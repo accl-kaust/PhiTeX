@@ -83,7 +83,6 @@ const ROW: &str = "\u{0}alignrow";
 const FIN: &str = "\u{0}alignfin";
 const SET: &str = "\u{0}alignset";
 const FROZEN_CR: &str = "\u{0}cr";
-const END_GRAF: &str = "\u{0}endgraf";
 const NORMAL_PARAGRAPH: &str = "\u{0}normalparagraph";
 
 const HELP_TAB: [&str; 6] = [
@@ -1062,7 +1061,7 @@ impl Exec<'_> {
         }
         if self.st.mode == Mode::H && !self.st.inner {
             // (`end_graf`: a paragraph in a `\valign` entry ends first)
-            let e = self.cs(END_GRAF);
+            let e = self.end_graf_token(2);
             self.back(t);
             self.back(e);
             return;
@@ -1251,7 +1250,7 @@ impl Exec<'_> {
     /// group closes, `align_peek`.
     pub(super) fn noalign_close(&mut self, t: &Tok) {
         if self.st.mode == Mode::H && !self.st.inner {
-            let e = self.cs(END_GRAF);
+            let e = self.end_graf_token(2);
             self.back(t.clone());
             self.back(e);
             return;

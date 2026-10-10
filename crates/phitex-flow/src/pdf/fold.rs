@@ -77,6 +77,11 @@ pub trait Files {
     fn glyph_unicode(&mut self, _name: &str) -> Option<Uni> {
         None
     }
+    /// `\pdffontattr`'s text of the font `key` at the end of the job
+    /// (`Key::FontAttr`), if any.
+    fn font_attr(&mut self, _key: &str) -> Option<Text> {
+        None
+    }
     /// Font `name`'s `.vf` file, if there is one.
     fn vf(&mut self, _name: &str) -> Option<Arc<[u8]>> {
         None
@@ -1708,11 +1713,6 @@ impl F<'_> {
                     }
                 }
             }
-            Event::FontAttr(font, t) => {
-                if let Some(f) = self.font_num(font) {
-                    self.font_attr.insert(f, t.clone());
-                }
-            }
             Event::NoBuiltinToUnicode(font) => {
                 if let Some(f) = self.font_num(font) {
                     self.nobuiltin.insert(f);
@@ -2281,6 +2281,13 @@ impl F<'_> {
 
     #[allow(clippy::too_many_lines)]
     fn finish(&mut self, end: &End) {
+        // (`pdf_font_attr`: what `\pdffontattr` left for each font used)
+        let used: Vec<(u32, Arc<str>)> = self.fonts.iter().map(|(&k, u)| (k, u.font.key.clone())).collect();
+        for (k, key) in used {
+            if let Some(a) = self.files.font_attr(&key) {
+                self.font_attr.insert(k, a);
+            }
+        }
         self.cur = end.params.clone();
         self.compress_level = end.compress_level;
         self.end_page_dims = (end.page_width, end.page_height);

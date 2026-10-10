@@ -216,10 +216,7 @@ impl Exec<'_> {
                 Prim::PageInt(k) => IVal::Int(self.int(&Key::Page(super::output::DEAD_CYCLES + k))),
                 Prim::PageDimen(k) => IVal::Dimen(self.int(&Key::Page(k))),
                 Prim::BoxDimen(c) => IVal::Dimen(self.box_dimen(c)),
-                Prim::Mat(crate::val::Mat::FontInt(k)) => {
-                    let key = self.font_int_key(k);
-                    IVal::Int(self.int(&key))
-                }
+                Prim::Mat(crate::val::Mat::FontInt(k)) => IVal::Int(self.font_int_value(k)),
                 Prim::Parshape => IVal::Int(match self.get(&Key::Parshape) {
                     Val::Parshape(s) => s.len() as i32,
                     _ => 0,

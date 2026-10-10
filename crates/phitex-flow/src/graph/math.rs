@@ -844,7 +844,7 @@ impl Exec<'_> {
         for it in &just.list {
             let (d, visible) = match it {
                 Item::Char(..) | Item::Lig(_) | Item::Box(_) | Item::Rule { .. } => (it.width(), true),
-                Item::Kern { w, .. } | Item::Math { w, .. } => (*w, false),
+                Item::Kern { w, .. } | Item::Math { w, .. } | Item::MarginKern { w, .. } => (*w, false),
                 Item::Glue { .. } | Item::Leaders(_) => {
                     let g = it.glue().expect("glue");
                     if (just.glue.sign == 1 && just.glue.order == g.stretch_order && g.stretch != 0)

@@ -94,6 +94,10 @@ impl FoldEnv for NoEnv {
     }
 }
 
+/// The last of the page builder's own quantities (`\insertpenalties`);
+/// `Key::Page(n)` above it is `\pdfinsertht n`.
+const INSERT_PENALTIES_Q: u8 = 9;
+
 /// tex.web 1009: a page insertion record (`page_ins_head`'s list).
 #[derive(Clone, Debug)]
 struct PageIns {
@@ -610,6 +614,9 @@ impl Scan {
             2..=5 => self.stretch[usize::from(q - 2)],
             6 => self.shrink,
             7 => self.depth,
+            // (pdfTeX's `\pdfinsertht n`: insertion class `n`'s height on
+            // the page so far, its page insertion record's)
+            n if n > INSERT_PENALTIES_Q => self.ins.iter().find(|r| r.n == n).map_or(0, |r| r.height),
             _ => 0,
         }
     }

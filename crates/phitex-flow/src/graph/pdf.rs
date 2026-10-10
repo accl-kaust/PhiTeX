@@ -516,14 +516,6 @@ impl Exec<'_> {
                     self.pdf_fatal("font", "command cannot be used with virtual font");
                 }
             }
-            "pdffontattr" => {
-                if !self.pdf_on(name, true) {
-                    return;
-                }
-                let Some(f) = self.pdf_font() else { return };
-                let t = self.pdf_text();
-                self.pdf_event(Event::FontAttr(f, t));
-            }
             "pdfnobuiltintounicode" => {
                 if !self.pdf_on(name, true) {
                     return;
@@ -546,6 +538,14 @@ impl Exec<'_> {
             "pdfinterwordspaceoff" | "pdfinterwordspaceon" => {
                 if self.pdf_on(name, true) {
                     self.pdf_whatsit(What::InterwordSpace(name == "pdfinterwordspaceon"));
+                }
+            }
+            "pdfspacefont" => {
+                // (the dummy font's name: only pdfTeX's own one so far)
+                let on = self.pdf_on(name, true);
+                let t = self.pdf_text();
+                if on && &*t != b"pdftexspace" {
+                    self.err(format!("\\{name} with a font other than pdftexspace is not supported yet"));
                 }
             }
             "pdffakespace" => {
@@ -983,63 +983,6 @@ impl Exec<'_> {
                 }
                 self.define(Key::PdfRandom, Val::Penalties(Arc::from(r.to_ints())), true);
                 let _ = write!(s, "{v}");
-            }
-            "pdfmatch" => {
-                let icase = self.keyword("icase");
-                let sub = if self.keyword("subcount") { self.scan_int() } else { -1 };
-                let pat = self.pdf_text();
-                let txt = self.pdf_text();
-                // (C strings: they end at a null byte)
-                let cut = |b: &[u8]| -> Vec<u8> { b.iter().copied().take_while(|&c| c != 0).collect() };
-                let (pat, txt) = (cut(&pat), cut(&txt));
-                match crate::pdf::lib::regex::Regex::new(&pat, icase) {
-                    Err(e) => {
-                        self.log_push(&format!("\npdfTeX warning: \\pdfmatch: {}\n", String::from_utf8_lossy(e.message())));
-                        s.push_str("-1");
-                    }
-                    Ok(re) => {
-                        let count = if sub < 0 { 10 } else { sub as usize };
-                        let caps = re.exec(&txt);
-                        // (`\pdflastmatch n`'s answers, one a group, NUL-separated)
-                        let mut m = String::new();
-                        if let Some(c) = &caps {
-                            for g in 0..count {
-                                if g > 0 {
-                                    m.push('\0');
-                                }
-                                match c.get(g).copied().flatten() {
-                                    Some((a, b)) if b >= a => {
-                                        let _ = write!(m, "{a}->");
-                                        m.extend(txt[a..b].iter().map(|&x| char::from(x)));
-                                    }
-                                    _ => m.push_str("-1->"),
-                                }
-                            }
-                        }
-                        s.push(if caps.is_some() { '1' } else { '0' });
-                        let v = if caps.is_some() { format!("{count}\0{m}") } else { String::new() };
-                        self.define(Key::PdfMatch, Val::Name(Arc::from(v)), true);
-                    }
-                }
-            }
-            "pdflastmatch" => {
-                let mut n = self.scan_int();
-                if n < 0 {
-                    self.error(&format!("Bad match number ({n})"), &[
-                        "Since I expected zero or a positive number,",
-                        "I changed this one to zero.",
-                    ]);
-                    n = 0;
-                }
-                let found = match self.get(&Key::PdfMatch) {
-                    Val::Name(v) if !v.is_empty() => {
-                        let mut parts = v.split('\0');
-                        let count: usize = parts.next().and_then(|c| c.parse().ok()).unwrap_or(0);
-                        if (n as usize) < count { parts.nth(n as usize).map(str::to_string) } else { None }
-                    }
-                    _ => None,
-                };
-                s.push_str(found.as_deref().unwrap_or("-1->"));
             }
             _ => {
                 self.err(format!("\\{name} is not supported yet"));

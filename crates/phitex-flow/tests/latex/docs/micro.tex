@@ -1,0 +1,32 @@
+% microtype in DVI mode: character protrusion (\pdfprotrudechars=2 and
+% microtype's protrusion codes for Computer Modern), and whatever else
+% microtype enables in DVI mode, set as `latex` sets it.
+\documentclass{article}
+\usepackage{microtype}
+\begin{document}
+\section{Protrusion}
+
+A quick brown fox jumps over the lazy dog, and then (again) it jumps over
+the lazy dog once more. ``Quick,'' said the fox --- and it jumped. The end
+of the story: dogs are lazy, foxes are quick; and so on, and so forth,
+until the end of the paragraph is reached at last, which it is, here.
+
+``Hyphens-and-dashes'' at the end of lines, commas, periods, and quotation
+marks hang into the margin; so do the left parentheses (like this one) and
+the opening quotes. Lines are broken knowing it: the paragraph's breaks
+come out differently from those without protrusion, as they should, since
+each line is a little wider than it looks.
+
+\begin{minipage}{0.5\textwidth}
+A narrow minipage, whose lines protrude too: ``margins,'' hyphens-, and
+dots. More text here, to have more lines; and still more, until it ends.
+\end{minipage}
+
+\microtypesetup{protrusion=false}
+Protrusion off again: ``margins,'' hyphens-, and dots, as plain \TeX\ sets
+them, with the same words as above to compare their lines, line by line.
+
+\microtypesetup{protrusion=true}
+\noindent\textit{Italic text, also protruding: ``quotes,'' dots... and more
+words to fill some lines; italic fonts have their own codes, as they should.}
+\end{document}

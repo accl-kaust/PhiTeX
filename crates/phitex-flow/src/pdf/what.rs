@@ -210,8 +210,7 @@ pub enum Event {
     /// `\pdfincludechars`: the font initialized, characters marked used.
     /// Answer: \[-, -, 1 if the font is virtual].
     IncludeChars(Arc<Font>, Vec<u8>),
-    /// `\pdffontattr`, `\pdfnobuiltintounicode`.
-    FontAttr(Arc<Font>, Text),
+    /// `\pdfnobuiltintounicode`.
     NoBuiltinToUnicode(Arc<Font>),
     /// `\pdfmapfile`, `\pdfmapline`.
     MapFile(Text),

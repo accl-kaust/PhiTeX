@@ -816,7 +816,7 @@ impl W<'_> {
                     self.hleaders(this, l, rule_wd, base_line, left_edge);
                     self.path.pop();
                 }
-                Item::Kern { w, .. } | Item::Math { w, .. } => self.cur_h += *w,
+                Item::Kern { w, .. } | Item::Math { w, .. } | Item::MarginKern { w, .. } => self.cur_h += *w,
                 Item::Whatsit(w) => self.whatsit(w, this, left_edge, base_line, false),
                 _ => {}
             }

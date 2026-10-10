@@ -1806,6 +1806,23 @@ any schedule (1 thread, Suspend, priority too). Pre-existing: 72ee98e
 hangs the same. Not in `open/` (its replay does not end); a timeout's
 reproduction names its step now (`fuzz::run_seed_at`).
 
+*T1's trip timeouts are mostly TeX's own.* Job 7978 checked 7899's 108
+trip timeouts (5000 plain seeds on 86941d0, 120 s a seed) with
+`scripts/flow-fuzz-tex.py`: the system's `tex` on TRIP's two passes,
+before and after the edit, a run counted only when tex wrote its files.
+It also ran `phitex-flow --fuzz-cold FILE before|after` on each.
+- 89 (and both of 7853's originals): tex loops on pass 2 after the edit,
+  so this is TRIP edited into a loop, not a bug. flow-fuzz.sh now
+  classes these "tex-loops trip".
+- 20: our cold build of the text after the edit loops while tex ends on
+  every pass. All 20 are `swap` edits, so the bug is in a cold build
+  with no update (owner A), e.g. `cmd-7899/fuzz-out/j1/fuzz-trip-398-2.repro`.
+- 1: both cold builds end.
+The two cut repros named below were cut before the cold builds were
+checked (A found that their text loops before the edit); the
+minimizer now requires the cold builds to end, or, with FLOW_MIN_TEX,
+cuts a cold loop of ours while tex still ends.
+
 *T1 on plain documents too.* Fuzz subset 7853 ran 300 seeds at 1 thread and 60 at 8 on each of trip,
 pages and table, with a 120 s limit per seed, on a50fa8a. 43 timeouts:
 42 trip and 1 pages; table had none. The log is not compared, so the 9
@@ -2186,6 +2203,34 @@ Not yet: hyperref (the `.aux` fixpoint — format gap 1 — and its many
 `\special`s/`\pdf…` commands), microtype (pdfTeX's font expansion and
 protrusion, PDF mode only).
 
+## LaTeX corpus, round 3 (agent B)
+
+Five more documents, on the saved format, five schedules, identical with
+`latex` (DVI, written files): `tikz` (pgf/TikZ: paths, nodes, a circle, a
+fill, a `matrix of nodes`), `ltmc` (longtable over a page break's worth
+of rows, multicol), `lst` (listings with numbers and a frame,
+`\lstinline`, fancyvrb's `Verbatim`), `bib` (a given `bib.bbl` read by
+`\bibliography`; makeidx's `\index` writing `bib.idx`, compared as a
+written file), `href` (hyperref with the dvips driver: `\url`, `\href`,
+`\ref` with anchors; it gets through on the first run without the `.aux`
+read-back, writing `href.aux` and `href.out`). No language gap in their
+output.
+
+*TikZ is the expansion-heaviest document* (P measures with it): cold, `-j
+1`, on the format (fastdev): 132 s, 1,127,514 commands run for 225,506
+(five runs of its one piece: the reruns from a routine's definitions,
+F7). Profile (perf, frame pointers): 62% is `Chain::resolve` and
+`Chain::scope_of` finding a definition inside its node by scanning the
+node's definitions (`Key::eq`, `Key::word`). The φ nodes are large: of
+267,608 definitions in the run, 164,646 are φs; the largest φ nodes hold
+9,828, 7,666, 6,986 and 4,069 (each twice: nested `\fi`s, the outer one
+taking every φ of the inner arm again), and every later read of a name
+whose definition is in one of them scans it. For P (name lookup): find a
+definition in its node by index (the node's def position in `defs_of`),
+not by scanning. Fixed on the language side: `pop_cond` collected the
+arm's keys with `Vec::contains` (quadratic in the keys an arm defines):
+now a set (164 s → 132 s).
+
 ## The format: definitions before the first piece (agent B)
 
 AGENTS_BRIEF §6.1: "known at t=0: the format, a set of definitions with
@@ -2396,9 +2441,10 @@ in these lists. `cargo test -p phitex-flow --lib tag_tests` runs them.
 
 Who took which (new ones go here). Key word tags: 1–42 and 63–65 (flow), 66 `GlyphUnicode`; B
 (c94cc4e) 67 `FontExpand`, 68 `FontAttr`, 69 `FontCopies`, 70
-`FontCode` (its hash); Q 80 `PdfAns` (its hash), 81 `PdfLast`, 82
-`PdfRandom`, 83 `PdfSeed`, 84 `PdfClock`, 85 `PdfDate`, 86 `PdfMatch`;
-X 87–91; 71–79 and 92 on are free. Format key tags: 34
+`FontCode` (its hash), 71 `LastMatch`, 72 `ParToken`; Q 80 `PdfAns`
+(its hash), 81 `PdfLast`, 82 `PdfRandom`, 83 `PdfSeed`, 84 `PdfClock`,
+85 `PdfDate` (86 was `PdfMatch`, gone for B's `LastMatch`: free); X
+87–91; 73–79, 86 and 92 on are free. Format key tags: 34
 `GlyphUnicode`, B 35–38, X 50–53. Format meaning tags: 0–7 (flow),
 X 12 (`XMathCharGiven`). Format whatsit tags: 0–3 (flow), X 4
 (`SavePos`). Q takes no format tag of any kind: a primitive meaning is
@@ -2846,16 +2892,17 @@ again when one differs (as the DVI join does).
 `\pdfoutline`, `\pdfthread`/`\pdfstartthread`/`\pdfendthread`,
 `\pdfcatalog` (`openaction`), `\pdfinfo`, `\pdfnames`, `\pdftrailer`,
 `\pdftrailerid`, `\pdfmapfile`/`\pdfmapline` (the default map flushed
-or read first, `+`, `=`, `-`, entries in use kept), `\pdffontattr`,
-`\pdfincludechars`, `\pdfnobuiltintounicode`, `\pdffontname`/
+or read first, `+`, `=`, `-`, entries in use kept), `\pdffontattr`
+(B's command, `Key::FontAttr`; the fold reads each font's at the end:
+`Files::font_attr`), `\pdfincludechars`, `\pdfnobuiltintounicode`, `\pdffontname`/
 `\pdffontobjnum`/`\pdffontsize`, `\pdfpageref`, `\pdfsavepos` with
 `\pdflastxpos`/`\pdflastypos`, the random generator
 (`\pdfsetrandomseed`, `\pdfuniformdeviate`, `\pdfnormaldeviate`,
 `\pdfrandomseed`: pdfTeX's generator, the seed a given,
 `Build::set_pdf_seed_clock`), `\pdfelapsedtime`/`\pdfresettimer` (the
 clock a given), `\pdfcreationdate`, `\pdffilesize`, `\pdffiledump`,
-`\pdfmdfivesum`, `\pdfmatch`/`\pdflastmatch` (`lib::regex`, POSIX
-extended as glibc's), and `\immediate` with `\pdfobj`, `\pdfxform`,
+`\pdfmdfivesum` (`\pdfmatch`/`\pdflastmatch` are B's, `ere.rs`), and
+`\immediate` with `\pdfobj`, `\pdfxform`,
 `\pdfximage`. A command asking something of the file emits
 `Item::Pdf` (taken out of its lists as `\shipout` is, so `\lastskip`,
 `\unskip` and friends do not see it); the page builder hands the
@@ -2917,13 +2964,15 @@ entry's encoding names 32 `space`), the dummy font `pdftexspace` (read
 where the page is, numbered there as a virtual font's local font, its
 map line `pdfmaplinesp`) — a page made where it was shipped does not
 know: the fold makes it again (`PageBody::space_asked`, `wants_dummy`).
-Test: `tests/pdf.rs` `interword`. Missing from the primitive table, to
-be added once B's table changes are on flow (adding a name renumbers
-the table): `\pdfspacefont` (the dummy font's name; `pdftexspace`
-until then), `\pdfsnaprefpoint`, `\pdfsnapy`, `\pdfsnapycomp`, and the
-old parameter names `\pdfmovechars`, `\pdfforcepagebox`,
-`\pdfoptionalwaysusepdfpagebox`, `\pdfoptionpdfinclusionerrorlevel`,
-`\pdfoptionpdfminorversion`.
+Test: `tests/pdf.rs` `interword`. In the primitive table since B's
+merge: the old parameter names `\pdfmovechars`, `\pdfforcepagebox`,
+`\pdfoptionalwaysusepdfpagebox`, `\pdfoptionpdfinclusionerrorlevel`
+(parameters of their own, as pdfTeX's) and `\pdfoptionpdfminorversion`
+(`\pdfminorversion`); `\pdfspacefont` (only `pdftexspace`, the
+default: another name is an error, a gap); `\pdfsnaprefpoint`,
+`\pdfsnapy`, `\pdfsnapycomp` (an error where executed: the snapping in
+`pdf_vlist_out` and the page builder's and `\vsplit`'s discarding of
+snap nodes are a gap).
 
 **pdfTeX's read-backs.** What a command reads back of the PDF file —
 `\pdflastobj`, `\pdflastxform`, `\pdflastximage` (its pages and colour
@@ -3007,7 +3056,218 @@ is a pure function or a fold step, no state shared with the others):
 | numbers, zlib, MD5 | `pdf/num.rs`, `pdf/zlib.rs`, `pdf/md5.rs` | `num::Out` (pdfTeX's printing), `zlib::compress(data, level)`, `md5::md5` — done |
 | a page's content stream | `pdf/content.rs` | `content::page(&Page, &Ship, &Numbers, extra) -> PageBody` where the page is shipped; `content::page_body(&Page, &Ship, &Given)` and `form_body` in the fold: the stream, `fonts` (font, number, glyphs), `events` (marks and references in the walk's order: fonts, annotations, links and their pieces per line, destinations, beads, `\pdfrefobj`, forms, images), `links`/`beads` rectangles, `write_pos` (`\pdfsavepos` at each `\write`), the walk's state `entry`/`exit` (`WalkState`: colour stacks, matrix stack, the open links, the thread, the last position), `incomplete` (a form or image not known where the page was made), guesses (`ff`, `fixed`); `origins` (a non-version field, below). pdfTeX's whatsits are `Item::Whatsit(Whatsit::Pdf(what::What))`, made by their nodes (`graph/pdf.rs`) — done |
 | the fold | `pdf/fold.rs`, `pdf/fold/marks.rs`, `pdf/fold/image.rs` | `fold::assemble(pages, bodies, events, numbers, &End, &mut dyn Files) -> Written`: the PDF events before each page and after the last (`PageOrg::pdf`, the build's tail: `Item::Pdf` of the material, which the page builder hands to the pages in the order it meets them) are fold steps (`F::step`, part 53's commands: objects, forms, images, outlines, catalog, info, names, trailer, colour stacks, fonts, maps); each page is shipped as `pdf_ship_out` does (its walk's marks numbered in walk order, the page object with `/Group`, `/Annots`, `/B`, the raw objects, images and forms it refers to — forms shipped recursively — the marks, the resources); the end as "Finish the PDF file" (pages checked, destinations fixed, fonts, page tree, outlines, name tree, threads, catalog, info, xref, trailer). `Written::answers` are the read-backs' answers — done |
-| fonts | `pdf/font/` (`map.rs`, `enc.rs`, `t1.rs`), the font part of `fold.rs` | the map file (`map::Map`), encodings, Type 1 subsetting (`t1::writet1`), `fold::F::{do_pdf_font, write_fontdescriptor, write_enc, write_fontdictionary}`. To come: ToUnicode (`\pdfgentounicode`, `\pdfglyphtounicode`'s table as a document-level value) (virtual fonts: done, "Virtual fonts" below), PK fonts (Type 3), TrueType/OpenType, `\pdfmapfile`/`\pdfmapline` (document-level items the fold applies before the first font is initialized), `\pdffontattr`. How the TrueType/OpenType gap closes: the face (tables, cmap, glyf/loca, hmtx, post, CFF) is read through `partex-otf` (a pure library, linked, on the wall's allowlist), never a second parser copied from the old port; only the subset writer (which tables, in which order, pdfTeX's checksums and glyph renumbering) is the byte-exact port of `writettf.c` (and its CFF path for `.otf`), with the ttf2afm-style metrics and the map's `<[` encodings; PFB and encoding parsing through `partex-otf` where it has them, `writet1`'s writer kept. Files (map, pfb, enc, ttf/otf) are to be found through the build's kpathsea given (A's `Build::set_kpse`, `tfm::Kpse::find` with formats `FontMap`, `Type1`, `Enc`, program `pdftex`), not by `tfm::pdf_file`'s directory walk: `PdfFiles::get` switches to it when A's commit reaches this branch |
+| fonts | `pdf/font/` (`map.rs`, `enc.rs`, `t1.rs`), the font part of `fold.rs` | the map file (`map::Map`), encodings, Type 1 subsetting (`t1::writet1`), `fold::F::{do_pdf_font, write_fontdescriptor, write_enc, write_fontdictionary}`. To come: ToUnicode (`\pdfgentounicode`, `\pdfglyphtounicode`'s table as a document-level value) (virtual fonts: done, "Virtual fonts" below), PK fonts (Type 3), TrueType/OpenType, `\pdfmapfile`/`\pdfmapline` (document-level items the fold applies before the first font is initialized). How the TrueType/OpenType gap closes: the face (tables, cmap, glyf/loca, hmtx, post, CFF) is read through `partex-otf` (a pure library, linked, on the wall's allowlist), never a second parser copied from the old port; only the subset writer (which tables, in which order, pdfTeX's checksums and glyph renumbering) is the byte-exact port of `writettf.c` (and its CFF path for `.otf`), with the ttf2afm-style metrics and the map's `<[` encodings; PFB and encoding parsing through `partex-otf` where it has them, `writet1`'s writer kept. Files (map, pfb, enc, ttf/otf) are to be found through the build's kpathsea given (A's `Build::set_kpse`, `tfm::Kpse::find` with formats `FontMap`, `Type1`, `Enc`, program `pdftex`), not by `tfm::pdf_file`'s directory walk: `PdfFiles::get` switches to it when A's commit reaches this branch |
 | images | `pdf/image/mod.rs` (reading, at the node), `pdf/fold/image.rs` (writing) | `\pdfximage` reads the file (`Key::File`) at its node: `image::read_image`, `image::scale` (pdfTeX's `scale_image`); the fold writes JPEG as it is, PNG (`write_png`, IDAT copied or rows through `lib::png`, soft masks, palettes, the transparency group), a PDF page (`write_epdf` through `lib::pdfread`: objects copied, Type 1 fonts the map has replaced by the job's embedding unless `\pdfinclusioncopyfonts`) — done; `\pdfimageapplygamma`, JBIG2 are gaps |
 | links, dests, outlines | `pdf/content.rs` (rectangles), `pdf/fold/marks.rs` | links split per line box at their nesting level and threaded across pages by `WalkState::links`; destinations' duplicates the fold's; outlines, the name tree (`sort_dest_names`, `str_less_str`), threads and beads as pdfTeX writes them — done |
 | reads of the fold | `graph/pdf.rs`, `build.rs` (`PdfKept`, `Given::answer`) | `Key::PdfAns` answered from the last fold, rounds until they hold ("pdfTeX's read-backs" below); A's `ReadRef` may take this over later — the keys are listed there |
+
+## Font expansion and character protrusion (agent B)
+
+pdfTeX's `\pdfadjustspacing`, `\pdfprotrudechars`, their codes and
+fonts, copied from pdftex.web as pure functions (`src/micro.rs`) and
+values:
+
+- **Codes** (`\efcode`, `\lpcode`, `\rpcode`, `\knbscode`, `\stbscode`,
+  `\shbscode`, `\knbccode`, `\knaccode`: `Mat::FontInt` with pdfTeX's
+  code numbers, `micro::LP`…): one value per font and code,
+  `Key::FontCode(code, font)`, the font's 256-entry table
+  (`Val::Penalties`; empty: the defaults, `\efcode` 1000, the others 0),
+  global as pdfTeX keeps them beside the font; an assignment is a node
+  reading the table and defining the new one (clamped as `set_*_code`).
+  A table per font, not a key per character: a paragraph's `\par` node
+  reads three keys a font, not three a character, and a document sets
+  them once, at a font's first use (microtype's `\MT@setupfont`).
+  `\pdfnoligatures f` is `Key::FontCode(6, f)` = 1, read by the main loop
+  (its lig/kern program is not looked at; the left boundary's still is,
+  as `set_no_ligatures` clears only the characters' tags).
+- **`\pdffontexpand f stretch shrink step [autoexpand]`**:
+  `Key::FontExpand(f)` = `micro::Expand` (`read_expand_font`'s checks;
+  given twice, the same parameters or pdfTeX's fatal error). The fonts
+  expanded by the limits are loaded there (`Key::FontLoaded`: numbered
+  as pdfTeX's `get_expand_font` numbers them); the others are numbered
+  where a page uses them (`dvi::number`'s `extra`).
+- **An expanded font is a value**: `Font::expanded(base, e)`
+  (`auto_expand_font`: widths, italic corrections, kerns scaled by
+  `round_xn_over_d(x, 1000+e, 1000)`; named `name+e`; identity `base.key`
+  and `e`), `Font::derived = Derived { base, kind: Expanded(e) }`. Made
+  by the line breaker where `hpack(…, subst_ex_font)` substitutes a
+  character's font (`do_subst_font`), once per paragraph (`micro::Cache`).
+- **The `\par` node reads them** only with `\pdfadjustspacing` or
+  `\pdfprotrudechars` positive (`LineParams::micro`: `None` otherwise, so
+  DVI documents without them read nothing more): for the paragraph's
+  fonts (its characters', its discretionaries', its hboxes'), the
+  expansion parameters, `\efcode`, `\lpcode`, `\rpcode` tables and the
+  quad (`\fontdimen6` now); `check_expand_pars`' one step and one pair
+  of limits a paragraph is checked there.
+- **Line breaking** (`linebreak.rs`): the widths are eight (the font
+  stretch and shrink, `cur_active_width[7..8]`, with
+  `\pdfadjustspacing>1`: `micro::Micro::widths_at`, a character's
+  `char_stretch`/`char_shrink`, a font kern's `kern_stretch`/
+  `kern_shrink` between two characters of its font); `try_break`'s
+  shortfall gets `total_pw` (`\pdfprotrudechars>1`) and the font
+  stretch/shrink adjustment (`\pdfadjustspacing>1`), as pdftex.web
+  orders them. `post_line_break` puts the margin kerns where pdfTeX does
+  (`\pdfprotrudechars>0`: the right one after the item before the break,
+  the protruding character found back from it with `find_protchar_right`,
+  or a discretionary's pre-break list's last; the left one first) and
+  packs the line with `micro::Micro::hpack_line` (`\pdfadjustspacing>0`:
+  `cal_expand_ratio`, then `subst_ex_font` with the ratio, kerns and
+  margin kerns redone as pdfTeX redoes them).
+- **The main loop**: `\pdfprependkern`/`\pdfappendkern` kerns
+  (`get_auto_kern`: before the first character — no left boundary then —,
+  between two characters instead of their lig/kern program, before a
+  ligature, around `\-`'s hyphen), `Item::Kern { sub: 3 }` (shown
+  `(for \pdfprependkern/\pdfappendkern)`); `\pdfadjustinterwordglue`:
+  every space is the normal space, widened by the character before's
+  `\knbscode`… (`adjust_interword_glue`; it reads the current list's
+  tail, so a space node with it positive runs again with its paragraph).
+- **`\pdfcopyfont\cs=f`**: `Font::copied` (a font of its own: key
+  `f.key copyN`, parameters as `f`'s are now, its own codes);
+  **`\letterspacefont\cs=f n [nolig]`**: `Font::letterspaced` (widths
+  plus `n` thousandths of the quad, named `name+nls`); both counted per
+  base font (`Key::FontCopies`) for their identity, loaded (numbered,
+  `font_ptr`) as `\font` loads a font. `\pdffontattr f {…}`:
+  `Key::FontAttr(f)`, PDF mode only (pdfTeX's fatal error in DVI mode).
+- `\leftmarginkern n`, `\rightmarginkern n` (`Conv`): the box's margin
+  kern past what protrusion skips and the skip glue. `\unhbox` drops
+  margin kerns (pdftex.web 1110).
+
+**For Q (the PDF content stream).** Two things reach a page:
+
+1. `Item::MarginKern { w, right, font, c }`: everywhere a kern of width
+   `w` (`cur_h += w`, as `hlist_out`'s `margin_kern_node, kern_node`
+   case); `font`/`c` are the protruding character (`margin_char`), for
+   nothing in the stream. DVI and `pdf/content.rs` move right by `w`
+   (the one line changed in `content.rs`).
+2. `Item::Char(f, c)` / `Item::Lig` whose `f.expanded_from()` is
+   `Some((base, e))`: set the base font's glyph `c` with the text matrix
+   scaled horizontally by `1000+e` thousandths (pdftex.web's
+   `pdf_new_Tm_a`/`get_font_auto_expand_ratio`, the `Tm` operator when
+   `e` changes: pdftex.web 16285–16300); the PDF font object is the
+   base's (`pdf_font_blink`), never one for `name+e`. The advance is the
+   expanded width (`f.glyph(c).width`). A letter-spaced font
+   (`DerivedKind::LetterSpaced { e, .. }`) is a virtual font over
+   `base`: each character is the base's, moved right by
+   `round_xn_over_d(quad, e, 2000)` before and after (pdftex.web's
+   `letter_space_font` packets, `vf_replace_z`'s fix-word rounding).
+
+**Held by**: `tests/etex.rs`' `micro` (PDF mode, no page shipped: the
+codes and their `\the`, copies and letter-spaced fonts, `\pdfnoligatures`,
+protrusion at `\pdfprotrudechars` 1 and 2, `\leftmarginkern`/
+`\rightmarginkern`, expansion at `\pdfadjustspacing` 1 and 2 and with
+protrusion, an `\hbox to`, the auto kerns, `\pdfadjustinterwordglue`;
+`\showbox`'s lines against `etex -ini -etex`, i.e. pdfTeX) at five
+schedules; `tests/latex_docs.rs`' `micro` (microtype in DVI mode:
+protrusion; DVI and `.aux` against `latex`, first run and fixpoint).
+`tests/pdflatex/docs/micro.tex` (expansion and protrusion, lmodern) and
+`microls.tex` (`\textls`, tracking, spacing, kerning) are for the
+pdflatex harness (`tests/pdflatex_docs.rs`, Q), not in the tree yet:
+their PDF needs (2) above.
+
+Gaps:
+- *Expanded TFM files.* A font given `\pdffontexpand` without
+  `autoexpand` names `name+e.tfm` files pdfTeX loads (`load_expand_font`
+  → `read_font_info`); here every font is expanded as `autoexpand` makes
+  it. microtype always gives `autoexpand` with pdfTeX.
+- *`\tagcode` and `\pdfnoligatures` outside the main loop.* Both clear
+  tags (`Key::FontCode(5, f)`, the bits cleared per character; read by
+  the main loop and `\the`); the hyphenation pass's reconstitution and
+  math (lig/kern, charlists, extensible recipes) look at the font as
+  loaded.
+- *The margin kerns' variations* in `try_break` (`cal_margin_kern_var`)
+  are taken as zero: an autoexpanded font's protrusion is its base's
+  (same quad, same codes), so pdfTeX's are zero too.
+- *A derived font in a saved format*: `format::decode` refuses it (the
+  font is written as its file's bytes).
+- *`\pdfmatch`, `\pdflastmatch`* (`src/ere.rs`, POSIX extended
+  expressions, backtracking; the last match `Key::LastMatch`, global):
+  the whole match is leftmost-longest as POSIX's; a group's submatch is
+  the first path's to it, not POSIX's subexpression rules. A bad
+  expression gives -1 without pdfTeX's warning in the log.
+- *An error's context at a macro's end (for P).* `\def\m{\setbox0\hbox{}\showbox0 }
+  \m`: TeX's `! OK.` context shows the macro's level (`\m ...\showbox
+  0 `) above `l.N \m`; the graph shows `...` there: the macro's level,
+  read to its end, is gone before the error is shown (TeX pops it at the
+  next `get_next`). Found by `tests/etex/micro.tex`, which now puts
+  `\showbox0` after its macro.
+- *`\partokenname` in the reader (for P).* `Key::ParToken` (global) is
+  the paragraph token where material.rs, align.rs and output.rs insert
+  one (`\vskip`-like commands in horizontal mode; with
+  `\partokencontext` 1 or 2 the box, `\insert`, `\vadjust`, `\output`,
+  `\noalign` and `\valign` entry ends: partoken.ch). Still `\par`: the
+  blank line's token (graph.rs `get_next`, `TState::N`), the runaway
+  checks of a non-`\long` macro's argument (`is_par`, and the token a
+  runaway `use` backs up). Those are the reader's, and want the token in
+  the reader state, defined where `\partokenname` runs.
+- *`\pdfinsertht n` for classes 0–9.* `Key::Page(n)` is the page builder's
+  quantities for 0–9, so those classes read 0pt; 10–254 are the page's
+  insertion records' heights (`Page::page_quantity`, validated as the
+  other page quantities).
+- *`\pdfprimitive` where a value is scanned* (pdftex.web's "Reset
+  `cur_tok` for unexpandable primitives" in `scan_something_internal`):
+  not done; as a command and an expansion step it is.
+- *A box's glue when the expansion ratio rounds to zero*: pdfTeX returns
+  the first pass's box without setting its glue (uninitialized fields);
+  here its glue is normal.
+
+## The cross-run fixpoint (agent B)
+
+AGENTS_BRIEF §7. Run k+1 is the same build updated again. The files run
+k wrote are given to it as a new version of those files
+(`Build::set_file_bytes`; files run k no longer writes are removed): an
+edit of run k. Nothing is copied into a state. It stops when a run
+writes byte for byte what the run before wrote, or after five runs
+(oscillation: `Runs::stable` false, `changed` names the files).
+
+API (`src/fixpoint.rs`): `Fixpoint::run(&mut build, src, opts) -> Run
+{ out, changed, stable }` is one run. The CLI runs bibtex/makeindex
+between runs and gives their output with `set_file`; a changed `.bbl`
+means one more run whatever `stable` says. `fixpoint(b, src, opts, max)`
+is the plain loop. Dev binary: `phitex-flow --runs N` prints each run's
+changed files.
+
+Oracle (`tests/latex_docs.rs`, `fix_*`): `latex` run until what it
+writes is stable (`NAME.fix.dvi`, `.fix.writes`, `.fix.runs`). The last
+run's DVI and written files must be latex's at five schedules, with
+latex's number of runs (format gap 1, the same-run read-back of the
+`.aux`, is closed: "Reads of folds").
+
+Run 2 against run 1, commands run at one thread, on 9fa4ccf (job 7796):
+
+| document | run 1 | run 2 | files run 1 changed |
+|---|---|---|---|
+| sections | 35684 | 8741 | sections.aux |
+| math | 21786 | 4553 | math.aux |
+| tables | 21590 | 4365 | tables.aux |
+| ams | 70064 | 13584 | ams.aux |
+| gfx | 79195 | 4305 | gfx.aux |
+| layout | 77985 | 10209 | layout.aux |
+| packages | 30361 | 5358 | packages.aux |
+| ltmc | 31599 | 11077 | ltmc.aux |
+| lst | 62491 | 21588 | lst.aux |
+| bib | 22762 | 5056 | bib.idx, bib.aux |
+| href | 222359 | 9372 | href.aux, href.out |
+| micro (job 7824) | 150555 | 30644 | micro.aux |
+
+Every document converges in latex's two runs. Before 9fa4ccf (A's F5:
+pieces mark their readers by position), run 2 re-ran every piece
+(sections: 21155 commands against 20942 for the whole document). Now it
+re-runs 5–25% of run 1. What remains is the pieces reading the `.aux`
+at `\begin{document}` and the nodes after a changed read. F's
+over-invalidation dump was not needed: no piece re-runs wholesale.
+
+**Hang (W2, A's; fixed in 87a1d3d, the tests run again).** Run 2 of
+`titlepage`, `figures` and `rules` did not finish: 7796 made no progress for an hour on their first schedule
+(threads 1). W sees the same on titlepage (W2). Smallest repro:
+`tests/latex/docs/titlepage.tex` (466 bytes) on the saved format. Run 1
+as `fix_at` runs it, `set_file_bytes` of run 1's `titlepage.aux` and
+`titlepage.toc`, then `update` again: it never returned. The
+`fix_*` tests give a fixpoint 600 s (`FIX_TIMEOUT`, in a thread of its
+own) and fail instead of hanging.
+
+**The CLI** (`phitex-cli` `Session::fixpoint`) runs each run as
+`Fixpoint::run_reading`: a written file not given by a run before is
+compared with what the run read as it (the file on disk from an earlier
+job), so a first run whose `.aux` is the one on disk is stable; BibTeX
+and makeindex run between runs and a changed `.bbl` or `.ind` is one
+more run.
