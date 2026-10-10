@@ -41,9 +41,6 @@ const PRE: u8 = 247;
 const POST: u8 = 248;
 const POST_POST: u8 = 249;
 const ID_BYTE: u8 = 2;
-/// tex.web's `dvi_buf_size` as TeX Live builds it.
-const BUF_SIZE: i32 = 16384;
-const HALF_BUF: i32 = BUF_SIZE / 2;
 
 // (§608: the movement stack's states)
 const Y_HERE: u8 = 1;
@@ -139,14 +136,20 @@ pub struct Fixed {
 
 /// What of a start offset `o` the `dvi_gone` test sees: all of it before
 /// the buffer was first full, then `o` modulo half the buffer (§598).
-fn gone_class(o: i32) -> i32 {
-    if o < BUF_SIZE { o } else { BUF_SIZE + o % HALF_BUF }
+fn gone_class(o: i32, buf: i32) -> i32 {
+    if o < buf { o } else { buf + o % (buf / 2) }
 }
 
 impl Body {
     /// Is it this page's commands at offset `at`, with fonts numbered by
     /// `number` and those `used` already defined?
-    fn holds(&self, at: i32, number: &mut impl FnMut(&Font) -> u32, used: &std::collections::HashSet<u32>) -> bool {
+    fn holds(
+        &self,
+        at: i32,
+        number: &mut impl FnMut(&Font) -> u32,
+        used: &std::collections::HashSet<u32>,
+        buf: i32,
+    ) -> bool {
         if !self.fonts.iter().all(|(f, n, _, _)| number(f) == *n) {
             return false;
         }
@@ -154,13 +157,16 @@ impl Body {
         let mut defined: Vec<u32> = self.fonts.iter().map(|f| f.1).filter(|n| used.contains(n)).collect();
         defined.sort_unstable();
         defined == x.defined
-            && x.gone.is_none_or(|c| c == gone_class(at))
-            && x.edges.iter().all(|&(r, e)| ((at + r) % BUF_SIZE == 0) == e)
+            && x.gone.is_none_or(|c| c == gone_class(at, buf))
+            && x.edges.iter().all(|&(r, e)| ((at + r) % buf == 0) == e)
     }
 }
 
 /// The DVI writer's state for one page (tex.web 592–595, 605, 616).
 struct Writer<'a> {
+    /// tex.web's `dvi_buf_size` (`print::Limits`): what `dvi_gone` and
+    /// `dvi_pop` see of where the page is in the file.
+    buf: i32,
     out: Vec<u8>,
     /// Where `out` starts in the file.
     origin: i32,
@@ -199,7 +205,8 @@ impl Writer<'_> {
     /// `dvi_gone`: what the half-buffer has written out (§598).
     fn gone(&self) -> i32 {
         let t = self.loc();
-        if t >= BUF_SIZE { (t / HALF_BUF - 1) * HALF_BUF } else { 0 }
+        let half = self.buf / 2;
+        if t >= self.buf { (t / half - 1) * half } else { 0 }
     }
 
     fn byte(&mut self, b: u8) {
@@ -217,9 +224,9 @@ impl Writer<'_> {
     /// §601: `dvi_pop`.
     fn pop(&mut self, l: i32) {
         if l == self.loc() {
-            self.edges.push((l - self.origin, self.loc() % BUF_SIZE == 0));
+            self.edges.push((l - self.origin, self.loc() % self.buf == 0));
         }
-        if l == self.loc() && self.loc() % BUF_SIZE != 0 {
+        if l == self.loc() && self.loc() % self.buf != 0 {
             self.out.pop();
         } else {
             self.byte(POP);
@@ -898,7 +905,14 @@ fn def_len(f: &Font) -> i32 {
 /// Page `p`'s commands, with fonts numbered by `numbers` (then `extra`),
 /// those numbered `defined` already defined, written at file offset `at`.
 pub fn page_body(p: &Page, numbers: &Numbers, extra: &[Arc<str>], defined: &[u32], at: i32) -> Body {
+    page_body_in(p, numbers, extra, defined, at, crate::print::Limits::TEX_LIVE.dvi_buf_size)
+}
+
+/// [`page_body`] for a DVI writer whose buffer is `buf` bytes
+/// (`dvi_buf_size`).
+pub fn page_body_in(p: &Page, numbers: &Numbers, extra: &[Arc<str>], defined: &[u32], at: i32, buf: i32) -> Body {
     let mut w = Writer {
+        buf,
         out: Vec::new(),
         origin: at,
         max_push: 0,
@@ -922,11 +936,11 @@ pub fn page_body(p: &Page, numbers: &Numbers, extra: &[Arc<str>], defined: &[u32
     // (putting in or leaving out its `fnt_def`s moves a look back by at
     // most all of them)
     let slack: i32 = w.fonts.iter().map(|x| def_len(&x.0)).sum();
-    let far = w.lookback + slack > HALF_BUF;
+    let far = w.lookback + slack > buf / 2;
     let fixed = (far || !w.edges.is_empty()).then(|| {
         let mut defined: Vec<u32> = w.fonts.iter().filter(|x| x.3 == 0).map(|x| x.1).collect();
         defined.sort_unstable();
-        Fixed { defined, gone: far.then(|| gone_class(at)), edges: w.edges }
+        Fixed { defined, gone: far.then(|| gone_class(at, buf)), edges: w.edges }
     });
     Body { bytes: w.out, fonts: w.fonts, fixed, max_push: w.max_push }
 }
@@ -955,6 +969,11 @@ fn font_def(out: &mut Vec<u8>, f: &Font, n: u32) {
 /// (§642). A body that does not hold where it lands is written again
 /// there, in `bodies`; returns the file and how many were.
 pub fn assemble(numbers: &Numbers, pages: &[Page], bodies: &mut [Arc<Body>]) -> (Vec<u8>, usize) {
+    assemble_in(numbers, pages, bodies, crate::print::Limits::TEX_LIVE.dvi_buf_size)
+}
+
+/// [`assemble`] for a DVI writer whose buffer is `buf` bytes.
+pub fn assemble_in(numbers: &Numbers, pages: &[Page], bodies: &mut [Arc<Body>], buf: i32) -> (Vec<u8>, usize) {
     let Some(first) = pages.first() else { return (Vec::new(), 0) };
     let mut out = Vec::new();
     // (§617: the preamble, at the first page)
@@ -977,10 +996,10 @@ pub fn assemble(numbers: &Numbers, pages: &[Page], bodies: &mut [Arc<Body>]) -> 
         max_v = max_v.max(bx.h + bx.d + s.voffset);
         max_h = max_h.max(bx.w + s.hoffset);
         let at = out.len() as i32;
-        if !b.holds(at, &mut |f| number(numbers, &mut extra, f), &defined) {
+        if !b.holds(at, &mut |f| number(numbers, &mut extra, f), &defined, buf) {
             let mut d: Vec<u32> = defined.iter().copied().collect();
             d.sort_unstable();
-            *b = Arc::new(page_body(p, numbers, &extra, &d, at));
+            *b = Arc::new(page_body_in(p, numbers, &extra, &d, at, buf));
             again += 1;
         }
         if b.fixed.is_some() {
@@ -1014,7 +1033,8 @@ pub fn assemble(numbers: &Numbers, pages: &[Page], bodies: &mut [Arc<Body>]) -> 
     }
     // (§642: the postamble)
     let total_pages = pages.len() as i32;
-    let mag = pages.last().map_or(1000, |p| p.ship.mag);
+    // (§642: `prepare_mag` again: the magnification the first page fixed)
+    let mag = first.ship.mag;
     let post = out.len() as i32;
     out.push(POST);
     for x in [last_bop, 25_400_000, 473_628_672, mag, max_v, max_h] {
@@ -1030,8 +1050,8 @@ pub fn assemble(numbers: &Numbers, pages: &[Page], bodies: &mut [Arc<Body>]) -> 
     out.push(POST_POST);
     out.extend(post.to_be_bytes());
     out.push(ID_BYTE);
-    let ptr = out.len() as i32 % BUF_SIZE;
-    let k = 4 + (BUF_SIZE - ptr) % 4;
+    let ptr = out.len() as i32 % buf;
+    let k = 4 + (buf - ptr) % 4;
     out.extend(std::iter::repeat_n(223, k as usize));
     (out, again)
 }

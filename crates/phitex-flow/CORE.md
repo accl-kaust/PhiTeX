@@ -919,6 +919,107 @@ e-TeX's primitives:
 | `\showgroups`, `\showifs`, `\showtokens` | xray | log text and the error's context, the line a placeholder (gap 3) | done (file-level context) |
 | `\unless` | expand_after | step (a node at the top, as conditionals are): the boolean conditional after it, negated | done |
 
+## TRIP (agent F)
+
+`tests/trip.rs` runs Knuth's TRIP test (`bench/trip/`, `bench/trip.sh
+fetch`) as one session (`session.rs`). **The gate is the document only**
+(the user's decision, 2026-10-10). `trip.typ` is DVItype's listing of our
+`trip.dvi`. It must equal Knuth's, except for the header and the glue
+rounding that TeX Live's `trip.diffs` allows, and it must be the same at
+the five schedules. Until it is, `REACHED` in the test is a ratchet: the
+first differing line may only move down.
+
+**Not a gate** (written for navigation, no effort spent on their form):
+`tripin.log`, `trip.log`, `trip.fot`. That covers:
+- error messages, their context lines and help text;
+- the output of `\show` and `\showthe`;
+- the tracing family (`\tracingcommands`, `\tracingmacros`,
+  `\tracingrestores`, `\tracingparagraphs`, `\tracingpages`);
+- the statistics at `\dump` and at the end, and the history value;
+- the labels on input levels in an error's context;
+- printer limits, beyond the line lengths the terminal needs.
+
+**Sessions.**
+- A job starts at a line that begins with `graph::JOB`. It is a node of
+  its own:
+  - it takes the `**` line from the terminal and logs the banner;
+  - it defines the date parameters and runs `\everyjob`.
+- `Key::LineBase` and the page fold (`Item::JobStart`) start again at
+  each job.
+- `\dump` defines `Key::Format`, which the next job's banner names.
+- The terminal is `Key::ReadStream(16)` (`Build::set_terminal`) and the
+  interaction is `Key::Interaction` (`Build::set_interaction`). An error
+  reads its answer from the terminal (tex.web 82–93): delete, insert,
+  change the mode, or `X`/`E` (which goes through `Item::Halt`).
+- `print::Limits` holds TRIP's compiled sizes (`error_line` and the
+  others), including `dvi_buf_size` (800), which the DVI writer's
+  half-buffer rule reads.
+- The memory bound is A's `Options::main_memory`.
+
+**Stopgaps in the harness:**
+- *Waiting on A's `Key::Ended`:* pass 1's text is cut after its `\next`
+  (= `\dump`) line, in `tests/trip.rs` and in `phitex-flow --trip`. The
+  core still runs the pieces after an `\end`/`\dump`. In IniTeX's state
+  they loop forever at line 206 (`\everypar`'s `\gobble` eats the `$`
+  that is inserted).
+- *Waiting on A's same-run write/read:* `tripos.tex`, written by
+  `\write10` and read back in the same run, goes through the session's
+  fixpoint over written files (`Session::run`, up to 3 runs).
+
+**Gaps for A:**
+1. **The fold ignores a document's `\pagegoal=` and the other page
+   dimensions** (tex.web 1245: `page_so_far[k]` is assigned at once, at
+   the command, against the page as the last `build_page` left it). This
+   is the last thing between TRIP and Knuth's `trip.typ`:
+   - Pages 10 and 15 are packed to 16383.99998pt, not 10000pt.
+     `\showlonglists` sets `\pagegoal=10000pt`.
+   - Repro, against `tex -ini`:
+
+         \catcode`\{=1 \catcode`\}=2
+         \vsize=100pt \hsize=50pt \maxdepth=2pt \output={\showbox255 \shipout\box255}
+         \hrule height 5pt\penalty0
+         \pagegoal=50pt
+         \vfil\penalty-10000
+         \end
+
+     TeX gives `\vbox(50.0+0.0)x0.0, glue set 45.0fil`; we give 100pt.
+   - Without the `\penalty0` the page is still empty at the assignment.
+     TeX then sets the goal back to `\vsize` when the first box arrives
+     (§987).
+   - Proposal: the assignment emits an item that the fold applies to its
+     page state on receipt, not queued behind the contributions (like
+     `Item::PrevDepth`).
+2. **The pieces after `\end`/`\dump` still run** (`Key::Ended`, above).
+
+**Fixed here** (each one changed TRIP's DVI or what came after it):
+- `\fontdimen` growing the last font loaded (`Key::LastFont`, and
+  `FontDimen(f,0)` as its count);
+- `check_shrinkage` in line breaking, and `prev_p` after a
+  discretionary;
+- §1120 Illegal math `\discretionary`;
+- §1241: `Improper \setbox` reads the register and the `=` first;
+- `\outer`: `check_outer_validity` (§336–339) with a `scanner_status`
+  per node (`Exec::scanning`). `\noexpand`, `\string`, `\meaning`, `\ifx`
+  and `\ifdefined` read as `normal`. A frozen `\fi` (`\0fi`) and a frozen
+  `\relax` (`\0relax`) were added beside `\0cr`.
+- §1094: `\par` in an alignment entry whose braces are still open does
+  `off_save`;
+- §378: `\input` while a file name is scanned inserts `\relax`;
+- §362: `\endinput` before `\input` ends the new file's first line
+  (`force_eof` belongs to the next line end, in whatever file);
+- §352/355: a `^^`-reduced superscript can begin another `^^`;
+- §442: a backquoted brace does not count in an alignment's balance;
+- §288 `prepare_mag` and `Key::MagSet`. The postamble's magnification is
+  the first page's.
+- §641: Huge page cannot be shipped out;
+- `Tok::Param(n, c)`: a parameter text keeps its character, and a body
+  shows `match_chr` (§294).
+
+**Approximations left** (not met by TRIP's DVI):
+- `\endtemplate` is not yet an `\outer` name for `check_outer`.
+- `prepare_mag` runs at a `\shipout` only while no magnification is
+  fixed. TeX runs it at the first page only.
+
 ## The inventory
 
 ### (i) Expandable and input-rewriting: steps — 40

@@ -611,7 +611,9 @@ impl Exec<'_> {
     /// `new_interaction`): the log's line ends, the mode is defined (always
     /// globally: it is not in TeX's tables).
     pub(super) fn new_interaction(&mut self, k: i32) {
-        self.log = Some(format!("{RAW}{LN}").into());
+        // (`print_ln` with the selector in force before the change)
+        let cur = self.selector();
+        self.log = Some(format!("{RAW}{}{LN}", crate::print::sel(cur)).into());
         self.define(Key::Interaction, Val::Int(k), true);
     }
 

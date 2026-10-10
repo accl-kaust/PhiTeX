@@ -39,7 +39,7 @@ pub use crate::item::{Item, Para};
 use crate::page::IGNORE_DEPTH;
 use crate::tfm::Font;
 use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
-use crate::show::{HALT, NL, RAW, THAT_MAKES_100};
+
 
 mod align;
 mod assign;
@@ -48,6 +48,8 @@ pub(crate) mod diag;
 mod etex;
 mod expand;
 mod fonts;
+mod help;
+mod interact;
 mod io;
 mod lang;
 mod material;
@@ -111,6 +113,12 @@ pub trait Env {
     /// The lines of its file before this piece (`Key::LineBase`).
     fn line_base(&mut self) -> i32 {
         0
+    }
+
+    /// The sizes TeX was compiled with (`print::Limits`: the lengths of
+    /// printed lines; fixed for a build's life).
+    fn limits(&self) -> crate::print::Limits {
+        crate::print::Limits::TEX_LIVE
     }
 }
 
@@ -251,6 +259,9 @@ enum TextKind {
     /// A `\read` line: its end ends the reading (`next_raw` is `None`);
     /// `\read` leaves it.
     Read,
+    /// A line typed at an error's prompt after `I` (tex.web 87): read
+    /// with no end-of-line character; its end ends it.
+    Terminal,
 }
 
 /// An open group: its kind and the tokens `\aftergroup` gave it (its
@@ -1234,6 +1245,28 @@ pub fn alignment_start(chain: &Chain, i: usize) -> usize {
     material::box_start(chain, i.saturating_sub(1), level)
 }
 
+/// Begins a line where a job of a session begins (tex.web 1337: TeX run
+/// again, its format the definitions the previous job's `\dump` reached):
+/// the cut always cuts before it, the lines of the job are counted from
+/// there (`Key::LineBase`), and the job's first node is its start
+/// (`Exec::job_start`: the terminal's first line, the transcript's banner,
+/// `\everyjob`). No document can type it.
+pub const JOB: char = '\u{E00A}';
+
+/// The source of a session: each job's main file, in order, each
+/// beginning with [`JOB`].
+pub fn jobs(texts: &[&str]) -> String {
+    let mut s = String::new();
+    for t in texts {
+        s.push(JOB);
+        s.push_str(t);
+        if !t.ends_with('\n') {
+            s.push('\n');
+        }
+    }
+    s
+}
+
 /// Cuts the source into pieces at blank lines at brace depth 0. Lines lose
 /// their trailing spaces and end in `\r` (TeX's end of line).
 pub fn cut(src: &str) -> Vec<Arc<[char]>> {
@@ -1265,7 +1298,17 @@ pub fn cut_from(
             break;
         }
         let line = raw.trim_end_matches([' ', '\r']);
-        let blank = line.trim_start_matches(' ').is_empty();
+        // (a job of a session begins: a piece of its own, from depth 0)
+        if line.starts_with(JOB) && !cur.is_empty() {
+            pieces.push(Arc::from(std::mem::take(&mut cur)));
+            if stop(line_start) {
+                return (pieces, starts, Some(line_start));
+            }
+            starts.push(line_start);
+            depth = 0;
+            blank_run = false;
+        }
+        let blank = !line.starts_with(JOB) && line.trim_start_matches(' ').is_empty();
         if blank {
             blank_run = true;
         } else {
@@ -1897,6 +1940,27 @@ struct Exec<'a> {
     stop: Option<Check>,
     /// This node made the hundredth error: the build ends here (§82).
     halt: bool,
+    /// What is being scanned, where an `\outer` name is forbidden
+    /// (tex.web 305: `scanner_status`), and whose (`warning_index`).
+    scanning: Scanning,
+    warning: Option<Tok>,
+    /// An `\outer` name ended the argument being matched: the `\par`
+    /// inserted ends the call silently (tex.web 339: `outer_call`).
+    outer_abort: bool,
+    /// A file name is being scanned: `\input` inserts `\relax`
+    /// (tex.web 378: `name_in_progress`).
+    name_in_progress: bool,
+}
+
+/// tex.web 305: what the reader is in the middle of, for `\outer`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Scanning {
+    Normal,
+    Skipping,
+    Defining,
+    Matching,
+    Aligning,
+    Absorbing,
 }
 
 /// Up to this many reads, a node's reads are looked up by a scan.
@@ -1960,6 +2024,10 @@ impl<'a> Exec<'a> {
             steps: 0,
             stop: None,
             halt: false,
+            scanning: Scanning::Normal,
+            warning: None,
+            outer_abort: false,
+            name_in_progress: false,
         }
     }
 
@@ -2018,18 +2086,12 @@ impl<'a> Exec<'a> {
         }
     }
 
+    /// An error of TeX's (tex.web 82) whose help is its message's
+    /// (`help::help_for`), or one of the graph's own.
+    #[allow(clippy::needless_pass_by_value, reason = "every caller formats its message")]
     fn err(&mut self, s: String) {
-        if self.halted() {
-            return;
-        }
-        self.errors.push(s);
-        if self.count_error() {
-            let mut l = String::from(RAW);
-            l.push(NL);
-            l.push_str(THAT_MAKES_100);
-            l.push(HALT);
-            self.log_raw(&l);
-        }
+        let h = help::help_for(&s);
+        self.error(&s, h);
     }
 
     /// tex.web 94, `overflow`: "TeX capacity exceeded", a fatal error: as
@@ -2042,8 +2104,8 @@ impl<'a> Exec<'a> {
         self.errors.push(s);
         self.st.error_count = FATAL_ERRORS;
         self.halt = true;
-        let mut l = String::from(RAW);
-        l.push(HALT);
+        let mut l = String::from(crate::show::RAW);
+        l.push(crate::show::HALT);
         self.log_raw(&l);
     }
 
@@ -2329,16 +2391,31 @@ impl<'a> Exec<'a> {
     }
 
     /// The character at `pos`, the position after it and its category
-    /// (tex.web 355): a line's end is its end-of-line character (none if
-    /// inactive), and `^^` reduces the character or the two hex digits
-    /// after it.
+    /// (tex.web 352, 355): a line's end is its end-of-line character (none
+    /// if inactive), and `^^` reduces the character or the two hex digits
+    /// after it; a reduced superscript character can begin another `^^`
+    /// (TeX reduces in its buffer and reads the result again).
     fn char_at(&mut self, pos: usize) -> Option<(char, usize, u8)> {
         let raw = *self.txt().get(pos)?;
         let c = if raw == '\r' { self.eol()? } else { raw };
-        let cat = self.catcode(c);
-        // (`^^`: the second circumflex on the line, and a character after it)
-        if raw == '\r' || cat != 7 || self.txt().get(pos + 1) != Some(&c) {
-            return Some((c, pos + 1, cat));
+        let mut cur = (c, pos + 1, self.catcode(c));
+        if raw == '\r' {
+            return Some(cur);
+        }
+        while cur.2 == 7
+            && let Some((r, np)) = self.reduce_sup(cur.0, cur.1)
+        {
+            cur = (r, np, self.catcode(r));
+        }
+        Some(cur)
+    }
+
+    /// `^^` after a superscript character `c` whose second is at `p` (the
+    /// same character, not the line's end), and a character after it: the
+    /// character it means and the position after it.
+    fn reduce_sup(&mut self, c: char, p: usize) -> Option<(char, usize)> {
+        if self.txt().get(p) != Some(&c) {
+            return None;
         }
         let at = |x: &mut Self, p: usize| -> Option<char> {
             let ch = x.txt().get(p).copied();
@@ -2347,25 +2424,22 @@ impl<'a> Exec<'a> {
                 other => other,
             }
         };
-        let Some(c2) = at(self, pos + 2) else {
-            return Some((c, pos + 1, cat));
-        };
+        let c2 = at(self, p + 1)?;
         if u32::from(c2) >= 128 {
-            return Some((c, pos + 1, cat));
+            return None;
         }
         let hex = |ch: char| ch.is_ascii_digit() || ('a'..='f').contains(&ch);
-        let (r, np) = match at(self, pos + 3) {
-            Some(c3) if hex(c2) && hex(c3) && self.txt().get(pos + 2) != Some(&'\r') => (
+        let (r, np) = match at(self, p + 2) {
+            Some(c3) if hex(c2) && hex(c3) && self.txt().get(p + 1) != Some(&'\r') => (
                 (c2.to_digit(16).unwrap_or(0) << 4) | c3.to_digit(16).unwrap_or(0),
-                pos + 4,
+                p + 3,
             ),
             _ => {
                 let v = u32::from(c2);
-                (if v < 64 { v + 64 } else { v - 64 }, pos + 3)
+                (if v < 64 { v + 64 } else { v - 64 }, p + 2)
             }
         };
-        let r = char::from_u32(r).unwrap_or('\0');
-        Some((r, np, self.catcode(r)))
+        Some((char::from_u32(r).unwrap_or('\0'), np))
     }
 
     /// The position just after the current line's end.
@@ -2382,8 +2456,78 @@ impl<'a> Exec<'a> {
     /// braces are counted and an entry's end inserts its v template
     /// (tex.web 342: `align_state`).
     fn next_raw(&mut self) -> Option<Tok> {
-        let t = self.next_raw0()?;
+        let mut t = self.next_raw0()?;
+        if self.scanning != Scanning::Normal && !self.noexp && t.key().is_some() {
+            t = self.check_outer(t);
+        }
         if self.st.al.on { self.align_token(t) } else { Some(t) }
+    }
+
+    /// tex.web 336-339: `check_outer_validity`. An `\outer` macro where
+    /// one is forbidden: it is read again later (unless it came from a
+    /// `\read` line), what was being scanned is ended (a `}`, a `\par`,
+    /// `\cr}` or `\fi` inserted), and the scanner sees a space.
+    fn check_outer(&mut self, t: Tok) -> Tok {
+        let outer = matches!(self.tok_meaning(&t), Meaning::Macro(m) if m.outer);
+        if !outer {
+            return t;
+        }
+        let floor = self.st.texts.last().map_or(0, |x| x.at);
+        let from_read = self.st.pending.len() == floor
+            && self.st.texts.last().is_some_and(|x| x.kind == TextKind::Read);
+        if !from_read {
+            self.back(t);
+        }
+        let of = self.warning.as_ref().map_or_else(String::new, |w| format!(" of {w}"));
+        match self.scanning {
+            Scanning::Skipping => {
+                self.back(Tok::Cs("\u{0}fi".into()));
+                self.err("Incomplete \\if; all text was ignored after the test".into());
+            }
+            s => {
+                let what = match s {
+                    Scanning::Defining => "definition",
+                    Scanning::Matching => "use",
+                    Scanning::Aligning => "preamble",
+                    _ => "text",
+                };
+                match s {
+                    Scanning::Matching => {
+                        self.back(Tok::Cs("par".into()));
+                        self.outer_abort = true;
+                    }
+                    Scanning::Aligning => {
+                        self.back(Tok::Char(2, '}'));
+                        self.back(Tok::Cs("\u{0}cr".into()));
+                        self.st.al.state = -align::ALIGN_BASE;
+                    }
+                    _ => self.back(Tok::Char(2, '}')),
+                }
+                self.err(format!("Forbidden control sequence found while scanning {what}{of}"));
+            }
+        }
+        Tok::Char(10, ' ')
+    }
+
+    /// The next token, unexpanded, where an `\outer` name is allowed
+    /// (`\noexpand`, `\string`, `\meaning`, `\ifx`, `\ifdefined`:
+    /// tex.web 367, 465, 507).
+    fn next_raw_normal(&mut self) -> Option<Tok> {
+        let was = std::mem::replace(&mut self.scanning, Scanning::Normal);
+        let t = self.next_raw();
+        self.scanning = was;
+        t
+    }
+
+    /// Runs `f` with the scanner in state `s` (and `w` the name it is
+    /// for), as it was after.
+    fn scanning<R>(&mut self, s: Scanning, w: Option<Tok>, f: impl FnOnce(&mut Self) -> R) -> R {
+        let prev = std::mem::replace(&mut self.scanning, s);
+        let prev_w = std::mem::replace(&mut self.warning, w);
+        let r = f(self);
+        self.scanning = prev;
+        self.warning = prev_w;
+        r
     }
 
     /// [`Exec::next_raw`] before an alignment sees the token.
@@ -2442,7 +2586,7 @@ impl<'a> Exec<'a> {
             return t;
         }
         // (`\endinput` forces the end: no `\everyeof`)
-        if !x.eof && !x.endinput {
+        if !x.eof && !x.endinput && x.kind != TextKind::Terminal {
             x.eof = true;
             let every = match self.get(&Key::TokPar(crate::val::TokPar::Everyeof)) {
                 Val::Toks(l) => l,
@@ -2560,13 +2704,31 @@ impl<'a> Exec<'a> {
     /// A macro call: matches the arguments and rewrites the input with the
     /// body (tex.web 389-399). A step: it defines nothing.
     fn call(&mut self, name: &Tok, m: &Macro) {
+        self.outer_abort = false;
+        let Some(args) = self.scanning(Scanning::Matching, Some(name.clone()), |x| x.call_args(name, m)) else {
+            return;
+        };
+        let mut out = Vec::with_capacity(m.body.len());
+        for t in &m.body {
+            match t {
+                Tok::Param(n, _) => out.extend(args[usize::from(*n)].iter().cloned()),
+                _ => out.push(t.clone()),
+            }
+        }
+        self.end_read_lists();
+        self.rewrite(out);
+    }
+
+    /// A macro call's arguments (tex.web 389-399); `None`: the call ends
+    /// without its body.
+    fn call_args(&mut self, name: &Tok, m: &Macro) -> Option<Vec<Vec<Tok>>> {
         let mut args: Vec<Vec<Tok>> = vec![Vec::new(); 10];
         let p = &m.params;
         let mut i = 0;
         while i < p.len() {
-            if let Tok::Param(n) = p[i] {
+            if let Tok::Param(n, _) = p[i] {
                 let mut j = i + 1;
-                while j < p.len() && !matches!(p[j], Tok::Param(_)) {
+                while j < p.len() && !matches!(p[j], Tok::Param(..)) {
                     j += 1;
                 }
                 let delim = &p[i + 1..j];
@@ -2575,8 +2737,7 @@ impl<'a> Exec<'a> {
                 } else {
                     self.delimited(name, delim, m.long)
                 };
-                let Some(arg) = arg else { return };
-                args[usize::from(n)] = arg;
+                args[usize::from(n)] = arg?;
                 i = j;
             } else {
                 match self.next_raw() {
@@ -2586,26 +2747,24 @@ impl<'a> Exec<'a> {
                         if let Some(x) = other {
                             self.back(x);
                         }
-                        return;
+                        return None;
                     }
                 }
                 i += 1;
             }
         }
-        let mut out = Vec::with_capacity(m.body.len());
-        for t in &m.body {
-            match t {
-                Tok::Param(n) => out.extend(args[usize::from(*n)].iter().cloned()),
-                _ => out.push(t.clone()),
-            }
-        }
-        self.end_read_lists();
-        self.rewrite(out);
+        Some(args)
     }
 
     /// A `\par` in a short macro's argument ends the call (tex.web 392).
     fn runaway(&mut self, name: &Tok, t: &Tok, long: bool) -> bool {
-        if !long && matches!(t, Tok::Cs(n) if &**n == "par") {
+        let par = matches!(t, Tok::Cs(n) if &**n == "par");
+        if par && self.outer_abort {
+            // (the `\par` an `\outer` name inserted: no error, consumed)
+            self.outer_abort = false;
+            return true;
+        }
+        if !long && par {
             self.err(format!("Paragraph ended before {name} was complete"));
             self.back(t.clone());
             return true;
@@ -2706,6 +2865,11 @@ impl<'a> Exec<'a> {
 
     /// One command.
     fn command(&mut self) {
+        // (a job of a session begins: its first piece's first node)
+        if self.st.pos == 0 && self.ptext.is_none() && self.st.pending.is_empty() && self.text.first() == Some(&JOB) {
+            self.job_start();
+            return;
+        }
         self.at_start = true;
         let next = self.next_x_m(true);
         self.at_start = false;
@@ -2822,6 +2986,11 @@ impl<'a> Exec<'a> {
             11 | 12 => self.char_cmd(u32::from(c), t),
             3 => self.math_shift(t),
             7 | 8 => self.sub_sup_cmd(cat == 7, t),
+            6 => {
+                // (tex.web 1045: `report_illegal_case`)
+                let m = self.mode_name();
+                self.err(format!("You can't use `macro parameter character {c}' in {m} mode"));
+            }
             _ => self.err(format!(
                 "Character {c} of category {cat} is not supported yet"
             )),

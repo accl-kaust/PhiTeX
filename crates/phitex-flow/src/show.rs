@@ -31,6 +31,30 @@ pub const CTX: char = '\u{7}';
 /// (no file is closed: no ` )`).
 pub const HALT: char = '\u{8}';
 pub const THAT_MAKES_100: &str = "(That makes 100 errors; please try again.)";
+/// The selector markers (tex.web 54): `SEL` + 0 no print, + 1 the terminal
+/// only, + 2 the log only, + 3 both (`print::sel`). An entry without one
+/// prints to the log only (batch mode).
+pub const SEL: char = '\u{E010}';
+/// Saves the selector; [`SEL_POP`] restores it.
+pub const SEL_PUSH: char = '\u{E014}';
+pub const SEL_POP: char = '\u{E015}';
+/// `MSG text MSG_END`: a `\message`'s text, after the rule of tex.web
+/// 1280 (a line of its own if it does not fit the terminal's line, else
+/// a space if a line is begun).
+pub const MSG: char = '\u{E016}';
+pub const MSG_END: char = '\u{E017}';
+/// `OPEN name MSG_END`: a file opened (tex.web 537: the same rule, then
+/// `(` and the name).
+pub const OPEN: char = '\u{E018}';
+/// `SHIP n MSG_END`: a page shipped (tex.web 638: `[` after its rule;
+/// the rest of the page's text follows).
+pub const SHIP: char = '\u{E019}';
+/// Begins the entry of a job's start (the build's `graph::JOB`): the log
+/// of a session is split there (`print::session`).
+pub const JOB: char = '\u{E01A}';
+/// `WLOG text WLOG`: written into the transcript directly (tex.web
+/// 1334's `wlog`), bypassing the selector and the line length count.
+pub const WLOG: char = '\u{E01B}';
 
 /// What a display reads: the escape character, the font identifiers, and
 /// `\showboxdepth`/`\showboxbreadth`.
@@ -43,6 +67,9 @@ pub struct Ctx {
     pub breadth: i32,
     /// `\newlinechar`: printing that character ends the line (tex.web 59).
     pub newline: i32,
+    /// `max_print_line` (`print::Limits`): `print_mark` cuts a mark's text
+    /// 10 short of it.
+    pub max_print_line: i32,
 }
 
 impl Ctx {
@@ -454,10 +481,10 @@ impl Shower<'_> {
     /// tex.web 176's `print_mark`: braces round a text, cut with `\ETC.`
     /// past 69 characters.
     fn mark_text(&mut self, t: &str) {
-        const LIMIT: usize = crate::print::MAX_PRINT_LINE - 10;
+        let limit = (self.cx.max_print_line as usize).saturating_sub(10);
         self.out.push('{');
-        if t.chars().count() > LIMIT {
-            self.out.extend(t.chars().take(LIMIT));
+        if t.chars().count() > limit {
+            self.out.extend(t.chars().take(limit));
             self.cx.esc(self.out, "ETC.");
         } else {
             self.out.push_str(t);
@@ -633,7 +660,7 @@ fn show_toks_plain(out: &mut String, toks: &[Tok], cx: &Ctx) {
                 out.push(*c);
             }
             Tok::Char(_, c) | Tok::Active(c) => out.push(*c),
-            Tok::Param(n) => {
+            Tok::Param(n, _) => {
                 out.push('#');
                 out.push(char::from(b'0' + n));
             }

@@ -41,8 +41,12 @@ struct Level {
 }
 
 impl Exec<'_> {
-    /// `\showbox`, `\showlists` (tex.web 1293).
+    /// `\show`, `\showbox`, `\showthe`, `\showlists` (tex.web 1293).
     pub(super) fn show_cmd(&mut self, c: u8) {
+        if c == 0 || c == 2 {
+            self.show_meaning_or_the(c == 0);
+            return;
+        }
         let mut s = String::from(RAW);
         if c == 1 {
             // (§1296)
@@ -67,6 +71,62 @@ impl Exec<'_> {
         s.push(LN);
         s.push(LN);
         self.log_raw(&s);
+    }
+
+    /// §1294, §1297: `\show` (a token's meaning) and `\showthe` (a
+    /// quantity's value), then §1293's `common_ending`: an error without
+    /// help, not counted, in the modes that do not stop.
+    fn show_meaning_or_the(&mut self, meaning: bool) {
+        let mut head = String::new();
+        if meaning {
+            let Some(t) = self.next_raw() else { return };
+            let m = if self.noexp && super::expand::expands(&self.tok_meaning(&t)) {
+                crate::val::Meaning::Prim(crate::val::Prim::Relax)
+            } else {
+                self.tok_meaning(&t)
+            };
+            match &t {
+                crate::val::Tok::Cs(n) => {
+                    let n = n.clone();
+                    self.sprint_cs(&mut head, &n);
+                    head.push('=');
+                }
+                crate::val::Tok::Active(c) => {
+                    head.push(*c);
+                    head.push('=');
+                }
+                _ => {}
+            }
+            self.meaning_text(&mut head, &m);
+        } else {
+            let toks = self.the_toks();
+            self.show_toks(&mut head, &toks);
+        }
+        let cur = self.selector();
+        let mut s = String::from(RAW);
+        s.push(crate::print::sel(cur));
+        s.push(NL);
+        s.push_str("> ");
+        s.push_str(&head);
+        let stop = self.interaction() == super::interact::ERROR_STOP_MODE;
+        let help: &[&str] = if !stop {
+            &[]
+        } else if self.int_par(crate::val::IntPar::Tracingonline) > 0 {
+            &[
+                r"This isn't an error message; I'm just \showing something.",
+                r"Type `I\show...' to show more (e.g., \show\cs,",
+                r"\showthe\count10, \showbox255, \showlists).",
+            ]
+        } else {
+            &[
+                r"This isn't an error message; I'm just \showing something.",
+                r"Type `I\show...' to show more (e.g., \show\cs,",
+                r"\showthe\count10, \showbox255, \showlists).",
+                r"And type `I\tracingonline=1\show...' to show boxes and",
+                r"lists on your terminal as well as in the transcript file.",
+            ]
+        };
+        self.error_tail(s, cur, super::interact::Help::Lines(help), false, stop);
     }
 
     /// §311–§318 `show_context`: a backed-up list at the top (`<to be read

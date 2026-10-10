@@ -179,6 +179,9 @@ pub struct Output {
     /// order): each file's name and contents, in the order they were
     /// first opened (`logs::replay`).
     pub writes: Vec<(String, String)>,
+    /// The pages each job of a session shipped, in order (one job unless
+    /// the source is a session's, `graph::jobs`).
+    pub job_pages: Vec<usize>,
 }
 
 /// A piece whose definition was read before any definition.
@@ -355,6 +358,12 @@ pub struct Build {
     /// Where `\input` and `\openin` find files, and the job's name.
     inputs: Arc<Vec<PathBuf>>,
     job: Arc<str>,
+    /// What the session gives before any definition: the terminal's lines
+    /// (`Key::ReadStream(16)`), the interaction mode (`Key::Interaction`).
+    terminal: Option<Arc<[u8]>>,
+    interaction: i32,
+    /// The sizes TeX was compiled with.
+    limits: crate::print::Limits,
 }
 
 /// A file's text and its pieces.
@@ -406,6 +415,12 @@ struct Given {
     job: Arc<str>,
     /// The lines of its file before each piece of the sequence.
     bases: Vec<u32>,
+    /// The terminal's lines and the interaction mode before any
+    /// definition (`Build::set_terminal`, `Build::set_interaction`), and
+    /// the sizes TeX was compiled with.
+    terminal: Option<Arc<[u8]>>,
+    interaction: i32,
+    limits: crate::print::Limits,
 }
 
 impl Given {
@@ -421,6 +436,9 @@ impl Given {
             files: Mutex::default(),
             job,
             bases,
+            terminal: None,
+            interaction: 0,
+            limits: crate::print::Limits::TEX_LIVE,
         }
     }
 
@@ -631,7 +649,7 @@ impl Names {
         }
         let (s, bit) = Names::route(key);
         if self.defined[s].load(Ordering::Acquire) & bit == 0 {
-            return (None, initial(key, font, self.etex), 0, END);
+            return (None, self.initial(key, font), 0, END);
         }
         let g = self.shards[s].read().expect("names");
         if let Some(v) = g.get(key) {
@@ -645,9 +663,22 @@ impl Names {
                 let lo = if p.0 == at.0 { p.1 + 1 } else { 0 };
                 return (Some(*p), val.clone(), lo, hi);
             }
-            return (None, initial(key, font, self.etex), 0, hi);
+            return (None, self.initial(key, font), 0, hi);
         }
-        (None, initial(key, font, self.etex), 0, END)
+        (None, self.initial(key, font), 0, END)
+    }
+
+    /// The value of `key` before any definition: IniTeX's, but what the
+    /// session gives (the terminal, the interaction mode).
+    fn initial(&self, key: &Key, font: &Arc<Font>) -> Val {
+        match key {
+            Key::Interaction => Val::Int(self.given.interaction),
+            Key::ReadStream(16) => match &self.given.terminal {
+                Some(d) => Val::Stream(Arc::new(crate::val::Stream { data: d.clone(), next: 0, normal: true })),
+                None => Val::Void,
+            },
+            _ => initial(key, font, self.etex),
+        }
     }
 
     /// Whether `key` may be defined between a piece's nodes.
@@ -892,6 +923,9 @@ impl Build {
             rests: FxMap::default(),
             fold: FoldKept::default(),
             virt: FxMap::default(),
+            terminal: None,
+            interaction: 0,
+            limits: crate::print::Limits::TEX_LIVE,
         }
     }
 
@@ -964,6 +998,10 @@ impl Build {
         let mut out = Vec::with_capacity(texts.len());
         let mut base = 0;
         for t in texts {
+            // (a job of a session counts its lines from its start)
+            if t.first() == Some(&crate::graph::JOB) {
+                base = 0;
+            }
             self.place(&mut out, &mut m, olds, t, Entry::Start, base, 0);
             base += count_lines(t);
         }
@@ -1022,6 +1060,36 @@ impl Build {
         let rest = self.rest_text(text, stop);
         let rbase = base + count_lines(&text[..stop]);
         self.place(out, m, olds, &rest, Entry::Rest(k, last), rbase, depth)
+    }
+
+    /// The terminal: the lines the user types (`Key::ReadStream(16)`
+    /// before any definition), read by a job's start, an error's prompt
+    /// in `\errorstopmode`, `\read16`. Unset, the terminal is closed.
+    pub fn set_terminal(&mut self, lines: &[&str]) {
+        let mut b = Vec::new();
+        for l in lines {
+            b.extend(l.bytes());
+            b.push(b'\n');
+        }
+        self.terminal = Some(Arc::from(b));
+    }
+
+    /// The interaction mode before any definition (the command line's
+    /// `-interaction`: 0 `batchmode` … 3 `errorstopmode`, IniTeX's own).
+    /// Batch mode until set, as the oracles run TeX.
+    pub fn set_interaction(&mut self, mode: i32) {
+        self.interaction = mode.clamp(0, 3);
+    }
+
+    /// The sizes TeX was compiled with (`print::Limits`; TeX Live's
+    /// until set). Fixed for the build's life.
+    pub fn set_limits(&mut self, limits: crate::print::Limits) {
+        self.limits = limits;
+    }
+
+    /// The sizes set by [`Build::set_limits`].
+    pub fn limits(&self) -> crate::print::Limits {
+        self.limits
     }
 
     /// Cuts `src` into pieces, the pieces outside the edit from the last
@@ -1244,15 +1312,11 @@ impl Build {
         // (the names index: what the kept pieces define, at their places,
         // and what an edited piece's predecessor defined, as its prediction)
         let bases: Vec<u32> = p.iter().map(|x| x.base as u32).collect();
-        let names = Names::new(
-            Given::new(
-                self.inputs.clone(),
-                self.job.clone(),
-                self.files.clone(),
-                bases,
-            ),
-            opts.etex,
-        );
+        let mut given = Given::new(self.inputs.clone(), self.job.clone(), self.files.clone(), bases);
+        given.terminal.clone_from(&self.terminal);
+        given.interaction = self.interaction;
+        given.limits = self.limits;
+        let names = Names::new(given, opts.etex);
         for (k, ps) in p.iter().enumerate() {
             if let Some(r) = ps.run.as_ref().or(ps.prev.as_ref().map(|(r, _, _)| r)) {
                 for (key, val) in &r.exports {
@@ -1551,7 +1615,7 @@ impl Build {
             st.p.iter()
                 .filter_map(|ps| ps.run.as_ref().map(|r| &r.fonts[..])),
         );
-        let (out, again) = dvi::assemble(&numbers, &st.pages, &mut bodies);
+        let (out, again) = dvi::assemble_in(&numbers, &st.pages, &mut bodies, sh.names.given.limits.dvi_buf_size);
         st.stats.bodies_again = again;
         let mut errors = Vec::new();
         let mut dump = String::new();
@@ -1577,30 +1641,22 @@ impl Build {
             .unwrap_or_default();
         // (the piece holding `\end` ends the document: the pieces after it
         // are not in the log; CORE.md: the core is to not run them)
-        let upto =
-            st.p.iter()
-                .position(|ps| {
-                    ps.run
-                        .as_ref()
-                        .is_some_and(|r| crate::graph::ends_document(r))
-                })
-                .map_or(st.p.len(), |e| e + 1);
+        // (and in a session, the pieces after it up to the next job's start)
+        let live = live_pieces(&st.p);
         let (log, writes) = {
-            let frags: Vec<&Frag> = st.p[..upto]
-                .iter()
-                .map(|ps| &**ps.log.as_ref().expect("a part"))
-                .collect();
+            let idx: Vec<usize> = (0..st.p.len()).filter(|&k| live[k]).collect();
+            let frags: Vec<&Frag> = idx.iter().map(|&k| &**st.p[k].log.as_ref().expect("a part")).collect();
             // (each page the page builder shipped does its whatsits where
             // its call stands: its `\write`s expanded with the definitions
             // reaching there)
-            let end = upto.checked_sub(1).map_or((0, 0), |k| {
-                (k, st.p[k].run.as_ref().map_or(0, |r| r.chain.nodes.len()))
+            let end = idx.len().checked_sub(1).map_or((0, 0), |j| {
+                (j, st.p[idx[j]].run.as_ref().map_or(0, |r| r.chain.nodes.len()))
             });
             let places = logs::page_places(&frags, &marks, st.pages.len(), end);
             let mut page_io = Vec::with_capacity(st.pages.len());
             for (pg, at) in st.pages.iter().zip(&places) {
-                let io = match *at {
-                    Some((k, i)) if k < upto => match st.p[k].run.as_ref() {
+                let io = match at.map(|(j, i)| (idx.get(j).copied(), i)) {
+                    Some((Some(k), i)) => match st.p[k].run.as_ref() {
                         Some(r) => {
                             let mut env = JoinEnv {
                                 names: &sh.names,
@@ -1616,8 +1672,9 @@ impl Build {
                 };
                 page_io.push(io);
             }
-            let parts: Vec<logs::Part<'_>> = st.p[..upto]
+            let parts: Vec<logs::Part<'_>> = idx
                 .iter()
+                .map(|&k| &st.p[k])
                 .map(|ps| logs::Part {
                     frag: ps.log.as_ref().expect("a part"),
                     base: ps.base,
@@ -1630,7 +1687,7 @@ impl Build {
         };
         for (k, ps) in st.p.iter().enumerate() {
             let r = ps.run.as_ref().expect("every piece ran");
-            if k < upto {
+            if live[k] {
                 for e in &r.errors {
                     errors.push(format!("piece {k}: {e}"));
                 }
@@ -1655,6 +1712,12 @@ impl Build {
             for (i, pg) in st.pages.iter().enumerate() {
                 let _ = writeln!(dump, "page {}: {} items", i + 1, pg.b.list.len());
             }
+        }
+        let jobs = job_of(st.p.iter().map(|ps| ps.text.first() == Some(&crate::graph::JOB)));
+        let mut job_pages = vec![0usize; jobs.last().map_or(1, |j| j + 1)];
+        for o in &st.orgs {
+            let j = jobs.get(o.call.0 as usize).copied().unwrap_or(0);
+            job_pages[j] += 1;
         }
         st.stats.time_join = t_join.elapsed();
         st.stats.pages = st.pages.len();
@@ -1690,6 +1753,7 @@ impl Build {
             dump,
             log,
             writes,
+            job_pages,
         })
     }
 }
@@ -1704,6 +1768,10 @@ struct JoinEnv<'a> {
 }
 
 impl Env for JoinEnv<'_> {
+    fn limits(&self) -> crate::print::Limits {
+        self.names.given.limits
+    }
+
     fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32) {
         let (def, val, lo, hi) = self.names.reaching(key, (self.k as u32, node), self.font);
         (
@@ -1725,6 +1793,40 @@ impl Env for JoinEnv<'_> {
     fn line_base(&mut self) -> i32 {
         self.names.given.base(self.k) as i32
     }
+}
+
+/// Which pieces are the document's: in each job, those up to the first
+/// holding `\end` or `\dump` (TeX stops reading there; CORE.md: the core
+/// is to not run the others).
+fn live_pieces(p: &[PState]) -> Vec<bool> {
+    let mut live = vec![true; p.len()];
+    let mut ended = false;
+    for (k, ps) in p.iter().enumerate() {
+        if ps.text.first() == Some(&crate::graph::JOB) {
+            ended = false;
+        }
+        live[k] = !ended;
+        if ps.run.as_ref().is_some_and(|r| crate::graph::ends_document(r)) {
+            ended = true;
+        }
+    }
+    live
+}
+
+/// The job of each piece of a session (0 for all of a document that is
+/// not one).
+fn job_of(texts: impl Iterator<Item = bool>) -> Vec<usize> {
+    let mut j = 0usize;
+    let mut seen = false;
+    texts
+        .map(|starts| {
+            if starts && seen {
+                j += 1;
+            }
+            seen = true;
+            j
+        })
+        .collect()
 }
 
 fn dump_piece(out: &mut String, k: usize, ps: &PState, r: &Run) {
@@ -2507,7 +2609,7 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
             // (at the file's start, with nothing defined: the join puts in
             // or leaves out the `fnt_def`s, and writes again a page whose
             // commands depend on where it lands)
-            let body = Arc::new(dvi::page_body(&page, &numbers, &[], &[], 0));
+            let body = Arc::new(dvi::page_body_in(&page, &numbers, &[], &[], 0, sh.names.given.limits.dvi_buf_size));
             let mut g = lock(sh);
             if body.fixed.is_some() {
                 g.stats.bodies_fixed += 1;
@@ -2788,6 +2890,10 @@ impl PieceEnv<'_> {
 }
 
 impl Env for PieceEnv<'_> {
+    fn limits(&self) -> crate::print::Limits {
+        self.sh.names.given.limits
+    }
+
     fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
         self.sh.fonts.get(name)
     }
@@ -3284,6 +3390,36 @@ fn notify(sh: &Shared, work: bool) {
     sh.parked.notify_all();
     if work {
         sh.cv.notify_all();
+    }
+}
+
+impl Output {
+    /// The transcripts (and terminals) of a session's jobs, laid out with
+    /// `limits`, each ending as `close_files_and_terminate` ends it
+    /// (tex.web 642: the pages written on `dvi_name`, or none).
+    pub fn job_logs(&self, limits: &crate::print::Limits, dvi_name: &str) -> Vec<crate::print::JobLog> {
+        use crate::show::{LN, NL};
+        let foots: Vec<String> = self
+            .job_pages
+            .iter()
+            .map(|&n| {
+                let mut f = String::new();
+                f.push(NL);
+                if n == 0 {
+                    f.push_str("No pages of output.");
+                } else {
+                    let _ = write!(
+                        f,
+                        "Output written on {dvi_name} ({n} page{}, {} bytes).",
+                        if n == 1 { "" } else { "s" },
+                        self.dvi.len()
+                    );
+                }
+                f.push(LN);
+                f
+            })
+            .collect();
+        crate::print::session(&self.log, limits, &foots)
     }
 }
 

@@ -115,39 +115,6 @@ pub fn io_event(kind: char, stream: u8, payload: &str) -> String {
 /// Brackets an error's context, laid out by `rebase` (`context`).
 const CTX: char = '\u{E002}';
 
-/// TeX Live's `error_line`, `half_error_line` (texmf.cnf).
-const ERROR_LINE: usize = 79;
-const HALF_ERROR_LINE: usize = 50;
-
-/// tex.web 313–318: an error's context — `head` (`l.N `, or a token
-/// list's label), what was read and the rest (cut by `CUT`, each character
-/// as it prints): two lines, cut short as TeX does.
-fn context(out: &mut String, head: &str, x: &str) {
-    use crate::show::LN;
-    let (read, rest) = x.split_once(crate::graph::diag::CUT).unwrap_or((x, ""));
-    let read: Vec<char> = read.chars().collect();
-    let rest: Vec<char> = rest.chars().collect();
-    out.push_str(head);
-    let l = head.chars().count();
-    let first_count = read.len();
-    let trick_count = (first_count + 1 + ERROR_LINE - HALF_ERROR_LINE).max(ERROR_LINE);
-    let m = rest.len().min(trick_count - first_count);
-    let (p, n) = if l + first_count <= HALF_ERROR_LINE {
-        (0, l + first_count)
-    } else {
-        out.push_str("...");
-        (l + first_count - HALF_ERROR_LINE + 3, HALF_ERROR_LINE)
-    };
-    out.extend(&read[p.min(first_count)..]);
-    out.push(LN);
-    out.extend(std::iter::repeat_n(' ', n));
-    let k = if m + n <= ERROR_LINE { m } else { ERROR_LINE - n - 3 };
-    out.extend(&rest[..k.min(rest.len())]);
-    if m + n > ERROR_LINE {
-        out.push_str("...");
-    }
-}
-
 /// A piece's part of the log, and the run and lines it was made from.
 #[derive(Debug)]
 pub struct Frag {
@@ -156,6 +123,9 @@ pub struct Frag {
     pub entries: Vec<Entry>,
     /// The lines of the piece's text.
     pub newlines: usize,
+    /// A job of a session begins with the piece: its lines are counted
+    /// from there.
+    pub job_start: bool,
 }
 
 impl Frag {
@@ -208,6 +178,7 @@ pub fn fragment(text: &[char], run: &Arc<Run>, lines: &[Option<Lines>]) -> Frag 
         lines: lines.to_vec(),
         entries,
         newlines: text.iter().filter(|&&c| c == '\r').count(),
+        job_start: text.first() == Some(&crate::graph::JOB),
     }
 }
 
@@ -232,8 +203,15 @@ fn rebase(s: &str, base: usize) -> String {
     let mut laid = String::with_capacity(out.len());
     for (k, part) in out.split(CTX).enumerate() {
         if k % 2 == 1 {
+            // (laid out by the printer, which knows the lengths: `print::Limits`)
             let (head, x) = part.split_once(crate::graph::diag::CUT).unwrap_or((part, ""));
-            context(&mut laid, head, x);
+            let (read, rest) = x.split_once(crate::graph::diag::CUT).unwrap_or((x, ""));
+            laid.push_str(head);
+            for t in [read, rest] {
+                laid.push(crate::show::CTX);
+                laid.push_str(t);
+            }
+            laid.push(crate::show::CTX);
         } else {
             laid.push_str(part);
         }

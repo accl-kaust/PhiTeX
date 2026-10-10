@@ -218,6 +218,9 @@ pub enum Item {
     /// The hundredth error (tex.web 82: `jump_out`): the build ends, the
     /// page so far is not shipped.
     Halt,
+    /// A job of a session begins (`graph::JOB`): the page builder starts
+    /// again from an empty page (TeX run again).
+    JobStart,
 }
 
 impl Item {

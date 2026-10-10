@@ -407,14 +407,12 @@ impl Prim {
         if let Prim::Unimpl(i) = self {
             return UNIMPL[usize::from(i)];
         }
-        if let Some((n, _)) = INTERNAL.iter().find(|(_, p)| *p == self) {
-            return n;
-        }
         PRIMITIVES
             .iter()
             .find(|(_, p, _)| *p == self)
             .map(|(n, _, _)| *n)
             .or_else(|| ETEX_PRIMITIVES.iter().find(|(_, p)| *p == self).map(|(n, _)| *n))
+            .or_else(|| INTERNAL.iter().find(|(_, p)| *p == self).map(|(n, _)| *n))
             .unwrap_or("IMPOSSIBLE.")
     }
 }
@@ -459,7 +457,7 @@ params! { GluePar, 18, Lineskip = "lineskip", Baselineskip = "baselineskip", Par
 params! { TokPar, 10, Output = "output", Everypar = "everypar", Everymath = "everymath", Everydisplay = "everydisplay", Everyhbox = "everyhbox", Everyvbox = "everyvbox", Everyjob = "everyjob", Everycr = "everycr", Errhelp = "errhelp", Everyeof = "everyeof" }
 
 /// The reader's internal commands (`Mat::Internal`).
-pub const INTERNAL: [(&str, Prim); 23] = [
+pub const INTERNAL: [(&str, Prim); 25] = [
     ("\u{0}package", Prim::Mat(Mat::Internal(0))),
     ("\u{0}endgraf", Prim::Mat(Mat::Internal(1))),
     ("\u{0}discnext", Prim::Mat(Mat::Internal(2))),
@@ -484,6 +482,10 @@ pub const INTERNAL: [(&str, Prim); 23] = [
     ("\u{0}alignfin", Prim::Align(Al::Fin)),
     ("\u{0}alignset", Prim::Align(Al::Set)),
     ("\u{0}cr", Prim::Align(Al::FrozenCr)),
+    // (`frozen_fi`: what an `\outer` name in skipped text inserts)
+    ("\u{0}fi", Prim::Fi),
+    // (`frozen_relax`: what `\input` in a file name inserts)
+    ("\u{0}relax", Prim::Relax),
 ];
 
 /// Every TeX82 primitive (tex.web §1336: partex-core's `init_prim_tex` less
@@ -742,12 +744,12 @@ pub const PRIMITIVES: [(&str, Prim, &str); 325] = [
     ("setlanguage", Prim::SetLanguage, "EXTENSION"),
     ("sfcode", Prim::Code(Code::Sf), "DEF_CODE"),
     ("shipout", Prim::Mat(Mat::Shipout), "LEADER_SHIP"),
-    ("show", Prim::Unimpl(99), "XRAY"),
+    ("show", Prim::Show(0), "XRAY"),
     ("showbox", Prim::Show(1), "XRAY"),
     ("showboxbreadth", Prim::IntPar(IntPar::Showboxbreadth), "ASSIGN_INT"),
     ("showboxdepth", Prim::IntPar(IntPar::Showboxdepth), "ASSIGN_INT"),
     ("showlists", Prim::Show(3), "XRAY"),
-    ("showthe", Prim::Unimpl(101), "XRAY"),
+    ("showthe", Prim::Show(2), "XRAY"),
     ("skewchar", Prim::Mat(Mat::FontInt(1)), "ASSIGN_FONT_INT"),
     ("skip", Prim::Register(Reg::Skip), "REGISTER"),
     ("skipdef", Prim::Shorthand(Shorthand::Skip), "SHORTHAND_DEF"),

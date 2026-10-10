@@ -68,6 +68,7 @@ impl Exec<'_> {
         let loaded = Key::FontLoaded(f.key.clone());
         if self.get(&loaded) == Val::Int(0) {
             self.define(loaded, Val::Int(1), true);
+            self.define(Key::LastFont, Val::Name(f.key.clone()), true);
             for (k, &v) in f.params.iter().enumerate().skip(1) {
                 self.define(Key::FontDimen(f.key.clone(), k as u16), Val::Int(v), true);
             }
@@ -86,6 +87,7 @@ impl Exec<'_> {
         let mut name = String::new();
         let mut quoted = false;
         let mut first = true;
+        let was = std::mem::replace(&mut self.name_in_progress, true);
         while let Some((t, m)) = self.next_x_m(false) {
             let c = match m {
                 Meaning::Char(cat, c) if (1..=12).contains(&cat) && u32::from(c) <= 255 => c,
@@ -107,6 +109,7 @@ impl Exec<'_> {
             }
             name.push(c);
         }
+        self.name_in_progress = was;
         match name.strip_suffix(".tfm") {
             Some(n) => n.to_string(),
             None => name,
@@ -139,12 +142,33 @@ impl Exec<'_> {
     pub(super) fn find_font_dimen(&mut self) -> Option<Key> {
         let n = self.scan_int();
         let f = self.scan_font_ident();
-        if n <= 0 || n as usize > f.nparams() {
+        let fk = self.font_key(&f);
+        let have = self.font_params(&f);
+        if n > 0 && n as usize > have {
+            // (§580: the font loaded last gets more, zero)
+            let last = matches!(self.get(&Key::LastFont), Val::Name(l) if *l == *fk);
+            if last && n <= 0x7fff {
+                self.define(Key::FontDimen(fk.clone(), 0), Val::Int(n), true);
+                return Some(Key::FontDimen(fk, n as u16));
+            }
+        }
+        if n <= 0 || n as usize > have {
             let id = self.font_ident(&f);
-            self.err(format!("Font \\{id} has only {} fontdimen parameters", f.nparams()));
+            self.err(format!("Font \\{id} has only {have} fontdimen parameters"));
             return None;
         }
         Some(Key::FontDimen(f.key.clone(), n as u16))
+    }
+
+    /// The parameters font `f` has (`font_params`): its own, or more given
+    /// since by `\fontdimen` while it was the font loaded last
+    /// (`Key::FontDimen(f, 0)`).
+    pub(super) fn font_params(&mut self, f: &Font) -> usize {
+        let fk = self.font_key(f);
+        match self.get(&Key::FontDimen(fk, 0)) {
+            Val::Int(k) if k > 0 => k as usize,
+            _ => f.nparams(),
+        }
     }
 
     /// The name font `f` was last defined by (`font_id_text`).
