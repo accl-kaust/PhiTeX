@@ -2564,10 +2564,10 @@ CLI's cold build). `PHITEX_SCHED=FILE` writes the scheduler's events of
 every round (each run's setup, reading, install validation, lock wait and
 hold, nodes and outcome; parks; idle waits; picks with the pieces ready;
 the settled runs that change the sequence; every wait for the scheduler's
-lock); `perf-in/sched.py FILE` reports them per round.
+lock); `bench/flow-par/sched.py FILE` reports them per round.
 
 **Hardware first.** Measure pinned to physical cores
-(`perf-in/hw.sh`: `sched_setaffinity`, one hardware thread per core or
+(`bench/flow-par/hw.sh`: `sched_setaffinity`, one hardware thread per core or
 two), with N independent `-j 1` processes side by side as the control
 (job 7919, harrier): eight big2 processes read 772 → 790 ms each, so the
 hardware alone costs nothing up to eight cores; unpinned on a busy node
@@ -2602,7 +2602,7 @@ of the threads' time; `-j 2`, `-j 4` the same walls, waits 4.5 → 0.7%, 8
 ms), the inserts sorted by shard and the shard locks.
 
 **LaTeX documents: rounds, the body's chain, per-page reruns** (job
-7930, pinned, `Reads::Suspend`; `perf-in/biglatex.tex` is sections.tex's
+7930, pinned, `Reads::Suspend`; `biglatex.tex` (`bench/flow-par/biglatex.py 40`) is sections.tex's
 body 40 times, 130 pieces). Walls `-j 1` / `-j 8`: sections 694 / 728
 ms, titlepage 833 / 910, biglatex 5659 / 3992; six rounds each. A round's
 barrier is cheap (layout 0.1-5.7 ms); what it lets run is not. biglatex
@@ -2658,6 +2658,120 @@ shortens it (AGENTS_BRIEF §6.5: the build is as long as its true chain).
 Amdahl's serial fraction from that round alone is at least 0.88. The
 format is built once and saved (`--dump-fmt`); documents start from it,
 so this is left as is.
+
+**After (job 8081, flow 9ed3b38e: the edges out of the lock, P1 and
+`due_at`, the progress cap, the cause gate; same documents, reps and
+node class as job 7913; outputs the same at every `-j` for every
+document).** Median cold wall in s at `-j` 1 / 2 / 4 / 8 / 16 / 32 / 48,
+before (7913) → after:
+
+| document | before | after | best speedup before → after |
+|---|---|---|---|
+| big2 | 0.965 / 0.664 / 0.473 / 0.398 / 0.439 / 0.488 / 0.549 | 1.102 / 0.695 / 0.466 / 0.347 / 0.313 / 0.341 / 0.373 | 2.42x at 8 → 3.52x at 16 |
+| sections | 0.982 / … / 1.014 (8) / … / 1.047 | 0.519 / 0.511 / 0.514 / 0.533 / 0.536 / 0.550 / 0.570 | 1.00 → 1.02 |
+| math | 0.936 / … / 0.985 (8) / … / 0.990 | 0.456 / 0.498 / 0.500 / 0.497 / 0.506 / 0.513 / 0.540 | 1.02 → 1.00 |
+| tables | 1.848 / … / 2.166 (8) / … / 2.325 | 0.481 / 0.493 / 0.526 / 0.517 / 0.521 / 0.557 / 0.542 | 1.00 → 1.00 |
+| figures | 2.635 / … / 3.029 (8) / … / 3.474 | 0.505 / 0.541 / 0.557 / 0.579 / 0.584 / 0.614 / 0.641 | 1.00 → 1.00 |
+| titlepage | 1.142 / … / 1.247 (8) / … / 1.287 | 0.665 / 0.680 / 0.699 / 0.698 / 0.749 / 0.817 / 0.857 | 1.00 → 1.00 |
+| packages | 0.970 / … / 1.022 (8) / … / 1.056 | 0.524 / 0.557 / 0.556 / 0.570 / 0.583 / 0.591 / 0.592 | 1.00 → 1.00 |
+| latex.ltx | ≈ 28.8 at every `-j` | 24.6 / 24.6 / 24.9 / 25.2 / 25.3 / 25.4 / 26.8 | 1.00 → 1.00 |
+
+big2 at `-j 32` / `48` no longer stalls ("Done with dirty", two of
+three runs before) and its DVI is the same. The LaTeX documents' cold
+builds are 1.9-5.2x faster at every `-j` (P1: no run on a layout about
+to change) but still do not scale: under `Suspend` the preamble and the
+body are chains (hindsight T1/T∞ 1.0-1.09), and `-j 48` costs them
+10-29% over `-j 1` (parks, abandoned runs). big2 (2401 independent-ish
+pieces) is the case the scheduler limits, now from `-j 16`: reading
+summed over the threads grows 797 → 1184 → 3524 ms at 1 / 16 / 48 and
+reruns 0 → 54 → 902 (speculative entries confirmed late), not the lock
+(held 6 → 40 ms in all).
+
+**The pgf manual's rounds** (job 8082: `phitex --compat=pdflatex`, the
+format made first, `PHITEX_SCHED`; it stops at the join of piece 5445,
+as expected until A's fix). `-threads=1`: 283 rounds in 90.1 s of round
+wall (108 s in all), 1081 settled file reads ending rounds, setups
+(cutting, layout) 14.2 s = 16%, the median round 12.4 ms. `-threads=6`:
+277 rounds, 89.7 s, setups 7.7 s. Two rounds hold 64 s: round 27, one
+run of piece 456 of 53.9 s (1009 nodes, ending in a join), and round
+207, piece 4622's run of 9.6 s (378k commands; its slowest nodes an
+`\ignorespaces` reading eight fonts, 26-30 ms each, for P). Then 20
+rounds of 0.75-1.4 s (18.4 s in all), most holding one run of 0.7-0.87
+s. Where piece 456's 53.9 s go (job 8089, `bench/flow-par/pgfstack.sh`:
+gdb stacks every 4 s): all 13 samples in the window are in one
+definition's body being expanded (`Exec::def` → `def_in` →
+`expand_text`: an `\edef`/`\xdef`), in `\csname`, `\expandafter`,
+macro calls building their arguments, and 3 of 13 in `Exec::outer_of` /
+`find_name` searching the node's own definitions linearly
+(`defs.iter().rposition`), which is quadratic if the expansion defines
+many names in that node (each `\csname` of an unknown name defines it
+`\relax`). Not confirmed: the node's sizes need a build with full debug
+information (`DEBUG=2 SDUMP=1`, job 8095 cancelled under the hold). The
+slow-node notes missed it: this node is the run's last, it reads past
+the piece's end (the join), and the notes are taken in
+`PieceEnv::check`, which a crossing node never reaches. For P (the
+search) and A (the join).
+
+**Read-ahead (AGENTS_BRIEF §6.2), proposal; nothing implemented.** Today
+a file is placed when a run that read it settles: one round per file
+discovered (rounds end at once since P1, so a round costs its setup and
+the pieces' re-entry, not wasted runs). Proposal: the cutter, which
+does not run TeX, scans each text it cuts at plain catcodes for the
+literal kernel forms `\documentclass`, `\LoadClass`, `\usepackage`,
+`\RequirePackage` (with or without options, comma lists), `\input{f}`,
+`\input f` and `\include{f}`; each names a file (`.cls`, `.sty`, `.tex`
+as LaTeX adds them) resolved by the build's `Given` (the input
+directories) to the `Key::File` name a run reads. The hinted files are
+read and cut at once, in parallel, and scanned in turn (a package's
+`\RequirePackage`s), deduplicated in document order (LaTeX loads a
+package once). The first layout then places each hinted file's pieces
+where a discovered file would go (`Build::place_list`: after the piece
+cut at the end of the hint's line, the file's first piece entered on the
+assumed file start, `entry_holds` as now), and that piece's `Expect`
+says it reads that file there. A run that reads it there settles with
+`got == expect`: no round. A wrong hint (a conditional load, an
+`\IfFileExists` false, an option's file, a package loaded already, a
+file read inline by `Build::inline`'s rule) is a mismatch exactly like
+today's discovery: one round that corrects the layout; a refuted hint is
+remembered for the update (as `known_join` is) and never placed again,
+so it cannot oscillate. Results cannot change: hints are only
+expectations, and every placement is validated as today. Edits keep
+their last layout, so this is for cold builds only.
+What it buys, bounded by measurement: the rounds' setups and the
+pieces' re-entry for every correctly hinted file. pgf manual: at most
+the 14.2 s of setups (16%) and most of 283 barriers; the LaTeX corpus
+(in process, `-j 1`): setups 6-12 ms of 200-380 ms for the six
+documents (3-5%), 40-87 ms of 300-880 ms (10-13%) for packages, ams,
+gfx, layout, rules (12-19 rounds). What it does not buy: overlap under
+`Suspend`. A hinted file's pieces park on the definitions of the
+pieces before them (the preamble is a chain), so the LaTeX documents
+stay flat in `-j`; overlap needs `Speculate` with node-level reruns,
+and latex.ltx stays a true chain. Cost: a literal scan per text in the
+cutter (no TeX), a hint table per update, and `place_list` called at
+the first layout as well as at discovery. Order: worth doing after A's
+join fix for the pgf manual (where setups are 16% and the layout is
+O(files × pieces)); for the small LaTeX documents its 3-13% is smaller
+than what `Speculate` could give.
+
+**The harness, `bench/flow-par/`** (each script's header says its
+arguments; run on accl through `scripts/accl/accl` with the inputs
+staged by hand: big2.tex, tikz.tex and its .dirs, the pgf manual's
+sources in `pgfman-src/`; never committed). Curves: `scale.sh` (the
+scaling job: big2, the six LaTeX documents, latex.ltx at `-j`
+1..48, `REPS`, wall, RSS, the outputs' md5 across `-j`; then
+`phitex-flow --scaling`), `scale-table.py` (its table), `meas.py`
+(wall and peak RSS of one command), `rundoc.sh`, `dirsof.sh`, `fix.sh`
+(running a LaTeX document on the saved format, its directories, the TeX
+Live paths). Scheduler: `sched.sh` + `sched.py` (`PHITEX_SCHED` per
+round), `hindsight.py` (critical path by content from
+`PHITEX_SCHED_DEPS`), `biglatex.py`. Hardware and A/B: `hw.sh`,
+`cpus.py` (pinning, side-by-side control), `abpin.sh`, `abdocs.sh`,
+`docsab.sh` (revisions side by side: big2 pinned, the LaTeX documents,
+latex_docs tests one at a time). Acceptance: `accept.sh` (clippy, the
+suite, latex_docs one thread), `ldocs.sh`, `tripab.sh`, `tripdiff.sh`
+(TRIP per revision, its DVI and log compared). pgf: `pgfrounds.sh`
+(rounds and setups, format made first, `CAPS`, `THREADS`),
+`pgfstack.sh` + `sdump.py` (gdb stack samples of a long run).
 
 ## Found by the CLI (agent W)
 
