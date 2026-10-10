@@ -3247,10 +3247,11 @@ opentype tree here, so `cjk.tex` sets its CJK text in Latin Modern
   with no record; e-TeX's set glue a kern). `tests/synctex.rs`'s
   `synctex_against_xetex`: forward 98.5%, inverse 98.6%, positions 100%
   (job 8065).
-- graphicx's `dvips` driver under xelatex (`gfx`): the XDV is xetex's,
-  but partex-xdvipdfmx has no `spc_dvips.c` (`PSfile=`) nor `mpost.c`
-  (`ps:` code), so its EPS picture and PostScript transforms are missing
-  from the PDF.
+- graphicx's `dvips` driver under xelatex (`gfx`): xelatex's PDF (job
+  8077). partex-xdvipdfmx ports `spc_dvips.c` (`PSfile=` EPS through the
+  host's distiller, `ps:`, `" `) and `mpost.c`'s inline PostScript
+  interpreter; not PSTricks's `PST:`/`pst:` (ghostscript as a calculator)
+  nor MetaPost files and fonts.
 - `pics` (LaTeX, graphicx's xetex.def): page 2 of `xpic-three.pdf` makes a
   line of about 397pt where xelatex's is about 633pt, so the document
   breaks into one page, not two (the IniTeX `\XeTeXpdffile` of the same
