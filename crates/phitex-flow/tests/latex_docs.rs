@@ -3,24 +3,24 @@
 //! `.aux` present: references print `??` on both sides, so the cross-run
 //! fixpoint is not needed.
 //!
-//! Our side is one build, a session of two jobs (`graph::jobs`): the
-//! format's (`latex.ini` as `fmtutil` runs it: `pdftexconfig`,
-//! `\pdfoutput=0`, `latex.ltx`, `\dump`) and the document's (`&latex
-//! NAME`), with the directories the oracle read its files from (`latex
+//! Our side is a build on the saved format (`Build::set_format`): the
+//! definitions `latex.ini`'s job (as `fmtutil` runs it: `pdftexconfig`,
+//! `\pdfoutput=0`, `latex.ltx`, `\dump`) reaches at its `\dump`, made once
+//! per test run (`Build::format`), given to the document's build as
+//! definitions before its first piece; the document's job is `&latex
+//! NAME`, with the directories the oracle read its files from (`latex
 //! -recorder`) and the `texsys.aux` the format's job writes and reads back
 //! (`tests/latex/`, CORE.md). Compared: the DVI file, its preamble's dated
 //! comment masked, and the files the document's job writes (its `.aux`,
-//! `.toc`); the log is diagnostics only.
+//! `.toc`); the log is diagnostics only. `format_is_the_prelude` holds the
+//! format to the session it stands for (`latex.ini`'s job, then the
+//! document's, in one build), byte for byte, log included.
 //!
 //! The documents are in `tests/latex/docs/`, each with what `latex` made:
 //! `NAME.dvi`, `NAME.writes` (each file written: a line `=== FILE N`, then
 //! its N characters) and `NAME.dirs` (`ini PATH`: `latex.ini`; `input
 //! DIR`, `font DIR`). Where `latex` runs they are checked against a fresh
 //! run (`oracles_are_latex`); `PHITEX_FLOW_BLESS=1` records them anew.
-//!
-//! A build holds about 4 GB (`latex.ltx`'s 3.1M nodes): each schedule runs
-//! in a process of its own (this test, run again with
-//! `PHITEX_FLOW_DOC_RUN`), one document at a time.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -30,39 +30,24 @@ use std::sync::{Arc, Mutex};
 use phitex_flow::build::MAIN_MEMORY;
 use phitex_flow::graph::jobs;
 use phitex_flow::print::Limits;
-use phitex_flow::{Build, Font, Options, Order, Reads};
+use phitex_flow::{Build, Font, Options, Order, Output, Reads};
 
 /// The documents.
 const DOCS: [&str; 6] = ["sections", "math", "tables", "figures", "titlepage", "packages"];
 
-/// The schedules: one thread, eight, and eight speculating in a random
-/// order.
-const RUNS: [Options; 3] = [
-    Options {
-        threads: 1,
-        reads: Reads::Suspend,
-        order: Order::Priority,
-        dump: false,
-        etex: true,
-        main_memory: MAIN_MEMORY,
-    },
-    Options {
-        threads: 8,
-        reads: Reads::Suspend,
-        order: Order::Priority,
-        dump: false,
-        etex: true,
-        main_memory: MAIN_MEMORY,
-    },
-    Options {
-        threads: 8,
-        reads: Reads::Speculate,
-        order: Order::Random(7),
-        dump: false,
-        etex: true,
-        main_memory: MAIN_MEMORY,
-    },
+/// The schedules: one thread; eight suspending, in priority order and in
+/// a random one; eight speculating, in priority order and in a random one.
+const RUNS: [Options; 5] = [
+    run(1, Reads::Suspend, Order::Priority),
+    run(8, Reads::Suspend, Order::Priority),
+    run(8, Reads::Speculate, Order::Priority),
+    run(8, Reads::Suspend, Order::Random(1)),
+    run(8, Reads::Speculate, Order::Random(7)),
 ];
+
+const fn run(threads: usize, reads: Reads, order: Order) -> Options {
+    Options { threads, reads, order, dump: false, etex: true, main_memory: MAIN_MEMORY }
+}
 
 fn latex_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/latex")
@@ -216,65 +201,135 @@ fn masked(dvi: &[u8]) -> Vec<u8> {
     d
 }
 
-/// The document on the graph at schedule `o`: its DVI file and written
-/// files are `latex`'s.
-fn doc_at(name: &str, o: Options) {
+/// The directories a document's oracle read from (its `NAME.dirs`, then
+/// the format's, `tests/latex/dirs.txt`, then the TeX Live tree's fonts),
+/// and `latex.ini`.
+fn dirs_of(name: &str) -> (Vec<PathBuf>, Vec<PathBuf>, PathBuf) {
     let want = recorded(name);
     let mut ini = None;
     let (mut inputs, mut fonts) = (vec![latex_dir()], Vec::new());
     for l in &want.dirs {
         match l.split_once(' ') {
-            Some(("ini", p)) => ini = Some(p.to_string()),
+            Some(("ini", p)) => ini = Some(PathBuf::from(p)),
             Some(("input", d)) => inputs.push(PathBuf::from(d)),
             Some(("font", d)) => fonts.push(PathBuf::from(d)),
             _ => {}
         }
     }
-    // (the format's directories: those `latex.ltx` was read from)
     for d in std::fs::read_to_string(latex_dir().join("dirs.txt")).expect("tests/latex/dirs.txt").lines() {
         let d = PathBuf::from(d);
         if !inputs.contains(&d) {
             inputs.push(d);
         }
     }
-    let ini = chars(&std::fs::read(ini.expect("ini in NAME.dirs")).expect("latex.ini"));
-    let doc = chars(&std::fs::read(docs_dir().join(format!("{name}.tex"))).expect("NAME.tex"));
-    // (and the TeX Live tree's, for the fonts the format loads)
     fonts.extend(phitex_flow::tfm::default_dirs());
+    (inputs, fonts, ini.expect("ini in NAME.dirs"))
+}
+
+/// A build reading what document `name`'s oracle read, as job `job`.
+fn build_for(name: &str, job: &str) -> Build {
+    let (inputs, fonts, _) = dirs_of(name);
     let mut b = Build::new(font());
     b.set_font_dirs(fonts);
     b.set_input_dirs(inputs);
-    b.set_jobname(name);
-    b.set_terminal(&["latex.ini", &format!("&latex {name}")]);
+    b.set_jobname(job);
     b.set_limits(Limits::TEX_LIVE);
+    b
+}
+
+fn doc_text(name: &str) -> String {
+    chars(&std::fs::read(docs_dir().join(format!("{name}.tex"))).expect("NAME.tex"))
+}
+
+/// One heavy build at a time (a build of `latex.ltx` holds about 4 GB).
+static ONE: Mutex<()> = Mutex::new(());
+
+/// The saved format, made once: `latex.ini`'s job (`fmtutil`'s
+/// `pdftexconfig`, `\pdfoutput=0`, `latex.ltx`, `\dump`) as job `latex`,
+/// its definitions at the `\dump` (`Build::format`).
+static FORMAT: Mutex<Option<Arc<Vec<u8>>>> = Mutex::new(None);
+
+fn format_file() -> Arc<Vec<u8>> {
+    let mut f = FORMAT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(b) = &*f {
+        return b.clone();
+    }
+    let _one = ONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (_, _, ini) = dirs_of("sections");
+    let ini = chars(&std::fs::read(ini).expect("latex.ini"));
+    let mut b = build_for("sections", "latex");
+    b.set_terminal(&["latex.ini"]);
     let t0 = std::time::Instant::now();
-    let out = b.update(&jobs(&[&ini, &doc]), o);
-    eprintln!("{name} ({o:?}): {:.1} s", t0.elapsed().as_secs_f64());
+    let out = b.update(&jobs(&[&ini]), RUNS[0]);
+    assert!(out.errors.is_empty(), "latex.ini's job: {:?}", &out.errors[..out.errors.len().min(20)]);
+    let t1 = std::time::Instant::now();
+    let bytes = Arc::new(b.format().expect("the format"));
+    eprintln!(
+        "latex.fmt: built in {:.1} s, saved in {:.0} ms, {} bytes",
+        (t1 - t0).as_secs_f64(),
+        t1.elapsed().as_secs_f64() * 1e3,
+        bytes.len()
+    );
+    let d = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latex-docs");
+    let _ = std::fs::create_dir_all(&d);
+    let _ = std::fs::write(d.join("latex.fmt"), &*bytes);
+    *f = Some(bytes.clone());
+    bytes
+}
+
+/// Document `name` on the saved format at schedule `o`, as job `job`
+/// (the terminal's line `&latex NAME`).
+fn on_format(name: &str, job: &str, text: &str, o: Options) -> (Build, Output) {
+    let fmt = format_file();
+    let mut b = build_for(name, job);
+    let t0 = std::time::Instant::now();
+    b.set_format(&fmt).expect("the format reads");
+    let t1 = std::time::Instant::now();
+    b.set_terminal(&[&format!("&latex {name}")]);
+    let out = b.update(&jobs(&[text]), o);
+    eprintln!(
+        "{name} ({o:?}): format read in {:.0} ms, cold {:.0} ms",
+        (t1 - t0).as_secs_f64() * 1e3,
+        t1.elapsed().as_secs_f64() * 1e3
+    );
+    (b, out)
+}
+
+/// The errors but the core gap's (CORE.md "LaTeX documents": `\enddocument`
+/// reads back the `.aux` file the job wrote and closed,
+/// `\@@input\jobname.aux`; a file is read from the input directories only,
+/// so it is not found and, in batch mode, the terminal TeX asks for
+/// another name ends the job: after the last page is shipped and the
+/// `.aux` file written), and whether the gap was met.
+fn errors_but_gap<'a>(out: &'a Output, job: &str) -> (Vec<&'a String>, bool) {
+    let aux = format!("I can't find file `{job}.aux'");
+    let gap = out.errors.iter().any(|e| e.ends_with(&aux));
+    let errors = out
+        .errors
+        .iter()
+        .filter(|e| !(gap && (e.ends_with(&aux) || e.ends_with("End of file on the terminal!"))))
+        .collect();
+    (errors, gap)
+}
+
+/// The document on the saved format at schedule `o`: its DVI file and
+/// written files are `latex`'s.
+fn doc_at(name: &str, o: Options) {
+    let want = recorded(name);
+    let (_, out) = on_format(name, name, &doc_text(name), o);
     let d = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latex-docs");
     let _ = std::fs::create_dir_all(&d);
     let _ = std::fs::write(d.join(format!("{name}.dvi")), &out.dvi);
     for (i, l) in out.job_logs(&Limits::TEX_LIVE, &format!("{name}.dvi")).iter().enumerate() {
         let _ = std::fs::write(d.join(format!("{name}.{i}.log")), &l.log);
     }
-    // (a core gap, CORE.md "LaTeX documents": `\enddocument` reads back the
-    // `.aux` file the job wrote and closed, `\@@input\jobname.aux`; a file
-    // is read from the input directories only, so it is not found and,
-    // in batch mode, the terminal TeX asks for another name ends the job:
-    // after the last page is shipped and the `.aux` file written)
-    let aux = format!("I can't find file `{name}.aux'");
-    let gap = out.errors.iter().any(|e| e.ends_with(&aux));
-    let errors: Vec<&String> = out
-        .errors
-        .iter()
-        .filter(|e| !(gap && (e.ends_with(&aux) || e.ends_with("End of file on the terminal!"))))
-        .collect();
+    let (errors, gap) = errors_but_gap(&out, name);
     assert!(errors.is_empty(), "{name} ({o:?}): errors on the graph: {:?}", &errors[..errors.len().min(20)]);
     // (the same gap: the `.toc` lines are written while the `.aux` file is
     // read back, `\@writefile`; without it the `.toc` stays empty)
     let writes: Vec<(String, String)> = out
         .writes
         .iter()
-        .filter(|(n, _)| n != "texsys.aux")
         .map(|(n, t)| match want.writes.iter().find(|(m, _)| m == n) {
             Some((_, w)) if gap && Path::new(n).extension().is_some_and(|e| e == "toc") && t.is_empty() => {
                 (n.clone(), w.clone())
@@ -292,24 +347,93 @@ fn doc_at(name: &str, o: Options) {
     );
 }
 
-/// One document at a time (each schedule a process of its own holds a
-/// build of the format).
-static ONE: Mutex<()> = Mutex::new(());
-
 fn doc(name: &str) {
-    if let Ok(k) = std::env::var("PHITEX_FLOW_DOC_RUN") {
-        doc_at(name, RUNS[k.parse::<usize>().expect("a schedule")]);
-        return;
+    for o in RUNS {
+        doc_at(name, o);
     }
-    let _one = ONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    for (k, o) in RUNS.iter().enumerate() {
-        let st = Command::new(std::env::current_exe().expect("the test binary"))
-            .args(["--exact", &format!("doc_{name}"), "--nocapture", "--test-threads=1"])
-            .env("PHITEX_FLOW_DOC_RUN", k.to_string())
-            .status()
-            .expect("the test binary runs");
-        assert!(st.success(), "{name} ({o:?}) failed on the graph (its message above)");
+}
+
+/// A document on the saved format is the same document after
+/// `latex.ini`'s job in one session (the format's source run as prelude
+/// text): the same DVI file, written files and log, byte for byte, at
+/// every schedule (the session's at one thread: its schedules are
+/// `latex_format`'s and the session tests' business).
+#[test]
+fn format_is_the_prelude() {
+    let name = "sections";
+    let text = doc_text(name);
+    let fmt = format_file();
+    let session = {
+        let _one = ONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_, _, ini) = dirs_of(name);
+        let ini = chars(&std::fs::read(ini).expect("latex.ini"));
+        let mut b = build_for(name, "latex");
+        b.set_terminal(&["latex.ini", &format!("&latex {name}")]);
+        b.update(&jobs(&[&ini, &text]), RUNS[0])
+    };
+    assert!(!fmt.is_empty());
+    let logs = session.job_logs(&Limits::TEX_LIVE, "latex.dvi");
+    assert_eq!(logs.len(), 2, "two jobs");
+    let writes: Vec<(String, String)> = session.writes.iter().filter(|(n, _)| n != "texsys.aux").cloned().collect();
+    for o in RUNS {
+        let (_, out) = on_format(name, "latex", &text, o);
+        assert!(out.dvi == session.dvi, "{name} ({o:?}): the DVI file is not the session's");
+        assert_eq!(out.writes, writes, "{name} ({o:?}): the written files are not the session's");
+        let log = out.job_logs(&Limits::TEX_LIVE, "latex.dvi");
+        assert_eq!(log.len(), 1, "one job");
+        assert_eq!(log[0].log, logs[1].log, "{name} ({o:?}): the log is not the session's second job's");
+        // (an error names its piece by position: the session's has the
+        // format's job's pieces before it)
+        let bare = |es: &[String]| -> Vec<String> {
+            es.iter()
+                .map(|e| {
+                    e.split_once(": ")
+                        .filter(|(p, _)| p.starts_with("piece "))
+                        .map_or(e.clone(), |(_, m)| m.to_string())
+                })
+                .collect()
+        };
+        assert_eq!(bare(&out.errors), bare(&session.errors), "{name} ({o:?}): the errors are not the session's");
     }
+}
+
+/// An edit on a build that started from the saved format is the same as
+/// a cold build of the edited text on it (DVI, written files, log), at
+/// every schedule.
+#[test]
+fn format_edit_is_cold() {
+    let name = "sections";
+    let text = doc_text(name);
+    let edited = text.replacen("bold words", "strong words", 1).replacen(
+        "\\subsection{Lists}",
+        "A paragraph put in, long enough to take a line of its own and a little more than that.\n\n\\subsection{Lists}",
+        1,
+    );
+    assert_ne!(edited, text);
+    let fmt = format_file();
+    for o in RUNS {
+        let (mut b, _) = on_format(name, name, &text, o);
+        let e = b.update(&jobs(&[&edited]), o);
+        let mut c = build_for(name, name);
+        c.set_format(&fmt).expect("the format reads");
+        c.set_terminal(&[&format!("&latex {name}")]);
+        let cold = c.update(&jobs(&[&edited]), o);
+        assert!(e.dvi == cold.dvi, "{name} ({o:?}): the edit's DVI file is not the cold build's");
+        assert_eq!(e.writes, cold.writes, "{name} ({o:?}): the edit's written files are not the cold build's");
+        assert_eq!(e.log, cold.log, "{name} ({o:?}): the edit's log is not the cold build's");
+        assert_eq!(e.errors, cold.errors, "{name} ({o:?}): the edit's errors are not the cold build's");
+    }
+}
+
+/// The format's file reads back as the same definitions: written again,
+/// the same bytes.
+#[test]
+fn format_reads_back() {
+    let fmt = format_file();
+    let cs = phitex_flow::build::CsTable::new();
+    let f = phitex_flow::format::decode(&fmt, &cs).expect("the format reads");
+    let again = phitex_flow::format::encode(&f.defs, &f.fonts, &cs).expect("the format writes");
+    assert!(again == *fmt, "the format written again differs ({} bytes, {} before)", again.len(), fmt.len());
 }
 
 #[test]

@@ -24,7 +24,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
-         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--edit OLD=>NEW] [--repeat N] \
+         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--fmt FILE] [--dump-fmt FILE] [--edit OLD=>NEW] [--repeat N] \
          [--check] [--log] [--main-memory WORDS]"
     );
     ExitCode::from(2)
@@ -335,6 +335,8 @@ fn main() -> ExitCode {
     let mut before: Vec<String> = Vec::new();
     let mut terminal: Vec<String> = Vec::new();
     let mut font_dirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut fmt: Option<String> = None;
+    let mut dump_fmt: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -385,6 +387,14 @@ fn main() -> ExitCode {
                 Some(d) => font_dirs.push(d.into()),
                 None => return usage(),
             },
+            "--fmt" => match val() {
+                Some(f) => fmt = Some(f),
+                None => return usage(),
+            },
+            "--dump-fmt" => match val() {
+                Some(f) => dump_fmt = Some(f),
+                None => return usage(),
+            },
             "--repeat" => match val().and_then(|v| v.parse().ok()) {
                 Some(n) => repeat = n,
                 None => return usage(),
@@ -432,7 +442,8 @@ fn main() -> ExitCode {
         }
     };
     // (files read as bytes, a character each; with `--before`, a session:
-    // those files' jobs, then this one's)
+    // those files' jobs, then this one's; with `--terminal`, a job reading
+    // the terminal's first line)
     let read = |f: &str| std::fs::read(f).map(|b| b.iter().map(|&c| char::from(c)).collect::<String>());
     let src = match read(&file) {
         Ok(s) => s,
@@ -441,7 +452,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let src = if before.is_empty() {
+    let src = if before.is_empty() && terminal.is_empty() {
         src
     } else {
         let mut texts = Vec::new();
@@ -477,8 +488,39 @@ fn main() -> ExitCode {
         font_dirs.extend(phitex_flow::tfm::default_dirs());
         b.set_font_dirs(font_dirs.clone());
     }
+    // (the format the build starts from: its definitions before the first
+    // piece)
+    if let Some(f) = &fmt {
+        let t = std::time::Instant::now();
+        let bytes = match std::fs::read(f) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("{f}: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        if let Err(e) = b.set_format(&bytes) {
+            eprintln!("{f}: {e}");
+            return ExitCode::FAILURE;
+        }
+        println!("format: {f} ({} bytes) read in {:.2} ms", bytes.len(), t.elapsed().as_secs_f64() * 1e3);
+    }
     let cold = b.update(&src, opts);
     report("cold", &cold);
+    if let Some(f) = &dump_fmt {
+        let t = std::time::Instant::now();
+        match b.format().map(|bytes| std::fs::write(f, &bytes).map(|()| bytes.len())) {
+            Ok(Ok(n)) => println!("format: wrote {f} ({n} bytes) in {:.2} ms", t.elapsed().as_secs_f64() * 1e3),
+            Ok(Err(e)) => {
+                eprintln!("{f}: {e}");
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                eprintln!("--dump-fmt: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     if dump {
         print!("{}", cold.dump);
     }

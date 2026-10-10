@@ -1600,7 +1600,8 @@ All six pass at the three schedules (the `.aux` read-back below aside).
 Cold, the format included: about 46 s each at `-j 1` and at `-j 8` (the
 format's first piece is 99% of the work); `latex` takes 0.19 s with its
 dumped format, 10.8 s to make the format (`pdftex -ini -etex latex.ini`)
-on the same machine.
+on the same machine. Now the documents run on the saved format, at five
+schedules (next section): 0.7–2 s each.
 
 **Language gaps the documents found (fixed).**
 - *`\lastskip` at a piece's start* (`\addvspace` after a list, a
@@ -1644,6 +1645,77 @@ on the same machine.
    lines' count (the same deferral as `\prevdepth`; no document reads it).
 3. *`Key::MainTail` after a removal* in a node of its own is none, not the
    item before (Conflict 13).
+
+## The format: definitions before the first piece (agent B)
+
+AGENTS_BRIEF §6.1: "known at t=0: the format, a set of definitions with
+known versions". `Build::format` makes it after a build of the format's
+job (`latex.ini`: pdftexconfig, `\pdfoutput=0`, `latex.ltx`, `\dump`):
+each name's definition reaching the end of the source (the pieces'
+exports in order), of the names TeX's `store_fmt_file` keeps
+(`format::saved`): control sequences and active characters with their
+meanings, codes, parameters, registers (boxes included), fonts and their
+parameters, patterns and exceptions, the interaction mode, the e-TeX mode,
+`format_ident`. Left out, as a run's and not a format's: files and
+streams, the job's name, the page builder's state and marks, `mag_set`,
+whether the job ended, the main vertical list. Also kept: the fonts'
+numbering (the order the job loaded them, `Run::fonts` piece by piece: a
+DVI file's font numbers; the build's own fonts are numbered after them).
+
+`format::encode` writes it as our own file (`src/format.rs`, no crate):
+a magic line, the control sequences' names (tokens and keys refer to
+them by number in the file; `decode` gives each its number in the reading
+build's `CsTable`), the fonts (the TFM bytes and the size: loaded again as
+`\font` loads them), the numbering, the definitions. The order is the
+names' own, so the same definitions give the same bytes
+(`format_reads_back`).
+
+`Build::set_format` gives a build the format: the names index answers a
+read of a name no piece defined before (the place before piece 0) with the
+format's definition, as it answers IniTeX's initial values
+(`Names::initial`; the by-name table lives in the index, `FormatDefs`).
+No piece starts with anything copied in, and a value carries no place: a
+definition from the format equals the same definition made by running
+`latex.ltx`. CLI: `--dump-fmt FILE` after a build (`phitex-flow latex.ini
+--etex --jobname latex --terminal latex.ini ... --dump-fmt latex.fmt`),
+`--fmt FILE` before one (with `--terminal '&latex NAME'`; a `--terminal`
+line makes the text a job, `graph::jobs`).
+
+Held by `tests/latex_docs.rs`: the six documents on the format at five
+schedules are `latex`'s (DVI, `.aux`); `format_is_the_prelude`: a document
+on the format is byte for byte the session `latex.ini`'s job + the
+document (DVI, written files, the document job's log, errors) at five
+schedules; `format_edit_is_cold`: an edit (a word, an inserted paragraph)
+on a format-based build equals its cold build.
+
+Numbers (release, this machine, the CLI): the format is 4.13 MB
+(pdfTeX's `latex.fmt` 2.33 MB), made in 0.2 s after the 45 s build, read
+in about 55 ms. The documents cold on it, `-j 1` / `-j 8`: sections 0.71
+/ 0.74 s, math 0.97 / 1.00, tables 1.06 / 1.17, figures 0.98 / 1.01,
+titlepage 2.04 / 1.97, packages 0.73 / 0.80 (`latex`: 0.19 s each, its
+format read included). What remains is the documents' own work: about
+11 µs a command (the expansion's cost, above) and the reruns below; one
+to three pieces each, so eight threads have little to share.
+
+Gaps:
+- *The command line's `-interaction` at a job's start.* web2c sets
+  `interaction` from `-interaction` after loading a format (tex.ch,
+  `interaction_option`); `latex.ltx` dumps `\errorstopmode`, so `latex
+  -interaction=batchmode NAME` runs in batch mode. The session (and so
+  the format, which keeps the dumped mode to equal it) runs the
+  document's job in error-stop mode: the selector is `term_and_log`, the
+  log's layout differs from `latex`'s where a line is printed to the
+  terminal too. Proposal (session, F): a given interaction applies at
+  each job's start when the session gives one.
+- *Reruns from definitions between a piece's nodes (core, A).* On the
+  format a document's own cost shows: `titlepage` (one piece, five
+  pages) runs its 20k commands ten times (204k), `sections` twice. Each
+  page the output routine fires defines names between the piece's nodes
+  (`\vsize`, `\count0`, LaTeX's `\@colht`…); every node of the piece
+  reading such a name from before the piece is dirty, also the ones
+  before the definition's place, so the piece runs again from its first
+  reader, once per round. The session had the same reruns (hidden in the
+  format's 45 s).
 
 ## The inventory
 
