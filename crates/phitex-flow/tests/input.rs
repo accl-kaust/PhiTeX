@@ -323,7 +323,8 @@ fn a_file_read_at_twenty_places_needs_no_fallback_round() {
     assert!(base.errors.is_empty(), "{:?}", base.errors);
     assert!(!base.stats.forced_last, "the last round was the fallback: {} rounds", base.stats.rounds);
     let log = phitex_flow::print::log("", &base.log, "");
-    assert_eq!(log.matches("(./f.tex").count(), 20, "{log}");
+    // (the log's lines are broken at 79 characters)
+    assert_eq!(log.replace('\n', "").matches("(./f.tex").count(), 20, "{log}");
     for threads in [2, 8] {
         let o = build_with(&files).update(&main, Options { threads, ..Options::default() });
         assert!(o.errors.is_empty(), "{threads}: {:?}", o.errors);

@@ -1085,6 +1085,19 @@ impl Names {
         }))
     }
 
+    /// Whether file `name` is read as the directories or the build give it:
+    /// no fold of this build has a value for it (a file the run writes and
+    /// reads back) and no earlier round's probes guessed its bytes.
+    fn file_as_given(&self, name: &str) -> bool {
+        !self.file_guess.read().expect("file guesses").contains_key(name)
+            && !self
+                .fold_vals
+                .read()
+                .expect("fold values")
+                .keys()
+                .any(|(_, _, k)| matches!(k, Key::File(n) if **n == *name))
+    }
+
     /// What a read of `key` at `at` is validated against, and the
     /// definition the names index has there: a fold's read (`Key::Page`,
     /// `Key::File`) only ever against the fold's value at that node,
@@ -3315,9 +3328,6 @@ fn ready_count(g: &State, sh: &Shared) -> u64 {
     g.unstarted.iter().filter(|&&k| entry_ready(g, k, speculate && !g.p[k].suspend)).take(255).count() as u64
 }
 
-/// Appends a round's events to the file `PHITEX_SCHED` names, as text: a
-/// line for the round, one per piece (its runs, the nodes and text of its
-/// last run) and one per event (`Ev`'s fields in order).
 /// Appends the last round's dependencies to the file `PHITEX_SCHED`
 /// names (measuring: the critical path with hindsight): per piece a line
 /// `G k entry-deps ran nodes ns ran` (the pieces its entry state came
@@ -3335,8 +3345,8 @@ fn write_deps(
     times: &FxMap<PieceId, (u64, u64)>,
     cmds: &FxMap<PieceId, Vec<String>>,
 ) {
-    let cs = &names.cs;
     use std::io::Write as _;
+    let cs = &names.cs;
     let Some(path) = std::env::var_os("PHITEX_SCHED") else { return };
     let mut s = String::new();
     for (k, ps) in st.p.iter().enumerate() {
@@ -3398,6 +3408,9 @@ fn write_deps(
     }
 }
 
+/// Appends a round's events to the file `PHITEX_SCHED` names, as text: a
+/// line for the round, one per piece (its runs, the nodes and text of its
+/// last run) and one per event (`Ev`'s fields in order).
 fn write_sched(ev: &[Ev], st: &State, threads: usize, build_no: u64, wall: Duration, waits: (u64, u64)) {
     use std::io::Write as _;
     let Some(path) = std::env::var_os("PHITEX_SCHED") else { return };
@@ -4305,7 +4318,12 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
             // the pieces after this one — TRIP's `\input tripos` reads a file
             // the run itself writes at a shipout; ended at once, every round
             // repeated the same change and never laid it out)
-            if !sh.at_once {
+            // (and only when the change's cause is known now: a file read as
+            // it is in the directories or given, not one this build writes —
+            // a fold value or a guess from an earlier round's probes says
+            // it does —, or an `\endinput`, a stop, a cut)
+            let cause_known = g.p[k].got.input.as_ref().is_none_or(|f| sh.names.file_as_given(&f.name));
+            if !sh.at_once || !cause_known {
                 g.restructure_due = true;
                 g.settled += 1;
                 continue;
