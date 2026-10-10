@@ -2027,10 +2027,13 @@ impl Build {
         // whose material made them, whatever a round lays out)
         self.page_runs = Some(self.pieces.iter().map(|o| o.run.clone()).collect());
         let mut rounds = 0;
+        // (measuring: `PHITEX_ROUND_CAP` moves the round past which files
+        // are read inline)
+        let cap = std::env::var("PHITEX_ROUND_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(MAX_ROUNDS);
         loop {
             rounds += 1;
             let t_round = Instant::now();
-            if let Some(mut out) = self.round(&texts, opts, t0, time_cut, rounds > MAX_ROUNDS) {
+            if let Some(mut out) = self.round(&texts, opts, t0, time_cut, rounds > cap) {
                 let mut carried = std::mem::take(&mut self.carried);
                 carried.round_walls.push(t_round.elapsed());
                 out.stats.absorb(carried);
@@ -2654,7 +2657,7 @@ impl Build {
         if let Some(ev) = &sh.sched {
             let waits = (sh.lock_wait.load(Ordering::Relaxed), sh.lock_n.load(Ordering::Relaxed));
             write_sched(&ev.lock().expect("sched"), &st, threads, sh.build_no, sh.t_base.elapsed(), waits);
-            if !st.restructure {
+            if !st.restructure && std::env::var_os("PHITEX_SCHED_DEPS").is_some_and(|v| !v.is_empty()) {
                 write_deps(&st, &sh.seq, &sh.names, &sh.font, &self.run_times, &self.read_cmds);
             }
         }
@@ -5089,6 +5092,8 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         e.0 += te - tr;
         e.1 += run.ran;
         drop(m);
+    }
+    if sh.sched.is_some() && std::env::var_os("PHITEX_SCHED_DEPS").is_some_and(|v| !v.is_empty()) {
         // (what read each name from before the piece: its first reader)
         let v: Vec<String> = run
             .reads
