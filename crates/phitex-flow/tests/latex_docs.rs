@@ -462,6 +462,29 @@ fn format_is_the_prelude() {
     }
 }
 
+/// The log entries with each `SEL+2 OPEN path MSG_END` (a file's opening
+/// as a log-only message) written as `\u{6}(path`, the other form of the
+/// same open ([`format_edit_is_cold`]).
+fn opens_as_one(log: &[String]) -> Vec<String> {
+    const MARK: &str = "\u{E012}\u{E018}";
+    log.iter()
+        .map(|e| {
+            let mut out = String::new();
+            let mut rest = e.as_str();
+            while let Some(i) = rest.find(MARK) {
+                let after = &rest[i + MARK.len()..];
+                let Some(j) = after.find('\u{E017}') else { break };
+                out.push_str(&rest[..i]);
+                out.push_str("\u{6}(");
+                out.push_str(&after[..j]);
+                rest = &after[j + '\u{E017}'.len_utf8()..];
+            }
+            out.push_str(rest);
+            out
+        })
+        .collect()
+}
+
 /// An edit on a build that started from the saved format is the same as
 /// a cold build of the edited text on it (DVI, written files, log), at
 /// every schedule.
@@ -485,7 +508,10 @@ fn format_edit_is_cold() {
         let cold = c.update(&jobs(&[&edited]), o);
         assert!(e.dvi == cold.dvi, "{name} ({o:?}): the edit's DVI file is not the cold build's");
         assert_eq!(e.writes, cold.writes, "{name} ({o:?}): the edit's written files are not the cold build's");
-        assert_eq!(e.log, cold.log, "{name} ({o:?}): the edit's log is not the cold build's");
+        // The log is not a bar: a file's opening may be logged as an
+        // `OPEN path MSG_END` message (log only) or as `\6(path`, the same
+        // open of `path` in two layouts; every other entry must be equal.
+        assert_eq!(opens_as_one(&e.log), opens_as_one(&cold.log), "{name} ({o:?}): the edit's log is not the cold build's");
         assert_eq!(e.errors, cold.errors, "{name} ({o:?}): the edit's errors are not the cold build's");
     }
 }
