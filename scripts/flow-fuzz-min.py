@@ -6,6 +6,9 @@ BIN is phitex-flow. The text before the edit is cut after blank lines;
 the paragraph holding the edit stays (its offset follows what goes before
 it); a paragraph goes while `BIN --fuzz-classify` gives the same class
 (the part before " | ", and whether the DVI or only the log differs).
+A timeout's reproduction is cut while its last edit alone still does not
+end (`BIN --fuzz-replay FILE --alone` running past HANG seconds, env
+FLOW_MIN_HANG, 60).
 Run it under scripts/sandbox.
 """
 import re
@@ -59,7 +62,21 @@ def cls(path):
     return a + ' | ' + b[:4]
 
 
+def hangs(path):
+    try:
+        subprocess.run([binary, '--fuzz-replay', path, '--alone'], capture_output=True, timeout=HANG)
+    except subprocess.TimeoutExpired:
+        return 'hangs'
+    return 'ends'
+
+
+import os
+HANG = int(os.environ.get('FLOW_MIN_HANG', '60'))
 want = cls(src)
+if want is not None and want.startswith('timeout') and hangs(src) == 'hangs':
+    # (a hang of the last edit alone: cut while it still hangs)
+    cls = hangs
+    want = 'hangs'
 print('class', want, 'units', len(units), flush=True)
 if want is None or want.startswith(('passes', 'history', 'F2?', 'timeout')):
     print('not reducible: the class needs the seed\'s history or never ends')
