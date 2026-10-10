@@ -608,8 +608,10 @@ struct FoldKept {
 /// fold handed it, the fold's definitions, the document's), and what it
 /// gave.
 struct Memo {
-    /// The fire's ordinal (its PDF events' `what::Tag`).
+    /// The fire's ordinal (its PDF events' `what::Tag`), and whether the
+    /// run read the PDF file's answers or asked it something.
     ordinal: u32,
+    pdf: bool,
     toks: Arc<Vec<Tok>>,
     page: Arc<crate::item::BoxNode>,
     fire: OutputReads,
@@ -5266,7 +5268,10 @@ impl BuildFold<'_> {
         cands
             .iter()
             .find(|m| {
-                m.ordinal == rt.fire
+                // (the fire's ordinal matters only to a routine that read
+                // or asked something of the PDF file: its events' tags;
+                // a scan resumed counts its fires from there)
+                (m.ordinal == rt.fire || !m.pdf)
                     && (Arc::ptr_eq(&m.toks, &rt.toks) || m.toks == rt.toks)
                     && (Arc::ptr_eq(&m.page, &rt.page.b) || m.page == rt.page.b)
                     && m.fire == rt.reads
@@ -5310,8 +5315,11 @@ impl BuildFold<'_> {
         }
         let lines: Vec<Option<Lines>> = paras.iter().map(|(_, l)| Some(l.clone())).collect();
         let log = logs::texts(&logs::fragment(&[], &run, &lines));
+        let pdf = run.reads.iter().any(|(k, _, _)| matches!(k, Key::PdfAns(..)))
+            || items.iter().any(|i| matches!(i, crate::item::Item::Pdf(_)));
         Memo {
             ordinal: rt.fire,
+            pdf,
             toks: rt.toks.clone(),
             page: rt.page.b.clone(),
             fire: rt.reads.clone(),
