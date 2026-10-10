@@ -1027,6 +1027,9 @@ impl Exec<'_> {
         let mut out = Vec::new();
         let mut unbalance = 1;
         loop {
+            if self.holding(out.len()) {
+                return out;
+            }
             let Some(t) = self.next_raw() else {
                 self.err("File ended while scanning text".into());
                 return out;

@@ -160,11 +160,17 @@ pub trait Env {
     }
 
     /// Whether the run goes on after a node it ran (`ran` run so far, the
-    /// run holding `words` of material, [`words_of`]): a speculating run
+    /// run holding `words` of material, [`Live`]): a speculating run
     /// whose predictions are refuted is abandoned; one past TeX's main
     /// memory ends (tex.web 120).
     fn check(&mut self, _ran: u64, words: u64) -> Check {
         if words > MAIN_MEMORY { Check::Exceeded(MAIN_MEMORY) } else { Check::Go }
+    }
+
+    /// The main memory a run may hold ([`MAIN_MEMORY`], or the build's
+    /// `Options::main_memory`).
+    fn main_memory(&self) -> u64 {
+        MAIN_MEMORY
     }
 
     /// The bytes of the TFM file `name.tfm`, if there is one (a pure
@@ -228,7 +234,7 @@ pub trait Env {
 }
 
 /// web2c's `main_memory` (tex.web 11's `mem_max`): words a run's material
-/// may hold ([`words_of`]) before "TeX capacity exceeded".
+/// may hold ([`Live`]) before "TeX capacity exceeded".
 pub const MAIN_MEMORY: u64 = 5_000_000;
 
 /// What [`Env::check`] says of a run.
@@ -242,29 +248,111 @@ pub enum Check {
     Exceeded(u64),
 }
 
-/// The words of material a node makes as TeX's memory would hold them (an
-/// item, a box's items; and one for the node, which the run holds while it
-/// runs): the measure of [`MAIN_MEMORY`].
-pub fn words_of(n: &Node) -> u64 {
-    let items = |v: &[crate::item::Item]| -> u64 {
-        v.iter()
-            .map(|it| match it {
-                crate::item::Item::Box(b) => 1 + b.list.len() as u64,
-                _ => 1,
-            })
-            .sum()
-    };
-    // (material, and boxes defined: what a loop that runs away piles up;
-    // macros and token lists TeX frees when they are defined again)
-    let boxes: u64 = n
-        .defs()
-        .iter()
-        .map(|d| match &d.val {
-            Val::Box(b) => 1 + b.list.len() as u64,
-            _ => 0,
-        })
-        .sum();
-    1 + items(&n.emit) + items(n.vemit()) + boxes
+/// The words of an item as TeX's memory holds it: one, and a box's (or
+/// an unset box's, an insertion's, an adjustment's, a discretionary's,
+/// leaders') list inside, all the way down (TeX copies a box's whole list
+/// at `\copy`). Counted down to `budget` at most: what is past it is not
+/// looked at (the cap is passed anyway).
+fn item_words(it: &crate::item::Item, budget: &mut u64) -> u64 {
+    use crate::item::Item;
+    if *budget == 0 {
+        return 0;
+    }
+    *budget -= 1;
+    1 + match it {
+        Item::Box(b) | Item::Append(b, _) => list_words(&b.list, budget),
+        Item::Unset(u) => list_words(&u.list, budget),
+        Item::Ins(i) => list_words(&i.list, budget),
+        Item::Adjust(l) => list_words(l, budget),
+        Item::Disc(d) => list_words(&d.pre, budget) + list_words(&d.post, budget),
+        Item::Leaders(l) => item_words(&l.b, budget),
+        _ => 0,
+    }
+}
+
+fn list_words(v: &[crate::item::Item], budget: &mut u64) -> u64 {
+    let mut n = 0;
+    for it in v {
+        if *budget == 0 {
+            break;
+        }
+        n += item_words(it, budget);
+    }
+    n
+}
+
+/// The words of a list as TeX's memory holds it ([`item_words`]), up to
+/// a little past `cap`.
+pub fn words_in(v: &[crate::item::Item], cap: u64) -> u64 {
+    let mut budget = cap.saturating_add(1);
+    list_words(v, &mut budget)
+}
+
+/// What a run holds of TeX's main memory, as TeX would hold it (tex.web
+/// 120's `var_used`: the nodes alive), the measure of [`MAIN_MEMORY`]:
+/// the material of the lists open (made by the run's nodes), and the
+/// boxes the run put in box registers. What TeX frees is let go
+/// (`flush_node_list`): a list's material when the list ends (its box
+/// holds it then, counted where the box goes), a paragraph's when it is
+/// broken (its lines go to the main vertical list), the main vertical
+/// list's material (contributed to the page, which `\shipout` frees: the
+/// page builder is not the run's), a box register's box when the register
+/// is set again or emptied (`\setbox`, `\box`). So a run as long as a
+/// whole document holds what TeX holds at its end, not all it ever made.
+/// Commands, macros and token lists are not counted (TeX frees a token
+/// list defined again); the input waiting is ([`pending_words`]).
+#[derive(Default)]
+pub struct Live {
+    /// Per list level, the words of the material the run's nodes put into
+    /// the list open there (level 0: the paragraph being built).
+    lists: Vec<u64>,
+    /// The box registers the run set: their boxes' words.
+    boxes: FxMap<Key, u64>,
+    total: u64,
+}
+
+impl Live {
+    /// The words held after node `n` (run fresh) ran.
+    pub fn add(&mut self, n: &Node, cap: u64) -> u64 {
+        let l = usize::from(n.out.level);
+        // (the lists closed: their material is the box made of them)
+        while self.lists.len() > l + 1 {
+            self.total -= self.lists.pop().unwrap_or(0);
+        }
+        if self.lists.len() < l + 1 {
+            self.lists.resize(l + 1, 0);
+        }
+        if l == 0 {
+            if n.out.mode == Mode::H {
+                let w = words_in(&n.emit, cap);
+                self.lists[0] += w;
+                self.total += w;
+            } else {
+                // (a paragraph broken, or none: the main vertical list's
+                // material goes to the page)
+                self.total -= std::mem::take(&mut self.lists[0]);
+            }
+        } else {
+            let w = words_in(&n.emit, cap) + words_in(n.vemit(), cap);
+            self.lists[l] += w;
+            self.total += w;
+        }
+        for d in n.defs() {
+            if let Key::Box(_) = d.key {
+                let w = match &d.val {
+                    Val::Box(b) => 1 + words_in(&b.list, cap),
+                    _ => 0,
+                };
+                let was = self.boxes.insert(d.key.clone(), w).unwrap_or(0);
+                self.total = self.total + w - was;
+            }
+        }
+        self.total
+    }
+
+    pub fn total(&self) -> u64 {
+        self.total
+    }
 }
 
 /// The input pending in `st`, as words (tex.web 120 counts it in the
@@ -2725,9 +2813,10 @@ pub fn run_piece(
     let mut state = chain.input(from);
     let mut scratch = Scratch::default();
     let mut oi = from;
-    // (the material the nodes run hold, and what the environment says of
-    // the run after each)
-    let mut words = 0u64;
+    // (the material the nodes run hold, as TeX would, and what the
+    // environment says of the run after each)
+    let mut live = Live::default();
+    let cap = env.main_memory();
     let mut verdict = Check::Go;
     let mut abandoned = false;
     // (a paragraph's node runs again if any node of its paragraph did)
@@ -2901,6 +2990,7 @@ pub fn run_piece(
             (None, None) => {
                 ran += 1;
                 let mut x = Exec::new(text, &chain, &state, env, &mut outside, &mut scratch);
+                x.words_base = live.total();
                 // (the old node at this input's paragraph: an equal one is
                 // shared)
                 x.old_para = cand.and_then(|ci| oldc.and_then(|oc| oc.nodes[ci].para().cloned()));
@@ -2911,7 +3001,7 @@ pub fn run_piece(
                     x.kind = Kind::End;
                 }
                 let n = chain.with_group(x.finish());
-                words += words_of(&n);
+                let words = live.add(&n, cap);
                 verdict = match stop {
                     Some(Check::Abandon) => Check::Abandon,
                     Some(_) => Check::Go,
@@ -3283,6 +3373,11 @@ struct Exec<'a> {
     /// the environment said of the run while it expanded on and on: the
     /// node ends at once ([`Exec::rewrite`]).
     steps: u64,
+    /// The words the run held before this node ([`Live`]).
+    pub(crate) words_base: u64,
+    /// The length a token list being gathered was last checked at
+    /// ([`Exec::holding`]).
+    held: usize,
     stop: Option<Check>,
     /// This node made the hundredth error: the build ends here (§82).
     halt: bool,
@@ -3449,6 +3544,8 @@ impl<'a> Exec<'a> {
             output: None,
             in_csname: 0,
             steps: 0,
+            words_base: 0,
+            held: 0,
             stop: None,
             halt: false,
             cut_short: false,
@@ -4098,18 +4195,45 @@ impl<'a> Exec<'a> {
             self.expansion_shown();
         }
         if self.steps.is_multiple_of(1 << 12) && self.stop.is_none() {
-            let words = pending_words(&self.st) + (self.emit.len() + self.vemit.len()) as u64;
-            match self.env.check(self.steps, words) {
-                Check::Go => {}
-                c => {
-                    self.stop = Some(c);
-                    self.st.pending.clear();
-                    self.st.texts = Stack::new();
-                    self.ptext = None;
-                    self.st.pos = self.text.len();
-                }
+            self.memory_check(0);
+        }
+    }
+
+    /// What the run holds now, with `toks` tokens piling up in this
+    /// command: the environment says whether the run goes on (tex.web 120:
+    /// TeX's memory holds them); if not, the input ends here. Whether the
+    /// run stops.
+    fn memory_check(&mut self, toks: usize) -> bool {
+        let words = self.words_base.max(pending_words(&self.st)) + (self.emit.len() + self.vemit.len() + toks) as u64;
+        match self.env.check(self.steps, words) {
+            Check::Go => false,
+            c => {
+                self.stop = Some(c);
+                self.st.pending.clear();
+                self.st.texts = Stack::new();
+                self.ptext = None;
+                self.st.pos = self.text.len();
+                true
             }
         }
+    }
+
+    /// A token list being gathered (an argument, a definition's body, a
+    /// balanced text) is `toks` long: TeX's memory holds it as it grows
+    /// (tex.web 120: a runaway argument ends in "TeX capacity exceeded"),
+    /// so now and then the run is checked as [`Exec::step`] checks it.
+    /// Whether the run stops (its input is gone: the list is not used).
+    pub(super) fn holding(&mut self, toks: usize) -> bool {
+        if self.stop.is_some() {
+            return true;
+        }
+        // (once at each length: a list not growing while macros expand is
+        // the steps' to check)
+        if toks == 0 || !toks.is_multiple_of(1 << 12) || toks == self.held {
+            return false;
+        }
+        self.held = toks;
+        self.memory_check(toks)
     }
 
     /// The current line's end-of-line character (tex.web 360: the value of
@@ -4835,7 +4959,7 @@ impl<'a> Exec<'a> {
         let mut out = Vec::new();
         let mut depth = 1;
         while let Some(t) = self.next_raw() {
-            if self.runaway(name, &t, long) {
+            if self.runaway(name, &t, long) || self.holding(out.len()) {
                 return None;
             }
             match t.cat() {
@@ -4869,7 +4993,7 @@ impl<'a> Exec<'a> {
             // before a `\par` ends the call)
             let expected = depth == 0
                 && (0..delim.len()).any(|j| delim[j] == t && buf.len() >= j && buf[buf.len() - j..] == delim[..j]);
-            if !expected && self.runaway(name, &t, long) {
+            if !expected && self.runaway(name, &t, long) || self.holding(buf.len()) {
                 return None;
             }
             let at_zero = depth == 0;
