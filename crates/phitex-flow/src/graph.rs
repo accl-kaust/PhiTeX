@@ -507,8 +507,8 @@ impl Cursor {
     }
 
     /// The tokens from `a` to `b` as the reader reads them: a part of one
-    /// list when they are, else their own list.
-    fn arg(l: &Level, a: Cursor, b: Cursor) -> Arg {
+    /// list when they are, else their own list (gathered in `buf`).
+    fn arg(l: &Level, a: Cursor, b: Cursor, buf: &mut Vec<Tok>) -> Arg {
         let norm = |c: Cursor| match c.arg {
             Some((n, q)) if l.args.as_ref().is_some_and(|x| q >= x[n].end) => Cursor { k: c.k, arg: None },
             _ => c,
@@ -535,17 +535,17 @@ impl Cursor {
             _ => {}
         }
         
-        let mut v = Vec::new();
+        buf.clear();
         let mut c = a;
         while c != b {
             match c.next(l) {
-                Some(t) => v.push(t.clone()),
+                Some(t) => buf.push(t.clone()),
                 None => break,
             }
             c = norm(c);
         }
-        let end = v.len();
-        Arg { list: Arc::from(v), start: 0, end }
+        let end = buf.len();
+        Arg { list: Arc::from(&buf[..]), start: 0, end }
     }
 }
 
@@ -2619,6 +2619,8 @@ struct Scratch {
     /// The numbers of the names the piece spelled.
     cs_ids: FxMap<Box<str>, u32>,
     stamp: u32,
+    /// An argument's tokens gathered from several lists (`Cursor::arg`).
+    arg: Vec<Tok>,
     /// The node's reads and what it emitted (their capacity kept).
     reads: Vec<ReadRef>,
     emit: Vec<Item>,
@@ -3841,7 +3843,7 @@ impl<'a> Exec<'a> {
     /// body (tex.web 389-399). A step: it defines nothing.
     fn call(&mut self, name: &Tok, m: &Macro) {
         self.outer_abort = false;
-        let Some((args, k)) = self.scanning(Scanning::Matching, Some(name.clone()), |x| x.call_args(name, m)) else {
+        let Some((mut args, k)) = self.scanning(Scanning::Matching, Some(name.clone()), |x| x.call_args(name, m)) else {
             return;
         };
         // (the body is read where it is, the macro's; its parameters are
@@ -3851,11 +3853,10 @@ impl<'a> Exec<'a> {
             if k == 0 {
                 self.st.pending.push((m.body.clone(), 0, false));
             } else {
-                let args: Args = args
-                    .into_iter()
-                    .skip(1)
-                    .take(k)
-                    .map(|a| a.unwrap_or_else(|| Arg { list: m.body.clone(), start: 0, end: 0 }))
+                // (from a slice: one allocation, of the right size)
+                let args: Args = args[1..=k]
+                    .iter_mut()
+                    .map(|a| a.take().unwrap_or_else(|| Arg { list: m.body.clone(), start: 0, end: 0 }))
                     .collect();
                 self.st.pending.push_body(m.body.clone(), args);
             }
@@ -3985,7 +3986,8 @@ impl<'a> Exec<'a> {
         } else {
             (c.back(top), c, c)
         };
-        let arg = Cursor::arg(top, from, to);
+        let top = self.st.pending.top.as_ref()?;
+        let arg = Cursor::arg(top, from, to, &mut self.scratch.arg);
         let l = arg.list.clone();
         if self.outer_in(&l[arg.start..arg.end], &[]) {
             return None;
@@ -4029,7 +4031,8 @@ impl<'a> Exec<'a> {
             }
         }
         let end = last[(n - d) % MAX].map_or(c, |(_, at)| at);
-        let mut arg = Cursor::arg(top, start, end);
+        let top = self.st.pending.top.as_ref()?;
+        let mut arg = Cursor::arg(top, start, end, &mut self.scratch.arg);
         // (an argument that is one group loses its braces, tex.web 400)
         let toks = &arg.list[arg.start..arg.end];
         if toks.len() >= 2 && toks[0].cat() == Some(1) && toks[toks.len() - 1].cat() == Some(2) {
