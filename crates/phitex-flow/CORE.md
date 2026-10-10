@@ -3145,10 +3145,12 @@ exists only because the join runs after the pieces). `tests/pdf.rs`'s
 `rerun` is a reader whose run again itself allocates (`\pdflastobj`
 read, then a conditional `\pdfobj`), at five schedules; `readback` reads
 each kind. Rounds per document: `Stats::pdf_rounds`. Output routines'
-reads: the routine's memo keeps its fire's ordinal and its reads of
-`Key::PdfAns`, so a changed answer runs the routine again (the page
-builder of a document with routines is made again from its start
-anyway). Keys for A, if `ReadRef` takes over: `Key::PdfAns`,
+reads: a routine's events and the answers it reads are filed under its
+fire's ordinal among the job's fires (`RoutineEnv::pdf_scope`), a name,
+not an input: a memo made at another ordinal (a scan resumed counts its
+fires from there) is checked with its answers read under this fire's,
+and reused with its events filed under it; a changed answer runs the
+routine again. Keys for A, if `ReadRef` takes over: `Key::PdfAns`,
 `Key::PdfLast`, `Key::PdfSeed`, `Key::PdfClock`, `Key::PdfDate`,
 `Key::PdfRandom`, `Key::PdfMatch`.
 
