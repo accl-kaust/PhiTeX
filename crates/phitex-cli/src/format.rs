@@ -102,8 +102,7 @@ pub fn ensure(
 /// What a format that fails is waiting on, if it is known.
 fn waits_on(e: &Engine) -> &'static str {
     match e.name {
-        "pdflatex" => " (pdflatex's format on the graph is agent Q's slice Q2, not landed yet)",
-        "pdftex" => " (pdfTeX's PDF-mode formats come with agent Q's slice Q2)",
+        "tex" | "etex" | "pdftex" => " (plain's formats are not among phitex-flow's tested ones yet)",
         _ => "",
     }
 }

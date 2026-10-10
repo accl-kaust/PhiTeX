@@ -13,8 +13,9 @@
 //! - `phitex watch` (headless: no viewer) on a 48-page plain document: a
 //!   word edited in the file is built as an edit, and the PDF it writes is
 //!   the cold build's of the edited text;
-//! - `pdflatex` on the LaTeX documents, against `pdflatex`: ignored until
-//!   pdflatex's format and documents land on the graph (agent Q's Q2).
+//! - `pdflatex -interaction=batchmode NAME.tex` on the same documents:
+//!   the PDF file and the written files are the recorded `pdflatex`
+//!   oracles' (`crates/phitex-flow/tests/latex/pdf/`), byte for byte.
 //!
 //! One heavy run at a time (a format build holds about 4 GB). The formats
 //! are kept in the target's temporary directory across runs.
@@ -121,26 +122,39 @@ fn copy_doc(name: &str, dir: &Path) {
     }
 }
 
-const LATEX_DOCS: [&str; 10] =
-    ["sections", "math", "tables", "figures", "titlepage", "packages", "ams", "gfx", "layout", "rules"];
-
 /// `latex -interaction=batchmode NAME.tex` through phitex: the DVI file
 /// and the written files are the recorded oracle's. The `.aux` file read
 /// back at `\end{document}` in the same run is phitex-flow's known gap
 /// (CORE.md, "LaTeX documents": until agent B's fixpoint lands), with
 /// exactly its two errors and an empty `.toc`.
 fn latex_doc(name: &str) {
+    tex_doc("latex", name);
+}
+
+/// `pdflatex -interaction=batchmode NAME.tex` through phitex: the PDF file
+/// and the written files are the recorded `pdflatex` oracle's
+/// (`crates/phitex-flow/tests/latex/pdf/`).
+fn pdflatex_doc(name: &str) {
+    tex_doc("pdflatex", name);
+}
+
+/// Document `name` through phitex run as `program` (`latex`: the DVI
+/// oracles of `tests/latex/docs/`, its preamble's date masked;
+/// `pdflatex`: the PDF oracles of `tests/latex/pdf/`, byte for byte).
+fn tex_doc(program: &str, name: &str) {
     let _one = one();
-    let dir = scratch(&format!("latex-{name}"));
+    let pdf = program == "pdflatex";
+    let oracles = if pdf { flow().join("tests/latex/pdf") } else { docs_dir() };
+    let dir = scratch(&format!("{program}-{name}"));
     copy_doc(name, &dir);
     let t = Instant::now();
-    let out = command(&as_program("latex"), &dir)
+    let out = command(&as_program(program), &dir)
         .args(["-interaction=batchmode", &format!("{name}.tex")])
         .output()
         .expect("phitex runs");
     let term = String::from_utf8_lossy(&out.stdout);
     let errs = String::from_utf8_lossy(&out.stderr);
-    eprintln!("{name}: latex through phitex in {:.2} s, status {:?}\n{errs}", t.elapsed().as_secs_f64(), out.status.code());
+    eprintln!("{name}: {program} through phitex in {:.2} s, status {:?}\n{errs}", t.elapsed().as_secs_f64(), out.status.code());
     // (in batch mode the errors are in the log only)
     let log = chars(&std::fs::read(dir.join(format!("{name}.log"))).unwrap_or_default());
     let gap = log.contains(&format!("I can't find file `{name}.aux'"));
@@ -152,21 +166,23 @@ fn latex_doc(name: &str) {
         );
         eprintln!("{name}: the .aux read back at \\end{{document}} is phitex-flow's known gap (agent B's fixpoint)");
     }
-    let want = std::fs::read(docs_dir().join(format!("{name}.dvi"))).expect("NAME.dvi");
-    let got = std::fs::read(dir.join(format!("{name}.dvi"))).unwrap_or_default();
+    let ext = if pdf { "pdf" } else { "dvi" };
+    let want = std::fs::read(oracles.join(format!("{name}.{ext}"))).expect("the oracle");
+    let got = std::fs::read(dir.join(format!("{name}.{ext}"))).unwrap_or_default();
+    let same = if pdf { got == want } else { masked(&got) == masked(&want) };
     assert!(
-        masked(&got) == masked(&want),
-        "{name}: the DVI file is not latex's: {} (ours in {})",
+        same,
+        "{name}: the {ext} file is not {program}'s: {} (ours in {})",
         first_difference(&got, &want),
         dir.display()
     );
-    let writes = parse_writes(&chars(&std::fs::read(docs_dir().join(format!("{name}.writes"))).expect("NAME.writes")));
+    let writes = parse_writes(&chars(&std::fs::read(oracles.join(format!("{name}.writes"))).expect("NAME.writes")));
     for (n, w) in writes {
         let got = chars(&std::fs::read(dir.join(&n)).unwrap_or_default());
         if gap && Path::new(&n).extension().is_some_and(|e| e == "toc") && got.is_empty() {
             continue;
         }
-        assert_eq!(got, w, "{name}: {n} is not latex's");
+        assert_eq!(got, w, "{name}: {n} is not {program}'s");
     }
 }
 
@@ -526,41 +542,52 @@ fn json_string(s: &str) -> String {
     o
 }
 
-/// `pdflatex` through phitex on the LaTeX documents, against TeX Live's
-/// `pdflatex` (`SOURCE_DATE_EPOCH=0`): the PDF files byte for byte.
 #[test]
-#[ignore = "waits on agent Q's slice Q2: pdflatex's format and documents on phitex-flow"]
-fn pdflatex_documents() {
-    if !have("pdflatex") {
-        eprintln!("pdflatex_documents: no `pdflatex` here to compare with: not checked");
-        return;
-    }
-    let _one = one();
-    let mut bad = Vec::new();
-    for name in LATEX_DOCS {
-        let theirs = scratch(&format!("pdflatex-{name}-tl"));
-        copy_doc(name, &theirs);
-        let _ = Command::new("pdflatex")
-            .args(["-interaction=batchmode", &format!("{name}.tex")])
-            .current_dir(&theirs)
-            .env("SOURCE_DATE_EPOCH", "0")
-            .env("FORCE_SOURCE_DATE", "1")
-            .output();
-        let want = std::fs::read(theirs.join(format!("{name}.pdf"))).unwrap_or_default();
-        let ours = scratch(&format!("pdflatex-{name}"));
-        copy_doc(name, &ours);
-        let out = command(&as_program("pdflatex"), &ours)
-            .args(["-interaction=batchmode", &format!("{name}.tex")])
-            .output()
-            .expect("phitex runs");
-        let got = std::fs::read(ours.join(format!("{name}.pdf"))).unwrap_or_default();
-        if got.is_empty() || got != want {
-            bad.push(format!(
-                "{name}: {}; stderr: {}",
-                first_difference(&got, &want),
-                String::from_utf8_lossy(&out.stderr)
-            ));
-        }
-    }
-    assert!(bad.is_empty(), "pdflatex's PDF files differ:\n{}", bad.join("\n"));
+fn pdflatex_sections() {
+    pdflatex_doc("sections");
+}
+
+#[test]
+fn pdflatex_math() {
+    pdflatex_doc("math");
+}
+
+#[test]
+fn pdflatex_tables() {
+    pdflatex_doc("tables");
+}
+
+#[test]
+fn pdflatex_figures() {
+    pdflatex_doc("figures");
+}
+
+#[test]
+fn pdflatex_titlepage() {
+    pdflatex_doc("titlepage");
+}
+
+#[test]
+fn pdflatex_packages() {
+    pdflatex_doc("packages");
+}
+
+#[test]
+fn pdflatex_ams() {
+    pdflatex_doc("ams");
+}
+
+#[test]
+fn pdflatex_gfx() {
+    pdflatex_doc("gfx");
+}
+
+#[test]
+fn pdflatex_layout() {
+    pdflatex_doc("layout");
+}
+
+#[test]
+fn pdflatex_rules() {
+    pdflatex_doc("rules");
 }

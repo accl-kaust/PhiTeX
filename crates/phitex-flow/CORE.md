@@ -2054,6 +2054,21 @@ after on the same base):
    7.22G, sections 2.72G → 2.54G, `latex.ltx` 190.8G → 189.2G, big2
    unchanged; DVIs identical.
 
+## Found by the CLI (agent W)
+
+- **W1 (open, A): a LaTeX document in nonstop mode with no `.aux` never
+  ends.** `phitex build --output-format dvi titlepage.tex` (the CLI's
+  build then ran in `\nonstopmode` over the `latex` format: `Build::
+  set_interaction_option(Some(1))`, terminal `&latex titlepage.tex`, the
+  document of `tests/latex/docs/`, no `titlepage.aux` anywhere) ran over
+  25 minutes without ending on flow 9fa4ccf (cluster job 7802, test
+  `build_to_the_fixpoint`); the same document in batch mode (`latex
+  -interaction=batchmode`) ends in under a second with the `.aux` gap's
+  two errors. Suspected: the missing `.aux` at `\enddocument` in nonstop
+  mode (TeX: `*** (job aborted, file error in nonstop mode)`). The CLI
+  now builds in batch mode by default; its tests run every build under
+  `timeout 600`.
+
 ## The inventory
 
 ### (i) Expandable and input-rewriting: steps — 40
