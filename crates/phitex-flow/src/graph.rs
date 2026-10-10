@@ -2481,18 +2481,37 @@ pub fn run_piece(
     // (the dirty old nodes: those reading a dirty name from before the
     // piece, in order)
     let dirty: Vec<u32> = match oldc {
-        Some(oc) if !dirty.is_empty() => oc
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|&(i, n)| {
-                n.reads.iter().any(|r| {
-                    dirty.iter().any(|(k, from)| *k == r.key && i as u32 >= *from)
-                        && (!matches!(r.src, Src::Node(_)) || env.has_between(&r.key))
+        Some(oc) if !dirty.is_empty() => {
+            // (each dirty name's first dirty node: a lookup per read, not a
+            // scan of the dirty names; a few are scanned)
+            let first: FxMap<&Key, u32> = if dirty.len() > 4 {
+                let mut m = FxMap::default();
+                for (k, f) in dirty {
+                    let e = m.entry(k).or_insert(*f);
+                    *e = (*e).min(*f);
+                }
+                m
+            } else {
+                FxMap::default()
+            };
+            let is_dirty = |key: &Key, i: u32| {
+                if dirty.len() > 4 {
+                    first.get(key).is_some_and(|&f| i >= f)
+                } else {
+                    dirty.iter().any(|(k, from)| k == key && i >= *from)
+                }
+            };
+            oc.nodes
+                .iter()
+                .enumerate()
+                .filter(|&(i, n)| {
+                    n.reads.iter().any(|r| {
+                        is_dirty(&r.key, i as u32) && (!matches!(r.src, Src::Node(_)) || env.has_between(&r.key))
+                    })
                 })
-            })
-            .map(|(i, _)| i as u32)
-            .collect(),
+                .map(|(i, _)| i as u32)
+                .collect()
+        }
         _ => Vec::new(),
     };
     // (where to start: the first dirty node, or the first the edit touches;
