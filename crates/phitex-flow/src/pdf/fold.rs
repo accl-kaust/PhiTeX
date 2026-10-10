@@ -2843,7 +2843,7 @@ pub fn assemble(
             // (a virtual font found makes the walk again however many there
             // are: each walk looks for one more font's file; the guesses'
             // walks again are bounded)
-            if !(virt || stale) || (renders >= 4 && !virt) {
+            if !virt && (!stale || renders >= 4) {
                 break;
             }
             let guess = if numbered { body.ff.clone() } else { content::guess_ff(p, f.nums(), &[]) };
