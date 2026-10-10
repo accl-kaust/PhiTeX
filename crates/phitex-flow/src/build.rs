@@ -44,6 +44,9 @@ use std::time::{Duration, Instant};
 use crate::dvi;
 pub use crate::graph::MAIN_MEMORY;
 
+/// The shipped pages' source places, for SyncTeX and the viewer.
+pub mod sync;
+
 /// The cutter's default: a cut proposed every this many lines (at a line
 /// beginning with a control sequence, at brace depth 0), besides blank
 /// lines ([`Options::cut_lines`]).

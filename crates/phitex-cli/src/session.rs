@@ -150,6 +150,8 @@ pub struct Session {
     /// The format the build starts from.
     pub format: Option<PathBuf>,
     builds: usize,
+    /// `JOB.synctex.gz`, kept between builds (`synctex.rs`).
+    pub sync: crate::synctex::Writer,
 }
 
 /// `SOURCE_DATE_EPOCH`, else the time now.
@@ -214,6 +216,7 @@ impl Session {
             tools: crate::tools::Tools::default(),
             format,
             builds: 0,
+            sync: crate::synctex::Writer::default(),
         })
     }
 
@@ -360,6 +363,10 @@ impl Session {
         let ext = r.main_output().map_or(self.job.engine.output.ext(), |(e, _)| e);
         if let Some((e, b)) = r.main_output() {
             main = Some(put(&format!("{}.{e}", self.job.jobname), b)?);
+            if self.job.synctex {
+                let (n, b) = self.sync.file(&self.build, &self.job.jobname, &self.job.path, &r.out.files_read, self.job.threads);
+                put(&n, &b)?;
+            }
         }
         for (n, t) in &r.out.writes {
             put(n, &tex::bytes(t))?;
@@ -416,13 +423,6 @@ impl Session {
 /// The notes a job's options that phitex-flow cannot do yet give, once.
 pub fn waiting_notes(job: &Job) -> Vec<String> {
     let mut v = Vec::new();
-    if job.synctex {
-        v.push(
-            "SyncTeX: no .synctex.gz yet: phitex-flow's pages keep no source places \
-             (glyph origins asked of agents Q and A)"
-                .to_owned(),
-        );
-    }
     if job.recorder {
         v.push(
             "-recorder: the .fls lists the format, the main file and the outputs; the files \

@@ -1801,6 +1801,38 @@ impl Run {
         (!vals.is_empty() && vals.iter().all(|x| matches!(x.2, Val::Outer(_)))).then_some(vals)
     }
 
+    /// The boxes its nodes put in registers (`\setbox`), with the node
+    /// defining each, in node order (a lean run's too): the way back from
+    /// a box an output routine moved onto a page to the node that made it
+    /// (SyncTeX, `build::sync`). Reads nothing.
+    pub fn box_defs(&self) -> Vec<(u32, Arc<crate::item::BoxNode>)> {
+        let mut v: Vec<(u32, Arc<crate::item::BoxNode>)> = Vec::new();
+        match &self.lean {
+            Some(l) => {
+                for (key, d, _, val) in &l.defs {
+                    if let (Key::Box(_), Val::Box(b)) = (key, val) {
+                        v.push((*d, b.clone()));
+                    }
+                }
+            }
+            None => {
+                let c = &self.chain;
+                for (key, ds) in &c.defs_of {
+                    if !matches!(key, Key::Box(_)) {
+                        continue;
+                    }
+                    for &(d, j) in ds {
+                        if let Some(Val::Box(b)) = c.nodes[d as usize].defs().get(j as usize).map(|x| &x.val) {
+                            v.push((d, b.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        v.sort_by_key(|x| x.0);
+        v
+    }
+
     /// How many nodes it has (had, if lean).
     pub fn nodes_len(&self) -> usize {
         self.lean.as_ref().map_or(self.chain.nodes.len(), |l| l.len as usize)
