@@ -409,7 +409,7 @@ impl Exec<'_> {
             Xe::InterCharToks => {
                 let a = self.scan_char_class(false) as u16;
                 let b = self.scan_char_class(false) as u16;
-                if level != Lv::Tok {
+                if level < Lv::Ident {
                     self.err("Missing number, treated as zero".into());
                     self.back(t.clone());
                     return Some(IVal::Dimen(0));
@@ -451,13 +451,6 @@ impl Exec<'_> {
             Xe::Item(k) => self.xe_item(k),
             _ => return None,
         };
-        let mut v = v;
-        while v_level(&v) > level {
-            v = match v {
-                IVal::Dimen(d) => IVal::Int(d),
-                other => other,
-            };
-        }
         Some(v)
     }
 
@@ -924,11 +917,15 @@ impl Exec<'_> {
     /// `check_for_inter_char_toks` for character `c` (category `cat`),
     /// read again after a list (`backed`).
     pub(super) fn check_inter_char(&mut self, c: u32, cat: u8, backed: bool) -> Inter {
+        let enabled = self.int_par(IntPar::XeTeXinterchartokenstate) > 0;
+        if !enabled {
+            // (`space_class` is read only where the lists are on)
+            return Inter::None;
+        }
         let sf = self.int(&Key::Sfcode(usv(c as i32)));
         let space = (sf >> 16) as u16;
-        let enabled = self.int_par(IntPar::XeTeXinterchartokenstate) > 0;
-        let mut prev = self.xclass.0;
-        self.xclass.1 = space;
+        let mut prev = self.st.xclass.0;
+        self.st.xclass.1 = space;
         if enabled && space != IGNORED {
             if prev == BOUNDARY {
                 if !backed && let Some(t) = self.inter_char_toks(BOUNDARY, space) {
@@ -937,12 +934,12 @@ impl Exec<'_> {
                 }
             } else if let Some(t) = self.inter_char_toks(prev, space) {
                 self.back_char_then(c, cat, t);
-                self.xclass.0 = BOUNDARY;
+                self.st.xclass.0 = BOUNDARY;
                 return Inter::Found;
             }
             prev = space;
         }
-        self.xclass.0 = prev;
+        self.st.xclass.0 = prev;
         Inter::None
     }
 
@@ -967,11 +964,11 @@ impl Exec<'_> {
     /// the list from the last character's class to the boundary, `t` read
     /// again after it. Whether one went in.
     pub(super) fn check_post_char(&mut self, t: &Tok) -> bool {
-        let (prev, space) = self.xclass;
+        let (prev, space) = self.st.xclass;
         if space == IGNORED || prev == BOUNDARY || self.int_par(IntPar::XeTeXinterchartokenstate) <= 0 {
             return false;
         }
-        self.xclass.0 = BOUNDARY;
+        self.st.xclass.0 = BOUNDARY;
         let Some(toks) = self.inter_char_toks(space, BOUNDARY) else { return false };
         self.back(t.clone());
         self.rewrite(toks);
@@ -1035,7 +1032,7 @@ impl Exec<'_> {
     /// after hyphens, ICU's breaks with `\XeTeXlinebreaklocale`), joined
     /// to the word before when nothing separates them.
     pub(super) fn main_loop_native(&mut self, f: Arc<Font>, c0: u32, cat0: u8, backed: bool) {
-        self.xclass.0 = BOUNDARY;
+        self.st.xclass.0 = BOUNDARY;
         if !self.st.inner {
             self.fix_language();
         }
@@ -1272,16 +1269,4 @@ impl Exec<'_> {
 /// space).
 fn quoted(n: &str) -> String {
     if n.contains(' ') { format!("\"{n}\"") } else { n.to_string() }
-}
-
-/// An internal value's level.
-fn v_level(v: &IVal) -> Lv {
-    match v {
-        IVal::Int(_) => Lv::Int,
-        IVal::Dimen(_) => Lv::Dimen,
-        IVal::Glue(_) => Lv::Glue,
-        IVal::Mu(_) => Lv::Mu,
-        IVal::Font(_) => Lv::Ident,
-        IVal::Toks(_) => Lv::Tok,
-    }
 }

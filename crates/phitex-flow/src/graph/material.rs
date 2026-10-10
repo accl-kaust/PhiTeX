@@ -914,7 +914,7 @@ impl Exec<'_> {
             // (xetex.web: `prev_class` begins at the boundary; a list
             // before the run's first character goes in first; a character
             // past the font's is lost)
-            self.xclass.0 = super::xetex::BOUNDARY;
+            self.st.xclass.0 = super::xetex::BOUNDARY;
             self.adjust_space_factor(c0 as i32);
             if let super::xetex::Inter::BigSwitch = self.check_inter_char(c0, cat0, backed) {
                 return;

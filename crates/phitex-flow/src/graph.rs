@@ -758,6 +758,11 @@ pub struct RState {
     /// XeTeX: how the current line is decoded, read with `eol` where the
     /// line is begun (`Key::InputEncoding`: `graph::xetex`'s modes).
     enc: u32,
+    /// XeTeX's `prev_class` and `space_class` (`\XeTeXinterchartoks`):
+    /// set by a run of characters, read by the next command in horizontal
+    /// mode (`check_for_post_char_toks`). A piece begins at the boundary
+    /// class (CORE.md: a gap where a piece begins after a character).
+    xclass: (u16, u16),
     /// `\endinput` was read: the file ends after this line (tex.web 362).
     endinput: bool,
     /// The alignment being read: `align_state`, the current column and
@@ -804,6 +809,7 @@ impl RState {
             prev_graf: 0,
             eol: EOL_UNREAD,
             enc: 0,
+            xclass: (xetex::BOUNDARY, 0),
             endinput: false,
             al: align::AlignCur::OFF,
             protected: false,
@@ -1046,6 +1052,7 @@ impl RState {
             && self.prev_graf == o.prev_graf
             && self.eol == o.eol
             && self.enc == o.enc
+            && self.xclass == o.xclass
             && self.endinput == o.endinput
             && self.al == o.al
             && self.pending == o.pending
@@ -2734,11 +2741,6 @@ struct Exec<'a> {
     xetex: bool,
     /// XeTeX's `scan_decimal` is scanning (a dimension without units).
     decimal_only: bool,
-    /// XeTeX's `prev_class` and `space_class` (`\XeTeXinterchartoks`):
-    /// the main loop's, begun at the boundary class in every run of
-    /// characters (xetex.web's "Append character", so never read across
-    /// commands).
-    xclass: (u16, u16),
     /// The output routine's end this node is (`output::OutputEnd`).
     output: Option<Box<output::OutputEnd>>,
     /// Inside `\csname`…`\endcsname` (pdfTeX's `\ifincsname`).
@@ -2880,7 +2882,6 @@ impl<'a> Exec<'a> {
             ptext: None,
             xetex,
             decimal_only: false,
-            xclass: (xetex::BOUNDARY, 0),
             output: None,
             in_csname: 0,
             steps: 0,
@@ -4264,6 +4265,19 @@ impl<'a> Exec<'a> {
             return;
         };
         self.cmd = t.clone();
+        // (XeTeX's big switch: a command other than a character's, in
+        // horizontal mode, after a run of characters: the list from the
+        // last one's class to the boundary first)
+        if self.xetex
+            && self.st.mode == Mode::H
+            && !matches!(
+                m,
+                Meaning::Char(11 | 12, _) | Meaning::CharGiven(_) | Meaning::Prim(Prim::Char | Prim::Xe(Xe::BackedChar))
+            )
+            && self.check_post_char(&t)
+        {
+            return;
+        }
         let (global, long, outer) = (
             std::mem::take(&mut self.st.global),
             std::mem::take(&mut self.st.long),

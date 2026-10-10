@@ -170,7 +170,7 @@ impl Exec<'_> {
                     };
                     IVal::Int(if self.xetex { self.xe_code_out(c, v) } else { v })
                 }
-                Prim::Xe(x) => return self.xe_internal(t, x, level),
+                Prim::Xe(x) => self.xe_internal(t, x, level)?,
                 Prim::TokPar(q) => {
                     if level != Lv::Tok {
                         return Some(toks_ok(self, Arc::new(Vec::new())));
