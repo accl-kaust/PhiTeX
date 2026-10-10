@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use crate::arith::{AWFUL_BAD, INF_BAD, badness, fract};
 use crate::item::{BoxNode, Disc, Interline, Item, Para, is_zero};
+use crate::micro::Micro;
 use crate::pack::{Params, Spec, end_lr_type, hpack, math_subtype};
 use crate::show::{Ctx, Place, report};
 use crate::val::Glue;
@@ -59,6 +60,10 @@ pub struct LineParams {
     /// What hyphenating the paragraph's words reads (its second pass,
     /// tex.web 891–918).
     pub hyph: Option<Arc<crate::hyph::HyphParams>>,
+    /// pdfTeX's font expansion and character protrusion: what the `\par`
+    /// node read with `\pdfadjustspacing` or `\pdfprotrudechars`
+    /// positive (`None`: both are not).
+    pub micro: Option<Arc<Micro>>,
 }
 
 /// A line: its box (shifted by its indentation) and what follows it.
@@ -105,17 +110,18 @@ const PAR_FILL_SKIP: u8 = 15;
 /// `max_halfword`: the line number of the last active node (tex.web 820).
 const MAX_HALFWORD: i32 = 0x0FFF_FFFF;
 
-/// Widths: natural, stretch of each order, shrink (tex.web 823).
-type W = [i64; 6];
+/// Widths: natural, stretch of each order, shrink (tex.web 823); pdfTeX's
+/// font stretch and shrink (`\pdfadjustspacing` above 1).
+type W = [i64; 8];
 
 fn add(a: &mut W, b: &W) {
-    for k in 0..6 {
+    for k in 0..8 {
         a[k] += b[k];
     }
 }
 
 fn sub(a: &mut W, b: &W) {
-    for k in 0..6 {
+    for k in 0..8 {
         a[k] -= b[k];
     }
 }
@@ -129,7 +135,7 @@ fn glue_widths(w: &mut W, g: &Glue) {
 
 /// The widths an item adds (tex.web 866–871).
 fn widths(it: &Item) -> W {
-    let mut w = [0i64; 6];
+    let mut w = [0i64; 8];
     match it {
         Item::Glue { g, .. } => glue_widths(&mut w, g),
         Item::Leaders(l) => glue_widths(&mut w, &l.g),
@@ -141,10 +147,22 @@ fn widths(it: &Item) -> W {
     w
 }
 
-fn list_widths(l: &[Item]) -> W {
-    let mut w = [0i64; 6];
-    for it in l {
-        add(&mut w, &widths(it));
+/// The widths item `i` of `list` adds, with its font stretch and shrink
+/// (`ex`: `\pdfadjustspacing` above 1).
+fn widths_at(list: &[Item], i: usize, ex: Option<&Micro>) -> W {
+    let mut w = widths(&list[i]);
+    if let Some(m) = ex {
+        let (a, b) = m.widths_at(list, i);
+        w[6] += a;
+        w[7] += b;
+    }
+    w
+}
+
+fn list_widths(l: &[Item], ex: Option<&Micro>) -> W {
+    let mut w = [0i64; 8];
+    for i in 0..l.len() {
+        add(&mut w, &widths_at(l, i, ex));
     }
     w
 }
@@ -189,6 +207,10 @@ struct Breaker<'a> {
     /// item's font is an `Arc` every thread shares).
     items: std::borrow::Cow<'a, [Item]>,
     p: &'a LineParams,
+    /// Expansion and protrusion (`LineParams::micro`); `ex`: with
+    /// `\pdfadjustspacing` above 1, the font stretch and shrink counted.
+    micro: Option<&'a Micro>,
+    ex: Option<&'a Micro>,
     /// `prefix[i]`: the widths of `items[..i]`.
     prefix: Vec<W>,
     background: W,
@@ -288,13 +310,13 @@ impl Breaker<'_> {
     /// before that point it has (a discretionary's post-break list): what
     /// tex.web's `break_width` computes (tex.web 837–840).
     fn start(&self, a: &Active) -> (usize, W) {
-        let Some(pi) = a.passive else { return (0, [0; 6]) };
-        let Some(b) = self.passive[pi].at else { return (self.items.len(), [0; 6]) };
+        let Some(pi) = a.passive else { return (0, [0; 8]) };
+        let Some(b) = self.passive[pi].at else { return (self.items.len(), [0; 8]) };
         let mut s = b;
         if let Item::Disc(d) = &self.items[b] {
             let v = b + usize::from(d.replace);
             if !d.post.is_empty() {
-                return (v + 1, list_widths(&d.post));
+                return (v + 1, list_widths(&d.post, self.ex));
             }
             s = v + 1;
         }
@@ -305,7 +327,7 @@ impl Breaker<'_> {
             }
             s += 1;
         }
-        (s, [0; 6])
+        (s, [0; 8])
     }
 
     /// §850: the length of line `l`.
@@ -386,6 +408,40 @@ impl Breaker<'_> {
             add(&mut w, &extra);
             add(&mut w, pre);
             let mut shortfall = i64::from(line_width) - w[0];
+            if let Some(m) = self.micro {
+                // (pdftex.web: the protrusion at the line's edges, then the
+                // fonts' stretch or shrink)
+                if m.protrude_chars > 1 {
+                    let from = a.passive.and_then(|pi| self.passive[pi].at);
+                    shortfall += m.total_pw(&self.items, from, cur);
+                }
+                if m.adjust_spacing > 1 && shortfall != 0 {
+                    // (the margin kerns' variations: an expanded font's
+                    // protrusion is its base's, its quad and codes the
+                    // base's — zero)
+                    let (mks, mksh) = (0i64, 0i64);
+                    let (fs, fsh) = (w[6] + mks, w[7] + mksh);
+                    if shortfall > 0 && fs > 0 {
+                        let div = i64::from(m.max_stretch) / i64::from(m.step.max(1));
+                        if fs > shortfall {
+                            if div > 0 {
+                                shortfall = (fs / div) / 2;
+                            }
+                        } else {
+                            shortfall -= fs;
+                        }
+                    } else if shortfall < 0 && fsh > 0 {
+                        let div = i64::from(m.max_shrink) / i64::from(m.step.max(1));
+                        if fsh > -shortfall {
+                            if div > 0 {
+                                shortfall = -((fsh / div) / 2);
+                            }
+                        } else {
+                            shortfall += fsh;
+                        }
+                    }
+                }
+            }
             // (e-TeX's `g`: the line's glue stretch or shrink, or the last
             // line's adjustment; set by `last_line`: `found`)
             let mut g: i64 = 0;
@@ -515,7 +571,7 @@ impl Breaker<'_> {
         self.minimal = [i64::from(AWFUL_BAD); 4];
         self.minimum = i64::from(AWFUL_BAD);
         let mut k = 0;
-        let none = [0i64; 6];
+        let none = [0i64; 8];
         // (§866: no break at glue inside a formula)
         let mut auto_breaking = true;
         // (§891: initialize for hyphenating a paragraph)
@@ -538,7 +594,7 @@ impl Breaker<'_> {
                 Item::Kern { sub: 1, .. } => Step::Kern,
                 Item::Math { after, lr, .. } => Step::Math(*after, *lr),
                 Item::Penalty(p) => Step::Penalty(*p),
-                Item::Disc(d) => Step::Disc((!d.pre.is_empty()).then(|| list_widths(&d.pre)), d.replace),
+                Item::Disc(d) => Step::Disc((!d.pre.is_empty()).then(|| list_widths(&d.pre, self.ex)), d.replace),
                 _ => Step::Other,
             };
             match step {
@@ -642,10 +698,13 @@ impl Breaker<'_> {
     /// The widths' prefix sums again from item `from` on (a word there
     /// was hyphenated).
     fn reprefix(&mut self, from: usize) {
+        // (a font kern's stretch looks at the item after it: from the one
+        // before)
+        let from = from.saturating_sub(1);
         self.prefix.truncate(from + 1);
         let mut acc = self.prefix[from];
-        for it in &self.items[from..] {
-            add(&mut acc, &widths(it));
+        for i in from..self.items.len() {
+            add(&mut acc, &widths_at(&self.items, i, self.ex));
             self.prefix.push(acc);
         }
     }
@@ -700,15 +759,17 @@ pub fn lines(items: &[Item], p: &LineParams) -> Vec<Arc<Line>> {
     } else {
         items
     };
+    let micro = p.micro.as_deref();
+    let ex = micro.filter(|m| m.adjust_spacing > 1);
     let mut prefix = Vec::with_capacity(items.len() + 1);
-    let mut acc = [0i64; 6];
+    let mut acc = [0i64; 8];
     prefix.push(acc);
-    for it in items {
-        add(&mut acc, &widths(it));
+    for i in 0..items.len() {
+        add(&mut acc, &widths_at(items, i, ex));
         prefix.push(acc);
     }
     // (§827: the background)
-    let mut background = [0i64; 6];
+    let mut background = [0i64; 8];
     glue_widths(&mut background, &p.leftskip);
     glue_widths(&mut background, &p.rightskip);
     // (§848, §849: the lines' lengths)
@@ -735,6 +796,8 @@ pub fn lines(items: &[Item], p: &LineParams) -> Vec<Arc<Line>> {
         orig: None,
         items: std::borrow::Cow::Borrowed(items),
         p,
+        micro,
+        ex,
         prefix,
         background,
         easy_line,
@@ -854,6 +917,7 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
         }
     };
     let items = &br.items[..];
+    let mut cache = crate::micro::Cache::default();
     let mut breaks: Vec<Option<usize>> = Vec::new();
     let mut q = best.passive;
     while let Some(pi) = q {
@@ -889,19 +953,31 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
         let mut disc_break = false;
         let mut post_disc = false;
         let rightskip = Item::Glue { g: p.rightskip.clone(), sub: 9, zero: is_zero(&p.rightskip) };
+        // (pdfTeX's protrusion: the item after which the right margin kern
+        // goes, and whether it is the protruding one itself — a
+        // discretionary's pre-break list's last — or the search for it
+        // begins there)
+        let mut ptmp: Option<usize>;
+        let mut direct = false;
         // (§881: the end of the line, with `\rightskip`)
         let next_start = if let Some(b) = brk {
             match &items[b] {
                 Item::Glue { .. } | Item::Leaders(_) => {
                     line.extend(items[start..b].iter().cloned());
+                    ptmp = line.len().checked_sub(1);
                     line.push(rightskip);
                     b + 1
                 }
                 Item::Disc(d) => {
                     // (§882: the discretionary becomes compulsory)
                     line.extend(items[start..b].iter().cloned());
+                    ptmp = line.len().checked_sub(1);
                     line.push(Item::Disc(Arc::new(Disc { pre: Vec::new(), post: Vec::new(), replace: 0 })));
                     line.extend(d.pre.iter().cloned());
+                    if !d.pre.is_empty() {
+                        ptmp = Some(line.len() - 1);
+                        direct = true;
+                    }
                     line.push(rightskip);
                     if !d.post.is_empty() {
                         carry.clone_from(&d.post);
@@ -912,12 +988,14 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
                 }
                 Item::Kern { sub, .. } => {
                     line.extend(items[start..b].iter().cloned());
+                    ptmp = line.len().checked_sub(1);
                     line.push(Item::Kern { w: 0, sub: *sub });
                     line.push(rightskip);
                     b + 1
                 }
                 Item::Math { after, lr: base, .. } => {
                     line.extend(items[start..b].iter().cloned());
+                    ptmp = line.len().checked_sub(1);
                     let m = Item::Math { w: 0, after: *after, lr: *base };
                     if p.texxet {
                         adjust_lr(&mut lr, &m);
@@ -928,12 +1006,14 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
                 }
                 _ => {
                     line.extend(items[start..=b].iter().cloned());
+                    ptmp = line.len().checked_sub(2);
                     line.push(rightskip);
                     b + 1
                 }
             }
         } else {
             line.extend(items[start..].iter().cloned());
+            ptmp = line.len().checked_sub(2);
             line.push(rightskip);
             items.len()
         };
@@ -946,6 +1026,18 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
                 from.push(orig(i));
             }
             from.resize(line.len(), at_break);
+        }
+        if let Some(m) = p.micro.as_deref().filter(|m| m.protrude_chars > 0) {
+            // (the margin kerns come from the items they are beside)
+            let (right, left) = m.margin_kerns(&mut line, ptmp, direct);
+            if let Some(i) = right {
+                let f = i.checked_sub(1).and_then(|j| from.get(j)).copied().unwrap_or(at_start);
+                from.insert(i, f);
+            }
+            if left {
+                let f = from.first().copied().unwrap_or(at_start);
+                from.insert(0, f);
+            }
         }
         if p.texxet && !lr.is_empty() {
             // (etex.web §1520: and end before `\rightskip`, innermost first)
@@ -987,7 +1079,10 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
         if p.texxet {
             crate::pack::lr_fix(&mut line);
         }
-        let packed = hpack(line, Spec::Exactly(width), &p.pack, Some(&mut adjust));
+        let packed = match p.micro.as_deref().filter(|m| m.adjust_spacing > 0) {
+            Some(m) => m.hpack_line(line, width, &p.pack, &mut adjust, &mut cache),
+            None => hpack(line, Spec::Exactly(width), &p.pack, Some(&mut adjust)),
+        };
         // (the diagnostic is hpack's: before the shift, tex.web 889)
         let report = packed.report.map(|r| report(r, &packed.b, Place::Paragraph, &p.show));
         let mut b = packed.b;

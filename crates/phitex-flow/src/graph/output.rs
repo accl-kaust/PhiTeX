@@ -351,7 +351,7 @@ impl Exec<'_> {
         if self.st.mode == Mode::H && !self.st.inner {
             // (`end_graf` before the group ends: the paragraph ends, then the
             // `}` again, backed up: read to its end, §1100 lets it pass)
-            let e = self.cs("\u{0}endgraf");
+            let e = self.end_graf_token(2);
             self.back(t.clone());
             self.rewrite(vec![e]);
             return;

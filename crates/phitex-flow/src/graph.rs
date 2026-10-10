@@ -4440,6 +4440,17 @@ impl<'a> Exec<'a> {
             }
             return;
         };
+        // (pdfTeX's frozen `\pdfprimitive`: the next token, as its name's
+        // primitive)
+        let (t, m) = if m == Meaning::Prim(Prim::PdfPrimitiveExec) {
+            let Some(x) = self.next_raw() else { return };
+            match self.primitive_of(&x) {
+                Some(p) => (x, Meaning::Prim(p)),
+                None => return,
+            }
+        } else {
+            (t, m)
+        };
         self.cmd = t.clone();
         let (global, long, outer) = (
             std::mem::take(&mut self.st.global),
@@ -4616,6 +4627,10 @@ impl<'a> Exec<'a> {
                 }
             }
             Prim::Space => self.ex_space(),
+            // (pdfTeX's extensions: no whatsit, done where they are met)
+            Prim::ParTokenName => self.par_token_name(),
+            Prim::PdfFont(0) => self.pdf_font_expand(),
+            Prim::PdfFont(1) => self.pdf_font_attr(),
             Prim::Char => {
                 let t = self.cmd.clone();
                 self.char_cmd_num(&t);

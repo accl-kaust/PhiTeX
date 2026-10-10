@@ -97,6 +97,36 @@ pub struct Font {
     pub bchar_label: Option<u16>,
     /// The file's bytes (to load it at another size).
     pub data: Arc<[u8]>,
+    /// A font pdfTeX makes from another (`None`: loaded from its file).
+    pub derived: Option<Arc<Derived>>,
+}
+
+/// A font pdfTeX makes from another font (pdftex.web): the font it is
+/// made from and how.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Derived {
+    pub base: Arc<Font>,
+    pub kind: DerivedKind,
+}
+
+/// How a derived font is made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DerivedKind {
+    /// Font expansion (`auto_expand_font`): widths, italic corrections
+    /// and kerns scaled by `1000+e` thousandths; named `name+e` (`name-e`).
+    /// The PDF writer sets it as the base font's glyphs, the text matrix
+    /// scaled horizontally by `1000+e` thousandths (pdftex.web's
+    /// `pdf_new_Tm_a`); DVI names it by its name.
+    Expanded(i32),
+    /// `\pdfcopyfont`'s copy: the same metrics, a font of its own (its
+    /// codes and parameters apart), the `n`th copy of the base.
+    Copy(u32),
+    /// `\letterspacefont`: every width plus `e` thousandths of the quad,
+    /// named `name+els`, the `n`th of the base; a virtual font whose
+    /// characters are the base font's, each moved right by
+    /// `round_xn_over_d(quad, e, 2000)` before and after
+    /// (`letter_space_font`). `nolig`: its ligatures removed.
+    LetterSpaced { e: i32, n: u32, nolig: bool },
 }
 
 /// A TFM file tex.web would not load (§560's `abort`).
@@ -181,6 +211,7 @@ impl Font {
             false_bchar: 256,
             bchar_label: None,
             data: Arc::from([]),
+            derived: None,
         }
     }
 
@@ -392,7 +423,143 @@ impl Font {
             false_bchar,
             bchar_label: (bch_label < nl).then_some(bch_label as u16),
             data,
+            derived: None,
         })
+    }
+
+    /// pdftex.web's `round_xn_over_d`: `x*n/d` rounded, as pdfTeX computes
+    /// it (its intermediate quantities as C's `int`s).
+    pub fn round_xn_over_d(x: i32, n: i32, d: i32) -> i32 {
+        let (positive, x) = if x >= 0 { (true, i64::from(x)) } else { (false, -i64::from(x)) };
+        let (n, d) = (i64::from(n), i64::from(d));
+        let t = (x % 0o100_000) * n;
+        let mut u = (x / 0o100_000) * n + (t / 0o100_000);
+        let mut v = (u % d) * 0o100_000 + (t % 0o100_000);
+        if u / d < 0o100_000 {
+            u = 0o100_000 * (u / d) + (v / d);
+        }
+        v %= d;
+        if 2 * v >= d {
+            u += 1;
+        }
+        (if positive { u } else { -u }) as i32
+    }
+
+    /// The font this one is made from, if it is an expanded font
+    /// (pdftex.web's `pdf_font_blink`).
+    pub fn expanded_from(&self) -> Option<(&Arc<Font>, i32)> {
+        match self.derived.as_deref() {
+            Some(Derived { base, kind: DerivedKind::Expanded(e) }) => Some((base, *e)),
+            _ => None,
+        }
+    }
+
+    /// The font whose name a display shows for this one (an expanded
+    /// font's base, pdftex.web's `print_font_identifier`).
+    pub fn ident_key(&self) -> &Arc<str> {
+        self.expanded_from().map_or(&self.key, |(b, _)| &b.key)
+    }
+
+    /// pdftex.web's `auto_expand_font`: `base` expanded by `e` thousandths
+    /// (a pure function of the two: its identity is the base's and `e`).
+    pub fn expanded(base: &Arc<Font>, e: i32) -> Font {
+        let r = |x: i32| Font::round_xn_over_d(x, 1000 + e, 1000);
+        let glyphs: Arc<[Option<Glyph>]> =
+            base.glyphs.iter().map(|g| g.map(|g| Glyph { width: r(g.width), italic: r(g.italic), ..g })).collect();
+        let name = if e > 0 { format!("{}+{e}", base.name) } else { format!("{}{e}", base.name) };
+        Font {
+            name,
+            key: Arc::from(format!("{} {e:+}", base.key)),
+            glyphs,
+            kerns: base.kerns.iter().map(|&k| r(k)).collect(),
+            derived: Some(Arc::new(Derived { base: base.clone(), kind: DerivedKind::Expanded(e) })),
+            ..(**base).clone()
+        }
+    }
+
+    /// pdftex.web's `copy_font_info`: the `n`th copy of `base`, its
+    /// parameters as `params` (the base's as they are now).
+    pub fn copied(base: &Arc<Font>, n: u32, params: Arc<[i32]>) -> Font {
+        Font {
+            key: Arc::from(format!("{} copy{n}", base.key)),
+            params,
+            derived: Some(Arc::new(Derived { base: base.clone(), kind: DerivedKind::Copy(n) })),
+            ..(**base).clone()
+        }
+    }
+
+    /// pdftex.web's `letter_space_font`: `base`'s file loaded again, the
+    /// `n`th such, its widths plus `round_xn_over_d(quad, e, 1000)`, where
+    /// the quad is its own (or `base_quad` if its own is zero); `nolig`:
+    /// its ligatures removed (`set_no_ligatures`).
+    pub fn letterspaced(base: &Arc<Font>, e: i32, n: u32, nolig: bool, base_quad: i32) -> Font {
+        let mut params: Vec<i32> = base.params.to_vec();
+        if params[6] == 0 && base_quad > 0 {
+            params[6] = base_quad;
+        }
+        let add = Font::round_xn_over_d(params[6], e, 1000);
+        let glyphs: Arc<[Option<Glyph>]> = base
+            .glyphs
+            .iter()
+            .map(|g| {
+                g.map(|g| Glyph {
+                    width: g.width + add,
+                    tag: if nolig && matches!(g.tag, Tag::Lig(_)) { Tag::None } else { g.tag },
+                    ..g
+                })
+            })
+            .collect();
+        let name = if e > 0 { format!("{}+{e}ls", base.name) } else { format!("{}{e}ls", base.name) };
+        Font {
+            key: Arc::from(format!("{} {e:+}ls{n}", base.key)),
+            name,
+            glyphs,
+            params: params.into(),
+            derived: Some(Arc::new(Derived { base: base.clone(), kind: DerivedKind::LetterSpaced { e, n, nolig } })),
+            ..(**base).clone()
+        }
+    }
+
+    /// `\pdfnoligatures`'s value (`test_no_ligatures`): 1 if no character
+    /// has a tag whose code is odd (a lig/kern program or an extensible
+    /// recipe) after the tags `cleared` (`micro::TAG`'s table), else 0.
+    pub fn test_no_ligatures(&self, cleared: &[i32]) -> i32 {
+        let odd = self.glyphs.iter().enumerate().any(|(i, g)| {
+            let gone = cleared.get(i + self.bc.max(0) as usize).copied().unwrap_or(0);
+            match g.map(|g| g.tag) {
+                Some(Tag::Lig(_)) => gone & 1 == 0,
+                Some(Tag::Ext(_)) => gone & 4 == 0,
+                _ => false,
+            }
+        });
+        i32::from(!odd)
+    }
+
+    /// pdftex.web's `get_kern`: the kern between `lc` and `rc` in the
+    /// lig/kern program (0 if none).
+    pub fn get_kern(&self, lc: u8, rc: u8) -> i32 {
+        let Some(Glyph { tag: Tag::Lig(start), .. }) = self.glyph(i32::from(lc)) else { return 0 };
+        let lk = |k: usize| self.lig_kerns.get(k).copied();
+        let mut k = usize::from(start);
+        let Some(j) = lk(k) else { return 0 };
+        if j.skip > LigKern::STOP {
+            k = 256 * usize::from(j.op) + usize::from(j.remainder);
+        }
+        loop {
+            let Some(j) = lk(k) else { return 0 };
+            if j.next == rc && j.skip <= LigKern::STOP && j.op >= LigKern::KERN {
+                let i = 256 * usize::from(j.op - LigKern::KERN) + usize::from(j.remainder);
+                return self.kerns.get(i).copied().unwrap_or(0);
+            }
+            if j.skip == 0 {
+                k += 1;
+            } else {
+                if j.skip >= LigKern::STOP {
+                    return 0;
+                }
+                k += usize::from(j.skip) + 1;
+            }
+        }
     }
 
     /// The identity of the font `name` at `size`.
@@ -424,7 +591,8 @@ impl Font {
 
 impl PartialEq for Font {
     fn eq(&self, o: &Self) -> bool {
-        std::ptr::eq(self, o) || (self.size == o.size && self.checksum == o.checksum && self.name == o.name)
+        std::ptr::eq(self, o)
+            || (self.size == o.size && self.checksum == o.checksum && self.name == o.name && self.key == o.key)
     }
 }
 
