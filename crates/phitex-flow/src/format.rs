@@ -160,11 +160,17 @@ impl Writer<'_> {
 
     fn prim(&mut self, p: Prim) -> Result<(), String> {
         let name = p.name();
-        if prim_named(name) != Some(p) {
-            return Err(format!("the primitive {p:?} has no name it is found by again"));
+        if prim_named(name) == Some(p) {
+            self.str(name);
+            return Ok(());
         }
-        self.str(name);
-        Ok(())
+        // (XeTeX's own primitive of a name pdfTeX's table has too,
+        // `\pdfsavepos`: the name marked as XeTeX's)
+        if Prim::by_name_xetex(name) == Some(p) {
+            self.str(&format!("{XETEX_OWN}{name}"));
+            return Ok(());
+        }
+        Err(format!("the primitive {p:?} has no name it is found by again"))
     }
 
     fn meaning(&mut self, m: &Meaning) -> Result<(), String> {
@@ -531,6 +537,10 @@ impl Writer<'_> {
 
 /// The primitive whose name is `name` (each table, then the reader's own
 /// and the ones without a graph form).
+/// Before a primitive's name in the file: XeTeX's primitive of that name,
+/// not pdfTeX's (no primitive's name begins with it).
+const XETEX_OWN: char = '\u{1}';
+
 fn prim_named(name: &str) -> Option<Prim> {
     Prim::by_name(name)
         .or_else(|| Prim::by_name_etex(name))
@@ -690,7 +700,11 @@ impl Reader<'_> {
             0 => Meaning::Undefined,
             1 => {
                 let name = self.str()?;
-                Meaning::Prim(prim_named(&name).ok_or_else(|| bad("an unknown primitive"))?)
+                let p = match name.strip_prefix(XETEX_OWN) {
+                    Some(n) => Prim::by_name_xetex(n),
+                    None => prim_named(&name),
+                };
+                Meaning::Prim(p.ok_or_else(|| bad("an unknown primitive"))?)
             }
             2 => {
                 let params = self.toks()?;

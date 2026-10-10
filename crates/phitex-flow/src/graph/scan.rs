@@ -495,8 +495,10 @@ impl Exec<'_> {
                 }
                 _ => None,
             };
+            // (XeTeX: any Unicode scalar value, xetex.web 442)
+            let biggest = if self.xetex { 0x10_FFFF } else { 255 };
             match c {
-                Some(c) if u32::from(c) <= 255 => {
+                Some(c) if u32::from(c) <= biggest => {
                     v = u32::from(c) as i32;
                     self.optional_space();
                 }

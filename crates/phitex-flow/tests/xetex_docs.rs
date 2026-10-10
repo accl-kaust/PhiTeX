@@ -52,7 +52,7 @@ fn oracle_dir() -> PathBuf {
 }
 
 fn font() -> Arc<Font> {
-    let b = std::fs::read(root().join("../partex-core/testdata/cmr10.tfm")).unwrap();
+    let b = std::fs::read(root().join("testdata/cmr10.tfm")).unwrap();
     Arc::new(Font::parse("cmr10", &b).unwrap())
 }
 
