@@ -14,7 +14,7 @@ use phitex_flow::build::MAIN_MEMORY;
 use phitex_flow::{Build, Font, Options, Order, Reads};
 
 /// The documents.
-const DOCS: [&str; 28] = [
+const DOCS: [&str; 29] = [
     "hello",
     "compressed",
     "mag",
@@ -44,6 +44,7 @@ const DOCS: [&str; 28] = [
     "pageref",
     "vf",
     "interword",
+    "bera",
 ];
 
 /// The directories a document's files are found in: its own, and the
@@ -357,6 +358,11 @@ fn vf() {
 #[test]
 fn interword() {
     check("interword");
+}
+
+#[test]
+fn bera() {
+    check("bera");
 }
 
 /// Page 2 guesses its decimal digits (page 1 fixed 3) and which font

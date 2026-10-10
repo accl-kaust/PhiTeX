@@ -3341,7 +3341,10 @@ font, when a walk first shows a character of it (`F::do_vf`,
 `pdf/vf.rs` `parse`): a walk that does not know a font takes it as real
 and lists it (`PageBody::vf_asked`, in the order it showed them); the
 fold looks for those files in that order up to the first virtual font
-and walks again, until a walk asks about nothing new (a page made where
+and walks again — once for each virtual font a page first shows, however
+many (bera's documents show five on a page: a cap of four walks left the
+fifth real, "Type 3 (PK) fonts are not supported yet") — until a walk
+asks about nothing new (a page made where
 it was shipped knows no font, so a page whose fonts are all real is
 kept as it was). The local fonts are TeX fonts loaded then
 (`vf_def_font`: one of that name and size loaded before, else the TFM
@@ -3353,8 +3356,11 @@ the pages so far show (the fold's `vf_order`). `\pdffontname`,
 `\pdffontobjnum`, `\pdfincludechars` of a virtual font are fatal, as
 pdfTeX's `pdf_check_vf_cur_val`. Tests: `tests/pdf.rs` `vf` (Times and
 Helvetica in OT1, a font loaded after a page that loaded local fonts, a
-form), `tests/pdflatex_docs.rs` `vfont` (T1 Times, Helvetica, Courier).
-Gaps: a font the page's own piece loads before the page builder fired
+form), `bera` (six of bera's virtual fonts first shown on one page and
+in a form), `tests/pdflatex_docs.rs` `vfont` (T1 Times, Helvetica, Courier).
+Speed (not this part's): enumitem's manual (24 pages) took 18:57 at
+`-j 1` and 3.8 GB, A's quadratic lookup of names in deep groups
+(`Chain::resolve`). Gaps: a font the page's own piece loads before the page builder fired
 and the page does not show is counted as loaded after; an
 auto-expanded virtual font and `\letterspacefont` wait for font
 expansion.

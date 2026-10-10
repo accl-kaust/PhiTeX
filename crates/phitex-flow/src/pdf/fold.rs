@@ -2252,11 +2252,8 @@ impl F<'_> {
             f.form_render(&b, &guess)
         };
         let mut body = render(self);
-        // (its virtual fonts, as a page's)
-        for _ in 0..8 {
-            if !(self.resolve_vfs(&body.vf_asked) | self.resolve_spaces(&body)) {
-                break;
-            }
+        // (its virtual fonts, as a page's: each walk again finds one more)
+        while self.resolve_vfs(&body.vf_asked) | self.resolve_spaces(&body) {
             body = render(self);
         }
         self.walk_events(&body);
@@ -2843,7 +2840,10 @@ pub fn assemble(
             } else {
                 numbered && !ff_holds
             };
-            if !(virt || stale) || renders == 4 {
+            // (a virtual font found makes the walk again however many there
+            // are: each walk looks for one more font's file; the guesses'
+            // walks again are bounded)
+            if !(virt || stale) || (renders >= 4 && !virt) {
                 break;
             }
             let guess = if numbered { body.ff.clone() } else { content::guess_ff(p, f.nums(), &[]) };
