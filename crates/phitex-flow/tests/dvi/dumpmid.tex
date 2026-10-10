@@ -1,0 +1,9 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\rm=cmr10 \rm \hsize=100pt \vsize=100pt \parindent=0pt
+\def\gobble#1{}
+\message{[job one]}
+\dump
+
+\everypar{\gobble}\def\loop{$\par\loop}\loop
+
+\message{[never]}

@@ -288,6 +288,8 @@ pub fn push_vertical(list: &mut Vec<Item>, prev_depth: &mut i32, it: Item) {
         Item::Append(b, inter) => append_to_vlist(list, prev_depth, &b, &inter),
         Item::PrevDepth(d) => *prev_depth = d,
         Item::Remove(k) => remove_last(list, k),
+        // (the page builder's: not in a list)
+        Item::PageSoFar(..) => {}
         _ => list.push(it),
     }
 }
@@ -559,6 +561,17 @@ impl Scan {
                 self.contrib.extend(v);
             }
             Item::PrevDepth(d) => *pd = d,
+            // (tex.web 1245–1246: the page so far changes now, before the
+            // contributions after it are looked at)
+            Item::PageSoFar(k, v) => match k {
+                0 => self.page_goal = v,
+                1 => self.total = v,
+                2..=5 => self.stretch[usize::from(k - 2)] = v,
+                6 => self.shrink = v,
+                7 => self.depth = v,
+                8 => self.dead_cycles = v,
+                _ => self.insert_penalties = v,
+            },
             Item::Remove(k) => {
                 self.unsafe_since.push(org);
                 let mut v: Vec<Item> = self.contrib.drain(..).collect();
@@ -1043,6 +1056,11 @@ impl Scan {
         // every fire, §1013; the insertion boxes, §1018–1022; the marks,
         // once there are any)
         let mut defs: Vec<(Key, Val)> = vec![(Key::IntPar(IntPar::Outputpenalty), Val::Int(out_pen))];
+        // (the page is empty now: outside a routine `\pagegoal` reads
+        // `max_dimen`, the others 0, tex.web 421)
+        for k in 0..8u8 {
+            defs.push((Key::Page(k), Val::Int(if k == 0 { MAX_DIMEN } else { 0 })));
+        }
         for (n, list) in boxes {
             let b = vpack(list, Spec::NATURAL, MAX_DIMEN, &Params::QUIET).b;
             defs.push((Key::Box(u16::from(n)), Val::Box(Arc::new(b))));
