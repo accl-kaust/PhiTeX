@@ -63,6 +63,26 @@ pub fn pdf_format(name: &str) -> KpseFormat {
     }
 }
 
+/// The program name the default finder asks as.
+pub const TEX_LIVE_PROG: &str = "pdftex";
+
+/// TeX Live's kpathsea as `pdftex`, made once per process (its texmf.cnf
+/// and `ls-R` read at the first lookup): what a build finds TFM and PDF
+/// output's files with by default. None where no TeX Live is found
+/// ([`Kpathsea::from_path`]) or `PHITEX_NO_KPSE` is set (not empty): then
+/// TeX Live's directories are walked, as before.
+pub fn tex_live() -> Option<Arc<Kpathsea>> {
+    static TEX_LIVE: std::sync::OnceLock<Option<Arc<Kpathsea>>> = std::sync::OnceLock::new();
+    TEX_LIVE
+        .get_or_init(|| {
+            if std::env::var_os("PHITEX_NO_KPSE").is_some_and(|v| !v.is_empty()) {
+                return None;
+            }
+            Kpathsea::from_path(TEX_LIVE_PROG, TEX_LIVE_PROG).map(Arc::new)
+        })
+        .clone()
+}
+
 impl Kpathsea {
     /// Over an instance made for the program (`Kpse::new(selfdir,
     /// progname, engine)`).

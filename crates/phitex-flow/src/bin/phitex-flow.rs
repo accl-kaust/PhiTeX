@@ -24,7 +24,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
-         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--kpse PROG] [--fmt FILE] [--dump-fmt FILE] [--interaction MODE] [--edit OLD=>NEW] [--repeat N] \
+         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--kpse PROG] [--no-kpse] [--fmt FILE] [--dump-fmt FILE] [--interaction MODE] [--edit OLD=>NEW] [--repeat N] \
          [--check] [--log] [--main-memory WORDS] [--cut-lines N|inf]"
     );
     ExitCode::from(2)
@@ -382,6 +382,7 @@ fn main() -> ExitCode {
     let mut terminal: Vec<String> = Vec::new();
     let mut font_dirs: Vec<std::path::PathBuf> = Vec::new();
     let mut kpse: Option<String> = None;
+    let mut no_kpse = false;
     let mut fmt: Option<String> = None;
     let mut dump_fmt: Option<String> = None;
     let mut interaction: Option<i32> = None;
@@ -435,6 +436,7 @@ fn main() -> ExitCode {
                 Some(d) => font_dirs.push(d.into()),
                 None => return usage(),
             },
+            "--no-kpse" => no_kpse = true,
             "--kpse" => match val() {
                 Some(p) => kpse = Some(p),
                 None => return usage(),
@@ -558,21 +560,36 @@ fn main() -> ExitCode {
         font_dirs.extend(phitex_flow::tfm::default_dirs());
         b.set_font_dirs(font_dirs.clone());
     }
-    // (`--kpse PROG`: files found by TeX Live's kpathsea as program PROG —
-    // inputs after the input directories, TFM files, PDF output's files —
-    // instead of walking TeX Live's directories)
+    // (files found by TeX Live's kpathsea as program PROG, `--kpse PROG`,
+    // `pdftex` by default — inputs after the input directories, TFM files,
+    // PDF output's files — where a TeX Live is found; `--no-kpse`, or no
+    // TeX Live: TeX Live's directories walked, inputs in the input
+    // directories only)
     let mut finder: Option<(Arc<phitex_flow::kpse::Kpathsea>, String)> = None;
-    if let Some(prog) = &kpse {
-        match phitex_flow::kpse::Kpathsea::from_path(prog, prog) {
+    if no_kpse {
+        b.set_no_kpse();
+    } else {
+        let prog = kpse.clone().unwrap_or_else(|| phitex_flow::kpse::TEX_LIVE_PROG.to_string());
+        let k = if prog == phitex_flow::kpse::TEX_LIVE_PROG {
+            phitex_flow::kpse::tex_live()
+        } else {
+            phitex_flow::kpse::Kpathsea::from_path(&prog, &prog).map(Arc::new)
+        };
+        match k {
             Some(k) => {
-                let k = Arc::new(k);
-                b.set_kpse(k.clone(), prog);
-                finder = Some((k, prog.clone()));
+                b.set_kpse(k.clone(), &prog);
+                finder = Some((k, prog));
             }
-            None => {
+            None if kpse.is_some() => {
                 eprintln!("--kpse {prog}: no TeX Live (kpsewhich or tex with a texmf.cnf) on PATH");
                 return ExitCode::FAILURE;
             }
+            None => {}
+        }
+        // (`--font-dir`: those directories walked for TFM files, then TeX
+        // Live's, as asked)
+        if !font_dirs.is_empty() {
+            b.set_font_dirs(font_dirs.clone());
         }
     }
     // (`-interaction`: the mode before any definition, and at each job's
@@ -641,6 +658,8 @@ fn main() -> ExitCode {
             fb.set_input_dirs(inputs.clone());
             if let Some((k, prog)) = &finder {
                 fb.set_kpse(k.clone(), prog);
+            } else if no_kpse {
+                fb.set_no_kpse();
             }
             fb.set_jobname(&job);
             let fresh = fb.update(&edited, opts);

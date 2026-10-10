@@ -519,6 +519,10 @@ pub struct Build {
     /// How a file's name becomes a path, if not by the input directories,
     /// and the program name it asks as ([`Build::set_kpse`]).
     finder: Option<(Arc<dyn Kpse>, Arc<str>)>,
+    /// TeX Live's kpathsea where one is found ([`crate::kpse::tex_live`]):
+    /// TFM and PDF output's files by default, with no finder set
+    /// ([`Build::set_no_kpse`] walks TeX Live's directories instead).
+    tex_live: Option<Arc<dyn Kpse>>,
     job: Arc<str>,
     /// What the session gives before any definition: the terminal's lines
     /// (`Key::ReadStream(16)`), the interaction mode (`Key::Interaction`).
@@ -670,6 +674,8 @@ struct Given {
     files: FileCache,
     /// The files PDF output read through the finder ([`Given::pdf_found`]).
     pdf: FileCache,
+    /// With no finder, TeX Live's kpathsea for PDF output's files, if any.
+    tex_live: Option<Arc<dyn Kpse>>,
     job: Arc<str>,
     /// The lines of its file before each piece of the sequence.
     bases: Vec<u32>,
@@ -698,6 +704,7 @@ impl Given {
             mem,
             files: Mutex::default(),
             pdf: Mutex::default(),
+            tex_live: None,
             job,
             bases,
             terminal: None,
@@ -754,6 +761,11 @@ impl Given {
     /// finder: where, as TeX Live shows it, and its bytes.
     fn by_finder(&self, name: &str, format: KpseFormat) -> Option<(Arc<str>, Arc<[u8]>)> {
         let (f, prog) = self.finder.as_ref()?;
+        Self::by(&**f, prog, name, format)
+    }
+
+    /// File `name` of `format` as `f` finds it as program `prog`.
+    fn by(f: &dyn Kpse, prog: &str, name: &str, format: KpseFormat) -> Option<(Arc<str>, Arc<[u8]>)> {
         let p = f.find(name, format, prog)?;
         let b = f.read(&p)?;
         let shown = if p.starts_with('/') { p } else { format!("./{}", p.trim_start_matches("./")) };
@@ -763,10 +775,23 @@ impl Given {
     /// A file PDF output reads (the map file, a font file, an encoding):
     /// given in memory, else by the finder in the format pdfTeX asks for
     /// it ([`crate::kpse::pdf_format`]); without a finder, as an input
-    /// file, then below TeX Live's font directories ([`crate::tfm::pdf_file`]).
+    /// file, then by TeX Live's kpathsea as `pdftex` (or, where none is
+    /// found or [`Build::set_no_kpse`], below TeX Live's font directories:
+    /// [`crate::tfm::pdf_file`]).
     fn pdf_found(&self, name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
         if self.finder.is_none() {
-            return self.found(name).or_else(|| crate::tfm::pdf_file(name));
+            return self.found(name).or_else(|| match &self.tex_live {
+                Some(k) => {
+                    let mut g = self.pdf.lock().expect("pdf files");
+                    if let Some(v) = g.get(name) {
+                        return v.clone();
+                    }
+                    let v = Self::by(&**k, crate::kpse::TEX_LIVE_PROG, name, crate::kpse::pdf_format(name));
+                    g.insert(Arc::from(name), v.clone());
+                    v
+                }
+                None => crate::tfm::pdf_file(name),
+            });
         }
         if let Some(b) = self.mem.get(name) {
             return Some((Arc::from(format!("./{name}")), b.clone()));
@@ -1358,13 +1383,15 @@ enum Task {
 }
 
 impl Build {
-    /// A build whose documents can load `font` by its name, and the TFM
-    /// files in TeX Live's directories.
+    /// A build whose documents can load `font` by its name, and TeX Live's
+    /// TFM files: by its kpathsea where one is found
+    /// ([`crate::kpse::tex_live`]), else below its font directories.
     pub fn new(font: Arc<Font>) -> Build {
-        let fonts = Arc::new(FontFiles::new(
-            Self::given(&font),
-            crate::tfm::default_dirs(),
-        ));
+        let tex_live: Option<Arc<dyn Kpse>> = crate::kpse::tex_live().map(|k| k as Arc<dyn Kpse>);
+        let fonts = Arc::new(match &tex_live {
+            Some(k) => FontFiles::with_kpse(Self::given(&font), k.clone(), Arc::from(crate::kpse::TEX_LIVE_PROG)),
+            None => FontFiles::new(Self::given(&font), crate::tfm::default_dirs()),
+        });
         Build {
             font,
             fonts,
@@ -1380,6 +1407,7 @@ impl Build {
             starts: Vec::new(),
             inputs: Arc::new(Vec::new()),
             finder: None,
+            tex_live,
             job: Arc::from(crate::graph::JOBNAME),
             lean: true,
             builds: 0,
@@ -1484,6 +1512,16 @@ impl Build {
         let prog: Arc<str> = Arc::from(prog);
         self.fonts = Arc::new(FontFiles::with_kpse(Self::given(&self.font), kpse.clone(), prog.clone()));
         self.finder = Some((kpse, prog));
+    }
+
+    /// No kpathsea: TFM files below TeX Live's font directories and PDF
+    /// output's files below its map, font and encoding directories, each
+    /// tree walked once (the default where no TeX Live is found), inputs
+    /// in the input directories only.
+    pub fn set_no_kpse(&mut self) {
+        self.finder = None;
+        self.tex_live = None;
+        self.fonts = Arc::new(FontFiles::new(Self::given(&self.font), crate::tfm::default_dirs()));
     }
 
     /// The job's name (`\jobname`; `texput` until set).
@@ -2223,6 +2261,7 @@ impl Build {
         let bases: Vec<u32> = p.iter().map(|x| x.base as u32).collect();
         let mut given = Given::new(self.inputs.clone(), self.job.clone(), self.files.clone(), bases);
         given.finder.clone_from(&self.finder);
+        given.tex_live.clone_from(&self.tex_live);
         given.terminal.clone_from(&self.terminal);
         given.interaction = self.interaction;
         given.interaction_option = self.interaction_option;
