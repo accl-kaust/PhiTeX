@@ -1301,6 +1301,42 @@ moves to `tests/fuzz/fixed/`, which must pass):
   `\input` keeps the wrong run, and the cold build of the edited text
   (no restructure) does not have it.
 
+**LaTeX documents** (`fuzz::Kind::Latex`, `fuzz::latex_corpus`,
+`phitex-flow --fuzz ... --latex`). A LaTeX document is a session of two
+jobs as `tests/latex_docs.rs` builds them: `latex.ini`, with `latex.ltx`
+as the prelude until the saved format, then `&latex NAME`. It runs in
+extended mode, with the directories B's documents' `.dirs` and
+`tests/latex/dirs.txt` give. The corpus is `tests/fuzz/latex/tiny.tex`
+(the harness is made on it: sections, labels and refs, a list, an
+equation, a tabular, a figure, `\newcommand`, `ifthen`) and B's six
+documents, named `latex-NAME`. The edits are made in the document's text
+(`fuzz::edit_latex`):
+- a word; an inserted paragraph; a `\section` title;
+- a `\label` moved to another paragraph; a `\ref`'s target changed;
+- `\emph`/`\textbf` wrapped round a word or removed;
+- an `\item` added or removed; an equation changed; a tabular cell;
+- a figure or table moved to another paragraph;
+- `\usepackage` added or removed (ifthen, calc, array, verbatim);
+- the class option toggled (none, 11pt, 12pt, twocolumn);
+- the `\newcommand` body; a comment line; a blank line inside or outside
+  an environment.
+Each update is compared with a cold build (at 8 workers). There are no
+dumps and no over-invalidation check until the format, since
+latex.ltx's graph has millions of nodes (`PHITEX_FUZZ_LATEX_OVER=1`
+forces them).
+
+`tests/fuzz.rs` `latex_edits_equal_cold_and_latex`: `PHITEX_FUZZ_LATEX`
+seeds (1) of one edit on tiny, compared with the cold build and with
+`latex` itself on its first run (DVI with the date masked, `.aux`). It
+takes about 100 s with the prelude. Locally, 3 seeds of 2 edits at 8
+threads (random schedules) passed, and so did seed 0 against `latex`.
+The budgets table gets a LaTeX row set
+(`phitex-flow --budgets 1 latex-tiny`, `tests/budgets.rs`): word, line,
+page-break, the `\newcommand` body and `\parskip`, once at 8 workers,
+lean. With the prelude, tiny's cold build takes 42 s and its edits
+140–290 ms: a word reruns 9 pieces and 17365 steps, `\parskip` 3039. The
+real numbers come with the format.
+
 **Edit budgets** (`src/budgets.rs`, `phitex-flow --budgets [REPS]
 [DOC]`, `scripts/flow-budgets.sh`, `tests/budgets.rs`, informational).
 Documents: the plain ones; big (48 pages); bigout (152 pages, big's body
