@@ -1365,7 +1365,12 @@ pub fn save(dir: &Path, r: &Repro) -> PathBuf {
 /// its schedule, the edit at the failing schedule, against the cold
 /// build. The failure, if it still fails.
 pub fn replay(r: &Repro) -> Option<Fail> {
-    replay_outputs(r)?.0
+    // (a panic is a failure too: a reproduction of one can be an open
+    // finding)
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| replay_outputs(r))) {
+        Ok(o) => o?.0,
+        Err(e) => Some(Fail::Panic(panic_text(&*e))),
+    }
 }
 
 /// [`replay`], with the edit's and the cold build's outputs.
