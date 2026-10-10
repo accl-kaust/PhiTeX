@@ -965,6 +965,22 @@ impl Names {
         }))
     }
 
+    /// What a read of `key` at `at` is validated against, and the
+    /// definition the names index has there: a fold's read (`Key::Page`,
+    /// `Key::File`) only ever against the fold's value at that node,
+    /// every other read against the names index. The one place reads are
+    /// checked ([`Names::read_holds`]: install, `still_dirty`).
+    fn read_now(&self, key: &Key, at: Pos, font: &Arc<Font>) -> (Option<Pos>, Val) {
+        let (def, now, ..) = self.reaching(key, at, font);
+        (def, self.fold_value(key, at, font).unwrap_or(now))
+    }
+
+    /// Whether a read of `key` at `at` that saw `saw` sees it still
+    /// ([`Names::read_now`]).
+    fn read_holds(&self, key: &Key, at: Pos, font: &Arc<Font>, saw: &Val) -> bool {
+        saw.seen_as(&self.read_now(key, at, font).1)
+    }
+
     /// The fold's value of `key` at `at` is `v` (validated).
     fn set_fold_value(&self, key: &Key, at: Pos, v: Val) {
         self.fold_vals.write().expect("fold values").insert((at.0, at.1, key.clone()), v);
@@ -1956,7 +1972,8 @@ impl Build {
         let kept = self.pieces.get(k)?;
         let (file, base) = self.places.get(&kept.id)?;
         let pos = kept.run.as_ref()?.node_pos(node as usize)?;
-        let p = pos.saturating_sub(1).min(kept.text.len());
+        // (where it began reading: the lines before that position)
+        let p = pos.min(kept.text.len());
         let line = 1 + kept.text[..p].iter().filter(|&&c| c == '\r').count() as u32;
         Some((file.clone(), base + line))
     }
@@ -2310,6 +2327,7 @@ impl Build {
             .filter(|(_, x)| x.status == Status::Unstarted)
             .map(|(k, _)| k)
             .collect();
+
         let mut deps = vec![Vec::new(); n];
         for (k, ps) in p.iter().enumerate() {
             match ps.entry {
@@ -3057,17 +3075,6 @@ fn worker(sh: &Shared, id: usize) {
     }
 }
 
-/// What a read of `key` the run entered at node `node` (from before the
-/// piece) finds now, and the definition the names index has there (a
-/// fold's read is the fold's to validate: against what it has there now,
-/// not the names index). A kept node's reads have the sources the run
-/// would give them now (`graph::run_piece` re-points one whose source
-/// moved into or out of the piece), so an entry is a read from before the
-/// piece as the run would make it again.
-fn read_now(sh: &Shared, k: usize, node: u32, key: &Key) -> (Option<Pos>, Val) {
-    let (def, now, ..) = sh.names.reaching(key, (k as u32, node), &sh.font);
-    (def, sh.names.fold_value(key, (k as u32, node), &sh.font).unwrap_or(now))
-}
 
 /// The definitions of `key` between piece `k`'s nodes, for a dump.
 fn outside_ranges(names: &Names, key: &Key, k: usize, node: u32, font: &Arc<Font>) -> String {
@@ -3153,7 +3160,7 @@ fn outer_still(g: &State, sh: &Shared, r: usize, key: &Key) -> bool {
     let Some(vals) = g.p[r].run.as_ref().and_then(|run| run.outer_reads_only(key)) else {
         return false;
     };
-    vals.iter().all(|(_, node, v)| v.seen_as(&sh.names.reaching(key, (r as u32, *node), &sh.font).1))
+    vals.iter().all(|(_, node, v)| sh.names.read_holds(key, (r as u32, *node), &sh.font, v))
 }
 
 /// Piece `k` read a definition of `key` since remade: it runs again from
@@ -3297,13 +3304,15 @@ fn reached(g: &mut State, sh: &Shared, m: Pos, keys: &[Key]) -> Vec<(usize, Key)
 }
 
 /// Whether piece `r`'s `run` read `key` with the values reaching it now:
-/// each of its reads of the name, at its node.
+/// each of its reads of the name, at its node ([`Names::read_holds`]: a
+/// refuted read of a written file is given the file's bytes as the fold's
+/// value while the names index still answers what it had before).
 fn reads_still(names: &Names, font: &Arc<Font>, run: &Run, r: usize, key: &Key) -> bool {
     let vals = run.values_read(key);
     !vals.is_empty()
         && vals
             .iter()
-            .all(|(_, node, v)| v.seen_as(&names.reaching(key, (r as u32, *node), font).1))
+            .all(|(_, node, v)| names.read_holds(key, (r as u32, *node), font, v))
 }
 
 /// Piece `k`'s dirty names as it starts to run: those its last run read
@@ -4216,7 +4225,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
         .reads
         .iter()
         .map(|(key, node, val)| {
-            let (def, now) = read_now(sh, k, *node, key);
+            let (def, now) = sh.names.read_now(key, (k as u32, *node), &sh.font);
             (def, val.seen_as(&now))
         })
         .collect();
@@ -4249,7 +4258,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
             let since: FxSet<&Key> = g.names_log[seen..now_gen].iter().flatten().collect();
             for ((key, node, val), c) in run.reads.iter().zip(&mut checks) {
                 if since.contains(key) {
-                    let (def, now) = read_now(sh, k, *node, key);
+                    let (def, now) = sh.names.read_now(key, (k as u32, *node), &sh.font);
                     *c = (def, val.seen_as(&now));
                 }
             }

@@ -871,6 +871,11 @@ immediate at their nodes, deferred at their pages' ship positions;
 `\closeout` ends what was written). A node's read of one is a read of
 the fold's value at the node's position (Conflict 12, decided).
 
+Invariant: a fold's read is only ever validated against the fold's value
+at that node (`Names::read_now`/`read_holds`, the one check install and
+`still_dirty` make; the names index answered it twice: 5e3ea81 at
+install, then `reads_still`, which dropped a refuted file read's mark).
+
 - **The read** (`graph::Env::fold_read`, `Names::fold_value`): answered
   with the fold's value at `(piece, node)` as known — this build's,
   else the last build's (`Build::fold_vals`, by piece id and node),
@@ -931,7 +936,9 @@ the fold's value at the node's position (Conflict 12, decided).
   is not a read; an edit that changes the number of lines before a node
   in the same piece keeps it unless the node read its line
   (`Key::LineBase`): then it runs again (`run_piece`'s `line_ok`).
-  `tests/fuzz/fixed/f8-kept-node-line-in-piece.repro`.
+  `tests/fuzz/fixed/f8-kept-node-line-in-piece.repro`; F's F9 (story,
+  a line removed, the log's line numbers) is the same finding, made on a
+  branch without this fix: `tests/fuzz/fixed/f9-kept-node-line-in-piece.repro`.
 - **Which node made an item** (`item::Origins`): a side table per list,
   not per item — runs of item indices with the distance back from the
   node that made the list (the paragraph's `\par` node: `Para::origins`;

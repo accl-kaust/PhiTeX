@@ -203,7 +203,8 @@ fn a_glyph_leads_to_its_source_line() {
                     let n = b.material_node(0, at as u32, &[j]).expect("a node");
                     seen.push((char::from(*c), b.source_place(0, n).expect("a place").1));
                 }
-                Item::Box(bx) => {
+                // (the paragraph's indent is an empty box)
+                Item::Box(bx) if !bx.list.is_empty() => {
                     let n = b.material_node(0, at as u32, &[j, 0]).expect("a node in the box");
                     let c = match &bx.list[0] {
                         Item::Char(_, c) => char::from(*c),
