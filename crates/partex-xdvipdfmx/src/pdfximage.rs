@@ -4,7 +4,8 @@
 //! `self.ximage.ximages`. The loaders (pngimage, jpegimage, bmpimage, epdf)
 //! take the id of the entry `load_image` made and fill it with
 //! `pdf_ximage_set_image` / `pdf_ximage_set_form`. jp2image, mpost
-//! (MetaPost/EPS) and the `ps_include_page` distiller are not ported.
+//! (MetaPost/EPS) are not ported; the `ps_include_page` distiller runs
+//! through the host (`Files::apply_filter`).
 
 use crate::ctx::CompatMode;
 use crate::dpxutil::{max4, min4};
@@ -1033,30 +1034,42 @@ impl Dpx {
     pub fn get_distiller_template(&mut self) -> Option<Vec<u8>> {
         self.ximage.cmdtmpl.clone()
     }
-    /// `ps_include_page` (static): runs the distiller on a PS/EPS file.
-    /// Without a distiller template it fails, as in C; running one (an
-    /// external command and a temporary file) is not ported.
+    /// `ps_include_page` (static): runs the distiller on a PS/EPS file
+    /// (through the host, [`crate::io::Files::apply_filter`]) and includes
+    /// the PDF it made.
     pub fn ps_include_page(
         &mut self,
         xobj_id: i32,
         filename: &[u8],
         options: LoadOptions,
     ) -> Result<i32> {
-        let _ = (xobj_id, options);
-        if self.ximage.cmdtmpl.is_none() {
+        let Some(distiller_template) = self.ximage.cmdtmpl.clone() else {
             warn!(
                 "No image converter available for converting file \"{}\" to PDF format.",
                 String::from_utf8_lossy(filename)
             );
             warn!(">> Please check if you have 'D' option in config file.");
             return Ok(-1);
+        };
+        let version = self.o.get_version();
+        let Some(data) = self.files.apply_filter(&distiller_template, filename, version) else {
+            warn!("Image format conversion for \"{}\" failed...", String::from_utf8_lossy(filename));
+            return Ok(-1);
+        };
+        // (C's temporary file's name: the distilled file's identity in the
+        // input cache)
+        let mut temp = filename.to_vec();
+        temp.extend_from_slice(b".distilled.pdf");
+        let mut fp = MemFile::new(data, &temp);
+        let error = self.pdf_include_page(xobj_id, &mut fp, &temp, options)?;
+        if error != 0 {
+            warn!("Failed to include image file \"{}\"", String::from_utf8_lossy(filename));
+            warn!(">> Please check if");
+            warn!(">>   {}", String::from_utf8_lossy(&distiller_template));
+            warn!(">>   %o = output filename, %i = input filename, %b = input filename without suffix");
+            warn!(">> can really convert \"{}\" to PDF format image.", String::from_utf8_lossy(filename));
         }
-        // (not ported: the distiller, an external command run by
-        // dpx_file_apply_filter)
-        fatal!(
-            "Image format conversion for \"{}\" (the distiller) is not supported.",
-            String::from_utf8_lossy(filename)
-        )
+        Ok(error)
     }
     /// `pdf_error_cleanup_cache`: deletes the temporary files (none here:
     /// the distiller is not ported).

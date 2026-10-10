@@ -378,4 +378,38 @@ impl partex_xdvipdfmx::io::Files for Files {
     fn read(&mut self, path: &[u8]) -> Option<Arc<[u8]>> {
         self.0.read(&String::from_utf8_lossy(path))
     }
+
+    /// The distiller (`dvipdfmx.cfg`'s `D` line: `rungs` for an EPS
+    /// picture) as C's `exec_spawn` runs it, through `sh -c`, on a copy of
+    /// the input in a scratch directory, removed after.
+    fn apply_filter(&mut self, template: &[u8], input: &[u8], version: i32) -> Option<Arc<[u8]>> {
+        use std::os::unix::ffi::OsStrExt;
+        static SCRATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let data = self.0.read(&String::from_utf8_lossy(input))?;
+        let k = SCRATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("phitex-distill-{}-{k}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok()?;
+        let base = input.rsplit(|&b| b == b'/').next().unwrap_or(input);
+        let inp = dir.join(std::ffi::OsStr::from_bytes(base));
+        let out = dir.join("distilled.pdf");
+        let r = std::fs::write(&inp, &data).ok().and_then(|()| {
+            let cmd = partex_xdvipdfmx::io::filter_command(
+                template,
+                inp.as_os_str().as_bytes(),
+                out.as_os_str().as_bytes(),
+                version,
+            );
+            let ok = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(std::ffi::OsStr::from_bytes(&cmd))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if ok { std::fs::read(&out).ok().map(Arc::from) } else { None }
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        r
+    }
 }

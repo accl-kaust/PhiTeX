@@ -7,10 +7,11 @@
 //! Not ported (no corpus reaches them; each stops the run where C would
 //! need it): PK fonts (pkfont.c), subfonts (subfont.c, `@SFD@` map
 //! entries), encryption (pdfencrypt.c), MetaPost input (mpost.c), BMP and
-//! JPEG 2000 images, EPS through the distiller, manual thumbnails,
-//! extractbb, page selection (`-s`), libpng's gamma and background
-//! transforms for PNGs. tpic and PostScript specials (spc_tpic.c,
-//! spc_dvips.c: ghostscript) are skipped, as a failed special is.
+//! JPEG 2000 images, manual thumbnails, extractbb, page selection (`-s`),
+//! libpng's gamma and background transforms for PNGs. tpic and PostScript
+//! specials (spc_tpic.c, spc_dvips.c: ghostscript) are skipped, as a
+//! failed special is. EPS goes through the distiller only where the host
+//! runs it (`io::Files::apply_filter`).
 
 // The C names are kept (non_snake_case among them); lints to be tightened.
 #![allow(unused, dead_code, non_snake_case, clippy::all, clippy::pedantic)]
