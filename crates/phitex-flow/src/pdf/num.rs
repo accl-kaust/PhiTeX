@@ -44,11 +44,11 @@ pub fn divide_scaled(s: i32, m: i32, dd: i32) -> Option<(i32, i32)> {
 pub fn round_xn_over_d(x: i32, n: i32, d: i32) -> i32 {
     let positive = x >= 0;
     let x = x.wrapping_abs();
-    let t = (x % 0o100000).wrapping_mul(n);
-    let mut u = (x / 0o100000).wrapping_mul(n).wrapping_add(t / 0o100000);
-    let v = (u % d).wrapping_mul(0o100000).wrapping_add(t % 0o100000);
-    if u / d < 0o100000 {
-        u = (u / d).wrapping_mul(0o100000).wrapping_add(v / d);
+    let t = (x % 0o100_000).wrapping_mul(n);
+    let mut u = (x / 0o100_000).wrapping_mul(n).wrapping_add(t / 0o100_000);
+    let v = (u % d).wrapping_mul(0o100_000).wrapping_add(t % 0o100_000);
+    if u / d < 0o100_000 {
+        u = (u / d).wrapping_mul(0o100_000).wrapping_add(v / d);
     }
     let v = v % d;
     if 2 * v >= d {
@@ -121,7 +121,7 @@ impl Out {
     pub fn fw_int(&mut self, n: i64, w: usize) {
         let mut n = n;
         let mut d = vec![0u8; w];
-        for x in d.iter_mut() {
+        for x in &mut d {
             *x = n.rem_euclid(10) as u8;
             n /= 10;
         }
@@ -134,7 +134,7 @@ impl Out {
     pub fn bytes(&mut self, n: i64, w: usize) {
         let mut n = n;
         let mut d = vec![0u8; w];
-        for x in d.iter_mut() {
+        for x in &mut d {
             *x = n.rem_euclid(256) as u8;
             n /= 256;
         }

@@ -262,7 +262,7 @@ impl W<'_> {
             (0, 0)
         };
         if !must_set_text_pos {
-            must_set_text_pos = v != 0 || s.abs() >= 0o100000;
+            must_set_text_pos = v != 0 || s.abs() >= 0o100_000;
         }
         if must_set_text_pos {
             self.end_string();
@@ -430,8 +430,7 @@ impl W<'_> {
                     let rule_wd = glue.set(this, &l.g);
                     self.hleaders(this, l, rule_wd, base_line, left_edge);
                 }
-                Item::Kern { w, .. } => self.cur_h += *w,
-                Item::Math { w, .. } => self.cur_h += *w,
+                Item::Kern { w, .. } | Item::Math { w, .. } => self.cur_h += *w,
                 Item::Whatsit(w) => self.whatsit(w),
                 _ => {}
             }
@@ -439,13 +438,10 @@ impl W<'_> {
     }
 
     fn char_item(&mut self, f: &Arc<Font>, c: u8) {
-        match f.glyph(i32::from(c)) {
-            Some(g) => {
-                self.char_out(f, c);
-                self.cur_h += g.width;
-            }
-            // (`char_warning`: a missing character is not shown)
-            None => {}
+        // (`char_warning`: a missing character is not shown)
+        if let Some(g) = f.glyph(i32::from(c)) {
+            self.char_out(f, c);
+            self.cur_h += g.width;
         }
     }
 
@@ -684,12 +680,11 @@ pub fn guess_ff(p: &Page, numbers: &Numbers) -> Vec<(u32, u32)> {
         if out.iter().any(|&(n, _)| n == k) {
             return;
         }
-        let owner = match first.iter().find(|(n, _)| *n == font.name) {
-            Some(&(_, o)) => o,
-            None => {
-                first.push((font.name.clone(), k));
-                k
-            }
+        let owner = if let Some(&(_, o)) = first.iter().find(|(n, _)| *n == font.name) {
+            o
+        } else {
+            first.push((font.name.clone(), k));
+            k
         };
         out.push((k, owner));
     });

@@ -2109,3 +2109,25 @@ Found and fixed in `prim.rs` (B's table, two entries): `\pdfomitprocset`
 and `\pdfomitinfodict` (pdfTeX 1.40.29's integer parameters 34, 35) were
 missing (154 primitives now), and IniTeX's `\pdfhorigin`/`\pdfvorigin`
 are 4736287sp (1truein as pdfTeX rounds it), not 4736286.
+
+**State (Q1).** `tests/pdf.rs`: eight `-ini` documents (one font
+uncompressed and compressed, `\mag`, object streams and a two-level
+page tree over 42 pages, rules and leaders and four fonts, fonts mixed
+in a line, a page made again) and plain TeX's ten documents of
+`tests/plain.rs` (story, pages, display, table, hyphens, each with
+plain's `\output` and TeX's default) are byte-identical with
+`pdftex -ini -etex` at six schedules (1 thread, 8, 8 speculating, three
+random orders).
+
+**pdfTeX work split** (modules another agent can take in parallel; each
+is a pure function or a fold step, no state shared with the others):
+
+| part | where | interface |
+|---|---|---|
+| numbers, zlib, MD5 | `pdf/num.rs`, `pdf/zlib.rs`, `pdf/md5.rs` | `num::Out` (pdfTeX's printing), `zlib::compress(data, level)`, `md5::md5` — done |
+| a page's content stream | `pdf/content.rs` | `content::page(&Page, &Ship, &Numbers) -> PageBody`: the stream, `fonts` (font, number, glyphs), `events` (what makes objects, in stream order), guesses (`ff`, `fixed`). New whatsits (`\pdfliteral`, `\pdfcolorstack`, `\pdfsetmatrix`/`\pdfsave`/`\pdfrestore`, `\pdfrefxform`, `\pdfrefximage`, links, annotations, dests) are items in the page's list (`Item::Whatsit` variants made by their nodes) that the walk turns into stream text and `Event`s; position-dependent results (`\pdfsavepos`'s x, y; a link's rectangles split at line breaks) are made here, in the page's value |
+| the fold | `pdf/fold.rs` | `fold::assemble(pages, bodies, numbers, &End, &mut dyn Files) -> Written`; each `Event` gets a branch in `F::ship` that numbers its object as pdfTeX's `pdf_create_obj` does and writes it where pdfTeX does (`pdf_ship_out`'s "Write out resource lists", "Write out pending PDF marks", "Finish the PDF file"); document-level items (`\pdfobj`, `\pdfoutline`, `\pdfdest` names, `\pdfcatalog`, `\pdfinfo`, `\pdfnames`, `\pdftrailer`) arrive in position order as items of the material and are fold steps |
+| fonts | `pdf/font/` (`map.rs`, `enc.rs`, `t1.rs`), the font part of `fold.rs` | the map file (`map::Map`), encodings, Type 1 subsetting (`t1::writet1`), `fold::F::{do_pdf_font, write_fontdescriptor, write_enc, write_fontdictionary}`. To come: ToUnicode (`\pdfgentounicode`, `\pdfglyphtounicode`'s table as a document-level value), virtual fonts (`do_vf_packet` in the content walk), PK fonts (Type 3), TrueType/OpenType, `\pdfmapfile`/`\pdfmapline` (document-level items the fold applies before the first font is initialized), `\pdffontattr` |
+| images | `pdf/image/` (new) | `\pdfximage` is a node whose value is the image's description (a pure function of the file's bytes, the page asked for, the box); its dimensions are known at the node (pdfTeX reads the file there); `\pdfrefximage` is a whatsit; the fold writes the XObject (PNG through `zlib`, JPEG as it is, PDF pages through a PDF reader copied from partex-engine's `pdfread.rs`/partex-core's `epdf.rs`) at the first page using it |
+| links, dests, outlines | `pdf/link.rs` (new) + fold | link and annotation rectangles in `content.rs` (pdfTeX's `append_link`, `end_link`: per line box at its nesting level), dest names sorted and the name tree in the fold (`sort_dest_names`, "Output name tree"), outlines as document-level items in position order |
+| reads of the fold | core (A: Conflict 12's `ReadRef`) | `\pdflastobj`, `\pdflastxform`, `\pdflastximage`, `\pdflastannot`, `\pdflastlink`, `\pdflastxpos`/`\pdflastypos`: the fold's counters at the node's position |

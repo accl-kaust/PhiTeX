@@ -994,7 +994,11 @@ impl F<'_> {
             let mut d = end.date.as_bytes().to_vec();
             d.extend_from_slice(end.file_name.as_bytes());
             let digest = super::md5::md5(&d);
-            let hex: String = digest.iter().map(|b| format!("{b:02X}")).collect();
+            let hex: String = digest.iter().fold(String::new(), |mut h, b| {
+                use std::fmt::Write as _;
+                let _ = write!(h, "{b:02X}");
+                h
+            });
             format!("/ID [<{hex}> <{hex}>]")
         };
         if self.os_enable {
@@ -1067,12 +1071,12 @@ impl F<'_> {
             o.fw_int(i64::from(self.objs[0].link), 10);
             o.print_ln(b" 65535 f ");
             for k in 1..=self.obj_ptr {
-                if !self.is_written(k) {
-                    o.fw_int(i64::from(self.objs[k as usize].link), 10);
-                    o.print_ln(b" 00000 f ");
-                } else {
+                if self.is_written(k) {
                     o.fw_int(self.objs[k as usize].offset, 10);
                     o.print_ln(b" 00000 n ");
+                } else {
+                    o.fw_int(i64::from(self.objs[k as usize].link), 10);
+                    o.print_ln(b" 00000 f ");
                 }
             }
             // ("Output the trailer")

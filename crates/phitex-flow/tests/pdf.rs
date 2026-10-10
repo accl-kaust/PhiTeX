@@ -149,3 +149,118 @@ fn rules() {
 fn guess() {
     check_again("guess", true);
 }
+
+// ---- plain TeX in PDF mode (the documents of `tests/plain.rs`)
+
+/// The plain documents, as `tests/plain.rs` has them (`NAME-default`:
+/// TeX's default output).
+const PLAIN: [&str; 10] = [
+    "story",
+    "story-default",
+    "pages",
+    "pages-default",
+    "display",
+    "display-default",
+    "table",
+    "table-default",
+    "hyphens",
+    "hyphens-default",
+];
+
+/// plain.tex: `tests/dvi/plaintext.tex` before its body, with
+/// `hyphen.tex` (as `tests/plain.rs`).
+fn plain() -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let s = std::fs::read_to_string(root.join("tests/dvi/plaintext.tex")).unwrap();
+    let at = s.find("\\output={}\n").expect("plaintext.tex's body");
+    let h = std::fs::read_to_string(root.join("tests/hyph/hyphen.tex")).unwrap();
+    s[..at].replace("% (\\input hyphen: no hyphenation patterns on the graph yet)\n", &h)
+}
+
+/// Plain document `name` in PDF mode.
+fn plain_doc(name: &str) -> String {
+    let (body, default) = match name.strip_suffix("-default") {
+        Some(b) => (b, true),
+        None => (name, false),
+    };
+    let b = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/plain/{body}.tex"))).unwrap();
+    "\\pdfoutput=1\n".to_string() + &plain() + if default { "\\output={}\n" } else { "" } + &b
+}
+
+fn check_plain(name: &str) {
+    let text = plain_doc(name);
+    let want = recorded(&format!("plain-{name}"));
+    for &o in &RUNS {
+        let mut b = Build::new(font());
+        b.set_jobname(name);
+        let out = b.update(&text, o);
+        if let Some(d) = std::env::var_os("PHITEX_FLOW_PDF_OUT") {
+            let _ = std::fs::write(Path::new(&d).join(format!("plain-{name}.pdf")), &out.pdf);
+        }
+        assert!(out.errors.is_empty(), "{name} ({o:?}): errors on the graph: {:?}", out.errors);
+        assert!(out.pdf == want, "{name} ({o:?}): the PDF file differs {}", first_difference(&out.pdf, &want));
+    }
+}
+
+/// Every recorded plain oracle is pdftex's.
+#[test]
+fn plain_oracles_are_pdftex() {
+    for name in PLAIN {
+        let Some(pdf) = pdftex(name, &plain_doc(name)) else { return };
+        assert!(!pdf.is_empty(), "{name}: pdftex wrote no PDF");
+        if std::env::var_os("PHITEX_FLOW_BLESS").is_some() {
+            std::fs::write(dir().join(format!("plain-{name}.pdf")), &pdf).unwrap();
+        }
+        assert!(pdf == recorded(&format!("plain-{name}")), "{name}: pdftex's PDF is not the recorded one");
+    }
+}
+
+#[test]
+fn plain_story() {
+    check_plain("story");
+}
+
+#[test]
+fn plain_story_default() {
+    check_plain("story-default");
+}
+
+#[test]
+fn plain_pages() {
+    check_plain("pages");
+}
+
+#[test]
+fn plain_pages_default() {
+    check_plain("pages-default");
+}
+
+#[test]
+fn plain_display() {
+    check_plain("display");
+}
+
+#[test]
+fn plain_display_default() {
+    check_plain("display-default");
+}
+
+#[test]
+fn plain_table() {
+    check_plain("table");
+}
+
+#[test]
+fn plain_table_default() {
+    check_plain("table-default");
+}
+
+#[test]
+fn plain_hyphens() {
+    check_plain("hyphens");
+}
+
+#[test]
+fn plain_hyphens_default() {
+    check_plain("hyphens-default");
+}

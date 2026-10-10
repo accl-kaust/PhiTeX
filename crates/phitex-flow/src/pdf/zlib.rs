@@ -22,7 +22,7 @@ const WINDOW_SIZE: usize = 2 * W_SIZE;
 const HASH_BITS: u32 = 15;
 const HASH_SIZE: usize = 1 << HASH_BITS;
 const HASH_MASK: u32 = (HASH_SIZE - 1) as u32;
-const HASH_SHIFT: u32 = (HASH_BITS + MIN_MATCH as u32 - 1) / MIN_MATCH as u32;
+const HASH_SHIFT: u32 = HASH_BITS.div_ceil(MIN_MATCH as u32);
 const LIT_BUFSIZE: usize = 1 << (8 + 6);
 const MAX_DIST: usize = W_SIZE - MIN_LOOKAHEAD;
 const TOO_FAR: usize = 4096;
@@ -274,7 +274,7 @@ struct State<'a> {
 
 enum Block {
     NeedMore,
-    BlockDone,
+    Done,
     FinishDone,
 }
 
@@ -297,7 +297,7 @@ impl State<'_> {
             self.bi_buf |= ((val as u16) as u32).wrapping_shl(self.bi_valid as u32) as u16;
             let b = self.bi_buf;
             self.put_short(b);
-            self.bi_buf = ((val as u16) >> (BUF_SIZE - self.bi_valid)) as u16;
+            self.bi_buf = (val as u16) >> (BUF_SIZE - self.bi_valid);
             self.bi_valid += len - BUF_SIZE;
         } else {
             self.bi_buf |= ((value as u16) as u32).wrapping_shl(self.bi_valid as u32) as u16;
@@ -540,7 +540,8 @@ impl State<'_> {
             count += 1;
             if count < max_count && curlen == nextlen {
                 continue;
-            } else if count < min_count {
+            }
+            if count < min_count {
                 self.bl_tree[curlen as usize].fc = self.bl_tree[curlen as usize].fc.wrapping_add(count as u16);
             } else if curlen != 0 {
                 if curlen != prevlen {
@@ -582,7 +583,8 @@ impl State<'_> {
             count += 1;
             if count < max_count && curlen == nextlen {
                 continue;
-            } else if count < min_count {
+            }
+            if count < min_count {
                 loop {
                     self.send_code(curlen as usize, Tree::Bl);
                     count -= 1;
@@ -638,8 +640,8 @@ impl State<'_> {
         self.send_bits((lcodes - 257) as u32, 5);
         self.send_bits((dcodes - 1) as u32, 5);
         self.send_bits((blcodes - 4) as u32, 4);
-        for rank in 0..blcodes {
-            let l = u32::from(self.bl_tree[BL_ORDER[rank]].dl);
+        for &r in &BL_ORDER[..blcodes] {
+            let l = u32::from(self.bl_tree[r].dl);
             self.send_bits(l, 3);
         }
         self.send_tree(Which::L, lcodes as isize - 1);
@@ -965,7 +967,7 @@ impl State<'_> {
         if self.sym_next != 0 {
             self.flush_block_only(false);
         }
-        Block::BlockDone
+        Block::Done
     }
 
     fn deflate_slow(&mut self, finish: bool) -> Block {
@@ -1042,7 +1044,7 @@ impl State<'_> {
         if self.sym_next != 0 {
             self.flush_block_only(false);
         }
-        Block::BlockDone
+        Block::Done
     }
 }
 
