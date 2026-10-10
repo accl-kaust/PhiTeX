@@ -1243,6 +1243,10 @@ struct Shared {
     waiting: Vec<AtomicBool>,
     /// The round is ending ([`restructure_now`]): no run waits.
     restructuring: AtomicBool,
+    /// Runs replaced, dropped on a thread of their own: freeing a large
+    /// run's nodes is not a worker's (6.5% of the critical path on
+    /// latex.ltx).
+    drops: std::sync::mpsc::Sender<Arc<Run>>,
     /// Where each piece's run may stop ([`Spec::stops`]).
     stops: Vec<Arc<[usize]>>,
     state: Mutex<State>,
@@ -2406,6 +2410,15 @@ impl Build {
             inline: state.p.iter().map(|ps| ps.inline).collect(),
             waiting: state.p.iter().map(|_| AtomicBool::new(false)).collect(),
             restructuring: AtomicBool::new(false),
+            drops: {
+                let (tx, rx) = std::sync::mpsc::channel::<Arc<Run>>();
+                let _ = std::thread::Builder::new().name("flow-drop".into()).spawn(move || {
+                    for r in rx {
+                        drop(r);
+                    }
+                });
+                tx
+            },
             stops: state.p.iter().map(|ps| ps.stops.clone()).collect(),
             state: Mutex::new(state),
             cv: Condvar::new(),
@@ -2993,7 +3006,7 @@ fn worker(sh: &Shared, id: usize) {
             let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
             let gen_now = sh.generation.load(Ordering::Acquire);
             if g.inflight == 0 || (parked == g.inflight && stall_seen == Some(gen_now)) {
-                stall(&mut g, sh, parked);
+                stall(&mut g, sh, parked, "the scheduler stalled");
                 return;
             }
             let (g2, timeout) = sh.cv.wait_timeout(g, STALL_CHECK).expect("state");
@@ -3024,15 +3037,19 @@ fn worker(sh: &Shared, id: usize) {
     }
 }
 
+/// How many times a piece may run in one round before the build fails as
+/// a livelock ([`stall`]).
+const RUN_LIMIT: u32 = 4096;
+
 /// How long an idle worker waits before it looks whether every run in
 /// progress is parked for good.
 const STALL_CHECK: Duration = Duration::from_secs(2);
 
 /// The scheduler stalled: the round ends, the runs parked stop, and the
 /// build fails with the pieces' states.
-fn stall(g: &mut State, sh: &Shared, parked: usize) {
+fn stall(g: &mut State, sh: &Shared, parked: usize, why: &str) {
     let mut d = format!(
-        "the scheduler stalled: {} running ({parked} parked), settled {}/{}, scan at {} (free {}, done {}), {} to ship, {} logs queued ({} running), {} breaks queued;",
+        "{why}: {} running ({parked} parked), settled {}/{}, scan at {} (free {}, done {}), {} to ship, {} logs queued ({} running), {} breaks queued;",
         g.inflight,
         g.settled,
         g.p.len(),
@@ -4265,6 +4282,17 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
         }
         g.p[k].runs += 1;
         g.stats.ran += 1;
+        // (a piece run again and again in one build: a livelock of the
+        // core, which fails the build with the pieces' states, as a stall)
+        if g.p[k].runs == RUN_LIMIT {
+            let why = format!(
+                "piece {k} ran {RUN_LIMIT} times (a livelock): read again {:?}, its definitions that changed {:?}",
+                stale.keys().take(8).collect::<Vec<_>>(),
+                changed.iter().take(8).collect::<Vec<_>>()
+            );
+            let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
+            stall(&mut g, sh, parked, &why);
+        }
         g.running.remove(&k);
         let marks = reached(&mut g, sh, (k as u32, END), &changed);
         for (r, key) in marks {
@@ -4335,6 +4363,10 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
     }
     sh.parked.notify_all();
     sh.cv.notify_all();
+    // (the run it replaced goes to be freed elsewhere)
+    if let Some(o) = old_run {
+        let _ = sh.drops.send(o);
+    }
     steps
 }
 
@@ -5039,7 +5071,7 @@ fn park(sh: &Shared, k: usize, seen: u64) {
                 let mut g = lock(sh);
                 let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
                 if !moved() && parked == g.inflight && g.inflight == g.stats.work.len() {
-                    stall(&mut g, sh, parked);
+                    stall(&mut g, sh, parked, "the scheduler stalled");
                 }
             }
             p = sh.park.lock().expect("park");
