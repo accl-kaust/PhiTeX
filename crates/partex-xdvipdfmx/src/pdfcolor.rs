@@ -602,7 +602,7 @@ pub fn iccp_get_checksum(profile: &[u8]) -> [u8; 16] {
     /* body */
     d.extend_from_slice(&p[128..]);
 
-    partex_engine::md5::md5(&d)
+    phitex_codecs::md5::md5(&d)
 }
 
 /// `sget_signed_long`.

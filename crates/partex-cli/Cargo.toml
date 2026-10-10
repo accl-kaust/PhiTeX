@@ -6,7 +6,7 @@ license.workspace = true
 publish = false
 
 [[bin]]
-name = "phitex"
+name = "phitex-machine"
 path = "src/main.rs"
 
 [features]

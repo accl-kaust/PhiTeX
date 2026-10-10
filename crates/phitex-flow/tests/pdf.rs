@@ -12,7 +12,8 @@ use phitex_flow::build::MAIN_MEMORY;
 use phitex_flow::{Build, Font, Options, Order, Reads};
 
 /// The documents.
-const DOCS: [&str; 8] = ["hello", "compressed", "mag", "mixed1", "mixed2", "objstm", "rules", "guess"];
+const DOCS: [&str; 10] =
+    ["hello", "compressed", "mag", "mixed1", "mixed2", "objstm", "rules", "guess", "tounicode", "tounicode0"];
 
 fn dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/pdf")
@@ -140,6 +141,20 @@ fn objstm() {
 #[test]
 fn rules() {
     check("rules");
+}
+
+/// `\pdfgentounicode`: the `ToUnicode` maps of a font with its own
+/// encoding and of a re-encoded one, from `\pdfglyphtounicode`'s entries
+/// (ranges, strings, a font's own, out of range, invalid, redefined).
+#[test]
+fn tounicode() {
+    check("tounicode");
+}
+
+/// `\pdfgentounicode` without any entry: no map.
+#[test]
+fn tounicode0() {
+    check("tounicode0");
 }
 
 /// Page 2 guesses its decimal digits (page 1 fixed 3) and which font

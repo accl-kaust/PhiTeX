@@ -1427,6 +1427,7 @@ name = "partex-engine"
 version = "0.0.0"
 dependencies = [
  "partex-ssa",
+ "phitex-codecs",
 ]
 
 [[package]]
@@ -1469,7 +1470,7 @@ name = "partex-xdvipdfmx"
 version = "0.0.0"
 dependencies = [
  "libm",
- "partex-engine",
+ "phitex-codecs",
 ]
 
 [[package]]
@@ -1484,6 +1485,25 @@ version = "0.0.0"
 dependencies = [
  "criterion",
 ]
+
+[[package]]
+name = "phitex-cli"
+version = "0.0.0"
+dependencies = [
+ "partex-bibtex",
+ "partex-kpse",
+ "partex-makeindex",
+ "partex-xdvipdfmx",
+ "phitex-codecs",
+ "phitex-doc",
+ "phitex-draw",
+ "phitex-flow",
+ "tikv-jemallocator",
+]
+
+[[package]]
+name = "phitex-codecs"
+version = "0.0.0"
 
 [[package]]
 name = "phitex-diff"
@@ -1504,8 +1524,8 @@ name = "phitex-draw"
 version = "0.0.0"
 dependencies = [
  "miniz_oxide",
- "partex-engine",
  "partex-xdvipdfmx",
+ "phitex-codecs",
  "skrifa",
 ]
 
@@ -1516,6 +1536,7 @@ dependencies = [
  "partex-otf",
  "partex-xdvipdfmx",
  "phi",
+ "phitex-codecs",
  "tikv-jemallocator",
 ]
 
@@ -1960,7 +1981,7 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "partex-engine",
+ "phitex-codecs",
  "regex",
  "serde",
  "serde_json",

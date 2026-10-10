@@ -13,6 +13,7 @@ description = "TeX as a suspending dataflow graph over content-versioned values 
 phi = { path = "../phi" }
 partex-otf = { path = "../partex-otf" }
 partex-xdvipdfmx = { path = "../partex-xdvipdfmx" }
+phitex-codecs = { path = "../phitex-codecs" }
 # (the CLI's global allocator, as partex-cli's: glibc's thread arenas grow
 # by mprotect under the address-space lock, which 8 threads building nodes
 # contend on)

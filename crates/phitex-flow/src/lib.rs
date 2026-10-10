@@ -44,11 +44,9 @@ pub mod item;
 pub mod linebreak;
 pub mod page;
 pub mod pdf;
-pub mod pdfread;
 pub mod graph;
 pub mod hyph;
 pub mod icu_linebreak;
-pub mod inflate;
 #[rustfmt::skip]
 pub mod icu_tables;
 pub mod logs;

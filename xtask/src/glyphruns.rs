@@ -9,8 +9,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use partex_engine::pdfread::{Doc, Obj, Page};
-use partex_engine::pdftext;
+use phitex_codecs::pdfread::{Doc, Obj, Page};
+use phitex_codecs::pdftext;
 use serde_json::Value;
 
 /// The runs of each page.

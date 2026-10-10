@@ -11,6 +11,8 @@ const ALLOWED: &[&str] = &[
     // OpenType faces and shaping; XDV to PDF)
     "partex-otf",
     "partex-xdvipdfmx",
+    // (pure codecs: the PDF reader XeTeX's \XeTeXpdffile measures with)
+    "phitex-codecs",
     // (the CLI's global allocator, an optional feature: no TeX in it)
     "tikv-jemallocator",
 ];
@@ -51,6 +53,29 @@ fn depends_on_the_listed_crates_only() {
     for (name, l) in &deps {
         assert!(!name.starts_with("partex") || ALLOWED.contains(&name.as_str()), "no partex crate: {l}");
         assert!(ALLOWED.contains(&name.as_str()), "phitex-flow may depend on {ALLOWED:?} only: {l}");
+    }
+}
+
+/// The crates of the machine-mode engine (deleted): never in phitex-flow's
+/// dependency closure, directly or through another crate.
+const NEVER: &[&str] = &["partex-core", "partex-engine", "partex-incr", "partex-ssa", "partex-trace", "phitex-ir", "partex-cli"];
+
+/// The transitive closure too (`cargo tree`, normal and build
+/// dependencies): a pure crate that linked an engine crate would bring
+/// it in with the direct check still green.
+#[test]
+fn no_engine_crate_in_the_closure() {
+    let out = std::process::Command::new(env!("CARGO"))
+        .args(["tree", "-p", "phitex-flow", "-e", "normal,build", "--prefix", "none", "--offline", "--all-features"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("cargo tree runs");
+    assert!(out.status.success(), "cargo tree: {}", String::from_utf8_lossy(&out.stderr));
+    let tree = String::from_utf8_lossy(&out.stdout);
+    assert!(tree.lines().any(|l| l.starts_with("phi ")), "the closure is listed: {tree}");
+    for l in tree.lines() {
+        let name = l.split(' ').next().unwrap_or("");
+        assert!(!NEVER.contains(&name), "phitex-flow's dependency closure holds {name}: {tree}");
     }
 }
 

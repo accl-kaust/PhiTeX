@@ -545,6 +545,9 @@ fn main() -> ExitCode {
     }
     b.set_input_dirs(inputs.clone());
     b.set_jobname(&job);
+    // (PDF mode: the file's date is `SOURCE_DATE_EPOCH`'s, as pdfTeX's;
+    // 1970 when it is not set — no clock is read)
+    b.set_pdf_date(std::env::var("SOURCE_DATE_EPOCH").ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0));
     if !terminal.is_empty() {
         let lines: Vec<&str> = terminal.iter().map(String::as_str).collect();
         b.set_terminal(&lines);
@@ -627,7 +630,13 @@ fn main() -> ExitCode {
         }
         last = e;
     }
-    if let Err(e) = std::fs::write(&out, &last.dvi) {
+    // (PDF mode, `\pdfoutput` positive: the PDF file instead)
+    let (out, bytes) = if last.pdf.is_empty() {
+        (out, &last.dvi)
+    } else {
+        (out.strip_suffix(".dvi").map_or(out.clone(), |s| format!("{s}.pdf")), &last.pdf)
+    };
+    if let Err(e) = std::fs::write(&out, bytes) {
         eprintln!("{out}: {e}");
         return ExitCode::FAILURE;
     }
@@ -641,7 +650,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    println!("wrote {out} ({} bytes)", last.dvi.len());
+    println!("wrote {out} ({} bytes)", bytes.len());
     if let Some(pdf) = pdf_out {
         match b.xdv_pdf(&last.dvi) {
             Some(Ok(bytes)) => {

@@ -1,0 +1,33 @@
+[package]
+name = "phitex-cli"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The phitex command line: TeX documents built and watched on phitex-flow"
+
+[[bin]]
+name = "phitex"
+path = "src/main.rs"
+
+[features]
+default = ["jemalloc"]
+# jemalloc as the global allocator (native only): N threads building
+# nodes contend on glibc's arenas (phitex-flow's own CLI does the same).
+jemalloc = ["dep:tikv-jemallocator"]
+
+[dependencies]
+partex-bibtex = { path = "../partex-bibtex" }
+partex-kpse = { path = "../partex-kpse" }
+partex-makeindex = { path = "../partex-makeindex" }
+partex-xdvipdfmx = { path = "../partex-xdvipdfmx" }
+phitex-codecs = { path = "../phitex-codecs" }
+phitex-doc = { path = "../phitex-doc" }
+phitex-draw = { path = "../phitex-draw" }
+phitex-flow = { path = "../phitex-flow", default-features = false }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tikv-jemallocator = { version = "0.6", optional = true }
+
+[lints]
+workspace = true

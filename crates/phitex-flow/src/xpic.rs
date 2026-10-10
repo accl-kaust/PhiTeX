@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::pdfread::{Dict, Doc, Obj};
+use phitex_codecs::pdfread::{Dict, Doc, Obj};
 
 
 /// `pdf_box_type`s: what `find_pic_file` is asked for (0 for

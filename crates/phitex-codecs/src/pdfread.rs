@@ -18,12 +18,12 @@
 //! empty), nor are the image filters decoded (no page's contents use
 //! them).
 
-use std::boxed::Box;
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::vec::Vec;
-use std::cell::RefCell;
-use std::cmp::Ordering;
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::cell::RefCell;
+use core::cmp::Ordering;
 
 use crate::inflate::inflate;
 
@@ -249,7 +249,7 @@ impl Lexer<'_> {
             b'0'..=b'9' | b'+' | b'-' | b'.' => self.number(c),
             b'(' => self.literal(),
             b'/' => self.name(),
-            b'[' | b']' => Obj::Cmd(vec![c]),
+            b'[' | b']' => Obj::Cmd(alloc::vec![c]),
             b'<' if self.look() == Some(b'<') => {
                 self.pos += 1;
                 Obj::Cmd(b"<<".to_vec())
@@ -466,7 +466,7 @@ impl Lexer<'_> {
     /// A keyword (at most 127 bytes: the 128th is dropped and ends it),
     /// or `true`, `false`, `null`.
     fn command(&mut self, c: u8) -> Obj {
-        let mut k = vec![c];
+        let mut k = alloc::vec![c];
         while let Some(c) = self.look() {
             if special(c) != 0 {
                 break;
@@ -1121,7 +1121,7 @@ impl Doc {
                 }
                 v
             }
-            _ => vec![(0, i32::try_from(size).unwrap_or(i32::MAX))],
+            _ => alloc::vec![(0, i32::try_from(size).unwrap_or(i32::MAX))],
         };
         for (first, n) in sections {
             if first < 0 || n < 0 || !self.read_xref_stream_section(&data, &mut at, w, first, n) {
@@ -1643,7 +1643,7 @@ impl Doc {
             // (Acrobat counts a zero count's tree; an absurd count is
             // counted too)
             Obj::Int(n) if n == 0 || n > 50_000 => {
-                let mut touched = vec![false; self.num_objects()];
+                let mut touched = alloc::vec![false; self.num_objects()];
                 self.count_tree(&Obj::Ref(top), &mut touched)
             }
             Obj::Int(n) => n,
@@ -1796,7 +1796,7 @@ impl Doc {
         if dest == Obj::Null
             && let Obj::Dict(tree) = &self.name_tree
         {
-            let mut touched = vec![false; self.num_objects()];
+            let mut touched = alloc::vec![false; self.num_objects()];
             dest = self.dest_in_tree(&Obj::Null, tree, name, &mut touched);
         }
         match dest {
@@ -2070,7 +2070,8 @@ fn check_header(d: &[u8]) -> (usize, f64) {
 
 /// C's `atof`: after any white space, the longest number at the start
 /// (sign, digits, a point, an exponent), 0 if none.
-pub(crate) fn atof(w: &[u8]) -> f64 {
+#[must_use]
+pub fn atof(w: &[u8]) -> f64 {
     let w = &w[w
         .iter()
         .take_while(|c| matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
@@ -2146,7 +2147,7 @@ impl Pred {
         let (comps, bits) = (comps as usize, bits as usize);
         let pix = (comps * bits).div_ceil(8);
         let row = (n_vals * bits).div_ceil(8) + pix;
-        let mut line = vec![0u8; row];
+        let mut line = alloc::vec![0u8; row];
         let mut out = Vec::with_capacity(d.len());
         let mut k = 0;
         loop {
@@ -2393,7 +2394,7 @@ fn run_length(d: &[u8]) -> Vec<u8> {
 fn lzw(d: &[u8], early: i32) -> Vec<u8> {
     let mut out = Vec::new();
     // (each entry: its length, the code before it, its last byte)
-    let mut table = vec![(0usize, 0usize, 0u8); 4097];
+    let mut table = alloc::vec![(0usize, 0usize, 0u8); 4097];
     let (mut next_code, mut next_bits) = (258usize, 9u32);
     let (mut buf, mut cnt, mut pos) = (0u32, 0u32, 0usize);
     let mut first = true;
@@ -2475,7 +2476,7 @@ mod tests {
         let mut obj = |f: &mut Vec<u8>, body: &[u8]| {
             offs.push(f.len());
             let n = offs.len();
-            f.extend_from_slice(format!("{n} 0 obj\n").as_bytes());
+            f.extend_from_slice(alloc::format!("{n} 0 obj\n").as_bytes());
             f.extend_from_slice(body);
             f.extend_from_slice(b"\nendobj\n");
         };
@@ -2502,10 +2503,10 @@ mod tests {
         let x = f.len();
         f.extend_from_slice(b"xref\n0 9\n0000000000 65535 f \n");
         for o in &offs {
-            f.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+            f.extend_from_slice(alloc::format!("{o:010} 00000 n \n").as_bytes());
         }
         f.extend_from_slice(
-            format!("trailer\n<< /Size 9 /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n")
+            alloc::format!("trailer\n<< /Size 9 /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n")
                 .as_bytes(),
         );
         f
@@ -2601,15 +2602,15 @@ mod tests {
         assert_eq!(a[3], Obj::Int(50));
         assert_eq!(a[4], Obj::Real(1.25));
         assert_eq!(a[5], Obj::Str(b"a(b)A\nc".to_vec()));
-        assert_eq!(a[6], Obj::Str(vec![0x4a, 0x40]));
+        assert_eq!(a[6], Obj::Str(alloc::vec![0x4a, 0x40]));
         assert_eq!(a[7], Obj::Name(b"ABc".to_vec()));
         assert_eq!(a[8], Obj::Real(-1.5));
         // (a double minus makes an integer 0)
         assert_eq!(a[9], Obj::Int(0));
         // (a byte not hex is a 0 digit)
-        assert_eq!(a[10], Obj::Str(vec![0x40, 0x10]));
+        assert_eq!(a[10], Obj::Str(alloc::vec![0x40, 0x10]));
         // (one digit after `#`: its value)
-        assert_eq!(a[11], Obj::Name(vec![b'x', 4]));
+        assert_eq!(a[11], Obj::Name(alloc::vec![b'x', 4]));
         assert_eq!(a[12], Obj::Error);
         assert_eq!(a[13], Obj::Error);
         // (a minus in a fraction skipped: 1.52)

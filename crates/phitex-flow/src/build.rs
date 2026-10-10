@@ -2526,11 +2526,24 @@ impl Build {
 /// reads (given, in the input directories, then TeX Live's).
 /// The files the PDF fold reads: given, in the input directories, then
 /// TeX Live's.
-struct PdfFiles<'a>(&'a Given);
+struct PdfFiles<'a> {
+    names: &'a Names,
+    font: &'a Arc<Font>,
+    /// The end of the job.
+    at: Pos,
+}
 
 impl crate::pdf::fold::Files for PdfFiles<'_> {
     fn get(&mut self, name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
-        self.0.found(name).or_else(|| crate::tfm::pdf_file(name))
+        self.names.given.found(name).or_else(|| crate::tfm::pdf_file(name))
+    }
+    fn glyph_unicode(&mut self, name: &str) -> Option<crate::pdf::font::unicode::Uni> {
+        use crate::pdf::font::unicode::Uni;
+        match self.names.reaching(&Key::GlyphUnicode(Arc::from(name)), self.at, self.font).1 {
+            Val::Int(c) => Some(Uni::Code(i64::from(c))),
+            Val::Name(s) => Some(Uni::Seq(s)),
+            _ => None,
+        }
     }
 }
 
@@ -2565,7 +2578,7 @@ fn pdf_file(names: &Names, font: &Arc<Font>, last: usize, numbers: &dvi::Numbers
     };
     let mut pdf_bodies: Vec<Arc<crate::pdf::content::PageBody>> =
         bodies.iter().map(|b| b.pdf.clone().unwrap_or_else(|| Arc::new(crate::pdf::content::empty()))).collect();
-    let w = crate::pdf::fold::assemble(pages, &mut pdf_bodies, numbers, &end, &mut PdfFiles(&names.given));
+    let w = crate::pdf::fold::assemble(pages, &mut pdf_bodies, numbers, &end, &mut PdfFiles { names, font, at });
     for (b, p) in bodies.iter_mut().zip(pdf_bodies) {
         if !b.pdf.as_ref().is_some_and(|x| Arc::ptr_eq(x, &p)) {
             let mut nb = dvi::Body { bytes: Vec::new(), fonts: Vec::new(), fixed: None, max_push: 0, io: p.io, pdf: None };
