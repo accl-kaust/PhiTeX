@@ -1487,6 +1487,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "phitex-cli"
+version = "0.0.0"
+dependencies = [
+ "partex-bibtex",
+ "partex-kpse",
+ "partex-makeindex",
+ "partex-xdvipdfmx",
+ "phitex-codecs",
+ "phitex-doc",
+ "phitex-draw",
+ "phitex-flow",
+ "tikv-jemallocator",
+]
+
+[[package]]
 name = "phitex-codecs"
 version = "0.0.0"
 

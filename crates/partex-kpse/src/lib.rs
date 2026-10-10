@@ -1133,6 +1133,29 @@ impl Kpse {
         self.init_format(format)
     }
 
+    /// Every directory the search path of `format` covers, in the order
+    /// a search tries them, each once: an element's `!!` dropped (its
+    /// directories are the database's or the disk's alike) and its `//`
+    /// expanded to the directories below it (`elt-dirs.c`). A caller that
+    /// looks files up by itself (the flow builds' input directories)
+    /// finds what [`Kpse::find_file`] finds, but for `ls-R`'s order among
+    /// equal names below one `//`.
+    pub fn search_dirs(&mut self, format: Format) -> Vec<Bytes> {
+        let path = self.show_path(format);
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for elt in path_elements(&path) {
+            let mut elt = elt.strip_prefix(b"!!").map_or(elt.clone(), <[u8]>::to_vec);
+            normalize_path(&mut elt);
+            for d in self.element_dirs(&elt) {
+                if seen.insert(d.clone()) {
+                    out.push(d);
+                }
+            }
+        }
+        out
+    }
+
     /// [`Kpse::find_file`], and the candidates it tried and did not find,
     /// in order: while none of them is there and the file found still is,
     /// the same search finds the same file, or none.
