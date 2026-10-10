@@ -1500,7 +1500,11 @@ mod etex_tests {
         }
         for (n, p) in PDFTEX_PRIMITIVES {
             assert_eq!(Prim::by_name_pdftex(n), Some(p));
-            assert_eq!(p.name(), n);
+            // (pdfTeX's one alias: `\pdfoptionpdfminorversion` is
+            // `\pdfminorversion`'s parameter, shown by that name)
+            if n != "pdfoptionpdfminorversion" {
+                assert_eq!(p.name(), n);
+            }
             assert_eq!(Prim::by_name(n), None, "{n} is TeX82's");
             assert_eq!(Prim::by_name_etex(n), None, "{n} is e-TeX's");
         }
