@@ -3064,7 +3064,10 @@ struct Ev {
     /// The worker; the kind: 0 a piece's run (`run_and_install`), 5 idle
     /// (waiting for work), 6 parked (a read waiting for a definition), 7 a
     /// pick, 8 a settled run that changes the sequence (`c`: what differs,
-    /// `Expect::differs`; `a`: 1 a join, which ends the round at once), 16 + the task's kind a worker's task (16 run, 17 line
+    /// `Expect::differs`; `a`: 1 a join, which ends the round at once), 9 an
+    /// install's steps under the lock (`t`: the lock taken, the reads
+    /// validated again, the edges, the exports, the marks, the entries;
+    /// `a`: the reads), 16 + the task's kind a worker's task (16 run, 17 line
     /// breaking, 18 the scan, 19 shipping, 20 the log); the piece.
     wid: u16,
     kind: u8,
@@ -4485,6 +4488,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         // (the edges: the new run's, each with the piece whose definition
         // answers it now, replace the old run's; a read answered otherwise
         // than it was is stale)
+        let tp1 = sh.now();
         let mut stale = Dirty::new();
         let old_srcs = std::mem::take(&mut g.p[k].srcs);
         let mut srcs = Vec::with_capacity(run.reads.len());
@@ -4525,6 +4529,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
                 }
             }
         }
+        let tp2 = sh.now();
         let mut changed = changed;
         for key in &changed {
             refresh_export(&sh.names, &sh.font, k, &run, key);
@@ -4612,6 +4617,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
             let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
             stall(&mut g, sh, parked, &why);
         }
+        let tp3 = sh.now();
         g.running.remove(&k);
         let marks = reached(&mut g, sh, (k as u32, END), &changed);
         for (r, key) in marks {
@@ -4625,6 +4631,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
                 sh.cancel[r].store(true, Ordering::Relaxed);
             }
         }
+        let tp4 = sh.now();
         queue_breaks(&mut g, k, &equal);
         // (a run reading on past its text: the piece after it begins in
         // the middle of a command, its run in progress is not a result)
@@ -4672,6 +4679,8 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
                 }
             }
         }
+        let tp5 = sh.now();
+        sh.ev(Ev { wid, kind: 9, k: k32, t: [tl, tp1, tp2, tp3, tp4, tp5], a: run.reads.len() as u64, b: 0, c: 0, d: 0, e: 0 });
         // (the frontier moves now: every thread may be waiting in a run)
         settle(&mut g, sh);
         g.stats.time_confirm += t.elapsed();
