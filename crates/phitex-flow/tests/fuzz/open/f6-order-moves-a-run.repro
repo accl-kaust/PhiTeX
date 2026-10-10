@@ -1,0 +1,23 @@
+phitex-flow fuzz repro
+doc story
+seed 0 step 1
+before threads=1 reads=Suspend order=Random(9) lean=true
+schedule threads=1 reads=Suspend order=Priority lean=true
+fail mismatch dvi,log
+history threads=1 doc=-
+edit - 0 0 none
+ins
+
+text
+\catcode`\{=1 \catcode`\}=2 \font\x=cmr10 \x \hsize=300pt \vsize=500pt \parfillskip=0pt plus 1fil
+
+\noindent Some words that make a paragraph long enough to need two lines when narrow.\par
+
+\hsize=100pt
+
+\noindent Some words that make a paragraph long enough to need two lines when narrow.\par
+
+\input fzsub
+
+\end
+

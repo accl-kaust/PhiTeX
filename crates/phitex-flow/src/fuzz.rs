@@ -640,6 +640,24 @@ impl Fail {
         matches!(self, Fail::Over { .. })
     }
 
+    /// What [`Fail::text`] wrote (an over-invalidation's numbers kept, its
+    /// detail as written).
+    fn parse(v: &str) -> Fail {
+        let num = |k: &str| v.split_whitespace().find_map(|w| w.strip_prefix(k)?.parse().ok()).unwrap_or(0);
+        if let Some(w) = v.strip_prefix("mismatch ") {
+            Fail::Mismatch(w.to_string())
+        } else if v.starts_with("over ") {
+            let detail = v.splitn(4, ' ').nth(3).unwrap_or("").to_string();
+            Fail::Over { ran: num("ran="), allowed: num("allowed="), detail }
+        } else if let Some(m) = v.strip_prefix("panic ") {
+            Fail::Panic(m.to_string())
+        } else if v == "timeout" {
+            Fail::Timeout
+        } else {
+            Fail::Mismatch(v.to_string())
+        }
+    }
+
     fn text(&self) -> String {
         match self {
             Fail::Mismatch(w) => format!("mismatch {w}"),
@@ -726,7 +744,7 @@ impl Repro {
                 }
                 "before" => before = Schedule::parse(v),
                 "schedule" => schedule = Schedule::parse(v),
-                "fail" => fail = Fail::Mismatch(v.to_string()),
+                "fail" => fail = Fail::parse(v),
                 "history" => {
                     for w in v.split_whitespace() {
                         if let Some(t) = w.strip_prefix("threads=") {
@@ -1193,6 +1211,11 @@ pub fn save(dir: &Path, r: &Repro) -> PathBuf {
 /// its schedule, the edit at the failing schedule, against the cold
 /// build. The failure, if it still fails.
 pub fn replay(r: &Repro) -> Option<Fail> {
+    replay_outputs(r)?.0
+}
+
+/// [`replay`], with the edit's and the cold build's outputs.
+fn replay_outputs(r: &Repro) -> Option<(Option<Fail>, Output, Output)> {
     let corpus = corpus();
     let doc = corpus.iter().find(|d| d.name == r.doc)?.clone();
     let mut text = r.text.clone();
@@ -1213,26 +1236,98 @@ pub fn replay(r: &Repro) -> Option<Fail> {
         write_outputs(&PathBuf::from(d), &prev, &inc, &c);
     }
     if let Some(w) = differs(&inc, &c) {
-        return Some(Fail::Mismatch(w));
+        return Some((Some(Fail::Mismatch(w)), inc, c));
     }
     if over
-        && let Some((allowed, detail)) =
-            over_invalidation(
-                &r.text,
-                &text,
-                r.edit.file.is_some(),
-                &prev.dump,
-                &inc.dump,
-                std::env::var_os("PHITEX_FUZZ_STRICT").is_some(),
-            )
+        && let Some((allowed, detail)) = over_invalidation(
+            &r.text,
+            &text,
+            r.edit.file.is_some(),
+            &prev.dump,
+            &inc.dump,
+            std::env::var_os("PHITEX_FUZZ_STRICT").is_some(),
+        )
     {
-        return Some(Fail::Over {
+        let f = Fail::Over {
             ran: inc.stats.commands_run,
             allowed,
             detail,
-        });
+        };
+        return Some((Some(f), inc, c));
     }
-    None
+    Some((None, inc, c))
+}
+
+/// The first log entry two outputs differ at (the cold build's `b`), a
+/// signature: its first 48 characters, control characters as spaces and
+/// digits as `#`.
+fn first_log_diff(a: &Output, b: &Output) -> String {
+    let i = a.log.iter().zip(&b.log).position(|(x, y)| x != y).unwrap_or(a.log.len().min(b.log.len()));
+    let e = b.log.get(i).or_else(|| a.log.get(i)).cloned().unwrap_or_default();
+    let e: String = e
+        .chars()
+        .map(|c| if c.is_ascii_digit() { '#' } else if c < ' ' || ('\u{E000}'..='\u{F8FF}').contains(&c) { ' ' } else { c })
+        .collect();
+    let e = e.split_whitespace().collect::<Vec<_>>().join(" ");
+    let short: String = e.chars().take(48).collect();
+    if a.dvi == b.dvi { format!("log: {short}") } else { format!("dvi: {short}") }
+}
+
+/// A failure's class, to tell findings apart over many seeds: the open
+/// findings it matches (CORE.md "Fuzz findings") by how it fails, else a
+/// signature (the document, the edit's kind, where the log first differs).
+/// - a no-op edit fails too, and passes after a first build in priority
+///   order: F6 (the order of the first build);
+/// - a no-op edit fails too: F1 on TRIP, else "noop" (F4's kind);
+/// - the last edit alone passes, with the seed's history it fails: a
+///   "history" failure (F2 is one, its log only);
+/// - otherwise "edit" (marked F2? when the log alone differs, at an
+///   error's entry).
+pub fn classify(r: &Repro) -> String {
+    match &r.fail {
+        Fail::Timeout => return format!("timeout {}", r.doc),
+        Fail::Panic(p) => return format!("panic {} | {}", r.doc, p.lines().next().unwrap_or("").chars().take(60).collect::<String>()),
+        Fail::Over { .. } | Fail::Mismatch(_) => {}
+    }
+    // (an over-invalidation as the last edit alone shows it)
+    if let Some((Some(Fail::Over { .. }), ..)) = replay_outputs(r) {
+        return format!("over {} {}", r.doc, r.edit.what);
+    }
+    // (the no-op at 1 thread in priority order, deterministic; else at the
+    // failure's schedules)
+    let mut quiet = r.noop();
+    for s in [&mut quiet.before, &mut quiet.schedule] {
+        s.threads = 1;
+        s.reads = Reads::Suspend;
+        s.order = Order::Priority;
+    }
+    let noop = if replay(&quiet).is_some() { quiet } else { r.noop() };
+    if let Some((Some(_), inc, c)) = replay_outputs(&noop) {
+        let mut p = noop.clone();
+        p.before = Schedule { threads: 1, reads: Reads::Suspend, order: Order::Priority, lean: r.before.lean };
+        if replay(&p).is_none() {
+            return format!("F6 order {}", r.doc);
+        }
+        if r.doc == "trip" {
+            return "F1 trip".to_string();
+        }
+        return format!("noop {} | {}", r.doc, first_log_diff(&inc, &c));
+    }
+    match replay_outputs(r) {
+        Some((Some(_), inc, c)) => {
+            let d = first_log_diff(&inc, &c);
+            // (an error's entry, the log only: F2's shape)
+            let f2 = if d.starts_with("log: ! ") { "F2? " } else { "" };
+            format!("{f2}edit {} {} | {d}", r.doc, r.edit.what)
+        }
+        _ => match replay_history(r) {
+            Some(h) => {
+                let f2 = matches!(&h.fail, Fail::Mismatch(w) if w == "log");
+                format!("{}history {} {} | {}", if f2 { "F2? " } else { "" }, r.doc, r.edit.what, h.fail.text())
+            }
+            None => format!("passes {}", r.doc),
+        },
+    }
 }
 
 /// A reproduction with its history: its seed run again, the same edits at
@@ -1261,4 +1356,28 @@ fn write_outputs(d: &Path, prev: &Output, inc: &Output, c: &Output) {
     let _ = std::fs::write(d.join("cold.log"), c.log.join("\n"));
     let _ = std::fs::write(d.join("edit.dvi"), &inc.dvi);
     let _ = std::fs::write(d.join("cold.dvi"), &c.dvi);
+}
+
+/// An order as the CLI writes it: `priority` or `random:N`.
+pub fn parse_order(s: &str) -> Option<Order> {
+    if s == "priority" {
+        return Some(Order::Priority);
+    }
+    s.strip_prefix("random:")?.parse().ok().map(Order::Random)
+}
+
+/// Whether two cold builds of `text`, as document `doc` is built, at 1
+/// worker with waiting reads in orders `a` and `b`, differ (DVI, log,
+/// writes); and where first (`differs`' names). `dump`: both graphs.
+pub fn orders_differ(doc: &Doc, text: &str, a: Order, b: Order, dump: bool) -> (Option<String>, Output, Output) {
+    let o = |order| Options { threads: 1, reads: Reads::Suspend, order, dump, etex: false, ..Options::default() };
+    let x = builder(doc, &doc.files).update(text, o(a));
+    let y = builder(doc, &doc.files).update(text, o(b));
+    (differs(&x, &y), x, y)
+}
+
+/// A plain document of the corpus's kind with `body` after plain.tex (and
+/// the scaffold), named `name`.
+pub fn plain_body_doc(name: &str, body: &str) -> Option<Doc> {
+    Some(plain_doc(name, body, &cmr10()?, &plain()?))
 }

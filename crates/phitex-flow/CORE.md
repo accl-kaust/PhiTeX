@@ -1162,6 +1162,20 @@ its step. A summary line says "(a no-op edit fails too)" when the update
 fails whatever the edit. `PHITEX_FUZZ_DUMP=DIR` writes both graphs, both
 logs and both DVI files.
 
+**At scale** (`scripts/flow-fuzz.sh [SEEDS] [OUT]`, for the cluster): SEEDS
+seeds (5000 by default) of 6 edits at 1 thread, then SEEDS/5 other seeds
+at 8 threads (random schedules). Chunks of 100 seeds run `JOBS` at a
+time, under `scripts/sandbox`. It writes `OUT/summary.txt` (passed and
+failed by document) and `OUT/classes.txt` (`phitex-flow --fuzz-classify
+REPRO...`: F1, F2?, F6 for the open findings by how they fail, else
+`edit`, `noop`, `history`, `over`, `panic` or `timeout` with the
+document, the edit's kind and where the log first differs). One
+reproduction per new class goes into `OUT/min/`, cut down by
+`scripts/flow-fuzz-min.py` (delta debugging over the paragraphs of the
+text; the edit's paragraph stays). `phitex-flow --fuzz-orders DOC FILE A
+B [DIR]` compares two cold builds of a text in two orders (`priority`,
+`random:N`; `-` is the document's own text). It was the oracle for F6.
+
 **Over-invalidation** (seeds that keep their nodes; `src/fuzz.rs`
 `over_invalidation`): a piece whose text the edit changed, a new piece, or
 one entered in a predecessor's state may run all its nodes; any other
@@ -1182,6 +1196,11 @@ of 3 edits by default, `PHITEX_FUZZ_TRIP=N`): passes.
 its first edit, and a no-op edit fails the same), hyphens seed 102 (F2),
 big seed 236 (F6; cut down, its text also gives F4). The
 over-invalidation: story seed 161 (F5).
+`scripts/flow-fuzz.sh 1000` (1000 seeds at 1 thread, 200 at 8): 852 and
+168 passed. Classes: 170 F1 (TRIP); 4 F2 (hyphens 102, 802, 970 with
+history, 1187 a split); 1 F6 (big 236); 1 F6 by its cause (big 1153);
+4 over-invalidations, all F5 (story 161 and 1127, pages 659, hyphens
+830). Nothing new beyond F1–F6.
 
 **Open findings** (`tests/fuzz/open/*.repro` must still fail; a fixed one
 moves to `tests/fuzz/fixed/`, which must pass):
@@ -1195,22 +1214,67 @@ moves to `tests/fuzz/fixed/`, which must pass):
   same text updated again ships 3, no node running again. In TRIP
   every update after the first differs (`--fuzz 6 1 1 --threads 1`), so
   no TRIP edit can be checked until F1 is fixed.
-- **F2. A kept node's error context shows the line as it was.**
-  `tests/fuzz/open/f2-error-context-line.repro`: `\hsize=3iin
-  \tolerance=1000`, an `X` inserted after `3iin `: the "Illegal unit"
-  error's context line is printed without the `X` (pieces keeping their
-  nodes; lean pieces run again and pass). The context shows the rest of
-  the line, which the erring node never read: either its log reads the
-  rest of its line, or the line is laid out from the current text when the
-  log is made (`logs::rebase`). Hyphens seed 102 (`--fuzz 102 5 1
-  --threads 1`).
+  *Cause* (traced): the cold build fires three times at node (0,15).
+  The first fire reads `\holdinginserts` = 1 and holds the inserts. The
+  routine's `\global\holdinginserts0` goes into the names index at
+  (0,15), so fires 2 and 3 read 0. Then the default fire at (0,24). In
+  the second update the first fire at (0,15) is a predicted position. The
+  page builder's hold test (page.rs, §1018: `env.read(Holdinginserts)`)
+  goes through `BuildFold::read` and `read_at`, i.e.
+  `names.reaching(key, (k, node+1))`. That includes the last build's
+  fold definitions at (0,15), which are not retracted yet: `pass()` only
+  drops positions before the scan's, and `fire()` retracts only after
+  the hold test. So it reads 0 and does not hold. `find_memo` then finds
+  the last build's no-hold run (reads nothing that changed), and one
+  fire is lost. One `Pos` holds what all three fires at (0,15) defined.
+  *Fix wanted*: drop the predicted definitions at the fire's position
+  before the page builder's first read for that fire (`\holdinginserts`,
+  `\output`, `\box255`, the insert boxes, §1012–1018). Or make the
+  fold's reads at its own position see only this build's earlier fires
+  there. Several fires at one node probably need a fire index in the
+  position.
+- **F2. A kept node's error context shows the line as it was** (fixed,
+  `logs.rs` only: `tests/fuzz/fixed/f2-error-context-line.repro`, an `X`
+  inserted after the error on its line;
+  `tests/fuzz/fixed/f2-error-context-edit-before.repro`, a `\mark{b} `
+  inserted before the erring node). The capture is in `graph/diag.rs`
+  (`show_context`): the node's log holds `X{before}CUT{after}`, the
+  line around the error taken from the piece's text when the node ran.
+  The node keeps its run while its reads are the same, but the rest of
+  its line is other nodes' text, so an edit there changes nothing it
+  read. The fix is in `logs::resolve`, when the log is gathered
+  (`line_now`). The node's own text, from where its predecessor stopped
+  to where it stopped, is unchanged. The error's place in it is the one
+  split that `before` ends with and `after` begins with. From there the
+  line is read again in the current text. If the split is not found or
+  not unique (a pseudo file's line), the captured line is kept. Hyphens
+  seeds 102, 802, 970 and 1187 pass now. Done without a core change: a
+  placeholder carrying the error's offset from `diag.rs` would make it
+  exact, if A wants it.
 - **F3. After an update of the empty text, no page is shipped again.**
   `tests/fuzz/open/f3-update-after-empty.repro`: `Build::new`,
   `update("")`, then `update("\hsize=100pt\vsize=100pt \font\x=cmr10 \x
   A\par\end")`: no page (a cold build ships one). Every corpus document:
-  0 of its pages (`tests/design.rs` `cold_equals_edit` reports it). The
-  cold path is the edit path by construction (one `update`); the empty
-  build leaves state the next update reads.
+  0 of its pages (`tests/design.rs` `cold_equals_edit` reports it).
+  *Cause* (traced): a round that restructures leaves the next round
+  comparing the wrong builds. In `Build::update`, a round that returns
+  `None` (a run changed the sequence) puts back the last build's pages,
+  orgs and marks ("the pages to compare with are the last build's"). But
+  the next round's `olds`, and so `old_runs`, are the pieces of the round
+  that just ran, not the last build's. `advance_match` finds every piece
+  `same_material` (`Arc::ptr_eq(o, run)`: the same run) and, under "the
+  same material throughout: the same pages", takes the last build's
+  pages. After the empty text those are none. A smaller case:
+  `tests/fuzz/open/f3-restructured-update-reuses-pages.repro`,
+  `\count1=1 \hsize=100pt` + `A\par\end` in one piece, the `1` edited to
+  `0`. The edited piece has no old `expect`, and its run ends the job
+  (`got.ends`), so round 1 restructures. Round 2 reuses the last build's
+  page `[0.1]`, where a cold build ships `[0]`. Any edit in the piece
+  holding `\end`/`\bye` restructures the same way.
+  *Fix wanted*: the round after a restructure compares with the last
+  build's runs (keep `old_runs` from the build's first round, as the
+  pages are), or does not take the all-same path when `olds` come from a
+  round of this build.
 - **F4. A second update loses the last page's last line.**
   `tests/fuzz/open/f4-second-update-last-line.repro` (32 lines cut from
   big's text by delta debugging, no-op edit, both builds 1 thread in
@@ -1227,6 +1291,36 @@ moves to `tests/fuzz/fixed/`, which must pass):
   value it had (`\fz`, `\vsize`, `\escapechar` now from piece 134, the
   same values), and n1, reading `\vsize` from the new piece too, is kept.
   A macro call's reading node compares the definer, not the meaning.
+  It is not only macros: pages seed 659 step 5 (a swap) runs the
+  `\bye` piece again, 5 of its 6 nodes, whose only changed read is
+  `\vsize` = 14208860 now from piece 134 instead of 133. Hyphens seed
+  830 step 5 (a split) runs 2 of 3 nodes of `\tolerance=1000`, whose
+  only changed read is `\hsize` = 14208860 from piece 137 instead of
+  133. Story seed 1127 (8 threads) is the swap again. So some reads
+  compare the definer's piece, not the value.
+  `tests/fuzz/open/f5-new-definer-equal-value.repro` (cut down from
+  hyphens 830): `\vsize=2in \hsize=3in \tolerance=1000` split into two
+  pieces before `\tolerance`, so `\hsize` now comes from a new piece with
+  the same value. The `\tolerance` piece runs 2 of its 3 nodes again.
+  *Cause* (traced): not `Read::same`, which compares reads inside a
+  piece's chain. Marking between pieces is by position, not by value.
+  When a piece finishes, `changed_names(old_run, run)` compares its
+  exports with the run it replaces. A definition that moves to another
+  piece with the same value counts twice: the edited piece no longer
+  exports `\hsize` (changed), and the new piece, with no old run, exports
+  it (changed). For each, `reached` (build.rs) marks every reader of the
+  name whose edge source is at or before the changing place
+  (`src_at_or_before(src, m)`), and `mark` makes it dirty. It never asks
+  whether the value now reaching that reader is the one it read. The
+  wrong predicate: `reached` marks reader `r` of `key` when
+  `src_at_or_before(&sh.seq, src, m)`; it should also require
+  `!read_val.seen_as(&names.reaching(key, (rpos, node)).1)`, where
+  `read_val` is the value `r`'s run recorded for its first read of
+  `key`. When the value is the same, move the edge's source to the new
+  definer and do not mark. The trace (repro above): the update runs piece 1
+  with `changed=[Hsize]` (marks piece 3), then the new piece 2 with
+  `changed=[Hsize]` (marks piece 3 again); piece 3 reads `\hsize` =
+  3in both times.
 - **F6. Big: the order of a cold build changes its output.** At 1
   worker, waiting reads, `Order::Random(400)` gives another DVI and log
   than priority order, every time (`tests/design.rs`
@@ -1234,6 +1328,81 @@ moves to `tests/fuzz/fixed/`, which must pass):
   `Order::Random(7)` does about one run in eight. Big seed 236 (`--fuzz
   236 1 1 --threads 1`) is it: its first build ran in that order. The
   smaller documents do not show it.
+  `tests/fuzz/open/f6-order-moves-a-run.repro`, 6 pieces: `\hsize=300pt`;
+  paragraph P; `\hsize=100pt`; P again (the same text); `\input fzsub`;
+  `\end`. `phitex-flow --fuzz-orders story FILE random:9 priority` says
+  "differs": in random order the first P is broken at 100pt.
+  *Cause* (traced): the `\input` piece restructures the sequence after 4
+  of the 6 pieces are done. The first P has not run, the second has. The
+  next round's layout matches the new pieces with the old ones.
+  `Matcher::new` indexes only old pieces that have a run, so the first P
+  does not find its own old piece by pointer. `Matcher::find` falls back
+  to equal text and takes old piece 3 (the second P, which read
+  `\hsize` = 100pt from piece 2). That run is kept as Done at position 1:
+  its definer is now after it, and its read is not checked again there.
+  Its `Para.lb.hsize` is 100pt, and the lines come from it. Big shows the
+  same: 30 pieces were still unrun at the restructure, and part 0's story
+  piece takes part 1's copy (`\hsize=3in`, from part 0's hyphens). The
+  pieces' graphs are the same in both orders (the dumps differ only in
+  piece ids; the lean regeneration shows the right reads). The page fed
+  at the first fire differs.
+  *Fix wanted*: index old pieces without a run by pointer too, so each
+  piece keeps its own place. A run that the text fallback moves to
+  another place has its reads checked by value there, or is not kept.
+  Not only in random orders: big seed 1153 step 6 (removing an `\input
+  fzsub`, 8 threads; it fails at 1 thread in priority order too). The
+  first build, in priority order, restructures at the `\input` with 164
+  of 170 pieces done. Part 1's "Mr.~Drofnats" piece has not run yet and
+  takes part 2's run by equal text (old 152 for new 143). That build is
+  already wrong, the same way as its cold build. The update without the
+  `\input` keeps the wrong run, and the cold build of the edited text
+  (no restructure) does not have it.
+
+**Edit budgets** (`src/budgets.rs`, `phitex-flow --budgets [REPS]
+[DOC]`, `scripts/flow-budgets.sh`, `tests/budgets.rs`, informational).
+Documents: the plain ones; big (48 pages); bigout (152 pages, big's body
+twelve times with a `\mark` per part, through plain's output routine,
+headlines and footnotes). Each at 1 and 8 workers (predicted reads),
+lean and not. Five edits, each made 5 times on the document's text and
+taken back unmeasured:
+- word: a word of five letters or more, replaced by one as long;
+- line: a line of words inserted in a paragraph in the middle;
+- page-break: a six-line paragraph inserted near the start;
+- def: `\fz` defined again, in a variant with `\fz` at the start of
+  every paragraph;
+- param: `\parindent` at the start of the body.
+The table gives the median and maximum time, steps (nodes run), pieces
+run, the join's time and the longest phase, and flags each miss of the
+brief's budgets (word ≤ 50 ms and ≤ 300 steps, line ≤ 50 ms, page-break
+≤ 100 ms, any edit ≤ 25% of a cold build).
+
+First local table (5 repetitions, median ms):
+
+| | big lean | big nodes | bigout lean | bigout nodes |
+|---|---|---|---|---|
+| word, 1 worker | 7.9 (10 steps) | 63.4 | 20.1 | 273 |
+| line | 7.8 | 64.2 | 20.0 | 186 |
+| page-break | 12.0 | 64.5 | 23.4 | 209 |
+| def | 12.4 | 66.6 | 31.3 | 199 |
+| param | 140 | 133 | 550 | 430 |
+| cold | 135 | 160 | 360 | 400 |
+
+- **B1. With pieces keeping their nodes, every edit scans all the pages
+  again.** The page scan is the longest phase: 60 ms on big and 270 ms on
+  bigout, for a 10-step word edit. Lean pieces take 4.8 ms and 14 ms. So
+  "nodes" misses the 50 ms word and line budgets on big and bigout, and
+  the 100 ms page-break budget on bigout. The scan does not converge on
+  the last build's pages when runs are kept, presumably because a kept
+  run is a new `Arc`. For A.
+- **B2.** Even lean, the scan of a word edit grows with the document
+  (4.8 ms on 48 pages, 14 ms on 152).
+- `param` (every paragraph reflowed) is a cold build's cost or more:
+  about 100% of cold, 140% on bigout lean.
+- `word` misses the 300 steps where the word is part of a definition or
+  an alignment: in pages it is inside `\para`'s body (1858 steps), in
+  table inside the `\halign` (430). There the kind is really "def".
+- The one-page documents miss the 25% rule on any edit (cold ≈ 20–30 ms,
+  an edit 3–7 ms).
 
 **Design tests** (`tests/design.rs`, the brief's 1–6; 7 waits for
 `Key::File` by writes):
