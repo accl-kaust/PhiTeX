@@ -1,21 +1,18 @@
 //! TeX Live as the flow builds see it: the engines by their program names
-//! (fmtutil.cnf's lines), kpathsea for the paths, and the directories a
-//! `Build` is given.
-//!
-//! A `Build` finds `\input` files in a list of directories, trying each in
-//! order (`Build::set_input_dirs`). kpathsea's TEXINPUTS covers thousands
-//! of directories (`//`), so they are folded into one: a directory of
-//! links, one per file name, to the file kpathsea's search order finds
-//! first ([`Tree::inputs`]). It is made once per program name and TeX
-//! Live tree (its `ls-R` databases' stamps) in the cache directory, as
-//! `mktexlsr` makes `ls-R`: a cache of the tree, never of a document.
+//! (fmtutil.cnf's lines), and kpathsea, the finder a `Build` is given
+//! (`Build::set_kpse` with `phitex_flow::kpse::Kpathsea`): `\input` files
+//! by TEXINPUTS (from the environment, `.` first as texmf.cnf has it),
+//! TFM files, map files, fonts and encodings, each a lookup in the `ls-R`
+//! databases, no directory walked.
 
-use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use partex_kpse::{Format, Kpse};
+use phitex_flow::kpse::Kpathsea;
+use phitex_flow::tfm::{Kpse as _, KpseFormat};
 
 /// What a format writes when no `\pdfoutput` says otherwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,13 +181,13 @@ pub fn exe_stamp() -> u64 {
         .0
 }
 
-/// TeX Live for one program name: where a build finds its inputs and its
-/// fonts.
+/// TeX Live for one program name: the finder a build is given, and the
+/// tree's stamp.
 pub struct Tree {
-    /// The directory of links standing for TEXINPUTS (but `.`).
-    pub inputs: PathBuf,
-    /// The directories `\font` finds TFM files below.
-    pub fonts: Vec<PathBuf>,
+    /// kpathsea as the engine's program (its `progname`, `$engine`).
+    pub kpse: Arc<Kpathsea>,
+    /// The program name it finds files as.
+    pub prog: &'static str,
     /// The tree's stamp: the search paths and the `ls-R` databases'
     /// sizes and times.
     pub stamp: u64,
@@ -201,106 +198,46 @@ fn os(b: &[u8]) -> &Path {
 }
 
 impl Tree {
-    /// The tree for engine `e` (its links made if the cache has none);
-    /// `note` hears what takes time.
-    pub fn open(e: &Engine, note: &mut dyn FnMut(&str)) -> Result<Tree, String> {
-        let mut kpse = kpse(e.name, e.kpse_engine);
-        let tex_path = kpse.show_path(Format::Tex);
-        let tfm_path = kpse.show_path(Format::Tfm);
-        let mut h = Fnv::new().add(&tex_path).add(&tfm_path);
-        for elt in kpse.show_path(Format::Db).split(|&c| c == b':') {
-            let elt = elt.strip_prefix(b"!!").unwrap_or(elt);
-            if let Ok(m) = std::fs::metadata(os(elt).join("ls-R")) {
-                let t = m
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map_or(0, |d| d.as_nanos());
-                h = h.add(elt).add(&m.len().to_le_bytes()).add(&t.to_le_bytes());
-            }
-        }
-        let stamp = h.0;
-        let inputs = cache_dir().join("inputs").join(format!("{}-{stamp:016x}", e.name));
-        if !inputs.is_dir() {
-            let t = std::time::Instant::now();
-            let dirs = kpse.search_dirs(Format::Tex);
-            let n = link_farm(&dirs, &inputs)
-                .map_err(|err| format!("can't make {}: {err}", inputs.display()))?;
-            note(&format!(
-                "TeX Live's inputs for {}: {n} files of {} directories, linked in {:.1} s ({})",
-                e.name,
-                dirs.len(),
-                t.elapsed().as_secs_f64(),
-                inputs.display()
-            ));
-        }
-        let mut fonts = Vec::new();
-        for elt in tfm_path.split(|&c| c == b':') {
-            let elt = elt.strip_prefix(b"!!").unwrap_or(elt);
-            let mut d = elt.to_vec();
-            while d.ends_with(b"/") && d.len() > 1 {
-                d.pop();
-            }
-            let p = os(&d).to_path_buf();
-            if p.is_absolute() && p.is_dir() && !fonts.contains(&p) {
-                fonts.push(p);
-            }
-        }
-        if fonts.is_empty() {
-            fonts = phitex_flow::tfm::default_dirs();
-        }
-        Ok(Tree { inputs, fonts, stamp })
+    /// The tree for engine `e`: kpathsea as its program, made once (its
+    /// `texmf.cnf` and `ls-R` read at the first lookup).
+    pub fn open(e: &Engine) -> Tree {
+        let mut k = kpse(e.name, e.kpse_engine);
+        let stamp = stamp(&mut k);
+        Tree { kpse: Arc::new(Kpathsea::new(k)), prog: e.name, stamp }
+    }
+
+    /// The same tree for a format's build: the current directory is never
+    /// searched (fmtutil runs in a scratch directory), so a format cached
+    /// for the tree holds nothing of the directory it was made in.
+    pub fn for_format(&self, e: &Engine) -> Tree {
+        Tree { kpse: Arc::new(Kpathsea::new(kpse(e.name, e.kpse_engine)).without_cwd()), prog: self.prog, stamp: self.stamp }
     }
 
     /// The path of TeX Live's file `name` (as TEXINPUTS finds it), if any.
     pub fn input(&self, name: &str) -> Option<PathBuf> {
-        let p = self.inputs.join(name);
-        p.is_file().then_some(p)
+        self.kpse.find(name, KpseFormat::Tex, self.prog).map(PathBuf::from)
     }
 }
 
-/// Makes `at`: a link per file name in `dirs` (absolute ones, in order),
-/// to the first file of that name. Made beside it and renamed, so a
-/// process that finds it finds it whole. The number of links.
-fn link_farm(dirs: &[Vec<u8>], at: &Path) -> std::io::Result<usize> {
-    let parent = at.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(
-        ".{}.{}",
-        at.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp)?;
-    let mut seen = HashSet::new();
-    for d in dirs {
-        let d = os(d);
-        if !d.is_absolute() {
-            // (`.`: the document's own directory comes first anyway)
-            continue;
-        }
-        let Ok(rd) = std::fs::read_dir(d) else { continue };
-        let mut names: Vec<std::ffi::OsString> = rd
-            .flatten()
-            .filter(|e| e.path().is_file())
-            .map(|e| e.file_name())
-            .collect();
-        names.sort();
-        for n in names {
-            if seen.insert(n.clone()) {
-                std::os::unix::fs::symlink(d.join(&n), tmp.join(&n))?;
-            }
+/// The tree's stamp: the search paths of inputs and TFM files and the
+/// `ls-R` databases' sizes and times (a format is made again when the
+/// tree changes).
+fn stamp(kpse: &mut Kpse) -> u64 {
+    let tex_path = kpse.show_path(Format::Tex);
+    let tfm_path = kpse.show_path(Format::Tfm);
+    let mut h = Fnv::new().add(&tex_path).add(&tfm_path);
+    for elt in kpse.show_path(Format::Db).split(|&c| c == b':') {
+        let elt = elt.strip_prefix(b"!!").unwrap_or(elt);
+        if let Ok(m) = std::fs::metadata(os(elt).join("ls-R")) {
+            let t = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            h = h.add(elt).add(&m.len().to_le_bytes()).add(&t.to_le_bytes());
         }
     }
-    match std::fs::rename(&tmp, at) {
-        Ok(()) => Ok(seen.len()),
-        // (another process made it meanwhile)
-        Err(_) if at.is_dir() => {
-            let _ = std::fs::remove_dir_all(&tmp);
-            Ok(seen.len())
-        }
-        Err(e) => Err(e),
-    }
+    h.0
 }
 
 /// Bytes as TeX's characters, one each (what a `Build` reads).

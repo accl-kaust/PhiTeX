@@ -1133,6 +1133,19 @@ impl Kpse {
         self.init_format(format)
     }
 
+    /// The search path of `format` without its `.` elements (the current
+    /// directory) from now on, until the program name changes: a run that
+    /// must not read the directory it was started in, as fmtutil keeps a
+    /// format's build out of it by running it in a scratch directory.
+    pub fn drop_cwd(&mut self, format: Format) {
+        let path = self.show_path(format);
+        let kept: Vec<Bytes> = path_elements(&path)
+            .into_iter()
+            .filter(|e| !matches!(e.as_slice(), b"." | b"./"))
+            .collect();
+        self.paths.insert(format, kept.join(&b':'));
+    }
+
     /// Every directory the search path of `format` covers, in the order
     /// a search tries them, each once: an element's `!!` dropped (its
     /// directories are the database's or the disk's alike) and its `//`
