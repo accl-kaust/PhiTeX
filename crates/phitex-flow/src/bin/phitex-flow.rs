@@ -135,7 +135,7 @@ fn trip(dir: &str, threads: usize) -> ExitCode {
 }
 
 /// `phitex-flow --fuzz SEED COUNT [SEEDS] [--threads N,..] [--doc NAME]
-/// [--out DIR] [--no-over] [--strict-over] [--timeout SECS]`: the incremental fuzz gate
+/// [--out DIR] [--no-over] [--strict-over] [--latex] [--timeout SECS]`: the incremental fuzz gate
 /// (`phitex_flow::fuzz`): SEEDS seeds from SEED (1), COUNT edits each; a
 /// failing seed's reproduction goes to DIR (`fuzz-out`).
 fn fuzz(args: &[String]) -> ExitCode {
@@ -148,6 +148,7 @@ fn fuzz(args: &[String]) -> ExitCode {
     let mut seeds = 1;
     let mut cfg = fuzz::Config::default();
     let mut out = std::path::PathBuf::from("fuzz-out");
+    let mut latex = false;
     let mut i = 2;
     if let Some(n) = num(2) {
         seeds = n;
@@ -160,6 +161,11 @@ fn fuzz(args: &[String]) -> ExitCode {
             "--doc" => cfg.doc = Some(val),
             "--out" => out = val.into(),
             "--timeout" => cfg.timeout = std::time::Duration::from_secs(val.parse().unwrap_or(600)),
+            "--latex" => {
+                latex = true;
+                i += 1;
+                continue;
+            }
             "--strict-over" => {
                 cfg.strict = true;
                 i += 1;
@@ -177,7 +183,7 @@ fn fuzz(args: &[String]) -> ExitCode {
         }
         i += 2;
     }
-    let corpus = Arc::new(fuzz::corpus());
+    let corpus = Arc::new(if latex { fuzz::latex_corpus() } else { fuzz::corpus() });
     let (mut fails, mut over, mut ok) = (0, 0, 0);
     for s in seed..seed + seeds {
         match fuzz::run_seed_timed(&corpus, s, usize::try_from(count).unwrap_or(usize::MAX), &cfg) {

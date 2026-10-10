@@ -158,6 +158,8 @@ fn edited(doc: &Doc, text: &str, kind: EditKind, rep: usize) -> Option<String> {
                 let w = line.1.split(' ').find_map(|w| {
                     let here = pos;
                     pos += w.len() + 1;
+                    // (its letters, a stop or comma after them left)
+                    let w = w.trim_end_matches(['.', ',', ';', '\n']);
                     (w.len() >= 5 && w.chars().all(char::is_alphabetic)).then_some((here, w))
                 })?;
                 let new: String = WORDS[rep % 5].chars().cycle().take(w.1.len()).collect();
@@ -173,9 +175,21 @@ fn edited(doc: &Doc, text: &str, kind: EditKind, rep: usize) -> Option<String> {
             p.push('\n');
             t.insert_str(s, &p);
         }
+        EditKind::Def if doc.kind.etex() => {
+            // (a LaTeX document: its first \newcommand's body)
+            let at = doc.body + t[doc.body..].find("\\newcommand{")?;
+            let close = at + t[at..].find("}{")? + 2;
+            let n = t[close..].find('}')?;
+            t.replace_range(close..close + n, WORDS[rep % 5]);
+        }
         EditKind::Def => {
             let at = t[doc.body..].find("\\def\\fz{lazy}").map(|i| doc.body + i)?;
             t.replace_range(at..at + "\\def\\fz{lazy}".len(), &format!("\\def\\fz{{{}}}", WORDS[rep % 5]));
+        }
+        EditKind::Param if doc.kind.etex() => {
+            // (a LaTeX document: `\parskip`, after `\begin{document}`)
+            let at = doc.body + t[doc.body..].find("\\begin{document}\n")? + "\\begin{document}\n".len();
+            t.insert_str(at, &format!("\\setlength{{\\parskip}}{{{}pt}}\n", 1 + rep));
         }
         EditKind::Param => {
             t.insert_str(doc.body, &format!("\\parindent={}pt\n", 21 + rep));
@@ -200,8 +214,8 @@ fn with_fz(doc: &Doc) -> Doc {
     d
 }
 
-fn opts(threads: usize) -> Options {
-    Options { threads, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: false, ..Options::default() }
+fn opts(threads: usize, etex: bool) -> Options {
+    Options { threads, reads: Reads::Speculate, order: Order::Priority, dump: false, etex, ..Options::default() }
 }
 
 fn timed(f: impl FnOnce() -> Output) -> (Output, Duration) {
@@ -213,17 +227,25 @@ fn timed(f: impl FnOnce() -> Output) -> (Output, Duration) {
 /// Measures every kind on `doc` at `sched`, `reps` times each.
 pub fn measure(doc: &Doc, sched: Sched, reps: usize, kinds: &[EditKind]) -> Vec<Row> {
     let mut rows = Vec::new();
-    let o = opts(sched.threads);
+    // (a LaTeX document: one build for all the kinds, its prelude is long)
+    let latex = doc.kind.etex();
+    let o = opts(sched.threads, latex);
     // (a first build, not measured: the fonts read, the caches warm)
-    fuzz::builder(doc, &doc.files).update(&doc.text, o);
+    if !latex {
+        fuzz::builder(doc, &doc.files).update(&doc.text, o);
+    }
+    let mut shared: Option<(crate::build::Build, usize, Duration)> = None;
     for &kind in kinds {
-        let d = if kind == EditKind::Def { with_fz(doc) } else { doc.clone() };
-        let mut b = fuzz::builder(&d, &d.files);
-        b.set_lean(sched.lean);
-        let (first, cold) = timed(|| b.update(&d.text, o));
+        let d = if kind == EditKind::Def && !latex { with_fz(doc) } else { doc.clone() };
+        let (mut b, pages, cold) = shared.take().unwrap_or_else(|| {
+            let mut b = fuzz::builder(&d, &d.files);
+            b.set_lean(sched.lean);
+            let (first, cold) = timed(|| b.update(&d.text, o));
+            (b, first.stats.pages, cold)
+        });
         let mut row = Row {
             doc: doc.name.clone(),
-            pages: first.stats.pages,
+            pages,
             kind,
             sched,
             cold,
@@ -257,6 +279,9 @@ pub fn measure(doc: &Doc, sched: Sched, reps: usize, kinds: &[EditKind]) -> Vec<
             row.phase.push(phases.into_iter().max_by_key(|p| p.1).unwrap_or(("-", Duration::ZERO)));
             // (back to the document, not measured)
             b.update(&d.text, o);
+        }
+        if latex {
+            shared = Some((b, pages, cold));
         }
         if row.times.is_empty() {
             continue;
@@ -323,6 +348,11 @@ pub fn table(rows: &[Row]) -> String {
 /// Every document at -j1 and -j8, lean and not.
 pub fn run_all(reps: usize, only: Option<&str>) -> Vec<Row> {
     let mut rows = Vec::new();
+    // (a LaTeX document, `latex-NAME`: once, at 8 workers, lean, until the
+    // saved format makes its builds short)
+    if let Some(d) = only.filter(|n| n.starts_with("latex-")).and_then(fuzz::find_doc) {
+        return measure(&d, Sched { threads: 8, lean: true }, reps, &EditKind::ALL);
+    }
     for d in docs().iter().filter(|d| only.is_none_or(|n| n == d.name)) {
         for threads in [1, 8] {
             for lean in [true, false] {
