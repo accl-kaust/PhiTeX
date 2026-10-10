@@ -1874,8 +1874,9 @@ fn edit_latex(rng: &mut Rng, doc: &Doc, text: &str) -> Option<Edit> {
 /// plain bodies four times). One line per build: the wall time, the work
 /// of every thread by kind, the time installs held the lock, the runs
 /// thrown away (re-run after a changed read, abandoned) — where a build's
-/// time goes as threads are added.
-pub fn scaling(threads: &[usize], only: &[String]) -> String {
+/// time goes as threads are added. `reads`: the policy every build runs
+/// with (the CLI's cold build suspends, its edits speculate).
+pub fn scaling(threads: &[usize], reads: Reads, only: &[String]) -> String {
     let mut s = String::new();
     let want = |n: &str| only.is_empty() || only.iter().any(|o| o == n);
     let line = |s: &mut String, name: &str, j: usize, o: &Output| {
@@ -1885,7 +1886,7 @@ pub fn scaling(threads: &[usize], only: &[String]) -> String {
         let busiest = st.work.iter().copied().max().unwrap_or(0);
         let _ = writeln!(
             s,
-            "{name:<16} -j{j:<3} wall {:>9.1} ms | run {:>9.1} break {:>7.1} scan {:>7.1} ship {:>6.1} log {:>6.1} confirm {:>7.1} (held {:>7.1}) | cut {:>6.1} setup {:>6.1} join {:>6.1} | pieces {} ran {} reruns {} abandoned {} parks {} rounds {} | busiest {:.0}% of {} commands{}",
+            "{name:<16} {reads:?} -j{j:<3} wall {:>9.1} ms | run {:>9.1} break {:>7.1} scan {:>7.1} ship {:>6.1} log {:>6.1} confirm {:>7.1} (held {:>7.1}) | cut {:>6.1} setup {:>6.1} join {:>6.1} | pieces {} ran {} reruns {} abandoned {} parks {} rounds {} | busiest {:.0}% of {} commands{}",
             ms(st.wall),
             ms(st.time_run),
             ms(st.time_break),
@@ -1923,7 +1924,7 @@ pub fn scaling(threads: &[usize], only: &[String]) -> String {
             b.set_limits(Limits::TEX_LIVE);
             b.set_interaction_option(Some(0));
             b.set_terminal(&["latex.ini"]);
-            let o = Options { threads: j, etex: true, reads: Reads::Speculate, ..Options::default() };
+            let o = Options { threads: j, etex: true, reads, ..Options::default() };
             let out = b.update(&crate::graph::jobs(&[&ini]), o);
             line(&mut s, "latex.ltx", j, &out);
         }
@@ -1932,7 +1933,7 @@ pub fn scaling(threads: &[usize], only: &[String]) -> String {
     docs.extend(corpus().into_iter().filter(|d| d.name == "big"));
     for doc in docs.iter().filter(|d| want(&d.name)) {
         for &j in threads {
-            let o = Options { threads: j, etex: doc.kind.etex(), reads: Reads::Speculate, ..Options::default() };
+            let o = Options { threads: j, etex: doc.kind.etex(), reads, ..Options::default() };
             let out = builder(doc, &doc.files).update(&doc.text, o);
             line(&mut s, &doc.name, j, &out);
         }
