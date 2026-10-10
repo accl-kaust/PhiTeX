@@ -649,6 +649,8 @@ struct Names {
     /// The same, for the names ever defined between a piece's nodes (by
     /// the page builder or an output routine: never cleared).
     inner: Vec<AtomicU64>,
+    /// Whether any is (any bit of `inner`).
+    any_inner: std::sync::atomic::AtomicBool,
     /// The names the build answers itself (files, the job, line bases).
     given: Given,
     /// The values before any definition are e-TeX's extended mode's.
@@ -661,6 +663,7 @@ impl Names {
             shards: (0..SHARDS).map(|_| RwLock::default()).collect(),
             defined: (0..SHARDS).map(|_| AtomicU64::new(0)).collect(),
             inner: (0..SHARDS).map(|_| AtomicU64::new(0)).collect(),
+            any_inner: std::sync::atomic::AtomicBool::new(false),
             given,
             etex,
         }
@@ -668,6 +671,11 @@ impl Names {
 
     /// The shard of `key` and its bit there. (The hash only routes; the
     /// map's `==` decides.)
+    /// Whether anything between a piece's nodes defines any name now.
+    fn any_inner(&self) -> bool {
+        self.any_inner.load(Ordering::Acquire)
+    }
+
     fn route(key: &Key) -> (usize, u64) {
         let h = hash_of(key);
         ((h % SHARDS as u64) as usize, 1 << ((h >> 32) % 64))
@@ -737,6 +745,7 @@ impl Names {
             self.defined[s].fetch_or(bit, Ordering::AcqRel);
             if at.1 != END {
                 self.inner[s].fetch_or(bit, Ordering::AcqRel);
+                self.any_inner.store(true, Ordering::Release);
             }
         }
         let mut g = self.shards[s].write().expect("names");
@@ -3086,6 +3095,10 @@ impl Env for PieceEnv<'_> {
 
     fn has_between(&mut self, key: &Key) -> bool {
         self.sh.names.has_inner(key)
+    }
+
+    fn any_between(&mut self) -> bool {
+        self.sh.names.any_inner()
     }
 
     fn between(&mut self, key: &Key, after: u32, node: u32) -> Option<(Val, Src)> {

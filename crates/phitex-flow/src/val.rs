@@ -551,14 +551,13 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool) -> Val {
         Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
         Key::SkewChar(_) => Val::Int(-1),
         Key::FontIdent(_) | Key::LastFont => Val::Name(Arc::from("nullfont")),
-        Key::Ended => Val::Int(0),
         Key::Job => Val::Name(Arc::from("texput")),
         Key::SplitMarks => Val::SplitMarks(Arc::from(Vec::new())),
         Key::Format => Val::Name(Arc::from("")),
-        // (no magnification fixed yet; batch mode, as the oracles run TeX:
+        // (the job not ended; no magnification fixed yet; batch mode, as the oracles run TeX:
         // `-interaction=batchmode`; a build gives its own,
         // `Build::set_interaction`: IniTeX's `error_stop_mode` is 3)
-        Key::MagSet | Key::Interaction => Val::Int(0),
+        Key::Ended | Key::MagSet | Key::Interaction => Val::Int(0),
         Key::ETeXMode => Val::Int(i32::from(etex)),
         Key::Patterns(_) => Val::Patterns(crate::hyph::Patterns::new()),
         Key::Exceptions(_) => Val::Exceptions(crate::hyph::Exceptions::new()),

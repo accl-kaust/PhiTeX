@@ -84,6 +84,12 @@ pub trait Env {
         false
     }
 
+    /// Whether anything between this piece's nodes may define any name
+    /// (unknown: yes).
+    fn any_between(&mut self) -> bool {
+        true
+    }
+
     /// Whether the run goes on after a node it ran (`ran` run so far, the
     /// run holding `words` of material, [`words_of`]): a speculating run
     /// whose predictions are refuted is abandoned; one past TeX's main
@@ -173,7 +179,7 @@ pub fn words_of(n: &Node) -> u64 {
 /// memory too): the lists waiting, and the top list's tokens left (the
 /// lists below are shared from node to node: counted once each).
 pub fn pending_words(st: &RState) -> u64 {
-    let top = st.pending.top.as_ref().map_or(0, |l| l.list.len().saturating_sub(l.at));
+    let top = st.pending.top.as_ref().map_or(0, |l| l.end.saturating_sub(l.at));
     st.pending.len() as u64 + top as u64
 }
 
@@ -375,8 +381,132 @@ struct Pending {
     depth: u32,
 }
 
-/// A macro body's arguments, by parameter number.
-type Args = Arc<[Arc<[Tok]>]>;
+/// A macro's argument: tokens `start..end` of a list (of the input list it
+/// was scanned in, shared, or its own).
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Arg {
+    list: Arc<[Tok]>,
+    start: usize,
+    end: usize,
+}
+
+impl Arg {
+    /// The tokens of `v` (none: an empty part of `filler`).
+    fn own(v: Vec<Tok>, filler: &Arc<[Tok]>) -> Arg {
+        if v.is_empty() {
+            return Arg { list: filler.clone(), start: 0, end: 0 };
+        }
+        let end = v.len();
+        Arg { list: Arc::from(v), start: 0, end }
+    }
+}
+
+/// A place in the top input list as the reader reads it: the list's
+/// next token `k`, or inside the argument its parameter at `k - 1` is
+/// read as (argument `n`, its next token `q`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Cursor {
+    k: usize,
+    arg: Option<(usize, usize)>,
+}
+
+impl Cursor {
+    fn at(l: &Level) -> Cursor {
+        Cursor { k: l.at, arg: l.sub }
+    }
+
+    /// Whether level `l`'s argument, if it is reading one, is read.
+    fn sub_done(l: &Level) -> bool {
+        match (l.sub, &l.args) {
+            (Some((n, q)), Some(a)) => q >= a[n].end,
+            _ => true,
+        }
+    }
+
+    /// The next token from here, as the reader reads it (an argument's
+    /// tokens where its parameter is), and the place after it.
+    fn next<'l>(&mut self, l: &'l Level) -> Option<&'l Tok> {
+        loop {
+            if let Some((n, q)) = self.arg {
+                let a = &l.args.as_ref()?[n];
+                if q < a.end {
+                    self.arg = Some((n, q + 1));
+                    return Some(&a.list[q]);
+                }
+                self.arg = None;
+            }
+            if self.k >= l.end {
+                return None;
+            }
+            let t = &l.list[self.k];
+            self.k += 1;
+            match (t, &l.args) {
+                (Tok::Param(n, _), Some(a)) => {
+                    // (a parameter without an argument reads as nothing)
+                    if let Some(i) = usize::from(*n).checked_sub(1)
+                        && let Some(a) = a.get(i)
+                    {
+                        self.arg = Some((i, a.start));
+                    }
+                }
+                _ => return Some(t),
+            }
+        }
+    }
+
+    /// The place of the token just read (`self` the place after it).
+    fn back(self, l: &Level) -> Cursor {
+        match self.arg {
+            Some((n, q)) if l.args.as_ref().is_some_and(|a| q > a[n].start) => Cursor { k: self.k, arg: Some((n, q - 1)) },
+            _ => Cursor { k: self.k - 1, arg: None },
+        }
+    }
+
+    /// The tokens from `a` to `b` as the reader reads them: a part of one
+    /// list when they are, else their own list.
+    fn arg(l: &Level, a: Cursor, b: Cursor) -> Arg {
+        let norm = |c: Cursor| match c.arg {
+            Some((n, q)) if l.args.as_ref().is_some_and(|x| q >= x[n].end) => Cursor { k: c.k, arg: None },
+            _ => c,
+        };
+        let (a, b) = (norm(a), norm(b));
+        // (one parameter: its argument)
+        if let (None, None, Some(x)) = (a.arg, b.arg, &l.args)
+            && b.k == a.k + 1
+            && let Tok::Param(n, _) = l.list[a.k]
+            && let Some(arg) = usize::from(n).checked_sub(1).and_then(|n| x.get(n))
+        {
+            return arg.clone();
+        }
+        match (a.arg, b.arg) {
+            (None, None) if !l.list[a.k..b.k].iter().any(|t| matches!(t, Tok::Param(..))) || l.args.is_none() => {
+                
+                return Arg { list: l.list.clone(), start: a.k, end: b.k };
+            }
+            (Some((n, p)), Some((m, q))) if n == m && a.k == b.k => {
+                let x = &l.args.as_ref().expect("an argument")[n];
+                
+                return Arg { list: x.list.clone(), start: p, end: q };
+            }
+            _ => {}
+        }
+        
+        let mut v = Vec::new();
+        let mut c = a;
+        while c != b {
+            match c.next(l) {
+                Some(t) => v.push(t.clone()),
+                None => break,
+            }
+            c = norm(c);
+        }
+        let end = v.len();
+        Arg { list: Arc::from(v), start: 0, end }
+    }
+}
+
+/// A macro body's arguments, by parameter number (`#1` first).
+type Args = Arc<[Arg]>;
 
 /// One list of [`Pending`].
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -387,6 +517,12 @@ struct Level {
     /// `out_param`); the body itself is the macro's, shared.
     args: Option<Args>,
     at: usize,
+    /// Where the list ends (an argument is a part of one).
+    end: usize,
+    /// Reading the argument the parameter at `at - 1` is (argument `.0`,
+    /// its next token `.1`): an argument is read where its parameter is,
+    /// in the body's list (tex.web 357 makes it an input level of its own).
+    sub: Option<(usize, usize)>,
     backed: bool,
 }
 
@@ -408,11 +544,13 @@ impl Pending {
         self.depth += 1;
     }
     fn push(&mut self, (list, at, backed): (Arc<[Tok]>, usize, bool)) {
-        self.push_level(Level { list, args: None, at, backed });
+        let end = list.len();
+        self.push_level(Level { list, args: None, at, end, sub: None, backed });
     }
     /// A macro's body, to be read with its arguments.
     fn push_body(&mut self, list: Arc<[Tok]>, args: Args) {
-        self.push_level(Level { list, args: Some(args), at: 0, backed: false });
+        let end = list.len();
+        self.push_level(Level { list, args: Some(args), at: 0, end, sub: None, backed: false });
     }
     fn pop(&mut self) {
         if self.top.take().is_none() {
@@ -431,21 +569,38 @@ impl Pending {
     fn clear(&mut self) {
         *self = Pending::default();
     }
-    /// The top list, how far it has been read, whether it was backed up.
-    fn last(&self) -> Option<(&Arc<[Tok]>, usize, bool)> {
-        self.top.as_ref().map(|t| (&t.list, t.at, t.backed))
+    /// The top list, how far it has been read, where it ends, whether it
+    /// was backed up.
+    fn last(&self) -> Option<(&Arc<[Tok]>, usize, usize, bool)> {
+        self.top.as_ref().map(|t| (&t.list, t.at, t.end, t.backed))
     }
-    /// The top list and how far it has been read, to be advanced.
-    fn last_mut(&mut self) -> Option<(&Arc<[Tok]>, &mut usize)> {
-        self.top.as_mut().map(|t| (&t.list, &mut t.at))
+    /// Whether the top list has been read to its end (none: no list).
+    fn top_done(&self) -> Option<bool> {
+        self.top.as_ref().map(|t| t.at >= t.end && Cursor::sub_done(t))
+    }
+    /// The rest of the top list is skipped.
+    fn skip_top(&mut self) {
+        if let Some(t) = self.top.as_mut() {
+            t.at = t.end;
+            t.sub = None;
+        }
     }
     /// The top list's next token, read (`None`: it has been read to its
-    /// end), and the top list's arguments if it is a macro's body.
-    fn next_tok(&mut self) -> Option<(Tok, Option<&Args>)> {
+    /// end): a macro body's parameter is read as its argument.
+    fn next_tok(&mut self) -> Option<Tok> {
         let t = self.top.as_mut()?;
-        let x = t.list.get(t.at)?.clone();
-        t.at += 1;
-        Some((x, t.args.as_ref()))
+        if t.sub.is_none() && t.at < t.end {
+            let x = &t.list[t.at];
+            if t.args.is_none() || !matches!(x, Tok::Param(..)) {
+                t.at += 1;
+                return Some(x.clone());
+            }
+        }
+        let mut c = Cursor { k: t.at, arg: t.sub };
+        let x = c.next(t).cloned();
+        t.at = c.k;
+        t.sub = c.arg;
+        x
     }
     fn levels(&self) -> impl Iterator<Item = &Level> {
         self.top.iter().chain(
@@ -2177,6 +2332,10 @@ struct Scratch {
     /// The node's reads of `\catcode` and `\sfcode` of characters below
     /// 256, by index, while their stamp is the node's.
     chars: Vec<(u32, u32)>,
+    /// The node's reads of names, by index, while their stamp is the
+    /// node's: a slot per name, by where its spelling is (the read at the
+    /// index holds that spelling: it is the name).
+    names_at: Vec<(u32, u32)>,
     stamp: u32,
     /// The node's reads and what it emitted (their capacity kept).
     reads: Vec<ReadRef>,
@@ -2193,10 +2352,30 @@ struct Scratch {
     /// TeX's shared zero glue, which `\showbox` and the short display
     /// tell apart).
     glue_shared: bool,
+    /// The names the piece has read (by where their spelling is, each
+    /// held), with the read: the definition reaching the next node while
+    /// no node after it defines the name ([`Known`]); and where each
+    /// spelling is, by name. Kept from node to node (as the nodes the
+    /// chain gained since are looked at: `known_len`).
+    known: FxMap<usize, Known>,
+    known_by_name: FxMap<Arc<str>, Vec<usize>>,
+    known_len: Option<usize>,
     /// The last read of each name made in the piece (from a node of it):
     /// a node reading the same definition, seen the same, shares it (a
     /// read is a value: equal fields, the same read).
     inside: FxMap<Key, ReadRef>,
+}
+
+/// A name's read, as [`Scratch::known`] keeps it.
+struct Known {
+    name: Arc<str>,
+    read: ReadRef,
+    /// It holds for the nodes before this one (a definition from before
+    /// the piece reaching a range of its nodes).
+    hi: u32,
+    /// The groups opened and closed before it was read (a definition
+    /// local to a group is seen by its level from the group open).
+    scopes: usize,
 }
 
 /// One node's execution: one command, from the state its predecessor left.
@@ -2273,6 +2452,65 @@ enum Scanning {
 /// Up to this many reads, a node's reads are looked up by a scan.
 const FEW_READS: usize = 12;
 
+/// Whether `t` is `\par` (by name: tex.web 392's `par_token`).
+fn is_par(t: &Tok) -> bool {
+    matches!(t, Tok::Cs(n) if &**n == "par")
+}
+
+/// The slots of [`Scratch::names_at`].
+const NAME_SLOTS: usize = 256;
+
+/// Name `n`'s slot: by where its spelling is (the names a piece reads are
+/// shared, one spelling each).
+fn name_slot(n: &Arc<str>) -> usize {
+    let a = name_addr(n);
+    ((a >> 4) ^ (a >> 12)) & (NAME_SLOTS - 1)
+}
+
+/// Where name `n`'s spelling is.
+fn name_addr(n: &Arc<str>) -> usize {
+    Arc::as_ptr(n).cast::<u8>().addr()
+}
+
+/// The nodes a run makes before it keeps the names it read
+/// ([`Scratch::known`]).
+const KNOWN_AFTER: usize = 256;
+
+/// [`Scratch::known`] for the next node of `chain`: the names the nodes
+/// added since defined are read again; all of them, if the chain is not
+/// the one it was kept for, or if anything between the piece's nodes may
+/// define a name.
+fn known_since(scratch: &mut Scratch, chain: &Chain, env: &mut dyn Env) {
+    let len = chain.nodes.len();
+    // (a short run reads few names twice: none kept)
+    if len < KNOWN_AFTER && scratch.known_len.is_none() {
+        return;
+    }
+    let between = env.any_between();
+    let keep = match scratch.known_len {
+        Some(prev) if prev <= len && !between => {
+            for i in prev..len {
+                for d in chain.nodes[i].defs() {
+                    if let Key::Cs(n) = &d.key
+                        && let Some(v) = scratch.known_by_name.remove(n)
+                    {
+                        for a in v {
+                            scratch.known.remove(&a);
+                        }
+                    }
+                }
+            }
+            true
+        }
+        _ => false,
+    };
+    if !keep {
+        scratch.known.clear();
+        scratch.known_by_name.clear();
+    }
+    scratch.known_len = (len >= KNOWN_AFTER && !between).then_some(len);
+}
+
 /// Where a node found a definition: its own `defs[i]`, or `reads[i]`.
 enum Found {
     Own(usize),
@@ -2291,12 +2529,15 @@ impl<'a> Exec<'a> {
         if !scratch.seen.is_empty() {
             scratch.seen.clear();
         }
+        known_since(scratch, chain, env);
         if scratch.chars.is_empty() {
             scratch.chars = vec![(0, 0); 512];
+            scratch.names_at = vec![(0, 0); NAME_SLOTS];
         }
         scratch.stamp = scratch.stamp.wrapping_add(1);
         if scratch.stamp == 0 {
             scratch.chars.fill((0, 0));
+            scratch.names_at.fill((0, 0));
             scratch.stamp = 1;
         }
         let stamp = scratch.stamp;
@@ -2462,6 +2703,11 @@ impl<'a> Exec<'a> {
     /// Where the definition of `key` reaching this node is: its own, or
     /// one of its reads (read now if it was not).
     fn find(&mut self, key: &Key) -> Found {
+        if let Key::Cs(n) = key
+            && self.defs.is_empty()
+        {
+            return self.find_name(n, key);
+        }
         // (a character's code, read again in the node: by the character)
         let slot = match key {
             Key::Cat(c) if (*c as u32) < 256 && self.defs.is_empty() => Some(*c as usize),
@@ -2479,6 +2725,43 @@ impl<'a> Exec<'a> {
             self.scratch.chars[s] = (self.stamp, *i as u32);
         }
         f
+    }
+
+    /// [`Exec::find`] of a name (the node defining nothing yet): read
+    /// again in the node, by its slot ([`Scratch::names_at`]).
+    fn find_name(&mut self, n: &Arc<str>, key: &Key) -> Found {
+        let s = name_slot(n);
+        if let Some(i) = self.name_read(s, n) {
+            return Found::Read(i);
+        }
+        let f = self.find_slow(key);
+        if let Found::Read(i) = f
+            && matches!(&self.reads[i].key, Key::Cs(m) if Arc::ptr_eq(m, n))
+        {
+            self.scratch.names_at[s] = (self.stamp, i as u32);
+        }
+        f
+    }
+
+    /// The node's read of name `n` by its slot `s`, if it is there.
+    fn name_read(&self, s: usize, n: &Arc<str>) -> Option<usize> {
+        let (stamp, i) = self.scratch.names_at[s];
+        let i = i as usize;
+        (stamp == self.stamp && matches!(&self.reads.get(i)?.key, Key::Cs(m) if Arc::ptr_eq(m, n))).then_some(i)
+    }
+
+    /// The meaning of name `n` (as [`Exec::meaning`] of `Key::Cs(n)`), the
+    /// key made only if it was not read in the node yet.
+    fn name_meaning(&mut self, n: &Arc<str>) -> Meaning {
+        if self.defs.is_empty()
+            && let Some(i) = self.name_read(name_slot(n), n)
+        {
+            return match &self.reads[i].val {
+                Val::Meaning(m) => m.clone(),
+                _ => Meaning::Undefined,
+            };
+        }
+        self.meaning(&Key::Cs(n.clone()))
     }
 
     fn find_slow(&mut self, key: &Key) -> Found {
@@ -2509,6 +2792,37 @@ impl<'a> Exec<'a> {
     /// [`resolve_now`], the read shared with an earlier node's equal one
     /// ([`Scratch::inside`]).
     fn resolve_shared(&mut self, key: &Key) -> ReadRef {
+        let chain = self.chain;
+        let n = match key {
+            Key::Cs(n) if self.scratch.known_len.is_some() => Some(n),
+            _ => None,
+        };
+        if let Some(n) = n
+            && let Some(k) = self.scratch.known.get(&name_addr(n))
+            && Arc::ptr_eq(&k.name, n)
+            && (chain.nodes.len() as u32) < k.hi
+            && (k.read.scope.is_none() || k.scopes == chain.scopes.len())
+        {
+            return k.read.clone();
+        }
+        let r = self.resolve_shared_slow(key);
+        if let Some(n) = n
+            && r.cond.is_none()
+        {
+            let hi = match r.src {
+                Src::Node(_) => u32::MAX,
+                _ => self.outside.get(key).map_or(0, |(_, _, hi)| *hi),
+            };
+            let a = name_addr(n);
+            let k = Known { name: n.clone(), read: r.clone(), hi, scopes: chain.scopes.len() };
+            if self.scratch.known.insert(a, k).is_none() {
+                self.scratch.known_by_name.entry(n.clone()).or_default().push(a);
+            }
+        }
+        r
+    }
+
+    fn resolve_shared_slow(&mut self, key: &Key) -> ReadRef {
         let chain = self.chain;
         let Some((d, val)) = chain.resolve(key, chain.nodes.len()) else {
             return outside_read(self.env, self.outside, key, chain.nodes.len() as u32);
@@ -2608,6 +2922,7 @@ impl<'a> Exec<'a> {
     fn tok_meaning(&mut self, t: &Tok) -> Meaning {
         match t {
             Tok::Char(c, x) => Meaning::Char(*c, *x),
+            Tok::Cs(n) => self.name_meaning(n),
             _ => t.key().map_or(Meaning::Undefined, |k| self.meaning(&k)),
         }
     }
@@ -2645,7 +2960,7 @@ impl<'a> Exec<'a> {
     /// `\loop` does, keeps the input as long as it was).
     fn end_read_lists(&mut self) {
         let floor = self.st.texts.last().map_or(0, |x| x.at);
-        while self.st.pending.len() > floor && self.st.pending.last().is_some_and(|(l, i, _)| i >= l.len()) {
+        while self.st.pending.len() > floor && self.st.pending.top_done() == Some(true) {
             self.st.pending.pop();
         }
     }
@@ -2881,16 +3196,7 @@ impl<'a> Exec<'a> {
             // read to its end stays until the next read, tex.web 325)
             let floor = self.st.texts.last().map_or(0, |x| x.at);
             while self.st.pending.len() > floor {
-                if let Some((t, args)) = self.st.pending.next_tok() {
-                    if let (Tok::Param(n, _), Some(a)) = (&t, args) {
-                        // (a parameter of the macro whose body this is: its
-                        // argument, read next, tex.web 357)
-                        let arg = a.get(usize::from(*n)).cloned().unwrap_or_else(|| Arc::from([]));
-                        if !arg.is_empty() {
-                            self.st.pending.push((arg, 0, false));
-                        }
-                        continue;
-                    }
+                if let Some(t) = self.st.pending.next_tok() {
                     if t == Tok::DontExpand {
                         // (the marked token, as the wrapper will see it)
                         let n = self.next_raw0();
@@ -3051,30 +3357,33 @@ impl<'a> Exec<'a> {
     /// body (tex.web 389-399). A step: it defines nothing.
     fn call(&mut self, name: &Tok, m: &Macro) {
         self.outer_abort = false;
-        let Some(args) = self.scanning(Scanning::Matching, Some(name.clone()), |x| x.call_args(name, m)) else {
+        let Some((args, k)) = self.scanning(Scanning::Matching, Some(name.clone()), |x| x.call_args(name, m)) else {
             return;
         };
         // (the body is read where it is, the macro's; its parameters are
         // the arguments, tex.web 390, 357)
         self.end_read_lists();
         if !m.body.is_empty() {
-            let used =
-                m.body.iter().filter_map(|t| if let Tok::Param(n, _) = t { Some(usize::from(*n)) } else { None }).max();
-            match used {
-                None => self.st.pending.push((m.body.clone(), 0, false)),
-                Some(k) => {
-                    let args: Args = args.into_iter().take(k + 1).map(Arc::from).collect();
-                    self.st.pending.push_body(m.body.clone(), args);
-                }
+            if k == 0 {
+                self.st.pending.push((m.body.clone(), 0, false));
+            } else {
+                let args: Args = args
+                    .into_iter()
+                    .skip(1)
+                    .take(k)
+                    .map(|a| a.unwrap_or_else(|| Arg { list: m.body.clone(), start: 0, end: 0 }))
+                    .collect();
+                self.st.pending.push_body(m.body.clone(), args);
             }
         }
         self.step();
     }
 
-    /// A macro call's arguments (tex.web 389-399); `None`: the call ends
-    /// without its body.
-    fn call_args(&mut self, name: &Tok, m: &Macro) -> Option<Vec<Vec<Tok>>> {
-        let mut args: Vec<Vec<Tok>> = vec![Vec::new(); 10];
+    /// A macro call's arguments (tex.web 389-399), and the highest
+    /// parameter number; `None`: the call ends without its body.
+    fn call_args(&mut self, name: &Tok, m: &Macro) -> Option<([Option<Arg>; 10], usize)> {
+        let mut args: [Option<Arg>; 10] = Default::default();
+        let mut k = 0;
         let p = &m.params;
         let mut i = 0;
         while i < p.len() {
@@ -3084,12 +3393,22 @@ impl<'a> Exec<'a> {
                     j += 1;
                 }
                 let delim = &p[i + 1..j];
+                // (from the list the reader is in, in one go, when nothing
+                // in it is read otherwise; else token by token)
                 let arg = if delim.is_empty() {
-                    self.undelimited(name, m.long)
+                    match self.bulk_undelimited(m.long) {
+                        Some(a) => Some(a),
+                        None => {  self.undelimited(name, m.long).map(|v| Arg::own(v, &m.body)) }
+                    }
                 } else {
-                    self.delimited(name, delim, m.long)
+                    match self.bulk_delimited(delim, m.long) {
+                        Some(a) => Some(a),
+                        None => {  self.delimited(name, delim, m.long).map(|v| Arg::own(v, &m.body)) }
+                    }
                 };
-                args[usize::from(n)] = arg?;
+                let arg = arg?;
+                k = usize::from(n);
+                args[k] = Some(arg);
                 i = j;
             } else {
                 match self.next_raw() {
@@ -3105,12 +3424,160 @@ impl<'a> Exec<'a> {
                 i += 1;
             }
         }
-        Some(args)
+        Some((args, k))
+    }
+
+    /// Whether an argument taken in one go holds an `\outer` name, or its
+    /// delimiter does: then it is read token by token, which ends the call
+    /// as TeX does (tex.web 336).
+    fn outer_in(&mut self, toks: &[Tok], delim: &[Tok]) -> bool {
+        toks.iter().chain(delim).any(|t| t.key().is_some() && matches!(self.tok_meaning(t), Meaning::Macro(m) if m.outer))
+    }
+
+    /// The top input list, where the reader reads next, if it reads it as
+    /// it is: no other text or alignment in the way (its parameters are
+    /// its arguments, [`Cursor`]).
+    fn plain_top(&mut self) -> Option<&Level> {
+        let floor = self.st.texts.last().map_or(0, |x| x.at);
+        if self.halted() || self.st.al.on {
+            return None;
+        }
+        // (the lists read to their end go, as the reader's next read
+        // takes them away)
+        while self.st.pending.len() > floor && self.st.pending.top_done() == Some(true) {
+            self.st.pending.pop();
+        }
+        if self.st.pending.len() <= floor {
+            return None;
+        }
+        self.st.pending.top.as_ref()
+    }
+
+    /// The reader reads on from `to` in the top list: where it is, and
+    /// the argument it is in, read to `to` (the argument's list stays
+    /// until the next read even when read to its end, as the reader's).
+    fn read_to(&mut self, to: Cursor) {
+        let Some(t) = self.st.pending.top.as_mut() else { return };
+        t.at = to.k;
+        t.sub = to.arg;
+    }
+
+    /// An undelimited argument taken from the top input list in one go
+    /// (tex.web 392–399, as [`Exec::undelimited`] reads it), if it is all
+    /// there; else nothing is read.
+    fn bulk_undelimited(&mut self, long: bool) -> Option<Arg> {
+        let top = self.plain_top()?;
+        let plain = |t: &Tok| !matches!(t, Tok::Param(..) | Tok::DontExpand) && (long || !is_par(t));
+        let mut c = Cursor::at(top);
+        let first = loop {
+            let t = c.next(top)?;
+            if !plain(t) {
+                return None;
+            }
+            if t.cat() != Some(10) {
+                break t;
+            }
+        };
+        let (from, to, after) = if first.cat() == Some(1) {
+            let from = c;
+            let mut depth = 1;
+            loop {
+                let before = c;
+                let u = c.next(top)?;
+                if !plain(u) {
+                    return None;
+                }
+                match u.cat() {
+                    Some(1) => depth += 1,
+                    Some(2) => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break (from, before, c);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            (c.back(top), c, c)
+        };
+        let arg = Cursor::arg(top, from, to);
+        let l = arg.list.clone();
+        if self.outer_in(&l[arg.start..arg.end], &[]) {
+            return None;
+        }
+        self.read_to(after);
+        Some(arg)
+    }
+
+    /// A delimited argument taken from the top input list in one go (as
+    /// [`Exec::delimited`] reads it), if it is all there; else nothing is
+    /// read.
+    fn bulk_delimited(&mut self, delim: &[Tok], long: bool) -> Option<Arg> {
+        const MAX: usize = 8;
+        let d = delim.len();
+        if d > MAX || delim.last().is_some_and(|t| t.cat() == Some(1)) {
+            return None;
+        }
+        let top = self.plain_top()?;
+        let plain = |t: &Tok| !matches!(t, Tok::Param(..) | Tok::DontExpand) && (long || !is_par(t));
+        let start = Cursor::at(top);
+        let mut c = start;
+        // (the last tokens read, and where each began)
+        let mut last: [Option<(&Tok, Cursor)>; MAX] = [None; MAX];
+        let mut n = 0usize;
+        let mut depth = 0i32;
+        loop {
+            let before = c;
+            let u = c.next(top)?;
+            if !plain(u) {
+                return None;
+            }
+            match u.cat() {
+                Some(1) => depth += 1,
+                Some(2) => depth -= 1,
+                _ => {}
+            }
+            last[n % MAX] = Some((u, before));
+            n += 1;
+            if depth == 0 && n >= d && (0..d).all(|i| last[(n - d + i) % MAX].is_some_and(|(t, _)| *t == delim[i])) {
+                break;
+            }
+        }
+        let end = last[(n - d) % MAX].map_or(c, |(_, at)| at);
+        let mut arg = Cursor::arg(top, start, end);
+        // (an argument that is one group loses its braces, tex.web 400)
+        let toks = &arg.list[arg.start..arg.end];
+        if toks.len() >= 2 && toks[0].cat() == Some(1) && toks[toks.len() - 1].cat() == Some(2) {
+            let mut dd = 0;
+            let mut whole = true;
+            for (k, t) in toks.iter().enumerate() {
+                match t.cat() {
+                    Some(1) => dd += 1,
+                    Some(2) => dd -= 1,
+                    _ => {}
+                }
+                if dd == 0 && k + 1 < toks.len() {
+                    whole = false;
+                    break;
+                }
+            }
+            if whole {
+                arg.start += 1;
+                arg.end -= 1;
+            }
+        }
+        let l = arg.list.clone();
+        if self.outer_in(&l[arg.start..arg.end], delim) {
+            return None;
+        }
+        self.read_to(c);
+        Some(arg)
     }
 
     /// A `\par` in a short macro's argument ends the call (tex.web 392).
     fn runaway(&mut self, name: &Tok, t: &Tok, long: bool) -> bool {
-        let par = matches!(t, Tok::Cs(n) if &**n == "par");
+        let par = is_par(t);
         if par && self.outer_abort {
             // (the `\par` an `\outer` name inserted: no error, consumed)
             self.outer_abort = false;
@@ -3479,4 +3946,5 @@ fn intern(names: &mut FxSet<Arc<str>>, s: &str) -> Arc<str> {
     names.insert(a.clone());
     a
 }
+
 

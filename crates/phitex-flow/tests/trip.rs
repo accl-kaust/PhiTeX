@@ -29,7 +29,7 @@ use phitex_flow::{Font, Options, Order, Reads};
 
 /// The listing's lines known to be Knuth's: its first difference is at
 /// least this far down (1-based: the first differing line's number).
-const REACHED: usize = 419;
+const REACHED: usize = 1079;
 
 fn dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/trip")

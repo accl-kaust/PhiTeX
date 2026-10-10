@@ -1073,6 +1073,50 @@ representation, the states unchanged:
   read (`Scratch::inside`: same defining node, scope, value).
 Now 4.65 GB at `-j 1` and 4.69 GB at `-j 8` (1.5 KB a node).
 
+**The cost of expansion.** latex.ltx: 45.0M expansion steps (29.0M of
+them macro calls) in 3.13M nodes, the reader handing out 467M tokens (TeX
+pays about 10–15 ns a token, the graph 125 ns at first). Changes, the
+states, nodes and steps unchanged in meaning:
+- *Arguments in one go* (`Exec::bulk_undelimited`, `bulk_delimited`): an
+  argument all in the list the reader is in is taken by a [`Cursor`] over
+  that list (a body's parameters read as their arguments), as a part of
+  the list (`Arg`: zero copies) when it is one; else token by token as
+  before. The reader now hands out 228M tokens.
+- *An argument is read inside its body's list* (`Level::sub`), not as a
+  list of its own pushed above it (tex.web 357 makes it an input level).
+- *Names read before in the piece* (`Scratch::known`, by where a name's
+  spelling is): the read of the definition reaching the next node while
+  no node after it defines the name, a local one while no group opens or
+  closes, one from before the piece within its range of nodes; a run of
+  fewer than 256 nodes keeps none. Chain lookups: 42.6M → 3.9M.
+- *A name read again in the node* by its slot (`Scratch::names_at`), and
+  no copy of a macro's handle per call.
+Cycles (user, `-j 1`): 161G → 123G; time 59 s → 45 s; 0.76M → 1.0M
+steps/s. big2 (10k steps): reading unchanged within noise (+1.5%
+instructions).
+
+*Conflict with the brief (§3, "memoised expansion is required").* With
+the body read in place, a call's expansion is one push of (the macro's
+body, the arguments): there is no substituted body left to memoise, and a
+memo keyed by the arguments needs them scanned first, which is the cost.
+What could be memoised is the argument scan keyed by (the macro, the raw
+input after it); it hits only on re-runs, and re-runs already keep nodes.
+The memo's purpose is met by in-place bodies and arguments as parts of
+lists. (Carried to the brief by the coordinator.)
+
+*The expansion profile now* (latex.ltx, `-j 1`, perf, inclusive): macro
+calls (`expand` → `call`, the argument scans 20%) 42%; integer scanning
+(`scan_int`, `\numexpr`) 34%; `\expandafter` 19%; `\edef`/`\write`
+expanded texts 17%; conditionals 15%; name lookups (`find`) 15%;
+`\the`/token registers 14%; `\csname` 9%; the input lists (`Pending`
+push/pop) 7%; definitions 7%. By self time: `expand` 9%, `Cursor::next`
+9%, `next_raw0` 6%, `find_slow` 6%, `next_x_m` 5%, `tok_meaning` 4%,
+`Pending::pop` 3%, `Key::eq` 3%, the allocator 4%. What remains is the
+per-token path itself: a token is an `Arc` name (two atomic counts per
+copy), a meaning a cloned value, a first read in a node a search of the
+node's reads; an interned name (a number, with the meaning table indexed
+by it) is the next step.
+
 **Gaps left for the core (A), with repros.**
 1. *A file written and read back in one run.* `texsys.cfg` writes
    `texsys.aux` with `\immediate\openout`/`\write`/`\closeout`, then
