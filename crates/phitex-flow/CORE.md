@@ -2338,33 +2338,58 @@ after on the same base):
    (`Node::test`); only a φ with keys goes into `Rare` (2.1M of
    `latex.ltx`'s 3.1M nodes had a `Rare` only for that). Ir: the
    documents on the format -0.2% to -0.5%.
+7. *A long read list sorted by rank* (`graph::sort_reads`): a piece's
+   reads, 4096 or more, get each distinct key's rank from one `FxMap`
+   pass, only the distinct keys sorted with `Key::cmp`, then one
+   `sort_unstable` on (rank, node, place): the stable sort's order,
+   `Key::cmp` once per key instead of once per comparison. A shorter
+   list keeps the plain sort (sorting every list this way cost big2
+   +5.4%, the plain documents +1%). Ir (job 7892, on the merge of flow
+   through 96bdfcc): `latex.ltx` 228.9G -> 212.8G (-7.0%), the
+   documents on the format -0.2% to -1.2%, plain documents within
+   0.1%, big2 +0.8%.
+8. *`#[inline]` on `Cursor::next` and `Pending::next_tok`*, the two
+   calls made per token: nothing on the short runs (job 7818), on
+   `latex.ltx` 212.8G -> 200.8G (-5.6%); the documents on the format
+   -1.6% to -2.8%, big2 -0.3%, plain within 0.1% (job 7892).
+
+Upstream between the two stacks: flow through 96bdfcc (`pop_cond`'s
+set, B's tikz fix) moved 99ff426's numbers by 0% to -1.2% (the
+documents on the format; `latex.ltx` 229.1G -> 228.9G; big2 and plain
+unchanged).
 
 Tried and dropped (Ir, cluster job 7818): the lists a node pushes kept
 in a vector until the node ends instead of shared cells (+0.0% to +1.2%:
 moving a larger `Level` in and out of the vector costs what the cells
 cost); one shared one-token list per token for `Exec::back` (-0.5% big2,
 +0.2% elsewhere); a call's single argument in place in its `Level`
-(+0.2% to +1.1%: every `Level` grows); `#[inline]` on `Cursor::next`
-and `Pending::next_tok` (no change).
+(+0.2% to +1.1%: every `Level` grows).
 
-**After 1-6** (callgrind Ir, exact, the cluster image's TeX Live; job
-7818; the same outputs at every step):
+**After 1-8** (callgrind Ir, exact, the cluster image's TeX Live; base
+and 1-6 job 7857, 7-8 job 7892; the same DVIs at every step):
 
-| document | base 9fa4ccf | after (job 7818's stack through 6, with two dropped items in it: within 1%) | TeX |
-|---|---|---|---|
-| big2 | 5.135G | 4.687G | `tex -ini` 0.654G (7.2x) |
-| plain story, DVI | 0.414G | 0.321G | `tex -ini` 0.224G (1.4x) |
-| plain story, PDF | 0.593G | 0.461G | `pdftex -ini` 0.796G (0.58x) |
-| sections on the format | 1.692G | 1.356G | `latex` 0.622G, of which 0.481G loading the format |
-| titlepage on the format | 2.309G | 1.977G | `latex` 0.633G |
-| `latex.ltx` | | 224.6G (with the dropped items too) | `etex -ini` 71.2G (3.2x) |
+| document | base 9fa4ccf | after 1-6 (99ff426) | after 1-8 (4aca73b's code) | TeX |
+|---|---|---|---|---|
+| big2 | 5.121G | 4.694G | 4.717G | `tex -ini` 0.653G (7.2x) |
+| plain story, DVI | 0.414G | 0.322G | 0.322G | `tex -ini` 0.224G (1.4x) |
+| plain story, PDF | 0.592G | 0.462G | 0.462G | `pdftex -ini` 0.796G (0.58x) |
+| sections on the format | 1.693G | 1.366G | 1.308G | `latex` 0.622G, of which 0.481G loading the format (2.1x) |
+| titlepage on the format | 2.309G | 1.985G | 1.926G | `latex` 0.633G (3.0x) |
+| `latex.ltx` | 240.3G | 229.1G | 200.8G | `etex -ini` 71.2G (2.8x) |
+
+Wall time (bash `time`, 3 runs, median, 4 CPUs of a shared node, job
+7817, the stack through 6 with the dropped items in it: noisy, the
+direction only): big2 839 -> 751 ms (`tex` 100 ms), sections 511 ->
+474 ms (`latex` 107), plain story DVI 74 -> 65 ms (`tex` 52), PDF 111 ->
+67 ms (`pdftex` 138), `latex.ltx` 36.0 -> 34.0 s (`etex` 7.4 s).
 
 On the documents the graph's own work is still about 6x TeX's a
 command, times the reruns (titlepage 9x). In `latex.ltx` (callgrind
 self cost) the input lists and argument scanning lead (`Cursor::next`
 12.6%, `next_raw0` 7%, `next_raw` 3%, `Cursor::arg` 2.4%), then sorting
 by `Key` (`Key::cmp` 5.1% and the sort about 3.5%: a piece's reads and
-exports, once per run, over 171k names), `tok_meaning` 2.2%.
+exports, once per run, over 171k names; 7 removes most of the reads'
+part), `tok_meaning` 2.2%.
 
 ## Found by the CLI (agent W)
 
