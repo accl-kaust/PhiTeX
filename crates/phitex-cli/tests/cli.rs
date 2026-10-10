@@ -607,9 +607,31 @@ fn lualatex_external() {
         return;
     }
     let _one = one();
-    let ours = scratch("lua");
-    std::fs::write(ours.join("lua.tex"), LUA_DOC).expect("the document");
-    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &ours)
+    // (in the same directory, one after the other: LuaTeX's /ID hashes the
+    // output file's full name)
+    let dir = scratch("lua");
+    std::fs::write(dir.join("lua.tex"), LUA_DOC).expect("the document");
+    let mut last = None;
+    for _ in 0..5 {
+        let _ = Command::new("lualatex")
+            .args(["-interaction=batchmode", "-recorder", "-synctex=1", "lua.tex"])
+            .current_dir(&dir)
+            .env("SOURCE_DATE_EPOCH", "0")
+            .env("FORCE_SOURCE_DATE", "1")
+            .output();
+        let aux = std::fs::read(dir.join("lua.aux")).ok();
+        if aux == last {
+            break;
+        }
+        last = aux;
+    }
+    let want = std::fs::read(dir.join("lua.pdf")).expect("lualatex's PDF");
+    for e in std::fs::read_dir(&dir).expect("the directory").flatten() {
+        if e.file_name() != "lua.tex" {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args(["build", "--engine", "lualatex", "lua.tex"])
         .output()
         .expect("phitex runs");
@@ -617,24 +639,7 @@ fn lualatex_external() {
     eprintln!("phitex build --engine lualatex:\n{errs}");
     assert!(out.status.success(), "phitex build --engine lualatex failed:\n{errs}");
     assert!(errs.contains("not incremental"), "the build does not say it is not incremental:\n{errs}");
-    let theirs = scratch("lua-tl");
-    std::fs::write(theirs.join("lua.tex"), LUA_DOC).expect("the document");
-    let mut last = None;
-    for _ in 0..5 {
-        let _ = Command::new("lualatex")
-            .args(["-interaction=batchmode", "-recorder", "-synctex=1", "lua.tex"])
-            .current_dir(&theirs)
-            .env("SOURCE_DATE_EPOCH", "0")
-            .env("FORCE_SOURCE_DATE", "1")
-            .output();
-        let aux = std::fs::read(theirs.join("lua.aux")).ok();
-        if aux == last {
-            break;
-        }
-        last = aux;
-    }
-    let want = std::fs::read(theirs.join("lua.pdf")).expect("lualatex's PDF");
-    let got = std::fs::read(ours.join("lua.pdf")).expect("phitex's PDF");
+    let got = std::fs::read(dir.join("lua.pdf")).expect("phitex's PDF");
     assert!(got == want, "the PDF is not lualatex's: {}", first_difference(&got, &want));
-    assert!(ours.join("lua.synctex.gz").is_file(), "lualatex's SyncTeX file is not there");
+    assert!(dir.join("lua.synctex.gz").is_file(), "lualatex's SyncTeX file is not there");
 }
