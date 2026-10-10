@@ -1596,6 +1596,26 @@ piece 0.
 seeds (1) of one edit on tiny, compared with the cold build and with
 `latex` itself on its first run (DVI with the date masked, `.aux`). Locally, 3 seeds of 2 edits at 8
 threads (random schedules) passed, and so did seed 0 against `latex`.
+
+**300 LaTeX seeds** (job 7878: `LATEX=1 JOBS=6 TIMEOUT=180
+scripts/flow-fuzz.sh 30`, 30 seeds of 6 edits on each of B's ten
+documents, at 1 or 8 threads at random, on the saved format; snapshot
+89f3a41 = 96bdfcc with the timeout-resume and OUT fixes, before
+A's W2 and keep_again fixes): 229 passed, 0 over-invalidated, 71 failed.
+- **Over-invalidation: none.** The check runs on the seeds that keep
+  their nodes (a third), now that the graph holds only the document's
+  nodes.
+- **69 timeouts** (180 s a seed): gfx 30 of 30, rules 12, titlepage 7,
+  packages 7, math 7, tables 2, ams 2, sections 1, figures 1; layout
+  none. gfx fails at step 2–4 whatever the edit or schedule, so it may
+  be slowness (W3: gfx 40 s through the CLI) rather than a hang; the
+  others are mostly blank lines in or out. To be told apart: each
+  replayed alone with a longer limit.
+- **2 DVI mismatches**, the update against our cold build: ams seed 24
+  step 3 (the class option toggled) and rules seed 10 step 3 (an `\item`
+  removed). The log first differs at a `Package:` line (amsmath,
+  caption).
+- The repros are in `~/code/flinner/partex-phitex-runs/cmd-7878/fuzz-latex/latex/`.
 The budgets table gets LaTeX rows (`phitex-flow --budgets REPS latex`
 for all of them, `latex-NAME` for one; `tests/budgets.rs` runs tiny once).
 The edits are word, line, page-break, the `\newcommand` body (def) and
