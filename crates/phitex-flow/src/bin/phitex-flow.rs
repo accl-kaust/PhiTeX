@@ -352,6 +352,18 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some("--budgets") {
         return budgets(&args[1..]);
     }
+    if args.first().map(String::as_str) == Some("--scaling") {
+        // (`--scaling [J,J,...] [DOC...]`: cold builds at each thread count)
+        let js: Vec<usize> = args
+            .get(1)
+            .map_or("1,2,4,8,16,48", String::as_str)
+            .split(',')
+            .filter_map(|x| x.parse().ok())
+            .collect();
+        let only: Vec<String> = args.iter().skip(2).cloned().collect();
+        print!("{}", phitex_flow::fuzz::scaling(&js, &only));
+        return ExitCode::SUCCESS;
+    }
     if args.first().map(String::as_str) == Some("--fuzz-reruns") {
         return fuzz_reruns(&args[1..]);
     }
