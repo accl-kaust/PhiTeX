@@ -477,13 +477,10 @@ fn synctex_against_pdftex() {
 /// apart), and fontspec's of the XeTeX documents.
 const XELATEX: [&str; 10] = ["sections", "math", "tables", "figures", "titlepage", "packages", "ams", "layout", "rules", "fontspec"];
 
-/// phitex's SyncTeX files against xelatex's, as against pdfTeX's above.
-/// Ignored until XeTeX's records are there (CORE.md, "XeTeX on the graph":
-/// the header and the records of native words, glyphs and pictures); run
-/// with `--ignored` for the tallies. Both files stay in the scratch
-/// directories.
+/// phitex's SyncTeX files against xelatex's, as against pdfTeX's above
+/// (job 8065: forward 98.5%, inverse 98.6%, positions 100%). Both files
+/// stay in the scratch directories.
 #[test]
-#[ignore = "XeTeX's SyncTeX records are a gap (CORE.md)"]
 fn synctex_against_xetex() {
     if !have("synctex", "help") || !have("xelatex", "--version") {
         eprintln!("synctex_against_xetex: no `synctex` or `xelatex` here: not checked");

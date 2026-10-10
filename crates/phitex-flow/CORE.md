@@ -3114,13 +3114,11 @@ opentype tree here, so `cjk.tex` sets its CJK text in Latin Modern
   (`\XeTeXinputencoding "latin1"` in `xetex -ini`), so they have no oracle.
 - Astral letters in hyphenated native words (two code units).
 - `\pdflastxpos`/`\pdflastypos` are 0.
-- SyncTeX for XeTeX: the CLI's writer works on the page boxes, so a
-  XeTeX document gets a `.synctex.gz`, but its header says `Output:dvi`
-  (`PageSync::pdf` follows `ShipParams::pdf`, `None` in XeTeX), and native
-  words, glyphs and pictures make no records (`build/sync.rs`). The oracle
-  is `xetex -synctex=1`'s `JOB.synctex.gz`; phitex-cli's `tests/synctex.rs`
-  is the harness to extend with the xelatex documents (X's, after
-  flow-xetex merges).
+- SyncTeX for XeTeX: as xetex writes it (`Output:pdf`, positions from
+  the page's corner an inch in; native words, glyphs and pictures passed
+  with no record; e-TeX's set glue a kern). `tests/synctex.rs`'s
+  `synctex_against_xetex`: forward 98.5%, inverse 98.6%, positions 100%
+  (job 8065).
 - graphicx's `dvips` driver under xelatex (`gfx`): the XDV is xetex's,
   but partex-xdvipdfmx has no `spc_dvips.c` (`PSfile=`) nor `mpost.c`
   (`ps:` code), so its EPS picture and PostScript transforms are missing
