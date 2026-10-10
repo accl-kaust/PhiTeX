@@ -16,13 +16,13 @@ kpathsea's of the same name. The CLI makes one per engine and tree
 to every build: `\input`/`\openin` names (format `tex`, after the input
 directories: web2c's `-output-directory`), TFM files (`tfm`) and PDF
 output's files (`map`, `type1 fonts`, `enc files`… by extension) are
-database lookups, and no build walks TeX Live's tree. It is the default
-everywhere a TeX Live is found: a `Build` given no finder still finds TFM
-and PDF output's files by `kpse::tex_live()` (kpathsea as `pdftex`, one
-per process), the `phitex-flow` binary sets it as its finder (`--kpse
-PROG`); `tfm::Index`'s walk remains only as the fallback where no TeX Live
-is found, under `Build::set_no_kpse` (`--no-kpse`, `PHITEX_NO_KPSE=1`) and
-for directories asked for by name (`set_font_dirs`, `--font-dir`).
+database lookups, and no build walks TeX Live's tree. Where TeX Live is
+(`SELFAUTOLOC`, kpsewhich on `PATH`) is the caller's to find, never the
+library's, which runs no process (`tests/wall.rs`): the CLI always gives
+the finder, the `phitex-flow` binary unless `--no-kpse` (`--kpse PROG`
+names the program), the tests through `tests/common` (`give_kpse`; off
+with `PHITEX_NO_KPSE=1`). A build given no finder walks TeX Live's
+directories as before (`tfm::Index`, `tfm::pdf_file`): the fallback.
 What a lookup finds changes nothing about reads: the path's bytes are the
 `Key::File` read exactly as before (a font's, a PDF file's, as the build's
 `Env::font_file` and the fold's `Files`), so the graph keeps its shape.

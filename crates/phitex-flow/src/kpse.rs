@@ -4,8 +4,12 @@
 //! Live's tree. A given of the build, never a node: the bytes of the path
 //! found are what a read of `Key::File` (or a font's, a PDF file's) finds,
 //! as with the input directories.
+//!
+//! Where TeX Live is (`SELFAUTOLOC`, kpsewhich on `PATH`) is the caller's
+//! to find — the CLI's, the `phitex-flow` binary's, the tests' helper —:
+//! the library never looks for it and runs no process (`tests/wall.rs`).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use partex_kpse::Format;
@@ -63,26 +67,6 @@ pub fn pdf_format(name: &str) -> KpseFormat {
     }
 }
 
-/// The program name the default finder asks as.
-pub const TEX_LIVE_PROG: &str = "pdftex";
-
-/// TeX Live's kpathsea as `pdftex`, made once per process (its texmf.cnf
-/// and `ls-R` read at the first lookup): what a build finds TFM and PDF
-/// output's files with by default. None where no TeX Live is found
-/// ([`Kpathsea::from_path`]) or `PHITEX_NO_KPSE` is set (not empty): then
-/// TeX Live's directories are walked, as before.
-pub fn tex_live() -> Option<Arc<Kpathsea>> {
-    static TEX_LIVE: std::sync::OnceLock<Option<Arc<Kpathsea>>> = std::sync::OnceLock::new();
-    TEX_LIVE
-        .get_or_init(|| {
-            if std::env::var_os("PHITEX_NO_KPSE").is_some_and(|v| !v.is_empty()) {
-                return None;
-            }
-            Kpathsea::from_path(TEX_LIVE_PROG, TEX_LIVE_PROG).map(Arc::new)
-        })
-        .clone()
-}
-
 impl Kpathsea {
     /// Over an instance made for the program (`Kpse::new(selfdir,
     /// progname, engine)`).
@@ -99,34 +83,11 @@ impl Kpathsea {
         self
     }
 
-    /// kpathsea as TeX Live's programs on `PATH` run it, as program
-    /// `progname` of engine `engine`: `SELFAUTOLOC` is the directory of
-    /// `kpsewhich` (else `tex`) on `PATH`, links resolved, as web2c finds
-    /// its own; none if no `texmf.cnf` is reachable from there.
-    pub fn from_path(progname: &str, engine: &str) -> Option<Kpathsea> {
-        let dir = bin_dir()?;
-        let mut k = partex_kpse::Kpse::new(&dir, progname, engine);
-        k.var_value("TEXMF")?;
-        Some(Kpathsea::new(k))
-    }
-
     /// The instance, for what the trait does not ask (`show_path`,
     /// `var_value`…).
     pub fn with<R>(&self, f: impl FnOnce(&mut partex_kpse::Kpse) -> R) -> R {
         f(&mut self.k.lock().unwrap_or_else(PoisonError::into_inner))
     }
-}
-
-/// The directory of TeX Live's programs on `PATH` (`kpsewhich`, else
-/// `tex`), links resolved.
-pub fn bin_dir() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    ["kpsewhich", "tex"].iter().find_map(|prog| {
-        std::env::split_paths(&path)
-            .filter_map(|d| d.join(prog).canonicalize().ok())
-            .find(|p| p.is_file())
-            .and_then(|p| p.parent().map(Path::to_path_buf))
-    })
 }
 
 impl tfm::Kpse for Kpathsea {

@@ -21,6 +21,25 @@ use phitex_flow::{Build, Font, Options, Order, Output, Reads};
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+/// TeX Live's kpathsea as program `prog`: `SELFAUTOLOC` is the
+/// environment's, else the directory of `kpsewhich` (or `tex`) on `PATH`,
+/// links resolved, as web2c finds its own; none if no `texmf.cnf` is
+/// reachable from there (no process is run).
+fn tex_live(prog: &str) -> Option<Arc<phitex_flow::kpse::Kpathsea>> {
+    let dir = std::env::var_os("SELFAUTOLOC").filter(|d| !d.is_empty()).map(std::path::PathBuf::from).or_else(|| {
+        let path = std::env::var_os("PATH")?;
+        ["kpsewhich", "tex"].iter().find_map(|p| {
+            std::env::split_paths(&path)
+                .filter_map(|d| d.join(p).canonicalize().ok())
+                .find(|f| f.is_file())
+                .and_then(|f| f.parent().map(std::path::Path::to_path_buf))
+        })
+    })?;
+    let mut k = partex_kpse::Kpse::new(&dir, prog, prog);
+    k.var_value("TEXMF")?;
+    Some(Arc::new(phitex_flow::kpse::Kpathsea::new(k)))
+}
+
 fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
@@ -566,16 +585,9 @@ fn main() -> ExitCode {
     // TeX Live: TeX Live's directories walked, inputs in the input
     // directories only)
     let mut finder: Option<(Arc<phitex_flow::kpse::Kpathsea>, String)> = None;
-    if no_kpse {
-        b.set_no_kpse();
-    } else {
-        let prog = kpse.clone().unwrap_or_else(|| phitex_flow::kpse::TEX_LIVE_PROG.to_string());
-        let k = if prog == phitex_flow::kpse::TEX_LIVE_PROG {
-            phitex_flow::kpse::tex_live()
-        } else {
-            phitex_flow::kpse::Kpathsea::from_path(&prog, &prog).map(Arc::new)
-        };
-        match k {
+    if !no_kpse {
+        let prog = kpse.clone().unwrap_or_else(|| "pdftex".to_string());
+        match tex_live(&prog) {
             Some(k) => {
                 b.set_kpse(k.clone(), &prog);
                 finder = Some((k, prog));
@@ -658,8 +670,6 @@ fn main() -> ExitCode {
             fb.set_input_dirs(inputs.clone());
             if let Some((k, prog)) = &finder {
                 fb.set_kpse(k.clone(), prog);
-            } else if no_kpse {
-                fb.set_no_kpse();
             }
             fb.set_jobname(&job);
             let fresh = fb.update(&edited, opts);

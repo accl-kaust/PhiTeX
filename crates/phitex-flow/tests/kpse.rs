@@ -4,6 +4,8 @@
 //! -format=FORMAT NAME`'s, or none where it finds none. Skipped where
 //! there is no `kpsewhich`.
 
+mod common;
+
 use std::process::Command;
 
 use phitex_flow::kpse::Kpathsea;
@@ -87,7 +89,7 @@ fn the_paths_are_kpsewhichs() {
         return;
     }
     let mut finders: Vec<(&str, Kpathsea)> = Vec::new();
-    let one = Kpathsea::from_path("pdftex", "pdftex").expect("TeX Live beside kpsewhich");
+    let one = common::kpathsea_as("pdftex", "pdftex").expect("TeX Live beside kpsewhich");
     let mut bad = Vec::new();
     let mut found = 0;
     for &(prog, format, name) in TABLE {
@@ -96,7 +98,7 @@ fn the_paths_are_kpsewhichs() {
         // one made for the program)
         let got = one.find(name, format, prog);
         if !finders.iter().any(|(p, _)| *p == prog) {
-            finders.push((prog, Kpathsea::from_path(prog, "pdftex").expect("TeX Live")));
+            finders.push((prog, common::kpathsea_as(prog, "pdftex").expect("TeX Live")));
         }
         let own = finders.iter().find(|(p, _)| *p == prog).expect("made").1.find(name, format, prog);
         eprintln!("{prog} {} {name}: kpsewhich {want:?}, ours {got:?}", format.name());
@@ -116,7 +118,7 @@ fn without_cwd_skips_the_current_directory() {
         eprintln!("no kpsewhich: skipped");
         return;
     }
-    let k = Kpathsea::from_path("pdftex", "pdftex").expect("TeX Live").without_cwd();
+    let k = common::kpathsea_as("pdftex", "pdftex").expect("TeX Live").without_cwd();
     assert_eq!(k.find("Cargo.toml", KpseFormat::Tex, "pdftex"), None);
     assert_eq!(k.find("plain.tex", KpseFormat::Tex, "pdftex"), kpsewhich("pdftex", KpseFormat::Tex, "plain.tex"));
 }

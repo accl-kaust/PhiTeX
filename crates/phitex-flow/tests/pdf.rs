@@ -4,6 +4,8 @@
 //! oracles are recorded (`NAME.pdf`); [`oracles_are_pdftex`] checks them
 //! against the system's `pdftex`, `PHITEX_FLOW_BLESS=1` records them anew.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -83,6 +85,7 @@ fn check_again(name: &str, again: bool) {
     let want = recorded(name);
     for &o in &RUNS {
         let mut b = Build::new(font());
+        common::give_kpse(&mut b, "pdftex");
         b.set_jobname(name);
         let out = b.update(&text, o);
         if let Some(d) = std::env::var_os("PHITEX_FLOW_PDF_OUT") {
@@ -207,6 +210,7 @@ fn check_plain(name: &str) {
     let want = recorded(&format!("plain-{name}"));
     for &o in &RUNS {
         let mut b = Build::new(font());
+        common::give_kpse(&mut b, "pdftex");
         b.set_jobname(name);
         let out = b.update(&text, o);
         if let Some(d) = std::env::var_os("PHITEX_FLOW_PDF_OUT") {
