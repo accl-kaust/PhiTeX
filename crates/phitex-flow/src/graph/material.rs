@@ -1749,9 +1749,13 @@ impl Exec<'_> {
                 for s in ships {
                     self.emit_here(s);
                 }
-                // (§1121: only characters, kerns, boxes, rules, ligatures)
+                // (§1121: only characters, kerns, boxes, rules, ligatures;
+                // XeTeX's native words and glyphs too)
                 if let Some(bad) = list.iter().position(|i| {
-                    !matches!(i, Item::Char(..) | Item::Kern { .. } | Item::Box(_) | Item::Rule { .. } | Item::Lig(_))
+                    !matches!(
+                        i,
+                        Item::Char(..) | Item::Kern { .. } | Item::Box(_) | Item::Rule { .. } | Item::Lig(_) | Item::Native(_) | Item::Glyph(_)
+                    )
                 }) {
                     self.err("Improper discretionary list".into());
                     list.truncate(bad);

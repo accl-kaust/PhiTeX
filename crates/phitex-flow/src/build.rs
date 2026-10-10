@@ -1818,10 +1818,12 @@ impl Build {
     pub fn xdv_pdf(&self, xdv: &[u8]) -> Option<Result<Vec<u8>, String>> {
         let xe = self.xe.as_ref()?;
         let name = format!("{}.pdf", self.job);
+        // (the build's finder if it has one, [`Build::set_kpse`], else the
+        // input directories, then the native fonts' finder)
         let files: Arc<dyn crate::tfm::Kpse> = Arc::new(DocFiles {
             mem: self.files.clone(),
-            dirs: self.inputs.clone(),
-            inner: xe.kpse().clone(),
+            dirs: if self.finder.is_some() { Arc::new(Vec::new()) } else { self.inputs.clone() },
+            inner: self.finder.as_ref().map_or_else(|| xe.kpse().clone(), |(k, _)| k.clone()),
         });
         Some(crate::native::xdv_to_pdf(xdv, &files, &name, self.pdf_date))
     }
@@ -2994,9 +2996,10 @@ impl Env for JoinEnv<'_> {
     }
 }
 
-/// xdvipdfmx's finder in [`Build::xdv_pdf`]: the document's files first
-/// (those given in memory, then the input directories, as the picture
-/// specials name them, `./NAME` in the first), then kpathsea's.
+/// xdvipdfmx's finder in [`Build::xdv_pdf`], one more [`Kpse`]: the
+/// document's files first (those given in memory, then the input
+/// directories, as the picture specials name them, `./NAME` in the
+/// first), then the build's finder.
 struct DocFiles {
     mem: Arc<FxMap<Arc<str>, Arc<[u8]>>>,
     dirs: Arc<Vec<PathBuf>>,
