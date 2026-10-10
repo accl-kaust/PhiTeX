@@ -981,27 +981,24 @@ impl Exec<'_> {
             self.current_list(false)
         };
         let Some(Item::Native(w)) = list.last() else { return None };
-        let n = list.len();
-        if n < 2 {
-            return Some((w.clone(), false));
-        }
-        // (the walk from the head: a discretionary's replaced items are
-        // passed over)
-        let mut i = 0usize;
-        let mut prev: Option<usize> = None;
-        while i < n - 1 {
-            prev = Some(i);
-            if let Item::Disc(d) = &list[i] {
-                let r = usize::from(d.replace);
-                if i + r >= n - 1 {
-                    // (the tail is replaced text: `main_ppp` reaches it)
-                    return Some((w.clone(), false));
-                }
-                i += r;
+        // (xetex.web: `main_ppp` walks from the head, `-1`, to the item
+        // before the tail, a discretionary's replaced items passed over)
+        let pp = list.len() as isize - 1;
+        let mut ppp: isize = -1;
+        while ppp != pp && ppp + 1 != pp {
+            if ppp >= 0
+                && let Item::Disc(d) = &list[ppp as usize]
+            {
+                ppp += isize::from(d.replace);
             }
-            i += 1;
+            if ppp > pp {
+                return Some((w.clone(), false));
+            }
+            if ppp != pp {
+                ppp += 1;
+            }
         }
-        let ok = prev.is_some_and(|p| !matches!(list[p], Item::Char(..) | Item::Disc(_)));
+        let ok = ppp != pp && (ppp < 0 || !matches!(list[ppp as usize], Item::Char(..) | Item::Disc(_)));
         Some((w.clone(), ok))
     }
 
