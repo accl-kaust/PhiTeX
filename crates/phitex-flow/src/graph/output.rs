@@ -325,18 +325,19 @@ impl Exec<'_> {
     /// (`end_token_list`).
     fn output_text_end(&mut self) {
         let text = self.st.fire.as_ref().map(|f| f.text.clone());
-        let Some((list, i, backed)) = self.st.pending.last().map(|(l, i, b)| (l.clone(), i, b)) else { return };
+        let Some((list, _, _, backed)) = self.st.pending.last().map(|(l, i, e, b)| (l.clone(), i, e, b)) else {
+            return;
+        };
+        let done = self.st.pending.top_done() == Some(true);
         let ours = text.is_some_and(|x| Arc::ptr_eq(&x, &list));
-        if i < list.len() || !(ours || backed) {
+        if !done || !(ours || backed) {
             self.err(UNBALANCED.into());
-            if i >= list.len() {
+            if done {
                 // (a list read to its end: `get_token` reads on in the one
                 // below it, to its end)
                 self.st.pending.pop();
             }
-            if let Some((l, i)) = self.st.pending.last_mut() {
-                *i = l.len();
-            }
+            self.st.pending.skip_top();
         }
         self.st.pending.pop();
     }
