@@ -2932,6 +2932,22 @@ Gaps:
   read to its end, is gone before the error is shown (TeX pops it at the
   next `get_next`). Found by `tests/etex/micro.tex`, which now puts
   `\showbox0` after its macro.
+- *`\partokenname` in the reader (for P).* `Key::ParToken` (global) is
+  the paragraph token where material.rs, align.rs and output.rs insert
+  one (`\vskip`-like commands in horizontal mode; with
+  `\partokencontext` 1 or 2 the box, `\insert`, `\vadjust`, `\output`,
+  `\noalign` and `\valign` entry ends: partoken.ch). Still `\par`: the
+  blank line's token (graph.rs `get_next`, `TState::N`), the runaway
+  checks of a non-`\long` macro's argument (`is_par`, and the token a
+  runaway `use` backs up). Those are the reader's, and want the token in
+  the reader state, defined where `\partokenname` runs.
+- *`\pdfinsertht n` for classes 0–9.* `Key::Page(n)` is the page builder's
+  quantities for 0–9, so those classes read 0pt; 10–254 are the page's
+  insertion records' heights (`Page::page_quantity`, validated as the
+  other page quantities).
+- *`\pdfprimitive` where a value is scanned* (pdftex.web's "Reset
+  `cur_tok` for unexpandable primitives" in `scan_something_internal`):
+  not done; as a command and an expansion step it is.
 - *A box's glue when the expansion ratio rounds to zero*: pdfTeX returns
   the first pass's box without setting its glue (uninitialized fields);
   here its glue is normal.
