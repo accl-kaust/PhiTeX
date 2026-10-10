@@ -177,7 +177,7 @@ fn a_fire_between_a_pieces_nodes_reruns_only_the_nodes_after_it() {
 }
 
 /// Item provenance: each glyph of a line, and of a box in it, leads to
-/// the node that made it and that node's source line (SyncTeX's tags).
+/// the node that made it and that node's source line (`SyncTeX`'s tags).
 #[test]
 fn a_glyph_leads_to_its_source_line() {
     use phitex_flow::item::Item;
@@ -200,12 +200,12 @@ fn a_glyph_leads_to_its_source_line() {
         for (j, it) in line.list.iter().enumerate() {
             match it {
                 Item::Char(_, c) if c.is_ascii_uppercase() => {
-                    let n = b.material_node(0, at as u32, &[j]).expect("a node");
+                    let n = b.material_node(0, u32::try_from(at).unwrap(), &[j]).expect("a node");
                     seen.push((char::from(*c), b.source_place(0, n).expect("a place").1));
                 }
                 // (the paragraph's indent is an empty box)
                 Item::Box(bx) if !bx.list.is_empty() => {
-                    let n = b.material_node(0, at as u32, &[j, 0]).expect("a node in the box");
+                    let n = b.material_node(0, u32::try_from(at).unwrap(), &[j, 0]).expect("a node in the box");
                     let c = match &bx.list[0] {
                         Item::Char(_, c) => char::from(*c),
                         _ => '?',

@@ -1758,6 +1758,14 @@ same tree, and is bisecting. Three were cut down (job 7869,
 45 s). They are in `tests/fuzz/hang/`, not replayed by the tests:
 - `t1-pages-blank-insert.repro`, pages seed 134 step 4: 3 paragraphs,
   1587 bytes, a blank line inserted inside the second paragraph.
+  *Fixed* (A; in `tests/fuzz/fixed/`): the scan waited for a piece
+  whose run `keep_again` had kept (every mark read its value again)
+  with 8 of its 18 paragraphs left without lines by an earlier round's
+  restructure, and nothing queued them (the setup queues the unbroken
+  paragraphs only of pieces Done when it starts); the stall detector
+  names the scan's piece and its paragraphs without lines now.
+  Invariant: a piece Done has lines for every paragraph, or their
+  breaks are queued (a kept run leaves the queue as a fresh run would).
 - `t1-trip-swap.repro` (trip seed 29 step 2, Suspend, priority, nodes
   kept) and `t1-trip-char-delete.repro` (trip seed 12 step 5, lean):
   2 and 3 of trip.tex's units.
