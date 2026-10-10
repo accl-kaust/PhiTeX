@@ -17,25 +17,22 @@ use std::sync::{Arc, Mutex};
 use partex_otf::index::{FaceEntry, FontIndex, VARIABLE};
 use phitex_flow::native::Fonts;
 
-use crate::tex::{self, Engine, Fnv};
+use crate::tex::{self, Engine, Fnv, Tree};
 
-/// The fonts for engine `e`'s builds: made once per process.
-pub fn fonts(e: &Engine, note: &mut dyn FnMut(&str)) -> Result<Arc<Fonts>, String> {
+/// The fonts for engine `e`'s builds, their files found by `tree`'s
+/// kpathsea: made once per process.
+pub fn fonts(e: &Engine, tree: &Tree, note: &mut dyn FnMut(&str)) -> Result<Arc<Fonts>, String> {
     static ONE: Mutex<Option<Arc<Fonts>>> = Mutex::new(None);
     let mut g = ONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(f) = &*g {
         return Ok(f.clone());
     }
     let index = index(note)?;
-    let kpse = finder(e);
+    let _ = e;
+    let kpse: Arc<dyn phitex_flow::tfm::Kpse> = tree.kpse.clone();
     let f = Arc::new(Fonts::new(Arc::new(index), kpse));
     *g = Some(f.clone());
     Ok(f)
-}
-
-/// How XeTeX's builds find files by name: kpathsea as program `e.name`.
-fn finder(_e: &Engine) -> Arc<dyn phitex_flow::tfm::Kpse> {
-    Arc::new(phitex_flow::tfm::Kpsewhich::new())
 }
 
 /// One face as `fc-list` gives it.

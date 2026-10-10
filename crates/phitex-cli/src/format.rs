@@ -45,6 +45,7 @@ pub fn ensure(
         e.name, e.ini
     ));
     let t = Instant::now();
+    let tree = tree.for_format(e);
     let Some(ini_path) = tree.input(e.ini) else {
         return Err(format!("{}: not found in TeX Live (TEXINPUTS for {})", e.ini, e.name));
     };
@@ -57,11 +58,11 @@ pub fn ensure(
     let _ = std::fs::create_dir_all(&work);
     let _ = std::fs::write(work.join("texsys.aux"), "1970/01/01:00:00\n\n");
     let mut b = Build::new(phitex_flow::tfm::null_font());
-    b.set_font_dirs(tree.fonts.clone());
+    b.set_kpse(tree.kpse.clone(), tree.prog);
     if e.xetex {
-        b.set_xetex(crate::xetex::fonts(e, note)?);
+        b.set_xetex(crate::xetex::fonts(e, &tree, note)?);
     }
-    b.set_input_dirs(vec![work.clone(), tree.inputs.clone()]);
+    b.set_input_dirs(vec![work.clone()]);
     b.set_jobname(e.name);
     b.set_limits(Limits::TEX_LIVE);
     b.set_terminal(&[e.ini]);

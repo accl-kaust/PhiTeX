@@ -512,12 +512,16 @@ pub fn default_dirs() -> Vec<std::path::PathBuf> {
     .collect()
 }
 
-/// The TFM files a build can load: those given to it by name, then the
-/// font directories (searched once, on the first name not given). Reading
-/// one is a pure function of its name while the files do not change.
+/// The TFM files a build can load: those given to it by name, then
+/// kpathsea's (`name.tfm` in format `tfm`, as the program: the build's
+/// finder, [`FontFiles::with_kpse`]) or else the font directories
+/// (walked once, on the first name not given). Reading one is a pure
+/// function of its name while the files do not change.
 pub struct FontFiles {
     given: Vec<(String, Arc<[u8]>)>,
     dirs: Vec<std::path::PathBuf>,
+    /// kpathsea instead of `dirs`, and the program name it asks as.
+    finder: Option<(Arc<dyn Kpse>, Arc<str>)>,
     index: std::sync::OnceLock<Arc<Index>>,
     cache: std::sync::Mutex<std::collections::HashMap<String, Option<Arc<[u8]>>>>,
 }
@@ -538,7 +542,20 @@ fn index_of(dirs: &[std::path::PathBuf]) -> Arc<Index> {
 
 impl FontFiles {
     pub fn new(given: Vec<(String, Arc<[u8]>)>, dirs: Vec<std::path::PathBuf>) -> FontFiles {
-        FontFiles { given, dirs, index: std::sync::OnceLock::new(), cache: std::sync::Mutex::default() }
+        FontFiles { given, dirs, finder: None, index: std::sync::OnceLock::new(), cache: std::sync::Mutex::default() }
+    }
+
+    /// The files `given`, then those kpathsea finds as program `prog`
+    /// (`kpse_find_file("name.tfm", kpse_tfm_format)`): no directory is
+    /// walked.
+    pub fn with_kpse(given: Vec<(String, Arc<[u8]>)>, kpse: Arc<dyn Kpse>, prog: Arc<str>) -> FontFiles {
+        FontFiles {
+            given,
+            dirs: Vec::new(),
+            finder: Some((kpse, prog)),
+            index: std::sync::OnceLock::new(),
+            cache: std::sync::Mutex::default(),
+        }
     }
 
     /// The bytes of `name.tfm`, if there is such a file.
@@ -549,7 +566,10 @@ impl FontFiles {
         if let Some(v) = self.cache.lock().expect("font cache").get(name) {
             return v.clone();
         }
-        let v = self.index.get_or_init(|| index_of(&self.dirs)).read(name).map(Arc::from);
+        let v = match &self.finder {
+            Some((k, prog)) => k.find(&format!("{name}.tfm"), KpseFormat::Tfm, prog).and_then(|p| k.read(&p)),
+            None => self.index.get_or_init(|| index_of(&self.dirs)).read(name).map(Arc::from),
+        };
         self.cache.lock().expect("font cache").insert(name.to_string(), v.clone());
         v
     }
@@ -717,53 +737,6 @@ impl Kpse for DirKpse {
             return Some(p);
         }
         format.suffixes().iter().find_map(|s| try_one(&format!("{base}{s}")))
-    }
-
-    fn read(&self, path: &str) -> Option<Arc<[u8]>> {
-        let mut g = self.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        g.entry(path.to_string())
-            .or_insert_with(|| std::fs::read(path).ok().map(Arc::from))
-            .clone()
-    }
-}
-
-/// [`Kpse`] through TeX Live's `kpsewhich` (`-progname`, `-format`): what
-/// kpathsea itself finds, each answer and each file read once (the CLI's
-/// and the XeTeX tests' finder; the build never runs it but through this
-/// given).
-#[derive(Default)]
-pub struct Kpsewhich {
-    found: std::sync::Mutex<std::collections::HashMap<(String, &'static str, String), Option<String>>>,
-    files: std::sync::Mutex<std::collections::HashMap<String, Option<Arc<[u8]>>>>,
-}
-
-impl Kpsewhich {
-    pub fn new() -> Kpsewhich {
-        Kpsewhich::default()
-    }
-}
-
-impl Kpse for Kpsewhich {
-    fn find(&self, name: &str, format: KpseFormat, prog: &str) -> Option<String> {
-        if name.starts_with('/') {
-            return std::path::Path::new(name).exists().then(|| name.to_string());
-        }
-        let key = (name.to_string(), format.name(), prog.to_string());
-        if let Some(r) = self.found.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
-            return r.clone();
-        }
-        let r = std::process::Command::new("kpsewhich")
-            .arg(format!("-progname={prog}"))
-            .arg(format!("-format={}", format.name()))
-            .arg(name)
-            .output()
-            .ok()
-            .and_then(|o| {
-                let s = String::from_utf8_lossy(&o.stdout).trim_end_matches('\n').to_string();
-                (o.status.success() && !s.is_empty()).then_some(s)
-            });
-        self.found.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, r.clone());
-        r
     }
 
     fn read(&self, path: &str) -> Option<Arc<[u8]>> {

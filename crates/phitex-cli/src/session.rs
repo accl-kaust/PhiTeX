@@ -183,19 +183,20 @@ impl Session {
     /// A session for `job`: TeX Live's paths, the format (made if the
     /// cache has none), the main file read. `note` hears what takes time.
     pub fn new(job: Job, note: &mut dyn FnMut(&str)) -> Result<Session, String> {
-        let tree = Tree::open(&job.engine, note)?;
+        let tree = Tree::open(&job.engine);
         let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()))?;
         let mut build = Build::new(phitex_flow::tfm::null_font());
-        build.set_font_dirs(tree.fonts.clone());
+        // (every file by kpathsea as the engine's program — TEXINPUTS from
+        // the environment, `.` first —, the output directory before it, as
+        // web2c's `open_input` tries `-output-directory` first)
+        build.set_kpse(tree.kpse.clone(), tree.prog);
         if job.engine.xetex {
-            build.set_xetex(crate::xetex::fonts(&job.engine, note)?);
+            build.set_xetex(crate::xetex::fonts(&job.engine, &tree, note)?);
         }
         let mut dirs = Vec::new();
         if job.out_dir != Path::new(".") {
             dirs.push(job.out_dir.clone());
         }
-        dirs.push(PathBuf::from("."));
-        dirs.push(tree.inputs.clone());
         build.set_input_dirs(dirs);
         build.set_jobname(&job.jobname);
         build.set_limits(Limits::TEX_LIVE);

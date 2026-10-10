@@ -78,10 +78,25 @@ fn index() -> Option<Arc<Vec<u8>>> {
         .clone()
 }
 
+/// TeX Live's kpathsea as program `xetex` (`SELFAUTOLOC`: the directory
+/// of `kpsewhich` on `PATH`): the native fonts' files, the pictures',
+/// xdvipdfmx's.
+fn kpathsea() -> Arc<dyn phitex_flow::tfm::Kpse> {
+    let dir = std::env::var_os("PATH")
+        .and_then(|p| {
+            std::env::split_paths(&p)
+                .filter_map(|d| d.join("kpsewhich").canonicalize().ok())
+                .find(|f| f.is_file())
+                .and_then(|f| f.parent().map(Path::to_path_buf))
+        })
+        .unwrap_or_else(|| PathBuf::from("/usr/bin"));
+    Arc::new(phitex_flow::kpse::Kpathsea::new(partex_kpse::Kpse::new(&dir, "xetex", "xetex")))
+}
+
 /// A XeTeX build with the given fonts, as job `job`, reading `inputs`.
 fn xetex_build(job: &str, inputs: Vec<PathBuf>) -> Option<Build> {
     let idx = index()?;
-    let kpse: Arc<dyn phitex_flow::tfm::Kpse> = Arc::new(phitex_flow::tfm::Kpsewhich::new());
+    let kpse: Arc<dyn phitex_flow::tfm::Kpse> = kpathsea();
     let fonts = phitex_flow::native::Fonts::from_index_bytes(&idx, kpse).expect("PHITEX_FONT_INDEX: a font index");
     let mut b = Build::new(font());
     b.set_xetex(fonts);
