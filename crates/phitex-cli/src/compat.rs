@@ -194,8 +194,9 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         path,
         jobname,
         out_dir: out_dir.map_or_else(|| PathBuf::from("."), PathBuf::from),
-        // (no terminal input: errorstopmode would stop at the first error)
-        interaction: mode.unwrap_or(1),
+        // (TeX's own default; with no terminal input an error stops the
+        // job, as TeX's does when its standard input is at its end)
+        interaction: mode.unwrap_or(3),
         threads: threads.unwrap_or_else(crate::default_threads),
         fixpoint: false,
         tools: false,

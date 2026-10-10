@@ -34,7 +34,7 @@ options:
       --output-format F    dvi or pdf (latex/pdflatex, etex/pdftex)
       --ini [--etex]       the file is the whole job: no format (TeX's -ini)
   -j, --jobs N             threads (default: all cores)
-      --interaction MODE   batchmode, nonstopmode (default), scrollmode
+      --interaction MODE   batchmode (default), nonstopmode, scrollmode
   -v, --verbose            each run, and each warning's first lines
   -q, --quiet              only problems and the result
       --open               watch: open the viewer in the browser
@@ -269,7 +269,8 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
         path,
         jobname: t.job(),
         out_dir: t.output_dir.as_ref().map_or_else(|| PathBuf::from("."), PathBuf::from),
-        interaction: o.interaction.unwrap_or(1),
+        // (batch mode, as the oracles run: the CLI shows the errors itself)
+        interaction: o.interaction.unwrap_or(0),
         threads: o.threads.unwrap_or_else(crate::default_threads),
         fixpoint: true,
         tools: true,

@@ -61,8 +61,11 @@ fn as_program(name: &str) -> PathBuf {
     p
 }
 
+/// `program` in `dir`, stopped after ten minutes (`timeout`): a build that
+/// hangs fails its test instead of holding the job.
 fn command(program: &Path, dir: &Path) -> Command {
-    let mut c = Command::new(program);
+    let mut c = Command::new("timeout");
+    c.arg("600").arg(program);
     c.current_dir(dir)
         .env("PHITEX_CACHE_DIR", cache())
         .env("SOURCE_DATE_EPOCH", "0")
@@ -138,11 +141,14 @@ fn latex_doc(name: &str) {
     let term = String::from_utf8_lossy(&out.stdout);
     let errs = String::from_utf8_lossy(&out.stderr);
     eprintln!("{name}: latex through phitex in {:.2} s, status {:?}\n{errs}", t.elapsed().as_secs_f64(), out.status.code());
-    let gap = term.contains(&format!("I can't find file `{name}.aux'"));
+    // (in batch mode the errors are in the log only)
+    let log = chars(&std::fs::read(dir.join(format!("{name}.log"))).unwrap_or_default());
+    let gap = log.contains(&format!("I can't find file `{name}.aux'"));
     if !out.status.success() {
+        let errors: Vec<&str> = log.lines().filter(|l| l.starts_with("! ")).collect();
         assert!(
-            gap,
-            "{name}: phitex failed, not on the known .aux gap:\nterminal:\n{term}\nstderr:\n{errs}"
+            gap && errors.iter().all(|e| e.contains(&format!("`{name}.aux'")) || e.contains("End of file on the terminal") || e.contains("Emergency stop")),
+            "{name}: phitex failed, not on the known .aux gap: {errors:?}\nterminal:\n{term}\nstderr:\n{errs}\nlog:\n{log}"
         );
         eprintln!("{name}: the .aux read back at \\end{{document}} is phitex-flow's known gap (agent B's fixpoint)");
     }
