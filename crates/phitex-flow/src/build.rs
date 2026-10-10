@@ -425,6 +425,8 @@ pub struct Build {
     /// (`Key::ReadStream(16)`), the interaction mode (`Key::Interaction`).
     terminal: Option<Arc<[u8]>>,
     interaction: i32,
+    /// The command line's `-interaction` (`set_interaction_option`).
+    interaction_option: Option<i32>,
     /// The sizes TeX was compiled with.
     limits: crate::print::Limits,
     /// A settled piece drops its nodes (`graph::Lean`; the default): a
@@ -570,6 +572,8 @@ struct Given {
     /// the sizes TeX was compiled with.
     terminal: Option<Arc<[u8]>>,
     interaction: i32,
+    /// The command line's `-interaction`, set at each job's start.
+    interaction_option: Option<i32>,
     limits: crate::print::Limits,
 }
 
@@ -588,6 +592,7 @@ impl Given {
             bases,
             terminal: None,
             interaction: 0,
+            interaction_option: None,
             limits: crate::print::Limits::TEX_LIVE,
         }
     }
@@ -1134,6 +1139,7 @@ impl Build {
             cs: Arc::new(CsTable::new()),
             terminal: None,
             interaction: 0,
+            interaction_option: None,
             limits: crate::print::Limits::TEX_LIVE,
             format: None,
         }
@@ -1390,6 +1396,13 @@ impl Build {
         self.interaction = mode.clamp(0, 3);
     }
 
+    /// The command line's `-interaction` (none until set): web2c sets the
+    /// mode from it at each job's start, after the format (tex.ch's
+    /// `interaction_option`), over the mode the format dumped.
+    pub fn set_interaction_option(&mut self, mode: Option<i32>) {
+        self.interaction_option = mode.map(|m| m.clamp(0, 3));
+    }
+
     /// The sizes TeX was compiled with (`print::Limits`; TeX Live's
     /// until set). Fixed for the build's life.
     pub fn set_limits(&mut self, limits: crate::print::Limits) {
@@ -1632,6 +1645,7 @@ impl Build {
         let mut given = Given::new(self.inputs.clone(), self.job.clone(), self.files.clone(), bases);
         given.terminal.clone_from(&self.terminal);
         given.interaction = self.interaction;
+        given.interaction_option = self.interaction_option;
         given.limits = self.limits;
         let names = Names::new(given, opts.etex, self.cs.clone(), self.format.clone());
         for (k, ps) in p.iter().enumerate() {
@@ -2142,6 +2156,10 @@ impl Env for JoinEnv<'_> {
 
     fn limits(&self) -> crate::print::Limits {
         self.names.given.limits
+    }
+
+    fn interaction_option(&self) -> Option<i32> {
+        self.names.given.interaction_option
     }
 
     fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
@@ -3320,6 +3338,10 @@ impl Env for PieceEnv<'_> {
         self.sh.names.given.limits
     }
 
+    fn interaction_option(&self) -> Option<i32> {
+        self.sh.names.given.interaction_option
+    }
+
     fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
         self.sh.fonts.get(name)
     }
@@ -3709,6 +3731,10 @@ struct RoutineEnv<'a> {
 impl Env for RoutineEnv<'_> {
     fn cs(&self) -> &Arc<CsTable> {
         &self.fold.sh.names.cs
+    }
+
+    fn interaction_option(&self) -> Option<i32> {
+        self.fold.sh.names.given.interaction_option
     }
 
     fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {

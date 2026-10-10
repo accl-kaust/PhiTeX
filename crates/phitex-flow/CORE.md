@@ -1646,6 +1646,29 @@ schedules (next section): 0.7–2 s each.
 3. *`Key::MainTail` after a removal* in a node of its own is none, not the
    item before (Conflict 13).
 
+## LaTeX packages (agent B)
+
+Four more documents in `tests/latex_docs.rs`, on the saved format, at the
+five schedules, against `latex` in DVI mode on the first run: `ams`
+(amsmath and amssymb: `align`, `gather`, `multline`, `cases`, `\text`,
+`\DeclareMathOperator`, the matrices, `\binom`, `\dfrac`), `gfx`
+(graphicx and color with the dvips driver: `\includegraphics` of an EPS
+by its bounding box, scaled and turned, `\scalebox`, `\rotatebox`,
+`\reflectbox`, `\resizebox`, `\textcolor`, `\colorbox`, `\fcolorbox`, a
+coloured paragraph: the `\special`s), `layout` (babel english, geometry
+on A5, fancyhdr, enumitem, three pages), `rules` (booktabs, caption,
+enumerate). A document's `NAME-*` files (the EPS) sit beside it and are
+copied for `latex`; the graph reads them from the documents' directory.
+
+Gap found and fixed: *an alignment entry's leaders are glue*
+(`align::totals`, §796's `hpack`): booktabs' `\cmidrule` is a spanned
+`\omit` entry holding `\leaders\hrule\hfill`; its stretch was not
+counted, the entry's glue was not set and the rule was not drawn.
+
+Not yet: hyperref (the `.aux` fixpoint — format gap 1 — and its many
+`\special`s/`\pdf…` commands), microtype (pdfTeX's font expansion and
+protrusion, PDF mode only).
+
 ## The format: definitions before the first piece (agent B)
 
 AGENTS_BRIEF §6.1: "known at t=0: the format, a set of definitions with
@@ -1698,15 +1721,15 @@ format read included). What remains is the documents' own work: about
 to three pieces each, so eight threads have little to share.
 
 Gaps:
-- *The command line's `-interaction` at a job's start.* web2c sets
-  `interaction` from `-interaction` after loading a format (tex.ch,
+- *(done)* *The command line's `-interaction` at a job's start.* web2c
+  sets `interaction` from `-interaction` after loading a format (tex.ch,
   `interaction_option`); `latex.ltx` dumps `\errorstopmode`, so `latex
-  -interaction=batchmode NAME` runs in batch mode. The session (and so
-  the format, which keeps the dumped mode to equal it) runs the
-  document's job in error-stop mode: the selector is `term_and_log`, the
-  log's layout differs from `latex`'s where a line is printed to the
-  terminal too. Proposal (session, F): a given interaction applies at
-  each job's start when the session gives one.
+  -interaction=batchmode NAME` runs in batch mode. Now
+  `Build::set_interaction_option` (CLI `--interaction MODE`, which sets
+  the mode before any definition too) is defined at each job's start
+  (`Env::interaction_option`), in a session and on a format alike; the
+  format keeps the dumped mode (equal to the session). None until set:
+  TRIP's second run (`tex` without `-interaction`) keeps its format's.
 - *Reruns from definitions between a piece's nodes (core, A).* On the
   format a document's own cost shows: `titlepage` (one piece, five
   pages) runs its 20k commands ten times (204k), `sections` twice. Each

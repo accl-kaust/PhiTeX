@@ -24,7 +24,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
-         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--fmt FILE] [--dump-fmt FILE] [--edit OLD=>NEW] [--repeat N] \
+         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--fmt FILE] [--dump-fmt FILE] [--interaction MODE] [--edit OLD=>NEW] [--repeat N] \
          [--check] [--log] [--main-memory WORDS]"
     );
     ExitCode::from(2)
@@ -337,6 +337,7 @@ fn main() -> ExitCode {
     let mut font_dirs: Vec<std::path::PathBuf> = Vec::new();
     let mut fmt: Option<String> = None;
     let mut dump_fmt: Option<String> = None;
+    let mut interaction: Option<i32> = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -394,6 +395,13 @@ fn main() -> ExitCode {
             "--dump-fmt" => match val() {
                 Some(f) => dump_fmt = Some(f),
                 None => return usage(),
+            },
+            "--interaction" => match val().as_deref() {
+                Some("batchmode") => interaction = Some(0),
+                Some("nonstopmode") => interaction = Some(1),
+                Some("scrollmode") => interaction = Some(2),
+                Some("errorstopmode") => interaction = Some(3),
+                _ => return usage(),
             },
             "--repeat" => match val().and_then(|v| v.parse().ok()) {
                 Some(n) => repeat = n,
@@ -487,6 +495,12 @@ fn main() -> ExitCode {
     if !font_dirs.is_empty() {
         font_dirs.extend(phitex_flow::tfm::default_dirs());
         b.set_font_dirs(font_dirs.clone());
+    }
+    // (`-interaction`: the mode before any definition, and at each job's
+    // start over the format's)
+    if let Some(m) = interaction {
+        b.set_interaction(m);
+        b.set_interaction_option(Some(m));
     }
     // (the format the build starts from: its definitions before the first
     // piece)
