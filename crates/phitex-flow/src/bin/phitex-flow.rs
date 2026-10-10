@@ -24,7 +24,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
-         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--edit OLD=>NEW] [--repeat N] \
+         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--edit OLD=>NEW] [--repeat N] \
          [--check] [--log] [--main-memory WORDS]"
     );
     ExitCode::from(2)
@@ -332,6 +332,9 @@ fn main() -> ExitCode {
     let mut log = false;
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     let mut jobname = None;
+    let mut before: Vec<String> = Vec::new();
+    let mut terminal: Vec<String> = Vec::new();
+    let mut font_dirs: Vec<std::path::PathBuf> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -370,6 +373,18 @@ fn main() -> ExitCode {
                 None => return usage(),
             },
             "--jobname" => jobname = val(),
+            "--before" => match val() {
+                Some(f) => before.push(f),
+                None => return usage(),
+            },
+            "--terminal" => match val() {
+                Some(l) => terminal.push(l),
+                None => return usage(),
+            },
+            "--font-dir" => match val() {
+                Some(d) => font_dirs.push(d.into()),
+                None => return usage(),
+            },
             "--repeat" => match val().and_then(|v| v.parse().ok()) {
                 Some(n) => repeat = n,
                 None => return usage(),
@@ -416,12 +431,32 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let src = match std::fs::read_to_string(&file) {
+    // (files read as bytes, a character each; with `--before`, a session:
+    // those files' jobs, then this one's)
+    let read = |f: &str| std::fs::read(f).map(|b| b.iter().map(|&c| char::from(c)).collect::<String>());
+    let src = match read(&file) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{file}: {e}");
             return ExitCode::FAILURE;
         }
+    };
+    let src = if before.is_empty() {
+        src
+    } else {
+        let mut texts = Vec::new();
+        for f in &before {
+            match read(f) {
+                Ok(s) => texts.push(s),
+                Err(e) => {
+                    eprintln!("{f}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        texts.push(src);
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        phitex_flow::graph::jobs(&refs)
     };
     let out = out.unwrap_or_else(|| format!("{}.dvi", file.trim_end_matches(".tex")));
     // (`\input` and `\openin` find files beside the document; the job is
@@ -434,6 +469,14 @@ fn main() -> ExitCode {
     let mut b = Build::new(font.clone());
     b.set_input_dirs(inputs.clone());
     b.set_jobname(&job);
+    if !terminal.is_empty() {
+        let lines: Vec<&str> = terminal.iter().map(String::as_str).collect();
+        b.set_terminal(&lines);
+    }
+    if !font_dirs.is_empty() {
+        font_dirs.extend(phitex_flow::tfm::default_dirs());
+        b.set_font_dirs(font_dirs.clone());
+    }
     let cold = b.update(&src, opts);
     report("cold", &cold);
     if dump {

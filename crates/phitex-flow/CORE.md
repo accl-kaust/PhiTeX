@@ -204,10 +204,16 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     back to this piece's last paragraph) and takes its last item. Not a
     `Key`: the node becomes `Kind::Par`, so it runs again whenever a node of
     its paragraph does (a conditional reading it keeps its kind — then a
-    stale value is possible: a gap). Gaps: on the main vertical list after a
-    paragraph's lines, or at a piece's start, the last item is another
-    task's (lines) or another piece's — read as none; TeX's `\lastpenalty`
-    of a penalty the page builder has just set to 10000 is not seen.
+    stale value is possible: a gap). On the main vertical list after a
+    paragraph's lines, or at a piece's start, the last item is the value
+    of `Key::MainTail` (`Val::Tail`): each node at the outer level that
+    contributes to the list defines it globally (`material::main_tail`: a
+    paragraph's lines count as a box, whatever line breaking makes), so
+    a node reading it from another piece reads it as a name (LaTeX:
+    `\addvspace`'s `\lastskip` after a list, at the next piece's start).
+    Gaps: after a removal (`\unskip`…) in a node of its own the key is
+    none, not the item before the one removed; TeX's `\lastpenalty` of a penalty
+    the page builder has just set to 10000 is not seen.
     `\lastbox` (a removal whose value the node needs): done, the same read
     and an `Item::Remove(3)`.
 14. **Groups and conditionals across a piece boundary** (a blank line inside
@@ -1513,6 +1519,27 @@ input lists (`Pending` pop) 8%; definitions 6%. By self time: `expand` 11%,
 the input lists) and the lists' cells (an allocation per macro call); a
 meaning is still cloned per lookup (a macro's handle).
 
+*The Unicode data block* (expl3-code.tex's `\ior_str_map_inline` reading
+the Unicode data into intarrays, about 2.9M of latex.ltx's 3.1M commands,
+one serial chain). Its piece exports 171,120 names: 157,260 of them
+`Key::FontDimen` (the intarrays' entries, 157,753 definitions), 17,671
+control sequences (619,065 definitions), 45 counts; `Key::ReadStream` is
+defined 45,533 times (a line each), the stream advancing by offset over
+the file's shared bytes (no copy). Installing the exports is about 2% of
+the run, dropping the replaced run's 3M nodes at the commit 6.5% (on the
+critical path). Profile (perf, frame pointers, inclusive): `next_x_m`
+63%, `expand` 45%, `scan_int_ext` 32%, `\if` tests 26%, expanded texts
+26%, `\expandafter` 26%, definitions 24%, `next_raw` 20%, conversions
+19%, `scan_expr` 19%; by self time `expand` 11%, `Cursor::next` 10%,
+`next_raw0` 6%, `Pending::pop` 4%, the allocator 6%, `outer_of` 3%,
+`Cursor::arg` 3%, `Chain::resolve` 2%. *The `\outer` check of each
+token scanned* (`Exec::outer_of`, `Field::Outer`) went through
+`find_slow` (the node's reads searched one by one, a key hashed, a new
+read made per name and node): 13.5% of the run. Now a name's is found by
+its number as `find_name` does, and the piece's kept read (`Known`) holds
+its outer-ness read, made once. latex.ltx `-j 1`: 119.4G → 109.2G cycles,
+212G → 191G instructions (45 s → 42 s on a loaded machine).
+
 **Gaps left for the core (A), with repros.**
 1. *A file written and read back in one run.* `texsys.cfg` writes
    `texsys.aux` with `\immediate\openout`/`\write`/`\closeout`, then
@@ -1553,6 +1580,70 @@ meaning is still cloned per lookup (a macro's handle).
    `\count1=0 \def\l{\def\a{<1000 x>}\advance\count1 1 \ifnum\count1<10000
    \expandafter\l\fi}\l \message{\the\count1}\end`: TeX 10000, the graph
    "TeX capacity exceeded, sorry [main memory size=5000000]".
+
+## LaTeX documents (agent B)
+
+`tests/latex_docs.rs`: six documents (`tests/latex/docs/`: sections and
+lists, base math, tabular and a table float, figures and `\twocolumn`,
+a title page with `\tableofcontents` over five pages, `ifthen`/`calc`/
+`array`/`verbatim`) against TeX Live's `latex` (pdfTeX in DVI mode, the
+`latex` format) on each one's first run, no `.aux` present. Our side is
+one build, a session of two jobs: `latex.ini` (the format: pdftexconfig,
+`latex.ltx`, `\dump`) and `&latex NAME`, with the directories `latex
+-recorder` read from. Compared: the DVI file (its dated comment masked)
+and the files the document's job writes (`.aux`, `.toc`), at one thread,
+eight, and eight speculating in a random order. The CLI runs the same
+session: `--before latex.ini --terminal latex.ini --terminal '&latex
+NAME' --font-dir DIR`.
+
+All six pass at the three schedules (the `.aux` read-back below aside).
+Cold, the format included: about 46 s each at `-j 1` and at `-j 8` (the
+format's first piece is 99% of the work); `latex` takes 0.19 s with its
+dumped format, 10.8 s to make the format (`pdftex -ini -etex latex.ini`)
+on the same machine.
+
+**Language gaps the documents found (fixed).**
+- *`\lastskip` at a piece's start* (`\addvspace` after a list, a
+  section after a blank line): the main vertical list's last item is
+  another piece's. Now `Key::MainTail` (Conflict 13).
+- *`\prevdepth` after a paragraph of the main vertical list*: its lines
+  are broken by the page fold, so the reader state did not have the last
+  line's depth (`\the\prevdepth` read -1000pt; LaTeX's floats save and
+  restore it around their `\vbox{}`: no interline glue after a float).
+  Now the reader state says `page::MAIN_DEPTH` there and at a piece's
+  start, and `\prevdepth` reads `Key::MainDepth`: defined globally by
+  each node at the outer level that sets it, the paragraph itself
+  (`Val::Para`) when its lines set it, the depth made when read (line
+  breaking is a function of the paragraph). After an output routine the
+  main list's is the one from where the routine fired (`pop_nest`), not
+  `ignore_depth`.
+- *A `\write` on a page an output routine shipped* was expanded a second
+  time, at the page builder's call with the definitions there
+  (`Page::builder`: only pages the builder ships itself, TeX's default
+  output, have their whatsits done by the fold). Repro:
+  `\output={\begingroup\let\x\relax\shipout\box255\endgroup}
+  \def\x{\iffalse} Text\write-1{[\x a]}\par\end` ("Incomplete \if").
+- *A φ's read from before its `\if`* was entered in the run's reads at
+  the `\fi`; a global definition in the arm of a name also defined
+  between the piece's nodes (its place in the names index exact) then
+  answered it, the read was stale at every commit and the piece ran
+  forever (`twocolumn` with a `figure*`; `\addvspace` at `-j 8`). Now it
+  is entered where the `\if` began (`graph::cond_at`), and the old
+  run's entries are kept only before the first such place of the nodes
+  run again.
+
+**Gaps left (core, A).**
+1. *The `.aux` file read back at `\end{document}`* (`\@@input\jobname.aux`
+   after `\immediate\closeout\@mainaux`): gap 1 of LaTeX's format, a
+   file written and read in one run. Not found, then "End of file on
+   the terminal!" ends the job (batch mode), after the last page and the
+   `.aux` file; the `.toc` lines that read writes (`\@writefile`) are not
+   written. The test allows exactly these two errors and an empty `.toc`
+   while the first is there. Repro: any of the documents.
+2. *`\prevgraf` after a paragraph of the main vertical list* is not the
+   lines' count (the same deferral as `\prevdepth`; no document reads it).
+3. *`Key::MainTail` after a removal* in a node of its own is none, not the
+   item before (Conflict 13).
 
 ## The inventory
 

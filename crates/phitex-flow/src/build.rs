@@ -1919,7 +1919,7 @@ impl Build {
                 let io = match at.map(|(x, i)| (idx.get(x).copied(), i)) {
                     // (only a page whose body met a whatsit has events)
                     Some((Some(k), i)) => match st.p[k].run.as_ref() {
-                        Some(r) if bodies[j].io => {
+                        Some(r) if bodies[j].io && pg.builder => {
                             let mut env = JoinEnv {
                                 names: &sh.names,
                                 seq: &sh.seq,

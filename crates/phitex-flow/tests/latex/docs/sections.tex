@@ -1,0 +1,27 @@
+\documentclass{article}
+\year=2024 \month=3 \day=14
+\begin{document}
+\section{Introduction}\label{sec:intro}
+This is the \emph{first} section, with \textbf{bold} words and a
+footnote.\footnote{A footnote, with \emph{emphasis}.} See
+Section~\ref{sec:more} on page~\pageref{sec:more}, written \today.
+
+\subsection{Lists}
+\begin{itemize}
+\item One item.
+\item Another item, a little longer, so that it runs over the end of the
+  line and the list's indentation shows.
+\end{itemize}
+\begin{enumerate}
+\item First.\label{it:first}
+\item Second, after item~\ref{it:first}.
+\end{enumerate}
+\begin{description}
+\item[Term] Its description.
+\item[Another] And another one.\footnote{Second footnote.}
+\end{description}
+
+\section{More}\label{sec:more}
+Back to Section~\ref{sec:intro}. Some \textit{italic}, \texttt{typewriter}
+and \textsc{small caps} text.
+\end{document}

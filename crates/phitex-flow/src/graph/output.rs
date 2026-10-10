@@ -379,7 +379,8 @@ impl Exec<'_> {
         self.st.level -= 1;
         self.st.mode = Mode::V;
         self.st.inner = self.st.level > 0;
-        self.st.prev_depth = IGNORE_DEPTH;
+        // (the main vertical list's, as it was where the routine fired)
+        self.st.prev_depth = crate::page::MAIN_DEPTH;
         self.st.prev_graf = 0;
         // (§1028, once the group has ended)
         if matches!(self.after_close(&Key::Box(255)), Val::Box(_)) {

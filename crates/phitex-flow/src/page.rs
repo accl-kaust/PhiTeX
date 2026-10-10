@@ -251,6 +251,12 @@ pub fn prune_page_top(list: Vec<Item>, top: &Glue) -> Vec<Item> {
 /// `\prevdepth` meaning "no interline glue" (tex.web 212).
 pub const IGNORE_DEPTH: i32 = -65_536_000;
 
+/// `\prevdepth` of the main vertical list as `Key::MainDepth` gives it:
+/// at a piece's start (what the pieces before left), and just after a
+/// paragraph whose lines are not broken yet (line breaking waits for the
+/// page fold: its last line's depth, made when read).
+pub const MAIN_DEPTH: i32 = i32::MIN;
+
 /// A paragraph's lines.
 pub type Lines = Arc<Vec<Arc<Line>>>;
 
@@ -346,6 +352,11 @@ pub fn material(paras: &[(Arc<Para>, Lines)]) -> Vec<Item> {
 pub struct Page {
     pub b: Arc<BoxNode>,
     pub ship: Arc<ShipParams>,
+    /// Shipped by the page builder itself (the default output, tex.web
+    /// 1023): its whatsits are done where the builder was called. A page
+    /// a `\shipout` made (in the text or an output routine) had them done
+    /// by that command's node.
+    pub builder: bool,
 }
 
 /// Where an item of the material came from: the piece (by position) and
@@ -557,6 +568,7 @@ impl Scan {
                 self.pages.push(Page {
                     b: s.b.clone(),
                     ship: s.ship.clone(),
+                    builder: false,
                 });
                 self.orgs.push(PageOrg {
                     call: org,
@@ -1109,7 +1121,7 @@ impl Scan {
                 page_so_far,
             };
             self.dead_cycles += 1;
-            let page = Page { b, ship: Arc::default() };
+            let page = Page { b, ship: Arc::default(), builder: false };
             let fired = env.fire(defs, Some(Routine { toks, page, reads }));
             self.errors.extend(fired.errors);
             self.halt |= fired.halt;
@@ -1125,7 +1137,7 @@ impl Scan {
                 match it {
                     Item::Shipout(s) => {
                         self.unsafe_since.push(self.cur.0);
-                        self.pages.push(Page { b: s.b.clone(), ship: s.ship.clone() });
+                        self.pages.push(Page { b: s.b.clone(), ship: s.ship.clone(), builder: false });
                         self.orgs.push(PageOrg { call: self.cur.0, call_idx, resume: None, last_call: last_call.clone() });
                         self.pages_made += 1;
                     }
@@ -1162,7 +1174,7 @@ impl Scan {
         }
         self.dead_cycles = 0;
         let ship = ship_params(env);
-        self.pages.push(Page { b, ship });
+        self.pages.push(Page { b, ship, builder: true });
         self.pages_made += 1;
     }
 
