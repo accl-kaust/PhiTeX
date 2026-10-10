@@ -308,3 +308,59 @@ fn an_edit_inside_a_group_keeps_the_nodes_after_it() {
         e.stats.commands
     );
 }
+
+/// A document whose pieces each scan `scanned` as an argument they drop
+/// (`\c{...}`), and one piece scanning it and using `\a`.
+fn scanning_doc(def: &str, scanned: &str) -> String {
+    let mut s = String::from(
+        "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6 \\font\\tenrm=cmr10 \\tenrm\n\
+         \\hsize=300pt \\vsize=200pt \\parfillskip=0pt plus 1fil \\baselineskip=12pt\n",
+    );
+    s.push_str(def);
+    s.push_str("\\def\\c#1{}\n\n");
+    for k in 0..12 {
+        let _ = write!(s, "Paragraph {k} scans \\c{{{scanned}}}an argument it drops.\n\n");
+    }
+    // (a piece that both scans the name and uses it: its scanning node is
+    // kept while the user runs again)
+    let _ = write!(s, "The last one scans \\c{{{scanned}}}and then uses \\a.\n\n");
+    s
+}
+
+#[test]
+fn a_scanned_name_reads_only_whether_it_is_outer() {
+    let opt = opts(4, Reads::Suspend, Order::Priority);
+    // (lean pieces, as builds keep them, and pieces keeping their nodes)
+    for lean in [true, false] {
+        // (the nodes run when `\a` is redefined: the same whether the
+        // pieces scan `\a` or a name never defined)
+        let edit = |scanned: &str, to: &str| {
+            let before = scanning_doc("\\def\\a{x}", scanned);
+            let after = scanning_doc(to, scanned);
+            let mut bld = Build::new(font());
+            bld.set_lean(lean);
+            let first = bld.update(&before, opt);
+            assert!(first.errors.is_empty(), "{:?}", first.errors);
+            let e = bld.update(&after, opt);
+            let c = cold(&after, opt);
+            assert!(e.dvi == c.dvi, "the edit's DVI is not the cold build's");
+            assert_eq!(e.errors, c.errors, "the edit's errors are not the cold build's");
+            e
+        };
+        let scanning = edit("\\a", "\\def\\a{yy}");
+        let not = edit("\\z", "\\def\\a{yy}");
+        assert!(scanning.errors.is_empty(), "{:?}", scanning.errors);
+        assert!(scanning.stats.commands_run > 0, "the user of \\a runs again");
+        assert_eq!(
+            (scanning.stats.commands_run, scanning.stats.reruns),
+            (not.stats.commands_run, not.stats.reruns),
+            "lean {lean}: a node that only scanned \\a ran again: {:?} against {:?}",
+            scanning.stats,
+            not.stats
+        );
+        // (made `\outer`, the scanning nodes see it: TeX's error, each piece)
+        let outer = edit("\\a", "\\outer\\def\\a{x}");
+        let forbidden = outer.errors.iter().filter(|e| e.contains("Forbidden control sequence")).count();
+        assert_eq!(forbidden, 13, "lean {lean}: {:?}", outer.errors);
+    }
+}

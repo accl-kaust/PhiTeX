@@ -428,6 +428,27 @@ pub enum Val {
     /// The split marks (`Key::SplitMarks`): per class with a mark in the
     /// part the last `\vsplit` split off, by class, its first and last.
     SplitMarks(Arc<[SplitMark]>),
+    /// What a read of a meaning's outer-ness alone saw
+    /// (`graph::Field::Outer`): only ever a piece's record of such a read,
+    /// never a definition.
+    Outer(bool),
+}
+
+impl Val {
+    /// Whether this is the meaning of an `\outer` macro (tex.web 336:
+    /// `cur_cmd>=outer_call`).
+    pub fn is_outer(&self) -> bool {
+        matches!(self, Val::Meaning(Meaning::Macro(m)) if m.outer) || matches!(self, Val::Outer(true))
+    }
+
+    /// Whether a read that saw this would see the same in `now`: equal, or
+    /// for a read of the outer-ness alone, as outer.
+    pub fn seen_as(&self, now: &Val) -> bool {
+        match self {
+            Val::Outer(o) => now.is_outer() == *o,
+            _ => self == now,
+        }
+    }
 }
 
 /// A class's split marks: the class, the first mark, the last.
@@ -470,6 +491,7 @@ impl fmt::Display for Val {
             Val::Bytes(b) => write!(f, "{} bytes", b.len()),
             Val::Stream(x) => write!(f, "stream at {} of {}", x.next, x.data.len()),
             Val::SplitMarks(m) => write!(f, "split marks of {} classes", m.len()),
+            Val::Outer(o) => write!(f, "{}", if *o { "\\outer" } else { "not \\outer" }),
             Val::Patterns(p) => write!(f, "{} patterns", p.len()),
             Val::Exceptions(x) => write!(f, "{} exceptions", x.len()),
             Val::Meaning(Meaning::Font(x)) => write!(f, "select font {}", x.name),

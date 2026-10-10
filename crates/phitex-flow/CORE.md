@@ -1024,6 +1024,16 @@ five schedules. The two remaining raw differences are the glue rounding
   per node (`Exec::scanning`). `\noexpand`, `\string`, `\meaning`, `\ifx`
   and `\ifdefined` read as `normal`. A frozen `\fi` (`\0fi`) and a frozen
   `\relax` (`\0relax`) were added beside `\0cr`.
+  A scanned name reads only whether its meaning is `\outer`
+  (`graph::Field::Outer` on its `Read`, AGENTS_BRIEF §1). `Read::same`
+  compares only that, so a kept node stays kept. A piece records the read
+  as `Val::Outer(bool)`, which a lean run keeps too, and `Val::seen_as`
+  compares it at the commit. `build::outer_still` does not mark a piece
+  whose every read of the name was of that kind and still sees the same.
+  So redefining a macro that is only scanned somewhere (a definition, an
+  argument, skipped text) re-runs none of the scanning nodes, and making
+  it `\outer` re-runs them (`tests/flow.rs`,
+  `a_scanned_name_reads_only_whether_it_is_outer`).
 - §1094: `\par` in an alignment entry whose braces are still open does
   `off_save`;
 - §378: `\input` while a file name is scanned inserts `\relax`;
