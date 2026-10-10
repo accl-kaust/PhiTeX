@@ -516,13 +516,13 @@ impl Writer<'_> {
             }
             // (XeTeX's)
             Key::InterChar(a, b) => {
-                self.byte(35);
+                self.byte(50);
                 self.u(u64::from(*a));
                 self.u(u64::from(*b));
             }
-            Key::InputEncoding => self.byte(36),
-            Key::DefaultEncoding => self.byte(37),
-            Key::LinebreakLocale => self.byte(38),
+            Key::InputEncoding => self.byte(51),
+            Key::DefaultEncoding => self.byte(52),
+            Key::LinebreakLocale => self.byte(53),
             _ => return Err(format!("a name a format does not hold: {k:?}")),
         }
         Ok(())
@@ -900,10 +900,10 @@ impl Reader<'_> {
             32 => Key::LastFont,
             33 => Key::Interaction,
             34 => Key::GlyphUnicode(Arc::from(self.str()?)),
-            35 => Key::InterChar(self.n()?, self.n()?),
-            36 => Key::InputEncoding,
-            37 => Key::DefaultEncoding,
-            38 => Key::LinebreakLocale,
+            50 => Key::InterChar(self.n()?, self.n()?),
+            51 => Key::InputEncoding,
+            52 => Key::DefaultEncoding,
+            53 => Key::LinebreakLocale,
             _ => return Err(bad("a name")),
         })
     }

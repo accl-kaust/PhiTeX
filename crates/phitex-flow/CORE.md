@@ -2540,7 +2540,7 @@ partex-engine/src/xpic.rs ported them).
 | `\pdfsavepos` | `Whatsit::SavePos` (`\pdflastxpos`/`ypos` stay 0: gap). |
 | XDV | DVI's fold (`dvi::assemble_as(…, xdv)`): id byte 7, " XeTeX output" comment, `define_native_font` (252, partex-otf's `font_def`), `set_glyphs` (253), `set_text_and_glyphs` (254, `\XeTeXgenerateactualtext`), pictures as `pdf:image matrix … page … (path)` specials. |
 | PDF | `Build::xdv_pdf(xdv)`: partex-xdvipdfmx in process, as `xdvipdfmx -q -E -o JOB.pdf`, its files through the same `Kpse`, zlib's deflate from `pdf::zlib`, dated `SOURCE_DATE_EPOCH` (`Build::set_pdf_date`). |
-| `xelatex.fmt` | `Build::format`: the code tables are definitions, so a wide table is saved sparsely (only what was defined). The new keys are format keys 34–37. A native font cannot be dumped (XeTeX's error). |
+| `xelatex.fmt` | `Build::format`: the code tables are definitions, so a wide table is saved sparsely (only what was defined). The new keys are format keys 50–53. A native font cannot be dumped (XeTeX's error). |
 | `\strcmp`, `\filesize`, `\shellescape`, `\ifprimitive`, … (pdfTeX's names XeTeX has) | `XETEX_PRIMITIVES` (95, sorted). `\primitive` is the name as it is (gap). `\ifprimitive` is `IfKind::PdfPrimitive`. |
 
 ### The fonts
@@ -2584,3 +2584,13 @@ opentype tree here, so `cjk.tex` sets its CJK text in Latin Modern
   not a bar).
 - The empty-but-set `\XeTeXinterchartoks` inside a group drops the token
   that ended the run (XeTeX's `cur_ptr` quirk): not reproduced.
+
+### Tag numbers (X)
+
+XeTeX's keys take Key word tags 87–91 (`NativeDir` 87, `InterChar` 88,
+`InputEncoding` 89, `DefaultEncoding` 90, `LinebreakLocale` 91) and format
+key tags 50–53 (`InterChar`, `InputEncoding`, `DefaultEncoding`,
+`LinebreakLocale`). There is also format meaning tag 12
+(`Meaning::XMathCharGiven`) and format whatsit tag 4 (`Whatsit::SavePos`).
+This is clear of flow's 1–42 and 63–66, B's 67–70 and format 35–38, and
+Q's 80–86.
