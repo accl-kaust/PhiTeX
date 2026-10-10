@@ -851,6 +851,64 @@ decides. "Where the reader is is itself a read."
   canonical state where the cutter saw none ends its run there; the rest
   is cut again.
 
+## Reads of folds (decided, 2026-10-10)
+
+Two values are folds over the document's positions, not definitions any
+node makes: the page builder's state (`\pagegoal`…`\pagedepth`,
+`\deadcycles`, `\insertpenalties`: `Key::Page(0..=9)`; Q's `\pdflast*`
+counters are next), and a file the run writes (`\openout`/`\write`,
+immediate at their nodes, deferred at their pages' ship positions;
+`\closeout` ends what was written). A node's read of one is a read of
+the fold's value at the node's position (Conflict 12, decided).
+
+- **The read** (`graph::Env::fold_read`, `Names::fold_value`): answered
+  with the fold's value at `(piece, node)` as known — this build's,
+  else the last build's (`Build::fold_vals`, by piece id and node),
+  else the names index's (the page builder's fires' definitions;
+  IniTeX's values before any) or the file as found in the directories.
+  A node's own definitions do not answer a page quantity (`Env::folds`:
+  an assignment `\pagegoal=…` is an item the fold applies). Every such
+  read is entered in the run's reads, at its node (`graph::positional`:
+  not one per value); the page quantities have no edges.
+- **Validated by the fold.** The scan, before the first item of each
+  node of a piece's material (and after the piece's material), compares
+  the reads of the page quantities at the nodes up to there with its
+  page so far (`Scan::page_quantity`, tex.web 421: `\pagegoal` is
+  `\maxdimen` and the others 0 while the page is empty; the goal and
+  totals as the insertions left them), keeps each value
+  (`Names::set_fold_value`) and, at the first that differs, marks the
+  piece from that node (`check_page_reads`, `mark_from`) and stops there,
+  as a fire's definitions do. The scan does not converge with the last
+  build's pages before a run whose reads it has not validated
+  (`PState::fold_unchecked`). Files: the log's replay takes what was
+  written of each file at each node reading one (`logs::Entry::Probe`,
+  `logs::replay_probed`); a read that saw something else marks its piece
+  from its node and the build goes another round (`Build::keep_round`).
+  LaTeX's `\enddocument` reads back the `.aux` it wrote and closed: on a
+  cold build, one more round runs that piece's tail.
+- **The Suspend policy's one speculative exception, and why.** Under
+  `Reads::Suspend` a read waits for the value it reads. A fold's value at
+  node n depends on the items of the reading piece's own nodes before n,
+  and the scan sees a run's items only when the run is installed: waiting
+  would wait for itself. So these reads are predicted and validated under
+  both policies; the result is the same (validation is by exact value,
+  a refuted read runs again from its node). The generalization that
+  removes the exception: a run publishing its items per node, so the scan
+  can pass node n−1 while the run is at node n — which also removes Q's
+  second round and is the brief's §6.4 overlap. Not built yet.
+- `Output::files_read`: every file read (each name once, in document
+  order) and where it was found (`None`: not found), for the CLI's
+  `-recorder` and a watch's dependencies.
+- Tests: `tests/dvi.rs` `pagequant` (each quantity read mid-page:
+  empty page, after a paragraph, skips of each order, an insertion, a
+  split insertion with `\floatingpenalty`, a deep box, inside a paragraph
+  after `\pagegoal=`, after a page break), `readback` (immediate and
+  deferred writes read back with `\input` and `\read`, a file read while
+  open and after `\closeout`), both at five schedules against `tex`;
+  `reads_of_folds_follow_edits`; `tests/latex_docs.rs`: the documents'
+  `.aux` read back, no gap; TRIP's `tripos.tex` in one build
+  (`Session::run`).
+
 ## `\input` (decided)
 
 - A file is a value, `Key::File(name)`: the file's bytes are a read, so a

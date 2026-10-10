@@ -322,23 +322,6 @@ fn on_format(name: &str, job: &str, text: &str, o: Options) -> (Build, Output) {
     (b, out)
 }
 
-/// The errors but the core gap's (CORE.md "LaTeX documents": `\enddocument`
-/// reads back the `.aux` file the job wrote and closed,
-/// `\@@input\jobname.aux`; a file is read from the input directories only,
-/// so it is not found and, in batch mode, the terminal TeX asks for
-/// another name ends the job: after the last page is shipped and the
-/// `.aux` file written), and whether the gap was met.
-fn errors_but_gap<'a>(out: &'a Output, job: &str) -> (Vec<&'a String>, bool) {
-    let aux = format!("I can't find file `{job}.aux'");
-    let gap = out.errors.iter().any(|e| e.ends_with(&aux));
-    let errors = out
-        .errors
-        .iter()
-        .filter(|e| !(gap && (e.ends_with(&aux) || e.ends_with("End of file on the terminal!"))))
-        .collect();
-    (errors, gap)
-}
-
 /// The document on the saved format at schedule `o`: its DVI file and
 /// written files are `latex`'s.
 fn doc_at(name: &str, o: Options) {
@@ -350,20 +333,11 @@ fn doc_at(name: &str, o: Options) {
     for (i, l) in out.job_logs(&Limits::TEX_LIVE, &format!("{name}.dvi")).iter().enumerate() {
         let _ = std::fs::write(d.join(format!("{name}.{i}.log")), &l.log);
     }
-    let (errors, gap) = errors_but_gap(&out, name);
-    assert!(errors.is_empty(), "{name} ({o:?}): errors on the graph: {:?}", &errors[..errors.len().min(20)]);
-    // (the same gap: the `.toc` lines are written while the `.aux` file is
-    // read back, `\@writefile`; without it the `.toc` stays empty)
-    let writes: Vec<(String, String)> = out
-        .writes
-        .iter()
-        .map(|(n, t)| match want.writes.iter().find(|(m, _)| m == n) {
-            Some((_, w)) if gap && Path::new(n).extension().is_some_and(|e| e == "toc") && t.is_empty() => {
-                (n.clone(), w.clone())
-            }
-            _ => (n.clone(), t.clone()),
-        })
-        .collect();
+    // (no gap: `\enddocument` reads back the `.aux` file the job wrote and
+    // closed, as what the run wrote of it, CORE.md "Reads of folds"; its
+    // `\@writefile` lines fill the `.toc`)
+    assert!(out.errors.is_empty(), "{name} ({o:?}): errors on the graph: {:?}", &out.errors[..out.errors.len().min(20)]);
+    let writes = out.writes.clone();
     assert_eq!(writes, want.writes, "{name} ({o:?}): the written files are not latex's");
     assert!(
         masked(&out.dvi) == masked(&want.dvi),

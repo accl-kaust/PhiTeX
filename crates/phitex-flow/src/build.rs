@@ -48,7 +48,7 @@ pub use crate::graph::MAIN_MEMORY;
 /// beginning with a control sequence, at brace depth 0), besides blank
 /// lines ([`Options::cut_lines`]).
 pub const CUT_LINES: usize = 200;
-use crate::graph::output::{self, DEAD_CYCLES, OutputReads};
+use crate::graph::output::{self, DEAD_CYCLES, INSERT_PENALTIES, OutputReads};
 use crate::graph::{
     Check, Env, FileText, Para, PieceId, RState, Run, Src, cut_every, cut_from, run_piece,
 };
@@ -234,6 +234,10 @@ pub struct Output {
     /// The pages each job of a session shipped, in order (one job unless
     /// the source is a session's, `graph::jobs`).
     pub job_pages: Vec<usize>,
+    /// Every file the build read (`Key::File`, each name once, in document
+    /// order), with where it was found (`./name` for one the run wrote) or
+    /// `None`: the CLI's `-recorder` (`.fls`) and a watch's dependencies.
+    pub files_read: Vec<(String, Option<String>)>,
 }
 
 /// A piece whose definition was read before any definition.
@@ -454,6 +458,10 @@ type Join = (Arc<[char]>, Vec<Arc<[char]>>, Arc<[char]>, Arc<[usize]>);
 /// the pages with their DVI.
 pub struct Build {
     font: Arc<Font>,
+    /// The folds' values the last build's reads were validated against
+    /// (the page builder's quantities, the files the run wrote), by piece
+    /// id and node: the next build's predictions ([`Names::fold_value`]).
+    fold_vals: FxMap<(PieceId, u32, Key), Val>,
     /// The TFM files `\font` can load.
     fonts: Arc<FontFiles>,
     pieces: Vec<Kept>,
@@ -887,6 +895,10 @@ struct Names {
     /// The format's definitions, at the place before the first piece
     /// (`Build::set_format`): what a name no piece defined before means.
     format: Option<Arc<FormatDefs>>,
+    /// The folds' values at the nodes reading them, by place: the last
+    /// build's, then this build's as the folds validate the reads
+    /// ([`Names::fold_value`]).
+    fold_vals: RwLock<FxMap<(u32, u32, Key), Val>>,
 }
 
 /// A format's definitions by name, and its fonts' numbering
@@ -908,7 +920,35 @@ impl Names {
             any_inner: std::sync::atomic::AtomicBool::new(false),
             given,
             etex,
+            fold_vals: RwLock::default(),
         }
+    }
+
+    /// What a read of `key` at `at` is answered with when a fold of the
+    /// build gives it (`graph::Env::fold_read`): the value the fold had
+    /// there (this build's, else the last build's), else the names index's
+    /// (the page builder's quantities: what its fires defined, IniTeX's
+    /// before any) or the file as found (a file: what is in the
+    /// directories). `None`: not a fold's.
+    fn fold_value(&self, key: &Key, at: Pos, font: &Arc<Font>) -> Option<Val> {
+        if !matches!(key, Key::Page(_) | Key::File(_)) {
+            return None;
+        }
+        let known = self
+            .fold_vals
+            .read()
+            .expect("fold values")
+            .get(&(at.0, at.1, key.clone()))
+            .cloned();
+        Some(known.unwrap_or_else(|| match key {
+            Key::File(n) => self.given.file(n).map_or(Val::Void, Val::Bytes),
+            _ => self.reaching(key, at, font).1,
+        }))
+    }
+
+    /// The fold's value of `key` at `at` is `v` (validated).
+    fn set_fold_value(&self, key: &Key, at: Pos, v: Val) {
+        self.fold_vals.write().expect("fold values").insert((at.0, at.1, key.clone()), v);
     }
 
     /// The shard of `key` and its bit there. (The hash only routes; the
@@ -1062,6 +1102,9 @@ struct PState {
     /// page builder has passed it: until then a definition the page
     /// builder makes between its nodes runs only the nodes after it again.
     lean_later: Option<(Arc<Run>, Arc<Run>)>,
+    /// Its run reads the page builder's quantities and the scan has not
+    /// validated them all yet: the scan does not converge before it.
+    fold_unchecked: bool,
 }
 
 /// A piece's dirty names, each from the first node of its run that may
@@ -1253,6 +1296,7 @@ impl Build {
             marks: Vec::new(),
             next_id: 0,
             readers: FxMap::default(),
+            fold_vals: FxMap::default(),
             src: String::new(),
             starts: Vec::new(),
             inputs: Arc::new(Vec::new()),
@@ -1803,6 +1847,57 @@ impl Build {
         }
     }
 
+    /// A round that does not end the build: its runs are kept for the
+    /// next, each with what it still has to read again.
+    fn keep_round(&mut self, st: State) {
+        // (the sequence changed: the runs are kept, with what each still
+        // has to read again)
+        self.pieces =
+            st.p.into_iter()
+                .map(|ps| {
+                    let pending =
+                        (ps.status != Status::Done || !ps.dirty.is_empty()).then_some(ps.dirty);
+                    match (ps.run, ps.prev) {
+                        (Some(run), _) => Kept {
+                            id: ps.id,
+                            text: ps.text,
+                            run: Some(run),
+                            lines: ps.lines,
+                            srcs: ps.srcs,
+                            log: ps.log,
+                            pending,
+                            got: ps.got,
+                            hot_until: ps.hot_until,
+                        },
+                        (None, Some((run, lines, text))) => Kept {
+                            id: ps.id,
+                            text,
+                            got: Expect::of(&run),
+                            run: Some(run),
+                            lines,
+                            srcs: ps.srcs,
+                            log: None,
+                            pending: None,
+                            hot_until: ps.hot_until,
+                        },
+                        (None, None) => Kept {
+                            id: ps.id,
+                            text: ps.text,
+                            run: None,
+                            lines: Vec::new(),
+                            srcs: ps.srcs,
+                            log: None,
+                            pending: None,
+                            got: Expect::default(),
+                            hot_until: 0,
+                        },
+                    }
+                })
+                .collect();
+        self.readers = st.readers;
+        self.carried.absorb(st.stats);
+    }
+
     /// One evaluation of the sequence the kept runs give: `None` if a run
     /// changed the sequence (the runs are kept for the next).
     #[allow(clippy::too_many_lines)]
@@ -1869,6 +1964,7 @@ impl Build {
                 entered: None,
                 recheck: false,
                 lean_later: None,
+                fold_unchecked: false,
             };
             if let Some(i) = sp.old.filter(|&i| sp.moved || olds[i].run.is_none()) {
                 // (its own place, not run yet — a restructure stopped the
@@ -1960,6 +2056,16 @@ impl Build {
         given.limits = self.limits;
         given.pdf_date = self.pdf_date;
         let names = Names::new(given, opts.etex, self.cs.clone(), self.format.clone());
+        // (the last build's folds' values, at the pieces' places now)
+        {
+            let at: FxMap<PieceId, u32> = p.iter().enumerate().map(|(k, x)| (x.id, k as u32)).collect();
+            let mut fv = names.fold_vals.write().expect("fold values");
+            for ((id, node, key), v) in &self.fold_vals {
+                if let Some(&k) = at.get(id) {
+                    fv.insert((k, *node, key.clone()), v.clone());
+                }
+            }
+        }
         for (k, ps) in p.iter().enumerate() {
             if let Some(r) = ps.run.as_ref().or(ps.prev.as_ref().map(|(r, _, _)| r)) {
                 for (key, val) in &r.exports {
@@ -2059,11 +2165,16 @@ impl Build {
                     continue;
                 };
                 let Some(r) = &p[rpos].run else { continue };
-                let now = names.given.answer(key, rpos);
-                if r.values_read(key)
-                    .iter()
-                    .any(|x| now.as_ref() != Some(&x.2))
-                {
+                // (a file at each read's node: what the run wrote of it
+                // before, if it wrote it, `Names::fold_value`)
+                let changed = r.values_read(key).iter().any(|x| {
+                    let now = match key {
+                        Key::File(_) => names.fold_value(key, (rpos as u32, x.1), &self.font),
+                        _ => names.given.answer(key, rpos),
+                    };
+                    now.as_ref() != Some(&x.2)
+                });
+                if changed {
                     marks.push((rpos, key.clone()));
                 }
             }
@@ -2237,53 +2348,9 @@ impl Build {
         if let Some(d) = st.stalled.take() {
             panic!("{d}");
         }
+        self.fold_vals = fold_vals_by_id(&sh.names, &st.p);
         if st.restructure {
-            // (the sequence changed: the runs are kept, with what each still
-            // has to read again)
-            self.pieces =
-                st.p.into_iter()
-                    .map(|ps| {
-                        let pending =
-                            (ps.status != Status::Done || !ps.dirty.is_empty()).then_some(ps.dirty);
-                        match (ps.run, ps.prev) {
-                            (Some(run), _) => Kept {
-                                id: ps.id,
-                                text: ps.text,
-                                run: Some(run),
-                                lines: ps.lines,
-                                srcs: ps.srcs,
-                                log: ps.log,
-                                pending,
-                                got: ps.got,
-                                hot_until: ps.hot_until,
-                            },
-                            (None, Some((run, lines, text))) => Kept {
-                                id: ps.id,
-                                text,
-                                got: Expect::of(&run),
-                                run: Some(run),
-                                lines,
-                                srcs: ps.srcs,
-                                log: None,
-                                pending: None,
-                                hot_until: ps.hot_until,
-                            },
-                            (None, None) => Kept {
-                                id: ps.id,
-                                text: ps.text,
-                                run: None,
-                                lines: Vec::new(),
-                                srcs: ps.srcs,
-                                log: None,
-                                pending: None,
-                                got: Expect::default(),
-                                hot_until: 0,
-                            },
-                        }
-                    })
-                    .collect();
-            self.readers = st.readers;
-            self.carried.absorb(st.stats);
+            self.keep_round(st);
             return None;
         }
         let t_join = Instant::now();
@@ -2335,7 +2402,7 @@ impl Build {
         // are not in the log; CORE.md: the core is to not run them)
         // (and in a session, the pieces after it up to the next job's start)
         let live = live_pieces(&st.p);
-        let (log, writes) = {
+        let (log, writes, probes) = {
             let idx: Vec<usize> = (0..st.p.len()).filter(|&k| live[k]).collect();
             let frags: Vec<&Frag> = idx.iter().map(|&k| &**st.p[k].log.as_ref().expect("a part")).collect();
             // (each page the page builder shipped does its whatsits where
@@ -2379,11 +2446,68 @@ impl Build {
                     post: ps.post.as_deref(),
                 })
                 .collect();
-            logs::replay(
+            let (log, writes, probes) = logs::replay_probed(
                 logs::gather(&parts, &marks, &call_logs, &st.pages, &page_io),
                 opts.etex,
-            )
+            );
+            let probes: Vec<logs::Probe> = probes.into_iter().map(|(x, n, f)| (idx[x], n, f)).collect();
+            (log, writes, probes)
         };
+        // (each read of a file the run wrote, against what it had written of
+        // it by the reading node; a read that saw something else runs again
+        // from its node, in another round)
+        let mut refuted: Vec<(usize, Key, u32)> = Vec::new();
+        for (k, node, files) in &probes {
+            let Some(r) = st.p[*k].run.as_ref() else { continue };
+            for (key, n, read) in r.all_reads() {
+                let Key::File(name) = key else { continue };
+                if n != node {
+                    continue;
+                }
+                let now = match files.iter().find(|f| *f.0 == **name) {
+                    Some((_, text)) => Val::Bytes(text.chars().map(|c| u32::from(c).min(255) as u8).collect()),
+                    None => sh.names.given.file(name).map_or(Val::Void, Val::Bytes),
+                };
+                if now != *read {
+                    refuted.push((*k, key.clone(), *n));
+                }
+                sh.names.set_fold_value(key, (*k as u32, *n), now);
+            }
+        }
+        self.fold_vals = fold_vals_by_id(&sh.names, &st.p);
+        if !refuted.is_empty() {
+            if last {
+                errors.push("the files read back did not settle".into());
+            } else {
+                for (k, key, n) in refuted {
+                    dirty_from(&mut st.p[k].dirty, key, n);
+                }
+                self.keep_round(st);
+                return None;
+            }
+        }
+        // (the files read, each once, in document order, where found)
+        let mut files_read: Vec<(String, Option<String>)> = Vec::new();
+        {
+            let mut seen: FxSet<Arc<str>> = FxSet::default();
+            for (k, ps) in st.p.iter().enumerate() {
+                let Some(r) = ps.run.as_ref().filter(|_| live[k]) else { continue };
+                let mut fr: Vec<(u32, &Arc<str>, bool)> = r
+                    .all_reads()
+                    .iter()
+                    .filter_map(|(key, n, v)| match key {
+                        Key::File(name) => Some((*n, name, matches!(v, Val::Bytes(_)))),
+                        _ => None,
+                    })
+                    .collect();
+                fr.sort_by_key(|x| x.0);
+                for (_, name, found) in fr {
+                    if seen.insert(name.clone()) {
+                        files_read.push((name.to_string(), found.then(|| sh.names.given.path(name).to_string())));
+                    }
+                }
+            }
+        }
         for (k, ps) in st.p.iter().enumerate() {
             let r = ps.run.as_ref().expect("every piece ran");
             if live[k] {
@@ -2483,6 +2607,7 @@ impl Build {
             log,
             writes,
             job_pages,
+            files_read,
         })
     }
 }
@@ -2614,6 +2739,16 @@ impl Env for JoinEnv<'_> {
             lo,
             hi,
         )
+    }
+
+    // (as the run read them: the folds' values its reads were validated
+    // against)
+    fn folds(&mut self, key: &Key) -> bool {
+        matches!(key, Key::Page(_))
+    }
+
+    fn fold_read(&mut self, key: &Key, node: u32) -> Option<Val> {
+        self.names.fold_value(key, (self.k as u32, node), self.font)
     }
 
     fn file(&mut self, name: &str) -> Option<Arc<[u8]>> {
@@ -3528,7 +3663,13 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
             let end_run = g.p.last().and_then(|ps| ps.run.clone());
             let scan = g.scan.take().expect("the scan is free");
             let (from, skip) = (g.scan_next, std::mem::take(&mut g.scan_skip));
-            let converge = last_diff(g).map(|after| (after, g.old_orgs.clone()));
+            // (no convergence before a run whose page quantities the scan
+            // has not validated)
+            let converge = if g.p[g.scan_next.min(g.p.len())..].iter().any(|ps| ps.fold_unchecked) {
+                None
+            } else {
+                last_diff(g).map(|after| (after, g.old_orgs.clone()))
+            };
             Some(Task::Scan {
                 scan,
                 from,
@@ -3615,19 +3756,32 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
                 routines: 0,
                 kept: 0,
             };
+            // (the pieces whose page-quantity reads all held)
+            let mut checked: Vec<(usize, Arc<Run>)> = Vec::new();
             'feed: for (d, (run, paras)) in pieces.iter().enumerate() {
                 let k = from + d;
                 env.k = k;
                 env.run = Some(run.clone());
                 let skip = if d == 0 { skip as usize } else { 0 };
                 let nodes = run.para_nodes();
+                // (its reads of the page builder's quantities, by node: each
+                // validated before the first item of a node at or after it)
+                let freads = page_reads(run);
+                let mut fr = 0usize;
                 let mut i = 0usize;
                 for (pj, pl) in paras.iter().enumerate() {
                     let node = nodes.get(pj).copied().unwrap_or(0);
                     for it in material(std::slice::from_ref(pl)) {
                         if i < skip {
+                            while freads.get(fr).is_some_and(|r| r.1 <= node) {
+                                fr += 1;
+                            }
                             i += 1;
                             continue;
+                        }
+                        if !check_page_reads(sh, &scan, k, &freads, &mut fr, Some(node)) {
+                            stop = Some((k, i as u32));
+                            break 'feed;
                         }
                         env.node = node;
                         if env.pass((k as u32, node)) {
@@ -3651,6 +3805,13 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
                         }
                     }
                 }
+                // (the reads after its last node with material: the page as
+                // the piece's material leaves it)
+                if !check_page_reads(sh, &scan, k, &freads, &mut fr, None) {
+                    stop = Some((k, i as u32));
+                    break 'feed;
+                }
+                checked.push((k, run.clone()));
             }
             if finish && converged.is_none() && stop.is_none() {
                 if let Some(r) = end_run {
@@ -3668,6 +3829,11 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
             let work = scan.fed - before;
             let (new, new_orgs) = scan.take_pages();
             let mut g = lock(sh);
+            for (k, r) in checked {
+                if g.p[k].run.as_ref().is_some_and(|x| Arc::ptr_eq(x, &r)) {
+                    g.p[k].fold_unchecked = false;
+                }
+            }
             g.stats.routines += routines;
             g.stats.routines_kept += routines_kept;
             let finish = finish && stop.is_none();
@@ -3917,8 +4083,9 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
             let src = def.map_or(INITIAL, |d| sh.seq.id_at(d));
             srcs.push(src);
             // (one edge per name: its first reader; a second entry for the
-            // name, read with another value, follows it)
-            if i > 0 && run.reads[i - 1].0 == *key {
+            // name, read with another value, follows it; the page builder's
+            // quantities have none: the scan validates each read)
+            if (i > 0 && run.reads[i - 1].0 == *key) || matches!(key, Key::Page(_)) {
                 continue;
             }
             if same_keys
@@ -3966,6 +4133,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
         sh.names_gen.store(g.names_log.len(), Ordering::Release);
         g.p[k].run = Some(run.clone());
         g.p[k].got = got.clone();
+        g.p[k].fold_unchecked = run.reads.iter().any(|r| matches!(r.0, Key::Page(_)));
         // (names marked while it ran — a definition made between its nodes
         // reaching a node whose read the run's first reader of the same
         // value stands for — are read again)
@@ -4237,6 +4405,15 @@ impl PieceEnv<'_> {
 impl Env for PieceEnv<'_> {
     fn cs(&self) -> &Arc<CsTable> {
         &self.sh.names.cs
+    }
+
+    // (CORE.md "Reads of folds": predicted, validated by the fold)
+    fn folds(&mut self, key: &Key) -> bool {
+        matches!(key, Key::Page(_))
+    }
+
+    fn fold_read(&mut self, key: &Key, node: u32) -> Option<Val> {
+        self.sh.names.fold_value(key, (self.k as u32, node), &self.sh.font)
     }
 
     fn limits(&self) -> crate::print::Limits {
@@ -4687,7 +4864,8 @@ fn changed_at(g: &mut State, sh: &Shared, pos: Pos, keys: Vec<Key>) -> bool {
         && let Some(run) = g.p.get(pos.0 as usize).and_then(|ps| ps.run.as_ref())
     {
         for key in &keys {
-            if run.reads_after(key, pos.1) {
+            // (the page builder's quantities are the scan's to validate)
+            if !matches!(key, Key::Page(_)) && run.reads_after(key, pos.1) {
                 marks.push((pos.0 as usize, key.clone(), pos.1 + 1));
             }
         }
@@ -4729,6 +4907,52 @@ fn park(sh: &Shared, k: usize, seen: u64) {
         }
     }
     sh.waiting[k].store(false, Ordering::Release);
+}
+
+/// The folds' values the round validated, by piece id ([`Build::fold_vals`]).
+fn fold_vals_by_id(names: &Names, p: &[PState]) -> FxMap<(PieceId, u32, Key), Val> {
+    names
+        .fold_vals
+        .read()
+        .expect("fold values")
+        .iter()
+        .filter_map(|((k, n, key), v)| p.get(*k as usize).map(|ps| ((ps.id, *n, key.clone()), v.clone())))
+        .collect()
+}
+
+/// A run's reads of the page builder's quantities (`Key::Page`), by
+/// node: (the quantity, the node, the value read).
+fn page_reads(run: &Run) -> Vec<(u8, u32, Val)> {
+    let mut v: Vec<(u8, u32, Val)> = (0..=INSERT_PENALTIES)
+        .flat_map(|q| run.values_read(&Key::Page(q)).iter().map(move |(_, n, val)| (q, *n, val.clone())))
+        .collect();
+    v.sort_by_key(|x| x.1);
+    v
+}
+
+/// The scan is before the first item of node `upto` of piece `k` (`None`:
+/// after the piece's material): the reads of the page builder's quantities
+/// at nodes up to there (from `fr` on) are checked against the page as the
+/// scan has it (tex.web 421), the values kept for the next reads. At the
+/// first read that saw another value its piece is marked from its node
+/// and `false` is returned: the scan stops there.
+fn check_page_reads(sh: &Shared, scan: &Scan, k: usize, reads: &[(u8, u32, Val)], fr: &mut usize, upto: Option<u32>) -> bool {
+    while let Some((q, node, read)) = reads.get(*fr).filter(|r| upto.is_none_or(|u| r.1 <= u)) {
+        *fr += 1;
+        let key = Key::Page(*q);
+        let now = Val::Int(scan.page_quantity(*q));
+        sh.names.set_fold_value(&key, (k as u32, *node), now.clone());
+        if now != *read {
+            let mut g = lock(sh);
+            if mark_from(&mut g, k, key, *node) {
+                sh.done[k].store(false, Ordering::Release);
+            } else if g.p[k].status == Status::Running {
+                sh.cancel[k].store(true, Ordering::Relaxed);
+            }
+            return false;
+        }
+    }
+    true
 }
 
 /// Wakes the parked readers, and the idle workers if there is new work.

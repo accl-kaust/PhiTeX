@@ -7,10 +7,9 @@
 //! later piece's do. No format file, no second engine.
 //!
 //! The files the session writes are values joined at the end; a file
-//! written and read back in the same run (TRIP's `tripos.tex`) is the
-//! brief's cross-run fixpoint for now (run k reads what run k−1 wrote, at
-//! most three runs): agent A's slice makes the write node define
-//! `Key::File(name)` (CORE.md).
+//! written and read back in the same run (TRIP's `tripos.tex`) is read as
+//! what the run wrote of it before the reading node: a read the build's
+//! fold of the written files validates (CORE.md "Reads of folds").
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,54 +45,33 @@ pub struct SessionOut {
     pub logs: Vec<JobLog>,
     pub writes: Vec<(String, String)>,
     pub errors: Vec<String>,
-    /// The runs the written files took to settle.
+    /// The builds it took: one (the written files read back settle within
+    /// the build).
     pub runs: usize,
 }
 
 impl Session {
-    /// Runs the session: one build, again while a file it reads is one it
-    /// wrote with other contents (at most three runs).
+    /// Runs the session: one build. A file it writes and reads back in the
+    /// same run (TRIP's `tripos.tex`) is read as what was written of it
+    /// before the reading node (CORE.md "Reads of folds").
     pub fn run(&self, opts: Options) -> SessionOut {
         let texts: Vec<&str> = self.jobs.iter().map(String::as_str).collect();
         let src = crate::graph::jobs(&texts);
-        let mut written: Vec<(String, String)> = Vec::new();
-        let mut out = SessionOut::default();
-        for run in 1..=3 {
-            // (the files written by the last run, where `\input` finds them first)
-            let dir = std::env::temp_dir().join(format!(
-                "phitex-flow-session-{}-{:x}",
-                std::process::id(),
-                crate::hash::hash_of(&(&src, run, opts.threads, format!("{:?}{:?}", opts.reads, opts.order)))
-            ));
-            let _ = std::fs::create_dir_all(&dir);
-            for (n, t) in &written {
-                let b: Vec<u8> = t.chars().map(|c| u32::from(c) as u8).collect();
-                let _ = std::fs::write(dir.join(n), b);
-            }
-            let mut b = Build::new(self.font.clone());
-            b.set_font_dirs(self.font_dirs.clone());
-            let mut dirs = vec![dir.clone()];
-            dirs.extend(self.input_dirs.iter().cloned());
-            b.set_input_dirs(dirs);
-            b.set_jobname(&self.jobname);
-            let lines: Vec<&str> = self.terminal.iter().map(String::as_str).collect();
-            b.set_terminal(&lines);
-            b.set_interaction(self.interaction);
-            b.set_limits(self.limits);
-            let o = b.update(&src, opts);
-            let _ = std::fs::remove_dir_all(&dir);
-            out = SessionOut {
-                logs: o.job_logs(&self.limits, &format!("{}.dvi", self.jobname)),
-                dvi: o.dvi,
-                writes: o.writes,
-                errors: o.errors,
-                runs: run,
-            };
-            if out.writes == written {
-                break;
-            }
-            written.clone_from(&out.writes);
+        let mut b = Build::new(self.font.clone());
+        b.set_font_dirs(self.font_dirs.clone());
+        b.set_input_dirs(self.input_dirs.clone());
+        b.set_jobname(&self.jobname);
+        let lines: Vec<&str> = self.terminal.iter().map(String::as_str).collect();
+        b.set_terminal(&lines);
+        b.set_interaction(self.interaction);
+        b.set_limits(self.limits);
+        let o = b.update(&src, opts);
+        SessionOut {
+            logs: o.job_logs(&self.limits, &format!("{}.dvi", self.jobname)),
+            dvi: o.dvi,
+            writes: o.writes,
+            errors: o.errors,
+            runs: 1,
         }
-        out
     }
 }

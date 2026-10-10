@@ -522,6 +522,30 @@ impl Scan {
         self.marks.push((from, self.pages_made));
     }
 
+    /// A page builder's quantity as a node outside an output routine reads
+    /// it here (tex.web 421, 1245): `\pagegoal` (0) … `\pagedepth` (7) of
+    /// the page so far — `\pagegoal` is `\maxdimen` and the others 0 while
+    /// the page is empty —, `\deadcycles` (8), `\insertpenalties` (9).
+    pub fn page_quantity(&self, q: u8) -> i32 {
+        match q {
+            8 => self.dead_cycles,
+            9 => self.insert_penalties,
+            _ if self.page_contents == EMPTY => {
+                if q == 0 {
+                    MAX_DIMEN
+                } else {
+                    0
+                }
+            }
+            0 => self.page_goal,
+            1 => self.total,
+            2..=5 => self.stretch[usize::from(q - 2)],
+            6 => self.shrink,
+            7 => self.depth,
+            _ => 0,
+        }
+    }
+
     /// Feeds `item`, from `org` in the material.
     pub fn feed(&mut self, item: Item, org: Org, env: &mut dyn FoldEnv) {
         self.fed += 1;

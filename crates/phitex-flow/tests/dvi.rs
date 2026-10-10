@@ -321,6 +321,41 @@ fn math_errors_in_order() {
 // `\vadjust` and `\insert` items, `\end` inside groups and conditionals)
 documents!(writes, input, leaders, accent, lastbox, vsplit, inserts, endgroup);
 
+// (reads of the folds, CORE.md "Reads of folds": the page builder's
+// quantities read mid-page, each of them, before, in and after a page;
+// files written and read back in the same run, at once and deferred)
+documents!(pagequant, readback);
+
+/// An edit above mid-page reads of the page builder's quantities, and an
+/// edit to a deferred `\write` read back later: each a cold build's
+/// output.
+#[test]
+fn reads_of_folds_follow_edits() {
+    for (name, old, new) in [
+        ("pagequant", "A first paragraph, long", "A first paragraph, much much longer and long"),
+        ("pagequant", "\\vskip 4pt plus 2fil", "\\vskip 14pt plus 2fil"),
+        ("readback", "\\def\\x{one}", "\\def\\x{uno}"),
+        ("readback", "\\count0=2", "\\count0=5"),
+    ] {
+        let a = std::fs::read_to_string(dir().join(format!("{name}.tex"))).unwrap();
+        let b = a.replacen(old, new, 1);
+        assert_ne!(a, b, "{name}: the edit applies");
+        for o in RUNS {
+            let mut bld = Build::new(font());
+            bld.set_input_dirs(vec![dir()]);
+            bld.set_jobname(name);
+            bld.update(&a, o);
+            let e = bld.update(&b, o);
+            let (dvi, log, errors, writes) = graph(name, &b, o);
+            assert!(e.dvi == dvi, "{name} ({o:?}): the edit's DVI is not a cold build's");
+            let elog = phitex_flow::print::log(&format!("(./{name}.tex"), &e.log, " )");
+            assert_eq!(elog.strip_suffix('\n').unwrap_or(&elog), log.as_str(), "{name} ({o:?}): log");
+            assert_eq!(writes_text(e.writes), writes, "{name} ({o:?}): written files");
+            assert_eq!(e.errors, errors, "{name} ({o:?}): errors");
+        }
+    }
+}
+
 /// A log line with the format's date left out: TeX dates the format by the
 /// clock, not by `SOURCE_DATE_EPOCH`.
 fn undated(l: &str) -> String {

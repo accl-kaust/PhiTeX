@@ -74,6 +74,24 @@ pub trait Env {
     /// them, as when no element between the piece's nodes defines `key`).
     fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32);
 
+    /// Whether the build's folds answer reads of `key` ([`Env::fold_read`]):
+    /// the page builder's quantities, which a node's own definitions do not
+    /// answer either (the fold sees them as items).
+    fn folds(&mut self, _key: &Key) -> bool {
+        false
+    }
+
+    /// A read a fold of the build answers at this node: the page builder's
+    /// quantity where the scan is when it reaches the node (tex.web 421), a
+    /// file as what the run wrote of it before the node. Predicted here (this
+    /// build's value at the node, else the last build's, else the names
+    /// index's or the file's), validated by the fold when it gets there: a
+    /// refuted read runs its piece again from the node (CORE.md "Reads of
+    /// folds"). `None`: an ordinary read.
+    fn fold_read(&mut self, _key: &Key, _node: u32) -> Option<Val> {
+        None
+    }
+
     /// A definition of `key` made between this piece's nodes `after` and
     /// `node` (an output routine's run where the page builder fired there),
     /// which reaches `node` instead of node `after`'s own: its value and
@@ -1749,6 +1767,12 @@ impl Run {
         &v[a..b]
     }
 
+    /// Its reads from before the piece, by name then node, with their
+    /// values (a lean run's too).
+    pub fn all_reads(&self) -> &[(Key, u32, Val)] {
+        self.lean.as_ref().map_or(&self.reads[..], |l| &l.reads[..])
+    }
+
     /// The index of its first read of `key` (`read_at`), the edge's.
     pub fn first_read(&self, key: &Key) -> Option<usize> {
         let v = self.lean.as_ref().map_or(&self.reads[..], |l| &l.reads[..]);
@@ -2085,8 +2109,11 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key, node: u32) ->
         return v.clone();
     }
     // (what the build answers itself: a file's bytes, the job's name, the
-    // lines before the piece)
+    // lines before the piece; a fold's value at this node, for this node
+    // only)
+    let fold = env.fold_read(k, node);
     let (val, src, lo, hi) = match k {
+        _ if fold.is_some() => (fold.unwrap_or(Val::Void), Src::Initial, node, node.saturating_add(1)),
         Key::File(n) => (env.file(n).map_or(Val::Void, Val::Bytes), Src::Initial, 0, u32::MAX),
         Key::Job => (Val::Name(env.jobname()), Src::Initial, 0, u32::MAX),
         Key::LineBase => (Val::Int(env.line_base()), Src::Initial, 0, u32::MAX),
@@ -2106,6 +2133,9 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key, node: u32) ->
 
 /// The definition of `key` for the next node of `chain`, and where from.
 fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Key) -> ReadRef {
+    if env.folds(key) {
+        return outside_read(env, outside, key, chain.nodes.len() as u32);
+    }
     let local = chain.resolve(key, chain.nodes.len());
     // (a definition made between the piece's nodes after the local one
     // reaches further: a routine's, where the page builder fired)
@@ -2132,6 +2162,12 @@ fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Ke
         }),
         None => outside_read(env, outside, key, chain.nodes.len() as u32),
     }
+}
+
+/// Whether a read of `key` is a fold's, validated at its node: every
+/// reader is a read of its own ([`Env::fold_read`]).
+pub fn positional(key: &Key) -> bool {
+    matches!(key, Key::Page(_) | Key::File(_))
 }
 
 /// Where node `i`'s read `r` is entered in its run's reads
@@ -2182,7 +2218,8 @@ fn before_read(
     at: usize,
     c: u16,
 ) -> ReadRef {
-    let r = match chain.resolve(key, at) {
+    let local = if env.folds(key) { None } else { chain.resolve(key, at) };
+    let r = match local {
         Some((d, val)) => Read {
             key: key.clone(),
             src: Src::Node(d),
@@ -2560,13 +2597,16 @@ pub fn run_piece(
     }
     reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     // (one entry per (name, value): its first reader — the first of its
-    // name's run with that value)
+    // name's run with that value; a read a fold answers, every one: the
+    // fold validates each at its node)
     let mut kept: Vec<(Key, u32, Val)> = Vec::with_capacity(reads.len());
     let mut run_start = 0;
     for e in reads {
         if kept.last().is_none_or(|l| l.0 != e.0) {
             run_start = kept.len();
-        } else if kept[run_start..].iter().any(|x| x.2 == e.2) {
+        } else if !positional(&e.0) && kept[run_start..].iter().any(|x| x.2 == e.2) {
+            continue;
+        } else if positional(&e.0) && kept.last().is_some_and(|l| l.1 == e.1 && l.2 == e.2) {
             continue;
         }
         kept.push(e);
@@ -3214,6 +3254,9 @@ impl<'a> Exec<'a> {
 
     fn resolve_shared_slow(&mut self, key: &Key) -> ReadRef {
         let chain = self.chain;
+        if self.env.folds(key) {
+            return outside_read(self.env, self.outside, key, chain.nodes.len() as u32);
+        }
         let Some((d, val)) = chain.resolve(key, chain.nodes.len()) else {
             return outside_read(self.env, self.outside, key, chain.nodes.len() as u32);
         };
