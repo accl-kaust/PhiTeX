@@ -2717,7 +2717,7 @@ pub fn run_piece(
             reads.push((r.key.clone(), at as u32, r.seen()));
         }
     }
-    reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    sort_reads(&mut reads);
     // (one entry per (name, value): its first reader — the first of its
     // name's run with that value; a read a fold answers, every one: the
     // fold validates each at its node)
@@ -2757,6 +2757,42 @@ pub fn run_piece(
         lean: None,
         crossed,
     }
+}
+
+/// From this many entries on, [`sort_reads`] ranks the keys.
+const RANK_READS: usize = 1 << 12;
+
+/// `reads` sorted by key, then node, stably: as `sort_by` with
+/// `Key::cmp`, each distinct key compared with the others once and
+/// stood for by its rank after that (a piece reads millions of entries
+/// of a few hundred thousand names; comparing two keys of fonts compares
+/// their names).
+fn sort_reads(reads: &mut Vec<(Key, u32, Val)>) {
+    // (a short list: comparing is cheaper than ranking)
+    if reads.len() < RANK_READS {
+        reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        return;
+    }
+    let mut ids: FxMap<Key, u32> = FxMap::default();
+    let id: Vec<u32> = reads
+        .iter()
+        .map(|e| {
+            let n = ids.len() as u32;
+            *ids.entry(e.0.clone()).or_insert(n)
+        })
+        .collect();
+    let mut keys: Vec<(Key, u32)> = ids.into_iter().collect();
+    keys.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut rank = vec![0u32; keys.len()];
+    for (r, (_, i)) in keys.iter().enumerate() {
+        rank[*i as usize] = r as u32;
+    }
+    // (rank, node, place: all distinct, so the order is the stable sort's)
+    let mut order: Vec<(u32, u32, u32)> =
+        reads.iter().zip(&id).enumerate().map(|(k, (e, &i))| (rank[i as usize], e.1, k as u32)).collect();
+    order.sort_unstable();
+    let mut old: Vec<Option<(Key, u32, Val)>> = std::mem::take(reads).into_iter().map(Some).collect();
+    reads.extend(order.into_iter().filter_map(|(_, _, k)| old[k as usize].take()));
 }
 
 /// Buffers reused from node to node (their capacity, never their
