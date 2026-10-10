@@ -8,7 +8,9 @@ it); a paragraph goes while `BIN --fuzz-classify` gives the same class
 (the part before " | ", and whether the DVI or only the log differs).
 A timeout's reproduction is cut while its last edit alone still does not
 end (`BIN --fuzz-replay FILE --alone` running past HANG seconds, env
-FLOW_MIN_HANG, 60).
+FLOW_MIN_HANG, 60) and the cold builds of its text before and after the
+edit do end (`BIN --fuzz-cold FILE`, in HANG seconds): a cut that makes
+the text itself loop is not the update's hang.
 Run it under scripts/sandbox.
 """
 import re
@@ -63,6 +65,10 @@ def cls(path):
 
 
 def hangs(path):
+    try:
+        subprocess.run([binary, '--fuzz-cold', path], capture_output=True, timeout=HANG)
+    except subprocess.TimeoutExpired:
+        return 'the text loops'
     try:
         subprocess.run([binary, '--fuzz-replay', path, '--alone'], capture_output=True, timeout=HANG)
     except subprocess.TimeoutExpired:
