@@ -34,6 +34,7 @@
 pub mod arith;
 pub mod build;
 pub mod dvi;
+pub mod fuzz;
 pub mod hash;
 pub mod item;
 pub mod linebreak;

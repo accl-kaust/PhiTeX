@@ -979,6 +979,21 @@ pub struct Read {
     /// of the reading node. A depth, not a node: an edit moving the
     /// conditional's opener does not change the read.
     pub cond: Option<u16>,
+    /// What of the value was read (AGENTS_BRIEF §1: a node reads only the
+    /// fields it uses).
+    pub field: Field,
+}
+
+/// The part of a definition a read uses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Field {
+    /// All of it.
+    #[default]
+    Whole,
+    /// Of a meaning, only whether it is `\outer`: a name scanned where an
+    /// `\outer` one is forbidden (a definition, an argument, skipped text:
+    /// tex.web 336). Redefining it otherwise re-runs no such reader.
+    Outer,
 }
 
 /// A shared [`Read`].
@@ -986,9 +1001,22 @@ pub type ReadRef = Arc<Read>;
 
 impl Read {
     /// Whether `r` read the definition this one did (by identity, then
-    /// equality of the value and of its scope).
+    /// equality of the value and of its scope); for a read of the
+    /// outer-ness alone, whether both are `\outer` or neither is.
     fn same(this: &ReadRef, r: &ReadRef) -> bool {
+        if r.field == Field::Outer {
+            return this.val.is_outer() == r.val.is_outer();
+        }
         Arc::ptr_eq(this, r) || (this.val == r.val && this.scope == r.scope)
+    }
+
+    /// The record of this read a piece keeps (`Val::Outer` for a read of
+    /// the outer-ness alone).
+    fn seen(&self) -> Val {
+        match self.field {
+            Field::Whole => self.val.clone(),
+            Field::Outer => Val::Outer(self.val.is_outer()),
+        }
     }
 }
 
@@ -1538,7 +1566,8 @@ pub struct Lean {
     /// Its reads from before the piece (`Run::reads`) without their values
     /// (its edges are the build's), but for the names the build answers
     /// itself (files, the job, the lines before it), whose values are
-    /// compared at the next build.
+    /// compared at the next build, and the reads of a meaning's outer-ness
+    /// alone (`Val::Outer`), which a redefinition keeping it leaves be.
     reads: Vec<(Key, u32)>,
     given: Vec<(Key, u32, Val)>,
     /// Its part of the log, but for its paragraphs' lines.
@@ -1584,7 +1613,7 @@ impl Run {
             given: self
                 .reads
                 .iter()
-                .filter(|(k, _, _)| matches!(k, Key::File(_) | Key::Job | Key::LineBase))
+                .filter(|(k, _, v)| matches!(k, Key::File(_) | Key::Job | Key::LineBase) || matches!(v, Val::Outer(_)))
                 .cloned()
                 .collect(),
             plan: Arc::new(crate::logs::plan(text, self)),
@@ -1618,12 +1647,27 @@ impl Run {
     }
 
     /// The values it read `key` with (of a lean run: only for the names
-    /// the build answers itself).
+    /// the build answers itself and the reads of outer-ness alone).
     pub fn values_read(&self, key: &Key) -> &[(Key, u32, Val)] {
         let v = self.lean.as_ref().map_or(&self.reads[..], |l| &l.given[..]);
         let a = v.partition_point(|x| x.0 < *key);
         let b = a + v[a..].partition_point(|x| x.0 == *key);
         &v[a..b]
+    }
+
+    /// Its reads of `key`, if it read only whether that is `\outer`
+    /// (`Field::Outer`, `Val::Outer`): every one of them, a lean run's
+    /// included.
+    pub fn outer_reads_only(&self, key: &Key) -> Option<&[(Key, u32, Val)]> {
+        let vals = self.values_read(key);
+        let all = match &self.lean {
+            Some(l) => {
+                let a = l.reads.partition_point(|x| x.0 < *key);
+                l.reads[a..].partition_point(|x| x.0 == *key)
+            }
+            None => vals.len(),
+        };
+        (!vals.is_empty() && vals.len() == all && vals.iter().all(|x| matches!(x.2, Val::Outer(_)))).then_some(vals)
     }
 
     /// How many nodes it has (had, if lean).
@@ -1922,6 +1966,7 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key, node: u32) ->
         val,
         scope: None,
         cond: None,
+        field: Field::Whole,
     });
     outside.insert(k.clone(), (r.clone(), lo, hi));
     r
@@ -1941,6 +1986,7 @@ fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Ke
             val,
             scope: None,
             cond: None,
+            field: Field::Whole,
         });
     }
     match local {
@@ -1950,6 +1996,7 @@ fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Ke
             val,
             scope: chain.scope_of(d, key),
             cond: None,
+            field: Field::Whole,
         }),
         None => outside_read(env, outside, key, chain.nodes.len() as u32),
     }
@@ -1979,11 +2026,18 @@ fn reread(
     outside: &mut Outside,
     r: &Read,
 ) -> Option<ReadRef> {
-    let Some(c) = r.cond else {
-        return Some(resolve_now(chain, env, outside, &r.key));
+    let now = match r.cond {
+        None => resolve_now(chain, env, outside, &r.key),
+        Some(c) => {
+            let at = state.conds.get(c as usize)?.open as usize;
+            before_read(chain, env, outside, &r.key, at, c)
+        }
     };
-    let at = state.conds.get(c as usize)?.open as usize;
-    Some(before_read(chain, env, outside, &r.key, at, c))
+    // (what of it the reader uses stays what it was)
+    if r.field == Field::Whole {
+        return Some(now);
+    }
+    Some(Arc::new(Read { field: r.field, ..(*now).clone() }))
 }
 
 /// The definition of `key` as of node `at`, the opener of the `c`th open
@@ -2003,6 +2057,7 @@ fn before_read(
             val,
             scope: chain.scope_of(d, key),
             cond: None,
+            field: Field::Whole,
         },
         None => (*outside_read(env, outside, key, at as u32)).clone(),
     };
@@ -2361,7 +2416,7 @@ pub fn run_piece(
                 continue;
             }
             let at = cond_at(&chain, i, r).map_or(i, |a| a.max(rfrom));
-            reads.push((r.key.clone(), at as u32, r.val.clone()));
+            reads.push((r.key.clone(), at as u32, r.seen()));
         }
     }
     reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -2788,6 +2843,7 @@ impl<'a> Exec<'a> {
                 val: self.defs[i].val.clone(),
                 scope: None,
                 cond: None,
+                field: Field::Whole,
             }),
             Found::Read(i) => self.reads[i].clone(),
         }
@@ -2811,7 +2867,11 @@ impl<'a> Exec<'a> {
                 return Found::Read(i as usize);
             }
         }
-        let f = self.find_slow(key);
+        let f = self.find_slow(key, Field::Whole);
+        if let Found::Read(i) = f {
+            // (read whole after its outer-ness alone: the read is now whole)
+            self.whole(i);
+        }
         if let (Some(s), Found::Read(i)) = (slot, &f) {
             self.scratch.chars[s] = (self.stamp, *i as u32);
         }
@@ -2827,6 +2887,8 @@ impl<'a> Exec<'a> {
             return Found::Own(i);
         }
         if let Some(i) = self.name_read(n) {
+            // (read whole after its outer-ness alone: the read is now whole)
+            self.whole(i);
             return Found::Read(i);
         }
         let r = self.resolve_shared(key);
@@ -2870,6 +2932,7 @@ impl<'a> Exec<'a> {
         if self.defs.is_empty()
             && let Some(i) = self.name_read(n)
         {
+            self.whole(i);
             return match &self.reads[i].val {
                 Val::Meaning(m) => m.clone(),
                 _ => Meaning::Undefined,
@@ -2894,7 +2957,27 @@ impl<'a> Exec<'a> {
         n
     }
 
-    fn find_slow(&mut self, key: &Key) -> Found {
+    /// The node's read `i`, read whole from now on (it may have read only
+    /// a meaning's outer-ness so far).
+    fn whole(&mut self, i: usize) {
+        if self.reads[i].field != Field::Whole {
+            let r = Read { field: Field::Whole, ..(*self.reads[i]).clone() };
+            self.reads[i] = Arc::new(r);
+        }
+    }
+
+    /// Whether the name `key` means an `\outer` macro, read as that alone
+    /// ([`Field::Outer`]) unless the node read or defined it already.
+    fn outer_of(&mut self, key: &Key) -> bool {
+        match self.find_slow(key, Field::Outer) {
+            Found::Own(i) => self.defs[i].val.is_outer(),
+            Found::Read(i) => self.reads[i].val.is_outer(),
+        }
+    }
+
+    /// Where the definition of `key` is ([`Exec::find`]); a read made now
+    /// reads `field` of it.
+    fn find_slow(&mut self, key: &Key, field: Field) -> Found {
         if let Some(i) = self.defs.iter().rposition(|d| d.key == *key) {
             return Found::Own(i);
         }
@@ -2914,7 +2997,10 @@ impl<'a> Exec<'a> {
                 return Found::Read(i as usize);
             }
         }
-        let r = self.resolve_shared(key);
+        let mut r = self.resolve_shared(key);
+        if field != Field::Whole {
+            r = Arc::new(Read { field, ..(*r).clone() });
+        }
         Found::Read(self.push_read(r))
     }
 
@@ -2967,7 +3053,7 @@ impl<'a> Exec<'a> {
         {
             return r.clone();
         }
-        let r = Arc::new(Read { key: key.clone(), src: Src::Node(d), val, scope, cond: None });
+        let r = Arc::new(Read { key: key.clone(), src: Src::Node(d), val, scope, cond: None, field: Field::Whole });
         self.scratch.inside.insert(key.clone(), r.clone());
         r
     }
@@ -3250,7 +3336,8 @@ impl<'a> Exec<'a> {
     /// `\read` line), what was being scanned is ended (a `}`, a `\par`,
     /// `\cr}` or `\fi` inserted), and the scanner sees a space.
     fn check_outer(&mut self, t: Tok) -> Tok {
-        let outer = matches!(self.tok_meaning(&t), Meaning::Macro(m) if m.outer);
+        // (only whether it is `\outer` is read: AGENTS_BRIEF §1)
+        let outer = t.key().is_some_and(|k| self.outer_of(&k));
         if !outer {
             return t;
         }
@@ -3260,6 +3347,14 @@ impl<'a> Exec<'a> {
         if !from_read {
             self.back(t);
         }
+        self.outer_recover(false);
+        Tok::Char(10, ' ')
+    }
+
+    /// tex.web 338-339: what was being scanned is ended where an `\outer`
+    /// name came (`eof` false) or a file ended (`eof`, tex.web 362: its
+    /// error says so): a `}`, a `\par`, `\cr}` or `\fi` goes in first.
+    fn outer_recover(&mut self, eof: bool) {
         let of = self.warning.as_ref().map_or_else(String::new, |w| format!(" of {}", self.shown(w)));
         match self.scanning {
             Scanning::Skipping => {
@@ -3287,10 +3382,10 @@ impl<'a> Exec<'a> {
                     }
                     _ => self.back(Tok::Char(2, '}')),
                 }
-                self.err(format!("Forbidden control sequence found while scanning {what}{of}"));
+                let why = if eof { "File ended" } else { "Forbidden control sequence found" };
+                self.err(format!("{why} while scanning {what}{of}"));
             }
         }
-        Tok::Char(10, ' ')
     }
 
     /// The next token, unexpanded, where an `\outer` name is allowed
@@ -3378,9 +3473,17 @@ impl<'a> Exec<'a> {
                 return None;
             }
         }
-        if let Some(PendingText { kind: TextKind::File(_), .. }) = self.st.texts.pop() {
+        let popped = self.st.texts.pop();
+        if let Some(PendingText { kind: TextKind::File(_), .. }) = popped {
             // (an `\input` file is closed, tex.web 362)
             self.log_raw(&format!("{}{}", crate::show::RAW, ')'));
+        }
+        // (a file, or `\scantokens`'s pseudo file, ended in the middle of
+        // what was being scanned: tex.web 362's `check_outer_validity`)
+        if popped.is_some_and(|p| matches!(p.kind, TextKind::File(_) | TextKind::Scan))
+            && self.scanning != Scanning::Normal
+        {
+            self.outer_recover(true);
         }
         None
     }
@@ -3562,7 +3665,7 @@ impl<'a> Exec<'a> {
     /// delimiter does: then it is read token by token, which ends the call
     /// as TeX does (tex.web 336).
     fn outer_in(&mut self, toks: &[Tok], delim: &[Tok]) -> bool {
-        toks.iter().chain(delim).any(|t| t.key().is_some() && matches!(self.tok_meaning(t), Meaning::Macro(m) if m.outer))
+        toks.iter().chain(delim).any(|t| t.key().is_some_and(|k| self.outer_of(&k)))
     }
 
     /// The top input list, where the reader reads next, if it reads it as

@@ -818,6 +818,12 @@ impl Exec<'_> {
         if self.st.prev_depth != MAIN_DEPTH {
             return self.st.prev_depth;
         }
+        self.main_depth()
+    }
+
+    /// The main vertical list's `\prevdepth` where a reader state says
+    /// `page::MAIN_DEPTH`: `Key::MainDepth`.
+    pub(super) fn main_depth(&mut self) -> i32 {
         match self.get(&Key::MainDepth) {
             Val::Int(d) => d,
             Val::Para(p) => match &p.lb {

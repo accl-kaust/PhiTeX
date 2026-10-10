@@ -364,6 +364,27 @@ pub enum Val {
     Tail(Arc<crate::item::Item>),
     /// A paragraph before line breaking (`Key::MainDepth`).
     Para(Arc<crate::item::Para>),
+    /// What a read of a meaning's outer-ness alone saw
+    /// (`graph::Field::Outer`): only ever a piece's record of such a read,
+    /// never a definition.
+    Outer(bool),
+}
+
+impl Val {
+    /// Whether this is the meaning of an `\outer` macro (tex.web 336:
+    /// `cur_cmd>=outer_call`).
+    pub fn is_outer(&self) -> bool {
+        matches!(self, Val::Meaning(Meaning::Macro(m)) if m.outer) || matches!(self, Val::Outer(true))
+    }
+
+    /// Whether a read that saw this would see the same in `now`: equal, or
+    /// for a read of the outer-ness alone, as outer.
+    pub fn seen_as(&self, now: &Val) -> bool {
+        match self {
+            Val::Outer(o) => now.is_outer() == *o,
+            _ => self == now,
+        }
+    }
 }
 
 /// A class's split marks: the class, the first mark, the last.
@@ -498,6 +519,7 @@ impl fmt::Display for Shown<'_, Val> {
             Val::SplitMarks(m) => write!(f, "split marks of {} classes", m.len()),
             Val::Tail(i) => write!(f, "the item {i:?}"),
             Val::Para(p) => write!(f, "a paragraph of {} items", p.hlist.len()),
+            Val::Outer(o) => write!(f, "{}", if *o { "\\outer" } else { "not \\outer" }),
             Val::Patterns(p) => write!(f, "{} patterns", p.len()),
             Val::Exceptions(x) => write!(f, "{} exceptions", x.len()),
             Val::Meaning(Meaning::Font(x)) => write!(f, "select font {}", x.name),

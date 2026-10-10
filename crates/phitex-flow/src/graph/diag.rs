@@ -276,7 +276,7 @@ impl Exec<'_> {
             };
             let incompleat = if mode == Mode::M { self.incompleat(level) } else { None };
             // (after a paragraph not broken into lines yet: its last line's)
-            let shown = if mode == Mode::V && aux == crate::page::MAIN_DEPTH { self.prev_depth() } else { aux };
+            let shown = if mode == Mode::V && aux == crate::page::MAIN_DEPTH { self.main_depth() } else { aux };
             out.push(Level {
                 mode,
                 inner,

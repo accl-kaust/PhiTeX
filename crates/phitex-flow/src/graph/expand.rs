@@ -791,7 +791,14 @@ impl Exec<'_> {
                 continue;
             };
             let scope = self.chain.scope_of(d, &k);
-            self.reads.push(Arc::new(Read { key: k.clone(), src: Src::Node(d), val: after.clone(), scope, cond: None }));
+            self.reads.push(Arc::new(Read {
+                key: k.clone(),
+                src: Src::Node(d),
+                val: after.clone(),
+                scope,
+                cond: None,
+                field: super::Field::Whole,
+            }));
             // (as of the `\if`: the conditional's depth in the node's input
             // state, the same as below the ones it opened and closed)
             let before = super::before_read(self.chain, self.env, self.outside, &k, at, depth);

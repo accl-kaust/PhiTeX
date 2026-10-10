@@ -2253,6 +2253,16 @@ fn finished(g: &State) -> bool {
         && g.logs_running == 0
 }
 
+/// Whether piece `r` read `key` only for whether it is `\outer`
+/// (`graph::Field::Outer`), and it still is or still is not: the piece
+/// need not run again for it.
+fn outer_still(g: &State, sh: &Shared, r: usize, key: &Key) -> bool {
+    let Some(vals) = g.p[r].run.as_ref().and_then(|run| run.outer_reads_only(key)) else {
+        return false;
+    };
+    vals.iter().all(|(_, node, v)| v.seen_as(&sh.names.reaching(key, (r as u32, *node), &sh.font).1))
+}
+
 /// Piece `k` read a definition of `key` since remade: it runs again from
 /// the first of its nodes reading the name (every node reading it is
 /// looked at again). Returns whether it was done.
@@ -3022,7 +3032,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
         .iter()
         .map(|(key, node, val)| {
             let (def, now, ..) = sh.names.reaching(key, (k as u32, *node), &sh.font);
-            (def, now == *val)
+            (def, val.seen_as(&now))
         })
         .collect();
     let changed = changed_names(old_run.as_deref(), &run);
@@ -3055,7 +3065,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
             for ((key, node, val), c) in run.reads.iter().zip(&mut checks) {
                 if since.contains(key) {
                     let (def, now, ..) = sh.names.reaching(key, (k as u32, *node), &sh.font);
-                    *c = (def, now == *val);
+                    *c = (def, val.seen_as(&now));
                 }
             }
         }
@@ -3131,6 +3141,9 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
         g.running.remove(&k);
         let marks = reached(&g, sh, (k as u32, END), &changed);
         for (r, key) in marks {
+            if outer_still(&g, sh, r, &key) {
+                continue;
+            }
             if mark(&mut g, r, key) {
                 sh.done[r].store(false, Ordering::Release);
             } else if g.p[r].status == Status::Running {
@@ -3519,7 +3532,7 @@ impl BuildFold<'_> {
                     && m.overlay == overlay
                     && m.reads
                         .iter()
-                        .all(|(key, val)| self.routine_read(overlay, key) == *val)
+                        .all(|(key, val)| val.seen_as(&self.routine_read(overlay, key)))
             })
             .cloned()
     }
