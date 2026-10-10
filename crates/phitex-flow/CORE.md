@@ -1746,8 +1746,7 @@ any schedule (1 thread, Suspend, priority too). Pre-existing: 72ee98e
 hangs the same. Not in `open/` (its replay does not end); a timeout's
 reproduction names its step now (`fuzz::run_seed_at`).
 
-**T1 (open, A). Plain-document and TRIP edits that never end.** Fuzz
-subset 7853 ran 300 seeds at 1 thread and 60 at 8 on each of trip,
+*T1 on plain documents too.* Fuzz subset 7853 ran 300 seeds at 1 thread and 60 at 8 on each of trip,
 pages and table, with a 120 s limit per seed, on a50fa8a. 43 timeouts:
 42 trip and 1 pages; table had none. The log is not compared, so the 9
 log-only failures do not count. By edit kind the trip timeouts are 21
@@ -1792,8 +1791,8 @@ F's report of it (F7):
   the update never ends). B's bac0a76 does not contain 2c217c3, and both
   repros pass on it.
 
-**F9 (log only, A, core). A kept node in an edited piece reads its old
-line.** The log is not compared any more (the bar is the DVI/PDF and the
+**F9 (fixed by A, as F8 above: `run_piece`'s `line_ok`). A kept node in
+an edited piece reads its old line.** The log is not compared any more (the bar is the DVI/PDF and the
 written files), so F9 fails no seed. Its repro is kept, not replayed, in
 `tests/fuzz/log-only/`, for when a line number reaches a written file
 (an `.aux` `\write` of `\the\inputlineno` would). Found by the LaTeX fuzz: tiny seed 2, with `\usepackage{ifthen}`
