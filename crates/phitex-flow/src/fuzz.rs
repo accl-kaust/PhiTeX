@@ -135,10 +135,8 @@ pub enum Kind {
     /// TRIP's two jobs as a session (`graph::jobs`), the edits in pass
     /// 2's text.
     Trip,
-    /// A LaTeX document: a session of two jobs, `latex.ini` (the format,
-    /// `latex.ltx`, as the prelude until the saved format comes) and the
-    /// document (`&latex NAME`), in extended mode, the edits in the
-    /// document's text.
+    /// A LaTeX document: its job (`&latex NAME`) on the saved format
+    /// ([`latex_format`]), in extended mode, the edits in its text.
     Latex(Arc<LatexSetup>),
 }
 
@@ -149,13 +147,15 @@ impl Kind {
     }
 }
 
-/// Where a LaTeX document's files are, as `tests/latex_docs.rs` sets them:
-/// the directories `latex -recorder` read them from.
+/// Where a LaTeX document's files are, as `tests/latex_docs.rs` sets them
+/// (the directories `latex -recorder` read them from), and the format it
+/// is built on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LatexSetup {
     pub jobname: String,
     pub input_dirs: Vec<PathBuf>,
     pub font_dirs: Vec<PathBuf>,
+    pub format: Arc<Vec<u8>>,
 }
 
 /// A document of the corpus.
@@ -197,7 +197,8 @@ pub fn plain() -> Option<String> {
 }
 
 fn cmr10() -> Option<Arc<Font>> {
-    let b = std::fs::read(root().join("../partex-core/testdata/cmr10.tfm")).ok()?;
+    // (the crate's own copy once partex-core is gone, else partex-core's)
+    let b = ["testdata/cmr10.tfm", "../partex-core/testdata/cmr10.tfm"].iter().find_map(|p| std::fs::read(root().join(p)).ok())?;
     Font::parse("cmr10", &b).ok().map(Arc::new)
 }
 
@@ -281,8 +282,11 @@ pub fn builder(doc: &Doc, files: &[(String, String)]) -> Build {
         b.set_font_dirs(s.font_dirs.clone());
         b.set_input_dirs(s.input_dirs.clone());
         b.set_jobname(&s.jobname);
-        b.set_terminal(&["latex.ini", &format!("&latex {}", s.jobname)]);
+        b.set_terminal(&[&format!("&latex {}", s.jobname)]);
         b.set_limits(Limits::TEX_LIVE);
+        // (as the oracle runs: `latex -interaction=batchmode`)
+        b.set_interaction_option(Some(0));
+        b.set_format(&s.format).expect("the format reads");
     }
     if doc.kind == Kind::Trip {
         let d = trip_dir();
@@ -862,7 +866,8 @@ fn differs(a: &Output, b: &Output) -> Option<String> {
         w.push("dvi");
     }
     if a.log != b.log {
-        w.push("log");
+        // (only its numbers: F9's shape)
+        w.push(if numbers_only(a, b) { "log-numbers" } else { "log" });
     }
     if a.writes != b.writes {
         w.push("writes");
@@ -873,7 +878,7 @@ fn differs(a: &Output, b: &Output) -> Option<String> {
 /// The cold build of `text` the edit's output must equal.
 pub fn cold(doc: &Doc, text: &str, files: &[(String, String)]) -> Output {
     let opts = Options {
-        // (a LaTeX document's at 8: its format's prelude is long)
+        // (a LaTeX document's at 8, as `tests/latex_docs.rs` builds them)
         threads: if doc.kind.etex() { 8 } else { 1 },
         reads: Reads::Suspend,
         order: Order::Priority,
@@ -900,6 +905,13 @@ struct PieceFacts {
     ran: bool,
     /// Each node's reads from before the piece: (name, value).
     reads: Vec<Vec<(String, String)>>,
+    /// Where each of those reads was defined, as the dump says (`piece id
+    /// N`, `initial`, or nothing for the format), in the same order.
+    srcs: Vec<Vec<String>>,
+    /// Each node's number in the piece (`nN`), in the same order.
+    ids: Vec<u64>,
+    /// The last node of the piece defining each name (what it exports).
+    defs: BTreeMap<String, u64>,
 }
 
 /// What a dump says (`Options::dump`): each piece's header facts and its
@@ -952,36 +964,118 @@ fn facts(dump: &str) -> Facts {
                 start: rest.contains("entered Start"),
                 ran: head.contains(") [ran;"),
                 reads: Vec::new(),
+                srcs: Vec::new(),
+                ids: Vec::new(),
+                defs: BTreeMap::new(),
             });
-        } else if l.starts_with("  n") {
+        } else if let Some(rest) = l.strip_prefix("  n") {
             let ran = f.pieces.last().is_some_and(|p| p.ran);
-            let mut reads = Vec::new();
+            let id: u64 = rest.split(|c: char| !c.is_ascii_digit()).next().and_then(|n| n.parse().ok()).unwrap_or(u64::MAX);
+            let (mut reads, mut srcs, mut defs) = (Vec::new(), Vec::new(), Vec::new());
             for seg in l.split(" | ").skip(1) {
                 if let Some(kv) = seg.strip_prefix("reads ") {
                     let Some((k, v)) = kv.split_once(" = ") else { continue };
                     // (from a node of the piece: inside it, not a read from before)
-                    let v = match v.rsplit_once(" from ") {
+                    let (v, src) = match v.rsplit_once(" from ") {
                         Some((_, src)) if src.starts_with('n') => continue,
-                        Some((x, _)) => x,
-                        None => v.strip_suffix(" initial").unwrap_or(v),
+                        Some((x, src)) => (x, src),
+                        None => v.strip_suffix(" initial").map_or((v, ""), |x| (x, "initial")),
                     };
                     reads.push((k.to_string(), v.to_string()));
+                    srcs.push(src.to_string());
                 } else if let Some(kv) = seg.strip_prefix("defines ") {
                     let kv = kv.strip_prefix("global ").unwrap_or(kv);
-                    if let Some((k, v)) = kv.split_once(" = ")
-                        && ran
-                        && opaque(v)
-                    {
-                        f.defined_in.insert(k.to_string());
+                    if let Some((k, v)) = kv.split_once(" = ") {
+                        defs.push(k.to_string());
+                        if ran && opaque(v) {
+                            f.defined_in.insert(k.to_string());
+                        }
                     }
                 }
             }
             if let Some(p) = f.pieces.last_mut() {
                 p.reads.push(reads);
+                p.srcs.push(srcs);
+                p.ids.push(id);
+                for k in defs {
+                    p.defs.insert(k, id);
+                }
             }
         }
     }
     f
+}
+
+/// Why each piece that ran nodes in the build after an edit ran them,
+/// from the graphs before and after (`dump_before`, `dump_after`, as
+/// `Options::dump` writes them): a line a piece. A piece the build before
+/// had (by its id, with the same text) names its
+/// first read from before it that changed: the node, the name, the value
+/// it read in the build before and the value reaching it now, each with
+/// the node that defined it (`piece id N nM`: the last node of piece N
+/// defining the name; `initial`; nothing for the format's). A value the
+/// dump shows only in part (`opaque`) and shows the same is marked so: it
+/// may have changed. A piece with no changed read says so: it ran
+/// without a reason the dump shows (over-invalidation); one entered in a
+/// predecessor's state is marked (its entry may be the reason). Pieces
+/// with new or changed text are counted.
+pub fn rerun_reasons(dump_before: &str, dump_after: &str) -> String {
+    let (a, b) = (facts(dump_before), facts(dump_after));
+    let by_id = |f: &Facts| -> BTreeMap<u64, usize> { f.pieces.iter().enumerate().map(|(i, p)| (p.id, i)).collect() };
+    let (ia, ib) = (by_id(&a), by_id(&b));
+    let short = |v: &str| -> String {
+        let c: String = v.chars().take(72).collect();
+        if c.len() < v.len() { format!("{c}...") } else { c }
+    };
+    // (the node that defined a value, as `piece id N nM`)
+    let definer = |f: &Facts, idx: &BTreeMap<u64, usize>, src: &str, k: &str| -> String {
+        let node = src
+            .strip_prefix("piece id ")
+            .and_then(|n| n.parse::<u64>().ok())
+            .and_then(|n| idx.get(&n))
+            .and_then(|&i| f.pieces[i].defs.get(k));
+        match (src, node) {
+            ("", _) => "the format".to_string(),
+            (s, Some(n)) => format!("{s} n{n}"),
+            (s, None) => s.to_string(),
+        }
+    };
+    let mut out = String::new();
+    let (mut other, mut quiet) = (0, 0);
+    for p in b.pieces.iter().filter(|p| p.ran && p.run > 0) {
+        let Some(o) = ia.get(&p.id).map(|&i| &a.pieces[i]).filter(|o| o.text == p.text) else {
+            other += 1;
+            continue;
+        };
+        let before: BTreeSet<(&str, &str)> = o.reads.iter().flatten().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let first = p.reads.iter().enumerate().find_map(|(i, rs)| {
+            rs.iter().enumerate().find_map(|(j, (k, v))| {
+                let part = opaque(v) && b.defined_in.contains(k);
+                (!before.contains(&(k.as_str(), v.as_str())) || part).then_some((i, j, part))
+            })
+        });
+        let entered = if p.start { "" } else { " (entered in a predecessor's state)" };
+        let _ = write!(out, "piece id {} {}{entered} ran {} of {}: ", p.id, p.text, p.run, p.nodes);
+        let Some((i, j, part)) = first else {
+            quiet += 1;
+            let _ = writeln!(out, "no read from before it changed (over-invalidated)");
+            continue;
+        };
+        let (k, v) = &p.reads[i][j];
+        let now = definer(&b, &ib, &p.srcs[i][j], k);
+        // (the value it read before: the same name's first read in the old piece)
+        let old = o.reads.iter().zip(&o.srcs).find_map(|(rs, ss)| rs.iter().zip(ss).find(|((ok, _), _)| ok == k));
+        let was = old.map_or("not read".to_string(), |((_, ov), os)| format!("{} from {}", short(ov), definer(&a, &ia, os, k)));
+        let _ = writeln!(
+            out,
+            "first changed read n{} {k}: before {was}; now {} from {now}{}",
+            p.ids.get(i).copied().unwrap_or(u64::MAX),
+            short(v),
+            if part { " (shown in part, the same: it may differ)" } else { "" }
+        );
+    }
+    let _ = writeln!(out, "{quiet} pieces ran with no changed read; {other} ran with new or changed text");
+    out
 }
 
 /// A piece's first characters as the dump shows them.
@@ -1089,10 +1183,18 @@ fn over_invalidation(
     (ran > allowed || worst.is_some()).then(|| {
         let names: Vec<&str> = changed_all.iter().take(12).map(String::as_str).collect();
         let at = worst.map_or(String::new(), |(r, m, t)| format!(" worst piece {t} ran {r} of {m} allowed;"));
+        // (the first piece run without a changed read, or else the first
+        // one's reason: `rerun_reasons`)
+        let reasons = rerun_reasons(dump_before, dump_after);
+        let why = reasons
+            .lines()
+            .find(|l| l.ends_with("(over-invalidated)"))
+            .or_else(|| reasons.lines().next())
+            .map_or(String::new(), |l| format!(" first: {}", l.chars().take(300).collect::<String>()));
         (
             allowed,
             format!(
-                "{}readers={readers} edited-new-or-edge-nodes={free};{at} changed={}",
+                "{}readers={readers} edited-new-or-edge-nodes={free};{at} changed={};{why}",
                 if strict { "strict " } else { "" },
                 names.join(",")
             ),
@@ -1136,9 +1238,6 @@ fn run_seed_at(
     let mut text = doc.text.clone();
     let mut files = doc.files.clone();
     let etex = doc.kind.etex();
-    // (a LaTeX build's graph is latex.ltx's, millions of nodes: no dumps,
-    // no over-invalidation check, until the saved format)
-    let check_over = check_over && (!etex || std::env::var_os("PHITEX_FUZZ_LATEX_OVER").is_some());
     let mut sched = Schedule::random(&mut rng, &cfg.threads, lean);
     let mut b = builder(&doc, &files);
     b.set_lean(sched.lean);
@@ -1199,7 +1298,8 @@ fn run_seed_at(
         };
         if let Some(w) = differs(&inc, &c) {
             if let Some(d) = std::env::var_os("PHITEX_FUZZ_DUMP") {
-                write_outputs(&PathBuf::from(d), &prev, &inc, &c);
+                // (in `run/`: the no-op replay after a failure writes DIR)
+                write_outputs(&PathBuf::from(d).join("run"), &prev, &inc, &c);
             }
             return Some(repro(Fail::Mismatch(w)));
         }
@@ -1237,7 +1337,9 @@ pub fn run_seed_timed(corpus: &Arc<Vec<Doc>>, seed: u64, count: usize, cfg: &Con
     if let Some(r) = pending.try_iter().last() {
         return Some(r);
     }
-    let doc = corpus.get((seed % corpus.len().max(1) as u64) as usize).map_or_else(String::new, |d| d.name.clone());
+    // (the document `run_seed` picks: among `--doc`'s when given)
+    let docs: Vec<&Doc> = corpus.iter().filter(|d| cfg.doc.as_ref().is_none_or(|n| *n == d.name)).collect();
+    let doc = docs.get((seed % docs.len().max(1) as u64) as usize).map_or_else(String::new, |d| d.name.clone());
     let s = Schedule { threads: 1, reads: Reads::Suspend, order: Order::Priority, lean: true };
     Some(Repro {
         doc,
@@ -1278,7 +1380,6 @@ fn replay_outputs(r: &Repro) -> Option<(Option<Fail>, Output, Output)> {
     b.set_lean(r.before.lean);
     let over = !r.before.lean && !r.schedule.lean;
     let etex = doc.kind.etex();
-    let over = over && (!etex || std::env::var_os("PHITEX_FUZZ_LATEX_OVER").is_some());
     let prev = b.update(&text, r.before.options(etex, over));
     r.edit.apply(&mut text, &mut files);
     for (n, t) in &files {
@@ -1329,6 +1430,14 @@ fn first_log_diff(a: &Output, b: &Output) -> String {
     if a.dvi == b.dvi { format!("log: {short}") } else { format!("dvi: {short}") }
 }
 
+/// Whether two outputs differ only in numbers of the log (the DVI the
+/// same, each log line the same with its digits masked): F9's shape, a
+/// line number kept from before the edit.
+fn numbers_only(a: &Output, b: &Output) -> bool {
+    let mask = |s: &String| s.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect::<String>();
+    a.dvi == b.dvi && a.log.len() == b.log.len() && a.log.iter().zip(&b.log).all(|(x, y)| x == y || mask(x) == mask(y))
+}
+
 /// A failure's class, to tell findings apart over many seeds: the open
 /// findings it matches (CORE.md "Fuzz findings") by how it fails, else a
 /// signature (the document, the edit's kind, where the log first differs).
@@ -1338,7 +1447,7 @@ fn first_log_diff(a: &Output, b: &Output) -> String {
 /// - the last edit alone passes, with the seed's history it fails: a
 ///   "history" failure (F2 is one, its log only);
 /// - otherwise "edit" (marked F2? when the log alone differs, at an
-///   error's entry).
+///   error's entry; F9? when only the log's numbers differ).
 pub fn classify(r: &Repro) -> String {
     match &r.fail {
         Fail::Timeout => return format!("timeout {}", r.doc),
@@ -1373,13 +1482,23 @@ pub fn classify(r: &Repro) -> String {
         Some((Some(_), inc, c)) => {
             let d = first_log_diff(&inc, &c);
             // (an error's entry, the log only: F2's shape)
-            let f2 = if d.starts_with("log: ! ") { "F2? " } else { "" };
+            let f2 = if numbers_only(&inc, &c) {
+                "F9? "
+            } else if d.starts_with("log: ! ") {
+                "F2? "
+            } else {
+                ""
+            };
             format!("{f2}edit {} {} | {d}", r.doc, r.edit.what)
         }
         _ => match replay_history(r) {
             Some(h) => {
-                let f2 = matches!(&h.fail, Fail::Mismatch(w) if w == "log");
-                format!("{}history {} {} | {}", if f2 { "F2? " } else { "" }, r.doc, r.edit.what, h.fail.text())
+                let mark = match &h.fail {
+                    Fail::Mismatch(w) if w == "log-numbers" => "F9? ",
+                    Fail::Mismatch(w) if w == "log" => "F2? ",
+                    _ => "",
+                };
+                format!("{mark}history {} {} | {}", r.doc, r.edit.what, h.fail.text())
             }
             None => format!("passes {}", r.doc),
         },
@@ -1398,7 +1517,8 @@ pub fn replay_history(r: &Repro) -> Option<Repro> {
         timeout: Duration::from_secs(600),
         doc: r.only.clone(),
     };
-    let corpus = Arc::new(corpus());
+    // (the corpus the seed ran on: a LaTeX document's is the LaTeX one)
+    let corpus = Arc::new(if r.doc.starts_with("latex-") { latex_corpus() } else { corpus() });
     run_seed_timed(&corpus, r.seed, r.step, &cfg)
 }
 
@@ -1408,8 +1528,22 @@ fn write_outputs(d: &Path, prev: &Output, inc: &Output, c: &Output) {
     let _ = std::fs::create_dir_all(d);
     let _ = std::fs::write(d.join("before.dump"), &prev.dump);
     let _ = std::fs::write(d.join("after.dump"), &inc.dump);
+    // (why each piece run again ran, when the graphs were dumped)
+    if !prev.dump.is_empty() && !inc.dump.is_empty() {
+        let _ = std::fs::write(d.join("reruns.txt"), rerun_reasons(&prev.dump, &inc.dump));
+    }
     let _ = std::fs::write(d.join("edit.log"), inc.log.join("\n"));
     let _ = std::fs::write(d.join("cold.log"), c.log.join("\n"));
+    // (the entries one a line, quoted: a log that differs only in how it is
+    // cut into entries reads the same above)
+    let entries = |o: &Output| {
+        o.log.iter().fold(String::new(), |mut s, e| {
+            let _ = writeln!(s, "{e:?}");
+            s
+        })
+    };
+    let _ = std::fs::write(d.join("edit.entries"), entries(inc));
+    let _ = std::fs::write(d.join("cold.entries"), entries(c));
     let _ = std::fs::write(d.join("edit.dvi"), &inc.dvi);
     let _ = std::fs::write(d.join("cold.dvi"), &c.dvi);
 }
@@ -1444,22 +1578,27 @@ fn latex_dir() -> PathBuf {
     root().join("tests/latex")
 }
 
-/// A LaTeX document of the corpus (`tests/fuzz/latex/NAME.tex`, or B's
-/// `tests/latex/docs/NAME.tex`), named `latex-NAME`. The directories are
-/// those `latex` read B's documents' files from (their `.dirs`, and
-/// `tests/latex/dirs.txt` for the format's); `None` without `latex.ini`.
-pub fn latex_doc(name: &str) -> Option<Doc> {
-    let tex = [root().join(format!("tests/fuzz/latex/{name}.tex")), latex_dir().join(format!("docs/{name}.tex"))]
-        .into_iter()
-        .find(|p| p.exists())?;
+/// The directories `latex -recorder` read B's documents' files from, as
+/// `tests/latex_docs.rs` sets them (the documents' own directory first,
+/// their `.dirs`, then `tests/latex/dirs.txt` for the format's), and
+/// `latex.ini`; `None` without them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LatexDirs {
+    pub ini: PathBuf,
+    pub inputs: Vec<PathBuf>,
+    pub fonts: Vec<PathBuf>,
+}
+
+pub fn latex_dirs() -> Option<LatexDirs> {
+    let docs = latex_dir().join("docs");
     let mut ini = None;
-    let (mut inputs, mut fonts) = (vec![latex_dir()], Vec::new());
+    let (mut inputs, mut fonts) = (vec![docs.clone(), latex_dir()], Vec::new());
     let add = |v: &mut Vec<PathBuf>, d: PathBuf| {
         if !v.contains(&d) {
             v.push(d);
         }
     };
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(latex_dir().join("docs")).ok()?.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&docs).ok()?.filter_map(|e| e.ok().map(|e| e.path())).collect();
     dirs.sort();
     for p in dirs.iter().filter(|p| p.extension().is_some_and(|x| x == "dirs")) {
         for l in std::fs::read_to_string(p).ok()?.lines() {
@@ -1477,13 +1616,60 @@ pub fn latex_doc(name: &str) -> Option<Doc> {
     for d in crate::tfm::default_dirs() {
         add(&mut fonts, d);
     }
-    let ini = latin1(&std::fs::read(ini?).ok()?);
+    let ini = ini?;
+    ini.exists().then_some(LatexDirs { ini, inputs, fonts })
+}
+
+/// The saved LaTeX format, as `tests/latex_docs.rs` makes it: `latex.ini`'s
+/// job as job `latex` (`fmtutil`'s `pdftexconfig`, `\pdfoutput=0`,
+/// `latex.ltx`, `\dump`), its definitions at the `\dump`
+/// (`Build::format`). Made once per process by its caller (a corpus
+/// shares it); `PHITEX_FUZZ_LATEX_FMT=FILE` keeps it in FILE across
+/// processes (read when there, written when made).
+pub fn latex_format(dirs: &LatexDirs) -> Option<Arc<Vec<u8>>> {
+    let keep = std::env::var_os("PHITEX_FUZZ_LATEX_FMT").map(PathBuf::from);
+    if let Some(b) = keep.as_ref().and_then(|f| std::fs::read(f).ok()) {
+        return Some(Arc::new(b));
+    }
+    let ini = latin1(&std::fs::read(&dirs.ini).ok()?);
+    let mut b = Build::new(cmr10()?);
+    b.set_font_dirs(dirs.fonts.clone());
+    b.set_input_dirs(dirs.inputs.clone());
+    b.set_jobname("latex");
+    b.set_limits(Limits::TEX_LIVE);
+    b.set_interaction_option(Some(0));
+    b.set_terminal(&["latex.ini"]);
+    let o = Options { threads: 8, etex: true, ..Options::default() };
+    let out = b.update(&crate::graph::jobs(&[&ini]), o);
+    if !out.errors.is_empty() {
+        eprintln!("latex.ini's job: {:?}", &out.errors[..out.errors.len().min(5)]);
+        return None;
+    }
+    let bytes = b.format().map_err(|e| eprintln!("the LaTeX format: {e}")).ok()?;
+    if let Some(f) = keep {
+        let _ = std::fs::write(f, &bytes);
+    }
+    Some(Arc::new(bytes))
+}
+
+/// A LaTeX document of the corpus (`tests/fuzz/latex/NAME.tex`, or B's
+/// `tests/latex/docs/NAME.tex`), named `latex-NAME`, built on `format`
+/// (`&latex NAME`): its text is the document's job alone.
+pub fn latex_doc_on(name: &str, dirs: &LatexDirs, format: &Arc<Vec<u8>>) -> Option<Doc> {
+    let tex = [root().join(format!("tests/fuzz/latex/{name}.tex")), latex_dir().join(format!("docs/{name}.tex"))]
+        .into_iter()
+        .find(|p| p.exists())?;
     let doc = latin1(&std::fs::read(&tex).ok()?);
-    let text = crate::graph::jobs(&[&ini, &doc]);
+    let text = crate::graph::jobs(&[&doc]);
     let body = text.rfind(crate::graph::JOB).map_or(0, |i| i + crate::graph::JOB.len_utf8());
     Some(Doc {
         name: format!("latex-{name}"),
-        kind: Kind::Latex(Arc::new(LatexSetup { jobname: name.to_string(), input_dirs: inputs, font_dirs: fonts })),
+        kind: Kind::Latex(Arc::new(LatexSetup {
+            jobname: name.to_string(),
+            input_dirs: dirs.inputs.clone(),
+            font_dirs: dirs.fonts.clone(),
+            format: format.clone(),
+        })),
         text,
         body,
         files: Vec::new(),
@@ -1491,9 +1677,22 @@ pub fn latex_doc(name: &str) -> Option<Doc> {
     })
 }
 
-/// The LaTeX documents: the small one the harness is made on, and B's.
+/// [`latex_doc_on`] with the format made here; `None` without TeX Live's
+/// `latex.ini`.
+pub fn latex_doc(name: &str) -> Option<Doc> {
+    let dirs = latex_dirs()?;
+    latex_doc_on(name, &dirs, &latex_format(&dirs)?)
+}
+
+/// The LaTeX documents: the small one the harness is made on, and B's ten.
+pub const LATEX_DOCS: [&str; 11] =
+    ["tiny", "sections", "math", "tables", "figures", "titlepage", "packages", "ams", "gfx", "layout", "rules"];
+
+/// The LaTeX documents ([`LATEX_DOCS`]) on one format.
 pub fn latex_corpus() -> Vec<Doc> {
-    ["tiny", "sections", "math", "tables", "figures", "titlepage", "packages"].iter().filter_map(|n| latex_doc(n)).collect()
+    let Some(dirs) = latex_dirs() else { return Vec::new() };
+    let Some(format) = latex_format(&dirs) else { return Vec::new() };
+    LATEX_DOCS.iter().filter_map(|n| latex_doc_on(n, &dirs, &format)).collect()
 }
 
 /// A document of either corpus by name.

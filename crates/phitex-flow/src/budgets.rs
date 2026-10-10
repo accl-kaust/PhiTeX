@@ -227,22 +227,16 @@ fn timed(f: impl FnOnce() -> Output) -> (Output, Duration) {
 /// Measures every kind on `doc` at `sched`, `reps` times each.
 pub fn measure(doc: &Doc, sched: Sched, reps: usize, kinds: &[EditKind]) -> Vec<Row> {
     let mut rows = Vec::new();
-    // (a LaTeX document: one build for all the kinds, its prelude is long)
     let latex = doc.kind.etex();
     let o = opts(sched.threads, latex);
     // (a first build, not measured: the fonts read, the caches warm)
-    if !latex {
-        fuzz::builder(doc, &doc.files).update(&doc.text, o);
-    }
-    let mut shared: Option<(crate::build::Build, usize, Duration)> = None;
+    fuzz::builder(doc, &doc.files).update(&doc.text, o);
     for &kind in kinds {
         let d = if kind == EditKind::Def && !latex { with_fz(doc) } else { doc.clone() };
-        let (mut b, pages, cold) = shared.take().unwrap_or_else(|| {
-            let mut b = fuzz::builder(&d, &d.files);
-            b.set_lean(sched.lean);
-            let (first, cold) = timed(|| b.update(&d.text, o));
-            (b, first.stats.pages, cold)
-        });
+        let mut b = fuzz::builder(&d, &d.files);
+        b.set_lean(sched.lean);
+        let (first, cold) = timed(|| b.update(&d.text, o));
+        let pages = first.stats.pages;
         let mut row = Row {
             doc: doc.name.clone(),
             pages,
@@ -280,9 +274,6 @@ pub fn measure(doc: &Doc, sched: Sched, reps: usize, kinds: &[EditKind]) -> Vec<
             // (back to the document, not measured)
             b.update(&d.text, o);
         }
-        if latex {
-            shared = Some((b, pages, cold));
-        }
         if row.times.is_empty() {
             continue;
         }
@@ -301,6 +292,8 @@ pub fn measure(doc: &Doc, sched: Sched, reps: usize, kinds: &[EditKind]) -> Vec<
         if worst * 4 > row.cold {
             row.misses.push(format!("{} ms > 25% of the cold {} ms", worst.as_millis(), row.cold.as_millis()));
         }
+        // (progress, on stderr: a LaTeX table takes minutes)
+        eprintln!("budgets: {} {} -j{}{}: max {} ms, cold {} ms", row.doc, kind.name(), sched.threads, if sched.lean { " lean" } else { "" }, worst.as_millis(), row.cold.as_millis());
         rows.push(row);
     }
     rows
@@ -348,10 +341,14 @@ pub fn table(rows: &[Row]) -> String {
 /// Every document at -j1 and -j8, lean and not.
 pub fn run_all(reps: usize, only: Option<&str>) -> Vec<Row> {
     let mut rows = Vec::new();
-    // (a LaTeX document, `latex-NAME`: once, at 8 workers, lean, until the
-    // saved format makes its builds short)
+    // (the LaTeX documents, `latex` for all of them on one format,
+    // `latex-NAME` for one: at 8 workers, lean)
+    let latex = Sched { threads: 8, lean: true };
+    if only == Some("latex") {
+        return fuzz::latex_corpus().iter().flat_map(|d| measure(d, latex, reps, &EditKind::ALL)).collect();
+    }
     if let Some(d) = only.filter(|n| n.starts_with("latex-")).and_then(fuzz::find_doc) {
-        return measure(&d, Sched { threads: 8, lean: true }, reps, &EditKind::ALL);
+        return measure(&d, latex, reps, &EditKind::ALL);
     }
     for d in docs().iter().filter(|d| only.is_none_or(|n| n == d.name)) {
         for threads in [1, 8] {

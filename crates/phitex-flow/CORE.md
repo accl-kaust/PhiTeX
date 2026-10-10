@@ -2162,6 +2162,23 @@ exports, once per run, over 171k names), `tok_meaning` 2.2%.
   directories are the document's, then one directory of links standing
   for TEXINPUTS.
 
+## Tag numbers
+
+Several tag namespaces must stay free of collisions. `Key::word` puts the
+kind of key in the bits above 40, and `Hash` and `Eq` compare that word,
+so two kinds with one tag are one key. The format file (`format.rs`) has
+one-byte tags for keys, meanings, items, whatsits and values. The tests
+check the tags without upkeep:
+- `val.rs` `tag_tests`: `every_key` lists one key of each kind.
+  `key_index` is a `match` without wildcard, so a new `Key` variant does
+  not compile until it has an index, and `every_key_once` fails until it
+  is listed. `key_word_tags_are_distinct` then checks the word tags.
+- `format.rs` `tag_tests` does the same for meanings and whatsits
+  (`every_meaning`, `every_whatsit`). It checks that the bytes the
+  writer gives each key, meaning and whatsit are distinct per namespace.
+To add a variant, give it the next free tag, then its index and sample
+in these lists. `cargo test -p phitex-flow --lib tag_tests` runs them.
+
 ## The inventory
 
 ### (i) Expandable and input-rewriting: steps — 40
