@@ -20,6 +20,8 @@
 # of each document, one chunk a document, at 1 or 8 threads at random
 # (each chunk takes 8 processors: JOBS defaults to nproc/8); MIN
 # defaults to 0. MIN=timeouts cuts down one of each timeout class only.
+# A TRIP timeout on which the system's tex loops too is classed
+# "tex-loops trip" (scripts/flow-fuzz-tex.py), not ours.
 # DOCS="trip pages ...": the plain corpus's documents named only, each by
 # `--doc` (its own seeds: seed N is not the same case as without DOCS),
 # in chunks of 50 seeds, SEEDS of each at 1 thread and SEEDS/5 at 8.
@@ -138,6 +140,17 @@ fi
 : >"$OUT/classes.txt"
 if [ -s "$OUT/repros.txt" ]; then
 	run bash -c "xargs -P $JOBS -n 4 $BIN --fuzz-classify <'$OUT/repros.txt'" | sort >"$OUT/classes.txt" || true
+fi
+# (a TRIP timeout where the system's tex loops too, on either text, is
+# TRIP edited into a loop, not ours: classed "tex-loops trip")
+if grep -q '^timeout trip' "$OUT/classes.txt" && command -v tex >/dev/null; then
+	mkdir -p "$OUT/tmp"
+	grep '^timeout trip' "$OUT/classes.txt" | cut -f2 |
+		TMPDIR="$OUT/tmp" run bash -c "xargs -P $JOBS -n 4 python3 scripts/flow-fuzz-tex.py bench/trip" >"$OUT/trip-tex.txt" || true
+	awk -F'\t' 'NR == FNR { if ($0 ~ /loops/) loop[$1] = 1; next }
+		$1 ~ /^timeout trip/ && ($2 in loop) { $1 = "tex-loops trip" } { print $1 "\t" $2 }' \
+		"$OUT/trip-tex.txt" "$OUT/classes.txt" | sort >"$OUT/classes.txt.new" && mv "$OUT/classes.txt.new" "$OUT/classes.txt"
+	rm -rf "$OUT/tmp"
 fi
 echo "== classes"
 cut -f1 "$OUT/classes.txt" | sort | uniq -c | sort -rn | tee "$OUT/classes-count.txt"

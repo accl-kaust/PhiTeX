@@ -430,7 +430,7 @@ impl W<'_> {
                     let rule_wd = glue.set(this, &l.g);
                     self.hleaders(this, l, rule_wd, base_line, left_edge);
                 }
-                Item::Kern { w, .. } | Item::Math { w, .. } => self.cur_h += *w,
+                Item::Kern { w, .. } | Item::Math { w, .. } | Item::MarginKern { w, .. } => self.cur_h += *w,
                 Item::Whatsit(w) => self.whatsit(w),
                 _ => {}
             }
