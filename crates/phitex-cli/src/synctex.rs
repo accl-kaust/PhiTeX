@@ -142,9 +142,10 @@ impl Writer {
             c.tag_of.insert(None, 1);
         }
         for (name, found) in files_read {
+            let Some(found) = found else { continue };
             let key = Some(Arc::<str>::from(name.as_str()));
             if !c.tag_of.contains_key(&key) {
-                c.tags.push(input_name(&cwd, found.as_deref().unwrap_or(name)));
+                c.tags.push(input_name(&cwd, found));
                 c.tag_of.insert(key, c.tags.len() as u32);
             }
         }

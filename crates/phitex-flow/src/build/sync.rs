@@ -13,10 +13,10 @@
 //! that an output routine moved; the items in a box by its origins. The
 //! boxes an output routine made itself (the page's own, a headline) and
 //! what is in them have the place of the page builder's call that fired it
-//! (pdfTeX's: the line being read then). Not yet: inserts' lists (the
-//! place of the paragraph holding the insert), alignments' and math
-//! lists' items (the place of the node that made the whole), TeXXeT's
-//! reversed segments (in their order in the list).
+//! (pdfTeX's: the line being read then). Not yet: what is in an insert
+//! (all at the place of the node that made the insert), alignments' and
+//! math lists' items (the place of the node that made the whole),
+//! TeXXeT's reversed segments (in their order in the list).
 
 use std::sync::Arc;
 
@@ -142,6 +142,9 @@ fn anchor_item(m: &mut FxMap<usize, Anchor>, it: &Item, k: u32, pn: u32) {
     match it {
         Item::Box(b) | Item::Append(b, _) => {
             m.entry(addr(b)).or_insert(Anchor::Made { k, maker: pn });
+        }
+        Item::Shipout(sh) => {
+            m.entry(addr(&sh.b)).or_insert(Anchor::Made { k, maker: pn });
         }
         Item::Ins(ins) => {
             for x in &ins.list {
@@ -554,10 +557,22 @@ impl Build {
                     anchor_item(&mut m, it, k, pn);
                 }
                 if let Some(Some(lines)) = kept.lines.get(j) {
+                    // (the inserts the lines moved out: by the node that
+                    // made each in the paragraph's list)
+                    let mut ins: FxMap<usize, u32> = FxMap::default();
+                    for (i, it) in para.hlist.iter().enumerate() {
+                        if let (Item::Ins(x), Some(d)) = (it, para.origins.of(i)) {
+                            ins.insert(Arc::as_ptr(x) as usize, pn.saturating_sub(d));
+                        }
+                    }
                     for (li, l) in lines.iter().enumerate() {
                         m.entry(addr(&l.b)).or_insert(Anchor::Line { k, j: j as u32, li: li as u32 });
                         for it in &l.adjust {
-                            anchor_item(&mut m, it, k, pn);
+                            let node = match it {
+                                Item::Ins(x) => ins.get(&(Arc::as_ptr(x) as usize)).copied().unwrap_or(pn),
+                                _ => pn,
+                            };
+                            anchor_item(&mut m, it, k, node);
                         }
                     }
                 }

@@ -186,6 +186,8 @@ fn edit(dir: &Path, out: &str, page: usize, x: f64, y: f64) -> Option<(String, i
 struct Tally {
     fwd: usize,
     fwd_ok: usize,
+    /// Lines all of whose boxes in phitex's file are near pdfTeX's.
+    fwd_all: usize,
     fwd_bad: Vec<String>,
     inv: usize,
     inv_same: usize,
@@ -200,6 +202,7 @@ impl Tally {
     fn add(&mut self, o: &Tally) {
         self.fwd += o.fwd;
         self.fwd_ok += o.fwd_ok;
+        self.fwd_all += o.fwd_all;
         self.inv += o.inv;
         self.inv_same += o.inv_same;
         self.inv_one += o.inv_one;
@@ -212,9 +215,10 @@ impl Tally {
 
     fn line(&self, name: &str) -> String {
         format!(
-            "{name:<22} forward {}/{} within a box; inverse {} points: {} same line, {} within one, {} pdfTeX's line-box line, {} other; x records {}/{} within 1 sp",
+            "{name:<22} forward {}/{} within a box ({} with every box so); inverse {} points: {} same line, {} within one, {} pdfTeX's line-box line, {} other; x records {}/{} within 1 sp",
             self.fwd_ok,
             self.fwd,
+            self.fwd_all,
             self.inv,
             self.inv_same,
             self.inv_one,
@@ -244,9 +248,13 @@ fn compare(name: &str, ext: &str, ours: &Path, theirs: &Path, lines: std::ops::R
         }
         t.fwd += 1;
         let got = view(ours, &out, &input, l);
-        let ok = got.first().is_some_and(|g| {
-            want.iter().any(|w| w.0 == g.0 && (w.1 - g.1).abs() <= 1.5 * w.2.max(g.2).max(10.0))
-        });
+        // (synctex's answers come in no particular order: one of phitex's
+        // boxes is one of pdfTeX's, or the line box next to it)
+        let near = |g: &(usize, f64, f64), w: &(usize, f64, f64)| w.0 == g.0 && (w.1 - g.1).abs() <= 1.5 * w.2.max(g.2).max(10.0);
+        let ok = got.iter().any(|g| want.iter().any(|w| near(g, w)));
+        if got.iter().all(|g| want.iter().any(|w| near(g, w))) && !got.is_empty() {
+            t.fwd_all += 1;
+        }
         if ok {
             t.fwd_ok += 1;
         } else {
@@ -354,7 +362,7 @@ fn synctex_against_pdftex() {
     }
     lines.push(all.line("all"));
     eprintln!("SyncTeX, phitex against TeX Live (synctex's answers):\n{}", lines.join("\n"));
-    for b in all.fwd_bad.iter().chain(&all.inv_bad).take(40) {
+    for b in all.fwd_bad.iter().take(30).chain(all.inv_bad.iter().take(40)) {
         eprintln!("  {b}");
     }
     let pct = |a: usize, b: usize| if b == 0 { 100.0 } else { 100.0 * a as f64 / b as f64 };
@@ -406,7 +414,8 @@ fn phitex_sync_answers_as_synctex() {
         let page: Option<usize> = got.lines().find_map(|x| x.strip_prefix("Page:")).and_then(|p| p.trim().parse().ok());
         let v: Option<f64> = got.lines().find_map(|x| x.strip_prefix("v:")).and_then(|p| p.trim().parse().ok());
         fn_ += 1;
-        if want.first().is_some_and(|w| Some(w.0) == page && v.is_some_and(|v| (v - w.1).abs() < 0.01)) {
+        // (synctex's answers come in no particular order: phitex's first is one of them)
+        if want.iter().any(|w| Some(w.0) == page && v.is_some_and(|v| (v - w.1).abs() < 0.01)) {
             fsame += 1;
         }
     }
@@ -475,9 +484,15 @@ fn watch_synctex_word_edit() {
         .output()
         .expect("phitex build runs");
     assert!(out.status.success(), "the cold build failed: {}", String::from_utf8_lossy(&out.stderr));
-    let a = String::from_utf8_lossy(&gunzip(&watched)).replace(&dir.display().to_string(), "DIR");
-    let b = String::from_utf8_lossy(&gunzip(&std::fs::read(cold_dir.join("big.synctex.gz")).expect("the cold SyncTeX file")))
-        .replace(&cold_dir.display().to_string(), "DIR");
+    // (but for the directory in the input names, and so the anchors' byte counts)
+    let norm = |t: &str, d: &Path| {
+        t.replace(&d.display().to_string(), "DIR").lines().filter(|l| !l.starts_with('!')).collect::<Vec<_>>().join("\n")
+    };
+    let a = norm(&String::from_utf8_lossy(&gunzip(&watched)), &dir);
+    let b = norm(
+        &String::from_utf8_lossy(&gunzip(&std::fs::read(cold_dir.join("big.synctex.gz")).expect("the cold SyncTeX file"))),
+        &cold_dir,
+    );
     if a != b {
         let (la, lb): (Vec<&str>, Vec<&str>) = (a.lines().collect(), b.lines().collect());
         let k = la.iter().zip(&lb).position(|(x, y)| x != y).unwrap_or(la.len().min(lb.len()));
