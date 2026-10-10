@@ -69,9 +69,10 @@ pub fn engine(name: &str) -> Result<Engine, String> {
             "{n}: XeTeX on phitex-flow is not there yet (it is agent X's slice); \
              pdflatex, latex, pdftex, etex and tex are"
         )),
-        "luatex" | "lualatex" | "luahbtex" | "lualatex-dev" | "dvilualatex" => {
-            Err(format!("the {n} engine is not supported"))
-        }
+        "luatex" | "lualatex" | "luahbtex" | "lualatex-dev" | "dvilualatex" => Err(format!(
+            "{n} is not on the graph: `phitex build --engine {n}` runs the system's {n} as an external \
+             process (not incremental)"
+        )),
         "pdfetex" => engine("pdftex"),
         "initex" | "virtex" => engine("tex"),
         _ => ENGINES
