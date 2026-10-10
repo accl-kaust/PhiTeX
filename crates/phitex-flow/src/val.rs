@@ -605,6 +605,15 @@ pub fn initial(key: &Key, font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) ->
     initial_in(key, font, etex, false, cs)
 }
 
+/// The mark before a name in the name of `\primitive`'s frozen token (no
+/// document's control sequence begins with it).
+pub const FROZEN_PRIMITIVE: &str = "\u{0}primitive ";
+
+/// XeTeX's primitive of that name (TeX's, e-TeX's or its own).
+pub fn primitive_named(n: &str) -> Option<Prim> {
+    Prim::by_name(n).or_else(|| Prim::by_name_etex(n)).or_else(|| Prim::by_name_xetex(n))
+}
+
 /// [`initial`] for an engine: with `xetex`, XeTeX's IniTeX (xetex.web
 /// §232, §240): XeTeX's primitives named (with e-TeX's), its math codes
 /// (`fam<<24 | class<<21 | usv`: digits class 7, letters class 7 family
@@ -618,12 +627,11 @@ pub fn initial_in(key: &Key, _font: &Arc<Font>, etex: bool, xetex: bool, cs: Opt
             Key::Cs(n) => {
                 let Some(cs) = cs else { return Val::Meaning(Meaning::Undefined) };
                 let n = cs.name(*n);
+                // (`\primitive`'s frozen token: never defined, the
+                // primitive of the name after the mark)
+                let n = n.strip_prefix(FROZEN_PRIMITIVE).unwrap_or(&n);
                 return Val::Meaning(
-                    Prim::by_name(&n)
-                        .or_else(|| Prim::by_name_etex(&n))
-                        .or_else(|| Prim::by_name_xetex(&n))
-                        .or_else(|| Prim::internal(&n))
-                        .map_or(Meaning::Undefined, Meaning::Prim),
+                    primitive_named(n).or_else(|| Prim::internal(n)).map_or(Meaning::Undefined, Meaning::Prim),
                 );
             }
             Key::Mathcode(c) => {

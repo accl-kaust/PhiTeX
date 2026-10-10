@@ -113,9 +113,26 @@ impl Exec<'_> {
                 }
                 Prim::CsName => self.csname(),
                 Prim::Convert(c) => self.convert(c),
-                // (`\primitive`: the name as it is, a gap where it was
-                // redefined: CORE.md)
-                Prim::Xe(Xe::Primitive) => {}
+                // (pdftex.web's `\primitive`: the next token, if it names a
+                // primitive, read as a frozen token that always means that
+                // primitive, whatever the name means now; else as it was)
+                Prim::Xe(Xe::Primitive) => {
+                    let Some(x) = self.next_raw_normal() else { return };
+                    let frozen = match &x {
+                        Tok::Cs(n) => {
+                            let name = self.env.cs().name(*n);
+                            crate::val::primitive_named(&name).is_some().then(|| format!("{}{name}", crate::val::FROZEN_PRIMITIVE))
+                        }
+                        _ => None,
+                    };
+                    match frozen {
+                        Some(f) => {
+                            let t = self.cs(&f);
+                            self.back(t);
+                        }
+                        None => self.back(x),
+                    }
+                }
                 Prim::Xe(x) => self.xe_convert(x),
                 Prim::The => {
                     let toks = self.the_toks();
