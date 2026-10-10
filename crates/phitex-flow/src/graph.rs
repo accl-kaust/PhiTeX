@@ -1828,6 +1828,40 @@ impl Run {
         }
     }
 
+    /// What the run holds, counted (`PHITEX_CENSUS`: where the memory of
+    /// a build goes): its nodes and their sizes, their reads (distinct and
+    /// of outer-ness alone), items, rare parts, and the stacks their states
+    /// hold.
+    pub fn census(&self) -> String {
+        let c = &self.chain;
+        let n = c.nodes.len();
+        let (mut reads, mut outer, mut emit, mut rare, mut texts, mut conds, mut groups) = (0, 0, 0, 0, 0, 0, 0);
+        let mut distinct: FxSet<usize> = FxSet::default();
+        for node in c.nodes.range(0, n) {
+            reads += node.reads.len();
+            for r in node.reads.iter() {
+                if r.field != Field::Whole {
+                    outer += 1;
+                }
+                distinct.insert(Arc::as_ptr(r) as usize);
+            }
+            emit += node.emit.len();
+            rare += usize::from(node.rare.is_some());
+            texts += node.out.texts.len();
+            conds += node.out.conds.len();
+            groups += node.out.groups.len();
+        }
+        format!(
+            "nodes {n} (node {} B, state {} B) reads {reads} (distinct {}, outer-ness {outer}, read {} B) items {emit} rare {rare} texts {texts} conds {conds} groups {groups} reads-before {} lean {}",
+            std::mem::size_of::<Node>(),
+            std::mem::size_of::<RState>(),
+            distinct.len(),
+            std::mem::size_of::<Read>(),
+            self.reads.len(),
+            self.lean.is_some()
+        )
+    }
+
     /// Each name its nodes read (from the piece or from before it) and the
     /// last node reading it: [`Run::reads_after`] as a lookup, for a run
     /// with its nodes (made once per run by whoever asks often).

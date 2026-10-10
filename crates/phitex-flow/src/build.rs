@@ -4153,6 +4153,9 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
         return run.ran;
     }
     let steps = run.ran;
+    if std::env::var_os("PHITEX_CENSUS").is_some() {
+        eprintln!("census piece {k} ran {}: {}", run.ran, run.census());
+    }
     let t = Instant::now();
     let got = Expect::of(&run);
     // (what the piece keeps once it has settled: the run without its nodes)
