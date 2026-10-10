@@ -2369,7 +2369,15 @@ reads, counters and `\@currentlabel`, a chain under `Suspend`); R4 1888 /
 438 the output routine's definitions between nodes, every later piece
 run again once per page (piece 129: 23-26 runs, 23 pages); R5-R6 676 /
 479. Fix of R1's waste (A reviewed): a final settled run that changes
-the sequence ends the round at once (`settle`).
+the sequence ends the round at once (`settle`, b06939f); one that is not
+final yet (a fold read unchecked, its entry not holding) holds the pieces
+after it, their runs stopped (`State::due_at`, de0d20cd). Measured by P
+at `-j 1` (flow 67d83701 + these): tikz 58,619 → 2,487 ms (238k commands
+run for 226k, 905 runs, 2 reruns), c0 54,735 → 1,397 ms, the DVIs
+`latex`'s. Format builds no longer run a piece to 2.4M commands and 50
+GB on a layout about to change. What remains for tikz: 65 rounds, one per
+file it discovers (rounds 1-64 2-90 ms each), and the 65th, past the cap
+of 64, reads every further file inline (519 ms).
 
 **`latex.ltx` is a true chain.** 31.2 s at `-j 1`, 31.1 s at `-j 8`
 (job 7914). Of its 19-20 rounds one holds 27.3 s, and in it one piece
