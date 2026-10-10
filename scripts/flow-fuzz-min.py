@@ -8,7 +8,13 @@ it); a paragraph goes while `BIN --fuzz-classify` gives the same class
 (the part before " | ", and whether the DVI or only the log differs).
 A timeout's reproduction is cut while its last edit alone still does not
 end (`BIN --fuzz-replay FILE --alone` running past HANG seconds, env
-FLOW_MIN_HANG, 60).
+FLOW_MIN_HANG, 60) and the cold builds of its text before and after the
+edit do end (`BIN --fuzz-cold FILE`, in HANG seconds): a cut that makes
+the text itself loop is not the update's hang. When the cold builds
+themselves do not end (a loop of ours with no update) and FLOW_MIN_TEX
+names TRIP's directory, the reproduction is cut while that loop stays
+and the system's `tex` ends on both texts (scripts/flow-fuzz-tex.py): a
+cut that makes TeX loop too is not ours.
 Run it under scripts/sandbox.
 """
 import re
@@ -64,16 +70,38 @@ def cls(path):
 
 def hangs(path):
     try:
+        subprocess.run([binary, '--fuzz-cold', path], capture_output=True, timeout=HANG)
+    except subprocess.TimeoutExpired:
+        return 'the text loops'
+    try:
         subprocess.run([binary, '--fuzz-replay', path, '--alone'], capture_output=True, timeout=HANG)
     except subprocess.TimeoutExpired:
         return 'hangs'
     return 'ends'
 
 
+def cold_loops(path):
+    try:
+        subprocess.run([binary, '--fuzz-cold', path], capture_output=True, timeout=HANG)
+    except subprocess.TimeoutExpired:
+        if TEX:
+            r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'flow-fuzz-tex.py'), TEX, path],
+                               capture_output=True, text=True)
+            if 'before pass1 ends pass2 ends\tafter pass1 ends pass2 ends' not in r.stdout:
+                return 'tex loops too'
+        return 'cold loops'
+    return 'cold ends'
+
+
 import os
 HANG = int(os.environ.get('FLOW_MIN_HANG', '60'))
+TEX = os.environ.get('FLOW_MIN_TEX')
 want = cls(src)
-if want is not None and want.startswith('timeout') and hangs(src) == 'hangs':
+if want is not None and want.startswith('timeout') and TEX and cold_loops(src) == 'cold loops':
+    # (our cold build loops where TeX ends: cut while it does)
+    cls = cold_loops
+    want = 'cold loops'
+elif want is not None and want.startswith('timeout') and hangs(src) == 'hangs':
     # (a hang of the last edit alone: cut while it still hangs)
     cls = hangs
     want = 'hangs'

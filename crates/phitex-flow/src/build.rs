@@ -667,12 +667,14 @@ type FileCache = Mutex<FxMap<Arc<str>, Option<(Arc<str>, Arc<[u8]>)>>>;
 /// lines of the source before each piece.
 struct Given {
     dirs: Arc<Vec<PathBuf>>,
-    /// The lookup instead of `dirs`, as a program ([`Build::set_kpse`]).
+    /// The lookup after `dirs`, as a program ([`Build::set_kpse`]).
     finder: Option<(Arc<dyn Kpse>, Arc<str>)>,
     /// The files given in memory (`Build::set_file`), before the
     /// directories'.
     mem: Arc<FxMap<Arc<str>, Arc<[u8]>>>,
     files: FileCache,
+    /// The files PDF output read through the finder ([`Given::pdf_found`]).
+    pdf: FileCache,
     job: Arc<str>,
     /// The lines of its file before each piece of the sequence.
     bases: Vec<u32>,
@@ -700,6 +702,7 @@ impl Given {
             finder: None,
             mem,
             files: Mutex::default(),
+            pdf: Mutex::default(),
             job,
             bases,
             terminal: None,
@@ -732,24 +735,52 @@ impl Given {
         if let Some(v) = g.get(name) {
             return v.clone();
         }
-        if let Some((f, prog)) = &self.finder {
-            let v = f.find(name, KpseFormat::Tex, prog).and_then(|p| {
-                let b = f.read(&p)?;
-                let shown = if p.starts_with('/') { p } else { format!("./{}", p.trim_start_matches("./")) };
-                Some((Arc::from(shown), b))
-            });
-            g.insert(Arc::from(name), v.clone());
-            return v;
+        // (the directories, the name as it is — with a finder, web2c's
+        // `-output-directory`, tried before kpathsea — then the finder)
+        let v = self
+            .dirs
+            .iter()
+            .enumerate()
+            .find_map(|(k, d)| {
+                let b = std::fs::read(d.join(name)).ok()?;
+                let shown = if k == 0 || d.is_relative() {
+                    format!("./{name}")
+                } else {
+                    d.join(name).to_string_lossy().into_owned()
+                };
+                Some((Arc::from(shown), Arc::from(b)))
+            })
+            .or_else(|| self.by_finder(name, KpseFormat::Tex));
+        g.insert(Arc::from(name), v.clone());
+        v
+    }
+
+    /// File `name` of `format` as the finder finds it, if there is a
+    /// finder: where, as TeX Live shows it, and its bytes.
+    fn by_finder(&self, name: &str, format: KpseFormat) -> Option<(Arc<str>, Arc<[u8]>)> {
+        let (f, prog) = self.finder.as_ref()?;
+        let p = f.find(name, format, prog)?;
+        let b = f.read(&p)?;
+        let shown = if p.starts_with('/') { p } else { format!("./{}", p.trim_start_matches("./")) };
+        Some((Arc::from(shown), b))
+    }
+
+    /// A file PDF output reads (the map file, a font file, an encoding):
+    /// given in memory, else by the finder in the format pdfTeX asks for
+    /// it ([`crate::kpse::pdf_format`]); without a finder, as an input
+    /// file, then below TeX Live's font directories ([`crate::tfm::pdf_file`]).
+    fn pdf_found(&self, name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
+        if self.finder.is_none() {
+            return self.found(name).or_else(|| crate::tfm::pdf_file(name));
         }
-        let v = self.dirs.iter().enumerate().find_map(|(k, d)| {
-            let b = std::fs::read(d.join(name)).ok()?;
-            let shown = if k == 0 || d.is_relative() {
-                format!("./{name}")
-            } else {
-                d.join(name).to_string_lossy().into_owned()
-            };
-            Some((Arc::from(shown), Arc::from(b)))
-        });
+        if let Some(b) = self.mem.get(name) {
+            return Some((Arc::from(format!("./{name}")), b.clone()));
+        }
+        let mut g = self.pdf.lock().expect("pdf files");
+        if let Some(v) = g.get(name) {
+            return v.clone();
+        }
+        let v = self.by_finder(name, crate::kpse::pdf_format(name));
         g.insert(Arc::from(name), v.clone());
         v
     }
@@ -1458,12 +1489,18 @@ impl Build {
     }
 
     /// How a file's name becomes a path (the CLI's: TeX Live's kpathsea,
-    /// `partex-kpse`, as program `prog`: `tex`, `etex`, `pdftex`…),
-    /// instead of the input directories in order. A given of the build: a
-    /// read of `Key::File` is answered as before (the file's bytes), only
-    /// the lookup differs. Files given in memory (`set_file`) come first.
+    /// [`crate::kpse::Kpathsea`], as program `prog`: `tex`, `latex`,
+    /// `pdftex`…): `\input` and `\openin` files (format `tex`) after the
+    /// input directories (the name as it is: web2c's `-output-directory`),
+    /// TFM files (`tfm`; instead of the font directories, until
+    /// `set_font_dirs`) and the files PDF output reads (`map`, `type1
+    /// fonts`, `enc files`…). A given of the build, never a node: a read of
+    /// `Key::File` is answered as before (the file's bytes), only the
+    /// lookup differs. Files given in memory (`set_file`) come first.
     pub fn set_kpse(&mut self, kpse: Arc<dyn Kpse>, prog: &str) {
-        self.finder = Some((kpse, Arc::from(prog)));
+        let prog: Arc<str> = Arc::from(prog);
+        self.fonts = Arc::new(FontFiles::with_kpse(Self::given(&self.font), kpse.clone(), prog.clone()));
+        self.finder = Some((kpse, prog));
     }
 
     /// The job's name (`\jobname`; `texput` until set).
@@ -2821,7 +2858,7 @@ struct PdfFiles<'a> {
 
 impl crate::pdf::fold::Files for PdfFiles<'_> {
     fn get(&mut self, name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
-        self.names.given.found(name).or_else(|| crate::tfm::pdf_file(name))
+        self.names.given.pdf_found(name)
     }
     fn glyph_unicode(&mut self, name: &str) -> Option<crate::pdf::font::unicode::Uni> {
         use crate::pdf::font::unicode::Uni;
