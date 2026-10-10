@@ -982,12 +982,12 @@ states, nodes and steps unchanged in meaning:
   before. The reader now hands out 228M tokens.
 - *An argument is read inside its body's list* (`Level::sub`), not as a
   list of its own pushed above it (tex.web 357 makes it an input level).
-- *Names read before in the piece* (`Scratch::known`, by where a name's
-  spelling is): the read of the definition reaching the next node while
+- *Names read before in the piece* (`Known`, now by the name's number
+  in `Scratch::cs`): the read of the definition reaching the next node while
   no node after it defines the name, a local one while no group opens or
   closes, one from before the piece within its range of nodes; a run of
   fewer than 256 nodes keeps none. Chain lookups: 42.6M → 3.9M.
-- *A name read again in the node* by its slot (`Scratch::names_at`), and
+- *A name read again in the node* (now a stamp by number), and
   no copy of a macro's handle per call.
 Cycles (user, `-j 1`): 161G → 123G; time 59 s → 45 s; 0.76M → 1.0M
 steps/s. big2 (10k steps): reading unchanged within noise (+1.5%
@@ -1002,18 +1002,29 @@ input after it); it hits only on re-runs, and re-runs already keep nodes.
 The memo's purpose is met by in-place bodies and arguments as parts of
 lists. (Carried to the brief by the coordinator.)
 
+*Names by number* (`build::CsTable`, one per build, kept from update
+to update): `Tok::Cs` and `Key::Cs` hold a control sequence's number, a
+per-build alias of its name (two are equal exactly when the names are;
+never a version). A token is 8 bytes and copies no counted handle; a key
+of a name hashes and compares as one word; text shows a name through the
+table (`val::Shown`). Per piece, `Scratch::cs` is a table by number: the
+node's read of the name (a stamp: the first read in a node no longer
+searches the node's reads) and the read the piece keeps of it (`Known`).
+The table is the build's, not the process's (`tests/shapes.rs`: no
+process-wide state). latex.ltx `-j 1`: 135G → 92G cycles, 198G → 171G
+instructions, about 35 s; 1.3M steps/s, 13M tokens/s; peak RSS 3.8 GB.
+
 *The expansion profile now* (latex.ltx, `-j 1`, perf, inclusive): macro
-calls (`expand` → `call`, the argument scans 20%) 42%; integer scanning
-(`scan_int`, `\numexpr`) 34%; `\expandafter` 19%; `\edef`/`\write`
-expanded texts 17%; conditionals 15%; name lookups (`find`) 15%;
-`\the`/token registers 14%; `\csname` 9%; the input lists (`Pending`
-push/pop) 7%; definitions 7%. By self time: `expand` 9%, `Cursor::next`
-9%, `next_raw0` 6%, `find_slow` 6%, `next_x_m` 5%, `tok_meaning` 4%,
-`Pending::pop` 3%, `Key::eq` 3%, the allocator 4%. What remains is the
-per-token path itself: a token is an `Arc` name (two atomic counts per
-copy), a meaning a cloned value, a first read in a node a search of the
-node's reads; an interned name (a number, with the meaning table indexed
-by it) is the next step.
+calls (`expand` → `call`, argument scans included) 45%; integer scanning
+(`scan_int`, `\numexpr`) 32%; `\expandafter` 25%; `\string`-like
+conversions 16%; `\edef`/`\write` expanded texts 15%; conditionals 14%;
+`\the`/token registers 14%; name lookups (`find`) 10%; `\csname` 9%; the
+input lists (`Pending` pop) 8%; definitions 6%. By self time: `expand` 11%,
+`Cursor::next` 10%, `next_raw0` 6%, `Pending::pop` 5%, the allocator 4%,
+`next_x_m` 3%, `Cursor::arg` 3%, `next_raw` 3%, `Chain::resolve` 3%,
+`Key::eq` 3%. What remains is reading itself (a token at a time through
+the input lists) and the lists' cells (an allocation per macro call); a
+meaning is still cloned per lookup (a macro's handle).
 
 **Gaps left for the core (A), with repros.**
 1. *A file written and read back in one run.* `texsys.cfg` writes

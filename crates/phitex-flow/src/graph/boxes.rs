@@ -267,7 +267,7 @@ impl Exec<'_> {
                 }
                 (t, m) = self.nonblank_nonrelax()?;
                 if !prefixable(&m) {
-                    self.err(format!("You can't use a prefix with `{t}'"));
+                    self.err(format!("You can't use a prefix with `{}'", self.shown(&t)));
                     self.back(t);
                     continue 'next;
                 }

@@ -18,8 +18,10 @@ impl Exec<'_> {
     pub(super) fn new_font(&mut self, global: bool) {
         let Some(key) = self.r_token() else { return };
         let ident: Arc<str> = match &key {
-            Key::Cs(n) if n.is_empty() => Arc::from("FONT"),
-            Key::Cs(n) => n.clone(),
+            Key::Cs(n) => {
+                let s = self.env.cs().name(*n);
+                if s.is_empty() { Arc::from("FONT") } else { s }
+            }
             Key::Active(c) => Arc::from(format!("FONT{c}")),
             _ => Arc::from("FONT"),
         };
@@ -201,7 +203,7 @@ impl Exec<'_> {
     /// meaning is that font unless it was redefined since: CORE.md).
     pub(super) fn font_ident_tok(&mut self, f: &Font) -> Tok {
         let n = self.font_ident(f);
-        Tok::Cs(n)
+        Tok::Cs(self.cs_of(&n))
     }
 
     /// `\textfont n` and friends.

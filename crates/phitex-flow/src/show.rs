@@ -43,6 +43,8 @@ pub struct Ctx {
     pub breadth: i32,
     /// `\newlinechar`: printing that character ends the line (tex.web 59).
     pub newline: i32,
+    /// The control sequences' names.
+    pub cs: Arc<crate::build::CsTable>,
 }
 
 impl Ctx {
@@ -623,7 +625,8 @@ fn show_toks_plain(out: &mut String, toks: &[Tok], cx: &Ctx) {
     for t in toks {
         match t {
             Tok::Cs(n) => {
-                cx.esc(out, n);
+                let n = cx.cs.name(*n);
+                cx.esc(out, &n);
                 if n.chars().count() != 1 || n.chars().all(|c| c.is_ascii_alphabetic()) {
                     out.push(' ');
                 }

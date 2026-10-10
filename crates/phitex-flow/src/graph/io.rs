@@ -326,7 +326,7 @@ impl Exec<'_> {
             }
             self.err("Missing control sequence inserted".into());
             self.back(t);
-            break Key::Cs(Arc::from(INACCESSIBLE));
+            break Key::Cs(self.env.cs().id(INACCESSIBLE));
         };
         let m = if (0..=15).contains(&n) { n as u8 } else { 16 };
         let body = self.read_toks(m);
@@ -342,7 +342,7 @@ impl Exec<'_> {
         if !self.keyword("to") {
             self.err("Missing `to' inserted".into());
         }
-        let key = self.r_token().unwrap_or_else(|| Key::Cs(Arc::from(INACCESSIBLE)));
+        let key = self.r_token().unwrap_or_else(|| Key::Cs(self.env.cs().id(INACCESSIBLE)));
         let m = if (0..=15).contains(&n) { n as u8 } else { 16 };
         let stream = Key::ReadStream(m);
         let line: String = match self.get(&stream) {

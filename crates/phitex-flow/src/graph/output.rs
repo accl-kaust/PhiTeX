@@ -121,7 +121,7 @@ pub fn output_entry(page: &Page, reads: &OutputReads, output: &[Tok]) -> RState 
         text: Arc::from(output),
     };
     let mut st = RState::start();
-    let begin: Arc<[Tok]> = Arc::from([Tok::Cs(Arc::from("\u{0}output"))]);
+    let begin: Arc<[Tok]> = Arc::from([Tok::Cs(crate::build::CS_OUTPUT)]);
     st.pending = Pending::default();
     st.pending.push((fire.text.clone(), 0, false));
     st.pending.push((begin, 0, false));

@@ -56,7 +56,7 @@ use crate::page::{
 };
 use crate::show::{RAW, SP};
 use crate::tfm::{Font, FontFiles};
-use crate::val::{Key, Meaning, Tok, TokPar, Val, initial};
+use crate::val::{Key, Meaning, Shown, Tok, TokPar, Val, initial};
 
 /// What a read does when the definition it finds is being remade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -358,6 +358,8 @@ pub struct Build {
     /// definitions at each place it fired (by the piece and node), and its
     /// routines' runs.
     fold: FoldKept,
+    /// The control sequences' names met in the build, by number.
+    cs: Arc<CsTable>,
     /// The ids of the elements between a piece's nodes (fires).
     virt: FxMap<(PieceId, u32), PieceId>,
     /// Where `\input` and `\openin` find files, and the job's name.
@@ -405,6 +407,82 @@ struct Memo {
 }
 
 const SHARDS: usize = 64;
+
+// ------------------------------------------------------------ names
+
+/// Control sequences' names and their numbers (`Tok::Cs`, `Key::Cs`): one
+/// table for a build, filled as names are met, kept from update to update.
+/// A number is an alias of its name within the build, never part of a
+/// version: two numbers are equal exactly when the names are, and a value's
+/// content is the same whichever number its names were given.
+pub struct CsTable {
+    ids: Vec<RwLock<FxMap<Arc<str>, u32>>>,
+    names: RwLock<Vec<Arc<str>>>,
+}
+
+/// Names given their numbers first, in this order ([`CS_PAR`]…).
+const CS_FIRST: [&str; 3] = ["par", "nullfont", "\u{0}output"];
+
+/// `\par`'s number.
+pub const CS_PAR: u32 = 0;
+/// `\nullfont`'s number.
+pub const CS_NULLFONT: u32 = 1;
+/// The output routine's opening command's number (`graph::output`).
+pub const CS_OUTPUT: u32 = 2;
+
+impl std::fmt::Debug for CsTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CsTable")
+    }
+}
+
+/// A build's table is itself.
+impl PartialEq for CsTable {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+impl Eq for CsTable {}
+
+impl Default for CsTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CsTable {
+    pub fn new() -> CsTable {
+        let t = CsTable { ids: (0..SHARDS).map(|_| RwLock::default()).collect(), names: RwLock::default() };
+        for n in CS_FIRST {
+            t.id(n);
+        }
+        t
+    }
+
+    /// The number of control sequence `name`.
+    pub fn id(&self, name: &str) -> u32 {
+        let s = (hash_of(name) % SHARDS as u64) as usize;
+        if let Some(&i) = self.ids[s].read().expect("names").get(name) {
+            return i;
+        }
+        let mut ids = self.ids[s].write().expect("names");
+        if let Some(&i) = ids.get(name) {
+            return i;
+        }
+        let a: Arc<str> = Arc::from(name);
+        let mut names = self.names.write().expect("names");
+        let i = u32::try_from(names.len()).expect("fewer than 2^32 names");
+        names.push(a.clone());
+        ids.insert(a, i);
+        i
+    }
+
+    /// The name of control sequence number `id`.
+    pub fn name(&self, id: u32) -> Arc<str> {
+        self.names.read().expect("names").get(id as usize).cloned().unwrap_or_else(|| Arc::from(""))
+    }
+}
 
 /// The input files read in a build, by name (`None`: not found): where
 /// each was found, as TeX Live shows it, and its bytes.
@@ -630,6 +708,8 @@ struct Names {
     /// The same, for the names ever defined between a piece's nodes (by
     /// the page builder or an output routine: never cleared).
     inner: Vec<AtomicU64>,
+    /// The build's control sequence names.
+    cs: Arc<CsTable>,
     /// Whether any is (any bit of `inner`).
     any_inner: std::sync::atomic::AtomicBool,
     /// The names the build answers itself (files, the job, line bases).
@@ -639,8 +719,9 @@ struct Names {
 }
 
 impl Names {
-    fn new(given: Given, etex: bool) -> Names {
+    fn new(given: Given, etex: bool, cs: Arc<CsTable>) -> Names {
         Names {
+            cs,
             shards: (0..SHARDS).map(|_| RwLock::default()).collect(),
             defined: (0..SHARDS).map(|_| AtomicU64::new(0)).collect(),
             inner: (0..SHARDS).map(|_| AtomicU64::new(0)).collect(),
@@ -672,7 +753,7 @@ impl Names {
         }
         let (s, bit) = Names::route(key);
         if self.defined[s].load(Ordering::Acquire) & bit == 0 {
-            return (None, initial(key, font, self.etex), 0, END);
+            return (None, initial(key, font, self.etex, Some(&self.cs)), 0, END);
         }
         let g = self.shards[s].read().expect("names");
         if let Some(v) = g.get(key) {
@@ -686,9 +767,9 @@ impl Names {
                 let lo = if p.0 == at.0 { p.1 + 1 } else { 0 };
                 return (Some(*p), val.clone(), lo, hi);
             }
-            return (None, initial(key, font, self.etex), 0, hi);
+            return (None, initial(key, font, self.etex, Some(&self.cs)), 0, hi);
         }
-        (None, initial(key, font, self.etex), 0, END)
+        (None, initial(key, font, self.etex, Some(&self.cs)), 0, END)
     }
 
     /// Whether `key` may be defined between a piece's nodes.
@@ -946,6 +1027,7 @@ impl Build {
             rests: FxMap::default(),
             fold: FoldKept::default(),
             virt: FxMap::default(),
+            cs: Arc::new(CsTable::new()),
         }
     }
 
@@ -1328,6 +1410,7 @@ impl Build {
                 bases,
             ),
             opts.etex,
+            self.cs.clone(),
         );
         for (k, ps) in p.iter().enumerate() {
             if let Some(r) = ps.run.as_ref().or(ps.prev.as_ref().map(|(r, _, _)| r)) {
@@ -1732,7 +1815,7 @@ impl Build {
                     k,
                 };
                 let r = regen(&mut env, &ps.text, r);
-                dump_piece(&mut dump, k, ps, &r);
+                dump_piece(&mut dump, k, ps, &r, &sh.names.cs);
             }
         }
         if let Some(sc) = &st.scan {
@@ -1825,6 +1908,10 @@ fn regen(env: &mut JoinEnv<'_>, text: &[char], r: &Arc<Run>) -> Arc<Run> {
 }
 
 impl Env for JoinEnv<'_> {
+    fn cs(&self) -> &Arc<CsTable> {
+        &self.names.cs
+    }
+
     fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
         self.fonts.get(name)
     }
@@ -1856,7 +1943,7 @@ impl Env for JoinEnv<'_> {
     }
 }
 
-fn dump_piece(out: &mut String, k: usize, ps: &PState, r: &Run) {
+fn dump_piece(out: &mut String, k: usize, ps: &PState, r: &Run, cs: &CsTable) {
     let how = if ps.runs == 0 { "kept" } else { "ran" };
     let _ = writeln!(
         out,
@@ -1871,24 +1958,24 @@ fn dump_piece(out: &mut String, k: usize, ps: &PState, r: &Run) {
         ps.text.iter().take(40).collect::<String>()
     );
     for (i, n) in r.chain.nodes.iter().enumerate() {
-        let _ = write!(out, "  n{i} {:?} {}", n.kind, n.cmd);
+        let _ = write!(out, "  n{i} {:?} {}", n.kind, Shown(&n.cmd, cs));
         for rd in n.reads.iter() {
             match rd.src {
                 Src::Node(d) => {
-                    let _ = write!(out, " | reads {} = {} from n{d}", rd.key, rd.val);
+                    let _ = write!(out, " | reads {} = {} from n{d}", Shown(&rd.key, cs), Shown(&rd.val, cs));
                 }
                 Src::Piece(p) => {
-                    let _ = write!(out, " | reads {} = {} from piece id {p}", rd.key, rd.val);
+                    let _ = write!(out, " | reads {} = {} from piece id {p}", Shown(&rd.key, cs), Shown(&rd.val, cs));
                 }
                 Src::Initial => {
-                    let _ = write!(out, " | reads {} = {} initial", rd.key, rd.val);
+                    let _ = write!(out, " | reads {} = {} initial", Shown(&rd.key, cs), Shown(&rd.val, cs));
                 }
             }
         }
         if let Some(phi) = n.phi() {
             let _ = write!(out, " | φ test={}", phi.test);
             for (key, after, before) in &phi.keys {
-                let _ = write!(out, " | {key} = φ({after} | {before})");
+                let _ = write!(out, " | {} = φ({} | {})", Shown(key, cs), Shown(after, cs), Shown(before, cs));
             }
         }
         for d in n.defs() {
@@ -1896,8 +1983,8 @@ fn dump_piece(out: &mut String, k: usize, ps: &PState, r: &Run) {
                 out,
                 " | defines {}{} = {}",
                 if d.global { "global " } else { "" },
-                d.key,
-                d.val
+                Shown(&d.key, cs),
+                Shown(&d.val, cs)
             );
         }
         out.push('\n');
@@ -2941,6 +3028,10 @@ impl PieceEnv<'_> {
 }
 
 impl Env for PieceEnv<'_> {
+    fn cs(&self) -> &Arc<CsTable> {
+        &self.sh.names.cs
+    }
+
     fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
         self.sh.fonts.get(name)
     }
@@ -3324,6 +3415,10 @@ struct RoutineEnv<'a> {
 }
 
 impl Env for RoutineEnv<'_> {
+    fn cs(&self) -> &Arc<CsTable> {
+        &self.fold.sh.names.cs
+    }
+
     fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
         self.fold.sh.fonts.get(name)
     }
@@ -3476,8 +3571,8 @@ mod tests {
             Arc::default(),
             Vec::new(),
         );
-        let (names, font) = (Names::new(given, true), font());
-        let x = Key::Cs("x".into());
+        let (names, font) = (Names::new(given, true, Arc::new(CsTable::new())), font());
+        let x = Key::Cs(names.cs.id("x"));
         names.set((0, END), &x, Some(&Val::Int(1)));
         names.set((2, 5), &x, Some(&Val::Int(2)));
         names.set((2, END), &x, Some(&Val::Int(3)));
