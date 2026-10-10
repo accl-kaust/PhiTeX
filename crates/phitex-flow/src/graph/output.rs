@@ -262,7 +262,7 @@ pub fn run_routine(entry: &RState, env: &mut dyn Env) -> Run {
         .defs_of
         .iter()
         .filter_map(|(k, v)| match k {
-            Key::FontLoaded(f) => v.first().map(|&i| (i, f.clone())),
+            Key::FontLoaded(f) => v.first().map(|&(i, _)| (i, f.clone())),
             _ => None,
         })
         .collect();
@@ -410,9 +410,9 @@ impl Exec<'_> {
         let og = chain.open_groups().last().copied();
         let mut local = false;
         if let Some(ds) = chain.defs_of.get(key) {
-            for &d in ds.iter().rev() {
+            for &(d, j) in ds.iter().rev() {
                 let n = &chain.nodes[d as usize];
-                let Some(def) = n.defs().iter().rev().find(|x| x.key == *key) else { continue };
+                let def = &n.defs()[j as usize];
                 if def.global {
                     return def.val.clone();
                 }

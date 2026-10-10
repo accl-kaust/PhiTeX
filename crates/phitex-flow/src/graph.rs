@@ -1405,8 +1405,11 @@ pub struct Chain {
     /// piece's or a rest-of-line piece's entry edge, or an output
     /// routine's run (`output::output_entry`).
     entry: Option<Arc<RState>>,
-    /// Nodes defining each key, in order.
-    defs_of: FxMap<Key, Vec<u32>>,
+    /// Nodes defining each key, in order, each once, with the index of
+    /// its last definition of the key in its `defs` (the one that
+    /// counts): resolving a name reads that definition, never scans a
+    /// node's definitions.
+    defs_of: FxMap<Key, Vec<(u32, u32)>>,
     /// For each `Open` node, the index of its `Close`, once there is one.
     close_of: FxMap<u32, u32>,
     open: Vec<u32>,
@@ -1458,14 +1461,12 @@ impl Chain {
     /// node): the latest still in scope.
     pub fn resolve(&self, key: &Key, i: usize) -> Option<(u32, Val)> {
         let ds = self.defs_of.get(key)?;
-        for &d in ds.iter().rev() {
+        for &(d, j) in ds.iter().rev() {
             if d as usize >= i {
                 continue;
             }
             let n = &self.nodes[d as usize];
-            let Some(def) = n.defs().iter().rev().find(|x| x.key == *key) else {
-                continue;
-            };
+            let def = &n.defs()[j as usize];
             let closed = self
                 .def_group(n, def)
                 .is_some_and(|g| self.close_of.get(&g).is_some_and(|&c| (c as usize) < i));
@@ -1491,13 +1492,20 @@ impl Chain {
     /// one open; `None` global, or made at the piece's outer level.
     pub fn scope_of(&self, d: u32, key: &Key) -> Option<u16> {
         let n = &self.nodes[d as usize];
-        let def = n.defs().iter().rev().find(|x| x.key == *key)?;
+        let def = &n.defs()[self.def_index(d, key)?];
         if def.global {
             return None;
         }
         let g = self.def_group(n, def)?;
         let p = self.open.iter().rposition(|&o| o == g)?;
         Some((self.open.len() - 1 - p) as u16)
+    }
+
+    /// The index in node `d`'s `defs` of its last definition of `key`.
+    fn def_index(&self, d: u32, key: &Key) -> Option<usize> {
+        let ds = self.defs_of.get(key)?;
+        let p = ds.partition_point(|x| x.0 <= d).checked_sub(1)?;
+        (ds[p].0 == d).then_some(ds[p].1 as usize)
     }
 
     /// The nodes with a paragraph, in order (`Run::paras` is theirs).
@@ -1547,8 +1555,12 @@ impl Chain {
             _ => {}
         }
         if let Some(r) = &n.rare {
-            for d in &r.defs {
-                self.defs_of.entry(d.key.clone()).or_default().push(i);
+            for (j, d) in r.defs.iter().enumerate() {
+                let v = self.defs_of.entry(d.key.clone()).or_default();
+                match v.last_mut() {
+                    Some(l) if l.0 == i => l.1 = j as u32,
+                    _ => v.push((i, j as u32)),
+                }
             }
             if r.para.is_some() {
                 self.para_at.push(i);
@@ -1581,7 +1593,7 @@ impl Chain {
             s..e
         };
         for (k, v) in &old.defs_of {
-            let r = within(v);
+            let r = v.partition_point(|x| (x.0 as usize) < a)..v.partition_point(|x| (x.0 as usize) < b);
             if !r.is_empty() {
                 self.defs_of
                     .entry(k.clone())
@@ -1674,14 +1686,9 @@ impl Run {
         let c = &self.chain;
         let mut defs: Vec<(Key, u32, u32, Val)> = Vec::new();
         for (key, ds) in &c.defs_of {
-            let mut last = None;
-            for &d in ds {
-                if last == Some(d) {
-                    continue;
-                }
-                last = Some(d);
+            for &(d, j) in ds {
                 let n = &c.nodes[d as usize];
-                let Some(def) = n.defs().iter().rev().find(|x| x.key == *key) else { continue };
+                let def = &n.defs()[j as usize];
                 // (`Chain::resolve`: a local definition reaches up to its
                 // group's close, that node included)
                 let until = if def.global {
@@ -2569,7 +2576,7 @@ pub fn run_piece(
         .defs_of
         .iter()
         .filter_map(|(k, v)| match k {
-            Key::FontLoaded(f) => v.first().map(|&i| (i, f.clone())),
+            Key::FontLoaded(f) => v.first().map(|&(i, _)| (i, f.clone())),
             _ => None,
         })
         .collect();
