@@ -94,10 +94,7 @@ impl Exec<'_> {
     /// One expansion step of `t`, whose meaning is `m` (tex.web 366).
     pub(super) fn expand(&mut self, t: &Tok, m: &Meaning) {
         match m {
-            Meaning::Macro(mac) => {
-                let mac = mac.clone();
-                self.call(t, &mac);
-            }
+            Meaning::Macro(mac) => self.call(t, mac),
             Meaning::Undefined => self.err(format!("Undefined control sequence {t}")),
             Meaning::Prim(p) => match *p {
                 Prim::If(_) | Prim::Fi | Prim::Else | Prim::Or | Prim::Unless => self.conditional(*p, t),
