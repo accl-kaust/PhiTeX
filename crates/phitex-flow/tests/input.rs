@@ -234,3 +234,37 @@ fn input_edits_are_cold_builds() {
         }
     }
 }
+
+/// A settled run that reads a file changes the sequence: the round ends
+/// there, and no piece after it runs on the old layout (where the names
+/// the file defines are not defined yet). Every body piece runs once.
+#[test]
+fn a_file_read_stops_the_pieces_after_it() {
+    let mut main = String::from(
+        "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6 \\font\\tenrm=cmr10 \\tenrm \\tolerance=200 \\linepenalty=10\n\
+         \\parindent=20pt \\baselineskip=12pt \\topskip=10pt \\maxdepth=4pt \\parfillskip=0pt plus 1fil\n\
+         \\hsize=300pt \\vsize=200pt\n\n\\input defs \n\n",
+    );
+    for k in 0..60 {
+        main.push_str(&format!("Word \\x\\ number {k}.\n\n"));
+    }
+    main.push_str("\\end\n");
+    let files = vec![("defs.tex", String::from("\\def\\x{X}\n\n\\def\\y{Y}\n"))];
+    let base = build_with(&files).update(&main, Options::default());
+    assert!(base.errors.is_empty(), "{:?}", base.errors);
+    assert!(
+        base.stats.ran <= base.stats.pieces + 4,
+        "pieces ran on the layout before the file: {} runs of {} pieces",
+        base.stats.ran,
+        base.stats.pieces
+    );
+    for reads in [phitex_flow::Reads::Suspend, phitex_flow::Reads::Speculate] {
+        for threads in [2, 8] {
+            for order in [phitex_flow::Order::Priority, phitex_flow::Order::Random(1), phitex_flow::Order::Random(5)] {
+                let o = build_with(&files).update(&main, Options { threads, reads, order, ..Options::default() });
+                assert!(o.errors.is_empty(), "{threads} {reads:?} {order:?}: {:?}", o.errors);
+                assert!(o.dvi == base.dvi, "{threads} {reads:?} {order:?}: another DVI");
+            }
+        }
+    }
+}

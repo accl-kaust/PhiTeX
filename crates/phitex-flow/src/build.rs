@@ -3987,6 +3987,24 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
                 restructure_now(g, sh);
                 return true;
             }
+            // (a run reading a file, ending its file or stopping where the
+            // layout did not say, final — no fold read unchecked, entered as
+            // its piece is: nothing can mark it again and give back its old
+            // `got` —: the pieces after it are laid out again, and none runs
+            // on the old layout, where the names the file defines are not
+            // defined yet (biglatex: the body ran 1.35 s before its class
+            // was read, all of it thrown away). The runs in progress after
+            // it stop; what they finished is kept as at any round's end.)
+            let fin = !g.p[k].fold_unchecked && g.p[k].run.as_ref().is_some_and(|r| entry_holds(g, k, r));
+            if fin {
+                for &q in &g.running {
+                    if q > k {
+                        sh.cancel[q].store(true, Ordering::Relaxed);
+                    }
+                }
+                restructure_now(g, sh);
+                return true;
+            }
             g.restructure_due = true;
         }
         g.settled += 1;
