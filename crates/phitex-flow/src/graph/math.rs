@@ -32,8 +32,6 @@ use crate::val::{DimenPar, Glue, GluePar, IntPar, Key, Mat, MathP, Meaning, Prim
 
 /// `max_dimen`.
 const MAX_DIMEN: i32 = 0o7_777_777_777;
-/// §1151: `var_code`.
-const VAR_CODE: i32 = 0x7000;
 
 /// Where a subformula's list goes: a field of the last noad of the
 /// enclosing list, and whether that noad is an ord noad (§1186).
@@ -115,6 +113,20 @@ impl MathEnv for Reads<'_, '_> {
     fn skew_char(&mut self, f: &Arc<Font>) -> i32 {
         self.0.int(&Key::SkewChar(f.key.clone()))
     }
+    fn native_char_glyph(&mut self, f: &Arc<Font>, c: u32) -> u16 {
+        // (`new_native_character`: the font's mapping, its direction as
+        // the main loop defined it, a lost character warned of)
+        let w = self.0.native_character(f, c);
+        w.glyphs.first().map_or(0, |g| g.gid)
+    }
+}
+
+/// A TeX math code (15 bits, "8000 active) in XeTeX's form.
+fn xe_form(c: i32) -> i32 {
+    if c >= 0x8000 {
+        return 0x1F_FFFF;
+    }
+    ((((c % 0x1000) / 0x100) as u32) << 24) as i32 + ((c / 0x1000) << 21) + (c % 0x100)
 }
 
 impl Exec<'_> {
@@ -128,34 +140,51 @@ impl Exec<'_> {
         }
         match m {
             Meaning::Char(11 | 12, c) => {
-                let v = self.mathcode(*c);
+                let v = self.math_code_x(*c);
                 self.set_math_char(v, *c);
             }
             Meaning::CharGiven(c) => {
                 let ch = char::from_u32(*c).unwrap_or('\0');
-                let v = self.mathcode(ch);
+                let v = self.math_code_x(ch);
                 self.set_math_char(v, ch);
             }
-            Meaning::MathCharGiven(v) => self.set_math_char(*v as i32, '\0'),
-            Meaning::XMathCharGiven(v) => {
-                let v = self.xe_tex_mathcode(*v as i32);
-                self.set_math_char(v, '\0');
-            }
+            Meaning::MathCharGiven(v) => self.set_math_char(xe_form(*v as i32), '\0'),
+            Meaning::XMathCharGiven(v) => self.set_math_char(*v as i32, '\0'),
             Meaning::Prim(Prim::Char) => {
                 let c = self.scan_char_num();
                 let ch = char::from_u32(c as u32).unwrap_or('\0');
-                let v = self.mathcode(ch);
+                let v = self.math_code_x(ch);
                 self.set_math_char(v, ch);
             }
             Meaning::Prim(Prim::Xe(Xe::MathCharNum(k))) => {
-                // (`\Umathcharnum`, `\Umathchar`: XeTeX's form, the list's
-                // characters TeX's: CORE.md, OpenType math)
+                // (`\Umathcharnum`, `\Umathchar`)
                 let v = self.scan_xe_math_char(*k);
-                let v = self.xe_tex_mathcode(v);
                 self.set_math_char(v, '\0');
             }
-            Meaning::Prim(Prim::Xe(x @ (Xe::Delimiter | Xe::Radical | Xe::MathAccent))) => {
-                self.err(format!("\\{} is not supported yet", Prim::Xe(*x).name()));
+            Meaning::Prim(Prim::Xe(Xe::Delimiter)) => {
+                // (`\Udelimiter class fam usv` as a character)
+                let v = self.scan_xe_math_char(2);
+                self.set_math_char(v, '\0');
+            }
+            Meaning::Prim(Prim::Xe(Xe::Radical)) => {
+                // (xetex.web: `\Uradical fam usv`, then the nucleus)
+                let fam = self.scan_math_fam_int();
+                let u = self.scan_usv_num();
+                let d = Delim::from_code(0x4000_0000 + fam * 0x20_0000 + u);
+                self.noad_with_nucleus(Noad::new(NK::Radical(d)), false);
+            }
+            Meaning::Prim(Prim::Xe(Xe::MathAccent)) => {
+                // (xetex.web `math_ac`: `\Umathaccent [fixed|bottom [fixed]]
+                // class fam usv`)
+                let mut sub = 0;
+                if self.keyword("fixed") {
+                    sub = mlist::FIXED_ACC;
+                } else if self.keyword("bottom") {
+                    sub = if self.keyword("fixed") { mlist::BOTTOM_ACC + mlist::FIXED_ACC } else { mlist::BOTTOM_ACC };
+                }
+                let v = self.scan_xe_math_char(2);
+                let fam = self.var_fam_x(v);
+                self.noad_with_nucleus(Noad::new(NK::Accent { fam, ch: (v & 0x1F_FFFF) as u32, sub }), false);
             }
             Meaning::Char(1, _) => {
                 // (§1154: a new ord noad, its nucleus the subformula)
@@ -203,11 +232,11 @@ impl Exec<'_> {
         match x {
             MathP::MathChar => {
                 let v = self.scan_fifteen_bit_int();
-                self.set_math_char(v, '\0');
+                self.set_math_char(xe_form(v), '\0');
             }
             MathP::Delimiter => {
                 let v = self.scan_twenty_seven_bit_int();
-                self.set_math_char(v / 0o10_000, '\0');
+                self.set_math_char(xe_form(v / 0o10_000), '\0');
             }
             MathP::Comp(c) => {
                 // (§1158)
@@ -229,9 +258,9 @@ impl Exec<'_> {
             }
             MathP::Accent => {
                 // (§1165)
-                let v = self.scan_fifteen_bit_int();
-                let fam = self.var_fam(v);
-                self.noad_with_nucleus(Noad::new(NK::Accent { fam, ch: (v % 256) as u8 }), false);
+                let v = xe_form(self.scan_fifteen_bit_int());
+                let fam = self.var_fam_x(v);
+                self.noad_with_nucleus(Noad::new(NK::Accent { fam, ch: (v & 0x1F_FFFF) as u32, sub: 0 }), false);
             }
             MathP::Vcenter => self.vcenter(),
             MathP::Style(s) => self.emit.push(mlist::item(MItem::Style(s))),
@@ -338,84 +367,85 @@ impl Exec<'_> {
         self.st.prev_graf = 0;
     }
 
-    /// `\fam` if it is a family (`fam_in_range`).
+    /// `\fam` if it is a family (`fam_in_range`: XeTeX's 256).
     fn cur_fam(&mut self) -> Option<u8> {
         let f = self.int_par(IntPar::Fam);
-        (0..16).contains(&f).then_some(f as u8)
+        let n = if self.xetex { 256 } else { 16 };
+        (0..n).contains(&f).then_some(f as u8)
     }
 
-    /// The family of a math code: `\fam` for a variable one (§1151).
-    fn var_fam(&mut self, c: i32) -> u8 {
-        if c >= VAR_CODE
+    /// The math code of `ch` in XeTeX's form (`fam<<24 | class<<21 |
+    /// usv`, active "1FFFFF), TeX's 15 bits converted.
+    fn math_code_x(&mut self, ch: char) -> i32 {
+        let v = self.int(&Key::Mathcode(ch));
+        if self.xetex { v } else { xe_form(v) }
+    }
+
+    /// The family of a math code in XeTeX's form: `\fam` for a variable
+    /// one (class 7, §1151).
+    fn var_fam_x(&mut self, c: i32) -> u8 {
+        if (c >> 21) & 7 == 7
             && let Some(f) = self.cur_fam()
         {
             return f;
         }
-        ((c / 256) % 16) as u8
+        (c as u32 >> 24) as u8
     }
 
-    /// §1155: `set_math_char`.
+    /// §1155 (xetex.web `set_math_char`): a noad for math code `c` in
+    /// XeTeX's form; an active one reads `ch` as an active character.
     fn set_math_char(&mut self, c: i32, ch: char) {
-        if c >= 0o100_000 {
+        if c & 0x1F_FFFF == 0x1F_FFFF {
             // (§1152: the character as an active one)
             self.back(Tok::Active(ch));
             return;
         }
-        let fam = self.var_fam(c);
-        let kind = if c >= VAR_CODE { NK::Ord } else { NK::class(c) };
+        let fam = self.var_fam_x(c);
+        let class = (c >> 21) & 7;
+        let kind = if class == 7 { NK::Ord } else { NK::comp(class as u8) };
         let mut n = Noad::new(kind);
-        n.nucleus = Field::Char { fam, ch: (c % 256) as u8 };
+        n.nucleus = Field::Char { fam, ch: (c & 0x1F_FFFF) as u32 };
         self.emit.push(mlist::item(MItem::Noad(n)));
     }
 
-    /// §1151: `scan_math`: a math character's field, or `None` when a
-    /// subformula follows (the next node opens its group).
+    /// §1151 (xetex.web `scan_math`): a math character's field, or `None`
+    /// when a subformula follows (the next node opens its group).
     fn scan_math(&mut self, target: Target) -> Option<Field> {
         loop {
             let (t, m) = self.nonblank_nonrelax()?;
+            let mut ch = '\0';
             let c = match m {
-                Meaning::Char(11 | 12, ch) => {
-                    let c = self.mathcode(ch);
-                    if c == 0o100_000 {
-                        self.back(Tok::Active(ch));
-                        continue;
-                    }
-                    c
+                Meaning::Char(11 | 12, x) => {
+                    ch = x;
+                    self.math_code_x(x)
                 }
                 Meaning::CharGiven(c) => {
-                    let ch = char::from_u32(c).unwrap_or('\0');
-                    let c = self.mathcode(ch);
-                    if c == 0o100_000 {
-                        self.back(Tok::Active(ch));
-                        continue;
-                    }
-                    c
+                    ch = char::from_u32(c).unwrap_or('\0');
+                    self.math_code_x(ch)
                 }
                 Meaning::Prim(Prim::Char) => {
                     let c = self.scan_char_num();
-                    let ch = char::from_u32(c as u32).unwrap_or('\0');
-                    let c = self.mathcode(ch);
-                    if c == 0o100_000 {
-                        self.back(Tok::Active(ch));
-                        continue;
-                    }
-                    c
+                    ch = char::from_u32(c as u32).unwrap_or('\0');
+                    self.math_code_x(ch)
                 }
-                Meaning::Prim(Prim::Math(MathP::MathChar)) => self.scan_fifteen_bit_int(),
-                Meaning::Prim(Prim::Xe(Xe::MathCharNum(k))) => {
-                    let v = self.scan_xe_math_char(k);
-                    self.xe_tex_mathcode(v)
-                }
-                Meaning::MathCharGiven(v) => v as i32,
-                Meaning::XMathCharGiven(v) => self.xe_tex_mathcode(v as i32),
-                Meaning::Prim(Prim::Math(MathP::Delimiter)) => self.scan_twenty_seven_bit_int() / 0o10_000,
+                Meaning::Prim(Prim::Math(MathP::MathChar)) => xe_form(self.scan_fifteen_bit_int()),
+                Meaning::Prim(Prim::Xe(Xe::MathCharNum(k))) => self.scan_xe_math_char(k),
+                Meaning::MathCharGiven(v) => xe_form(v as i32),
+                Meaning::XMathCharGiven(v) => v as i32,
+                Meaning::Prim(Prim::Math(MathP::Delimiter)) => xe_form(self.scan_twenty_seven_bit_int() / 0o10_000),
+                Meaning::Prim(Prim::Xe(Xe::Delimiter)) => self.scan_xe_math_char(2),
                 _ => {
                     self.open_sub_later(target, t);
                     return None;
                 }
             };
-            let fam = self.var_fam(c);
-            return Some(Field::Char { fam, ch: (c % 256) as u8 });
+            if c & 0x1F_FFFF == 0x1F_FFFF {
+                // (an active character: read again as one)
+                self.back(Tok::Active(ch));
+                continue;
+            }
+            let fam = self.var_fam_x(c);
+            return Some(Field::Char { fam, ch: (c & 0x1F_FFFF) as u32 });
         }
     }
 
@@ -524,6 +554,13 @@ impl Exec<'_> {
             match self.nonblank_nonrelax() {
                 Some((_, Meaning::Char(11 | 12, c))) => self.int(&Key::Delcode(c)),
                 Some((_, Meaning::Prim(Prim::Math(MathP::Delimiter)))) => self.scan_twenty_seven_bit_int(),
+                Some((_, Meaning::Prim(Prim::Xe(Xe::Delimiter)))) => {
+                    // (`\Udelimiter`: the class is read and dropped)
+                    let _ = self.scan_math_class_int();
+                    let fam = self.scan_math_fam_int();
+                    let u = self.scan_usv_num();
+                    0x4000_0000 + fam * 0x20_0000 + u
+                }
                 Some((t, _)) => {
                     self.back(t);
                     -1
@@ -643,11 +680,20 @@ impl Exec<'_> {
 
     /// What a formula reads where it ends.
     fn math_end(&mut self, display: bool) -> MathEnd {
-        let mut fonts = Vec::with_capacity(48);
+        // (TeX's 16 families; XeTeX's others where the formula uses them)
+        let mut used = [false; 256];
+        used[..16].fill(true);
+        if self.xetex {
+            let items = self.math_items();
+            mlist::families(&items, &mut used);
+        }
+        let mut fonts = vec![None; mlist::FAM_SLOTS];
         for size in 0..3u8 {
-            for fam in 0..16u8 {
-                let f = self.fam_font(size, fam);
-                fonts.push((&*f.key != "nullfont").then_some(f));
+            for fam in 0..256usize {
+                if used[fam] {
+                    let f = self.fam_font(size, fam as u8);
+                    fonts[usize::from(size) * mlist::SCRIPT_SIZE + fam] = (&*f.key != "nullfont").then_some(f);
+                }
             }
         }
         let params = mlist::Params {
@@ -1132,9 +1178,10 @@ impl Exec<'_> {
 
     /// §1195: the symbol and extension fonts a formula needs.
     fn fonts_ok(&mut self) -> bool {
+        // (xetex.web: an OpenType math font has what it needs)
         let mut params = |size: u8, fam: u8| {
             let f = self.fam_font(size, fam);
-            self.font_params(&f)
+            if crate::native::is_math(&f) { usize::MAX } else { self.font_params(&f) }
         };
         if [0, 1, 2].into_iter().any(|z| params(z, 2) < 22) {
             self.err("Math formula deleted: Insufficient symbol fonts".into());
@@ -1154,13 +1201,13 @@ impl Exec<'_> {
             match e {
                 mlist::Event::UndefinedFamily { size, fam, ch } => {
                     let s = match size {
-                        0 => "textfont",
-                        16 => "scriptfont",
+                        mlist::TEXT_SIZE => "textfont",
+                        mlist::SCRIPT_SIZE => "scriptfont",
                         _ => "scriptscriptfont",
                     };
-                    self.err(format!("\\{s} {fam} is undefined (character {})", char::from(ch)));
+                    self.err(format!("\\{s} {fam} is undefined (character {})", char::from_u32(ch).unwrap_or('?')));
                 }
-                mlist::Event::MissingChar { font, ch } => self.char_warning(&font, i32::from(ch)),
+                mlist::Event::MissingChar { font, ch } => self.char_warning(&font, ch as i32),
             }
         }
         hl

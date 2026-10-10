@@ -209,7 +209,7 @@ impl Exec<'_> {
                 Prim::Font => self.new_font(global),
                 Prim::DefFamily(size) => {
                     // (tex.web 1234)
-                    let fam = self.scan_four_bit_int() as u8;
+                    let fam = self.scan_fam_num();
                     self.optional_equals();
                     let f = self.scan_font_ident();
                     self.assign(Key::FamFont(size, fam), Val::Font(f), global);

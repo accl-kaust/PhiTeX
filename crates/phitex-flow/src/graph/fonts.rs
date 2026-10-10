@@ -177,7 +177,7 @@ impl Exec<'_> {
                 Some((_, Meaning::Prim(Prim::Font))) => return self.font(),
                 Some((_, Meaning::Font(f))) => return f,
                 Some((_, Meaning::Prim(Prim::DefFamily(size)))) => {
-                    let fam = self.scan_four_bit_int() as u8;
+                    let fam = self.scan_fam_num();
                     return self.fam_font(size, fam);
                 }
                 other => {

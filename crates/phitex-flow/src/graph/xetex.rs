@@ -306,22 +306,10 @@ impl Exec<'_> {
         }
     }
 
-    /// The math code of `ch` in TeX's form (the math list's characters
-    /// are TeX's: a family below 16, a character below 256), XeTeX's
-    /// table's 32 bits made back into 15 (CORE.md: the gap of OpenType
-    /// math).
-    pub(super) fn mathcode(&mut self, ch: char) -> i32 {
-        let v = self.int(&Key::Mathcode(ch));
-        if self.xetex { self.xe_tex_mathcode(v) } else { v }
-    }
-
-    /// A math code of XeTeX's form in TeX's (`"8000`: active).
-    pub(super) fn xe_tex_mathcode(&mut self, v: i32) -> i32 {
-        if v & 0x1F_FFFF == 0x1F_FFFF {
-            return 0x8000;
-        }
-        let (class, fam, ch) = ((v >> 21) & 7, (v as u32 >> 24) as i32, v & 0x1F_FFFF);
-        class * 0x1000 + (fam & 15) * 0x100 + (ch & 255)
+    /// A math family's number: TeX's four bits, XeTeX's
+    /// `scan_math_fam_int` (0–255).
+    pub(super) fn scan_fam_num(&mut self) -> u8 {
+        if self.xetex { self.scan_math_fam_int() as u8 } else { self.scan_four_bit_int() as u8 }
     }
 
     /// `\Umathcharnum n` (1) or `\Umathchar class fam usv` (2).

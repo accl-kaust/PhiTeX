@@ -270,7 +270,7 @@ impl Exec<'_> {
                     IVal::Font(self.font())
                 }
                 Prim::DefFamily(size) => {
-                    let fam = self.scan_four_bit_int() as u8;
+                    let fam = self.scan_fam_num();
                     let f = self.fam_font(size, fam);
                     if level < Lv::Ident {
                         return Some(toks_ok(self, Arc::new(Vec::new())));
