@@ -3058,6 +3058,15 @@ impl<'a> Exec<'a> {
 
     /// One command.
     fn command(&mut self) {
+        // (a piece after the end of the job: TeX never reads it)
+        if self.chain.nodes.is_empty() && self.st.fire.is_none() && self.int(&Key::Ended) != 0 {
+            self.st.pending.clear();
+            self.st.texts = Stack::new();
+            self.ptext = None;
+            self.st.pos = self.text.len();
+            self.kind = Kind::End;
+            return;
+        }
         self.at_start = true;
         let next = self.next_x_m(true);
         self.at_start = false;

@@ -1703,6 +1703,9 @@ impl Exec<'_> {
         }
         let c = self.page_call();
         self.vemit.push(Item::End(c));
+        // (the end of the job is a definition: the pieces after it read it
+        // at their first node and read nothing more)
+        self.define(Key::Ended, Val::Int(1), true);
         self.st.pending.clear();
         self.st.texts = super::Stack::new();
         self.st.pos = self.text.len();

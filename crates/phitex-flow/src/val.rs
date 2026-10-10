@@ -146,6 +146,9 @@ pub enum Key {
     /// The most recently loaded font (`font_ptr`'s, global: `Val::Name` of
     /// its key; none before any `\font` loads one).
     LastFont,
+    /// The job has ended (`\end`, `\dump`: 1), global: every piece's
+    /// first node reads it, so the pieces after the end read nothing more.
+    Ended,
 }
 
 impl Key {
@@ -226,6 +229,7 @@ impl Key {
             Key::File(_) => w(30, 0),
             Key::FontParams(_) => w(38, 0),
             Key::LastFont => w(39, 0),
+            Key::Ended => w(40, 0),
             Key::Active(x) => w(1, c(x)),
             Key::Cat(x) => w(2, c(x)),
             Key::Lccode(x) => w(3, c(x)),
@@ -297,6 +301,7 @@ impl fmt::Display for Key {
             Key::SplitMarks => write!(f, "\\splitfirstmarks"),
             Key::FontParams(x) => write!(f, "font_params ({x})"),
             Key::LastFont => write!(f, "font_ptr"),
+            Key::Ended => write!(f, "the end of the job"),
             Key::Interaction => write!(f, "\\interactionmode"),
             Key::ETeXMode => write!(f, "e-TeX mode"),
             Key::Patterns(l) => write!(f, "\\patterns (language {l})"),
@@ -532,6 +537,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool) -> Val {
         Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
         Key::SkewChar(_) => Val::Int(-1),
         Key::FontIdent(_) | Key::LastFont => Val::Name(Arc::from("nullfont")),
+        Key::Ended => Val::Int(0),
         Key::Job => Val::Name(Arc::from("texput")),
         Key::SplitMarks => Val::SplitMarks(Arc::from(Vec::new())),
         // (IniTeX's `error_stop_mode`; TeX run with `-interaction` starts

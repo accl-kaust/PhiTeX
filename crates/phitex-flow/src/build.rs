@@ -222,6 +222,8 @@ struct Expect {
     input: Option<Arc<FileText>>,
     stop: usize,
     endinput: bool,
+    /// The job ends in it (`\end`, `\dump`): no piece follows.
+    ends: bool,
 }
 
 impl Expect {
@@ -234,6 +236,10 @@ impl Expect {
         Expect {
             stop: if input.is_some() { out.pos } else { 0 },
             endinput: out.ends_file(),
+            ends: r
+                .exports
+                .binary_search_by(|(k, _)| k.cmp(&Key::Ended))
+                .is_ok(),
             input,
         }
     }
@@ -241,6 +247,7 @@ impl Expect {
     fn same(&self, o: &Expect) -> bool {
         self.stop == o.stop
             && self.endinput == o.endinput
+            && self.ends == o.ends
             && match (&self.input, &o.input) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b) || **a == **b,
                 (None, None) => true,
@@ -841,6 +848,10 @@ struct Shared {
     /// Each piece's status is `Done` (a copy of the scheduler's, written
     /// under its lock, read without it).
     done: Vec<AtomicBool>,
+    /// A piece's run in progress is to stop: a name it read was defined
+    /// again while it ran, or the sequence changes (read by the run between
+    /// its nodes, [`PieceEnv`]'s `check`).
+    cancel: Vec<AtomicBool>,
     state: Mutex<State>,
     cv: Condvar,
     font: Arc<Font>,
@@ -1005,8 +1016,13 @@ impl Build {
         let mut out = Vec::with_capacity(texts.len());
         let mut base = 0;
         for t in texts {
+            let k0 = out.len();
             self.place(&mut out, &mut m, olds, t, Entry::Start, base, 0);
             base += count_lines(t);
+            // (the job ended: what follows is never read)
+            if out[k0..].iter().any(|s| s.expect.ends) {
+                break;
+            }
         }
         out
     }
@@ -1050,14 +1066,21 @@ impl Build {
             let l = self.place(out, m, olds, ft, e, fbase, depth + 1);
             fbase += count_lines(ft);
             last = Some(l);
-            if out[l].expect.endinput {
+            if out[l].expect.endinput || out[l..].iter().any(|s| s.expect.ends) {
                 break;
             }
         }
         let close = last.unwrap_or(k);
+        // (the job ended in the file: its parenthesis closes at the end,
+        // tex.web 1333, and the rest of the calling line is never read)
+        let ended = out[k..].iter().any(|s| s.expect.ends);
+        let paren = if ended { " )" } else { ")" };
         match &mut out[close].post {
-            Some(p) => p.push(')'),
-            p @ None => *p = Some(format!("{RAW})")),
+            Some(p) => p.push_str(paren),
+            p @ None => *p = Some(format!("{RAW}{paren}")),
+        }
+        if ended {
+            return close;
         }
         let stop = expect.stop.min(text.len());
         let rest = self.rest_text(text, stop);
@@ -1498,6 +1521,7 @@ impl Build {
                 .iter()
                 .map(|ps| AtomicBool::new(ps.status == Status::Done))
                 .collect(),
+            cancel: state.p.iter().map(|_| AtomicBool::new(false)).collect(),
             state: Mutex::new(state),
             cv: Condvar::new(),
             font: self.font.clone(),
@@ -1674,7 +1698,10 @@ impl Build {
                     post: ps.post.as_deref(),
                 })
                 .collect();
-            logs::replay(logs::gather(&parts, &marks, &call_logs, &st.pages, &page_io), opts.etex)
+            logs::replay(
+                logs::gather(&parts, &marks, &call_logs, &st.pages, &page_io),
+                opts.etex,
+            )
         };
         for (k, ps) in st.p.iter().enumerate() {
             let r = ps.run.as_ref().expect("every piece ran");
@@ -2637,6 +2664,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
         };
         (ps.text.clone(), old, entry_state(&g, k), ps.suspend)
     };
+    sh.cancel[k].store(false, Ordering::Relaxed);
     let mut env = PieceEnv {
         sh,
         k,
@@ -2799,6 +2827,9 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
         for (r, key) in marks {
             if mark(&mut g, r, key) {
                 sh.done[r].store(false, Ordering::Release);
+            } else if g.p[r].status == Status::Running {
+                // (its run read what is defined again: it stops)
+                sh.cancel[r].store(true, Ordering::Relaxed);
             }
         }
         queue_breaks(&mut g, k, &equal);
@@ -2817,6 +2848,10 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
             // sequence)
             if sh.restructure_ok && !got.same(&g.p[k].expect) {
                 g.restructure = true;
+                // (the runs in progress stop: the sequence is laid out again)
+                for &q in &g.running {
+                    sh.cancel[q].store(true, Ordering::Relaxed);
+                }
             }
         } else {
             g.p[k].dirty = stale;
@@ -2902,6 +2937,10 @@ impl Env for PieceEnv<'_> {
     }
 
     fn check(&mut self, ran: u64, words: u64) -> Check {
+        // (marked stale while it runs, or the sequence changes: it stops)
+        if self.sh.cancel[self.k].load(Ordering::Relaxed) {
+            return Check::Abandon;
+        }
         let cap = self.sh.opts.main_memory;
         let periodic = ran.is_multiple_of(CHECK_EVERY);
         if !(periodic || words > cap) || self.predicted.is_empty() {
@@ -3381,6 +3420,8 @@ fn changed_at(g: &mut State, sh: &Shared, pos: Pos, keys: Vec<Key>) -> bool {
     for (r, key) in marks {
         if mark(g, r, key) {
             sh.done[r].store(false, Ordering::Release);
+        } else if g.p[r].status == Status::Running {
+            sh.cancel[r].store(true, Ordering::Relaxed);
         }
     }
     any
