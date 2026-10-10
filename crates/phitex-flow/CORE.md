@@ -2911,18 +2911,21 @@ Gaps:
   `autoexpand` names `name+e.tfm` files pdfTeX loads (`load_expand_font`
   → `read_font_info`); here every font is expanded as `autoexpand` makes
   it. microtype always gives `autoexpand` with pdfTeX.
-- *`\tagcode`* is not done (it clears a character's tags in place).
-- *`\pdfnoligatures` and hyphenation/math*: the main loop honours it;
-  the hyphenation pass's reconstitution and math's lig/kern look at the
-  font's program as loaded.
+- *`\tagcode` and `\pdfnoligatures` outside the main loop.* Both clear
+  tags (`Key::FontCode(5, f)`, the bits cleared per character; read by
+  the main loop and `\the`); the hyphenation pass's reconstitution and
+  math (lig/kern, charlists, extensible recipes) look at the font as
+  loaded.
 - *The margin kerns' variations* in `try_break` (`cal_margin_kern_var`)
   are taken as zero: an autoexpanded font's protrusion is its base's
   (same quad, same codes), so pdfTeX's are zero too.
 - *A derived font in a saved format*: `format::decode` refuses it (the
   font is written as its file's bytes).
-- *`\pdfmatch`* (microtype's `\MT@ifint`, `\MT@ifdimen`) is done as
-  match or not (`src/ere.rs`, POSIX extended expressions, backtracking);
-  `\pdflastmatch`'s submatches (leftmost-longest) are not kept.
+- *`\pdfmatch`, `\pdflastmatch`* (`src/ere.rs`, POSIX extended
+  expressions, backtracking; the last match `Key::LastMatch`, global):
+  the whole match is leftmost-longest as POSIX's; a group's submatch is
+  the first path's to it, not POSIX's subexpression rules. A bad
+  expression gives -1 without pdfTeX's warning in the log.
 - *An error's context at a macro's end (for P).* `\def\m{\setbox0\hbox{}\showbox0 }
   \m`: TeX's `! OK.` context shows the macro's level (`\m ...\showbox
   0 `) above `l.N \m`; the graph shows `...` there: the macro's level,
