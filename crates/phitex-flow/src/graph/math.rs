@@ -918,7 +918,14 @@ impl Exec<'_> {
         let mut w = -MAX_DIMEN;
         for it in &just.list {
             let (d, visible) = match it {
-                Item::Char(..) | Item::Lig(_) | Item::Box(_) | Item::Rule { .. } => (it.width(), true),
+                // (XeTeX: native words, glyphs and pictures are visible)
+                Item::Char(..)
+                | Item::Lig(_)
+                | Item::Box(_)
+                | Item::Rule { .. }
+                | Item::Native(_)
+                | Item::Glyph(_)
+                | Item::Pic(_) => (it.width(), true),
                 Item::Kern { w, .. } | Item::Math { w, .. } | Item::MarginKern { w, .. } => (*w, false),
                 Item::Glue { .. } | Item::Leaders(_) => {
                     let g = it.glue().expect("glue");
