@@ -1,0 +1,8 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+\pdfstartthread width 100pt name{t}\hbox{one}\pdfendthread A\par
+\penalty-10000
+\pdfstartthread attr{/I << /Title (Seven) >>} num 7 \hbox{two}\pdfendthread
+\pdfthread name{t}\hbox{three}
+B\pdfstartlink thread num 8 L\pdfendlink\par
+\end

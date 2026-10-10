@@ -63,6 +63,13 @@ pub fn saved(key: &Key) -> bool {
             | Key::Ended
             | Key::MainTail
             | Key::MainDepth
+            | Key::PdfLast(_)
+            | Key::PdfAns(..)
+            | Key::PdfRandom
+            | Key::PdfSeed
+            | Key::PdfClock
+            | Key::PdfDate
+            | Key::PdfMatch
     )
 }
 
@@ -327,6 +334,7 @@ impl Writer<'_> {
                         self.byte(3);
                         self.str(t);
                     }
+                    Whatsit::Pdf(_) => return Err(format!("an item a format does not hold: {it:?}")),
                 }
             }
             Item::Ins(x) => {

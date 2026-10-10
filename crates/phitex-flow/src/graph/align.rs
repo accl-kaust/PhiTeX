@@ -1150,10 +1150,10 @@ impl Exec<'_> {
         }
         let ships: Vec<Item> = list
             .iter()
-            .filter(|i| matches!(i, Item::Shipout(_)))
+            .filter(|i| i.hoisted())
             .cloned()
             .collect();
-        list.retain(|i| !matches!(i, Item::Shipout(_) | Item::BuildPage(_) | Item::End(_)));
+        list.retain(|i| !i.hoisted() && !matches!(i, Item::BuildPage(_) | Item::End(_)));
         let (st, sh) = totals(&list);
         let (so, ho) = (order(&st), order(&sh));
         let mut adj = Vec::new();

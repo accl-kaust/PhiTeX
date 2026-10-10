@@ -49,6 +49,9 @@ pub struct Routine {
     pub page: Page,
     /// What the fold read and computed at the fire.
     pub reads: OutputReads,
+    /// The fire's ordinal among the job's fires with a routine (the
+    /// routine's PDF events' `what::Tag`).
+    pub fire: u32,
 }
 
 /// What a fire gave back (tex.web 1026).
@@ -168,6 +171,18 @@ pub fn vert_break(list: &[Item], h: i32, d: i32) -> (Option<usize>, i32) {
                 }
             }
             Some(Item::Penalty(x)) => pi = *x,
+            // (pdfTeX: an image's or a form's reference, §1588)
+            Some(Item::Whatsit(w)) if w.dims().is_some() => {
+                let (_, wh, wd) = w.dims().unwrap_or_default();
+                cur_height += prev_dp + wh;
+                prev_dp = wd;
+                if prev_dp > d {
+                    cur_height += prev_dp - d;
+                    prev_dp = d;
+                }
+                i += 1;
+                continue;
+            }
             Some(_) => {
                 if prev_dp > d {
                     cur_height += prev_dp - d;
@@ -310,6 +325,15 @@ pub fn push_vertical(list: &mut Vec<Item>, prev_depth: &mut i32, it: Item) {
 /// last item if it is of that kind (not one a discretionary replaces);
 /// `\lastbox` (3) a box (tex.web 1081).
 pub fn remove_last(list: &mut Vec<Item>, k: u8) {
+    // (an item taken out to the outer list, a PDF event's, is no node:
+    // the one before it is the last)
+    if list.last().is_some_and(|i| matches!(i, Item::Pdf(_))) {
+        let at = list.iter().rposition(|i| !matches!(i, Item::Pdf(_))).map_or(0, |p| p + 1);
+        let tail = list.split_off(at);
+        remove_last(list, k);
+        list.extend(tail);
+        return;
+    }
     let hit = match list.last() {
         Some(Item::Penalty(_)) => k == 0,
         Some(Item::Kern { .. }) => k == 1,
@@ -390,7 +414,14 @@ pub struct PageOrg {
     /// The last page-builder call before the restart point (what `finish`
     /// would use).
     pub last_call: Option<Arc<PageCall>>,
+    /// The PDF events met since the page before (pdfTeX does them before
+    /// it ships this page), with where they came from.
+    pub pdf: PdfEvents,
 }
+
+/// PDF events in the order they are done, each with its origin (a
+/// routine's: the origin of the call that fired it).
+pub type PdfEvents = Arc<Vec<(Org, Arc<crate::pdf::what::PdfItem>)>>;
 
 const EMPTY: u8 = 0;
 const BOX_THERE: u8 = 2;
@@ -474,6 +505,13 @@ pub struct Scan {
     pub fancy: bool,
     /// The first page the current call made.
     call_start: u32,
+    /// The PDF events met since the last page made; the material's met
+    /// before this origin were handed to a page already (a fold resumed
+    /// after them).
+    pub pdf: Vec<(Org, Arc<crate::pdf::what::PdfItem>)>,
+    pdf_skip: Option<Org>,
+    /// Fires with a routine so far.
+    fires: u32,
 }
 
 impl Scan {
@@ -487,8 +525,10 @@ impl Scan {
         call_from: Option<u32>,
         marks: u32,
         last_call: Option<Arc<PageCall>>,
+        pdf_skip: Org,
     ) -> Scan {
         Scan {
+            pdf_skip: Some(pdf_skip),
             prev_depth: Some(prev_depth),
             pages_made: pages,
             orgs_base: pages,
@@ -568,6 +608,11 @@ impl Scan {
                 self.ended = true;
             }
             Item::Halt => self.ended = true,
+            Item::Pdf(e) => {
+                if self.pdf_skip.is_none_or(|s| org >= s) {
+                    self.pdf.push((org, e));
+                }
+            }
             Item::Shipout(s) => {
                 self.unsafe_since.push(org);
                 self.dead_cycles = 0;
@@ -576,11 +621,13 @@ impl Scan {
                     ship: s.ship.clone(),
                     builder: false,
                 });
+                let pdf = self.take_pdf();
                 self.orgs.push(PageOrg {
                     call: org,
                     call_idx: u32::MAX,
                     resume: None,
                     last_call: None,
+                    pdf,
                 });
                 self.pages_made += 1;
             }
@@ -639,6 +686,11 @@ impl Scan {
         }
         self.ended = true;
         self.mark(from);
+    }
+
+    /// The PDF events met since the last page made: the next page's.
+    fn take_pdf(&mut self) -> PdfEvents {
+        Arc::new(std::mem::take(&mut self.pdf))
     }
 
     fn push_contrib(&mut self, it: Item) {
@@ -759,6 +811,14 @@ impl Scan {
                 }
                 Item::Ins(x) => {
                     self.page_insert(call, x, env);
+                    self.contribute();
+                    continue;
+                }
+                // (pdfTeX: an image's or a form's reference, §1587)
+                Item::Whatsit(w) if w.dims().is_some() => {
+                    let (_, wh, wd) = w.dims().unwrap_or_default();
+                    self.total += self.depth + wh;
+                    self.depth = wd;
                     self.contribute();
                     continue;
                 }
@@ -1128,7 +1188,9 @@ impl Scan {
             };
             self.dead_cycles += 1;
             let page = Page { b, ship: Arc::default(), builder: false };
-            let fired = env.fire(defs, Some(Routine { toks, page, reads }));
+            let fire = self.fires;
+            self.fires += 1;
+            let fired = env.fire(defs, Some(Routine { toks, page, reads, fire }));
             self.errors.extend(fired.errors);
             self.halt |= fired.halt;
             if let Some(d) = fired.dead_cycles {
@@ -1144,9 +1206,11 @@ impl Scan {
                     Item::Shipout(s) => {
                         self.unsafe_since.push(self.cur.0);
                         self.pages.push(Page { b: s.b.clone(), ship: s.ship.clone(), builder: false });
-                        self.orgs.push(PageOrg { call: self.cur.0, call_idx, resume: None, last_call: last_call.clone() });
+                        let pdf = self.take_pdf();
+                        self.orgs.push(PageOrg { call: self.cur.0, call_idx, resume: None, last_call: last_call.clone(), pdf });
                         self.pages_made += 1;
                     }
+                    Item::Pdf(e) => self.pdf.push((self.cur.0, e)),
                     Item::BuildPage(_) | Item::End(_) => {}
                     other => list.push((other, self.cur)),
                 }
@@ -1170,7 +1234,8 @@ impl Scan {
             self.contrib.push_front(it);
             self.contrib_org.push_front(o);
         }
-        self.orgs.push(PageOrg { call: self.cur.0, call_idx, resume, last_call });
+        let pdf = self.take_pdf();
+        self.orgs.push(PageOrg { call: self.cur.0, call_idx, resume, last_call, pdf });
         if let Some(r) = resume {
             self.just = Some((k, r));
         }

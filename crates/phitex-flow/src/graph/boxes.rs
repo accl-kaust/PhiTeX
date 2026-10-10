@@ -59,7 +59,7 @@ impl Exec<'_> {
         }
         let at = list[from..]
             .iter()
-            .rposition(|i| !matches!(i, Item::BuildPage(_) | Item::End(_) | Item::Shipout(_)))
+            .rposition(|i| !matches!(i, Item::BuildPage(_) | Item::End(_)) && !i.hoisted())
             .map(|p| p + from);
         let Some(at) = at else {
             if v && self.st.level == 0 && !self.st.inner {

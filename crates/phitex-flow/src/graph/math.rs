@@ -780,8 +780,8 @@ impl Exec<'_> {
         for it in std::mem::take(&mut self.emit) {
             push_horizontal(&mut hlist, it);
         }
-        let ships: Vec<Item> = hlist.iter().filter(|i| matches!(i, Item::Shipout(_))).cloned().collect();
-        hlist.retain(|i| !matches!(i, Item::Shipout(_)));
+        let ships: Vec<Item> = hlist.iter().filter(|i| i.hoisted()).cloned().collect();
+        hlist.retain(|i| !i.hoisted());
         self.st.mode = Mode::V;
         self.st.inner = level > 0;
         let mut para = Para { before: ships, ..Para::default() };

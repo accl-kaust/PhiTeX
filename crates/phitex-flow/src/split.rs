@@ -54,6 +54,12 @@ pub fn vert_break(list: &mut [Item], h: i32, d: i32) -> (usize, bool) {
                     ah[1] = ah[1].wrapping_add(prev_dp).wrapping_add(*rh);
                     prev_dp = *rd;
                 }
+                // (pdfTeX: an image's or a form's reference, §1588)
+                Item::Whatsit(w) if w.dims().is_some() => {
+                    let (_, wh, wd) = w.dims().unwrap_or_default();
+                    ah[1] = ah[1].wrapping_add(prev_dp).wrapping_add(wh);
+                    prev_dp = wd;
+                }
                 Item::Kern { .. } => {
                     if list.get(i + 1).is_some_and(Item::is_glue) {
                         pi = Some(0);

@@ -665,8 +665,8 @@ impl Exec<'_> {
             push_horizontal(&mut hlist, it);
         }
         // (a `\shipout` inside the paragraph ships before its lines come)
-        let ships: Vec<Item> = hlist.iter().filter(|i| matches!(i, Item::Shipout(_))).cloned().collect();
-        hlist.retain(|i| !matches!(i, Item::Shipout(_)));
+        let ships: Vec<Item> = hlist.iter().filter(|i| i.hoisted()).cloned().collect();
+        hlist.retain(|i| !i.hoisted());
         self.st.mode = Mode::V;
         self.st.inner = level > 0;
         let mut para = Para { before: ships, ..Para::default() };
@@ -791,7 +791,7 @@ impl Exec<'_> {
         }
         let v = self.st.mode == Mode::V;
         let list = self.current_list(v);
-        let last = list.into_iter().rev().find(|i| !matches!(i, Item::BuildPage(_) | Item::End(_) | Item::Shipout(_)));
+        let last = list.into_iter().rev().find(|i| !matches!(i, Item::BuildPage(_) | Item::End(_)) && !i.hoisted());
         if last.is_some() || !v || self.st.level != 0 || self.st.in_output() {
             return last;
         }
@@ -1585,8 +1585,8 @@ impl Exec<'_> {
                 }
             }
         }
-        let ships: Vec<Item> = list.iter().filter(|i| matches!(i, Item::Shipout(_))).cloned().collect();
-        list.retain(|i| !matches!(i, Item::Shipout(_) | Item::BuildPage(_) | Item::End(_)));
+        let ships: Vec<Item> = list.iter().filter(|i| i.hoisted()).cloned().collect();
+        list.retain(|i| !i.hoisted() && !matches!(i, Item::BuildPage(_) | Item::End(_)));
         match &be.g.kind {
             BoxKind::Vcenter => self.vcenter_package(&be, list, ships),
             BoxKind::Math(k) => {
@@ -1738,7 +1738,12 @@ impl Exec<'_> {
                 // (the page's whatsits are done as it is shipped, here:
                 // its `\write`s expanded with the definitions reaching this
                 // node, tex.web 1374)
-                let io = self.ship_io(&b);
+                let pos = crate::pdf::content::write_positions(&crate::page::Page {
+                    b: Arc::new(b.clone()),
+                    ship: ship.clone(),
+                    builder: false,
+                });
+                let io = self.ship_io(&b, &pos);
                 let mut mark = page_mark(&ship);
                 if self.int_par(IntPar::Tracingoutput) > 0 {
                     // (§638–§639: the box displayed before it is shipped)
@@ -1828,7 +1833,7 @@ pub(super) fn main_tail(p: &Para) -> Option<Val> {
     let mut pd = IGNORE_DEPTH;
     let mut changed = false;
     let mut add = |list: &mut Vec<Item>, it: &Item| match it {
-        Item::BuildPage(_) | Item::End(_) | Item::Shipout(_) | Item::Halt => {}
+        Item::BuildPage(_) | Item::End(_) | Item::Shipout(_) | Item::Pdf(_) | Item::Halt => {}
         Item::JobStart => {
             list.clear();
             changed = true;

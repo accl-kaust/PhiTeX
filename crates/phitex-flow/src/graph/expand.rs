@@ -113,6 +113,7 @@ impl Exec<'_> {
                 }
                 Prim::CsName => self.csname(),
                 Prim::Convert(c) => self.convert(c),
+                Prim::PdfX(i) => self.pdf_expand(i),
                 Prim::The => {
                     let toks = self.the_toks();
                     self.rewrite(toks);

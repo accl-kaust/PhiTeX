@@ -151,6 +151,8 @@ pub struct Stats {
     /// Evaluations of the sequence: one, and one more each time a run
     /// changed it (an `\input` read or changed, an `\endinput`).
     pub rounds: usize,
+    /// Of them, the rounds made for pdfTeX's read-backs.
+    pub pdf_rounds: usize,
     /// Each round's wall time.
     pub round_walls: Vec<Duration>,
     /// Output routines run, and kept from the last build.
@@ -234,10 +236,17 @@ pub struct Output {
     /// The pages each job of a session shipped, in order (one job unless
     /// the source is a session's, `graph::jobs`).
     pub job_pages: Vec<usize>,
+    /// In PDF mode, each page's glyph runs and rules where they were put
+    /// (`pdf::content::Origin`: for SyncTeX and the viewer; not part of
+    /// the pages' values).
+    pub origins: Vec<Vec<crate::pdf::content::Origin>>,
 }
 
 /// A piece whose definition was read before any definition.
 const INITIAL: PieceId = u32::MAX;
+/// The rounds an update may make for pdfTeX's read-backs (then an error,
+/// as TeX's capacity exceeded: CORE.md, "pdfTeX's read-backs").
+const PDF_ROUNDS: usize = 8;
 /// A piece not in this build.
 const NONE: u32 = u32::MAX;
 
@@ -526,6 +535,35 @@ pub struct Build {
     /// The PDF file's creation date, in seconds since 1970 (UTC):
     /// `SOURCE_DATE_EPOCH` for pdfTeX (`Build::set_pdf_date`).
     pdf_date: i64,
+    /// The PDF fold's state kept between builds and rounds.
+    pdf: PdfKept,
+}
+
+/// The PDF fold's answers to the PDF events (`Key::PdfAns`): by the
+/// piece holding the command (an output routine's: the firing call's)
+/// and the event's `what::Tag` with the field's slot.
+pub type PdfAnswers = FxMap<(PieceId, [u32; 4]), i32>;
+
+/// What the PDF side keeps between builds: the last fold's answers, the
+/// PDF events after the last page, the givens (`Key::PdfSeed`,
+/// `Key::PdfClock`), and the rounds of this update made for the
+/// read-backs (CORE.md, "pdfTeX's read-backs").
+#[derive(Default, Clone)]
+struct PdfKept {
+    answers: Arc<PdfAnswers>,
+    tail: crate::page::PdfEvents,
+    seed: i32,
+    clock: i32,
+    rounds: usize,
+}
+
+/// A page builder's PDF events with the pieces' ids for their positions.
+fn pdf_ids(seq: &Sequence, v: Vec<(crate::page::Org, Arc<crate::pdf::what::PdfItem>)>) -> crate::page::PdfEvents {
+    Arc::new(
+        v.into_iter()
+            .map(|((k, i), e)| ((seq.pieces.get(k as usize).copied().unwrap_or(NONE), i), e))
+            .collect(),
+    )
 }
 
 /// A file's text and its pieces.
@@ -548,6 +586,8 @@ struct FoldKept {
 /// fold handed it, the fold's definitions, the document's), and what it
 /// gave.
 struct Memo {
+    /// The fire's ordinal (its PDF events' `what::Tag`).
+    ordinal: u32,
     toks: Arc<Vec<Tok>>,
     page: Arc<crate::item::BoxNode>,
     fire: OutputReads,
@@ -664,6 +704,12 @@ struct Given {
     limits: crate::print::Limits,
     /// The PDF file's creation date (`Build::set_pdf_date`).
     pdf_date: i64,
+    /// The PDF fold's answers, the pieces' ids by position, the random
+    /// seed and the clock given.
+    pdf_answers: Arc<PdfAnswers>,
+    ids: Vec<PieceId>,
+    pdf_seed: i32,
+    pdf_clock: i32,
 }
 
 impl Given {
@@ -684,6 +730,10 @@ impl Given {
             interaction_option: None,
             limits: crate::print::Limits::TEX_LIVE,
             pdf_date: 0,
+            pdf_answers: Arc::default(),
+            ids: Vec::new(),
+            pdf_seed: 0,
+            pdf_clock: 0,
         }
     }
 
@@ -733,6 +783,15 @@ impl Given {
             Key::File(n) => Some(self.file(n).map_or(Val::Void, Val::Bytes)),
             Key::Job => Some(Val::Name(self.job.clone())),
             Key::LineBase => Some(Val::Int(self.base(k) as i32)),
+            Key::PdfAns(a, b, c, d) => Some(
+                self.ids
+                    .get(k)
+                    .and_then(|id| self.pdf_answers.get(&(*id, [*a, *b, *c, *d])))
+                    .map_or(Val::Void, |v| Val::Int(*v)),
+            ),
+            Key::PdfSeed => Some(Val::Int(self.pdf_seed)),
+            Key::PdfClock => Some(Val::Int(self.pdf_clock)),
+            Key::PdfDate => Some(Val::Name(Arc::from(crate::pdf::pdf_date(self.pdf_date)))),
             _ => None,
         }
     }
@@ -1122,6 +1181,10 @@ struct State {
     old_pages: Vec<Option<(Page, Arc<dvi::Body>)>>,
     old_orgs: Arc<Vec<PageOrg>>,
     old_marks: Vec<(u32, u32)>,
+    /// The PDF events after the last page (the last build's, and this
+    /// one's once the scan has finished).
+    old_pdf_tail: crate::page::PdfEvents,
+    pdf_tail: crate::page::PdfEvents,
     /// The page builder's marks before the scan's (kept), and after them
     /// (the last build's, where the scan met its pages again).
     marks_before: Vec<(u32, u32)>,
@@ -1274,6 +1337,7 @@ impl Build {
             limits: crate::print::Limits::TEX_LIVE,
             format: None,
             pdf_date: 0,
+            pdf: PdfKept::default(),
         }
     }
 
@@ -1680,6 +1744,13 @@ impl Build {
     /// The PDF file's creation date and `/ID`'s time, in seconds since
     /// 1970 UTC (pdfTeX's `SOURCE_DATE_EPOCH`; 0 until set). No clock is
     /// read: the date is a given of the build.
+    pub fn set_pdf_seed_clock(&mut self, seed: i32, clock: i32) {
+        self.pdf.seed = seed;
+        self.pdf.clock = clock;
+    }
+
+    /// The PDF file's creation date (see [`Build::set_pdf_seed_clock`] for
+    /// the random seed and the clock).
     pub fn set_pdf_date(&mut self, epoch: i64) {
         self.pdf_date = epoch;
     }
@@ -1779,6 +1850,7 @@ impl Build {
         // whose material made them, whatever a round lays out)
         self.page_runs = Some(self.pieces.iter().map(|o| o.run.clone()).collect());
         let mut rounds = 0;
+        self.pdf.rounds = 0;
         loop {
             rounds += 1;
             let t_round = Instant::now();
@@ -1955,6 +2027,10 @@ impl Build {
         given.interaction_option = self.interaction_option;
         given.limits = self.limits;
         given.pdf_date = self.pdf_date;
+        given.pdf_answers = self.pdf.answers.clone();
+        given.ids = p.iter().map(|x| x.id).collect();
+        given.pdf_seed = self.pdf.seed;
+        given.pdf_clock = self.pdf.clock;
         let names = Names::new(given, opts.etex, self.cs.clone(), self.format.clone());
         for (k, ps) in p.iter().enumerate() {
             if let Some(r) = ps.run.as_ref().or(ps.prev.as_ref().map(|(r, _, _)| r)) {
@@ -2047,7 +2123,10 @@ impl Build {
         // name, the lines before a piece — read with a value they no longer
         // have: their readers are marked)
         for (key, m) in &readers {
-            if !matches!(key, Key::File(_) | Key::Job | Key::LineBase) {
+            if !matches!(
+                key,
+                Key::File(_) | Key::Job | Key::LineBase | Key::PdfAns(..) | Key::PdfSeed | Key::PdfClock | Key::PdfDate
+            ) {
                 continue;
             }
             for &rid in m.keys() {
@@ -2136,6 +2215,8 @@ impl Build {
                 std::mem::take(&mut self.page_orgs)
             }),
             old_marks: std::mem::take(&mut self.marks),
+            old_pdf_tail: self.pdf.tail.clone(),
+            pdf_tail: Arc::default(),
             rng: match opts.order {
                 Order::Random(s) => s.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1,
                 Order::Priority => 1,
@@ -2289,11 +2370,13 @@ impl Build {
         let mut errors = Vec::new();
         // (PDF mode, from the first page's `\pdfoutput`: the PDF file is
         // the fold over the pages, as the DVI file is)
+        let mut pdf_answers = None;
         let (out, pdf, again) = if st.pages.first().is_some_and(|p| p.ship.pdf.is_some()) {
             let live = live_pieces(&st.p);
             let last = live.iter().rposition(|&l| l).unwrap_or(0);
-            let w = pdf_file(&sh.names, &sh.font, last, &numbers, &st.pages, &mut bodies);
+            let w = pdf_file(&sh.names, &sh.font, last, &numbers, &st.pages, &st.orgs, &st.pdf_tail, &mut bodies);
             errors.extend(w.errors.into_iter().map(|e| format!("pdf: {e}")));
+            pdf_answers = Some(w.answers);
             (Vec::new(), w.bytes, w.again)
         } else {
             let (out, again) = dvi::assemble_in(&numbers, &st.pages, &mut bodies, sh.names.given.limits.dvi_buf_size);
@@ -2352,7 +2435,8 @@ impl Build {
                                 stop: usize::MAX,
                             };
                             let r = regen(&mut env, &st.p[k].text, r);
-                            crate::graph::page_io(&r.chain, i, &mut env, &pg.b, &mut errors)
+                            let pos = crate::pdf::content::write_positions(pg);
+                            crate::graph::page_io(&r.chain, i, &mut env, &pg.b, &pos, &mut errors)
                         }
                         _ => String::new(),
                     },
@@ -2463,7 +2547,26 @@ impl Build {
         self.pages = st.pages.into_iter().zip(bodies).collect();
         self.page_orgs = st.orgs;
         self.marks = marks;
+        self.pdf.tail = st.pdf_tail;
+        // (pdfTeX's read-backs: the fold answered otherwise than the nodes
+        // read — another round, the readers of the answers that changed
+        // run again; CORE.md, "pdfTeX's read-backs")
+        let mut errors = errors;
+        if let Some(a) = pdf_answers
+            && a != *self.pdf.answers
+        {
+            if self.pdf.rounds < PDF_ROUNDS {
+                self.pdf.rounds += 1;
+                self.pdf.answers = Arc::new(a);
+                self.carried.absorb(st.stats);
+                return None;
+            }
+            errors.push(format!("! TeX capacity exceeded, sorry [pdf read-back rounds={PDF_ROUNDS}]."));
+        }
+        st.stats.pdf_rounds = self.pdf.rounds;
+        let origins = self.pages.iter().map(|(_, b)| b.pdf.as_ref().map_or_else(Vec::new, |p| p.origins.0.clone())).collect();
         Some(Output {
+            origins,
             dvi: out,
             pdf,
             stats: st.stats,
@@ -2504,7 +2607,17 @@ impl crate::pdf::fold::Files for PdfFiles<'_> {
     }
 }
 
-fn pdf_file(names: &Names, font: &Arc<Font>, last: usize, numbers: &dvi::Numbers, pages: &[Page], bodies: &mut [Arc<dvi::Body>]) -> crate::pdf::fold::Written {
+#[allow(clippy::too_many_arguments)]
+fn pdf_file(
+    names: &Names,
+    font: &Arc<Font>,
+    last: usize,
+    numbers: &dvi::Numbers,
+    pages: &[Page],
+    orgs: &[PageOrg],
+    tail: &crate::page::PdfEvents,
+    bodies: &mut [Arc<dvi::Body>],
+) -> crate::pdf::fold::Written {
     use crate::val::{IntPar, TokPar};
     let at = (last as u32 + 1, 0);
     let read = |key: &Key| names.reaching(key, at, font).1;
@@ -2532,10 +2645,20 @@ fn pdf_file(names: &Names, font: &Arc<Font>, last: usize, numbers: &dvi::Numbers
         date: crate::pdf::pdf_date(names.given.pdf_date),
         file_name: format!("{}.pdf", names.given.job),
         banner: crate::graph::PDFTEX_BANNER.to_string(),
+        params: Arc::new(crate::pdf::read_params(&mut |k| read(k))),
+        page_width: match read(&Key::DimenPar(crate::val::DimenPar::Pdfpagewidth)) {
+            Val::Int(i) => i,
+            _ => 0,
+        },
+        page_height: match read(&Key::DimenPar(crate::val::DimenPar::Pdfpageheight)) {
+            Val::Int(i) => i,
+            _ => 0,
+        },
     };
     let mut pdf_bodies: Vec<Arc<crate::pdf::content::PageBody>> =
         bodies.iter().map(|b| b.pdf.clone().unwrap_or_else(|| Arc::new(crate::pdf::content::empty()))).collect();
-    let w = crate::pdf::fold::assemble(pages, &mut pdf_bodies, numbers, &end, &mut PdfFiles { names, font, at });
+    let events: Vec<&crate::page::PdfEvents> = orgs.iter().map(|o| &o.pdf).chain(std::iter::once(tail)).collect();
+    let w = crate::pdf::fold::assemble(pages, &mut pdf_bodies, &events, numbers, &end, &mut PdfFiles { names, font, at });
     for (b, p) in bodies.iter_mut().zip(pdf_bodies) {
         if !b.pdf.as_ref().is_some_and(|x| Arc::ptr_eq(x, &p)) {
             let mut nb = dvi::Body { bytes: Vec::new(), fonts: Vec::new(), fixed: None, max_push: 0, io: p.io, pdf: None };
@@ -3204,6 +3327,7 @@ fn advance_match(g: &mut State) {
             }
             g.orgs = g.old_orgs.to_vec();
             g.marks_before = std::mem::take(&mut g.old_marks);
+            g.pdf_tail = g.old_pdf_tail.clone();
             g.scan_done = true;
             g.matching = false;
         } else {
@@ -3298,6 +3422,7 @@ fn resume(g: &mut State, c: usize) {
         call_from,
         kept as u32,
         o.last_call.clone(),
+        o.call,
     )));
     g.scan_next = s.0 as usize;
     g.scan_skip = s.1;
@@ -3602,8 +3727,16 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
             }
             let (routines, routines_kept) = (env.routines, env.kept);
             let work = scan.fed - before;
-            let (new, new_orgs) = scan.take_pages();
+            let (new, mut new_orgs) = scan.take_pages();
+            for o in &mut new_orgs {
+                let v = std::mem::take(Arc::make_mut(&mut o.pdf));
+                o.pdf = pdf_ids(&sh.seq, v);
+            }
+            let tail = (finish && stop.is_none() && converged.is_none()).then(|| pdf_ids(&sh.seq, std::mem::take(&mut scan.pdf)));
             let mut g = lock(sh);
+            if let Some(t) = tail {
+                g.pdf_tail = t;
+            }
             g.stats.routines += routines;
             g.stats.routines_kept += routines_kept;
             let finish = finish && stop.is_none();
@@ -3683,6 +3816,7 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
                     .map(|&(a, b)| (sh_(a), sh_(b)))
                     .collect();
                 g.scan_next = g.p.len();
+                g.pdf_tail = g.old_pdf_tail.clone();
                 g.scan_done = true;
             }
             if finish {
@@ -4388,7 +4522,8 @@ impl BuildFold<'_> {
         cands
             .iter()
             .find(|m| {
-                (Arc::ptr_eq(&m.toks, &rt.toks) || m.toks == rt.toks)
+                m.ordinal == rt.fire
+                    && (Arc::ptr_eq(&m.toks, &rt.toks) || m.toks == rt.toks)
                     && (Arc::ptr_eq(&m.page, &rt.page.b) || m.page == rt.page.b)
                     && m.fire == rt.reads
                     && m.overlay == overlay
@@ -4406,6 +4541,7 @@ impl BuildFold<'_> {
         let mut env = RoutineEnv {
             fold: self,
             overlay,
+            fire: rt.fire,
         };
         let entry = output::output_entry(&rt.page, &rt.reads, &rt.toks);
         let run = Arc::new(output::run_routine(&entry, &mut env));
@@ -4431,6 +4567,7 @@ impl BuildFold<'_> {
         let lines: Vec<Option<Lines>> = paras.iter().map(|(_, l)| Some(l.clone())).collect();
         let log = logs::texts(&logs::fragment(&[], &run, &lines));
         Memo {
+            ordinal: rt.fire,
             toks: rt.toks.clone(),
             page: rt.page.b.clone(),
             fire: rt.reads.clone(),
@@ -4524,11 +4661,16 @@ impl FoldEnv for BuildFold<'_> {
 struct RoutineEnv<'a> {
     fold: &'a BuildFold<'a>,
     overlay: &'a [(Key, Val)],
+    fire: u32,
 }
 
 impl Env for RoutineEnv<'_> {
     fn cs(&self) -> &Arc<CsTable> {
         &self.fold.sh.names.cs
+    }
+
+    fn pdf_scope(&self) -> (u32, u32) {
+        (1, self.fire)
     }
 
     fn interaction_option(&self) -> Option<i32> {

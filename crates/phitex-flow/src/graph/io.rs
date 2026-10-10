@@ -111,7 +111,9 @@ pub fn whatsits(b: &BoxNode) -> Vec<Arc<Whatsit>> {
         for it in list {
             match it {
                 Item::Box(b) => walk(&b.list, out),
-                Item::Whatsit(w) if !matches!(**w, Whatsit::Special(_)) => out.push(w.clone()),
+                Item::Whatsit(w) if matches!(**w, Whatsit::Open { .. } | Whatsit::Write { .. } | Whatsit::Close { .. }) => {
+                    out.push(w.clone());
+                }
                 _ => {}
             }
         }
@@ -126,7 +128,9 @@ pub fn whatsits(b: &BoxNode) -> Vec<Arc<Whatsit>> {
 /// tex.web 1374): each `\write` expanded with the definitions reaching
 /// there — the chain's, then the `Env`'s. A pure function of the box, the
 /// place and those definitions; its errors go to `errors`.
-pub fn page_io(chain: &Chain, at: usize, env: &mut dyn Env, b: &BoxNode, errors: &mut Vec<String>) -> String {
+/// `pos`: where `\pdfsavepos` was last at each whatsit, in PDF mode
+/// (`pdf::content::write_positions`).
+pub fn page_io(chain: &Chain, at: usize, env: &mut dyn Env, b: &BoxNode, pos: &[(i32, i32)], errors: &mut Vec<String>) -> String {
     if whatsits(b).is_empty() {
         return String::new();
     }
@@ -136,7 +140,7 @@ pub fn page_io(chain: &Chain, at: usize, env: &mut dyn Env, b: &BoxNode, errors:
     let mut outside = Outside::default();
     let mut scratch = Scratch::default();
     let mut x = Exec::new(&[], &pre, &input, env, &mut outside, &mut scratch);
-    let s = x.ship_io(b);
+    let s = x.ship_io(b, pos);
     errors.append(&mut x.errors);
     s
 }
@@ -539,6 +543,11 @@ impl Exec<'_> {
                 let stream = self.scan_four_bit_int() as u8;
                 self.log_raw(&format!("{RAW}{}", io_event('c', stream, "")));
             }
+            Meaning::Prim(Prim::Pdf(i)) => {
+                if !self.pdf_immediate(i) {
+                    self.back(t);
+                }
+            }
             _ => self.back(t),
         }
     }
@@ -566,9 +575,10 @@ impl Exec<'_> {
 
     /// The events of shipping box `b` here (tex.web 1374: `out_what` for
     /// each whatsit met), in order.
-    pub(super) fn ship_io(&mut self, b: &BoxNode) -> String {
+    pub(super) fn ship_io(&mut self, b: &BoxNode, pos: &[(i32, i32)]) -> String {
         let mut s = String::new();
-        for w in whatsits(b) {
+        for (j, w) in whatsits(b).into_iter().enumerate() {
+            self.pdf_pos = pos.get(j).copied();
             match &*w {
                 Whatsit::Open { stream, name } => s.push_str(&io_event('o', *stream, name)),
                 Whatsit::Close { stream } => s.push_str(&io_event('c', *stream, "")),
@@ -576,9 +586,10 @@ impl Exec<'_> {
                     let text = self.expand_write(toks);
                     s.push_str(&io_event('w', *stream, &text));
                 }
-                Whatsit::Special(_) => {}
+                Whatsit::Special(_) | Whatsit::Pdf(_) => {}
             }
         }
+        self.pdf_pos = None;
         s
     }
 

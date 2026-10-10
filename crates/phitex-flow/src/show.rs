@@ -477,6 +477,152 @@ impl Shower<'_> {
                 self.cx.esc(self.out, "special");
                 self.mark_text(s);
             }
+            Whatsit::Pdf(p) => self.pdf_whatsit(p),
+        }
+    }
+
+    /// pdfTeX's whatsits (pdftex.web's "Display the whatsit node").
+    fn pdf_whatsit(&mut self, p: &crate::pdf::what::What) {
+        use crate::pdf::what::{self, Id, What};
+        let text = |t: &[u8]| -> String { t.iter().map(|&c| char::from(c)).collect() };
+        let rule = |s: &mut Self, w: i32, h: i32, d: i32| {
+            s.out.push('(');
+            rule_dim(s.out, h);
+            s.out.push('+');
+            rule_dim(s.out, d);
+            s.out.push_str(")x");
+            rule_dim(s.out, w);
+        };
+        let id = |s: &mut Self, i: &Id| match i {
+            Id::Name(t) => {
+                s.out.push_str(" name");
+                s.mark_text(&text(t));
+            }
+            Id::Num(n) => {
+                let _ = write!(s.out, " num{n}");
+            }
+        };
+        match p {
+            What::Literal { mode, data } => {
+                self.cx.esc(self.out, "pdfliteral");
+                match *mode {
+                    what::DIRECT_PAGE => self.out.push_str(" page"),
+                    what::DIRECT_ALWAYS => self.out.push_str(" direct"),
+                    _ => {}
+                }
+                self.mark_text(&text(data));
+            }
+            What::ColorStack { stack, cmd, data } => {
+                self.cx.esc(self.out, "pdfcolorstack ");
+                let _ = write!(self.out, "{stack}");
+                self.out.push_str(match *cmd {
+                    what::CS_SET => " set ",
+                    what::CS_PUSH => " push ",
+                    what::CS_POP => " pop",
+                    _ => " current",
+                });
+                if let Some(d) = data {
+                    self.mark_text(&text(d));
+                }
+            }
+            What::SetMatrix(d) => {
+                self.cx.esc(self.out, "pdfsetmatrix");
+                self.mark_text(&text(d));
+            }
+            What::Save => self.cx.esc(self.out, "pdfsave"),
+            What::Restore => self.cx.esc(self.out, "pdfrestore"),
+            What::RefObj(_) => self.cx.esc(self.out, "pdfrefobj"),
+            What::RefXform { w, h, d, .. } | What::RefXimage { w, h, d, .. } => {
+                self.cx.esc(self.out, if matches!(p, What::RefXform { .. }) { "pdfrefxform" } else { "pdfrefximage" });
+                self.out.push('(');
+                crate::print::scaled(self.out, *h);
+                self.out.push('+');
+                crate::print::scaled(self.out, *d);
+                self.out.push_str(")x");
+                crate::print::scaled(self.out, *w);
+            }
+            What::Annot { w, h, d, data, .. } => {
+                self.cx.esc(self.out, "pdfannot");
+                rule(self, *w, *h, *d);
+                self.mark_text(&text(data));
+            }
+            What::StartLink { w, h, d, attr, action, .. } => {
+                self.cx.esc(self.out, "pdfstartlink");
+                rule(self, *w, *h, *d);
+                if let Some(a) = attr {
+                    self.out.push_str(" attr");
+                    self.mark_text(&text(a));
+                }
+                self.out.push_str(" action");
+                if action.kind == what::ACTION_USER {
+                    self.out.push_str(" user");
+                    self.mark_text(&text(&action.text));
+                } else {
+                    if let Some(f) = &action.file {
+                        self.out.push_str(" file");
+                        self.mark_text(&text(f));
+                    }
+                    match (action.kind, &action.id) {
+                        (what::ACTION_PAGE, Id::Num(n)) => {
+                            let _ = write!(self.out, " page{n}");
+                            self.mark_text(&text(&action.text));
+                        }
+                        (what::ACTION_GOTO, Id::Name(t)) => {
+                            self.out.push_str(" goto name");
+                            self.mark_text(&text(t));
+                        }
+                        (what::ACTION_GOTO, Id::Num(n)) => {
+                            let _ = write!(self.out, " goto num{n}");
+                        }
+                        (_, Id::Name(t)) => {
+                            self.out.push_str(" thread name");
+                            self.mark_text(&text(t));
+                        }
+                        (_, Id::Num(n)) => {
+                            let _ = write!(self.out, " thread num{n}");
+                        }
+                    }
+                }
+            }
+            What::EndLink => self.cx.esc(self.out, "pdfendlink"),
+            What::Dest { id: i, struct_num, kind, zoom, w, h, d } => {
+                self.cx.esc(self.out, "pdfdest");
+                if let Some(s) = struct_num {
+                    let _ = write!(self.out, " struct{s}");
+                }
+                id(self, i);
+                self.out.push(' ');
+                match *kind {
+                    what::DEST_XYZ => {
+                        self.out.push_str("xyz");
+                        if let Some(z) = zoom {
+                            let _ = write!(self.out, " zoom{z}");
+                        }
+                    }
+                    what::DEST_FITBH => self.out.push_str("fitbh"),
+                    what::DEST_FITBV => self.out.push_str("fitbv"),
+                    what::DEST_FITB => self.out.push_str("fitb"),
+                    what::DEST_FITH => self.out.push_str("fith"),
+                    what::DEST_FITV => self.out.push_str("fitv"),
+                    what::DEST_FITR => {
+                        self.out.push_str("fitr");
+                        rule(self, *w, *h, *d);
+                    }
+                    _ => self.out.push_str("fit"),
+                }
+            }
+            What::Thread { start, id: i, w, h, d, attr } => {
+                self.cx.esc(self.out, if *start { "pdfstartthread" } else { "pdfthread" });
+                rule(self, *w, *h, *d);
+                if let Some(a) = attr {
+                    self.out.push_str(" attr");
+                    self.mark_text(&text(a));
+                }
+                id(self, i);
+            }
+            What::EndThread => self.cx.esc(self.out, "pdfendthread"),
+            What::SavePos => self.cx.esc(self.out, "pdfsavepos"),
+            What::RunningLink(on) => self.cx.esc(self.out, if *on { "pdfrunninglinkon" } else { "pdfrunninglinkoff" }),
         }
     }
 
