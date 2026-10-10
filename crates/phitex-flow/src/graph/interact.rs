@@ -412,6 +412,11 @@ impl Exec<'_> {
         }
         // (a new run of TeX: the last job's `\end` or `\dump` is behind it)
         self.define(Key::Ended, Val::Int(0), true);
+        // (web2c, after loading the format: the command line's
+        // `-interaction` over the format's mode)
+        if let Some(m) = self.env.interaction_option() {
+            self.define(Key::Interaction, Val::Int(m), true);
+        }
         let ident = match (first.trim_start_matches(' ').starts_with('&'), self.get(&Key::Format)) {
             (true, Val::Name(n)) if !n.is_empty() => n.to_string(),
             _ => " (INITEX)".to_string(),

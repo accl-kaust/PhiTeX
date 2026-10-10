@@ -1,9 +1,11 @@
 //! The edit budgets (`AGENTS_BRIEF.md`, "Budgets"), measured over the plain
-//! documents, big and bigout at 1 and 8 workers, lean or not
-//! (`phitex_flow::budgets`). Informational: the table is printed
-//! (`cargo test --release --test budgets -- --nocapture`), nothing is
-//! asserted but that every row was measured. `PHITEX_BUDGET_REPS` (5)
-//! repetitions of each edit; `scripts/flow-budgets.sh` for the cluster.
+//! documents, big and bigout at 1 and 8 workers, lean or not, and a LaTeX
+//! document once at 8 workers (`phitex_flow::budgets`; latex.ltx as the
+//! prelude until the saved format, so its times are not yet the real
+//! ones). Informational: the table is printed (`cargo test --release
+//! --test budgets -- --nocapture`), nothing is asserted but that every row
+//! was measured. `PHITEX_BUDGET_REPS` (5) repetitions of each edit (the
+//! LaTeX document's: 1); `scripts/flow-budgets.sh` for the cluster.
 
 use phitex_flow::budgets;
 
@@ -14,4 +16,14 @@ fn edit_budgets_table() {
     println!("{}", budgets::table(&rows));
     let docs = budgets::docs().len();
     assert_eq!(rows.len(), docs * 4 * budgets::EditKind::ALL.len(), "a row for each document, schedule and edit");
+}
+
+#[test]
+fn latex_budgets_table() {
+    if phitex_flow::fuzz::latex_doc("tiny").is_none() {
+        return;
+    }
+    let rows = budgets::run_all(1, Some("latex-tiny"));
+    println!("{}", budgets::table(&rows));
+    assert_eq!(rows.len(), budgets::EditKind::ALL.len(), "a row for each edit");
 }

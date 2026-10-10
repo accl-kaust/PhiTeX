@@ -135,6 +135,27 @@ pub enum Kind {
     /// TRIP's two jobs as a session (`graph::jobs`), the edits in pass
     /// 2's text.
     Trip,
+    /// A LaTeX document: a session of two jobs, `latex.ini` (the format,
+    /// `latex.ltx`, as the prelude until the saved format comes) and the
+    /// document (`&latex NAME`), in extended mode, the edits in the
+    /// document's text.
+    Latex(Arc<LatexSetup>),
+}
+
+impl Kind {
+    /// Whether its builds run in e-TeX's extended mode.
+    pub fn etex(&self) -> bool {
+        matches!(self, Kind::Latex(_))
+    }
+}
+
+/// Where a LaTeX document's files are, as `tests/latex_docs.rs` sets them:
+/// the directories `latex -recorder` read them from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LatexSetup {
+    pub jobname: String,
+    pub input_dirs: Vec<PathBuf>,
+    pub font_dirs: Vec<PathBuf>,
 }
 
 /// A document of the corpus.
@@ -256,6 +277,13 @@ pub fn trip_doc(pass2: Option<&str>) -> Option<Doc> {
 /// A build as `doc` is built (its font, its files; TRIP's session).
 pub fn builder(doc: &Doc, files: &[(String, String)]) -> Build {
     let mut b = Build::new(doc.font.clone());
+    if let Kind::Latex(s) = &doc.kind {
+        b.set_font_dirs(s.font_dirs.clone());
+        b.set_input_dirs(s.input_dirs.clone());
+        b.set_jobname(&s.jobname);
+        b.set_terminal(&["latex.ini", &format!("&latex {}", s.jobname)]);
+        b.set_limits(Limits::TEX_LIVE);
+    }
     if doc.kind == Kind::Trip {
         let d = trip_dir();
         b.set_font_dirs(vec![d.clone()]);
@@ -430,6 +458,9 @@ fn letter(rng: &mut Rng) -> char {
 /// One random edit of the document as it is now (`None`: the kind drawn
 /// had nothing to edit).
 fn edit_once(rng: &mut Rng, doc: &Doc, text: &str, files: &[(String, String)]) -> Option<Edit> {
+    if matches!(doc.kind, Kind::Latex(_)) {
+        return edit_latex(rng, doc, text);
+    }
     let s = scan(text, doc.body);
     let main = |at: usize, del: usize, ins: String, what: &str| Edit {
         file: None,
@@ -842,11 +873,12 @@ fn differs(a: &Output, b: &Output) -> Option<String> {
 /// The cold build of `text` the edit's output must equal.
 pub fn cold(doc: &Doc, text: &str, files: &[(String, String)]) -> Output {
     let opts = Options {
-        threads: 1,
+        // (a LaTeX document's at 8: its format's prelude is long)
+        threads: if doc.kind.etex() { 8 } else { 1 },
         reads: Reads::Suspend,
         order: Order::Priority,
         dump: false,
-        etex: false,
+        etex: doc.kind.etex(),
         ..Options::default()
     };
     builder(doc, files).update(text, opts)
@@ -1103,7 +1135,10 @@ fn run_seed_at(
     let check_over = cfg.over && lean == Some(false);
     let mut text = doc.text.clone();
     let mut files = doc.files.clone();
-    let etex = false;
+    let etex = doc.kind.etex();
+    // (a LaTeX build's graph is latex.ltx's, millions of nodes: no dumps,
+    // no over-invalidation check, until the saved format)
+    let check_over = check_over && (!etex || std::env::var_os("PHITEX_FUZZ_LATEX_OVER").is_some());
     let mut sched = Schedule::random(&mut rng, &cfg.threads, lean);
     let mut b = builder(&doc, &files);
     b.set_lean(sched.lean);
@@ -1236,20 +1271,21 @@ pub fn replay(r: &Repro) -> Option<Fail> {
 
 /// [`replay`], with the edit's and the cold build's outputs.
 fn replay_outputs(r: &Repro) -> Option<(Option<Fail>, Output, Output)> {
-    let corpus = corpus();
-    let doc = corpus.iter().find(|d| d.name == r.doc)?.clone();
+    let doc = find_doc(&r.doc)?;
     let mut text = r.text.clone();
     let mut files = r.files.clone();
     let mut b = builder(&doc, &files);
     b.set_lean(r.before.lean);
     let over = !r.before.lean && !r.schedule.lean;
-    let prev = b.update(&text, r.before.options(false, over));
+    let etex = doc.kind.etex();
+    let over = over && (!etex || std::env::var_os("PHITEX_FUZZ_LATEX_OVER").is_some());
+    let prev = b.update(&text, r.before.options(etex, over));
     r.edit.apply(&mut text, &mut files);
     for (n, t) in &files {
         b.set_file(n, t);
     }
     b.set_lean(r.schedule.lean);
-    let inc = b.update(&text, r.schedule.options(false, over));
+    let inc = b.update(&text, r.schedule.options(etex, over));
     let c = cold(&doc, &text, &files);
     // (the two graphs, for looking at: `PHITEX_FUZZ_DUMP=DIR`)
     if let Some(d) = std::env::var_os("PHITEX_FUZZ_DUMP") {
@@ -1400,4 +1436,261 @@ pub fn orders_differ(doc: &Doc, text: &str, a: Order, b: Order, dump: bool) -> (
 /// the scaffold), named `name`.
 pub fn plain_body_doc(name: &str, body: &str) -> Option<Doc> {
     Some(plain_doc(name, body, &cmr10()?, &plain()?))
+}
+
+// ------------------------------------------------------------ LaTeX
+
+fn latex_dir() -> PathBuf {
+    root().join("tests/latex")
+}
+
+/// A LaTeX document of the corpus (`tests/fuzz/latex/NAME.tex`, or B's
+/// `tests/latex/docs/NAME.tex`), named `latex-NAME`. The directories are
+/// those `latex` read B's documents' files from (their `.dirs`, and
+/// `tests/latex/dirs.txt` for the format's); `None` without `latex.ini`.
+pub fn latex_doc(name: &str) -> Option<Doc> {
+    let tex = [root().join(format!("tests/fuzz/latex/{name}.tex")), latex_dir().join(format!("docs/{name}.tex"))]
+        .into_iter()
+        .find(|p| p.exists())?;
+    let mut ini = None;
+    let (mut inputs, mut fonts) = (vec![latex_dir()], Vec::new());
+    let add = |v: &mut Vec<PathBuf>, d: PathBuf| {
+        if !v.contains(&d) {
+            v.push(d);
+        }
+    };
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(latex_dir().join("docs")).ok()?.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    dirs.sort();
+    for p in dirs.iter().filter(|p| p.extension().is_some_and(|x| x == "dirs")) {
+        for l in std::fs::read_to_string(p).ok()?.lines() {
+            match l.split_once(' ') {
+                Some(("ini", p)) => ini = ini.or_else(|| Some(PathBuf::from(p))),
+                Some(("input", d)) => add(&mut inputs, PathBuf::from(d)),
+                Some(("font", d)) => add(&mut fonts, PathBuf::from(d)),
+                _ => {}
+            }
+        }
+    }
+    for d in std::fs::read_to_string(latex_dir().join("dirs.txt")).ok()?.lines() {
+        add(&mut inputs, PathBuf::from(d));
+    }
+    for d in crate::tfm::default_dirs() {
+        add(&mut fonts, d);
+    }
+    let ini = latin1(&std::fs::read(ini?).ok()?);
+    let doc = latin1(&std::fs::read(&tex).ok()?);
+    let text = crate::graph::jobs(&[&ini, &doc]);
+    let body = text.rfind(crate::graph::JOB).map_or(0, |i| i + crate::graph::JOB.len_utf8());
+    Some(Doc {
+        name: format!("latex-{name}"),
+        kind: Kind::Latex(Arc::new(LatexSetup { jobname: name.to_string(), input_dirs: inputs, font_dirs: fonts })),
+        text,
+        body,
+        files: Vec::new(),
+        font: cmr10()?,
+    })
+}
+
+/// The LaTeX documents: the small one the harness is made on, and B's.
+pub fn latex_corpus() -> Vec<Doc> {
+    ["tiny", "sections", "math", "tables", "figures", "titlepage", "packages"].iter().filter_map(|n| latex_doc(n)).collect()
+}
+
+/// A document of either corpus by name.
+pub fn find_doc(name: &str) -> Option<Doc> {
+    if let Some(n) = name.strip_prefix("latex-") {
+        return latex_doc(n);
+    }
+    corpus().into_iter().find(|d| d.name == name)
+}
+
+/// The text from `at` to the end of its line (the `\n` included).
+fn line_at(text: &str, at: usize) -> (usize, usize) {
+    let s = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    let e = text[at..].find('\n').map_or(text.len(), |i| at + i + 1);
+    (s, e)
+}
+
+/// One random LaTeX edit (`None`: nothing of the kind drawn to edit). The
+/// document's preamble and body are after `doc.body`.
+fn edit_latex(rng: &mut Rng, doc: &Doc, text: &str) -> Option<Edit> {
+    let main = |at: usize, del: usize, ins: String, what: &str| Edit { file: None, at, del, ins, what: what.to_string() };
+    let from = doc.body;
+    let begin = from + text[from..].find("\\begin{document}")? + "\\begin{document}\n".len();
+    let end = from + text[from..].find("\\end{document}")?;
+    let all = |pat: &str| -> Vec<usize> { text[begin..end].match_indices(pat).map(|(i, _)| begin + i).collect() };
+    // (lines of running text: starting with a letter)
+    let mut text_lines = Vec::new();
+    let mut at = begin;
+    for l in text[begin..end].split_inclusive('\n') {
+        if l.chars().next().is_some_and(char::is_alphabetic) {
+            text_lines.push(at);
+        }
+        at += l.len();
+    }
+    let spaces: Vec<usize> =
+        text_lines.iter().flat_map(|&l| text[l..line_at(text, l).1].match_indices(' ').map(move |(i, _)| l + i)).collect();
+    // (paragraph starts after blank lines in the body)
+    let blanks = all("\n\n").into_iter().map(|i| i + 2).filter(|&i| i < end).collect::<Vec<_>>();
+    let kinds = [
+        "word", "para", "section", "label", "ref", "emph", "unemph", "item-add", "item-remove", "equation", "cell", "float",
+        "package", "class", "newcommand", "comment", "blank-in", "blank-out",
+    ];
+    let kind = rng.pick(&kinds)?;
+    let w = rng.pick(&WORDS)?;
+    match kind {
+        "word" => {
+            let at = rng.pick(&spaces)?;
+            Some(main(at, 0, format!(" {w}"), kind))
+        }
+        "para" => {
+            let at = rng.pick(&blanks)?;
+            Some(main(at, 0, format!("An inserted paragraph about the {w} and its words.\n\n"), kind))
+        }
+        "section" => {
+            let at = rng.pick(&all("\\section{"))? + "\\section{".len();
+            let n = text[at..].find('}')?;
+            Some(main(at, n, format!("The {w}"), kind))
+        }
+        "label" => {
+            // (a \label moved to another paragraph)
+            let at = rng.pick(&all("\\label{"))?;
+            let n = text[at..].find('}')? + 1;
+            let to = rng.pick(&blanks)?;
+            let label = text[at..at + n].to_string();
+            if to >= at && to <= at + n {
+                return None;
+            }
+            // (one edit: the span from the first place to the last, rewritten)
+            let (a, b) = (at.min(to), (at + n).max(to));
+            let mut span = text[a..b].to_string();
+            if to < at {
+                span = format!("{label}{}", &span[..at - a]) + &span[at + n - a..];
+            } else {
+                span = format!("{}{}{label}", &span[..0], &span[n..]);
+            }
+            Some(main(a, b - a, span, "label-move"))
+        }
+        "ref" => {
+            let at = rng.pick(&all("\\ref{"))? + "\\ref{".len();
+            let n = text[at..].find('}')?;
+            let labels: Vec<String> = all("\\label{")
+                .into_iter()
+                .filter_map(|l| {
+                    let s = l + "\\label{".len();
+                    text[s..].find('}').map(|e| text[s..s + e].to_string())
+                })
+                .collect();
+            let t = rng.pick(&labels.iter().map(String::as_str).collect::<Vec<_>>())?.to_string();
+            (text[at..at + n] != t).then(|| main(at, n, t, "ref-target"))
+        }
+        "emph" => {
+            let at = rng.pick(&spaces)? + 1;
+            let n = text[at..].find([' ', '\n'])?;
+            let word = &text[at..at + n];
+            if word.is_empty() || !word.chars().all(char::is_alphabetic) {
+                return None;
+            }
+            let cmd = if rng.below(2) == 0 { "emph" } else { "textbf" };
+            Some(main(at, n, format!("\\{cmd}{{{word}}}"), "emph-wrap"))
+        }
+        "unemph" => {
+            let mut v = all("\\emph{");
+            v.extend(all("\\textbf{"));
+            let at = rng.pick(&v)?;
+            let open = at + text[at..].find('{')? + 1;
+            let n = text[open..].find('}')?;
+            Some(main(at, open + n + 1 - at, text[open..open + n].to_string(), "emph-remove"))
+        }
+        "item-add" => {
+            let at = rng.pick(&all("\\item "))?;
+            Some(main(at, 0, format!("\\item An added {w}.\n"), kind))
+        }
+        "item-remove" => {
+            let at = rng.pick(&all("\\item "))?;
+            let (_, e) = line_at(text, at);
+            Some(main(at, e - at, String::new(), kind))
+        }
+        "equation" => {
+            let at = rng.pick(&all("\\end{equation}"))?;
+            Some(main(at, 0, format!("+{}\n", letter(rng)), kind))
+        }
+        "cell" => {
+            let at = rng.pick(&all("& "))? + 2;
+            let n = text[at..].find([' ', '\\', '&', '\n'])?;
+            Some(main(at, n, w.to_string(), kind))
+        }
+        "float" => {
+            let mut v = all("\\begin{figure}");
+            v.extend(all("\\begin{table}"));
+            let a = rng.pick(&v)?;
+            let env = if text[a..].starts_with("\\begin{figure}") { "\\end{figure}\n" } else { "\\end{table}\n" };
+            let b = a + text[a..].find(env)? + env.len();
+            let to = rng.pick(&blanks)?;
+            if to >= a && to <= b {
+                return None;
+            }
+            let float = text[a..b].to_string();
+            let (s, e) = (a.min(to), b.max(to));
+            let span = if to < a {
+                format!("{float}{}", &text[to..a]) + &text[b..b]
+            } else {
+                format!("{}{float}", &text[b..to])
+            };
+            Some(main(s, e - s, span, "float-move"))
+        }
+        "package" => {
+            let pre = text[from..begin].find("\\begin{document}").map(|i| from + i)?;
+            let have: Vec<usize> = ["ifthen", "calc", "array", "verbatim"]
+                .iter()
+                .filter_map(|p| text[from..pre].find(&format!("\\usepackage{{{p}}}\n")).map(|i| from + i))
+                .collect();
+            if rng.below(2) == 0 && !have.is_empty() {
+                let at = rng.pick(&have)?;
+                let (_, e) = line_at(text, at);
+                Some(main(at, e - at, String::new(), "package-remove"))
+            } else {
+                let p = rng.pick(&["ifthen", "calc", "array", "verbatim"])?;
+                if text[from..pre].contains(&format!("\\usepackage{{{p}}}")) {
+                    return None;
+                }
+                Some(main(pre, 0, format!("\\usepackage{{{p}}}\n"), "package-add"))
+            }
+        }
+        "class" => {
+            let at = from + text[from..].find("\\documentclass")?;
+            let (_, e) = line_at(text, at);
+            let line = &text[at..e];
+            let opts = ["", "[11pt]", "[12pt]", "[twocolumn]"];
+            let o = rng.pick(&opts)?;
+            let cls = &line[line.find('{')?..];
+            let new = format!("\\documentclass{o}{cls}");
+            (new != line).then(|| main(at, e - at, new, "class-option"))
+        }
+        "newcommand" => {
+            let at = from + text[from..].find("\\newcommand{")?;
+            let close = at + text[at..].find("}{")? + 2;
+            let n = text[close..].find('}')?;
+            Some(main(close, n, w.to_string(), kind))
+        }
+        "comment" => {
+            let at = rng.pick(&text_lines)?;
+            Some(main(at, 0, format!("% a comment about the {w}\n"), kind))
+        }
+        "blank-in" | "blank-out" => {
+            // (a line start inside an environment, or outside every one)
+            let mut depth = 0i32;
+            let mut inside = Vec::new();
+            let mut outside = Vec::new();
+            let mut at = begin;
+            for l in text[begin..end].split_inclusive('\n') {
+                if depth > 0 { inside.push(at) } else { outside.push(at) }
+                depth += l.matches("\\begin{").count() as i32 - l.matches("\\end{").count() as i32;
+                at += l.len();
+            }
+            let at = rng.pick(if kind == "blank-in" { &inside } else { &outside })?;
+            Some(main(at, 0, "\n".into(), kind))
+        }
+        _ => None,
+    }
 }

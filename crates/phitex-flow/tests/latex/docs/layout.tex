@@ -1,0 +1,37 @@
+\documentclass{article}
+\usepackage[english]{babel}
+\usepackage[a5paper,margin=2cm]{geometry}
+\usepackage{fancyhdr}
+\usepackage{enumitem}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{Layout test}
+\fancyhead[R]{\thepage}
+\fancyfoot[C]{\leftmark}
+\renewcommand{\headrulewidth}{0.4pt}
+\begin{document}
+\section{Geometry and headers}
+This text sits on an A5 page with two centimetre margins, \today.
+\begin{itemize}[label=--,itemsep=0pt]
+\item A dash item.
+\item Another one.
+\end{itemize}
+\begin{enumerate}[label=(\alph*),leftmargin=*]
+\item First, lettered.
+\item Second, lettered.
+\begin{enumerate}[label=\roman*.]
+\item Nested, roman.
+\end{enumerate}
+\end{enumerate}
+\begin{description}[font=\sffamily]
+\item[Term] Its description.
+\end{description}
+\newpage
+\section{A second page}
+The header and footer repeat here, with the section's mark.
+\clearpage
+\section{A third page}
+Hyphenation in English: information, hyphenation, typesetting,
+characteristically, incomprehensibilities, and an extraordinarily long
+sentence to make the line breaker work a little.
+\end{document}

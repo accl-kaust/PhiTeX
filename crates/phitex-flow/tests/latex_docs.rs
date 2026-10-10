@@ -33,7 +33,8 @@ use phitex_flow::print::Limits;
 use phitex_flow::{Build, Font, Options, Order, Output, Reads};
 
 /// The documents.
-const DOCS: [&str; 6] = ["sections", "math", "tables", "figures", "titlepage", "packages"];
+const DOCS: [&str; 10] =
+    ["sections", "math", "tables", "figures", "titlepage", "packages", "ams", "gfx", "layout", "rules"];
 
 /// The schedules: one thread; eight suspending, in priority order and in
 /// a random one; eight speculating, in priority order and in a random one.
@@ -76,6 +77,21 @@ struct Made {
     dirs: Vec<String>,
 }
 
+/// A document's files: `NAME.tex` and the `NAME-*` files it reads (a
+/// picture).
+fn doc_files(name: &str) -> Vec<String> {
+    let mut v = vec![format!("{name}.tex")];
+    let pre = format!("{name}-");
+    for e in std::fs::read_dir(docs_dir()).expect("tests/latex/docs").flatten() {
+        let f = e.file_name().to_string_lossy().into_owned();
+        if f.starts_with(&pre) {
+            v.push(f);
+        }
+    }
+    v.sort();
+    v
+}
+
 fn kpsewhich(name: &str) -> Option<String> {
     let o = Command::new("kpsewhich").arg(name).output().ok()?;
     let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -86,7 +102,9 @@ fn kpsewhich(name: &str) -> Option<String> {
 fn run_latex(name: &str) -> Option<Made> {
     let tmp = std::env::temp_dir().join(format!("phitex-flow-latex-doc-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).ok()?;
-    std::fs::copy(docs_dir().join(format!("{name}.tex")), tmp.join(format!("{name}.tex"))).ok()?;
+    for f in doc_files(name) {
+        std::fs::copy(docs_dir().join(&f), tmp.join(&f)).ok()?;
+    }
     let st = Command::new("latex")
         .args(["-interaction=batchmode", "-recorder", &format!("{name}.tex")])
         .env("SOURCE_DATE_EPOCH", "0")
@@ -207,7 +225,9 @@ fn masked(dvi: &[u8]) -> Vec<u8> {
 fn dirs_of(name: &str) -> (Vec<PathBuf>, Vec<PathBuf>, PathBuf) {
     let want = recorded(name);
     let mut ini = None;
-    let (mut inputs, mut fonts) = (vec![latex_dir()], Vec::new());
+    // (the document's own directory first: its pictures, as `latex` finds
+    // them beside it)
+    let (mut inputs, mut fonts) = (vec![docs_dir(), latex_dir()], Vec::new());
     for l in &want.dirs {
         match l.split_once(' ') {
             Some(("ini", p)) => ini = Some(PathBuf::from(p)),
@@ -234,6 +254,9 @@ fn build_for(name: &str, job: &str) -> Build {
     b.set_input_dirs(inputs);
     b.set_jobname(job);
     b.set_limits(Limits::TEX_LIVE);
+    // (as the oracle runs: `latex -interaction=batchmode`, over the
+    // format's `\errorstopmode` at the document's job's start)
+    b.set_interaction_option(Some(0));
     b
 }
 
@@ -468,4 +491,24 @@ fn doc_titlepage() {
 #[test]
 fn doc_packages() {
     doc("packages");
+}
+
+#[test]
+fn doc_ams() {
+    doc("ams");
+}
+
+#[test]
+fn doc_gfx() {
+    doc("gfx");
+}
+
+#[test]
+fn doc_layout() {
+    doc("layout");
+}
+
+#[test]
+fn doc_rules() {
+    doc("rules");
 }

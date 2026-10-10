@@ -166,6 +166,13 @@ pub trait Env {
     fn limits(&self) -> crate::print::Limits {
         crate::print::Limits::TEX_LIVE
     }
+
+    /// The interaction mode the command line gives (web2c's
+    /// `-interaction`, `interaction_option`): set at each job's start,
+    /// after the format (none: the format's, or IniTeX's).
+    fn interaction_option(&self) -> Option<i32> {
+        None
+    }
 }
 
 /// web2c's `main_memory` (tex.web 11's `mem_max`): words a run's material

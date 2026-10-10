@@ -1411,6 +1411,42 @@ moves to `tests/fuzz/fixed/`, which must pass):
   `\input` keeps the wrong run, and the cold build of the edited text
   (no restructure) does not have it.
 
+**LaTeX documents** (`fuzz::Kind::Latex`, `fuzz::latex_corpus`,
+`phitex-flow --fuzz ... --latex`). A LaTeX document is a session of two
+jobs as `tests/latex_docs.rs` builds them: `latex.ini`, with `latex.ltx`
+as the prelude until the saved format, then `&latex NAME`. It runs in
+extended mode, with the directories B's documents' `.dirs` and
+`tests/latex/dirs.txt` give. The corpus is `tests/fuzz/latex/tiny.tex`
+(the harness is made on it: sections, labels and refs, a list, an
+equation, a tabular, a figure, `\newcommand`, `ifthen`) and B's six
+documents, named `latex-NAME`. The edits are made in the document's text
+(`fuzz::edit_latex`):
+- a word; an inserted paragraph; a `\section` title;
+- a `\label` moved to another paragraph; a `\ref`'s target changed;
+- `\emph`/`\textbf` wrapped round a word or removed;
+- an `\item` added or removed; an equation changed; a tabular cell;
+- a figure or table moved to another paragraph;
+- `\usepackage` added or removed (ifthen, calc, array, verbatim);
+- the class option toggled (none, 11pt, 12pt, twocolumn);
+- the `\newcommand` body; a comment line; a blank line inside or outside
+  an environment.
+Each update is compared with a cold build (at 8 workers). There are no
+dumps and no over-invalidation check until the format, since
+latex.ltx's graph has millions of nodes (`PHITEX_FUZZ_LATEX_OVER=1`
+forces them).
+
+`tests/fuzz.rs` `latex_edits_equal_cold_and_latex`: `PHITEX_FUZZ_LATEX`
+seeds (1) of one edit on tiny, compared with the cold build and with
+`latex` itself on its first run (DVI with the date masked, `.aux`). It
+takes about 100 s with the prelude. Locally, 3 seeds of 2 edits at 8
+threads (random schedules) passed, and so did seed 0 against `latex`.
+The budgets table gets a LaTeX row set
+(`phitex-flow --budgets 1 latex-tiny`, `tests/budgets.rs`): word, line,
+page-break, the `\newcommand` body and `\parskip`, once at 8 workers,
+lean. With the prelude, tiny's cold build takes 42 s and its edits
+140–290 ms: a word reruns 9 pieces and 17365 steps, `\parskip` 3039. The
+real numbers come with the format.
+
 **Edit budgets** (`src/budgets.rs`, `phitex-flow --budgets [REPS]
 [DOC]`, `scripts/flow-budgets.sh`, `tests/budgets.rs`, informational).
 Documents: the plain ones; big (48 pages); bigout (152 pages, big's body
@@ -1528,6 +1564,32 @@ piece again and again (a worker in `run_piece`, the round waiting), at
 any schedule (1 thread, Suspend, priority too). Pre-existing: 72ee98e
 hangs the same. Not in `open/` (its replay does not end); a timeout's
 reproduction names its step now (`fuzz::run_seed_at`).
+
+F's report of it (F7):
+- **F7 (fixed, A: above). An `\input` added by an edit stops the update at the file**
+  (a regression on the gate head, from A's 2c217c3, "\input anywhere
+  the reader is on the piece's own text is pieces"; flow-trip has not
+  merged it and passes). Seen in the cluster run of 5000 seeds (job 7722,
+  gate head 394eeab, before the F2 fix): 1203 failures of the classes
+  "edit DOC input-add | dvi: ./fzsub.tex" on every plain document, and
+  the one "timeout big" (seed 565). They come from the core, not the
+  environment: the second file is in memory (`Build::set_file`, found
+  before any directory), and 394eeab gives them here too. The update
+  prints `(./fzsub.tex`, and then neither the file's text nor the `)`
+  nor the pages after it. Bisected with `phitex-flow DOC --edit 'B
+  second=>\input fzsub<newline>B second' --check`: 59c78f1 gives
+  "edit == cold: yes", 2c217c3 and 394eeab give "NO". Regression
+  repros in `tests/fuzz/fixed/` (they pass here and must keep passing;
+  replayed with a 300 s limit, a hang counts as a failure):
+  `f7-input-added-in-update.repro` (four lines and a two-piece
+  `fzsub.tex`, `\input fzsub` added before the second paragraph) and
+  `f7-input-added-hang.repro` (big, seed 565's first edit: on 394eeab
+  the update never ends). B's bac0a76 does not contain 2c217c3, and both
+  repros pass on it.
+
+The cluster run's other classes: 827 F1 (TRIP), 27 "timeout trip" (F1's
+document, at 8 threads under load), and about 12 "F2?" on hyphens. The F2
+fix (e1f2aa0) is not in 394eeab.
 
 **Design tests** (`tests/design.rs`, the brief's 1–6; 7 waits for
 `Key::File` by writes):
@@ -1800,6 +1862,29 @@ schedules (next section): 0.7–2 s each.
 3. *`Key::MainTail` after a removal* in a node of its own is none, not the
    item before (Conflict 13).
 
+## LaTeX packages (agent B)
+
+Four more documents in `tests/latex_docs.rs`, on the saved format, at the
+five schedules, against `latex` in DVI mode on the first run: `ams`
+(amsmath and amssymb: `align`, `gather`, `multline`, `cases`, `\text`,
+`\DeclareMathOperator`, the matrices, `\binom`, `\dfrac`), `gfx`
+(graphicx and color with the dvips driver: `\includegraphics` of an EPS
+by its bounding box, scaled and turned, `\scalebox`, `\rotatebox`,
+`\reflectbox`, `\resizebox`, `\textcolor`, `\colorbox`, `\fcolorbox`, a
+coloured paragraph: the `\special`s), `layout` (babel english, geometry
+on A5, fancyhdr, enumitem, three pages), `rules` (booktabs, caption,
+enumerate). A document's `NAME-*` files (the EPS) sit beside it and are
+copied for `latex`; the graph reads them from the documents' directory.
+
+Gap found and fixed: *an alignment entry's leaders are glue*
+(`align::totals`, §796's `hpack`): booktabs' `\cmidrule` is a spanned
+`\omit` entry holding `\leaders\hrule\hfill`; its stretch was not
+counted, the entry's glue was not set and the rule was not drawn.
+
+Not yet: hyperref (the `.aux` fixpoint — format gap 1 — and its many
+`\special`s/`\pdf…` commands), microtype (pdfTeX's font expansion and
+protrusion, PDF mode only).
+
 ## The format: definitions before the first piece (agent B)
 
 AGENTS_BRIEF §6.1: "known at t=0: the format, a set of definitions with
@@ -1852,15 +1937,15 @@ format read included). What remains is the documents' own work: about
 to three pieces each, so eight threads have little to share.
 
 Gaps:
-- *The command line's `-interaction` at a job's start.* web2c sets
-  `interaction` from `-interaction` after loading a format (tex.ch,
+- *(done)* *The command line's `-interaction` at a job's start.* web2c
+  sets `interaction` from `-interaction` after loading a format (tex.ch,
   `interaction_option`); `latex.ltx` dumps `\errorstopmode`, so `latex
-  -interaction=batchmode NAME` runs in batch mode. The session (and so
-  the format, which keeps the dumped mode to equal it) runs the
-  document's job in error-stop mode: the selector is `term_and_log`, the
-  log's layout differs from `latex`'s where a line is printed to the
-  terminal too. Proposal (session, F): a given interaction applies at
-  each job's start when the session gives one.
+  -interaction=batchmode NAME` runs in batch mode. Now
+  `Build::set_interaction_option` (CLI `--interaction MODE`, which sets
+  the mode before any definition too) is defined at each job's start
+  (`Env::interaction_option`), in a session and on a format alike; the
+  format keeps the dumped mode (equal to the session). None until set:
+  TRIP's second run (`tex` without `-interaction`) keeps its format's.
 - *Reruns from definitions between a piece's nodes (core, A).* On the
   format a document's own cost shows: `titlepage` (one piece, five
   pages) runs its 20k commands ten times (204k), `sections` twice. Each

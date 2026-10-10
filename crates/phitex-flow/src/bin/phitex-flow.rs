@@ -24,7 +24,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
-         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--fmt FILE] [--dump-fmt FILE] [--edit OLD=>NEW] [--repeat N] \
+         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--fmt FILE] [--dump-fmt FILE] [--interaction MODE] [--edit OLD=>NEW] [--repeat N] \
          [--check] [--log] [--main-memory WORDS] [--cut-lines N|inf]"
     );
     ExitCode::from(2)
@@ -135,7 +135,7 @@ fn trip(dir: &str, threads: usize) -> ExitCode {
 }
 
 /// `phitex-flow --fuzz SEED COUNT [SEEDS] [--threads N,..] [--doc NAME]
-/// [--out DIR] [--no-over] [--strict-over] [--timeout SECS]`: the incremental fuzz gate
+/// [--out DIR] [--no-over] [--strict-over] [--latex] [--timeout SECS]`: the incremental fuzz gate
 /// (`phitex_flow::fuzz`): SEEDS seeds from SEED (1), COUNT edits each; a
 /// failing seed's reproduction goes to DIR (`fuzz-out`).
 fn fuzz(args: &[String]) -> ExitCode {
@@ -148,6 +148,7 @@ fn fuzz(args: &[String]) -> ExitCode {
     let mut seeds = 1;
     let mut cfg = fuzz::Config::default();
     let mut out = std::path::PathBuf::from("fuzz-out");
+    let mut latex = false;
     let mut i = 2;
     if let Some(n) = num(2) {
         seeds = n;
@@ -160,6 +161,11 @@ fn fuzz(args: &[String]) -> ExitCode {
             "--doc" => cfg.doc = Some(val),
             "--out" => out = val.into(),
             "--timeout" => cfg.timeout = std::time::Duration::from_secs(val.parse().unwrap_or(600)),
+            "--latex" => {
+                latex = true;
+                i += 1;
+                continue;
+            }
             "--strict-over" => {
                 cfg.strict = true;
                 i += 1;
@@ -177,7 +183,7 @@ fn fuzz(args: &[String]) -> ExitCode {
         }
         i += 2;
     }
-    let corpus = Arc::new(fuzz::corpus());
+    let corpus = Arc::new(if latex { fuzz::latex_corpus() } else { fuzz::corpus() });
     let (mut fails, mut over, mut ok) = (0, 0, 0);
     for s in seed..seed + seeds {
         match fuzz::run_seed_timed(&corpus, s, usize::try_from(count).unwrap_or(usize::MAX), &cfg) {
@@ -337,6 +343,7 @@ fn main() -> ExitCode {
     let mut font_dirs: Vec<std::path::PathBuf> = Vec::new();
     let mut fmt: Option<String> = None;
     let mut dump_fmt: Option<String> = None;
+    let mut interaction: Option<i32> = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -394,6 +401,13 @@ fn main() -> ExitCode {
             "--dump-fmt" => match val() {
                 Some(f) => dump_fmt = Some(f),
                 None => return usage(),
+            },
+            "--interaction" => match val().as_deref() {
+                Some("batchmode") => interaction = Some(0),
+                Some("nonstopmode") => interaction = Some(1),
+                Some("scrollmode") => interaction = Some(2),
+                Some("errorstopmode") => interaction = Some(3),
+                _ => return usage(),
             },
             "--repeat" => match val().and_then(|v| v.parse().ok()) {
                 Some(n) => repeat = n,
@@ -495,6 +509,12 @@ fn main() -> ExitCode {
     if !font_dirs.is_empty() {
         font_dirs.extend(phitex_flow::tfm::default_dirs());
         b.set_font_dirs(font_dirs.clone());
+    }
+    // (`-interaction`: the mode before any definition, and at each job's
+    // start over the format's)
+    if let Some(m) = interaction {
+        b.set_interaction(m);
+        b.set_interaction_option(Some(m));
     }
     // (the format the build starts from: its definitions before the first
     // piece)

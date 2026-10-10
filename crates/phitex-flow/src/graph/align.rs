@@ -272,7 +272,8 @@ fn tab_glue((g, zero): (Arc<Glue>, bool)) -> Item {
 fn totals(list: &[Item]) -> ([i32; 4], [i32; 4]) {
     let (mut st, mut sh) = ([0; 4], [0; 4]);
     for it in list {
-        if let Item::Glue { g, .. } = it {
+        // (§796's hpack: leaders are glue)
+        if let Some(g) = it.glue() {
             st[usize::from(g.stretch_order).min(3)] += g.stretch;
             sh[usize::from(g.shrink_order).min(3)] += g.shrink;
         }
