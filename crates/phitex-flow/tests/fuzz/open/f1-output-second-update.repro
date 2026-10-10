@@ -1,0 +1,18 @@
+phitex-flow fuzz repro
+doc story
+seed 0 step 1
+before threads=1 reads=Suspend order=Priority lean=false
+schedule threads=1 reads=Suspend order=Priority lean=false
+fail mismatch dvi,log
+history threads=1 doc=-
+edit - 0 0 none
+ins
+
+text
+\catcode`{=1 \catcode`}=2 \holdinginserts1
+{\output{\global\holdinginserts0\unvbox255\penalty\outputpenalty
+\shipout\hbox{\vsplit255 to 55pt}}
+\insert100{\vskip0pt plus 1fil}
+\vbox spread 1000pt{}
+A\vadjust{\penalty-5000}}
+\end
