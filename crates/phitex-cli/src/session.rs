@@ -82,6 +82,9 @@ pub struct Report {
     /// What the tools said.
     pub notes: Vec<String>,
     pub wall: Duration,
+    /// XeTeX's: `out.dvi` is an XDV file (`out.pdf` xdvipdfmx's of it,
+    /// unless `-no-pdf`).
+    pub xetex: bool,
 }
 
 impl Report {
@@ -90,7 +93,7 @@ impl Report {
         if !self.out.pdf.is_empty() {
             Some(("pdf", &self.out.pdf))
         } else if !self.out.dvi.is_empty() {
-            Some(("dvi", &self.out.dvi))
+            Some((if self.xetex { "xdv" } else { "dvi" }, &self.out.dvi))
         } else {
             None
         }
@@ -184,6 +187,9 @@ impl Session {
         let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()))?;
         let mut build = Build::new(phitex_flow::tfm::null_font());
         build.set_font_dirs(tree.fonts.clone());
+        if job.engine.xetex {
+            build.set_xetex(crate::xetex::fonts(&job.engine, note)?);
+        }
         let mut dirs = Vec::new();
         if job.out_dir != Path::new(".") {
             dirs.push(job.out_dir.clone());
@@ -294,9 +300,10 @@ impl Session {
             changed.clear();
             let mut new: Vec<(String, String)> = Vec::new();
             for (n, t) in &out.writes {
+                let t = self.as_read(t);
                 if self.read_back(n).as_deref() != Some(t.as_str()) {
                     changed.push(n.clone());
-                    new.push((n.clone(), t.clone()));
+                    new.push((n.clone(), t));
                 }
             }
             if self.job.tools {
@@ -331,14 +338,37 @@ impl Session {
             why.clone_from(&changed.join(", "));
             why.push_str(" changed");
         }
-        let out = last.expect("a run");
+        let mut out = last.expect("a run");
+        let xetex = self.job.engine.xetex;
+        // (XeTeX's pages to PDF as `xetex` pipes them to `xdvipdfmx -q -E`,
+        // in process: unless `-no-pdf`)
+        if xetex && self.job.engine.output == tex::Output::Pdf && !out.dvi.is_empty() {
+            match self.build.xdv_pdf(&out.dvi) {
+                Some(Ok(pdf)) => out.pdf = pdf,
+                Some(Err(e)) => notes.push(format!("xdvipdfmx: {e} (the XDV file is written instead)")),
+                None => {}
+            }
+        }
         Report {
             out,
             runs,
             unsettled: if self.job.fixpoint { changed } else { Vec::new() },
             notes,
             wall: t0.elapsed(),
+            xetex,
         }
+    }
+
+    /// A file TeX wrote as its bytes: XeTeX writes UTF-8, TeX a byte per
+    /// character.
+    fn out_bytes(&self, t: &str) -> Vec<u8> {
+        if self.job.engine.xetex { t.as_bytes().to_vec() } else { tex::bytes(t) }
+    }
+
+    /// A file TeX wrote as a build reads it back (its bytes as TeX's
+    /// characters).
+    fn as_read(&self, t: &str) -> String {
+        if self.job.engine.xetex { tex::chars(t.as_bytes()) } else { t.to_owned() }
     }
 
     /// Writes what the build made: `JOB.pdf` or `JOB.dvi`, the files
@@ -362,7 +392,7 @@ impl Session {
             main = Some(put(&format!("{}.{e}", self.job.jobname), b)?);
         }
         for (n, t) in &r.out.writes {
-            put(n, &tex::bytes(t))?;
+            put(n, &self.out_bytes(t))?;
         }
         for (n, t) in &self.given {
             if !r.out.writes.iter().any(|(m, _)| m == n) {
@@ -374,7 +404,7 @@ impl Session {
         }
         let out_name = format!("{}.{ext}", self.job.jobname);
         if let Some(l) = r.out.job_logs(&Limits::TEX_LIVE, &out_name).last() {
-            put(&format!("{}.log", self.job.jobname), &tex::bytes(&l.log))?;
+            put(&format!("{}.log", self.job.jobname), &self.out_bytes(&l.log))?;
         }
         if self.job.recorder {
             let fls = self.recorder(r, &out_name);

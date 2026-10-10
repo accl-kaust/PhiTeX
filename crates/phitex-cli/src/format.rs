@@ -58,6 +58,9 @@ pub fn ensure(
     let _ = std::fs::write(work.join("texsys.aux"), "1970/01/01:00:00\n\n");
     let mut b = Build::new(phitex_flow::tfm::null_font());
     b.set_font_dirs(tree.fonts.clone());
+    if e.xetex {
+        b.set_xetex(crate::xetex::fonts(e, note)?);
+    }
     b.set_input_dirs(vec![work.clone(), tree.inputs.clone()]);
     b.set_jobname(e.name);
     b.set_limits(Limits::TEX_LIVE);

@@ -1807,8 +1807,8 @@ impl Build {
     /// the file finder, both given), XDV output and the PDF xdvipdfmx
     /// makes of it. Fixed for a `Build`'s life, given before the first
     /// update.
-    pub fn set_xetex(&mut self, fonts: crate::native::Fonts) {
-        self.xe = Some(Arc::new(fonts));
+    pub fn set_xetex(&mut self, fonts: impl Into<Arc<crate::native::Fonts>>) {
+        self.xe = Some(fonts.into());
     }
 
     /// XeTeX's PDF of an XDV file this build wrote (`Output::dvi`): what
