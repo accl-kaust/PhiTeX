@@ -47,7 +47,7 @@ const RUNS: [Options; 5] = [
 ];
 
 const fn run(threads: usize, reads: Reads, order: Order) -> Options {
-    Options { threads, reads, order, dump: false, etex: true, main_memory: MAIN_MEMORY }
+    Options { threads, reads, order, dump: false, etex: true, main_memory: MAIN_MEMORY, cut_lines: phitex_flow::build::CUT_LINES }
 }
 
 fn latex_dir() -> PathBuf {
@@ -311,9 +311,13 @@ fn on_format(name: &str, job: &str, text: &str, o: Options) -> (Build, Output) {
     b.set_terminal(&[&format!("&latex {name}")]);
     let out = b.update(&jobs(&[text]), o);
     eprintln!(
-        "{name} ({o:?}): format read in {:.0} ms, cold {:.0} ms",
+        "{name} ({o:?}): format read in {:.0} ms, cold {:.0} ms, {} of {} commands run, {} runs of {} pieces",
         (t1 - t0).as_secs_f64() * 1e3,
-        t1.elapsed().as_secs_f64() * 1e3
+        t1.elapsed().as_secs_f64() * 1e3,
+        out.stats.commands_run,
+        out.stats.commands,
+        out.stats.ran,
+        out.stats.pieces
     );
     (b, out)
 }

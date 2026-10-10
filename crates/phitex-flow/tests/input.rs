@@ -146,6 +146,68 @@ fn input_is_tex_s() {
             assert!(log.contains(m), "{name}: the log lacks {m:?}:\n{log}");
         }
         assert_eq!(log.contains("end of sub"), !name.starts_with("endinput") || name.ends_with("gone"), "{name}: {log}");
+        // (each file is pieces of the sequence, not read in its caller:
+        // the main text's pieces, the file's up to its `\endinput`, and a
+        // rest of the line for each `\input`)
+        let n = |t: &str| phitex_flow::graph::cut(t).len();
+        let sub = files.iter().find(|f| f.0 == "sub.tex").map_or("", |f| f.1.as_str());
+        let sub_read = if name == "endinput" { n(sub) - 2 } else { n(sub) };
+        let inputs = 2 + usize::from(name == "input added");
+        let extra = if name == "input added" { n(&extra()) } else { 0 };
+        let want = n(&main) + sub_read + n(&subsub()) + extra + inputs;
+        assert_eq!(out.stats.pieces, want, "{name}: pieces");
+    }
+}
+
+/// An `\input` met in a macro's expansion, a conditional's arm or with
+/// tokens pending after it is a piece too: the tokens pending and the rest
+/// of the line are read after the file (the rest's piece), the
+/// conditional's `\fi` there.
+#[test]
+fn input_in_a_macro_and_a_conditional_is_pieces() {
+    let file = format!("{}\\message{{in f}}\n\n{}\\message{{end of f}}\n", para(WORDS, 23), para(WORDS, 17));
+    let main = format!(
+        "{PRE}\\def\\load#1{{\\iftrue \\input #1 \\message{{pending}}\\fi}}\n\n{}\\load{{f}}\\message{{rest}}\n\n{}\\end\n",
+        para(WORDS, 20),
+        para(WORDS, 31)
+    );
+    let files = [("f.tex", file.clone())];
+    for threads in [1, 8] {
+        for reads in [Reads::Suspend, Reads::Speculate] {
+            let o = Options { threads, reads, ..Options::default() };
+            let out = build_with(&files).update(&main, o);
+            assert!(out.errors.is_empty(), "{:?}", out.errors);
+            let log = phitex_flow::print::log("", &out.log, "");
+            let at = |m: &str| log.find(m).unwrap_or_else(|| panic!("the log lacks {m:?}:\n{log}"));
+            assert!(at("(./f.tex") < at("in f") && at("in f") < at("end of f") && at("end of f") < at("pending") && at("pending") < at("rest"), "{log}");
+            let n = |t: &str| phitex_flow::graph::cut(t).len();
+            assert_eq!(out.stats.pieces, n(&main) + n(&file) + 1, "pieces");
+            let mut all = vec![("main.tex", main.clone())];
+            all.push(("f.tex", file.clone()));
+            if let Some(want) = tex("macro", &all) {
+                assert!(masked(&out.dvi) == masked(&want), "not TeX's DVI");
+            }
+        }
+    }
+}
+
+/// A file whose end leaves a paragraph open (the rest of the calling line
+/// goes on with it) is read in its caller: TeX's DVI, the file's text
+/// once.
+#[test]
+fn a_file_ending_inside_a_paragraph_is_read_in_its_caller() {
+    let file = format!("{}words at the end of the file", para(WORDS, 21));
+    let main = format!("{PRE}{}\\input g and the caller's line.\n\n{}\\end\n", para(WORDS, 20), para(WORDS, 12));
+    let files = [("g.tex", file.clone())];
+    for threads in [1, 8] {
+        let o = Options { threads, ..Options::default() };
+        let out = build_with(&files).update(&main, o);
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let mut all = vec![("main.tex", main.clone())];
+        all.push(("g.tex", file.clone()));
+        if let Some(want) = tex("open-par", &all) {
+            assert!(masked(&out.dvi) == masked(&want), "not TeX's DVI");
+        }
     }
 }
 

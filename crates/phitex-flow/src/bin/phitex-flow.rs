@@ -25,7 +25,7 @@ fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
          [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--fmt FILE] [--dump-fmt FILE] [--interaction MODE] [--edit OLD=>NEW] [--repeat N] \
-         [--check] [--log] [--main-memory WORDS]"
+         [--check] [--log] [--main-memory WORDS] [--cut-lines N|inf]"
     );
     ExitCode::from(2)
 }
@@ -416,6 +416,14 @@ fn main() -> ExitCode {
             "--log" => log = true,
             "--main-memory" => match val().and_then(|v| v.parse().ok()) {
                 Some(n) => opts.main_memory = n,
+                None => return usage(),
+            },
+            "--cut-lines" => match val() {
+                Some(v) if v == "inf" => opts.cut_lines = usize::MAX,
+                Some(v) => match v.parse() {
+                    Ok(n) if n > 0 => opts.cut_lines = n,
+                    _ => return usage(),
+                },
                 None => return usage(),
             },
             "--edit" => match val() {

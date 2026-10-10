@@ -93,6 +93,30 @@ pub trait Env {
         false
     }
 
+    /// A run nests groups deeper than any document does (`DEEP`): whether
+    /// it stops — it runs on predictions not confirmed yet (a cut's
+    /// assumed entry, or definitions predicted), which such a nesting
+    /// says are wrong. (Every node's state holds its open groups: a run
+    /// on wrong predictions opening groups without end would hold memory
+    /// as the square of its length.)
+    fn give_up_deep(&mut self) -> bool {
+        false
+    }
+
+    /// Whether an `\input` fetched as a command where the reader is on the
+    /// piece's own text ends the run, its file's pieces following it
+    /// (CORE.md, `\input`); else every file is read in the piece.
+    fn split_inputs(&mut self) -> bool {
+        false
+    }
+
+    /// Whether the run stops at `pos` if a command begins there in a state
+    /// a piece may be entered in: a text it was joined from begins there
+    /// (CORE.md, cuts).
+    fn stop_at(&mut self, _pos: usize) -> bool {
+        false
+    }
+
     /// Whether anything between this piece's nodes may define any name
     /// (unknown: yes).
     fn any_between(&mut self) -> bool {
@@ -200,6 +224,10 @@ pub fn pending_words(st: &RState) -> u64 {
 }
 
 /// The fatal error of a run past TeX's main memory.
+/// Groups open at once beyond which a run on predictions not confirmed is
+/// given up ([`Env::give_up_deep`]).
+const DEEP: usize = 1024;
+
 pub fn capacity_error(size: u64) -> String {
     format!("TeX capacity exceeded, sorry [main memory size={size}]")
 }
@@ -796,6 +824,51 @@ impl RState {
         }
     }
 
+    /// Whether the reader has stopped at a fatal error (tex.web 82: the
+    /// hundredth error, "capacity exceeded"): nothing after it is read.
+    pub fn halted(&self) -> bool {
+        self.error_count >= FATAL_ERRORS
+    }
+
+    /// Whether a piece may be entered in this state (the state a run
+    /// left at its text's end, or at an `\input`): the outer vertical
+    /// list, no group, box, alignment or output routine open. (A paragraph
+    /// or a group open across pieces is not made: the piece reads on into
+    /// the text after it instead.)
+    pub fn enterable(&self) -> bool {
+        self.mode == Mode::V
+            && !self.inner
+            && self.level == 0
+            && self.boxing.is_none()
+            && self.groups.is_empty()
+            && self.al == align::AlignCur::OFF
+            && self.fire.is_none()
+            && self.texts.is_empty()
+    }
+
+    /// The state a piece after a cut is entered in when the run before it
+    /// left `out` at the cut (CORE.md, cuts): `out` at the next line's
+    /// start, the conditionals open as the piece sees them (opened before
+    /// it), and the paragraph-level fields a piece starts afresh with, as
+    /// at every cut (`RState::cut_point`).
+    pub fn entered_after(out: &RState) -> RState {
+        let start = RState::start();
+        RState {
+            pos: 0,
+            tstate: TState::N,
+            eol: EOL_UNREAD,
+            endinput: false,
+            conds: out.conds.outside(),
+            pending: if out.pending.len() == 0 { Pending::default() } else { out.pending.clone() },
+            space_factor: start.space_factor,
+            prev_depth: start.prev_depth,
+            prev_graf: start.prev_graf,
+            hyph_lang: start.hyph_lang,
+            error_count: start.error_count,
+            ..out.clone()
+        }
+    }
+
     /// Whether a piece entered in this state may begin: no paragraph,
     /// box or group open (an `\input` inside one is not supported: a
     /// definition made inside would outlive the group).
@@ -1115,6 +1188,10 @@ pub struct Rare {
     pub output: Option<Box<output::OutputEnd>>,
     /// `\input`: the file read (its pieces follow the node's).
     pub input: Option<Arc<FileText>>,
+    /// The reader ran out of the piece's text in the middle of this
+    /// command (an argument, a definition, a number, a skipped arm): the
+    /// text after the piece is not a place a piece may begin.
+    pub crossed: bool,
 }
 
 /// A file `\input` read: its name and its text.
@@ -1167,6 +1244,12 @@ impl Node {
     /// The file an `\input` node read.
     pub fn input(&self) -> Option<&Arc<FileText>> {
         self.rare.as_ref().and_then(|r| r.input.as_ref())
+    }
+
+    /// Whether the reader ran out of the piece's text in the middle of
+    /// this command ([`Rare::crossed`]).
+    pub fn crossed(&self) -> bool {
+        self.rare.as_ref().is_some_and(|r| r.crossed)
     }
 
     /// What an output routine's end left for the page builder (the `Close`
@@ -1322,8 +1405,11 @@ pub struct Chain {
     /// piece's or a rest-of-line piece's entry edge, or an output
     /// routine's run (`output::output_entry`).
     entry: Option<Arc<RState>>,
-    /// Nodes defining each key, in order.
-    defs_of: FxMap<Key, Vec<u32>>,
+    /// Nodes defining each key, in order, each once, with the index of
+    /// its last definition of the key in its `defs` (the one that
+    /// counts): resolving a name reads that definition, never scans a
+    /// node's definitions.
+    defs_of: FxMap<Key, Vec<(u32, u32)>>,
     /// For each `Open` node, the index of its `Close`, once there is one.
     close_of: FxMap<u32, u32>,
     open: Vec<u32>,
@@ -1375,14 +1461,12 @@ impl Chain {
     /// node): the latest still in scope.
     pub fn resolve(&self, key: &Key, i: usize) -> Option<(u32, Val)> {
         let ds = self.defs_of.get(key)?;
-        for &d in ds.iter().rev() {
+        for &(d, j) in ds.iter().rev() {
             if d as usize >= i {
                 continue;
             }
             let n = &self.nodes[d as usize];
-            let Some(def) = n.defs().iter().rev().find(|x| x.key == *key) else {
-                continue;
-            };
+            let def = &n.defs()[j as usize];
             let closed = self
                 .def_group(n, def)
                 .is_some_and(|g| self.close_of.get(&g).is_some_and(|&c| (c as usize) < i));
@@ -1408,13 +1492,20 @@ impl Chain {
     /// one open; `None` global, or made at the piece's outer level.
     pub fn scope_of(&self, d: u32, key: &Key) -> Option<u16> {
         let n = &self.nodes[d as usize];
-        let def = n.defs().iter().rev().find(|x| x.key == *key)?;
+        let def = &n.defs()[self.def_index(d, key)?];
         if def.global {
             return None;
         }
         let g = self.def_group(n, def)?;
         let p = self.open.iter().rposition(|&o| o == g)?;
         Some((self.open.len() - 1 - p) as u16)
+    }
+
+    /// The index in node `d`'s `defs` of its last definition of `key`.
+    fn def_index(&self, d: u32, key: &Key) -> Option<usize> {
+        let ds = self.defs_of.get(key)?;
+        let p = ds.partition_point(|x| x.0 <= d).checked_sub(1)?;
+        (ds[p].0 == d).then_some(ds[p].1 as usize)
     }
 
     /// The nodes with a paragraph, in order (`Run::paras` is theirs).
@@ -1464,8 +1555,12 @@ impl Chain {
             _ => {}
         }
         if let Some(r) = &n.rare {
-            for d in &r.defs {
-                self.defs_of.entry(d.key.clone()).or_default().push(i);
+            for (j, d) in r.defs.iter().enumerate() {
+                let v = self.defs_of.entry(d.key.clone()).or_default();
+                match v.last_mut() {
+                    Some(l) if l.0 == i => l.1 = j as u32,
+                    _ => v.push((i, j as u32)),
+                }
             }
             if r.para.is_some() {
                 self.para_at.push(i);
@@ -1498,7 +1593,7 @@ impl Chain {
             s..e
         };
         for (k, v) in &old.defs_of {
-            let r = within(v);
+            let r = v.partition_point(|x| (x.0 as usize) < a)..v.partition_point(|x| (x.0 as usize) < b);
             if !r.is_empty() {
                 self.defs_of
                     .entry(k.clone())
@@ -1548,6 +1643,9 @@ pub struct Run {
     /// A settled piece's run without its nodes ([`Run::leaned`]): `chain`
     /// is then empty.
     pub lean: Option<Arc<Lean>>,
+    /// The reader ran out of the piece's text in the middle of a command
+    /// ([`Node::crossed`]): the piece reads on into the text after it.
+    pub crossed: bool,
 }
 
 /// What a settled piece keeps of its run once its nodes are dropped (CORE.md,
@@ -1570,13 +1668,12 @@ pub struct Lean {
     input: Option<Arc<FileText>>,
     /// Its run ended at a cut the cutter missed ([`Kind::Cut`]).
     cut: bool,
-    /// Its reads from before the piece (`Run::reads`) without their values
-    /// (its edges are the build's), but for the names the build answers
-    /// itself (files, the job, the lines before it), whose values are
-    /// compared at the next build, and the reads of a meaning's outer-ness
-    /// alone (`Val::Outer`), which a redefinition keeping it leaves be.
-    reads: Vec<(Key, u32)>,
-    given: Vec<(Key, u32, Val)>,
+    /// Its reads from before the piece (`Run::reads`), with their values:
+    /// a new definition of a name it read, or another place for it, that
+    /// gives each of its reads the value it read leaves it be (and the
+    /// names the build answers itself — files, the job, the lines before
+    /// it — are compared at the next build).
+    reads: Vec<(Key, u32, Val)>,
     /// Its part of the log, but for its paragraphs' lines.
     pub plan: Arc<crate::logs::Plan>,
 }
@@ -1589,14 +1686,9 @@ impl Run {
         let c = &self.chain;
         let mut defs: Vec<(Key, u32, u32, Val)> = Vec::new();
         for (key, ds) in &c.defs_of {
-            let mut last = None;
-            for &d in ds {
-                if last == Some(d) {
-                    continue;
-                }
-                last = Some(d);
+            for &(d, j) in ds {
                 let n = &c.nodes[d as usize];
-                let Some(def) = n.defs().iter().rev().find(|x| x.key == *key) else { continue };
+                let def = &n.defs()[j as usize];
                 // (`Chain::resolve`: a local definition reaches up to its
                 // group's close, that node included)
                 let until = if def.global {
@@ -1616,13 +1708,7 @@ impl Run {
             out: self.out(),
             input: self.input().cloned(),
             cut: self.ends_at_cut(),
-            reads: self.reads.iter().map(|(k, i, _)| (k.clone(), *i)).collect(),
-            given: self
-                .reads
-                .iter()
-                .filter(|(k, _, v)| matches!(k, Key::File(_) | Key::Job | Key::LineBase) || matches!(v, Val::Outer(_)))
-                .cloned()
-                .collect(),
+            reads: self.reads.clone(),
             plan: Arc::new(crate::logs::plan(text, self)),
         };
         Run {
@@ -1635,11 +1721,12 @@ impl Run {
             fonts: self.fonts.clone(),
             abandoned: false,
             lean: Some(Arc::new(lean)),
+            crossed: self.crossed,
         }
     }
 
     /// How many reads from before the piece it has (`reads`, kept by a
-    /// lean run without their values).
+    /// lean run too).
     pub fn read_count(&self) -> usize {
         self.lean.as_ref().map_or(self.reads.len(), |l| l.reads.len())
     }
@@ -1653,13 +1740,20 @@ impl Run {
         }
     }
 
-    /// The values it read `key` with (of a lean run: only for the names
-    /// the build answers itself and the reads of outer-ness alone).
+    /// The values it read `key` with: each read of it, the first reader's
+    /// (the edge's) first.
     pub fn values_read(&self, key: &Key) -> &[(Key, u32, Val)] {
-        let v = self.lean.as_ref().map_or(&self.reads[..], |l| &l.given[..]);
+        let v = self.lean.as_ref().map_or(&self.reads[..], |l| &l.reads[..]);
         let a = v.partition_point(|x| x.0 < *key);
         let b = a + v[a..].partition_point(|x| x.0 == *key);
         &v[a..b]
+    }
+
+    /// The index of its first read of `key` (`read_at`), the edge's.
+    pub fn first_read(&self, key: &Key) -> Option<usize> {
+        let v = self.lean.as_ref().map_or(&self.reads[..], |l| &l.reads[..]);
+        let a = v.partition_point(|x| x.0 < *key);
+        (v.get(a).is_some_and(|x| x.0 == *key)).then_some(a)
     }
 
     /// Its reads of `key`, if it read only whether that is `\outer`
@@ -1667,14 +1761,7 @@ impl Run {
     /// included.
     pub fn outer_reads_only(&self, key: &Key) -> Option<&[(Key, u32, Val)]> {
         let vals = self.values_read(key);
-        let all = match &self.lean {
-            Some(l) => {
-                let a = l.reads.partition_point(|x| x.0 < *key);
-                l.reads[a..].partition_point(|x| x.0 == *key)
-            }
-            None => vals.len(),
-        };
-        (!vals.is_empty() && vals.len() == all && vals.iter().all(|x| matches!(x.2, Val::Outer(_)))).then_some(vals)
+        (!vals.is_empty() && vals.iter().all(|x| matches!(x.2, Val::Outer(_)))).then_some(vals)
     }
 
     /// How many nodes it has (had, if lean).
@@ -1827,7 +1914,33 @@ pub fn jobs(texts: &[&str]) -> String {
 /// Cuts the source into pieces at blank lines at brace depth 0. Lines lose
 /// their trailing spaces and end in `\r` (TeX's end of line).
 pub fn cut(src: &str) -> Vec<Arc<[char]>> {
-    cut_from(src, 0, |_| false).0
+    cut_from(src, 0, usize::MAX, |_| false).0
+}
+
+/// [`cut`], and a cut proposed about every `every` lines besides
+/// ([`cut_from`]).
+pub fn cut_every(src: &str, every: usize) -> Vec<Arc<[char]>> {
+    cut_from(src, 0, every, |_| false).0
+}
+
+/// Whether the cutter proposes a cut before `line`, `lines` lines after
+/// the last cut, about every `every` lines (CORE.md, cuts): a line beginning with a control sequence, chosen by its content
+/// (a hash of it, so that after an edit the cuts are found again where
+/// the lines are the same), at least `every / 4` lines after the last cut
+/// and at the first such line `4 * every` lines after it.
+fn line_cut(line: &str, lines: usize, every: usize) -> bool {
+    if every == usize::MAX || !line.starts_with('\\') || lines < (every / 4).max(1) {
+        return false;
+    }
+    if lines >= every.saturating_mul(4) {
+        return true;
+    }
+    // (FNV-1a)
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in line.bytes() {
+        h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+    }
+    h.is_multiple_of(every as u64)
 }
 
 /// [`cut`] from byte `from` of `src` (0, or the start of a piece's first
@@ -1838,6 +1951,7 @@ pub fn cut(src: &str) -> Vec<Arc<[char]>> {
 pub fn cut_from(
     src: &str,
     from: usize,
+    every: usize,
     mut stop: impl FnMut(usize) -> bool,
 ) -> (Vec<Arc<[char]>>, Vec<usize>, Option<usize>) {
     let mut pieces: Vec<Arc<[char]>> = Vec::new();
@@ -1845,6 +1959,8 @@ pub fn cut_from(
     let mut cur: Vec<char> = Vec::new();
     let mut depth: i32 = 0;
     let mut blank_run = false;
+    // (lines since the last cut)
+    let mut lines_in = 0usize;
     let mut off = from;
     let mut lines = src[from..].split('\n').peekable();
     while let Some(raw) = lines.next() {
@@ -1864,23 +1980,32 @@ pub fn cut_from(
             starts.push(line_start);
             depth = 0;
             blank_run = false;
+            lines_in = 0;
         }
         let blank = !line.starts_with(JOB) && line.trim_start_matches(' ').is_empty();
         if blank {
             blank_run = true;
         } else {
-            if blank_run && depth == 0 && cur.iter().any(|c| !c.is_whitespace()) {
+            // (a line cut at depth 0, or anywhere once the cutter has seen
+            // no depth 0 for a long while: one brace it misreads would
+            // leave it at depth 1 for the rest of the text, and a cut is
+            // only proposed — a run reading on past it is one piece with
+            // the next)
+            let by_lines = line_cut(line, lines_in, every) && (depth == 0 || lines_in >= every.saturating_mul(4));
+            if ((blank_run && depth == 0) || by_lines) && cur.iter().any(|c| !c.is_whitespace()) {
                 pieces.push(Arc::from(std::mem::take(&mut cur)));
                 if stop(line_start) {
                     return (pieces, starts, Some(line_start));
                 }
                 starts.push(line_start);
+                lines_in = 0;
             }
             blank_run = false;
             depth = brace_depth(line, depth);
         }
         cur.extend(line.chars());
         cur.push('\r');
+        lines_in += 1;
     }
     if cur.is_empty() {
         starts.truncate(pieces.len());
@@ -2073,14 +2198,16 @@ fn before_read(
 
 /// Runs a piece: `old` is its previous run (and the text that made it),
 /// `dirty` the names from before the piece a definition of which was
-/// remade: every old node reading one of them is dirty; `entry` the state
+/// remade, each with the first old node it may reach (a definition between
+/// the piece's own nodes reaches only those after it): every old node from
+/// there reading one of them is dirty; `entry` the state
 /// it is entered in (none: the canonical start). Returns the new chain,
 /// with every old node still holding kept.
 pub fn run_piece(
     text: &[char],
     env: &mut dyn Env,
     old: Option<(&Run, &[char])>,
-    dirty: &[Key],
+    dirty: &[(Key, u32)],
     entry: Option<&RState>,
 ) -> Run {
     // (a lean run has no nodes to keep: every node runs again)
@@ -2102,9 +2229,10 @@ pub fn run_piece(
             .nodes
             .iter()
             .enumerate()
-            .filter(|(_, n)| {
+            .filter(|&(i, n)| {
                 n.reads.iter().any(|r| {
-                    dirty.contains(&r.key) && (!matches!(r.src, Src::Node(_)) || env.has_between(&r.key))
+                    dirty.iter().any(|(k, from)| *k == r.key && i as u32 >= *from)
+                        && (!matches!(r.src, Src::Node(_)) || env.has_between(&r.key))
                 })
             })
             .map(|(i, _)| i as u32)
@@ -2181,6 +2309,9 @@ pub fn run_piece(
                 // (the text it read, through the character after it, unchanged)
                 let text_ok = edit.is_none_or(|e| n.out.pos < e.start || inp_pos >= e.old_end);
                 let par_ok = !(matches!(n.kind, Kind::Par | Kind::End) && para_fresh);
+                // (where a run ends is the build's to say again: a cut, an
+                // `\input` whose file is pieces only where they may be)
+                let par_ok = par_ok && n.kind != Kind::Cut && (n.kind != Kind::Input || env.split_inputs());
                 let state_ok = if oi == 0 {
                     oc.input(0).eq_but_pos(&state)
                 } else {
@@ -2306,6 +2437,7 @@ pub fn run_piece(
                 verdict = match stop {
                     Some(Check::Abandon) => Check::Abandon,
                     Some(_) => Check::Go,
+                    None if n.out.groups.len() > DEEP && env.give_up_deep() => Check::Abandon,
                     None => env.check(ran, words.max(pending_words(&n.out))),
                 };
                 n
@@ -2444,12 +2576,13 @@ pub fn run_piece(
         .defs_of
         .iter()
         .filter_map(|(k, v)| match k {
-            Key::FontLoaded(f) => v.first().map(|&i| (i, f.clone())),
+            Key::FontLoaded(f) => v.first().map(|&(i, _)| (i, f.clone())),
             _ => None,
         })
         .collect();
     fonts.sort_by_key(|x| x.0);
     let fonts = fonts.into_iter().map(|(_, f)| f).collect();
+    let crossed = chain.nodes.range(0, end).any(|n| n.crossed());
     Run {
         chain,
         reads,
@@ -2460,6 +2593,7 @@ pub fn run_piece(
         fonts,
         abandoned,
         lean: None,
+        crossed,
     }
 }
 
@@ -2559,6 +2693,11 @@ struct Exec<'a> {
     /// The command is being looked for (an `\input` expanded now is a
     /// node of its own).
     at_start: bool,
+    /// The reader looks for the next command's first token: running out
+    /// of the piece's text here is the piece's end, anywhere else a
+    /// command that goes on after it ([`Rare::crossed`]).
+    boundary: bool,
+    crossed: bool,
     /// This node's stamp in `scratch.chars`.
     stamp: u32,
     /// The paragraph the old node at this place made, if any: an equal
@@ -2700,6 +2839,8 @@ impl<'a> Exec<'a> {
             seen_upto: 0,
             input: None,
             at_start: false,
+            boundary: false,
+            crossed: false,
             stamp,
             old_para: None,
             ptext: None,
@@ -2769,7 +2910,8 @@ impl<'a> Exec<'a> {
             || !self.vemit.is_empty()
             || self.log.is_some()
             || self.input.is_some()
-            || self.output.is_some())
+            || self.output.is_some()
+            || self.crossed)
         .then(|| {
             Box::new(Rare {
                 defs: self.defs,
@@ -2780,6 +2922,7 @@ impl<'a> Exec<'a> {
                 log: self.log,
                 input: self.input,
                 output: self.output,
+                crossed: self.crossed,
             })
         });
         Node {
@@ -3466,7 +3609,11 @@ impl<'a> Exec<'a> {
                 self.st.pending.pop();
             }
             if self.st.texts.is_empty() {
-                return self.tokenize();
+                let t = self.tokenize();
+                if t.is_none() && !self.boundary && self.ptext.is_none() && self.stop.is_none() {
+                    self.crossed = true;
+                }
+                return t;
             }
             // (a `\read` line's end ends the reading)
             if self.st.texts.last().is_some_and(|x| x.kind == TextKind::Read) {
@@ -3998,6 +4145,18 @@ impl<'a> Exec<'a> {
             self.kind = Kind::Cut;
             return;
         }
+        // (where a text this piece was joined from begins, a command
+        // begins in a state a piece may be entered in: the run stops, the
+        // rest is pieces again)
+        if self.st.pos > 0
+            && self.ptext.is_none()
+            && self.st.tstate == TState::N
+            && self.st.enterable()
+            && self.env.stop_at(self.st.pos)
+        {
+            self.kind = Kind::Cut;
+            return;
+        }
         self.at_start = true;
         let next = self.next_x_m(true);
         self.at_start = false;
@@ -4050,16 +4209,21 @@ impl<'a> Exec<'a> {
             self.kind = Kind::End;
             return;
         }
+        // (a paragraph, a group, a box open at the text's end: the text
+        // after it goes on with it, the two are one piece)
+        if !self.st.enterable() {
+            self.crossed = true;
+        }
         self.end_par();
         self.kind = Kind::End;
-        // (groups and conditionals open where the piece was entered are
-        // its caller's, closed after it)
+        // (groups open where the piece was entered are its caller's,
+        // closed after it; a group it opens is closed by a piece it is
+        // joined with: the last piece of the document is where one is
+        // left open. A conditional open is the next piece's entry, as at
+        // a file's end in TeX.)
         let entry = self.chain.input(0);
         if self.st.groups.len() > entry.groups.len() {
             self.err("Missing } inserted at the end of a piece".into());
-        }
-        if self.st.conds.len() > entry.conds.len() {
-            self.err("Incomplete \\if at the end of a piece".into());
         }
     }
 
@@ -4212,7 +4376,7 @@ impl<'a> Exec<'a> {
             Prim::Write => self.write_cmd(),
             Prim::OpenOut | Prim::CloseOut | Prim::Special => self.extension(p),
             Prim::InStream(open) => self.open_in(open),
-            Prim::Input => self.start_input(),
+            Prim::Input => self.input_file(true),
             Prim::Uppercase | Prim::Lowercase => self.case_shift(p == Prim::Uppercase),
             Prim::EndCsName => self.err("Extra \\endcsname".into()),
             Prim::End | Prim::Dump => self.stop_job(p == Prim::Dump),
