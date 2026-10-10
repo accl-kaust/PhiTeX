@@ -2288,6 +2288,28 @@ after on the same base):
    7.22G, sections 2.72G → 2.54G, `latex.ltx` 190.8G → 189.2G, big2
    unchanged; DVIs identical.
 
+## Parallelism (agent S, 2026-10-10)
+
+Measured on accl (64 cores, 2 hardware threads each; a job's `-c N` is N
+hardware threads), release build, cold builds, `Reads::Suspend` (the
+CLI's cold build). `PHITEX_SCHED=FILE` writes the scheduler's events of
+every round (each run's setup, reading, install validation, lock wait and
+hold, nodes and outcome; parks; idle waits; picks with the pieces ready;
+the settled runs that change the sequence; every wait for the scheduler's
+lock); `perf-in/sched.py FILE` reports them per round.
+
+**`latex.ltx` is a true chain.** 31.2 s at `-j 1`, 31.1 s at `-j 8`
+(job 7914). Of its 19-20 rounds one holds 27.3 s, and in it one piece
+holds 96.2% of the commands (2.9M): expl3-code.tex's Unicode-data block
+(`\ior_str_map_inline`), read inside a macro's argument. Each iteration
+reads the next line of the stream (`Key::ReadStream`, defined again per
+line) and defines intarray entries the next ones read: a dependency
+chain, not a granularity problem: no cut, file piece or scheduler policy
+shortens it (AGENTS_BRIEF §6.5: the build is as long as its true chain).
+Amdahl's serial fraction from that round alone is at least 0.88. The
+format is built once and saved (`--dump-fmt`); documents start from it,
+so this is left as is.
+
 ## Found by the CLI (agent W)
 
 - **W1 (open, A): a LaTeX document in nonstop mode with no `.aux` never
