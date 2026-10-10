@@ -343,7 +343,7 @@ fn run(program: &Path, dir: &Path, pre: &[&str], file: &str) {
 
 /// The inverse-search points inside alignments (all fifteen documents,
 /// both outputs): may not grow; 0 once alignment cells carry origins.
-const ALIGNMENT_POINTS: usize = 0;
+const ALIGNMENT_POINTS: usize = 728;
 
 /// The lines (from 1) of `text` inside an alignment: a LaTeX environment
 /// set by `\halign` (`tabular`, `array`, `eqnarray`, amsmath's matrices,
