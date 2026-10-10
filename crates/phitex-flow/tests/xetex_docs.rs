@@ -41,6 +41,12 @@ const RUNS: [Options; 5] = [
     run(8, Reads::Speculate, Order::Random(7)),
 ];
 
+/// The schedules a document runs at: all, or with `PHITEX_XETEX_ONE` set
+/// the first alone (one thread: a hang's diagnosis).
+fn runs() -> &'static [Options] {
+    if std::env::var_os("PHITEX_XETEX_ONE").is_some() { &RUNS[..1] } else { &RUNS }
+}
+
 const fn run(threads: usize, reads: Reads, order: Order) -> Options {
     Options { threads, reads, order, dump: false, etex: true, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES }
 }
@@ -164,7 +170,7 @@ fn ini(name: &str) {
     let dir = root().join("tests/xetex/ini");
     let text = chars(&std::fs::read(dir.join(format!("{name}.tex"))).expect("NAME.tex"));
     let oracle = oracle_dir().join(format!("ini/{name}.xdv"));
-    for (k, &o) in RUNS.iter().enumerate() {
+    for (k, &o) in runs().iter().enumerate() {
         let Some(mut b) = xetex_build(name, vec![dir.clone()]) else { return };
         let out = b.update(&text, o);
         compare(name, o, &b, &out, &oracle, k == 0);
@@ -241,7 +247,7 @@ fn plain_doc(name: &str) -> String {
 fn plain(name: &str) {
     let text = plain_doc(name);
     let oracle = oracle_dir().join(format!("plain/{name}.xdv"));
-    for &o in &RUNS {
+    for &o in runs() {
         let Some(mut b) = xetex_build(name, vec![root().join("tests/plain")]) else { return };
         let out = b.update(&text, o);
         compare(name, o, &b, &out, &oracle, false);
@@ -362,7 +368,7 @@ fn latex(dir: &Path, name: &str) {
     let oracle = oracle_dir().join(format!("docs/{name}.xdv"));
     let mut inputs = vec![dir.to_path_buf(), root().join("tests/latex")];
     inputs.extend(fls_dirs(&oracle.with_extension("fls")));
-    for (k, &o) in RUNS.iter().enumerate() {
+    for (k, &o) in runs().iter().enumerate() {
         let Some(mut b) = xetex_build(name, inputs.clone()) else { return };
         b.set_format(&fmt).expect("the format reads");
         b.set_terminal(&[&format!("&xelatex {name}")]);

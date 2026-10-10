@@ -17,6 +17,16 @@ echo "test binary: $bin" >> "$r/summary.txt"
 mkdir -p "$r/tests"
 "$bin" --list 2>/dev/null | sed -n 's/: test$//p' | grep -E "${XTESTS:-.}" | grep -vx xelatex_format > "$r/tests.list"
 export PHITEX_FONT_INDEX="$r/fonts.idx" r bin
+# (HANG=NAME,...: those first, one at a time, the first schedule alone
+# (one thread), with A's PHITEX_HANG_DUMP watchdog: $r/hang/NAME.txt)
+if [ -n "${HANG:-}" ]; then
+  mkdir -p "$r/hang"
+  for t in $(echo "$HANG" | tr ',' ' '); do
+    PHITEX_XETEX_ONE=1 PHITEX_HANG_DUMP=${HANG_DUMP:-60} timeout ${HANG_LIMIT:-8m} "$bin" --exact "$t" --nocapture > "$r/hang/$t.txt" 2>&1
+    echo "hang $t exit $? ($(wc -c < "$r/hang/$t.txt") bytes)" >> "$r/summary.txt"
+    grep -vx "$t" "$r/tests.list" > "$r/tests.list.tmp"; mv "$r/tests.list.tmp" "$r/tests.list"
+  done
+fi
 xargs -P ${PAR:-3} -I{} sh -c 'timeout '"${TEST_LIMIT:-12m}"' "$bin" --exact {} --nocapture > "$r/tests/{}.txt" 2>&1; echo "{} exit $?" >> "$r/tests.exit"' < "$r/tests.list"
 { echo "tests (exit 0 ok, 101 failed, 124 over ${TEST_LIMIT:-12m}):"; sort "$r/tests.exit"; } >> "$r/summary.txt"
 grep -h -E "panicked|livelock" "$r"/tests/*.txt | cut -c1-300 | head -40 >> "$r/summary.txt"
