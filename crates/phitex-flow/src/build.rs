@@ -278,6 +278,7 @@ const PDF_ROUNDS: usize = 8;
 const NONE: u32 = u32::MAX;
 
 /// A piece as the last build left it.
+#[derive(Clone)]
 struct Kept {
     id: PieceId,
     text: Arc<[char]>,
@@ -677,6 +678,18 @@ pub struct Build {
     /// Two texts read as one piece (a run read on past the first), by
     /// their `Arc`s.
     joins: FxMap<usize, Vec<Join>>,
+    /// The last run of each joined text of this update's rounds, kept as
+    /// long as the update lays the sequence out (`Build::keep_round`): a
+    /// join made over several rounds (a text joined with the next, that
+    /// with the next, …) is laid out again from all of its runs, not from
+    /// the last round's alone. Invariant: a text the layout joins has a
+    /// run among the last ones (`known_join`), or is joined anew from
+    /// texts whose runs are (`Expect::join`).
+    join_kept: Vec<Kept>,
+    /// (layout) Where the texts a joined text being placed joined begin,
+    /// and where its run stopped at one of them ([`Build::place_with`]).
+    rewind_at: Vec<usize>,
+    rewound: Option<usize>,
     /// The pieces whose `\input`s are read in the piece: the file's end
     /// left what the rest of the calling line goes on with (a paragraph, a
     /// group open) or its last command read on past it.
@@ -1720,6 +1733,9 @@ impl Build {
             rests: FxMap::default(),
             recuts: FxMap::default(),
             joins: FxMap::default(),
+            join_kept: Vec::new(),
+            rewind_at: Vec::new(),
+            rewound: None,
             inline: Vec::new(),
             cut_lines: CUT_LINES,
             page_runs: None,
@@ -2000,6 +2016,8 @@ impl Build {
             let mut l = self.place(out, m, olds, &texts[i], entry, b, ctx, depth);
             b += count_lines(&texts[i]);
             i += 1;
+            // (the texts joined to the last piece from here on)
+            let joined_from = i;
             // (a run reading on past its text reads the texts after it with
             // it, as one, up to the first place one begins where it can
             // stop: the rest is cut again from there; or did when they were
@@ -2029,7 +2047,21 @@ impl Build {
                 i += w;
                 m.release(olds, &out[l..]);
                 out.truncate(l);
-                l = self.place_with(out, m, olds, &joined, e, lb, ctx, depth, stops);
+                // (where each text of this list it joined begins in it: the
+                // last of its stops, one per text)
+                let n = i - joined_from;
+                self.rewind_at = stops[stops.len().saturating_sub(n)..].to_vec();
+                l = self.place_with(out, m, olds, &joined, e, lb, ctx, depth, stops.clone());
+                self.rewind_at.clear();
+                if let Some(stop) = self.rewound.take() {
+                    // (its run stopped where text `p` of this list begins:
+                    // the list goes on from there)
+                    let first = stops.len().saturating_sub(n);
+                    let p = joined_from + stops[first..].iter().position(|&x| x == stop).expect("a joined text's start");
+                    b -= texts[p..i].iter().map(|x| count_lines(x)).sum::<usize>();
+                    i = p;
+                    break;
+                }
             }
             last = Some(l);
             // (the job ended: what follows is never read; the file ended)
@@ -2111,10 +2143,21 @@ impl Build {
             stops,
             moved,
         });
+        // (where the caller may lay the rest out from: the texts this one
+        // joined begin there — set for the joined text alone)
+        let rewind_at = std::mem::take(&mut self.rewind_at);
         if expect.cut {
             // (the cutter missed a cut: the rest of the text is cut again
-            // from there)
+            // from there; or a joined text's run stops where one of the
+            // texts it joined begins: the caller lays them out again from
+            // that one, as texts of its own list — the same texts, whose
+            // runs and joins the layout finds, which may join texts after
+            // this one's end)
             let stop = expect.stop.min(text.len());
+            if rewind_at.contains(&stop) {
+                self.rewound = Some(stop);
+                return k;
+            }
             let b = base + count_lines(&text[..stop]);
             let pieces = self.recut(text, stop);
             return self
@@ -2350,6 +2393,7 @@ impl Build {
             let t_round = Instant::now();
             let last = rounds > cap || stalled >= MAX_STALLED_ROUNDS;
             if let Some(mut out) = self.round(&texts, opts, t0, time_cut, last, stalled == 0) {
+                self.join_kept.clear();
                 let mut carried = std::mem::take(&mut self.carried);
                 carried.round_walls.push(t_round.elapsed());
                 out.stats.absorb(carried);
@@ -2520,6 +2564,16 @@ impl Build {
                     }
                 })
                 .collect();
+        // (each joined text's last run, the newest first: kept for the
+        // rounds to come, those of this round replacing the older)
+        let joined = |t: &Arc<[char]>| self.joins.values().flatten().any(|x| Arc::ptr_eq(&x.2, t));
+        let mut keep: Vec<Kept> = self.pieces.iter().filter(|o| o.run.is_some() && joined(&o.text)).cloned().collect();
+        for o in std::mem::take(&mut self.join_kept) {
+            if !keep.iter().any(|x| Arc::ptr_eq(&x.text, &o.text)) && joined(&o.text) {
+                keep.push(o);
+            }
+        }
+        self.join_kept = keep;
         self.carried.absorb(st.stats);
     }
 
@@ -2538,6 +2592,18 @@ impl Build {
         let threads = opts.threads.max(1);
         let t_setup = Instant::now();
         let mut olds: Vec<Kept> = std::mem::take(&mut self.pieces);
+        // (the joined texts' runs of the earlier rounds of this update,
+        // after the last round's pieces: the layout finds a join it made
+        // over several rounds again — of a piece not in the last round)
+        for o in &self.join_kept {
+            if !olds.iter().any(|x| Arc::ptr_eq(&x.text, &o.text)) {
+                // (an id of its own: the piece it was may be another text now)
+                let mut o = o.clone();
+                o.id = self.next_id;
+                self.next_id += 1;
+                olds.push(o);
+            }
+        }
         let old_runs: Vec<Option<Arc<Run>>> = olds.iter().map(|o| o.run.clone()).collect();
         let page_runs = self.page_runs.clone().unwrap_or_else(|| old_runs.clone());
         let specs = self.layout(texts, &olds);
