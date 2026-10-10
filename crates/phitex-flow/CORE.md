@@ -23,6 +23,13 @@ tex.web command code, its graph form and its status here.
 logs of typeset documents, byte for byte); "partial": the parts that fit,
 with what is missing in the status column.)
 
+## Checklist (every agent)
+
+- Every field added to `RState` is in `eq_but_pos` (or in
+  `same_but_pos` if it is positional): a field left out is a state two
+  runs compare equal while TeX would differ, and an edit keeps the wrong
+  nodes.
+
 ## Where each quantity lives
 
 There is no eqtb, save stack, nest or input stack. Each quantity TeX keeps
@@ -169,6 +176,23 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     `Key::Mark`) an output routine's run defines at its start ("The TeX
     side of output routines"); elsewhere an empty page's values and empty
     marks until the fold defines them.
+    **Decided (coordinator, 2026-10-10; after re-cuts, before `\input`
+    in groups): a mid-stream read of a page quantity is a read of the
+    fold's output at that position.** `\pagegoal`…`\pagedepth`,
+    `\pagestretch`…, `\deadcycles`, `\insertpenalties` exist twice in
+    TeX: as the page builder's state (`page_so_far`, §982, read by
+    `\the` through §421) and as what an assignment sets (§1245
+    `alter_page_so_far`, done: `Item::PageSoFar`, applied by the fold when
+    it receives it). The read outside a routine is a `ReadRef` on the scan
+    at `(piece, node)`: under Suspend it parks until the scan has consumed
+    every item emitted before that node, and gets the scan's value there;
+    under Speculate it predicts the last build's value at that position,
+    and the scan validates it when it gets there (a refuted prediction
+    marks the reader, like any changed read). It is **not** the fold
+    writing the names index as it scans (definitions at every position
+    would be a second, sequential history of the page state, and every
+    reader after it would read the fold's writes): the scan is asked,
+    at one position, by the nodes that read it.
 13. **The current list's last item**: `\lastpenalty`, `\lastkern`,
     `\lastskip`, `\/` read it; `\unskip`, `\unkern`, `\unpenalty` remove
     it. Done: the removals emit `Item::Remove`, which the list's gatherer
@@ -983,18 +1007,27 @@ Now 4.65 GB at `-j 1` and 4.69 GB at `-j 8` (1.5 KB a node).
    `\immediate` write's file is a value the writing node defines
    (`Key::File(name)` → the bytes written so far), the reads after it in
    the order reading that, not the `Env`.
-2. *The cut is blind to catcodes.* `latex.ltx` line 160:
+2. *(done: re-cuts)* *The cut is blind to catcodes.* `latex.ltx` line 160:
    `\catcode`\%=12 \def\@percentchar{%}\catcode`\%=14`; the cut's brace
    count reads `%` as a comment, stays at depth 1 to the end of the file,
    and `latex.ltx` is one piece (94 blank lines). Repro: those three
    lines, then two paragraphs with a blank line between: one piece.
+   Now a reader that reaches a blank line at depth 0 under the real
+   catcodes (canonical state, `RState::cut_point`; at a line start after a
+   blank line, the rest not blank, outside an `\input`'s text) ends its
+   run there (`Kind::Cut`); the layout re-cuts the rest of the piece's
+   text and the pieces after the cut run with the start state
+   (`Build::recut`, cached by text so the pieces keep their runs).
+   `latex.ltx` is 19 pieces; the first (lines 1–1234) still does 3.0M of
+   the 3.1M commands, `expl3-code.tex` read inside a macro's argument
+   (line 1147, gap 3).
 3. *`\input`'ed files run inside the calling piece* where `\input` is
    not a command of its own at a piece's top level: in `latex.ltx` every
    `\input` is inside a macro or a group (`\@input`, `\InputIfFileExists`,
    expl3.ltx's), so expl3-code.tex's 36k lines, the font definitions and
    the patterns are read by the one piece, and the build is sequential
    (one thread did 100%).
-4. *The main memory counts what was ever defined.* `graph::words_of`
+4. *(done: live words)* *The main memory counts what was ever defined.* `graph::words_of`
    sums every node's definitions (a macro's body, a box, a token list)
    over the run, kept or not; TeX's `mem` holds only what is live (a
    macro defined again frees the old body). LaTeX's format passes 5M

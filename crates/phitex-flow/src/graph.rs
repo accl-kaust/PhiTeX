@@ -82,6 +82,12 @@ pub trait Env {
         false
     }
 
+    /// Whether the run may end at a cut the cutter missed ([`Kind::Cut`]):
+    /// the sequence may still change.
+    fn cut_ok(&mut self) -> bool {
+        false
+    }
+
     /// Whether the run goes on after a node it ran (`ran` run so far, the
     /// run holding `words` of material, [`words_of`]): a speculating run
     /// whose predictions are refuted is abandoned; one past TeX's main
@@ -620,6 +626,28 @@ impl RState {
         self.mode == Mode::V && self.level == 0 && self.groups.is_empty()
     }
 
+    /// A point a piece may begin at with the canonical state (CORE.md,
+    /// re-cuts): the outer vertical list at a line's start, nothing open,
+    /// pending or prefixed. (The paragraph-level fields a cut piece starts
+    /// afresh with, as the cutter's pieces do: `\prevdepth` is the page's
+    /// material.)
+    pub fn cut_point(&self) -> bool {
+        self.mode == Mode::V
+            && !self.inner
+            && self.level == 0
+            && self.boxing.is_none()
+            && !(self.global || self.long || self.outer || self.protected)
+            && self.conds.is_empty()
+            && self.groups.is_empty()
+            && self.after_assignment.is_none()
+            && self.pending.len() == 0
+            && self.texts.is_empty()
+            && !self.endinput
+            && self.al == align::AlignCur::OFF
+            && self.fire.is_none()
+            && self.tstate == TState::N
+    }
+
     /// The file ends after the current line (`\endinput`).
     pub fn ends_file(&self) -> bool {
         self.endinput
@@ -655,6 +683,10 @@ pub enum Kind {
     End,
     /// `\input`: the piece's run ends here, the file's pieces follow it.
     Input,
+    /// A cut the text's cutter missed (CORE.md, re-cuts): a blank line the
+    /// reader passed at a piece's canonical start; the run ends here, the
+    /// rest of the text is cut again from here.
+    Cut,
 }
 
 impl Kind {
@@ -1331,6 +1363,8 @@ pub struct Lean {
     defs: Vec<(Key, u32, u32, Val)>,
     out: RState,
     input: Option<Arc<FileText>>,
+    /// Its run ended at a cut the cutter missed ([`Kind::Cut`]).
+    cut: bool,
     /// Its reads from before the piece (`Run::reads`) without their values
     /// (its edges are the build's), but for the names the build answers
     /// itself (files, the job, the lines before it), whose values are
@@ -1375,6 +1409,7 @@ impl Run {
             defs,
             out: self.out(),
             input: self.input().cloned(),
+            cut: self.ends_at_cut(),
             reads: self.reads.iter().map(|(k, i, _)| (k.clone(), *i)).collect(),
             given: self
                 .reads
@@ -1465,6 +1500,20 @@ impl Run {
         match &self.lean {
             Some(l) => l.out.clone(),
             None => self.chain.input(self.chain.nodes.len()),
+        }
+    }
+
+    /// Whether its run ended at a cut the cutter missed ([`Kind::Cut`]):
+    /// the text after it is cut again.
+    pub fn ends_at_cut(&self) -> bool {
+        match &self.lean {
+            Some(l) => l.cut,
+            None => self
+                .chain
+                .nodes
+                .len()
+                .checked_sub(1)
+                .is_some_and(|i| self.chain.nodes[i].kind == Kind::Cut),
         }
     }
 
@@ -2024,7 +2073,7 @@ pub fn run_piece(
         } else if !same_material {
             para_fresh = true;
         }
-        let end = matches!(n.kind, Kind::End | Kind::Input);
+        let end = matches!(n.kind, Kind::End | Kind::Input | Kind::Cut);
         state = n.out.clone();
         chain.push_arc(n);
         if end {
@@ -3056,6 +3105,22 @@ impl<'a> Exec<'a> {
 
     // ------------------------------------------------------------ commands
 
+    /// Whether the reader is at a line's start after a blank line with
+    /// more than blank lines after it: where the cutter would have begun a
+    /// piece had it read the catcodes the reader does.
+    fn missed_cut(&self) -> bool {
+        let t = self.text;
+        let p = self.st.pos;
+        if p < 2 || p >= t.len() || t[p - 1] != '\r' {
+            return false;
+        }
+        let mut q = p - 1;
+        while q > 0 && t[q - 1] == ' ' {
+            q -= 1;
+        }
+        (q == 0 || t[q - 1] == '\r') && t[p..].iter().any(|&c| c != ' ' && c != '\r')
+    }
+
     /// One command.
     fn command(&mut self) {
         // (a piece after the end of the job: TeX never reads it)
@@ -3065,6 +3130,17 @@ impl<'a> Exec<'a> {
             self.ptext = None;
             self.st.pos = self.text.len();
             self.kind = Kind::End;
+            return;
+        }
+        // (a blank line passed where a piece may begin: the cutter missed
+        // a cut here)
+        if self.st.pos > 0
+            && self.ptext.is_none()
+            && self.st.cut_point()
+            && self.missed_cut()
+            && self.env.cut_ok()
+        {
+            self.kind = Kind::Cut;
             return;
         }
         self.at_start = true;

@@ -753,3 +753,19 @@ fn dumpmid() {
         assert!(out.log.iter().any(|l| l.contains("[job one]")) && !out.log.iter().any(|l| l.contains("[never]")), "{:?}", out.log);
     }
 }
+
+/// The cutter reads catcodes as plain TeX's: `%` made a character (as
+/// latex.ltx's `\def\@percentchar{%}`) hides a brace from it and the rest of
+/// the text is one piece. The reader passing a blank line where a piece
+/// may begin ends its run there; the rest is cut again: four pieces, TeX's
+/// result at every schedule.
+#[test]
+fn recut() {
+    check("recut");
+    let src = std::fs::read_to_string(dir().join("recut.tex")).unwrap();
+    for o in RUNS {
+        let out = Build::new(font()).update(&src, o);
+        assert!(out.errors.is_empty(), "recut ({o:?}): {:?}", out.errors);
+        assert_eq!(out.stats.pieces, 4, "recut ({o:?}): {:?}", out.stats);
+    }
+}

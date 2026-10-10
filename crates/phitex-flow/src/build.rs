@@ -140,6 +140,8 @@ pub struct Stats {
     /// Evaluations of the sequence: one, and one more each time a run
     /// changed it (an `\input` read or changed, an `\endinput`).
     pub rounds: usize,
+    /// Each round's wall time.
+    pub round_walls: Vec<Duration>,
     /// Output routines run, and kept from the last build.
     pub routines: usize,
     pub routines_kept: usize,
@@ -162,6 +164,42 @@ pub struct Stats {
     pub time_setup: Duration,
     pub time_join: Duration,
     pub wall: Duration,
+}
+
+impl Stats {
+    /// Adds an earlier round's counts of work done to these (what a round
+    /// holds as a state, pieces, pages, kept, stays this round's).
+    fn absorb(&mut self, o: Stats) {
+        self.ran += o.ran;
+        self.commands_run += o.commands_run;
+        self.reruns += o.reruns;
+        self.parks += o.parks;
+        self.leapfrogs += o.leapfrogs;
+        self.abandoned += o.abandoned;
+        self.breaks_run += o.breaks_run;
+        self.routines += o.routines;
+        if self.work.len() < o.work.len() {
+            self.work.resize(o.work.len(), 0);
+            self.tasks.resize(o.tasks.len(), 0);
+        }
+        for (a, b) in self.work.iter_mut().zip(&o.work) {
+            *a += b;
+        }
+        for (a, b) in self.tasks.iter_mut().zip(&o.tasks) {
+            *a += b;
+        }
+        self.time_run += o.time_run;
+        self.time_break += o.time_break;
+        self.time_scan += o.time_scan;
+        self.time_ship += o.time_ship;
+        self.time_log += o.time_log;
+        self.time_confirm += o.time_confirm;
+        self.time_held += o.time_held;
+        self.time_setup += o.time_setup;
+        let later = std::mem::take(&mut self.round_walls);
+        self.round_walls = o.round_walls;
+        self.round_walls.extend(later);
+    }
 }
 
 pub struct Output {
@@ -224,6 +262,9 @@ struct Expect {
     endinput: bool,
     /// The job ends in it (`\end`, `\dump`): no piece follows.
     ends: bool,
+    /// It ends at a cut the cutter missed (at `stop`): the rest of its
+    /// text is cut again from there.
+    cut: bool,
 }
 
 impl Expect {
@@ -233,8 +274,10 @@ impl Expect {
         }
         let out = r.out();
         let input = r.input().cloned();
+        let cut = r.ends_at_cut();
         Expect {
-            stop: if input.is_some() { out.pos } else { 0 },
+            stop: if input.is_some() || cut { out.pos } else { 0 },
+            cut,
             endinput: out.ends_file(),
             ends: r
                 .exports
@@ -248,6 +291,7 @@ impl Expect {
         self.stop == o.stop
             && self.endinput == o.endinput
             && self.ends == o.ends
+            && self.cut == o.cut
             && match (&self.input, &o.input) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b) || **a == **b,
                 (None, None) => true,
@@ -326,6 +370,9 @@ fn count_lines(t: &[char]) -> usize {
 /// from before the piece, the piece whose definition it read).
 type Readers = FxMap<Key, FxMap<PieceId, (u32, PieceId)>>;
 
+/// A piece's text and the pieces it was re-cut into.
+type Recut = (Arc<[char]>, Vec<Arc<[char]>>);
+
 /// What survives between builds: the pieces with their nodes, the edges,
 /// the pages with their DVI.
 pub struct Build {
@@ -353,6 +400,11 @@ pub struct Build {
     /// and the rest of each line that called `\input`.
     file_cuts: FxMap<usize, FileCut>,
     rests: FxMap<(usize, usize), Rest>,
+    /// The pieces of the rest of a text after a cut the cutter missed (the
+    /// same `Arc`s while the text is).
+    recuts: FxMap<(usize, usize), Recut>,
+    /// The counts of this build's rounds that changed the sequence.
+    carried: Stats,
     /// What the page builder left: whether it fired a routine or met an
     /// insertion or a mark (then it is made again from its start), its
     /// definitions at each place it fired (by the piece and node), and its
@@ -935,6 +987,8 @@ impl Build {
             files: Arc::default(),
             file_cuts: FxMap::default(),
             rests: FxMap::default(),
+            recuts: FxMap::default(),
+            carried: Stats::default(),
             fold: FoldKept::default(),
             virt: FxMap::default(),
         }
@@ -991,6 +1045,24 @@ impl Build {
             .find(|(t, _)| **t == **text)
             .map_or_else(|| cut(text), |x| x.1.clone());
         self.file_cuts.insert(key, (text.clone(), v.clone()));
+        v
+    }
+
+    /// The pieces of `text` after a cut the cutter missed at `stop` (a
+    /// line's start: the lines from there, cut as the main text is).
+    fn recut(&mut self, text: &Arc<[char]>, stop: usize) -> Vec<Arc<[char]>> {
+        let key = (text.as_ptr() as usize, stop);
+        if let Some((t, v)) = self.recuts.get(&key)
+            && Arc::ptr_eq(t, text)
+        {
+            return v.clone();
+        }
+        let src: String = text[stop.min(text.len())..]
+            .iter()
+            .map(|&c| if c == '\r' { '\n' } else { c })
+            .collect();
+        let v = cut(&src);
+        self.recuts.insert(key, (text.clone(), v.clone()));
         v
     }
 
@@ -1051,6 +1123,21 @@ impl Build {
             old,
             expect: expect.clone(),
         });
+        if expect.cut {
+            // (the cutter missed a cut: the rest of the text is cut again
+            // from there, each piece entered at the canonical start)
+            let stop = expect.stop.min(text.len());
+            let mut b = base + count_lines(&text[..stop]);
+            let mut last = k;
+            for p in self.recut(text, stop) {
+                last = self.place(out, m, olds, &p, Entry::Start, b, depth);
+                b += count_lines(&p);
+                if out[k..].iter().any(|s| s.expect.ends) {
+                    break;
+                }
+            }
+            return last;
+        }
         let Some(f) = expect.input.clone() else {
             return k;
         };
@@ -1168,11 +1255,16 @@ impl Build {
         let mut rounds = 0;
         loop {
             rounds += 1;
+            let t_round = Instant::now();
             if let Some(mut out) = self.round(&texts, opts, t0, time_cut, rounds > 64) {
+                let mut carried = std::mem::take(&mut self.carried);
+                carried.round_walls.push(t_round.elapsed());
+                out.stats.absorb(carried);
                 out.stats.rounds = rounds;
                 out.stats.wall = t0.elapsed();
                 return out;
             }
+            self.carried.round_walls.push(t_round.elapsed());
             // (a run changed the sequence: evaluated again, its runs kept;
             // the pages to compare with are the last build's)
             self.pages.clone_from(&saved.0);
@@ -1610,6 +1702,7 @@ impl Build {
                     })
                     .collect();
             self.readers = st.readers;
+            self.carried.absorb(st.stats);
             return None;
         }
         let t_join = Instant::now();
@@ -1680,6 +1773,7 @@ impl Build {
                                 font: &sh.font,
                                 fonts: &sh.fonts,
                                 k,
+                                cut: false,
                             };
                             let r = regen(&mut env, &st.p[k].text, r);
                             crate::graph::page_io(&r.chain, i, &mut env, &pg.b, &mut errors)
@@ -1721,6 +1815,7 @@ impl Build {
                     font: &sh.font,
                     fonts: &sh.fonts,
                     k,
+                    cut: false,
                 };
                 let r = regen(&mut env, &ps.text, r);
                 dump_piece(&mut dump, k, ps, &r);
@@ -1802,6 +1897,8 @@ struct JoinEnv<'a> {
     font: &'a Arc<Font>,
     fonts: &'a Arc<FontFiles>,
     k: usize,
+    /// The run ran up to a cut the cutter missed: so does its run again.
+    cut: bool,
 }
 
 /// A lean piece's run with its nodes again (`graph::Lean`): run again,
@@ -1812,12 +1909,18 @@ fn regen(env: &mut JoinEnv<'_>, text: &[char], r: &Arc<Run>) -> Arc<Run> {
         return r.clone();
     }
     let entry = r.entry();
+    env.cut = r.ends_at_cut();
     Arc::new(run_piece(text, env, None, &[], Some(&entry)))
 }
 
 impl Env for JoinEnv<'_> {
     fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
         self.fonts.get(name)
+    }
+
+    // (run again as it ran: up to its cut)
+    fn cut_ok(&mut self) -> bool {
+        self.cut
     }
 
     fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32) {
@@ -2974,6 +3077,10 @@ impl Env for PieceEnv<'_> {
 
     fn has_between(&mut self, key: &Key) -> bool {
         self.sh.names.has_inner(key)
+    }
+
+    fn cut_ok(&mut self) -> bool {
+        self.sh.restructure_ok
     }
 
     fn between(&mut self, key: &Key, after: u32, node: u32) -> Option<(Val, Src)> {

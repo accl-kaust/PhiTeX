@@ -73,6 +73,14 @@ fn report(what: &str, o: &Output) {
         s.time_confirm.as_secs_f64() * 1000.0,
         s.time_held.as_secs_f64() * 1000.0
     );
+    if s.rounds > 1 {
+        let walls: Vec<String> = s
+            .round_walls
+            .iter()
+            .map(|d| format!("{:.0}", d.as_secs_f64() * 1000.0))
+            .collect();
+        println!("  {} rounds (ms): {}", s.rounds, walls.join(" "));
+    }
     for e in o.errors.iter().take(20) {
         eprintln!("! {e}");
     }
