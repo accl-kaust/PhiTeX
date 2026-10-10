@@ -3869,6 +3869,14 @@ impl Env for PieceEnv<'_> {
         self.sh.restructure_ok && !self.sh.inline[self.k]
     }
 
+    fn give_up_deep(&mut self) -> bool {
+        if (!self.predicted.is_empty() || self.entry_assumed) && self.unconfirmed() {
+            self.gave_up = true;
+            return true;
+        }
+        false
+    }
+
     fn stop_at(&mut self, pos: usize) -> bool {
         self.sh.restructure_ok && self.sh.stops[self.k].binary_search(&pos).is_ok()
     }

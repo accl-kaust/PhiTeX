@@ -93,6 +93,16 @@ pub trait Env {
         false
     }
 
+    /// A run nests groups deeper than any document does (`DEEP`): whether
+    /// it stops — it runs on predictions not confirmed yet (a cut's
+    /// assumed entry, or definitions predicted), which such a nesting
+    /// says are wrong. (Every node's state holds its open groups: a run
+    /// on wrong predictions opening groups without end would hold memory
+    /// as the square of its length.)
+    fn give_up_deep(&mut self) -> bool {
+        false
+    }
+
     /// Whether an `\input` fetched as a command where the reader is on the
     /// piece's own text ends the run, its file's pieces following it
     /// (CORE.md, `\input`); else every file is read in the piece.
@@ -207,6 +217,10 @@ pub fn pending_words(st: &RState) -> u64 {
 }
 
 /// The fatal error of a run past TeX's main memory.
+/// Groups open at once beyond which a run on predictions not confirmed is
+/// given up ([`Env::give_up_deep`]).
+const DEEP: usize = 1024;
+
 pub fn capacity_error(size: u64) -> String {
     format!("TeX capacity exceeded, sorry [main memory size={size}]")
 }
@@ -2390,6 +2404,7 @@ pub fn run_piece(
                 verdict = match stop {
                     Some(Check::Abandon) => Check::Abandon,
                     Some(_) => Check::Go,
+                    None if n.out.groups.len() > DEEP && env.give_up_deep() => Check::Abandon,
                     None => env.check(ran, words.max(pending_words(&n.out))),
                 };
                 n
