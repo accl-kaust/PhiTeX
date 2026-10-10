@@ -7,6 +7,9 @@
 /// The dependencies allowed (every section: normal, dev, build, target).
 const ALLOWED: &[&str] = &[
     "phi",
+    // (kpathsea, user-approved pure library: texmf.cnf, ls-R and the path
+    // search; the file finder a build is given, `kpse::Kpathsea`)
+    "partex-kpse",
     // (the CLI's global allocator, an optional feature: no TeX in it)
     "tikv-jemallocator",
 ];
@@ -45,7 +48,7 @@ fn depends_on_the_listed_crates_only() {
     let deps = dependencies(&toml);
     assert!(deps.iter().any(|(n, _)| n == "phi"), "phi is a dependency");
     for (name, l) in &deps {
-        assert!(!name.starts_with("partex"), "no partex crate: {l}");
+        assert!(!name.starts_with("partex") || ALLOWED.contains(&name.as_str()), "no partex crate: {l}");
         assert!(ALLOWED.contains(&name.as_str()), "phitex-flow may depend on {ALLOWED:?} only: {l}");
     }
 }
@@ -79,4 +82,39 @@ fn the_wall_forbids_unlisted_crates() {
                [dev-dependencies.serde]\nversion = \"1\"\n[target.'cfg(unix)'.dependencies]\nlibc = \"0.2\"\n";
     let names: Vec<String> = dependencies(bad).into_iter().map(|d| d.0).collect();
     assert_eq!(names, ["phi", "partex-core", "serde", "libc"]);
+}
+
+/// The library runs no process (the finder, like every file, is a given
+/// of the build; wasm has no processes): no source under `src/` but the
+/// binaries' names `std::process` or `Command`, before its `#[cfg(test)]`
+/// module (a unit test may run an oracle).
+#[test]
+fn the_library_runs_no_process() {
+    fn walk(d: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(d).expect("src").flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if p.file_name().is_some_and(|n| n != "bin") {
+                    walk(&p, out);
+                }
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src")), &mut files);
+    assert!(files.len() > 10, "the sources are listed: {files:?}");
+    let mut bad = Vec::new();
+    for f in &files {
+        let text = std::fs::read_to_string(f).expect("a source");
+        let lib = text.split("#[cfg(test)]").next().unwrap_or("");
+        for (i, l) in lib.lines().enumerate() {
+            let code = l.split("//").next().unwrap_or("");
+            if code.contains("std::process") || code.contains("Command::new") {
+                bad.push(format!("{}:{}: {}", f.display(), i + 1, l.trim()));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "phitex-flow's library runs processes:\n{}", bad.join("\n"));
 }

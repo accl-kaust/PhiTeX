@@ -21,10 +21,29 @@ use phitex_flow::{Build, Font, Options, Order, Output, Reads};
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+/// TeX Live's kpathsea as program `prog`: `SELFAUTOLOC` is the
+/// environment's, else the directory of `kpsewhich` (or `tex`) on `PATH`,
+/// links resolved, as web2c finds its own; none if no `texmf.cnf` is
+/// reachable from there (no process is run).
+fn tex_live(prog: &str) -> Option<Arc<phitex_flow::kpse::Kpathsea>> {
+    let dir = std::env::var_os("SELFAUTOLOC").filter(|d| !d.is_empty()).map(std::path::PathBuf::from).or_else(|| {
+        let path = std::env::var_os("PATH")?;
+        ["kpsewhich", "tex"].iter().find_map(|p| {
+            std::env::split_paths(&path)
+                .filter_map(|d| d.join(p).canonicalize().ok())
+                .find(|f| f.is_file())
+                .and_then(|f| f.parent().map(std::path::Path::to_path_buf))
+        })
+    })?;
+    let mut k = partex_kpse::Kpse::new(&dir, prog, prog);
+    k.var_value("TEXMF")?;
+    Some(Arc::new(phitex_flow::kpse::Kpathsea::new(k)))
+}
+
 fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
-         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--fmt FILE] [--dump-fmt FILE] [--interaction MODE] [--edit OLD=>NEW] [--repeat N] \
+         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--kpse PROG] [--no-kpse] [--fmt FILE] [--dump-fmt FILE] [--interaction MODE] [--edit OLD=>NEW] [--repeat N] \
          [--check] [--log] [--main-memory WORDS] [--cut-lines N|inf]"
     );
     ExitCode::from(2)
@@ -432,6 +451,8 @@ fn main() -> ExitCode {
     let mut before: Vec<String> = Vec::new();
     let mut terminal: Vec<String> = Vec::new();
     let mut font_dirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut kpse: Option<String> = None;
+    let mut no_kpse = false;
     let mut fmt: Option<String> = None;
     let mut dump_fmt: Option<String> = None;
     let mut interaction: Option<i32> = None;
@@ -483,6 +504,11 @@ fn main() -> ExitCode {
             },
             "--font-dir" => match val() {
                 Some(d) => font_dirs.push(d.into()),
+                None => return usage(),
+            },
+            "--no-kpse" => no_kpse = true,
+            "--kpse" => match val() {
+                Some(p) => kpse = Some(p),
                 None => return usage(),
             },
             "--fmt" => match val() {
@@ -604,6 +630,31 @@ fn main() -> ExitCode {
         font_dirs.extend(phitex_flow::tfm::default_dirs());
         b.set_font_dirs(font_dirs.clone());
     }
+    // (files found by TeX Live's kpathsea as program PROG, `--kpse PROG`,
+    // `pdftex` by default — inputs after the input directories, TFM files,
+    // PDF output's files — where a TeX Live is found; `--no-kpse`, or no
+    // TeX Live: TeX Live's directories walked, inputs in the input
+    // directories only)
+    let mut finder: Option<(Arc<phitex_flow::kpse::Kpathsea>, String)> = None;
+    if !no_kpse {
+        let prog = kpse.clone().unwrap_or_else(|| "pdftex".to_string());
+        match tex_live(&prog) {
+            Some(k) => {
+                b.set_kpse(k.clone(), &prog);
+                finder = Some((k, prog));
+            }
+            None if kpse.is_some() => {
+                eprintln!("--kpse {prog}: no TeX Live (kpsewhich or tex with a texmf.cnf) on PATH");
+                return ExitCode::FAILURE;
+            }
+            None => {}
+        }
+        // (`--font-dir`: those directories walked for TFM files, then TeX
+        // Live's, as asked)
+        if !font_dirs.is_empty() {
+            b.set_font_dirs(font_dirs.clone());
+        }
+    }
     // (`-interaction`: the mode before any definition, and at each job's
     // start over the format's)
     if let Some(m) = interaction {
@@ -668,6 +719,9 @@ fn main() -> ExitCode {
         if check {
             let mut fb = Build::new(font);
             fb.set_input_dirs(inputs.clone());
+            if let Some((k, prog)) = &finder {
+                fb.set_kpse(k.clone(), prog);
+            }
             fb.set_jobname(&job);
             let fresh = fb.update(&edited, opts);
             report("cold of the edited text", &fresh);
