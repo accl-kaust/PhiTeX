@@ -7,7 +7,7 @@
 set -u
 R=${r:-/tmp/pgfs-results}; W=${w:-/tmp/pgfs-work}/pgfs; mkdir -p "$R" "$W"
 SRC=${SRC:-$PWD/bench/flow-par/pgfman-src}
-START=${START:-8}; STEP=${STEP:-4}; N=${N:-16}; TH=${TH:-1}
+START=${START:-8}; STEP=${STEP:-4}; N=${N:-16}; TH=${TH:-1}; SDUMP=${SDUMP:-0}
 export SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1
 cargo build --release -q -p phitex-cli > "$R/build.log" 2>&1 || { echo "build failed"; tail -30 "$R/build.log"; exit 1; }
 B=$PWD/target/release/phitex
@@ -16,7 +16,8 @@ printf '%s\n' '\documentclass{article}\begin{document}x\end{document}' > $W/fmt/
 (cd $W/fmt && $B --compat=pdflatex -threads=4 -interaction=batchmode one.tex > "$R/format.out" 2>&1)
 rm -rf $W/run; cp -a $SRC $W/run
 cmds=(-ex 'set pagination off' -ex 'set confirm off' -ex 'handle SIGINT stop print nopass' -ex run)
-for i in $(seq $N); do cmds+=(-ex "echo ==SAMPLE $i\\n" -ex 'thread apply all bt 60' -ex continue); done
+[ "$SDUMP" = 1 ] && cmds=(-x $PWD/bench/flow-par/sdump.py "${cmds[@]}")
+for i in $(seq $N); do cmds+=(-ex "echo ==SAMPLE $i\\n" -ex 'thread apply all bt 60'); [ "$SDUMP" = 1 ] && cmds+=(-ex sdump); cmds+=(-ex continue); done
 cd $W/run
 PHITEX_SCHED=$R/sched.tsv gdb -batch "${cmds[@]}" --args $B --compat=pdflatex -threads=$TH -interaction=batchmode pgfmanual.tex > "$R/gdb.txt" 2>&1 &
 g=$!
