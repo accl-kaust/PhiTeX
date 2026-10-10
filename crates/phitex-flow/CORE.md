@@ -1963,6 +1963,22 @@ release build, `-j 1`, `perf stat -e cycles:u,instructions:u` inside
 `scripts/sandbox`; the machine is shared, so cycles move by 10-20% from
 run to run and instructions are the steadier figure).
 
+**How the numbers are made (from the changes on).** On the accl
+cluster, never on the shared workstation: `scripts/accl/accl submit cmd
+bash -c 'LTX=1 perf-in/cg.sh base=REV a=REV ...'` builds each revision
+(release, frame pointers) and runs every document at `-j 1` under
+`valgrind --tool=callgrind` (exact instruction counts, Ir, independent
+of the node's load; an inclusive profile per run with
+`callgrind_annotate --inclusive=yes`), TeX Live's binaries on the same
+documents the same way; wall-clock rows are bash `time` on a `-c 48`
+node (`perf-in/ab.sh`). `perf` is not usable there (the nodes'
+`perf_event_paranoid` is 4). The scripts are kept beside the worktree,
+not in the repository: big2 (`tests/plain` bodies, IniTeX prelude), the
+six documents of `tests/latex/docs` on the saved format, the plain
+documents with `\pdfoutput=1` (as `tests/pdf.rs` makes them),
+`latex.ltx`. The phase table below is from local `perf` before that
+rule and is superseded by the callgrind profiles where they are given.
+
 **Against TeX on this machine.**
 
 | document | graph | TeX | cycles |
@@ -2059,6 +2075,54 @@ after on the same base):
    titlepage 7.22G → 7.13G, tikz 207.0G → 206.5G; DVIs identical; the
    fuzz (60 seeds of 6 edits at 8 threads) fails the same 8 TRIP seeds
    as before (F1).
+3. *An argument gathered into the run's buffer.* `Cursor::arg` gathers
+   an argument spread over several lists into `Scratch::arg` and makes
+   its list in one allocation (it grew a new vector token by token); a
+   call's argument array is collected from a slice of the matched
+   arguments (one allocation, not a vector and a copy). Ir: the
+   documents on the format -0.7% to -1.6%; `latex.ltx` (local perf)
+   -5.8%.
+4. *The font and PDF-file index walked only as far as a name needs.*
+   `tfm::Index` keeps its place in the same walk (directories in order,
+   depth first, entries sorted, eight levels) and goes on only until the
+   file asked for is met; the first path met is the whole walk's. The
+   whole TFM tree was walked at a process's first `\font`: a fifth of
+   every short run. Ir: plain documents -20.5% to -22.0% (DVI and PDF
+   mode), the documents on the format -12.6% to -18.8%.
+5. *A name's readers edges in a vector ordered by piece*
+   (`build::Edges`, was a hash map per name): mostly appended, since
+   pieces are installed mostly in order. Ir: big2 -1.2%.
+6. *A conditional whose φ defines nothing keeps its test in the node*
+   (`Node::test`); only a φ with keys goes into `Rare` (2.1M of
+   `latex.ltx`'s 3.1M nodes had a `Rare` only for that). Ir: the
+   documents on the format -0.2% to -0.5%.
+
+Tried and dropped (Ir, cluster job 7818): the lists a node pushes kept
+in a vector until the node ends instead of shared cells (+0.0% to +1.2%:
+moving a larger `Level` in and out of the vector costs what the cells
+cost); one shared one-token list per token for `Exec::back` (-0.5% big2,
++0.2% elsewhere); a call's single argument in place in its `Level`
+(+0.2% to +1.1%: every `Level` grows); `#[inline]` on `Cursor::next`
+and `Pending::next_tok` (no change).
+
+**After 1-6** (callgrind Ir, exact, the cluster image's TeX Live; job
+7818; the same outputs at every step):
+
+| document | base 9fa4ccf | after (job 7818's stack through 6, with two dropped items in it: within 1%) | TeX |
+|---|---|---|---|
+| big2 | 5.135G | 4.687G | `tex -ini` 0.654G (7.2x) |
+| plain story, DVI | 0.414G | 0.321G | `tex -ini` 0.224G (1.4x) |
+| plain story, PDF | 0.593G | 0.461G | `pdftex -ini` 0.796G (0.58x) |
+| sections on the format | 1.692G | 1.356G | `latex` 0.622G, of which 0.481G loading the format |
+| titlepage on the format | 2.309G | 1.977G | `latex` 0.633G |
+| `latex.ltx` | | 224.6G (with the dropped items too) | `etex -ini` 71.2G (3.2x) |
+
+On the documents the graph's own work is still about 6x TeX's a
+command, times the reruns (titlepage 9x). In `latex.ltx` (callgrind
+self cost) the input lists and argument scanning lead (`Cursor::next`
+12.6%, `next_raw0` 7%, `next_raw` 3%, `Cursor::arg` 2.4%), then sorting
+by `Key` (`Key::cmp` 5.1% and the sort about 3.5%: a piece's reads and
+exports, once per run, over 171k names), `tok_meaning` 2.2%.
 
 ## The inventory
 
