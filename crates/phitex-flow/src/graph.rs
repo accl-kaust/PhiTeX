@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use crate::hash::{FxMap, FxSet};
 pub use crate::item::{Item, Para};
-use crate::page::IGNORE_DEPTH;
+use crate::page::MAIN_DEPTH;
 use crate::tfm::Font;
 use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
 
@@ -742,7 +742,8 @@ impl RState {
             groups: Stack::new(),
             after_assignment: None,
             space_factor: 1000,
-            prev_depth: IGNORE_DEPTH,
+            // (the main vertical list's, as the pieces before left it)
+            prev_depth: MAIN_DEPTH,
             prev_graf: 0,
             eol: EOL_UNREAD,
             endinput: false,
@@ -1954,6 +1955,19 @@ fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Ke
     }
 }
 
+/// Where node `i`'s read `r` is entered in its run's reads
+/// (`Run::reads`), if not at `i`: a φ's read from before its `\if`
+/// (`Read::cond`, from before the piece) where the `\if` began, so that
+/// a definition in the arm (global, its place in the names index exact:
+/// one between the piece's nodes) does not answer it.
+fn cond_at(chain: &Chain, i: usize, r: &Read) -> Option<usize> {
+    let c = r.cond?;
+    if i == 0 || matches!(r.src, Src::Node(_)) {
+        return None;
+    }
+    chain.nodes[i - 1].out.conds.get(c as usize).map(|o| (o.open as usize).min(i))
+}
+
 /// `r` read again for the next node of `chain`, whose input state is
 /// `state`: as of the node now opening the conditional it read before
 /// (`Read::cond`), or as of the next node (`None`: that conditional is
@@ -2317,24 +2331,37 @@ pub fn run_piece(
         .collect();
     // (the kept nodes before `from` read what they read in the old run:
     // its entries whose first reader is among them; then each read of the
-    // other nodes, its identity seen once)
+    // other nodes, its identity seen once. A φ's read from before its `\if`
+    // is entered where the `\if` began (`cond_at`): the old entries kept
+    // stop before the first such place of the nodes from `from` on, old or
+    // new, and the nodes from there are entered again)
+    let lowest = |c: &Chain| {
+        c.nodes
+            .range(from, c.nodes.len())
+            .enumerate()
+            .filter_map(|(d, n)| n.reads.iter().filter_map(|r| cond_at(c, from + d, r)).min())
+            .min()
+            .unwrap_or(from)
+    };
+    let rfrom = lowest(&chain).min(oldc.map_or(from, lowest)).min(from);
     let mut reads: Vec<(Key, u32, Val)> = match old {
         Some((r, _)) => r
             .reads
             .iter()
-            .filter(|(_, i, _)| (*i as usize) < from)
+            .filter(|(_, i, _)| (*i as usize) < rfrom)
             .cloned()
             .collect(),
         None => Vec::new(),
     };
     let mut seen: FxSet<usize> = FxSet::default();
-    for (d, n) in chain.nodes.range(from, end).enumerate() {
-        let i = from + d;
+    for (d, n) in chain.nodes.range(rfrom, end).enumerate() {
+        let i = rfrom + d;
         for r in n.reads.iter() {
             if matches!(r.src, Src::Node(_)) || !seen.insert(Arc::as_ptr(r) as usize) {
                 continue;
             }
-            reads.push((r.key.clone(), i as u32, r.val.clone()));
+            let at = cond_at(&chain, i, r).map_or(i, |a| a.max(rfrom));
+            reads.push((r.key.clone(), at as u32, r.val.clone()));
         }
     }
     reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -2642,6 +2669,29 @@ impl<'a> Exec<'a> {
             // (§82: at any level, into the page fold's stream)
             let p = self.para.get_or_insert_with(|| Arc::new(Para::default()));
             Arc::make_mut(p).after.push(Item::Halt);
+        }
+        // (the main vertical list's last item, as this node left it)
+        if self.st.level == 0
+            && !self.st.in_output()
+            && let Some(p) = &self.para
+            && let Some(t) = material::main_tail(p)
+        {
+            self.defs.push(Def { key: Key::MainTail, val: t, global: true, level: None });
+        }
+        // (and its `\prevdepth`: what the node set, or the paragraph it
+        // ended, its last line's depth, `page::MAIN_DEPTH`)
+        if self.st.level == 0
+            && !self.st.in_output()
+            && let Some(p) = &self.para
+        {
+            let val = match self.st.prev_depth {
+                MAIN_DEPTH if p.lb.is_some() => Some(Val::Para(p.clone())),
+                MAIN_DEPTH => None,
+                d => Some(Val::Int(d)),
+            };
+            if let Some(val) = val {
+                self.defs.push(Def { key: Key::MainDepth, val, global: true, level: None });
+            }
         }
         let reads = Few::take(&mut self.reads);
         let emit = Few::take(&mut self.emit);

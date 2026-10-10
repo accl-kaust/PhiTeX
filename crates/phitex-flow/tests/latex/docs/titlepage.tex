@@ -1,0 +1,23 @@
+\documentclass[titlepage]{article}
+\title{A Title}
+\author{An Author}
+\date{14 March 2024}
+\begin{document}
+\maketitle
+\tableofcontents
+\section{One}
+\newcount\n \n=0
+\loop
+Paragraph number \the\n. The quick brown fox jumps over the lazy dog,
+and the lazy dog does not mind at all; it sleeps on.
+\par
+\advance\n by 1
+\ifnum\n<30 \repeat
+\newpage
+\section{Two}
+A page of its own.
+\clearpage
+\section{Three}
+\subsection{Three point one}
+The last words.
+\end{document}

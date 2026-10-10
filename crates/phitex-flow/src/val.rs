@@ -151,6 +151,17 @@ pub enum Key {
     /// The job has ended (`\end`, `\dump`: 1), global: every piece's
     /// first node reads it, so the pieces after the end read nothing more.
     Ended,
+    /// The main vertical list's last item (tex.web 424: the contributions'
+    /// tail, or the page builder's `last_glue`, `last_penalty`,
+    /// `last_kern` once it took them): `Val::Tail`, defined globally by
+    /// each node contributing to the list; `\lastskip` and the like read
+    /// it where their piece has contributed nothing yet.
+    MainTail,
+    /// The main vertical list's `\prevdepth` (`Val::Int`), or the
+    /// paragraph whose last line's depth it is, its lines not broken yet
+    /// (`Val::Para`): defined globally by each node at the outer level
+    /// that sets it; read where the reader state says `page::MAIN_DEPTH`.
+    MainDepth,
 }
 
 impl Key {
@@ -230,6 +241,8 @@ impl Key {
             Key::FontParams(_) => w(38, 0),
             Key::LastFont => w(39, 0),
             Key::Ended => w(40, 0),
+            Key::MainTail => w(64, 0),
+            Key::MainDepth => w(65, 0),
             Key::Active(x) => w(1, c(x)),
             Key::Cat(x) => w(2, c(x)),
             Key::Lccode(x) => w(3, c(x)),
@@ -347,6 +360,10 @@ pub enum Val {
     /// The split marks (`Key::SplitMarks`): per class with a mark in the
     /// part the last `\vsplit` split off, by class, its first and last.
     SplitMarks(Arc<[SplitMark]>),
+    /// A list's last item (`Key::MainTail`).
+    Tail(Arc<crate::item::Item>),
+    /// A paragraph before line breaking (`Key::MainDepth`).
+    Para(Arc<crate::item::Para>),
 }
 
 /// A class's split marks: the class, the first mark, the last.
@@ -418,6 +435,8 @@ impl fmt::Display for Shown<'_, Key> {
             Key::Format => write!(f, "format_ident"),
             Key::MagSet => write!(f, "mag_set"),
             Key::Ended => write!(f, "the end of the job"),
+            Key::MainTail => write!(f, "the main vertical list's last item"),
+            Key::MainDepth => write!(f, "the main vertical list's \\prevdepth"),
             Key::Interaction => write!(f, "\\interactionmode"),
             Key::ETeXMode => write!(f, "e-TeX mode"),
             Key::Patterns(l) => write!(f, "\\patterns (language {l})"),
@@ -477,6 +496,8 @@ impl fmt::Display for Shown<'_, Val> {
             Val::Bytes(b) => write!(f, "{} bytes", b.len()),
             Val::Stream(x) => write!(f, "stream at {} of {}", x.next, x.data.len()),
             Val::SplitMarks(m) => write!(f, "split marks of {} classes", m.len()),
+            Val::Tail(i) => write!(f, "the item {i:?}"),
+            Val::Para(p) => write!(f, "a paragraph of {} items", p.hlist.len()),
             Val::Patterns(p) => write!(f, "{} patterns", p.len()),
             Val::Exceptions(x) => write!(f, "{} exceptions", x.len()),
             Val::Meaning(Meaning::Font(x)) => write!(f, "select font {}", x.name),
@@ -556,7 +577,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -
             Val::Int(0)
         }
         Key::GluePar(_) | Key::Skip(_) | Key::Muskip(_) => Val::Glue(Arc::new(Glue::default())),
-        Key::Box(_) | Key::File(_) | Key::ReadStream(_) => Val::Void,
+        Key::Box(_) | Key::File(_) | Key::ReadStream(_) | Key::MainTail => Val::Void,
         Key::Parshape => Val::Parshape(Arc::new(Vec::new())),
         Key::Font | Key::FamFont(..) => Val::Font(crate::tfm::null_font()),
         Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
@@ -569,6 +590,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -
         // `-interaction=batchmode`; a build gives its own,
         // `Build::set_interaction`: IniTeX's `error_stop_mode` is 3)
         Key::Ended | Key::MagSet | Key::Interaction => Val::Int(0),
+        Key::MainDepth => Val::Int(crate::page::IGNORE_DEPTH),
         Key::ETeXMode => Val::Int(i32::from(etex)),
         Key::Patterns(_) => Val::Patterns(crate::hyph::Patterns::new()),
         Key::Exceptions(_) => Val::Exceptions(crate::hyph::Exceptions::new()),

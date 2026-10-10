@@ -202,7 +202,7 @@ fn shipped(run: &Run) -> Vec<Page> {
         .iter()
         .flat_map(|p| p.before.iter().chain(&p.after))
         .filter_map(|it| match it {
-            Item::Shipout(s) => Some(Page { b: s.b.clone(), ship: s.ship.clone() }),
+            Item::Shipout(s) => Some(Page { b: s.b.clone(), ship: s.ship.clone(), builder: false }),
             _ => None,
         })
         .collect()
@@ -305,6 +305,7 @@ fn a_routine_reads_the_fire_and_leaves_its_list() {
     let page = Page {
         b: Arc::new(BoxNode { vertical: true, h: 100, ..BoxNode::default() }),
         ship: Arc::new(ShipParams { counts: [0; 10], hoffset: 0, voffset: 0, mag: 1000, date: [1970, 1, 1, 0] }),
+        builder: false,
     };
     let t = |s: &str| -> Arc<Vec<Tok>> { Arc::new(s.chars().map(|c| Tok::Char(12, c)).collect()) };
     let reads = OutputReads {

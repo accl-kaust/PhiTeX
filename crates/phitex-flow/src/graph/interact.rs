@@ -443,6 +443,8 @@ impl Exec<'_> {
         s.push(MSG_END);
         self.log_push(&s);
         self.vemit.push(Item::JobStart);
+        // (a new job's main vertical list: `ignore_depth`, §215)
+        self.st.prev_depth = crate::page::IGNORE_DEPTH;
         // (§1030: `\everyjob` first)
         if let Val::Toks(t) = self.get(&Key::TokPar(TokPar::Everyjob))
             && !t.is_empty()
