@@ -3255,8 +3255,28 @@ fn write_deps(st: &State, seq: &Sequence, names: &Names, font: &Arc<Font>, times
             // definition, the format's or IniTeX's: what a cold build's
             // prediction of no earlier write gets right)
             let init = names.initial(key, font);
-            let same = run.values_read(key).iter().all(|x| x.2.seen_as(&init));
-            let _ = writeln!(s, "D\t{k}\t{}\t{}\t{}\t{}", pos.0, u8::from(pos.1 != END), name.replace(['\t', '\n'], " "), u8::from(same));
+            let vals = run.values_read(key);
+            let same = vals.iter().all(|x| x.2.seen_as(&init));
+            // (the value's content, and the one before any definition, as
+            // hashes of their text: a reader of a value depends only on the
+            // first piece that left the name at it)
+            let vh = vals.first().map_or(0, |x| crate::hash::hash_of(&format!("{:?}", x.2)));
+            let ih = crate::hash::hash_of(&format!("{init:?}"));
+            let _ = writeln!(
+                s,
+                "D\t{k}\t{}\t{}\t{}\t{}\t{vh}\t{ih}",
+                pos.0,
+                u8::from(pos.1 != END),
+                name.replace(['\t', '\n'], " "),
+                u8::from(same)
+            );
+        }
+        for (key, val) in &run.exports {
+            let name = match key {
+                Key::Cs(n) => format!("\\{}", cs.name(*n)),
+                _ => format!("{key:?}"),
+            };
+            let _ = writeln!(s, "X\t{k}\t{}\t{}", name.replace(['\t', '\n'], " "), crate::hash::hash_of(&format!("{val:?}")));
         }
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
