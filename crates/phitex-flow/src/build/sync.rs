@@ -98,9 +98,10 @@ pub struct Dep {
 /// A shipped page's records.
 #[derive(Clone, Debug, Default)]
 pub struct PageSync {
-    /// pdfTeX's PDF mode (`\pdfoutput` positive where it was shipped):
-    /// positions from the page's top left corner, `\pdfhorigin` and
-    /// `\pdfvorigin` included; else DVI's (TeX's, without the inch).
+    /// pdfTeX's PDF mode (`\pdfoutput` positive where it was shipped), or
+    /// XeTeX's (its pages go to xdvipdfmx): positions from the page's top
+    /// left corner, `\pdfhorigin` and `\pdfvorigin` (XeTeX: an inch)
+    /// included; else DVI's (TeX's, without the inch).
     pub pdf: bool,
     /// `\mag` where it was shipped.
     pub mag: i32,
@@ -230,6 +231,8 @@ enum Ctx<'a> {
 /// The walk over a page (tex.web's ship, recording).
 struct Walk<'a> {
     b: &'a Build,
+    /// e-TeX's mode (set glue becomes a kern).
+    etex: bool,
     idx: &'a Index,
     deps: Vec<Dep>,
     dep_of: FxMap<u32, u32>,
@@ -358,9 +361,6 @@ impl<'a> Walk<'a> {
             let width = match it {
                 Item::Char(f, c) => Some(f.glyph(i32::from(*c)).map_or(0, |g| g.width)),
                 Item::Lig(l) => Some(l.font.glyph(i32::from(l.c)).map_or(0, |g| g.width)),
-                // (XeTeX: a native word or a glyph, a run of characters)
-                Item::Native(n) => Some(n.w),
-                Item::Glyph(g) => Some(g.w),
                 _ => None,
             };
             if let Some(wd) = width {
@@ -397,9 +397,19 @@ impl<'a> Walk<'a> {
                     self.rec(Kind::Rule, p, self.h, base_line, [*w, ht + dp, dp]);
                 }
                 Item::Glue { g, .. } => {
-                    self.h += glue.set(this, g);
+                    let wd = glue.set(this, g);
+                    self.h += wd;
                     let p = self.item_place(ctx, this, i);
-                    self.rec(Kind::Glue, p, self.h, base_line, [0; 3]);
+                    // (e-TeX's `hlist_out` makes glue set by stretching or
+                    // shrinking a kern of its width: `synctex.c` sees a
+                    // kern, as in xetex's and pdftex's files)
+                    let set = (this.glue.sign == 1 && g.stretch_order == this.glue.order)
+                        || (this.glue.sign == -1 && g.shrink_order == this.glue.order);
+                    if self.etex && set {
+                        self.rec(Kind::Kern, p, self.h, base_line, [wd, 0, 0]);
+                    } else {
+                        self.rec(Kind::Glue, p, self.h, base_line, [0; 3]);
+                    }
                 }
                 Item::Kern { w, .. } => {
                     self.h += *w;
@@ -415,8 +425,9 @@ impl<'a> Walk<'a> {
                     let rule_wd = glue.set(this, &l.g);
                     self.hleaders(this, ctx, i, l, rule_wd, base_line, left_edge);
                 }
-                // (XeTeX's pictures: passed, as xetex.web's `hlist_out`)
-                Item::Pic(p) => self.h += p.w,
+                // (XeTeX's native words, glyphs and pictures: passed, no
+                // record, as xetex's `synctex` writes none for them)
+                Item::Native(_) | Item::Glyph(_) | Item::Pic(_) => self.h += it.xdims().map_or(0, |x| x.0),
                 _ => {}
             }
         }
@@ -627,6 +638,7 @@ impl Build {
         let pdf = ship.pdf.as_ref().filter(|s| s.output > 0);
         let mut w = Walk {
             b: self,
+            etex: self.etex_last,
             idx,
             deps: Vec::new(),
             dep_of: FxMap::default(),
@@ -645,9 +657,13 @@ impl Build {
                 Some(w.place(o.call.0, node))
             })
             .unwrap_or(NOWHERE);
-        let (h0, v0) = match pdf {
-            Some(s) => (s.horigin + ship.hoffset, s.vorigin + ship.voffset),
-            None => (ship.hoffset, ship.voffset),
+        // (XeTeX: as PDF output, from the page's corner, its origin an inch
+        // in, as xdvipdfmx puts it: xetex's `synctex` writes `Output:pdf`)
+        const INCH: i32 = 4_736_287;
+        let (h0, v0) = match (pdf, ship.xdv) {
+            (Some(s), _) => (s.horigin + ship.hoffset, s.vorigin + ship.voffset),
+            (None, Some(_)) => (INCH + ship.hoffset, INCH + ship.voffset),
+            (None, None) => (ship.hoffset, ship.voffset),
         };
         w.h = h0;
         w.v = v0 + page.b.h;
@@ -661,7 +677,7 @@ impl Build {
                 }
             }
         }
-        Some(PageSync { pdf: pdf.is_some(), mag: ship.mag, deps: w.deps, recs: w.recs })
+        Some(PageSync { pdf: pdf.is_some() || ship.xdv.is_some(), mag: ship.mag, deps: w.deps, recs: w.recs })
     }
 }
 
