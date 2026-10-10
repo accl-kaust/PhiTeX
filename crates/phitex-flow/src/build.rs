@@ -215,6 +215,9 @@ impl Stats {
 
 pub struct Output {
     pub dvi: Vec<u8>,
+    /// The PDF file, in PDF mode (`\pdfoutput` positive at the first
+    /// page; the DVI file is then empty).
+    pub pdf: Vec<u8>,
     pub stats: Stats,
     pub errors: Vec<String>,
     /// The graph, as text.
@@ -520,6 +523,9 @@ pub struct Build {
     builds: u64,
     /// The format the build starts from (`set_format`).
     format: Option<Arc<FormatDefs>>,
+    /// The PDF file's creation date, in seconds since 1970 (UTC):
+    /// `SOURCE_DATE_EPOCH` for pdfTeX (`Build::set_pdf_date`).
+    pdf_date: i64,
 }
 
 /// A file's text and its pieces.
@@ -656,6 +662,8 @@ struct Given {
     /// The command line's `-interaction`, set at each job's start.
     interaction_option: Option<i32>,
     limits: crate::print::Limits,
+    /// The PDF file's creation date (`Build::set_pdf_date`).
+    pdf_date: i64,
 }
 
 impl Given {
@@ -675,6 +683,7 @@ impl Given {
             interaction: 0,
             interaction_option: None,
             limits: crate::print::Limits::TEX_LIVE,
+            pdf_date: 0,
         }
     }
 
@@ -1264,6 +1273,7 @@ impl Build {
             interaction_option: None,
             limits: crate::print::Limits::TEX_LIVE,
             format: None,
+            pdf_date: 0,
         }
     }
 
@@ -1667,6 +1677,13 @@ impl Build {
         self.limits = limits;
     }
 
+    /// The PDF file's creation date and `/ID`'s time, in seconds since
+    /// 1970 UTC (pdfTeX's `SOURCE_DATE_EPOCH`; 0 until set). No clock is
+    /// read: the date is a given of the build.
+    pub fn set_pdf_date(&mut self, epoch: i64) {
+        self.pdf_date = epoch;
+    }
+
     /// The sizes set by [`Build::set_limits`].
     pub fn limits(&self) -> crate::print::Limits {
         self.limits
@@ -1937,6 +1954,7 @@ impl Build {
         given.interaction = self.interaction;
         given.interaction_option = self.interaction_option;
         given.limits = self.limits;
+        given.pdf_date = self.pdf_date;
         let names = Names::new(given, opts.etex, self.cs.clone(), self.format.clone());
         for (k, ps) in p.iter().enumerate() {
             if let Some(r) = ps.run.as_ref().or(ps.prev.as_ref().map(|(r, _, _)| r)) {
@@ -2268,9 +2286,20 @@ impl Build {
             std::iter::once(self.format_fonts())
                 .chain(st.p.iter().filter_map(|ps| ps.run.as_ref().map(|r| &r.fonts[..]))),
         );
-        let (out, again) = dvi::assemble_in(&numbers, &st.pages, &mut bodies, sh.names.given.limits.dvi_buf_size);
-        st.stats.bodies_again = again;
         let mut errors = Vec::new();
+        // (PDF mode, from the first page's `\pdfoutput`: the PDF file is
+        // the fold over the pages, as the DVI file is)
+        let (out, pdf, again) = if st.pages.first().is_some_and(|p| p.ship.pdf.is_some()) {
+            let live = live_pieces(&st.p);
+            let last = live.iter().rposition(|&l| l).unwrap_or(0);
+            let w = pdf_file(&sh.names, &sh.font, last, &numbers, &st.pages, &mut bodies);
+            errors.extend(w.errors.into_iter().map(|e| format!("pdf: {e}")));
+            (Vec::new(), w.bytes, w.again)
+        } else {
+            let (out, again) = dvi::assemble_in(&numbers, &st.pages, &mut bodies, sh.names.given.limits.dvi_buf_size);
+            (out, Vec::new(), again)
+        };
+        st.stats.bodies_again = again;
         let mut dump = String::new();
         let marks: Vec<(u32, u32)> = st
             .marks_before
@@ -2436,6 +2465,7 @@ impl Build {
         self.marks = marks;
         Some(Output {
             dvi: out,
+            pdf,
             stats: st.stats,
             errors,
             dump,
@@ -2444,6 +2474,63 @@ impl Build {
             job_pages,
         })
     }
+}
+
+/// The PDF file of the pages (`pdf::fold`): the pages' streams (in
+/// `bodies`, made again where the fold says), what the job's end reads
+/// (the definitions reaching the end of piece `last`, the place before
+/// the next), the files the fold
+/// reads (given, in the input directories, then TeX Live's).
+/// The files the PDF fold reads: given, in the input directories, then
+/// TeX Live's.
+struct PdfFiles<'a>(&'a Given);
+
+impl crate::pdf::fold::Files for PdfFiles<'_> {
+    fn get(&mut self, name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
+        self.0.found(name).or_else(|| crate::tfm::pdf_file(name))
+    }
+}
+
+fn pdf_file(names: &Names, font: &Arc<Font>, last: usize, numbers: &dvi::Numbers, pages: &[Page], bodies: &mut [Arc<dvi::Body>]) -> crate::pdf::fold::Written {
+    use crate::val::{IntPar, TokPar};
+    let at = (last as u32 + 1, 0);
+    let read = |key: &Key| names.reaching(key, at, font).1;
+    let int = |p: IntPar| match read(&Key::IntPar(p)) {
+        Val::Int(i) => i,
+        _ => 0,
+    };
+    let esc = int(IntPar::Escapechar);
+    let text = |p: TokPar| match read(&Key::TokPar(p)) {
+        Val::Toks(t) if !t.is_empty() => {
+            let cs = &names.cs;
+            Some(Arc::from(crate::pdf::toks_text(&t, &|n| cs.name(n), esc, &mut |c| read(&Key::Cat(c)) == Val::Cat(11))))
+        }
+        _ => None,
+    };
+    let end = crate::pdf::fold::End {
+        compress_level: int(IntPar::Pdfcompresslevel),
+        gen_tounicode: int(IntPar::Pdfgentounicode),
+        omit_charset: int(IntPar::Pdfomitcharset),
+        info_omit_date: int(IntPar::Pdfinfoomitdate),
+        suppress_ptex_info: int(IntPar::Pdfsuppressptexinfo),
+        ptex_use_underscore: int(IntPar::Pdfptexuseunderscore),
+        omit_info_dict: int(IntPar::Pdfomitinfodict),
+        pages_attr: text(TokPar::Pdfpagesattr),
+        date: crate::pdf::pdf_date(names.given.pdf_date),
+        file_name: format!("{}.pdf", names.given.job),
+        banner: crate::graph::PDFTEX_BANNER.to_string(),
+    };
+    let mut pdf_bodies: Vec<Arc<crate::pdf::content::PageBody>> =
+        bodies.iter().map(|b| b.pdf.clone().unwrap_or_else(|| Arc::new(crate::pdf::content::empty()))).collect();
+    let w = crate::pdf::fold::assemble(pages, &mut pdf_bodies, numbers, &end, &mut PdfFiles(&names.given));
+    for (b, p) in bodies.iter_mut().zip(pdf_bodies) {
+        if !b.pdf.as_ref().is_some_and(|x| Arc::ptr_eq(x, &p)) {
+            let mut nb = dvi::Body { bytes: Vec::new(), fonts: Vec::new(), fixed: None, max_push: 0, io: p.io, pdf: None };
+            nb.pdf = Some(p);
+            *b = Arc::new(nb);
+        }
+    }
+    w
 }
 
 /// The join's reads (a page's `\write`s expanded where it was shipped):
@@ -4358,6 +4445,15 @@ impl FoldEnv for BuildFold<'_> {
         let pos = (self.k as u32, self.node);
         let fresh = !self.predicted.contains(&pos) || self.fired.last() == Some(&pos);
         read_at_with(self.sh, self.run.as_deref(), self.k, self.node, key, fresh)
+    }
+
+    fn toks_text(&mut self, toks: &[Tok]) -> Vec<u8> {
+        let esc = match self.read(&Key::IntPar(crate::val::IntPar::Escapechar)) {
+            Val::Int(e) => e,
+            _ => -1,
+        };
+        let cs = self.sh.names.cs.clone();
+        crate::pdf::toks_text(toks, &|n| cs.name(n), esc, &mut |c| self.read(&Key::Cat(c)) == Val::Cat(11))
     }
 
     fn fire(&mut self, defs: Vec<(Key, Val)>, routine: Option<Routine>) -> Fired {

@@ -281,6 +281,7 @@ impl Exec<'_> {
         for (k, c) in counts.iter_mut().enumerate() {
             *c = self.int(&Key::Count(k as u16));
         }
+        let pdf = crate::pdf::read_ship(&mut ExecShip(self));
         Arc::new(ShipParams {
             counts,
             hoffset: self.dimen_par(DimenPar::Hoffset),
@@ -292,6 +293,7 @@ impl Exec<'_> {
                 self.int_par(IntPar::Day),
                 self.int_par(IntPar::Time),
             ],
+            pdf,
         })
     }
 
@@ -1850,4 +1852,18 @@ pub(super) fn main_tail(p: &Para) -> Option<Val> {
         return None;
     }
     Some(list.pop().map_or(Val::Void, |t| Val::Tail(Arc::new(t))))
+}
+
+/// A `\shipout` node, as PDF shipping reads where it is.
+struct ExecShip<'x, 'a>(&'x mut Exec<'a>);
+
+impl crate::pdf::ShipEnv for ExecShip<'_, '_> {
+    fn read(&mut self, key: &Key) -> crate::val::Val {
+        self.0.get(key)
+    }
+    fn text(&mut self, toks: &[crate::val::Tok]) -> Vec<u8> {
+        let mut s = String::new();
+        self.0.show_toks(&mut s, toks);
+        s.chars().map(|c| u32::from(c).min(255) as u8).collect()
+    }
 }

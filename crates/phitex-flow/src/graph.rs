@@ -57,7 +57,7 @@ mod math;
 pub mod output;
 mod scan;
 
-pub use expand::JOBNAME;
+pub use expand::{JOBNAME, PDFTEX_BANNER};
 pub use io::{ends_document, file_text, page_io, whatsits};
 
 /// A piece's identity, stable across edits.

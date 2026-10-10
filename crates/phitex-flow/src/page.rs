@@ -32,6 +32,12 @@ pub trait FoldEnv {
     /// A fire (tex.web 1012): the fold defines `defs` here, then — with
     /// `routine` — the output routine runs; returns what it left.
     fn fire(&mut self, defs: Vec<(Key, Val)>, routine: Option<Routine>) -> Fired;
+    /// A token list as `tokens_to_string` shows it here (pdfTeX's
+    /// `\pdfpageattr` where the page is shipped); an environment that
+    /// does not know the names' spellings shows each as `\?`.
+    fn toks_text(&mut self, toks: &[Tok]) -> Vec<u8> {
+        crate::pdf::toks_text(toks, &|_| Arc::from("?"), i32::from(b'\\'), &mut |_| false)
+    }
 }
 
 /// An output routine to run where the page builder fires (tex.web 1025):
@@ -1200,6 +1206,7 @@ fn ship_params(env: &mut dyn FoldEnv) -> Arc<ShipParams> {
     for (k, c) in counts.iter_mut().enumerate() {
         *c = int(&env.read(&Key::Count(k as u16)));
     }
+    let pdf = crate::pdf::read_ship(&mut FoldShip(env));
     let mut r = |k: Key| int(&env.read(&k));
     Arc::new(ShipParams {
         counts,
@@ -1207,7 +1214,20 @@ fn ship_params(env: &mut dyn FoldEnv) -> Arc<ShipParams> {
         voffset: r(Key::DimenPar(DimenPar::Voffset)),
         mag: r(Key::IntPar(IntPar::Mag)),
         date: [r(Key::IntPar(IntPar::Year)), r(Key::IntPar(IntPar::Month)), r(Key::IntPar(IntPar::Day)), r(Key::IntPar(IntPar::Time))],
+        pdf,
     })
+}
+
+/// A place where the page builder ships, as PDF shipping reads it.
+struct FoldShip<'e>(&'e mut dyn FoldEnv);
+
+impl crate::pdf::ShipEnv for FoldShip<'_> {
+    fn read(&mut self, key: &Key) -> Val {
+        self.0.read(key)
+    }
+    fn text(&mut self, toks: &[Tok]) -> Vec<u8> {
+        self.0.toks_text(toks)
+    }
 }
 
 /// The names the default output's shipping reads ([`ship_params`]).
@@ -1222,6 +1242,7 @@ pub fn ship_keys() -> Vec<Key> {
         Key::IntPar(IntPar::Day),
         Key::IntPar(IntPar::Time),
     ]);
+    v.extend(crate::pdf::ship_keys());
     v
 }
 
