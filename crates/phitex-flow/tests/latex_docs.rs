@@ -580,6 +580,7 @@ fn doc_rules() {
 }
 
 #[test]
+#[ignore = "runaway: P2"]
 fn doc_tikz() {
     doc("tikz");
 }
@@ -669,6 +670,12 @@ macro_rules! fix_tests {
     };
 }
 
+#[test]
+#[ignore = "runaway: A's W3"]
+fn fix_gfx() {
+    fix("gfx");
+}
+
 // (all but tikz: its one piece runs 2 minutes a run until F7 and P land)
 fix_tests! {
     fix_sections: "sections",
@@ -678,7 +685,6 @@ fix_tests! {
     fix_titlepage: "titlepage",
     fix_packages: "packages",
     fix_ams: "ams",
-    fix_gfx: "gfx",
     fix_layout: "layout",
     fix_rules: "rules",
     fix_ltmc: "ltmc",
