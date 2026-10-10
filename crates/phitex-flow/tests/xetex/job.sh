@@ -31,6 +31,19 @@ fi
 xargs -P ${PAR:-3} -I{} sh -c 'timeout '"${TEST_LIMIT:-12m}"' "$bin" --exact {} --nocapture > "$r/tests/{}.txt" 2>&1; echo "{} exit $?" >> "$r/tests.exit"' < "$r/tests.list"
 { echo "tests (exit 0 ok, 101 failed, 124 over ${TEST_LIMIT:-12m}):"; sort "$r/tests.exit"; } >> "$r/summary.txt"
 grep -h -E "panicked|livelock" "$r"/tests/*.txt | cut -c1-300 | head -40 >> "$r/summary.txt"
+# (CLI=1: `phitex --compat=xelatex` on documents, its PDF against the
+# oracle's; fonts as the oracle's fontconfig saw them)
+if [ -n "${CLI:-}" ]; then
+  cargo build --release -p phitex-cli > "$r/cli-build.log" 2>&1; echo "cli build exit $?" >> "$r/summary.txt"
+  root=$PWD; oracle=${PHITEX_XETEX_ORACLE:-$root/crates/phitex-flow/tests/xetex/oracle}
+  for d in crates/phitex-flow/tests/xetex/docs/fontspec.tex crates/phitex-flow/tests/latex/docs/ams.tex; do
+    n=$(basename "$d" .tex); w="$r/cli/$n"; mkdir -p "$w"; cp "$d" "$w/"
+    ( cd "$w" && SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1 FONTCONFIG_FILE="$root/scripts/xetex/fonts.conf" PHITEX_CACHE_DIR="$r/cli-cache" \
+      timeout ${CLI_LIMIT:-15m} "$root/target/release/phitex" --compat=xelatex -interaction=batchmode "$n.tex" > out.txt 2>&1 )
+    echo "cli $n exit $?" >> "$r/summary.txt"
+    if cmp -s "$w/$n.pdf" "$oracle/docs/$n.pdf"; then echo "cli $n: the PDF is xelatex's" >> "$r/summary.txt"; else echo "cli $n: the PDF differs ($(cmp "$w/$n.pdf" "$oracle/docs/$n.pdf" 2>&1 | head -1))" >> "$r/summary.txt"; fi
+  done
+fi
 if [ -n "${REGRESS:-1}" ]; then
 cargo test --release -p phitex-flow --lib --test wall --test shapes --test dvi --test plain --test pdf --test etex --test output > "$r/regress.txt" 2>&1; echo "regress exit $?" >> "$r/summary.txt"
 grep -E "^test result|FAILED|panicked" "$r/regress.txt" | head -40 >> "$r/summary.txt"
