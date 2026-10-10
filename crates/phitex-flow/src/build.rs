@@ -1208,6 +1208,10 @@ struct State {
     fold_defs: FoldDefs,
     predicted: Vec<(Pos, Vec<Key>)>,
     memo_new: Vec<Arc<Memo>>,
+    /// Each piece's run with its nodes and the last node reading each name
+    /// (`Run::last_readers`), made at the first definition between its
+    /// nodes that asks (B1: a fire asks of every name it defines).
+    last_readers: FxMap<usize, (Arc<Run>, Arc<FxMap<Key, u32>>)>,
     /// The scheduler stalled (no task, the round not finished, nothing
     /// running that could change that): the pieces' states then. The
     /// build fails with it, never hangs.
@@ -2325,7 +2329,8 @@ impl Build {
             scan_next: 0,
             scan_skip: 0,
             scan_done: false,
-            matching: !fancy && (!self.page_orgs.is_empty() || !self.marks.is_empty()),
+            // (a fancy fold too, B2: its restart points carry its state)
+            matching: !self.page_orgs.is_empty() || !self.marks.is_empty(),
             old_runs: page_runs,
             last_diff: None,
             last_diff_known: false,
@@ -2369,6 +2374,7 @@ impl Build {
             fold_defs: Vec::new(),
             predicted,
             memo_new: Vec::new(),
+            last_readers: FxMap::default(),
             stalled: None,
         };
         for (k, key) in marks {
@@ -3610,6 +3616,7 @@ fn resume(g: &mut State, c: usize) {
         call_from,
         kept as u32,
         o.last_call.clone(),
+        o.fold.as_deref(),
     )));
     g.scan_next = s.0 as usize;
     g.scan_skip = s.1;
@@ -3908,10 +3915,12 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
                             stop = Some((k, i as u32));
                             break 'feed;
                         }
-                        if let Some((page, r)) = scan.just.take()
+                        // (the same restart point with the same fold state:
+                        // the pages after it are the last build's)
+                        if let Some((page, r, f)) = scan.just.take()
                             && let Some((after, olds)) = &converge
                             && r.0.0 as usize > *after
-                            && let Some(j) = olds.iter().position(|o| o.resume == Some(r))
+                            && let Some(j) = olds.iter().position(|o| o.resume == Some(r) && o.fold == f)
                         {
                             converged = Some((page as usize, j));
                             break 'feed;
@@ -4833,6 +4842,7 @@ impl FoldEnv for BuildFold<'_> {
         if let Some(rt) = routine {
             let m = if let Some(m) = self.find_memo(&rt, &defs) {
                 self.kept += 1;
+                fired.memo = true;
                 m
             } else {
                 self.routines += 1;
@@ -4974,12 +4984,28 @@ fn changed_at(g: &mut State, sh: &Shared, pos: Pos, keys: Vec<Key>) -> bool {
     // those reading the name from one of its earlier nodes included — not
     // those before it: they run again from the first after it)
     if pos.1 != END
-        && let Some(run) = g.p.get(pos.0 as usize).and_then(|ps| ps.run.as_ref())
+        && let Some(run) = g.p.get(pos.0 as usize).and_then(|ps| ps.run.clone())
     {
+        let k = pos.0 as usize;
+        // (a run with its nodes: which nodes read a name, looked up)
+        let last = if run.lean.is_none() {
+            let fresh = g.last_readers.get(&k).is_some_and(|(r, _)| Arc::ptr_eq(r, &run));
+            if !fresh {
+                let m = Arc::new(run.last_readers());
+                g.last_readers.insert(k, (run.clone(), m));
+            }
+            g.last_readers.get(&k).map(|x| x.1.clone())
+        } else {
+            None
+        };
         for key in &keys {
             // (the page builder's quantities are the scan's to validate)
-            if !matches!(key, Key::Page(_)) && run.reads_after(key, pos.1) {
-                marks.push((pos.0 as usize, key.clone(), pos.1 + 1));
+            let after = match &last {
+                Some(m) => m.get(key).is_some_and(|&j| j > pos.1),
+                None => run.reads_after(key, pos.1),
+            };
+            if !matches!(key, Key::Page(_)) && after {
+                marks.push((k, key.clone(), pos.1 + 1));
             }
         }
     }

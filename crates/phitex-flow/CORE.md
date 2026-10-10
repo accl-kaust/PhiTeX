@@ -1570,7 +1570,18 @@ First local table (5 repetitions, median ms):
 | param | 140 | 133 | 550 | 430 |
 | cold | 135 | 160 | 360 | 400 |
 
-- **B2. Every edit scans every page, lean or not** (traced: the root of
+- **B2 (fixed, A). Every edit scans every page, lean or not.** Fixed as
+  wanted: a fancy fold has restart points too. After a fire whose
+  routine was a memo hit and put nothing back (no held-over insertions,
+  no list), the routine's last page is one; so is a default-output page
+  of a fancy fold with nothing held over. The point carries the fold's
+  state besides the contributions (`page::FoldState`: the marks,
+  `\deadcycles`; `PageOrg::fold`); `Scan::resumed` starts with it, and
+  convergence asks for the same restart point and the same state.
+  Matching (`advance_match`) is on for fancy folds. A cold build has no
+  memo hits, so its routine pages are not restart points; the first
+  edit's are.
+  Was: **Every edit scans every page, lean or not** (traced: the root of
   both). A word edit in the middle of big makes the scan feed all 1850
   items from piece 0 and fire all 48 output routines (memo hits), in both
   modes. Nothing is skipped: no `advance_match` match, no `resume`, no
@@ -1591,8 +1602,10 @@ First local table (5 repetitions, median ms):
   at the last such page before the first changed piece, and converge at
   the first page after the last changed piece. That makes the scan
   O(changed pages).
-- **B1. With pieces keeping their nodes the same scan costs 15 times
-  more** (traced). 66 ms against 4.5 ms on big, 188 ms against 16 ms on
+- **B1 (fixed, A). With pieces keeping their nodes the same scan costs 15 times
+  more** (traced). Fixed: `changed_at` looks up each name's last reader
+  in a per-run table made at the first fire in the run (`Run::last_readers`,
+  `State::last_readers`), not a walk over the later nodes' reads. 66 ms against 4.5 ms on big, 188 ms against 16 ms on
   bigout, for the same items fed and the same 152 memo hits. On bigout,
   `install_fold_defs` takes 89 ms (lean: 2 ms), the retraction of the
   predicted definitions inside `fire` about 93 ms, `find_memo` 6.5 ms.

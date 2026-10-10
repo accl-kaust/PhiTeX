@@ -1828,6 +1828,19 @@ impl Run {
         }
     }
 
+    /// Each name its nodes read (from the piece or from before it) and the
+    /// last node reading it: [`Run::reads_after`] as a lookup, for a run
+    /// with its nodes (made once per run by whoever asks often).
+    pub fn last_readers(&self) -> FxMap<Key, u32> {
+        let mut m: FxMap<Key, u32> = FxMap::default();
+        for (j, n) in self.chain.nodes.range(0, self.chain.nodes.len()).enumerate() {
+            for r in n.reads.iter() {
+                m.insert(r.key.clone(), j as u32);
+            }
+        }
+        m
+    }
+
     /// Whether a node after node `i` may read `key` (from the piece or
     /// from before it): of a lean run, whether the piece reads it from
     /// before it or defines it at all.
