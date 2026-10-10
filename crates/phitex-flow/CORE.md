@@ -6,6 +6,22 @@
 
 Pure, link them: partex-kpse (kpathsea: texmf.cnf, ls-R, path search; the input finder the CLI gives the build), partex-otf (OpenType faces/shaping/OT math/TECkit; X, and Q for TrueType embedding), partex-xdvipdfmx (XDV→PDF byte for byte; X's backend; its image readers are dvipdfmx's, for the PDF it writes: XeTeX's pictures are measured by XeTeX's own readers, X's xpic.rs copy, not dvipdfmx's, and pdfTeX's by pdfTeX's), phitex-codecs (inflate, md5, png, pdfread, pdftext, zlib crc; yours), partex-bibtex and partex-makeindex (in-process, between fixpoint runs), phi (allowed, unused), phitex-syntax/doc/draw/diff/git (CLI/viewer).
 
+**The file finder is a given of the build, never a node** (agent K).
+`kpse::Kpathsea` is `tfm::Kpse` over partex-kpse: kpathsea's own lookup
+(texmf.cnf, the `ls-R` databases, `kpse_find_file(name, format, false)`
+as the program `Build::set_kpse` names: `kpsewhich -progname=PROG
+-format=FORMAT NAME` is its oracle, `tests/kpse.rs`), each `KpseFormat`
+kpathsea's of the same name. The CLI makes one per engine and tree
+(`tex::Tree`; a format's build one that never searches `.`) and gives it
+to every build: `\input`/`\openin` names (format `tex`, after the input
+directories: web2c's `-output-directory`), TFM files (`tfm`) and PDF
+output's files (`map`, `type1 fonts`, `enc files`… by extension) are
+database lookups, and no build walks TeX Live's tree (`tfm::Index`
+remains for builds given no finder: the tests' directories, `--font-dir`).
+What a lookup finds changes nothing about reads: the path's bytes are the
+`Key::File` read exactly as before (a font's, a PDF file's, as the build's
+`Env::font_file` and the fold's `Files`), so the graph keeps its shape.
+
 Never link, deleted: partex-core, partex-engine, partex-incr, partex-ssa, partex-trace, phitex-ir, partex-cli; copy pure bodies only, naming the source file in the commit.
 
 ## The command set
@@ -959,9 +975,10 @@ install, then `reads_still`, which dropped a refuted file read's mark).
   the output routine's lists carry no origins (their items lead to the
   node that made the whole); TeXXeT's reversed lines are approximate.
 - **Files by kpathsea** (`tfm::Kpse`, X's shape; `Build::set_kpse(kpse,
-  prog)`): a given of the build — a name becomes a path by kpathsea's
-  lookup (format `tex`, the program's name) instead of the input
-  directories; reads stay `Key::File`.
+  prog)`, `kpse::Kpathsea`): a given of the build — a name becomes a path
+  by kpathsea's lookup (format `tex` after the input directories, `tfm`
+  for fonts, the PDF files' formats; the program's name); reads stay
+  `Key::File` (see "Crates").
 
 ## `\input` (decided)
 

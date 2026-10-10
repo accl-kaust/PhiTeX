@@ -7,6 +7,9 @@
 /// The dependencies allowed (every section: normal, dev, build, target).
 const ALLOWED: &[&str] = &[
     "phi",
+    // (kpathsea, user-approved pure library: texmf.cnf, ls-R and the path
+    // search; the file finder a build is given, `kpse::Kpathsea`)
+    "partex-kpse",
     // (the CLI's global allocator, an optional feature: no TeX in it)
     "tikv-jemallocator",
 ];
@@ -45,7 +48,7 @@ fn depends_on_the_listed_crates_only() {
     let deps = dependencies(&toml);
     assert!(deps.iter().any(|(n, _)| n == "phi"), "phi is a dependency");
     for (name, l) in &deps {
-        assert!(!name.starts_with("partex"), "no partex crate: {l}");
+        assert!(!name.starts_with("partex") || ALLOWED.contains(&name.as_str()), "no partex crate: {l}");
         assert!(ALLOWED.contains(&name.as_str()), "phitex-flow may depend on {ALLOWED:?} only: {l}");
     }
 }
