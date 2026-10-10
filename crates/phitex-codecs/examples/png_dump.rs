@@ -1,4 +1,4 @@
-//! What `partex_engine::png` reads of PNG files, printed as the libpng
+//! What `phitex_codecs::png` reads of PNG files, printed as the libpng
 //! harness (`scripts/png-check/harness.c`) prints what libpng reads, for
 //! comparing the two:
 //!
@@ -12,7 +12,7 @@
 
 use std::fmt::Write as _;
 
-use partex_engine::png::{self, Info, Transforms};
+use phitex_codecs::png::{self, Info, Transforms};
 
 fn main() {
     let mut hex = false;

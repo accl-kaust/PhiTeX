@@ -352,7 +352,7 @@ impl Dpx {
         for s in [producer, dviname, pdfname].into_iter().flatten() {
             data.extend_from_slice(s);
         }
-        partex_engine::md5::md5(&data)
+        phitex_codecs::md5::md5(&data)
     }
     /// The `PRODUCER` string (`"%s-%s, Copyright ..."`).
     #[must_use]

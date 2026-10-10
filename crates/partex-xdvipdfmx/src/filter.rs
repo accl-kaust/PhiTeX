@@ -323,11 +323,11 @@ pub fn decode_predictor(src: &[u8], parms: &DecodeParms) -> Option<Vec<u8>> {
 /// `filter_stream_decode_FlateDecode`.
 #[must_use]
 pub fn decode_flate(data: &[u8], parms: Option<&DecodeParms>) -> Option<Vec<u8>> {
-    let raw = partex_engine::inflate::inflate(data).or_else(|| {
+    let raw = phitex_codecs::inflate::inflate(data).or_else(|| {
         // (zlib's inflate stops quietly at a truncated stream)
         let body = data.get(2..)?;
         let mut out = Vec::new();
-        partex_engine::inflate::inflate_raw(body, &mut out);
+        phitex_codecs::inflate::inflate_raw(body, &mut out);
         Some(out)
     })?;
     match parms {

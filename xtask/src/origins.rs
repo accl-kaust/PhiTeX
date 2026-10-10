@@ -2,7 +2,7 @@
 //! `<job>.origins.jsonl` against its PDF and its sources.
 //!
 //! - Each page has as many glyphs as its content stream shows character
-//!   codes, counted as `partex_engine::pdftext` counts them (the order
+//!   codes, counted as `phitex_codecs::pdftext` counts them (the order
 //!   origins are defined in): each code a `Tj`, `TJ`, `'` or `"` shows,
 //!   a form's at each `Do` that draws it, again at each use.
 //! - A glyph with no source has `file` `u32::MAX`, `start` and `end` 0,
@@ -16,8 +16,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, ensure};
-use partex_engine::pdfread::Doc;
-use partex_engine::pdftext;
+use phitex_codecs::pdfread::Doc;
+use phitex_codecs::pdftext;
 
 /// A side file: the files by id, and each page's glyphs, `[file, start,
 /// end, synthesized]`.

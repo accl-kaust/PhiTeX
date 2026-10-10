@@ -717,9 +717,9 @@ mod font_tests {
             }
             let font = std::fs::read(path).unwrap();
             let font_md5 = FONT_MD5.iter().find(|f| f.0 == path).unwrap().1;
-            if hex(&partex_engine::md5::md5(&font)) == font_md5 {
+            if hex(&phitex_codecs::md5::md5(&font)) == font_md5 {
                 if let Some(&(_, want)) = C_MD5.iter().find(|c| c.0 == name) {
-                    assert_eq!(hex(&partex_engine::md5::md5(&bytes)), want, "{name}");
+                    assert_eq!(hex(&phitex_codecs::md5::md5(&bytes)), want, "{name}");
                 }
             }
         }

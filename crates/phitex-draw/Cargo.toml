@@ -7,7 +7,7 @@ publish = false
 description = "What a page viewer draws: a PDF page's draw list (v2) and its glyphs' places, as the PhiTeX viewer consumes them"
 
 [dependencies]
-partex-engine = { path = "../partex-engine" }
+phitex-codecs = { path = "../phitex-codecs" }
 partex-xdvipdfmx = { path = "../partex-xdvipdfmx" }
 # (images re-encoded as PNGs: pure Rust, builds for wasm)
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
