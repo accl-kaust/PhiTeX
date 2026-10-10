@@ -1,5 +1,13 @@
 # CORE: the command set of TeX on the graph
 
+## Crates
+
+Pure, link them: partex-kpse (kpathsea: texmf.cnf, ls-R, path search; the input finder the CLI gives the build), partex-otf (OpenType faces/shaping/OT math/TECkit; X, and Q for TrueType embedding), partex-xdvipdfmx (XDV→PDF byte for byte; X's backend; dvipdfmx's image readers, not pdfTeX's), phitex-codecs (inflate, md5, png, pdfread, pdftext, zlib crc; yours), partex-bibtex and partex-makeindex (in-process, between fixpoint runs), phi (allowed, unused), phitex-syntax/doc/draw/diff/git (CLI/viewer).
+
+Never link, deleted: partex-core, partex-engine, partex-incr, partex-ssa, partex-trace, phitex-ir, partex-cli; copy pure bodies only, naming the source file in the commit.
+
+## The command set
+
 Every TeX82 primitive (325: partex-core's `init_prim_tex`, less encTeX's 14),
 classified by what it is on the graph (AGENTS_BRIEF.md): **(i)** an
 expandable primitive or input rewriting — a *step* inside a node, which
