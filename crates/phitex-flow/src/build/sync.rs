@@ -358,6 +358,9 @@ impl<'a> Walk<'a> {
             let width = match it {
                 Item::Char(f, c) => Some(f.glyph(i32::from(*c)).map_or(0, |g| g.width)),
                 Item::Lig(l) => Some(l.font.glyph(i32::from(l.c)).map_or(0, |g| g.width)),
+                // (XeTeX: a native word or a glyph, a run of characters)
+                Item::Native(n) => Some(n.w),
+                Item::Glyph(g) => Some(g.w),
                 _ => None,
             };
             if let Some(wd) = width {
@@ -412,6 +415,8 @@ impl<'a> Walk<'a> {
                     let rule_wd = glue.set(this, &l.g);
                     self.hleaders(this, ctx, i, l, rule_wd, base_line, left_edge);
                 }
+                // (XeTeX's pictures: passed, as xetex.web's `hlist_out`)
+                Item::Pic(p) => self.h += p.w,
                 _ => {}
             }
         }
@@ -497,6 +502,9 @@ impl<'a> Walk<'a> {
                     self.vleaders(this, ctx, i, l, rule_ht, left_edge, top_edge);
                 }
                 Item::Kern { w, .. } => self.v += *w,
+                // (XeTeX's glyphs and pictures in a vertical list: their
+                // height and depth, as xetex.web's `vlist_out`)
+                Item::Glyph(_) | Item::Pic(_) => self.v += it.xdims().map_or(0, |(_, h, d)| h + d),
                 _ => {}
             }
         }
