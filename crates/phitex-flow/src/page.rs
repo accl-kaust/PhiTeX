@@ -412,6 +412,10 @@ const EMPTY: u8 = 0;
 const BOX_THERE: u8 = 2;
 const DEPLORABLE: i32 = 100_000;
 
+/// A restart point of the scan: the page's number, where it is, and the
+/// fancy fold's state there ([`Scan::just`]).
+pub type Restart = (u32, (Org, i32), Option<Arc<FoldState>>);
+
 /// The page builder's fold.
 #[derive(Default)]
 pub struct Scan {
@@ -465,7 +469,7 @@ pub struct Scan {
     /// Restart points found for pages already taken (`(page, point)`).
     pub late: Vec<(u32, (Org, i32))>,
     /// The last restart point found, with its page's number.
-    pub just: Option<(u32, (Org, i32), Option<Arc<FoldState>>)>,
+    pub just: Option<Restart>,
     /// The first mark pushed takes this as its first page (a fold resumed
     /// inside a call: the call's pages before the resumption are kept).
     first_from: Option<u32>,
