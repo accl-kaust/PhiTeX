@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use phitex_flow::build::CsTable;
 use phitex_flow::dvi;
 use phitex_flow::graph::output::{OutputEnd, OutputReads, fire_marks, output_end, output_entry, run_routine};
 use phitex_flow::graph::{Env, Run, Src, cut, run_piece};
@@ -98,13 +99,18 @@ fn masked(dvi: &[u8]) -> Vec<u8> {
 struct Names {
     defs: HashMap<Key, Val>,
     fonts: FontFiles,
+    cs: Arc<CsTable>,
 }
 
 impl Env for Names {
+    fn cs(&self) -> &Arc<CsTable> {
+        &self.cs
+    }
+
     fn reach(&mut self, key: &Key, _node: u32) -> (Val, Src, u32, u32) {
         match self.defs.get(key) {
             Some(v) => (v.clone(), Src::Piece(0), 0, u32::MAX),
-            None => (initial(key, &null_font(), false), Src::Initial, 0, u32::MAX),
+            None => (initial(key, &null_font(), false, Some(&self.cs)), Src::Initial, 0, u32::MAX),
         }
     }
 
@@ -131,7 +137,7 @@ impl FoldEnv for DocFold<'_> {
         if *key == Key::TokPar(TokPar::Output) {
             return Val::Toks(Arc::new(Vec::new()));
         }
-        self.0.defs.get(key).cloned().unwrap_or_else(|| initial(key, &null_font(), true))
+        self.0.defs.get(key).cloned().unwrap_or_else(|| initial(key, &null_font(), true, Some(&self.0.cs)))
     }
     fn fire(&mut self, _defs: Vec<(Key, Val)>, _routine: Option<Routine>) -> Fired {
         Fired::default()
@@ -139,7 +145,8 @@ impl FoldEnv for DocFold<'_> {
 }
 
 fn run_doc(src: &str) -> Doc {
-    let mut names = Names { defs: HashMap::new(), fonts: FontFiles::new(Vec::new(), default_dirs()) };
+    let mut names =
+        Names { defs: HashMap::new(), fonts: FontFiles::new(Vec::new(), default_dirs()), cs: Arc::new(CsTable::new()) };
     let mut scan = Scan::default();
     let mut fonts = Vec::new();
     let pieces = cut(src);

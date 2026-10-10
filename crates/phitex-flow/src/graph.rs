@@ -65,6 +65,9 @@ pub type PieceId = u32;
 
 /// Where a piece's reads of names from before it are answered.
 pub trait Env {
+    /// The build's control sequence names (`Tok::Cs` numbers).
+    fn cs(&self) -> &Arc<crate::build::CsTable>;
+
     /// The definition of `key` reaching node `node` of this piece from
     /// before the piece (or from an element between its nodes), where it
     /// was made, and the nodes it reaches, `lo..hi` (`0..u32::MAX`: all of
@@ -2436,10 +2439,15 @@ struct Scratch {
     /// The node's reads of `\catcode` and `\sfcode` of characters below
     /// 256, by index, while their stamp is the node's.
     chars: Vec<(u32, u32)>,
-    /// The node's reads of names, by index, while their stamp is the
-    /// node's: a slot per name, by where its spelling is (the read at the
-    /// index holds that spelling: it is the name).
-    names_at: Vec<(u32, u32)>,
+    /// Per control sequence (by its number): the node's read of it, by
+    /// index, while its stamp is the node's; and the read the piece keeps
+    /// of it ([`Known`]).
+    cs: Vec<CsAt>,
+    /// The kept reads are those of this epoch (a new one: none kept).
+    known_epoch: u32,
+    known_len: Option<usize>,
+    /// The numbers of the names the piece spelled.
+    cs_ids: FxMap<Box<str>, u32>,
     stamp: u32,
     /// The node's reads and what it emitted (their capacity kept).
     reads: Vec<ReadRef>,
@@ -2456,23 +2464,26 @@ struct Scratch {
     /// TeX's shared zero glue, which `\showbox` and the short display
     /// tell apart).
     glue_shared: bool,
-    /// The names the piece has read (by where their spelling is, each
-    /// held), with the read: the definition reaching the next node while
-    /// no node after it defines the name ([`Known`]); and where each
-    /// spelling is, by name. Kept from node to node (as the nodes the
-    /// chain gained since are looked at: `known_len`).
-    known: FxMap<usize, Known>,
-    known_by_name: FxMap<Arc<str>, Vec<usize>>,
-    known_len: Option<usize>,
     /// The last read of each name made in the piece (from a node of it):
     /// a node reading the same definition, seen the same, shares it (a
     /// read is a value: equal fields, the same read).
     inside: FxMap<Key, ReadRef>,
 }
 
-/// A name's read, as [`Scratch::known`] keeps it.
+/// A control sequence's entry in [`Scratch::cs`].
+#[derive(Clone, Default)]
+struct CsAt {
+    stamp: u32,
+    idx: u32,
+    known: Option<Known>,
+}
+
+/// A name's read as the piece keeps it: the definition reaching the next
+/// node while no node after it defines the name (kept from node to node
+/// as the nodes the chain gained since are looked at: `known_len`).
+#[derive(Clone)]
 struct Known {
-    name: Arc<str>,
+    epoch: u32,
     read: ReadRef,
     /// It holds for the nodes before this one (a definition from before
     /// the piece reaching a range of its nodes).
@@ -2558,32 +2569,17 @@ const FEW_READS: usize = 12;
 
 /// Whether `t` is `\par` (by name: tex.web 392's `par_token`).
 fn is_par(t: &Tok) -> bool {
-    matches!(t, Tok::Cs(n) if &**n == "par")
-}
-
-/// The slots of [`Scratch::names_at`].
-const NAME_SLOTS: usize = 256;
-
-/// Name `n`'s slot: by where its spelling is (the names a piece reads are
-/// shared, one spelling each).
-fn name_slot(n: &Arc<str>) -> usize {
-    let a = name_addr(n);
-    ((a >> 4) ^ (a >> 12)) & (NAME_SLOTS - 1)
-}
-
-/// Where name `n`'s spelling is.
-fn name_addr(n: &Arc<str>) -> usize {
-    Arc::as_ptr(n).cast::<u8>().addr()
+    matches!(t, Tok::Cs(crate::build::CS_PAR))
 }
 
 /// The nodes a run makes before it keeps the names it read
 /// ([`Scratch::known`]).
 const KNOWN_AFTER: usize = 256;
 
-/// [`Scratch::known`] for the next node of `chain`: the names the nodes
-/// added since defined are read again; all of them, if the chain is not
-/// the one it was kept for, or if anything between the piece's nodes may
-/// define a name.
+/// [`Known`] for the next node of `chain`: the names the nodes added since
+/// defined are read again; all of them, if the chain is not the one they
+/// were kept for, or if anything between the piece's nodes may define a
+/// name.
 fn known_since(scratch: &mut Scratch, chain: &Chain, env: &mut dyn Env) {
     let len = chain.nodes.len();
     // (a short run reads few names twice: none kept)
@@ -2595,12 +2591,10 @@ fn known_since(scratch: &mut Scratch, chain: &Chain, env: &mut dyn Env) {
         Some(prev) if prev <= len && !between => {
             for i in prev..len {
                 for d in chain.nodes[i].defs() {
-                    if let Key::Cs(n) = &d.key
-                        && let Some(v) = scratch.known_by_name.remove(n)
+                    if let Key::Cs(n) = d.key
+                        && let Some(e) = scratch.cs.get_mut(n as usize)
                     {
-                        for a in v {
-                            scratch.known.remove(&a);
-                        }
+                        e.known = None;
                     }
                 }
             }
@@ -2609,8 +2603,7 @@ fn known_since(scratch: &mut Scratch, chain: &Chain, env: &mut dyn Env) {
         _ => false,
     };
     if !keep {
-        scratch.known.clear();
-        scratch.known_by_name.clear();
+        scratch.known_epoch = scratch.known_epoch.wrapping_add(1);
     }
     scratch.known_len = (len >= KNOWN_AFTER && !between).then_some(len);
 }
@@ -2636,12 +2629,13 @@ impl<'a> Exec<'a> {
         known_since(scratch, chain, env);
         if scratch.chars.is_empty() {
             scratch.chars = vec![(0, 0); 512];
-            scratch.names_at = vec![(0, 0); NAME_SLOTS];
         }
         scratch.stamp = scratch.stamp.wrapping_add(1);
         if scratch.stamp == 0 {
             scratch.chars.fill((0, 0));
-            scratch.names_at.fill((0, 0));
+            for e in &mut scratch.cs {
+                e.stamp = 0;
+            }
             scratch.stamp = 1;
         }
         let stamp = scratch.stamp;
@@ -2808,9 +2802,7 @@ impl<'a> Exec<'a> {
     /// Where the definition of `key` reaching this node is: its own, or
     /// one of its reads (read now if it was not).
     fn find(&mut self, key: &Key) -> Found {
-        if let Key::Cs(n) = key
-            && self.defs.is_empty()
-        {
+        if let Key::Cs(n) = *key {
             return self.find_name(n, key);
         }
         // (a character's code, read again in the node: by the character)
@@ -2836,36 +2828,59 @@ impl<'a> Exec<'a> {
         f
     }
 
-    /// [`Exec::find`] of a name (the node defining nothing yet): read
-    /// again in the node, by its slot ([`Scratch::names_at`]).
-    fn find_name(&mut self, n: &Arc<str>, key: &Key) -> Found {
-        let s = name_slot(n);
-        if let Some(i) = self.name_read(s, n) {
+    /// [`Exec::find`] of control sequence `n`: its own definition, its
+    /// read in the node (by its number, [`Scratch::cs`]), else read now.
+    fn find_name(&mut self, n: u32, key: &Key) -> Found {
+        if !self.defs.is_empty()
+            && let Some(i) = self.defs.iter().rposition(|d| d.key == *key)
+        {
+            return Found::Own(i);
+        }
+        if let Some(i) = self.name_read(n) {
+            // (read whole after its outer-ness alone: the read is now whole)
             self.whole(i);
             return Found::Read(i);
         }
-        let f = self.find_slow(key, Field::Whole);
-        if let Found::Read(i) = f {
-            self.whole(i);
-            if matches!(&self.reads[i].key, Key::Cs(m) if Arc::ptr_eq(m, n)) {
-                self.scratch.names_at[s] = (self.stamp, i as u32);
+        let r = self.resolve_shared(key);
+        Found::Read(self.push_read(r))
+    }
+
+    /// The node's read of control sequence `n`, if it read it.
+    fn name_read(&self, n: u32) -> Option<usize> {
+        let e = self.scratch.cs.get(n as usize)?;
+        (e.stamp == self.stamp).then_some(e.idx as usize)
+    }
+
+    /// Control sequence `n`'s entry in [`Scratch::cs`].
+    fn cs_at(&mut self, n: u32) -> &mut CsAt {
+        let i = n as usize;
+        if i >= self.scratch.cs.len() {
+            self.scratch.cs.resize(i + 1, CsAt::default());
+        }
+        &mut self.scratch.cs[i]
+    }
+
+    /// A read of the node, its index (the first of a name is the node's
+    /// read of it, [`Exec::name_read`]).
+    fn push_read(&mut self, r: ReadRef) -> usize {
+        let i = self.reads.len();
+        if let Key::Cs(n) = r.key {
+            let stamp = self.stamp;
+            let e = self.cs_at(n);
+            if e.stamp != stamp {
+                e.stamp = stamp;
+                e.idx = i as u32;
             }
         }
-        f
+        self.reads.push(r);
+        i
     }
 
-    /// The node's read of name `n` by its slot `s`, if it is there.
-    fn name_read(&self, s: usize, n: &Arc<str>) -> Option<usize> {
-        let (stamp, i) = self.scratch.names_at[s];
-        let i = i as usize;
-        (stamp == self.stamp && matches!(&self.reads.get(i)?.key, Key::Cs(m) if Arc::ptr_eq(m, n))).then_some(i)
-    }
-
-    /// The meaning of name `n` (as [`Exec::meaning`] of `Key::Cs(n)`), the
-    /// key made only if it was not read in the node yet.
-    fn name_meaning(&mut self, n: &Arc<str>) -> Meaning {
+    /// The meaning of control sequence `n` (as [`Exec::meaning`] of
+    /// `Key::Cs(n)`).
+    fn name_meaning(&mut self, n: u32) -> Meaning {
         if self.defs.is_empty()
-            && let Some(i) = self.name_read(name_slot(n), n)
+            && let Some(i) = self.name_read(n)
         {
             self.whole(i);
             return match &self.reads[i].val {
@@ -2873,7 +2888,23 @@ impl<'a> Exec<'a> {
                 _ => Meaning::Undefined,
             };
         }
-        self.meaning(&Key::Cs(n.clone()))
+        self.meaning(&Key::Cs(n))
+    }
+
+    /// `x` as text (control sequences by their names).
+    fn shown<'s, T>(&'s self, x: &'s T) -> crate::val::Shown<'s, T> {
+        crate::val::Shown(x, self.env.cs())
+    }
+
+    /// The number of control sequence `name` (the piece's own table
+    /// first).
+    fn cs_of(&mut self, name: &str) -> u32 {
+        if let Some(&n) = self.scratch.cs_ids.get(name) {
+            return n;
+        }
+        let n = self.env.cs().id(name);
+        self.scratch.cs_ids.insert(name.into(), n);
+        n
     }
 
     /// The node's read `i`, read whole from now on (it may have read only
@@ -2920,21 +2951,21 @@ impl<'a> Exec<'a> {
         if field != Field::Whole {
             r = Arc::new(Read { field, ..(*r).clone() });
         }
-        self.reads.push(r);
-        Found::Read(self.reads.len() - 1)
+        Found::Read(self.push_read(r))
     }
 
     /// [`resolve_now`], the read shared with an earlier node's equal one
-    /// ([`Scratch::inside`]).
+    /// ([`Scratch::inside`], [`Known`]).
     fn resolve_shared(&mut self, key: &Key) -> ReadRef {
         let chain = self.chain;
-        let n = match key {
+        let n = match *key {
             Key::Cs(n) if self.scratch.known_len.is_some() => Some(n),
             _ => None,
         };
+        let epoch = self.scratch.known_epoch;
         if let Some(n) = n
-            && let Some(k) = self.scratch.known.get(&name_addr(n))
-            && Arc::ptr_eq(&k.name, n)
+            && let Some(k) = self.scratch.cs.get(n as usize).and_then(|e| e.known.as_ref())
+            && k.epoch == epoch
             && (chain.nodes.len() as u32) < k.hi
             && (k.read.scope.is_none() || k.scopes == chain.scopes.len())
         {
@@ -2948,11 +2979,8 @@ impl<'a> Exec<'a> {
                 Src::Node(_) => u32::MAX,
                 _ => self.outside.get(key).map_or(0, |(_, _, hi)| *hi),
             };
-            let a = name_addr(n);
-            let k = Known { name: n.clone(), read: r.clone(), hi, scopes: chain.scopes.len() };
-            if self.scratch.known.insert(a, k).is_none() {
-                self.scratch.known_by_name.entry(n.clone()).or_default().push(a);
-            }
+            let scopes = chain.scopes.len();
+            self.cs_at(n).known = Some(Known { epoch, read: r.clone(), hi, scopes });
         }
         r
     }
@@ -3057,13 +3085,13 @@ impl<'a> Exec<'a> {
     fn tok_meaning(&mut self, t: &Tok) -> Meaning {
         match t {
             Tok::Char(c, x) => Meaning::Char(*c, *x),
-            Tok::Cs(n) => self.name_meaning(n),
+            Tok::Cs(n) => self.name_meaning(*n),
             _ => t.key().map_or(Meaning::Undefined, |k| self.meaning(&k)),
         }
     }
 
     fn cs(&mut self, name: &str) -> Tok {
-        Tok::Cs(intern(&mut self.scratch.names, name))
+        Tok::Cs(self.cs_of(name))
     }
 
     /// Sets the node's kind from a conditional's step, unless its command
@@ -3269,10 +3297,11 @@ impl<'a> Exec<'a> {
         if !from_read {
             self.back(t);
         }
-        let of = self.warning.as_ref().map_or_else(String::new, |w| format!(" of {w}"));
+        let of = self.warning.as_ref().map_or_else(String::new, |w| format!(" of {}", self.shown(w)));
         match self.scanning {
             Scanning::Skipping => {
-                self.back(Tok::Cs("\u{0}fi".into()));
+                let t = self.cs("\u{0}fi");
+                self.back(t);
                 self.err("Incomplete \\if; all text was ignored after the test".into());
             }
             s => {
@@ -3284,12 +3313,13 @@ impl<'a> Exec<'a> {
                 };
                 match s {
                     Scanning::Matching => {
-                        self.back(Tok::Cs("par".into()));
+                        self.back(Tok::Cs(crate::build::CS_PAR));
                         self.outer_abort = true;
                     }
                     Scanning::Aligning => {
                         self.back(Tok::Char(2, '}'));
-                        self.back(Tok::Cs("\u{0}cr".into()));
+                        let t = self.cs("\u{0}cr");
+                        self.back(t);
                         self.st.al.state = -align::ALIGN_BASE;
                     }
                     _ => self.back(Tok::Char(2, '}')),
@@ -3435,7 +3465,9 @@ impl<'a> Exec<'a> {
                             q = q3;
                         }
                         self.st.tstate = TState::S;
-                        let t = Tok::Cs(intern(&mut self.scratch.names, &self.scratch.buf));
+                        let buf = std::mem::take(&mut self.scratch.buf);
+                        let t = Tok::Cs(self.cs_of(&buf));
+                        self.scratch.buf = buf;
                         self.advance(q);
                         return Some(t);
                     }
@@ -3550,7 +3582,7 @@ impl<'a> Exec<'a> {
                 match self.next_raw() {
                     Some(x) if x == p[i] => {}
                     other => {
-                        self.err(format!("Use of {name} doesn't match its definition"));
+                        self.err(format!("Use of {} doesn't match its definition", self.shown(name)));
                         if let Some(x) = other {
                             self.back(x);
                         }
@@ -3720,7 +3752,7 @@ impl<'a> Exec<'a> {
             return true;
         }
         if !long && par {
-            self.err(format!("Paragraph ended before {name} was complete"));
+            self.err(format!("Paragraph ended before {} was complete", self.shown(name)));
             self.back(t.clone());
             return true;
         }
@@ -3900,7 +3932,7 @@ impl<'a> Exec<'a> {
             Meaning::Char(cat, c) => self.char_tok(cat, c, &t),
             Meaning::CharGiven(c) => self.char_cmd(c, &t),
             Meaning::MathCharGiven(_) => self.insert_dollar_sign(&t),
-            Meaning::Undefined => self.err(format!("Undefined control sequence {t}")),
+            Meaning::Undefined => self.err(format!("Undefined control sequence {}", self.shown(&t))),
             Meaning::Macro(_)
             | Meaning::CountRef(_)
             | Meaning::DimenRef(_)

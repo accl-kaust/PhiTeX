@@ -66,7 +66,7 @@ pub struct NoEnv;
 
 impl FoldEnv for NoEnv {
     fn read(&mut self, key: &Key) -> Val {
-        crate::val::initial(key, &crate::tfm::null_font(), true)
+        crate::val::initial(key, &crate::tfm::null_font(), true, None)
     }
     fn fire(&mut self, _defs: Vec<(Key, Val)>, _routine: Option<Routine>) -> Fired {
         Fired::default()

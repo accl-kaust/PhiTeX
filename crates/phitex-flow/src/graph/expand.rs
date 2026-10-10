@@ -95,7 +95,7 @@ impl Exec<'_> {
     pub(super) fn expand(&mut self, t: &Tok, m: &Meaning) {
         match m {
             Meaning::Macro(mac) => self.call(t, mac),
-            Meaning::Undefined => self.err(format!("Undefined control sequence {t}")),
+            Meaning::Undefined => self.err(format!("Undefined control sequence {}", self.shown(t))),
             Meaning::Prim(p) => match *p {
                 Prim::If(_) | Prim::Fi | Prim::Else | Prim::Or | Prim::Unless => self.conditional(*p, t),
                 Prim::ExpandAfter => self.expandafter(),
@@ -118,7 +118,8 @@ impl Exec<'_> {
                 Prim::Input if self.name_in_progress => {
                     // (tex.web 378: `insert_relax`)
                     self.back(t.clone());
-                    self.back(Tok::Cs("\u{0}relax".into()));
+                    let t = self.cs("\u{0}relax");
+                    self.back(t);
                 }
                 Prim::Input => self.input_file(),
                 Prim::EndInput => self.end_input(),
@@ -242,7 +243,7 @@ impl Exec<'_> {
                 if let Some(t) = self.next_raw_normal() {
                     match &t {
                         Tok::Char(_, c) | Tok::Active(c) => s.push(*c),
-                        Tok::Cs(n) => self.sprint_cs(&mut s, n),
+                        Tok::Cs(n) => self.sprint_cs(&mut s, &self.env.cs().name(*n)),
                         Tok::Param(..) | Tok::DontExpand => {}
                     }
                 }
@@ -396,7 +397,7 @@ impl Exec<'_> {
     fn show_toks_m(&mut self, out: &mut String, toks: &[Tok], match_chr: &mut char, in_params: bool) {
         for t in toks {
             match t {
-                Tok::Cs(n) => self.print_cs(out, n),
+                Tok::Cs(n) => self.print_cs(out, &self.env.cs().name(*n)),
                 Tok::Char(6, c) => {
                     out.push(*c);
                     out.push(*c);
@@ -493,7 +494,7 @@ impl Exec<'_> {
                 match self.tok_meaning(&u) {
                     Meaning::Prim(Prim::If(k)) if k != IfKind::Case && !self.noexp => self.begin_if(k, true),
                     _ => {
-                        self.err(format!("You can't use `\\unless' before `{u}'"));
+                        self.err(format!("You can't use `\\unless' before `{}'", self.shown(&u)));
                         if self.noexp {
                             self.rewrite(vec![Tok::DontExpand, u]);
                         } else {
@@ -685,9 +686,10 @@ impl Exec<'_> {
                 // meaning)
                 let Some(t) = self.next_raw() else { return false };
                 let Tok::Cs(n) = &t else { return false };
+                let n = self.env.cs().name(*n);
                 let etex = self.int(&Key::ETeXMode) != 0;
-                let p = Prim::by_name(n)
-                    .or_else(|| if etex { Prim::by_name_etex(n).or_else(|| Prim::by_name_pdftex(n)) } else { None });
+                let p = Prim::by_name(&n)
+                    .or_else(|| if etex { Prim::by_name_etex(&n).or_else(|| Prim::by_name_pdftex(&n)) } else { None });
                 p.is_some_and(|p| self.tok_meaning(&t) == Meaning::Prim(p))
             }
             IfKind::FontChar => {
@@ -820,7 +822,7 @@ impl Exec<'_> {
             return Vec::new();
         };
         let Some(v) = self.internal(&t, &m, super::scan::Lv::Tok) else {
-            self.err(format!("You can't use `{t}' after \\the"));
+            self.err(format!("You can't use `{}' after \\the", self.shown(&t)));
             return print::str_toks("0");
         };
         let s = match v {

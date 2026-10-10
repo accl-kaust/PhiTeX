@@ -326,6 +326,7 @@ impl Exec<'_> {
             depth: self.int_par(IntPar::Showboxdepth),
             breadth: self.int_par(IntPar::Showboxbreadth),
             newline: self.int_par(IntPar::Newlinechar),
+            cs: self.env.cs().clone(),
             max_print_line: self.env.limits().max_print_line as i32,
         }
     }
@@ -428,7 +429,7 @@ impl Exec<'_> {
             }
             Mat::Vmove(lower) => {
                 if v {
-                    self.err(format!("You can't use `{t}' in vertical mode"));
+                    self.err(format!("You can't use `{}' in vertical mode", self.shown(t)));
                 } else {
                     let d = self.scan_dimen();
                     self.scan_box(BoxContext::Shift(if lower { d } else { -d }));
@@ -439,7 +440,7 @@ impl Exec<'_> {
                     let d = self.scan_dimen();
                     self.scan_box(BoxContext::Shift(if left { -d } else { d }));
                 } else {
-                    self.err(format!("You can't use `{t}' in horizontal mode"));
+                    self.err(format!("You can't use `{}' in horizontal mode", self.shown(t)));
                 }
             }
             Mat::Shipout => self.scan_box(BoxContext::Ship),
@@ -452,7 +453,7 @@ impl Exec<'_> {
             }
             Mat::ItalCorr => {
                 if v {
-                    self.err(format!("You can't use `{t}' in vertical mode"));
+                    self.err(format!("You can't use `{}' in vertical mode", self.shown(t)));
                 } else {
                     self.italic_correction();
                 }
@@ -469,7 +470,7 @@ impl Exec<'_> {
             Mat::Insert => self.begin_insert(false),
             Mat::Vadjust => {
                 if v {
-                    self.err(format!("You can't use `{t}' in vertical mode"));
+                    self.err(format!("You can't use `{}' in vertical mode", self.shown(t)));
                 } else {
                     self.begin_insert(true);
                 }
@@ -1758,7 +1759,7 @@ impl Exec<'_> {
             return;
         }
         if self.st.level > 0 {
-            self.err(format!("You can't use `{t}' in internal vertical mode"));
+            self.err(format!("You can't use `{}' in internal vertical mode", self.shown(&t)));
             return;
         }
         let c = self.page_call();

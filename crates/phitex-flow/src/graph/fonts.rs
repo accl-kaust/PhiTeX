@@ -18,8 +18,10 @@ impl Exec<'_> {
     pub(super) fn new_font(&mut self, global: bool) {
         let Some(key) = self.r_token() else { return };
         let ident: Arc<str> = match &key {
-            Key::Cs(n) if n.is_empty() => Arc::from("FONT"),
-            Key::Cs(n) => n.clone(),
+            Key::Cs(n) => {
+                let s = self.env.cs().name(*n);
+                if s.is_empty() { Arc::from("FONT") } else { s }
+            }
             Key::Active(c) => Arc::from(format!("FONT{c}")),
             _ => Arc::from("FONT"),
         };
@@ -49,7 +51,7 @@ impl Exec<'_> {
             -1000
         };
         let Some(data) = self.env.font_file(&name) else {
-            self.err(format!("Font {}={name} not loadable: Metric (TFM) file not found", key_text(&key)));
+            self.err(format!("Font {}={name} not loadable: Metric (TFM) file not found", key_text(&key, self.env.cs())));
             return;
         };
         // (tex.web 568: the size; a bad file is not loaded)
@@ -59,7 +61,7 @@ impl Exec<'_> {
             s => Font::design_size_of(&data).map(|z| Some(xn_over_d(z, -s, 1000).0)),
         };
         let Some(f) = size.and_then(|at| Font::load(&name, data, at)).ok() else {
-            self.err(format!("Font {}={name} not loadable: Bad metric (TFM) file", key_text(&key)));
+            self.err(format!("Font {}={name} not loadable: Bad metric (TFM) file", key_text(&key, self.env.cs())));
             return;
         };
         let f = Arc::new(f);
@@ -211,7 +213,7 @@ impl Exec<'_> {
     /// meaning is that font unless it was redefined since: CORE.md).
     pub(super) fn font_ident_tok(&mut self, f: &Font) -> Tok {
         let n = self.font_ident(f);
-        Tok::Cs(n)
+        Tok::Cs(self.cs_of(&n))
     }
 
     /// `\textfont n` and friends.
@@ -230,9 +232,9 @@ impl Exec<'_> {
 }
 
 /// How an error names the key a `\font` defines.
-fn key_text(k: &Key) -> String {
+fn key_text(k: &Key, cs: &crate::build::CsTable) -> String {
     match k {
-        Key::Cs(n) => format!("\\{n}"),
+        Key::Cs(n) => format!("\\{}", cs.name(*n)),
         Key::Active(c) => c.to_string(),
         _ => String::new(),
     }
