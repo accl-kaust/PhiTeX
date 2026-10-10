@@ -18,6 +18,7 @@ use super::content::{Event, Glyphs, PageBody};
 use super::font::enc::NOTDEF;
 use super::font::map::{F_INCLUDED, F_PK, F_SUBSETTED, F_TYPE1, Map, MapEntry};
 use super::font::t1::{self, FONT_KEYS, T1Job};
+use super::font::unicode::{self, Uni};
 use super::num::{Out, divide_scaled};
 use super::{Fixed, Ship};
 
@@ -48,6 +49,11 @@ pub struct End {
 /// bytes and the path TeX would show, by name.
 pub trait Files {
     fn get(&mut self, name: &str) -> Option<(Arc<str>, Arc<[u8]>)>;
+    /// `\pdfglyphtounicode`'s entry of a name reaching the end of the job
+    /// (`Key::GlyphUnicode`); the empty name's says whether there is any.
+    fn glyph_unicode(&mut self, _name: &str) -> Option<Uni> {
+        None
+    }
 }
 
 /// The file, and what the fold had to say.
@@ -101,6 +107,8 @@ struct Fd {
     font_dim: [(i32, bool); 11],
     tx_tree: BTreeSet<u8>,
     gl_tree: BTreeSet<Vec<u8>>,
+    /// `builtin_glyph_names` (writet1's, of a subsetted font).
+    builtin: Option<Vec<Vec<u8>>>,
 }
 
 /// A font dictionary (`fo_entry`).
@@ -154,6 +162,8 @@ struct F<'a> {
     fe_tree: BTreeMap<Vec<u8>, Fe>,
     tags: BTreeSet<[u8; 6]>,
     last_arg_other_subr3: i32,
+    /// `fixed_gen_tounicode`.
+    gen_tounicode: i32,
     errors: Vec<String>,
     warnings: Vec<String>,
 }
@@ -525,6 +535,7 @@ impl F<'_> {
             font_dim,
             tx_tree: BTreeSet::new(),
             gl_tree: BTreeSet::new(),
+            builtin: None,
         });
         // (the /Widths array)
         let cw_objnum = self.new_objnum();
@@ -620,6 +631,7 @@ impl F<'_> {
             fd.fontname = fontname;
             fd.font_dim = font_dim;
             fd.subset_tag = t1o.subset_tag;
+            fd.builtin = t1o.builtin;
         }
         let ff_objnum = self.new_objnum();
         self.begin_dict(ff_objnum, 0);
@@ -704,11 +716,26 @@ impl F<'_> {
     }
 
     /// `write_fontdictionary`.
-    fn write_fontdictionary(&mut self, tfm: &[u8], end: &End) {
-        let fo = &self.fo_tree[tfm];
-        if end.gen_tounicode > 0 {
-            self.errors.push("\\pdfgentounicode is not supported yet".into());
+    fn write_fontdictionary(&mut self, tfm: &[u8]) {
+        // (the ToUnicode map first, `write_tounicode`: a fresh object)
+        let mut tounicode = 0;
+        if self.gen_tounicode > 0 {
+            if self.files.glyph_unicode("").is_none() {
+                self.warnings.push("no GlyphToUnicode entry has been inserted yet!".into());
+                self.gen_tounicode = 0;
+            } else {
+                let fo = &self.fo_tree[tfm];
+                let names = match &fo.fe {
+                    Some(e) => self.fe_tree.get(e).map(|x| (x.names.to_vec(), Some(e.clone()))),
+                    None => self.fd_tree[&fo.fd].builtin.clone().map(|n| (n, None)),
+                };
+                match names {
+                    Some((names, enc)) => tounicode = self.write_tounicode(&names, tfm, enc.as_deref()),
+                    None => self.errors.push("builtin glyph names is empty".into()),
+                }
+            }
         }
+        let fo = &self.fo_tree[tfm];
         let fd = &self.fd_tree[&fo.fd];
         let mut o = Out::new();
         o.print_ln(b"/Type /Font");
@@ -724,10 +751,30 @@ impl F<'_> {
         {
             o.indirect_ln(b"Encoding", n);
         }
+        if tounicode != 0 {
+            o.indirect_ln(b"ToUnicode", tounicode);
+        }
         let n = fo.objnum;
         self.begin_dict(n, 1);
         self.print_out(&o);
         self.end_dict();
+    }
+
+    /// `write_tounicode`: the CMap of a font whose codes are glyphs
+    /// `names` (its encoding `enc`'s, or the font's own).
+    fn write_tounicode(&mut self, names: &[Vec<u8>], tfm: &[u8], enc: Option<&[u8]>) -> u32 {
+        let tfm = String::from_utf8_lossy(tfm).into_owned();
+        let enc = enc.map(|e| String::from_utf8_lossy(e).into_owned());
+        let (buf, w) = unicode::cmap_name(&tfm, enc.as_deref());
+        self.warnings.extend(w);
+        let files = &mut *self.files;
+        let data = unicode::cmap(names, &tfm, &buf, &mut |n| files.glyph_unicode(n));
+        let objnum = self.new_objnum();
+        self.begin_dict(objnum, 0);
+        let level = self.compress_level;
+        let z = if level > 0 { super::zlib::compress(&data, level) } else { data };
+        self.stream(&z, level);
+        objnum
     }
 
     // ---- a page (§750–§752, "Finish shipping")
@@ -870,6 +917,7 @@ impl F<'_> {
                 }
             }
         }
+        self.gen_tounicode = end.gen_tounicode;
         let mut k = self.head_tab[OBJ_TYPE_FONT];
         while k != 0 {
             let f = self.objs[k as usize].info as u32;
@@ -886,7 +934,7 @@ impl F<'_> {
         }
         let fos: Vec<_> = self.fo_tree.keys().cloned().collect();
         for t in fos {
-            self.write_fontdictionary(&t, end);
+            self.write_fontdictionary(&t);
         }
         // ("Output pages tree")
         let a = i64::from(self.sys_obj_ptr) + 1;
@@ -1161,6 +1209,7 @@ pub fn assemble(pages: &[Page], bodies: &mut [Arc<PageBody>], numbers: &Numbers,
         fe_tree: BTreeMap::new(),
         tags: BTreeSet::new(),
         last_arg_other_subr3: 0,
+        gen_tounicode: 0,
         errors: Vec::new(),
         warnings: Vec::new(),
     };
