@@ -386,11 +386,12 @@ impl partex_xdvipdfmx::io::Files for Files {
     /// the input in a scratch directory, removed after.
     fn apply_filter(&mut self, template: &[u8], input: &[u8], version: i32) -> Option<Arc<[u8]>> {
         use std::os::unix::ffi::OsStrExt;
-        static SCRATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let data = self.0.read(&String::from_utf8_lossy(input))?;
-        let k = SCRATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("phitex-distill-{}-{k}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok()?;
+        // (a scratch directory no other run has: the first name free)
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = (0..1000u32)
+            .map(|k| std::env::temp_dir().join(format!("phitex-distill-{}-{stamp}-{k}", std::process::id())))
+            .find(|d| std::fs::create_dir(d).is_ok())?;
         let base = input.rsplit(|&b| b == b'/').next().unwrap_or(input);
         let inp = dir.join(std::ffi::OsStr::from_bytes(base));
         let out = dir.join("distilled.pdf");
