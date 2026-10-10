@@ -938,7 +938,8 @@ install, then `reads_still`, which dropped a refuted file read's mark).
   (`Key::LineBase`): then it runs again (`run_piece`'s `line_ok`).
   `tests/fuzz/fixed/f8-kept-node-line-in-piece.repro`; F's F9 (story,
   a line removed, the log's line numbers) is the same finding, made on a
-  branch without this fix: `tests/fuzz/fixed/f9-kept-node-line-in-piece.repro`.
+  branch without this fix (`tests/fuzz/log-only/`, F's: the fuzz compares
+  the DVI and written files).
 - **Which node made an item** (`item::Origins`): a side table per list,
   not per item — runs of item indices with the distance back from the
   node that made the list (the paragraph's `\par` node: `Para::origins`;

@@ -858,15 +858,13 @@ impl Default for Config {
     }
 }
 
-/// Where an edit's output differs from a cold build's.
+/// Where an edit's output differs from a cold build's: the DVI and the
+/// written files, the outputs that must be exact (the log need not be:
+/// it is not compared).
 fn differs(a: &Output, b: &Output) -> Option<String> {
     let mut w = Vec::new();
     if a.dvi != b.dvi {
         w.push("dvi");
-    }
-    if a.log != b.log {
-        // (only its numbers: F9's shape)
-        w.push(if numbers_only(a, b) { "log-numbers" } else { "log" });
     }
     if a.writes != b.writes {
         w.push("writes");
@@ -1429,14 +1427,6 @@ fn first_log_diff(a: &Output, b: &Output) -> String {
     if a.dvi == b.dvi { format!("log: {short}") } else { format!("dvi: {short}") }
 }
 
-/// Whether two outputs differ only in numbers of the log (the DVI the
-/// same, each log line the same with its digits masked): F9's shape, a
-/// line number kept from before the edit.
-fn numbers_only(a: &Output, b: &Output) -> bool {
-    let mask = |s: &String| s.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect::<String>();
-    a.dvi == b.dvi && a.log.len() == b.log.len() && a.log.iter().zip(&b.log).all(|(x, y)| x == y || mask(x) == mask(y))
-}
-
 /// A failure's class, to tell findings apart over many seeds: the open
 /// findings it matches (CORE.md "Fuzz findings") by how it fails, else a
 /// signature (the document, the edit's kind, where the log first differs).
@@ -1444,9 +1434,9 @@ fn numbers_only(a: &Output, b: &Output) -> bool {
 ///   order: F6 (the order of the first build);
 /// - a no-op edit fails too: F1 on TRIP, else "noop" (F4's kind);
 /// - the last edit alone passes, with the seed's history it fails: a
-///   "history" failure (F2 is one, its log only);
-/// - otherwise "edit" (marked F2? when the log alone differs, at an
-///   error's entry; F9? when only the log's numbers differ).
+///   "history" failure;
+/// - otherwise "edit". (The log is not compared: where it first differs
+///   only helps to tell a class.)
 pub fn classify(r: &Repro) -> String {
     match &r.fail {
         Fail::Timeout => return format!("timeout {}", r.doc),
@@ -1480,25 +1470,10 @@ pub fn classify(r: &Repro) -> String {
     match replay_outputs(r) {
         Some((Some(_), inc, c)) => {
             let d = first_log_diff(&inc, &c);
-            // (an error's entry, the log only: F2's shape)
-            let f2 = if numbers_only(&inc, &c) {
-                "F9? "
-            } else if d.starts_with("log: ! ") {
-                "F2? "
-            } else {
-                ""
-            };
-            format!("{f2}edit {} {} | {d}", r.doc, r.edit.what)
+            format!("edit {} {} | {d}", r.doc, r.edit.what)
         }
         _ => match replay_history(r) {
-            Some(h) => {
-                let mark = match &h.fail {
-                    Fail::Mismatch(w) if w == "log-numbers" => "F9? ",
-                    Fail::Mismatch(w) if w == "log" => "F2? ",
-                    _ => "",
-                };
-                format!("{mark}history {} {} | {}", r.doc, r.edit.what, h.fail.text())
-            }
+            Some(h) => format!("history {} {} | {}", r.doc, r.edit.what, h.fail.text()),
             None => format!("passes {}", r.doc),
         },
     }

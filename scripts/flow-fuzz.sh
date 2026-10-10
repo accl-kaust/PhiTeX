@@ -133,7 +133,8 @@ fi
 	done
 } | tee "$OUT/summary.txt"
 # (the classes, and one cut-down reproduction per new class)
-find "$OUT"/j1 "$OUT"/j8 "$OUT"/latex -name '*.repro' 2>/dev/null | sort >"$OUT/repros.txt"
+# (some of the directories may not be there: find's status is not the run's)
+{ find "$OUT"/j1 "$OUT"/j8 "$OUT"/latex -name '*.repro' 2>/dev/null || true; } | sort >"$OUT/repros.txt"
 : >"$OUT/classes.txt"
 if [ -s "$OUT/repros.txt" ]; then
 	run bash -c "xargs -P $JOBS -n 4 $BIN --fuzz-classify <'$OUT/repros.txt'" | sort >"$OUT/classes.txt" || true
