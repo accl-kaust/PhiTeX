@@ -10,6 +10,8 @@
 //! against a fresh `pdflatex` run where there is one
 //! (`oracles_are_pdflatex`); `PHITEX_FLOW_BLESS=1` records them anew.
 
+mod common;
+
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -259,6 +261,7 @@ fn build_for(name: &str, job: &str) -> Build {
     let (inputs, fonts, _) = dirs_of(name);
     let mut b = Build::new(font());
     b.set_font_dirs(fonts);
+    common::give_kpse(&mut b, "pdflatex");
     b.set_input_dirs(inputs);
     b.set_jobname(job);
     b.set_limits(Limits::TEX_LIVE);

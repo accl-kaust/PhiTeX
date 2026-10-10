@@ -100,8 +100,10 @@ fn no_shape_of_knuths_machine() {
                 || ["AtomicBool", "AtomicUsize", "AtomicIsize", "AtomicU64", "AtomicU32", "AtomicI64", "AtomicI32"]
                     .iter()
                     .any(|a| line.contains(a));
-            if has_lock && name != "build.rs" && name != "tfm.rs" {
-                bad.push(at("a lock or atomic outside the scheduler (build.rs) and the font file cache (tfm.rs)"));
+            // (kpse.rs: kpathsea's path search behind the finder trait's &self,
+            // a given of the build like the font file cache)
+            if has_lock && name != "build.rs" && name != "tfm.rs" && name != "kpse.rs" {
+                bad.push(at("a lock or atomic outside the scheduler (build.rs), the font file cache (tfm.rs) and the file finder (kpse.rs)"));
             }
             for w in [
                 "eqtb",
