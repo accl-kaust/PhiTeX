@@ -517,6 +517,7 @@ impl Writer<'_> {
             Key::FontExpand(f) => font_key(self, 36, f),
             Key::FontAttr(f) => font_key(self, 37, f),
             Key::FontCopies(f) => font_key(self, 38, f),
+            Key::ParToken => self.byte(39),
             _ => return Err(format!("a name a format does not hold: {k:?}")),
         }
         Ok(())
@@ -894,6 +895,7 @@ impl Reader<'_> {
             36 => Key::FontExpand(Arc::from(self.str()?)),
             37 => Key::FontAttr(Arc::from(self.str()?)),
             38 => Key::FontCopies(Arc::from(self.str()?)),
+            39 => Key::ParToken,
             _ => return Err(bad("a name")),
         })
     }

@@ -358,6 +358,13 @@ pub enum Prim {
     GlyphToUnicode,
     /// A pdfTeX primitive without a graph form yet: `PDFTEX_PRIMITIVES[i]`.
     PdfUnimpl(u16),
+    /// pdfTeX's `\partokenname\cs`: the token ending paragraphs.
+    ParTokenName,
+    /// pdfTeX's `\pdfprimitive\cs`: the primitive meaning of `\cs`'s
+    /// name (expanded at once if it expands, else executed: the internal
+    /// `PdfPrimitiveExec`, pdftex.web's `frozen_primitive`, before `\cs`).
+    PdfPrimitive,
+    PdfPrimitiveExec,
     /// pdfTeX's font commands: `\pdffontexpand` (0), `\pdffontattr` (1),
     /// `\pdfcopyfont` (2, an assignment), `\letterspacefont` (3, an
     /// assignment).
@@ -421,6 +428,7 @@ impl Prim {
                 | Prim::Unexpanded
                 | Prim::Detokenize
                 | Prim::ScanTokens
+                | Prim::PdfPrimitive
         )
     }
 
@@ -456,6 +464,9 @@ impl Prim {
         }
         if let Prim::PdfUnimpl(i) = self {
             return PDFTEX_PRIMITIVES[usize::from(i)].0;
+        }
+        if self == Prim::PdfPrimitiveExec {
+            return "pdfprimitive";
         }
         PRIMITIVES
             .iter()
@@ -526,7 +537,7 @@ params! { GluePar, 18, Lineskip = "lineskip", Baselineskip = "baselineskip", Par
 params! { TokPar, 14, Output = "output", Everypar = "everypar", Everymath = "everymath", Everydisplay = "everydisplay", Everyhbox = "everyhbox", Everyvbox = "everyvbox", Everyjob = "everyjob", Everycr = "everycr", Errhelp = "errhelp", Everyeof = "everyeof", Pdfpageattr = "pdfpageattr", Pdfpageresources = "pdfpageresources", Pdfpagesattr = "pdfpagesattr", Pdfpkmode = "pdfpkmode" }
 
 /// The reader's internal commands (`Mat::Internal`).
-pub const INTERNAL: [(&str, Prim); 25] = [
+pub const INTERNAL: [(&str, Prim); 26] = [
     ("\u{0}package", Prim::Mat(Mat::Internal(0))),
     ("\u{0}endgraf", Prim::Mat(Mat::Internal(1))),
     ("\u{0}discnext", Prim::Mat(Mat::Internal(2))),
@@ -555,6 +566,8 @@ pub const INTERNAL: [(&str, Prim); 25] = [
     ("\u{0}fi", Prim::Fi),
     // (`frozen_relax`: what `\input` in a file name inserts)
     ("\u{0}relax", Prim::Relax),
+    // (`frozen_primitive`: `\pdfprimitive` of a primitive not expanded)
+    ("\u{0}pdfprimitive", Prim::PdfPrimitiveExec),
 ];
 
 /// Every TeX82 primitive (tex.web §1336: partex-core's `init_prim_tex` less
@@ -1091,7 +1104,7 @@ pub const PDFTEX_PRIMITIVES: [(&str, Prim); 154] = [
     ("letterspacefont", Prim::PdfFont(3)),
     ("lpcode", Prim::Mat(Mat::FontInt(2))),
     ("partokencontext", Prim::IntPar(IntPar::Partokencontext)),
-    ("partokenname", Prim::PdfUnimpl(14)),
+    ("partokenname", Prim::ParTokenName),
     ("pdfadjustinterwordglue", Prim::IntPar(IntPar::Pdfadjustinterwordglue)),
     ("pdfadjustspacing", Prim::IntPar(IntPar::Pdfadjustspacing)),
     ("pdfannot", Prim::PdfUnimpl(17)),
@@ -1181,7 +1194,7 @@ pub const PDFTEX_PRIMITIVES: [(&str, Prim); 154] = [
     ("pdfpkmode", Prim::TokPar(TokPar::Pdfpkmode)),
     ("pdfpkresolution", Prim::IntPar(IntPar::Pdfpkresolution)),
     ("pdfprependkern", Prim::IntPar(IntPar::Pdfprependkern)),
-    ("pdfprimitive", Prim::PdfUnimpl(104)),
+    ("pdfprimitive", Prim::PdfPrimitive),
     ("pdfprotrudechars", Prim::IntPar(IntPar::Pdfprotrudechars)),
     ("pdfptexuseunderscore", Prim::IntPar(IntPar::Pdfptexuseunderscore)),
     ("pdfpxdimen", Prim::DimenPar(DimenPar::Pdfpxdimen)),

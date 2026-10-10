@@ -186,6 +186,10 @@ pub enum Key {
     /// subexpression up to the subcount, -1 for none; empty: the match
     /// failed, or none yet).
     LastMatch(u8),
+    /// The token TeX inserts to end a paragraph (`par_token`, pdfTeX's
+    /// `\partokenname`, global): `Val::Toks` of that one token; empty:
+    /// `\par`.
+    ParToken,
     /// pdfTeX's `\pdfglyphtounicode` entry of a glyph name (global, its
     /// `glyph_unicode_tree`): `Val::Int` (a code; -1 none), `Val::Name` (a
     /// string of hexadecimal digits); read by the PDF file's ToUnicode
@@ -278,6 +282,7 @@ impl Key {
             Key::FontAttr(_) => w(68, 0),
             Key::FontCopies(_) => w(69, 0),
             Key::LastMatch(k) => w(71, u64::from(*k)),
+            Key::ParToken => w(72, 0),
             Key::Cs(n) => w(63, u64::from(*n)),
             // (a font's: the font's name is hashed too)
             Key::HyphenChar(_) => w(21, 0),
@@ -509,6 +514,7 @@ impl fmt::Display for Shown<'_, Key> {
             Key::FontAttr(x) => write!(f, "\\pdffontattr ({x})"),
             Key::FontCopies(x) => write!(f, "font copies ({x})"),
             Key::LastMatch(k) => write!(f, "\\pdflastmatch ({k})"),
+            Key::ParToken => write!(f, "\\partokenname"),
             Key::LastFont => write!(f, "font_ptr"),
             Key::Format => write!(f, "format_ident"),
             Key::MagSet => write!(f, "mag_set"),
@@ -650,7 +656,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -
         }),
         Key::Delcode(c) => Val::Int(if *c == '.' { 0 } else { -1 }),
         Key::IntPar(p) => Val::Int(p.initial()),
-        Key::TokPar(_) | Key::Toks(_) | Key::Mark(..) => Val::Toks(Arc::new(Vec::new())),
+        Key::TokPar(_) | Key::Toks(_) | Key::Mark(..) | Key::ParToken => Val::Toks(Arc::new(Vec::new())),
         // (`\fontdimen`: the null font's, tex.web 552; a loaded font's are
         // defined by its `\font`)
         Key::DimenPar(p) => Val::Int(p.initial()),
@@ -768,6 +774,7 @@ pub(crate) fn every_key() -> Vec<Key> {
         Key::FontAttr(f.clone()),
         Key::FontCopies(f),
         Key::LastMatch(0),
+        Key::ParToken,
     ]
 }
 
@@ -826,6 +833,7 @@ pub(crate) fn key_index(k: &Key) -> usize {
         Key::FontAttr(_) => 48,
         Key::FontCopies(_) => 49,
         Key::LastMatch(_) => 50,
+        Key::ParToken => 51,
     }
 }
 

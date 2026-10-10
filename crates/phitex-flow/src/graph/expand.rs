@@ -93,6 +93,15 @@ impl Exec<'_> {
         self.next_x_m(false).map(|(t, _)| t)
     }
 
+    /// The primitive a control sequence's name names (pdftex.web's
+    /// `prim_lookup`: TeX's, and in extended mode e-TeX's and pdfTeX's).
+    pub(super) fn primitive_of(&mut self, t: &Tok) -> Option<Prim> {
+        let Tok::Cs(n) = t else { return None };
+        let n = self.env.cs().name(*n);
+        let etex = self.int(&Key::ETeXMode) != 0;
+        Prim::by_name(&n).or_else(|| if etex { Prim::by_name_etex(&n).or_else(|| Prim::by_name_pdftex(&n)) } else { None })
+    }
+
     /// One expansion step of `t`, whose meaning is `m` (tex.web 366).
     pub(super) fn expand(&mut self, t: &Tok, m: &Meaning) {
         match m {
@@ -112,6 +121,21 @@ impl Exec<'_> {
                     }
                 }
                 Prim::CsName => self.csname(),
+                Prim::PdfPrimitive => {
+                    // (pdftex.web: `get_token`; the name's primitive expands
+                    // here, or is executed: the frozen `\pdfprimitive` goes
+                    // before the token; a name of none is dropped)
+                    let Some(x) = self.next_raw() else { return };
+                    match self.primitive_of(&x) {
+                        Some(p) if p.expandable() => self.expand(&x, &Meaning::Prim(p)),
+                        Some(_) => {
+                            self.back(x);
+                            let f = self.cs("\u{0}pdfprimitive");
+                            self.back(f);
+                        }
+                        None => {}
+                    }
+                }
                 Prim::Convert(c) => self.convert(c),
                 Prim::The => {
                     let toks = self.the_toks();
@@ -797,11 +821,7 @@ impl Exec<'_> {
                 // (pdftex.web: `get_next`; the name's primitive, still its
                 // meaning)
                 let Some(t) = self.next_raw() else { return false };
-                let Tok::Cs(n) = &t else { return false };
-                let n = self.env.cs().name(*n);
-                let etex = self.int(&Key::ETeXMode) != 0;
-                let p = Prim::by_name(&n)
-                    .or_else(|| if etex { Prim::by_name_etex(&n).or_else(|| Prim::by_name_pdftex(&n)) } else { None });
+                let p = self.primitive_of(&t);
                 p.is_some_and(|p| self.tok_meaning(&t) == Meaning::Prim(p))
             }
             IfKind::FontChar => {

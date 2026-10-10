@@ -571,7 +571,7 @@ impl Exec<'_> {
                 self.rewrite(vec![Tok::Char(2, '}'), t.clone()]);
             }
         } else {
-            let par = self.cs("par");
+            let par = self.par_token();
             self.rewrite(vec![par, t.clone()]);
         }
     }
@@ -655,6 +655,39 @@ impl Exec<'_> {
         } else if !self.st.inner {
             self.end_par();
             self.build_page();
+        }
+    }
+
+    /// `\partokenname\cs` (pdfTeX's partoken.ch): a control sequence
+    /// becomes the token ending paragraphs, globally; anything else is
+    /// read and ignored.
+    pub(super) fn par_token_name(&mut self) {
+        if let Some(t) = self.next_raw()
+            && matches!(t, Tok::Cs(_) | Tok::Active(_))
+        {
+            self.define(Key::ParToken, Val::Toks(Arc::new(vec![t])), true);
+        }
+    }
+
+    /// The token ending paragraphs (`par_token`): `\par`, or
+    /// `\partokenname`'s.
+    pub(super) fn par_token(&mut self) -> Tok {
+        match self.get(&Key::ParToken) {
+            Val::Toks(t) if t.len() == 1 => t[0].clone(),
+            _ => self.cs("par"),
+        }
+    }
+
+    /// What ends a paragraph before a group's `}` in horizontal mode:
+    /// TeX's `end_graf`, or with `\partokencontext` at least `level` the
+    /// paragraph token (pdfTeX's partoken.ch: 1 for `\vbox`, `\vtop`,
+    /// `\vcenter`; 2 for `\insert`, `\vadjust`, `\output`, `\noalign`
+    /// and a `\valign` entry).
+    pub(super) fn end_graf_token(&mut self, level: i32) -> Tok {
+        if self.int_par(IntPar::Partokencontext) >= level {
+            self.par_token()
+        } else {
+            self.cs("\u{0}endgraf")
         }
     }
 
@@ -1770,7 +1803,12 @@ impl Exec<'_> {
         if self.st.mode == Mode::H && !self.st.inner {
             // (the `}` read again: as `back_input`, which an alignment's
             // brace count sees)
-            let e = self.cs("\u{0}endgraf");
+            let level = match g.kind {
+                BoxKind::V | BoxKind::Vtop | BoxKind::Vcenter => 1,
+                BoxKind::Insert(..) => 2,
+                _ => i32::MAX,
+            };
+            let e = self.end_graf_token(level);
             self.back(t.clone());
             self.back(e);
             return;
