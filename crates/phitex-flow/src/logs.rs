@@ -146,7 +146,14 @@ pub enum Entry {
     Text(String),
     /// A call of the page builder by node `.0` of the piece.
     Mark(u32),
+    /// Node `.0` reads a file: what the run has written of each file by
+    /// then is taken here ([`replay`]'s probes).
+    Probe(u32),
 }
+
+/// Brackets a probe in the gathered entries ([`Entry::Probe`]): the
+/// part's index and the node.
+const PROBE: char = '\u{E009}';
 
 /// Between the entries of one node's log (`Node::log`).
 pub const SEP: char = '\u{E007}';
@@ -179,6 +186,8 @@ enum PEntry {
     Text(String),
     /// A call of the page builder by a node.
     Mark(u32),
+    /// A node reading a file ([`Entry::Probe`]).
+    Probe(u32),
     /// The reports of the lines of paragraph `pi`, made by node `node`:
     /// the lines (within the piece) where the node was and where its
     /// paragraph began.
@@ -196,7 +205,22 @@ pub fn plan(text: &[char], run: &Run) -> Plan {
             }
         }
     };
+    // (the nodes reading a file: what was written of it before them is
+    // looked at there)
+    let mut probes: Vec<u32> = run
+        .reads
+        .iter()
+        .filter(|(k, _, _)| matches!(k, crate::val::Key::File(_)))
+        .map(|(_, i, _)| *i)
+        .collect();
+    probes.sort_unstable();
+    probes.dedup();
+    let mut next_probe = 0;
     for (i, n) in run.chain.nodes.iter().enumerate() {
+        while probes.get(next_probe).is_some_and(|&p| p as usize <= i) {
+            entries.push(PEntry::Probe(probes[next_probe]));
+            next_probe += 1;
+        }
         if let Some(l) = n.log() {
             for e in l.split(SEP) {
                 entries.push(PEntry::Text(resolve(e, text, run, i)));
@@ -286,6 +310,7 @@ pub fn fragment(text: &[char], run: &Arc<Run>, lines: &[Option<Lines>]) -> Frag 
         match e {
             PEntry::Text(s) => entries.push(Entry::Text(s.clone())),
             PEntry::Mark(i) => entries.push(Entry::Mark(*i)),
+            PEntry::Probe(i) => entries.push(Entry::Probe(*i)),
             PEntry::Lines { pi, here, start } => {
                 if let Some(Some(ls)) = lines.get(*pi) {
                     for l in ls.iter() {
@@ -360,7 +385,7 @@ pub fn texts(f: &Frag) -> Vec<String> {
         .iter()
         .filter_map(|e| match e {
             Entry::Text(s) => Some(rebase(s, 0)),
-            Entry::Mark(_) => None,
+            Entry::Mark(_) | Entry::Probe(_) => None,
         })
         .collect()
 }
@@ -405,11 +430,12 @@ pub fn gather(
         }
         *mi += 1;
     };
-    for part in parts {
+    for (x, part) in parts.iter().enumerate() {
         for e in &part.frag.entries {
             match e {
                 Entry::Text(s) => out.push(rebase(s, part.base)),
                 Entry::Mark(_) => marks_at(&mut out, &mut mi),
+                Entry::Probe(i) => out.push(format!("{PROBE}{x}:{i}")),
             }
         }
         if let Some(p) = part.post {
@@ -467,11 +493,29 @@ fn file_name(name: &str) -> String {
 /// entries and the files written (name, contents), in the order they were
 /// first opened.
 pub fn replay(entries: Vec<String>, log_openout: bool) -> (Vec<String>, Vec<(String, String)>) {
+    let r = replay_probed(entries, log_openout);
+    (r.0, r.1)
+}
+
+/// What the files written held at a probe ([`Entry::Probe`]): the part's
+/// index, the node, and each file opened so far (its name and what was
+/// written to it since it was last opened).
+pub type Probe = (usize, u32, Vec<(String, String)>);
+
+/// [`replay`], and the files as they stood at each probe (the probes are
+/// not log entries).
+pub fn replay_probed(entries: Vec<String>, log_openout: bool) -> (Vec<String>, Vec<(String, String)>, Vec<Probe>) {
     use crate::show::{LN, NL, RAW};
     let mut files: Vec<(String, String)> = Vec::new();
     let mut open: [Option<usize>; 16] = [None; 16];
     let mut out = Vec::with_capacity(entries.len());
+    let mut probes: Vec<Probe> = Vec::new();
     for e in entries {
+        if let Some(p) = e.strip_prefix(PROBE) {
+            let (x, i) = p.split_once(':').unwrap_or((p, "0"));
+            probes.push((x.parse().unwrap_or(0), i.parse().unwrap_or(0), files.clone()));
+            continue;
+        }
         if !e.contains(IO) {
             out.push(e);
             continue;
@@ -536,5 +580,5 @@ pub fn replay(entries: Vec<String>, log_openout: bool) -> (Vec<String>, Vec<(Str
         }
         out.push(s);
     }
-    (out, files)
+    (out, files, probes)
 }

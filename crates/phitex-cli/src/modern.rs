@@ -30,7 +30,10 @@ commands:
 options:
   -o, --output-dir DIR     where the outputs go (TeX's -output-directory)
       --engine NAME        pdflatex (default for LaTeX), latex, pdftex (default
-                           otherwise), etex or tex
+                           otherwise), etex or tex; lualatex runs the system's
+                           lualatex as an external process: NOT incremental
+                           (each build runs the whole document, watch reruns
+                           it on each saved change), its own SyncTeX
       --output-format F    dvi or pdf (latex/pdflatex, etex/pdftex)
       --ini [--etex]       the file is the whole job: no format (TeX's -ini)
   -j, --jobs N             threads (default: all cores)
@@ -180,6 +183,9 @@ pub struct Target {
     /// Where to copy the PDF after a successful build.
     pub copy_pdf: Option<PathBuf>,
     pub synctex: bool,
+    /// An engine run as the system's program, outside the graph
+    /// (`external.rs`: LuaLaTeX), by its program name.
+    pub external: Option<&'static str>,
 }
 
 impl Target {
@@ -227,7 +233,10 @@ fn resolve(o: &Options) -> Result<Target, String> {
         text = read(&file)?;
         program = config::magic_comments(&text).0.or(program);
     }
-    let mut engine = match o.engine.clone().or(cfg.engine).or(program) {
+    let named = o.engine.clone().or(cfg.engine).or(program);
+    let external = named.as_deref().and_then(external_program);
+    let mut engine = match named {
+        Some(_) if external.is_some() => tex::engine("pdflatex")?,
         Some(e) => tex::engine(&e)?,
         None => tex::engine(config::default_engine(&text))?,
     };
@@ -246,8 +255,24 @@ fn resolve(o: &Options) -> Result<Target, String> {
         engine,
         output_dir,
         copy_pdf,
-        synctex: o.synctex.or(cfg.synctex).unwrap_or(false),
+        // (an external engine writes its own SyncTeX file)
+        synctex: o.synctex.or(cfg.synctex).unwrap_or(external.is_some()),
+        external,
     })
+}
+
+/// The program an external engine's name runs (none: not external; never
+/// in a wasm build).
+fn external_program(name: &str) -> Option<&'static str> {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        crate::external::program_of(name)
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        let _ = name;
+        None
+    }
 }
 
 fn copy_dir(c: &config::CopyPdf, cwd: &Path, base: &Path) -> Option<PathBuf> {
@@ -514,6 +539,14 @@ pub fn main(args: &[String]) -> ! {
         eprintln!("{}: {e}", st.red("error"));
         std::process::exit(2);
     });
+    #[cfg(not(target_family = "wasm"))]
+    if let Some(p) = t.external {
+        match command {
+            Command::Build | Command::Check => std::process::exit(crate::external::main_build(p, &t, &o, &st)),
+            Command::Watch => crate::external::main_watch(p, &t, &o, &st),
+            _ => {}
+        }
+    }
     match command {
         Command::Build => std::process::exit(build(&t, &o, &st, true)),
         Command::Check => std::process::exit(build(&t, &o, &st, false)),

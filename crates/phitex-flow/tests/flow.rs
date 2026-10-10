@@ -176,6 +176,49 @@ fn a_fire_between_a_pieces_nodes_reruns_only_the_nodes_after_it() {
     }
 }
 
+/// Item provenance: each glyph of a line, and of a box in it, leads to
+/// the node that made it and that node's source line (SyncTeX's tags).
+#[test]
+fn a_glyph_leads_to_its_source_line() {
+    use phitex_flow::item::Item;
+    let src = "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x \\hsize=300pt \\vsize=200pt \\parfillskip=0pt plus 1fil\nAlpha\nBeta \\hbox{Gamma}\nDelta\\par\n\\end\n";
+    for lean in [true, false] {
+        let mut b = Build::new(font());
+        b.set_lean(lean);
+        let out = b.update(src, opts(1, Reads::Suspend, Order::Priority));
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let mat = b.material_of(0).expect("piece 0's material");
+        let (at, line) = mat
+            .iter()
+            .enumerate()
+            .find_map(|(i, it)| match it {
+                Item::Append(l, _) => Some((i, l.clone())),
+                _ => None,
+            })
+            .expect("a line");
+        let mut seen = Vec::new();
+        for (j, it) in line.list.iter().enumerate() {
+            match it {
+                Item::Char(_, c) if c.is_ascii_uppercase() => {
+                    let n = b.material_node(0, at as u32, &[j]).expect("a node");
+                    seen.push((char::from(*c), b.source_place(0, n).expect("a place").1));
+                }
+                // (the paragraph's indent is an empty box)
+                Item::Box(bx) if !bx.list.is_empty() => {
+                    let n = b.material_node(0, at as u32, &[j, 0]).expect("a node in the box");
+                    let c = match &bx.list[0] {
+                        Item::Char(_, c) => char::from(*c),
+                        _ => '?',
+                    };
+                    seen.push((c, b.source_place(0, n).expect("a place").1));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(seen, [('A', 2), ('B', 3), ('G', 3), ('D', 4)], "lean {lean}");
+    }
+}
+
 #[test]
 fn a_changed_definition_reruns_its_readers_only() {
     let a = doc(30);
@@ -384,6 +427,26 @@ fn scanning_doc(def: &str, scanned: &str) -> String {
     // kept while the user runs again)
     let _ = write!(s, "The last one scans \\c{{{scanned}}}and then uses \\a.\n\n");
     s
+}
+
+/// A name scanned (its outer-ness read) and then read whole by each of
+/// many nodes: the run holds one `Read` per distinct read, not a copy per
+/// node (the copies held 18.5M `Read`s of latex.ltx's expl3 piece where
+/// 1M are distinct, 3 GB).
+#[test]
+fn a_scanned_and_expanded_name_is_one_read() {
+    let mut s = String::from("\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6 \\def\\x{}\\def\\y#1{#1}");
+    for _ in 0..400 {
+        s.push_str("\\y{\\x\\x}\\relax");
+    }
+    s.push_str("\n\\end\n");
+    let mut b = Build::new(font());
+    b.set_lean(false);
+    let out = b.update(&s, opts(1, Reads::Suspend, Order::Priority));
+    assert!(out.errors.is_empty(), "{:?}", out.errors);
+    let (reads, distinct) = b.reads_held(0).expect("piece 0 holds its nodes");
+    assert!(reads >= 800, "{reads} reads");
+    assert!(distinct <= 60, "{distinct} distinct reads of {reads}: a copy per node");
 }
 
 #[test]

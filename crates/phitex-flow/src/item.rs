@@ -35,6 +35,55 @@ pub struct BoxNode {
     pub shift: i32,
     pub list: Vec<Item>,
     pub glue: GlueSet,
+    /// Which nodes made its list's items (empty: the node that made the
+    /// box, or not known): a side table, not part of the box's value.
+    pub origins: Origins,
+}
+
+/// Which node of its piece made each item of a list (SyncTeX tags per
+/// node, never per character): runs of item indices, ascending, each
+/// `(its first item, the node's distance back from the node that made
+/// the list)` — the paragraph's `\par` node, the box's closing node; a
+/// distance, not an index, so that a list whose nodes were all kept
+/// where an edit moved them still says it. Not part of the list's value:
+/// equal lists are equal whoever made them.
+#[derive(Clone, Debug, Default)]
+pub struct Origins(pub Arc<[(u32, u32)]>);
+
+impl PartialEq for Origins {
+    fn eq(&self, _: &Origins) -> bool {
+        true
+    }
+}
+
+impl Eq for Origins {}
+
+impl Origins {
+    /// The distance back, from the list's maker, of the node that made
+    /// item `i`, if known.
+    pub fn of(&self, i: usize) -> Option<u32> {
+        let k = self.0.partition_point(|x| x.0 as usize <= i);
+        k.checked_sub(1).map(|k| self.0[k].1)
+    }
+
+    /// The node that made item `i` of a list made by node `maker`.
+    pub fn node_of(&self, maker: u32, i: usize) -> Option<u32> {
+        maker.checked_sub(self.of(i)?)
+    }
+
+    /// Runs of `(item, distance)` made into a table (consecutive equal
+    /// distances merged).
+    pub fn from_runs(runs: impl IntoIterator<Item = (u32, u32)>) -> Origins {
+        let mut v: Vec<(u32, u32)> = Vec::new();
+        for (i, d) in runs {
+            match v.last_mut() {
+                Some(l) if l.1 == d => {}
+                Some(l) if l.0 == i => l.1 = d,
+                _ => v.push((i, d)),
+            }
+        }
+        Origins(Arc::from(v))
+    }
 }
 
 /// A ligature: its character and the characters it was made of (tex.web
@@ -135,6 +184,9 @@ pub struct Unset {
 pub struct Para {
     pub before: Vec<Item>,
     pub hlist: Vec<Item>,
+    /// Which nodes made `hlist`'s items, back from the node holding the
+    /// paragraph ([`Origins`]).
+    pub origins: Origins,
     /// What line breaking reads; `None`: no paragraph.
     pub lb: Option<Arc<crate::linebreak::LineParams>>,
     pub after: Vec<Item>,
