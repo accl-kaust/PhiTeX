@@ -88,6 +88,7 @@ def cold_loops(path):
             r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'flow-fuzz-tex.py'), TEX, path],
                                capture_output=True, text=True)
             if 'before pass1 ends pass2 ends\tafter pass1 ends pass2 ends' not in r.stdout:
+                print('tex:', r.stdout.strip() or r.stderr.strip()[-300:], flush=True)
                 return 'tex loops too'
         return 'cold loops'
     return 'cold ends'
@@ -97,7 +98,10 @@ import os
 HANG = int(os.environ.get('FLOW_MIN_HANG', '60'))
 TEX = os.environ.get('FLOW_MIN_TEX')
 want = cls(src)
-if want is not None and want.startswith('timeout') and TEX and cold_loops(src) == 'cold loops':
+first = cold_loops(src) if want is not None and want.startswith('timeout') and TEX else None
+if first is not None:
+    print('cold check:', first, flush=True)
+if first == 'cold loops':
     # (our cold build loops where TeX ends: cut while it does)
     cls = cold_loops
     want = 'cold loops'
