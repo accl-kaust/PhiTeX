@@ -442,6 +442,13 @@ impl Exec<'_> {
             }
             _ => return,
         };
+        // (and the page builder's quantity changes where the main vertical
+        // list is now: an item in its order, tex.web 1245)
+        if self.st.level == 0
+            && let Key::Page(i) = key
+        {
+            self.vemit.push(Item::PageSoFar(i, v));
+        }
         self.change_direct(key, Val::Int(v));
     }
 }

@@ -646,6 +646,10 @@ documents!(outroutine, outmarks, outinserts);
 // `\outputpenalty` at every fire of the default output)
 documents!(outsame, outpen);
 
+// (tex.web 1245: `\pagegoal`, `\pagetotal`, `\pagestretch` assigned
+// change the page so far where they stand in the main vertical list)
+documents!(pagegoal);
+
 /// plain.tex's own `\output` (`\plainoutput`: the headline with marks, the
 /// page body with footnotes, the footline with `\folio`,
 /// `\advancepageno`), in every schedule.
