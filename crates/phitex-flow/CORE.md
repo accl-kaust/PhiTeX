@@ -903,8 +903,8 @@ the fold's value at the node's position (Conflict 12, decided).
   empty page, after a paragraph, skips of each order, an insertion, a
   split insertion with `\floatingpenalty`, a deep box, inside a paragraph
   after `\pagegoal=`, after a page break), `readback` (immediate and
-  deferred writes read back with `\input` and `\read`, a file read while
-  open and after `\closeout`), both at five schedules against `tex`;
+  deferred writes read back with `\input` and `\read`, a file before it
+  is opened and after `\closeout`; not while open: TeX's buffering), both at five schedules against `tex`;
   `reads_of_folds_follow_edits`; `tests/latex_docs.rs`: the documents'
   `.aux` read back, no gap; TRIP's `tripos.tex` in one build
   (`Session::run`).

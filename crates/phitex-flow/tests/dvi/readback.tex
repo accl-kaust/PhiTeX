@@ -16,10 +16,9 @@ Page two.\write1{\noexpand\def\noexpand\c{on page \the\count0}}
 \input readback.aux
 \message{[\a][\b][\c]}
 \openin3=readback.aux \read3 to\l \message{[\meaning\l]}\closein3
+\openin4=readback.two \ifeof4 \message{[two: not yet]}\fi \closein4
 \immediate\openout2=readback.two
 \immediate\write2{first}
-\openin4=readback.two \ifeof4 \message{[two: not yet]}\else
-  \read4 to\l \message{[two: \meaning\l]}\fi \closein4
 \immediate\closeout2
 \openin4=readback.two \read4 to\l \message{[two closed: \meaning\l]}\closein4
 \count0=3
