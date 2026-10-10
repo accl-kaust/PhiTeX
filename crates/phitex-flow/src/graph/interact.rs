@@ -317,6 +317,7 @@ impl Exec<'_> {
                     pos: 0,
                     tstate: TState::M,
                     eol: -1,
+                    enc: super::xetex::DECODED,
                     eof: false,
                     kind: TextKind::Terminal,
                     endinput: false,

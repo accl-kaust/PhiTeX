@@ -127,6 +127,7 @@ impl Exec<'_> {
         let mut seen = [false; 256];
         let mut fonts: Vec<Arc<Font>> = Vec::new();
         let mut langs = vec![lang];
+        let mut wide: Vec<char> = Vec::new();
         let font = |f: &Arc<Font>, fonts: &mut Vec<Arc<Font>>| {
             if !fonts.iter().any(|x| x.key == f.key) {
                 fonts.push(f.clone());
@@ -145,9 +146,26 @@ impl Exec<'_> {
                     font(&l.font, &mut fonts);
                 }
                 Item::Lang { lang, .. } if !langs.contains(lang) => langs.push(*lang),
+                Item::Native(w) => {
+                    for c in crate::native::chars_of(&w.text) {
+                        if let Some(ch) = char::from_u32(c) {
+                            wide.push(ch);
+                        }
+                    }
+                    font(&w.font, &mut fonts);
+                }
                 _ => {}
             }
         }
+        wide.sort_unstable();
+        wide.dedup();
+        let lc_wide: Vec<(char, u32)> =
+            wide.into_iter().map(|c| (c, self.int(&Key::Lccode(c)).max(0).cast_unsigned())).collect();
+        let max_len = if self.xetex {
+            self.int_par(IntPar::XeTeXhyphenatablelength).clamp(0, 4095) as usize
+        } else {
+            63
+        };
         let mut lc = vec![0u8; 256];
         for (c, s) in seen.iter().enumerate() {
             if *s {
@@ -177,6 +195,8 @@ impl Exec<'_> {
             hyphen_chars,
             tables,
             lost_chars: self.int_par(IntPar::Tracinglostchars) > 0,
+            lc_wide,
+            max_len,
         })
     }
 }

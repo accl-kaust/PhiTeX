@@ -199,6 +199,7 @@ impl Exec<'_> {
             pos: 0,
             tstate: TState::N,
             eol: EOL_UNREAD,
+            enc: super::xetex::DECODED,
             eof: false,
             kind: TextKind::Scan,
             endinput: false,
@@ -266,6 +267,20 @@ impl Exec<'_> {
                 // (etex.web §1402: a character in the font's range; one it
                 // lacks has zero metrics)
                 let f = self.scan_font_ident();
+                if self.xetex {
+                    // (xetex.web: `scan_usv_num`; a native font measures
+                    // the character)
+                    let c = self.scan_usv_num();
+                    if let Some(d) = self.native_char_dimen(k - 14, &f, c) {
+                        return IVal::Dimen(d);
+                    }
+                    return IVal::Dimen(f.glyph(c).map_or(0, |g| match k {
+                        14 => g.width,
+                        15 => g.height,
+                        16 => g.depth,
+                        _ => g.italic,
+                    }));
+                }
                 let c = self.scan_char_num();
                 IVal::Dimen(f.glyph(c).map_or(0, |g| match k {
                     14 => g.width,

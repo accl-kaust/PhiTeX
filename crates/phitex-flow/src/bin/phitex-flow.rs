@@ -43,8 +43,8 @@ fn tex_live(prog: &str) -> Option<Arc<phitex_flow::kpse::Kpathsea>> {
 fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
-         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--kpse PROG] [--no-kpse] [--fmt FILE] [--dump-fmt FILE] [--interaction MODE] [--runs N] [--edit OLD=>NEW] [--repeat N] \
-         [--check] [--log] [--main-memory WORDS] [--cut-lines N|inf]"
+         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--kpse PROG] [--no-kpse] [--fmt FILE] [--dump-fmt FILE] [--interaction MODE] [--edit OLD=>NEW] [--repeat N] \
+         [--check] [--log] [--main-memory WORDS] [--cut-lines N|inf] [--xetex [--font-index FILE] [--pdf OUT.pdf]]"
     );
     ExitCode::from(2)
 }
@@ -436,6 +436,9 @@ fn main() -> ExitCode {
     let mut fmt: Option<String> = None;
     let mut dump_fmt: Option<String> = None;
     let mut interaction: Option<i32> = None;
+    let mut xetex = false;
+    let mut font_index: Option<String> = None;
+    let mut pdf_out: Option<String> = None;
     let mut runs: usize = 1;
     let mut i = 0;
     while i < args.len() {
@@ -470,6 +473,17 @@ fn main() -> ExitCode {
             }
             "--check" => check = true,
             "--etex" => opts.etex = true,
+            // (XeTeX: the engine, the installed fonts' index, files found
+            // by `kpsewhich`; `--pdf`: also xdvipdfmx's PDF of the XDV)
+            "--xetex" => xetex = true,
+            "--font-index" => match val() {
+                Some(f) => font_index = Some(f),
+                None => return usage(),
+            },
+            "--pdf" => match val() {
+                Some(f) => pdf_out = Some(f),
+                None => return usage(),
+            },
             "--input-dir" => match val() {
                 Some(d) => dirs.push(d.into()),
                 None => return usage(),
@@ -593,7 +607,8 @@ fn main() -> ExitCode {
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         phitex_flow::graph::jobs(&refs)
     };
-    let out = out.unwrap_or_else(|| format!("{}.dvi", file.trim_end_matches(".tex")));
+    let ext = if xetex { "xdv" } else { "dvi" };
+    let out = out.unwrap_or_else(|| format!("{}.{ext}", file.trim_end_matches(".tex")));
     // (`\input` and `\openin` find files beside the document; the job is
     // its name)
     let path = std::path::Path::new(&file);
@@ -602,6 +617,37 @@ fn main() -> ExitCode {
         .unwrap_or_else(|| path.file_stem().map_or_else(|| "texput".to_string(), |s| s.to_string_lossy().into_owned()));
     let inputs: Vec<std::path::PathBuf> = std::iter::once(dir.clone()).chain(dirs).collect();
     let mut b = Build::new(font.clone());
+    if xetex {
+        let idx = match &font_index {
+            Some(f) => match std::fs::read(f) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    eprintln!("{f}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            None => Vec::new(),
+        };
+        // (native fonts' files and xdvipdfmx's by kpathsea as `xetex`; no
+        // TeX Live: none found)
+        let kpse: Arc<dyn phitex_flow::tfm::Kpse> = match tex_live("xetex") {
+            Some(k) => k,
+            None => Arc::new(phitex_flow::tfm::DirKpse::new(&[])),
+        };
+        let fonts = if idx.is_empty() {
+            phitex_flow::native::Fonts::new(Arc::default(), kpse)
+        } else {
+            let Some(f) = phitex_flow::native::Fonts::from_index_bytes(&idx, kpse) else {
+                eprintln!("--font-index: not a font index");
+                return ExitCode::FAILURE;
+            };
+            f
+        };
+        b.set_xetex(fonts.with_distiller(distiller()));
+        if let Some(e) = std::env::var("SOURCE_DATE_EPOCH").ok().and_then(|v| v.trim().parse().ok()) {
+            b.set_pdf_date(e);
+        }
+    }
     b.set_input_dirs(inputs.clone());
     b.set_jobname(&job);
     // (PDF mode: the file's date is `SOURCE_DATE_EPOCH`'s, as pdfTeX's;
@@ -622,7 +668,7 @@ fn main() -> ExitCode {
     // directories only)
     let mut finder: Option<(Arc<phitex_flow::kpse::Kpathsea>, String)> = None;
     if !no_kpse {
-        let prog = kpse.clone().unwrap_or_else(|| "pdftex".to_string());
+        let prog = kpse.clone().unwrap_or_else(|| if xetex { "xetex" } else { "pdftex" }.to_string());
         match tex_live(&prog) {
             Some(k) => {
                 b.set_kpse(k.clone(), &prog);
@@ -745,11 +791,64 @@ fn main() -> ExitCode {
     // (what `\openout` and `\write` made, beside the document)
     for (name, text) in &last.writes {
         let p = dir.join(name);
-        if let Err(e) = std::fs::write(&p, text.chars().map(|c| u32::from(c).min(255) as u8).collect::<Vec<u8>>()) {
+        // (XeTeX writes UTF-8)
+        let bytes: Vec<u8> = if xetex { text.as_bytes().to_vec() } else { text.chars().map(|c| u32::from(c).min(255) as u8).collect() };
+        if let Err(e) = std::fs::write(&p, bytes) {
             eprintln!("{}: {e}", p.display());
             return ExitCode::FAILURE;
         }
     }
     println!("wrote {out} ({} bytes)", bytes.len());
+    if let Some(pdf) = pdf_out {
+        match b.xdv_pdf(&last.dvi) {
+            Some(Ok(bytes)) => {
+                if let Err(e) = std::fs::write(&pdf, &bytes) {
+                    eprintln!("{pdf}: {e}");
+                    return ExitCode::FAILURE;
+                }
+                println!("wrote {pdf} ({} bytes)", bytes.len());
+            }
+            Some(Err(e)) => {
+                eprintln!("xdvipdfmx: {e}");
+                return ExitCode::FAILURE;
+            }
+            None => eprintln!("--pdf: only with --xetex"),
+        }
+    }
     ExitCode::SUCCESS
+}
+
+/// xdvipdfmx's distiller (dvipdfmx.cfg's `D` line: `rungs` for an EPS
+/// picture) as `dpx_file_apply_filter` runs it: through `sh -c`, on a copy
+/// of the input in a scratch directory, removed after.
+fn distiller() -> phitex_flow::native::Distiller {
+    std::sync::Arc::new(|template: &[u8], input: &str, data: &[u8], version: i32| -> Option<Vec<u8>> {
+        use std::os::unix::ffi::OsStrExt;
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = (0..1000u32)
+            .map(|k| std::env::temp_dir().join(format!("phitex-distill-{}-{stamp}-{k}", std::process::id())))
+            .find(|d| std::fs::create_dir(d).is_ok())?;
+        let base = input.rsplit('/').next().unwrap_or(input);
+        let inp = dir.join(base);
+        let out = dir.join("distilled.pdf");
+        let r = std::fs::write(&inp, data).ok().and_then(|()| {
+            let cmd = partex_xdvipdfmx::io::filter_command(
+                template,
+                inp.as_os_str().as_bytes(),
+                out.as_os_str().as_bytes(),
+                version,
+            );
+            let ok = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(std::ffi::OsStr::from_bytes(&cmd))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if ok { std::fs::read(&out).ok() } else { None }
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        r
+    })
 }

@@ -38,7 +38,7 @@ options:
                            lualatex as an external process: NOT incremental
                            (each build runs the whole document, watch reruns
                            it on each saved change), its own SyncTeX
-      --output-format F    dvi or pdf (latex/pdflatex, etex/pdftex)
+      --output-format F    dvi, pdf or xdv (latex/pdflatex, etex/pdftex; xdv: xelatex's -no-pdf)
       --ini [--etex]       the file is the whole job: no format (TeX's -ini)
   -j, --jobs N             threads (default: all cores)
       --interaction MODE   batchmode (default), nonstopmode, scrollmode
@@ -130,7 +130,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 o.output = Some(match value()?.as_str() {
                     "dvi" => Output::Dvi,
                     "pdf" => Output::Pdf,
-                    v => return Err(format!("--output-format: `{v}` is not dvi or pdf")),
+                    "xdv" => Output::Xdv,
+                    v => return Err(format!("--output-format: `{v}` is not dvi, pdf or xdv")),
                 });
             }
             "--ini" => o.ini = true,

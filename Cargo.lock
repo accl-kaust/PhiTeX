@@ -1433,6 +1433,7 @@ dependencies = [
  "partex-bibtex",
  "partex-kpse",
  "partex-makeindex",
+ "partex-otf",
  "partex-xdvipdfmx",
  "phitex-codecs",
  "phitex-doc",
@@ -1474,7 +1475,10 @@ name = "phitex-flow"
 version = "0.0.0"
 dependencies = [
  "partex-kpse",
+ "partex-otf",
+ "partex-xdvipdfmx",
  "phi",
+ "phitex-codecs",
  "tikv-jemallocator",
 ]
 

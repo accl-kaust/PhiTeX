@@ -41,6 +41,11 @@ const PRE: u8 = 247;
 const POST: u8 = 248;
 const POST_POST: u8 = 249;
 const ID_BYTE: u8 = 2;
+// (xetex.web: XDV, the extended DVI XeTeX writes)
+const DEFINE_NATIVE_FONT: u8 = 252;
+const SET_GLYPHS: u8 = 253;
+const SET_TEXT_AND_GLYPHS: u8 = 254;
+const XDV_ID_BYTE: u8 = 7;
 
 // (§608: the movement stack's states)
 const Y_HERE: u8 = 1;
@@ -563,9 +568,31 @@ impl Writer<'_> {
                         if let Whatsit::Special(s) = &**w {
                             let s = s.clone();
                             self.special(&s);
-                        } else {
+                        } else if !matches!(**w, Whatsit::SavePos) {
                             self.io = true;
                         }
+                    }
+                    Item::Native(nw) => {
+                        let nw = nw.clone();
+                        self.native_word_out(&nw);
+                    }
+                    Item::Glyph(g) => {
+                        let g = g.clone();
+                        self.glyph_out(&g, g.w);
+                        self.cur_h += g.w;
+                        self.dvi_h = self.cur_h;
+                    }
+                    Item::Pic(pic) => {
+                        // (xetex.web: `pic_out` at the base line)
+                        let pic = pic.clone();
+                        let (save_h, save_v) = (self.dvi_h, self.dvi_v);
+                        self.cur_v = base_line;
+                        let edge = self.cur_h + pic.w;
+                        self.pic_out(&pic);
+                        self.dvi_h = save_h;
+                        self.dvi_v = save_v;
+                        self.cur_h = edge;
+                        self.cur_v = base_line;
                     }
                     _ => {}
                 },
@@ -616,6 +643,11 @@ impl Writer<'_> {
                 H::I(Item::Rule { w, h, d }) => {
                     self.cur_h += w;
                     (H::I(Item::Rule { w, h, d }), None)
+                }
+                // (xetex.web: words, glyphs and pictures are measured)
+                H::I(it @ (Item::Native(_) | Item::Glyph(_) | Item::Pic(_))) => {
+                    self.cur_h += it.xdims().map_or(0, |x| x.0);
+                    (H::I(it), None)
                 }
                 H::I(Item::Kern { w, .. } | Item::MarginKern { w, .. }) | H::Kern(w) => {
                     self.cur_h += w;
@@ -866,13 +898,102 @@ impl Writer<'_> {
                 Item::Whatsit(w) => {
                     if let Whatsit::Special(s) = &**w {
                         self.special(s);
-                    } else {
+                    } else if !matches!(**w, Whatsit::SavePos) {
                         self.io = true;
                     }
+                }
+                Item::Glyph(g) => {
+                    // (xetex.web: a glyph in a vlist, of no width)
+                    self.cur_v += g.h;
+                    self.cur_h = left_edge;
+                    self.glyph_out(g, 0);
+                    self.cur_v += g.d;
+                    self.cur_h = left_edge;
+                }
+                Item::Pic(pic) => {
+                    let (save_h, save_v) = (self.dvi_h, self.dvi_v);
+                    self.cur_v += pic.h;
+                    self.pic_out(pic);
+                    self.dvi_h = save_h;
+                    self.dvi_v = save_v;
+                    self.cur_v = save_v + pic.d;
+                    self.cur_h = left_edge;
                 }
                 _ => {}
             }
         }
+    }
+
+    /// xetex.web: a native word (`set_glyphs`, or `set_text_and_glyphs`
+    /// with `\XeTeXgenerateactualtext`), then `cur_h` past it.
+    fn native_word_out(&mut self, nw: &crate::native::NativeWord) {
+        self.synch_h();
+        self.synch_v();
+        if self.number(&nw.font) != self.dvi_f {
+            self.change_font(&nw.font);
+        }
+        if nw.at {
+            if !nw.text.is_empty() || !nw.glyphs.is_empty() {
+                self.byte(SET_TEXT_AND_GLYPHS);
+                self.out.extend((nw.text.len() as u16).to_be_bytes());
+                for u in nw.text.iter() {
+                    self.out.extend(u.to_be_bytes());
+                }
+                self.out.extend(nw.glyph_array());
+            }
+        } else if !nw.glyphs.is_empty() {
+            self.byte(SET_GLYPHS);
+            self.out.extend(nw.glyph_array());
+        }
+        self.cur_h += nw.w;
+        self.dvi_h = self.cur_h;
+    }
+
+    /// xetex.web: one glyph (`\XeTeXglyph`), `w` its advance written.
+    fn glyph_out(&mut self, g: &crate::native::GlyphItem, w: i32) {
+        self.synch_h();
+        self.synch_v();
+        if self.number(&g.font) != self.dvi_f {
+            self.change_font(&g.font);
+        }
+        self.byte(SET_GLYPHS);
+        self.four(w);
+        self.out.extend(1u16.to_be_bytes());
+        self.four(0);
+        self.four(0);
+        self.out.extend(g.gid.to_be_bytes());
+    }
+
+    /// xetex.web's `pic_out`: the picture as xdvipdfmx's special.
+    fn pic_out(&mut self, p: &crate::native::Pic) {
+        self.synch_h();
+        self.synch_v();
+        let mut s = String::from("pdf:image matrix ");
+        for t in p.t {
+            crate::print::scaled(&mut s, t);
+            s.push(' ');
+        }
+        let _ = std::fmt::Write::write_fmt(&mut s, format_args!("page {} ", p.page));
+        s.push_str(match p.pdf_box {
+            crate::xpic::PDFBOX_CROP => "pagebox cropbox ",
+            crate::xpic::PDFBOX_MEDIA => "pagebox mediabox ",
+            crate::xpic::PDFBOX_BLEED => "pagebox bleedbox ",
+            crate::xpic::PDFBOX_ART => "pagebox artbox ",
+            crate::xpic::PDFBOX_TRIM => "pagebox trimbox ",
+            _ => "",
+        });
+        let mut bytes = s.into_bytes();
+        bytes.push(b'(');
+        bytes.extend_from_slice(&p.path);
+        bytes.push(b')');
+        if bytes.len() < 256 {
+            self.byte(XXX1);
+            self.byte(bytes.len() as u8);
+        } else {
+            self.byte(XXX4);
+            self.four(bytes.len() as i32);
+        }
+        self.out.extend(bytes);
     }
 
     /// §640: one page, from `bop` to `eop` (the back pointer left 0).
@@ -889,6 +1010,22 @@ impl Writer<'_> {
             self.four(c);
         }
         self.four(0);
+        if let Some((w, h)) = s.xdv {
+            // (xetex.web: the page's size for xdvipdfmx, at its start)
+            let mut t = String::from("pdf:pagesize ");
+            if w > 0 && h > 0 {
+                t.push_str("width ");
+                crate::print::scaled(&mut t, w);
+                t.push_str("pt height ");
+                crate::print::scaled(&mut t, h);
+                t.push_str("pt");
+            } else {
+                t.push_str("default");
+            }
+            self.byte(XXX1);
+            self.byte(t.len() as u8);
+            self.out.extend(t.as_bytes());
+        }
         self.cur_v = b.h + s.voffset;
         self.list_out(b);
         self.byte(EOP);
@@ -911,7 +1048,10 @@ fn number(numbers: &Numbers, extra: &mut Vec<Arc<str>>, f: &Font) -> u32 {
 
 /// The length of font `f`'s `fnt_def` (§602).
 fn def_len(f: &Font) -> i32 {
-    16 + f.name.len() as i32
+    match &f.native {
+        Some(nf) => 5 + nf.xf.font_def().len() as i32,
+        None => 16 + f.name.len() as i32,
+    }
 }
 
 /// Page `p`'s commands, with fonts numbered by `numbers` (then `extra`),
@@ -970,6 +1110,13 @@ fn comment(date: [i32; 4]) -> String {
 
 /// §602: `dvi_font_def` of font number `n`.
 fn font_def(out: &mut Vec<u8>, f: &Font, n: u32) {
+    if let Some(nf) = &f.native {
+        // (xetex.web: `dvi_native_font_def`)
+        out.push(DEFINE_NATIVE_FONT);
+        out.extend((n - 1).to_be_bytes());
+        out.extend(nf.xf.font_def());
+        return;
+    }
     out.push(FNT_DEF1);
     out.push((n - 1) as u8);
     out.extend(f.checksum.to_be_bytes());
@@ -991,15 +1138,25 @@ pub fn assemble(numbers: &Numbers, pages: &[Page], bodies: &mut [Arc<Body>]) -> 
 
 /// [`assemble`] for a DVI writer whose buffer is `buf` bytes.
 pub fn assemble_in(numbers: &Numbers, pages: &[Page], bodies: &mut [Arc<Body>], buf: i32) -> (Vec<u8>, usize) {
+    assemble_as(numbers, pages, bodies, buf, false)
+}
+
+/// [`assemble_in`] as TeX writes DVI or (`xdv`) as XeTeX writes XDV (its
+/// id byte and preamble comment).
+pub fn assemble_as(numbers: &Numbers, pages: &[Page], bodies: &mut [Arc<Body>], buf: i32, xdv: bool) -> (Vec<u8>, usize) {
     let Some(first) = pages.first() else { return (Vec::new(), 0) };
+    let id = if xdv { XDV_ID_BYTE } else { ID_BYTE };
     let mut out = Vec::new();
     // (§617: the preamble, at the first page)
     out.push(PRE);
-    out.push(ID_BYTE);
+    out.push(id);
     out.extend(25_400_000i32.to_be_bytes());
     out.extend(473_628_672i32.to_be_bytes());
     out.extend(first.ship.mag.to_be_bytes());
-    let c = comment(first.ship.date);
+    let mut c = comment(first.ship.date);
+    if xdv {
+        c = c.replacen(" TeX output", " XeTeX output", 1);
+    }
     out.push(c.len() as u8);
     out.extend(c.as_bytes());
     let mut extra: Vec<Arc<str>> = Vec::new();
@@ -1066,7 +1223,7 @@ pub fn assemble_in(numbers: &Numbers, pages: &[Page], bodies: &mut [Arc<Body>], 
     }
     out.push(POST_POST);
     out.extend(post.to_be_bytes());
-    out.push(ID_BYTE);
+    out.push(id);
     let ptr = out.len() as i32 % buf;
     let k = 4 + (buf - ptr) % 4;
     out.extend(std::iter::repeat_n(223, k as usize));

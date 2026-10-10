@@ -6,6 +6,14 @@
 //! [`MathEnv`] (the families' `\fontdimen`s are global values: the σ
 //! parameters of family 2, the ξ parameters of family 3, §700–702).
 //!
+//! XeTeX's (xetex.web §742–§806): families 0–255, characters of 21 bits;
+//! a family whose font is an OpenType math font (`native::is_math`) reads
+//! its parameters from the font's MATH table (`native::mathsy`,
+//! `native::mathex`: pure functions of the font value), its characters
+//! are glyphs (`Item::Glyph`), its delimiters, radicals, big operators and
+//! accents grow by the table's variants and assemblies, scripts are
+//! kerned by its math kerns, accents placed by its attachment points.
+//!
 //! A math list is a `Vec<Item>`: noads, style changes and choices are
 //! [`Item::Noad`] entries ([`MItem`]); the other items (glue, kerns,
 //! penalties, rules, discretionaries, marks) are the nodes an mlist may
@@ -19,6 +27,7 @@ use std::sync::Arc;
 use crate::arith::xn_over_d;
 use crate::item::{BoxNode, Item, RUNNING};
 use crate::pack::{self, Spec};
+use crate::native::{self, GlyphItem};
 use crate::tfm::{Font, Glyph, LigKern, Tag};
 use crate::val::Glue;
 
@@ -34,10 +43,37 @@ pub const COND_MATH_GLUE: u8 = 98;
 pub const MU_GLUE: u8 = 99;
 /// §157
 const INF_PENALTY: i32 = 10000;
-/// §699: the sizes, as offsets of the family fonts.
-const TEXT_SIZE: usize = 0;
-const SCRIPT_SIZE: usize = 16;
-const SCRIPT_SCRIPT_SIZE: usize = 32;
+/// §699: the sizes, as offsets of the family fonts (XeTeX's 256
+/// families: `script_size` is `number_math_families`).
+pub const TEXT_SIZE: usize = 0;
+pub const SCRIPT_SIZE: usize = 256;
+pub const SCRIPT_SCRIPT_SIZE: usize = 512;
+/// The family fonts' slots: 256 families in three sizes.
+pub const FAM_SLOTS: usize = 768;
+/// xetex.web: accent noad subtypes (`\Umathaccent fixed`, `bottom`).
+pub const FIXED_ACC: u8 = 1;
+pub const BOTTOM_ACC: u8 = 2;
+/// `get_ot_math_accent_pos` without an attachment point.
+const NO_ACCENT_POS: i32 = 0x7FFF_FFFF;
+/// `min_halfword` (xetex.web's `stack_glue_into_box` sets a vertical
+/// box's width to it).
+const MIN_HALFWORD: i32 = -0xFFF_FFFF;
+/// xetex.web §742: the MATH constants math reads.
+const DISPLAY_OPERATOR_MIN_HEIGHT: u32 = 3;
+const ACCENT_BASE_HEIGHT: u32 = 6;
+const SUBSCRIPT_TOP_MAX: u32 = 9;
+const SUPERSCRIPT_BOTTOM_MIN: u32 = 13;
+const SUB_SUPERSCRIPT_GAP_MIN: u32 = 15;
+const SUPERSCRIPT_BOTTOM_MAX_WITH_SUBSCRIPT: u32 = 16;
+const STACK_GAP_MIN: u32 = 26;
+const STACK_DISPLAY_STYLE_GAP_MIN: u32 = 27;
+const FRACTION_NUMERATOR_GAP_MIN: u32 = 36;
+const FRACTION_NUM_DISPLAY_STYLE_GAP_MIN: u32 = 37;
+const FRACTION_DENOMINATOR_GAP_MIN: u32 = 39;
+const FRACTION_DENOM_DISPLAY_STYLE_GAP_MIN: u32 = 40;
+const RADICAL_VERTICAL_GAP: u32 = 49;
+const RADICAL_DISPLAY_STYLE_VERTICAL_GAP: u32 = 50;
+const RADICAL_RULE_THICKNESS: u32 = 51;
 /// The largest dimension (`max_dimen`).
 const MAX_DIMEN: i32 = 0o7_777_777_777;
 
@@ -66,23 +102,32 @@ pub fn half(x: i32) -> i32 {
     if x % 2 != 0 { (x + 1).div_euclid(2) } else { x / 2 }
 }
 
-/// §683: a delimiter field.
+/// §683: a delimiter field (XeTeX: 8-bit families, 21-bit characters).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Delim {
     pub small_fam: u8,
-    pub small_char: u8,
+    pub small_char: u32,
     pub large_fam: u8,
-    pub large_char: u8,
+    pub large_char: u32,
 }
 
 impl Delim {
-    /// From a 24-bit delimiter code (§1160).
+    /// From a 24-bit delimiter code (§1160), or XeTeX's extended one
+    /// (`"40000000 + fam*"200000 + usv`: one size).
     pub fn from_code(v: i32) -> Delim {
+        if v >= 0x4000_0000 {
+            return Delim {
+                small_fam: ((v / 0x20_0000) % 0x100) as u8,
+                small_char: (v % 0x20_0000) as u32,
+                large_fam: 0,
+                large_char: 0,
+            };
+        }
         Delim {
             small_fam: ((v / 0o4_000_000) % 16) as u8,
-            small_char: ((v / 0o10_000) % 256) as u8,
+            small_char: ((v / 0o10_000) % 256) as u32,
             large_fam: ((v / 256) % 16) as u8,
-            large_char: (v % 256) as u8,
+            large_char: (v % 256) as u32,
         }
     }
 }
@@ -94,12 +139,12 @@ pub enum Field {
     Empty,
     Char {
         fam: u8,
-        ch: u8,
+        ch: u32,
     },
     /// A character in mid-word (§752): no italic correction.
     TextChar {
         fam: u8,
-        ch: u8,
+        ch: u32,
     },
     Box(Arc<BoxNode>),
     Mlist(Vec<Item>),
@@ -134,9 +179,11 @@ pub enum Kind {
     },
     Under,
     Over,
+    /// `sub`: XeTeX's `fixed_acc`, `bottom_acc` bits.
     Accent {
         fam: u8,
-        ch: u8,
+        ch: u32,
+        sub: u8,
     },
     Vcenter,
     Left(Delim),
@@ -386,8 +433,9 @@ pub struct Params {
     pub thick_mu_skip: Arc<Glue>,
 }
 
-/// `\textfont`, `\scriptfont`, `\scriptscriptfont` of the 16 families, at
-/// `fam + size` (`size` 0, 16, 32); `None`: `\nullfont`.
+/// `\textfont`, `\scriptfont`, `\scriptscriptfont` of the families, at
+/// `fam + size` (`size` 0, 256, 512; [`FAM_SLOTS`] long); `None`:
+/// `\nullfont` (or a family not read: none the formula uses).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Fonts(pub Vec<Option<Arc<Font>>>);
 
@@ -402,15 +450,22 @@ impl Fonts {
 pub trait MathEnv {
     fn param(&mut self, f: &Arc<Font>, k: u16) -> i32;
     fn skew_char(&mut self, f: &Arc<Font>) -> i32;
+    /// XeTeX: `get_native_glyph(new_native_character(f, c), 0)`, the
+    /// glyph of character `c` set in native font `f` (with its mapping;
+    /// a character the font lacks is warned of).
+    fn native_char_glyph(&mut self, f: &Arc<Font>, c: u32) -> u16 {
+        native::native(f).map_or(0, |nf| nf.xf.map_char_to_glyph(c as i32) as u16)
+    }
 }
 
 /// What the caller reports, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    /// §723: "\textfont 3 is undefined (character x)"; `size` 0, 16, 32.
-    UndefinedFamily { size: usize, fam: u8, ch: u8 },
+    /// §723: "\textfont 3 is undefined (character x)"; `size` 0, 256,
+    /// 512.
+    UndefinedFamily { size: usize, fam: u8, ch: u32 },
     /// §581: the character is not in the font.
-    MissingChar { font: Arc<Font>, ch: u8 },
+    MissingChar { font: Arc<Font>, ch: u32 },
 }
 
 fn kern(w: i32) -> Item {
@@ -455,6 +510,8 @@ fn natural_hd(list: &[Item]) -> (i32, i32) {
             },
             Item::Box(b) => (b.h, b.d, b.shift),
             Item::Rule { h, d, .. } => (*h, *d, 0),
+            Item::Glyph(g) => (g.h, g.d, 0),
+            Item::Native(w) => (w.h, w.d, 0),
             _ => continue,
         };
         h = h.max(ht - s);
@@ -527,6 +584,63 @@ struct Ctx<'a, E: MathEnv> {
     style: u8,
     size: usize,
     mu: i32,
+    /// §724: `cur_f`, the font of the last character fetched (XeTeX reads
+    /// it after the fact). A formula begins with none (CORE.md: XeTeX's
+    /// carries over from the formula before).
+    cur_f: Option<Arc<Font>>,
+}
+
+/// §722: what `fetch` found.
+enum Fetched {
+    /// An undefined family or a missing character (the field emptied).
+    None,
+    Tfm(Arc<Font>, Glyph),
+    /// A native font's character (`cur_i` null).
+    Native(Arc<Font>),
+}
+
+/// A glyph of an OpenType math font with its glyph metrics
+/// (`set_native_glyph_metrics(p, 1)`).
+fn glyph_item(f: &Arc<Font>, g: u16) -> GlyphItem {
+    native::glyph(f, g, true)
+}
+
+/// XeTeX's `is_glyph_node` of a list's first item.
+fn glyph_of(n: Option<&Item>) -> Option<Arc<GlyphItem>> {
+    match n {
+        Some(Item::Glyph(g)) => Some(g.clone()),
+        _ => None,
+    }
+}
+
+/// xetex.web §749 `stack_glyph_into_box`: glyph `g` after the others in
+/// an hlist (the first one's height and depth not counted), under them in
+/// a vlist.
+fn stack_glyph_into_box(b: &mut BoxNode, g: GlyphItem) {
+    if b.vertical {
+        b.h = g.h;
+        b.w = b.w.max(g.w);
+        b.list.insert(0, Item::Glyph(Arc::new(g)));
+    } else {
+        if !b.list.is_empty() {
+            b.h = b.h.max(g.h);
+            b.d = b.d.max(g.d);
+        }
+        b.list.push(Item::Glyph(Arc::new(g)));
+    }
+}
+
+/// xetex.web §749 `stack_glue_into_box`: glue of width `min` stretching
+/// to `max`. In a vlist it sets the box's width to the glue node's
+/// `width` word, which holds `leader_ptr`: `null`.
+fn stack_glue_into_box(b: &mut BoxNode, min: i32, max: i32) {
+    let g = Item::Glue { g: Arc::new(Glue { width: min, stretch: max - min, ..Glue::default() }), sub: 0, zero: false };
+    if b.vertical {
+        b.list.insert(0, g);
+        b.w = MIN_HALFWORD;
+    } else {
+        b.list.push(g);
+    }
 }
 
 /// §726: `mlist` in `style` as an hlist; `penalties`: penalties after
@@ -539,7 +653,7 @@ pub fn mlist_to_hlist(
     params: &Params,
     env: &mut impl MathEnv,
 ) -> (Vec<Item>, Vec<Event>) {
-    let mut cx = Ctx { env, fonts, params, events: Vec::new(), style, size: 0, mu: 0 };
+    let mut cx = Ctx { env, fonts, params, events: Vec::new(), style, size: 0, mu: 0, cur_f: None };
     let list = cx.mlist_to_hlist(mlist, style, penalties);
     (list, cx.events)
 }
@@ -549,9 +663,11 @@ impl<E: MathEnv> Ctx<'_, E> {
         self.fonts.get(z).cloned()
     }
 
-    /// `mathsy(k)` of family 2 in `size`.
+    /// `mathsy(k)` of family 2 in `size` (xetex.web §742: an OpenType
+    /// math font's from its MATH table).
     fn mathsy(&mut self, k: u16, size: usize) -> i32 {
         match self.fam(2 + size) {
+            Some(f) if native::is_math(&f) => native::mathsy(&f, i32::from(k)),
             Some(f) => self.env.param(&f, k),
             None => 0,
         }
@@ -565,9 +681,20 @@ impl<E: MathEnv> Ctx<'_, E> {
     /// `mathex(k)` of family 3 in the current size.
     fn mathex(&mut self, k: u16) -> i32 {
         match self.fam(3 + self.size) {
+            Some(f) if native::is_math(&f) => native::mathex(&f, i32::from(k)),
             Some(f) => self.env.param(&f, k),
             None => 0,
         }
+    }
+
+    /// `is_new_mathfont(cur_f)`.
+    fn cur_mathfont(&self) -> bool {
+        self.cur_f.as_ref().is_some_and(|f| native::is_math(f))
+    }
+
+    /// `get_ot_math_constant(cur_f, k)`.
+    fn cur_constant(&self, k: u32) -> i32 {
+        self.cur_f.as_ref().and_then(|f| native::native(f)).map_or(0, |nf| nf.xf.ot_math_constant(k))
     }
     fn default_rule_thickness(&mut self) -> i32 {
         self.mathex(8)
@@ -602,39 +729,71 @@ impl<E: MathEnv> Ctx<'_, E> {
         g.height + g.depth
     }
 
-    /// §706: a delimiter of size at least `v` for `d` in size `s`.
+    /// §706 (xetex.web §749): a delimiter of size at least `v` for `d` in
+    /// size `s`. In a native font the character's vertical variants are
+    /// looked at, then its assembly.
     fn var_delimiter(&mut self, d: Delim, s: usize, v: i32) -> BoxNode {
         let mut f: Option<Arc<Font>> = None;
-        let mut c: u8 = 0;
+        let mut c: u32 = 0;
         let mut ext: Option<u8> = None;
+        let mut assembly: Option<Vec<partex_otf::math::GlyphPart>> = None;
         let mut w = 0;
-        'found: for (z0, x) in [(d.small_fam, d.small_char), (d.large_fam, d.large_char)] {
-            // (§707)
+        'found: for (z0, x0) in [(d.small_fam, d.small_char), (d.large_fam, d.large_char)] {
+            // (§707; XeTeX's character is a quarterword)
+            let mut x = x0 & 0xFFFF;
             if z0 != 0 || x != 0 {
                 let mut z = usize::from(z0) + s + SCRIPT_SIZE;
                 loop {
                     z -= SCRIPT_SIZE;
                     if let Some(g) = self.fam(z) {
-                        // (§708)
-                        let mut y = x;
-                        while let Some(q) = g.glyph(i32::from(y)) {
-                            if let Tag::Ext(r) = q.tag {
-                                f = Some(g.clone());
-                                c = y;
-                                ext = Some(r);
-                                break 'found;
-                            }
-                            let u = q.height + q.depth;
-                            if u > w {
-                                f = Some(g.clone());
-                                c = y;
-                                w = u;
-                                if u >= v {
-                                    break 'found;
+                        if let Some(nf) = native::native(&g) {
+                            // (xetex.web §751)
+                            x = nf.xf.map_char_to_glyph(x as i32) as u32 & 0xFFFF;
+                            f = Some(g.clone());
+                            c = x;
+                            w = 0;
+                            let mut n = 0;
+                            loop {
+                                let (y, u) = nf.xf.ot_math_variant(x, n, false);
+                                if u > w {
+                                    c = y;
+                                    w = u;
+                                    if u >= v {
+                                        break 'found;
+                                    }
+                                }
+                                n += 1;
+                                if u < 0 {
+                                    break;
                                 }
                             }
-                            let Tag::List(next) = q.tag else { break };
-                            y = next;
+                            // (no glyph big enough: is it extensible?)
+                            assembly = nf.xf.ot_assembly(x, false);
+                            if assembly.is_some() {
+                                break 'found;
+                            }
+                        } else {
+                            // (§708)
+                            let mut y = x;
+                            while let Some(q) = g.glyph(y as i32) {
+                                if let Tag::Ext(r) = q.tag {
+                                    f = Some(g.clone());
+                                    c = y;
+                                    ext = Some(r);
+                                    break 'found;
+                                }
+                                let u = q.height + q.depth;
+                                if u > w {
+                                    f = Some(g.clone());
+                                    c = y;
+                                    w = u;
+                                    if u >= v {
+                                        break 'found;
+                                    }
+                                }
+                                let Tag::List(next) = q.tag else { break };
+                                y = u32::from(next);
+                            }
                         }
                     }
                     if z < SCRIPT_SIZE {
@@ -645,12 +804,91 @@ impl<E: MathEnv> Ctx<'_, E> {
         }
         let mut b = match f {
             None => BoxNode { w: self.params.null_delimiter_space, ..BoxNode::default() },
-            Some(f) => match ext {
+            Some(f) if f.native.is_none() => match ext {
                 Some(r) => Self::extensible(&f, r, v),
-                None => Self::char_box(&f, c),
+                None => Self::char_box(&f, c as u8),
             },
+            Some(f) => {
+                if let Some(a) = assembly {
+                    Self::opentype_assembly(&f, &a, v, false)
+                } else {
+                    let g = glyph_item(&f, c as u16);
+                    BoxNode { vertical: true, w: g.w, h: g.h, d: g.d, list: vec![Item::Glyph(Arc::new(g))], ..BoxNode::default() }
+                }
+            }
         };
         b.shift = half(b.h - b.d) - self.axis_height(s);
+        b
+    }
+
+    /// xetex.web §749 `build_opentype_assembly`: a box at least `s` high
+    /// (wide if `horiz`) of the parts `a` of font `f`, as few copies of the
+    /// extenders as do, their overlaps glue that stretches.
+    fn opentype_assembly(f: &Arc<Font>, a: &[partex_otf::math::GlyphPart], s: i32, horiz: bool) -> BoxNode {
+        let mut b = BoxNode { vertical: !horiz, ..BoxNode::default() };
+        let min_o = native::native(f).map_or(0, |nf| nf.xf.ot_min_connector_overlap());
+        let mut n: u32 = 0;
+        loop {
+            let mut no_extenders = true;
+            let mut s_max: i32 = 0;
+            let mut prev_o = 0;
+            for p in a {
+                let reps = if p.extender {
+                    no_extenders = false;
+                    n
+                } else {
+                    1
+                };
+                for _ in 0..reps {
+                    let o = p.start_connector_length.min(min_o).min(prev_o);
+                    s_max = s_max.wrapping_sub(o).wrapping_add(p.full_advance);
+                    prev_o = p.end_connector_length;
+                }
+            }
+            // (XeTeX loops for ever on extenders that add nothing)
+            if s_max >= s || no_extenders || n >= 1 << 16 {
+                break;
+            }
+            n += 1;
+        }
+        let mut prev_o = 0;
+        for p in a {
+            for _ in 0..if p.extender { n } else { 1 } {
+                let mut o = p.start_connector_length.min(prev_o);
+                let oo = o;
+                o = o.min(min_o);
+                if oo > 0 {
+                    stack_glue_into_box(&mut b, -oo, -o);
+                }
+                stack_glyph_into_box(&mut b, glyph_item(f, p.glyph as u16));
+                prev_o = p.end_connector_length;
+            }
+        }
+        let (mut nat, mut stretch) = (0, 0);
+        for p in &b.list {
+            match p {
+                Item::Glyph(g) => nat += if horiz { g.w } else { g.h + g.d },
+                Item::Glue { g, .. } => {
+                    nat += g.width;
+                    stretch += g.stretch;
+                }
+                _ => {}
+            }
+        }
+        let size = if s > nat && stretch > 0 {
+            let o = (s - nat).min(stretch);
+            b.glue.order = 0;
+            b.glue.sign = 1;
+            b.glue.ratio = f64::from(o) / f64::from(stretch);
+            nat + crate::show::zround(f64::from(stretch) * b.glue.ratio)
+        } else {
+            nat
+        };
+        if horiz {
+            b.w = size;
+        } else {
+            b.h = size;
+        }
         b
     }
 
@@ -783,30 +1021,44 @@ impl<E: MathEnv> Ctx<'_, E> {
         r
     }
 
-    /// §722: `fetch`: the font and metrics of a math character, or an
-    /// event (and `None`) if there are none.
-    fn fetch(&mut self, fam: u8, ch: u8) -> Option<(Arc<Font>, Glyph)> {
-        let Some(f) = self.fam(usize::from(fam) + self.size) else {
+    /// §722 (xetex.web §765): `fetch` of math character `(fam, ch)`,
+    /// setting `cur_f`; an event if it is not there.
+    fn fetch(&mut self, fam: u8, ch: u32) -> Fetched {
+        let f = self.fam(usize::from(fam) + self.size);
+        self.cur_f.clone_from(&f);
+        let Some(f) = f else {
             self.events.push(Event::UndefinedFamily { size: self.size, fam, ch });
-            return None;
+            return Fetched::None;
         };
-        if let Some(g) = f.glyph(i32::from(ch)) {
-            Some((f, g))
+        if f.native.is_some() {
+            return Fetched::Native(f);
+        }
+        if let Some(g) = f.glyph(ch as i32).filter(|_| ch <= 255) {
+            Fetched::Tfm(f, g)
         } else {
             self.events.push(Event::MissingChar { font: f, ch });
-            None
+            Fetched::None
         }
     }
 
     /// `fetch` of a character field, emptied if the character is not
     /// there.
-    fn fetch_field(&mut self, field: &mut Field) -> Option<(Arc<Font>, u8, Glyph)> {
-        let (Field::Char { fam, ch } | Field::TextChar { fam, ch }) = *field else { return None };
+    fn fetch_field(&mut self, field: &mut Field) -> Fetched {
+        let (Field::Char { fam, ch } | Field::TextChar { fam, ch }) = *field else { return Fetched::None };
         let r = self.fetch(fam, ch);
-        if r.is_none() {
+        if let Fetched::None = r {
             *field = Field::Empty;
         }
-        r.map(|(f, g)| (f, ch, g))
+        r
+    }
+
+    /// `fetch` of a TFM character field: its font, character and metrics.
+    fn fetch_tfm(&mut self, field: &mut Field) -> Option<(Arc<Font>, u8, Glyph)> {
+        let (Field::Char { ch, .. } | Field::TextChar { ch, .. }) = *field else { return None };
+        match self.fetch_field(field) {
+            Fetched::Tfm(f, g) => Some((f, ch as u8, g)),
+            _ => None,
+        }
     }
 
     fn mlist_to_hlist(&mut self, mlist: Vec<Item>, style: u8, penalties: bool) -> Vec<Item> {
@@ -904,9 +1156,9 @@ impl<E: MathEnv> Ctx<'_, E> {
                 }
                 Kind::Over => self.make_over(&mut q),
                 Kind::Under => self.make_under(&mut q),
-                Kind::Accent { fam, ch } => {
-                    let (fam, ch) = (*fam, *ch);
-                    self.make_math_accent(&mut q, fam, ch);
+                Kind::Accent { fam, ch, sub } => {
+                    let (fam, ch, sub) = (*fam, *ch, *sub);
+                    self.make_math_accent(&mut q, fam, ch, sub);
                 }
                 Kind::Vcenter => self.make_vcenter(&mut q),
             }
@@ -914,11 +1166,26 @@ impl<E: MathEnv> Ctx<'_, E> {
             let text = matches!(q.nucleus, Field::TextChar { .. });
             let mut p = match std::mem::take(&mut q.nucleus) {
                 mut n @ (Field::Char { .. } | Field::TextChar { .. }) => {
-                    // (§755)
+                    // (§755, xetex.web §799)
+                    let (Field::Char { ch, .. } | Field::TextChar { ch, .. }) = n else { unreachable!() };
                     match self.fetch_field(&mut n) {
-                        Some((f, ch, g)) => {
+                        Fetched::Native(f) => {
+                            let g = self.env.native_char_glyph(&f, ch);
+                            let g = glyph_item(&f, g);
+                            delta = native::native(&f).map_or(0, |nf| nf.xf.ot_math_ital_corr(u32::from(g.gid)));
+                            if text && !native::is_math(&f) {
+                                delta = 0;
+                            }
+                            let mut p = vec![Item::Glyph(Arc::new(g))];
+                            if q.sub == Field::Empty && delta != 0 {
+                                p.push(kern(delta));
+                                delta = 0;
+                            }
+                            p
+                        }
+                        Fetched::Tfm(f, g) => {
                             delta = g.italic;
-                            let mut p = vec![Item::Char(f.clone(), ch)];
+                            let mut p = vec![Item::Char(f.clone(), ch as u8)];
                             if text && self.env.param(&f, 2) != 0 {
                                 delta = 0;
                             }
@@ -928,7 +1195,7 @@ impl<E: MathEnv> Ctx<'_, E> {
                             }
                             p
                         }
-                        None => Vec::new(),
+                        Fetched::None => Vec::new(),
                     }
                 }
                 Field::Empty => Vec::new(),
@@ -1015,11 +1282,16 @@ impl<E: MathEnv> Ctx<'_, E> {
         v.d = delta - v.h;
     }
 
-    /// §737
+    /// §737 (xetex.web §780: an OpenType math font's rule and gaps).
     fn make_radical(&mut self, q: &mut Noad, d: Delim) {
+        let f = self.fam(usize::from(d.small_fam) + self.size);
+        let ot = f.as_ref().is_some_and(|f| native::is_math(f));
+        let constant = |k: u32| f.as_ref().and_then(|f| native::native(f)).map_or(0, |nf| nf.xf.ot_math_constant(k));
+        let t = if ot { constant(RADICAL_RULE_THICKNESS) } else { self.default_rule_thickness() };
         let x = self.clean_box(std::mem::take(&mut q.nucleus), cramped(self.style));
-        let t = self.default_rule_thickness();
-        let mut clr = if self.style < TEXT {
+        let mut clr = if ot {
+            if self.style < TEXT { constant(RADICAL_DISPLAY_STYLE_VERTICAL_GAP) } else { constant(RADICAL_VERTICAL_GAP) }
+        } else if self.style < TEXT {
             let size = self.size;
             t + self.math_x_height(size).abs() / 4
         } else {
@@ -1027,6 +1299,10 @@ impl<E: MathEnv> Ctx<'_, E> {
         };
         let size = self.size;
         let mut y = self.var_delimiter(d, size, x.h + x.d + clr + t);
+        if ot {
+            y.d = y.h + y.d - t;
+            y.h = t;
+        }
         let delta = y.d - (x.h + x.d + clr);
         if delta > 0 {
             clr += half(delta);
@@ -1037,12 +1313,44 @@ impl<E: MathEnv> Ctx<'_, E> {
         q.nucleus = Field::Box(Arc::new(hpack_natural(vec![boxed(y), boxed(o)])));
     }
 
+    /// xetex.web §781 `compute_ot_math_accent_pos`: the top accent
+    /// attachment of the nucleus's character (or of the nucleus of an
+    /// accent that is its subformula's first noad).
+    fn compute_ot_math_accent_pos(&mut self, nucleus: &mut Field) -> i32 {
+        match nucleus {
+            Field::Char { ch, .. } => {
+                let ch = *ch;
+                self.fetch_field(nucleus);
+                match self.cur_f.clone() {
+                    Some(f) if f.native.is_some() => {
+                        let g = self.env.native_char_glyph(&f, ch);
+                        native::native(&f).map_or(NO_ACCENT_POS, |nf| nf.xf.ot_math_accent_pos(u32::from(g)))
+                    }
+                    _ => NO_ACCENT_POS,
+                }
+            }
+            Field::Mlist(l) => match l.first_mut() {
+                Some(Item::Noad(m)) => {
+                    let m = Arc::make_mut(m);
+                    match m {
+                        MItem::Noad(r) if matches!(r.kind, Kind::Accent { .. }) => {
+                            self.compute_ot_math_accent_pos(&mut r.nucleus)
+                        }
+                        _ => NO_ACCENT_POS,
+                    }
+                }
+                _ => NO_ACCENT_POS,
+            },
+            _ => NO_ACCENT_POS,
+        }
+    }
+
     /// §741: the skew of a character nucleus: its kern with the font's
     /// `\skewchar`.
     fn skew(&mut self, nucleus: &mut Field) -> i32 {
         let mut s = 0;
         if let Field::Char { .. } = nucleus
-            && let Some((cf, _, g)) = self.fetch_field(nucleus)
+            && let Some((cf, _, g)) = self.fetch_tfm(nucleus)
             && let Tag::Lig(start) = g.tag
         {
             let skew = self.env.skew_char(&cf);
@@ -1068,27 +1376,51 @@ impl<E: MathEnv> Ctx<'_, E> {
         s
     }
 
-    /// §738
-    fn make_math_accent(&mut self, q: &mut Noad, fam: u8, ch: u8) {
-        let Some((f, mut i)) = self.fetch(fam, ch) else { return };
-        let mut c = ch;
-        let s = self.skew(&mut q.nucleus);
-        let accentee =
-            if matches!(q.nucleus, Field::Char { .. }) { q.nucleus.clone() } else { std::mem::take(&mut q.nucleus) };
-        let mut x = self.clean_box(accentee, cramped(self.style));
-        let (w, mut h) = (x.w, x.h);
-        // (§740: a larger accent if there is one and it fits)
-        while let Tag::List(y) = i.tag {
-            match f.glyph(i32::from(y)) {
-                Some(g) if g.width <= w => {
-                    i = g;
-                    c = y;
-                }
-                _ => break,
+    /// §738 (xetex.web §781: accents of native fonts, placed by their
+    /// attachment points, growing by their horizontal variants and
+    /// assemblies; bottom and fixed accents).
+    fn make_math_accent(&mut self, q: &mut Noad, fam: u8, ch: u32, sub: u8) {
+        let bottom = sub & BOTTOM_ACC != 0;
+        let accentee = |q: &mut Noad| {
+            if matches!(q.nucleus, Field::Char { .. }) { q.nucleus.clone() } else { std::mem::take(&mut q.nucleus) }
+        };
+        let (f, mut s, mut x, w, mut h, tfm) = match self.fetch(fam, ch) {
+            Fetched::None => return,
+            Fetched::Native(f) => {
+                let s = if bottom { 0 } else { self.compute_ot_math_accent_pos(&mut q.nucleus) };
+                let a = accentee(q);
+                let x = self.clean_box(a, cramped(self.style));
+                let (w, h) = (x.w, x.h);
+                (f, s, x, w, h, None)
             }
-        }
-        let xh = self.env.param(&f, 5);
-        let mut delta = if h < xh { h } else { xh };
+            Fetched::Tfm(f, mut i) => {
+                let mut c = ch as u8;
+                let s = self.skew(&mut q.nucleus);
+                let a = accentee(q);
+                let x = self.clean_box(a, cramped(self.style));
+                let (w, h) = (x.w, x.h);
+                // (§740: a larger accent if there is one and it fits)
+                while let Tag::List(y) = i.tag {
+                    match f.glyph(i32::from(y)) {
+                        Some(g) if g.width <= w => {
+                            i = g;
+                            c = y;
+                        }
+                        _ => break,
+                    }
+                }
+                (f, s, x, w, h, Some(c))
+            }
+        };
+        let mut delta = if native::is_math(&f) {
+            if bottom {
+                0
+            } else {
+                h.min(native::native(&f).map_or(0, |nf| nf.xf.ot_math_constant(ACCENT_BASE_HEIGHT)))
+            }
+        } else {
+            h.min(self.env.param(&f, 5))
+        };
         if (q.sup != Field::Empty || q.sub != Field::Empty) && matches!(q.nucleus, Field::Char { .. }) {
             // (§742: the scripts go into box `x`)
             let mut n = Noad::new(Kind::Ord);
@@ -1100,17 +1432,74 @@ impl<E: MathEnv> Ctx<'_, E> {
             delta = delta + x.h - h;
             h = x.h;
         }
-        let mut y = Self::char_box(&f, c);
-        y.shift = s + half(w - y.w);
+        let mut y = if let Some(c) = tfm {
+            let mut y = Self::char_box(&f, c);
+            y.shift = s + half(w - y.w);
+            y
+        } else {
+            // (the accent as a glyph, larger as the accentee is wider)
+            let c = self.env.native_char_glyph(&f, ch);
+            let nf = native::native(&f).cloned();
+            let mut p = glyph_item(&f, c);
+            let mut assembly = None;
+            if sub & FIXED_ACC == 0
+                && let Some(nf) = &nf
+            {
+                let mut a = 0;
+                loop {
+                    let (g, w2) = nf.xf.ot_math_variant(u32::from(c), a, true);
+                    if w2 > 0 && w2 <= w {
+                        p = glyph_item(&f, g as u16);
+                        a += 1;
+                    }
+                    // (XeTeX loops for ever on a variant of no width)
+                    if w2 < 0 || w2 >= w || w2 == 0 {
+                        if w2 < 0 {
+                            assembly = nf.xf.ot_assembly(u32::from(c), true).map(|a| Self::opentype_assembly(&f, &a, w, true));
+                        }
+                        break;
+                    }
+                }
+            }
+            let mut y = match assembly {
+                Some(b) => BoxNode { w: b.w, h: b.h, d: b.d, list: vec![boxed(b)], ..BoxNode::default() },
+                None => BoxNode { w: p.w, h: p.h, d: p.d, list: vec![Item::Glyph(Arc::new(p))], ..BoxNode::default() },
+            };
+            if bottom {
+                y.h = y.h.max(0);
+            } else {
+                y.d = y.d.max(0);
+            }
+            let sa = match glyph_of(y.list.first()) {
+                Some(g) => match nf.as_ref().map_or(NO_ACCENT_POS, |nf| nf.xf.ot_math_accent_pos(u32::from(g.gid))) {
+                    NO_ACCENT_POS => half(y.w),
+                    sa => sa,
+                },
+                None => half(y.w),
+            };
+            if bottom || s == NO_ACCENT_POS {
+                s = half(w);
+            }
+            y.shift = s - sa;
+            y
+        };
         y.w = 0;
         let xw = x.w;
-        let mut y = vpack_natural(vec![boxed(y), kern(-delta), boxed(x)]);
+        let mut y = if bottom {
+            let xh = h;
+            let mut y = vpack_natural(vec![boxed(x), boxed(y)]);
+            y.shift = -(xh - y.h);
+            y
+        } else {
+            let mut y = vpack_natural(vec![boxed(y), kern(-delta), boxed(x)]);
+            if y.h < h {
+                // (§739)
+                y.list.insert(0, kern(h - y.h));
+                y.h = h;
+            }
+            y
+        };
         y.w = xw;
-        if y.h < h {
-            // (§739)
-            y.list.insert(0, kern(h - y.h));
-            y.h = h;
-        }
         q.nucleus = Field::Box(Arc::new(y));
     }
 
@@ -1139,10 +1528,17 @@ impl<E: MathEnv> Ctx<'_, E> {
             shift_up = if thickness == 0 { self.mathsy(10, size) } else { self.mathsy(9, size) };
         }
         let mut delta = 0;
+        // (xetex.web §789, §790: the gaps of `cur_f`, the font of the last
+        // character fetched, if an OpenType math font)
+        let ot = self.cur_mathfont();
         if thickness == 0 {
             // (§745)
-            let t = self.default_rule_thickness();
-            let clr = if style < TEXT { 7 * t } else { 3 * t };
+            let clr = if ot {
+                self.cur_constant(if style < TEXT { STACK_DISPLAY_STYLE_GAP_MIN } else { STACK_GAP_MIN })
+            } else {
+                let t = self.default_rule_thickness();
+                if style < TEXT { 7 * t } else { 3 * t }
+            };
             let d = half(clr - ((shift_up - x.d) - (z.h - shift_down)));
             if d > 0 {
                 shift_up += d;
@@ -1150,11 +1546,21 @@ impl<E: MathEnv> Ctx<'_, E> {
             }
         } else {
             // (§746)
-            let clr = if style < TEXT { 3 * thickness } else { thickness };
+            let (clr1, clr2) = if ot {
+                if style < TEXT {
+                    (self.cur_constant(FRACTION_NUM_DISPLAY_STYLE_GAP_MIN), self.cur_constant(FRACTION_DENOM_DISPLAY_STYLE_GAP_MIN))
+                } else {
+                    (self.cur_constant(FRACTION_NUMERATOR_GAP_MIN), self.cur_constant(FRACTION_DENOMINATOR_GAP_MIN))
+                }
+            } else if style < TEXT {
+                (3 * thickness, 3 * thickness)
+            } else {
+                (thickness, thickness)
+            };
             delta = half(thickness);
             let axis = self.axis_height(size);
-            let delta1 = clr - ((shift_up - x.d) - (axis + delta));
-            let delta2 = clr - ((axis - delta) - (z.h - shift_down));
+            let delta1 = clr1 - ((shift_up - x.d) - (axis + delta));
+            let delta2 = clr2 - ((axis - delta) - (z.h - shift_down));
             if delta1 > 0 {
                 shift_up += delta1;
             }
@@ -1192,20 +1598,66 @@ impl<E: MathEnv> Ctx<'_, E> {
         let limits = *limits == Limits::Limits;
         let mut delta = 0;
         if let Field::Char { .. } = q.nucleus {
-            if let Some((f, _, mut g)) = self.fetch_field(&mut q.nucleus) {
+            if let Fetched::Tfm(f, mut g) = self.fetch_field(&mut q.nucleus) {
                 if self.style < TEXT
                     && let Tag::List(c) = g.tag
                     && let Some(i) = f.glyph(i32::from(c))
                 {
                     g = i;
                     if let Field::Char { ch, .. } = &mut q.nucleus {
-                        *ch = c;
+                        *ch = u32::from(c);
                     }
                 }
                 delta = g.italic;
             }
             let s = self.style;
             let mut x = self.clean_box(std::mem::take(&mut q.nucleus), s);
+            if self.cur_mathfont()
+                && let Some(f) = self.cur_f.clone()
+                && let Some(nf) = native::native(&f).cloned()
+                && let Some(mut p) = glyph_of(x.list.first()).map(|g| (*g).clone())
+            {
+                // (xetex.web §793: in display style a variant at least
+                // `displayOperatorMinHeight` high and larger than the text
+                // style's glyph, else the glyph's assembly)
+                let mut assembly = None;
+                if self.style < TEXT {
+                    let mut h1 = nf.xf.ot_math_constant(DISPLAY_OPERATOR_MIN_HEIGHT);
+                    let h = (p.h + p.d).wrapping_mul(5) / 4;
+                    if h1 < h {
+                        h1 = h;
+                    }
+                    let c = p.gid;
+                    let mut n = 0;
+                    loop {
+                        let (g, h2) = nf.xf.ot_math_variant(u32::from(c), n, false);
+                        if h2 > 0 {
+                            p = glyph_item(&f, g as u16);
+                        }
+                        n += 1;
+                        if h2 < 0 || h2 >= h1 {
+                            if h2 < 0 {
+                                assembly = nf.xf.ot_assembly(u32::from(c), false).map(|a| Self::opentype_assembly(&f, &a, h1, false));
+                            }
+                            break;
+                        }
+                    }
+                }
+                let (w, h, d) = if let Some(b) = assembly {
+                    delta = 0;
+                    let dims = (b.w, b.h, b.d);
+                    x.list = vec![boxed(b)];
+                    dims
+                } else {
+                    delta = nf.xf.ot_math_ital_corr(u32::from(p.gid));
+                    let dims = (p.w, p.h, p.d);
+                    x.list[0] = Item::Glyph(Arc::new(p));
+                    dims
+                };
+                x.w = w;
+                x.h = h;
+                x.d = d;
+            }
             if q.sub != Field::Empty && !limits {
                 x.w -= delta;
             }
@@ -1217,12 +1669,14 @@ impl<E: MathEnv> Ctx<'_, E> {
             return (delta, None);
         }
         // (§750)
+        let save_f = self.cur_f.clone();
         let style = self.style;
         let sup_empty = q.sup == Field::Empty;
         let sub_empty = q.sub == Field::Empty;
         let x = self.clean_box(std::mem::take(&mut q.sup), sup_style(style));
         let y = self.clean_box(std::mem::take(&mut q.nucleus), style);
         let z = self.clean_box(std::mem::take(&mut q.sub), sub_style(style));
+        self.cur_f = save_f;
         let mut v = BoxNode { vertical: true, w: y.w.max(x.w).max(z.w), ..BoxNode::default() };
         let mut x = Self::rebox(x, v.w);
         let y = Self::rebox(y, v.w);
@@ -1268,7 +1722,7 @@ impl<E: MathEnv> Ctx<'_, E> {
                 return;
             }
             q.nucleus = Field::TextChar { fam, ch };
-            let Some((cf, _, g)) = self.fetch_field(&mut q.nucleus) else { return };
+            let Some((cf, _, g)) = self.fetch_tfm(&mut q.nucleus) else { return };
             let Tag::Lig(start) = g.tag else { return };
             let mut k = usize::from(start);
             let first = cf.lig_kerns[k];
@@ -1277,19 +1731,20 @@ impl<E: MathEnv> Ctx<'_, E> {
             }
             loop {
                 let ci = cf.lig_kerns[k];
-                if ci.next == pch && ci.skip <= LigKern::STOP {
+                // (XeTeX compares the character's low 16 bits)
+                if u32::from(ci.next) == pch & 0xFFFF && ci.skip <= LigKern::STOP {
                     if ci.op >= LigKern::KERN {
                         todo.push_front(kern(char_kern(&cf, ci)));
                         return;
                     }
-                    let rem = ci.remainder;
+                    let rem = u32::from(ci.remainder);
                     match ci.op {
                         1 | 5 => q.nucleus = Field::TextChar { fam, ch: rem },
                         2 | 6 => {
                             if let Some(Item::Noad(pm)) = todo.front_mut()
                                 && let MItem::Noad(p) = Arc::make_mut(pm)
                             {
-                                p.nucleus = Field::Char { fam, ch: rem };
+                                p.nucleus = Field::Char { fam, ch: (pch & !0xFFFF) | rem };
                             }
                         }
                         3 | 7 | 11 => {
@@ -1327,12 +1782,68 @@ impl<E: MathEnv> Ctx<'_, E> {
         }
     }
 
-    /// §756–§759: the scripts of `q` attached to its hlist `p`.
+    /// xetex.web §805 "Fetch first character of a sub/superscript": the
+    /// font and glyph of script `field`'s first character if it is in an
+    /// OpenType math font. Kerns and glue before it are passed, style
+    /// changes obeyed, a `\mathchoice` followed; it is fetched in
+    /// subscript style, a missing one complained about (and its field
+    /// emptied) as `fetch` does.
+    fn script_glyph(&mut self, field: &mut Field) -> (Option<Arc<Font>>, u16) {
+        let mut this_style = sub_style(self.style);
+        let head = match field {
+            Field::Mlist(l) => first_nucleus(l, &mut this_style),
+            f => Some(f),
+        };
+        let Some(head) = head else { return (None, 0) };
+        let Field::Char { ch, .. } = *head else { return (None, 0) };
+        let save_f = self.cur_f.clone();
+        let saved_style = self.style;
+        self.style = this_style;
+        self.set_size_and_mu();
+        self.fetch_field(head);
+        let r = match self.cur_f.clone() {
+            Some(f) if native::is_math(&f) => {
+                let g = self.env.native_char_glyph(&f, ch);
+                (Some(f), g)
+            }
+            _ => (None, 0),
+        };
+        self.cur_f = save_f;
+        self.style = saved_style;
+        self.set_size_and_mu();
+        r
+    }
+
+    /// xetex.web §806: the OpenType math kern between nucleus `p` (if it
+    /// begins with a glyph) and a script of glyph `sg` in `sf`, shifted by
+    /// `shift`; appended to `p` unless zero.
+    fn attach_ot_kern(p: &mut Vec<Item>, script: &(Option<Arc<Font>>, u16), sup: bool, shift: i32) -> i32 {
+        let Some(g) = glyph_of(p.first()) else { return 0 };
+        let Some(nf) = native::native(&g.font) else { return 0 };
+        let k = match &script.0 {
+            Some(sf) => match native::native(sf) {
+                Some(snf) => {
+                    let cmd = if sup { partex_otf::xetex::ScriptKind::Sup } else { partex_otf::xetex::ScriptKind::Sub };
+                    nf.xf.ot_math_kern(u32::from(g.gid), &snf.xf, u32::from(script.1), cmd, shift)
+                }
+                None => 0,
+            },
+            None => 0,
+        };
+        if k != 0 {
+            p.push(kern(k));
+        }
+        k
+    }
+
+    /// §756–§759 (xetex.web §800: an OpenType math font's script
+    /// parameters and kerns, of `cur_f`): the scripts of `q` attached to
+    /// its hlist `p`.
     fn make_scripts(&mut self, q: &mut Noad, p: &mut Vec<Item>, delta: i32) {
         let style = self.style;
         let size = self.size;
         let (mut shift_up, mut shift_down);
-        if matches!(p.first(), Some(Item::Char(..))) {
+        if matches!(p.first(), Some(Item::Char(..) | Item::Glyph(_))) {
             shift_up = 0;
             shift_down = 0;
         } else {
@@ -1344,16 +1855,29 @@ impl<E: MathEnv> Ctx<'_, E> {
         let script_space = self.params.script_space;
         let x = if q.sup == Field::Empty {
             // (§757)
+            let sub = self.script_glyph(&mut q.sub);
+            let save_f = self.cur_f.clone();
             let mut x = self.clean_box(std::mem::take(&mut q.sub), sub_style(style));
+            self.cur_f = save_f;
             x.w += script_space;
             shift_down = shift_down.max(self.mathsy(16, size));
-            let clr = x.h - (self.math_x_height(size) * 4).abs() / 5;
+            let clr = if self.cur_mathfont() {
+                x.h - self.cur_constant(SUBSCRIPT_TOP_MAX)
+            } else {
+                x.h - (self.math_x_height(size) * 4).abs() / 5
+            };
             shift_down = shift_down.max(clr);
             x.shift = shift_down;
+            if self.cur_mathfont() {
+                Self::attach_ot_kern(p, &sub, false, shift_down);
+            }
             x
         } else {
             // (§758)
+            let sup = self.script_glyph(&mut q.sup);
+            let save_f = self.cur_f.clone();
             let mut x = self.clean_box(std::mem::take(&mut q.sup), sup_style(style));
+            self.cur_f = save_f;
             x.w += script_space;
             let clr = if style % 2 == 1 {
                 self.mathsy(15, size)
@@ -1363,26 +1887,52 @@ impl<E: MathEnv> Ctx<'_, E> {
                 self.mathsy(14, size)
             };
             shift_up = shift_up.max(clr);
-            let clr = x.d + self.math_x_height(size).abs() / 4;
+            let clr = if self.cur_mathfont() {
+                x.d + self.cur_constant(SUPERSCRIPT_BOTTOM_MIN)
+            } else {
+                x.d + self.math_x_height(size).abs() / 4
+            };
             shift_up = shift_up.max(clr);
+            if self.cur_mathfont() && q.sub == Field::Empty {
+                // (with a subscript the kern goes into the shift)
+                Self::attach_ot_kern(p, &sup, true, shift_up);
+            }
             if q.sub == Field::Empty {
                 x.shift = -shift_up;
                 x
             } else {
                 // (§759)
+                let save_f = self.cur_f.clone();
+                let sub = self.script_glyph(&mut q.sub);
+                let sub_empty = q.sub == Field::Empty;
                 let mut y = self.clean_box(std::mem::take(&mut q.sub), sub_style(style));
+                self.cur_f = save_f;
                 y.w += script_space;
                 shift_down = shift_down.max(self.mathsy(17, size));
-                let clr = 4 * self.default_rule_thickness() - ((shift_up - x.d) - (y.h - shift_down));
+                let ot = self.cur_mathfont();
+                let clr = if ot { self.cur_constant(SUB_SUPERSCRIPT_GAP_MIN) } else { 4 * self.default_rule_thickness() }
+                    - ((shift_up - x.d) - (y.h - shift_down));
                 if clr > 0 {
                     shift_down += clr;
-                    let clr = (self.math_x_height(size) * 4).abs() / 5 - (shift_up - x.d);
+                    let clr = if ot {
+                        self.cur_constant(SUPERSCRIPT_BOTTOM_MAX_WITH_SUBSCRIPT)
+                    } else {
+                        (self.math_x_height(size) * 4).abs() / 5
+                    } - (shift_up - x.d);
                     if clr > 0 {
                         shift_up += clr;
                         shift_down -= clr;
                     }
                 }
-                x.shift = delta;
+                let (mut sub_kern, mut sup_kern) = (0, 0);
+                if ot {
+                    sub_kern = Self::attach_ot_kern(p, &sub, false, shift_down);
+                    if sub_empty {
+                        sup_kern = Self::attach_ot_kern(p, &sup, true, shift_up);
+                    }
+                }
+                // (the superscript `delta` right of the subscript)
+                x.shift = sup_kern + delta - sub_kern;
                 let k = kern((shift_up - x.d) - (y.h - shift_down));
                 let mut x = vpack_natural(vec![boxed(x), k, boxed(y)]);
                 x.shift = shift_down;
@@ -1489,6 +2039,83 @@ impl<E: MathEnv> Ctx<'_, E> {
             delta = delta2;
         }
         self.var_delimiter(d, size, delta)
+    }
+}
+
+/// xetex.web §805: the nucleus of the first noad of a script's mlist that
+/// is ordinary to `\mathpunct`, past kerns, glue and style changes (which
+/// set `style`), into the branch of a `\mathchoice` that `style` picks.
+fn first_nucleus<'a>(l: &'a mut [Item], style: &mut u8) -> Option<&'a mut Field> {
+    for it in l {
+        match it {
+            Item::Kern { .. } | Item::Glue { .. } | Item::Leaders(_) => {}
+            Item::Noad(m) => {
+                let m = Arc::make_mut(m);
+                match m {
+                    MItem::Style(s) => *style = *s,
+                    MItem::Choice(c) => {
+                        let k = usize::from(*style / 2).min(3);
+                        return first_nucleus(&mut c[k], style);
+                    }
+                    MItem::Noad(n)
+                        if matches!(
+                            n.kind,
+                            Kind::Ord | Kind::Op(_) | Kind::Bin | Kind::Rel | Kind::Open | Kind::Close | Kind::Punct
+                        ) =>
+                    {
+                        return Some(&mut n.nucleus);
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// The math families a list uses (its characters', delimiters' and
+/// accents', in its subformulas too): XeTeX's 256 families are read only
+/// where used.
+pub fn families(list: &[Item], out: &mut [bool; 256]) {
+    let field = |f: &Field, out: &mut [bool; 256]| match f {
+        Field::Char { fam, .. } | Field::TextChar { fam, .. } => out[usize::from(*fam)] = true,
+        Field::Mlist(l) => families(l, out),
+        _ => {}
+    };
+    let delim = |d: &Delim, out: &mut [bool; 256]| {
+        out[usize::from(d.small_fam)] = true;
+        out[usize::from(d.large_fam)] = true;
+    };
+    for it in list {
+        let Item::Noad(m) = it else { continue };
+        match &**m {
+            MItem::Noad(n) | MItem::Replace(n) => {
+                field(&n.nucleus, out);
+                field(&n.sup, out);
+                field(&n.sub, out);
+                match &n.kind {
+                    Kind::Radical(d) | Kind::Left(d) | Kind::Right(d, _) => delim(d, out),
+                    Kind::Fraction { left, right, .. } => {
+                        delim(left, out);
+                        delim(right, out);
+                    }
+                    Kind::Accent { fam, .. } => out[usize::from(*fam)] = true,
+                    _ => {}
+                }
+            }
+            MItem::Choice(c) => {
+                for l in &**c {
+                    families(l, out);
+                }
+            }
+            MItem::Set(_, f) => field(f, out),
+            MItem::Above { left, right, .. } => {
+                delim(left, out);
+                delim(right, out);
+            }
+            _ => {}
+        }
     }
 }
 

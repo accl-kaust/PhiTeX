@@ -118,6 +118,7 @@ pub fn lr_fix(list: &mut Vec<Item>) -> u32 {
 /// §649: `hpack`. Marks, insertions and adjustments' material move out to
 /// `adjust` if given (§655).
 pub fn hpack(mut list: Vec<Item>, spec: Spec, params: &Params, adjust: Option<&mut Vec<Item>>) -> Packed {
+    merge_native(&mut list);
     if let Some(adj) = adjust {
         let (moved, kept): (Vec<Item>, Vec<Item>) = list
             .into_iter()
@@ -170,6 +171,12 @@ pub fn hpack(mut list: Vec<Item>, spec: Spec, params: &Params, adjust: Option<&m
                 t.shrink[usize::from(l.g.shrink_order)] += l.g.shrink;
             }
             Item::Kern { w, .. } | Item::Math { w, .. } | Item::MarginKern { w, .. } => x += w,
+            // (XeTeX: "Incorporate a whatsit node into an hbox")
+            Item::Native(_) | Item::Glyph(_) | Item::Pic(_) => {
+                if let Some((w, ht, dp)) = it.xdims() {
+                    boxed(w, ht, dp, 0, &mut x);
+                }
+            }
             _ => {}
         }
     }
@@ -182,6 +189,68 @@ pub fn hpack(mut list: Vec<Item>, spec: Spec, params: &Params, adjust: Option<&m
     let mut b = BoxNode { origins: crate::item::Origins::default(), vertical: false, w, h, d, shift: 0, list, glue: GlueSet::default() };
     let (badness, report) = set_glue(&mut b, w - x, &t, params, true);
     Packed { b, badness, report }
+}
+
+/// XeTeX's "Incorporate a whatsit node into an hbox" (xetex.web §1409):
+/// each run of words in one native font, joined directly or by
+/// discretionaries (whose breaks are not taken: the discretionary goes, a
+/// word it replaces joins the run), becomes one word, shaped again. A word
+/// right after a discretionary whose replacement it is begins no run.
+pub fn merge_native(list: &mut Vec<Item>) {
+    if !list.iter().any(|i| matches!(i, Item::Native(_))) {
+        return;
+    }
+    let same = |it: Option<&Item>, f: &crate::tfm::Font| matches!(it, Some(Item::Native(n)) if *n.font == *f);
+    let mut q: Option<usize> = None;
+    let mut i = 0;
+    while i < list.len() {
+        let Item::Native(first) = &list[i] else {
+            i += 1;
+            continue;
+        };
+        let first = first.clone();
+        // (xetex.web: `q` walks up to the word from where it stood, `k`
+        // counting down from the last discretionary's replace count: a
+        // word in a discretionary's replaced text starts no chain)
+        let mut k = match q.map(|x: usize| &list[x]) {
+            Some(Item::Disc(d)) => i32::from(d.replace),
+            _ => 0,
+        };
+        loop {
+            let next = q.map_or(0, |x| x + 1);
+            if next >= i {
+                break;
+            }
+            k -= 1;
+            q = Some(next);
+            if let Item::Disc(d) = &list[next] {
+                k = i32::from(d.replace);
+            }
+        }
+        let mut j = i + 1;
+        if k <= 0 {
+            loop {
+                if same(list.get(j), &first.font) {
+                    j += 1;
+                } else if matches!(list.get(j), Some(Item::Disc(_))) && same(list.get(j + 1), &first.font) {
+                    j += 2;
+                } else {
+                    break;
+                }
+            }
+        }
+        if j > i + 1 {
+            let mut text: Vec<u16> = Vec::new();
+            for it in &list[i..j] {
+                if let Item::Native(n) = it {
+                    text.extend_from_slice(&n.text);
+                }
+            }
+            let merged = first.part(&text);
+            list.splice(i..j, [Item::Native(std::sync::Arc::new(merged))]);
+        }
+        i += 1;
+    }
 }
 
 /// §668: `vpackage` with the depth at most `max_depth` (`vpack`: no limit).
@@ -227,6 +296,12 @@ pub fn vpack(list: Vec<Item>, spec: Spec, max_depth: i32, params: &Params) -> Pa
             Item::Kern { w: k, .. } => {
                 x += d + k;
                 d = 0;
+            }
+            // (XeTeX: "Incorporate a whatsit node into a vbox")
+            Item::Pic(p) => {
+                x += d + p.h;
+                d = p.d;
+                w = w.max(p.w);
             }
             _ => {}
         }
