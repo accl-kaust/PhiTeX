@@ -2321,6 +2321,23 @@ run read: 382k reads, 2401 installs) are 87%: 45.9 of 52.7 ms at `-j 1`,
 91.6 of 109 ms at `-j 8` (job 7925); validation again 0.2, exports 3.2,
 marks 1.8, entries 1.6 ms at `-j 1`.
 
+**LaTeX documents: rounds, the body's chain, per-page reruns** (job
+7930, pinned, `Reads::Suspend`; `perf-in/biglatex.tex` is sections.tex's
+body 40 times, 130 pieces). Walls `-j 1` / `-j 8`: sections 694 / 728
+ms, titlepage 833 / 910, biglatex 5659 / 3992; six rounds each. A round's
+barrier is cheap (layout 0.1-5.7 ms); what it lets run is not. biglatex
+by round (`-j 1` / `-j 8`, ms): R1 1360 / 1613: `\documentclass` (a file
+read) changed the sequence at 5.9 ms, but the round went on until every
+piece settled, so the body ran on the layout before its class was read
+and was thrown away (at `-j 8` serially too: parks 85%); R2 50 / 61 the
+class's pieces; R3 1513 / 1351 the body on the right layout (at `-j 8`
+parks 68%, 1.44 readers at once: each section defines names the next
+reads, counters and `\@currentlabel`, a chain under `Suspend`); R4 1888 /
+438 the output routine's definitions between nodes, every later piece
+run again once per page (piece 129: 23-26 runs, 23 pages); R5-R6 676 /
+479. Fix of R1's waste (A reviewed): a final settled run that changes
+the sequence ends the round at once (`settle`).
+
 **`latex.ltx` is a true chain.** 31.2 s at `-j 1`, 31.1 s at `-j 8`
 (job 7914). Of its 19-20 rounds one holds 27.3 s, and in it one piece
 holds 96.2% of the commands (2.9M): expl3-code.tex's Unicode-data block
