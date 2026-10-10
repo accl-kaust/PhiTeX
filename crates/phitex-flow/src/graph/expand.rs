@@ -243,7 +243,9 @@ impl Exec<'_> {
 
     /// `\csname ... \endcsname` (tex.web 372).
     fn csname(&mut self) {
-        let mut name = String::new();
+        // (the run's buffer: a `\csname` inside this one finds it empty)
+        let mut name = std::mem::take(&mut self.scratch.csname);
+        name.clear();
         self.in_csname += 1;
         loop {
             let Some((t, m)) = self.next_x_m(false) else {
@@ -262,6 +264,7 @@ impl Exec<'_> {
         }
         self.in_csname -= 1;
         let t = self.cs(&name);
+        self.scratch.csname = name;
         let key = t.key().expect("a name");
         if self.meaning(&key) == Meaning::Undefined {
             // (TeX's `eq_define`: local, whatever `\globaldefs` says)
