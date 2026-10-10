@@ -680,20 +680,13 @@ impl Exec<'_> {
 
     /// What a formula reads where it ends.
     fn math_end(&mut self, display: bool) -> MathEnd {
-        // (TeX's 16 families; XeTeX's others where the formula uses them)
-        let mut used = [false; 256];
-        used[..16].fill(true);
-        if self.xetex {
-            let items = self.math_items();
-            mlist::families(&items, &mut used);
-        }
+        // (TeX's 16 families; XeTeX's others where the formula is
+        // converted, `mlist_hlist`)
         let mut fonts = vec![None; mlist::FAM_SLOTS];
         for size in 0..3u8 {
-            for fam in 0..256usize {
-                if used[fam] {
-                    let f = self.fam_font(size, fam as u8);
-                    fonts[usize::from(size) * mlist::SCRIPT_SIZE + fam] = (&*f.key != "nullfont").then_some(f);
-                }
+            for fam in 0..16usize {
+                let f = self.fam_font(size, fam as u8);
+                fonts[usize::from(size) * mlist::SCRIPT_SIZE + fam] = (&*f.key != "nullfont").then_some(f);
             }
         }
         let params = mlist::Params {
@@ -1196,7 +1189,27 @@ impl Exec<'_> {
 
     /// `mlist_to_hlist`, with what it reports.
     fn mlist_hlist(&mut self, p: Vec<Item>, style: u8, penalties: bool, end: &MathEnd) -> Vec<Item> {
-        let (hl, events) = mlist::mlist_to_hlist(p, style, penalties, &end.fonts, &end.params, &mut Reads(self));
+        // (XeTeX's families past 15 the formula uses, read where it is
+        // converted: after its group, CORE.md)
+        let mut used = [false; 256];
+        if self.xetex {
+            mlist::families(&p, &mut used);
+        }
+        let fonts = if used[16..].iter().any(|&u| u) {
+            let mut fonts = end.fonts.clone();
+            for size in 0..3u8 {
+                for fam in 16..256usize {
+                    if used[fam] {
+                        let f = self.fam_font(size, fam as u8);
+                        fonts.0[usize::from(size) * mlist::SCRIPT_SIZE + fam] = (&*f.key != "nullfont").then_some(f);
+                    }
+                }
+            }
+            std::borrow::Cow::Owned(fonts)
+        } else {
+            std::borrow::Cow::Borrowed(&end.fonts)
+        };
+        let (hl, events) = mlist::mlist_to_hlist(p, style, penalties, &fonts, &end.params, &mut Reads(self));
         for e in events {
             match e {
                 mlist::Event::UndefinedFamily { size, fam, ch } => {
