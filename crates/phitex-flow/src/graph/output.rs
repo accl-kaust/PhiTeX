@@ -31,7 +31,7 @@
 use std::sync::Arc;
 
 use super::material::box_start;
-use super::{Chain, Env, Exec, Group, GroupKind, Kind, Mode, Outside, RState, Run, Scratch, Src, outside_read};
+use super::{Chain, Env, Exec, Group, GroupKind, Kind, Mode, Outside, Pending, RState, Run, Scratch, Src, outside_read};
 use crate::hash::FxSet;
 use crate::item::{BoxNode, Item};
 use crate::page::{IGNORE_DEPTH, Page, push_vertical};
@@ -119,7 +119,9 @@ pub fn output_entry(page: &Page, reads: &OutputReads, output: &[Tok]) -> RState 
     };
     let mut st = RState::start();
     let begin: Arc<[Tok]> = Arc::from([Tok::Cs(Arc::from("\u{0}output"))]);
-    st.pending = vec![(fire.text.clone(), 0, false), (begin, 0, false)];
+    st.pending = Pending::default();
+    st.pending.push((fire.text.clone(), 0, false));
+    st.pending.push((begin, 0, false));
     st.fire = Some(Arc::new(fire));
     st
 }
@@ -307,7 +309,7 @@ impl Exec<'_> {
     /// (`end_token_list`).
     fn output_text_end(&mut self) {
         let text = self.st.fire.as_ref().map(|f| f.text.clone());
-        let Some((list, i, backed)) = self.st.pending.last().cloned() else { return };
+        let Some((list, i, backed)) = self.st.pending.last().map(|(l, i, b)| (l.clone(), i, b)) else { return };
         let ours = text.is_some_and(|x| Arc::ptr_eq(&x, &list));
         if i < list.len() || !(ours || backed) {
             self.err(UNBALANCED.into());
@@ -316,8 +318,8 @@ impl Exec<'_> {
                 // below it, to its end)
                 self.st.pending.pop();
             }
-            if let Some(top) = self.st.pending.last_mut() {
-                top.1 = top.0.len();
+            if let Some((l, i)) = self.st.pending.last_mut() {
+                *i = l.len();
             }
         }
         self.st.pending.pop();
@@ -375,7 +377,7 @@ impl Exec<'_> {
         self.vemit.extend(list);
         self.output = Some(Box::new(OutputEnd { shipped, dead_cycles }));
         self.rewrite(after);
-        self.kind = Kind::Close;
+        self.closes();
     }
 
     /// The definition of `key` reaching the node after this one, which

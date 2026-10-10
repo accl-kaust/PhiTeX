@@ -209,6 +209,7 @@ impl Exec<'_> {
     /// defined; unlike `\csname`, it defines nothing.
     pub(super) fn if_csname(&mut self) -> bool {
         let mut name = String::new();
+        self.in_csname += 1;
         loop {
             let Some((t, m)) = self.next_x_m(false) else {
                 self.err("Missing \\endcsname inserted".into());
@@ -224,6 +225,7 @@ impl Exec<'_> {
                 break;
             }
         }
+        self.in_csname -= 1;
         let t = self.cs(&name);
         let key = t.key().expect("a name");
         self.meaning(&key) != Meaning::Undefined

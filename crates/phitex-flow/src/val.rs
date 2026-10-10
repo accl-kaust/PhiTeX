@@ -81,7 +81,7 @@ pub enum Key {
     /// The current font.
     Font,
     /// `\fontdimen n` of a font (`Font::key`), global.
-    FontDimen(Arc<str>, u16),
+    FontDimen(Arc<str>, u32),
     /// `\hyphenchar`, `\skewchar` of a font (global).
     HyphenChar(Arc<str>),
     SkewChar(Arc<str>),
@@ -139,6 +139,13 @@ pub enum Key {
     /// page builder fires (an output routine's run). The split marks are
     /// `Key::SplitMarks`.
     Mark(u8, u16),
+    /// How many `\fontdimen`s a font has (`font_params`, global): 0 as
+    /// loaded (`Font::nparams`); more once the most recently loaded font's
+    /// were extended (tex.web 579).
+    FontParams(Arc<str>),
+    /// The most recently loaded font (`font_ptr`'s, global: `Val::Name` of
+    /// its key; none before any `\font` loads one).
+    LastFont,
 }
 
 impl Key {
@@ -166,7 +173,12 @@ impl std::hash::Hash for Key {
                 n.hash(h);
                 h.write_u64((20 << 40) | u64::from(*k));
             }
-            Key::HyphenChar(n) | Key::SkewChar(n) | Key::FontIdent(n) | Key::FontLoaded(n) | Key::File(n) => {
+            Key::HyphenChar(n)
+            | Key::SkewChar(n)
+            | Key::FontIdent(n)
+            | Key::FontLoaded(n)
+            | Key::File(n)
+            | Key::FontParams(n) => {
                 n.hash(h);
                 h.write_u64(self.word());
             }
@@ -184,7 +196,8 @@ impl PartialEq for Key {
             | (Key::SkewChar(a), Key::SkewChar(b))
             | (Key::FontIdent(a), Key::FontIdent(b))
             | (Key::FontLoaded(a), Key::FontLoaded(b))
-            | (Key::File(a), Key::File(b)) => Arc::ptr_eq(a, b) || a == b,
+            | (Key::File(a), Key::File(b))
+            | (Key::FontParams(a), Key::FontParams(b)) => Arc::ptr_eq(a, b) || a == b,
             (Key::Cat(a), Key::Cat(b)) => a == b,
             (Key::FontDimen(a, k), Key::FontDimen(b, l)) => k == l && (Arc::ptr_eq(a, b) || a == b),
             (Key::Cs(_), _) | (_, Key::Cs(_)) => false,
@@ -211,6 +224,8 @@ impl Key {
             Key::FontIdent(_) => w(23, 0),
             Key::FontLoaded(_) => w(24, 0),
             Key::File(_) => w(30, 0),
+            Key::FontParams(_) => w(38, 0),
+            Key::LastFont => w(39, 0),
             Key::Active(x) => w(1, c(x)),
             Key::Cat(x) => w(2, c(x)),
             Key::Lccode(x) => w(3, c(x)),
@@ -280,6 +295,8 @@ impl fmt::Display for Key {
             Key::Job => write!(f, "\\jobname"),
             Key::LineBase => write!(f, "line base"),
             Key::SplitMarks => write!(f, "\\splitfirstmarks"),
+            Key::FontParams(x) => write!(f, "font_params ({x})"),
+            Key::LastFont => write!(f, "font_ptr"),
             Key::Interaction => write!(f, "\\interactionmode"),
             Key::ETeXMode => write!(f, "e-TeX mode"),
             Key::Patterns(l) => write!(f, "\\patterns (language {l})"),
@@ -317,7 +334,8 @@ impl fmt::Display for Key {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Macro {
     pub params: Vec<Tok>,
-    pub body: Vec<Tok>,
+    /// Shared with the calls reading it (`RState`'s pending input).
+    pub body: Arc<[Tok]>,
     pub long: bool,
     pub outer: bool,
     /// e-TeX's `\protected`: not expanded where `\edef` and `\write`
@@ -476,7 +494,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool) -> Val {
         Key::Cs(n) if &**n == "nullfont" => Val::Meaning(Meaning::Font(crate::tfm::null_font())),
         Key::Cs(n) => Val::Meaning(
             Prim::by_name(n)
-                .or_else(|| if etex { Prim::by_name_etex(n) } else { None })
+                .or_else(|| if etex { Prim::by_name_etex(n).or_else(|| Prim::by_name_pdftex(n)) } else { None })
                 .or_else(|| Prim::internal(n))
                 .map_or(Meaning::Undefined, Meaning::Prim),
         ),
@@ -503,7 +521,8 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool) -> Val {
         Key::TokPar(_) | Key::Toks(_) | Key::Mark(..) => Val::Toks(Arc::new(Vec::new())),
         // (`\fontdimen`: the null font's, tex.web 552; a loaded font's are
         // defined by its `\font`)
-        Key::DimenPar(_) | Key::Count(_) | Key::Dimen(_) | Key::FontDimen(..) | Key::FontLoaded(_) | Key::LineBase => {
+        Key::DimenPar(p) => Val::Int(p.initial()),
+        Key::Count(_) | Key::Dimen(_) | Key::FontDimen(..) | Key::FontLoaded(_) | Key::LineBase | Key::FontParams(_) => {
             Val::Int(0)
         }
         Key::GluePar(_) | Key::Skip(_) | Key::Muskip(_) => Val::Glue(Arc::new(Glue::default())),
@@ -512,7 +531,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool) -> Val {
         Key::Font | Key::FamFont(..) => Val::Font(crate::tfm::null_font()),
         Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
         Key::SkewChar(_) => Val::Int(-1),
-        Key::FontIdent(_) => Val::Name(Arc::from("nullfont")),
+        Key::FontIdent(_) | Key::LastFont => Val::Name(Arc::from("nullfont")),
         Key::Job => Val::Name(Arc::from("texput")),
         Key::SplitMarks => Val::SplitMarks(Arc::from(Vec::new())),
         // (IniTeX's `error_stop_mode`; TeX run with `-interaction` starts

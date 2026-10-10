@@ -68,8 +68,11 @@ impl Exec<'_> {
         let loaded = Key::FontLoaded(f.key.clone());
         if self.get(&loaded) == Val::Int(0) {
             self.define(loaded, Val::Int(1), true);
+            // (`font_ptr`: the most recently loaded font, whose parameters
+            // can be extended, tex.web 579)
+            self.define(Key::LastFont, Val::Name(f.key.clone()), true);
             for (k, &v) in f.params.iter().enumerate().skip(1) {
-                self.define(Key::FontDimen(f.key.clone(), k as u16), Val::Int(v), true);
+                self.define(Key::FontDimen(f.key.clone(), k as u32), Val::Int(v), true);
             }
             let h = self.int_par(IntPar::Defaulthyphenchar);
             let sk = self.int_par(IntPar::Defaultskewchar);
@@ -139,12 +142,25 @@ impl Exec<'_> {
     pub(super) fn find_font_dimen(&mut self) -> Option<Key> {
         let n = self.scan_int();
         let f = self.scan_font_ident();
-        if n <= 0 || n as usize > f.nparams() {
+        let np = match self.get(&Key::FontParams(f.key.clone())) {
+            Val::Int(k) if k > 0 => k as usize,
+            _ => f.nparams(),
+        };
+        if n > 0 && n as usize > np {
+            // (tex.web 580: the most recently loaded font's parameters grow,
+            // the new ones zero, whether this reads or writes)
+            let last = matches!(self.get(&Key::LastFont), Val::Name(k) if *k == *f.key);
+            if last {
+                self.define(Key::FontParams(f.key.clone()), Val::Int(n), true);
+                return Some(Key::FontDimen(f.key.clone(), n.cast_unsigned()));
+            }
+        }
+        if n <= 0 || n as usize > np {
             let id = self.font_ident(&f);
-            self.err(format!("Font \\{id} has only {} fontdimen parameters", f.nparams()));
+            self.err(format!("Font \\{id} has only {np} fontdimen parameters"));
             return None;
         }
-        Some(Key::FontDimen(f.key.clone(), n as u16))
+        Some(Key::FontDimen(f.key.clone(), n.cast_unsigned()))
     }
 
     /// The name font `f` was last defined by (`font_id_text`).

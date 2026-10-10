@@ -76,7 +76,7 @@ impl Exec<'_> {
     pub(super) fn show_context(&mut self, s: &mut String) {
         let n = self.st.pending.len();
         let mut middle = n;
-        if let Some((list, i, true)) = self.st.pending.last().cloned() {
+        if let Some((list, i, true)) = self.st.pending.last().map(|(l, i, b)| (l.clone(), i, b)) {
             middle -= 1;
             let label = if i >= list.len() { "<recently read> " } else { "<to be read again> " };
             let mut read = String::new();

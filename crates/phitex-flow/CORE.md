@@ -349,7 +349,7 @@ lives across commands).
 | `\immediate\openout/\write/\closeout` | the node's log holds an event (`logs::io_event`: kind, stream, payload); a `\write`'s text is expanded in the node (§1370, no mode, `\newlinechar` a line break, unprintables `^^`) |
 | `\openout`, `\write`, `\closeout`, `\special` | whatsit items (`Item::Whatsit`) in the current list, in any mode; a `\write` holds its tokens unexpanded, a `\special` its expanded text |
 | `ship_out`'s `out_what` (§1374) | an explicit `\shipout`: its node does the box's whatsits (DVI order, none inside leaders) — its `\write`s expanded with the definitions reaching it — between its `[n` and `]`. A page the page builder ships: at the join, `graph::page_io` expands its `\write`s with the definitions reaching the node whose `BuildPage` (or `End`) shipped it (`logs::page_places`: the call's node from the log fragments' marks; a pure function of the box, the place and those definitions: a candidate for a task and memo) |
-| the files written | `Output::writes`: (name, contents) per file, in the order first opened; `\openout` adds `.tex` to a name without extension (web2c's `\openout j = `name'.` log line is off for `tex`: texmf.cnf `log_openout.tex = f`); a `\write` to a closed stream, 16 or 17 is a log line |
+| the files written | `Output::writes`: (name, contents) per file, in the order first opened; `\openout` adds `.tex` to a name without extension (web2c's `\openout j = `name'.` log line, at the replay: on in extended mode — `etex` and pdfTeX — off for `tex`, texmf.cnf `log_openout.tex = f`); a `\write` to a closed stream, 16 or 17 is a log line |
 | `\special` in the DVI file | `xxx1`/`xxx4` after `synch_h`, `synch_v` (§1368) |
 
 **`\input` (decided design, TeX side complete; the core's part is A's).**
@@ -884,6 +884,80 @@ e-TeX's primitives:
 | `\scantokens` | input | step: rewrites the input with the shown text, read again (`RState.texts`) | done (no "File ended" check: gap 1) |
 | `\showgroups`, `\showifs`, `\showtokens` | xray | log text and the error's context, the line a placeholder (gap 3) | done (file-level context) |
 | `\unless` | expand_after | step (a node at the top, as conditionals are): the boolean conditional after it, negated | done |
+
+## LaTeX's format: `latex.ltx` through the graph (agent B)
+
+`tests/latex.rs` builds TeX Live's `latex.ltx` (and the 60 files it
+reads: `texsys.cfg`, expl3, the font definitions, `hyphen.cfg` and the
+patterns, the Unicode data) and compares the log with `etex -ini -etex
+latex.ltx` (TeX Live's `etex` is pdfTeX writing DVI) up to `\dump`'s
+` (preloaded format=…)` line, at the five schedules, without errors.
+The input directories are the ones the oracle read from (`-recorder`'s
+`.fls`, `tests/latex/dirs.txt`). The CLI takes `--etex`, `--input-dir DIR`
+(repeatable) and `--jobname NAME` to run the same build by hand.
+
+**pdfTeX's names.** In extended mode the graph is the oracle's engine:
+pdfTeX 1.40.29 in DVI mode. Its 152 primitives are named
+(`prim::PDFTEX_PRIMITIVES`). What a format reads is made:
+
+| pdfTeX | graph |
+|---|---|
+| the 36 integer and 13 dimension parameters, 4 token parameters | `IntPar`/`DimenPar`/`TokPar`, with pdfTeX's initial values (`\pdfcompresslevel` 9, `\pdfdecimaldigits` 3, `\pdfminorversion` 4, `\pdfhorigin` 1in, `\pdfpxdimen` 1/72.27in…) |
+| `\pdftexversion`, `\pdftexrevision`, `\pdftexbanner`, `\pdfshellescape`, `\pdflastxpos`… (14 read-only integers) | `Prim::PdfItem(k)`: a constant (`PDF_ITEMS`) |
+| `\pdfstrcmp`, `\pdfescapestring`/`name`/`hex`, `\pdfunescapehex`, `\pdffilesize`, `\expanded` | steps (convert): the expanded text, shown, transformed (`expand::pdf_string`); `\pdffilesize` reads `Key::File` |
+| `\ifincsname`, `\ifpdfprimitive`, `\ifpdfabsnum`, `\ifpdfabsdim` | conditionals; `\ifincsname` reads the step's `\csname` depth |
+| `\quitvmode` | a node: `\indent`'s path only in vertical mode |
+| `\pdfglyphtounicode` | a node scanning its two texts (a PDF-only table: DVI ignores it) |
+| the other PDF-only primitives (`\pdfobj`, `\pdfliteral`…) | `Prim::PdfUnimpl`: an error if executed ("… is not supported yet"; a format only tests and `\let`s them) |
+| `\lastnamedcs`, `\ifcondition`… (LuaTeX's) | undefined, as in pdfTeX |
+
+**Language gaps the format found (fixed).**
+- *A definition made while the closing command is fetched* (`\begingroup
+  \expandafter\expandafter\expandafter\endgroup\expandafter\ifx\csname
+  directlua\endcsname\relax`, expl3's idiom): the `\csname`'s `\relax` is
+  defined inside the group, by the node whose command closes it. A
+  `Close` node's group is the outer one, so it outlived the group
+  (LaTeX then took LuaTeX's branch). Now `Exec::closes` (every close) lets
+  the node's local definitions made before the close end with the group.
+- *`\fontdimen` growth past 65535* (expl3's intarrays, `\fontdimen
+  65536\font`): `Key::FontDimen`'s index is a `u32`.
+- *web2c's `\openout j = `name'.` line* in the log (extended mode).
+
+**The reader state's size (per node).** The format is 3.13M nodes in
+one piece; at first 12.1 GB peak (3.9 KB a node). Three changes of
+representation, the states unchanged:
+- `RState.pending` is a `Pending`: the top list held in the state (a
+  token read changes only it), the lists below a chain of cells shared
+  from node to node (was a `Vec` copied into every node's state).
+- A macro call reads the body where it is (`Macro.body: Arc<[Tok]>`, the
+  definition's), its parameter tokens pushing their arguments when met
+  (tex.web 357's `out_param`; was a copy of the body with the arguments
+  substituted, kept by every state it was pending in).
+- A node's read of a name defined in the piece shares the previous equal
+  read (`Scratch::inside`: same defining node, scope, value).
+Now 4.65 GB at `-j 1` and 4.69 GB at `-j 8` (1.5 KB a node).
+
+**Gaps left for the core (A), with repros.**
+1. *A file written and read back in one run.* `texsys.cfg` writes
+   `texsys.aux` with `\immediate\openout`/`\write`/`\closeout`, then
+   `\openin`s it. `Key::File` is answered by the build (`Env::file`) before
+   any write is replayed, so the read sees the disk: the test places the
+   recorded `texsys.aux` first in the input directories. Repro:
+   `\immediate\openout1=t.aux \immediate\write1{x}\immediate\closeout1
+   \openin1=t.aux \ifeof1 \message{no}\else\message{yes}\fi \end` (TeX:
+   yes; the graph: no, without a `t.aux` on disk). Proposal: an
+   `\immediate` write's file is a value the writing node defines
+   (`Key::File(name)` → the bytes written so far), the reads after it in
+   the order reading that, not the `Env`.
+2. *The cut is blind to catcodes.* `latex.ltx` line 160:
+   `\catcode`\%=12 \def\@percentchar{%}\catcode`\%=14`; the cut's brace
+   count reads `%` as a comment, stays at depth 1 to the end of the file,
+   and `latex.ltx` is one piece (94 blank lines). Repro: those three
+   lines, then two paragraphs with a blank line between: one piece.
+3. *`\input`'ed files run inside the calling piece* (the single-piece
+   emulation above): expl3-code.tex's 36k lines, the font definitions and
+   the patterns are read by the one piece, so the build is sequential
+   (3 of 8 threads worked, one did 100%).
 
 ## The inventory
 

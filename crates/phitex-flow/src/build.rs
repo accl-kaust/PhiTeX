@@ -203,8 +203,9 @@ pub struct Build {
 
 const SHARDS: usize = 64;
 
-/// The input files read in a build, by name (`None`: not found).
-type FileCache = Mutex<FxMap<Arc<str>, Option<Arc<[u8]>>>>;
+/// The input files read in a build, by name (`None`: not found): where
+/// each was found, as TeX Live shows it, and its bytes.
+type FileCache = Mutex<FxMap<Arc<str>, Option<(Arc<str>, Arc<[u8]>)>>>;
 
 /// What the build answers itself, never a definition (`Env::file`,
 /// `Env::jobname`, `Env::line_base`): the input files (each read once per
@@ -225,11 +226,30 @@ impl Given {
 
     /// The file `name` in the first directory holding it.
     fn file(&self, name: &str) -> Option<Arc<[u8]>> {
+        self.found(name).map(|(_, b)| b)
+    }
+
+    /// Where file `name` was found, as TeX Live shows it: `./name` in the
+    /// first directory (the document's, kpathsea's current directory) or a
+    /// relative one; else the path.
+    fn path(&self, name: &str) -> Arc<str> {
+        self.found(name).map_or_else(|| Arc::from(format!("./{name}")), |(p, _)| p)
+    }
+
+    fn found(&self, name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
         let mut g = self.files.lock().expect("files");
         if let Some(v) = g.get(name) {
             return v.clone();
         }
-        let v: Option<Arc<[u8]>> = self.dirs.iter().find_map(|d| std::fs::read(d.join(name)).ok()).map(Arc::from);
+        let v = self.dirs.iter().enumerate().find_map(|(k, d)| {
+            let b = std::fs::read(d.join(name)).ok()?;
+            let shown = if k == 0 || d.is_relative() {
+                format!("./{name}")
+            } else {
+                d.join(name).to_string_lossy().into_owned()
+            };
+            Some((Arc::from(shown), Arc::from(b)))
+        });
         g.insert(Arc::from(name), v.clone());
         v
     }
@@ -1015,7 +1035,7 @@ impl Build {
                 };
                 page_io.push(io);
             }
-            logs::replay(logs::gather_with(&frags, &marks, &st.pages, &page_io))
+            logs::replay(logs::gather_with(&frags, &marks, &st.pages, &page_io), opts.etex)
         };
         for (k, ps) in st.p.iter().enumerate() {
             let r = ps.run.as_ref().expect("every piece ran");
@@ -1083,6 +1103,10 @@ impl Env for JoinEnv<'_> {
 
     fn file(&mut self, name: &str) -> Option<Arc<[u8]>> {
         self.names.given.file(name)
+    }
+
+    fn file_path(&mut self, name: &str) -> Arc<str> {
+        self.names.given.path(name)
     }
 
     fn jobname(&mut self) -> Arc<str> {
@@ -1880,6 +1904,10 @@ impl Env for PieceEnv<'_> {
 
     fn file(&mut self, name: &str) -> Option<Arc<[u8]>> {
         self.sh.names.given.file(name)
+    }
+
+    fn file_path(&mut self, name: &str) -> Arc<str> {
+        self.sh.names.given.path(name)
     }
 
     fn jobname(&mut self) -> Arc<str> {

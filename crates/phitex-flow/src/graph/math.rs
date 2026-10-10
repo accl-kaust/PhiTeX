@@ -110,7 +110,7 @@ struct Reads<'e, 'a>(&'e mut Exec<'a>);
 
 impl MathEnv for Reads<'_, '_> {
     fn param(&mut self, f: &Arc<Font>, k: u16) -> i32 {
-        self.0.int(&Key::FontDimen(f.key.clone(), k))
+        self.0.int(&Key::FontDimen(f.key.clone(), u32::from(k)))
     }
     fn skew_char(&mut self, f: &Arc<Font>) -> i32 {
         self.0.int(&Key::SkewChar(f.key.clone()))
@@ -619,7 +619,7 @@ impl Exec<'_> {
         self.rewrite(after);
         let p = self.cs("\u{0}package");
         self.back(p);
-        self.kind = Kind::Close;
+        self.closes();
     }
 
     /// What a formula reads where it ends.
