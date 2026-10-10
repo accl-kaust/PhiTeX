@@ -434,6 +434,22 @@ impl Shower<'_> {
                 self.sub('.', l);
             }
             Item::Whatsit(w) => self.whatsit(w),
+            // (xetex.web's `print_native_word`, glyph and picture nodes)
+            Item::Native(w) => {
+                self.cx.font_ident(self.out, &w.font.key);
+                self.out.push(' ');
+                self.out.push_str(&crate::native::text_of(&w.text));
+            }
+            Item::Glyph(g) => {
+                self.cx.font_ident(self.out, &g.font.key);
+                let _ = write!(self.out, " glyph#{}", g.gid);
+            }
+            Item::Pic(p) => {
+                self.cx.esc(self.out, if p.pdf { "XeTeXpdffile" } else { "XeTeXpicfile" });
+                self.out.push_str(" \"");
+                self.out.push_str(&String::from_utf8_lossy(&p.path));
+                self.out.push('"');
+            }
             Item::Marks(n, t) => {
                 // (etex.web §196: the class after `\marks`)
                 self.cx.esc(self.out, "marks");
