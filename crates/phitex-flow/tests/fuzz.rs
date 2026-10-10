@@ -39,6 +39,19 @@ fn noop_fails(r: &fuzz::Repro) -> bool {
     fuzz::replay(&n).is_some()
 }
 
+/// [`fuzz::replay`] in a thread of its own, given `secs` seconds: the
+/// failure, if any (a hang is one; the thread is left behind).
+fn replay_within(r: fuzz::Repro, secs: u64) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || {
+            let _ = tx.send(fuzz::replay(&r).map(|f| format!("{f:?}")));
+        })
+        .expect("a thread");
+    rx.recv_timeout(Duration::from_secs(secs)).unwrap_or_else(|_| Some(format!("no end in {secs} s")))
+}
+
 fn env_num(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -103,7 +116,7 @@ fn open_findings_fail_fixed_ones_pass() {
         assert!(got.is_some(), "{} passes now: fixed, move it to tests/fuzz/fixed/ (and close it in CORE.md)", p.display());
     }
     for (p, r) in read("fixed") {
-        assert_eq!(fuzz::replay(&r).map(|f| format!("{f:?}")), None, "{} fails again", p.display());
+        assert_eq!(replay_within(r, 300), None, "{} fails again (or hangs)", p.display());
     }
 }
 

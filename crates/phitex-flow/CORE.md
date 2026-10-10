@@ -1411,6 +1411,31 @@ First local table (5 repetitions, median ms):
 - The one-page documents miss the 25% rule on any edit (cold ≈ 20–30 ms,
   an edit 3–7 ms).
 
+- **F7. An `\input` added by an edit stops the update at the file**
+  (a regression on the gate head, from A's 2c217c3, "\input anywhere
+  the reader is on the piece's own text is pieces"; flow-trip has not
+  merged it and passes). Seen in the cluster run of 5000 seeds (job 7722,
+  gate head 394eeab, before the F2 fix): 1203 failures of the classes
+  "edit DOC input-add | dvi: ./fzsub.tex" on every plain document, and
+  the one "timeout big" (seed 565). They come from the core, not the
+  environment: the second file is in memory (`Build::set_file`, found
+  before any directory), and 394eeab gives them here too. The update
+  prints `(./fzsub.tex`, and then neither the file's text nor the `)`
+  nor the pages after it. Bisected with `phitex-flow DOC --edit 'B
+  second=>\input fzsub<newline>B second' --check`: 59c78f1 gives
+  "edit == cold: yes", 2c217c3 and 394eeab give "NO". Regression
+  repros in `tests/fuzz/fixed/` (they pass here and must keep passing;
+  replayed with a 300 s limit, a hang counts as a failure):
+  `f7-input-added-in-update.repro` (four lines and a two-piece
+  `fzsub.tex`, `\input fzsub` added before the second paragraph) and
+  `f7-input-added-hang.repro` (big, seed 565's first edit: on 394eeab
+  the update never ends). B's bac0a76 does not contain 2c217c3, and both
+  repros pass on it.
+
+The cluster run's other classes: 827 F1 (TRIP), 27 "timeout trip" (F1's
+document, at 8 threads under load), and about 12 "F2?" on hyphens. The F2
+fix (e1f2aa0) is not in 394eeab.
+
 **Design tests** (`tests/design.rs`, the brief's 1–6; 7 waits for
 `Key::File` by writes):
 1. `a_segment_start_reads_zero_state`: `Entry` is `Start`, `File(usize)`,
