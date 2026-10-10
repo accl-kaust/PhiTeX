@@ -74,7 +74,9 @@ fn resolve(s: &str, text: &[char], run: &Run, i: usize) -> String {
             // (an error's context: laid out once the line number is known,
             // in `rebase`; head, what was read and the rest, cut by `CUT`)
             x if x.starts_with('X') => {
-                let _ = write!(out, "{CTX}l.{REL}{here}{REL} {}{}{CTX}", crate::graph::diag::CUT, &x[1..]);
+                let from = if i == 0 { 0 } else { run.chain.nodes[i - 1].out.pos };
+                let ctx = line_now(&x[1..], text, (from, run.chain.nodes[i].out.pos));
+                let _ = write!(out, "{CTX}l.{REL}{here}{REL} {}{ctx}{CTX}", crate::graph::diag::CUT);
             }
             x if x.starts_with('T') => {
                 let _ = write!(out, "{CTX}{}{CTX}", &x[1..]);
@@ -86,6 +88,55 @@ fn resolve(s: &str, text: &[char], run: &Run, i: usize) -> String {
         out.push_str(parts.next().unwrap_or(""));
     }
     out
+}
+
+/// An error's source line (`before CUT after`, as the erring node saw it:
+/// `graph::diag`'s `show_context`) as the current text has it. A node is
+/// kept while what it read is the same, but the line around it is other
+/// nodes' text: an edit before or after it on its line changes the
+/// context without running it again. The node's own text (`span`, from
+/// where its predecessor stopped to where it stopped) is the same now: the
+/// place in it where the error was is the split of it that `before` ends
+/// with and `after` begins with; the line is read again around that place.
+/// Kept as it was if the split is not found or not unique (a pseudo
+/// file's line, a node spanning lines).
+fn line_now(ctx: &str, text: &[char], span: (usize, usize)) -> String {
+    let cut = crate::graph::diag::CUT;
+    let Some((before, after)) = ctx.split_once(cut) else {
+        return ctx.to_string();
+    };
+    // (tex.web 49: how a character prints)
+    let shown = |c: &[char]| -> String {
+        c.iter()
+            .map(|&c| {
+                let k = u32::from(c);
+                if k < 32 || k == 127 {
+                    let x = if k < 64 { k + 64 } else { k - 64 };
+                    format!("^^{}", char::from_u32(x).unwrap_or('?'))
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect()
+    };
+    let (a, b) = (span.0.min(text.len()), span.1.min(text.len()));
+    if a >= b {
+        return ctx.to_string();
+    }
+    // (the node's text on its last line: where an error's line is)
+    let a = text[a..b - 1].iter().rposition(|&c| c == '\r').map_or(a, |k| a + k + 1);
+    let own = &text[a..b];
+    let splits: Vec<usize> = (0..=own.len())
+        .filter(|&e| before.ends_with(&shown(&own[..e])) && after.starts_with(&shown(&own[e..])))
+        .collect();
+    let [e] = splits[..] else {
+        return ctx.to_string();
+    };
+    let pos = a + e;
+    let last = pos.saturating_sub(1);
+    let start = text[..last].iter().rposition(|&c| c == '\r').map_or(0, |k| k + 1);
+    let end = text[start..].iter().position(|&c| c == '\r').map_or(text.len(), |k| start + k);
+    format!("{}{cut}{}", shown(&text[start..pos.min(end)]), if pos < end { shown(&text[pos..end]) } else { String::new() })
 }
 
 /// A log entry of a piece: a text (line numbers within the piece), or a

@@ -27,6 +27,18 @@ use phitex_flow::{Options, Order, Reads};
 /// findings"): such a seed is reported, not counted, while it stays open.
 const NOOP_OPEN: [(&str, &str); 1] = [("trip", "F1: a second update of TRIP differs from a cold build, edit or not")];
 
+/// Whether a no-op edit fails too, at 1 thread in priority order (where
+/// F1 always shows; the 8-thread schedule of the failure may hide it).
+fn noop_fails(r: &fuzz::Repro) -> bool {
+    let mut n = r.noop();
+    for s in [&mut n.before, &mut n.schedule] {
+        s.threads = 1;
+        s.reads = phitex_flow::Reads::Suspend;
+        s.order = phitex_flow::Order::Priority;
+    }
+    fuzz::replay(&n).is_some()
+}
+
 fn env_num(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -55,7 +67,7 @@ fn edits_equal_cold_builds() {
         let line = format!("seed {seed} ({}, edit {} {}): {:?} -> {}", r.doc, r.step, r.edit.what, r.fail, p.display());
         let open = NOOP_OPEN.iter().find(|(d, _)| *d == r.doc);
         match open {
-            Some((_, why)) if !matches!(r.fail, fuzz::Fail::Over { .. }) && fuzz::replay(&r.noop()).is_some() => {
+            Some((_, why)) if !matches!(r.fail, fuzz::Fail::Over { .. }) && noop_fails(&r) => {
                 eprintln!("open: {line} [{why}]");
             }
             _ => bad.push(line),

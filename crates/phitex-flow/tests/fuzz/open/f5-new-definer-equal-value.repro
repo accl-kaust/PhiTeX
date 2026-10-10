@@ -1,0 +1,36 @@
+phitex-flow fuzz repro
+doc hyphens
+seed 0 step 1
+before threads=1 reads=Suspend order=Priority lean=false
+schedule threads=1 reads=Speculate order=Random(40) lean=false
+fail over ran=44 allowed=320 readers=6 edited-new-or-edge-nodes=38; worst piece "\\tolerance=1000\r\r" ran 2 of 0 allowed; changed=\para
+history threads=1 doc=-
+edit - 685 1 split
+ins
+
+
+
+text
+\catcode`\{=1 % left brace is begin-group character
+\catcode`\}=2 % right brace is end-group character
+\catcode`\$=3 % dollar sign is math shift
+\catcode`\&=4 % ampersand is alignment tab
+\catcode`\#=6 % hash mark is macro parameter character
+\catcode`\^=7 \catcode`\^^K=7 % circumflex and uparrow are for superscripts
+\catcode`\_=8 \catcode`\^^A=8 % underline and downarrow are for subscripts
+\catcode`\^^I=10 % ascii tab is a blank space
+\chardef\active=13 \catcode`\~=\active % tilde is active
+\catcode`\^^L=\active \outer\def^^L{\par} % ascii form-feed is "\outer\par"
+
+% ---- the text layer, with the default output routine
+\def\fz{lazy}\newif\iffz \fztrue
+\input fzsub
+\vsize=2in \hsize=3in
+
+\tolerance=1000
+
+
+file fzsub.tex
+Sub file text one.
+
+Sub file text two, with \fz.
