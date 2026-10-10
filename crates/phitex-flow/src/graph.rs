@@ -1853,6 +1853,8 @@ impl Run {
     /// of outer-ness alone), items, rare parts, and the stacks their states
     /// hold.
     pub fn census(&self) -> String {
+        // (name, source kind and node, scope, conditional, outer-ness)
+        type Group = (Key, u8, u64, Option<u16>, Option<u16>, bool);
         let c = &self.chain;
         let n = c.nodes.len();
         let (mut reads, mut outer, mut emit, mut rare, mut texts, mut conds, mut groups) = (0, 0, 0, 0, 0, 0, 0);
@@ -1860,7 +1862,7 @@ impl Run {
         // (the distinct reads by what they read: more than one per group is
         // a copy not shared; by kind: outer-ness, whole from a node, whole
         // from before the piece)
-        let mut groups_of: FxMap<(Key, u8, u64, Option<u16>, Option<u16>, bool), u32> = FxMap::default();
+        let mut groups_of: FxMap<Group, u32> = FxMap::default();
         for node in c.nodes.range(0, n) {
             reads += node.reads.len();
             for r in node.reads.iter() {
@@ -2727,10 +2729,15 @@ pub fn run_piece(
     for e in reads {
         if kept.last().is_none_or(|l| l.0 != e.0) {
             run_start = kept.len();
-        } else if !positional(&e.0) && kept[run_start..].iter().any(|x| x.2 == e.2) {
-            continue;
-        } else if positional(&e.0) && kept.last().is_some_and(|l| l.1 == e.1 && l.2 == e.2) {
-            continue;
+        } else {
+            let seen = if positional(&e.0) {
+                kept.last().is_some_and(|l| l.1 == e.1 && l.2 == e.2)
+            } else {
+                kept[run_start..].iter().any(|x| x.2 == e.2)
+            };
+            if seen {
+                continue;
+            }
         }
         kept.push(e);
     }
