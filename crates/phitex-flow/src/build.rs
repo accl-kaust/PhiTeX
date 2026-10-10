@@ -4172,6 +4172,9 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
         .iter()
         .map(|(key, node, val)| {
             let (def, now, ..) = sh.names.reaching(key, (k as u32, *node), &sh.font);
+            // (a fold's read is the fold's to validate: against what it
+            // has there now, not the names index)
+            let now = sh.names.fold_value(key, (k as u32, *node), &sh.font).unwrap_or(now);
             (def, val.seen_as(&now))
         })
         .collect();
@@ -4205,6 +4208,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
             for ((key, node, val), c) in run.reads.iter().zip(&mut checks) {
                 if since.contains(key) {
                     let (def, now, ..) = sh.names.reaching(key, (k as u32, *node), &sh.font);
+                    let now = sh.names.fold_value(key, (k as u32, *node), &sh.font).unwrap_or(now);
                     *c = (def, val.seen_as(&now));
                 }
             }
