@@ -96,7 +96,6 @@ pub fn ship_keys() -> Vec<Key> {
     ]
     .into_iter()
     .chain(PARAM_INTS)
-    .into_iter()
     .map(Key::IntPar)
     .collect();
     v.extend(

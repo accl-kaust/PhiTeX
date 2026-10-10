@@ -2862,7 +2862,6 @@ impl Build {
         // (pdfTeX's read-backs: the fold answered otherwise than the nodes
         // read — another round, the readers of the answers that changed
         // run again; CORE.md, "pdfTeX's read-backs")
-        let mut errors = errors;
         if let Some(a) = pdf_answers
             && a != *self.pdf.answers
         {

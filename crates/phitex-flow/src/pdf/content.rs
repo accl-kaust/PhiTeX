@@ -1474,25 +1474,22 @@ impl W<'_> {
         self.events.push(Event::Image(n));
         let (x, y) = (self.cur_h - self.origin_h, self.origin_v - self.cur_v);
         let index = r.as_ref().map_or(0, |r| r.index);
-        match r.as_ref().and_then(|r| r.image.pdf.as_ref().map(|p| (p, r.image.shown()))) {
-            Some((p, (img_w, img_h))) => {
-                self.o.real(ext_xn_over_d(w, TEN_POW[6], img_w), 6);
-                self.o.print(b" 0 0 ");
-                self.o.real(ext_xn_over_d(h + d, TEN_POW[6], img_h), 6);
-                self.o.out(b' ');
-                self.bp(x - ext_xn_over_d(w, p.orig_x, img_w));
-                self.o.out(b' ');
-                self.bp(y - ext_xn_over_d(h + d, p.orig_y, img_h));
-            }
-            None => {
-                self.o.real(ext_xn_over_d(w, TEN_POW[6], ONE_HUNDRED_BP), 4);
-                self.o.print(b" 0 0 ");
-                self.o.real(ext_xn_over_d(h + d, TEN_POW[6], ONE_HUNDRED_BP), 4);
-                self.o.out(b' ');
-                self.bp(x);
-                self.o.out(b' ');
-                self.bp(y);
-            }
+        if let Some((p, (img_w, img_h))) = r.as_ref().and_then(|r| r.image.pdf.as_ref().map(|p| (p, r.image.shown()))) {
+            self.o.real(ext_xn_over_d(w, TEN_POW[6], img_w), 6);
+            self.o.print(b" 0 0 ");
+            self.o.real(ext_xn_over_d(h + d, TEN_POW[6], img_h), 6);
+            self.o.out(b' ');
+            self.bp(x - ext_xn_over_d(w, p.orig_x, img_w));
+            self.o.out(b' ');
+            self.bp(y - ext_xn_over_d(h + d, p.orig_y, img_h));
+        } else {
+            self.o.real(ext_xn_over_d(w, TEN_POW[6], ONE_HUNDRED_BP), 4);
+            self.o.print(b" 0 0 ");
+            self.o.real(ext_xn_over_d(h + d, TEN_POW[6], ONE_HUNDRED_BP), 4);
+            self.o.out(b' ');
+            self.bp(x);
+            self.o.out(b' ');
+            self.bp(y);
         }
         self.o.print_ln(b" cm");
         self.o.print(b"/Im");

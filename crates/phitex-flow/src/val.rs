@@ -662,8 +662,6 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -
         | Key::GlyphUnicode(_)
         | Key::PdfAns(..)
         | Key::PdfRandom => Val::Void,
-        Key::PdfLast(_) | Key::PdfSeed | Key::PdfClock => Val::Int(0),
-        Key::PdfDate | Key::PdfMatch => Val::Name(Arc::from("")),
         Key::Parshape => Val::Parshape(Arc::new(Vec::new())),
         Key::Font | Key::FamFont(..) => Val::Font(crate::tfm::null_font()),
         Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
@@ -671,11 +669,11 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -
         Key::FontIdent(_) | Key::LastFont => Val::Name(Arc::from("nullfont")),
         Key::Job => Val::Name(Arc::from("texput")),
         Key::SplitMarks => Val::SplitMarks(Arc::from(Vec::new())),
-        Key::Format => Val::Name(Arc::from("")),
+        Key::Format | Key::PdfDate | Key::PdfMatch => Val::Name(Arc::from("")),
         // (the job not ended; no magnification fixed yet; batch mode, as the oracles run TeX:
         // `-interaction=batchmode`; a build gives its own,
         // `Build::set_interaction`: IniTeX's `error_stop_mode` is 3)
-        Key::Ended | Key::MagSet | Key::Interaction => Val::Int(0),
+        Key::Ended | Key::MagSet | Key::Interaction | Key::PdfLast(_) | Key::PdfSeed | Key::PdfClock => Val::Int(0),
         Key::MainDepth => Val::Int(crate::page::IGNORE_DEPTH),
         Key::ETeXMode => Val::Int(i32::from(etex)),
         Key::Patterns(_) => Val::Patterns(crate::hyph::Patterns::new()),

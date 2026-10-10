@@ -8,12 +8,13 @@
 const UNITY: i32 = 0x1_0000;
 
 /// pdfTeX §111: $2^{27}$, $2^{28}$, $2^{30}$ and $2^{31}-1$ as fractions.
-const FRACTION_HALF: i32 = 0o1000000000;
-const FRACTION_ONE: i32 = 0o2000000000;
-const FRACTION_FOUR: i32 = 0o10000000000;
-const EL_GORDO: i32 = 0o17777777777;
+const FRACTION_HALF: i32 = 0o1_000_000_000;
+const FRACTION_ONE: i32 = 0o2_000_000_000;
+const FRACTION_FOUR: i32 = 0o10_000_000_000;
+const EL_GORDO: i32 = 0o17_777_777_777;
 
 /// pdfTeX §117–§118: $2^{27}\ln(1/(1-2^{-k}))$, rounded, for `m_log`.
+#[allow(clippy::unreadable_literal)]
 const SPEC_LOG: [i32; 29] = [
     0, 93032640, 38612034, 17922280, 8662214, 4261238, 2113709, 1052693, 525315, 262400, 131136,
     65552, 32772, 16385, 8192, 4096, 2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1, 1,

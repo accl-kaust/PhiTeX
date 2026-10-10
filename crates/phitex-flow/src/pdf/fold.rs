@@ -772,15 +772,14 @@ impl F<'_> {
                 && e.is(F_INCLUDED)
                 && self.maps.over.get(&e.tfm_name).is_some_and(|x| x.as_ref().is_some_and(|x| Arc::ptr_eq(x, e)))
         });
-        let fm = match over {
-            Some(e) => e.clone(),
-            None => {
-                let e = self.maps.base.as_ref()?.lookup_ps(&key)?;
-                if self.maps.over.contains_key(&e.tfm_name) {
-                    return None;
-                }
-                e
+        let fm = if let Some(e) = over {
+            e.clone()
+        } else {
+            let e = self.maps.base.as_ref()?.lookup_ps(&key)?;
+            if self.maps.over.contains_key(&e.tfm_name) {
+                return None;
             }
+            e
         };
         let ff = String::from_utf8_lossy(fm.ff_name.as_ref()?).into_owned();
         self.files.get(&ff)?;
@@ -802,13 +801,11 @@ impl F<'_> {
         if file {
             let name = String::from_utf8_lossy(item).into_owned();
             let found = self.files.get(&name).or_else(|| if name.contains('.') { None } else { self.files.get(&format!("{name}.map")) });
-            match found {
-                Some((_, data)) => super::font::map::for_map_file_lines(&data, |l| lines.push(l.to_vec())),
-                None => {
-                    self.warnings.push("pdfTeX warning: cannot open font map file".into());
-                    return;
-                }
-            }
+            let Some((_, data)) = found else {
+                self.warnings.push("pdfTeX warning: cannot open font map file".into());
+                return;
+            };
+            super::font::map::for_map_file_lines(&data, |l| lines.push(l.to_vec()));
         } else {
             super::font::map::for_map_file_lines(item, |l| lines.push(l.to_vec()));
         }

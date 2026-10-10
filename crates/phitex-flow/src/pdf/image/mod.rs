@@ -272,7 +272,7 @@ pub fn page_box(p: &super::lib::pdfread::Page, spec: i32) -> Option<[f64; 4]> {
 /// given, else number `page_num`) and its box `spec`; the version allowed
 /// (`major.minor`, and what a newer one is: `errorlevel`). The image and
 /// a warning, or `pdftex_fail`'s message.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 pub fn read_pdf_info(
     name: Vec<u8>,
     data: Arc<[u8]>,
@@ -404,7 +404,10 @@ pub fn read_image(
 /// pdftex.web's `scale_image`: the image's width, height and depth from
 /// those given (`item::RUNNING` where not), and the warnings it gives;
 /// `Err`: `pdf_error`'s message.
-pub fn scale(image: &Image, given: (i32, i32, i32), image_resolution: i32) -> Result<((i32, i32, i32), Vec<String>), String> {
+/// An image's size as scaled, and the warnings scaling gave.
+pub type Scaled = ((i32, i32, i32), Vec<String>);
+
+pub fn scale(image: &Image, given: (i32, i32, i32), image_resolution: i32) -> Result<Scaled, String> {
     use crate::item::RUNNING;
     let mut warnings = Vec::new();
     let (x, y) = image.shown();

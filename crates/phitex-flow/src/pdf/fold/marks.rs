@@ -56,7 +56,7 @@ fn str_less_str(a: &[u8], b: &[u8]) -> bool {
 /// `sort_dest_names`: pdfTeX's quicksort (its order of equal names).
 fn sort_dest_names(v: &mut [(crate::pdf::what::Text, u32)], l: isize, r: isize) {
     let (mut i, mut j) = (l, r);
-    let s = v[((l + r) / 2) as usize].0.clone();
+    let s = v[isize::midpoint(l, r) as usize].0.clone();
     loop {
         while str_less_str(&v[i as usize].0, &s) {
             i += 1;
@@ -246,7 +246,7 @@ impl F<'_> {
             }
             let mut o = Out::new();
             o.out(b'[');
-            o.int(i64::from(struct_num.map_or(self.last_page as i32, |s| s)));
+            o.int(i64::from(struct_num.unwrap_or(self.last_page as i32)));
             o.print(b" 0 R ");
             let h = self.cur_page_height;
             match kind {
@@ -641,13 +641,12 @@ impl F<'_> {
             }
         }
         let mut o = Out::new();
-        match last_attr {
-            Some(x) => o.print_ln(&x),
-            None => {
-                o.print_ln(b"/I << ");
-                self.thread_title(&mut o, t);
-                o.print_ln(b">>");
-            }
+        if let Some(x) = last_attr {
+            o.print_ln(&x);
+        } else {
+            o.print_ln(b"/I << ");
+            self.thread_title(&mut o, t);
+            o.print_ln(b">>");
         }
         o.indirect_ln(b"F", a);
         self.print_out(&o);
