@@ -2461,6 +2461,18 @@ run for 226k, 905 runs, 2 reruns), c0 54,735 → 1,397 ms, the DVIs
 GB on a layout about to change. What remains for tikz: 65 rounds, one per
 file it discovers (rounds 1-64 2-90 ms each), and the 65th, past the cap
 of 64, reads every further file inline (519 ms).
+Then (A reviewed): the cap counts rounds without progress (`Build::progress`:
+a file placed, a rest of a line, a re-cut, a join, an inline mark not
+placed by an earlier round of the update; 8 in a row, 4096 in all), and
+a change ends the round at once only when its cause is known now: a file
+read as the directories or the build give it, or an `\endinput`, a stop,
+a cut. A file the run itself writes (TRIP's `\input tripos`, written at
+a shipout) is known to the layout only from the round's fold replaying
+the writes; ended at once, every round repeated the same change (65
+rounds, and the capped last round gave another DVI). Now TRIP takes 10
+rounds (12 before). tikz still loops on a join the layout never absorbs
+(piece 2270, the same since flow 90113ce): 8 rounds placing nothing, then
+the last round's loud failure.
 
 **`latex.ltx` is a true chain.** 31.2 s at `-j 1`, 31.1 s at `-j 8`
 (job 7914). Of its 19-20 rounds one holds 27.3 s, and in it one piece
