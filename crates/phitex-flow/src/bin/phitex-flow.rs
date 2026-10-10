@@ -302,6 +302,28 @@ fn budgets(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `phitex-flow --fuzz-cold FILE`: cold builds of a reproduction's text
+/// before its edit and after it, as its document is built; "ends" when
+/// both do (a hang's reduction asks it of every cut: a text whose cold
+/// build does not end is not the update's hang).
+fn fuzz_cold(file: &str) -> ExitCode {
+    use phitex_flow::fuzz;
+    let Some(r) = std::fs::read_to_string(file).ok().and_then(|s| fuzz::Repro::parse(&s)) else {
+        eprintln!("--fuzz-cold: {file}: not a reproduction");
+        return ExitCode::FAILURE;
+    };
+    let Some(doc) = fuzz::find_doc(&r.doc) else {
+        eprintln!("--fuzz-cold: no document {}", r.doc);
+        return ExitCode::FAILURE;
+    };
+    let _ = fuzz::cold(&doc, &r.text, &r.files);
+    let (mut text, mut files) = (r.text.clone(), r.files.clone());
+    r.edit.apply(&mut text, &mut files);
+    let _ = fuzz::cold(&doc, &text, &files);
+    println!("{file}: both cold builds end");
+    ExitCode::SUCCESS
+}
+
 /// `phitex-flow --fuzz-reruns BEFORE AFTER`: why each piece run again in
 /// the build of graph AFTER ran, from the graph BEFORE it (`--dump`
 /// output, or a fuzz dump's `before.dump`, `after.dump`):
@@ -370,6 +392,9 @@ fn main() -> ExitCode {
     }
     if args.first().map(String::as_str) == Some("--budgets") {
         return budgets(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("--fuzz-cold") {
+        return fuzz_cold(args.get(1).map_or("", String::as_str));
     }
     if args.first().map(String::as_str) == Some("--fuzz-reruns") {
         return fuzz_reruns(&args[1..]);
