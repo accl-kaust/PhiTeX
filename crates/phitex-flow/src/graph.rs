@@ -4042,6 +4042,9 @@ impl<'a> Exec<'a> {
     }
 
     /// [`Exec::next_raw`] before an alignment sees the token.
+    // (LLVM declined a plain #[inline]; inline(always) measured
+    // latex.ltx -0.7%, the documents -0.3% to -0.6%, job 8059)
+    #[allow(clippy::inline_always)]
     #[inline(always)]
     fn next_raw0(&mut self) -> Option<Tok> {
         self.noexp = false;
