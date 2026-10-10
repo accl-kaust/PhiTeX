@@ -270,6 +270,37 @@ fn a_file_read_stops_the_pieces_after_it() {
     }
 }
 
+/// The last round, which may not lay the sequence out again, ends each
+/// run where the layout says: a file the layout placed is read as its
+/// pieces, any other in the piece. Cut off after any number of rounds,
+/// the build gives the document's DVI file, or fails saying the sequence
+/// did not settle; never another output.
+#[test]
+fn the_last_round_follows_the_layout() {
+    for (name, main, files) in versions() {
+        let want = build_with(&files).update(&main, Options::default());
+        for max in [0, 1, 2, 3] {
+            let mut b = build_with(&files);
+            b.set_max_rounds(max);
+            let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.update(&main, Options::default())));
+            match got {
+                Ok(out) => {
+                    assert!(out.dvi == want.dvi, "{name}, {max} rounds before the last: not the document's DVI file");
+                    assert_eq!(out.errors, want.errors, "{name}, {max} rounds before the last");
+                }
+                Err(e) => {
+                    let msg = e
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| e.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                        .unwrap_or_default();
+                    assert!(msg.contains("did not settle"), "{name}, {max} rounds before the last: {msg}");
+                }
+            }
+        }
+    }
+}
+
 /// A settled run that reads a file on a page quantity read before the page
 /// scan checked it: the change waits (`due_at`), the pieces after it do
 /// not run, and when the scan refutes the read the piece runs again
