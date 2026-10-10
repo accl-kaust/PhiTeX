@@ -546,10 +546,14 @@ impl Exec<'_> {
     /// A `\write`'s text (tex.web 1370): its tokens expanded now as
     /// `\edef` expands them, in no mode, then shown as printing writes them.
     pub(super) fn expand_write(&mut self, toks: &[Tok]) -> String {
-        let mut l = Vec::with_capacity(toks.len() + 1);
+        // (tex.web 1371: the text between a `{` and a `}`, both read, so an
+        // alignment's brace count stays as it was)
+        let mut l = Vec::with_capacity(toks.len() + 2);
+        l.push(Tok::Char(1, '{'));
         l.extend_from_slice(toks);
         l.push(Tok::Char(2, '}'));
         self.rewrite(l);
+        let _ = self.next_raw();
         let was = self.in_write;
         self.in_write = true;
         let out = self.scanning(super::Scanning::Absorbing, None, |x| x.expand_text(None));
@@ -637,6 +641,9 @@ impl Exec<'_> {
                     let ident = format!(" (preloaded format={job} {y}.{mo}.{d})");
                     s.push_str(&ident);
                     self.define(Key::Format, Val::Name(Arc::from(ident)), true);
+                    // (etex.ch, Dump the e-TeX state: every enhancement off in
+                    // the format)
+                    self.define(Key::IntPar(IntPar::TeXXeTstate), Val::Int(0), true);
                 }
             }
             if s.chars().count() > 3 {

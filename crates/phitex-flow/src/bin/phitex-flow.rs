@@ -89,14 +89,18 @@ fn report(what: &str, o: &Output) {
 /// `phitex-flow --trip DIR [THREADS]`: Knuth's TRIP test (tripman.tex,
 /// Appendix A) as one session: DIR holds `trip.tex`, `trip.tfm`, `trip1.in`
 /// and `trip2.in`; `tripin.log`, `trip.log`, `trip.fot`, `trip.dvi` and the
-/// files TRIP writes go there.
+/// files TRIP writes go there. A DIR holding `etrip.tex` runs e-TRIP
+/// instead (etripman.tex, part 2: `etrip.tfm`, `etrip2.in`, `etrip3.in`,
+/// extended mode), its outputs named `etrip`.
 fn trip(dir: &str, threads: usize) -> ExitCode {
     let d = std::path::Path::new(dir);
     let read = |n: &str| std::fs::read(d.join(n)).unwrap_or_else(|e| panic!("{dir}/{n}: {e}"));
-    let tex: String = read("trip.tex").iter().map(|&b| char::from(b)).collect();
-    let font = Arc::new(Font::parse("trip", &read("trip.tfm")).expect("trip.tfm"));
+    let e = d.join("etrip.tex").exists();
+    let (job, ins) = if e { ("etrip", ["etrip2.in", "etrip3.in"]) } else { ("trip", ["trip1.in", "trip2.in"]) };
+    let tex: String = read(&format!("{job}.tex")).iter().map(|&b| char::from(b)).collect();
+    let font = Arc::new(Font::parse(job, &read(&format!("{job}.tfm"))).expect("the TFM file"));
     let mut terminal = Vec::new();
-    for f in ["trip1.in", "trip2.in"] {
+    for f in ins {
         terminal.extend(String::from_utf8_lossy(&read(f)).lines().map(str::to_string));
     }
     let s = phitex_flow::session::Session {
@@ -106,7 +110,7 @@ fn trip(dir: &str, threads: usize) -> ExitCode {
             tex.clone(),
             std::fs::read(d.join("pass2.tex")).map_or(tex, |b| b.iter().map(|&c| char::from(c)).collect()),
         ],
-        jobname: "trip".into(),
+        jobname: job.into(),
         terminal,
         interaction: 3,
         limits: phitex_flow::print::Limits::TRIP,
@@ -114,19 +118,19 @@ fn trip(dir: &str, threads: usize) -> ExitCode {
         input_dirs: Vec::new(),
         font,
     };
-    let o = s.run(Options { threads, etex: false, ..Options::default() });
+    let o = s.run(Options { threads, etex: e, ..Options::default() });
     let put = |n: &str, b: &[u8]| std::fs::write(d.join(n), b).unwrap_or_else(|e| panic!("{dir}/{n}: {e}"));
     for (k, l) in o.logs.iter().enumerate() {
-        put(if k == 0 { "tripin.log" } else { "trip.log" }, l.log.as_bytes());
+        put(&if k == 0 { format!("{job}in.log") } else { format!("{job}.log") }, l.log.as_bytes());
         if k == 1 {
-            put("trip.fot", l.term.as_bytes());
+            put(&format!("{job}.fot"), l.term.as_bytes());
         }
     }
-    put("trip.dvi", &o.dvi);
+    put(&format!("{job}.dvi"), &o.dvi);
     for (n, t) in &o.writes {
         put(n, &t.chars().map(|c| u8::try_from(c).unwrap_or(b'?')).collect::<Vec<u8>>());
     }
-    println!("trip: {} bytes of DVI, {} runs, {} errors on the graph", o.dvi.len(), o.runs, o.errors.len());
+    println!("{job}: {} bytes of DVI, {} runs, {} errors on the graph", o.dvi.len(), o.runs, o.errors.len());
     ExitCode::SUCCESS
 }
 

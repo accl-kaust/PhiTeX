@@ -3297,6 +3297,14 @@ impl<'a> Exec<'a> {
         if !from_read {
             self.back(t);
         }
+        self.outer_recover(false);
+        Tok::Char(10, ' ')
+    }
+
+    /// tex.web 338-339: what was being scanned is ended where an `\outer`
+    /// name came (`eof` false) or a file ended (`eof`, tex.web 362: its
+    /// error says so): a `}`, a `\par`, `\cr}` or `\fi` goes in first.
+    fn outer_recover(&mut self, eof: bool) {
         let of = self.warning.as_ref().map_or_else(String::new, |w| format!(" of {}", self.shown(w)));
         match self.scanning {
             Scanning::Skipping => {
@@ -3324,10 +3332,10 @@ impl<'a> Exec<'a> {
                     }
                     _ => self.back(Tok::Char(2, '}')),
                 }
-                self.err(format!("Forbidden control sequence found while scanning {what}{of}"));
+                let why = if eof { "File ended" } else { "Forbidden control sequence found" };
+                self.err(format!("{why} while scanning {what}{of}"));
             }
         }
-        Tok::Char(10, ' ')
     }
 
     /// The next token, unexpanded, where an `\outer` name is allowed
@@ -3415,9 +3423,17 @@ impl<'a> Exec<'a> {
                 return None;
             }
         }
-        if let Some(PendingText { kind: TextKind::File(_), .. }) = self.st.texts.pop() {
+        let popped = self.st.texts.pop();
+        if let Some(PendingText { kind: TextKind::File(_), .. }) = popped {
             // (an `\input` file is closed, tex.web 362)
             self.log_raw(&format!("{}{}", crate::show::RAW, ')'));
+        }
+        // (a file, or `\scantokens`'s pseudo file, ended in the middle of
+        // what was being scanned: tex.web 362's `check_outer_validity`)
+        if popped.is_some_and(|p| matches!(p.kind, TextKind::File(_) | TextKind::Scan))
+            && self.scanning != Scanning::Normal
+        {
+            self.outer_recover(true);
         }
         None
     }

@@ -199,7 +199,10 @@ fn compatibility_mode_names_nothing_of_etex() {
 /// defines nothing (unlike `\csname`).
 #[test]
 fn etex_steps_make_no_nodes_and_ifcsname_defines_nothing() {
-    let src = "\\def\\a{A}\\edef\\b{\\unexpanded{\\a}\\detokenize{\\a}\\scantokens{x}\\numexpr1\\relax}%\n\
+    // (`\everyeof{\noexpand}`: a pseudo file ending inside `\edef` is
+    // "File ended while scanning definition", tex.web 362, unless the
+    // file's end is met by `\noexpand`)
+    let src = "\\everyeof{\\noexpand}\\def\\a{A}\\edef\\b{\\unexpanded{\\a}\\detokenize{\\a}\\scantokens{x}\\numexpr1\\relax}%\n\
                \\count1=\\numexpr 2*3\\relax\\ifcsname zz\\endcsname\\else\\count2=1 \\fi\\message{\\b}\n";
     let o = Build::new(font()).update(&format!("{PRELUDE}{src}"), Options { dump: true, ..opts() });
     assert!(o.dump.contains("\\count2 = φ(1 | 0)"), "no φ for \\count2:\n{}", o.dump);

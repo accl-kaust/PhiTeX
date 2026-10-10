@@ -218,8 +218,9 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     from that state. Now: "Missing } inserted at the end of a piece" /
     "Incomplete \if".
 15. **`\mag` and `true` units** — TeX freezes `\mag` at its first use
-    (`mag_set`, a hidden global). Proposal: `Key::MagSet`, defined globally
-    by the first node using it. Now: `\mag` is read, not frozen.
+    (`mag_set`, a hidden global). Done (F, TRIP): `Key::MagSet`, defined
+    globally by `prepare_mag` (a `true` dimension, or a `\shipout` while
+    none is fixed); the postamble's magnification is the first page's.
 16. **`\show`, `\showthe`, error contexts** — `\showbox` and `\showlists`
     are done (`graph/diag.rs`): their text is a raw log entry whose line
     numbers are placeholders the log's gatherer fills (`G` k: where the
@@ -1051,6 +1052,24 @@ five schedules. The two remaining raw differences are the glue rounding
   next);
 - tex.web 368: an `\input` expanded by `\expandafter` is read in the
   piece, not as a file-piece node (the token put back is read first).
+
+**e-TRIP** (`tests/etrip.rs`, `bench/etrip/`: TeX Live's
+`etexdir/etrip`, part 2 of `etripman.tex`). Two jobs: `*etrip` (extended
+mode) dumps, `&etrip etrip` runs, at TRIP's sizes. Gate: `etrip.typ` (3
+pages), byte-identical but for the header, at the five schedules: passes.
+The logs are diagnostics. Fixed for it:
+- tex.web 362: a file or `\scantokens` pseudo file that ends in the middle
+  of what is being scanned ends it as an `\outer` name would, with "File
+  ended while scanning ..." or "Incomplete \if" and the `\fi`, `}`,
+  `\par` or `\cr}` inserted (`Exec::outer_recover`).
+- tex.web 1371: a `\write`'s text is read between a `{` and a `}`, both
+  read, so an alignment's brace count stays as it was (an
+  `\immediate\write` inside a `\valign` entry).
+- etex.ch: `\dump` turns `\TeXXeTstate` off in the format.
+- `phitex-flow --trip DIR` runs e-TRIP when DIR holds `etrip.tex`.
+
+The log still differs where a group or conditional spans a blank line
+(item 14 above; etrip.tex lines 147–181). The DVI does not depend on it.
 
 **Approximations left** (not met by TRIP's DVI):
 - `\endtemplate` is not yet an `\outer` name for `check_outer`.
