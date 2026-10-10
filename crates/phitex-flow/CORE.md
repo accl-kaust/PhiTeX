@@ -2401,6 +2401,22 @@ after on the same base):
    calls made per token: nothing on the short runs (job 7818), on
    `latex.ltx` 212.8G -> 200.8G (-5.6%); the documents on the format
    -1.6% to -2.8%, big2 -0.3%, plain within 0.1% (job 7892).
+9. *A lean piece's full run freed on the drop thread.* Once the page
+   scan passes a lean piece, its full run is the scan task's alone; the
+   task freed it on the worker (`drop_glue::<Vec<(Arc<Run>, ..)>>`, 3.4%
+   of `latex.ltx`'s Ir), now it sends its pieces' runs to the drop
+   thread, as a replaced run goes. Same Ir in all (job 7927, callgrind
+   per thread, `latex.ltx` at `-j 1`): the worker 158.4G -> 157.1G, the
+   drop thread +3.8G; wall (5 runs, median) 26.43 s -> 25.73 s.
+10. *`\csname`'s name in the run's buffer* (`Scratch::csname`), and
+   `print::str_toks` allocating its list once: the name's `String` grew
+   push by push (2.4G of `latex.ltx`'s vector growth). Ir (job 7984, on
+   flow 9c2c4ab): `latex.ltx` 177.84G -> 175.57G (-1.3%), the documents
+   on the format -0.1% to -0.4%.
+11. *`#[inline]` on `Tok::key`*: a caller that sees the token's variant
+   drops the `Option<Key>` it made without calling `Key`'s drop glue
+   (3.2G self on `latex.ltx`). Ir (job 7984): `latex.ltx` 175.57G ->
+   172.43G (-1.8%), the documents on the format -0.2% to +0.4%.
 
 Upstream between the two stacks: flow through 96bdfcc (`pop_cond`'s
 set, B's tikz fix) moved 99ff426's numbers by 0% to -1.2% (the
@@ -2412,7 +2428,9 @@ in a vector until the node ends instead of shared cells (+0.0% to +1.2%:
 moving a larger `Level` in and out of the vector costs what the cells
 cost); one shared one-token list per token for `Exec::back` (-0.5% big2,
 +0.2% elsewhere); a call's single argument in place in its `Level`
-(+0.2% to +1.1%: every `Level` grows).
+(+0.2% to +1.1%: every `Level` grows); a counting sort by rank in
+place of 7's `sort_unstable` (`latex.ltx` 177.71G -> 177.65G, job 7922:
+after flow f56da28 the long read lists are few).
 
 **After 1-8** (callgrind Ir, exact, the cluster image's TeX Live; base
 and 1-6 job 7857, 7-8 job 7892; the same DVIs at every step):
