@@ -482,6 +482,31 @@ impl Matcher {
         }
         Some((i, own))
     }
+
+    /// The last build's runs the pieces `undone` took, to be taken again:
+    /// the layout placed them, then laid that text out otherwise (joined
+    /// with the texts after it, its file read in its caller). A run one
+    /// took by its text from another place goes back to its own place: a
+    /// text twice in a file, the first place joined, the second finds its
+    /// own run again (else it runs on no run, never knows it reads on,
+    /// and the sequence is laid out the same way round after round).
+    fn release(&mut self, olds: &[Kept], undone: &[Spec]) {
+        for i in undone.iter().filter_map(|s| s.old) {
+            if !self.used[i] {
+                continue;
+            }
+            self.used[i] = false;
+            if let Some(m) = self.by_len.as_mut()
+                && olds[i].run.is_some()
+            {
+                let q = m.entry(olds[i].text.len()).or_default();
+                if !q.contains(&i) {
+                    let at = q.iter().position(|&j| j > i).unwrap_or(q.len());
+                    q.insert(at, i);
+                }
+            }
+        }
+    }
 }
 
 fn count_lines(t: &[char]) -> usize {
@@ -2002,6 +2027,7 @@ impl Build {
                 let (e, lb) = (out[l].entry, out[l].base);
                 b += texts[i..i + w].iter().map(|x| count_lines(x)).sum::<usize>();
                 i += w;
+                m.release(olds, &out[l..]);
                 out.truncate(l);
                 l = self.place_with(out, m, olds, &joined, e, lb, ctx, depth, stops);
             }
@@ -2049,13 +2075,28 @@ impl Build {
         let inline = self.inline.iter().any(|t| Arc::ptr_eq(t, text) || **t == **text);
         // (a run that read a file as pieces is not one of a piece whose
         // files are read in it)
-        let found = m
-            .find(olds, text)
+        let cand = m.find(olds, text);
+        let found = cand
             .filter(|&(i, _)| !inline || olds[i].got.input.is_none())
             .filter(|&(i, _)| old_entry_holds(out, olds, entry, i));
         let old = found.map(|x| x.0);
         let moved = found.is_some_and(|x| !x.1);
         let k = out.len();
+        // (`PHITEX_PLACE`: each piece placed, the last build's run of its
+        // text found for it and taken or not, and why not)
+        if std::env::var_os("PHITEX_PLACE").is_some() {
+            let head: String = text.iter().take(50).collect::<String>().replace('\r', "|");
+            let why = match cand {
+                Some((i, _)) if found.is_none() && inline && olds[i].got.input.is_some() => "inline, the old run read a file".to_string(),
+                Some((i, _)) if found.is_none() => entry_diff(out, olds, entry, i),
+                _ => String::new(),
+            };
+            eprintln!(
+                "placed {k} {entry:?} cand {cand:?} old {old:?} join {} len {} [{head}] {why}",
+                old.is_some_and(|i| olds[i].got.join),
+                text.len()
+            );
+        }
         let expect = old.map(|i| olds[i].got.clone()).unwrap_or_default();
         out.push(Spec {
             text: text.clone(),
@@ -2092,6 +2133,7 @@ impl Build {
         // past it: the file is read in the calling piece)
         if !ended && last.is_some_and(|l| out[l].expect.join) {
             self.inline.push(text.clone());
+            m.release(olds, &out[k..]);
             out.truncate(k);
             return self.place(out, m, olds, text, entry, base, ctx, depth);
         }
@@ -4442,7 +4484,31 @@ fn entry_ready(g: &State, k: usize, speculate: bool) -> bool {
 /// says nothing of the sequence (it began in the middle of a command, or
 /// in another file's place).
 fn old_entry_holds(out: &[Spec], olds: &[Kept], entry: Entry, i: usize) -> bool {
-    let Some(run) = &olds[i].run else { return true };
+    match old_entry(out, olds, entry, i) {
+        Err(()) => false,
+        Ok(x) => x.is_none_or(|(old, e)| old == e),
+    }
+}
+
+/// (`PHITEX_PLACE`) How old run `i`'s entry differs from the one
+/// [`old_entry_holds`] computes: the first difference of the two shown.
+fn entry_diff(out: &[Spec], olds: &[Kept], entry: Entry, i: usize) -> String {
+    let (old, e) = match old_entry(out, olds, entry, i) {
+        Err(()) => return "the piece before reads on into it".into(),
+        Ok(None) => return String::new(),
+        Ok(Some(x)) => x,
+    };
+    let (a, b) = (format!("{old:?}"), format!("{e:?}"));
+    let at = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+    let w = |s: &str| s.chars().skip(at.saturating_sub(80)).take(240).collect::<String>();
+    format!("entry differs at {at}: old [{}] layout [{}]", w(&a), w(&b))
+}
+
+/// [`old_entry_holds`]'s two states: old run `i`'s entry and the one the
+/// layout so far gives its place (none: unknown, it holds; `Err`: the
+/// piece before reads on into it, it does not).
+fn old_entry(out: &[Spec], olds: &[Kept], entry: Entry, i: usize) -> Result<Option<(RState, RState)>, ()> {
+    let Some(run) = &olds[i].run else { return Ok(None) };
     let prev = |c: usize| out[c].old.and_then(|j| olds[j].run.as_ref());
     let state = match entry {
         Entry::Start => Some(RState::start()),
@@ -4459,13 +4525,13 @@ fn old_entry_holds(out: &[Spec], olds: &[Kept], entry: Entry, i: usize) -> bool 
             };
             match prev(q) {
                 // (the piece before reads on into it)
-                Some(_) if out[q].expect.join => return false,
+                Some(_) if out[q].expect.join => return Err(()),
                 Some(r) if r.out().enterable() && !r.out().halted() => Some(RState::entered_after(&r.out())),
                 _ => assumed,
             }
         }
     };
-    state.is_none_or(|e| run.entry() == e)
+    Ok(state.map(|e| (run.entry(), e)))
 }
 
 /// The state a piece after a cut is assumed to be entered in: the
@@ -4810,10 +4876,13 @@ fn rounds_shown(g: &State) {
     };
     for (k, ps) in g.p.iter().enumerate().filter(|(_, p)| p.status == Status::Done && !p.got.same(&p.expect)) {
         eprintln!(
-            "round ends: piece {k} of {} (id {:?}, inline {}): got [{}] the layout assumed [{}]",
+            "round ends: piece {k} of {} (id {:?}, inline {}, entry {:?}, len {}, [{}]): got [{}] the layout assumed [{}]",
             g.p.len(),
             ps.id,
             ps.inline,
+            ps.entry,
+            ps.text.len(),
+            ps.text.iter().take(50).collect::<String>().replace('\r', "|"),
             show(&ps.got),
             show(&ps.expect)
         );
