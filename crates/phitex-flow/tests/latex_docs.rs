@@ -114,56 +114,69 @@ fn kpsewhich(name: &str) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-/// `latex NAME` in a directory of its own, if there is a `latex`.
-fn run_latex(name: &str) -> Option<Made> {
-    let tmp = std::env::temp_dir().join(format!("phitex-flow-latex-doc-{name}-{}", std::process::id()));
+/// `latex NAME` in a directory of its own, if there is a `latex`, run
+/// again until what it writes is what it wrote the run before (at most
+/// `max` runs, as latexmk): the last run's DVI file and written files,
+/// the directories any run read from, and the runs made.
+fn run_latex(name: &str, max: usize) -> Option<(Made, usize)> {
+    let tmp = std::env::temp_dir().join(format!("phitex-flow-latex-doc-{name}-{max}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).ok()?;
     for f in doc_files(name) {
         std::fs::copy(docs_dir().join(&f), tmp.join(&f)).ok()?;
     }
-    let st = Command::new("latex")
-        .args(["-interaction=batchmode", "-recorder", &format!("{name}.tex")])
-        .env("SOURCE_DATE_EPOCH", "0")
-        .env("FORCE_SOURCE_DATE", "1")
-        .current_dir(&tmp)
-        .output()
-        .ok()?;
-    let fls = std::fs::read_to_string(tmp.join(format!("{name}.fls"))).unwrap_or_default();
-    let dvi = std::fs::read(tmp.join(format!("{name}.dvi"))).ok();
     let mut made = Made::default();
-    let mut add = |l: String| {
-        if !made.dirs.contains(&l) {
-            made.dirs.push(l);
+    let mut runs = 0;
+    loop {
+        runs += 1;
+        let st = Command::new("latex")
+            .args(["-interaction=batchmode", "-recorder", &format!("{name}.tex")])
+            .env("SOURCE_DATE_EPOCH", "0")
+            .env("FORCE_SOURCE_DATE", "1")
+            .current_dir(&tmp)
+            .output()
+            .ok()?;
+        assert!(st.status.success(), "latex failed on {name}");
+        let fls = std::fs::read_to_string(tmp.join(format!("{name}.fls"))).unwrap_or_default();
+        let mut add = |l: String| {
+            if !made.dirs.contains(&l) {
+                made.dirs.push(l);
+            }
+        };
+        let ini = kpsewhich("latex.ini")?;
+        add(format!("ini {ini}"));
+        for f in ["latex.ini", "pdftexconfig.tex"] {
+            let p = kpsewhich(f)?;
+            add(format!("input {}", Path::new(&p).parent()?.display()));
         }
-    };
-    let ini = kpsewhich("latex.ini")?;
-    add(format!("ini {ini}"));
-    for f in ["latex.ini", "pdftexconfig.tex"] {
-        let p = kpsewhich(f)?;
-        add(format!("input {}", Path::new(&p).parent()?.display()));
-    }
-    for l in fls.lines() {
-        if let Some(f) = l.strip_prefix("INPUT ") {
-            let p = Path::new(f);
-            let ext = p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-            if !p.is_absolute() || f.starts_with("/dev/") || ["fmt", "cnf", "map"].contains(&ext.as_str()) {
-                continue;
+        let mut writes: Vec<(String, String)> = Vec::new();
+        for l in fls.lines() {
+            if let Some(f) = l.strip_prefix("INPUT ") {
+                let p = Path::new(f);
+                let ext = p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+                if !p.is_absolute() || f.starts_with("/dev/") || ["fmt", "cnf", "map"].contains(&ext.as_str()) {
+                    continue;
+                }
+                let d = p.parent()?.display().to_string();
+                add(if ext == "tfm" { format!("font {d}") } else { format!("input {d}") });
+            } else if let Some(f) = l.strip_prefix("OUTPUT ") {
+                let ext = Path::new(f).extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+                if ["log", "dvi", "fls"].contains(&ext.as_str()) || writes.iter().any(|(n, _)| n == f) {
+                    continue;
+                }
+                let text = std::fs::read(tmp.join(f)).unwrap_or_default();
+                writes.push((f.to_string(), chars(&text)));
             }
-            let d = p.parent()?.display().to_string();
-            add(if ext == "tfm" { format!("font {d}") } else { format!("input {d}") });
-        } else if let Some(f) = l.strip_prefix("OUTPUT ") {
-            let ext = Path::new(f).extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
-            if ["log", "dvi", "fls"].contains(&ext.as_str()) || made.writes.iter().any(|(n, _)| n == f) {
-                continue;
-            }
-            let text = std::fs::read(tmp.join(f)).unwrap_or_default();
-            made.writes.push((f.to_string(), chars(&text)));
+        }
+        let stable = runs > 1 && writes == made.writes;
+        made.writes = writes;
+        made.dvi = std::fs::read(tmp.join(format!("{name}.dvi"))).ok()?;
+        if stable || runs >= max {
+            break;
         }
     }
     let _ = std::fs::remove_dir_all(&tmp);
-    assert!(st.status.success(), "latex failed on {name}");
-    made.dvi = dvi?;
-    Some(made)
+    Some((made, runs))
 }
 
 fn writes_text(w: &[(String, String)]) -> String {
@@ -207,20 +220,51 @@ fn recorded(name: &str) -> Made {
 /// records them.
 #[test]
 fn oracles_are_latex() {
+    let bless = std::env::var_os("PHITEX_FLOW_BLESS").is_some();
+    let d = docs_dir();
+    let save = |file: String, w: &[(String, String)]| {
+        let b: Vec<u8> = writes_text(w).chars().map(|c| u8::try_from(c).expect("a byte")).collect();
+        std::fs::write(d.join(file), b).unwrap();
+    };
     for name in DOCS {
-        let Some(made) = run_latex(name) else { return };
-        if std::env::var_os("PHITEX_FLOW_BLESS").is_some() {
-            let d = docs_dir();
+        let Some((made, _)) = run_latex(name, 1) else { return };
+        if bless {
             std::fs::write(d.join(format!("{name}.dvi")), &made.dvi).unwrap();
-            let w: Vec<u8> = writes_text(&made.writes).chars().map(|c| u8::try_from(c).expect("a byte")).collect();
-            std::fs::write(d.join(format!("{name}.writes")), w).unwrap();
+            save(format!("{name}.writes"), &made.writes);
             std::fs::write(d.join(format!("{name}.dirs")), made.dirs.join("\n") + "\n").unwrap();
         }
         let want = recorded(name);
         assert!(masked(&made.dvi) == masked(&want.dvi), "{name}: latex's DVI is not the recorded one");
         assert_eq!(made.writes, want.writes, "{name}: latex's written files are not the recorded ones");
         assert_eq!(made.dirs, want.dirs, "{name}: latex read its files from other directories");
+        // (and run again until it writes what it wrote: the fixpoint's)
+        let Some((fixed, runs)) = run_latex(name, MAX_RUNS) else { return };
+        if bless {
+            std::fs::write(d.join(format!("{name}.fix.dvi")), &fixed.dvi).unwrap();
+            save(format!("{name}.fix.writes"), &fixed.writes);
+            std::fs::write(d.join(format!("{name}.fix.runs")), format!("{runs}\n")).unwrap();
+        }
+        let (want, want_runs) = recorded_fixed(name);
+        assert!(masked(&fixed.dvi) == masked(&want.dvi), "{name}: latex's last run's DVI is not the recorded one");
+        assert_eq!(fixed.writes, want.writes, "{name}: latex's last run's files are not the recorded ones");
+        assert_eq!(runs, want_runs, "{name}: latex ran another number of times");
     }
+}
+
+/// The most runs of a fixpoint (latexmk's).
+const MAX_RUNS: usize = 5;
+
+/// The recorded fixpoint of a document: `latex`'s last run's DVI file and
+/// written files, and its runs.
+fn recorded_fixed(name: &str) -> (Made, usize) {
+    let d = docs_dir();
+    let made = Made {
+        dvi: std::fs::read(d.join(format!("{name}.fix.dvi"))).expect("NAME.fix.dvi"),
+        writes: parse_writes(&chars(&std::fs::read(d.join(format!("{name}.fix.writes"))).expect("NAME.fix.writes"))),
+        dirs: Vec::new(),
+    };
+    let runs = std::fs::read_to_string(d.join(format!("{name}.fix.runs"))).expect("NAME.fix.runs");
+    (made, runs.trim().parse().expect("a number of runs"))
 }
 
 /// A DVI file with its preamble's comment (the date) masked.
@@ -552,4 +596,101 @@ fn doc_bib() {
 #[test]
 fn doc_href() {
     doc("href");
+}
+
+/// The document on the saved format run to the cross-run fixpoint
+/// (`fixpoint::fixpoint`: each run reads what the run before wrote) at
+/// schedule `o`: it stops where `latex` stops, its last run's DVI file and
+/// written files are `latex`'s last run's, without errors (the `.aux`
+/// file read back at `\end{document}` is the run before's).
+fn fix_at(name: &str, o: Options) {
+    let (want, want_runs) = recorded_fixed(name);
+    let fmt = format_file();
+    let mut b = build_for(name, name);
+    b.set_format(&fmt).expect("the format reads");
+    b.set_terminal(&[&format!("&latex {name}")]);
+    // (in a thread of its own, given FIX_TIMEOUT: a run that hangs fails
+    // the test instead of holding the job's cores until its time is up)
+    let text = jobs(&[&doc_text(name)]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(phitex_flow::fixpoint::fixpoint(&mut b, &text, o, MAX_RUNS));
+    });
+    let r = rx
+        .recv_timeout(std::time::Duration::from_secs(FIX_TIMEOUT))
+        .unwrap_or_else(|_| panic!("{name} ({o:?}): no fixpoint within {FIX_TIMEOUT} s (a run hangs)"));
+    let counts: Vec<String> = r
+        .outs
+        .iter()
+        .zip(&r.changed)
+        .map(|(x, ch)| format!("{} commands ({})", x.stats.commands_run, ch.join(" ")))
+        .collect();
+    eprintln!("{name} ({o:?}): {} runs: {}", r.outs.len(), counts.join("; "));
+    assert!(r.stable, "{name} ({o:?}): not stable after {} runs ({counts:?})", r.outs.len());
+    let out = r.outs.last().expect("a run");
+    assert!(out.errors.is_empty(), "{name} ({o:?}): errors in the last run: {:?}", &out.errors[..out.errors.len().min(20)]);
+    assert_eq!(out.writes, want.writes, "{name} ({o:?}): the last run's files are not latex's");
+    assert!(masked(&out.dvi) == masked(&want.dvi), "{name} ({o:?}): the last run's DVI file is not latex's");
+    // (one run more than latex's where the first met the same-run read of
+    // the `.aux` file, format gap 1: its `.toc` stayed empty)
+    let (_, gap) = errors_but_gap(&r.outs[0], name);
+    let runs = r.outs.len();
+    assert!(
+        runs == want_runs || (gap && runs == want_runs + 1),
+        "{name} ({o:?}): {runs} runs, latex's {want_runs}"
+    );
+}
+
+/// The most seconds a document's fixpoint may take at one schedule.
+const FIX_TIMEOUT: u64 = 600;
+
+fn fix(name: &str) {
+    for o in RUNS {
+        fix_at(name, o);
+    }
+}
+
+macro_rules! fix_tests {
+    ($($t:ident: $n:literal),* $(,)?) => {
+        $(
+            #[test]
+            fn $t() {
+                fix($n);
+            }
+        )*
+    };
+}
+
+// (W2, A's: run 2 of these hangs, CORE.md "The cross-run fixpoint")
+#[test]
+#[ignore = "W2: run 2 hangs"]
+fn fix_figures() {
+    fix("figures");
+}
+
+#[test]
+#[ignore = "W2: run 2 hangs"]
+fn fix_titlepage() {
+    fix("titlepage");
+}
+
+#[test]
+#[ignore = "W2: run 2 hangs"]
+fn fix_rules() {
+    fix("rules");
+}
+
+// (all but tikz: its one piece runs 2 minutes a run until F7 and P land)
+fix_tests! {
+    fix_sections: "sections",
+    fix_math: "math",
+    fix_tables: "tables",
+    fix_packages: "packages",
+    fix_ams: "ams",
+    fix_gfx: "gfx",
+    fix_layout: "layout",
+    fix_ltmc: "ltmc",
+    fix_lst: "lst",
+    fix_bib: "bib",
+    fix_href: "href",
 }

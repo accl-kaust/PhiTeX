@@ -2465,3 +2465,58 @@ is a pure function or a fold step, no state shared with the others):
 | images | `pdf/image/` (new) | `\pdfximage` is a node whose value is the image's description (a pure function of the file's bytes, the page asked for, the box); its dimensions are known at the node (pdfTeX reads the file there); `\pdfrefximage` is a whatsit; the fold writes the XObject (PNG through `zlib`, JPEG as it is, PDF pages through a PDF reader copied from partex-engine's `pdfread.rs`/partex-core's `epdf.rs`) at the first page using it |
 | links, dests, outlines | `pdf/link.rs` (new) + fold | link and annotation rectangles in `content.rs` (pdfTeX's `append_link`, `end_link`: per line box at its nesting level), dest names sorted and the name tree in the fold (`sort_dest_names`, "Output name tree"), outlines as document-level items in position order |
 | reads of the fold | core (A: Conflict 12's `ReadRef`) | `\pdflastobj`, `\pdflastxform`, `\pdflastximage`, `\pdflastannot`, `\pdflastlink`, `\pdflastxpos`/`\pdflastypos`: the fold's counters at the node's position |
+
+## The cross-run fixpoint (agent B)
+
+AGENTS_BRIEF §7. Run k+1 is the same build updated again. The files run
+k wrote are given to it as a new version of those files
+(`Build::set_file_bytes`; files run k no longer writes are removed): an
+edit of run k. Nothing is copied into a state. It stops when a run
+writes byte for byte what the run before wrote, or after five runs
+(oscillation: `Runs::stable` false, `changed` names the files).
+
+API (`src/fixpoint.rs`): `Fixpoint::run(&mut build, src, opts) -> Run
+{ out, changed, stable }` is one run. The CLI runs bibtex/makeindex
+between runs and gives their output with `set_file`; a changed `.bbl`
+means one more run whatever `stable` says. `fixpoint(b, src, opts, max)`
+is the plain loop. Dev binary: `phitex-flow --runs N` prints each run's
+changed files.
+
+Oracle (`tests/latex_docs.rs`, `fix_*`): `latex` run until what it
+writes is stable (`NAME.fix.dvi`, `.fix.writes`, `.fix.runs`). The last
+run's DVI and written files must be latex's at five schedules, with
+latex's number of runs. One run more is allowed where the first run met
+format gap 1: the `.toc` stays empty on the first run.
+
+Run 2 against run 1, commands run at one thread, on 9fa4ccf (job 7796):
+
+| document | run 1 | run 2 | files run 1 changed |
+|---|---|---|---|
+| sections | 35684 | 8741 | sections.aux |
+| math | 21786 | 4553 | math.aux |
+| tables | 21590 | 4365 | tables.aux |
+| ams | 70064 | 13584 | ams.aux |
+| gfx | 79195 | 4305 | gfx.aux |
+| layout | 77985 | 10209 | layout.aux |
+| packages | 30361 | 5358 | packages.aux |
+| ltmc | 31599 | 11077 | ltmc.aux |
+| lst | 62491 | 21588 | lst.aux |
+| bib | 22762 | 5056 | bib.idx, bib.aux |
+| href | 222359 | 9372 | href.aux, href.out |
+| micro (job 7824) | 150555 | 30644 | micro.aux |
+
+Every document converges in latex's two runs. Before 9fa4ccf (A's F5:
+pieces mark their readers by position), run 2 re-ran every piece
+(sections: 21155 commands against 20942 for the whole document). Now it
+re-runs 5–25% of run 1. What remains is the pieces reading the `.aux`
+at `\begin{document}` and the nodes after a changed read. F's
+over-invalidation dump was not needed: no piece re-runs wholesale.
+
+**Hang (W2, A's).** Run 2 of `titlepage`, `figures` and `rules` does not
+finish: 7796 made no progress for an hour on their first schedule
+(threads 1). W sees the same on titlepage (W2). Smallest repro:
+`tests/latex/docs/titlepage.tex` (466 bytes) on the saved format. Run 1
+as `fix_at` runs it, `set_file_bytes` of run 1's `titlepage.aux` and
+`titlepage.toc`, then `update` again: it never returns. The
+`fix_*` tests now give a fixpoint 600 s (`FIX_TIMEOUT`, in a thread of
+its own) and fail instead of hanging.

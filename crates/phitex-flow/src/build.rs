@@ -1322,14 +1322,15 @@ impl Build {
     /// The text of file `name` (what `\input name` and `\openin` find),
     /// from now on, before the input directories'.
     pub fn set_file(&mut self, name: &str, text: &str) {
-        if self
-            .files
-            .get(name)
-            .is_some_and(|t| **t == *text.as_bytes())
-        {
+        self.set_file_bytes(name, text.as_bytes());
+    }
+
+    /// The bytes of file `name` (as [`Build::set_file`]).
+    pub fn set_file_bytes(&mut self, name: &str, bytes: &[u8]) {
+        if self.files.get(name).is_some_and(|t| **t == *bytes) {
             return;
         }
-        Arc::make_mut(&mut self.files).insert(Arc::from(name), Arc::from(text.as_bytes()));
+        Arc::make_mut(&mut self.files).insert(Arc::from(name), Arc::from(bytes));
     }
 
     /// File `name` is no more in memory.
