@@ -633,6 +633,8 @@ impl Build {
     /// Page `j`'s records, as shipping it walks it (`idx`: this build's
     /// [`Build::sync_index`]).
     pub fn page_sync(&self, j: usize, idx: &Index) -> Option<PageSync> {
+        /// xdvipdfmx's origin: an inch, in scaled points.
+        const INCH: i32 = 4_736_287;
         let (page, _) = self.pages.get(j)?;
         let ship = &page.ship;
         let pdf = ship.pdf.as_ref().filter(|s| s.output > 0);
@@ -659,7 +661,6 @@ impl Build {
             .unwrap_or(NOWHERE);
         // (XeTeX: as PDF output, from the page's corner, its origin an inch
         // in, as xdvipdfmx puts it: xetex's `synctex` writes `Output:pdf`)
-        const INCH: i32 = 4_736_287;
         let (h0, v0) = match (pdf, ship.xdv) {
             (Some(s), _) => (s.horigin + ship.hoffset, s.vorigin + ship.voffset),
             (None, Some(_)) => (INCH + ship.hoffset, INCH + ship.voffset),
