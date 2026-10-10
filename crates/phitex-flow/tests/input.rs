@@ -9,6 +9,7 @@
 // (a DVI file is compared whole; `assert_eq!` would print its bytes)
 #![allow(clippy::manual_assert_eq)]
 
+use std::fmt::Write as _;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -246,7 +247,7 @@ fn a_file_read_stops_the_pieces_after_it() {
          \\hsize=300pt \\vsize=200pt\n\n\\input defs \n\n",
     );
     for k in 0..60 {
-        main.push_str(&format!("Word \\x\\ number {k}.\n\n"));
+        let _ = write!(main, "Word \\x\\ number {k}.\n\n");
     }
     main.push_str("\\end\n");
     let files = vec![("defs.tex", String::from("\\def\\x{X}\n\n\\def\\y{Y}\n"))];
@@ -282,7 +283,7 @@ fn a_revoked_sequence_change_lets_the_pieces_after_it_run() {
          \\hsize=300pt \\vsize=200pt\n\nSome text on the page.\n\n\\ifdim\\pagegoal>1000pt \\input sub \\fi\n\n",
     );
     for k in 0..30 {
-        main.push_str(&format!("Word number {k}.\n\n"));
+        let _ = write!(main, "Word number {k}.\n\n");
     }
     main.push_str("\\end\n");
     let files = vec![("sub.tex", String::from("\\message{SUB}\n"))];
