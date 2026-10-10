@@ -1010,6 +1010,22 @@ impl Writer<'_> {
             self.four(c);
         }
         self.four(0);
+        if let Some((w, h)) = s.xdv {
+            // (xetex.web: the page's size for xdvipdfmx, at its start)
+            let mut t = String::from("pdf:pagesize ");
+            if w > 0 && h > 0 {
+                t.push_str("width ");
+                crate::print::scaled(&mut t, w);
+                t.push_str("pt height ");
+                crate::print::scaled(&mut t, h);
+                t.push_str("pt");
+            } else {
+                t.push_str("default");
+            }
+            self.byte(XXX1);
+            self.byte(t.len() as u8);
+            self.out.extend(t.as_bytes());
+        }
         self.cur_v = b.h + s.voffset;
         self.list_out(b);
         self.byte(EOP);

@@ -299,6 +299,7 @@ impl Exec<'_> {
                 self.int_par(IntPar::Time),
             ],
             pdf,
+            xdv: self.xetex.then(|| (self.dimen_par(DimenPar::Pdfpagewidth), self.dimen_par(DimenPar::Pdfpageheight))),
         })
     }
 

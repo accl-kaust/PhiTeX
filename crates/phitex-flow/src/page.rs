@@ -38,6 +38,10 @@ pub trait FoldEnv {
     fn toks_text(&mut self, toks: &[Tok]) -> Vec<u8> {
         crate::pdf::toks_text(toks, &|_| Arc::from("?"), i32::from(b'\\'), &mut |_| false)
     }
+    /// The engine is XeTeX (its pages begin with `pdf:pagesize`).
+    fn xetex(&self) -> bool {
+        false
+    }
 }
 
 /// An output routine to run where the page builder fires (tex.web 1025):
@@ -1223,7 +1227,9 @@ fn ship_params(env: &mut dyn FoldEnv) -> Arc<ShipParams> {
         *c = int(&env.read(&Key::Count(k as u16)));
     }
     let pdf = crate::pdf::read_ship(&mut FoldShip(env));
+    let xetex = env.xetex();
     let mut r = |k: Key| int(&env.read(&k));
+    let xdv = xetex.then(|| (r(Key::DimenPar(DimenPar::Pdfpagewidth)), r(Key::DimenPar(DimenPar::Pdfpageheight))));
     Arc::new(ShipParams {
         counts,
         hoffset: r(Key::DimenPar(DimenPar::Hoffset)),
@@ -1231,6 +1237,7 @@ fn ship_params(env: &mut dyn FoldEnv) -> Arc<ShipParams> {
         mag: r(Key::IntPar(IntPar::Mag)),
         date: [r(Key::IntPar(IntPar::Year)), r(Key::IntPar(IntPar::Month)), r(Key::IntPar(IntPar::Day)), r(Key::IntPar(IntPar::Time))],
         pdf,
+        xdv,
     })
 }
 

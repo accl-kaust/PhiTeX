@@ -4495,6 +4495,10 @@ impl BuildFold<'_> {
 }
 
 impl FoldEnv for BuildFold<'_> {
+    fn xetex(&self) -> bool {
+        self.sh.names.given.xe.is_some()
+    }
+
     fn read(&mut self, key: &Key) -> Val {
         // (the last build's definitions where the page builder fires now,
         // not made again yet, are not read: they are what its fires there

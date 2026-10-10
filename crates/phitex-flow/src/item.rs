@@ -77,6 +77,9 @@ pub struct ShipParams {
     pub date: [i32; 4],
     /// What shipping reads in PDF mode (`\pdfoutput` positive).
     pub pdf: Option<Arc<crate::pdf::Ship>>,
+    /// XeTeX: `\pdfpagewidth`, `\pdfpageheight`, for the page's
+    /// `pdf:pagesize` special (xetex.web's "Ship box |p| out").
+    pub xdv: Option<(i32, i32)>,
 }
 
 /// A point where TeX calls the page builder (tex.web 994), with what it
