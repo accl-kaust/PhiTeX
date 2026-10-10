@@ -337,19 +337,32 @@ pub use crate::tfm::Fonts;
 /// PDF_NAME` makes of `xdv` (partex-xdvipdfmx, linked), its files found by
 /// `kpse`, its streams compressed by zlib's deflate (`pdf::zlib`), its date
 /// `SOURCE_DATE_EPOCH` = `epoch`.
-pub fn xdv_to_pdf(xdv: &[u8], kpse: &Arc<dyn crate::tfm::Kpse>, pdf_name: &str, epoch: i64) -> Result<Vec<u8>, String> {
+pub fn xdv_to_pdf(
+    xdv: &[u8],
+    kpse: &Arc<dyn crate::tfm::Kpse>,
+    distiller: Option<&Distiller>,
+    pdf_name: &str,
+    epoch: i64,
+) -> Result<Vec<u8>, String> {
     let options = partex_xdvipdfmx::api::Options {
         pdf_filename: Some(pdf_name.as_bytes().to_vec()),
         source_date_epoch: Some(epoch),
         ..partex_xdvipdfmx::api::Options::default()
     };
-    let files = Box::new(Files(kpse.clone()));
+    let files = Box::new(Files(kpse.clone(), distiller.cloned()));
     let deflate: partex_xdvipdfmx::obj::Deflate = Box::new(|level, data| crate::pdf::zlib::compress(data, level));
     partex_xdvipdfmx::api::Session::convert(options, files, deflate, xdv).map_err(|e| e.to_string())
 }
 
 /// xdvipdfmx's file finder over the build's.
-struct Files(Arc<dyn crate::tfm::Kpse>);
+struct Files(Arc<dyn crate::tfm::Kpse>, Option<Distiller>);
+
+/// xdvipdfmx's distiller as the host runs it (`dpx_file_apply_filter`):
+/// given `dvipdfmx.cfg`'s template (`%i`, `%o`, `%b`, `%v`:
+/// `partex_xdvipdfmx::io::filter_command`), the input's path and bytes and
+/// the PDF version (15: 1.5), the PDF it made. The library runs no process
+/// (tests/wall.rs): the CLI and the tests give one.
+pub type Distiller = Arc<dyn Fn(&[u8], &str, &[u8], i32) -> Option<Vec<u8>> + Send + Sync>;
 
 impl partex_xdvipdfmx::io::Files for Files {
     fn find(&mut self, name: &[u8], format: partex_xdvipdfmx::io::Format, progname: &[u8]) -> Option<Vec<u8>> {
@@ -382,37 +395,11 @@ impl partex_xdvipdfmx::io::Files for Files {
     }
 
     /// The distiller (`dvipdfmx.cfg`'s `D` line: `rungs` for an EPS
-    /// picture) as C's `exec_spawn` runs it, through `sh -c`, on a copy of
-    /// the input in a scratch directory, removed after.
+    /// picture), as the host runs it ([`Distiller`]).
     fn apply_filter(&mut self, template: &[u8], input: &[u8], version: i32) -> Option<Arc<[u8]>> {
-        use std::os::unix::ffi::OsStrExt;
-        let data = self.0.read(&String::from_utf8_lossy(input))?;
-        // (a scratch directory no other run has: the first name free)
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let dir = (0..1000u32)
-            .map(|k| std::env::temp_dir().join(format!("phitex-distill-{}-{stamp}-{k}", std::process::id())))
-            .find(|d| std::fs::create_dir(d).is_ok())?;
-        let base = input.rsplit(|&b| b == b'/').next().unwrap_or(input);
-        let inp = dir.join(std::ffi::OsStr::from_bytes(base));
-        let out = dir.join("distilled.pdf");
-        let r = std::fs::write(&inp, &data).ok().and_then(|()| {
-            let cmd = partex_xdvipdfmx::io::filter_command(
-                template,
-                inp.as_os_str().as_bytes(),
-                out.as_os_str().as_bytes(),
-                version,
-            );
-            let ok = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(std::ffi::OsStr::from_bytes(&cmd))
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success());
-            if ok { std::fs::read(&out).ok().map(Arc::from) } else { None }
-        });
-        let _ = std::fs::remove_dir_all(&dir);
-        r
+        let d = self.1.as_ref()?;
+        let path = String::from_utf8_lossy(input);
+        let data = self.0.read(&path)?;
+        d(template, &path, &data, version).map(Arc::from)
     }
 }

@@ -924,12 +924,26 @@ impl Kpse for DirKpse {
 pub struct Fonts {
     index: Arc<partex_otf::index::FontIndex>,
     kpse: Arc<dyn Kpse>,
+    distiller: Option<crate::native::Distiller>,
     memo: std::sync::Mutex<std::collections::HashMap<(String, i32, i32), crate::native::Loaded>>,
 }
 
 impl Fonts {
     pub fn new(index: Arc<partex_otf::index::FontIndex>, kpse: Arc<dyn Kpse>) -> Fonts {
-        Fonts { index, kpse, memo: std::sync::Mutex::default() }
+        Fonts { index, kpse, distiller: None, memo: std::sync::Mutex::default() }
+    }
+
+    /// The same, with xdvipdfmx's distiller for EPS pictures (run by the
+    /// host: the library runs no process).
+    #[must_use]
+    pub fn with_distiller(mut self, d: crate::native::Distiller) -> Fonts {
+        self.distiller = Some(d);
+        self
+    }
+
+    /// The distiller given, if any.
+    pub fn distiller(&self) -> Option<&crate::native::Distiller> {
+        self.distiller.as_ref()
     }
 
     /// The fonts of an index file (partex-otf's `otf-index` output: the

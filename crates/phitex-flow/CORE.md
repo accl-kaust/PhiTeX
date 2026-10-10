@@ -2904,7 +2904,9 @@ Linked (tests/wall.rs allows them): partex-otf (faces, HarfBuzz-equal
 shaping, TECkit mappings, OpenType math tables, `xetex::fontmgr`),
 partex-xdvipdfmx (XDV to PDF, itself on phitex-codecs since W's
 extraction; EPS pictures through dvipdfmx.cfg's `D` distiller, which the
-host runs: `Files::apply_filter`, here `sh -c` on a scratch copy) and
+host runs: `Files::apply_filter`, given as `native::Distiller` with
+`Fonts::with_distiller`, since the library runs no process; the CLI, the
+binary and the tests give `sh -c` on a scratch copy) and
 phitex-codecs (the PDF reader `\XeTeXpdffile` measures
 with). Copied: `icu_tables.rs` (from partex-core), `icu_linebreak.rs` and
 `.bin` (ICU's line-break rules, from partex-core), and `xpic.rs`

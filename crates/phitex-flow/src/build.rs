@@ -1903,7 +1903,7 @@ impl Build {
             dirs: if self.finder.is_some() { Arc::new(Vec::new()) } else { self.inputs.clone() },
             inner: self.finder.as_ref().map_or_else(|| xe.kpse().clone(), |(k, _)| k.clone()),
         });
-        Some(crate::native::xdv_to_pdf(xdv, &files, &name, self.pdf_date))
+        Some(crate::native::xdv_to_pdf(xdv, &files, xe.distiller(), &name, self.pdf_date))
     }
 
     /// The engine is XeTeX ([`Build::set_xetex`]).

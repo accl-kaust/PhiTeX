@@ -99,11 +99,48 @@ fn kpathsea() -> Arc<dyn phitex_flow::tfm::Kpse> {
     Arc::new(phitex_flow::kpse::Kpathsea::new(partex_kpse::Kpse::new(&dir, "xetex", "xetex")))
 }
 
+/// xdvipdfmx's distiller (dvipdfmx.cfg's `D` line: `rungs` for an EPS
+/// picture) as `dpx_file_apply_filter` runs it: through `sh -c`, on a copy
+/// of the input in a scratch directory, removed after.
+fn distiller() -> phitex_flow::native::Distiller {
+    std::sync::Arc::new(|template: &[u8], input: &str, data: &[u8], version: i32| -> Option<Vec<u8>> {
+        use std::os::unix::ffi::OsStrExt;
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = (0..1000u32)
+            .map(|k| std::env::temp_dir().join(format!("phitex-distill-{}-{stamp}-{k}", std::process::id())))
+            .find(|d| std::fs::create_dir(d).is_ok())?;
+        let base = input.rsplit('/').next().unwrap_or(input);
+        let inp = dir.join(base);
+        let out = dir.join("distilled.pdf");
+        let r = std::fs::write(&inp, data).ok().and_then(|()| {
+            let cmd = partex_xdvipdfmx::io::filter_command(
+                template,
+                inp.as_os_str().as_bytes(),
+                out.as_os_str().as_bytes(),
+                version,
+            );
+            let ok = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(std::ffi::OsStr::from_bytes(&cmd))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if ok { std::fs::read(&out).ok() } else { None }
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        r
+    })
+}
+
 /// A XeTeX build with the given fonts, as job `job`, reading `inputs`.
 fn xetex_build(job: &str, inputs: Vec<PathBuf>) -> Option<Build> {
     let idx = index()?;
     let kpse: Arc<dyn phitex_flow::tfm::Kpse> = kpathsea();
-    let fonts = phitex_flow::native::Fonts::from_index_bytes(&idx, kpse).expect("PHITEX_FONT_INDEX: a font index");
+    let fonts = phitex_flow::native::Fonts::from_index_bytes(&idx, kpse)
+        .expect("PHITEX_FONT_INDEX: a font index")
+        .with_distiller(distiller());
     let mut b = Build::new(font());
     b.set_xetex(fonts);
     let mut fd = vec![];

@@ -30,7 +30,7 @@ pub fn fonts(e: &Engine, tree: &Tree, note: &mut dyn FnMut(&str)) -> Result<Arc<
     let index = index(note)?;
     let _ = e;
     let kpse: Arc<dyn phitex_flow::tfm::Kpse> = tree.kpse.clone();
-    let f = Arc::new(Fonts::new(Arc::new(index), kpse));
+    let f = Arc::new(Fonts::new(Arc::new(index), kpse).with_distiller(distiller()));
     *g = Some(f.clone());
     Ok(f)
 }
@@ -139,6 +139,41 @@ fn remove_others(dir: &Path, keep: &Path) {
             let _ = std::fs::remove_file(p);
         }
     }
+}
+
+/// xdvipdfmx's distiller (dvipdfmx.cfg's `D` line: `rungs` for an EPS
+/// picture) as `dpx_file_apply_filter` runs it: through `sh -c`, on a copy
+/// of the input in a scratch directory, removed after.
+fn distiller() -> phitex_flow::native::Distiller {
+    std::sync::Arc::new(|template: &[u8], input: &str, data: &[u8], version: i32| -> Option<Vec<u8>> {
+        use std::os::unix::ffi::OsStrExt;
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = (0..1000u32)
+            .map(|k| std::env::temp_dir().join(format!("phitex-distill-{}-{stamp}-{k}", std::process::id())))
+            .find(|d| std::fs::create_dir(d).is_ok())?;
+        let base = input.rsplit('/').next().unwrap_or(input);
+        let inp = dir.join(base);
+        let out = dir.join("distilled.pdf");
+        let r = std::fs::write(&inp, data).ok().and_then(|()| {
+            let cmd = partex_xdvipdfmx::io::filter_command(
+                template,
+                inp.as_os_str().as_bytes(),
+                out.as_os_str().as_bytes(),
+                version,
+            );
+            let ok = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(std::ffi::OsStr::from_bytes(&cmd))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if ok { std::fs::read(&out).ok() } else { None }
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        r
+    })
 }
 
 #[cfg(test)]
