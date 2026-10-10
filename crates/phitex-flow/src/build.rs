@@ -2804,7 +2804,7 @@ impl Build {
             if state.p[k].status == Status::Done && !lines_ready(&state, k) {
                 let r = state.p[k].run.clone().expect("a run");
                 let equal = equal_paras(Some(&r), &r);
-                queue_breaks(&mut state, k, &equal);
+                queue_breaks(&mut state, k, Some(&r), &equal);
             }
         }
         state.stats.time_cut = time_cut;
@@ -4169,9 +4169,11 @@ fn move_edge_in(shard: &mut FxMap<Key, ReadersOf>, ps: &mut PState, key: &Key, s
 /// one of `old`'s (or of the edited piece's predecessor) keeps its lines;
 /// the others are queued.
 ///
-/// `equal[i]` lists the old paragraphs equal to paragraph `i`
-/// ([`equal_paras`], found before taking the lock), its own place first.
-fn queue_breaks(g: &mut State, k: usize, equal: &[Vec<u32>]) {
+/// `equal.of(i)` lists the old paragraphs that may equal paragraph `i`
+/// ([`equal_paras`], found before taking the lock), its own place first:
+/// the first of them with lines and equal to it gives them (compared only
+/// then: most have no lines, or are the same `Arc`).
+fn queue_breaks(g: &mut State, k: usize, old: Option<&Run>, equal: &ParaCands) {
     let run = g.p[k].run.clone().expect("a run");
     let old_lines = std::mem::take(&mut g.p[k].lines);
     let prev_lines = match g.p[k].prev.take() {
@@ -4180,9 +4182,11 @@ fn queue_breaks(g: &mut State, k: usize, equal: &[Vec<u32>]) {
     };
     let mut lines = vec![None; run.paras.len()];
     for (i, para) in run.paras.iter().enumerate() {
-        let reuse = equal[i]
-            .iter()
-            .find_map(|&j| prev_lines.get(j as usize).cloned().flatten());
+        let reuse = equal.of(i).find_map(|j| {
+            let l = prev_lines.get(j as usize).cloned().flatten()?;
+            let q = old?.paras.get(j as usize)?;
+            (Arc::ptr_eq(q, para) || **q == **para).then_some(l)
+        });
         match reuse {
             Some(l) => {
                 lines[i] = Some(l);
@@ -4194,31 +4198,42 @@ fn queue_breaks(g: &mut State, k: usize, equal: &[Vec<u32>]) {
     g.p[k].lines = lines;
 }
 
-/// For each paragraph of `run`, the paragraphs of `old` equal to it (by
-/// identity, then equality), its own place first.
-fn equal_paras(old: Option<&Run>, run: &Run) -> Vec<Vec<u32>> {
-    run.paras
-        .iter()
-        .enumerate()
-        .map(|(i, para)| {
-            let Some(o) = old else { return Vec::new() };
-            let eq = |j: usize| {
-                o.paras
-                    .get(j)
-                    .is_some_and(|q| Arc::ptr_eq(q, para) || **q == **para)
-            };
-            let mut v: Vec<u32> = Vec::new();
-            if eq(i) {
-                v.push(i as u32);
-            }
-            v.extend(
-                (0..o.paras.len())
-                    .filter(|&j| j != i && eq(j))
-                    .map(|j| j as u32),
-            );
-            v
-        })
-        .collect()
+/// For each paragraph of `run`, the paragraphs of `old` that may equal
+/// it: its own place first, then those of the same lengths ([`queue_breaks`]
+/// compares one only where it has lines to give: a piece of thousands of
+/// paragraphs — a document read in one piece — is not compared with
+/// itself pair by pair).
+fn equal_paras(old: Option<&Run>, run: &Run) -> ParaCands {
+    let Some(o) = old else { return ParaCands::default() };
+    let shape = |p: &crate::item::Para| (p.before.len(), p.hlist.len(), p.after.len());
+    let mut index: FxMap<(usize, usize, usize), usize> = FxMap::default();
+    let mut buckets: Vec<Vec<u32>> = Vec::new();
+    for (j, q) in o.paras.iter().enumerate() {
+        let b = *index.entry(shape(q)).or_insert_with(|| {
+            buckets.push(Vec::new());
+            buckets.len() - 1
+        });
+        buckets[b].push(j as u32);
+    }
+    let of = run.paras.iter().map(|p| index.get(&shape(p)).copied()).collect();
+    ParaCands { olds: o.paras.len(), of, buckets }
+}
+
+/// [`equal_paras`]: for paragraph `i`, its own place (if `old` has one),
+/// then the old paragraphs in `buckets[of[i]]` (of its lengths).
+#[derive(Default)]
+struct ParaCands {
+    olds: usize,
+    of: Vec<Option<usize>>,
+    buckets: Vec<Vec<u32>>,
+}
+
+impl ParaCands {
+    fn of(&self, i: usize) -> impl Iterator<Item = u32> + '_ {
+        let own = (i < self.olds).then_some(i as u32);
+        let rest = self.of.get(i).copied().flatten().map_or(&[][..], |b| &self.buckets[b][..]);
+        own.into_iter().chain(rest.iter().copied().filter(move |&j| j as usize != i))
+    }
 }
 
 /// Whether the pieces piece `k` is entered from have run (installed and
@@ -5434,7 +5449,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
             }
         }
         let tp4 = sh.now();
-        queue_breaks(&mut g, k, &equal);
+        queue_breaks(&mut g, k, old_run.as_deref(), &equal);
         // (a run reading on past its text: the piece after it begins in
         // the middle of a command, its run in progress is not a result)
         if got.join && k + 1 < g.p.len() && g.p[k + 1].status == Status::Running {
