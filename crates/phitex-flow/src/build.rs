@@ -1997,8 +1997,10 @@ impl Build {
                 _ => String::new(),
             };
             eprintln!(
-                "placed {k} {entry:?} cand {cand:?} old {old:?} join {} len {} [{head}] {why}",
+                "placed {k} {entry:?} cand {cand:?} old {old:?} join {} cut {} stop {} len {} [{head}] {why}",
                 old.is_some_and(|i| olds[i].got.join),
+                old.is_some_and(|i| olds[i].got.cut),
+                old.map_or(0, |i| olds[i].got.stop),
                 text.len()
             );
         }
@@ -4579,15 +4581,33 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
                 let why = g.p[k].got.differs(&g.p[k].expect);
                 sh.ev(Ev { wid: 0, kind: 8, k: k as u32, t: [t, t, 0, 0, 0, 0], a: u64::from(g.p[k].got.join), b: 0, c: why, d: 0, e: 0 });
             }
-            // (a settled run reading on into the next text: the pieces
-            // after it begin in the middle of a command, they wait for the
-            // sequence laid out again — the runs in progress finish and are
-            // kept where they hold)
-            if g.p[k].got.join {
-                rounds_shown(g);
+            // (a settled run reading on into the next text where the layout
+            // did not join them: the pieces after it begin in the middle of
+            // a command, they wait for the sequence laid out again — the
+            // runs in progress finish and are kept where they hold. A run
+            // the layout already joined saying otherwise of something else
+            // — its job's end — waits as any other, for its page quantities
+            // to be validated: else it flips with them round after round)
+            if g.p[k].got.join && !g.p[k].expect.join {
                 if k + 1 < n && g.p[k + 1].status == Status::Running {
                     sh.cancel[k + 1].store(true, Ordering::Relaxed);
                 }
+                // (once what it read of the page builder's definitions and
+                // quantities is confirmed: the scan reaches it and runs it
+                // again if they differ — a join made on the last round's
+                // routines is not the sequence's)
+                if g.p[k].fold_unchecked {
+                    for &q in &g.running {
+                        if q > k {
+                            sh.cancel[q].store(true, Ordering::Relaxed);
+                        }
+                    }
+                    g.due_at = Some(g.due_at.map_or(k, |d| d.min(k)));
+                    g.restructure_due = true;
+                    g.settled += 1;
+                    continue;
+                }
+                rounds_shown(g);
                 restructure_now(g, sh);
                 return true;
             }
@@ -4632,6 +4652,15 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
     if g.restructure_due && g.settled == n {
         // (a run that said so may have run again since)
         if (0..n).any(|k| !g.p[k].got.same(&g.p[k].expect)) {
+            // (not while such a run reads the page builder's quantities the
+            // scan has not validated yet: what it says of the sequence
+            // holds once they do — the scan may run it again —, else the
+            // next layout assumes what a refuted read made it say, and its
+            // run, on the validated value, says the other: the sequence
+            // flips round after round (trip's `\end` ending the job or not))
+            if (0..n).any(|k| !g.p[k].got.same(&g.p[k].expect) && g.p[k].fold_unchecked) {
+                return false;
+            }
             rounds_shown(g);
             restructure_now(g, sh);
             return true;
@@ -4682,6 +4711,31 @@ fn rounds_shown(g: &State) {
             show(&ps.got),
             show(&ps.expect)
         );
+        // (the reads of what the build makes itself — written files, the
+        // page builder's quantities —, which a run may say otherwise on)
+        if let Some(r) = &ps.run {
+            eprintln!(
+                "  run: {} nodes, crossed {}, entry {:016x}, text {:016x}, stops {:?}, dirty {}, fold unchecked {}, status {:?}",
+                r.nodes_len(),
+                r.crossed,
+                crate::hash::hash_of(&format!("{:?}", r.entry())),
+                crate::hash::hash_of(&*ps.text),
+                ps.stops,
+                ps.dirty.len(),
+                ps.fold_unchecked,
+                ps.status
+            );
+            if std::env::var_os("PHITEX_ROUNDS_READS").is_some() {
+                let mut rs: Vec<&(Key, u32, Val)> = r.all_reads().iter().collect();
+                rs.sort_by_key(|x| x.1);
+                for (key, n, v) in rs.iter().take(400) {
+                    eprintln!("  first-read n{n} {key:?} = {:016x}", crate::hash::hash_of(&format!("{v:?}")));
+                }
+            }
+            for (key, n, v) in r.all_reads().iter().filter(|x| matches!(x.0, Key::File(_) | Key::Page(_))) {
+                eprintln!("  read {key:?} at node {n}: {:016x}", crate::hash::hash_of(&format!("{v:?}")));
+            }
+        }
     }
 }
 
@@ -5166,6 +5220,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         gave_up: false,
         entry_assumed,
         seen: FxMap::default(),
+        fold_read: false,
     };
     let run = Arc::new(run_piece(
         &text,
@@ -5367,7 +5422,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         sh.names_gen.store(g.names_log.len(), Ordering::Release);
         g.p[k].run = Some(run.clone());
         g.p[k].got = got.clone();
-        g.p[k].fold_unchecked = run.reads.iter().any(|r| matches!(r.0, Key::Page(_)));
+        g.p[k].fold_unchecked = env.fold_read || run.reads.iter().any(|r| matches!(r.0, Key::Page(_)));
         // (names marked while it ran — a definition made between its nodes
         // reaching a node whose read the run's first reader of the same
         // value stands for — are read again)
@@ -5616,6 +5671,10 @@ struct PieceEnv<'a> {
     /// Every read from before the piece so far: the name, its reader, the
     /// value read.
     seen: FxMap<Key, Vec<(u32, Val)>>,
+    /// A read found a definition the page builder made between a piece's
+    /// nodes (an output routine's, `Names::has_inner`): this round's scan
+    /// has not confirmed it yet ([`PState::fold_unchecked`]).
+    fold_read: bool,
 }
 
 /// Measuring: a run reading longer than this (ns) has its five slowest
@@ -5721,6 +5780,9 @@ impl PieceEnv<'_> {
                 }
                 continue;
             };
+            if d.1 != END {
+                self.fold_read = true;
+            }
             let src = Src::Piece(sh.seq.id_at(d));
             let d = d.0 as usize;
             // (an element between this piece's own nodes is this run's)
