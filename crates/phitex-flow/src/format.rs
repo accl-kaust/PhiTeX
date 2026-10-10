@@ -505,6 +505,13 @@ impl Writer<'_> {
             Key::FontParams(f) => font_key(self, 31, f),
             Key::LastFont => self.byte(32),
             Key::Interaction => self.byte(33),
+            Key::FontCode(k, f) => {
+                font_key(self, 34, f);
+                self.byte(*k);
+            }
+            Key::FontExpand(f) => font_key(self, 35, f),
+            Key::FontAttr(f) => font_key(self, 36, f),
+            Key::FontCopies(f) => font_key(self, 37, f),
             _ => return Err(format!("a name a format does not hold: {k:?}")),
         }
         Ok(())
@@ -874,6 +881,13 @@ impl Reader<'_> {
             31 => Key::FontParams(Arc::from(self.str()?)),
             32 => Key::LastFont,
             33 => Key::Interaction,
+            34 => {
+                let f = Arc::from(self.str()?);
+                Key::FontCode(self.byte()?, f)
+            }
+            35 => Key::FontExpand(Arc::from(self.str()?)),
+            36 => Key::FontAttr(Arc::from(self.str()?)),
+            37 => Key::FontCopies(Arc::from(self.str()?)),
             _ => return Err(bad("a name")),
         })
     }

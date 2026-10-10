@@ -156,10 +156,22 @@ pub enum Item {
         sub: u8,
         zero: bool,
     },
-    /// A kern: 0 a font's, 1 explicit, 2 for an accent.
+    /// A kern: 0 a font's, 1 explicit, 2 for an accent, 3 pdfTeX's
+    /// `\pdfprependkern`/`\pdfappendkern` (`auto_kern`).
     Kern {
         w: i32,
         sub: u8,
+    },
+    /// pdfTeX's margin kern (`margin_kern_node`, character protrusion):
+    /// put at a line's left (`right` false) or right edge by the line
+    /// breaker, `w` minus the protruding character's protrusion; the
+    /// character (`margin_char`) it is for. Everywhere it is a kern of
+    /// width `w` (DVI and PDF move right by `w`); `\unhbox` drops it.
+    MarginKern {
+        w: i32,
+        right: bool,
+        font: Arc<Font>,
+        c: u8,
     },
     Penalty(i32),
     Disc(Arc<Disc>),
@@ -240,7 +252,7 @@ impl Item {
             Item::Lig(l) => l.font.glyph(i32::from(l.c)).map_or(0, |g| g.width),
             Item::Box(b) => b.w,
             Item::Unset(u) => u.w,
-            Item::Rule { w, .. } | Item::Kern { w, .. } | Item::Math { w, .. } => *w,
+            Item::Rule { w, .. } | Item::Kern { w, .. } | Item::Math { w, .. } | Item::MarginKern { w, .. } => *w,
             Item::Glue { g, .. } => g.width,
             Item::Leaders(l) => l.g.width,
             _ => 0,

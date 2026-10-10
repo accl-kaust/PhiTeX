@@ -348,6 +348,49 @@ impl Exec<'_> {
                     s.push(char::from(b));
                 }
             }
+            Conv::PdfMatch => {
+                // (pdftex.web 470, `matchstrings`: 1, 0, or -1 for a bad
+                // expression; the submatches `\pdflastmatch` gives are not
+                // kept, CORE.md)
+                let icase = self.keyword("icase");
+                if self.keyword("subcount") {
+                    let _ = self.scan_int();
+                }
+                let pat = self.pdf_string();
+                let t = self.pdf_string();
+                s.push_str(match crate::ere::is_match(&pat, &t, icase) {
+                    Some(true) => "1",
+                    Some(false) => "0",
+                    None => "-1",
+                });
+            }
+            Conv::LeftMarginKern | Conv::RightMarginKern => {
+                // (pdftex.web 470: a box register's hbox, its margin kern at
+                // that edge past what protrusion skips and the skip glue)
+                let n = self.scan_eight_bit_int();
+                let b = match self.get(&Key::Box(n)) {
+                    Val::Box(b) if !b.vertical => b,
+                    _ => {
+                        self.pdf_error("marginkern", "a non-empty hbox expected");
+                        return;
+                    }
+                };
+                let right = c == Conv::RightMarginKern;
+                let pass = |it: &&crate::item::Item| {
+                    crate::micro::skipable(it)
+                        || matches!(it, crate::item::Item::Glue { sub, .. } if *sub == if right { 9 } else { 8 })
+                };
+                let found = if right {
+                    b.list.iter().rev().find(|it| !pass(it))
+                } else {
+                    b.list.iter().find(|it| !pass(it))
+                };
+                match found {
+                    Some(crate::item::Item::MarginKern { w, right: r, .. }) if *r == right => print::scaled(&mut s, *w),
+                    _ => s.push('0'),
+                }
+                s.push_str("pt");
+            }
         }
         self.rewrite(print::str_toks(&s));
     }

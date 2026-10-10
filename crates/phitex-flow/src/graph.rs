@@ -4329,6 +4329,9 @@ impl<'a> Exec<'a> {
                 let _ = self.scan_toks_x();
             }
             Prim::Space => self.ex_space(),
+            // (pdfTeX's extensions: no whatsit, done where they are met)
+            Prim::PdfFont(0) => self.pdf_font_expand(),
+            Prim::PdfFont(1) => self.pdf_font_attr(),
             Prim::Char => {
                 let t = self.cmd.clone();
                 self.char_cmd_num(&t);

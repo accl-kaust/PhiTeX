@@ -2466,6 +2466,136 @@ is a pure function or a fold step, no state shared with the others):
 | links, dests, outlines | `pdf/link.rs` (new) + fold | link and annotation rectangles in `content.rs` (pdfTeX's `append_link`, `end_link`: per line box at its nesting level), dest names sorted and the name tree in the fold (`sort_dest_names`, "Output name tree"), outlines as document-level items in position order |
 | reads of the fold | core (A: Conflict 12's `ReadRef`) | `\pdflastobj`, `\pdflastxform`, `\pdflastximage`, `\pdflastannot`, `\pdflastlink`, `\pdflastxpos`/`\pdflastypos`: the fold's counters at the node's position |
 
+## Font expansion and character protrusion (agent B)
+
+pdfTeX's `\pdfadjustspacing`, `\pdfprotrudechars`, their codes and
+fonts, copied from pdftex.web as pure functions (`src/micro.rs`) and
+values:
+
+- **Codes** (`\efcode`, `\lpcode`, `\rpcode`, `\knbscode`, `\stbscode`,
+  `\shbscode`, `\knbccode`, `\knaccode`: `Mat::FontInt` with pdfTeX's
+  code numbers, `micro::LP`…): one value per font and code,
+  `Key::FontCode(code, font)`, the font's 256-entry table
+  (`Val::Penalties`; empty: the defaults, `\efcode` 1000, the others 0),
+  global as pdfTeX keeps them beside the font; an assignment is a node
+  reading the table and defining the new one (clamped as `set_*_code`).
+  A table per font, not a key per character: a paragraph's `\par` node
+  reads three keys a font, not three a character, and a document sets
+  them once, at a font's first use (microtype's `\MT@setupfont`).
+  `\pdfnoligatures f` is `Key::FontCode(6, f)` = 1, read by the main loop
+  (its lig/kern program is not looked at; the left boundary's still is,
+  as `set_no_ligatures` clears only the characters' tags).
+- **`\pdffontexpand f stretch shrink step [autoexpand]`**:
+  `Key::FontExpand(f)` = `micro::Expand` (`read_expand_font`'s checks;
+  given twice, the same parameters or pdfTeX's fatal error). The fonts
+  expanded by the limits are loaded there (`Key::FontLoaded`: numbered
+  as pdfTeX's `get_expand_font` numbers them); the others are numbered
+  where a page uses them (`dvi::number`'s `extra`).
+- **An expanded font is a value**: `Font::expanded(base, e)`
+  (`auto_expand_font`: widths, italic corrections, kerns scaled by
+  `round_xn_over_d(x, 1000+e, 1000)`; named `name+e`; identity `base.key`
+  and `e`), `Font::derived = Derived { base, kind: Expanded(e) }`. Made
+  by the line breaker where `hpack(…, subst_ex_font)` substitutes a
+  character's font (`do_subst_font`), once per paragraph (`micro::Cache`).
+- **The `\par` node reads them** only with `\pdfadjustspacing` or
+  `\pdfprotrudechars` positive (`LineParams::micro`: `None` otherwise, so
+  DVI documents without them read nothing more): for the paragraph's
+  fonts (its characters', its discretionaries', its hboxes'), the
+  expansion parameters, `\efcode`, `\lpcode`, `\rpcode` tables and the
+  quad (`\fontdimen6` now); `check_expand_pars`' one step and one pair
+  of limits a paragraph is checked there.
+- **Line breaking** (`linebreak.rs`): the widths are eight (the font
+  stretch and shrink, `cur_active_width[7..8]`, with
+  `\pdfadjustspacing>1`: `micro::Micro::widths_at`, a character's
+  `char_stretch`/`char_shrink`, a font kern's `kern_stretch`/
+  `kern_shrink` between two characters of its font); `try_break`'s
+  shortfall gets `total_pw` (`\pdfprotrudechars>1`) and the font
+  stretch/shrink adjustment (`\pdfadjustspacing>1`), as pdftex.web
+  orders them. `post_line_break` puts the margin kerns where pdfTeX does
+  (`\pdfprotrudechars>0`: the right one after the item before the break,
+  the protruding character found back from it with `find_protchar_right`,
+  or a discretionary's pre-break list's last; the left one first) and
+  packs the line with `micro::Micro::hpack_line` (`\pdfadjustspacing>0`:
+  `cal_expand_ratio`, then `subst_ex_font` with the ratio, kerns and
+  margin kerns redone as pdfTeX redoes them).
+- **The main loop**: `\pdfprependkern`/`\pdfappendkern` kerns
+  (`get_auto_kern`: before the first character — no left boundary then —,
+  between two characters instead of their lig/kern program, before a
+  ligature, around `\-`'s hyphen), `Item::Kern { sub: 3 }` (shown
+  `(for \pdfprependkern/\pdfappendkern)`); `\pdfadjustinterwordglue`:
+  every space is the normal space, widened by the character before's
+  `\knbscode`… (`adjust_interword_glue`; it reads the current list's
+  tail, so a space node with it positive runs again with its paragraph).
+- **`\pdfcopyfont\cs=f`**: `Font::copied` (a font of its own: key
+  `f.key copyN`, parameters as `f`'s are now, its own codes);
+  **`\letterspacefont\cs=f n [nolig]`**: `Font::letterspaced` (widths
+  plus `n` thousandths of the quad, named `name+nls`); both counted per
+  base font (`Key::FontCopies`) for their identity, loaded (numbered,
+  `font_ptr`) as `\font` loads a font. `\pdffontattr f {…}`:
+  `Key::FontAttr(f)`, PDF mode only (pdfTeX's fatal error in DVI mode).
+- `\leftmarginkern n`, `\rightmarginkern n` (`Conv`): the box's margin
+  kern past what protrusion skips and the skip glue. `\unhbox` drops
+  margin kerns (pdftex.web 1110).
+
+**For Q (the PDF content stream).** Two things reach a page:
+
+1. `Item::MarginKern { w, right, font, c }`: everywhere a kern of width
+   `w` (`cur_h += w`, as `hlist_out`'s `margin_kern_node, kern_node`
+   case); `font`/`c` are the protruding character (`margin_char`), for
+   nothing in the stream. DVI and `pdf/content.rs` move right by `w`
+   (the one line changed in `content.rs`).
+2. `Item::Char(f, c)` / `Item::Lig` whose `f.expanded_from()` is
+   `Some((base, e))`: set the base font's glyph `c` with the text matrix
+   scaled horizontally by `1000+e` thousandths (pdftex.web's
+   `pdf_new_Tm_a`/`get_font_auto_expand_ratio`, the `Tm` operator when
+   `e` changes: pdftex.web 16285–16300); the PDF font object is the
+   base's (`pdf_font_blink`), never one for `name+e`. The advance is the
+   expanded width (`f.glyph(c).width`). A letter-spaced font
+   (`DerivedKind::LetterSpaced { e, .. }`) is a virtual font over
+   `base`: each character is the base's, moved right by
+   `round_xn_over_d(quad, e, 2000)` before and after (pdftex.web's
+   `letter_space_font` packets, `vf_replace_z`'s fix-word rounding).
+
+**Held by**: `tests/etex.rs`' `micro` (PDF mode, no page shipped: the
+codes and their `\the`, copies and letter-spaced fonts, `\pdfnoligatures`,
+protrusion at `\pdfprotrudechars` 1 and 2, `\leftmarginkern`/
+`\rightmarginkern`, expansion at `\pdfadjustspacing` 1 and 2 and with
+protrusion, an `\hbox to`, the auto kerns, `\pdfadjustinterwordglue`;
+`\showbox`'s lines against `etex -ini -etex`, i.e. pdfTeX) at five
+schedules; `tests/latex_docs.rs`' `micro` (microtype in DVI mode:
+protrusion; DVI and `.aux` against `latex`, first run and fixpoint).
+`tests/pdflatex/docs/micro.tex` (expansion and protrusion, lmodern) and
+`microls.tex` (`\textls`, tracking, spacing, kerning) are for the
+pdflatex harness (`tests/pdflatex_docs.rs`, Q), not in the tree yet:
+their PDF needs (2) above.
+
+Gaps:
+- *Expanded TFM files.* A font given `\pdffontexpand` without
+  `autoexpand` names `name+e.tfm` files pdfTeX loads (`load_expand_font`
+  → `read_font_info`); here every font is expanded as `autoexpand` makes
+  it. microtype always gives `autoexpand` with pdfTeX.
+- *`\tagcode`* is not done (it clears a character's tags in place).
+- *`\pdfnoligatures` and hyphenation/math*: the main loop honours it;
+  the hyphenation pass's reconstitution and math's lig/kern look at the
+  font's program as loaded.
+- *The margin kerns' variations* in `try_break` (`cal_margin_kern_var`)
+  are taken as zero: an autoexpanded font's protrusion is its base's
+  (same quad, same codes), so pdfTeX's are zero too.
+- *A derived font in a saved format*: `format::decode` refuses it (the
+  font is written as its file's bytes).
+- *`\pdfmatch`* (microtype's `\MT@ifint`, `\MT@ifdimen`) is done as
+  match or not (`src/ere.rs`, POSIX extended expressions, backtracking);
+  `\pdflastmatch`'s submatches (leftmost-longest) are not kept.
+- *An error's context at a macro's end (for P).* `\def\m{\setbox0\hbox{}\showbox0 }
+  \m`: TeX's `! OK.` context shows the macro's level (`\m ...\showbox
+  0 `) above `l.N \m`; the graph shows `...` there: the macro's level,
+  read to its end, is gone before the error is shown (TeX pops it at the
+  next `get_next`). Found by `tests/etex/micro.tex`, which now puts
+  `\showbox0` after its macro.
+- *A box's glue when the expansion ratio rounds to zero*: pdfTeX returns
+  the first pass's box without setting its glue (uninitialized fields);
+  here its glue is normal.
+
 ## The cross-run fixpoint (agent B)
 
 AGENTS_BRIEF §7. Run k+1 is the same build updated again. The files run

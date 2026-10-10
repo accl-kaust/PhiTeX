@@ -33,7 +33,7 @@ use phitex_flow::print::Limits;
 use phitex_flow::{Build, Font, Options, Order, Output, Reads};
 
 /// The documents.
-const DOCS: [&str; 15] = [
+const DOCS: [&str; 16] = [
     "sections",
     "math",
     "tables",
@@ -49,6 +49,7 @@ const DOCS: [&str; 15] = [
     "lst",
     "bib",
     "href",
+    "micro",
 ];
 
 /// The schedules: one thread; eight suspending, in priority order and in
@@ -598,6 +599,12 @@ fn doc_href() {
     doc("href");
 }
 
+/// microtype in DVI mode: character protrusion (pdfTeX's margin kerns).
+#[test]
+fn doc_micro() {
+    doc("micro");
+}
+
 /// The document on the saved format run to the cross-run fixpoint
 /// (`fixpoint::fixpoint`: each run reads what the run before wrote) at
 /// schedule `o`: it stops where `latex` stops, its last run's DVI file and
@@ -693,4 +700,5 @@ fix_tests! {
     fix_lst: "lst",
     fix_bib: "bib",
     fix_href: "href",
+    fix_micro: "micro",
 }

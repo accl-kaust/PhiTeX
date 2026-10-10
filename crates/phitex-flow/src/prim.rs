@@ -126,6 +126,11 @@ pub enum Conv {
     PdfEscapeName,
     PdfEscapeHex,
     PdfUnescapeHex,
+    /// `\leftmarginkern`, `\rightmarginkern`.
+    LeftMarginKern,
+    /// `\pdfmatch [icase] [subcount n] {pattern}{string}`.
+    PdfMatch,
+    RightMarginKern,
 }
 
 /// A primitive that makes material, boxes or pages (tex.web's commands
@@ -160,7 +165,8 @@ pub enum Mat {
     Disc(bool),
     /// `\/`.
     ItalCorr,
-    /// `\hyphenchar` (0), `\skewchar` (1).
+    /// `\hyphenchar` (0), `\skewchar` (1); pdfTeX's per-character codes
+    /// (`micro::LP` … `micro::KNAC`) and `\pdfnoligatures` (6).
     FontInt(u8),
     /// The reader's own: a box group's contents are packaged (0); a
     /// paragraph ends before a `}` (1); a discretionary's next part
@@ -349,6 +355,10 @@ pub enum Prim {
     GlyphToUnicode,
     /// A pdfTeX primitive without a graph form yet: `PDFTEX_PRIMITIVES[i]`.
     PdfUnimpl(u16),
+    /// pdfTeX's font commands: `\pdffontexpand` (0), `\pdffontattr` (1),
+    /// `\pdfcopyfont` (2, an assignment), `\letterspacefont` (3, an
+    /// assignment).
+    PdfFont(u8),
     // ---- e-TeX's (etex.web), named only in extended mode
     // (`ETEX_PRIMITIVES`); `LastItem(ETEX_ITEM..)`, `Mark(5..)` and
     // `PageInt(2)` are e-TeX's too.
@@ -1064,19 +1074,19 @@ pub const ETEX_PRIMITIVES: [(&str, Prim); 66] = [
 /// quantities `PdfItem`s (`PDF_ITEMS`); what has no graph form yet is
 /// `PdfUnimpl` (an error where it is executed).
 pub const PDFTEX_PRIMITIVES: [(&str, Prim); 154] = [
-    ("efcode", Prim::PdfUnimpl(0)),
+    ("efcode", Prim::Mat(Mat::FontInt(4))),
     ("expanded", Prim::Convert(Conv::Expanded)),
     ("ifincsname", Prim::If(IfKind::InCsname)),
     ("ifpdfabsdim", Prim::If(IfKind::AbsDim)),
     ("ifpdfabsnum", Prim::If(IfKind::AbsNum)),
     ("ifpdfprimitive", Prim::If(IfKind::PdfPrimitive)),
     ("ignoreprimitiveerror", Prim::IntPar(IntPar::Ignoreprimitiveerror)),
-    ("knaccode", Prim::PdfUnimpl(7)),
-    ("knbccode", Prim::PdfUnimpl(8)),
-    ("knbscode", Prim::PdfUnimpl(9)),
-    ("leftmarginkern", Prim::PdfUnimpl(10)),
-    ("letterspacefont", Prim::PdfUnimpl(11)),
-    ("lpcode", Prim::PdfUnimpl(12)),
+    ("knaccode", Prim::Mat(Mat::FontInt(11))),
+    ("knbccode", Prim::Mat(Mat::FontInt(10))),
+    ("knbscode", Prim::Mat(Mat::FontInt(7))),
+    ("leftmarginkern", Prim::Convert(Conv::LeftMarginKern)),
+    ("letterspacefont", Prim::PdfFont(3)),
+    ("lpcode", Prim::Mat(Mat::FontInt(2))),
     ("partokencontext", Prim::IntPar(IntPar::Partokencontext)),
     ("partokenname", Prim::PdfUnimpl(14)),
     ("pdfadjustinterwordglue", Prim::IntPar(IntPar::Pdfadjustinterwordglue)),
@@ -1087,7 +1097,7 @@ pub const PDFTEX_PRIMITIVES: [(&str, Prim); 154] = [
     ("pdfcolorstack", Prim::PdfUnimpl(20)),
     ("pdfcolorstackinit", Prim::PdfUnimpl(21)),
     ("pdfcompresslevel", Prim::IntPar(IntPar::Pdfcompresslevel)),
-    ("pdfcopyfont", Prim::PdfUnimpl(23)),
+    ("pdfcopyfont", Prim::PdfFont(2)),
     ("pdfcreationdate", Prim::PdfUnimpl(24)),
     ("pdfdecimaldigits", Prim::IntPar(IntPar::Pdfdecimaldigits)),
     ("pdfdest", Prim::PdfUnimpl(26)),
@@ -1106,8 +1116,8 @@ pub const PDFTEX_PRIMITIVES: [(&str, Prim); 154] = [
     ("pdffilemoddate", Prim::PdfUnimpl(39)),
     ("pdffilesize", Prim::Convert(Conv::PdfFilesize)),
     ("pdffirstlineheight", Prim::DimenPar(DimenPar::Pdffirstlineheight)),
-    ("pdffontattr", Prim::PdfUnimpl(42)),
-    ("pdffontexpand", Prim::PdfUnimpl(43)),
+    ("pdffontattr", Prim::PdfFont(1)),
+    ("pdffontexpand", Prim::PdfFont(0)),
     ("pdffontname", Prim::PdfUnimpl(44)),
     ("pdffontobjnum", Prim::PdfUnimpl(45)),
     ("pdffontsize", Prim::PdfUnimpl(46)),
@@ -1144,12 +1154,12 @@ pub const PDFTEX_PRIMITIVES: [(&str, Prim); 154] = [
     ("pdfmajorversion", Prim::IntPar(IntPar::Pdfmajorversion)),
     ("pdfmapfile", Prim::PdfUnimpl(78)),
     ("pdfmapline", Prim::PdfUnimpl(79)),
-    ("pdfmatch", Prim::PdfUnimpl(80)),
+    ("pdfmatch", Prim::Convert(Conv::PdfMatch)),
     ("pdfmdfivesum", Prim::PdfUnimpl(81)),
     ("pdfminorversion", Prim::IntPar(IntPar::Pdfminorversion)),
     ("pdfnames", Prim::PdfUnimpl(83)),
     ("pdfnobuiltintounicode", Prim::PdfUnimpl(84)),
-    ("pdfnoligatures", Prim::PdfUnimpl(85)),
+    ("pdfnoligatures", Prim::Mat(Mat::FontInt(6))),
     ("pdfnormaldeviate", Prim::PdfUnimpl(86)),
     ("pdfobj", Prim::PdfUnimpl(87)),
     ("pdfobjcompresslevel", Prim::IntPar(IntPar::Pdfobjcompresslevel)),
@@ -1210,11 +1220,11 @@ pub const PDFTEX_PRIMITIVES: [(&str, Prim); 154] = [
     ("pdfximage", Prim::PdfUnimpl(143)),
     ("pdfximagebbox", Prim::PdfUnimpl(144)),
     ("quitvmode", Prim::QuitVmode),
-    ("rightmarginkern", Prim::PdfUnimpl(146)),
-    ("rpcode", Prim::PdfUnimpl(147)),
-    ("shbscode", Prim::PdfUnimpl(148)),
+    ("rightmarginkern", Prim::Convert(Conv::RightMarginKern)),
+    ("rpcode", Prim::Mat(Mat::FontInt(3))),
+    ("shbscode", Prim::Mat(Mat::FontInt(9))),
     ("showstream", Prim::IntPar(IntPar::Showstream)),
-    ("stbscode", Prim::PdfUnimpl(150)),
+    ("stbscode", Prim::Mat(Mat::FontInt(8))),
     ("synctex", Prim::IntPar(IntPar::Synctex)),
     ("tagcode", Prim::PdfUnimpl(152)),
     ("tracingstacklevels", Prim::IntPar(IntPar::Tracingstacklevels)),
