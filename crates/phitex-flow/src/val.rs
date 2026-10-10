@@ -646,3 +646,145 @@ pub fn initial_cat(c: char) -> u8 {
         _ => 12,
     }
 }
+
+/// One key of each kind, for the tag tests (`Key::word`'s here, the
+/// format's in `format.rs`): `key_index` has no wildcard, so a new kind
+/// does not compile until it has an index, and `every_key_once` fails
+/// until it has a key here.
+#[cfg(test)]
+pub(crate) fn every_key() -> Vec<Key> {
+    use crate::prim::{DimenPar, GluePar, IntPar, TokPar};
+    let f: Arc<str> = Arc::from("cmr10");
+    vec![
+        Key::Cs(5),
+        Key::Active('a'),
+        Key::Cat('a'),
+        Key::Lccode('a'),
+        Key::Uccode('a'),
+        Key::Sfcode('a'),
+        Key::Mathcode('a'),
+        Key::Delcode('a'),
+        Key::IntPar(IntPar::Tolerance),
+        Key::DimenPar(DimenPar::Hsize),
+        Key::GluePar(GluePar::Parskip),
+        Key::TokPar(TokPar::Output),
+        Key::Count(1),
+        Key::Dimen(1),
+        Key::Skip(1),
+        Key::Muskip(1),
+        Key::Toks(1),
+        Key::Box(1),
+        Key::Parshape,
+        Key::Font,
+        Key::FontDimen(f.clone(), 1),
+        Key::HyphenChar(f.clone()),
+        Key::SkewChar(f.clone()),
+        Key::FontIdent(f.clone()),
+        Key::FontLoaded(f.clone()),
+        Key::FamFont(0, 1),
+        Key::File(Arc::from("a.tex")),
+        Key::ReadStream(1),
+        Key::Job,
+        Key::LineBase,
+        Key::SplitMarks,
+        Key::Interaction,
+        Key::ETeXMode,
+        Key::Patterns(0),
+        Key::Exceptions(0),
+        Key::PenaltiesArray(0),
+        Key::Page(0),
+        Key::Mark(0, 1),
+        Key::Format,
+        Key::MagSet,
+        Key::FontParams(f.clone()),
+        Key::LastFont,
+        Key::Ended,
+        Key::MainTail,
+        Key::MainDepth,
+        Key::GlyphUnicode(f),
+    ]
+}
+
+/// Each kind of key's place in [`every_key`] (no wildcard: see there).
+#[cfg(test)]
+pub(crate) fn key_index(k: &Key) -> usize {
+    match k {
+        Key::Cs(_) => 0,
+        Key::Active(_) => 1,
+        Key::Cat(_) => 2,
+        Key::Lccode(_) => 3,
+        Key::Uccode(_) => 4,
+        Key::Sfcode(_) => 5,
+        Key::Mathcode(_) => 6,
+        Key::Delcode(_) => 7,
+        Key::IntPar(_) => 8,
+        Key::DimenPar(_) => 9,
+        Key::GluePar(_) => 10,
+        Key::TokPar(_) => 11,
+        Key::Count(_) => 12,
+        Key::Dimen(_) => 13,
+        Key::Skip(_) => 14,
+        Key::Muskip(_) => 15,
+        Key::Toks(_) => 16,
+        Key::Box(_) => 17,
+        Key::Parshape => 18,
+        Key::Font => 19,
+        Key::FontDimen(..) => 20,
+        Key::HyphenChar(_) => 21,
+        Key::SkewChar(_) => 22,
+        Key::FontIdent(_) => 23,
+        Key::FontLoaded(_) => 24,
+        Key::FamFont(..) => 25,
+        Key::File(_) => 26,
+        Key::ReadStream(_) => 27,
+        Key::Job => 28,
+        Key::LineBase => 29,
+        Key::SplitMarks => 30,
+        Key::Interaction => 31,
+        Key::ETeXMode => 32,
+        Key::Patterns(_) => 33,
+        Key::Exceptions(_) => 34,
+        Key::PenaltiesArray(_) => 35,
+        Key::Page(_) => 36,
+        Key::Mark(..) => 37,
+        Key::Format => 38,
+        Key::MagSet => 39,
+        Key::FontParams(_) => 40,
+        Key::LastFont => 41,
+        Key::Ended => 42,
+        Key::MainTail => 43,
+        Key::MainDepth => 44,
+        Key::GlyphUnicode(_) => 45,
+    }
+}
+
+/// The tag numbers (CORE.md "Tag numbers"): every kind of key is in
+/// [`every_key`] once, and no two kinds share `Key::word`'s tag (the bits
+/// above 40, which `Hash` and `Eq` compare).
+#[cfg(test)]
+mod tag_tests {
+    use super::*;
+
+    #[test]
+    fn every_key_once() {
+        let mut ix: Vec<usize> = every_key().iter().map(key_index).collect();
+        ix.sort_unstable();
+        let want: Vec<usize> = (0..ix.len()).collect();
+        assert_eq!(ix, want, "every_key: one key of each kind, each kind's index in key_index");
+    }
+
+    #[test]
+    fn key_word_tags_are_distinct() {
+        let mut seen: std::collections::BTreeMap<u64, Key> = std::collections::BTreeMap::new();
+        for k in every_key() {
+            // (a font dimension is compared by its font's name: no tag)
+            if k.word() == u64::MAX {
+                continue;
+            }
+            let tag = k.word() >> 40;
+            if let Some(o) = seen.insert(tag, k.clone()) {
+                panic!("Key::word tag {tag}: {o:?} and {k:?}");
+            }
+        }
+    }
+}

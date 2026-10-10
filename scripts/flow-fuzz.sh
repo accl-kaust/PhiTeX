@@ -15,19 +15,40 @@
 #                    scripts/flow-fuzz-min.py (MIN=0 skips it).
 # Everything runs under scripts/sandbox (directly when already inside it).
 # Env: JOBS, EDITS (6), TIMEOUT (seconds a seed may take, 600), MIN (1).
-# Under Slurm (SLURM_JOB_ID set) OUT is copied at the end to
+# LATEX=1: the LaTeX documents instead (fuzz::LATEX_DOCS but tiny, on the
+# saved format, made once into OUT/latex.fmt): SEEDS seeds (default 30)
+# of each document, one chunk a document, at 1 or 8 threads at random
+# (each chunk takes 8 processors: JOBS defaults to nproc/8); MIN
+# defaults to 0.
+# DOCS="trip pages ...": the plain corpus's documents named only, each by
+# `--doc` (its own seeds: seed N is not the same case as without DOCS),
+# in chunks of 50 seeds, SEEDS of each at 1 thread and SEEDS/5 at 8.
+# In a cluster job (job.sbatch's `cmd`, which exports the results
+# directory $r into the container) OUT is copied at the end to
+# $r/$(basename OUT) (but the format), which the job copies to
+# ~/code/flinner/partex-phitex-runs/cmd-JOBID/; else under Slurm to
 # $HOME/code/flinner/partex-phitex-runs/cmd-$SLURM_JOB_ID/$(basename OUT),
 # where the runner fetches a job's results from (the run itself writes
 # inside the checkout, where the sandbox may write).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-SEEDS=${1:-5000}
+LATEX=${LATEX:-0}
+if [ "$LATEX" = 1 ]; then
+	SEEDS=${1:-30}
+	JOBS=${JOBS:-$(($(nproc) / 8 > 0 ? $(nproc) / 8 : 1))}
+	MIN=${MIN:-0}
+	LATEX_DOCS="sections math tables figures titlepage packages ams gfx layout rules"
+else
+	SEEDS=${1:-5000}
+	JOBS=${JOBS:-$(nproc)}
+	MIN=${MIN:-1}
+fi
 OUT=${2:-target/flow-fuzz}
-JOBS=${JOBS:-$(nproc)}
 EDITS=${EDITS:-6}
 TIMEOUT=${TIMEOUT:-600}
-MIN=${MIN:-1}
-if [ -n "${SLURM_JOB_ID:-}" ]; then
+if [ -n "${r:-}" ]; then
+	KEEP="$r/$(basename "$OUT")"
+elif [ -n "${SLURM_JOB_ID:-}" ]; then
 	KEEP="$HOME/code/flinner/partex-phitex-runs/cmd-$SLURM_JOB_ID/$(basename "$OUT")"
 else
 	KEEP=
@@ -37,14 +58,39 @@ BIN=target/release/phitex-flow
 run cargo build --release -q -p phitex-flow
 mkdir -p "$OUT"
 J8=$((SEEDS / 5))
-# (one line per chunk: threads, first seed, count)
-{
-	for ((s = 0; s < SEEDS; s += 100)); do echo "1 $s $((SEEDS - s < 100 ? SEEDS - s : 100))"; done
-	for ((s = 0; s < J8; s += 100)); do echo "8 $((SEEDS + s)) $((J8 - s < 100 ? J8 - s : 100))"; done
-} >"$OUT/chunks.txt"
+# (one line per chunk: threads, first seed, count[, LaTeX document])
+if [ "$LATEX" = 1 ]; then
+	# (the format, made once: every chunk reads it)
+	export PHITEX_FUZZ_LATEX_FMT="$PWD/$OUT/latex.fmt"
+	run "$BIN" --fuzz 1 1 1 --latex --doc latex-tiny --out "$OUT/tiny" >"$OUT/format.txt" 2>&1 || true
+	for d in $LATEX_DOCS; do echo "1,8 1 $SEEDS latex-$d"; done >"$OUT/chunks.txt"
+elif [ -n "${DOCS:-}" ]; then
+	for d in $DOCS; do
+		for ((s = 0; s < SEEDS; s += 50)); do echo "1 $s $((SEEDS - s < 50 ? SEEDS - s : 50)) $d"; done
+		for ((s = 0; s < J8; s += 50)); do echo "8 $((SEEDS + s)) $((J8 - s < 50 ? J8 - s : 50)) $d"; done
+	done >"$OUT/chunks.txt"
+else
+	{
+		for ((s = 0; s < SEEDS; s += 100)); do echo "1 $s $((SEEDS - s < 100 ? SEEDS - s : 100))"; done
+		for ((s = 0; s < J8; s += 100)); do echo "8 $((SEEDS + s)) $((J8 - s < 100 ? J8 - s : 100))"; done
+	} >"$OUT/chunks.txt"
+fi
 export BIN OUT EDITS TIMEOUT
 chunk() {
-	local t=$1 s=$2 n=$3
+	local t=$1 s=$2 n=$3 doc=${4:-}
+	if [ -n "$doc" ] && [ "${doc#latex-}" = "$doc" ]; then
+		# (a plain document by name)
+		local dir="$OUT/j$t"
+		mkdir -p "$dir"
+		"$BIN" --fuzz "$s" "$EDITS" "$n" --doc "$doc" --threads "$t" --timeout "$TIMEOUT" --out "$dir" >"$dir/chunk-$doc-$s.txt" 2>&1 || true
+		return
+	fi
+	if [ -n "$doc" ]; then
+		local dir="$OUT/latex"
+		mkdir -p "$dir"
+		"$BIN" --fuzz "$s" "$EDITS" "$n" --latex --doc "$doc" --threads "$t" --timeout "$TIMEOUT" --out "$dir" >"$dir/chunk-$doc.txt" 2>&1 || true
+		return
+	fi
 	local dir="$OUT/j$t"
 	mkdir -p "$dir"
 	"$BIN" --fuzz "$s" "$EDITS" "$n" --threads "$t" --timeout "$TIMEOUT" --out "$dir" >"$dir/chunk-$s.txt" 2>&1 || true
@@ -57,10 +103,12 @@ else
 fi
 # (the summary: each failure line names its document)
 {
-	for t in 1 8; do
-		[ -d "$OUT/j$t" ] || continue
-		echo "== $t thread(s)"
-		cat "$OUT/j$t"/chunk-*.txt | awk '
+	for t in 1 8 latex; do
+		dir="$OUT/j$t"
+		[ "$t" = latex ] && dir="$OUT/latex"
+		[ -d "$dir" ] || continue
+		echo "== $t"
+		cat "$dir"/chunk-*.txt | awk '
 			/^fuzz: / { split($0, a, " "); seeds += a[2]; next }
 			/^seed / { d = $3; sub(/^\(/, "", d); sub(/,$/, "", d); if ($0 ~ /Over \{/) over[d]++; else fail[d]++; bad++ ; docs[d] = 1 }
 			END {
@@ -70,7 +118,7 @@ fi
 	done
 } | tee "$OUT/summary.txt"
 # (the classes, and one cut-down reproduction per new class)
-find "$OUT"/j1 "$OUT"/j8 -name '*.repro' 2>/dev/null | sort >"$OUT/repros.txt"
+find "$OUT"/j1 "$OUT"/j8 "$OUT"/latex -name '*.repro' 2>/dev/null | sort >"$OUT/repros.txt"
 : >"$OUT/classes.txt"
 if [ -s "$OUT/repros.txt" ]; then
 	run bash -c "xargs -P $JOBS -n 4 $BIN --fuzz-classify <'$OUT/repros.txt'" | sort >"$OUT/classes.txt" || true
@@ -100,5 +148,6 @@ fi
 if [ -n "$KEEP" ]; then
 	mkdir -p "$KEEP"
 	cp -r "$OUT"/. "$KEEP"/
+	rm -f "$KEEP/latex.fmt"
 	echo "copied $OUT to $KEEP"
 fi
