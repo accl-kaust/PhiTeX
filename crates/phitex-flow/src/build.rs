@@ -4197,6 +4197,11 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
             g.scan = Some(scan);
             drop(g);
             sh.cv.notify_all();
+            // (a lean piece's full run is the scan's alone now: freed on
+            // the drop thread, as a replaced run)
+            for (r, _) in pieces {
+                let _ = sh.drops.send(r);
+            }
             (work, 2)
         }
         Task::Ship(i, page, numbers) => {
