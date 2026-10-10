@@ -5356,7 +5356,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         g.stats.time_held += held.elapsed();
     }
     sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, tr, te, tl, sh.now(), ta], a: run.ran, b: run.nodes_len() as u64, c: outcome, d: env.idx.0, e: env.idx.1 });
-    if sh.sched.is_some() && !env.slow.is_empty() {
+    if sh.sched.is_some() && te - tr > SLOW_NODE && !env.slow.is_empty() {
         let first = run.nodes_len().saturating_sub(usize::try_from(run.ran).unwrap_or(usize::MAX));
         let mut notes = sh.notes.lock().expect("notes");
         for &(ran, ns) in &env.slow {
@@ -5464,9 +5464,9 @@ struct PieceEnv<'a> {
     seen: FxMap<Key, Vec<(u32, Val)>>,
 }
 
-/// Measuring: a node taking longer than this (ns) is noted with its
-/// command (`PHITEX_SCHED`'s `N` lines).
-const SLOW_NODE: u64 = 100_000_000;
+/// Measuring: a run reading longer than this (ns) has its five slowest
+/// nodes noted with their commands (`PHITEX_SCHED`'s `N` lines).
+const SLOW_NODE: u64 = 1_000_000_000;
 
 /// How many builds a piece that ran in an edit keeps its nodes for.
 pub const HOT_BUILDS: u64 = 8;
@@ -5668,10 +5668,17 @@ impl Env for PieceEnv<'_> {
     fn check(&mut self, ran: u64, words: u64) -> Check {
         // (a node's end: `ran` counts the nodes; the checks every 4096
         // steps inside a node count steps, and are not node ends)
-        if self.sh.sched.is_some() && ran == self.node_ran + 1 {
+        if self.sh.sched.is_some() && (ran == self.node_ran + 1 || self.node_ran == 0) {
             let now = self.sh.now();
-            if now - self.last_check > SLOW_NODE {
-                self.slow.push((ran, now - self.last_check));
+            let gap = now - self.last_check;
+            // (the five slowest nodes of the run)
+            if self.slow.len() < 5 || gap > self.slow.iter().map(|x| x.1).min().unwrap_or(0) {
+                if self.slow.len() == 5
+                    && let Some(i) = self.slow.iter().enumerate().min_by_key(|x| x.1.1).map(|x| x.0)
+                {
+                    self.slow.swap_remove(i);
+                }
+                self.slow.push((ran, gap));
             }
             self.last_check = now;
             self.node_ran = ran;
