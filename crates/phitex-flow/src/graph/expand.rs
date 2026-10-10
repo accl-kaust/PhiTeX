@@ -434,7 +434,13 @@ impl Exec<'_> {
                     Ok(n) if n > 9 => self.int(&Key::Page(n)),
                     _ => 0,
                 };
-                print::scaled(&mut s, h);
+                // (no record of the class on the page: `0`; a record of
+                // height 0 is taken as none)
+                if h == 0 {
+                    s.push('0');
+                } else {
+                    print::scaled(&mut s, h);
+                }
                 s.push_str("pt");
             }
             Conv::LeftMarginKern | Conv::RightMarginKern => {
