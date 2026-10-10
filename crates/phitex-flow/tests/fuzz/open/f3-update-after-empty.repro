@@ -1,0 +1,11 @@
+phitex-flow fuzz repro
+doc story
+seed 0 step 1
+before threads=1 reads=Suspend order=Priority lean=true
+schedule threads=1 reads=Suspend order=Priority lean=true
+fail mismatch dvi,log
+history threads=1 doc=-
+edit - 0 0 insert
+ins
+\hsize=100pt\vsize=100pt \font\x=cmr10 \x A\par\end
+text

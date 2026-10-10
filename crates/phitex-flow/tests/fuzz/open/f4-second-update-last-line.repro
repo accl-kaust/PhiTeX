@@ -1,0 +1,43 @@
+phitex-flow fuzz repro
+doc big
+seed 0 step 1
+before threads=1 reads=Suspend order=Priority lean=false
+schedule threads=1 reads=Suspend order=Priority lean=false
+fail mismatch dvi
+history threads=1 doc=-
+edit - 0 0 none
+ins
+
+text
+\catcode`\{=1 % left brace is begin-group character
+\catcode`\}=2 % right brace is end-group character
+\catcode`\#=6 % hash mark is macro parameter character
+\catcode`@=11
+\outer\def\newskip{\alloc@2\skip\skipdef\insc@unt}
+\def\alloc@#1#2#3#4#5{\global\advance\count1#1by\@ne
+  \ch@ck#1#4#2% make sure there's still room
+\newskip\bigskipamount \bigskipamount=12pt plus 4pt minus 4pt
+\font\sevenbf=cmbx7
+\textfont\bffam=\tenbf \scriptfont\bffam=\sevenbf
+\let\bgroup={ \let\egroup=}
+\def\footnote#1{\let\@sf\empty % parameter #2 (the text) is read later
+  #1\@sf\vfootnote{#1}}
+\def\vfootnote#1{\insert\footins\bgroup
+  \else\let\next\f@t\fi \next}
+\def\f@t#1{#1\@foot}
+\def\@foot{\strut\egroup}
+\count\footins=1000 % footnote magnification factor (1 to 1)
+\vsize=5in
+\headline={\tenrm\firstmark\hfil\botmark}
+\vskip 1in
+\centerline{\bf A SHORT STORY}
+\vskip .5cm
+\mark{Galaxy}Once upon a time, in a distant
+  galaxy called \"O\"o\c c,
+there lived a computer
+Mr.~Drofnats---or ``R. J.,'' as
+he preferred to be called---was happiest when he was at work
+typesetting beautiful documents.\footnote\dag{Mostly cookbooks.}
+\item{a)} Typesetting is a craft, and craftsmen like their work.
+\item{b)} The documents were beautiful, which pleased him.
+\vskip 1in

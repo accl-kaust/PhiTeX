@@ -1075,6 +1075,140 @@ The log still differs where a group or conditional spans a blank line
 - `\endtemplate` is not yet an `\outer` name for `check_outer`.
 - `prepare_mag` runs at a `\shipout` only while no magnification is
   fixed. TeX runs it at the first page only.
+
+## Fuzz findings (agent F)
+
+**The gate.** `phitex-flow --fuzz SEED COUNT [SEEDS] [--threads N,..]
+[--doc NAME] [--out DIR] [--no-over] [--strict-over] [--timeout SECS]`
+(`src/fuzz.rs`, `tests/fuzz.rs`): from a seed, COUNT random edits in
+sequence on a document of the corpus (the plain documents story, pages,
+display, table, hyphens; "big", every body four times, 48 pages; TRIP's
+session, edits from pass 2's line 100). Edits: a character, a word, a
+blank line in or out, a paragraph split or joined, two paragraphs
+swapped, `\hsize` `\parindent` `\baselineskip` `\tolerance` changed, a
+use or redefinition of `\fz`, an `\iffz` toggled or its arm edited, a
+span grouped, `\input fzsub` added or removed and the file edited, a
+`\footnote`/`\mark`/`\insert`, an edit inside an alignment or a display.
+After each edit, `Build::update` at a random schedule (1 or 8 threads,
+waiting or predicted reads, priority or random order; lean, not lean, or
+either at random by seed) must give a cold build's DVI, log and written
+files. A failure is written as a reproduction (`--out`, the text before,
+the edit, both schedules, the run's history) that `--fuzz-replay FILE`
+runs again: the last edit alone, then, if that passes, the seed again to
+its step. A summary line says "(a no-op edit fails too)" when the update
+fails whatever the edit. `PHITEX_FUZZ_DUMP=DIR` writes both graphs, both
+logs and both DVI files.
+
+**Over-invalidation** (seeds that keep their nodes; `src/fuzz.rs`
+`over_invalidation`): a piece whose text the edit changed, a new piece, or
+one entered in a predecessor's state may run all its nodes; any other
+piece is matched by its id with the graph before the edit, its changed
+names are those it reads from before it with another value (or with a
+value the dump shows only in part that a node run defines), and it may
+run nothing before its first node reading one. `--strict-over`: the
+design's bound, only the readers of changed names outside the edited
+pieces, on the sum (hook H2 below would make it node by node).
+
+**TRIP edited** (`tests/fuzz.rs` `edited_trip_is_tex`): TeX (the system's
+`tex`, which gives Knuth's `trip.typ` on the unedited file) is the oracle
+of edited `trip.tex`s: our session's DVItype listing equals TeX's (4 seeds
+of 3 edits by default, `PHITEX_FUZZ_TRIP=N`): passes.
+
+**Local run** (500 seeds of 6 edits, 1 thread): 426 passed, 73 failed,
+1 over-invalidated. The 73: 71 TRIP seeds (F1: every TRIP seed fails at
+its first edit, and a no-op edit fails the same), hyphens seed 102 (F2),
+big seed 236 (F6; cut down, its text also gives F4). The
+over-invalidation: story seed 161 (F5).
+
+**Open findings** (`tests/fuzz/open/*.repro` must still fail; a fixed one
+moves to `tests/fuzz/fixed/`, which must pass):
+
+- **F1. A second update after an output routine that holds inserts
+  differs.** `tests/fuzz/open/f1-output-second-update.repro` (7 lines,
+  no-op edit): `\holdinginserts1`, a group with an `\output` that sets
+  `\global\holdinginserts0`, `\unvbox255\penalty\outputpenalty` and ships
+  a `\vsplit`, an `\insert100`, a `\vbox spread 1000pt{}` and a
+  `\vadjust{\penalty-5000}`. A cold build ships 4 pages (TeX's 4); the
+  same text updated again ships 3, no node running again. In TRIP
+  every update after the first differs (`--fuzz 6 1 1 --threads 1`), so
+  no TRIP edit can be checked until F1 is fixed.
+- **F2. A kept node's error context shows the line as it was.**
+  `tests/fuzz/open/f2-error-context-line.repro`: `\hsize=3iin
+  \tolerance=1000`, an `X` inserted after `3iin `: the "Illegal unit"
+  error's context line is printed without the `X` (pieces keeping their
+  nodes; lean pieces run again and pass). The context shows the rest of
+  the line, which the erring node never read: either its log reads the
+  rest of its line, or the line is laid out from the current text when the
+  log is made (`logs::rebase`). Hyphens seed 102 (`--fuzz 102 5 1
+  --threads 1`).
+- **F3. After an update of the empty text, no page is shipped again.**
+  `tests/fuzz/open/f3-update-after-empty.repro`: `Build::new`,
+  `update("")`, then `update("\hsize=100pt\vsize=100pt \font\x=cmr10 \x
+  A\par\end")`: no page (a cold build ships one). Every corpus document:
+  0 of its pages (`tests/design.rs` `cold_equals_edit` reports it). The
+  cold path is the edit path by construction (one `update`); the empty
+  build leaves state the next update reads.
+- **F4. A second update loses the last page's last line.**
+  `tests/fuzz/open/f4-second-update-last-line.repro` (32 lines cut from
+  big's text by delta debugging, no-op edit, both builds 1 thread in
+  priority): an `\outer\def` whose body never closes, undefined
+  `\alloc@`-style macros, plain's `\footnote` with its `\vfootnote`
+  cut, a `\headline` with `\firstmark`, `\vsize=5in`. The cold build
+  ends page 2 with the word "which"; the same text updated again ends
+  page 2 without it. Like F1, nothing was edited.
+- **F5. A new definer with an equal value re-runs a macro's reader.**
+  Story seed 161 step 2 (`--fuzz 161 2 1 --threads 1`): a swap moves
+  `\def\fz{lazy}` into a new piece (id 134 for 133). Piece "\medskip
+  \noindent{\bf EXERCISE 1.1}" runs 29 of its 77 nodes, from n48, the
+  node before the first reading `\fz`; every read from before it has the
+  value it had (`\fz`, `\vsize`, `\escapechar` now from piece 134, the
+  same values), and n1, reading `\vsize` from the new piece too, is kept.
+  A macro call's reading node compares the definer, not the meaning.
+- **F6. Big: the order of a cold build changes its output.** At 1
+  worker, waiting reads, `Order::Random(400)` gives another DVI and log
+  than priority order, every time (`tests/design.rs`
+  `the_same_output_at_any_w` reports it); at 8 workers,
+  `Order::Random(7)` does about one run in eight. Big seed 236 (`--fuzz
+  236 1 1 --threads 1`) is it: its first build ran in that order. The
+  smaller documents do not show it.
+
+**Design tests** (`tests/design.rs`, the brief's 1–6; 7 waits for
+`Key::File` by writes):
+1. `a_segment_start_reads_zero_state`: `Entry` is `Start`, `File(usize)`,
+   `Rest(usize, Option<usize>)` only; `Entry::Start` is entered in
+   `RState::start()`, made from nothing; `RState` holds no name's value;
+   every piece of the corpus is entered so. Passes.
+2. `no_dominant_thread`: big, 8 workers, best of three: predicted reads
+   16–18% for the busiest thread (asserted ≤ 25%); waiting reads 16–28%
+   (shown, not asserted: it depends on how the machine runs the threads).
+3. `cold_equals_edit`: one public function makes an `Output`
+   (`Build::update`; `fuzz::cold` wraps it), and it does not branch on a
+   first run; an update after the empty text equals a cold build: F3.
+4. `a_blank_line_above_any_definition_reruns_no_reader`: above every
+   piece holding a definition (the bodies, and plain.tex in one document),
+   at most one piece runs, no rerun, a cold build's output. Passes.
+5. `the_same_output_at_any_w`: every corpus document at 1 and 8 workers,
+   both reads, priority and random orders: one DVI, log and set of files.
+   Big differs in random orders: F6 (reported; any other difference
+   fails).
+6. `an_edit_to_the_untaken_arm_runs_nothing_past_it`: the φ at `\fi`;
+   an edit to the arm not taken runs one piece and at most two nodes.
+   Passes.
+
+**Hooks wanted (A):**
+- **H1** `Build::check_entries(&self) -> Result<(), String>`: for every
+  piece that has run, its run's entry equals `entry_state` now, and an
+  `Entry::Start` piece's equals `RState::start()`. Test 1 then checks
+  built graphs, not only the source.
+- **H2** The dump marks the nodes run in this build (`  n5* …`). The
+  fuzz then checks the brief's bound node by node: outside the edited
+  pieces a node runs only if it reads a changed name or a value a node run
+  defined.
+- **H3** The dump shows a token list or macro whole, or with a hash of the
+  whole (now cut at 24 tokens; a box by its dimensions, a stream by its
+  position): such values count as changed whenever a node run defines
+  them.
+
 ## LaTeX's format: `latex.ltx` through the graph (agent B)
 
 `tests/latex.rs` builds TeX Live's `latex.ltx` (and the 60 files it
