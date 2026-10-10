@@ -15,14 +15,14 @@ class SDump(gdb.Command):
             i = shown = 0
             while f is not None and i < 300 and shown < 3:
                 n = f.name() or ''
-                if '::graph::Exec' in n and '{closure' not in n:
+                if any(n == m or n.endswith('::' + m) for m in ('def_in', 'expand_text', 'csname')):
                     f.select()
                     out = []
                     for e in ['self.defs.len', 'self.reads.len', 'self.steps', 'self.emit.len', 'self.text.length', 'self.in_csname']:
                         try:
                             out.append(f"{e.split('.',1)[1]}={gdb.parse_and_eval(e)}")
                         except Exception as x:
-                            out.append(f"{e.split('.',1)[1]}=?")
+                            out.append(f"{e.split('.',1)[1]}=?({str(x)[:50]})")
                     print(f"SDUMP thread {th.num} frame {i} {n[-60:]}: " + ' '.join(out))
                     shown += 1
                 f = f.older()

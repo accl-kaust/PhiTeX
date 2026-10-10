@@ -3,13 +3,14 @@
 # by stacks sampled under gdb (gdb starts the build, so ptrace_scope 1
 # allows it): from START s, every STEP s, N times, the build is sent SIGINT
 # (gdb stops it, not passed on) and every thread's backtrace written.
+# DEBUG=2: full debug information (sdump.py reads the node's fields).
 # The format is made first into a cache of the job's own (pgfrounds.sh).
 set -u
 R=${r:-/tmp/pgfs-results}; W=${w:-/tmp/pgfs-work}/pgfs; mkdir -p "$R" "$W"
 SRC=${SRC:-$PWD/bench/flow-par/pgfman-src}
 START=${START:-8}; STEP=${STEP:-4}; N=${N:-16}; TH=${TH:-1}; SDUMP=${SDUMP:-0}
 export SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1
-cargo build --release -q -p phitex-cli > "$R/build.log" 2>&1 || { echo "build failed"; tail -30 "$R/build.log"; exit 1; }
+CARGO_PROFILE_RELEASE_DEBUG=${DEBUG:-line-tables-only} cargo build --release -q -p phitex-cli > "$R/build.log" 2>&1 || { echo "build failed"; tail -30 "$R/build.log"; exit 1; }
 B=$PWD/target/release/phitex
 export PHITEX_CACHE_DIR=$W/cache; rm -rf $W/cache $W/fmt; mkdir -p $W/fmt
 printf '%s\n' '\documentclass{article}\begin{document}x\end{document}' > $W/fmt/one.tex
