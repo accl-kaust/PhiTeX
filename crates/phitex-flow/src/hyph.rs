@@ -183,6 +183,18 @@ impl Patterns {
     pub fn get(&self, letters: &[char]) -> Option<&[u8]> {
         self.0.map.get(letters).map(|d| &d[..])
     }
+
+    /// Each pattern's letters and digits, in order (`format`).
+    pub fn entries(&self) -> impl Iterator<Item = (&[char], &[u8])> {
+        self.0.map.iter().map(|(l, d)| (&l[..], &d[..]))
+    }
+
+    /// The patterns with these letters and digits (`format`).
+    pub fn from_entries(entries: impl IntoIterator<Item = (Box<[char]>, Box<[u8]>)>) -> Patterns {
+        let map: BTreeMap<Box<[char]>, Box<[u8]>> = entries.into_iter().collect();
+        let longest = map.keys().map(|l| l.len()).max().unwrap_or(0);
+        Patterns(Arc::new(PatternMap { map, longest }))
+    }
 }
 
 /// One language's `\hyphenation` exceptions: each word's lc-coded letters
@@ -247,6 +259,16 @@ impl Exceptions {
     /// The hyphens of the word with these lc-coded letters, if it is one.
     pub fn get(&self, letters: &[char]) -> Option<&[usize]> {
         self.0.get(letters).map(|h| &h[..])
+    }
+
+    /// Each word's letters and hyphens, in order (`format`).
+    pub fn entries(&self) -> impl Iterator<Item = (&[char], &[usize])> {
+        self.0.iter().map(|(w, h)| (&w[..], &h[..]))
+    }
+
+    /// The exceptions with these words and hyphens (`format`).
+    pub fn from_entries(entries: impl IntoIterator<Item = (Box<[char]>, Box<[usize]>)>) -> Exceptions {
+        Exceptions(Arc::new(entries.into_iter().collect()))
     }
 }
 

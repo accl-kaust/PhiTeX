@@ -35,6 +35,7 @@ pub mod arith;
 pub mod budgets;
 pub mod build;
 pub mod dvi;
+pub mod format;
 pub mod fuzz;
 pub mod hash;
 pub mod item;

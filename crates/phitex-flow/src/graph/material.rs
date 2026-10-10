@@ -19,7 +19,7 @@ use crate::item::{
 };
 use crate::linebreak::{self, LineParams};
 use crate::pack::{Params, Spec, hpack, vpack};
-use crate::page::{IGNORE_DEPTH, page_mark, push_vertical, remove_last};
+use crate::page::{IGNORE_DEPTH, MAIN_DEPTH, page_mark, push_vertical, remove_last};
 use crate::show::{Ctx, NL, RAW, report};
 use crate::tfm::{Font, Glyph, LigKern, Tag};
 use crate::val::{DimenPar, Glue, GluePar, IntPar, Key, Mat, Meaning, Prim, Tok, TokPar, Val};
@@ -681,6 +681,8 @@ impl Exec<'_> {
                 hlist.shrink_to_fit();
                 para.hlist = hlist;
                 para.lb = Some(Arc::new(lp));
+                // (its last line's depth, once broken: `Exec::prev_depth`)
+                self.st.prev_depth = MAIN_DEPTH;
             } else {
                 let lines = linebreak::lines(&hlist, &lp);
                 self.vemit.append(&mut para.before);
@@ -787,7 +789,49 @@ impl Exec<'_> {
         }
         let v = self.st.mode == Mode::V;
         let list = self.current_list(v);
-        list.into_iter().rev().find(|i| !matches!(i, Item::BuildPage(_) | Item::End(_) | Item::Shipout(_)))
+        let last = list.into_iter().rev().find(|i| !matches!(i, Item::BuildPage(_) | Item::End(_) | Item::Shipout(_)));
+        if last.is_some() || !v || self.st.level != 0 || self.st.in_output() {
+            return last;
+        }
+        // (the main vertical list, nothing contributed since its last
+        // paragraph or in this piece: that paragraph's tail, or the one
+        // reaching the piece, tex.web 424)
+        let nodes = &self.chain.nodes;
+        let lb = (0..nodes.len()).rev().find(|&j| nodes[j].para().is_some_and(|p| p.lb.is_some()));
+        if let Some(j) = lb {
+            return nodes[j].para().and_then(|p| match main_tail(p) {
+                Some(Val::Tail(t)) => Some((*t).clone()),
+                _ => None,
+            });
+        }
+        match self.get(&Key::MainTail) {
+            Val::Tail(t) => Some((*t).clone()),
+            _ => None,
+        }
+    }
+
+    /// `\prevdepth` of the current vertical list; the main vertical
+    /// list's where the reader state says `page::MAIN_DEPTH` (a piece's
+    /// start, after a paragraph not broken into lines yet): a read of
+    /// `Key::MainDepth`, a paragraph's its last line's depth.
+    pub(super) fn prev_depth(&mut self) -> i32 {
+        if self.st.prev_depth != MAIN_DEPTH {
+            return self.st.prev_depth;
+        }
+        self.main_depth()
+    }
+
+    /// The main vertical list's `\prevdepth` where a reader state says
+    /// `page::MAIN_DEPTH`: `Key::MainDepth`.
+    pub(super) fn main_depth(&mut self) -> i32 {
+        match self.get(&Key::MainDepth) {
+            Val::Int(d) => d,
+            Val::Para(p) => match &p.lb {
+                Some(lp) => linebreak::lines(&p.hlist, lp).last().map_or(IGNORE_DEPTH, |l| l.b.d),
+                None => IGNORE_DEPTH,
+            },
+            _ => IGNORE_DEPTH,
+        }
     }
 
     // ------------------------------------------------------------ characters
@@ -1771,4 +1815,39 @@ impl Exec<'_> {
         self.st.texts = super::Stack::new();
         self.st.pos = self.text.len();
     }
+}
+
+/// The main vertical list's last item after paragraph `p`'s contributions
+/// (its items before its lines, its lines, its items after them): the
+/// value of `Key::MainTail` (`Val::Void`: none, a job begun), if they
+/// change it.
+pub(super) fn main_tail(p: &Para) -> Option<Val> {
+    let mut list = Vec::new();
+    let mut pd = IGNORE_DEPTH;
+    let mut changed = false;
+    let mut add = |list: &mut Vec<Item>, it: &Item| match it {
+        Item::BuildPage(_) | Item::End(_) | Item::Shipout(_) | Item::Halt => {}
+        Item::JobStart => {
+            list.clear();
+            changed = true;
+        }
+        _ => {
+            push_vertical(list, &mut pd, it.clone());
+            changed = true;
+        }
+    };
+    for it in &p.before {
+        add(&mut list, it);
+    }
+    if p.lb.is_some() {
+        // (a line of the paragraph: a box, whatever line breaking makes)
+        add(&mut list, &Item::Box(Arc::new(BoxNode::default())));
+    }
+    for it in &p.after {
+        add(&mut list, it);
+    }
+    if !changed {
+        return None;
+    }
+    Some(list.pop().map_or(Val::Void, |t| Val::Tail(Arc::new(t))))
 }

@@ -204,10 +204,16 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     back to this piece's last paragraph) and takes its last item. Not a
     `Key`: the node becomes `Kind::Par`, so it runs again whenever a node of
     its paragraph does (a conditional reading it keeps its kind — then a
-    stale value is possible: a gap). Gaps: on the main vertical list after a
-    paragraph's lines, or at a piece's start, the last item is another
-    task's (lines) or another piece's — read as none; TeX's `\lastpenalty`
-    of a penalty the page builder has just set to 10000 is not seen.
+    stale value is possible: a gap). On the main vertical list after a
+    paragraph's lines, or at a piece's start, the last item is the value
+    of `Key::MainTail` (`Val::Tail`): each node at the outer level that
+    contributes to the list defines it globally (`material::main_tail`: a
+    paragraph's lines count as a box, whatever line breaking makes), so
+    a node reading it from another piece reads it as a name (LaTeX:
+    `\addvspace`'s `\lastskip` after a list, at the next piece's start).
+    Gaps: after a removal (`\unskip`…) in a node of its own the key is
+    none, not the item before the one removed; TeX's `\lastpenalty` of a penalty
+    the page builder has just set to 10000 is not seen.
     `\lastbox` (a removal whose value the node needs): done, the same read
     and an `Item::Remove(3)`.
 14. **Groups and conditionals across a piece boundary** (a blank line inside
@@ -1434,15 +1440,43 @@ First local table (5 repetitions, median ms):
 | param | 140 | 133 | 550 | 430 |
 | cold | 135 | 160 | 360 | 400 |
 
-- **B1. With pieces keeping their nodes, every edit scans all the pages
-  again.** The page scan is the longest phase: 60 ms on big and 270 ms on
-  bigout, for a 10-step word edit. Lean pieces take 4.8 ms and 14 ms. So
-  "nodes" misses the 50 ms word and line budgets on big and bigout, and
-  the 100 ms page-break budget on bigout. The scan does not converge on
-  the last build's pages when runs are kept, presumably because a kept
-  run is a new `Arc`. For A.
-- **B2.** Even lean, the scan of a word edit grows with the document
-  (4.8 ms on 48 pages, 14 ms on 152).
+- **B2. Every edit scans every page, lean or not** (traced: the root of
+  both). A word edit in the middle of big makes the scan feed all 1850
+  items from piece 0 and fire all 48 output routines (memo hits), in both
+  modes. Nothing is skipped: no `advance_match` match, no `resume`, no
+  convergence. The predicate: `matching: !fancy && (...)` (build.rs, the
+  round's `State`) turns matching off whenever the document has an
+  `\output` routine. Every plain document has one (`\plainoutput`). And
+  in page.rs `let resume = if fancy { None } ...` gives no page a restart
+  point, so `converge` never finds `o.resume == Some(r)`. With an output
+  routine the scan is O(pages) for any edit. Lean bigout, word edit
+  (scan 16 ms): `find_memo` 152 × 53 µs = 8 ms (`m.page == rt.page.b` and
+  the reads' `seen_as`), the fires' installs and retractions 2–3 ms, the
+  page builder's feeding of about 5500 items about 5 ms. Big is the same
+  in a third of the size. *Wanted*: a restart point for a fancy fold. The
+  page builder's state after a fire whose routine's run is the last
+  build's (a memo hit, same `\box255`, same exports), at the first item
+  after the call, is what a fold started there with nothing would have.
+  So the resume rule can treat a memo-hit fire like a default one: resume
+  at the last such page before the first changed piece, and converge at
+  the first page after the last changed piece. That makes the scan
+  O(changed pages).
+- **B1. With pieces keeping their nodes the same scan costs 15 times
+  more** (traced). 66 ms against 4.5 ms on big, 188 ms against 16 ms on
+  bigout, for the same items fed and the same 152 memo hits. On bigout,
+  `install_fold_defs` takes 89 ms (lean: 2 ms), the retraction of the
+  predicted definitions inside `fire` about 93 ms, `find_memo` 6.5 ms.
+  Both go through `refresh_exports` and `changed_at` (build.rs). For each
+  key a fire defines between a piece's nodes (`\outputpenalty`,
+  `Page(0..8)`, the marks, `\box255`...), `changed_at` calls
+  `run.reads_after(key, pos.1)`. The predicate: `Run::reads_after`
+  (graph.rs:1702) is `(i+1..nodes.len()).any(|j| nodes[j].reads.iter()
+  .any(|r| r.key == *key))` for a run with its nodes, a walk over every
+  later node's reads. A lean run has a binary search over its tables.
+  The fires sit in pieces of thousands of nodes, so each fire costs
+  O(nodes × reads). *Wanted*: an index per run of the nodes reading each
+  key (sorted node lists), so `reads_after` is a binary search as for a
+  lean run. Then B2's restart point removes most fires altogether.
 - `param` (every paragraph reflowed) is a cold build's cost or more:
   about 100% of cold, 140% on bigout lean.
 - `word` misses the 300 steps where the word is part of a definition or
@@ -1604,6 +1638,27 @@ input lists (`Pending` pop) 8%; definitions 6%. By self time: `expand` 11%,
 the input lists) and the lists' cells (an allocation per macro call); a
 meaning is still cloned per lookup (a macro's handle).
 
+*The Unicode data block* (expl3-code.tex's `\ior_str_map_inline` reading
+the Unicode data into intarrays, about 2.9M of latex.ltx's 3.1M commands,
+one serial chain). Its piece exports 171,120 names: 157,260 of them
+`Key::FontDimen` (the intarrays' entries, 157,753 definitions), 17,671
+control sequences (619,065 definitions), 45 counts; `Key::ReadStream` is
+defined 45,533 times (a line each), the stream advancing by offset over
+the file's shared bytes (no copy). Installing the exports is about 2% of
+the run, dropping the replaced run's 3M nodes at the commit 6.5% (on the
+critical path). Profile (perf, frame pointers, inclusive): `next_x_m`
+63%, `expand` 45%, `scan_int_ext` 32%, `\if` tests 26%, expanded texts
+26%, `\expandafter` 26%, definitions 24%, `next_raw` 20%, conversions
+19%, `scan_expr` 19%; by self time `expand` 11%, `Cursor::next` 10%,
+`next_raw0` 6%, `Pending::pop` 4%, the allocator 6%, `outer_of` 3%,
+`Cursor::arg` 3%, `Chain::resolve` 2%. *The `\outer` check of each
+token scanned* (`Exec::outer_of`, `Field::Outer`) went through
+`find_slow` (the node's reads searched one by one, a key hashed, a new
+read made per name and node): 13.5% of the run. Now a name's is found by
+its number as `find_name` does, and the piece's kept read (`Known`) holds
+its outer-ness read, made once. latex.ltx `-j 1`: 119.4G → 109.2G cycles,
+212G → 191G instructions (45 s → 42 s on a loaded machine).
+
 **Gaps left for the core (A), with repros.**
 1. *A file written and read back in one run.* `texsys.cfg` writes
    `texsys.aux` with `\immediate\openout`/`\write`/`\closeout`, then
@@ -1644,6 +1699,142 @@ meaning is still cloned per lookup (a macro's handle).
    `\count1=0 \def\l{\def\a{<1000 x>}\advance\count1 1 \ifnum\count1<10000
    \expandafter\l\fi}\l \message{\the\count1}\end`: TeX 10000, the graph
    "TeX capacity exceeded, sorry [main memory size=5000000]".
+
+## LaTeX documents (agent B)
+
+`tests/latex_docs.rs`: six documents (`tests/latex/docs/`: sections and
+lists, base math, tabular and a table float, figures and `\twocolumn`,
+a title page with `\tableofcontents` over five pages, `ifthen`/`calc`/
+`array`/`verbatim`) against TeX Live's `latex` (pdfTeX in DVI mode, the
+`latex` format) on each one's first run, no `.aux` present. Our side is
+one build, a session of two jobs: `latex.ini` (the format: pdftexconfig,
+`latex.ltx`, `\dump`) and `&latex NAME`, with the directories `latex
+-recorder` read from. Compared: the DVI file (its dated comment masked)
+and the files the document's job writes (`.aux`, `.toc`), at one thread,
+eight, and eight speculating in a random order. The CLI runs the same
+session: `--before latex.ini --terminal latex.ini --terminal '&latex
+NAME' --font-dir DIR`.
+
+All six pass at the three schedules (the `.aux` read-back below aside).
+Cold, the format included: about 46 s each at `-j 1` and at `-j 8` (the
+format's first piece is 99% of the work); `latex` takes 0.19 s with its
+dumped format, 10.8 s to make the format (`pdftex -ini -etex latex.ini`)
+on the same machine. Now the documents run on the saved format, at five
+schedules (next section): 0.7–2 s each.
+
+**Language gaps the documents found (fixed).**
+- *`\lastskip` at a piece's start* (`\addvspace` after a list, a
+  section after a blank line): the main vertical list's last item is
+  another piece's. Now `Key::MainTail` (Conflict 13).
+- *`\prevdepth` after a paragraph of the main vertical list*: its lines
+  are broken by the page fold, so the reader state did not have the last
+  line's depth (`\the\prevdepth` read -1000pt; LaTeX's floats save and
+  restore it around their `\vbox{}`: no interline glue after a float).
+  Now the reader state says `page::MAIN_DEPTH` there and at a piece's
+  start, and `\prevdepth` reads `Key::MainDepth`: defined globally by
+  each node at the outer level that sets it, the paragraph itself
+  (`Val::Para`) when its lines set it, the depth made when read (line
+  breaking is a function of the paragraph). After an output routine the
+  main list's is the one from where the routine fired (`pop_nest`), not
+  `ignore_depth`.
+- *A `\write` on a page an output routine shipped* was expanded a second
+  time, at the page builder's call with the definitions there
+  (`Page::builder`: only pages the builder ships itself, TeX's default
+  output, have their whatsits done by the fold). Repro:
+  `\output={\begingroup\let\x\relax\shipout\box255\endgroup}
+  \def\x{\iffalse} Text\write-1{[\x a]}\par\end` ("Incomplete \if").
+- *A φ's read from before its `\if`* was entered in the run's reads at
+  the `\fi`; a global definition in the arm of a name also defined
+  between the piece's nodes (its place in the names index exact) then
+  answered it, the read was stale at every commit and the piece ran
+  forever (`twocolumn` with a `figure*`; `\addvspace` at `-j 8`). Now it
+  is entered where the `\if` began (`graph::cond_at`), and the old
+  run's entries are kept only before the first such place of the nodes
+  run again.
+
+**Gaps left (core, A).**
+1. *The `.aux` file read back at `\end{document}`* (`\@@input\jobname.aux`
+   after `\immediate\closeout\@mainaux`): gap 1 of LaTeX's format, a
+   file written and read in one run. Not found, then "End of file on
+   the terminal!" ends the job (batch mode), after the last page and the
+   `.aux` file; the `.toc` lines that read writes (`\@writefile`) are not
+   written. The test allows exactly these two errors and an empty `.toc`
+   while the first is there. Repro: any of the documents.
+2. *`\prevgraf` after a paragraph of the main vertical list* is not the
+   lines' count (the same deferral as `\prevdepth`; no document reads it).
+3. *`Key::MainTail` after a removal* in a node of its own is none, not the
+   item before (Conflict 13).
+
+## The format: definitions before the first piece (agent B)
+
+AGENTS_BRIEF §6.1: "known at t=0: the format, a set of definitions with
+known versions". `Build::format` makes it after a build of the format's
+job (`latex.ini`: pdftexconfig, `\pdfoutput=0`, `latex.ltx`, `\dump`):
+each name's definition reaching the end of the source (the pieces'
+exports in order), of the names TeX's `store_fmt_file` keeps
+(`format::saved`): control sequences and active characters with their
+meanings, codes, parameters, registers (boxes included), fonts and their
+parameters, patterns and exceptions, the interaction mode, the e-TeX mode,
+`format_ident`. Left out, as a run's and not a format's: files and
+streams, the job's name, the page builder's state and marks, `mag_set`,
+whether the job ended, the main vertical list. Also kept: the fonts'
+numbering (the order the job loaded them, `Run::fonts` piece by piece: a
+DVI file's font numbers; the build's own fonts are numbered after them).
+
+`format::encode` writes it as our own file (`src/format.rs`, no crate):
+a magic line, the control sequences' names (tokens and keys refer to
+them by number in the file; `decode` gives each its number in the reading
+build's `CsTable`), the fonts (the TFM bytes and the size: loaded again as
+`\font` loads them), the numbering, the definitions. The order is the
+names' own, so the same definitions give the same bytes
+(`format_reads_back`).
+
+`Build::set_format` gives a build the format: the names index answers a
+read of a name no piece defined before (the place before piece 0) with the
+format's definition, as it answers IniTeX's initial values
+(`Names::initial`; the by-name table lives in the index, `FormatDefs`).
+No piece starts with anything copied in, and a value carries no place: a
+definition from the format equals the same definition made by running
+`latex.ltx`. CLI: `--dump-fmt FILE` after a build (`phitex-flow latex.ini
+--etex --jobname latex --terminal latex.ini ... --dump-fmt latex.fmt`),
+`--fmt FILE` before one (with `--terminal '&latex NAME'`; a `--terminal`
+line makes the text a job, `graph::jobs`).
+
+Held by `tests/latex_docs.rs`: the six documents on the format at five
+schedules are `latex`'s (DVI, `.aux`); `format_is_the_prelude`: a document
+on the format is byte for byte the session `latex.ini`'s job + the
+document (DVI, written files, the document job's log, errors) at five
+schedules; `format_edit_is_cold`: an edit (a word, an inserted paragraph)
+on a format-based build equals its cold build.
+
+Numbers (release, this machine, the CLI): the format is 4.13 MB
+(pdfTeX's `latex.fmt` 2.33 MB), made in 0.2 s after the 45 s build, read
+in about 55 ms. The documents cold on it, `-j 1` / `-j 8`: sections 0.71
+/ 0.74 s, math 0.97 / 1.00, tables 1.06 / 1.17, figures 0.98 / 1.01,
+titlepage 2.04 / 1.97, packages 0.73 / 0.80 (`latex`: 0.19 s each, its
+format read included). What remains is the documents' own work: about
+11 µs a command (the expansion's cost, above) and the reruns below; one
+to three pieces each, so eight threads have little to share.
+
+Gaps:
+- *The command line's `-interaction` at a job's start.* web2c sets
+  `interaction` from `-interaction` after loading a format (tex.ch,
+  `interaction_option`); `latex.ltx` dumps `\errorstopmode`, so `latex
+  -interaction=batchmode NAME` runs in batch mode. The session (and so
+  the format, which keeps the dumped mode to equal it) runs the
+  document's job in error-stop mode: the selector is `term_and_log`, the
+  log's layout differs from `latex`'s where a line is printed to the
+  terminal too. Proposal (session, F): a given interaction applies at
+  each job's start when the session gives one.
+- *Reruns from definitions between a piece's nodes (core, A).* On the
+  format a document's own cost shows: `titlepage` (one piece, five
+  pages) runs its 20k commands ten times (204k), `sections` twice. Each
+  page the output routine fires defines names between the piece's nodes
+  (`\vsize`, `\count0`, LaTeX's `\@colht`…); every node of the piece
+  reading such a name from before the piece is dirty, also the ones
+  before the definition's place, so the piece runs again from its first
+  reader, once per round. The session had the same reruns (hidden in the
+  format's 45 s).
 
 ## The inventory
 

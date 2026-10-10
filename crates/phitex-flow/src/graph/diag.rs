@@ -275,12 +275,14 @@ impl Exec<'_> {
                 "0".into()
             };
             let incompleat = if mode == Mode::M { self.incompleat(level) } else { None };
+            // (after a paragraph not broken into lines yet: its last line's)
+            let shown = if mode == Mode::V && aux == crate::page::MAIN_DEPTH { self.main_depth() } else { aux };
             out.push(Level {
                 mode,
                 inner,
                 line,
                 items,
-                aux,
+                aux: shown,
                 prev_graf: if mode == Mode::V { prev_graf } else { 0 },
                 hyph_lang,
                 incompleat,

@@ -202,7 +202,7 @@ impl Exec<'_> {
                         self.err(format!("Improper \\{}", p.name()));
                         if level == Lv::Tok { IVal::Int(0) } else { IVal::Dimen(0) }
                     } else if want == Mode::V {
-                        IVal::Dimen(self.st.prev_depth)
+                        IVal::Dimen(self.prev_depth())
                     } else {
                         IVal::Int(self.st.space_factor)
                     }

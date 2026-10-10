@@ -516,6 +516,8 @@ pub struct Build {
     lean: bool,
     /// Updates made (the cold build is the first).
     builds: u64,
+    /// The format the build starts from (`set_format`).
+    format: Option<Arc<FormatDefs>>,
 }
 
 /// A file's text and its pieces.
@@ -868,11 +870,23 @@ struct Names {
     given: Given,
     /// The values before any definition are e-TeX's extended mode's.
     etex: bool,
+    /// The format's definitions, at the place before the first piece
+    /// (`Build::set_format`): what a name no piece defined before means.
+    format: Option<Arc<FormatDefs>>,
+}
+
+/// A format's definitions by name, and its fonts' numbering
+/// (`crate::format::Format`), as the names index holds them.
+#[derive(Default)]
+struct FormatDefs {
+    defs: FxMap<Key, Val>,
+    fonts: Vec<Arc<str>>,
 }
 
 impl Names {
-    fn new(given: Given, etex: bool, cs: Arc<CsTable>) -> Names {
+    fn new(given: Given, etex: bool, cs: Arc<CsTable>, format: Option<Arc<FormatDefs>>) -> Names {
         Names {
+            format,
             cs,
             shards: (0..SHARDS).map(|_| RwLock::default()).collect(),
             defined: (0..SHARDS).map(|_| AtomicU64::new(0)).collect(),
@@ -924,9 +938,13 @@ impl Names {
         (None, self.initial(key, font), 0, END)
     }
 
-    /// The value of `key` before any definition: IniTeX's, but what the
-    /// session gives (the terminal, the interaction mode).
+    /// The value of `key` before any definition: the format's if it
+    /// defines it, else IniTeX's, but what the session gives (the
+    /// terminal, the interaction mode).
     fn initial(&self, key: &Key, font: &Arc<Font>) -> Val {
+        if let Some(v) = self.format.as_ref().and_then(|f| f.defs.get(key)) {
+            return v.clone();
+        }
         match key {
             Key::Interaction => Val::Int(self.given.interaction),
             Key::ReadStream(16) => match &self.given.terminal {
@@ -1224,7 +1242,50 @@ impl Build {
             terminal: None,
             interaction: 0,
             limits: crate::print::Limits::TEX_LIVE,
+            format: None,
         }
+    }
+
+    /// The format this build starts from (`format::decode` of `bytes`):
+    /// its definitions are at the place before the first piece, where a
+    /// name no piece defined before is read. Given before the first
+    /// update.
+    pub fn set_format(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let f = crate::format::decode(bytes, &self.cs)?;
+        self.format = Some(Arc::new(FormatDefs { defs: f.defs.into_iter().collect(), fonts: f.fonts }));
+        Ok(())
+    }
+
+    /// The format the build makes (`format::encode`): each name's
+    /// definition reaching the end of the source, as the format's `\dump`
+    /// leaves it (the format it started from, then each piece's exports in
+    /// order), of the names a format keeps (`format::saved`); and the
+    /// fonts' numbering (the format's, then the fonts each piece loads).
+    pub fn format(&self) -> Result<Vec<u8>, String> {
+        if !self.fold.defs.is_empty() {
+            return Err("a format whose job fired an output routine is not saved yet".into());
+        }
+        let mut defs: FxMap<Key, Val> = self.format.as_ref().map(|f| f.defs.clone()).unwrap_or_default();
+        let mut numbers = dvi::numbers([self.format_fonts()]);
+        for p in &self.pieces {
+            if let Some(r) = &p.run {
+                for (k, v) in &r.exports {
+                    defs.insert(k.clone(), v.clone());
+                }
+                dvi::extend(&mut numbers, &r.fonts);
+            }
+        }
+        let defs: Vec<(Key, Val)> = defs.into_iter().filter(|(k, _)| crate::format::saved(k)).collect();
+        let mut fonts: Vec<(u32, Arc<str>)> = numbers.into_iter().map(|(f, n)| (n, f)).collect();
+        fonts.sort();
+        let fonts: Vec<Arc<str>> = fonts.into_iter().map(|(_, f)| f).collect();
+        crate::format::encode(&defs, &fonts, &self.cs)
+    }
+
+    /// The fonts the format the build starts from loaded, in order (the
+    /// build's are numbered after them).
+    fn format_fonts(&self) -> &[Arc<str>] {
+        self.format.as_ref().map_or(&[], |f| &f.fonts[..])
     }
 
     /// The text of file `name` (what `\input name` and `\openin` find),
@@ -1846,7 +1907,7 @@ impl Build {
         given.terminal.clone_from(&self.terminal);
         given.interaction = self.interaction;
         given.limits = self.limits;
-        let names = Names::new(given, opts.etex, self.cs.clone());
+        let names = Names::new(given, opts.etex, self.cs.clone(), self.format.clone());
         for (k, ps) in p.iter().enumerate() {
             if let Some(r) = ps.run.as_ref().or(ps.prev.as_ref().map(|(r, _, _)| r)) {
                 for (key, val) in &r.exports {
@@ -2010,7 +2071,7 @@ impl Build {
             marks_before: Vec::new(),
             marks_after: Vec::new(),
             bodies: Vec::new(),
-            numbers: Arc::default(),
+            numbers: Arc::new(dvi::numbers([self.format_fonts()])),
             numbered: 0,
             log_next: 0,
             log_queue: VecDeque::new(),
@@ -2174,8 +2235,8 @@ impl Build {
             .map(|b| b.clone().expect("every page shipped"))
             .collect();
         let numbers = dvi::numbers(
-            st.p.iter()
-                .filter_map(|ps| ps.run.as_ref().map(|r| &r.fonts[..])),
+            std::iter::once(self.format_fonts())
+                .chain(st.p.iter().filter_map(|ps| ps.run.as_ref().map(|r| &r.fonts[..]))),
         );
         let (out, again) = dvi::assemble_in(&numbers, &st.pages, &mut bodies, sh.names.given.limits.dvi_buf_size);
         st.stats.bodies_again = again;
@@ -2220,7 +2281,7 @@ impl Build {
                 let io = match at.map(|(x, i)| (idx.get(x).copied(), i)) {
                     // (only a page whose body met a whatsit has events)
                     Some((Some(k), i)) => match st.p[k].run.as_ref() {
-                        Some(r) if bodies[j].io => {
+                        Some(r) if bodies[j].io && pg.builder => {
                             let mut env = JoinEnv {
                                 names: &sh.names,
                                 seq: &sh.seq,
@@ -4479,7 +4540,7 @@ mod tests {
             Arc::default(),
             Vec::new(),
         );
-        let (names, font) = (Names::new(given, true, Arc::new(CsTable::new())), font());
+        let (names, font) = (Names::new(given, true, Arc::new(CsTable::new()), None), font());
         let x = Key::Cs(names.cs.id("x"));
         names.set((0, END), &x, Some(&Val::Int(1)));
         names.set((2, 5), &x, Some(&Val::Int(2)));
