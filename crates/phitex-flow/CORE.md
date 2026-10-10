@@ -2069,6 +2069,21 @@ after on the same base):
   now builds in batch mode by default; its tests run every build under
   `timeout 600`.
 
+- **W2 (open, A/B): the fixpoint's second run of a LaTeX document never
+  ends.** `phitex build --output-format dvi titlepage.tex` in batch mode
+  (cluster job 7826, test `build_to_the_fixpoint`, flow 45ffd43): run 1
+  is the `latex` run that passes (0.84 s, the `.aux` gap's errors); then
+  the CLI gives the build the files run 1 wrote (`Build::set_file` of
+  `titlepage.aux` and `titlepage.toc`) and calls `update` with the same
+  source: that update did not end within 600 s (killed by the test's
+  `timeout`). The CLI's loop is `crates/phitex-cli/src/session.rs`,
+  `Session::fixpoint`; B's `Fixpoint` replaces it when on flow.
+- **W3 (open, A): `gfx` takes 40 s through the CLI** (`latex
+  -interaction=batchmode gfx.tex`, job 7826; the other documents 0.7–1.6
+  s, all on the cached format), its DVI right. The CLI's input
+  directories are the document's, then one directory of links standing
+  for TEXINPUTS.
+
 ## The inventory
 
 ### (i) Expandable and input-rewriting: steps — 40
