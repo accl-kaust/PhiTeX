@@ -55,6 +55,11 @@ if [ -n "${CLI_TESTS:-}" ]; then
   cargo test --release -p phitex-cli --test cli > "$r/cli-tests.txt" 2>&1; echo "phitex-cli --test cli exit $?" >> "$r/summary.txt"
   grep -E "^test result|FAILED|panicked" "$r/cli-tests.txt" | head -20 >> "$r/summary.txt"
 fi
+# (DPX=1: partex-xdvipdfmx's own tests)
+if [ -n "${DPX:-}" ]; then
+  cargo test --release -p partex-xdvipdfmx > "$r/dpx-tests.txt" 2>&1; echo "partex-xdvipdfmx tests exit $?" >> "$r/summary.txt"
+  grep -E "^test result|FAILED|panicked" "$r/dpx-tests.txt" | head -20 >> "$r/summary.txt"
+fi
 if [ "${REGRESS:-1}" != 0 ]; then
 cargo test --release -p phitex-flow --lib --test wall --test shapes --test dvi --test plain --test pdf --test etex --test output > "$r/regress.txt" 2>&1; echo "regress exit $?" >> "$r/summary.txt"
 grep -E "^test result|FAILED|panicked" "$r/regress.txt" | head -40 >> "$r/summary.txt"
