@@ -41,6 +41,12 @@ pub enum IfKind {
     Defined,
     Csname,
     FontChar,
+    /// pdfTeX's `\ifincsname` (20), `\ifpdfprimitive` (21),
+    /// `\ifpdfabsnum` (22), `\ifpdfabsdim` (23).
+    InCsname,
+    PdfPrimitive,
+    AbsNum,
+    AbsDim,
 }
 
 impl IfKind {
@@ -107,6 +113,19 @@ pub enum Conv {
     JobName,
     /// e-TeX's `\eTeXrevision`.
     ETeXRevision,
+    /// pdfTeX's (`PDFTEX_PRIMITIVES`): `\expanded`, `\pdfstrcmp`,
+    /// `\pdftexrevision`, `\pdftexbanner`, `\pdffilesize`,
+    /// `\pdfescapestring`, `\pdfescapename`, `\pdfescapehex`,
+    /// `\pdfunescapehex`.
+    Expanded,
+    PdfStrcmp,
+    PdfRevision,
+    PdfBanner,
+    PdfFilesize,
+    PdfEscapeString,
+    PdfEscapeName,
+    PdfEscapeHex,
+    PdfUnescapeHex,
 }
 
 /// A primitive that makes material, boxes or pages (tex.web's commands
@@ -320,6 +339,16 @@ pub enum Prim {
     Show(u8),
     /// A primitive without a graph form yet: `UNIMPL[i]`.
     Unimpl(u16),
+    // ---- pdfTeX's (`PDFTEX_PRIMITIVES`), named with e-TeX's (TeX Live's
+    // `etex` is pdfTeX writing DVI)
+    /// A read-only quantity (`PdfItem` codes: `PDF_ITEMS`).
+    PdfItem(u8),
+    /// `\quitvmode`: a paragraph begins in vertical mode, nothing else.
+    QuitVmode,
+    /// `\pdfglyphtounicode{name}{code}`: read, kept by nothing (DVI).
+    GlyphToUnicode,
+    /// A pdfTeX primitive without a graph form yet: `PDFTEX_PRIMITIVES[i]`.
+    PdfUnimpl(u16),
     // ---- e-TeX's (etex.web), named only in extended mode
     // (`ETEX_PRIMITIVES`); `LastItem(ETEX_ITEM..)`, `Mark(5..)` and
     // `PageInt(2)` are e-TeX's too.
@@ -396,6 +425,11 @@ impl Prim {
         ETEX_PRIMITIVES.binary_search_by(|(m, _)| (*m).cmp(n)).ok().map(|i| ETEX_PRIMITIVES[i].1)
     }
 
+    /// pdfTeX's primitive of that name (named with e-TeX's).
+    pub fn by_name_pdftex(n: &str) -> Option<Prim> {
+        PDFTEX_PRIMITIVES.binary_search_by(|(m, _)| (*m).cmp(n)).ok().map(|i| PDFTEX_PRIMITIVES[i].1)
+    }
+
     /// The reader's internal commands, by the names only it makes (never
     /// a name a document can spell: they begin with a NUL).
     pub fn internal(n: &str) -> Option<Prim> {
@@ -407,11 +441,16 @@ impl Prim {
         if let Prim::Unimpl(i) = self {
             return UNIMPL[usize::from(i)];
         }
+        if let Prim::PdfUnimpl(i) = self {
+            return PDFTEX_PRIMITIVES[usize::from(i)].0;
+        }
         PRIMITIVES
             .iter()
             .find(|(_, p, _)| *p == self)
             .map(|(n, _, _)| *n)
             .or_else(|| ETEX_PRIMITIVES.iter().find(|(_, p)| *p == self).map(|(n, _)| *n))
+            .or_else(|| PDFTEX_PRIMITIVES.iter().find(|(_, p)| *p == self).map(|(n, _)| *n))
+            // (last: `\0fi` and `\0relax` are `\fi` and `\relax`)
             .or_else(|| INTERNAL.iter().find(|(_, p)| *p == self).map(|(n, _)| *n))
             .unwrap_or("IMPOSSIBLE.")
     }
@@ -422,22 +461,39 @@ impl IntPar {
     /// `SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1` make them).
     pub fn initial(self) -> i32 {
         match self {
-            IntPar::Mag => 1000,
+            IntPar::Mag | IntPar::Pdfgamma => 1000,
             IntPar::Tolerance => 10000,
-            IntPar::Hangafter | IntPar::Month | IntPar::Day => 1,
+            IntPar::Hangafter | IntPar::Month | IntPar::Day | IntPar::Pdfmajorversion | IntPar::Pdfimagehicolor => 1,
             IntPar::Maxdeadcycles => 25,
             IntPar::Escapechar => 92,
             IntPar::Endlinechar => 13,
             IntPar::Year => 1970,
+            // (pdfTeX's IniTeX values)
+            IntPar::Pdfcompresslevel => 9,
+            IntPar::Pdfdecimaldigits => 3,
+            IntPar::Pdfimageresolution => 72,
+            IntPar::Pdfminorversion => 4,
+            IntPar::Pdfimagegamma => 2200,
+            IntPar::Showstream => -1,
             _ => 0,
         }
     }
 }
 
 impl DimenPar {
-    /// IniTeX's value: zero.
+    /// IniTeX's value: zero (pdfTeX's: its origins one inch, the line
+    /// dimensions and `\pdfignoreddimen` -1000pt, `\pdfpxdimen` 1bp).
     pub fn initial(self) -> i32 {
-        0
+        match self {
+            DimenPar::Pdfhorigin | DimenPar::Pdfvorigin => 4_736_286,
+            DimenPar::Pdffirstlineheight
+            | DimenPar::Pdflastlinedepth
+            | DimenPar::Pdfeachlineheight
+            | DimenPar::Pdfeachlinedepth
+            | DimenPar::Pdfignoreddimen => -65_536_000,
+            DimenPar::Pdfpxdimen => 65_782,
+            _ => 0,
+        }
     }
 }
 
@@ -451,10 +507,10 @@ impl GluePar {
     }
 }
 
-params! { IntPar, 65, Pretolerance = "pretolerance", Tolerance = "tolerance", Linepenalty = "linepenalty", Hyphenpenalty = "hyphenpenalty", Exhyphenpenalty = "exhyphenpenalty", Clubpenalty = "clubpenalty", Widowpenalty = "widowpenalty", Displaywidowpenalty = "displaywidowpenalty", Brokenpenalty = "brokenpenalty", Binoppenalty = "binoppenalty", Relpenalty = "relpenalty", Predisplaypenalty = "predisplaypenalty", Postdisplaypenalty = "postdisplaypenalty", Interlinepenalty = "interlinepenalty", Doublehyphendemerits = "doublehyphendemerits", Finalhyphendemerits = "finalhyphendemerits", Adjdemerits = "adjdemerits", Mag = "mag", Delimiterfactor = "delimiterfactor", Looseness = "looseness", Time = "time", Day = "day", Month = "month", Year = "year", Showboxbreadth = "showboxbreadth", Showboxdepth = "showboxdepth", Hbadness = "hbadness", Vbadness = "vbadness", Pausing = "pausing", Tracingonline = "tracingonline", Tracingmacros = "tracingmacros", Tracingstats = "tracingstats", Tracingparagraphs = "tracingparagraphs", Tracingpages = "tracingpages", Tracingoutput = "tracingoutput", Tracinglostchars = "tracinglostchars", Tracingcommands = "tracingcommands", Tracingrestores = "tracingrestores", Uchyph = "uchyph", Outputpenalty = "outputpenalty", Maxdeadcycles = "maxdeadcycles", Hangafter = "hangafter", Floatingpenalty = "floatingpenalty", Globaldefs = "globaldefs", Fam = "fam", Escapechar = "escapechar", Defaulthyphenchar = "defaulthyphenchar", Defaultskewchar = "defaultskewchar", Endlinechar = "endlinechar", Newlinechar = "newlinechar", Language = "language", Lefthyphenmin = "lefthyphenmin", Righthyphenmin = "righthyphenmin", Holdinginserts = "holdinginserts", Errorcontextlines = "errorcontextlines", Tracingassigns = "tracingassigns", Tracinggroups = "tracinggroups", Tracingifs = "tracingifs", Tracingscantokens = "tracingscantokens", Tracingnesting = "tracingnesting", Predisplaydirection = "predisplaydirection", Lastlinefit = "lastlinefit", Savingvdiscards = "savingvdiscards", Savinghyphcodes = "savinghyphcodes", TeXXeTstate = "TeXXeTstate" }
-params! { DimenPar, 21, Parindent = "parindent", Mathsurround = "mathsurround", Lineskiplimit = "lineskiplimit", Hsize = "hsize", Vsize = "vsize", Maxdepth = "maxdepth", Splitmaxdepth = "splitmaxdepth", Boxmaxdepth = "boxmaxdepth", Hfuzz = "hfuzz", Vfuzz = "vfuzz", Delimitershortfall = "delimitershortfall", Nulldelimiterspace = "nulldelimiterspace", Scriptspace = "scriptspace", Predisplaysize = "predisplaysize", Displaywidth = "displaywidth", Displayindent = "displayindent", Overfullrule = "overfullrule", Hangindent = "hangindent", Hoffset = "hoffset", Voffset = "voffset", Emergencystretch = "emergencystretch" }
+params! { IntPar, 101, Pretolerance = "pretolerance", Tolerance = "tolerance", Linepenalty = "linepenalty", Hyphenpenalty = "hyphenpenalty", Exhyphenpenalty = "exhyphenpenalty", Clubpenalty = "clubpenalty", Widowpenalty = "widowpenalty", Displaywidowpenalty = "displaywidowpenalty", Brokenpenalty = "brokenpenalty", Binoppenalty = "binoppenalty", Relpenalty = "relpenalty", Predisplaypenalty = "predisplaypenalty", Postdisplaypenalty = "postdisplaypenalty", Interlinepenalty = "interlinepenalty", Doublehyphendemerits = "doublehyphendemerits", Finalhyphendemerits = "finalhyphendemerits", Adjdemerits = "adjdemerits", Mag = "mag", Delimiterfactor = "delimiterfactor", Looseness = "looseness", Time = "time", Day = "day", Month = "month", Year = "year", Showboxbreadth = "showboxbreadth", Showboxdepth = "showboxdepth", Hbadness = "hbadness", Vbadness = "vbadness", Pausing = "pausing", Tracingonline = "tracingonline", Tracingmacros = "tracingmacros", Tracingstats = "tracingstats", Tracingparagraphs = "tracingparagraphs", Tracingpages = "tracingpages", Tracingoutput = "tracingoutput", Tracinglostchars = "tracinglostchars", Tracingcommands = "tracingcommands", Tracingrestores = "tracingrestores", Uchyph = "uchyph", Outputpenalty = "outputpenalty", Maxdeadcycles = "maxdeadcycles", Hangafter = "hangafter", Floatingpenalty = "floatingpenalty", Globaldefs = "globaldefs", Fam = "fam", Escapechar = "escapechar", Defaulthyphenchar = "defaulthyphenchar", Defaultskewchar = "defaultskewchar", Endlinechar = "endlinechar", Newlinechar = "newlinechar", Language = "language", Lefthyphenmin = "lefthyphenmin", Righthyphenmin = "righthyphenmin", Holdinginserts = "holdinginserts", Errorcontextlines = "errorcontextlines", Tracingassigns = "tracingassigns", Tracinggroups = "tracinggroups", Tracingifs = "tracingifs", Tracingscantokens = "tracingscantokens", Tracingnesting = "tracingnesting", Predisplaydirection = "predisplaydirection", Lastlinefit = "lastlinefit", Savingvdiscards = "savingvdiscards", Savinghyphcodes = "savinghyphcodes", TeXXeTstate = "TeXXeTstate", Pdfoutput = "pdfoutput", Pdfcompresslevel = "pdfcompresslevel", Pdfobjcompresslevel = "pdfobjcompresslevel", Pdfdecimaldigits = "pdfdecimaldigits", Pdfimageresolution = "pdfimageresolution", Pdfpkresolution = "pdfpkresolution", Pdfuniqueresname = "pdfuniqueresname", Pdfmajorversion = "pdfmajorversion", Pdfminorversion = "pdfminorversion", Pdfpagebox = "pdfpagebox", Pdfinclusionerrorlevel = "pdfinclusionerrorlevel", Pdfgamma = "pdfgamma", Pdfimagegamma = "pdfimagegamma", Pdfimagehicolor = "pdfimagehicolor", Pdfimageapplygamma = "pdfimageapplygamma", Pdfadjustspacing = "pdfadjustspacing", Pdfprotrudechars = "pdfprotrudechars", Pdftracingfonts = "pdftracingfonts", Pdfadjustinterwordglue = "pdfadjustinterwordglue", Pdfprependkern = "pdfprependkern", Pdfappendkern = "pdfappendkern", Pdfgentounicode = "pdfgentounicode", Pdfdraftmode = "pdfdraftmode", Pdfinclusioncopyfonts = "pdfinclusioncopyfonts", Pdfsuppresswarningdupdest = "pdfsuppresswarningdupdest", Pdfsuppresswarningdupmap = "pdfsuppresswarningdupmap", Pdfsuppresswarningpagegroup = "pdfsuppresswarningpagegroup", Pdfinfoomitdate = "pdfinfoomitdate", Pdfsuppressptexinfo = "pdfsuppressptexinfo", Pdfomitcharset = "pdfomitcharset", Pdfptexuseunderscore = "pdfptexuseunderscore", Synctex = "synctex", Tracingstacklevels = "tracingstacklevels", Partokencontext = "partokencontext", Showstream = "showstream", Ignoreprimitiveerror = "ignoreprimitiveerror" }
+params! { DimenPar, 34, Parindent = "parindent", Mathsurround = "mathsurround", Lineskiplimit = "lineskiplimit", Hsize = "hsize", Vsize = "vsize", Maxdepth = "maxdepth", Splitmaxdepth = "splitmaxdepth", Boxmaxdepth = "boxmaxdepth", Hfuzz = "hfuzz", Vfuzz = "vfuzz", Delimitershortfall = "delimitershortfall", Nulldelimiterspace = "nulldelimiterspace", Scriptspace = "scriptspace", Predisplaysize = "predisplaysize", Displaywidth = "displaywidth", Displayindent = "displayindent", Overfullrule = "overfullrule", Hangindent = "hangindent", Hoffset = "hoffset", Voffset = "voffset", Emergencystretch = "emergencystretch", Pdfhorigin = "pdfhorigin", Pdfvorigin = "pdfvorigin", Pdfpagewidth = "pdfpagewidth", Pdfpageheight = "pdfpageheight", Pdflinkmargin = "pdflinkmargin", Pdfdestmargin = "pdfdestmargin", Pdfthreadmargin = "pdfthreadmargin", Pdffirstlineheight = "pdffirstlineheight", Pdflastlinedepth = "pdflastlinedepth", Pdfeachlineheight = "pdfeachlineheight", Pdfeachlinedepth = "pdfeachlinedepth", Pdfignoreddimen = "pdfignoreddimen", Pdfpxdimen = "pdfpxdimen" }
 params! { GluePar, 18, Lineskip = "lineskip", Baselineskip = "baselineskip", Parskip = "parskip", Abovedisplayskip = "abovedisplayskip", Belowdisplayskip = "belowdisplayskip", Abovedisplayshortskip = "abovedisplayshortskip", Belowdisplayshortskip = "belowdisplayshortskip", Leftskip = "leftskip", Rightskip = "rightskip", Topskip = "topskip", Splittopskip = "splittopskip", Tabskip = "tabskip", Spaceskip = "spaceskip", Xspaceskip = "xspaceskip", Parfillskip = "parfillskip", Thinmuskip = "thinmuskip", Medmuskip = "medmuskip", Thickmuskip = "thickmuskip" }
-params! { TokPar, 10, Output = "output", Everypar = "everypar", Everymath = "everymath", Everydisplay = "everydisplay", Everyhbox = "everyhbox", Everyvbox = "everyvbox", Everyjob = "everyjob", Everycr = "everycr", Errhelp = "errhelp", Everyeof = "everyeof" }
+params! { TokPar, 14, Output = "output", Everypar = "everypar", Everymath = "everymath", Everydisplay = "everydisplay", Everyhbox = "everyhbox", Everyvbox = "everyvbox", Everyjob = "everyjob", Everycr = "everycr", Errhelp = "errhelp", Everyeof = "everyeof", Pdfpageattr = "pdfpageattr", Pdfpageresources = "pdfpageresources", Pdfpagesattr = "pdfpagesattr", Pdfpkmode = "pdfpkmode" }
 
 /// The reader's internal commands (`Mat::Internal`).
 pub const INTERNAL: [(&str, Prim); 25] = [
@@ -1001,6 +1057,188 @@ pub const ETEX_PRIMITIVES: [(&str, Prim); 66] = [
     ("widowpenalties", Prim::PenShape(2)),
 ];
 
+
+/// pdfTeX's primitives (pdftex.web), sorted by name (byte order): named
+/// with e-TeX's (`Options::etex`: TeX Live's `etex` is pdfTeX writing DVI).
+/// Its parameters are `IntPar`s, `DimenPar`s and `TokPar`s; its read-only
+/// quantities `PdfItem`s (`PDF_ITEMS`); what has no graph form yet is
+/// `PdfUnimpl` (an error where it is executed).
+pub const PDFTEX_PRIMITIVES: [(&str, Prim); 152] = [
+    ("efcode", Prim::PdfUnimpl(0)),
+    ("expanded", Prim::Convert(Conv::Expanded)),
+    ("ifincsname", Prim::If(IfKind::InCsname)),
+    ("ifpdfabsdim", Prim::If(IfKind::AbsDim)),
+    ("ifpdfabsnum", Prim::If(IfKind::AbsNum)),
+    ("ifpdfprimitive", Prim::If(IfKind::PdfPrimitive)),
+    ("ignoreprimitiveerror", Prim::IntPar(IntPar::Ignoreprimitiveerror)),
+    ("knaccode", Prim::PdfUnimpl(7)),
+    ("knbccode", Prim::PdfUnimpl(8)),
+    ("knbscode", Prim::PdfUnimpl(9)),
+    ("leftmarginkern", Prim::PdfUnimpl(10)),
+    ("letterspacefont", Prim::PdfUnimpl(11)),
+    ("lpcode", Prim::PdfUnimpl(12)),
+    ("partokencontext", Prim::IntPar(IntPar::Partokencontext)),
+    ("partokenname", Prim::PdfUnimpl(14)),
+    ("pdfadjustinterwordglue", Prim::IntPar(IntPar::Pdfadjustinterwordglue)),
+    ("pdfadjustspacing", Prim::IntPar(IntPar::Pdfadjustspacing)),
+    ("pdfannot", Prim::PdfUnimpl(17)),
+    ("pdfappendkern", Prim::IntPar(IntPar::Pdfappendkern)),
+    ("pdfcatalog", Prim::PdfUnimpl(19)),
+    ("pdfcolorstack", Prim::PdfUnimpl(20)),
+    ("pdfcolorstackinit", Prim::PdfUnimpl(21)),
+    ("pdfcompresslevel", Prim::IntPar(IntPar::Pdfcompresslevel)),
+    ("pdfcopyfont", Prim::PdfUnimpl(23)),
+    ("pdfcreationdate", Prim::PdfUnimpl(24)),
+    ("pdfdecimaldigits", Prim::IntPar(IntPar::Pdfdecimaldigits)),
+    ("pdfdest", Prim::PdfUnimpl(26)),
+    ("pdfdestmargin", Prim::DimenPar(DimenPar::Pdfdestmargin)),
+    ("pdfdraftmode", Prim::IntPar(IntPar::Pdfdraftmode)),
+    ("pdfeachlinedepth", Prim::DimenPar(DimenPar::Pdfeachlinedepth)),
+    ("pdfeachlineheight", Prim::DimenPar(DimenPar::Pdfeachlineheight)),
+    ("pdfelapsedtime", Prim::PdfItem(12)),
+    ("pdfendlink", Prim::PdfUnimpl(32)),
+    ("pdfendthread", Prim::PdfUnimpl(33)),
+    ("pdfescapehex", Prim::Convert(Conv::PdfEscapeHex)),
+    ("pdfescapename", Prim::Convert(Conv::PdfEscapeName)),
+    ("pdfescapestring", Prim::Convert(Conv::PdfEscapeString)),
+    ("pdffakespace", Prim::PdfUnimpl(37)),
+    ("pdffiledump", Prim::PdfUnimpl(38)),
+    ("pdffilemoddate", Prim::PdfUnimpl(39)),
+    ("pdffilesize", Prim::Convert(Conv::PdfFilesize)),
+    ("pdffirstlineheight", Prim::DimenPar(DimenPar::Pdffirstlineheight)),
+    ("pdffontattr", Prim::PdfUnimpl(42)),
+    ("pdffontexpand", Prim::PdfUnimpl(43)),
+    ("pdffontname", Prim::PdfUnimpl(44)),
+    ("pdffontobjnum", Prim::PdfUnimpl(45)),
+    ("pdffontsize", Prim::PdfUnimpl(46)),
+    ("pdfgamma", Prim::IntPar(IntPar::Pdfgamma)),
+    ("pdfgentounicode", Prim::IntPar(IntPar::Pdfgentounicode)),
+    ("pdfglyphtounicode", Prim::GlyphToUnicode),
+    ("pdfhorigin", Prim::DimenPar(DimenPar::Pdfhorigin)),
+    ("pdfignoreddimen", Prim::DimenPar(DimenPar::Pdfignoreddimen)),
+    ("pdfimageapplygamma", Prim::IntPar(IntPar::Pdfimageapplygamma)),
+    ("pdfimagegamma", Prim::IntPar(IntPar::Pdfimagegamma)),
+    ("pdfimagehicolor", Prim::IntPar(IntPar::Pdfimagehicolor)),
+    ("pdfimageresolution", Prim::IntPar(IntPar::Pdfimageresolution)),
+    ("pdfincludechars", Prim::PdfUnimpl(56)),
+    ("pdfinclusioncopyfonts", Prim::IntPar(IntPar::Pdfinclusioncopyfonts)),
+    ("pdfinclusionerrorlevel", Prim::IntPar(IntPar::Pdfinclusionerrorlevel)),
+    ("pdfinfo", Prim::PdfUnimpl(59)),
+    ("pdfinfoomitdate", Prim::IntPar(IntPar::Pdfinfoomitdate)),
+    ("pdfinsertht", Prim::PdfUnimpl(61)),
+    ("pdfinterwordspaceoff", Prim::PdfUnimpl(62)),
+    ("pdfinterwordspaceon", Prim::PdfUnimpl(63)),
+    ("pdflastannot", Prim::PdfItem(5)),
+    ("pdflastlinedepth", Prim::DimenPar(DimenPar::Pdflastlinedepth)),
+    ("pdflastlink", Prim::PdfItem(11)),
+    ("pdflastmatch", Prim::PdfUnimpl(67)),
+    ("pdflastobj", Prim::PdfItem(1)),
+    ("pdflastxform", Prim::PdfItem(2)),
+    ("pdflastximage", Prim::PdfItem(3)),
+    ("pdflastximagecolordepth", Prim::PdfItem(9)),
+    ("pdflastximagepages", Prim::PdfItem(4)),
+    ("pdflastxpos", Prim::PdfItem(6)),
+    ("pdflastypos", Prim::PdfItem(7)),
+    ("pdflinkmargin", Prim::DimenPar(DimenPar::Pdflinkmargin)),
+    ("pdfliteral", Prim::PdfUnimpl(76)),
+    ("pdfmajorversion", Prim::IntPar(IntPar::Pdfmajorversion)),
+    ("pdfmapfile", Prim::PdfUnimpl(78)),
+    ("pdfmapline", Prim::PdfUnimpl(79)),
+    ("pdfmatch", Prim::PdfUnimpl(80)),
+    ("pdfmdfivesum", Prim::PdfUnimpl(81)),
+    ("pdfminorversion", Prim::IntPar(IntPar::Pdfminorversion)),
+    ("pdfnames", Prim::PdfUnimpl(83)),
+    ("pdfnobuiltintounicode", Prim::PdfUnimpl(84)),
+    ("pdfnoligatures", Prim::PdfUnimpl(85)),
+    ("pdfnormaldeviate", Prim::PdfUnimpl(86)),
+    ("pdfobj", Prim::PdfUnimpl(87)),
+    ("pdfobjcompresslevel", Prim::IntPar(IntPar::Pdfobjcompresslevel)),
+    ("pdfomitcharset", Prim::IntPar(IntPar::Pdfomitcharset)),
+    ("pdfoutline", Prim::PdfUnimpl(90)),
+    ("pdfoutput", Prim::IntPar(IntPar::Pdfoutput)),
+    ("pdfpageattr", Prim::TokPar(TokPar::Pdfpageattr)),
+    ("pdfpagebox", Prim::IntPar(IntPar::Pdfpagebox)),
+    ("pdfpageheight", Prim::DimenPar(DimenPar::Pdfpageheight)),
+    ("pdfpageref", Prim::PdfUnimpl(95)),
+    ("pdfpageresources", Prim::TokPar(TokPar::Pdfpageresources)),
+    ("pdfpagesattr", Prim::TokPar(TokPar::Pdfpagesattr)),
+    ("pdfpagewidth", Prim::DimenPar(DimenPar::Pdfpagewidth)),
+    ("pdfpkmode", Prim::TokPar(TokPar::Pdfpkmode)),
+    ("pdfpkresolution", Prim::IntPar(IntPar::Pdfpkresolution)),
+    ("pdfprependkern", Prim::IntPar(IntPar::Pdfprependkern)),
+    ("pdfprimitive", Prim::PdfUnimpl(102)),
+    ("pdfprotrudechars", Prim::IntPar(IntPar::Pdfprotrudechars)),
+    ("pdfptexuseunderscore", Prim::IntPar(IntPar::Pdfptexuseunderscore)),
+    ("pdfpxdimen", Prim::DimenPar(DimenPar::Pdfpxdimen)),
+    ("pdfrandomseed", Prim::PdfItem(13)),
+    ("pdfrefobj", Prim::PdfUnimpl(107)),
+    ("pdfrefxform", Prim::PdfUnimpl(108)),
+    ("pdfrefximage", Prim::PdfUnimpl(109)),
+    ("pdfresettimer", Prim::PdfUnimpl(110)),
+    ("pdfrestore", Prim::PdfUnimpl(111)),
+    ("pdfretval", Prim::PdfItem(8)),
+    ("pdfrunninglinkoff", Prim::PdfUnimpl(113)),
+    ("pdfrunninglinkon", Prim::PdfUnimpl(114)),
+    ("pdfsave", Prim::PdfUnimpl(115)),
+    ("pdfsavepos", Prim::PdfUnimpl(116)),
+    ("pdfsetmatrix", Prim::PdfUnimpl(117)),
+    ("pdfsetrandomseed", Prim::PdfUnimpl(118)),
+    ("pdfshellescape", Prim::PdfItem(10)),
+    ("pdfstartlink", Prim::PdfUnimpl(120)),
+    ("pdfstartthread", Prim::PdfUnimpl(121)),
+    ("pdfstrcmp", Prim::Convert(Conv::PdfStrcmp)),
+    ("pdfsuppressptexinfo", Prim::IntPar(IntPar::Pdfsuppressptexinfo)),
+    ("pdfsuppresswarningdupdest", Prim::IntPar(IntPar::Pdfsuppresswarningdupdest)),
+    ("pdfsuppresswarningdupmap", Prim::IntPar(IntPar::Pdfsuppresswarningdupmap)),
+    ("pdfsuppresswarningpagegroup", Prim::IntPar(IntPar::Pdfsuppresswarningpagegroup)),
+    ("pdftexbanner", Prim::Convert(Conv::PdfBanner)),
+    ("pdftexrevision", Prim::Convert(Conv::PdfRevision)),
+    ("pdftexversion", Prim::PdfItem(0)),
+    ("pdfthread", Prim::PdfUnimpl(130)),
+    ("pdfthreadmargin", Prim::DimenPar(DimenPar::Pdfthreadmargin)),
+    ("pdftracingfonts", Prim::IntPar(IntPar::Pdftracingfonts)),
+    ("pdftrailer", Prim::PdfUnimpl(133)),
+    ("pdftrailerid", Prim::PdfUnimpl(134)),
+    ("pdfunescapehex", Prim::Convert(Conv::PdfUnescapeHex)),
+    ("pdfuniformdeviate", Prim::PdfUnimpl(136)),
+    ("pdfuniqueresname", Prim::IntPar(IntPar::Pdfuniqueresname)),
+    ("pdfvorigin", Prim::DimenPar(DimenPar::Pdfvorigin)),
+    ("pdfxform", Prim::PdfUnimpl(139)),
+    ("pdfxformname", Prim::PdfUnimpl(140)),
+    ("pdfximage", Prim::PdfUnimpl(141)),
+    ("pdfximagebbox", Prim::PdfUnimpl(142)),
+    ("quitvmode", Prim::QuitVmode),
+    ("rightmarginkern", Prim::PdfUnimpl(144)),
+    ("rpcode", Prim::PdfUnimpl(145)),
+    ("shbscode", Prim::PdfUnimpl(146)),
+    ("showstream", Prim::IntPar(IntPar::Showstream)),
+    ("stbscode", Prim::PdfUnimpl(148)),
+    ("synctex", Prim::IntPar(IntPar::Synctex)),
+    ("tagcode", Prim::PdfUnimpl(150)),
+    ("tracingstacklevels", Prim::IntPar(IntPar::Tracingstacklevels)),
+];
+
+/// pdfTeX's read-only quantities (`Prim::PdfItem` codes) and their values
+/// in DVI mode with nothing made: `\pdftexversion` 140; `\pdfshellescape`
+/// 2 (TeX Live's restricted `\write18`); `\pdfelapsedtime` and
+/// `\pdfrandomseed` (the clock's) 0.
+pub const PDF_ITEMS: [(&str, i32); 14] = [
+    ("pdftexversion", 140),
+    ("pdflastobj", 0),
+    ("pdflastxform", 0),
+    ("pdflastximage", 0),
+    ("pdflastximagepages", 0),
+    ("pdflastannot", 0),
+    ("pdflastxpos", 0),
+    ("pdflastypos", 0),
+    ("pdfretval", 0),
+    ("pdflastximagecolordepth", 0),
+    ("pdfshellescape", 2),
+    ("pdflastlink", 0),
+    ("pdfelapsedtime", 0),
+    ("pdfrandomseed", 0),
+];
+
 #[cfg(test)]
 mod etex_tests {
     use super::*;
@@ -1014,6 +1252,19 @@ mod etex_tests {
             assert_eq!(Prim::by_name_etex(n), Some(p));
             assert_eq!(p.name(), n);
             assert_eq!(Prim::by_name(n), None, "{n} is TeX82's");
+        }
+    }
+
+    #[test]
+    fn pdftex_table_is_sorted_and_named_back() {
+        for w in PDFTEX_PRIMITIVES.windows(2) {
+            assert!(w[0].0 < w[1].0, "{} before {}", w[0].0, w[1].0);
+        }
+        for (n, p) in PDFTEX_PRIMITIVES {
+            assert_eq!(Prim::by_name_pdftex(n), Some(p));
+            assert_eq!(p.name(), n);
+            assert_eq!(Prim::by_name(n), None, "{n} is TeX82's");
+            assert_eq!(Prim::by_name_etex(n), None, "{n} is e-TeX's");
         }
     }
 }

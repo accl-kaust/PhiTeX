@@ -276,7 +276,7 @@ impl Exec<'_> {
                     self.err("Missing { inserted".into());
                     self.define(
                         key,
-                        Val::Meaning(Meaning::Macro(Arc::new(Macro { params, body: Vec::new(), long, outer, protected }))),
+                        Val::Meaning(Meaning::Macro(Arc::new(Macro { params, body: Arc::from([]), long, outer, protected }))),
                         global,
                     );
                     return;
@@ -310,7 +310,7 @@ impl Exec<'_> {
         }
         self.define(
             key,
-            Val::Meaning(Meaning::Macro(Arc::new(Macro { params, body, long, outer, protected }))),
+            Val::Meaning(Meaning::Macro(Arc::new(Macro { params, body: body.into(), long, outer, protected }))),
             global,
         );
     }

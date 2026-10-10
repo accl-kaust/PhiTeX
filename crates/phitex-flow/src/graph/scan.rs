@@ -71,6 +71,7 @@ pub(super) fn is_internal(m: &Meaning) -> bool {
                 | Prim::PenShape(_)
                 | Prim::FontDimen
                 | Prim::LastItem(_)
+                | Prim::PdfItem(_)
                 | Prim::Font
                 | Prim::DefFamily(_)
                 | Prim::Mat(crate::val::Mat::FontInt(_))
@@ -228,6 +229,8 @@ impl Exec<'_> {
                     None => 0,
                 }),
                 Prim::LastItem(k) if k >= crate::prim::ETEX_ITEM => self.etex_item(k),
+                // (pdfTeX's read-only quantities: constants in DVI mode)
+                Prim::PdfItem(k) => IVal::Int(crate::prim::PDF_ITEMS.get(usize::from(k)).map_or(0, |x| x.1)),
                 Prim::PenShape(k) => IVal::Int(self.penalties_item(k)),
                 Prim::LastItem(k) => {
                     // (tex.web 424: the current list's last item, the one read

@@ -245,9 +245,9 @@ impl Exec<'_> {
             self.err(format!("I can't find file `{name}'"));
             return;
         };
-        let shown = format!("./{found}");
+        let shown = self.env.file_path(&found);
         // (tex.web 537: on a line of its own if it would not fit the
-        // terminal's, else after a space)
+        // terminal's, else after a space: the printer's rule)
         let cur = self.selector();
         self.log_raw(&format!("{RAW}{}{OPEN}{shown}{MSG_END}", crate::print::sel(cur)));
         // (tex.web 362: `force_eof` is the next line end's, in whatever
@@ -258,7 +258,7 @@ impl Exec<'_> {
             Some(_) => false,
             None => std::mem::take(&mut self.st.endinput),
         };
-        self.push_source(file_text(&data), TextKind::File(Arc::from(shown)));
+        self.push_source(file_text(&data), TextKind::File(shown));
         if let Some(x) = self.st.texts.last_mut() {
             x.endinput = eof;
         }
@@ -309,6 +309,12 @@ impl Exec<'_> {
         }
     }
 
+    /// pdfTeX's `\pdffilesize`: the size of the file a name finds (as
+    /// `\input` finds it), if there is one.
+    pub(super) fn file_size(&mut self, name: &str) -> Option<usize> {
+        self.find_file(name).map(|(_, b)| b.len())
+    }
+
     /// `\ifeof n` (tex.web 498): is the stream closed?
     pub(super) fn if_eof(&mut self) -> bool {
         let n = self.scan_four_bit_int() as u8;
@@ -338,7 +344,7 @@ impl Exec<'_> {
         };
         let m = if (0..=15).contains(&n) { n as u8 } else { 16 };
         let body = self.read_toks(m, n, &key);
-        let mac = Macro { params: Vec::new(), body, long: false, outer: false, protected: false };
+        let mac = Macro { params: Vec::new(), body: body.into(), long: false, outer: false, protected: false };
         self.define(key, Val::Meaning(Meaning::Macro(Arc::new(mac))), global);
     }
 
@@ -372,7 +378,7 @@ impl Exec<'_> {
         };
         let eol = u8::try_from(self.int_par(IntPar::Endlinechar)).ok().map(char::from);
         let body = super::etex::readline_toks(&line, eol);
-        let mac = Macro { params: Vec::new(), body, long: false, outer: false, protected: false };
+        let mac = Macro { params: Vec::new(), body: body.into(), long: false, outer: false, protected: false };
         self.define(key, Val::Meaning(Meaning::Macro(Arc::new(mac))), global);
     }
 

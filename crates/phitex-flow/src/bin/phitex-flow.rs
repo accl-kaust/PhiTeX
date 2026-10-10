@@ -24,7 +24,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
-         [--tfm PATH] [-o OUT.dvi] [--dump] [--edit OLD=>NEW] [--repeat N] [--check] [--log] [--main-memory WORDS]"
+         [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--edit OLD=>NEW] [--repeat N] \
+         [--check] [--log] [--main-memory WORDS]"
     );
     ExitCode::from(2)
 }
@@ -146,6 +147,8 @@ fn main() -> ExitCode {
     let mut check = false;
     let mut repeat = 0usize;
     let mut log = false;
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut jobname = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -178,6 +181,12 @@ fn main() -> ExitCode {
                 opts.dump = true;
             }
             "--check" => check = true,
+            "--etex" => opts.etex = true,
+            "--input-dir" => match val() {
+                Some(d) => dirs.push(d.into()),
+                None => return usage(),
+            },
+            "--jobname" => jobname = val(),
             "--repeat" => match val().and_then(|v| v.parse().ok()) {
                 Some(n) => repeat = n,
                 None => return usage(),
@@ -236,9 +245,11 @@ fn main() -> ExitCode {
     // its name)
     let path = std::path::Path::new(&file);
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).map_or_else(|| ".".into(), std::path::Path::to_path_buf);
-    let job = path.file_stem().map_or_else(|| "texput".to_string(), |s| s.to_string_lossy().into_owned());
+    let job = jobname
+        .unwrap_or_else(|| path.file_stem().map_or_else(|| "texput".to_string(), |s| s.to_string_lossy().into_owned()));
+    let inputs: Vec<std::path::PathBuf> = std::iter::once(dir.clone()).chain(dirs).collect();
     let mut b = Build::new(font.clone());
-    b.set_input_dirs(vec![dir.clone()]);
+    b.set_input_dirs(inputs.clone());
     b.set_jobname(&job);
     let cold = b.update(&src, opts);
     report("cold", &cold);
@@ -266,7 +277,7 @@ fn main() -> ExitCode {
         }
         if check {
             let mut fb = Build::new(font);
-            fb.set_input_dirs(vec![dir.clone()]);
+            fb.set_input_dirs(inputs.clone());
             fb.set_jobname(&job);
             let fresh = fb.update(&edited, opts);
             report("cold of the edited text", &fresh);

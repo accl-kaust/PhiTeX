@@ -566,7 +566,7 @@ impl Exec<'_> {
             Al::Row => self.fin_row(),
             Al::Fin => {
                 // (§800: the alignment's group closes)
-                self.kind = Kind::Close;
+                self.closes();
                 let p = self.cs(SET);
                 self.back(p);
             }
@@ -980,7 +980,7 @@ impl Exec<'_> {
                 Meaning::Char(2, _) => {
                     // (§800: the entries' group closes, then the alignment's)
                     let after = self.st.groups.pop().map(|g| g.after).unwrap_or_default();
-                    self.kind = Kind::Close;
+                    self.closes();
                     self.rewrite(after);
                     let p = self.cs(FIN);
                     self.back(p);
@@ -1081,7 +1081,7 @@ impl Exec<'_> {
             self.init_col(s, t, &m);
         } else {
             let after = self.st.groups.pop().map(|g| g.after).unwrap_or_default();
-            self.kind = Kind::Close;
+            self.closes();
             self.rewrite(after);
             let p = self.cs(PACK);
             self.back(p);
@@ -1252,7 +1252,7 @@ impl Exec<'_> {
             return;
         }
         let after = self.st.groups.pop().map(|g| g.after).unwrap_or_default();
-        self.kind = Kind::Close;
+        self.closes();
         self.rewrite(after);
         let p = self.cs(PEEK);
         self.back(p);

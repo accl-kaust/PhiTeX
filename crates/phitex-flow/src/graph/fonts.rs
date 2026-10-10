@@ -68,9 +68,11 @@ impl Exec<'_> {
         let loaded = Key::FontLoaded(f.key.clone());
         if self.get(&loaded) == Val::Int(0) {
             self.define(loaded, Val::Int(1), true);
+            // (`font_ptr`: the most recently loaded font, whose parameters
+            // can be extended, tex.web 579)
             self.define(Key::LastFont, Val::Name(f.key.clone()), true);
             for (k, &v) in f.params.iter().enumerate().skip(1) {
-                self.define(Key::FontDimen(f.key.clone(), k as u16), Val::Int(v), true);
+                self.define(Key::FontDimen(f.key.clone(), k as u32), Val::Int(v), true);
             }
             let h = self.int_par(IntPar::Defaulthyphenchar);
             let sk = self.int_par(IntPar::Defaultskewchar);
@@ -142,30 +144,30 @@ impl Exec<'_> {
     pub(super) fn find_font_dimen(&mut self) -> Option<Key> {
         let n = self.scan_int();
         let f = self.scan_font_ident();
-        let fk = self.font_key(&f);
-        let have = self.font_params(&f);
-        if n > 0 && n as usize > have {
-            // (§580: the font loaded last gets more, zero)
-            let last = matches!(self.get(&Key::LastFont), Val::Name(l) if *l == *fk);
-            if last && n <= 0x7fff {
-                self.define(Key::FontDimen(fk.clone(), 0), Val::Int(n), true);
-                return Some(Key::FontDimen(fk, n as u16));
+        let np = self.font_params(&f);
+        if n > 0 && n as usize > np {
+            // (tex.web 580: the most recently loaded font's parameters grow,
+            // the new ones zero, whether this reads or writes)
+            let last = matches!(self.get(&Key::LastFont), Val::Name(k) if *k == *f.key);
+            if last {
+                self.define(Key::FontParams(f.key.clone()), Val::Int(n), true);
+                return Some(Key::FontDimen(f.key.clone(), n.cast_unsigned()));
             }
         }
-        if n <= 0 || n as usize > have {
+        if n <= 0 || n as usize > np {
             let id = self.font_ident(&f);
-            self.err(format!("Font \\{id} has only {have} fontdimen parameters"));
+            self.err(format!("Font \\{id} has only {np} fontdimen parameters"));
             return None;
         }
-        Some(Key::FontDimen(f.key.clone(), n as u16))
+        Some(Key::FontDimen(f.key.clone(), n.cast_unsigned()))
     }
 
     /// The parameters font `f` has (`font_params`): its own, or more given
     /// since by `\fontdimen` while it was the font loaded last
-    /// (`Key::FontDimen(f, 0)`).
+    /// (`Key::FontParams`): what math's parameter checks count too
+    /// (tex.web 1195).
     pub(super) fn font_params(&mut self, f: &Font) -> usize {
-        let fk = self.font_key(f);
-        match self.get(&Key::FontDimen(fk, 0)) {
+        match self.get(&Key::FontParams(f.key.clone())) {
             Val::Int(k) if k > 0 => k as usize,
             _ => f.nparams(),
         }

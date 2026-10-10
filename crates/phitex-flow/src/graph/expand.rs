@@ -6,6 +6,7 @@
 //! step of that command's node. Every meaning, code and parameter read
 //! goes through `Exec::get`, so the node's operands stay exact.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use super::scan::IVal;
@@ -15,6 +16,25 @@ use crate::val::{Conv, IfKind, IntPar, Key, Meaning, Prim, Tok, Val};
 
 /// The job's name (`\jobname`): TeX's when it was given no file name.
 pub const JOBNAME: &str = "texput";
+
+/// pdfTeX's `\pdftexrevision` and `\pdftexbanner` (TeX Live 2026's, whose
+/// `etex` is the oracle).
+pub const PDFTEX_REVISION: &str = "29";
+pub const PDFTEX_BANNER: &str =
+    "This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) kpathsea version 6.4.2";
+
+/// A string's characters as pdfTeX's bytes (a character below 256 is its
+/// byte; another, its UTF-8 bytes).
+fn latin1(s: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        match u8::try_from(u32::from(c)) {
+            Ok(b) => out.push(b),
+            Err(_) => out.extend_from_slice(c.to_string().as_bytes()),
+        }
+    }
+    out
+}
 
 // (tex.web 489: `if_limit`)
 const IF_CODE: u8 = 1;
@@ -178,6 +198,7 @@ impl Exec<'_> {
     /// `\csname ... \endcsname` (tex.web 372).
     fn csname(&mut self) {
         let mut name = String::new();
+        self.in_csname += 1;
         loop {
             let Some((t, m)) = self.next_x_m(false) else {
                 self.err("Missing \\endcsname inserted".into());
@@ -193,6 +214,7 @@ impl Exec<'_> {
                 break;
             }
         }
+        self.in_csname -= 1;
         let t = self.cs(&name);
         let key = t.key().expect("a name");
         if self.meaning(&key) == Meaning::Undefined {
@@ -240,8 +262,81 @@ impl Exec<'_> {
                 _ => s.push_str(JOBNAME),
             },
             Conv::ETeXRevision => s.push_str(super::etex::ETEX_REVISION),
+            Conv::Expanded => {
+                // (pdftex.web: `scan_toks(false, true)`, then the list is
+                // the input)
+                let toks = self.scan_toks_x();
+                self.rewrite(toks);
+                return;
+            }
+            Conv::PdfStrcmp => {
+                let a = self.pdf_string();
+                let b = self.pdf_string();
+                s.push_str(match a.as_bytes().cmp(b.as_bytes()) {
+                    std::cmp::Ordering::Less => "-1",
+                    std::cmp::Ordering::Equal => "0",
+                    std::cmp::Ordering::Greater => "1",
+                });
+            }
+            Conv::PdfRevision => s.push_str(PDFTEX_REVISION),
+            Conv::PdfBanner => s.push_str(PDFTEX_BANNER),
+            Conv::PdfFilesize => {
+                let name = self.pdf_string();
+                if let Some(n) = self.file_size(&name) {
+                    s.push_str(&n.to_string());
+                }
+            }
+            Conv::PdfEscapeString => {
+                let a = self.pdf_string();
+                for b in latin1(&a) {
+                    match b {
+                        b'(' | b')' | b'\\' => {
+                            s.push('\\');
+                            s.push(char::from(b));
+                        }
+                        0..=32 | 127..=255 => {
+                            let _ = write!(s, "\\{b:03o}");
+                        }
+                        _ => s.push(char::from(b)),
+                    }
+                }
+            }
+            Conv::PdfEscapeName => {
+                let a = self.pdf_string();
+                for b in latin1(&a) {
+                    match b {
+                        0..=32 | 127..=255 | b'#' | b'%' | b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' => {
+                            let _ = write!(s, "#{b:02X}");
+                        }
+                        _ => s.push(char::from(b)),
+                    }
+                }
+            }
+            Conv::PdfEscapeHex => {
+                let a = self.pdf_string();
+                for b in latin1(&a) {
+                    let _ = write!(s, "{b:02X}");
+                }
+            }
+            Conv::PdfUnescapeHex => {
+                let a = self.pdf_string();
+                let digits: Vec<u8> = a.chars().filter_map(|c| c.to_digit(16)).map(|d| d as u8).collect();
+                for pair in digits.chunks(2) {
+                    let b = (pair[0] << 4) | pair.get(1).copied().unwrap_or(0);
+                    s.push(char::from(b));
+                }
+            }
         }
         self.rewrite(print::str_toks(&s));
+    }
+
+    /// pdfTeX's `scan_pdf_ext_toks`, as a string: a general text, expanded
+    /// (`\protected` macros kept), shown as `\message` shows it.
+    fn pdf_string(&mut self) -> String {
+        let toks = self.scan_toks_x();
+        let mut s = String::new();
+        self.show_toks(&mut s, &toks);
+        s
     }
 
     // ------------------------------------------------------------ printing
@@ -519,16 +614,24 @@ impl Exec<'_> {
                 let (m2, c2) = self.if_operand();
                 if k == IfKind::Char { c1 == c2 } else { m1 == m2 }
             }
-            IfKind::Num | IfKind::Dim => {
-                let a = if k == IfKind::Num { self.scan_int() } else { self.scan_dimen() };
+            IfKind::Num | IfKind::Dim | IfKind::AbsNum | IfKind::AbsDim => {
+                let num = matches!(k, IfKind::Num | IfKind::AbsNum);
+                // (pdfTeX's `\ifpdfabsnum`, `\ifpdfabsdim`: the absolute values)
+                let abs = matches!(k, IfKind::AbsNum | IfKind::AbsDim);
+                let a = if num { self.scan_int() } else { self.scan_dimen() };
                 let r = loop {
                     match self.next_x_m(false) {
                         Some((t, _)) if t.cat() == Some(10) => {}
                         Some((Tok::Char(12, c @ ('<' | '=' | '>')), _)) => break c,
                         other => {
                             self.err(format!(
-                                "Missing = inserted for \\if{}",
-                                if k == IfKind::Num { "num" } else { "dim" }
+                                "Missing = inserted for \\{}",
+                                match k {
+                                    IfKind::Num => "ifnum",
+                                    IfKind::Dim => "ifdim",
+                                    IfKind::AbsNum => "ifpdfabsnum",
+                                    _ => "ifpdfabsdim",
+                                }
                             ));
                             if let Some((t, _)) = other {
                                 self.back(t);
@@ -537,7 +640,8 @@ impl Exec<'_> {
                         }
                     }
                 };
-                let b = if k == IfKind::Num { self.scan_int() } else { self.scan_dimen() };
+                let b = if num { self.scan_int() } else { self.scan_dimen() };
+                let (a, b) = if abs { (a.wrapping_abs(), b.wrapping_abs()) } else { (a, b) };
                 match r {
                     '<' => a < b,
                     '>' => a > b,
@@ -573,6 +677,18 @@ impl Exec<'_> {
                 (self.noexp && expands(&m)) || m != Meaning::Undefined
             }
             IfKind::Csname => self.if_csname(),
+            // (pdfTeX: within `\csname`…`\endcsname` or `\ifcsname`'s name)
+            IfKind::InCsname => self.in_csname > 0,
+            IfKind::PdfPrimitive => {
+                // (pdftex.web: `get_next`; the name's primitive, still its
+                // meaning)
+                let Some(t) = self.next_raw() else { return false };
+                let Tok::Cs(n) = &t else { return false };
+                let etex = self.int(&Key::ETeXMode) != 0;
+                let p = Prim::by_name(n)
+                    .or_else(|| if etex { Prim::by_name_etex(n).or_else(|| Prim::by_name_pdftex(n)) } else { None });
+                p.is_some_and(|p| self.tok_meaning(&t) == Meaning::Prim(p))
+            }
             IfKind::FontChar => {
                 // (etex.web §1452)
                 let f = self.scan_font_ident();
