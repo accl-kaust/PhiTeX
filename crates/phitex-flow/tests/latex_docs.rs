@@ -432,7 +432,7 @@ fn format_edit_is_cold() {
 /// output as a cold build given them.
 #[test]
 fn fixpoint_run_two_ends() {
-    for name in ["titlepage"] {
+    for name in ["titlepage", "lst"] {
         let text = doc_text(name);
         let fmt = format_file();
         for o in [RUNS[0], RUNS[1]] {
