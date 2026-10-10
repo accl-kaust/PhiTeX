@@ -1014,7 +1014,7 @@ impl Exec<'_> {
         if !self.st.inner {
             self.fix_language();
         }
-        let k = self.font_key(&f);
+        let k = self.font_key(f);
         let hyph = self.int(&Key::HyphenChar(k));
         let dash = self.int_par(IntPar::XeTeXdashbreakstate) > 0;
         let mut text: Vec<u16> = Vec::new();
@@ -1063,7 +1063,7 @@ impl Exec<'_> {
         }
         let _ = big_switch;
         // (collected:)
-        if let Some(nf) = native::native(&f)
+        if let Some(nf) = native::native(f)
             && nf.xf.mapping.is_some()
         {
             text = nf.xf.apply_mapping(&text);
@@ -1071,8 +1071,8 @@ impl Exec<'_> {
         }
         if self.int_par(IntPar::Tracinglostchars) > 0 {
             for ch in native::chars_of(&text) {
-                if !native::has_char(&f, ch) {
-                    self.char_warning(&f, ch as i32);
+                if !native::has_char(f, ch) {
+                    self.char_warning(f, ch as i32);
                 }
             }
         }
@@ -1082,9 +1082,9 @@ impl Exec<'_> {
                     self.drop_native_tail();
                     let mut s: Vec<u16> = old.text.to_vec();
                     s.extend_from_slice(&text);
-                    self.native_word(&f, &s)
+                    self.native_word(f, &s)
                 }
-                _ => self.native_word(&f, &text),
+                _ => self.native_word(f, &text),
             };
             self.emit.push(Item::Native(Arc::new(w)));
         } else {
@@ -1107,12 +1107,12 @@ impl Exec<'_> {
                     self.drop_native_tail();
                     let mut s: Vec<u16> = old.text.to_vec();
                     s.extend_from_slice(&text[temp..temp + main_h]);
-                    self.locale_linebreaks(&f, &s);
+                    self.locale_linebreaks(f, &s);
                     main_k = text.len() - main_h - temp;
                     temp = main_h;
                 } else {
                     let s = text[temp..temp + main_h].to_vec();
-                    self.locale_linebreaks(&f, &s);
+                    self.locale_linebreaks(f, &s);
                     temp += main_h;
                     main_k -= main_h;
                 }
@@ -1128,7 +1128,7 @@ impl Exec<'_> {
             }
         }
         if self.int_par(IntPar::XeTeXinterwordspaceshaping) > 0 {
-            self.interword_space_shaping(&f);
+            self.interword_space_shaping(f);
         }
     }
 

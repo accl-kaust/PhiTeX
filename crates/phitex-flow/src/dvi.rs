@@ -973,7 +973,7 @@ impl Writer<'_> {
             crate::print::scaled(&mut s, t);
             s.push(' ');
         }
-        s.push_str(&format!("page {} ", p.page));
+        let _ = std::fmt::Write::write_fmt(&mut s, format_args!("page {} ", p.page));
         s.push_str(match p.pdf_box {
             crate::xpic::PDFBOX_CROP => "pagebox cropbox ",
             crate::xpic::PDFBOX_MEDIA => "pagebox mediabox ",
