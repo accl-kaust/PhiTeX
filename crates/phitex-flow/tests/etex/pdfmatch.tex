@@ -14,3 +14,11 @@
 \font\nine=cmr9 \pdfnoligatures\nine
 \message{[\the\pdfnoligatures\nine]}
 \setbox0\hbox{\nine fi AV}\showbox0
+% \pdfinsertht: an insertion class's height on the page so far.
+\output={\global\setbox1\box255 \global\setbox2\box100 \deadcycles=0 }
+\count100=1000 \dimen100=16383pt \skip100=0pt
+\message{[\pdfinsertht100]}
+\insert100{\hrule height 10pt depth 2pt}
+\message{[\pdfinsertht100, \pdfinsertht99]}
+\insert100{\hrule height 3pt}
+\message{[\pdfinsertht100]}

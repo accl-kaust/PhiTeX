@@ -400,6 +400,19 @@ impl Exec<'_> {
                     _ => s.push_str("-1->"),
                 }
             }
+            Conv::PdfInsertHt => {
+                // (pdftex.web 470: insertion class `n`'s height on the page so
+                // far, a read of the page builder's fold, `Key::Page(n)`;
+                // classes 0–9 are the page builder's own quantities' keys:
+                // CORE.md)
+                let n = self.scan_eight_bit_int();
+                let h = match u8::try_from(n) {
+                    Ok(n) if n > 9 => self.int(&Key::Page(n)),
+                    _ => 0,
+                };
+                print::scaled(&mut s, h);
+                s.push_str("pt");
+            }
             Conv::LeftMarginKern | Conv::RightMarginKern => {
                 // (pdftex.web 470: a box register's hbox, its margin kern at
                 // that edge past what protrusion skips and the skip glue)

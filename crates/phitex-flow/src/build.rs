@@ -5245,6 +5245,14 @@ fn page_reads(run: &Run) -> Vec<(u8, u32, Val)> {
     let mut v: Vec<(u8, u32, Val)> = (0..=INSERT_PENALTIES)
         .flat_map(|q| run.values_read(&Key::Page(q)).iter().map(move |(_, n, val)| (q, *n, val.clone())))
         .collect();
+    // (and `\pdfinsertht n`'s, `Key::Page(n)` above them: the reads are
+    // sorted by key)
+    let all = run.all_reads();
+    let a = all.partition_point(|x| x.0 < Key::Page(INSERT_PENALTIES + 1));
+    for (key, n, val) in &all[a..] {
+        let Key::Page(q) = key else { break };
+        v.push((*q, *n, val.clone()));
+    }
     v.sort_by_key(|x| x.1);
     v
 }

@@ -125,7 +125,9 @@ pub enum Key {
     PenaltiesArray(u8),
     /// The page builder's quantities a document reads and assigns
     /// (`graph::output::PAGE_GOAL` …): `\pagegoal` … `\pagedepth`
-    /// (0–7, `page_so_far`), `\deadcycles` (8), `\insertpenalties` (9).
+    /// (0–7, `page_so_far`), `\deadcycles` (8), `\insertpenalties` (9);
+    /// pdfTeX's `\pdfinsertht n` (`n`, 10–254: the class's height on the
+    /// page so far; classes 0–9 are not read, CORE.md).
     /// Assigned directly (at the level of the definition
     /// replaced); an output routine's run defines them at its start.
     Page(u8),
@@ -523,6 +525,7 @@ impl fmt::Display for Shown<'_, Key> {
                 "\\{}penalties",
                 ["interline", "club", "widow", "displaywidow"][usize::from(*k).min(3)]
             ),
+            Key::Page(k) if *k > 9 => write!(f, "\\pdfinsertht{k}"),
             Key::Page(k) => write!(
                 f,
                 "\\{}",

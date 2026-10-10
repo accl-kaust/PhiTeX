@@ -131,6 +131,8 @@ pub enum Conv {
     /// `\pdfmatch [icase] [subcount n] {pattern}{string}`, `\pdflastmatch n`.
     PdfMatch,
     PdfLastMatch,
+    /// `\pdfinsertht n`.
+    PdfInsertHt,
     RightMarginKern,
 }
 
@@ -1136,7 +1138,7 @@ pub const PDFTEX_PRIMITIVES: [(&str, Prim); 154] = [
     ("pdfinclusionerrorlevel", Prim::IntPar(IntPar::Pdfinclusionerrorlevel)),
     ("pdfinfo", Prim::PdfUnimpl(59)),
     ("pdfinfoomitdate", Prim::IntPar(IntPar::Pdfinfoomitdate)),
-    ("pdfinsertht", Prim::PdfUnimpl(61)),
+    ("pdfinsertht", Prim::Convert(Conv::PdfInsertHt)),
     ("pdfinterwordspaceoff", Prim::PdfUnimpl(62)),
     ("pdfinterwordspaceon", Prim::PdfUnimpl(63)),
     ("pdflastannot", Prim::PdfItem(5)),
