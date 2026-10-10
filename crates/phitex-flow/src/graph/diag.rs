@@ -87,7 +87,7 @@ impl Exec<'_> {
             };
             match &t {
                 crate::val::Tok::Cs(n) => {
-                    let n = n.clone();
+                    let n = self.env.cs().name(*n);
                     self.sprint_cs(&mut head, &n);
                     head.push('=');
                 }

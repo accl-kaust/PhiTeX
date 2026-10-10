@@ -87,7 +87,7 @@ impl Exec<'_> {
             return;
         };
         if !prefixable(&m) {
-            self.err(format!("You can't use a prefix with `{t}'"));
+            self.err(format!("You can't use a prefix with `{}'", self.shown(&t)));
             self.back(t);
             return;
         }
@@ -108,7 +108,7 @@ impl Exec<'_> {
     pub(super) fn prefixed(&mut self, t: &Tok, m: &Meaning, global: bool, long: bool, outer: bool, protected: bool) {
         let is_def = matches!(m, Meaning::Prim(Prim::Def | Prim::Gdef | Prim::Edef | Prim::Xdef));
         if (long || outer || protected) && !is_def {
-            self.err(format!("You can't use `\\long' or `\\outer' with `{t}'"));
+            self.err(format!("You can't use `\\long' or `\\outer' with `{}'", self.shown(t)));
         }
         let gd = self.int_par(IntPar::Globaldefs);
         let mut global = global;
@@ -257,7 +257,7 @@ impl Exec<'_> {
         let Some(key) = self.r_token() else { return };
         let w = Some(match &key {
             Key::Active(c) => Tok::Active(*c),
-            Key::Cs(c) => Tok::Cs(c.clone()),
+            Key::Cs(c) => Tok::Cs(*c),
             _ => self.cmd.clone(),
         });
         self.scanning(super::Scanning::Defining, w, |x| x.def_in(key, global, expand, long, outer, protected));
@@ -513,14 +513,14 @@ impl Exec<'_> {
                 };
                 let tg = self.target(&xm);
                 if tg.is_none() {
-                    self.err(format!("You can't use `{x}' after \\{}", p.name()));
+                    self.err(format!("You can't use `{}' after \\{}", self.shown(&x), p.name()));
                     return;
                 }
                 tg
             }
         };
         let Some(target) = target else {
-            self.err(format!("You can't use `{t}' here"));
+            self.err(format!("You can't use `{}' here", self.shown(t)));
             return;
         };
         if op.is_none() {

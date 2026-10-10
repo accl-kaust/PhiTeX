@@ -601,7 +601,7 @@ impl Exec<'_> {
                 } else if self.int_par(IntPar::TeXXeTstate) > 0 {
                     self.emit_here(Item::Math { w: 0, after: sub % 2 == 1, lr: sub & !1 });
                 } else {
-                    self.err(format!("Improper {t}"));
+                    self.err(format!("Improper {}", self.shown(&t)));
                 }
             }
             Prim::ShowE(k) => self.show_etex(k),

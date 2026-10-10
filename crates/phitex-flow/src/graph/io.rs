@@ -340,7 +340,7 @@ impl Exec<'_> {
             }
             self.err("Missing control sequence inserted".into());
             self.back(t);
-            break Key::Cs(Arc::from(INACCESSIBLE));
+            break Key::Cs(self.env.cs().id(INACCESSIBLE));
         };
         let m = if (0..=15).contains(&n) { n as u8 } else { 16 };
         let body = self.read_toks(m, n, &key);
@@ -356,7 +356,7 @@ impl Exec<'_> {
         if !self.keyword("to") {
             self.err("Missing `to' inserted".into());
         }
-        let key = self.r_token().unwrap_or_else(|| Key::Cs(Arc::from(INACCESSIBLE)));
+        let key = self.r_token().unwrap_or_else(|| Key::Cs(self.env.cs().id(INACCESSIBLE)));
         let m = if (0..=15).contains(&n) { n as u8 } else { 16 };
         let stream = Key::ReadStream(m);
         let line: String = match self.get(&stream) {
@@ -390,8 +390,8 @@ impl Exec<'_> {
     fn read_toks(&mut self, m: u8, n: i32, target: &Key) -> Vec<Tok> {
         let w = Some(match target {
             Key::Active(c) => Tok::Active(*c),
-            Key::Cs(c) => Tok::Cs(c.clone()),
-            _ => Tok::Cs("read".into()),
+            Key::Cs(c) => Tok::Cs(*c),
+            _ => self.cs("read"),
         });
         self.scanning(super::Scanning::Defining, w, |x| x.read_toks_in(m, n, target))
     }
@@ -415,7 +415,7 @@ impl Exec<'_> {
                 if n >= 0 {
                     s.push(LN);
                     if let Key::Cs(name) = target {
-                        let name = name.clone();
+                        let name = self.env.cs().name(*name);
                         self.sprint_cs(&mut s, &name);
                     }
                     s.push('=');
@@ -546,10 +546,14 @@ impl Exec<'_> {
     /// A `\write`'s text (tex.web 1370): its tokens expanded now as
     /// `\edef` expands them, in no mode, then shown as printing writes them.
     pub(super) fn expand_write(&mut self, toks: &[Tok]) -> String {
-        let mut l = Vec::with_capacity(toks.len() + 1);
+        // (tex.web 1371: the text between a `{` and a `}`, both read, so an
+        // alignment's brace count stays as it was)
+        let mut l = Vec::with_capacity(toks.len() + 2);
+        l.push(Tok::Char(1, '{'));
         l.extend_from_slice(toks);
         l.push(Tok::Char(2, '}'));
         self.rewrite(l);
+        let _ = self.next_raw();
         let was = self.in_write;
         self.in_write = true;
         let out = self.scanning(super::Scanning::Absorbing, None, |x| x.expand_text(None));
@@ -637,6 +641,9 @@ impl Exec<'_> {
                     let ident = format!(" (preloaded format={job} {y}.{mo}.{d})");
                     s.push_str(&ident);
                     self.define(Key::Format, Val::Name(Arc::from(ident)), true);
+                    // (etex.ch, Dump the e-TeX state: every enhancement off in
+                    // the format)
+                    self.define(Key::IntPar(IntPar::TeXXeTstate), Val::Int(0), true);
                 }
             }
             if s.chars().count() > 3 {

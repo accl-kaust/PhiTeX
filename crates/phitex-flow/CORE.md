@@ -222,8 +222,9 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     names index to end a definition's reach at a close in a later piece:
     not yet, so such pieces are joined.)
 15. **`\mag` and `true` units** — TeX freezes `\mag` at its first use
-    (`mag_set`, a hidden global). Proposal: `Key::MagSet`, defined globally
-    by the first node using it. Now: `\mag` is read, not frozen.
+    (`mag_set`, a hidden global). Done (F, TRIP): `Key::MagSet`, defined
+    globally by `prepare_mag` (a `true` dimension, or a `\shipout` while
+    none is fixed); the postamble's magnification is the first page's.
 16. **`\show`, `\showthe`, error contexts** — `\showbox` and `\showlists`
     are done (`graph/diag.rs`): their text is a raw log entry whose line
     numbers are placeholders the log's gatherer fills (`G` k: where the
@@ -1087,6 +1088,16 @@ five schedules. The two remaining raw differences are the glue rounding
   per node (`Exec::scanning`). `\noexpand`, `\string`, `\meaning`, `\ifx`
   and `\ifdefined` read as `normal`. A frozen `\fi` (`\0fi`) and a frozen
   `\relax` (`\0relax`) were added beside `\0cr`.
+  A scanned name reads only whether its meaning is `\outer`
+  (`graph::Field::Outer` on its `Read`, AGENTS_BRIEF §1). `Read::same`
+  compares only that, so a kept node stays kept. A piece records the read
+  as `Val::Outer(bool)`, which a lean run keeps too, and `Val::seen_as`
+  compares it at the commit. `build::outer_still` does not mark a piece
+  whose every read of the name was of that kind and still sees the same.
+  So redefining a macro that is only scanned somewhere (a definition, an
+  argument, skipped text) re-runs none of the scanning nodes, and making
+  it `\outer` re-runs them (`tests/flow.rs`,
+  `a_scanned_name_reads_only_whether_it_is_outer`).
 - §1094: `\par` in an alignment entry whose braces are still open does
   `off_save`;
 - §378: `\input` while a file name is scanned inserts `\relax`;
@@ -1104,6 +1115,24 @@ five schedules. The two remaining raw differences are the glue rounding
   next);
 - tex.web 368: an `\input` expanded by `\expandafter` is read in the
   piece, not as a file-piece node (the token put back is read first).
+
+**e-TRIP** (`tests/etrip.rs`, `bench/etrip/`: TeX Live's
+`etexdir/etrip`, part 2 of `etripman.tex`). Two jobs: `*etrip` (extended
+mode) dumps, `&etrip etrip` runs, at TRIP's sizes. Gate: `etrip.typ` (3
+pages), byte-identical but for the header, at the five schedules: passes.
+The logs are diagnostics. Fixed for it:
+- tex.web 362: a file or `\scantokens` pseudo file that ends in the middle
+  of what is being scanned ends it as an `\outer` name would, with "File
+  ended while scanning ..." or "Incomplete \if" and the `\fi`, `}`,
+  `\par` or `\cr}` inserted (`Exec::outer_recover`).
+- tex.web 1371: a `\write`'s text is read between a `{` and a `}`, both
+  read, so an alignment's brace count stays as it was (an
+  `\immediate\write` inside a `\valign` entry).
+- etex.ch: `\dump` turns `\TeXXeTstate` off in the format.
+- `phitex-flow --trip DIR` runs e-TRIP when DIR holds `etrip.tex`.
+
+The log still differs where a group or conditional spans a blank line
+(item 14 above; etrip.tex lines 147–181). The DVI does not depend on it.
 
 **Approximations left** (not met by TRIP's DVI):
 - `\endtemplate` is not yet an `\outer` name for `check_outer`.
@@ -1172,12 +1201,12 @@ states, nodes and steps unchanged in meaning:
   before. The reader now hands out 228M tokens.
 - *An argument is read inside its body's list* (`Level::sub`), not as a
   list of its own pushed above it (tex.web 357 makes it an input level).
-- *Names read before in the piece* (`Scratch::known`, by where a name's
-  spelling is): the read of the definition reaching the next node while
+- *Names read before in the piece* (`Known`, now by the name's number
+  in `Scratch::cs`): the read of the definition reaching the next node while
   no node after it defines the name, a local one while no group opens or
   closes, one from before the piece within its range of nodes; a run of
   fewer than 256 nodes keeps none. Chain lookups: 42.6M → 3.9M.
-- *A name read again in the node* by its slot (`Scratch::names_at`), and
+- *A name read again in the node* (now a stamp by number), and
   no copy of a macro's handle per call.
 Cycles (user, `-j 1`): 161G → 123G; time 59 s → 45 s; 0.76M → 1.0M
 steps/s. big2 (10k steps): reading unchanged within noise (+1.5%
@@ -1192,18 +1221,29 @@ input after it); it hits only on re-runs, and re-runs already keep nodes.
 The memo's purpose is met by in-place bodies and arguments as parts of
 lists. (Carried to the brief by the coordinator.)
 
+*Names by number* (`build::CsTable`, one per build, kept from update
+to update): `Tok::Cs` and `Key::Cs` hold a control sequence's number, a
+per-build alias of its name (two are equal exactly when the names are;
+never a version). A token is 8 bytes and copies no counted handle; a key
+of a name hashes and compares as one word; text shows a name through the
+table (`val::Shown`). Per piece, `Scratch::cs` is a table by number: the
+node's read of the name (a stamp: the first read in a node no longer
+searches the node's reads) and the read the piece keeps of it (`Known`).
+The table is the build's, not the process's (`tests/shapes.rs`: no
+process-wide state). latex.ltx `-j 1`: 135G → 92G cycles, 198G → 171G
+instructions, about 35 s; 1.3M steps/s, 13M tokens/s; peak RSS 3.8 GB.
+
 *The expansion profile now* (latex.ltx, `-j 1`, perf, inclusive): macro
-calls (`expand` → `call`, the argument scans 20%) 42%; integer scanning
-(`scan_int`, `\numexpr`) 34%; `\expandafter` 19%; `\edef`/`\write`
-expanded texts 17%; conditionals 15%; name lookups (`find`) 15%;
-`\the`/token registers 14%; `\csname` 9%; the input lists (`Pending`
-push/pop) 7%; definitions 7%. By self time: `expand` 9%, `Cursor::next`
-9%, `next_raw0` 6%, `find_slow` 6%, `next_x_m` 5%, `tok_meaning` 4%,
-`Pending::pop` 3%, `Key::eq` 3%, the allocator 4%. What remains is the
-per-token path itself: a token is an `Arc` name (two atomic counts per
-copy), a meaning a cloned value, a first read in a node a search of the
-node's reads; an interned name (a number, with the meaning table indexed
-by it) is the next step.
+calls (`expand` → `call`, argument scans included) 45%; integer scanning
+(`scan_int`, `\numexpr`) 32%; `\expandafter` 25%; `\string`-like
+conversions 16%; `\edef`/`\write` expanded texts 15%; conditionals 14%;
+`\the`/token registers 14%; name lookups (`find`) 10%; `\csname` 9%; the
+input lists (`Pending` pop) 8%; definitions 6%. By self time: `expand` 11%,
+`Cursor::next` 10%, `next_raw0` 6%, `Pending::pop` 5%, the allocator 4%,
+`next_x_m` 3%, `Cursor::arg` 3%, `next_raw` 3%, `Chain::resolve` 3%,
+`Key::eq` 3%. What remains is reading itself (a token at a time through
+the input lists) and the lists' cells (an allocation per macro call); a
+meaning is still cloned per lookup (a macro's handle).
 
 **Gaps left for the core (A), with repros.**
 1. *A file written and read back in one run.* `texsys.cfg` writes

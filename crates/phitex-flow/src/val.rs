@@ -8,6 +8,7 @@ use std::fmt;
 use std::sync::Arc;
 
 pub use crate::prim::{Al, Code, Conv, DimenPar, GluePar, IfKind, IntPar, Mat, MathP, Prim, Reg, Shorthand, TokPar};
+use crate::build::CsTable;
 use crate::tfm::Font;
 
 /// A token.
@@ -15,8 +16,8 @@ use crate::tfm::Font;
 pub enum Tok {
     /// A character with its category.
     Char(u8, char),
-    /// A control sequence.
-    Cs(Arc<str>),
+    /// A control sequence, by its name's number (`build::cs_id`).
+    Cs(u32),
     /// An active character.
     Active(char),
     /// `#n` in a macro's parameter text or body. In a parameter text, the
@@ -39,29 +40,20 @@ impl Tok {
     /// The key a control sequence or active character names.
     pub fn key(&self) -> Option<Key> {
         match self {
-            Tok::Cs(n) => Some(Key::Cs(n.clone())),
+            Tok::Cs(n) => Some(Key::Cs(*n)),
             Tok::Active(c) => Some(Key::Active(*c)),
             _ => None,
         }
     }
 }
 
-impl fmt::Display for Tok {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Tok::Char(_, c) | Tok::Active(c) => write!(f, "{c}"),
-            Tok::Cs(n) => write!(f, "\\{n}"),
-            Tok::Param(n, c) => write!(f, "{c}{n}"),
-            Tok::DontExpand => Ok(()),
-        }
-    }
-}
 
 /// Anything a document can define: every quantity TeX keeps in its
 /// tables is a name with a reaching definition.
 #[derive(Clone, Debug, PartialOrd, Ord)]
 pub enum Key {
-    Cs(Arc<str>),
+    /// A control sequence, by its name's number.
+    Cs(u32),
     Active(char),
     /// A character's category code.
     Cat(char),
@@ -180,7 +172,6 @@ impl std::hash::Hash for Key {
     #[inline]
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
         match self {
-            Key::Cs(n) => n.hash(h),
             Key::Cat(x) => h.write_u64((2 << 40) | u64::from(u32::from(*x))),
             Key::FontDimen(n, k) => {
                 n.hash(h);
@@ -204,8 +195,7 @@ impl PartialEq for Key {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Key::Cs(a), Key::Cs(b))
-            | (Key::HyphenChar(a), Key::HyphenChar(b))
+            (Key::HyphenChar(a), Key::HyphenChar(b))
             | (Key::SkewChar(a), Key::SkewChar(b))
             | (Key::FontIdent(a), Key::FontIdent(b))
             | (Key::FontLoaded(a), Key::FontLoaded(b))
@@ -213,7 +203,6 @@ impl PartialEq for Key {
             | (Key::FontParams(a), Key::FontParams(b)) => Arc::ptr_eq(a, b) || a == b,
             (Key::Cat(a), Key::Cat(b)) => a == b,
             (Key::FontDimen(a, k), Key::FontDimen(b, l)) => k == l && (Arc::ptr_eq(a, b) || a == b),
-            (Key::Cs(_), _) | (_, Key::Cs(_)) => false,
             (x, y) if x.word() == u64::MAX || y.word() == u64::MAX => false,
             _ => self.word() == other.word(),
         }
@@ -230,7 +219,8 @@ impl Key {
         let w = |tag: u64, x: u64| (tag << 40) | x;
         let c = |x: &char| u64::from(u32::from(*x));
         match self {
-            Key::Cs(_) | Key::FontDimen(..) => u64::MAX,
+            Key::FontDimen(..) => u64::MAX,
+            Key::Cs(n) => w(63, u64::from(*n)),
             // (a font's: the font's name is hashed too)
             Key::HyphenChar(_) => w(21, 0),
             Key::SkewChar(_) => w(22, 0),
@@ -277,77 +267,6 @@ impl Key {
     }
 }
 
-impl fmt::Display for Key {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Key::Cs(n) => write!(f, "\\{n}"),
-            Key::Active(c) => write!(f, "active {c}"),
-            Key::Cat(c) => write!(f, "\\catcode`{}", c.escape_debug()),
-            Key::Lccode(c) => write!(f, "\\lccode`{}", c.escape_debug()),
-            Key::Uccode(c) => write!(f, "\\uccode`{}", c.escape_debug()),
-            Key::Sfcode(c) => write!(f, "\\sfcode`{}", c.escape_debug()),
-            Key::Mathcode(c) => write!(f, "\\mathcode`{}", c.escape_debug()),
-            Key::Delcode(c) => write!(f, "\\delcode`{}", c.escape_debug()),
-            Key::IntPar(p) => write!(f, "\\{}", p.name()),
-            Key::DimenPar(p) => write!(f, "\\{}", p.name()),
-            Key::GluePar(p) => write!(f, "\\{}", p.name()),
-            Key::TokPar(p) => write!(f, "\\{}", p.name()),
-            Key::Count(n) => write!(f, "\\count{n}"),
-            Key::Dimen(n) => write!(f, "\\dimen{n}"),
-            Key::Skip(n) => write!(f, "\\skip{n}"),
-            Key::Muskip(n) => write!(f, "\\muskip{n}"),
-            Key::Toks(n) => write!(f, "\\toks{n}"),
-            Key::Box(n) => write!(f, "\\box{n}"),
-            Key::Parshape => write!(f, "\\parshape"),
-            Key::Font => write!(f, "font"),
-            Key::FontDimen(x, n) => write!(f, "\\fontdimen{n} ({x})"),
-            Key::HyphenChar(x) => write!(f, "\\hyphenchar ({x})"),
-            Key::SkewChar(x) => write!(f, "\\skewchar ({x})"),
-            Key::FontIdent(x) => write!(f, "font_id_text ({x})"),
-            Key::FontLoaded(x) => write!(f, "font loaded ({x})"),
-            Key::FamFont(s, x) => write!(f, "\\{}font{x}", ["text", "script", "scriptscript"][usize::from(*s).min(2)]),
-            Key::File(n) => write!(f, "file {n}"),
-            Key::ReadStream(n) => write!(f, "read stream {n}"),
-            Key::Job => write!(f, "\\jobname"),
-            Key::LineBase => write!(f, "line base"),
-            Key::SplitMarks => write!(f, "\\splitfirstmarks"),
-            Key::Format => write!(f, "format_ident"),
-            Key::MagSet => write!(f, "mag_set"),
-            Key::FontParams(x) => write!(f, "font_params ({x})"),
-            Key::LastFont => write!(f, "font_ptr"),
-            Key::Ended => write!(f, "the end of the job"),
-            Key::Interaction => write!(f, "\\interactionmode"),
-            Key::ETeXMode => write!(f, "e-TeX mode"),
-            Key::Patterns(l) => write!(f, "\\patterns (language {l})"),
-            Key::Exceptions(l) => write!(f, "\\hyphenation (language {l})"),
-            Key::PenaltiesArray(k) => write!(
-                f,
-                "\\{}penalties",
-                ["interline", "club", "widow", "displaywidow"][usize::from(*k).min(3)]
-            ),
-            Key::Page(k) => write!(
-                f,
-                "\\{}",
-                [
-                    "pagegoal",
-                    "pagetotal",
-                    "pagestretch",
-                    "pagefilstretch",
-                    "pagefillstretch",
-                    "pagefilllstretch",
-                    "pageshrink",
-                    "pagedepth",
-                    "deadcycles",
-                    "insertpenalties"
-                ][usize::from(*k).min(9)]
-            ),
-            Key::Mark(k, c) => {
-                let n = ["topmark", "firstmark", "botmark", "splitfirstmark", "splitbotmark"][usize::from(*k).min(4)];
-                if *c == 0 { write!(f, "\\{n}") } else { write!(f, "\\{n}s{c}") }
-            }
-        }
-    }
-}
 
 /// A macro: its parameter text and body (`Tok::Param` marks `#n`).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -428,6 +347,27 @@ pub enum Val {
     /// The split marks (`Key::SplitMarks`): per class with a mark in the
     /// part the last `\vsplit` split off, by class, its first and last.
     SplitMarks(Arc<[SplitMark]>),
+    /// What a read of a meaning's outer-ness alone saw
+    /// (`graph::Field::Outer`): only ever a piece's record of such a read,
+    /// never a definition.
+    Outer(bool),
+}
+
+impl Val {
+    /// Whether this is the meaning of an `\outer` macro (tex.web 336:
+    /// `cur_cmd>=outer_call`).
+    pub fn is_outer(&self) -> bool {
+        matches!(self, Val::Meaning(Meaning::Macro(m)) if m.outer) || matches!(self, Val::Outer(true))
+    }
+
+    /// Whether a read that saw this would see the same in `now`: equal, or
+    /// for a read of the outer-ness alone, as outer.
+    pub fn seen_as(&self, now: &Val) -> bool {
+        match self {
+            Val::Outer(o) => now.is_outer() == *o,
+            _ => self == now,
+        }
+    }
 }
 
 /// A class's split marks: the class, the first mark, the last.
@@ -445,9 +385,97 @@ pub struct Stream {
     pub normal: bool,
 }
 
-impl fmt::Display for Val {
+/// A token, a key or a value as text: control sequences by their names
+/// (`CsTable`: a number is shown as the name it stands for).
+pub struct Shown<'a, T>(pub &'a T, pub &'a CsTable);
+
+impl fmt::Display for Shown<'_, Tok> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        match self.0 {
+            Tok::Char(_, c) | Tok::Active(c) => write!(f, "{c}"),
+            Tok::Cs(n) => write!(f, "\\{}", self.1.name(*n)),
+            Tok::Param(n, c) => write!(f, "{c}{n}"),
+            Tok::DontExpand => Ok(()),
+        }
+    }
+}
+
+impl fmt::Display for Shown<'_, Key> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Key::Cs(n) => write!(f, "\\{}", self.1.name(*n)),
+            Key::Active(c) => write!(f, "active {c}"),
+            Key::Cat(c) => write!(f, "\\catcode`{}", c.escape_debug()),
+            Key::Lccode(c) => write!(f, "\\lccode`{}", c.escape_debug()),
+            Key::Uccode(c) => write!(f, "\\uccode`{}", c.escape_debug()),
+            Key::Sfcode(c) => write!(f, "\\sfcode`{}", c.escape_debug()),
+            Key::Mathcode(c) => write!(f, "\\mathcode`{}", c.escape_debug()),
+            Key::Delcode(c) => write!(f, "\\delcode`{}", c.escape_debug()),
+            Key::IntPar(p) => write!(f, "\\{}", p.name()),
+            Key::DimenPar(p) => write!(f, "\\{}", p.name()),
+            Key::GluePar(p) => write!(f, "\\{}", p.name()),
+            Key::TokPar(p) => write!(f, "\\{}", p.name()),
+            Key::Count(n) => write!(f, "\\count{n}"),
+            Key::Dimen(n) => write!(f, "\\dimen{n}"),
+            Key::Skip(n) => write!(f, "\\skip{n}"),
+            Key::Muskip(n) => write!(f, "\\muskip{n}"),
+            Key::Toks(n) => write!(f, "\\toks{n}"),
+            Key::Box(n) => write!(f, "\\box{n}"),
+            Key::Parshape => write!(f, "\\parshape"),
+            Key::Font => write!(f, "font"),
+            Key::FontDimen(x, n) => write!(f, "\\fontdimen{n} ({x})"),
+            Key::HyphenChar(x) => write!(f, "\\hyphenchar ({x})"),
+            Key::SkewChar(x) => write!(f, "\\skewchar ({x})"),
+            Key::FontIdent(x) => write!(f, "font_id_text ({x})"),
+            Key::FontLoaded(x) => write!(f, "font loaded ({x})"),
+            Key::FamFont(s, x) => write!(f, "\\{}font{x}", ["text", "script", "scriptscript"][usize::from(*s).min(2)]),
+            Key::File(n) => write!(f, "file {n}"),
+            Key::ReadStream(n) => write!(f, "read stream {n}"),
+            Key::Job => write!(f, "\\jobname"),
+            Key::LineBase => write!(f, "line base"),
+            Key::SplitMarks => write!(f, "\\splitfirstmarks"),
+            Key::FontParams(x) => write!(f, "font_params ({x})"),
+            Key::LastFont => write!(f, "font_ptr"),
+            Key::Format => write!(f, "format_ident"),
+            Key::MagSet => write!(f, "mag_set"),
+            Key::Ended => write!(f, "the end of the job"),
+            Key::Interaction => write!(f, "\\interactionmode"),
+            Key::ETeXMode => write!(f, "e-TeX mode"),
+            Key::Patterns(l) => write!(f, "\\patterns (language {l})"),
+            Key::Exceptions(l) => write!(f, "\\hyphenation (language {l})"),
+            Key::PenaltiesArray(k) => write!(
+                f,
+                "\\{}penalties",
+                ["interline", "club", "widow", "displaywidow"][usize::from(*k).min(3)]
+            ),
+            Key::Page(k) => write!(
+                f,
+                "\\{}",
+                [
+                    "pagegoal",
+                    "pagetotal",
+                    "pagestretch",
+                    "pagefilstretch",
+                    "pagefillstretch",
+                    "pagefilllstretch",
+                    "pageshrink",
+                    "pagedepth",
+                    "deadcycles",
+                    "insertpenalties"
+                ][usize::from(*k).min(9)]
+            ),
+            Key::Mark(k, c) => {
+                let n = ["topmark", "firstmark", "botmark", "splitfirstmark", "splitbotmark"][usize::from(*k).min(4)];
+                if *c == 0 { write!(f, "\\{n}") } else { write!(f, "\\{n}s{c}") }
+            }
+        }
+    }
+}
+
+impl fmt::Display for Shown<'_, Val> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let cs = self.1;
+        match self.0 {
             Val::Int(i) => write!(f, "{i}"),
             Val::Cat(c) => write!(f, "cat {c}"),
             Val::Font(x) => write!(f, "font {}", x.name),
@@ -455,7 +483,7 @@ impl fmt::Display for Val {
             Val::Toks(t) => {
                 write!(f, "{{")?;
                 for x in t.iter().take(24) {
-                    write!(f, "{x}")?;
+                    write!(f, "{}", Shown(x, cs))?;
                 }
                 if t.len() > 24 {
                     write!(f, "...")?;
@@ -470,6 +498,7 @@ impl fmt::Display for Val {
             Val::Bytes(b) => write!(f, "{} bytes", b.len()),
             Val::Stream(x) => write!(f, "stream at {} of {}", x.next, x.data.len()),
             Val::SplitMarks(m) => write!(f, "split marks of {} classes", m.len()),
+            Val::Outer(o) => write!(f, "{}", if *o { "\\outer" } else { "not \\outer" }),
             Val::Patterns(p) => write!(f, "{} patterns", p.len()),
             Val::Exceptions(x) => write!(f, "{} exceptions", x.len()),
             Val::Meaning(Meaning::Font(x)) => write!(f, "select font {}", x.name),
@@ -486,11 +515,11 @@ impl fmt::Display for Val {
             Val::Meaning(Meaning::Macro(m)) => {
                 write!(f, "macro:")?;
                 for t in &m.params {
-                    write!(f, "{t}")?;
+                    write!(f, "{}", Shown(t, cs))?;
                 }
                 write!(f, "->")?;
                 for t in m.body.iter().take(24) {
-                    write!(f, "{t}")?;
+                    write!(f, "{}", Shown(t, cs))?;
                 }
                 if m.body.len() > 24 {
                     write!(f, "...")?;
@@ -507,16 +536,20 @@ impl fmt::Display for Val {
 /// a file `\font` can load, not the initial font: that is `\nullfont`.
 /// With `etex` (e-TeX's extended mode, etex.web §1337), e-TeX's
 /// primitives are named too.
-pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool) -> Val {
+pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -> Val {
     let c32 = |c: &char| u32::from(*c) as i32;
     match key {
-        Key::Cs(n) if &**n == "nullfont" => Val::Meaning(Meaning::Font(crate::tfm::null_font())),
-        Key::Cs(n) => Val::Meaning(
-            Prim::by_name(n)
-                .or_else(|| if etex { Prim::by_name_etex(n).or_else(|| Prim::by_name_pdftex(n)) } else { None })
-                .or_else(|| Prim::internal(n))
-                .map_or(Meaning::Undefined, Meaning::Prim),
-        ),
+        Key::Cs(crate::build::CS_NULLFONT) => Val::Meaning(Meaning::Font(crate::tfm::null_font())),
+        Key::Cs(n) => {
+            let Some(cs) = cs else { return Val::Meaning(Meaning::Undefined) };
+            let n = cs.name(*n);
+            Val::Meaning(
+                Prim::by_name(&n)
+                    .or_else(|| if etex { Prim::by_name_etex(&n).or_else(|| Prim::by_name_pdftex(&n)) } else { None })
+                    .or_else(|| Prim::internal(&n))
+                    .map_or(Meaning::Undefined, Meaning::Prim),
+            )
+        }
         Key::Active(_) => Val::Meaning(Meaning::Undefined),
         Key::Cat(c) => Val::Cat(initial_cat(*c)),
         Key::Lccode(c) => Val::Int(match c {

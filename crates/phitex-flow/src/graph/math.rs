@@ -180,7 +180,7 @@ impl Exec<'_> {
     pub(super) fn math_prim(&mut self, x: MathP, t: &Tok) {
         if self.st.mode != Mode::M {
             if x == MathP::EqNo(false) || x == MathP::EqNo(true) {
-                self.err(format!("You can't use `{t}' in {} mode", self.mode_name()));
+                self.err(format!("You can't use `{}' in {} mode", self.shown(t), self.mode_name()));
             } else {
                 self.insert_dollar_sign(t);
             }
@@ -243,7 +243,7 @@ impl Exec<'_> {
             MathP::EqNo(left) => {
                 // (§1140, §1142)
                 if self.st.inner {
-                    self.err(format!("You can't use `{t}' in math mode"));
+                    self.err(format!("You can't use `{}' in math mode", self.shown(t)));
                 } else if self.math_kind().is_some_and(|k| matches!(*k, MathKind::Display { .. })) {
                     let g = self.math_group_of(MathKind::EqNo { left });
                     self.push_math(g);
@@ -571,7 +571,7 @@ impl Exec<'_> {
         let kind = self.st.groups.last().map(|g| g.kind);
         let (ins, what) = match (kind, self.math_kind().as_deref()) {
             (None, _) => {
-                self.err(format!("Extra {t}"));
+                self.err(format!("Extra {}", self.shown(t)));
                 return;
             }
             (Some(GroupKind::SemiSimple), _) => (vec![self.cs("endgroup")], "\\endgroup".to_string()),
@@ -1276,7 +1276,7 @@ impl Exec<'_> {
     pub(super) fn display_for_alignment(&mut self, t: &Tok) -> Option<i32> {
         if self.st.inner {
             // (§1049: `report_illegal_case`)
-            self.err(format!("You can't use `{t}' in {} mode", self.mode_name()));
+            self.err(format!("You can't use `{}' in {} mode", self.shown(t), self.mode_name()));
             return None;
         }
         if !self.math_kind().is_some_and(|k| matches!(*k, MathKind::Display { .. })) {

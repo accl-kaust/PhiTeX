@@ -461,11 +461,12 @@ impl Exec<'_> {
                 }
                 Some(Tok::Active(c)) => Some(c),
                 Some(Tok::Cs(n)) => {
-                    let mut it = n.chars();
+                    let s = self.env.cs().name(n);
+                    let mut it = s.chars();
                     if let (Some(c), None) = (it.next(), it.next()) {
                         Some(c)
                     } else {
-                        self.back(Tok::Cs(n.clone()));
+                        self.back(Tok::Cs(n));
                         None
                     }
                 }

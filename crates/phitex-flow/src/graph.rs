@@ -65,6 +65,9 @@ pub type PieceId = u32;
 
 /// Where a piece's reads of names from before it are answered.
 pub trait Env {
+    /// The build's control sequence names (`Tok::Cs` numbers).
+    fn cs(&self) -> &Arc<crate::build::CsTable>;
+
     /// The definition of `key` reaching node `node` of this piece from
     /// before the piece (or from an element between its nodes), where it
     /// was made, and the nodes it reaches, `lo..hi` (`0..u32::MAX`: all of
@@ -1028,6 +1031,21 @@ pub struct Read {
     /// of the reading node. A depth, not a node: an edit moving the
     /// conditional's opener does not change the read.
     pub cond: Option<u16>,
+    /// What of the value was read (AGENTS_BRIEF §1: a node reads only the
+    /// fields it uses).
+    pub field: Field,
+}
+
+/// The part of a definition a read uses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Field {
+    /// All of it.
+    #[default]
+    Whole,
+    /// Of a meaning, only whether it is `\outer`: a name scanned where an
+    /// `\outer` one is forbidden (a definition, an argument, skipped text:
+    /// tex.web 336). Redefining it otherwise re-runs no such reader.
+    Outer,
 }
 
 /// A shared [`Read`].
@@ -1035,9 +1053,22 @@ pub type ReadRef = Arc<Read>;
 
 impl Read {
     /// Whether `r` read the definition this one did (by identity, then
-    /// equality of the value and of its scope).
+    /// equality of the value and of its scope); for a read of the
+    /// outer-ness alone, whether both are `\outer` or neither is.
     fn same(this: &ReadRef, r: &ReadRef) -> bool {
+        if r.field == Field::Outer {
+            return this.val.is_outer() == r.val.is_outer();
+        }
         Arc::ptr_eq(this, r) || (this.val == r.val && this.scope == r.scope)
+    }
+
+    /// The record of this read a piece keeps (`Val::Outer` for a read of
+    /// the outer-ness alone).
+    fn seen(&self) -> Val {
+        match self.field {
+            Field::Whole => self.val.clone(),
+            Field::Outer => Val::Outer(self.val.is_outer()),
+        }
     }
 }
 
@@ -1600,7 +1631,8 @@ pub struct Lean {
     /// Its reads from before the piece (`Run::reads`) without their values
     /// (its edges are the build's), but for the names the build answers
     /// itself (files, the job, the lines before it), whose values are
-    /// compared at the next build.
+    /// compared at the next build, and the reads of a meaning's outer-ness
+    /// alone (`Val::Outer`), which a redefinition keeping it leaves be.
     reads: Vec<(Key, u32)>,
     given: Vec<(Key, u32, Val)>,
     /// Its part of the log, but for its paragraphs' lines.
@@ -1646,7 +1678,7 @@ impl Run {
             given: self
                 .reads
                 .iter()
-                .filter(|(k, _, _)| matches!(k, Key::File(_) | Key::Job | Key::LineBase))
+                .filter(|(k, _, v)| matches!(k, Key::File(_) | Key::Job | Key::LineBase) || matches!(v, Val::Outer(_)))
                 .cloned()
                 .collect(),
             plan: Arc::new(crate::logs::plan(text, self)),
@@ -1681,12 +1713,27 @@ impl Run {
     }
 
     /// The values it read `key` with (of a lean run: only for the names
-    /// the build answers itself).
+    /// the build answers itself and the reads of outer-ness alone).
     pub fn values_read(&self, key: &Key) -> &[(Key, u32, Val)] {
         let v = self.lean.as_ref().map_or(&self.reads[..], |l| &l.given[..]);
         let a = v.partition_point(|x| x.0 < *key);
         let b = a + v[a..].partition_point(|x| x.0 == *key);
         &v[a..b]
+    }
+
+    /// Its reads of `key`, if it read only whether that is `\outer`
+    /// (`Field::Outer`, `Val::Outer`): every one of them, a lean run's
+    /// included.
+    pub fn outer_reads_only(&self, key: &Key) -> Option<&[(Key, u32, Val)]> {
+        let vals = self.values_read(key);
+        let all = match &self.lean {
+            Some(l) => {
+                let a = l.reads.partition_point(|x| x.0 < *key);
+                l.reads[a..].partition_point(|x| x.0 == *key)
+            }
+            None => vals.len(),
+        };
+        (!vals.is_empty() && vals.len() == all && vals.iter().all(|x| matches!(x.2, Val::Outer(_)))).then_some(vals)
     }
 
     /// How many nodes it has (had, if lean).
@@ -2023,6 +2070,7 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key, node: u32) ->
         val,
         scope: None,
         cond: None,
+        field: Field::Whole,
     });
     outside.insert(k.clone(), (r.clone(), lo, hi));
     r
@@ -2042,6 +2090,7 @@ fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Ke
             val,
             scope: None,
             cond: None,
+            field: Field::Whole,
         });
     }
     match local {
@@ -2051,6 +2100,7 @@ fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Ke
             val,
             scope: chain.scope_of(d, key),
             cond: None,
+            field: Field::Whole,
         }),
         None => outside_read(env, outside, key, chain.nodes.len() as u32),
     }
@@ -2067,11 +2117,18 @@ fn reread(
     outside: &mut Outside,
     r: &Read,
 ) -> Option<ReadRef> {
-    let Some(c) = r.cond else {
-        return Some(resolve_now(chain, env, outside, &r.key));
+    let now = match r.cond {
+        None => resolve_now(chain, env, outside, &r.key),
+        Some(c) => {
+            let at = state.conds.get(c as usize)?.open as usize;
+            before_read(chain, env, outside, &r.key, at, c)
+        }
     };
-    let at = state.conds.get(c as usize)?.open as usize;
-    Some(before_read(chain, env, outside, &r.key, at, c))
+    // (what of it the reader uses stays what it was)
+    if r.field == Field::Whole {
+        return Some(now);
+    }
+    Some(Arc::new(Read { field: r.field, ..(*now).clone() }))
 }
 
 /// The definition of `key` as of node `at`, the opener of the `c`th open
@@ -2091,6 +2148,7 @@ fn before_read(
             val,
             scope: chain.scope_of(d, key),
             cond: None,
+            field: Field::Whole,
         },
         None => (*outside_read(env, outside, key, at as u32)).clone(),
     };
@@ -2436,7 +2494,7 @@ pub fn run_piece(
             if matches!(r.src, Src::Node(_)) || !seen.insert(Arc::as_ptr(r) as usize) {
                 continue;
             }
-            reads.push((r.key.clone(), i as u32, r.val.clone()));
+            reads.push((r.key.clone(), i as u32, r.seen()));
         }
     }
     reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -2488,10 +2546,15 @@ struct Scratch {
     /// The node's reads of `\catcode` and `\sfcode` of characters below
     /// 256, by index, while their stamp is the node's.
     chars: Vec<(u32, u32)>,
-    /// The node's reads of names, by index, while their stamp is the
-    /// node's: a slot per name, by where its spelling is (the read at the
-    /// index holds that spelling: it is the name).
-    names_at: Vec<(u32, u32)>,
+    /// Per control sequence (by its number): the node's read of it, by
+    /// index, while its stamp is the node's; and the read the piece keeps
+    /// of it ([`Known`]).
+    cs: Vec<CsAt>,
+    /// The kept reads are those of this epoch (a new one: none kept).
+    known_epoch: u32,
+    known_len: Option<usize>,
+    /// The numbers of the names the piece spelled.
+    cs_ids: FxMap<Box<str>, u32>,
     stamp: u32,
     /// The node's reads and what it emitted (their capacity kept).
     reads: Vec<ReadRef>,
@@ -2508,23 +2571,26 @@ struct Scratch {
     /// TeX's shared zero glue, which `\showbox` and the short display
     /// tell apart).
     glue_shared: bool,
-    /// The names the piece has read (by where their spelling is, each
-    /// held), with the read: the definition reaching the next node while
-    /// no node after it defines the name ([`Known`]); and where each
-    /// spelling is, by name. Kept from node to node (as the nodes the
-    /// chain gained since are looked at: `known_len`).
-    known: FxMap<usize, Known>,
-    known_by_name: FxMap<Arc<str>, Vec<usize>>,
-    known_len: Option<usize>,
     /// The last read of each name made in the piece (from a node of it):
     /// a node reading the same definition, seen the same, shares it (a
     /// read is a value: equal fields, the same read).
     inside: FxMap<Key, ReadRef>,
 }
 
-/// A name's read, as [`Scratch::known`] keeps it.
+/// A control sequence's entry in [`Scratch::cs`].
+#[derive(Clone, Default)]
+struct CsAt {
+    stamp: u32,
+    idx: u32,
+    known: Option<Known>,
+}
+
+/// A name's read as the piece keeps it: the definition reaching the next
+/// node while no node after it defines the name (kept from node to node
+/// as the nodes the chain gained since are looked at: `known_len`).
+#[derive(Clone)]
 struct Known {
-    name: Arc<str>,
+    epoch: u32,
     read: ReadRef,
     /// It holds for the nodes before this one (a definition from before
     /// the piece reaching a range of its nodes).
@@ -2615,32 +2681,17 @@ const FEW_READS: usize = 12;
 
 /// Whether `t` is `\par` (by name: tex.web 392's `par_token`).
 fn is_par(t: &Tok) -> bool {
-    matches!(t, Tok::Cs(n) if &**n == "par")
-}
-
-/// The slots of [`Scratch::names_at`].
-const NAME_SLOTS: usize = 256;
-
-/// Name `n`'s slot: by where its spelling is (the names a piece reads are
-/// shared, one spelling each).
-fn name_slot(n: &Arc<str>) -> usize {
-    let a = name_addr(n);
-    ((a >> 4) ^ (a >> 12)) & (NAME_SLOTS - 1)
-}
-
-/// Where name `n`'s spelling is.
-fn name_addr(n: &Arc<str>) -> usize {
-    Arc::as_ptr(n).cast::<u8>().addr()
+    matches!(t, Tok::Cs(crate::build::CS_PAR))
 }
 
 /// The nodes a run makes before it keeps the names it read
 /// ([`Scratch::known`]).
 const KNOWN_AFTER: usize = 256;
 
-/// [`Scratch::known`] for the next node of `chain`: the names the nodes
-/// added since defined are read again; all of them, if the chain is not
-/// the one it was kept for, or if anything between the piece's nodes may
-/// define a name.
+/// [`Known`] for the next node of `chain`: the names the nodes added since
+/// defined are read again; all of them, if the chain is not the one they
+/// were kept for, or if anything between the piece's nodes may define a
+/// name.
 fn known_since(scratch: &mut Scratch, chain: &Chain, env: &mut dyn Env) {
     let len = chain.nodes.len();
     // (a short run reads few names twice: none kept)
@@ -2652,12 +2703,10 @@ fn known_since(scratch: &mut Scratch, chain: &Chain, env: &mut dyn Env) {
         Some(prev) if prev <= len && !between => {
             for i in prev..len {
                 for d in chain.nodes[i].defs() {
-                    if let Key::Cs(n) = &d.key
-                        && let Some(v) = scratch.known_by_name.remove(n)
+                    if let Key::Cs(n) = d.key
+                        && let Some(e) = scratch.cs.get_mut(n as usize)
                     {
-                        for a in v {
-                            scratch.known.remove(&a);
-                        }
+                        e.known = None;
                     }
                 }
             }
@@ -2666,8 +2715,7 @@ fn known_since(scratch: &mut Scratch, chain: &Chain, env: &mut dyn Env) {
         _ => false,
     };
     if !keep {
-        scratch.known.clear();
-        scratch.known_by_name.clear();
+        scratch.known_epoch = scratch.known_epoch.wrapping_add(1);
     }
     scratch.known_len = (len >= KNOWN_AFTER && !between).then_some(len);
 }
@@ -2693,12 +2741,13 @@ impl<'a> Exec<'a> {
         known_since(scratch, chain, env);
         if scratch.chars.is_empty() {
             scratch.chars = vec![(0, 0); 512];
-            scratch.names_at = vec![(0, 0); NAME_SLOTS];
         }
         scratch.stamp = scratch.stamp.wrapping_add(1);
         if scratch.stamp == 0 {
             scratch.chars.fill((0, 0));
-            scratch.names_at.fill((0, 0));
+            for e in &mut scratch.cs {
+                e.stamp = 0;
+            }
             scratch.stamp = 1;
         }
         let stamp = scratch.stamp;
@@ -2863,6 +2912,7 @@ impl<'a> Exec<'a> {
                 val: self.defs[i].val.clone(),
                 scope: None,
                 cond: None,
+                field: Field::Whole,
             }),
             Found::Read(i) => self.reads[i].clone(),
         }
@@ -2871,9 +2921,7 @@ impl<'a> Exec<'a> {
     /// Where the definition of `key` reaching this node is: its own, or
     /// one of its reads (read now if it was not).
     fn find(&mut self, key: &Key) -> Found {
-        if let Key::Cs(n) = key
-            && self.defs.is_empty()
-        {
+        if let Key::Cs(n) = *key {
             return self.find_name(n, key);
         }
         // (a character's code, read again in the node: by the character)
@@ -2888,51 +2936,117 @@ impl<'a> Exec<'a> {
                 return Found::Read(i as usize);
             }
         }
-        let f = self.find_slow(key);
+        let f = self.find_slow(key, Field::Whole);
+        if let Found::Read(i) = f {
+            // (read whole after its outer-ness alone: the read is now whole)
+            self.whole(i);
+        }
         if let (Some(s), Found::Read(i)) = (slot, &f) {
             self.scratch.chars[s] = (self.stamp, *i as u32);
         }
         f
     }
 
-    /// [`Exec::find`] of a name (the node defining nothing yet): read
-    /// again in the node, by its slot ([`Scratch::names_at`]).
-    fn find_name(&mut self, n: &Arc<str>, key: &Key) -> Found {
-        let s = name_slot(n);
-        if let Some(i) = self.name_read(s, n) {
+    /// [`Exec::find`] of control sequence `n`: its own definition, its
+    /// read in the node (by its number, [`Scratch::cs`]), else read now.
+    fn find_name(&mut self, n: u32, key: &Key) -> Found {
+        if !self.defs.is_empty()
+            && let Some(i) = self.defs.iter().rposition(|d| d.key == *key)
+        {
+            return Found::Own(i);
+        }
+        if let Some(i) = self.name_read(n) {
+            // (read whole after its outer-ness alone: the read is now whole)
+            self.whole(i);
             return Found::Read(i);
         }
-        let f = self.find_slow(key);
-        if let Found::Read(i) = f
-            && matches!(&self.reads[i].key, Key::Cs(m) if Arc::ptr_eq(m, n))
-        {
-            self.scratch.names_at[s] = (self.stamp, i as u32);
+        let r = self.resolve_shared(key);
+        Found::Read(self.push_read(r))
+    }
+
+    /// The node's read of control sequence `n`, if it read it.
+    fn name_read(&self, n: u32) -> Option<usize> {
+        let e = self.scratch.cs.get(n as usize)?;
+        (e.stamp == self.stamp).then_some(e.idx as usize)
+    }
+
+    /// Control sequence `n`'s entry in [`Scratch::cs`].
+    fn cs_at(&mut self, n: u32) -> &mut CsAt {
+        let i = n as usize;
+        if i >= self.scratch.cs.len() {
+            self.scratch.cs.resize(i + 1, CsAt::default());
         }
-        f
+        &mut self.scratch.cs[i]
     }
 
-    /// The node's read of name `n` by its slot `s`, if it is there.
-    fn name_read(&self, s: usize, n: &Arc<str>) -> Option<usize> {
-        let (stamp, i) = self.scratch.names_at[s];
-        let i = i as usize;
-        (stamp == self.stamp && matches!(&self.reads.get(i)?.key, Key::Cs(m) if Arc::ptr_eq(m, n))).then_some(i)
+    /// A read of the node, its index (the first of a name is the node's
+    /// read of it, [`Exec::name_read`]).
+    fn push_read(&mut self, r: ReadRef) -> usize {
+        let i = self.reads.len();
+        if let Key::Cs(n) = r.key {
+            let stamp = self.stamp;
+            let e = self.cs_at(n);
+            if e.stamp != stamp {
+                e.stamp = stamp;
+                e.idx = i as u32;
+            }
+        }
+        self.reads.push(r);
+        i
     }
 
-    /// The meaning of name `n` (as [`Exec::meaning`] of `Key::Cs(n)`), the
-    /// key made only if it was not read in the node yet.
-    fn name_meaning(&mut self, n: &Arc<str>) -> Meaning {
+    /// The meaning of control sequence `n` (as [`Exec::meaning`] of
+    /// `Key::Cs(n)`).
+    fn name_meaning(&mut self, n: u32) -> Meaning {
         if self.defs.is_empty()
-            && let Some(i) = self.name_read(name_slot(n), n)
+            && let Some(i) = self.name_read(n)
         {
+            self.whole(i);
             return match &self.reads[i].val {
                 Val::Meaning(m) => m.clone(),
                 _ => Meaning::Undefined,
             };
         }
-        self.meaning(&Key::Cs(n.clone()))
+        self.meaning(&Key::Cs(n))
     }
 
-    fn find_slow(&mut self, key: &Key) -> Found {
+    /// `x` as text (control sequences by their names).
+    fn shown<'s, T>(&'s self, x: &'s T) -> crate::val::Shown<'s, T> {
+        crate::val::Shown(x, self.env.cs())
+    }
+
+    /// The number of control sequence `name` (the piece's own table
+    /// first).
+    fn cs_of(&mut self, name: &str) -> u32 {
+        if let Some(&n) = self.scratch.cs_ids.get(name) {
+            return n;
+        }
+        let n = self.env.cs().id(name);
+        self.scratch.cs_ids.insert(name.into(), n);
+        n
+    }
+
+    /// The node's read `i`, read whole from now on (it may have read only
+    /// a meaning's outer-ness so far).
+    fn whole(&mut self, i: usize) {
+        if self.reads[i].field != Field::Whole {
+            let r = Read { field: Field::Whole, ..(*self.reads[i]).clone() };
+            self.reads[i] = Arc::new(r);
+        }
+    }
+
+    /// Whether the name `key` means an `\outer` macro, read as that alone
+    /// ([`Field::Outer`]) unless the node read or defined it already.
+    fn outer_of(&mut self, key: &Key) -> bool {
+        match self.find_slow(key, Field::Outer) {
+            Found::Own(i) => self.defs[i].val.is_outer(),
+            Found::Read(i) => self.reads[i].val.is_outer(),
+        }
+    }
+
+    /// Where the definition of `key` is ([`Exec::find`]); a read made now
+    /// reads `field` of it.
+    fn find_slow(&mut self, key: &Key, field: Field) -> Found {
         if let Some(i) = self.defs.iter().rposition(|d| d.key == *key) {
             return Found::Own(i);
         }
@@ -2952,22 +3066,25 @@ impl<'a> Exec<'a> {
                 return Found::Read(i as usize);
             }
         }
-        let r = self.resolve_shared(key);
-        self.reads.push(r);
-        Found::Read(self.reads.len() - 1)
+        let mut r = self.resolve_shared(key);
+        if field != Field::Whole {
+            r = Arc::new(Read { field, ..(*r).clone() });
+        }
+        Found::Read(self.push_read(r))
     }
 
     /// [`resolve_now`], the read shared with an earlier node's equal one
-    /// ([`Scratch::inside`]).
+    /// ([`Scratch::inside`], [`Known`]).
     fn resolve_shared(&mut self, key: &Key) -> ReadRef {
         let chain = self.chain;
-        let n = match key {
+        let n = match *key {
             Key::Cs(n) if self.scratch.known_len.is_some() => Some(n),
             _ => None,
         };
+        let epoch = self.scratch.known_epoch;
         if let Some(n) = n
-            && let Some(k) = self.scratch.known.get(&name_addr(n))
-            && Arc::ptr_eq(&k.name, n)
+            && let Some(k) = self.scratch.cs.get(n as usize).and_then(|e| e.known.as_ref())
+            && k.epoch == epoch
             && (chain.nodes.len() as u32) < k.hi
             && (k.read.scope.is_none() || k.scopes == chain.scopes.len())
         {
@@ -2981,11 +3098,8 @@ impl<'a> Exec<'a> {
                 Src::Node(_) => u32::MAX,
                 _ => self.outside.get(key).map_or(0, |(_, _, hi)| *hi),
             };
-            let a = name_addr(n);
-            let k = Known { name: n.clone(), read: r.clone(), hi, scopes: chain.scopes.len() };
-            if self.scratch.known.insert(a, k).is_none() {
-                self.scratch.known_by_name.entry(n.clone()).or_default().push(a);
-            }
+            let scopes = chain.scopes.len();
+            self.cs_at(n).known = Some(Known { epoch, read: r.clone(), hi, scopes });
         }
         r
     }
@@ -3008,7 +3122,7 @@ impl<'a> Exec<'a> {
         {
             return r.clone();
         }
-        let r = Arc::new(Read { key: key.clone(), src: Src::Node(d), val, scope, cond: None });
+        let r = Arc::new(Read { key: key.clone(), src: Src::Node(d), val, scope, cond: None, field: Field::Whole });
         self.scratch.inside.insert(key.clone(), r.clone());
         r
     }
@@ -3090,13 +3204,13 @@ impl<'a> Exec<'a> {
     fn tok_meaning(&mut self, t: &Tok) -> Meaning {
         match t {
             Tok::Char(c, x) => Meaning::Char(*c, *x),
-            Tok::Cs(n) => self.name_meaning(n),
+            Tok::Cs(n) => self.name_meaning(*n),
             _ => t.key().map_or(Meaning::Undefined, |k| self.meaning(&k)),
         }
     }
 
     fn cs(&mut self, name: &str) -> Tok {
-        Tok::Cs(intern(&mut self.scratch.names, name))
+        Tok::Cs(self.cs_of(name))
     }
 
     /// Sets the node's kind from a conditional's step, unless its command
@@ -3291,7 +3405,8 @@ impl<'a> Exec<'a> {
     /// `\read` line), what was being scanned is ended (a `}`, a `\par`,
     /// `\cr}` or `\fi` inserted), and the scanner sees a space.
     fn check_outer(&mut self, t: Tok) -> Tok {
-        let outer = matches!(self.tok_meaning(&t), Meaning::Macro(m) if m.outer);
+        // (only whether it is `\outer` is read: AGENTS_BRIEF §1)
+        let outer = t.key().is_some_and(|k| self.outer_of(&k));
         if !outer {
             return t;
         }
@@ -3301,10 +3416,19 @@ impl<'a> Exec<'a> {
         if !from_read {
             self.back(t);
         }
-        let of = self.warning.as_ref().map_or_else(String::new, |w| format!(" of {w}"));
+        self.outer_recover(false);
+        Tok::Char(10, ' ')
+    }
+
+    /// tex.web 338-339: what was being scanned is ended where an `\outer`
+    /// name came (`eof` false) or a file ended (`eof`, tex.web 362: its
+    /// error says so): a `}`, a `\par`, `\cr}` or `\fi` goes in first.
+    fn outer_recover(&mut self, eof: bool) {
+        let of = self.warning.as_ref().map_or_else(String::new, |w| format!(" of {}", self.shown(w)));
         match self.scanning {
             Scanning::Skipping => {
-                self.back(Tok::Cs("\u{0}fi".into()));
+                let t = self.cs("\u{0}fi");
+                self.back(t);
                 self.err("Incomplete \\if; all text was ignored after the test".into());
             }
             s => {
@@ -3316,20 +3440,21 @@ impl<'a> Exec<'a> {
                 };
                 match s {
                     Scanning::Matching => {
-                        self.back(Tok::Cs("par".into()));
+                        self.back(Tok::Cs(crate::build::CS_PAR));
                         self.outer_abort = true;
                     }
                     Scanning::Aligning => {
                         self.back(Tok::Char(2, '}'));
-                        self.back(Tok::Cs("\u{0}cr".into()));
+                        let t = self.cs("\u{0}cr");
+                        self.back(t);
                         self.st.al.state = -align::ALIGN_BASE;
                     }
                     _ => self.back(Tok::Char(2, '}')),
                 }
-                self.err(format!("Forbidden control sequence found while scanning {what}{of}"));
+                let why = if eof { "File ended" } else { "Forbidden control sequence found" };
+                self.err(format!("{why} while scanning {what}{of}"));
             }
         }
-        Tok::Char(10, ' ')
     }
 
     /// The next token, unexpanded, where an `\outer` name is allowed
@@ -3421,9 +3546,17 @@ impl<'a> Exec<'a> {
                 return None;
             }
         }
-        if let Some(PendingText { kind: TextKind::File(_), .. }) = self.st.texts.pop() {
+        let popped = self.st.texts.pop();
+        if let Some(PendingText { kind: TextKind::File(_), .. }) = popped {
             // (an `\input` file is closed, tex.web 362)
             self.log_raw(&format!("{}{}", crate::show::RAW, ')'));
+        }
+        // (a file, or `\scantokens`'s pseudo file, ended in the middle of
+        // what was being scanned: tex.web 362's `check_outer_validity`)
+        if popped.is_some_and(|p| matches!(p.kind, TextKind::File(_) | TextKind::Scan))
+            && self.scanning != Scanning::Normal
+        {
+            self.outer_recover(true);
         }
         None
     }
@@ -3471,7 +3604,9 @@ impl<'a> Exec<'a> {
                             q = q3;
                         }
                         self.st.tstate = TState::S;
-                        let t = Tok::Cs(intern(&mut self.scratch.names, &self.scratch.buf));
+                        let buf = std::mem::take(&mut self.scratch.buf);
+                        let t = Tok::Cs(self.cs_of(&buf));
+                        self.scratch.buf = buf;
                         self.advance(q);
                         return Some(t);
                     }
@@ -3586,7 +3721,7 @@ impl<'a> Exec<'a> {
                 match self.next_raw() {
                     Some(x) if x == p[i] => {}
                     other => {
-                        self.err(format!("Use of {name} doesn't match its definition"));
+                        self.err(format!("Use of {} doesn't match its definition", self.shown(name)));
                         if let Some(x) = other {
                             self.back(x);
                         }
@@ -3603,7 +3738,7 @@ impl<'a> Exec<'a> {
     /// delimiter does: then it is read token by token, which ends the call
     /// as TeX does (tex.web 336).
     fn outer_in(&mut self, toks: &[Tok], delim: &[Tok]) -> bool {
-        toks.iter().chain(delim).any(|t| t.key().is_some() && matches!(self.tok_meaning(t), Meaning::Macro(m) if m.outer))
+        toks.iter().chain(delim).any(|t| t.key().is_some_and(|k| self.outer_of(&k)))
     }
 
     /// The top input list, where the reader reads next, if it reads it as
@@ -3756,7 +3891,7 @@ impl<'a> Exec<'a> {
             return true;
         }
         if !long && par {
-            self.err(format!("Paragraph ended before {name} was complete"));
+            self.err(format!("Paragraph ended before {} was complete", self.shown(name)));
             self.back(t.clone());
             return true;
         }
@@ -3948,7 +4083,7 @@ impl<'a> Exec<'a> {
             Meaning::Char(cat, c) => self.char_tok(cat, c, &t),
             Meaning::CharGiven(c) => self.char_cmd(c, &t),
             Meaning::MathCharGiven(_) => self.insert_dollar_sign(&t),
-            Meaning::Undefined => self.err(format!("Undefined control sequence {t}")),
+            Meaning::Undefined => self.err(format!("Undefined control sequence {}", self.shown(&t))),
             Meaning::Macro(_)
             | Meaning::CountRef(_)
             | Meaning::DimenRef(_)

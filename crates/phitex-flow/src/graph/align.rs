@@ -467,11 +467,12 @@ impl Exec<'_> {
     /// `align_state` to 0 (§324); a tab or `\cr` with `align_state` 0 ends
     /// the entry: its v template is inserted (§789) and read instead.
     pub(super) fn align_token(&mut self, mut t: Tok) -> Option<Tok> {
+        let end_u = self.cs_of(END_U);
         loop {
             match &t {
                 Tok::Char(1, _) => self.st.al.state += 1,
                 Tok::Char(2, _) => self.st.al.state -= 1,
-                Tok::Cs(n) if &**n == END_U => {
+                Tok::Cs(n) if *n == end_u => {
                     if self.st.al.state > 500_000 {
                         self.st.al.state = 0;
                     } else {
@@ -669,7 +670,10 @@ impl Exec<'_> {
         let shown: Vec<Tok> = toks
             .iter()
             .map(|t| match t {
-                Tok::Cs(n) if n.starts_with('\0') => Tok::Cs(Arc::from(&n[1..])),
+                Tok::Cs(n) => {
+                    let s = self.env.cs().name(*n);
+                    s.strip_prefix('\0').map_or_else(|| t.clone(), |x| Tok::Cs(self.env.cs().id(x)))
+                }
                 _ => t.clone(),
             })
             .collect();
