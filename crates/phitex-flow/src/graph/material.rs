@@ -327,6 +327,7 @@ impl Exec<'_> {
             breadth: self.int_par(IntPar::Showboxbreadth),
             newline: self.int_par(IntPar::Newlinechar),
             cs: self.env.cs().clone(),
+            max_print_line: self.env.limits().max_print_line as i32,
         }
     }
 
@@ -583,6 +584,11 @@ impl Exec<'_> {
         if self.st.mode == Mode::V {
             self.normal_paragraph();
             self.build_page();
+        } else if self.st.al.state < 0 {
+            // (tex.web 1094: an alignment entry's braces are unbalanced:
+            // `off_save`)
+            let t = self.cmd.clone();
+            self.math_off_save(&t);
         } else if !self.st.inner {
             self.end_par();
             self.build_page();
@@ -1609,6 +1615,17 @@ impl Exec<'_> {
                         self.back(t);
                     }
                     _ => {
+                        // (§1120: in a formula the third part must be empty)
+                        if !list.is_empty() && self.st.mode == Mode::M {
+                            self.error(
+                                "Illegal math \\discretionary",
+                                &[
+                                    "Sorry: The third part of a discretionary break must be",
+                                    "empty, in math formulas. I had to delete your third part.",
+                                ],
+                            );
+                            list.clear();
+                        }
                         let n = list.len();
                         if n > 255 {
                             self.err("Discretionary list is too long".into());
@@ -1656,15 +1673,58 @@ impl Exec<'_> {
             BoxContext::Ship => {
                 // (tex.web 638: `dead_cycles:=0`)
                 self.define(Key::Page(super::output::DEAD_CYCLES), Val::Int(0), true);
+                // (§617: the first page fixes the magnification; here, the
+                // first while none is fixed)
+                if self.int(&Key::MagSet) == 0 {
+                    self.prepare_mag();
+                }
                 let ship = self.ship_params();
+                // (§641: a page too large is not shipped, nor its whatsits
+                // done)
+                let max = i64::from(super::scan::MAX_DIMEN);
+                let (h, d, w) = (i64::from(b.h), i64::from(b.d), i64::from(b.w));
+                if h > max || d > max || h + d + i64::from(ship.voffset) > max || w + i64::from(ship.hoffset) > max {
+                    let mark = page_mark(&ship);
+                    self.log_raw(&mark);
+                    self.err("Huge page cannot be shipped out".into());
+                    return;
+                }
                 // (the page's whatsits are done as it is shipped, here:
                 // its `\write`s expanded with the definitions reaching this
                 // node, tex.web 1374)
                 let io = self.ship_io(&b);
                 let mut mark = page_mark(&ship);
-                mark.pop();
-                mark.push_str(&io);
-                mark.push(']');
+                if self.int_par(IntPar::Tracingoutput) > 0 {
+                    // (§638–§639: the box displayed before it is shipped)
+                    use crate::show::{LN, NL, SEL_POP, SEL_PUSH};
+                    let cur = self.selector();
+                    let diag = if cur == crate::print::TERM_AND_LOG && self.int_par(IntPar::Tracingonline) <= 0 {
+                        crate::print::LOG_ONLY
+                    } else {
+                        cur
+                    };
+                    let mut s = String::from(RAW);
+                    s.push(crate::print::sel(cur));
+                    s.push(NL);
+                    s.push(LN);
+                    s.push_str("Completed box being shipped out");
+                    s.push_str(mark.strip_prefix(RAW).unwrap_or(&mark));
+                    s.push(SEL_PUSH);
+                    s.push(crate::print::sel(diag));
+                    let bx = Arc::new(b.clone());
+                    let cx = self.show_ctx(std::slice::from_ref(&Item::Box(bx.clone())));
+                    s.push(NL);
+                    crate::show::show_box(&mut s, &bx, &cx);
+                    s.push(NL);
+                    s.push(LN);
+                    s.push(SEL_POP);
+                    s.push_str(&io);
+                    mark = s;
+                } else {
+                    mark.pop();
+                    mark.push_str(&io);
+                    mark.push(']');
+                }
                 self.log_raw(&mark);
                 self.emit_here(Item::Shipout(Arc::new(Shipped { b: Arc::new(b), ship })));
             }

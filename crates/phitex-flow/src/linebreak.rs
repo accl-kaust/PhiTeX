@@ -500,6 +500,9 @@ impl Breaker<'_> {
         // (no hyphenation at all when no language present has patterns or
         // exceptions)
         let hyph = self.p.hyph.as_deref().filter(|h| h.tables.iter().any(|(_, a, b)| !a.is_empty() || !b.is_empty()));
+        // (§866: `prev_p`, the node before the current one as the loop goes:
+        // a discretionary's replaced nodes are passed over)
+        let mut prev: Option<usize> = None;
         while k < self.items.len() && !self.active.is_empty() {
             // (§866: what the item needs, read before the breaker changes)
             let step = match &self.items[k] {
@@ -514,8 +517,8 @@ impl Breaker<'_> {
             match step {
                 Step::Glue => {
                     // (§868)
-                    if k > 0 && auto_breaking {
-                        let pr = &self.items[k - 1];
+                    if let Some(pk) = prev.filter(|_| auto_breaking) {
+                        let pr = &self.items[pk];
                         if pr.is_char() || pr.precedes_break() || matches!(pr, Item::Kern { sub, .. } if *sub != 1) {
                             self.try_break(0, false, Some(k), &none);
                         }
@@ -556,10 +559,13 @@ impl Breaker<'_> {
                         None => self.try_break(self.p.exhyphenpenalty, true, Some(k), &none),
                         Some(pre) => self.try_break(self.p.hyphenpenalty, true, Some(k), &pre),
                     }
-                    k += usize::from(replace);
+                    prev = Some(k);
+                    k += usize::from(replace) + 1;
+                    continue;
                 }
                 Step::Other => {}
             }
+            prev = Some(k);
             k += 1;
         }
         if k < self.items.len() || self.active.is_empty() {
@@ -621,8 +627,49 @@ pub fn break_lines(para: &Para) -> Vec<Arc<Line>> {
     lines(&para.hlist, p)
 }
 
+/// tex.web 826, `finite_shrink`: glue whose shrinkability is infinite,
+/// with that shrinkability made finite (`None`: it is finite).
+fn finite_shrink(g: &Glue) -> Option<Arc<Glue>> {
+    (g.shrink_order != 0 && g.shrink != 0).then(|| Arc::new(Glue { shrink_order: 0, ..*g }))
+}
+
 /// The lines of a paragraph's list.
 pub fn lines(items: &[Item], p: &LineParams) -> Vec<Arc<Line>> {
+    // (§826–§827, §868: `check_shrinkage` makes the shrinkability of
+    // `\leftskip`, `\rightskip` and of the list's glue finite — the glue
+    // the lines are made of too)
+    let skips = (finite_shrink(&p.leftskip), finite_shrink(&p.rightskip));
+    let fixed;
+    let p = if skips.0.is_some() || skips.1.is_some() {
+        fixed = LineParams {
+            leftskip: skips.0.unwrap_or_else(|| p.leftskip.clone()),
+            rightskip: skips.1.unwrap_or_else(|| p.rightskip.clone()),
+            ..p.clone()
+        };
+        &fixed
+    } else {
+        p
+    };
+    let owned: Vec<Item>;
+    let items = if items.iter().any(|it| it.glue().is_some_and(|g| finite_shrink(g).is_some())) {
+        owned = items
+            .iter()
+            .map(|it| match it {
+                Item::Glue { g, sub, .. } => match finite_shrink(g) {
+                    Some(f) => Item::Glue { g: f, sub: *sub, zero: false },
+                    None => it.clone(),
+                },
+                Item::Leaders(l) => match finite_shrink(&l.g) {
+                    Some(f) => Item::Leaders(Arc::new(crate::item::Leaders { g: f, zero: false, ..(**l).clone() })),
+                    None => it.clone(),
+                },
+                _ => it.clone(),
+            })
+            .collect();
+        &owned[..]
+    } else {
+        items
+    };
     let mut prefix = Vec::with_capacity(items.len() + 1);
     let mut acc = [0i64; 6];
     prefix.push(acc);

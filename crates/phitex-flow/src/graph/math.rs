@@ -267,7 +267,7 @@ impl Exec<'_> {
         }
     }
 
-    fn mode_name(&self) -> &'static str {
+    pub(super) fn mode_name(&self) -> &'static str {
         match (self.st.mode, self.st.inner) {
             (Mode::V, false) => "vertical",
             (Mode::V, true) => "internal vertical",
@@ -1113,7 +1113,10 @@ impl Exec<'_> {
 
     /// §1195: the symbol and extension fonts a formula needs.
     fn fonts_ok(&mut self) -> bool {
-        let mut params = |size: u8, fam: u8| self.fam_font(size, fam).nparams();
+        let mut params = |size: u8, fam: u8| {
+            let f = self.fam_font(size, fam);
+            self.font_params(&f)
+        };
         if [0, 1, 2].into_iter().any(|z| params(z, 2) < 22) {
             self.err("Math formula deleted: Insufficient symbol fonts".into());
             return false;

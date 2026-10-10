@@ -20,8 +20,11 @@ pub enum Tok {
     Cs(u32),
     /// An active character.
     Active(char),
-    /// `#n` in a macro's parameter text or body.
-    Param(u8),
+    /// `#n` in a macro's parameter text or body. In a parameter text, the
+    /// parameter character it was written with (TeX's `match` token keeps
+    /// it, tex.web 289); in a body always `#` (an `out_param` token has
+    /// none: it shows as the last one its macro's display showed, 294).
+    Param(u8, char),
     /// `\noexpand`'s mark: the token after it is not expanded, once
     /// (tex.web 358). Only ever in rewritten input, never in a value.
     DontExpand,
@@ -131,6 +134,13 @@ pub enum Key {
     /// page builder fires (an output routine's run). The split marks are
     /// `Key::SplitMarks`.
     Mark(u8, u16),
+    /// The format's identification (`format_ident`, tex.web 1328:
+    /// ` (preloaded format=JOB Y.M.D)`), defined globally by `\dump`: what
+    /// the next job of a session names in its banner.
+    Format,
+    /// The magnification fixed by its first use (`mag_set`, tex.web 286):
+    /// 0 until a `true` dimension or the first page; defined globally.
+    MagSet,
     /// How many `\fontdimen`s a font has (`font_params`, global): 0 as
     /// loaded (`Font::nparams`); more once the most recently loaded font's
     /// were extended (tex.web 579).
@@ -210,7 +220,7 @@ impl Key {
         let c = |x: &char| u64::from(u32::from(*x));
         match self {
             Key::FontDimen(..) => u64::MAX,
-            Key::Cs(n) => w(41, u64::from(*n)),
+            Key::Cs(n) => w(63, u64::from(*n)),
             // (a font's: the font's name is hashed too)
             Key::HyphenChar(_) => w(21, 0),
             Key::SkewChar(_) => w(22, 0),
@@ -251,6 +261,8 @@ impl Key {
             Key::Job => w(35, 0),
             Key::LineBase => w(36, 0),
             Key::SplitMarks => w(37, 0),
+            Key::MagSet => w(42, 0),
+            Key::Format => w(41, 0),
         }
     }
 }
@@ -361,7 +373,7 @@ impl fmt::Display for Shown<'_, Tok> {
         match self.0 {
             Tok::Char(_, c) | Tok::Active(c) => write!(f, "{c}"),
             Tok::Cs(n) => write!(f, "\\{}", self.1.name(*n)),
-            Tok::Param(n) => write!(f, "#{n}"),
+            Tok::Param(n, c) => write!(f, "{c}{n}"),
             Tok::DontExpand => Ok(()),
         }
     }
@@ -403,6 +415,8 @@ impl fmt::Display for Shown<'_, Key> {
             Key::SplitMarks => write!(f, "\\splitfirstmarks"),
             Key::FontParams(x) => write!(f, "font_params ({x})"),
             Key::LastFont => write!(f, "font_ptr"),
+            Key::Format => write!(f, "format_ident"),
+            Key::MagSet => write!(f, "mag_set"),
             Key::Ended => write!(f, "the end of the job"),
             Key::Interaction => write!(f, "\\interactionmode"),
             Key::ETeXMode => write!(f, "e-TeX mode"),
@@ -548,12 +562,13 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -
         Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
         Key::SkewChar(_) => Val::Int(-1),
         Key::FontIdent(_) | Key::LastFont => Val::Name(Arc::from("nullfont")),
-        Key::Ended => Val::Int(0),
         Key::Job => Val::Name(Arc::from("texput")),
         Key::SplitMarks => Val::SplitMarks(Arc::from(Vec::new())),
-        // (IniTeX's `error_stop_mode`; TeX run with `-interaction` starts
-        // in that mode instead)
-        Key::Interaction => Val::Int(3),
+        Key::Format => Val::Name(Arc::from("")),
+        // (the job not ended; no magnification fixed yet; batch mode, as the oracles run TeX:
+        // `-interaction=batchmode`; a build gives its own,
+        // `Build::set_interaction`: IniTeX's `error_stop_mode` is 3)
+        Key::Ended | Key::MagSet | Key::Interaction => Val::Int(0),
         Key::ETeXMode => Val::Int(i32::from(etex)),
         Key::Patterns(_) => Val::Patterns(crate::hyph::Patterns::new()),
         Key::Exceptions(_) => Val::Exceptions(crate::hyph::Exceptions::new()),

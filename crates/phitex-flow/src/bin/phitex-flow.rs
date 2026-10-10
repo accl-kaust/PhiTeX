@@ -86,9 +86,56 @@ fn report(what: &str, o: &Output) {
     }
 }
 
+/// `phitex-flow --trip DIR [THREADS]`: Knuth's TRIP test (tripman.tex,
+/// Appendix A) as one session: DIR holds `trip.tex`, `trip.tfm`, `trip1.in`
+/// and `trip2.in`; `tripin.log`, `trip.log`, `trip.fot`, `trip.dvi` and the
+/// files TRIP writes go there.
+fn trip(dir: &str, threads: usize) -> ExitCode {
+    let d = std::path::Path::new(dir);
+    let read = |n: &str| std::fs::read(d.join(n)).unwrap_or_else(|e| panic!("{dir}/{n}: {e}"));
+    let tex: String = read("trip.tex").iter().map(|&b| char::from(b)).collect();
+    let font = Arc::new(Font::parse("trip", &read("trip.tfm")).expect("trip.tfm"));
+    let mut terminal = Vec::new();
+    for f in ["trip1.in", "trip2.in"] {
+        terminal.extend(String::from_utf8_lossy(&read(f)).lines().map(str::to_string));
+    }
+    let s = phitex_flow::session::Session {
+        // (a `pass2.tex` beside it is the second job instead: for looking
+        // at a part of pass 2)
+        jobs: vec![
+            tex.clone(),
+            std::fs::read(d.join("pass2.tex")).map_or(tex, |b| b.iter().map(|&c| char::from(c)).collect()),
+        ],
+        jobname: "trip".into(),
+        terminal,
+        interaction: 3,
+        limits: phitex_flow::print::Limits::TRIP,
+        font_dirs: vec![d.to_path_buf()],
+        input_dirs: Vec::new(),
+        font,
+    };
+    let o = s.run(Options { threads, etex: false, ..Options::default() });
+    let put = |n: &str, b: &[u8]| std::fs::write(d.join(n), b).unwrap_or_else(|e| panic!("{dir}/{n}: {e}"));
+    for (k, l) in o.logs.iter().enumerate() {
+        put(if k == 0 { "tripin.log" } else { "trip.log" }, l.log.as_bytes());
+        if k == 1 {
+            put("trip.fot", l.term.as_bytes());
+        }
+    }
+    put("trip.dvi", &o.dvi);
+    for (n, t) in &o.writes {
+        put(n, &t.chars().map(|c| u8::try_from(c).unwrap_or(b'?')).collect::<Vec<u8>>());
+    }
+    println!("trip: {} bytes of DVI, {} runs, {} errors on the graph", o.dvi.len(), o.runs, o.errors.len());
+    ExitCode::SUCCESS
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--trip") {
+        return trip(args.get(1).map_or(".", String::as_str), args.get(2).and_then(|j| j.parse().ok()).unwrap_or(1));
+    }
     let mut file = None;
     let mut opts = Options::default();
     let mut tfm = std::env::var("PHITEX_FLOW_TFM").ok();

@@ -273,6 +273,9 @@ impl Exec<'_> {
                 }
             }
             if m == Meaning::Prim(Prim::Mat(Mat::SetBox)) {
+                // (tex.web 1241: the register and the `=` are read first)
+                self.scan_eight_bit_int();
+                self.optional_equals();
                 self.err("Improper \\setbox".into());
                 continue;
             }

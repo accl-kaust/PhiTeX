@@ -51,7 +51,7 @@ impl Exec<'_> {
             -1000
         };
         let Some(data) = self.env.font_file(&name) else {
-            self.err(format!("Font {}={name} not loadable: Metric (TFM) file not found", key_text(&key)));
+            self.err(format!("Font {}={name} not loadable: Metric (TFM) file not found", key_text(&key, self.env.cs())));
             return;
         };
         // (tex.web 568: the size; a bad file is not loaded)
@@ -61,7 +61,7 @@ impl Exec<'_> {
             s => Font::design_size_of(&data).map(|z| Some(xn_over_d(z, -s, 1000).0)),
         };
         let Some(f) = size.and_then(|at| Font::load(&name, data, at)).ok() else {
-            self.err(format!("Font {}={name} not loadable: Bad metric (TFM) file", key_text(&key)));
+            self.err(format!("Font {}={name} not loadable: Bad metric (TFM) file", key_text(&key, self.env.cs())));
             return;
         };
         let f = Arc::new(f);
@@ -91,6 +91,7 @@ impl Exec<'_> {
         let mut name = String::new();
         let mut quoted = false;
         let mut first = true;
+        let was = std::mem::replace(&mut self.name_in_progress, true);
         while let Some((t, m)) = self.next_x_m(false) {
             let c = match m {
                 Meaning::Char(cat, c) if (1..=12).contains(&cat) && u32::from(c) <= 255 => c,
@@ -112,6 +113,7 @@ impl Exec<'_> {
             }
             name.push(c);
         }
+        self.name_in_progress = was;
         match name.strip_suffix(".tfm") {
             Some(n) => n.to_string(),
             None => name,
@@ -144,10 +146,7 @@ impl Exec<'_> {
     pub(super) fn find_font_dimen(&mut self) -> Option<Key> {
         let n = self.scan_int();
         let f = self.scan_font_ident();
-        let np = match self.get(&Key::FontParams(f.key.clone())) {
-            Val::Int(k) if k > 0 => k as usize,
-            _ => f.nparams(),
-        };
+        let np = self.font_params(&f);
         if n > 0 && n as usize > np {
             // (tex.web 580: the most recently loaded font's parameters grow,
             // the new ones zero, whether this reads or writes)
@@ -163,6 +162,17 @@ impl Exec<'_> {
             return None;
         }
         Some(Key::FontDimen(f.key.clone(), n.cast_unsigned()))
+    }
+
+    /// The parameters font `f` has (`font_params`): its own, or more given
+    /// since by `\fontdimen` while it was the font loaded last
+    /// (`Key::FontParams`): what math's parameter checks count too
+    /// (tex.web 1195).
+    pub(super) fn font_params(&mut self, f: &Font) -> usize {
+        match self.get(&Key::FontParams(f.key.clone())) {
+            Val::Int(k) if k > 0 => k as usize,
+            _ => f.nparams(),
+        }
     }
 
     /// The name font `f` was last defined by (`font_id_text`).
@@ -222,9 +232,9 @@ impl Exec<'_> {
 }
 
 /// How an error names the key a `\font` defines.
-fn key_text(k: &Key) -> String {
+fn key_text(k: &Key, cs: &crate::build::CsTable) -> String {
     match k {
-        Key::Cs(n) => format!("\\{n}"),
+        Key::Cs(n) => format!("\\{}", cs.name(*n)),
         Key::Active(c) => c.to_string(),
         _ => String::new(),
     }

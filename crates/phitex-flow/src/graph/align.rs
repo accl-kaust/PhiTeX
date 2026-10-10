@@ -56,7 +56,7 @@ use crate::show::{CTX, HALT, LINE, LN, NL, Place, RAW, THAT_MAKES_100, report, z
 use crate::val::{Al, DimenPar, Glue, GluePar, IntPar, Key, Meaning, Prim, Tok, TokPar, Val};
 
 /// `align_state` outside an entry (tex.web 309).
-const ALIGN_BASE: i32 = 1_000_000;
+pub(super) const ALIGN_BASE: i32 = 1_000_000;
 /// §769: a column no entry has used.
 const NULL_FLAG: i32 = -0o10_000_000_000;
 /// §421.
@@ -874,6 +874,7 @@ impl Exec<'_> {
         let mut looping: Option<u16> = None;
         let mut assigned: Option<bool> = None;
         let mut done = false;
+        let was = std::mem::replace(&mut self.scanning, super::Scanning::Aligning);
         loop {
             // (§778)
             let g = self.glue_par(GluePar::Tabskip);
@@ -940,6 +941,7 @@ impl Exec<'_> {
                 v: Arc::from(v),
             });
         }
+        self.scanning = was;
         if let Some(g) = self.st.groups.last_mut()
             && let Some(a) = &mut g.align
         {

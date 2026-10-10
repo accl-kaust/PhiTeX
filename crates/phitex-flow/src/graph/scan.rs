@@ -452,7 +452,14 @@ impl Exec<'_> {
         if t.is_char(12, '`') {
             // (tex.web 442: an alphabetic constant)
             let c = match self.next_raw() {
-                Some(Tok::Char(_, c) | Tok::Active(c)) => Some(c),
+                Some(Tok::Char(cat, c)) => {
+                    // (the brace does not count in an alignment's balance)
+                    if self.st.al.on && (cat == 1 || cat == 2) {
+                        self.st.al.state += if cat == 2 { 1 } else { -1 };
+                    }
+                    Some(c)
+                }
+                Some(Tok::Active(c)) => Some(c),
                 Some(Tok::Cs(n)) => {
                     let s = self.env.cs().name(n);
                     let mut it = s.chars();
@@ -694,7 +701,7 @@ impl Exec<'_> {
                 }
                 if self.keyword("true") {
                     // (tex.web 457)
-                    let mag = self.int_par(IntPar::Mag);
+                    let mag = self.prepare_mag();
                     if mag != 1000 && mag > 0 {
                         let (q, r) = xn_over_d(v, 1000, mag);
                         f = ((1000 * i64::from(f) + 0o200_000 * i64::from(r)) / i64::from(mag)) as i32;
@@ -836,6 +843,28 @@ impl Exec<'_> {
 
     // ------------------------------------------------------------ token lists
 
+    /// tex.web 288: `prepare_mag`: `\mag` as first used is kept (a later
+    /// value is an error, and is put back, globally); an illegal one is
+    /// 1000. The magnification in force.
+    pub(super) fn prepare_mag(&mut self) -> i32 {
+        let mut mag = self.int_par(IntPar::Mag);
+        let set = self.int(&Key::MagSet);
+        if set > 0 && mag != set {
+            self.err(format!("Incompatible magnification ({mag}); the previous value will be retained ({set})"));
+            self.define(Key::IntPar(IntPar::Mag), Val::Int(set), true);
+            mag = set;
+        }
+        if mag <= 0 || mag > 32768 {
+            self.err(format!("Illegal magnification has been changed to 1000 ({mag})"));
+            self.define(Key::IntPar(IntPar::Mag), Val::Int(1000), true);
+            mag = 1000;
+        }
+        if set != mag {
+            self.define(Key::MagSet, Val::Int(mag), true);
+        }
+        mag
+    }
+
     /// tex.web 403: a left brace, after blanks and `\relax`es, expanded.
     pub(super) fn scan_left_brace(&mut self) {
         match self.nonblank_nonrelax() {
@@ -851,8 +880,11 @@ impl Exec<'_> {
 
     /// A balanced text, unexpanded (`scan_toks(false, false)`, tex.web 473).
     pub(super) fn scan_toks_raw(&mut self) -> Vec<Tok> {
-        self.scan_left_brace();
-        self.balanced_raw()
+        let w = Some(self.cmd.clone());
+        self.scanning(super::Scanning::Absorbing, w, |x| {
+            x.scan_left_brace();
+            x.balanced_raw()
+        })
     }
 
     /// The tokens up to the brace closing the one just read, unexpanded.
@@ -880,7 +912,10 @@ impl Exec<'_> {
 
     /// A balanced text, expanded (`scan_toks(false, true)`).
     pub(super) fn scan_toks_x(&mut self) -> Vec<Tok> {
-        self.scan_left_brace();
-        self.expand_text(None)
+        let w = Some(self.cmd.clone());
+        self.scanning(super::Scanning::Absorbing, w, |x| {
+            x.scan_left_brace();
+            x.expand_text(None)
+        })
     }
 }

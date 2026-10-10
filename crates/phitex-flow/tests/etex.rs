@@ -156,6 +156,9 @@ fn check_errors(name: &str) {
     let words = |s: &str| s.split_whitespace().map(str::to_string).collect::<Vec<_>>();
     for o in RUNS {
         let (got, errors) = graph_log(&src, o);
+        // (the errors' blocks are in the graph's log too: compared as words
+        // without them, as TeX's)
+        let (got, _) = split_errors(&got);
         let errors: Vec<String> = errors.iter().map(|e| format!("{}.", without_piece(e))).collect();
         assert_eq!(errors, tex_errors, "{name} ({o:?}): the graph's errors are not etex's");
         assert_eq!(words(&got), words(&expected), "{name} ({o:?}): another log\n--- graph:\n{got}\n--- etex:\n{expected}");
@@ -187,7 +190,7 @@ fn expr_errors() {
 fn compatibility_mode_names_nothing_of_etex() {
     let src = "\\message{\\meaning\\numexpr,\\meaning\\protected}\\count256=1\n";
     let o = Build::new(font()).update(&format!("{PRELUDE}{src}"), Options { etex: false, ..Options::default() });
-    assert_eq!(o.log, ["undefined,undefined"]);
+    assert_eq!(o.log[0], "undefined,undefined");
     let errors: Vec<&str> = o.errors.iter().map(|e| without_piece(e)).collect();
     assert_eq!(errors, ["Bad register code (256)"]);
 }

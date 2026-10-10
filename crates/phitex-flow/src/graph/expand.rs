@@ -101,7 +101,7 @@ impl Exec<'_> {
                 Prim::ExpandAfter => self.expandafter(),
                 Prim::NoExpand => {
                     // (tex.web 369: the token, marked not to be expanded once)
-                    if let Some(x) = self.next_raw() {
+                    if let Some(x) = self.next_raw_normal() {
                         if x.key().is_some() {
                             self.rewrite(vec![Tok::DontExpand, x]);
                         } else {
@@ -114,6 +114,12 @@ impl Exec<'_> {
                 Prim::The => {
                     let toks = self.the_toks();
                     self.rewrite(toks);
+                }
+                Prim::Input if self.name_in_progress => {
+                    // (tex.web 378: `insert_relax`)
+                    self.back(t.clone());
+                    let t = self.cs("\u{0}relax");
+                    self.back(t);
                 }
                 Prim::Input => self.input_file(),
                 Prim::EndInput => self.end_input(),
@@ -177,7 +183,11 @@ impl Exec<'_> {
         if let Some(u) = self.next_raw() {
             let m = self.tok_meaning(&u);
             if !self.noexp && u.key().is_some() && expands(&m) {
+                // (an `\input` expanded here is read in the piece: the token
+                // put back after it is read first, tex.web 368)
+                let was = std::mem::replace(&mut self.at_start, false);
                 self.expand(&u, &m);
+                self.at_start = was;
             } else if self.noexp {
                 self.rewrite(vec![Tok::DontExpand, u]);
             } else {
@@ -230,16 +240,16 @@ impl Exec<'_> {
                 print::roman(&mut s, v);
             }
             Conv::String => {
-                if let Some(t) = self.next_raw() {
+                if let Some(t) = self.next_raw_normal() {
                     match &t {
                         Tok::Char(_, c) | Tok::Active(c) => s.push(*c),
                         Tok::Cs(n) => self.sprint_cs(&mut s, &self.env.cs().name(*n)),
-                        Tok::Param(_) | Tok::DontExpand => {}
+                        Tok::Param(..) | Tok::DontExpand => {}
                     }
                 }
             }
             Conv::Meaning => {
-                if let Some(t) = self.next_raw() {
+                if let Some(t) = self.next_raw_normal() {
                     let m = if self.noexp && expands(&self.tok_meaning(&t)) {
                         Meaning::Prim(Prim::Relax)
                     } else {
@@ -377,6 +387,14 @@ impl Exec<'_> {
 
     /// A token list as TeX shows it (tex.web 292-294).
     pub(super) fn show_toks(&mut self, out: &mut String, toks: &[Tok]) {
+        let mut match_chr = '#';
+        self.show_toks_m(out, toks, &mut match_chr, false);
+    }
+
+    /// [`Exec::show_toks`] of a macro's parameter text (`in_params`) or
+    /// body, with `match_chr` carried from the one to the other (tex.web
+    /// 294).
+    fn show_toks_m(&mut self, out: &mut String, toks: &[Tok], match_chr: &mut char, in_params: bool) {
         for t in toks {
             match t {
                 Tok::Cs(n) => self.print_cs(out, &self.env.cs().name(*n)),
@@ -385,8 +403,11 @@ impl Exec<'_> {
                     out.push(*c);
                 }
                 Tok::Char(_, c) | Tok::Active(c) => out.push(*c),
-                Tok::Param(n) => {
-                    out.push('#');
+                Tok::Param(n, c) => {
+                    out.push(if in_params { *c } else { *match_chr });
+                    if in_params {
+                        *match_chr = *c;
+                    }
                     out.push(char::from(b'0' + n));
                 }
                 Tok::DontExpand => {}
@@ -452,9 +473,10 @@ impl Exec<'_> {
                     out.push_str("macro:");
                 }
                 let mac = mac.clone();
-                self.show_toks(out, &mac.params);
+                let mut match_chr = '#';
+                self.show_toks_m(out, &mac.params, &mut match_chr, true);
                 out.push_str("->");
-                self.show_toks(out, &mac.body);
+                self.show_toks_m(out, &mac.body, &mut match_chr, false);
             }
         }
     }
@@ -652,7 +674,7 @@ impl Exec<'_> {
             IfKind::Defined => {
                 // (etex.web §1450: `get_next`; a `\noexpand`ed name means
                 // `\relax`)
-                let Some(t) = self.next_raw() else { return false };
+                let Some(t) = self.next_raw_normal() else { return false };
                 let m = self.tok_meaning(&t);
                 (self.noexp && expands(&m)) || m != Meaning::Undefined
             }
@@ -696,7 +718,7 @@ impl Exec<'_> {
     }
 
     fn ifx_operand(&mut self) -> Cmp {
-        let Some(t) = self.next_raw() else {
+        let Some(t) = self.next_raw_normal() else {
             return Cmp::M(Meaning::Undefined);
         };
         let m = self.tok_meaning(&t);
@@ -706,6 +728,10 @@ impl Exec<'_> {
     /// Skips text to the next `\fi`, `\else` or `\or` at this level
     /// (tex.web 494); returns which (0: the piece ended).
     fn pass_text(&mut self) -> u8 {
+        self.scanning(super::Scanning::Skipping, None, Self::pass_text_in)
+    }
+
+    fn pass_text_in(&mut self) -> u8 {
         let mut l = 0usize;
         loop {
             let Some(t) = self.next_raw() else {
@@ -853,7 +879,8 @@ impl Exec<'_> {
                     match self.next_x() {
                         Some(x) if x.cat() == Some(6) => out.push(x),
                         Some(Tok::Char(12, d)) if d.is_ascii_digit() && d != '0' && (d as u8 - b'0') <= n => {
-                            out.push(Tok::Param(d as u8 - b'0'));
+                            // (an `out_param` token: no character of its own, tex.web 476)
+                            out.push(Tok::Param(d as u8 - b'0', '#'));
                         }
                         other => {
                             self.err("Illegal parameter number in definition".into());

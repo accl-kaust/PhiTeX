@@ -813,6 +813,24 @@ positions after it, and its material is consumed after it.
   files given in memory with `Build::set_file`, then the input
   directories); `Key::LineBase` is the lines of its own file before a
   piece of the sequence.
+- **The current rule, as TRIP holds it** (F, 2026-10-10; `tests/trip.rs`
+  must stay green under any change to it). A file-piece node is made
+  only for an `\input` that `Exec::command` fetches as the command
+  itself (`at_start`, at the plain boundary, no rewritten text). Read
+  in the piece instead:
+  - an `\input` expanded by `\expandafter`: `at_start` is off while
+    `\expandafter` expands, so the token it puts back is read before the
+    file (tex.web 368; trip.tex line 424, `\expandafter\stopinput\input
+    tripos\endinput\input`);
+  - an `\input` met while a file name is scanned: it inserts `\relax`
+    (tex.web 378, `Exec::name_in_progress`);
+  - an `\endinput` before an `\input` read in the piece ends the new
+    file's first line, not the caller's (`force_eof` belongs to the next
+    line end, in whatever file: `Exec::start_input`).
+
+  Making more `\input`s file pieces must keep those three as TeX has
+  them: the tokens pending at the `\input` are read before the file, and
+  `force_eof` moves to the file.
 
 ## e-TeX (extended mode)
 
@@ -943,6 +961,91 @@ e-TeX's primitives:
 | `\showgroups`, `\showifs`, `\showtokens` | xray | log text and the error's context, the line a placeholder (gap 3) | done (file-level context) |
 | `\unless` | expand_after | step (a node at the top, as conditionals are): the boolean conditional after it, negated | done |
 
+## TRIP (agent F)
+
+`tests/trip.rs` runs Knuth's TRIP test (`bench/trip/`, `bench/trip.sh
+fetch`) as one session (`session.rs`). **The gate is the document only**
+(the user's decision, 2026-10-10). `trip.typ` is DVItype's listing of our
+`trip.dvi`. It must equal Knuth's, except for the header and the glue
+rounding that TeX Live's `trip.diffs` allows, and it must be the same at
+the five schedules. Until it is, `REACHED` in the test is a ratchet: the
+first differing line may only move down.
+
+**Not a gate** (written for navigation, no effort spent on their form):
+`tripin.log`, `trip.log`, `trip.fot`. That covers:
+- error messages, their context lines and help text;
+- the output of `\show` and `\showthe`;
+- the tracing family (`\tracingcommands`, `\tracingmacros`,
+  `\tracingrestores`, `\tracingparagraphs`, `\tracingpages`);
+- the statistics at `\dump` and at the end, and the history value;
+- the labels on input levels in an error's context;
+- printer limits, beyond the line lengths the terminal needs.
+
+**Sessions.**
+- A job starts at a line that begins with `graph::JOB`. It is a node of
+  its own:
+  - it takes the `**` line from the terminal and logs the banner;
+  - it defines the date parameters and runs `\everyjob`.
+- `Key::LineBase` and the page fold (`Item::JobStart`) start again at
+  each job.
+- `\dump` defines `Key::Format`, which the next job's banner names.
+- The terminal is `Key::ReadStream(16)` (`Build::set_terminal`) and the
+  interaction is `Key::Interaction` (`Build::set_interaction`). An error
+  reads its answer from the terminal (tex.web 82–93): delete, insert,
+  change the mode, or `X`/`E` (which goes through `Item::Halt`).
+- `print::Limits` holds TRIP's compiled sizes (`error_line` and the
+  others), including `dvi_buf_size` (800), which the DVI writer's
+  half-buffer rule reads.
+- The memory bound is A's `Options::main_memory`.
+
+**Result** (2026-10-10): `trip.typ` is Knuth's, all 16 pages, at the
+five schedules. The two remaining raw differences are the glue rounding
+`trip.diffs` allows (`down4 639342177`, `y4`/`y0 203921756`).
+- Pass 1 is no longer cut at `\dump`: A's `Key::Ended` ends job 1, and a
+  job start defines it 0 again (a new run of TeX). The layout skips the
+  rest of an ended job up to the next job's first piece.
+- `tripos.tex` still goes through the session's fixpoint over written
+  files. B's gap 1 below (a file written and read back in one run) is the
+  same core gap.
+- A's `Item::PageSoFar` (tex.web 1245) is sent at any level, not only at
+  level 0: inside a group, box, paragraph or formula, through the node's
+  `para` stream, as `Item::Halt` is (not inside an output routine).
+  `\showlonglists` sets `\pagegoal` inside `{{...}}`.
+
+**Fixed here** (each one changed TRIP's DVI or what came after it):
+- `\fontdimen` growing the last font loaded (B's `Key::LastFont` and
+  `Key::FontParams`, merged), counted by math's parameter checks too
+  (§1195);
+- `check_shrinkage` in line breaking, and `prev_p` after a
+  discretionary;
+- §1120 Illegal math `\discretionary`;
+- §1241: `Improper \setbox` reads the register and the `=` first;
+- `\outer`: `check_outer_validity` (§336–339) with a `scanner_status`
+  per node (`Exec::scanning`). `\noexpand`, `\string`, `\meaning`, `\ifx`
+  and `\ifdefined` read as `normal`. A frozen `\fi` (`\0fi`) and a frozen
+  `\relax` (`\0relax`) were added beside `\0cr`.
+- §1094: `\par` in an alignment entry whose braces are still open does
+  `off_save`;
+- §378: `\input` while a file name is scanned inserts `\relax`;
+- §362: `\endinput` before `\input` ends the new file's first line
+  (`force_eof` belongs to the next line end, in whatever file);
+- §352/355: a `^^`-reduced superscript can begin another `^^`;
+- §442: a backquoted brace does not count in an alignment's balance;
+- §288 `prepare_mag` and `Key::MagSet`. The postamble's magnification is
+  the first page's.
+- §641: Huge page cannot be shipped out;
+- `Tok::Param(n, c)`: a parameter text keeps its character, and a body
+  shows `match_chr` (§294).
+- tex.web 392/397: a delimited argument matches the token its delimiter
+  expects next before a `\par` ends the call (`\a#1\par` with `\par`
+  next);
+- tex.web 368: an `\input` expanded by `\expandafter` is read in the
+  piece, not as a file-piece node (the token put back is read first).
+
+**Approximations left** (not met by TRIP's DVI):
+- `\endtemplate` is not yet an `\outer` name for `check_outer`.
+- `prepare_mag` runs at a `\shipout` only while no magnification is
+  fixed. TeX runs it at the first page only.
 ## LaTeX's format: `latex.ltx` through the graph (agent B)
 
 `tests/latex.rs` builds TeX Live's `latex.ltx` (and the 60 files it

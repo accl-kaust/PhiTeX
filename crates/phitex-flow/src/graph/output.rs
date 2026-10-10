@@ -445,10 +445,17 @@ impl Exec<'_> {
         };
         // (and the page builder's quantity changes where the main vertical
         // list is now: an item in its order, tex.web 1245)
-        if self.st.level == 0
-            && let Key::Page(i) = key
-        {
-            self.vemit.push(Item::PageSoFar(i, v));
+        if let Key::Page(i) = key {
+            if self.st.level == 0 {
+                self.vemit.push(Item::PageSoFar(i, v));
+            } else if self.st.fire.is_none() {
+                // (inside a group, a box, a paragraph or a formula, not an
+                // output routine: TeX assigns `page_so_far` at once all the
+                // same, so the item goes to the fold's stream at this node,
+                // as `Item::Halt` does; no page builder call comes between)
+                let p = self.para.get_or_insert_with(|| Arc::new(super::Para::default()));
+                Arc::make_mut(p).before.push(Item::PageSoFar(i, v));
+            }
         }
         self.change_direct(key, Val::Int(v));
     }

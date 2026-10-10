@@ -508,6 +508,19 @@ impl Scan {
     /// Feeds `item`, from `org` in the material.
     pub fn feed(&mut self, item: Item, org: Org, env: &mut dyn FoldEnv) {
         self.fed += 1;
+        if matches!(item, Item::JobStart) {
+            // (TeX run again: nothing on the page or contributed, no call yet)
+            self.ended = false;
+            self.contrib.clear();
+            self.contrib_org.clear();
+            self.page.clear();
+            self.page_org.clear();
+            self.page_contents = EMPTY;
+            self.prev_depth = None;
+            self.last_call = None;
+            self.cur_call = None;
+            return;
+        }
         if self.ended {
             return;
         }

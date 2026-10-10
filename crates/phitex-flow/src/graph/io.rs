@@ -33,8 +33,8 @@ use std::sync::Arc;
 use super::{Chain, EOL_UNREAD, Env, Exec, Mode, Outside, PendingText, Scratch, Stack, TState, TextKind};
 use crate::item::{BoxNode, Item, Whatsit};
 use crate::logs::{SEP, io_event};
-use crate::print::{ENDJOB, MAX_PRINT_LINE};
-use crate::show::{LN, NL, RAW, SP};
+use crate::print::ENDJOB;
+use crate::show::{LN, MSG_END, NL, OPEN, RAW};
 use crate::val::{IntPar, Key, Macro, Meaning, Prim, Stream, Tok, Val};
 
 /// The name `\read` defines when it was not given one (tex.web 1215:
@@ -63,7 +63,7 @@ pub fn file_text(data: &[u8]) -> Arc<[char]> {
 
 /// The line of `data` beginning at `i`, without its trailing spaces, and
 /// where the next line begins.
-fn next_line(data: &[u8], i: usize) -> (&[u8], usize) {
+pub(super) fn next_line(data: &[u8], i: usize) -> (&[u8], usize) {
     let end = data[i..].iter().position(|&b| b == b'\n' || b == b'\r').map_or(data.len(), |k| i + k);
     let next = if end >= data.len() {
         end
@@ -181,6 +181,7 @@ impl Exec<'_> {
         let mut name = String::new();
         let mut quoted = false;
         let mut first = true;
+        let was = std::mem::replace(&mut self.name_in_progress, true);
         while let Some((t, m)) = self.next_x_m(false) {
             let c = match m {
                 Meaning::Char(cat, c) if (1..=12).contains(&cat) && u32::from(c) <= 255 => c,
@@ -202,6 +203,7 @@ impl Exec<'_> {
             }
             name.push(c);
         }
+        self.name_in_progress = was;
         name
     }
 
@@ -244,10 +246,22 @@ impl Exec<'_> {
             return;
         };
         let shown = self.env.file_path(&found);
-        // (`term_offset` is 0: in batch mode nothing reaches the terminal)
-        let lead = if shown.chars().count() > MAX_PRINT_LINE - 2 { LN } else { SP };
-        self.log_raw(&format!("{RAW}{lead}({shown}"));
+        // (tex.web 537: on a line of its own if it would not fit the
+        // terminal's, else after a space: the printer's rule)
+        let cur = self.selector();
+        self.log_raw(&format!("{RAW}{}{OPEN}{shown}{MSG_END}", crate::print::sel(cur)));
+        // (tex.web 362: `force_eof` is the next line end's, in whatever
+        // file: an `\endinput` before `\input` ends the new file's first
+        // line)
+        let eof = match self.st.texts.last_mut() {
+            Some(x) if x.kind != TextKind::Read => std::mem::take(&mut x.endinput),
+            Some(_) => false,
+            None => std::mem::take(&mut self.st.endinput),
+        };
         self.push_source(file_text(&data), TextKind::File(shown));
+        if let Some(x) = self.st.texts.last_mut() {
+            x.endinput = eof;
+        }
     }
 
     /// `\endinput` (tex.web 378, `force_eof`): the file being read (or
@@ -329,7 +343,7 @@ impl Exec<'_> {
             break Key::Cs(self.env.cs().id(INACCESSIBLE));
         };
         let m = if (0..=15).contains(&n) { n as u8 } else { 16 };
-        let body = self.read_toks(m);
+        let body = self.read_toks(m, n, &key);
         let mac = Macro { params: Vec::new(), body: body.into(), long: false, outer: false, protected: false };
         self.define(key, Val::Meaning(Meaning::Macro(Arc::new(mac))), global);
     }
@@ -373,13 +387,49 @@ impl Exec<'_> {
     /// after it while braces are open; the stream is defined advanced, and
     /// closed at the file's end (where the line read is empty: its end of
     /// line is a `\par`).
-    fn read_toks(&mut self, m: u8) -> Vec<Tok> {
+    fn read_toks(&mut self, m: u8, n: i32, target: &Key) -> Vec<Tok> {
+        let w = Some(match target {
+            Key::Active(c) => Tok::Active(*c),
+            Key::Cs(c) => Tok::Cs(*c),
+            _ => self.cs("read"),
+        });
+        self.scanning(super::Scanning::Defining, w, |x| x.read_toks_in(m, n, target))
+    }
+
+    fn read_toks_in(&mut self, m: u8, mut n: i32, target: &Key) -> Vec<Tok> {
         let key = Key::ReadStream(m);
         let mut out = Vec::new();
         // (`align_state` less 1000000: the braces open)
         let mut depth: i32 = 0;
         loop {
-            let line: Vec<char> = match self.get(&key) {
+            let closed = m == super::interact::TERMINAL || !matches!(self.get(&key), Val::Stream(_));
+            let line: Vec<char> = if closed {
+                // (§484: the terminal, in the modes that may ask it)
+                if self.interaction() <= super::interact::NONSTOP_MODE {
+                    self.fatal_error("*** (cannot \\read from terminal in nonstop modes)");
+                    return out;
+                }
+                let cur = self.selector();
+                let mut s = String::from(RAW);
+                s.push(crate::print::sel(cur));
+                if n >= 0 {
+                    s.push(LN);
+                    if let Key::Cs(name) = target {
+                        let name = self.env.cs().name(*name);
+                        self.sprint_cs(&mut s, &name);
+                    }
+                    s.push('=');
+                    n = -1;
+                }
+                let got = self.term_input(&mut s, cur);
+                self.log_raw(&s);
+                let Some(l) = got else {
+                    self.fatal_error("End of file on the terminal!");
+                    return out;
+                };
+                l.chars().collect()
+            } else {
+                match self.get(&key) {
                 Val::Stream(s) if s.next < s.data.len() => {
                     let (l, next) = next_line(&s.data, s.next);
                     let l = l.iter().map(|&b| char::from(b)).collect();
@@ -395,10 +445,7 @@ impl Exec<'_> {
                     }
                     Vec::new()
                 }
-                _ => {
-                    // (§484: the terminal, which batch mode cannot read)
-                    self.err("*** (cannot \\read from terminal in nonstop modes)".into());
-                    return out;
+                    _ => return out,
                 }
             };
             let mut text = line;
@@ -505,7 +552,7 @@ impl Exec<'_> {
         self.rewrite(l);
         let was = self.in_write;
         self.in_write = true;
-        let out = self.expand_text(None);
+        let out = self.scanning(super::Scanning::Absorbing, None, |x| x.expand_text(None));
         self.in_write = was;
         let mut s = String::new();
         self.show_toks(&mut s, &out);
@@ -543,6 +590,8 @@ impl Exec<'_> {
             let mut s = String::new();
             s.push(ENDJOB);
             s.push(RAW);
+            let cur = self.selector();
+            s.push(crate::print::sel(cur));
             if let Some(v) = &self.st.texts.0 {
                 for _ in v.iter().filter(|x| matches!(x.kind, TextKind::File(_))) {
                     s.push_str(" )");
@@ -585,10 +634,12 @@ impl Exec<'_> {
                     s.push(NL);
                     let _ = write!(s, "Beginning to dump on file {job}.fmt");
                     s.push(NL);
-                    let _ = write!(s, " (preloaded format={job} {y}.{mo}.{d})");
+                    let ident = format!(" (preloaded format={job} {y}.{mo}.{d})");
+                    s.push_str(&ident);
+                    self.define(Key::Format, Val::Name(Arc::from(ident)), true);
                 }
             }
-            if s.chars().count() > 2 {
+            if s.chars().count() > 3 {
                 self.log_push(&s);
             }
             self.st.groups = Stack::new();
