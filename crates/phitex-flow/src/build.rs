@@ -5104,12 +5104,18 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
                 }
                 let n = &run.chain.nodes[*node as usize];
                 let r = n.reads.iter().find(|r| r.key == *key);
+                // (the nearest node before it defining the name in this
+                // piece, whatever its scope, looked for 5000 nodes back)
+                let lo = (*node as usize).saturating_sub(5000);
+                let def = (lo..*node as usize).rev().find(|&j| run.chain.nodes[j].defs().iter().any(|d| d.key == *key));
                 format!(
-                    "{:?} {} {:?}{}",
+                    "{:?} {} {:?}{} @{} def@{}",
                     n.kind,
                     crate::val::Shown(&n.cmd, &sh.names.cs),
                     r.map(|r| r.field),
-                    if r.is_some_and(|r| r.cond.is_some()) { " phi" } else { "" }
+                    if r.is_some_and(|r| r.cond.is_some()) { " phi" } else { "" },
+                    node,
+                    def.map_or_else(|| "-".to_string(), |j| j.to_string())
                 )
             })
             .collect();
