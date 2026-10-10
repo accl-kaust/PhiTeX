@@ -748,7 +748,11 @@ pub(crate) fn every_key() -> Vec<Key> {
         Key::Ended,
         Key::MainTail,
         Key::MainDepth,
-        Key::GlyphUnicode(f),
+        Key::GlyphUnicode(f.clone()),
+        Key::FontCode(crate::micro::EF, f.clone()),
+        Key::FontExpand(f.clone()),
+        Key::FontAttr(f.clone()),
+        Key::FontCopies(f),
     ]
 }
 
@@ -802,6 +806,10 @@ pub(crate) fn key_index(k: &Key) -> usize {
         Key::MainTail => 43,
         Key::MainDepth => 44,
         Key::GlyphUnicode(_) => 45,
+        Key::FontCode(..) => 46,
+        Key::FontExpand(_) => 47,
+        Key::FontAttr(_) => 48,
+        Key::FontCopies(_) => 49,
     }
 }
 
