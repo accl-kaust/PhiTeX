@@ -41,8 +41,8 @@ use crate::json::{self, Value, quote};
 use crate::ws;
 
 /// The viewer's page and its script (`scripts/viewer-bundle.sh`).
-const INDEX: &[u8] = include_bytes!("../../partex-cli/viewer/index.html");
-const SCRIPT: &[u8] = include_bytes!("../../partex-cli/viewer/viewer.js");
+const INDEX: &[u8] = include_bytes!("../viewer/index.html");
+const SCRIPT: &[u8] = include_bytes!("../viewer/viewer.js");
 
 /// Fonts the viewer draws text in when a page's font has no outlines
 /// (`page2.ts`'s `FILES`), found by kpathsea.

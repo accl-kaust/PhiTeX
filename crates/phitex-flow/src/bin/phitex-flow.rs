@@ -491,7 +491,6 @@ fn main() -> ExitCode {
     let tfm = tfm.or_else(|| {
         [
             "crates/phitex-flow/testdata/cmr10.tfm",
-            "crates/partex-core/testdata/cmr10.tfm",
             "/usr/share/texmf-dist/fonts/tfm/public/cm/cmr10.tfm",
             "/usr/share/texlive/texmf-dist/fonts/tfm/public/cm/cmr10.tfm",
         ]

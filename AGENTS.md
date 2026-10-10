@@ -1,10 +1,9 @@
 # AGENTS.md
 
 Rules for coding agents (and people) working in this repository. Read
-`DESIGN.md` first: it is the whole design and is self-contained. Keep it
-current. When a design changes, or a measurement changes what the design
-should be, update its section in the same branch. Don't add other design
-documents.
+`AGENTS_BRIEF.md` first: it is the design. `crates/phitex-flow/CORE.md`
+records the engine's command set and decisions, `DESIGN.md` the crates
+and the φ core. Keep them current.
 
 ## Workflow
 
@@ -17,7 +16,6 @@ documents.
   - the gates, on the pushed commit:
 
         ACCL_COMMIT=<rev> scripts/accl/accl submit gate
-        ACCL_COMMIT=<rev> scripts/accl/accl submit edits --brief --fixpoint
         scripts/accl/accl wait <job>
 
 - Fix bugs at their root, never at the symptom: a guard that hides a
@@ -65,31 +63,25 @@ documents.
   specifications. Cite their sections (`// §123`; pdfTeX's as
   "pdfTeX §N").
 - Don't emulate internal statistics (memory, pool, hash, stack counts,
-  exact capacity limits). They are masked in comparisons
-  (`xtask/src/mask.rs`).
+  exact capacity limits) beyond what the oracle's outputs show.
 
 ## Architecture
 
-- Core crates build for `wasm32-unknown-unknown`. `partex-core` is
-  `no_std` + `alloc`, and every effect goes through the `Host` trait.
-- Engine state is reached only through accessors that call the
-  `Tracker` (DESIGN 3.2, 3.15).
-- Dynamic SSA (DESIGN 3.1): "a step runs again if and only if a version
-  it read changed" is the invariant. Any change to the SSA runtime, the
-  tracker or the records reports a one-word edit's rebuild on a real
-  document: its ms, steps run and reads checked. A rebuild whose work
-  grows with the document instead of with the edit is a bug in the
-  dependency graph.
-- Every acceleration (memos, speculation, parallelism) can be switched
-  off and gives byte-identical output.
-- Every IR has a canonical, round-tripping text form (DESIGN 5.3).
+- `AGENTS_BRIEF.md`'s Banned table holds everywhere, the CLI included:
+  no engine state outside phitex-flow, no second source of truth (the
+  Build is the document's state), no cold-build path apart from the edit
+  path.
+- phitex-flow depends on no crate holding TeX state (`tests/wall.rs`).
+- Pure crates build for `wasm32-unknown-unknown` (`cargo xtask check`).
+- The scheduler affects speed, never results: every schedule gives
+  byte-identical output.
 
 ## Quality
 
 - `cargo fmt` and `cargo clippy` (pedantic, workspace lints) are clean;
   `unsafe_code` is denied.
-- Performance claims need a benchmark. Keep the `tracing` spans and the
-  TeX-level profiler working.
+- Performance claims need a benchmark (`phitex-flow --budgets`, the
+  cluster).
 - `upstream/` is fetched from pinned commits by
   `scripts/fetch-upstream.sh` and isn't committed. To change a pin,
   update the script and run `scripts/sandbox cargo xtask corpus`.

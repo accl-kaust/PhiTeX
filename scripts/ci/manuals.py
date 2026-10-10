@@ -1,35 +1,21 @@
 #!/usr/bin/env python3
 """The manual corpus (docs/ci.md): TeX Live's own documentation sources,
-built by TeX Live's engine to a settled fixpoint (the oracle) and by
-partex in each of its modes, every output compared byte for byte (the PDF
-and the files the job reads back; not the .log).
+built by TeX Live's engines to a settled fixpoint: the oracle a flow CI
+will compare `phitex` with (the PDF and the files the job reads back; not
+the .log).
 
     manuals.py discover --doc DIR --out CANDIDATES.json
     manuals.py oracle   --list FILE --doc DIR --cache DIR [--shard I/N]
-    manuals.py run      --list FILE --doc DIR --cache DIR --bin PARTEX
-                        --formats DIR --out DIR [--modes M,...] [--shard I/N]
     manuals.py pin      --list CANDIDATES.json --cache DIR --out ci/manuals.json
 
 `discover` picks the candidates (one main document per package directory,
 and the manuals named in FORCED); `oracle` builds each with TeX Live and
 keeps the outputs in the cache, keyed by the input tree's hash; `pin`
 turns the oracle's results into the pinned list (the inputs' hashes, the
-engine, the tools each needs) and the excluded list (with the reason);
-`run` checks the pinned hashes, takes the oracle's outputs from the cache
-(building them if missing), and runs partex's modes:
-
-  plain    partex as TeX Live's engine (`--compat=tex -engine=…`), in the
-           same latexmk-like loop as the oracle, BibTeX and makeindex
-           as `partex -bibtex` / `partex -makeindex`, biber TeX Live's
-  build    `partex build --no-machine` (one process to the fixpoint,
-           BibTeX and makeindex in process): pdflatex documents whose
-           tools are BibTeX and plain makeindex
-  machine  `partex build` (machine mode, its store in the scratch dir)
-  ssa      `PARTEX_SSA=1 partex --compat=tex …`: one SSA process, in
-           trips to its fixpoint (DESIGN 3.7), the tools in process
+engine, the tools each needs) and the excluded list (with the reason).
 
 All in one fixed directory (/w/run/<id>, the container's bind of the
-job's scratch), so absolute paths are the same on both sides.
+job's scratch), so absolute paths are the same for every engine.
 """
 
 import argparse
@@ -42,12 +28,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
-import pdfdiff  # noqa: E402
 
 HARNESS_VERSION = "1"
 MAX_PASSES = 8
 PASS_TIMEOUT = 1200
-MODE_TIMEOUT = 5400
 WORK = Path(os.environ.get("CI_WORK", "/w"))
 
 # Manuals the corpus must have, by path under the doc tree (the rest is
@@ -276,12 +260,6 @@ def oracle_cmd(engine, main):
     return [engine, "-no-shell-escape", "-interaction=nonstopmode", main]
 
 
-def partex_compat(binary, engine, main):
-    flavor, fmt = ("xetex", "xelatex") if engine == "xelatex" else ("pdftex", "pdflatex")
-    return [binary, "--compat=tex", f"-engine={flavor}", f"-fmt={fmt}", "-no-shell-escape",
-            "-interaction=nonstopmode", main]
-
-
 def side_env(engine, extra=None, partex=False, formats=None):
     e = {"HOME": str(WORK / "home"), "TEXMFVAR": str(WORK / "texmf-var")}
     if engine == "xelatex":
@@ -393,87 +371,6 @@ def oracle_one(doc, c, cache, new_cache=None):
     return key, res
 
 
-def compare(run_dir, base, key, ores):
-    """Differences between this run's outputs and the oracle's."""
-    mine = common.snapshot(run_dir, base)
-    theirs = ores["outputs"]
-    diffs = sorted(n for n in set(mine) | set(theirs) if mine.get(n) != theirs.get(n))
-    out = {"files": [d for d in diffs if d != ores["pdf"]]}
-    pdf = run_dir / ores["pdf"]
-    if not pdf.exists():
-        out["pdf"] = {"missing": True}
-    elif ores["pdf"] in diffs:
-        out["pdf"] = pdfdiff.diff(key / "files" / ores["pdf"], pdf)
-    else:
-        out["pdf"] = {"same": True}
-    return out
-
-
-def mode_applies(mode, c, ores):
-    tools = set(ores.get("tools", []))
-    if mode == "plain":
-        return None
-    if mode in ("build", "machine"):
-        if c["engine"] != "pdflatex":
-            return "partex build has no XeTeX yet"
-        if tools - {"bibtex", "makeindex"}:
-            return "needs " + ", ".join(sorted(tools - {"bibtex", "makeindex"})) + " (not in partex build)"
-    if mode == "ssa" and tools - {"bibtex", "makeindex"}:
-        return "needs " + ", ".join(sorted(tools - {"bibtex", "makeindex"})) + " (not in SSA mode's tools)"
-    return None
-
-
-def run_mode(mode, c, key, ores, doc, binary, formats):
-    na = mode_applies(mode, c, ores)
-    if na:
-        return {"status": "n/a", "note": na}
-    run_dir = prepare(doc, c, None)
-    for d in ("cache", "store"):
-        shutil.rmtree(WORK / d, ignore_errors=True)
-    base = {rel: common.sha256_file(run_dir / rel) for rel in common.tree_files(run_dir)}
-    ist = {k for k in base if k.endswith(".ist")}
-    job = Path(c["main"]).stem
-    log = []
-    eng = c["engine"]
-    if mode == "plain":
-        r = loop(run_dir, partex_compat(binary, eng, c["main"]), Tools(binary),
-                 side_env(eng, partex=True, formats=formats), job, base, ist, log)
-    else:
-        if mode == "ssa":
-            cmd = partex_compat(binary, eng, c["main"])
-            extra = {"PARTEX_SSA": "1"}
-        else:
-            cmd = [binary, "build", "--no-shell-escape", "--color", "never", c["main"]]
-            extra = {"PARTEX_MACHINE": "0"} if mode == "build" else {}
-            if mode == "build":
-                cmd.insert(2, "--no-machine")
-        x = common.run(cmd, run_dir, side_env(eng, extra, partex=True, formats=formats),
-                       MODE_TIMEOUT, out=run_dir / "term-mode.txt")
-        log.append({"cmd": mode, **x})
-        r = {"status": "timeout" if x["timeout"] else "ok", "exit": x["exit"],
-             "wall_s": x["wall_s"], "rss_kib": x["rss_kib"]}
-    res = {k: r[k] for k in ("exit", "wall_s", "rss_kib", "passes", "settled") if k in r}
-    term = b"".join(p.read_bytes()[-400000:] for p in sorted(run_dir.glob("term*.txt")))
-    if r["status"] == "timeout":
-        res["status"] = "timeout"
-    elif b"panicked at" in term:
-        m = re.search(rb"panicked at[^\n]*\n?[^\n]*", term)
-        res.update(status="error", note=m.group(0)[:300].decode("latin-1"))
-    elif not (run_dir / ores["pdf"]).exists():
-        res.update(status="error", note=why_failed(run_dir, job, run_dir / "term-mode.txt"))
-    else:
-        cmp = compare(run_dir, base, key, ores)
-        res.update(cmp)
-        same = cmp["pdf"].get("same") and not cmp["files"]
-        res["status"] = "identical" if same else "differs"
-        if not same:
-            first = cmp["pdf"].get("summary") if not cmp["pdf"].get("same") else None
-            res["first"] = first or ("files: " + ", ".join(cmp["files"][:4]))
-    res["log"] = log
-    shutil.rmtree(run_dir, ignore_errors=True)
-    return res
-
-
 def load_list(path):
     data = common.read_json(path)
     if data is None:
@@ -496,34 +393,6 @@ def cmd_oracle(args):
         key, res = oracle_one(args.doc, c, args.cache, args.new_cache)
         print(f"{c['id']}: {res['status']} {res.get('reason', '')} passes={res.get('passes')} "
               f"tools={res.get('tools')} {res.get('wall_s')}s", flush=True)
-
-
-def cmd_run(args):
-    items = shard(load_list(args.list), args.shard)
-    if args.ids:
-        items = [c for c in items if c["id"] in args.ids.split(",")]
-    modes = args.modes.split(",")
-    out = Path(args.out)
-    for c in items:
-        h = common.tree_hash(Path(args.doc) / c["dir"])
-        res = {"id": c["id"], "path": c["path"], "engine": c["engine"], "suite": f"manuals-{c['engine']}"}
-        if c.get("input_hash") and h != c["input_hash"]:
-            res.update(status="error", note=f"input tree hash {h[:16]} is not the pinned {c['input_hash'][:16]}")
-            common.write_json(out / f"{c['id']}.json", res)
-            print(f"{c['id']}: HASH MISMATCH", flush=True)
-            continue
-        key, ores = oracle_one(args.doc, c, args.cache, args.new_cache)
-        res["oracle"] = {k: ores.get(k) for k in ("status", "reason", "passes", "tools", "wall_s", "rss_kib", "errors")}
-        if ores["status"] != "ok":
-            res["status"] = "excluded"
-            common.write_json(out / f"{c['id']}.json", res)
-            continue
-        res["modes"] = {}
-        for m in modes:
-            res["modes"][m] = run_mode(m, c, key, ores, args.doc, args.bin, args.formats)
-            common.write_json(out / f"{c['id']}.json", res)
-        line = " ".join(f"{m}={v['status']}" for m, v in res["modes"].items())
-        print(f"{c['id']}: {line}", flush=True)
 
 
 def cmd_pin(args):
@@ -568,26 +437,20 @@ def main():
     d = sub.add_parser("discover")
     d.add_argument("--doc", required=True)
     d.add_argument("--out", required=True)
-    for name in ("oracle", "run"):
-        p = sub.add_parser(name)
-        p.add_argument("--list", required=True)
-        p.add_argument("--doc", required=True)
-        p.add_argument("--cache", required=True)
-        p.add_argument("--new-cache")
-        p.add_argument("--shard")
-        p.add_argument("--ids")
-        if name == "run":
-            p.add_argument("--bin", required=True)
-            p.add_argument("--formats", required=True)
-            p.add_argument("--out", required=True)
-            p.add_argument("--modes", default="plain,build,machine,ssa")
+    p = sub.add_parser("oracle")
+    p.add_argument("--list", required=True)
+    p.add_argument("--doc", required=True)
+    p.add_argument("--cache", required=True)
+    p.add_argument("--new-cache")
+    p.add_argument("--shard")
+    p.add_argument("--ids")
     p = sub.add_parser("pin")
     p.add_argument("--list", required=True)
     p.add_argument("--cache", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--image")
     args = ap.parse_args()
-    {"discover": discover, "oracle": cmd_oracle, "run": cmd_run, "pin": cmd_pin}[args.cmd](args)
+    {"discover": discover, "oracle": cmd_oracle, "pin": cmd_pin}[args.cmd](args)
 
 
 if __name__ == "__main__":
