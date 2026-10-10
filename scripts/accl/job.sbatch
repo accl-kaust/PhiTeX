@@ -32,7 +32,7 @@ mkdir -p "$w/cargo" "$out" "$r"
 # (the results reach the shared home however the job ends)
 trap 'cp -a "$r/." "$out/" 2>/dev/null; rm -rf "$w"' EXIT
 exec > >(tee "$out/job.log") 2>&1
-cp -a "$here/tasks" "$w/tasks"
+[ -d "$here/tasks" ] && cp -a "$here/tasks" "$w/tasks"  # (machine mode's task scripts, gone with b8c6a5d; `cmd` needs none)
 
 git clone -q "$HOME/code/flinner/partex-phitex.git" "$w/partex"
 git -C "$w/partex" -c advice.detachedHead=false checkout -q "$commit"
