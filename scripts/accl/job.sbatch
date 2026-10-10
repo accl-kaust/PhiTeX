@@ -28,6 +28,8 @@ here=$HOME/code/flinner/partex-phitex-accl
 w=/tmp/$USER-$SLURM_JOB_ID
 out=$HOME/code/flinner/partex-phitex-runs/$task-$SLURM_JOB_ID
 r=$w/results
+# (a full node disk corrupts results silently: fail at once below 20 GB free)
+free=$(df -Pk /tmp | awk 'NR==2{print $4}'); [ "$free" -ge 20971520 ] || { echo "FAILED: /tmp on $(hostname) has only $((free/1048576)) GB free (need 20); leftovers: $(ls -d /tmp/$USER-* 2>/dev/null | wc -l) of ours"; exit 75; }
 mkdir -p "$w/cargo" "$out" "$r"
 # (the results reach the shared home however the job ends)
 trap 'cp -a "$r/." "$out/" 2>/dev/null; rm -rf "$w"' EXIT
