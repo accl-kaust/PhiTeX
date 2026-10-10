@@ -1099,6 +1099,20 @@ its step. A summary line says "(a no-op edit fails too)" when the update
 fails whatever the edit. `PHITEX_FUZZ_DUMP=DIR` writes both graphs, both
 logs and both DVI files.
 
+**At scale** (`scripts/flow-fuzz.sh [SEEDS] [OUT]`, for the cluster): SEEDS
+seeds (5000 by default) of 6 edits at 1 thread, then SEEDS/5 other seeds
+at 8 threads (random schedules). Chunks of 100 seeds run `JOBS` at a
+time, under `scripts/sandbox`. It writes `OUT/summary.txt` (passed and
+failed by document) and `OUT/classes.txt` (`phitex-flow --fuzz-classify
+REPRO...`: F1, F2?, F6 for the open findings by how they fail, else
+`edit`, `noop`, `history`, `over`, `panic` or `timeout` with the
+document, the edit's kind and where the log first differs). One
+reproduction per new class goes into `OUT/min/`, cut down by
+`scripts/flow-fuzz-min.py` (delta debugging over the paragraphs of the
+text; the edit's paragraph stays). `phitex-flow --fuzz-orders DOC FILE A
+B [DIR]` compares two cold builds of a text in two orders (`priority`,
+`random:N`; `-` is the document's own text). It was the oracle for F6.
+
 **Over-invalidation** (seeds that keep their nodes; `src/fuzz.rs`
 `over_invalidation`): a piece whose text the edit changed, a new piece, or
 one entered in a predecessor's state may run all its nodes; any other
@@ -1119,6 +1133,11 @@ of 3 edits by default, `PHITEX_FUZZ_TRIP=N`): passes.
 its first edit, and a no-op edit fails the same), hyphens seed 102 (F2),
 big seed 236 (F6; cut down, its text also gives F4). The
 over-invalidation: story seed 161 (F5).
+`scripts/flow-fuzz.sh 1000` (1000 seeds at 1 thread, 200 at 8): 852 and
+168 passed. Classes: 170 F1 (TRIP); 4 F2 (hyphens 102, 802, 970 with
+history, 1187 a split); 1 F6 (big 236); 1 F6 by its cause (big 1153);
+4 over-invalidations, all F5 (story 161 and 1127, pages 659, hyphens
+830). Nothing new beyond F1–F6.
 
 **Open findings** (`tests/fuzz/open/*.repro` must still fail; a fixed one
 moves to `tests/fuzz/fixed/`, which must pass):
@@ -1132,6 +1151,25 @@ moves to `tests/fuzz/fixed/`, which must pass):
   same text updated again ships 3, no node running again. In TRIP
   every update after the first differs (`--fuzz 6 1 1 --threads 1`), so
   no TRIP edit can be checked until F1 is fixed.
+  *Cause* (traced): the cold build fires three times at node (0,15).
+  The first fire reads `\holdinginserts` = 1 and holds the inserts. The
+  routine's `\global\holdinginserts0` goes into the names index at
+  (0,15), so fires 2 and 3 read 0. Then the default fire at (0,24). In
+  the second update the first fire at (0,15) is a predicted position. The
+  page builder's hold test (page.rs, §1018: `env.read(Holdinginserts)`)
+  goes through `BuildFold::read` and `read_at`, i.e.
+  `names.reaching(key, (k, node+1))`. That includes the last build's
+  fold definitions at (0,15), which are not retracted yet: `pass()` only
+  drops positions before the scan's, and `fire()` retracts only after
+  the hold test. So it reads 0 and does not hold. `find_memo` then finds
+  the last build's no-hold run (reads nothing that changed), and one
+  fire is lost. One `Pos` holds what all three fires at (0,15) defined.
+  *Fix wanted*: drop the predicted definitions at the fire's position
+  before the page builder's first read for that fire (`\holdinginserts`,
+  `\output`, `\box255`, the insert boxes, §1012–1018). Or make the
+  fold's reads at its own position see only this build's earlier fires
+  there. Several fires at one node probably need a fire index in the
+  position.
 - **F2. A kept node's error context shows the line as it was.**
   `tests/fuzz/open/f2-error-context-line.repro`: `\hsize=3iin
   \tolerance=1000`, an `X` inserted after `3iin `: the "Illegal unit"
@@ -1164,6 +1202,17 @@ moves to `tests/fuzz/fixed/`, which must pass):
   value it had (`\fz`, `\vsize`, `\escapechar` now from piece 134, the
   same values), and n1, reading `\vsize` from the new piece too, is kept.
   A macro call's reading node compares the definer, not the meaning.
+  It is not only macros: pages seed 659 step 5 (a swap) runs the
+  `\bye` piece again, 5 of its 6 nodes, whose only changed read is
+  `\vsize` = 14208860 now from piece 134 instead of 133. Hyphens seed
+  830 step 5 (a split) runs 2 of 3 nodes of `\tolerance=1000`, whose
+  only changed read is `\hsize` = 14208860 from piece 137 instead of
+  133. Story seed 1127 (8 threads) is the swap again. So some reads
+  compare the definer's piece, not the value.
+  `tests/fuzz/open/f5-new-definer-equal-value.repro` (cut down from
+  hyphens 830): `\vsize=2in \hsize=3in \tolerance=1000` split into two
+  pieces before `\tolerance`, so `\hsize` now comes from a new piece with
+  the same value. The `\tolerance` piece runs 2 of its 3 nodes again.
 - **F6. Big: the order of a cold build changes its output.** At 1
   worker, waiting reads, `Order::Random(400)` gives another DVI and log
   than priority order, every time (`tests/design.rs`
@@ -1171,6 +1220,35 @@ moves to `tests/fuzz/fixed/`, which must pass):
   `Order::Random(7)` does about one run in eight. Big seed 236 (`--fuzz
   236 1 1 --threads 1`) is it: its first build ran in that order. The
   smaller documents do not show it.
+  `tests/fuzz/open/f6-order-moves-a-run.repro`, 6 pieces: `\hsize=300pt`;
+  paragraph P; `\hsize=100pt`; P again (the same text); `\input fzsub`;
+  `\end`. `phitex-flow --fuzz-orders story FILE random:9 priority` says
+  "differs": in random order the first P is broken at 100pt.
+  *Cause* (traced): the `\input` piece restructures the sequence after 4
+  of the 6 pieces are done. The first P has not run, the second has. The
+  next round's layout matches the new pieces with the old ones.
+  `Matcher::new` indexes only old pieces that have a run, so the first P
+  does not find its own old piece by pointer. `Matcher::find` falls back
+  to equal text and takes old piece 3 (the second P, which read
+  `\hsize` = 100pt from piece 2). That run is kept as Done at position 1:
+  its definer is now after it, and its read is not checked again there.
+  Its `Para.lb.hsize` is 100pt, and the lines come from it. Big shows the
+  same: 30 pieces were still unrun at the restructure, and part 0's story
+  piece takes part 1's copy (`\hsize=3in`, from part 0's hyphens). The
+  pieces' graphs are the same in both orders (the dumps differ only in
+  piece ids; the lean regeneration shows the right reads). The page fed
+  at the first fire differs.
+  *Fix wanted*: index old pieces without a run by pointer too, so each
+  piece keeps its own place. A run that the text fallback moves to
+  another place has its reads checked by value there, or is not kept.
+  Not only in random orders: big seed 1153 step 6 (removing an `\input
+  fzsub`, 8 threads; it fails at 1 thread in priority order too). The
+  first build, in priority order, restructures at the `\input` with 164
+  of 170 pieces done. Part 1's "Mr.~Drofnats" piece has not run yet and
+  takes part 2's run by equal text (old 152 for new 143). That build is
+  already wrong, the same way as its cold build. The update without the
+  `\input` keeps the wrong run, and the cold build of the edited text
+  (no restructure) does not have it.
 
 **Design tests** (`tests/design.rs`, the brief's 1–6; 7 waits for
 `Key::File` by writes):

@@ -208,6 +208,66 @@ fn fuzz(args: &[String]) -> ExitCode {
     std::process::exit(i32::from(fails + over > 0));
 }
 
+/// `phitex-flow --fuzz-orders DOC FILE A B [DIR]`: two cold builds of FILE's
+/// text, as corpus document DOC is built, at 1 worker in orders A and B
+/// (`priority`, `random:N`): "same" or "differs: WHAT" (exit 1); DIR gets
+/// both graphs and logs (a.dump, b.dump, a.log, b.log).
+fn fuzz_orders(args: &[String]) -> ExitCode {
+    use phitex_flow::fuzz;
+    let (Some(doc), Some(file), Some(first), Some(second)) = (
+        args.first(),
+        args.get(1),
+        args.get(2).and_then(|s| fuzz::parse_order(s)),
+        args.get(3).and_then(|s| fuzz::parse_order(s)),
+    ) else {
+        eprintln!("usage: phitex-flow --fuzz-orders DOC FILE ORDER ORDER [DIR]");
+        return ExitCode::FAILURE;
+    };
+    let corpus = fuzz::corpus();
+    let Some(found) = corpus.iter().find(|x| x.name == *doc) else {
+        eprintln!("--fuzz-orders: no document {doc}");
+        return ExitCode::FAILURE;
+    };
+    // (`-`: the document's own text)
+    let read = if file == "-" { Ok(found.text.clone()) } else { std::fs::read_to_string(file) };
+    let Ok(text) = read else {
+        eprintln!("--fuzz-orders: {file}: unreadable");
+        return ExitCode::FAILURE;
+    };
+    let dir = args.get(4);
+    let (w, x, y) = fuzz::orders_differ(found, &text, first, second, dir.is_some());
+    if let Some(dir) = dir {
+        let dir = std::path::Path::new(dir);
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(dir.join("a.dump"), &x.dump);
+        let _ = std::fs::write(dir.join("b.dump"), &y.dump);
+        let _ = std::fs::write(dir.join("a.log"), x.log.join("\n"));
+        let _ = std::fs::write(dir.join("b.log"), y.log.join("\n"));
+    }
+    match w {
+        None => {
+            println!("same");
+            ExitCode::SUCCESS
+        }
+        Some(w) => {
+            println!("differs: {w}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `phitex-flow --fuzz-classify FILE...`: each reproduction's class
+/// (`fuzz::classify`), a line `CLASS<TAB>FILE`.
+fn fuzz_classify(files: &[String]) -> ExitCode {
+    for f in files {
+        match std::fs::read_to_string(f).ok().and_then(|s| phitex_flow::fuzz::Repro::parse(&s)) {
+            Some(r) => println!("{}\t{f}", phitex_flow::fuzz::classify(&r)),
+            None => println!("unreadable\t{f}"),
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 /// `phitex-flow --fuzz-replay FILE`: a reproduction run again.
 fn fuzz_replay(file: &str) -> ExitCode {
     let Some(r) = std::fs::read_to_string(file).ok().and_then(|s| phitex_flow::fuzz::Repro::parse(&s)) else {
@@ -236,6 +296,12 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--fuzz") {
         return fuzz(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("--fuzz-classify") {
+        return fuzz_classify(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("--fuzz-orders") {
+        return fuzz_orders(&args[1..]);
     }
     if args.first().map(String::as_str) == Some("--fuzz-replay") {
         return fuzz_replay(args.get(1).map_or("", String::as_str));
