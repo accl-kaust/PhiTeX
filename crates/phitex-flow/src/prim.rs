@@ -128,8 +128,9 @@ pub enum Conv {
     PdfUnescapeHex,
     /// `\leftmarginkern`, `\rightmarginkern`.
     LeftMarginKern,
-    /// `\pdfmatch [icase] [subcount n] {pattern}{string}`.
+    /// `\pdfmatch [icase] [subcount n] {pattern}{string}`, `\pdflastmatch n`.
     PdfMatch,
+    PdfLastMatch,
     RightMarginKern,
 }
 
@@ -1141,7 +1142,7 @@ pub const PDFTEX_PRIMITIVES: [(&str, Prim); 154] = [
     ("pdflastannot", Prim::PdfItem(5)),
     ("pdflastlinedepth", Prim::DimenPar(DimenPar::Pdflastlinedepth)),
     ("pdflastlink", Prim::PdfItem(11)),
-    ("pdflastmatch", Prim::PdfUnimpl(67)),
+    ("pdflastmatch", Prim::Convert(Conv::PdfLastMatch)),
     ("pdflastobj", Prim::PdfItem(1)),
     ("pdflastxform", Prim::PdfItem(2)),
     ("pdflastximage", Prim::PdfItem(3)),
@@ -1226,7 +1227,7 @@ pub const PDFTEX_PRIMITIVES: [(&str, Prim); 154] = [
     ("showstream", Prim::IntPar(IntPar::Showstream)),
     ("stbscode", Prim::Mat(Mat::FontInt(8))),
     ("synctex", Prim::IntPar(IntPar::Synctex)),
-    ("tagcode", Prim::PdfUnimpl(152)),
+    ("tagcode", Prim::Mat(Mat::FontInt(5))),
     ("tracingstacklevels", Prim::IntPar(IntPar::Tracingstacklevels)),
 ];
 

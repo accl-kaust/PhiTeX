@@ -350,19 +350,55 @@ impl Exec<'_> {
             }
             Conv::PdfMatch => {
                 // (pdftex.web 470, `matchstrings`: 1, 0, or -1 for a bad
-                // expression; the submatches `\pdflastmatch` gives are not
-                // kept, CORE.md)
+                // expression; the string and the submatches, up to the
+                // subcount (10), defined for `\pdflastmatch`, global)
                 let icase = self.keyword("icase");
-                if self.keyword("subcount") {
-                    let _ = self.scan_int();
-                }
+                let subcount = if self.keyword("subcount") { self.scan_int() } else { -1 };
                 let pat = self.pdf_string();
                 let t = self.pdf_string();
-                s.push_str(match crate::ere::is_match(&pat, &t, icase) {
-                    Some(true) => "1",
-                    Some(false) => "0",
-                    None => "-1",
-                });
+                match crate::ere::find(&pat, &t, icase) {
+                    None => s.push_str("-1"),
+                    Some(found) => {
+                        s.push(if found.is_some() { '1' } else { '0' });
+                        let n = if subcount < 0 { 10 } else { subcount as usize };
+                        let caps: Vec<i32> = found
+                            .map(|c| {
+                                (0..n)
+                                    .flat_map(|i| match c.get(i).copied().flatten() {
+                                        Some((a, b)) => [a as i32, b as i32],
+                                        None => [-1, -1],
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        self.define(Key::LastMatch(0), Val::Name(Arc::from(t)), true);
+                        self.define(Key::LastMatch(1), Val::Penalties(caps.into()), true);
+                    }
+                }
+            }
+            Conv::PdfLastMatch => {
+                // (pdftex.web 470, `getmatch`: `start->text`, or `-1->`)
+                let mut n = self.scan_int();
+                if n < 0 {
+                    self.err("Bad match number".into());
+                    n = 0;
+                }
+                let caps = match self.get(&Key::LastMatch(1)) {
+                    Val::Penalties(c) => c,
+                    _ => Arc::from([]),
+                };
+                let at = 2 * n as usize;
+                match (caps.get(at).copied(), caps.get(at + 1).copied()) {
+                    (Some(a), Some(b)) if a >= 0 && b >= a => {
+                        let t = match self.get(&Key::LastMatch(0)) {
+                            Val::Name(t) => t,
+                            _ => Arc::from(""),
+                        };
+                        let _ = write!(s, "{a}->");
+                        s.extend(t.chars().skip(a as usize).take((b - a) as usize));
+                    }
+                    _ => s.push_str("-1->"),
+                }
             }
             Conv::LeftMarginKern | Conv::RightMarginKern => {
                 // (pdftex.web 470: a box register's hbox, its margin kern at

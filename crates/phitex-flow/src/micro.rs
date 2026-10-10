@@ -25,6 +25,11 @@ pub const LP: u8 = 2;
 pub const RP: u8 = 3;
 pub const EF: u8 = 4;
 pub const TAG: u8 = 5;
+/// `micro::TAG`'s bits: the lig/kern program's, the charlist's, the
+/// extensible recipe's tag cleared.
+pub const TAG_LIG: i32 = 1;
+pub const TAG_LIST: i32 = 2;
+pub const TAG_EXT: i32 = 4;
 pub const NOLIG: u8 = 6;
 pub const KNBS: u8 = 7;
 pub const STBS: u8 = 8;
@@ -70,6 +75,20 @@ pub fn set_code(table: &[i32], kind: u8, c: u8, v: i32) -> Arc<[i32]> {
     let (lo, hi) = code_range(kind);
     t[usize::from(c)] = v.clamp(lo, hi);
     t.into()
+}
+
+/// `\tagcode f c`'s value (`get_tag_code`): character `c`'s tag after the
+/// tags `cleared` (1 a lig/kern program, 2 a charlist, 4 an extensible
+/// recipe, 0 none), -1 if the font has no such character.
+pub fn tag_code(f: &Font, cleared: &[i32], c: i32) -> i32 {
+    let Some(g) = f.glyph(c) else { return -1 };
+    let gone = cleared.get(c as usize).copied().unwrap_or(0);
+    match g.tag {
+        crate::tfm::Tag::Lig(_) if gone & TAG_LIG == 0 => 1,
+        crate::tfm::Tag::List(_) if gone & TAG_LIST == 0 => 2,
+        crate::tfm::Tag::Ext(_) if gone & TAG_EXT == 0 => 4,
+        _ => 0,
+    }
 }
 
 /// A font's `\pdffontexpand` parameters: the stretch and shrink limits

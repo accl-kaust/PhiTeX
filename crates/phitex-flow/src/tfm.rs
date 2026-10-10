@@ -522,12 +522,15 @@ impl Font {
 
     /// `\pdfnoligatures`'s value (`test_no_ligatures`): 1 if no character
     /// has a tag whose code is odd (a lig/kern program or an extensible
-    /// recipe), else 0.
-    pub fn test_no_ligatures(&self, removed: bool) -> i32 {
-        let odd = self.glyphs.iter().flatten().any(|g| match g.tag {
-            Tag::Lig(_) => !removed,
-            Tag::Ext(_) => true,
-            _ => false,
+    /// recipe) after the tags `cleared` (`micro::TAG`'s table), else 0.
+    pub fn test_no_ligatures(&self, cleared: &[i32]) -> i32 {
+        let odd = self.glyphs.iter().enumerate().any(|(i, g)| {
+            let gone = cleared.get(i + self.bc.max(0) as usize).copied().unwrap_or(0);
+            match g.map(|g| g.tag) {
+                Some(Tag::Lig(_)) => gone & 1 == 0,
+                Some(Tag::Ext(_)) => gone & 4 == 0,
+                _ => false,
+            }
         });
         i32::from(!odd)
     }

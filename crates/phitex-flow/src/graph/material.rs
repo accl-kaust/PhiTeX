@@ -131,9 +131,10 @@ struct Main {
     ins_disc: bool,
     /// The token after the characters, read and not one.
     look: Option<Tok>,
-    /// pdfTeX: `\pdfnoligatures` was given the font (its characters have
-    /// no lig/kern program).
-    nolig: bool,
+    /// pdfTeX: the tags `\pdfnoligatures` and `\tagcode` cleared of the
+    /// font's characters (`micro::TAG`'s table): one whose lig/kern
+    /// program's is cleared has none.
+    tags: Arc<[i32]>,
     /// pdfTeX's `\pdfprependkern`/`\pdfappendkern` kerns, if either is
     /// positive.
     auto: Option<AutoKern>,
@@ -1055,11 +1056,11 @@ impl Exec<'_> {
             rt_hit: false,
             ins_disc: false,
             look: None,
-            nolig: false,
+            tags: Arc::from([]),
             auto: None,
         };
         let key = self.font_key(&m.font);
-        m.nolig = matches!(self.get(&Key::FontCode(crate::micro::NOLIG, key.clone())), Val::Int(1));
+        m.tags = self.font_code_table(&Key::FontCode(crate::micro::TAG, key.clone()));
         m.auto = self.auto_kern(&key);
         let mut l = if let Some(k) = m.auto.as_ref().and_then(|a| a.kern(NON_CHAR, m.cur_l)) {
             // (pdftex.web: a kern before the first character, which then
@@ -1186,7 +1187,10 @@ impl Exec<'_> {
                         L::Move
                     }
                     // (§1039)
-                    Tag::Lig(start) if m.cur_r != NON_CHAR && !m.nolig => {
+                    Tag::Lig(start)
+                        if m.cur_r != NON_CHAR
+                            && m.tags.get(m.cur_l as usize).is_none_or(|t| t & crate::micro::TAG_LIG == 0) =>
+                    {
                         m.k = usize::from(start);
                         m.j = m.lk();
                         if m.j.skip <= LigKern::STOP {

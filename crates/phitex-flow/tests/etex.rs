@@ -175,7 +175,7 @@ programs!(version, expr, detok, scan, ifs, groups, lastnode, glue, interaction, 
 
 // (pdfTeX's font expansion and character protrusion, in PDF mode: the
 // lines `\showbox` shows)
-programs!(micro);
+programs!(micro, pdfmatch);
 
 // (e-TeX with input and output: `\readline` on a stream, `\everyeof` after
 // an `\input` file, a file inside `\scantokens`, `\endinput` in a

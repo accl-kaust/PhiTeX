@@ -178,6 +178,12 @@ pub enum Key {
     /// How many fonts `\pdfcopyfont` and `\letterspacefont` made from a
     /// font so far (`Val::Int`), global: the next one's number.
     FontCopies(Arc<str>),
+    /// What the last `\pdfmatch` matched, for `\pdflastmatch` (global,
+    /// pdfTeX's `match_string`, `pmatch`): 0 the string searched
+    /// (`Val::Name`), 1 the submatches (`Val::Penalties`: start, end per
+    /// subexpression up to the subcount, -1 for none; empty: the match
+    /// failed, or none yet).
+    LastMatch(u8),
     /// pdfTeX's `\pdfglyphtounicode` entry of a glyph name (global, its
     /// `glyph_unicode_tree`): `Val::Int` (a code; -1 none), `Val::Name` (a
     /// string of hexadecimal digits); read by the PDF file's ToUnicode
@@ -269,6 +275,7 @@ impl Key {
             Key::FontExpand(_) => w(67, 0),
             Key::FontAttr(_) => w(68, 0),
             Key::FontCopies(_) => w(69, 0),
+            Key::LastMatch(k) => w(71, u64::from(*k)),
             Key::Cs(n) => w(63, u64::from(*n)),
             // (a font's: the font's name is hashed too)
             Key::HyphenChar(_) => w(21, 0),
@@ -499,6 +506,7 @@ impl fmt::Display for Shown<'_, Key> {
             Key::FontExpand(x) => write!(f, "\\pdffontexpand ({x})"),
             Key::FontAttr(x) => write!(f, "\\pdffontattr ({x})"),
             Key::FontCopies(x) => write!(f, "font copies ({x})"),
+            Key::LastMatch(k) => write!(f, "\\pdflastmatch ({k})"),
             Key::LastFont => write!(f, "font_ptr"),
             Key::Format => write!(f, "format_ident"),
             Key::MagSet => write!(f, "mag_set"),
@@ -664,6 +672,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -
         Key::SplitMarks => Val::SplitMarks(Arc::from(Vec::new())),
         // (and no `\pdffontattr` text)
         Key::Format | Key::FontAttr(_) => Val::Name(Arc::from("")),
+        Key::LastMatch(0) => Val::Name(Arc::from("")),
         // (above, 0: the job not ended; no magnification fixed yet; batch
         // mode, as the oracles run TeX: `-interaction=batchmode`; a build
         // gives its own, `Build::set_interaction`: IniTeX's
@@ -673,7 +682,9 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -
         Key::Patterns(_) => Val::Patterns(crate::hyph::Patterns::new()),
         Key::Exceptions(_) => Val::Exceptions(crate::hyph::Exceptions::new()),
         // (and pdfTeX's codes, `\pdffontexpand`'s parameters: none given)
-        Key::PenaltiesArray(_) | Key::FontCode(..) | Key::FontExpand(_) => Val::Penalties(Arc::from([])),
+        Key::PenaltiesArray(_) | Key::FontCode(..) | Key::FontExpand(_) | Key::LastMatch(_) => {
+            Val::Penalties(Arc::from([]))
+        }
         // (an empty page's, read outside an output routine: tex.web 421's
         // `max_dimen` for `\pagegoal`, else 0)
         Key::Page(k) => Val::Int(if *k == 0 { 0x3FFF_FFFF } else { 0 }),
@@ -753,6 +764,7 @@ pub(crate) fn every_key() -> Vec<Key> {
         Key::FontExpand(f.clone()),
         Key::FontAttr(f.clone()),
         Key::FontCopies(f),
+        Key::LastMatch(0),
     ]
 }
 
@@ -810,6 +822,7 @@ pub(crate) fn key_index(k: &Key) -> usize {
         Key::FontExpand(_) => 47,
         Key::FontAttr(_) => 48,
         Key::FontCopies(_) => 49,
+        Key::LastMatch(_) => 50,
     }
 }
 

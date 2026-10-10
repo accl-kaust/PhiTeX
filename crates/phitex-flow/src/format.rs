@@ -63,6 +63,7 @@ pub fn saved(key: &Key) -> bool {
             | Key::Ended
             | Key::MainTail
             | Key::MainDepth
+            | Key::LastMatch(_)
     )
 }
 

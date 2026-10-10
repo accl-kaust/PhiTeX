@@ -203,8 +203,28 @@ impl Exec<'_> {
         }
         let f = self.scan_font_ident();
         let key = Key::FontCode(which, f.key.clone());
-        if which == micro::NOLIG {
-            self.define(key, Val::Int(1), true);
+        // (`\pdfnoligatures` and `\tagcode` clear characters' tags: the
+        // font's `micro::TAG` table of the tags cleared, `set_no_ligatures`
+        // the lig/kern program's of every character, `set_tag_code` those
+        // of `abs(fix_int(n, -7, 0))`'s bits of an existing character)
+        if which == micro::NOLIG || which == micro::TAG {
+            let tkey = Key::FontCode(micro::TAG, f.key.clone());
+            let mut t: Vec<i32> = self.font_code_table(&tkey).to_vec();
+            t.resize(256, 0);
+            if which == micro::NOLIG {
+                for x in &mut t {
+                    *x |= micro::TAG_LIG;
+                }
+            } else {
+                let c = self.scan_char_num();
+                self.optional_equals();
+                let v = self.scan_int().clamp(-7, 0).abs();
+                if f.glyph(c).is_none() {
+                    return;
+                }
+                t[c as usize] |= v;
+            }
+            self.define(tkey, Val::Penalties(t.into()), true);
             return;
         }
         let c = self.scan_char_num();
@@ -231,9 +251,13 @@ impl Exec<'_> {
             return self.int(&k);
         }
         let f = self.scan_font_ident();
-        if which == micro::NOLIG {
-            let removed = matches!(self.get(&Key::FontCode(micro::NOLIG, f.key.clone())), Val::Int(1));
-            return f.test_no_ligatures(removed);
+        if which == micro::NOLIG || which == micro::TAG {
+            let t = self.font_code_table(&Key::FontCode(micro::TAG, f.key.clone()));
+            if which == micro::NOLIG {
+                return f.test_no_ligatures(&t);
+            }
+            let c = self.scan_char_num();
+            return micro::tag_code(&f, &t, c);
         }
         let c = self.scan_char_num();
         let t = self.font_code_table(&Key::FontCode(which, f.key.clone()));
