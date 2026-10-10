@@ -353,7 +353,15 @@ fn where_shown(text: &[char], n: &Node) -> String {
         let b = (p + 40).min(t.len());
         t[a..b].iter().collect::<String>().replace('\r', "|")
     };
-    let mut s = format!("node {:?} at {} [{}]", n.kind, n.out.pos, around(text, n.out.pos));
+    let mut s = format!(
+        "node {:?} at {} [{}]; {} lists pending, {} groups, {} conditionals",
+        n.kind,
+        n.out.pos,
+        around(text, n.out.pos),
+        n.out.pending.len(),
+        n.out.groups.len(),
+        n.out.conds.len()
+    );
     for i in 0..n.out.texts.len() {
         if let Some(x) = n.out.texts.get(i) {
             let _ = std::fmt::Write::write_fmt(&mut s, format_args!("; text {i} {:?} at {} [{}]", x.kind, x.pos, around(&x.text, x.pos)));
@@ -2769,7 +2777,14 @@ pub fn run_piece(
                 };
                 // (`PHITEX_HANG_DUMP`: a run past millions of commands says
                 // where it is, for a loop's diagnosis)
-                if ran.is_multiple_of(1 << 22) && std::env::var_os("PHITEX_HANG_DUMP").is_some() {
+                let every = if ran.is_multiple_of(1 << 12) {
+                    std::env::var("PHITEX_HANG_STEPS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(1 << 22)
+                } else {
+                    1 << 22
+                };
+                if ran.is_multiple_of(every.max(1 << 12))
+                    && (std::env::var_os("PHITEX_HANG_DUMP").is_some() || std::env::var_os("PHITEX_HANG_STEPS").is_some())
+                {
                     eprintln!("runaway run: {ran} commands; {}", where_shown(text, &n));
                 }
                 n
@@ -3778,6 +3793,36 @@ impl<'a> Exec<'a> {
         o
     }
 
+    /// (`PHITEX_HANG_DUMP`) What is being expanded: the next tokens of the
+    /// top input lists, for an expansion that does not end.
+    fn expansion_shown(&mut self) {
+        let next = |l: &Level| l.list[l.at.min(l.end)..l.end.min(l.at + 24)].to_vec();
+        let mut lists: Vec<Vec<Tok>> = self.st.pending.top.iter().map(next).collect();
+        let mut below = self.st.pending.below.clone();
+        while lists.len() < 5
+            && let Some(c) = below
+        {
+            lists.push(next(&c.level));
+            below = c.below.clone();
+        }
+        let mut s = format!(
+            "expansion: {} steps, {} lists pending, {} groups, {} conditionals, {} texts, {} nodes, at {}",
+            self.steps,
+            self.st.pending.len(),
+            self.st.groups.len(),
+            self.st.conds.len(),
+            self.st.texts.len(),
+            self.chain.nodes.len(),
+            self.st.pos
+        );
+        for (i, l) in lists.iter().enumerate() {
+            let mut o = String::new();
+            self.show_toks(&mut o, l);
+            let _ = std::fmt::Write::write_fmt(&mut s, format_args!("; list {i}: {}", o.chars().take(200).collect::<String>()));
+        }
+        eprintln!("{s}");
+    }
+
     /// Font `f`'s identity as the piece's own name (for the keys of its
     /// parameters).
     fn font_key(&mut self, f: &Font) -> Arc<str> {
@@ -3823,7 +3868,27 @@ impl<'a> Exec<'a> {
         }
         // (tex.web 325: lists read to their end go first)
         self.end_read_lists();
+        if self.input_full() {
+            return;
+        }
         self.st.pending.push((Arc::from([t]), 0, true));
+    }
+
+    /// Whether the input stack is full (tex.web 321's `push_input`: the
+    /// levels under the current one are `stack_size`): the run stops with
+    /// TeX's fatal "TeX capacity exceeded" (an expansion that nests on
+    /// and on ends there, as TeX's does).
+    fn input_full(&mut self) -> bool {
+        let n = self.env.limits().stack_size;
+        if self.st.pending.len() + self.st.texts.len() < n {
+            return false;
+        }
+        self.overflow(format!("TeX capacity exceeded, sorry [input stack size={n}]"));
+        self.st.pending.clear();
+        self.st.texts = Stack::new();
+        self.ptext = None;
+        self.st.pos = self.text.len();
+        true
     }
 
     /// The token lists read to their end go (not those under a rewritten
@@ -3842,7 +3907,7 @@ impl<'a> Exec<'a> {
     /// whether the run goes on ([`Env::check`]); if not, its input ends
     /// here.
     fn rewrite(&mut self, toks: Vec<Tok>) {
-        if !toks.is_empty() {
+        if !toks.is_empty() && !self.input_full() {
             self.st.pending.push((Arc::from(toks), 0, false));
         }
         self.step();
@@ -3853,6 +3918,12 @@ impl<'a> Exec<'a> {
     /// not, the input ends here.
     fn step(&mut self) {
         self.steps += 1;
+        if self.steps.is_multiple_of(1 << 16)
+            && let Some(every) = std::env::var("PHITEX_HANG_STEPS").ok().and_then(|v| v.parse::<u64>().ok())
+            && self.steps.is_multiple_of(every.max(1 << 16))
+        {
+            self.expansion_shown();
+        }
         if self.steps.is_multiple_of(1 << 12) && self.stop.is_none() {
             let words = pending_words(&self.st) + (self.emit.len() + self.vemit.len()) as u64;
             match self.env.check(self.steps, words) {
@@ -4330,7 +4401,7 @@ impl<'a> Exec<'a> {
         // (the body is read where it is, the macro's; its parameters are
         // the arguments, tex.web 390, 357)
         self.end_read_lists();
-        if !m.body.is_empty() {
+        if !m.body.is_empty() && !self.input_full() {
             if k == 0 {
                 self.st.pending.push((m.body.clone(), 0, false));
             } else {
