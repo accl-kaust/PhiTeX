@@ -3063,6 +3063,9 @@ struct Ev {
     a: u64,
     b: u64,
     c: u32,
+    /// A run: its reads of names from before it, and their time.
+    d: u64,
+    e: u64,
 }
 
 impl Shared {
@@ -3103,8 +3106,8 @@ fn write_sched(ev: &[Ev], st: &State, threads: usize, build_no: u64, wall: Durat
     for e in ev {
         let _ = writeln!(
             s,
-            "E\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            e.wid, e.kind, e.k, e.t[0], e.t[1], e.t[2], e.t[3], e.t[4], e.a, e.b, e.c, e.t[5]
+            "E\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            e.wid, e.kind, e.k, e.t[0], e.t[1], e.t[2], e.t[3], e.t[4], e.a, e.b, e.c, e.t[5], e.d, e.e
         );
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -3145,6 +3148,8 @@ fn worker(sh: &Shared, id: usize) {
                 a: ready,
                 b: g.inflight as u64,
                 c: u32::try_from(parked).unwrap_or(u32::MAX) << 1 | u32::from(picked.is_some()),
+                d: 0,
+                e: 0,
             });
         }
         let Some(task) = picked else {
@@ -3165,7 +3170,7 @@ fn worker(sh: &Shared, id: usize) {
             let ti = sh.now();
             let (g2, timeout) = sh.cv.wait_timeout(g, STALL_CHECK).expect("state");
             g = g2;
-            sh.ev(Ev { wid, kind: 5, k: 0, t: [ti, sh.now(), 0, 0, 0, 0], a: 0, b: 0, c: 0 });
+            sh.ev(Ev { wid, kind: 5, k: 0, t: [ti, sh.now(), 0, 0, 0, 0], a: 0, b: 0, c: 0, d: 0, e: 0 });
             stall_seen = (timeout.timed_out() && g.inflight > 0).then_some(gen_now);
             continue;
         };
@@ -3191,6 +3196,8 @@ fn worker(sh: &Shared, id: usize) {
             a: work,
             b: 0,
             c: 0,
+            d: 0,
+            e: 0,
         });
         g.inflight -= 1;
         if g.restructure && g.inflight == 0 {
@@ -4319,7 +4326,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         if std::mem::take(&mut g.p[k].recheck) && dirty.is_empty() && keep_again(&mut g, sh, k) {
             drop(g);
             let t = sh.now();
-            sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, t, t, t, t, t], a: 0, b: 0, c: 3 });
+            sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, t, t, t, t, t], a: 0, b: 0, c: 3, d: 0, e: 0 });
             notify(sh, true);
             return 0;
         }
@@ -4342,6 +4349,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         sh,
         k,
         wid,
+        idx: (0, 0),
         spec: sh.opts.reads == Reads::Speculate && !strict,
         strict,
         predicted: Vec::new(),
@@ -4364,7 +4372,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         let ta = sh.now();
         let mut g = lock(sh);
         let t = sh.now();
-        sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, tr, te, t, t, ta], a: run.ran, b: run.nodes_len() as u64, c: 2 });
+        sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, tr, te, t, t, ta], a: run.ran, b: run.nodes_len() as u64, c: 2, d: env.idx.0, e: env.idx.1 });
         g.stats.abandoned += 1;
         g.stats.commands_run += run.ran;
         g.p[k].suspend |= env.gave_up;
@@ -4637,7 +4645,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         g.stats.time_confirm += t.elapsed();
         g.stats.time_held += held.elapsed();
     }
-    sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, tr, te, tl, sh.now(), ta], a: run.ran, b: run.nodes_len() as u64, c: outcome });
+    sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, tr, te, tl, sh.now(), ta], a: run.ran, b: run.nodes_len() as u64, c: outcome, d: env.idx.0, e: env.idx.1 });
     {
         let _p = sh.park.lock().expect("park");
         sh.generation.fetch_add(1, Ordering::AcqRel);
@@ -4657,6 +4665,9 @@ struct PieceEnv<'a> {
     k: usize,
     /// The worker running it (for `PHITEX_SCHED`'s events).
     wid: u16,
+    /// Measuring: reads of names from before the piece, and the time they
+    /// took (parks included).
+    idx: (u64, u64),
     /// Reads run on predictions (`Reads::Speculate`, and not a piece whose
     /// speculation was given up).
     spec: bool,
@@ -4775,7 +4786,7 @@ impl PieceEnv<'_> {
                     }
                     let tp = sh.now();
                     park(sh, self.k, seen);
-                    sh.ev(Ev { wid: self.wid, kind: 6, k: self.k as u32, t: [tp, sh.now(), 0, 0, 0, 0], a: 0, b: 0, c: 0 });
+                    sh.ev(Ev { wid: self.wid, kind: 6, k: self.k as u32, t: [tp, sh.now(), 0, 0, 0, 0], a: 0, b: 0, c: 0, d: 0, e: 0 });
                 }
                 continue;
             };
@@ -4832,7 +4843,7 @@ impl PieceEnv<'_> {
                 }
                 let tp = sh.now();
                 park(sh, self.k, seen);
-                sh.ev(Ev { wid: self.wid, kind: 6, k: self.k as u32, t: [tp, sh.now(), 0, 0, 0, 0], a: 0, b: 0, c: 0 });
+                sh.ev(Ev { wid: self.wid, kind: 6, k: self.k as u32, t: [tp, sh.now(), 0, 0, 0, 0], a: 0, b: 0, c: 0, d: 0, e: 0 });
             }
         }
     }
@@ -4965,7 +4976,12 @@ impl Env for PieceEnv<'_> {
     }
 
     fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32) {
+        let t = self.sh.now();
         let r = self.reach_now(key, node);
+        if self.sh.sched.is_some() {
+            self.idx.0 += 1;
+            self.idx.1 += self.sh.now() - t;
+        }
         // (every read from before the piece, to see it while running if
         // its definition is made again)
         self.seen.entry(key.clone()).or_default().push((node, r.0.clone()));
