@@ -958,3 +958,134 @@ pub fn decode(b: &[u8], cs: &CsTable) -> Result<Format, String> {
     }
     Ok(Format { defs, fonts })
 }
+
+/// The tag numbers (CORE.md "Tag numbers"): the format's tags of keys,
+/// meanings and whatsits are each distinct. The keys are
+/// `val::every_key`; the meanings and whatsits are listed here, each list
+/// kept whole by a `match` without wildcard (a new kind does not compile
+/// until it has an index, and the `*_once` test fails until it is listed).
+#[cfg(test)]
+mod tag_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn writer(cs: &CsTable) -> Writer<'_> {
+        Writer { out: Vec::new(), cs, names: FxMap::default(), name_list: Vec::new(), fonts: FxMap::default(), font_list: Vec::new() }
+    }
+
+    /// Panics naming both when two things share a tag.
+    fn distinct<T: std::fmt::Debug>(what: &str, tags: Vec<(u8, T)>) {
+        let mut seen: BTreeMap<u8, String> = BTreeMap::new();
+        for (t, x) in tags {
+            if let Some(o) = seen.insert(t, format!("{x:?}")) {
+                panic!("format {what} tag {t}: {o} and {x:?}");
+            }
+        }
+    }
+
+    fn once<T>(all: &[T], index: impl Fn(&T) -> usize, what: &str) {
+        let mut ix: Vec<usize> = all.iter().map(index).collect();
+        ix.sort_unstable();
+        let want: Vec<usize> = (0..ix.len()).collect();
+        assert_eq!(ix, want, "{what}: one of each kind, each kind's index");
+    }
+
+    fn every_meaning() -> Vec<Meaning> {
+        let m = Macro { params: Vec::new(), body: Arc::from(Vec::new()), long: false, outer: false, protected: false };
+        vec![
+            Meaning::Undefined,
+            Meaning::Prim(Prim::by_name("relax").expect("relax")),
+            Meaning::Macro(Arc::new(m)),
+            Meaning::Char(11, 'a'),
+            Meaning::CharGiven(1),
+            Meaning::MathCharGiven(1),
+            Meaning::CountRef(1),
+            Meaning::DimenRef(1),
+            Meaning::SkipRef(1),
+            Meaning::MuskipRef(1),
+            Meaning::ToksRef(1),
+            Meaning::Font(null_font()),
+        ]
+    }
+
+    fn meaning_index(m: &Meaning) -> usize {
+        match m {
+            Meaning::Undefined => 0,
+            Meaning::Prim(_) => 1,
+            Meaning::Macro(_) => 2,
+            Meaning::Char(..) => 3,
+            Meaning::CharGiven(_) => 4,
+            Meaning::MathCharGiven(_) => 5,
+            Meaning::CountRef(_) => 6,
+            Meaning::DimenRef(_) => 7,
+            Meaning::SkipRef(_) => 8,
+            Meaning::MuskipRef(_) => 9,
+            Meaning::ToksRef(_) => 10,
+            Meaning::Font(_) => 11,
+        }
+    }
+
+    fn every_whatsit() -> Vec<Whatsit> {
+        vec![
+            Whatsit::Open { stream: 1, name: Arc::from("a") },
+            Whatsit::Write { stream: 1, toks: Arc::new(Vec::new()) },
+            Whatsit::Close { stream: 1 },
+            Whatsit::Special(Arc::from("a")),
+        ]
+    }
+
+    fn whatsit_index(w: &Whatsit) -> usize {
+        match w {
+            Whatsit::Open { .. } => 0,
+            Whatsit::Write { .. } => 1,
+            Whatsit::Close { .. } => 2,
+            Whatsit::Special(_) => 3,
+        }
+    }
+
+    #[test]
+    fn meanings_and_whatsits_once() {
+        once(&every_meaning(), meaning_index, "every_meaning");
+        once(&every_whatsit(), whatsit_index, "every_whatsit");
+    }
+
+    #[test]
+    fn format_key_tags_are_distinct() {
+        let cs = CsTable::new();
+        let mut tags = Vec::new();
+        for k in crate::val::every_key() {
+            let k = if let Key::Cs(_) = k { Key::Cs(cs.id("relax")) } else { k };
+            let mut w = writer(&cs);
+            // (a key a format does not hold has no tag)
+            if w.key(&k).is_ok() {
+                tags.push((w.out[0], k));
+            }
+        }
+        distinct("key", tags);
+    }
+
+    #[test]
+    fn format_meaning_tags_are_distinct() {
+        let cs = CsTable::new();
+        let mut tags = Vec::new();
+        for m in every_meaning() {
+            let mut w = writer(&cs);
+            w.meaning(&m).expect("a meaning a format holds");
+            tags.push((w.out[0], m));
+        }
+        distinct("meaning", tags);
+    }
+
+    #[test]
+    fn format_whatsit_tags_are_distinct() {
+        let cs = CsTable::new();
+        let mut tags = Vec::new();
+        for x in every_whatsit() {
+            let mut w = writer(&cs);
+            w.item(&Item::Whatsit(Arc::new(x.clone()))).expect("a whatsit a format holds");
+            // (after the item's own tag)
+            tags.push((w.out[1], x));
+        }
+        distinct("whatsit", tags);
+    }
+}
