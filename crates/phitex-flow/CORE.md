@@ -2091,3 +2091,21 @@ Gaps:
 | `\showlists` | xray | node reading the open lists (the one read of material): log text as `show_activities`, the current page not shown (Conflict 16) | partial: the current page |
 | `\showthe` | xray | diagnostic node whose result is log text (`> ...`) and an error context — needs the line number field | not yet |
 | `\write` | extension | with `\immediate`: an event in the node's log, its text expanded in no mode; deferred: a whatsit whose text is expanded where its page is shipped (IO) | done |
+
+## pdfTeX's PDF mode (agent Q)
+
+`\pdfoutput>0` at a page's ship: the page's value is its content
+stream (`pdf/content.rs`, made in the ship task where the DVI body is
+made), and the PDF file is a fold over the pages in document order
+(`pdf/fold.rs`): object numbering, object streams, fonts at the end
+(map file, encodings, Type 1 subsetting copied from partex's writet1),
+page tree, catalog, `/Info`, cross-reference table or stream. Streams
+are compressed by a copy of zlib's deflate (`pdf/zlib.rs`, the
+library pdfTeX links: equal to the system zlib's output). The date is a
+given of the build (`Build::set_pdf_date`, `SOURCE_DATE_EPOCH`, 0 until
+set). Checked by `tests/pdf.rs` against `pdftex -ini -etex`.
+
+Gaps found:
+- *(B)* `\pdfomitprocset` and `\pdfomitinfodict` (pdfTeX 1.40.29 integer
+  parameters 34, 35) are not in `prim::PDFTEX_PRIMITIVES`; the fold takes
+  them as 0 (their initial value).

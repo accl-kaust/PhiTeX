@@ -459,17 +459,22 @@ pub struct Index {
 
 impl Index {
     pub fn new(dirs: &[std::path::PathBuf]) -> Index {
-        fn walk(d: &std::path::Path, depth: u32, out: &mut std::collections::HashMap<String, std::path::PathBuf>) {
+        Index::of_kinds(dirs, &["tfm"])
+    }
+
+    /// The files below `dirs` whose extension is one of `exts`.
+    pub fn of_kinds(dirs: &[std::path::PathBuf], exts: &[&str]) -> Index {
+        fn walk(d: &std::path::Path, depth: u32, exts: &[&str], out: &mut std::collections::HashMap<String, std::path::PathBuf>) {
             let Ok(rd) = std::fs::read_dir(d) else { return };
             let mut entries: Vec<_> = rd.filter_map(Result::ok).map(|e| e.path()).collect();
             entries.sort();
             for p in entries {
                 if p.is_dir() {
                     if depth > 0 {
-                        walk(&p, depth - 1, out);
+                        walk(&p, depth - 1, exts, out);
                     }
                 } else if let Some(n) = p.file_name().and_then(|n| n.to_str())
-                    && p.extension().is_some_and(|e| e == "tfm")
+                    && p.extension().and_then(|e| e.to_str()).is_some_and(|e| exts.contains(&e))
                 {
                     out.entry(n.to_string()).or_insert(p);
                 }
@@ -477,7 +482,7 @@ impl Index {
         }
         let mut paths = std::collections::HashMap::new();
         for d in dirs {
-            walk(d, 8, &mut paths);
+            walk(d, 8, exts, &mut paths);
         }
         Index { paths }
     }
@@ -542,4 +547,48 @@ impl FontFiles {
         self.cache.lock().expect("font cache").insert(name.to_string(), v.clone());
         v
     }
+}
+
+/// TeX Live's directories of the files PDF output reads (pdfTeX's map
+/// files, Type 1 fonts, encodings), where they exist; kpathsea's
+/// `TEXMFVAR` first, as it finds `pdftex.map` there.
+pub fn pdf_dirs() -> Vec<std::path::PathBuf> {
+    [
+        "/var/lib/texmf/fonts/map/pdftex",
+        "/usr/local/texlive/texmf-var/fonts/map/pdftex",
+        "/usr/share/texmf-dist/fonts/map/pdftex",
+        "/usr/share/texlive/texmf-dist/fonts/map/pdftex",
+        "/usr/local/texlive/texmf-dist/fonts/map/pdftex",
+        "/usr/share/texmf-dist/fonts/type1",
+        "/usr/share/texlive/texmf-dist/fonts/type1",
+        "/usr/local/texlive/texmf-dist/fonts/type1",
+        "/usr/share/texmf-dist/fonts/enc",
+        "/usr/share/texlive/texmf-dist/fonts/enc",
+        "/usr/local/texlive/texmf-dist/fonts/enc",
+    ]
+    .iter()
+    .map(std::path::PathBuf::from)
+    .filter(|p| p.is_dir())
+    .collect()
+}
+
+/// A file PDF output reads (a map file, a Type 1 font, an encoding), by
+/// name, below [`pdf_dirs`]: its path and bytes. The index and the bytes
+/// are made once per process (a pure function of the file system, which
+/// does not change while we run).
+pub fn pdf_file(name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
+    type Cache = std::sync::Mutex<std::collections::HashMap<String, Option<(Arc<str>, Arc<[u8]>)>>>;
+    static INDEX: std::sync::OnceLock<Index> = std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Cache::default);
+    if let Some(v) = cache.lock().expect("pdf file cache").get(name) {
+        return v.clone();
+    }
+    let index = INDEX.get_or_init(|| Index::of_kinds(&pdf_dirs(), &["map", "pfb", "pfa", "enc"]));
+    let v = index.paths.get(name).and_then(|p| {
+        let b = std::fs::read(p).ok()?;
+        Some((Arc::from(p.to_string_lossy().as_ref()), Arc::from(b)))
+    });
+    cache.lock().expect("pdf file cache").insert(name.to_string(), v.clone());
+    v
 }
