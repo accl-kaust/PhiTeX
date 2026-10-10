@@ -61,7 +61,7 @@ J8=$((SEEDS / 5))
 # (one line per chunk: threads, first seed, count[, LaTeX document])
 if [ "$LATEX" = 1 ]; then
 	# (the format, made once: every chunk reads it)
-	export PHITEX_FUZZ_LATEX_FMT="$PWD/$OUT/latex.fmt"
+	export PHITEX_FUZZ_LATEX_FMT="$(cd "$OUT" && pwd)/latex.fmt"
 	run "$BIN" --fuzz 1 1 1 --latex --doc latex-tiny --out "$OUT/tiny" >"$OUT/format.txt" 2>&1 || true
 	for d in $LATEX_DOCS; do echo "1,8 1 $SEEDS latex-$d"; done >"$OUT/chunks.txt"
 elif [ -n "${DOCS:-}" ]; then
@@ -82,24 +82,39 @@ chunk() {
 		# (a plain document by name)
 		local dir="$OUT/j$t"
 		mkdir -p "$dir"
-		"$BIN" --fuzz "$s" "$EDITS" "$n" --doc "$doc" --threads "$t" --timeout "$TIMEOUT" --out "$dir" >"$dir/chunk-$doc-$s.txt" 2>&1 || true
+		fuzz_from "$s" "$n" "$dir/chunk-$doc-$s.txt" --doc "$doc" --threads "$t" --out "$dir"
 		return
 	fi
 	if [ -n "$doc" ]; then
 		local dir="$OUT/latex"
 		mkdir -p "$dir"
-		"$BIN" --fuzz "$s" "$EDITS" "$n" --latex --doc "$doc" --threads "$t" --timeout "$TIMEOUT" --out "$dir" >"$dir/chunk-$doc.txt" 2>&1 || true
+		fuzz_from "$s" "$n" "$dir/chunk-$doc.txt" --latex --doc "$doc" --threads "$t" --out "$dir"
 		return
 	fi
 	local dir="$OUT/j$t"
 	mkdir -p "$dir"
-	"$BIN" --fuzz "$s" "$EDITS" "$n" --threads "$t" --timeout "$TIMEOUT" --out "$dir" >"$dir/chunk-$s.txt" 2>&1 || true
+	fuzz_from "$s" "$n" "$dir/chunk-$s.txt" --threads "$t" --out "$dir"
 }
-export -f chunk
+# (seeds S.. N of them, resumed after a seed that timed out: the run
+# stops there, its thread left behind; OPTS after the log file)
+fuzz_from() {
+	local s=$1 n=$2 log=$3
+	shift 3
+	local end=$((s + n)) st=0
+	: >"$log"
+	while [ "$s" -lt "$end" ]; do
+		st=0
+		"$BIN" --fuzz "$s" "$EDITS" "$((end - s))" --timeout "$TIMEOUT" "$@" >>"$log" 2>&1 || st=$?
+		[ "$st" = 3 ] || break
+		s=$(sed -n 's/^fuzz: stopped after a timeout; resume at seed //p' "$log" | tail -1)
+		[ -n "$s" ] || break
+	done
+}
+export -f chunk fuzz_from
 if [ -n "${PARTEX_SANDBOX:-}" ]; then
 	xargs -P "$JOBS" -L 1 bash -c 'chunk "$@"' _ <"$OUT/chunks.txt"
 else
-	scripts/sandbox env BIN="$BIN" OUT="$OUT" EDITS="$EDITS" TIMEOUT="$TIMEOUT" bash -c "$(declare -f chunk); export -f chunk; xargs -P $JOBS -L 1 bash -c 'chunk \"\$@\"' _ <'$OUT/chunks.txt'"
+	scripts/sandbox env BIN="$BIN" OUT="$OUT" EDITS="$EDITS" TIMEOUT="$TIMEOUT" bash -c "$(declare -f chunk fuzz_from); export -f chunk fuzz_from; xargs -P $JOBS -L 1 bash -c 'chunk \"\$@\"' _ <'$OUT/chunks.txt'"
 fi
 # (the summary: each failure line names its document)
 {
@@ -145,8 +160,8 @@ if [ -d "$OUT/min" ]; then
 	echo "== cut-down reproductions"
 	ls -1 "$OUT/min"/*.repro 2>/dev/null || echo "(none)"
 fi
-if [ -n "$KEEP" ]; then
-	mkdir -p "$KEEP"
+# (OUT may be inside the results already: nothing to copy then)
+if [ -n "$KEEP" ] && [ "$(mkdir -p "$KEEP" && cd "$KEEP" && pwd)" != "$(cd "$OUT" && pwd)" ]; then
 	cp -r "$OUT"/. "$KEEP"/
 	rm -f "$KEEP/latex.fmt"
 	echo "copied $OUT to $KEEP"
