@@ -122,6 +122,9 @@ pub struct Body {
     /// out where they stand. Otherwise what it was written for.
     pub fixed: Option<Fixed>,
     pub max_push: i32,
+    /// It holds events of the output streams (`\openout`, `\write`,
+    /// `\closeout`) to do when it is shipped.
+    pub io: bool,
 }
 
 /// What a page that depends on where it starts was written for.
@@ -185,6 +188,8 @@ struct Writer<'a> {
     edges: Vec<(i32, bool)>,
     /// etex.web's `cur_dir`: 0 left to right, 1 right to left.
     cur_dir: u8,
+    /// A whatsit other than `\special` was met.
+    io: bool,
 }
 
 impl Writer<'_> {
@@ -548,6 +553,8 @@ impl Writer<'_> {
                         if let Whatsit::Special(s) = &**w {
                             let s = s.clone();
                             self.special(&s);
+                        } else {
+                            self.io = true;
                         }
                     }
                     _ => {}
@@ -849,6 +856,8 @@ impl Writer<'_> {
                 Item::Whatsit(w) => {
                     if let Whatsit::Special(s) = &**w {
                         self.special(s);
+                    } else {
+                        self.io = true;
                     }
                 }
                 _ => {}
@@ -917,6 +926,7 @@ pub fn page_body(p: &Page, numbers: &Numbers, extra: &[Arc<str>], defined: &[u32
         lookback: 0,
         edges: Vec::new(),
         cur_dir: 0,
+        io: false,
     };
     w.page(p);
     // (putting in or leaving out its `fnt_def`s moves a look back by at
@@ -928,7 +938,7 @@ pub fn page_body(p: &Page, numbers: &Numbers, extra: &[Arc<str>], defined: &[u32
         defined.sort_unstable();
         Fixed { defined, gone: far.then(|| gone_class(at)), edges: w.edges }
     });
-    Body { bytes: w.out, fonts: w.fonts, fixed, max_push: w.max_push }
+    Body { bytes: w.out, fonts: w.fonts, fixed, max_push: w.max_push, io: w.io }
 }
 
 /// The preamble's comment (tex.web 617): ` TeX output YYYY.MM.DD:HHMM`.

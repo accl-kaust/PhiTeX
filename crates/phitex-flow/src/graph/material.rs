@@ -671,6 +671,7 @@ impl Exec<'_> {
             hlist.push(param_glue(&g, GluePar::Parfillskip as u8));
             let lp = self.line_params(&hlist);
             if level == 0 {
+                hlist.shrink_to_fit();
                 para.hlist = hlist;
                 para.lb = Some(Arc::new(lp));
             } else {
