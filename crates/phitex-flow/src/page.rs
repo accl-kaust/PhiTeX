@@ -151,6 +151,13 @@ pub fn vert_break(list: &[Item], h: i32, d: i32) -> (Option<usize>, i32) {
                 i += 1;
                 continue;
             }
+            // (xetex.web: a picture's height and depth count)
+            Some(Item::Pic(pc)) => {
+                cur_height += prev_dp + pc.h;
+                prev_dp = pc.d;
+                i += 1;
+                continue;
+            }
             Some(Item::Glue { .. }) => {
                 if i > 0 && list[i - 1].precedes_break() {
                     pi = 0;
@@ -315,6 +322,8 @@ pub fn remove_last(list: &mut Vec<Item>, k: u8) {
         Some(Item::Kern { .. }) => k == 1,
         Some(Item::Glue { .. } | Item::Leaders(_)) => k == 2,
         Some(Item::Box(_)) => k == 3,
+        // (XeTeX: a native word merged into the next one)
+        Some(Item::Native(_)) => k == 4,
         _ => false,
     };
     if !hit {
@@ -759,6 +768,13 @@ impl Scan {
                 }
                 Item::Ins(x) => {
                     self.page_insert(call, x, env);
+                    self.contribute();
+                    continue;
+                }
+                // (xetex.web: a picture adds its height and depth)
+                Item::Pic(pc) => {
+                    self.total += self.depth + pc.h;
+                    self.depth = pc.d;
                     self.contribute();
                     continue;
                 }

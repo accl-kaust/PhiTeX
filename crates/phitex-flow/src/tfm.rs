@@ -97,6 +97,9 @@ pub struct Font {
     pub bchar_label: Option<u16>,
     /// The file's bytes (to load it at another size).
     pub data: Arc<[u8]>,
+    /// XeTeX: a native font's face and what loading it computed
+    /// (`native::NativeFont`); `None` for a TFM font.
+    pub native: Option<Arc<crate::native::NativeFont>>,
 }
 
 /// A TFM file tex.web would not load (§560's `abort`).
@@ -181,6 +184,7 @@ impl Font {
             false_bchar: 256,
             bchar_label: None,
             data: Arc::from([]),
+            native: None,
         }
     }
 
@@ -392,6 +396,7 @@ impl Font {
             false_bchar,
             bchar_label: (bch_label < nl).then_some(bch_label as u16),
             data,
+            native: None,
         })
     }
 
@@ -462,7 +467,8 @@ impl Index {
         Index::of_kinds(dirs, &["tfm"])
     }
 
-    /// The files below `dirs` whose extension is one of `exts`.
+    /// The files below `dirs` whose extension is one of `exts` (none:
+    /// every file).
     pub fn of_kinds(dirs: &[std::path::PathBuf], exts: &[&str]) -> Index {
         fn walk(d: &std::path::Path, depth: u32, exts: &[&str], out: &mut std::collections::HashMap<String, std::path::PathBuf>) {
             let Ok(rd) = std::fs::read_dir(d) else { return };
@@ -474,7 +480,7 @@ impl Index {
                         walk(&p, depth - 1, exts, out);
                     }
                 } else if let Some(n) = p.file_name().and_then(|n| n.to_str())
-                    && p.extension().and_then(|e| e.to_str()).is_some_and(|e| exts.contains(&e))
+                    && (exts.is_empty() || p.extension().and_then(|e| e.to_str()).is_some_and(|e| exts.contains(&e)))
                 {
                     out.entry(n.to_string()).or_insert(p);
                 }
@@ -592,3 +598,257 @@ pub fn pdf_file(name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
     cache.lock().expect("pdf file cache").insert(name.to_string(), v.clone());
     v
 }
+
+/// Shapers (partex-otf's: HarfRust's plans and a memo of results, a cache
+/// that never changes a result) lent to whoever shapes a word: a native
+/// word is a pure function of its font, text and direction, and the
+/// shaper only saves building a plan again. Kept here with the font file
+/// cache: no TeX state.
+pub fn with_shaper<R>(f: impl FnOnce(&mut partex_otf::shape::Shaper) -> R) -> R {
+    static POOL: std::sync::OnceLock<std::sync::Mutex<Vec<partex_otf::shape::Shaper>>> = std::sync::OnceLock::new();
+    let pool = POOL.get_or_init(Default::default);
+    let mut sh = pool
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pop()
+        .unwrap_or_default();
+    let r = f(&mut sh);
+    pool.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(sh);
+    r
+}
+
+/// kpathsea's lookups as a build is given them: a file of a format by
+/// name, the path found, and a file's bytes by path (each a pure function
+/// of its argument during a build). XeTeX's native fonts (`[file]`
+/// names, `.tec` mappings) and xdvipdfmx (its configuration, maps,
+/// encodings, fonts, pictures) ask through it.
+pub trait Kpse: Send + Sync {
+    /// `kpse_find_file(name, format, 0)` as program `prog` (`xetex`,
+    /// `dvipdfmx`, …).
+    fn find(&self, name: &str, format: KpseFormat, prog: &str) -> Option<String>;
+    /// The bytes of the file at `path`.
+    fn read(&self, path: &str) -> Option<Arc<[u8]>>;
+}
+
+/// kpathsea's formats asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KpseFormat {
+    OpenType,
+    TrueType,
+    Type1,
+    MiscFonts,
+    FontMap,
+    Cmap,
+    Sfd,
+    Enc,
+    Tfm,
+    Ofm,
+    Vf,
+    Ovf,
+    Pict,
+    Tex,
+    ProgramText,
+    ProgramBinary,
+}
+
+impl KpseFormat {
+    /// The extensions kpathsea tries for a name without one.
+    pub fn suffixes(self) -> &'static [&'static str] {
+        match self {
+            KpseFormat::OpenType => &[".otf", ".OTF"],
+            KpseFormat::TrueType => &[".ttf", ".ttc", ".TTF", ".TTC", ".dfont"],
+            KpseFormat::Type1 => &[".pfb", ".pfa"],
+            KpseFormat::MiscFonts => &[],
+            KpseFormat::FontMap => &[".map"],
+            KpseFormat::Enc => &[".enc"],
+            KpseFormat::Tfm => &[".tfm"],
+            KpseFormat::Ofm => &[".ofm", ".tfm"],
+            KpseFormat::Vf => &[".vf"],
+            KpseFormat::Ovf => &[".ovf", ".vf"],
+            KpseFormat::Tex => &[".tex"],
+            _ => &[],
+        }
+    }
+
+    /// `kpsewhich -format=` names.
+    pub fn name(self) -> &'static str {
+        match self {
+            KpseFormat::OpenType => "opentype fonts",
+            KpseFormat::TrueType => "truetype fonts",
+            KpseFormat::Type1 => "type1 fonts",
+            KpseFormat::MiscFonts => "misc fonts",
+            KpseFormat::FontMap => "map",
+            KpseFormat::Cmap => "cmap files",
+            KpseFormat::Sfd => "subfont definition files",
+            KpseFormat::Enc => "enc files",
+            KpseFormat::Tfm => "tfm",
+            KpseFormat::Ofm => "ofm",
+            KpseFormat::Vf => "vf",
+            KpseFormat::Ovf => "ovf",
+            KpseFormat::Pict => "graphic/figure",
+            KpseFormat::Tex => "tex",
+            KpseFormat::ProgramText => "other text files",
+            KpseFormat::ProgramBinary => "other binary files",
+        }
+    }
+}
+
+/// [`Kpse`] over directories walked once: a name is found in the first
+/// directory (in order, recursively) holding a file of that name, or of
+/// that name with one of its format's suffixes. Reads are cached.
+pub struct DirKpse {
+    index: Index,
+    files: std::sync::Mutex<std::collections::HashMap<String, Option<Arc<[u8]>>>>,
+}
+
+impl DirKpse {
+    pub fn new(dirs: &[std::path::PathBuf]) -> DirKpse {
+        DirKpse { index: Index::of_kinds(dirs, &[]), files: std::sync::Mutex::default() }
+    }
+}
+
+impl Kpse for DirKpse {
+    fn find(&self, name: &str, format: KpseFormat, _prog: &str) -> Option<String> {
+        if name.starts_with('/') {
+            return std::path::Path::new(name).exists().then(|| name.to_string());
+        }
+        let base = name.rsplit('/').next().unwrap_or(name);
+        let try_one = |n: &str| self.index.paths.get(n).map(|p| p.to_string_lossy().into_owned());
+        if let Some(p) = try_one(base) {
+            return Some(p);
+        }
+        format.suffixes().iter().find_map(|s| try_one(&format!("{base}{s}")))
+    }
+
+    fn read(&self, path: &str) -> Option<Arc<[u8]>> {
+        let mut g = self.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.entry(path.to_string())
+            .or_insert_with(|| std::fs::read(path).ok().map(Arc::from))
+            .clone()
+    }
+}
+
+/// [`Kpse`] through TeX Live's `kpsewhich` (`-progname`, `-format`): what
+/// kpathsea itself finds, each answer and each file read once (the CLI's
+/// and the XeTeX tests' finder; the build never runs it but through this
+/// given).
+#[derive(Default)]
+pub struct Kpsewhich {
+    found: std::sync::Mutex<std::collections::HashMap<(String, &'static str, String), Option<String>>>,
+    files: std::sync::Mutex<std::collections::HashMap<String, Option<Arc<[u8]>>>>,
+}
+
+impl Kpsewhich {
+    pub fn new() -> Kpsewhich {
+        Kpsewhich::default()
+    }
+}
+
+impl Kpse for Kpsewhich {
+    fn find(&self, name: &str, format: KpseFormat, prog: &str) -> Option<String> {
+        if name.starts_with('/') {
+            return std::path::Path::new(name).exists().then(|| name.to_string());
+        }
+        let key = (name.to_string(), format.name(), prog.to_string());
+        if let Some(r) = self.found.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
+            return r.clone();
+        }
+        let r = std::process::Command::new("kpsewhich")
+            .arg(format!("-progname={prog}"))
+            .arg(format!("-format={}", format.name()))
+            .arg(name)
+            .output()
+            .ok()
+            .and_then(|o| {
+                let s = String::from_utf8_lossy(&o.stdout).trim_end_matches('\n').to_string();
+                (o.status.success() && !s.is_empty()).then_some(s)
+            });
+        self.found.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, r.clone());
+        r
+    }
+
+    fn read(&self, path: &str) -> Option<Arc<[u8]>> {
+        let mut g = self.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.entry(path.to_string())
+            .or_insert_with(|| std::fs::read(path).ok().map(Arc::from))
+            .clone()
+    }
+}
+
+/// The build's given for XeTeX's native fonts: the installed fonts' index
+/// (what fontconfig lists, partex-otf's `FontIndex`) and the file finder
+/// (kpathsea's `OPENTYPEFONTS`, `TTFONTS`, the mappings), both given, never
+/// searched for; each load a pure function of (name, size, tracing),
+/// memoised for the build (a fresh `FontManager` per load: no state
+/// crosses loads).
+pub struct Fonts {
+    index: Arc<partex_otf::index::FontIndex>,
+    kpse: Arc<dyn Kpse>,
+    memo: std::sync::Mutex<std::collections::HashMap<(String, i32, i32), crate::native::Loaded>>,
+}
+
+impl Fonts {
+    pub fn new(index: Arc<partex_otf::index::FontIndex>, kpse: Arc<dyn Kpse>) -> Fonts {
+        Fonts { index, kpse, memo: std::sync::Mutex::default() }
+    }
+
+    /// The fonts of an index file (partex-otf's `otf-index` output: the
+    /// faces fontconfig lists, in its order), found and read by `kpse`.
+    pub fn from_index_bytes(index: &[u8], kpse: Arc<dyn Kpse>) -> Option<Fonts> {
+        let idx = partex_otf::index::FontIndex::from_bytes(index)?;
+        Some(Fonts::new(Arc::new(idx), kpse))
+    }
+
+    /// The finder.
+    pub fn kpse(&self) -> &Arc<dyn Kpse> {
+        &self.kpse
+    }
+
+    /// xetex.web's `load_native_font(name, s)`: the font, and what XeTeX
+    /// prints meanwhile (`\XeTeXtracingfonts`).
+    pub fn load(&self, name: &str, s: i32, tracing: i32) -> crate::native::Loaded {
+        let key = (name.to_string(), s, tracing);
+        if let Some(l) = self.memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
+            return l.clone();
+        }
+        let mut mgr = partex_otf::xetex::fontmgr::FontManager::new(self.index.clone());
+        let src = Source(&*self.kpse);
+        let (xf, diags) = partex_otf::xetex::find_native_font(&mut mgr, &src, name, s, tracing);
+        let f = xf.map(|xf| {
+            // (`load_native_font`: the size asked, or the design size
+            // scaled)
+            let actual = if s >= 0 {
+                s
+            } else if s != -1000 {
+                crate::arith::xn_over_d(xf.design_size, -s, 1000).0
+            } else {
+                xf.design_size
+            };
+            Arc::new(crate::native::make_font(xf, name, actual))
+        });
+        let l: crate::native::Loaded = (f, diags);
+        self.memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, l.clone());
+        l
+    }
+}
+
+/// partex-otf's file source over the build's finder.
+struct Source<'a>(&'a dyn Kpse);
+
+impl partex_otf::FontSource for Source<'_> {
+    fn read(&self, path: &str) -> Option<Arc<[u8]>> {
+        self.0.read(path)
+    }
+
+    fn find_file(&self, name: &str, format: partex_otf::KpseFormat) -> Option<String> {
+        use KpseFormat as K;
+        let f = match format {
+            partex_otf::KpseFormat::OpenType => K::OpenType,
+            partex_otf::KpseFormat::TrueType => K::TrueType,
+            partex_otf::KpseFormat::Type1 => K::Type1,
+            partex_otf::KpseFormat::MiscFonts => K::MiscFonts,
+        };
+        self.0.find(name, f, "xetex")
+    }
+}
+

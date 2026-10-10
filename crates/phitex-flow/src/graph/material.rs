@@ -131,6 +131,9 @@ struct Main {
     ins_disc: bool,
     /// The token after the characters, read and not one.
     look: Option<Tok>,
+    /// XeTeX: the category of the character looked ahead at (a letter
+    /// or not, for `\XeTeXinterchartoks`).
+    cat: u8,
 }
 
 impl Main {
@@ -200,6 +203,8 @@ pub(super) fn fonts_in(list: &[Item], out: &mut Vec<Arc<str>>) {
         let id = match it {
             Item::Char(f, _) => &f.key,
             Item::Lig(l) => &l.font.key,
+            Item::Native(w) => &w.font.key,
+            Item::Glyph(g) => &g.font.key,
             Item::Box(b) => {
                 fonts_in(&b.list, out);
                 continue;
@@ -844,8 +849,23 @@ impl Exec<'_> {
         if self.st.mode == Mode::V {
             self.back_new_graf(t);
         } else {
-            self.main_loop(c);
+            let cat = if let Tok::Char(11, _) = t { 11 } else { 12 };
+            self.main_loop_any(c, cat, false);
         }
+    }
+
+    /// The main loop from character `c` (category `cat`; `backed`: put
+    /// back after a `\XeTeXinterchartoks` list): XeTeX's native fonts'
+    /// own (`graph::xetex`), or TeX's.
+    pub(super) fn main_loop_any(&mut self, c: u32, cat: u8, backed: bool) {
+        if self.xetex {
+            let f = self.font();
+            if f.native.is_some() {
+                self.main_loop_native(f, c, cat, backed);
+                return;
+            }
+        }
+        self.main_loop(c, cat, backed);
     }
 
     /// `\char`.
@@ -853,8 +873,9 @@ impl Exec<'_> {
         if self.st.mode == Mode::V {
             self.back_new_graf(t);
         } else {
-            let c = self.scan_char_num();
-            self.main_loop(c as u32);
+            // (XeTeX: `scan_usv_num`)
+            let c = if self.xetex { self.scan_usv_num() } else { self.scan_char_num() };
+            self.main_loop_any(c as u32, 12, false);
         }
     }
 
@@ -868,9 +889,9 @@ impl Exec<'_> {
     }
 
     /// §1034: `adjust_space_factor`.
-    fn adjust_space_factor(&mut self, c: i32) {
+    pub(super) fn adjust_space_factor(&mut self, c: i32) {
         let ch = char::from_u32(c as u32).unwrap_or('\0');
-        let s = self.int(&Key::Sfcode(ch));
+        let s = self.int(&Key::Sfcode(ch)) & 0xFFFF;
         if s == 1000 {
             self.st.space_factor = 1000;
         } else if s < 1000 {
@@ -887,10 +908,26 @@ impl Exec<'_> {
     /// §1034–§1040: the main loop, from character `c0`: the characters
     /// after it, with their ligatures and kerns, while the next token is a
     /// character; that token goes back.
-    fn main_loop(&mut self, c0: u32) {
+    fn main_loop(&mut self, c0: u32, cat0: u8, backed: bool) {
         let font = self.font();
+        if self.xetex {
+            // (xetex.web: `prev_class` begins at the boundary; a list
+            // before the run's first character goes in first; a character
+            // past the font's is lost)
+            self.xclass.0 = super::xetex::BOUNDARY;
+            self.adjust_space_factor(c0 as i32);
+            if let super::xetex::Inter::BigSwitch = self.check_inter_char(c0, cat0, backed) {
+                return;
+            }
+            if c0 > 255 {
+                self.char_warning(&font, c0 as i32);
+                return;
+            }
+        }
         let c0 = c0.min(255) as i32;
-        self.adjust_space_factor(c0);
+        if !self.xetex {
+            self.adjust_space_factor(c0);
+        }
         self.fix_language();
         let mut m = Main {
             bchar: font.bchar,
@@ -909,6 +946,7 @@ impl Exec<'_> {
             rt_hit: false,
             ins_disc: false,
             look: None,
+            cat: cat0,
         };
         let mut l = match m.font.bchar_label {
             None => L::Move2,
@@ -986,9 +1024,20 @@ impl Exec<'_> {
                 L::Lookahead => {
                     // (§1038)
                     let c = match self.next_x_m(false) {
+                        Some((_, Meaning::Char(cat @ (11 | 12), c))) if self.xetex => {
+                            m.cat = cat;
+                            Some(u32::from(c) as i32)
+                        }
+                        Some((_, Meaning::CharGiven(c))) if self.xetex => {
+                            m.cat = 12;
+                            Some(c as i32)
+                        }
                         Some((_, Meaning::Char(11 | 12, c))) if u32::from(c) < 256 => Some(u32::from(c) as i32),
                         Some((_, Meaning::CharGiven(c))) if c < 256 => Some(c as i32),
-                        Some((_, Meaning::Prim(Prim::Char))) => Some(self.scan_char_num()),
+                        Some((_, Meaning::Prim(Prim::Char))) => {
+                            m.cat = 12;
+                            Some(self.scan_char_num())
+                        }
                         Some((t, _)) => {
                             m.look = Some(t);
                             None
@@ -1006,10 +1055,18 @@ impl Exec<'_> {
                 }
                 L::Lookahead1 => {
                     self.adjust_space_factor(m.cur_chr);
+                    if self.xetex {
+                        // (`check_for_inter_char_toks(big_switch)`: the
+                        // character goes back behind the list)
+                        match self.check_inter_char(m.cur_chr as u32, m.cat, false) {
+                            super::xetex::Inter::None => {}
+                            _ => return,
+                        }
+                    }
                     m.lig_stack.clear();
                     m.lig_stack.push(LigEntry::Char(m.cur_chr as u8));
                     m.cur_r = m.cur_chr;
-                    if m.cur_r == m.false_bchar {
+                    if m.cur_r == m.false_bchar || m.cur_r > 255 {
                         m.cur_r = NON_CHAR;
                     }
                     L::LigLoop
@@ -1289,6 +1346,9 @@ impl Exec<'_> {
         let w = match self.last_item() {
             Some(Item::Char(f, c)) => f.glyph(i32::from(c)).map(|g| g.italic),
             Some(Item::Lig(l)) => l.font.glyph(i32::from(l.c)).map(|g| g.italic),
+            // (xetex.web §1113: a native word's or glyph's)
+            Some(Item::Native(w)) => Some(w.italic_correction()),
+            Some(Item::Glyph(g)) => Some(crate::native::glyph_italic(&g)),
             _ => None,
         };
         if let Some(w) = w {
@@ -1302,8 +1362,14 @@ impl Exec<'_> {
             let f = self.font();
             let k = self.font_key(&f);
             let c = self.int(&Key::HyphenChar(k));
-            let pre =
-                if (0..256).contains(&c) && f.glyph(c).is_some() { vec![Item::Char(f, c as u8)] } else { Vec::new() };
+            let pre = if self.xetex && f.native.is_some() {
+                // (xetex.web: `new_character` of a native font)
+                if (0..=65535).contains(&c) { vec![Item::Native(Arc::new(self.native_character(&f, c as u32)))] } else { Vec::new() }
+            } else if (0..256).contains(&c) && f.glyph(c).is_some() {
+                vec![Item::Char(f, c as u8)]
+            } else {
+                Vec::new()
+            };
             self.emit.push(Item::Disc(Arc::new(Disc { pre, post: Vec::new(), replace: 0 })));
             return;
         }

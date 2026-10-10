@@ -1,0 +1,28 @@
+% Native fonts: words in OpenType Latin Modern, interword glue, the merge
+% of words in hlist_out, discretionaries and hyphens, a paragraph broken
+% with patterns of native words, \XeTeXglyph, actual text, glyph
+% metrics, interword space shaping, and the font queries typeset.
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\^=7
+\hsize=200pt \vsize=600pt \parindent=10pt \baselineskip=12pt \tolerance=1000
+\parfillskip=0pt plus 1fil \pretolerance=-1 \hyphenpenalty=50
+\lccode`a=`a \lccode`b=`b
+\patterns{a1b 1ba e1n n1t 1na ti1on 1ti i1o o1n 2io}
+\font\x="[lmroman10-regular]" at 10pt \x \hyphenchar\x=`-
+\font\t=cmr10
+\def\space{ }\def\n#1{\number#1\space}
+Hello world, office affluent ``quotes'' -- and --- dashes; a co-operation
+and an internationalization of the nation in a long long paragraph of text
+that will be broken into lines: abba baba nation tion tation.\par
+\setbox0\hbox{Off\relax ice ab\-cd ef\discretionary{x}{y}{gh}ij {\t q}rst}\box0
+\setbox0\hbox{\XeTeXinterwordspaceshaping=1 AV AV Te To}\box0
+\setbox0\hbox{\XeTeXgenerateactualtext=1 fi ffl\XeTeXgenerateactualtext=0\ fi}\box0
+\setbox0\hbox{\XeTeXuseglyphmetrics=1 ace gjp\XeTeXuseglyphmetrics=0\ ace}\box0
+\setbox0\hbox{\XeTeXglyph36 \XeTeXglyph37\kern2pt\XeTeXglyph\XeTeXcharglyph`Q}\box0
+\setbox0\hbox{a\/ \x f\/ x}\box0
+\setbox0\vbox{\hsize=60pt \XeTeXdashbreakstate=1 \noindent long^^^^2014dash^^^^2013en a-b\par}\box0
+\setbox0\hbox{\n{\XeTeXcountglyphs\x}\n{\XeTeXOTcountscripts\x}\n{\XeTeXcharglyph`a}
+ \n{\XeTeXglyphindex"a"}\XeTeXglyphname\x 36 \n{\XeTeXfirstfontchar\x}\n{\XeTeXlastfontchar\x}
+ \the\fontcharwd\x`A{} \the\XeTeXglyphbounds1 36{} \n{\XeTeXfonttype\x}\n{\XeTeXfonttype\t}
+ \iffontchar\x"1D400 y\else n\fi\ \fontname\x\ \the\fontdimen6\x{} \the\fontdimen8\x}\box0
+\setbox0\hbox{\n{\XeTeXOTscripttag\x 0}\n{\XeTeXOTcountlanguages\x "6C61746E}\n{\XeTeXOTcountfeatures\x "6C61746E 0}\n{\XeTeXOTfeaturetag\x "6C61746E 0 0}}\box0
+\end

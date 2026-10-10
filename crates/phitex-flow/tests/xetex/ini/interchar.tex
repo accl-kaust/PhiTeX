@@ -1,0 +1,14 @@
+% \XeTeXinterchartoks: classes, the boundary class, tokens put between
+% characters of a native font and of a TFM font.
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\hsize=300pt \vsize=300pt \parindent=0pt \baselineskip=12pt \tolerance=10000
+\parfillskip=0pt plus 1fil
+\font\x="[lmroman10-regular]" at 10pt \font\t=cmr10 \x
+\XeTeXinterchartokenstate=1 \XeTeXcharclass`B=3 \XeTeXcharclass`C=4
+\XeTeXinterchartoks 0 3 {\kern1pt\relax}\XeTeXinterchartoks 3 0 {\kern2pt\relax}
+\XeTeXinterchartoks 4095 3 {\kern3pt\relax}\XeTeXinterchartoks 3 4095 {\kern4pt\relax}
+\XeTeXinterchartoks 3 4 {[}\XeTeXinterchartoks 4 4095 {]}
+aBc B aBCd C\par
+{\t aBc B BC}\par
+\XeTeXinterchartokenstate=0 aBc B\par
+\end

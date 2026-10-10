@@ -193,6 +193,10 @@ impl Writer<'_> {
                 self.byte(5);
                 self.u(u64::from(*x));
             }
+            Meaning::XMathCharGiven(x) => {
+                self.byte(12);
+                self.u(u64::from(*x));
+            }
             Meaning::CountRef(n) => {
                 self.byte(6);
                 self.u(u64::from(*n));
@@ -327,6 +331,7 @@ impl Writer<'_> {
                         self.byte(3);
                         self.str(t);
                     }
+                    Whatsit::SavePos => self.byte(4),
                 }
             }
             Item::Ins(x) => {
@@ -505,6 +510,15 @@ impl Writer<'_> {
             Key::FontParams(f) => font_key(self, 31, f),
             Key::LastFont => self.byte(32),
             Key::Interaction => self.byte(33),
+            // (XeTeX's)
+            Key::InterChar(a, b) => {
+                self.byte(34);
+                self.u(u64::from(*a));
+                self.u(u64::from(*b));
+            }
+            Key::InputEncoding => self.byte(35),
+            Key::DefaultEncoding => self.byte(36),
+            Key::LinebreakLocale => self.byte(37),
             _ => return Err(format!("a name a format does not hold: {k:?}")),
         }
         Ok(())
@@ -517,6 +531,7 @@ fn prim_named(name: &str) -> Option<Prim> {
     Prim::by_name(name)
         .or_else(|| Prim::by_name_etex(name))
         .or_else(|| Prim::by_name_pdftex(name))
+        .or_else(|| Prim::by_name_xetex(name))
         .or_else(|| Prim::internal(name))
         .or_else(|| UNIMPL.iter().position(|n| *n == name).map(|i| Prim::Unimpl(i as u16)))
 }
@@ -553,6 +568,10 @@ pub fn encode(defs: &[(Key, Val)], numbering: &[Arc<str>], cs: &CsTable) -> Resu
         w.str(n);
     }
     let fonts = std::mem::take(&mut w.font_list);
+    // (xetex.web: "Can't \dump a format with native fonts or font-mappings")
+    if fonts.iter().any(|f| f.native.is_some()) {
+        return Err("Can't \\dump a format with native fonts or font-mappings".into());
+    }
     w.u(fonts.len() as u64);
     for f in &fonts {
         w.str(&f.name);
@@ -690,6 +709,7 @@ impl Reader<'_> {
             9 => Meaning::MuskipRef(self.n()?),
             10 => Meaning::ToksRef(self.n()?),
             11 => Meaning::Font(self.font()?),
+            12 => Meaning::XMathCharGiven(self.n()?),
             _ => return Err(bad("a meaning")),
         })
     }
@@ -756,6 +776,7 @@ impl Reader<'_> {
                 1 => Whatsit::Write { stream: self.byte()?, toks: Arc::new(self.toks()?) },
                 2 => Whatsit::Close { stream: self.byte()? },
                 3 => Whatsit::Special(Arc::from(self.str()?)),
+                4 => Whatsit::SavePos,
                 _ => return Err(bad("a whatsit")),
             })),
             11 => {
@@ -874,6 +895,10 @@ impl Reader<'_> {
             31 => Key::FontParams(Arc::from(self.str()?)),
             32 => Key::LastFont,
             33 => Key::Interaction,
+            34 => Key::InterChar(self.n()?, self.n()?),
+            35 => Key::InputEncoding,
+            36 => Key::DefaultEncoding,
+            37 => Key::LinebreakLocale,
             _ => return Err(bad("a name")),
         })
     }

@@ -25,7 +25,7 @@ fn usage() -> ExitCode {
     eprintln!(
         "usage: phitex-flow FILE.tex [-j N] [--reads suspend|speculate] [--order priority|random:SEED] \
          [--tfm PATH] [-o OUT.dvi] [--dump] [--etex] [--input-dir DIR]... [--jobname NAME] [--before FILE]... [--terminal LINE]... [--font-dir DIR]... [--fmt FILE] [--dump-fmt FILE] [--interaction MODE] [--edit OLD=>NEW] [--repeat N] \
-         [--check] [--log] [--main-memory WORDS] [--cut-lines N|inf]"
+         [--check] [--log] [--main-memory WORDS] [--cut-lines N|inf] [--xetex [--font-index FILE] [--pdf OUT.pdf]]"
     );
     ExitCode::from(2)
 }
@@ -344,6 +344,9 @@ fn main() -> ExitCode {
     let mut fmt: Option<String> = None;
     let mut dump_fmt: Option<String> = None;
     let mut interaction: Option<i32> = None;
+    let mut xetex = false;
+    let mut font_index: Option<String> = None;
+    let mut pdf_out: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -377,6 +380,17 @@ fn main() -> ExitCode {
             }
             "--check" => check = true,
             "--etex" => opts.etex = true,
+            // (XeTeX: the engine, the installed fonts' index, files found
+            // by `kpsewhich`; `--pdf`: also xdvipdfmx's PDF of the XDV)
+            "--xetex" => xetex = true,
+            "--font-index" => match val() {
+                Some(f) => font_index = Some(f),
+                None => return usage(),
+            },
+            "--pdf" => match val() {
+                Some(f) => pdf_out = Some(f),
+                None => return usage(),
+            },
             "--input-dir" => match val() {
                 Some(d) => dirs.push(d.into()),
                 None => return usage(),
@@ -491,7 +505,8 @@ fn main() -> ExitCode {
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         phitex_flow::graph::jobs(&refs)
     };
-    let out = out.unwrap_or_else(|| format!("{}.dvi", file.trim_end_matches(".tex")));
+    let ext = if xetex { "xdv" } else { "dvi" };
+    let out = out.unwrap_or_else(|| format!("{}.{ext}", file.trim_end_matches(".tex")));
     // (`\input` and `\openin` find files beside the document; the job is
     // its name)
     let path = std::path::Path::new(&file);
@@ -500,6 +515,34 @@ fn main() -> ExitCode {
         .unwrap_or_else(|| path.file_stem().map_or_else(|| "texput".to_string(), |s| s.to_string_lossy().into_owned()));
     let inputs: Vec<std::path::PathBuf> = std::iter::once(dir.clone()).chain(dirs).collect();
     let mut b = Build::new(font.clone());
+    if xetex {
+        let idx = match &font_index {
+            Some(f) => match std::fs::read(f) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    eprintln!("{f}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            None => Vec::new(),
+        };
+        let kpse: Arc<dyn phitex_flow::tfm::Kpse> = Arc::new(phitex_flow::tfm::Kpsewhich::new());
+        let fonts = if idx.is_empty() {
+            phitex_flow::native::Fonts::new(Arc::default(), kpse)
+        } else {
+            match phitex_flow::native::Fonts::from_index_bytes(&idx, kpse) {
+                Some(f) => f,
+                None => {
+                    eprintln!("--font-index: not a font index");
+                    return ExitCode::FAILURE;
+                }
+            }
+        };
+        b.set_xetex(fonts);
+        if let Some(e) = std::env::var("SOURCE_DATE_EPOCH").ok().and_then(|v| v.trim().parse().ok()) {
+            b.set_pdf_date(e);
+        }
+    }
     b.set_input_dirs(inputs.clone());
     b.set_jobname(&job);
     if !terminal.is_empty() {
@@ -591,11 +634,29 @@ fn main() -> ExitCode {
     // (what `\openout` and `\write` made, beside the document)
     for (name, text) in &last.writes {
         let p = dir.join(name);
-        if let Err(e) = std::fs::write(&p, text.chars().map(|c| u32::from(c).min(255) as u8).collect::<Vec<u8>>()) {
+        // (XeTeX writes UTF-8)
+        let bytes: Vec<u8> = if xetex { text.as_bytes().to_vec() } else { text.chars().map(|c| u32::from(c).min(255) as u8).collect() };
+        if let Err(e) = std::fs::write(&p, bytes) {
             eprintln!("{}: {e}", p.display());
             return ExitCode::FAILURE;
         }
     }
     println!("wrote {out} ({} bytes)", last.dvi.len());
+    if let Some(pdf) = pdf_out {
+        match b.xdv_pdf(&last.dvi) {
+            Some(Ok(bytes)) => {
+                if let Err(e) = std::fs::write(&pdf, &bytes) {
+                    eprintln!("{pdf}: {e}");
+                    return ExitCode::FAILURE;
+                }
+                println!("wrote {pdf} ({} bytes)", bytes.len());
+            }
+            Some(Err(e)) => {
+                eprintln!("xdvipdfmx: {e}");
+                return ExitCode::FAILURE;
+            }
+            None => eprintln!("--pdf: only with --xetex"),
+        }
+    }
     ExitCode::SUCCESS
 }

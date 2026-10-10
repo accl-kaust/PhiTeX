@@ -61,7 +61,7 @@ use crate::page::{
 };
 use crate::show::RAW;
 use crate::tfm::{Font, FontFiles};
-use crate::val::{Key, Meaning, Shown, Tok, TokPar, Val, initial};
+use crate::val::{Key, Meaning, Shown, Tok, TokPar, Val};
 
 /// What a read does when the definition it finds is being remade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -526,6 +526,9 @@ pub struct Build {
     /// The PDF file's creation date, in seconds since 1970 (UTC):
     /// `SOURCE_DATE_EPOCH` for pdfTeX (`Build::set_pdf_date`).
     pdf_date: i64,
+    /// The engine is XeTeX, with these installed fonts and this finder
+    /// (`Build::set_xetex`).
+    xe: Option<Arc<crate::native::Fonts>>,
 }
 
 /// A file's text and its pieces.
@@ -664,6 +667,8 @@ struct Given {
     limits: crate::print::Limits,
     /// The PDF file's creation date (`Build::set_pdf_date`).
     pdf_date: i64,
+    /// XeTeX's native fonts (`Build::set_xetex`).
+    xe: Option<Arc<crate::native::Fonts>>,
 }
 
 impl Given {
@@ -684,6 +689,15 @@ impl Given {
             interaction_option: None,
             limits: crate::print::Limits::TEX_LIVE,
             pdf_date: 0,
+            xe: None,
+        }
+    }
+
+    /// XeTeX's `load_native_font` through the given fonts.
+    fn native_font(&self, name: &str, size: i32, tracing: i32) -> crate::native::Loaded {
+        match &self.xe {
+            Some(x) => x.load(name, size, tracing),
+            None => (None, Vec::new()),
         }
     }
 
@@ -965,7 +979,7 @@ impl Names {
                 Some(d) => Val::Stream(Arc::new(crate::val::Stream { data: d.clone(), next: 0, normal: true })),
                 None => Val::Void,
             },
-            _ => initial(key, font, self.etex, Some(&self.cs)),
+            _ => crate::val::initial_in(key, font, self.etex, self.given.xe.is_some(), Some(&self.cs)),
         }
     }
 
@@ -1274,6 +1288,7 @@ impl Build {
             limits: crate::print::Limits::TEX_LIVE,
             format: None,
             pdf_date: 0,
+            xe: None,
         }
     }
 
@@ -1684,6 +1699,31 @@ impl Build {
         self.pdf_date = epoch;
     }
 
+    /// The engine is XeTeX (`xetex -ini`, with e-TeX's extended mode as
+    /// [`Options::etex`] says): its primitives and IniTeX values, Unicode
+    /// input, native fonts from `fonts` (the installed fonts' index and
+    /// the file finder, both given), XDV output and the PDF xdvipdfmx
+    /// makes of it. Fixed for a `Build`'s life, given before the first
+    /// update.
+    pub fn set_xetex(&mut self, fonts: crate::native::Fonts) {
+        self.xe = Some(Arc::new(fonts));
+    }
+
+    /// XeTeX's PDF of an XDV file this build wrote (`Output::dvi`): what
+    /// `xdvipdfmx -q -E -o JOB.pdf` makes of it, in process
+    /// (`native::xdv_to_pdf`), dated by [`Build::set_pdf_date`]. `None`
+    /// when the engine is not XeTeX.
+    pub fn xdv_pdf(&self, xdv: &[u8]) -> Option<Result<Vec<u8>, String>> {
+        let xe = self.xe.as_ref()?;
+        let name = format!("{}.pdf", self.job);
+        Some(crate::native::xdv_to_pdf(xdv, xe.kpse(), &name, self.pdf_date))
+    }
+
+    /// The engine is XeTeX ([`Build::set_xetex`]).
+    pub fn xetex(&self) -> bool {
+        self.xe.is_some()
+    }
+
     /// The sizes set by [`Build::set_limits`].
     pub fn limits(&self) -> crate::print::Limits {
         self.limits
@@ -1955,6 +1995,7 @@ impl Build {
         given.interaction_option = self.interaction_option;
         given.limits = self.limits;
         given.pdf_date = self.pdf_date;
+        given.xe.clone_from(&self.xe);
         let names = Names::new(given, opts.etex, self.cs.clone(), self.format.clone());
         for (k, ps) in p.iter().enumerate() {
             if let Some(r) = ps.run.as_ref().or(ps.prev.as_ref().map(|(r, _, _)| r)) {
@@ -2296,7 +2337,9 @@ impl Build {
             errors.extend(w.errors.into_iter().map(|e| format!("pdf: {e}")));
             (Vec::new(), w.bytes, w.again)
         } else {
-            let (out, again) = dvi::assemble_in(&numbers, &st.pages, &mut bodies, sh.names.given.limits.dvi_buf_size);
+            // (XeTeX: the XDV file, its id byte and comment XeTeX's)
+            let xdv = sh.names.given.xe.is_some();
+            let (out, again) = dvi::assemble_as(&numbers, &st.pages, &mut bodies, sh.names.given.limits.dvi_buf_size, xdv);
             (out, Vec::new(), again)
         };
         st.stats.bodies_again = again;
@@ -2580,6 +2623,14 @@ impl Env for JoinEnv<'_> {
 
     fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
         self.fonts.get(name)
+    }
+
+    fn xetex(&self) -> bool {
+        self.names.given.xe.is_some()
+    }
+
+    fn native_font(&mut self, name: &str, size: i32, tracing: i32) -> crate::native::Loaded {
+        self.names.given.native_font(name, size, tracing)
     }
 
     // (run again as it ran: up to its cut)
@@ -4184,6 +4235,14 @@ impl Env for PieceEnv<'_> {
         self.sh.fonts.get(name)
     }
 
+    fn xetex(&self) -> bool {
+        self.sh.names.given.xe.is_some()
+    }
+
+    fn native_font(&mut self, name: &str, size: i32, tracing: i32) -> crate::native::Loaded {
+        self.sh.names.given.native_font(name, size, tracing)
+    }
+
     fn check(&mut self, ran: u64, words: u64) -> Check {
         // (marked stale while it runs, or the sequence changes: it stops)
         if self.sh.cancel[self.k].load(Ordering::Relaxed) {
@@ -4524,6 +4583,14 @@ impl Env for RoutineEnv<'_> {
 
     fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
         self.fold.sh.fonts.get(name)
+    }
+
+    fn xetex(&self) -> bool {
+        self.fold.sh.names.given.xe.is_some()
+    }
+
+    fn native_font(&mut self, name: &str, size: i32, tracing: i32) -> crate::native::Loaded {
+        self.fold.sh.names.given.native_font(name, size, tracing)
     }
 
     fn reach(&mut self, key: &Key, _node: u32) -> (Val, Src, u32, u32) {

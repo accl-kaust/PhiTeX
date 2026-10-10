@@ -13,7 +13,9 @@
 //! function, memoised by content. N equal threads run whatever the
 //! scheduler picks. A cold build is an edit from nothing.
 //!
-//! Depends on no `partex-*` crate (`tests/wall.rs`).
+//! Depends on no `partex-*` crate holding TeX state (`tests/wall.rs`): the
+//! pure libraries partex-otf (OpenType) and partex-xdvipdfmx (XDV to PDF)
+//! for XeTeX.
 
 #![allow(
     clippy::missing_panics_doc,
@@ -42,10 +44,16 @@ pub mod item;
 pub mod linebreak;
 pub mod page;
 pub mod pdf;
+pub mod pdfread;
 pub mod graph;
 pub mod hyph;
+pub mod icu_linebreak;
+pub mod inflate;
+#[rustfmt::skip]
+pub mod icu_tables;
 pub mod logs;
 pub mod mlist;
+pub mod native;
 pub mod pack;
 pub mod prim;
 pub mod print;
@@ -54,6 +62,7 @@ pub mod show;
 pub mod split;
 pub mod tfm;
 pub mod val;
+pub mod xpic;
 
 pub use build::{Build, Options, Order, Output, Reads, Stats};
 pub use tfm::Font;

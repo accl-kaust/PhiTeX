@@ -2437,3 +2437,88 @@ is a pure function or a fold step, no state shared with the others):
 | images | `pdf/image/` (new) | `\pdfximage` is a node whose value is the image's description (a pure function of the file's bytes, the page asked for, the box); its dimensions are known at the node (pdfTeX reads the file there); `\pdfrefximage` is a whatsit; the fold writes the XObject (PNG through `zlib`, JPEG as it is, PDF pages through a PDF reader copied from partex-engine's `pdfread.rs`/partex-core's `epdf.rs`) at the first page using it |
 | links, dests, outlines | `pdf/link.rs` (new) + fold | link and annotation rectangles in `content.rs` (pdfTeX's `append_link`, `end_link`: per line box at its nesting level), dest names sorted and the name tree in the fold (`sort_dest_names`, "Output name tree"), outlines as document-level items in position order |
 | reads of the fold | core (A: Conflict 12's `ReadRef`) | `\pdflastobj`, `\pdflastxform`, `\pdflastximage`, `\pdflastannot`, `\pdflastlink`, `\pdflastxpos`/`\pdflastypos`: the fold's counters at the node's position |
+
+## XeTeX on the graph (agent X)
+
+The engine is a given of the build: `Build::set_xetex(fonts)` (the CLI's
+`--xetex [--font-index FILE] [--pdf OUT.pdf]`), with e-TeX's extended mode
+as `Options::etex` says. `fonts` is `tfm::Fonts`: the installed fonts'
+index (partex-otf's `FontIndex`, made by `otf-index` from what fontconfig
+lists with `scripts/xetex/fonts.conf`: TeX Live's `fonts/opentype` and
+`fonts/truetype`, nothing of the system's) and the file finder
+(`tfm::Kpse`: `find(name, format, prog) -> Option<path>`, `read(path)`;
+`tfm::Kpsewhich` asks `kpsewhich`, `tfm::DirKpse` walks directories).
+Both are givens, never searched for by a node. This `Kpse` is the shape
+proposed for A's `Build::set_input_finder`; once that lands on flow there
+is one trait.
+
+Linked (tests/wall.rs allows them): partex-otf (faces, HarfBuzz-equal
+shaping, TECkit mappings, OpenType math tables, `xetex::fontmgr`) and
+partex-xdvipdfmx (XDV to PDF). partex-xdvipdfmx itself still depends on
+partex-engine, for md5, png and inflate only. W's phitex-codecs
+extraction (flow-cli 73adb56) points it at phitex-codecs, and W makes the
+wall check transitive dependencies. Copied: `icu_tables.rs` (from
+partex-core), `icu_linebreak.rs` and `.bin` (ICU's line-break rules, from
+partex-core), and `pdfread.rs`, `inflate.rs`, `xpic.rs` (XeTeX_pic.c's
+own readers and poppler's page boxes as partex-engine ported them). The
+last three move to phitex-codecs when it is on flow.
+
+### Construct → graph
+
+| XeTeX construct | On the graph |
+|---|---|
+| 21-bit characters | Rust's `char` everywhere already (Keys are char-keyed); surrogates (no `char`) read as U+FFFD (gap). |
+| The input encodings (`\XeTeXinputencoding`, `\XeTeXdefaultencoding`) | `Key::InputEncoding`/`Key::DefaultEncoding`, global (XeTeX keeps them per file, never local to a group). Texts stay bytes (one `char` each). The tokenizer decodes a byte ≥ 0x80 at `char_at` with the mode the line was begun in (`RState::enc`, read with `\endlinechar` at the line's start: a read like the catcodes). `\scantokens` and terminal texts are `DECODED`. |
+| `^^^^XXXX`, `^^^^^^XXXXXX` | `reduce_sup_xetex` (xetex.web §355). |
+| Codes per code point (`\catcode`… up to "10FFFF) | The same keys. `\mathcode` holds XeTeX's 32 bits (fam<<24 \| class<<21 \| usv; active "1FFFFF). `\the\mathcode` converts back (`xe_code_out`: "Extended mathchar used as mathchar"). The math list reads TeX's 15 bits (`Exec::mathcode`). |
+| `\XeTeXcharclass` | Shares `Key::Sfcode(c)`: class<<16 \| sf. This is right only because XeTeX's own semantics merge them: one eqtb word with two ranges. In xetex.web's `def_code` (~27923–27980), `XeTeX_def_code` for sf_code_base keeps `n:=sf_code mod "10000`, and `def_code` for `\sfcode` keeps `equiv(p) div "10000`. A space factor read masks `& 0xFFFF` (`adjust_space_factor`). |
+| `\XeTeXinterchartoks a b` | `Key::InterChar(a, b)`, a token list. `prev_class`/`space_class` are an `Exec` field (`xclass`), begun at the boundary in every run of characters (xetex.web's "Append character…"), so they never cross commands. The character put back behind a list is marked by the internal `\0xbackedchar` (`backed_up_char`). |
+| `\Umathcode`, `\Umathcodenum`, `\Udelcode`, `\Udelcodenum`, `\Umathchardef`, `\Umathcharnumdef`, `\Umathchar`, `\Umathcharnum` | `Xe::DefCode`, `Xe::MathCharDef` (`Meaning::XMathCharGiven`), `Xe::MathCharNum`. In math, TeX's 15 bits (gap: OpenType math). |
+| Native fonts (`\font\x="Name:features" at s`, `[file]`) | A font is a value: `Font { native: Some(NativeFont { xf, height_base, depth_base, glue, … }) }`. It is loaded by `Env::native_font` (a pure function of name, size and `\XeTeXtracingfonts` through `tfm::Fonts`, memoised for the build, a fresh `FontManager` per load). Its identity is `Font::key_of(canonical name, size)`, as `load_native_font` finds a loaded font again. A quoted name goes native first, an unquoted one TFM first (`read_font_info`). |
+| The shaping state (`hb_buffer`'s last script) | `Key::NativeDir(font)`: a value a node defines (the main loop's `native_word`, global as XeTeX's font engine is) and a later node reads. **Nodes that only measure or hyphenate read the SAME definition the main loop made, never re-derive it.** A word carries the direction it was shaped with (`NativeWord::rtl`), and its parts (hyphenation, hpack's merging) are shaped again with it. |
+| A run of characters in a native font | `main_loop_native`: the run collected (interchar lists, mapping, lost characters), cut at hyphens into words with empty discretionaries, ICU's breaks with `\XeTeXlinebreaklocale` (penalty, `\XeTeXlinebreakskip`). A word joins the previous one (`native_tail`: the tail and the item before it, own emit first, else a read of material, `Kind::Par`) by `Item::Remove(4)` and one merged word. `\XeTeXinterwordspaceshaping` adds a space-adjustment kern. |
+| `Item::Native`, `Item::Glyph`, `Item::Pic` | Items with a box's dimensions (`Item::xdims`): hpack, vpack, line breaking (widths), the page builder and `\vsplit` (pictures). |
+| Hyphenation of a native word | `hyph::hyphenate_native` (xetex.web §945–§957): split at non-letters (the split stays even without a hyphen, as XeTeX's does), patterns on the `\lccode`s (`HyphParams::lc_wide`, any code point), fragments with a discretionary holding the hyphen character; `\XeTeXhyphenatablelength` (`HyphParams::max_len`). |
+| `hpack` | `pack::merge_native` first: fragments of one font joined across empty discretionaries (xetex.web §1409). |
+| Font queries (`\XeTeXcountglyphs`, `\XeTeXOT…`, `\XeTeXcharglyph`, `\XeTeXglyphindex`, `\XeTeXglyphname`, `\XeTeXglyphbounds`, `\fontcharwd`… of a native font, `\iffontchar`) | Pure functions of the font value (`xe_item`, `native_char_dimen`). The AAT and Graphite queries give XeTeX's errors. |
+| `\XeTeXpicfile`, `\XeTeXpdffile` | A value measured from the file's bytes (a read of `Key::File`) and the keywords (`xpic::picture`); `Item::Pic`. |
+| `\XeTeXglyph` | `Item::Glyph`. |
+| `\pdfsavepos` | `Whatsit::SavePos` (`\pdflastxpos`/`ypos` stay 0: gap). |
+| XDV | DVI's fold (`dvi::assemble_as(…, xdv)`): id byte 7, " XeTeX output" comment, `define_native_font` (252, partex-otf's `font_def`), `set_glyphs` (253), `set_text_and_glyphs` (254, `\XeTeXgenerateactualtext`), pictures as `pdf:image matrix … page … (path)` specials. |
+| PDF | `Build::xdv_pdf(xdv)`: partex-xdvipdfmx in process, as `xdvipdfmx -q -E -o JOB.pdf`, its files through the same `Kpse`, zlib's deflate from `pdf::zlib`, dated `SOURCE_DATE_EPOCH` (`Build::set_pdf_date`). |
+| `xelatex.fmt` | `Build::format`: the code tables are definitions, so a wide table is saved sparsely (only what was defined). The new keys are format keys 34–37. A native font cannot be dumped (XeTeX's error). |
+| `\strcmp`, `\filesize`, `\shellescape`, `\ifprimitive`, … (pdfTeX's names XeTeX has) | `XETEX_PRIMITIVES` (95, sorted). `\primitive` is the name as it is (gap). `\ifprimitive` is `IfKind::PdfPrimitive`. |
+
+### The fonts
+
+The oracle's fontconfig sees TeX Live's `fonts/opentype` and
+`fonts/truetype` (2711 faces on the cluster's TeX Live 2026, Arch;
+`tests/xetex/oracle/fc-list.txt`). The documents use:
+lm/lmroman{6,7,8,9,10,12,17}-regular, lmroman{9,10,12}-bold,
+lmroman{8,10}-italic, lmromancaps10-regular, lmsans{8,10}-regular,
+lmsans10-bold, lmmono10-regular, lm-math/latinmodern-math,
+tex-gyre/texgyrepagella-{regular,bold,italic}, texgyretermes-regular,
+texgyreheros-regular, libertinus-fonts/LibertinusSerif-Regular,
+truetype amiri/Amiri-Regular. There is no CJK face in TeX Live's
+opentype tree here, so `cjk.tex` sets its CJK text in Latin Modern
+(missing glyphs). It still tests `\XeTeXlinebreaklocale`'s breaks.
+
+### Gaps (repros in `tests/xetex/`)
+
+- OpenType math: math lists hold TeX's 15-bit characters. `\Udelimiter`,
+  `\Uradical`, `\Umathaccent` are "not supported yet". unicode-math's
+  formulas (`docs/umath.tex`) differ.
+- Accents (`\accent`) in a native font; `\XeTeXinterwordspaceshaping=2`'s
+  hlist_out merging; TFM fonts with a mapping.
+- `\XeTeXinputencoding` is global, not per file. ICU converters other
+  than single-byte tables and UTF-8 are errors; ICU's dictionary and
+  phrase line breaking (Thai, Lao, Khmer, Myanmar; `lw=phrase`) are
+  errors. TeX Live 2026's xetex crashes opening any ICU converter
+  (`\XeTeXinputencoding "latin1"` in `xetex -ini`), so they have no oracle.
+- Astral letters in hyphenated native words (two code units).
+- `\pdflastxpos`/`\pdflastypos` are 0.
+- `\tracingcommands` shows `\0xbackedchar` where XeTeX shows the
+  character read again. Native items print in no box display (the log is
+  not a bar).
+- The empty-but-set `\XeTeXinterchartoks` inside a group drops the token
+  that ended the run (XeTeX's `cur_ptr` quirk): not reproduced.

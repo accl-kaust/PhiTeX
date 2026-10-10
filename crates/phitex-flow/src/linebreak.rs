@@ -112,6 +112,8 @@ fn widths(it: &Item) -> W {
         Item::Char(..) | Item::Lig(_) | Item::Box(_) | Item::Rule { .. } | Item::Kern { .. } | Item::Math { .. } => {
             w[0] = i64::from(it.width());
         }
+        // (xetex.web: native words, glyphs and pictures have widths)
+        Item::Native(_) | Item::Glyph(_) | Item::Pic(_) => w[0] = i64::from(it.width()),
         _ => {}
     }
     w

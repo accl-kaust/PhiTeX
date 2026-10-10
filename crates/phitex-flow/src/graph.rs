@@ -38,7 +38,7 @@ use crate::hash::{FxMap, FxSet};
 pub use crate::item::{Item, Para};
 use crate::page::MAIN_DEPTH;
 use crate::tfm::Font;
-use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
+use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val, Xe};
 
 
 mod align;
@@ -56,6 +56,7 @@ mod material;
 mod math;
 pub mod output;
 mod scan;
+pub(crate) mod xetex;
 
 pub use expand::{JOBNAME, PDFTEX_BANNER};
 pub use io::{ends_document, file_text, page_io, whatsits};
@@ -172,6 +173,22 @@ pub trait Env {
     /// after the format (none: the format's, or IniTeX's).
     fn interaction_option(&self) -> Option<i32> {
         None
+    }
+
+    /// The engine is XeTeX (a given of the build, fixed for its life):
+    /// the reader decodes UTF-8 (or the encoding in force), XeTeX's
+    /// primitives are named, characters are Unicode's.
+    fn xetex(&self) -> bool {
+        false
+    }
+
+    /// XeTeX's `find_native_font(name, size)` and `load_native_font`: the
+    /// font `name` names (a font name with its options through the index
+    /// of the installed fonts, or a `[file]` through kpathsea) at `size`
+    /// (negative: scaled), with what loading it prints; a pure function of
+    /// its arguments during a build (`\XeTeXtracingfonts` only adds lines).
+    fn native_font(&mut self, _name: &str, _size: i32, _tracing: i32) -> crate::native::Loaded {
+        (None, Vec::new())
     }
 }
 
@@ -302,6 +319,8 @@ struct PendingText {
     pos: usize,
     tstate: TState,
     eol: i16,
+    /// XeTeX: how its current line is decoded (`RState::enc`).
+    enc: u32,
     eof: bool,
     kind: TextKind,
     endinput: bool,
@@ -736,6 +755,9 @@ pub struct RState {
     /// The current line's end-of-line character (`\endlinechar` as the line
     /// was begun; -1: none), or `EOL_UNREAD`.
     eol: i16,
+    /// XeTeX: how the current line is decoded, read with `eol` where the
+    /// line is begun (`Key::InputEncoding`: `graph::xetex`'s modes).
+    enc: u32,
     /// `\endinput` was read: the file ends after this line (tex.web 362).
     endinput: bool,
     /// The alignment being read: `align_state`, the current column and
@@ -781,6 +803,7 @@ impl RState {
             prev_depth: MAIN_DEPTH,
             prev_graf: 0,
             eol: EOL_UNREAD,
+            enc: 0,
             endinput: false,
             al: align::AlignCur::OFF,
             protected: false,
@@ -1022,6 +1045,7 @@ impl RState {
             && self.prev_depth == o.prev_depth
             && self.prev_graf == o.prev_graf
             && self.eol == o.eol
+            && self.enc == o.enc
             && self.endinput == o.endinput
             && self.al == o.al
             && self.pending == o.pending
@@ -2706,6 +2730,15 @@ struct Exec<'a> {
     /// While a rewritten text (`\scantokens`) is read: its characters,
     /// which the tokenizer reads instead of the piece's.
     ptext: Option<Arc<[char]>>,
+    /// The engine is XeTeX (`Env::xetex`).
+    xetex: bool,
+    /// XeTeX's `scan_decimal` is scanning (a dimension without units).
+    decimal_only: bool,
+    /// XeTeX's `prev_class` and `space_class` (`\XeTeXinterchartoks`):
+    /// the main loop's, begun at the boundary class in every run of
+    /// characters (xetex.web's "Append character", so never read across
+    /// commands).
+    xclass: (u16, u16),
     /// The output routine's end this node is (`output::OutputEnd`).
     output: Option<Box<output::OutputEnd>>,
     /// Inside `\csname`…`\endcsname` (pdfTeX's `\ifincsname`).
@@ -2817,6 +2850,7 @@ impl<'a> Exec<'a> {
         let stamp = scratch.stamp;
         let reads = std::mem::take(&mut scratch.reads);
         let emit = std::mem::take(&mut scratch.emit);
+        let xetex = env.xetex();
         Exec {
             text,
             chain,
@@ -2844,6 +2878,9 @@ impl<'a> Exec<'a> {
             stamp,
             old_para: None,
             ptext: None,
+            xetex,
+            decimal_only: false,
+            xclass: (xetex::BOUNDARY, 0),
             output: None,
             in_csname: 0,
             steps: 0,
@@ -3395,10 +3432,18 @@ impl<'a> Exec<'a> {
         u8::try_from(self.st.eol).ok().map(char::from)
     }
 
-    /// Reads `\endlinechar` for the line being begun.
+    /// Reads `\endlinechar` for the line being begun (and XeTeX's input
+    /// encoding: the line is decoded as `\XeTeXinputencoding` says when it
+    /// is begun).
     fn read_eol(&mut self) {
         let v = self.int_par(IntPar::Endlinechar);
         self.st.eol = if (0..=255).contains(&v) { v as i16 } else { -1 };
+        if self.xetex && self.st.enc != xetex::DECODED {
+            self.st.enc = match self.get(&Key::InputEncoding) {
+                Val::Int(m) => m as u32,
+                _ => 0,
+            };
+        }
     }
 
     /// The reader has passed a line's end: the next line begins (its
@@ -3443,7 +3488,15 @@ impl<'a> Exec<'a> {
     fn char_at(&mut self, pos: usize) -> Option<(char, usize, u8)> {
         let raw = *self.txt().get(pos)?;
         let c = if raw == '\r' { self.eol()? } else { raw };
-        let mut cur = (c, pos + 1, self.catcode(c));
+        let mut cur = if self.xetex && raw != '\r' && ('\u{80}'..='\u{ff}').contains(&raw) {
+            if self.st.eol == EOL_UNREAD {
+                self.read_eol();
+            }
+            let (c, n) = xetex::decode(self.txt(), pos, self.st.enc);
+            (c, pos + n, self.catcode(c))
+        } else {
+            (c, pos + 1, self.catcode(c))
+        };
         if raw == '\r' {
             return Some(cur);
         }
@@ -3461,6 +3514,9 @@ impl<'a> Exec<'a> {
     fn reduce_sup(&mut self, c: char, p: usize) -> Option<(char, usize)> {
         if self.txt().get(p) != Some(&c) {
             return None;
+        }
+        if self.xetex {
+            return self.reduce_sup_xetex(c, p);
         }
         let at = |x: &mut Self, p: usize| -> Option<char> {
             let ch = x.txt().get(p).copied();
@@ -3485,6 +3541,45 @@ impl<'a> Exec<'a> {
             }
         };
         Some((char::from_u32(r).unwrap_or('\0'), np))
+    }
+
+    /// XeTeX's `^^` (xetex.web §355): two to six superscript characters
+    /// and as many lowercase hexadecimal digits are the character of that
+    /// code (if a Unicode scalar value); else `^^` and a character below
+    /// 128 is that character plus or minus 64. `p` is the second's place.
+    fn reduce_sup_xetex(&mut self, c: char, p: usize) -> Option<(char, usize)> {
+        let at = |x: &mut Self, q: usize| -> Option<char> {
+            match x.txt().get(q).copied() {
+                Some('\r') => x.eol(),
+                other => other,
+            }
+        };
+        // (the line's last place: its end-of-line character's)
+        let limit = self.line_end_after(p).saturating_sub(1);
+        if p >= limit {
+            return None;
+        }
+        let mut sup = 2usize;
+        while sup < 6 && p + 2 * sup - 2 <= limit && self.txt().get(p + sup - 1) == Some(&c) {
+            sup += 1;
+        }
+        let hex = |ch: Option<char>| ch.filter(|h| h.is_ascii_digit() || ('a'..='f').contains(h));
+        let mut v: u32 = 0;
+        for d in 1..=sup {
+            let Some(h) = hex(at(self, p + sup - 2 + d)) else {
+                let c2 = at(self, p + 1)?;
+                if u32::from(c2) < 128 {
+                    let x = u32::from(c2);
+                    return Some((char::from_u32(if x < 64 { x + 64 } else { x - 64 }).unwrap_or('\0'), p + 2));
+                }
+                return None;
+            };
+            v = 16 * v + h.to_digit(16).unwrap_or(0);
+        }
+        if v > 0x10_FFFF {
+            return None;
+        }
+        Some((char::from_u32(v).unwrap_or('\u{FFFD}'), p + 2 * sup - 1))
     }
 
     /// The position just after the current line's end.
@@ -3630,15 +3725,15 @@ impl<'a> Exec<'a> {
     /// the text is done (`None`: read on below it).
     fn text_token(&mut self) -> Option<Tok> {
         let x = self.st.texts.last()?.clone();
-        let outer = (self.st.pos, self.st.tstate, self.st.eol);
-        (self.st.pos, self.st.tstate, self.st.eol) = (x.pos, x.tstate, x.eol);
+        let outer = (self.st.pos, self.st.tstate, self.st.eol, self.st.enc);
+        (self.st.pos, self.st.tstate, self.st.eol, self.st.enc) = (x.pos, x.tstate, x.eol, x.enc);
         let prev = self.ptext.replace(x.text.clone());
         let t = self.tokenize();
         self.ptext = prev;
-        let here = (self.st.pos, self.st.tstate, self.st.eol);
-        (self.st.pos, self.st.tstate, self.st.eol) = outer;
+        let here = (self.st.pos, self.st.tstate, self.st.eol, self.st.enc);
+        (self.st.pos, self.st.tstate, self.st.eol, self.st.enc) = outer;
         let Some(x) = self.st.texts.last_mut() else { return t };
-        (x.pos, x.tstate, x.eol) = here;
+        (x.pos, x.tstate, x.eol, x.enc) = here;
         if t.is_some() || x.kind == TextKind::Read {
             return t;
         }
@@ -4190,7 +4285,7 @@ impl<'a> Exec<'a> {
             Meaning::Prim(p) => self.prim(p),
             Meaning::Char(cat, c) => self.char_tok(cat, c, &t),
             Meaning::CharGiven(c) => self.char_cmd(c, &t),
-            Meaning::MathCharGiven(_) => self.insert_dollar_sign(&t),
+            Meaning::MathCharGiven(_) | Meaning::XMathCharGiven(_) => self.insert_dollar_sign(&t),
             Meaning::Undefined => self.err(format!("Undefined control sequence {}", self.shown(&t))),
             Meaning::Macro(_)
             | Meaning::CountRef(_)
@@ -4383,6 +4478,26 @@ impl<'a> Exec<'a> {
             Prim::Align(a) => self.align_cmd(a),
             Prim::Relax => {}
             Prim::Marks | Prim::Discards(_) | Prim::ShowE(_) | Prim::Lr(_) => self.etex_command(p),
+            Prim::Xe(Xe::BackedChar) => {
+                // (the character after the mark, read again where the
+                // `\XeTeXinterchartoks` list put it back)
+                if self.st.mode == Mode::H
+                    && let Some(t) = self.next_raw()
+                {
+                    match t {
+                        Tok::Char(cat @ (11 | 12), c) => self.main_loop_any(u32::from(c), cat, true),
+                        t => self.back(t),
+                    }
+                }
+            }
+            Prim::Xe(Xe::Item(_) | Xe::DefCode(_) | Xe::InterCharToks) => {
+                self.err(format!("You can't use `\\{}' here", p.name()));
+            }
+            Prim::Xe(Xe::MathCharNum(_) | Xe::Delimiter | Xe::Radical | Xe::MathAccent) => {
+                let t = self.cmd.clone();
+                self.insert_dollar_sign(&t);
+            }
+            Prim::Xe(x) => self.xe_command(x),
             Prim::LastItem(_)
             | Prim::SpaceFactor
             | Prim::PrevDepth

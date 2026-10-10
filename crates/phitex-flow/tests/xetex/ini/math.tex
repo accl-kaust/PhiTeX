@@ -1,0 +1,26 @@
+% OpenType math: Latin Modern Math in the families, \Umathcode,
+% \Umathchar, \Udelimiter, \Uradical, \Umathaccent; fractions, radicals,
+% scripts with the MATH table's kerns, operators with limits, big
+% delimiters from variants and assemblies, accents, displays.
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \catcode`\$=3 \catcode`\^=7 \catcode`\_=8
+\def\loop#1\repeat{\def\body{#1}\iterate}\def\iterate{\body\let\next\iterate\else\let\next\relax\fi\next}
+\hsize=300pt \vsize=600pt \parindent=0pt \baselineskip=14pt \tolerance=10000
+\parfillskip=0pt plus 1fil
+\font\rm="[lmroman10-regular]" at 10pt \rm
+\font\m="[latinmodern-math.otf]" at 10pt \font\ms="[latinmodern-math.otf]:+ssty=0" at 7pt
+\font\mss="[latinmodern-math.otf]:+ssty=1" at 5pt
+\textfont0=\rm \textfont1=\m \scriptfont1=\ms \scriptscriptfont1=\mss
+\textfont2=\m \scriptfont2=\ms \scriptscriptfont2=\mss
+\textfont3=\m \scriptfont3=\ms \scriptscriptfont3=\mss
+\count1=`a \loop\ifnum\count1<`z \Umathcode\count1="7 "1 \numexpr"1D44E+\count1-`a\relax \advance\count1 1 \repeat
+\Umathcode`+="2 "1 "2B \Umathcode`=="3 "1 "3D \Umathcode`(="4 "1 "28 \Umathcode`)="5 "1 "29
+\Umathcode`1="0 "1 "31 \Umathcode`2="0 "1 "32
+\Umathchardef\sum="1 "1 "2211 \Umathchardef\int="1 "1 "222B \Umathchardef\alpha="0 "1 "1D6FC
+\def\sqrt{\Uradical "1 "221A } \def\hat{\Umathaccent "0 "1 "302 }
+\def\lp{\Udelimiter "4 "1 "28 }\def\rp{\Udelimiter "5 "1 "29 }
+\thinmuskip=3mu \medmuskip=4mu plus 2mu minus 4mu \thickmuskip=5mu plus 5mu
+Inline $a+b=c$, $x^2_1$, $a^{b^c}$, $f_{i_j}$, ${a\over b}$, $\sqrt{x+1}$, $\hat a$, $\alpha_1^2$.\par
+$$\sum_{i=1}^n a_i = \int_0^1 f \qquad {1+a\over 2} \qquad \left\lp {a\over b} \right\rp
+\qquad \left\lp \vrule height 30pt depth 20pt \right\rp$$
+$$\sqrt{{a\over b}+\sqrt{c}} \displaystyle\sum\limits_{k=1}^{2} \hat{x}\, x^{2^{2}}_{1_1}\eqno(1)$$
+\end

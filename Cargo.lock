@@ -1513,6 +1513,8 @@ dependencies = [
 name = "phitex-flow"
 version = "0.0.0"
 dependencies = [
+ "partex-otf",
+ "partex-xdvipdfmx",
  "phi",
  "tikv-jemallocator",
 ]

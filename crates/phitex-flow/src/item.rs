@@ -229,6 +229,13 @@ pub enum Item {
     /// A job of a session begins (`graph::JOB`): the page builder starts
     /// again from an empty page (TeX run again).
     JobStart,
+    // ---- XeTeX's whatsits with dimensions (xetex.web §169–§170)
+    /// A word in a native font (`native_word_node`).
+    Native(Arc<crate::native::NativeWord>),
+    /// One glyph of a native font (`glyph_node`, `\XeTeXglyph`).
+    Glyph(Arc<crate::native::GlyphItem>),
+    /// A picture (`pic_node`, `pdf_node`: `\XeTeXpicfile`, `\XeTeXpdffile`).
+    Pic(Arc<crate::native::Pic>),
 }
 
 impl Item {
@@ -243,7 +250,21 @@ impl Item {
             Item::Rule { w, .. } | Item::Kern { w, .. } | Item::Math { w, .. } => *w,
             Item::Glue { g, .. } => g.width,
             Item::Leaders(l) => l.g.width,
+            Item::Native(n) => n.w,
+            Item::Glyph(g) => g.w,
+            Item::Pic(p) => p.w,
             _ => 0,
+        }
+    }
+
+    /// XeTeX's whatsits that have a box's dimensions (native words, glyphs,
+    /// pictures): width, height, depth.
+    pub fn xdims(&self) -> Option<(i32, i32, i32)> {
+        match self {
+            Item::Native(n) => Some((n.w, n.h, n.d)),
+            Item::Glyph(g) => Some((g.w, g.h, g.d)),
+            Item::Pic(p) => Some((p.w, p.h, p.d)),
+            _ => None,
         }
     }
 
@@ -281,6 +302,9 @@ impl Item {
                 | Item::Lang { .. }
                 | Item::Whatsit(_)
                 | Item::Adjust(_)
+                | Item::Native(_)
+                | Item::Glyph(_)
+                | Item::Pic(_)
         )
     }
 
@@ -319,6 +343,9 @@ pub enum Whatsit {
     Close { stream: u8 },
     /// `\special{…}`: the expanded text as shipping prints it.
     Special(Arc<str>),
+    /// XeTeX's `\pdfsavepos` (`pdf_save_pos_node`): shipping notes where
+    /// it is; nothing is written.
+    SavePos,
 }
 
 /// An insertion (tex.web 140): its class, its natural height plus depth,

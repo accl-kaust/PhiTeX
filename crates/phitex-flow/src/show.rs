@@ -477,6 +477,7 @@ impl Shower<'_> {
                 self.cx.esc(self.out, "special");
                 self.mark_text(s);
             }
+            Whatsit::SavePos => self.cx.esc(self.out, "pdfsavepos"),
         }
     }
 

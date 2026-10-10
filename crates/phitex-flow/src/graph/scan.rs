@@ -75,10 +75,12 @@ pub(super) fn is_internal(m: &Meaning) -> bool {
                 | Prim::Font
                 | Prim::DefFamily(_)
                 | Prim::Mat(crate::val::Mat::FontInt(_))
+                | Prim::Xe(crate::val::Xe::Item(_) | crate::val::Xe::DefCode(_) | crate::val::Xe::InterCharToks)
         ),
         Meaning::Font(_)
         | Meaning::CharGiven(_)
         | Meaning::MathCharGiven(_)
+        | Meaning::XMathCharGiven(_)
         | Meaning::CountRef(_)
         | Meaning::DimenRef(_)
         | Meaning::SkipRef(_)
@@ -159,14 +161,16 @@ impl Exec<'_> {
         let v = match m {
             Meaning::Prim(p) => match *p {
                 Prim::Code(c) => {
-                    let n = self.scan_char_num();
-                    let key = Self::code_key(c, char::from_u32(n as u32).unwrap_or('\0'));
-                    IVal::Int(match self.get(&key) {
+                    let n = self.scan_code_char();
+                    let key = Self::code_key(c, super::xetex::usv(n));
+                    let v = match self.get(&key) {
                         Val::Cat(k) => i32::from(k),
                         Val::Int(i) => i,
                         _ => 0,
-                    })
+                    };
+                    IVal::Int(if self.xetex { self.xe_code_out(c, v) } else { v })
                 }
+                Prim::Xe(x) => return self.xe_internal(t, x, level),
                 Prim::TokPar(q) => {
                     if level != Lv::Tok {
                         return Some(toks_ok(self, Arc::new(Vec::new())));
@@ -281,7 +285,7 @@ impl Exec<'_> {
                 }
                 IVal::Font(f.clone())
             }
-            Meaning::CharGiven(c) | Meaning::MathCharGiven(c) => IVal::Int(*c as i32),
+            Meaning::CharGiven(c) | Meaning::MathCharGiven(c) | Meaning::XMathCharGiven(c) => IVal::Int(*c as i32),
             Meaning::CountRef(n) => IVal::Int(self.int(&Key::Count(*n))),
             Meaning::DimenRef(n) => IVal::Dimen(self.int(&Key::Dimen(*n))),
             Meaning::SkipRef(n) => IVal::Glue(self.glue(&Key::Skip(*n))),
@@ -410,7 +414,26 @@ impl Exec<'_> {
     }
 
     pub(super) fn scan_char_num(&mut self) -> i32 {
+        // (XeTeX: `biggest_char`, 65535)
+        if self.xetex {
+            return self.scan_char_num_xetex();
+        }
         self.limited(255, "character code")
+    }
+
+    /// XeTeX's `scan_decimal`: a dimension's number without units, in
+    /// scaled points.
+    pub(super) fn scan_decimal(&mut self) -> i32 {
+        let was = std::mem::replace(&mut self.decimal_only, true);
+        let v = self.scan_dimen_full(false, false, None).0;
+        self.decimal_only = was;
+        v
+    }
+
+    /// A character code of the code tables (`\catcode` …): XeTeX's any
+    /// Unicode scalar value (`scan_usv_num`), TeX's 0–255.
+    pub(super) fn scan_code_char(&mut self) -> i32 {
+        if self.xetex { self.scan_usv_num() } else { self.scan_char_num() }
     }
 
     pub(super) fn scan_four_bit_int(&mut self) -> i32 {
@@ -559,6 +582,8 @@ impl Exec<'_> {
             Fraction,
             Sign,
             Done,
+            /// XeTeX's `scan_decimal`: no units (`requires_units` false).
+            Raw,
         }
         let mut f = 0i32;
         let mut arith = false;
@@ -630,6 +655,9 @@ impl Exec<'_> {
             }
             // (tex.web 453-458: the units)
             let u = 'units: {
+                if self.decimal_only {
+                    break 'units U::Raw;
+                }
                 if inf && self.keyword("fil") {
                     order = 1;
                     while self.keyword("l") {
@@ -747,6 +775,13 @@ impl Exec<'_> {
                 }
                 U::Done => self.optional_space(),
                 U::Sign => {}
+                U::Raw => {
+                    if v >= 0o40000 {
+                        arith = true;
+                    } else {
+                        v = v * 65536 + f;
+                    }
+                }
             }
         }
         if arith || v.unsigned_abs() >= 0o10_000_000_000 {

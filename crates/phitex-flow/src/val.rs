@@ -7,7 +7,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-pub use crate::prim::{Al, Code, Conv, DimenPar, GluePar, IfKind, IntPar, Mat, MathP, Prim, Reg, Shorthand, TokPar};
+pub use crate::prim::{Al, Code, Conv, DimenPar, GluePar, IfKind, IntPar, Mat, MathP, Prim, Reg, Shorthand, TokPar, Xe};
 use crate::build::CsTable;
 use crate::tfm::Font;
 
@@ -162,6 +162,24 @@ pub enum Key {
     /// (`Val::Para`): defined globally by each node at the outer level
     /// that sets it; read where the reader state says `page::MAIN_DEPTH`.
     MainDepth,
+    // ---- XeTeX's
+    /// `\XeTeXinterchartoks a b` (`Val::Toks`): the tokens put between a
+    /// character of class `a` and one of class `b` (4095: the boundary).
+    InterChar(u16, u16),
+    /// The script a native font's last word was shaped in (XeTeX's
+    /// `hb_buffer` script, which sets the next word's default direction):
+    /// `Val::Int` (0: none), defined globally by the nodes setting words
+    /// in the font (its key, `Font::key`).
+    NativeDir(Arc<str>),
+    /// How the input is decoded from the next line on
+    /// (`\XeTeXinputencoding`; `Val::Int`, `graph::xetex`'s modes), and
+    /// files opened later (`\XeTeXdefaultencoding`): global, as XeTeX sets
+    /// them in place.
+    InputEncoding,
+    DefaultEncoding,
+    /// `\XeTeXlinebreaklocale` (`Val::Name`; empty: none): global, as
+    /// XeTeX assigns it in place (no save stack).
+    LinebreakLocale,
 }
 
 impl Key {
@@ -193,7 +211,8 @@ impl std::hash::Hash for Key {
             | Key::FontIdent(n)
             | Key::FontLoaded(n)
             | Key::File(n)
-            | Key::FontParams(n) => {
+            | Key::FontParams(n)
+            | Key::NativeDir(n) => {
                 n.hash(h);
                 h.write_u64(self.word());
             }
@@ -211,7 +230,8 @@ impl PartialEq for Key {
             | (Key::FontIdent(a), Key::FontIdent(b))
             | (Key::FontLoaded(a), Key::FontLoaded(b))
             | (Key::File(a), Key::File(b))
-            | (Key::FontParams(a), Key::FontParams(b)) => Arc::ptr_eq(a, b) || a == b,
+            | (Key::FontParams(a), Key::FontParams(b))
+            | (Key::NativeDir(a), Key::NativeDir(b)) => Arc::ptr_eq(a, b) || a == b,
             (Key::Cat(a), Key::Cat(b)) => a == b,
             (Key::FontDimen(a, k), Key::FontDimen(b, l)) => k == l && (Arc::ptr_eq(a, b) || a == b),
             (x, y) if x.word() == u64::MAX || y.word() == u64::MAX => false,
@@ -243,6 +263,11 @@ impl Key {
             Key::Ended => w(40, 0),
             Key::MainTail => w(64, 0),
             Key::MainDepth => w(65, 0),
+            Key::NativeDir(_) => w(66, 0),
+            Key::InterChar(a, b) => w(67, (u64::from(*a) << 16) | u64::from(*b)),
+            Key::InputEncoding => w(68, 0),
+            Key::DefaultEncoding => w(69, 0),
+            Key::LinebreakLocale => w(70, 0),
             Key::Active(x) => w(1, c(x)),
             Key::Cat(x) => w(2, c(x)),
             Key::Lccode(x) => w(3, c(x)),
@@ -307,6 +332,9 @@ pub enum Meaning {
     CharGiven(u32),
     /// `\mathchardef`.
     MathCharGiven(u32),
+    /// XeTeX's `\Umathchardef`, `\Umathcharnumdef`: a 32-bit math code
+    /// (`fam<<24 | class<<21 | usv`).
+    XMathCharGiven(u32),
     /// `\countdef` and friends: the register the name stands for.
     CountRef(u16),
     DimenRef(u16),
@@ -458,6 +486,11 @@ impl fmt::Display for Shown<'_, Key> {
             Key::Ended => write!(f, "the end of the job"),
             Key::MainTail => write!(f, "the main vertical list's last item"),
             Key::MainDepth => write!(f, "the main vertical list's \\prevdepth"),
+            Key::InterChar(a, b) => write!(f, "\\XeTeXinterchartoks{a} {b}"),
+            Key::NativeDir(x) => write!(f, "the last script shaped ({x})"),
+            Key::InputEncoding => write!(f, "\\XeTeXinputencoding"),
+            Key::DefaultEncoding => write!(f, "\\XeTeXdefaultencoding"),
+            Key::LinebreakLocale => write!(f, "\\XeTeXlinebreaklocale"),
             Key::Interaction => write!(f, "\\interactionmode"),
             Key::ETeXMode => write!(f, "e-TeX mode"),
             Key::Patterns(l) => write!(f, "\\patterns (language {l})"),
@@ -528,6 +561,7 @@ impl fmt::Display for Shown<'_, Val> {
             Val::Meaning(Meaning::Char(c, x)) => write!(f, "the character {x} (cat {c})"),
             Val::Meaning(Meaning::CharGiven(c)) => write!(f, "\\char{c}"),
             Val::Meaning(Meaning::MathCharGiven(c)) => write!(f, "\\mathchar{c}"),
+            Val::Meaning(Meaning::XMathCharGiven(c)) => write!(f, "\\Umathchar{c}"),
             Val::Meaning(Meaning::CountRef(n)) => write!(f, "\\count{n}"),
             Val::Meaning(Meaning::DimenRef(n)) => write!(f, "\\dimen{n}"),
             Val::Meaning(Meaning::SkipRef(n)) => write!(f, "\\skip{n}"),
@@ -557,8 +591,44 @@ impl fmt::Display for Shown<'_, Val> {
 /// a file `\font` can load, not the initial font: that is `\nullfont`.
 /// With `etex` (e-TeX's extended mode, etex.web §1337), e-TeX's
 /// primitives are named too.
-pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -> Val {
+pub fn initial(key: &Key, font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -> Val {
+    initial_in(key, font, etex, false, cs)
+}
+
+/// [`initial`] for an engine: with `xetex`, XeTeX's IniTeX (xetex.web
+/// §232, §240): XeTeX's primitives named (with e-TeX's), its math codes
+/// (`fam<<24 | class<<21 | usv`: digits class 7, letters class 7 family
+/// 1), its space factor codes holding the character class above 16 bits
+/// (class 0), its parameters' initial values.
+pub fn initial_in(key: &Key, _font: &Arc<Font>, etex: bool, xetex: bool, cs: Option<&CsTable>) -> Val {
     let c32 = |c: &char| u32::from(*c) as i32;
+    if xetex {
+        match key {
+            Key::Cs(crate::build::CS_NULLFONT) => {}
+            Key::Cs(n) => {
+                let Some(cs) = cs else { return Val::Meaning(Meaning::Undefined) };
+                let n = cs.name(*n);
+                return Val::Meaning(
+                    Prim::by_name(&n)
+                        .or_else(|| Prim::by_name_etex(&n))
+                        .or_else(|| Prim::by_name_xetex(&n))
+                        .or_else(|| Prim::internal(&n))
+                        .map_or(Meaning::Undefined, Meaning::Prim),
+                );
+            }
+            Key::Mathcode(c) => {
+                return Val::Int(match c {
+                    '0'..='9' => c32(c) + (7 << 21),
+                    'A'..='Z' | 'a'..='z' => c32(c) + (1 << 24) + (7 << 21),
+                    _ => c32(c),
+                });
+            }
+            Key::InterChar(..) => return Val::Toks(Arc::new(Vec::new())),
+            Key::NativeDir(_) | Key::InputEncoding | Key::DefaultEncoding => return Val::Int(0),
+            Key::LinebreakLocale => return Val::Name(Arc::from("")),
+            _ => {}
+        }
+    }
     match key {
         Key::Cs(crate::build::CS_NULLFONT) => Val::Meaning(Meaning::Font(crate::tfm::null_font())),
         Key::Cs(n) => {
@@ -613,6 +683,9 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -
         // `Build::set_interaction`: IniTeX's `error_stop_mode` is 3)
         Key::Ended | Key::MagSet | Key::Interaction => Val::Int(0),
         Key::MainDepth => Val::Int(crate::page::IGNORE_DEPTH),
+        Key::InterChar(..) => Val::Toks(Arc::new(Vec::new())),
+        Key::NativeDir(_) | Key::InputEncoding | Key::DefaultEncoding => Val::Int(0),
+        Key::LinebreakLocale => Val::Name(Arc::from("")),
         Key::ETeXMode => Val::Int(i32::from(etex)),
         Key::Patterns(_) => Val::Patterns(crate::hyph::Patterns::new()),
         Key::Exceptions(_) => Val::Exceptions(crate::hyph::Exceptions::new()),

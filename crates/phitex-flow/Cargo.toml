@@ -6,9 +6,13 @@ license.workspace = true
 publish = false
 description = "TeX as a suspending dataflow graph over content-versioned values (AGENTS_BRIEF.md)"
 
-# The wall: phi only, never a partex-* crate (`tests/wall.rs` checks it).
+# The wall: phi, and the pure libraries the user approved (`tests/wall.rs`
+# lists them): partex-otf (OpenType faces, shaping, TECkit: no TeX state)
+# and partex-xdvipdfmx (XDV in, PDF out: a pure function of its inputs).
 [dependencies]
 phi = { path = "../phi" }
+partex-otf = { path = "../partex-otf" }
+partex-xdvipdfmx = { path = "../partex-xdvipdfmx" }
 # (the CLI's global allocator, as partex-cli's: glibc's thread arenas grow
 # by mprotect under the address-space lock, which 8 threads building nodes
 # contend on)

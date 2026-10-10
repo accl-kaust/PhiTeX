@@ -28,7 +28,7 @@ use crate::mlist::{self, Delim, Field, Kind as NK, Limits, MItem, MathEnv, Noad,
 use crate::pack::{self, Params, Spec, hpack};
 use crate::show::report;
 use crate::tfm::Font;
-use crate::val::{DimenPar, Glue, GluePar, IntPar, Key, Mat, MathP, Meaning, Prim, Tok, TokPar, Val};
+use crate::val::{DimenPar, Glue, GluePar, IntPar, Key, Mat, MathP, Meaning, Prim, Tok, TokPar, Val, Xe};
 
 /// `max_dimen`.
 const MAX_DIMEN: i32 = 0o7_777_777_777;
@@ -128,20 +128,34 @@ impl Exec<'_> {
         }
         match m {
             Meaning::Char(11 | 12, c) => {
-                let v = self.int(&Key::Mathcode(*c));
+                let v = self.mathcode(*c);
                 self.set_math_char(v, *c);
             }
             Meaning::CharGiven(c) => {
                 let ch = char::from_u32(*c).unwrap_or('\0');
-                let v = self.int(&Key::Mathcode(ch));
+                let v = self.mathcode(ch);
                 self.set_math_char(v, ch);
             }
             Meaning::MathCharGiven(v) => self.set_math_char(*v as i32, '\0'),
+            Meaning::XMathCharGiven(v) => {
+                let v = self.xe_tex_mathcode(*v as i32);
+                self.set_math_char(v, '\0');
+            }
             Meaning::Prim(Prim::Char) => {
                 let c = self.scan_char_num();
                 let ch = char::from_u32(c as u32).unwrap_or('\0');
-                let v = self.int(&Key::Mathcode(ch));
+                let v = self.mathcode(ch);
                 self.set_math_char(v, ch);
+            }
+            Meaning::Prim(Prim::Xe(Xe::MathCharNum(k))) => {
+                // (`\Umathcharnum`, `\Umathchar`: XeTeX's form, the list's
+                // characters TeX's: CORE.md, OpenType math)
+                let v = self.scan_xe_math_char(*k);
+                let v = self.xe_tex_mathcode(v);
+                self.set_math_char(v, '\0');
+            }
+            Meaning::Prim(Prim::Xe(x @ (Xe::Delimiter | Xe::Radical | Xe::MathAccent))) => {
+                self.err(format!("\\{} is not supported yet", Prim::Xe(*x).name()));
             }
             Meaning::Char(1, _) => {
                 // (§1154: a new ord noad, its nucleus the subformula)
@@ -361,7 +375,7 @@ impl Exec<'_> {
             let (t, m) = self.nonblank_nonrelax()?;
             let c = match m {
                 Meaning::Char(11 | 12, ch) => {
-                    let c = self.int(&Key::Mathcode(ch));
+                    let c = self.mathcode(ch);
                     if c == 0o100_000 {
                         self.back(Tok::Active(ch));
                         continue;
@@ -370,7 +384,7 @@ impl Exec<'_> {
                 }
                 Meaning::CharGiven(c) => {
                     let ch = char::from_u32(c).unwrap_or('\0');
-                    let c = self.int(&Key::Mathcode(ch));
+                    let c = self.mathcode(ch);
                     if c == 0o100_000 {
                         self.back(Tok::Active(ch));
                         continue;
@@ -380,7 +394,7 @@ impl Exec<'_> {
                 Meaning::Prim(Prim::Char) => {
                     let c = self.scan_char_num();
                     let ch = char::from_u32(c as u32).unwrap_or('\0');
-                    let c = self.int(&Key::Mathcode(ch));
+                    let c = self.mathcode(ch);
                     if c == 0o100_000 {
                         self.back(Tok::Active(ch));
                         continue;
@@ -388,7 +402,12 @@ impl Exec<'_> {
                     c
                 }
                 Meaning::Prim(Prim::Math(MathP::MathChar)) => self.scan_fifteen_bit_int(),
+                Meaning::Prim(Prim::Xe(Xe::MathCharNum(k))) => {
+                    let v = self.scan_xe_math_char(k);
+                    self.xe_tex_mathcode(v)
+                }
                 Meaning::MathCharGiven(v) => v as i32,
+                Meaning::XMathCharGiven(v) => self.xe_tex_mathcode(v as i32),
                 Meaning::Prim(Prim::Math(MathP::Delimiter)) => self.scan_twenty_seven_bit_int() / 0o10_000,
                 _ => {
                     self.open_sub_later(target, t);
