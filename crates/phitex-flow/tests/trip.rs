@@ -46,19 +46,8 @@ fn session() -> Session {
         let t = std::fs::read_to_string(d.join(f)).expect("bench/trip/trip?.in");
         terminal.extend(t.lines().map(str::to_string));
     }
-    // (STOPGAP, waiting on agent A's `Key::Ended`: TeX stops reading pass 1
-    // at `\next` = `\dump` on line 91, but the core still runs the pieces
-    // after an end, which in IniTeX's state loop forever at line 206; so
-    // pass 1's text is cut after that line here. Remove when A lands it.)
-    let pass1: String = tex.split_inclusive('\n').scan(false, |done, l| {
-        if *done {
-            return None;
-        }
-        *done = l.starts_with("\\next ");
-        Some(l)
-    }).collect();
     Session {
-        jobs: vec![pass1, tex],
+        jobs: vec![tex.clone(), tex],
         jobname: "trip".into(),
         terminal,
         interaction: 3,

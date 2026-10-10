@@ -94,18 +94,8 @@ fn trip(dir: &str, threads: usize) -> ExitCode {
     let s = phitex_flow::session::Session {
         // (a `pass2.tex` beside it is the second job instead: for looking
         // at a part of pass 2)
-        // (STOPGAP, waiting on agent A's `Key::Ended`: pass 1 cut after its
-        // `\next` (= `\dump`) line, as in tests/trip.rs)
         jobs: vec![
-            tex.split_inclusive('\n')
-                .scan(false, |done, l| {
-                    if *done {
-                        return None;
-                    }
-                    *done = l.starts_with("\\next ");
-                    Some(l)
-                })
-                .collect(),
+            tex.clone(),
             std::fs::read(d.join("pass2.tex")).map_or(tex, |b| b.iter().map(|&c| char::from(c)).collect()),
         ],
         jobname: "trip".into(),

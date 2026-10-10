@@ -122,7 +122,9 @@ fn a_changed_definition_reruns_its_readers_only() {
     let a = doc(30);
     let b = a.replacen("\\def\\idle{idle}", "\\def\\idle{sleepy}", 1);
     let o = opts(4, Reads::Speculate, Order::Priority);
+    // (pieces keeping their nodes: a lean piece runs every node again)
     let mut bld = Build::new(font());
+    bld.set_lean(false);
     let first = bld.update(&a, o);
     let e = bld.update(&b, o);
     assert!(e.dvi == cold(&b, o).dvi);
@@ -138,6 +140,28 @@ fn a_changed_definition_reruns_its_readers_only() {
         e.stats.kept, 3,
         "the three pieces reading nothing that changed: {:?}",
         e.stats
+    );
+}
+
+/// Lean pieces (the default): the first edit of a definition runs its
+/// readers' pieces again from their text; those pieces keep their nodes
+/// for the next edits, which run only the reading nodes again.
+#[test]
+fn edited_pieces_keep_their_nodes_a_while() {
+    let a = doc(30);
+    let b = a.replacen("\\def\\idle{idle}", "\\def\\idle{sleepy}", 1);
+    let o = opts(4, Reads::Speculate, Order::Priority);
+    let mut bld = Build::new(font());
+    bld.update(&a, o);
+    let e1 = bld.update(&b, o);
+    assert!(e1.dvi == cold(&b, o).dvi);
+    let e2 = bld.update(&a, o);
+    assert!(e2.dvi == cold(&a, o).dvi);
+    assert!(
+        e2.stats.commands_run * 10 < e2.stats.commands,
+        "the second edit runs only the reading nodes: {:?} (the first ran {})",
+        e2.stats,
+        e1.stats.commands_run
     );
 }
 
@@ -257,6 +281,7 @@ fn an_edit_inside_a_group_keeps_the_nodes_after_it() {
         ..opts(1, Reads::Suspend, Order::Priority)
     };
     let mut bld = Build::new(font());
+    bld.set_lean(false);
     let first = bld.update(a, o);
     assert!(first.errors.is_empty(), "{:?}", first.errors);
     let e = bld.update(&b, o);

@@ -209,6 +209,12 @@ pub enum Item {
     Append(Arc<BoxNode>, Arc<Interline>),
     /// `\prevdepth` set in a vertical list.
     PrevDepth(i32),
+    /// An assignment to the page builder's own quantities (tex.web
+    /// 1245–1246), in the main vertical list's order: `Key::Page`'s
+    /// numbering (`\pagegoal` 0 … `\pagedepth` 7, `\deadcycles` 8,
+    /// `\insertpenalties` 9) and the value. The fold applies it when it
+    /// receives it, before the contributions after it.
+    PageSoFar(u8, i32),
     /// The page builder is called here (outer vertical list only).
     BuildPage(Arc<PageCall>),
     /// `\shipout`, in the outer vertical list's order.

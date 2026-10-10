@@ -202,6 +202,8 @@ struct Kept {
     pending: Option<BTreeSet<Key>>,
     /// What its run says of the sequence ([`Expect::of`], made when it ran).
     got: Expect,
+    /// It ran in an edit: it keeps its nodes until this build.
+    hot_until: u64,
 }
 
 /// What a piece is entered with (CORE.md, `\input`): the canonical start,
@@ -223,19 +225,25 @@ struct Expect {
     input: Option<Arc<FileText>>,
     stop: usize,
     endinput: bool,
+    /// The job ends in it (`\end`, `\dump`): no piece follows.
+    ends: bool,
 }
 
 impl Expect {
     fn of(r: &Run) -> Expect {
-        let n = r.chain.nodes.len();
-        if n == 0 {
+        if r.nodes_len() == 0 {
             return Expect::default();
         }
-        let out = &r.chain.nodes[n - 1].out;
+        let out = r.out();
         let input = r.input().cloned();
         Expect {
             stop: if input.is_some() { out.pos } else { 0 },
             endinput: out.ends_file(),
+            // (a session's next job begins by defining it 0)
+            ends: r
+                .exports
+                .binary_search_by(|(k, _)| k.cmp(&Key::Ended))
+                .is_ok_and(|i| r.exports[i].1 != Val::Int(0)),
             input,
         }
     }
@@ -243,6 +251,7 @@ impl Expect {
     fn same(&self, o: &Expect) -> bool {
         self.stop == o.stop
             && self.endinput == o.endinput
+            && self.ends == o.ends
             && match (&self.input, &o.input) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b) || **a == **b,
                 (None, None) => true,
@@ -364,6 +373,14 @@ pub struct Build {
     interaction: i32,
     /// The sizes TeX was compiled with.
     limits: crate::print::Limits,
+    /// A settled piece drops its nodes (`graph::Lean`; the default): a
+    /// run of it again runs every node; else its nodes are kept and a run
+    /// again runs only those whose reads or text changed. A piece that ran
+    /// in one of the last [`HOT_BUILDS`] edits keeps them meanwhile (edits
+    /// come near each other).
+    lean: bool,
+    /// Updates made (the cold build is the first).
+    builds: u64,
 }
 
 /// A file's text and its pieces.
@@ -453,7 +470,8 @@ impl Given {
     /// in memory, in the first directory (the document's, kpathsea's
     /// current directory) or a relative one; else the path.
     fn path(&self, name: &str) -> Arc<str> {
-        self.found(name).map_or_else(|| Arc::from(format!("./{name}")), |(p, _)| p)
+        self.found(name)
+            .map_or_else(|| Arc::from(format!("./{name}")), |(p, _)| p)
     }
 
     fn found(&self, name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
@@ -773,6 +791,9 @@ struct PState {
     /// Its reads suspend whatever the policy (a speculating run of it went
     /// on long on predictions nothing confirmed).
     suspend: bool,
+    /// It ran in an edit: it keeps its nodes until this build (then it
+    /// goes lean, `graph::Lean`).
+    hot_until: u64,
 }
 
 /// An edited piece's predecessor: its run, lines and text.
@@ -859,6 +880,10 @@ struct Shared {
     /// Each piece's status is `Done` (a copy of the scheduler's, written
     /// under its lock, read without it).
     done: Vec<AtomicBool>,
+    /// A piece's run in progress is to stop: a name it read was defined
+    /// again while it ran, or the sequence changes (read by the run between
+    /// its nodes, [`PieceEnv`]'s `check`).
+    cancel: Vec<AtomicBool>,
     state: Mutex<State>,
     cv: Condvar,
     font: Arc<Font>,
@@ -869,6 +894,9 @@ struct Shared {
     /// A run may change the sequence (not in a round that must be the
     /// last).
     restructure_ok: bool,
+    /// Settled pieces drop their nodes; which update this is.
+    lean: bool,
+    build_no: u64,
 }
 
 /// Where to look a routine run up: its page's first box (the same `Arc`
@@ -933,6 +961,8 @@ impl Build {
             starts: Vec::new(),
             inputs: Arc::new(Vec::new()),
             job: Arc::from(crate::graph::JOBNAME),
+            lean: true,
+            builds: 0,
             texts: Vec::new(),
             files: Arc::default(),
             file_cuts: FxMap::default(),
@@ -974,6 +1004,13 @@ impl Build {
         self.job = Arc::from(name);
     }
 
+    /// Whether settled pieces drop their nodes (`true` until set): with
+    /// `false` an edit runs again only the nodes whose reads or text
+    /// changed, holding every node in memory.
+    pub fn set_lean(&mut self, lean: bool) {
+        self.lean = lean;
+    }
+
     /// The pieces of a file's text (the last cut's `Arc`s while the text
     /// is the same; the pieces of a changed text are found by their text).
     fn file_pieces(&mut self, text: &Arc<str>) -> Vec<Arc<[char]>> {
@@ -1013,13 +1050,23 @@ impl Build {
         let mut m = Matcher::new(olds);
         let mut out = Vec::with_capacity(texts.len());
         let mut base = 0;
+        // (a job of a session that ended is read no further; the next job
+        // begins at its own first piece)
+        let mut ended = false;
         for t in texts {
             // (a job of a session counts its lines from its start)
             if t.first() == Some(&crate::graph::JOB) {
                 base = 0;
+                ended = false;
             }
+            if ended {
+                continue;
+            }
+            let k0 = out.len();
             self.place(&mut out, &mut m, olds, t, Entry::Start, base, 0);
             base += count_lines(t);
+            // (the job ended: what follows is never read)
+            ended = out[k0..].iter().any(|s| s.expect.ends);
         }
         out
     }
@@ -1063,14 +1110,21 @@ impl Build {
             let l = self.place(out, m, olds, ft, e, fbase, depth + 1);
             fbase += count_lines(ft);
             last = Some(l);
-            if out[l].expect.endinput {
+            if out[l].expect.endinput || out[l..].iter().any(|s| s.expect.ends) {
                 break;
             }
         }
         let close = last.unwrap_or(k);
+        // (the job ended in the file: its parenthesis closes at the end,
+        // tex.web 1333, and the rest of the calling line is never read)
+        let ended = out[k..].iter().any(|s| s.expect.ends);
+        let paren = if ended { " )" } else { ")" };
         match &mut out[close].post {
-            Some(p) => p.push(')'),
-            p @ None => *p = Some(format!("{RAW})")),
+            Some(p) => p.push_str(paren),
+            p @ None => *p = Some(format!("{RAW}{paren}")),
+        }
+        if ended {
+            return close;
         }
         let stop = expect.stop.min(text.len());
         let rest = self.rest_text(text, stop);
@@ -1173,6 +1227,7 @@ impl Build {
     /// Builds `src`: what changed, and what the changes reach.
     pub fn update(&mut self, src: &str, opts: Options) -> Output {
         let t0 = Instant::now();
+        self.builds += 1;
         let (texts, starts) = self.cut(src);
         self.src.clear();
         self.src.push_str(src);
@@ -1259,6 +1314,7 @@ impl Build {
                 base: sp.base,
                 post: sp.post.clone(),
                 suspend: false,
+                hot_until: 0,
             };
             if let Some(i) = sp.old {
                 // (each old piece is taken at most once: its lines and edge
@@ -1269,6 +1325,7 @@ impl Build {
                 ps.lines = std::mem::take(&mut o.lines);
                 ps.srcs = std::mem::take(&mut o.srcs);
                 ps.log = o.log.take();
+                ps.hot_until = o.hot_until;
                 if let Some(d) = o.pending.take() {
                     ps.status = Status::Unstarted;
                     ps.dirty = d;
@@ -1385,8 +1442,8 @@ impl Build {
                 touched.extend(r.exports.iter().map(|(k, _)| k.clone()));
             }
             if now.is_none() {
-                for (key, _, _) in &r.reads {
-                    if let Some(m) = readers.get_mut(key) {
+                for i in 0..r.read_count() {
+                    if let Some(m) = readers.get_mut(r.read_at(i).0) {
                         m.remove(&o.id);
                     }
                 }
@@ -1421,10 +1478,8 @@ impl Build {
                 };
                 let Some(r) = &p[rpos].run else { continue };
                 let now = names.given.answer(key, rpos);
-                let at = r.reads.partition_point(|x| x.0 < *key);
-                if r.reads[at..]
+                if r.values_read(key)
                     .iter()
-                    .take_while(|x| x.0 == *key)
                     .any(|x| now.as_ref() != Some(&x.2))
                 {
                     marks.push((rpos, key.clone()));
@@ -1536,12 +1591,15 @@ impl Build {
                 .iter()
                 .map(|ps| AtomicBool::new(ps.status == Status::Done))
                 .collect(),
+            cancel: state.p.iter().map(|_| AtomicBool::new(false)).collect(),
             state: Mutex::new(state),
             cv: Condvar::new(),
             font: self.font.clone(),
             fonts: self.fonts.clone(),
             opts,
             restructure_ok: !last,
+            lean: self.lean,
+            build_no: self.builds,
             memo_old,
         };
         std::thread::scope(|s| {
@@ -1594,6 +1652,7 @@ impl Build {
                                 log: ps.log,
                                 pending,
                                 got: ps.got,
+                                hot_until: ps.hot_until,
                             },
                             (None, Some((run, lines, text))) => Kept {
                                 id: ps.id,
@@ -1604,6 +1663,7 @@ impl Build {
                                 srcs: ps.srcs,
                                 log: None,
                                 pending: None,
+                                hot_until: ps.hot_until,
                             },
                             (None, None) => Kept {
                                 id: ps.id,
@@ -1614,6 +1674,7 @@ impl Build {
                                 log: None,
                                 pending: None,
                                 got: Expect::default(),
+                                hot_until: 0,
                             },
                         }
                     })
@@ -1666,23 +1727,26 @@ impl Build {
             // its call stands: its `\write`s expanded with the definitions
             // reaching there)
             let end = idx.len().checked_sub(1).map_or((0, 0), |j| {
-                (j, st.p[idx[j]].run.as_ref().map_or(0, |r| r.chain.nodes.len()))
+                (j, st.p[idx[j]].run.as_ref().map_or(0, |r| r.nodes_len()))
             });
             let places = logs::page_places(&frags, &marks, st.pages.len(), end);
             let mut page_io = Vec::with_capacity(st.pages.len());
-            for (pg, at) in st.pages.iter().zip(&places) {
-                let io = match at.map(|(j, i)| (idx.get(j).copied(), i)) {
+            for (j, (pg, at)) in st.pages.iter().zip(&places).enumerate() {
+                let io = match at.map(|(x, i)| (idx.get(x).copied(), i)) {
+                    // (only a page whose body met a whatsit has events)
                     Some((Some(k), i)) => match st.p[k].run.as_ref() {
-                        Some(r) => {
+                        Some(r) if bodies[j].io => {
                             let mut env = JoinEnv {
                                 names: &sh.names,
                                 seq: &sh.seq,
                                 font: &sh.font,
+                                fonts: &sh.fonts,
                                 k,
                             };
+                            let r = regen(&mut env, &st.p[k].text, r);
                             crate::graph::page_io(&r.chain, i, &mut env, &pg.b, &mut errors)
                         }
-                        None => String::new(),
+                        _ => String::new(),
                     },
                     _ => String::new(),
                 };
@@ -1697,7 +1761,10 @@ impl Build {
                     post: ps.post.as_deref(),
                 })
                 .collect();
-            logs::replay(logs::gather(&parts, &marks, &call_logs, &st.pages, &page_io), opts.etex)
+            logs::replay(
+                logs::gather(&parts, &marks, &call_logs, &st.pages, &page_io),
+                opts.etex,
+            )
         };
         for (k, ps) in st.p.iter().enumerate() {
             let r = ps.run.as_ref().expect("every piece ran");
@@ -1709,9 +1776,17 @@ impl Build {
             if ps.runs == 0 {
                 st.stats.kept += 1;
             }
-            st.stats.commands += r.chain.nodes.len() as u64;
+            st.stats.commands += r.nodes_len() as u64;
             if opts.dump {
-                dump_piece(&mut dump, k, ps, r);
+                let mut env = JoinEnv {
+                    names: &sh.names,
+                    seq: &sh.seq,
+                    font: &sh.font,
+                    fonts: &sh.fonts,
+                    k,
+                };
+                let r = regen(&mut env, &ps.text, r);
+                dump_piece(&mut dump, k, ps, &r);
             }
         }
         if let Some(sc) = &st.scan {
@@ -1743,20 +1818,37 @@ impl Build {
             defs: fold_defs,
             memo: std::mem::take(&mut st.memo_new),
         };
+        // (a piece quiet since it last ran in an edit drops its nodes now)
+        let build_no = self.builds;
+        let lean = self.lean;
         self.pieces =
             st.p.into_iter()
-                .map(|ps| Kept {
-                    id: ps.id,
-                    text: ps.text,
-                    run: ps.run,
-                    lines: ps.lines,
-                    srcs: ps.srcs,
-                    log: ps.log,
-                    pending: None,
-                    got: ps.got,
+                .map(|ps| {
+                    let quiet = lean && ps.hot_until < build_no;
+                    let (run, log) = match ps.run {
+                        Some(r) if quiet && r.lean.is_none() => {
+                            (Some(Arc::new(r.leaned(&ps.text))), None)
+                        }
+                        r => (r, ps.log),
+                    };
+                    Kept {
+                        id: ps.id,
+                        text: ps.text,
+                        run,
+                        lines: ps.lines,
+                        srcs: ps.srcs,
+                        log,
+                        pending: None,
+                        got: ps.got,
+                        hot_until: ps.hot_until,
+                    }
                 })
                 .collect();
         self.readers = st.readers;
+        // (the edges are kept until the next build: no spare capacity)
+        for m in self.readers.values_mut() {
+            m.shrink_to_fit();
+        }
         self.pages = st.pages.into_iter().zip(bodies).collect();
         self.page_orgs = st.orgs;
         self.marks = marks;
@@ -1778,12 +1870,28 @@ struct JoinEnv<'a> {
     names: &'a Names,
     seq: &'a Sequence,
     font: &'a Arc<Font>,
+    fonts: &'a Arc<FontFiles>,
     k: usize,
+}
+
+/// A lean piece's run with its nodes again (`graph::Lean`): run again,
+/// reading only, over the names index as it is — for the join's page
+/// events and the dump.
+fn regen(env: &mut JoinEnv<'_>, text: &[char], r: &Arc<Run>) -> Arc<Run> {
+    if r.lean.is_none() {
+        return r.clone();
+    }
+    let entry = r.entry();
+    Arc::new(run_piece(text, env, None, &[], Some(&entry)))
 }
 
 impl Env for JoinEnv<'_> {
     fn limits(&self) -> crate::print::Limits {
         self.names.given.limits
+    }
+
+    fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
+        self.fonts.get(name)
     }
 
     fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32) {
@@ -1853,9 +1961,9 @@ fn dump_piece(out: &mut String, k: usize, ps: &PState, r: &Run) {
         out,
         "piece {k} (id {}) [{how}; {} nodes, {} run]: {} reads from before it, {} definitions after it, {} paragraphs; entered {:?}; {:?}",
         ps.id,
-        r.chain.nodes.len(),
+        r.nodes_len(),
         r.ran,
-        r.reads.len(),
+        r.read_count(),
         r.exports.len(),
         r.paras.len(),
         ps.entry,
@@ -1974,10 +2082,7 @@ fn mark(g: &mut State, k: usize, key: Key) -> bool {
 fn export_of(names: &Names, font: &Arc<Font>, k: usize, run: &Run, key: &Key) -> Option<Val> {
     let i = run.exports.binary_search_by(|(x, _)| x.cmp(key)).ok()?;
     if names.has_inner(key) {
-        let last = run
-            .chain
-            .resolve(key, run.chain.nodes.len())
-            .map(|(d, _)| d);
+        let last = run.resolve(key, run.nodes_len()).map(|(d, _)| d);
         if let (Some(p), ..) = names.reaching(key, (k as u32, END), font)
             && p.0 == k as u32
             && p.1 != END
@@ -2496,7 +2601,7 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
                 env.k = k;
                 env.run = Some(run.clone());
                 let skip = if d == 0 { skip as usize } else { 0 };
-                let nodes = run.chain.para_nodes();
+                let nodes = run.para_nodes();
                 let mut i = 0usize;
                 for (pj, pl) in paras.iter().enumerate() {
                     let node = nodes.get(pj).copied().unwrap_or(0);
@@ -2531,7 +2636,7 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
             if finish && converged.is_none() && stop.is_none() {
                 if let Some(r) = end_run {
                     env.k = to.saturating_sub(1);
-                    env.node = r.chain.nodes.len().saturating_sub(1) as u32;
+                    env.node = r.nodes_len().saturating_sub(1) as u32;
                     env.run = Some(r);
                 }
                 if env.pass((u32::MAX, 0)) {
@@ -2667,6 +2772,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
         };
         (ps.text.clone(), old, entry_state(&g, k), ps.suspend)
     };
+    sh.cancel[k].store(false, Ordering::Relaxed);
     let mut env = PieceEnv {
         sh,
         k,
@@ -2701,6 +2807,10 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
     let steps = run.ran;
     let t = Instant::now();
     let got = Expect::of(&run);
+    // (what the piece keeps once it has settled: the run without its nodes)
+    // (a run in an edit keeps its nodes a while: [`HOT_BUILDS`])
+    let hot = sh.build_no > 1;
+    let lean = (sh.lean && !hot).then(|| Arc::new(run.leaned(&text)));
     // (what stood for this piece until now: its last run, or for an edited
     // piece the run of the piece it replaces; nobody else installs this
     // piece while it runs here)
@@ -2722,7 +2832,12 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
     // (a run reading the same names as the old one, in the same order,
     // leaves the edges whose node and source are the same as they are)
     let same_keys = old_run.as_ref().is_some_and(|o| {
-        o.reads.len() == run.reads.len() && o.reads.iter().zip(&run.reads).all(|(a, b)| a.0 == b.0)
+        o.read_count() == run.reads.len()
+            && run
+                .reads
+                .iter()
+                .enumerate()
+                .all(|(i, b)| *o.read_at(i).0 == b.0)
     });
     let read_keys: FxSet<&Key> = if old_run.is_some() && !same_keys {
         run.reads.iter().map(|(key, _, _)| key).collect()
@@ -2765,7 +2880,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
             }
             if same_keys
                 && old_srcs.get(i) == Some(&src)
-                && old_run.as_ref().is_some_and(|o| o.reads[i].1 == *node)
+                && old_run.as_ref().is_some_and(|o| o.read_at(i).1 == *node)
             {
                 continue;
             }
@@ -2779,7 +2894,8 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
         }
         g.p[k].srcs = srcs;
         if let Some(o) = old_run.as_ref().filter(|_| !same_keys) {
-            for (key, _, _) in &o.reads {
+            for i in 0..o.read_count() {
+                let key = o.read_at(i).0;
                 if !read_keys.contains(key)
                     && let Some(m) = g.readers.get_mut(key)
                 {
@@ -2819,18 +2935,31 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
         for (r, key) in marks {
             if mark(&mut g, r, key) {
                 sh.done[r].store(false, Ordering::Release);
+            } else if g.p[r].status == Status::Running {
+                // (its run read what is defined again: it stops)
+                sh.cancel[r].store(true, Ordering::Relaxed);
             }
         }
         queue_breaks(&mut g, k, &equal);
         // (entered in the state its predecessors leave now, or run again)
         let entered = entry_holds(&g, k, &run);
         if stale.is_empty() && entered {
+            if let Some(l) = lean {
+                g.p[k].run = Some(l);
+            }
+            if hot {
+                g.p[k].hot_until = sh.build_no + HOT_BUILDS;
+            }
             g.p[k].status = Status::Done;
             sh.done[k].store(true, Ordering::Release);
             // (a run reading another file, or ending its file, changes the
             // sequence)
             if sh.restructure_ok && !got.same(&g.p[k].expect) {
                 g.restructure = true;
+                // (the runs in progress stop: the sequence is laid out again)
+                for &q in &g.running {
+                    sh.cancel[q].store(true, Ordering::Relaxed);
+                }
             }
         } else {
             g.p[k].dirty = stale;
@@ -2885,6 +3014,9 @@ struct PieceEnv<'a> {
     gave_up: bool,
 }
 
+/// How many builds a piece that ran in an edit keeps its nodes for.
+pub const HOT_BUILDS: u64 = 8;
+
 /// How often (in nodes run) a run on predictions looks at them again.
 const CHECK_EVERY: u64 = 1 << 12;
 /// Nodes after which a run on predictions an earlier piece has not
@@ -2917,6 +3049,10 @@ impl Env for PieceEnv<'_> {
     }
 
     fn check(&mut self, ran: u64, words: u64) -> Check {
+        // (marked stale while it runs, or the sequence changes: it stops)
+        if self.sh.cancel[self.k].load(Ordering::Relaxed) {
+            return Check::Abandon;
+        }
         let cap = self.sh.opts.main_memory;
         let periodic = ran.is_multiple_of(CHECK_EVERY);
         if !(periodic || words > cap) || self.predicted.is_empty() {
@@ -3091,7 +3227,7 @@ impl Env for PieceEnv<'_> {
 /// `k` (`run`): the piece's own definitions up to that node, else the
 /// names index before the place (a fire at the same place included).
 fn read_at(sh: &Shared, run: Option<&Run>, k: usize, node: u32, key: &Key) -> Val {
-    let local = run.and_then(|r| r.chain.resolve(key, node as usize + 1));
+    let local = run.and_then(|r| r.resolve(key, node as usize + 1));
     let (ipos, ival, ..) = sh
         .names
         .reaching(key, (k as u32, node.saturating_add(1)), &sh.font);
@@ -3383,10 +3519,8 @@ fn changed_at(g: &mut State, sh: &Shared, pos: Pos, keys: Vec<Key>) -> bool {
     if pos.1 != END
         && let Some(run) = g.p.get(pos.0 as usize).and_then(|ps| ps.run.as_ref())
     {
-        let from = pos.1 as usize + 1;
         for key in &keys {
-            let reads = (from..run.chain.nodes.len())
-                .any(|j| run.chain.nodes[j].reads.iter().any(|r| r.key == *key));
+            let reads = run.reads_after(key, pos.1);
             if reads && !marks.iter().any(|m| m.0 == pos.0 as usize && m.1 == *key) {
                 marks.push((pos.0 as usize, key.clone()));
             }
@@ -3398,6 +3532,8 @@ fn changed_at(g: &mut State, sh: &Shared, pos: Pos, keys: Vec<Key>) -> bool {
     for (r, key) in marks {
         if mark(g, r, key) {
             sh.done[r].store(false, Ordering::Release);
+        } else if g.p[r].status == Status::Running {
+            sh.cancel[r].store(true, Ordering::Relaxed);
         }
     }
     any

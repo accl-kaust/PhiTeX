@@ -677,6 +677,7 @@ impl Exec<'_> {
             hlist.push(param_glue(&g, GluePar::Parfillskip as u8));
             let lp = self.line_params(&hlist);
             if level == 0 {
+                hlist.shrink_to_fit();
                 para.hlist = hlist;
                 para.lb = Some(Arc::new(lp));
             } else {
@@ -1762,6 +1763,9 @@ impl Exec<'_> {
         }
         let c = self.page_call();
         self.vemit.push(Item::End(c));
+        // (the end of the job is a definition: the pieces after it read it
+        // at their first node and read nothing more)
+        self.define(Key::Ended, Val::Int(1), true);
         self.st.pending.clear();
         self.st.texts = super::Stack::new();
         self.st.pos = self.text.len();

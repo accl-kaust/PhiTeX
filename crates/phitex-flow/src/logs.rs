@@ -115,10 +115,89 @@ pub fn io_event(kind: char, stream: u8, payload: &str) -> String {
 /// Brackets an error's context, laid out by `rebase` (`context`).
 const CTX: char = '\u{E002}';
 
-/// A piece's part of the log, and the run and lines it was made from.
+/// A piece's part of the log but for its paragraphs' lines: made from the
+/// run's nodes (which a lean piece then drops, `graph::Lean`).
+#[derive(Debug)]
+pub struct Plan {
+    entries: Vec<PEntry>,
+    newlines: usize,
+}
+
+#[derive(Debug)]
+enum PEntry {
+    Text(String),
+    /// A call of the page builder by a node.
+    Mark(u32),
+    /// The reports of the lines of paragraph `pi`, made by node `node`:
+    /// the lines (within the piece) where the node was and where its
+    /// paragraph began.
+    Lines { pi: usize, here: usize, start: usize },
+}
+
+/// The plan of the log of a piece: its text, its run (with its nodes).
+pub fn plan(text: &[char], run: &Run) -> Plan {
+    let mut entries = Vec::new();
+    let mut pi = 0;
+    let mark = |entries: &mut Vec<PEntry>, items: &[Item], i: usize| {
+        for it in items {
+            if matches!(it, Item::BuildPage(_) | Item::End(_)) {
+                entries.push(PEntry::Mark(i as u32));
+            }
+        }
+    };
+    for (i, n) in run.chain.nodes.iter().enumerate() {
+        if let Some(l) = n.log() {
+            for e in l.split(SEP) {
+                entries.push(PEntry::Text(resolve(e, text, run, i)));
+            }
+        }
+        let Some(p) = n.para() else { continue };
+        mark(&mut entries, &p.before, i);
+        if p.lb.is_some() {
+            let start = paragraph_start(&run.chain, i);
+            entries.push(PEntry::Lines { pi, here: line_of(text, run, i), start: line_of(text, run, start) });
+        }
+        mark(&mut entries, &p.after, i);
+        pi += 1;
+    }
+    Plan { entries, newlines: text.iter().filter(|&&c| c == '\r').count() }
+}
+
+/// A line report's placeholders filled (as [`resolve`] does, from the
+/// lines a [`PEntry::Lines`] keeps).
+fn resolve_lines(s: &str, here: usize, start: usize) -> String {
+    if !s.contains(LINE) {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut parts = s.split(LINE);
+    out.push_str(parts.next().unwrap_or(""));
+    while let Some(what) = parts.next() {
+        match what {
+            "P" => {
+                let _ = write!(out, "{REL}{start}{REL}--{REL}{here}{REL}");
+            }
+            x if x.starts_with('X') => {
+                let _ = write!(out, "{CTX}l.{REL}{here}{REL} {}{}{CTX}", crate::graph::diag::CUT, &x[1..]);
+            }
+            x if x.starts_with('T') => {
+                let _ = write!(out, "{CTX}{}{CTX}", &x[1..]);
+            }
+            _ => {
+                let _ = write!(out, "{REL}{here}{REL}");
+            }
+        }
+        out.push_str(parts.next().unwrap_or(""));
+    }
+    out
+}
+
+/// A piece's part of the log, and the plan (a lean run's) or the run and
+/// the lines it was made from.
 #[derive(Debug)]
 pub struct Frag {
-    run: Arc<Run>,
+    plan: Arc<Plan>,
+    run: Option<Arc<Run>>,
     lines: Vec<Option<Lines>>,
     pub entries: Vec<Entry>,
     /// The lines of the piece's text.
@@ -129,10 +208,13 @@ pub struct Frag {
 }
 
 impl Frag {
-    /// Was it made from this run and these lines (the same `Arc`s)?
+    /// Was it made from this run's plan and these lines (the same `Arc`s)?
     pub fn holds(&self, run: &Arc<Run>, lines: &[Option<Lines>]) -> bool {
-        Arc::ptr_eq(&self.run, run)
-            && self.lines.len() == lines.len()
+        let same = match &run.lean {
+            Some(l) => Arc::ptr_eq(&self.plan, &l.plan),
+            None => self.run.as_ref().is_some_and(|r| Arc::ptr_eq(r, run)),
+        };
+        same && self.lines.len() == lines.len()
             && self.lines.iter().zip(lines).all(|(a, b)| match (a, b) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
                 (None, None) => true,
@@ -142,42 +224,35 @@ impl Frag {
 }
 
 /// The part of the log of a piece: its text, its run, its paragraphs'
-/// lines.
+/// lines (a lean run's plan, or one made now).
 pub fn fragment(text: &[char], run: &Arc<Run>, lines: &[Option<Lines>]) -> Frag {
-    let mut entries = Vec::new();
-    let mut pi = 0;
-    let mark = |entries: &mut Vec<Entry>, items: &[Item], i: usize| {
-        for it in items {
-            if matches!(it, Item::BuildPage(_) | Item::End(_)) {
-                entries.push(Entry::Mark(i as u32));
-            }
-        }
+    let plan = match &run.lean {
+        Some(l) => l.plan.clone(),
+        None => Arc::new(plan(text, run)),
     };
-    for (i, n) in run.chain.nodes.iter().enumerate() {
-        if let Some(l) = n.log() {
-            for e in l.split(SEP) {
-                entries.push(Entry::Text(resolve(e, text, run, i)));
-            }
-        }
-        let Some(p) = n.para() else { continue };
-        mark(&mut entries, &p.before, i);
-        if p.lb.is_some()
-            && let Some(Some(ls)) = lines.get(pi)
-        {
-            for l in ls.iter() {
-                if let Some(r) = &l.report {
-                    entries.push(Entry::Text(resolve(r, text, run, i)));
+    let mut entries = Vec::with_capacity(plan.entries.len());
+    for e in &plan.entries {
+        match e {
+            PEntry::Text(s) => entries.push(Entry::Text(s.clone())),
+            PEntry::Mark(i) => entries.push(Entry::Mark(*i)),
+            PEntry::Lines { pi, here, start } => {
+                if let Some(Some(ls)) = lines.get(*pi) {
+                    for l in ls.iter() {
+                        if let Some(r) = &l.report {
+                            entries.push(Entry::Text(resolve_lines(r, *here, *start)));
+                        }
+                    }
                 }
             }
         }
-        mark(&mut entries, &p.after, i);
-        pi += 1;
     }
+    let run = run.lean.is_none().then(|| run.clone());
     Frag {
-        run: run.clone(),
+        newlines: plan.newlines,
+        plan,
+        run,
         lines: lines.to_vec(),
         entries,
-        newlines: text.iter().filter(|&&c| c == '\r').count(),
         job_start: text.first() == Some(&crate::graph::JOB),
     }
 }

@@ -410,6 +410,8 @@ impl Exec<'_> {
         for p in [IntPar::Time, IntPar::Day, IntPar::Month, IntPar::Year] {
             self.define(Key::IntPar(p), Val::Int(p.initial()), true);
         }
+        // (a new run of TeX: the last job's `\end` or `\dump` is behind it)
+        self.define(Key::Ended, Val::Int(0), true);
         let ident = match (first.trim_start_matches(' ').starts_with('&'), self.get(&Key::Format)) {
             (true, Val::Name(n)) if !n.is_empty() => n.to_string(),
             _ => " (INITEX)".to_string(),

@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use phitex_flow::build::MAIN_MEMORY;
 use phitex_flow::{Build, Font, Options, Order, Reads};
 
 fn dir() -> PathBuf {
@@ -75,11 +76,10 @@ fn etex() -> Option<(String, Vec<String>, Vec<u8>)> {
     Some((cut(&log)?, dirs, aux))
 }
 
-/// The main memory the runs may hold. The graph counts every definition
-/// a run makes, kept or not (`graph::words_of`); TeX counts what is live,
-/// and LaTeX redefines much. Past `MAIN_MEMORY` (TeX Live's 5000000) until
-/// the core counts the live words (CORE.md, LaTeX's format, gap 4).
-const MEMORY: u64 = 1 << 32;
+/// The main memory the runs may hold: TeX Live's (`graph::words_of`
+/// counts material and the nodes a run holds, not the definitions it
+/// makes: LaTeX redefines much).
+const MEMORY: u64 = MAIN_MEMORY;
 
 /// The schedules (`tests/etex.rs`'s).
 const RUNS: [Options; 5] = [

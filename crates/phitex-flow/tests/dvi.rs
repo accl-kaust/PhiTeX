@@ -646,6 +646,10 @@ documents!(outroutine, outmarks, outinserts);
 // `\outputpenalty` at every fire of the default output)
 documents!(outsame, outpen);
 
+// (tex.web 1245: `\pagegoal`, `\pagetotal`, `\pagestretch` assigned
+// change the page so far where they stand in the main vertical list)
+documents!(pagegoal);
+
 /// plain.tex's own `\output` (`\plainoutput`: the headline with marks, the
 /// page body with footnotes, the footline with `\folio`,
 /// `\advancepageno`), in every schedule.
@@ -715,5 +719,37 @@ fn capacity_exceeded() {
         let (_, log, errors, _) = graph("capacity", src, o);
         let all = format!("{log}{errors:?}");
         assert!(all.contains("TeX capacity exceeded, sorry [main memory size=5000]"), "({o:?}): {all}");
+    }
+}
+
+/// The end of the job is a definition (`Key::Ended`): the pieces after an
+/// `\end` (one loops for ever in its expansion, one piles up boxes) are
+/// never read, at every schedule and in random orders: TeX's result, and
+/// the sequence stops at the piece that ends.
+#[test]
+fn endmid() {
+    check("endmid");
+    let src = std::fs::read_to_string(dir().join("endmid.tex")).unwrap();
+    for seed in 0..12u64 {
+        for (threads, reads) in [(1, Reads::Speculate), (8, Reads::Speculate), (1, Reads::Suspend), (8, Reads::Suspend)] {
+            let o = Options { threads, reads, order: Order::Random(seed), dump: false, etex: false, main_memory: MAIN_MEMORY };
+            let out = Build::new(font()).update(&src, o);
+            assert!(out.errors.is_empty(), "endmid ({o:?}): {:?}", out.errors);
+            assert_eq!(out.stats.pieces, 2, "endmid ({o:?}): the pieces after the end are not in the sequence");
+        }
+    }
+}
+
+/// Two jobs in one file (as trip.tex): after `\dump` the text loops for
+/// ever in the first job's state (`\everypar` eats each `$` the paragraph
+/// gets); it is never read.
+#[test]
+fn dumpmid() {
+    let src = std::fs::read_to_string(dir().join("dumpmid.tex")).unwrap();
+    for o in RUNS {
+        let out = Build::new(font()).update(&src, o);
+        assert!(out.errors.is_empty(), "dumpmid ({o:?}): {:?}", out.errors);
+        assert_eq!(out.stats.pieces, 1, "dumpmid ({o:?})");
+        assert!(out.log.iter().any(|l| l.contains("[job one]")) && !out.log.iter().any(|l| l.contains("[never]")), "{:?}", out.log);
     }
 }
