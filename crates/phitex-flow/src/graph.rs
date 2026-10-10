@@ -2184,14 +2184,16 @@ fn before_read(
 
 /// Runs a piece: `old` is its previous run (and the text that made it),
 /// `dirty` the names from before the piece a definition of which was
-/// remade: every old node reading one of them is dirty; `entry` the state
+/// remade, each with the first old node it may reach (a definition between
+/// the piece's own nodes reaches only those after it): every old node from
+/// there reading one of them is dirty; `entry` the state
 /// it is entered in (none: the canonical start). Returns the new chain,
 /// with every old node still holding kept.
 pub fn run_piece(
     text: &[char],
     env: &mut dyn Env,
     old: Option<(&Run, &[char])>,
-    dirty: &[Key],
+    dirty: &[(Key, u32)],
     entry: Option<&RState>,
 ) -> Run {
     // (a lean run has no nodes to keep: every node runs again)
@@ -2213,9 +2215,10 @@ pub fn run_piece(
             .nodes
             .iter()
             .enumerate()
-            .filter(|(_, n)| {
+            .filter(|&(i, n)| {
                 n.reads.iter().any(|r| {
-                    dirty.contains(&r.key) && (!matches!(r.src, Src::Node(_)) || env.has_between(&r.key))
+                    dirty.iter().any(|(k, from)| *k == r.key && i as u32 >= *from)
+                        && (!matches!(r.src, Src::Node(_)) || env.has_between(&r.key))
                 })
             })
             .map(|(i, _)| i as u32)

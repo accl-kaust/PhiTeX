@@ -144,6 +144,38 @@ fn a_new_definer_of_the_same_value_reruns_no_reader() {
     }
 }
 
+/// F7 (B's): an output routine fired between a piece's nodes defines
+/// names there (`\count0`); the piece's nodes before the fire that read
+/// them do not run again, only those after it (and the piece keeps its
+/// nodes until the page builder has passed it, lean or not).
+#[test]
+fn a_fire_between_a_pieces_nodes_reruns_only_the_nodes_after_it() {
+    let mut a = String::from(
+        "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x \\hsize=100pt \\vsize=40pt \\parfillskip=0pt plus 1fil\n\
+         \\output={\\global\\advance\\count0 by1 \\shipout\\box255}\n\
+         \\message{[\\the\\count0]}",
+    );
+    for i in 0..60 {
+        let _ = write!(a, "\nLine {i}.\\par\\message{{[\\the\\count0]}}");
+    }
+    a.push_str("\n\\end\n");
+    for lean in [true, false] {
+        let o = opts(1, Reads::Suspend, Order::Priority);
+        let mut bld = Build::new(font());
+        bld.set_lean(lean);
+        let e = bld.update(&a, o);
+        assert!(e.stats.pages > 5, "pages: {:?}", e.stats);
+        assert!(
+            // (every line reads \\count0: each fire runs the readers after
+            // it again, about half of them; it ran the whole piece again,
+            // 13 times its commands)
+            e.stats.commands_run < e.stats.commands * 2,
+            "each fire runs only the nodes after it again (lean {lean}): {:?}",
+            e.stats
+        );
+    }
+}
+
 #[test]
 fn a_changed_definition_reruns_its_readers_only() {
     let a = doc(30);

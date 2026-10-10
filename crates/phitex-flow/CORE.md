@@ -1501,6 +1501,25 @@ nested in the runs it had leapfrogged. Now it runs the first piece before
 d that can be entered (`reach_now`), as an undefined name's wait already
 did.
 
+**B's F7 (fixed, A). A fire between a piece's nodes ran the piece again
+from its first reader.** Each time the output routine fires it defines
+names between the piece's nodes (`\vsize`, `\count0`, `\@colht` at
+`(k,i)`). `reached` marked every reader of those names in piece k (its
+edge is its first reader's, before the fire or not), and a lean piece has
+no nodes to keep: the piece ran again whole at every fire (titlepage, one
+piece of five pages, 78k commands for its 20k). Now (1) dirty names are
+positional (`Dirty`: a name, the first node it may reach): a definition at
+`(k,i)` marks piece k from node `i + 1` (`changed_at`, `mark_from`), and
+`run_piece` takes only the readers from there as dirty; `reached` leaves
+the piece's own nodes to `changed_at`. (2) A piece keeps its nodes until
+the scan has passed it (`PState::lean_later`), so a fire runs only the
+nodes after it. titlepage 78k -> 25k commands at one thread (sections
+35k -> 28k); `tests/flow.rs`
+`a_fire_between_a_pieces_nodes_reruns_only_the_nodes_after_it` (12 pages
+in one piece, every line reading `\count0`: 5629 -> 752 commands of
+433). Still 0.5–0.8 s cold per document: the per-command cost, not
+reruns.
+
 **F8 (open, A). An edit of TRIP that never ends.** Found once F1 let
 TRIP's updates be checked: `tests/fuzz/hang/f8-trip-edit-hangs.repro`
 (TRIP seed 1 step 3, `--fuzz 1 3 1 --doc trip`): a character of
