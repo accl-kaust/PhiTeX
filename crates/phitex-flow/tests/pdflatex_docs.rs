@@ -45,8 +45,8 @@ fn latex_dir() -> PathBuf {
 }
 
 /// The documents of pdfTeX's PDF-only commands (`tests/latex/pdfdocs/`):
-/// hyperref, graphicx's three kinds of image, xcolor, TikZ, positions
-/// written to the `.aux` file, objects and forms by hand.
+/// hyperref, graphicx's three kinds of image, xcolor, `TikZ`, positions
+/// written to the `.aux` file, objects and forms by hand, virtual fonts.
 const PDFDOCS: [&str; 7] = ["hyper", "graphics", "color", "tikz", "zsavepos", "objs", "vfont"];
 
 /// The directory of document `name`.
