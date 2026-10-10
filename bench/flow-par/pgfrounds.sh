@@ -35,6 +35,6 @@ for b, rs in by.items():
     print(f"  build {b}: {len(rs)} rounds, pieces at the end {rs[-1]['pieces']}, settled file reads (round triggers) {files}; rounds' walls: total {sum(walls):.0f} ms, all but the last {sum(walls[:-1]):.0f} ms (median {sorted(walls[:-1])[len(walls[:-1])//2] if len(walls)>1 else 0:.1f}, max {max(walls[:-1]) if len(walls)>1 else 0:.0f}), the last {walls[-1]:.0f} ms; setups {sum(r['setup'] for r in rs):.0f} ms")
     print('    walls: ' + ' '.join(f"{w:.0f}" for w in walls))
 PY
-  { echo "  slow nodes (> 100 ms):"; zcat -f $f | grep -P "^N\t" | sort -t"	" -k3,3nr | head -15 | cut -c1-300; } | tee -a "$R/summary.txt"
+  { echo "  slow nodes (five per run over 1 s):"; zcat -f $f | grep -P "^N\t" | sort -t"	" -k3,3nr | head -15 | cut -c1-300; } | tee -a "$R/summary.txt"
   gzip -f $f
 done
