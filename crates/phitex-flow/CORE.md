@@ -2105,7 +2105,7 @@ library pdfTeX links: equal to the system zlib's output). The date is a
 given of the build (`Build::set_pdf_date`, `SOURCE_DATE_EPOCH`, 0 until
 set). Checked by `tests/pdf.rs` against `pdftex -ini -etex`.
 
-Gaps found:
-- *(B)* `\pdfomitprocset` and `\pdfomitinfodict` (pdfTeX 1.40.29 integer
-  parameters 34, 35) are not in `prim::PDFTEX_PRIMITIVES`; the fold takes
-  them as 0 (their initial value).
+Found and fixed in `prim.rs` (B's table, two entries): `\pdfomitprocset`
+and `\pdfomitinfodict` (pdfTeX 1.40.29's integer parameters 34, 35) were
+missing (154 primitives now), and IniTeX's `\pdfhorigin`/`\pdfvorigin`
+are 4736287sp (1truein as pdfTeX rounds it), not 4736286.

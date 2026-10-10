@@ -2183,6 +2183,7 @@ fn pdf_file(names: &Names, font: &Arc<Font>, last: usize, numbers: &dvi::Numbers
         info_omit_date: int(IntPar::Pdfinfoomitdate),
         suppress_ptex_info: int(IntPar::Pdfsuppressptexinfo),
         ptex_use_underscore: int(IntPar::Pdfptexuseunderscore),
+        omit_info_dict: int(IntPar::Pdfomitinfodict),
         pages_attr: text(TokPar::Pdfpagesattr),
         date: crate::pdf::pdf_date(names.given.pdf_date),
         file_name: format!("{}.pdf", names.given.job),

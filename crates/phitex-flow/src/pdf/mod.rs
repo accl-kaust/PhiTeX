@@ -47,6 +47,8 @@ pub struct Ship {
     pub major_version: i32,
     pub minor_version: i32,
     pub draftmode: i32,
+    /// `\pdfomitprocset`.
+    pub omit_procset: i32,
     /// `\pdfpageattr` and `\pdfpageresources` as `tokens_to_string`
     /// shows them (`None`: empty, TeX's null).
     pub page_attr: Option<Arc<[u8]>>,
@@ -77,6 +79,7 @@ pub fn ship_keys() -> Vec<Key> {
         IntPar::Pdfmajorversion,
         IntPar::Pdfminorversion,
         IntPar::Pdfdraftmode,
+        IntPar::Pdfomitprocset,
         IntPar::Escapechar,
     ]
     .into_iter()
@@ -117,6 +120,7 @@ pub fn read_ship(env: &mut dyn ShipEnv) -> Option<Arc<Ship>> {
         (i(IntPar::Pdfdecimaldigits), i(IntPar::Pdfcompresslevel), i(IntPar::Pdfobjcompresslevel));
     let (major_version, minor_version, draftmode) =
         (i(IntPar::Pdfmajorversion), i(IntPar::Pdfminorversion), i(IntPar::Pdfdraftmode));
+    let omit_procset = i(IntPar::Pdfomitprocset);
     let mut d = |p: DimenPar| int(&env.read(&Key::DimenPar(p)));
     let (horigin, vorigin, page_width, page_height) =
         (d(DimenPar::Pdfhorigin), d(DimenPar::Pdfvorigin), d(DimenPar::Pdfpagewidth), d(DimenPar::Pdfpageheight));
@@ -137,6 +141,7 @@ pub fn read_ship(env: &mut dyn ShipEnv) -> Option<Arc<Ship>> {
         major_version,
         minor_version,
         draftmode,
+        omit_procset,
         page_attr,
         page_resources,
     }))

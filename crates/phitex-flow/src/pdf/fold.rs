@@ -32,6 +32,8 @@ pub struct End {
     pub info_omit_date: i32,
     pub suppress_ptex_info: i32,
     pub ptex_use_underscore: i32,
+    /// `\pdfomitinfodict`.
+    pub omit_info_dict: i32,
     /// `\pdfpagesattr` as shown (`None`: empty).
     pub pages_attr: Option<Arc<[u8]>>,
     /// The creation date as pdfTeX prints it (`D:19700101000000Z`).
@@ -777,11 +779,13 @@ impl F<'_> {
         if let Some(a) = attr {
             o.print_ln(a);
         }
+        // (the dictionary is begun, which may begin an object stream, before
+        // the parent Pages object is made)
+        self.begin_dict(last_page, 1);
         if self.total_pages % PAGES_TREE_KIDS_MAX == 1 {
             self.last_pages = self.create_obj(OBJ_TYPE_PAGES, PAGES_TREE_KIDS_MAX);
         }
         o.indirect_ln(b"Parent", self.last_pages);
-        self.begin_dict(last_page, 1);
         self.print_out(&o);
         self.end_dict();
         // ("Write out resources dictionary")
@@ -808,11 +812,14 @@ impl F<'_> {
             }
             o.print_ln(b">>");
         }
-        o.print(b"/ProcSet [ /PDF");
-        if !body.fonts.is_empty() {
-            o.print(b" /Text");
+        // (`pdf_major_version` is the parameter where the page is shipped)
+        if ship.omit_procset < 0 || (ship.omit_procset == 0 && ship.major_version < 2) {
+            o.print(b"/ProcSet [ /PDF");
+            if !body.fonts.is_empty() {
+                o.print(b" /Text");
+            }
+            o.print_ln(b" ]");
         }
-        o.print_ln(b" ]");
         self.begin_dict(last_resources, 1);
         self.print_out(&o);
         self.end_dict();
@@ -961,26 +968,28 @@ impl F<'_> {
         self.print_out(&o);
         self.end_dict();
         // (`pdf_print_info`)
-        let info = self.create_obj(OBJ_TYPE_OTHERS, 0);
-        self.begin_dict(info, 3);
-        let mut o = Out::new();
-        o.print_ln(b"/Producer (pdfTeX-1.40.29)");
-        o.str_entry_ln(b"Creator", b"TeX");
-        if end.info_omit_date == 0 {
-            o.print(b"/CreationDate (");
-            o.print(end.date.as_bytes());
-            o.print_ln(b")");
-            o.print(b"/ModDate (");
-            o.print(end.date.as_bytes());
-            o.print_ln(b")");
+        if end.omit_info_dict == 0 {
+            let info = self.create_obj(OBJ_TYPE_OTHERS, 0);
+            self.begin_dict(info, 3);
+            let mut o = Out::new();
+            o.print_ln(b"/Producer (pdfTeX-1.40.29)");
+            o.str_entry_ln(b"Creator", b"TeX");
+            if end.info_omit_date == 0 {
+                o.print(b"/CreationDate (");
+                o.print(end.date.as_bytes());
+                o.print_ln(b")");
+                o.print(b"/ModDate (");
+                o.print(end.date.as_bytes());
+                o.print_ln(b")");
+            }
+            o.print_ln(b"/Trapped /False");
+            if end.suppress_ptex_info % 2 == 0 {
+                let key: &[u8] = if end.ptex_use_underscore > 0 { b"PTEX_Fullbanner" } else { b"PTEX.Fullbanner" };
+                o.str_entry_ln(key, end.banner.as_bytes());
+            }
+            self.print_out(&o);
+            self.end_dict();
         }
-        o.print_ln(b"/Trapped /False");
-        if end.suppress_ptex_info % 2 == 0 {
-            let key: &[u8] = if end.ptex_use_underscore > 0 { b"PTEX_Fullbanner" } else { b"PTEX.Fullbanner" };
-            o.str_entry_ln(key, end.banner.as_bytes());
-        }
-        self.print_out(&o);
-        self.end_dict();
         let id = {
             let mut d = end.date.as_bytes().to_vec();
             d.extend_from_slice(end.file_name.as_bytes());
@@ -1016,7 +1025,9 @@ impl F<'_> {
             o.int(w);
             o.print_ln(b" 1]");
             o.indirect_ln(b"Root", root);
-            o.indirect_ln(b"Info", self.obj_ptr - 1);
+            if end.omit_info_dict == 0 {
+                o.indirect_ln(b"Info", self.obj_ptr - 1);
+            }
             o.print(id.as_bytes());
             o.nl();
             self.print_out(&o);
@@ -1069,7 +1080,9 @@ impl F<'_> {
             o.print(b"<< ");
             o.int_entry_ln(b"Size", i64::from(self.sys_obj_ptr) + 1);
             o.indirect_ln(b"Root", root);
-            o.indirect_ln(b"Info", self.sys_obj_ptr);
+            if end.omit_info_dict == 0 {
+                o.indirect_ln(b"Info", self.sys_obj_ptr);
+            }
             o.print(id.as_bytes());
             o.print_ln(b" >>");
             o.print_ln(b"startxref");

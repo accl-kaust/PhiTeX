@@ -12,7 +12,7 @@ use phitex_flow::build::MAIN_MEMORY;
 use phitex_flow::{Build, Font, Options, Order, Reads};
 
 /// The documents.
-const DOCS: [&str; 3] = ["hello", "compressed", "mag"];
+const DOCS: [&str; 8] = ["hello", "compressed", "mag", "mixed1", "mixed2", "objstm", "rules", "guess"];
 
 fn dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/pdf")
@@ -71,6 +71,13 @@ fn first_difference(a: &[u8], b: &[u8]) -> String {
 /// The graph writes document `name`'s PDF file as pdfTeX does, at every
 /// schedule.
 fn check(name: &str) {
+    check_again(name, false);
+}
+
+/// [`check`]; with `again`, some page's own guesses about the pages
+/// before it are wrong (`pdf::content::page`) and the fold makes it
+/// again: the file is still the same at every schedule.
+fn check_again(name: &str, again: bool) {
     let text = src(name);
     let want = recorded(name);
     for &o in &RUNS {
@@ -82,6 +89,7 @@ fn check(name: &str) {
         }
         assert!(out.errors.is_empty(), "{name} ({o:?}): errors on the graph: {:?}", out.errors);
         assert!(out.pdf == want, "{name} ({o:?}): the PDF file differs {}", first_difference(&out.pdf, &want));
+        assert!(!again || out.stats.bodies_again > 0, "{name} ({o:?}): no page made again");
     }
 }
 
@@ -112,4 +120,32 @@ fn compressed() {
 #[test]
 fn mag() {
     check("mag");
+}
+
+#[test]
+fn mixed1() {
+    check("mixed1");
+}
+
+#[test]
+fn mixed2() {
+    check("mixed2");
+}
+
+#[test]
+fn objstm() {
+    check("objstm");
+}
+
+#[test]
+fn rules() {
+    check("rules");
+}
+
+/// Page 2 guesses its decimal digits (page 1 fixed 3) and which font
+/// shows `cmr10 at 12pt` (`cmr10`, set on page 1, owns the object): both
+/// wrong, so the fold makes it again.
+#[test]
+fn guess() {
+    check_again("guess", true);
 }
