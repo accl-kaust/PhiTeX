@@ -10,8 +10,16 @@ cargo build --release -p phitex-flow --all-targets > "$r/build.log" 2>&1; echo "
 PHITEX_FONT_INDEX="$r/fonts.idx" timeout ${FMT_LIMIT:-30m} cargo test --release -p phitex-flow --test xetex_docs -- --exact xelatex_format --nocapture > "$r/format.txt" 2>&1; echo "xelatex_format exit $? (124: over ${FMT_LIMIT:-30m})" >> "$r/summary.txt"
 grep -E "xelatex.fmt|panicked|errors" "$r/format.txt" | head -5 >> "$r/summary.txt"
 [ -f target/tmp/xetex-docs/xelatex.fmt ] && export PHITEX_XELATEX_FMT=$PWD/target/tmp/xetex-docs/xelatex.fmt
-PHITEX_FONT_INDEX="$r/fonts.idx" timeout ${DOCS_LIMIT:-45m} cargo test --release -p phitex-flow --test xetex_docs -- --test-threads=2 ${XTESTS:-} > "$r/xetex_docs.txt" 2>&1; echo "xetex_docs exit $? (124: over ${DOCS_LIMIT:-45m})" >> "$r/summary.txt"
-grep -E "^test |^test result|panicked" "$r/xetex_docs.txt" | head -80 >> "$r/summary.txt"
+# (each test its own process with its own limit, PAR at a time: a hang
+# holds one slot, not the run; its output whole in $r/tests/NAME.txt)
+bin=$(sed -n 's/.*Running tests\/xetex_docs.rs (\(.*\))$/\1/p' "$r/format.txt" | head -1)
+echo "test binary: $bin" >> "$r/summary.txt"
+mkdir -p "$r/tests"
+"$bin" --list 2>/dev/null | sed -n 's/: test$//p' | grep -E "${XTESTS:-.}" | grep -vx xelatex_format > "$r/tests.list"
+export PHITEX_FONT_INDEX="$r/fonts.idx" r bin
+xargs -P ${PAR:-3} -I{} sh -c 'timeout '"${TEST_LIMIT:-12m}"' "$bin" --exact {} --nocapture > "$r/tests/{}.txt" 2>&1; echo "{} exit $?" >> "$r/tests.exit"' < "$r/tests.list"
+{ echo "tests (exit 0 ok, 101 failed, 124 over ${TEST_LIMIT:-12m}):"; sort "$r/tests.exit"; } >> "$r/summary.txt"
+grep -h -E "panicked|livelock" "$r"/tests/*.txt | cut -c1-300 | head -40 >> "$r/summary.txt"
 if [ -n "${REGRESS:-1}" ]; then
 cargo test --release -p phitex-flow --lib --test wall --test shapes --test dvi --test plain --test pdf --test etex --test output > "$r/regress.txt" 2>&1; echo "regress exit $?" >> "$r/summary.txt"
 grep -E "^test result|FAILED|panicked" "$r/regress.txt" | head -40 >> "$r/summary.txt"
