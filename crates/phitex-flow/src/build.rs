@@ -1276,6 +1276,10 @@ struct Shared {
     opts: Options,
     /// The last build's routine runs, by their page's first box.
     memo_old: FxMap<usize, Vec<Arc<Memo>>>,
+    /// `PHITEX_SCHED`: the scheduler's events, for measuring (none: off).
+    sched: Option<Mutex<Vec<Ev>>>,
+    /// When the round began (the events' times count from it).
+    t_base: Instant,
     /// A run may change the sequence (not in a round that must be the
     /// last).
     restructure_ok: bool,
@@ -2458,6 +2462,8 @@ impl Build {
             lean: self.lean,
             build_no: self.builds,
             memo_old,
+            sched: std::env::var_os("PHITEX_SCHED").map(|_| Mutex::new(Vec::new())),
+            t_base: Instant::now(),
         };
         std::thread::scope(|s| {
             for id in 0..threads {
@@ -2491,6 +2497,9 @@ impl Build {
         self.virt = virt.ids;
         self.next_id = self.next_id.max(virt.next);
         let mut st = sh.state.into_inner().expect("state");
+        if let Some(ev) = &sh.sched {
+            write_sched(&ev.lock().expect("sched"), &st, threads, sh.build_no, sh.t_base.elapsed());
+        }
         // (a stalled scheduler is a bug of the core: the build fails with
         // the pieces' states, it does not hang)
         if let Some(d) = st.stalled.take() {
@@ -3024,6 +3033,78 @@ fn dump_piece(out: &mut String, k: usize, ps: &PState, r: &Run, cs: &CsTable) {
     }
 }
 
+/// One scheduler event, recorded when `PHITEX_SCHED` names a file
+/// (measurement only: times and counts, written at the round's end).
+#[derive(Clone, Copy)]
+struct Ev {
+    /// The worker; the kind: 0 a piece's run (`run_and_install`), 5 idle
+    /// (waiting for work), 6 parked (a read waiting for a definition), 7 a
+    /// pick, 16 + the task's kind a worker's task (16 run, 17 line
+    /// breaking, 18 the scan, 19 shipping, 20 the log); the piece.
+    wid: u16,
+    kind: u8,
+    k: u32,
+    /// Nanoseconds since the round began. A run: begun, reading begun (its
+    /// setup's lock taken), reading done, the install's lock taken, the
+    /// install done. A task: begun, done, the scheduler's lock taken again.
+    /// Idle, parked, a pick: begun, done.
+    t: [u64; 5],
+    /// A run: the nodes it ran, the nodes it holds, its outcome (0 settled,
+    /// 1 stale: to run again, 2 abandoned, 3 kept again without running). A
+    /// pick: the pieces ready to start (at most 255), the tasks in
+    /// progress, the runs parked; and 1 if it found a task.
+    a: u64,
+    b: u64,
+    c: u32,
+}
+
+impl Shared {
+    /// Nanoseconds since the round began (0 when not measuring).
+    fn now(&self) -> u64 {
+        if self.sched.is_some() {
+            u64::try_from(self.t_base.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        } else {
+            0
+        }
+    }
+
+    fn ev(&self, e: Ev) {
+        if let Some(s) = &self.sched {
+            s.lock().expect("sched").push(e);
+        }
+    }
+}
+
+/// The pieces ready to start now (at most 255): what a pick chooses from.
+fn ready_count(g: &State, sh: &Shared) -> u64 {
+    let speculate = sh.opts.reads == Reads::Speculate;
+    g.unstarted.iter().filter(|&&k| entry_ready(g, k, speculate && !g.p[k].suspend)).take(255).count() as u64
+}
+
+/// Appends a round's events to the file `PHITEX_SCHED` names, as text: a
+/// line for the round, one per piece (its runs, the nodes and text of its
+/// last run) and one per event (`Ev`'s fields in order).
+fn write_sched(ev: &[Ev], st: &State, threads: usize, build_no: u64, wall: Duration) {
+    use std::io::Write as _;
+    let Some(path) = std::env::var_os("PHITEX_SCHED") else { return };
+    let mut s = String::new();
+    let _ = writeln!(s, "R\t{build_no}\t{threads}\t{}\t{}\t{}", st.p.len(), wall.as_nanos(), ev.len());
+    for (k, ps) in st.p.iter().enumerate() {
+        let nodes = ps.run.as_ref().map_or(0, |r| r.nodes_len());
+        let _ = writeln!(s, "P\t{k}\t{}\t{nodes}\t{}", ps.runs, ps.text.len());
+    }
+    for e in ev {
+        let _ = writeln!(
+            s,
+            "E\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            e.wid, e.kind, e.k, e.t[0], e.t[1], e.t[2], e.t[3], e.t[4], e.a, e.b, e.c
+        );
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(s.as_bytes());
+    }
+}
+
 fn lock(sh: &Shared) -> MutexGuard<'_, State> {
     sh.state.lock().expect("state")
 }
@@ -3032,11 +3113,27 @@ fn worker(sh: &Shared, id: usize) {
     let mut g = lock(sh);
     // (the parked runs' generation when this idle worker last looked)
     let mut stall_seen: Option<u64> = None;
+    let wid = u16::try_from(id).unwrap_or(u16::MAX);
     loop {
         if g.done {
             return;
         }
-        let Some(task) = pick(&mut g, sh) else {
+        let tp = sh.now();
+        let ready = if sh.sched.is_some() { ready_count(&g, sh) } else { 0 };
+        let picked = pick(&mut g, sh);
+        if sh.sched.is_some() {
+            let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
+            sh.ev(Ev {
+                wid,
+                kind: 7,
+                k: 0,
+                t: [tp, sh.now(), 0, 0, 0],
+                a: ready,
+                b: g.inflight as u64,
+                c: u32::try_from(parked).unwrap_or(u32::MAX) << 1 | u32::from(picked.is_some()),
+            });
+        }
+        let Some(task) = picked else {
             if finished(&g) {
                 g.done = true;
                 sh.cv.notify_all();
@@ -3051,8 +3148,10 @@ fn worker(sh: &Shared, id: usize) {
                 stall(&mut g, sh, parked, "the scheduler stalled");
                 return;
             }
+            let ti = sh.now();
             let (g2, timeout) = sh.cv.wait_timeout(g, STALL_CHECK).expect("state");
             g = g2;
+            sh.ev(Ev { wid, kind: 5, k: 0, t: [ti, sh.now(), 0, 0, 0], a: 0, b: 0, c: 0 });
             stall_seen = (timeout.timed_out() && g.inflight > 0).then_some(gen_now);
             continue;
         };
@@ -3060,10 +3159,25 @@ fn worker(sh: &Shared, id: usize) {
         g.stats.tasks[id] += 1;
         g.inflight += 1;
         drop(g);
+        let tk = match &task {
+            Task::Run(k, _) | Task::Break(k, ..) | Task::Ship(k, ..) | Task::Log(k, ..) => *k,
+            Task::Scan { from, .. } => *from,
+        };
+        let t0 = sh.now();
         let t = Instant::now();
-        let (work, kind) = execute(sh, task);
+        let (work, kind) = execute(sh, task, wid);
         let dt = t.elapsed();
+        let t1 = sh.now();
         g = lock(sh);
+        sh.ev(Ev {
+            wid,
+            kind: 16 + kind,
+            k: u32::try_from(tk).unwrap_or(u32::MAX),
+            t: [t0, t1, sh.now(), 0, 0],
+            a: work,
+            b: 0,
+            c: 0,
+        });
         g.inflight -= 1;
         if g.restructure && g.inflight == 0 {
             sh.cv.notify_all();
@@ -3935,9 +4049,9 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
 
 /// Does a task (outside the scheduler's lock) and installs its result.
 /// Returns the work done and its kind.
-fn execute(sh: &Shared, task: Task) -> (u64, u8) {
+fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
     match task {
-        Task::Run(k, dirty) => (run_and_install(sh, k, &dirty), 0),
+        Task::Run(k, dirty) => (run_and_install(sh, k, &dirty, wid), 0),
         Task::Break(k, j, para) => {
             let lines = Arc::new(break_lines(&para));
             let mut g = lock(sh);
@@ -4183,11 +4297,15 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
 /// nodes and installs the run: its exports into the names index, its
 /// reads as edges, the readers its changed definitions reach marked; its
 /// own reads validated against the index as it is now.
-fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
+fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64 {
+    let tb = sh.now();
+    let k32 = u32::try_from(k).unwrap_or(u32::MAX);
     let (text, old, entry, strict, entry_assumed) = {
         let mut g = lock(sh);
         if std::mem::take(&mut g.p[k].recheck) && dirty.is_empty() && keep_again(&mut g, sh, k) {
             drop(g);
+            let t = sh.now();
+            sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, t, t, t, t], a: 0, b: 0, c: 3 });
             notify(sh, true);
             return 0;
         }
@@ -4205,9 +4323,11 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
         (ps.text.clone(), old, ps.entered.clone(), ps.suspend, entry_assumed)
     };
     sh.cancel[k].store(false, Ordering::Relaxed);
+    let tr = sh.now();
     let mut env = PieceEnv {
         sh,
         k,
+        wid,
         spec: sh.opts.reads == Reads::Speculate && !strict,
         strict,
         predicted: Vec::new(),
@@ -4223,10 +4343,13 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
         dirty,
         entry.as_ref(),
     ));
+    let te = sh.now();
     if run.abandoned {
         // (not a result: the piece runs again, from its last run, its
         // dirty names still dirty)
         let mut g = lock(sh);
+        let t = sh.now();
+        sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, tr, te, t, t], a: run.ran, b: run.nodes_len() as u64, c: 2 });
         g.stats.abandoned += 1;
         g.stats.commands_run += run.ran;
         g.p[k].suspend |= env.gave_up;
@@ -4283,8 +4406,11 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
     } else {
         FxSet::default()
     };
+    let outcome;
+    let tl;
     {
         let mut g = lock(sh);
+        tl = sh.now();
         let held = Instant::now();
         g.stats.commands_run += run.ran;
         let id = sh.seq.piece(k);
@@ -4451,6 +4577,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
         }
         // (entered in the state its predecessors leave now, or run again)
         let entered = entry_holds(&g, k, &run);
+        outcome = u32::from(!(stale.is_empty() && entered));
         if stale.is_empty() && entered {
             g.p[k].lean_later = lean.map(|l| (run.clone(), l));
             if hot {
@@ -4494,6 +4621,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
         g.stats.time_confirm += t.elapsed();
         g.stats.time_held += held.elapsed();
     }
+    sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, tr, te, tl, sh.now()], a: run.ran, b: run.nodes_len() as u64, c: outcome });
     {
         let _p = sh.park.lock().expect("park");
         sh.generation.fetch_add(1, Ordering::AcqRel);
@@ -4511,6 +4639,8 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
 struct PieceEnv<'a> {
     sh: &'a Shared,
     k: usize,
+    /// The worker running it (for `PHITEX_SCHED`'s events).
+    wid: u16,
     /// Reads run on predictions (`Reads::Speculate`, and not a piece whose
     /// speculation was given up).
     spec: bool,
@@ -4622,12 +4752,14 @@ impl PieceEnv<'_> {
                     }
                 };
                 if let Some((e, dirty)) = leapfrog {
-                    run_and_install(sh, e, &dirty);
+                    run_and_install(sh, e, &dirty, self.wid);
                 } else {
                     if !wait(self) {
                         return (val, Src::Initial, lo, hi);
                     }
+                    let tp = sh.now();
                     park(sh, self.k, seen);
+                    sh.ev(Ev { wid: self.wid, kind: 6, k: self.k as u32, t: [tp, sh.now(), 0, 0, 0], a: 0, b: 0, c: 0 });
                 }
                 continue;
             };
@@ -4677,12 +4809,14 @@ impl PieceEnv<'_> {
                 }
             };
             if let Some((e, dirty)) = leapfrog {
-                run_and_install(sh, e, &dirty);
+                run_and_install(sh, e, &dirty, self.wid);
             } else {
                 if !wait(self) {
                     return (val, Src::Initial, lo, hi);
                 }
+                let tp = sh.now();
                 park(sh, self.k, seen);
+                sh.ev(Ev { wid: self.wid, kind: 6, k: self.k as u32, t: [tp, sh.now(), 0, 0, 0], a: 0, b: 0, c: 0 });
             }
         }
     }
