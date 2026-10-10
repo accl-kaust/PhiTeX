@@ -112,6 +112,16 @@ pub trait Env {
         false
     }
 
+    /// Whether a run that reads past its text's end in the middle of a
+    /// command ([`Node::crossed`]) ends there: text follows the piece, and
+    /// the sequence joins the two (the run, its command cut short, would
+    /// run on what the cut made of it — a `\loop` whose `\repeat` is in
+    /// the next piece calls itself for ever). No: the document's end, the
+    /// command ends there, as at a file's end in TeX.
+    fn crossed_ends(&mut self) -> bool {
+        false
+    }
+
     /// A run nests groups deeper than any document does (`DEEP`): whether
     /// it stops — it runs on predictions not confirmed yet (a cut's
     /// assumed entry, or definitions predicted), which such a nesting
@@ -2507,6 +2517,9 @@ pub fn run_piece(
     // (entered otherwise than the old run was: every node is looked at)
     let entry_changed = old.is_some_and(|(r, _)| r.chain.entry != entry);
     let mut ran = 0u64;
+    // (`PHITEX_HANG_STEPS`: after a runaway print, the next commands one
+    // by one, with their reads and definitions)
+    let mut trace_left = 0u32;
     let edit = old.and_then(|(_, t)| Edit::between(t, text));
     // (the edit changed how many lines are before the text after it: a node
     // there that read its line, `\inputlineno` in the piece's own text —
@@ -2786,6 +2799,23 @@ pub fn run_piece(
                     && (std::env::var_os("PHITEX_HANG_DUMP").is_some() || std::env::var_os("PHITEX_HANG_STEPS").is_some())
                 {
                     eprintln!("runaway run: {ran} commands; {}", where_shown(text, &n));
+                    if trace_left == 0 {
+                        trace_left = 400;
+                    }
+                }
+                if trace_left > 0 {
+                    trace_left -= 1;
+                    let cs = env.cs();
+                    let mut o = format!("  #{} {:?} {} at {} p{} g{} c{}:", chain.nodes.len(), n.kind, crate::val::Shown(&n.cmd, cs), n.out.pos, n.out.pending.len(), n.out.groups.len(), n.out.conds.len());
+                    for r in n.reads.iter() {
+                        let v = crate::val::Shown(&r.val, cs).to_string();
+                        let _ = std::fmt::Write::write_fmt(&mut o, format_args!(" R[{}={} {:?}]", crate::val::Shown(&r.key, cs), v.chars().take(50).collect::<String>(), r.src));
+                    }
+                    for d in n.defs() {
+                        let v = crate::val::Shown(&d.val, cs).to_string();
+                        let _ = std::fmt::Write::write_fmt(&mut o, format_args!(" D[{}={}{}]", crate::val::Shown(&d.key, cs), v.chars().take(50).collect::<String>(), if d.global { " g" } else { "" }));
+                    }
+                    eprintln!("{o}");
                 }
                 n
             }
@@ -2829,7 +2859,9 @@ pub fn run_piece(
         } else if !same_material {
             para_fresh = true;
         }
-        let end = matches!(n.kind, Kind::End | Kind::Input | Kind::Cut);
+        // (a run that read on past its text, text following: the sequence
+        // joins the two, the rest of this run is no result)
+        let end = matches!(n.kind, Kind::End | Kind::Input | Kind::Cut) || (n.crossed() && env.crossed_ends());
         state = n.out.clone();
         chain.push_arc(n);
         if end {
@@ -3124,6 +3156,9 @@ struct Exec<'a> {
     stop: Option<Check>,
     /// This node made the hundredth error: the build ends here (§82).
     halt: bool,
+    /// The node read past its text's end with text following
+    /// ([`Env::crossed_ends`]): it reads nothing more, the run ends.
+    cut_short: bool,
     /// What is being scanned, where an `\outer` name is forbidden
     /// (tex.web 305: `scanner_status`), and whose (`warning_index`).
     scanning: Scanning,
@@ -3282,6 +3317,7 @@ impl<'a> Exec<'a> {
             steps: 0,
             stop: None,
             halt: false,
+            cut_short: false,
             scanning: Scanning::Normal,
             warning: None,
             outer_abort: false,
@@ -3798,12 +3834,12 @@ impl<'a> Exec<'a> {
     fn expansion_shown(&mut self) {
         let next = |l: &Level| l.list[l.at.min(l.end)..l.end.min(l.at + 24)].to_vec();
         let mut lists: Vec<Vec<Tok>> = self.st.pending.top.iter().map(next).collect();
-        let mut below = self.st.pending.below.clone();
+        let mut below = self.st.pending.below.as_ref();
         while lists.len() < 5
             && let Some(c) = below
         {
             lists.push(next(&c.level));
-            below = c.below.clone();
+            below = c.below.as_ref();
         }
         let mut s = format!(
             "expansion: {} steps, {} lists pending, {} groups, {} conditionals, {} texts, {} nodes, at {}",
@@ -3821,6 +3857,7 @@ impl<'a> Exec<'a> {
             let _ = std::fmt::Write::write_fmt(&mut s, format_args!("; list {i}: {}", o.chars().take(200).collect::<String>()));
         }
         eprintln!("{s}");
+
     }
 
     /// Font `f`'s identity as the piece's own name (for the keys of its
@@ -4215,7 +4252,7 @@ impl<'a> Exec<'a> {
     #[inline(always)]
     fn next_raw0(&mut self) -> Option<Tok> {
         self.noexp = false;
-        if self.halted() {
+        if self.halted() || self.cut_short {
             return None;
         }
         loop {
@@ -4235,6 +4272,11 @@ impl<'a> Exec<'a> {
                 let t = self.tokenize();
                 if t.is_none() && !self.boundary && self.ptext.is_none() && self.stop.is_none() {
                     self.crossed = true;
+                    // (text follows: the sequence runs it with this piece,
+                    // as one; what this run would read now, its command cut
+                    // short by its text's end, is no result: the run ends
+                    // here, never in a loop the cut made)
+                    self.cut_short = self.env.crossed_ends();
                 }
                 return t;
             }

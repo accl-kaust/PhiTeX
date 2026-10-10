@@ -5796,6 +5796,12 @@ impl Env for PieceEnv<'_> {
         self.sh.names.has_inner(key)
     }
 
+    fn crossed_ends(&mut self) -> bool {
+        // (a piece follows: the layout joins it with this one; in the last
+        // round, which may not, `settle` fails the build there)
+        self.k + 1 < self.sh.inline.len()
+    }
+
     fn cut_ok(&mut self) -> bool {
         // (the last round: where the layout re-cut the text, only)
         self.sh.restructure_ok || self.sh.laid[self.k].1

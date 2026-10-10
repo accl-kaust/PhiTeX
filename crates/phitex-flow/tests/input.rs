@@ -363,3 +363,27 @@ fn a_file_read_at_twenty_places_needs_no_fallback_round() {
         assert!(o.dvi == base.dvi, "{threads}: another DVI");
     }
 }
+
+/// A command whose argument runs on past its piece's text (a `\loop`
+/// whose `\repeat` follows a blank line, `\long` as LaTeX's): the run ends
+/// where it read past its text, the sequence joins the two pieces and runs
+/// them as one. It never runs on what the cut left of the command: that
+/// `\loop`, its body cut at the blank line, calls itself for ever.
+#[test]
+fn a_command_read_past_its_piece_ends_the_run() {
+    let main = format!(
+        "{PRE}\\countdef\\n=10 \\n=0 \\let\\repeat=\\fi\n\
+\\long\\def\\loop#1\\repeat{{\\def\\body{{#1}}\\iterate}}\n\
+\\def\\iterate{{\\body \\let\\next\\iterate \\else\\let\\next\\relax\\fi \\next}}\n\
+\\loop Paragraph \\the\\n, the first half.\n\n\
+The second half of it.\\par\n\
+\\advance\\n by 1\n\
+\\ifnum\\n<5 \\repeat\n\n{}\\end\n",
+        para(WORDS, 20)
+    );
+    let out = build_with(&[]).update(&main, Options::default());
+    assert!(out.errors.is_empty(), "{:?}", out.errors);
+    if let Some(want) = tex("crossed-loop", &[("main.tex", main.clone())]) {
+        assert!(masked(&out.dvi) == masked(&want), "not TeX's DVI ({} bytes, TeX {})", out.dvi.len(), want.len());
+    }
+}
