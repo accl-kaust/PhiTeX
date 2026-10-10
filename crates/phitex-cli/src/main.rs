@@ -46,6 +46,7 @@ mod tools;
 mod view;
 mod warnings;
 mod watch;
+mod xetex;
 mod ws;
 
 #[cfg(all(feature = "jemalloc", not(target_family = "wasm")))]

@@ -1,0 +1,5 @@
+XeTeX 3.141592653-2.6-0.999998 (TeX Live 2026/Arch Linux)
+This is xdvipdfmx Version 20260113 by the DVIPDFMx project team,
+TEXMFDIST /usr/share/texmf-dist
+xelatex.ini /usr/share/texmf-dist/tex/latex/tex-ini-files/xelatex.ini
+fonts 2711

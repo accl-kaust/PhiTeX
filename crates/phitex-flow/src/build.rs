@@ -44,6 +44,9 @@ use std::time::{Duration, Instant};
 use crate::dvi;
 pub use crate::graph::MAIN_MEMORY;
 
+/// The shipped pages' source places, for SyncTeX and the viewer.
+pub mod sync;
+
 /// The cutter's default: a cut proposed every this many lines (at a line
 /// beginning with a control sequence, at brace depth 0), besides blank
 /// lines ([`Options::cut_lines`]).
@@ -61,7 +64,7 @@ use crate::page::{
 };
 use crate::show::RAW;
 use crate::tfm::{Font, FontFiles, Kpse, KpseFormat};
-use crate::val::{Key, Meaning, Shown, Tok, TokPar, Val, initial};
+use crate::val::{Key, Meaning, Shown, Tok, TokPar, Val};
 
 /// What a read does when the definition it finds is being remade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -461,7 +464,7 @@ fn count_lines(t: &[char]) -> usize {
 
 /// A name's readers: reader piece -> (its first node reading the name
 /// from before the piece, the piece whose definition it read).
-type ReadersOf = FxMap<PieceId, (u32, PieceId)>;
+type ReadersOf = Edges;
 
 /// The edges, name -> its readers, in shards by name (`Names::route`, as
 /// the names index): a run's edges go in before the scheduler's lock is
@@ -498,10 +501,60 @@ impl Readers {
         if let Some(m) = map.get_mut(key) {
             m.insert(id, e);
         } else {
-            let mut m = FxMap::default();
+            let mut m = Edges::default();
             m.insert(id, e);
             map.insert(key.clone(), m);
         }
+    }
+}
+
+
+/// A name's edges: per reading piece (by id, in order), its first reader
+/// node and the piece whose definition it read. Pieces are installed
+/// mostly in order, so an edge is mostly added at the end.
+#[derive(Clone, Debug, Default)]
+struct Edges(Vec<Edge>);
+
+/// A reading piece's edge: (its id, (its first reader node, the defining
+/// piece)).
+type Edge = (PieceId, (u32, PieceId));
+
+impl Edges {
+    fn find(&self, id: PieceId) -> Result<usize, usize> {
+        match self.0.last() {
+            None => Err(0),
+            Some(l) if l.0 < id => Err(self.0.len()),
+            _ => self.0.binary_search_by_key(&id, |e| e.0),
+        }
+    }
+    fn get_mut(&mut self, id: PieceId) -> Option<&mut (u32, PieceId)> {
+        let i = self.find(id).ok()?;
+        Some(&mut self.0[i].1)
+    }
+    fn insert(&mut self, id: PieceId, e: (u32, PieceId)) {
+        match self.find(id) {
+            Ok(i) => self.0[i].1 = e,
+            Err(i) => self.0.insert(i, (id, e)),
+        }
+    }
+    fn remove(&mut self, id: PieceId) {
+        if let Ok(i) = self.find(id) {
+            self.0.remove(i);
+        }
+    }
+    fn keys(&self) -> impl Iterator<Item = &PieceId> {
+        self.0.iter().map(|e| &e.0)
+    }
+    fn shrink_to_fit(&mut self) {
+        self.0.shrink_to_fit();
+    }
+}
+
+impl<'a> IntoIterator for &'a Edges {
+    type Item = (&'a PieceId, &'a (u32, PieceId));
+    type IntoIter = std::iter::Map<std::slice::Iter<'a, Edge>, fn(&'a Edge) -> Self::Item>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter().map(|e| (&e.0, &e.1))
     }
 }
 
@@ -617,6 +670,9 @@ pub struct Build {
     /// The PDF file's creation date, in seconds since 1970 (UTC):
     /// `SOURCE_DATE_EPOCH` for pdfTeX (`Build::set_pdf_date`).
     pdf_date: i64,
+    /// The engine is XeTeX, with these installed fonts and this finder
+    /// (`Build::set_xetex`).
+    xe: Option<Arc<crate::native::Fonts>>,
 }
 
 /// A file's text and its pieces.
@@ -759,6 +815,8 @@ struct Given {
     limits: crate::print::Limits,
     /// The PDF file's creation date (`Build::set_pdf_date`).
     pdf_date: i64,
+    /// XeTeX's native fonts (`Build::set_xetex`).
+    xe: Option<Arc<crate::native::Fonts>>,
 }
 
 impl Given {
@@ -781,6 +839,15 @@ impl Given {
             interaction_option: None,
             limits: crate::print::Limits::TEX_LIVE,
             pdf_date: 0,
+            xe: None,
+        }
+    }
+
+    /// XeTeX's `load_native_font` through the given fonts.
+    fn native_font(&self, name: &str, size: i32, tracing: i32) -> crate::native::Loaded {
+        match &self.xe {
+            Some(x) => x.load(name, size, tracing),
+            None => (None, Vec::new()),
         }
     }
 
@@ -1173,7 +1240,7 @@ impl Names {
                 Some(d) => Val::Stream(Arc::new(crate::val::Stream { data: d.clone(), next: 0, normal: true })),
                 None => Val::Void,
             },
-            _ => initial(key, font, self.etex, Some(&self.cs)),
+            _ => crate::val::initial_in(key, font, self.etex, self.given.xe.is_some(), Some(&self.cs)),
         }
     }
 
@@ -1541,6 +1608,7 @@ impl Build {
             limits: crate::print::Limits::TEX_LIVE,
             format: None,
             pdf_date: 0,
+            xe: None,
         }
     }
 
@@ -1965,6 +2033,38 @@ impl Build {
     /// read: the date is a given of the build.
     pub fn set_pdf_date(&mut self, epoch: i64) {
         self.pdf_date = epoch;
+    }
+
+    /// The engine is XeTeX (`xetex -ini`, with e-TeX's extended mode as
+    /// [`Options::etex`] says): its primitives and IniTeX values, Unicode
+    /// input, native fonts from `fonts` (the installed fonts' index and
+    /// the file finder, both given), XDV output and the PDF xdvipdfmx
+    /// makes of it. Fixed for a `Build`'s life, given before the first
+    /// update.
+    pub fn set_xetex(&mut self, fonts: impl Into<Arc<crate::native::Fonts>>) {
+        self.xe = Some(fonts.into());
+    }
+
+    /// XeTeX's PDF of an XDV file this build wrote (`Output::dvi`): what
+    /// `xdvipdfmx -q -E -o JOB.pdf` makes of it, in process
+    /// (`native::xdv_to_pdf`), dated by [`Build::set_pdf_date`]. `None`
+    /// when the engine is not XeTeX.
+    pub fn xdv_pdf(&self, xdv: &[u8]) -> Option<Result<Vec<u8>, String>> {
+        let xe = self.xe.as_ref()?;
+        let name = format!("{}.pdf", self.job);
+        // (the build's finder if it has one, [`Build::set_kpse`], else the
+        // input directories, then the native fonts' finder)
+        let files: Arc<dyn crate::tfm::Kpse> = Arc::new(DocFiles {
+            mem: self.files.clone(),
+            dirs: if self.finder.is_some() { Arc::new(Vec::new()) } else { self.inputs.clone() },
+            inner: self.finder.as_ref().map_or_else(|| xe.kpse().clone(), |(k, _)| k.clone()),
+        });
+        Some(crate::native::xdv_to_pdf(xdv, &files, xe.distiller(), &name, self.pdf_date))
+    }
+
+    /// The engine is XeTeX ([`Build::set_xetex`]).
+    pub fn xetex(&self) -> bool {
+        self.xe.is_some()
     }
 
     /// The sizes set by [`Build::set_limits`].
@@ -2408,6 +2508,7 @@ impl Build {
         given.interaction_option = self.interaction_option;
         given.limits = self.limits;
         given.pdf_date = self.pdf_date;
+        given.xe.clone_from(&self.xe);
         let names = Names::new(given, opts.etex, self.cs.clone(), self.format.clone());
         // (the last build's folds' values, at the pieces' places now)
         {
@@ -2474,7 +2575,7 @@ impl Build {
             if now.is_none() {
                 for i in 0..r.read_count() {
                     if let Some(m) = readers.get_mut(r.read_at(i).0) {
-                        m.remove(&o.id);
+                        m.remove(o.id);
                     }
                 }
             }
@@ -2485,7 +2586,7 @@ impl Build {
         let mut moves: Vec<(usize, Key, PieceId)> = Vec::new();
         for key in &touched {
             let Some(m) = readers.get_mut(key) else { continue };
-            for (&rid, &(node, src)) in m.iter() {
+            for (&rid, &(node, src)) in &*m {
                 let Some(rpos) = seq.pos_of(rid) else {
                     continue;
                 };
@@ -2765,7 +2866,9 @@ impl Build {
             errors.extend(w.errors.into_iter().map(|e| format!("pdf: {e}")));
             (Vec::new(), w.bytes, w.again)
         } else {
-            let (out, again) = dvi::assemble_in(&numbers, &st.pages, &mut bodies, sh.names.given.limits.dvi_buf_size);
+            // (XeTeX: the XDV file, its id byte and comment XeTeX's)
+            let xdv = sh.names.given.xe.is_some();
+            let (out, again) = dvi::assemble_as(&numbers, &st.pages, &mut bodies, sh.names.given.limits.dvi_buf_size, xdv);
             (out, Vec::new(), again)
         };
         st.stats.bodies_again = again;
@@ -3141,6 +3244,14 @@ impl Env for JoinEnv<'_> {
         self.fonts.get(name)
     }
 
+    fn xetex(&self) -> bool {
+        self.names.given.xe.is_some()
+    }
+
+    fn native_font(&mut self, name: &str, size: i32, tracing: i32) -> crate::native::Loaded {
+        self.names.given.native_font(name, size, tracing)
+    }
+
     // (run again as it ran: up to its cut)
     fn cut_ok(&mut self) -> bool {
         self.cut
@@ -3188,6 +3299,42 @@ impl Env for JoinEnv<'_> {
 
     fn line_base(&mut self) -> i32 {
         self.names.given.base(self.k) as i32
+    }
+}
+
+/// xdvipdfmx's finder in [`Build::xdv_pdf`], one more [`Kpse`]: the
+/// document's files first (those given in memory, then the input
+/// directories, as the picture specials name them, `./NAME` in the
+/// first), then the build's finder.
+struct DocFiles {
+    mem: Arc<FxMap<Arc<str>, Arc<[u8]>>>,
+    dirs: Arc<Vec<PathBuf>>,
+    inner: Arc<dyn crate::tfm::Kpse>,
+}
+
+impl crate::tfm::Kpse for DocFiles {
+    fn find(&self, name: &str, format: crate::tfm::KpseFormat, prog: &str) -> Option<String> {
+        let bare = name.strip_prefix("./").unwrap_or(name);
+        if self.mem.contains_key(bare) {
+            return Some(format!("./{bare}"));
+        }
+        if let Some(p) = self.dirs.iter().map(|d| d.join(bare)).find(|p| p.is_file()) {
+            return Some(p.to_string_lossy().into_owned());
+        }
+        self.inner.find(name, format, prog)
+    }
+
+    fn read(&self, path: &str) -> Option<Arc<[u8]>> {
+        let bare = path.strip_prefix("./").unwrap_or(path);
+        if let Some(b) = self.mem.get(bare) {
+            return Some(b.clone());
+        }
+        if std::path::Path::new(bare).is_relative()
+            && let Some(b) = self.dirs.iter().find_map(|d| std::fs::read(d.join(bare)).ok())
+        {
+            return Some(Arc::from(b));
+        }
+        self.inner.read(path)
     }
 }
 
@@ -3924,7 +4071,7 @@ fn move_edge(readers: &Readers, ps: &mut PState, key: &Key, src: PieceId) {
 
 /// [`move_edge`], `key`'s shard locked already.
 fn move_edge_in(shard: &mut FxMap<Key, ReadersOf>, ps: &mut PState, key: &Key, src: PieceId) {
-    if let Some(e) = shard.get_mut(key).and_then(|m| m.get_mut(&ps.id)) {
+    if let Some(e) = shard.get_mut(key).and_then(|m| m.get_mut(ps.id)) {
         e.1 = src;
     }
     if let Some(i) = ps.run.as_ref().and_then(|r| r.first_read(key))
@@ -4760,6 +4907,11 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
             g.scan = Some(scan);
             drop(g);
             sh.cv.notify_all();
+            // (a lean piece's full run is the scan's alone now: freed on
+            // the drop thread, as a replaced run)
+            for (r, _) in pieces {
+                let _ = sh.drops.send(r);
+            }
             (work, 2)
         }
         Task::Ship(i, page, numbers) => {
@@ -4973,7 +5125,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
             }
             while let Some(&(_, key)) = gone.get(b).filter(|x| x.0 == sh_i) {
                 if let Some(r) = m.get_mut(key) {
-                    r.remove(&id);
+                    r.remove(id);
                 }
                 b += 1;
             }
@@ -5451,6 +5603,14 @@ impl Env for PieceEnv<'_> {
         self.sh.fonts.get(name)
     }
 
+    fn xetex(&self) -> bool {
+        self.sh.names.given.xe.is_some()
+    }
+
+    fn native_font(&mut self, name: &str, size: i32, tracing: i32) -> crate::native::Loaded {
+        self.sh.names.given.native_font(name, size, tracing)
+    }
+
     fn check(&mut self, ran: u64, words: u64) -> Check {
         // (marked stale while it runs, or the sequence changes: it stops)
         if self.sh.cancel[self.k].load(Ordering::Relaxed) {
@@ -5711,6 +5871,10 @@ impl BuildFold<'_> {
 }
 
 impl FoldEnv for BuildFold<'_> {
+    fn xetex(&self) -> bool {
+        self.sh.names.given.xe.is_some()
+    }
+
     fn read(&mut self, key: &Key) -> Val {
         // (the last build's definitions where the page builder fires now,
         // not made again yet, are not read: they are what its fires there
@@ -5800,6 +5964,14 @@ impl Env for RoutineEnv<'_> {
 
     fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
         self.fold.sh.fonts.get(name)
+    }
+
+    fn xetex(&self) -> bool {
+        self.fold.sh.names.given.xe.is_some()
+    }
+
+    fn native_font(&mut self, name: &str, size: i32, tracing: i32) -> crate::native::Loaded {
+        self.fold.sh.names.given.native_font(name, size, tracing)
     }
 
     fn reach(&mut self, key: &Key, _node: u32) -> (Val, Src, u32, u32) {

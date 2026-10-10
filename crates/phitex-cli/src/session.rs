@@ -83,6 +83,9 @@ pub struct Report {
     /// What the tools said.
     pub notes: Vec<String>,
     pub wall: Duration,
+    /// XeTeX's: `out.dvi` is an XDV file (`out.pdf` xdvipdfmx's of it,
+    /// unless `-no-pdf`).
+    pub xetex: bool,
 }
 
 impl Report {
@@ -91,7 +94,7 @@ impl Report {
         if !self.out.pdf.is_empty() {
             Some(("pdf", &self.out.pdf))
         } else if !self.out.dvi.is_empty() {
-            Some(("dvi", &self.out.dvi))
+            Some((if self.xetex { "xdv" } else { "dvi" }, &self.out.dvi))
         } else {
             None
         }
@@ -151,6 +154,8 @@ pub struct Session {
     /// The format the build starts from.
     pub format: Option<PathBuf>,
     builds: usize,
+    /// `JOB.synctex.gz`, kept between builds (`synctex.rs`).
+    pub sync: crate::synctex::Writer,
 }
 
 /// What a run reads as file `name`: the version given, else the disk's
@@ -200,6 +205,9 @@ impl Session {
         // the environment, `.` first —, the output directory before it, as
         // web2c's `open_input` tries `-output-directory` first)
         build.set_kpse(tree.kpse.clone(), tree.prog);
+        if job.engine.xetex {
+            build.set_xetex(crate::xetex::fonts(&job.engine, &tree, note)?);
+        }
         let mut dirs = Vec::new();
         if job.out_dir != Path::new(".") {
             dirs.push(job.out_dir.clone());
@@ -228,6 +236,7 @@ impl Session {
             tools: crate::tools::Tools::default(),
             format,
             builds: 0,
+            sync: crate::synctex::Writer::default(),
         })
     }
 
@@ -311,7 +320,8 @@ impl Session {
             changed = run.changed;
             for (n, t) in &out.writes {
                 if changed.contains(n) {
-                    self.given.insert(n.clone(), t.clone());
+                    let t = self.as_read(t);
+                    self.given.insert(n.clone(), t);
                 }
             }
             if self.job.tools {
@@ -343,14 +353,37 @@ impl Session {
             why.clone_from(&changed.join(", "));
             why.push_str(" changed");
         }
-        let out = last.expect("a run");
+        let mut out = last.expect("a run");
+        let xetex = self.job.engine.xetex;
+        // (XeTeX's pages to PDF as `xetex` pipes them to `xdvipdfmx -q -E`,
+        // in process: unless `-no-pdf`)
+        if xetex && self.job.engine.output == tex::Output::Pdf && !out.dvi.is_empty() {
+            match self.build.xdv_pdf(&out.dvi) {
+                Some(Ok(pdf)) => out.pdf = pdf,
+                Some(Err(e)) => notes.push(format!("xdvipdfmx: {e} (the XDV file is written instead)")),
+                None => {}
+            }
+        }
         Report {
             out,
             runs,
             unsettled: if self.job.fixpoint { changed } else { Vec::new() },
             notes,
             wall: t0.elapsed(),
+            xetex,
         }
+    }
+
+    /// A file TeX wrote as its bytes: XeTeX writes UTF-8, TeX a byte per
+    /// character.
+    fn out_bytes(&self, t: &str) -> Vec<u8> {
+        if self.job.engine.xetex { t.as_bytes().to_vec() } else { tex::bytes(t) }
+    }
+
+    /// A file TeX wrote as a build reads it back (its bytes as TeX's
+    /// characters).
+    fn as_read(&self, t: &str) -> String {
+        if self.job.engine.xetex { tex::chars(t.as_bytes()) } else { t.to_owned() }
     }
 
     /// Writes what the build made: `JOB.pdf` or `JOB.dvi`, the files
@@ -372,9 +405,13 @@ impl Session {
         let ext = r.main_output().map_or(self.job.engine.output.ext(), |(e, _)| e);
         if let Some((e, b)) = r.main_output() {
             main = Some(put(&format!("{}.{e}", self.job.jobname), b)?);
+            if self.job.synctex {
+                let (n, b) = self.sync.file(&self.build, &self.job.jobname, &self.job.path, &r.out.files_read, self.job.threads);
+                put(&n, &b)?;
+            }
         }
         for (n, t) in &r.out.writes {
-            put(n, &tex::bytes(t))?;
+            put(n, &self.out_bytes(t))?;
         }
         for (n, t) in &self.given {
             if !r.out.writes.iter().any(|(m, _)| m == n) {
@@ -386,7 +423,7 @@ impl Session {
         }
         let out_name = format!("{}.{ext}", self.job.jobname);
         if let Some(l) = r.out.job_logs(&Limits::TEX_LIVE, &out_name).last() {
-            put(&format!("{}.log", self.job.jobname), &tex::bytes(&l.log))?;
+            put(&format!("{}.log", self.job.jobname), &self.out_bytes(&l.log))?;
         }
         if self.job.recorder {
             let fls = self.recorder(r, &out_name);
@@ -428,13 +465,6 @@ impl Session {
 /// The notes a job's options that phitex-flow cannot do yet give, once.
 pub fn waiting_notes(job: &Job) -> Vec<String> {
     let mut v = Vec::new();
-    if job.synctex {
-        v.push(
-            "SyncTeX: no .synctex.gz yet: phitex-flow's pages keep no source places \
-             (glyph origins asked of agents Q and A)"
-                .to_owned(),
-        );
-    }
     if job.recorder {
         v.push(
             "-recorder: the .fls lists the format, the main file and the outputs; the files \

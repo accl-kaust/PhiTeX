@@ -1,0 +1,14 @@
+% Right to left: Arabic in Amiri (joining, marks), Hebrew, mixed digits,
+% TeXXeT's \beginR...\endR, a word without strong characters after an
+% Arabic one (the font's last script sets its direction).
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\hsize=300pt \vsize=600pt \parindent=0pt \baselineskip=18pt \tolerance=10000
+\parfillskip=0pt plus 1fil \TeXXeTstate=1
+\font\ar="[Amiri-Regular.ttf]:script=arab" at 12pt
+\font\he="Libertinus Serif:script=hebr" at 11pt
+\font\la="[lmroman10-regular]" at 10pt
+\la English \beginR\ar مرحبا بالعالم، هذا نص عربي ١٢٣ 456.\endR\ more.\par
+\beginR\ar السلام عليكم ورحمة الله\endR\par
+\beginR\he שלום עולם, זה טקסט בעברית.\endR\par
+\ar نص 123 ... \la 123 (ab)\par
+\end

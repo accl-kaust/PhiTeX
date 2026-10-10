@@ -30,7 +30,11 @@ impl Exec<'_> {
         // 1257)
         self.define(key.clone(), Val::Meaning(Meaning::Font(null_font())), global);
         self.optional_equals();
-        let name = self.scan_file_name();
+        let (raw, quoted) = self.scan_file_name_q();
+        let name = match raw.strip_suffix(".tfm") {
+            Some(n) => n.to_string(),
+            None => raw.clone(),
+        };
         // (§1258: the size)
         let s = if self.keyword("at") {
             let s = self.scan_dimen();
@@ -51,7 +55,20 @@ impl Exec<'_> {
         } else {
             -1000
         };
+        // (xetex.web's `read_font_info`: a quoted name is an installed
+        // font's first, an unquoted one a TFM file's first)
+        if self.xetex && quoted && let Some(f) = self.load_native(&raw, s) {
+            self.font_loaded(key, f, ident, global);
+            return;
+        }
         let Some(data) = self.env.font_file(&name) else {
+            if self.xetex && !quoted && let Some(f) = self.load_native(&raw, s) {
+                self.font_loaded(key, f, ident, global);
+                return;
+            }
+            if self.xetex && self.int_par(IntPar::Suppressfontnotfounderror) != 0 {
+                return;
+            }
             self.err(format!("Font {}={name} not loadable: Metric (TFM) file not found", key_text(&key, self.env.cs())));
             return;
         };
@@ -65,7 +82,11 @@ impl Exec<'_> {
             self.err(format!("Font {}={name} not loadable: Bad metric (TFM) file", key_text(&key, self.env.cs())));
             return;
         };
-        let f = Arc::new(f);
+        self.font_loaded(key, Arc::new(f), ident, global);
+    }
+
+    /// `\font`'s end: `key` means font `f`, now loaded or loaded before.
+    fn font_loaded(&mut self, key: Key, f: Arc<Font>, ident: Arc<str>, global: bool) {
         // (§1260: a font already loaded — the same name at the same size — is
         // that font, its parameters as they are now)
         let loaded = Key::FontLoaded(f.key.clone());
@@ -89,13 +110,27 @@ impl Exec<'_> {
     /// tex.web 526: a file name: characters up to a space (which goes) or
     /// anything else (which stays), after blanks; `"` quotes spaces.
     pub(super) fn scan_file_name(&mut self) -> String {
+        let (name, _) = self.scan_file_name_q();
+        match name.strip_suffix(".tfm") {
+            Some(n) => n.to_string(),
+            None => name,
+        }
+    }
+
+    /// [`Exec::scan_file_name`] as it is (no `.tfm` taken off), and
+    /// whether it was quoted (XeTeX's `quoted_filename`: a `"` or `'`
+    /// quotes up to the same character, the characters past 255 are the
+    /// name's too, xetex.ch's `more_name`).
+    pub(super) fn scan_file_name_q(&mut self) -> (String, bool) {
         let mut name = String::new();
         let mut quoted = false;
+        let mut quote: Option<char> = None;
         let mut first = true;
         let was = std::mem::replace(&mut self.name_in_progress, true);
+        let wide = self.xetex;
         while let Some((t, m)) = self.next_x_m(false) {
             let c = match m {
-                Meaning::Char(cat, c) if (1..=12).contains(&cat) && u32::from(c) <= 255 => c,
+                Meaning::Char(cat, c) if (1..=12).contains(&cat) && (wide || u32::from(c) <= 255) => c,
                 _ => {
                     self.back(t);
                     break;
@@ -105,6 +140,23 @@ impl Exec<'_> {
                 continue;
             }
             first = false;
+            if wide {
+                match quote {
+                    None if c == ' ' => break,
+                    Some(q) if c == q => {
+                        quote = None;
+                        continue;
+                    }
+                    None if c == '"' || c == '\'' => {
+                        quote = Some(c);
+                        quoted = true;
+                        continue;
+                    }
+                    _ => {}
+                }
+                name.push(c);
+                continue;
+            }
             if c == '"' {
                 quoted = !quoted;
                 continue;
@@ -115,10 +167,7 @@ impl Exec<'_> {
             name.push(c);
         }
         self.name_in_progress = was;
-        match name.strip_suffix(".tfm") {
-            Some(n) => n.to_string(),
-            None => name,
-        }
+        (name, if wide { quoted } else { false })
     }
 
     /// tex.web 577: a font identifier (`\font` is the current font).
@@ -129,7 +178,7 @@ impl Exec<'_> {
                 Some((_, Meaning::Prim(Prim::Font))) => return self.font(),
                 Some((_, Meaning::Font(f))) => return f,
                 Some((_, Meaning::Prim(Prim::DefFamily(size)))) => {
-                    let fam = self.scan_four_bit_int() as u8;
+                    let fam = self.scan_fam_num();
                     return self.fam_font(size, fam);
                 }
                 other => {
@@ -225,6 +274,7 @@ impl Exec<'_> {
                 t[c as usize] |= v;
             }
             self.define(tkey, Val::Penalties(t.into()), true);
+            self.main_state(&f, micro::MAIN_TAGS);
             return;
         }
         let c = self.scan_char_num();
@@ -233,6 +283,26 @@ impl Exec<'_> {
         let table = self.font_code_table(&key);
         let t = micro::set_code(&table, which, u8::try_from(c).unwrap_or(0), v);
         self.define(key, Val::Penalties(t), true);
+        if v != 0 && which == micro::KNBC {
+            self.main_state(&f, micro::MAIN_KNBC);
+        } else if v != 0 && which == micro::KNAC {
+            self.main_state(&f, micro::MAIN_KNAC);
+        }
+    }
+
+    /// Adds `bit` to font `f`'s main-loop state (`micro::MAIN`), if not
+    /// there yet.
+    fn main_state(&mut self, f: &Font, bit: i32) {
+        let k = Key::FontCode(micro::MAIN, f.key.clone());
+        let was = self.int(&k);
+        if was & bit == 0 {
+            self.define(k, Val::Int(was | bit), true);
+        }
+    }
+
+    /// What the main loop must read of a font (`micro::MAIN`'s bits).
+    pub(super) fn main_state_of(&mut self, key: &Arc<str>) -> i32 {
+        self.int(&Key::FontCode(micro::MAIN, key.clone()))
     }
 
     /// A font's table of a code (`Key::FontCode`; empty: the defaults).
@@ -451,7 +521,15 @@ impl Exec<'_> {
     /// `\fontname f` (tex.web 472).
     pub(super) fn font_name_text(&mut self, out: &mut String) {
         let f = self.scan_font_ident();
-        out.push_str(&f.name);
+        if f.native.is_some() {
+            // (XeTeX: a native font's name quoted)
+            let q = if f.name.contains('"') { '\'' } else { '"' };
+            out.push(q);
+            out.push_str(&f.name);
+            out.push(q);
+        } else {
+            out.push_str(&f.name);
+        }
         if f.size != f.design_size {
             out.push_str(" at ");
             crate::print::scaled(out, f.size);

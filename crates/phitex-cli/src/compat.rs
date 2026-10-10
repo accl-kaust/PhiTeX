@@ -138,6 +138,7 @@ pub fn main(progname: &str, args: &[String]) -> ! {
                 output = Some(match v().as_str() {
                     "dvi" => Output::Dvi,
                     "pdf" => Output::Pdf,
+                    "xdv" => Output::Xdv,
                     _ => usage(progname),
                 });
             }
@@ -152,7 +153,9 @@ pub fn main(progname: &str, args: &[String]) -> ! {
             "shell-escape" => {
                 eprintln!("{progname}: -shell-escape: \\write18 is not run by phitex");
             }
-            "draftmode" | "no-pdf" | "mktex" | "no-mktex" | "kpathsea-debug" | "ipc" | "ipc-start" | "enc"
+            // (XeTeX's: the XDV file, xdvipdfmx not run)
+            "no-pdf" => output = Some(Output::Xdv),
+            "draftmode" | "mktex" | "no-mktex" | "kpathsea-debug" | "ipc" | "ipc-start" | "enc"
             | "mltex" => {
                 eprintln!("{progname}: -{name} is not supported by phitex");
                 std::process::exit(2);

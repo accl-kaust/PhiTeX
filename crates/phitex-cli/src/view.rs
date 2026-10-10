@@ -21,9 +21,10 @@
 //!   double-click's or an error's place: the editor opens there), and the
 //!   editor's buffer: `set_file {file, text}` and `edit {file, start, end,
 //!   text}` (UTF-16 offsets) become the Build's new versions of the file,
-//!   built as an edit. `origins` answers no glyphs: phitex-flow's pages
-//!   keep no source places yet. The diff ops (`diff_*`) say they are not
-//!   there.
+//!   built as an edit. `origins` answers a page's characters with their
+//!   source lines (the build's SyncTeX records, `synctex.rs`): what a
+//!   double-click finds and forward search highlights. The diff ops
+//!   (`diff_*`) say they are not there.
 //! - **Forward search.** `GET /TOKEN/sync?file=F&line=L` (what `phitex
 //!   sync F:L` asks) pushes `{"event":"sync",…}`; the address is kept in a
 //!   file per directory ([`address_file`]).
@@ -121,6 +122,8 @@ struct Shared {
     asks: Mutex<Vec<Ask>>,
     wake: Mutex<Option<Box<dyn Fn() + Send>>>,
     building: AtomicBool,
+    /// The last build's SyncTeX records.
+    sync: Mutex<Option<Arc<crate::synctex::Doc>>>,
 }
 
 /// The live viewer of a watch.
@@ -181,6 +184,7 @@ impl View {
             asks: Mutex::new(Vec::new()),
             wake: Mutex::new(None),
             building: AtomicBool::new(false),
+            sync: Mutex::new(None),
         });
         let url = format!("http://127.0.0.1:{port}/{}/", shared.token);
         if let Some(f) = address_file(&shared.root) {
@@ -212,6 +216,11 @@ impl View {
     /// What the browsers asked for since last taken.
     pub fn take_asks(&self) -> Vec<Ask> {
         std::mem::take(&mut *lock(&self.shared.asks))
+    }
+
+    /// The last build's SyncTeX records (for `origins`).
+    pub fn set_sync(&self, doc: Option<Arc<crate::synctex::Doc>>) {
+        *lock(&self.shared.sync) = doc;
     }
 
     /// A build began (`true`) or ended.
@@ -464,8 +473,9 @@ fn answer(s: &Shared, req: &Value) -> String {
             }
             out.push('}');
         }
-        // (no glyph origins: phitex-flow's pages keep no source places yet)
-        "origins" => out.push_str("true,\"json\":{\"files\":[],\"g\":[]}}"),
+        "origins" => {
+            let _ = write!(out, "true,\"json\":{}}}", origins(s, page.unwrap_or(0)));
+        }
         "source" => {
             let file = text("file").unwrap_or_default();
             let at = req
@@ -567,13 +577,49 @@ fn forward(s: &Shared, req: &ws::Request) -> (&'static str, String) {
     if n == 0 {
         return ("503 Service Unavailable", "no viewer is open\n".into());
     }
-    (
-        "200 OK",
-        format!(
-            "{rel}:{line} sent to {n} viewer(s) (no glyph origins on phitex-flow yet: the page cannot \
-             highlight the line's glyphs)\n"
-        ),
-    )
+    ("200 OK", format!("{rel}:{line} sent to {n} viewer(s)\n"))
+}
+
+/// Page `k`'s characters with their sources (`session.ts`'s `origins`:
+/// `{files, g}`, each glyph `[x, y, file, start, end, synth]`, points from
+/// the page's top left, `start..end` the bytes of its source line): from
+/// the last build's SyncTeX records. Files are named from the project's
+/// directory (others by their paths: the viewer has none of them).
+fn origins(s: &Shared, k: usize) -> String {
+    let Some(doc) = lock(&s.sync).clone() else { return "{\"files\":[],\"g\":[]}".into() };
+    let root = std::fs::canonicalize(&s.root).unwrap_or_else(|_| s.root.clone());
+    let files: Vec<String> = doc
+        .inputs
+        .iter()
+        .map(|n| {
+            let p = PathBuf::from(n.replace("/./", "/"));
+            let p = std::fs::canonicalize(&p).unwrap_or(p);
+            p.strip_prefix(&root).map_or_else(|_| n.clone(), |r| r.to_string_lossy().into_owned())
+        })
+        .collect();
+    // (each file's line starts, read once)
+    let mut starts: HashMap<u32, Option<Vec<usize>>> = HashMap::new();
+    let mut g = String::new();
+    for gl in doc.pages.get(k).map(|p| p.as_slice()).unwrap_or_default() {
+        let ls = starts.entry(gl.tag).or_insert_with(|| {
+            let f = files.get((gl.tag as usize).checked_sub(1)?)?;
+            let text = std::fs::read(root.join(f)).ok()?;
+            let mut v = vec![0];
+            v.extend(text.iter().enumerate().filter(|&(_, &c)| c == b'\n').map(|(i, _)| i + 1));
+            v.push(text.len() + 1);
+            Some(v)
+        });
+        let (lo, hi) = ls
+            .as_ref()
+            .and_then(|v| Some((*v.get((gl.line as usize).checked_sub(1)?)?, v.get(gl.line as usize)?.saturating_sub(1))))
+            .unwrap_or((0, 0));
+        if !g.is_empty() {
+            g.push(',');
+        }
+        let _ = write!(g, "[{:.2},{:.2},{},{lo},{hi},0]", gl.x, gl.y, i64::from(gl.tag) - 1);
+    }
+    let fs: Vec<String> = files.iter().map(|f| quote(f)).collect();
+    format!("{{\"files\":[{}],\"g\":[{g}]}}", fs.join(","))
 }
 
 /// `phitex sync FILE:LINE[:COL]`: the viewer of the watch running here

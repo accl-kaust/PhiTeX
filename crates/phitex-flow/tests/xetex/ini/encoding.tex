@@ -1,0 +1,13 @@
+% \XeTeXinputencoding: lines read as bytes, as UTF-8 again; a malformed
+% UTF-8 sequence. (TeX Live 2026's xetex crashes opening any ICU
+% converter, "latin1" among them: not tested.)
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\hsize=300pt \vsize=300pt \parindent=0pt \baselineskip=12pt \tolerance=10000
+\parfillskip=0pt plus 1fil
+\font\x="[lmroman10-regular]" at 10pt \x
+UTF-8: déjà vu.\par
+\XeTeXinputencoding "bytes"
+Bytes: déjà vu.\par
+\XeTeXinputencoding "utf8"
+Again: déjà vu, and a bad byte: x�y.\par
+\end

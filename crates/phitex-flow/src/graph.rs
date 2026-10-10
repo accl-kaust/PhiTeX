@@ -38,7 +38,7 @@ use crate::hash::{FxMap, FxSet};
 pub use crate::item::{Item, Para};
 use crate::page::MAIN_DEPTH;
 use crate::tfm::Font;
-use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val};
+use crate::val::{DimenPar, IntPar, Key, Macro, Meaning, Prim, Tok, Val, Xe};
 
 
 mod align;
@@ -56,6 +56,7 @@ mod material;
 mod math;
 pub mod output;
 mod scan;
+pub(crate) mod xetex;
 
 pub use expand::{JOBNAME, PDFTEX_BANNER};
 pub use io::{ends_document, file_text, page_io, whatsits};
@@ -191,6 +192,22 @@ pub trait Env {
     fn interaction_option(&self) -> Option<i32> {
         None
     }
+
+    /// The engine is XeTeX (a given of the build, fixed for its life):
+    /// the reader decodes UTF-8 (or the encoding in force), XeTeX's
+    /// primitives are named, characters are Unicode's.
+    fn xetex(&self) -> bool {
+        false
+    }
+
+    /// XeTeX's `find_native_font(name, size)` and `load_native_font`: the
+    /// font `name` names (a font name with its options through the index
+    /// of the installed fonts, or a `[file]` through kpathsea) at `size`
+    /// (negative: scaled), with what loading it prints; a pure function of
+    /// its arguments during a build (`\XeTeXtracingfonts` only adds lines).
+    fn native_font(&mut self, _name: &str, _size: i32, _tracing: i32) -> crate::native::Loaded {
+        (None, Vec::new())
+    }
 }
 
 /// web2c's `main_memory` (tex.web 11's `mem_max`): words a run's material
@@ -320,6 +337,8 @@ struct PendingText {
     pos: usize,
     tstate: TState,
     eol: i16,
+    /// XeTeX: how its current line is decoded (`RState::enc`).
+    enc: u32,
     eof: bool,
     kind: TextKind,
     endinput: bool,
@@ -505,6 +524,7 @@ impl Cursor {
 
     /// The next token from here, as the reader reads it (an argument's
     /// tokens where its parameter is), and the place after it.
+    #[inline]
     fn next<'l>(&mut self, l: &'l Level) -> Option<&'l Tok> {
         loop {
             if let Some((n, q)) = self.arg {
@@ -543,8 +563,8 @@ impl Cursor {
     }
 
     /// The tokens from `a` to `b` as the reader reads them: a part of one
-    /// list when they are, else their own list.
-    fn arg(l: &Level, a: Cursor, b: Cursor) -> Arg {
+    /// list when they are, else their own list (gathered in `buf`).
+    fn arg(l: &Level, a: Cursor, b: Cursor, buf: &mut Vec<Tok>) -> Arg {
         let norm = |c: Cursor| match c.arg {
             Some((n, q)) if l.args.as_ref().is_some_and(|x| q >= x[n].end) => Cursor { k: c.k, arg: None },
             _ => c,
@@ -571,17 +591,17 @@ impl Cursor {
             _ => {}
         }
         
-        let mut v = Vec::new();
+        buf.clear();
         let mut c = a;
         while c != b {
             match c.next(l) {
-                Some(t) => v.push(t.clone()),
+                Some(t) => buf.push(t.clone()),
                 None => break,
             }
             c = norm(c);
         }
-        let end = v.len();
-        Arg { list: Arc::from(v), start: 0, end }
+        let end = buf.len();
+        Arg { list: Arc::from(&buf[..]), start: 0, end }
     }
 }
 
@@ -667,6 +687,7 @@ impl Pending {
     }
     /// The top list's next token, read (`None`: it has been read to its
     /// end): a macro body's parameter is read as its argument.
+    #[inline]
     fn next_tok(&mut self) -> Option<Tok> {
         let t = self.top.as_mut()?;
         if t.sub.is_none() && t.at < t.end {
@@ -772,6 +793,14 @@ pub struct RState {
     /// The current line's end-of-line character (`\endlinechar` as the line
     /// was begun; -1: none), or `EOL_UNREAD`.
     eol: i16,
+    /// XeTeX: how the current line is decoded, read with `eol` where the
+    /// line is begun (`Key::InputEncoding`: `graph::xetex`'s modes).
+    enc: u32,
+    /// XeTeX's `prev_class` and `space_class` (`\XeTeXinterchartoks`):
+    /// set by a run of characters, read by the next command in horizontal
+    /// mode (`check_for_post_char_toks`). A piece begins at the boundary
+    /// class (CORE.md: a gap where a piece begins after a character).
+    xclass: (u16, u16),
     /// `\endinput` was read: the file ends after this line (tex.web 362).
     endinput: bool,
     /// The alignment being read: `align_state`, the current column and
@@ -817,6 +846,8 @@ impl RState {
             prev_depth: MAIN_DEPTH,
             prev_graf: 0,
             eol: EOL_UNREAD,
+            enc: 0,
+            xclass: (xetex::BOUNDARY, 0),
             endinput: false,
             al: align::AlignCur::OFF,
             protected: false,
@@ -1058,6 +1089,8 @@ impl RState {
             && self.prev_depth == o.prev_depth
             && self.prev_graf == o.prev_graf
             && self.eol == o.eol
+            && self.enc == o.enc
+            && self.xclass == o.xclass
             && self.endinput == o.endinput
             && self.al == o.al
             && self.pending == o.pending
@@ -1254,6 +1287,9 @@ pub struct Node {
     /// outer level they are carried by `para`).
     pub emit: Few<Item>,
     pub rare: Option<Box<Rare>>,
+    /// A conditional's test, where its φ defines nothing (most of them):
+    /// held here, not in `rare`.
+    test: Option<bool>,
 }
 
 impl Node {
@@ -1266,8 +1302,11 @@ impl Node {
     pub fn errors(&self) -> &[String] {
         self.rare.as_ref().map_or(&[], |r| &r.errors)
     }
-    pub fn phi(&self) -> Option<&Phi> {
-        self.rare.as_ref().and_then(|r| r.phi.as_deref())
+    pub fn phi(&self) -> Option<std::borrow::Cow<'_, Phi>> {
+        match self.rare.as_ref().and_then(|r| r.phi.as_deref()) {
+            Some(p) => Some(std::borrow::Cow::Borrowed(p)),
+            None => self.test.map(|test| std::borrow::Cow::Owned(Phi { test, keys: Vec::new() })),
+        }
     }
     pub fn vemit(&self) -> &[Item] {
         self.rare.as_ref().map_or(&[], |r| &r.vemit)
@@ -1817,6 +1856,35 @@ impl Run {
     pub fn outer_reads_only(&self, key: &Key) -> Option<&[(Key, u32, Val)]> {
         let vals = self.values_read(key);
         (!vals.is_empty() && vals.iter().all(|x| matches!(x.2, Val::Outer(_)))).then_some(vals)
+    }
+
+    /// The boxes its nodes put in registers (`\setbox`), with the node
+    /// defining each, in node order (a lean run's too): the way back from
+    /// a box an output routine moved onto a page to the node that made it
+    /// (SyncTeX, `build::sync`). Reads nothing.
+    pub fn box_defs(&self) -> Vec<(u32, Arc<crate::item::BoxNode>)> {
+        let mut v: Vec<(u32, Arc<crate::item::BoxNode>)> = Vec::new();
+        if let Some(l) = &self.lean {
+            for (key, d, _, val) in &l.defs {
+                if let (Key::Box(_), Val::Box(b)) = (key, val) {
+                    v.push((*d, b.clone()));
+                }
+            }
+        } else {
+            let c = &self.chain;
+            for (key, ds) in &c.defs_of {
+                if !matches!(key, Key::Box(_)) {
+                    continue;
+                }
+                for &(d, j) in ds {
+                    if let Some(Val::Box(b)) = c.nodes[d as usize].defs().get(j as usize).map(|x| &x.val) {
+                        v.push((d, b.clone()));
+                    }
+                }
+            }
+        }
+        v.sort_by_key(|x| x.0);
+        v
     }
 
     /// How many nodes it has (had, if lean).
@@ -2444,18 +2512,37 @@ pub fn run_piece(
     // (the dirty old nodes: those reading a dirty name from before the
     // piece, in order)
     let dirty: Vec<u32> = match oldc {
-        Some(oc) if !dirty.is_empty() => oc
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|&(i, n)| {
-                n.reads.iter().any(|r| {
-                    dirty.iter().any(|(k, from)| *k == r.key && i as u32 >= *from)
-                        && (!matches!(r.src, Src::Node(_)) || env.has_between(&r.key))
+        Some(oc) if !dirty.is_empty() => {
+            // (each dirty name's first dirty node: a lookup per read, not a
+            // scan of the dirty names; a few are scanned)
+            let first: FxMap<&Key, u32> = if dirty.len() > 4 {
+                let mut m = FxMap::default();
+                for (k, f) in dirty {
+                    let e = m.entry(k).or_insert(*f);
+                    *e = (*e).min(*f);
+                }
+                m
+            } else {
+                FxMap::default()
+            };
+            let is_dirty = |key: &Key, i: u32| {
+                if dirty.len() > 4 {
+                    first.get(key).is_some_and(|&f| i >= f)
+                } else {
+                    dirty.iter().any(|(k, from)| k == key && i >= *from)
+                }
+            };
+            oc.nodes
+                .iter()
+                .enumerate()
+                .filter(|&(i, n)| {
+                    n.reads.iter().any(|r| {
+                        is_dirty(&r.key, i as u32) && (!matches!(r.src, Src::Node(_)) || env.has_between(&r.key))
+                    })
                 })
-            })
-            .map(|(i, _)| i as u32)
-            .collect(),
+                .map(|(i, _)| i as u32)
+                .collect()
+        }
         _ => Vec::new(),
     };
     // (where to start: the first dirty node, or the first the edit touches;
@@ -2803,7 +2890,7 @@ pub fn run_piece(
             reads.push((r.key.clone(), at as u32, r.seen()));
         }
     }
-    reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    sort_reads(&mut reads);
     // (one entry per (name, value): its first reader — the first of its
     // name's run with that value; a read a fold answers, every one: the
     // fold validates each at its node)
@@ -2850,10 +2937,48 @@ pub fn run_piece(
     }
 }
 
+/// From this many entries on, [`sort_reads`] ranks the keys.
+const RANK_READS: usize = 1 << 12;
+
+/// `reads` sorted by key, then node, stably: as `sort_by` with
+/// `Key::cmp`, each distinct key compared with the others once and
+/// stood for by its rank after that (a piece reads millions of entries
+/// of a few hundred thousand names; comparing two keys of fonts compares
+/// their names).
+fn sort_reads(reads: &mut Vec<(Key, u32, Val)>) {
+    // (a short list: comparing is cheaper than ranking)
+    if reads.len() < RANK_READS {
+        reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        return;
+    }
+    let mut ids: FxMap<Key, u32> = FxMap::default();
+    let id: Vec<u32> = reads
+        .iter()
+        .map(|e| {
+            let n = ids.len() as u32;
+            *ids.entry(e.0.clone()).or_insert(n)
+        })
+        .collect();
+    let mut keys: Vec<(Key, u32)> = ids.into_iter().collect();
+    keys.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut rank = vec![0u32; keys.len()];
+    for (r, (_, i)) in keys.iter().enumerate() {
+        rank[*i as usize] = r as u32;
+    }
+    // (rank, node, place: all distinct, so the order is the stable sort's)
+    let mut order: Vec<(u32, u32, u32)> =
+        reads.iter().zip(&id).enumerate().map(|(k, (e, &i))| (rank[i as usize], e.1, k as u32)).collect();
+    order.sort_unstable();
+    let mut old: Vec<Option<(Key, u32, Val)>> = std::mem::take(reads).into_iter().map(Some).collect();
+    reads.extend(order.into_iter().filter_map(|(_, _, k)| old[k as usize].take()));
+}
+
 /// Buffers reused from node to node (their capacity, never their
 /// content).
 #[derive(Default)]
 struct Scratch {
+    /// The name `\csname` gathers.
+    csname: String,
     /// The node's reads so far (read once each, by index), once there are
     /// many.
     seen: FxMap<Key, u32>,
@@ -2864,12 +2989,16 @@ struct Scratch {
     /// index, while its stamp is the node's; and the read the piece keeps
     /// of it ([`Known`]).
     cs: Vec<CsAt>,
+    /// The same for the keys with a small number ([`small_slot`]).
+    small: Vec<CsAt>,
     /// The kept reads are those of this epoch (a new one: none kept).
     known_epoch: u32,
     known_len: Option<usize>,
     /// The numbers of the names the piece spelled.
     cs_ids: FxMap<Box<str>, u32>,
     stamp: u32,
+    /// An argument's tokens gathered from several lists (`Cursor::arg`).
+    arg: Vec<Tok>,
     /// The node's reads and what it emitted (their capacity kept).
     reads: Vec<ReadRef>,
     emit: Vec<Item>,
@@ -2944,6 +3073,9 @@ struct Exec<'a> {
     in_write: bool,
     /// How many of `reads` are in `scratch.seen`.
     seen_upto: usize,
+    /// How many of `reads` came through [`Exec::push_read`] (while all
+    /// did, a small key's stamp says whether and where the node read it).
+    pushed: usize,
     /// `\input`: the file read (the node ends the piece's run).
     input: Option<Arc<FileText>>,
     /// The command is being looked for (an `\input` expanded now is a
@@ -2962,6 +3094,10 @@ struct Exec<'a> {
     /// While a rewritten text (`\scantokens`) is read: its characters,
     /// which the tokenizer reads instead of the piece's.
     ptext: Option<Arc<[char]>>,
+    /// The engine is XeTeX (`Env::xetex`).
+    xetex: bool,
+    /// XeTeX's `scan_decimal` is scanning (a dimension without units).
+    decimal_only: bool,
     /// The output routine's end this node is (`output::OutputEnd`).
     output: Option<Box<output::OutputEnd>>,
     /// Inside `\csname`…`\endcsname` (pdfTeX's `\ifincsname`).
@@ -3004,9 +3140,33 @@ fn is_par(t: &Tok) -> bool {
     matches!(t, Tok::Cs(crate::build::CS_PAR))
 }
 
-/// The nodes a run makes before it keeps the names it read
-/// ([`Scratch::known`]).
-const KNOWN_AFTER: usize = 256;
+/// A key's place in [`Scratch::small`]: the current font, the
+/// parameters, the codes of characters below 256, the registers below
+/// 256, the family fonts (none: a key without one).
+fn small_slot(key: &Key) -> Option<usize> {
+    let (base, x, n) = match key {
+        Key::Font => (0, 0, 1),
+        Key::IntPar(p) => (1, *p as usize, 128),
+        Key::DimenPar(p) => (129, *p as usize, 128),
+        Key::GluePar(p) => (257, *p as usize, 128),
+        Key::TokPar(p) => (385, *p as usize, 128),
+        Key::Cat(c) => (513, *c as usize, 256),
+        Key::Sfcode(c) => (769, *c as usize, 256),
+        Key::Lccode(c) => (1025, *c as usize, 256),
+        Key::Uccode(c) => (1281, *c as usize, 256),
+        Key::Mathcode(c) => (1537, *c as usize, 256),
+        Key::Delcode(c) => (1793, *c as usize, 256),
+        Key::Count(r) => (2049, usize::from(*r), 256),
+        Key::Dimen(r) => (2305, usize::from(*r), 256),
+        Key::Skip(r) => (2561, usize::from(*r), 256),
+        Key::Muskip(r) => (2817, usize::from(*r), 256),
+        Key::Toks(r) => (3073, usize::from(*r), 256),
+        Key::Box(r) => (3329, usize::from(*r), 256),
+        Key::FamFont(s, f) if *f < 16 => (3585, usize::from(*s) * 16 + usize::from(*f), 48),
+        _ => return None,
+    };
+    (x < n).then_some(base + x)
+}
 
 /// [`Known`] for the next node of `chain`: the names the nodes added since
 /// defined are read again; all of them, if the chain is not the one they
@@ -3014,18 +3174,16 @@ const KNOWN_AFTER: usize = 256;
 /// name.
 fn known_since(scratch: &mut Scratch, chain: &Chain, env: &mut dyn Env) {
     let len = chain.nodes.len();
-    // (a short run reads few names twice: none kept)
-    if len < KNOWN_AFTER && scratch.known_len.is_none() {
-        return;
-    }
     let between = env.any_between();
     let keep = match scratch.known_len {
         Some(prev) if prev <= len && !between => {
             for i in prev..len {
                 for d in chain.nodes[i].defs() {
-                    if let Key::Cs(n) = d.key
-                        && let Some(e) = scratch.cs.get_mut(n as usize)
-                    {
+                    let e = match d.key {
+                        Key::Cs(n) => scratch.cs.get_mut(n as usize),
+                        ref k => small_slot(k).and_then(|s| scratch.small.get_mut(s)),
+                    };
+                    if let Some(e) = e {
                         e.known = None;
                     }
                 }
@@ -3037,7 +3195,7 @@ fn known_since(scratch: &mut Scratch, chain: &Chain, env: &mut dyn Env) {
     if !keep {
         scratch.known_epoch = scratch.known_epoch.wrapping_add(1);
     }
-    scratch.known_len = (len >= KNOWN_AFTER && !between).then_some(len);
+    scratch.known_len = (!between).then_some(len);
 }
 
 /// Where a node found a definition: its own `defs[i]`, or `reads[i]`.
@@ -3065,7 +3223,7 @@ impl<'a> Exec<'a> {
         scratch.stamp = scratch.stamp.wrapping_add(1);
         if scratch.stamp == 0 {
             scratch.chars.fill((0, 0));
-            for e in &mut scratch.cs {
+            for e in scratch.cs.iter_mut().chain(scratch.small.iter_mut()) {
                 e.stamp = 0;
             }
             scratch.stamp = 1;
@@ -3073,6 +3231,7 @@ impl<'a> Exec<'a> {
         let stamp = scratch.stamp;
         let reads = std::mem::take(&mut scratch.reads);
         let emit = std::mem::take(&mut scratch.emit);
+        let xetex = env.xetex();
         Exec {
             text,
             chain,
@@ -3093,6 +3252,7 @@ impl<'a> Exec<'a> {
             noexp: false,
             in_write: false,
             seen_upto: 0,
+            pushed: 0,
             input: None,
             at_start: false,
             boundary: false,
@@ -3100,6 +3260,8 @@ impl<'a> Exec<'a> {
             stamp,
             old_para: None,
             ptext: None,
+            xetex,
+            decimal_only: false,
             output: None,
             in_csname: 0,
             steps: 0,
@@ -3159,6 +3321,12 @@ impl<'a> Exec<'a> {
         let emit = Few::take(&mut self.emit);
         self.scratch.reads = self.reads;
         self.scratch.emit = self.emit;
+        // (a φ defining nothing is its test)
+        let (phi, test) = match self.phi {
+            Some(p) if p.keys.is_empty() => (None, Some(p.test)),
+            p => (p, None),
+        };
+        self.phi = phi;
         let rare = (!self.defs.is_empty()
             || self.para.is_some()
             || !self.errors.is_empty()
@@ -3189,6 +3357,7 @@ impl<'a> Exec<'a> {
             reads,
             emit,
             rare,
+            test,
         }
     }
 
@@ -3264,6 +3433,26 @@ impl<'a> Exec<'a> {
         if let Key::Cs(n) = *key {
             return self.find_name(n, key);
         }
+        // (a small key, as a name: its own definition, its read in the
+        // node by its stamp, else read now)
+        if let Some(s) = small_slot(key)
+            && self.pushed == self.reads.len()
+        {
+            if !self.defs.is_empty()
+                && let Some(i) = self.defs.iter().rposition(|d| d.key == *key)
+            {
+                return Found::Own(i);
+            }
+            if let Some(e) = self.scratch.small.get(s)
+                && e.stamp == self.stamp
+            {
+                let i = e.idx as usize;
+                self.whole(i);
+                return Found::Read(i);
+            }
+            let r = self.resolve_shared(key);
+            return Found::Read(self.push_read(r));
+        }
         // (a character's code, read again in the node: by the character)
         let slot = match key {
             Key::Cat(c) if (*c as u32) < 256 && self.defs.is_empty() => Some(*c as usize),
@@ -3319,17 +3508,31 @@ impl<'a> Exec<'a> {
         &mut self.scratch.cs[i]
     }
 
+    /// Small key `s`'s entry in [`Scratch::small`].
+    fn small_at(&mut self, s: usize) -> &mut CsAt {
+        if s >= self.scratch.small.len() {
+            self.scratch.small.resize(s + 1, CsAt::default());
+        }
+        &mut self.scratch.small[s]
+    }
+
     /// A read of the node, its index (the first of a name is the node's
     /// read of it, [`Exec::name_read`]).
     fn push_read(&mut self, r: ReadRef) -> usize {
         let i = self.reads.len();
-        if let Key::Cs(n) = r.key {
-            let stamp = self.stamp;
-            let e = self.cs_at(n);
-            if e.stamp != stamp {
-                e.stamp = stamp;
-                e.idx = i as u32;
-            }
+        let stamp = self.stamp;
+        let e = match r.key {
+            Key::Cs(n) => Some(self.cs_at(n)),
+            ref k => small_slot(k).map(|s| self.small_at(s)),
+        };
+        if let Some(e) = e
+            && e.stamp != stamp
+        {
+            e.stamp = stamp;
+            e.idx = i as u32;
+        }
+        if self.pushed == i {
+            self.pushed += 1;
         }
         self.reads.push(r);
         i
@@ -3454,13 +3657,15 @@ impl<'a> Exec<'a> {
     /// ([`Scratch::inside`], [`Known`]).
     fn resolve_shared(&mut self, key: &Key) -> ReadRef {
         let chain = self.chain;
+        // (a name by its number, a small key by its slot)
         let n = match *key {
-            Key::Cs(n) if self.scratch.known_len.is_some() => Some(n),
-            _ => None,
+            _ if self.scratch.known_len.is_none() => None,
+            Key::Cs(n) => Some((true, n as usize)),
+            ref k => small_slot(k).map(|s| (false, s)),
         };
         let epoch = self.scratch.known_epoch;
-        if let Some(n) = n
-            && let Some(k) = self.scratch.cs.get(n as usize).and_then(|e| e.known.as_ref())
+        if let Some((cs, n)) = n
+            && let Some(k) = if cs { self.scratch.cs.get(n) } else { self.scratch.small.get(n) }.and_then(|e| e.known.as_ref())
             && k.epoch == epoch
             && (chain.nodes.len() as u32) < k.hi
             && (k.read.scope.is_none() || k.scopes == chain.scopes.len())
@@ -3468,7 +3673,7 @@ impl<'a> Exec<'a> {
             return k.read.clone();
         }
         let r = self.resolve_shared_slow(key);
-        if let Some(n) = n
+        if let Some((cs, n)) = n
             && r.cond.is_none()
         {
             let hi = match r.src {
@@ -3476,7 +3681,12 @@ impl<'a> Exec<'a> {
                 _ => self.outside.get(key).map_or(0, |(_, _, hi)| *hi),
             };
             let scopes = chain.scopes.len();
-            self.cs_at(n).known = Some(Known { epoch, read: r.clone(), hi, scopes });
+            let known = Some(Known { epoch, read: r.clone(), hi, scopes });
+            if cs {
+                self.cs_at(n as u32).known = known;
+            } else {
+                self.small_at(n).known = known;
+            }
         }
         r
     }
@@ -3667,10 +3877,18 @@ impl<'a> Exec<'a> {
         u8::try_from(self.st.eol).ok().map(char::from)
     }
 
-    /// Reads `\endlinechar` for the line being begun.
+    /// Reads `\endlinechar` for the line being begun (and XeTeX's input
+    /// encoding: the line is decoded as `\XeTeXinputencoding` says when it
+    /// is begun).
     fn read_eol(&mut self) {
         let v = self.int_par(IntPar::Endlinechar);
         self.st.eol = if (0..=255).contains(&v) { v as i16 } else { -1 };
+        if self.xetex && self.st.enc != xetex::DECODED {
+            self.st.enc = match self.get(&Key::InputEncoding) {
+                Val::Int(m) => m as u32,
+                _ => 0,
+            };
+        }
     }
 
     /// The reader has passed a line's end: the next line begins (its
@@ -3715,7 +3933,15 @@ impl<'a> Exec<'a> {
     fn char_at(&mut self, pos: usize) -> Option<(char, usize, u8)> {
         let raw = *self.txt().get(pos)?;
         let c = if raw == '\r' { self.eol()? } else { raw };
-        let mut cur = (c, pos + 1, self.catcode(c));
+        let mut cur = if self.xetex && raw != '\r' && ('\u{80}'..='\u{ff}').contains(&raw) {
+            if self.st.eol == EOL_UNREAD {
+                self.read_eol();
+            }
+            let (c, n) = xetex::decode(self.txt(), pos, self.st.enc);
+            (c, pos + n, self.catcode(c))
+        } else {
+            (c, pos + 1, self.catcode(c))
+        };
         if raw == '\r' {
             return Some(cur);
         }
@@ -3733,6 +3959,9 @@ impl<'a> Exec<'a> {
     fn reduce_sup(&mut self, c: char, p: usize) -> Option<(char, usize)> {
         if self.txt().get(p) != Some(&c) {
             return None;
+        }
+        if self.xetex {
+            return self.reduce_sup_xetex(c, p);
         }
         let at = |x: &mut Self, p: usize| -> Option<char> {
             let ch = x.txt().get(p).copied();
@@ -3757,6 +3986,45 @@ impl<'a> Exec<'a> {
             }
         };
         Some((char::from_u32(r).unwrap_or('\0'), np))
+    }
+
+    /// XeTeX's `^^` (xetex.web §355): two to six superscript characters
+    /// and as many lowercase hexadecimal digits are the character of that
+    /// code (if a Unicode scalar value); else `^^` and a character below
+    /// 128 is that character plus or minus 64. `p` is the second's place.
+    fn reduce_sup_xetex(&mut self, c: char, p: usize) -> Option<(char, usize)> {
+        let at = |x: &mut Self, q: usize| -> Option<char> {
+            match x.txt().get(q).copied() {
+                Some('\r') => x.eol(),
+                other => other,
+            }
+        };
+        // (the line's last place: its end-of-line character's)
+        let limit = self.line_end_after(p).saturating_sub(1);
+        if p >= limit {
+            return None;
+        }
+        let mut sup = 2usize;
+        while sup < 6 && p + 2 * sup - 2 <= limit && self.txt().get(p + sup - 1) == Some(&c) {
+            sup += 1;
+        }
+        let hex = |ch: Option<char>| ch.filter(|h| h.is_ascii_digit() || ('a'..='f').contains(h));
+        let mut v: u32 = 0;
+        for d in 1..=sup {
+            let Some(h) = hex(at(self, p + sup - 2 + d)) else {
+                let c2 = at(self, p + 1)?;
+                if u32::from(c2) < 128 {
+                    let x = u32::from(c2);
+                    return Some((char::from_u32(if x < 64 { x + 64 } else { x - 64 }).unwrap_or('\0'), p + 2));
+                }
+                return None;
+            };
+            v = 16 * v + h.to_digit(16).unwrap_or(0);
+        }
+        if v > 0x10_FFFF {
+            return None;
+        }
+        Some((char::from_u32(v).unwrap_or('\u{FFFD}'), p + 2 * sup - 1))
     }
 
     /// The position just after the current line's end.
@@ -3858,7 +4126,22 @@ impl<'a> Exec<'a> {
         r
     }
 
+    /// The token after a `\noexpand` mark, as the wrapper will see it
+    /// (out of [`Exec::next_raw0`]'s line: that is inlined, and this rare
+    /// case reads on through it again).
+    #[cold]
+    #[inline(never)]
+    fn marked(&mut self) -> Option<Tok> {
+        let n = self.next_raw0();
+        self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
+        n
+    }
+
     /// [`Exec::next_raw`] before an alignment sees the token.
+    // (LLVM declined a plain #[inline]; inline(always) measured
+    // latex.ltx -0.7%, the documents -0.3% to -0.6%, job 8059)
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn next_raw0(&mut self) -> Option<Tok> {
         self.noexp = false;
         if self.halted() {
@@ -3871,10 +4154,7 @@ impl<'a> Exec<'a> {
             while self.st.pending.len() > floor {
                 if let Some(t) = self.st.pending.next_tok() {
                     if t == Tok::DontExpand {
-                        // (the marked token, as the wrapper will see it)
-                        let n = self.next_raw0();
-                        self.noexp = n.as_ref().is_some_and(|x| x.key().is_some());
-                        return n;
+                        return self.marked();
                     }
                     return Some(t);
                 }
@@ -3902,15 +4182,15 @@ impl<'a> Exec<'a> {
     /// the text is done (`None`: read on below it).
     fn text_token(&mut self) -> Option<Tok> {
         let x = self.st.texts.last()?.clone();
-        let outer = (self.st.pos, self.st.tstate, self.st.eol);
-        (self.st.pos, self.st.tstate, self.st.eol) = (x.pos, x.tstate, x.eol);
+        let outer = (self.st.pos, self.st.tstate, self.st.eol, self.st.enc);
+        (self.st.pos, self.st.tstate, self.st.eol, self.st.enc) = (x.pos, x.tstate, x.eol, x.enc);
         let prev = self.ptext.replace(x.text.clone());
         let t = self.tokenize();
         self.ptext = prev;
-        let here = (self.st.pos, self.st.tstate, self.st.eol);
-        (self.st.pos, self.st.tstate, self.st.eol) = outer;
+        let here = (self.st.pos, self.st.tstate, self.st.eol, self.st.enc);
+        (self.st.pos, self.st.tstate, self.st.eol, self.st.enc) = outer;
         let Some(x) = self.st.texts.last_mut() else { return t };
-        (x.pos, x.tstate, x.eol) = here;
+        (x.pos, x.tstate, x.eol, x.enc) = here;
         if t.is_some() || x.kind == TextKind::Read {
             return t;
         }
@@ -4044,7 +4324,7 @@ impl<'a> Exec<'a> {
     /// body (tex.web 389-399). A step: it defines nothing.
     fn call(&mut self, name: &Tok, m: &Macro) {
         self.outer_abort = false;
-        let Some((args, k)) = self.scanning(Scanning::Matching, Some(name.clone()), |x| x.call_args(name, m)) else {
+        let Some((mut args, k)) = self.scanning(Scanning::Matching, Some(name.clone()), |x| x.call_args(name, m)) else {
             return;
         };
         // (the body is read where it is, the macro's; its parameters are
@@ -4054,11 +4334,10 @@ impl<'a> Exec<'a> {
             if k == 0 {
                 self.st.pending.push((m.body.clone(), 0, false));
             } else {
-                let args: Args = args
-                    .into_iter()
-                    .skip(1)
-                    .take(k)
-                    .map(|a| a.unwrap_or_else(|| Arg { list: m.body.clone(), start: 0, end: 0 }))
+                // (from a slice: one allocation, of the right size)
+                let args: Args = args[1..=k]
+                    .iter_mut()
+                    .map(|a| a.take().unwrap_or_else(|| Arg { list: m.body.clone(), start: 0, end: 0 }))
                     .collect();
                 self.st.pending.push_body(m.body.clone(), args);
             }
@@ -4188,7 +4467,8 @@ impl<'a> Exec<'a> {
         } else {
             (c.back(top), c, c)
         };
-        let arg = Cursor::arg(top, from, to);
+        let top = self.st.pending.top.as_ref()?;
+        let arg = Cursor::arg(top, from, to, &mut self.scratch.arg);
         let l = arg.list.clone();
         if self.outer_in(&l[arg.start..arg.end], &[]) {
             return None;
@@ -4232,7 +4512,8 @@ impl<'a> Exec<'a> {
             }
         }
         let end = last[(n - d) % MAX].map_or(c, |(_, at)| at);
-        let mut arg = Cursor::arg(top, start, end);
+        let top = self.st.pending.top.as_ref()?;
+        let mut arg = Cursor::arg(top, start, end, &mut self.scratch.arg);
         // (an argument that is one group loses its braces, tex.web 400)
         let toks = &arg.list[arg.start..arg.end];
         if toks.len() >= 2 && toks[0].cat() == Some(1) && toks[toks.len() - 1].cat() == Some(2) {
@@ -4452,6 +4733,19 @@ impl<'a> Exec<'a> {
             (t, m)
         };
         self.cmd = t.clone();
+        // (XeTeX's big switch: a command other than a character's, in
+        // horizontal mode, after a run of characters: the list from the
+        // last one's class to the boundary first)
+        if self.xetex
+            && self.st.mode == Mode::H
+            && !matches!(
+                m,
+                Meaning::Char(11 | 12, _) | Meaning::CharGiven(_) | Meaning::Prim(Prim::Char | Prim::Xe(Xe::BackedChar))
+            )
+            && self.check_post_char(&t)
+        {
+            return;
+        }
         let (global, long, outer) = (
             std::mem::take(&mut self.st.global),
             std::mem::take(&mut self.st.long),
@@ -4473,7 +4767,7 @@ impl<'a> Exec<'a> {
             Meaning::Prim(p) => self.prim(p),
             Meaning::Char(cat, c) => self.char_tok(cat, c, &t),
             Meaning::CharGiven(c) => self.char_cmd(c, &t),
-            Meaning::MathCharGiven(_) => self.insert_dollar_sign(&t),
+            Meaning::MathCharGiven(_) | Meaning::XMathCharGiven(_) => self.insert_dollar_sign(&t),
             Meaning::Undefined => self.err(format!("Undefined control sequence {}", self.shown(&t))),
             Meaning::Macro(_)
             | Meaning::CountRef(_)
@@ -4685,6 +4979,26 @@ impl<'a> Exec<'a> {
             Prim::Align(a) => self.align_cmd(a),
             Prim::Relax => {}
             Prim::Marks | Prim::Discards(_) | Prim::ShowE(_) | Prim::Lr(_) => self.etex_command(p),
+            Prim::Xe(Xe::BackedChar) => {
+                // (the character after the mark, read again where the
+                // `\XeTeXinterchartoks` list put it back)
+                if self.st.mode == Mode::H
+                    && let Some(t) = self.next_raw()
+                {
+                    match t {
+                        Tok::Char(cat @ (11 | 12), c) => self.main_loop_any(u32::from(c), cat, true),
+                        t => self.back(t),
+                    }
+                }
+            }
+            Prim::Xe(Xe::Item(_) | Xe::DefCode(_) | Xe::InterCharToks) => {
+                self.err(format!("You can't use `\\{}' here", p.name()));
+            }
+            Prim::Xe(Xe::MathCharNum(_) | Xe::Delimiter | Xe::Radical | Xe::MathAccent) => {
+                let t = self.cmd.clone();
+                self.insert_dollar_sign(&t);
+            }
+            Prim::Xe(x) => self.xe_command(x),
             Prim::LastItem(_)
             | Prim::SpaceFactor
             | Prim::PrevDepth

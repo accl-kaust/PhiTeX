@@ -99,7 +99,10 @@ impl Exec<'_> {
         let Tok::Cs(n) = t else { return None };
         let n = self.env.cs().name(*n);
         let etex = self.int(&Key::ETeXMode) != 0;
-        Prim::by_name(&n).or_else(|| if etex { Prim::by_name_etex(&n).or_else(|| Prim::by_name_pdftex(&n)) } else { None })
+        Prim::by_name(&n)
+            .or_else(|| if etex { Prim::by_name_etex(&n).or_else(|| Prim::by_name_pdftex(&n)) } else { None })
+            // (XeTeX's `\primitive` and `\ifprimitive`: its own names too)
+            .or_else(|| if self.xetex { Prim::by_name_xetex(&n) } else { None })
     }
 
     /// One expansion step of `t`, whose meaning is `m` (tex.web 366).
@@ -137,6 +140,7 @@ impl Exec<'_> {
                     }
                 }
                 Prim::Convert(c) => self.convert(c),
+                Prim::Xe(x) => self.xe_convert(x),
                 Prim::The => {
                     let toks = self.the_toks();
                     self.rewrite(toks);
@@ -243,7 +247,9 @@ impl Exec<'_> {
 
     /// `\csname ... \endcsname` (tex.web 372).
     fn csname(&mut self) {
-        let mut name = String::new();
+        // (the run's buffer: a `\csname` inside this one finds it empty)
+        let mut name = std::mem::take(&mut self.scratch.csname);
+        name.clear();
         self.in_csname += 1;
         loop {
             let Some((t, m)) = self.next_x_m(false) else {
@@ -262,6 +268,7 @@ impl Exec<'_> {
         }
         self.in_csname -= 1;
         let t = self.cs(&name);
+        self.scratch.csname = name;
         let key = t.key().expect("a name");
         if self.meaning(&key) == Meaning::Undefined {
             // (TeX's `eq_define`: local, whatever `\globaldefs` says)
@@ -315,10 +322,12 @@ impl Exec<'_> {
                 self.rewrite(toks);
                 return;
             }
-            Conv::PdfStrcmp => {
+            Conv::PdfStrcmp | Conv::Strcmp => {
                 let a = self.pdf_string();
                 let b = self.pdf_string();
-                s.push_str(match a.as_bytes().cmp(b.as_bytes()) {
+                // (XeTeX's strings are of UTF-16 code units)
+                let ord = if self.xetex { a.encode_utf16().cmp(b.encode_utf16()) } else { a.as_bytes().cmp(b.as_bytes()) };
+                s.push_str(match ord {
                     std::cmp::Ordering::Less => "-1",
                     std::cmp::Ordering::Equal => "0",
                     std::cmp::Ordering::Greater => "1",
@@ -326,7 +335,7 @@ impl Exec<'_> {
             }
             Conv::PdfRevision => s.push_str(PDFTEX_REVISION),
             Conv::PdfBanner => s.push_str(PDFTEX_BANNER),
-            Conv::PdfFilesize => {
+            Conv::PdfFilesize | Conv::Filesize => {
                 let name = self.pdf_string();
                 if let Some(n) = self.file_size(&name) {
                     s.push_str(&n.to_string());
@@ -488,7 +497,9 @@ impl Exec<'_> {
     /// The escape character, then `s` (tex.web 63).
     pub(super) fn print_esc(&mut self, out: &mut String, s: &str) {
         let e = self.int_par(IntPar::Escapechar);
-        if let Some(c) = u8::try_from(e).ok().map(char::from) {
+        // (XeTeX: any Unicode scalar value)
+        let c = if self.xetex { u32::try_from(e).ok().and_then(char::from_u32) } else { u8::try_from(e).ok().map(char::from) };
+        if let Some(c) = c {
             out.push(c);
         }
         out.push_str(s);
@@ -585,6 +596,13 @@ impl Exec<'_> {
                 self.print_esc(out, "mathchar");
                 print::hex(out, *c as i32);
             }
+            Meaning::XMathCharGiven(c) => {
+                // (xetex.web: class, family, character, each in hex)
+                self.print_esc(out, "Umathchar");
+                print::hex(out, ((*c >> 21) & 7) as i32);
+                print::hex(out, (*c >> 24) as i32);
+                print::hex(out, (*c & 0x1F_FFFF) as i32);
+            }
             Meaning::CountRef(n) => self.print_esc(out, &format!("count{n}")),
             Meaning::DimenRef(n) => self.print_esc(out, &format!("dimen{n}")),
             Meaning::SkipRef(n) => self.print_esc(out, &format!("skip{n}")),
@@ -592,7 +610,15 @@ impl Exec<'_> {
             Meaning::ToksRef(n) => self.print_esc(out, &format!("toks{n}")),
             Meaning::Font(f) => {
                 out.push_str("select font ");
-                out.push_str(&f.name);
+                if f.native.is_some() {
+                    // (XeTeX: a native font's name quoted)
+                    let q = if f.name.contains('"') { '\'' } else { '"' };
+                    out.push(q);
+                    out.push_str(&f.name);
+                    out.push(q);
+                } else {
+                    out.push_str(&f.name);
+                }
                 if f.size != f.design_size {
                     out.push_str(" at ");
                     print::scaled(out, f.size);
@@ -833,6 +859,14 @@ impl Exec<'_> {
             IfKind::FontChar => {
                 // (etex.web §1452)
                 let f = self.scan_font_ident();
+                if self.xetex {
+                    // (xetex.web: `scan_usv_num`; a native font's own map)
+                    let c = self.scan_usv_num();
+                    return match crate::native::native(&f) {
+                        Some(nf) => nf.xf.map_char_to_glyph(c) > 0,
+                        None => f.glyph(c).is_some(),
+                    };
+                }
                 let c = self.scan_char_num();
                 f.glyph(c).is_some()
             }
