@@ -2608,10 +2608,18 @@ pub fn run_piece(
             // read); a paragraph's node is looked at if a node of its
             // paragraph ran)
             let oc = oldc.expect("an old chain");
+            let split = env.split_inputs();
             let mut j = oi;
             while j < stop {
                 let n = &oc.nodes[j];
                 if j > oi && para_fresh && matches!(n.kind, Kind::Par | Kind::End) {
+                    break;
+                }
+                // (where a run ends is the build's to say again, as for a
+                // node looked at: a cut, an `\input` whose file is read in
+                // the piece now — shared, it would end the run at the file
+                // the layout reads in it, a restructure every round)
+                if j > oi && (n.kind == Kind::Cut || (n.kind == Kind::Input && !split)) {
                     break;
                 }
                 if oc.starts_para(j) {

@@ -897,6 +897,16 @@ at that node (`Names::read_now`/`read_holds`, the one check install and
 `still_dirty` make; the names index answered it twice: 5e3ea81 at
 install, then `reads_still`, which dropped a refuted file read's mark).
 
+Invariant: a node kept by sharing (`run_piece`'s in-place copy of the
+old chain) has had every check a node looked at gets: the copy stops
+before a `Cut` node, and before an `Input` node when the layout reads
+the piece's `\input`s in it (F's TRIP update class: the shared node
+ended the run at the file the layout read inline, its run saying
+"input" at every round's end, 64 rounds). A written file a read finds
+no fold value for at its place is guessed as a read last found it
+(`Names::file_guess`), so the layout a read of it makes comes back;
+the probes validate it like any prediction.
+
 Invariant: a written file's content at a read is what the writes that
 reached it in this build's sequence wrote, kept pages included: the
 routines' call logs (their deferred `\write`s among them) are kept with

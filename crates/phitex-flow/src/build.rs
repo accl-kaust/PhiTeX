@@ -462,6 +462,8 @@ pub struct Build {
     /// (the page builder's quantities, the files the run wrote), by piece
     /// id and node: the next build's predictions ([`Names::fold_value`]).
     fold_vals: FxMap<(PieceId, u32, Key), Val>,
+    /// [`Names::file_guess`], kept from round to round and build to build.
+    file_guess: FxMap<Arc<str>, Val>,
     /// Each piece's file (`None`: the main file) and the lines of that
     /// file before it, as the last build laid them out
     /// ([`Build::source_place`]).
@@ -954,6 +956,12 @@ struct Names {
     /// build's, then this build's as the folds validate the reads
     /// ([`Names::fold_value`]).
     fold_vals: RwLock<FxMap<(u32, u32, Key), Val>>,
+    /// Each written file's bytes as a read of it last found them, for a
+    /// read at a place the folds have no value for yet: a piece the
+    /// sequence made again (cut otherwise around an `\input` of the file
+    /// itself) reads what it read before, not the file as given, so that
+    /// the layout the read makes comes back ([`Names::fold_value`]).
+    file_guess: RwLock<FxMap<Arc<str>, Val>>,
 }
 
 /// A format's definitions by name, and its fonts' numbering
@@ -976,6 +984,7 @@ impl Names {
             given,
             etex,
             fold_vals: RwLock::default(),
+            file_guess: RwLock::default(),
         }
     }
 
@@ -996,7 +1005,13 @@ impl Names {
             .get(&(at.0, at.1, key.clone()))
             .cloned();
         Some(known.unwrap_or_else(|| match key {
-            Key::File(n) => self.given.file(n).map_or(Val::Void, Val::Bytes),
+            Key::File(n) => self
+                .file_guess
+                .read()
+                .expect("file guesses")
+                .get(n)
+                .cloned()
+                .unwrap_or_else(|| self.given.file(n).map_or(Val::Void, Val::Bytes)),
             _ => self.reaching(key, at, font).1,
         }))
     }
@@ -1392,6 +1407,7 @@ impl Build {
             next_id: 0,
             readers: FxMap::default(),
             fold_vals: FxMap::default(),
+            file_guess: FxMap::default(),
             places: FxMap::default(),
             src: String::new(),
             starts: Vec::new(),
@@ -2251,6 +2267,7 @@ impl Build {
         // (the last build's folds' values, at the pieces' places now)
         {
             let at: FxMap<PieceId, u32> = p.iter().enumerate().map(|(k, x)| (x.id, k as u32)).collect();
+            names.file_guess.write().expect("file guesses").clone_from(&self.file_guess);
             let mut fv = names.fold_vals.write().expect("fold values");
             for ((id, node, key), v) in &self.fold_vals {
                 if let Some(&k) = at.get(id) {
@@ -2687,6 +2704,7 @@ impl Build {
                 if now != *read {
                     refuted.push((*k, key.clone(), *n));
                 }
+                self.file_guess.insert(name.clone(), now.clone());
                 sh.names.set_fold_value(key, (*k as u32, *n), now);
             }
         }
