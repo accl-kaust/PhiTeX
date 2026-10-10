@@ -2976,8 +2976,10 @@ opentype tree here, so `cjk.tex` sets its CJK text in Latin Modern
 - SyncTeX for XeTeX: the CLI's writer works on the page boxes, so a
   XeTeX document gets a `.synctex.gz`, but its header says `Output:dvi`
   (`PageSync::pdf` follows `ShipParams::pdf`, `None` in XeTeX), and native
-  words, glyphs and pictures make no records (`build/sync.rs`); no xetex
-  oracle yet.
+  words, glyphs and pictures make no records (`build/sync.rs`). The oracle
+  is `xetex -synctex=1`'s `JOB.synctex.gz`; phitex-cli's `tests/synctex.rs`
+  is the harness to extend with the xelatex documents (X's, after
+  flow-xetex merges).
 - graphicx's `dvips` driver under xelatex (`gfx`): the XDV is xetex's,
   but partex-xdvipdfmx has no `spc_dvips.c` (`PSfile=`) nor `mpost.c`
   (`ps:` code), so its EPS picture and PostScript transforms are missing
