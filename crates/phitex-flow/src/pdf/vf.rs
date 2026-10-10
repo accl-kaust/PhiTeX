@@ -75,10 +75,10 @@ impl Vf {
         self.packets.get(usize::from(c)).cloned().flatten().unwrap_or_else(|| Arc::from([]))
     }
 
-    /// The local font numbered `k` by the file: `Err` if there is none
-    /// ("local font not found"), `Ok(None)` if it was not loadable.
-    pub fn local(&self, k: i32) -> Result<Option<Arc<Font>>, ()> {
-        self.fonts.iter().find(|(e, _)| *e == k).map(|(_, f)| f.clone()).ok_or(())
+    /// The local font numbered `k` by the file: `None` if there is none
+    /// ("local font not found"), `Some(None)` if it was not loadable.
+    pub fn local(&self, k: i32) -> Option<Option<Arc<Font>>> {
+        self.fonts.iter().find(|(e, _)| *e == k).map(|(_, f)| f.clone())
     }
 
     /// The font a packet starts with (`vf_default_font`: the first local).
@@ -97,12 +97,12 @@ impl PartialEq for Vf {
 /// `store_scaled_f`: a `fix_word` times `z`; `Err` with pdfTeX's message
 /// (`font`, "size is too large"; `store_scaled_f`, "vf scaling").
 pub fn store_scaled_f(sq: i32, z: i32) -> Result<i32, String> {
-    if z >= 0o1000000000 {
+    if z >= 0o1_000_000_000 {
         return Err("pdfTeX error (font): size is too large".into());
     }
     let mut z = z;
     let mut alpha = 16;
-    while z >= 0o40000000 {
+    while z >= 0o40_000_000 {
         z /= 2;
         alpha += alpha;
     }

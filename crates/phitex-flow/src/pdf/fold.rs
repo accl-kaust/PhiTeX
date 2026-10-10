@@ -60,8 +60,8 @@ pub struct End {
     pub params: Arc<Params>,
     pub page_width: i32,
     pub page_height: i32,
-    /// For each page, how many fonts the job had loaded where it was
-    /// shipped (the format's and those of the pieces up to the page's):
+    /// For each page, how many fonts the job had loaded before the piece
+    /// it was shipped in (the format's and those of the pieces before):
     /// a virtual font's local fonts loaded then are numbered after them
     /// (`vf_def_font`'s `read_font_info`), the fonts loaded later after
     /// those.
@@ -1370,18 +1370,17 @@ impl F<'_> {
     /// where the page is shipped; `None` if it is not loadable.
     fn vf_def_font(&mut self, l: &super::vf::LocalDef) -> Option<Arc<Font>> {
         let key = Font::key_of(&l.name, l.fs);
-        let font = match self.known_fonts.get(&key) {
-            Some(f) => f.clone(),
-            None => {
-                let data = self.files.tfm(&l.name);
-                let Some(f) = data.and_then(|d| Font::load(&l.name, d, Some(l.fs)).ok()) else {
-                    self.errors.push(format!("! Font \\relax={} not loadable: Metric (TFM) file not found.", l.name));
-                    return None;
-                };
-                let f = Arc::new(f);
-                self.known_fonts.insert(key.clone(), f.clone());
-                f
-            }
+        let font = if let Some(f) = self.known_fonts.get(&key) {
+            f.clone()
+        } else {
+            let data = self.files.tfm(&l.name);
+            let Some(f) = data.and_then(|d| Font::load(&l.name, d, Some(l.fs)).ok()) else {
+                self.errors.push(format!("! Font \\relax={} not loadable: Metric (TFM) file not found.", l.name));
+                return None;
+            };
+            let f = Arc::new(f);
+            self.known_fonts.insert(key.clone(), f.clone());
+            f
         };
         self.number_loaded(&key);
         Some(font)
@@ -2788,8 +2787,18 @@ pub fn assemble(
         warnings: Vec::new(),
     };
     let mut again = 0;
+    let mut used_max = 0;
     for (i, (p, body)) in pages.iter().zip(bodies.iter_mut()).enumerate() {
-        f.ship_count = end.ship_fonts.get(i).copied().unwrap_or(u32::MAX);
+        // (the fonts loaded where the page is shipped: those of the pieces
+        // before its own, and at least every font a page so far shows —
+        // pdfTeX loaded them before it shipped this one; a font the page's
+        // piece loads after the page builder fired is not counted)
+        for u in body.fonts.iter().map(|u| &u.font).chain(body.vf_asked.iter()) {
+            if let Some(&n) = numbers.get(&u.key) {
+                used_max = used_max.max(n);
+            }
+        }
+        f.ship_count = end.ship_fonts.get(i).copied().unwrap_or(u32::MAX).max(used_max);
         if let Some(ev) = events.get(i) {
             for ((piece, _), it) in ev.iter() {
                 f.step(*piece, it);

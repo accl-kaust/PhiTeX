@@ -902,8 +902,8 @@ impl W<'_> {
             } else if (FNT_NUM_0..FNT_NUM_0 + 64).contains(&cmd) || cmd == FNT1 {
                 let k = if cmd == FNT1 { i32::from(next(&mut i)) } else { i32::from(cmd - FNT_NUM_0) };
                 match vf.local(k) {
-                    Ok(lf) => f = lf,
-                    Err(()) => fatal = Some("pdfTeX error (vf): local font not found".into()),
+                    Some(lf) => f = lf,
+                    None => fatal = Some("pdfTeX error (vf): local font not found".into()),
                 }
                 continue;
             } else {

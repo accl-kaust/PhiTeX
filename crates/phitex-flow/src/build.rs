@@ -2674,7 +2674,8 @@ impl Build {
                 .chain(st.p.iter().filter_map(|ps| ps.run.as_ref().map(|r| &r.fonts[..]))),
         );
         // (how many fonts the job had loaded up to each piece: a page's
-        // virtual fonts' local fonts are numbered after its piece's)
+        // virtual fonts' local fonts are numbered after those of the pieces
+        // before its own, and of the fonts the pages show)
         let loaded_by_piece: Vec<u32> = {
             let mut m = dvi::numbers([self.format_fonts()]);
             st.p.iter()
@@ -2693,8 +2694,15 @@ impl Build {
         let (out, pdf, again) = if st.pages.first().is_some_and(|p| p.ship.pdf.is_some()) {
             let live = live_pieces(&st.p);
             let last = live.iter().rposition(|&l| l).unwrap_or(0);
-            let ship_fonts: Vec<u32> =
-                st.orgs.iter().map(|o| loaded_by_piece.get(o.call.0 as usize).or(loaded_by_piece.last()).copied().unwrap_or(0)).collect();
+            let format_fonts = self.format_fonts().len() as u32;
+            let ship_fonts: Vec<u32> = st
+                .orgs
+                .iter()
+                .map(|o| match (o.call.0 as usize).checked_sub(1) {
+                    Some(k) => loaded_by_piece.get(k).or(loaded_by_piece.last()).copied().unwrap_or(format_fonts),
+                    None => format_fonts,
+                })
+                .collect();
             let w = pdf_file(&sh.names, &sh.font, &sh.fonts, last, &numbers, ship_fonts, &st.pages, &st.orgs, &st.pdf_tail, &mut bodies);
             errors.extend(w.errors.into_iter().map(|e| format!("pdf: {e}")));
             pdf_answers = Some(w.answers);

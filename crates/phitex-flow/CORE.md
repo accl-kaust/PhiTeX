@@ -2893,14 +2893,16 @@ it was shipped knows no font, so a page whose fonts are all real is
 kept as it was). The local fonts are TeX fonts loaded then
 (`vf_def_font`: one of that name and size loaded before, else the TFM
 file at that size), numbered after the fonts the job had loaded where
-the page was shipped and before those it loads later (`End::ship_fonts`,
-the fold's `vf_order`): the `/F` names are pdfTeX's. `\pdffontname`,
+the page was shipped and before those it loads later: the `/F` names
+are pdfTeX's. Where the page was shipped is counted as the fonts of the
+pieces before the page's own (`End::ship_fonts`) and at least every font
+the pages so far show (the fold's `vf_order`). `\pdffontname`,
 `\pdffontobjnum`, `\pdfincludechars` of a virtual font are fatal, as
 pdfTeX's `pdf_check_vf_cur_val`. Tests: `tests/pdf.rs` `vf` (Times and
 Helvetica in OT1, a font loaded after a page that loaded local fonts, a
 form), `tests/pdflatex_docs.rs` `vfont` (T1 Times, Helvetica, Courier).
-Gaps: where a page was shipped is counted by pieces (a `\font` in the
-same piece after the page builder fired counts as before); an
+Gaps: a font the page's own piece loads before the page builder fired
+and the page does not show is counted as loaded after; an
 auto-expanded virtual font and `\letterspacefont` wait for font
 expansion.
 
