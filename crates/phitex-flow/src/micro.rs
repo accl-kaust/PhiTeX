@@ -460,8 +460,10 @@ impl Micro {
     /// `post_line_break`'s margin kerns (`\pdfprotrudechars` positive):
     /// the right one after item `ptmp` of `line` (the protruding character
     /// found back from it, or — `direct` — that item itself), then the left
-    /// one at the line's start.
-    pub fn margin_kerns(&self, line: &mut Vec<Item>, ptmp: Option<usize>, direct: bool) {
+    /// one at the line's start: where the right one went, and whether the
+    /// left one did.
+    pub fn margin_kerns(&self, line: &mut Vec<Item>, ptmp: Option<usize>, direct: bool) -> (Option<usize>, bool) {
+        let mut right = None;
         if let Some(pt) = ptmp {
             let found = if direct { line.get(pt) } else { protchar_right(line, 0, pt) };
             let (w, ch) = self.char_pw(found, true);
@@ -469,6 +471,7 @@ impl Micro {
                 && let Some((font, c)) = ch
             {
                 line.insert(pt + 1, Item::MarginKern { w: -w, right: true, font, c });
+                right = Some(pt + 1);
             }
         }
         let (w, ch) = self.char_pw(protchar_left(line, 0, false), false);
@@ -476,7 +479,9 @@ impl Micro {
             && let Some((font, c)) = ch
         {
             line.insert(0, Item::MarginKern { w: -w, right: false, font, c });
+            return (right, true);
         }
+        (right, false)
     }
 
     /// `hpack(q, w, cal_expand_ratio)`: a line packed to width `w`, its

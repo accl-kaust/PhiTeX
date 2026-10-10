@@ -757,3 +757,79 @@ pub fn pdf_file(name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
     cache.lock().expect("pdf file cache").insert(name.to_string(), v.clone());
     v
 }
+
+/// kpathsea's lookups as a build is given them: a file of a format by
+/// name, the path found, and a file's bytes by path (each a pure function
+/// of its argument during a build). XeTeX's native fonts (`[file]`
+/// names, `.tec` mappings) and xdvipdfmx (its configuration, maps,
+/// encodings, fonts, pictures) ask through it.
+pub trait Kpse: Send + Sync {
+    /// `kpse_find_file(name, format, 0)` as program `prog` (`xetex`,
+    /// `dvipdfmx`, …).
+    fn find(&self, name: &str, format: KpseFormat, prog: &str) -> Option<String>;
+    /// The bytes of the file at `path`.
+    fn read(&self, path: &str) -> Option<Arc<[u8]>>;
+}
+
+/// kpathsea's formats asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KpseFormat {
+    OpenType,
+    TrueType,
+    Type1,
+    MiscFonts,
+    FontMap,
+    Cmap,
+    Sfd,
+    Enc,
+    Tfm,
+    Ofm,
+    Vf,
+    Ovf,
+    Pict,
+    Tex,
+    ProgramText,
+    ProgramBinary,
+}
+
+impl KpseFormat {
+    /// The extensions kpathsea tries for a name without one.
+    pub fn suffixes(self) -> &'static [&'static str] {
+        match self {
+            KpseFormat::OpenType => &[".otf", ".OTF"],
+            KpseFormat::TrueType => &[".ttf", ".ttc", ".TTF", ".TTC", ".dfont"],
+            KpseFormat::Type1 => &[".pfb", ".pfa"],
+            KpseFormat::MiscFonts => &[],
+            KpseFormat::FontMap => &[".map"],
+            KpseFormat::Enc => &[".enc"],
+            KpseFormat::Tfm => &[".tfm"],
+            KpseFormat::Ofm => &[".ofm", ".tfm"],
+            KpseFormat::Vf => &[".vf"],
+            KpseFormat::Ovf => &[".ovf", ".vf"],
+            KpseFormat::Tex => &[".tex"],
+            _ => &[],
+        }
+    }
+
+    /// `kpsewhich -format=` names.
+    pub fn name(self) -> &'static str {
+        match self {
+            KpseFormat::OpenType => "opentype fonts",
+            KpseFormat::TrueType => "truetype fonts",
+            KpseFormat::Type1 => "type1 fonts",
+            KpseFormat::MiscFonts => "misc fonts",
+            KpseFormat::FontMap => "map",
+            KpseFormat::Cmap => "cmap files",
+            KpseFormat::Sfd => "subfont definition files",
+            KpseFormat::Enc => "enc files",
+            KpseFormat::Tfm => "tfm",
+            KpseFormat::Ofm => "ofm",
+            KpseFormat::Vf => "vf",
+            KpseFormat::Ovf => "ovf",
+            KpseFormat::Pict => "graphic/figure",
+            KpseFormat::Tex => "tex",
+            KpseFormat::ProgramText => "other text files",
+            KpseFormat::ProgramBinary => "other binary files",
+        }
+    }
+}

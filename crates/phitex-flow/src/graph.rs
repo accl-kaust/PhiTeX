@@ -74,6 +74,24 @@ pub trait Env {
     /// them, as when no element between the piece's nodes defines `key`).
     fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32);
 
+    /// Whether the build's folds answer reads of `key` ([`Env::fold_read`]):
+    /// the page builder's quantities, which a node's own definitions do not
+    /// answer either (the fold sees them as items).
+    fn folds(&mut self, _key: &Key) -> bool {
+        false
+    }
+
+    /// A read a fold of the build answers at this node: the page builder's
+    /// quantity where the scan is when it reaches the node (tex.web 421), a
+    /// file as what the run wrote of it before the node. Predicted here (this
+    /// build's value at the node, else the last build's, else the names
+    /// index's or the file's), validated by the fold when it gets there: a
+    /// refuted read runs its piece again from the node (CORE.md "Reads of
+    /// folds"). `None`: an ordinary read.
+    fn fold_read(&mut self, _key: &Key, _node: u32) -> Option<Val> {
+        None
+    }
+
     /// A definition of `key` made between this piece's nodes `after` and
     /// `node` (an output routine's run where the page builder fired there),
     /// which reaches `node` instead of node `after`'s own: its value and
@@ -1659,6 +1677,9 @@ pub struct Run {
 pub struct Lean {
     /// How many nodes it had.
     len: u32,
+    /// Where each node began in the piece's text (its input position):
+    /// the source place of what it made (`Run::node_pos`).
+    pos: Vec<u32>,
     para_at: Vec<u32>,
     /// Every definition, by name then node: the name, the node, the first
     /// node it no longer reaches (its group's close + 1; `u32::MAX`: the
@@ -1703,6 +1724,7 @@ impl Run {
         defs.shrink_to_fit();
         let lean = Lean {
             len: c.nodes.len() as u32,
+            pos: (0..c.nodes.len()).map(|i| c.input_pos(i) as u32).collect(),
             para_at: c.para_at.clone(),
             defs,
             out: self.out(),
@@ -1722,6 +1744,15 @@ impl Run {
             abandoned: false,
             lean: Some(Arc::new(lean)),
             crossed: self.crossed,
+        }
+    }
+
+    /// Where node `i` began in the piece's text (its input position; a
+    /// node reading a file read in the piece: where the `\input` was).
+    pub fn node_pos(&self, i: usize) -> Option<usize> {
+        match &self.lean {
+            Some(l) => l.pos.get(i).map(|&p| p as usize),
+            None => (i < self.chain.nodes.len()).then(|| self.chain.input_pos(i)),
         }
     }
 
@@ -1747,6 +1778,12 @@ impl Run {
         let a = v.partition_point(|x| x.0 < *key);
         let b = a + v[a..].partition_point(|x| x.0 == *key);
         &v[a..b]
+    }
+
+    /// Its reads from before the piece, by name then node, with their
+    /// values (a lean run's too).
+    pub fn all_reads(&self) -> &[(Key, u32, Val)] {
+        self.lean.as_ref().map_or(&self.reads[..], |l| &l.reads[..])
     }
 
     /// The index of its first read of `key` (`read_at`), the edge's.
@@ -1789,6 +1826,88 @@ impl Run {
                     .map(|(_, d, _, v)| (*d, v.clone()))
             }
         }
+    }
+
+    /// The reads its nodes hold, and how many distinct `Read`s they are
+    /// (a lean run: none).
+    pub fn reads_held(&self) -> (usize, usize) {
+        let c = &self.chain;
+        let mut distinct: FxSet<usize> = FxSet::default();
+        let mut n = 0;
+        for node in c.nodes.range(0, c.nodes.len()) {
+            n += node.reads.len();
+            distinct.extend(node.reads.iter().map(|r| Arc::as_ptr(r) as usize));
+        }
+        (n, distinct.len())
+    }
+
+    /// What the run holds, counted (`PHITEX_CENSUS`: where the memory of
+    /// a build goes): its nodes and their sizes, their reads (distinct and
+    /// of outer-ness alone), items, rare parts, and the stacks their states
+    /// hold.
+    pub fn census(&self) -> String {
+        let c = &self.chain;
+        let n = c.nodes.len();
+        let (mut reads, mut outer, mut emit, mut rare, mut texts, mut conds, mut groups) = (0, 0, 0, 0, 0, 0, 0);
+        let mut distinct: FxSet<usize> = FxSet::default();
+        // (the distinct reads by what they read: more than one per group is
+        // a copy not shared; by kind: outer-ness, whole from a node, whole
+        // from before the piece)
+        let mut groups_of: FxMap<(Key, u8, u64, Option<u16>, Option<u16>, bool), u32> = FxMap::default();
+        for node in c.nodes.range(0, n) {
+            reads += node.reads.len();
+            for r in node.reads.iter() {
+                if r.field != Field::Whole {
+                    outer += 1;
+                }
+                if distinct.insert(Arc::as_ptr(r) as usize) {
+                    let s = match r.src {
+                        Src::Node(d) => (0u8, u64::from(d)),
+                        Src::Piece(_) => (1, 0),
+                        Src::Initial => (2, 0),
+                    };
+                    *groups_of.entry((r.key.clone(), s.0, s.1, r.scope, r.cond, r.field == Field::Outer)).or_default() += 1;
+                }
+            }
+            emit += node.emit.len();
+            rare += usize::from(node.rare.is_some());
+            texts += node.out.texts.len();
+            conds += node.out.conds.len();
+            groups += node.out.groups.len();
+        }
+        let (mut copies_outer, mut copies_node, mut copies_before) = (0u32, 0u32, 0u32);
+        for (g, c) in &groups_of {
+            let extra = c - 1;
+            if g.5 {
+                copies_outer += extra;
+            } else if g.1 == 0 {
+                copies_node += extra;
+            } else {
+                copies_before += extra;
+            }
+        }
+        format!(
+            "copies (outer {copies_outer}, node {copies_node}, before {copies_before}) nodes {n} (node {} B, state {} B) reads {reads} (distinct {}, outer-ness {outer}, read {} B) items {emit} rare {rare} texts {texts} conds {conds} groups {groups} reads-before {} lean {}",
+            std::mem::size_of::<Node>(),
+            std::mem::size_of::<RState>(),
+            distinct.len(),
+            std::mem::size_of::<Read>(),
+            self.reads.len(),
+            self.lean.is_some()
+        )
+    }
+
+    /// Each name its nodes read (from the piece or from before it) and the
+    /// last node reading it: [`Run::reads_after`] as a lookup, for a run
+    /// with its nodes (made once per run by whoever asks often).
+    pub fn last_readers(&self) -> FxMap<Key, u32> {
+        let mut m: FxMap<Key, u32> = FxMap::default();
+        for (j, n) in self.chain.nodes.range(0, self.chain.nodes.len()).enumerate() {
+            for r in n.reads.iter() {
+                m.insert(r.key.clone(), j as u32);
+            }
+        }
+        m
     }
 
     /// Whether a node after node `i` may read `key` (from the piece or
@@ -2085,8 +2204,11 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key, node: u32) ->
         return v.clone();
     }
     // (what the build answers itself: a file's bytes, the job's name, the
-    // lines before the piece)
+    // lines before the piece; a fold's value at this node, for this node
+    // only)
+    let fold = env.fold_read(k, node);
     let (val, src, lo, hi) = match k {
+        _ if fold.is_some() => (fold.unwrap_or(Val::Void), Src::Initial, node, node.saturating_add(1)),
         Key::File(n) => (env.file(n).map_or(Val::Void, Val::Bytes), Src::Initial, 0, u32::MAX),
         Key::Job => (Val::Name(env.jobname()), Src::Initial, 0, u32::MAX),
         Key::LineBase => (Val::Int(env.line_base()), Src::Initial, 0, u32::MAX),
@@ -2106,6 +2228,9 @@ fn outside_read(env: &mut dyn Env, outside: &mut Outside, k: &Key, node: u32) ->
 
 /// The definition of `key` for the next node of `chain`, and where from.
 fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Key) -> ReadRef {
+    if env.folds(key) {
+        return outside_read(env, outside, key, chain.nodes.len() as u32);
+    }
     let local = chain.resolve(key, chain.nodes.len());
     // (a definition made between the piece's nodes after the local one
     // reaches further: a routine's, where the page builder fired)
@@ -2132,6 +2257,12 @@ fn resolve_now(chain: &Chain, env: &mut dyn Env, outside: &mut Outside, key: &Ke
         }),
         None => outside_read(env, outside, key, chain.nodes.len() as u32),
     }
+}
+
+/// Whether a read of `key` is a fold's, validated at its node: every
+/// reader is a read of its own ([`Env::fold_read`]).
+pub fn positional(key: &Key) -> bool {
+    matches!(key, Key::Page(_) | Key::File(_))
 }
 
 /// Where node `i`'s read `r` is entered in its run's reads
@@ -2182,7 +2313,8 @@ fn before_read(
     at: usize,
     c: u16,
 ) -> ReadRef {
-    let r = match chain.resolve(key, at) {
+    let local = if env.folds(key) { None } else { chain.resolve(key, at) };
+    let r = match local {
         Some((d, val)) => Read {
             key: key.clone(),
             src: Src::Node(d),
@@ -2221,6 +2353,14 @@ pub fn run_piece(
     let entry_changed = old.is_some_and(|(r, _)| r.chain.entry != entry);
     let mut ran = 0u64;
     let edit = old.and_then(|(_, t)| Edit::between(t, text));
+    // (the edit changed how many lines are before the text after it: a node
+    // there that read its line, `\inputlineno` in the piece's own text —
+    // the lines before the piece, `Key::LineBase`, plus its line in the
+    // piece —, is not kept)
+    let lines_moved = old.zip(edit).is_some_and(|((_, t), e)| {
+        let n = |x: &[char]| x.iter().filter(|&&c| c == '\r').count();
+        n(&t[e.start..e.old_end]) != n(&text[e.start..e.new_end])
+    });
     let oldc = old.map(|(r, _)| &r.chain);
     // (the dirty old nodes: those reading a dirty name from before the
     // piece, in order)
@@ -2317,15 +2457,28 @@ pub fn run_piece(
                 } else {
                     oc.nodes[oi - 1].out.eq_but_pos(&state)
                 };
+                let line_ok = !(lines_moved
+                    && edit.is_some_and(|e| inp_pos >= e.old_end)
+                    && n.reads.iter().any(|r| r.key == Key::LineBase));
                 if start_ok && text_ok && state_ok {
                     cand = Some(oi);
+                    // (a read answered with the same value from elsewhere
+                    // than before — the piece's own definition where a
+                    // routine's between its nodes answered it, or the other
+                    // way — keeps the node, its read re-pointed: whether a
+                    // read is from before the piece is what the run's reads
+                    // list, and install validates them as such)
+                    let mut repoint = false;
                     let reads_ok = par_ok
+                        && line_ok
                         && n.reads.iter().all(|r| {
-                            reread(&chain, &state, env, &mut outside, r)
-                                .is_some_and(|now| Read::same(&now, r))
+                            reread(&chain, &state, env, &mut outside, r).is_some_and(|now| {
+                                repoint |= matches!(now.src, Src::Node(_)) != matches!(r.src, Src::Node(_));
+                                Read::same(&now, r)
+                            })
                         });
                     if reads_ok {
-                        let in_place = edit.is_none() && !scope_changed && oi == chain.nodes.len();
+                        let in_place = edit.is_none() && !scope_changed && !repoint && oi == chain.nodes.len();
                         if in_place {
                             // (the same node at the same index, its operands
                             // from the same nodes: shared, not copied; and so
@@ -2560,13 +2713,16 @@ pub fn run_piece(
     }
     reads.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     // (one entry per (name, value): its first reader — the first of its
-    // name's run with that value)
+    // name's run with that value; a read a fold answers, every one: the
+    // fold validates each at its node)
     let mut kept: Vec<(Key, u32, Val)> = Vec::with_capacity(reads.len());
     let mut run_start = 0;
     for e in reads {
         if kept.last().is_none_or(|l| l.0 != e.0) {
             run_start = kept.len();
-        } else if kept[run_start..].iter().any(|x| x.2 == e.2) {
+        } else if !positional(&e.0) && kept[run_start..].iter().any(|x| x.2 == e.2) {
+            continue;
+        } else if positional(&e.0) && kept.last().is_some_and(|l| l.1 == e.1 && l.2 == e.2) {
             continue;
         }
         kept.push(e);
@@ -2636,6 +2792,12 @@ struct Scratch {
     /// a node reading the same definition, seen the same, shares it (a
     /// read is a value: equal fields, the same read).
     inside: FxMap<Key, ReadRef>,
+    /// Each read's copy of the outer-ness alone ([`Field::Outer`]), made
+    /// once (by the whole read's address; the pair keeps it alive), and
+    /// back (by the copy's): the run holds one `Read` per distinct read,
+    /// however often a name is scanned and then read whole.
+    outer_of: FxMap<usize, (ReadRef, ReadRef)>,
+    whole_of: FxMap<usize, ReadRef>,
 }
 
 /// A control sequence's entry in [`Scratch::cs`].
@@ -2659,9 +2821,6 @@ struct Known {
     /// The groups opened and closed before it was read (a definition
     /// local to a group is seen by its level from the group open).
     scopes: usize,
-    /// The same read of the meaning's outer-ness alone ([`Field::Outer`]),
-    /// once made.
-    outer: Option<ReadRef>,
 }
 
 /// One node's execution: one command, from the state its predecessor left.
@@ -3114,9 +3273,30 @@ impl<'a> Exec<'a> {
     /// a meaning's outer-ness so far).
     fn whole(&mut self, i: usize) {
         if self.reads[i].field != Field::Whole {
+            // (the read it was copied from, if this run made it: the same)
+            if let Some(w) = self.scratch.whole_of.get(&(Arc::as_ptr(&self.reads[i]) as usize)) {
+                self.reads[i] = w.clone();
+                return;
+            }
             let r = Read { field: Field::Whole, ..(*self.reads[i]).clone() };
             self.reads[i] = Arc::new(r);
         }
+    }
+
+    /// `r`'s outer-ness alone ([`Field::Outer`]): one copy per read
+    /// ([`Scratch::outer_of`]).
+    fn outer_copy(&mut self, r: ReadRef) -> ReadRef {
+        if r.field == Field::Outer {
+            return r;
+        }
+        let at = Arc::as_ptr(&r) as usize;
+        if let Some((_, o)) = self.scratch.outer_of.get(&at) {
+            return o.clone();
+        }
+        let o = Arc::new(Read { field: Field::Outer, ..(*r).clone() });
+        self.scratch.whole_of.insert(Arc::as_ptr(&o) as usize, r.clone());
+        self.scratch.outer_of.insert(at, (r, o.clone()));
+        o
     }
 
     /// Whether the name `key` means an `\outer` macro, read as that alone
@@ -3134,15 +3314,7 @@ impl<'a> Exec<'a> {
             }
             let r = self.resolve_shared(key);
             let outer = r.val.is_outer();
-            let epoch = self.scratch.known_epoch;
-            let as_outer = |r: &ReadRef| Arc::new(Read { field: Field::Outer, ..(**r).clone() });
-            let r = match self.scratch.cs.get_mut(n as usize).and_then(|e| e.known.as_mut()) {
-                _ if r.field == Field::Outer => r,
-                // (the piece's kept read of the name: its outer-ness read
-                // made once)
-                Some(k) if k.epoch == epoch && Arc::ptr_eq(&k.read, &r) => k.outer.get_or_insert_with(|| as_outer(&r)).clone(),
-                _ => as_outer(&r),
-            };
+            let r = self.outer_copy(r);
             self.push_read(r);
             return outer;
         }
@@ -3175,8 +3347,8 @@ impl<'a> Exec<'a> {
             }
         }
         let mut r = self.resolve_shared(key);
-        if field != Field::Whole {
-            r = Arc::new(Read { field, ..(*r).clone() });
+        if field == Field::Outer {
+            r = self.outer_copy(r);
         }
         Found::Read(self.push_read(r))
     }
@@ -3207,13 +3379,16 @@ impl<'a> Exec<'a> {
                 _ => self.outside.get(key).map_or(0, |(_, _, hi)| *hi),
             };
             let scopes = chain.scopes.len();
-            self.cs_at(n).known = Some(Known { epoch, read: r.clone(), hi, scopes, outer: None });
+            self.cs_at(n).known = Some(Known { epoch, read: r.clone(), hi, scopes });
         }
         r
     }
 
     fn resolve_shared_slow(&mut self, key: &Key) -> ReadRef {
         let chain = self.chain;
+        if self.env.folds(key) {
+            return outside_read(self.env, self.outside, key, chain.nodes.len() as u32);
+        }
         let Some((d, val)) = chain.resolve(key, chain.nodes.len()) else {
             return outside_read(self.env, self.outside, key, chain.nodes.len() as u32);
         };

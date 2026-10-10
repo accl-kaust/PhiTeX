@@ -351,7 +351,7 @@ fn set_entry(r: &Unset, q: &Unset, t: i32, w: i32, valign: bool) -> BoxNode {
         };
     }
     if valign {
-        BoxNode {
+        BoxNode { origins: crate::item::Origins::default(),
             vertical: true,
             w: q.w,
             h: w,
@@ -361,7 +361,7 @@ fn set_entry(r: &Unset, q: &Unset, t: i32, w: i32, valign: bool) -> BoxNode {
             glue,
         }
     } else {
-        BoxNode {
+        BoxNode { origins: crate::item::Origins::default(),
             vertical: false,
             w,
             h: q.h,
@@ -383,7 +383,7 @@ fn set_row(
     valign: bool,
     o: i32,
 ) -> BoxNode {
-    let mut row = BoxNode {
+    let mut row = BoxNode { origins: crate::item::Origins::default(),
         vertical: valign,
         w: q.w,
         h: q.h,

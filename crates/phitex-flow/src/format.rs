@@ -718,7 +718,7 @@ impl Reader<'_> {
         let order = self.byte()?;
         let ratio = f64::from_bits(self.u()?);
         let list = self.items()?;
-        Ok(BoxNode { vertical, w, h, d, shift, list, glue: GlueSet { sign, order, ratio } })
+        Ok(BoxNode { origins: crate::item::Origins::default(), vertical, w, h, d, shift, list, glue: GlueSet { sign, order, ratio } })
     }
 
     fn items(&mut self) -> Result<Vec<Item>, String> {

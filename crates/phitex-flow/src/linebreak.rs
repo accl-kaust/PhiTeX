@@ -76,6 +76,30 @@ pub struct Line {
     pub pen: Option<i32>,
     /// TeX's diagnostic about the line's box, a raw log entry.
     pub report: Option<String>,
+    /// Where its box's items came from in the paragraph's list: runs
+    /// `(item of the box, item of the list)`, each going on one for one
+    /// (a hyphenated word's items, a discretionary's, the skips: the
+    /// list's item they stand at). With the paragraph's
+    /// [`crate::item::Origins`], the node that made each item.
+    pub from: Arc<[(u32, u32)]>,
+}
+
+impl Line {
+    /// The paragraph list's item that the box's item `i` came from.
+    pub fn list_item(&self, i: usize) -> Option<usize> {
+        let k = self.from.partition_point(|x| x.0 as usize <= i).checked_sub(1)?;
+        let (b, l) = self.from[k];
+        Some(l as usize + (i - b as usize))
+    }
+
+    /// The node (its index in its piece) that made the box's item `i`, the
+    /// line being one of `para`'s, held by node `para_node`: SyncTeX's
+    /// and the viewer's link from a glyph to its source place
+    /// (`Build::source_place`). Inside a box among the items: that box's
+    /// [`crate::item::Origins`], back from the node found here.
+    pub fn node_of(&self, para: &crate::item::Para, para_node: u32, i: usize) -> Option<u32> {
+        para_node.checked_sub(para.origins.of(self.list_item(i)?)?)
+    }
 }
 
 const EJECT: i32 = -10000;
@@ -215,6 +239,9 @@ struct Breaker<'a> {
     lang: crate::hyph::LangState,
     /// Hyphen characters the font lacks (tex.web 915), for the log.
     missing: Vec<(Arc<crate::tfm::Font>, i32)>,
+    /// For each item of `items`, the paragraph list's item it came from,
+    /// once a word was hyphenated (`None`: the same index).
+    orig: Option<Vec<u32>>,
 }
 
 impl Breaker<'_> {
@@ -586,6 +613,9 @@ impl Breaker<'_> {
                         && let Some(w) = crate::hyph::hyphenate_after(&self.items, k, &mut self.lang, h)
                     {
                         self.missing.extend(w.missing);
+                        let o = self.orig.get_or_insert_with(|| (0..self.items.len() as u32).collect());
+                        let at = o[w.start];
+                        o.splice(w.start..w.end, std::iter::repeat_n(at, w.items.len()));
                         self.items.to_mut().splice(w.start..w.end, w.items);
                         self.reprefix(w.start);
                     }
@@ -763,6 +793,7 @@ pub fn lines(items: &[Item], p: &LineParams) -> Vec<Arc<Line>> {
     }
     let easy_line = if p.looseness == 0 { lsl } else { MAX_HALFWORD };
     let mut br = Breaker {
+        orig: None,
         items: std::borrow::Cow::Borrowed(items),
         p,
         micro,
@@ -899,9 +930,13 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
     let mut start = 0usize;
     // (a discretionary's post-break list, beginning the next line)
     let mut carry: Vec<Item> = Vec::new();
+    let orig = |i: usize| br.orig.as_ref().map_or(i as u32, |o| o.get(i).copied().unwrap_or(i as u32));
     for (bi, &brk) in breaks.iter().enumerate() {
         let cur_line = p.prev_graf + 1 + bi as i32;
         let mut line: Vec<Item> = Vec::new();
+        // (the list's item each of the line's items came from)
+        let mut from: Vec<u32> = Vec::new();
+        let at_start = orig(start.min(items.len().saturating_sub(1)));
         if p.texxet {
             // (etex.web §1517: the directions open at the line's start begin
             // it, outermost first; then those of the line's own nodes)
@@ -912,7 +947,9 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
                 adjust_lr(&mut lr, it);
             }
         }
+        from.resize(line.len(), at_start);
         line.append(&mut carry);
+        from.resize(line.len(), at_start);
         let mut disc_break = false;
         let mut post_disc = false;
         let rightskip = Item::Glue { g: p.rightskip.clone(), sub: 9, zero: is_zero(&p.rightskip) };
@@ -980,18 +1017,54 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
             line.push(rightskip);
             items.len()
         };
+        // (the line's own items, one for one; what the break added, at the
+        // break)
+        {
+            let own_end = brk.map_or(items.len(), |b| if matches!(items[b], Item::Glue { .. } | Item::Leaders(_) | Item::Disc(_) | Item::Kern { .. } | Item::Math { .. }) { b } else { b + 1 });
+            let at_break = orig(brk.unwrap_or(items.len().saturating_sub(1)).min(items.len().saturating_sub(1)));
+            for i in start..own_end.max(start) {
+                from.push(orig(i));
+            }
+            from.resize(line.len(), at_break);
+        }
         if let Some(m) = p.micro.as_deref().filter(|m| m.protrude_chars > 0) {
-            m.margin_kerns(&mut line, ptmp, direct);
+            // (the margin kerns come from the items they are beside)
+            let (right, left) = m.margin_kerns(&mut line, ptmp, direct);
+            if let Some(i) = right {
+                let f = i.checked_sub(1).and_then(|j| from.get(j)).copied().unwrap_or(at_start);
+                from.insert(i, f);
+            }
+            if left {
+                let f = from.first().copied().unwrap_or(at_start);
+                from.insert(0, f);
+            }
         }
         if p.texxet && !lr.is_empty() {
             // (etex.web §1520: and end before `\rightskip`, innermost first)
             let at = line.len() - 1;
             let ends: Vec<Item> = lr.iter().rev().map(|&e| Item::Math { w: 0, after: true, lr: e - 1 }).collect();
+            let fill = from.get(at).copied().unwrap_or(at_start);
+            from.splice(at..at, std::iter::repeat_n(fill, ends.len()));
             line.splice(at..at, ends);
         }
         // (§887: `\leftskip`, unless zero)
         if !is_zero(&p.leftskip) {
             line.insert(0, Item::Glue { g: p.leftskip.clone(), sub: 8, zero: false });
+            from.insert(0, at_start);
+        }
+        // (the packager moves the marks, insertions and adjustments out)
+        let from: Vec<u32> = line
+            .iter()
+            .zip(&from)
+            .filter(|(i, _)| !matches!(i, Item::Mark(_) | Item::Marks(..) | Item::Ins(_) | Item::Adjust(_)))
+            .map(|(_, &f)| f)
+            .collect();
+        let mut runs: Vec<(u32, u32)> = Vec::new();
+        for (j, &f) in from.iter().enumerate() {
+            match runs.last() {
+                Some(&(b, l)) if l as usize + (j - b as usize) == f as usize => {}
+                _ => runs.push((j as u32, f)),
+            }
         }
         // (§889: the packaging)
         let (width, indent) = if cur_line > br.last_special_line {
@@ -1041,7 +1114,7 @@ fn post_line_break(br: &Breaker<'_>, best: Active) -> Vec<Arc<Line>> {
                 pen = Some(x);
             }
         }
-        out.push(Arc::new(Line { b: Arc::new(b), adjust, pen, report }));
+        out.push(Arc::new(Line { b: Arc::new(b), adjust, pen, report, from: Arc::from(runs) }));
         // (§879: discardable items at the next line's start go)
         start = next_start;
         if !post_disc {

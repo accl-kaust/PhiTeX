@@ -15,7 +15,7 @@ use std::sync::Arc;
 use super::{Chain, Exec, Group, GroupKind, Kind, Mode};
 use crate::arith::xn_over_d;
 use crate::item::{
-    BoxNode, Disc, Interline, Item, Lig, PageCall, Para, RUNNING, ShipParams, Shipped, is_zero, param_glue,
+    BoxNode, Disc, Interline, Item, Lig, Origins, PageCall, Para, RUNNING, ShipParams, Shipped, is_zero, param_glue,
 };
 use crate::linebreak::{self, LineParams};
 use crate::pack::{Params, Spec, hpack, vpack};
@@ -783,19 +783,26 @@ impl Exec<'_> {
         let level = self.st.level;
         let nodes = &self.chain.nodes;
         let start = para_start(self.chain, nodes.len(), level);
+        let me = nodes.len();
         let mut hlist = Vec::new();
-        for n in nodes.range(start, nodes.len()) {
+        // (which node made each item: its distance back from this one)
+        let mut orig: Vec<u32> = Vec::new();
+        for (j, n) in nodes.range(start, nodes.len()).enumerate() {
             if n.out.level == level && n.out.mode == Mode::H {
                 for it in n.emit.iter() {
                     push_horizontal(&mut hlist, it.clone());
+                    orig.resize(hlist.len(), (me - start - j) as u32);
                 }
             }
         }
         for it in std::mem::take(&mut self.emit) {
             push_horizontal(&mut hlist, it);
+            orig.resize(hlist.len(), 0);
         }
         // (a `\shipout` inside the paragraph ships before its lines come)
         let ships: Vec<Item> = hlist.iter().filter(|i| matches!(i, Item::Shipout(_))).cloned().collect();
+        let mut keep = hlist.iter().map(|i| !matches!(i, Item::Shipout(_)));
+        orig.retain(|_| keep.next().unwrap_or(true));
         hlist.retain(|i| !matches!(i, Item::Shipout(_)));
         self.st.mode = Mode::V;
         self.st.inner = level > 0;
@@ -808,10 +815,13 @@ impl Exec<'_> {
             hlist.push(Item::Penalty(10000));
             let g = self.glue_par(GluePar::Parfillskip);
             hlist.push(param_glue(&g, GluePar::Parfillskip as u8));
+            orig.resize(hlist.len(), 0);
+            let origins = Origins::from_runs(orig.iter().enumerate().map(|(i, &d)| (i as u32, d)));
             let lp = self.line_params(&hlist);
             if level == 0 {
                 hlist.shrink_to_fit();
                 para.hlist = hlist;
+                para.origins = origins;
                 para.lb = Some(Arc::new(lp));
                 // (its last line's depth, once broken: `Exec::prev_depth`)
                 self.st.prev_depth = MAIN_DEPTH;
@@ -822,7 +832,13 @@ impl Exec<'_> {
                     if let Some(r) = &l.report {
                         self.log_raw(r);
                     }
-                    self.vemit.push(Item::Append(l.b.clone(), lp.inter.clone()));
+                    // (inside a box: the line's items by the nodes that made
+                    // them, back from this one)
+                    let mut b = (*l.b).clone();
+                    b.origins = Origins::from_runs(
+                        (0..b.list.len()).filter_map(|i| Some((i as u32, origins.of(l.list_item(i)?)?))),
+                    );
+                    self.vemit.push(Item::Append(Arc::new(b), lp.inter.clone()));
                     self.vemit.extend(l.adjust.iter().cloned());
                     if let Some(x) = l.pen {
                         self.vemit.push(Item::Penalty(x));
@@ -837,7 +853,7 @@ impl Exec<'_> {
         if level == 0 && (!para.before.is_empty() || para.lb.is_some()) {
             // (equal to the paragraph the old node here made: that one)
             self.para = Some(match self.old_para.take() {
-                Some(o) if *o == para => o,
+                Some(o) if *o == para && o.origins.0 == para.origins.0 => o,
                 _ => Arc::new(para),
             });
         }
@@ -1794,23 +1810,42 @@ impl Exec<'_> {
         // (the nodes inside: back from the `Close` node before this one)
         let end = nodes.len().saturating_sub(1);
         let start = box_start(self.chain, end, inner);
+        let me = nodes.len();
         let mut list = Vec::new();
+        // (which node made each item: its distance back from this one)
+        let mut orig: Vec<u32> = Vec::new();
         let mut pd = IGNORE_DEPTH;
-        for n in nodes.range(start, end) {
+        for (j, n) in nodes.range(start, end).enumerate() {
             if n.out.level == inner {
+                let d = (me - start - j) as u32;
                 if vertical {
                     for it in n.vemit() {
                         push_vertical(&mut list, &mut pd, it.clone());
+                        orig.resize(list.len(), d);
                     }
                 } else {
                     for it in n.emit.iter() {
                         push_horizontal(&mut list, it.clone());
+                        orig.resize(list.len(), d);
                     }
                 }
             }
         }
         let ships: Vec<Item> = list.iter().filter(|i| matches!(i, Item::Shipout(_))).cloned().collect();
+        let mut keep = list.iter().map(|i| !matches!(i, Item::Shipout(_) | Item::BuildPage(_) | Item::End(_)));
+        orig.retain(|_| keep.next().unwrap_or(true));
         list.retain(|i| !matches!(i, Item::Shipout(_) | Item::BuildPage(_) | Item::End(_)));
+        // (the nodes, once the packager moved the marks and insertions out
+        // or not: [`Origins`])
+        let origins_of = |orig: &[u32], list: &[Item], adjusted: bool| {
+            Origins::from_runs(
+                list.iter()
+                    .zip(orig)
+                    .filter(|(i, _)| !adjusted || !matches!(i, Item::Mark(_) | Item::Marks(..) | Item::Ins(_) | Item::Adjust(_)))
+                    .enumerate()
+                    .map(|(k, (_, &d))| (k as u32, d)),
+            )
+        };
         match &be.g.kind {
             BoxKind::Vcenter => self.vcenter_package(&be, list, ships),
             BoxKind::Math(k) => {
@@ -1829,7 +1864,9 @@ impl Exec<'_> {
                     // (etex.web: TeXXeT's checks of `hpack`)
                     crate::pack::lr_fix(&mut list);
                 }
-                let packed = hpack(list, be.g.spec, &params, if be.g.adjusted { Some(&mut adj) } else { None });
+                let origins = if orig.len() == list.len() { origins_of(&orig, &list, be.g.adjusted) } else { Origins::default() };
+                let mut packed = hpack(list, be.g.spec, &params, if be.g.adjusted { Some(&mut adj) } else { None });
+                packed.b.origins = origins;
                 if let Some(r) = packed.report {
                     let cx = self.show_ctx(std::slice::from_ref(&Item::Box(Arc::new(packed.b.clone()))));
                     let s = report(r, &packed.b, self.box_place(), &cx);
@@ -1843,7 +1880,9 @@ impl Exec<'_> {
                     fuzz: self.dimen_par(DimenPar::Vfuzz),
                     overfull_rule: 0,
                 };
-                let packed = vpack(list, be.g.spec, be.boxmaxdepth, &params);
+                let origins = origins_of(&orig, &list, false);
+                let mut packed = vpack(list, be.g.spec, be.boxmaxdepth, &params);
+                packed.b.origins = origins;
                 if let Some(r) = packed.report {
                     let cx = self.show_ctx(std::slice::from_ref(&Item::Box(Arc::new(packed.b.clone()))));
                     let s = report(r, &packed.b, self.box_place(), &cx);
