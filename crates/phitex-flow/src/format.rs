@@ -1005,6 +1005,7 @@ mod tag_tests {
             Meaning::MuskipRef(1),
             Meaning::ToksRef(1),
             Meaning::Font(null_font()),
+            Meaning::XMathCharGiven(1),
         ]
     }
 
@@ -1022,6 +1023,7 @@ mod tag_tests {
             Meaning::MuskipRef(_) => 9,
             Meaning::ToksRef(_) => 10,
             Meaning::Font(_) => 11,
+            Meaning::XMathCharGiven(_) => 12,
         }
     }
 
@@ -1031,6 +1033,7 @@ mod tag_tests {
             Whatsit::Write { stream: 1, toks: Arc::new(Vec::new()) },
             Whatsit::Close { stream: 1 },
             Whatsit::Special(Arc::from("a")),
+            Whatsit::SavePos,
         ]
     }
 
@@ -1040,6 +1043,7 @@ mod tag_tests {
             Whatsit::Write { .. } => 1,
             Whatsit::Close { .. } => 2,
             Whatsit::Special(_) => 3,
+            Whatsit::SavePos => 4,
         }
     }
 

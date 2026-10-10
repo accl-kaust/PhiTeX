@@ -774,7 +774,12 @@ pub(crate) fn every_key() -> Vec<Key> {
         Key::Ended,
         Key::MainTail,
         Key::MainDepth,
-        Key::GlyphUnicode(f),
+        Key::GlyphUnicode(f.clone()),
+        Key::InterChar(0, 1),
+        Key::NativeDir(f),
+        Key::InputEncoding,
+        Key::DefaultEncoding,
+        Key::LinebreakLocale,
     ]
 }
 
@@ -828,6 +833,11 @@ pub(crate) fn key_index(k: &Key) -> usize {
         Key::MainTail => 43,
         Key::MainDepth => 44,
         Key::GlyphUnicode(_) => 45,
+        Key::InterChar(..) => 46,
+        Key::NativeDir(_) => 47,
+        Key::InputEncoding => 48,
+        Key::DefaultEncoding => 49,
+        Key::LinebreakLocale => 50,
     }
 }
 

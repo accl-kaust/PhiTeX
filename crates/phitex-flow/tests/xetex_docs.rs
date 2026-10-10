@@ -311,6 +311,13 @@ fn format_file() -> Option<Arc<Vec<u8>>> {
         return Some(b.clone());
     }
     let _one = ONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // (PHITEX_XELATEX_FMT: one made by `xelatex_format` in an earlier
+    // process of the same build)
+    if let Some(b) = std::env::var_os("PHITEX_XELATEX_FMT").and_then(|p| std::fs::read(p).ok()) {
+        let b = Arc::new(b);
+        *f = Some(b.clone());
+        return Some(b);
+    }
     let fls = oracle_dir().join("fmt/xelatex.fls");
     let ini = std::fs::read_to_string(&fls)
         .ok()?
@@ -352,6 +359,12 @@ fn latex(dir: &Path, name: &str) {
             assert!(t.as_bytes() == &want[..], "{name} ({o:?}): the .aux file is not xelatex's");
         }
     }
+}
+
+/// The format alone (tests/xetex/job.sh runs it first, with a time limit).
+#[test]
+fn xelatex_format() {
+    let _ = format_file();
 }
 
 fn xdoc(name: &str) {
