@@ -2808,6 +2808,8 @@ fn sort_reads(reads: &mut Vec<(Key, u32, Val)>) {
 /// content).
 #[derive(Default)]
 struct Scratch {
+    /// The name `\csname` gathers.
+    csname: String,
     /// The node's reads so far (read once each, by index), once there are
     /// many.
     seen: FxMap<Key, u32>,
