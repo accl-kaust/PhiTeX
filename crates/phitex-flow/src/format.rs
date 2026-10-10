@@ -505,6 +505,10 @@ impl Writer<'_> {
             Key::FontParams(f) => font_key(self, 31, f),
             Key::LastFont => self.byte(32),
             Key::Interaction => self.byte(33),
+            Key::GlyphUnicode(g) => {
+                self.byte(34);
+                self.str(g);
+            }
             _ => return Err(format!("a name a format does not hold: {k:?}")),
         }
         Ok(())
@@ -874,6 +878,7 @@ impl Reader<'_> {
             31 => Key::FontParams(Arc::from(self.str()?)),
             32 => Key::LastFont,
             33 => Key::Interaction,
+            34 => Key::GlyphUnicode(Arc::from(self.str()?)),
             _ => return Err(bad("a name")),
         })
     }

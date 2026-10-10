@@ -2,7 +2,7 @@
 //! `<job>.display.jsonl` against its PDF, as a reader of the PDF sees it.
 //!
 //! - Each page's glyphs (`glyphs`, forms walked where drawn: glyph
-//!   origins' order) are the codes `partex_engine::pdftext::page_codes`
+//!   origins' order) are the codes `phitex_codecs::pdftext::page_codes`
 //!   finds in the PDF's page, one for one: each one placed shows the same
 //!   code at the same point, bit for bit, in the font the page's
 //!   resources name (`/BaseFont`, its subset tag dropped); a `null` stands
@@ -23,8 +23,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use partex_engine::pdfread::{Dict, Doc, Obj, Ref};
-use partex_engine::pdftext::{self, DocText, Font, FontId, Item, ListRes, Text, XKind};
+use phitex_codecs::pdfread::{Dict, Doc, Obj, Ref};
+use phitex_codecs::pdftext::{self, DocText, Font, FontId, Item, ListRes, Text, XKind};
 use serde_json::Value;
 
 /// A stream's part of a side file.

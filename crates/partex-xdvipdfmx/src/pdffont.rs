@@ -233,7 +233,7 @@ impl Dpx {
             data.extend_from_slice(p);
         }
         data.extend_from_slice(&counter.to_le_bytes());
-        let digest = partex_engine::md5::md5(&data);
+        let digest = phitex_codecs::md5::md5(&data);
         let mut tag = [0u8; 6];
         for i in 0..6 {
             tag[i] = b'A' + digest[i] % 26;

@@ -1792,9 +1792,9 @@ mod font_tests {
                 std::fs::write(std::format!("{dir}/{name}.inv.txt"), &out).unwrap();
             }
             let font = std::fs::read(path).unwrap();
-            if !want.is_empty() && hex(&partex_engine::md5::md5(&font)) == font_md5 {
+            if !want.is_empty() && hex(&phitex_codecs::md5::md5(&font)) == font_md5 {
                 assert_eq!(
-                    hex(&partex_engine::md5::md5(out.as_bytes())),
+                    hex(&phitex_codecs::md5::md5(out.as_bytes())),
                     want,
                     "{name}"
                 );

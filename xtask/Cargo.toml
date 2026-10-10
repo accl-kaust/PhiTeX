@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-partex-engine = { path = "../crates/partex-engine" }
+phitex-codecs = { path = "../crates/phitex-codecs" }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 # (`float_roundtrip`: a number read back is the `f64` written, which the
