@@ -2637,10 +2637,18 @@ pub fn run_piece(
             // read); a paragraph's node is looked at if a node of its
             // paragraph ran)
             let oc = oldc.expect("an old chain");
+            let split = env.split_inputs();
             let mut j = oi;
             while j < stop {
                 let n = &oc.nodes[j];
                 if j > oi && para_fresh && matches!(n.kind, Kind::Par | Kind::End) {
+                    break;
+                }
+                // (where a run ends is the build's to say again, as for a
+                // node looked at: a cut, an `\input` whose file is read in
+                // the piece now — shared, it would end the run at the file
+                // the layout reads in it, a restructure every round)
+                if j > oi && (n.kind == Kind::Cut || (n.kind == Kind::Input && !split)) {
                     break;
                 }
                 if oc.starts_para(j) {
@@ -4461,6 +4469,17 @@ impl<'a> Exec<'a> {
             }
             return;
         };
+        // (pdfTeX's frozen `\pdfprimitive`: the next token, as its name's
+        // primitive)
+        let (t, m) = if m == Meaning::Prim(Prim::PdfPrimitiveExec) {
+            let Some(x) = self.next_raw() else { return };
+            match self.primitive_of(&x) {
+                Some(p) => (x, Meaning::Prim(p)),
+                None => return,
+            }
+        } else {
+            (t, m)
+        };
         self.cmd = t.clone();
         let (global, long, outer) = (
             std::mem::take(&mut self.st.global),
@@ -4637,6 +4656,10 @@ impl<'a> Exec<'a> {
                 }
             }
             Prim::Space => self.ex_space(),
+            // (pdfTeX's extensions: no whatsit, done where they are met)
+            Prim::ParTokenName => self.par_token_name(),
+            Prim::PdfFont(0) => self.pdf_font_expand(),
+            Prim::PdfFont(1) => self.pdf_font_attr(),
             Prim::Char => {
                 let t = self.cmd.clone();
                 self.char_cmd_num(&t);
