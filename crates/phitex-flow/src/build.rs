@@ -1146,6 +1146,10 @@ struct State {
     fold_defs: FoldDefs,
     predicted: Vec<(Pos, Vec<Key>)>,
     memo_new: Vec<Arc<Memo>>,
+    /// The scheduler stalled (no task, the round not finished, nothing
+    /// running that could change that): the pieces' states then. The
+    /// build fails with it, never hangs.
+    stalled: Option<String>,
 }
 
 struct Shared {
@@ -2154,6 +2158,7 @@ impl Build {
             fold_defs: Vec::new(),
             predicted,
             memo_new: Vec::new(),
+            stalled: None,
         };
         for (k, key) in marks {
             mark(&mut state, k, key);
@@ -2227,6 +2232,11 @@ impl Build {
         self.virt = virt.ids;
         self.next_id = self.next_id.max(virt.next);
         let mut st = sh.state.into_inner().expect("state");
+        // (a stalled scheduler is a bug of the core: the build fails with
+        // the pieces' states, it does not hang)
+        if let Some(d) = st.stalled.take() {
+            panic!("{d}");
+        }
         if st.restructure {
             // (the sequence changed: the runs are kept, with what each still
             // has to read again)
@@ -2408,6 +2418,7 @@ impl Build {
         if last && st.restructure {
             errors.push("the sequence of pieces did not settle (\\input)".into());
         }
+
         if opts.dump {
             for (i, pg) in st.pages.iter().enumerate() {
                 let _ = writeln!(dump, "page {}: {} items", i + 1, pg.b.list.len());
@@ -2710,6 +2721,8 @@ fn lock(sh: &Shared) -> MutexGuard<'_, State> {
 
 fn worker(sh: &Shared, id: usize) {
     let mut g = lock(sh);
+    // (the parked runs' generation when this idle worker last looked)
+    let mut stall_seen: Option<u64> = None;
     loop {
         if g.done {
             return;
@@ -2720,9 +2733,21 @@ fn worker(sh: &Shared, id: usize) {
                 sh.cv.notify_all();
                 return;
             }
-            g = sh.cv.wait(g).expect("state");
+            // (nothing to do, nothing running, the round not finished:
+            // nothing will ever change that — or every run in progress is
+            // parked and no definition came since the last look)
+            let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
+            let gen_now = sh.generation.load(Ordering::Acquire);
+            if g.inflight == 0 || (parked == g.inflight && stall_seen == Some(gen_now)) {
+                stall(&mut g, sh, parked);
+                return;
+            }
+            let (g2, timeout) = sh.cv.wait_timeout(g, STALL_CHECK).expect("state");
+            g = g2;
+            stall_seen = (timeout.timed_out() && g.inflight > 0).then_some(gen_now);
             continue;
         };
+        stall_seen = None;
         g.stats.tasks[id] += 1;
         g.inflight += 1;
         drop(g);
@@ -2743,6 +2768,58 @@ fn worker(sh: &Shared, id: usize) {
             _ => g.stats.time_ship += dt,
         }
     }
+}
+
+/// How long an idle worker waits before it looks whether every run in
+/// progress is parked for good.
+const STALL_CHECK: Duration = Duration::from_secs(2);
+
+/// The scheduler stalled: the round ends, the runs parked stop, and the
+/// build fails with the pieces' states.
+fn stall(g: &mut State, sh: &Shared, parked: usize) {
+    let mut d = format!(
+        "the scheduler stalled: {} running ({parked} parked), settled {}/{}, scan at {} (free {}, done {}), {} to ship, {} logs queued ({} running), {} breaks queued;",
+        g.inflight,
+        g.settled,
+        g.p.len(),
+        g.scan_next,
+        g.scan.is_some(),
+        g.scan_done,
+        g.unshipped,
+        g.log_queue.len(),
+        g.logs_running,
+        g.break_queue.len()
+    );
+    let mut shown = 0;
+    for k in 0..g.p.len() {
+        let ps = &g.p[k];
+        if ps.status == Status::Done && ps.dirty.is_empty() {
+            continue;
+        }
+        if shown == 40 {
+            d.push_str(" ...");
+            break;
+        }
+        shown += 1;
+        let _ = write!(
+            d,
+            " piece {k}: {:?} entry {:?} enterable {} dirty {} parked {} run {};",
+            ps.status,
+            ps.entry,
+            entry_ready(g, k, false),
+            ps.dirty.len(),
+            sh.waiting[k].load(Ordering::Acquire),
+            ps.run.is_some()
+        );
+    }
+    g.stalled = Some(d);
+    g.done = true;
+    for c in &sh.cancel {
+        c.store(true, Ordering::Relaxed);
+    }
+    sh.restructuring.store(true, Ordering::Release);
+    sh.cv.notify_all();
+    notify(sh, true);
 }
 
 fn finished(g: &State) -> bool {
@@ -4091,12 +4168,7 @@ impl PieceEnv<'_> {
                     if !wait(self) {
                         return (val, Src::Initial, lo, hi);
                     }
-                    let mut p = sh.park.lock().expect("park");
-                    sh.waiting[self.k].store(true, Ordering::Release);
-                    while sh.generation.load(Ordering::Acquire) == seen && !sh.restructuring.load(Ordering::Acquire) {
-                        p = sh.parked.wait(p).expect("park");
-                    }
-                    sh.waiting[self.k].store(false, Ordering::Release);
+                    park(sh, self.k, seen);
                 }
                 continue;
             };
@@ -4151,12 +4223,7 @@ impl PieceEnv<'_> {
                 if !wait(self) {
                     return (val, Src::Initial, lo, hi);
                 }
-                let mut p = sh.park.lock().expect("park");
-                sh.waiting[self.k].store(true, Ordering::Release);
-                while sh.generation.load(Ordering::Acquire) == seen && !sh.restructuring.load(Ordering::Acquire) {
-                    p = sh.parked.wait(p).expect("park");
-                }
-                sh.waiting[self.k].store(false, Ordering::Release);
+                park(sh, self.k, seen);
             }
         }
     }
@@ -4636,6 +4703,32 @@ fn changed_at(g: &mut State, sh: &Shared, pos: Pos, keys: Vec<Key>) -> bool {
         }
     }
     any
+}
+
+/// Piece `k`'s run waits until a definition is installed (the
+/// generation moves from `seen`) or the round ends. Every thread parked
+/// so, none idle to look (`worker`), and nothing installed for a while:
+/// the scheduler stalled ([`stall`]).
+fn park(sh: &Shared, k: usize, seen: u64) {
+    let moved = || sh.generation.load(Ordering::Acquire) != seen || sh.restructuring.load(Ordering::Acquire);
+    let mut p = sh.park.lock().expect("park");
+    sh.waiting[k].store(true, Ordering::Release);
+    while !moved() {
+        let (p2, t) = sh.parked.wait_timeout(p, STALL_CHECK).expect("park");
+        p = p2;
+        if t.timed_out() && !moved() {
+            drop(p);
+            {
+                let mut g = lock(sh);
+                let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
+                if !moved() && parked == g.inflight && g.inflight == g.stats.work.len() {
+                    stall(&mut g, sh, parked);
+                }
+            }
+            p = sh.park.lock().expect("park");
+        }
+    }
+    sh.waiting[k].store(false, Ordering::Release);
 }
 
 /// Wakes the parked readers, and the idle workers if there is new work.
