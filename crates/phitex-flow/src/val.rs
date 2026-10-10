@@ -680,8 +680,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -
         Key::Job => Val::Name(Arc::from("texput")),
         Key::SplitMarks => Val::SplitMarks(Arc::from(Vec::new())),
         // (and no `\pdffontattr` text)
-        Key::Format | Key::FontAttr(_) => Val::Name(Arc::from("")),
-        Key::LastMatch(0) => Val::Name(Arc::from("")),
+        Key::Format | Key::FontAttr(_) | Key::LastMatch(0) => Val::Name(Arc::from("")),
         // (above, 0: the job not ended; no magnification fixed yet; batch
         // mode, as the oracles run TeX: `-interaction=batchmode`; a build
         // gives its own, `Build::set_interaction`: IniTeX's

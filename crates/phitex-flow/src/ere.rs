@@ -205,7 +205,7 @@ impl Matcher<'_> {
             Node::Group(x, g) => {
                 let was = self.caps.borrow().get(*g).copied().flatten();
                 let hit = self.m(x, i, &mut |j| {
-                    let old = std::mem::replace(&mut self.caps.borrow_mut()[*g], Some((i, j)));
+                    let old = self.caps.borrow_mut()[*g].replace((i, j));
                     if k(j) {
                         return true;
                     }
@@ -253,15 +253,18 @@ pub fn is_match(pattern: &str, s: &str, icase: bool) -> Option<bool> {
     Some((0..=s.len()).any(|i| m.m(&n, i, &mut |_| true)))
 }
 
+/// Each subexpression's match (start, end), the whole one first.
+pub type Caps = Vec<Option<(usize, usize)>>;
+
 /// Where `pattern` matches in `s` (`None`: not a valid expression; then
 /// `None`: no match): the whole match (index 0, leftmost-longest) and each
 /// group's submatch, in characters.
-pub fn find(pattern: &str, s: &str, icase: bool) -> Option<Option<Vec<Option<(usize, usize)>>>> {
+pub fn find(pattern: &str, s: &str, icase: bool) -> Option<Option<Caps>> {
     let (n, groups) = parse(pattern)?;
     let s: Vec<char> = s.chars().collect();
     let m = Matcher { s: &s, icase, caps: std::cell::RefCell::new(vec![None; groups + 1]) };
     for start in 0..=s.len() {
-        let mut best: Option<(usize, Vec<Option<(usize, usize)>>)> = None;
+        let mut best: Option<(usize, Caps)> = None;
         m.m(&n, start, &mut |j| {
             if best.as_ref().is_none_or(|(e, _)| j > *e) {
                 best = Some((j, m.caps.borrow().clone()));
