@@ -2,21 +2,29 @@
 # bench/flow-par/pgfrounds.sh: the pgf manual's first pdflatex run (cold, no .aux)
 # through `phitex --compat=pdflatex -threads=1`, with PHITEX_SCHED: rounds,
 # files discovered (settled runs reading a file), each round's wall and
-# setup, the last (inline) round. CAPS: round caps to try (PHITEX_ROUND_CAP).
+# setup, the last (inline) round. CAPS: round caps to try (PHITEX_ROUND_CAP);
+# THREADS: -threads values to try. The format is made first, on a one-line
+# document without PHITEX_SCHED, into a cache of the job's own
+# (PHITEX_CACHE_DIR): the rounds counted are the manual's only.
 set -u
 R=${r:-/tmp/pgfr-results}; W=${w:-/tmp/pgfr-work}/pgfr; mkdir -p "$R" "$W"
 SRC=${SRC:-$PWD/bench/flow-par/pgfman-src}
-CAPS=${CAPS:-"300"}; LIMIT=${LIMIT:-2400}
+CAPS=${CAPS:-"300"}; THREADS=${THREADS:-"1"}; LIMIT=${LIMIT:-2400}
 export SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1
 log() { echo "$*" | tee -a "$R/summary.txt"; }
 log "commit $(git rev-parse --short HEAD); node $(cat /proc/sys/kernel/hostname); $(ls $SRC | wc -l) source files"
 cargo build --release -q -p phitex-cli > "$R/build.log" 2>&1 || { log "build failed"; tail -30 "$R/build.log"; exit 1; }
 B=$PWD/target/release/phitex
+export PHITEX_CACHE_DIR=$W/cache; rm -rf $W/cache $W/fmt; mkdir -p $W/fmt
+printf '%s\n' '\documentclass{article}\begin{document}x\end{document}' > $W/fmt/one.tex
+read s rss st < <(cd $W/fmt && python3 $OLDPWD/bench/flow-par/meas.py $R/out-format.txt $B --compat=pdflatex -threads=8 -interaction=batchmode one.tex)
+log "format (pdflatex, made on a one-line document): ${s}s maxrss ${rss}KB status $st; $(ls $W/cache/formats/*.fmt 2>/dev/null | xargs -r ls -l | awk '{print $5}') bytes"
+for th in $THREADS; do
 for cap in $CAPS; do
   rm -rf $W/run; cp -a $SRC $W/run
-  f=$R/sched-cap$cap.tsv; rm -f $f
-  read s rss st < <(cd $W/run && PHITEX_ROUND_CAP=$cap PHITEX_SCHED=$f python3 $OLDPWD/bench/flow-par/meas.py $R/out-cap$cap.txt timeout $LIMIT $B --compat=pdflatex -threads=1 -interaction=batchmode pgfmanual.tex)
-  log "cap $cap: ${s}s maxrss ${rss}KB status $st (124 = timeout); pdf $(ls -l $W/run/pgfmanual.pdf 2>/dev/null | awk '{print $5}') bytes"
+  f=$R/sched-t$th-cap$cap.tsv; rm -f $f
+  read s rss st < <(cd $W/run && PHITEX_ROUND_CAP=$cap PHITEX_SCHED=$f python3 $OLDPWD/bench/flow-par/meas.py $R/out-t$th-cap$cap.txt timeout $LIMIT $B --compat=pdflatex -threads=$th -interaction=batchmode pgfmanual.tex)
+  log "threads $th, cap $cap: ${s}s maxrss ${rss}KB status $st (124 = timeout); pdf $(ls -l $W/run/pgfmanual.pdf 2>/dev/null | awk '{print $5}') bytes"
   tail -5 $W/run/pgfmanual.log 2>/dev/null | sed 's/^/    log: /' >> "$R/summary.txt"
   python3 - "$f" <<'PY' | tee -a "$R/summary.txt"
 import sys, collections
@@ -36,5 +44,7 @@ for b, rs in by.items():
     print('    walls: ' + ' '.join(f"{w:.0f}" for w in walls))
 PY
   { echo "  slow nodes (five per run over 1 s):"; zcat -f $f | grep -P "^N\t" | sort -t"	" -k3,3nr | head -15 | cut -c1-300; } | tee -a "$R/summary.txt"
+  grep -m1 -o "the sequence of pieces did not settle.\{0,160\}" $R/out-t$th-cap$cap.txt | sed 's/^/  stop: /' | tee -a "$R/summary.txt"
   gzip -f $f
+done
 done
