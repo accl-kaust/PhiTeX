@@ -1825,24 +1825,21 @@ impl Run {
     /// (SyncTeX, `build::sync`). Reads nothing.
     pub fn box_defs(&self) -> Vec<(u32, Arc<crate::item::BoxNode>)> {
         let mut v: Vec<(u32, Arc<crate::item::BoxNode>)> = Vec::new();
-        match &self.lean {
-            Some(l) => {
-                for (key, d, _, val) in &l.defs {
-                    if let (Key::Box(_), Val::Box(b)) = (key, val) {
-                        v.push((*d, b.clone()));
-                    }
+        if let Some(l) = &self.lean {
+            for (key, d, _, val) in &l.defs {
+                if let (Key::Box(_), Val::Box(b)) = (key, val) {
+                    v.push((*d, b.clone()));
                 }
             }
-            None => {
-                let c = &self.chain;
-                for (key, ds) in &c.defs_of {
-                    if !matches!(key, Key::Box(_)) {
-                        continue;
-                    }
-                    for &(d, j) in ds {
-                        if let Some(Val::Box(b)) = c.nodes[d as usize].defs().get(j as usize).map(|x| &x.val) {
-                            v.push((d, b.clone()));
-                        }
+        } else {
+            let c = &self.chain;
+            for (key, ds) in &c.defs_of {
+                if !matches!(key, Key::Box(_)) {
+                    continue;
+                }
+                for &(d, j) in ds {
+                    if let Some(Val::Box(b)) = c.nodes[d as usize].defs().get(j as usize).map(|x| &x.val) {
+                        v.push((d, b.clone()));
                     }
                 }
             }

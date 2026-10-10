@@ -146,7 +146,7 @@ impl Writer {
             let key = Some(Arc::<str>::from(name.as_str()));
             if !c.tag_of.contains_key(&key) {
                 c.tags.push(input_name(&cwd, found));
-                c.tag_of.insert(key, c.tags.len() as u32);
+                c.tag_of.insert(key, u32::try_from(c.tags.len()).unwrap_or(u32::MAX));
             }
         }
         let pieces: HashMap<u32, phitex_flow::build::sync::SyncPiece> =
@@ -166,13 +166,12 @@ impl Writer {
                 .get(&(Arc::as_ptr(&b) as usize))
                 .and_then(|&i| olds[i].take())
                 .filter(|o| Arc::ptr_eq(&o.b, &b) && same_runs(&o.sync.deps));
-            let sync = match &kept {
-                Some(o) => o.sync.clone(),
-                None => {
-                    st.walked += 1;
-                    let idx = idx.get_or_insert_with(|| build.sync_index());
-                    Arc::new(build.page_sync(j, idx).unwrap_or_default())
-                }
+            let sync = if let Some(o) = &kept {
+                o.sync.clone()
+            } else {
+                st.walked += 1;
+                let idx = idx.get_or_insert_with(|| build.sync_index());
+                Arc::new(build.page_sync(j, idx).unwrap_or_default())
             };
             let mut resolved = Vec::with_capacity(sync.deps.len());
             for d in &sync.deps {
@@ -182,7 +181,7 @@ impl Writer {
                 } else {
                     let name = file.as_deref().unwrap_or("texput.tex");
                     c.tags.push(input_name(&cwd, name));
-                    let t = c.tags.len() as u32;
+                    let t = u32::try_from(c.tags.len()).unwrap_or(u32::MAX);
                     c.tag_of.insert(file, t);
                     t
                 };
@@ -366,6 +365,7 @@ fn crc32(data: &[u8]) -> u32 {
         let mut t = [0u32; 256];
         let mut i = 0;
         while i < 256 {
+            #[allow(clippy::cast_possible_truncation, reason = "i < 256")]
             let mut c = i as u32;
             let mut k = 0;
             while k < 8 {

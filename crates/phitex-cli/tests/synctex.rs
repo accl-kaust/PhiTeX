@@ -26,6 +26,16 @@
 //! edit's SyncTeX file is the cold build's of the edited text, made
 //! walking the remade pages only, within the word budget.
 
+#![allow(
+    clippy::doc_markdown,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::many_single_char_names,
+    clippy::absurd_extreme_comparisons,
+    reason = "a test's arithmetic on positions in points and scaled points; ALIGNMENT_POINTS goes to 0"
+)]
+
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

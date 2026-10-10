@@ -278,7 +278,7 @@ impl<'a> Walk<'a> {
                 let pn = *run.para_nodes().get(j as usize)?;
                 let line = kept.lines.get(j as usize)?.as_ref()?.get(li as usize)?;
                 let p = self.place(k, pn);
-                Some((Ctx::Line { k, para: &**para, pn, line: &**line }, p))
+                Some((Ctx::Line { k, para, pn, line }, p))
             }
             Anchor::Made { k, maker } => {
                 let p = self.place(k, maker);
@@ -326,18 +326,15 @@ impl<'a> Walk<'a> {
         {
             return r;
         }
-        match Self::item_node(ctx, this, i) {
-            Some((k, n)) => {
-                let p = self.place(k, n);
-                (Ctx::Made { k, maker: n }, p)
-            }
-            None => {
-                let p = match ctx {
-                    Ctx::Fixed(p) => *p,
-                    _ => NOWHERE,
-                };
-                (Ctx::Fixed(p), p)
-            }
+        if let Some((k, n)) = Self::item_node(ctx, this, i) {
+            let p = self.place(k, n);
+            (Ctx::Made { k, maker: n }, p)
+        } else {
+            let p = match ctx {
+                Ctx::Fixed(p) => *p,
+                _ => NOWHERE,
+            };
+            (Ctx::Fixed(p), p)
         }
     }
 
