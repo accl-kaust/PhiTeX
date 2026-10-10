@@ -609,7 +609,6 @@ fn doc_rules() {
 }
 
 #[test]
-#[ignore = "runaway: P2"]
 fn doc_tikz() {
     doc("tikz");
 }
