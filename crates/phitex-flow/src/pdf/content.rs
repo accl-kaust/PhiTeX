@@ -595,7 +595,7 @@ pub fn min_bp_val(dd: i32) -> i32 {
 /// the order met) and shown by the font `ff_of` says they share their
 /// object with (themselves where it says nothing), with `fixed` the
 /// values the first page fixed.
-pub fn page_body(p: &Page, ship: &Ship, numbers: &Numbers, ff_of: &dyn Fn(u32) -> Option<u32>, fixed: Fixed) -> PageBody {
+pub fn page_body(p: &Page, ship: &Ship, numbers: &Numbers, extra: &[Arc<str>], ff_of: &dyn Fn(u32) -> Option<u32>, fixed: Fixed) -> PageBody {
     let b = &p.b;
     let dd = fixed.decimal_digits;
     // (§752: "Calculate page dimensions and margins")
@@ -606,7 +606,7 @@ pub fn page_body(p: &Page, ship: &Ship, numbers: &Numbers, ff_of: &dyn Fn(u32) -
     let mut w = W {
         o: Out::new(),
         numbers,
-        extra: Vec::new(),
+        extra: extra.to_vec(),
         ff_of,
         dd,
         min_bp_val: min_bp_val(dd),
@@ -647,10 +647,10 @@ pub fn page_body(p: &Page, ship: &Ship, numbers: &Numbers, ff_of: &dyn Fn(u32) -
 /// A page's own guess of `set_ff`: each font shares its object with the
 /// first font of the same name the page sets (the fold checks the guess
 /// against the fonts the pages before used).
-pub fn guess_ff(p: &Page, numbers: &Numbers) -> Vec<(u32, u32)> {
+pub fn guess_ff(p: &Page, numbers: &Numbers, extra: &[Arc<str>]) -> Vec<(u32, u32)> {
     let mut first: Vec<(String, u32)> = Vec::new();
     let mut out = Vec::new();
-    let mut extra: Vec<Arc<str>> = Vec::new();
+    let mut extra: Vec<Arc<str>> = extra.to_vec();
     let walk = |list: &[Item], f: &mut dyn FnMut(&Arc<Font>)| {
         fn rec(list: &[Item], f: &mut dyn FnMut(&Arc<Font>)) {
             for it in list {
@@ -694,11 +694,13 @@ pub fn guess_ff(p: &Page, numbers: &Numbers) -> Vec<(u32, u32)> {
 /// Page `p`'s value in PDF mode, where it is shipped: its stream made
 /// with its own guesses (its own `\pdfdecimaldigits` as the fixed one,
 /// [`guess_ff`] for the fonts' objects); the fold makes it again where
-/// they do not hold.
-pub fn page(p: &Page, ship: &Ship, numbers: &Numbers) -> PageBody {
-    let ff = guess_ff(p, numbers);
+/// they do not hold, and where a font's number (`numbers`, then `extra`
+/// as the DVI writer numbers them where the page is shipped) is not the
+/// job's.
+pub fn page(p: &Page, ship: &Ship, numbers: &Numbers, extra: &[Arc<str>]) -> PageBody {
+    let ff = guess_ff(p, numbers, extra);
     let ff_of = |k: u32| ff.iter().find(|x| x.0 == k).map(|x| x.1).filter(|&o| o != k);
-    page_body(p, ship, numbers, &ff_of, Fixed::of(ship))
+    page_body(p, ship, numbers, extra, &ff_of, Fixed::of(ship))
 }
 
 /// A page body with nothing (a page shipped in DVI mode in a PDF file).

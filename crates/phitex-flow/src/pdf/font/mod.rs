@@ -5,3 +5,4 @@
 pub mod enc;
 pub mod map;
 pub mod t1;
+pub mod unicode;

@@ -9,7 +9,7 @@
 //! contents shows the title again (those come from the `.toc` or a mark,
 //! not from the title's bytes). Its point is the glyph's origin on the
 //! page, in PDF points from the bottom left, which the caller computes
-//! from the PDF (`partex_engine::pdftext` places every code a page shows,
+//! from the PDF (`phitex_codecs::pdftext` places every code a page shows,
 //! in the order glyph origins are given in).
 
 use crate::{Project, text};

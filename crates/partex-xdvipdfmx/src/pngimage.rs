@@ -1,6 +1,6 @@
 //! pngimage.c, pngimage.h: PNG images.
 //!
-//! C reads PNGs with libpng (1.6, TeX Live's); here partex_engine::png, the
+//! C reads PNGs with libpng (1.6, TeX Live's); here phitex_codecs::png, the
 //! port pdfTeX uses, reads them: [`PngInfo`] holds what libpng's
 //! `png_structp` + `png_infop` tell pngimage.c. Its inflater keeps a 32 KiB
 //! window whatever the zlib header says (`PNG_MAXIMUM_INFLATE_WINDOW` on).
@@ -10,7 +10,7 @@
 
 use alloc::sync::Arc;
 
-use partex_engine::png;
+use phitex_codecs::png;
 
 use crate::ctx::CompatMode;
 use crate::fmt::round_acc;
@@ -89,7 +89,7 @@ pub struct PngText {
 }
 
 /// libpng's `png_structp` + `png_infop` as pngimage.c reads them: what
-/// `partex_engine::png::read_info` gives (the header, PLTE, tRNS, gAMA,
+/// `phitex_codecs::png::read_info` gives (the header, PLTE, tRNS, gAMA,
 /// pHYs, the valid bits), the values of the chunks it judged but does not
 /// keep (sRGB, cHRM, iCCP, the text chunks before the image data), and
 /// the transformations asked for.
@@ -128,7 +128,7 @@ impl PngInfo {
     fn gamma(&self) -> f64 {
         0.00001 * f64::from(self.info.gamma)
     }
-    /// The transformations asked, as partex_engine::png takes them.
+    /// The transformations asked, as phitex_codecs::png takes them.
     fn transforms(&self) -> png::Transforms {
         png::Transforms {
             trns_to_alpha: false,
@@ -150,7 +150,7 @@ pub fn check_for_png(fp: &mut MemFile) -> i32 {
 }
 
 /// The values of the chunks before the first IDAT that libpng keeps and
-/// partex_engine::png only judges: the first sRGB's intent, the first
+/// phitex_codecs::png only judges: the first sRGB's intent, the first
 /// cHRM's values, the first iCCP's name and inflated profile, and every
 /// text chunk (an iTXt as `png_handle_iTXt` reads it). Whether libpng
 /// accepted a chunk is `read_info`'s valid bits; text chunks libpng
@@ -181,7 +181,7 @@ fn chunk_values(d: &[u8], png: &mut PngInfo) {
                 iccp = true;
                 if let Some(kw) = data.iter().position(|&c| c == 0)
                     && let Some(z) = data.get(kw + 2..)
-                    && let Some(mut profile) = partex_engine::inflate::inflate(z)
+                    && let Some(mut profile) = phitex_codecs::inflate::inflate(z)
                     && profile.len() >= 4
                 {
                     let n = u32::from_be_bytes([profile[0], profile[1], profile[2], profile[3]]);
@@ -614,7 +614,7 @@ impl Dpx {
         }
 
         /* png_read_end(): the chunks after the image data are not read
-         * (partex_engine::png reads up to the image data's end) */
+         * (phitex_codecs::png reads up to the image data's end) */
 
         if color_type != PNG_COLOR_TYPE_PALETTE && info.bits_per_component >= 8 && info.height > 64
         {

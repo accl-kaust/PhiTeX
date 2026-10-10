@@ -4,7 +4,7 @@
 //! position, with the text over it for selecting; paths for `TikZ`). No
 //! PDF renderer, no raster.
 //!
-//! Read through `partex_engine::pdfread`, so any PDF pdfTeX writes reads
+//! Read through `phitex_codecs::pdfread`, so any PDF pdfTeX writes reads
 //! (compressed or not, object streams, cross-reference streams): the page
 //! tree; each page's content streams (text, paths, colours, the graphics
 //! state, images, forms, clips, axial and radial shadings: `sh` and
@@ -35,7 +35,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use partex_engine::pdfread;
+use phitex_codecs::pdfread;
 use std::fmt::Write as _;
 
 use crate::esc;
@@ -249,7 +249,7 @@ impl Lex<'_> {
     }
 }
 
-/// An open PDF: [`pdfread`](partex_engine::pdfread)'s, which reads any
+/// An open PDF: [`pdfread`](phitex_codecs::pdfread)'s, which reads any
 /// PDF pdfTeX or xdvipdfmx writes (compressed streams, object streams,
 /// cross-reference streams), its objects given to the walk below as
 /// [`O`]s. Opened once, drawn from page by page.
@@ -1247,7 +1247,7 @@ impl Pdf {
             return Vec::new();
         };
         let [x0, _, _, y1] = pg.media;
-        partex_engine::pdftext::page_codes(&self.doc, &pg)
+        phitex_codecs::pdftext::page_codes(&self.doc, &pg)
             .iter()
             .map(|s| (s.x - x0, y1 - s.y))
             .collect()

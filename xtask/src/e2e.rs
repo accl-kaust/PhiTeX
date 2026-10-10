@@ -3346,7 +3346,7 @@ fn compare(o: &Path, p: &Path, no_term: bool) -> Result<Vec<String>> {
 fn synctex_masked(gz: &[u8], dir: &Path) -> Option<String> {
     let body = gz.get(10..gz.len().checked_sub(8)?)?;
     let mut text = Vec::new();
-    if !partex_engine::inflate::inflate_raw(body, &mut text) {
+    if !phitex_codecs::inflate::inflate_raw(body, &mut text) {
         return None;
     }
     let text = String::from_utf8_lossy(&text);

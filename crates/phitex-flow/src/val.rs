@@ -178,6 +178,12 @@ pub enum Key {
     /// How many fonts `\pdfcopyfont` and `\letterspacefont` made from a
     /// font so far (`Val::Int`), global: the next one's number.
     FontCopies(Arc<str>),
+    /// pdfTeX's `\pdfglyphtounicode` entry of a glyph name (global, its
+    /// `glyph_unicode_tree`): `Val::Int` (a code; -1 none), `Val::Name` (a
+    /// string of hexadecimal digits); read by the PDF file's ToUnicode
+    /// maps at the end of the job. The empty name is defined (`Val::Int`)
+    /// once any entry is: the tree exists.
+    GlyphUnicode(Arc<str>),
 }
 
 impl Key {
@@ -206,7 +212,7 @@ impl std::hash::Hash for Key {
             }
             Key::FontCode(k, n) => {
                 n.hash(h);
-                h.write_u64((66 << 40) | u64::from(*k));
+                h.write_u64((70 << 40) | u64::from(*k));
             }
             Key::HyphenChar(n)
             | Key::SkewChar(n)
@@ -216,7 +222,8 @@ impl std::hash::Hash for Key {
             | Key::FontParams(n)
             | Key::FontExpand(n)
             | Key::FontAttr(n)
-            | Key::FontCopies(n) => {
+            | Key::FontCopies(n)
+            | Key::GlyphUnicode(n) => {
                 n.hash(h);
                 h.write_u64(self.word());
             }
@@ -237,7 +244,8 @@ impl PartialEq for Key {
             | (Key::FontParams(a), Key::FontParams(b))
             | (Key::FontExpand(a), Key::FontExpand(b))
             | (Key::FontAttr(a), Key::FontAttr(b))
-            | (Key::FontCopies(a), Key::FontCopies(b)) => Arc::ptr_eq(a, b) || a == b,
+            | (Key::FontCopies(a), Key::FontCopies(b))
+            | (Key::GlyphUnicode(a), Key::GlyphUnicode(b)) => Arc::ptr_eq(a, b) || a == b,
             (Key::FontCode(k, a), Key::FontCode(l, b)) => k == l && (Arc::ptr_eq(a, b) || a == b),
             (Key::Cat(a), Key::Cat(b)) => a == b,
             (Key::FontDimen(a, k), Key::FontDimen(b, l)) => k == l && (Arc::ptr_eq(a, b) || a == b),
@@ -273,6 +281,7 @@ impl Key {
             Key::Ended => w(40, 0),
             Key::MainTail => w(64, 0),
             Key::MainDepth => w(65, 0),
+            Key::GlyphUnicode(_) => w(66, 0),
             Key::Active(x) => w(1, c(x)),
             Key::Cat(x) => w(2, c(x)),
             Key::Lccode(x) => w(3, c(x)),
@@ -496,6 +505,7 @@ impl fmt::Display for Shown<'_, Key> {
             Key::Ended => write!(f, "the end of the job"),
             Key::MainTail => write!(f, "the main vertical list's last item"),
             Key::MainDepth => write!(f, "the main vertical list's \\prevdepth"),
+            Key::GlyphUnicode(x) => write!(f, "\\pdfglyphtounicode ({x})"),
             Key::Interaction => write!(f, "\\interactionmode"),
             Key::ETeXMode => write!(f, "e-TeX mode"),
             Key::Patterns(l) => write!(f, "\\patterns (language {l})"),
@@ -644,7 +654,7 @@ pub fn initial(key: &Key, _font: &Arc<Font>, etex: bool, cs: Option<&CsTable>) -
         | Key::MagSet
         | Key::Interaction => Val::Int(0),
         Key::GluePar(_) | Key::Skip(_) | Key::Muskip(_) => Val::Glue(Arc::new(Glue::default())),
-        Key::Box(_) | Key::File(_) | Key::ReadStream(_) | Key::MainTail => Val::Void,
+        Key::Box(_) | Key::File(_) | Key::ReadStream(_) | Key::MainTail | Key::GlyphUnicode(_) => Val::Void,
         Key::Parshape => Val::Parshape(Arc::new(Vec::new())),
         Key::Font | Key::FamFont(..) => Val::Font(crate::tfm::null_font()),
         Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
