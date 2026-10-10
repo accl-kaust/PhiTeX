@@ -1,65 +1,190 @@
-//! The modern command line: `phitex build`, `phitex watch`, … What to
-//! build comes from the command line, `phitex.toml` and the main file's
-//! magic comments (`config.rs`); the build is a session on phitex-flow
-//! (`session.rs`), to the cross-run fixpoint, BibTeX and makeindex
-//! included.
+//! The modern command line: `phitex build`, `phitex watch`, … (clap: the
+//! options anywhere on the line, a coloured sectioned `--help`, typos
+//! suggested). What to build comes from the command line, `phitex.toml`
+//! and the main file's magic comments (`config.rs`); the build is a
+//! session on phitex-flow (`session.rs`), to the cross-run fixpoint,
+//! BibTeX and makeindex included; the terminal is `ui.rs`.
 
-use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use clap::builder::styling::{AnsiColor, Styles};
+use clap::{Args, ColorChoice, Parser, Subcommand};
 
 use crate::config;
-use crate::session::{self, Job, Report, Session};
+use crate::session::{self, Job, Report, Session, Status};
 use crate::tex::{self, Output};
+pub use crate::ui::{Style, Ui, ms};
 
-const USAGE: &str = "\
+const STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Green.on_default().bold())
+    .usage(AnsiColor::Green.on_default().bold())
+    .literal(AnsiColor::Cyan.on_default().bold())
+    .placeholder(AnsiColor::Cyan.on_default())
+    .error(AnsiColor::Red.on_default().bold())
+    .valid(AnsiColor::Green.on_default())
+    .invalid(AnsiColor::Yellow.on_default());
+
+const ABOUT: &str = "\
 PhiTeX: TeX documents as dataflow graphs (phitex-flow)
 
-usage: phitex <command> [options] [file.tex]
+A document is built to its fixpoint (BibTeX and makeindex included) and,
+under `watch`, kept up to date as its files and the editor's buffers
+change, the pages live in the browser.";
 
-commands:
-  build    build the document to its fixpoint (BibTeX and makeindex included)
-  watch    build, then rebuild whenever an input changes (an edit of the
-           graph), the pages live in the browser; keys on standard input:
-           r rebuild, q quit
-  check    build without writing the outputs
-  clean    remove the files a build writes (clean --all: the cache of
-           formats and TeX Live's links too; no file needed)
-  sync     sync FILE:LINE[:COL]: the watch's viewer shows that line;
-           sync --pdf PAGE X Y [file.tex]: the source of what is at (X, Y)
-           (big points from the page's top left), sync --tex FILE LINE
-           [file.tex]: where that line is shown, both from <job>.synctex.gz
-           (printed as TeX Live's `synctex edit` and `synctex view` do)
-  outline  the document's structure, read from its source without TeX
+/// The sections after the options (styled as clap's headers; the escapes
+/// are stripped when colour is off).
+fn after_help() -> String {
+    let h = STYLES.get_header();
+    let l = STYLES.get_literal();
+    format!(
+        "{h}Examples:{h:#}
+  {l}phitex build paper.tex{l:#}              the PDF beside it, pdflatex for LaTeX
+  {l}phitex watch -o out paper.tex{l:#}       rebuild on each change, the viewer in the browser
+  {l}phitex -j 4 check paper.tex{l:#}         build on four threads, write nothing
+  {l}phitex sync paper.tex:120{l:#}           the watch's viewer shows that line
+  {l}phitex clean --all{l:#}                  remove the cache of formats
 
-options:
-  -o, --output-dir DIR     where the outputs go (TeX's -output-directory)
-      --engine NAME        pdflatex (default for LaTeX), latex, pdftex (default
-                           otherwise), etex or tex; lualatex runs the system's
-                           lualatex as an external process: NOT incremental
-                           (each build runs the whole document, watch reruns
-                           it on each saved change), its own SyncTeX
-      --output-format F    dvi, pdf or xdv (latex/pdflatex, etex/pdftex; xdv: xelatex's -no-pdf)
-      --ini [--etex]       the file is the whole job: no format (TeX's -ini)
-  -j, --jobs N             threads (default: all cores)
-      --interaction MODE   batchmode (default), nonstopmode, scrollmode
-  -v, --verbose            each run, and each warning's first lines
-  -q, --quiet              only problems and the result
-      --open               watch: open the viewer in the browser
-      --view, --no-view    watch: serve the live viewer (default: on a terminal)
-      --editor CMD         watch: where a double-click on a page opens its source
-      --copy-pdf[=DIR]     copy the PDF after each successful build
-      --no-synctex         no <job>.synctex.gz (build and watch write it)
-      --recorder           write <job>.fls
-  -V, --version
-  -h, --help
+{h}Configuration:{h:#}
+  Without a file, `phitex.toml` (here or above) names it:
+      main = \"paper.tex\"   engine = \"pdflatex\"   output-dir = \"out\"
+      copy-pdf = true   (or a directory, relative to phitex.toml's)
+  A `% !TEX program = …` or `% !TEX root = …` comment in the file is honoured.
 
-Without a file, `phitex.toml` (here or above) names it:
-    main = \"paper.tex\"   engine = \"pdflatex\"   output-dir = \"out\"
-    copy-pdf = true   (or a directory, relative to phitex.toml's)
-A `% !TEX program = …` or `% !TEX root = …` comment in the file is honoured.
+{h}TeX's own command line:{h:#}
+  run phitex as `pdflatex`, `latex`, `pdftex`, `etex` or `tex` (a link to
+  it), or `phitex --compat=NAME …`: web2c's options, one run."
+    )
+}
 
-For TeX's own command line run phitex as `pdflatex`, `latex`, `pdftex`,
-`etex` or `tex`, or `phitex --compat=NAME …`.";
+#[derive(Parser, Debug)]
+#[command(
+    name = "phitex",
+    bin_name = "phitex",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (phitex-flow)"),
+    about = "PhiTeX: TeX documents as dataflow graphs (phitex-flow)",
+    long_about = ABOUT,
+    after_help = after_help(),
+    styles = STYLES,
+    color = ColorChoice::Auto,
+    infer_subcommands = true,
+    arg_required_else_help = true,
+    disable_help_subcommand = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Sub>,
+    #[command(flatten)]
+    opts: Opts,
+}
+
+#[derive(Subcommand, Debug)]
+enum Sub {
+    /// Build the document to its fixpoint (BibTeX and makeindex included)
+    Build {
+        #[arg(value_name = "FILE")]
+        file: Option<String>,
+    },
+    /// Build, then rebuild whenever an input changes (an edit of the
+    /// graph), the pages live in the browser; keys on standard input:
+    /// r rebuild, q quit
+    Watch {
+        #[arg(value_name = "FILE")]
+        file: Option<String>,
+    },
+    /// Build without writing the outputs
+    Check {
+        #[arg(value_name = "FILE")]
+        file: Option<String>,
+    },
+    /// Remove the files a build writes
+    Clean {
+        /// The cache of formats and TeX Live's links too (no file needed)
+        #[arg(long)]
+        all: bool,
+        #[arg(value_name = "FILE")]
+        file: Option<String>,
+    },
+    /// FILE:LINE[:COL]: the watch's viewer shows that line. `--pdf PAGE X Y
+    /// [FILE.tex]`: the source of what is at (X, Y) (big points from the
+    /// page's top left); `--tex FILE LINE [FILE.tex]`: where that line is
+    /// shown; both from <job>.synctex.gz, printed as TeX Live's `synctex`
+    #[command(verbatim_doc_comment)]
+    Sync {
+        #[arg(value_name = "ARGS", trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// The document's structure, read from its source without TeX
+    /// (`phitex outline --help`)
+    Outline {
+        #[arg(value_name = "ARGS", trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+/// The options, accepted anywhere on the line.
+#[derive(Args, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
+struct Opts {
+    /// Where the outputs go (TeX's -output-directory)
+    #[arg(short = 'o', long = "output-dir", alias = "output-directory", alias = "out-dir", value_name = "DIR", global = true)]
+    output_dir: Option<String>,
+    /// pdflatex (default for LaTeX), latex, pdftex (default otherwise),
+    /// etex, tex; lualatex runs the system's lualatex: NOT incremental
+    #[arg(long, alias = "program", value_name = "NAME", global = true)]
+    engine: Option<String>,
+    /// dvi, pdf or xdv (xdv: xelatex's -no-pdf)
+    #[arg(long, value_name = "FORMAT", value_parser = ["dvi", "pdf", "xdv"], global = true)]
+    output_format: Option<String>,
+    /// The file is the whole job: no format (TeX's -ini)
+    #[arg(long, global = true)]
+    ini: bool,
+    /// With --ini: e-TeX's extended mode
+    #[arg(long, global = true)]
+    etex: bool,
+    /// Threads (default: all cores)
+    #[arg(short = 'j', long = "jobs", alias = "threads", value_name = "N", global = true)]
+    jobs: Option<usize>,
+    /// batchmode (default), nonstopmode, scrollmode or errorstopmode
+    #[arg(long, value_name = "MODE", value_parser = ["batchmode", "nonstopmode", "scrollmode", "errorstopmode"], global = true)]
+    interaction: Option<String>,
+    /// Each run, each warning's first lines, an engine failure's whole
+    /// message (-vv: more)
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    verbose: u8,
+    /// Only problems and the result
+    #[arg(short, long, global = true)]
+    quiet: bool,
+    /// watch: open the viewer in the browser
+    #[arg(long, global = true)]
+    open: bool,
+    /// watch: serve the live viewer (the default on a terminal)
+    #[arg(long, global = true, overrides_with = "no_view")]
+    view: bool,
+    /// watch: no live viewer
+    #[arg(long, global = true, overrides_with = "view")]
+    no_view: bool,
+    /// watch: where a double-click on a page opens its source (code,
+    /// emacsclient, nvim, … or a command with {file} {line} {col}; else
+    /// PHITEX_EDITOR, VISUAL, EDITOR)
+    #[arg(long, value_name = "CMD", global = true)]
+    editor: Option<String>,
+    /// Copy the PDF after each successful build into DIR (default: where
+    /// phitex was run)
+    #[arg(long, value_name = "DIR", num_args = 0..=1, require_equals = true, default_missing_value = "", global = true)]
+    copy_pdf: Option<String>,
+    #[arg(long, global = true, hide = true)]
+    no_copy_pdf: bool,
+    /// Write <job>.synctex.gz (the default; --synctex=0: not)
+    #[arg(long, value_name = "N", num_args = 0..=1, require_equals = true, default_missing_value = "1", global = true)]
+    synctex: Option<String>,
+    /// No <job>.synctex.gz
+    #[arg(long, global = true)]
+    no_synctex: bool,
+    /// Write <job>.fls
+    #[arg(long, global = true)]
+    recorder: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -68,9 +193,11 @@ pub enum Command {
     Check,
     Clean,
     Sync,
+    Outline,
 }
 
-/// The modern command line's options.
+/// The modern command line's options, as the rest of the program reads
+/// them.
 #[derive(Debug, Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Options {
@@ -94,87 +221,66 @@ pub struct Options {
     pub all: bool,
 }
 
-fn parse(args: &[String]) -> Result<Options, String> {
-    let command = match args.first().map(String::as_str) {
-        Some("build" | "b") => Command::Build,
-        Some("watch" | "w") => Command::Watch,
-        Some("check" | "c") => Command::Check,
-        Some("clean") => Command::Clean,
-        Some("sync") => Command::Sync,
-        Some("-h" | "--help" | "help") | None => return Err(String::new()),
-        Some(a) if a.starts_with('-') || a.starts_with('&') || a.starts_with('\\') => {
-            return Err(format!(
-                "`{a}` is a TeX command-line argument; use `phitex --compat=pdftex {a} …` \
-                 (or run phitex as pdftex, pdflatex, …) for TeX's command line"
-            ));
-        }
-        Some(c) => return Err(format!("unknown command `{c}`")),
-    };
-    let mut o = Options { command: Some(command), ..Options::default() };
-    let mut it = args[1..].iter();
-    while let Some(a) = it.next() {
-        let (name, inline) = match a.split_once('=') {
-            Some((n, v)) if n.starts_with("--") => (n, Some(v.to_owned())),
-            _ => (a.as_str(), None),
+impl Cli {
+    fn into_options(self) -> Options {
+        let (command, file, all) = match self.command {
+            Some(Sub::Build { file }) => (Some(Command::Build), file, false),
+            Some(Sub::Watch { file }) => (Some(Command::Watch), file, false),
+            Some(Sub::Check { file }) => (Some(Command::Check), file, false),
+            Some(Sub::Clean { all, file }) => (Some(Command::Clean), file, all),
+            Some(Sub::Sync { args }) => (Some(Command::Sync), args.into_iter().next(), false),
+            Some(Sub::Outline { args }) => (Some(Command::Outline), args.into_iter().next(), false),
+            None => (None, None, false),
         };
-        let mut value = || -> Result<String, String> {
-            inline
-                .clone()
-                .or_else(|| it.next().cloned())
-                .ok_or_else(|| format!("`{name}` needs a value"))
-        };
-        match name {
-            "-o" | "--output-dir" | "--output-directory" | "--out-dir" => o.output_dir = Some(value()?),
-            "--engine" | "--program" => o.engine = Some(value()?),
-            "--output-format" | "-output-format" => {
-                o.output = Some(match value()?.as_str() {
-                    "dvi" => Output::Dvi,
-                    "pdf" => Output::Pdf,
-                    "xdv" => Output::Xdv,
-                    v => return Err(format!("--output-format: `{v}` is not dvi, pdf or xdv")),
-                });
-            }
-            "--ini" => o.ini = true,
-            "--etex" => o.etex = true,
-            "-j" | "--jobs" | "--threads" => {
-                o.threads = Some(value()?.parse().map_err(|_| "--jobs needs a number".to_owned())?);
-            }
-            "--interaction" => {
-                let v = value()?;
-                o.interaction = Some(
-                    crate::compat::interaction(&v).ok_or_else(|| format!("--interaction: `{v}` is not a mode"))?,
-                );
-            }
-            "-v" | "--verbose" => o.verbose += 1,
-            "-vv" => o.verbose += 2,
-            "-q" | "--quiet" => o.quiet = true,
-            "--open" => o.open = true,
-            "--view" => o.view = Some(true),
-            "--no-view" => o.view = Some(false),
-            "--editor" => o.editor = Some(value()?),
-            "--synctex" => o.synctex = Some(inline.as_deref().is_none_or(|v| v.trim() != "0")),
-            "--no-synctex" => o.synctex = Some(false),
-            "--recorder" => o.recorder = true,
-            // (the value only inline: `--copy-pdf paper.tex` names the file)
-            "--copy-pdf" => {
-                o.copy_pdf = Some(match &inline {
-                    Some(d) if d.is_empty() => return Err("`--copy-pdf=` needs a directory".into()),
-                    Some(d) => config::CopyPdf::Dir(d.clone()),
-                    None => config::CopyPdf::Invocation,
-                });
-            }
-            "--no-copy-pdf" => o.copy_pdf = Some(config::CopyPdf::Off),
-            "--all" if command == Command::Clean => o.all = true,
-            "-h" | "--help" => return Err(String::new()),
-            f if f.starts_with('-') && f.len() > 1 => return Err(format!("unknown option `{f}`")),
-            f => {
-                if o.file.replace(f.to_owned()).is_some() {
-                    return Err(String::from("more than one file given"));
-                }
-            }
+        let o = self.opts;
+        Options {
+            command,
+            file,
+            engine: o.engine,
+            output: o.output_format.as_deref().map(|f| match f {
+                "dvi" => Output::Dvi,
+                "xdv" => Output::Xdv,
+                _ => Output::Pdf,
+            }),
+            ini: o.ini,
+            etex: o.etex,
+            output_dir: o.output_dir,
+            threads: o.jobs,
+            interaction: o.interaction.as_deref().and_then(crate::compat::interaction),
+            verbose: o.verbose,
+            quiet: o.quiet,
+            open: o.open,
+            view: if o.view {
+                Some(true)
+            } else if o.no_view {
+                Some(false)
+            } else {
+                None
+            },
+            editor: o.editor,
+            copy_pdf: if o.no_copy_pdf {
+                Some(config::CopyPdf::Off)
+            } else {
+                o.copy_pdf.map(|d| if d.is_empty() { config::CopyPdf::Invocation } else { config::CopyPdf::Dir(d) })
+            },
+            synctex: if o.no_synctex { Some(false) } else { o.synctex.map(|v| v.trim() != "0") },
+            recorder: o.recorder,
+            all,
         }
     }
-    Ok(o)
+}
+
+/// The command line's options (`args` after the program's name). The
+/// letters `b`, `w` and `c` are `build`, `watch` and `check`.
+fn parse(args: &[String]) -> Result<Options, clap::Error> {
+    let first = match args.first().map(String::as_str) {
+        Some("b") => Some("build"),
+        Some("w") => Some("watch"),
+        Some("c") => Some("check"),
+        other => other,
+    };
+    let line = std::iter::once("phitex").chain(first).chain(args.iter().skip(1).map(String::as_str));
+    Cli::try_parse_from(line).map(Cli::into_options)
 }
 
 /// What to build.
@@ -310,168 +416,136 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
     })
 }
 
-/// Colours on standard error, unless it is no terminal or `NO_COLOR`.
-pub struct Style {
-    color: bool,
-}
-
-impl Style {
-    pub fn detect() -> Style {
-        let force = std::env::var_os("CLICOLOR_FORCE").is_some_and(|v| v != "0");
-        let no = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
-        Style { color: !no && (force || std::io::stderr().is_terminal()) }
-    }
-
-    fn paint(&self, code: &str, s: &str) -> String {
-        if self.color { format!("\x1b[{code}m{s}\x1b[0m") } else { s.to_owned() }
-    }
-
-    pub fn red(&self, s: &str) -> String {
-        self.paint("1;31", s)
-    }
-
-    pub fn yellow(&self, s: &str) -> String {
-        self.paint("33", s)
-    }
-
-    pub fn green(&self, s: &str) -> String {
-        self.paint("32", s)
-    }
-
-    pub fn dim(&self, s: &str) -> String {
-        self.paint("2", s)
-    }
-}
-
-/// Milliseconds of a duration, for the terminal.
-pub fn ms(d: std::time::Duration) -> String {
-    let m = d.as_secs_f64() * 1e3;
-    if m >= 1000.0 { format!("{:.2} s", m / 1e3) } else { format!("{m:.1} ms") }
+/// What the spinner says is built: `pdflatex paper.tex`.
+pub fn what(t: &Target, job: &Job) -> String {
+    if job.ini { format!("{} (ini)", t.file) } else { format!("{} {}", t.engine.name, t.file) }
 }
 
 /// What a build did, for the terminal: each run (verbose), the tools, the
-/// result, the errors, the warnings.
-pub fn report(t: &Target, s: &Session, r: &Report, wrote: Option<&Path>, o: &Options, st: &Style) {
+/// errors as reports, the warnings, the result line.
+pub fn report(t: &Target, s: &Session, r: &Report, wrote: Option<&Path>, o: &Options, ui: &Ui, checked: bool) {
+    let st = ui.st;
     let job = &s.job;
     if o.verbose > 0 {
         for (k, run) in r.runs.iter().enumerate() {
-            eprintln!(
-                "{}",
-                st.dim(&format!(
-                    "  run {}: {} ({}): {} of {} commands, {} of {} pieces ran, {} pages ({} kept)",
-                    k + 1,
-                    ms(run.wall),
-                    run.why,
-                    run.commands_run,
-                    run.commands,
-                    run.pieces_ran,
-                    run.pieces,
-                    run.pages,
-                    run.pages_reused
-                ))
-            );
+            ui.line(&st.dim(&format!(
+                "  run {}: {} ({}): {} of {} commands, {} of {} pieces ran, {} pages ({} kept)",
+                k + 1,
+                ms(run.wall),
+                run.why,
+                run.commands_run,
+                run.commands,
+                run.pieces_ran,
+                run.pieces,
+                run.pages,
+                run.pages_reused
+            )));
         }
     }
     if !o.quiet {
         for n in &r.notes {
-            eprintln!("{}", st.dim(&format!("  {n}")));
+            ui.line(&st.dim(&format!("  {n}")));
         }
     }
     let log = job.out_dir.join(format!("{}.log", job.jobname));
-    for e in r.out.errors.iter().take(if o.verbose > 0 { 100 } else { 10 }) {
-        eprintln!("{} {}", st.red("!"), crate::format::bare(e));
-    }
+    let text = r.log_text();
+    crate::problems::show(ui, &r.out.errors, &text, &t.file);
     if r.out.errors.len() > 10 && o.verbose == 0 {
-        eprintln!("  … {} errors in all (-v shows more; the log: {})", r.out.errors.len(), log.display());
+        ui.line(&format!("  … {} errors in all (-v shows more; the log: {})", r.out.errors.len(), log.display()));
     }
     if !r.unsettled.is_empty() {
-        eprintln!(
-            "{}: the written files did not settle in {} runs: {} still changed (oscillating?)",
-            st.yellow("warning"),
+        ui.warning(&format!(
+            "the written files did not settle in {} runs: {} still changed (oscillating?)",
             r.runs.len(),
             r.unsettled.join(", ")
-        );
+        ));
     }
-    let warn = crate::warnings::lines(&r.log_text(), o.verbose > 0);
+    let warnings: usize = crate::warnings::summarize(&text).iter().map(|g| g.1).sum();
+    let warn = crate::warnings::lines(&text, o.verbose > 0);
     if !warn.is_empty() && !o.quiet {
-        eprintln!("{}: {} ({})", st.yellow("warnings"), warn.iter().filter(|l| !l.starts_with(' ')).cloned().collect::<Vec<_>>().join(", "), log.display());
+        ui.line(&format!(
+            "{}: {} ({})",
+            st.yellow("warnings"),
+            warn.iter().filter(|l| !l.starts_with(' ')).cloned().collect::<Vec<_>>().join(", "),
+            log.display()
+        ));
         for l in warn.iter().filter(|l| l.starts_with(' ')) {
-            eprintln!("{}", st.dim(l));
+            ui.line(&st.dim(l));
         }
     }
-    let what = match (wrote, r.main_output()) {
-        (Some(p), Some((_, b))) => {
-            format!("{}: {} page{}, {} bytes", p.display(), r.pages(), if r.pages() == 1 { "" } else { "s" }, b.len())
-        }
-        (None, Some(_)) => format!("{} pages (not written)", r.pages()),
-        _ => "no pages of output".to_owned(),
-    };
-    let runs = r.runs.len();
-    let line = format!(
-        "{what}, in {} ({} run{}{})",
-        ms(r.wall),
-        runs,
-        if runs == 1 { "" } else { "s" },
-        if job.ini { String::new() } else { format!(", {}", t.engine.name) }
-    );
-    if r.out.errors.is_empty() {
-        eprintln!("{}", st.green(&line));
-    } else {
-        eprintln!("{} ({} error{})", st.red(&line), r.out.errors.len(), if r.out.errors.len() == 1 { "" } else { "s" });
-    }
+    ui.result(&crate::ui::Outcome {
+        output: wrote,
+        file: &t.file,
+        pages: r.pages(),
+        bytes: r.main_output().map(|(_, b)| b.len()),
+        wall: r.wall,
+        errors: r.out.errors.len(),
+        warnings,
+        runs: r.runs.len(),
+        engine: (!job.ini).then_some(t.engine.name),
+        checked,
+    });
 }
 
 /// Copy the written PDF into `dir`.
-fn copy_pdf(main: &Path, dir: &Path, st: &Style) {
+fn copy_pdf(main: &Path, dir: &Path, ui: &Ui) {
     if main.extension().is_none_or(|e| e != "pdf") {
         return;
     }
     let Some(name) = main.file_name() else { return };
     let to = dir.join(name);
     if let Err(e) = std::fs::copy(main, &to) {
-        eprintln!("{}: can't copy the PDF to {}: {e}", st.yellow("warning"), to.display());
+        ui.warning(&format!("can't copy the PDF to {}: {e}", to.display()));
     }
 }
 
 /// `phitex build` / `phitex check`: one session to the fixpoint. The exit
 /// status.
-fn build(t: &Target, o: &Options, st: &Style, write: bool) -> i32 {
+fn build(t: &Target, o: &Options, ui: &Ui, write: bool) -> i32 {
     let job = match job(t, o) {
         Ok(j) => j,
         Err(e) => {
-            eprintln!("{}: {e}", st.red("error"));
+            ui.error(&e);
             return 2;
         }
     };
     for n in session::waiting_notes(&job) {
-        eprintln!("{}: {n}", st.yellow("note"));
+        ui.line(&format!("{}: {n}", ui.st.yellow("note")));
     }
-    let quiet = o.quiet;
-    let mut s = match Session::new(job, &mut |n: &str| {
-        if !quiet {
-            eprintln!("{}", st.dim(&format!("phitex: {n}")));
-        }
-    }) {
+    let status = Arc::new(Status::default());
+    let spin = ui.spin(what(t, &job), status.clone());
+    let mut s = match Session::new(job, status.clone(), &mut |n: &str| ui.note(n)) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("{}: {e}", st.red("error"));
+            spin.done();
+            ui.error(&e);
             return 1;
         }
     };
-    let r = s.build();
+    let r = match crate::ui::catch(|| s.build()) {
+        Ok(r) => r,
+        Err(m) => {
+            spin.done();
+            ui.failed("the build", &m);
+            return 1;
+        }
+    };
     let mut main = None;
     if write {
+        status.set("writing the outputs");
         match s.write(&r) {
             Ok(w) => main = w.main,
             Err(e) => {
-                eprintln!("{}: {e}", st.red("error"));
+                spin.done();
+                ui.error(&e);
                 return 1;
             }
         }
     }
-    report(t, &s, &r, main.as_deref(), o, st);
+    spin.done();
+    report(t, &s, &r, main.as_deref(), o, ui, !write);
     if let (Some(m), Some(d), true) = (&main, &t.copy_pdf, r.out.errors.is_empty()) {
-        copy_pdf(m, d, st);
+        copy_pdf(m, d, ui);
     }
     i32::from(!r.out.errors.is_empty())
 }
@@ -482,7 +556,7 @@ const CLEAN: &[&str] = &[
     "ind", "ilg", "nav", "snm", "vrb", "bcf", "run.xml", "glo", "gls", "glg", "loa", "thm",
 ];
 
-fn clean(t: &Target, st: &Style) -> i32 {
+fn clean(t: &Target, ui: &Ui) -> i32 {
     let dir = t.output_dir.as_ref().map_or_else(|| PathBuf::from("."), PathBuf::from);
     let mut n = 0;
     for ext in CLEAN {
@@ -491,17 +565,17 @@ fn clean(t: &Target, st: &Style) -> i32 {
             n += 1;
         }
     }
-    eprintln!("{}", st.green(&format!("removed {n} file{}", if n == 1 { "" } else { "s" })));
+    ui.line(&ui.st.green(&format!("removed {n} file{}", if n == 1 { "" } else { "s" })));
     0
 }
 
-fn clean_all(st: &Style) -> ! {
+fn clean_all(ui: &Ui) -> ! {
     let d = tex::cache_dir();
     match std::fs::remove_dir_all(&d) {
-        Ok(()) => eprintln!("{}", st.green(&format!("removed {}", d.display()))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => eprintln!("nothing cached ({})", d.display()),
+        Ok(()) => ui.line(&ui.st.green(&format!("removed {}", d.display()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ui.line(&format!("nothing cached ({})", d.display())),
         Err(e) => {
-            eprintln!("{}: {}: {e}", st.red("error"), d.display());
+            ui.error(&format!("{}: {e}", d.display()));
             std::process::exit(1);
         }
     }
@@ -510,10 +584,8 @@ fn clean_all(st: &Style) -> ! {
 
 /// Run the modern command line with `args`.
 pub fn main(args: &[String]) -> ! {
-    if matches!(args.first().map(String::as_str), Some("-V" | "--version")) {
-        println!("PhiTeX {} (phitex-flow)", env!("CARGO_PKG_VERSION"));
-        std::process::exit(0);
-    }
+    // (their own command lines: `outline`'s options, `sync --pdf` and
+    // `sync --tex`)
     if args.first().is_some_and(|a| a == "outline") {
         crate::outline::main(&args[1..]);
     }
@@ -522,45 +594,49 @@ pub fn main(args: &[String]) -> ! {
     }
     let o = match parse(args) {
         Ok(o) => o,
-        Err(e) if e.is_empty() => {
-            println!("{USAGE}");
-            std::process::exit(if args.is_empty() { 2 } else { 0 });
-        }
-        Err(e) => {
-            eprintln!("phitex: {e}\n\n{USAGE}");
-            std::process::exit(2);
-        }
+        Err(e) => e.exit(),
     };
-    let st = Style::detect();
+    let ui = Ui::new(Style::detect(), o.verbose, o.quiet);
+    crate::ui::capture_panics(o.verbose > 0);
     if o.all {
-        clean_all(&st);
+        clean_all(&ui);
     }
-    let command = o.command.unwrap_or(Command::Build);
-    if command == Command::Sync {
-        let Some(place) = o.file.as_deref() else {
-            eprintln!("{}: sync: give FILE:LINE[:COL]", st.red("error"));
-            std::process::exit(2);
-        };
-        std::process::exit(crate::view::sync_command(place));
+    let Some(command) = o.command else {
+        ui.error("no command given: build, watch, check, clean, sync or outline (`phitex --help`)");
+        std::process::exit(2);
+    };
+    match command {
+        Command::Sync => {
+            let Some(place) = o.file.as_deref() else {
+                ui.error("sync: give FILE:LINE[:COL]");
+                std::process::exit(2);
+            };
+            std::process::exit(crate::view::sync_command(place));
+        }
+        Command::Outline => {
+            let rest: Vec<String> = args.iter().skip_while(|a| *a != "outline").skip(1).cloned().collect();
+            crate::outline::main(&rest);
+        }
+        _ => {}
     }
     let t = resolve(&o).unwrap_or_else(|e| {
-        eprintln!("{}: {e}", st.red("error"));
+        ui.error(&e);
         std::process::exit(2);
     });
     #[cfg(not(target_family = "wasm"))]
     if let Some(p) = t.external {
         match command {
-            Command::Build | Command::Check => std::process::exit(crate::external::main_build(p, &t, &o, &st)),
-            Command::Watch => crate::external::main_watch(p, &t, &o, &st),
+            Command::Build | Command::Check => std::process::exit(crate::external::main_build(p, &t, &o, ui.st)),
+            Command::Watch => crate::external::main_watch(p, &t, &o, ui.st),
             _ => {}
         }
     }
     match command {
-        Command::Build => std::process::exit(build(&t, &o, &st, true)),
-        Command::Check => std::process::exit(build(&t, &o, &st, false)),
-        Command::Clean => std::process::exit(clean(&t, &st)),
-        Command::Watch => crate::watch::main(&t, &o, &st),
-        Command::Sync => unreachable!("answered above"),
+        Command::Build => std::process::exit(build(&t, &o, &ui, true)),
+        Command::Check => std::process::exit(build(&t, &o, &ui, false)),
+        Command::Clean => std::process::exit(clean(&t, &ui)),
+        Command::Watch => crate::watch::main(&t, &o, &ui),
+        Command::Sync | Command::Outline => unreachable!("answered above"),
     }
 }
 
@@ -579,8 +655,35 @@ mod tests {
         assert_eq!(o.threads, Some(4));
         assert_eq!(o.output, Some(Output::Dvi));
         assert_eq!(o.file.as_deref(), Some("x.tex"));
-        assert!(parse(&v(&["-ini", "x"])).unwrap_err().contains("TeX command-line"));
         assert!(parse(&v(&["build", "--frob"])).is_err());
-        assert!(parse(&v(&["watch", "--no-view", "--ini", "--etex", "a.tex"])).unwrap().ini);
+        let o = parse(&v(&["watch", "--no-view", "--ini", "--etex", "a.tex"])).unwrap();
+        assert!(o.ini && o.etex);
+        assert_eq!(o.view, Some(false));
+        assert_eq!(parse(&v(&["b", "x.tex"])).unwrap().command, Some(Command::Build));
+    }
+
+    #[test]
+    fn options_anywhere() {
+        for line in [
+            ["-o", "out", "-j", "2", "watch", "f.tex"],
+            ["watch", "-o", "out", "-j", "2", "f.tex"],
+            ["watch", "f.tex", "-o", "out", "-j", "2"],
+        ] {
+            let o = parse(&v(&line)).unwrap();
+            assert_eq!(o.command, Some(Command::Watch), "{line:?}");
+            assert_eq!(o.output_dir.as_deref(), Some("out"), "{line:?}");
+            assert_eq!(o.threads, Some(2), "{line:?}");
+            assert_eq!(o.file.as_deref(), Some("f.tex"), "{line:?}");
+        }
+        let o = parse(&v(&["build", "--copy-pdf", "--synctex=0", "-vv", "x.tex"])).unwrap();
+        assert_eq!(o.verbose, 2);
+        assert_eq!(parse(&v(&["-v", "build", "x.tex"])).unwrap().verbose, 1);
+        assert!(matches!(o.copy_pdf, Some(config::CopyPdf::Invocation)));
+        assert_eq!(o.synctex, Some(false));
+        assert_eq!(o.file.as_deref(), Some("x.tex"));
+        let e = parse(&v(&["build", "--frob", "x.tex"])).unwrap_err().to_string();
+        assert!(e.contains("--frob"), "{e}");
+        assert!(parse(&v(&["clean", "--all"])).unwrap().all);
+        assert_eq!(parse(&v(&["sync", "a.tex:3"])).unwrap().file.as_deref(), Some("a.tex:3"));
     }
 }

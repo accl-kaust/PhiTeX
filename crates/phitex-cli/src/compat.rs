@@ -220,7 +220,8 @@ pub fn main(progname: &str, args: &[String]) -> ! {
     for n in session::waiting_notes(&job) {
         eprintln!("{progname}: {n}");
     }
-    let mut s = Session::new(job, &mut |n: &str| eprintln!("{progname}: {n}")).unwrap_or_else(|e| {
+    let status = std::sync::Arc::new(session::Status::default());
+    let mut s = Session::new(job, status, &mut |n: &str| eprintln!("{progname}: {n}")).unwrap_or_else(|e| {
         eprintln!("{progname}: {e}");
         std::process::exit(1);
     });

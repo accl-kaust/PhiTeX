@@ -121,6 +121,23 @@ impl Default for Options {
     }
 }
 
+/// What a build is doing now, for a caller that shows progress while it
+/// runs (the CLI's spinner): counters the build's threads store into and
+/// another thread reads, never waited on. Given by [`Build::set_progress`].
+#[derive(Debug, Default)]
+pub struct Progress {
+    /// The round under way (from 1; `Stats::rounds` when it is over).
+    pub round: AtomicUsize,
+    /// The pieces settled this round, of the pieces in all.
+    pub settled: AtomicUsize,
+    pub total: AtomicUsize,
+    /// The pages shipped this round.
+    pub pages: AtomicUsize,
+    /// 0 idle, 1 laying the sequence out, 2 running the pieces, 3 writing
+    /// the output.
+    pub phase: std::sync::atomic::AtomicU8,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
     pub pieces: usize,
@@ -582,6 +599,8 @@ type Join = (Arc<[char]>, Vec<Arc<[char]>>, Arc<[char]>, Arc<[usize]>);
 /// the pages with their DVI.
 pub struct Build {
     font: Arc<Font>,
+    /// Where the build reports what it does now (none: nobody looks).
+    board: Option<Arc<Progress>>,
     /// The folds' values the last build's reads were validated against
     /// (the page builder's quantities, the files the run wrote), by piece
     /// id and node: the next build's predictions ([`Names::fold_value`]).
@@ -1526,6 +1545,8 @@ struct Shared {
     /// How many commands each piece's run in progress has run (set every
     /// `CHECK_EVERY`; for the dumps).
     progress: Vec<AtomicU64>,
+    /// The caller's progress board, if it gave one ([`Build::set_progress`]).
+    board: Option<Arc<Progress>>,
     /// The elements in order, fixed for the build.
     seq: Sequence,
     /// Bumped (under `park`, and `parked` notified) whenever a run is
@@ -1646,6 +1667,7 @@ impl Build {
         ));
         Build {
             font,
+            board: None,
             fonts,
             pieces: Vec::new(),
             pages: Vec::new(),
@@ -1789,6 +1811,13 @@ impl Build {
     /// (tests) How many rounds may lay the sequence out before the last,
     /// which may not ([`MAX_ROUNDS`] until set).
     #[doc(hidden)]
+    /// Where to report what the build does now ([`Progress`]: the round,
+    /// the pieces settled, the pages shipped), for a spinner; none by
+    /// default.
+    pub fn set_progress(&mut self, board: Option<Arc<Progress>>) {
+        self.board = board;
+    }
+
     pub fn set_max_rounds(&mut self, n: usize) {
         self.max_rounds = n;
     }
@@ -2269,6 +2298,11 @@ impl Build {
         let mut stalled = 0;
         loop {
             rounds += 1;
+            if let Some(b) = &self.board {
+                b.round.store(rounds, Ordering::Relaxed);
+                b.pages.store(0, Ordering::Relaxed);
+                b.phase.store(1, Ordering::Relaxed);
+            }
             let t_round = Instant::now();
             let last = rounds > cap || stalled >= MAX_STALLED_ROUNDS;
             if let Some(mut out) = self.round(&texts, opts, t0, time_cut, last, stalled == 0) {
@@ -2864,6 +2898,7 @@ impl Build {
                 .collect(),
             cancel: state.p.iter().map(|_| AtomicBool::new(false)).collect(),
             progress: state.p.iter().map(|_| AtomicU64::new(0)).collect(),
+            board: self.board.clone(),
             inline: state.p.iter().map(|ps| ps.inline).collect(),
             laid: state.p.iter().map(|ps| (ps.expect.input.is_some(), ps.expect.cut)).collect(),
             waiting: state.p.iter().map(|_| AtomicBool::new(false)).collect(),
@@ -2897,6 +2932,12 @@ impl Build {
             lock_wait: AtomicU64::new(0),
             lock_n: AtomicU64::new(0),
         };
+        if let Some(b) = &sh.board {
+            let g = lock(&sh);
+            b.total.store(g.p.len(), Ordering::Relaxed);
+            b.settled.store(g.p.iter().filter(|ps| ps.status == Status::Done).count(), Ordering::Relaxed);
+            b.phase.store(2, Ordering::Relaxed);
+        }
         std::thread::scope(|s| {
             if let Some(secs) = std::env::var("PHITEX_HANG_DUMP").ok().and_then(|v| v.parse::<u64>().ok()) {
                 let sh = &sh;
@@ -2911,6 +2952,9 @@ impl Build {
                     .expect("spawn a worker");
             }
         });
+        if let Some(b) = &sh.board {
+            b.phase.store(3, Ordering::Relaxed);
+        }
         // (the last build's page builder definitions the scan did not reach
         // again — a fold that converged — stay as they were)
         let unreached: FoldDefs = {
@@ -4254,6 +4298,9 @@ fn keep_again(g: &mut State, sh: &Shared, k: usize) -> bool {
     // again nor settled, the scan waits at it)
     debug_assert!(g.p[k].dirty.is_empty(), "piece {k} kept again with marks");
     g.p[k].status = Status::Done;
+    if let Some(b) = &sh.board {
+        b.settled.fetch_add(1, Ordering::Relaxed);
+    }
     g.p[k].entered = None;
     if g.due_at == Some(k) {
         g.due_at = None;
@@ -5195,6 +5242,9 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
             g.bodies[i] = Some(body);
             g.unshipped -= 1;
             g.stats.pages_shipped += 1;
+            if let Some(b) = &sh.board {
+                b.pages.fetch_add(1, Ordering::Relaxed);
+            }
             drop(g);
             sh.cv.notify_all();
             (page.b.list.len() as u64, 3)
@@ -5567,6 +5617,9 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
             }
             debug_assert!(g.p[k].dirty.is_empty(), "piece {k} installed Done with marks");
             g.p[k].status = Status::Done;
+            if let Some(b) = &sh.board {
+                b.settled.fetch_add(1, Ordering::Relaxed);
+            }
             sh.done[k].store(true, Ordering::Release);
             // (a run reading another file, or ending its file, changes the
             // sequence)
