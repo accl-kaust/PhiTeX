@@ -39,6 +39,19 @@ fn noop_fails(r: &fuzz::Repro) -> bool {
     fuzz::replay(&n).is_some()
 }
 
+/// [`fuzz::replay`] in a thread of its own, given `secs` seconds: the
+/// failure, if any (a hang is one; the thread is left behind).
+fn replay_within(r: fuzz::Repro, secs: u64) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || {
+            let _ = tx.send(fuzz::replay(&r).map(|f| format!("{f:?}")));
+        })
+        .expect("a thread");
+    rx.recv_timeout(Duration::from_secs(secs)).unwrap_or_else(|_| Some(format!("no end in {secs} s")))
+}
+
 fn env_num(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -103,7 +116,7 @@ fn open_findings_fail_fixed_ones_pass() {
         assert!(got.is_some(), "{} passes now: fixed, move it to tests/fuzz/fixed/ (and close it in CORE.md)", p.display());
     }
     for (p, r) in read("fixed") {
-        assert_eq!(fuzz::replay(&r).map(|f| format!("{f:?}")), None, "{} fails again", p.display());
+        assert_eq!(replay_within(r, 300), None, "{} fails again (or hangs)", p.display());
     }
 }
 
@@ -251,4 +264,71 @@ fn edited_trip_is_tex() {
         }
     }
     assert!(bad.is_empty(), "edited TRIP differs from TeX:\n{}", bad.join("\n"));
+}
+
+// ------------------------------------------------------------ LaTeX edited
+
+/// A DVI file with its preamble's comment (the date) masked.
+fn masked(dvi: &[u8]) -> Vec<u8> {
+    let mut d = dvi.to_vec();
+    if d.len() > 15 {
+        let k = usize::from(d[14]);
+        for b in d.iter_mut().skip(15).take(k) {
+            *b = b'.';
+        }
+    }
+    d
+}
+
+/// `latex NAME` on `text` (its first run, no `.aux`): the DVI file and the
+/// `.aux` written, if there is a `latex`.
+fn run_latex(dir: &Path, name: &str, text: &str) -> Option<(Vec<u8>, String)> {
+    std::fs::create_dir_all(dir).ok()?;
+    let _ = std::fs::remove_file(dir.join(format!("{name}.aux")));
+    std::fs::write(dir.join(format!("{name}.tex")), text.chars().map(|c| u8::try_from(c).unwrap_or(b'?')).collect::<Vec<u8>>()).ok()?;
+    Command::new("timeout")
+        .args(["120", "latex", "-interaction=batchmode", &format!("{name}.tex")])
+        .env("SOURCE_DATE_EPOCH", "0")
+        .env("FORCE_SOURCE_DATE", "1")
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    let dvi = std::fs::read(dir.join(format!("{name}.dvi"))).ok()?;
+    let aux = std::fs::read(dir.join(format!("{name}.aux"))).ok()?;
+    Some((dvi, aux.iter().map(|&b| char::from(b)).collect()))
+}
+
+/// A LaTeX document edited (`tests/fuzz/latex/tiny.tex`, latex.ltx as
+/// the prelude until the saved format: one schedule, a build of about a
+/// minute): the edit's build equals a cold build of the edited text
+/// (DVI, log, written files), and `latex` itself on its first run (the
+/// DVI, the `.aux`). `PHITEX_FUZZ_LATEX` seeds of one edit (1); none
+/// without TeX Live's `latex.ini`.
+#[test]
+fn latex_edits_equal_cold_and_latex() {
+    let Some(doc) = fuzz::latex_doc("tiny") else { return };
+    let o = phitex_flow::Options { threads: 8, ..phitex_flow::Options::default() };
+    for seed in 0..env_num("PHITEX_FUZZ_LATEX", 1) {
+        let mut rng = Rng::new(seed);
+        let edit = fuzz::random_edit(&mut rng, &doc, &doc.text, &doc.files).expect("an edit");
+        let mut text = doc.text.clone();
+        let mut files = doc.files.clone();
+        edit.apply(&mut text, &mut files);
+        let mut b = fuzz::builder(&doc, &doc.files);
+        b.update(&doc.text, o);
+        let inc = b.update(&text, o);
+        drop(b);
+        let cold = fuzz::cold(&doc, &text, &files);
+        let same = inc.dvi == cold.dvi && inc.log == cold.log && inc.writes == cold.writes;
+        assert!(same, "seed {seed} ({}): the edit's build is not the cold build's", edit.what);
+        // (and latex's: the document's own text, after its job's mark)
+        let at = text.rfind(phitex_flow::graph::JOB).map_or(0, |i| i + phitex_flow::graph::JOB.len_utf8());
+        let Some((dvi, aux)) = run_latex(&out_dir().join(format!("latex-{seed}")), "tiny", &text[at..]) else {
+            eprintln!("latex_edits_equal_cold_and_latex: no latex here");
+            return;
+        };
+        let ours = inc.writes.iter().find(|(n, _)| n == "tiny.aux").map(|(_, t)| t.clone()).unwrap_or_default();
+        assert!(masked(&inc.dvi) == masked(&dvi), "seed {seed} ({}): the DVI is not latex's", edit.what);
+        assert_eq!(ours, aux, "seed {seed} ({}): the .aux is not latex's", edit.what);
+    }
 }

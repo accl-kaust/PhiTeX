@@ -1,0 +1,32 @@
+\documentclass{article}
+\usepackage{ifthen}
+\newcommand{\word}{lazy}
+\year=2024 \month=3 \day=14
+\begin{document}
+\section{First}\label{sec:a}
+Some text with a \word\ dog and a reference to Section~\ref{sec:b}, a
+line long enough to be broken into two lines of the paragraph.
+
+\begin{itemize}
+\item One item.
+\item Two items, the second.
+\end{itemize}
+
+\begin{equation}
+a+b=c \label{eq:a}
+\end{equation}
+
+\section{Second}\label{sec:b}
+More \emph{text} here, see equation~\ref{eq:a} and the figure.
+
+\begin{tabular}{ll}
+x & y \\
+z & w \\
+\end{tabular}
+
+\begin{figure}[h]
+\centering A figure. \caption{A caption}\label{fig:a}
+\end{figure}
+
+The end of the text with \textbf{bold} words.
+\end{document}

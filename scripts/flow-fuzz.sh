@@ -15,6 +15,10 @@
 #                    scripts/flow-fuzz-min.py (MIN=0 skips it).
 # Everything runs under scripts/sandbox (directly when already inside it).
 # Env: JOBS, EDITS (6), TIMEOUT (seconds a seed may take, 600), MIN (1).
+# Under Slurm (SLURM_JOB_ID set) OUT is copied at the end to
+# $HOME/code/flinner/partex-phitex-runs/cmd-$SLURM_JOB_ID/$(basename OUT),
+# where the runner fetches a job's results from (the run itself writes
+# inside the checkout, where the sandbox may write).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 SEEDS=${1:-5000}
@@ -23,6 +27,11 @@ JOBS=${JOBS:-$(nproc)}
 EDITS=${EDITS:-6}
 TIMEOUT=${TIMEOUT:-600}
 MIN=${MIN:-1}
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+	KEEP="$HOME/code/flinner/partex-phitex-runs/cmd-$SLURM_JOB_ID/$(basename "$OUT")"
+else
+	KEEP=
+fi
 run() { if [ -n "${PARTEX_SANDBOX:-}" ]; then "$@"; else scripts/sandbox "$@"; fi; }
 BIN=target/release/phitex-flow
 run cargo build --release -q -p phitex-flow
@@ -64,7 +73,7 @@ fi
 find "$OUT"/j1 "$OUT"/j8 -name '*.repro' 2>/dev/null | sort >"$OUT/repros.txt"
 : >"$OUT/classes.txt"
 if [ -s "$OUT/repros.txt" ]; then
-	run bash -c "xargs -P $JOBS -n 4 $BIN --fuzz-classify <'$OUT/repros.txt'" | sort >"$OUT/classes.txt"
+	run bash -c "xargs -P $JOBS -n 4 $BIN --fuzz-classify <'$OUT/repros.txt'" | sort >"$OUT/classes.txt" || true
 fi
 echo "== classes"
 cut -f1 "$OUT/classes.txt" | sort | uniq -c | sort -rn | tee "$OUT/classes-count.txt"
@@ -75,6 +84,21 @@ if [ "$MIN" = 1 ]; then
 		name=$(basename "$f" .repro)
 		[ -n "$f" ] || continue
 		echo "== new class: $c ($f)"
-		run python3 scripts/flow-fuzz-min.py "$BIN" "$f" "$OUT/min/$name.repro" | tail -1
+		run python3 scripts/flow-fuzz-min.py "$BIN" "$f" "$OUT/min/$name.repro" | tail -1 || true
 	done
+fi
+# (the summary and the classes again, at the end of the output; and OUT
+# where the runner fetches it from)
+echo "== summary"
+cat "$OUT/summary.txt"
+echo "== classes"
+cat "$OUT/classes-count.txt"
+if [ -d "$OUT/min" ]; then
+	echo "== cut-down reproductions"
+	ls -1 "$OUT/min"/*.repro 2>/dev/null || echo "(none)"
+fi
+if [ -n "$KEEP" ]; then
+	mkdir -p "$KEEP"
+	cp -r "$OUT"/. "$KEEP"/
+	echo "copied $OUT to $KEEP"
 fi
