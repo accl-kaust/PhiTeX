@@ -213,10 +213,14 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 14. **Groups and conditionals across a piece boundary** (a blank line inside
     `\begingroup…\endgroup` or an `\if…\fi`; `\obeylines` or a changed
     `\endlinechar`, where a blank line is not a `\par`): the cut assumes the
-    start state at every blank line. Proposal (brief §6.3): a piece whose
-    predecessor's `End` state is not the start state is re-cut — it runs on
-    from that state. Now: "Missing } inserted at the end of a piece" /
-    "Incomplete \if".
+    start state at every blank line. Done (cuts, below): a piece after a
+    cut is entered in the state the piece before it leaves there (a
+    conditional open, a prefix pending: an entry edge, assumed canonical
+    until that piece has run); a piece leaving a group, a box or a
+    paragraph open, or whose last command reads on past its text, is one
+    piece with the text after it. (A group open across pieces needs the
+    names index to end a definition's reach at a close in a later piece:
+    not yet, so such pieces are joined.)
 15. **`\mag` and `true` units** — TeX freezes `\mag` at its first use
     (`mag_set`, a hidden global). Proposal: `Key::MagSet`, defined globally
     by the first node using it. Now: `\mag` is read, not frozen.
@@ -780,6 +784,56 @@ definitions are treated like a moved piece's exports (the existing
 `touched` rule). There is no cycle: a run at `(k, i)` reaches only
 positions after it, and its material is consumed after it.
 
+## Cuts (decided, 2026-10-10)
+
+The cutter proposes where pieces begin; where a run actually stops
+decides. "Where the reader is is itself a read."
+
+- Proposals: a blank line at brace depth 0 (plain catcodes), a job's
+  start, and about every `Options::cut_lines` lines (`CUT_LINES` = 200) a
+  line beginning with a control sequence at brace depth 0, chosen by a
+  hash of the line (at least `n/4` lines after the last cut, at most
+  `4n`): after an edit the cuts fall where the lines are the same. The
+  value is a scheduling knob: every document gives the same result for
+  any (`tests/dvi.rs` `any_cut_gives_tex_s_result`: 3, 20, blank lines
+  only).
+- Entry: a piece after a cut (`Entry::After(prev, ctx)`) is entered in the
+  state the piece before it left there (`RState::entered_after`: the next
+  line's start, the conditionals open as seen from outside, the
+  paragraph-level fields a cut starts afresh with). Until that piece has
+  run the state is assumed: the canonical start, or in a file the start
+  of the file (`ctx`: the state its `\input` left). A run on another
+  state than its predecessor leaves is run again (`entry_holds`, the
+  pieces entered from a piece, `deps`), as any read is.
+- Joins: a run whose last command reads on past its text's end
+  (`Run::crossed`: the reader ran out of the piece's text anywhere but
+  where it looks for the next command — an argument, a definition, a
+  number, a skipped arm), or that leaves a state no piece is entered in
+  (`RState::enterable`: a paragraph, a group, a box, an alignment open),
+  reads on into the texts after it (`Expect::join`, `Build::place_list`):
+  joined with as many as make it twice as long, its run stops at the
+  first place one of them begins where a command begins in a state a
+  piece is entered in (`Env::stop_at`, `Kind::Cut`), and the rest is cut
+  again from there. The joined piece is kept by the next layouts
+  (`Build::known_join`): its run never stops at the first place to say
+  so again. A piece whose predecessor reads on into it does not run.
+- The sequence changes when a run that says otherwise than the layout
+  assumed has settled (all before it final): at once for a join (the
+  pieces after it begin in the middle of a command; runs waiting for an
+  earlier piece stop, the others finish and are kept), else once every
+  piece has settled. A layout ignores a last run entered otherwise than
+  it now says (`old_entry_holds`).
+- A run validates what it read while it runs (`PieceEnv::check`, every
+  4096 steps): a definition made again since — its piece ran again —
+  abandons it; so does a prediction refuted, and a long run on an
+  assumed entry or predictions while a piece before it is not settled is
+  given up (its piece then waits).
+- The hundredth error (and "capacity exceeded") ends the job:
+  `Key::Ended` is defined, as by `\end`.
+- Re-cuts (`Kind::Cut`): a reader passing a blank line at depth 0 in the
+  canonical state where the cutter saw none ends its run there; the rest
+  is cut again.
+
 ## `\input` (decided)
 
 - A file is a value, `Key::File(name)`: the file's bytes are a read, so a
@@ -801,14 +855,23 @@ positions after it, and its material is consumed after it.
   at the end of that line).
 - Line numbers: `(file, line)` is a field of the position, read by
   `\inputlineno` and error contexts, never in a version.
-- Two paths (done). An `\input` that is a command of its own at a piece's
-  top level (vertical mode, no group, box or paragraph open, no text
-  rewritten) ends its node's run and its file's pieces join the sequence
-  (`Build::layout`, entry edges, `\endinput` dropping the later pieces):
-  they run in parallel like the main file's. Anywhere else (inside a
-  group, a box, a paragraph, a macro's expansion, another `\input` read
-  in the piece) the file is read in the piece as a text on the
-  `\scantokens` stack (`TextKind::File`, `Exec::start_input`). Files are
+- Two paths (done). An `\input` fetched as the command itself where the
+  reader is on the piece's own text — the outer vertical list, no group
+  or box open, no rewritten text above it, no `\endinput` pending, not
+  in an output routine, `\everyeof` empty — ends its node's run, whatever
+  is pending: a macro's expansion, a conditional open (`Exec::input_file`).
+  The node logs `(name`; the file's pieces join the sequence, cut as any
+  text is (`Build::place_list`), the first entered with the node's state
+  (`RState::file_start`: the tokens pending set aside), the others after
+  their predecessor (assumed: the file's start); the rest of the calling
+  line enters with the file's last state and the tokens pending
+  (`RState::rest`). A file whose end leaves what the rest of the line goes
+  on with (a paragraph or a group open) or whose last command reads on
+  past it is read in its caller (`Build::inline`). Anywhere else (an
+  `\input` expanded by `\expandafter` or while a command scans, inside a
+  group, a box, a paragraph, another `\input` read in the piece) the file
+  is read in the piece as a text on the `\scantokens` stack
+  (`TextKind::File`, `Exec::start_input`). Files are
   `Key::File(name)` = `Val::Bytes` answered by the build (`Given`: the
   files given in memory with `Build::set_file`, then the input
   directories); `Key::LineBase` is the lines of its own file before a

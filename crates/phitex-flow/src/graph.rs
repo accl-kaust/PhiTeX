@@ -90,6 +90,20 @@ pub trait Env {
         false
     }
 
+    /// Whether an `\input` fetched as a command where the reader is on the
+    /// piece's own text ends the run, its file's pieces following it
+    /// (CORE.md, `\input`); else every file is read in the piece.
+    fn split_inputs(&mut self) -> bool {
+        false
+    }
+
+    /// Whether the run stops at `pos` if a command begins there in a state
+    /// a piece may be entered in: a text it was joined from begins there
+    /// (CORE.md, cuts).
+    fn stop_at(&mut self, _pos: usize) -> bool {
+        false
+    }
+
     /// Whether anything between this piece's nodes may define any name
     /// (unknown: yes).
     fn any_between(&mut self) -> bool {
@@ -785,6 +799,45 @@ impl RState {
         }
     }
 
+    /// Whether a piece may be entered in this state (the state a run
+    /// left at its text's end, or at an `\input`): the outer vertical
+    /// list, no group, box, alignment or output routine open. (A paragraph
+    /// or a group open across pieces is not made: the piece reads on into
+    /// the text after it instead.)
+    pub fn enterable(&self) -> bool {
+        self.mode == Mode::V
+            && !self.inner
+            && self.level == 0
+            && self.boxing.is_none()
+            && self.groups.is_empty()
+            && self.al == align::AlignCur::OFF
+            && self.fire.is_none()
+            && self.texts.is_empty()
+    }
+
+    /// The state a piece after a cut is entered in when the run before it
+    /// left `out` at the cut (CORE.md, cuts): `out` at the next line's
+    /// start, the conditionals open as the piece sees them (opened before
+    /// it), and the paragraph-level fields a piece starts afresh with, as
+    /// at every cut (`RState::cut_point`).
+    pub fn entered_after(out: &RState) -> RState {
+        let start = RState::start();
+        RState {
+            pos: 0,
+            tstate: TState::N,
+            eol: EOL_UNREAD,
+            endinput: false,
+            conds: out.conds.outside(),
+            pending: if out.pending.len() == 0 { Pending::default() } else { out.pending.clone() },
+            space_factor: start.space_factor,
+            prev_depth: start.prev_depth,
+            prev_graf: start.prev_graf,
+            hyph_lang: start.hyph_lang,
+            error_count: start.error_count,
+            ..out.clone()
+        }
+    }
+
     /// Whether a piece entered in this state may begin: no paragraph,
     /// box or group open (an `\input` inside one is not supported: a
     /// definition made inside would outlive the group).
@@ -1076,6 +1129,10 @@ pub struct Rare {
     pub output: Option<Box<output::OutputEnd>>,
     /// `\input`: the file read (its pieces follow the node's).
     pub input: Option<Arc<FileText>>,
+    /// The reader ran out of the piece's text in the middle of this
+    /// command (an argument, a definition, a number, a skipped arm): the
+    /// text after the piece is not a place a piece may begin.
+    pub crossed: bool,
 }
 
 /// A file `\input` read: its name and its text.
@@ -1128,6 +1185,12 @@ impl Node {
     /// The file an `\input` node read.
     pub fn input(&self) -> Option<&Arc<FileText>> {
         self.rare.as_ref().and_then(|r| r.input.as_ref())
+    }
+
+    /// Whether the reader ran out of the piece's text in the middle of
+    /// this command ([`Rare::crossed`]).
+    pub fn crossed(&self) -> bool {
+        self.rare.as_ref().is_some_and(|r| r.crossed)
     }
 
     /// What an output routine's end left for the page builder (the `Close`
@@ -1509,6 +1572,9 @@ pub struct Run {
     /// A settled piece's run without its nodes ([`Run::leaned`]): `chain`
     /// is then empty.
     pub lean: Option<Arc<Lean>>,
+    /// The reader ran out of the piece's text in the middle of a command
+    /// ([`Node::crossed`]): the piece reads on into the text after it.
+    pub crossed: bool,
 }
 
 /// What a settled piece keeps of its run once its nodes are dropped (CORE.md,
@@ -1595,6 +1661,7 @@ impl Run {
             fonts: self.fonts.clone(),
             abandoned: false,
             lean: Some(Arc::new(lean)),
+            crossed: self.crossed,
         }
     }
 
@@ -1772,7 +1839,33 @@ pub fn jobs(texts: &[&str]) -> String {
 /// Cuts the source into pieces at blank lines at brace depth 0. Lines lose
 /// their trailing spaces and end in `\r` (TeX's end of line).
 pub fn cut(src: &str) -> Vec<Arc<[char]>> {
-    cut_from(src, 0, |_| false).0
+    cut_from(src, 0, usize::MAX, |_| false).0
+}
+
+/// [`cut`], and a cut proposed about every `every` lines besides
+/// ([`cut_from`]).
+pub fn cut_every(src: &str, every: usize) -> Vec<Arc<[char]>> {
+    cut_from(src, 0, every, |_| false).0
+}
+
+/// Whether the cutter proposes a cut before `line`, `lines` lines after
+/// the last cut, about every `every` lines (CORE.md, cuts): a line beginning with a control sequence, chosen by its content
+/// (a hash of it, so that after an edit the cuts are found again where
+/// the lines are the same), at least `every / 4` lines after the last cut
+/// and at the first such line `4 * every` lines after it.
+fn line_cut(line: &str, lines: usize, every: usize) -> bool {
+    if every == usize::MAX || !line.starts_with('\\') || lines < (every / 4).max(1) {
+        return false;
+    }
+    if lines >= every.saturating_mul(4) {
+        return true;
+    }
+    // (FNV-1a)
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in line.bytes() {
+        h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+    }
+    h.is_multiple_of(every as u64)
 }
 
 /// [`cut`] from byte `from` of `src` (0, or the start of a piece's first
@@ -1783,6 +1876,7 @@ pub fn cut(src: &str) -> Vec<Arc<[char]>> {
 pub fn cut_from(
     src: &str,
     from: usize,
+    every: usize,
     mut stop: impl FnMut(usize) -> bool,
 ) -> (Vec<Arc<[char]>>, Vec<usize>, Option<usize>) {
     let mut pieces: Vec<Arc<[char]>> = Vec::new();
@@ -1790,6 +1884,8 @@ pub fn cut_from(
     let mut cur: Vec<char> = Vec::new();
     let mut depth: i32 = 0;
     let mut blank_run = false;
+    // (lines since the last cut)
+    let mut lines_in = 0usize;
     let mut off = from;
     let mut lines = src[from..].split('\n').peekable();
     while let Some(raw) = lines.next() {
@@ -1809,23 +1905,32 @@ pub fn cut_from(
             starts.push(line_start);
             depth = 0;
             blank_run = false;
+            lines_in = 0;
         }
         let blank = !line.starts_with(JOB) && line.trim_start_matches(' ').is_empty();
         if blank {
             blank_run = true;
         } else {
-            if blank_run && depth == 0 && cur.iter().any(|c| !c.is_whitespace()) {
+            // (a line cut at depth 0, or anywhere once the cutter has seen
+            // no depth 0 for a long while: one brace it misreads would
+            // leave it at depth 1 for the rest of the text, and a cut is
+            // only proposed — a run reading on past it is one piece with
+            // the next)
+            let by_lines = line_cut(line, lines_in, every) && (depth == 0 || lines_in >= every.saturating_mul(4));
+            if ((blank_run && depth == 0) || by_lines) && cur.iter().any(|c| !c.is_whitespace()) {
                 pieces.push(Arc::from(std::mem::take(&mut cur)));
                 if stop(line_start) {
                     return (pieces, starts, Some(line_start));
                 }
                 starts.push(line_start);
+                lines_in = 0;
             }
             blank_run = false;
             depth = brace_depth(line, depth);
         }
         cur.extend(line.chars());
         cur.push('\r');
+        lines_in += 1;
     }
     if cur.is_empty() {
         starts.truncate(pieces.len());
@@ -2358,6 +2463,7 @@ pub fn run_piece(
         .collect();
     fonts.sort_by_key(|x| x.0);
     let fonts = fonts.into_iter().map(|(_, f)| f).collect();
+    let crossed = chain.nodes.range(0, end).any(|n| n.crossed());
     Run {
         chain,
         reads,
@@ -2368,6 +2474,7 @@ pub fn run_piece(
         fonts,
         abandoned,
         lean: None,
+        crossed,
     }
 }
 
@@ -2456,6 +2563,11 @@ struct Exec<'a> {
     /// The command is being looked for (an `\input` expanded now is a
     /// node of its own).
     at_start: bool,
+    /// The reader looks for the next command's first token: running out
+    /// of the piece's text here is the piece's end, anywhere else a
+    /// command that goes on after it ([`Rare::crossed`]).
+    boundary: bool,
+    crossed: bool,
     /// This node's stamp in `scratch.chars`.
     stamp: u32,
     /// The paragraph the old node at this place made, if any: an equal
@@ -2614,6 +2726,8 @@ impl<'a> Exec<'a> {
             seen_upto: 0,
             input: None,
             at_start: false,
+            boundary: false,
+            crossed: false,
             stamp,
             old_para: None,
             ptext: None,
@@ -2645,6 +2759,9 @@ impl<'a> Exec<'a> {
             }
         }
         if self.halt {
+            // (the job ends: TeX reads nothing more, the pieces after it
+            // neither, whatever state this one leaves)
+            self.define(Key::Ended, Val::Int(1), true);
             // (§82: at any level, into the page fold's stream)
             let p = self.para.get_or_insert_with(|| Arc::new(Para::default()));
             Arc::make_mut(p).after.push(Item::Halt);
@@ -2660,7 +2777,8 @@ impl<'a> Exec<'a> {
             || !self.vemit.is_empty()
             || self.log.is_some()
             || self.input.is_some()
-            || self.output.is_some())
+            || self.output.is_some()
+            || self.crossed)
         .then(|| {
             Box::new(Rare {
                 defs: self.defs,
@@ -2671,6 +2789,7 @@ impl<'a> Exec<'a> {
                 log: self.log,
                 input: self.input,
                 output: self.output,
+                crossed: self.crossed,
             })
         });
         Node {
@@ -3257,7 +3376,11 @@ impl<'a> Exec<'a> {
                 self.st.pending.pop();
             }
             if self.st.texts.is_empty() {
-                return self.tokenize();
+                let t = self.tokenize();
+                if t.is_none() && !self.boundary && self.ptext.is_none() && self.stop.is_none() {
+                    self.crossed = true;
+                }
+                return t;
             }
             // (a `\read` line's end ends the reading)
             if self.st.texts.last().is_some_and(|x| x.kind == TextKind::Read) {
@@ -3779,6 +3902,18 @@ impl<'a> Exec<'a> {
             self.kind = Kind::Cut;
             return;
         }
+        // (where a text this piece was joined from begins, a command
+        // begins in a state a piece may be entered in: the run stops, the
+        // rest is pieces again)
+        if self.st.pos > 0
+            && self.ptext.is_none()
+            && self.st.tstate == TState::N
+            && self.st.enterable()
+            && self.env.stop_at(self.st.pos)
+        {
+            self.kind = Kind::Cut;
+            return;
+        }
         self.at_start = true;
         let next = self.next_x_m(true);
         self.at_start = false;
@@ -3831,16 +3966,21 @@ impl<'a> Exec<'a> {
             self.kind = Kind::End;
             return;
         }
+        // (a paragraph, a group, a box open at the text's end: the text
+        // after it goes on with it, the two are one piece)
+        if !self.st.enterable() {
+            self.crossed = true;
+        }
         self.end_par();
         self.kind = Kind::End;
-        // (groups and conditionals open where the piece was entered are
-        // its caller's, closed after it)
+        // (groups open where the piece was entered are its caller's,
+        // closed after it; a group it opens is closed by a piece it is
+        // joined with: the last piece of the document is where one is
+        // left open. A conditional open is the next piece's entry, as at
+        // a file's end in TeX.)
         let entry = self.chain.input(0);
         if self.st.groups.len() > entry.groups.len() {
             self.err("Missing } inserted at the end of a piece".into());
-        }
-        if self.st.conds.len() > entry.conds.len() {
-            self.err("Incomplete \\if at the end of a piece".into());
         }
     }
 
@@ -3993,7 +4133,7 @@ impl<'a> Exec<'a> {
             Prim::Write => self.write_cmd(),
             Prim::OpenOut | Prim::CloseOut | Prim::Special => self.extension(p),
             Prim::InStream(open) => self.open_in(open),
-            Prim::Input => self.start_input(),
+            Prim::Input => self.input_file(true),
             Prim::Uppercase | Prim::Lowercase => self.case_shift(p == Prim::Uppercase),
             Prim::EndCsName => self.err("Extra \\endcsname".into()),
             Prim::End | Prim::Dump => self.stop_job(p == Prim::Dump),

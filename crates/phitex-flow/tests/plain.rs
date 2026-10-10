@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use phitex_flow::build::MAIN_MEMORY;
+use phitex_flow::build::{CUT_LINES, MAIN_MEMORY};
 use phitex_flow::{Build, Font, Options, Order, Reads};
 
 /// Every document, and what the graph needs before it is a test (`""`:
@@ -104,11 +104,11 @@ fn masked(dvi: &[u8]) -> Vec<u8> {
 
 /// The schedules (as `tests/dvi.rs`).
 const RUNS: [Options; 5] = [
-    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: false, main_memory: MAIN_MEMORY },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: false, main_memory: MAIN_MEMORY },
+    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: false, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: false, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES },
 ];
 
 fn recorded(name: &str) -> (Vec<u8>, String) {

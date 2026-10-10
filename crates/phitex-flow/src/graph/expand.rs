@@ -12,6 +12,8 @@ use std::sync::Arc;
 use super::scan::IVal;
 use super::{Cond, Exec, Kind, Mode, Phi, Read, Src};
 use crate::print;
+use crate::print::MAX_PRINT_LINE;
+use crate::show::{LN, RAW, SP};
 use crate::val::{Conv, IfKind, IntPar, Key, Meaning, Prim, Tok, Val};
 
 /// The job's name (`\jobname`): TeX's when it was given no file name.
@@ -65,7 +67,11 @@ impl Exec<'_> {
     /// the top, a conditional is returned: it is a command, a node.
     pub(super) fn next_x_m(&mut self, top: bool) -> Option<(Tok, Meaning)> {
         loop {
-            let t = self.next_raw()?;
+            // (at the top, the piece's text may end here: the piece ends)
+            self.boundary = top;
+            let t = self.next_raw();
+            self.boundary = false;
+            let t = t?;
             let m = self.tok_meaning(&t);
             if self.noexp && expands(&m) {
                 return Some((t, Meaning::Prim(Prim::Relax)));
@@ -77,10 +83,6 @@ impl Exec<'_> {
             }
             if t.key().is_some() && expands(&m) {
                 self.expand(&t, &m);
-                if self.input.is_some() {
-                    // (`\input`: this node ends the piece's run)
-                    return None;
-                }
                 continue;
             }
             return Some((t, m));
@@ -120,7 +122,7 @@ impl Exec<'_> {
                     self.back(t.clone());
                     self.back(Tok::Cs("\u{0}relax".into()));
                 }
-                Prim::Input => self.input_file(),
+                Prim::Input => self.input_file(false),
                 Prim::EndInput => self.end_input(),
                 // (`\splitfirstmark`, `\splitbotmark`, e-TeX's
                 // `\splitfirstmarks n`, `\splitbotmarks n`: what the last
@@ -157,13 +159,27 @@ impl Exec<'_> {
         }
     }
 
-    /// `\input` (tex.web 537) as a command of its own at a piece's top
-    /// level (vertical mode, no group, box or paragraph open, no text
-    /// rewritten): the file name, the file a read of `Key::File`; the node
-    /// ends the piece's run, the file's pieces follow it in the sequence.
-    /// Anywhere else the file is read in the piece ([`Exec::start_input`]).
-    fn input_file(&mut self) {
-        if !self.at_start || !self.st.plain_boundary() || !self.st.texts.is_empty() {
+    /// `\input` (tex.web 537). Fetched as the command itself (`top`) where
+    /// the reader is on the piece's own text — the outer vertical list, no
+    /// group or box open, no rewritten text above it, no `\endinput`
+    /// pending, no output routine, `\everyeof` empty — the node ends the
+    /// piece's run and the file's pieces follow it in the sequence (CORE.md,
+    /// `\input`): the tokens pending now are read after the file, with the
+    /// rest of the line. Anywhere else (expanded by `\expandafter` or
+    /// while a command scans) the file is read in the piece
+    /// ([`Exec::start_input`]), as it is where the build says so
+    /// ([`Env::split_inputs`]: the file's end leaves a paragraph or a group
+    /// open, which the rest of the line goes on with).
+    pub(super) fn input_file(&mut self, top: bool) {
+        let split = top
+            && self.st.plain_boundary()
+            && self.st.texts.is_empty()
+            && self.ptext.is_none()
+            && !self.st.endinput
+            && self.st.fire.is_none()
+            && self.env.split_inputs()
+            && matches!(self.get(&Key::TokPar(crate::val::TokPar::Everyeof)), Val::Toks(ref l) if l.is_empty());
+        if !split {
             self.start_input();
             return;
         }
@@ -172,8 +188,12 @@ impl Exec<'_> {
             self.err(format!("I can't find file `{name}'"));
             return;
         };
+        let shown = self.env.file_path(&found);
+        let lead = if shown.chars().count() > MAX_PRINT_LINE - 2 { LN } else { SP };
+        self.log_raw(&format!("{RAW}{lead}({shown}"));
         let text: String = data.iter().map(|&b| char::from(b)).collect();
         self.input = Some(Arc::new(super::FileText { name: Arc::from(found), text: Arc::from(text) }));
+        self.kind = Kind::Input;
     }
 
     /// `\expandafter` (tex.web 368).
