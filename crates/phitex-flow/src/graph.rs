@@ -1828,6 +1828,19 @@ impl Run {
         }
     }
 
+    /// The reads its nodes hold, and how many distinct `Read`s they are
+    /// (a lean run: none).
+    pub fn reads_held(&self) -> (usize, usize) {
+        let c = &self.chain;
+        let mut distinct: FxSet<usize> = FxSet::default();
+        let mut n = 0;
+        for node in c.nodes.range(0, c.nodes.len()) {
+            n += node.reads.len();
+            distinct.extend(node.reads.iter().map(|r| Arc::as_ptr(r) as usize));
+        }
+        (n, distinct.len())
+    }
+
     /// What the run holds, counted (`PHITEX_CENSUS`: where the memory of
     /// a build goes): its nodes and their sizes, their reads (distinct and
     /// of outer-ness alone), items, rare parts, and the stacks their states
@@ -1837,13 +1850,24 @@ impl Run {
         let n = c.nodes.len();
         let (mut reads, mut outer, mut emit, mut rare, mut texts, mut conds, mut groups) = (0, 0, 0, 0, 0, 0, 0);
         let mut distinct: FxSet<usize> = FxSet::default();
+        // (the distinct reads by what they read: more than one per group is
+        // a copy not shared; by kind: outer-ness, whole from a node, whole
+        // from before the piece)
+        let mut groups_of: FxMap<(Key, u8, u64, Option<u16>, Option<u16>, bool), u32> = FxMap::default();
         for node in c.nodes.range(0, n) {
             reads += node.reads.len();
             for r in node.reads.iter() {
                 if r.field != Field::Whole {
                     outer += 1;
                 }
-                distinct.insert(Arc::as_ptr(r) as usize);
+                if distinct.insert(Arc::as_ptr(r) as usize) {
+                    let s = match r.src {
+                        Src::Node(d) => (0u8, u64::from(d)),
+                        Src::Piece(_) => (1, 0),
+                        Src::Initial => (2, 0),
+                    };
+                    *groups_of.entry((r.key.clone(), s.0, s.1, r.scope, r.cond, r.field == Field::Outer)).or_default() += 1;
+                }
             }
             emit += node.emit.len();
             rare += usize::from(node.rare.is_some());
@@ -1851,8 +1875,19 @@ impl Run {
             conds += node.out.conds.len();
             groups += node.out.groups.len();
         }
+        let (mut copies_outer, mut copies_node, mut copies_before) = (0u32, 0u32, 0u32);
+        for (g, c) in &groups_of {
+            let extra = c - 1;
+            if g.5 {
+                copies_outer += extra;
+            } else if g.1 == 0 {
+                copies_node += extra;
+            } else {
+                copies_before += extra;
+            }
+        }
         format!(
-            "nodes {n} (node {} B, state {} B) reads {reads} (distinct {}, outer-ness {outer}, read {} B) items {emit} rare {rare} texts {texts} conds {conds} groups {groups} reads-before {} lean {}",
+            "copies (outer {copies_outer}, node {copies_node}, before {copies_before}) nodes {n} (node {} B, state {} B) reads {reads} (distinct {}, outer-ness {outer}, read {} B) items {emit} rare {rare} texts {texts} conds {conds} groups {groups} reads-before {} lean {}",
             std::mem::size_of::<Node>(),
             std::mem::size_of::<RState>(),
             distinct.len(),
@@ -2757,6 +2792,12 @@ struct Scratch {
     /// a node reading the same definition, seen the same, shares it (a
     /// read is a value: equal fields, the same read).
     inside: FxMap<Key, ReadRef>,
+    /// Each read's copy of the outer-ness alone ([`Field::Outer`]), made
+    /// once (by the whole read's address; the pair keeps it alive), and
+    /// back (by the copy's): the run holds one `Read` per distinct read,
+    /// however often a name is scanned and then read whole.
+    outer_of: FxMap<usize, (ReadRef, ReadRef)>,
+    whole_of: FxMap<usize, ReadRef>,
 }
 
 /// A control sequence's entry in [`Scratch::cs`].
@@ -2780,9 +2821,6 @@ struct Known {
     /// The groups opened and closed before it was read (a definition
     /// local to a group is seen by its level from the group open).
     scopes: usize,
-    /// The same read of the meaning's outer-ness alone ([`Field::Outer`]),
-    /// once made.
-    outer: Option<ReadRef>,
 }
 
 /// One node's execution: one command, from the state its predecessor left.
@@ -3235,9 +3273,30 @@ impl<'a> Exec<'a> {
     /// a meaning's outer-ness so far).
     fn whole(&mut self, i: usize) {
         if self.reads[i].field != Field::Whole {
+            // (the read it was copied from, if this run made it: the same)
+            if let Some(w) = self.scratch.whole_of.get(&(Arc::as_ptr(&self.reads[i]) as usize)) {
+                self.reads[i] = w.clone();
+                return;
+            }
             let r = Read { field: Field::Whole, ..(*self.reads[i]).clone() };
             self.reads[i] = Arc::new(r);
         }
+    }
+
+    /// `r`'s outer-ness alone ([`Field::Outer`]): one copy per read
+    /// ([`Scratch::outer_of`]).
+    fn outer_copy(&mut self, r: ReadRef) -> ReadRef {
+        if r.field == Field::Outer {
+            return r;
+        }
+        let at = Arc::as_ptr(&r) as usize;
+        if let Some((_, o)) = self.scratch.outer_of.get(&at) {
+            return o.clone();
+        }
+        let o = Arc::new(Read { field: Field::Outer, ..(*r).clone() });
+        self.scratch.whole_of.insert(Arc::as_ptr(&o) as usize, r.clone());
+        self.scratch.outer_of.insert(at, (r, o.clone()));
+        o
     }
 
     /// Whether the name `key` means an `\outer` macro, read as that alone
@@ -3255,15 +3314,7 @@ impl<'a> Exec<'a> {
             }
             let r = self.resolve_shared(key);
             let outer = r.val.is_outer();
-            let epoch = self.scratch.known_epoch;
-            let as_outer = |r: &ReadRef| Arc::new(Read { field: Field::Outer, ..(**r).clone() });
-            let r = match self.scratch.cs.get_mut(n as usize).and_then(|e| e.known.as_mut()) {
-                _ if r.field == Field::Outer => r,
-                // (the piece's kept read of the name: its outer-ness read
-                // made once)
-                Some(k) if k.epoch == epoch && Arc::ptr_eq(&k.read, &r) => k.outer.get_or_insert_with(|| as_outer(&r)).clone(),
-                _ => as_outer(&r),
-            };
+            let r = self.outer_copy(r);
             self.push_read(r);
             return outer;
         }
@@ -3296,8 +3347,8 @@ impl<'a> Exec<'a> {
             }
         }
         let mut r = self.resolve_shared(key);
-        if field != Field::Whole {
-            r = Arc::new(Read { field, ..(*r).clone() });
+        if field == Field::Outer {
+            r = self.outer_copy(r);
         }
         Found::Read(self.push_read(r))
     }
@@ -3328,7 +3379,7 @@ impl<'a> Exec<'a> {
                 _ => self.outside.get(key).map_or(0, |(_, _, hi)| *hi),
             };
             let scopes = chain.scopes.len();
-            self.cs_at(n).known = Some(Known { epoch, read: r.clone(), hi, scopes, outer: None });
+            self.cs_at(n).known = Some(Known { epoch, read: r.clone(), hi, scopes });
         }
         r
     }

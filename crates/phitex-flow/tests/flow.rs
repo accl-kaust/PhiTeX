@@ -428,6 +428,26 @@ fn scanning_doc(def: &str, scanned: &str) -> String {
     s
 }
 
+/// A name scanned (its outer-ness read) and then read whole by each of
+/// many nodes: the run holds one `Read` per distinct read, not a copy per
+/// node (the copies held 18.5M `Read`s of latex.ltx's expl3 piece where
+/// 1M are distinct, 3 GB).
+#[test]
+fn a_scanned_and_expanded_name_is_one_read() {
+    let mut s = String::from("\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6 \\def\\x{}\\def\\y#1{#1}");
+    for _ in 0..400 {
+        s.push_str("\\y{\\x\\x}\\relax");
+    }
+    s.push_str("\n\\end\n");
+    let mut b = Build::new(font());
+    b.set_lean(false);
+    let out = b.update(&s, opts(1, Reads::Suspend, Order::Priority));
+    assert!(out.errors.is_empty(), "{:?}", out.errors);
+    let (reads, distinct) = b.reads_held(0).expect("piece 0 holds its nodes");
+    assert!(reads >= 800, "{reads} reads");
+    assert!(distinct <= 60, "{distinct} distinct reads of {reads}: a copy per node");
+}
+
 #[test]
 fn a_scanned_name_reads_only_whether_it_is_outer() {
     let opt = opts(4, Reads::Suspend, Order::Priority);

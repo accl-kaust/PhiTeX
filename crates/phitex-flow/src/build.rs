@@ -1899,6 +1899,13 @@ impl Build {
         Some(material(&paras?))
     }
 
+    /// The reads piece `k`'s nodes hold, and how many distinct `Read`s
+    /// they are (one per distinct read, however often a node reads it:
+    /// [`crate::graph::Run::reads_held`]; a lean piece holds none).
+    pub fn reads_held(&self, k: usize) -> Option<(usize, usize)> {
+        Some(self.pieces.get(k)?.run.as_ref()?.reads_held())
+    }
+
     /// The node (its index in piece `k`) that made an item of the piece's
     /// material (`page::material`, as the page builder's `Org` names it:
     /// `item`), or, `path` naming items inside it — a line's box's item,

@@ -2209,6 +2209,36 @@ check the tags without upkeep:
 To add a variant, give it the next free tag, then its index and sample
 in these lists. `cargo test -p phitex-flow --lib tag_tests` runs them.
 
+## Memory (agent A, 2026-10-10)
+
+`latex.ltx` as a format at `-j 1` (`--cut-lines 200`), peak RSS: bac0a76
+5.39 GB, 2c217c3 4.46, 021c65e 5.92, their merge 1ae75fa 7.82, head
+36b0c50 6.85. `PHITEX_CENSUS=1` prints what each run holds
+(`Run::census`): nodes, reads, distinct `Read`s, and the distinct ones
+that are copies of another (same name, source, scope, conditional and
+field: a read not shared).
+
+| | reads held | distinct `Read`s | of the expl3 piece (2.9M nodes) | copies | RSS |
+|---|---|---|---|---|---|
+| 2c217c3 | 51.6M | 1.41M | 0.76M | | 4.46 GB |
+| 1ae75fa | 51.3M | 25.9M | 23.9M | | 7.82 GB |
+| 36b0c50 | 51.3M | 20.0M | 18.5M | 18.4M | 6.85 GB |
+| shared outer-ness (this commit) | 51.3M | 1.70M | 1.05M | 79K | 3.75 GB |
+
+The merge brought F's reads of outer-ness alone (`Field::Outer`): a
+name scanned where `\outer` is forbidden reads only that, a copy of the
+read with the field changed; a later whole read of it in the same node
+(`Exec::whole`, the scanned argument expanded) made another copy, with
+the field back. Every node scanning and then expanding a name held two
+`Read`s of its own instead of the one all its readers share (the
+`Known` cache made each outer copy once only for a name the piece
+kept). Now `Exec::outer_copy` makes one outer copy per read in a run
+(`Scratch::outer_of`), and `whole` gives back the read it was copied
+from (`Scratch::whole_of`). Cold build 41.6 s -> 35.1 s.
+`tests/flow.rs` `a_scanned_and_expanded_name_is_one_read`: 400 nodes
+scanning and expanding `\x` hold 40 distinct reads (439 without
+`whole`'s lookup).
+
 ## The inventory
 
 ### (i) Expandable and input-rewriting: steps — 40
