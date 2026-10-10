@@ -861,6 +861,108 @@ decides. "Where the reader is is itself a read."
   canonical state where the cutter saw none ends its run there; the rest
   is cut again.
 
+## Reads of folds (decided, 2026-10-10)
+
+Two values are folds over the document's positions, not definitions any
+node makes: the page builder's state (`\pagegoal`…`\pagedepth`,
+`\deadcycles`, `\insertpenalties`: `Key::Page(0..=9)`; Q's `\pdflast*`
+counters are next), and a file the run writes (`\openout`/`\write`,
+immediate at their nodes, deferred at their pages' ship positions;
+`\closeout` ends what was written). A node's read of one is a read of
+the fold's value at the node's position (Conflict 12, decided).
+
+Invariant: a fold's read is only ever validated against the fold's value
+at that node (`Names::read_now`/`read_holds`, the one check install and
+`still_dirty` make; the names index answered it twice: 5e3ea81 at
+install, then `reads_still`, which dropped a refuted file read's mark).
+
+- **The read** (`graph::Env::fold_read`, `Names::fold_value`): answered
+  with the fold's value at `(piece, node)` as known — this build's,
+  else the last build's (`Build::fold_vals`, by piece id and node),
+  else the names index's (the page builder's fires' definitions;
+  IniTeX's values before any) or the file as found in the directories.
+  A node's own definitions do not answer a page quantity (`Env::folds`:
+  an assignment `\pagegoal=…` is an item the fold applies). Every such
+  read is entered in the run's reads, at its node (`graph::positional`:
+  not one per value); the page quantities have no edges.
+- **Validated by the fold.** The scan, before the first item of each
+  node of a piece's material (and after the piece's material), compares
+  the reads of the page quantities at the nodes up to there with its
+  page so far (`Scan::page_quantity`, tex.web 421: `\pagegoal` is
+  `\maxdimen` and the others 0 while the page is empty; the goal and
+  totals as the insertions left them), keeps each value
+  (`Names::set_fold_value`) and, at the first that differs, marks the
+  piece from that node (`check_page_reads`, `mark_from`) and stops there,
+  as a fire's definitions do. The scan does not converge with the last
+  build's pages before a run whose reads it has not validated
+  (`PState::fold_unchecked`). Files: the log's replay takes what was
+  written of each file at each node reading one (`logs::Entry::Probe`,
+  `logs::replay_probed`); a read that saw something else marks its piece
+  from its node and the build goes another round (`Build::keep_round`).
+  LaTeX's `\enddocument` reads back the `.aux` it wrote and closed: on a
+  cold build, one more round runs that piece's tail.
+- **The Suspend policy's one speculative exception, and why.** Under
+  `Reads::Suspend` a read waits for the value it reads. A fold's value at
+  node n depends on the items of the reading piece's own nodes before n,
+  and the scan sees a run's items only when the run is installed: waiting
+  would wait for itself. So these reads are predicted and validated under
+  both policies; the result is the same (validation is by exact value,
+  a refuted read runs again from its node). The generalization that
+  removes the exception: a run publishing its items per node, so the scan
+  can pass node n−1 while the run is at node n — which also removes Q's
+  second round and is the brief's §6.4 overlap. Not built yet.
+- `Output::files_read`: every file read (each name once, in document
+  order) and where it was found (`None`: not found), for the CLI's
+  `-recorder` and a watch's dependencies.
+- Tests: `tests/dvi.rs` `pagequant` (each quantity read mid-page:
+  empty page, after a paragraph, skips of each order, an insertion, a
+  split insertion with `\floatingpenalty`, a deep box, inside a paragraph
+  after `\pagegoal=`, after a page break), `readback` (immediate and
+  deferred writes read back with `\input` and `\read`, a file before it
+  is opened and after `\closeout`; not while open: TeX's buffering), both at five schedules against `tex`;
+  `reads_of_folds_follow_edits`; `tests/latex_docs.rs`: the documents'
+  `.aux` read back, no gap; TRIP's `tripos.tex` in one build
+  (`Session::run`).
+
+## Source places and item provenance (SyncTeX, inverse search)
+
+- **A node's source place** (`Build::source_place(k, node)`): the
+  piece's file (`None`: the main file; a piece after `\input`'s file
+  piece names that file) and line: the lines of the file before the
+  piece (what `Key::LineBase` answers) plus the node's line in the piece
+  (`Run::node_pos`, kept by lean runs too). A node reading a file read
+  inside its piece is placed at the `\input`.
+- **F8 (F's: a kept node's `\inputlineno`)**: a node's line in its piece
+  is not a read; an edit that changes the number of lines before a node
+  in the same piece keeps it unless the node read its line
+  (`Key::LineBase`): then it runs again (`run_piece`'s `line_ok`).
+  `tests/fuzz/fixed/f8-kept-node-line-in-piece.repro`; F's F9 (story,
+  a line removed, the log's line numbers) is the same finding, made on a
+  branch without this fix (`tests/fuzz/log-only/`, F's: the fuzz compares
+  the DVI and written files).
+- **Which node made an item** (`item::Origins`): a side table per list,
+  not per item — runs of item indices with the distance back from the
+  node that made the list (the paragraph's `\par` node: `Para::origins`;
+  a box's closing node: `BoxNode::origins`; a line of a paragraph inside
+  a box: its box's). Not part of a list's value (equal lists are equal
+  whoever made them). A distance, so a paragraph whose nodes were all
+  kept where an edit moved them still says it; a node reusing its old
+  paragraph does so only with equal origins. Lines of the main vertical
+  list are line breaking's, memoised by equality: a `Line` says which
+  item of the paragraph's list each of its box's items came from
+  (`Line::from`, runs; a hyphenated word's items, a discretionary's and
+  the skips at the item they stand at), and the paragraph's origins give
+  the node (`Line::node_of`). `Build::material_node(k, item, path)`:
+  from an item of piece k's material (the page builder's `Org`), down
+  `path` (a line's box's item, a box's item…), to its node;
+  `Build::material_of(k)`. Not yet: alignments, math lists, inserts and
+  the output routine's lists carry no origins (their items lead to the
+  node that made the whole); TeXXeT's reversed lines are approximate.
+- **Files by kpathsea** (`tfm::Kpse`, X's shape; `Build::set_kpse(kpse,
+  prog)`): a given of the build — a name becomes a path by kpathsea's
+  lookup (format `tex`, the program's name) instead of the input
+  directories; reads stay `Key::File`.
+
 ## `\input` (decided)
 
 - A file is a value, `Key::File(name)`: the file's bytes are a read, so a
@@ -1541,7 +1643,18 @@ First local table (5 repetitions, median ms):
 | param | 140 | 133 | 550 | 430 |
 | cold | 135 | 160 | 360 | 400 |
 
-- **B2. Every edit scans every page, lean or not** (traced: the root of
+- **B2 (fixed, A). Every edit scans every page, lean or not.** Fixed as
+  wanted: a fancy fold has restart points too. After a fire whose
+  routine was a memo hit and put nothing back (no held-over insertions,
+  no list), the routine's last page is one; so is a default-output page
+  of a fancy fold with nothing held over. The point carries the fold's
+  state besides the contributions (`page::FoldState`: the marks,
+  `\deadcycles`; `PageOrg::fold`); `Scan::resumed` starts with it, and
+  convergence asks for the same restart point and the same state.
+  Matching (`advance_match`) is on for fancy folds. A cold build has no
+  memo hits, so its routine pages are not restart points; the first
+  edit's are.
+  Was: **Every edit scans every page, lean or not** (traced: the root of
   both). A word edit in the middle of big makes the scan feed all 1850
   items from piece 0 and fire all 48 output routines (memo hits), in both
   modes. Nothing is skipped: no `advance_match` match, no `resume`, no
@@ -1562,8 +1675,10 @@ First local table (5 repetitions, median ms):
   at the last such page before the first changed piece, and converge at
   the first page after the last changed piece. That makes the scan
   O(changed pages).
-- **B1. With pieces keeping their nodes the same scan costs 15 times
-  more** (traced). 66 ms against 4.5 ms on big, 188 ms against 16 ms on
+- **B1 (fixed, A). With pieces keeping their nodes the same scan costs 15 times
+  more** (traced). Fixed: `changed_at` looks up each name's last reader
+  in a per-run table made at the first fire in the run (`Run::last_readers`,
+  `State::last_readers`), not a walk over the later nodes' reads. 66 ms against 4.5 ms on big, 188 ms against 16 ms on
   bigout, for the same items fed and the same 152 memo hits. On bigout,
   `install_fold_defs` takes 89 ms (lean: 2 ms), the retraction of the
   predicted definitions inside `fire` about 93 ms, `find_memo` 6.5 ms.
@@ -1621,8 +1736,9 @@ in one piece, every line reading `\count0`: 5629 -> 752 commands of
 433). Still 0.5–0.8 s cold per document: the per-command cost, not
 reruns.
 
-**F8 (open, A). An edit of TRIP that never ends.** Found once F1 let
-TRIP's updates be checked: `tests/fuzz/hang/f8-trip-edit-hangs.repro`
+**T1 (open, A; was called F8 before F's F8). An edit of TRIP that never
+ends.** Found once F1 let TRIP's updates be checked:
+`tests/fuzz/hang/t1-trip-edit-hangs.repro`
 (TRIP seed 1 step 3, `--fuzz 1 3 1 --doc trip`): a character of
 `\hbox to 23pt{} % output now` replaced (`23st`). The update runs a
 piece again and again (a worker in `run_piece`, the round waiting), at
@@ -2288,6 +2404,36 @@ check the tags without upkeep:
   writer gives each key, meaning and whatsit are distinct per namespace.
 To add a variant, give it the next free tag, then its index and sample
 in these lists. `cargo test -p phitex-flow --lib tag_tests` runs them.
+
+## Memory (agent A, 2026-10-10)
+
+`latex.ltx` as a format at `-j 1` (`--cut-lines 200`), peak RSS: bac0a76
+5.39 GB, 2c217c3 4.46, 021c65e 5.92, their merge 1ae75fa 7.82, head
+36b0c50 6.85. `PHITEX_CENSUS=1` prints what each run holds
+(`Run::census`): nodes, reads, distinct `Read`s, and the distinct ones
+that are copies of another (same name, source, scope, conditional and
+field: a read not shared).
+
+| | reads held | distinct `Read`s | of the expl3 piece (2.9M nodes) | copies | RSS |
+|---|---|---|---|---|---|
+| 2c217c3 | 51.6M | 1.41M | 0.76M | | 4.46 GB |
+| 1ae75fa | 51.3M | 25.9M | 23.9M | | 7.82 GB |
+| 36b0c50 | 51.3M | 20.0M | 18.5M | 18.4M | 6.85 GB |
+| shared outer-ness (this commit) | 51.3M | 1.70M | 1.05M | 79K | 3.75 GB |
+
+The merge brought F's reads of outer-ness alone (`Field::Outer`): a
+name scanned where `\outer` is forbidden reads only that, a copy of the
+read with the field changed; a later whole read of it in the same node
+(`Exec::whole`, the scanned argument expanded) made another copy, with
+the field back. Every node scanning and then expanding a name held two
+`Read`s of its own instead of the one all its readers share (the
+`Known` cache made each outer copy once only for a name the piece
+kept). Now `Exec::outer_copy` makes one outer copy per read in a run
+(`Scratch::outer_of`), and `whole` gives back the read it was copied
+from (`Scratch::whole_of`). Cold build 41.6 s -> 35.1 s.
+`tests/flow.rs` `a_scanned_and_expanded_name_is_one_read`: 400 nodes
+scanning and expanding `\x` hold 40 distinct reads (439 without
+`whole`'s lookup).
 
 ## The inventory
 

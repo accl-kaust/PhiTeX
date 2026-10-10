@@ -86,6 +86,16 @@ fn usage(progname: &str) -> ! {
 /// Run as the engine `progname` with `args`; never returns.
 #[allow(clippy::too_many_lines, reason = "one option an arm")]
 pub fn main(progname: &str, args: &[String]) -> ! {
+    // (LuaTeX's names: the system's program, run as it is: not on the graph)
+    #[cfg(not(target_family = "wasm"))]
+    if let Some(p) = crate::external::program_of(progname) {
+        let Some(path) = crate::external::find_program(p) else {
+            eprintln!("{progname}: `{p}` is not on PATH (phitex runs the system's {p})");
+            std::process::exit(2);
+        };
+        let st = std::process::Command::new(path).args(args).status();
+        std::process::exit(st.ok().and_then(|s| s.code()).unwrap_or(1));
+    }
     let mut ini = progname == "initex";
     let mut etex = false;
     let mut mode = None;

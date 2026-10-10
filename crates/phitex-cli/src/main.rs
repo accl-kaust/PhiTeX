@@ -33,6 +33,8 @@ mod compat;
 mod config;
 mod dvipdf;
 mod editor;
+#[cfg(not(target_family = "wasm"))]
+mod external;
 mod format;
 mod json;
 mod modern;

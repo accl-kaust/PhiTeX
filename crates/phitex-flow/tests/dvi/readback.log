@@ -1,0 +1,9 @@
+(./readback.tex [1] [2] (./readback.aux) [written at once][deferred two on page
+ 1][on page 2] [macro:->\def \a {written at once} ] [two: not yet] [two closed:
+ macro:->first ]
+Tight \hbox (badness 13) in paragraph at lines 25--26
+[]\tenrm A third page: written at once, deferred two
+
+\hbox(6.94444+1.94444)x200.0, glue set - 0.51425 []
+
+[3] )
