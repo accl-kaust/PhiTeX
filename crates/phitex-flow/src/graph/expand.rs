@@ -182,7 +182,11 @@ impl Exec<'_> {
         if let Some(u) = self.next_raw() {
             let m = self.tok_meaning(&u);
             if !self.noexp && u.key().is_some() && expands(&m) {
+                // (an `\input` expanded here is read in the piece: the token
+                // put back after it is read first, tex.web 368)
+                let was = std::mem::replace(&mut self.at_start, false);
                 self.expand(&u, &m);
+                self.at_start = was;
             } else if self.noexp {
                 self.rewrite(vec![Tok::DontExpand, u]);
             } else {

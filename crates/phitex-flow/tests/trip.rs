@@ -15,9 +15,8 @@
 //! diagnostics only (the user's decision, 2026-10-10): they are written to
 //! `$CARGO_TARGET_TMPDIR/trip/` with the listing, for navigation.
 //!
-//! Until the listing is Knuth's, the test holds the ground gained: the
-//! listing's first line that differs may only move down (`REACHED`), and
-//! all five schedules of `tests/dvi.rs` must give the same bytes.
+//! The listing is Knuth's, and all five schedules of `tests/dvi.rs` give
+//! the same bytes.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -26,10 +25,6 @@ use std::sync::Arc;
 use phitex_flow::print::Limits;
 use phitex_flow::session::{Session, SessionOut};
 use phitex_flow::{Font, Options, Order, Reads};
-
-/// The listing's lines known to be Knuth's: its first difference is at
-/// least this far down (1-based: the first differing line's number).
-const REACHED: usize = 1079;
 
 fn dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/trip")
@@ -157,26 +152,19 @@ fn trip() {
     };
     let got = masked(&typ);
     let at = got.iter().zip(&want).position(|(a, b)| a != b);
-    let first_diff = match at {
-        None if got.len() == want.len() => {
-            eprintln!("TRIP: trip.typ is Knuth's ({} lines)", want.len());
-            return;
-        }
-        None => got.len().min(want.len()) + 1,
-        Some(i) => i + 1,
+    let Some(i) = at.or_else(|| (got.len() != want.len()).then(|| got.len().min(want.len()))) else {
+        eprintln!("TRIP: trip.typ is Knuth's ({} lines)", want.len());
+        return;
     };
-    eprintln!(
-        "TRIP: trip.typ differs from line {first_diff} of {} (ours: {:?}, Knuth's: {:?}); \
+    panic!(
+        "TRIP: trip.typ differs from line {} of {} (ours: {:?}, Knuth's: {:?}); \
          {} pages of DVI, {} bytes; outputs in {}",
+        i + 1,
         want.len(),
-        got.get(first_diff - 1),
-        want.get(first_diff - 1),
+        got.get(i),
+        want.get(i),
         typ.matches("beginning of page").count(),
         first.dvi.len(),
         out_dir().display()
-    );
-    assert!(
-        first_diff >= REACHED,
-        "TRIP went back: trip.typ now differs from line {first_diff}, it was right up to line {REACHED}"
     );
 }

@@ -956,41 +956,19 @@ first differing line may only move down.
   half-buffer rule reads.
 - The memory bound is A's `Options::main_memory`.
 
-**Stopgaps in the harness:**
-- *Waiting on A's `Key::Ended`:* pass 1's text is cut after its `\next`
-  (= `\dump`) line, in `tests/trip.rs` and in `phitex-flow --trip`. The
-  core still runs the pieces after an `\end`/`\dump`. In IniTeX's state
-  they loop forever at line 206 (`\everypar`'s `\gobble` eats the `$`
-  that is inserted).
-- *Waiting on A's same-run write/read:* `tripos.tex`, written by
-  `\write10` and read back in the same run, goes through the session's
-  fixpoint over written files (`Session::run`, up to 3 runs) (B's gap 1 below,
-  the same core gap).
-
-**Gaps for A:**
-1. **The fold ignores a document's `\pagegoal=` and the other page
-   dimensions** (tex.web 1245: `page_so_far[k]` is assigned at once, at
-   the command, against the page as the last `build_page` left it). This
-   is the last thing between TRIP and Knuth's `trip.typ`:
-   - Pages 10 and 15 are packed to 16383.99998pt, not 10000pt.
-     `\showlonglists` sets `\pagegoal=10000pt`.
-   - Repro, against `tex -ini`:
-
-         \catcode`\{=1 \catcode`\}=2
-         \vsize=100pt \hsize=50pt \maxdepth=2pt \output={\showbox255 \shipout\box255}
-         \hrule height 5pt\penalty0
-         \pagegoal=50pt
-         \vfil\penalty-10000
-         \end
-
-     TeX gives `\vbox(50.0+0.0)x0.0, glue set 45.0fil`; we give 100pt.
-   - Without the `\penalty0` the page is still empty at the assignment.
-     TeX then sets the goal back to `\vsize` when the first box arrives
-     (§987).
-   - Proposal: the assignment emits an item that the fold applies to its
-     page state on receipt, not queued behind the contributions (like
-     `Item::PrevDepth`).
-2. **The pieces after `\end`/`\dump` still run** (`Key::Ended`, above).
+**Result** (2026-10-10): `trip.typ` is Knuth's, all 16 pages, at the
+five schedules. The two remaining raw differences are the glue rounding
+`trip.diffs` allows (`down4 639342177`, `y4`/`y0 203921756`).
+- Pass 1 is no longer cut at `\dump`: A's `Key::Ended` ends job 1, and a
+  job start defines it 0 again (a new run of TeX). The layout skips the
+  rest of an ended job up to the next job's first piece.
+- `tripos.tex` still goes through the session's fixpoint over written
+  files. B's gap 1 below (a file written and read back in one run) is the
+  same core gap.
+- A's `Item::PageSoFar` (tex.web 1245) is sent at any level, not only at
+  level 0: inside a group, box, paragraph or formula, through the node's
+  `para` stream, as `Item::Halt` is (not inside an output routine).
+  `\showlonglists` sets `\pagegoal` inside `{{...}}`.
 
 **Fixed here** (each one changed TRIP's DVI or what came after it):
 - `\fontdimen` growing the last font loaded (B's `Key::LastFont` and
@@ -1016,6 +994,11 @@ first differing line may only move down.
 - §641: Huge page cannot be shipped out;
 - `Tok::Param(n, c)`: a parameter text keeps its character, and a body
   shows `match_chr` (§294).
+- tex.web 392/397: a delimited argument matches the token its delimiter
+  expects next before a `\par` ends the call (`\a#1\par` with `\par`
+  next);
+- tex.web 368: an `\input` expanded by `\expandafter` is read in the
+  piece, not as a file-piece node (the token put back is read first).
 
 **Approximations left** (not met by TRIP's DVI):
 - `\endtemplate` is not yet an `\outer` name for `check_outer`.
