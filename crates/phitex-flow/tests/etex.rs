@@ -19,7 +19,7 @@ const PRELUDE: &str = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\$=3 \\catcode
 \\baselineskip=12pt \\topskip=10pt \\tolerance=200 \\linepenalty=10 %\n";
 
 fn font() -> Arc<Font> {
-    let b = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../partex-core/testdata/cmr10.tfm")).unwrap();
+    let b = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/cmr10.tfm")).unwrap();
     Arc::new(Font::parse("cmr10", &b).unwrap())
 }
 

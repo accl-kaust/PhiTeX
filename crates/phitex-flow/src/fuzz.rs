@@ -197,8 +197,7 @@ pub fn plain() -> Option<String> {
 }
 
 fn cmr10() -> Option<Arc<Font>> {
-    // (the crate's own copy once partex-core is gone, else partex-core's)
-    let b = ["testdata/cmr10.tfm", "../partex-core/testdata/cmr10.tfm"].iter().find_map(|p| std::fs::read(root().join(p)).ok())?;
+    let b = std::fs::read(root().join("testdata/cmr10.tfm")).ok()?;
     Font::parse("cmr10", &b).ok().map(Arc::new)
 }
 
