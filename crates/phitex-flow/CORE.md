@@ -1324,15 +1324,43 @@ First local table (5 repetitions, median ms):
 | param | 140 | 133 | 550 | 430 |
 | cold | 135 | 160 | 360 | 400 |
 
-- **B1. With pieces keeping their nodes, every edit scans all the pages
-  again.** The page scan is the longest phase: 60 ms on big and 270 ms on
-  bigout, for a 10-step word edit. Lean pieces take 4.8 ms and 14 ms. So
-  "nodes" misses the 50 ms word and line budgets on big and bigout, and
-  the 100 ms page-break budget on bigout. The scan does not converge on
-  the last build's pages when runs are kept, presumably because a kept
-  run is a new `Arc`. For A.
-- **B2.** Even lean, the scan of a word edit grows with the document
-  (4.8 ms on 48 pages, 14 ms on 152).
+- **B2. Every edit scans every page, lean or not** (traced: the root of
+  both). A word edit in the middle of big makes the scan feed all 1850
+  items from piece 0 and fire all 48 output routines (memo hits), in both
+  modes. Nothing is skipped: no `advance_match` match, no `resume`, no
+  convergence. The predicate: `matching: !fancy && (...)` (build.rs, the
+  round's `State`) turns matching off whenever the document has an
+  `\output` routine. Every plain document has one (`\plainoutput`). And
+  in page.rs `let resume = if fancy { None } ...` gives no page a restart
+  point, so `converge` never finds `o.resume == Some(r)`. With an output
+  routine the scan is O(pages) for any edit. Lean bigout, word edit
+  (scan 16 ms): `find_memo` 152 × 53 µs = 8 ms (`m.page == rt.page.b` and
+  the reads' `seen_as`), the fires' installs and retractions 2–3 ms, the
+  page builder's feeding of about 5500 items about 5 ms. Big is the same
+  in a third of the size. *Wanted*: a restart point for a fancy fold. The
+  page builder's state after a fire whose routine's run is the last
+  build's (a memo hit, same `\box255`, same exports), at the first item
+  after the call, is what a fold started there with nothing would have.
+  So the resume rule can treat a memo-hit fire like a default one: resume
+  at the last such page before the first changed piece, and converge at
+  the first page after the last changed piece. That makes the scan
+  O(changed pages).
+- **B1. With pieces keeping their nodes the same scan costs 15 times
+  more** (traced). 66 ms against 4.5 ms on big, 188 ms against 16 ms on
+  bigout, for the same items fed and the same 152 memo hits. On bigout,
+  `install_fold_defs` takes 89 ms (lean: 2 ms), the retraction of the
+  predicted definitions inside `fire` about 93 ms, `find_memo` 6.5 ms.
+  Both go through `refresh_exports` and `changed_at` (build.rs). For each
+  key a fire defines between a piece's nodes (`\outputpenalty`,
+  `Page(0..8)`, the marks, `\box255`...), `changed_at` calls
+  `run.reads_after(key, pos.1)`. The predicate: `Run::reads_after`
+  (graph.rs:1702) is `(i+1..nodes.len()).any(|j| nodes[j].reads.iter()
+  .any(|r| r.key == *key))` for a run with its nodes, a walk over every
+  later node's reads. A lean run has a binary search over its tables.
+  The fires sit in pieces of thousands of nodes, so each fire costs
+  O(nodes × reads). *Wanted*: an index per run of the nodes reading each
+  key (sorted node lists), so `reads_after` is a binary search as for a
+  lean run. Then B2's restart point removes most fires altogether.
 - `param` (every paragraph reflowed) is a cold build's cost or more:
   about 100% of cold, 140% on bigout lean.
 - `word` misses the 300 steps where the word is part of a definition or
