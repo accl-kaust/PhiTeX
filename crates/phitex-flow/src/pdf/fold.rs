@@ -495,6 +495,14 @@ impl F<'_> {
         u32::try_from(n).ok().and_then(|n| self.objs.get(n as usize).filter(|_| n > 0)).is_some_and(|o| o.t == t)
     }
 
+    /// A fatal `pdf_error` of the file's: pdfTeX stops at the first (the
+    /// job's errors get it once).
+    fn fatal(&mut self, m: &str) {
+        if !self.errors.iter().any(|e| e == m) {
+            self.errors.push(m.to_string());
+        }
+    }
+
     /// An event's answer field.
     fn answer(&mut self, piece: u32, tag: what::Tag, field: u32, v: i32) {
         let [s, f, n, i] = tag;
@@ -1617,6 +1625,8 @@ impl F<'_> {
                 self.answer(piece, tag, ECHO, *n);
                 self.answer(piece, tag, 0, i32::from(ok));
                 if !ok {
+                    // (`pdf_check_obj`'s fatal error, where the file says so)
+                    self.fatal("pdfTeX error (ext1): cannot find referenced object");
                     return;
                 }
                 let dims = match self.data.get(&(*n as u32)) {
@@ -1640,6 +1650,7 @@ impl F<'_> {
                         let ok = *n > 0 && *n as u32 <= self.obj_ptr && self.objs[*n as usize].aux == 0;
                         if !ok {
                             self.answer(piece, tag, 1, 1);
+                            self.fatal("pdfTeX error (ext1): invalid object number");
                             return;
                         }
                         *n as u32

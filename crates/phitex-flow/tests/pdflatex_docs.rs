@@ -477,3 +477,35 @@ fn pdf_objs() {
 fn pdf_vfont() {
     doc("vfont");
 }
+
+/// The graphics document at a schedule that speculated on a stale
+/// `\pdflastximage` (one worker, random order 1): its `\pdfrefximage` of
+/// the predicted number met the last round's answer for it.
+#[test]
+fn pdf_graphics_speculating() {
+    doc_at("graphics", run(1, Reads::Speculate, Order::Random(1)));
+}
+
+/// Looks for the schedules a document fails at (not a test of its own:
+/// `PHITEX_SCAN=NAME:THREADS:FROM..TO` with `--ignored`), speculating in
+/// random orders seeded `FROM..TO`; prints each seed that fails.
+#[test]
+#[ignore = "a search, run by hand"]
+fn scan_seeds() {
+    let Ok(spec) = std::env::var("PHITEX_SCAN") else { return };
+    let mut it = spec.split(':');
+    let name = it.next().expect("NAME").to_string();
+    let threads: usize = it.next().expect("THREADS").parse().expect("a number");
+    let (from, to) = it.next().expect("FROM..TO").split_once("..").expect("FROM..TO");
+    let (from, to): (u64, u64) = (from.parse().expect("FROM"), to.parse().expect("TO"));
+    let mut bad = Vec::new();
+    for seed in from..to {
+        let o = run(threads, Reads::Speculate, Order::Random(seed));
+        let n = name.clone();
+        if std::panic::catch_unwind(move || doc_at(&n, o)).is_err() {
+            eprintln!("SEED {seed} FAILS");
+            bad.push(seed);
+        }
+    }
+    eprintln!("failing seeds: {bad:?}");
+}

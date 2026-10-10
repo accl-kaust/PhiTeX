@@ -3423,7 +3423,17 @@ fire's ordinal among the job's fires (`RoutineEnv::pdf_scope`), a name,
 not an input: a memo made at another ordinal (a scan resumed counts its
 fires from there) is checked with its answers read under this fire's,
 and reused with its events filed under it; a changed answer runs the
-routine again. Keys for A, if `ReadRef` takes over: `Key::PdfAns`,
+routine again. The errors an answer implies (`\pdfrefobj` of an
+object that does not exist, `\pdfannot useobjnum` of an invalid one:
+pdfTeX's fatal "cannot find referenced object", "invalid object
+number") are the fold's, never a node's: a node reads an answer of an
+earlier round, and a restructure that gives a piece a new id loses its
+answers (they are filed by the piece's id), so a reader of its
+`\pdflastximage` can see 0 for a round; a node that stopped the job on
+it would end the build before the round that corrects it (the graphics
+document at one worker, speculating, random order 1:
+`pdf_graphics_speculating`). The fold has every event of the round in
+order and stops at the first, as pdfTeX does. Keys for A, if `ReadRef` takes over: `Key::PdfAns`,
 `Key::PdfLast`, `Key::PdfSeed`, `Key::PdfClock`, `Key::PdfDate`,
 `Key::PdfRandom`, `Key::PdfMatch`.
 

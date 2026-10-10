@@ -258,9 +258,12 @@ impl Exec<'_> {
         Some(f)
     }
 
-    /// `pdf_check_obj(t, n)` (fatal if `n` is no object of type `t`), and
-    /// its answer's fields (`[there, w, h, d, obj_info]`).
-    fn pdf_check(&mut self, kind: u8, n: i32) -> Option<[i32; 5]> {
+    /// `pdf_check_obj(t, n)`'s answer's fields (`[there, w, h, d,
+    /// obj_info]`). Its fatal error (`n` no object of type `t`) is the
+    /// fold's, where the object table is the file's: a node never stops
+    /// the job on an answer an earlier round gave (a number read on a
+    /// cold or since refuted value), the round after answers again.
+    fn pdf_check(&mut self, kind: u8, n: i32) -> [i32; 5] {
         let i = self.pdf_event(Event::Check { kind, n });
         // (an answer for another `n` is none yet: `what::ECHO`)
         let a = if self.pdf_answer(i, what::ECHO) == Some(n) { self.pdf_answer(i, 0) } else { None };
@@ -271,11 +274,7 @@ impl Exec<'_> {
                 *o = self.pdf_answer(i, f as u32).unwrap_or(0);
             }
         }
-        if out[0] == 0 {
-            self.pdf_fatal("ext1", "cannot find referenced object");
-            return None;
-        }
-        Some(out)
+        out
     }
 
     /// A PDF-only command (`Prim::Pdf(i)`).
@@ -366,9 +365,8 @@ impl Exec<'_> {
                     return;
                 }
                 let n = self.scan_int();
-                if self.pdf_check(what::OBJ_TYPE_OBJ, n).is_some() {
-                    self.pdf_whatsit(What::RefObj(n));
-                }
+                self.pdf_check(what::OBJ_TYPE_OBJ, n);
+                self.pdf_whatsit(What::RefObj(n));
             }
             "pdfxform" => self.pdf_xform(false),
             "pdfrefxform" => {
@@ -376,9 +374,8 @@ impl Exec<'_> {
                     return;
                 }
                 let n = self.scan_int();
-                if let Some(a) = self.pdf_check(what::OBJ_TYPE_XFORM, n) {
-                    self.pdf_whatsit(What::RefXform { n, w: a[1], h: a[2], d: a[3] });
-                }
+                let a = self.pdf_check(what::OBJ_TYPE_XFORM, n);
+                self.pdf_whatsit(What::RefXform { n, w: a[1], h: a[2], d: a[3] });
             }
             "pdfximage" => self.pdf_ximage(false),
             "pdfrefximage" => {
@@ -386,9 +383,8 @@ impl Exec<'_> {
                     return;
                 }
                 let n = self.scan_int();
-                if let Some(a) = self.pdf_check(what::OBJ_TYPE_XIMAGE, n) {
-                    self.pdf_whatsit(What::RefXimage { n, w: a[1], h: a[2], d: a[3] });
-                }
+                let a = self.pdf_check(what::OBJ_TYPE_XIMAGE, n);
+                self.pdf_whatsit(What::RefXimage { n, w: a[1], h: a[2], d: a[3] });
             }
             "pdfannot" => {
                 if !self.pdf_on(name, true) {
@@ -403,11 +399,7 @@ impl Exec<'_> {
                 }
                 let use_num = self.keyword("useobjnum").then(|| self.scan_int());
                 let i = self.pdf_event(Event::Annot { reserve: false, use_num });
-                let echoed = use_num.is_some_and(|n| self.pdf_answer(i, what::ECHO) == Some(n));
-                if echoed && self.pdf_answer(i, 1) == Some(1) {
-                    self.pdf_fatal("ext1", "invalid object number");
-                    return;
-                }
+                // (an invalid `useobjnum`'s fatal error is the fold's)
                 let k = self.pdf_answer(i, 0).unwrap_or(0);
                 let (w, h, d) = self.pdf_alt_rule();
                 let data = self.pdf_text();
@@ -951,14 +943,12 @@ impl Exec<'_> {
             }
             "pdfxformname" => {
                 let n = self.scan_int();
-                let Some(a) = self.pdf_check(what::OBJ_TYPE_XFORM, n) else { return };
+                let a = self.pdf_check(what::OBJ_TYPE_XFORM, n);
                 let _ = write!(s, "{}", a[4]);
             }
             "pdfximagebbox" => {
                 let n = self.scan_int();
-                if self.pdf_check(what::OBJ_TYPE_XIMAGE, n).is_none() {
-                    return;
-                }
+                self.pdf_check(what::OBJ_TYPE_XIMAGE, n);
                 let j = self.scan_int();
                 if !(1..=4).contains(&j) {
                     self.pdf_fatal("pdfximagebbox", "invalid parameter");
