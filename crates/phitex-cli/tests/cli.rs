@@ -40,6 +40,19 @@ fn docs_dir() -> PathBuf {
     flow().join("tests/latex/docs")
 }
 
+/// The documents of pdfTeX's PDF-only commands (hyperref, graphicx,
+/// xcolor's colour stack, `TikZ`, positions, objects and forms, virtual
+/// fonts: `tests/latex/pdfdocs/`, their `pdflatex` oracles in
+/// `tests/latex/pdf/` beside the others').
+fn pdfdocs_dir() -> PathBuf {
+    flow().join("tests/latex/pdfdocs")
+}
+
+/// Where document `name` is: `tests/latex/pdfdocs/` if it is one of those.
+fn doc_dir(name: &str) -> PathBuf {
+    if pdfdocs_dir().join(format!("{name}.tex")).exists() { pdfdocs_dir() } else { docs_dir() }
+}
+
 fn cache() -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("phitex-cache")
 }
@@ -114,7 +127,7 @@ fn first_difference(a: &[u8], b: &[u8]) -> String {
 /// Copies document `name` (`NAME.tex` and its `NAME-*` files) into `dir`.
 fn copy_doc(name: &str, dir: &Path) {
     let pre = format!("{name}-");
-    for e in std::fs::read_dir(docs_dir()).expect("the documents").flatten() {
+    for e in std::fs::read_dir(doc_dir(name)).expect("the documents").flatten() {
         let f = e.file_name().to_string_lossy().into_owned();
         if f == format!("{name}.tex") || f.starts_with(&pre) {
             std::fs::copy(e.path(), dir.join(&f)).expect("a copy");
@@ -591,6 +604,51 @@ fn pdflatex_layout() {
 #[test]
 fn pdflatex_rules() {
     pdflatex_doc("rules");
+}
+
+/// `pdflatex` on a document of `tests/latex/pdfdocs/`, if the tree has
+/// it (they came with the pdfTeX primitives' merge).
+fn pdflatex_pdfdoc(name: &str) {
+    if !pdfdocs_dir().join(format!("{name}.tex")).exists() {
+        eprintln!("{name}: not in this tree (tests/latex/pdfdocs/)");
+        return;
+    }
+    pdflatex_doc(name);
+}
+
+#[test]
+fn pdflatex_pdfdoc_hyper() {
+    pdflatex_pdfdoc("hyper");
+}
+
+#[test]
+fn pdflatex_pdfdoc_graphics() {
+    pdflatex_pdfdoc("graphics");
+}
+
+#[test]
+fn pdflatex_pdfdoc_color() {
+    pdflatex_pdfdoc("color");
+}
+
+#[test]
+fn pdflatex_pdfdoc_tikz() {
+    pdflatex_pdfdoc("tikz");
+}
+
+#[test]
+fn pdflatex_pdfdoc_zsavepos() {
+    pdflatex_pdfdoc("zsavepos");
+}
+
+#[test]
+fn pdflatex_pdfdoc_objs() {
+    pdflatex_pdfdoc("objs");
+}
+
+#[test]
+fn pdflatex_pdfdoc_vfont() {
+    pdflatex_pdfdoc("vfont");
 }
 
 /// A small `LuaLaTeX` document (a reference, `\directlua`).

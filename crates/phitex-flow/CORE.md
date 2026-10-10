@@ -1647,7 +1647,7 @@ timeouts (four of gfx) and titlepage-15-6 replay alone in 1–4 s and
 pass, and the 20 TRIP swap seeds end cold (TeX's input stack size,
 now enforced) with their replays passing. That makes 8044's timeouts
 c89d1fec's slowness and loops. A swap's replay takes 34–43 s, against
-TRIP's 0.75 s cold.
+TRIP's 0.75 s cold: a speed item, not traced.
 
 **The ship candidate's gates** (one line each, `ACCL_COMMIT` the
 candidate, which must contain the scripts):
