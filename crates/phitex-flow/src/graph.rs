@@ -1513,6 +1513,27 @@ pub struct Chain {
     err_at: Vec<u32>,
     /// For each `Open` node, the `Open` node of the group enclosing it.
     parent_of: FxMap<u32, u32>,
+    /// An index over `defs_of` and the scopes, TeX's save stack: for each
+    /// key, the entries of `defs_of` still reaching the next node, in
+    /// order — every definition but the local ones of a group closed since
+    /// ([`Chain::resolve`] at the chain's end reads the last). A group's
+    /// `Close` drops its own local definitions, nothing else: a `\global`
+    /// one made in it stays (it reaches past the close), and so do the
+    /// definitions under it, local to the groups still open — the walk
+    /// answers with the latest definition that is global or in a group not
+    /// closed, which is the stack's last however a `\global` and local
+    /// ones interleave (one local made after a `\global` in the same group
+    /// goes at the close, the `\global` is the last again).
+    live: FxMap<Key, Vec<(u32, u32)>>,
+    /// The entries a `Close` dropped from `live`, in order: the `Close`
+    /// node, the definition's node and index. Node `i` before the end sees
+    /// the definitions in `live` before it and those dropped at a close
+    /// from `i` on ([`Chain::resolve`]: a `\fi`'s φ reads as of its
+    /// `\if`, a few nodes back, and looks at the few closes since).
+    dropped: FxMap<Key, Vec<(u32, u32, u32)>>,
+    /// The keys a group's nodes defined locally to it (by its `Open`
+    /// node), for its `Close` to drop from `live`.
+    local_keys: FxMap<u32, Vec<Key>>,
 }
 
 impl Chain {
@@ -1551,8 +1572,42 @@ impl Chain {
     }
 
     /// The definition of `key` reaching node `i` (`i == len`: the next
-    /// node): the latest still in scope.
+    /// node): the latest still in scope. At the chain's end, from the
+    /// stack of those still in scope (`live`); before it, by walking the
+    /// key's definitions back.
     pub fn resolve(&self, key: &Key, i: usize) -> Option<(u32, Val)> {
+        let at = |&(d, j): &(u32, u32)| (d, self.nodes[d as usize].defs()[j as usize].val.clone());
+        if i >= self.nodes.len() {
+            let r = self.live.get(key).and_then(|v| v.last()).map(at);
+            debug_assert_eq!(r, self.resolve_walk(key, i), "the stack of {key:?} at {i}");
+            return r;
+        }
+        // (before the end: the latest of those in `live` before `i`, and of
+        // those dropped at a close from `i` on — in scope at `i` — before
+        // `i`)
+        let i32 = u32::try_from(i).unwrap_or(u32::MAX);
+        let mut best: Option<(u32, u32)> = self.live.get(key).and_then(|v| {
+            let p = v.partition_point(|x| x.0 < i32);
+            p.checked_sub(1).map(|q| v[q])
+        });
+        if let Some(dr) = self.dropped.get(key) {
+            for &(c, d, j) in dr.iter().rev() {
+                if c < i32 {
+                    break;
+                }
+                if d < i32 && best.is_none_or(|b| d > b.0) {
+                    best = Some((d, j));
+                }
+            }
+        }
+        let r = best.as_ref().map(at);
+        debug_assert_eq!(r, self.resolve_walk(key, i), "the stack of {key:?} before the end, at {i}");
+        r
+    }
+
+    /// [`Chain::resolve`] by walking the definitions of `key` back from
+    /// node `i`, past the local ones of groups closed before it.
+    fn resolve_walk(&self, key: &Key, i: usize) -> Option<(u32, Val)> {
         let ds = self.defs_of.get(key)?;
         for &(d, j) in ds.iter().rev() {
             if d as usize >= i {
@@ -1642,6 +1697,7 @@ impl Chain {
             Kind::Close => {
                 if let Some(o) = self.open.pop() {
                     self.close_of.insert(o, i);
+                    self.live_close(o, i);
                 }
                 self.scopes.push(i);
             }
@@ -1654,12 +1710,61 @@ impl Chain {
                     Some(l) if l.0 == i => l.1 = j as u32,
                     _ => v.push((i, j as u32)),
                 }
+                self.live_def(n, i, j as u32, d);
             }
             if r.para.is_some() {
                 self.para_at.push(i);
             }
             if !r.errors.is_empty() {
                 self.err_at.push(i);
+            }
+        }
+    }
+
+    /// Node `n`'s (at `i`) definition `j`, `d`, on the stack of those in
+    /// scope (`live`; a node's last definition of a key is the one that
+    /// counts, as in `defs_of`).
+    fn live_def(&mut self, n: &Node, i: u32, j: u32, d: &Def) {
+        let g = if d.global { None } else { self.def_group(n, d) };
+        let v = self.live.entry(d.key.clone()).or_default();
+        match v.last_mut() {
+            Some(l) if l.0 == i => l.1 = j,
+            _ => v.push((i, j)),
+        }
+        if let Some(g) = g {
+            let ks = self.local_keys.entry(g).or_default();
+            if ks.last() != Some(&d.key) {
+                ks.push(d.key.clone());
+            }
+        }
+    }
+
+    /// The group opened at node `g` closes: its local definitions leave
+    /// the stack (they follow its `Open` there; a `\global` one stays).
+    fn live_close(&mut self, g: u32, c: u32) {
+        let Some(keys) = self.local_keys.remove(&g) else { return };
+        for key in keys {
+            let Some(mut v) = self.live.remove(&key) else { continue };
+            let from = v.partition_point(|x| x.0 <= g);
+            let mut w = from;
+            let mut gone = Vec::new();
+            for r in from..v.len() {
+                let (d, j) = v[r];
+                let n = &self.nodes[d as usize];
+                let def = &n.defs()[j as usize];
+                if def.global || self.def_group(n, def) != Some(g) {
+                    v[w] = v[r];
+                    w += 1;
+                } else {
+                    gone.push((c, d, j));
+                }
+            }
+            v.truncate(w);
+            if !gone.is_empty() {
+                self.dropped.entry(key.clone()).or_default().extend(gone);
+            }
+            if !v.is_empty() {
+                self.live.insert(key, v);
             }
         }
     }
@@ -1679,21 +1784,13 @@ impl Chain {
         if a >= b {
             return;
         }
+        let open_at_a = self.open.clone();
         self.nodes.share(&old.nodes, a, b);
         let within = |v: &[u32]| {
             let s = v.partition_point(|&i| (i as usize) < a);
             let e = v.partition_point(|&i| (i as usize) < b);
             s..e
         };
-        for (k, v) in &old.defs_of {
-            let r = v.partition_point(|x| (x.0 as usize) < a)..v.partition_point(|x| (x.0 as usize) < b);
-            if !r.is_empty() {
-                self.defs_of
-                    .entry(k.clone())
-                    .or_default()
-                    .extend_from_slice(&v[r]);
-            }
-        }
         for &i in &old.scopes[within(&old.scopes)] {
             if old.nodes[i as usize].kind == Kind::Open {
                 if let Some(&p) = self.open.last() {
@@ -1709,6 +1806,32 @@ impl Chain {
             .extend_from_slice(&old.para_at[within(&old.para_at)]);
         self.err_at
             .extend_from_slice(&old.err_at[within(&old.err_at)]);
+        // (the stack of definitions in scope, as `index` makes it, node by
+        // node: the shared nodes' groups as they open and close)
+        let mut open = open_at_a;
+        for i in a..b {
+            let n = self.nodes[i].clone();
+            match n.kind {
+                Kind::Open => open.push(i as u32),
+                Kind::Close => {
+                    if let Some(o) = open.pop() {
+                        self.live_close(o, i as u32);
+                    }
+                }
+                _ => {}
+            }
+            // (`defs_of` from the shared nodes' own definitions, as `index`
+            // makes it: not from `old`'s, all of whose keys a walk would
+            // visit at every share)
+            for (j, d) in n.defs().iter().enumerate() {
+                let v = self.defs_of.entry(d.key.clone()).or_default();
+                match v.last_mut() {
+                    Some(l) if l.0 == i as u32 => l.1 = j as u32,
+                    _ => v.push((i as u32, j as u32)),
+                }
+                self.live_def(&n, i as u32, j as u32, d);
+            }
+        }
     }
 }
 
