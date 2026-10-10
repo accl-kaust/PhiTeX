@@ -3,6 +3,7 @@
 //! glyph names of its encoding (`cmap`), reading the definitions that
 //! reach the end of the job. Pure functions.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use super::enc::NOTDEF;
@@ -86,7 +87,7 @@ enum G {
 /// `check_unicode_value`.
 fn check_unicode_value(s: &[u8], multiple: bool) -> Option<i64> {
     let l = s.len();
-    if l == 0 || (multiple && l % 4 != 0) || (!multiple && !(4..=6).contains(&l)) {
+    if l == 0 || (multiple && !l.is_multiple_of(4)) || (!multiple && !(4..=6).contains(&l)) {
         return None;
     }
     let mut code = 0i64;
@@ -255,26 +256,28 @@ pub fn cmap(names: &[Vec<u8>], tfm: &str, buf: &str, lookup: &mut dyn FnMut(&str
     let (mut bfrange, mut bfchar) = (0, 0);
     let mut i = 0;
     while i < 256 {
-        if range[i] == 1 {
-            bfchar += 1;
-            i += 1;
-        } else if range[i] > 1 {
-            bfrange += 1;
-            i += range[i];
-        } else {
-            i += 1;
+        match range[i] {
+            1 => {
+                bfchar += 1;
+                i += 1;
+            }
+            0 => i += 1,
+            r => {
+                bfrange += 1;
+                i += r;
+            }
         }
     }
     let mut i = 0;
     loop {
         let sub = bfrange.min(100);
         bfrange -= sub;
-        o.push_str(&format!("{sub} beginbfrange\n"));
+        let _ = writeln!(o, "{sub} beginbfrange");
         for _ in 0..sub {
             while i < 256 && range[i] <= 1 {
                 i += 1;
             }
-            o.push_str(&format!("<{i:02X}> <{:02X}> <{}>\n", i + range[i] - 1, utf16be(code(&gtab[i]))));
+            let _ = writeln!(o, "<{i:02X}> <{:02X}> <{}>", i + range[i] - 1, utf16be(code(&gtab[i])));
             i += range[i];
         }
         o.push_str("endbfrange\n");
@@ -286,7 +289,7 @@ pub fn cmap(names: &[Vec<u8>], tfm: &str, buf: &str, lookup: &mut dyn FnMut(&str
     loop {
         let sub = bfchar.min(100);
         bfchar -= sub;
-        o.push_str(&format!("{sub} beginbfchar\n"));
+        let _ = writeln!(o, "{sub} beginbfchar");
         for _ in 0..sub {
             while i < 256 {
                 if range[i] > 1 {
@@ -298,8 +301,12 @@ pub fn cmap(names: &[Vec<u8>], tfm: &str, buf: &str, lookup: &mut dyn FnMut(&str
                 }
             }
             match &gtab[i] {
-                G::Str(s) => o.push_str(&format!("<{i:02X}> <{s}>\n")),
-                g => o.push_str(&format!("<{i:02X}> <{}>\n", utf16be(code(g)))),
+                G::Str(s) => {
+                    let _ = writeln!(o, "<{i:02X}> <{s}>");
+                }
+                g => {
+                    let _ = writeln!(o, "<{i:02X}> <{}>", utf16be(code(g)));
+                }
             }
             i += 1;
         }

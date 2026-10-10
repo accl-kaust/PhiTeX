@@ -143,7 +143,7 @@ fn rules() {
     check("rules");
 }
 
-/// `\pdfgentounicode`: the ToUnicode maps of a font with its own
+/// `\pdfgentounicode`: the `ToUnicode` maps of a font with its own
 /// encoding and of a re-encoded one, from `\pdfglyphtounicode`'s entries
 /// (ranges, strings, a font's own, out of range, invalid, redefined).
 #[test]
