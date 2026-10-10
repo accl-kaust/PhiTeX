@@ -2777,14 +2777,22 @@ lists with `scripts/xetex/fonts.conf`: TeX Live's `fonts/opentype` and
 `fonts/truetype`, nothing of the system's) and the file finder
 (`tfm::Kpse`: `find(name, format, prog) -> Option<path>`, `read(path)`;
 `tfm::Kpsewhich` asks `kpsewhich`, `tfm::DirKpse` walks directories).
-Both are givens, never searched for by a node. This `Kpse` is the shape
-proposed for A's `Build::set_input_finder`; once that lands on flow there
-is one trait.
+Both are givens, never searched for by a node. `tfm::Kpse` is flow's one
+file-finding interface: `Build::set_kpse` takes it for `\input`, and
+xdvipdfmx's finder in `Build::xdv_pdf` (`DocFiles`: the build's memory
+files and input directories, then the build's finder) is one more
+implementation. phitex-cli's `xelatex`/`xetex` (`tex.rs`, `xetex.rs`)
+index the installed fonts as fontconfig lists them (`fc-list` in XeTeX's
+`FcFontList` order, cached under the hash of its output: the one thing
+kpathsea cannot answer) and write `JOB.pdf` through xdvipdfmx in process
+(`-no-pdf`: the XDV file).
 
 Linked (tests/wall.rs allows them): partex-otf (faces, HarfBuzz-equal
 shaping, TECkit mappings, OpenType math tables, `xetex::fontmgr`),
 partex-xdvipdfmx (XDV to PDF, itself on phitex-codecs since W's
-extraction) and phitex-codecs (the PDF reader `\XeTeXpdffile` measures
+extraction; EPS pictures through dvipdfmx.cfg's `D` distiller, which the
+host runs: `Files::apply_filter`, here `sh -c` on a scratch copy) and
+phitex-codecs (the PDF reader `\XeTeXpdffile` measures
 with). Copied: `icu_tables.rs` (from partex-core), `icu_linebreak.rs` and
 `.bin` (ICU's line-break rules, from partex-core), and `xpic.rs`
 (XeTeX_pic.c's own image readers and poppler's page boxes, as

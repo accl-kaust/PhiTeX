@@ -1433,6 +1433,7 @@ dependencies = [
  "partex-bibtex",
  "partex-kpse",
  "partex-makeindex",
+ "partex-otf",
  "partex-xdvipdfmx",
  "phitex-codecs",
  "phitex-doc",
