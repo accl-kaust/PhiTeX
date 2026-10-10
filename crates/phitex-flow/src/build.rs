@@ -1500,6 +1500,9 @@ struct Shared {
     run_times: Mutex<FxMap<PieceId, (u64, u64)>>,
     /// Measuring: `Build::read_cmds`, likewise.
     read_cmds: Mutex<FxMap<PieceId, Vec<String>>>,
+    /// Measuring: the nodes that took longer than `SLOW_NODE`, as `N`
+    /// lines for the round's events.
+    notes: Mutex<Vec<String>>,
     /// When the round began (the events' times count from it).
     t_base: Instant,
     /// Measuring: the time threads waited for the scheduler's lock, and how
@@ -2786,6 +2789,7 @@ impl Build {
             sched: std::env::var_os("PHITEX_SCHED").map(|_| Mutex::new(Vec::new())),
             run_times: Mutex::new(std::mem::take(&mut self.run_times)),
             read_cmds: Mutex::new(std::mem::take(&mut self.read_cmds)),
+            notes: Mutex::new(Vec::new()),
             t_base: Instant::now(),
             lock_wait: AtomicU64::new(0),
             lock_n: AtomicU64::new(0),
@@ -2832,6 +2836,7 @@ impl Build {
         if let Some(ev) = &sh.sched {
             let waits = (sh.lock_wait.load(Ordering::Relaxed), sh.lock_n.load(Ordering::Relaxed));
             write_sched(&ev.lock().expect("sched"), &st, threads, sh.build_no, sh.t_base.elapsed(), waits);
+            write_notes(&sh.notes.lock().expect("notes"));
             if !st.restructure && std::env::var_os("PHITEX_SCHED_DEPS").is_some_and(|v| !v.is_empty()) {
                 write_deps(&st, &sh.seq, &sh.names, &sh.font, &self.run_times, &self.read_cmds);
             }
@@ -3473,6 +3478,20 @@ impl Shared {
 fn ready_count(g: &State, sh: &Shared) -> u64 {
     let speculate = sh.opts.reads == Reads::Speculate;
     g.unstarted.iter().filter(|&&k| entry_ready(g, k, speculate && !g.p[k].suspend)).take(255).count() as u64
+}
+
+/// Appends the slow nodes' notes to the file `PHITEX_SCHED` names.
+fn write_notes(notes: &[String]) {
+    use std::io::Write as _;
+    let Some(path) = std::env::var_os("PHITEX_SCHED") else { return };
+    if notes.is_empty() {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        for n in notes {
+            let _ = writeln!(f, "{n}");
+        }
+    }
 }
 
 /// Appends the last round's dependencies to the file `PHITEX_SCHED`
@@ -4984,6 +5003,9 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         k,
         wid,
         idx: (0, 0),
+        last_check: sh.now(),
+        node_ran: 0,
+        slow: Vec::new(),
         spec: sh.opts.reads == Reads::Speculate && !strict,
         strict,
         predicted: Vec::new(),
@@ -5334,6 +5356,29 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         g.stats.time_held += held.elapsed();
     }
     sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, tr, te, tl, sh.now(), ta], a: run.ran, b: run.nodes_len() as u64, c: outcome, d: env.idx.0, e: env.idx.1 });
+    if sh.sched.is_some() && !env.slow.is_empty() {
+        let first = run.nodes_len().saturating_sub(usize::try_from(run.ran).unwrap_or(usize::MAX));
+        let mut notes = sh.notes.lock().expect("notes");
+        for &(ran, ns) in &env.slow {
+            let i = (first + usize::try_from(ran).unwrap_or(0)).saturating_sub(1).min(run.nodes_len().saturating_sub(1));
+            if run.chain.nodes.is_empty() {
+                break;
+            }
+            let n = &run.chain.nodes[i];
+            let what: Vec<String> = n
+                .reads
+                .iter()
+                .filter(|r| matches!(r.key, Key::File(_) | Key::FontLoaded(_) | Key::Font | Key::ReadStream(_)))
+                .map(|r| format!("{:?}", r.key))
+                .collect();
+            notes.push(format!(
+                "N\t{k}\t{ns}\t{i}\t{:?} {}\t{}",
+                n.kind,
+                crate::val::Shown(&n.cmd, &sh.names.cs),
+                what.join(" ").replace(['\t', '\n'], " ")
+            ));
+        }
+    }
     if sh.sched.is_some() {
         let mut m = sh.run_times.lock().expect("run times");
         let e = m.entry(sh.seq.piece(k)).or_insert((0, 0));
@@ -5391,6 +5436,11 @@ struct PieceEnv<'a> {
     /// Measuring: reads of names from before the piece, and the time they
     /// took (parks included).
     idx: (u64, u64),
+    /// Measuring: when `check` last ran, and the nodes that took longer
+    /// than `SLOW_NODE` (the nodes run before them, the time).
+    last_check: u64,
+    node_ran: u64,
+    slow: Vec<(u64, u64)>,
     /// Reads run on predictions (`Reads::Speculate`, and not a piece whose
     /// speculation was given up).
     spec: bool,
@@ -5413,6 +5463,10 @@ struct PieceEnv<'a> {
     /// value read.
     seen: FxMap<Key, Vec<(u32, Val)>>,
 }
+
+/// Measuring: a node taking longer than this (ns) is noted with its
+/// command (`PHITEX_SCHED`'s `N` lines).
+const SLOW_NODE: u64 = 100_000_000;
 
 /// How many builds a piece that ran in an edit keeps its nodes for.
 pub const HOT_BUILDS: u64 = 8;
@@ -5612,6 +5666,16 @@ impl Env for PieceEnv<'_> {
     }
 
     fn check(&mut self, ran: u64, words: u64) -> Check {
+        // (a node's end: `ran` counts the nodes; the checks every 4096
+        // steps inside a node count steps, and are not node ends)
+        if self.sh.sched.is_some() && ran == self.node_ran + 1 {
+            let now = self.sh.now();
+            if now - self.last_check > SLOW_NODE {
+                self.slow.push((ran, now - self.last_check));
+            }
+            self.last_check = now;
+            self.node_ran = ran;
+        }
         // (marked stale while it runs, or the sequence changes: it stops)
         if self.sh.cancel[self.k].load(Ordering::Relaxed) {
             return Check::Abandon;
