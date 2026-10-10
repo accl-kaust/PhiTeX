@@ -153,6 +153,9 @@ pub struct Stats {
     pub rounds: usize,
     /// Each round's wall time.
     pub round_walls: Vec<Duration>,
+    /// The last round was the one that may not lay the sequence out again
+    /// (the rounds stopped placing anything new: `MAX_STALLED_ROUNDS`).
+    pub forced_last: bool,
     /// Output routines run, and kept from the last build.
     pub routines: usize,
     pub routines_kept: usize,
@@ -1426,6 +1429,9 @@ struct Shared {
     /// A run may change the sequence (not in a round that must be the
     /// last).
     restructure_ok: bool,
+    /// A settled run that changes the sequence ends the round at once
+    /// (`settle`): not in a round after one that placed nothing new.
+    at_once: bool,
     /// Settled pieces drop their nodes; which update this is.
     lean: bool,
     build_no: u64,
@@ -2044,21 +2050,29 @@ impl Build {
         // whose material made them, whatever a round lays out)
         self.page_runs = Some(self.pieces.iter().map(|o| o.run.clone()).collect());
         let mut rounds = 0;
-        // (measuring: `PHITEX_ROUND_CAP` moves the round past which files
-        // are read inline)
+        // (measuring: `PHITEX_ROUND_CAP` moves the bound on all rounds)
         let cap = std::env::var("PHITEX_ROUND_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(MAX_ROUNDS);
+        // (what the rounds of this update placed, and the rounds in a row
+        // that placed nothing new: a round laying the sequence out again
+        // with only what an earlier one placed is no progress)
+        let mut placed: FxSet<(u8, u64, u64)> = FxSet::default();
+        self.progress(&mut placed);
+        let mut stalled = 0;
         loop {
             rounds += 1;
             let t_round = Instant::now();
-            if let Some(mut out) = self.round(&texts, opts, t0, time_cut, rounds > cap) {
+            let last = rounds > cap || stalled >= MAX_STALLED_ROUNDS;
+            if let Some(mut out) = self.round(&texts, opts, t0, time_cut, last, stalled == 0) {
                 let mut carried = std::mem::take(&mut self.carried);
                 carried.round_walls.push(t_round.elapsed());
                 out.stats.absorb(carried);
                 out.stats.rounds = rounds;
+                out.stats.forced_last = last;
                 out.stats.wall = t0.elapsed();
                 return out;
             }
             self.carried.round_walls.push(t_round.elapsed());
+            stalled = if self.progress(&mut placed) { 0 } else { stalled + 1 };
             // (a run changed the sequence: evaluated again, its runs kept;
             // the pages to compare with are the last build's)
             self.pages.clone_from(&saved.0);
@@ -2066,6 +2080,33 @@ impl Build {
             self.marks.clone_from(&saved.2);
             self.call_logs.clone_from(&saved.3);
         }
+    }
+
+    /// Adds what the layout has placed — each file's pieces where it is
+    /// read, the rests of lines, the re-cuts, the joins, the pieces whose
+    /// `\input`s are read inline — to `placed`; whether anything was new.
+    /// Each element only ever enters once, so rounds with progress are
+    /// bounded by what the documents hold.
+    fn progress(&self, placed: &mut FxSet<(u8, u64, u64)>) -> bool {
+        let before = placed.len();
+        // (a file by its name and pieces: the same file read again at
+        // another place is not counted again)
+        for (name, cuts) in self.file_cuts.values() {
+            placed.insert((0, crate::hash::hash_of(&**name), cuts.len() as u64));
+        }
+        for k in self.rests.keys() {
+            placed.insert((1, k.0 as u64, k.1 as u64));
+        }
+        for k in self.recuts.keys() {
+            placed.insert((2, k.0 as u64, k.1 as u64));
+        }
+        for (k, v) in &self.joins {
+            placed.insert((3, *k as u64, v.len() as u64));
+        }
+        for t in &self.inline {
+            placed.insert((4, Arc::as_ptr(t).cast::<char>() as usize as u64, t.len() as u64));
+        }
+        placed.len() > before
     }
 
     /// Piece `k`'s material as the page builder is fed it
@@ -2205,6 +2246,7 @@ impl Build {
         t0: Instant,
         time_cut: Duration,
         last: bool,
+        at_once: bool,
     ) -> Option<Output> {
         let threads = opts.threads.max(1);
         let t_setup = Instant::now();
@@ -2622,6 +2664,7 @@ impl Build {
             fonts: self.fonts.clone(),
             opts,
             restructure_ok: !last,
+            at_once,
             lean: self.lean,
             build_no: self.builds,
             memo_old,
@@ -3495,9 +3538,15 @@ fn outside_ranges(names: &Names, key: &Key, k: usize, node: u32, font: &Arc<Font
     v.join(", ")
 }
 
-/// How many rounds a build lays its sequence out before its last, which
-/// may not lay it out again.
-const MAX_ROUNDS: usize = 64;
+/// How many rounds in a row a build may lay its sequence out without
+/// progress (`Build::progress`: nothing placed that no round of this
+/// build had placed) before its last, which may not lay it out again.
+const MAX_STALLED_ROUNDS: usize = 8;
+
+/// The rounds a build lays its sequence out at most, progress or not,
+/// before its last (a bound past any document's files: each round with
+/// progress places at least one new file, join, cut or inline mark).
+const MAX_ROUNDS: usize = 4096;
 
 /// How many times a piece may run in one round before the build fails as
 /// a livelock ([`stall`]).
@@ -4221,7 +4270,7 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
         if !sh.restructure_ok && g.p[k].got.join && !g.p[k].got.same(&g.p[k].expect) {
             let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
             let why = format!(
-                "the sequence of pieces did not settle in {MAX_ROUNDS} rounds: piece {k}'s run reads on into the next piece's text (a group or command open at its end), and the last round may not join them"
+                "the sequence of pieces did not settle ({MAX_STALLED_ROUNDS} rounds in a row placed nothing new, or {MAX_ROUNDS} in all): piece {k}'s run reads on into the next piece's text (a group or command open at its end), and the last round may not join them"
             );
             stall(g, sh, parked, &why);
             return true;
@@ -4251,6 +4300,16 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
             // defined yet (biglatex: the body ran 1.35 s before its class
             // was read, all of it thrown away). The runs in progress after
             // it stop; what they finished is kept as at any round's end.)
+            // (after a round that placed nothing new, the round runs to its
+            // end as before: what tells the layout the rest may come from
+            // the pieces after this one — TRIP's `\input tripos` reads a file
+            // the run itself writes at a shipout; ended at once, every round
+            // repeated the same change and never laid it out)
+            if !sh.at_once {
+                g.restructure_due = true;
+                g.settled += 1;
+                continue;
+            }
             for &q in &g.running {
                 if q > k {
                     sh.cancel[q].store(true, Ordering::Relaxed);
