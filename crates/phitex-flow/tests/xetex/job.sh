@@ -44,12 +44,18 @@ if [ -n "${CLI:-}" ]; then
     if cmp -s "$w/$n.pdf" "$oracle/docs/$n.pdf"; then echo "cli $n: the PDF is xelatex's" >> "$r/summary.txt"; else echo "cli $n: the PDF differs ($(cmp "$w/$n.pdf" "$oracle/docs/$n.pdf" 2>&1 | head -1))" >> "$r/summary.txt"; fi
   done
 fi
+# (SYNCTEX=1: phitex-cli's SyncTeX against xelatex's; both files kept in $r/synctex)
+if [ -n "${SYNCTEX:-}" ]; then
+  cargo test --release -p phitex-cli --test synctex synctex_against -- --include-ignored --nocapture --test-threads=1 > "$r/synctex.txt" 2>&1; echo "synctex_against (xetex, pdftex) exit $?" >> "$r/summary.txt"
+  grep -E "^xelatex|^pdflatex|^latex|^pdftex|^all|forward|panicked|^test " "$r/synctex.txt" | head -20 >> "$r/summary.txt"
+  mkdir -p "$r/synctex"; for d in target/tmp/synctex/xelatex-*; do mkdir -p "$r/synctex/$(basename "$d")"; cp "$d"/*.synctex.gz "$d"/*.log "$r/synctex/$(basename "$d")/" 2>/dev/null; done
+fi
 # (CLI_TESTS=1: phitex-cli's own tests)
 if [ -n "${CLI_TESTS:-}" ]; then
   cargo test --release -p phitex-cli --test cli > "$r/cli-tests.txt" 2>&1; echo "phitex-cli --test cli exit $?" >> "$r/summary.txt"
   grep -E "^test result|FAILED|panicked" "$r/cli-tests.txt" | head -20 >> "$r/summary.txt"
 fi
-if [ -n "${REGRESS:-1}" ]; then
+if [ "${REGRESS:-1}" != 0 ]; then
 cargo test --release -p phitex-flow --lib --test wall --test shapes --test dvi --test plain --test pdf --test etex --test output > "$r/regress.txt" 2>&1; echo "regress exit $?" >> "$r/summary.txt"
 grep -E "^test result|FAILED|panicked" "$r/regress.txt" | head -40 >> "$r/summary.txt"
 fi

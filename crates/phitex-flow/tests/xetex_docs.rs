@@ -410,6 +410,12 @@ fn latex(dir: &Path, name: &str) {
         b.set_format(&fmt).expect("the format reads");
         b.set_terminal(&[&format!("&xelatex {name}")]);
         let out = b.update(&jobs(&[&text]), o);
+        // (the log, for a failure's diagnosis: not compared)
+        if k == 0
+            && let Some(l) = out.job_logs(&Limits::TEX_LIVE, &format!("{name}.pdf")).pop()
+        {
+            let _ = std::fs::write(out_dir().join(format!("{name}.log")), l.log.as_bytes());
+        }
         compare(name, o, &b, &out, &oracle, k == 0);
         // (the `.aux` file, as the oracle wrote it: UTF-8)
         if let Some((_, t)) =

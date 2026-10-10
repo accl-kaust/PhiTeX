@@ -600,6 +600,9 @@ pub struct Build {
     /// The PDF file's creation date, in seconds since 1970 (UTC):
     /// `SOURCE_DATE_EPOCH` for pdfTeX (`Build::set_pdf_date`).
     pdf_date: i64,
+    /// The last update's e-TeX mode (`Options::etex`): its pages' glue is
+    /// shipped as e-TeX's `hlist_out` does (`sync`).
+    etex_last: bool,
     /// The engine is XeTeX, with these installed fonts and this finder
     /// (`Build::set_xetex`).
     xe: Option<Arc<crate::native::Fonts>>,
@@ -1501,6 +1504,7 @@ impl Build {
             limits: crate::print::Limits::TEX_LIVE,
             format: None,
             pdf_date: 0,
+            etex_last: false,
             xe: None,
         }
     }
@@ -2031,6 +2035,7 @@ impl Build {
     pub fn update(&mut self, src: &str, opts: Options) -> Output {
         let t0 = Instant::now();
         self.builds += 1;
+        self.etex_last = opts.etex;
         // (cut otherwise: every text is cut again)
         if opts.cut_lines != self.cut_lines {
             self.cut_lines = opts.cut_lines;
