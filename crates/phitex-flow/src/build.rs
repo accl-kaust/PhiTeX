@@ -1414,6 +1414,9 @@ struct Shared {
     /// A run may change the sequence (not in a round that must be the
     /// last).
     restructure_ok: bool,
+    /// A settled run that changes the sequence ends the round at once
+    /// (`settle`): not in a round after one that placed nothing new.
+    at_once: bool,
     /// Settled pieces drop their nodes; which update this is.
     lean: bool,
     build_no: u64,
@@ -2042,7 +2045,7 @@ impl Build {
             rounds += 1;
             let t_round = Instant::now();
             let last = rounds > cap || stalled >= MAX_STALLED_ROUNDS;
-            if let Some(mut out) = self.round(&texts, opts, t0, time_cut, last) {
+            if let Some(mut out) = self.round(&texts, opts, t0, time_cut, last, stalled == 0) {
                 let mut carried = std::mem::take(&mut self.carried);
                 carried.round_walls.push(t_round.elapsed());
                 out.stats.absorb(carried);
@@ -2226,6 +2229,7 @@ impl Build {
         t0: Instant,
         time_cut: Duration,
         last: bool,
+        at_once: bool,
     ) -> Option<Output> {
         let threads = opts.threads.max(1);
         let t_setup = Instant::now();
@@ -2642,6 +2646,7 @@ impl Build {
             fonts: self.fonts.clone(),
             opts,
             restructure_ok: !last,
+            at_once,
             lean: self.lean,
             build_no: self.builds,
             memo_old,
@@ -4276,6 +4281,16 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
             // defined yet (biglatex: the body ran 1.35 s before its class
             // was read, all of it thrown away). The runs in progress after
             // it stop; what they finished is kept as at any round's end.)
+            // (after a round that placed nothing new, the round runs to its
+            // end as before: what tells the layout the rest may come from
+            // the pieces after this one — TRIP's `\input tripos` reads a file
+            // the run itself writes at a shipout; ended at once, every round
+            // repeated the same change and never laid it out)
+            if !sh.at_once {
+                g.restructure_due = true;
+                g.settled += 1;
+                continue;
+            }
             for &q in &g.running {
                 if q > k {
                     sh.cancel[q].store(true, Ordering::Relaxed);
