@@ -2489,7 +2489,10 @@ copy of the shared prefix (`Chain::share` rebuilding `defs_of`, 17.5M
 for a 7K-node piece: A's). The first fonts are not it: a TFM load is
 about 1M Ir; kpathsea's `texmf.cnf` is 92M once a process. Tried and
 dropped: the output routine's merges of definitions by a map (job 8034,
-within 0.1%).
+within 0.1%); `next_raw0` inlined into `next_raw`, its `\noexpand` case
+out of line (job 8047: `latex.ltx` +0.1%; the two are called once each a
+token, 235M times, and the call is not the cost: `next_raw0`'s 94 Ir a
+token are the walk of the pending lists itself).
 
 Upstream between the two stacks: flow through 96bdfcc (`pop_cond`'s
 set, B's tikz fix) moved 99ff426's numbers by 0% to -1.2% (the
