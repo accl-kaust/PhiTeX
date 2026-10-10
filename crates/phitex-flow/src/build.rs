@@ -1201,6 +1201,10 @@ fn dirty_from(d: &mut Dirty, key: Key, from: u32) {
     d.entry(key).and_modify(|f| *f = (*f).min(from)).or_insert(from);
 }
 
+/// A run and the last node reading each name it reads
+/// ([`State::last_readers`]).
+type LastReaders = (Arc<Run>, Arc<FxMap<Key, u32>>);
+
 /// An edited piece's predecessor: its run, lines and text.
 type Prev = (Arc<Run>, Vec<Option<Lines>>, Arc<[char]>);
 
@@ -1276,7 +1280,7 @@ struct State {
     /// Each piece's run with its nodes and the last node reading each name
     /// (`Run::last_readers`), made at the first definition between its
     /// nodes that asks (B1: a fire asks of every name it defines).
-    last_readers: FxMap<usize, (Arc<Run>, Arc<FxMap<Key, u32>>)>,
+    last_readers: FxMap<usize, LastReaders>,
     /// The scheduler stalled (no task, the round not finished, nothing
     /// running that could change that): the pieces' states then. The
     /// build fails with it, never hangs.
@@ -3159,6 +3163,27 @@ fn stall(g: &mut State, sh: &Shared, parked: usize, why: &str) {
         g.logs_running,
         g.break_queue.len()
     );
+    // (the piece the scan waits for: its paragraphs without lines, and
+    // whether a break of each is queued)
+    if let Some(ps) = g.p.get(g.scan_next)
+        && let Some(r) = ps.run.as_ref()
+    {
+        let missing: Vec<(usize, bool)> = (0..r.paras.len())
+            .filter(|&j| !ps.lines.get(j).is_some_and(Option::is_some))
+            .map(|j| (j, g.break_queue.iter().any(|q| q.0 == g.scan_next && q.1 == j)))
+            .collect();
+        let _ = write!(
+            d,
+            " the scan's piece {}: {} paragraphs, {} lines kept, without lines (queued) {:?}, {:?}, recheck {}, fold unchecked {};",
+            g.scan_next,
+            r.paras.len(),
+            ps.lines.len(),
+            missing.iter().take(8).collect::<Vec<_>>(),
+            ps.status,
+            ps.recheck,
+            ps.fold_unchecked
+        );
+    }
     let mut shown = 0;
     for k in 0..g.p.len() {
         let ps = &g.p[k];
@@ -3408,6 +3433,18 @@ fn keep_again(g: &mut State, sh: &Shared, k: usize) -> bool {
     g.running.remove(&k);
     g.p[k].status = Status::Done;
     g.p[k].entered = None;
+    // (its paragraphs whose breaks a restructure or a rerun since the
+    // round began left without lines go to the queue: the scan waits for
+    // every line, and nothing else queues them for a kept run)
+    if !lines_ready(g, k) {
+        let ps = &mut g.p[k];
+        ps.lines.resize(run.paras.len(), None);
+        for (j, para) in run.paras.iter().enumerate() {
+            if ps.lines[j].is_none() && !g.break_queue.iter().any(|q| q.0 == k && q.1 == j) {
+                g.break_queue.push_back((k, j, para.clone()));
+            }
+        }
+    }
     g.stats.kept += 1;
     sh.done[k].store(true, Ordering::Release);
     settle(g, sh);
@@ -5234,10 +5271,7 @@ fn park(sh: &Shared, k: usize, seen: u64) {
 /// [`crate::item::Origins`]).
 fn inner_node(maker: u32, it: &crate::item::Item, path: &[usize]) -> Option<u32> {
     let Some((&first, rest)) = path.split_first() else { return Some(maker) };
-    let b = match it {
-        crate::item::Item::Box(b) | crate::item::Item::Append(b, _) => b,
-        _ => return Some(maker),
-    };
+    let (crate::item::Item::Box(b) | crate::item::Item::Append(b, _)) = it else { return Some(maker) };
     let node = b.origins.node_of(maker, first).unwrap_or(maker);
     inner_node(node, b.list.get(first)?, rest)
 }

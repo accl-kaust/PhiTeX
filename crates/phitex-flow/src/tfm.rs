@@ -680,7 +680,6 @@ impl KpseFormat {
             KpseFormat::OpenType => &[".otf", ".OTF"],
             KpseFormat::TrueType => &[".ttf", ".ttc", ".TTF", ".TTC", ".dfont"],
             KpseFormat::Type1 => &[".pfb", ".pfa"],
-            KpseFormat::MiscFonts => &[],
             KpseFormat::FontMap => &[".map"],
             KpseFormat::Enc => &[".enc"],
             KpseFormat::Tfm => &[".tfm"],
