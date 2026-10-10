@@ -75,6 +75,8 @@ pub struct ShipParams {
     pub mag: i32,
     /// `\year`, `\month`, `\day`, `\time`.
     pub date: [i32; 4],
+    /// What shipping reads in PDF mode (`\pdfoutput` positive).
+    pub pdf: Option<Arc<crate::pdf::Ship>>,
 }
 
 /// A point where TeX calls the page builder (tex.web 994), with what it

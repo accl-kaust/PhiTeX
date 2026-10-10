@@ -122,6 +122,9 @@ pub struct Body {
     /// It holds events of the output streams (`\openout`, `\write`,
     /// `\closeout`) to do when it is shipped.
     pub io: bool,
+    /// In PDF mode (the page's `ShipParams::pdf`), the page's value is its
+    /// content stream (`pdf::content`) and the DVI fields are empty.
+    pub pdf: Option<Arc<crate::pdf::content::PageBody>>,
 }
 
 /// What a page that depends on where it starts was written for.
@@ -920,6 +923,10 @@ pub fn page_body(p: &Page, numbers: &Numbers, extra: &[Arc<str>], defined: &[u32
 /// [`page_body`] for a DVI writer whose buffer is `buf` bytes
 /// (`dvi_buf_size`).
 pub fn page_body_in(p: &Page, numbers: &Numbers, extra: &[Arc<str>], defined: &[u32], at: i32, buf: i32) -> Body {
+    if let Some(ship) = &p.ship.pdf {
+        let body = crate::pdf::content::page(p, ship, numbers);
+        return Body { bytes: Vec::new(), fonts: Vec::new(), fixed: None, max_push: 0, io: body.io, pdf: Some(Arc::new(body)) };
+    }
     let mut w = Writer {
         buf,
         out: Vec::new(),
@@ -952,7 +959,7 @@ pub fn page_body_in(p: &Page, numbers: &Numbers, extra: &[Arc<str>], defined: &[
         defined.sort_unstable();
         Fixed { defined, gone: far.then(|| gone_class(at, buf)), edges: w.edges }
     });
-    Body { bytes: w.out, fonts: w.fonts, fixed, max_push: w.max_push, io: w.io }
+    Body { bytes: w.out, fonts: w.fonts, fixed, max_push: w.max_push, io: w.io, pdf: None }
 }
 
 /// The preamble's comment (tex.web 617): ` TeX output YYYY.MM.DD:HHMM`.
