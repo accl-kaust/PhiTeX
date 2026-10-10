@@ -202,47 +202,55 @@ fn fixed() -> (Huffman, Huffman) {
 /// The raw deflate data `d` decoded into `out`, as far as it goes; whether
 /// it went to its last block's end.
 pub fn inflate_raw(d: &[u8], out: &mut Vec<u8>) -> bool {
+    inflate_raw_len(d, out).is_some()
+}
+
+/// [`inflate_raw`], and how many bytes of `d` the data took to its last
+/// block's end (`None`: it did not get there): where what follows it
+/// begins (a gzip file's trailer, its next member).
+pub fn inflate_raw_len(d: &[u8], out: &mut Vec<u8>) -> Option<usize> {
     let mut bits = Bits {
         d,
         pos: 0,
         buf: 0,
         cnt: 0,
     };
-    let mut block = || -> Option<bool> {
-        let last = bits.take(1)? == 1;
-        match bits.take(2)? {
-            0 => {
-                // (stored: from the next byte)
-                bits.buf = 0;
-                bits.cnt = 0;
-                let p = bits.pos;
-                let len = usize::from(u16::from_le_bytes([*d.get(p)?, *d.get(p + 1)?]));
-                let nlen = u16::from_le_bytes([*d.get(p + 2)?, *d.get(p + 3)?]);
-                if usize::from(!nlen) != len {
-                    return None;
-                }
-                out.extend_from_slice(d.get(p + 4..p + 4 + len)?);
-                bits.pos = p + 4 + len;
-            }
-            1 => {
-                let (lit, dist) = fixed();
-                codes(&mut bits, out, &lit, &dist)?;
-            }
-            2 => {
-                let (lit, dist) = dynamic(&mut bits)?;
-                codes(&mut bits, out, &lit, &dist)?;
-            }
-            _ => return None,
-        }
-        Some(last)
-    };
     loop {
-        match block() {
-            Some(true) => return true,
-            Some(false) => {}
-            None => return false,
+        if block(&mut bits, d, out)? {
+            return Some(bits.pos);
         }
     }
+}
+
+/// One block of `d` (`bits` at its start) decoded into `out`: whether it
+/// was the last.
+fn block(bits: &mut Bits<'_>, d: &[u8], out: &mut Vec<u8>) -> Option<bool> {
+    let last = bits.take(1)? == 1;
+    match bits.take(2)? {
+        0 => {
+            // (stored: from the next byte)
+            bits.buf = 0;
+            bits.cnt = 0;
+            let p = bits.pos;
+            let len = usize::from(u16::from_le_bytes([*d.get(p)?, *d.get(p + 1)?]));
+            let nlen = u16::from_le_bytes([*d.get(p + 2)?, *d.get(p + 3)?]);
+            if usize::from(!nlen) != len {
+                return None;
+            }
+            out.extend_from_slice(d.get(p + 4..p + 4 + len)?);
+            bits.pos = p + 4 + len;
+        }
+        1 => {
+            let (lit, dist) = fixed();
+            codes(bits, out, &lit, &dist)?;
+        }
+        2 => {
+            let (lit, dist) = dynamic(bits)?;
+            codes(bits, out, &lit, &dist)?;
+        }
+        _ => return None,
+    }
+    Some(last)
 }
 
 /// A zlib stream (`/FlateDecode`) decoded, as far as it goes: `None` if

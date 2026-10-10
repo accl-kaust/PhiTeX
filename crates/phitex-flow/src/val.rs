@@ -37,7 +37,9 @@ impl Tok {
     pub fn is_char(&self, cat: u8, ch: char) -> bool {
         matches!(self, Tok::Char(c, x) if *c == cat && *x == ch)
     }
-    /// The key a control sequence or active character names.
+    /// The key a control sequence or active character names. (Inlined:
+    /// where the caller sees the variant, the key's drop is no call.)
+    #[inline]
     pub fn key(&self) -> Option<Key> {
         match self {
             Tok::Cs(n) => Some(Key::Cs(*n)),

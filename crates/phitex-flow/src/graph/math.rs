@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use super::material::{BoxContext, BoxEnd, BoxGroup, BoxKind, box_start, para_start, push_horizontal};
 use super::{Exec, Group, GroupKind, Kind, Mode};
-use crate::item::{BoxNode, Interline, Item, PageCall, Para, param_glue};
+use crate::item::{BoxNode, Interline, Item, Origins, PageCall, Para, param_glue};
 use crate::linebreak;
 use crate::mlist::{self, Delim, Field, Kind as NK, Limits, MItem, MathEnv, Noad, Which};
 use crate::pack::{self, Params, Spec, hpack};
@@ -769,18 +769,26 @@ impl Exec<'_> {
         let level = self.st.level;
         let nodes = &self.chain.nodes;
         let start = para_start(self.chain, nodes.len(), level);
+        let me = nodes.len();
         let mut hlist = Vec::new();
-        for n in nodes.range(start, nodes.len()) {
+        // (which node made each item, as `end_par` keeps it: a side table
+        // for SyncTeX, not part of the paragraph's value)
+        let mut orig: Vec<u32> = Vec::new();
+        for (j, n) in nodes.range(start, nodes.len()).enumerate() {
             if n.out.level == level && n.out.mode == Mode::H {
                 for it in n.emit.iter() {
                     push_horizontal(&mut hlist, it.clone());
+                    orig.resize(hlist.len(), (me - start - j) as u32);
                 }
             }
         }
         for it in std::mem::take(&mut self.emit) {
             push_horizontal(&mut hlist, it);
+            orig.resize(hlist.len(), 0);
         }
         let ships: Vec<Item> = hlist.iter().filter(|i| i.hoisted()).cloned().collect();
+        let mut keep = hlist.iter().map(|i| !i.hoisted());
+        orig.retain(|_| keep.next().unwrap_or(true));
         hlist.retain(|i| !i.hoisted());
         self.st.mode = Mode::V;
         self.st.inner = level > 0;
@@ -793,12 +801,15 @@ impl Exec<'_> {
             hlist.push(Item::Penalty(10000));
             let g = self.glue_par(GluePar::Parfillskip);
             hlist.push(param_glue(&g, GluePar::Parfillskip as u8));
+            orig.resize(hlist.len(), 0);
+            let origins = Origins::from_runs(orig.iter().enumerate().map(|(i, &d)| (i as u32, d)));
             let mut lp = self.line_params(&hlist);
             lp.widowpenalty = self.int_par(IntPar::Displaywidowpenalty);
             lp.widowpenalties = self.penalties(3);
             let lines = linebreak::lines(&hlist, &lp);
             if level == 0 {
                 para.hlist = hlist;
+                para.origins = origins;
                 para.lb = Some(Arc::new(lp.clone()));
             } else {
                 self.vemit.append(&mut para.before);
@@ -806,7 +817,13 @@ impl Exec<'_> {
                     if let Some(r) = &l.report {
                         self.log_raw(r);
                     }
-                    self.vemit.push(Item::Append(l.b.clone(), lp.inter.clone()));
+                    // (inside a box: the line's items by the nodes that made
+                    // them, back from this one, as `end_par`'s)
+                    let mut b = (*l.b).clone();
+                    b.origins = Origins::from_runs(
+                        (0..b.list.len()).filter_map(|i| Some((i as u32, origins.of(l.list_item(i)?)?))),
+                    );
+                    self.vemit.push(Item::Append(Arc::new(b), lp.inter.clone()));
                     self.vemit.extend(l.adjust.iter().cloned());
                     if let Some(x) = l.pen {
                         self.vemit.push(Item::Penalty(x));

@@ -2309,6 +2309,22 @@ release build, `-j 1`, `perf stat -e cycles:u,instructions:u` inside
 `scripts/sandbox`; the machine is shared, so cycles move by 10-20% from
 run to run and instructions are the steadier figure).
 
+**How the numbers are made (from the changes on).** On the accl
+cluster, never on the shared workstation: `scripts/accl/accl submit cmd
+bash -c 'LTX=1 perf-in/cg.sh base=REV a=REV ...'` builds each revision
+(release, frame pointers) and runs every document at `-j 1` under
+`valgrind --tool=callgrind` (exact instruction counts, Ir, independent
+of the node's load; an inclusive profile per run with
+`callgrind_annotate --inclusive=yes`), TeX Live's binaries on the same
+documents the same way; wall-clock rows are bash `time` on a `-c 48`
+node (`perf-in/ab.sh`). `perf` is not usable there (the nodes'
+`perf_event_paranoid` is 4). The scripts are kept beside the worktree,
+not in the repository: big2 (`tests/plain` bodies, IniTeX prelude), the
+six documents of `tests/latex/docs` on the saved format, the plain
+documents with `\pdfoutput=1` (as `tests/pdf.rs` makes them),
+`latex.ltx`. The phase table below is from local `perf` before that
+rule and is superseded by the callgrind profiles where they are given.
+
 **Against TeX on this machine.**
 
 | document | graph | TeX | cycles |
@@ -2391,6 +2407,129 @@ after on the same base):
    (before → after): tikz 759G → 207G (149 s → 40 s), titlepage 8.41G →
    7.22G, sections 2.72G → 2.54G, `latex.ltx` 190.8G → 189.2G, big2
    unchanged; DVIs identical.
+2. *Small keys read like names, and kept reads in every run.* The
+   current font, the parameters, the codes of characters below 256, the
+   registers below 256 and the family fonts have a slot
+   (`graph::small_slot`): a node's read of one is found by its stamp
+   (`Scratch::small`, as a name's by its number), and the run's kept
+   read of it (`Known`) is the name's, with the same rules (a
+   definition in a later node ends it; a local one holds while no group
+   opens or closes; one from before the piece within its nodes). `Known`
+   is no longer off in runs under 256 nodes. The read made is the one
+   `resolve_shared` made, the same handle. Instructions: big2 4.36G →
+   3.92G, `latex.ltx` 189.2G → 183.9G, sections 2.54G → 2.51G,
+   titlepage 7.22G → 7.13G, tikz 207.0G → 206.5G; DVIs identical; the
+   fuzz (60 seeds of 6 edits at 8 threads) fails the same 8 TRIP seeds
+   as before (F1).
+3. *An argument gathered into the run's buffer.* `Cursor::arg` gathers
+   an argument spread over several lists into `Scratch::arg` and makes
+   its list in one allocation (it grew a new vector token by token); a
+   call's argument array is collected from a slice of the matched
+   arguments (one allocation, not a vector and a copy). Ir: the
+   documents on the format -0.7% to -1.6%; `latex.ltx` (local perf)
+   -5.8%.
+4. *The font and PDF-file index walked only as far as a name needs.*
+   `tfm::Index` keeps its place in the same walk (directories in order,
+   depth first, entries sorted, eight levels) and goes on only until the
+   file asked for is met; the first path met is the whole walk's. The
+   whole TFM tree was walked at a process's first `\font`: a fifth of
+   every short run. Ir: plain documents -20.5% to -22.0% (DVI and PDF
+   mode), the documents on the format -12.6% to -18.8%.
+5. *A name's readers edges in a vector ordered by piece*
+   (`build::Edges`, was a hash map per name): mostly appended, since
+   pieces are installed mostly in order. Ir: big2 -1.2%.
+6. *A conditional whose φ defines nothing keeps its test in the node*
+   (`Node::test`); only a φ with keys goes into `Rare` (2.1M of
+   `latex.ltx`'s 3.1M nodes had a `Rare` only for that). Ir: the
+   documents on the format -0.2% to -0.5%.
+7. *A long read list sorted by rank* (`graph::sort_reads`): a piece's
+   reads, 4096 or more, get each distinct key's rank from one `FxMap`
+   pass, only the distinct keys sorted with `Key::cmp`, then one
+   `sort_unstable` on (rank, node, place): the stable sort's order,
+   `Key::cmp` once per key instead of once per comparison. A shorter
+   list keeps the plain sort (sorting every list this way cost big2
+   +5.4%, the plain documents +1%). Ir (job 7892, on the merge of flow
+   through 96bdfcc): `latex.ltx` 228.9G -> 212.8G (-7.0%), the
+   documents on the format -0.2% to -1.2%, plain documents within
+   0.1%, big2 +0.8%.
+8. *`#[inline]` on `Cursor::next` and `Pending::next_tok`*, the two
+   calls made per token: nothing on the short runs (job 7818), on
+   `latex.ltx` 212.8G -> 200.8G (-5.6%); the documents on the format
+   -1.6% to -2.8%, big2 -0.3%, plain within 0.1% (job 7892).
+9. *A lean piece's full run freed on the drop thread.* Once the page
+   scan passes a lean piece, its full run is the scan task's alone; the
+   task freed it on the worker (`drop_glue::<Vec<(Arc<Run>, ..)>>`, 3.4%
+   of `latex.ltx`'s Ir), now it sends its pieces' runs to the drop
+   thread, as a replaced run goes. Same Ir in all (job 7927, callgrind
+   per thread, `latex.ltx` at `-j 1`): the worker 158.4G -> 157.1G, the
+   drop thread +3.8G; wall (5 runs, median) 26.43 s -> 25.73 s.
+10. *`\csname`'s name in the run's buffer* (`Scratch::csname`), and
+   `print::str_toks` allocating its list once: the name's `String` grew
+   push by push (2.4G of `latex.ltx`'s vector growth). Ir (job 7984, on
+   flow 9c2c4ab): `latex.ltx` 177.84G -> 175.57G (-1.3%), the documents
+   on the format -0.1% to -0.4%.
+11. *`#[inline]` on `Tok::key`*: a caller that sees the token's variant
+   drops the `Option<Key>` it made without calling `Key`'s drop glue
+   (3.2G self on `latex.ltx`). Ir (job 7984): `latex.ltx` 175.57G ->
+   172.43G (-1.8%), the documents on the format -0.2% to +0.4%.
+12. *The dirty old nodes of a rerun by a map* from each dirty name to
+   its first dirty node (`run_piece`; more than four names), not a scan
+   of the dirty names for every read of every old node (113M of
+   sections' 1.5G). Ir (job 8034, on flow 09b454f0): sections -6.6%,
+   titlepage -6.5%, math -3.1%, tables -2.9%, figures -2.3%.
+
+Where a LaTeX document's first body piece goes (job 8027, sections and
+titlepage at `-j 1`, callgrind dumped after each `run_piece`): in
+sections it runs once, 3829 steps, 71M Ir: 18.6K a step, as the other
+body pieces (piece 10 19.3K); its wall time at `-j N` is waiting, not
+work. In titlepage it runs 18 times, and each rerun costs 40-120M
+whatever it runs again (0-257 new steps): the output routine fired
+again (`BuildFold::fire`, 60% of a 0-step rerun), then `run_piece`'s
+copy of the shared prefix (`Chain::share` rebuilding `defs_of`, 17.5M
+for a 7K-node piece: A's). The first fonts are not it: a TFM load is
+about 1M Ir; kpathsea's `texmf.cnf` is 92M once a process. Tried and
+dropped: the output routine's merges of definitions by a map (job 8034,
+within 0.1%).
+
+Upstream between the two stacks: flow through 96bdfcc (`pop_cond`'s
+set, B's tikz fix) moved 99ff426's numbers by 0% to -1.2% (the
+documents on the format; `latex.ltx` 229.1G -> 228.9G; big2 and plain
+unchanged).
+
+Tried and dropped (Ir, cluster job 7818): the lists a node pushes kept
+in a vector until the node ends instead of shared cells (+0.0% to +1.2%:
+moving a larger `Level` in and out of the vector costs what the cells
+cost); one shared one-token list per token for `Exec::back` (-0.5% big2,
++0.2% elsewhere); a call's single argument in place in its `Level`
+(+0.2% to +1.1%: every `Level` grows); a counting sort by rank in
+place of 7's `sort_unstable` (`latex.ltx` 177.71G -> 177.65G, job 7922:
+after flow f56da28 the long read lists are few).
+
+**After 1-8** (callgrind Ir, exact, the cluster image's TeX Live; base
+and 1-6 job 7857, 7-8 job 7892; the same DVIs at every step):
+
+| document | base 9fa4ccf | after 1-6 (99ff426) | after 1-8 (4aca73b's code) | TeX |
+|---|---|---|---|---|
+| big2 | 5.121G | 4.694G | 4.717G | `tex -ini` 0.653G (7.2x) |
+| plain story, DVI | 0.414G | 0.322G | 0.322G | `tex -ini` 0.224G (1.4x) |
+| plain story, PDF | 0.592G | 0.462G | 0.462G | `pdftex -ini` 0.796G (0.58x) |
+| sections on the format | 1.693G | 1.366G | 1.308G | `latex` 0.622G, of which 0.481G loading the format (2.1x) |
+| titlepage on the format | 2.309G | 1.985G | 1.926G | `latex` 0.633G (3.0x) |
+| `latex.ltx` | 240.3G | 229.1G | 200.8G | `etex -ini` 71.2G (2.8x) |
+
+Wall time (bash `time`, 3 runs, median, 4 CPUs of a shared node, job
+7817, the stack through 6 with the dropped items in it: noisy, the
+direction only): big2 839 -> 751 ms (`tex` 100 ms), sections 511 ->
+474 ms (`latex` 107), plain story DVI 74 -> 65 ms (`tex` 52), PDF 111 ->
+67 ms (`pdftex` 138), `latex.ltx` 36.0 -> 34.0 s (`etex` 7.4 s).
+
+On the documents the graph's own work is still about 6x TeX's a
+command, times the reruns (titlepage 9x). In `latex.ltx` (callgrind
+self cost) the input lists and argument scanning lead (`Cursor::next`
+12.6%, `next_raw0` 7%, `next_raw` 3%, `Cursor::arg` 2.4%), then sorting
+by `Key` (`Key::cmp` 5.1% and the sort about 3.5%: a piece's reads and
+exports, once per run, over 171k names; 7 removes most of the reads'
+part), `tok_meaning` 2.2%.
 
 ## Found by the CLI (agent W)
 
@@ -3077,9 +3216,11 @@ values:
   A table per font, not a key per character: a paragraph's `\par` node
   reads three keys a font, not three a character, and a document sets
   them once, at a font's first use (microtype's `\MT@setupfont`).
-  `\pdfnoligatures f` is `Key::FontCode(6, f)` = 1, read by the main loop
-  (its lig/kern program is not looked at; the left boundary's still is,
-  as `set_no_ligatures` clears only the characters' tags).
+  `\pdfnoligatures f` and `\tagcode` clear tag bits in the font's `TAG`
+  table (`Key::FontCode(micro::TAG, f)`: per character, the tags gone;
+  `\pdfnoligatures` clears every character's `TAG_LIG`, so its lig/kern
+  program is not looked at; the left boundary's still is, as
+  `set_no_ligatures` clears only the characters' tags).
 - **`\pdffontexpand f stretch shrink step [autoexpand]`**:
   `Key::FontExpand(f)` = `micro::Expand` (`read_expand_font`'s checks;
   given twice, the same parameters or pdfTeX's fatal error). The fonts
@@ -3121,6 +3262,33 @@ values:
   every space is the normal space, widened by the character before's
   `\knbscode`… (`adjust_interword_glue`; it reads the current list's
   tail, so a space node with it positive runs again with its paragraph).
+- **The main loop's one read a word** (`Key::FontCode(micro::MAIN, f)`,
+  a `Val::Int` of bits, global as the codes are): a word of characters
+  of font `f` reads it once, at its start, and nothing else of the
+  micro-typography unless a bit says so. `MAIN_TAGS` (some `\tagcode` or
+  `\pdfnoligatures` cleared a tag of `f`): read the `TAG` table;
+  `MAIN_KNBC`/`MAIN_KNAC` (some `\knbccode`/`\knaccode` of `f` set
+  nonzero): read those two tables, `\pdfprependkern` and
+  `\pdfappendkern` (`AutoKern`). The bits are set by the assignment
+  node (`main_state`: a node reading the state and defining it with the
+  bit added, only when the bit is new) and never cleared, so a document
+  that sets a code back to 0 keeps reading the tables (same output, a
+  read more). `\-` (its hyphen's auto kerns) is gated the same way. A
+  font that no code ever touched costs the word one read (the default
+  `0`), where it read the tables and both kern parameters before: A/B 8021, outputs byte-identical,
+  `big2` -4.3% instructions, `titlepage` -0.5%, `story` ~0.
+  **A space is not under the gate.** `\pdfadjustinterwordglue` is an
+  integer parameter (local, grouped: `\begingroup` can turn it on for a
+  phrase), not something of a font, and the codes it consults
+  (`\knbscode`, `\stbscode`, `\shbscode`) are those of the character
+  *before* the space (the list's tail, its font, which need not be the
+  current font), so no per-font global bit can stand for it. So
+  `normal_space` reads the parameter every time (and only with it
+  positive reads the tail and those three tables); `space_cmd` reads it
+  only when the space factor is not 1000 (with 1000 the normal space is
+  taken anyway, `||` short-circuits), the one read pdfTeX's own
+  `main_loop` test costs. A gate bit for it would have to be per group
+  level, which is the parameter itself.
 - **`\pdfcopyfont\cs=f`**: `Font::copied` (a font of its own: key
   `f.key copyN`, parameters as `f`'s are now, its own codes);
   **`\letterspacefont\cs=f n [nolig]`**: `Font::letterspaced` (widths

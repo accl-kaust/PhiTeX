@@ -98,7 +98,10 @@ pub fn hex(out: &mut String, n: i32) {
 /// A string as the tokens `\the` and friends make of it: characters of
 /// category 12, spaces of category 10 (tex.web 464).
 pub fn str_toks(s: &str) -> Vec<Tok> {
-    s.chars().map(|c| if c == ' ' { Tok::Char(10, ' ') } else { Tok::Char(12, c) }).collect()
+    // (as many tokens as characters, at most one a byte: one allocation)
+    let mut v = Vec::with_capacity(s.len());
+    v.extend(s.chars().map(|c| if c == ' ' { Tok::Char(10, ' ') } else { Tok::Char(12, c) }));
+    v
 }
 
 /// The sizes TeX was compiled with that shape its output (tex.web 11):

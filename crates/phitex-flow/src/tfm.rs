@@ -617,12 +617,64 @@ impl fmt::Debug for Font {
     }
 }
 
-/// Where TFM files are: file name -> path, from walking the font
-/// directories once (a pure function of the file system, which is constant
-/// during a build).
+/// Where the files of some kinds are (TFM files; for PDF output map files,
+/// Type 1 fonts, encodings): file name -> path, the first one met walking
+/// the directories in order (each depth first, its entries sorted, eight
+/// levels deep): a pure function of the file system, which is constant
+/// during a build. The walk goes only as far as a name asked for needs
+/// (TeX Live's tree is large); the path found is the one a whole walk
+/// would give.
 #[derive(Default)]
 pub struct Index {
+    walk: std::sync::Mutex<Walk>,
+}
+
+/// How far an [`Index`]'s walk has gone: the names met, and the
+/// directories' entries still to look at (innermost last: the entries
+/// left, in reverse order, and the levels left below them).
+#[derive(Default)]
+struct Walk {
+    exts: Vec<String>,
     paths: std::collections::HashMap<String, std::path::PathBuf>,
+    stack: Vec<(Vec<std::path::PathBuf>, u32)>,
+}
+
+impl Walk {
+    /// The sorted entries of directory `d`, to be looked at with `depth`
+    /// levels left below them.
+    fn enter(&mut self, d: &std::path::Path, depth: u32) {
+        let Ok(rd) = std::fs::read_dir(d) else { return };
+        let mut entries: Vec<_> = rd.filter_map(Result::ok).map(|e| e.path()).collect();
+        entries.sort();
+        entries.reverse();
+        self.stack.push((entries, depth));
+    }
+
+    /// Walks on until `file` is met (true) or the walk is over (false).
+    fn until(&mut self, file: &str) -> bool {
+        loop {
+            let Some((entries, depth)) = self.stack.last_mut() else { return false };
+            let depth = *depth;
+            let Some(p) = entries.pop() else {
+                self.stack.pop();
+                continue;
+            };
+            if p.is_dir() {
+                if depth > 0 {
+                    self.enter(&p, depth - 1);
+                }
+            } else if let Some(n) = p.file_name().and_then(|n| n.to_str())
+                && p.extension().and_then(|e| e.to_str()).is_some_and(|e| self.exts.iter().any(|x| x == e))
+                && !self.paths.contains_key(n)
+            {
+                let found = n == file;
+                self.paths.insert(n.to_string(), p);
+                if found {
+                    return true;
+                }
+            }
+        }
+    }
 }
 
 impl Index {
@@ -632,32 +684,26 @@ impl Index {
 
     /// The files below `dirs` whose extension is one of `exts`.
     pub fn of_kinds(dirs: &[std::path::PathBuf], exts: &[&str]) -> Index {
-        fn walk(d: &std::path::Path, depth: u32, exts: &[&str], out: &mut std::collections::HashMap<String, std::path::PathBuf>) {
-            let Ok(rd) = std::fs::read_dir(d) else { return };
-            let mut entries: Vec<_> = rd.filter_map(Result::ok).map(|e| e.path()).collect();
-            entries.sort();
-            for p in entries {
-                if p.is_dir() {
-                    if depth > 0 {
-                        walk(&p, depth - 1, exts, out);
-                    }
-                } else if let Some(n) = p.file_name().and_then(|n| n.to_str())
-                    && p.extension().and_then(|e| e.to_str()).is_some_and(|e| exts.contains(&e))
-                {
-                    out.entry(n.to_string()).or_insert(p);
-                }
-            }
+        let mut w = Walk { exts: exts.iter().map(|e| (*e).to_string()).collect(), ..Walk::default() };
+        // (the first directory is walked first: entered last)
+        for d in dirs.iter().rev() {
+            w.enter(d, 8);
         }
-        let mut paths = std::collections::HashMap::new();
-        for d in dirs {
-            walk(d, 8, exts, &mut paths);
+        Index { walk: std::sync::Mutex::new(w) }
+    }
+
+    /// The path of the file named `file`, if there is one.
+    pub fn path(&self, file: &str) -> Option<std::path::PathBuf> {
+        let mut w = self.walk.lock().expect("file index");
+        if !w.paths.contains_key(file) {
+            w.until(file);
         }
-        Index { paths }
+        w.paths.get(file).cloned()
     }
 
     /// The bytes of `name.tfm`.
     pub fn read(&self, name: &str) -> Option<Vec<u8>> {
-        self.paths.get(&format!("{name}.tfm")).and_then(|p| std::fs::read(p).ok())
+        self.path(&format!("{name}.tfm")).and_then(|p| std::fs::read(p).ok())
     }
 }
 
@@ -773,8 +819,8 @@ pub fn pdf_file(name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
         return v.clone();
     }
     let index = INDEX.get_or_init(|| Index::of_kinds(&pdf_dirs(), &["map", "pfb", "pfa", "enc"]));
-    let v = index.paths.get(name).and_then(|p| {
-        let b = std::fs::read(p).ok()?;
+    let v = index.path(name).and_then(|p| {
+        let b = std::fs::read(&p).ok()?;
         Some((Arc::from(p.to_string_lossy().as_ref()), Arc::from(b)))
     });
     cache.lock().expect("pdf file cache").insert(name.to_string(), v.clone());
@@ -801,7 +847,7 @@ pub fn vf_file(name: &str) -> Option<Arc<[u8]>> {
         return v.clone();
     }
     let index = INDEX.get_or_init(|| Index::of_kinds(&vf_dirs(), &["vf"]));
-    let v = index.paths.get(&format!("{name}.vf")).and_then(|p| std::fs::read(p).ok()).map(Arc::from);
+    let v = index.path(&format!("{name}.vf")).and_then(|p| std::fs::read(p).ok()).map(Arc::from);
     cache.lock().expect("vf cache").insert(name.to_string(), v.clone());
     v
 }

@@ -36,9 +36,18 @@ pub const STBS: u8 = 8;
 pub const SHBS: u8 = 9;
 pub const KNBC: u8 = 10;
 pub const KNAC: u8 = 11;
+/// What the main loop must read of a font (`Key::FontCode(MAIN, f)`,
+/// `Val::Int` of bits, global): `MAIN_TAGS` some tag cleared (read the
+/// `TAG` table), `MAIN_KNBC`/`MAIN_KNAC` some `\knbccode`/`\knaccode`
+/// given nonzero (read `\pdfprependkern`, `\pdfappendkern` and the
+/// tables). Set by those assignments, never cleared: one read a word.
+pub const MAIN: u8 = 12;
+pub const MAIN_TAGS: i32 = 1;
+pub const MAIN_KNBC: i32 = 2;
+pub const MAIN_KNAC: i32 = 4;
 
 /// The codes' primitives' names, by code.
-pub const CODE_NAMES: [&str; 12] = [
+pub const CODE_NAMES: [&str; 13] = [
     "hyphenchar",
     "skewchar",
     "lpcode",
@@ -51,6 +60,7 @@ pub const CODE_NAMES: [&str; 12] = [
     "shbscode",
     "knbccode",
     "knaccode",
+    "pdfTeX main-loop state",
 ];
 
 /// A code's value before it is given (`init_font_base`): 1000 for
