@@ -342,46 +342,66 @@ struct Spec {
     /// Where texts it was joined from begin: its run stops at the first
     /// where it can.
     stops: Arc<[usize]>,
+    /// `old` is another place's piece of equal text: its run is where this
+    /// one runs from, not kept.
+    moved: bool,
 }
 
 /// Finds the last build's pieces by their text: the same `Arc`, or equal
 /// text (in order), each taken once. (Equal texts are looked for among the
 /// pieces of the same length: no text is hashed.)
 struct Matcher {
-    by_ptr: FxMap<usize, usize>,
+    /// Every last build's piece by its text's `Arc` — those whose run a
+    /// restructure stopped before it ran included: a piece keeps its own
+    /// place, never another's run of equal text.
+    by_ptr: FxMap<usize, Vec<usize>>,
     by_len: Option<FxMap<usize, VecDeque<usize>>>,
     used: Vec<bool>,
+    /// The last build's piece taken last: one of equal text right after
+    /// it is at its own place (a text cut again near an edit is a new
+    /// `Arc`).
+    last: Option<usize>,
 }
 
 impl Matcher {
     fn new(olds: &[Kept]) -> Matcher {
+        let mut by_ptr: FxMap<usize, Vec<usize>> = FxMap::default();
+        for (i, o) in olds.iter().enumerate() {
+            by_ptr.entry(o.text.as_ptr() as usize).or_default().push(i);
+        }
         Matcher {
-            by_ptr: olds
-                .iter()
-                .enumerate()
-                .filter(|(_, o)| o.run.is_some())
-                .map(|(i, o)| (o.text.as_ptr() as usize, i))
-                .collect(),
+            by_ptr,
             by_len: None,
             used: vec![false; olds.len()],
+            last: None,
         }
     }
 
-    /// Whether the last build's piece of text `t` (the same `Arc`) is
-    /// still to be taken.
-    fn has(&self, olds: &[Kept], t: &Arc<[char]>) -> bool {
+    /// The last build's piece of text `t` (the same `Arc`) still to be
+    /// taken.
+    fn by_arc(&self, olds: &[Kept], t: &Arc<[char]>) -> Option<usize> {
         self.by_ptr
-            .get(&(t.as_ptr() as usize))
-            .is_some_and(|&i| Arc::ptr_eq(&olds[i].text, t) && !self.used[i])
+            .get(&(t.as_ptr() as usize))?
+            .iter()
+            .copied()
+            .find(|&i| Arc::ptr_eq(&olds[i].text, t) && !self.used[i])
     }
 
-    fn find(&mut self, olds: &[Kept], t: &Arc<[char]>) -> Option<usize> {
-        if let Some(&i) = self.by_ptr.get(&(t.as_ptr() as usize))
-            && Arc::ptr_eq(&olds[i].text, t)
-            && !self.used[i]
-        {
+    /// Whether the last build's piece of text `t` (the same `Arc`), with a
+    /// run, is still to be taken.
+    fn has(&self, olds: &[Kept], t: &Arc<[char]>) -> bool {
+        self.by_arc(olds, t).is_some_and(|i| olds[i].run.is_some())
+    }
+
+    /// The last build's piece of `t`: the same `Arc` (`.1` true: its own
+    /// place), else one of equal text that ran (`.1` false: another
+    /// place's run, which is never kept as it is — its reads are of that
+    /// place: the piece runs from it, every read looked at again).
+    fn find(&mut self, olds: &[Kept], t: &Arc<[char]>) -> Option<(usize, bool)> {
+        if let Some(i) = self.by_arc(olds, t) {
             self.used[i] = true;
-            return Some(i);
+            self.last = Some(i);
+            return Some((i, true));
         }
         let m = self.by_len.get_or_insert_with(|| {
             let mut m: FxMap<usize, VecDeque<usize>> = FxMap::default();
@@ -393,12 +413,18 @@ impl Matcher {
             m
         });
         let q = m.get_mut(&t.len())?;
+        let next = self.last.map_or(0, |l| l + 1);
         let at = q
             .iter()
-            .position(|&i| !self.used[i] && olds[i].text == *t)?;
+            .position(|&i| i == next && !self.used[i] && olds[i].text == *t)
+            .or_else(|| q.iter().position(|&i| !self.used[i] && olds[i].text == *t))?;
         let i = q.remove(at)?;
         self.used[i] = true;
-        Some(i)
+        let own = i == next;
+        if own {
+            self.last = Some(i);
+        }
+        Some((i, own))
     }
 }
 
@@ -997,6 +1023,9 @@ struct PState {
     stops: Arc<[usize]>,
     /// The state its run in progress was entered in.
     entered: Option<RState>,
+    /// Every name it was marked for has the value its run read again
+    /// ([`still_dirty`]): the run stands if its entry does.
+    recheck: bool,
 }
 
 /// An edited piece's predecessor: its run, lines and text.
@@ -1461,10 +1490,12 @@ impl Build {
         let inline = self.inline.iter().any(|t| Arc::ptr_eq(t, text) || **t == **text);
         // (a run that read a file as pieces is not one of a piece whose
         // files are read in it)
-        let old = m
+        let found = m
             .find(olds, text)
-            .filter(|&i| !inline || olds[i].got.input.is_none())
-            .filter(|&i| old_entry_holds(out, olds, entry, i));
+            .filter(|&(i, _)| !inline || olds[i].got.input.is_none())
+            .filter(|&(i, _)| old_entry_holds(out, olds, entry, i));
+        let old = found.map(|x| x.0);
+        let moved = found.is_some_and(|x| !x.1);
         let k = out.len();
         let expect = old.map(|i| olds[i].got.clone()).unwrap_or_default();
         out.push(Spec {
@@ -1476,6 +1507,7 @@ impl Build {
             expect: expect.clone(),
             inline,
             stops,
+            moved,
         });
         if expect.cut {
             // (the cutter missed a cut: the rest of the text is cut again
@@ -1725,8 +1757,23 @@ impl Build {
                 inline: sp.inline,
                 stops: sp.stops.clone(),
                 entered: None,
+                recheck: false,
             };
-            if let Some(i) = sp.old {
+            if let Some(i) = sp.old.filter(|&i| sp.moved || olds[i].run.is_none()) {
+                // (its own place, not run yet — a restructure stopped the
+                // round before it ran — or another place's run of equal
+                // text, which it runs from: every node it keeps has its
+                // reads looked at again here)
+                let o = &mut olds[i];
+                let mut ps = base(sp.text.clone(), o.id, Status::Unstarted);
+                ps.srcs = std::mem::take(&mut o.srcs);
+                if sp.moved
+                    && let Some(r) = &o.run
+                {
+                    ps.prev = Some((r.clone(), std::mem::take(&mut o.lines), o.text.clone()));
+                }
+                p.push(ps);
+            } else if let Some(i) = sp.old {
                 // (each old piece is taken at most once: its lines and edge
                 // sources move)
                 let o = &mut olds[i];
@@ -1862,6 +1909,7 @@ impl Build {
         touched.sort();
         touched.dedup();
         let mut marks: Vec<(usize, Key)> = Vec::new();
+        let mut moves: Vec<(usize, Key, PieceId)> = Vec::new();
         for key in &touched {
             let Some(m) = readers.get(key) else { continue };
             for (&rid, &(node, src)) in m {
@@ -1870,10 +1918,21 @@ impl Build {
                 };
                 let (def, ..) = names.reaching(key, (rpos.0, node), &self.font);
                 let def_id = def.map_or(INITIAL, |d| seq.id_at(d));
-                if src != def_id {
-                    marks.push((rpos.0 as usize, key.clone()));
+                if src == def_id {
+                    continue;
+                }
+                // (another definer giving every read the value it read: the
+                // edge moves to it, nothing runs again)
+                let r = rpos.0 as usize;
+                if p[r].run.as_ref().is_some_and(|run| reads_still(&names, &self.font, run, r, key)) {
+                    moves.push((r, key.clone(), def_id));
+                } else {
+                    marks.push((r, key.clone()));
                 }
             }
+        }
+        for (r, key, src) in moves {
+            move_edge(&mut readers, &mut p[r], &key, src);
         }
         // (the names the build answers itself — a file's bytes, the job's
         // name, the lines before a piece — read with a value they no longer
@@ -2611,9 +2670,13 @@ fn changed_names(old: Option<&Run>, new: &Run) -> Vec<Key> {
 }
 
 /// Piece `m`'s definitions of `keys` changed: the nodes after it that
-/// read those names from before `m` (or from `m`), by the edges.
-fn reached(g: &State, sh: &Shared, m: Pos, keys: &[Key]) -> Vec<(usize, Key)> {
+/// read those names from before `m` (or from `m`), by the edges. A
+/// settled reader whose every read of the name has the value it read (a
+/// new definer of the same value) is not one: its edge moves to the
+/// definer reaching it now.
+fn reached(g: &mut State, sh: &Shared, m: Pos, keys: &[Key]) -> Vec<(usize, Key)> {
     let mut out = Vec::new();
+    let mut moves: Vec<(usize, Key, PieceId)> = Vec::new();
     for key in keys {
         let Some(rm) = g.readers.get(key) else {
             continue;
@@ -2628,12 +2691,102 @@ fn reached(g: &State, sh: &Shared, m: Pos, keys: &[Key]) -> Vec<(usize, Key)> {
             if (rpos.0, node) <= m && !(m.1 != END && rpos.0 == m.0) {
                 continue;
             }
-            if src_at_or_before(&sh.seq, src, m) {
-                out.push((rpos.0 as usize, key.clone()));
+            if !src_at_or_before(&sh.seq, src, m) {
+                continue;
             }
+            let r = rpos.0 as usize;
+            let ps = &g.p[r];
+            if ps.status == Status::Done
+                && !(m.1 != END && rpos.0 == m.0)
+                && let Some(run) = &ps.run
+                && reads_still(&sh.names, &sh.font, run, r, key)
+            {
+                let (def, ..) = sh.names.reaching(key, (rpos.0, node), &sh.font);
+                let def_id = def.map_or(INITIAL, |d| sh.seq.id_at(d));
+                if def_id != src {
+                    moves.push((r, key.clone(), def_id));
+                }
+                continue;
+            }
+            out.push((r, key.clone()));
         }
     }
+    for (r, key, src) in moves {
+        move_edge(&mut g.readers, &mut g.p[r], &key, src);
+    }
     out
+}
+
+/// Whether piece `r`'s `run` read `key` with the values reaching it now:
+/// each of its reads of the name, at its node.
+fn reads_still(names: &Names, font: &Arc<Font>, run: &Run, r: usize, key: &Key) -> bool {
+    let vals = run.values_read(key);
+    !vals.is_empty()
+        && vals
+            .iter()
+            .all(|(_, node, v)| v.seen_as(&names.reaching(key, (r as u32, *node), font).1))
+}
+
+/// Piece `k`'s dirty names as it starts to run: those its last run read
+/// with values that no longer reach it. A name marked when its definer
+/// changed whose reads have their values again (it moved to a new piece
+/// that has run since, with the same value) is not: its edge moves to the
+/// definer reaching it now. (Taken from the piece.)
+fn still_dirty(g: &mut State, sh: &Shared, k: usize) -> Vec<Key> {
+    let dirty = std::mem::take(&mut g.p[k].dirty);
+    let Some(run) = g.p[k].run.clone() else {
+        return dirty.into_iter().collect();
+    };
+    let any = !dirty.is_empty();
+    let mut out = Vec::new();
+    for key in dirty {
+        // (a name defined between some piece's nodes — the page builder's
+        // — may have marked this piece from one of its own fires: its
+        // nodes after the fire read another value though the first reader
+        // (the value recorded) does not, so it stays dirty)
+        if sh.names.has_inner(&key) || !reads_still(&sh.names, &sh.font, &run, k, &key) {
+            out.push(key);
+            continue;
+        }
+        let node = run.values_read(&key)[0].1;
+        let (def, ..) = sh.names.reaching(&key, (k as u32, node), &sh.font);
+        let src = def.map_or(INITIAL, |d| sh.seq.id_at(d));
+        move_edge(&mut g.readers, &mut g.p[k], &key, src);
+    }
+    g.p[k].recheck = any && out.is_empty();
+    out
+}
+
+/// Piece `k`, chosen to run, whose every marked name reads its value
+/// again ([`PState::recheck`]): its run is kept, as at the round's start,
+/// if it is entered as it was. Whether it was.
+fn keep_again(g: &mut State, sh: &Shared, k: usize) -> bool {
+    let ps = &g.p[k];
+    let Some(run) = ps.run.clone() else { return false };
+    // (entered on a state assumed at its cut: not known yet)
+    let assumed = matches!(ps.entry, Entry::After(q, _) if !(g.p[q].status == Status::Done && g.p[q].dirty.is_empty()));
+    if assumed || !entry_holds(g, k, &run) {
+        return false;
+    }
+    g.running.remove(&k);
+    g.p[k].status = Status::Done;
+    g.p[k].entered = None;
+    g.stats.kept += 1;
+    sh.done[k].store(true, Ordering::Release);
+    settle(g, sh);
+    true
+}
+
+/// Piece `ps`'s edge for `key` comes from `src` now (its reads unchanged).
+fn move_edge(readers: &mut Readers, ps: &mut PState, key: &Key, src: PieceId) {
+    if let Some(e) = readers.get_mut(key).and_then(|m| m.get_mut(&ps.id)) {
+        e.1 = src;
+    }
+    if let Some(i) = ps.run.as_ref().and_then(|r| r.first_read(key))
+        && let Some(s) = ps.srcs.get_mut(i)
+    {
+        *s = src;
+    }
 }
 
 /// Gives each of piece `k`'s paragraphs its lines: a paragraph equal to
@@ -2724,7 +2877,7 @@ fn entry_ready(g: &State, k: usize, speculate: bool) -> bool {
                 Some(_) if g.p[q].got.join && !g.p[q].expect.join => false,
                 Some(r) => {
                     let out = r.out();
-                    !out.enterable() || RState::entered_after(&out) == assumed || need(q)
+                    !out.enterable() || out.halted() || RState::entered_after(&out) == assumed || need(q)
                 }
                 None => true,
             }
@@ -2756,7 +2909,7 @@ fn old_entry_holds(out: &[Spec], olds: &[Kept], entry: Entry, i: usize) -> bool 
             match prev(q) {
                 // (the piece before reads on into it)
                 Some(_) if out[q].expect.join => return false,
-                Some(r) if r.out().enterable() => Some(RState::entered_after(&r.out())),
+                Some(r) if r.out().enterable() && !r.out().halted() => Some(RState::entered_after(&r.out())),
                 _ => assumed,
             }
         }
@@ -2795,8 +2948,10 @@ fn entry_state_in(p: &[PState], k: usize) -> Option<RState> {
         }
         // (a state no piece is entered in: the two are laid out as one
         // piece, the assumption stands until then)
+        // (after a piece that stopped at a fatal error nothing is read: the
+        // pieces after it read nothing of its state — the log ends there)
         Entry::After(q, c) => match out(q) {
-            Some(o) if o.enterable() => RState::entered_after(&o),
+            Some(o) if o.enterable() && !o.halted() => RState::entered_after(&o),
             _ => assumed_entry(p, c)?,
         },
     })
@@ -3078,7 +3233,7 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
             g.unstarted.remove(&k);
             g.running.insert(k);
             g.p[k].status = Status::Running;
-            let dirty = std::mem::take(&mut g.p[k].dirty).into_iter().collect();
+            let dirty = still_dirty(g, sh, k);
             Some(Task::Run(k, dirty))
         }
         1 => {
@@ -3190,6 +3345,7 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
                 node: 0,
                 run: None,
                 predicted,
+                fired: Vec::new(),
                 routines: 0,
                 kept: 0,
             };
@@ -3361,6 +3517,11 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
 fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
     let (text, old, entry, strict, entry_assumed) = {
         let mut g = lock(sh);
+        if std::mem::take(&mut g.p[k].recheck) && dirty.is_empty() && keep_again(&mut g, sh, k) {
+            drop(g);
+            notify(sh, true);
+            return 0;
+        }
         g.p[k].entered = entry_state(&g, k);
         let ps = &g.p[k];
         // (entered on the state assumed at the cut: the piece before it
@@ -3535,7 +3696,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[Key]) -> u64 {
         g.p[k].runs += 1;
         g.stats.ran += 1;
         g.running.remove(&k);
-        let marks = reached(&g, sh, (k as u32, END), &changed);
+        let marks = reached(&mut g, sh, (k as u32, END), &changed);
         for (r, key) in marks {
             if outer_still(&g, sh, r, &key) {
                 continue;
@@ -3713,12 +3874,7 @@ impl PieceEnv<'_> {
                         g.p[e].status = Status::Running;
                         g.stats.parks += 1;
                         g.stats.leapfrogs += 1;
-                        Some((
-                            e,
-                            std::mem::take(&mut g.p[e].dirty)
-                                .into_iter()
-                                .collect::<Vec<Key>>(),
-                        ))
+                        Some((e, still_dirty(&mut g, self.sh, e)))
                     } else if g.running.first().is_some_and(|&e| e < self.k)
                         || g.unstarted.first().is_some_and(|&e| e < self.k)
                     {
@@ -3773,11 +3929,7 @@ impl PieceEnv<'_> {
                         g.p[d].status = Status::Running;
                         g.stats.parks += 1;
                         g.stats.leapfrogs += 1;
-                        Some(
-                            std::mem::take(&mut g.p[d].dirty)
-                                .into_iter()
-                                .collect::<Vec<Key>>(),
-                        )
+                        Some(still_dirty(&mut g, self.sh, d))
                     }
                     Status::Running => {
                         g.stats.parks += 1;
@@ -3928,10 +4080,15 @@ impl Env for PieceEnv<'_> {
 /// `k` (`run`): the piece's own definitions up to that node, else the
 /// names index before the place (a fire at the same place included).
 fn read_at(sh: &Shared, run: Option<&Run>, k: usize, node: u32, key: &Key) -> Val {
+    read_at_with(sh, run, k, node, key, true)
+}
+
+/// [`read_at`], the definitions made between the pieces' nodes at the
+/// node itself (where the page builder fired) seen or not.
+fn read_at_with(sh: &Shared, run: Option<&Run>, k: usize, node: u32, key: &Key, at_node: bool) -> Val {
     let local = run.and_then(|r| r.resolve(key, node as usize + 1));
-    let (ipos, ival, ..) = sh
-        .names
-        .reaching(key, (k as u32, node.saturating_add(1)), &sh.font);
+    let to = if at_node { node.saturating_add(1) } else { node };
+    let (ipos, ival, ..) = sh.names.reaching(key, (k as u32, to), &sh.font);
     match (local, ipos) {
         (Some((d, _)), Some(p)) if p.0 == k as u32 && p.1 != END && p.1 >= d => ival,
         (Some((_, v)), _) => v,
@@ -3949,6 +4106,8 @@ struct BuildFold<'a> {
     run: Option<Arc<Run>>,
     /// The last build's definitions' places not made again yet.
     predicted: Vec<Pos>,
+    /// Where this build's page builder fired, in order.
+    fired: Vec<Pos>,
     routines: usize,
     kept: usize,
 }
@@ -4066,12 +4225,22 @@ impl BuildFold<'_> {
 
 impl FoldEnv for BuildFold<'_> {
     fn read(&mut self, key: &Key) -> Val {
-        read_at(self.sh, self.run.as_deref(), self.k, self.node, key)
+        // (the last build's definitions where the page builder fires now,
+        // not made again yet, are not read: they are what its fires there
+        // made, and this build's first fire there decides afresh — whether
+        // it holds the insertions, which routine runs; a later fire at the
+        // same place reads this build's)
+        let pos = (self.k as u32, self.node);
+        let fresh = !self.predicted.contains(&pos) || self.fired.last() == Some(&pos);
+        read_at_with(self.sh, self.run.as_deref(), self.k, self.node, key, fresh)
     }
 
     fn fire(&mut self, defs: Vec<(Key, Val)>, routine: Option<Routine>) -> Fired {
         let mut fired = Fired::default();
         let pos = (self.k as u32, self.node);
+        if self.fired.last() != Some(&pos) {
+            self.fired.push(pos);
+        }
         if self.predicted.contains(&pos) {
             self.predicted.retain(|&p| p != pos);
             // (the last build's definitions here go before a routine reads:

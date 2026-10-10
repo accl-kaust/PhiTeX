@@ -816,6 +816,12 @@ impl RState {
         }
     }
 
+    /// Whether the reader has stopped at a fatal error (tex.web 82: the
+    /// hundredth error, "capacity exceeded"): nothing after it is read.
+    pub fn halted(&self) -> bool {
+        self.error_count >= FATAL_ERRORS
+    }
+
     /// Whether a piece may be entered in this state (the state a run
     /// left at its text's end, or at an `\input`): the outer vertical
     /// list, no group, box, alignment or output routine open. (A paragraph
@@ -1642,13 +1648,12 @@ pub struct Lean {
     input: Option<Arc<FileText>>,
     /// Its run ended at a cut the cutter missed ([`Kind::Cut`]).
     cut: bool,
-    /// Its reads from before the piece (`Run::reads`) without their values
-    /// (its edges are the build's), but for the names the build answers
-    /// itself (files, the job, the lines before it), whose values are
-    /// compared at the next build, and the reads of a meaning's outer-ness
-    /// alone (`Val::Outer`), which a redefinition keeping it leaves be.
-    reads: Vec<(Key, u32)>,
-    given: Vec<(Key, u32, Val)>,
+    /// Its reads from before the piece (`Run::reads`), with their values:
+    /// a new definition of a name it read, or another place for it, that
+    /// gives each of its reads the value it read leaves it be (and the
+    /// names the build answers itself — files, the job, the lines before
+    /// it — are compared at the next build).
+    reads: Vec<(Key, u32, Val)>,
     /// Its part of the log, but for its paragraphs' lines.
     pub plan: Arc<crate::logs::Plan>,
 }
@@ -1688,13 +1693,7 @@ impl Run {
             out: self.out(),
             input: self.input().cloned(),
             cut: self.ends_at_cut(),
-            reads: self.reads.iter().map(|(k, i, _)| (k.clone(), *i)).collect(),
-            given: self
-                .reads
-                .iter()
-                .filter(|(k, _, v)| matches!(k, Key::File(_) | Key::Job | Key::LineBase) || matches!(v, Val::Outer(_)))
-                .cloned()
-                .collect(),
+            reads: self.reads.clone(),
             plan: Arc::new(crate::logs::plan(text, self)),
         };
         Run {
@@ -1712,7 +1711,7 @@ impl Run {
     }
 
     /// How many reads from before the piece it has (`reads`, kept by a
-    /// lean run without their values).
+    /// lean run too).
     pub fn read_count(&self) -> usize {
         self.lean.as_ref().map_or(self.reads.len(), |l| l.reads.len())
     }
@@ -1726,13 +1725,20 @@ impl Run {
         }
     }
 
-    /// The values it read `key` with (of a lean run: only for the names
-    /// the build answers itself and the reads of outer-ness alone).
+    /// The values it read `key` with: each read of it, the first reader's
+    /// (the edge's) first.
     pub fn values_read(&self, key: &Key) -> &[(Key, u32, Val)] {
-        let v = self.lean.as_ref().map_or(&self.reads[..], |l| &l.given[..]);
+        let v = self.lean.as_ref().map_or(&self.reads[..], |l| &l.reads[..]);
         let a = v.partition_point(|x| x.0 < *key);
         let b = a + v[a..].partition_point(|x| x.0 == *key);
         &v[a..b]
+    }
+
+    /// The index of its first read of `key` (`read_at`), the edge's.
+    pub fn first_read(&self, key: &Key) -> Option<usize> {
+        let v = self.lean.as_ref().map_or(&self.reads[..], |l| &l.reads[..]);
+        let a = v.partition_point(|x| x.0 < *key);
+        (v.get(a).is_some_and(|x| x.0 == *key)).then_some(a)
     }
 
     /// Its reads of `key`, if it read only whether that is `\outer`
@@ -1740,14 +1746,7 @@ impl Run {
     /// included.
     pub fn outer_reads_only(&self, key: &Key) -> Option<&[(Key, u32, Val)]> {
         let vals = self.values_read(key);
-        let all = match &self.lean {
-            Some(l) => {
-                let a = l.reads.partition_point(|x| x.0 < *key);
-                l.reads[a..].partition_point(|x| x.0 == *key)
-            }
-            None => vals.len(),
-        };
-        (!vals.is_empty() && vals.len() == all && vals.iter().all(|x| matches!(x.2, Val::Outer(_)))).then_some(vals)
+        (!vals.is_empty() && vals.iter().all(|x| matches!(x.2, Val::Outer(_)))).then_some(vals)
     }
 
     /// How many nodes it has (had, if lean).
@@ -2279,6 +2278,9 @@ pub fn run_piece(
                 // (the text it read, through the character after it, unchanged)
                 let text_ok = edit.is_none_or(|e| n.out.pos < e.start || inp_pos >= e.old_end);
                 let par_ok = !(matches!(n.kind, Kind::Par | Kind::End) && para_fresh);
+                // (where a run ends is the build's to say again: a cut, an
+                // `\input` whose file is pieces only where they may be)
+                let par_ok = par_ok && n.kind != Kind::Cut && (n.kind != Kind::Input || env.split_inputs());
                 let state_ok = if oi == 0 {
                     oc.input(0).eq_but_pos(&state)
                 } else {
@@ -2823,9 +2825,6 @@ impl<'a> Exec<'a> {
             }
         }
         if self.halt {
-            // (the job ends: TeX reads nothing more, the pieces after it
-            // neither, whatever state this one leaves)
-            self.define(Key::Ended, Val::Int(1), true);
             // (§82: at any level, into the page fold's stream)
             let p = self.para.get_or_insert_with(|| Arc::new(Para::default()));
             Arc::make_mut(p).after.push(Item::Halt);

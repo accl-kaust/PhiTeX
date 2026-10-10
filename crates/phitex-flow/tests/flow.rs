@@ -117,6 +117,28 @@ fn a_blank_line_above_a_definition_reruns_no_reader() {
     assert!(e.dvi == cold(&b, o).dvi);
 }
 
+/// F5: definitions moved into new pieces by a split, with the values
+/// they had: their readers' reads are the same, nothing reading them runs
+/// again (the edges move to the new definers).
+#[test]
+fn a_new_definer_of_the_same_value_reruns_no_reader() {
+    let head = "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x \\vsize=200pt ";
+    let a = format!("{head}\\def\\fz{{lazy}}\\hsize=100pt\n\nA \\fz\\par\\message{{\\the\\hsize}}\n\n\\end\n");
+    let b = a.replacen("{lazy}", "{lazy}\n\n", 1);
+    for lean in [true, false] {
+        for o in [opts(1, Reads::Suspend, Order::Priority), opts(4, Reads::Speculate, Order::Random(3))] {
+            let mut bld = Build::new(font());
+            bld.set_lean(lean);
+            bld.update(&a, o);
+            let e = bld.update(&b, o);
+            assert!(e.dvi == cold(&b, o).dvi && e.log == cold(&b, o).log, "lean {lean} {o:?}");
+            // (the two new pieces run; the readers, marked while the
+            // definitions were between pieces, keep their runs)
+            assert_eq!(e.stats.ran, 2, "no reader of \\fz or \\hsize runs again (lean {lean}, {o:?}): {:?}", e.stats);
+        }
+    }
+}
+
 #[test]
 fn a_changed_definition_reruns_its_readers_only() {
     let a = doc(30);

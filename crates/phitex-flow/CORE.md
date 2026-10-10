@@ -220,7 +220,14 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
     paragraph open, or whose last command reads on past its text, is one
     piece with the text after it. (A group open across pieces needs the
     names index to end a definition's reach at a close in a later piece:
-    not yet, so such pieces are joined.)
+    not yet, so such pieces are joined — decided for now, coordinator
+    2026-10-10. The alternative for later, when a document has a large
+    group whose inside is not a serial chain: visibility by positions and
+    levels — a local definition at level L made in piece k reaches
+    position m iff every piece entry between k and m has depth ≥ L and
+    m's current depth ≥ L; the entry depths are known once the
+    predecessors settle, so it is a reaching-definition rule, not a
+    restore.)
 15. **`\mag` and `true` units** — TeX freezes `\mag` at its first use
     (`mag_set`, a hidden global). Done (F, TRIP): `Key::MagSet`, defined
     globally by `prepare_mag` (a `true` dimension, or a `\shipout` while
@@ -829,8 +836,11 @@ decides. "Where the reader is is itself a read."
   abandons it; so does a prediction refuted, and a long run on an
   assumed entry or predictions while a piece before it is not settled is
   given up (its piece then waits).
-- The hundredth error (and "capacity exceeded") ends the job:
-  `Key::Ended` is defined, as by `\end`.
+- After a piece that stopped at a fatal error (the hundredth error,
+  "capacity exceeded") the next piece is entered in the assumed state,
+  not that one's (nothing after the error is read; the log ends there).
+  (Defining `Key::Ended` there instead let a speculative run on wrong
+  predictions that met a hundred errors end the layout.)
 - Re-cuts (`Kind::Cut`): a reader passing a blank line at depth 0 in the
   canonical state where the cutter saw none ends its run there; the rest
   is cut again.
@@ -1205,15 +1215,21 @@ history, 1187 a split); 1 F6 (big 236); 1 F6 by its cause (big 1153);
 **Open findings** (`tests/fuzz/open/*.repro` must still fail; a fixed one
 moves to `tests/fuzz/fixed/`, which must pass):
 
-- **F1. A second update after an output routine that holds inserts
-  differs.** `tests/fuzz/open/f1-output-second-update.repro` (7 lines,
+- **F1 (fixed, A). A second update after an output routine that holds
+  inserts differs.** Cause (F's root cause): before deciding whether a
+  fire holds, the fold read the last build's routine export at that same
+  fire position (`\global\holdinginserts0`, made by the routine that
+  had not run yet this build). Fixed: at a fire position still predicted
+  (not yet retracted or made again by this build) the fold reads what
+  reaches the node, not its own last definitions there
+  (`read_at_with(.., at_node)`; `BuildFold::fired`).
+  `tests/fuzz/fixed/f1-output-second-update.repro` (7 lines,
   no-op edit): `\holdinginserts1`, a group with an `\output` that sets
   `\global\holdinginserts0`, `\unvbox255\penalty\outputpenalty` and ships
   a `\vsplit`, an `\insert100`, a `\vbox spread 1000pt{}` and a
   `\vadjust{\penalty-5000}`. A cold build ships 4 pages (TeX's 4); the
   same text updated again ships 3, no node running again. In TRIP
-  every update after the first differs (`--fuzz 6 1 1 --threads 1`), so
-  no TRIP edit can be checked until F1 is fixed.
+  every update after the first differed (`--fuzz 6 1 1 --threads 1`).
   *Cause* (traced): the cold build fires three times at node (0,15).
   The first fire reads `\holdinginserts` = 1 and holds the inserts. The
   routine's `\global\holdinginserts0` goes into the names index at
@@ -1227,12 +1243,6 @@ moves to `tests/fuzz/fixed/`, which must pass):
   the hold test. So it reads 0 and does not hold. `find_memo` then finds
   the last build's no-hold run (reads nothing that changed), and one
   fire is lost. One `Pos` holds what all three fires at (0,15) defined.
-  *Fix wanted*: drop the predicted definitions at the fire's position
-  before the page builder's first read for that fire (`\holdinginserts`,
-  `\output`, `\box255`, the insert boxes, §1012–1018). Or make the
-  fold's reads at its own position see only this build's earlier fires
-  there. Several fires at one node probably need a fire index in the
-  position.
 - **F2. A kept node's error context shows the line as it was** (fixed,
   `logs.rs` only: `tests/fuzz/fixed/f2-error-context-line.repro`, an `X`
   inserted after the error on its line;
@@ -1251,11 +1261,17 @@ moves to `tests/fuzz/fixed/`, which must pass):
   seeds 102, 802, 970 and 1187 pass now. Done without a core change: a
   placeholder carrying the error's offset from `diag.rs` would make it
   exact, if A wants it.
-- **F3. After an update of the empty text, no page is shipped again.**
-  `tests/fuzz/open/f3-update-after-empty.repro`: `Build::new`,
+- **F3 (fixed, A, 2c217c3: `tests/fuzz/fixed/`). After an update of the
+  empty text, no page is shipped again.** Fixed with the round changes of
+  the \input-as-pieces slice: a round's page matching compares the pages
+  with the runs that made them (the last build's, `Build::page_runs`),
+  not with the previous round's.
+  `tests/fuzz/fixed/f3-update-after-empty.repro`: `Build::new`,
   `update("")`, then `update("\hsize=100pt\vsize=100pt \font\x=cmr10 \x
   A\par\end")`: no page (a cold build ships one). Every corpus document:
-  0 of its pages (`tests/design.rs` `cold_equals_edit` reports it).
+  0 of its pages (`tests/design.rs` `cold_equals_edit` reported it). The
+  cold path is the edit path by construction (one `update`); the empty
+  build leaves state the next update reads.
   *Cause* (traced): a round that restructures leaves the next round
   comparing the wrong builds. In `Build::update`, a round that returns
   `None` (a run changed the sequence) puts back the last build's pages,
@@ -1265,25 +1281,43 @@ moves to `tests/fuzz/fixed/`, which must pass):
   `same_material` (`Arc::ptr_eq(o, run)`: the same run) and, under "the
   same material throughout: the same pages", takes the last build's
   pages. After the empty text those are none. A smaller case:
-  `tests/fuzz/open/f3-restructured-update-reuses-pages.repro`,
+  `tests/fuzz/fixed/f3-restructured-update-reuses-pages.repro`,
   `\count1=1 \hsize=100pt` + `A\par\end` in one piece, the `1` edited to
   `0`. The edited piece has no old `expect`, and its run ends the job
   (`got.ends`), so round 1 restructures. Round 2 reuses the last build's
   page `[0.1]`, where a cold build ships `[0]`. Any edit in the piece
   holding `\end`/`\bye` restructures the same way.
-  *Fix wanted*: the round after a restructure compares with the last
-  build's runs (keep `old_runs` from the build's first round, as the
-  pages are), or does not take the all-same path when `olds` come from a
-  round of this build.
-- **F4. A second update loses the last page's last line.**
-  `tests/fuzz/open/f4-second-update-last-line.repro` (32 lines cut from
+- **F4 (fixed, A, with F1). A second update loses the last page's last
+  line.** The same cause as F1: the fold's first fire at a predicted
+  position read the last build's routine definitions there; F1's fix
+  fixes it (without it, it fails still).
+  `tests/fuzz/fixed/f4-second-update-last-line.repro` (32 lines cut from
   big's text by delta debugging, no-op edit, both builds 1 thread in
   priority): an `\outer\def` whose body never closes, undefined
   `\alloc@`-style macros, plain's `\footnote` with its `\vfootnote`
   cut, a `\headline` with `\firstmark`, `\vsize=5in`. The cold build
   ends page 2 with the word "which"; the same text updated again ends
   page 2 without it. Like F1, nothing was edited.
-- **F5. A new definer with an equal value re-runs a macro's reader.**
+- **F5 (fixed, A). A new definer with an equal value re-runs a macro's
+  reader.** Fixed in two places. (1) `reached` asks F's predicate: a
+  settled reader whose every read of the name has the value it read
+  (`Run::values_read`, lean runs keep their reads' values now) is not
+  marked, its edge moves to the definer reaching it now (`move_edge`).
+  (2) That alone is not enough: the piece that no longer defines the name
+  runs first, and the new definer has not run yet, so the reader does see
+  another value then and is marked. So when a marked piece is chosen to
+  run, its dirty names are looked at again (`still_dirty`): those whose
+  reads have their values again are dropped (edges moved), and if none is
+  left and it is entered as it was, its run is kept without running
+  (`keep_again`). Correct whatever the order: the edge's source is
+  always the definer reaching it at that moment, so a later change there
+  marks it again. `tests/flow.rs`
+  `a_new_definer_of_the_same_value_reruns_no_reader` (a split moving
+  `\def\fz` and `\hsize` into new pieces runs the two new pieces only,
+  lean or not, Suspend and Speculate). F's repro passed already on this
+  tree (the matcher of F6 runs the split pieces as new); moved to
+  `fixed/` with F3's smaller repro and F6's.
+  Was:
   Story seed 161 step 2 (`--fuzz 161 2 1 --threads 1`): a swap moves
   `\def\fz{lazy}` into a new piece (id 134 for 133). Piece "\medskip
   \noindent{\bf EXERCISE 1.1}" runs 29 of its 77 nodes, from n48, the
@@ -1298,7 +1332,7 @@ moves to `tests/fuzz/fixed/`, which must pass):
   only changed read is `\hsize` = 14208860 from piece 137 instead of
   133. Story seed 1127 (8 threads) is the swap again. So some reads
   compare the definer's piece, not the value.
-  `tests/fuzz/open/f5-new-definer-equal-value.repro` (cut down from
+  `tests/fuzz/fixed/f5-new-definer-equal-value.repro` (cut down from
   hyphens 830): `\vsize=2in \hsize=3in \tolerance=1000` split into two
   pieces before `\tolerance`, so `\hsize` now comes from a new piece with
   the same value. The `\tolerance` piece runs 2 of its 3 nodes again.
@@ -1321,14 +1355,27 @@ moves to `tests/fuzz/fixed/`, which must pass):
   with `changed=[Hsize]` (marks piece 3), then the new piece 2 with
   `changed=[Hsize]` (marks piece 3 again); piece 3 reads `\hsize` =
   3in both times.
-- **F6. Big: the order of a cold build changes its output.** At 1
+- **F6 (fixed, A). Big: the order of a cold build changes its output.**
+  Cause (F's root cause): a restructure left pieces without runs, the
+  next layout's `Matcher` indexed only pieces with runs, and its
+  equal-text fallback gave a piece another place's run (the second of two
+  equal paragraphs, which had read `\hsize=100pt`), kept as `Done` with
+  its definer now after it. Fixed: every last build's piece is indexed by
+  its text's `Arc` (a piece keeps its own place, run or not); an equal
+  text is taken as its own only right after the last piece taken (a text
+  cut again near an edit), and another place's run is never kept as it is
+  — the piece runs from it, every kept node's reads looked at again
+  (`Spec::moved`). Restructures now also wait for the runs to settle.
+  `tests/order.rs`: big at 1 worker random:400 and 8 workers random:7, and
+  F's six-piece repro at 40 orders.
+  Was: At 1
   worker, waiting reads, `Order::Random(400)` gives another DVI and log
   than priority order, every time (`tests/design.rs`
   `the_same_output_at_any_w` reports it); at 8 workers,
   `Order::Random(7)` does about one run in eight. Big seed 236 (`--fuzz
   236 1 1 --threads 1`) is it: its first build ran in that order. The
   smaller documents do not show it.
-  `tests/fuzz/open/f6-order-moves-a-run.repro`, 6 pieces: `\hsize=300pt`;
+  `tests/fuzz/fixed/f6-order-moves-a-run.repro`, 6 pieces: `\hsize=300pt`;
   paragraph P; `\hsize=100pt`; P again (the same text); `\input fzsub`;
   `\end`. `phitex-flow --fuzz-orders story FILE random:9 priority` says
   "differs": in random order the first P is broken at 100pt.
@@ -1403,6 +1450,15 @@ First local table (5 repetitions, median ms):
   table inside the `\halign` (430). There the kind is really "def".
 - The one-page documents miss the 25% rule on any edit (cold ≈ 20–30 ms,
   an edit 3–7 ms).
+
+**F8 (open, A). An edit of TRIP that never ends.** Found once F1 let
+TRIP's updates be checked: `tests/fuzz/hang/f8-trip-edit-hangs.repro`
+(TRIP seed 1 step 3, `--fuzz 1 3 1 --doc trip`): a character of
+`\hbox to 23pt{} % output now` replaced (`23st`). The update runs a
+piece again and again (a worker in `run_piece`, the round waiting), at
+any schedule (1 thread, Suspend, priority too). Pre-existing: 72ee98e
+hangs the same. Not in `open/` (its replay does not end); a timeout's
+reproduction names its step now (`fuzz::run_seed_at`).
 
 **Design tests** (`tests/design.rs`, the brief's 1–6; 7 waits for
 `Key::File` by writes):

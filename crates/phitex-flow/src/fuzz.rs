@@ -1078,6 +1078,18 @@ fn panic_text(e: &(dyn std::any::Any + Send)) -> String {
 /// A seed: `count` edits on document `doc`, each checked. The first
 /// failure ends the seed (later edits would build on it).
 pub fn run_seed(corpus: &[Doc], seed: u64, count: usize, cfg: &Config) -> Option<Repro> {
+    run_seed_at(corpus, seed, count, cfg, None)
+}
+
+/// [`run_seed`], each step's reproduction (as a timeout) sent to `pending`
+/// before its update: a seed that does not end says where it hung.
+fn run_seed_at(
+    corpus: &[Doc],
+    seed: u64,
+    count: usize,
+    cfg: &Config,
+    pending: Option<&std::sync::mpsc::Sender<Repro>>,
+) -> Option<Repro> {
     let docs: Vec<&Doc> = corpus.iter().filter(|d| cfg.doc.as_ref().is_none_or(|n| *n == d.name)).collect();
     let doc = (*docs.get((seed % docs.len().max(1) as u64) as usize)?).clone();
     let mut rng = Rng::new(seed);
@@ -1138,6 +1150,9 @@ pub fn run_seed(corpus: &[Doc], seed: u64, count: usize, cfg: &Config) -> Option
             threads: cfg.threads.clone(),
             only: cfg.doc.clone(),
         };
+        if let Some(p) = pending {
+            let _ = p.send(repro(Fail::Timeout));
+        }
         let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let inc = b.update(&text, sched.options(etex, check_over));
             let c = cold(&doc, &text, &files);
@@ -1173,14 +1188,19 @@ pub fn run_seed(corpus: &[Doc], seed: u64, count: usize, cfg: &Config) -> Option
 pub fn run_seed_timed(corpus: &Arc<Vec<Doc>>, seed: u64, count: usize, cfg: &Config) -> Option<Repro> {
     let (tx, rx) = std::sync::mpsc::channel();
     let (c, g) = (corpus.clone(), cfg.clone());
+    let (at, pending) = std::sync::mpsc::channel();
     let _ = std::thread::Builder::new()
         .name(format!("fuzz-{seed}"))
         .stack_size(64 << 20)
         .spawn(move || {
-            let _ = tx.send(run_seed(&c, seed, count, &g));
+            let _ = tx.send(run_seed_at(&c, seed, count, &g, Some(&at)));
         });
     if let Ok(r) = rx.recv_timeout(cfg.timeout) {
         return r;
+    }
+    // (the step it hung at, if it got past its first build)
+    if let Some(r) = pending.try_iter().last() {
+        return Some(r);
     }
     let doc = corpus.get((seed % corpus.len().max(1) as u64) as usize).map_or_else(String::new, |d| d.name.clone());
     let s = Schedule { threads: 1, reads: Reads::Suspend, order: Order::Priority, lean: true };
