@@ -22,9 +22,9 @@ pub struct Run {
     /// wrote and this one did not (all of this run's for the first run):
     /// their names, in the order written.
     pub changed: Vec<String>,
-    /// This run wrote what the one before it wrote. (Only the files this
-    /// build writes: a caller that changed another input between runs, a
-    /// `.bbl`, runs again.)
+    /// This run wrote what the one before it wrote (no file changed).
+    /// (Only the files this build writes: a caller that changed another
+    /// input between runs, a `.bbl`, runs again.)
     pub stable: bool,
 }
 
@@ -54,23 +54,29 @@ impl Fixpoint {
 
     /// Runs `src` once more: `b` updated, then what it wrote given to it
     /// as the next run's files (and what the run before wrote and this one
-    /// did not, removed).
+    /// did not, removed). The first run's files are all changed.
     pub fn run(&mut self, b: &mut Build, src: &str, opts: Options) -> Run {
+        self.run_reading(b, src, opts, &|_| None)
+    }
+
+    /// [`Fixpoint::run`], a written file not given by a run before
+    /// compared with what `read` says the run read as it (the CLI: the
+    /// file on disk from an earlier job), so a first run can be stable.
+    pub fn run_reading(&mut self, b: &mut Build, src: &str, opts: Options, read: &dyn Fn(&str) -> Option<String>) -> Run {
         let out = b.update(src, opts);
-        let changed: Vec<String> = match &self.prev {
-            None => out.writes.iter().map(|(n, _)| n.clone()).collect(),
-            Some(prev) => {
-                let mut ch: Vec<String> = out
-                    .writes
-                    .iter()
-                    .filter(|(n, t)| prev.iter().find(|(m, _)| m == n).is_none_or(|(_, u)| u != t))
-                    .map(|(n, _)| n.clone())
-                    .collect();
-                ch.extend(prev.iter().filter(|(n, _)| !out.writes.iter().any(|(m, _)| m == n)).map(|(n, _)| n.clone()));
-                ch
-            }
-        };
-        let stable = self.prev.is_some() && changed.is_empty();
+        let empty = Vec::new();
+        let prev = self.prev.as_ref().unwrap_or(&empty);
+        let mut changed: Vec<String> = out
+            .writes
+            .iter()
+            .filter(|(n, t)| match prev.iter().find(|(m, _)| m == n) {
+                Some((_, u)) => u != t,
+                None => read(n).as_deref() != Some(t.as_str()),
+            })
+            .map(|(n, _)| n.clone())
+            .collect();
+        changed.extend(prev.iter().filter(|(n, _)| !out.writes.iter().any(|(m, _)| m == n)).map(|(n, _)| n.clone()));
+        let stable = changed.is_empty();
         if let Some(prev) = &self.prev {
             for (n, _) in prev {
                 if !out.writes.iter().any(|(m, _)| m == n) {
