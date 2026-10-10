@@ -97,7 +97,7 @@ pub struct Options {
     /// pieces kept from an earlier update read the mode they ran with.
     pub etex: bool,
     /// TeX's main memory, in words of material a run may hold
-    /// (`graph::words_of`): past it, "TeX capacity exceeded" ends the run
+    /// (`graph::Live`): past it, "TeX capacity exceeded" ends the run
     /// (tex.web 94, 120). [`MAIN_MEMORY`] is web2c's.
     pub main_memory: u64,
     /// The cutter proposes a cut every this many lines (at a line
@@ -5817,6 +5817,10 @@ impl Env for PieceEnv<'_> {
 
     fn native_font(&mut self, name: &str, size: i32, tracing: i32) -> crate::native::Loaded {
         self.sh.names.given.native_font(name, size, tracing)
+    }
+
+    fn main_memory(&self) -> u64 {
+        self.sh.opts.main_memory
     }
 
     fn check(&mut self, ran: u64, words: u64) -> Check {

@@ -1,0 +1,11 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=100pt \vsize=60pt \parindent=10pt \baselineskip=12pt \topskip=10pt
+\tolerance=10000 \hbadness=10000 \vbadness=10000 \parfillskip=0pt plus 1fil \maxdepth=2pt
+\output={\shipout\box255 \global\setbox1\hbox{\number\count1}}
+\def\words{one two three four five six seven eight nine ten eleven twelve}
+\def\pages{\advance\count1 by 1 \setbox2\hbox{\words}\words\ \words\par
+  \ifnum\count1<300 \expandafter\pages\fi}
+\pages
+\message{[\number\count1]}
+\end

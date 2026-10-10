@@ -2139,6 +2139,32 @@ its outer-ness read, made once. latex.ltx `-j 1`: 119.4G → 109.2G cycles,
    `\count1=0 \def\l{\def\a{<1000 x>}\advance\count1 1 \ifnum\count1<10000
    \expandafter\l\fi}\l \message{\the\count1}\end`: TeX 10000, the graph
    "TeX capacity exceeded, sorry [main memory size=5000000]".
+   *Now (agent B): `graph::Live`.* A run counts what TeX's `mem` would
+   hold, not what its nodes ever made: per list level the material of
+   the list open there (let go when the list ends: its box, counted
+   where the box goes, holds it), the paragraph at level 0 (let go when
+   it is broken: its lines go to the main vertical list), nothing of the
+   main vertical list (contributed to the page; `\shipout` frees it in
+   TeX, and the page builder is not the run's), and the box registers
+   the run set (a register set again or emptied lets its box go). A
+   box's words are its list's all the way down (`\copy` copies all of
+   it; counted only up to the cap). A command costs nothing (it was one
+   word each: a 300-page document as one piece passed 5M words where TeX
+   holds a page); macros and token lists defined are not counted (TeX
+   frees one defined again). Token lists being gathered (a delimited or
+   group argument, a `\def` or `\edef` body, a balanced text) count
+   their length as they grow (`Exec::holding`, every 4096 tokens), with
+   the input waiting (`pending_words`): a runaway `\edef` ends in TeX's
+   error, and a speculative run reading on and on (a predicted state that
+   never ends a delimited argument) is given up (`PieceEnv::check`)
+   instead of growing without bound. Not counted: kept and shared nodes
+   of a run again (as before). A loop that makes nothing (`\def\a{\a}`
+   in a box, characters in `\nullfont`) runs for ever, as TeX's does
+   (it used to end at 5M commands). TeX's "Runaway definition?" lines
+   before the error are not printed. Tests: `dvi::one_piece_frees_pages`
+   (`onepiece.tex`, 360 pages in one piece under 2000 words),
+   `capacity_exceeded`, `capacity_exceeded_in_registers`,
+   `capacity_exceeded_in_a_token_list`.
 
 ## LaTeX documents (agent B)
 
