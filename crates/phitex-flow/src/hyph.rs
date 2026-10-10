@@ -460,8 +460,9 @@ pub fn hyphenate_after(items: &[Item], cur_p: usize, st: &mut LangState, p: &Hyp
                 };
                 (c, &l.font)
             }
-            // (§896: and any other whatsit is passed)
-            Item::Kern { sub: 0, .. } | Item::Whatsit(_) => {
+            // (§896: and any other whatsit is passed; XeTeX's glyphs and
+            // pictures too)
+            Item::Kern { sub: 0, .. } | Item::Whatsit(_) | Item::Glyph(_) | Item::Pic(_) => {
                 prev_s = s;
                 s += 1;
                 continue;
@@ -478,15 +479,10 @@ pub fn hyphenate_after(items: &[Item], cur_p: usize, st: &mut LangState, p: &Hyp
                 let first = crate::native::chars_of(&nw.text).into_iter().find(|&c| p.lc_of(c) != 0);
                 if let Some(c) = first {
                     if p.lc_of(c) == c || p.uc_hyph {
-                        return hyphenate_native(items, s, st, p);
+                        return hyphenate_native(items, s, *st, p);
                     }
                     return None;
                 }
-                prev_s = s;
-                s += 1;
-                continue;
-            }
-            Item::Glyph(_) | Item::Pic(_) => {
                 prev_s = s;
                 s += 1;
                 continue;
@@ -669,7 +665,7 @@ pub fn hyphenate_after(items: &[Item], cur_p: usize, st: &mut LangState, p: &Hyp
 /// between them. The parts are shaped with the word's own direction
 /// (CORE.md: `Key::NativeDir` is read where the word was made, never
 /// again).
-fn hyphenate_native(items: &[Item], ha: usize, st: &LangState, p: &HyphParams) -> Option<Hyphenated> {
+fn hyphenate_native(items: &[Item], ha: usize, st: LangState, p: &HyphParams) -> Option<Hyphenated> {
     let Item::Native(w0) = &items[ha] else { return None };
     let hf = w0.font.clone();
     let hyf_char = p.hyphen_chars.iter().find(|(k, _)| **k == *hf.key).map_or(-1, |(_, h)| *h);

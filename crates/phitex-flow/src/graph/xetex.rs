@@ -54,8 +54,7 @@ pub fn decode(t: &[char], pos: usize, enc: u32) -> (char, usize) {
         t.get(i).copied().filter(|&c| c != '\r').and_then(|c| u8::try_from(u32::from(c)).ok())
     };
     match enc {
-        DECODED => (raw, 1),
-        RAW | UTF16BE | UTF16LE => (raw, 1),
+        DECODED | RAW | UTF16BE | UTF16LE => (raw, 1),
         _ if enc & 0xFF == ICU => {
             let conv = (enc >> 8) as usize;
             if conv == usize::from(crate::icu_tables::UTF8) {
@@ -464,7 +463,6 @@ impl Exec<'_> {
         const NOT_AAT_GR: &str = "; not an AAT or Graphite font";
         let name = |k: u8| Prim::Xe(Xe::Item(k)).name();
         IVal::Int(match k {
-            0 => 0,
             1 | 16 => {
                 let f = self.scan_font_ident();
                 native::native(&f).map_or(0, |nf| nf.xf.ot_font_get(i32::from(k)))
@@ -663,22 +661,17 @@ impl Exec<'_> {
             }
             Xe::InputEncoding | Xe::DefaultEncoding => {
                 let n = self.scan_file_name();
-                let mode = match encoding_mode(&n) {
-                    Ok((m, unknown)) => {
-                        if unknown {
-                            self.log_raw(&format!(
-                                "{}{}Unknown encoding `{n}'; reading as raw bytes",
-                                crate::show::RAW,
-                                crate::show::NL
-                            ));
-                        }
-                        m
-                    }
-                    Err(()) => {
-                        self.err(format!("\\{} \"{n}\": this ICU converter is not supported yet", Prim::Xe(x).name()));
-                        return;
-                    }
+                let Ok((mode, unknown)) = encoding_mode(&n) else {
+                    self.err(format!("\\{} \"{n}\": this ICU converter is not supported yet", Prim::Xe(x).name()));
+                    return;
                 };
+                if unknown {
+                    self.log_raw(&format!(
+                        "{}{}Unknown encoding `{n}'; reading as raw bytes",
+                        crate::show::RAW,
+                        crate::show::NL
+                    ));
+                }
                 if x == Xe::DefaultEncoding {
                     self.define(Key::DefaultEncoding, Val::Int(mode as i32), true);
                 } else if mode == AUTO {
@@ -1016,7 +1009,7 @@ impl Exec<'_> {
     /// from `c0` on, gathered, mapped, set as words (with discretionaries
     /// after hyphens, ICU's breaks with `\XeTeXlinebreaklocale`), joined
     /// to the word before when nothing separates them.
-    pub(super) fn main_loop_native(&mut self, f: Arc<Font>, c0: u32, cat0: u8, backed: bool) {
+    pub(super) fn main_loop_native(&mut self, f: &Arc<Font>, c0: u32, cat0: u8, backed: bool) {
         self.st.xclass.0 = BOUNDARY;
         if !self.st.inner {
             self.fix_language();
@@ -1083,7 +1076,18 @@ impl Exec<'_> {
                 }
             }
         }
-        if !self.st.inner {
+        if self.st.inner {
+            let w = match self.native_tail() {
+                Some((old, true)) if *old.font == **f => {
+                    self.drop_native_tail();
+                    let mut s: Vec<u16> = old.text.to_vec();
+                    s.extend_from_slice(&text);
+                    self.native_word(&f, &s)
+                }
+                _ => self.native_word(&f, &text),
+            };
+            self.emit.push(Item::Native(Arc::new(w)));
+        } else {
             let mut main_k = text.len();
             let mut temp = 0usize;
             let mut first = true;
@@ -1093,7 +1097,7 @@ impl Exec<'_> {
                 }
                 let merge = if first {
                     match self.native_tail() {
-                        Some((w, true)) if *w.font == *f => Some(w),
+                        Some((w, true)) if *w.font == **f => Some(w),
                         _ => None,
                     }
                 } else {
@@ -1122,17 +1126,6 @@ impl Exec<'_> {
                     break;
                 }
             }
-        } else {
-            let w = match self.native_tail() {
-                Some((old, true)) if *old.font == *f => {
-                    self.drop_native_tail();
-                    let mut s: Vec<u16> = old.text.to_vec();
-                    s.extend_from_slice(&text);
-                    self.native_word(&f, &s)
-                }
-                _ => self.native_word(&f, &text),
-            };
-            self.emit.push(Item::Native(Arc::new(w)));
         }
         if self.int_par(IntPar::XeTeXinterwordspaceshaping) > 0 {
             self.interword_space_shaping(&f);

@@ -1198,11 +1198,9 @@ impl Exec<'_> {
         let fonts = if used[16..].iter().any(|&u| u) {
             let mut fonts = end.fonts.clone();
             for size in 0..3u8 {
-                for fam in 16..256usize {
-                    if used[fam] {
-                        let f = self.fam_font(size, fam as u8);
-                        fonts.0[usize::from(size) * mlist::SCRIPT_SIZE + fam] = (&*f.key != "nullfont").then_some(f);
-                    }
+                for (fam, _) in used.iter().enumerate().skip(16).filter(|(_, u)| **u) {
+                    let f = self.fam_font(size, fam as u8);
+                    fonts.0[usize::from(size) * mlist::SCRIPT_SIZE + fam] = (&*f.key != "nullfont").then_some(f);
                 }
             }
             std::borrow::Cow::Owned(fonts)

@@ -808,13 +808,14 @@ impl<E: MathEnv> Ctx<'_, E> {
                 Some(r) => Self::extensible(&f, r, v),
                 None => Self::char_box(&f, c as u8),
             },
-            Some(f) => match assembly {
-                Some(a) => Self::opentype_assembly(&f, &a, v, false),
-                None => {
+            Some(f) => {
+                if let Some(a) = assembly {
+                    Self::opentype_assembly(&f, &a, v, false)
+                } else {
                     let g = glyph_item(&f, c as u16);
                     BoxNode { vertical: true, w: g.w, h: g.h, d: g.d, list: vec![Item::Glyph(Arc::new(g))], ..BoxNode::default() }
                 }
-            },
+            }
         };
         b.shift = half(b.h - b.d) - self.axis_height(s);
         b
@@ -1032,12 +1033,11 @@ impl<E: MathEnv> Ctx<'_, E> {
         if f.native.is_some() {
             return Fetched::Native(f);
         }
-        match f.glyph(ch as i32).filter(|_| ch <= 255) {
-            Some(g) => Fetched::Tfm(f, g),
-            None => {
-                self.events.push(Event::MissingChar { font: f, ch });
-                Fetched::None
-            }
+        if let Some(g) = f.glyph(ch as i32).filter(|_| ch <= 255) {
+            Fetched::Tfm(f, g)
+        } else {
+            self.events.push(Event::MissingChar { font: f, ch });
+            Fetched::None
         }
     }
 
@@ -2105,7 +2105,7 @@ pub fn families(list: &[Item], out: &mut [bool; 256]) {
                 }
             }
             MItem::Choice(c) => {
-                for l in c.iter() {
+                for l in &**c {
                     families(l, out);
                 }
             }

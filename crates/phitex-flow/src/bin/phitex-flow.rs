@@ -570,13 +570,11 @@ fn main() -> ExitCode {
         let fonts = if idx.is_empty() {
             phitex_flow::native::Fonts::new(Arc::default(), kpse)
         } else {
-            match phitex_flow::native::Fonts::from_index_bytes(&idx, kpse) {
-                Some(f) => f,
-                None => {
-                    eprintln!("--font-index: not a font index");
-                    return ExitCode::FAILURE;
-                }
-            }
+            let Some(f) = phitex_flow::native::Fonts::from_index_bytes(&idx, kpse) else {
+                eprintln!("--font-index: not a font index");
+                return ExitCode::FAILURE;
+            };
+            f
         };
         b.set_xetex(fonts);
         if let Some(e) = std::env::var("SOURCE_DATE_EPOCH").ok().and_then(|v| v.trim().parse().ok()) {

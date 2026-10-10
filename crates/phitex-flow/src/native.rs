@@ -230,6 +230,7 @@ fn layout(nf: &NativeFont, text: &[u16], rtl: bool) -> (NativeLayout, u32) {
 impl NativeWord {
     /// A word of `text` in this word's font, measured as this one was
     /// (its parts: hyphenation, `hpack`'s merging).
+    #[must_use]
     pub fn part(&self, text: &[u16]) -> NativeWord {
         word(&self.font, Arc::from(text), self.at, self.gm, self.rtl).0
     }
@@ -237,6 +238,7 @@ impl NativeWord {
     /// `store_justified_native_glyphs`: measured again (without glyph
     /// metrics), its glyphs stretched to width `saved` (on its spaces, or
     /// all its glyphs).
+    #[must_use]
     pub fn justified(&self, saved: i32) -> NativeWord {
         let Some(nf) = native(&self.font) else { return self.clone() };
         let (mut l, _) = layout(nf, &self.text, self.rtl);

@@ -21,6 +21,8 @@
 //! `PHITEX_FONT_INDEX` names; files are found by `kpsewhich`. Without an
 //! index the tests say so and pass (they need TeX Live's tree).
 
+#![allow(clippy::doc_markdown)]
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -62,19 +64,18 @@ fn chars(b: &[u8]) -> String {
 }
 
 /// The font index, read once (`None`: none given, the tests pass).
-static INDEX: Mutex<Option<Option<Arc<Vec<u8>>>>> = Mutex::new(None);
+static INDEX: std::sync::OnceLock<Option<Arc<Vec<u8>>>> = std::sync::OnceLock::new();
 
 fn index() -> Option<Arc<Vec<u8>>> {
-    let mut g = INDEX.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(i) = &*g {
-        return i.clone();
-    }
-    let i = std::env::var_os("PHITEX_FONT_INDEX").and_then(|p| std::fs::read(p).ok()).map(Arc::new);
-    if i.is_none() {
-        eprintln!("xetex_docs: no PHITEX_FONT_INDEX: not run");
-    }
-    *g = Some(i.clone());
-    i
+    INDEX
+        .get_or_init(|| {
+            let i = std::env::var_os("PHITEX_FONT_INDEX").and_then(|p| std::fs::read(p).ok()).map(Arc::new);
+            if i.is_none() {
+                eprintln!("xetex_docs: no PHITEX_FONT_INDEX: not run");
+            }
+            i
+        })
+        .clone()
 }
 
 /// A XeTeX build with the given fonts, as job `job`, reading `inputs`.
@@ -353,7 +354,8 @@ fn latex(dir: &Path, name: &str) {
         let out = b.update(&jobs(&[&text]), o);
         compare(name, o, &b, &out, &oracle, k == 0);
         // (the `.aux` file, as the oracle wrote it: UTF-8)
-        if let Some((_, t)) = out.writes.iter().find(|(n, _)| n.ends_with(".aux"))
+        if let Some((_, t)) =
+            out.writes.iter().find(|(n, _)| Path::new(n).extension().is_some_and(|e| e.eq_ignore_ascii_case("aux")))
             && let Ok(want) = std::fs::read(oracle.with_extension("aux"))
         {
             assert!(t.as_bytes() == &want[..], "{name} ({o:?}): the .aux file is not xelatex's");

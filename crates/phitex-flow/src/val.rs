@@ -238,7 +238,7 @@ impl PartialEq for Key {
             | (Key::FontLoaded(a), Key::FontLoaded(b))
             | (Key::File(a), Key::File(b))
             | (Key::FontParams(a), Key::FontParams(b))
-            | (Key::GlyphUnicode(a), Key::GlyphUnicode(b)) => Arc::ptr_eq(a, b) || a == b,
+            | (Key::GlyphUnicode(a), Key::GlyphUnicode(b))
             | (Key::NativeDir(a), Key::NativeDir(b)) => Arc::ptr_eq(a, b) || a == b,
             (Key::Cat(a), Key::Cat(b)) => a == b,
             (Key::FontDimen(a, k), Key::FontDimen(b, l)) => k == l && (Arc::ptr_eq(a, b) || a == b),
@@ -671,7 +671,7 @@ pub fn initial_in(key: &Key, _font: &Arc<Font>, etex: bool, xetex: bool, cs: Opt
         }),
         Key::Delcode(c) => Val::Int(if *c == '.' { 0 } else { -1 }),
         Key::IntPar(p) => Val::Int(p.initial()),
-        Key::TokPar(_) | Key::Toks(_) | Key::Mark(..) => Val::Toks(Arc::new(Vec::new())),
+        Key::TokPar(_) | Key::Toks(_) | Key::Mark(..) | Key::InterChar(..) => Val::Toks(Arc::new(Vec::new())),
         // (`\fontdimen`: the null font's, tex.web 552; a loaded font's are
         // defined by its `\font`)
         Key::DimenPar(p) => Val::Int(p.initial()),
@@ -687,15 +687,17 @@ pub fn initial_in(key: &Key, _font: &Arc<Font>, etex: bool, xetex: bool, cs: Opt
         Key::FontIdent(_) | Key::LastFont => Val::Name(Arc::from("nullfont")),
         Key::Job => Val::Name(Arc::from("texput")),
         Key::SplitMarks => Val::SplitMarks(Arc::from(Vec::new())),
-        Key::Format => Val::Name(Arc::from("")),
+        Key::Format | Key::LinebreakLocale => Val::Name(Arc::from("")),
         // (the job not ended; no magnification fixed yet; batch mode, as the oracles run TeX:
         // `-interaction=batchmode`; a build gives its own,
         // `Build::set_interaction`: IniTeX's `error_stop_mode` is 3)
-        Key::Ended | Key::MagSet | Key::Interaction => Val::Int(0),
+        Key::Ended
+        | Key::MagSet
+        | Key::Interaction
+        | Key::NativeDir(_)
+        | Key::InputEncoding
+        | Key::DefaultEncoding => Val::Int(0),
         Key::MainDepth => Val::Int(crate::page::IGNORE_DEPTH),
-        Key::InterChar(..) => Val::Toks(Arc::new(Vec::new())),
-        Key::NativeDir(_) | Key::InputEncoding | Key::DefaultEncoding => Val::Int(0),
-        Key::LinebreakLocale => Val::Name(Arc::from("")),
         Key::ETeXMode => Val::Int(i32::from(etex)),
         Key::Patterns(_) => Val::Patterns(crate::hyph::Patterns::new()),
         Key::Exceptions(_) => Val::Exceptions(crate::hyph::Exceptions::new()),

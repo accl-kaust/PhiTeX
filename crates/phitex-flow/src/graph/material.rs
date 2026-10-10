@@ -878,7 +878,7 @@ impl Exec<'_> {
         if self.xetex {
             let f = self.font();
             if f.native.is_some() {
-                self.main_loop_native(f, c, cat, backed);
+                self.main_loop_native(&f, c, cat, backed);
                 return;
             }
         }

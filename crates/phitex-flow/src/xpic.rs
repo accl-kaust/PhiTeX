@@ -249,9 +249,11 @@ pub fn pdf_page_count(data: &Arc<[u8]>) -> i32 {
     Doc::open(data).ok().map_or(0, |doc| pp_page_count(&doc))
 }
 
-/// libpng's header and `pHYs` as `png_scan_file` reads them: width,
-/// height, and the pixels per unit with the unit.
-fn png_info(d: &[u8]) -> Option<(u32, u32, Option<(u32, u32, u8)>)> {
+/// A PNG's width, height, and `pHYs`'s pixels per unit with the unit.
+type PngInfo = (u32, u32, Option<(u32, u32, u8)>);
+
+/// libpng's header and `pHYs` as `png_scan_file` reads them.
+fn png_info(d: &[u8]) -> Option<PngInfo> {
     let be = |p: usize| -> Option<u32> { Some(u32::from_be_bytes(d.get(p..p + 4)?.try_into().ok()?)) };
     if d.get(12..16)? != b"IHDR" {
         return None;
@@ -633,15 +635,10 @@ fn bmp_scan_file(d: &[u8]) -> Option<(i32, i32, f64, f64)> {
         // ("Unknown BMP header type.": C exits)
         return None;
     }
-    let num_palette = if bit_count < 24 {
-        if !matches!(bit_count, 1 | 4 | 8) {
-            return None;
-        }
-        (offset - hsize - DIB_FILE_HEADER_SIZE) / psize
-    } else if bit_count == 24 {
-        1
-    } else {
-        return None;
+    let num_palette = match bit_count.cmp(&24) {
+        std::cmp::Ordering::Less if matches!(bit_count, 1 | 4 | 8) => (offset - hsize - DIB_FILE_HEADER_SIZE) / psize,
+        std::cmp::Ordering::Equal => 1,
+        _ => return None,
     };
     if width == 0 || height == 0 || num_palette < 1 {
         return None;
