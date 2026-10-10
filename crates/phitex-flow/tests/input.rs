@@ -302,3 +302,32 @@ fn a_revoked_sequence_change_lets_the_pieces_after_it_run() {
         }
     }
 }
+
+/// A file read at twenty places: each place is a round that places
+/// something new (the rest of its line), so the rounds go on until all are
+/// read; the build never falls back to the last round that may not lay the
+/// sequence out again.
+#[test]
+fn a_file_read_at_twenty_places_needs_no_fallback_round() {
+    let mut main = String::from(
+        "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6 \\font\\tenrm=cmr10 \\tenrm \\tolerance=200 \\linepenalty=10\n\
+         \\parindent=20pt \\baselineskip=12pt \\topskip=10pt \\maxdepth=4pt \\parfillskip=0pt plus 1fil\n\
+         \\hsize=300pt \\vsize=200pt\n\n",
+    );
+    for k in 0..20 {
+        let _ = write!(main, "\\input f \n\nParagraph {k}.\n\n");
+    }
+    main.push_str("\\end\n");
+    let files = vec![("f.tex", String::from("\\message{F}From the file.\n\n"))];
+    let base = build_with(&files).update(&main, Options::default());
+    assert!(base.errors.is_empty(), "{:?}", base.errors);
+    assert!(!base.stats.forced_last, "the last round was the fallback: {} rounds", base.stats.rounds);
+    let log = phitex_flow::print::log("", &base.log, "");
+    assert_eq!(log.matches("(./f.tex").count(), 20, "{log}");
+    for threads in [2, 8] {
+        let o = build_with(&files).update(&main, Options { threads, ..Options::default() });
+        assert!(o.errors.is_empty(), "{threads}: {:?}", o.errors);
+        assert!(!o.stats.forced_last, "{threads}: the fallback round");
+        assert!(o.dvi == base.dvi, "{threads}: another DVI");
+    }
+}
