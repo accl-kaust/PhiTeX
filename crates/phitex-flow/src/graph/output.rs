@@ -276,6 +276,7 @@ pub fn run_routine(entry: &RState, env: &mut dyn Env) -> Run {
         ran,
         fonts: fonts.into_iter().map(|(_, f)| f).collect(),
         abandoned: false,
+        lean: None,
     }
 }
 

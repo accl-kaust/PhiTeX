@@ -142,9 +142,9 @@ pub enum Check {
     Exceeded(u64),
 }
 
-/// The words of material a node holds as TeX's memory would (an item,
-/// a box's items, a token list's tokens; one for the node): the measure of
-/// [`MAIN_MEMORY`].
+/// The words of material a node makes as TeX's memory would hold them (an
+/// item, a box's items; and one for the node, which the run holds while it
+/// runs): the measure of [`MAIN_MEMORY`].
 pub fn words_of(n: &Node) -> u64 {
     let items = |v: &[crate::item::Item]| -> u64 {
         v.iter()
@@ -154,24 +154,25 @@ pub fn words_of(n: &Node) -> u64 {
             })
             .sum()
     };
-    let defs: u64 = n
+    // (material, and boxes defined: what a loop that runs away piles up;
+    // macros and token lists TeX frees when they are defined again)
+    let boxes: u64 = n
         .defs()
         .iter()
         .map(|d| match &d.val {
             Val::Box(b) => 1 + b.list.len() as u64,
-            Val::Toks(t) => 1 + t.len() as u64,
-            Val::Meaning(Meaning::Macro(m)) => 1 + m.body.len() as u64,
-            _ => 1,
+            _ => 0,
         })
         .sum();
-    1 + items(&n.emit) + items(n.vemit()) + defs
+    1 + items(&n.emit) + items(n.vemit()) + boxes
 }
 
-/// The tokens of input pending in `st` (tex.web 120 counts them in the
-/// memory too).
+/// The input pending in `st`, as words (tex.web 120 counts it in the
+/// memory too): the lists waiting, and the top list's tokens left (the
+/// lists below are shared from node to node: counted once each).
 pub fn pending_words(st: &RState) -> u64 {
-    st.pending.levels().map(|l| l.end.saturating_sub(l.at) as u64).sum::<u64>()
-        + st.pending.top.as_ref().and_then(|l| Some(l.args.as_ref()?[l.sub?.0].end.saturating_sub(l.sub?.1) as u64)).unwrap_or(0)
+    let top = st.pending.top.as_ref().map_or(0, |l| l.end.saturating_sub(l.at));
+    st.pending.len() as u64 + top as u64
 }
 
 /// The fatal error of a run past TeX's main memory.
@@ -1462,16 +1463,171 @@ pub struct Run {
     pub fonts: Vec<Arc<str>>,
     /// The run was abandoned ([`Check::Abandon`]): not a result.
     pub abandoned: bool,
+    /// A settled piece's run without its nodes ([`Run::leaned`]): `chain`
+    /// is then empty.
+    pub lean: Option<Arc<Lean>>,
+}
+
+/// What a settled piece keeps of its run once its nodes are dropped (CORE.md,
+/// lean pieces): enough for its readers (the run's `reads` and `exports`
+/// stay), the page builder (where its paragraphs are, the definitions
+/// reaching each node), the log (its part but for its lines), the pieces
+/// entered from it and the next run of it (which runs every node again
+/// from the text). The dump and the join's page events run it again,
+/// reading only.
+#[derive(Debug)]
+pub struct Lean {
+    /// How many nodes it had.
+    len: u32,
+    para_at: Vec<u32>,
+    /// Every definition, by name then node: the name, the node, the first
+    /// node it no longer reaches (its group's close + 1; `u32::MAX`: the
+    /// end), the value.
+    defs: Vec<(Key, u32, u32, Val)>,
+    out: RState,
+    input: Option<Arc<FileText>>,
+    /// Its reads from before the piece (`Run::reads`) without their values
+    /// (its edges are the build's), but for the names the build answers
+    /// itself (files, the job, the lines before it), whose values are
+    /// compared at the next build.
+    reads: Vec<(Key, u32)>,
+    given: Vec<(Key, u32, Val)>,
+    /// Its part of the log, but for its paragraphs' lines.
+    pub plan: Arc<crate::logs::Plan>,
 }
 
 impl Run {
+    /// The run without its nodes, for a settled piece whose text is
+    /// `text` ([`Lean`]).
+    #[must_use]
+    pub fn leaned(&self, text: &[char]) -> Run {
+        let c = &self.chain;
+        let mut defs: Vec<(Key, u32, u32, Val)> = Vec::new();
+        for (key, ds) in &c.defs_of {
+            let mut last = None;
+            for &d in ds {
+                if last == Some(d) {
+                    continue;
+                }
+                last = Some(d);
+                let n = &c.nodes[d as usize];
+                let Some(def) = n.defs().iter().rev().find(|x| x.key == *key) else { continue };
+                // (`Chain::resolve`: a local definition reaches up to its
+                // group's close, that node included)
+                let until = if def.global {
+                    u32::MAX
+                } else {
+                    c.def_group(n, def).and_then(|g| c.close_of.get(&g).map(|&x| x + 1)).unwrap_or(u32::MAX)
+                };
+                defs.push((key.clone(), d, until, def.val.clone()));
+            }
+        }
+        defs.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        defs.shrink_to_fit();
+        let lean = Lean {
+            len: c.nodes.len() as u32,
+            para_at: c.para_at.clone(),
+            defs,
+            out: self.out(),
+            input: self.input().cloned(),
+            reads: self.reads.iter().map(|(k, i, _)| (k.clone(), *i)).collect(),
+            given: self
+                .reads
+                .iter()
+                .filter(|(k, _, _)| matches!(k, Key::File(_) | Key::Job | Key::LineBase))
+                .cloned()
+                .collect(),
+            plan: Arc::new(crate::logs::plan(text, self)),
+        };
+        Run {
+            chain: Chain { entry: c.entry.clone(), ..Chain::default() },
+            reads: Vec::new(),
+            exports: self.exports.clone(),
+            paras: self.paras.clone(),
+            errors: self.errors.clone(),
+            ran: self.ran,
+            fonts: self.fonts.clone(),
+            abandoned: false,
+            lean: Some(Arc::new(lean)),
+        }
+    }
+
+    /// How many reads from before the piece it has (`reads`, kept by a
+    /// lean run without their values).
+    pub fn read_count(&self) -> usize {
+        self.lean.as_ref().map_or(self.reads.len(), |l| l.reads.len())
+    }
+
+    /// Its `i`-th read from before the piece: the name and its first
+    /// reader.
+    pub fn read_at(&self, i: usize) -> (&Key, u32) {
+        match &self.lean {
+            Some(l) => (&l.reads[i].0, l.reads[i].1),
+            None => (&self.reads[i].0, self.reads[i].1),
+        }
+    }
+
+    /// The values it read `key` with (of a lean run: only for the names
+    /// the build answers itself).
+    pub fn values_read(&self, key: &Key) -> &[(Key, u32, Val)] {
+        let v = self.lean.as_ref().map_or(&self.reads[..], |l| &l.given[..]);
+        let a = v.partition_point(|x| x.0 < *key);
+        let b = a + v[a..].partition_point(|x| x.0 == *key);
+        &v[a..b]
+    }
+
+    /// How many nodes it has (had, if lean).
+    pub fn nodes_len(&self) -> usize {
+        self.lean.as_ref().map_or(self.chain.nodes.len(), |l| l.len as usize)
+    }
+
+    /// The nodes with a paragraph, in order (`paras` is theirs).
+    pub fn para_nodes(&self) -> &[u32] {
+        self.lean.as_ref().map_or(self.chain.para_nodes(), |l| &l.para_at)
+    }
+
+    /// The definition of `key` its node `i` reads from the piece (`i` the
+    /// node count: what reaches the piece's end), and the node making it.
+    pub fn resolve(&self, key: &Key, i: usize) -> Option<(u32, Val)> {
+        match &self.lean {
+            None => self.chain.resolve(key, i),
+            Some(l) => {
+                let a = l.defs.partition_point(|x| x.0 < *key);
+                let b = a + l.defs[a..].partition_point(|x| x.0 == *key);
+                l.defs[a..b]
+                    .iter()
+                    .rev()
+                    .find(|(_, d, until, _)| (*d as usize) < i && i < *until as usize)
+                    .map(|(_, d, _, v)| (*d, v.clone()))
+            }
+        }
+    }
+
+    /// Whether a node after node `i` may read `key` (from the piece or
+    /// from before it): of a lean run, whether the piece reads it from
+    /// before it or defines it at all.
+    pub fn reads_after(&self, key: &Key, i: u32) -> bool {
+        match &self.lean {
+            None => (i as usize + 1..self.chain.nodes.len()).any(|j| self.chain.nodes[j].reads.iter().any(|r| r.key == *key)),
+            Some(l) => {
+                l.reads.binary_search_by(|x| x.0.cmp(key)).is_ok() || l.defs.binary_search_by(|x| x.0.cmp(key)).is_ok()
+            }
+        }
+    }
+
     /// The state its last node left (the piece's end, or its `\input`).
     pub fn out(&self) -> RState {
-        self.chain.input(self.chain.nodes.len())
+        match &self.lean {
+            Some(l) => l.out.clone(),
+            None => self.chain.input(self.chain.nodes.len()),
+        }
     }
 
     /// The file its last node, an `\input`, read.
     pub fn input(&self) -> Option<&Arc<FileText>> {
+        if let Some(l) = &self.lean {
+            return l.input.as_ref();
+        }
         let n = self.chain.nodes.len();
         if n == 0 {
             return None;
@@ -1756,6 +1912,8 @@ pub fn run_piece(
     dirty: &[Key],
     entry: Option<&RState>,
 ) -> Run {
+    // (a lean run has no nodes to keep: every node runs again)
+    let old = old.filter(|(r, _)| r.lean.is_none());
     let mut outside: Outside = FxMap::default();
     let mut chain = Chain::default();
     let entry: Option<Arc<RState>> = entry
@@ -2117,6 +2275,7 @@ pub fn run_piece(
         ran,
         fonts,
         abandoned,
+        lean: None,
     }
 }
 
@@ -2755,8 +2914,9 @@ impl<'a> Exec<'a> {
         self.step();
     }
 
-    /// One input rewrite (a macro call, [`Exec::rewrite`]): counted, the
-    /// environment asked now and then.
+    /// A step of the input (a rewrite, a macro's body read): now and then
+    /// the environment says whether the run goes on ([`Env::check`]); if
+    /// not, the input ends here.
     fn step(&mut self) {
         self.steps += 1;
         if self.steps.is_multiple_of(1 << 12) && self.stop.is_none() {

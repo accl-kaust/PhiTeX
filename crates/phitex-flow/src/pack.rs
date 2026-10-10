@@ -177,6 +177,8 @@ pub fn hpack(mut list: Vec<Item>, spec: Spec, params: &Params, adjust: Option<&m
         Spec::Exactly(w) => w,
         Spec::Additional(s) => x + s,
     };
+    // (a box is kept long: no spare capacity)
+    list.shrink_to_fit();
     let mut b = BoxNode { vertical: false, w, h, d, shift: 0, list, glue: GlueSet::default() };
     let (badness, report) = set_glue(&mut b, w - x, &t, params, true);
     Packed { b, badness, report }
