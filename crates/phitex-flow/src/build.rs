@@ -156,6 +156,9 @@ pub struct Stats {
     pub rounds: usize,
     /// Each round's wall time.
     pub round_walls: Vec<Duration>,
+    /// The last round was the one that may not lay the sequence out again
+    /// (the rounds stopped placing anything new: `MAX_STALLED_ROUNDS`).
+    pub forced_last: bool,
     /// Output routines run, and kept from the last build.
     pub routines: usize,
     pub routines_kept: usize,
@@ -323,6 +326,23 @@ impl Expect {
         }
     }
 
+    /// What differs from `o` (measuring, `PHITEX_SCHED`): bits 1 a file
+    /// read, 2 a join, 4 a re-cut, 8 `\endinput`, 16 the job's end, 32 where
+    /// it stops.
+    fn differs(&self, o: &Expect) -> u32 {
+        let input = match (&self.input, &o.input) {
+            (Some(a), Some(b)) => !(Arc::ptr_eq(a, b) || **a == **b),
+            (None, None) => false,
+            _ => true,
+        };
+        u32::from(input)
+            | u32::from(self.join != o.join) << 1
+            | u32::from(self.cut != o.cut) << 2
+            | u32::from(self.endinput != o.endinput) << 3
+            | u32::from(self.ends != o.ends) << 4
+            | u32::from(self.stop != o.stop) << 5
+    }
+
     fn same(&self, o: &Expect) -> bool {
         self.stop == o.stop
             && self.endinput == o.endinput
@@ -442,9 +462,52 @@ fn count_lines(t: &[char]) -> usize {
     t.iter().filter(|&&c| c == '\r').count()
 }
 
-/// The edges: name -> reader piece -> (its first node reading the name
+/// A name's readers: reader piece -> (its first node reading the name
 /// from before the piece, the piece whose definition it read).
-type Readers = FxMap<Key, Edges>;
+type ReadersOf = Edges;
+
+/// The edges, name -> its readers, in shards by name (`Names::route`, as
+/// the names index): a run's edges go in before the scheduler's lock is
+/// taken (`run_and_install`), each shard locked once per run; under the
+/// lock, `reached` and the edge moves lock the shard of each name they
+/// look at. Between rounds the build alone holds it (`get_mut`, no
+/// locking).
+struct Readers(Vec<Mutex<FxMap<Key, ReadersOf>>>);
+
+impl Default for Readers {
+    fn default() -> Self {
+        Readers((0..SHARDS).map(|_| Mutex::default()).collect())
+    }
+}
+
+impl Readers {
+    /// The shard holding `key`'s readers, locked.
+    fn shard(&self, key: &Key) -> MutexGuard<'_, FxMap<Key, ReadersOf>> {
+        self.0[Names::route(key).0].lock().expect("readers")
+    }
+
+    /// `key`'s readers, the build alone holding the index.
+    fn get_mut(&mut self, key: &Key) -> Option<&mut ReadersOf> {
+        self.0[Names::route(key).0].get_mut().expect("readers").get_mut(key)
+    }
+
+    /// Every name and its readers, the build alone holding the index.
+    fn iter_mut(&mut self) -> impl Iterator<Item = (&Key, &mut ReadersOf)> {
+        self.0.iter_mut().flat_map(|m| m.get_mut().expect("readers").iter_mut())
+    }
+
+    /// Piece `id`'s edge for `key` is now `e`.
+    fn insert(map: &mut FxMap<Key, ReadersOf>, key: &Key, id: PieceId, e: (u32, PieceId)) {
+        if let Some(m) = map.get_mut(key) {
+            m.insert(id, e);
+        } else {
+            let mut m = Edges::default();
+            m.insert(id, e);
+            map.insert(key.clone(), m);
+        }
+    }
+}
+
 
 /// A name's edges: per reading piece (by id, in order), its first reader
 /// node and the piece whose definition it read. Pieces are installed
@@ -534,6 +597,13 @@ pub struct Build {
     /// that a page kept from the last build keeps what it wrote.
     call_logs: CallLogs,
     next_id: PieceId,
+    /// Measuring (`PHITEX_SCHED`): each piece's installed runs' reading
+    /// time (ns) and nodes run, summed, by piece id.
+    run_times: FxMap<PieceId, (u64, u64)>,
+    /// Measuring: for each piece's last installed run, what read each name
+    /// from before it (the reading node's kind and command, the read's
+    /// field, whether it is a φ's read from before its `\if`).
+    read_cmds: FxMap<PieceId, Vec<String>>,
     readers: Readers,
     /// The source the pieces were cut from, and the byte offset of each
     /// piece's first line in it.
@@ -1085,6 +1155,19 @@ impl Names {
         }))
     }
 
+    /// Whether file `name` is read as the directories or the build give it:
+    /// no fold of this build has a value for it (a file the run writes and
+    /// reads back) and no earlier round's probes guessed its bytes.
+    fn file_as_given(&self, name: &str) -> bool {
+        !self.file_guess.read().expect("file guesses").contains_key(name)
+            && !self
+                .fold_vals
+                .read()
+                .expect("fold values")
+                .keys()
+                .any(|(_, _, k)| matches!(k, Key::File(n) if **n == *name))
+    }
+
     /// What a read of `key` at `at` is validated against, and the
     /// definition the names index has there: a fold's read (`Key::Page`,
     /// `Key::File`) only ever against the fold's value at that node,
@@ -1292,7 +1375,6 @@ struct State {
     /// Pieces before this one cannot change any more in this build: the
     /// page scan reads them.
     settled: usize,
-    readers: Readers,
     break_queue: VecDeque<(usize, usize, Arc<Para>)>,
     scan: Option<Box<Scan>>,
     scan_next: usize,
@@ -1349,6 +1431,12 @@ struct State {
     /// again with all they say (the runs in progress are not stopped for
     /// it, and the pieces after it keep runs that still hold).
     restructure_due: bool,
+    /// The first settled run that changes the sequence while not final (a
+    /// fold read unchecked, or its entry not holding): no piece after it
+    /// starts, and the runs after it stopped, until it is final (the round
+    /// ends: `pick`) or a run of it says nothing new (cleared at every
+    /// install of it, set again by `settle` if it still differs).
+    due_at: Option<usize>,
     inflight: usize,
     /// The page builder's definitions installed this build (by piece id
     /// and node), the last build's not yet made again (by place), and its
@@ -1407,9 +1495,29 @@ struct Shared {
     opts: Options,
     /// The last build's routine runs, by their page's first box.
     memo_old: FxMap<usize, Vec<Arc<Memo>>>,
+    /// The edges (`Readers`): outside the scheduler's lock.
+    readers: Readers,
+    /// `PHITEX_SCHED`: the scheduler's events, for measuring (none: off).
+    sched: Option<Mutex<Vec<Ev>>>,
+    /// Measuring: `Build::run_times`, this round's installs added.
+    run_times: Mutex<FxMap<PieceId, (u64, u64)>>,
+    /// Measuring: `Build::read_cmds`, likewise.
+    read_cmds: Mutex<FxMap<PieceId, Vec<String>>>,
+    /// Measuring: the nodes that took longer than `SLOW_NODE`, as `N`
+    /// lines for the round's events.
+    notes: Mutex<Vec<String>>,
+    /// When the round began (the events' times count from it).
+    t_base: Instant,
+    /// Measuring: the time threads waited for the scheduler's lock, and how
+    /// many times it was taken.
+    lock_wait: AtomicU64,
+    lock_n: AtomicU64,
     /// A run may change the sequence (not in a round that must be the
     /// last).
     restructure_ok: bool,
+    /// A settled run that changes the sequence ends the round at once
+    /// (`settle`): not in a round after one that placed nothing new.
+    at_once: bool,
     /// Settled pieces drop their nodes; which update this is.
     lean: bool,
     build_no: u64,
@@ -1474,7 +1582,9 @@ impl Build {
             marks: Vec::new(),
             call_logs: Vec::new(),
             next_id: 0,
-            readers: FxMap::default(),
+            readers: Readers::default(),
+            run_times: FxMap::default(),
+            read_cmds: FxMap::default(),
             fold_vals: FxMap::default(),
             file_guess: FxMap::default(),
             places: FxMap::default(),
@@ -2061,18 +2171,29 @@ impl Build {
         // whose material made them, whatever a round lays out)
         self.page_runs = Some(self.pieces.iter().map(|o| o.run.clone()).collect());
         let mut rounds = 0;
+        // (measuring: `PHITEX_ROUND_CAP` moves the bound on all rounds)
+        let cap = std::env::var("PHITEX_ROUND_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(MAX_ROUNDS);
+        // (what the rounds of this update placed, and the rounds in a row
+        // that placed nothing new: a round laying the sequence out again
+        // with only what an earlier one placed is no progress)
+        let mut placed: FxSet<(u8, u64, u64)> = FxSet::default();
+        self.progress(&mut placed);
+        let mut stalled = 0;
         loop {
             rounds += 1;
             let t_round = Instant::now();
-            if let Some(mut out) = self.round(&texts, opts, t0, time_cut, rounds > MAX_ROUNDS) {
+            let last = rounds > cap || stalled >= MAX_STALLED_ROUNDS;
+            if let Some(mut out) = self.round(&texts, opts, t0, time_cut, last, stalled == 0) {
                 let mut carried = std::mem::take(&mut self.carried);
                 carried.round_walls.push(t_round.elapsed());
                 out.stats.absorb(carried);
                 out.stats.rounds = rounds;
+                out.stats.forced_last = last;
                 out.stats.wall = t0.elapsed();
                 return out;
             }
             self.carried.round_walls.push(t_round.elapsed());
+            stalled = if self.progress(&mut placed) { 0 } else { stalled + 1 };
             // (a run changed the sequence: evaluated again, its runs kept;
             // the pages to compare with are the last build's)
             self.pages.clone_from(&saved.0);
@@ -2080,6 +2201,33 @@ impl Build {
             self.marks.clone_from(&saved.2);
             self.call_logs.clone_from(&saved.3);
         }
+    }
+
+    /// Adds what the layout has placed — each file's pieces where it is
+    /// read, the rests of lines, the re-cuts, the joins, the pieces whose
+    /// `\input`s are read inline — to `placed`; whether anything was new.
+    /// Each element only ever enters once, so rounds with progress are
+    /// bounded by what the documents hold.
+    fn progress(&self, placed: &mut FxSet<(u8, u64, u64)>) -> bool {
+        let before = placed.len();
+        // (a file by its name and pieces: the same file read again at
+        // another place is not counted again)
+        for (name, cuts) in self.file_cuts.values() {
+            placed.insert((0, crate::hash::hash_of(&**name), cuts.len() as u64));
+        }
+        for k in self.rests.keys() {
+            placed.insert((1, k.0 as u64, k.1 as u64));
+        }
+        for k in self.recuts.keys() {
+            placed.insert((2, k.0 as u64, k.1 as u64));
+        }
+        for (k, v) in &self.joins {
+            placed.insert((3, *k as u64, v.len() as u64));
+        }
+        for t in &self.inline {
+            placed.insert((4, Arc::as_ptr(t).cast::<char>() as usize as u64, t.len() as u64));
+        }
+        placed.len() > before
     }
 
     /// Piece `k`'s material as the page builder is fed it
@@ -2206,7 +2354,6 @@ impl Build {
                     }
                 })
                 .collect();
-        self.readers = st.readers;
         self.carried.absorb(st.stats);
     }
 
@@ -2220,6 +2367,7 @@ impl Build {
         t0: Instant,
         time_cut: Duration,
         last: bool,
+        at_once: bool,
     ) -> Option<Output> {
         let threads = opts.threads.max(1);
         let t_setup = Instant::now();
@@ -2445,8 +2593,8 @@ impl Build {
         let mut marks: Vec<(usize, Key)> = Vec::new();
         let mut moves: Vec<(usize, Key, PieceId)> = Vec::new();
         for key in &touched {
-            let Some(m) = readers.get(key) else { continue };
-            for (&rid, &(node, src)) in m {
+            let Some(m) = readers.get_mut(key) else { continue };
+            for (&rid, &(node, src)) in &*m {
                 let Some(rpos) = seq.pos_of(rid) else {
                     continue;
                 };
@@ -2466,12 +2614,12 @@ impl Build {
             }
         }
         for (r, key, src) in moves {
-            move_edge(&mut readers, &mut p[r], &key, src);
+            move_edge(&readers, &mut p[r], &key, src);
         }
         // (the names the build answers itself — a file's bytes, the job's
         // name, the lines before a piece — read with a value they no longer
         // have: their readers are marked)
-        for (key, m) in &readers {
+        for (key, m) in readers.iter_mut() {
             if !matches!(key, Key::File(_) | Key::Job | Key::LineBase) {
                 continue;
             }
@@ -2535,7 +2683,6 @@ impl Build {
             unstarted,
             running: BTreeSet::new(),
             settled: 0,
-            readers,
             break_queue: VecDeque::new(),
             scan: Some(Box::default()),
             scan_next: 0,
@@ -2585,6 +2732,7 @@ impl Build {
             deps,
             restructure: false,
             restructure_due: false,
+            due_at: None,
             inflight: 0,
             fold_defs: Vec::new(),
             predicted,
@@ -2638,9 +2786,18 @@ impl Build {
             fonts: self.fonts.clone(),
             opts,
             restructure_ok: !last,
+            at_once,
             lean: self.lean,
             build_no: self.builds,
             memo_old,
+            readers,
+            sched: std::env::var_os("PHITEX_SCHED").map(|_| Mutex::new(Vec::new())),
+            run_times: Mutex::new(std::mem::take(&mut self.run_times)),
+            read_cmds: Mutex::new(std::mem::take(&mut self.read_cmds)),
+            notes: Mutex::new(Vec::new()),
+            t_base: Instant::now(),
+            lock_wait: AtomicU64::new(0),
+            lock_n: AtomicU64::new(0),
         };
         std::thread::scope(|s| {
             if let Some(secs) = std::env::var("PHITEX_HANG_DUMP").ok().and_then(|v| v.parse::<u64>().ok()) {
@@ -2678,6 +2835,17 @@ impl Build {
         self.virt = virt.ids;
         self.next_id = self.next_id.max(virt.next);
         let mut st = sh.state.into_inner().expect("state");
+        self.readers = sh.readers;
+        self.run_times = sh.run_times.into_inner().expect("run times");
+        self.read_cmds = sh.read_cmds.into_inner().expect("read commands");
+        if let Some(ev) = &sh.sched {
+            let waits = (sh.lock_wait.load(Ordering::Relaxed), sh.lock_n.load(Ordering::Relaxed));
+            write_sched(&ev.lock().expect("sched"), &st, threads, sh.build_no, sh.t_base.elapsed(), waits);
+            write_notes(&sh.notes.lock().expect("notes"));
+            if !st.restructure && std::env::var_os("PHITEX_SCHED_DEPS").is_some_and(|v| !v.is_empty()) {
+                write_deps(&st, &sh.seq, &sh.names, &sh.font, &self.run_times, &self.read_cmds);
+            }
+        }
         // (a stalled scheduler is a bug of the core: the build fails with
         // the pieces' states, it does not hang)
         if let Some(d) = st.stalled.take() {
@@ -2945,9 +3113,8 @@ impl Build {
                     }
                 })
                 .collect();
-        self.readers = st.readers;
         // (the edges are kept until the next build: no spare capacity)
-        for m in self.readers.values_mut() {
+        for (_, m) in self.readers.iter_mut() {
             m.shrink_to_fit();
         }
         self.pages = st.pages.into_iter().zip(bodies).collect();
@@ -3263,19 +3430,226 @@ fn dump_piece(out: &mut String, k: usize, ps: &PState, r: &Run, cs: &CsTable) {
     }
 }
 
+/// One scheduler event, recorded when `PHITEX_SCHED` names a file
+/// (measurement only: times and counts, written at the round's end).
+#[derive(Clone, Copy)]
+struct Ev {
+    /// The worker; the kind: 0 a piece's run (`run_and_install`), 5 idle
+    /// (waiting for work), 6 parked (a read waiting for a definition), 7 a
+    /// pick, 8 a settled run that changes the sequence (`c`: what differs,
+    /// `Expect::differs`; `a`: 1 a join, which ends the round at once), 9 an
+    /// install's steps under the lock (`t`: the lock taken, the reads
+    /// validated again, the edges, the exports, the marks, the entries;
+    /// `a`: the reads), 16 + the task's kind a worker's task (16 run, 17 line
+    /// breaking, 18 the scan, 19 shipping, 20 the log); the piece.
+    wid: u16,
+    kind: u8,
+    k: u32,
+    /// Nanoseconds since the round began. A run: begun, reading begun (its
+    /// setup's lock taken), reading done, the install's lock taken, the
+    /// install done, the install's lock asked for. A task: begun, done, the
+    /// scheduler's lock taken again. Idle, parked, a pick: begun, done.
+    t: [u64; 6],
+    /// A run: the nodes it ran, the nodes it holds, its outcome (0 settled,
+    /// 1 stale: to run again, 2 abandoned, 3 kept again without running). A
+    /// pick: the pieces ready to start (at most 255), the tasks in
+    /// progress, the runs parked; and 1 if it found a task.
+    a: u64,
+    b: u64,
+    c: u32,
+    /// A run: its reads of names from before it, and their time.
+    d: u64,
+    e: u64,
+}
+
+impl Shared {
+    /// Nanoseconds since the round began (0 when not measuring).
+    fn now(&self) -> u64 {
+        if self.sched.is_some() {
+            u64::try_from(self.t_base.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        } else {
+            0
+        }
+    }
+
+    fn ev(&self, e: Ev) {
+        if let Some(s) = &self.sched {
+            s.lock().expect("sched").push(e);
+        }
+    }
+}
+
+/// The pieces ready to start now (at most 255): what a pick chooses from.
+fn ready_count(g: &State, sh: &Shared) -> u64 {
+    let speculate = sh.opts.reads == Reads::Speculate;
+    g.unstarted.iter().filter(|&&k| entry_ready(g, k, speculate && !g.p[k].suspend)).take(255).count() as u64
+}
+
+/// Appends the slow nodes' notes to the file `PHITEX_SCHED` names.
+fn write_notes(notes: &[String]) {
+    use std::io::Write as _;
+    let Some(path) = std::env::var_os("PHITEX_SCHED") else { return };
+    if notes.is_empty() {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        for n in notes {
+            let _ = writeln!(f, "{n}");
+        }
+    }
+}
+
+/// Appends the last round's dependencies to the file `PHITEX_SCHED`
+/// names (measuring: the critical path with hindsight): per piece a line
+/// `G k entry-deps ran nodes ns ran` (the pieces its entry state came
+/// from, when it is not the state assumed at its cut; the reading time and
+/// nodes run of all its installed runs) and per read from before it a
+/// line `D k piece inner name init` (the piece whose definition answered
+/// it; `inner` 1: a definition between that piece's nodes, the page
+/// builder's or an output routine's; `init` 1: the value read is the one
+/// before any definition).
+fn write_deps(
+    st: &State,
+    seq: &Sequence,
+    names: &Names,
+    font: &Arc<Font>,
+    times: &FxMap<PieceId, (u64, u64)>,
+    cmds: &FxMap<PieceId, Vec<String>>,
+) {
+    use std::io::Write as _;
+    let cs = &names.cs;
+    let Some(path) = std::env::var_os("PHITEX_SCHED") else { return };
+    let mut s = String::new();
+    for (k, ps) in st.p.iter().enumerate() {
+        let Some(run) = &ps.run else { continue };
+        let entry: Vec<usize> = match ps.entry {
+            Entry::Start => Vec::new(),
+            Entry::File(c) => vec![c],
+            Entry::Rest(c, l) => std::iter::once(c).chain(l).collect(),
+            Entry::After(q, c) => {
+                if assumed_entry(&st.p, c).is_some_and(|a| run.entry() == a) {
+                    Vec::new()
+                } else {
+                    vec![q]
+                }
+            }
+        };
+        let e: Vec<String> = entry.iter().map(ToString::to_string).collect();
+        let (ns, ran) = times.get(&ps.id).copied().unwrap_or((0, 0));
+        let _ = writeln!(s, "G\t{k}\t{}\t{}\t{}\t{ns}\t{ran}", e.join(","), run.ran, run.nodes_len());
+        for i in 0..run.read_count() {
+            let Some(&src) = ps.srcs.get(i) else { continue };
+            let Some(pos) = seq.pos_of(src) else { continue };
+            let key = run.read_at(i).0;
+            let name = match key {
+                Key::Cs(n) => format!("\\{}", cs.name(*n)),
+                _ => format!("{key:?}"),
+            };
+            // (whether every value it read is the name's value before any
+            // definition, the format's or IniTeX's: what a cold build's
+            // prediction of no earlier write gets right)
+            let init = names.initial(key, font);
+            let vals = run.values_read(key);
+            let same = vals.iter().all(|x| x.2.seen_as(&init));
+            // (the value's content, and the one before any definition, as
+            // hashes of their text: a reader of a value depends only on the
+            // first piece that left the name at it)
+            let vh = vals.first().map_or(0, |x| crate::hash::hash_of(&format!("{:?}", x.2)));
+            let ih = crate::hash::hash_of(&format!("{init:?}"));
+            let _ = writeln!(
+                s,
+                "D\t{k}\t{}\t{}\t{}\t{}\t{vh}\t{ih}\t{}",
+                pos.0,
+                u8::from(pos.1 != END),
+                name.replace(['\t', '\n'], " "),
+                u8::from(same),
+                cmds.get(&ps.id).and_then(|v| v.get(i)).map_or("", String::as_str).replace(['\t', '\n'], " ")
+            );
+        }
+        for (key, val) in &run.exports {
+            let name = match key {
+                Key::Cs(n) => format!("\\{}", cs.name(*n)),
+                _ => format!("{key:?}"),
+            };
+            let _ = writeln!(s, "X\t{k}\t{}\t{}", name.replace(['\t', '\n'], " "), crate::hash::hash_of(&format!("{val:?}")));
+        }
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(s.as_bytes());
+    }
+}
+
+/// Appends a round's events to the file `PHITEX_SCHED` names, as text: a
+/// line for the round, one per piece (its runs, the nodes and text of its
+/// last run) and one per event (`Ev`'s fields in order).
+fn write_sched(ev: &[Ev], st: &State, threads: usize, build_no: u64, wall: Duration, waits: (u64, u64)) {
+    use std::io::Write as _;
+    let Some(path) = std::env::var_os("PHITEX_SCHED") else { return };
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "R\t{build_no}\t{threads}\t{}\t{}\t{}\t{}\t{}\t{}",
+        st.p.len(),
+        wall.as_nanos(),
+        ev.len(),
+        waits.0,
+        waits.1,
+        st.stats.time_setup.as_nanos()
+    );
+    for (k, ps) in st.p.iter().enumerate() {
+        let nodes = ps.run.as_ref().map_or(0, |r| r.nodes_len());
+        let _ = writeln!(s, "P\t{k}\t{}\t{nodes}\t{}", ps.runs, ps.text.len());
+    }
+    for e in ev {
+        let _ = writeln!(
+            s,
+            "E\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            e.wid, e.kind, e.k, e.t[0], e.t[1], e.t[2], e.t[3], e.t[4], e.a, e.b, e.c, e.t[5], e.d, e.e
+        );
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(s.as_bytes());
+    }
+}
+
 fn lock(sh: &Shared) -> MutexGuard<'_, State> {
-    sh.state.lock().expect("state")
+    if sh.sched.is_none() {
+        return sh.state.lock().expect("state");
+    }
+    let t = sh.now();
+    let g = sh.state.lock().expect("state");
+    sh.lock_wait.fetch_add(sh.now() - t, Ordering::Relaxed);
+    sh.lock_n.fetch_add(1, Ordering::Relaxed);
+    g
 }
 
 fn worker(sh: &Shared, id: usize) {
     let mut g = lock(sh);
     // (the parked runs' generation when this idle worker last looked)
     let mut stall_seen: Option<u64> = None;
+    let wid = u16::try_from(id).unwrap_or(u16::MAX);
     loop {
         if g.done {
             return;
         }
-        let Some(task) = pick(&mut g, sh) else {
+        let tp = sh.now();
+        let ready = if sh.sched.is_some() { ready_count(&g, sh) } else { 0 };
+        let picked = pick(&mut g, sh);
+        if sh.sched.is_some() {
+            let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
+            sh.ev(Ev {
+                wid,
+                kind: 7,
+                k: 0,
+                t: [tp, sh.now(), 0, 0, 0, 0],
+                a: ready,
+                b: g.inflight as u64,
+                c: u32::try_from(parked).unwrap_or(u32::MAX) << 1 | u32::from(picked.is_some()),
+                d: 0,
+                e: 0,
+            });
+        }
+        let Some(task) = picked else {
             if finished(&g) {
                 g.done = true;
                 sh.cv.notify_all();
@@ -3290,8 +3664,10 @@ fn worker(sh: &Shared, id: usize) {
                 stall(&mut g, sh, parked, "the scheduler stalled");
                 return;
             }
+            let ti = sh.now();
             let (g2, timeout) = sh.cv.wait_timeout(g, STALL_CHECK).expect("state");
             g = g2;
+            sh.ev(Ev { wid, kind: 5, k: 0, t: [ti, sh.now(), 0, 0, 0, 0], a: 0, b: 0, c: 0, d: 0, e: 0 });
             stall_seen = (timeout.timed_out() && g.inflight > 0).then_some(gen_now);
             continue;
         };
@@ -3299,10 +3675,27 @@ fn worker(sh: &Shared, id: usize) {
         g.stats.tasks[id] += 1;
         g.inflight += 1;
         drop(g);
+        let (tk, tto) = match &task {
+            Task::Run(k, _) | Task::Break(k, ..) | Task::Ship(k, ..) | Task::Log(k, ..) => (*k, 0),
+            Task::Scan { from, to, .. } => (*from, *to as u64),
+        };
+        let t0 = sh.now();
         let t = Instant::now();
-        let (work, kind) = execute(sh, task);
+        let (work, kind) = execute(sh, task, wid);
         let dt = t.elapsed();
+        let t1 = sh.now();
         g = lock(sh);
+        sh.ev(Ev {
+            wid,
+            kind: 16 + kind,
+            k: u32::try_from(tk).unwrap_or(u32::MAX),
+            t: [t0, t1, sh.now(), 0, 0, 0],
+            a: work,
+            b: tto,
+            c: 0,
+            d: 0,
+            e: 0,
+        });
         g.inflight -= 1;
         if g.restructure && g.inflight == 0 {
             sh.cv.notify_all();
@@ -3329,9 +3722,15 @@ fn outside_ranges(names: &Names, key: &Key, k: usize, node: u32, font: &Arc<Font
     v.join(", ")
 }
 
-/// How many rounds a build lays its sequence out before its last, which
-/// may not lay it out again.
-const MAX_ROUNDS: usize = 64;
+/// How many rounds in a row a build may lay its sequence out without
+/// progress (`Build::progress`: nothing placed that no round of this
+/// build had placed) before its last, which may not lay it out again.
+const MAX_STALLED_ROUNDS: usize = 8;
+
+/// The rounds a build lays its sequence out at most, progress or not,
+/// before its last (a bound past any document's files: each round with
+/// progress places at least one new file, join, cut or inline mark).
+const MAX_ROUNDS: usize = 4096;
 
 /// How many times a piece may run in one round before the build fails as
 /// a livelock ([`stall`]).
@@ -3360,10 +3759,11 @@ fn stall(g: &mut State, sh: &Shared, parked: usize, why: &str) {
 /// settled.
 fn state_dump(g: &State, sh: &Shared, parked: usize, why: &str) -> String {
     let mut d = format!(
-        "{why}: {} running ({parked} parked), settled {}/{}, scan at {} (free {}, done {}), {} to ship, {} logs queued ({} running), {} breaks queued;",
+        "{why}: {} running ({parked} parked), settled {}/{}, due at {:?}, scan at {} (free {}, done {}), {} to ship, {} logs queued ({} running), {} breaks queued;",
         g.inflight,
         g.settled,
         g.p.len(),
+        g.due_at,
         g.scan_next,
         g.scan.is_some(),
         g.scan_done,
@@ -3565,11 +3965,15 @@ fn changed_names(old: Option<&Run>, new: &Run) -> Vec<Key> {
 /// definer reaching it now.
 fn reached(g: &mut State, sh: &Shared, m: Pos, keys: &[Key]) -> Vec<(usize, Key)> {
     let mut out = Vec::new();
-    let mut moves: Vec<(usize, Key, PieceId)> = Vec::new();
     for key in keys {
-        let Some(rm) = g.readers.get(key) else {
+        // (the shard stays locked while its readers are looked at and their
+        // edges moved: a run putting its edges in waits; see
+        // `run_and_install`)
+        let mut shard = sh.readers.shard(key);
+        let Some(rm) = shard.get(key) else {
             continue;
         };
+        let mut moves: Vec<(usize, PieceId)> = Vec::new();
         for (&rid, &(node, src)) in rm {
             let Some(rpos) = sh.seq.pos_of(rid) else {
                 continue;
@@ -3594,15 +3998,15 @@ fn reached(g: &mut State, sh: &Shared, m: Pos, keys: &[Key]) -> Vec<(usize, Key)
                 let (def, ..) = sh.names.reaching(key, (rpos.0, node), &sh.font);
                 let def_id = def.map_or(INITIAL, |d| sh.seq.id_at(d));
                 if def_id != src {
-                    moves.push((r, key.clone(), def_id));
+                    moves.push((r, def_id));
                 }
                 continue;
             }
             out.push((r, key.clone()));
         }
-    }
-    for (r, key, src) in moves {
-        move_edge(&mut g.readers, &mut g.p[r], &key, src);
+        for (r, src) in moves {
+            move_edge_in(&mut shard, &mut g.p[r], key, src);
+        }
     }
     out
 }
@@ -3643,7 +4047,7 @@ fn still_dirty(g: &mut State, sh: &Shared, k: usize) -> Vec<(Key, u32)> {
         let node = run.values_read(&key)[0].1;
         let (def, ..) = sh.names.reaching(&key, (k as u32, node), &sh.font);
         let src = def.map_or(INITIAL, |d| sh.seq.id_at(d));
-        move_edge(&mut g.readers, &mut g.p[k], &key, src);
+        move_edge(&sh.readers, &mut g.p[k], &key, src);
     }
     g.p[k].recheck = any && out.is_empty();
     out
@@ -3663,6 +4067,9 @@ fn keep_again(g: &mut State, sh: &Shared, k: usize) -> bool {
     g.running.remove(&k);
     g.p[k].status = Status::Done;
     g.p[k].entered = None;
+    if g.due_at == Some(k) {
+        g.due_at = None;
+    }
     // (its paragraphs whose breaks a restructure or a rerun since the
     // round began left without lines go to the queue: the scan waits for
     // every line, and nothing else queues them for a kept run)
@@ -3682,8 +4089,13 @@ fn keep_again(g: &mut State, sh: &Shared, k: usize) -> bool {
 }
 
 /// Piece `ps`'s edge for `key` comes from `src` now (its reads unchanged).
-fn move_edge(readers: &mut Readers, ps: &mut PState, key: &Key, src: PieceId) {
-    if let Some(e) = readers.get_mut(key).and_then(|m| m.get_mut(ps.id)) {
+fn move_edge(readers: &Readers, ps: &mut PState, key: &Key, src: PieceId) {
+    move_edge_in(&mut readers.shard(key), ps, key, src);
+}
+
+/// [`move_edge`], `key`'s shard locked already.
+fn move_edge_in(shard: &mut FxMap<Key, ReadersOf>, ps: &mut PState, key: &Key, src: PieceId) {
+    if let Some(e) = shard.get_mut(key).and_then(|m| m.get_mut(ps.id)) {
         e.1 = src;
     }
     if let Some(i) = ps.run.as_ref().and_then(|r| r.first_read(key))
@@ -4042,12 +4454,17 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
         if !sh.restructure_ok && g.p[k].got.join && !g.p[k].got.same(&g.p[k].expect) {
             let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
             let why = format!(
-                "the sequence of pieces did not settle in {MAX_ROUNDS} rounds: piece {k}'s run reads on into the next piece's text (a group or command open at its end), and the last round may not join them"
+                "the sequence of pieces did not settle ({MAX_STALLED_ROUNDS} rounds in a row placed nothing new, or {MAX_ROUNDS} in all): piece {k}'s run reads on into the next piece's text (a group or command open at its end), and the last round may not join them"
             );
             stall(g, sh, parked, &why);
             return true;
         }
         if sh.restructure_ok && !g.p[k].got.same(&g.p[k].expect) {
+            if sh.sched.is_some() {
+                let t = sh.now();
+                let why = g.p[k].got.differs(&g.p[k].expect);
+                sh.ev(Ev { wid: 0, kind: 8, k: k as u32, t: [t, t, 0, 0, 0, 0], a: u64::from(g.p[k].got.join), b: 0, c: why, d: 0, e: 0 });
+            }
             // (a settled run reading on into the next text: the pieces
             // after it begin in the middle of a command, they wait for the
             // sequence laid out again — the runs in progress finish and are
@@ -4059,6 +4476,40 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
                 restructure_now(g, sh);
                 return true;
             }
+            // (a run reading a file, ending its file or stopping where the
+            // layout did not say, final — no fold read unchecked, entered as
+            // its piece is: nothing can mark it again and give back its old
+            // `got` —: the pieces after it are laid out again, and none runs
+            // on the old layout, where the names the file defines are not
+            // defined yet (biglatex: the body ran 1.35 s before its class
+            // was read, all of it thrown away). The runs in progress after
+            // it stop; what they finished is kept as at any round's end.)
+            // (after a round that placed nothing new, the round runs to its
+            // end as before: what tells the layout the rest may come from
+            // the pieces after this one — TRIP's `\input tripos` reads a file
+            // the run itself writes at a shipout; ended at once, every round
+            // repeated the same change and never laid it out)
+            // (and only when the change's cause is known now: a file read as
+            // it is in the directories or given, not one this build writes —
+            // a fold value or a guess from an earlier round's probes says
+            // it does —, or an `\endinput`, a stop, a cut)
+            let cause_known = g.p[k].got.input.as_ref().is_none_or(|f| sh.names.file_as_given(&f.name));
+            if !sh.at_once || !cause_known {
+                g.restructure_due = true;
+                g.settled += 1;
+                continue;
+            }
+            for &q in &g.running {
+                if q > k {
+                    sh.cancel[q].store(true, Ordering::Relaxed);
+                }
+            }
+            if change_final(g, k) {
+                restructure_now(g, sh);
+                return true;
+            }
+            // (not final: the pieces after it wait, `due_at`)
+            g.due_at = Some(g.due_at.map_or(k, |d| d.min(k)));
             g.restructure_due = true;
         }
         g.settled += 1;
@@ -4074,6 +4525,18 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
     false
 }
 
+/// Whether piece `k`'s settled run changes the sequence and nothing can
+/// give back its old `got`: done, unmarked, no fold read unchecked, entered
+/// as its piece is.
+fn change_final(g: &State, k: usize) -> bool {
+    let ps = &g.p[k];
+    ps.status == Status::Done
+        && ps.dirty.is_empty()
+        && !ps.fold_unchecked
+        && !ps.got.same(&ps.expect)
+        && ps.run.as_ref().is_some_and(|r| entry_holds(g, k, r))
+}
+
 /// The scheduler: a function of the state, choosing this thread's next
 /// piece of work.
 fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
@@ -4082,6 +4545,13 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
     }
     let n = g.p.len();
     if settle(g, sh) {
+        return None;
+    }
+    // (a change waiting to be final, now final: the round ends)
+    if let Some(d) = g.due_at
+        && change_final(g, d)
+    {
+        restructure_now(g, sh);
         return None;
     }
     if g.matching {
@@ -4106,10 +4576,12 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
     let scan_finish = g.scan_next == n && g.settled == n && !g.scan_done;
     let scan_ok = g.scan.is_some() && (scan_to > g.scan_next || scan_finish);
     let speculate = sh.opts.reads == Reads::Speculate;
+    let due = g.due_at.unwrap_or(usize::MAX);
     let ready = g
         .unstarted
         .iter()
         .copied()
+        .take_while(|&k| k <= due)
         .find(|&k| entry_ready(g, k, speculate && !g.p[k].suspend));
     let run_ok = ready.is_some();
     // (priority: pages out first, then the scan, the reading, line breaking)
@@ -4141,7 +4613,7 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
                 Order::Random(_) => {
                     let i = rand(g, g.unstarted.len());
                     let k = *g.unstarted.iter().nth(i).expect("an unstarted piece");
-                    if entry_ready(g, k, speculate) {
+                    if k <= due && entry_ready(g, k, speculate) {
                         k
                     } else {
                         first
@@ -4228,9 +4700,9 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
 
 /// Does a task (outside the scheduler's lock) and installs its result.
 /// Returns the work done and its kind.
-fn execute(sh: &Shared, task: Task) -> (u64, u8) {
+fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
     match task {
-        Task::Run(k, dirty) => (run_and_install(sh, k, &dirty), 0),
+        Task::Run(k, dirty) => (run_and_install(sh, k, &dirty, wid), 0),
         Task::Break(k, j, para) => {
             let lines = Arc::new(break_lines(&para));
             let mut g = lock(sh);
@@ -4499,13 +4971,17 @@ fn execute(sh: &Shared, task: Task) -> (u64, u8) {
 /// nodes and installs the run: its exports into the names index, its
 /// reads as edges, the readers its changed definitions reach marked; its
 /// own reads validated against the index as it is now.
-fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
-    let (text, old, entry, strict, entry_assumed) = {
+fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64 {
+    let tb = sh.now();
+    let k32 = u32::try_from(k).unwrap_or(u32::MAX);
+    let (text, old, entry, strict, entry_assumed, old_srcs) = {
         let mut g = lock(sh);
         // (kept again only if no mark came since it was picked: a mark
         // made while it was Running is in its dirty names, not its status)
         if std::mem::take(&mut g.p[k].recheck) && dirty.is_empty() && g.p[k].dirty.is_empty() && keep_again(&mut g, sh, k) {
             drop(g);
+            let t = sh.now();
+            sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, t, t, t, t, t], a: 0, b: 0, c: 3, d: 0, e: 0 });
             notify(sh, true);
             return 0;
         }
@@ -4520,12 +4996,21 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
             (None, Some((r, _, t))) => Some((r.clone(), t.clone())),
             (None, None) => None,
         };
-        (ps.text.clone(), old, ps.entered.clone(), ps.suspend, entry_assumed)
+        // (the old run's edges' sources: nobody moves a running piece's
+        // edges — `reached` moves a settled piece's, `still_dirty` one's
+        // about to run)
+        (ps.text.clone(), old, ps.entered.clone(), ps.suspend, entry_assumed, ps.srcs.clone())
     };
     sh.cancel[k].store(false, Ordering::Relaxed);
+    let tr = sh.now();
     let mut env = PieceEnv {
         sh,
         k,
+        wid,
+        idx: (0, 0),
+        last_check: sh.now(),
+        node_ran: 0,
+        slow: Vec::new(),
         spec: sh.opts.reads == Reads::Speculate && !strict,
         strict,
         predicted: Vec::new(),
@@ -4541,10 +5026,14 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
         dirty,
         entry.as_ref(),
     ));
+    let te = sh.now();
     if run.abandoned {
         // (not a result: the piece runs again, from its last run, its
         // dirty names still dirty)
+        let ta = sh.now();
         let mut g = lock(sh);
+        let t = sh.now();
+        sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, tr, te, t, t, ta], a: run.ran, b: run.nodes_len() as u64, c: 2, d: env.idx.0, e: env.idx.1 });
         g.stats.abandoned += 1;
         g.stats.commands_run += run.ran;
         g.p[k].suspend |= env.gave_up;
@@ -4613,66 +5102,103 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
     } else {
         FxSet::default()
     };
+    // (from here on the run is installed: no return before the lock below,
+    // or the old run's edges taken out here would be lost while it stays)
+    // (the edges, before the scheduler's lock: the new run's, each with the
+    // piece whose definition answers it now, replace the old run's. In this
+    // order — `seen` taken, the reads validated, the edges in, then the
+    // lock — no mark is lost: an install changing one of these names under
+    // the lock either finds the edge (it went in before that install
+    // looked), or made its change after `seen` (the reads of that name are
+    // validated again under the lock below), or before it (then the read
+    // above already saw the new value). Each shard is locked once.)
+    let id = sh.seq.piece(k);
+    let mut srcs: Vec<PieceId> = checks.iter().map(|&(def, _)| def.map_or(INITIAL, |d| sh.seq.id_at(d))).collect();
+    // (whether read `i` holds its name's edge: its first reader; the page
+    // builder's quantities have none, the scan validates each read)
+    let holds_edge = |i: usize| {
+        let key = &run.reads[i].0;
+        !((i > 0 && run.reads[i - 1].0 == *key) || matches!(key, Key::Page(_)))
+    };
+    {
+        let mut ins: Vec<(usize, usize)> = (0..run.reads.len())
+            .filter(|&i| holds_edge(i))
+            .filter(|&i| {
+                !(same_keys
+                    && old_srcs.get(i) == Some(&srcs[i])
+                    && old_run.as_ref().is_some_and(|o| o.read_at(i).1 == run.reads[i].1))
+            })
+            .map(|i| (Names::route(&run.reads[i].0).0, i))
+            .collect();
+        ins.sort_unstable();
+        let mut gone: Vec<(usize, &Key)> = Vec::new();
+        if let Some(o) = old_run.as_ref().filter(|_| !same_keys) {
+            for i in 0..o.read_count() {
+                let key = o.read_at(i).0;
+                if !read_keys.contains(key) {
+                    gone.push((Names::route(key).0, key));
+                }
+            }
+        }
+        gone.sort_unstable_by_key(|x| x.0);
+        let (mut a, mut b) = (0, 0);
+        while a < ins.len() || b < gone.len() {
+            let sh_i = ins.get(a).map_or(usize::MAX, |x| x.0).min(gone.get(b).map_or(usize::MAX, |x| x.0));
+            let mut m = sh.readers.0[sh_i].lock().expect("readers");
+            while let Some(&(_, i)) = ins.get(a).filter(|x| x.0 == sh_i) {
+                let (key, node, _) = &run.reads[i];
+                Readers::insert(&mut m, key, id, (*node, srcs[i]));
+                a += 1;
+            }
+            while let Some(&(_, key)) = gone.get(b).filter(|x| x.0 == sh_i) {
+                if let Some(r) = m.get_mut(key) {
+                    r.remove(id);
+                }
+                b += 1;
+            }
+        }
+    }
+    let outcome;
+    let tl;
+    let ta = sh.now();
     {
         let mut g = lock(sh);
+        tl = sh.now();
         let held = Instant::now();
         g.stats.commands_run += run.ran;
-        let id = sh.seq.piece(k);
-        // (names changed since the reads were validated: those reads again;
-        // the index changes only under this lock)
+        // (names changed since the reads were validated: those reads again,
+        // and an edge whose source moved follows it; the index changes only
+        // under this lock)
         let now_gen = sh.names_gen.load(Ordering::Acquire);
         if now_gen != seen {
             let since: FxSet<&Key> = g.names_log[seen..now_gen].iter().flatten().collect();
-            for ((key, node, val), c) in run.reads.iter().zip(&mut checks) {
+            for (i, ((key, node, val), c)) in run.reads.iter().zip(&mut checks).enumerate() {
                 if since.contains(key) {
                     let (def, now) = sh.names.read_now(key, (k as u32, *node), &sh.font);
                     *c = (def, val.seen_as(&now));
+                    let src = def.map_or(INITIAL, |d| sh.seq.id_at(d));
+                    if src != srcs[i] {
+                        srcs[i] = src;
+                        if holds_edge(i) {
+                            Readers::insert(&mut sh.readers.shard(key), key, id, (*node, src));
+                        }
+                    }
                 }
             }
         }
         // (the edges: the new run's, each with the piece whose definition
         // answers it now, replace the old run's; a read answered otherwise
         // than it was is stale)
+        let tp1 = sh.now();
+        // (a read answered otherwise than it was is stale)
         let mut stale = Dirty::new();
-        let old_srcs = std::mem::take(&mut g.p[k].srcs);
-        let mut srcs = Vec::with_capacity(run.reads.len());
-        for (i, ((key, node, _), &(def, same))) in run.reads.iter().zip(&checks).enumerate() {
+        for ((key, _, _), &(_, same)) in run.reads.iter().zip(&checks) {
             if !same {
                 dirty_from(&mut stale, key.clone(), 0);
             }
-            let src = def.map_or(INITIAL, |d| sh.seq.id_at(d));
-            srcs.push(src);
-            // (one edge per name: its first reader; a second entry for the
-            // name, read with another value, follows it; the page builder's
-            // quantities have none: the scan validates each read)
-            if (i > 0 && run.reads[i - 1].0 == *key) || matches!(key, Key::Page(_)) {
-                continue;
-            }
-            if same_keys
-                && old_srcs.get(i) == Some(&src)
-                && old_run.as_ref().is_some_and(|o| o.read_at(i).1 == *node)
-            {
-                continue;
-            }
-            if let Some(m) = g.readers.get_mut(key) {
-                m.insert(id, (*node, src));
-            } else {
-                let mut m = Edges::default();
-                m.insert(id, (*node, src));
-                g.readers.insert(key.clone(), m);
-            }
         }
         g.p[k].srcs = srcs;
-        if let Some(o) = old_run.as_ref().filter(|_| !same_keys) {
-            for i in 0..o.read_count() {
-                let key = o.read_at(i).0;
-                if !read_keys.contains(key)
-                    && let Some(m) = g.readers.get_mut(key)
-                {
-                    m.remove(id);
-                }
-            }
-        }
+        let tp2 = sh.now();
         let mut changed = changed;
         for key in &changed {
             refresh_export(&sh.names, &sh.font, k, &run, key);
@@ -4760,6 +5286,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
             let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
             stall(&mut g, sh, parked, &why);
         }
+        let tp3 = sh.now();
         g.running.remove(&k);
         let marks = reached(&mut g, sh, (k as u32, END), &changed);
         for (r, key) in marks {
@@ -4773,6 +5300,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
                 sh.cancel[r].store(true, Ordering::Relaxed);
             }
         }
+        let tp4 = sh.now();
         queue_breaks(&mut g, k, &equal);
         // (a run reading on past its text: the piece after it begins in
         // the middle of a command, its run in progress is not a result)
@@ -4781,6 +5309,12 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
         }
         // (entered in the state its predecessors leave now, or run again)
         let entered = entry_holds(&g, k, &run);
+        // (a change waiting at this piece: its new run says again, or not,
+        // when it settles)
+        if g.due_at == Some(k) {
+            g.due_at = None;
+        }
+        outcome = u32::from(!(stale.is_empty() && entered));
         if stale.is_empty() && entered {
             g.p[k].lean_later = lean.map(|l| (run.clone(), l));
             if hot {
@@ -4819,10 +5353,71 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
                 }
             }
         }
+        let tp5 = sh.now();
+        sh.ev(Ev { wid, kind: 9, k: k32, t: [tl, tp1, tp2, tp3, tp4, tp5], a: run.reads.len() as u64, b: 0, c: 0, d: 0, e: 0 });
         // (the frontier moves now: every thread may be waiting in a run)
         settle(&mut g, sh);
         g.stats.time_confirm += t.elapsed();
         g.stats.time_held += held.elapsed();
+    }
+    sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, tr, te, tl, sh.now(), ta], a: run.ran, b: run.nodes_len() as u64, c: outcome, d: env.idx.0, e: env.idx.1 });
+    if sh.sched.is_some() && te - tr > SLOW_NODE && !env.slow.is_empty() {
+        let first = run.nodes_len().saturating_sub(usize::try_from(run.ran).unwrap_or(usize::MAX));
+        let mut notes = sh.notes.lock().expect("notes");
+        for &(ran, ns) in &env.slow {
+            let i = (first + usize::try_from(ran).unwrap_or(0)).saturating_sub(1).min(run.nodes_len().saturating_sub(1));
+            if run.chain.nodes.is_empty() {
+                break;
+            }
+            let n = &run.chain.nodes[i];
+            let what: Vec<String> = n
+                .reads
+                .iter()
+                .filter(|r| matches!(r.key, Key::File(_) | Key::FontLoaded(_) | Key::Font | Key::ReadStream(_)))
+                .map(|r| format!("{:?}", r.key))
+                .collect();
+            notes.push(format!(
+                "N\t{k}\t{ns}\t{i}\t{:?} {}\t{}",
+                n.kind,
+                crate::val::Shown(&n.cmd, &sh.names.cs),
+                what.join(" ").replace(['\t', '\n'], " ")
+            ));
+        }
+    }
+    if sh.sched.is_some() {
+        let mut m = sh.run_times.lock().expect("run times");
+        let e = m.entry(sh.seq.piece(k)).or_insert((0, 0));
+        e.0 += te - tr;
+        e.1 += run.ran;
+        drop(m);
+    }
+    if sh.sched.is_some() && std::env::var_os("PHITEX_SCHED_DEPS").is_some_and(|v| !v.is_empty()) {
+        // (what read each name from before the piece: its first reader)
+        let v: Vec<String> = run
+            .reads
+            .iter()
+            .map(|(key, node, _)| {
+                if *node as usize >= run.chain.nodes.len() {
+                    return String::new();
+                }
+                let n = &run.chain.nodes[*node as usize];
+                let r = n.reads.iter().find(|r| r.key == *key);
+                // (the nearest node before it defining the name in this
+                // piece, whatever its scope, looked for 5000 nodes back)
+                let lo = (*node as usize).saturating_sub(5000);
+                let def = (lo..*node as usize).rev().find(|&j| run.chain.nodes[j].defs().iter().any(|d| d.key == *key));
+                format!(
+                    "{:?} {} {:?}{} @{} def@{}",
+                    n.kind,
+                    crate::val::Shown(&n.cmd, &sh.names.cs),
+                    r.map(|r| r.field),
+                    if r.is_some_and(|r| r.cond.is_some()) { " phi" } else { "" },
+                    node,
+                    def.map_or_else(|| "-".to_string(), |j| j.to_string())
+                )
+            })
+            .collect();
+        sh.read_cmds.lock().expect("read commands").insert(sh.seq.piece(k), v);
     }
     {
         let _p = sh.park.lock().expect("park");
@@ -4841,6 +5436,16 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)]) -> u64 {
 struct PieceEnv<'a> {
     sh: &'a Shared,
     k: usize,
+    /// The worker running it (for `PHITEX_SCHED`'s events).
+    wid: u16,
+    /// Measuring: reads of names from before the piece, and the time they
+    /// took (parks included).
+    idx: (u64, u64),
+    /// Measuring: when `check` last ran, and the nodes that took longer
+    /// than `SLOW_NODE` (the nodes run before them, the time).
+    last_check: u64,
+    node_ran: u64,
+    slow: Vec<(u64, u64)>,
     /// Reads run on predictions (`Reads::Speculate`, and not a piece whose
     /// speculation was given up).
     spec: bool,
@@ -4863,6 +5468,10 @@ struct PieceEnv<'a> {
     /// value read.
     seen: FxMap<Key, Vec<(u32, Val)>>,
 }
+
+/// Measuring: a run reading longer than this (ns) has its five slowest
+/// nodes noted with their commands (`PHITEX_SCHED`'s `N` lines).
+const SLOW_NODE: u64 = 1_000_000_000;
 
 /// How many builds a piece that ran in an edit keeps its nodes for.
 pub const HOT_BUILDS: u64 = 8;
@@ -4952,12 +5561,14 @@ impl PieceEnv<'_> {
                     }
                 };
                 if let Some((e, dirty)) = leapfrog {
-                    run_and_install(sh, e, &dirty);
+                    run_and_install(sh, e, &dirty, self.wid);
                 } else {
                     if !wait(self) {
                         return (val, Src::Initial, lo, hi);
                     }
+                    let tp = sh.now();
                     park(sh, self.k, seen);
+                    sh.ev(Ev { wid: self.wid, kind: 6, k: self.k as u32, t: [tp, sh.now(), 0, 0, 0, 0], a: 0, b: 0, c: 0, d: 0, e: 0 });
                 }
                 continue;
             };
@@ -5007,12 +5618,14 @@ impl PieceEnv<'_> {
                 }
             };
             if let Some((e, dirty)) = leapfrog {
-                run_and_install(sh, e, &dirty);
+                run_and_install(sh, e, &dirty, self.wid);
             } else {
                 if !wait(self) {
                     return (val, Src::Initial, lo, hi);
                 }
+                let tp = sh.now();
                 park(sh, self.k, seen);
+                sh.ev(Ev { wid: self.wid, kind: 6, k: self.k as u32, t: [tp, sh.now(), 0, 0, 0, 0], a: 0, b: 0, c: 0, d: 0, e: 0 });
             }
         }
     }
@@ -5058,6 +5671,23 @@ impl Env for PieceEnv<'_> {
     }
 
     fn check(&mut self, ran: u64, words: u64) -> Check {
+        // (a node's end: `ran` counts the nodes; the checks every 4096
+        // steps inside a node count steps, and are not node ends)
+        if self.sh.sched.is_some() && (ran == self.node_ran + 1 || self.node_ran == 0) {
+            let now = self.sh.now();
+            let gap = now - self.last_check;
+            // (the five slowest nodes of the run)
+            if self.slow.len() < 5 || gap > self.slow.iter().map(|x| x.1).min().unwrap_or(0) {
+                if self.slow.len() == 5
+                    && let Some(i) = self.slow.iter().enumerate().min_by_key(|x| x.1.1).map(|x| x.0)
+                {
+                    self.slow.swap_remove(i);
+                }
+                self.slow.push((ran, gap));
+            }
+            self.last_check = now;
+            self.node_ran = ran;
+        }
         // (marked stale while it runs, or the sequence changes: it stops)
         if self.sh.cancel[self.k].load(Ordering::Relaxed) {
             return Check::Abandon;
@@ -5156,7 +5786,12 @@ impl Env for PieceEnv<'_> {
     }
 
     fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32) {
+        let t = self.sh.now();
         let r = self.reach_now(key, node);
+        if self.sh.sched.is_some() {
+            self.idx.0 += 1;
+            self.idx.1 += self.sh.now() - t;
+        }
         // (every read from before the piece, to see it while running if
         // its definition is made again)
         self.seen.entry(key.clone()).or_default().push((node, r.0.clone()));

@@ -2556,6 +2556,109 @@ by `Key` (`Key::cmp` 5.1% and the sort about 3.5%: a piece's reads and
 exports, once per run, over 171k names; 7 removes most of the reads'
 part), `tok_meaning` 2.2%.
 
+## Parallelism (agent S, 2026-10-10)
+
+Measured on accl (64 cores, 2 hardware threads each; a job's `-c N` is N
+hardware threads), release build, cold builds, `Reads::Suspend` (the
+CLI's cold build). `PHITEX_SCHED=FILE` writes the scheduler's events of
+every round (each run's setup, reading, install validation, lock wait and
+hold, nodes and outcome; parks; idle waits; picks with the pieces ready;
+the settled runs that change the sequence; every wait for the scheduler's
+lock); `perf-in/sched.py FILE` reports them per round.
+
+**Hardware first.** Measure pinned to physical cores
+(`perf-in/hw.sh`: `sched_setaffinity`, one hardware thread per core or
+two), with N independent `-j 1` processes side by side as the control
+(job 7919, harrier): eight big2 processes read 772 → 790 ms each, so the
+hardware alone costs nothing up to eight cores; unpinned on a busy node
+with siblings (job 7914) the same build's reading looked 3.7x dearer. A
+thread count above the physical cores buys nothing today: big2 at `-j 8`
+on 4 cores with their siblings takes 183 ms (round 1), on 8 cores 194 ms.
+The CLI's default thread count should be the physical cores, not the
+logical CPUs.
+
+**The first wall: the scheduler's lock (big2).** big2 (2401 pieces of 83
+commands), pinned, round 1: 758.6 / 429 / 227 / 194 ms at `-j` 1 / 2 / 4
+/ 8; the whole cold build 930-966 / 606 / 378 / 351 ms, the DVI the same
+at every `-j`. Reading summed over the threads grows only 649 → 839 ms;
+what grows is the one `Mutex<State>`: installs hold it 51.6 / 58.9 /
+60.7 / 115.7 ms in all (21 → 48 µs an install as its lines move between
+cores), at `-j 8` 60% of the round's wall, and threads wait for it 31.8%
+of their time (15% before an install, 16% taking it back after a task).
+Of the time held, the edges (`readers`, one insert per distinct name a
+run read: 382k reads, 2401 installs) are 87%: 45.9 of 52.7 ms at `-j 1`,
+91.6 of 109 ms at `-j 8` (job 7925); validation again 0.2, exports 3.2,
+marks 1.8, entries 1.6 ms at `-j 1`.
+
+**The edges out of the lock** (edaa404; A reviewed): the readers index
+is sharded by name (`Readers`, 64 shards), a run's edges go in after its
+reads are validated and before the scheduler's lock, each shard locked
+once (`run_and_install` states the order and why no mark is lost;
+`edges_outside_the_lock_lose_no_mark`). big2 pinned, before → after (job
+7935, three runs each, the DVI the same): `-j 8` cold 355-368 → 303-307
+ms, round 1 192-202 → 142-144 ms, waits for the lock 32-34% → 4.6-4.9%
+of the threads' time; `-j 2`, `-j 4` the same walls, waits 4.5 → 0.7%, 8
+→ 1.1%. Known cost to revisit: `-j 1` is 2.5-4% slower (923-930 → 946-968
+ms), the inserts sorted by shard and the shard locks.
+
+**LaTeX documents: rounds, the body's chain, per-page reruns** (job
+7930, pinned, `Reads::Suspend`; `perf-in/biglatex.tex` is sections.tex's
+body 40 times, 130 pieces). Walls `-j 1` / `-j 8`: sections 694 / 728
+ms, titlepage 833 / 910, biglatex 5659 / 3992; six rounds each. A round's
+barrier is cheap (layout 0.1-5.7 ms); what it lets run is not. biglatex
+by round (`-j 1` / `-j 8`, ms): R1 1360 / 1613: `\documentclass` (a file
+read) changed the sequence at 5.9 ms, but the round went on until every
+piece settled, so the body ran on the layout before its class was read
+and was thrown away (at `-j 8` serially too: parks 85%); R2 50 / 61 the
+class's pieces; R3 1513 / 1351 the body on the right layout (at `-j 8`
+parks 68%, 1.44 readers at once: each section defines names the next
+reads, counters and `\@currentlabel`, a chain under `Suspend`); R4 1888 /
+438 the output routine's definitions between nodes, every later piece
+run again once per page (piece 129: 23-26 runs, 23 pages); R5-R6 676 /
+479. Fix of R1's waste (A reviewed): a final settled run that changes
+the sequence ends the round at once (`settle`, b06939f); one that is not
+final yet (a fold read unchecked, its entry not holding) holds the pieces
+after it, their runs stopped (`State::due_at`, de0d20cd). Measured by P
+at `-j 1` (flow 67d83701 + these): tikz 58,619 → 2,487 ms (238k commands
+run for 226k, 905 runs, 2 reruns), c0 54,735 → 1,397 ms, the DVIs
+`latex`'s. Format builds no longer run a piece to 2.4M commands and 50
+GB on a layout about to change. What remains for tikz: 65 rounds, one per
+file it discovers (rounds 1-64 2-90 ms each), and the 65th, past the cap
+of 64, reads every further file inline (519 ms).
+Then (A reviewed): the cap counts rounds without progress (`Build::progress`:
+a file placed, a rest of a line, a re-cut, a join, an inline mark not
+placed by an earlier round of the update; 8 in a row, 4096 in all), and
+a change ends the round at once only when its cause is known now: a file
+read as the directories or the build give it, or an `\endinput`, a stop,
+a cut. A file the run itself writes (TRIP's `\input tripos`, written at
+a shipout) is known to the layout only from the round's fold replaying
+the writes; ended at once, every round repeated the same change (65
+rounds, and the capped last round gave another DVI). Now TRIP takes 10
+rounds (12 before). tikz still loops on a join the layout never absorbs
+(piece 2270, the same since flow 90113ce): 8 rounds placing nothing, then
+the last round's loud failure.
+The cap's commit (ede297fa, titled "(wip)" inside the merge c7277c4f)
+was meant to say: the round cap counts rounds without progress
+(`Build::progress`: a file placed, a rest of a line, a re-cut, a join,
+an inline mark no earlier round of the update placed; `MAX_STALLED_ROUNDS`
+8 in a row, `MAX_ROUNDS` 4096 in all; `Stats::forced_last`); test
+`a_file_read_at_twenty_places_needs_no_fallback_round`; tikz: 65 rounds
+then a silent inline last round before, 77 rounds then the loud join
+failure after. The harness is `bench/flow-par/` (its inputs big2.tex,
+tikz.tex and the pgf manual's sources are staged by hand, not committed).
+
+**`latex.ltx` is a true chain.** 31.2 s at `-j 1`, 31.1 s at `-j 8`
+(job 7914). Of its 19-20 rounds one holds 27.3 s, and in it one piece
+holds 96.2% of the commands (2.9M): expl3-code.tex's Unicode-data block
+(`\ior_str_map_inline`), read inside a macro's argument. Each iteration
+reads the next line of the stream (`Key::ReadStream`, defined again per
+line) and defines intarray entries the next ones read: a dependency
+chain, not a granularity problem: no cut, file piece or scheduler policy
+shortens it (AGENTS_BRIEF §6.5: the build is as long as its true chain).
+Amdahl's serial fraction from that round alone is at least 0.88. The
+format is built once and saved (`--dump-fmt`); documents start from it,
+so this is left as is.
+
 ## Found by the CLI (agent W)
 
 - **W1 (open, A): a LaTeX document in nonstop mode with no `.aux` never
