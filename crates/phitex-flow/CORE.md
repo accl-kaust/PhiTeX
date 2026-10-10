@@ -897,6 +897,14 @@ at that node (`Names::read_now`/`read_holds`, the one check install and
 `still_dirty` make; the names index answered it twice: 5e3ea81 at
 install, then `reads_still`, which dropped a refuted file read's mark).
 
+Invariant: a written file's content at a read is what the writes that
+reached it in this build's sequence wrote, kept pages included: the
+routines' call logs (their deferred `\write`s among them) are kept with
+the pages and marks (`Build::call_logs`), all of them when every page
+is kept, those before the scan's and after its convergence otherwise
+(B2 had let a LaTeX document keep its pages without them: run 2 of the
+fixpoint wrote the `.aux` without a kept page's `\@writefile`).
+
 - **The read** (`graph::Env::fold_read`, `Names::fold_value`): answered
   with the fold's value at `(piece, node)` as known — this build's,
   else the last build's (`Build::fold_vals`, by piece id and node),
