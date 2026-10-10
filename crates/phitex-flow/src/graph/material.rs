@@ -1503,7 +1503,7 @@ impl Exec<'_> {
         self.rewrite(after);
         let p = self.cs("\u{0}package");
         self.back(p);
-        self.kind = Kind::Close;
+        self.closes();
     }
 
     /// The box a group closed just before, from the items its nodes

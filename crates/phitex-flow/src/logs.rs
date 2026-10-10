@@ -416,14 +416,22 @@ pub fn page_places(frags: &[&Frag], marks: &[(u32, u32)], pages: usize, end: (us
     at
 }
 
+/// A file's name as `print_file_name` prints it (web2c: quoted if it
+/// holds a space, its quotes dropped).
+fn file_name(name: &str) -> String {
+    if name.contains(' ') { format!("\"{}\"", name.replace('"', "")) } else { name.to_string() }
+}
+
 /// The log's entries with the output streams' events done, in order
 /// (tex.web 1370, 1374): an `\openout` opens its file (the name with
-/// `.tex` if it has no extension; emptied) — web2c's `\openout j = `name'.`
-/// log line is off for `tex` (texmf.cnf `log_openout.tex = f`); a `\write` to an open stream is a line of its
+/// `.tex` if it has no extension; emptied) and, if `log_openout`, says so
+/// in the log: web2c's `\openout j = `name'.` line (tex.ch: `print_nl`, the
+/// line, `print_nl("")`, `print_ln`; texmf.cnf: on for `etex` and pdfTeX,
+/// `log_openout.tex = f`); a `\write` to an open stream is a line of its
 /// file, to any other a line of the log; `\closeout` closes. Returns the
 /// entries and the files written (name, contents), in the order they were
 /// first opened.
-pub fn replay(entries: Vec<String>) -> (Vec<String>, Vec<(String, String)>) {
+pub fn replay(entries: Vec<String>, log_openout: bool) -> (Vec<String>, Vec<(String, String)>) {
     use crate::show::{LN, NL, RAW};
     let mut files: Vec<(String, String)> = Vec::new();
     let mut open: [Option<usize>; 16] = [None; 16];
@@ -465,6 +473,12 @@ pub fn replay(entries: Vec<String>) -> (Vec<String>, Vec<(String, String)>) {
                             files.len() - 1
                         };
                         open[j] = Some(k);
+                        if log_openout {
+                            s.push(NL);
+                            let _ = write!(s, "\\openout{j} = `{}'.", file_name(&name));
+                            s.push(NL);
+                            s.push(LN);
+                        }
                     }
                 }
                 'c' => {

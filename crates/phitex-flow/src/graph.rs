@@ -103,6 +103,13 @@ pub trait Env {
         None
     }
 
+    /// Where the input file of this name was found, as TeX Live shows it
+    /// (`./name` in the current directory, else its path): a pure function
+    /// of the name during a build, read with the file (`Key::File`).
+    fn file_path(&mut self, name: &str) -> Arc<str> {
+        Arc::from(format!("./{name}"))
+    }
+
     /// The job's name (`\jobname`): what a read of `Key::Job` answers.
     fn jobname(&mut self) -> Arc<str> {
         Arc::from(expand::JOBNAME)
@@ -129,9 +136,9 @@ pub enum Check {
     Exceeded(u64),
 }
 
-/// The words of material a node holds as TeX's memory would (an item,
-/// a box's items, a token list's tokens; one for the node): the measure of
-/// [`MAIN_MEMORY`].
+/// The words of material a node makes as TeX's memory would hold them (an
+/// item, a box's items; and one for the node, which the run holds while it
+/// runs): the measure of [`MAIN_MEMORY`].
 pub fn words_of(n: &Node) -> u64 {
     let items = |v: &[crate::item::Item]| -> u64 {
         v.iter()
@@ -141,23 +148,25 @@ pub fn words_of(n: &Node) -> u64 {
             })
             .sum()
     };
-    let defs: u64 = n
+    // (material, and boxes defined: what a loop that runs away piles up;
+    // macros and token lists TeX frees when they are defined again)
+    let boxes: u64 = n
         .defs()
         .iter()
         .map(|d| match &d.val {
             Val::Box(b) => 1 + b.list.len() as u64,
-            Val::Toks(t) => 1 + t.len() as u64,
-            Val::Meaning(Meaning::Macro(m)) => 1 + m.body.len() as u64,
-            _ => 1,
+            _ => 0,
         })
         .sum();
-    1 + items(&n.emit) + items(n.vemit()) + defs
+    1 + items(&n.emit) + items(n.vemit()) + boxes
 }
 
-/// The tokens of input pending in `st` (tex.web 120 counts them in the
-/// memory too).
+/// The input pending in `st`, as words (tex.web 120 counts it in the
+/// memory too): the lists waiting, and the top list's tokens left (the
+/// lists below are shared from node to node: counted once each).
 pub fn pending_words(st: &RState) -> u64 {
-    st.pending.iter().map(|(l, i, _)| l.len().saturating_sub(*i) as u64).sum()
+    let top = st.pending.top.as_ref().map_or(0, |l| l.list.len().saturating_sub(l.at));
+    st.pending.len() as u64 + top as u64
 }
 
 /// The fatal error of a run past TeX's main memory.
@@ -340,6 +349,140 @@ impl<T: PartialEq> PartialEq for Stack<T> {
 
 impl<T: Eq> Eq for Stack<T> {}
 
+/// The token lists the input was rewritten with (innermost on top), each
+/// with how far it has been read and whether it was backed up. The top
+/// list is held in the state itself (reading a token changes only it);
+/// the ones below are a list of cells, each holding the ones below it,
+/// shared until changed: handing the state from a node to the next copies
+/// the top list's handles only, and a pop leaves the cells below shared.
+/// (A value: two are equal when their lists, positions and flags are.)
+#[derive(Clone, Default)]
+struct Pending {
+    top: Option<Level>,
+    below: Option<Arc<PCell>>,
+    /// The lists, the top one included.
+    depth: u32,
+}
+
+/// A macro body's arguments, by parameter number.
+type Args = Arc<[Arc<[Tok]>]>;
+
+/// One list of [`Pending`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Level {
+    list: Arc<[Tok]>,
+    /// A macro's body: its arguments, which its parameter tokens are read
+    /// as (each a list pushed above the body where it is met, tex.web 357's
+    /// `out_param`); the body itself is the macro's, shared.
+    args: Option<Args>,
+    at: usize,
+    backed: bool,
+}
+
+struct PCell {
+    level: Level,
+    below: Option<Arc<PCell>>,
+}
+
+impl Pending {
+    fn len(&self) -> usize {
+        self.depth as usize
+    }
+    fn push_level(&mut self, l: Level) {
+        if let Some(t) = self.top.take() {
+            let below = self.below.take();
+            self.below = Some(Arc::new(PCell { level: t, below }));
+        }
+        self.top = Some(l);
+        self.depth += 1;
+    }
+    fn push(&mut self, (list, at, backed): (Arc<[Tok]>, usize, bool)) {
+        self.push_level(Level { list, args: None, at, backed });
+    }
+    /// A macro's body, to be read with its arguments.
+    fn push_body(&mut self, list: Arc<[Tok]>, args: Args) {
+        self.push_level(Level { list, args: Some(args), at: 0, backed: false });
+    }
+    fn pop(&mut self) {
+        if self.top.take().is_none() {
+            return;
+        }
+        self.depth -= 1;
+        if let Some(c) = self.below.take() {
+            let (level, below) = match Arc::try_unwrap(c) {
+                Ok(PCell { level, below }) => (level, below),
+                Err(c) => (c.level.clone(), c.below.clone()),
+            };
+            self.top = Some(level);
+            self.below = below;
+        }
+    }
+    fn clear(&mut self) {
+        *self = Pending::default();
+    }
+    /// The top list, how far it has been read, whether it was backed up.
+    fn last(&self) -> Option<(&Arc<[Tok]>, usize, bool)> {
+        self.top.as_ref().map(|t| (&t.list, t.at, t.backed))
+    }
+    /// The top list and how far it has been read, to be advanced.
+    fn last_mut(&mut self) -> Option<(&Arc<[Tok]>, &mut usize)> {
+        self.top.as_mut().map(|t| (&t.list, &mut t.at))
+    }
+    /// The top list's next token, read (`None`: it has been read to its
+    /// end), and the top list's arguments if it is a macro's body.
+    fn next_tok(&mut self) -> Option<(Tok, Option<&Args>)> {
+        let t = self.top.as_mut()?;
+        let x = t.list.get(t.at)?.clone();
+        t.at += 1;
+        Some((x, t.args.as_ref()))
+    }
+    fn levels(&self) -> impl Iterator<Item = &Level> {
+        self.top.iter().chain(
+            std::iter::successors(self.below.as_deref(), |c| c.below.as_deref()).map(|c| &c.level),
+        )
+    }
+}
+
+impl Drop for Pending {
+    /// Cell by cell, not recursively (a deep input stack).
+    fn drop(&mut self) {
+        let mut next = self.below.take();
+        while let Some(c) = next {
+            next = match Arc::try_unwrap(c) {
+                Ok(mut c) => c.below.take(),
+                Err(_) => None,
+            };
+        }
+    }
+}
+
+impl PartialEq for Pending {
+    fn eq(&self, other: &Self) -> bool {
+        if self.depth != other.depth || self.top != other.top {
+            return false;
+        }
+        let (mut a, mut b) = (self.below.as_ref(), other.below.as_ref());
+        while let (Some(x), Some(y)) = (a, b) {
+            if Arc::ptr_eq(x, y) {
+                return true;
+            }
+            if x.level != y.level {
+                return false;
+            }
+            (a, b) = (x.below.as_ref(), y.below.as_ref());
+        }
+        true
+    }
+}
+
+impl Eq for Pending {}
+
+impl std::fmt::Debug for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.levels()).finish()
+    }
+}
+
 /// The value `RState::eol` holds before the line's end-of-line character
 /// has been read.
 const EOL_UNREAD: i16 = i16::MIN;
@@ -355,7 +498,7 @@ pub struct RState {
     /// (and whether it was backed up, tex.web 325's `backed_up`: an error's
     /// context shows it as such; a list read to its end stays until the
     /// next token is read, as TeX's input level does)
-    pending: Vec<(Arc<[Tok]>, usize, bool)>,
+    pending: Pending,
     mode: Mode,
     /// The list being built is internal: a box's (TeX's negative modes).
     inner: bool,
@@ -412,7 +555,7 @@ impl RState {
         RState {
             pos: 0,
             tstate: TState::N,
-            pending: Vec::new(),
+            pending: Pending::default(),
             mode: Mode::V,
             inner: false,
             level: 0,
@@ -445,7 +588,7 @@ impl RState {
         RState {
             pos: 0,
             tstate: TState::N,
-            pending: Vec::new(),
+            pending: Pending::default(),
             eol: EOL_UNREAD,
             endinput: false,
             conds: caller.conds.outside(),
@@ -2007,6 +2150,10 @@ struct Scratch {
     /// TeX's shared zero glue, which `\showbox` and the short display
     /// tell apart).
     glue_shared: bool,
+    /// The last read of each name made in the piece (from a node of it):
+    /// a node reading the same definition, seen the same, shares it (a
+    /// read is a value: equal fields, the same read).
+    inside: FxMap<Key, ReadRef>,
 }
 
 /// One node's execution: one command, from the state its predecessor left.
@@ -2053,6 +2200,8 @@ struct Exec<'a> {
     /// node ends at once ([`Exec::rewrite`]).
     steps: u64,
     stop: Option<Check>,
+    /// Inside `\csname`…`\endcsname` (pdfTeX's `\ifincsname`).
+    in_csname: u16,
     /// This node made the hundredth error: the build ends here (§82).
     halt: bool,
 }
@@ -2117,6 +2266,7 @@ impl<'a> Exec<'a> {
             output: None,
             steps: 0,
             stop: None,
+            in_csname: 0,
             halt: false,
         }
     }
@@ -2289,9 +2439,35 @@ impl<'a> Exec<'a> {
                 return Found::Read(i as usize);
             }
         }
-        let r = resolve_now(self.chain, self.env, self.outside, key);
+        let r = self.resolve_shared(key);
         self.reads.push(r);
         Found::Read(self.reads.len() - 1)
+    }
+
+    /// [`resolve_now`], the read shared with an earlier node's equal one
+    /// ([`Scratch::inside`]).
+    fn resolve_shared(&mut self, key: &Key) -> ReadRef {
+        let chain = self.chain;
+        let Some((d, val)) = chain.resolve(key, chain.nodes.len()) else {
+            return outside_read(self.env, self.outside, key, chain.nodes.len() as u32);
+        };
+        // (a definition made between the piece's nodes after the local one
+        // reaches further: [`resolve_now`])
+        if let Some((val, src)) = self.env.between(key, d, chain.nodes.len() as u32) {
+            return Arc::new(Read { key: key.clone(), src, val, scope: None, cond: None });
+        }
+        let scope = chain.scope_of(d, key);
+        if let Some(r) = self.scratch.inside.get(key)
+            && r.src == Src::Node(d)
+            && r.scope == scope
+            && r.cond.is_none()
+            && r.val == val
+        {
+            return r.clone();
+        }
+        let r = Arc::new(Read { key: key.clone(), src: Src::Node(d), val, scope, cond: None });
+        self.scratch.inside.insert(key.clone(), r.clone());
+        r
     }
 
     fn define(&mut self, key: Key, val: Val, global: bool) {
@@ -2362,7 +2538,7 @@ impl<'a> Exec<'a> {
     }
 
     /// `\fontdimen n` of the current font.
-    fn font_param(&mut self, n: u16) -> i32 {
+    fn font_param(&mut self, n: u32) -> i32 {
         let f = self.font();
         let k = self.font_key(&f);
         self.int(&Key::FontDimen(k, n))
@@ -2408,7 +2584,7 @@ impl<'a> Exec<'a> {
     /// `\loop` does, keeps the input as long as it was).
     fn end_read_lists(&mut self) {
         let floor = self.st.texts.last().map_or(0, |x| x.at);
-        while self.st.pending.len() > floor && self.st.pending.last().is_some_and(|(l, i, _)| *i >= l.len()) {
+        while self.st.pending.len() > floor && self.st.pending.last().is_some_and(|(l, i, _)| i >= l.len()) {
             self.st.pending.pop();
         }
     }
@@ -2421,6 +2597,13 @@ impl<'a> Exec<'a> {
         if !toks.is_empty() {
             self.st.pending.push((Arc::from(toks), 0, false));
         }
+        self.step();
+    }
+
+    /// A step of the input (a rewrite, a macro's body read): now and then
+    /// the environment says whether the run goes on ([`Env::check`]); if
+    /// not, the input ends here.
+    fn step(&mut self) {
         self.steps += 1;
         if self.steps.is_multiple_of(1 << 12) && self.stop.is_none() {
             let words = pending_words(&self.st) + (self.emit.len() + self.vemit.len()) as u64;
@@ -2555,10 +2738,16 @@ impl<'a> Exec<'a> {
             // read to its end stays until the next read, tex.web 325)
             let floor = self.st.texts.last().map_or(0, |x| x.at);
             while self.st.pending.len() > floor {
-                let Some((list, i, _)) = self.st.pending.last_mut() else { break };
-                if *i < list.len() {
-                    let t = list[*i].clone();
-                    *i += 1;
+                if let Some((t, args)) = self.st.pending.next_tok() {
+                    if let (Tok::Param(n), Some(a)) = (&t, args) {
+                        // (a parameter of the macro whose body this is: its
+                        // argument, read next, tex.web 357)
+                        let arg = a.get(usize::from(*n)).cloned().unwrap_or_else(|| Arc::from([]));
+                        if !arg.is_empty() {
+                            self.st.pending.push((arg, 0, false));
+                        }
+                        continue;
+                    }
                     if t == Tok::DontExpand {
                         // (the marked token, as the wrapper will see it)
                         let n = self.next_raw0();
@@ -2750,15 +2939,21 @@ impl<'a> Exec<'a> {
                 i += 1;
             }
         }
-        let mut out = Vec::with_capacity(m.body.len());
-        for t in &m.body {
-            match t {
-                Tok::Param(n) => out.extend(args[usize::from(*n)].iter().cloned()),
-                _ => out.push(t.clone()),
+        // (the body is read where it is, the macro's; its parameters are
+        // the arguments, tex.web 390, 357)
+        self.end_read_lists();
+        if m.body.is_empty() {
+            return;
+        }
+        let used = m.body.iter().filter_map(|t| if let Tok::Param(n) = t { Some(usize::from(*n)) } else { None }).max();
+        match used {
+            None => self.st.pending.push((m.body.clone(), 0, false)),
+            Some(k) => {
+                let args: Args = args.into_iter().take(k + 1).map(Arc::from).collect();
+                self.st.pending.push_body(m.body.clone(), args);
             }
         }
-        self.end_read_lists();
-        self.rewrite(out);
+        self.step();
     }
 
     /// A `\par` in a short macro's argument ends the call (tex.web 392).
@@ -2950,12 +3145,32 @@ impl<'a> Exec<'a> {
         }
     }
 
+    /// This node closes the innermost group. What it defined locally
+    /// before, reading up to the closing command (`\csname`'s `\relax`
+    /// in `\expandafter\endgroup`, tex.web 372), was inside that group
+    /// and ends with it; a definition at an enclosing group's level
+    /// (`Def::level`, counted from the node's own group) is one level
+    /// nearer, the node's group being the one outside.
+    fn closes(&mut self) {
+        self.defs.retain_mut(|d| {
+            d.global
+                || match d.level {
+                    None | Some(0) => false,
+                    Some(k) => {
+                        d.level = Some(k - 1);
+                        true
+                    }
+                }
+        });
+        self.kind = Kind::Close;
+    }
+
     /// The innermost group closes: it defines nothing; the tokens
     /// `\aftergroup` gave it rewrite the input (tex.web 282).
     fn close_group(&mut self) {
         let after = self.st.groups.pop().map(|g| g.after).unwrap_or_default();
         self.rewrite(after);
-        self.kind = Kind::Close;
+        self.closes();
     }
 
     fn char_tok(&mut self, cat: u8, c: char, t: &Tok) {
@@ -2992,6 +3207,19 @@ impl<'a> Exec<'a> {
         match p {
             Prim::Par => self.par_cmd(),
             Prim::Indent | Prim::Noindent => self.start_par(p == Prim::Indent),
+            // (pdfTeX: `start_par` with chr 2, a paragraph in vertical mode
+            // only)
+            Prim::QuitVmode => {
+                if self.st.mode == Mode::V {
+                    self.start_par(true);
+                }
+            }
+            // (pdfTeX: two general texts, expanded; the table they fill is
+            // read only when writing PDF)
+            Prim::GlyphToUnicode => {
+                let _ = self.scan_toks_x();
+                let _ = self.scan_toks_x();
+            }
             Prim::Space => self.ex_space(),
             Prim::Char => {
                 let t = self.cmd.clone();
@@ -3053,7 +3281,8 @@ impl<'a> Exec<'a> {
             | Prim::PrevGraf
             | Prim::PageInt(_)
             | Prim::PageDimen(_)
-            | Prim::BoxDimen(_) => self.err(format!("You can't use `\\{}' here", p.name())),
+            | Prim::BoxDimen(_)
+            | Prim::PdfItem(_) => self.err(format!("You can't use `\\{}' here", p.name())),
             _ => self.err(format!("\\{} is not supported yet", p.name())),
         }
     }
@@ -3068,3 +3297,4 @@ fn intern(names: &mut FxSet<Arc<str>>, s: &str) -> Arc<str> {
     names.insert(a.clone());
     a
 }
+
