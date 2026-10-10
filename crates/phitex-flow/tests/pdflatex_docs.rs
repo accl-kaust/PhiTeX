@@ -35,7 +35,7 @@ const RUNS: [Options; 5] = [
 ];
 
 const fn run(threads: usize, reads: Reads, order: Order) -> Options {
-    Options { threads, reads, order, dump: false, etex: true, main_memory: MAIN_MEMORY }
+    Options { threads, reads, order, dump: false, etex: true, main_memory: MAIN_MEMORY, cut_lines: phitex_flow::build::CUT_LINES }
 }
 
 fn latex_dir() -> PathBuf {
