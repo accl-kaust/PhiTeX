@@ -119,15 +119,18 @@ pub struct Limits {
     /// The DVI writer's buffer (`dvi_buf_size`): where `w`/`x`/`y`/`z`
     /// movements stop being reused (`dvi_gone`).
     pub dvi_buf_size: i32,
+    /// The input levels at once (`stack_size`, tex.web 11): token lists
+    /// and files; one more is "TeX capacity exceeded" (tex.web 321).
+    pub stack_size: usize,
 }
 
 impl Limits {
     /// TeX Live's `tex` (texmf.cnf).
     pub const TEX_LIVE: Limits =
-        Limits { error_line: 79, half_error_line: 50, max_print_line: 79, dvi_buf_size: 16384 };
+        Limits { error_line: 79, half_error_line: 50, max_print_line: 79, dvi_buf_size: 16384, stack_size: 10000 };
     /// Knuth's TRIP test (tripman.tex, Appendix A, step 2).
     pub const TRIP: Limits =
-        Limits { error_line: 64, half_error_line: 32, max_print_line: 72, dvi_buf_size: 800 };
+        Limits { error_line: 64, half_error_line: 32, max_print_line: 72, dvi_buf_size: 800, stack_size: 200 };
 }
 
 impl Default for Limits {

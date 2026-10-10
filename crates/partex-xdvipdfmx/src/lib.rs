@@ -6,12 +6,14 @@
 //!
 //! Not ported (no corpus reaches them; each stops the run where C would
 //! need it): PK fonts (pkfont.c), subfonts (subfont.c, `@SFD@` map
-//! entries), encryption (pdfencrypt.c), MetaPost input (mpost.c), BMP and
+//! entries), encryption (pdfencrypt.c), MetaPost files and fonts (mpost.c:
+//! its inline PostScript interpreter is ported), BMP and
 //! JPEG 2000 images, manual thumbnails, extractbb, page selection (`-s`),
-//! libpng's gamma and background transforms for PNGs. tpic and PostScript
-//! specials (spc_tpic.c, spc_dvips.c: ghostscript) are skipped, as a
-//! failed special is. EPS goes through the distiller only where the host
-//! runs it (`io::Files::apply_filter`).
+//! libpng's gamma and background transforms for PNGs. tpic specials
+//! (spc_tpic.c) and PSTricks's (spc_dvips.c: ghostscript) are skipped, as
+//! a failed special is. dvips's `PSfile=` EPS goes through the distiller
+//! only where the host runs it (`io::Files::apply_filter`); inline `ps:`
+//! code through mpost.c's interpreter.
 
 // The C names are kept (non_snake_case among them); lints to be tightened.
 #![allow(unused, dead_code, non_snake_case, clippy::all, clippy::pedantic)]
@@ -65,6 +67,7 @@ pub mod fontmap;
 pub mod glyphrun;
 pub mod io;
 pub mod jpegimage;
+pub mod mpost;
 pub mod obj;
 pub mod otl_opt;
 pub mod parse;
@@ -83,6 +86,7 @@ pub mod pst;
 pub mod pst_obj;
 pub mod session;
 pub mod sfnt;
+pub mod spc_dvips;
 pub mod spc_color;
 pub mod spc_dvipdfmx;
 pub mod spc_html;

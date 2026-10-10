@@ -3,11 +3,10 @@
 //!
 //! A handler is a plain `fn(&mut Dpx, &mut SpcEnv, &mut SpcArg) -> i32`
 //! ([`SpcHandlerFn`]); each spc_* module has its table of them.
-//! `spc_tpic` and `spc_dvips` (PostScript through ghostscript) are not
-//! ported. Their entries of `known_specials` are kept, with C's check
-//! functions (so they claim the same specials, and in the same order),
-//! no hooks, and a setup that fails: such a special is an error (-1),
-//! reported and skipped, as a failing handler is in C.
+//! `spc_tpic` is not ported. Its entry of `known_specials` is kept, with
+//! C's check function (so it claims the same specials, and in the same
+//! order), no hooks, and a setup that fails: such a special is an error
+//! (-1), reported and skipped, as a failing handler is in C.
 
 use crate::obj::PdfOut;
 use crate::parse::{Unknown, skip_white};
@@ -159,18 +158,18 @@ pub static KNOWN_SPECIALS: [KnownSpecial; 8] = [
         check_func: crate::spc_dvipdfmx::spc_dvipdfmx_check_special,
         setup_func: crate::spc_dvipdfmx::spc_dvipdfmx_setup_handler,
     },
-    // spc_dvips.c is not ported (ghostscript): C's check, no hooks, and
-    // a setup that fails.
+    // (spc_dvips's begin/end-of-document and begin-of-page hooks only
+    // keep PSTricks's ghostscript files)
     KnownSpecial {
         key: b"ps:",
         bodhk_func: None,
         eodhk_func: None,
         bophk_func: None,
-        eophk_func: None,
+        eophk_func: Some(Dpx::spc_dvips_at_end_page),
         bofhk_func: None,
         eofhk_func: None,
-        check_func: spc_dvips_check_special,
-        setup_func: spc_unsupported_setup_handler,
+        check_func: crate::spc_dvips::spc_dvips_check_special,
+        setup_func: crate::spc_dvips::spc_dvips_setup_handler,
     },
     KnownSpecial {
         key: b"color",
@@ -219,31 +218,6 @@ pub static KNOWN_SPECIALS: [KnownSpecial; 8] = [
     },
 ];
 
-/// spc_dvips.c's `dvips_handlers` keys (for its check).
-const DVIPS_KEYS: [&[u8]; 10] = [
-    b"header",
-    b"PSfile",
-    b"psfile",
-    b"ps: plotfile ",
-    b"PS: plotfile ",
-    b"PS:",
-    b"ps:",
-    b"PST:",
-    b"pst:",
-    b"\" ",
-];
-
-/// `spc_dvips_check_special` (spc_dvips.c).
-fn spc_dvips_check_special(buf: &[u8]) -> bool {
-    let mut p = 0;
-    skip_white(buf, &mut p);
-    if p >= buf.len() {
-        return false;
-    }
-    let rest = &buf[p..];
-    DVIPS_KEYS.iter().any(|k| rest.starts_with(k))
-}
-
 /// spc_tpic.c's `tpic_handlers` keys (for its check).
 const TPIC_KEYS: [&[u8]; 13] = [
     b"pn", b"pa", b"fp", b"ip", b"da", b"dt", b"sp", b"ar", b"ia", b"sh", b"wh", b"bk", b"tx",
@@ -269,7 +243,7 @@ fn spc_tpic_check_special(buf: &[u8]) -> bool {
     }
 }
 
-/// The setup of a module that is not ported (spc_dvips, spc_tpic): the
+/// The setup of a module that is not ported (spc_tpic): the
 /// special fails.
 fn spc_unsupported_setup_handler(
     dpx: &mut Dpx,
@@ -837,15 +811,6 @@ mod tests {
         assert!(!ispageref(b"pages"));
         assert!(!ispageref(b"page1a"));
         assert!(!ispageref(b"thispage"));
-    }
-
-    #[test]
-    fn dvips_check() {
-        assert!(spc_dvips_check_special(b"  ps: 1 0 0 setrgbcolor"));
-        assert!(spc_dvips_check_special(b"PSfile=foo.eps"));
-        assert!(spc_dvips_check_special(b"\" newpath"));
-        assert!(!spc_dvips_check_special(b"pdf:literal"));
-        assert!(!spc_dvips_check_special(b"   "));
     }
 
     #[test]

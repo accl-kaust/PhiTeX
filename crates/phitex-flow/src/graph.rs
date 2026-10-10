@@ -119,6 +119,16 @@ pub trait Env {
         false
     }
 
+    /// Whether a run that reads past its text's end in the middle of a
+    /// command ([`Node::crossed`]) ends there: text follows the piece, and
+    /// the sequence joins the two (the run, its command cut short, would
+    /// run on what the cut made of it — a `\loop` whose `\repeat` is in
+    /// the next piece calls itself for ever). No: the document's end, the
+    /// command ends there, as at a file's end in TeX.
+    fn crossed_ends(&mut self) -> bool {
+        false
+    }
+
     /// A run nests groups deeper than any document does (`DEEP`): whether
     /// it stops — it runs on predictions not confirmed yet (a cut's
     /// assumed entry, or definitions predicted), which such a nesting
@@ -360,7 +370,15 @@ fn where_shown(text: &[char], n: &Node) -> String {
         let b = (p + 40).min(t.len());
         t[a..b].iter().collect::<String>().replace('\r', "|")
     };
-    let mut s = format!("node {:?} at {} [{}]", n.kind, n.out.pos, around(text, n.out.pos));
+    let mut s = format!(
+        "node {:?} at {} [{}]; {} lists pending, {} groups, {} conditionals",
+        n.kind,
+        n.out.pos,
+        around(text, n.out.pos),
+        n.out.pending.len(),
+        n.out.groups.len(),
+        n.out.conds.len()
+    );
     for i in 0..n.out.texts.len() {
         if let Some(x) = n.out.texts.get(i) {
             let _ = std::fmt::Write::write_fmt(&mut s, format_args!("; text {i} {:?} at {} [{}]", x.kind, x.pos, around(&x.text, x.pos)));
@@ -2506,6 +2524,9 @@ pub fn run_piece(
     // (entered otherwise than the old run was: every node is looked at)
     let entry_changed = old.is_some_and(|(r, _)| r.chain.entry != entry);
     let mut ran = 0u64;
+    // (`PHITEX_HANG_STEPS`: after a runaway print, the next commands one
+    // by one, with their reads and definitions)
+    let mut trace_left = 0u32;
     let edit = old.and_then(|(_, t)| Edit::between(t, text));
     // (the edit changed how many lines are before the text after it: a node
     // there that read its line, `\inputlineno` in the piece's own text —
@@ -2776,8 +2797,32 @@ pub fn run_piece(
                 };
                 // (`PHITEX_HANG_DUMP`: a run past millions of commands says
                 // where it is, for a loop's diagnosis)
-                if ran.is_multiple_of(1 << 22) && std::env::var_os("PHITEX_HANG_DUMP").is_some() {
+                let every = if ran.is_multiple_of(1 << 12) {
+                    std::env::var("PHITEX_HANG_STEPS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(1 << 22)
+                } else {
+                    1 << 22
+                };
+                if ran.is_multiple_of(every.max(1 << 12))
+                    && (std::env::var_os("PHITEX_HANG_DUMP").is_some() || std::env::var_os("PHITEX_HANG_STEPS").is_some())
+                {
                     eprintln!("runaway run: {ran} commands; {}", where_shown(text, &n));
+                    if trace_left == 0 {
+                        trace_left = 400;
+                    }
+                }
+                if trace_left > 0 {
+                    trace_left -= 1;
+                    let cs = env.cs();
+                    let mut o = format!("  #{} {:?} {} at {} p{} g{} c{}:", chain.nodes.len(), n.kind, crate::val::Shown(&n.cmd, cs), n.out.pos, n.out.pending.len(), n.out.groups.len(), n.out.conds.len());
+                    for r in n.reads.iter() {
+                        let v = crate::val::Shown(&r.val, cs).to_string();
+                        let _ = std::fmt::Write::write_fmt(&mut o, format_args!(" R[{}={} {:?}]", crate::val::Shown(&r.key, cs), v.chars().take(50).collect::<String>(), r.src));
+                    }
+                    for d in n.defs() {
+                        let v = crate::val::Shown(&d.val, cs).to_string();
+                        let _ = std::fmt::Write::write_fmt(&mut o, format_args!(" D[{}={}{}]", crate::val::Shown(&d.key, cs), v.chars().take(50).collect::<String>(), if d.global { " g" } else { "" }));
+                    }
+                    eprintln!("{o}");
                 }
                 n
             }
@@ -2821,7 +2866,9 @@ pub fn run_piece(
         } else if !same_material {
             para_fresh = true;
         }
-        let end = matches!(n.kind, Kind::End | Kind::Input | Kind::Cut);
+        // (a run that read on past its text, text following: the sequence
+        // joins the two, the rest of this run is no result)
+        let end = matches!(n.kind, Kind::End | Kind::Input | Kind::Cut) || (n.crossed() && env.crossed_ends());
         state = n.out.clone();
         chain.push_arc(n);
         if end {
@@ -3116,6 +3163,9 @@ struct Exec<'a> {
     stop: Option<Check>,
     /// This node made the hundredth error: the build ends here (§82).
     halt: bool,
+    /// The node read past its text's end with text following
+    /// ([`Env::crossed_ends`]): it reads nothing more, the run ends.
+    cut_short: bool,
     /// What is being scanned, where an `\outer` name is forbidden
     /// (tex.web 305: `scanner_status`), and whose (`warning_index`).
     scanning: Scanning,
@@ -3278,6 +3328,7 @@ impl<'a> Exec<'a> {
             steps: 0,
             stop: None,
             halt: false,
+            cut_short: false,
             scanning: Scanning::Normal,
             warning: None,
             outer_abort: false,
@@ -3791,6 +3842,37 @@ impl<'a> Exec<'a> {
         o
     }
 
+    /// (`PHITEX_HANG_DUMP`) What is being expanded: the next tokens of the
+    /// top input lists, for an expansion that does not end.
+    fn expansion_shown(&mut self) {
+        let next = |l: &Level| l.list[l.at.min(l.end)..l.end.min(l.at + 24)].to_vec();
+        let mut lists: Vec<Vec<Tok>> = self.st.pending.top.iter().map(next).collect();
+        let mut below = self.st.pending.below.as_ref();
+        while lists.len() < 5
+            && let Some(c) = below
+        {
+            lists.push(next(&c.level));
+            below = c.below.as_ref();
+        }
+        let mut s = format!(
+            "expansion: {} steps, {} lists pending, {} groups, {} conditionals, {} texts, {} nodes, at {}",
+            self.steps,
+            self.st.pending.len(),
+            self.st.groups.len(),
+            self.st.conds.len(),
+            self.st.texts.len(),
+            self.chain.nodes.len(),
+            self.st.pos
+        );
+        for (i, l) in lists.iter().enumerate() {
+            let mut o = String::new();
+            self.show_toks(&mut o, l);
+            let _ = std::fmt::Write::write_fmt(&mut s, format_args!("; list {i}: {}", o.chars().take(200).collect::<String>()));
+        }
+        eprintln!("{s}");
+
+    }
+
     /// Font `f`'s identity as the piece's own name (for the keys of its
     /// parameters).
     fn font_key(&mut self, f: &Font) -> Arc<str> {
@@ -3836,7 +3918,27 @@ impl<'a> Exec<'a> {
         }
         // (tex.web 325: lists read to their end go first)
         self.end_read_lists();
+        if self.input_full() {
+            return;
+        }
         self.st.pending.push((Arc::from([t]), 0, true));
+    }
+
+    /// Whether the input stack is full (tex.web 321's `push_input`: the
+    /// levels under the current one are `stack_size`): the run stops with
+    /// TeX's fatal "TeX capacity exceeded" (an expansion that nests on
+    /// and on ends there, as TeX's does).
+    fn input_full(&mut self) -> bool {
+        let n = self.env.limits().stack_size;
+        if self.st.pending.len() + self.st.texts.len() < n {
+            return false;
+        }
+        self.overflow(format!("TeX capacity exceeded, sorry [input stack size={n}]"));
+        self.st.pending.clear();
+        self.st.texts = Stack::new();
+        self.ptext = None;
+        self.st.pos = self.text.len();
+        true
     }
 
     /// The token lists read to their end go (not those under a rewritten
@@ -3855,7 +3957,7 @@ impl<'a> Exec<'a> {
     /// whether the run goes on ([`Env::check`]); if not, its input ends
     /// here.
     fn rewrite(&mut self, toks: Vec<Tok>) {
-        if !toks.is_empty() {
+        if !toks.is_empty() && !self.input_full() {
             self.st.pending.push((Arc::from(toks), 0, false));
         }
         self.step();
@@ -3866,6 +3968,12 @@ impl<'a> Exec<'a> {
     /// not, the input ends here.
     fn step(&mut self) {
         self.steps += 1;
+        if self.steps.is_multiple_of(1 << 16)
+            && let Some(every) = std::env::var("PHITEX_HANG_STEPS").ok().and_then(|v| v.parse::<u64>().ok())
+            && self.steps.is_multiple_of(every.max(1 << 16))
+        {
+            self.expansion_shown();
+        }
         if self.steps.is_multiple_of(1 << 12) && self.stop.is_none() {
             let words = pending_words(&self.st) + (self.emit.len() + self.vemit.len()) as u64;
             match self.env.check(self.steps, words) {
@@ -4157,7 +4265,7 @@ impl<'a> Exec<'a> {
     #[inline(always)]
     fn next_raw0(&mut self) -> Option<Tok> {
         self.noexp = false;
-        if self.halted() {
+        if self.halted() || self.cut_short {
             return None;
         }
         loop {
@@ -4177,6 +4285,11 @@ impl<'a> Exec<'a> {
                 let t = self.tokenize();
                 if t.is_none() && !self.boundary && self.ptext.is_none() && self.stop.is_none() {
                     self.crossed = true;
+                    // (text follows: the sequence runs it with this piece,
+                    // as one; what this run would read now, its command cut
+                    // short by its text's end, is no result: the run ends
+                    // here, never in a loop the cut made)
+                    self.cut_short = self.env.crossed_ends();
                 }
                 return t;
             }
@@ -4343,7 +4456,7 @@ impl<'a> Exec<'a> {
         // (the body is read where it is, the macro's; its parameters are
         // the arguments, tex.web 390, 357)
         self.end_read_lists();
-        if !m.body.is_empty() {
+        if !m.body.is_empty() && !self.input_full() {
             if k == 0 {
                 self.st.pending.push((m.body.clone(), 0, false));
             } else {

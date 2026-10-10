@@ -672,6 +672,8 @@ pub struct Build {
     /// in one of the last [`HOT_BUILDS`] edits keeps them meanwhile (edits
     /// come near each other).
     lean: bool,
+    /// [`Build::set_max_rounds`].
+    max_rounds: usize,
     /// Updates made (the cold build is the first).
     builds: u64,
     /// The format the build starts from (`set_format`).
@@ -1543,6 +1545,10 @@ struct Shared {
     cancel: Vec<AtomicBool>,
     /// Each piece's `\input`s are read in it ([`Build::inline`]).
     inline: Vec<bool>,
+    /// What the layout placed after each piece (its `\input`'s file, a
+    /// re-cut): the last round's runs end where the layout says, never
+    /// elsewhere ([`settle`] fails the build where one does not).
+    laid: Vec<(bool, bool)>,
     /// Each piece's run is parked, waiting for an earlier piece.
     waiting: Vec<AtomicBool>,
     /// The round is ending ([`restructure_now`]): no run waits.
@@ -1659,6 +1665,7 @@ impl Build {
             finder: None,
             job: Arc::from(crate::graph::JOBNAME),
             lean: true,
+            max_rounds: MAX_ROUNDS,
             builds: 0,
             texts: Vec::new(),
             files: Arc::default(),
@@ -1777,6 +1784,13 @@ impl Build {
     /// changed, holding every node in memory.
     pub fn set_lean(&mut self, lean: bool) {
         self.lean = lean;
+    }
+
+    /// (tests) How many rounds may lay the sequence out before the last,
+    /// which may not ([`MAX_ROUNDS`] until set).
+    #[doc(hidden)]
+    pub fn set_max_rounds(&mut self, n: usize) {
+        self.max_rounds = n;
     }
 
     /// The pieces of a file's text (the last cut's `Arc`s while the text
@@ -2246,7 +2260,7 @@ impl Build {
         let mut rounds = 0;
         self.pdf.rounds = 0;
         // (measuring: `PHITEX_ROUND_CAP` moves the bound on all rounds)
-        let cap = std::env::var("PHITEX_ROUND_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(MAX_ROUNDS);
+        let cap = std::env::var("PHITEX_ROUND_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(self.max_rounds);
         // (what the rounds of this update placed, and the rounds in a row
         // that placed nothing new: a round laying the sequence out again
         // with only what an earlier one placed is no progress)
@@ -2851,6 +2865,7 @@ impl Build {
             cancel: state.p.iter().map(|_| AtomicBool::new(false)).collect(),
             progress: state.p.iter().map(|_| AtomicU64::new(0)).collect(),
             inline: state.p.iter().map(|ps| ps.inline).collect(),
+            laid: state.p.iter().map(|ps| (ps.expect.input.is_some(), ps.expect.cut)).collect(),
             waiting: state.p.iter().map(|_| AtomicBool::new(false)).collect(),
             restructuring: AtomicBool::new(false),
             drops: {
@@ -4235,6 +4250,9 @@ fn keep_again(g: &mut State, sh: &Shared, k: usize) -> bool {
         return false;
     }
     g.running.remove(&k);
+    // (Done implies no mark pending: a piece Done and dirty is neither run
+    // again nor settled, the scan waits at it)
+    debug_assert!(g.p[k].dirty.is_empty(), "piece {k} kept again with marks");
     g.p[k].status = Status::Done;
     g.p[k].entered = None;
     if g.due_at == Some(k) {
@@ -4620,13 +4638,28 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
         // (a settled run that says otherwise of the sequence than the
         // layout assumed changes it, once all have settled)
         let k = g.settled;
-        // (the last round may not lay the sequence out again: a run reading
-        // on into the next text there leaves the pieces after it unable to
-        // start — the build fails saying so, it does not stall)
-        if !sh.restructure_ok && g.p[k].got.join && !g.p[k].got.same(&g.p[k].expect) {
+        // (the last round may not lay the sequence out again: its runs end
+        // where the layout says (`laid`); a run saying otherwise of the
+        // sequence there — a file, a cut, an `\endinput`, a run reading on
+        // into the next text — would leave its output not the document's:
+        // the build fails saying so, it neither stalls nor gives another
+        // DVI file)
+        if !sh.restructure_ok && !g.p[k].got.same(&g.p[k].expect) {
             let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
+            let (got, exp) = (&g.p[k].got, &g.p[k].expect);
+            let what = if got.join != exp.join {
+                "reads on into the next piece's text (a group or command open at its end)"
+            } else if got.input.is_some() != exp.input.is_some() || got.stop != exp.stop {
+                "reads a file or stops where the layout did not place one"
+            } else if got.cut != exp.cut {
+                "ends at a cut the layout did not make"
+            } else if got.endinput != exp.endinput {
+                "ends its file (\\endinput) where the layout did not"
+            } else {
+                "ends the job where the layout did not"
+            };
             let why = format!(
-                "the sequence of pieces did not settle ({MAX_STALLED_ROUNDS} rounds in a row placed nothing new, or {MAX_ROUNDS} in all): piece {k}'s run reads on into the next piece's text (a group or command open at its end), and the last round may not join them"
+                "the sequence of pieces did not settle ({MAX_STALLED_ROUNDS} rounds in a row placed nothing new, or {MAX_ROUNDS} in all): in the last, which may not lay it out again, piece {k}'s run {what}"
             );
             stall(g, sh, parked, &why);
             return true;
@@ -4642,6 +4675,7 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
             // sequence laid out again — the runs in progress finish and are
             // kept where they hold)
             if g.p[k].got.join {
+                rounds_shown(g);
                 if k + 1 < n && g.p[k + 1].status == Status::Running {
                     sh.cancel[k + 1].store(true, Ordering::Relaxed);
                 }
@@ -4689,6 +4723,7 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
     if g.restructure_due && g.settled == n {
         // (a run that said so may have run again since)
         if (0..n).any(|k| !g.p[k].got.same(&g.p[k].expect)) {
+            rounds_shown(g);
             restructure_now(g, sh);
             return true;
         }
@@ -4707,6 +4742,35 @@ fn change_final(g: &State, k: usize) -> bool {
         && !ps.fold_unchecked
         && !ps.got.same(&ps.expect)
         && ps.run.as_ref().is_some_and(|r| entry_holds(g, k, r))
+}
+
+/// (`PHITEX_ROUNDS`) Why a round ends without output: each settled piece
+/// whose run says otherwise of the sequence than the layout assumed.
+fn rounds_shown(g: &State) {
+    if std::env::var_os("PHITEX_ROUNDS").is_none() {
+        return;
+    }
+    let show = |e: &Expect| {
+        format!(
+            "input {:?} stop {} endinput {} ends {} cut {} join {}",
+            e.input.as_ref().map(|f| (f.name.clone(), f.text.len())),
+            e.stop,
+            e.endinput,
+            e.ends,
+            e.cut,
+            e.join
+        )
+    };
+    for (k, ps) in g.p.iter().enumerate().filter(|(_, p)| p.status == Status::Done && !p.got.same(&p.expect)) {
+        eprintln!(
+            "round ends: piece {k} of {} (id {:?}, inline {}): got [{}] the layout assumed [{}]",
+            g.p.len(),
+            ps.id,
+            ps.inline,
+            show(&ps.got),
+            show(&ps.expect)
+        );
+    }
 }
 
 /// The scheduler: a function of the state, choosing this thread's next
@@ -5501,6 +5565,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
             if hot {
                 g.p[k].hot_until = sh.build_no + HOT_BUILDS;
             }
+            debug_assert!(g.p[k].dirty.is_empty(), "piece {k} installed Done with marks");
             g.p[k].status = Status::Done;
             sh.done[k].store(true, Ordering::Release);
             // (a run reading another file, or ending its file, changes the
@@ -5912,12 +5977,21 @@ impl Env for PieceEnv<'_> {
         self.sh.names.has_inner(key)
     }
 
+    fn crossed_ends(&mut self) -> bool {
+        // (a piece follows: the layout joins it with this one; in the last
+        // round, which may not, `settle` fails the build there)
+        self.k + 1 < self.sh.inline.len()
+    }
+
     fn cut_ok(&mut self) -> bool {
-        self.sh.restructure_ok
+        // (the last round: where the layout re-cut the text, only)
+        self.sh.restructure_ok || self.sh.laid[self.k].1
     }
 
     fn split_inputs(&mut self) -> bool {
-        self.sh.restructure_ok && !self.sh.inline[self.k]
+        // (the last round: an `\input` whose file the layout placed after
+        // the piece, only; any other is read in the piece)
+        (self.sh.restructure_ok || self.sh.laid[self.k].0) && !self.sh.inline[self.k]
     }
 
     fn give_up_deep(&mut self) -> bool {
@@ -5929,7 +6003,8 @@ impl Env for PieceEnv<'_> {
     }
 
     fn stop_at(&mut self, pos: usize) -> bool {
-        self.sh.restructure_ok && self.sh.stops[self.k].binary_search(&pos).is_ok()
+        // (where the layout joined texts: the last round too)
+        self.sh.stops[self.k].binary_search(&pos).is_ok()
     }
 
     fn any_between(&mut self) -> bool {

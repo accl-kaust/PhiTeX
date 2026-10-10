@@ -55,10 +55,15 @@ if [ -n "${CLI_TESTS:-}" ]; then
   cargo test --release -p phitex-cli --test cli > "$r/cli-tests.txt" 2>&1; echo "phitex-cli --test cli exit $?" >> "$r/summary.txt"
   grep -E "^test result|FAILED|panicked" "$r/cli-tests.txt" | head -20 >> "$r/summary.txt"
 fi
+# (DPX=1: partex-xdvipdfmx's own tests)
+if [ -n "${DPX:-}" ]; then
+  cargo test --release -p partex-xdvipdfmx > "$r/dpx-tests.txt" 2>&1; echo "partex-xdvipdfmx tests exit $?" >> "$r/summary.txt"
+  grep -E "^test result|FAILED|panicked" "$r/dpx-tests.txt" | head -20 >> "$r/summary.txt"
+fi
 if [ "${REGRESS:-1}" != 0 ]; then
 cargo test --release -p phitex-flow --lib --test wall --test shapes --test dvi --test plain --test pdf --test etex --test output > "$r/regress.txt" 2>&1; echo "regress exit $?" >> "$r/summary.txt"
 grep -E "^test result|FAILED|panicked" "$r/regress.txt" | head -40 >> "$r/summary.txt"
 fi
-if [ -n "${CLIPPY:-}" ]; then cargo clippy -p phitex-flow --all-targets > "$r/clippy.txt" 2>&1; echo "clippy exit $?, $(grep -c '^warning' $r/clippy.txt) warnings, $(grep -c '^error' $r/clippy.txt) errors" >> "$r/summary.txt"; fi
+if [ -n "${CLIPPY:-}" ]; then cargo clippy -p phitex-flow -p phitex-cli -p partex-xdvipdfmx --all-targets -- -D warnings > "$r/clippy.txt" 2>&1; echo "clippy (-D warnings: phitex-flow, phitex-cli, partex-xdvipdfmx) exit $?, $(grep -c ^error $r/clippy.txt) errors" >> "$r/summary.txt"; fi
 mkdir -p "$r/out"; cp -r target/tmp/xetex-docs "$r/out/" 2>/dev/null; cp -r target/release/build/*/out/xetex-docs "$r/out/" 2>/dev/null
 true
