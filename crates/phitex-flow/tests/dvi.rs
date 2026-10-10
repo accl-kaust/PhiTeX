@@ -405,8 +405,11 @@ fn dump() {
 // overfull alignment (`halign2`); `\valign` (`valign`); display alignments
 // in a paragraph and `\halign` ending one (`display`); TeX's errors and
 // what it does after them (`alignerr`); the hundredth error, which ends
-// the build (tex.web 82: `alignerr3`, a later piece's page not shipped).
-documents!(halign, halign2, valign, display, alignerr, alignerr2, alignerr3);
+// the build (tex.web 82: `alignerr3`, a later piece's page not shipped);
+// a macro whose parameter text ends with `#{` in an entry: its brace is
+// read twice, from the input and again from the body, and counted once
+// (tex.web 397: `alignbrace`).
+documents!(halign, halign2, valign, display, alignerr, alignerr2, alignerr3, alignbrace);
 
 /// A loop of errors (a macro calling itself after an undefined name) stops
 /// at the hundredth error, as TeX does (tex.web 82), in every schedule.
