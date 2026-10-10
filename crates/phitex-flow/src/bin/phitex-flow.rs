@@ -302,11 +302,12 @@ fn budgets(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `phitex-flow --fuzz-cold FILE`: cold builds of a reproduction's text
-/// before its edit and after it, as its document is built; "ends" when
-/// both do (a hang's reduction asks it of every cut: a text whose cold
-/// build does not end is not the update's hang).
-fn fuzz_cold(file: &str) -> ExitCode {
+/// `phitex-flow --fuzz-cold FILE [before|after]`: cold builds of a
+/// reproduction's text before its edit and after it (or only the one
+/// named), as its document is built; "ends" when they do (a hang's
+/// reduction asks it of every cut: a text whose cold build does not end
+/// is not the update's hang).
+fn fuzz_cold(file: &str, which: Option<&str>) -> ExitCode {
     use phitex_flow::fuzz;
     let Some(r) = std::fs::read_to_string(file).ok().and_then(|s| fuzz::Repro::parse(&s)) else {
         eprintln!("--fuzz-cold: {file}: not a reproduction");
@@ -316,11 +317,16 @@ fn fuzz_cold(file: &str) -> ExitCode {
         eprintln!("--fuzz-cold: no document {}", r.doc);
         return ExitCode::FAILURE;
     };
-    let _ = fuzz::cold(&doc, &r.text, &r.files);
-    let (mut text, mut files) = (r.text.clone(), r.files.clone());
-    r.edit.apply(&mut text, &mut files);
-    let _ = fuzz::cold(&doc, &text, &files);
-    println!("{file}: both cold builds end");
+    if which != Some("after") {
+        let _ = fuzz::cold(&doc, &r.text, &r.files);
+        println!("{file}: the cold build before the edit ends");
+    }
+    if which != Some("before") {
+        let (mut text, mut files) = (r.text.clone(), r.files.clone());
+        r.edit.apply(&mut text, &mut files);
+        let _ = fuzz::cold(&doc, &text, &files);
+        println!("{file}: the cold build after the edit ends");
+    }
     ExitCode::SUCCESS
 }
 
@@ -394,7 +400,7 @@ fn main() -> ExitCode {
         return budgets(&args[1..]);
     }
     if args.first().map(String::as_str) == Some("--fuzz-cold") {
-        return fuzz_cold(args.get(1).map_or("", String::as_str));
+        return fuzz_cold(args.get(1).map_or("", String::as_str), args.get(2).map(String::as_str));
     }
     if args.first().map(String::as_str) == Some("--fuzz-reruns") {
         return fuzz_reruns(&args[1..]);
