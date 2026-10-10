@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use phitex_flow::build::MAIN_MEMORY;
+use phitex_flow::build::{CUT_LINES, MAIN_MEMORY};
 use phitex_flow::{Build, Font, Options, Order, Reads};
 
 fn font() -> Arc<Font> {
@@ -174,20 +174,20 @@ fn first_difference(a: &[u8], b: &[u8]) -> usize {
 
 /// The schedules each document runs with.
 const RUNS: [Options; 5] = [
-    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: false, main_memory: MAIN_MEMORY },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: false, main_memory: MAIN_MEMORY },
+    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: false, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: false, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: false, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES },
 ];
 
 /// The same, in e-TeX's extended mode.
 const RUNS_ETEX: [Options; 5] = [
-    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY },
-    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: true, main_memory: MAIN_MEMORY },
-    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: true, main_memory: MAIN_MEMORY },
+    Options { threads: 1, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Priority, dump: false, etex: true, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES },
+    Options { threads: 8, reads: Reads::Suspend, order: Order::Random(1), dump: false, etex: true, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES },
+    Options { threads: 8, reads: Reads::Speculate, order: Order::Random(7), dump: false, etex: true, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES },
 ];
 
 fn check(name: &str) {
@@ -701,7 +701,7 @@ fn specloop() {
     let want = std::fs::read(dir().join("specloop.dvi")).unwrap();
     for seed in 0..24u64 {
         for (threads, reads) in [(1, Reads::Speculate), (8, Reads::Speculate), (1, Reads::Suspend), (8, Reads::Suspend)] {
-            let o = Options { threads, reads, order: Order::Random(seed), dump: false, etex: false, main_memory: MAIN_MEMORY };
+            let o = Options { threads, reads, order: Order::Random(seed), dump: false, etex: false, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES };
             let (dvi, _, errors, _) = graph("specloop", &src, o);
             assert!(errors.is_empty(), "specloop ({o:?}): {errors:?}");
             assert!(masked(&dvi) == masked(&want), "specloop ({o:?}): the DVI differs");
@@ -732,7 +732,7 @@ fn endmid() {
     let src = std::fs::read_to_string(dir().join("endmid.tex")).unwrap();
     for seed in 0..12u64 {
         for (threads, reads) in [(1, Reads::Speculate), (8, Reads::Speculate), (1, Reads::Suspend), (8, Reads::Suspend)] {
-            let o = Options { threads, reads, order: Order::Random(seed), dump: false, etex: false, main_memory: MAIN_MEMORY };
+            let o = Options { threads, reads, order: Order::Random(seed), dump: false, etex: false, main_memory: MAIN_MEMORY, cut_lines: CUT_LINES };
             let out = Build::new(font()).update(&src, o);
             assert!(out.errors.is_empty(), "endmid ({o:?}): {:?}", out.errors);
             assert_eq!(out.stats.pieces, 2, "endmid ({o:?}): the pieces after the end are not in the sequence");
@@ -767,5 +767,64 @@ fn recut() {
         let out = Build::new(font()).update(&src, o);
         assert!(out.errors.is_empty(), "recut ({o:?}): {:?}", out.errors);
         assert_eq!(out.stats.pieces, 4, "recut ({o:?}): {:?}", out.stats);
+    }
+}
+
+/// Where the cutter cuts is a scheduling knob (CORE.md, cuts): a cut
+/// every few lines, every twenty, or at blank lines only, each document
+/// gives TeX's DVI and log. A piece that reads on past its text's end (an
+/// argument, a definition, a skipped arm, a paragraph) is one piece with
+/// the next; one ending in another state than its successor assumed (a
+/// conditional open, `\global` pending) enters it in that state.
+#[test]
+fn any_cut_gives_tex_s_result() {
+    let plain = [
+        "para", "skips", "hbox", "setbox", "vbox", "pages", "fonts", "shape", "leave", "show", "ship", "disc", "math1",
+        "math2", "math3", "math4", "writes", "input", "leaders", "accent", "lastbox", "vsplit", "inserts", "endgroup",
+        "outsame", "outpen", "specloop", "pagegoal", "endmid", "recut", "cutstate",
+    ];
+    let etex = ["texxet", "llfit", "pens", "middle"];
+    for every in [3, 20, usize::MAX] {
+        let runs = |e: &[Options; 5]| -> Vec<Options> {
+            [e[0], e[2], e[4]].iter().map(|o| Options { cut_lines: every, ..*o }).collect()
+        };
+        for name in plain {
+            let src = std::fs::read_to_string(dir().join(format!("{name}.tex"))).unwrap();
+            check_src(name, &src, &runs(&RUNS));
+        }
+        for name in etex {
+            let src = std::fs::read_to_string(dir().join(format!("{name}.tex"))).unwrap();
+            check_src(name, &src, &runs(&RUNS_ETEX));
+        }
+    }
+}
+
+/// States a piece may be entered in, and texts a command reads across:
+/// `\begingroup` and a conditional open across blank lines, `\global`
+/// at a line's end, a macro's arguments and a definition's body on the
+/// lines after a cut, a paragraph across a cut. TeX's result at every
+/// schedule, cut at blank lines and every three lines.
+#[test]
+fn cutstate() {
+    check("cutstate");
+    let src = std::fs::read_to_string(dir().join("cutstate.tex")).unwrap();
+    for o in RUNS {
+        let o = Options { cut_lines: 3, ..o };
+        let out = Build::new(font()).update(&src, o);
+        assert!(out.errors.is_empty(), "cutstate ({o:?}): {:?}", out.errors);
+    }
+}
+
+/// A group open across a blank line (e-TRIP, etrip.tex lines 147–181):
+/// the definition made inside it ends at its `\endgroup` in the next
+/// piece's text. TeX: `[5]` then `[0]`, no error.
+#[test]
+fn a_group_across_a_blank_line() {
+    let src = "\\catcode`\\{=1 \\catcode`\\}=2 \\begingroup \\count1=5\n\n\\message{[\\the\\count1]}\\endgroup\\message{[\\the\\count1]} \\end\n";
+    for o in RUNS {
+        let out = Build::new(font()).update(src, o);
+        assert!(out.errors.is_empty(), "{o:?}: {:?}", out.errors);
+        let log = phitex_flow::print::log("", &out.log, "");
+        assert!(log.contains("[5] [0]"), "{o:?}: {log}");
     }
 }

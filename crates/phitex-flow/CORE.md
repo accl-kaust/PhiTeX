@@ -219,10 +219,21 @@ both TeX and the graph; `tests/flow.rs`'s `doc()` begins with its catcodes,
 14. **Groups and conditionals across a piece boundary** (a blank line inside
     `\begingroup…\endgroup` or an `\if…\fi`; `\obeylines` or a changed
     `\endlinechar`, where a blank line is not a `\par`): the cut assumes the
-    start state at every blank line. Proposal (brief §6.3): a piece whose
-    predecessor's `End` state is not the start state is re-cut — it runs on
-    from that state. Now: "Missing } inserted at the end of a piece" /
-    "Incomplete \if".
+    start state at every blank line. Done (cuts, below): a piece after a
+    cut is entered in the state the piece before it leaves there (a
+    conditional open, a prefix pending: an entry edge, assumed canonical
+    until that piece has run); a piece leaving a group, a box or a
+    paragraph open, or whose last command reads on past its text, is one
+    piece with the text after it. (A group open across pieces needs the
+    names index to end a definition's reach at a close in a later piece:
+    not yet, so such pieces are joined — decided for now, coordinator
+    2026-10-10. The alternative for later, when a document has a large
+    group whose inside is not a serial chain: visibility by positions and
+    levels — a local definition at level L made in piece k reaches
+    position m iff every piece entry between k and m has depth ≥ L and
+    m's current depth ≥ L; the entry depths are known once the
+    predecessors settle, so it is a reaching-definition rule, not a
+    restore.)
 15. **`\mag` and `true` units** — TeX freezes `\mag` at its first use
     (`mag_set`, a hidden global). Done (F, TRIP): `Key::MagSet`, defined
     globally by `prepare_mag` (a `true` dimension, or a `\shipout` while
@@ -787,6 +798,59 @@ definitions are treated like a moved piece's exports (the existing
 `touched` rule). There is no cycle: a run at `(k, i)` reaches only
 positions after it, and its material is consumed after it.
 
+## Cuts (decided, 2026-10-10)
+
+The cutter proposes where pieces begin; where a run actually stops
+decides. "Where the reader is is itself a read."
+
+- Proposals: a blank line at brace depth 0 (plain catcodes), a job's
+  start, and about every `Options::cut_lines` lines (`CUT_LINES` = 200) a
+  line beginning with a control sequence at brace depth 0, chosen by a
+  hash of the line (at least `n/4` lines after the last cut, at most
+  `4n`): after an edit the cuts fall where the lines are the same. The
+  value is a scheduling knob: every document gives the same result for
+  any (`tests/dvi.rs` `any_cut_gives_tex_s_result`: 3, 20, blank lines
+  only).
+- Entry: a piece after a cut (`Entry::After(prev, ctx)`) is entered in the
+  state the piece before it left there (`RState::entered_after`: the next
+  line's start, the conditionals open as seen from outside, the
+  paragraph-level fields a cut starts afresh with). Until that piece has
+  run the state is assumed: the canonical start, or in a file the start
+  of the file (`ctx`: the state its `\input` left). A run on another
+  state than its predecessor leaves is run again (`entry_holds`, the
+  pieces entered from a piece, `deps`), as any read is.
+- Joins: a run whose last command reads on past its text's end
+  (`Run::crossed`: the reader ran out of the piece's text anywhere but
+  where it looks for the next command — an argument, a definition, a
+  number, a skipped arm), or that leaves a state no piece is entered in
+  (`RState::enterable`: a paragraph, a group, a box, an alignment open),
+  reads on into the texts after it (`Expect::join`, `Build::place_list`):
+  joined with as many as make it twice as long, its run stops at the
+  first place one of them begins where a command begins in a state a
+  piece is entered in (`Env::stop_at`, `Kind::Cut`), and the rest is cut
+  again from there. The joined piece is kept by the next layouts
+  (`Build::known_join`): its run never stops at the first place to say
+  so again. A piece whose predecessor reads on into it does not run.
+- The sequence changes when a run that says otherwise than the layout
+  assumed has settled (all before it final): at once for a join (the
+  pieces after it begin in the middle of a command; runs waiting for an
+  earlier piece stop, the others finish and are kept), else once every
+  piece has settled. A layout ignores a last run entered otherwise than
+  it now says (`old_entry_holds`).
+- A run validates what it read while it runs (`PieceEnv::check`, every
+  4096 steps): a definition made again since — its piece ran again —
+  abandons it; so does a prediction refuted, and a long run on an
+  assumed entry or predictions while a piece before it is not settled is
+  given up (its piece then waits).
+- After a piece that stopped at a fatal error (the hundredth error,
+  "capacity exceeded") the next piece is entered in the assumed state,
+  not that one's (nothing after the error is read; the log ends there).
+  (Defining `Key::Ended` there instead let a speculative run on wrong
+  predictions that met a hundred errors end the layout.)
+- Re-cuts (`Kind::Cut`): a reader passing a blank line at depth 0 in the
+  canonical state where the cutter saw none ends its run there; the rest
+  is cut again.
+
 ## `\input` (decided)
 
 - A file is a value, `Key::File(name)`: the file's bytes are a read, so a
@@ -808,14 +872,23 @@ positions after it, and its material is consumed after it.
   at the end of that line).
 - Line numbers: `(file, line)` is a field of the position, read by
   `\inputlineno` and error contexts, never in a version.
-- Two paths (done). An `\input` that is a command of its own at a piece's
-  top level (vertical mode, no group, box or paragraph open, no text
-  rewritten) ends its node's run and its file's pieces join the sequence
-  (`Build::layout`, entry edges, `\endinput` dropping the later pieces):
-  they run in parallel like the main file's. Anywhere else (inside a
-  group, a box, a paragraph, a macro's expansion, another `\input` read
-  in the piece) the file is read in the piece as a text on the
-  `\scantokens` stack (`TextKind::File`, `Exec::start_input`). Files are
+- Two paths (done). An `\input` fetched as the command itself where the
+  reader is on the piece's own text — the outer vertical list, no group
+  or box open, no rewritten text above it, no `\endinput` pending, not
+  in an output routine, `\everyeof` empty — ends its node's run, whatever
+  is pending: a macro's expansion, a conditional open (`Exec::input_file`).
+  The node logs `(name`; the file's pieces join the sequence, cut as any
+  text is (`Build::place_list`), the first entered with the node's state
+  (`RState::file_start`: the tokens pending set aside), the others after
+  their predecessor (assumed: the file's start); the rest of the calling
+  line enters with the file's last state and the tokens pending
+  (`RState::rest`). A file whose end leaves what the rest of the line goes
+  on with (a paragraph or a group open) or whose last command reads on
+  past it is read in its caller (`Build::inline`). Anywhere else (an
+  `\input` expanded by `\expandafter` or while a command scans, inside a
+  group, a box, a paragraph, another `\input` read in the piece) the file
+  is read in the piece as a text on the `\scantokens` stack
+  (`TextKind::File`, `Exec::start_input`). Files are
   `Key::File(name)` = `Val::Bytes` answered by the build (`Given`: the
   files given in memory with `Build::set_file`, then the input
   directories); `Key::LineBase` is the lines of its own file before a
@@ -1148,15 +1221,21 @@ history, 1187 a split); 1 F6 (big 236); 1 F6 by its cause (big 1153);
 **Open findings** (`tests/fuzz/open/*.repro` must still fail; a fixed one
 moves to `tests/fuzz/fixed/`, which must pass):
 
-- **F1. A second update after an output routine that holds inserts
-  differs.** `tests/fuzz/open/f1-output-second-update.repro` (7 lines,
+- **F1 (fixed, A). A second update after an output routine that holds
+  inserts differs.** Cause (F's root cause): before deciding whether a
+  fire holds, the fold read the last build's routine export at that same
+  fire position (`\global\holdinginserts0`, made by the routine that
+  had not run yet this build). Fixed: at a fire position still predicted
+  (not yet retracted or made again by this build) the fold reads what
+  reaches the node, not its own last definitions there
+  (`read_at_with(.., at_node)`; `BuildFold::fired`).
+  `tests/fuzz/fixed/f1-output-second-update.repro` (7 lines,
   no-op edit): `\holdinginserts1`, a group with an `\output` that sets
   `\global\holdinginserts0`, `\unvbox255\penalty\outputpenalty` and ships
   a `\vsplit`, an `\insert100`, a `\vbox spread 1000pt{}` and a
   `\vadjust{\penalty-5000}`. A cold build ships 4 pages (TeX's 4); the
   same text updated again ships 3, no node running again. In TRIP
-  every update after the first differs (`--fuzz 6 1 1 --threads 1`), so
-  no TRIP edit can be checked until F1 is fixed.
+  every update after the first differed (`--fuzz 6 1 1 --threads 1`).
   *Cause* (traced): the cold build fires three times at node (0,15).
   The first fire reads `\holdinginserts` = 1 and holds the inserts. The
   routine's `\global\holdinginserts0` goes into the names index at
@@ -1170,12 +1249,6 @@ moves to `tests/fuzz/fixed/`, which must pass):
   the hold test. So it reads 0 and does not hold. `find_memo` then finds
   the last build's no-hold run (reads nothing that changed), and one
   fire is lost. One `Pos` holds what all three fires at (0,15) defined.
-  *Fix wanted*: drop the predicted definitions at the fire's position
-  before the page builder's first read for that fire (`\holdinginserts`,
-  `\output`, `\box255`, the insert boxes, §1012–1018). Or make the
-  fold's reads at its own position see only this build's earlier fires
-  there. Several fires at one node probably need a fire index in the
-  position.
 - **F2. A kept node's error context shows the line as it was** (fixed,
   `logs.rs` only: `tests/fuzz/fixed/f2-error-context-line.repro`, an `X`
   inserted after the error on its line;
@@ -1194,11 +1267,17 @@ moves to `tests/fuzz/fixed/`, which must pass):
   seeds 102, 802, 970 and 1187 pass now. Done without a core change: a
   placeholder carrying the error's offset from `diag.rs` would make it
   exact, if A wants it.
-- **F3. After an update of the empty text, no page is shipped again.**
-  `tests/fuzz/open/f3-update-after-empty.repro`: `Build::new`,
+- **F3 (fixed, A, 2c217c3: `tests/fuzz/fixed/`). After an update of the
+  empty text, no page is shipped again.** Fixed with the round changes of
+  the \input-as-pieces slice: a round's page matching compares the pages
+  with the runs that made them (the last build's, `Build::page_runs`),
+  not with the previous round's.
+  `tests/fuzz/fixed/f3-update-after-empty.repro`: `Build::new`,
   `update("")`, then `update("\hsize=100pt\vsize=100pt \font\x=cmr10 \x
   A\par\end")`: no page (a cold build ships one). Every corpus document:
-  0 of its pages (`tests/design.rs` `cold_equals_edit` reports it).
+  0 of its pages (`tests/design.rs` `cold_equals_edit` reported it). The
+  cold path is the edit path by construction (one `update`); the empty
+  build leaves state the next update reads.
   *Cause* (traced): a round that restructures leaves the next round
   comparing the wrong builds. In `Build::update`, a round that returns
   `None` (a run changed the sequence) puts back the last build's pages,
@@ -1208,25 +1287,43 @@ moves to `tests/fuzz/fixed/`, which must pass):
   `same_material` (`Arc::ptr_eq(o, run)`: the same run) and, under "the
   same material throughout: the same pages", takes the last build's
   pages. After the empty text those are none. A smaller case:
-  `tests/fuzz/open/f3-restructured-update-reuses-pages.repro`,
+  `tests/fuzz/fixed/f3-restructured-update-reuses-pages.repro`,
   `\count1=1 \hsize=100pt` + `A\par\end` in one piece, the `1` edited to
   `0`. The edited piece has no old `expect`, and its run ends the job
   (`got.ends`), so round 1 restructures. Round 2 reuses the last build's
   page `[0.1]`, where a cold build ships `[0]`. Any edit in the piece
   holding `\end`/`\bye` restructures the same way.
-  *Fix wanted*: the round after a restructure compares with the last
-  build's runs (keep `old_runs` from the build's first round, as the
-  pages are), or does not take the all-same path when `olds` come from a
-  round of this build.
-- **F4. A second update loses the last page's last line.**
-  `tests/fuzz/open/f4-second-update-last-line.repro` (32 lines cut from
+- **F4 (fixed, A, with F1). A second update loses the last page's last
+  line.** The same cause as F1: the fold's first fire at a predicted
+  position read the last build's routine definitions there; F1's fix
+  fixes it (without it, it fails still).
+  `tests/fuzz/fixed/f4-second-update-last-line.repro` (32 lines cut from
   big's text by delta debugging, no-op edit, both builds 1 thread in
   priority): an `\outer\def` whose body never closes, undefined
   `\alloc@`-style macros, plain's `\footnote` with its `\vfootnote`
   cut, a `\headline` with `\firstmark`, `\vsize=5in`. The cold build
   ends page 2 with the word "which"; the same text updated again ends
   page 2 without it. Like F1, nothing was edited.
-- **F5. A new definer with an equal value re-runs a macro's reader.**
+- **F5 (fixed, A). A new definer with an equal value re-runs a macro's
+  reader.** Fixed in two places. (1) `reached` asks F's predicate: a
+  settled reader whose every read of the name has the value it read
+  (`Run::values_read`, lean runs keep their reads' values now) is not
+  marked, its edge moves to the definer reaching it now (`move_edge`).
+  (2) That alone is not enough: the piece that no longer defines the name
+  runs first, and the new definer has not run yet, so the reader does see
+  another value then and is marked. So when a marked piece is chosen to
+  run, its dirty names are looked at again (`still_dirty`): those whose
+  reads have their values again are dropped (edges moved), and if none is
+  left and it is entered as it was, its run is kept without running
+  (`keep_again`). Correct whatever the order: the edge's source is
+  always the definer reaching it at that moment, so a later change there
+  marks it again. `tests/flow.rs`
+  `a_new_definer_of_the_same_value_reruns_no_reader` (a split moving
+  `\def\fz` and `\hsize` into new pieces runs the two new pieces only,
+  lean or not, Suspend and Speculate). F's repro passed already on this
+  tree (the matcher of F6 runs the split pieces as new); moved to
+  `fixed/` with F3's smaller repro and F6's.
+  Was:
   Story seed 161 step 2 (`--fuzz 161 2 1 --threads 1`): a swap moves
   `\def\fz{lazy}` into a new piece (id 134 for 133). Piece "\medskip
   \noindent{\bf EXERCISE 1.1}" runs 29 of its 77 nodes, from n48, the
@@ -1241,7 +1338,7 @@ moves to `tests/fuzz/fixed/`, which must pass):
   only changed read is `\hsize` = 14208860 from piece 137 instead of
   133. Story seed 1127 (8 threads) is the swap again. So some reads
   compare the definer's piece, not the value.
-  `tests/fuzz/open/f5-new-definer-equal-value.repro` (cut down from
+  `tests/fuzz/fixed/f5-new-definer-equal-value.repro` (cut down from
   hyphens 830): `\vsize=2in \hsize=3in \tolerance=1000` split into two
   pieces before `\tolerance`, so `\hsize` now comes from a new piece with
   the same value. The `\tolerance` piece runs 2 of its 3 nodes again.
@@ -1264,14 +1361,27 @@ moves to `tests/fuzz/fixed/`, which must pass):
   with `changed=[Hsize]` (marks piece 3), then the new piece 2 with
   `changed=[Hsize]` (marks piece 3 again); piece 3 reads `\hsize` =
   3in both times.
-- **F6. Big: the order of a cold build changes its output.** At 1
+- **F6 (fixed, A). Big: the order of a cold build changes its output.**
+  Cause (F's root cause): a restructure left pieces without runs, the
+  next layout's `Matcher` indexed only pieces with runs, and its
+  equal-text fallback gave a piece another place's run (the second of two
+  equal paragraphs, which had read `\hsize=100pt`), kept as `Done` with
+  its definer now after it. Fixed: every last build's piece is indexed by
+  its text's `Arc` (a piece keeps its own place, run or not); an equal
+  text is taken as its own only right after the last piece taken (a text
+  cut again near an edit), and another place's run is never kept as it is
+  — the piece runs from it, every kept node's reads looked at again
+  (`Spec::moved`). Restructures now also wait for the runs to settle.
+  `tests/order.rs`: big at 1 worker random:400 and 8 workers random:7, and
+  F's six-piece repro at 40 orders.
+  Was: At 1
   worker, waiting reads, `Order::Random(400)` gives another DVI and log
   than priority order, every time (`tests/design.rs`
   `the_same_output_at_any_w` reports it); at 8 workers,
   `Order::Random(7)` does about one run in eight. Big seed 236 (`--fuzz
   236 1 1 --threads 1`) is it: its first build ran in that order. The
   smaller documents do not show it.
-  `tests/fuzz/open/f6-order-moves-a-run.repro`, 6 pieces: `\hsize=300pt`;
+  `tests/fuzz/fixed/f6-order-moves-a-run.repro`, 6 pieces: `\hsize=300pt`;
   paragraph P; `\hsize=100pt`; P again (the same text); `\input fzsub`;
   `\end`. `phitex-flow --fuzz-orders story FILE random:9 priority` says
   "differs": in random order the first P is broken at 100pt.
@@ -1411,7 +1521,52 @@ First local table (5 repetitions, median ms):
 - The one-page documents miss the 25% rule on any edit (cold ≈ 20–30 ms,
   an edit 3–7 ms).
 
-- **F7. An `\input` added by an edit stops the update at the file**
+**F's F7 (fixed, A). An `\input` added by an edit never completes**
+(bisected by F to 2c217c3; 1203 of 5000 cluster seeds).
+`tests/fuzz/fixed/f7-input-added-in-update.repro`: the update printed
+`(./fzsub.tex` and stopped. Cause: the edited piece's run ran again from
+its old chain, and a kept node could be the run's end at a `Kind::Input`
+(or `Kind::Cut`) whose file was laid out as pieces or not by the last
+layout, so the new layout's decision was never asked again. Fixed in
+29b6919 (a node ending a run at a cut or an `\input` is never kept:
+`run_piece`'s `par_ok`). `tests/fuzz/fixed/f7-input-added-hang.repro`
+(big seed 565): a deadlock under Suspend at one thread. A run waiting for
+a definition of piece d, d not started and not enterable yet (its entry
+pieces not run), parked; but its thread was the only one, running it
+nested in the runs it had leapfrogged. Now it runs the first piece before
+d that can be entered (`reach_now`), as an undefined name's wait already
+did.
+
+**B's F7 (fixed, A). A fire between a piece's nodes ran the piece again
+from its first reader.** Each time the output routine fires it defines
+names between the piece's nodes (`\vsize`, `\count0`, `\@colht` at
+`(k,i)`). `reached` marked every reader of those names in piece k (its
+edge is its first reader's, before the fire or not), and a lean piece has
+no nodes to keep: the piece ran again whole at every fire (titlepage, one
+piece of five pages, 78k commands for its 20k). Now (1) dirty names are
+positional (`Dirty`: a name, the first node it may reach): a definition at
+`(k,i)` marks piece k from node `i + 1` (`changed_at`, `mark_from`), and
+`run_piece` takes only the readers from there as dirty; `reached` leaves
+the piece's own nodes to `changed_at`. (2) A piece keeps its nodes until
+the scan has passed it (`PState::lean_later`), so a fire runs only the
+nodes after it. titlepage 78k -> 25k commands at one thread (sections
+35k -> 28k); `tests/flow.rs`
+`a_fire_between_a_pieces_nodes_reruns_only_the_nodes_after_it` (12 pages
+in one piece, every line reading `\count0`: 5629 -> 752 commands of
+433). Still 0.5–0.8 s cold per document: the per-command cost, not
+reruns.
+
+**F8 (open, A). An edit of TRIP that never ends.** Found once F1 let
+TRIP's updates be checked: `tests/fuzz/hang/f8-trip-edit-hangs.repro`
+(TRIP seed 1 step 3, `--fuzz 1 3 1 --doc trip`): a character of
+`\hbox to 23pt{} % output now` replaced (`23st`). The update runs a
+piece again and again (a worker in `run_piece`, the round waiting), at
+any schedule (1 thread, Suspend, priority too). Pre-existing: 72ee98e
+hangs the same. Not in `open/` (its replay does not end); a timeout's
+reproduction names its step now (`fuzz::run_seed_at`).
+
+F's report of it (F7):
+- **F7 (fixed, A: above). An `\input` added by an edit stops the update at the file**
   (a regression on the gate head, from A's 2c217c3, "\input anywhere
   the reader is on the piece's own text is pieces"; flow-trip has not
   merged it and passes). Seen in the cluster run of 5000 seeds (job 7722,
@@ -1828,6 +1983,96 @@ Gaps:
   before the definition's place, so the piece runs again from its first
   reader, once per round. The session had the same reruns (hidden in the
   format's 45 s).
+
+## Single-thread cost (agent P)
+
+Why one thread of the graph is slower than TeX, measured (2026-10-10,
+release build, `-j 1`, `perf stat -e cycles:u,instructions:u` inside
+`scripts/sandbox`; the machine is shared, so cycles move by 10-20% from
+run to run and instructions are the steadier figure).
+
+**Against TeX on this machine.**
+
+| document | graph | TeX | cycles |
+|---|---|---|---|
+| `latex.ltx` as a format (`etex -ini -etex`) | 41.5 s, 107.8G cycles, 190.8G instructions | 10.8 s, 28.8G, 71.2G | 3.75x |
+| big2 (IniTeX prelude, 616 kB of text; `tex -ini`) | 0.98 s, 2.54G, 4.36G | 0.19 s, 0.38G, 0.65G | 6.7x |
+| sections on the saved format (`latex`) | 0.68 s, 1.47G | 0.165 s, 0.45G | 13x the document's own work |
+| titlepage on the saved format | 2.24 s, 5.42G | 0.14 s, 0.44G | 50x the document's own work |
+
+`etex -ini` takes 10.8 s on `latex.ltx` here, not about 1 s: the expl3
+Unicode-data block is as slow in TeX. `latex` spends 0.34G of its
+0.38-0.45G cycles loading its format (a bare `\stop`), so a document's
+own work is 40-110M cycles in TeX. The documents' other factor is
+commands run per command: 1.9x (sections), 4x (math, figures), 5x
+(tables), 9x (titlepage) — the reruns from definitions between a piece's
+nodes (LaTeX documents, gaps). Per command run the graph costs about 6x
+TeX; on `latex.ltx` 34k cycles a command against 9.2k.
+
+**Per token.** `latex.ltx` hands out 228M tokens (2.8M of them made
+from characters, the rest from rewritten lists; arguments taken in one
+go are not counted): 177 ns a token, `etex` 47 ns over the same count.
+A token is a plain value (`Tok` holds no counted handle); about 0.5
+counted-handle increments a token come from the lists: a macro's
+meaning cloned per call (31M), the body and argument handles, the
+input lists' cells.
+
+**Counts** (temporary counters, not in the code).
+
+| | `latex.ltx` | big2 |
+|---|---|---|
+| nodes | 3.13M | 199k |
+| reads a node | 15.6 | 9.6 |
+| definitions a node | 0.30 | 0.04 |
+| allocations a node | 71 | 9.2 |
+| bytes allocated a node | 6.7 KB | 3.4 KB |
+| macro calls / expansion steps | 29.0M / 32.5M | 8k / 12k |
+| input-list cells (one allocation each) | 52.7M | 102k |
+| argument arrays (`Arc<[Arg]>`) | 20.7M | 4k |
+| one-token lists put back (`Exec::back`) | 26.0M | 94k |
+| outer-ness reads (one a token scanned in an argument or definition) | 88.9M | 2k |
+| reads through `Known` / `Chain::resolve` | 44.7M / 4.3M | 0 / 1.9M |
+
+In big2 every read goes `Chain::resolve` (a miss in `defs_of`), then
+the run's `Outside` map (80% hits), the rest to the names index:
+`Known` is off in pieces under 256 nodes (they average 83).
+
+**By phase** (perf -g on a frame-pointer build, each sample under the
+innermost phase on its stack: the allocator, hashing and counted
+handles are charged to the phase that called them).
+
+| phase | `latex.ltx` | big2 |
+|---|---|---|
+| the input lists and argument scanning (`next_raw0`, `Pending`, `Cursor`, `call`) | 46% | 2% |
+| name lookup (`find`, `resolve_shared`, `Chain::resolve`, `Outside`, the names index) | 20% | 39% |
+| expansion primitives (`\expandafter`, `\csname`, conversions, `\the`, conditionals) | 17% | 1% |
+| node recording (`Exec::new`/`finish`, the chain's indices, dropping nodes) | 7% | 10% |
+| a piece's end (exports, sorting its reads) | 2.5% | 9.5% |
+| install (validation, the readers map) | 2.4% | 10% |
+| commands (material, assignments) | 1% | 9.5% |
+| line breaking, the page fold, DVI | 0% | 12% |
+| tokenizing characters | 1.2% | 2% |
+
+Also: dropping a lean piece's 3.1M nodes is 5.9% of `latex.ltx`; the
+growth of `Vec<Tok>`s (realloc) about 4%. On titlepage a node's
+definitions scanned key by key (`Chain::resolve`, `scope_of`: `Key::eq`
+16% inclusive) and the walk of TeX Live's whole TFM tree at the first
+`\font` (`tfm::Index`, 0.28 s) stand out; on B's tikz document the
+first is 62%.
+
+**Changes** (each its own commit; results unchanged, the before and
+after on the same base):
+
+1. *A node's definition of a name found by index.* `Chain::defs_of`
+   holds, per key, each defining node once with the index of its last
+   definition of the key (the one `Chain::resolve` took by scanning the
+   node's definitions backwards, `Key::eq` each); `resolve`,
+   `scope_of`, `Run::leaned` and the routine's `after_close` read it.
+   A φ at the `\fi` of a long arm defines every name the arm changed,
+   and each later read reaching it scanned them all. Instructions
+   (before → after): tikz 759G → 207G (149 s → 40 s), titlepage 8.41G →
+   7.22G, sections 2.72G → 2.54G, `latex.ltx` 190.8G → 189.2G, big2
+   unchanged; DVIs identical.
 
 ## The inventory
 

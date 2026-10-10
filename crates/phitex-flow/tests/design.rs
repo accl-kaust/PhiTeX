@@ -72,8 +72,8 @@ fn same(a: &Output, b: &Output) -> bool {
 // ------------------------------------------- 1. a segment starts from zero
 
 /// A piece's entry names where it starts, never a state copied in: the
-/// canonical start, or the state an `\input` node left (an edge of the
-/// graph). The structures say so: `Entry` holds piece indices only; the
+/// canonical start, or the state an `\input` node or the piece before a
+/// cut left (an edge of the graph). The structures say so: `Entry` holds piece indices only; the
 /// start is `RState::start()`, made from nothing; `RState` holds no
 /// name's value (every name is a read, resolved through the graph).
 #[test]
@@ -88,10 +88,10 @@ fn a_segment_start_reads_zero_state() {
         .collect();
     assert_eq!(
         variants,
-        ["Start,", "File(usize),", "Rest(usize, Option<usize>),"],
+        ["Start,", "File(usize),", "Rest(usize, Option<usize>),", "After(usize, Option<usize>),"],
         "a piece's entry is the start or an edge to a piece, never state"
     );
-    let state = item(&build_rs, "fn entry_state(");
+    let state = item(&build_rs, "fn entry_state_in(");
     assert!(state.contains("Entry::Start => RState::start(),"), "{state}");
 
     let graph_rs = code(&source("graph.rs"));
@@ -111,7 +111,10 @@ fn a_segment_start_reads_zero_state() {
         for h in o.dump.lines().filter(|l| l.starts_with("piece ")) {
             n += 1;
             assert!(
-                h.contains("entered Start;") || h.contains("entered File(") || h.contains("entered Rest("),
+                h.contains("entered Start;")
+                    || h.contains("entered File(")
+                    || h.contains("entered Rest(")
+                    || h.contains("entered After("),
                 "{}: {h}",
                 doc.name
             );
