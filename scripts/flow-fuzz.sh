@@ -19,7 +19,7 @@
 # saved format, made once into OUT/latex.fmt): SEEDS seeds (default 30)
 # of each document, one chunk a document, at 1 or 8 threads at random
 # (each chunk takes 8 processors: JOBS defaults to nproc/8); MIN
-# defaults to 0.
+# defaults to 0. MIN=timeouts cuts down one of each timeout class only.
 # DOCS="trip pages ...": the plain corpus's documents named only, each by
 # `--doc` (its own seeds: seed N is not the same case as without DOCS),
 # in chunks of 50 seeds, SEEDS of each at 1 thread and SEEDS/5 at 8.
@@ -141,9 +141,20 @@ if [ -s "$OUT/repros.txt" ]; then
 fi
 echo "== classes"
 cut -f1 "$OUT/classes.txt" | sort | uniq -c | sort -rn | tee "$OUT/classes-count.txt"
-if [ "$MIN" = 1 ]; then
+# (each reproduction under its class: OUT/by-class/CLASS/, the class's
+# words joined by '-', what follows " | " left out)
+while IFS=$'\t' read -r c f; do
+	d="$OUT/by-class/$(printf '%s' "${c%% | *}" | tr -c 'A-Za-z0-9?.\n' '-' | tr -s '-')"
+	mkdir -p "$d"
+	cp "$f" "$d/"
+done <"$OUT/classes.txt"
+# (MIN=1: one of each new class cut down; MIN=timeouts: of the timeout
+# classes only, while the last edit alone hangs)
+if [ "$MIN" = 1 ] || [ "$MIN" = timeouts ]; then
 	mkdir -p "$OUT/min"
-	cut -f1 "$OUT/classes.txt" | sort -u | grep -v -e '^F1 ' -e '^F6 ' -e '^F2? ' -e '^passes' | while IFS= read -r c; do
+	only='.'
+	[ "$MIN" = timeouts ] && only='^timeout '
+	cut -f1 "$OUT/classes.txt" | sort -u | grep -e "$only" | grep -v -e '^F1 ' -e '^F6 ' -e '^F2? ' -e '^passes' | while IFS= read -r c; do
 		f=$(C="$c" awk -F'\t' '$1 == ENVIRON["C"] { print $2; exit }' "$OUT/classes.txt")
 		name=$(basename "$f" .repro)
 		[ -n "$f" ] || continue

@@ -1,0 +1,18 @@
+\documentclass{article}
+\usepackage{listings}
+\usepackage{fancyvrb}
+\lstset{basicstyle=\small\ttfamily,numbers=left,frame=single}
+\begin{document}
+\section{Code}
+\begin{lstlisting}[language=C]
+int main(void) {
+    /* a comment */
+    return 42;
+}
+\end{lstlisting}
+Inline \lstinline|x = y + 1;| code.
+\begin{Verbatim}[frame=single,numbers=left]
+Verbatim text   with    spaces
+and a second line
+\end{Verbatim}
+\end{document}

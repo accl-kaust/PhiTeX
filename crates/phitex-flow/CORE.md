@@ -6,6 +6,27 @@
 
 Pure, link them: partex-kpse (kpathsea: texmf.cnf, ls-R, path search; the input finder the CLI gives the build), partex-otf (OpenType faces/shaping/OT math/TECkit; X, and Q for TrueType embedding), partex-xdvipdfmx (XDV→PDF byte for byte; X's backend; its image readers are dvipdfmx's, for the PDF it writes: XeTeX's pictures are measured by XeTeX's own readers, X's xpic.rs copy, not dvipdfmx's, and pdfTeX's by pdfTeX's), phitex-codecs (inflate, md5, png, pdfread, pdftext, zlib crc; yours), partex-bibtex and partex-makeindex (in-process, between fixpoint runs), phi (allowed, unused), phitex-syntax/doc/draw/diff/git (CLI/viewer).
 
+**The file finder is a given of the build, never a node** (agent K).
+`kpse::Kpathsea` is `tfm::Kpse` over partex-kpse: kpathsea's own lookup
+(texmf.cnf, the `ls-R` databases, `kpse_find_file(name, format, false)`
+as the program `Build::set_kpse` names: `kpsewhich -progname=PROG
+-format=FORMAT NAME` is its oracle, `tests/kpse.rs`), each `KpseFormat`
+kpathsea's of the same name. The CLI makes one per engine and tree
+(`tex::Tree`; a format's build one that never searches `.`) and gives it
+to every build: `\input`/`\openin` names (format `tex`, after the input
+directories: web2c's `-output-directory`), TFM files (`tfm`) and PDF
+output's files (`map`, `type1 fonts`, `enc files`… by extension) are
+database lookups, and no build walks TeX Live's tree. Where TeX Live is
+(`SELFAUTOLOC`, kpsewhich on `PATH`) is the caller's to find, never the
+library's, which runs no process (`tests/wall.rs`): the CLI always gives
+the finder, the `phitex-flow` binary unless `--no-kpse` (`--kpse PROG`
+names the program), the tests through `tests/common` (`give_kpse`; off
+with `PHITEX_NO_KPSE=1`). A build given no finder walks TeX Live's
+directories as before (`tfm::Index`, `tfm::pdf_file`): the fallback.
+What a lookup finds changes nothing about reads: the path's bytes are the
+`Key::File` read exactly as before (a font's, a PDF file's, as the build's
+`Env::font_file` and the fold's `Files`), so the graph keeps its shape.
+
 Never link, deleted: partex-core, partex-engine, partex-incr, partex-ssa, partex-trace, phitex-ir, partex-cli; copy pure bodies only, naming the source file in the commit.
 
 ## The command set
@@ -876,6 +897,14 @@ at that node (`Names::read_now`/`read_holds`, the one check install and
 `still_dirty` make; the names index answered it twice: 5e3ea81 at
 install, then `reads_still`, which dropped a refuted file read's mark).
 
+Invariant: a written file's content at a read is what the writes that
+reached it in this build's sequence wrote, kept pages included: the
+routines' call logs (their deferred `\write`s among them) are kept with
+the pages and marks (`Build::call_logs`), all of them when every page
+is kept, those before the scan's and after its convergence otherwise
+(B2 had let a LaTeX document keep its pages without them: run 2 of the
+fixpoint wrote the `.aux` without a kept page's `\@writefile`).
+
 - **The read** (`graph::Env::fold_read`, `Names::fold_value`): answered
   with the fold's value at `(piece, node)` as known — this build's,
   else the last build's (`Build::fold_vals`, by piece id and node),
@@ -959,9 +988,10 @@ install, then `reads_still`, which dropped a refuted file read's mark).
   the output routine's lists carry no origins (their items lead to the
   node that made the whole); TeXXeT's reversed lines are approximate.
 - **Files by kpathsea** (`tfm::Kpse`, X's shape; `Build::set_kpse(kpse,
-  prog)`): a given of the build — a name becomes a path by kpathsea's
-  lookup (format `tex`, the program's name) instead of the input
-  directories; reads stay `Key::File`.
+  prog)`, `kpse::Kpathsea`): a given of the build — a name becomes a path
+  by kpathsea's lookup (format `tex` after the input directories, `tfm`
+  for fonts, the PDF files' formats; the program's name); reads stay
+  `Key::File` (see "Crates").
 
 ## `\input` (decided)
 
@@ -1574,6 +1604,26 @@ piece 0.
 seeds (1) of one edit on tiny, compared with the cold build and with
 `latex` itself on its first run (DVI with the date masked, `.aux`). Locally, 3 seeds of 2 edits at 8
 threads (random schedules) passed, and so did seed 0 against `latex`.
+
+**300 LaTeX seeds** (job 7878: `LATEX=1 JOBS=6 TIMEOUT=180
+scripts/flow-fuzz.sh 30`, 30 seeds of 6 edits on each of B's ten
+documents, at 1 or 8 threads at random, on the saved format; snapshot
+89f3a41 = 96bdfcc with the timeout-resume and OUT fixes, before
+A's W2 and keep_again fixes): 229 passed, 0 over-invalidated, 71 failed.
+- **Over-invalidation: none.** The check runs on the seeds that keep
+  their nodes (a third), now that the graph holds only the document's
+  nodes.
+- **69 timeouts** (180 s a seed): gfx 30 of 30, rules 12, titlepage 7,
+  packages 7, math 7, tables 2, ams 2, sections 1, figures 1; layout
+  none. gfx fails at step 2–4 whatever the edit or schedule, so it may
+  be slowness (W3: gfx 40 s through the CLI) rather than a hang; the
+  others are mostly blank lines in or out. To be told apart: each
+  replayed alone with a longer limit.
+- **2 DVI mismatches**, the update against our cold build: ams seed 24
+  step 3 (the class option toggled) and rules seed 10 step 3 (an `\item`
+  removed). The log first differs at a `Package:` line (amsmath,
+  caption).
+- The repros are in `~/code/flinner/partex-phitex-runs/cmd-7878/fuzz-latex/latex/`.
 The budgets table gets LaTeX rows (`phitex-flow --budgets REPS latex`
 for all of them, `latex-NAME` for one; `tests/budgets.rs` runs tiny once).
 The edits are word, line, page-break, the `\newcommand` body (def) and
@@ -1746,8 +1796,7 @@ any schedule (1 thread, Suspend, priority too). Pre-existing: 72ee98e
 hangs the same. Not in `open/` (its replay does not end); a timeout's
 reproduction names its step now (`fuzz::run_seed_at`).
 
-**T1 (open, A). Plain-document and TRIP edits that never end.** Fuzz
-subset 7853 ran 300 seeds at 1 thread and 60 at 8 on each of trip,
+*T1 on plain documents too.* Fuzz subset 7853 ran 300 seeds at 1 thread and 60 at 8 on each of trip,
 pages and table, with a 120 s limit per seed, on a50fa8a. 43 timeouts:
 42 trip and 1 pages; table had none. The log is not compared, so the 9
 log-only failures do not count. By edit kind the trip timeouts are 21
@@ -1792,8 +1841,8 @@ F's report of it (F7):
   the update never ends). B's bac0a76 does not contain 2c217c3, and both
   repros pass on it.
 
-**F9 (log only, A, core). A kept node in an edited piece reads its old
-line.** The log is not compared any more (the bar is the DVI/PDF and the
+**F9 (fixed by A, as F8 above: `run_piece`'s `line_ok`). A kept node in
+an edited piece reads its old line.** The log is not compared any more (the bar is the DVI/PDF and the
 written files), so F9 fails no seed. Its repro is kept, not replayed, in
 `tests/fuzz/log-only/`, for when a line number reaches a written file
 (an `.aux` `\write` of `\the\inputlineno` would). Found by the LaTeX fuzz: tiny seed 2, with `\usepackage{ifthen}`
