@@ -4,7 +4,7 @@ use std::sync::PoisonError;
 
 use crate::engine::{
     AssumeKind, Effect, End, Engine, EvalError, K_FIELD, K_LOOP, K_OUTPUT, Locality, NIL, NodeId, OpId, RunResult,
-    Slot, Use, eff_code,
+    Slot, Use, eff_code, eff_kind,
 };
 use crate::hash::{FxHashMap, hash_words};
 use crate::value::{Field, ValueId, Values};
@@ -34,6 +34,7 @@ pub struct Ctx<'a> {
     contribs: Vec<(Field, ValueId)>,
     watch: Option<(Field, Slot, ValueId)>,
     effect: Option<u8>,
+    kind: Option<ValueId>,
     claim: Option<usize>,
     assumptions: Vec<(Slot, AssumeKind, ValueId)>,
     sig: u64,
@@ -60,6 +61,7 @@ impl<'a> Ctx<'a> {
             contribs: Vec::new(),
             watch: None,
             effect: None,
+            kind: None,
             claim: None,
             assumptions: Vec::new(),
             memo: Default::default(),
@@ -276,6 +278,25 @@ impl<'a> Ctx<'a> {
     /// Resolves this node's pending scope effect.
     pub fn set_effect(&mut self, e: Effect) {
         self.effect = Some(eff_code(e));
+        self.kind = eff_kind(e);
+    }
+
+    /// Whether this node's scope effect is pending (decided by its run).
+    #[must_use]
+    pub fn effect_pending(&self) -> bool {
+        self.eng.n(self.slot).has_dyn_effect()
+    }
+
+    /// The kind of this node's innermost enclosing scope (`None`: no kind,
+    /// or at the unit's top level). A binding to that scope's opener: known
+    /// once the opener's effect is.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] while the opener is not settled.
+    pub fn scope_kind(&mut self) -> Result<Option<ValueId>, Stop> {
+        let f = self.eng.kind_field;
+        Ok(self.use_field(f)?.filter(|&k| k != ValueId::UNIT))
     }
 
     /// Resolves this node's pending claim: it claims the next `n` siblings.
@@ -437,6 +458,7 @@ impl<'a> Ctx<'a> {
             contribs: self.contribs,
             watch: self.watch,
             effect: self.effect,
+            kind: self.kind,
             claim: self.claim,
             assumptions: self.assumptions,
             sig: self.sig,

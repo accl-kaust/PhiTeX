@@ -106,10 +106,29 @@ pub enum Locality {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Effect {
     None,
+    /// Opens a scope after the node (`Brackets { opens: 1, .. }`).
     Open,
+    /// Closes a scope after the node.
     Close,
     /// Known only when the node runs ([`Ctx::set_effect`]).
     Pending,
+    /// The general form.
+    Scope(Brackets),
+}
+
+/// A node's brackets: it closes `closes` scopes, then opens `opens`, either
+/// after itself (like `begin`/`end`) or `before` itself (the node then lies
+/// inside what it opens and outside what it closes). An opened scope may
+/// carry a `kind` (an opaque client tag), which nodes inside it read with
+/// [`Ctx::scope_kind`].
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct Brackets {
+    /// At most 3.
+    pub closes: u8,
+    /// At most 3.
+    pub opens: u8,
+    pub before: bool,
+    pub kind: Option<ValueId>,
 }
 
 /// Extent of a node's claim on its following siblings, from the text.
@@ -385,8 +404,18 @@ const PREFIX_SEED: u64 = 0x9e37_79b9;
 const F_REBIND: u16 = 32768;
 
 const EFF_NONE: u8 = 0;
-const EFF_OPEN: u8 = 1;
-const EFF_CLOSE: u8 = 2;
+// Effect codes: closes in bits 0-1, opens in bits 2-3, `before` in bit 4.
+const EFF_CLOSE: u8 = 1;
+const EFF_OPEN: u8 = 4;
+const EFF_BEFORE: u8 = 16;
+
+fn eff_closes(e: u8) -> u32 {
+    u32::from(e & 3)
+}
+
+fn eff_opens(e: u8) -> u32 {
+    u32::from((e >> 2) & 3)
+}
 
 /// The node record (under 128 bytes; rare data lives in `Aux`).
 pub(crate) struct Node {
@@ -425,6 +454,10 @@ impl Node {
             .filter(|v| *v != ValueId::NONE)
     }
 
+    pub(crate) fn has_dyn_effect(&self) -> bool {
+        self.has(F_EFF_DYN)
+    }
+
     pub(crate) fn in_work(&self) -> bool {
         matches!(self.state, State::Dirty | State::Spec | State::Parked)
     }
@@ -456,6 +489,10 @@ pub(crate) struct Aux {
     /// What a pending node is indexed under.
     pend_fields: Option<PendIx>,
     claimed_by: Option<Slot>,
+    /// The kind of the scope this node opens (`None`: no kind).
+    kind: Option<ValueId>,
+    /// For a pending effect: the effect the bindings around it reflect.
+    eff_bound: u8,
     pub(crate) body: Option<u32>,
     assumers: Vec<Assume>,
     assume_left: u32,
@@ -501,8 +538,8 @@ impl Aug<OItem, OSum> for OAug {
 
     fn leaf(&self, i: &OItem) -> OSum {
         OSum {
-            c: u32::from(i.eff == EFF_CLOSE),
-            o: u32::from(i.eff == EFF_OPEN),
+            c: eff_closes(i.eff),
+            o: eff_opens(i.eff),
             work: u32::from(i.work),
             maxh: i.h,
             pend: u32::from(i.pend),
@@ -732,6 +769,8 @@ pub struct Engine {
     settle_pending: Vec<(u32, u64)>,
     parked: BTreeSet<(NodeId, Slot)>,
     roots: FxHashSet<Slot>,
+    /// The hidden field an opener defines inside its scope: its kind.
+    pub(crate) kind_field: Field,
     /// Live memoized applications, and how many there were after the last
     /// collection (see `collect_apps`).
     apps_live: usize,
@@ -814,8 +853,10 @@ impl Iterator for Following<'_> {
 impl Engine {
     #[must_use]
     pub fn new() -> Self {
+        let values = Values::new();
+        let kind_field = values.field("\u{1}scope-kind");
         let mut e = Engine {
-            values: Values::new(),
+            values,
             ops: Vec::new(),
             nodes: Vec::new(),
             free_slots: Vec::new(),
@@ -851,6 +892,7 @@ impl Engine {
             settle_pending: Vec::new(),
             parked: BTreeSet::new(),
             roots: FxHashSet::default(),
+            kind_field: Field(ValueId::NONE),
             apps_live: 0,
             apps_at_collect: 0,
             claim_dirty: FxHashSet::default(),
@@ -870,6 +912,7 @@ impl Engine {
         };
         e.open_op = e.register(Arc::new(Marker(Effect::Open)));
         e.close_op = e.register(Arc::new(Marker(Effect::Close)));
+        e.kind_field = kind_field;
         e
     }
 
@@ -1286,6 +1329,9 @@ impl Engine {
             } else {
                 eff_code(eff)
             };
+            if eff != Effect::Pending {
+                self.ax(s).kind = eff_kind(eff);
+            }
             self.change_effect(s, new_eff);
             self.make_dirty(s);
             self.sync_pending(s);
@@ -1481,6 +1527,7 @@ impl Engine {
         if region {
             self.effect_region_changed(s, EFF_NONE);
         }
+        self.set_kind(s, eff_kind(eff));
     }
 
     /// Phase 3: definitions, pending structure, initial height, claims.
@@ -1770,15 +1817,28 @@ impl Engine {
         self.n(d).defs.iter().any(|x| x.field == f && x.global)
     }
 
-    /// The reaching definition of `f` for a use at `label`, and the nearest
-    /// pending node the walk crosses.
+    /// Whether the node at `label` lies after its own brackets.
+    fn brackets_before(&self, root: u32, label: u64) -> bool {
+        self.order.get(root, label).is_some_and(|i| i.eff & EFF_BEFORE != 0)
+    }
+
+    /// The scope depth at which the node at `label` defines `f`: where the
+    /// node lies (after its brackets if they come before it), except that
+    /// an opener's kind is defined inside the scope it opens.
+    fn def_depth(&self, root: u32, label: u64, f: Field) -> u32 {
+        let inside = f == self.kind_field || self.brackets_before(root, label);
+        self.order
+            .fold(&OAug, root, 0, if inside { label + 1 } else { label })
+            .o
+    }
+
     fn ix_insert(&mut self, unit: u32, f: Field, label: u64, x: Slot) {
         self.defs_ix.insert((unit, f, label), x);
         if self.def_global(x, f) {
             self.global_ix.insert((unit, f, label), x);
         } else {
             let root = self.units[unit as usize].root;
-            let depth = self.order.fold(&OAug, root, 0, label).o;
+            let depth = self.def_depth(root, label, f);
             self.local_ix.insert((unit, f, depth, label), x);
             self.local_depth.insert((unit, f, label), depth);
         }
@@ -1800,16 +1860,27 @@ impl Engine {
         count!(Walk);
         let root = self.units[unit as usize].root;
         let mut local: Option<(u64, Slot, u32)> = None;
-        let mut depth = self.order.fold(&OAug, root, 0, label).o;
+        // Brackets up to `bhi` (exclusive) enclose the use: a node whose
+        // brackets come before it lies after them, except that the kind it
+        // reads is that of the scope around its brackets (which its own
+        // effect depends on).
+        let mut bhi = if f != self.kind_field && self.brackets_before(root, label) {
+            label + 1
+        } else {
+            label
+        };
+        let mut depth = self.order.fold(&OAug, root, 0, bhi).o;
         let mut hi = label;
         loop {
             count!(WalkLevel);
             let opener = if depth == 0 {
                 None
             } else {
-                self.order.search_back(&OAug, root, hi, &|s: OSum| s.o >= 1)
+                self.order.search_back(&OAug, root, bhi, &|s: OSum| s.o >= 1)
             };
-            let lo = opener.map_or(0, |k| k + 1);
+            // The opener's own definitions inside its scope (its kind, or
+            // all of them if it opens before itself) count at this level.
+            let lo = opener.unwrap_or(0);
             if let Some((&(_, _, _, l), &d)) = self
                 .local_ix
                 .range((unit, f, depth, lo)..(unit, f, depth, hi))
@@ -1820,7 +1891,10 @@ impl Engine {
             }
             match opener {
                 Some(k) if depth > 0 => {
-                    hi = k;
+                    // The opener's definitions outside its scope count at
+                    // the next level out.
+                    bhi = k;
+                    hi = (k + 1).min(hi);
                     depth -= 1;
                 }
                 _ => break,
@@ -1910,19 +1984,23 @@ impl Engine {
     /// a definition of `f` lies in that range or a close is ignored there;
     /// effects sharing an outermost scope are checked once.
     fn walk_effects(&self, unit: u32, f: Field, site: u64, label: u64) -> Option<(u64, Slot)> {
-        self.pending_eff.range((unit, site + 1)..(unit, label)).next()?;
+        let (&(_, first), &first_s) = self.pending_eff.range((unit, site + 1)..(unit, label)).next_back()?;
+        if f == self.kind_field {
+            // A pending effect may open a scope, defining a nearer kind.
+            return Some((first, first_s));
+        }
         let root = self.units[unit as usize].root;
-        if self
-            .defs_ix
-            .range((unit, f, site + 1)..(unit, f, label))
-            .next()
-            .is_none()
+        // The site itself counts: a pending close may hide it.
+        if self.defs_ix.range((unit, f, site)..(unit, f, label)).next().is_none()
             && self.order.fold(&OAug, root, site + 1, label).c == 0
         {
             return None;
         }
         let mut hi = label;
         loop {
+            if hi <= site + 1 {
+                return None;
+            }
             let (&(_, p), &s) = self.pending_eff.range((unit, site + 1)..(unit, hi)).next_back()?;
             match self.effect_scope(unit, p, label, f) {
                 Ok(()) => return Some((p, s)),
@@ -2055,8 +2133,16 @@ impl Engine {
     }
 
     /// Makes `x`'s registered definitions equal `new`, re-binding uses.
+    /// Sets the client definitions of `x` (its scope kind is kept).
     fn set_defset(&mut self, x: Slot, new: &[(Field, bool)]) {
-        let old: Vec<(Field, bool)> = self.n(x).defs.iter().map(|d| (d.field, d.global)).collect();
+        let kf = self.kind_field;
+        let old: Vec<(Field, bool)> = self
+            .n(x)
+            .defs
+            .iter()
+            .filter(|d| d.field != kf)
+            .map(|d| (d.field, d.global))
+            .collect();
         for &(f, g) in &old {
             if !new.contains(&(f, g)) {
                 self.remove_def(x, f);
@@ -2124,7 +2210,7 @@ impl Engine {
                     prev.push((d, u64::MAX));
                     break;
                 }
-                let depth = self.order.fold(&OAug, root, 0, ld).o;
+                let depth = self.def_depth(root, ld, f);
                 let seg = self.order.fold(&OAug, root, ld, lx);
                 if depth == 0 || seg.c == 0 {
                     let rel = i64::from(seg.o);
@@ -2145,13 +2231,21 @@ impl Engine {
             }
         } else {
             let site = self.walk(unit, lx, f).site;
-            let depth = self.order.fold(&OAug, root, 0, lx).o + u32::from(self.n(x).effect == EFF_OPEN);
+            let depth = self.order.fold(&OAug, root, 0, lx + 1).o;
             let end = if depth == 0 {
                 u64::MAX
             } else {
+                // The closing node's own reads are inside the scope, unless
+                // its brackets come before it (its kind read always is).
                 self.order
                     .search_fwd(&OAug, root, lx, &|s: OSum| s.c >= 1)
-                    .unwrap_or(u64::MAX)
+                    .map_or(u64::MAX, |e| {
+                        if f == self.kind_field || !self.brackets_before(root, e) {
+                            e + 1
+                        } else {
+                            e
+                        }
+                    })
             };
             prev.push((site, end));
         }
@@ -2201,6 +2295,10 @@ impl Engine {
     /// have changed, i.e. the region from it to where depth returns to 0.
     fn effect_region_changed(&mut self, p: Slot, old: u8) {
         span!(Region);
+        if self.aux_of(p).is_some() || self.n(p).has(F_EFF_DYN) {
+            let e = self.oitem(p).eff;
+            self.ax(p).eff_bound = e;
+        }
         let n = self.n(p);
         let (unit, lp) = (n.unit, n.label);
         let root = self.units[unit as usize].root;
@@ -2231,11 +2329,17 @@ impl Engine {
             }
         };
         let end = reach(d_old).max(reach(d_new));
-        if end == lp {
+        // A node after its own brackets is inside the region.
+        let start = if (old | self.oitem(p).eff) & EFF_BEFORE != 0 {
+            lp
+        } else {
+            lp + 1
+        };
+        if end == lp && start > lp {
             return;
         }
         let mut region = Vec::new();
-        self.order.range(root, lp + 1, end, &mut region, usize::MAX);
+        self.order.range(root, start, end.max(lp), &mut region, usize::MAX);
         self.report.scope_region += region.len() as u64;
         count!(RegionNode, region.len());
         for (_, s) in region {
@@ -2278,6 +2382,40 @@ impl Engine {
         self.sync_order(s);
         if self.oitem(s).eff != old {
             self.effect_region_changed(s, old);
+        }
+        self.sync_kind(s);
+    }
+
+    /// Sets the kind of the scope `s` opens (from its effect).
+    fn set_kind(&mut self, s: Slot, kind: Option<ValueId>) {
+        if self.aux_of(s).and_then(|a| a.kind) != kind {
+            self.ax(s).kind = kind;
+        }
+        self.sync_kind(s);
+    }
+
+    /// An opener defines the kind of its scope inside it (a local
+    /// definition of `kind_field`, read by [`Ctx::scope_kind`]).
+    fn sync_kind(&mut self, s: Slot) {
+        let kf = self.kind_field;
+        let opens = self.oitem(s).eff >> 2 & 3 != 0;
+        let has = self.n(s).defs.iter().any(|d| d.field == kf);
+        if opens && !has {
+            self.add_def(s, kf, false);
+        } else if !opens && has {
+            self.remove_def(s, kf);
+            return;
+        }
+        if opens {
+            let v = self.aux_of(s).and_then(|a| a.kind).unwrap_or(ValueId::UNIT);
+            if self.n(s).def_value(kf) != Some(v) {
+                for d in &mut self.nm(s).defs {
+                    if d.field == kf {
+                        d.value = v;
+                    }
+                }
+                self.dirty_field_users(s.pack(), kf);
+            }
         }
     }
 
@@ -2525,6 +2663,9 @@ impl Engine {
         self.sync_order(s);
         if self.oitem(s).eff != EFF_NONE {
             self.effect_region_changed(s, EFF_NONE);
+        }
+        if eff != Effect::Pending {
+            self.set_kind(s, eff_kind(eff));
         }
         if self.n(s).has(F_CLAIMER) {
             self.claim_dirty.insert(s);
@@ -3387,7 +3528,8 @@ impl Engine {
             let set: Vec<(Field, bool)> = defs.iter().map(|d| (d.0, d.2)).collect();
             self.set_defset(x, &set);
         } else {
-            let declared: Vec<Field> = self.n(x).defs.iter().map(|d| d.field).collect();
+            let kf = self.kind_field;
+            let declared: Vec<Field> = self.n(x).defs.iter().map(|d| d.field).filter(|&f| f != kf).collect();
             for &(f, _, _) in defs {
                 if !declared.contains(&f) {
                     let id = self.n(x).id;
@@ -3737,6 +3879,9 @@ impl Engine {
         if self.n(x).has(F_EFF_DYN)
             && let Some(e) = r.effect
         {
+            if self.aux_of(x).and_then(|a| a.kind) != r.kind {
+                self.ax(x).kind = r.kind;
+            }
             self.change_effect(x, e);
         }
         if self.n(x).has(F_CLAIM_DYN) {
@@ -3907,6 +4052,7 @@ impl Engine {
     }
 
     /// `x` completed with all reads settled (or confirmed).
+    #[allow(clippy::too_many_lines)]
     fn finish(&mut self, x: Slot, height: u32) {
         span!(Finish);
         let mut work = vec![(x, height)];
@@ -3921,6 +4067,18 @@ impl Engine {
                 self.nm(y).on = NIL;
             }
             self.sync_pending(y);
+            if self.n(y).has(F_EFF_DYN) {
+                // A pending effect counts once the node is done: re-bind the
+                // region if it differs from what the bindings reflect.
+                self.sync_order(y);
+                let new = self.oitem(y).eff;
+                let old = self.aux_of(y).map_or(EFF_NONE, |a| a.eff_bound);
+                if new != old {
+                    self.ax(y).eff_bound = new;
+                    self.effect_region_changed(y, old);
+                }
+                self.sync_kind(y);
+            }
             let old = self.n(y).height;
             if h > old {
                 self.raise(y, h, y);
@@ -4220,18 +4378,19 @@ impl Engine {
     /// its own definitions, a global, or a local directly in the scope `s`
     /// itself is in.
     fn defines_past(&self, s: Slot) -> bool {
-        if !self.n(s).defs.is_empty() {
+        let kf = self.kind_field;
+        if self.n(s).defs.iter().any(|d| d.field != kf) {
             return true;
         }
         let unit = self.n(s).unit;
         let root = self.units[unit as usize].root;
-        let depth = self.order.fold(&OAug, root, 0, self.n(s).label).o;
+        let depth = self.def_depth(root, self.n(s).label, Field(ValueId::NONE));
         let mut stack: Vec<Slot> = self.children_of(s).to_vec();
         while let Some(c) = stack.pop() {
             let n = self.n(c);
             if n.state != State::Inert && !n.has(F_APP) {
-                for d in &n.defs {
-                    if d.global || self.order.fold(&OAug, root, 0, n.label).o <= depth {
+                for d in n.defs.iter().filter(|d| d.field != kf) {
+                    if d.global || self.def_depth(root, n.label, d.field) <= depth {
                         return true;
                     }
                 }
@@ -4513,6 +4672,18 @@ pub(crate) fn eff_code(e: Effect) -> u8 {
         Effect::Open => EFF_OPEN,
         Effect::Close => EFF_CLOSE,
         Effect::None | Effect::Pending => EFF_NONE,
+        Effect::Scope(b) => {
+            assert!(b.closes <= 3 && b.opens <= 3, "at most 3 brackets each way");
+            b.closes | (b.opens << 2) | if b.before { EFF_BEFORE } else { 0 }
+        }
+    }
+}
+
+/// The kind an effect gives the scope it opens.
+pub(crate) fn eff_kind(e: Effect) -> Option<ValueId> {
+    match e {
+        Effect::Scope(b) => b.kind,
+        _ => None,
     }
 }
 
@@ -4547,6 +4718,8 @@ pub struct RunResult {
     pub(crate) contribs: Vec<(Field, ValueId)>,
     pub(crate) watch: Option<(Field, Slot, ValueId)>,
     pub(crate) effect: Option<u8>,
+    /// The kind of the scope the run's effect opens.
+    pub(crate) kind: Option<ValueId>,
     pub(crate) claim: Option<usize>,
     pub(crate) assumptions: Vec<(Slot, AssumeKind, ValueId)>,
     pub(crate) sig: u64,

@@ -31,8 +31,8 @@ pub mod interp;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use defuse::{
-    Claim, Ctx, Effect, Engine, Executor, Field, FxHashMap, Locality, MayDefine, NodeId, OpId, Operation, RunResult,
-    SeqMonoid, Stop, UnitId, Value, ValueId, Values,
+    Brackets, Claim, Ctx, Effect, Engine, Executor, Field, FxHashMap, Locality, MayDefine, NodeId, OpId, Operation,
+    RunResult, SeqMonoid, Stop, UnitId, Value, ValueId, Values,
 };
 
 // ------------------------------------------------------------------- lexer
@@ -242,6 +242,22 @@ impl Parser<'_> {
             };
             match k.as_str() {
                 "begin" => return simple(self, "begin"),
+                "para" => return simple(self, "para"),
+                "scope" => {
+                    self.pos += 1;
+                    let k = self.ident()?;
+                    if k == LIST_KIND {
+                        return Err("list scopes are opened implicitly, by items".into());
+                    }
+                    return Ok(self.tagged("scope", vec![self.s(&k)]));
+                }
+                "item" => {
+                    self.pos += 1;
+                    let n = self.ident()?;
+                    self.eat("=")?;
+                    let e = self.expr()?;
+                    return Ok(self.tagged("item", vec![self.s(&n), e]));
+                }
                 "end" => return simple(self, "end"),
                 "endlist" => return simple(self, "endlist"),
                 "page" => return simple(self, "page"),
@@ -448,6 +464,12 @@ impl Parser<'_> {
                 let body = self.l(body);
                 Ok(self.tagged("fn", vec![ps, body, ret]))
             }
+            Some(Tok::Ident(k)) if k == "kind" => {
+                self.pos += 1;
+                self.eat("(")?;
+                self.eat(")")?;
+                Ok(self.tagged("kind", vec![]))
+            }
             Some(Tok::Ident(k)) if k == "layout" => {
                 self.pos += 1;
                 self.eat("(")?;
@@ -524,6 +546,10 @@ const OPAQUE: [&str; 6] = ["begin", "end", "do", "eval", "invoke", "seq"];
 #[derive(Default)]
 pub struct Procs {
     tracked: bool,
+    /// Lines containing an `item` (implicit-scope starter). While there are
+    /// none, `end` closes exactly one scope; otherwise how many depends on
+    /// whether an implicit scope is open, a binding.
+    items: usize,
     defs: FxHashMap<String, Vec<Option<Vec<String>>>>,
 }
 
@@ -597,7 +623,7 @@ fn literal_prefix(v: &Values, e: ValueId) -> (String, bool) {
     }
 }
 
-const KEYWORDS: [&str; 21] = [
+const KEYWORDS: [&str; 25] = [
     "begin",
     "end",
     "endlist",
@@ -619,7 +645,16 @@ const KEYWORDS: [&str; 21] = [
     "return",
     "fn",
     "seq",
+    "scope",
+    "item",
+    "para",
+    "kind",
 ];
+
+/// The scope kind inside which an `item` opens an implicit scope, and the
+/// kind of that scope.
+pub const DOC_KIND: &str = "doc";
+pub const LIST_KIND: &str = "list";
 
 /// What `eval TEXT` with a computed part may define, from the literal text
 /// before the first computed piece: names starting with its first token.
@@ -815,6 +850,7 @@ fn eval_expr(cx: &mut Ctx<'_>, ops: Ops, e: ValueId) -> Result<ValueId, Stop> {
     let (t, a) = tag(v, e);
     Ok(match t.as_str() {
         "str" | "lit" => a[0],
+        "kind" => cx.scope_kind()?.unwrap_or_else(|| v.str("none")),
         "var" => cx.use_field(v.field(&text(v, a[0])))?.unwrap_or(ValueId::UNIT),
         "op" => {
             let x = eval_expr(cx, ops, a[1])?;
@@ -925,7 +961,7 @@ impl Operation for StmtOp {
                         .collect(),
                 )
             }
-            "sumnext" | "listto" | "listuntil" => Some(vec![(v.field(&text(v, a[0])), Locality::Local)]),
+            "sumnext" | "listto" | "listuntil" | "item" => Some(vec![(v.field(&text(v, a[0])), Locality::Local)]),
             "proc" => Some(vec![(proc_field(v, a[0]), Locality::Local)]),
             "invoke" | "do" | "eval" | "seq" => None,
             "block" if exports(v, &items(v, a[0])).is_none_or(|e| !e.is_empty()) => None,
@@ -976,10 +1012,22 @@ impl Operation for StmtOp {
     fn effect(&self, args: &[ValueId], v: &Values) -> Effect {
         match tag(v, args[0]).0.as_str() {
             "begin" => Effect::Open,
-            "end" => Effect::Close,
-            // Runtime code may open or close scopes; literal text shows it.
-            "eval" if eval_literal(v, tag(v, args[0]).1[0]).is_some() => Effect::None,
-            "eval" => Effect::Pending,
+            "scope" => Effect::Scope(Brackets {
+                opens: 1,
+                kind: Some(tag(v, args[0]).1[0]),
+                ..Brackets::default()
+            }),
+            // Both depend on the kind of the enclosing scope, and runtime
+            // code may open or close scopes (literal text shows it).
+            "item" | "para" => Effect::Pending,
+            "eval" if eval_literal(v, tag(v, args[0]).1[0]).is_none() => Effect::Pending,
+            "end" => {
+                if self.1.read().expect("procs").items > 0 {
+                    Effect::Pending
+                } else {
+                    Effect::Close
+                }
+            }
             _ => Effect::None,
         }
     }
@@ -1028,7 +1076,7 @@ impl Operation for StmtOp {
         let mut out = Vec::new();
         let mut bound = Vec::new();
         match t.as_str() {
-            "assign" | "publish" => free_vars(v, a[1], &mut bound, &mut out),
+            "assign" | "publish" | "item" => free_vars(v, a[1], &mut bound, &mut out),
             // Text substitution: a call reads only the procedure.
             "do" => out.push(format!("proc.{}", text(v, a[0]))),
             "record" | "expr" | "print" | "emit" | "eval" | "invoke" => {
@@ -1036,7 +1084,7 @@ impl Operation for StmtOp {
             }
             "if" => free_vars(v, a[0], &mut bound, &mut out),
             "listuntil" => out.push(text(v, a[1])),
-            "block" | "begin" | "end" | "endlist" | "mark" | "loop" | "proc" => {}
+            "block" | "begin" | "end" | "endlist" | "mark" | "loop" | "proc" | "scope" | "para" => {}
             _ => return None,
         }
         Some(out.iter().map(|n| v.field(n)).collect())
@@ -1098,6 +1146,11 @@ impl Operation for StmtOp {
                 cx.set_effect(Effect::None);
                 match parse(v, &text(v, src)) {
                     Ok(ss) if ss.iter().any(|&s| has_proc(v, s)) => Ok(v.str("error: procedure in evaluated text")),
+                    // `end`'s effect is static while the program text has
+                    // no items: evaluated text may not add one.
+                    Ok(ss) if ss.iter().any(|&s| has_tag(v, s, &["item"])) => {
+                        Ok(v.str("error: item in evaluated text"))
+                    }
                     Ok(ss) => {
                         for s in ss {
                             cx.child(ops.stmt, vec![s]);
@@ -1217,7 +1270,49 @@ impl Operation for StmtOp {
                 Ok(v.list(vec![v.int(i64::try_from(xs.len()).unwrap_or(0)), v.int(sum)]))
             }
             "print" | "expr" | "return" => eval_expr(cx, ops, a[0]),
-            "loop" | "begin" | "end" | "endlist" | "mark" => Ok(ValueId::UNIT),
+            "item" => {
+                // Directly inside a `doc` scope, an item opens a `list` scope
+                // before itself; inside a `list`, it continues it.
+                let k = cx.scope_kind()?;
+                if k.is_some_and(|k| text(v, k) == DOC_KIND) {
+                    cx.set_effect(Effect::Scope(Brackets {
+                        opens: 1,
+                        before: true,
+                        kind: Some(v.str(LIST_KIND)),
+                        ..Brackets::default()
+                    }));
+                } else {
+                    cx.set_effect(Effect::None);
+                }
+                let val = eval_expr(cx, ops, a[1])?;
+                cx.define(v.field(&text(v, a[0])), val);
+                Ok(val)
+            }
+            "para" => {
+                let k = cx.scope_kind()?;
+                let list = k.is_some_and(|k| text(v, k) == LIST_KIND);
+                cx.set_effect(if list {
+                    Effect::Scope(Brackets {
+                        closes: 1,
+                        before: true,
+                        ..Brackets::default()
+                    })
+                } else {
+                    Effect::None
+                });
+                Ok(ValueId::UNIT)
+            }
+            "end" if cx.effect_pending() => {
+                // Closing a scope also closes an implicit one open inside it.
+                let k = cx.scope_kind()?;
+                let list = k.is_some_and(|k| text(v, k) == LIST_KIND);
+                cx.set_effect(Effect::Scope(Brackets {
+                    closes: if list { 2 } else { 1 },
+                    ..Brackets::default()
+                }));
+                Ok(ValueId::UNIT)
+            }
+            "loop" | "begin" | "end" | "endlist" | "mark" | "scope" => Ok(ValueId::UNIT),
             "error" => Ok(v.str(&format!("error: {}", text(v, a[0])))),
             _ => Ok(v.str("error: bad statement")),
         }
@@ -1326,6 +1421,7 @@ impl Program {
                 let mut d = Vec::new();
                 proc_decls(eng.values(), ast, &mut d);
                 p.add(d);
+                p.items += usize::from(has_tag(eng.values(), ast, &["item"]));
             }
             p.tracked = true;
         }
@@ -1360,6 +1456,22 @@ impl Program {
     /// Keeps the procedure table in step with a line edit; re-reads the
     /// `do` statements whose procedures may now define something else.
     fn procs_edit(&self, eng: &mut Engine, old: Option<&str>, new: Option<&str>) {
+        let has_item = |eng: &Engine, l: Option<&str>| {
+            l.is_some_and(|l| has_tag(eng.values(), parse_stmt(eng.values(), l), &["item"]))
+        };
+        let (oi, ni) = (has_item(eng, old), has_item(eng, new));
+        if oi != ni {
+            let flips = {
+                let mut p = self.lang.procs.write().expect("procs");
+                let before = p.items > 0;
+                p.items = p.items + usize::from(ni) - usize::from(oi);
+                before != (p.items > 0)
+            };
+            if flips {
+                let stmt = self.lang.ops.stmt;
+                eng.refresh_where(&|op, args, v| op == stmt && tag(v, args[0]).0 == "end");
+            }
+        }
         let decls = |eng: &Engine, l: Option<&str>| {
             let mut d = Vec::new();
             if let Some(l) = l {

@@ -183,6 +183,68 @@ fn slot_reused_steps_later_is_a_new_node() {
     eval(&mut eng, &prog);
 }
 
+// ------------------------------------------------------------ scope kinds
+
+#[test]
+fn implicit_scope_opened_by_a_starter_and_ended_by_a_closer() {
+    let (mut eng, mut prog, _) = load(&[
+        "scope doc",      // 0
+        "x = 1",          // 1
+        "item a = x + 1", // 2: opens a list scope before itself
+        "item b = a + 1", // 3: directly inside the list: no new scope
+        "k = kind()",     // 4
+        "para",           // 5: ends the list
+        "c = b",          // 6: b was local to the list
+        "k2 = kind()",    // 7
+        "end",            // 8
+        "d = x",          // 9
+    ]);
+    let r = prog.render(&eng);
+    assert_eq!(
+        r[..10],
+        ["()", "1", "2", "3", "\"list\"", "()", "()", "\"doc\"", "()", "()"]
+    );
+    // A plain line becomes a starter and back.
+    prog.set_line(&mut eng, 3, "b = a + 1".into());
+    eval(&mut eng, &prog);
+    prog.set_line(&mut eng, 2, "a = x + 1".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 4), "\"doc\"");
+    assert_eq!(out(&eng, &prog, 6), "3", "no list scope: b is visible");
+    prog.set_line(&mut eng, 2, "item a = x + 1".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 4), "\"list\"");
+    prog.set_line(&mut eng, 3, "item b = a + 1".into());
+    eval(&mut eng, &prog);
+    // Removing the closer: the list runs to the end of the doc scope.
+    prog.remove_line(&mut eng, 5);
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 5), "3");
+    assert_eq!(out(&eng, &prog, 6), "\"list\"");
+}
+
+#[test]
+fn closing_the_enclosing_scope_closes_the_implicit_one() {
+    let (mut eng, mut prog, _) = load(&["scope doc", "item a = 1", "end", "k = kind()", "z = a"]);
+    assert_eq!(prog.render(&eng)[3..5], ["\"none\"", "()"]);
+    prog.insert_line(&mut eng, 0, "scope doc".into());
+    prog.insert_line(&mut eng, 5, "end".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 4), "\"doc\"", "the inner end closed list and doc");
+}
+
+#[test]
+fn kind_read_binds_across_an_unfold() {
+    let (mut eng, mut prog, _) = load(&["scope doc", "eval \"k = kind()\"", "j = k", "end"]);
+    assert_eq!(out(&eng, &prog, 2), "\"doc\"");
+    prog.set_line(&mut eng, 0, "scope memo".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 2), "\"memo\"");
+    prog.set_line(&mut eng, 0, "begin".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 2), "\"none\"");
+}
+
 #[test]
 fn freeing() {
     let (mut eng, mut prog, _) = load(&["c = 1", "if c { a = 1  b = 2 } else { d = 3 }"]);

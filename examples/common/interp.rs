@@ -11,7 +11,7 @@
 //! A function body runs in a fresh unit seeded with its captures and
 //! parameters. Loop-back fields are iterated in whole rounds.
 
-use super::{Lang, binop, has_proc, items, parse, parse_stmt, proc_field, tag, text, truthy};
+use super::{DOC_KIND, LIST_KIND, Lang, binop, has_proc, items, parse, parse_stmt, proc_field, tag, text, truthy};
 use defuse::{Field, FxHashMap, FxHashSet, Value, ValueId, Values};
 
 type Binding = (u64, ValueId);
@@ -21,10 +21,26 @@ type Binding = (u64, ValueId);
 struct Unit {
     /// Local frames; the first is the unit's own (never closed).
     frames: Vec<FxHashMap<Field, Binding>>,
+    /// Each frame's scope kind.
+    kinds: Vec<Option<String>>,
     globals: FxHashMap<Field, Binding>,
     env: FxHashMap<Field, ValueId>,
     /// `out` contributions, in text order.
     contribs: Vec<(u64, ValueId)>,
+}
+
+impl Unit {
+    fn new() -> Unit {
+        Unit {
+            frames: vec![FxHashMap::default()],
+            kinds: vec![None],
+            ..Unit::default()
+        }
+    }
+
+    fn kind(&self) -> Option<&str> {
+        self.kinds.last().and_then(Option::as_deref)
+    }
 }
 
 struct Interp<'v> {
@@ -72,10 +88,7 @@ pub fn interpret(lines: &[String]) -> Result<Vec<u64>, String> {
         it.pubs.clear();
         // Applications may read loop-back fields.
         it.apps.clear();
-        let mut u = Unit {
-            frames: vec![FxHashMap::default()],
-            ..Unit::default()
-        };
+        let mut u = Unit::new();
         let outs = it.run_list(&mut u, &asts);
         if let Some(e) = it.error.take() {
             return Err(e);
@@ -122,13 +135,19 @@ impl Interp<'_> {
     }
 
     fn open(u: &mut Unit) {
+        Self::open_kind(u, None);
+    }
+
+    fn open_kind(u: &mut Unit, kind: Option<String>) {
         u.frames.push(FxHashMap::default());
+        u.kinds.push(kind);
     }
 
     fn close(u: &mut Unit) {
         // An unmatched close is ignored.
         if u.frames.len() > 1 {
             u.frames.pop();
+            u.kinds.pop();
         }
     }
 
@@ -266,6 +285,9 @@ impl Interp<'_> {
                 let src = self.expr(u, a[0]);
                 match parse(v, &text(v, src)) {
                     Ok(ss) if ss.iter().any(|&s| has_proc(v, s)) => v.str("error: procedure in evaluated text"),
+                    Ok(ss) if ss.iter().any(|&s| super::has_tag(v, s, &["item"])) => {
+                        v.str("error: item in evaluated text")
+                    }
                     Ok(ss) => {
                         self.run_list(u, &ss);
                         ValueId::UNIT
@@ -323,7 +345,29 @@ impl Interp<'_> {
                 ValueId::UNIT
             }
             "end" => {
+                // Also closes an implicit scope open inside the one it ends.
+                if u.kind() == Some(LIST_KIND) {
+                    Self::close(u);
+                }
                 Self::close(u);
+                ValueId::UNIT
+            }
+            "scope" => {
+                Self::open_kind(u, Some(text(v, a[0])));
+                ValueId::UNIT
+            }
+            "item" => {
+                if u.kind() == Some(DOC_KIND) {
+                    Self::open_kind(u, Some(LIST_KIND.into()));
+                }
+                let val = self.expr(u, a[1]);
+                self.define(u, v.field(&text(v, a[0])), val, false);
+                val
+            }
+            "para" => {
+                if u.kind() == Some(LIST_KIND) {
+                    Self::close(u);
+                }
                 ValueId::UNIT
             }
             "loop" | "endlist" | "mark" => ValueId::UNIT,
@@ -340,6 +384,7 @@ impl Interp<'_> {
         let (t, a) = tag(v, e);
         match t.as_str() {
             "str" | "lit" => a[0],
+            "kind" => v.str(u.kind().unwrap_or("none")),
             "var" => self.lookup(u, v.field(&text(v, a[0]))).unwrap_or(ValueId::UNIT),
             "op" => {
                 let x = self.expr(u, a[1]);
@@ -401,10 +446,7 @@ impl Interp<'_> {
         let c = tag(v, args[0]).1; // [params, body, ret, captures]
         let params = items(v, c[0]);
         let r = if params.len() == args.len() - 1 {
-            let mut u = Unit {
-                frames: vec![FxHashMap::default()],
-                ..Unit::default()
-            };
+            let mut u = Unit::new();
             for cap in items(v, c[3]) {
                 let cap = items(v, cap);
                 u.env.insert(v.field(&text(v, cap[0])), cap[1]);
