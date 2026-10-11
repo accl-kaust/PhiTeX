@@ -366,3 +366,35 @@ fn trip_edit_the_sequence_of_pieces_did_not_settle() {
     let r = fuzz::Repro::parse(&std::fs::read_to_string(&p).expect("the reproduction")).expect("a reproduction");
     assert_eq!(replay_within(r, 300), None, "{} fails (or hangs)", p.display());
 }
+
+/// A LaTeX edit whose update panics "the scheduler stalled" (nothing
+/// running, the next piece never entered: a04d58c0, a run's word on the
+/// sequence counted once its page-builder read is confirmed; 92 of the 300
+/// LaTeX seeds of the fuzz gate on b8fd8022): ams seed 10 step 3, cut line
+/// by line to four lines (`FLOW_MIN_UNITS=lines`). It must replay without a
+/// failure once A's fix lands; ignored until then.
+#[test]
+#[ignore = "A: the scheduler stalled (a04d58c0; fuzz gate 8163)"]
+fn latex_edit_the_scheduler_stalled() {
+    if fuzz::latex_doc("tiny").is_none() {
+        return;
+    }
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fuzz/panic/latex-ams-scheduler-stalled.repro");
+    let r = fuzz::Repro::parse(&std::fs::read_to_string(&p).expect("the reproduction")).expect("a reproduction");
+    assert_eq!(replay_within(r, 300), None, "{} fails (or hangs)", p.display());
+}
+
+/// A LaTeX cell edit whose updated DVI is not the cold build's (a04d58c0
+/// too; the cell edits of tables and rules in the fuzz gate on b8fd8022):
+/// rules seed 1 step 5, cut to eight lines, a tabular in a float with a
+/// blank line before its row, "0.30" made "zebra". Ignored until A's fix.
+#[test]
+#[ignore = "A: the edited DVI is not the cold one (a04d58c0; fuzz gate 8163)"]
+fn latex_edit_cell_dvi_is_the_cold_one() {
+    if fuzz::latex_doc("tiny").is_none() {
+        return;
+    }
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fuzz/dvi/latex-rules-cell.repro");
+    let r = fuzz::Repro::parse(&std::fs::read_to_string(&p).expect("the reproduction")).expect("a reproduction");
+    assert_eq!(replay_within(r, 300), None, "{} fails (or hangs)", p.display());
+}

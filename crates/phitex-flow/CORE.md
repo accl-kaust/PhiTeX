@@ -1341,7 +1341,11 @@ REPRO...`: F1, F2?, F6 for the open findings by how they fail, else
 document, the edit's kind and where the log first differs). One
 reproduction per new class goes into `OUT/min/`, cut down by
 `scripts/flow-fuzz-min.py` (delta debugging over the paragraphs of the
-text; the edit's paragraph stays). `phitex-flow --fuzz-orders DOC FILE A
+text; the edit's paragraph stays; `FLOW_MIN_UNITS=lines` cuts line by
+line instead, for LaTeX texts, which have few blank lines: it cut
+`tests/fuzz/panic/latex-ams-scheduler-stalled.repro` to 4 lines and
+`tests/fuzz/dvi/latex-rules-cell.repro` to 8, both from a04d58c0 and
+replayed by ignored tests in `tests/fuzz.rs` until A's fix). `phitex-flow --fuzz-orders DOC FILE A
 B [DIR]` compares two cold builds of a text in two orders (`priority`,
 `random:N`; `-` is the document's own text). It was the oracle for F6.
 `LATEX=1 scripts/flow-fuzz.sh [SEEDS] [OUT]`: the LaTeX documents
