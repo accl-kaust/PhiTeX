@@ -19,6 +19,7 @@
     clippy::similar_names
 )]
 
+pub mod align;
 pub mod arith;
 pub mod fonts;
 pub mod glue;
@@ -27,6 +28,7 @@ pub mod linebreak;
 pub mod math;
 pub mod node;
 pub mod pack;
+pub mod page;
 
 #[cfg(test)]
 pub(crate) mod testfont;
