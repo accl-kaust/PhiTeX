@@ -753,6 +753,25 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
                     cat = f.cat;
                     pre_expl = f.pre_expl;
                     st.special = f.special;
+                } else if body_depth == 0
+                    && !st.names_follow()
+                    && !st.after_equals()
+                    && soft.last().is_some_and(|f| f.depth == frames.len())
+                    && scope.is_some_and(|s| {
+                        if s.document.defines(name) {
+                            s.document.ends_group(name, Some((s.file, i)))
+                        } else {
+                            s.prelude.ends_group(name, None)
+                        }
+                    })
+                    && let Some(f) = soft.pop()
+                {
+                    // (a macro running the `\endgroup` of a group begun
+                    // here: its catcode changes end, §1063)
+                    st.end_from(f.open_spans, i);
+                    cat = f.cat;
+                    pre_expl = f.pre_expl;
+                    st.special = f.special;
                 } else if body_depth == 0 && !st.names_follow() && !st.after_equals() {
                     let floor = frames.last().map_or(0, |f| f.open_spans).max(
                         soft.last()
@@ -856,22 +875,11 @@ fn switch(
             ),
         },
         "@makeother" | "char_set_catcode_other:N" | "char_set_catcode_letter:N" => {
-            let j = skip_sp(b, end);
-            match char_code(b, j) {
-                Some((c, _)) if !structural(c) => {
-                    *cat = if name.ends_with("letter:N") {
-                        cat.with_letter(c)
-                    } else {
-                        cat.without_letter(c)
-                    };
-                    st.begin(
-                        i,
-                        "\\@makeother / char_set_catcode",
-                        (c as char).to_string(),
-                        sure,
-                    );
-                }
-                _ => pending(st, "\\@makeother of a shaping character", ""),
+            // (`\catcode` to 12, or 11, by another name)
+            let v = if name.ends_with("letter:N") { 11 } else { 12 };
+            match char_code(b, skip_sp(b, end)) {
+                Some((c, _)) => assign(st, cat, c, Some(v), i, floor, sure),
+                None => pending(st, "\\@makeother of a shaping character", ""),
             }
         }
         "dospecials" | "@sanitize" | "obeylines" | "obeyspaces" | "@vobeyspaces"
@@ -941,7 +949,20 @@ fn switch(
                     }
                 }
                 if k == 3 {
-                    st.special |= chars;
+                    // (the characters set to a literal catcode: as a
+                    // `\catcode` here would, §1232; the others pending
+                    // where they occur)
+                    let set = if s.document.defines(name) {
+                        s.document.set_catcodes(name, Some((s.file, i)))
+                    } else {
+                        s.prelude.set_catcodes(name, None)
+                    };
+                    let mut known = 0u128;
+                    for &(c, v) in set {
+                        assign(st, cat, c, Some(v), i, floor, sure);
+                        known |= 1 << c;
+                    }
+                    st.special |= chars & !known;
                 } else if k == 2 {
                     pending(st, "macro changing catcodes", name);
                 } else if k == 1 {
