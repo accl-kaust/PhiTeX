@@ -1,0 +1,18 @@
+[package]
+name = "phitex-red"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "TeX as graph reduction of pending thunks (CONSTRUCTS.md)"
+
+[dependencies]
+phitex-kpse = { path = "../../tools/kpse" }
+phitex-otf = { path = "../../fonts/otf" }
+phitex-bibtex = { path = "../../tools/bibtex" }
+phitex-makeindex = { path = "../../tools/makeindex" }
+phitex-codecs = { path = "../../codecs" }
+phitex-syntax = { path = "../syntax" }
+
+[lints]
+workspace = true

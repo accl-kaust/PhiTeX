@@ -15,5 +15,5 @@
     "allowImportingTsExtensions": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "../crates/phitex-cli/viewer/cli.ts"]
+  "include": ["src/**/*.ts", "../crates/cli/viewer/cli.ts"]
 }

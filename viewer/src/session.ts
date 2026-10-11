@@ -119,7 +119,7 @@ export type StreamEvent =
 
 /**
  * `phitex watch`'s events, the host building from disk (Options.remote,
- * crates/phitex-cli/src/view.rs): a page shipped while the build runs, how
+ * crates/cli/src/view.rs): a page shipped while the build runs, how
  * far it is, its problems, the build in (or a pass of it, settling), a
  * newer save superseding it, and a forward search's place.
  */

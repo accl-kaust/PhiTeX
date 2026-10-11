@@ -33,7 +33,7 @@ byte for byte.
 
 | Crate | What it is |
 |---|---|
-| `phitex-red` | the engine today: TeX as graph reduction (`crates/phitex-red/CONSTRUCTS.md`) |
+| `phitex-red` | the engine today: TeX as graph reduction (`crates/engines/red/CONSTRUCTS.md`) |
 | `phitex-reduce`, `phitex-tex`, `phitex-typeset` | (stubs) the reduction core, TeX on it, Knuth's algorithms as pure functions |
 | `phitex-pdftex`, `phitex-xetex`, `phitex-luatex`, `phitex-lua` | (stubs) the engines, and Lua for LuaTeX |
 | `phitex-tfm`, `phitex-dvi`, `phitex-pdf` | (stubs) font metrics, DVI/XDV, pdfTeX's PDF backend |

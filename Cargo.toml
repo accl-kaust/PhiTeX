@@ -1,6 +1,18 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "xtask"]
+members = [
+    "crates/cli",
+    "crates/codecs",
+    "crates/core/*",
+    "crates/engines/*",
+    "crates/engines/luatex/lua",
+    "crates/fonts/*",
+    "crates/output/*",
+    "crates/tools/*",
+    "crates/editor/*",
+    "crates/editor/diff/git",
+    "xtask",
+]
 
 [workspace.package]
 edition = "2024"

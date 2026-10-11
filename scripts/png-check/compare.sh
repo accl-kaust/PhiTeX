@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # libpng 1.6 (the system's, which pdfTeX links) against the port
-# (crates/phitex-codecs/src/png.rs), reading PNGs as pdfTeX's writepng.c
+# (crates/codecs/src/png.rs), reading PNGs as pdfTeX's writepng.c
 # does (harness.c and the png_dump example print the same report): run
 # from the repository,
 #
