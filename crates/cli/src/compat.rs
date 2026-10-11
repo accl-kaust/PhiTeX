@@ -25,9 +25,15 @@ pub enum Selection {
 /// `PHITEX_COMPAT`.
 #[must_use]
 pub fn select(argv0: &str, mut args: Vec<String>, env: Option<&str>) -> Selection {
-    let stem = Path::new(argv0).file_stem().and_then(|s| s.to_str()).unwrap_or("phitex");
+    let stem = Path::new(argv0)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("phitex");
     if !MODERN.contains(&stem) {
-        return Selection::Compat { progname: stem.to_owned(), args };
+        return Selection::Compat {
+            progname: stem.to_owned(),
+            args,
+        };
     }
     if let Some(first) = args.first() {
         let opt = first.strip_prefix("--").or_else(|| first.strip_prefix('-'));
@@ -43,7 +49,10 @@ pub fn select(argv0: &str, mut args: Vec<String>, env: Option<&str>) -> Selectio
         }
     }
     match env.filter(|e| !e.is_empty()) {
-        Some(name) => Selection::Compat { progname: name.to_owned(), args },
+        Some(name) => Selection::Compat {
+            progname: name.to_owned(),
+            args,
+        },
         None => Selection::Modern(args),
     }
 }
@@ -99,7 +108,9 @@ pub fn main(progname: &str, args: &[String]) -> ! {
     let mut ini = progname == "initex";
     let mut etex = false;
     let mut jobname = None;
-    let mut out_dir = std::env::var("TEXMF_OUTPUT_DIRECTORY").ok().filter(|d| !d.is_empty());
+    let mut out_dir = std::env::var("TEXMF_OUTPUT_DIRECTORY")
+        .ok()
+        .filter(|d| !d.is_empty());
     let mut output = None;
     let mut fmt = None;
     let mut recorder = false;
@@ -118,20 +129,23 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         };
         let (name, value) = match opt.split_once('=') {
             Some((n, v)) => (n, Some(v.to_owned())),
-            None if VALUE_OPTIONS.contains(&opt) => (opt, Some(it.next().cloned().unwrap_or_else(|| usage(progname)))),
+            None if VALUE_OPTIONS.contains(&opt) => (
+                opt,
+                Some(it.next().cloned().unwrap_or_else(|| usage(progname))),
+            ),
             None => (opt, None),
         };
         let v = || value.clone().unwrap_or_default();
         match name {
             "version" => {
-                println!("phitex {} (on phitex-red) as {progname}", env!("CARGO_PKG_VERSION"));
+                println!("phitex {} as {progname}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "help" => usage(progname),
             "ini" => ini = true,
             "etex" => etex = true,
             "interaction" => {
-                // (phitex-red runs every job to its end: the mode is checked, not kept)
+                // (every job runs to its end: the mode is checked, not kept)
                 interaction(&v()).unwrap_or_else(|| usage(progname));
             }
             "jobname" => jobname = Some(v()),
@@ -149,9 +163,19 @@ pub fn main(progname: &str, args: &[String]) -> ! {
             "synctex" => synctex = v().trim() != "0",
             "threads" | "j" => threads = v().parse().ok(),
             // (accepted, and as TeX Live's defaults are: no effect here)
-            "file-line-error" | "no-file-line-error" | "halt-on-error" | "8bit" | "translate-file"
-            | "default-translate-file" | "parse-first-line" | "no-parse-first-line" | "output-comment"
-            | "no-shell-escape" | "shell-restricted" | "src-specials" | "cnf-line" => {}
+            "file-line-error"
+            | "no-file-line-error"
+            | "halt-on-error"
+            | "8bit"
+            | "translate-file"
+            | "default-translate-file"
+            | "parse-first-line"
+            | "no-parse-first-line"
+            | "output-comment"
+            | "no-shell-escape"
+            | "shell-restricted"
+            | "src-specials"
+            | "cnf-line" => {}
             "shell-escape" => {
                 eprintln!("{progname}: -shell-escape: \\write18 is not run by phitex");
             }
@@ -220,10 +244,11 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         eprintln!("{progname}: {n}");
     }
     let status = std::sync::Arc::new(session::Status::default());
-    let mut s = Session::new(job, status, &mut |n: &str| eprintln!("{progname}: {n}")).unwrap_or_else(|e| {
-        eprintln!("{progname}: {e}");
-        std::process::exit(1);
-    });
+    let mut s = Session::new(job, status, &mut |n: &str| eprintln!("{progname}: {n}"))
+        .unwrap_or_else(|e| {
+            eprintln!("{progname}: {e}");
+            std::process::exit(1);
+        });
     let r = s.build();
     print!("{}", Session::terminal(&r));
     if let Err(e) = s.write(&r) {
@@ -264,16 +289,28 @@ mod tests {
     fn selection() {
         assert_eq!(
             select("/x/bin/pdflatex", v(&["a.tex"]), None),
-            Selection::Compat { progname: "pdflatex".into(), args: v(&["a.tex"]) }
+            Selection::Compat {
+                progname: "pdflatex".into(),
+                args: v(&["a.tex"])
+            }
         );
-        assert_eq!(select("target/release/phitex", v(&["build", "x.tex"]), None), Selection::Modern(v(&["build", "x.tex"])));
+        assert_eq!(
+            select("target/release/phitex", v(&["build", "x.tex"]), None),
+            Selection::Modern(v(&["build", "x.tex"]))
+        );
         assert_eq!(
             select("phitex", v(&["--compat=tex", "-ini", "x"]), None),
-            Selection::Compat { progname: "tex".into(), args: v(&["-ini", "x"]) }
+            Selection::Compat {
+                progname: "tex".into(),
+                args: v(&["-ini", "x"])
+            }
         );
         assert_eq!(
             select("phitex", v(&["x"]), Some("latex")),
-            Selection::Compat { progname: "latex".into(), args: v(&["x"]) }
+            Selection::Compat {
+                progname: "latex".into(),
+                args: v(&["x"])
+            }
         );
         assert_eq!(job_of("dir/paper.tex"), "paper");
     }

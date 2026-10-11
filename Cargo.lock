@@ -1434,7 +1434,6 @@ dependencies = [
  "phitex-draw",
  "phitex-kpse",
  "phitex-makeindex",
- "phitex-red",
  "phitex-xdvipdfmx",
  "tikv-jemallocator",
 ]
@@ -1532,27 +1531,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "phitex-red"
-version = "0.0.0"
-dependencies = [
- "phitex-bibtex",
- "phitex-codecs",
- "phitex-kpse",
- "phitex-makeindex",
- "phitex-otf",
- "phitex-syntax",
-]
-
-[[package]]
 name = "phitex-reduce"
 version = "0.0.0"
 
 [[package]]
 name = "phitex-source"
-version = "0.0.0"
-
-[[package]]
-name = "phitex-syntax"
 version = "0.0.0"
 
 [[package]]

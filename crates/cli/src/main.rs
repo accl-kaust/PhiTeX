@@ -1,5 +1,5 @@
-//! `phitex`: TeX documents built and watched on phitex-red, TeX as graph
-//! reduction of pending thunks.
+//! `phitex`: TeX documents built and watched, TeX as graph reduction of
+//! pending thunks.
 //!
 //! - Bare `phitex` is the modern command line (`modern.rs`): `phitex
 //!   build`, `watch`, `check`, `clean`, `outline`.
@@ -9,8 +9,9 @@
 //! - As `bibtex` or `makeindex` (or `phitex -bibtex`, `-makeindex`), those
 //!   programs, in process (`tools.rs`).
 //!
-//! Every build is a session of one `phitex_red::api::Build`
-//! (`session.rs`); a watch's edits are updates of the same Build.
+//! Every build is a document session (`session.rs`); a watch's edits are
+//! updates of the same session. The native engine (`phitex-tex` on
+//! `phitex-reduce`) is being written; until it lands, builds report so.
 
 #![allow(
     clippy::many_single_char_names,

@@ -55,7 +55,11 @@ fn read_path(p: &Path) -> Option<Vec<u8>> {
 impl ToolFiles<'_> {
     fn at(&self, name: &[u8]) -> PathBuf {
         let n = Path::new(std::ffi::OsStr::from_bytes(name));
-        if n.is_absolute() { n.to_path_buf() } else { self.dir.join(n) }
+        if n.is_absolute() {
+            n.to_path_buf()
+        } else {
+            self.dir.join(n)
+        }
     }
 
     fn get(&self, name: &[u8]) -> Option<Vec<u8>> {
@@ -76,9 +80,10 @@ impl ToolFiles<'_> {
         read.iter().all(|l| match l {
             Lookup::Read(n, was) => self.get(n) == *was,
             Lookup::Find(n, f, was) => self.find(n, *f) == *was,
-            Lookup::Readable(n, was) => (self.served.contains_key(&*String::from_utf8_lossy(n))
-                || self.at(n).exists())
-                == *was,
+            Lookup::Readable(n, was) => {
+                (self.served.contains_key(&*String::from_utf8_lossy(n)) || self.at(n).exists())
+                    == *was
+            }
             Lookup::Aux(n, was) => self.get(n).map(|d| aux_digest(&d)) == *was,
         })
     }
@@ -87,19 +92,24 @@ impl ToolFiles<'_> {
 impl phitex_bibtex::Files for ToolFiles<'_> {
     fn aux(&mut self, name: &[u8]) -> Option<Vec<u8>> {
         let d = self.get(name);
-        self.read.push(Lookup::Aux(name.to_vec(), d.as_ref().map(|d| aux_digest(d))));
+        self.read.push(Lookup::Aux(
+            name.to_vec(),
+            d.as_ref().map(|d| aux_digest(d)),
+        ));
         d
     }
 
     fn bst(&mut self, name: &[u8]) -> Option<Vec<u8>> {
         let f = self.find(name, Format::Bst);
-        self.read.push(Lookup::Find(name.to_vec(), Format::Bst, f.clone()));
+        self.read
+            .push(Lookup::Find(name.to_vec(), Format::Bst, f.clone()));
         f.and_then(|(_, d)| d)
     }
 
     fn bib(&mut self, name: &[u8]) -> Option<Vec<u8>> {
         let f = self.find(name, Format::Bib);
-        self.read.push(Lookup::Find(name.to_vec(), Format::Bib, f.clone()));
+        self.read
+            .push(Lookup::Find(name.to_vec(), Format::Bib, f.clone()));
         f.and_then(|(_, d)| d)
     }
 }
@@ -119,7 +129,8 @@ impl phitex_makeindex::Files for ToolFiles<'_> {
 
     fn style(&mut self, name: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
         let s = self.find(name, Format::Ist);
-        self.read.push(Lookup::Find(name.to_vec(), Format::Ist, s.clone()));
+        self.read
+            .push(Lookup::Find(name.to_vec(), Format::Ist, s.clone()));
         s
     }
 
@@ -139,9 +150,14 @@ impl phitex_makeindex::Files for ToolFiles<'_> {
 fn aux_digest(data: &[u8]) -> Vec<u8> {
     let mut d = Vec::new();
     for line in data.split(|&c| c == b'\n') {
-        if [&b"\\citation{"[..], b"\\bibdata{", b"\\bibstyle{", b"\\@input{"]
-            .iter()
-            .any(|p| line.starts_with(p))
+        if [
+            &b"\\citation{"[..],
+            b"\\bibdata{",
+            b"\\bibstyle{",
+            b"\\@input{",
+        ]
+        .iter()
+        .any(|p| line.starts_with(p))
         {
             d.extend_from_slice(line);
             d.push(b'\n');
@@ -186,8 +202,18 @@ fn mi_version() -> Vec<u8> {
 /// The last non-empty line of a tool's terminal output.
 fn summary(term: &[u8], failed: bool) -> String {
     let t = String::from_utf8_lossy(term);
-    let last = t.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_owned();
-    if failed { format!("failed: {last}") } else { last }
+    let last = t
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    if failed {
+        format!("failed: {last}")
+    } else {
+        last
+    }
 }
 
 /// The tools of one build, across its runs (and a watch's builds): what
@@ -213,25 +239,43 @@ impl Tools {
         dir: &Path,
         known: &dyn Fn(&str) -> bool,
     ) -> Vec<Made> {
-        let served: HashMap<String, Vec<u8>> =
-            writes.iter().map(|(n, t)| (n.clone(), crate::tex::bytes(t))).collect();
+        let served: HashMap<String, Vec<u8>> = writes
+            .iter()
+            .map(|(n, t)| (n.clone(), crate::tex::bytes(t)))
+            .collect();
         let mut made = Vec::new();
         for (name, text) in writes {
             if name.ends_with(".aux") && text.lines().any(|l| l.starts_with("\\bibdata{")) {
-                let kpse = self.bib_kpse.get_or_insert_with(|| crate::tex::kpse("bibtex", ""));
+                let kpse = self
+                    .bib_kpse
+                    .get_or_insert_with(|| crate::tex::kpse("bibtex", ""));
                 let bbl = format!("{}.bbl", name.trim_end_matches(".aux"));
-                let mut files = ToolFiles { kpse, dir: dir.to_path_buf(), served: &served, read: Vec::new() };
+                let mut files = ToolFiles {
+                    kpse,
+                    dir: dir.to_path_buf(),
+                    served: &served,
+                    read: Vec::new(),
+                };
                 if known(&bbl) && self.bib_last.get(name).is_some_and(|r| files.unchanged(r)) {
                     continue;
                 }
                 let t = std::time::Instant::now();
                 let opts = bib_options(files.kpse, false, 2);
                 let out = phitex_bibtex::run(name.as_bytes(), &opts, &mut files);
-                self.bib_last.insert(name.clone(), std::mem::take(&mut files.read));
+                self.bib_last
+                    .insert(name.clone(), std::mem::take(&mut files.read));
                 made.push(Made {
-                    file: out.bbl.as_ref().map_or(bbl, |f| String::from_utf8_lossy(&f.name).into_owned()),
+                    file: out
+                        .bbl
+                        .as_ref()
+                        .map_or(bbl, |f| String::from_utf8_lossy(&f.name).into_owned()),
                     text: out.bbl.as_ref().map(|f| crate::tex::chars(&f.contents)),
-                    side: out.blg.as_ref().map(|f| (String::from_utf8_lossy(&f.name).into_owned(), f.contents.clone())),
+                    side: out.blg.as_ref().map(|f| {
+                        (
+                            String::from_utf8_lossy(&f.name).into_owned(),
+                            f.contents.clone(),
+                        )
+                    }),
                     line: format!(
                         "bibtex {name} in {:.1} ms: {}",
                         t.elapsed().as_secs_f64() * 1e3,
@@ -240,19 +284,36 @@ impl Tools {
                 });
             }
             if name.ends_with(".idx") {
-                let kpse = self.mi_kpse.get_or_insert_with(|| crate::tex::kpse("makeindex", ""));
+                let kpse = self
+                    .mi_kpse
+                    .get_or_insert_with(|| crate::tex::kpse("makeindex", ""));
                 let ind = format!("{}.ind", name.trim_end_matches(".idx"));
-                let mut files = ToolFiles { kpse, dir: dir.to_path_buf(), served: &served, read: Vec::new() };
+                let mut files = ToolFiles {
+                    kpse,
+                    dir: dir.to_path_buf(),
+                    served: &served,
+                    read: Vec::new(),
+                };
                 if known(&ind) && self.mi_last.get(name).is_some_and(|r| files.unchanged(r)) {
                     continue;
                 }
                 let t = std::time::Instant::now();
-                let out = phitex_makeindex::run(&[name.as_bytes().to_vec()], &mi_version(), &mut files);
-                self.mi_last.insert(name.clone(), std::mem::take(&mut files.read));
+                let out =
+                    phitex_makeindex::run(&[name.as_bytes().to_vec()], &mi_version(), &mut files);
+                self.mi_last
+                    .insert(name.clone(), std::mem::take(&mut files.read));
                 made.push(Made {
-                    file: out.ind.as_ref().map_or(ind, |f| String::from_utf8_lossy(&f.name).into_owned()),
+                    file: out
+                        .ind
+                        .as_ref()
+                        .map_or(ind, |f| String::from_utf8_lossy(&f.name).into_owned()),
                     text: out.ind.as_ref().map(|f| crate::tex::chars(&f.contents)),
-                    side: out.ilg.as_ref().map(|f| (String::from_utf8_lossy(&f.name).into_owned(), f.contents.clone())),
+                    side: out.ilg.as_ref().map(|f| {
+                        (
+                            String::from_utf8_lossy(&f.name).into_owned(),
+                            f.contents.clone(),
+                        )
+                    }),
                     line: format!(
                         "makeindex {name} in {:.1} ms: {}",
                         t.elapsed().as_secs_f64() * 1e3,
@@ -279,16 +340,25 @@ impl Tools {
 
 /// Whether this invocation is BibTeX (`bibtex`, or `phitex -bibtex`).
 pub fn bibtex_wanted(argv0: &str, args: &[String]) -> bool {
-    stem(argv0) == "bibtex" || args.first().is_some_and(|a| a == "-bibtex" || a == "--bibtex")
+    stem(argv0) == "bibtex"
+        || args
+            .first()
+            .is_some_and(|a| a == "-bibtex" || a == "--bibtex")
 }
 
 /// Whether this invocation is makeindex.
 pub fn makeindex_wanted(argv0: &str, args: &[String]) -> bool {
-    stem(argv0) == "makeindex" || args.first().is_some_and(|a| a == "-makeindex" || a == "--makeindex")
+    stem(argv0) == "makeindex"
+        || args
+            .first()
+            .is_some_and(|a| a == "-makeindex" || a == "--makeindex")
 }
 
 fn stem(argv0: &str) -> String {
-    Path::new(argv0).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+    Path::new(argv0)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Run as `bibtex [-terse] [-min-crossrefs=N] AUX`.
@@ -296,12 +366,17 @@ pub fn bibtex_main(args: &[String]) -> ! {
     let mut terse = false;
     let mut min_crossrefs = 2;
     let mut files = Vec::new();
-    let mut it = args.iter().skip_while(|a| *a == "-bibtex" || *a == "--bibtex").peekable();
+    let mut it = args
+        .iter()
+        .skip_while(|a| *a == "-bibtex" || *a == "--bibtex")
+        .peekable();
     while let Some(a) = it.next() {
         let opt = a.strip_prefix("--").or_else(|| a.strip_prefix('-'));
         match opt {
             Some("terse") => terse = true,
-            Some("min-crossrefs") => min_crossrefs = it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            Some("min-crossrefs") => {
+                min_crossrefs = it.next().and_then(|v| v.parse().ok()).unwrap_or(0)
+            }
             Some(o) if o.starts_with("min-crossrefs=") => {
                 min_crossrefs = o["min-crossrefs=".len()..].parse().unwrap_or(0);
             }
@@ -317,13 +392,20 @@ pub fn bibtex_main(args: &[String]) -> ! {
         }
     }
     if files.len() != 1 {
-        eprintln!("bibtex: Need exactly one file argument.\nTry `bibtex --help' for more information.");
+        eprintln!(
+            "bibtex: Need exactly one file argument.\nTry `bibtex --help' for more information."
+        );
         std::process::exit(1);
     }
     let mut kpse = crate::tex::kpse("bibtex", "");
     let opts = bib_options(&mut kpse, terse, min_crossrefs);
     let served = HashMap::new();
-    let mut fs = ToolFiles { kpse: &mut kpse, dir: PathBuf::from("."), served: &served, read: Vec::new() };
+    let mut fs = ToolFiles {
+        kpse: &mut kpse,
+        dir: PathBuf::from("."),
+        served: &served,
+        read: Vec::new(),
+    };
     let out = phitex_bibtex::run(files[0].as_bytes(), &opts, &mut fs);
     for f in [&out.blg, &out.bbl].into_iter().flatten() {
         let name = String::from_utf8_lossy(&f.name).into_owned();
@@ -347,7 +429,12 @@ pub fn makeindex_main(args: &[String]) -> ! {
         .collect();
     let mut kpse = crate::tex::kpse("makeindex", "");
     let served = HashMap::new();
-    let mut fs = ToolFiles { kpse: &mut kpse, dir: PathBuf::from("."), served: &served, read: Vec::new() };
+    let mut fs = ToolFiles {
+        kpse: &mut kpse,
+        dir: PathBuf::from("."),
+        served: &served,
+        read: Vec::new(),
+    };
     let out = phitex_makeindex::run(&args, &mi_version(), &mut fs);
     let mut failed = false;
     for f in [&out.ind, &out.ilg].into_iter().flatten() {

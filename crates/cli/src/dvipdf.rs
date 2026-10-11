@@ -39,7 +39,11 @@ pub struct DpxFiles {
 
 impl DpxFiles {
     pub fn new() -> DpxFiles {
-        DpxFiles { kpse: crate::tex::kpse("dvipdfmx", "pdftex"), found: HashMap::new(), read: HashMap::new() }
+        DpxFiles {
+            kpse: crate::tex::kpse("dvipdfmx", "pdftex"),
+            found: HashMap::new(),
+            read: HashMap::new(),
+        }
     }
 }
 
@@ -60,7 +64,9 @@ impl Files for DpxFiles {
         self.read
             .entry(path.to_vec())
             .or_insert_with(|| {
-                let p = std::path::Path::new(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path));
+                let p = std::path::Path::new(
+                    <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path),
+                );
                 std::fs::read(p).ok().map(Arc::from)
             })
             .clone()
