@@ -200,7 +200,7 @@ impl<'a> Ctx<'a> {
             return self.stop(End::Wait(crossed));
         }
         let v = if w.site == NIL {
-            e.units[n.unit as usize].env.get(&f).copied()
+            e.start_value(n.unit, f)
         } else {
             self.read_node(w.site, e.n(w.site).def_value(f), AssumeKind::Def(f))?
         };
@@ -544,7 +544,7 @@ impl<'a> Ctx<'a> {
             return self.stop(End::Wait(w.pending));
         }
         let v = if w.site == NIL {
-            e.units[an.unit as usize].env.get(&f).copied()
+            e.start_value(an.unit, f)
         } else {
             self.read_node(w.site, e.n(w.site).def_value(f), AssumeKind::Def(f))?
         };

@@ -1782,6 +1782,13 @@ pub struct Program {
     pub nodes: Vec<NodeId>,
 }
 
+/// The environment `env` (integer fields) as the engine takes it.
+pub fn env_values(eng: &Engine, env: &[(&str, i64)]) -> Vec<(Field, ValueId)> {
+    env.iter()
+        .map(|&(f, x)| (eng.values().field(f), eng.values().int(x)))
+        .collect()
+}
+
 impl Program {
     /// Loads `lines` into a fresh engine.
     pub fn load(lines: Vec<String>) -> (Engine, Program) {

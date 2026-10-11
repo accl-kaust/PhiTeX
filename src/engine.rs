@@ -836,6 +836,11 @@ pub struct Engine {
     /// that ran meanwhile is checked against those after its start.
     pub(crate) touch_log: Vec<(u32, u64)>,
     in_eval: bool,
+    /// The environment: fields defined before every text unit (text order
+    /// -1), below the unit's own [`Engine::set_env`] entries.
+    environment: FxHashMap<Field, ValueId>,
+    /// The environment for the next evaluation, applied at its start.
+    env_next: Option<FxHashMap<Field, ValueId>>,
     /// Global definitions: `(unit, field, label)`.
     global_ix: BTreeMap<(u32, Field, u64), Slot>,
     users: BTreeMap<(u64, Field, u64), Slot>,
@@ -982,6 +987,8 @@ impl Engine {
             stream_runs: FxHashMap::default(),
             touch_log: Vec::new(),
             in_eval: false,
+            environment: FxHashMap::default(),
+            env_next: None,
             global_ix: BTreeMap::new(),
             users: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -1621,6 +1628,59 @@ impl Engine {
     /// Sets the value a field has at the start of `unit`.
     pub fn set_env(&mut self, unit: UnitId, field: Field, value: ValueId) {
         self.set_env_slot(unit.0, field, value);
+    }
+
+    /// Supplies the environment for the next evaluation: the fields every
+    /// text unit sees defined before its first node. Applied when the
+    /// evaluation starts; a field that changed from the previous environment
+    /// re-runs only its readers. Bodies of lexical applications do not see
+    /// it (their results are memoized by their arguments).
+    pub fn set_environment(&mut self, env: impl IntoIterator<Item = (Field, ValueId)>) {
+        self.env_next = Some(env.into_iter().collect());
+    }
+
+    /// The environment of the last evaluation (or of the next, once
+    /// supplied).
+    pub fn environment(&self) -> impl Iterator<Item = (Field, ValueId)> + '_ {
+        self.env_next
+            .as_ref()
+            .unwrap_or(&self.environment)
+            .iter()
+            .map(|(&f, &v)| (f, v))
+    }
+
+    fn apply_environment(&mut self) {
+        let Some(next) = self.env_next.take() else {
+            return;
+        };
+        let old = std::mem::replace(&mut self.environment, next);
+        let mut changed: Vec<Field> = old
+            .iter()
+            .filter(|&(f, v)| self.environment.get(f) != Some(v))
+            .map(|(&f, _)| f)
+            .chain(self.environment.keys().filter(|f| !old.contains_key(f)).copied())
+            .collect();
+        changed.sort_unstable();
+        for unit in 0..u32::try_from(self.units.len()).expect("unit count") {
+            let u = &self.units[unit as usize];
+            if !u.live || u.owner != NIL {
+                continue;
+            }
+            for &f in &changed {
+                if !self.units[unit as usize].env.contains_key(&f) {
+                    self.dirty_field_users(site_key(unit, NIL), f);
+                }
+            }
+        }
+    }
+
+    /// The value `f` has at the start of `unit`.
+    pub(crate) fn start_value(&self, unit: u32, f: Field) -> Option<ValueId> {
+        let u = &self.units[unit as usize];
+        u.env
+            .get(&f)
+            .or_else(|| if u.owner == NIL { self.environment.get(&f) } else { None })
+            .copied()
     }
 
     fn set_env_slot(&mut self, unit: u32, field: Field, value: ValueId) {
@@ -4066,7 +4126,7 @@ impl Engine {
                         return false;
                     }
                     if w.site == NIL {
-                        (0, self.units[n.unit as usize].env.get(&f).copied())
+                        (0, self.start_value(n.unit, f))
                     } else {
                         if !self.settled(w.site) {
                             return false;
@@ -4509,7 +4569,7 @@ impl Engine {
                         .find(|u| u.kind == K_FIELD && u.key == f.0.0)
                         .map(|u| u.site);
                     let cur = if w.site == NIL {
-                        self.units[xn.unit as usize].env.get(&f).copied()
+                        self.start_value(xn.unit, f)
                     } else {
                         self.n(w.site).def_value(f)
                     };
@@ -4645,7 +4705,7 @@ impl Engine {
                             continue;
                         }
                         let cur = if w.site == NIL {
-                            self.units[rn.unit as usize].env.get(&f).copied()
+                            self.start_value(rn.unit, f)
                         } else {
                             self.n(w.site).def_value(f)
                         };
@@ -4775,6 +4835,10 @@ impl Engine {
                 live.insert(x.value);
             }
         }
+        for (f, v) in self.environment.iter().chain(self.env_next.iter().flatten()) {
+            live.insert(f.0);
+            live.insert(*v);
+        }
         for u in &self.units {
             if !u.live {
                 continue;
@@ -4851,6 +4915,7 @@ impl Engine {
         }
         self.spec_done.clear();
         self.stream_runs.clear();
+        self.apply_environment();
         self.touch_log.clear();
         let restarted = self.feedback;
         let mut result = self.evaluate_inner(sched, exec);

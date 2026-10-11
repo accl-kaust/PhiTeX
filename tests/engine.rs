@@ -3,8 +3,8 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
-use common::interp::interpret;
-use common::{Program, SECTION, Threads, generate, generate_with};
+use common::interp::{interpret, interpret_env};
+use common::{Program, SECTION, Threads, env_values, generate, generate_with};
 use defuse::{Engine, EvalError, Greedy, RandomScheduler, Report, Rng, Sequential, Speculation};
 
 fn lines(src: &[&str]) -> Vec<String> {
@@ -1214,4 +1214,91 @@ fn a_global_inside_a_skipped_scope_hands_its_users_on() {
     prog.insert_line(&mut eng, 7, "add 7".into());
     eval(&mut eng, &prog);
     assert_eq!(out(&eng, &prog, 9), "[7 3]");
+}
+
+// ---------------------------------------------------------- environment
+
+const ENV_SRC: [&str; 9] = [
+    "a = x + 1",
+    "b = y * 2",
+    "c = a + b",
+    "{ z = y + 1 }",
+    "collect l until mark if go",
+    "1",
+    "mark a",
+    "x = 100",
+    "d = x",
+];
+
+fn env_eval(eng: &mut Engine, prog: &Program, env: &[(&str, i64)], sched: u8) -> Report {
+    eng.set_environment(env_values(eng, env));
+    let r = match sched {
+        0 => eng.evaluate_sequential(),
+        1 => eng.evaluate(&mut Greedy::speculative(Speculation::All, 64), &mut Threads(3)),
+        _ => eng.evaluate(&mut RandomScheduler::new(11, true), &mut Sequential),
+    }
+    .expect("evaluate");
+    assert_eq!(
+        prog.result(eng),
+        interpret_env(&prog.lines, env).expect("interpreter"),
+        "{env:?}"
+    );
+    r
+}
+
+#[test]
+fn equal_environments_give_identical_ids_and_results() {
+    let env = [("x", 1), ("y", 2), ("go", 1)];
+    for sched in 0..3 {
+        let (mut e1, p1) = Program::load(lines(&ENV_SRC));
+        env_eval(&mut e1, &p1, &env, sched);
+        let (mut e2, p2) = Program::load(lines(&ENV_SRC));
+        // The same environment supplied in another order.
+        let rev: Vec<(&str, i64)> = env.iter().rev().copied().collect();
+        env_eval(&mut e2, &p2, &rev, sched);
+        assert_eq!(p1.nodes, p2.nodes);
+        assert_eq!(p1.result(&e1), p2.result(&e2));
+        assert_eq!(
+            p1.render(&e1),
+            ["2", "4", "6", "()", "[1]", "1", "()", "100", "100", "<>"]
+        );
+        // Supplying an equal environment again runs nothing.
+        let r = env_eval(&mut e1, &p1, &env, sched);
+        assert_eq!(r.nodes_run, 0, "sched {sched}");
+    }
+}
+
+#[test]
+fn changing_one_environment_field_reruns_only_its_readers() {
+    for sched in 0..3 {
+        let (mut eng, prog) = Program::load(lines(&ENV_SRC));
+        env_eval(&mut eng, &prog, &[("x", 1), ("y", 2), ("go", 1)], sched);
+        let ids: Vec<_> = prog.nodes.clone();
+        // x: its reader `a`, then `c`.
+        let r = env_eval(&mut eng, &prog, &[("x", 5), ("y", 2), ("go", 1)], sched);
+        assert_eq!(prog.render(&eng)[..3], ["6", "4", "10"]);
+        assert_eq!(
+            Report::by_op(&r.runs_by_op, "stmt"),
+            2,
+            "sched {sched}: {:?}",
+            r.runs_by_op
+        );
+        // y: `b`, `c` and the block's child.
+        let r = env_eval(&mut eng, &prog, &[("x", 5), ("y", 3), ("go", 1)], sched);
+        assert_eq!(prog.render(&eng)[..4], ["6", "6", "12", "()"]);
+        assert_eq!(
+            Report::by_op(&r.runs_by_op, "stmt"),
+            3,
+            "sched {sched}: {:?}",
+            r.runs_by_op
+        );
+        // go goes: only the claim re-runs, and runs on past `mark`.
+        let r = env_eval(&mut eng, &prog, &[("x", 5), ("y", 3)], sched);
+        assert_eq!(r.nodes_run, 1, "sched {sched}");
+        assert_eq!(prog.render(&eng)[4], "[1 () 100 100]");
+        // An unread field changes nothing.
+        let r = env_eval(&mut eng, &prog, &[("x", 5), ("y", 3), ("w", 9)], sched);
+        assert_eq!(r.nodes_run, 0, "sched {sched}");
+        assert_eq!(prog.nodes, ids);
+    }
 }

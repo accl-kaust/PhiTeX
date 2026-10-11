@@ -81,6 +81,12 @@ struct Interp<'v> {
 /// A cycle (a function applied to itself), conflicting publications of a
 /// loop-back field, or no convergence within the engine's round limit.
 pub fn interpret(lines: &[String]) -> Result<Vec<u64>, String> {
+    interpret_env(lines, &[])
+}
+
+/// Interprets `lines` with the environment `env` (integer fields defined
+/// before the first line).
+pub fn interpret_env(lines: &[String], env: &[(&str, i64)]) -> Result<Vec<u64>, String> {
     let v = Values::new();
     let asts: Vec<ValueId> = lines.iter().map(|l| parse_stmt(&v, l)).collect();
     let mut loops = FxHashMap::default();
@@ -111,6 +117,9 @@ pub fn interpret(lines: &[String]) -> Result<Vec<u64>, String> {
         // Applications may read loop-back fields.
         it.apps.clear();
         let mut u = Unit::new();
+        for &(f, x) in env {
+            u.env.insert(v.field(f), v.int(x));
+        }
         let outs = it.run_list(&mut u, &asts);
         if let Some(e) = it.error.take() {
             return Err(e);
