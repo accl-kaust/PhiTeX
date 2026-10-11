@@ -14,7 +14,7 @@ use phitex_flow::build::MAIN_MEMORY;
 use phitex_flow::{Build, Font, Options, Order, Reads};
 
 /// The documents.
-const DOCS: [&str; 30] = [
+const DOCS: [&str; 31] = [
     "hello",
     "compressed",
     "mag",
