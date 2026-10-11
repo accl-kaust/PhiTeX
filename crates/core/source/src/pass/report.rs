@@ -46,20 +46,41 @@ fn ix(s: Status) -> usize {
 impl Stats {
     #[must_use]
     pub fn of(pass: &Pass, text: &str) -> Stats {
+        Stats::of_range(pass, text, 0..text.len())
+    }
+
+    /// The counts for the bytes `range` of the text (an item or pair is in
+    /// it where it begins).
+    #[must_use]
+    pub fn of_range(pass: &Pass, _text: &str, range: std::ops::Range<usize>) -> Stats {
+        let in_tok = |k: usize| range.contains(&pass.tokens[k].start);
+        let in_atom = |a: usize| range.contains(&pass.atoms[a].start);
         let mut s = Stats {
-            bytes: text.len(),
-            tokens: pass.tokens.len(),
-            cs: pass.tokens.iter().filter(|t| t.kind == TokKind::Cs).count(),
-            brace_pairs: pass.braces.len(),
+            bytes: range.len(),
+            tokens: pass
+                .tokens
+                .iter()
+                .filter(|t| range.contains(&t.start))
+                .count(),
+            cs: pass
+                .tokens
+                .iter()
+                .filter(|t| t.kind == TokKind::Cs && range.contains(&t.start))
+                .count(),
+            brace_pairs: pass.braces.iter().filter(|b| in_tok(b.open)).count(),
             ..Stats::default()
         };
-        for b in &pass.braces {
+        for b in pass.braces.iter().filter(|b| in_tok(b.open)) {
             s.groups[ix(b.status)] += 1;
         }
-        for g in &pass.groups {
+        for g in pass
+            .groups
+            .iter()
+            .filter(|g| g.open.or(g.close).is_some_and(in_atom))
+        {
             s.groups[ix(g.status)] += 1;
         }
-        for t in &pass.tokens {
+        for t in pass.tokens.iter().filter(|t| range.contains(&t.start)) {
             match t.tz {
                 Status::Pending => s.hazard_bytes[0] += t.end - t.start,
                 Status::Predicted => s.hazard_bytes[1] += t.end - t.start,
@@ -68,7 +89,7 @@ impl Stats {
         }
         // (pending items' atoms, for the chain)
         let mut pending_at = vec![false; pass.atoms.len()];
-        for it in &pass.items {
+        for it in pass.items.iter().filter(|it| in_atom(it.atom)) {
             s.items[ix(it.status)] += 1;
             if it.consumes {
                 s.args[ix(it.status)] += 1;
@@ -91,7 +112,7 @@ impl Stats {
         }
         let (mut best, mut best_par) = (0usize, 0usize);
         let mut stack: Vec<(usize, usize)> = Vec::new();
-        for (a, at) in pass.atoms.iter().enumerate() {
+        for (a, at) in pass.atoms.iter().enumerate().filter(|(a, _)| in_atom(*a)) {
             match at.kind {
                 AtomKind::Open => stack.push((best, best_par)),
                 AtomKind::Close => {
