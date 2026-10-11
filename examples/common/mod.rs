@@ -26,11 +26,11 @@
 //! ```
 #![allow(dead_code, clippy::many_single_char_names)] // AST code reads best with short names
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use defuse::{
-    Claim, Ctx, Effect, Engine, Executor, Field, Locality, NodeId, OpId, Operation, RunResult, SeqMonoid, Stop, UnitId,
-    Value, ValueId, Values,
+    Claim, Ctx, Effect, Engine, Executor, Field, FxHashMap, Locality, NodeId, OpId, Operation, RunResult, SeqMonoid,
+    Stop, UnitId, Value, ValueId, Values,
 };
 
 // ------------------------------------------------------------------- lexer
@@ -504,8 +504,104 @@ fn proc_field(v: &Values, name: ValueId) -> Field {
 }
 
 fn has_proc(v: &Values, id: ValueId) -> bool {
+    has_tag(v, id, &["proc"])
+}
+
+fn has_tag(v: &Values, id: ValueId, tags: &[&str]) -> bool {
     let xs = items(v, id);
-    xs.first().is_some_and(|&t| text(v, t) == "proc") || xs.iter().any(|&x| has_proc(v, x))
+    xs.first().is_some_and(|&t| tags.contains(&text(v, t).as_str())) || xs.iter().any(|&x| has_tag(v, x, tags))
+}
+
+/// Statements whose scope effect or definitions only show at run time.
+const OPAQUE: [&str; 6] = ["begin", "end", "do", "eval", "invoke", "seq"];
+
+/// Every procedure declared anywhere in a program, by name: what each
+/// declaration's body may define visibly after a `do` (`None`: unknowable).
+/// `tracked` is set once a [`Program`] maintains it; until then `do` stays
+/// unbounded.
+#[derive(Default)]
+pub struct Procs {
+    tracked: bool,
+    defs: FxHashMap<String, Vec<Option<Vec<String>>>>,
+}
+
+pub type ProcTable = Arc<RwLock<Procs>>;
+
+impl Procs {
+    /// The names a `do NAME` may define: the union over its declarations.
+    fn union(&self, name: &str) -> Option<Vec<String>> {
+        let mut out = Vec::new();
+        for e in self.defs.get(name).into_iter().flatten() {
+            out.extend(e.clone()?);
+        }
+        out.sort();
+        out.dedup();
+        Some(out)
+    }
+
+    fn add(&mut self, decls: Vec<(String, Option<Vec<String>>)>) {
+        for (n, e) in decls {
+            self.defs.entry(n).or_default().push(e);
+        }
+    }
+
+    fn remove(&mut self, decls: &[(String, Option<Vec<String>>)]) {
+        for (n, e) in decls {
+            let Some(es) = self.defs.get_mut(n) else { continue };
+            if let Some(i) = es.iter().position(|x| x == e) {
+                es.swap_remove(i);
+            }
+            if es.is_empty() {
+                self.defs.remove(n);
+            }
+        }
+    }
+}
+
+/// The procedure declarations in `ast`, with what each body may export.
+fn proc_decls(v: &Values, ast: ValueId, out: &mut Vec<(String, Option<Vec<String>>)>) {
+    let (t, a) = tag(v, ast);
+    if t == "proc" {
+        let body = a[2];
+        // The body unfolds inside its own scope: only globals escape, unless
+        // it opens, closes or unfolds further.
+        let e = if has_tag(v, body, &OPAQUE) {
+            None
+        } else {
+            exports(v, &items(v, body))
+        };
+        out.push((text(v, a[0]), e));
+    }
+    for x in items(v, ast) {
+        proc_decls(v, x, out);
+    }
+}
+
+/// What a literal `eval "TEXT"` may define, read statically: `None` if its
+/// text is not a literal, or opens, closes or unfolds further.
+fn eval_literal(v: &Values, expr: ValueId) -> Option<Vec<String>> {
+    let (t, a) = tag(v, expr);
+    if t != "str" {
+        return None;
+    }
+    let Ok(ss) = parse(v, &text(v, a[0])) else {
+        return Some(Vec::new()); // an error: defines nothing
+    };
+    if ss.iter().any(|&s| has_proc(v, s)) {
+        return Some(Vec::new());
+    }
+    if ss.iter().any(|&s| has_tag(v, s, &OPAQUE)) {
+        return None;
+    }
+    // No wrapper scope: its top-level assignments define in place.
+    let mut out = exports(v, &ss)?;
+    for &s in &ss {
+        let (t, a) = tag(v, s);
+        if t == "assign" || t == "record" {
+            out.push(text(v, a[0]));
+        }
+    }
+    Some(out)
 }
 
 fn text(v: &Values, id: ValueId) -> String {
@@ -630,7 +726,7 @@ pub struct Ops {
 }
 
 /// One operation for every statement kind; the AST is its argument.
-struct StmtOp(Arc<OnceLock<Ops>>);
+struct StmtOp(Arc<OnceLock<Ops>>, ProcTable);
 /// Lexical function application: arguments `[closure, arg...]`.
 struct ApplyOp(Arc<OnceLock<Ops>>);
 
@@ -787,6 +883,14 @@ impl Operation for StmtOp {
         match t.as_str() {
             // Whatever `~name` means, it can only define its target.
             "invoke" => Some(vec![v.field(&text(v, a[1]))]),
+            "do" => {
+                let p = self.1.read().expect("procs");
+                if !p.tracked {
+                    return None;
+                }
+                Some(p.union(&text(v, a[0]))?.iter().map(|n| v.field(n)).collect())
+            }
+            "eval" => Some(eval_literal(v, a[0])?.iter().map(|n| v.field(n)).collect()),
             "block" => exports(v, &items(v, a[0])).map(|e| e.iter().map(|n| v.field(n)).collect()),
             "if" => {
                 let mut e = exports(v, &items(v, a[1]))?;
@@ -801,7 +905,8 @@ impl Operation for StmtOp {
         match tag(v, args[0]).0.as_str() {
             "begin" => Effect::Open,
             "end" => Effect::Close,
-            // Runtime code may open or close scopes.
+            // Runtime code may open or close scopes; literal text shows it.
+            "eval" if eval_literal(v, tag(v, args[0]).1[0]).is_some() => Effect::None,
             "eval" => Effect::Pending,
             _ => Effect::None,
         }
@@ -1083,18 +1188,20 @@ impl Operation for ApplyOp {
 /// The language installed into an engine.
 pub struct Lang {
     pub ops: Ops,
+    pub procs: ProcTable,
 }
 
 impl Lang {
     pub fn install(eng: &mut Engine) -> Lang {
         let cell = Arc::new(OnceLock::new());
-        let stmt = eng.register(Arc::new(StmtOp(cell.clone())));
+        let procs = ProcTable::default();
+        let stmt = eng.register(Arc::new(StmtOp(cell.clone(), procs.clone())));
         let apply = eng.register(Arc::new(ApplyOp(cell.clone())));
         let ops = Ops { stmt, apply };
         cell.set(ops).expect("fresh");
         let out = out_field(eng.values());
         eng.declare_accumulator(out, Arc::new(SeqMonoid));
-        Lang { ops }
+        Lang { ops, procs }
     }
 
     /// Declares the loop-back fields of `asts` and returns their names.
@@ -1141,6 +1248,15 @@ impl Program {
         let unit = eng.new_unit();
         let asts: Vec<ValueId> = lines.iter().map(|l| parse_stmt(eng.values(), l)).collect();
         let loops = Lang::declare_loops(&mut eng, &asts);
+        {
+            let mut p = lang.procs.write().expect("procs");
+            for &ast in &asts {
+                let mut d = Vec::new();
+                proc_decls(eng.values(), ast, &mut d);
+                p.add(d);
+            }
+            p.tracked = true;
+        }
         let mut nodes = Vec::with_capacity(lines.len());
         for ast in asts {
             let ast = Lang::rewrite(eng.values(), &loops, ast);
@@ -1163,13 +1279,55 @@ impl Program {
     /// Replaces line `i`.
     pub fn set_line(&mut self, eng: &mut Engine, i: usize, text: String) {
         let ast = Lang::rewrite(eng.values(), &self.loops, parse_stmt(eng.values(), &text));
+        let old = self.lines[i].clone();
+        self.procs_edit(eng, Some(&old), Some(&text));
         eng.replace(self.nodes[i], self.lang.ops.stmt, vec![ast]);
         self.lines[i] = text;
+    }
+
+    /// Keeps the procedure table in step with a line edit; re-reads the
+    /// `do` statements whose procedures may now define something else.
+    fn procs_edit(&self, eng: &mut Engine, old: Option<&str>, new: Option<&str>) {
+        let decls = |eng: &Engine, l: Option<&str>| {
+            let mut d = Vec::new();
+            if let Some(l) = l {
+                proc_decls(eng.values(), parse_stmt(eng.values(), l), &mut d);
+            }
+            d
+        };
+        let (od, nd) = (decls(eng, old), decls(eng, new));
+        if od.is_empty() && nd.is_empty() {
+            return;
+        }
+        let names: Vec<String> = od.iter().chain(&nd).map(|d| d.0.clone()).collect();
+        let changed: Vec<String> = {
+            let mut p = self.lang.procs.write().expect("procs");
+            let before: Vec<_> = names.iter().map(|n| p.union(n)).collect();
+            p.remove(&od);
+            p.add(nd);
+            names
+                .iter()
+                .zip(before)
+                .filter(|(n, b)| p.union(n) != *b)
+                .map(|(n, _)| n.clone())
+                .collect()
+        };
+        if changed.is_empty() {
+            return;
+        }
+        let stmt = self.lang.ops.stmt;
+        eng.refresh_where(&|op, args, v| {
+            op == stmt && {
+                let (t, a) = tag(v, args[0]);
+                t == "do" && changed.contains(&text(v, a[0]))
+            }
+        });
     }
 
     /// Inserts a new line before line `i`.
     pub fn insert_line(&mut self, eng: &mut Engine, i: usize, text: String) {
         let ast = Lang::rewrite(eng.values(), &self.loops, parse_stmt(eng.values(), &text));
+        self.procs_edit(eng, None, Some(&text));
         let n = if i == 0 {
             eng.insert_before(self.nodes[0], self.lang.ops.stmt, vec![ast])
         } else {
@@ -1184,7 +1342,8 @@ impl Program {
     pub fn remove_line(&mut self, eng: &mut Engine, i: usize) {
         let n = self.nodes.remove(i);
         eng.remove(n);
-        self.lines.remove(i);
+        let old = self.lines.remove(i);
+        self.procs_edit(eng, Some(&old), None);
     }
 
     /// The result as raw content ids: every top-level output (0 if the line

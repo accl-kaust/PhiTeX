@@ -235,6 +235,23 @@ pub struct Report {
     pub values_freed: u64,
     /// Nodes re-bound because a scope boundary moved (region sizes).
     pub scope_region: u64,
+    /// Pending definition sets resolved this evaluation (canonical).
+    pub pending_sets: u64,
+    /// Of those, the ones that defined anything visible after the node:
+    /// their own definitions, or definitions of their unfolded text that
+    /// reach past it (canonical).
+    pub pending_sets_defining: u64,
+    /// Unfolded-text memo lookups that found the text.
+    pub text_memo_hits: u64,
+    /// Unfolded-text memo lookups that produced it.
+    pub text_memo_misses: u64,
+    /// Lexical applications found in the memo.
+    pub app_memo_hits: u64,
+    /// Lexical applications created.
+    pub app_memo_misses: u64,
+    /// Speculative runs kept whose shape (children, claim, scope effect or
+    /// definition set) differed from the node's previous shape.
+    pub spec_shape_changes: u64,
 }
 
 /// Evaluation errors.
@@ -380,6 +397,8 @@ pub(crate) struct Aux {
     publishes: Vec<(Field, ValueId)>,
     contribs: Vec<(Field, ValueId)>,
     pub(crate) claimed: Vec<Slot>,
+    /// The fields a pending node is indexed under (`None`: all).
+    pend_fields: Option<Vec<Field>>,
     claimed_by: Option<Slot>,
     pub(crate) body: Option<u32>,
     app_refs: u32,
@@ -1108,6 +1127,35 @@ impl Engine {
         if self.n(s).op == op && self.n(s).args == args {
             return;
         }
+        self.reset_text(s, op, args);
+    }
+
+    /// Re-reads the static hooks of every live node `pred` selects (by its
+    /// text), for hooks that depend on client state outside the node's text
+    /// (e.g. a program-wide table of what each procedure may define).
+    /// Linear in the live nodes; meant for rare, program-wide hint changes.
+    ///
+    /// # Panics
+    ///
+    /// If the engine holds more than `u32::MAX` node slots.
+    pub fn refresh_where(&mut self, pred: &dyn Fn(OpId, &[ValueId], &Values) -> bool) {
+        span!(Edit);
+        let hit: Vec<Slot> = (0..self.nodes.len())
+            .filter(|&i| {
+                let n = &self.nodes[i];
+                n.state != State::Free && !n.has(F_APP) && pred(n.op, &self.args_vec(n.args), &self.values)
+            })
+            .map(|i| u32::try_from(i).expect("slot"))
+            .collect();
+        for s in hit {
+            if self.live(s) {
+                let (op, args) = (self.n(s).op, self.n(s).args);
+                self.reset_text(s, op, args);
+            }
+        }
+    }
+
+    fn reset_text(&mut self, s: Slot, op: OpId, args: ValueId) {
         self.touch(s);
         let (unit, label) = (self.n(s).unit, self.n(s).label);
         self.dirty_reaching_claims(unit, label);
@@ -1769,7 +1817,16 @@ impl Engine {
 
     fn pending_index(&mut self, s: Slot, insert: bool) {
         let (unit, label) = (self.n(s).unit, self.n(s).label);
-        match self.pending_fields(s) {
+        // Removal uses the fields it was indexed under: the hook's answer may
+        // have changed since (see `refresh`).
+        let fields = if insert {
+            let f = self.pending_fields(s);
+            self.ax(s).pend_fields.clone_from(&f);
+            f
+        } else {
+            self.aux_of(s).and_then(|a| a.pend_fields.clone())
+        };
+        match fields {
             None => {
                 if insert {
                     self.pending.insert((unit, label), s);
@@ -3459,6 +3516,10 @@ impl Engine {
         if !matches!(st, State::Dirty | State::Parked) || (st == State::Parked && !r.speculative) {
             return;
         }
+        self.report.text_memo_hits += u64::from(r.memo[0]);
+        self.report.text_memo_misses += u64::from(r.memo[1]);
+        self.report.app_memo_hits += u64::from(r.memo[2]);
+        self.report.app_memo_misses += u64::from(r.memo[3]);
         if r.speculative {
             match r.end {
                 End::Output(_) => {}
@@ -3557,6 +3618,9 @@ impl Engine {
         let old_deps = self.compute_deps(x);
         self.touch(x);
         let provisional = r.speculative && !r.assumptions.is_empty();
+        if r.speculative && self.shape_changes(x, &r) {
+            self.report.spec_shape_changes += 1;
+        }
         self.report.runs += 1;
         if self.n(x).state == State::Parked {
             self.dequeue(x);
@@ -3696,6 +3760,33 @@ impl Engine {
             }
         }
         true
+    }
+
+    /// Whether a run's shape differs from the node's current one.
+    fn shape_changes(&self, x: Slot, r: &RunResult) -> bool {
+        let n = self.n(x);
+        let kids: Vec<(OpId, ValueId)> = self
+            .children_of(x)
+            .iter()
+            .map(|&c| (self.n(c).op, self.n(c).args))
+            .collect();
+        if kids != r.children {
+            return true;
+        }
+        if n.has(F_CLAIM_DYN) && r.claim.unwrap_or(0) != self.aux_of(x).map_or(0, |a| a.claimed.len()) {
+            return true;
+        }
+        if n.has(F_EFF_DYN) && r.effect.is_some_and(|e| e != n.effect) {
+            return true;
+        }
+        if n.has(F_DYN) {
+            let mut old: Vec<(Field, bool)> = n.defs.iter().map(|d| (d.field, d.global)).collect();
+            let mut new: Vec<(Field, bool)> = r.defs.iter().map(|d| (d.0, d.2)).collect();
+            old.sort_unstable();
+            new.sort_unstable();
+            return old != new;
+        }
+        false
     }
 
     /// A stopped run still unfolds: its children so far are created (so it
@@ -4060,6 +4151,31 @@ impl Engine {
         any
     }
 
+    /// Whether `s` or its unfolded text defines anything visible after it:
+    /// its own definitions, a global, or a local directly in the scope `s`
+    /// itself is in.
+    fn defines_past(&self, s: Slot) -> bool {
+        if !self.n(s).defs.is_empty() {
+            return true;
+        }
+        let unit = self.n(s).unit;
+        let root = self.units[unit as usize].root;
+        let depth = self.order.fold(&OAug, root, 0, self.n(s).label).o;
+        let mut stack: Vec<Slot> = self.children_of(s).to_vec();
+        while let Some(c) = stack.pop() {
+            let n = self.n(c);
+            if n.state != State::Inert && !n.has(F_APP) {
+                for d in &n.defs {
+                    if d.global || self.order.fold(&OAug, root, 0, n.label).o <= depth {
+                        return true;
+                    }
+                }
+            }
+            stack.extend(self.children_of(c).iter().copied());
+        }
+        false
+    }
+
     fn finalize_report(&mut self) {
         let touched = std::mem::take(&mut self.touched);
         for (id, snap) in touched {
@@ -4077,6 +4193,12 @@ impl Engine {
             );
             if inert {
                 continue;
+            }
+            if ran && self.n(s).has(F_DYN) && (!snap.existed || sig != snap.sig || args != snap.args) {
+                self.report.pending_sets += 1;
+                if self.defines_past(s) {
+                    self.report.pending_sets_defining += 1;
+                }
             }
             if !snap.existed {
                 self.report.created += 1;
@@ -4366,6 +4488,8 @@ pub struct RunResult {
     pub(crate) assumptions: Vec<(Slot, AssumeKind, ValueId)>,
     pub(crate) sig: u64,
     pub(crate) error: Option<EvalError>,
+    /// Unfolded-text and lexical-application memo hits and misses.
+    pub(crate) memo: [u32; 4],
 }
 
 impl Node {

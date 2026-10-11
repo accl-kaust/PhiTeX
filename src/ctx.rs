@@ -38,6 +38,8 @@ pub struct Ctx<'a> {
     assumptions: Vec<(Slot, AssumeKind, ValueId)>,
     sig: u64,
     error: Option<EvalError>,
+    /// Text memo hits, misses; application memo hits, misses.
+    memo: [std::cell::Cell<u32>; 4],
 }
 
 impl<'a> Ctx<'a> {
@@ -60,6 +62,7 @@ impl<'a> Ctx<'a> {
             effect: None,
             claim: None,
             assumptions: Vec::new(),
+            memo: Default::default(),
             sig: 0,
             error: None,
         }
@@ -335,9 +338,12 @@ impl<'a> Ctx<'a> {
     pub fn apply(&mut self, op: OpId, args: Vec<ValueId>) -> Result<ValueId, Stop> {
         self.check()?;
         let a = self.values().list(args);
-        match self.eng.memo.get(&(op, a)) {
-            Some(&t) => self.read_output(t),
-            None => self.stop(End::NeedApp(op, a)),
+        if let Some(&t) = self.eng.memo.get(&(op, a)) {
+            self.memo[2].set(self.memo[2].get() + 1);
+            self.read_output(t)
+        } else {
+            self.memo[3].set(self.memo[3].get() + 1);
+            self.stop(End::NeedApp(op, a))
         }
     }
 
@@ -398,8 +404,10 @@ impl<'a> Ctx<'a> {
     pub fn memo_text(&self, a: ValueId, b: ValueId, produce: impl FnOnce(&Values) -> ValueId) -> ValueId {
         let e = self.eng;
         if let Some(&v) = e.text_memo.read().unwrap_or_else(PoisonError::into_inner).get(&(a, b)) {
+            self.memo[0].set(self.memo[0].get() + 1);
             return v;
         }
+        self.memo[1].set(self.memo[1].get() + 1);
         let v = produce(&e.values);
         e.text_memo
             .write()
@@ -433,6 +441,7 @@ impl<'a> Ctx<'a> {
             assumptions: self.assumptions,
             sig: self.sig,
             error: self.error,
+            memo: self.memo.map(std::cell::Cell::into_inner),
         }
     }
 }
