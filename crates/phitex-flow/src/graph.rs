@@ -1466,7 +1466,8 @@ pub struct Nodes {
     tail: Vec<Arc<Node>>,
 }
 
-/// Past this many stretches, a chain's nodes are made one again.
+/// Past this many stretches, a chain's newest ones are made one
+/// ([`Nodes::compact`]).
 const MAX_SEGS: usize = 16;
 
 impl Nodes {
@@ -1500,10 +1501,7 @@ impl Nodes {
     /// The nodes added since become a stretch others can share.
     fn freeze(&mut self) {
         if self.segs.len() > MAX_SEGS {
-            let all: Vec<Arc<Node>> = self.iter().cloned().collect();
-            self.segs.clear();
-            self.ends.clear();
-            self.tail = all;
+            self.compact();
         }
         if self.tail.is_empty() {
             return;
@@ -1511,6 +1509,34 @@ impl Nodes {
         let v = Arc::new(std::mem::take(&mut self.tail));
         let end = v.len() as u32;
         self.add_seg(Seg { v, start: 0, end });
+    }
+
+    /// The newest stretches (and the tail) made one: as many as are
+    /// together at least half the one before them, and two at least. The
+    /// stretches' lengths then at least double from the newest back, so a
+    /// chain made of many shares (a piece run again, its old nodes kept
+    /// between new ones) has a logarithmic number of them, and each node is
+    /// copied a logarithmic number of times — not the whole chain each
+    /// time it passes `MAX_SEGS` (quadratic in a piece of millions of
+    /// nodes: listings.dtx's last piece).
+    fn compact(&mut self) {
+        let n = self.segs.len();
+        if n < 2 {
+            return;
+        }
+        let seg_len = |s: &Seg| (s.end - s.start) as usize;
+        let mut k = n - 1;
+        let mut sum = seg_len(&self.segs[k]) + self.tail.len();
+        while k > 0 && seg_len(&self.segs[k - 1]) <= 2 * sum {
+            k -= 1;
+            sum += seg_len(&self.segs[k]);
+        }
+        let k = k.min(n - 2);
+        let start = if k == 0 { 0 } else { self.ends[k - 1] as usize };
+        let merged: Vec<Arc<Node>> = self.range(start, self.len()).cloned().collect();
+        self.segs.truncate(k);
+        self.ends.truncate(k);
+        self.tail = merged;
     }
 
     fn add_seg(&mut self, s: Seg) {
