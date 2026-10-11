@@ -157,6 +157,17 @@ pub enum Until {
     ReadEach(Vec<Field>),
 }
 
+/// What an operation's hooks say about a text from the text alone (see
+/// [`Engine::statics`]).
+pub(crate) struct Static {
+    decl: Option<Vec<(Field, Locality)>>,
+    eff: Effect,
+    claim: Claim,
+    reads: Option<Vec<Field>>,
+    may_define: MayDefine,
+    predict: bool,
+}
+
 /// Where a pending node is indexed: `pending` (an unbounded definition
 /// set), `pending_eff` (a scope effect), and its bounded definition set.
 #[derive(Clone, Debug)]
@@ -184,6 +195,12 @@ pub enum MayDefine {
 }
 
 /// A client operation.
+///
+/// The text-only hooks (`defs`, `may_define`, `effect`, `claim` with no
+/// following text, `reads`, `until_predict` with no following text) are
+/// called once per distinct text and their answers memoized: if what they
+/// depend on besides the text changes, the client says so with
+/// [`Engine::refresh_where`].
 pub trait Operation: Send + Sync {
     fn name(&self) -> &'static str {
         "op"
@@ -860,6 +877,8 @@ pub struct Engine {
     loop_pubs: FxHashMap<Field, BTreeMap<NodeId, ValueId>>,
     pub(crate) memo: FxHashMap<(OpId, ValueId), Slot>,
     pub(crate) text_memo: RwLock<FxHashMap<(ValueId, ValueId), ValueId>>,
+    /// The text-only hooks of each (operation, text), computed once.
+    statics: RwLock<FxHashMap<(OpId, ValueId), Arc<Static>>>,
     /// Dirty demanded nodes by height (a bucket queue: entries are removed
     /// lazily, an entry is live iff its node is `F_QUEUED` at that height).
     queue: Vec<Vec<(NodeId, Slot)>>,
@@ -1002,6 +1021,7 @@ impl Engine {
             loop_pubs: FxHashMap::default(),
             memo: FxHashMap::default(),
             text_memo: RwLock::new(FxHashMap::default()),
+            statics: RwLock::new(FxHashMap::default()),
             queue: Vec::new(),
             queue_min: 0,
             queue_len: 0,
@@ -1067,12 +1087,66 @@ impl Engine {
         self.seqs.iter().any(|s| s.1 == f)
     }
 
+    /// The text-only hooks of `op` on `args`: computed on first use (by
+    /// any thread) and shared by every node with that text.
+    pub(crate) fn statics(&self, op: OpId, args: ValueId) -> Arc<Static> {
+        if let Some(st) = self
+            .statics
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&(op, args))
+        {
+            return st.clone();
+        }
+        let av = self.args_vec(args);
+        let opr = self.op(op);
+        let v = &self.values;
+        let decl = opr.defs(&av, v);
+        let st = Arc::new(Static {
+            may_define: if decl.is_none() {
+                opr.may_define(&av, v)
+            } else {
+                MayDefine::Nothing
+            },
+            decl,
+            eff: opr.effect(&av, v),
+            claim: opr.claim(&av, v, &mut std::iter::empty()),
+            reads: opr.reads(&av, v),
+            predict: opr.until_predict(&av, v, &mut std::iter::empty()).is_some(),
+        });
+        self.statics
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry((op, args))
+            .or_insert(st)
+            .clone()
+    }
+
+    /// Drops the memoized hooks of texts no longer live; keeps the fields
+    /// the rest name.
+    fn statics_live(&mut self, live: &mut FxHashSet<ValueId>) {
+        let st = self.statics.get_mut().unwrap_or_else(PoisonError::into_inner);
+        st.retain(|(_, a), _| live.contains(a));
+        for x in st.values() {
+            let fields = x
+                .decl
+                .iter()
+                .flatten()
+                .map(|d| d.0)
+                .chain(x.reads.iter().flatten().copied());
+            live.extend(fields.map(|f| f.0));
+            if let MayDefine::Names(fs) = &x.may_define {
+                live.extend(fs.iter().map(|f| f.0));
+            }
+        }
+    }
+
     /// Whether `s`'s operation statically declares (hidden) field `f`.
     fn declares(&self, s: Slot, f: Field) -> bool {
         let n = self.n(s);
-        let av = self.args_vec(n.args);
-        self.op(n.op)
-            .defs(&av, &self.values)
+        self.statics(n.op, n.args)
+            .decl
+            .as_ref()
             .is_some_and(|d| d.iter().any(|&(g, _)| self.canon(g) == f))
     }
 
@@ -1540,6 +1614,21 @@ impl Engine {
     /// If the engine holds more than `u32::MAX` node slots.
     pub fn refresh_where(&mut self, pred: &dyn Fn(OpId, &[ValueId], &Values) -> bool) {
         span!(Edit);
+        // The hooks' answers for those texts may have changed.
+        let stale: Vec<(OpId, ValueId)> = self
+            .statics
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter(|&(op, a)| pred(op, &self.args_vec(a), &self.values))
+            .collect();
+        let st = self.statics.get_mut().unwrap_or_else(PoisonError::into_inner);
+        for k in stale {
+            st.remove(&k);
+        }
         let hit: Vec<Slot> = (0..self.nodes.len())
             .filter(|&i| {
                 let n = &self.nodes[i];
@@ -1566,17 +1655,16 @@ impl Engine {
         }
         self.nm(s).op = op;
         self.nm(s).args = args;
-        let av = self.args_vec(args);
-        let opr = self.op(op).clone();
-        let decl = opr.defs(&av, &self.values);
-        let eff = opr.effect(&av, &self.values);
-        let claim_hook = opr.claim(&av, &self.values, &mut std::iter::empty());
-        let hint = opr.reads(&av, &self.values).is_some();
+        let st = self.statics(op, args);
+        let decl = st.decl.clone();
+        let eff = st.eff;
+        let claim_hook = st.claim;
+        let hint = st.reads.is_some();
         let inert = self.n(s).state == State::Inert;
-        let maybe = decl.is_none() && opr.may_define(&av, &self.values) != MayDefine::Any;
+        let maybe = decl.is_none() && st.may_define != MayDefine::Any;
         self.set_flag(s, F_MAYBE, maybe);
         self.set_flag(s, F_HINT, hint);
-        let predict = opr.until_predict(&av, &self.values, &mut std::iter::empty()).is_some();
+        let predict = st.predict;
         self.set_flag(s, F_PREDICT, predict);
         self.stream_touch(self.n(s).unit, self.n(s).label);
         self.set_flag(s, F_CLAIMER, claim_hook != Claim::None);
@@ -1760,14 +1848,10 @@ impl Engine {
         provisional: bool,
     ) -> Slot {
         count!(Create);
-        let av = self.args_vec(args);
-        let opr = self.op(op).clone();
-        let decl = opr.defs(&av, &self.values);
-        let eff = opr.effect(&av, &self.values);
-        let claim_hook = opr.claim(&av, &self.values, &mut std::iter::empty());
-        let hints = opr.reads(&av, &self.values);
+        let st = self.statics(op, args);
+        let (eff, claim_hook) = (st.eff, st.claim);
         let mut flags = 0;
-        if decl.is_none() {
+        if st.decl.is_none() {
             flags |= F_DYN;
         }
         if eff == Effect::Pending {
@@ -1779,13 +1863,13 @@ impl Engine {
         if claim_hook == Claim::Pending {
             flags |= F_CLAIM_DYN;
         }
-        if hints.is_some() {
+        if st.reads.is_some() {
             flags |= F_HINT;
         }
-        if opr.until_predict(&av, &self.values, &mut std::iter::empty()).is_some() {
+        if st.predict {
             flags |= F_PREDICT;
         }
-        if decl.is_none() && opr.may_define(&av, &self.values) != MayDefine::Any {
+        if st.decl.is_none() && st.may_define != MayDefine::Any {
             flags |= F_MAYBE;
         }
         if provisional {
@@ -1851,8 +1935,7 @@ impl Engine {
     /// Phase 2: the node's static scope effect (re-binding the region it
     /// changes unless `region` is false).
     fn set_created_effect(&mut self, s: Slot, region: bool) {
-        let av = self.args_vec(self.n(s).args);
-        let eff = self.op(self.n(s).op).effect(&av, &self.values);
+        let eff = self.statics(self.n(s).op, self.n(s).args).eff;
         if eff == Effect::Pending || eff == Effect::None {
             return;
         }
@@ -1867,12 +1950,10 @@ impl Engine {
     /// Phase 3: definitions, pending structure, initial height, claims.
     fn bind_created(&mut self, s: Slot) {
         let (unit, label) = (self.n(s).unit, self.n(s).label);
-        let av = self.args_vec(self.n(s).args);
-        let opr = self.op(self.n(s).op).clone();
-        let decl = opr.defs(&av, &self.values);
-        let hints = opr.reads(&av, &self.values);
-        if let Some(d) = decl {
-            for (f, l) in d {
+        let st = self.statics(self.n(s).op, self.n(s).args);
+        let hints = st.reads.clone();
+        if let Some(d) = &st.decl {
+            for &(f, l) in d {
                 let f = self.canon(f);
                 self.add_def(s, f, l == Locality::Global);
             }
@@ -1905,8 +1986,7 @@ impl Engine {
         let id = NodeId(hash_words(12, &[u64::from(op.0), args.0]));
         let body = self.alloc_unit(NIL);
         let mut flags = F_APP;
-        let av = self.args_vec(args);
-        if self.op(op).reads(&av, &self.values).is_some() {
+        if self.statics(op, args).reads.is_some() {
             flags |= F_HINT;
         }
         let node = Node {
@@ -2436,8 +2516,7 @@ impl Engine {
         let n = self.n(s);
         let bounded = n.has(F_DYN) && n.has(F_MAYBE);
         let bound = if bounded {
-            let av = self.args_vec(n.args);
-            self.op(n.op).may_define(&av, &self.values)
+            self.statics(n.op, n.args).may_define.clone()
         } else {
             MayDefine::Nothing
         };
@@ -3136,15 +3215,14 @@ impl Engine {
         self.ax(s).claimed_by = None;
         self.nm(s).state = State::Dirty;
         self.nm(s).epoch = self.n(s).epoch.wrapping_add(1);
-        let av = self.args_vec(self.n(s).args);
-        let opr = self.op(self.n(s).op).clone();
-        if let Some(d) = opr.defs(&av, &self.values) {
-            for (f, l) in d {
+        let st = self.statics(self.n(s).op, self.n(s).args);
+        if let Some(d) = &st.decl {
+            for &(f, l) in d {
                 let f = self.canon(f);
                 self.add_def(s, f, l == Locality::Global);
             }
         }
-        let eff = opr.effect(&av, &self.values);
+        let eff = st.eff;
         self.nm(s).effect = if eff == Effect::Pending {
             EFF_NONE
         } else {
@@ -4472,7 +4550,10 @@ impl Engine {
             self.nm(x).state = State::Dirty;
         }
         self.nm(x).on = NIL;
-        self.set_children(x, &r.children, provisional);
+        {
+            span!(Children);
+            self.set_children(x, &r.children, provisional);
+        }
         // A stream claim may have read its own previous unfolding, which
         // the line above just replaced: those reads are gone.
         let read_freed = r.stream.is_some()
@@ -4498,7 +4579,10 @@ impl Engine {
             }
         }
         self.set_stream(x, r.stream);
-        let mut changed = self.set_defs(x, &r.defs);
+        let mut changed = {
+            span!(Defs);
+            self.set_defs(x, &r.defs)
+        };
         if self.n(x).has(F_EFF_DYN)
             && let Some(e) = r.effect
         {
@@ -4927,6 +5011,7 @@ impl Engine {
                 live.insert(*b);
             }
         }
+        self.statics_live(&mut live);
         self.accs_arena_live(&mut live);
         // Built accumulator values are rebuilt on demand.
         self.acc_cache.write().unwrap_or_else(PoisonError::into_inner).clear();
@@ -5137,9 +5222,8 @@ impl Engine {
         if !n.has(F_HINT) || n.has(F_APP) {
             return None;
         }
-        let av = self.args_vec(n.args);
-        let fields = self.op(n.op).reads(&av, &self.values)?;
-        for f in fields {
+        let st = self.statics(n.op, n.args);
+        for &f in st.reads.as_ref()? {
             if self.loop_vals.contains_key(&f) {
                 continue;
             }

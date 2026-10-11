@@ -148,10 +148,14 @@ pub enum Span {
     Deps,
     /// Settling a finished node (heights, waking waiters).
     Finish,
+    /// Applying a run's unfolded children (creating and binding them).
+    Children,
+    /// Applying a run's definitions (re-binding readers of changed ones).
+    Defs,
 }
 
 impl Span {
-    pub const ALL: [Span; 16] = [
+    pub const ALL: [Span; 18] = [
         Span::Evaluate,
         Span::RunBatch,
         Span::ApplyBatch,
@@ -168,6 +172,8 @@ impl Span {
         Span::Uses,
         Span::Deps,
         Span::Finish,
+        Span::Children,
+        Span::Defs,
     ];
 
     #[must_use]
@@ -189,6 +195,8 @@ impl Span {
             Span::Uses => "uses",
             Span::Deps => "deps",
             Span::Finish => "finish",
+            Span::Children => "children",
+            Span::Defs => "defs",
         }
     }
 }
