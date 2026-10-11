@@ -199,7 +199,7 @@ pub fn banner(program: &str, path: &Path) -> String {
 }
 
 /// What a build did, for the terminal; whether it succeeded.
-pub fn report(r: &Report, o: &Options, st: &Style) -> bool {
+pub fn report(r: &Report, o: &Options, st: Style) -> bool {
     if !o.quiet {
         for n in &r.notes {
             eprintln!("{}", st.dim(&format!("  {n}")));
@@ -228,7 +228,7 @@ pub fn report(r: &Report, o: &Options, st: &Style) -> bool {
 }
 
 /// `phitex build` with an external engine: the exit status.
-pub fn main_build(program: &str, t: &Target, o: &Options, st: &Style) -> i32 {
+pub fn main_build(program: &str, t: &Target, o: &Options, st: Style) -> i32 {
     let Some(path) = find_program(program) else {
         eprintln!("{}: `{program}` is not on PATH (phitex runs the system's {program})", st.red("error"));
         return 2;
@@ -240,7 +240,7 @@ pub fn main_build(program: &str, t: &Target, o: &Options, st: &Style) -> i32 {
 
 /// `phitex watch` with an external engine: the whole build again on each
 /// change of a project file; never returns.
-pub fn main_watch(program: &str, t: &Target, o: &Options, st: &Style) -> ! {
+pub fn main_watch(program: &str, t: &Target, o: &Options, st: Style) -> ! {
     let Some(path) = find_program(program) else {
         eprintln!("{}: `{program}` is not on PATH (phitex runs the system's {program})", st.red("error"));
         std::process::exit(2);

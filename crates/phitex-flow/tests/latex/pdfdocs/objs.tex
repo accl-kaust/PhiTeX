@@ -1,0 +1,13 @@
+\documentclass{article}
+\begin{document}
+\immediate\pdfobj{<< /Type /Example >>}
+\edef\exobj{\the\pdflastobj}
+\pdfobj stream attr{/Kind /Note}{a stream}\pdfrefobj\pdflastobj
+\pdfcatalog{/Example \exobj\space 0 R}
+\setbox0=\hbox{\textbf{Form} text}
+\pdfxform 0
+\edef\myform{\the\pdflastxform}
+Use it: \pdfrefxform\myform\ and again \pdfrefxform\myform.
+\pdfannot width 2cm height 1cm depth 0pt {/Subtype /Text /Contents (A note)}
+\pdfinfo{/Subject (Objects)}
+\end{document}

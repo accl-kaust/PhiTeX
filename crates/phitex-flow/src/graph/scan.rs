@@ -231,7 +231,7 @@ impl Exec<'_> {
                 }),
                 Prim::LastItem(k) if k >= crate::prim::ETEX_ITEM => self.etex_item(k),
                 // (pdfTeX's read-only quantities: constants in DVI mode)
-                Prim::PdfItem(k) => IVal::Int(crate::prim::PDF_ITEMS.get(usize::from(k)).map_or(0, |x| x.1)),
+                Prim::PdfItem(k) => IVal::Int(self.pdf_item(k)),
                 Prim::PenShape(k) => IVal::Int(self.penalties_item(k)),
                 Prim::LastItem(k) => {
                     // (tex.web 424: the current list's last item, the one read

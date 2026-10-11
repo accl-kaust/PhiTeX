@@ -833,6 +833,31 @@ pub fn pdf_file(name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
     v
 }
 
+/// TeX Live's virtual font directories, where they exist.
+pub fn vf_dirs() -> Vec<std::path::PathBuf> {
+    ["/usr/share/texmf-dist/fonts/vf", "/usr/share/texlive/texmf-dist/fonts/vf", "/usr/local/texlive/texmf-dist/fonts/vf"]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// Font `name`'s `.vf` file below [`vf_dirs`], if there is one (the index
+/// and the bytes made once per process, as [`pdf_file`]'s).
+pub fn vf_file(name: &str) -> Option<Arc<[u8]>> {
+    type Cache = std::sync::Mutex<std::collections::HashMap<String, Option<Arc<[u8]>>>>;
+    static INDEX: std::sync::OnceLock<Index> = std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Cache::default);
+    if let Some(v) = cache.lock().expect("vf cache").get(name) {
+        return v.clone();
+    }
+    let index = INDEX.get_or_init(|| Index::of_kinds(&vf_dirs(), &["vf"]));
+    let v = index.path(&format!("{name}.vf")).and_then(|p| std::fs::read(p).ok()).map(Arc::from);
+    cache.lock().expect("vf cache").insert(name.to_string(), v.clone());
+    v
+}
+
 /// Shapers (partex-otf's: HarfRust's plans and a memo of results, a cache
 /// that never changes a result) lent to whoever shapes a word: a native
 /// word is a pure function of its font, text and direction, and the

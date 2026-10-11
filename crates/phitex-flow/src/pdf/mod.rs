@@ -25,6 +25,12 @@ pub mod content;
 pub mod fold;
 pub mod font;
 pub mod num;
+pub mod what;
+pub mod lib;
+pub mod image;
+pub mod colorstack;
+pub mod rand;
+pub mod vf;
 
 use std::sync::Arc;
 
@@ -53,6 +59,12 @@ pub struct Ship {
     /// shows them (`None`: empty, TeX's null).
     pub page_attr: Option<Arc<[u8]>>,
     pub page_resources: Option<Arc<[u8]>>,
+    /// `\pdflinkmargin`, `\pdfdestmargin`, `\pdfthreadmargin` (read by
+    /// the walk where the marks are).
+    pub margins: content::Margins,
+    /// The parameters the objects written with the page read (images,
+    /// forms, `\pdfsuppresswarningdupdest`).
+    pub params: Arc<what::Params>,
 }
 
 /// What the first page fixed for the whole file (`check_pdfversion`,
@@ -83,15 +95,62 @@ pub fn ship_keys() -> Vec<Key> {
         IntPar::Escapechar,
     ]
     .into_iter()
+    .chain(PARAM_INTS)
     .map(Key::IntPar)
     .collect();
     v.extend(
-        [DimenPar::Pdfhorigin, DimenPar::Pdfvorigin, DimenPar::Pdfpagewidth, DimenPar::Pdfpageheight]
+        [
+            DimenPar::Pdfhorigin,
+            DimenPar::Pdfvorigin,
+            DimenPar::Pdfpagewidth,
+            DimenPar::Pdfpageheight,
+            DimenPar::Pdflinkmargin,
+            DimenPar::Pdfdestmargin,
+            DimenPar::Pdfthreadmargin,
+        ]
             .into_iter()
             .map(Key::DimenPar),
     );
     v.extend([TokPar::Pdfpageattr, TokPar::Pdfpageresources].into_iter().map(Key::TokPar));
     v
+}
+
+/// The integer parameters of [`what::Params`] beyond the ship's own.
+const PARAM_INTS: [IntPar; 9] = [
+    IntPar::Pdfinclusioncopyfonts,
+    IntPar::Pdfimagehicolor,
+    IntPar::Pdfimageapplygamma,
+    IntPar::Pdfgamma,
+    IntPar::Pdfimagegamma,
+    IntPar::Pdfinclusionerrorlevel,
+    IntPar::Pdfsuppresswarningdupdest,
+    IntPar::Pdfsuppressptexinfo,
+    IntPar::Pdfsuppresswarningpagegroup,
+];
+
+/// The parameters an object written now reads (`what::Params`), where
+/// `read` reads.
+pub fn read_params(read: &mut dyn FnMut(&Key) -> Val) -> what::Params {
+    let mut i = |p: IntPar| int(&read(&Key::IntPar(p)));
+    what::Params {
+        output: i(IntPar::Pdfoutput),
+        major: i(IntPar::Pdfmajorversion),
+        minor: i(IntPar::Pdfminorversion),
+        compress_level: i(IntPar::Pdfcompresslevel),
+        obj_compress_level: i(IntPar::Pdfobjcompresslevel),
+        draftmode: i(IntPar::Pdfdraftmode),
+        decimal_digits: i(IntPar::Pdfdecimaldigits),
+        copy_fonts: i(IntPar::Pdfinclusioncopyfonts),
+        image_hicolor: i(IntPar::Pdfimagehicolor),
+        image_apply_gamma: i(IntPar::Pdfimageapplygamma),
+        gamma: i(IntPar::Pdfgamma),
+        image_gamma: i(IntPar::Pdfimagegamma),
+        inclusion_errorlevel: i(IntPar::Pdfinclusionerrorlevel),
+        suppress_dup_dest: i(IntPar::Pdfsuppresswarningdupdest),
+        suppress_ptex_info: i(IntPar::Pdfsuppressptexinfo),
+        suppress_pagegroup: i(IntPar::Pdfsuppresswarningpagegroup),
+        omit_procset: i(IntPar::Pdfomitprocset),
+    }
 }
 
 fn int(v: &Val) -> i32 {
@@ -129,6 +188,13 @@ pub fn read_ship(env: &mut dyn ShipEnv) -> Option<Arc<Ship>> {
         _ => None,
     };
     let (page_attr, page_resources) = (t(TokPar::Pdfpageattr), t(TokPar::Pdfpageresources));
+    let mut d = |p: DimenPar| int(&env.read(&Key::DimenPar(p)));
+    let margins = content::Margins {
+        link: d(DimenPar::Pdflinkmargin),
+        dest: d(DimenPar::Pdfdestmargin),
+        thread: d(DimenPar::Pdfthreadmargin),
+    };
+    let params = Arc::new(read_params(&mut |k| env.read(k)));
     Some(Arc::new(Ship {
         output,
         horigin,
@@ -144,6 +210,8 @@ pub fn read_ship(env: &mut dyn ShipEnv) -> Option<Arc<Ship>> {
         omit_procset,
         page_attr,
         page_resources,
+        margins,
+        params,
     }))
 }
 

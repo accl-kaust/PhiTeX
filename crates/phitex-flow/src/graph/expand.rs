@@ -140,6 +140,7 @@ impl Exec<'_> {
                     }
                 }
                 Prim::Convert(c) => self.convert(c),
+                Prim::PdfX(i) => self.pdf_expand(i),
                 Prim::Xe(x) => self.xe_convert(x),
                 Prim::The => {
                     let toks = self.the_toks();

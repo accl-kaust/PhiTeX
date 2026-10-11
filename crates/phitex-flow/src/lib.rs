@@ -66,5 +66,5 @@ pub mod tfm;
 pub mod val;
 pub mod xpic;
 
-pub use build::{Build, Options, Order, Output, Reads, Stats};
+pub use build::{Build, Options, Order, Output, Progress, Reads, Stats};
 pub use tfm::Font;

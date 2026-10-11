@@ -1,0 +1,6 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+\pdfsetrandomseed 12345
+\message{\the\pdfrandomseed,\pdfuniformdeviate 100,\pdfuniformdeviate 1000,\pdfnormaldeviate,\pdfnormaldeviate}
+\count1=\pdfuniformdeviate 1000000 A\the\count1\par
+\end

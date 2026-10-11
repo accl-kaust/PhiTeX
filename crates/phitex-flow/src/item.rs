@@ -288,6 +288,10 @@ pub enum Item {
     BuildPage(Arc<PageCall>),
     /// `\shipout`, in the outer vertical list's order.
     Shipout(Arc<Shipped>),
+    /// What a pdfTeX command asks of the PDF file (`pdf::what::Event`),
+    /// in the order the commands are done: like `\shipout`'s, taken out of
+    /// the lists that hold it to the outer vertical list's order.
+    Pdf(Arc<crate::pdf::what::PdfItem>),
     /// `\end` (tex.web 1054).
     End(Arc<PageCall>),
     /// The hundredth error (tex.web 82: `jump_out`): the build ends, the
@@ -306,6 +310,12 @@ pub enum Item {
 }
 
 impl Item {
+    /// An item taken out of the list it is emitted into, to the outer
+    /// vertical list (`\shipout`, a PDF event): it is no node of the list.
+    pub fn hoisted(&self) -> bool {
+        matches!(self, Item::Shipout(_) | Item::Pdf(_))
+    }
+
     /// The width TeX's `hpack` gives the item (characters, boxes, rules,
     /// glue, kerns).
     pub fn width(&self) -> i32 {
@@ -317,6 +327,7 @@ impl Item {
             Item::Rule { w, .. } | Item::Kern { w, .. } | Item::Math { w, .. } | Item::MarginKern { w, .. } => *w,
             Item::Glue { g, .. } => g.width,
             Item::Leaders(l) => l.g.width,
+            Item::Whatsit(w) => w.dims().map_or(0, |d| d.0),
             Item::Native(n) => n.w,
             Item::Glyph(g) => g.w,
             Item::Pic(p) => p.w,
@@ -413,6 +424,19 @@ pub enum Whatsit {
     /// XeTeX's `\pdfsavepos` (`pdf_save_pos_node`): shipping notes where
     /// it is; nothing is written.
     SavePos,
+    /// One of pdfTeX's (`pdf::what`).
+    Pdf(Arc<crate::pdf::what::What>),
+}
+
+impl Whatsit {
+    /// The width, height and depth a list sees: pdfTeX's image and form
+    /// references have them (pdftex.web §1586); the others none.
+    pub fn dims(&self) -> Option<(i32, i32, i32)> {
+        match self {
+            Whatsit::Pdf(w) => w.dims(),
+            _ => None,
+        }
+    }
 }
 
 /// An insertion (tex.web 140): its class, its natural height plus depth,

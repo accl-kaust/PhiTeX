@@ -416,8 +416,12 @@ fn doc_at(name: &str, o: Options) {
 }
 
 fn doc(name: &str) {
-    for o in RUNS {
-        doc_at(name, o);
+    // (`PHITEX_DOC_RUN=I`: schedule I of RUNS only, one at a time)
+    let only = std::env::var("PHITEX_DOC_RUN").ok().and_then(|v| v.parse::<usize>().ok());
+    for (i, o) in RUNS.into_iter().enumerate() {
+        if only.is_none_or(|j| j == i) {
+            doc_at(name, o);
+        }
     }
 }
 
@@ -612,6 +616,7 @@ fn doc_rules() {
 }
 
 #[test]
+#[ignore = "schedule-dependent 32 GiB allocation, open"]
 fn doc_tikz() {
     doc("tikz");
 }

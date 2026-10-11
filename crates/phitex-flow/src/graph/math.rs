@@ -844,10 +844,10 @@ impl Exec<'_> {
             push_horizontal(&mut hlist, it);
             orig.resize(hlist.len(), 0);
         }
-        let ships: Vec<Item> = hlist.iter().filter(|i| matches!(i, Item::Shipout(_))).cloned().collect();
-        let mut keep = hlist.iter().map(|i| !matches!(i, Item::Shipout(_)));
+        let ships: Vec<Item> = hlist.iter().filter(|i| i.hoisted()).cloned().collect();
+        let mut keep = hlist.iter().map(|i| !i.hoisted());
         orig.retain(|_| keep.next().unwrap_or(true));
-        hlist.retain(|i| !matches!(i, Item::Shipout(_)));
+        hlist.retain(|i| !i.hoisted());
         self.st.mode = Mode::V;
         self.st.inner = level > 0;
         let mut para = Para { before: ships, ..Para::default() };

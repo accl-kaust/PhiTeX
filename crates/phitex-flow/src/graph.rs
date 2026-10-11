@@ -55,6 +55,7 @@ mod lang;
 mod material;
 mod math;
 pub mod output;
+mod pdf;
 mod scan;
 pub(crate) mod xetex;
 
@@ -104,6 +105,12 @@ pub trait Env {
     /// Whether anything between this piece's nodes may define `key`.
     fn has_between(&mut self, _key: &Key) -> bool {
         false
+    }
+
+    /// Where a PDF event's command is (`pdf::what::Tag`'s scope and fire):
+    /// a piece's nodes (0, 0), or an output routine's (1, its fire).
+    fn pdf_scope(&self) -> (u32, u32) {
+        (0, 0)
     }
 
     /// Whether the run may end at a cut the cutter missed ([`Kind::Cut`]):
@@ -3387,6 +3394,10 @@ struct Exec<'a> {
     /// A file name is being scanned: `\input` inserts `\relax`
     /// (tex.web 378: `name_in_progress`).
     name_in_progress: bool,
+    /// The PDF events this node emitted (`graph::pdf`), and where the
+    /// walk put `\pdfsavepos` last when a shipped `\write` is expanded.
+    pdf_events: u32,
+    pdf_pos: Option<(i32, i32)>,
 }
 
 /// tex.web 305: what the reader is in the middle of, for `\outer`.
@@ -3542,6 +3553,8 @@ impl<'a> Exec<'a> {
             warning: None,
             outer_abort: false,
             name_in_progress: false,
+            pdf_events: 0,
+            pdf_pos: None,
         }
     }
 
@@ -5341,6 +5354,7 @@ impl<'a> Exec<'a> {
             Prim::Immediate => self.immediate(),
             Prim::Write => self.write_cmd(),
             Prim::OpenOut | Prim::CloseOut | Prim::Special => self.extension(p),
+            Prim::Pdf(i) => self.pdf_cmd(i),
             Prim::InStream(open) => self.open_in(open),
             Prim::Input => self.input_file(true),
             Prim::Uppercase | Prim::Lowercase => self.case_shift(p == Prim::Uppercase),

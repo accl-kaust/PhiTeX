@@ -40,6 +40,19 @@ fn docs_dir() -> PathBuf {
     flow().join("tests/latex/docs")
 }
 
+/// The documents of pdfTeX's PDF-only commands (hyperref, graphicx,
+/// xcolor's colour stack, `TikZ`, positions, objects and forms, virtual
+/// fonts: `tests/latex/pdfdocs/`, their `pdflatex` oracles in
+/// `tests/latex/pdf/` beside the others').
+fn pdfdocs_dir() -> PathBuf {
+    flow().join("tests/latex/pdfdocs")
+}
+
+/// Where document `name` is: `tests/latex/pdfdocs/` if it is one of those.
+fn doc_dir(name: &str) -> PathBuf {
+    if pdfdocs_dir().join(format!("{name}.tex")).exists() { pdfdocs_dir() } else { docs_dir() }
+}
+
 fn cache() -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("phitex-cache")
 }
@@ -114,7 +127,7 @@ fn first_difference(a: &[u8], b: &[u8]) -> String {
 /// Copies document `name` (`NAME.tex` and its `NAME-*` files) into `dir`.
 fn copy_doc(name: &str, dir: &Path) {
     let pre = format!("{name}-");
-    for e in std::fs::read_dir(docs_dir()).expect("the documents").flatten() {
+    for e in std::fs::read_dir(doc_dir(name)).expect("the documents").flatten() {
         let f = e.file_name().to_string_lossy().into_owned();
         if f == format!("{name}.tex") || f.starts_with(&pre) {
             std::fs::copy(e.path(), dir.join(&f)).expect("a copy");
@@ -593,6 +606,51 @@ fn pdflatex_rules() {
     pdflatex_doc("rules");
 }
 
+/// `pdflatex` on a document of `tests/latex/pdfdocs/`, if the tree has
+/// it (they came with the pdfTeX primitives' merge).
+fn pdflatex_pdfdoc(name: &str) {
+    if !pdfdocs_dir().join(format!("{name}.tex")).exists() {
+        eprintln!("{name}: not in this tree (tests/latex/pdfdocs/)");
+        return;
+    }
+    pdflatex_doc(name);
+}
+
+#[test]
+fn pdflatex_pdfdoc_hyper() {
+    pdflatex_pdfdoc("hyper");
+}
+
+#[test]
+fn pdflatex_pdfdoc_graphics() {
+    pdflatex_pdfdoc("graphics");
+}
+
+#[test]
+fn pdflatex_pdfdoc_color() {
+    pdflatex_pdfdoc("color");
+}
+
+#[test]
+fn pdflatex_pdfdoc_tikz() {
+    pdflatex_pdfdoc("tikz");
+}
+
+#[test]
+fn pdflatex_pdfdoc_zsavepos() {
+    pdflatex_pdfdoc("zsavepos");
+}
+
+#[test]
+fn pdflatex_pdfdoc_objs() {
+    pdflatex_pdfdoc("objs");
+}
+
+#[test]
+fn pdflatex_pdfdoc_vfont() {
+    pdflatex_pdfdoc("vfont");
+}
+
 /// A small `LuaLaTeX` document (a reference, `\directlua`).
 const LUA_DOC: &str = "\\documentclass{article}\n\\begin{document}\n\\section{One}\\label{one}\nSee section~\\ref{one}; \
 six times seven is \\directlua{tex.print(6*7)}.\n\\end{document}\n";
@@ -642,4 +700,69 @@ fn lualatex_external() {
     let got = std::fs::read(dir.join("lua.pdf")).expect("phitex's PDF");
     assert!(got == want, "the PDF is not lualatex's: {}", first_difference(&got, &want));
     assert!(dir.join("lua.synctex.gz").is_file(), "lualatex's SyncTeX file is not there");
+}
+
+/// A one-page job without a format (`--ini --etex`).
+fn tiny() -> &'static str {
+    "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x Hi\\end\n"
+}
+
+/// Every option is accepted before the command, after it and after the
+/// file: `-o DIR` and `-j N` in the three positions, the output where
+/// `-o` says.
+#[test]
+fn options_in_any_position() {
+    let _one = one();
+    let dir = scratch("options");
+    std::fs::write(dir.join("t.tex"), tiny()).expect("the document");
+    let lines: [&[&str]; 3] = [
+        &["-o", "out1", "-j", "2", "build", "--ini", "--etex", "t.tex"],
+        &["build", "-o", "out2", "-j", "2", "--ini", "--etex", "t.tex"],
+        &["build", "--ini", "--etex", "t.tex", "-o", "out3", "-j", "2"],
+    ];
+    for (k, args) in lines.iter().enumerate() {
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir).args(*args).output().expect("phitex runs");
+        assert!(out.status.success(), "phitex {args:?} failed:\n{}", String::from_utf8_lossy(&out.stderr));
+        let dvi = dir.join(format!("out{}", k + 1)).join("t.dvi");
+        assert!(dvi.is_file(), "phitex {args:?} wrote no {}", dvi.display());
+    }
+}
+
+/// An unknown option is named, with `--help` suggested, and the exit
+/// status is 2; an option before the command is never taken for TeX's
+/// command line.
+#[test]
+fn unknown_option_is_named() {
+    let dir = scratch("unknown-option");
+    std::fs::write(dir.join("t.tex"), tiny()).expect("the document");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["build", "--frob", "t.tex"])
+        .output()
+        .expect("phitex runs");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("--frob"), "the option is not named:\n{err}");
+    assert!(err.contains("--help"), "--help is not suggested:\n{err}");
+    assert!(err.lines().count() <= 8, "more than a few lines:\n{err}");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["-o", "out", "--frob", "build", "t.tex"])
+        .output()
+        .expect("phitex runs");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("--frob") && !err.contains("compat"), "{err}");
+}
+
+/// `--help` is sectioned (commands, options, examples) and plain off a
+/// terminal.
+#[test]
+fn help_is_sectioned() {
+    let dir = scratch("help");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir).arg("--help").output().expect("phitex runs");
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    for section in ["Commands:", "Options:", "Examples:", "build", "watch", "--output-dir", "--jobs"] {
+        assert!(text.contains(section), "`{section}` is not in the help:\n{text}");
+    }
+    assert!(!text.contains('\x1b'), "escape sequences off a terminal:\n{text}");
 }

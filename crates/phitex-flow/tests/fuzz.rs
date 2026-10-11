@@ -353,3 +353,16 @@ fn rerun_reasons_name_the_changed_read() {
     assert!(r.contains("\\a: before macro:->x from piece id 0 n"), "{why}");
     assert!(r.contains("now macro:->y from piece id 0 n"), "{why}");
 }
+
+/// A TRIP edit whose update panics "the sequence of pieces did not
+/// settle" (the join/cut flip of M's two manuals, amsldoc and hyperref-doc:
+/// CORE.md; 22 of the 6000 plain seeds of the fuzz gate on d271316):
+/// `tests/fuzz/panic/trip-did-not-settle.repro`, cut down. It must replay
+/// without a failure once A's fix lands; ignored until then.
+#[test]
+#[ignore = "A: the sequence of pieces did not settle (join/cut flip; fuzz gate 8108)"]
+fn trip_edit_the_sequence_of_pieces_did_not_settle() {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fuzz/panic/trip-did-not-settle.repro");
+    let r = fuzz::Repro::parse(&std::fs::read_to_string(&p).expect("the reproduction")).expect("a reproduction");
+    assert_eq!(replay_within(r, 300), None, "{} fails (or hangs)", p.display());
+}

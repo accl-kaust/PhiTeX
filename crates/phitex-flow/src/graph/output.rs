@@ -376,8 +376,8 @@ impl Exec<'_> {
         for it in std::mem::take(&mut self.vemit) {
             push_vertical(&mut list, &mut pd, it);
         }
-        let ships: Vec<Item> = list.iter().filter(|i| matches!(i, Item::Shipout(_))).cloned().collect();
-        list.retain(|i| !matches!(i, Item::Shipout(_) | Item::BuildPage(_) | Item::End(_)));
+        let ships: Vec<Item> = list.iter().filter(|i| i.hoisted()).cloned().collect();
+        list.retain(|i| !i.hoisted() && !matches!(i, Item::BuildPage(_) | Item::End(_)));
         // (`pop_nest`: the run's outer list, the main vertical list's place)
         self.st.level -= 1;
         self.st.mode = Mode::V;

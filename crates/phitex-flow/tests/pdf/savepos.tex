@@ -1,0 +1,8 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+\immediate\openout1=\jobname.pos
+A\pdfsavepos\write1{\the\pdflastxpos,\the\pdflastypos}B\par
+\hbox{\kern 10pt\pdfsavepos\write1{\the\pdflastxpos,\the\pdflastypos}}
+\vbox{\pdfsavepos\write1{\the\pdflastxpos,\the\pdflastypos}}
+\penalty-10000 C\the\pdflastxpos,\the\pdflastypos\par
+\end

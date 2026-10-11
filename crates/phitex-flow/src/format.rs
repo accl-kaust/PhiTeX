@@ -63,6 +63,12 @@ pub fn saved(key: &Key) -> bool {
             | Key::Ended
             | Key::MainTail
             | Key::MainDepth
+            | Key::PdfLast(_)
+            | Key::PdfAns(..)
+            | Key::PdfRandom
+            | Key::PdfSeed
+            | Key::PdfClock
+            | Key::PdfDate
             | Key::LastMatch(_)
     )
 }
@@ -338,6 +344,7 @@ impl Writer<'_> {
                         self.byte(3);
                         self.str(t);
                     }
+                    Whatsit::Pdf(_) => return Err(format!("an item a format does not hold: {it:?}")),
                     Whatsit::SavePos => self.byte(4),
                 }
             }
@@ -1064,6 +1071,7 @@ mod tag_tests {
             Whatsit::Write { stream: 1, toks: Arc::new(Vec::new()) },
             Whatsit::Close { stream: 1 },
             Whatsit::Special(Arc::from("a")),
+            Whatsit::Pdf(Arc::new(crate::pdf::what::What::Save)),
             Whatsit::SavePos,
         ]
     }
@@ -1075,6 +1083,7 @@ mod tag_tests {
             Whatsit::Close { .. } => 2,
             Whatsit::Special(_) => 3,
             Whatsit::SavePos => 4,
+            Whatsit::Pdf(_) => 5,
         }
     }
 
@@ -1117,9 +1126,11 @@ mod tag_tests {
         let mut tags = Vec::new();
         for x in every_whatsit() {
             let mut w = writer(&cs);
-            w.item(&Item::Whatsit(Arc::new(x.clone()))).expect("a whatsit a format holds");
-            // (after the item's own tag)
-            tags.push((w.out[1], x));
+            // (a whatsit a format does not hold has no tag: pdfTeX's)
+            if w.item(&Item::Whatsit(Arc::new(x.clone()))).is_ok() {
+                // (after the item's own tag)
+                tags.push((w.out[1], x));
+            }
         }
         distinct("whatsit", tags);
     }

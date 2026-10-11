@@ -1,0 +1,8 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+\setbox0\hbox{X\pdfliteral{0 g}}\pdfxform attr{/Group 1} resources{/ProcSet [/PDF]} 0 \edef\x{\the\pdflastxform}
+A\pdfrefxform\x\ \pdfrefxform\x\par
+\setbox0\vbox{\hrule width 20pt height 5pt\hbox{Y}}\immediate\pdfxform 0 \edef\y{\the\pdflastxform}\pdfrefxform\y
+\setbox1\hbox{\pdfrefxform\x}\pdfxform 1 \pdfrefxform\the\pdflastxform
+\par
+\end

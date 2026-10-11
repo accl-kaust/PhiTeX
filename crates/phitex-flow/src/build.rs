@@ -121,6 +121,23 @@ impl Default for Options {
     }
 }
 
+/// What a build is doing now, for a caller that shows progress while it
+/// runs (the CLI's spinner): counters the build's threads store into and
+/// another thread reads, never waited on. Given by [`Build::set_progress`].
+#[derive(Debug, Default)]
+pub struct Progress {
+    /// The round under way (from 1; `Stats::rounds` when it is over).
+    pub round: AtomicUsize,
+    /// The pieces settled this round, of the pieces in all.
+    pub settled: AtomicUsize,
+    pub total: AtomicUsize,
+    /// The pages shipped this round.
+    pub pages: AtomicUsize,
+    /// 0 idle, 1 laying the sequence out, 2 running the pieces, 3 writing
+    /// the output.
+    pub phase: std::sync::atomic::AtomicU8,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
     pub pieces: usize,
@@ -154,6 +171,8 @@ pub struct Stats {
     /// Evaluations of the sequence: one, and one more each time a run
     /// changed it (an `\input` read or changed, an `\endinput`).
     pub rounds: usize,
+    /// Of them, the rounds made for pdfTeX's read-backs.
+    pub pdf_rounds: usize,
     /// Each round's wall time.
     pub round_walls: Vec<Duration>,
     /// The last round was the one that may not lay the sequence out again
@@ -240,6 +259,10 @@ pub struct Output {
     /// The pages each job of a session shipped, in order (one job unless
     /// the source is a session's, `graph::jobs`).
     pub job_pages: Vec<usize>,
+    /// In PDF mode, each page's glyph runs and rules where they were put
+    /// (`pdf::content::Origin`: for SyncTeX and the viewer; not part of
+    /// the pages' values).
+    pub origins: Vec<Vec<crate::pdf::content::Origin>>,
     /// Every file the build read (`Key::File`, each name once, in document
     /// order), with where it was found (`./name` for one the run wrote) or
     /// `None`: the CLI's `-recorder` (`.fls`) and a watch's dependencies.
@@ -248,10 +271,14 @@ pub struct Output {
 
 /// A piece whose definition was read before any definition.
 const INITIAL: PieceId = u32::MAX;
+/// The rounds an update may make for pdfTeX's read-backs (then an error,
+/// as TeX's capacity exceeded: CORE.md, "pdfTeX's read-backs").
+const PDF_ROUNDS: usize = 8;
 /// A piece not in this build.
 const NONE: u32 = u32::MAX;
 
 /// A piece as the last build left it.
+#[derive(Clone)]
 struct Kept {
     id: PieceId,
     text: Arc<[char]>,
@@ -598,6 +625,8 @@ type Join = (Arc<[char]>, Vec<Arc<[char]>>, Arc<[char]>, Arc<[usize]>);
 /// the pages with their DVI.
 pub struct Build {
     font: Arc<Font>,
+    /// Where the build reports what it does now (none: nobody looks).
+    board: Option<Arc<Progress>>,
     /// The folds' values the last build's reads were validated against
     /// (the page builder's quantities, the files the run wrote), by piece
     /// id and node: the next build's predictions ([`Names::fold_value`]).
@@ -649,6 +678,18 @@ pub struct Build {
     /// Two texts read as one piece (a run read on past the first), by
     /// their `Arc`s.
     joins: FxMap<usize, Vec<Join>>,
+    /// The last run of each joined text of this update's rounds, kept as
+    /// long as the update lays the sequence out (`Build::keep_round`): a
+    /// join made over several rounds (a text joined with the next, that
+    /// with the next, …) is laid out again from all of its runs, not from
+    /// the last round's alone. Invariant: a text the layout joins has a
+    /// run among the last ones (`known_join`), or is joined anew from
+    /// texts whose runs are (`Expect::join`).
+    join_kept: Vec<Kept>,
+    /// (layout) Where the texts a joined text being placed joined begin,
+    /// and where its run stopped at one of them ([`Build::place_with`]).
+    rewind_at: Vec<usize>,
+    rewound: Option<usize>,
     /// The pieces whose `\input`s are read in the piece: the file's end
     /// left what the rest of the calling line goes on with (a paragraph, a
     /// group open) or its last command read on past it.
@@ -703,6 +744,35 @@ pub struct Build {
     /// The engine is XeTeX, with these installed fonts and this finder
     /// (`Build::set_xetex`).
     xe: Option<Arc<crate::native::Fonts>>,
+    /// The PDF fold's state kept between builds and rounds.
+    pdf: PdfKept,
+}
+
+/// The PDF fold's answers to the PDF events (`Key::PdfAns`): by the
+/// piece holding the command (an output routine's: the firing call's)
+/// and the event's `what::Tag` with the field's slot.
+pub type PdfAnswers = FxMap<(PieceId, [u32; 4]), i32>;
+
+/// What the PDF side keeps between builds: the last fold's answers, the
+/// PDF events after the last page, the givens (`Key::PdfSeed`,
+/// `Key::PdfClock`), and the rounds of this update made for the
+/// read-backs (CORE.md, "pdfTeX's read-backs").
+#[derive(Default, Clone)]
+struct PdfKept {
+    answers: Arc<PdfAnswers>,
+    tail: crate::page::PdfEvents,
+    seed: i32,
+    clock: i32,
+    rounds: usize,
+}
+
+/// A page builder's PDF events with the pieces' ids for their positions.
+fn pdf_ids(seq: &Sequence, v: Vec<(crate::page::Org, Arc<crate::pdf::what::PdfItem>)>) -> crate::page::PdfEvents {
+    Arc::new(
+        v.into_iter()
+            .map(|((k, i), e)| ((seq.pieces.get(k as usize).copied().unwrap_or(NONE), i), e))
+            .collect(),
+    )
 }
 
 /// A file's text and its pieces.
@@ -725,6 +795,10 @@ struct FoldKept {
 /// fold handed it, the fold's definitions, the document's), and what it
 /// gave.
 struct Memo {
+    /// The fire's ordinal its PDF events and their answers were filed
+    /// under (`what::Tag`): a name, not an input; a memo reused at another
+    /// fire has them filed again under that one.
+    ordinal: u32,
     toks: Arc<Vec<Tok>>,
     page: Arc<crate::item::BoxNode>,
     fire: OutputReads,
@@ -845,6 +919,12 @@ struct Given {
     limits: crate::print::Limits,
     /// The PDF file's creation date (`Build::set_pdf_date`).
     pdf_date: i64,
+    /// The PDF fold's answers, the pieces' ids by position, the random
+    /// seed and the clock given.
+    pdf_answers: Arc<PdfAnswers>,
+    ids: Vec<PieceId>,
+    pdf_seed: i32,
+    pdf_clock: i32,
     /// XeTeX's native fonts (`Build::set_xetex`).
     xe: Option<Arc<crate::native::Fonts>>,
 }
@@ -869,6 +949,10 @@ impl Given {
             interaction_option: None,
             limits: crate::print::Limits::TEX_LIVE,
             pdf_date: 0,
+            pdf_answers: Arc::default(),
+            ids: Vec::new(),
+            pdf_seed: 0,
+            pdf_clock: 0,
             xe: None,
         }
     }
@@ -964,6 +1048,15 @@ impl Given {
             Key::File(n) => Some(self.file(n).map_or(Val::Void, Val::Bytes)),
             Key::Job => Some(Val::Name(self.job.clone())),
             Key::LineBase => Some(Val::Int(self.base(k) as i32)),
+            Key::PdfAns(a, b, c, d) => Some(
+                self.ids
+                    .get(k)
+                    .and_then(|id| self.pdf_answers.get(&(*id, [*a, *b, *c, *d])))
+                    .map_or(Val::Void, |v| Val::Int(*v)),
+            ),
+            Key::PdfSeed => Some(Val::Int(self.pdf_seed)),
+            Key::PdfClock => Some(Val::Int(self.pdf_clock)),
+            Key::PdfDate => Some(Val::Name(Arc::from(crate::pdf::pdf_date(self.pdf_date)))),
             _ => None,
         }
     }
@@ -1436,6 +1529,10 @@ struct State {
     old_pages: Vec<Option<(Page, Arc<dvi::Body>)>>,
     old_orgs: Arc<Vec<PageOrg>>,
     old_marks: Vec<(u32, u32)>,
+    /// The PDF events after the last page (the last build's, and this
+    /// one's once the scan has finished).
+    old_pdf_tail: crate::page::PdfEvents,
+    pdf_tail: crate::page::PdfEvents,
     /// The page builder's marks before the scan's (kept), and after them
     /// (the last build's, where the scan met its pages again).
     marks_before: Vec<(u32, u32)>,
@@ -1486,6 +1583,8 @@ struct Shared {
     /// How many commands each piece's run in progress has run (set every
     /// `CHECK_EVERY`; for the dumps).
     progress: Vec<AtomicU64>,
+    /// The caller's progress board, if it gave one ([`Build::set_progress`]).
+    board: Option<Arc<Progress>>,
     /// The elements in order, fixed for the build.
     seq: Sequence,
     /// Bumped (under `park`, and `parked` notified) whenever a run is
@@ -1606,6 +1705,7 @@ impl Build {
         ));
         Build {
             font,
+            board: None,
             fonts,
             pieces: Vec::new(),
             pages: Vec::new(),
@@ -1633,6 +1733,9 @@ impl Build {
             rests: FxMap::default(),
             recuts: FxMap::default(),
             joins: FxMap::default(),
+            join_kept: Vec::new(),
+            rewind_at: Vec::new(),
+            rewound: None,
             inline: Vec::new(),
             cut_lines: CUT_LINES,
             page_runs: None,
@@ -1646,6 +1749,7 @@ impl Build {
             limits: crate::print::Limits::TEX_LIVE,
             format: None,
             pdf_date: 0,
+            pdf: PdfKept::default(),
             etex_last: false,
             xe: None,
         }
@@ -1748,6 +1852,13 @@ impl Build {
     /// (tests) How many rounds may lay the sequence out before the last,
     /// which may not ([`MAX_ROUNDS`] until set).
     #[doc(hidden)]
+    /// Where to report what the build does now ([`Progress`]: the round,
+    /// the pieces settled, the pages shipped), for a spinner; none by
+    /// default.
+    pub fn set_progress(&mut self, board: Option<Arc<Progress>>) {
+        self.board = board;
+    }
+
     pub fn set_max_rounds(&mut self, n: usize) {
         self.max_rounds = n;
     }
@@ -1905,6 +2016,8 @@ impl Build {
             let mut l = self.place(out, m, olds, &texts[i], entry, b, ctx, depth);
             b += count_lines(&texts[i]);
             i += 1;
+            // (the texts joined to the last piece from here on)
+            let joined_from = i;
             // (a run reading on past its text reads the texts after it with
             // it, as one, up to the first place one begins where it can
             // stop: the rest is cut again from there; or did when they were
@@ -1934,7 +2047,21 @@ impl Build {
                 i += w;
                 m.release(olds, &out[l..]);
                 out.truncate(l);
-                l = self.place_with(out, m, olds, &joined, e, lb, ctx, depth, stops);
+                // (where each text of this list it joined begins in it: the
+                // last of its stops, one per text)
+                let n = i - joined_from;
+                self.rewind_at = stops[stops.len().saturating_sub(n)..].to_vec();
+                l = self.place_with(out, m, olds, &joined, e, lb, ctx, depth, stops.clone());
+                self.rewind_at.clear();
+                if let Some(stop) = self.rewound.take() {
+                    // (its run stopped where text `p` of this list begins:
+                    // the list goes on from there)
+                    let first = stops.len().saturating_sub(n);
+                    let p = joined_from + stops[first..].iter().position(|&x| x == stop).expect("a joined text's start");
+                    b -= texts[p..i].iter().map(|x| count_lines(x)).sum::<usize>();
+                    i = p;
+                    break;
+                }
             }
             last = Some(l);
             // (the job ended: what follows is never read; the file ended)
@@ -1997,8 +2124,10 @@ impl Build {
                 _ => String::new(),
             };
             eprintln!(
-                "placed {k} {entry:?} cand {cand:?} old {old:?} join {} len {} [{head}] {why}",
+                "placed {k} {entry:?} cand {cand:?} old {old:?} join {} cut {} stop {} len {} [{head}] {why}",
                 old.is_some_and(|i| olds[i].got.join),
+                old.is_some_and(|i| olds[i].got.cut),
+                old.map_or(0, |i| olds[i].got.stop),
                 text.len()
             );
         }
@@ -2014,10 +2143,21 @@ impl Build {
             stops,
             moved,
         });
+        // (where the caller may lay the rest out from: the texts this one
+        // joined begin there — set for the joined text alone)
+        let rewind_at = std::mem::take(&mut self.rewind_at);
         if expect.cut {
             // (the cutter missed a cut: the rest of the text is cut again
-            // from there)
+            // from there; or a joined text's run stops where one of the
+            // texts it joined begins: the caller lays them out again from
+            // that one, as texts of its own list — the same texts, whose
+            // runs and joins the layout finds, which may join texts after
+            // this one's end)
             let stop = expect.stop.min(text.len());
+            if rewind_at.contains(&stop) {
+                self.rewound = Some(stop);
+                return k;
+            }
             let b = base + count_lines(&text[..stop]);
             let pieces = self.recut(text, stop);
             return self
@@ -2094,6 +2234,13 @@ impl Build {
     /// The PDF file's creation date and `/ID`'s time, in seconds since
     /// 1970 UTC (pdfTeX's `SOURCE_DATE_EPOCH`; 0 until set). No clock is
     /// read: the date is a given of the build.
+    pub fn set_pdf_seed_clock(&mut self, seed: i32, clock: i32) {
+        self.pdf.seed = seed;
+        self.pdf.clock = clock;
+    }
+
+    /// The PDF file's creation date (see [`Build::set_pdf_seed_clock`] for
+    /// the random seed and the clock).
     pub fn set_pdf_date(&mut self, epoch: i64) {
         self.pdf_date = epoch;
     }
@@ -2227,6 +2374,7 @@ impl Build {
         // whose material made them, whatever a round lays out)
         self.page_runs = Some(self.pieces.iter().map(|o| o.run.clone()).collect());
         let mut rounds = 0;
+        self.pdf.rounds = 0;
         // (measuring: `PHITEX_ROUND_CAP` moves the bound on all rounds)
         let cap = std::env::var("PHITEX_ROUND_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(self.max_rounds);
         // (what the rounds of this update placed, and the rounds in a row
@@ -2237,9 +2385,15 @@ impl Build {
         let mut stalled = 0;
         loop {
             rounds += 1;
+            if let Some(b) = &self.board {
+                b.round.store(rounds, Ordering::Relaxed);
+                b.pages.store(0, Ordering::Relaxed);
+                b.phase.store(1, Ordering::Relaxed);
+            }
             let t_round = Instant::now();
             let last = rounds > cap || stalled >= MAX_STALLED_ROUNDS;
             if let Some(mut out) = self.round(&texts, opts, t0, time_cut, last, stalled == 0) {
+                self.join_kept.clear();
                 let mut carried = std::mem::take(&mut self.carried);
                 carried.round_walls.push(t_round.elapsed());
                 out.stats.absorb(carried);
@@ -2410,6 +2564,16 @@ impl Build {
                     }
                 })
                 .collect();
+        // (each joined text's last run, the newest first: kept for the
+        // rounds to come, those of this round replacing the older)
+        let joined = |t: &Arc<[char]>| self.joins.values().flatten().any(|x| Arc::ptr_eq(&x.2, t));
+        let mut keep: Vec<Kept> = self.pieces.iter().filter(|o| o.run.is_some() && joined(&o.text)).cloned().collect();
+        for o in std::mem::take(&mut self.join_kept) {
+            if !keep.iter().any(|x| Arc::ptr_eq(&x.text, &o.text)) && joined(&o.text) {
+                keep.push(o);
+            }
+        }
+        self.join_kept = keep;
         self.carried.absorb(st.stats);
     }
 
@@ -2428,6 +2592,18 @@ impl Build {
         let threads = opts.threads.max(1);
         let t_setup = Instant::now();
         let mut olds: Vec<Kept> = std::mem::take(&mut self.pieces);
+        // (the joined texts' runs of the earlier rounds of this update,
+        // after the last round's pieces: the layout finds a join it made
+        // over several rounds again — of a piece not in the last round)
+        for o in &self.join_kept {
+            if !olds.iter().any(|x| Arc::ptr_eq(&x.text, &o.text)) {
+                // (an id of its own: the piece it was may be another text now)
+                let mut o = o.clone();
+                o.id = self.next_id;
+                self.next_id += 1;
+                olds.push(o);
+            }
+        }
         let old_runs: Vec<Option<Arc<Run>>> = olds.iter().map(|o| o.run.clone()).collect();
         let page_runs = self.page_runs.clone().unwrap_or_else(|| old_runs.clone());
         let specs = self.layout(texts, &olds);
@@ -2572,6 +2748,10 @@ impl Build {
         given.interaction_option = self.interaction_option;
         given.limits = self.limits;
         given.pdf_date = self.pdf_date;
+        given.pdf_answers = self.pdf.answers.clone();
+        given.ids = p.iter().map(|x| x.id).collect();
+        given.pdf_seed = self.pdf.seed;
+        given.pdf_clock = self.pdf.clock;
         given.xe.clone_from(&self.xe);
         let names = Names::new(given, opts.etex, self.cs.clone(), self.format.clone());
         // (the last build's folds' values, at the pieces' places now)
@@ -2676,7 +2856,10 @@ impl Build {
         // name, the lines before a piece — read with a value they no longer
         // have: their readers are marked)
         for (key, m) in readers.iter_mut() {
-            if !matches!(key, Key::File(_) | Key::Job | Key::LineBase) {
+            if !matches!(
+                key,
+                Key::File(_) | Key::Job | Key::LineBase | Key::PdfAns(..) | Key::PdfSeed | Key::PdfClock | Key::PdfDate
+            ) {
                 continue;
             }
             for &rid in m.keys() {
@@ -2773,6 +2956,8 @@ impl Build {
                 std::mem::take(&mut self.page_orgs)
             }),
             old_marks: std::mem::take(&mut self.marks),
+            old_pdf_tail: self.pdf.tail.clone(),
+            pdf_tail: Arc::default(),
             old_call_logs: std::mem::take(&mut self.call_logs),
             rng: match opts.order {
                 Order::Random(s) => s.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1,
@@ -2823,6 +3008,7 @@ impl Build {
                 .collect(),
             cancel: state.p.iter().map(|_| AtomicBool::new(false)).collect(),
             progress: state.p.iter().map(|_| AtomicU64::new(0)).collect(),
+            board: self.board.clone(),
             inline: state.p.iter().map(|ps| ps.inline).collect(),
             laid: state.p.iter().map(|ps| (ps.expect.input.is_some(), ps.expect.cut)).collect(),
             waiting: state.p.iter().map(|_| AtomicBool::new(false)).collect(),
@@ -2856,6 +3042,12 @@ impl Build {
             lock_wait: AtomicU64::new(0),
             lock_n: AtomicU64::new(0),
         };
+        if let Some(b) = &sh.board {
+            let g = lock(&sh);
+            b.total.store(g.p.len(), Ordering::Relaxed);
+            b.settled.store(g.p.iter().filter(|ps| ps.status == Status::Done).count(), Ordering::Relaxed);
+            b.phase.store(2, Ordering::Relaxed);
+        }
         std::thread::scope(|s| {
             if let Some(secs) = std::env::var("PHITEX_HANG_DUMP").ok().and_then(|v| v.parse::<u64>().ok()) {
                 let sh = &sh;
@@ -2870,6 +3062,9 @@ impl Build {
                     .expect("spawn a worker");
             }
         });
+        if let Some(b) = &sh.board {
+            b.phase.store(3, Ordering::Relaxed);
+        }
         // (the last build's page builder definitions the scan did not reach
         // again — a fold that converged — stay as they were)
         let unreached: FoldDefs = {
@@ -2923,14 +3118,39 @@ impl Build {
             std::iter::once(self.format_fonts())
                 .chain(st.p.iter().filter_map(|ps| ps.run.as_ref().map(|r| &r.fonts[..]))),
         );
+        // (how many fonts the job had loaded up to each piece: a page's
+        // virtual fonts' local fonts are numbered after those of the pieces
+        // before its own, and of the fonts the pages show)
+        let loaded_by_piece: Vec<u32> = {
+            let mut m = dvi::numbers([self.format_fonts()]);
+            st.p.iter()
+                .map(|ps| {
+                    if let Some(r) = &ps.run {
+                        dvi::extend(&mut m, &r.fonts);
+                    }
+                    m.len() as u32
+                })
+                .collect()
+        };
         let mut errors = Vec::new();
         // (PDF mode, from the first page's `\pdfoutput`: the PDF file is
         // the fold over the pages, as the DVI file is)
+        let mut pdf_answers = None;
         let (out, pdf, again) = if st.pages.first().is_some_and(|p| p.ship.pdf.is_some()) {
             let live = live_pieces(&st.p);
             let last = live.iter().rposition(|&l| l).unwrap_or(0);
-            let w = pdf_file(&sh.names, &sh.font, last, &numbers, &st.pages, &mut bodies);
+            let format_fonts = self.format_fonts().len() as u32;
+            let ship_fonts: Vec<u32> = st
+                .orgs
+                .iter()
+                .map(|o| match (o.call.0 as usize).checked_sub(1) {
+                    Some(k) => loaded_by_piece.get(k).or(loaded_by_piece.last()).copied().unwrap_or(format_fonts),
+                    None => format_fonts,
+                })
+                .collect();
+            let w = pdf_file(&sh.names, &sh.font, &sh.fonts, last, &numbers, ship_fonts, &st.pages, &st.orgs, &st.pdf_tail, &mut bodies);
             errors.extend(w.errors.into_iter().map(|e| format!("pdf: {e}")));
+            pdf_answers = Some(w.answers);
             (Vec::new(), w.bytes, w.again)
         } else {
             // (XeTeX: the XDV file, its id byte and comment XeTeX's)
@@ -2995,7 +3215,8 @@ impl Build {
                                 stop: usize::MAX,
                             };
                             let r = regen(&mut env, &st.p[k].text, r);
-                            crate::graph::page_io(&r.chain, i, &mut env, &pg.b, &mut errors)
+                            let pos = crate::pdf::content::write_positions(pg);
+                            crate::graph::page_io(&r.chain, i, &mut env, &pg.b, &pos, &mut errors)
                         }
                         _ => String::new(),
                     },
@@ -3178,7 +3399,25 @@ impl Build {
         self.page_orgs = st.orgs;
         self.marks = marks;
         self.call_logs = call_logs;
+        self.pdf.tail = st.pdf_tail;
+        // (pdfTeX's read-backs: the fold answered otherwise than the nodes
+        // read — another round, the readers of the answers that changed
+        // run again; CORE.md, "pdfTeX's read-backs")
+        if let Some(a) = pdf_answers
+            && a != *self.pdf.answers
+        {
+            if self.pdf.rounds < PDF_ROUNDS {
+                self.pdf.rounds += 1;
+                self.pdf.answers = Arc::new(a);
+                self.carried.absorb(st.stats);
+                return None;
+            }
+            errors.push(format!("! TeX capacity exceeded, sorry [pdf read-back rounds={PDF_ROUNDS}]."));
+        }
+        st.stats.pdf_rounds = self.pdf.rounds;
+        let origins = self.pages.iter().map(|(_, b)| b.pdf.as_ref().map_or_else(Vec::new, |p| p.origins.0.clone())).collect();
         Some(Output {
+            origins,
             dvi: out,
             pdf,
             stats: st.stats,
@@ -3202,6 +3441,8 @@ impl Build {
 struct PdfFiles<'a> {
     names: &'a Names,
     font: &'a Arc<Font>,
+    /// The TFM files `\font` can load (a virtual font's local fonts).
+    fonts: &'a Arc<FontFiles>,
     /// The end of the job.
     at: Pos,
 }
@@ -3209,6 +3450,24 @@ struct PdfFiles<'a> {
 impl crate::pdf::fold::Files for PdfFiles<'_> {
     fn get(&mut self, name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
         self.names.given.pdf_found(name)
+    }
+    fn font_attr(&mut self, key: &str) -> Option<crate::pdf::what::Text> {
+        match self.names.reaching(&Key::FontAttr(Arc::from(key)), self.at, self.font).1 {
+            Val::Name(s) if !s.is_empty() => Some(s.chars().map(|c| u32::from(c).min(255) as u8).collect()),
+            _ => None,
+        }
+    }
+    fn vf(&mut self, name: &str) -> Option<Arc<[u8]>> {
+        match &self.names.given.finder {
+            Some((f, prog)) => f.find(name, KpseFormat::Vf, prog).and_then(|p| f.read(&p)),
+            None => crate::tfm::vf_file(name),
+        }
+    }
+    fn tfm(&mut self, name: &str) -> Option<Arc<[u8]>> {
+        match &self.names.given.finder {
+            Some((f, prog)) => f.find(name, KpseFormat::Tfm, prog).and_then(|p| f.read(&p)),
+            None => self.fonts.get(name),
+        }
     }
     fn glyph_unicode(&mut self, name: &str) -> Option<crate::pdf::font::unicode::Uni> {
         use crate::pdf::font::unicode::Uni;
@@ -3220,7 +3479,19 @@ impl crate::pdf::fold::Files for PdfFiles<'_> {
     }
 }
 
-fn pdf_file(names: &Names, font: &Arc<Font>, last: usize, numbers: &dvi::Numbers, pages: &[Page], bodies: &mut [Arc<dvi::Body>]) -> crate::pdf::fold::Written {
+#[allow(clippy::too_many_arguments)]
+fn pdf_file(
+    names: &Names,
+    font: &Arc<Font>,
+    fonts: &Arc<FontFiles>,
+    last: usize,
+    numbers: &dvi::Numbers,
+    ship_fonts: Vec<u32>,
+    pages: &[Page],
+    orgs: &[PageOrg],
+    tail: &crate::page::PdfEvents,
+    bodies: &mut [Arc<dvi::Body>],
+) -> crate::pdf::fold::Written {
     use crate::val::{IntPar, TokPar};
     let at = (last as u32 + 1, 0);
     let read = |key: &Key| names.reaching(key, at, font).1;
@@ -3248,10 +3519,21 @@ fn pdf_file(names: &Names, font: &Arc<Font>, last: usize, numbers: &dvi::Numbers
         date: crate::pdf::pdf_date(names.given.pdf_date),
         file_name: format!("{}.pdf", names.given.job),
         banner: crate::graph::PDFTEX_BANNER.to_string(),
+        params: Arc::new(crate::pdf::read_params(&mut |k| read(k))),
+        page_width: match read(&Key::DimenPar(crate::val::DimenPar::Pdfpagewidth)) {
+            Val::Int(i) => i,
+            _ => 0,
+        },
+        page_height: match read(&Key::DimenPar(crate::val::DimenPar::Pdfpageheight)) {
+            Val::Int(i) => i,
+            _ => 0,
+        },
+        ship_fonts,
     };
     let mut pdf_bodies: Vec<Arc<crate::pdf::content::PageBody>> =
         bodies.iter().map(|b| b.pdf.clone().unwrap_or_else(|| Arc::new(crate::pdf::content::empty()))).collect();
-    let w = crate::pdf::fold::assemble(pages, &mut pdf_bodies, numbers, &end, &mut PdfFiles { names, font, at });
+    let events: Vec<&crate::page::PdfEvents> = orgs.iter().map(|o| &o.pdf).chain(std::iter::once(tail)).collect();
+    let w = crate::pdf::fold::assemble(pages, &mut pdf_bodies, &events, numbers, &end, &mut PdfFiles { names, font, fonts, at });
     for (b, p) in bodies.iter_mut().zip(pdf_bodies) {
         if !b.pdf.as_ref().is_some_and(|x| Arc::ptr_eq(x, &p)) {
             let mut nb = dvi::Body { bytes: Vec::new(), fonts: Vec::new(), fixed: None, max_push: 0, io: p.io, pdf: None };
@@ -4126,6 +4408,9 @@ fn keep_again(g: &mut State, sh: &Shared, k: usize) -> bool {
     // again nor settled, the scan waits at it)
     debug_assert!(g.p[k].dirty.is_empty(), "piece {k} kept again with marks");
     g.p[k].status = Status::Done;
+    if let Some(b) = &sh.board {
+        b.settled.fetch_add(1, Ordering::Relaxed);
+    }
     g.p[k].entered = None;
     if g.due_at == Some(k) {
         g.due_at = None;
@@ -4417,6 +4702,7 @@ fn advance_match(g: &mut State) {
             }
             g.orgs = g.old_orgs.to_vec();
             g.marks_before = std::mem::take(&mut g.old_marks);
+            g.pdf_tail = g.old_pdf_tail.clone();
             g.call_logs_before = std::mem::take(&mut g.old_call_logs);
             g.scan_done = true;
             g.matching = false;
@@ -4514,6 +4800,7 @@ fn resume(g: &mut State, c: usize) {
         call_from,
         kept as u32,
         o.last_call.clone(),
+        o.call,
         o.fold.as_deref(),
     )));
     g.scan_next = s.0 as usize;
@@ -4579,15 +4866,33 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
                 let why = g.p[k].got.differs(&g.p[k].expect);
                 sh.ev(Ev { wid: 0, kind: 8, k: k as u32, t: [t, t, 0, 0, 0, 0], a: u64::from(g.p[k].got.join), b: 0, c: why, d: 0, e: 0 });
             }
-            // (a settled run reading on into the next text: the pieces
-            // after it begin in the middle of a command, they wait for the
-            // sequence laid out again — the runs in progress finish and are
-            // kept where they hold)
-            if g.p[k].got.join {
-                rounds_shown(g);
+            // (a settled run reading on into the next text where the layout
+            // did not join them: the pieces after it begin in the middle of
+            // a command, they wait for the sequence laid out again — the
+            // runs in progress finish and are kept where they hold. A run
+            // the layout already joined saying otherwise of something else
+            // — its job's end — waits as any other, for its page quantities
+            // to be validated: else it flips with them round after round)
+            if g.p[k].got.join && !g.p[k].expect.join {
                 if k + 1 < n && g.p[k + 1].status == Status::Running {
                     sh.cancel[k + 1].store(true, Ordering::Relaxed);
                 }
+                // (once what it read of the page builder's definitions and
+                // quantities is confirmed: the scan reaches it and runs it
+                // again if they differ — a join made on the last round's
+                // routines is not the sequence's)
+                if g.p[k].fold_unchecked {
+                    for &q in &g.running {
+                        if q > k {
+                            sh.cancel[q].store(true, Ordering::Relaxed);
+                        }
+                    }
+                    g.due_at = Some(g.due_at.map_or(k, |d| d.min(k)));
+                    g.restructure_due = true;
+                    g.settled += 1;
+                    continue;
+                }
+                rounds_shown(g);
                 restructure_now(g, sh);
                 return true;
             }
@@ -4632,6 +4937,15 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
     if g.restructure_due && g.settled == n {
         // (a run that said so may have run again since)
         if (0..n).any(|k| !g.p[k].got.same(&g.p[k].expect)) {
+            // (not while such a run reads the page builder's quantities the
+            // scan has not validated yet: what it says of the sequence
+            // holds once they do — the scan may run it again —, else the
+            // next layout assumes what a refuted read made it say, and its
+            // run, on the validated value, says the other: the sequence
+            // flips round after round (trip's `\end` ending the job or not))
+            if (0..n).any(|k| !g.p[k].got.same(&g.p[k].expect) && g.p[k].fold_unchecked) {
+                return false;
+            }
             rounds_shown(g);
             restructure_now(g, sh);
             return true;
@@ -4682,6 +4996,31 @@ fn rounds_shown(g: &State) {
             show(&ps.got),
             show(&ps.expect)
         );
+        // (the reads of what the build makes itself — written files, the
+        // page builder's quantities —, which a run may say otherwise on)
+        if let Some(r) = &ps.run {
+            eprintln!(
+                "  run: {} nodes, crossed {}, entry {:016x}, text {:016x}, stops {:?}, dirty {}, fold unchecked {}, status {:?}",
+                r.nodes_len(),
+                r.crossed,
+                crate::hash::hash_of(&format!("{:?}", r.entry())),
+                crate::hash::hash_of(&*ps.text),
+                ps.stops,
+                ps.dirty.len(),
+                ps.fold_unchecked,
+                ps.status
+            );
+            if std::env::var_os("PHITEX_ROUNDS_READS").is_some() {
+                let mut rs: Vec<&(Key, u32, Val)> = r.all_reads().iter().collect();
+                rs.sort_by_key(|x| x.1);
+                for (key, n, v) in rs.iter().take(400) {
+                    eprintln!("  first-read n{n} {key:?} = {:016x}", crate::hash::hash_of(&format!("{v:?}")));
+                }
+            }
+            for (key, n, v) in r.all_reads().iter().filter(|x| matches!(x.0, Key::File(_) | Key::Page(_))) {
+                eprintln!("  read {key:?} at node {n}: {:016x}", crate::hash::hash_of(&format!("{v:?}")));
+            }
+        }
     }
 }
 
@@ -4967,8 +5306,16 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
             }
             let (routines, routines_kept) = (env.routines, env.kept);
             let work = scan.fed - before;
-            let (new, new_orgs) = scan.take_pages();
+            let (new, mut new_orgs) = scan.take_pages();
+            for o in &mut new_orgs {
+                let v = std::mem::take(Arc::make_mut(&mut o.pdf));
+                o.pdf = pdf_ids(&sh.seq, v);
+            }
+            let tail = (finish && stop.is_none() && converged.is_none()).then(|| pdf_ids(&sh.seq, std::mem::take(&mut scan.pdf)));
             let mut g = lock(sh);
+            if let Some(t) = tail {
+                g.pdf_tail = t;
+            }
             for (k, r) in checked {
                 if g.p[k].run.as_ref().is_some_and(|x| Arc::ptr_eq(x, &r)) {
                     g.p[k].fold_unchecked = false;
@@ -5071,6 +5418,7 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
                     })
                     .collect();
                 g.scan_next = g.p.len();
+                g.pdf_tail = g.old_pdf_tail.clone();
                 g.scan_done = true;
             }
             if finish {
@@ -5098,6 +5446,9 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
             g.bodies[i] = Some(body);
             g.unshipped -= 1;
             g.stats.pages_shipped += 1;
+            if let Some(b) = &sh.board {
+                b.pages.fetch_add(1, Ordering::Relaxed);
+            }
             drop(g);
             sh.cv.notify_all();
             (page.b.list.len() as u64, 3)
@@ -5166,6 +5517,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         gave_up: false,
         entry_assumed,
         seen: FxMap::default(),
+        fold_read: false,
     };
     let run = Arc::new(run_piece(
         &text,
@@ -5367,7 +5719,7 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         sh.names_gen.store(g.names_log.len(), Ordering::Release);
         g.p[k].run = Some(run.clone());
         g.p[k].got = got.clone();
-        g.p[k].fold_unchecked = run.reads.iter().any(|r| matches!(r.0, Key::Page(_)));
+        g.p[k].fold_unchecked = env.fold_read || run.reads.iter().any(|r| matches!(r.0, Key::Page(_)));
         // (names marked while it ran — a definition made between its nodes
         // reaching a node whose read the run's first reader of the same
         // value stands for — are read again)
@@ -5470,6 +5822,9 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
             }
             debug_assert!(g.p[k].dirty.is_empty(), "piece {k} installed Done with marks");
             g.p[k].status = Status::Done;
+            if let Some(b) = &sh.board {
+                b.settled.fetch_add(1, Ordering::Relaxed);
+            }
             sh.done[k].store(true, Ordering::Release);
             // (a run reading another file, or ending its file, changes the
             // sequence)
@@ -5616,6 +5971,10 @@ struct PieceEnv<'a> {
     /// Every read from before the piece so far: the name, its reader, the
     /// value read.
     seen: FxMap<Key, Vec<(u32, Val)>>,
+    /// A read found a definition the page builder made between a piece's
+    /// nodes (an output routine's, `Names::has_inner`): this round's scan
+    /// has not confirmed it yet ([`PState::fold_unchecked`]).
+    fold_read: bool,
 }
 
 /// Measuring: a run reading longer than this (ns) has its five slowest
@@ -5721,6 +6080,9 @@ impl PieceEnv<'_> {
                 }
                 continue;
             };
+            if d.1 != END {
+                self.fold_read = true;
+            }
             let src = Src::Piece(sh.seq.id_at(d));
             let d = d.0 as usize;
             // (an element between this piece's own nodes is this run's)
@@ -6049,13 +6411,20 @@ impl BuildFold<'_> {
         cands
             .iter()
             .find(|m| {
+                // (the fire's ordinal is not an input: only the name its
+                // PDF events and their answers are filed under, `pdf_scope`;
+                // the memo's answers are read under this fire's)
                 (Arc::ptr_eq(&m.toks, &rt.toks) || m.toks == rt.toks)
                     && (Arc::ptr_eq(&m.page, &rt.page.b) || m.page == rt.page.b)
                     && m.fire == rt.reads
                     && m.overlay == overlay
-                    && m.reads
-                        .iter()
-                        .all(|(key, val)| val.seen_as(&self.routine_read(overlay, key)))
+                    && m.reads.iter().all(|(key, val)| {
+                        let key = match key {
+                            Key::PdfAns(1, o, n, f) if *o == m.ordinal => &Key::PdfAns(1, rt.fire, *n, *f),
+                            k => k,
+                        };
+                        val.seen_as(&self.routine_read(overlay, key))
+                    })
             })
             .cloned()
     }
@@ -6067,6 +6436,7 @@ impl BuildFold<'_> {
         let mut env = RoutineEnv {
             fold: self,
             overlay,
+            fire: rt.fire,
         };
         let entry = output::output_entry(&rt.page, &rt.reads, &rt.toks);
         let run = Arc::new(output::run_routine(&entry, &mut env));
@@ -6092,6 +6462,7 @@ impl BuildFold<'_> {
         let lines: Vec<Option<Lines>> = paras.iter().map(|(_, l)| Some(l.clone())).collect();
         let log = logs::texts(&logs::fragment(&[], &run, &lines));
         Memo {
+            ordinal: rt.fire,
             toks: rt.toks.clone(),
             page: rt.page.b.clone(),
             fire: rt.reads.clone(),
@@ -6161,6 +6532,19 @@ impl FoldEnv for BuildFold<'_> {
                 Arc::new(self.run_routine(&rt, &defs))
             };
             fired.items.clone_from(&m.items);
+            // (its PDF events filed under this fire's ordinal)
+            if m.ordinal != rt.fire {
+                for it in &mut fired.items {
+                    if let crate::item::Item::Pdf(p) = it
+                        && p.tag[0] == 1
+                        && p.tag[1] == m.ordinal
+                    {
+                        let mut q = (**p).clone();
+                        q.tag[1] = rt.fire;
+                        *it = crate::item::Item::Pdf(Arc::new(q));
+                    }
+                }
+            }
             fired.log.clone_from(&m.log);
             fired.errors.clone_from(&m.errors);
             // (its exports — `\box255` void, `\outputpenalty`,
@@ -6190,11 +6574,16 @@ impl FoldEnv for BuildFold<'_> {
 struct RoutineEnv<'a> {
     fold: &'a BuildFold<'a>,
     overlay: &'a [(Key, Val)],
+    fire: u32,
 }
 
 impl Env for RoutineEnv<'_> {
     fn cs(&self) -> &Arc<CsTable> {
         &self.fold.sh.names.cs
+    }
+
+    fn pdf_scope(&self) -> (u32, u32) {
+        (1, self.fire)
     }
 
     fn interaction_option(&self) -> Option<i32> {

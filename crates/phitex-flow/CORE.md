@@ -1647,7 +1647,7 @@ timeouts (four of gfx) and titlepage-15-6 replay alone in 1–4 s and
 pass, and the 20 TRIP swap seeds end cold (TeX's input stack size,
 now enforced) with their replays passing. That makes 8044's timeouts
 c89d1fec's slowness and loops. A swap's replay takes 34–43 s, against
-TRIP's 0.75 s cold.
+TRIP's 0.75 s cold: a speed item, not traced.
 
 **The ship candidate's gates** (one line each, `ACCL_COMMIT` the
 candidate, which must contain the scripts):
@@ -2871,6 +2871,20 @@ check the tags without upkeep:
 To add a variant, give it the next free tag, then its index and sample
 in these lists. `cargo test -p phitex-flow --lib tag_tests` runs them.
 
+Who took which (new ones go here). Key word tags: 1–42 and 63–65 (flow), 66 `GlyphUnicode`; B
+(c94cc4e) 67 `FontExpand`, 68 `FontAttr`, 69 `FontCopies`, 70
+`FontCode` (its hash), 71 `LastMatch`, 72 `ParToken`; Q 80 `PdfAns`
+(its hash), 81 `PdfLast`, 82 `PdfRandom`, 83 `PdfSeed`, 84 `PdfClock`,
+85 `PdfDate` (86 was `PdfMatch`, gone for B's `LastMatch`: free); X
+87–91; 73–79, 86 and 92 on are free. Format key tags: 34
+`GlyphUnicode`, B 35–38, X 50–53. Format meaning tags: 0–7 (flow),
+X 12 (`XMathCharGiven`). Format whatsit tags: 0–3 (flow), X 4
+(`SavePos`). Q takes no format tag of any kind: a primitive meaning is
+written by name (`Prim::Pdf`, `Prim::PdfX` included), `Item::Pdf` and
+`Whatsit::Pdf` are refused by the format writer, and the PDF keys are
+not dumped (pdfTeX does not dump its PDF globals); nothing of Q3 hashes
+a tag but `Key::word`.
+
 ## Memory (agent A, 2026-10-10)
 
 `latex.ltx` as a format at `-j 1` (`--cut-lines 200`), peak RSS: bac0a76
@@ -3298,18 +3312,204 @@ before it by its own guess (as the DVI writer does, `extra`); the fold
 now checks every font's number against the job's and makes the page
 again when one differs (as the DVI join does).
 
+**State (Q3).** Every PDF-only command of the brief's list is a node
+(`graph/pdf.rs`): `\pdfliteral` (`shipout` excepted, a gap),
+`\pdfcolorstack`/`\pdfcolorstackinit`, `\pdfsetmatrix`/`\pdfsave`/
+`\pdfrestore`, `\pdfobj` (`reserveobjnum`, `useobjnum`, `stream`,
+`attr`, `file`)/`\pdfrefobj`, `\pdfxform`/`\pdfrefxform`/
+`\pdfxformname`, `\pdfximage` (PNG, JPEG, a PDF page, `page`,
+`named`, `colorspace`, the page boxes)/`\pdfrefximage`/
+`\pdfximagebbox`, `\pdfannot`, `\pdfstartlink`/`\pdfendlink`/
+`\pdfrunninglinkoff`/`on`, `\pdfdest` (every kind, `struct`),
+`\pdfoutline`, `\pdfthread`/`\pdfstartthread`/`\pdfendthread`,
+`\pdfcatalog` (`openaction`), `\pdfinfo`, `\pdfnames`, `\pdftrailer`,
+`\pdftrailerid`, `\pdfmapfile`/`\pdfmapline` (the default map flushed
+or read first, `+`, `=`, `-`, entries in use kept), `\pdffontattr`
+(B's command, `Key::FontAttr`; the fold reads each font's at the end:
+`Files::font_attr`), `\pdfincludechars`, `\pdfnobuiltintounicode`, `\pdffontname`/
+`\pdffontobjnum`/`\pdffontsize`, `\pdfpageref`, `\pdfsavepos` with
+`\pdflastxpos`/`\pdflastypos`, the random generator
+(`\pdfsetrandomseed`, `\pdfuniformdeviate`, `\pdfnormaldeviate`,
+`\pdfrandomseed`: pdfTeX's generator, the seed a given,
+`Build::set_pdf_seed_clock`), `\pdfelapsedtime`/`\pdfresettimer` (the
+clock a given), `\pdfcreationdate`, `\pdffilesize`, `\pdffiledump`,
+`\pdfmdfivesum` (`\pdfmatch`/`\pdflastmatch` are B's, `ere.rs`), and
+`\immediate` with `\pdfobj`, `\pdfxform`,
+`\pdfximage`. A command asking something of the file emits
+`Item::Pdf` (taken out of its lists as `\shipout` is, so `\lastskip`,
+`\unskip` and friends do not see it); the page builder hands the
+events met since the last page to the next page (`PageOrg::pdf`),
+those after the last to the build (`PdfKept::tail`); the join's fold
+does them between the pages. Tests: `tests/pdf.rs` (16 new `-ini`
+documents, one or more per family) and `tests/pdflatex_docs.rs`
+(`hyper`: links, destinations, outlines across pages, `/Info`, a link
+over a line break and a page break; `graphics`: PNG, JPEG, a PDF page;
+`color`: xcolor's colour stack across pages; `tikz`; `zsavepos`:
+`\pdfsavepos` to the `.aux` by `\write`; `objs`: `\pdfobj`,
+`\pdfrefobj`, `\pdfxform` by hand), each at five schedules against
+pdftex/pdflatex 1.40.29 (the cluster image's: pdfTeX
+3.141592653-2.6-1.40.29, zlib 1.3.2). Measured (job 7827, the tree before the fixes this
+commit adds; the next job measures the rest): byte-identical at every
+schedule: `literal`, `colorstack`, `trailerid`, `outline`, and the
+older plain documents; pdflatex `hyper` and `color`. Failing there,
+fixed here: `annot`, `obj`, `xform` (a stale answer for another number
+failed the build: `what::ECHO`); documents pdfTeX itself rejected
+(`ximage`, `thread`: a keyword after the identifier; `zsavepos`:
+`\pos` undefined when the `.aux` is read at the end), whose oracles,
+and those after them, were not recorded. Not known yet: `graphics`,
+`objs`, `tikz` (still running at the time limit).
+
+**Virtual fonts.** A character of a font with a `.vf` file is its
+packet played in the walk (`content.rs` `vf_packet`, pdftex.web's
+`do_vf_packet`: local fonts, rules, moves, the stack, `xxx` as a
+`\special`, recursion to 10). The file is read by the fold, once per
+font, when a walk first shows a character of it (`F::do_vf`,
+`pdf/vf.rs` `parse`): a walk that does not know a font takes it as real
+and lists it (`PageBody::vf_asked`, in the order it showed them); the
+fold looks for those files in that order up to the first virtual font
+and walks again — once for each virtual font a page first shows, however
+many (bera's documents show five on a page: a cap of four walks left the
+fifth real, "Type 3 (PK) fonts are not supported yet") — until a walk
+asks about nothing new (a page made where
+it was shipped knows no font, so a page whose fonts are all real is
+kept as it was). The local fonts are TeX fonts loaded then
+(`vf_def_font`: one of that name and size loaded before, else the TFM
+file at that size), numbered after the fonts the job had loaded where
+the page was shipped and before those it loads later: the `/F` names
+are pdfTeX's. Where the page was shipped is counted as the fonts of the
+pieces before the page's own (`End::ship_fonts`) and at least every font
+the pages so far show (the fold's `vf_order`). `\pdffontname`,
+`\pdffontobjnum`, `\pdfincludechars` of a virtual font are fatal, as
+pdfTeX's `pdf_check_vf_cur_val`. Tests: `tests/pdf.rs` `vf` (Times and
+Helvetica in OT1, a font loaded after a page that loaded local fonts, a
+form), `bera` (six of bera's virtual fonts first shown on one page and
+in a form), `tests/pdflatex_docs.rs` `vfont` (T1 Times, Helvetica, Courier).
+Speed (not this part's): enumitem's manual (24 pages) took 18:57 at
+`-j 1` and 3.8 GB, A's quadratic lookup of names in deep groups
+(`Chain::resolve`). Gaps: a font the page's own piece loads before the page builder fired
+and the page does not show is counted as loaded after; an
+auto-expanded virtual font and `\letterspacefont` wait for font
+expansion.
+
+**Faked interword spaces.** `\pdfinterwordspaceon`/`off` and
+`\pdffakespace` are whatsits; `gen_faked_interword_space` is part of
+the walk's state across pages (`WalkState::faked_space`), and
+`pdf_begin_string` is pdfTeX's whole (the font switch delayed while
+both fonts are used, a move that looks like a space shown as the font's
+own space character or the dummy font's). What the walk needs of the
+fold — `font_used`, `pdf_font_has_space_char` (`hasspacechar`: the map
+entry's encoding names 32 `space`), the dummy font `pdftexspace` (read
+where the page is, numbered there as a virtual font's local font, its
+map line `pdfmaplinesp`) — a page made where it was shipped does not
+know: the fold makes it again (`PageBody::space_asked`, `wants_dummy`).
+Test: `tests/pdf.rs` `interword`. In the primitive table since B's
+merge: the old parameter names `\pdfmovechars`, `\pdfforcepagebox`,
+`\pdfoptionalwaysusepdfpagebox`, `\pdfoptionpdfinclusionerrorlevel`
+(parameters of their own, as pdfTeX's) and `\pdfoptionpdfminorversion`
+(`\pdfminorversion`); `\pdfspacefont` (only `pdftexspace`, the
+default: another name is an error, a gap); `\pdfsnaprefpoint`,
+`\pdfsnapy`, `\pdfsnapycomp` (an error where executed: the snapping in
+`pdf_vlist_out` and the page builder's and `\vsplit`'s discarding of
+snap nodes are a gap).
+
+**pdfTeX's read-backs.** What a command reads back of the PDF file —
+`\pdflastobj`, `\pdflastxform`, `\pdflastximage` (its pages and colour
+depth are the node's own, from the file), `\pdflastannot`,
+`\pdflastlink`, `\pdfretval`, an object's existence and a form's or
+image's size (`\pdfrefobj`, `\pdfrefxform`, `\pdfrefximage`,
+`\pdfxformname`, `\pdfximagebbox`), a destination already shipped
+(`\pdfdest`'s duplicate), `\pdfcolorstackinit`'s number and the number
+of stacks, `\pdffontname`/`\pdffontobjnum`, `\pdfpageref`, and
+`\pdflastxpos`/`\pdflastypos` outside a shipped `\write` — is the
+fold's answer to the command's event: `Key::PdfAns(scope, fire, node,
+slot)` (scope 0 a piece's node, 1 an output routine's with `fire` its
+ordinal among the job's fires; `slot` = event index × 8 + field), a
+given of the build (`Given::answer`, by the piece's id), read by the
+node as any name is read, so a changed answer runs exactly its readers
+again. The command then sets pdfTeX's globals (`Key::PdfLast(code)`,
+global, never grouped). A cold build has no answers: a read gets
+IniTeX's initial value (0; an object assumed to exist), never parks.
+After the join's fold the build compares the fold's answers with
+those the round read; if they differ it stores them and makes another
+round (`Build::update`'s loop: `round` returns `None`), at most
+`PDF_ROUNDS` = 8, then fails the build as TeX's capacity exceeded
+("! TeX capacity exceeded, sorry [pdf read-back rounds=8]."), never
+keeping a file the answers do not hold for. Convergence: an answer at a
+position depends only on the events before it (the fold numbers in
+document order); a round runs again only the nodes whose answers
+changed, which change only the events from their position on; so the
+first position where the answers differ moves forward each round, and
+in practice one extra round settles a cold build (the second round
+exists only because the join runs after the pieces). `tests/pdf.rs`'s
+`rerun` is a reader whose run again itself allocates (`\pdflastobj`
+read, then a conditional `\pdfobj`), at five schedules; `readback` reads
+each kind. Rounds per document: `Stats::pdf_rounds`. Output routines'
+reads: a routine's events and the answers it reads are filed under its
+fire's ordinal among the job's fires (`RoutineEnv::pdf_scope`), a name,
+not an input: a memo made at another ordinal (a scan resumed counts its
+fires from there) is checked with its answers read under this fire's,
+and reused with its events filed under it; a changed answer runs the
+routine again. The errors an answer implies (`\pdfrefobj` of an
+object that does not exist, `\pdfannot useobjnum` of an invalid one:
+pdfTeX's fatal "cannot find referenced object", "invalid object
+number") are the fold's, never a node's: a node reads an answer of an
+earlier round, and a restructure that gives a piece a new id loses its
+answers (they are filed by the piece's id), so a reader of its
+`\pdflastximage` can see 0 for a round; a node that stopped the job on
+it would end the build before the round that corrects it (the graphics
+document at one worker, speculating, random order 1:
+`pdf_graphics_speculating`). The fold has every event of the round in
+order and stops at the first, as pdfTeX does. Keys for A, if `ReadRef` takes over: `Key::PdfAns`,
+`Key::PdfLast`, `Key::PdfSeed`, `Key::PdfClock`, `Key::PdfDate`,
+`Key::PdfRandom`, `Key::PdfMatch`.
+
+**Origins (for SyncTeX and the viewer).** Each PDF page value carries
+`origins` (`content::Origins`, a non-version field: never in
+equality) — for every glyph run and rule the walk emits, `Origin { h, v,
+font, first_char, item, src }`: the origin in sp at the page's
+origin (`cur_h`, `cur_v`), the font's number (0 a rule), the first
+character, `item` the path of the item as the walk sees it (the box
+indices from the page's list down, then the item's index in its list),
+`src` the node that made it — `None` for now. `Output::origins[page]`
+exposes them. The gap for A: `src` is filled from `item` through A's
+item provenance (`Build::material_node(piece, item index, path)`, then
+`Build::source_place(piece, node)` for file and line) once that reaches
+this branch.
+
+**Gaps (Q3).** `\pdfliteral shipout` and `\special shipout` (late
+expansion where the page is shipped): an error. `\pdffilemoddate`
+answers the build's given date for a file that exists (pdfTeX reads
+the file's mtime; `SOURCE_DATE_EPOCH` and `FORCE_SOURCE_DATE` do not
+change that). Token lists pdfTeX converts at the end (`\pdfinfo`,
+`\pdfcatalog`, `\pdfnames`, `\pdftrailer`, `\pdfobj`'s data,
+attributes) are converted where the command is: they differ only if
+`\escapechar` or a catcode changes in between. A `\write` before the
+first `\pdfsavepos` of its page reads 0, not the page before's last
+position; a `\pdfsavepos` inside a `\pdfxform` does not reach later
+reads. `\pdfsavepos` in DVI mode: the DVI writer does not record
+positions. PK fonts (Type 3), TrueType/OpenType embedding,
+`\pdfimageapplygamma`, JBIG2 images: errors. Font expansion and
+protrusion (Q4): `PdfUnimpl`. Warnings pdfTeX prints to the log are
+collected (`Written::warnings`), not placed in the log.
+Sources for what is still to come, after the old crates were deleted:
+virtual fonts in PDF (`do_vf`, `do_vf_packet`) are
+`45ffd43:crates/partex-core/src/pdf/vf.rs`; protrusion is
+`45ffd43:crates/partex-engine/src/margin.rs` and font expansion is
+`45ffd43:crates/partex-engine/src/font.rs` (Q4). Read them with `git show
+45ffd43:PATH`; the branch keeps 45ffd43 in its history.
+
 **pdfTeX work split** (modules another agent can take in parallel; each
 is a pure function or a fold step, no state shared with the others):
 
 | part | where | interface |
 |---|---|---|
 | numbers, zlib, MD5 | `pdf/num.rs`, `pdf/zlib.rs`, `pdf/md5.rs` | `num::Out` (pdfTeX's printing), `zlib::compress(data, level)`, `md5::md5` — done |
-| a page's content stream | `pdf/content.rs` | `content::page(&Page, &Ship, &Numbers) -> PageBody`: the stream, `fonts` (font, number, glyphs), `events` (what makes objects, in stream order), guesses (`ff`, `fixed`). New whatsits (`\pdfliteral`, `\pdfcolorstack`, `\pdfsetmatrix`/`\pdfsave`/`\pdfrestore`, `\pdfrefxform`, `\pdfrefximage`, links, annotations, dests) are items in the page's list (`Item::Whatsit` variants made by their nodes) that the walk turns into stream text and `Event`s; position-dependent results (`\pdfsavepos`'s x, y; a link's rectangles split at line breaks) are made here, in the page's value |
-| the fold | `pdf/fold.rs` | `fold::assemble(pages, bodies, numbers, &End, &mut dyn Files) -> Written`; each `Event` gets a branch in `F::ship` that numbers its object as pdfTeX's `pdf_create_obj` does and writes it where pdfTeX does (`pdf_ship_out`'s "Write out resource lists", "Write out pending PDF marks", "Finish the PDF file"); document-level items (`\pdfobj`, `\pdfoutline`, `\pdfdest` names, `\pdfcatalog`, `\pdfinfo`, `\pdfnames`, `\pdftrailer`) arrive in position order as items of the material and are fold steps |
-| fonts | `pdf/font/` (`map.rs`, `enc.rs`, `t1.rs`), the font part of `fold.rs` | the map file (`map::Map`), encodings, Type 1 subsetting (`t1::writet1`), `fold::F::{do_pdf_font, write_fontdescriptor, write_enc, write_fontdictionary}`. To come: ToUnicode (`\pdfgentounicode`, `\pdfglyphtounicode`'s table as a document-level value), virtual fonts (`do_vf_packet` in the content walk), PK fonts (Type 3), TrueType/OpenType, `\pdfmapfile`/`\pdfmapline` (document-level items the fold applies before the first font is initialized), `\pdffontattr` |
-| images | `pdf/image/` (new) | `\pdfximage` is a node whose value is the image's description (a pure function of the file's bytes, the page asked for, the box); its dimensions are known at the node (pdfTeX reads the file there); `\pdfrefximage` is a whatsit; the fold writes the XObject (PNG through `zlib`, JPEG as it is, PDF pages through a PDF reader copied from partex-engine's `pdfread.rs`/partex-core's `epdf.rs`) at the first page using it |
-| links, dests, outlines | `pdf/link.rs` (new) + fold | link and annotation rectangles in `content.rs` (pdfTeX's `append_link`, `end_link`: per line box at its nesting level), dest names sorted and the name tree in the fold (`sort_dest_names`, "Output name tree"), outlines as document-level items in position order |
-| reads of the fold | core (A: Conflict 12's `ReadRef`) | `\pdflastobj`, `\pdflastxform`, `\pdflastximage`, `\pdflastannot`, `\pdflastlink`, `\pdflastxpos`/`\pdflastypos`: the fold's counters at the node's position |
+| a page's content stream | `pdf/content.rs` | `content::page(&Page, &Ship, &Numbers, extra) -> PageBody` where the page is shipped; `content::page_body(&Page, &Ship, &Given)` and `form_body` in the fold: the stream, `fonts` (font, number, glyphs), `events` (marks and references in the walk's order: fonts, annotations, links and their pieces per line, destinations, beads, `\pdfrefobj`, forms, images), `links`/`beads` rectangles, `write_pos` (`\pdfsavepos` at each `\write`), the walk's state `entry`/`exit` (`WalkState`: colour stacks, matrix stack, the open links, the thread, the last position), `incomplete` (a form or image not known where the page was made), guesses (`ff`, `fixed`); `origins` (a non-version field, below). pdfTeX's whatsits are `Item::Whatsit(Whatsit::Pdf(what::What))`, made by their nodes (`graph/pdf.rs`) — done |
+| the fold | `pdf/fold.rs`, `pdf/fold/marks.rs`, `pdf/fold/image.rs` | `fold::assemble(pages, bodies, events, numbers, &End, &mut dyn Files) -> Written`: the PDF events before each page and after the last (`PageOrg::pdf`, the build's tail: `Item::Pdf` of the material, which the page builder hands to the pages in the order it meets them) are fold steps (`F::step`, part 53's commands: objects, forms, images, outlines, catalog, info, names, trailer, colour stacks, fonts, maps); each page is shipped as `pdf_ship_out` does (its walk's marks numbered in walk order, the page object with `/Group`, `/Annots`, `/B`, the raw objects, images and forms it refers to — forms shipped recursively — the marks, the resources); the end as "Finish the PDF file" (pages checked, destinations fixed, fonts, page tree, outlines, name tree, threads, catalog, info, xref, trailer). `Written::answers` are the read-backs' answers — done |
+| fonts | `pdf/font/` (`map.rs`, `enc.rs`, `t1.rs`), the font part of `fold.rs` | the map file (`map::Map`), encodings, Type 1 subsetting (`t1::writet1`), `fold::F::{do_pdf_font, write_fontdescriptor, write_enc, write_fontdictionary}`. To come: ToUnicode (`\pdfgentounicode`, `\pdfglyphtounicode`'s table as a document-level value) (virtual fonts: done, "Virtual fonts" below), PK fonts (Type 3), TrueType/OpenType, `\pdfmapfile`/`\pdfmapline` (document-level items the fold applies before the first font is initialized). How the TrueType/OpenType gap closes: the face (tables, cmap, glyf/loca, hmtx, post, CFF) is read through `partex-otf` (a pure library, linked, on the wall's allowlist), never a second parser copied from the old port; only the subset writer (which tables, in which order, pdfTeX's checksums and glyph renumbering) is the byte-exact port of `writettf.c` (and its CFF path for `.otf`), with the ttf2afm-style metrics and the map's `<[` encodings; PFB and encoding parsing through `partex-otf` where it has them, `writet1`'s writer kept. Files (map, pfb, enc, ttf/otf) are to be found through the build's kpathsea given (A's `Build::set_kpse`, `tfm::Kpse::find` with formats `FontMap`, `Type1`, `Enc`, program `pdftex`), not by `tfm::pdf_file`'s directory walk: `PdfFiles::get` switches to it when A's commit reaches this branch |
+| images | `pdf/image/mod.rs` (reading, at the node), `pdf/fold/image.rs` (writing) | `\pdfximage` reads the file (`Key::File`) at its node: `image::read_image`, `image::scale` (pdfTeX's `scale_image`); the fold writes JPEG as it is, PNG (`write_png`, IDAT copied or rows through `lib::png`, soft masks, palettes, the transparency group), a PDF page (`write_epdf` through `lib::pdfread`: objects copied, Type 1 fonts the map has replaced by the job's embedding unless `\pdfinclusioncopyfonts`) — done; `\pdfimageapplygamma`, JBIG2 are gaps |
+| links, dests, outlines | `pdf/content.rs` (rectangles), `pdf/fold/marks.rs` | links split per line box at their nesting level and threaded across pages by `WalkState::links`; destinations' duplicates the fold's; outlines, the name tree (`sort_dest_names`, `str_less_str`), threads and beads as pdfTeX writes them — done |
+| reads of the fold | `graph/pdf.rs`, `build.rs` (`PdfKept`, `Given::answer`) | `Key::PdfAns` answered from the last fold, rounds until they hold ("pdfTeX's read-backs" below); A's `ReadRef` may take this over later — the keys are listed there |
 
 ## XeTeX on the graph (agent X)
 
