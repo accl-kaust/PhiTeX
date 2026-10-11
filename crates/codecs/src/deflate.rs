@@ -1166,48 +1166,30 @@ mod tests {
         );
     }
 
-    /// Random inputs against the system's zlib (Python's `zlib` module,
-    /// the library pdfTeX links), if there is a `python3`.
+    /// Every `/FlateDecode` stream pdfTeX wrote into the output tests'
+    /// fixtures (zlib at `\pdfcompresslevel` 9) is reproduced byte for byte.
     #[test]
-    #[ignore = "needs python3"]
-    fn as_the_system_zlib() {
-        use std::io::Write as _;
-        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
-        let mut next = || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed
-        };
-        for case in 0..40 {
-            let n = [0, 1, 2, 3, 100, 1000, 70_000, 200_000][case % 8] + (next() % 50) as usize;
-            let alphabet = [2u64, 4, 16, 256][case % 4];
-            let mut data: Vec<u8> = Vec::with_capacity(n);
-            while data.len() < n {
-                if next() % 3 == 0 && data.len() > 10 {
-                    let from = (next() as usize) % data.len();
-                    let len = 3 + (next() as usize) % 300;
-                    for i in 0..len {
-                        let b = data[(from + i) % data.len()];
-                        data.push(b);
-                    }
-                } else {
-                    data.push(b'a'.wrapping_add((next() % alphabet) as u8));
-                }
+    fn as_pdftex_zlib() {
+        // (`hi9.pdf` is the fixture pdfTeX compressed: its page and its
+        // embedded Type 1 font.)
+        let pdf: &[u8] = include_bytes!("../../output/pdf/tests/fixtures/hi9.pdf");
+        let mut checked = 0;
+        let mut at = 0;
+        while let Some(k) = find(&pdf[at..], b"stream\n") {
+            let start = at + k + 7;
+            let Some(len) = find(&pdf[start..], b"\nendstream") else { break };
+            let z = &pdf[start..start + len];
+            at = start + len + b"\nendstream".len();
+            if z.starts_with(&[0x78, 0xda]) {
+                let data = crate::inflate::inflate(z).expect("a zlib stream");
+                assert!(compress(&data, 9) == z, "stream at byte {start}");
+                checked += 1;
             }
-            data.truncate(n);
-            let level = 1 + (case % 9) as i32;
-            let Ok(mut child) = std::process::Command::new("python3")
-                .args(["-c", &format!("import sys,zlib; sys.stdout.buffer.write(zlib.compress(sys.stdin.buffer.read(), {level}))")])
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-            else {
-                return;
-            };
-            child.stdin.take().unwrap().write_all(&data).unwrap();
-            let want = child.wait_with_output().unwrap().stdout;
-            assert!(compress(&data, level) == want, "case {case}: {n} bytes at level {level}");
         }
+        assert!(checked == 2, "{checked} streams");
+    }
+
+    fn find(h: &[u8], n: &[u8]) -> Option<usize> {
+        h.windows(n.len()).position(|w| w == n)
     }
 }
