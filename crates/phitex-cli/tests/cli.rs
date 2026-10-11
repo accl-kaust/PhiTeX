@@ -444,6 +444,55 @@ fn watch_word_edit() {
     }
 }
 
+/// Two copies of the binary (other paths, other times) share the format
+/// cache: a format is cached under the build's identity (a hash of its
+/// sources, `tex::build_id`), not the executable's path, size or time.
+#[test]
+fn format_cache_shared_by_copies() {
+    let _one = one();
+    let base = scratch("copies");
+    let cache = base.join("cache");
+    let doc = base.join("doc");
+    std::fs::create_dir_all(&doc).expect("a directory");
+    std::fs::write(doc.join("x.tex"), "Hi.\n\\bye\n").expect("the document");
+    let fmts = || -> Vec<(PathBuf, std::time::SystemTime)> {
+        let mut v: Vec<_> = std::fs::read_dir(cache.join("formats"))
+            .map(|rd| {
+                rd.filter_map(Result::ok)
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "fmt"))
+                    .map(|p| {
+                        let t = std::fs::metadata(&p).and_then(|m| m.modified()).expect("a time");
+                        (p, t)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    };
+    let mut after = Vec::new();
+    for copy in ["a", "b"] {
+        let d = base.join(copy);
+        std::fs::create_dir_all(&d).expect("a directory");
+        let exe = d.join("tex");
+        std::fs::copy(env!("CARGO_BIN_EXE_phitex"), &exe).expect("a copy of the binary");
+        let out = command(&exe, &doc)
+            .env("PHITEX_CACHE_DIR", &cache)
+            .args(["-interaction=batchmode", "x.tex"])
+            .output()
+            .expect("phitex runs");
+        let errs = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "copy {copy}: phitex failed: {errs}");
+        if copy == "b" {
+            assert!(!errs.contains("making the"), "copy b made the format again: {errs}");
+        }
+        after.push(fmts());
+    }
+    assert_eq!(after[0].len(), 1, "one format: {:?}", after[0]);
+    assert_eq!(after[0], after[1], "the second copy wrote a format of its own");
+}
+
 /// A WebSocket text frame from a client (masked, RFC 6455).
 fn ws_frame(text: &str) -> Vec<u8> {
     let p = text.as_bytes();
@@ -700,4 +749,69 @@ fn lualatex_external() {
     let got = std::fs::read(dir.join("lua.pdf")).expect("phitex's PDF");
     assert!(got == want, "the PDF is not lualatex's: {}", first_difference(&got, &want));
     assert!(dir.join("lua.synctex.gz").is_file(), "lualatex's SyncTeX file is not there");
+}
+
+/// A one-page job without a format (`--ini --etex`).
+fn tiny() -> &'static str {
+    "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x Hi\\end\n"
+}
+
+/// Every option is accepted before the command, after it and after the
+/// file: `-o DIR` and `-j N` in the three positions, the output where
+/// `-o` says.
+#[test]
+fn options_in_any_position() {
+    let _one = one();
+    let dir = scratch("options");
+    std::fs::write(dir.join("t.tex"), tiny()).expect("the document");
+    let lines: [&[&str]; 3] = [
+        &["-o", "out1", "-j", "2", "build", "--ini", "--etex", "t.tex"],
+        &["build", "-o", "out2", "-j", "2", "--ini", "--etex", "t.tex"],
+        &["build", "--ini", "--etex", "t.tex", "-o", "out3", "-j", "2"],
+    ];
+    for (k, args) in lines.iter().enumerate() {
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir).args(*args).output().expect("phitex runs");
+        assert!(out.status.success(), "phitex {args:?} failed:\n{}", String::from_utf8_lossy(&out.stderr));
+        let dvi = dir.join(format!("out{}", k + 1)).join("t.dvi");
+        assert!(dvi.is_file(), "phitex {args:?} wrote no {}", dvi.display());
+    }
+}
+
+/// An unknown option is named, with `--help` suggested, and the exit
+/// status is 2; an option before the command is never taken for TeX's
+/// command line.
+#[test]
+fn unknown_option_is_named() {
+    let dir = scratch("unknown-option");
+    std::fs::write(dir.join("t.tex"), tiny()).expect("the document");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["build", "--frob", "t.tex"])
+        .output()
+        .expect("phitex runs");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("--frob"), "the option is not named:\n{err}");
+    assert!(err.contains("--help"), "--help is not suggested:\n{err}");
+    assert!(err.lines().count() <= 8, "more than a few lines:\n{err}");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["-o", "out", "--frob", "build", "t.tex"])
+        .output()
+        .expect("phitex runs");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("--frob") && !err.contains("compat"), "{err}");
+}
+
+/// `--help` is sectioned (commands, options, examples) and plain off a
+/// terminal.
+#[test]
+fn help_is_sectioned() {
+    let dir = scratch("help");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir).arg("--help").output().expect("phitex runs");
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    for section in ["Commands:", "Options:", "Examples:", "build", "watch", "--output-dir", "--jobs"] {
+        assert!(text.contains(section), "`{section}` is not in the help:\n{text}");
+    }
+    assert!(!text.contains('\x1b'), "escape sequences off a terminal:\n{text}");
 }

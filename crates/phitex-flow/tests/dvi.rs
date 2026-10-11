@@ -258,7 +258,13 @@ macro_rules! documents {
     };
 }
 
-documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, ship, disc, math1, math2, math3, math4);
+documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, ship, disc, math1, math2, math3, math4, onepiece);
+
+// An output routine that sets `\vsize`, `\maxdepth` and `\topskip`
+// globally, every other page, while one paragraph's lines are contributed
+// in one call of the page builder: each page after a routine is frozen at
+// what the routine left (tex.web 1026: `build_page` again, 987).
+documents!(vsizeout);
 
 macro_rules! etex_documents {
     ($($name:ident),* $(,)?) => {
@@ -405,8 +411,11 @@ fn dump() {
 // overfull alignment (`halign2`); `\valign` (`valign`); display alignments
 // in a paragraph and `\halign` ending one (`display`); TeX's errors and
 // what it does after them (`alignerr`); the hundredth error, which ends
-// the build (tex.web 82: `alignerr3`, a later piece's page not shipped).
-documents!(halign, halign2, valign, display, alignerr, alignerr2, alignerr3);
+// the build (tex.web 82: `alignerr3`, a later piece's page not shipped);
+// a macro whose parameter text ends with `#{` in an entry: its brace is
+// read twice, from the input and again from the body, and counted once
+// (tex.web 397: `alignbrace`).
+documents!(halign, halign2, valign, display, alignerr, alignerr2, alignerr3, alignbrace);
 
 /// A loop of errors (a macro calling itself after an undefined name) stops
 /// at the hundredth error, as TeX does (tex.web 82), in every schedule.
@@ -745,15 +754,71 @@ fn specloop() {
 }
 
 /// A document that really loops ends as TeX ends it: "TeX capacity
-/// exceeded" (here with a small main memory).
+/// exceeded" (here with a small main memory), its box piling up
+/// characters (in `\nullfont` TeX makes none, and loops for ever).
 #[test]
 fn capacity_exceeded() {
-    let src = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6\n\\def\\a{x\\a}\\setbox1\\hbox{\\a}\n\\end\n";
+    let src = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6\n\\font\\tenrm=cmr10 \\tenrm\n\\def\\a{x\\a}\\setbox1\\hbox{\\a}\n\\end\n";
     for o in RUNS {
         let o = Options { main_memory: 5_000, ..o };
         let (_, log, errors, _) = graph("capacity", src, o);
         let all = format!("{log}{errors:?}");
         assert!(all.contains("TeX capacity exceeded, sorry [main memory size=5000]"), "({o:?}): {all}");
+    }
+}
+
+/// A box register piling up what TeX keeps (a box holding itself and a
+/// character, set again and again; a box doubled by `\copy`, its list
+/// counted all the way down) ends in "TeX capacity exceeded" too, though
+/// each `\setbox` frees the box it replaces.
+#[test]
+fn capacity_exceeded_in_registers() {
+    for body in ["\\setbox1\\hbox{\\box1 x}", "\\setbox1\\hbox{\\copy1\\copy1}"] {
+        let src = format!(
+            "\\catcode`\\{{=1 \\catcode`\\}}=2 \\catcode`\\#=6\n\\font\\tenrm=cmr10 \\tenrm\n\\setbox1\\hbox{{x}}\\def\\a{{{body}\\a}}\\a\n\\end\n"
+        );
+        for o in RUNS {
+            let o = Options { main_memory: 5_000, ..o };
+            let (_, log, errors, _) = graph("capacity", &src, o);
+            let all = format!("{log}{errors:?}");
+            assert!(all.contains("TeX capacity exceeded, sorry [main memory size=5000]"), "{body} ({o:?}): {all}");
+        }
+    }
+}
+
+/// A token list gathered without end (an `\edef` body, a `\message`
+/// text, each expanding a macro that never ends) is held in TeX's memory
+/// too: "TeX capacity exceeded" ends it (tex.web 120), it does not grow
+/// for ever (a run on a wrong prediction reading on and on is given up
+/// the same way).
+#[test]
+fn capacity_exceeded_in_a_token_list() {
+    for body in ["\\edef\\c{\\b}", "\\message{\\b}"] {
+        let src = format!("\\catcode`\\{{=1 \\catcode`\\}}=2 \\catcode`\\#=6\n\\def\\b{{x\\b}}{body}\n\\end\n");
+        for o in RUNS {
+            let o = Options { main_memory: 50_000, ..o };
+            let (_, log, errors, _) = graph("capacity", &src, o);
+            let all = format!("{log}{errors:?}");
+            assert!(all.contains("TeX capacity exceeded, sorry [main memory size=50000]"), "{body} ({o:?}): {all}");
+        }
+    }
+}
+
+/// A run holds what TeX's memory holds, not all it ever made: a document
+/// of 300-odd pages in one piece (no blank line: the cutter cannot cut it)
+/// stays under a main memory of a few pages, as TeX does, which frees a
+/// shipped page's nodes, a broken paragraph's, a box register's box set
+/// again (`graph::Live`). Its pages are TeX's.
+#[test]
+fn one_piece_frees_pages() {
+    let src = std::fs::read_to_string(dir().join("onepiece.tex")).unwrap();
+    let want = std::fs::read(dir().join("onepiece.dvi")).unwrap();
+    for o in RUNS {
+        let o = Options { main_memory: 2_000, ..o };
+        let out = Build::new(font()).update(&src, o);
+        assert!(out.errors.is_empty(), "onepiece ({o:?}): {:?}", out.errors);
+        assert_eq!(out.stats.pieces, 1, "onepiece ({o:?}): not one piece");
+        assert!(masked(&out.dvi) == masked(&want), "onepiece ({o:?}): the DVI differs");
     }
 }
 

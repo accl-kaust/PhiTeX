@@ -33,7 +33,7 @@ use std::sync::Arc;
 use super::material::box_start;
 use super::{
     Chain, Check, Env, Exec, Group, GroupKind, Kind, Mode, Outside, Pending, RState, Run, Scratch, Src, capacity_error,
-    outside_read, pending_words, words_of,
+    outside_read, pending_words, Live,
 };
 use crate::hash::FxSet;
 use crate::item::{BoxNode, Item};
@@ -208,10 +208,12 @@ pub fn run_routine(entry: &RState, env: &mut dyn Env) -> Run {
     let mut scratch = Scratch::default();
     let mut state = entry.clone();
     let mut ran = 0u64;
-    let mut words = 0u64;
+    let mut live = Live::default();
+    let cap = env.main_memory();
     loop {
         ran += 1;
         let mut x = Exec::new(text, &chain, &state, env, &mut outside, &mut scratch);
+        x.words_base = live.total();
         x.command();
         if let Some(Check::Exceeded(size)) = x.stop.take() {
             x.overflow(capacity_error(size));
@@ -219,7 +221,7 @@ pub fn run_routine(entry: &RState, env: &mut dyn Env) -> Run {
         }
         let n = chain.with_group(x.finish());
         let end = n.kind == Kind::End;
-        words += words_of(&n);
+        let words = live.add(&n, cap);
         let verdict = env.check(ran, words.max(pending_words(&n.out)));
         state = n.out.clone();
         chain.push_arc(n);
@@ -374,8 +376,8 @@ impl Exec<'_> {
         for it in std::mem::take(&mut self.vemit) {
             push_vertical(&mut list, &mut pd, it);
         }
-        let ships: Vec<Item> = list.iter().filter(|i| matches!(i, Item::Shipout(_))).cloned().collect();
-        list.retain(|i| !matches!(i, Item::Shipout(_) | Item::BuildPage(_) | Item::End(_)));
+        let ships: Vec<Item> = list.iter().filter(|i| i.hoisted()).cloned().collect();
+        list.retain(|i| !i.hoisted() && !matches!(i, Item::BuildPage(_) | Item::End(_)));
         // (`pop_nest`: the run's outer list, the main vertical list's place)
         self.st.level -= 1;
         self.st.mode = Mode::V;

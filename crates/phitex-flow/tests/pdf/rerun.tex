@@ -1,0 +1,9 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=0
+\font\r=cmr10 \r \hsize=200pt \vsize=300pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt
+\pdfobj{1}\pdfobj{2}
+\ifnum\pdflastobj>1 \pdfobj{3}\fi
+A\par
+\ifnum\pdflastobj>2 \immediate\pdfobj{4}\fi
+\edef\x{\the\pdflastobj}\pdfobj{(\x)}\pdfrefobj\pdflastobj B\par
+\message{\x}
+\end

@@ -1,0 +1,11 @@
+\documentclass{article}
+\usepackage{tikz}
+\begin{document}
+\begin{tikzpicture}
+\draw (0,0) -- (2,1) -- (2,0) -- cycle;
+\fill[red!40] (3,0) circle (0.5);
+\draw[thick,blue,->] (0,1) to[bend left] (3,1);
+\node[draw,rotate=30] at (1,-1) {Node};
+\draw[dashed] (0,-2) rectangle (3,-1.5);
+\end{tikzpicture}
+\end{document}

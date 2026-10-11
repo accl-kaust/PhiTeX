@@ -44,6 +44,16 @@ fn latex_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/latex")
 }
 
+/// The documents of pdfTeX's PDF-only commands (`tests/latex/pdfdocs/`):
+/// hyperref, graphicx's three kinds of image, xcolor, `TikZ`, positions
+/// written to the `.aux` file, objects and forms by hand, virtual fonts.
+const PDFDOCS: [&str; 8] = ["hyper", "graphics", "color", "tikz", "zsavepos", "objs", "vfont", "alignlink"];
+
+/// The directory of document `name`.
+fn doc_dir(name: &str) -> PathBuf {
+    if PDFDOCS.contains(&name) { latex_dir().join("pdfdocs") } else { docs_dir() }
+}
+
 fn docs_dir() -> PathBuf {
     latex_dir().join("docs")
 }
@@ -76,7 +86,7 @@ struct Made {
 fn doc_files(name: &str) -> Vec<String> {
     let mut v = vec![format!("{name}.tex")];
     let pre = format!("{name}-");
-    for e in std::fs::read_dir(docs_dir()).expect("tests/latex/docs").flatten() {
+    for e in std::fs::read_dir(doc_dir(name)).expect("tests/latex/docs").flatten() {
         let f = e.file_name().to_string_lossy().into_owned();
         if f.starts_with(&pre) {
             v.push(f);
@@ -97,7 +107,7 @@ fn run_latex(name: &str) -> Option<Made> {
     let tmp = std::env::temp_dir().join(format!("phitex-flow-pdflatex-doc-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).ok()?;
     for f in doc_files(name) {
-        std::fs::copy(docs_dir().join(&f), tmp.join(&f)).ok()?;
+        std::fs::copy(doc_dir(name).join(&f), tmp.join(&f)).ok()?;
     }
     let st = Command::new("pdflatex")
         .args(["-interaction=batchmode", "-recorder", &format!("{name}.tex")])
@@ -185,8 +195,18 @@ fn recorded(name: &str) -> Made {
 /// `PHITEX_FLOW_BLESS=1` records them.
 #[test]
 fn oracles_are_pdflatex() {
-    for name in DOCS {
-        let Some(made) = run_latex(name) else { return };
+    // (every document, the failures listed at the end: one blessing run
+    // records all it can)
+    let mut bad = Vec::new();
+    for name in DOCS.into_iter().chain(PDFDOCS) {
+        let made = match std::panic::catch_unwind(|| run_latex(name)) {
+            Ok(Some(m)) => m,
+            Ok(None) => return,
+            Err(_) => {
+                bad.push(format!("{name}: pdflatex failed"));
+                continue;
+            }
+        };
         if std::env::var_os("PHITEX_FLOW_BLESS").is_some() {
             let d = pdf_dir();
             let _ = std::fs::create_dir_all(&d);
@@ -196,10 +216,17 @@ fn oracles_are_pdflatex() {
             std::fs::write(d.join(format!("{name}.dirs")), made.dirs.join("\n") + "\n").unwrap();
         }
         let want = recorded(name);
-        assert!(made.pdf == want.pdf, "{name}: pdflatex's PDF is not the recorded one");
-        assert_eq!(made.writes, want.writes, "{name}: pdflatex's written files are not the recorded ones");
-        assert_eq!(made.dirs, want.dirs, "{name}: pdflatex read its files from other directories");
+        if made.pdf != want.pdf {
+            bad.push(format!("{name}: pdflatex's PDF is not the recorded one"));
+        }
+        if made.writes != want.writes {
+            bad.push(format!("{name}: pdflatex's written files are not the recorded ones"));
+        }
+        if made.dirs != want.dirs {
+            bad.push(format!("{name}: pdflatex read its files from other directories"));
+        }
     }
+    assert!(bad.is_empty(), "{bad:#?}");
 }
 
 /// The directories a document's oracle read from (its `NAME.dirs`, then
@@ -210,7 +237,7 @@ fn dirs_of(name: &str) -> (Vec<PathBuf>, Vec<PathBuf>, PathBuf) {
     let mut ini = None;
     // (the document's own directory first: its pictures, as `latex` finds
     // them beside it)
-    let (mut inputs, mut fonts) = (vec![docs_dir(), latex_dir()], Vec::new());
+    let (mut inputs, mut fonts) = (vec![doc_dir(name), latex_dir()], Vec::new());
     for l in &want.dirs {
         match l.split_once(' ') {
             Some(("ini", p)) => ini = Some(PathBuf::from(p)),
@@ -246,7 +273,7 @@ fn build_for(name: &str, job: &str) -> Build {
 }
 
 fn doc_text(name: &str) -> String {
-    chars(&std::fs::read(docs_dir().join(format!("{name}.tex"))).expect("NAME.tex"))
+    chars(&std::fs::read(doc_dir(name).join(format!("{name}.tex"))).expect("NAME.tex"))
 }
 
 /// One heavy build at a time (a build of `latex.ltx` holds about 4 GB).
@@ -414,4 +441,81 @@ fn doc_layout() {
 #[test]
 fn doc_rules() {
     doc("rules");
+}
+
+#[test]
+fn pdf_hyper() {
+    doc("hyper");
+}
+
+#[test]
+fn pdf_graphics() {
+    doc("graphics");
+}
+
+#[test]
+fn pdf_color() {
+    doc("color");
+}
+
+#[test]
+fn pdf_tikz() {
+    doc("tikz");
+}
+
+#[test]
+fn pdf_zsavepos() {
+    doc("zsavepos");
+}
+
+#[test]
+fn pdf_objs() {
+    doc("objs");
+}
+
+#[test]
+fn pdf_vfont() {
+    doc("vfont");
+}
+
+/// hyperref's links in amsmath's `\text` in `align` and `alignat`: each
+/// link reserves an annotation's object (`\pdfannot reserveobjnum`, a PDF
+/// event taken out of the list, no node), four times (`\mathchoice`); the
+/// display's math list is still empty where the alignment begins (tex.web
+/// 1145: no "Improper \halign inside $$'s").
+#[test]
+fn pdf_alignlink() {
+    doc("alignlink");
+}
+
+/// The graphics document at a schedule that speculated on a stale
+/// `\pdflastximage` (one worker, random order 1): its `\pdfrefximage` of
+/// the predicted number met the last round's answer for it.
+#[test]
+fn pdf_graphics_speculating() {
+    doc_at("graphics", run(1, Reads::Speculate, Order::Random(1)));
+}
+
+/// Looks for the schedules a document fails at (not a test of its own:
+/// `PHITEX_SCAN=NAME:THREADS:FROM..TO` with `--ignored`), speculating in
+/// random orders seeded `FROM..TO`; prints each seed that fails.
+#[test]
+#[ignore = "a search, run by hand"]
+fn scan_seeds() {
+    let Ok(spec) = std::env::var("PHITEX_SCAN") else { return };
+    let mut it = spec.split(':');
+    let name = it.next().expect("NAME").to_string();
+    let threads: usize = it.next().expect("THREADS").parse().expect("a number");
+    let (from, to) = it.next().expect("FROM..TO").split_once("..").expect("FROM..TO");
+    let (from, to): (u64, u64) = (from.parse().expect("FROM"), to.parse().expect("TO"));
+    let mut bad = Vec::new();
+    for seed in from..to {
+        let o = run(threads, Reads::Speculate, Order::Random(seed));
+        let n = name.clone();
+        if std::panic::catch_unwind(move || doc_at(&n, o)).is_err() {
+            eprintln!("SEED {seed} FAILS");
+            bad.push(seed);
+        }
+    }
+    eprintln!("failing seeds: {bad:?}");
 }

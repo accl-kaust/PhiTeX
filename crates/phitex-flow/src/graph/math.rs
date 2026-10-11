@@ -844,10 +844,10 @@ impl Exec<'_> {
             push_horizontal(&mut hlist, it);
             orig.resize(hlist.len(), 0);
         }
-        let ships: Vec<Item> = hlist.iter().filter(|i| matches!(i, Item::Shipout(_))).cloned().collect();
-        let mut keep = hlist.iter().map(|i| !matches!(i, Item::Shipout(_)));
+        let ships: Vec<Item> = hlist.iter().filter(|i| i.hoisted()).cloned().collect();
+        let mut keep = hlist.iter().map(|i| !i.hoisted());
         orig.retain(|_| keep.next().unwrap_or(true));
-        hlist.retain(|i| !matches!(i, Item::Shipout(_)));
+        hlist.retain(|i| !i.hoisted());
         self.st.mode = Mode::V;
         self.st.inner = level > 0;
         let mut para = Para { before: ships, ..Para::default() };
@@ -1384,7 +1384,10 @@ impl Exec<'_> {
             self.math_off_save(t);
             return None;
         }
-        if !self.math_items().is_empty() {
+        // (a PDF event made in the formula — `\pdfannot reserveobjnum`,
+        // hyperref's link in amsmath's `\text` — is no node of it: TeX's
+        // math list is still empty)
+        if self.math_items().iter().any(|it| !it.hoisted()) {
             // (§776: TeX flushes the formula; not here)
             self.err("Improper \\halign inside $$'s".into());
         }

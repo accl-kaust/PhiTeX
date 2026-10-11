@@ -12,8 +12,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use crate::modern::{self, Options, Style, Target, ms};
-use crate::session::{self, Session};
+use crate::modern::{self, Options, Target, Ui, ms};
+use crate::session::{self, Session, Status};
 use crate::tex;
 use crate::view::{self, Ask, Built, View};
 
@@ -149,26 +149,36 @@ fn diagnostics(r: &session::Report, log: &str) -> Vec<String> {
 
 /// Watch target `t`; never returns.
 #[allow(clippy::too_many_lines)]
-pub fn main(t: &Target, o: &Options, st: &Style) -> ! {
+pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
+    let st = ui.st;
     let job = modern::job(t, o).unwrap_or_else(|e| {
-        eprintln!("{}: {e}", st.red("error"));
+        ui.error(&e);
         std::process::exit(2);
     });
     for n in session::waiting_notes(&job) {
-        eprintln!("{}: {n}", st.yellow("note"));
+        ui.line(&format!("{}: {n}", st.yellow("note")));
     }
-    let mut s = Session::new(job, &mut |n: &str| eprintln!("{}", st.dim(&format!("phitex: {n}")))).unwrap_or_else(|e| {
-        eprintln!("{}: {e}", st.red("error"));
+    let status = Arc::new(Status::default());
+    let what = modern::what(t, &job);
+    let spin = ui.spin(what.clone(), status.clone());
+    let mut s = Session::new(job, status.clone(), &mut |n: &str| ui.note(n)).unwrap_or_else(|e| {
+        ui.error(&e);
         std::process::exit(1);
     });
+    spin.done();
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let main_file = root.join(&s.job.path);
     let main_rel = s.job.path.to_string_lossy().trim_start_matches("./").to_owned();
     let (tx, rx) = mpsc::channel::<Event>();
     // (the viewer: on a terminal unless --no-view; anywhere with --view)
     let want_view = o.view.unwrap_or_else(|| std::io::IsTerminal::is_terminal(&std::io::stdout()));
+    // (a terminal editor, or an unknown one: the viewer shows the place
+    // instead of opening it)
     let editor = crate::editor::Editor::configured(o.editor.as_deref()).unwrap_or_else(|e| {
-        eprintln!("{}: {e}", st.yellow("warning"));
+        ui.note(&format!(
+            "editor `{e}`: not one the viewer can open (a terminal editor?): a double-click on a page shows the \
+             place; --editor names one it can (code, emacsclient, nvim, …)"
+        ));
         None
     });
     let view = if want_view {
@@ -178,14 +188,15 @@ pub fn main(t: &Target, o: &Options, st: &Style) -> ! {
                 v.on_ask(Box::new(move || {
                     let _ = tx.lock().unwrap_or_else(PoisonError::into_inner).send(Event::Asked);
                 }));
-                println!("phitex: the viewer is at {}", v.url());
+                ui.stdout(&format!("phitex: the viewer is at {}", v.url()));
+                ui.pin(&format!("{} {}", st.dim("viewer:"), st.cyan(v.url())));
                 if o.open && !view::open_browser(v.url()) {
-                    eprintln!("{}: could not start a browser", st.yellow("warning"));
+                    ui.warning("could not start a browser");
                 }
                 Some(v)
             }
             Err(e) => {
-                eprintln!("{}: the viewer: {e}", st.yellow("warning"));
+                ui.warning(&format!("the viewer: {e}"));
                 None
             }
         }
@@ -228,7 +239,32 @@ pub fn main(t: &Target, o: &Options, st: &Style) -> ! {
         if let Some(v) = &view {
             v.building(true);
         }
-        let r = s.build();
+        let spin = ui.spin(format!("{what}: build {builds} ({why})"), status.clone());
+        // (a build that fails inside the engine — a panic: the pieces did
+        // not settle — is reported, and the watch goes on waiting)
+        let r = match crate::ui::catch(|| s.build()) {
+            Ok(r) => r,
+            Err(m) => {
+                spin.done();
+                ui.failed(&format!("build {builds} ({why})"), &m);
+                ui.stdout(&format!("phitex: build {builds} ({why}) failed inside the engine"));
+                if let Some(v) = &view {
+                    let first = m.lines().next().unwrap_or("the engine panicked");
+                    v.built(&Built {
+                        pdf: None,
+                        history: 2,
+                        ms: 0.0,
+                        diagnostics: vec![format!(
+                            "{{\"severity\":\"error\",\"code\":\"engine\",\"message\":{}}}",
+                            crate::json::quote(first)
+                        )],
+                    });
+                    v.building(false);
+                }
+                return;
+            }
+        };
+        status.set("writing the outputs");
         // (the poller waits on the lock while the files are written, then
         // knows them as the watch's own)
         let mut mine = ours.lock().unwrap_or_else(PoisonError::into_inner);
@@ -242,11 +278,12 @@ pub fn main(t: &Target, o: &Options, st: &Style) -> ! {
                 w.main
             }
             Err(e) => {
-                eprintln!("{}: {e}", st.red("error"));
+                ui.error(&e);
                 None
             }
         };
         drop(mine);
+        status.set("");
         let update = r.runs.first().map(|x| x.wall).unwrap_or_default();
         let mut line = format!(
             "phitex: build {builds} ({why}) in {} (update {:.2} ms; {} run{}); {} page{}, {} kept",
@@ -276,13 +313,14 @@ pub fn main(t: &Target, o: &Options, st: &Style) -> ! {
                 Some((_, dvi)) => match crate::dvipdf::dvi_to_pdf(dvi, &format!("{}.pdf", s.job.jobname), s.job.pdf_date) {
                     Ok(p) => Some(session::shared(&p)),
                     Err(e) => {
-                        eprintln!("{}: the viewer's PDF of the DVI file: {e}", st.yellow("warning"));
+                        ui.warning(&format!("the viewer's PDF of the DVI file: {e}"));
                         None
                     }
                 },
                 None => None,
             };
             let log = s.job.out_dir.join(format!("{}.log", s.job.jobname)).display().to_string();
+            status.set("drawing the pages for the viewer");
             let (changed, n) = v.built(&Built {
                 pdf,
                 history: r.history(),
@@ -290,6 +328,7 @@ pub fn main(t: &Target, o: &Options, st: &Style) -> ! {
                 diagnostics: diagnostics(&r, &log),
             });
             v.building(false);
+            status.set("");
             line.push_str(&format!(
                 "; viewer: {} of {n} page{} redrawn{}",
                 changed.len(),
@@ -297,8 +336,9 @@ pub fn main(t: &Target, o: &Options, st: &Style) -> ! {
                 if changed.is_empty() { String::new() } else { format!(" ({})", view::ranges(&changed)) }
             ));
         }
-        println!("{line}");
-        modern::report(t, s, &r, written.as_deref(), &Options { quiet: true, ..Options::default() }, st);
+        spin.done();
+        ui.stdout(&line);
+        modern::report(t, s, &r, written.as_deref(), &Options { quiet: true, ..Options::default() }, ui, false);
     };
     rebuild(&mut s, "cold");
     let set = |s: &mut Session, buffers: &HashMap<String, String>, file: &str| {
@@ -327,7 +367,7 @@ pub fn main(t: &Target, o: &Options, st: &Style) -> ! {
                         again = true;
                         why.push("asked".to_owned());
                     }
-                    other => eprintln!("phitex watch: `{other}`: r rebuilds, q quits"),
+                    other => ui.line(&format!("phitex watch: `{other}`: r rebuilds, q quits")),
                 },
                 Event::Files(ps) => {
                     for p in ps {

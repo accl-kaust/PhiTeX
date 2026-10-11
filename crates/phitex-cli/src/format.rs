@@ -15,11 +15,12 @@ use phitex_flow::{Build, Options};
 use crate::tex::{self, Engine, Fnv, Tree};
 
 /// The format engine `e` loads: from the cache, else made now (`note`
-/// hears about it). Its bytes and its path.
+/// hears about it, `status` shows it). Its bytes and its path.
 pub fn ensure(
     e: &Engine,
     tree: &Tree,
     threads: usize,
+    status: &crate::session::Status,
     note: &mut dyn FnMut(&str),
 ) -> Result<(Arc<Vec<u8>>, PathBuf), String> {
     let dir = tex::cache_dir().join("formats");
@@ -27,7 +28,7 @@ pub fn ensure(
     let key = Fnv::new()
         .add(e.name.as_bytes())
         .add(&tree.stamp.to_le_bytes())
-        .add(&tex::exe_stamp().to_le_bytes())
+        .add(&tex::build_id().to_le_bytes())
         .0;
     let path = dir.join(format!("{}-{key:016x}.fmt", e.name));
     if let Ok(b) = std::fs::read(&path) {
@@ -44,6 +45,7 @@ pub fn ensure(
         "making the {} format on the graph from {} (once per TeX Live tree and phitex build)",
         e.name, e.ini
     ));
+    status.set(format!("making the {} format", e.name));
     let t = Instant::now();
     let tree = tree.for_format(e);
     let Some(ini_path) = tree.input(e.ini) else {
@@ -58,6 +60,7 @@ pub fn ensure(
     let _ = std::fs::create_dir_all(&work);
     let _ = std::fs::write(work.join("texsys.aux"), "1970/01/01:00:00\n\n");
     let mut b = Build::new(phitex_flow::tfm::null_font());
+    b.set_progress(Some(status.engine.clone()));
     b.set_kpse(tree.kpse.clone(), tree.prog);
     if e.xetex {
         b.set_xetex(crate::xetex::fonts(e, &tree, note)?);
@@ -93,6 +96,7 @@ pub fn ensure(
         .and_then(|()| std::fs::rename(&tmp, &path))
         .map_err(|err| format!("can't write {}: {err}", path.display()))?;
     remove_others(&dir, e.name, &path);
+    status.set("");
     note(&format!(
         "the {} format: made in {:.1} s, {} bytes ({})",
         e.name,

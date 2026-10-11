@@ -140,6 +140,7 @@ impl Exec<'_> {
                     }
                 }
                 Prim::Convert(c) => self.convert(c),
+                Prim::PdfX(i) => self.pdf_expand(i),
                 Prim::Xe(x) => self.xe_convert(x),
                 Prim::The => {
                     let toks = self.the_toks();
@@ -1026,6 +1027,9 @@ impl Exec<'_> {
         let mut out = Vec::new();
         let mut unbalance = 1;
         loop {
+            if self.holding(out.len()) {
+                return out;
+            }
             let Some(t) = self.next_raw() else {
                 self.err("File ended while scanning text".into());
                 return out;

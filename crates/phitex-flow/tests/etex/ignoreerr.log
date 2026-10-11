@@ -1,0 +1,34 @@
+(./core.tex
+ignored: Infinite glue shrinkage found in box being split
+Underfull \vbox (badness 10000) detected at line 7
+
+\vbox(5.0+0.0)x5.00002
+.\hbox(4.30554+0.0)x5.00002
+..\tenrm a
+
+[5.0pt, 20.94444pt]
+ignored: Infinite glue shrinkage found in box being split
+Underfull \vbox (badness 10000) detected at line 10
+
+\vbox(1000.0+0.0)x5.55557
+.\hbox(4.30554+0.0)x5.00002
+..\tenrm a
+.\glue 0.0 minus 1.0
+.\glue(\baselineskip) 5.05556
+.\hbox(6.94444+0.0)x5.55557
+..\tenrm b
+
+> \box2=
+\vbox(1000.0+0.0)x5.55557
+.\hbox(4.30554+0.0)x5.00002
+..\tenrm a
+.\glue 0.0 minus 1.0
+.\glue(\baselineskip) 5.05556
+.\hbox(6.94444+0.0)x5.55557
+..\tenrm b
+
+! OK.
+l.11 \showbox2
+              
+
+ )

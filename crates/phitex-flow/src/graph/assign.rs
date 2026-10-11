@@ -327,6 +327,9 @@ impl Exec<'_> {
         let mut body = Vec::new();
         let mut depth = 1;
         loop {
+            if self.holding(body.len()) {
+                return body;
+            }
             let Some(t) = self.next_raw() else {
                 self.err("File ended while scanning a definition".into());
                 return body;

@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use phitex_flow::graph::jobs;
@@ -26,6 +26,25 @@ use crate::tex::{self, Engine, Tree};
 
 /// The runs a fixpoint may take.
 pub const FIXPOINT_RUNS: usize = 5;
+
+/// What a session does now, for a terminal's spinner (`ui.rs`): its
+/// phase in words (the format, the run, the tools) and the engine's own
+/// board (the round, the pieces settled, the pages shipped).
+#[derive(Default)]
+pub struct Status {
+    phase: Mutex<String>,
+    pub engine: Arc<phitex_flow::Progress>,
+}
+
+impl Status {
+    pub fn set(&self, phase: impl Into<String>) {
+        *self.phase.lock().unwrap_or_else(PoisonError::into_inner) = phase.into();
+    }
+
+    pub fn phase(&self) -> String {
+        self.phase.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
 
 /// What to build, and how.
 #[derive(Clone, Debug)]
@@ -156,6 +175,11 @@ pub struct Session {
     builds: usize,
     /// `JOB.synctex.gz`, kept between builds (`synctex.rs`).
     pub sync: crate::synctex::Writer,
+    /// What the session does now, for a spinner.
+    status: Arc<Status>,
+    /// TeX's main memory for the runs (`Options::main_memory`): texmf.cnf's
+    /// and the environment's (`tex::run_memory`) when a format is loaded.
+    main_memory: u64,
 }
 
 /// What a run reads as file `name`: the version given, else the disk's
@@ -196,11 +220,13 @@ fn reads(edit: bool) -> Reads {
 
 impl Session {
     /// A session for `job`: TeX Live's paths, the format (made if the
-    /// cache has none), the main file read. `note` hears what takes time.
-    pub fn new(job: Job, note: &mut dyn FnMut(&str)) -> Result<Session, String> {
+    /// cache has none), the main file read. `note` hears what takes time;
+    /// `status` is told what the session does now.
+    pub fn new(job: Job, status: Arc<Status>, note: &mut dyn FnMut(&str)) -> Result<Session, String> {
         let tree = Tree::open(&job.engine);
         let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()))?;
         let mut build = Build::new(phitex_flow::tfm::null_font());
+        build.set_progress(Some(status.engine.clone()));
         // (every file by kpathsea as the engine's program — TEXINPUTS from
         // the environment, `.` first —, the output directory before it, as
         // web2c's `open_input` tries `-output-directory` first)
@@ -218,8 +244,9 @@ impl Session {
         build.set_interaction(job.interaction);
         build.set_pdf_date(job.pdf_date);
         let mut format = None;
+        let main_memory = if job.ini { phitex_flow::build::MAIN_MEMORY } else { tree.main_memory };
         if !job.ini {
-            let (bytes, path) = crate::format::ensure(&job.engine, &tree, job.threads, note)?;
+            let (bytes, path) = crate::format::ensure(&job.engine, &tree, job.threads, &status, note)?;
             build
                 .set_format(&bytes)
                 .map_err(|e| format!("{}: the format does not read: {e}", path.display()))?;
@@ -237,6 +264,8 @@ impl Session {
             format,
             builds: 0,
             sync: crate::synctex::Writer::default(),
+            status,
+            main_memory,
         })
     }
 
@@ -280,7 +309,13 @@ impl Session {
     pub fn build(&mut self) -> Report {
         let edit = self.builds > 0;
         self.builds += 1;
-        let opts = Options { threads: self.job.threads.max(1), reads: reads(edit), etex: self.etex(), ..Options::default() };
+        let opts = Options {
+            threads: self.job.threads.max(1),
+            reads: reads(edit),
+            etex: self.etex(),
+            main_memory: self.main_memory,
+            ..Options::default()
+        };
         let bound = if self.job.fixpoint { FIXPOINT_RUNS } else { 1 };
         self.fixpoint(opts, bound, if edit { "edit" } else { "cold" })
     }
@@ -299,6 +334,7 @@ impl Session {
         let mut fix = Fixpoint::new();
         for k in 1..=bound {
             let t = Instant::now();
+            self.status.set(format!("run {k} ({why})"));
             let run = {
                 let (given, dir) = (&self.given, &self.job.out_dir);
                 fix.run_reading(&mut self.build, &src, opts, &|n| read_back_in(given, dir, n))
@@ -325,6 +361,7 @@ impl Session {
                 }
             }
             if self.job.tools {
+                self.status.set(format!("after run {k}: BibTeX and makeindex"));
                 let dir = self.job.out_dir.clone();
                 let made = {
                     let given = &self.given;
@@ -358,12 +395,15 @@ impl Session {
         // (XeTeX's pages to PDF as `xetex` pipes them to `xdvipdfmx -q -E`,
         // in process: unless `-no-pdf`)
         if xetex && self.job.engine.output == tex::Output::Pdf && !out.dvi.is_empty() {
+            self.status.set("xdvipdfmx");
             match self.build.xdv_pdf(&out.dvi) {
                 Some(Ok(pdf)) => out.pdf = pdf,
                 Some(Err(e)) => notes.push(format!("xdvipdfmx: {e} (the XDV file is written instead)")),
                 None => {}
             }
         }
+        self.status.set("");
+        self.status.engine.phase.store(0, std::sync::atomic::Ordering::Relaxed);
         Report {
             out,
             runs,

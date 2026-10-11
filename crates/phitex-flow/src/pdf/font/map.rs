@@ -65,8 +65,13 @@ impl MapEntry {
         self.kind & bit != 0
     }
 
-    fn is_t1fontfile(&self) -> bool {
+    pub fn is_t1fontfile(&self) -> bool {
         self.ff_name.is_some() && self.is(F_TYPE1)
+    }
+
+    /// The `ps_tree`'s key: the PostScript name, slant and extend.
+    pub fn ps_key(&self) -> Option<(Vec<u8>, i32, i32)> {
+        Some((self.ps_name.clone()?, self.slant, self.extend))
     }
 
     fn is_reencoded(&self) -> bool {
@@ -594,6 +599,44 @@ impl Map {
             at = end + 1;
         }
         Map { data, lines }
+    }
+
+    /// The entry the `ps_tree` has for `key` (an included PDF's font by
+    /// its PostScript name, slant and extend): the first line of the file
+    /// with that name that is an included Type 1 font, if it is also the
+    /// entry of its TFM name.
+    pub fn lookup_ps(&self, key: &(Vec<u8>, i32, i32)) -> Option<Arc<MapEntry>> {
+        let data = &self.data[..];
+        let needle = &key.0[..];
+        let mut at = 0;
+        while !needle.is_empty()
+            && let Some(i) = data[at..].windows(needle.len()).position(|w| w == needle)
+        {
+            let pos = at + i;
+            let start = data[..pos].iter().rposition(|&c| c == 10 || c == 13).map_or(0, |p| p + 1);
+            let end = data[pos..].iter().position(|&c| c == 10 || c == 13).map_or(data.len(), |p| pos + p);
+            let mut entry = None;
+            let mut warn = Vec::new();
+            for_map_file_lines(&data[start..end], |line| {
+                if entry.is_none() {
+                    entry = scan_line(line, &mut warn);
+                }
+            });
+            if let Some(fm) = entry
+                && fm.ps_key().as_ref() == Some(key)
+                && fm.is_t1fontfile()
+                && fm.is(F_INCLUDED)
+            {
+                let first = if fm.tfm_name == b"<nontfm>" { Some(Arc::new(fm.clone())) } else { self.lookup(&fm.tfm_name) };
+                if let Some(f) = first
+                    && *f == fm
+                {
+                    return Some(f);
+                }
+            }
+            at = end.max(pos + 1);
+        }
+        None
     }
 
     /// The entry for TFM font `tfm`, if the map has one.

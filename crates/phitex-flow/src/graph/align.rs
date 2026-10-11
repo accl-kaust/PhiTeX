@@ -967,7 +967,7 @@ impl Exec<'_> {
         let s = &*a;
         loop {
             self.st.al.state = ALIGN_BASE;
-            let Some((t, m)) = self.nonblank_x() else {
+            let Some((t, m)) = self.nonblank_x_or_protected() else {
                 self.err("File ended inside an alignment".into());
                 return;
             };
@@ -1030,7 +1030,7 @@ impl Exec<'_> {
             self.st.space_factor = 1000;
         }
         self.st.al.state = ALIGN_BASE;
-        let Some((t, m)) = self.nonblank_x() else {
+        let Some((t, m)) = self.nonblank_x_or_protected() else {
             return;
         };
         self.init_col(s, t, &m);
@@ -1078,7 +1078,7 @@ impl Exec<'_> {
         }
         if self.st.al.end == END_SPAN {
             self.st.al.state = ALIGN_BASE;
-            let Some((t, m)) = self.nonblank_x() else {
+            let Some((t, m)) = self.nonblank_x_or_protected() else {
                 return;
             };
             self.st.al.col = next as u16;
@@ -1149,10 +1149,10 @@ impl Exec<'_> {
         }
         let ships: Vec<Item> = list
             .iter()
-            .filter(|i| matches!(i, Item::Shipout(_)))
+            .filter(|i| i.hoisted())
             .cloned()
             .collect();
-        list.retain(|i| !matches!(i, Item::Shipout(_) | Item::BuildPage(_) | Item::End(_)));
+        list.retain(|i| !i.hoisted() && !matches!(i, Item::BuildPage(_) | Item::End(_)));
         let (st, sh) = totals(&list);
         let (so, ho) = (order(&st), order(&sh));
         let mut adj = Vec::new();

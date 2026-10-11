@@ -588,7 +588,9 @@ impl Exec<'_> {
     pub(super) fn new_graf(&mut self, indented: bool) {
         self.st.prev_graf = 0;
         let outer = self.st.level == 0 && !self.st.in_output();
-        if outer || !self.current_list(true).is_empty() {
+        // (tex.web 1091: `head<>tail`; a PDF event or a `\shipout` taken out
+        // of the list is no node of it)
+        if outer || self.current_list(true).iter().any(|i| !matches!(i, Item::BuildPage(_) | Item::End(_)) && !i.hoisted()) {
             let g = self.glue_par(GluePar::Parskip);
             self.vemit.push(param_glue(&g, GluePar::Parskip as u8));
         }
@@ -840,10 +842,10 @@ impl Exec<'_> {
             orig.resize(hlist.len(), 0);
         }
         // (a `\shipout` inside the paragraph ships before its lines come)
-        let ships: Vec<Item> = hlist.iter().filter(|i| matches!(i, Item::Shipout(_))).cloned().collect();
-        let mut keep = hlist.iter().map(|i| !matches!(i, Item::Shipout(_)));
+        let ships: Vec<Item> = hlist.iter().filter(|i| i.hoisted()).cloned().collect();
+        let mut keep = hlist.iter().map(|i| !i.hoisted());
         orig.retain(|_| keep.next().unwrap_or(true));
-        hlist.retain(|i| !matches!(i, Item::Shipout(_)));
+        hlist.retain(|i| !i.hoisted());
         self.st.mode = Mode::V;
         self.st.inner = level > 0;
         let mut para = Para { before: ships, ..Para::default() };
@@ -915,15 +917,17 @@ impl Exec<'_> {
         let mut list = Vec::new();
         if vertical && level == 0 {
             // (the main vertical list: what this piece contributed since its
-            // last paragraph's lines, which are a separate task's)
-            let mut from = 0;
-            for (j, n) in nodes.iter().enumerate() {
-                if n.para().is_some_and(|p| p.lb.is_some()) {
-                    from = j + 1;
-                }
-            }
-            for n in nodes.range(from, nodes.len()) {
-                if let Some(p) = n.para() {
+            // last paragraph's lines, which are a separate task's — the
+            // paragraphs after the last with lines, found from the end of
+            // the chain's index of nodes with a paragraph: as long as what
+            // came since, not as the piece)
+            let paras = self.chain.para_nodes();
+            let from = paras
+                .iter()
+                .rposition(|&j| nodes[j as usize].para().is_some_and(|p| p.lb.is_some()))
+                .map_or(0, |k| k + 1);
+            for &j in &paras[from..] {
+                if let Some(p) = nodes[j as usize].para() {
                     for it in p.before.iter().chain(&p.after) {
                         list.push(it.clone());
                     }
@@ -977,7 +981,7 @@ impl Exec<'_> {
         }
         let v = self.st.mode == Mode::V;
         let list = self.current_list(v);
-        let last = list.into_iter().rev().find(|i| !matches!(i, Item::BuildPage(_) | Item::End(_) | Item::Shipout(_)));
+        let last = list.into_iter().rev().find(|i| !matches!(i, Item::BuildPage(_) | Item::End(_)) && !i.hoisted());
         if last.is_some() || !v || self.st.level != 0 || self.st.in_output() {
             return last;
         }
@@ -985,7 +989,13 @@ impl Exec<'_> {
         // paragraph or in this piece: that paragraph's tail, or the one
         // reaching the piece, tex.web 424)
         let nodes = &self.chain.nodes;
-        let lb = (0..nodes.len()).rev().find(|&j| nodes[j].para().is_some_and(|p| p.lb.is_some()));
+        let lb = self
+            .chain
+            .para_nodes()
+            .iter()
+            .rev()
+            .map(|&j| j as usize)
+            .find(|&j| nodes[j].para().is_some_and(|p| p.lb.is_some()));
         if let Some(j) = lb {
             return nodes[j].para().and_then(|p| match main_tail(p) {
                 Some(Val::Tail(t)) => Some((*t).clone()),
@@ -1949,10 +1959,10 @@ impl Exec<'_> {
                 }
             }
         }
-        let ships: Vec<Item> = list.iter().filter(|i| matches!(i, Item::Shipout(_))).cloned().collect();
-        let mut keep = list.iter().map(|i| !matches!(i, Item::Shipout(_) | Item::BuildPage(_) | Item::End(_)));
+        let ships: Vec<Item> = list.iter().filter(|i| i.hoisted()).cloned().collect();
+        let mut keep = list.iter().map(|i| !i.hoisted() && !matches!(i, Item::BuildPage(_) | Item::End(_)));
         orig.retain(|_| keep.next().unwrap_or(true));
-        list.retain(|i| !matches!(i, Item::Shipout(_) | Item::BuildPage(_) | Item::End(_)));
+        list.retain(|i| !i.hoisted() && !matches!(i, Item::BuildPage(_) | Item::End(_)));
         // (the nodes, once the packager moved the marks and insertions out
         // or not: [`Origins`])
         let origins_of = |orig: &[u32], list: &[Item], adjusted: bool| {
@@ -2123,7 +2133,12 @@ impl Exec<'_> {
                 // (the page's whatsits are done as it is shipped, here:
                 // its `\write`s expanded with the definitions reaching this
                 // node, tex.web 1374)
-                let io = self.ship_io(&b);
+                let pos = crate::pdf::content::write_positions(&crate::page::Page {
+                    b: Arc::new(b.clone()),
+                    ship: ship.clone(),
+                    builder: false,
+                });
+                let io = self.ship_io(&b, &pos);
                 let mut mark = page_mark(&ship);
                 if self.int_par(IntPar::Tracingoutput) > 0 {
                     // (§638–§639: the box displayed before it is shipped)
@@ -2214,7 +2229,7 @@ pub(super) fn main_tail(p: &Para) -> Option<Val> {
     let mut pd = IGNORE_DEPTH;
     let mut changed = false;
     let mut add = |list: &mut Vec<Item>, it: &Item| match it {
-        Item::BuildPage(_) | Item::End(_) | Item::Shipout(_) | Item::Halt => {}
+        Item::BuildPage(_) | Item::End(_) | Item::Shipout(_) | Item::Pdf(_) | Item::Halt => {}
         Item::JobStart => {
             list.clear();
             changed = true;

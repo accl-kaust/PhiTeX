@@ -171,6 +171,12 @@ pub fn hpack(mut list: Vec<Item>, spec: Spec, params: &Params, adjust: Option<&m
                 t.shrink[usize::from(l.g.shrink_order)] += l.g.shrink;
             }
             Item::Kern { w, .. } | Item::Math { w, .. } | Item::MarginKern { w, .. } => x += w,
+            // (pdfTeX: an image's or a form's reference, §1586)
+            Item::Whatsit(wh) => {
+                if let Some((ww, wh, wd)) = wh.dims() {
+                    boxed(ww, wh, wd, 0, &mut x);
+                }
+            }
             // (XeTeX: "Incorporate a whatsit node into an hbox")
             Item::Native(_) | Item::Glyph(_) | Item::Pic(_) => {
                 if let Some((w, ht, dp)) = it.xdims() {
@@ -296,6 +302,14 @@ pub fn vpack(list: Vec<Item>, spec: Spec, max_depth: i32, params: &Params) -> Pa
             Item::Kern { w: k, .. } => {
                 x += d + k;
                 d = 0;
+            }
+            // (pdfTeX: an image's or a form's reference, §1586)
+            Item::Whatsit(wh) => {
+                if let Some((ww, wh, wd)) = wh.dims() {
+                    x += d + wh;
+                    d = wd;
+                    w = w.max(ww);
+                }
             }
             // (XeTeX: "Incorporate a whatsit node into a vbox")
             Item::Pic(p) => {

@@ -1,0 +1,17 @@
+=== hyper.aux 692
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\@writefile{toc}{\contentsline {section}{\numberline {1}First}{1}{section.1}\protected@file@percent }
+\newlabel{sec:first}{{1}{1}{First}{section.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.1}Inside}{1}{subsection.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}Second}{1}{section.2}\protected@file@percent }
+\newlabel{sec:second}{{2}{1}{Second}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Third}{1}{subsection.2.1}\protected@file@percent }
+\gdef \@abspage@last{1}
+=== hyper.out 306
+\BOOKMARK [1][]{section.1}{\376\377\000F\000i\000r\000s\000t}{}% 1
+\BOOKMARK [2][]{subsection.1.1}{\376\377\000I\000n\000s\000i\000d\000e}{section.1}% 2
+\BOOKMARK [1][]{section.2}{\376\377\000S\000e\000c\000o\000n\000d}{}% 3
+\BOOKMARK [2][]{subsection.2.1}{\376\377\000T\000h\000i\000r\000d}{section.2}% 4

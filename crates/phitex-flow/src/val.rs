@@ -198,6 +198,30 @@ pub enum Key {
     /// maps at the end of the job. The empty name is defined (`Val::Int`)
     /// once any entry is: the tree exists.
     GlyphUnicode(Arc<str>),
+    /// pdfTeX's read-backs set by commands (global variables, never
+    /// grouped): `\pdflastobj` (1), `\pdflastxform` (2), `\pdflastximage`
+    /// (3), `\pdflastximagepages` (4), `\pdflastannot` (5), `\pdfretval`
+    /// (8), `\pdflastximagecolordepth` (9), `\pdflastlink` (11): the
+    /// codes of `prim::PDF_ITEMS`. Defined by the command, with the value
+    /// the fold answered it (`PdfAns`).
+    PdfLast(u8),
+    /// The fold's answer to a PDF event (`pdf::what::Event`): in scope
+    /// (0 a piece's nodes; 1 an output routine's) and fire (the routine's
+    /// ordinal among the job's fires; 0 for a piece's nodes), of the
+    /// command at node `node`, field `slot`
+    /// (`index * ANSWER_FIELDS + field`). Answered by the build from the
+    /// last fold (`Val::Int`; `Val::Void` before any), never defined.
+    PdfAns(u32, u32, u32, u32),
+    /// The random generator's state (`Val::Penalties`: the 55 values,
+    /// `j_random`, the seed), global; `Val::Void` until first used, then
+    /// seeded from `PdfSeed`.
+    PdfRandom,
+    /// The build's givens: the random seed pdfTeX takes from the clock,
+    /// the elapsed time `\pdfelapsedtime` reads (both 0 unless given),
+    /// the creation date (`\pdfcreationdate`, `D:…`).
+    PdfSeed,
+    PdfClock,
+    PdfDate,
     // ---- XeTeX's
     /// `\XeTeXinterchartoks a b` (`Val::Toks`): the tokens put between a
     /// character of class `a` and one of class `b` (4095: the boundary).
@@ -242,6 +266,10 @@ impl std::hash::Hash for Key {
                 n.hash(h);
                 h.write_u64((20 << 40) | u64::from(*k));
             }
+            Key::PdfAns(a, b, c, d) => {
+                h.write_u64((80 << 40) | (u64::from(*a) << 20) ^ u64::from(*b));
+                h.write_u64((u64::from(*c) << 32) | u64::from(*d));
+            }
             Key::FontCode(k, n) => {
                 n.hash(h);
                 h.write_u64((70 << 40) | u64::from(*k));
@@ -283,6 +311,7 @@ impl PartialEq for Key {
             (Key::FontCode(k, a), Key::FontCode(l, b)) => k == l && (Arc::ptr_eq(a, b) || a == b),
             (Key::Cat(a), Key::Cat(b)) => a == b,
             (Key::FontDimen(a, k), Key::FontDimen(b, l)) => k == l && (Arc::ptr_eq(a, b) || a == b),
+            (Key::PdfAns(a, b, c, d), Key::PdfAns(x, y, z, w)) => a == x && b == y && c == z && d == w,
             (x, y) if x.word() == u64::MAX || y.word() == u64::MAX => false,
             _ => self.word() == other.word(),
         }
@@ -299,7 +328,7 @@ impl Key {
         let w = |tag: u64, x: u64| (tag << 40) | x;
         let c = |x: &char| u64::from(u32::from(*x));
         match self {
-            Key::FontDimen(..) | Key::FontCode(..) => u64::MAX,
+            Key::FontDimen(..) | Key::FontCode(..) | Key::PdfAns(..) => u64::MAX,
             Key::FontExpand(_) => w(67, 0),
             Key::FontAttr(_) => w(68, 0),
             Key::FontCopies(_) => w(69, 0),
@@ -318,6 +347,11 @@ impl Key {
             Key::MainTail => w(64, 0),
             Key::MainDepth => w(65, 0),
             Key::GlyphUnicode(_) => w(66, 0),
+            Key::PdfLast(k) => w(81, u64::from(*k)),
+            Key::PdfRandom => w(82, 0),
+            Key::PdfSeed => w(83, 0),
+            Key::PdfClock => w(84, 0),
+            Key::PdfDate => w(85, 0),
             Key::NativeDir(_) => w(87, 0),
             Key::InterChar(a, b) => w(88, (u64::from(*a) << 16) | u64::from(*b)),
             Key::InputEncoding => w(89, 0),
@@ -552,6 +586,12 @@ impl fmt::Display for Shown<'_, Key> {
             Key::MainTail => write!(f, "the main vertical list's last item"),
             Key::MainDepth => write!(f, "the main vertical list's \\prevdepth"),
             Key::GlyphUnicode(x) => write!(f, "\\pdfglyphtounicode ({x})"),
+            Key::PdfLast(k) => write!(f, "pdfTeX's read-back {k}"),
+            Key::PdfAns(a, b, c, d) => write!(f, "the PDF fold's answer ({a}, {b}, {c}, {d})"),
+            Key::PdfRandom => write!(f, "the random generator"),
+            Key::PdfSeed => write!(f, "the random seed given"),
+            Key::PdfClock => write!(f, "the clock given"),
+            Key::PdfDate => write!(f, "the creation date given"),
             Key::InterChar(a, b) => write!(f, "\\XeTeXinterchartoks{a} {b}"),
             Key::NativeDir(x) => write!(f, "the last script shaped ({x})"),
             Key::InputEncoding => write!(f, "\\XeTeXinputencoding"),
@@ -744,9 +784,18 @@ pub fn initial_in(key: &Key, _font: &Arc<Font>, etex: bool, xetex: bool, cs: Opt
         | Key::Interaction
         | Key::NativeDir(_)
         | Key::InputEncoding
-        | Key::DefaultEncoding => Val::Int(0),
+        | Key::DefaultEncoding
+        | Key::PdfLast(_)
+        | Key::PdfSeed
+        | Key::PdfClock => Val::Int(0),
         Key::GluePar(_) | Key::Skip(_) | Key::Muskip(_) => Val::Glue(Arc::new(Glue::default())),
-        Key::Box(_) | Key::File(_) | Key::ReadStream(_) | Key::MainTail | Key::GlyphUnicode(_) => Val::Void,
+        Key::Box(_)
+        | Key::File(_)
+        | Key::ReadStream(_)
+        | Key::MainTail
+        | Key::GlyphUnicode(_)
+        | Key::PdfAns(..)
+        | Key::PdfRandom => Val::Void,
         Key::Parshape => Val::Parshape(Arc::new(Vec::new())),
         Key::Font | Key::FamFont(..) => Val::Font(crate::tfm::null_font()),
         Key::HyphenChar(_) => Val::Int(i32::from(b'-')),
@@ -755,7 +804,7 @@ pub fn initial_in(key: &Key, _font: &Arc<Font>, etex: bool, xetex: bool, cs: Opt
         Key::Job => Val::Name(Arc::from("texput")),
         Key::SplitMarks => Val::SplitMarks(Arc::from(Vec::new())),
         // (and no `\pdffontattr` text)
-        Key::Format | Key::FontAttr(_) | Key::LastMatch(0) | Key::LinebreakLocale => Val::Name(Arc::from("")),
+        Key::Format | Key::FontAttr(_) | Key::LastMatch(0) | Key::LinebreakLocale | Key::PdfDate => Val::Name(Arc::from("")),
         // (above, 0: the job not ended; no magnification fixed yet; batch
         // mode, as the oracles run TeX: `-interaction=batchmode`; a build
         // gives its own, `Build::set_interaction`: IniTeX's
@@ -850,10 +899,16 @@ pub(crate) fn every_key() -> Vec<Key> {
         Key::LastMatch(0),
         Key::ParToken,
         Key::InterChar(0, 1),
-        Key::NativeDir(f),
+        Key::NativeDir(f.clone()),
         Key::InputEncoding,
         Key::DefaultEncoding,
         Key::LinebreakLocale,
+        Key::PdfLast(1),
+        Key::PdfAns(0, 0, 1, 0),
+        Key::PdfRandom,
+        Key::PdfSeed,
+        Key::PdfClock,
+        Key::PdfDate,
     ]
 }
 
@@ -918,6 +973,12 @@ pub(crate) fn key_index(k: &Key) -> usize {
         Key::InputEncoding => 54,
         Key::DefaultEncoding => 55,
         Key::LinebreakLocale => 56,
+        Key::PdfLast(_) => 57,
+        Key::PdfAns(..) => 58,
+        Key::PdfRandom => 59,
+        Key::PdfSeed => 60,
+        Key::PdfClock => 61,
+        Key::PdfDate => 62,
     }
 }
 

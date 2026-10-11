@@ -1,0 +1,14 @@
+ini /usr/share/texmf-dist/tex/latex/tex-ini-files/pdflatex.ini
+input /usr/share/texmf-dist/tex/latex/tex-ini-files
+input /etc/texmf/tex/generic/tex-ini-files
+input /usr/share/texmf-dist/tex/latex/base
+input /usr/share/texmf-dist/tex/latex/graphics
+input /usr/share/texmf-dist/tex/latex/graphics-cfg
+input /usr/share/texmf-dist/tex/latex/graphics-def
+input /usr/share/texmf-dist/tex/latex/l3backend
+input /usr/share/texmf-dist/tex/context/base/mkii
+input /usr/share/texmf-dist/tex/latex/epstopdf-pkg
+input /usr/share/texmf-dist/tex/latex/latexconfig
+input /usr/share/texmf-dist/tex/latex/mwe
+input /usr/share/texmf-dist/fonts/type1/public/amsfonts/cm
+input /usr/share/texmf-dist/fonts/type1/public/lm
