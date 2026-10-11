@@ -10,6 +10,10 @@
 //! become characters, which primitives exist, how fonts load, what is
 //! written. An engine adds behaviour through it, never by forking what is
 //! here.
+//!
+//! `PRIMITIVES.md` beside this crate catalogues every TeX82, e-TeX and
+//! pdfTeX primitive as a node spec on the core (reads, defines, scope,
+//! claim, unfold, contribution, hazards) and lists what the core lacks.
 
 /// What makes an engine that engine.
 pub trait Engine: Send + Sync {
