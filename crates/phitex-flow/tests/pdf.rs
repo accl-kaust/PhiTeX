@@ -46,6 +46,7 @@ const DOCS: [&str; 30] = [
     "vf",
     "interword",
     "bera",
+    "berasizes",
 ];
 
 /// The directories a document's files are found in: its own, and the
@@ -401,6 +402,15 @@ fn interword() {
 #[test]
 fn bera() {
     check("bera");
+}
+
+/// A virtual font at two sizes (bera's `fvmr8t`, `fvsr8t`): its local
+/// fonts (`fvmr8r` at each size) share one font object (`pdf_init_font`),
+/// and the page names the one that owns it, though no guess about the
+/// page knew of them before its walk.
+#[test]
+fn berasizes() {
+    check("berasizes");
 }
 
 /// Page 2 guesses its decimal digits (page 1 fixed 3) and which font

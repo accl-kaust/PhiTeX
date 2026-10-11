@@ -21,7 +21,7 @@ use crate::item::{BoxNode, Ins, Item, PageCall, Para, ShipParams};
 use crate::linebreak::Line;
 use crate::pack::{Params, Spec, vpack};
 use crate::graph::output::{self, DEAD_CYCLES, Marks, OutputReads};
-use crate::val::{DimenPar, Glue, IntPar, Key, Tok, TokPar, Val};
+use crate::val::{DimenPar, Glue, GluePar, IntPar, Key, Tok, TokPar, Val};
 
 /// What the fold reads and makes happen where the page builder is called
 /// (the build's: reads resolve at the calling node's place; a fire's
@@ -128,6 +128,21 @@ pub enum CallLog {
 const MAX_DIMEN: i32 = 0o7_777_777_777;
 const EJECT_PENALTY: i32 = -10000;
 const INSERTS_ONLY: u8 = 1;
+
+/// What the page builder reads where it is called (`graph`'s
+/// `page_call`), read again by the fold after an output routine.
+fn call_now(env: &mut dyn FoldEnv) -> PageCall {
+    let topskip = match env.read(&Key::GluePar(GluePar::Topskip)) {
+        Val::Glue(g) => g,
+        _ => Arc::new(Glue::default()),
+    };
+    PageCall {
+        vsize: int(&env.read(&Key::DimenPar(DimenPar::Vsize))),
+        maxdepth: int(&env.read(&Key::DimenPar(DimenPar::Maxdepth))),
+        topskip,
+        hsize: int(&env.read(&Key::DimenPar(DimenPar::Hsize))),
+    }
+}
 
 fn int(v: &Val) -> i32 {
     match v {
@@ -774,6 +789,7 @@ impl Scan {
     /// tex.web 1054: `its_all_over`, until the page and the contributions
     /// are empty and no output routine is in a dead cycle.
     fn its_all_over(&mut self, call: &PageCall, env: &mut dyn FoldEnv) {
+        let mut call = call.clone();
         for _ in 0..1000 {
             if self.page.is_empty() && self.contrib.is_empty() && self.dead_cycles == 0 {
                 return;
@@ -794,7 +810,7 @@ impl Scan {
                 zero: false,
             });
             self.push_contrib(Item::Penalty(-0o10_000_000_000));
-            self.build_page(call, env);
+            call = self.build_page(&call, env);
         }
     }
 
@@ -811,8 +827,15 @@ impl Scan {
     }
 
     /// §994: `build_page`.
-    fn build_page(&mut self, call: &PageCall, env: &mut dyn FoldEnv) {
+    /// What it reads at its end (after a routine: read again).
+    fn build_page(&mut self, call: &PageCall, env: &mut dyn FoldEnv) -> PageCall {
+        // (after an output routine TeX calls `build_page` again, §1026:
+        // what it reads — `\vsize` at the next page's freeze, `\maxdepth`,
+        // `\topskip` — is read then, after the routine's assignments, as
+        // LaTeX's `\global\vsize\@colroom` for a page with a float on top)
+        let mut call = call.clone();
         while let Some(p) = self.contrib.front().cloned() {
+            let call = &mut call;
             // (§1000)
             let pi;
             match &p {
@@ -870,7 +893,7 @@ impl Scan {
                         }
                         Item::Kern { .. } => {
                             if self.contrib.len() == 1 {
-                                return;
+                                break;
                             } else if self.contrib.get(1).is_some_and(Item::is_glue) {
                                 pi = 0;
                             } else {
@@ -944,7 +967,9 @@ impl Scan {
                     }
                 }
                 if c == AWFUL_BAD || pi <= -10000 {
-                    self.fire_up(env);
+                    if self.fire_up(env) {
+                        *call = call_now(env);
+                    }
                     continue;
                 }
             }
@@ -954,6 +979,7 @@ impl Scan {
                 self.contribute();
             }
         }
+        call
     }
 
     /// §1004, then §1003 and the link (`contribute`).
@@ -1091,7 +1117,8 @@ impl Scan {
     /// `\firstmark` and `\botmark`, what follows goes back to the
     /// contributions; then the output routine fires (`env`), or the default
     /// output ships the box.
-    fn fire_up(&mut self, env: &mut dyn FoldEnv) {
+    /// Whether an output routine ran.
+    fn fire_up(&mut self, env: &mut dyn FoldEnv) -> bool {
         // (§1012–1013: the marks, the break's penalty, the page so far as
         // the routine reads it, §991 having made its depth 0)
         let page_so_far = [
@@ -1319,7 +1346,7 @@ impl Scan {
                 self.just = Some((self.pages_made - 1, r, Some(f)));
             }
             self.add_call_log(call_idx, &mut log, made_before);
-            return;
+            return true;
         }
         // (§1023: the default output; `ship_out` makes `\deadcycles` 0)
         if self.fancy {
@@ -1353,6 +1380,7 @@ impl Scan {
         let ship = ship_params(env);
         self.pages.push(Page { b, ship, builder: true });
         self.pages_made += 1;
+        false
     }
 
     /// Appends to the log of call `call_idx` (made at its first routine,

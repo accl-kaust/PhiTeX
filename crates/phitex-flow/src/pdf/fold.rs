@@ -2846,19 +2846,39 @@ pub fn assemble(
                 f.ff_truth(k, name.as_deref(), g)
             };
             let ff_holds = numbered && body.ff.iter().all(|&(k, g)| truth(&f, k, g) == g);
+            // (`pdf_init_font` as the walk meets the page's fonts, in the
+            // order it set them: one not used before shares the object of
+            // a font of its name used before, on an earlier page or earlier
+            // on this one — a virtual font's local fonts too, `fvmr8r` at
+            // two sizes under bera's `fvmr8t`, which no guess knew of)
+            let mut met: Vec<(u32, u32)> = Vec::with_capacity(body.fonts.len());
+            for (i, u) in body.fonts.iter().enumerate() {
+                let g = body.fonts[..i].iter().zip(&met).find(|(v, _)| v.font.name == u.font.name).map_or(u.num, |(_, m)| m.1);
+                met.push((u.num, truth(&f, u.num, g)));
+            }
+            let met_holds = body.ff.iter().all(|&(k, g)| met.iter().find(|m| m.0 == k).is_none_or(|m| m.1 == g));
             let stale = if renders == 0 {
-                !ff_holds || body.fixed != fixed || body.incomplete || *body.entry != *f.walk
+                !ff_holds || !met_holds || body.fixed != fixed || body.incomplete || *body.entry != *f.walk
             } else {
-                numbered && !ff_holds
+                (numbered && !ff_holds) || !met_holds
             };
             // (a virtual font found makes the walk again however many there
             // are: each walk looks for one more font's file; the guesses'
             // walks again are bounded)
-            if !virt && (!stale || renders >= 4) {
+            // (the fonts' sharing as `pdf_init_font` will make it is known
+            // once the walk set them all: a walk again until it holds,
+            // whatever the guesses' bound)
+            if !virt && (!stale || renders >= 4) && (met_holds || renders >= 16) {
                 break;
             }
             let guess = if numbered { body.ff.clone() } else { content::guess_ff(p, f.nums(), &[]) };
-            let ff: Vec<(u32, u32)> = guess.iter().map(|&(k, g)| (k, truth(&f, k, g))).collect();
+            let mut ff: Vec<(u32, u32)> = guess.iter().map(|&(k, g)| (k, truth(&f, k, g))).collect();
+            for &(k, o) in &met {
+                match ff.iter_mut().find(|x| x.0 == k) {
+                    Some(x) => x.1 = o,
+                    None => ff.push((k, o)),
+                }
+            }
             let ff_of = |k: u32| -> Option<u32> { ff.iter().find(|x| x.0 == k).map(|x| x.1).filter(|&o| o != k) };
             *body = Arc::new(f.page_render(p, &ship, &ff_of));
             renders += 1;

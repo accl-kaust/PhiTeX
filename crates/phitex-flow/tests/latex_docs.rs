@@ -35,7 +35,7 @@ use phitex_flow::print::Limits;
 use phitex_flow::{Build, Font, Options, Order, Output, Reads};
 
 /// The documents.
-const DOCS: [&str; 17] = [
+const DOCS: [&str; 19] = [
     "sections",
     "math",
     "tables",
@@ -53,6 +53,8 @@ const DOCS: [&str; 17] = [
     "href",
     "micro",
     "hrefcell",
+    "floatgoal",
+    "enlarge",
 ];
 
 /// The schedules: one thread; eight suspending, in priority order and in
@@ -653,6 +655,25 @@ fn doc_hrefcell() {
     doc("hrefcell");
 }
 
+/// Floats placed on the page by LaTeX's output routine (`\@specialoutput`
+/// sets `\vsize` to `\@colroom`, less the float): the page builder, called
+/// again after the routine, freezes the next page's goal at the new
+/// `\vsize` (tex.web 1026, 987); `\pagegoal` shows it.
+#[test]
+fn doc_floatgoal() {
+    doc("floatgoal");
+}
+
+/// A table float and `\enlargethispage` (book): LaTeX's float output sets
+/// `\global\vsize\maxdimen`, a second routine `\global\vsize\@colroom`;
+/// the page builder freezes each page at the `\vsize` the last routine
+/// left (it read the calling node's: 2 pages, "Overfull \vbox (2316pt too
+/// high) while \output is active", where latex makes 6).
+#[test]
+fn doc_enlarge() {
+    doc("enlarge");
+}
+
 /// The document on the saved format run to the cross-run fixpoint
 /// (`fixpoint::fixpoint`: each run reads what the run before wrote) at
 /// schedule `o`: it stops where `latex` stops, its last run's DVI file and
@@ -745,4 +766,6 @@ fix_tests! {
     fix_bib: "bib",
     fix_href: "href",
     fix_hrefcell: "hrefcell",
+    fix_floatgoal: "floatgoal",
+    fix_enlarge: "enlarge",
 }
