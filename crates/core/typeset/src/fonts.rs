@@ -94,6 +94,9 @@ pub trait Fonts {
     fn char_info(&self, font: FontId, ch: u16) -> Option<CharInfo>;
     /// The lig/kern instruction for `left` followed by `right`, if any.
     fn lig_kern(&self, font: FontId, left: Left, right: u16) -> Option<LigKern>;
+    /// Whether the font has a left boundary lig/kern program
+    /// (`bchar_label <> non_address`).
+    fn has_left_boundary(&self, font: FontId) -> bool;
     /// `font_bchar`: the right boundary character, if the font has one.
     fn bchar(&self, font: FontId) -> Option<u16>;
     /// `param(n)` (§558), 1-based; 0 when absent.
