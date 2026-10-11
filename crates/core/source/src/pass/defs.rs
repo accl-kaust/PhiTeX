@@ -139,6 +139,15 @@ impl Definitions {
         self.macros.is_empty()
     }
 
+    /// Every definition harvested: the name defined, its file and the byte
+    /// position of the command that defines it (a repeated definition of
+    /// the same shape in the same file is kept once).
+    pub fn sites(&self) -> impl Iterator<Item = (&str, u32, usize)> + '_ {
+        self.macros
+            .iter()
+            .flat_map(|(n, v)| v.iter().map(move |d| (n.as_str(), d.file, d.pos)))
+    }
+
     /// What `name` is at `at` (file, byte) or, without a place, by its
     /// last definition (a format's).
     pub(crate) fn find(&self, name: &str, at: Option<(u32, usize)>) -> Found<'_, Shape> {
