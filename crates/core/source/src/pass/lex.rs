@@ -253,6 +253,15 @@ pub(crate) fn catcode_assignment(b: &[u8], j: usize) -> Option<(u8, Option<u32>)
             }
             u8::from_str_radix(std::str::from_utf8(&b[s..j]).ok()?, 16).ok()?
         }
+        // (a constant the kernel names, `\z@`: its value, §440)
+        b'\\' => {
+            let s = j + 1;
+            j = s;
+            while j < b.len() && (b[j].is_ascii_alphabetic() || b[j] == b'@') {
+                j += 1;
+            }
+            u8::try_from(named_value(&b[s..j])?).ok()?
+        }
         _ => return None,
     };
     j = skip_sp(b, j);
