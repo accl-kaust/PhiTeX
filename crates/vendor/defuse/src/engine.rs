@@ -141,6 +141,22 @@ pub enum Claim {
     Pending,
 }
 
+/// A stream claim's test of one candidate node (see [`Ctx::claim_stream`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Until {
+    /// The claim goes on past it.
+    No,
+    /// The claim ends before it.
+    Yes,
+    /// Decided by [`Operation::until_value`] from the value `field` has at
+    /// the candidate's position.
+    Read(Field),
+    /// Decided by [`Operation::until_values`] from the values each field
+    /// has there: a test resting on several facts. Each is a recorded read,
+    /// so a change in any one runs the claimer again.
+    ReadEach(Vec<Field>),
+}
+
 /// Where a pending node is indexed: `pending` (an unbounded definition
 /// set), `pending_eff` (a scope effect), and its bounded definition set.
 #[derive(Clone, Debug)]
@@ -219,6 +235,53 @@ pub trait Operation: Send + Sync {
         Claim::None
     }
 
+    /// For a stream claimer ([`Ctx::claim_stream`]): the test of candidate
+    /// node `cand` (its class is its operation and text).
+    fn until(&self, _args: &[ValueId], _values: &Values, _cand: OpId, _cand_args: &[ValueId]) -> Until {
+        Until::No
+    }
+
+    /// For [`Until::Read`]: whether the claim ends before `cand`, given the
+    /// value the field has there.
+    fn until_value(
+        &self,
+        _args: &[ValueId],
+        _values: &Values,
+        _cand: OpId,
+        _cand_args: &[ValueId],
+        _value: Option<ValueId>,
+    ) -> bool {
+        false
+    }
+
+    /// For [`Until::ReadEach`]: whether the claim ends before `cand`, given
+    /// the values the fields have there, in order.
+    fn until_values(
+        &self,
+        _args: &[ValueId],
+        _values: &Values,
+        _cand: OpId,
+        _cand_args: &[ValueId],
+        _fields: &[Option<ValueId>],
+    ) -> bool {
+        false
+    }
+
+    /// For a stream claimer: where its claim ends, predicted from the text of
+    /// the following siblings (the index of the sibling it ends before).
+    /// The engine then speculates on the claimer (under
+    /// [`Speculation::Predicted`](crate::Speculation)), confirming the
+    /// prediction by testing that sibling; a wrong prediction only costs a
+    /// re-run.
+    fn until_predict(
+        &self,
+        _args: &[ValueId],
+        _values: &Values,
+        _following: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Option<usize> {
+        None
+    }
+
     /// Fields the node may read (a hint): a node whose hinted inputs are
     /// known to be missing is not started.
     fn reads(&self, _args: &[ValueId], _values: &Values) -> Option<Vec<Field>> {
@@ -286,6 +349,8 @@ pub struct Report {
     pub rounds: u64,
     /// Loop-back restarts from initial values.
     pub restarts: u64,
+    /// `nodes_run` by operation name.
+    pub runs_by_op: Vec<(&'static str, u64)>,
 
     /// Executions (complete runs).
     pub runs: u64,
@@ -326,6 +391,23 @@ pub struct Report {
     /// Speculative runs kept whose shape (children, claim, scope effect or
     /// definition set) differed from the node's previous shape.
     pub spec_shape_changes: u64,
+    /// Nodes parked on a node of each operation (by name).
+    pub waits_by_op: Vec<(&'static str, u64)>,
+}
+
+impl Report {
+    /// The count for operation `name` in `runs_by_op` or `waits_by_op`.
+    #[must_use]
+    pub fn by_op(counts: &[(&'static str, u64)], name: &str) -> u64 {
+        counts.iter().find(|c| c.0 == name).map_or(0, |c| c.1)
+    }
+}
+
+fn bump(counts: &mut Vec<(&'static str, u64)>, name: &'static str) {
+    match counts.iter_mut().find(|c| c.0 == name) {
+        Some(c) => c.1 += 1,
+        None => counts.push((name, 1)),
+    }
 }
 
 /// Evaluation errors.
@@ -367,6 +449,9 @@ pub(crate) enum State {
 pub(crate) const K_FIELD: u8 = 0;
 pub(crate) const K_OUTPUT: u8 = 1;
 pub(crate) const K_LOOP: u8 = 2;
+/// A link of a contribution chain past the first (see
+/// [`Ctx::contributions_before_me`]): `key` is the sequence's hidden field.
+pub(crate) const K_CHAIN: u8 = 3;
 
 /// A recorded read: 16 bytes.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -397,6 +482,10 @@ const F_CLAIM_DYN: u16 = 256;
 const F_TAINT: u16 = 512;
 const F_CLAIMER: u16 = 1024;
 const F_PARKSET: u16 = 2048;
+/// Runs of one stream claimer in one evaluation taken as a cycle.
+const STREAM_RUN_LIMIT: u32 = 4096;
+/// A stream claimer with a predicted extent: eligible for speculation.
+const F_PREDICT: u16 = 4096;
 const F_HINT: u16 = 8192;
 const F_MAYBE: u16 = 16384;
 const PREFIX_SEED: u64 = 0x9e37_79b9;
@@ -436,6 +525,9 @@ pub(crate) struct Node {
     on: Slot,
     pub(crate) state: State,
     pub(crate) effect: u8,
+    /// The effect the bindings reflect (what the order holds while a
+    /// pending effect is decided).
+    bound: u8,
     flags: u16,
     pub(crate) uses: Box<[Use]>,
     pub(crate) defs: Box<[Def]>,
@@ -491,8 +583,6 @@ pub(crate) struct Aux {
     claimed_by: Option<Slot>,
     /// The kind of the scope this node opens (`None`: no kind).
     kind: Option<ValueId>,
-    /// For a pending effect: the effect the bindings around it reflect.
-    eff_bound: u8,
     pub(crate) body: Option<u32>,
     assumers: Vec<Assume>,
     assume_left: u32,
@@ -500,6 +590,9 @@ pub(crate) struct Aux {
     /// For a pending claim: 1 + the label of the last sibling it could take
     /// (0: not computed yet, i.e. unbounded).
     reach1: u64,
+    /// For a stream claimer: the label range `(after, end]` whose structure
+    /// its last run read.
+    stream: Option<(u64, u64)>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -735,6 +828,19 @@ pub struct Engine {
     local_ix: BTreeMap<(u32, Field, u32, u64), Slot>,
     /// The depth each local definition is indexed under.
     local_depth: FxHashMap<(u32, Field, u64), u32>,
+    /// Stream claimers by `(unit, first label, slot)`.
+    stream_ix: BTreeSet<(u32, u64, u64)>,
+    /// Runs of each stream claimer in this evaluation.
+    stream_runs: FxHashMap<Slot, u32>,
+    /// The labels `stream_touch` saw this evaluation, in order: a claim
+    /// that ran meanwhile is checked against those after its start.
+    pub(crate) touch_log: Vec<(u32, u64)>,
+    in_eval: bool,
+    /// The environment: fields defined before every text unit (text order
+    /// -1), below the unit's own [`Engine::set_env`] entries.
+    environment: FxHashMap<Field, ValueId>,
+    /// The environment for the next evaluation, applied at its start.
+    env_next: Option<FxHashMap<Field, ValueId>>,
     /// Global definitions: `(unit, field, label)`.
     global_ix: BTreeMap<(u32, Field, u64), Slot>,
     users: BTreeMap<(u64, Field, u64), Slot>,
@@ -771,6 +877,11 @@ pub struct Engine {
     roots: FxHashSet<Slot>,
     /// The hidden field an opener defines inside its scope: its kind.
     pub(crate) kind_field: Field,
+    /// Contribution sequences: `(sequence, hidden field)`. A contributor
+    /// defines the hidden field (its element, see `Contribution`); an opener
+    /// defines it inside its scope as `seq_start`.
+    seqs: Vec<(Field, Field)>,
+    pub(crate) seq_start: ValueId,
     /// Live memoized applications, and how many there were after the last
     /// collection (see `collect_apps`).
     apps_live: usize,
@@ -872,6 +983,12 @@ impl Engine {
             defs_ix: BTreeMap::new(),
             local_ix: BTreeMap::new(),
             local_depth: FxHashMap::default(),
+            stream_ix: BTreeSet::new(),
+            stream_runs: FxHashMap::default(),
+            touch_log: Vec::new(),
+            in_eval: false,
+            environment: FxHashMap::default(),
+            env_next: None,
             global_ix: BTreeMap::new(),
             users: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -893,6 +1010,8 @@ impl Engine {
             parked: BTreeSet::new(),
             roots: FxHashSet::default(),
             kind_field: Field(ValueId::NONE),
+            seqs: Vec::new(),
+            seq_start: ValueId::NONE,
             apps_live: 0,
             apps_at_collect: 0,
             claim_dirty: FxHashSet::default(),
@@ -913,7 +1032,62 @@ impl Engine {
         e.open_op = e.register(Arc::new(Marker(Effect::Open)));
         e.close_op = e.register(Arc::new(Marker(Effect::Close)));
         e.kind_field = kind_field;
+        e.seq_start = e.values.str("\u{1}start");
         e
+    }
+
+    /// Declares a contribution sequence: nodes add to it, read the element
+    /// before them in their scope, take it away, or read the whole prefix
+    /// (see [`Ctx::push_contribution`]).
+    pub fn declare_sequence(&mut self, seq: Field) {
+        if self.seq_field(seq).is_none() {
+            let name = format!("\u{1}seq:{}", self.values.render(seq.0));
+            let h = self.values.field(&name);
+            self.seqs.push((seq, h));
+        }
+    }
+
+    /// The hidden field of a declared sequence.
+    pub(crate) fn seq_field(&self, seq: Field) -> Option<Field> {
+        self.seqs.iter().find(|s| s.0 == seq).map(|s| s.1)
+    }
+
+    /// The field a client declaration names: a sequence's contributions
+    /// are its hidden field.
+    fn canon(&self, f: Field) -> Field {
+        self.seq_field(f).unwrap_or(f)
+    }
+
+    /// The client name of a field (a sequence for its hidden field).
+    fn client_name(&self, f: Field) -> Field {
+        self.seqs.iter().find(|s| s.1 == f).map_or(f, |s| s.0)
+    }
+
+    fn is_seq_hidden(&self, f: Field) -> bool {
+        self.seqs.iter().any(|s| s.1 == f)
+    }
+
+    /// Whether `s`'s operation statically declares (hidden) field `f`.
+    fn declares(&self, s: Slot, f: Field) -> bool {
+        let n = self.n(s);
+        let av = self.args_vec(n.args);
+        self.op(n.op)
+            .defs(&av, &self.values)
+            .is_some_and(|d| d.iter().any(|&(g, _)| self.canon(g) == f))
+    }
+
+    /// Whether `x`'s definition of `f` is the client's: not a scope kind,
+    /// and not an opener's start-of-sequence marker (an opener's
+    /// contributions are not supported: its markers take precedence). A
+    /// marker left until the node's new effect applies has the value
+    /// `seq_start`.
+    fn is_client_def(&self, x: Slot, f: Field) -> bool {
+        f != self.kind_field && !(self.is_seq_hidden(f) && eff_opens(self.oitem(x).eff) > 0)
+    }
+
+    /// Fields the engine defines on its own (never client-declared).
+    fn is_hidden(&self, f: Field) -> bool {
+        f == self.kind_field || self.is_seq_hidden(f)
     }
 
     /// The value table.
@@ -981,6 +1155,104 @@ impl Engine {
         self.nodes
             .get(s.ix as usize)
             .is_some_and(|n| n.gen_ == s.gen_ && n.state != State::Free)
+    }
+
+    /// Internal consistency after an evaluation (for tests and fuzzing):
+    /// every local definition indexed at its current depth, every settled
+    /// use bound where a fresh walk binds it and indexed among its site's
+    /// users, every decided pending effect reflected in the order.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn check_invariants(&self) -> Vec<String> {
+        let mut bad = Vec::new();
+        for i in 0..self.nodes.len() {
+            let s = self.slot_at(i);
+            if !self.live(s) {
+                continue;
+            }
+            let n = self.n(s);
+            if n.state == State::Inert || n.has(F_APP) {
+                continue;
+            }
+            let root = self.units[n.unit as usize].root;
+            for d in &n.defs {
+                if d.global {
+                    if self.global_ix.get(&(n.unit, d.field, n.label)) != Some(&s) {
+                        bad.push(format!("{s:?}: global {:?} not indexed", d.field));
+                    }
+                    continue;
+                }
+                let want = self.def_depth(root, n.label, d.field);
+                if self.local_depth.get(&(n.unit, d.field, n.label)) != Some(&want) {
+                    bad.push(format!(
+                        "{s:?}: local {} indexed at depth {:?}, now {want}",
+                        self.values.render(d.field.0),
+                        self.local_depth.get(&(n.unit, d.field, n.label))
+                    ));
+                }
+            }
+            if n.state != State::Done {
+                continue;
+            }
+            if n.has(F_EFF_DYN) && n.bound != n.effect {
+                bad.push(format!("{s:?}: bound effect {} but decided {}", n.bound, n.effect));
+            }
+            for u in &n.uses {
+                if u.kind != K_FIELD {
+                    continue;
+                }
+                let f = Field(ValueId(u.key));
+                let w = self.walk(n.unit, n.label, f);
+                if w.site != u.site {
+                    let desc = |x: Slot| {
+                        if self.live(x) {
+                            let a = self.args_vec(self.n(x).args);
+                            format!(
+                                "{x:?}@{} {}",
+                                self.n(x).label >> 32,
+                                a.first().map_or(String::new(), |&a| self.values.render(a))
+                            )
+                        } else {
+                            format!("{x:?}")
+                        }
+                    };
+                    bad.push(format!(
+                        "{}: use of {} bound to {}, walk finds {}",
+                        desc(s),
+                        self.values.render(f.0),
+                        desc(u.site),
+                        desc(w.site)
+                    ));
+                }
+                if self.users.get(&(site_key(n.unit, u.site), f, n.label)) != Some(&s) {
+                    bad.push(format!("{s:?}: use of {} missing from users", self.values.render(f.0)));
+                }
+            }
+        }
+        bad
+    }
+
+    /// A node's scheduling state, for diagnostics.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn debug_node(&self, id: NodeId) -> String {
+        let Some(&s) = self.ids.get(&id) else {
+            return "gone".into();
+        };
+        let n = self.n(s);
+        let on = if n.on != NIL && self.live(n.on) {
+            let o = self.n(n.on);
+            format!(
+                "{:?} state {:?} flags {:#x} args {}",
+                o.id,
+                o.state,
+                o.flags,
+                self.values.render(o.args)
+            )
+        } else {
+            format!("{:?}", n.on)
+        };
+        format!("{s:?} state {:?} flags {:#x} on {on}", n.state, n.flags)
     }
 
     /// The current reference to slot `i`.
@@ -1304,6 +1576,9 @@ impl Engine {
         let maybe = decl.is_none() && opr.may_define(&av, &self.values) != MayDefine::Any;
         self.set_flag(s, F_MAYBE, maybe);
         self.set_flag(s, F_HINT, hint);
+        let predict = opr.until_predict(&av, &self.values, &mut std::iter::empty()).is_some();
+        self.set_flag(s, F_PREDICT, predict);
+        self.stream_touch(self.n(s).unit, self.n(s).label);
         self.set_flag(s, F_CLAIMER, claim_hook != Claim::None);
         self.set_flag(s, F_CLAIM_DYN, claim_hook == Claim::Pending);
         self.set_flag(s, F_EFF_DYN, eff == Effect::Pending);
@@ -1353,6 +1628,59 @@ impl Engine {
     /// Sets the value a field has at the start of `unit`.
     pub fn set_env(&mut self, unit: UnitId, field: Field, value: ValueId) {
         self.set_env_slot(unit.0, field, value);
+    }
+
+    /// Supplies the environment for the next evaluation: the fields every
+    /// text unit sees defined before its first node. Applied when the
+    /// evaluation starts; a field that changed from the previous environment
+    /// re-runs only its readers. Bodies of lexical applications do not see
+    /// it (their results are memoized by their arguments).
+    pub fn set_environment(&mut self, env: impl IntoIterator<Item = (Field, ValueId)>) {
+        self.env_next = Some(env.into_iter().collect());
+    }
+
+    /// The environment of the last evaluation (or of the next, once
+    /// supplied).
+    pub fn environment(&self) -> impl Iterator<Item = (Field, ValueId)> + '_ {
+        self.env_next
+            .as_ref()
+            .unwrap_or(&self.environment)
+            .iter()
+            .map(|(&f, &v)| (f, v))
+    }
+
+    fn apply_environment(&mut self) {
+        let Some(next) = self.env_next.take() else {
+            return;
+        };
+        let old = std::mem::replace(&mut self.environment, next);
+        let mut changed: Vec<Field> = old
+            .iter()
+            .filter(|&(f, v)| self.environment.get(f) != Some(v))
+            .map(|(&f, _)| f)
+            .chain(self.environment.keys().filter(|f| !old.contains_key(f)).copied())
+            .collect();
+        changed.sort_unstable();
+        for unit in 0..u32::try_from(self.units.len()).expect("unit count") {
+            let u = &self.units[unit as usize];
+            if !u.live || u.owner != NIL {
+                continue;
+            }
+            for &f in &changed {
+                if !self.units[unit as usize].env.contains_key(&f) {
+                    self.dirty_field_users(site_key(unit, NIL), f);
+                }
+            }
+        }
+    }
+
+    /// The value `f` has at the start of `unit`.
+    pub(crate) fn start_value(&self, unit: u32, f: Field) -> Option<ValueId> {
+        let u = &self.units[unit as usize];
+        u.env
+            .get(&f)
+            .or_else(|| if u.owner == NIL { self.environment.get(&f) } else { None })
+            .copied()
     }
 
     fn set_env_slot(&mut self, unit: u32, field: Field, value: ValueId) {
@@ -1454,6 +1782,9 @@ impl Engine {
         if hints.is_some() {
             flags |= F_HINT;
         }
+        if opr.until_predict(&av, &self.values, &mut std::iter::empty()).is_some() {
+            flags |= F_PREDICT;
+        }
         if decl.is_none() && opr.may_define(&av, &self.values) != MayDefine::Any {
             flags |= F_MAYBE;
         }
@@ -1477,6 +1808,7 @@ impl Engine {
             on: NIL,
             state: State::Dirty,
             effect: EFF_NONE,
+            bound: EFF_NONE,
             flags,
             uses: Box::new([]),
             defs: Box::new([]),
@@ -1508,7 +1840,9 @@ impl Engine {
         }
         let label = self.alloc_label(unit, after);
         self.nm(s).label = label;
+        self.stream_touch(unit, label);
         let item = self.oitem(s);
+        self.nm(s).bound = item.eff;
         let root = self.units[unit as usize].root;
         self.units[unit as usize].root = self.order.insert(&OAug, root, label, item);
         s
@@ -1539,6 +1873,7 @@ impl Engine {
         let hints = opr.reads(&av, &self.values);
         if let Some(d) = decl {
             for (f, l) in d {
+                let f = self.canon(f);
                 self.add_def(s, f, l == Locality::Global);
             }
         }
@@ -1591,6 +1926,7 @@ impl Engine {
             on: NIL,
             state: State::Dirty,
             effect: EFF_NONE,
+            bound: EFF_NONE,
             flags,
             uses: Box::new([]),
             defs: Box::new([]),
@@ -1624,13 +1960,24 @@ impl Engine {
         s
     }
 
+    /// Whether `s` opens a scope before itself (with `run` the effect its
+    /// current run has set): its own reads are inside that scope.
+    pub(crate) fn opens_before(&self, s: Slot, run: Option<u8>) -> bool {
+        let e = run.unwrap_or_else(|| self.oitem(s).eff);
+        e & EFF_BEFORE != 0 && eff_opens(e) > 0
+    }
+
     fn oitem(&self, s: Slot) -> OItem {
         let n = self.n(s);
         let inert = n.state == State::Inert;
         OItem {
             slot: s,
-            eff: if inert || (n.has(F_EFF_DYN) && n.in_work()) {
+            // A pending effect keeps the one the bindings reflect until the
+            // node is done (the pending-effect index makes readers wait).
+            eff: if inert {
                 EFF_NONE
+            } else if n.has(F_EFF_DYN) && n.in_work() {
+                n.bound
             } else {
                 n.effect
             },
@@ -1744,6 +2091,7 @@ impl Engine {
                     self.attach_labels(x);
                 }
                 self.rebuild_watches(unit);
+                self.restream(unit);
                 return;
             }
             assert!(!whole, "unit label space exhausted");
@@ -1794,6 +2142,7 @@ impl Engine {
             .collect();
         let pend = n.has(F_INPEND);
         let item = self.oitem(x);
+        self.nm(x).bound = item.eff;
         let root = self.units[unit as usize].root;
         self.units[unit as usize].root = self.order.insert(&OAug, root, label, item);
         for f in defs {
@@ -1826,7 +2175,9 @@ impl Engine {
     /// node lies (after its brackets if they come before it), except that
     /// an opener's kind is defined inside the scope it opens.
     fn def_depth(&self, root: u32, label: u64, f: Field) -> u32 {
-        let inside = f == self.kind_field || self.brackets_before(root, label);
+        let opener_mark = (f == self.kind_field || self.is_seq_hidden(f))
+            && self.order.get(root, label).is_some_and(|i| eff_opens(i.eff) > 0);
+        let inside = opener_mark || self.brackets_before(root, label);
         self.order
             .fold(&OAug, root, 0, if inside { label + 1 } else { label })
             .o
@@ -1953,7 +2304,7 @@ impl Engine {
         if self.pending_p_lens.is_empty() {
             return None;
         }
-        let v = self.values.get(f.0);
+        let v = self.values.get(self.client_name(f).0);
         let Value::Str(name) = &*v else { return None };
         let name = name.as_bytes();
         let mut best: Option<(u64, Slot)> = None;
@@ -1976,7 +2327,7 @@ impl Engine {
     fn pending_for(&self, p: Slot, f: Field) -> bool {
         let n = self.n(p);
         let av = self.args_vec(n.args);
-        self.op(n.op).may_define_field(&av, &self.values, f)
+        self.op(n.op).may_define_field(&av, &self.values, self.client_name(f))
     }
 
     /// The nearest pending scope effect in `(site, label)` that could change
@@ -1990,12 +2341,37 @@ impl Engine {
             return Some((first, first_s));
         }
         let root = self.units[unit as usize].root;
-        // The site itself counts: a pending close may hide it.
-        if self.defs_ix.range((unit, f, site)..(unit, f, label)).next().is_none()
+        // The common case: no other definition and no close between the
+        // site and the use, so every pending effect between them lies in
+        // the site's top-level scope (if it has one), where it may hide it.
+        if self
+            .defs_ix
+            .range((unit, f, site + 1)..(unit, f, label))
+            .next()
+            .is_none()
             && self.order.fold(&OAug, root, site + 1, label).c == 0
         {
-            return None;
+            let in_scope = site != 0 && self.def_depth(root, site, f) > 0;
+            return in_scope.then_some((first, first_s));
         }
+        let ignored = |x: u64| self.order.fold(&OAug, root, 0, x).c;
+        // A close ignored at depth 0 after a pending effect shifts every
+        // depth up to it: any pending effect before the last such close in
+        // the range counts.
+        let target = ignored(label);
+        if target > ignored(site + 1)
+            && let Some(c) = self.order.search_fwd(&OAug, root, 0, &|s: OSum| s.c >= target)
+            && let Some((&(_, p), &s)) = self
+                .pending_eff
+                .range((unit, site + 1)..(unit, c.min(label)))
+                .next_back()
+        {
+            return Some((p, s));
+        }
+        // Otherwise a pending effect matters only together with a
+        // definition of `f` in its top-level scope (the site itself counts:
+        // a pending close may hide it): visit the pending effects one
+        // top-level scope at a time.
         let mut hi = label;
         loop {
             if hi <= site + 1 {
@@ -2004,6 +2380,14 @@ impl Engine {
             let (&(_, p), &s) = self.pending_eff.range((unit, site + 1)..(unit, hi)).next_back()?;
             match self.effect_scope(unit, p, label, f) {
                 Ok(()) => return Some((p, s)),
+                Err(open) if open == p => {
+                    // `p` lies at depth 0, as does everything back to the
+                    // close of the previous top-level scope: skip to it.
+                    hi = self
+                        .order
+                        .search_back(&OAug, root, p, &|s: OSum| s.c >= 1)
+                        .map_or(0, |k| k + 1);
+                }
                 Err(open) => hi = open.min(p),
             }
         }
@@ -2014,15 +2398,12 @@ impl Engine {
     /// depth 0, so extra brackets at `p` re-match brackets only up to the end
     /// of `p`'s outermost enclosing scope `T` (an extra open leaves `T` open,
     /// an extra close makes `T`'s own close the ignored one), plus wherever a
-    /// close was ignored at depth 0 after `p`. Only definitions of `f` in `T`
-    /// can change visibility then; elsewhere the shift is uniform.
+    /// close was ignored at depth 0 after `p` (the caller has ruled that
+    /// out). Only definitions of `f` in `T` can change visibility then;
+    /// elsewhere the shift is uniform.
     /// `Err(open)`: it cannot, nor can any effect in `(open, p)`.
     fn effect_scope(&self, unit: u32, p: u64, label: u64, f: Field) -> Result<(), u64> {
         let root = self.units[unit as usize].root;
-        let ignored = |x: u64| self.order.fold(&OAug, root, 0, x).c;
-        if ignored(label) > ignored(p + 1) {
-            return Ok(());
-        }
         let depth = self.order.fold(&OAug, root, 0, p).o;
         if depth == 0 {
             return Err(p);
@@ -2035,9 +2416,11 @@ impl Engine {
             .order
             .search_fwd(&OAug, root, p, &|s: OSum| s.c >= depth)
             .unwrap_or(u64::MAX);
+        // An opener's start-of-sequence marker lies inside its scope.
+        let from = if self.is_seq_hidden(f) { open } else { open + 1 };
         if self
             .defs_ix
-            .range((unit, f, open + 1)..(unit, f, close.min(label)))
+            .range((unit, f, from)..(unit, f, close.min(label)))
             .next()
             .is_some()
         {
@@ -2108,6 +2491,7 @@ impl Engine {
             }
             MayDefine::Names(fs) => {
                 for f in fs {
+                    let f = self.canon(f);
                     if insert {
                         self.pending_f.insert((unit, f, label), s);
                     } else {
@@ -2135,14 +2519,19 @@ impl Engine {
     /// Makes `x`'s registered definitions equal `new`, re-binding uses.
     /// Sets the client definitions of `x` (its scope kind is kept).
     fn set_defset(&mut self, x: Slot, new: &[(Field, bool)]) {
-        let kf = self.kind_field;
         let old: Vec<(Field, bool)> = self
             .n(x)
             .defs
             .iter()
-            .filter(|d| d.field != kf)
+            .filter(|d| self.is_client_def(x, d.field) && d.value != self.seq_start)
             .map(|d| (d.field, d.global))
             .collect();
+        let new: Vec<(Field, bool)> = new
+            .iter()
+            .map(|&(f, g)| (self.canon(f), g))
+            .filter(|d| self.is_client_def(x, d.0))
+            .collect();
+        let new = &new[..];
         for &(f, g) in &old {
             if !new.contains(&(f, g)) {
                 self.remove_def(x, f);
@@ -2160,10 +2549,11 @@ impl Engine {
         self.users.remove(&(from, f, label));
         self.touch(u);
         self.users.insert((to, f, label), u);
+        let unit = self.n(u).unit;
         let n = self.nm(u);
         let mut uses = std::mem::take(&mut n.uses).into_vec();
         for us in &mut uses {
-            if us.kind == K_FIELD && us.key == f.0.0 {
+            if (us.kind == K_FIELD || us.kind == K_CHAIN) && us.key == f.0.0 && site_key(unit, us.site) == from {
                 us.site = to_slot;
             }
         }
@@ -2199,6 +2589,12 @@ impl Engine {
         // (previous site, users in (lx, end)) pairs.
         let mut prev: Vec<(Slot, u64)> = Vec::new();
         if global {
+            // Every use after `lx` bound to the latest global before it
+            // (wherever that lies: possibly inside a scope the walk below
+            // steps over) now reaches `x`.
+            if let Some((_, &g)) = self.global_ix.range((unit, f, 0)..(unit, f, lx)).next_back() {
+                prev.push((g, u64::MAX));
+            }
             let mut hi = lx;
             let mut last_rel: i64 = -1;
             loop {
@@ -2207,7 +2603,9 @@ impl Engine {
                     break;
                 };
                 if self.def_global(d, f) {
-                    prev.push((d, u64::MAX));
+                    if !prev.iter().any(|p| p.0 == d) {
+                        prev.push((d, u64::MAX));
+                    }
                     break;
                 }
                 let depth = self.def_depth(root, ld, f);
@@ -2250,6 +2648,7 @@ impl Engine {
             prev.push((site, end));
         }
         self.ix_insert(unit, f, lx, x);
+        self.stream_touch(unit, lx);
         for (site, end) in prev {
             let from = site_key(unit, site);
             let movers: Vec<(u64, Slot)> = self
@@ -2278,6 +2677,7 @@ impl Engine {
             return;
         }
         self.ix_remove(unit, f, label);
+        self.stream_touch(unit, label);
         let from = x.pack();
         let users: Vec<(u64, Slot)> = self
             .users
@@ -2295,12 +2695,11 @@ impl Engine {
     /// have changed, i.e. the region from it to where depth returns to 0.
     fn effect_region_changed(&mut self, p: Slot, old: u8) {
         span!(Region);
-        if self.aux_of(p).is_some() || self.n(p).has(F_EFF_DYN) {
-            let e = self.oitem(p).eff;
-            self.ax(p).eff_bound = e;
-        }
+        let e = self.oitem(p).eff;
+        self.nm(p).bound = e;
         let n = self.n(p);
         let (unit, lp) = (n.unit, n.label);
+        self.stream_touch(unit, lp);
         let root = self.units[unit as usize].root;
         let before = self.order.fold(&OAug, root, 0, lp);
         let depth_after = |eff: u8| {
@@ -2330,16 +2729,14 @@ impl Engine {
         };
         let end = reach(d_old).max(reach(d_new));
         // A node after its own brackets is inside the region.
-        let start = if (old | self.oitem(p).eff) & EFF_BEFORE != 0 {
-            lp
-        } else {
-            lp + 1
-        };
-        if end == lp && start > lp {
+        let before_p = (old | self.oitem(p).eff) & EFF_BEFORE != 0;
+        if end == lp && !before_p {
             return;
         }
+        // p's own definitions are inside the scope it opens: their reach
+        // changes with its brackets, so they re-register too.
         let mut region = Vec::new();
-        self.order.range(root, start, end.max(lp), &mut region, usize::MAX);
+        self.order.range(root, lp, end.max(lp), &mut region, usize::MAX);
         self.report.scope_region += region.len() as u64;
         count!(RegionNode, region.len());
         for (_, s) in region {
@@ -2364,6 +2761,11 @@ impl Engine {
             let uses: Vec<Use> = self.n(s).uses.to_vec();
             let label = self.n(s).label;
             for u in uses {
+                if u.kind == K_CHAIN {
+                    // A deeper chain link may have moved: read it again.
+                    self.make_dirty(s);
+                    continue;
+                }
                 if u.kind != K_FIELD {
                     continue;
                 }
@@ -2397,24 +2799,36 @@ impl Engine {
     /// An opener defines the kind of its scope inside it (a local
     /// definition of `kind_field`, read by [`Ctx::scope_kind`]).
     fn sync_kind(&mut self, s: Slot) {
-        let kf = self.kind_field;
-        let opens = self.oitem(s).eff >> 2 & 3 != 0;
-        let has = self.n(s).defs.iter().any(|d| d.field == kf);
-        if opens && !has {
-            self.add_def(s, kf, false);
-        } else if !opens && has {
-            self.remove_def(s, kf);
-            return;
-        }
-        if opens {
-            let v = self.aux_of(s).and_then(|a| a.kind).unwrap_or(ValueId::UNIT);
-            if self.n(s).def_value(kf) != Some(v) {
+        let opens = eff_opens(self.oitem(s).eff) > 0;
+        let kind = self.aux_of(s).and_then(|a| a.kind).unwrap_or(ValueId::UNIT);
+        let start = self.seq_start;
+        let mut marks = vec![(self.kind_field, kind)];
+        marks.extend(self.seqs.iter().map(|&(_, h)| (h, start)));
+        for (f, v) in marks {
+            let cur = self.n(s).defs.iter().find(|d| d.field == f).map(|d| d.value);
+            if !opens {
+                // Only the markers go; a contribution stays, and a declared
+                // one (shadowed while this node opened) is registered.
+                let marker = cur.is_some() && (f == self.kind_field || cur == Some(start));
+                if marker {
+                    self.remove_def(s, f);
+                }
+                if marker && f != self.kind_field && self.declares(s, f) {
+                    self.add_def(s, f, false);
+                    self.make_dirty(s);
+                }
+                continue;
+            }
+            if cur.is_none() {
+                self.add_def(s, f, false);
+            }
+            if self.n(s).def_value(f) != Some(v) {
                 for d in &mut self.nm(s).defs {
-                    if d.field == kf {
+                    if d.field == f {
                         d.value = v;
                     }
                 }
-                self.dirty_field_users(s.pack(), kf);
+                self.dirty_field_users(s.pack(), f);
             }
         }
     }
@@ -2630,6 +3044,7 @@ impl Engine {
         }
         self.leave_spec(s);
         self.dequeue(s);
+        self.refute_assumers(s);
         let old_eff = self.oitem(s).eff;
         self.nm(s).state = State::Inert;
         self.nm(s).epoch = self.n(s).epoch.wrapping_add(1);
@@ -2650,6 +3065,7 @@ impl Engine {
         let opr = self.op(self.n(s).op).clone();
         if let Some(d) = opr.defs(&av, &self.values) {
             for (f, l) in d {
+                let f = self.canon(f);
                 self.add_def(s, f, l == Locality::Global);
             }
         }
@@ -2898,6 +3314,8 @@ impl Engine {
         self.nm(x).state = State::Parked;
         self.nm(x).on = on;
         if on != NIL {
+            let name = self.op(self.n(on).op).name();
+            bump(&mut self.report.waits_by_op, name);
             self.ax(on).waiters.push(x);
             if self.n(on).has(F_INPEND) {
                 self.report.pending_waits += 1;
@@ -2953,6 +3371,106 @@ impl Engine {
         deps.dedup();
         deps.retain(|&d| self.live(d));
         deps
+    }
+
+    /// Records the label range a stream claimer's run read the structure of.
+    fn set_stream(&mut self, x: Slot, range: Option<(u64, u64)>) {
+        let old = self.aux_of(x).and_then(|a| a.stream);
+        if old == range {
+            return;
+        }
+        // Keyed by the claimer's own label: the start of its range moves
+        // as its unfolded text comes and goes.
+        let (unit, own) = (self.n(x).unit, self.n(x).label);
+        if old.is_some() {
+            self.stream_ix.remove(&(unit, own, x.pack()));
+        }
+        if range.is_some() {
+            self.stream_ix.insert((unit, own, x.pack()));
+        }
+        self.ax(x).stream = range;
+    }
+
+    /// The unit was relabelled: recorded stream ranges are stale, so the
+    /// claimers re-key and run again.
+    fn restream(&mut self, unit: u32) {
+        let keys: Vec<(u32, u64, u64)> = self
+            .stream_ix
+            .range((unit, 0, 0)..=(unit, u64::MAX, u64::MAX))
+            .copied()
+            .collect();
+        for k in keys {
+            self.stream_ix.remove(&k);
+            let x = Slot::unpack(k.2);
+            self.ax(x).stream = None;
+            if self.live(x) {
+                self.make_dirty(x);
+            }
+        }
+    }
+
+    /// The structure at `label` changed (a node, definition or scope effect
+    /// there came, went or changed): stream claimers that read it run again.
+    /// A range ends just before the node after its delimiter, so that node
+    /// going counts too.
+    fn stream_touch(&mut self, unit: u32, label: u64) {
+        if self.in_eval {
+            self.touch_log.push((unit, label));
+        }
+        if self.stream_ix.is_empty() {
+            return;
+        }
+        let hit: Vec<Slot> = self
+            .stream_ix
+            .range((unit, 0, 0)..(unit, label, 0))
+            .map(|&(_, _, x)| Slot::unpack(x))
+            .filter(|&x| {
+                self.live(x)
+                    && self
+                        .aux_of(x)
+                        .and_then(|a| a.stream)
+                        .is_some_and(|(_, e)| label <= e.saturating_add(1))
+                    && self.stream_bounds(x).1 < label
+            })
+            .collect();
+        for x in hit {
+            self.make_dirty(x);
+        }
+    }
+
+    /// The label range a stream claim of `s` scans: after `s` and what it
+    /// unfolded, up to the end of its parent's unfolded text (or the unit).
+    pub(crate) fn stream_bounds(&self, s: Slot) -> (u32, u64, u64) {
+        let n = self.n(s);
+        let after = self.n(self.subtree_end(s)).label;
+        let end = if n.parent == NIL || !self.live(n.parent) {
+            u64::MAX
+        } else {
+            self.n(self.subtree_end(n.parent)).label
+        };
+        (n.unit, after, end)
+    }
+
+    /// The next node after `label` in `unit`'s order.
+    pub(crate) fn order_next(&self, unit: u32, label: u64) -> Option<(u64, Slot)> {
+        self.order
+            .next(self.units[unit as usize].root, label)
+            .map(|(k, i)| (k, i.slot))
+    }
+
+    /// `x` goes away (or out of the program) before finishing: speculation
+    /// that rested on it will never be confirmed, so it runs again.
+    fn refute_assumers(&mut self, x: Slot) {
+        let assumers = match self.aux_of(x) {
+            Some(a) if !a.assumers.is_empty() => a.assumers.clone(),
+            _ => return,
+        };
+        self.ax(x).assumers.clear();
+        for a in assumers {
+            if self.live(a.node) && self.n(a.node).epoch == a.epoch && self.n(a.node).state == State::Spec {
+                self.make_dirty(a.node);
+            }
+        }
     }
 
     // -------------------------------------------------------------- freeing
@@ -3030,6 +3548,10 @@ impl Engine {
                 }
             }
         }
+        self.refute_assumers(x);
+        self.set_stream(x, None);
+        let (u, l) = (self.n(x).unit, self.n(x).label);
+        self.stream_touch(u, l);
         self.set_publishes(x, Vec::new());
         self.roots.remove(&x);
         self.claim_dirty.remove(&x);
@@ -3130,6 +3652,11 @@ impl Engine {
             let uses: Vec<Use> = self.n(s).uses.to_vec();
             let l = self.n(s).label;
             for u in uses {
+                if u.kind == K_CHAIN {
+                    // A deeper chain link may have moved: read it again.
+                    self.make_dirty(s);
+                    continue;
+                }
                 if u.kind != K_FIELD {
                     continue;
                 }
@@ -3343,7 +3870,7 @@ impl Engine {
         let old = std::mem::replace(&mut self.nm(x).uses, new.into_boxed_slice());
         for u in &old {
             match u.kind {
-                K_FIELD if has_label => {
+                K_FIELD | K_CHAIN if has_label => {
                     self.users
                         .remove(&(site_key(unit, u.site), Field(ValueId(u.key)), label));
                 }
@@ -3364,7 +3891,7 @@ impl Engine {
         let new: Vec<Use> = self.n(x).uses.to_vec();
         for u in new {
             match u.kind {
-                K_FIELD if has_label => {
+                K_FIELD | K_CHAIN if has_label => {
                     self.users
                         .insert((site_key(unit, u.site), Field(ValueId(u.key)), label), x);
                 }
@@ -3528,25 +4055,33 @@ impl Engine {
             let set: Vec<(Field, bool)> = defs.iter().map(|d| (d.0, d.2)).collect();
             self.set_defset(x, &set);
         } else {
-            let kf = self.kind_field;
-            let declared: Vec<Field> = self.n(x).defs.iter().map(|d| d.field).filter(|&f| f != kf).collect();
+            let declared: Vec<Field> = self
+                .n(x)
+                .defs
+                .iter()
+                .filter(|d| self.is_client_def(x, d.field) && d.value != self.seq_start)
+                .map(|d| d.field)
+                .collect();
             for &(f, _, _) in defs {
-                if !declared.contains(&f) {
+                if !declared.contains(&f) && self.is_client_def(x, f) {
                     let id = self.n(x).id;
-                    self.errors.push(EvalError::UndeclaredDefinition { node: id, field: f });
+                    let field = self.client_name(f);
+                    self.errors.push(EvalError::UndeclaredDefinition { node: id, field });
                 }
             }
             for &f in &declared {
                 if !defs.iter().any(|d| d.0 == f) {
                     let id = self.n(x).id;
-                    self.errors.push(EvalError::UndeclaredDefinition { node: id, field: f });
+                    let field = self.client_name(f);
+                    self.errors.push(EvalError::UndeclaredDefinition { node: id, field });
                 }
             }
         }
         let mut changed = false;
-        let unit = self.n(x).unit;
-        let _ = unit;
         for &(f, v, _) in defs {
+            if self.is_seq_hidden(f) && eff_opens(self.oitem(x).eff) > 0 {
+                continue;
+            }
             let old = self.n(x).def_value(f);
             if old != Some(v) {
                 changed = true;
@@ -3591,7 +4126,7 @@ impl Engine {
                         return false;
                     }
                     if w.site == NIL {
-                        (0, self.units[n.unit as usize].env.get(&f).copied())
+                        (0, self.start_value(n.unit, f))
                     } else {
                         if !self.settled(w.site) {
                             return false;
@@ -3758,6 +4293,30 @@ impl Engine {
         if !matches!(st, State::Dirty | State::Parked) || (st == State::Parked && !r.speculative) {
             return;
         }
+        // A definition the run read was removed while it ran (its node
+        // freed or re-run by an unfolding parent applied in the same
+        // batch): only committed uses were re-bound, so run again.
+        if r.uses.iter().any(|u| {
+            (u.kind == K_FIELD || u.kind == K_CHAIN)
+                && u.site != NIL
+                && (!self.live(u.site) || self.n(u.site).def_value(Field(ValueId(u.key))).is_none())
+        }) {
+            count!(StaleSite);
+            self.make_dirty(x);
+            return;
+        }
+        // The structure a stream claim scanned changed while it ran.
+        if let Some((a, e)) = r.stream {
+            let (unit, a) = (self.n(x).unit, a.min(self.stream_bounds(x).1));
+            if self.touch_log[r.touch_seq.min(self.touch_log.len())..]
+                .iter()
+                .any(|&(u, l)| u == unit && a < l && l <= e.saturating_add(1))
+            {
+                count!(StaleSite);
+                self.make_dirty(x);
+                return;
+            }
+        }
         self.report.text_memo_hits += u64::from(r.memo[0]);
         self.report.text_memo_misses += u64::from(r.memo[1]);
         self.report.app_memo_hits += u64::from(r.memo[2]);
@@ -3869,12 +4428,31 @@ impl Engine {
         }
         self.nm(x).on = NIL;
         self.set_children(x, &r.children, provisional);
+        // A stream claim may have read its own previous unfolding, which
+        // the line above just replaced: those reads are gone.
+        let read_freed = r.stream.is_some()
+            && r.uses.iter().any(|u| {
+                (u.kind == K_FIELD || u.kind == K_CHAIN)
+                    && u.site != NIL
+                    && (!self.live(u.site) || self.n(u.site).def_value(Field(ValueId(u.key))).is_none())
+            });
         if let Some(body) = self.aux_of(x).and_then(|a| a.body) {
             for &(f, v) in &r.env {
                 self.set_env_slot(body, f, v);
             }
         }
         self.set_uses(x, r.uses);
+        if r.stream.is_some() {
+            // A stream claim reads forward: a node it takes that reads the
+            // claim back is a cycle that never parks (each run feeds the
+            // next). Bound the runs per evaluation.
+            let runs = self.stream_runs.entry(x).or_insert(0);
+            *runs += 1;
+            if *runs == STREAM_RUN_LIMIT {
+                self.errors.push(EvalError::Cycle(vec![self.n(x).id]));
+            }
+        }
+        self.set_stream(x, r.stream);
         let mut changed = self.set_defs(x, &r.defs);
         if self.n(x).has(F_EFF_DYN)
             && let Some(e) = r.effect
@@ -3913,6 +4491,10 @@ impl Engine {
             self.spec_done.remove(&x);
         }
         self.update_taint(x);
+        if read_freed {
+            count!(StaleSite);
+            self.make_dirty(x);
+        }
         // The run's own epoch bump (from rebinding during apply) must not
         // invalidate it.
         if self.n(x).state != State::Dirty || self.n(x).epoch != r.epoch {
@@ -3987,7 +4569,7 @@ impl Engine {
                         .find(|u| u.kind == K_FIELD && u.key == f.0.0)
                         .map(|u| u.site);
                     let cur = if w.site == NIL {
-                        self.units[xn.unit as usize].env.get(&f).copied()
+                        self.start_value(xn.unit, f)
                     } else {
                         self.n(w.site).def_value(f)
                     };
@@ -4070,11 +4652,10 @@ impl Engine {
             if self.n(y).has(F_EFF_DYN) {
                 // A pending effect counts once the node is done: re-bind the
                 // region if it differs from what the bindings reflect.
+                let old = self.n(y).bound;
                 self.sync_order(y);
                 let new = self.oitem(y).eff;
-                let old = self.aux_of(y).map_or(EFF_NONE, |a| a.eff_bound);
                 if new != old {
-                    self.ax(y).eff_bound = new;
                     self.effect_region_changed(y, old);
                 }
                 self.sync_kind(y);
@@ -4124,7 +4705,7 @@ impl Engine {
                             continue;
                         }
                         let cur = if w.site == NIL {
-                            self.units[rn.unit as usize].env.get(&f).copied()
+                            self.start_value(rn.unit, f)
                         } else {
                             self.n(w.site).def_value(f)
                         };
@@ -4254,6 +4835,10 @@ impl Engine {
                 live.insert(x.value);
             }
         }
+        for (f, v) in self.environment.iter().chain(self.env_next.iter().flatten()) {
+            live.insert(f.0);
+            live.insert(*v);
+        }
         for u in &self.units {
             if !u.live {
                 continue;
@@ -4329,6 +4914,9 @@ impl Engine {
             self.restart_loops();
         }
         self.spec_done.clear();
+        self.stream_runs.clear();
+        self.apply_environment();
+        self.touch_log.clear();
         let restarted = self.feedback;
         let mut result = self.evaluate_inner(sched, exec);
         self.feedback = self.has_feedback();
@@ -4378,8 +4966,7 @@ impl Engine {
     /// its own definitions, a global, or a local directly in the scope `s`
     /// itself is in.
     fn defines_past(&self, s: Slot) -> bool {
-        let kf = self.kind_field;
-        if self.n(s).defs.iter().any(|d| d.field != kf) {
+        if self.n(s).defs.iter().any(|d| !self.is_hidden(d.field)) {
             return true;
         }
         let unit = self.n(s).unit;
@@ -4389,7 +4976,7 @@ impl Engine {
         while let Some(c) = stack.pop() {
             let n = self.n(c);
             if n.state != State::Inert && !n.has(F_APP) {
-                for d in n.defs.iter().filter(|d| d.field != kf) {
+                for d in n.defs.iter().filter(|d| !self.is_hidden(d.field)) {
                     if d.global || self.def_depth(root, n.label, d.field) <= depth {
                         return true;
                     }
@@ -4428,6 +5015,8 @@ impl Engine {
                 self.report.created += 1;
                 if ran {
                     self.report.nodes_run += 1;
+                    let name = self.op(self.n(s).op).name();
+                    bump(&mut self.report.runs_by_op, name);
                 }
                 continue;
             }
@@ -4436,6 +5025,8 @@ impl Engine {
             self.report.rebinds += rebound as u64;
             if sig != snap.sig || args != snap.args {
                 self.report.nodes_run += 1;
+                let name = self.op(self.n(s).op).name();
+                bump(&mut self.report.runs_by_op, name);
                 if self.out_hash(s) == snap.out {
                     self.report.cutoffs += 1;
                 }
@@ -4444,6 +5035,14 @@ impl Engine {
     }
 
     fn evaluate_inner(&mut self, sched: &mut dyn Scheduler, exec: &mut dyn Executor) -> Result<(), EvalError> {
+        self.in_eval = true;
+        let r = self.rounds(sched, exec);
+        self.in_eval = false;
+        self.touch_log.clear();
+        r
+    }
+
+    fn rounds(&mut self, sched: &mut dyn Scheduler, exec: &mut dyn Executor) -> Result<(), EvalError> {
         loop {
             self.report.rounds += 1;
             self.drain(sched, exec)?;
@@ -4573,7 +5172,7 @@ impl Engine {
                             cands.push(Candidate {
                                 node: n.id,
                                 slot: s,
-                                has_prediction: n.has(F_RAN),
+                                has_prediction: n.has(F_RAN) || n.has(F_PREDICT),
                                 waiting: false,
                             });
                         }
@@ -4588,7 +5187,7 @@ impl Engine {
                         cands.push(Candidate {
                             node: n.id,
                             slot: s,
-                            has_prediction: n.has(F_RAN),
+                            has_prediction: n.has(F_RAN) || n.has(F_PREDICT),
                             waiting: true,
                         });
                     }
@@ -4721,6 +5320,9 @@ pub struct RunResult {
     /// The kind of the scope the run's effect opens.
     pub(crate) kind: Option<ValueId>,
     pub(crate) claim: Option<usize>,
+    pub(crate) stream: Option<(u64, u64)>,
+    /// The length of `touch_log` when the run started.
+    pub(crate) touch_seq: usize,
     pub(crate) assumptions: Vec<(Slot, AssumeKind, ValueId)>,
     pub(crate) sig: u64,
     pub(crate) error: Option<EvalError>,
