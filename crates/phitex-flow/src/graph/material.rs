@@ -588,7 +588,9 @@ impl Exec<'_> {
     pub(super) fn new_graf(&mut self, indented: bool) {
         self.st.prev_graf = 0;
         let outer = self.st.level == 0 && !self.st.in_output();
-        if outer || !self.current_list(true).is_empty() {
+        // (tex.web 1091: `head<>tail`; a PDF event or a `\shipout` taken out
+        // of the list is no node of it)
+        if outer || self.current_list(true).iter().any(|i| !matches!(i, Item::BuildPage(_) | Item::End(_)) && !i.hoisted()) {
             let g = self.glue_par(GluePar::Parskip);
             self.vemit.push(param_glue(&g, GluePar::Parskip as u8));
         }
