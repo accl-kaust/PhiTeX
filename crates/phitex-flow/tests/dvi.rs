@@ -260,6 +260,12 @@ macro_rules! documents {
 
 documents!(para, skips, hbox, setbox, vbox, pages, fonts, shape, leave, show, ship, disc, math1, math2, math3, math4, onepiece);
 
+// An output routine that sets `\vsize`, `\maxdepth` and `\topskip`
+// globally, every other page, while one paragraph's lines are contributed
+// in one call of the page builder: each page after a routine is frozen at
+// what the routine left (tex.web 1026: `build_page` again, 987).
+documents!(vsizeout);
+
 macro_rules! etex_documents {
     ($($name:ident),* $(,)?) => {
         $(#[test] fn $name() { check_etex(stringify!($name)); })*

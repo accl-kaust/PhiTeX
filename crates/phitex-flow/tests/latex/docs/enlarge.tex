@@ -1,0 +1,12 @@
+\documentclass{book}
+\begin{document}
+\newcount\n
+\def\para{\global\advance\n1 Paragraph \the\n. Some text that fills a line or two of the page, and more words to make it wrap around once at least.\par}
+\def\ten{\para\para\para\para\para\para\para\para\para\para}
+\ten\ten
+\begin{table}\centering\fbox{\vrule height 3cm width 2cm}\caption{A}\end{table}
+\enlargethispage{1\baselineskip}
+\section{B}
+Text.\footnote{A footnote.} More.
+\ten\ten\ten\ten\ten\ten\ten\ten\ten\ten
+\end{document}
