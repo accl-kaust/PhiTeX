@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::{self, BufRead};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::hash::{fnv1a, fnv1a_with};
 use crate::record::same_file;
@@ -235,13 +235,50 @@ impl Graph {
             .position(|n| n.call == Some((idx(begin), args)))
     }
 
+    /// How many steps the trace has.
+    #[must_use]
+    pub fn steps(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// A step's name (the primitive's, the macro's, the character class).
+    #[must_use]
+    pub fn name(&self, i: usize) -> &str {
+        &self.names[self.nodes[i].name as usize]
+    }
+
+    /// A step's kind.
+    #[must_use]
+    pub fn kind(&self, i: usize) -> Kind {
+        self.nodes[i].kind
+    }
+
+    /// A step's input line, as the log last reported it.
+    #[must_use]
+    pub fn line(&self, i: usize) -> Option<u32> {
+        self.nodes[i].line
+    }
+
+    /// The steps a step's reads bind to, with the field read.
+    pub fn deps(&self, i: usize) -> impl Iterator<Item = (usize, &str)> + '_ {
+        self.preds(i)
+            .iter()
+            .map(|&(from, _, f)| (from as usize, self.fields[f as usize].as_str()))
+    }
+
+    /// The longest def-use chain over the whole trace, in steps.
+    #[must_use]
+    pub fn critical_path(&self) -> u64 {
+        u64::from(self.longest.iter().copied().max().unwrap_or(0))
+    }
+
     fn is_par(&self, i: usize) -> bool {
         self.nodes[i].kind == Kind::Primitive && self.names[self.nodes[i].name as usize] == "\\par"
     }
 }
 
 /// Quantiles of a distribution.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Quantiles {
     pub p50: f64,
     pub p90: f64,
@@ -272,7 +309,7 @@ fn quantiles(values: &mut [f64]) -> Quantiles {
 }
 
 /// The graph's shape over a range of steps.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PartStats {
     pub steps: u64,
     pub fields: u64,
@@ -282,7 +319,7 @@ pub struct PartStats {
 }
 
 /// A region kind's summary: averages over its regions.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RegionStats {
     pub regions: u64,
     pub avg_steps: f64,
@@ -291,7 +328,7 @@ pub struct RegionStats {
 }
 
 /// Everything the analyzer reports.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Report {
     pub main: String,
     pub steps: u64,
@@ -425,7 +462,7 @@ impl Graph {
             unknown_reads: self.reads.iter().filter(|&&r| r == UNKNOWN).count() as u64,
             ..Report::default()
         };
-        report.critical_path = u64::from(self.longest.iter().copied().max().unwrap_or(0));
+        report.critical_path = self.critical_path();
         report.critical_path_pct = pct(report.critical_path, steps);
         let mut chain: Vec<f64> = self.longest.iter().map(|&l| f64::from(l)).collect();
         report.chain_length = quantiles(&mut chain);
@@ -591,6 +628,31 @@ pub fn markdown(r: &Report) -> String {
             s,
             "| {name}: regions / avg steps / avg reads from outside / avg visible writes | {} / {:.1} / {:.1} / {:.1} |",
             g.regions, g.avg_steps, g.avg_reads_from_outside, g.avg_visible_writes
+        );
+    }
+    s
+}
+
+/// Several reports as one Markdown table, a row per document.
+#[must_use]
+pub fn table(reports: &[Report]) -> String {
+    let mut s = String::from(
+        "| document | steps | fields | critical path | edit impact p50 / p99 (% of steps) | memo repeat | preamble summary |\n|---|---|---|---|---|---|---|\n",
+    );
+    for r in reports {
+        let _ = writeln!(
+            s,
+            "| `{}` | {} | {} | {} ({:.2}%) | {:.3} / {:.3} | {:.3} | {} |",
+            r.main.trim_start_matches("./"),
+            r.steps,
+            r.fields,
+            r.critical_path,
+            r.critical_path_pct,
+            r.edit_impact_pct.p50,
+            r.edit_impact_pct.p99,
+            r.memo_repeat_fraction,
+            r.preamble_summary_size
+                .map_or_else(|| "-".to_owned(), |n| n.to_string())
         );
     }
     s
