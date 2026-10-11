@@ -1573,6 +1573,36 @@ struct State {
     /// running that could change that): the pieces' states then. The
     /// build fails with it, never hangs.
     stalled: Option<String>,
+    /// `PHITEX_RERUN`: why each settled piece runs again (none: off).
+    rerun_log: Option<Vec<RerunNote>>,
+    /// The definition the next [`mark_from`] answers to (set only while
+    /// `rerun_log` is on).
+    mark_src: MarkSrc,
+}
+
+/// What made a settled piece run again (`PHITEX_RERUN`).
+#[derive(Clone, Debug)]
+enum MarkSrc {
+    /// A mark the round began with (the layout's, or the last round's).
+    Carried,
+    /// A definition at a place: `(k, END)` piece k's export, else one
+    /// between its nodes (the page builder's, an output routine's); the
+    /// value there now.
+    At(Pos, Option<Val>),
+    /// The page builder's quantity as the scan has it.
+    Page(Val),
+}
+
+/// A settled piece marked to run again (`PHITEX_RERUN`): the piece, its
+/// text's length, the name, from which node, what answered it, and the
+/// value its run had read.
+struct RerunNote {
+    k: usize,
+    len: usize,
+    key: Key,
+    from: u32,
+    src: MarkSrc,
+    old: Option<Val>,
 }
 
 struct Shared {
@@ -2925,6 +2955,8 @@ impl Build {
             memo_new: Vec::new(),
             last_readers: FxMap::default(),
             stalled: None,
+            rerun_log: std::env::var_os("PHITEX_RERUN").map(|_| Vec::new()),
+            mark_src: MarkSrc::Carried,
         };
         for (k, key) in marks {
             mark(&mut state, k, key);
@@ -3035,6 +3067,10 @@ impl Build {
         self.readers = sh.readers;
         self.run_times = sh.run_times.into_inner().expect("run times");
         self.read_cmds = sh.read_cmds.into_inner().expect("read commands");
+        if let Some(notes) = st.rerun_log.take() {
+            write_reruns(&notes, &sh.names, sh.build_no, st.p.len());
+            st.rerun_log = Some(Vec::new());
+        }
         if let Some(ev) = &sh.sched {
             let waits = (sh.lock_wait.load(Ordering::Relaxed), sh.lock_n.load(Ordering::Relaxed));
             write_sched(&ev.lock().expect("sched"), &st, threads, sh.build_no, sh.t_base.elapsed(), waits);
@@ -3769,6 +3805,48 @@ fn ready_count(g: &State, sh: &Shared) -> u64 {
     g.unstarted.iter().filter(|&&k| entry_ready(g, k, speculate && !g.p[k].suspend)).take(255).count() as u64
 }
 
+/// Appends a round's reruns to the file `PHITEX_RERUN` names: a line
+/// `R build pieces`, then per settled piece marked to run again `M k len
+/// name from-node source old new`, the source `carried` (the round began
+/// with it), `piece k` (piece k's export), `fold k n` (a definition
+/// between piece k's nodes n and n+1: the page builder's, an output
+/// routine's) or `page` (the page builder's quantity as the scan has it);
+/// the values as `Debug` text, cut to 100 characters.
+fn write_reruns(notes: &[RerunNote], names: &Names, build_no: u64, pieces: usize) {
+    use std::io::Write as _;
+    let Some(path) = std::env::var_os("PHITEX_RERUN") else { return };
+    let cut = |v: Option<&Val>| -> String {
+        v.map_or_else(|| "-".to_string(), |v| format!("{v:?}").replace(['\t', '\n'], " ").chars().take(100).collect())
+    };
+    let mut s = String::new();
+    let _ = writeln!(s, "R\t{build_no}\t{pieces}");
+    for n in notes {
+        let name = match &n.key {
+            Key::Cs(c) => format!("\\{}", names.cs.name(*c)),
+            k => format!("{k:?}"),
+        };
+        let (src, new) = match &n.src {
+            MarkSrc::Carried => ("carried".to_string(), None),
+            MarkSrc::At((p, END), v) => (format!("piece {p}"), v.as_ref()),
+            MarkSrc::At((p, i), v) => (format!("fold {p} {i}"), v.as_ref()),
+            MarkSrc::Page(v) => ("page".to_string(), Some(v)),
+        };
+        let _ = writeln!(
+            s,
+            "M\t{}\t{}\t{}\t{}\t{src}\t{}\t{}",
+            n.k,
+            n.len,
+            name.replace(['\t', '\n'], " "),
+            n.from,
+            cut(n.old.as_ref()),
+            cut(new)
+        );
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(s.as_bytes());
+    }
+}
+
 /// Appends the slow nodes' notes to the file `PHITEX_SCHED` names.
 fn write_notes(notes: &[String]) {
     use std::io::Write as _;
@@ -4187,6 +4265,12 @@ fn mark_from(g: &mut State, k: usize, key: Key, from: u32) -> bool {
     // yet but that had settled)
     if k < g.settled {
         g.settled = k;
+    }
+    if let Some(log) = &mut g.rerun_log
+        && g.p[k].status == Status::Done
+    {
+        let old = g.p[k].run.as_ref().and_then(|r| r.values_read(&key).first().map(|x| x.2.clone()));
+        log.push(RerunNote { k, len: g.p[k].text.len(), key: key.clone(), from, src: g.mark_src.clone(), old });
     }
     let ps = &mut g.p[k];
     dirty_from(&mut ps.dirty, key, from);
@@ -5796,6 +5880,9 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
             if outer_still(&g, sh, r, &key) {
                 continue;
             }
+            if g.rerun_log.is_some() {
+                g.mark_src = MarkSrc::At((k as u32, END), sh.names.at(&key, (k as u32, END)));
+            }
             if mark(&mut g, r, key) {
                 sh.done[r].store(false, Ordering::Release);
             } else if g.p[r].status == Status::Running {
@@ -6725,6 +6812,9 @@ fn changed_at(g: &mut State, sh: &Shared, pos: Pos, keys: Vec<Key>) -> bool {
     sh.names_gen.store(g.names_log.len(), Ordering::Release);
     let any = !marks.is_empty();
     for (r, key, from) in marks {
+        if g.rerun_log.is_some() {
+            g.mark_src = MarkSrc::At(pos, sh.names.at(&key, pos));
+        }
         if mark_from(g, r, key, from) {
             sh.done[r].store(false, Ordering::Release);
         } else if g.p[r].status == Status::Running {
@@ -6813,6 +6903,9 @@ fn check_page_reads(sh: &Shared, scan: &Scan, k: usize, reads: &[(u8, u32, Val)]
         sh.names.set_fold_value(&key, (k as u32, *node), now.clone());
         if now != *read {
             let mut g = lock(sh);
+            if g.rerun_log.is_some() {
+                g.mark_src = MarkSrc::Page(now.clone());
+            }
             if mark_from(&mut g, k, key, *node) {
                 sh.done[k].store(false, Ordering::Release);
             } else if g.p[k].status == Status::Running {
