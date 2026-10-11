@@ -992,3 +992,75 @@ fn output_routine_definition_set() {
     assert_eq!(s.prefixes.get("cs:\\q"), Some(&false));
     assert!(s.unbounded.is_empty(), "{:?}", s.unbounded);
 }
+
+/// The kernel's `\output {` (ltoutput's part of `latex.ltx`) is read as
+/// the control sequence, under no catcode hazard.
+#[test]
+#[ignore = "reads the installed latex.ltx"]
+fn latex_ltx_output_is_a_control_sequence() {
+    let path = std::env::var("PHITEX_LATEX_LTX")
+        .unwrap_or_else(|_| "/usr/share/texmf-dist/tex/latex/base/latex.ltx".into());
+    let t = std::fs::read_to_string(path).unwrap();
+    let at = t.find("\n\\output {").expect("\\output {") + 1;
+    let (p, _) = pass(&t, FileKind::Package);
+    for h in &p.hazards {
+        assert!(
+            !(h.start <= at && at < h.end),
+            "hazard {} covers \\output",
+            h.cause
+        );
+    }
+    let tok = p
+        .tokens
+        .iter()
+        .find(|k| k.start == at)
+        .expect("a token at \\output");
+    assert_eq!(
+        (tok.kind, &t[tok.start..tok.end]),
+        (TokKind::Cs, "\\output")
+    );
+}
+
+/// latex.ltx 8787: `\lowercase`'s braces are not a group (§1285 reads
+/// them with `scan_toks`, §473), so the `\egroup` in them ends the
+/// `\bgroup` before, once the argument is read.
+#[test]
+fn a_group_ended_in_an_argument_ends_after_it() {
+    let t = r"\bgroup\catcode`\ =11\relax\lowercase{\egroup}\x";
+    let (p, _) = pass(t, FileKind::Package);
+    assert_eq!(p.hazards[0].end, t.rfind('}').unwrap());
+    let x = p.tokens.last().unwrap();
+    assert_eq!((x.kind, x.tz), (TokKind::Cs, Status::Known));
+}
+
+/// latex.ltx 9649: `[` and `]` made the group's characters and `{` a
+/// letter (§1232); the character after `` \catcode` `` is a number's,
+/// never a group's (§442).
+#[test]
+fn other_characters_can_open_and_close_groups() {
+    let t = r"{\catcode`[=1 \catcode`]=2
+\catcode`{=11 \catcode`}=11
+\gdef\a[{]
+]\x";
+    let (p, _) = pass(t, FileKind::Package);
+    let x = p.tokens.last().unwrap();
+    assert_eq!((x.kind, x.tz), (TokKind::Cs, Status::Known));
+    let opens: Vec<&str> = p
+        .braces
+        .iter()
+        .map(|b| text_of(t, &p.tokens[b.open]))
+        .collect();
+    assert_eq!(opens, ["{", "["]);
+    assert!(p.hazards.iter().all(|h| h.end == t.rfind(']').unwrap()));
+}
+
+/// latex.ltx 15436: `|` made an escape character (§1232) starts control
+/// sequences, so `|endgroup` ends the group.
+#[test]
+fn another_escape_character_starts_control_sequences() {
+    let t = r"\begingroup\catcode`|=0 |gdef|a{}|endgroup\x";
+    let (p, _) = pass(t, FileKind::Package);
+    let names: Vec<&str> = p.items.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(names, ["begingroup", "catcode", "gdef", "endgroup", "x"]);
+    assert_eq!(p.tokens.last().unwrap().tz, Status::Known);
+}
