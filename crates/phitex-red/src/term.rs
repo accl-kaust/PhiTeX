@@ -135,27 +135,23 @@ pub enum Emit {
     Diag(Arc<crate::diag::Diag>),
 }
 
-/// A reduced node: its op, the input it consumed, every read with the value seen, its result.
+/// A reduced node: its op, the input it consumed, every read with the value
+/// seen, its result. In SSA terms: `uses` are its edges to the definitions it
+/// read (`DefId`s), `cells` the definitions it made (in the order its delta
+/// makes them), `reads` the values it saw (for answered keys, the only record).
 #[derive(Clone, Debug)]
 pub struct Node {
     pub op: Op,
     pub spans: Vec<Span>,
     pub reads: Vec<(Key, Val)>,
+    /// Def-use edges: each name read from before the node, with the definition that reached it.
+    pub uses: Vec<(Key, crate::env::DefId)>,
+    /// The definitions this node made, in delta order (`Change::Def`,
+    /// `Change::Replace`: one each; `Change::OpenList`: four, the list's keys).
+    pub cells: Vec<Arc<crate::env::DefCell>>,
     pub out: Out,
     /// The thunk after it.
     pub next: Thunk,
-}
-
-/// What is kept at a paragraph boundary when interior nodes are dropped
-/// (`retain.rs`): enough to re-reduce from here and to decide reuse.
-#[derive(Clone, Debug)]
-pub struct Checkpoint {
-    /// The thunk at the boundary (its input position and env).
-    pub thunk: Thunk,
-    /// `thunk.env.hash()`, cached.
-    pub env_hash: u128,
-    /// The page fold's state when the main list reached here.
-    pub fold: Arc<crate::page::Fold>,
-    /// Index of the first node after the boundary in the chain.
-    pub node: NodeId,
+    /// The edit epoch its spans and inputs are in (`Graph::input_now`).
+    pub epoch: u32,
 }

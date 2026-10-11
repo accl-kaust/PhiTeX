@@ -1,6 +1,7 @@
 //! The environment: a persistent map name → value, with group and list scopes.
 //! Bodies owned by A1; signatures are the contract.
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 
 use crate::tok::Toks;
 use crate::val::{Key, Val};
@@ -66,8 +67,18 @@ impl Env {
     pub fn lookup(&self, key: &Key) -> Val {
         crate::graph::env_lookup(self, key)
     }
+    /// The env after `d`, with fresh definition cells.
     pub fn apply(&self, d: &Delta) -> Env {
         crate::graph::env_apply(self, d)
+    }
+    /// The env after `d`, its definitions bound to `cells` (in delta order,
+    /// as `Node::cells`): the node's own definitions, kept across re-reductions.
+    pub fn apply_cells(&self, d: &Delta, cells: &[Arc<DefCell>]) -> Env {
+        crate::graph::env_apply_cells(self, d, cells)
+    }
+    /// The definition reaching `k` here (0: its initial value).
+    pub fn def_of(&self, k: &Key) -> DefId {
+        crate::graph::env_def(self, k)
     }
     pub fn group_kind(&self) -> GroupKind {
         crate::graph::env_group_kind(self)
@@ -86,11 +97,61 @@ impl Env {
     }
 }
 
-impl Env {
-    /// A hash of everything this env answers (definitions, scope chains),
-    /// maintained incrementally: equal hashes mean equal envs (128 bits; a
-    /// collision is treated as impossible). O(1).
-    pub fn hash(&self) -> u128 {
-        crate::graph::env_hash(self)
+
+/// A definition's identity: unique in the session (`DefCell::new` numbers
+/// them). 0: a key's initial value (never redefined, never a use edge).
+pub type DefId = u64;
+
+static NEXT_DEF: AtomicU64 = AtomicU64::new(1);
+
+/// The next definition id (graphs remember where theirs begin).
+pub fn next_def_id() -> DefId {
+    NEXT_DEF.load(Ordering::Relaxed)
+}
+
+/// One definition: the SSA value a name is bound to. Every env that the
+/// definition reaches holds this cell, so re-reducing its node with the same
+/// shape updates the value in place for all of them (`DefCell::set`). A cell
+/// may be forwarded to an equal older one (`forward`) when an edit realigns
+/// on it: readers follow the forward.
+#[derive(Debug)]
+pub struct DefCell {
+    pub id: DefId,
+    val: RwLock<Val>,
+    fwd: RwLock<Option<Arc<DefCell>>>,
+}
+
+impl DefCell {
+    pub fn new(val: Val) -> Arc<DefCell> {
+        Arc::new(DefCell { id: NEXT_DEF.fetch_add(1, Ordering::Relaxed), val: RwLock::new(val), fwd: RwLock::new(None) })
+    }
+    /// The cell this one stands for (itself unless forwarded).
+    pub fn resolved(self: &Arc<Self>) -> Arc<DefCell> {
+        let mut c = self.clone();
+        loop {
+            let f = c.fwd.read().unwrap().clone();
+            match f {
+                Some(n) => c = n,
+                None => return c,
+            }
+        }
+    }
+    pub fn val(self: &Arc<Self>) -> Val {
+        self.resolved().val.read().unwrap().clone()
+    }
+    /// The id readers' use edges name.
+    pub fn id_now(self: &Arc<Self>) -> DefId {
+        self.resolved().id
+    }
+    /// Updates the value in place (the node that made it was re-reduced with the same shape).
+    pub fn set(self: &Arc<Self>, v: Val) {
+        *self.resolved().val.write().unwrap() = v;
+    }
+    /// From now on this cell stands for `to` (equal value; an edit realigned).
+    pub fn forward(self: &Arc<Self>, to: &Arc<DefCell>) {
+        let to = to.resolved();
+        if !Arc::ptr_eq(&self.resolved(), &to) {
+            *self.fwd.write().unwrap() = Some(to);
+        }
     }
 }

@@ -1,21 +1,16 @@
-//! A3: edits: CST splices → un-reduction of touched nodes → re-reduction,
-//! reusing old nodes whose reads still hold; equal outputs stop propagation.
-//!
-//! An edit is a set of byte changes per text. A node whose consumed spans
-//! (or its untaken arm) touch a change is un-reduced: the chain is cut back
-//! to the thunk before the earliest such node, its input remapped onto the
-//! new texts, and reduction restarts there. At every new thunk we look for
-//! the old node that started at the same (mapped) input; if all of its reads
-//! hold in the new env, it is reused — and so are the old nodes after it,
-//! while theirs hold (memoized un-reduction). Nodes whose reads changed are
-//! re-applied; a re-applied node with the same emits as the old one counts
-//! as unchanged for the folds downstream (page builder, PDF).
-use std::collections::HashMap;
+//! Edits as SSA propagation: the nodes whose consumed text an edit touches are
+//! dirty; a dirty node is re-reduced where it stands; definitions whose value
+//! changed dirty their users (def→use edges), a changed rest of input or
+//! shape of definitions continues sequentially until the chains meet again.
+//! Nothing else is visited: no walk to the end, no state comparison.
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
 use crate::graph::Graph;
-use crate::term::{Input, Node, Op, Span, Src, TextId, Thunk};
+use crate::env::{Change, DefCell, Env};
+use crate::term::{Emit, Input, Node, NodeId, Op, Span, Src, TextId, Thunk};
+use crate::val::Key;
 
 /// One change to one text, in the OLD text's byte offsets: `from..to` was
 /// replaced by `inserted` bytes.
@@ -74,7 +69,7 @@ impl Changes {
 #[derive(Clone, Debug)]
 pub struct Chain {
     pub start: Thunk,
-    pub nodes: Vec<Node>,
+    pub nodes: Vec<Arc<Node>>,
 }
 
 /// Where a node of the new chain came from.
@@ -121,14 +116,18 @@ impl Report {
     }
 }
 
-/// Positions in the old texts → the new ones.
-struct Map {
+/// Positions in one epoch's texts → the next epoch's (one edit).
+#[derive(Debug)]
+pub struct EditMap {
     edits: HashMap<TextId, Vec<TextEdit>>,
     data: HashMap<TextId, Arc<str>>,
 }
 
-impl Map {
-    fn pos(&self, text: TextId, p: u32) -> u32 {
+impl EditMap {
+    pub fn new(changes: &Changes) -> EditMap {
+        EditMap { edits: changes.sorted(), data: changes.data.clone() }
+    }
+    pub fn pos(&self, text: TextId, p: u32) -> u32 {
         let Some(es) = self.edits.get(&text) else { return p };
         let mut shift: i64 = 0;
         for e in es {
@@ -144,22 +143,18 @@ impl Map {
         (i64::from(p) + shift) as u32
     }
 
-    fn span(&self, s: Span) -> Span {
+    pub fn span(&self, s: Span) -> Span {
         Span { text: s.text, from: self.pos(s.text, s.from), to: self.pos(s.text, s.to) }
     }
 
     /// Closed overlap: an insertion at a span's edge touches it (a run of
     /// characters or a scanned number could have read further).
-    fn touches(&self, s: &Span) -> bool {
+    pub fn touches(&self, s: &Span) -> bool {
         self.edits.get(&s.text).is_some_and(|es| es.iter().any(|e| s.from <= e.to && e.from <= s.to))
     }
 
-    fn node_touched(&self, n: &Node) -> bool {
-        n.spans.iter().any(|s| self.touches(s))
-            || matches!(&n.op, Op::Select { untaken: Some(s), .. } if self.touches(s))
-    }
 
-    fn src(&self, s: &Src) -> Src {
+    pub fn src(&self, s: &Src) -> Src {
         match s {
             Src::Text { text, data, pos, line, line_end, eol, ending } => {
                 let Some(new) = self.data.get(text) else { return s.clone() };
@@ -184,7 +179,7 @@ impl Map {
         }
     }
 
-    fn input(&self, i: &Input) -> Input {
+    pub fn input(&self, i: &Input) -> Input {
         let mut v = Vec::new();
         let mut cur = i.clone();
         while let Some(s) = cur.top() {
@@ -196,16 +191,6 @@ impl Map {
             out = out.push(s);
         }
         out
-    }
-
-    fn node(&self, n: &Node) -> Node {
-        let mut m = n.clone();
-        m.spans = n.spans.iter().map(|s| self.span(*s)).collect();
-        if let Op::Select { taken, untaken } = &n.op {
-            m.op = Op::Select { taken: *taken, untaken: untaken.map(|s| self.span(s)) };
-        }
-        m.next = Thunk { env: n.next.env.clone(), input: self.input(&n.next.input) };
-        m
     }
 }
 
@@ -297,136 +282,307 @@ fn in_key(i: &Input) -> InKey {
     InKey { depth, head, text }
 }
 
-fn reads_hold(g: &Graph, t: &Thunk, n: &Node) -> bool {
-    n.reads.iter().all(|r| g.holds(t, &r.0, &r.1))
-}
-
-/// Applies `changes` to the chain: returns the new chain and what changed.
+/// Applies `changes`: the nodes whose consumed text they touch are dirty,
+/// then dirtiness propagates along def→use and input edges (`propagate`).
 pub fn update(graph: &Graph, old: &Chain, changes: &Changes) -> (Chain, Report) {
-    let map = Map { edits: changes.sorted(), data: changes.data.clone() };
-    let n = old.nodes.len();
-    let touched: Vec<bool> = old.nodes.iter().map(|x| map.node_touched(x)).collect();
-    let mut report = Report::default();
-    let first = touched.iter().position(|&t| t);
+    let map = EditMap::new(changes);
+    let mut dirty = BTreeSet::new();
+    for (i, n) in old.nodes.iter().enumerate() {
+        let touched = n.spans.iter().any(|s| map.touches(&graph.span_now(*s, n.epoch)))
+            || matches!(&n.op, Op::Select { untaken: Some(s), .. } if map.touches(&graph.span_now(*s, n.epoch)));
+        // `\inputlineno` readers after an edit of their text
+        let line_reader = n.reads.iter().any(|(k, _)| *k == crate::val::Key::LineNo)
+            && n.spans.first().is_some_and(|s| {
+                let s = graph.span_now(*s, n.epoch);
+                map.edits.get(&s.text).is_some_and(|es| es.iter().any(|e| e.from <= s.from))
+            });
+        if touched || line_reader {
+            dirty.insert(i);
+        }
+    }
+    let first = dirty.first().copied();
+    graph.push_epoch(map);
+    let (chain, mut report) = propagate(graph, old, dirty);
     report.first_touched = first;
+    (chain, report)
+}
 
-    let start = Thunk { env: old.start.env.clone(), input: map.input(&old.start.input) };
-    let Some(k) = first else {
-        // nothing consumed was touched (e.g. text after `\end`): offsets only
-        let nodes: Vec<Node> = old.nodes.iter().map(|x| map.node(x)).collect();
-        report.origin = (0..n).map(Origin::Kept).collect();
-        return (Chain { start, nodes }, report);
-    };
+/// The old chain's nodes by arena id → position.
+fn positions(g: &Graph, nodes: &[Arc<Node>]) -> HashMap<NodeId, usize> {
+    let _ = g;
+    nodes.iter().enumerate().map(|(i, n)| (Graph::id_of(n), i)).collect()
+}
 
-    let mut nodes: Vec<Node> = old.nodes[..k].iter().map(|x| map.node(x)).collect();
-    report.origin = (0..k).map(Origin::Kept).collect();
-    let mut thunk = if k == 0 { start.clone() } else { nodes[k - 1].next.clone() };
-
-    // the old inputs each later node started from, remapped; indexed by key
-    let pre: Vec<Option<Input>> = (0..n)
-        .map(|j| {
-            if j < k || touched[j] {
-                None
-            } else {
-                let i = if j == 0 { &old.start.input } else { &old.nodes[j - 1].next.input };
-                Some(map.input(i))
+/// Keys a delta defines (list keys included for a list it opens).
+fn defined_keys(d: &crate::env::Delta, out: &mut HashSet<Key>) {
+    for c in &d.0 {
+        match c {
+            Change::Def { key, .. } | Change::Replace { key, .. } => {
+                out.insert(key.clone());
             }
-        })
-        .collect();
-    let mut index: HashMap<InKey, Vec<usize>> = HashMap::new();
-    for (j, p) in pre.iter().enumerate() {
-        if let Some(i) = p {
-            index.entry(in_key(i)).or_default().push(j);
+            _ => {}
         }
     }
+}
 
-    let mut cursor = k; // old nodes before it are accounted for
-    let mark_dropped = |report: &mut Report, from: usize, to: usize| {
-        report.dropped.extend(from..to);
+/// Marks the readers of what a changed list content affects: the node that
+/// closes the list (it gathers the items) and the nodes before it that read
+/// the list's tail. `from` is the first old node after the change.
+fn dirty_list_readers(old: &[Arc<Node>], from: usize, dirty: &mut BTreeSet<usize>) {
+    let mut depth = 0i32;
+    for (j, n) in old.iter().enumerate().skip(from) {
+        if n.reads.iter().any(|(k, _)| matches!(k, Key::Tail) || matches!(k, Key::Other(0, x) if crate::graph::pk::class(*x) == crate::graph::pk::class(crate::graph::pk::CHAIN)))
+        {
+            dirty.insert(j);
+        }
+        for e in &n.out.emits {
+            match e {
+                Emit::Open(_) => depth += 1,
+                Emit::Close => {
+                    if depth == 0 {
+                        dirty.insert(j);
+                        return;
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        // a list closed by a node that gathers it without an Emit::Close (the outer list)
+        if depth < 0 {
+            return;
+        }
+    }
+}
+
+/// Whether the new env `a` (at a realignment candidate) binds every key of
+/// `keys`, every open group's snapshot of them and every open list's keys as
+/// the old env `b` does: the same definitions, or equal values (then the new
+/// cell is forwarded to the old, so later readers keep one definition).
+fn envs_meet(g: &Graph, a: &Env, b: &Env, keys: &HashSet<Key>) -> bool {
+    let (ra, rb) = (&*a.inner, &*b.inner);
+    if ra.depth() != rb.depth() || ra.list.depth != rb.list.depth {
+        return false;
+    }
+    let mut pairs: Vec<(Arc<DefCell>, Arc<DefCell>)> = Vec::new();
+    let entry_pair = |x: Option<&crate::graph::Entry>, y: Option<&crate::graph::Entry>, pairs: &mut Vec<(Arc<DefCell>, Arc<DefCell>)>| -> bool {
+        match (x, y) {
+            (None, None) => true,
+            (Some(x), Some(y)) => {
+                if x.cell.id_now() == y.cell.id_now() {
+                    return true;
+                }
+                if x.level == y.level && x.cell.val() == y.cell.val() {
+                    pairs.push((x.cell.clone(), y.cell.clone()));
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
     };
+    for k in keys {
+        if !entry_pair(ra.defs.get(k), rb.defs.get(k), &mut pairs) {
+            return false;
+        }
+    }
+    // groups: kinds, after-tokens, snapshots and globals of the keys
+    let (mut fa, mut fb) = (ra.group.clone(), rb.group.clone());
+    while let (Some(x), Some(y)) = (fa.clone(), fb.clone()) {
+        if x.kind != y.kind || x.after_toks() != y.after_toks() {
+            return false;
+        }
+        for k in keys {
+            if !entry_pair(x.snap.get(k), y.snap.get(k), &mut pairs) {
+                return false;
+            }
+        }
+        let gx: Vec<(Key, crate::graph::Entry)> = crate::graph::cons_list(&x.globals);
+        let gy: Vec<(Key, crate::graph::Entry)> = crate::graph::cons_list(&y.globals);
+        if gx.len() != gy.len() {
+            return false;
+        }
+        for ((k1, e1), (k2, e2)) in gx.iter().zip(&gy) {
+            if k1 != k2 || !entry_pair(Some(e1), Some(e2), &mut pairs) {
+                return false;
+            }
+        }
+        if crate::graph::cons_list(&x.locals) != crate::graph::cons_list(&y.locals) {
+            return false;
+        }
+        fa = x.up.clone();
+        fb = y.up.clone();
+    }
+    // lists: modes and list keys
+    let (mut la, mut lb) = (Some(ra.list.clone()), Some(rb.list.clone()));
+    while let (Some(x), Some(y)) = (la.clone(), lb.clone()) {
+        if x.mode != y.mode {
+            return false;
+        }
+        for w in 0..4 {
+            let (cx, cy) = (&x.vals[w], &y.vals[w]);
+            if cx.id_now() != cy.id_now() {
+                if cx.val() != cy.val() {
+                    return false;
+                }
+                pairs.push((cx.clone(), cy.clone()));
+            }
+        }
+        la = x.up.clone();
+        lb = y.up.clone();
+    }
+    // one definition per value from here on: the new cells stand for the old
+    for (n, o) in pairs {
+        g.forward_def(&n, &o);
+    }
+    true
+}
 
+/// Re-reduces the dirty nodes of `old` (positions) in document order and
+/// propagates: a re-reduced node with the same shape keeps its definitions
+/// (values updated in place) and dirties the users of those whose value
+/// changed; one whose shape or rest of input differs is followed by
+/// sequential reduction until the new chain meets the old one again (same
+/// input, every differing binding equal). Untouched nodes are kept as they are.
+pub fn propagate(graph: &Graph, old: &Chain, mut dirty: BTreeSet<usize>) -> (Chain, Report) {
+    let n = old.nodes.len();
+    let pos = positions(graph, &old.nodes);
+    let start = Thunk { env: old.start.env.clone(), input: graph.input_now(&old.start.input, 0) };
+    let mut out: Vec<Arc<Node>> = Vec::with_capacity(n);
+    let mut report = Report::default();
+    // the old starts, in the current epoch, by input key (built on first need)
+    let mut index: Option<HashMap<InKey, Vec<usize>>> = None;
+    let mut i = 0usize;
     loop {
-        if graph_halted(graph) {
+        if graph.halted() {
             break;
         }
-        // align with an old node starting at this input
-        let mut counterpart = None;
-        if let Some(c) = index.get(&in_key(&thunk.input)) {
-            let s = c.partition_point(|&j| j < cursor);
-            counterpart = c[s..]
-                .iter()
-                .copied()
-                .find(|&j| pre[j].as_ref().is_some_and(|p| input_eq(p, &thunk.input)));
+        let next = dirty.range(i..).next().copied();
+        let upto = next.unwrap_or(n);
+        for j in i..upto {
+            out.push(old.nodes[j].clone());
+            report.origin.push(Origin::Kept(j));
         }
-        if let Some(mut j) = counterpart {
-            // memoized un-reduction: reuse while reads hold
-            let mut reused = false;
-            while j < n && !touched[j] && reads_hold(graph, &thunk, &old.nodes[j]) {
-                let o = &old.nodes[j];
-                let mut m = map.node(o);
-                m.next = Thunk { env: thunk.env.apply(&o.out.delta), input: m.next.input };
-                mark_dropped(&mut report, cursor, j);
-                report.origin.push(Origin::Kept(j));
-                cursor = j + 1;
-                thunk = m.next.clone();
-                nodes.push(m);
-                j += 1;
-                reused = true;
-            }
-            // the old node at the new thunk (if still aligned) is the re-applied one's counterpart
-            counterpart = if reused {
-                (j < n && !touched[j]).then_some(j)
-            } else {
-                Some(j)
-            };
-            if reused && j >= n {
-                counterpart = None;
-            }
-        }
-        if Graph::done(&thunk) || graph.halted() {
+        i = upto;
+        if next.is_none() {
             break;
         }
-        let node = (*graph.reduce_one(&thunk)).clone();
-        let origin = match counterpart {
-            // same items (definitions may differ: later nodes' reads decide): folds see no change
-            Some(j) if old.nodes[j].out.emits == node.out.emits => {
-                mark_dropped(&mut report, cursor, j);
-                cursor = j + 1;
-                Origin::Same(j)
-            }
-            _ => Origin::New,
+        // re-reduce node i where it stands
+        let thunk = match out.last() {
+            None => start.clone(),
+            Some(p) => Thunk { env: p.next.env.clone(), input: graph.input_now(&p.next.input, p.epoch) },
         };
-        report.origin.push(origin);
-        thunk = node.next.clone();
-        nodes.push(node);
-    }
-    report.dropped.extend(cursor..n);
-    // coalesce the New ones
-    let mut i = 0;
-    while i < report.origin.len() {
-        if report.origin[i] == Origin::New {
-            let s = i;
-            while i < report.origin.len() && report.origin[i] == Origin::New {
-                i += 1;
+        if Graph::done(&thunk) {
+            report.dropped.extend(i..n);
+            break;
+        }
+        let o = old.nodes[i].clone();
+        let (node, changed) = graph.reduce_reusing(&thunk, &o);
+        let old_next = graph.input_now(&o.next.input, o.epoch);
+        let emits_same = node.out.emits == o.out.emits;
+        if let (Some(changed), true) = (&changed, input_eq(&node.next.input, &old_next)) {
+            for d in changed {
+                for u in graph.users_of(*d) {
+                    if let Some(&p) = pos.get(&u)
+                        && p > i
+                    {
+                        dirty.insert(p);
+                    }
+                }
             }
-            report.changed.push(s..i);
-        } else {
+            if !emits_same {
+                dirty_list_readers(&old.nodes, i + 1, &mut dirty);
+            }
+            report.origin.push(if emits_same { Origin::Same(i) } else { Origin::New });
+            out.push(node);
             i += 1;
+            continue;
+        }
+        // the shape or the rest of the input changed: reduce on until the chains meet
+        let mut differ: HashSet<Key> = HashSet::new();
+        defined_keys(&node.out.delta, &mut differ);
+        defined_keys(&o.out.delta, &mut differ);
+        let mut t = node.next.clone();
+        report.origin.push(Origin::New);
+        out.push(node);
+        let idx = index.get_or_insert_with(|| {
+            let mut m: HashMap<InKey, Vec<usize>> = HashMap::new();
+            for j in 0..n {
+                let inp = if j == 0 { start.input.clone() } else { graph.input_now(&old.nodes[j - 1].next.input, old.nodes[j - 1].epoch) };
+                m.entry(in_key(&inp)).or_default().push(j);
+            }
+            m
+        });
+        let mut met = None;
+        loop {
+            if graph.halted() || Graph::done(&t) {
+                break;
+            }
+            // an old node starting here, after i, with the same bindings?
+            if let Some(c) = idx.get(&in_key(&t.input)) {
+                for &k in c.iter().filter(|&&k| k > i) {
+                    let ok_input = {
+                        let inp = graph.input_now(&old.nodes[k - 1].next.input, old.nodes[k - 1].epoch);
+                        input_eq(&inp, &t.input)
+                    };
+                    if ok_input && envs_meet(graph, &t.env, &old.nodes[k - 1].next.env, &differ) {
+                        met = Some(k);
+                        break;
+                    }
+                }
+            }
+            if met.is_some() {
+                break;
+            }
+            let nn = graph.reduce_one(&t);
+            defined_keys(&nn.out.delta, &mut differ);
+            t = nn.next.clone();
+            report.origin.push(Origin::New);
+            out.push(nn);
+        }
+        match met {
+            Some(k) => {
+                report.dropped.extend(i + 1..k);
+                // the old list around the meeting point gathers new items
+                dirty_list_readers(&old.nodes, k, &mut dirty);
+                // dirty nodes skipped over were re-reduced as part of the walk
+                let skipped: Vec<usize> = dirty.range(i..k).copied().collect();
+                for s in skipped {
+                    dirty.remove(&s);
+                }
+                i = k;
+            }
+            None => {
+                report.dropped.extend(i + 1..n);
+                break;
+            }
         }
     }
-    (Chain { start, nodes }, report)
-}
-
-fn graph_halted(g: &Graph) -> bool {
-    g.halted()
-}
-
-/// Un-reduces the main chain from the first node that read one of `keys`
-/// (their answers changed: a loop-back file, an editor buffer); the next
-/// `Graph::reduce` re-reduces from there (memo hits keep what still holds).
-pub fn invalidate_reads(g: &Graph, keys: &[crate::val::Key]) {
-    let nodes = g.nodes();
-    if let Some(i) = nodes.iter().position(|n| n.reads.iter().any(|(k, _)| keys.contains(k))) {
-        g.truncate_chain(i);
+    // coalesce the New ones
+    let mut j = 0;
+    while j < report.origin.len() {
+        if report.origin[j] == Origin::New {
+            let s = j;
+            while j < report.origin.len() && report.origin[j] == Origin::New {
+                j += 1;
+            }
+            report.changed.push(s..j);
+        } else {
+            j += 1;
+        }
     }
+    (Chain { start, nodes: out }, report)
+}
+
+/// The answers of `keys` changed (a loop-back file, an editor buffer): the
+/// nodes that read them are dirty; propagate from them.
+pub fn invalidate_reads(g: &Graph, keys: &[Key]) {
+    let old = g.chain();
+    let dirty: BTreeSet<usize> =
+        old.nodes.iter().enumerate().filter(|(_, n)| n.reads.iter().any(|(k, _)| keys.contains(k))).map(|(i, _)| i).collect();
+    if dirty.is_empty() {
+        return;
+    }
+    let (chain, _) = propagate(g, &old, dirty);
+    g.set_chain(chain);
 }

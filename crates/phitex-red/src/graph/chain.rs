@@ -52,6 +52,13 @@ pub struct Graph {
     /// The texts as the chain was last reduced from them.
     reduced_texts: RwLock<HashMap<TextId, Arc<str>>>,
     finder: RwLock<Option<Finder>>,
+    // ---- SSA bookkeeping
+    /// def → the nodes that read it (`Node::uses`), for definitions made in
+    /// this graph (ids ≥ `first_def`: format and initial values have none).
+    users: RwLock<HashMap<crate::env::DefId, Vec<NodeId>>>,
+    first_def: crate::env::DefId,
+    /// Edit epochs: `maps[e]` maps positions of epoch `e` to epoch `e + 1`.
+    maps: RwLock<Vec<Arc<crate::edit::EditMap>>>,
 }
 
 /// The file finder: a name as TeX asks for it → (the found name, its bytes).
@@ -74,7 +81,82 @@ impl Graph {
             chain: RwLock::new(Vec::new()),
             reduced_texts: RwLock::new(HashMap::new()),
             finder: RwLock::new(None),
+            users: RwLock::new(HashMap::new()),
+            first_def: crate::env::next_def_id(),
+            maps: RwLock::new(Vec::new()),
         }
+    }
+
+    // ---- SSA: def-use edges, epochs
+
+    /// Records node `id`'s use edges.
+    pub fn register_uses(&self, id: NodeId, uses: &[(Key, crate::env::DefId)]) {
+        let mut u = self.users.write().unwrap();
+        for (_, d) in uses {
+            if *d >= self.first_def {
+                u.entry(*d).or_default().push(id);
+            }
+        }
+    }
+    /// Definition `n` (made by an edit) now stands for the equal `o` (the
+    /// chains met): `n`'s readers become `o`'s.
+    pub fn forward_def(&self, n: &Arc<crate::env::DefCell>, o: &Arc<crate::env::DefCell>) {
+        let (ni, oi) = (n.id_now(), o.id_now());
+        if ni == oi {
+            return;
+        }
+        n.forward(o);
+        let mut u = self.users.write().unwrap();
+        if let Some(v) = u.remove(&ni) {
+            u.entry(oi).or_default().extend(v);
+        }
+    }
+    /// The nodes that read definition `d` (some may no longer be in the chain).
+    pub fn users_of(&self, d: crate::env::DefId) -> Vec<NodeId> {
+        self.users.read().unwrap().get(&d).cloned().unwrap_or_default()
+    }
+    /// The current edit epoch.
+    pub fn epoch(&self) -> u32 {
+        self.maps.read().unwrap().len() as u32
+    }
+    /// Starts a new epoch: positions of the current one map through `m`.
+    pub fn push_epoch(&self, m: crate::edit::EditMap) {
+        self.maps.write().unwrap().push(Arc::new(m));
+    }
+    /// The maps from epoch `e` to now.
+    pub fn maps_since(&self, e: u32) -> Vec<Arc<crate::edit::EditMap>> {
+        self.maps.read().unwrap()[(e as usize).min(self.epoch() as usize)..].to_vec()
+    }
+    /// A span of epoch `e`, in the current epoch's positions.
+    pub fn span_now(&self, s: Span, e: u32) -> Span {
+        self.maps_since(e).iter().fold(s, |s, m| m.span(s))
+    }
+    /// An input of epoch `e`, in the current epoch's positions and texts.
+    pub fn input_now(&self, i: &Input, e: u32) -> Input {
+        let ms = self.maps_since(e);
+        if ms.is_empty() {
+            return i.clone();
+        }
+        ms.iter().fold(i.clone(), |i, m| m.input(&i))
+    }
+    /// The thunk a node of the chain started from, in the current epoch.
+    pub fn thunk_before(&self, chain: &[Arc<Node>], start: &Thunk, i: usize) -> Thunk {
+        if i == 0 {
+            Thunk { env: start.env.clone(), input: self.input_now(&start.input, 0) }
+        } else {
+            let p = &chain[i - 1];
+            Thunk { env: p.next.env.clone(), input: self.input_now(&p.next.input, p.epoch) }
+        }
+    }
+
+    /// Re-reduces at the place of `old` from `t`: when the new node makes the
+    /// same shape of definitions, it keeps `old`'s definition cells (values
+    /// updated in place) and returns the definitions whose value changed;
+    /// `None`: the shape differs.
+    pub fn reduce_reusing(&self, t: &Thunk, old: &Node) -> (Arc<Node>, Option<Vec<crate::env::DefId>>) {
+        let mut r = Reducing::new(self, t);
+        let op = r.step();
+        r.finish_reusing(op, Some(old))
     }
 
     // ---- the build's main chain
@@ -118,12 +200,12 @@ impl Graph {
     /// The main chain as `edit.rs` takes it.
     pub fn chain(&self) -> crate::edit::Chain {
         let start = self.root.read().unwrap().clone().unwrap_or_else(|| self.start(self.initial_env(), Input::default()));
-        crate::edit::Chain { start, nodes: self.chain.read().unwrap().iter().map(|n| (**n).clone()).collect() }
+        crate::edit::Chain { start, nodes: self.chain.read().unwrap().clone() }
     }
     /// Replaces the main chain (after `edit::update`).
     pub fn set_chain(&self, c: crate::edit::Chain) {
         *self.root.write().unwrap() = Some(c.start);
-        *self.chain.write().unwrap() = c.nodes.into_iter().map(Arc::new).collect();
+        *self.chain.write().unwrap() = c.nodes;
     }
     /// Keeps the first `n` nodes of the main chain.
     pub fn truncate_chain(&self, n: usize) {
@@ -220,14 +302,36 @@ impl Graph {
 
     /// Appends a node after thunk `at` (used for memo hits, and by the page
     /// builder / output for `Op::Fire`). Its next env is `at.env + delta`.
+    /// Its definitions get fresh cells; its use edges are the definitions
+    /// reaching its reads at `at`.
     pub fn push_node(&self, at: &Thunk, op: Op, spans: Vec<Span>, reads: Vec<(Key, Val)>, out: Out, input: Input) -> Arc<Node> {
-        let env = at.env.apply(&out.delta);
+        let (env, cells) = env_apply_collect(&at.env, &out.delta);
+        let uses: Vec<(Key, crate::env::DefId)> =
+            reads.iter().map(|(k, _)| (k.clone(), at.env.def_of(k))).filter(|(_, d)| *d != 0).collect();
         let mut a = self.arena.write().unwrap();
         let id = a.nodes.len() as NodeId;
-        let n = Arc::new(Node { op, spans, reads, out, next: Thunk { env: env_at(&env, id), input } });
+        let n = Arc::new(Node {
+            op,
+            spans,
+            reads,
+            uses,
+            cells,
+            out,
+            next: Thunk { env: env_at(&env, id), input },
+            epoch: self.epoch(),
+        });
         a.nodes.push(n.clone());
         a.prev.push(at.env.inner.at);
+        drop(a);
+        self.register_uses(id, &n.uses);
         n
+    }
+
+    /// A node reduced elsewhere (a speculative chain) placed after `at`: its
+    /// definitions get fresh cells, its use edges the definitions reaching
+    /// its reads at `at`, its next input `input`.
+    pub fn rebase(&self, at: &Thunk, n: &Node, input: Input) -> Arc<Node> {
+        self.push_node(at, n.op.clone(), n.spans.clone(), n.reads.clone(), n.out.clone(), input)
     }
 
     /// Reduces `t` into exactly one node.

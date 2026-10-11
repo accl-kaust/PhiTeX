@@ -4,6 +4,8 @@
 #[derive(Default)]
 struct Rec {
     reads: Vec<(Key, Val)>,
+    /// Def-use edges of the reads (keys bound in env; answered keys have none).
+    uses: Vec<(Key, crate::env::DefId)>,
     read_set: HashSet<Key>,
     written: HashSet<Key>,
     written_list: HashSet<(u32, u8)>,
@@ -19,6 +21,11 @@ impl Rec {
             self.reads.push((k, v.clone()));
         }
     }
+    fn use_of(&mut self, k: Key, def: crate::env::DefId) {
+        if def != 0 && !self.uses.iter().any(|(u, _)| *u == k) {
+            self.uses.push((k, def));
+        }
+    }
     fn get(&mut self, env: &Env, k: &Key) -> Val {
         let v = env.lookup(k);
         if let Some(w) = list_which(k) {
@@ -28,12 +35,14 @@ impl Rec {
                 } else {
                     Key::Other(pk::TAG, pk::LIST_KEY + 4 * self.l_popped + u32::from(w))
                 };
-                self.record(rk, &v);
+                self.record(rk.clone(), &v);
+                self.use_of(rk, env.def_of(k));
             }
             return v;
         }
         if !self.written.contains(k) {
             self.record(k.clone(), &v);
+            self.use_of(k.clone(), env.def_of(k));
         }
         v
     }
@@ -48,6 +57,8 @@ pub struct Reducing<'g> {
     spans: Vec<Span>,
     emits: Vec<Emit>,
     delta: Vec<Change>,
+    /// The definition cells this node made so far, in delta order.
+    made: Vec<Arc<crate::env::DefCell>>,
     /// Per-reduction answers (speculation's snapshot) over the graph's.
     over: Option<&'g dyn Answers>,
     /// Per-reduction cancel flag (a speculative chain's).
@@ -69,6 +80,7 @@ impl<'g> Reducing<'g> {
             spans: Vec::new(),
             emits: Vec::new(),
             delta: Vec::new(),
+            made: Vec::new(),
             over: None,
             cancel: None,
         }
@@ -80,7 +92,13 @@ impl<'g> Reducing<'g> {
 
     fn change(&mut self, c: Change) {
         let mut r = (*self.env.inner).clone();
-        r.apply_change(&c);
+        let made = &mut self.made;
+        let mut mk = |v: Val| {
+            let cell = crate::env::DefCell::new(v);
+            made.push(cell.clone());
+            cell
+        };
+        r.apply_change(&c, &mut mk);
         self.env = Env { inner: Arc::new(r) };
         self.delta.push(c);
     }
@@ -337,19 +355,50 @@ impl<'g> Reducing<'g> {
 
     /// The node: id, next thunk.
     pub fn finish(self, op: Op) -> Arc<Node> {
+        self.finish_reusing(op, None).0
+    }
+
+    /// The node, its definitions bound to `old`'s cells when `old` (the node
+    /// re-reduced at the same place) made the same shape of definitions:
+    /// their values are updated in place, so every env they reach sees the
+    /// new values. Returns the node and the definitions whose value changed
+    /// (`None`: the shape differs; the node has fresh cells).
+    pub fn finish_reusing(self, op: Op, old: Option<&Node>) -> (Arc<Node>, Option<Vec<crate::env::DefId>>) {
         let g = self.g;
+        let delta = Delta(self.delta);
+        let reuse = old.filter(|o| same_shape(&o.out.delta, &delta) && o.cells.len() == self.made.len());
+        let (cells, next_env, changed) = match reuse {
+            Some(o) => {
+                let mut changed = Vec::new();
+                for (oc, nc) in o.cells.iter().zip(&self.made) {
+                    let nv = nc.val();
+                    if oc.val() != nv {
+                        changed.push(oc.id_now());
+                        oc.set(nv);
+                    }
+                }
+                let env = self.start.env.apply_cells(&delta, &o.cells);
+                (o.cells.clone(), env, Some(changed))
+            }
+            None => (self.made, self.env, None),
+        };
         let mut a = g.arena.write().unwrap();
         let id = a.nodes.len() as NodeId;
         let n = Arc::new(Node {
             op,
             spans: self.spans,
             reads: self.rec.reads,
-            out: Out { delta: Delta(self.delta), emits: self.emits },
-            next: Thunk { env: env_at(&self.env, id), input: self.input },
+            uses: self.rec.uses,
+            cells,
+            out: Out { delta, emits: self.emits },
+            next: Thunk { env: env_at(&next_env, id), input: self.input },
+            epoch: g.epoch(),
         });
         a.nodes.push(n.clone());
         a.prev.push(self.start.env.inner.at);
-        n
+        drop(a);
+        g.register_uses(id, &n.uses);
+        (n, changed)
     }
 
     // ---- lists
@@ -588,27 +637,22 @@ impl Ctx for Reducing<'_> {
     fn close_group(&mut self) {
         let Some(frame) = self.env.inner.group.clone() else { return };
         if self.rec.g_opened > 0 {
-            // Restored entries are values from before the group: read again if used.
-            for (k, _) in frame.saves_vec() {
-                self.rec.written.remove(&k);
-            }
             self.rec.g_opened -= 1;
         } else {
+            // A group opened before this node: what its end restores is read.
             let c = self.rec.g_popped;
             let key = Key::Other(pk::TAG, pk::FRAME + c);
             let v = self.start.env.lookup(&key);
-            if let Val::Data(d) = &v {
-                if let Some(fd) = d.as_any().downcast_ref::<FrameDatum>() {
-                    for (k, _) in &fd.saves {
-                        self.rec.written.insert(k.clone());
-                    }
-                }
-            }
             self.rec.record(key, &v);
             self.rec.g_popped += 1;
         }
         let toks: Toks = Arc::from(frame.after_toks());
         self.change(Change::CloseGroup);
+        // Names bound again to definitions from before the group are reads
+        // from before this node, unless this node made the binding itself.
+        let made: HashSet<crate::env::DefId> = self.made.iter().map(|c| c.id).collect();
+        let env = self.env.clone();
+        self.rec.written.retain(|k| env.inner.defs.get(k).is_some_and(|e| made.contains(&e.cell.id)));
         self.push(toks, TokKind::AfterGroup);
     }
 
@@ -716,4 +760,19 @@ impl Ctx for Reducing<'_> {
     fn halted(&self) -> bool {
         self.stopped()
     }
+}
+
+/// Whether two deltas make the same definitions (keys, scopes) and the same
+/// structure: then a re-reduction can keep the old definition cells.
+fn same_shape(a: &Delta, b: &Delta) -> bool {
+    a.0.len() == b.0.len()
+        && a.0.iter().zip(&b.0).all(|(x, y)| match (x, y) {
+            (Change::Def { key: k1, global: g1, .. }, Change::Def { key: k2, global: g2, .. }) => k1 == k2 && g1 == g2,
+            (Change::Replace { key: k1, .. }, Change::Replace { key: k2, .. }) => k1 == k2,
+            (Change::OpenGroup(a), Change::OpenGroup(b)) => a == b,
+            (Change::AfterGroup(a), Change::AfterGroup(b)) => a == b,
+            (Change::OpenList(a), Change::OpenList(b)) => a == b,
+            (Change::CloseGroup, Change::CloseGroup) | (Change::CloseList, Change::CloseList) => true,
+            _ => false,
+        })
 }

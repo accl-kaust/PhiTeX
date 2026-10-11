@@ -352,7 +352,7 @@ impl Sched {
                 if let Some(ix) = chains.iter().position(|c| c.at == b) {
                     let c = chains.remove(ix);
                     if c.shape == shape(&cur.env) {
-                        let (n, next) = self.adopt(&c, &cur, main_depth, &mut fold, &mut out);
+                        let (n, next) = self.adopt(&graph, &c, &cur, main_depth, &mut fold, &mut out);
                         if n > 0 {
                             cur = next;
                             if ended(out.last().unwrap()) {
@@ -451,7 +451,7 @@ impl Sched {
 
     /// Adopts the chain's nodes onto the real thunk `cur` while every read
     /// holds; returns how many and the real thunk after them.
-    fn adopt(&mut self, c: &Chain, cur: &Thunk, main_depth: u32, fold: &mut Fold, out: &mut Vec<Node>) -> (usize, Thunk) {
+    fn adopt(&mut self, graph: &Graph, c: &Chain, cur: &Thunk, main_depth: u32, fold: &mut Fold, out: &mut Vec<Node>) -> (usize, Thunk) {
         c.cancel.store(true, Ordering::Relaxed);
         let mut nodes = std::mem::take(&mut *c.nodes.lock().unwrap());
         self.spec_nodes.fetch_sub(nodes.len(), Ordering::Relaxed);
@@ -464,12 +464,13 @@ impl Sched {
             if !self.holds(&node, &real, fold, emitted_items) {
                 break;
             }
-            let next = Thunk { env: real.env.apply(&node.out.delta), input: rebase(&node.next.input, &base) };
+            // placed in the real chain: its use edges are the real reaching definitions
+            let placed = graph.rebase(&real, &node, rebase(&node.next.input, &base));
             feed(fold, &real.env, main_depth, &node);
             emitted_items += node.out.emits.iter().filter(|e| matches!(e, Emit::Item(_))).count();
             let end = ended(&node);
-            out.push(Node { next: next.clone(), ..node });
-            real = next;
+            real = placed.next.clone();
+            out.push((*placed).clone());
             n += 1;
             if end {
                 break;

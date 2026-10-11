@@ -23,11 +23,26 @@ pub mod pk {
 
 // ===================================================================== HAMT
 
-#[derive(Clone, Debug, PartialEq)]
+/// A name's binding: the definition reaching it (an SSA value) and TeX's
+/// level it was made at.
+#[derive(Clone, Debug)]
 pub struct Entry {
-    pub val: Val,
+    pub cell: Arc<crate::env::DefCell>,
     /// TeX's level: 1 global/bottom, depth+1 inside groups.
     pub level: u32,
+}
+
+impl Entry {
+    pub fn val(&self) -> Val {
+        self.cell.val()
+    }
+}
+
+impl PartialEq for Entry {
+    /// The same definition, or an equal value at the same level.
+    fn eq(&self, o: &Self) -> bool {
+        self.level == o.level && (self.cell.id_now() == o.cell.id_now() || self.cell.val() == o.cell.val())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -159,65 +174,73 @@ impl Hamt {
 
 // ============================================================ group / list
 
+/// A persistent list (newest first).
 #[derive(Debug)]
-pub struct SaveCell {
-    pub key: Key,
-    pub old: Entry,
-    pub next: Option<Arc<SaveCell>>,
+pub struct Cons<T> {
+    pub head: T,
+    pub next: Option<Arc<Cons<T>>>,
 }
 
-#[derive(Debug)]
-pub struct AfterCell {
-    pub tok: Tok,
-    pub next: Option<Arc<AfterCell>>,
+/// A persistent list's elements, oldest first.
+pub fn cons_list<T: Clone>(c: &Option<Arc<Cons<T>>>) -> Vec<T> {
+    cons_vec(c.clone())
 }
 
-/// One open group: its kind, the entries its local definitions shadowed
-/// (newest first), its `\aftergroup` tokens (newest first).
+fn cons_vec<T: Clone>(mut c: Option<Arc<Cons<T>>>) -> Vec<T> {
+    let mut v = Vec::new();
+    while let Some(x) = c {
+        v.push(x.head.clone());
+        c = x.next.clone();
+    }
+    v.reverse();
+    v
+}
+
+fn cons_push<T>(c: &Option<Arc<Cons<T>>>, head: T) -> Option<Arc<Cons<T>>> {
+    Some(Arc::new(Cons { head, next: c.clone() }))
+}
+
+/// One open group: the bindings when it opened (`snap`), the global
+/// definitions made inside it (oldest first when read), the keys defined
+/// locally at its level, its `\aftergroup` tokens. Its end is
+/// `snap + globals`: no entry-by-entry restore of a save stack.
 #[derive(Clone, Debug)]
 pub struct GroupFrame {
     pub kind: GroupKind,
     pub depth: u32,
-    pub saves: Option<Arc<SaveCell>>,
-    pub after: Option<Arc<AfterCell>>,
+    pub snap: Hamt,
+    pub globals: Option<Arc<Cons<(Key, Entry)>>>,
+    pub locals: Option<Arc<Cons<Key>>>,
+    pub after: Option<Arc<Cons<Tok>>>,
     pub up: Option<Arc<GroupFrame>>,
 }
 
 impl GroupFrame {
-    fn saves_vec(&self) -> Vec<(Key, Entry)> {
-        let mut v = Vec::new();
-        let mut s = self.saves.clone();
-        while let Some(c) = s {
-            v.push((c.key.clone(), c.old.clone()));
-            s = c.next.clone();
-        }
-        v
+    pub fn after_toks(&self) -> Vec<Tok> {
+        cons_vec(self.after.clone())
     }
-    fn after_toks(&self) -> Vec<Tok> {
-        let mut v = Vec::new();
-        let mut a = self.after.clone();
-        while let Some(c) = a {
-            v.push(c.tok);
-            a = c.next.clone();
-        }
-        v.reverse();
+    fn local_keys(&self) -> Vec<Key> {
+        let mut v = cons_vec(self.locals.clone());
+        v.sort();
+        v.dedup();
         v
     }
 }
 
-/// One open list: its mode and list-scope values.
+/// One open list: its mode and its list-scope definitions (spacefactor,
+/// prevdepth, prevgraf, clang), each a definition cell like any other.
 #[derive(Clone, Debug)]
 pub struct ListFrame {
     pub mode: Mode,
     pub depth: u32,
-    /// spacefactor, prevdepth, prevgraf, clang
-    pub vals: [i32; 4],
+    pub vals: [Arc<crate::env::DefCell>; 4],
     pub up: Option<Arc<ListFrame>>,
 }
 
 impl ListFrame {
-    fn new(mode: Mode, depth: u32, up: Option<Arc<ListFrame>>) -> ListFrame {
-        ListFrame { mode, depth, vals: [1000, IGNORE_DEPTH, 0, 0], up }
+    fn new(mode: Mode, depth: u32, up: Option<Arc<ListFrame>>, mk: &mut dyn FnMut(Val) -> Arc<crate::env::DefCell>) -> ListFrame {
+        let vals = [mk(Val::Int(1000)), mk(Val::Int(IGNORE_DEPTH)), mk(Val::Int(0)), mk(Val::Int(0))];
+        ListFrame { mode, depth, vals, up }
     }
     fn up_n(self: &Arc<Self>, c: u32) -> Option<Arc<ListFrame>> {
         let mut f = Some(self.clone());
@@ -246,7 +269,8 @@ pub fn mode_code(m: Mode) -> i32 {
     }
 }
 
-/// The environment's representation: definitions, group chain, list chain.
+/// The environment's representation: the reaching-definition map (key →
+/// definition cell), the group chain, the list chain.
 #[derive(Clone, Debug)]
 pub struct EnvRep {
     pub defs: Hamt,
@@ -258,17 +282,18 @@ pub struct EnvRep {
 
 impl Default for EnvRep {
     fn default() -> Self {
+        let mut mk = |v: Val| crate::env::DefCell::new(v);
         EnvRep {
             defs: Hamt::default(),
             group: None,
-            list: Arc::new(ListFrame::new(Mode::Vertical { inner: false }, 0, None)),
+            list: Arc::new(ListFrame::new(Mode::Vertical { inner: false }, 0, None, &mut mk)),
             at: NO_NODE,
         }
     }
 }
 
 impl EnvRep {
-    fn depth(&self) -> u32 {
+    pub fn depth(&self) -> u32 {
         self.group.as_ref().map_or(0, |g| g.depth)
     }
     fn group_up(&self, c: u32) -> Option<Arc<GroupFrame>> {
@@ -278,68 +303,111 @@ impl EnvRep {
         }
         f
     }
-    fn entry(&self, k: &Key) -> Entry {
-        self.defs.get(k).cloned().unwrap_or_else(|| Entry { val: initial(k), level: 1 })
+    fn entry(&self, k: &Key) -> Option<Entry> {
+        self.defs.get(k).cloned()
     }
-    fn define(&mut self, key: &Key, val: &Val, global: bool) {
+    fn with_frame(&mut self, f: impl FnOnce(&mut GroupFrame)) {
+        if let Some(g) = &self.group {
+            let mut n = (**g).clone();
+            f(&mut n);
+            self.group = Some(Arc::new(n));
+        }
+    }
+    fn define(&mut self, key: &Key, cell: Arc<crate::env::DefCell>, global: bool) {
         if let Some(w) = list_which(key) {
             let mut f = (*self.list).clone();
-            f.vals[w as usize] = val.int();
+            f.vals[w as usize] = cell;
             self.list = Arc::new(f);
             return;
         }
         if global {
-            self.defs = self.defs.insert(key.clone(), Entry { val: val.clone(), level: 1 });
+            let e = Entry { cell, level: 1 };
+            self.defs = self.defs.insert(key.clone(), e.clone());
+            let k = key.clone();
+            self.with_frame(|f| f.globals = cons_push(&f.globals, (k, e)));
             return;
         }
         let level = self.depth() + 1;
+        self.defs = self.defs.insert(key.clone(), Entry { cell, level });
         if level > 1 {
-            let cur = self.entry(key);
-            if cur.level != level {
-                if let Some(g) = &self.group {
-                    let mut f = (**g).clone();
-                    f.saves = Some(Arc::new(SaveCell { key: key.clone(), old: cur, next: g.saves.clone() }));
-                    self.group = Some(Arc::new(f));
-                }
-            }
+            let k = key.clone();
+            self.with_frame(|f| f.locals = cons_push(&f.locals, k));
         }
-        self.defs = self.defs.insert(key.clone(), Entry { val: val.clone(), level });
     }
-    fn apply_change(&mut self, c: &Change) {
+    /// TeX's in-place change (`box(n):=null`, `\wd n:=`): a new definition at
+    /// the level the current one lives at, seen by every group end that would
+    /// restore that level's binding.
+    fn replace(&mut self, key: &Key, cell: Arc<crate::env::DefCell>) {
+        if list_which(key).is_some() {
+            self.define(key, cell, false);
+            return;
+        }
+        let level = self.entry(key).map_or(1, |e| e.level);
+        if level <= 1 {
+            self.define(key, cell, true);
+            return;
+        }
+        let e = Entry { cell, level };
+        self.defs = self.defs.insert(key.clone(), e.clone());
+        // frames opened at depth ≥ level hold the level's binding in their snapshot
+        fn fix(f: &Option<Arc<GroupFrame>>, key: &Key, e: &Entry, level: u32) -> Option<Arc<GroupFrame>> {
+            let g = f.as_ref()?;
+            if g.depth < level + 1 {
+                return Some(g.clone());
+            }
+            let mut n = (**g).clone();
+            n.snap = n.snap.insert(key.clone(), e.clone());
+            n.up = fix(&g.up, key, e, level);
+            Some(Arc::new(n))
+        }
+        self.group = fix(&self.group, key, &e, level);
+    }
+    fn apply_change(&mut self, c: &Change, mk: &mut dyn FnMut(Val) -> Arc<crate::env::DefCell>) {
         match c {
-            Change::Def { key, val, global } => self.define(key, val, *global),
+            Change::Def { key, val, global } => {
+                let cell = mk(val.clone());
+                self.define(key, cell, *global);
+            }
             Change::Replace { key, val } => {
-                let level = self.entry(key).level;
-                self.defs = self.defs.insert(key.clone(), Entry { val: val.clone(), level });
+                let cell = mk(val.clone());
+                self.replace(key, cell);
             }
             Change::OpenGroup(kind) => {
                 let depth = self.depth() + 1;
-                self.group = Some(Arc::new(GroupFrame { kind: *kind, depth, saves: None, after: None, up: self.group.clone() }));
+                self.group = Some(Arc::new(GroupFrame {
+                    kind: *kind,
+                    depth,
+                    snap: self.defs.clone(),
+                    globals: None,
+                    locals: None,
+                    after: None,
+                    up: self.group.clone(),
+                }));
             }
             Change::CloseGroup => {
                 let Some(f) = self.group.clone() else { return };
-                self.group = f.up.clone();
-                let mut s = f.saves.clone();
-                while let Some(cell) = s {
-                    let cur_level = self.defs.get(&cell.key).map_or(1, |e| e.level);
-                    // A global definition made inside the group is retained.
-                    if cur_level != 1 {
-                        self.defs = self.defs.insert(cell.key.clone(), cell.old.clone());
-                    }
-                    s = cell.next.clone();
+                let globals = cons_vec(f.globals.clone());
+                let mut defs = f.snap.clone();
+                for (k, e) in &globals {
+                    defs = defs.insert(k.clone(), e.clone());
                 }
+                self.defs = defs;
+                self.group = f.up.clone();
+                // the globals stay global through the enclosing groups' ends
+                self.with_frame(|p| {
+                    for g in globals {
+                        p.globals = cons_push(&p.globals, g);
+                    }
+                });
             }
             Change::AfterGroup(t) => {
                 // tex.web: `\aftergroup` at level one is ignored.
-                if let Some(g) = &self.group {
-                    let mut f = (**g).clone();
-                    f.after = Some(Arc::new(AfterCell { tok: *t, next: g.after.clone() }));
-                    self.group = Some(Arc::new(f));
-                }
+                let t = *t;
+                self.with_frame(|f| f.after = cons_push(&f.after, t));
             }
             Change::OpenList(m) => {
                 let depth = self.list.depth + 1;
-                self.list = Arc::new(ListFrame::new(*m, depth, Some(self.list.clone())));
+                self.list = Arc::new(ListFrame::new(*m, depth, Some(self.list.clone()), mk));
             }
             Change::CloseList => {
                 if let Some(up) = self.list.up.clone() {
@@ -350,14 +418,14 @@ impl EnvRep {
     }
 }
 
-/// What closing a group read: the frame's contents and the current entries
-/// of the keys it shadowed (they decide restore vs. retain).
+/// What closing a group opened before a node read: the group's kind, its
+/// `\aftergroup` tokens, and the values its end restores (the keys defined
+/// locally in it, as the snapshot binds them).
 #[derive(Debug, PartialEq)]
 pub struct FrameDatum {
     pub kind: GroupKind,
-    pub saves: Vec<(Key, Entry)>,
     pub after: Vec<Tok>,
-    pub cur: Vec<(Key, Entry)>,
+    pub restored: Vec<(Key, Val)>,
 }
 
 impl Datum for FrameDatum {
@@ -484,22 +552,28 @@ pub fn initial_env(names: &Names, etex: bool, pdf: bool) -> Env {
         };
         if on {
             let key = Key::Cs(names.intern(d.name));
-            defs = defs.insert(key, Entry { val: Val::Meaning(Meaning::Prim(i as PrimId)), level: 1 });
+            defs = defs.insert(key, Entry { cell: crate::env::DefCell::new(Val::Meaning(Meaning::Prim(i as PrimId))), level: 1 });
         }
     }
     Env { inner: Arc::new(EnvRep { defs, ..EnvRep::default() }) }
 }
 
-fn frame_datum(r: &EnvRep, f: &GroupFrame) -> FrameDatum {
-    let saves = f.saves_vec();
-    let cur = saves.iter().map(|(k, _)| (k.clone(), r.entry(k))).collect();
-    FrameDatum { kind: f.kind, saves, after: f.after_toks(), cur }
+fn frame_datum(f: &GroupFrame) -> FrameDatum {
+    let restored = f
+        .local_keys()
+        .into_iter()
+        .map(|k| {
+            let v = f.snap.get(&k).map_or_else(|| initial(&k), Entry::val);
+            (k, v)
+        })
+        .collect();
+    FrameDatum { kind: f.kind, after: f.after_toks(), restored }
 }
 
 pub fn env_lookup(e: &Env, k: &Key) -> Val {
     let r = &*e.inner;
     if let Some(w) = list_which(k) {
-        return Val::Int(r.list.vals[w as usize]);
+        return r.list.vals[w as usize].val();
     }
     if let Key::Other(pk::TAG, n) = k {
         let c = n & 0xffff;
@@ -507,16 +581,28 @@ pub fn env_lookup(e: &Env, k: &Key) -> Val {
             0 if *n == pk::GROUP_DEPTH => Val::Int(r.depth() as i32),
             0 if *n == pk::LIST_DEPTH => Val::Int(r.list.depth as i32),
             1 => Val::Int(r.group_up(c).map_or(0, |f| f.kind as i32)),
-            2 => r.group_up(c).map_or(Val::Void, |f| Val::Data(Arc::new(frame_datum(r, &f)))),
+            2 => r.group_up(c).map_or(Val::Void, |f| Val::Data(Arc::new(frame_datum(&f)))),
             3 => Val::Int(r.list.up_n(c).map_or(0, |f| mode_code(f.mode))),
-            4 => r.list.up_n(c / 4).map_or(Val::Void, |f| Val::Int(f.vals[(c % 4) as usize])),
+            4 => r.list.up_n(c / 4).map_or(Val::Void, |f| f.vals[(c % 4) as usize].val()),
             _ => Val::Void,
         };
     }
     match r.defs.get(k) {
-        Some(e) => e.val.clone(),
+        Some(e) => e.val(),
         None => initial(k),
     }
+}
+
+/// The definition reaching `k` in `e` (0: the initial value; pseudo keys have none).
+pub fn env_def(e: &Env, k: &Key) -> crate::env::DefId {
+    let r = &*e.inner;
+    if let Some(w) = list_which(k) {
+        return r.list.vals[w as usize].id_now();
+    }
+    if matches!(k, Key::Other(pk::TAG, _)) {
+        return 0;
+    }
+    r.defs.get(k).map_or(0, |e| e.cell.id_now())
 }
 
 pub fn env_apply(e: &Env, d: &Delta) -> Env {
@@ -524,10 +610,45 @@ pub fn env_apply(e: &Env, d: &Delta) -> Env {
         return e.clone();
     }
     let mut r = (*e.inner).clone();
+    let mut mk = |v: Val| crate::env::DefCell::new(v);
     for c in &d.0 {
-        r.apply_change(c);
+        r.apply_change(c, &mut mk);
     }
     Env { inner: Arc::new(r) }
+}
+
+/// `env_apply` binding the delta's definitions to `cells` (in order); fresh
+/// cells past their end.
+pub fn env_apply_cells(e: &Env, d: &Delta, cells: &[Arc<crate::env::DefCell>]) -> Env {
+    let mut r = (*e.inner).clone();
+    let mut i = 0usize;
+    let mut mk = |v: Val| {
+        let c = match cells.get(i) {
+            Some(c) => c.clone(),
+            None => crate::env::DefCell::new(v),
+        };
+        i += 1;
+        c
+    };
+    for c in &d.0 {
+        r.apply_change(c, &mut mk);
+    }
+    Env { inner: Arc::new(r) }
+}
+
+/// `env_apply` returning the cells it made, in order.
+pub fn env_apply_collect(e: &Env, d: &Delta) -> (Env, Vec<Arc<crate::env::DefCell>>) {
+    let mut r = (*e.inner).clone();
+    let mut made = Vec::new();
+    let mut mk = |v: Val| {
+        let c = crate::env::DefCell::new(v);
+        made.push(c.clone());
+        c
+    };
+    for c in &d.0 {
+        r.apply_change(c, &mut mk);
+    }
+    (Env { inner: Arc::new(r) }, made)
 }
 
 pub fn env_group_kind(e: &Env) -> GroupKind {
@@ -595,10 +716,4 @@ fn combine(mut ext: Vec<Item>, under: &[u8], own: Vec<Item>) -> Vec<Item> {
     }
     ext.extend(own);
     ext
-}
-
-
-/// `Env::hash` (P3: maintain incrementally in `EnvRep`; every `Change` folds in).
-pub fn env_hash(_e: &Env) -> u128 {
-    todo!("P3: env hash")
 }

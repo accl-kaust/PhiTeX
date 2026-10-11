@@ -124,9 +124,20 @@ list it under `NEEDS` in your report.
 * `graph.rs` is one module in three files (`include!`): `graph/envrep.rs`
   (environment), `graph/chain.rs` (main chain, node store, answers),
   `graph/reduce.rs` (reducing one thunk, `Ctx`). Each has one owner.
-* `Env::hash() -> u128`: incremental; equal hash = equal env. Edits stop at the
-  first new thunk whose (input position, env hash, page fold state) equals an
-  old one, and keep the old chain from there wholesale.
+* **SSA.** A definition is a cell (`env::DefCell`, id `DefId`): the value a
+  name is bound to. The env is the reaching-definition map (key → cell). A
+  node records its def-use edges (`Node::uses`: key → `DefId`) and the cells
+  it made (`Node::cells`). The graph indexes def → users.
+* **Edits propagate along edges**, nothing else is visited (`edit.rs`): nodes
+  whose consumed text is touched are dirty. A dirty node is re-reduced where
+  it stands. Same shape of definitions and same rest of input: it keeps its
+  cells, their values are updated in place (every env they reach sees the new
+  value), and the users of each definition whose value changed become dirty;
+  changed emits dirty the list's closer and tail readers. Different shape or
+  input: reduce on sequentially until an old node starts at the same input
+  with every differing binding equal; equal-valued new cells are forwarded to
+  the old ones. No env hash, no checkpoints, no walk to the end.
+* Positions are lazily remapped by edit epoch (`Node::epoch`, `Graph::input_now`).
 * **Groups (replaces the save-stack-shaped frame):** a group is the env
   snapshot taken at its opening plus the global definitions made inside it. At
   its end the env is `snapshot + globals-in-group` (+ `\aftergroup` tokens
@@ -138,5 +149,3 @@ list it under `NEEDS` in your report.
   then `Fire.back` items are contributed again. Main reduction speculates "no
   fire"; a node that read a page quantity is re-validated after a fire.
 * `pool::Pool`: pure applications are spawned on it; callers join.
-* `term::Checkpoint`: (thunk, env hash, fold, node) kept at paragraph
-  boundaries; interior nodes may be dropped and re-reduced from a checkpoint.
