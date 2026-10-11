@@ -615,7 +615,7 @@ fn proc_decls(v: &Values, ast: ValueId, out: &mut Vec<(String, Option<Vec<String
     if t == "fold" {
         let (lt, la) = tag(v, a[0]);
         let e = if lt == "str" {
-            Some(fold_text(v, la[0]).map_or_default(|ss| fold_exports(v, &ss)))
+            Some(fold_text(v, la[0]).map_or_else(|_| Vec::new(), |ss| fold_exports(v, &ss)))
         } else {
             None
         };
@@ -1444,7 +1444,9 @@ impl Operation for StmtOp {
                 Ok(l)
             }
             "listuntil" => {
-                let stop = cx.use_field(v.field(&text(v, a[1])))?.map_or_default(|x| text(v, x));
+                let stop = cx
+                    .use_field(v.field(&text(v, a[1])))?
+                    .map_or_else(String::new, |x| text(v, x));
                 // Up to the mark, never past the block's close.
                 let mut n = 0;
                 while let Some((op, args)) = cx.following(n) {

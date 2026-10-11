@@ -934,7 +934,7 @@ fn fold_program(n: usize, h: &dyn Fn(usize) -> i64, text: &str, extra: &[String]
 
 fn outputs(eng: &Engine, prog: &Program) -> Vec<String> {
     let acc = eng.acc_value(prog.unit, common::out_field(eng.values()));
-    acc.map_or_default(|a| {
+    acc.map_or_else(Vec::new, |a| {
         eng.values()
             .seq_to_vec(a)
             .iter()

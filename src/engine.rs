@@ -2192,12 +2192,37 @@ impl Engine {
             return Some((first, first_s));
         }
         let root = self.units[unit as usize].root;
-        // The site itself counts: a pending close may hide it.
-        if self.defs_ix.range((unit, f, site)..(unit, f, label)).next().is_none()
+        // The common case: no other definition and no close between the
+        // site and the use, so every pending effect between them lies in
+        // the site's top-level scope (if it has one), where it may hide it.
+        if self
+            .defs_ix
+            .range((unit, f, site + 1)..(unit, f, label))
+            .next()
+            .is_none()
             && self.order.fold(&OAug, root, site + 1, label).c == 0
         {
-            return None;
+            let in_scope = site != 0 && self.def_depth(root, site, f) > 0;
+            return in_scope.then_some((first, first_s));
         }
+        let ignored = |x: u64| self.order.fold(&OAug, root, 0, x).c;
+        // A close ignored at depth 0 after a pending effect shifts every
+        // depth up to it: any pending effect before the last such close in
+        // the range counts.
+        let target = ignored(label);
+        if target > ignored(site + 1)
+            && let Some(c) = self.order.search_fwd(&OAug, root, 0, &|s: OSum| s.c >= target)
+            && let Some((&(_, p), &s)) = self
+                .pending_eff
+                .range((unit, site + 1)..(unit, c.min(label)))
+                .next_back()
+        {
+            return Some((p, s));
+        }
+        // Otherwise a pending effect matters only together with a
+        // definition of `f` in its top-level scope (the site itself counts:
+        // a pending close may hide it): visit the pending effects one
+        // top-level scope at a time.
         let mut hi = label;
         loop {
             if hi <= site + 1 {
@@ -2206,6 +2231,14 @@ impl Engine {
             let (&(_, p), &s) = self.pending_eff.range((unit, site + 1)..(unit, hi)).next_back()?;
             match self.effect_scope(unit, p, label, f) {
                 Ok(()) => return Some((p, s)),
+                Err(open) if open == p => {
+                    // `p` lies at depth 0, as does everything back to the
+                    // close of the previous top-level scope: skip to it.
+                    hi = self
+                        .order
+                        .search_back(&OAug, root, p, &|s: OSum| s.c >= 1)
+                        .map_or(0, |k| k + 1);
+                }
                 Err(open) => hi = open.min(p),
             }
         }
@@ -2216,15 +2249,12 @@ impl Engine {
     /// depth 0, so extra brackets at `p` re-match brackets only up to the end
     /// of `p`'s outermost enclosing scope `T` (an extra open leaves `T` open,
     /// an extra close makes `T`'s own close the ignored one), plus wherever a
-    /// close was ignored at depth 0 after `p`. Only definitions of `f` in `T`
-    /// can change visibility then; elsewhere the shift is uniform.
+    /// close was ignored at depth 0 after `p` (the caller has ruled that
+    /// out). Only definitions of `f` in `T` can change visibility then;
+    /// elsewhere the shift is uniform.
     /// `Err(open)`: it cannot, nor can any effect in `(open, p)`.
     fn effect_scope(&self, unit: u32, p: u64, label: u64, f: Field) -> Result<(), u64> {
         let root = self.units[unit as usize].root;
-        let ignored = |x: u64| self.order.fold(&OAug, root, 0, x).c;
-        if ignored(label) > ignored(p + 1) {
-            return Ok(());
-        }
         let depth = self.order.fold(&OAug, root, 0, p).o;
         if depth == 0 {
             return Err(p);
@@ -2627,10 +2657,11 @@ impl Engine {
             if !opens {
                 // Only the markers go; a contribution stays, and a declared
                 // one (shadowed while this node opened) is registered.
-                if cur.is_some() && (f == self.kind_field || cur == Some(start)) {
+                let marker = cur.is_some() && (f == self.kind_field || cur == Some(start));
+                if marker {
                     self.remove_def(s, f);
                 }
-                if f != self.kind_field && self.n(s).def_value(f).is_none() && self.declares(s, f) {
+                if marker && f != self.kind_field && self.declares(s, f) {
                     self.add_def(s, f, false);
                     self.make_dirty(s);
                 }
