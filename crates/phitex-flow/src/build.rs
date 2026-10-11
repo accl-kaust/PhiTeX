@@ -2486,7 +2486,13 @@ impl Build {
         let mut olds: Vec<Kept> = std::mem::take(&mut self.pieces);
         // (the joined texts' runs of the earlier rounds of this update,
         // after the last round's pieces: the layout finds a join it made
-        // over several rounds again — of a piece not in the last round)
+        // over several rounds again — of a piece not in the last round.
+        // Under an id of its own, which no edge of the names index holds:
+        // placed, it runs again from that run, every read of the nodes it
+        // keeps looked at again, as a moved piece's — what it read may have
+        // been defined since, a package read before it now: kept as it was,
+        // nothing would mark it)
+        let first_rejoined = olds.len();
         for o in &self.join_kept {
             if !olds.iter().any(|x| Arc::ptr_eq(&x.text, &o.text)) {
                 // (an id of its own: the piece it was may be another text now)
@@ -2550,7 +2556,8 @@ impl Build {
                 lean_later: None,
                 fold_unchecked: false,
             };
-            if let Some(i) = sp.old.filter(|&i| sp.moved || olds[i].run.is_none()) {
+            let rejoined = sp.old.is_some_and(|i| i >= first_rejoined);
+            if let Some(i) = sp.old.filter(|&i| sp.moved || rejoined || olds[i].run.is_none()) {
                 // (its own place, not run yet — a restructure stopped the
                 // round before it ran — or another place's run of equal
                 // text, which it runs from: every node it keeps has its
@@ -2558,7 +2565,7 @@ impl Build {
                 let o = &mut olds[i];
                 let mut ps = base(sp.text.clone(), o.id, Status::Unstarted);
                 ps.srcs = std::mem::take(&mut o.srcs);
-                if sp.moved
+                if (sp.moved || rejoined)
                     && let Some(r) = &o.run
                 {
                     ps.prev = Some((r.clone(), std::mem::take(&mut o.lines), o.text.clone()));
