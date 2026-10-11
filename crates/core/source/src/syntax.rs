@@ -530,7 +530,7 @@ pub fn lex(text: &str) -> Green {
                     verb = verbatim_at(b, i);
                 }
                 let limit = verb.map_or(b.len(), |v| v.start);
-                let (kind, end) = scan(b, i, limit);
+                let (kind, end) = scan(b, i, limit, &Catcodes::PLAIN);
                 items.push(token(kind, end - i));
                 i = end;
             }
@@ -543,6 +543,112 @@ pub fn lex(text: &str) -> Green {
     }
     items.shrink_to_fit();
     node(SyntaxKind::Para, items)
+}
+
+/// The catcode regime a text is read under, as far as the shape of its
+/// tokens goes: which ASCII bytes are letters (catcode 11, and so make up
+/// control-sequence names), and whether spaces are ignored (catcode 9, as
+/// under expl3's `\ExplSyntaxOn`). Braces, `\`, `%` and `#` keep their
+/// plain catcodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Catcodes {
+    letters: u128,
+    /// Characters that normally shape tokens (`\\`, `{`, `}`, `%`, `#`)
+    /// read as other characters (catcode 12).
+    other: u128,
+    pub ignore_spaces: bool,
+}
+
+impl Catcodes {
+    /// Plain TeX's and a LaTeX document's: the letters are `a`–`z`, `A`–`Z`.
+    pub const PLAIN: Catcodes = Catcodes {
+        letters: ((1u128 << 26) - 1) << b'A' | ((1u128 << 26) - 1) << b'a',
+        other: 0,
+        ignore_spaces: false,
+    };
+
+    /// LaTeX's internal regime (`\makeatletter`, `.sty` and `.cls` files):
+    /// `@` is a letter.
+    #[must_use]
+    pub const fn at_letter() -> Catcodes {
+        Catcodes::PLAIN.with_letter(b'@')
+    }
+
+    /// expl3's (`\ExplSyntaxOn`): `_` and `:` are letters and spaces are
+    /// ignored (`@` keeps what it was: a letter in a package).
+    #[must_use]
+    pub const fn expl(self) -> Catcodes {
+        Catcodes {
+            letters: self.with_letter(b'_').with_letter(b':').letters,
+            other: self.other,
+            ignore_spaces: true,
+        }
+    }
+
+    /// This regime with `c` a letter.
+    #[must_use]
+    pub const fn with_letter(self, c: u8) -> Catcodes {
+        let mut r = self;
+        if c < 128 {
+            r.letters |= 1 << c;
+        }
+        r
+    }
+
+    /// This regime with `c` not a letter.
+    #[must_use]
+    pub const fn without_letter(self, c: u8) -> Catcodes {
+        let mut r = self;
+        if c < 128 {
+            r.letters &= !(1 << c);
+        }
+        r
+    }
+
+    /// This regime with `c` (one of `\\ { } % #`) an other character, or
+    /// not.
+    #[must_use]
+    pub const fn with_other(self, c: u8, on: bool) -> Catcodes {
+        let mut r = self;
+        if c < 128 {
+            if on {
+                r.other |= 1 << c;
+            } else {
+                r.other &= !(1 << c);
+            }
+        }
+        r
+    }
+
+    #[must_use]
+    pub const fn is_other(&self, c: u8) -> bool {
+        c < 128 && self.other >> c & 1 == 1
+    }
+
+    #[must_use]
+    pub const fn is_letter(&self, c: u8) -> bool {
+        c < 128 && self.letters >> c & 1 == 1
+    }
+}
+
+/// The token at `i` under `cat`, read no further than `limit`: its kind
+/// and where it ends. A `{` or a `}` is a [`SyntaxKind::Brace`] of one
+/// byte; verbatim runs are not looked for ([`verbatim_run`] finds them).
+#[must_use]
+pub(crate) fn token_at(text: &str, i: usize, limit: usize, cat: &Catcodes) -> (SyntaxKind, usize) {
+    let b = text.as_bytes();
+    match b[i] {
+        b'{' | b'}' if !cat.is_other(b[i]) => (SyntaxKind::Brace, i + 1),
+        _ => scan(b, i, limit.min(b.len()), cat),
+    }
+}
+
+/// The verbatim run that the command at `i` (a backslash) begins, if it is
+/// one of LaTeX's verbatim constructs: the bytes from after its name to the
+/// end of its verbatim text (a verbatim environment's: its body).
+#[must_use]
+pub(crate) fn verbatim_run(text: &str, i: usize) -> Option<std::ops::Range<usize>> {
+    verbatim_at(text.as_bytes(), i).map(|v| v.start..v.end)
 }
 
 /// The bytes that end a text token.
@@ -559,13 +665,20 @@ static TEXT_END: [bool; 256] = {
 
 /// The token at `i` (not a group's brace), read no further than `limit`:
 /// its kind and where it ends.
-fn scan(b: &[u8], mut i: usize, limit: usize) -> (SyntaxKind, usize) {
+fn scan(b: &[u8], mut i: usize, limit: usize, cat: &Catcodes) -> (SyntaxKind, usize) {
     let kind = match b[i] {
+        c if cat.other != 0 && cat.is_other(c) => {
+            i += 1;
+            while i < limit && (!TEXT_END[b[i] as usize] || cat.is_other(b[i])) {
+                i += 1;
+            }
+            SyntaxKind::Text
+        }
         b'\\' => {
             i += 1;
             if i < limit {
-                if b[i].is_ascii_alphabetic() {
-                    while i < limit && b[i].is_ascii_alphabetic() {
+                if cat.is_letter(b[i]) {
+                    while i < limit && cat.is_letter(b[i]) {
                         i += 1;
                     }
                 } else {
@@ -602,7 +715,7 @@ fn scan(b: &[u8], mut i: usize, limit: usize) -> (SyntaxKind, usize) {
             SyntaxKind::Param
         }
         _ => {
-            while i < limit && !TEXT_END[b[i] as usize] {
+            while i < limit && (!TEXT_END[b[i] as usize] || cat.other != 0 && cat.is_other(b[i])) {
                 i += 1;
             }
             SyntaxKind::Text
