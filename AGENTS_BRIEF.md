@@ -41,8 +41,9 @@ evaluation, run by any number of cores.
 - **A macro call is a step, not a node.** It rewrites the input and changes
   no state. Its expansion is memoised by the meaning's version and the
   argument tokens. Memoised expansion is required.
-- **Conditionals.** The test is a node and only the taken arm is read. At
-  `\fi`, each name either arm changed gets an **explicit φ**.
+- **Conditionals.** The test is a node and only the taken arm is read.
+  `\fi` defines nothing: **no φ** (dropped 2026-10-11); the untaken arm
+  is text the graph holds.
 - **`\input` is a call** into a named source. File contents are values like
   any other.
 - **Line numbers** (`\inputlineno`, the error context) are a field that is
@@ -179,8 +180,8 @@ drifted. Stop and re-read this file.
    leaves its version unchanged, and re-runs no reader of it.
 5. **The same output at any W:** W=1 and W=8 give byte-identical PDF and
    `.aux`.
-6. **Explicit φ:** a conditional whose arms define a name has a φ at `\fi`,
-   and an edit to the untaken arm re-runs nothing past it.
+6. **The untaken arm:** an edit to a conditional's untaken arm re-runs
+   nothing past it (no φ at `\fi`).
 7. **Per-label `.aux`:** changing one label's page re-runs only that label's
    readers.
 
@@ -208,7 +209,7 @@ drifted. Stop and re-read this file.
   a feature that seems to need its core changed is a design conversation
   first.
 - **Milestones:**
-  1. `{\def\a{x}}\a` and an `\if` with φ on the graph at W=8, random
+  1. `{\def\a{x}}\a` and an `\if` on the graph at W=8, random
      scheduler, the graph printed.
   2. `-ini` documents with a TFM font shipped to DVI/PDF, byte-identical
      with TeX, at W=1 and W=8.

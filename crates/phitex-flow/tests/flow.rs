@@ -268,7 +268,7 @@ fn edited_pieces_keep_their_nodes_a_while() {
 }
 
 #[test]
-fn phi_is_explicit_at_fi() {
+fn fi_defines_nothing() {
     let src = "\\catcode`\\{=1 \\catcode`\\}=2 \\def\\a{x}\\ifx\\a\\a \\def\\b{yes}\\else\\def\\b{no}\\fi\n";
     let o = cold(
         src,
@@ -277,8 +277,10 @@ fn phi_is_explicit_at_fi() {
             ..Options::default()
         },
     );
-    assert!(o.dump.contains("φ test=true"), "{}", o.dump);
-    assert!(o.dump.contains("\\b = φ("), "{}", o.dump);
+    // (only the taken arm is read, and its definitions are the only ones:
+    // the test is a node, `\fi` none, no φ)
+    assert!(o.dump.contains("test=true"), "{}", o.dump);
+    assert!(!o.dump.contains("φ("), "{}", o.dump);
 }
 
 #[test]

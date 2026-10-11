@@ -2336,6 +2336,19 @@ impl Run {
         }
     }
 
+    /// Whether a definition of `key` made in the piece before node `i`
+    /// still reaches node `i` (a read after `i` may be its; a definition
+    /// made between the piece's nodes at `i` would answer it instead).
+    pub fn defines_across(&self, key: &Key, i: u32) -> bool {
+        match &self.lean {
+            None => self.chain.resolve(key, i as usize).is_some(),
+            Some(l) => {
+                let a = l.defs.partition_point(|x| x.0 < *key);
+                l.defs[a..].iter().take_while(|x| x.0 == *key).any(|x| x.1 < i && x.2 > i)
+            }
+        }
+    }
+
     /// The state its last node left (the piece's end, or its `\input`).
     pub fn out(&self) -> RState {
         match &self.lean {

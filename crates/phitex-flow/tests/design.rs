@@ -302,11 +302,11 @@ fn the_same_output_at_any_w() {
     }
 }
 
-// --------------------------------------------------------- 6. explicit φ
+// ------------------------------------------------- 6. the untaken arm
 
-/// A conditional whose arms define a name has a φ at `\fi`, and an edit
-/// to the arm not taken runs nothing past it: not the readers of the name,
-/// not the nodes after `\fi`.
+/// A conditional's untaken arm is text the graph holds, not a definition
+/// (no φ at `\fi`): an edit to it runs nothing past it, not the readers of
+/// the name, not the nodes after `\fi`.
 #[test]
 fn an_edit_to_the_untaken_arm_runs_nothing_past_it() {
     let head = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6\n\\def\\a{x}\\count1=0\n\n";
@@ -318,14 +318,14 @@ fn an_edit_to_the_untaken_arm_runs_nothing_past_it() {
     let mut bld = Build::new(fuzz::corpus().first().expect("a document").font.clone());
     bld.set_lean(false);
     let first = bld.update(&a, o);
-    assert!(first.dump.contains("\\b = φ("), "{}", first.dump);
+    assert!(!first.dump.contains("φ("), "{}", first.dump);
     let e = bld.update(&b, o);
     let fresh = Build::new(fuzz::corpus().first().unwrap().font.clone()).update(&b, o);
     assert!(e.log == fresh.log && e.dvi == fresh.dvi);
     assert_eq!(e.stats.ran, 1, "only the conditional's piece: {:?}", e.stats);
     assert_eq!(e.stats.reruns, 0);
     // (the conditional's piece: the untaken arm's node runs, and nothing
-    // after `\fi` — neither the φ's readers nor the three assignments)
+    // after `\fi` — neither the readers of \b nor the three assignments)
     assert!(
         e.stats.commands_run <= 2,
         "the untaken arm's node (and the test at most) run, not {}: {:?}",

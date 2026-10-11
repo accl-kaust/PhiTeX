@@ -862,12 +862,8 @@ decides. "Where the reader is is itself a read."
   again from there. The joined piece is kept by the next layouts
   (`Build::known_join`): its run never stops at the first place to say
   so again. A piece whose predecessor reads on into it does not run.
-- The sequence changes when a run that says otherwise than the layout
-  assumed has settled (all before it final): at once for a join (the
-  pieces after it begin in the middle of a command; runs waiting for an
-  earlier piece stop, the others finish and are kept), else once every
-  piece has settled. A layout ignores a last run entered otherwise than
-  it now says (`old_entry_holds`).
+- The sequence is rewritten where a run says otherwise than it, locally
+  and at once (see "Reduction"): there are no layouts and no rounds.
 - A run validates what it read while it runs (`PieceEnv::check`, every
   4096 steps): a definition made again since — its piece ran again —
   abandons it; so does a prediction refuted, and a long run on an
@@ -881,6 +877,71 @@ decides. "Where the reader is is itself a read."
 - Re-cuts (`Kind::Cut`): a reader passing a blank line at depth 0 in the
   canonical state where the cutter saw none ends its run there; the rest
   is cut again.
+
+## Reduction (decided, 2026-10-11)
+
+The document is a term that evaluation rewrites. A piece is a thunk: a
+text, and how it is entered; running it reduces it to its run (nodes,
+reads, exports). What its run says of the text around it rewrites the
+sequence there, and nowhere else. There are no layouts, no rounds and no
+matching of old runs by their text.
+
+- **Pieces have identities, not positions.** A piece is (list, shape):
+  a list is the root text, a file's text (`ListKind::File`, its caller
+  the piece whose `\input` read it) or the rest of a text cut again
+  (`ListKind::Recut`, its caller the piece that stopped there); a shape
+  is a span of the list's texts (`Shape::Texts`, joined texts one span)
+  or the rest of the caller's line after its `\input`
+  (`Shape::Rest`). Ids are never reused.
+- **Order labels.** Pieces are ordered by `u64` labels with gaps
+  (`Labels`): a piece made between two others takes a label between
+  theirs, and nothing else moves. When a gap runs out the labels are
+  spread again in the same order (`Labels::spreads`); the scheduler's
+  sets keyed by label are keyed again then (`rekey`). A place is
+  `(piece, node)`, compared by label then node. Cursors (the scan's, the
+  numbering's, the log's) name the last piece they handled, never a
+  label, so a piece made after them is not skipped.
+- **Local rewrites** (`apply_structure`, at a run's install, and again
+  when the settled frontier passes it, `settle`, for a kept run whose
+  neighbours changed):
+  - `\input` of a file: the file's pieces and a Rest piece after the
+    caller (`Seq::make_file`); a file whose text changed is made again.
+  - A run reading on past its text (`Expect::join`): it and the texts
+    after it in its list that make it twice as long are one piece
+    (`Seq::join`). Its list's last text: a file's piece is read in its
+    caller (`inline`), a re-cut's caller does not stop at the cut
+    (`nocut`).
+  - A cut the cutter missed (`Expect::cut`): the rest of the text is cut
+    again after it (`Seq::make_recut`).
+  - `\endinput` and the job's end: what follows is muted, or back
+    (`Seq::recompute_mutes`); a muted piece keeps its run.
+  - At most `EDIT_LIMIT` (64) rewrites of one piece in an update, then a
+    loud stall: a rewrite that does not converge is a bug, never a
+    silent loop.
+- **Exact invalidation.** A changed export marks only the readers whose
+  read value changed (`reached`), from the first node that read it; an
+  edge to a reader that no longer reads the name is dropped. A
+  definition made between a piece's nodes (the page builder's, an output
+  routine's) marks only reads after its place (`Run::defines_across`).
+- **No φ.** A conditional's test is a node; only the taken arm is read;
+  `\fi` defines nothing. The untaken arm is text the graph holds: an
+  edit to it reruns only the conditional's piece.
+- **Loop-back instead of files.** The `.aux`/`.toc`/… a document writes
+  and reads again are values in memory: an update evaluates again, at
+  most `FILE_ROUNDS` (5) times, while a file read changed
+  (`Build::set_converge`; the CLI's `--fixpoint`), and PDF read-backs at
+  most `PDF_ROUNDS` (8). Each iteration is an evaluation over the same
+  persistent sequence: only readers of what changed run. The first
+  update starts from nothing written; later ones from the last update's
+  values. The bar is the PDF after convergence, compared with pdfTeX's
+  converged output; `.log` and the feedback files are not.
+- **Edits.** An edit rewrites the root list's texts (`Seq::edit_root`):
+  the pieces whose text is the same keep their runs and identities; a
+  kept run whose entry or reads changed runs again, as any read does.
+- **Deferred:** PDF object numbers as values (allocation in
+  `pdf/fold.rs`), laziness from the PDF root (nothing unreachable from
+  the shipped pages evaluated), BibTeX/MakeIndex as nodes of the build
+  rather than between iterations.
 
 ## Reads of folds (decided, 2026-10-10)
 
@@ -1957,7 +2018,7 @@ fix (e1f2aa0) is not in 394eeab.
    both reads, priority and random orders: one DVI, log and set of files.
    Big differs in random orders: F6 (reported; any other difference
    fails).
-6. `an_edit_to_the_untaken_arm_runs_nothing_past_it`: the φ at `\fi`;
+6. `an_edit_to_the_untaken_arm_runs_nothing_past_it`: no φ at `\fi`;
    an edit to the arm not taken runs one piece and at most two nodes.
    Passes.
 
@@ -2942,37 +3003,37 @@ scanning and expanding `\x` hold 40 distinct reads (439 without
 |---|---|---|---|
 | `\botmark` | top_bot_mark | step: rewrites the input with `Key::Mark(which, 0)` (a read), defined by an output routine's run (`graph/output.rs`) | approx: empty outside a routine until the fold runs routines |
 | `\csname` | cs_name | step: builds the name, rewrites the input with it; an undefined name is defined `\relax` (local) by the node the step is in | done |
-| `\else` | fi_or_else | ends the taken arm (skips the rest to `\fi`): the closing node defines each key the arm defined as φ(after, before) | done |
+| `\else` | fi_or_else | ends the taken arm (skips the rest to `\fi`): the closing node defines nothing: the taken arm's definitions are the only ones (no φ) | done |
 | `\endcsname` | end_cs_name | outside `\csname`: an error node | done |
 | `\endinput` | input | step: the innermost `\input` file ends with its current line (`Infile.endinput`); in pieces the core drops its later pieces (IO) | done (in an `\input` file; in the main file an error) |
 | `\expandafter` | expand_after | step: expands the token after next once, rewrites the input | done |
-| `\fi` | fi_or_else | ends the taken arm (skips the rest to `\fi`): the closing node defines each key the arm defined as φ(after, before) | done |
+| `\fi` | fi_or_else | ends the taken arm (skips the rest to `\fi`): the closing node defines nothing: the taken arm's definitions are the only ones (no φ) | done |
 | `\firstmark` | top_bot_mark | step: rewrites the input with `Key::Mark(which, 0)` (a read), defined by an output routine's run (`graph/output.rs`) | approx: empty outside a routine until the fold runs routines |
 | `\fontname` | convert | step: the font's name and size (tex.web 472) | done |
-| `\if` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\ifcase` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\ifcat` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\ifdim` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\ifeof` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ; the test reads `Key::ReadStream(n)` | done |
-| `\iffalse` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\ifhbox` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\ifhmode` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\ifinner` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\ifmmode` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\ifnum` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\ifodd` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\iftrue` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\ifvbox` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\ifvmode` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\ifvoid` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
-| `\ifx` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end gets an explicit φ | done |
+| `\if` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
+| `\ifcase` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
+| `\ifcat` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
+| `\ifdim` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
+| `\ifeof` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ); the test reads `Key::ReadStream(n)` | done |
+| `\iffalse` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
+| `\ifhbox` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
+| `\ifhmode` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
+| `\ifinner` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
+| `\ifmmode` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
+| `\ifnum` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
+| `\ifodd` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
+| `\iftrue` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
+| `\ifvbox` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
+| `\ifvmode` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
+| `\ifvoid` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
+| `\ifx` | if_test | conditional: at the top a node (`Kind::If`, test operands = the reads it made); inside scanning a step of that node; only the taken arm is read; the end defines nothing (no φ) | done |
 | `\input` | input | at the top a node whose result is the file's text (`Key::File` read; its out state's new `RState::texts` entry, `TextKind::File`); inside scanning a step; read in the piece now, cut into pieces by the core (IO) | done (single-piece emulation) |
 | `\jobname` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens; the name a read of `Key::Job` | done |
 | `\lowercase` | case_shift | node (not expandable): reads lccode/uccode (`get`) of each character and rewrites the input with the changed text; defines nothing | done |
 | `\meaning` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens | done |
 | `\noexpand` | no_expand | step: marks the next token not-to-expand once (`Tok::DontExpand` in the rewritten input) | done |
 | `\number` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens | done |
-| `\or` | fi_or_else | ends the taken arm (skips the rest to `\fi`): the closing node defines each key the arm defined as φ(after, before) | done |
+| `\or` | fi_or_else | ends the taken arm (skips the rest to `\fi`): the closing node defines nothing: the taken arm's definitions are the only ones (no φ) | done |
 | `\romannumeral` | convert | step: reads its operand (a token, a number, `\escapechar`, catcodes of one-letter names) and rewrites the input with category-12 tokens | done |
 | `\splitbotmark` | top_bot_mark | step: rewrites the input with class 0's last mark in `Key::SplitMarks`, defined (globally) by each `\vsplit` | done |
 | `\splitfirstmark` | top_bot_mark | step: rewrites the input with class 0's first mark in `Key::SplitMarks`, defined (globally) by each `\vsplit` | done |

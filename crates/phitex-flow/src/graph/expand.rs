@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use super::scan::IVal;
-use super::{Cond, Exec, Kind, Mode, Phi, Read, Src};
+use super::{Cond, Exec, Kind, Mode, Phi};
 use crate::print;
 use crate::print::MAX_PRINT_LINE;
 use crate::show::{LN, RAW, SP};
@@ -939,54 +939,12 @@ impl Exec<'_> {
     fn pop_cond(&mut self) {
         let Some(c) = self.st.conds.pop() else { return };
         self.cond_kind(Kind::EndIf);
-        let nodes = &self.chain.nodes;
-        let here = nodes.len();
-        let at = c.open as usize;
-        let depth = u16::try_from(self.st.conds.len()).unwrap_or(u16::MAX);
-        if at >= here {
-            // (opened and closed within this node: no arm of nodes)
-            if self.phi.is_none() {
-                self.phi = Some(Box::new(Phi { test: c.test, keys: Vec::new() }));
-            }
-            return;
-        }
-        // (in the order first defined; a set beside it, as an arm may hold
-        // a whole table's definitions: xelatex.ini's Unicode data)
-        let mut keys: Vec<Key> = Vec::new();
-        let mut seen: crate::hash::FxSet<Key> = crate::hash::FxSet::default();
-        for n in nodes.range(at, here) {
-            for d in n.defs() {
-                if seen.insert(d.key.clone()) {
-                    keys.push(d.key.clone());
-                }
-            }
-        }
-        let mut phis = Vec::new();
-        for k in keys {
-            let Some((d, after)) = self.chain.resolve(&k, here) else {
-                continue;
-            };
-            let scope = self.chain.scope_of(d, &k);
-            self.reads.push(Arc::new(Read {
-                key: k.clone(),
-                src: Src::Node(d),
-                val: after.clone(),
-                scope,
-                cond: None,
-                field: super::Field::Whole,
-            }));
-            // (as of the `\if`: the conditional's depth in the node's input
-            // state, the same as below the ones it opened and closed)
-            let before = super::before_read(self.chain, self.env, self.outside, &k, at, depth);
-            let before_val = before.val.clone();
-            self.reads.push(before);
-            // (the φ is a definition: readers after the `\fi` read it)
-            self.defs.push(super::Def { key: k.clone(), val: after.clone(), global: false, level: None });
-            phis.push((k, after, before_val));
-        }
-        match &mut self.phi {
-            Some(p) if !p.keys.is_empty() => p.keys.extend(phis),
-            _ => self.phi = Some(Box::new(Phi { test: c.test, keys: phis })),
+        // (no φ: a reader after the `\fi` reads the definition the taken
+        // arm made, or the one from before the `\if`, by the scopes; the
+        // conditional is its test, the `\if` node's reads, and its
+        // untaken arm, a node of text)
+        if self.phi.is_none() {
+            self.phi = Some(Box::new(Phi { test: c.test, keys: Vec::new() }));
         }
     }
 

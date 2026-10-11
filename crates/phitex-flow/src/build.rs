@@ -1,43 +1,38 @@
-//! Evaluation: N equal threads, a scheduler function, edges from every
-//! definition to the nodes that read it.
+//! Evaluation as graph reduction (CORE.md, "Reduction").
 //!
-//! The graph's nodes are made by running pieces (see `graph`). What a
-//! piece defines at its end goes into the **names index** (name -> the
-//! pieces defining it, by position), which every thread reads at once; a
-//! node's read of a name from before its piece resolves there to the
-//! latest definition before it. Each such read is an **edge**, kept in the
-//! readers index: name -> (reader piece, reader node, defining piece).
+//! The source is cut into texts (blank lines at brace depth 0); each text
+//! is a **piece**: text not evaluated yet, with the state it is entered
+//! in. A piece's run evaluates it (`graph::run_piece`): a node per command,
+//! each reading versions and defining versions. What a run finds out about
+//! the sequence itself is a **local rewrite**, made where it was found by
+//! the worker installing the run: an `\input` puts the file's pieces and
+//! the rest of the calling line after the piece, `\endinput` mutes the
+//! rest of its file, a run reading on past its text is joined with the
+//! texts after it, a cut the cutter missed re-cuts the rest of the text,
+//! the job's end mutes what follows. Pieces are named by structure (which
+//! list, which of its texts) and ordered by labels with gaps, never by
+//! position: nothing installed moves when the sequence is rewritten. There
+//! are no rounds, and no run is ever matched to a text by the text.
 //!
-//! A read is answered with the definitions known so far; it may be wrong
-//! if an earlier piece that has not run yet defines the name. So when a
-//! piece's definitions are installed, exactly the readers of the names
-//! whose values changed are marked **dirty** (the pieces after it that read
-//! the name from before it, by name: every node of theirs reading it is
-//! dirty), and those pieces run again from their first dirty node. A
-//! piece's own reads are validated when it is installed, against the index
-//! as it is then; a stale read marks its name and the piece runs again
-//! from its readers. Under `Reads::Suspend` a read of a name whose
-//! definition is being remade parks until that definition is installed
-//! (or runs the defining piece itself if nobody has started it), and so
-//! does a read of an undefined name while an earlier piece has not
-//! finished (or it runs the first earlier piece nobody has started); under
-//! `Reads::Speculate` it takes the old value and is validated. Either way
-//! the result is the same: the scheduler affects speed, never results.
-//!
-//! Line breaking is a task per paragraph (a paragraph equal to one already
-//! broken keeps its lines). The page builder is a fold over the lines in
-//! order; it reads a piece once nothing before it can change any more. A
-//! page equal to the last build's page at its place keeps its DVI.
-//!
-//! An edit is the same evaluation: pieces whose text is unchanged keep
-//! their nodes; readers of a definition whose place changed are marked;
-//! the edited pieces run from the first node the edit touches. A cold
-//! build is an edit from nothing.
+//! A read of a name from before a piece resolves in the names index (name
+//! -> definitions by place) to the latest definition before it; each such
+//! read is an **edge** (the readers index). A changed definition marks
+//! exactly the readers whose value changed. Line breaking is a task per
+//! paragraph; the page builder is a fold over the settled pieces' lines
+//! that applies the output routine where it fires; pages become DVI or PDF
+//! by pure functions. N equal threads run whatever the scheduler picks;
+//! under `Reads::Speculate` a read takes the value known and is validated
+//! when the run is installed. An edit is the same evaluation: the edited
+//! texts are new pieces, everything whose reads still hold is kept. With
+//! [`Build::set_converge`] the files the build writes and reads back
+//! (`.aux`, `.toc`) are a loop-back: the build evaluates again, only the
+//! readers of what changed, until what it reads is what it wrote (pdfTeX
+//! run to convergence).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
@@ -52,16 +47,11 @@ pub mod sync;
 /// lines ([`Options::cut_lines`]).
 pub const CUT_LINES: usize = 200;
 use crate::graph::output::{self, DEAD_CYCLES, INSERT_PENALTIES, OutputReads};
-use crate::graph::{
-    Check, Env, FileText, Para, PieceId, RState, Run, Src, cut_every, cut_from, run_piece,
-};
+use crate::graph::{Check, Env, FileText, Para, PieceId, RState, Run, Src, cut_every, cut_from, run_piece};
 use crate::hash::{FxMap, FxSet, hash_of};
 use crate::linebreak::break_lines;
 use crate::logs::{self, Frag};
-use crate::page::{
-    CallLog, Fired, FoldEnv, IGNORE_DEPTH, Lines, Page, PageOrg, Routine, Scan, material,
-    push_vertical,
-};
+use crate::page::{CallLog, Fired, FoldEnv, IGNORE_DEPTH, Lines, Page, PageOrg, Routine, Scan, material, push_vertical};
 use crate::show::RAW;
 use crate::tfm::{Font, FontFiles, Kpse, KpseFormat};
 use crate::val::{Key, Meaning, Shown, Tok, Val};
@@ -269,532 +259,228 @@ pub struct Output {
     pub files_read: Vec<(String, Option<String>)>,
 }
 
-/// A piece whose definition was read before any definition.
+
+/// A read answered before any definition.
 const INITIAL: PieceId = u32::MAX;
-/// The rounds an update may make for pdfTeX's read-backs (then an error,
-/// as TeX's capacity exceeded: CORE.md, "pdfTeX's read-backs").
+/// The evaluations an update may make for pdfTeX's read-backs (then an
+/// error, as TeX's capacity exceeded: CORE.md, "pdfTeX's read-backs").
 const PDF_ROUNDS: usize = 8;
-/// A piece not in this build.
-const NONE: u32 = u32::MAX;
+/// The evaluations of the loop-back of the files a build writes and reads
+/// again ([`Build::set_converge`]), as latexmk's bound.
+const FILE_ROUNDS: usize = 5;
+/// How many times one piece's runs may rewrite the sequence in an update
+/// before the build fails (the sequence would flip for ever).
+const EDIT_LIMIT: u32 = 64;
+/// How many times a piece may run in one update before the build fails as
+/// a livelock.
+const RUN_LIMIT: u32 = 4096;
+/// The ids of the places between a piece's nodes (where the page builder
+/// fired) begin here; pieces' ids are below.
+const VIRT_BASE: PieceId = 0x8000_0000;
+/// How long an idle worker waits before it looks whether every run in
+/// progress is parked for good.
+const STALL_CHECK: Duration = Duration::from_secs(2);
+/// How many builds a piece that ran in an edit keeps its nodes for.
+pub const HOT_BUILDS: u64 = 8;
+/// How often (in nodes run) a run on predictions looks at them again.
+const CHECK_EVERY: u64 = 1 << 12;
+/// Nodes after which a run on predictions an earlier piece has not
+/// confirmed yet is given up (its piece then waits for them).
+const GIVE_UP_AFTER: u64 = 1 << 18;
 
-/// A piece as the last build left it.
-struct Kept {
-    id: PieceId,
-    text: Arc<[char]>,
-    run: Option<Arc<Run>>,
-    lines: Vec<Option<Lines>>,
-    srcs: Vec<PieceId>,
-    log: Option<Arc<Frag>>,
-    /// Left by a round that stopped before it ran again: the names it is
-    /// still to read again (it runs from them).
-    pending: Option<Dirty>,
-    /// What its run says of the sequence ([`Expect::of`], made when it ran).
-    got: Expect,
-    /// It ran in an edit: it keeps its nodes until this build.
-    hot_until: u64,
+/// A place in document order: (piece, node). A piece's exports are at
+/// `(id, END)`; node `j` of a piece reads what is defined before `(id, j)`;
+/// the page builder's definitions where it fired are at `(id, node)`.
+/// Places are ordered by their pieces' order labels ([`Labels`]), never by
+/// the ids.
+pub type Pos = (PieceId, u32);
+/// The node of a piece's exports: after all its nodes.
+pub const END: u32 = u32::MAX;
+
+/// The pieces in order: a label per piece, with gaps, so that pieces put
+/// between two others take labels between theirs and nothing else moves
+/// (the labels are spread again, in the same order, when a gap runs out).
+/// A piece taken out keeps its last label: only what holds it by label
+/// compares it again (the scheduler's sets, re-keyed at each spread).
+#[derive(Default)]
+struct Labels {
+    ord: Vec<u64>,
+    by: BTreeMap<u64, PieceId>,
+    /// How many times the labels were spread.
+    spreads: u64,
 }
 
-/// What a piece is entered with (CORE.md, `\input` and cuts): the
-/// canonical start (a job's first piece), the state an `\input` node left
-/// (the file's first piece, `.0` the calling piece), the rest of the
-/// calling line (`.0` the calling piece, `.1` the file's last), or the
-/// state the piece before it (`.0`) leaves at the cut — assumed to be the
-/// canonical start, or the start of the file `.1` calls (the state its
-/// `\input` left), until that piece has run: the entry is a read of its
-/// end, validated like any read.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Entry {
-    Start,
-    File(usize),
-    Rest(usize, Option<usize>),
-    After(usize, Option<usize>),
-}
-
-/// What the sequence assumed of a piece's run: the file its last node
-/// reads (and where that node ends), and whether the file ends after it
-/// (`\endinput`). A run that differs changes the sequence.
-#[derive(Clone, Default)]
-struct Expect {
-    input: Option<Arc<FileText>>,
-    stop: usize,
-    endinput: bool,
-    /// The job ends in it (`\end`, `\dump`): no piece follows.
-    ends: bool,
-    /// It ends at a cut the cutter missed (at `stop`): the rest of its
-    /// text is cut again from there.
-    cut: bool,
-    /// It does not stop where the next text begins: its last command reads
-    /// on past its text's end, or it leaves a state no piece is entered in
-    /// (a paragraph, a group open). It and the next text are one piece.
-    join: bool,
-}
-
-impl Expect {
-    fn of(r: &Run) -> Expect {
-        if r.nodes_len() == 0 {
-            return Expect::default();
-        }
-        let out = r.out();
-        let input = r.input().cloned();
-        let cut = r.ends_at_cut();
-        let join = input.is_none() && !cut && (r.crossed || !out.enterable());
-        Expect {
-            join,
-            stop: if input.is_some() || cut { out.pos } else { 0 },
-            cut,
-            endinput: out.ends_file(),
-            // (a session's next job begins by defining it 0)
-            ends: r
-                .exports
-                .binary_search_by(|(k, _)| k.cmp(&Key::Ended))
-                .is_ok_and(|i| r.exports[i].1 != Val::Int(0)),
-            input,
-        }
+impl Labels {
+    fn of(&self, id: PieceId) -> u64 {
+        self.ord.get(id as usize).copied().unwrap_or(u64::MAX)
     }
 
-    /// What differs from `o` (measuring, `PHITEX_SCHED`): bits 1 a file
-    /// read, 2 a join, 4 a re-cut, 8 `\endinput`, 16 the job's end, 32 where
-    /// it stops.
-    fn differs(&self, o: &Expect) -> u32 {
-        let input = match (&self.input, &o.input) {
-            (Some(a), Some(b)) => !(Arc::ptr_eq(a, b) || **a == **b),
-            (None, None) => false,
-            _ => true,
-        };
-        u32::from(input)
-            | u32::from(self.join != o.join) << 1
-            | u32::from(self.cut != o.cut) << 2
-            | u32::from(self.endinput != o.endinput) << 3
-            | u32::from(self.ends != o.ends) << 4
-            | u32::from(self.stop != o.stop) << 5
+    /// The order key of place `p`.
+    fn key(&self, p: Pos) -> (u64, u32) {
+        (self.of(p.0), p.1)
     }
 
-    fn same(&self, o: &Expect) -> bool {
-        self.stop == o.stop
-            && self.endinput == o.endinput
-            && self.ends == o.ends
-            && self.cut == o.cut
-            && self.join == o.join
-            && match (&self.input, &o.input) {
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b) || **a == **b,
-                (None, None) => true,
-                _ => false,
+    fn contains(&self, id: PieceId) -> bool {
+        self.ord.get(id as usize).is_some_and(|o| self.by.get(o) == Some(&id))
+    }
+
+    fn first(&self) -> Option<PieceId> {
+        self.by.values().next().copied()
+    }
+
+    fn next(&self, id: PieceId) -> Option<PieceId> {
+        let o = self.of(id);
+        self.by.range(o.saturating_add(1)..).next().map(|x| *x.1)
+    }
+
+    fn prev(&self, id: PieceId) -> Option<PieceId> {
+        let o = self.of(id);
+        self.by.range(..o).next_back().map(|x| *x.1)
+    }
+
+    /// The labels free between `anchor` (none: the start) and the piece
+    /// after it.
+    fn gap(&self, anchor: Option<PieceId>) -> (u64, u64) {
+        let lo = anchor.map_or(0, |a| self.of(a));
+        let hi = self.by.range(lo.saturating_add(1)..).next().map_or(u64::MAX - 1, |x| *x.0);
+        (lo, hi)
+    }
+
+    /// Puts `ids`, in order, right after `anchor` (none: first).
+    fn insert_after(&mut self, anchor: Option<PieceId>, ids: &[PieceId]) {
+        if ids.is_empty() {
+            return;
+        }
+        let n = ids.len() as u64;
+        let (lo, hi) = self.gap(anchor);
+        if hi.saturating_sub(lo) <= n + 1 {
+            self.spread(n);
+        }
+        let (lo, hi) = self.gap(anchor);
+        let step = (hi - lo) / (n + 1);
+        for (i, &id) in ids.iter().enumerate() {
+            let o = lo + step * (i as u64 + 1);
+            if self.ord.len() <= id as usize {
+                self.ord.resize(id as usize + 1, u64::MAX);
             }
-    }
-}
-
-/// A piece of the sequence a round evaluates.
-struct Spec {
-    text: Arc<[char]>,
-    entry: Entry,
-    /// Its lines before it in its own file, and what the log has after it.
-    base: usize,
-    post: Option<String>,
-    /// The last build's piece it is (its run kept).
-    old: Option<usize>,
-    expect: Expect,
-    /// Its `\input`s are read in the piece ([`Build::inline`]).
-    inline: bool,
-    /// Where texts it was joined from begin: its run stops at the first
-    /// where it can.
-    stops: Arc<[usize]>,
-    /// `old` is another place's piece of equal text: its run is where this
-    /// one runs from, not kept.
-    moved: bool,
-}
-
-/// Finds the last build's pieces by their text: the same `Arc`, or equal
-/// text (in order), each taken once. (Equal texts are looked for among the
-/// pieces of the same length: no text is hashed.)
-struct Matcher {
-    /// Every last build's piece by its text's `Arc` — those whose run a
-    /// restructure stopped before it ran included: a piece keeps its own
-    /// place, never another's run of equal text.
-    by_ptr: FxMap<usize, Vec<usize>>,
-    by_len: Option<FxMap<usize, VecDeque<usize>>>,
-    used: Vec<bool>,
-    /// The last build's piece taken last: one of equal text right after
-    /// it is at its own place (a text cut again near an edit is a new
-    /// `Arc`).
-    last: Option<usize>,
-}
-
-impl Matcher {
-    fn new(olds: &[Kept]) -> Matcher {
-        let mut by_ptr: FxMap<usize, Vec<usize>> = FxMap::default();
-        for (i, o) in olds.iter().enumerate() {
-            by_ptr.entry(o.text.as_ptr() as usize).or_default().push(i);
-        }
-        Matcher {
-            by_ptr,
-            by_len: None,
-            used: vec![false; olds.len()],
-            last: None,
+            self.ord[id as usize] = o;
+            self.by.insert(o, id);
         }
     }
 
-    /// The last build's piece of text `t` (the same `Arc`) still to be
-    /// taken.
-    fn by_arc(&self, olds: &[Kept], t: &Arc<[char]>) -> Option<usize> {
-        self.by_ptr
-            .get(&(t.as_ptr() as usize))?
-            .iter()
-            .copied()
-            .find(|&i| Arc::ptr_eq(&olds[i].text, t) && !self.used[i])
-    }
-
-    /// Whether the last build's piece of text `t` (the same `Arc`), with a
-    /// run, is still to be taken.
-    fn has(&self, olds: &[Kept], t: &Arc<[char]>) -> bool {
-        self.by_arc(olds, t).is_some_and(|i| olds[i].run.is_some())
-    }
-
-    /// The last build's piece of `t`: the same `Arc` (`.1` true: its own
-    /// place), else one of equal text that ran (`.1` false: another
-    /// place's run, which is never kept as it is — its reads are of that
-    /// place: the piece runs from it, every read looked at again).
-    fn find(&mut self, olds: &[Kept], t: &Arc<[char]>) -> Option<(usize, bool)> {
-        if let Some(i) = self.by_arc(olds, t) {
-            self.used[i] = true;
-            self.last = Some(i);
-            return Some((i, true));
-        }
-        let m = self.by_len.get_or_insert_with(|| {
-            let mut m: FxMap<usize, VecDeque<usize>> = FxMap::default();
-            for (i, o) in olds.iter().enumerate() {
-                if o.run.is_some() {
-                    m.entry(o.text.len()).or_default().push_back(i);
-                }
-            }
-            m
-        });
-        let q = m.get_mut(&t.len())?;
-        let next = self.last.map_or(0, |l| l + 1);
-        let at = q
-            .iter()
-            .position(|&i| i == next && !self.used[i] && olds[i].text == *t)
-            .or_else(|| q.iter().position(|&i| !self.used[i] && olds[i].text == *t))?;
-        let i = q.remove(at)?;
-        self.used[i] = true;
-        let own = i == next;
-        if own {
-            self.last = Some(i);
-        }
-        Some((i, own))
-    }
-
-    /// The last build's runs the pieces `undone` took, to be taken again:
-    /// the layout placed them, then laid that text out otherwise (joined
-    /// with the texts after it, its file read in its caller). A run one
-    /// took by its text from another place goes back to its own place: a
-    /// text twice in a file, the first place joined, the second finds its
-    /// own run again (else it runs on no run, never knows it reads on,
-    /// and the sequence is laid out the same way round after round).
-    fn release(&mut self, olds: &[Kept], undone: &[Spec]) {
-        for i in undone.iter().filter_map(|s| s.old) {
-            if !self.used[i] {
-                continue;
-            }
-            self.used[i] = false;
-            if let Some(m) = self.by_len.as_mut()
-                && olds[i].run.is_some()
-            {
-                let q = m.entry(olds[i].text.len()).or_default();
-                if !q.contains(&i) {
-                    let at = q.iter().position(|&j| j > i).unwrap_or(q.len());
-                    q.insert(at, i);
-                }
-            }
+    /// The labels spread evenly again, in the same order, with room for
+    /// `more` between any two.
+    fn spread(&mut self, more: u64) {
+        let ids: Vec<PieceId> = self.by.values().copied().collect();
+        self.by.clear();
+        self.spreads += 1;
+        let step = ((u64::MAX >> 2) / (ids.len() as u64 + 2)).max(more + 2);
+        for (i, id) in ids.into_iter().enumerate() {
+            let o = step * (i as u64 + 1);
+            self.ord[id as usize] = o;
+            self.by.insert(o, id);
         }
     }
-}
 
-fn count_lines(t: &[char]) -> usize {
-    t.iter().filter(|&&c| c == '\r').count()
-}
-
-/// A name's readers: reader piece -> (its first node reading the name
-/// from before the piece, the piece whose definition it read).
-type ReadersOf = Edges;
-
-/// The edges, name -> its readers, in shards by name (`Names::route`, as
-/// the names index): a run's edges go in before the scheduler's lock is
-/// taken (`run_and_install`), each shard locked once per run; under the
-/// lock, `reached` and the edge moves lock the shard of each name they
-/// look at. Between rounds the build alone holds it (`get_mut`, no
-/// locking).
-struct Readers(Vec<Mutex<FxMap<Key, ReadersOf>>>);
-
-impl Default for Readers {
-    fn default() -> Self {
-        Readers((0..SHARDS).map(|_| Mutex::default()).collect())
-    }
-}
-
-impl Readers {
-    /// The shard holding `key`'s readers, locked.
-    fn shard(&self, key: &Key) -> MutexGuard<'_, FxMap<Key, ReadersOf>> {
-        self.0[Names::route(key).0].lock().expect("readers")
-    }
-
-    /// `key`'s readers, the build alone holding the index.
-    fn get_mut(&mut self, key: &Key) -> Option<&mut ReadersOf> {
-        self.0[Names::route(key).0].get_mut().expect("readers").get_mut(key)
-    }
-
-    /// Every name and its readers, the build alone holding the index.
-    fn iter_mut(&mut self) -> impl Iterator<Item = (&Key, &mut ReadersOf)> {
-        self.0.iter_mut().flat_map(|m| m.get_mut().expect("readers").iter_mut())
-    }
-
-    /// Piece `id`'s edge for `key` is now `e`.
-    fn insert(map: &mut FxMap<Key, ReadersOf>, key: &Key, id: PieceId, e: (u32, PieceId)) {
-        if let Some(m) = map.get_mut(key) {
-            m.insert(id, e);
-        } else {
-            let mut m = Edges::default();
-            m.insert(id, e);
-            map.insert(key.clone(), m);
-        }
-    }
-}
-
-
-/// A name's edges: per reading piece (by id, in order), its first reader
-/// node and the piece whose definition it read. Pieces are installed
-/// mostly in order, so an edge is mostly added at the end.
-#[derive(Clone, Debug, Default)]
-struct Edges(Vec<Edge>);
-
-/// A reading piece's edge: (its id, (its first reader node, the defining
-/// piece)).
-type Edge = (PieceId, (u32, PieceId));
-
-impl Edges {
-    fn find(&self, id: PieceId) -> Result<usize, usize> {
-        match self.0.last() {
-            None => Err(0),
-            Some(l) if l.0 < id => Err(self.0.len()),
-            _ => self.0.binary_search_by_key(&id, |e| e.0),
-        }
-    }
-    fn get_mut(&mut self, id: PieceId) -> Option<&mut (u32, PieceId)> {
-        let i = self.find(id).ok()?;
-        Some(&mut self.0[i].1)
-    }
-    fn insert(&mut self, id: PieceId, e: (u32, PieceId)) {
-        match self.find(id) {
-            Ok(i) => self.0[i].1 = e,
-            Err(i) => self.0.insert(i, (id, e)),
-        }
-    }
     fn remove(&mut self, id: PieceId) {
-        if let Ok(i) = self.find(id) {
-            self.0.remove(i);
+        let o = self.of(id);
+        if self.by.get(&o) == Some(&id) {
+            self.by.remove(&o);
         }
     }
-    fn keys(&self) -> impl Iterator<Item = &PieceId> {
-        self.0.iter().map(|e| &e.0)
-    }
-    fn shrink_to_fit(&mut self) {
-        self.0.shrink_to_fit();
-    }
-}
 
-impl<'a> IntoIterator for &'a Edges {
-    type Item = (&'a PieceId, &'a (u32, PieceId));
-    type IntoIter = std::iter::Map<std::slice::Iter<'a, Edge>, fn(&'a Edge) -> Self::Item>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter().map(|e| (&e.0, &e.1))
+    /// The pieces in order.
+    fn ids(&self) -> Vec<PieceId> {
+        self.by.values().copied().collect()
     }
 }
 
-/// A piece's text and the pieces it was re-cut into.
-type Recut = (Arc<[char]>, Vec<Arc<[char]>>);
+/// Per piece, what a thread looks at without the scheduler's lock: its
+/// run is installed and valid ([`DONE`]), its run in progress is to stop
+/// ([`CANCEL`]). In chunks made once and never moved.
+struct Flags(RwLock<Vec<Box<[AtomicU8]>>>);
 
-/// How many texts after one were joined with it, the text all are, and
-/// where each begins in it.
-type Joined = (usize, Arc<[char]>, Arc<[usize]>);
+const FLAG_CHUNK: usize = 1 << 12;
+const DONE: u8 = 1;
+const CANCEL: u8 = 2;
 
-/// A text, the texts after it it was joined with, the text that is all of
-/// them, and where each after the first begins in it.
-type Join = (Arc<[char]>, Vec<Arc<[char]>>, Arc<[char]>, Arc<[usize]>);
+impl Flags {
+    fn new() -> Flags {
+        Flags(RwLock::new(Vec::new()))
+    }
 
-/// What survives between builds: the pieces with their nodes, the edges,
-/// the pages with their DVI.
-pub struct Build {
-    font: Arc<Font>,
-    /// Where the build reports what it does now (none: nobody looks).
-    board: Option<Arc<Progress>>,
-    /// The folds' values the last build's reads were validated against
-    /// (the page builder's quantities, the files the run wrote), by piece
-    /// id and node: the next build's predictions ([`Names::fold_value`]).
-    fold_vals: FxMap<(PieceId, u32, Key), Val>,
-    /// [`Names::file_guess`], kept from round to round and build to build.
-    file_guess: FxMap<Arc<str>, Val>,
-    /// Each piece's file (`None`: the main file) and the lines of that
-    /// file before it, as the last build laid them out
-    /// ([`Build::source_place`]).
-    places: FxMap<PieceId, (Option<Arc<str>>, u32)>,
-    /// The TFM files `\font` can load.
-    fonts: Arc<FontFiles>,
-    pieces: Vec<Kept>,
-    pages: Vec<(Page, Arc<dvi::Body>)>,
-    /// Where each page came from in the material (`page_orgs[i]` for
-    /// `pages[i]`), and the page builder's marks.
-    page_orgs: Vec<PageOrg>,
-    marks: Vec<(u32, u32)>,
-    /// The log of each call that fired a routine (by its mark's index),
-    /// with its pages: what the routines wrote, the deferred `\write`s of
-    /// the pages they shipped among it. Kept with the pages and marks, so
-    /// that a page kept from the last build keeps what it wrote.
-    call_logs: CallLogs,
-    next_id: PieceId,
-    /// Measuring (`PHITEX_SCHED`): each piece's installed runs' reading
-    /// time (ns) and nodes run, summed, by piece id.
-    run_times: FxMap<PieceId, (u64, u64)>,
-    /// Measuring: for each piece's last installed run, what read each name
-    /// from before it (the reading node's kind and command, the read's
-    /// field, whether it is a φ's read from before its `\if`).
-    read_cmds: FxMap<PieceId, Vec<String>>,
-    readers: Readers,
-    /// The source the pieces were cut from, and the byte offset of each
-    /// piece's first line in it.
-    src: String,
-    starts: Vec<usize>,
-    /// The pieces of the main text (the cut's).
-    texts: Vec<Arc<[char]>>,
-    /// Files given in memory (`set_file`), found before the input
-    /// directories' (a changed one is seen by its readers' reads).
-    files: Arc<FxMap<Arc<str>, Arc<[u8]>>>,
-    /// The pieces of each file read (the same `Arc`s while its text is),
-    /// and the rest of each line that called `\input`.
-    file_cuts: FxMap<usize, FileCut>,
-    rests: FxMap<(usize, usize), Rest>,
-    /// The pieces of the rest of a text after a cut the cutter missed (the
-    /// same `Arc`s while the text is).
-    recuts: FxMap<(usize, usize), Recut>,
-    /// Two texts read as one piece (a run read on past the first), by
-    /// their `Arc`s.
-    joins: FxMap<usize, Vec<Join>>,
-    /// The pieces whose `\input`s are read in the piece: the file's end
-    /// left what the rest of the calling line goes on with (a paragraph, a
-    /// group open) or its last command read on past it.
-    inline: Vec<Arc<[char]>>,
-    /// The cutter's [`Options::cut_lines`] the texts were cut with.
-    cut_lines: usize,
-    /// The last build's runs, in its order: what its pages were made of.
-    page_runs: Option<Vec<Option<Arc<Run>>>>,
-    /// The counts of this build's rounds that changed the sequence.
-    carried: Stats,
-    /// What the page builder left: whether it fired a routine or met an
-    /// insertion or a mark (then it is made again from its start), its
-    /// definitions at each place it fired (by the piece and node), and its
-    /// routines' runs.
-    fold: FoldKept,
-    /// The control sequences' names met in the build, by number.
-    cs: Arc<CsTable>,
-    /// The ids of the elements between a piece's nodes (fires).
-    virt: FxMap<(PieceId, u32), PieceId>,
-    /// Where `\input` and `\openin` find files, and the job's name.
-    inputs: Arc<Vec<PathBuf>>,
-    /// How a file's name becomes a path, if not by the input directories,
-    /// and the program name it asks as ([`Build::set_kpse`]).
-    finder: Option<(Arc<dyn Kpse>, Arc<str>)>,
-    job: Arc<str>,
-    /// What the session gives before any definition: the terminal's lines
-    /// (`Key::ReadStream(16)`), the interaction mode (`Key::Interaction`).
-    terminal: Option<Arc<[u8]>>,
-    interaction: i32,
-    /// The command line's `-interaction` (`set_interaction_option`).
-    interaction_option: Option<i32>,
-    /// The sizes TeX was compiled with.
-    limits: crate::print::Limits,
-    /// A settled piece drops its nodes (`graph::Lean`; the default): a
-    /// run of it again runs every node; else its nodes are kept and a run
-    /// again runs only those whose reads or text changed. A piece that ran
-    /// in one of the last [`HOT_BUILDS`] edits keeps them meanwhile (edits
-    /// come near each other).
-    lean: bool,
-    /// [`Build::set_max_rounds`].
-    max_rounds: usize,
-    /// Updates made (the cold build is the first).
-    builds: u64,
-    /// The format the build starts from (`set_format`).
-    format: Option<Arc<FormatDefs>>,
-    /// The PDF file's creation date, in seconds since 1970 (UTC):
-    /// `SOURCE_DATE_EPOCH` for pdfTeX (`Build::set_pdf_date`).
-    pdf_date: i64,
-    /// The last update's e-TeX mode (`Options::etex`): its pages' glue is
-    /// shipped as e-TeX's `hlist_out` does (`sync`).
-    etex_last: bool,
-    /// The engine is XeTeX, with these installed fonts and this finder
-    /// (`Build::set_xetex`).
-    xe: Option<Arc<crate::native::Fonts>>,
-    /// The PDF fold's state kept between builds and rounds.
-    pdf: PdfKept,
+    /// Calls `f` with piece `id`'s flags (chunks are made as ids grow).
+    fn with<R>(&self, id: PieceId, f: impl FnOnce(&AtomicU8) -> R) -> R {
+        let i = id as usize;
+        let (c, o) = (i / FLAG_CHUNK, i % FLAG_CHUNK);
+        {
+            let v = self.0.read().expect("flags");
+            if let Some(ch) = v.get(c) {
+                return f(&ch[o]);
+            }
+        }
+        let mut v = self.0.write().expect("flags");
+        while v.len() <= c {
+            v.push((0..FLAG_CHUNK).map(|_| AtomicU8::new(0)).collect());
+        }
+        f(&v[c][o])
+    }
+
+    fn get(&self, id: PieceId, f: u8) -> bool {
+        self.with(id, |a| a.load(Ordering::Acquire) & f != 0)
+    }
+
+    fn set(&self, id: PieceId, f: u8, on: bool) {
+        self.with(id, |a| {
+            if on {
+                a.fetch_or(f, Ordering::AcqRel);
+            } else {
+                a.fetch_and(!f, Ordering::AcqRel);
+            }
+        });
+    }
 }
 
-/// The PDF fold's answers to the PDF events (`Key::PdfAns`): by the
-/// piece holding the command (an output routine's: the firing call's)
-/// and the event's `what::Tag` with the field's slot.
-pub type PdfAnswers = FxMap<(PieceId, [u32; 4]), i32>;
-
-/// What the PDF side keeps between builds: the last fold's answers, the
-/// PDF events after the last page, the givens (`Key::PdfSeed`,
-/// `Key::PdfClock`), and the rounds of this update made for the
-/// read-backs (CORE.md, "pdfTeX's read-backs").
+/// The ids of the places between pieces' nodes (where the page builder
+/// fired): an edge's source when a routine's definition answered a read.
+/// Kept from build to build.
 #[derive(Default, Clone)]
-struct PdfKept {
-    answers: Arc<PdfAnswers>,
-    tail: crate::page::PdfEvents,
-    seed: i32,
-    clock: i32,
-    rounds: usize,
+struct Virt {
+    ids: FxMap<(PieceId, u32), PieceId>,
+    at: FxMap<PieceId, Pos>,
+    next: PieceId,
 }
 
-/// A page builder's PDF events with the pieces' ids for their positions.
-fn pdf_ids(seq: &Sequence, v: Vec<(crate::page::Org, Arc<crate::pdf::what::PdfItem>)>) -> crate::page::PdfEvents {
-    Arc::new(
-        v.into_iter()
-            .map(|((k, i), e)| ((seq.pieces.get(k as usize).copied().unwrap_or(NONE), i), e))
-            .collect(),
-    )
+/// The length of the common prefix of `a` and `b`.
+fn common_prefix(a: &[u8], b: &[u8]) -> usize {
+    const CHUNK: usize = 4096;
+    let n = a.len().min(b.len());
+    let mut i = 0;
+    while i + CHUNK <= n && a[i..i + CHUNK] == b[i..i + CHUNK] {
+        i += CHUNK;
+    }
+    i + a[i..n]
+        .iter()
+        .zip(&b[i..n])
+        .take_while(|(x, y)| x == y)
+        .count()
 }
 
-/// A file's text and its pieces.
-type FileCut = (Arc<str>, Vec<Arc<[char]>>);
-/// A calling piece's text and the rest of its line.
-type Rest = (Arc<[char]>, Arc<[char]>);
-/// The page builder's definitions where it fired: the piece, the node, the
-/// names and values.
-type FoldDefs = Vec<(PieceId, u32, Vec<(Key, Val)>)>;
-
-/// The page builder's results kept between builds.
-#[derive(Default, Clone)]
-struct FoldKept {
-    fancy: bool,
-    defs: FoldDefs,
-    memo: Vec<Arc<Memo>>,
-}
-
-/// An output routine's run: what it read (its tokens, the page, what the
-/// fold handed it, the fold's definitions, the document's), and what it
-/// gave.
-struct Memo {
-    /// The fire's ordinal its PDF events and their answers were filed
-    /// under (`what::Tag`): a name, not an input; a memo reused at another
-    /// fire has them filed again under that one.
-    ordinal: u32,
-    toks: Arc<Vec<Tok>>,
-    page: Arc<crate::item::BoxNode>,
-    fire: OutputReads,
-    overlay: Vec<(Key, Val)>,
-    reads: Vec<(Key, Val)>,
-    exports: Vec<(Key, Val)>,
-    items: Vec<crate::item::Item>,
-    log: Vec<String>,
-    errors: Vec<String>,
+/// The length of the common suffix of `a` and `b`.
+fn common_suffix(a: &[u8], b: &[u8]) -> usize {
+    const CHUNK: usize = 4096;
+    let n = a.len().min(b.len());
+    let (a, b) = (&a[a.len() - n..], &b[b.len() - n..]);
+    let mut i = 0;
+    while i + CHUNK <= n && a[n - i - CHUNK..n - i] == b[n - i - CHUNK..n - i] {
+        i += CHUNK;
+    }
+    i + a[..n - i]
+        .iter()
+        .rev()
+        .zip(b[..n - i].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count()
 }
 
 const SHARDS: usize = 64;
@@ -894,8 +580,8 @@ struct Given {
     /// The files PDF output read through the finder ([`Given::pdf_found`]).
     pdf: FileCache,
     job: Arc<str>,
-    /// The lines of its file before each piece of the sequence.
-    bases: Vec<u32>,
+    /// The lines of its file before each piece, by id.
+    bases: RwLock<FxMap<PieceId, u32>>,
     /// The terminal's lines and the interaction mode before any
     /// definition (`Build::set_terminal`, `Build::set_interaction`), and
     /// the sizes TeX was compiled with.
@@ -906,10 +592,8 @@ struct Given {
     limits: crate::print::Limits,
     /// The PDF file's creation date (`Build::set_pdf_date`).
     pdf_date: i64,
-    /// The PDF fold's answers, the pieces' ids by position, the random
-    /// seed and the clock given.
+    /// The PDF fold's answers, the random seed and the clock given.
     pdf_answers: Arc<PdfAnswers>,
-    ids: Vec<PieceId>,
     pdf_seed: i32,
     pdf_clock: i32,
     /// XeTeX's native fonts (`Build::set_xetex`).
@@ -921,7 +605,6 @@ impl Given {
         dirs: Arc<Vec<PathBuf>>,
         job: Arc<str>,
         mem: Arc<FxMap<Arc<str>, Arc<[u8]>>>,
-        bases: Vec<u32>,
     ) -> Given {
         Given {
             dirs,
@@ -930,14 +613,13 @@ impl Given {
             files: Mutex::default(),
             pdf: Mutex::default(),
             job,
-            bases,
+            bases: RwLock::default(),
             terminal: None,
             interaction: 0,
             interaction_option: None,
             limits: crate::print::Limits::TEX_LIVE,
             pdf_date: 0,
             pdf_answers: Arc::default(),
-            ids: Vec::new(),
             pdf_seed: 0,
             pdf_clock: 0,
             xe: None,
@@ -1024,22 +706,19 @@ impl Given {
         v
     }
 
-    /// The lines of its file before piece `k`.
-    fn base(&self, k: usize) -> u32 {
-        self.bases.get(k).copied().unwrap_or(0)
+    /// The lines of its file before piece `id`.
+    fn base(&self, id: PieceId) -> u32 {
+        self.bases.read().expect("bases").get(&id).copied().unwrap_or(0)
     }
 
     /// What a read of `key` from piece `k` finds, if the build answers it.
-    fn answer(&self, key: &Key, k: usize) -> Option<Val> {
+    fn answer(&self, key: &Key, k: PieceId) -> Option<Val> {
         match key {
             Key::File(n) => Some(self.file(n).map_or(Val::Void, Val::Bytes)),
             Key::Job => Some(Val::Name(self.job.clone())),
             Key::LineBase => Some(Val::Int(self.base(k) as i32)),
             Key::PdfAns(a, b, c, d) => Some(
-                self.ids
-                    .get(k)
-                    .and_then(|id| self.pdf_answers.get(&(*id, [*a, *b, *c, *d])))
-                    .map_or(Val::Void, |v| Val::Int(*v)),
+                self.pdf_answers.get(&(k, [*a, *b, *c, *d])).map_or(Val::Void, |v| Val::Int(*v)),
             ),
             Key::PdfSeed => Some(Val::Int(self.pdf_seed)),
             Key::PdfClock => Some(Val::Int(self.pdf_clock)),
@@ -1051,162 +730,34 @@ impl Given {
 
 type Defs = FxMap<Key, Vec<(Pos, Val)>>;
 
-/// A place in document order: (piece position, node). A piece's exports
-/// are at `(k, END)`; node `j` of piece `k` reads what is defined before
-/// `(k, j)`. (Elements put between a piece's nodes — an output routine's,
-/// an `\input` file's — will define at `(k, j)`; none does yet.)
-pub type Pos = (u32, u32);
-/// The node of a piece's exports: after all its nodes.
-pub const END: u32 = u32::MAX;
-
-/// The document's elements in order, each with a stable id (a piece's is
-/// its `PieceId`; an element between a piece's nodes — where the page
-/// builder fired — has one by its piece and node), and where each is: what
-/// an edge's ids mean, and which element a place in the names index is.
-struct Sequence {
-    /// Position -> the piece there.
-    pieces: Vec<PieceId>,
-    /// Piece id -> place (`(NONE, END)`: not in this build).
-    pos: Vec<Pos>,
-    /// The elements between nodes.
-    virt: RwLock<Virt>,
-}
-
-/// The elements between a piece's nodes: their ids by (piece, node),
-/// kept between builds, and their places in this one.
-#[derive(Default)]
-struct Virt {
-    ids: FxMap<(PieceId, u32), PieceId>,
-    at: FxMap<PieceId, Pos>,
-    next: PieceId,
-}
-
-impl Sequence {
-    /// The sequence of these pieces, in order, ids below `next`, with the
-    /// last build's ids of elements between nodes.
-    fn new(pieces: Vec<PieceId>, next: PieceId, ids: FxMap<(PieceId, u32), PieceId>) -> Sequence {
-        let mut pos = vec![(NONE, END); next as usize];
-        for (k, &id) in pieces.iter().enumerate() {
-            pos[id as usize] = (k as u32, END);
-        }
-        let mut at = FxMap::default();
-        for (&(p, node), &id) in &ids {
-            if let Some(&(k, _)) = pos.get(p as usize).filter(|x| x.0 != NONE) {
-                at.insert(id, (k, node));
-            }
-        }
-        Sequence {
-            pieces,
-            pos,
-            virt: RwLock::new(Virt { ids, at, next }),
-        }
-    }
-
-    /// The piece at position `k`.
-    fn piece(&self, k: usize) -> PieceId {
-        self.pieces[k]
-    }
-
-    /// Where element `id` is, if it is in this build.
-    fn pos_of(&self, id: PieceId) -> Option<Pos> {
-        if let Some(p) = self.pos.get(id as usize)
-            && p.0 != NONE
-        {
-            return Some(*p);
-        }
-        self.virt.read().expect("virt").at.get(&id).copied()
-    }
-
-    /// The element at place `p`.
-    fn id_at(&self, p: Pos) -> PieceId {
-        if p.1 == END {
-            return self.pieces[p.0 as usize];
-        }
-        let key = (self.pieces[p.0 as usize], p.1);
-        if let Some(&id) = self.virt.read().expect("virt").ids.get(&key) {
-            return id;
-        }
-        let mut v = self.virt.write().expect("virt");
-        if let Some(&id) = v.ids.get(&key) {
-            return id;
-        }
-        let id = v.next;
-        v.next += 1;
-        v.ids.insert(key, id);
-        v.at.insert(id, p);
-        id
-    }
-}
-
-/// Is an edge's source (`src`, where it was defined) at or before `m`?
-fn src_at_or_before(seq: &Sequence, src: PieceId, m: Pos) -> bool {
-    src == INITIAL || seq.pos_of(src).is_none_or(|p| p <= m)
-}
-
-/// The length of the common prefix of `a` and `b`.
-fn common_prefix(a: &[u8], b: &[u8]) -> usize {
-    const CHUNK: usize = 4096;
-    let n = a.len().min(b.len());
-    let mut i = 0;
-    while i + CHUNK <= n && a[i..i + CHUNK] == b[i..i + CHUNK] {
-        i += CHUNK;
-    }
-    i + a[i..n]
-        .iter()
-        .zip(&b[i..n])
-        .take_while(|(x, y)| x == y)
-        .count()
-}
-
-/// The length of the common suffix of `a` and `b`.
-fn common_suffix(a: &[u8], b: &[u8]) -> usize {
-    const CHUNK: usize = 4096;
-    let n = a.len().min(b.len());
-    let (a, b) = (&a[a.len() - n..], &b[b.len() - n..]);
-    let mut i = 0;
-    while i + CHUNK <= n && a[n - i - CHUNK..n - i] == b[n - i - CHUNK..n - i] {
-        i += CHUNK;
-    }
-    i + a[..n - i]
-        .iter()
-        .rev()
-        .zip(b[..n - i].iter().rev())
-        .take_while(|(x, y)| x == y)
-        .count()
-}
-
-/// Every installed run's exports: name -> (place, value), by place. Read by every thread at once, in shards; written only when a
-/// run is installed, under the scheduler's lock.
+/// Every installed run's exports, and the page builder's definitions where
+/// it fired: name -> (place, value), in document order (by the places'
+/// labels). Read by every thread at once, in shards; written under the
+/// scheduler's lock.
 struct Names {
     shards: Vec<RwLock<Defs>>,
-    /// Per shard, a bit per group of keys some piece has defined in this
-    /// build (set before the definition goes in, never cleared): a key
-    /// whose bit is clear has only its initial value, found without the
-    /// lock.
+    /// Per shard, a bit per group of keys some piece has defined (set
+    /// before the definition goes in, never cleared): a key whose bit is
+    /// clear has only its initial value, found without the lock.
     defined: Vec<AtomicU64>,
     /// The same, for the names ever defined between a piece's nodes (by
-    /// the page builder or an output routine: never cleared).
+    /// the page builder or an output routine).
     inner: Vec<AtomicU64>,
-    /// The build's control sequence names.
     cs: Arc<CsTable>,
-    /// Whether any is (any bit of `inner`).
-    any_inner: std::sync::atomic::AtomicBool,
+    any_inner: AtomicBool,
     /// The names the build answers itself (files, the job, line bases).
     given: Given,
-    /// The values before any definition are e-TeX's extended mode's.
     etex: bool,
-    /// The format's definitions, at the place before the first piece
-    /// (`Build::set_format`): what a name no piece defined before means.
+    /// The format's definitions, at the place before the first piece.
     format: Option<Arc<FormatDefs>>,
-    /// The folds' values at the nodes reading them, by place: the last
-    /// build's, then this build's as the folds validate the reads
-    /// ([`Names::fold_value`]).
-    fold_vals: RwLock<FxMap<(u32, u32, Key), Val>>,
+    /// The pieces' order.
+    labels: Arc<RwLock<Labels>>,
+    /// The folds' values at the nodes reading them (the page builder's
+    /// quantities, the files the run wrote), by piece and node: the last
+    /// build's, then this one's as the folds validate the reads.
+    fold_vals: RwLock<FxMap<(PieceId, u32, Key), Val>>,
     /// Each written file's bytes as a read of it last found them, for a
-    /// read at a place the folds have no value for yet: a piece the
-    /// sequence made again (cut otherwise around an `\input` of the file
-    /// itself) reads what it read before, not the file as given, so that
-    /// the layout the read makes comes back ([`Names::fold_value`]).
+    /// read at a place the folds have no value for yet.
     file_guess: RwLock<FxMap<Arc<str>, Val>>,
 }
 
@@ -1219,16 +770,17 @@ struct FormatDefs {
 }
 
 impl Names {
-    fn new(given: Given, etex: bool, cs: Arc<CsTable>, format: Option<Arc<FormatDefs>>) -> Names {
+    fn new(given: Given, etex: bool, cs: Arc<CsTable>, format: Option<Arc<FormatDefs>>, labels: Arc<RwLock<Labels>>) -> Names {
         Names {
             format,
             cs,
             shards: (0..SHARDS).map(|_| RwLock::default()).collect(),
             defined: (0..SHARDS).map(|_| AtomicU64::new(0)).collect(),
             inner: (0..SHARDS).map(|_| AtomicU64::new(0)).collect(),
-            any_inner: std::sync::atomic::AtomicBool::new(false),
+            any_inner: AtomicBool::new(false),
             given,
             etex,
+            labels,
             fold_vals: RwLock::default(),
             file_guess: RwLock::default(),
         }
@@ -1237,9 +789,7 @@ impl Names {
     /// What a read of `key` at `at` is answered with when a fold of the
     /// build gives it (`graph::Env::fold_read`): the value the fold had
     /// there (this build's, else the last build's), else the names index's
-    /// (the page builder's quantities: what its fires defined, IniTeX's
-    /// before any) or the file as found (a file: what is in the
-    /// directories). `None`: not a fold's.
+    /// or the file as found. `None`: not a fold's.
     fn fold_value(&self, key: &Key, at: Pos, font: &Arc<Font>) -> Option<Val> {
         if !matches!(key, Key::Page(_) | Key::File(_)) {
             return None;
@@ -1262,47 +812,30 @@ impl Names {
         }))
     }
 
-    /// Whether file `name` is read as the directories or the build give it:
-    /// no fold of this build has a value for it (a file the run writes and
-    /// reads back) and no earlier round's probes guessed its bytes.
-    fn file_as_given(&self, name: &str) -> bool {
-        !self.file_guess.read().expect("file guesses").contains_key(name)
-            && !self
-                .fold_vals
-                .read()
-                .expect("fold values")
-                .keys()
-                .any(|(_, _, k)| matches!(k, Key::File(n) if **n == *name))
-    }
-
     /// What a read of `key` at `at` is validated against, and the
-    /// definition the names index has there: a fold's read (`Key::Page`,
-    /// `Key::File`) only ever against the fold's value at that node,
-    /// every other read against the names index. The one place reads are
-    /// checked ([`Names::read_holds`]: install, `still_dirty`).
+    /// definition the names index has there: a fold's read only ever
+    /// against the fold's value at that node, every other read against
+    /// the names index.
     fn read_now(&self, key: &Key, at: Pos, font: &Arc<Font>) -> (Option<Pos>, Val) {
         let (def, now, ..) = self.reaching(key, at, font);
         (def, self.fold_value(key, at, font).unwrap_or(now))
     }
 
-    /// Whether a read of `key` at `at` that saw `saw` sees it still
-    /// ([`Names::read_now`]).
+    /// Whether a read of `key` at `at` that saw `saw` sees it still.
     fn read_holds(&self, key: &Key, at: Pos, font: &Arc<Font>, saw: &Val) -> bool {
         saw.seen_as(&self.read_now(key, at, font).1)
     }
 
-    /// The fold's value of `key` at `at` is `v` (validated).
     fn set_fold_value(&self, key: &Key, at: Pos, v: Val) {
         self.fold_vals.write().expect("fold values").insert((at.0, at.1, key.clone()), v);
     }
 
-    /// The shard of `key` and its bit there. (The hash only routes; the
-    /// map's `==` decides.)
-    /// Whether anything between a piece's nodes defines any name now.
     fn any_inner(&self) -> bool {
         self.any_inner.load(Ordering::Acquire)
     }
 
+    /// The shard of `key` and its bit there. (The hash only routes; the
+    /// map's `==` decides.)
     fn route(key: &Key) -> (usize, u64) {
         let h = hash_of(key);
         ((h % SHARDS as u64) as usize, 1 << ((h >> 32) % 64))
@@ -1313,28 +846,37 @@ impl Names {
     /// nodes of `at`'s piece it reaches, `lo..hi` (all of them, `0..END`,
     /// unless an element between the piece's nodes defines `key`).
     fn reaching(&self, key: &Key, at: Pos, font: &Arc<Font>) -> (Option<Pos>, Val, u32, u32) {
-        if let Some(v) = self.given.answer(key, at.0 as usize) {
+        if let Some(v) = self.given.answer(key, at.0) {
             return (None, v, 0, END);
         }
         let (s, bit) = Names::route(key);
         if self.defined[s].load(Ordering::Acquire) & bit == 0 {
             return (None, self.initial(key, font), 0, END);
         }
-        let g = self.shards[s].read().expect("names");
-        if let Some(v) = g.get(key) {
-            let i = v.partition_point(|(p, _)| *p < at);
-            let hi = match v.get(i) {
-                Some(((k, j), _)) if *k == at.0 && *j != END => j + 1,
-                _ => END,
-            };
-            if i > 0 {
-                let (p, val) = &v[i - 1];
-                let lo = if p.0 == at.0 { p.1 + 1 } else { 0 };
-                return (Some(*p), val.clone(), lo, hi);
-            }
-            return (None, self.initial(key, font), 0, hi);
+        let found = {
+            let l = self.labels.read().expect("labels");
+            let target = l.key(at);
+            let g = self.shards[s].read().expect("names");
+            g.get(key).map(|v| {
+                let i = v.partition_point(|(p, _)| l.key(*p) < target);
+                let hi = match v.get(i) {
+                    Some(((k, j), _)) if *k == at.0 && *j != END => j + 1,
+                    _ => END,
+                };
+                if i > 0 {
+                    let (p, val) = &v[i - 1];
+                    let lo = if p.0 == at.0 { p.1 + 1 } else { 0 };
+                    (Some((*p, val.clone(), lo)), hi)
+                } else {
+                    (None, hi)
+                }
+            })
+        };
+        match found {
+            Some((Some((p, val, lo)), hi)) => (Some(p), val, lo, hi),
+            Some((None, hi)) => (None, self.initial(key, font), 0, hi),
+            None => (None, self.initial(key, font), 0, END),
         }
-        (None, self.initial(key, font), 0, END)
     }
 
     /// The value of `key` before any definition: the format's if it
@@ -1363,10 +905,12 @@ impl Names {
     /// The value defined exactly at `at`, if any.
     fn at(&self, key: &Key, at: Pos) -> Option<Val> {
         let (s, _) = Names::route(key);
+        let l = self.labels.read().expect("labels");
+        let target = l.key(at);
         let g = self.shards[s].read().expect("names");
         let v = g.get(key)?;
-        let i = v.binary_search_by(|(p, _)| p.cmp(&at)).ok()?;
-        Some(v[i].1.clone())
+        let i = v.partition_point(|(p, _)| l.key(*p) < target);
+        v.get(i).filter(|(p, _)| *p == at).map(|(_, x)| x.clone())
     }
 
     /// Place `at` now defines `key` as `val` (none: no longer defines it).
@@ -1379,9 +923,14 @@ impl Names {
                 self.any_inner.store(true, Ordering::Release);
             }
         }
+        let l = self.labels.read().expect("labels");
+        let target = l.key(at);
         let mut g = self.shards[s].write().expect("names");
+        if val.is_none() && !g.contains_key(key) {
+            return;
+        }
         let v = g.entry(key.clone()).or_default();
-        let i = v.partition_point(|(p, _)| *p < at);
+        let i = v.partition_point(|(p, _)| l.key(*p) < target);
         let here = v.get(i).is_some_and(|(p, _)| *p == at);
         match (val, here) {
             (Some(val), true) => v[i].1 = val.clone(),
@@ -1392,6 +941,280 @@ impl Names {
             (None, false) => {}
         }
     }
+
+    /// Every definition piece `id` makes (its exports and those between
+    /// its nodes) taken out: the names.
+    fn drop_piece(&self, id: PieceId, exports: &[(Key, Val)]) -> Vec<Key> {
+        let mut out = Vec::new();
+        for (key, _) in exports {
+            if self.at(key, (id, END)).is_some() {
+                self.set((id, END), key, None);
+                out.push(key.clone());
+            }
+        }
+        out
+    }
+}
+
+/// A name's readers: reader piece -> (its first node reading the name
+/// from before the piece, the piece whose definition it read).
+type ReadersOf = Edges;
+
+/// The edges, name -> its readers, in shards by name (`Names::route`, as
+/// the names index): a run's edges go in before the scheduler's lock is
+/// taken (`run_and_install`), each shard locked once per run; under the
+/// lock, `reached` and the edge moves lock the shard of each name they
+/// look at. Between rounds the build alone holds it (`get_mut`, no
+/// locking).
+struct Readers(Vec<Mutex<FxMap<Key, ReadersOf>>>);
+
+impl Default for Readers {
+    fn default() -> Self {
+        Readers((0..SHARDS).map(|_| Mutex::default()).collect())
+    }
+}
+
+impl Readers {
+    /// The shard holding `key`'s readers, locked.
+    fn shard(&self, key: &Key) -> MutexGuard<'_, FxMap<Key, ReadersOf>> {
+        self.0[Names::route(key).0].lock().expect("readers")
+    }
+
+    /// `key`'s readers, the build alone holding the index.
+    fn get_mut(&mut self, key: &Key) -> Option<&mut ReadersOf> {
+        self.0[Names::route(key).0].get_mut().expect("readers").get_mut(key)
+    }
+
+    /// Every name and its readers, the build alone holding the index.
+    fn iter_mut(&mut self) -> impl Iterator<Item = (&Key, &mut ReadersOf)> {
+        self.0.iter_mut().flat_map(|m| m.get_mut().expect("readers").iter_mut())
+    }
+
+    /// Piece `id`'s edge for `key` is now `e`.
+    fn insert(map: &mut FxMap<Key, ReadersOf>, key: &Key, id: PieceId, e: (u32, PieceId)) {
+        if let Some(m) = map.get_mut(key) {
+            m.insert(id, e);
+        } else {
+            let mut m = Edges::default();
+            m.insert(id, e);
+            map.insert(key.clone(), m);
+        }
+    }
+}
+
+
+/// A name's edges: per reading piece (by id, in order), its first reader
+/// node and the piece whose definition it read. Pieces are installed
+/// mostly in order, so an edge is mostly added at the end.
+#[derive(Clone, Debug, Default)]
+struct Edges(Vec<Edge>);
+
+/// A reading piece's edge: (its id, (its first reader node, the defining
+/// piece)).
+type Edge = (PieceId, (u32, PieceId));
+
+impl Edges {
+    fn find(&self, id: PieceId) -> Result<usize, usize> {
+        match self.0.last() {
+            None => Err(0),
+            Some(l) if l.0 < id => Err(self.0.len()),
+            _ => self.0.binary_search_by_key(&id, |e| e.0),
+        }
+    }
+    fn get_mut(&mut self, id: PieceId) -> Option<&mut (u32, PieceId)> {
+        let i = self.find(id).ok()?;
+        Some(&mut self.0[i].1)
+    }
+    fn insert(&mut self, id: PieceId, e: (u32, PieceId)) {
+        match self.find(id) {
+            Ok(i) => self.0[i].1 = e,
+            Err(i) => self.0.insert(i, (id, e)),
+        }
+    }
+    fn remove(&mut self, id: PieceId) {
+        if let Ok(i) = self.find(id) {
+            self.0.remove(i);
+        }
+    }
+    fn keys(&self) -> impl Iterator<Item = &PieceId> {
+        self.0.iter().map(|e| &e.0)
+    }
+    fn shrink_to_fit(&mut self) {
+        self.0.shrink_to_fit();
+    }
+}
+
+impl<'a> IntoIterator for &'a Edges {
+    type Item = (&'a PieceId, &'a (u32, PieceId));
+    type IntoIter = std::iter::Map<std::slice::Iter<'a, Edge>, fn(&'a Edge) -> Self::Item>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter().map(|e| (&e.0, &e.1))
+    }
+}
+
+/// The PDF fold's answers to the PDF events (`Key::PdfAns`): by the
+/// piece holding the command (an output routine's: the firing call's)
+/// and the event's `what::Tag` with the field's slot.
+pub type PdfAnswers = FxMap<(PieceId, [u32; 4]), i32>;
+
+/// What the PDF side keeps between builds: the last fold's answers, the
+/// PDF events after the last page, the givens (`Key::PdfSeed`,
+/// `Key::PdfClock`), and the evaluations of this update made for the
+/// read-backs (CORE.md, "pdfTeX's read-backs").
+#[derive(Default, Clone)]
+struct PdfKept {
+    answers: Arc<PdfAnswers>,
+    tail: crate::page::PdfEvents,
+    seed: i32,
+    clock: i32,
+    rounds: usize,
+}
+
+/// The page builder's definitions where it fired: the piece, the node, the
+/// names and values.
+type FoldDefs = Vec<(PieceId, u32, Vec<(Key, Val)>)>;
+
+/// The page builder's results kept between evaluations.
+#[derive(Default, Clone)]
+struct FoldKept {
+    fancy: bool,
+    defs: FoldDefs,
+    memo: Vec<Arc<Memo>>,
+}
+
+/// An output routine's run: what it read (its tokens, the page, what the
+/// fold handed it, the fold's definitions, the document's), and what it
+/// gave.
+struct Memo {
+    /// The fire's ordinal its PDF events and their answers were filed
+    /// under (`what::Tag`): a name, not an input; a memo reused at another
+    /// fire has them filed again under that one.
+    ordinal: u32,
+    toks: Arc<Vec<Tok>>,
+    page: Arc<crate::item::BoxNode>,
+    fire: OutputReads,
+    overlay: Vec<(Key, Val)>,
+    reads: Vec<(Key, Val)>,
+    exports: Vec<(Key, Val)>,
+    items: Vec<crate::item::Item>,
+    log: Vec<String>,
+    errors: Vec<String>,
+}
+
+/// What a piece's run says of the sequence: the file its last node reads
+/// (and where that node ends), whether it ends its file (`\endinput`) or
+/// the job, whether it stopped at a cut the cutter missed, whether it reads
+/// on past its text. The sequence is rewritten where a run says otherwise
+/// than the sequence has it ([`apply_structure`]).
+#[derive(Clone, Default, Debug)]
+struct Expect {
+    input: Option<Arc<FileText>>,
+    stop: usize,
+    endinput: bool,
+    /// The job ends in it (`\end`, `\dump`): no piece follows.
+    ends: bool,
+    /// It ends at a cut the cutter missed (at `stop`): the rest of its
+    /// text is cut again from there.
+    cut: bool,
+    /// It does not stop where the next text begins: its last command reads
+    /// on past its text's end, or it leaves a state no piece is entered in
+    /// (a paragraph, a group open). It and the next text are one piece.
+    join: bool,
+}
+
+impl Expect {
+    fn of(r: &Run) -> Expect {
+        if r.nodes_len() == 0 && r.lean.is_none() {
+            return Expect::default();
+        }
+        let out = r.out();
+        let input = r.input().cloned();
+        let cut = r.ends_at_cut();
+        let join = input.is_none() && !cut && (r.crossed || !out.enterable());
+        Expect {
+            join,
+            stop: if input.is_some() || cut { out.pos } else { 0 },
+            cut,
+            endinput: out.ends_file(),
+            // (a session's next job begins by defining it 0)
+            ends: r
+                .exports
+                .binary_search_by(|(k, _)| k.cmp(&Key::Ended))
+                .is_ok_and(|i| r.exports[i].1 != Val::Int(0)),
+            input,
+        }
+    }
+}
+
+type ListId = u32;
+
+/// What a list's texts are.
+#[derive(Clone)]
+enum ListKind {
+    /// The source: every job's main text.
+    Root,
+    /// A file a piece's `\input` read.
+    File(Arc<FileText>),
+    /// The rest of a piece's text after a cut the cutter missed, cut again.
+    Recut,
+}
+
+/// A text the sequence reads, cut into texts at blank lines.
+struct List {
+    kind: ListKind,
+    /// The piece whose run made it (none: the root).
+    caller: Option<PieceId>,
+    texts: Vec<Arc<[char]>>,
+    /// The lines before each text, from the list's start (the root's: from
+    /// its job's start).
+    lines: Vec<u32>,
+    /// Where the caller's run stopped (its `\input`'s end, or the cut).
+    stop: usize,
+    /// A file's: the rest of the caller's line, read after the file.
+    rest: Option<PieceId>,
+    alive: bool,
+}
+
+impl List {
+    fn new(kind: ListKind, caller: Option<PieceId>, texts: Vec<Arc<[char]>>, stop: usize) -> List {
+        let lines = line_starts(&texts, matches!(kind, ListKind::Root));
+        List { kind, caller, texts, lines, stop, rest: None, alive: true }
+    }
+
+    fn file_name(&self) -> Option<&Arc<str>> {
+        match &self.kind {
+            ListKind::File(f) => Some(&f.name),
+            _ => None,
+        }
+    }
+}
+
+/// The lines before each text (a root's counted again at each job's start).
+fn line_starts(texts: &[Arc<[char]>], jobs: bool) -> Vec<u32> {
+    let mut v = Vec::with_capacity(texts.len());
+    let mut n = 0u32;
+    for t in texts {
+        if jobs && t.first() == Some(&crate::graph::JOB) {
+            n = 0;
+        }
+        v.push(n);
+        n += count_lines(t) as u32;
+    }
+    v
+}
+
+fn count_lines(t: &[char]) -> usize {
+    t.iter().filter(|&&c| c == '\r').count()
+}
+
+/// What a piece's text is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Shape {
+    /// Texts of its list, whole (`Piece::span`: one, or several joined).
+    Texts,
+    /// The rest of piece `.0`'s line after its `\input`, the file read
+    /// (then the texts `span` of its list, joined with it).
+    Rest(PieceId),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1401,283 +1224,918 @@ enum Status {
     Done,
 }
 
-struct PState {
-    id: PieceId,
-    text: Arc<[char]>,
-    status: Status,
-    /// Its installed run: its exports are in the names index, its reads
-    /// are edges.
-    run: Option<Arc<Run>>,
-    /// The lines of each of the run's paragraphs, once broken.
-    lines: Vec<Option<Lines>>,
-    /// An edited piece's: the removed piece nearest its place, whose
-    /// chain it runs from (kept wherever it still holds), with its lines
-    /// and text.
-    prev: Option<Prev>,
-    /// Nodes of its run that read a definition since remade.
-    dirty: Dirty,
-    runs: u32,
-    /// The piece whose definition answers each of its run's reads, as its
-    /// edges say (aligned with `Run::reads`).
-    srcs: Vec<PieceId>,
-    /// Its part of the log, once its run and lines are final.
-    log: Option<Arc<Frag>>,
-    entry: Entry,
-    expect: Expect,
-    /// What its run says of the sequence.
-    got: Expect,
-    base: usize,
-    post: Option<String>,
-    /// Its reads suspend whatever the policy (a speculating run of it went
-    /// on long on predictions nothing confirmed).
-    suspend: bool,
-    /// It ran in an edit: it keeps its nodes until this build (then it
-    /// goes lean, `graph::Lean`).
-    hot_until: u64,
-    /// Its `\input`s are read in it ([`Build::inline`]).
-    inline: bool,
-    /// Where its run may stop ([`Spec::stops`]).
-    stops: Arc<[usize]>,
-    /// The state its run in progress was entered in.
-    entered: Option<RState>,
-    /// Every name it was marked for has the value its run read again
-    /// ([`still_dirty`]): the run stands if its entry does.
-    recheck: bool,
-    /// Its run (`.0`) without its nodes (`.1`), to stand for it once the
-    /// page builder has passed it: until then a definition the page
-    /// builder makes between its nodes runs only the nodes after it again.
-    lean_later: Option<(Arc<Run>, Arc<Run>)>,
-    /// Its run reads the page builder's quantities and the scan has not
-    /// validated them all yet: the scan does not converge before it.
-    fold_unchecked: bool,
+/// How a piece is entered: the canonical start (a job's first text), the
+/// state an `\input` node of piece `.0` left (its file's first piece), the
+/// rest of piece `.0`'s line after the file, or the state the piece before
+/// it leaves (`.0`, the live piece before it; assumed to be the canonical
+/// start, or its file's start, until that piece has run).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Entry {
+    Start,
+    File(PieceId),
+    Rest(PieceId),
+    After(PieceId),
 }
 
 /// A piece's dirty names, each from the first node of its run that may
-/// read it otherwise (0: every reader; a definition made between its own
-/// nodes, at node `i`, reaches its nodes from `i + 1`).
+/// read it otherwise.
 type Dirty = BTreeMap<Key, u32>;
 
-/// `key` is dirty in `d` from node `from` on (the earliest wins).
-fn dirty_from(d: &mut Dirty, key: Key, from: u32) {
-    d.entry(key).and_modify(|f| *f = (*f).min(from)).or_insert(from);
+/// An edited piece's predecessor: its run, lines and text, which its run
+/// starts from (every node whose text and reads are the same kept).
+type Prev = (Arc<Run>, Vec<Option<Lines>>, Arc<[char]>);
+
+/// A piece: a text of a list (or the rest of a line after an `\input`,
+/// joined with texts after it), its place, and its run.
+struct Piece {
+    id: PieceId,
+    /// In the sequence (else taken out, for good).
+    alive: bool,
+    /// After the job's end or its file's `\endinput`: not read (TeX stops
+    /// before it), not run, kept for when that changes.
+    muted: bool,
+    list: ListId,
+    shape: Shape,
+    /// The texts of its list it holds whole, `from..to` (a rest: those
+    /// joined after it).
+    span: (u32, u32),
+    /// The texts of its list its text comes from.
+    covers: (u32, u32),
+    /// The lines of its list from text `covers.0`'s start to its own.
+    base_off: u32,
+    /// The lines of its file before it (`Key::LineBase`).
+    base: u32,
+    text: Arc<[char]>,
+    /// Where the texts it was joined from begin: its run stops at the
+    /// first it can (CORE.md, cuts).
+    stops: Arc<[usize]>,
+    /// Its `\input`s are read in it (a file whose end leaves what the rest
+    /// of the line goes on with, or whose last command reads on past it).
+    inline: bool,
+    /// Its run does not end at a cut the cutter missed (the re-cut's last
+    /// text read on past its end).
+    nocut: bool,
+    /// What the sequence's mutes were last computed with of its run:
+    /// (`ends`, `endinput`) (a run not installed valid says nothing).
+    muting: (bool, bool),
+    /// The file its run's `\input` read, as a list (its pieces follow it).
+    file: Option<ListId>,
+    /// The rest of its text after the cut its run stopped at, as a list.
+    recut: Option<ListId>,
+    /// Its runs' rewrites of the sequence this update.
+    edits: u32,
+    status: Status,
+    run: Option<Arc<Run>>,
+    lines: Vec<Option<Lines>>,
+    prev: Option<Prev>,
+    dirty: Dirty,
+    runs: u32,
+    /// The piece whose definition answers each of its run's reads (aligned
+    /// with `Run::reads`).
+    srcs: Vec<PieceId>,
+    log: Option<Arc<Frag>>,
+    /// What its run says of the sequence.
+    got: Expect,
+    /// Its reads suspend whatever the policy.
+    suspend: bool,
+    hot_until: u64,
+    /// The state its run in progress was entered in.
+    entered: Option<RState>,
+    recheck: bool,
+    /// Its run with and without its nodes: lean once the scan has passed.
+    lean_later: Option<(Arc<Run>, Arc<Run>)>,
+    /// Its run reads the page builder's quantities the scan has not
+    /// validated yet.
+    fold_unchecked: bool,
 }
 
-/// A run and the last node reading each name it reads
-/// ([`State::last_readers`]).
-type LastReaders = (Arc<Run>, Arc<FxMap<Key, u32>>);
+impl Piece {
+    fn new(id: PieceId, list: ListId, shape: Shape, span: (u32, u32), covers: (u32, u32), base_off: u32, text: Arc<[char]>, stops: Arc<[usize]>) -> Piece {
+        Piece {
+            id,
+            alive: true,
+            muted: false,
+            list,
+            shape,
+            span,
+            covers,
+            base_off,
+            base: 0,
+            text,
+            stops,
+            inline: false,
+            nocut: false,
+            muting: (false, false),
+            file: None,
+            recut: None,
+            edits: 0,
+            status: Status::Unstarted,
+            run: None,
+            lines: Vec::new(),
+            prev: None,
+            dirty: Dirty::new(),
+            runs: 0,
+            srcs: Vec::new(),
+            log: None,
+            got: Expect::default(),
+            suspend: false,
+            hot_until: 0,
+            entered: None,
+            recheck: false,
+            lean_later: None,
+            fold_unchecked: false,
+        }
+    }
+
+    fn live(&self) -> bool {
+        self.alive && !self.muted
+    }
+}
+
+/// The sequence: the pieces (by id, taken-out ones kept as tombstones),
+/// the lists they are texts of, their order.
+struct Seq {
+    p: Vec<Piece>,
+    lists: Vec<List>,
+    labels: Arc<RwLock<Labels>>,
+    root: Option<ListId>,
+    cut_lines: usize,
+    /// The pieces of each file text read (the same `Arc`s while its text is).
+    file_cuts: FxMap<usize, (Arc<str>, Vec<Arc<[char]>>)>,
+}
+
+impl Seq {
+    fn new(cut_lines: usize) -> Seq {
+        Seq { p: Vec::new(), lists: Vec::new(), labels: Arc::default(), root: None, cut_lines, file_cuts: FxMap::default() }
+    }
+
+    fn labels(&self) -> std::sync::RwLockReadGuard<'_, Labels> {
+        self.labels.read().expect("labels")
+    }
+
+    /// The first live piece.
+    fn first_live(&self) -> Option<PieceId> {
+        let l = self.labels();
+        let mut x = l.first();
+        while let Some(k) = x {
+            if self.p[k as usize].live() {
+                return Some(k);
+            }
+            x = l.next(k);
+        }
+        None
+    }
+
+    /// The live piece after `k`.
+    fn next_live(&self, k: PieceId) -> Option<PieceId> {
+        let l = self.labels();
+        let mut x = l.next(k);
+        while let Some(j) = x {
+            if self.p[j as usize].live() {
+                return Some(j);
+            }
+            x = l.next(j);
+        }
+        None
+    }
+
+    /// The live piece before `k`.
+    fn prev_live(&self, k: PieceId) -> Option<PieceId> {
+        let l = self.labels();
+        let mut x = l.prev(k);
+        while let Some(j) = x {
+            if self.p[j as usize].live() {
+                return Some(j);
+            }
+            x = l.prev(j);
+        }
+        None
+    }
+
+    /// The live pieces in order.
+    fn live_ids(&self) -> Vec<PieceId> {
+        self.labels().ids().into_iter().filter(|&k| self.p[k as usize].live()).collect()
+    }
+
+    /// Whether `a` comes before `b`.
+    fn before(&self, a: PieceId, b: PieceId) -> bool {
+        let l = self.labels();
+        l.of(a) < l.of(b)
+    }
+
+    fn ord(&self, k: PieceId) -> u64 {
+        self.labels().of(k)
+    }
+
+    /// The last piece in order of the pieces under `k`: its file's rest
+    /// (and what is under it), else its re-cut's last piece.
+    fn extent_end(&self, k: PieceId) -> PieceId {
+        let ps = &self.p[k as usize];
+        if let Some(l) = ps.file
+            && let Some(r) = self.lists[l as usize].rest
+            && self.p[r as usize].alive
+        {
+            return self.extent_end(r);
+        }
+        if let Some(l) = ps.recut {
+            let last = self.labels().ids().into_iter().rev().find(|&x| self.p[x as usize].alive && self.p[x as usize].list == l);
+            if let Some(x) = last {
+                return self.extent_end(x);
+            }
+        }
+        k
+    }
+
+    /// Takes piece `k` and everything under it out of the sequence: the
+    /// pieces taken out, in order.
+    fn remove_extent(&mut self, k: PieceId) -> Vec<PieceId> {
+        let end = self.extent_end(k);
+        let mut out = Vec::new();
+        {
+            let l = self.labels();
+            let mut x = Some(k);
+            while let Some(j) = x {
+                out.push(j);
+                if j == end {
+                    break;
+                }
+                x = l.next(j);
+            }
+        }
+        let mut l = self.labels.write().expect("labels");
+        for &j in &out {
+            l.remove(j);
+            let ps = &mut self.p[j as usize];
+            ps.alive = false;
+            for kid in [ps.file.take(), ps.recut.take()].into_iter().flatten() {
+                self.lists[kid as usize].alive = false;
+            }
+        }
+        out
+    }
+
+    /// A new piece (not in the order yet).
+    #[allow(clippy::too_many_arguments)]
+    fn add(&mut self, list: ListId, shape: Shape, span: (u32, u32), covers: (u32, u32), base_off: u32, text: Arc<[char]>, stops: Arc<[usize]>) -> PieceId {
+        let id = PieceId::try_from(self.p.len()).expect("fewer pieces than ids");
+        assert!(id < VIRT_BASE, "too many pieces");
+        self.p.push(Piece::new(id, list, shape, span, covers, base_off, text, stops));
+        id
+    }
+
+    fn add_list(&mut self, l: List) -> ListId {
+        let id = ListId::try_from(self.lists.len()).expect("fewer lists than ids");
+        self.lists.push(l);
+        id
+    }
+
+    /// Puts `ids` after `anchor` in the order.
+    fn place_after(&mut self, anchor: Option<PieceId>, ids: &[PieceId]) {
+        self.labels.write().expect("labels").insert_after(anchor, ids);
+    }
+
+    /// The pieces of a file's text (the last cut's `Arc`s while the text is
+    /// the same).
+    fn file_pieces(&mut self, text: &Arc<str>) -> Vec<Arc<[char]>> {
+        let key = text.as_ptr() as usize;
+        if let Some((t, v)) = self.file_cuts.get(&key)
+            && Arc::ptr_eq(t, text)
+        {
+            return v.clone();
+        }
+        let v = self
+            .file_cuts
+            .values()
+            .find(|(t, _)| **t == **text)
+            .map_or_else(|| cut_every(text, self.cut_lines), |x| x.1.clone());
+        self.file_cuts.insert(key, (text.clone(), v.clone()));
+        v
+    }
+
+    /// How deep piece `k`'s list is in files.
+    fn depth(&self, k: PieceId) -> u32 {
+        let mut d = 0;
+        let mut l = self.p[k as usize].list;
+        while let Some(c) = self.lists[l as usize].caller {
+            d += 1;
+            l = self.p[c as usize].list;
+            if d > 1000 {
+                break;
+            }
+        }
+        d
+    }
+
+    /// Puts file `f`'s pieces after piece `k` (whose run stopped at `stop`,
+    /// at its `\input`), then the rest of `k`'s line: the new pieces.
+    fn make_file(&mut self, k: PieceId, f: Arc<FileText>, stop: usize) -> Vec<PieceId> {
+        let texts = self.file_pieces(&f.text);
+        let l = self.add_list(List::new(ListKind::File(f), Some(k), texts.clone(), stop));
+        let mut ids = Vec::with_capacity(texts.len() + 1);
+        for (i, t) in texts.iter().enumerate() {
+            let i = i as u32;
+            ids.push(self.add(l, Shape::Texts, (i, i + 1), (i, i + 1), 0, t.clone(), Arc::from([])));
+        }
+        let (kl, kc, ko, kt) = {
+            let ps = &self.p[k as usize];
+            (ps.list, ps.covers, ps.base_off, ps.text.clone())
+        };
+        let stop = stop.min(kt.len());
+        let rest: Arc<[char]> = Arc::from(&kt[stop..]);
+        let r = self.add(kl, Shape::Rest(k), (kc.1, kc.1), kc, ko + count_lines(&kt[..stop]) as u32, rest, Arc::from([]));
+        ids.push(r);
+        self.lists[l as usize].rest = Some(r);
+        self.p[k as usize].file = Some(l);
+        self.place_after(Some(k), &ids);
+        ids
+    }
+
+    /// Puts the rest of piece `k`'s text after its run's stop, cut again,
+    /// after it: the new pieces.
+    fn make_recut(&mut self, k: PieceId, stop: usize) -> Vec<PieceId> {
+        let text = self.p[k as usize].text.clone();
+        let stop = stop.min(text.len());
+        let src: String = text[stop..].iter().map(|&c| if c == '\r' { '\n' } else { c }).collect();
+        let texts = cut_every(&src, self.cut_lines);
+        let l = self.add_list(List::new(ListKind::Recut, Some(k), texts.clone(), stop));
+        let mut ids = Vec::with_capacity(texts.len());
+        for (i, t) in texts.iter().enumerate() {
+            let i = i as u32;
+            ids.push(self.add(l, Shape::Texts, (i, i + 1), (i, i + 1), 0, t.clone(), Arc::from([])));
+        }
+        self.p[k as usize].recut = Some(l);
+        self.place_after(Some(k), &ids);
+        ids
+    }
+
+    /// The live pieces after `k` in its list that its join takes (as many
+    /// as make the text twice as long, one at least): none if `k` is its
+    /// list's last.
+    fn join_siblings(&self, k: PieceId) -> Vec<PieceId> {
+        let ps = &self.p[k as usize];
+        let end = self.extent_end(k);
+        let mut out = Vec::new();
+        let mut len = 0usize;
+        let l = self.labels();
+        let mut x = l.next(end);
+        while let Some(j) = x {
+            let q = &self.p[j as usize];
+            if q.list == ps.list && q.live() {
+                out.push(j);
+                len += q.text.len();
+                if len >= ps.text.len() {
+                    break;
+                }
+                x = l.next(self.extent_end(j));
+                continue;
+            }
+            // (out of its list: past its end)
+            if !self.inside(j, ps.list) {
+                break;
+            }
+            x = l.next(j);
+        }
+        out
+    }
+
+    /// Whether piece `j` is in list `l`, or under one of its pieces.
+    fn inside(&self, j: PieceId, l: ListId) -> bool {
+        let mut m = self.p[j as usize].list;
+        loop {
+            if m == l {
+                return true;
+            }
+            match self.lists[m as usize].caller {
+                Some(c) => m = self.p[c as usize].list,
+                None => return false,
+            }
+        }
+    }
+
+    /// Joins piece `k` with `sibs` (the pieces after it in its list) into
+    /// one piece at its place: the new piece, and those taken out.
+    fn join(&mut self, k: PieceId, sibs: &[PieceId]) -> (PieceId, Vec<PieceId>) {
+        let anchor = self.labels().prev(k);
+        let (list, shape, span0, cov0, base_off, mut text, mut stops) = {
+            let ps = &self.p[k as usize];
+            (ps.list, ps.shape, ps.span.0, ps.covers.0, ps.base_off, ps.text.to_vec(), ps.stops.to_vec())
+        };
+        let mut span1 = self.p[k as usize].span.1;
+        let mut cov1 = self.p[k as usize].covers.1;
+        for &s in sibs {
+            let q = &self.p[s as usize];
+            stops.push(text.len());
+            text.extend_from_slice(&q.text);
+            span1 = span1.max(q.span.1);
+            cov1 = cov1.max(q.covers.1);
+        }
+        let mut removed = self.remove_extent(k);
+        for &s in sibs {
+            if self.p[s as usize].alive {
+                removed.extend(self.remove_extent(s));
+            }
+        }
+        let j = self.add(list, shape, (span0, span1), (cov0, cov1), base_off, Arc::from(text), Arc::from(stops));
+        self.place_after(anchor, &[j]);
+        (j, removed)
+    }
+
+    /// How piece `k` is entered.
+    fn entry_of(&self, k: PieceId) -> Entry {
+        let ps = &self.p[k as usize];
+        let list = &self.lists[ps.list as usize];
+        if let Shape::Rest(c) = ps.shape {
+            return Entry::Rest(c);
+        }
+        match list.kind {
+            ListKind::Root if ps.span.0 == 0 || ps.text.first() == Some(&crate::graph::JOB) => Entry::Start,
+            ListKind::File(_) if ps.span.0 == 0 => Entry::File(list.caller.expect("a file's caller")),
+            _ => match self.prev_live(k) {
+                Some(q) => Entry::After(q),
+                None => Entry::Start,
+            },
+        }
+    }
+
+    /// The piece whose `\input` a piece entered after a cut is in the file
+    /// of (its assumed entry's), if any.
+    fn ctx_of(&self, k: PieceId) -> Option<PieceId> {
+        let mut l = self.p[k as usize].list;
+        loop {
+            let list = &self.lists[l as usize];
+            match (&list.kind, list.caller) {
+                (ListKind::File(_), Some(c)) => return Some(c),
+                (ListKind::Recut, Some(c)) => l = self.p[c as usize].list,
+                _ => return None,
+            }
+        }
+    }
+
+    /// The last live piece of the file piece `c`'s `\input` read (none: an
+    /// empty file).
+    fn last_of(&self, c: PieceId) -> Option<PieceId> {
+        let l = self.p[c as usize].file?;
+        let r = self.lists[l as usize].rest?;
+        self.prev_live(r).filter(|&x| x != c)
+    }
+
+    /// The pieces entered in a state piece `k` leaves.
+    fn dependents(&self, k: PieceId) -> Vec<PieceId> {
+        let mut v = Vec::new();
+        if let Some(n) = self.next_live(k)
+            && self.entry_of(n) == Entry::After(k)
+        {
+            v.push(n);
+        }
+        if let Some(l) = self.p[k as usize].file {
+            if let Some(n) = self.next_live(k)
+                && self.p[n as usize].list == l
+            {
+                v.push(n);
+            }
+            if let Some(r) = self.lists[l as usize].rest
+                && self.p[r as usize].live()
+            {
+                v.push(r);
+            }
+        }
+        let list = &self.lists[self.p[k as usize].list as usize];
+        if let (ListKind::File(_), Some(c)) = (&list.kind, list.caller)
+            && let Some(r) = list.rest
+            && self.p[r as usize].live()
+            && self.last_of(c) == Some(k)
+            && !v.contains(&r)
+        {
+            v.push(r);
+        }
+        v
+    }
+
+    /// The pieces muted again: after a job's end and after each file's
+    /// `\endinput` up to the file's end. Returns the pieces muted and those
+    /// unmuted now.
+    fn recompute_mutes(&mut self) -> (Vec<PieceId>, Vec<PieceId>) {
+        let order = self.labels().ids();
+        let mut ended = false;
+        let mut cut: FxSet<ListId> = FxSet::default();
+        let (mut muted, mut unmuted) = (Vec::new(), Vec::new());
+        for k in order {
+            let (list, starts_job, root) = {
+                let ps = &self.p[k as usize];
+                let root = matches!(self.lists[ps.list as usize].kind, ListKind::Root);
+                (ps.list, root && ps.text.first() == Some(&crate::graph::JOB), root)
+            };
+            if starts_job {
+                ended = false;
+                cut.clear();
+            }
+            let _ = root;
+            let caller_muted = self.lists[list as usize].caller.is_some_and(|c| self.p[c as usize].muted);
+            let m = ended || cut.contains(&list) || caller_muted;
+            let ps = &mut self.p[k as usize];
+            if m != ps.muted {
+                ps.muted = m;
+                if m { muted.push(k) } else { unmuted.push(k) }
+            }
+            if !m && ps.run.is_some() {
+                if ps.muting.0 {
+                    ended = true;
+                }
+                if ps.muting.1 {
+                    // (its file's pieces after it, and if it is in a re-cut,
+                    // the pieces of the texts it was cut from after it)
+                    let mut l = list;
+                    loop {
+                        cut.insert(l);
+                        let li = &self.lists[l as usize];
+                        match (&li.kind, li.caller) {
+                            (ListKind::Recut, Some(c)) => l = self.p[c as usize].list,
+                            _ => break,
+                        }
+                    }
+                }
+            }
+        }
+        (muted, unmuted)
+    }
+
+    /// Each live piece's lines before it in its file.
+    fn set_bases(&mut self) {
+        let order = self.labels().ids();
+        let mut list_base: FxMap<ListId, u32> = FxMap::default();
+        for k in order {
+            let (l, c0, off) = {
+                let ps = &self.p[k as usize];
+                (ps.list, ps.covers.0, ps.base_off)
+            };
+            let lb = match list_base.get(&l) {
+                Some(&b) => b,
+                None => {
+                    let li = &self.lists[l as usize];
+                    let b = match (&li.kind, li.caller) {
+                        (ListKind::Recut, Some(c)) => {
+                            let cp = &self.p[c as usize];
+                            cp.base + count_lines(&cp.text[..li.stop.min(cp.text.len())]) as u32
+                        }
+                        _ => 0,
+                    };
+                    list_base.insert(l, b);
+                    b
+                }
+            };
+            let li = &self.lists[l as usize];
+            self.p[k as usize].base = lb + li.lines.get(c0 as usize).copied().unwrap_or(0) + off;
+        }
+    }
+
+    /// What the log adds after each piece: a file's closing parenthesis
+    /// after its last piece (" )" where the job ended in it).
+    fn posts(&self) -> FxMap<PieceId, String> {
+        let mut out: FxMap<PieceId, String> = FxMap::default();
+        for k in self.live_ids() {
+            let ps = &self.p[k as usize];
+            let Some(l) = ps.file else { continue };
+            if ps.inline {
+                continue;
+            }
+            // (the job ended in the file: its parenthesis closes at the end)
+            let rest_live = self.lists[l as usize].rest.is_some_and(|r| self.p[r as usize].live());
+            let last = self.last_of(k).unwrap_or(k);
+            let paren = if rest_live { ")" } else { " )" };
+            out.entry(last).or_insert_with(|| RAW.to_string()).push_str(paren);
+        }
+        out
+    }
+
+    /// The root's texts are `texts` now: the pieces of texts no longer
+    /// there (and of joins and lines holding them) taken out, pieces made
+    /// for the new ones, each starting from the run of the piece it
+    /// replaces. Returns the pieces taken out.
+    fn edit_root(&mut self, texts: Vec<Arc<[char]>>) -> Vec<PieceId> {
+        let Some(root) = self.root else {
+            let l = self.add_list(List::new(ListKind::Root, None, texts.clone(), 0));
+            self.root = Some(l);
+            let ids: Vec<PieceId> = texts
+                .iter()
+                .enumerate()
+                .map(|(i, t)| self.add(l, Shape::Texts, (i as u32, i as u32 + 1), (i as u32, i as u32 + 1), 0, t.clone(), Arc::from([])))
+                .collect();
+            self.place_after(None, &ids);
+            return Vec::new();
+        };
+        let old = std::mem::take(&mut self.lists[root as usize].texts);
+        let same = |a: &Arc<[char]>, b: &Arc<[char]>| Arc::ptr_eq(a, b) || **a == **b;
+        let (ol, nl) = (old.len(), texts.len());
+        let p = old.iter().zip(&texts).take_while(|(a, b)| same(a, b)).count();
+        let s = old[p..].iter().rev().zip(texts[p..].iter().rev()).take_while(|(a, b)| same(a, b)).count();
+        let (a, b, nb) = ((p as u32), (ol - s) as u32, (nl - s) as u32);
+        if p == ol && p == nl {
+            self.lists[root as usize].texts = old;
+            return Vec::new();
+        }
+        let roots: Vec<PieceId> = self.labels().ids().into_iter().filter(|&x| self.p[x as usize].list == root).collect();
+        let mut removed = Vec::new();
+        // (old text index -> the run of the piece that held it)
+        let mut prevs: BTreeMap<u32, Prev> = BTreeMap::new();
+        for x in roots {
+            if !self.p[x as usize].alive {
+                continue;
+            }
+            let (f, t) = self.p[x as usize].covers;
+            let hit = (f < b && t > a) || (a == b && f < a && a < t);
+            if !hit {
+                continue;
+            }
+            if self.p[x as usize].shape == Shape::Texts
+                && let Some(r) = self.p[x as usize].run.clone().or_else(|| self.p[x as usize].prev.as_ref().map(|p| p.0.clone()))
+            {
+                let ps = &self.p[x as usize];
+                prevs.insert(f, (r, ps.lines.clone(), ps.text.clone()));
+            }
+            removed.extend(self.remove_extent(x));
+        }
+        let delta = i64::from(nb) - i64::from(b);
+        let shift = |v: u32| -> u32 { (i64::from(v) + delta) as u32 };
+        for ps in &mut self.p {
+            if ps.alive && ps.list == root && ps.covers.0 >= b {
+                ps.span = (shift(ps.span.0), shift(ps.span.1));
+                ps.covers = (shift(ps.covers.0), shift(ps.covers.1));
+            }
+        }
+        self.lists[root as usize].lines = line_starts(&texts, true);
+        self.lists[root as usize].texts = texts.clone();
+        // (the texts no piece holds now, each a piece: after the piece
+        // before it in the list, or what is under that)
+        let mut held = vec![false; nl];
+        let mut by_start: BTreeMap<u32, PieceId> = BTreeMap::new();
+        for x in self.labels().ids() {
+            let ps = &self.p[x as usize];
+            if ps.alive && ps.list == root {
+                for i in ps.span.0..ps.span.1 {
+                    if let Some(h) = held.get_mut(i as usize) {
+                        *h = true;
+                    }
+                }
+                if ps.shape == Shape::Texts {
+                    by_start.insert(ps.span.0, x);
+                }
+            }
+        }
+        for i in 0..nl {
+            if held[i] {
+                continue;
+            }
+            let i32_ = i as u32;
+            let anchor = by_start.range(..i32_).next_back().map(|(_, &x)| self.extent_end(x));
+            let id = self.add(root, Shape::Texts, (i32_, i32_ + 1), (i32_, i32_ + 1), 0, texts[i].clone(), Arc::from([]));
+            // (the piece it replaces: at its place among the texts edited,
+            // or the join that held it)
+            let old_i = if i32_ < a { i32_ } else if i32_ < nb { (a + (i32_ - a)).min(b.saturating_sub(1).max(a)) } else { (i64::from(i32_) - delta) as u32 };
+            let pv = prevs.get(&old_i).cloned().or_else(|| prevs.range(..=old_i).next_back().map(|(_, v)| v.clone()));
+            self.p[id as usize].prev = pv;
+            self.place_after(anchor, &[id]);
+            by_start.insert(i32_, id);
+        }
+        removed
+    }
+}
 
 /// The logs of the calls that fired a routine, by call ([`page::Scan::call_logs`]).
 type CallLogs = Vec<(u32, Vec<CallLog>)>;
 
-/// An edited piece's predecessor: its run, lines and text.
-type Prev = (Arc<Run>, Vec<Option<Lines>>, Arc<[char]>);
+/// A run and the last node reading each name it reads.
+type LastReaders = (Arc<Run>, Arc<FxMap<Key, u32>>);
+
+type ParaLines = (Arc<Para>, Lines);
+
+/// A piece of the last evaluation, in order, as its pages were made of it:
+/// what SyncTeX and the viewer look pieces up by (by index).
+struct Kept {
+    id: PieceId,
+    text: Arc<[char]>,
+    run: Option<Arc<Run>>,
+    lines: Vec<Option<Lines>>,
+}
+
+/// What survives between builds: the sequence with its runs, the edges,
+/// the pages with their DVI or PDF.
+pub struct Build {
+    font: Arc<Font>,
+    /// Where the build reports what it does now (none: nobody looks).
+    board: Option<Arc<Progress>>,
+    /// The folds' values the last evaluation's reads were validated
+    /// against, by piece and node: the next one's predictions.
+    fold_vals: FxMap<(PieceId, u32, Key), Val>,
+    file_guess: FxMap<Arc<str>, Val>,
+    /// Each piece's file (`None`: the main file) and the lines of that
+    /// file before it ([`Build::source_place`]).
+    places: FxMap<PieceId, (Option<Arc<str>>, u32)>,
+    fonts: Arc<FontFiles>,
+    /// The sequence, with every piece's run.
+    seq: Seq,
+    /// The last evaluation's live pieces, in order.
+    pieces: Vec<Kept>,
+    /// Piece id -> its index in `pieces`.
+    dense: FxMap<PieceId, usize>,
+    pages: Vec<(Page, Arc<dvi::Body>)>,
+    page_orgs: Vec<PageOrg>,
+    marks: Vec<(u32, u32)>,
+    call_logs: CallLogs,
+    readers: Readers,
+    src: String,
+    starts: Vec<usize>,
+    texts: Vec<Arc<[char]>>,
+    /// Files given in memory (`set_file`), found before the input
+    /// directories' (a changed one is seen by its readers' reads).
+    files: Arc<FxMap<Arc<str>, Arc<[u8]>>>,
+    cut_lines: usize,
+    /// What the page builder left: whether it fired a routine or met an
+    /// insertion or a mark, its definitions at each place it fired, and
+    /// its routines' runs.
+    fold: FoldKept,
+    cs: Arc<CsTable>,
+    virt: Virt,
+    inputs: Arc<Vec<PathBuf>>,
+    finder: Option<(Arc<dyn Kpse>, Arc<str>)>,
+    job: Arc<str>,
+    terminal: Option<Arc<[u8]>>,
+    interaction: i32,
+    interaction_option: Option<i32>,
+    limits: crate::print::Limits,
+    lean: bool,
+    max_rounds: usize,
+    builds: u64,
+    format: Option<Arc<FormatDefs>>,
+    pdf_date: i64,
+    etex_last: bool,
+    xe: Option<Arc<crate::native::Fonts>>,
+    pdf: PdfKept,
+    /// The files the build writes and reads back are a loop-back
+    /// ([`Build::set_converge`]).
+    converge: bool,
+    /// The loop-back's evaluations this update.
+    file_rounds: usize,
+    /// Names an edit took out or moved since the last evaluation: their
+    /// readers are looked at again.
+    touched: Vec<Key>,
+    /// Reads refuted after an evaluation (a file read back otherwise than
+    /// it was predicted): their pieces run again from the node.
+    refuted: Vec<(PieceId, Key, u32)>,
+}
 
 /// The scheduler's state.
 struct State {
     /// The names each change to the names index changed, in order.
     names_log: Vec<Vec<Key>>,
-    p: Vec<PState>,
-    unstarted: BTreeSet<usize>,
-    running: BTreeSet<usize>,
-    /// Pieces before this one cannot change any more in this build: the
-    /// page scan reads them.
-    settled: usize,
-    break_queue: VecDeque<(usize, usize, Arc<Para>)>,
+    seq: Seq,
+    unstarted: BTreeSet<(u64, PieceId)>,
+    running: BTreeSet<(u64, PieceId)>,
+    /// The labels' spreads `unstarted` and `running` are keyed after.
+    spreads: u64,
+    /// The first live piece not settled (none: all are): the pieces before
+    /// it cannot change any more in this evaluation.
+    settled: Option<PieceId>,
+    /// The piece the settled frontier stopped at, known settled now.
+    break_queue: VecDeque<(PieceId, usize, Arc<Para>)>,
     scan: Option<Box<Scan>>,
-    scan_next: usize,
-    /// Items of piece `scan_next`'s material the scan does not feed (it
-    /// resumed at a page that started there).
-    scan_skip: u32,
+    /// The last piece the scan fed whole (none: none yet): settled, so
+    /// never rewritten — the next is the live piece after it.
+    scan_last: Option<PieceId>,
+    /// A piece the scan fed part of, and how many of its items (it stopped
+    /// inside it): the next to feed.
+    scan_part: Option<(PieceId, u32)>,
     scan_done: bool,
-    /// The pieces are being compared with what the last build's scan was
-    /// fed at their place (its runs' paragraphs, `old_runs`), not fed: at
-    /// the first that differs the scan resumes from the last page that
-    /// started and was decided before it.
+    /// The thread running the scan in flight.
+    scan_thread: Option<std::thread::ThreadId>,
+    /// The last piece the scan in flight was given.
+    scan_inflight: Option<PieceId>,
+    /// Bumped when the scan is made again from the start: a task of an
+    /// older one is not a result.
+    scan_gen: u64,
+    /// The last piece whose fonts are numbered (`numbers`).
+    num_last: Option<PieceId>,
+    /// The fonts' numbering before any piece (the format's).
+    numbers0: Arc<dvi::Numbers>,
+    /// The pieces are compared with what the last evaluation's scan was
+    /// fed (`old_seq`, at `match_j`), not fed: at the first that differs
+    /// the scan resumes.
     matching: bool,
-    old_runs: Vec<Option<Arc<Run>>>,
-    /// Once known (`last_diff_known`): the last piece whose material
-    /// differs from the last build's.
-    last_diff: Option<usize>,
+    old_seq: Arc<Vec<PieceId>>,
+    old_pos: FxMap<PieceId, usize>,
+    match_j: usize,
+    old_runs: FxMap<PieceId, Arc<Run>>,
+    /// Once known: the last piece whose material differs from the last
+    /// evaluation's (the scan can converge after it).
+    last_diff: Option<PieceId>,
     last_diff_known: bool,
     pages: Vec<Page>,
     orgs: Vec<PageOrg>,
     bodies: Vec<Option<Arc<dvi::Body>>>,
-    /// The fonts' numbers as loaded by the pieces before `numbered` (what
-    /// a page shipped now numbers its fonts by; checked at the join).
     numbers: Arc<dvi::Numbers>,
-    numbered: usize,
-    /// The pieces before `log_next` have their part of the log, or are
-    /// queued for it, or are making it (`logs_running`).
-    log_next: usize,
-    log_queue: VecDeque<usize>,
+    /// The last settled piece looked at for its part of the log.
+    log_last: Option<PieceId>,
+    log_queue: VecDeque<PieceId>,
     logs_running: usize,
     unshipped: usize,
     ship_queue: VecDeque<usize>,
     old_pages: Vec<Option<(Page, Arc<dvi::Body>)>>,
-    /// The last build's pages' origins, as restart points: none after a
-    /// fancy fold (its restart points are not recorded).
     old_orgs: Arc<Vec<PageOrg>>,
-    /// The last build's pages' origins whatever the fold, given back with
-    /// its pages when the material is the same throughout: a page's PDF
-    /// events are its origin's (`PageOrg::pdf`), the fold's answers come
-    /// from them.
     old_orgs_whole: Arc<Vec<PageOrg>>,
-    /// The last build's fold was fancy: pages kept whole are still a fancy
-    /// fold's (their origins are no restart points for the next build).
     old_fancy: bool,
     old_marks: Vec<(u32, u32)>,
-    /// The PDF events after the last page (the last build's, and this
-    /// one's once the scan has finished).
     old_pdf_tail: crate::page::PdfEvents,
     pdf_tail: crate::page::PdfEvents,
-    /// The page builder's marks before the scan's (kept), and after them
-    /// (the last build's, where the scan met its pages again).
     marks_before: Vec<(u32, u32)>,
     marks_after: Vec<(u32, u32)>,
-    /// The same of the calls' logs: the last build's, those kept before
-    /// the scan's and after them (their calls and pages shifted).
     old_call_logs: CallLogs,
     call_logs_before: CallLogs,
     call_logs_after: CallLogs,
     rng: u64,
     stats: Stats,
     done: bool,
-    /// For each piece, the pieces entered with its state.
-    deps: Vec<Vec<usize>>,
-    /// A run changed the sequence: no new task; the round ends once the
-    /// tasks in flight are done.
-    restructure: bool,
-    /// A settled run says otherwise of the sequence than the layout
-    /// assumed: once every piece has settled, the sequence is laid out
-    /// again with all they say (the runs in progress are not stopped for
-    /// it, and the pieces after it keep runs that still hold).
-    restructure_due: bool,
-    /// The first settled run that changes the sequence while not final (a
-    /// fold read unchecked, or its entry not holding): no piece after it
-    /// starts, and the runs after it stopped, until it is final (the round
-    /// ends: `pick`) or a run of it says nothing new (cleared at every
-    /// install of it, set again by `settle` if it still differs).
-    due_at: Option<usize>,
     inflight: usize,
-    /// The page builder's definitions installed this build (by piece id
-    /// and node), the last build's not yet made again (by place), and its
-    /// routines' runs this build.
+    /// The page builder's definitions made this evaluation, and the last
+    /// one's not made again yet (by place, in order).
     fold_defs: FoldDefs,
     predicted: Vec<(Pos, Vec<Key>)>,
     memo_new: Vec<Arc<Memo>>,
-    /// Each piece's run with its nodes and the last node reading each name
-    /// (`Run::last_readers`), made at the first definition between its
-    /// nodes that asks (B1: a fire asks of every name it defines).
-    last_readers: FxMap<usize, LastReaders>,
-    /// The scheduler stalled (no task, the round not finished, nothing
-    /// running that could change that): the pieces' states then. The
-    /// build fails with it, never hangs.
+    last_readers: FxMap<PieceId, LastReaders>,
+    /// The scheduler stalled, or the sequence would not settle: the build
+    /// fails with this, it never hangs.
     stalled: Option<String>,
-    /// `PHITEX_RERUN`: why each settled piece runs again (none: off).
-    rerun_log: Option<Vec<RerunNote>>,
-    /// The definition the next [`mark_from`] answers to (set only while
-    /// `rerun_log` is on).
-    mark_src: MarkSrc,
-}
-
-/// What made a settled piece run again (`PHITEX_RERUN`).
-#[derive(Clone, Debug)]
-enum MarkSrc {
-    /// A mark the round began with (the layout's, or the last round's).
-    Carried,
-    /// A definition at a place: `(k, END)` piece k's export, else one
-    /// between its nodes (the page builder's, an output routine's); the
-    /// value there now.
-    At(Pos, Option<Val>),
-    /// The page builder's quantity as the scan has it.
-    Page(Val),
-}
-
-/// A settled piece marked to run again (`PHITEX_RERUN`): the piece, its
-/// text's length, the name, from which node, what answered it, and the
-/// value its run had read.
-struct RerunNote {
-    k: usize,
-    len: usize,
-    key: Key,
-    from: u32,
-    src: MarkSrc,
-    old: Option<Val>,
 }
 
 struct Shared {
     names: Names,
-    /// How many commands each piece's run in progress has run (set every
-    /// `CHECK_EVERY`; for the dumps).
-    progress: Vec<AtomicU64>,
-    /// The caller's progress board, if it gave one ([`Build::set_progress`]).
+    labels: Arc<RwLock<Labels>>,
+    flags: Flags,
     board: Option<Arc<Progress>>,
-    /// The elements in order, fixed for the build.
-    seq: Sequence,
+    virt: RwLock<Virt>,
     /// Bumped (under `park`, and `parked` notified) whenever a run is
     /// installed.
     generation: AtomicU64,
     park: Mutex<()>,
     parked: Condvar,
-    /// How many changes the names index has had (`State::names_log`'s
-    /// length, written under the scheduler's lock).
+    /// The runs parked now.
+    parked_n: AtomicUsize,
+    /// How many changes the names index has had.
     names_gen: AtomicUsize,
-    /// Each piece's status is `Done` (a copy of the scheduler's, written
-    /// under its lock, read without it).
-    done: Vec<AtomicBool>,
-    /// A piece's run in progress is to stop: a name it read was defined
-    /// again while it ran, or the sequence changes (read by the run between
-    /// its nodes, [`PieceEnv`]'s `check`).
-    cancel: Vec<AtomicBool>,
-    /// Each piece's `\input`s are read in it ([`Build::inline`]).
-    inline: Vec<bool>,
-    /// What the layout placed after each piece (its `\input`'s file, a
-    /// re-cut): the last round's runs end where the layout says, never
-    /// elsewhere ([`settle`] fails the build where one does not).
-    laid: Vec<(bool, bool)>,
-    /// Each piece's run is parked, waiting for an earlier piece.
-    waiting: Vec<AtomicBool>,
-    /// The round is ending ([`restructure_now`]): no run waits.
-    restructuring: AtomicBool,
-    /// Runs replaced, dropped on a thread of their own: freeing a large
-    /// run's nodes is not a worker's (6.5% of the critical path on
-    /// latex.ltx).
+    /// Runs replaced, dropped on a thread of their own.
     drops: std::sync::mpsc::Sender<Arc<Run>>,
-    /// Where each piece's run may stop ([`Spec::stops`]).
-    stops: Vec<Arc<[usize]>>,
     state: Mutex<State>,
     cv: Condvar,
     font: Arc<Font>,
     fonts: Arc<FontFiles>,
     opts: Options,
-    /// The last build's routine runs, by their page's first box.
+    /// The last evaluation's routine runs, by their page's first box.
     memo_old: FxMap<usize, Vec<Arc<Memo>>>,
-    /// The edges (`Readers`): outside the scheduler's lock.
     readers: Readers,
-    /// `PHITEX_SCHED`: the scheduler's events, for measuring (none: off).
-    sched: Option<Mutex<Vec<Ev>>>,
-    /// Measuring: `Build::run_times`, this round's installs added.
-    run_times: Mutex<FxMap<PieceId, (u64, u64)>>,
-    /// Measuring: `Build::read_cmds`, likewise.
-    read_cmds: Mutex<FxMap<PieceId, Vec<String>>>,
-    /// Measuring: the nodes that took longer than `SLOW_NODE`, as `N`
-    /// lines for the round's events.
-    notes: Mutex<Vec<String>>,
-    /// When the round began (the events' times count from it).
-    t_base: Instant,
-    /// Measuring: the time threads waited for the scheduler's lock, and how
-    /// many times it was taken.
-    lock_wait: AtomicU64,
-    lock_n: AtomicU64,
-    /// A run may change the sequence (not in a round that must be the
-    /// last).
-    restructure_ok: bool,
-    /// A settled run that changes the sequence ends the round at once
-    /// (`settle`): not in a round after one that placed nothing new.
-    at_once: bool,
-    /// Settled pieces drop their nodes; which update this is.
     lean: bool,
     build_no: u64,
+    /// The settled frontier's label (`State::settled`), read without the
+    /// lock.
+    settled_at: AtomicU64,
+}
+
+impl Shared {
+    /// The id of place `p` as an edge's source: a piece's own for its
+    /// exports, one by place for a place between its nodes.
+    fn id_at(&self, p: Pos) -> PieceId {
+        if p.1 == END {
+            return p.0;
+        }
+        if let Some(&id) = self.virt.read().expect("virt").ids.get(&p) {
+            return id;
+        }
+        let mut v = self.virt.write().expect("virt");
+        if let Some(&id) = v.ids.get(&p) {
+            return id;
+        }
+        let id = v.next.max(VIRT_BASE);
+        v.next = id + 1;
+        v.ids.insert(p, id);
+        v.at.insert(id, p);
+        id
+    }
+
+    /// Where the definer `id` is, if it is in the sequence.
+    fn pos_of(&self, id: PieceId) -> Option<Pos> {
+        if id >= VIRT_BASE {
+            let p = self.virt.read().expect("virt").at.get(&id).copied()?;
+            return self.labels.read().expect("labels").contains(p.0).then_some(p);
+        }
+        self.labels.read().expect("labels").contains(id).then_some((id, END))
+    }
+
+    /// Whether place `a` is before place `b`.
+    fn before(&self, a: Pos, b: Pos) -> bool {
+        let l = self.labels.read().expect("labels");
+        l.key(a) < l.key(b)
+    }
+
+    fn ord(&self, k: PieceId) -> u64 {
+        self.labels.read().expect("labels").of(k)
+    }
 }
 
 /// Where to look a routine run up: its page's first box (the same `Arc`
@@ -1692,57 +2150,55 @@ fn memo_key(page: &crate::item::BoxNode) -> usize {
         .unwrap_or(0)
 }
 
-type ParaLines = (Arc<Para>, Lines);
-
 enum Task {
-    /// Run piece `.0` again from the nodes reading the names `.1` (each
-    /// from its node on).
-    Run(usize, Vec<(Key, u32)>),
-    Break(usize, usize, Arc<Para>),
+    /// Run piece `.0` (again, from the nodes reading the names `.1`).
+    Run(PieceId, Vec<(Key, u32)>),
+    Break(PieceId, usize, Arc<Para>),
     Scan {
         scan: Box<Scan>,
-        /// The position of `pieces[0]`, and how many items of its material
-        /// to leave out.
-        from: usize,
+        sgen: u64,
+        /// The first piece, and how many items of its material to leave out.
+        from: PieceId,
         skip: u32,
-        /// Nothing differs from the last build after this piece: a restart
-        /// point after it equal to one of the last build's pages' begins
-        /// the last build's pages from there on.
-        converge: Option<(usize, Arc<Vec<PageOrg>>)>,
-        to: usize,
-        pieces: Vec<(Arc<Run>, Vec<ParaLines>)>,
+        /// Nothing differs from the last evaluation after this piece: a
+        /// restart point after it equal to one of the last pages' begins
+        /// the last pages from there on.
+        converge: Option<(PieceId, Arc<Vec<PageOrg>>)>,
+        /// The piece after the last fed (none: the end).
+        to: Option<PieceId>,
+        pieces: Vec<(PieceId, Arc<Run>, Vec<ParaLines>)>,
         finish: bool,
-        /// Where the last build's page builder defined names it has not
-        /// defined again yet, and the last piece's run (for the end).
         predicted: Vec<Pos>,
-        end_run: Option<Arc<Run>>,
+        end_run: Option<(PieceId, Arc<Run>)>,
     },
-    Ship(usize, Page, Arc<dvi::Numbers>),
-    /// Piece `.0`'s part of the log, from its text, run and lines.
-    Log(usize, Arc<[char]>, Arc<Run>, Vec<Option<Lines>>),
+    Ship(usize, Page, Arc<dvi::Numbers>, u64),
+    Log(PieceId, Arc<[char]>, Arc<Run>, Vec<Option<Lines>>),
+}
+
+/// What an evaluation ended with: the output, or another evaluation to
+/// make (a loop-back: what it read back is not what it wrote).
+enum Eval {
+    Done(Box<Output>),
+    Again(Stats),
 }
 
 impl Build {
     /// A build whose documents can load `font` by its name, and the TFM
     /// files in TeX Live's directories.
     pub fn new(font: Arc<Font>) -> Build {
-        let fonts = Arc::new(FontFiles::new(
-            Self::given(&font),
-            crate::tfm::default_dirs(),
-        ));
+        let fonts = Arc::new(FontFiles::new(Self::given(&font), crate::tfm::default_dirs()));
         Build {
             font,
             board: None,
             fonts,
+            seq: Seq::new(CUT_LINES),
             pieces: Vec::new(),
+            dense: FxMap::default(),
             pages: Vec::new(),
             page_orgs: Vec::new(),
             marks: Vec::new(),
             call_logs: Vec::new(),
-            next_id: 0,
             readers: Readers::default(),
-            run_times: FxMap::default(),
-            read_cmds: FxMap::default(),
             fold_vals: FxMap::default(),
             file_guess: FxMap::default(),
             places: FxMap::default(),
@@ -1752,20 +2208,13 @@ impl Build {
             finder: None,
             job: Arc::from(crate::graph::JOBNAME),
             lean: true,
-            max_rounds: MAX_ROUNDS,
+            max_rounds: PDF_ROUNDS + FILE_ROUNDS,
             builds: 0,
             texts: Vec::new(),
             files: Arc::default(),
-            file_cuts: FxMap::default(),
-            rests: FxMap::default(),
-            recuts: FxMap::default(),
-            joins: FxMap::default(),
-            inline: Vec::new(),
             cut_lines: CUT_LINES,
-            page_runs: None,
-            carried: Stats::default(),
             fold: FoldKept::default(),
-            virt: FxMap::default(),
+            virt: Virt { next: VIRT_BASE, ..Virt::default() },
             cs: Arc::new(CsTable::new()),
             terminal: None,
             interaction: 0,
@@ -1776,9 +2225,193 @@ impl Build {
             pdf: PdfKept::default(),
             etex_last: false,
             xe: None,
+            converge: false,
+            file_rounds: 0,
+            touched: Vec::new(),
+            refuted: Vec::new(),
         }
     }
 
+    /// The files the build writes and reads back (`.aux`, `.toc`: a
+    /// `\label`'s page read by a `\pageref`) are a loop-back in memory: an
+    /// update evaluates again, only the readers of what changed, until what
+    /// they read is what was written (pdfTeX run to convergence, as
+    /// latexmk runs it; at most [`FILE_ROUNDS`] times). Off until set: an
+    /// update is one TeX run.
+    pub fn set_converge(&mut self, on: bool) {
+        self.converge = on;
+    }
+
+    /// Takes pieces out of the build for good: their edges go, the names
+    /// they defined are looked at again by their readers at the next
+    /// evaluation.
+    fn take_out(&mut self, removed: &[PieceId]) {
+        if removed.is_empty() {
+            return;
+        }
+        let gone: FxSet<PieceId> = removed.iter().copied().collect();
+        for &k in removed {
+            let ps = &mut self.seq.p[k as usize];
+            if let Some(r) = ps.run.take() {
+                for i in 0..r.read_count() {
+                    if let Some(m) = self.readers.get_mut(r.read_at(i).0) {
+                        m.remove(k);
+                    }
+                }
+                self.touched.extend(r.exports.iter().map(|(key, _)| key.clone()));
+            }
+            ps.lines.clear();
+            ps.log = None;
+            ps.lean_later = None;
+        }
+        let defs = std::mem::take(&mut self.fold.defs);
+        for (pid, node, d) in defs {
+            if gone.contains(&pid) {
+                self.touched.extend(d.into_iter().map(|x| x.0));
+            } else {
+                self.fold.defs.push((pid, node, d));
+            }
+        }
+    }
+
+    /// Builds `src`: what changed, and what the changes reach.
+    pub fn update(&mut self, src: &str, opts: Options) -> Output {
+        let t0 = Instant::now();
+        self.builds += 1;
+        self.etex_last = opts.etex;
+        // (cut otherwise: every text is cut again, the sequence made anew)
+        if opts.cut_lines != self.cut_lines {
+            self.cut_lines = opts.cut_lines;
+            self.texts.clear();
+            self.src.clear();
+            self.starts.clear();
+            let all: Vec<PieceId> = self.seq.labels().ids();
+            self.take_out(&all);
+            self.seq = Seq::new(self.cut_lines);
+        }
+        let (texts, starts) = self.cut(src);
+        self.src.clear();
+        self.src.push_str(src);
+        self.starts = starts;
+        self.texts.clone_from(&texts);
+        let removed = self.seq.edit_root(texts);
+        self.take_out(&removed);
+        let time_cut = t0.elapsed();
+        self.pdf.rounds = 0;
+        self.file_rounds = 0;
+        let mut carried = Stats::default();
+        let mut rounds = 0;
+        loop {
+            rounds += 1;
+            if let Some(b) = &self.board {
+                b.round.store(rounds, Ordering::Relaxed);
+                b.pages.store(0, Ordering::Relaxed);
+                b.phase.store(1, Ordering::Relaxed);
+            }
+            let t_round = Instant::now();
+            let last = rounds >= self.max_rounds.max(1);
+            match self.evaluate(opts, time_cut, last) {
+                Eval::Done(out) => {
+                    let mut out = *out;
+                    carried.round_walls.push(t_round.elapsed());
+                    out.stats.absorb(carried);
+                    out.stats.rounds = rounds;
+                    out.stats.forced_last = last;
+                    out.stats.wall = t0.elapsed();
+                    return out;
+                }
+                Eval::Again(mut st) => {
+                    st.round_walls.push(t_round.elapsed());
+                    carried.absorb(st);
+                }
+            }
+        }
+    }
+
+    /// Piece `k`'s material as the page builder is fed it
+    /// (`page::material`), as the last build left it.
+    pub fn material_of(&self, k: usize) -> Option<Vec<crate::item::Item>> {
+        let kept = self.pieces.get(k)?;
+        let run = kept.run.as_ref()?;
+        let paras: Option<Vec<(Arc<crate::item::Para>, Lines)>> = run
+            .paras
+            .iter()
+            .zip(&kept.lines)
+            .map(|(p, l)| Some((p.clone(), l.clone().unwrap_or_default())))
+            .collect();
+        Some(material(&paras?))
+    }
+
+    /// The reads piece `k`'s nodes hold, and how many distinct `Read`s
+    /// they are.
+    pub fn reads_held(&self, k: usize) -> Option<(usize, usize)> {
+        Some(self.pieces.get(k)?.run.as_ref()?.reads_held())
+    }
+
+    /// The index in the last build's pieces of piece `id`.
+    /// The live pieces, a line each (debugging).
+    #[doc(hidden)]
+    pub fn dump_pieces(&self) -> String {
+        let mut out = String::new();
+        for k in self.seq.live_ids() {
+            let ps = &self.seq.p[k as usize];
+            let head: String = ps.text.iter().take(40).collect::<String>().replace('\n', "|");
+            let _ = writeln!(out, "{k} list {} {:?} join {} cut {} input {} ends {} len {} [{head}]", ps.list, ps.status, ps.got.join, ps.got.cut, ps.got.input.is_some(), ps.got.ends, ps.text.len());
+        }
+        out
+    }
+
+    pub fn piece_index(&self, id: PieceId) -> Option<usize> {
+        self.dense.get(&id).copied()
+    }
+
+    /// The node (its index in piece `k`) that made an item of the piece's
+    /// material, or, `path` naming items inside it, the item there. For
+    /// SyncTeX and the viewer, with [`Build::source_place`].
+    pub fn material_node(&self, k: usize, item: u32, path: &[usize]) -> Option<u32> {
+        let kept = self.pieces.get(k)?;
+        let run = kept.run.as_ref()?;
+        let nodes = run.para_nodes();
+        let mut i = item as usize;
+        for (j, para) in run.paras.iter().enumerate() {
+            let pn = *nodes.get(j)?;
+            if i < para.before.len() {
+                return inner_node(pn, &para.before[i], path);
+            }
+            i -= para.before.len();
+            if para.lb.is_some() {
+                let lines = kept.lines.get(j)?.as_ref()?;
+                for l in lines.iter() {
+                    let n = 1 + l.adjust.len() + usize::from(l.pen.is_some());
+                    if i < n {
+                        if i > 0 {
+                            return Some(pn);
+                        }
+                        let Some((&first, rest)) = path.split_first() else { return Some(pn) };
+                        let node = l.node_of(para, pn, first)?;
+                        return inner_node(node, l.b.list.get(first)?, rest);
+                    }
+                    i -= n;
+                }
+            }
+            if i < para.after.len() {
+                return inner_node(pn, &para.after[i], path);
+            }
+            i -= para.after.len();
+        }
+        None
+    }
+
+    /// Where node `node` of piece `k` (as the last build laid it out) is in
+    /// the source: its file (`None`: the main file) and line.
+    pub fn source_place(&self, k: usize, node: u32) -> Option<(Option<Arc<str>>, u32)> {
+        let kept = self.pieces.get(k)?;
+        let (file, base) = self.places.get(&kept.id)?;
+        let pos = kept.run.as_ref()?.node_pos(node as usize)?;
+        let p = pos.min(kept.text.len());
+        let line = 1 + kept.text[..p].iter().filter(|&&c| c == '\r').count() as u32;
+        Some((file.clone(), base + line))
+    }
     /// The format this build starts from (`format::decode` of `bytes`):
     /// its definitions are at the place before the first piece, where a
     /// name no piece defined before is read. Given before the first
@@ -1889,312 +2522,6 @@ impl Build {
 
     /// The pieces of a file's text (the last cut's `Arc`s while the text
     /// is the same; the pieces of a changed text are found by their text).
-    fn file_pieces(&mut self, text: &Arc<str>) -> Vec<Arc<[char]>> {
-        let key = text.as_ptr() as usize;
-        if let Some((t, v)) = self.file_cuts.get(&key)
-            && Arc::ptr_eq(t, text)
-        {
-            return v.clone();
-        }
-        let v = self
-            .file_cuts
-            .values()
-            .find(|(t, _)| **t == **text)
-            .map_or_else(|| cut_every(text, self.cut_lines), |x| x.1.clone());
-        self.file_cuts.insert(key, (text.clone(), v.clone()));
-        v
-    }
-
-    /// The pieces of `text` after a cut the cutter missed at `stop` (a
-    /// line's start: the lines from there, cut as the main text is).
-    fn recut(&mut self, text: &Arc<[char]>, stop: usize) -> Vec<Arc<[char]>> {
-        let key = (text.as_ptr() as usize, stop);
-        if let Some((t, v)) = self.recuts.get(&key)
-            && Arc::ptr_eq(t, text)
-        {
-            return v.clone();
-        }
-        let src: String = text[stop.min(text.len())..]
-            .iter()
-            .map(|&c| if c == '\r' { '\n' } else { c })
-            .collect();
-        let v = cut_every(&src, self.cut_lines);
-        self.recuts.insert(key, (text.clone(), v.clone()));
-        v
-    }
-
-    /// The most texts of `rest` that `a` was laid out as one with (in
-    /// one join or several, each joining the last's text), and the text
-    /// all are, if the last build's piece of that text is still to be
-    /// taken.
-    fn known_join(&self, a: &Arc<[char]>, rest: &[Arc<[char]>], m: &Matcher, olds: &[Kept]) -> Option<Joined> {
-        let recs = self.joins.get(&(a.as_ptr() as usize))?;
-        let mut best: Option<Joined> = None;
-        for (x, r, j, st) in recs {
-            if !Arc::ptr_eq(x, a) || r.len() > rest.len() || !r.iter().zip(rest).all(|(p, q)| Arc::ptr_eq(p, q)) {
-                continue;
-            }
-            let n = r.len();
-            let cand = match self.known_join(j, &rest[n..], m, olds) {
-                Some((n2, j2, st2)) => Some((n + n2, j2, st2)),
-                None => m.has(olds, j).then(|| (n, j.clone(), st.clone())),
-            };
-            if let Some(c) = cand
-                && best.as_ref().is_none_or(|b| c.0 > b.0)
-            {
-                best = Some(c);
-            }
-        }
-        best
-    }
-
-    /// `a` and the texts `rest` after it as one text (the same `Arc` while
-    /// they are), with where `a`'s own joined texts (`stops`) and each of
-    /// `rest` begin in it: the places its run may stop at (CORE.md, cuts).
-    fn joined(&mut self, a: &Arc<[char]>, stops: &[usize], rest: &[Arc<[char]>]) -> (Arc<[char]>, Arc<[usize]>) {
-        let recs = self.joins.entry(a.as_ptr() as usize).or_default();
-        recs.retain(|(x, _, _, _)| Arc::ptr_eq(x, a));
-        if let Some((_, _, j, st)) = recs
-            .iter()
-            .find(|(_, r, _, _)| r.len() == rest.len() && r.iter().zip(rest).all(|(p, q)| Arc::ptr_eq(p, q)))
-        {
-            return (j.clone(), st.clone());
-        }
-        let mut v: Vec<char> = Vec::with_capacity(a.len() + rest.iter().map(|t| t.len()).sum::<usize>());
-        let mut st = stops.to_vec();
-        v.extend_from_slice(a);
-        for t in rest {
-            st.push(v.len());
-            v.extend_from_slice(t);
-        }
-        let j: Arc<[char]> = Arc::from(v);
-        let st: Arc<[usize]> = Arc::from(st);
-        recs.push((a.clone(), rest.to_vec(), j.clone(), st.clone()));
-        (j, st)
-    }
-
-    /// The rest of a line that called `\input` (from `stop` in `caller`).
-    fn rest_text(&mut self, caller: &Arc<[char]>, stop: usize) -> Arc<[char]> {
-        let key = (caller.as_ptr() as usize, stop);
-        if let Some((c, r)) = self.rests.get(&key)
-            && Arc::ptr_eq(c, caller)
-        {
-            return r.clone();
-        }
-        let r: Arc<[char]> = Arc::from(&caller[stop.min(caller.len())..]);
-        self.rests.insert(key, (caller.clone(), r.clone()));
-        r
-    }
-
-    /// The sequence: the main text's pieces, and after each piece whose
-    /// last run read a file the file's pieces (up to one whose run ended
-    /// it with `\endinput`) and the rest of the calling line — what the
-    /// kept runs say; a run that says otherwise changes it.
-    fn layout(&mut self, texts: &[Arc<[char]>], olds: &[Kept]) -> Vec<Spec> {
-        let mut m = Matcher::new(olds);
-        let mut out = Vec::with_capacity(texts.len());
-        let mut base = 0;
-        // (each job of a session from its own first piece, its lines
-        // counted from its start; a job that ended is read no further)
-        let mut i = 0;
-        while i < texts.len() {
-            let mut j = i + 1;
-            while j < texts.len() && texts[j].first() != Some(&crate::graph::JOB) {
-                j += 1;
-            }
-            if texts[i].first() == Some(&crate::graph::JOB) {
-                base = 0;
-            }
-            let b = base;
-            base += texts[i..j].iter().map(|t| count_lines(t)).sum::<usize>();
-            self.place_list(&mut out, &mut m, olds, &texts[i..j], Entry::Start, None, b, 0);
-            i = j;
-        }
-        out
-    }
-
-    /// Places the pieces `texts` of one text (the main text's, a file's,
-    /// the rest of a re-cut piece's), each with what its run reads; the
-    /// first entered with `first`, each other in the state the piece
-    /// before it leaves (`ctx`: the file's calling piece). A run that does
-    /// not stop where the next text begins reads on into it: the two are
-    /// one piece (CORE.md, cuts). Returns the last piece placed.
-    #[allow(clippy::too_many_arguments)]
-    fn place_list(
-        &mut self,
-        out: &mut Vec<Spec>,
-        m: &mut Matcher,
-        olds: &[Kept],
-        texts: &[Arc<[char]>],
-        first: Entry,
-        ctx: Option<usize>,
-        base: usize,
-        depth: u32,
-    ) -> Option<usize> {
-        let mut last = None;
-        let mut b = base;
-        let mut i = 0;
-        while i < texts.len() {
-            let entry = if i == 0 { first } else { Entry::After(out.len() - 1, ctx) };
-            let k0 = out.len();
-            let mut l = self.place(out, m, olds, &texts[i], entry, b, ctx, depth);
-            b += count_lines(&texts[i]);
-            i += 1;
-            // (a run reading on past its text reads the texts after it with
-            // it, as one, up to the first place one begins where it can
-            // stop: the rest is cut again from there; or did when they were
-            // laid out last — that piece is kept, its run never stops at
-            // the first place to say so again. As many texts as make it
-            // twice as long: a run reading on and on takes rounds as the
-            // log of its length.)
-            while i < texts.len() && !out[l].expect.endinput && !out[k0..].iter().any(|s| s.expect.ends) {
-                let t = out[l].text.clone();
-                let (w, joined, stops) = if let Some(k) = self.known_join(&t, &texts[i..], m, olds) {
-                    k
-                } else if out[l].expect.join {
-                    let mut w = 1;
-                    let mut len = texts[i].len();
-                    while i + w < texts.len() && len < t.len() {
-                        len += texts[i + w].len();
-                        w += 1;
-                    }
-                    let own = out[l].stops.clone();
-                    let (j, st) = self.joined(&t, &own, &texts[i..i + w]);
-                    (w, j, st)
-                } else {
-                    break;
-                };
-                let (e, lb) = (out[l].entry, out[l].base);
-                b += texts[i..i + w].iter().map(|x| count_lines(x)).sum::<usize>();
-                i += w;
-                m.release(olds, &out[l..]);
-                out.truncate(l);
-                l = self.place_with(out, m, olds, &joined, e, lb, ctx, depth, stops);
-            }
-            last = Some(l);
-            // (the job ended: what follows is never read; the file ended)
-            if out[k0..].iter().any(|s| s.expect.ends) || (ctx.is_some() && out[l].expect.endinput) {
-                break;
-            }
-        }
-        last
-    }
-
-    /// Places piece `text`, then what its run reads and the rest of its
-    /// line; returns the index of the last piece placed.
-    #[allow(clippy::too_many_arguments)]
-    fn place(
-        &mut self,
-        out: &mut Vec<Spec>,
-        m: &mut Matcher,
-        olds: &[Kept],
-        text: &Arc<[char]>,
-        entry: Entry,
-        base: usize,
-        ctx: Option<usize>,
-        depth: u32,
-    ) -> usize {
-        self.place_with(out, m, olds, text, entry, base, ctx, depth, Arc::from([]))
-    }
-
-    /// [`Build::place`], the piece's run stopping at the first of `stops`
-    /// where it can (a text joined from several).
-    #[allow(clippy::too_many_arguments)]
-    fn place_with(
-        &mut self,
-        out: &mut Vec<Spec>,
-        m: &mut Matcher,
-        olds: &[Kept],
-        text: &Arc<[char]>,
-        entry: Entry,
-        base: usize,
-        ctx: Option<usize>,
-        depth: u32,
-        stops: Arc<[usize]>,
-    ) -> usize {
-        let inline = self.inline.iter().any(|t| Arc::ptr_eq(t, text) || **t == **text);
-        // (a run that read a file as pieces is not one of a piece whose
-        // files are read in it)
-        let cand = m.find(olds, text);
-        let found = cand
-            .filter(|&(i, _)| !inline || olds[i].got.input.is_none())
-            .filter(|&(i, _)| old_entry_holds(out, olds, entry, i));
-        let old = found.map(|x| x.0);
-        let moved = found.is_some_and(|x| !x.1);
-        let k = out.len();
-        // (`PHITEX_PLACE`: each piece placed, the last build's run of its
-        // text found for it and taken or not, and why not)
-        if std::env::var_os("PHITEX_PLACE").is_some() {
-            let head: String = text.iter().take(50).collect::<String>().replace('\r', "|");
-            let why = match cand {
-                Some((i, _)) if found.is_none() && inline && olds[i].got.input.is_some() => "inline, the old run read a file".to_string(),
-                Some((i, _)) if found.is_none() => entry_diff(out, olds, entry, i),
-                _ => String::new(),
-            };
-            eprintln!(
-                "placed {k} {entry:?} cand {cand:?} old {old:?} join {} cut {} stop {} len {} [{head}] {why}",
-                old.is_some_and(|i| olds[i].got.join),
-                old.is_some_and(|i| olds[i].got.cut),
-                old.map_or(0, |i| olds[i].got.stop),
-                text.len()
-            );
-        }
-        let expect = old.map(|i| olds[i].got.clone()).unwrap_or_default();
-        out.push(Spec {
-            text: text.clone(),
-            entry,
-            base,
-            post: None,
-            old,
-            expect: expect.clone(),
-            inline,
-            stops,
-            moved,
-        });
-        if expect.cut {
-            // (the cutter missed a cut: the rest of the text is cut again
-            // from there)
-            let stop = expect.stop.min(text.len());
-            let b = base + count_lines(&text[..stop]);
-            let pieces = self.recut(text, stop);
-            return self
-                .place_list(out, m, olds, &pieces, Entry::After(k, ctx), ctx, b, depth)
-                .unwrap_or(k);
-        }
-        let Some(f) = expect.input.clone() else {
-            return k;
-        };
-        if depth > 64 {
-            return k;
-        }
-        let pieces = self.file_pieces(&f.text);
-        let last = self.place_list(out, m, olds, &pieces, Entry::File(k), Some(k), 0, depth + 1);
-        let ended = out[k..].iter().any(|s| s.expect.ends);
-        // (the file's end leaves what the rest of the calling line goes on
-        // with — a paragraph, a group open — or its last command reads on
-        // past it: the file is read in the calling piece)
-        if !ended && last.is_some_and(|l| out[l].expect.join) {
-            self.inline.push(text.clone());
-            m.release(olds, &out[k..]);
-            out.truncate(k);
-            return self.place(out, m, olds, text, entry, base, ctx, depth);
-        }
-        let close = last.unwrap_or(k);
-        // (the job ended in the file: its parenthesis closes at the end,
-        // tex.web 1333, and the rest of the calling line is never read)
-        let paren = if ended { " )" } else { ")" };
-        match &mut out[close].post {
-            Some(p) => p.push_str(paren),
-            p @ None => *p = Some(format!("{RAW}{paren}")),
-        }
-        if ended {
-            return close;
-        }
-        let stop = expect.stop.min(text.len());
-        let rest = self.rest_text(text, stop);
-        let rbase = base + count_lines(&text[..stop]);
-        self.place(out, m, olds, &rest, Entry::Rest(k, last), rbase, ctx, depth)
-    }
 
     /// The terminal: the lines the user types (`Key::ReadStream(16)`
     /// before any definition), read by a job's start, an error's prompt
@@ -2342,380 +2669,26 @@ impl Build {
     }
 
     /// Builds `src`: what changed, and what the changes reach.
-    pub fn update(&mut self, src: &str, opts: Options) -> Output {
-        let t0 = Instant::now();
-        self.builds += 1;
-        self.etex_last = opts.etex;
-        // (cut otherwise: every text is cut again)
-        if opts.cut_lines != self.cut_lines {
-            self.cut_lines = opts.cut_lines;
-            self.texts.clear();
-            self.src.clear();
-            self.starts.clear();
-            self.file_cuts.clear();
-            self.recuts.clear();
-        }
-        let (texts, starts) = self.cut(src);
-        self.src.clear();
-        self.src.push_str(src);
-        self.starts = starts;
-        self.texts.clone_from(&texts);
-        let time_cut = t0.elapsed();
-        let saved = (
-            self.pages.clone(),
-            self.page_orgs.clone(),
-            self.marks.clone(),
-            self.call_logs.clone(),
-        );
-        // (the pages to compare with are the last build's: so are the runs
-        // whose material made them, whatever a round lays out)
-        self.page_runs = Some(self.pieces.iter().map(|o| o.run.clone()).collect());
-        let mut rounds = 0;
-        self.pdf.rounds = 0;
-        // (measuring: `PHITEX_ROUND_CAP` moves the bound on all rounds)
-        let cap = std::env::var("PHITEX_ROUND_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(self.max_rounds);
-        // (what the rounds of this update placed, and the rounds in a row
-        // that placed nothing new: a round laying the sequence out again
-        // with only what an earlier one placed is no progress)
-        let mut placed: FxSet<(u8, u64, u64)> = FxSet::default();
-        self.progress(&mut placed);
-        let mut stalled = 0;
-        loop {
-            rounds += 1;
-            if let Some(b) = &self.board {
-                b.round.store(rounds, Ordering::Relaxed);
-                b.pages.store(0, Ordering::Relaxed);
-                b.phase.store(1, Ordering::Relaxed);
-            }
-            let t_round = Instant::now();
-            let last = rounds > cap || stalled >= MAX_STALLED_ROUNDS;
-            if let Some(mut out) = self.round(&texts, opts, t0, time_cut, last, stalled == 0) {
-                let mut carried = std::mem::take(&mut self.carried);
-                carried.round_walls.push(t_round.elapsed());
-                out.stats.absorb(carried);
-                out.stats.rounds = rounds;
-                out.stats.forced_last = last;
-                out.stats.wall = t0.elapsed();
-                return out;
-            }
-            self.carried.round_walls.push(t_round.elapsed());
-            stalled = if self.progress(&mut placed) { 0 } else { stalled + 1 };
-            // (a run changed the sequence: evaluated again, its runs kept;
-            // the pages to compare with are the last build's)
-            self.pages.clone_from(&saved.0);
-            self.page_orgs.clone_from(&saved.1);
-            self.marks.clone_from(&saved.2);
-            self.call_logs.clone_from(&saved.3);
-        }
-    }
 
-    /// Adds what the layout has placed — each file's pieces where it is
-    /// read, the rests of lines, the re-cuts, the joins, the pieces whose
-    /// `\input`s are read inline — to `placed`; whether anything was new.
-    /// Each element only ever enters once, so rounds with progress are
-    /// bounded by what the documents hold.
-    fn progress(&self, placed: &mut FxSet<(u8, u64, u64)>) -> bool {
-        let before = placed.len();
-        // (a file by its name and pieces: the same file read again at
-        // another place is not counted again)
-        for (name, cuts) in self.file_cuts.values() {
-            placed.insert((0, crate::hash::hash_of(&**name), cuts.len() as u64));
-        }
-        for k in self.rests.keys() {
-            placed.insert((1, k.0 as u64, k.1 as u64));
-        }
-        for k in self.recuts.keys() {
-            placed.insert((2, k.0 as u64, k.1 as u64));
-        }
-        for (k, v) in &self.joins {
-            placed.insert((3, *k as u64, v.len() as u64));
-        }
-        for t in &self.inline {
-            placed.insert((4, Arc::as_ptr(t).cast::<char>() as usize as u64, t.len() as u64));
-        }
-        placed.len() > before
-    }
-
-    /// Piece `k`'s material as the page builder is fed it
-    /// (`page::material`), as the last build left it.
-    pub fn material_of(&self, k: usize) -> Option<Vec<crate::item::Item>> {
-        let kept = self.pieces.get(k)?;
-        let run = kept.run.as_ref()?;
-        let paras: Option<Vec<(Arc<crate::item::Para>, Lines)>> = run
-            .paras
-            .iter()
-            .zip(&kept.lines)
-            .map(|(p, l)| Some((p.clone(), l.clone().unwrap_or_default())))
-            .collect();
-        Some(material(&paras?))
-    }
-
-    /// The reads piece `k`'s nodes hold, and how many distinct `Read`s
-    /// they are (one per distinct read, however often a node reads it:
-    /// [`crate::graph::Run::reads_held`]; a lean piece holds none).
-    pub fn reads_held(&self, k: usize) -> Option<(usize, usize)> {
-        Some(self.pieces.get(k)?.run.as_ref()?.reads_held())
-    }
-
-    /// The node (its index in piece `k`) that made an item of the piece's
-    /// material (`page::material`, as the page builder's `Org` names it:
-    /// `item`), or, `path` naming items inside it — a line's box's item,
-    /// then an item of a box among those, and so on — the item there
-    /// (`item::Origins`, `linebreak::Line::node_of`). For SyncTeX and the
-    /// viewer, with [`Build::source_place`].
-    pub fn material_node(&self, k: usize, item: u32, path: &[usize]) -> Option<u32> {
-        let kept = self.pieces.get(k)?;
-        let run = kept.run.as_ref()?;
-        let nodes = run.para_nodes();
-        let mut i = item as usize;
-        for (j, para) in run.paras.iter().enumerate() {
-            let pn = *nodes.get(j)?;
-            if i < para.before.len() {
-                return inner_node(pn, &para.before[i], path);
-            }
-            i -= para.before.len();
-            if para.lb.is_some() {
-                let lines = kept.lines.get(j)?.as_ref()?;
-                for l in lines.iter() {
-                    let n = 1 + l.adjust.len() + usize::from(l.pen.is_some());
-                    if i < n {
-                        if i > 0 {
-                            return Some(pn);
-                        }
-                        let Some((&first, rest)) = path.split_first() else { return Some(pn) };
-                        let node = l.node_of(para, pn, first)?;
-                        return inner_node(node, l.b.list.get(first)?, rest);
-                    }
-                    i -= n;
-                }
-            }
-            if i < para.after.len() {
-                return inner_node(pn, &para.after[i], path);
-            }
-            i -= para.after.len();
-        }
-        None
-    }
-
-    /// Where node `node` of piece `k` (as the last build laid it out) is in
-    /// the source: its file (`None`: the main file) and line, the lines of
-    /// the file before the piece (what `Key::LineBase` answers) plus its
-    /// line in the piece — as `\inputlineno` counts it. A node reading a
-    /// file read in its piece is placed where the `\input` is. For the
-    /// CLI's SyncTeX and inverse search.
-    pub fn source_place(&self, k: usize, node: u32) -> Option<(Option<Arc<str>>, u32)> {
-        let kept = self.pieces.get(k)?;
-        let (file, base) = self.places.get(&kept.id)?;
-        let pos = kept.run.as_ref()?.node_pos(node as usize)?;
-        // (where it began reading: the lines before that position)
-        let p = pos.min(kept.text.len());
-        let line = 1 + kept.text[..p].iter().filter(|&&c| c == '\r').count() as u32;
-        Some((file.clone(), base + line))
-    }
-
-    /// A round that does not end the build: its runs are kept for the
-    /// next, each with what it still has to read again.
-    fn keep_round(&mut self, st: State) {
-        // (the sequence changed: the runs are kept, with what each still
-        // has to read again)
-        self.pieces =
-            st.p.into_iter()
-                .map(|ps| {
-                    let pending =
-                        (ps.status != Status::Done || !ps.dirty.is_empty()).then_some(ps.dirty);
-                    match (ps.run, ps.prev) {
-                        (Some(run), _) => Kept {
-                            id: ps.id,
-                            text: ps.text,
-                            run: Some(run),
-                            lines: ps.lines,
-                            srcs: ps.srcs,
-                            log: ps.log,
-                            pending,
-                            got: ps.got,
-                            hot_until: ps.hot_until,
-                        },
-                        (None, Some((run, lines, text))) => Kept {
-                            id: ps.id,
-                            text,
-                            got: Expect::of(&run),
-                            run: Some(run),
-                            lines,
-                            srcs: ps.srcs,
-                            log: None,
-                            pending: None,
-                            hot_until: ps.hot_until,
-                        },
-                        (None, None) => Kept {
-                            id: ps.id,
-                            text: ps.text,
-                            run: None,
-                            lines: Vec::new(),
-                            srcs: ps.srcs,
-                            log: None,
-                            pending: None,
-                            got: Expect::default(),
-                            hot_until: 0,
-                        },
-                    }
-                })
-                .collect();
-        self.carried.absorb(st.stats);
-    }
-
-    /// One evaluation of the sequence the kept runs give: `None` if a run
-    /// changed the sequence (the runs are kept for the next).
+    /// One evaluation of the sequence: every piece whose reads do not hold
+    /// runs, the page builder folds over the lines, the pages ship. Its
+    /// output, or another evaluation to make (a loop-back).
     #[allow(clippy::too_many_lines)]
-    fn round(
-        &mut self,
-        texts: &[Arc<[char]>],
-        opts: Options,
-        t0: Instant,
-        time_cut: Duration,
-        last: bool,
-        at_once: bool,
-    ) -> Option<Output> {
+    fn evaluate(&mut self, opts: Options, time_cut: Duration, last: bool) -> Eval {
         let threads = opts.threads.max(1);
         let t_setup = Instant::now();
-        let mut olds: Vec<Kept> = std::mem::take(&mut self.pieces);
-        let old_runs: Vec<Option<Arc<Run>>> = olds.iter().map(|o| o.run.clone()).collect();
-        let page_runs = self.page_runs.clone().unwrap_or_else(|| old_runs.clone());
-        let specs = self.layout(texts, &olds);
-        let mut used = vec![false; olds.len()];
-        for sp in &specs {
-            if let Some(i) = sp.old {
-                used[i] = true;
+        let mut seq = std::mem::replace(&mut self.seq, Seq::new(self.cut_lines));
+        seq.cut_lines = self.cut_lines;
+        // (what the runs say of the job's end and each file's end)
+        let (_, unmuted) = seq.recompute_mutes();
+        for k in unmuted {
+            let ps = &mut seq.p[k as usize];
+            if ps.status == Status::Done {
+                ps.status = Status::Unstarted;
             }
         }
-        let mut old_pos = vec![NONE; self.next_id as usize];
-        for (i, o) in olds.iter().enumerate() {
-            old_pos[o.id as usize] = i as u32;
-        }
-        // (for each piece, the last build's piece of the nearest kept piece
-        // before it and after it)
-        let mut prev_old = vec![None; specs.len()];
-        let mut next_old = vec![None; specs.len()];
-        let mut seen = None;
-        for (k, sp) in specs.iter().enumerate() {
-            prev_old[k] = seen;
-            seen = sp.old.or(seen);
-        }
-        seen = None;
-        for (k, sp) in specs.iter().enumerate().rev() {
-            next_old[k] = seen;
-            seen = sp.old.or(seen);
-        }
-        let mut p: Vec<PState> = Vec::with_capacity(specs.len());
-        for (k, sp) in specs.iter().enumerate() {
-            let base = |text: Arc<[char]>, id: PieceId, status: Status| PState {
-                id,
-                text,
-                status,
-                run: None,
-                lines: Vec::new(),
-                prev: None,
-                dirty: Dirty::new(),
-                runs: 0,
-                srcs: Vec::new(),
-                log: None,
-                entry: sp.entry,
-                expect: sp.expect.clone(),
-                got: sp.expect.clone(),
-                base: sp.base,
-                post: sp.post.clone(),
-                suspend: false,
-                hot_until: 0,
-                inline: sp.inline,
-                stops: sp.stops.clone(),
-                entered: None,
-                recheck: false,
-                lean_later: None,
-                fold_unchecked: false,
-            };
-            if let Some(i) = sp.old.filter(|&i| sp.moved || olds[i].run.is_none()) {
-                // (its own place, not run yet — a restructure stopped the
-                // round before it ran — or another place's run of equal
-                // text, which it runs from: every node it keeps has its
-                // reads looked at again here)
-                let o = &mut olds[i];
-                let mut ps = base(sp.text.clone(), o.id, Status::Unstarted);
-                ps.srcs = std::mem::take(&mut o.srcs);
-                if sp.moved
-                    && let Some(r) = &o.run
-                {
-                    ps.prev = Some((r.clone(), std::mem::take(&mut o.lines), o.text.clone()));
-                }
-                p.push(ps);
-            } else if let Some(i) = sp.old {
-                // (each old piece is taken at most once: its lines and edge
-                // sources move)
-                let o = &mut olds[i];
-                let mut ps = base(sp.text.clone(), o.id, Status::Done);
-                ps.run.clone_from(&o.run);
-                ps.lines = std::mem::take(&mut o.lines);
-                ps.srcs = std::mem::take(&mut o.srcs);
-                ps.log = o.log.take();
-                ps.hot_until = o.hot_until;
-                if let Some(d) = o.pending.take() {
-                    ps.status = Status::Unstarted;
-                    ps.dirty = d;
-                }
-                p.push(ps);
-            } else {
-                // (an edited piece: the unmatched old piece nearest its place,
-                // whose chain it runs from)
-                let (before, after) = (prev_old[k], next_old[k]);
-                let near = [
-                    before.map(|i| i + 1),
-                    after.and_then(|i| i.checked_sub(1)),
-                    (olds.len() == specs.len()).then_some(k),
-                ]
-                .into_iter()
-                .flatten()
-                .filter(|&i| i < olds.len() && !used[i] && olds[i].run.is_some())
-                .max_by_key(|&i| {
-                    olds[i]
-                        .text
-                        .iter()
-                        .zip(sp.text.iter())
-                        .take_while(|(a, b)| a == b)
-                        .count()
-                });
-                let prev = near.map(|i| {
-                    used[i] = true;
-                    (
-                        olds[i].run.clone().expect("a run"),
-                        std::mem::take(&mut olds[i].lines),
-                        olds[i].text.clone(),
-                    )
-                });
-                // (it keeps that piece's identity: its old definitions stay
-                // in the index as the prediction until it runs, so a reader
-                // of them parks on it rather than reading past it)
-                let id = if let Some(i) = near {
-                    olds[i].id
-                } else {
-                    self.next_id += 1;
-                    self.next_id - 1
-                };
-                let mut ps = base(sp.text.clone(), id, Status::Unstarted);
-                ps.srcs = near
-                    .map(|i| std::mem::take(&mut olds[i].srcs))
-                    .unwrap_or_default();
-                ps.prev = prev;
-                p.push(ps);
-            }
-        }
-        let n = p.len();
-        let seq = Sequence::new(
-            p.iter().map(|x| x.id).collect(),
-            self.next_id,
-            std::mem::take(&mut self.virt),
-        );
-        // (the names index: what the kept pieces define, at their places,
-        // and what an edited piece's predecessor defined, as its prediction)
-        let bases: Vec<u32> = p.iter().map(|x| x.base as u32).collect();
-        let mut given = Given::new(self.inputs.clone(), self.job.clone(), self.files.clone(), bases);
+        seq.set_bases();
+        let mut given = Given::new(self.inputs.clone(), self.job.clone(), self.files.clone());
         given.finder.clone_from(&self.finder);
         given.terminal.clone_from(&self.terminal);
         given.interaction = self.interaction;
@@ -2723,112 +2696,124 @@ impl Build {
         given.limits = self.limits;
         given.pdf_date = self.pdf_date;
         given.pdf_answers = self.pdf.answers.clone();
-        given.ids = p.iter().map(|x| x.id).collect();
         given.pdf_seed = self.pdf.seed;
         given.pdf_clock = self.pdf.clock;
         given.xe.clone_from(&self.xe);
-        let names = Names::new(given, opts.etex, self.cs.clone(), self.format.clone());
-        // (the last build's folds' values, at the pieces' places now)
         {
-            let at: FxMap<PieceId, u32> = p.iter().enumerate().map(|(k, x)| (x.id, k as u32)).collect();
-            names.file_guess.write().expect("file guesses").clone_from(&self.file_guess);
-            let mut fv = names.fold_vals.write().expect("fold values");
-            for ((id, node, key), v) in &self.fold_vals {
-                if let Some(&k) = at.get(id) {
-                    fv.insert((k, *node, key.clone()), v.clone());
+            let mut b = given.bases.write().expect("bases");
+            for ps in &seq.p {
+                if ps.alive {
+                    b.insert(ps.id, ps.base);
                 }
             }
         }
-        for (k, ps) in p.iter().enumerate() {
+        let names = Names::new(given, opts.etex, self.cs.clone(), self.format.clone(), seq.labels.clone());
+        names.file_guess.write().expect("file guesses").clone_from(&self.file_guess);
+        names.fold_vals.write().expect("fold values").clone_from(&self.fold_vals);
+        let order = seq.live_ids();
+        // (the names index: what the pieces define, at their places, and
+        // what an edited piece's predecessor defined, as its prediction)
+        for &k in &order {
+            let ps = &seq.p[k as usize];
             if let Some(r) = ps.run.as_ref().or(ps.prev.as_ref().map(|(r, _, _)| r)) {
                 for (key, val) in &r.exports {
-                    names.set((k as u32, END), key, Some(val));
+                    names.set((k, END), key, Some(val));
                 }
             }
         }
+        let virt = RwLock::new(std::mem::take(&mut self.virt));
+        let id_at = |p: Pos| -> PieceId {
+            if p.1 == END {
+                return p.0;
+            }
+            if let Some(&id) = virt.read().expect("virt").ids.get(&p) {
+                return id;
+            }
+            let mut v = virt.write().expect("virt");
+            let id = v.next.max(VIRT_BASE);
+            v.next = id + 1;
+            v.ids.insert(p, id);
+            v.at.insert(id, p);
+            id
+        };
+        // (the last evaluation's runs, what its pages were made of)
+        let old_runs: FxMap<PieceId, Arc<Run>> =
+            self.pieces.iter().filter_map(|kp| kp.run.clone().map(|r| (kp.id, r))).collect();
         // (the page builder's definitions where it fired, in a piece kept as
         // it was: predictions until the page builder passes there again)
-        let mut touched: Vec<Key> = Vec::new();
+        let mut touched = std::mem::take(&mut self.touched);
         let mut predicted: Vec<(Pos, Vec<Key>)> = Vec::new();
         let fold = self.fold.clone();
         for (pid, node, defs) in &fold.defs {
-            let kept = seq.pos_of(*pid).filter(|&(k, _)| {
-                let i = old_pos.get(*pid as usize).copied().unwrap_or(NONE);
-                i != NONE
-                    && p[k as usize]
+            let kept = seq.p.get(*pid as usize).is_some_and(|ps| {
+                ps.live()
+                    && ps
                         .run
                         .as_ref()
-                        .zip(old_runs.get(i as usize).and_then(Option::as_ref))
+                        .zip(old_runs.get(pid))
                         .is_some_and(|(a, b)| Arc::ptr_eq(a, b))
             });
-            match kept {
-                Some((k, _)) => {
-                    for (key, val) in defs {
-                        names.set((k, *node), key, Some(val));
-                    }
-                    predicted.push(((k, *node), defs.iter().map(|d| d.0.clone()).collect()));
+            if kept {
+                for (key, val) in defs {
+                    names.set((*pid, *node), key, Some(val));
                 }
-                None => touched.extend(defs.iter().map(|d| d.0.clone())),
+                predicted.push(((*pid, *node), defs.iter().map(|d| d.0.clone()).collect()));
+            } else {
+                touched.extend(defs.iter().map(|d| d.0.clone()));
             }
         }
-        predicted.sort_by_key(|x| x.0);
+        {
+            let l = seq.labels();
+            predicted.sort_by_key(|x| l.key(x.0));
+        }
         for (pos, keys) in &predicted {
-            let k = pos.0 as usize;
-            if let Some(r) = p[k].run.as_ref().or(p[k].prev.as_ref().map(|(r, _, _)| r)) {
+            let ps = &seq.p[pos.0 as usize];
+            if let Some(r) = ps.run.as_ref() {
                 for key in keys {
-                    refresh_export(&names, &self.font, k, r, key);
+                    refresh_export(&names, &self.font, pos.0, r, key);
                 }
             }
         }
-        // (the edges of removed pieces go; the names whose defining places
-        // changed — defined by a removed or moved piece — have their
-        // readers looked at: one reading another definition now is marked)
+        // (the names whose definitions an edit took out or moved: their
+        // readers are looked at, one reading another value now is marked)
         let mut readers = std::mem::take(&mut self.readers);
-        for o in &olds {
-            let Some(r) = &o.run else { continue };
-            let now = seq.pos_of(o.id).map(|p| p.0);
-            if now != Some(old_pos[o.id as usize]) {
-                touched.extend(r.exports.iter().map(|(k, _)| k.clone()));
-            }
-            if now.is_none() {
-                for i in 0..r.read_count() {
-                    if let Some(m) = readers.get_mut(r.read_at(i).0) {
-                        m.remove(o.id);
-                    }
-                }
-            }
-        }
         touched.sort();
         touched.dedup();
-        let mut marks: Vec<(usize, Key)> = Vec::new();
-        let mut moves: Vec<(usize, Key, PieceId)> = Vec::new();
+        let mut marks: Vec<(PieceId, Key)> = Vec::new();
+        let mut moves: Vec<(PieceId, Key, PieceId)> = Vec::new();
         for key in &touched {
             let Some(m) = readers.get_mut(key) else { continue };
+            let mut dead = Vec::new();
             for (&rid, &(node, src)) in &*m {
-                let Some(rpos) = seq.pos_of(rid) else {
+                let Some(ps) = seq.p.get(rid as usize) else { continue };
+                if !ps.alive {
+                    dead.push(rid);
                     continue;
-                };
-                let (def, ..) = names.reaching(key, (rpos.0, node), &self.font);
-                let def_id = def.map_or(INITIAL, |d| seq.id_at(d));
+                }
+                if !ps.live() {
+                    continue;
+                }
+                let (def, ..) = names.reaching(key, (rid, node), &self.font);
+                let def_id = def.map_or(INITIAL, id_at);
                 if src == def_id {
                     continue;
                 }
-                // (another definer giving every read the value it read: the
-                // edge moves to it, nothing runs again)
-                let r = rpos.0 as usize;
-                if p[r].run.as_ref().is_some_and(|run| reads_still(&names, &self.font, run, r, key)) {
-                    moves.push((r, key.clone(), def_id));
+                if ps.run.as_ref().is_some_and(|run| reads_still(&names, &self.font, run, rid, key)) {
+                    moves.push((rid, key.clone(), def_id));
                 } else {
-                    marks.push((r, key.clone()));
+                    marks.push((rid, key.clone()));
                 }
+            }
+            for d in dead {
+                m.remove(d);
             }
         }
         for (r, key, src) in moves {
-            move_edge(&readers, &mut p[r], &key, src);
+            move_edge(&readers, &mut seq.p[r as usize], &key, src);
         }
         // (the names the build answers itself — a file's bytes, the job's
-        // name, the lines before a piece — read with a value they no longer
-        // have: their readers are marked)
+        // name, the lines before a piece, the PDF answers — read with a
+        // value they no longer have: their readers are marked)
         for (key, m) in readers.iter_mut() {
             if !matches!(
                 key,
@@ -2837,52 +2822,56 @@ impl Build {
                 continue;
             }
             for &rid in m.keys() {
-                let Some(rpos) = seq.pos_of(rid).map(|x| x.0 as usize) else {
-                    continue;
-                };
-                let Some(r) = &p[rpos].run else { continue };
-                // (a file at each read's node: what the run wrote of it
-                // before, if it wrote it, `Names::fold_value`)
+                let Some(ps) = seq.p.get(rid as usize).filter(|p| p.live()) else { continue };
+                let Some(r) = &ps.run else { continue };
                 let changed = r.values_read(key).iter().any(|x| {
                     let now = match key {
-                        Key::File(_) => names.fold_value(key, (rpos as u32, x.1), &self.font),
-                        _ => names.given.answer(key, rpos),
+                        Key::File(_) => names.fold_value(key, (rid, x.1), &self.font),
+                        _ => names.given.answer(key, rid),
                     };
                     now.as_ref() != Some(&x.2)
                 });
                 if changed {
-                    marks.push((rpos, key.clone()));
+                    marks.push((rid, key.clone()));
                 }
             }
         }
-        // (a kept run entered otherwise than its piece is now — the piece
-        // before it left another state at the cut — runs again)
-        for k in 0..p.len() {
-            if p[k].status == Status::Done
-                && let Some(r) = &p[k].run
-                && entry_state_in(&p, k).is_some_and(|e| r.entry() != e)
+        // (reads the last evaluation found refuted: run again from there)
+        for (k, key, n) in std::mem::take(&mut self.refuted) {
+            if seq.p.get(k as usize).is_some_and(Piece::live) {
+                dirty_from(&mut seq.p[k as usize].dirty, key, n);
+                seq.p[k as usize].status = Status::Unstarted;
+            }
+        }
+        // (a run entered otherwise than its piece is now runs again)
+        for &k in &order {
+            let ps = &seq.p[k as usize];
+            if ps.status == Status::Done
+                && let Some(r) = &ps.run
+                && entry_state(&seq, k).is_some_and(|e| r.entry() != e)
             {
-                p[k].status = Status::Unstarted;
+                seq.p[k as usize].status = Status::Unstarted;
             }
         }
-        let unstarted: BTreeSet<usize> = p
-            .iter()
-            .enumerate()
-            .filter(|(_, x)| x.status == Status::Unstarted)
-            .map(|(k, _)| k)
-            .collect();
-
-        let mut deps = vec![Vec::new(); n];
-        for (k, ps) in p.iter().enumerate() {
-            match ps.entry {
-                Entry::Start => {}
-                Entry::File(c) => deps[c].push(k),
-                Entry::Rest(c, l) | Entry::After(c, l) => {
-                    deps[c].push(k);
-                    if let Some(l) = l {
-                        deps[l].push(k);
-                    }
-                }
+        for &k in &order {
+            let ps = &mut seq.p[k as usize];
+            ps.edits = 0;
+            ps.runs = 0;
+            if ps.run.is_none() || !ps.dirty.is_empty() {
+                ps.status = Status::Unstarted;
+            }
+        }
+        let unstarted: BTreeSet<(u64, PieceId)> = {
+            let l = seq.labels();
+            order
+                .iter()
+                .filter(|&&k| seq.p[k as usize].status != Status::Done)
+                .map(|&k| (l.of(k), k))
+                .collect()
+        };
+        for &k in &order {
+            if seq.p[k as usize].status != Status::Done {
+                seq.p[k as usize].status = Status::Unstarted;
             }
         }
         let fancy = fold.fancy;
@@ -2890,106 +2879,100 @@ impl Build {
         for m in fold.memo {
             memo_old.entry(memo_key(&m.page)).or_default().push(m);
         }
-        // (a fancy fold too, B2: its restart points carry its state)
         let matching = !self.page_orgs.is_empty() || !self.marks.is_empty();
         let old_orgs_whole = Arc::new(std::mem::take(&mut self.page_orgs));
         let old_orgs = if fancy { Arc::default() } else { old_orgs_whole.clone() };
+        let old_seq: Arc<Vec<PieceId>> = Arc::new(self.pieces.iter().map(|kp| kp.id).collect());
+        let old_pos: FxMap<PieceId, usize> = old_seq.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        let first = seq.first_live();
+        let n = order.len();
         let mut state = State {
             names_log: Vec::new(),
-            p,
+            seq,
             unstarted,
             running: BTreeSet::new(),
-            settled: 0,
+            spreads: 0,
+            settled: first,
             break_queue: VecDeque::new(),
             scan: Some(Box::default()),
-            scan_next: 0,
-            scan_skip: 0,
+            scan_last: None,
+            scan_part: None,
             scan_done: false,
+            scan_thread: None,
+            scan_inflight: None,
+            scan_gen: 0,
+            num_last: None,
+            numbers0: Arc::new(dvi::numbers([self.format_fonts()])),
             matching,
-            old_runs: page_runs,
+            old_seq,
+            old_pos,
+            match_j: 0,
+            old_runs,
             last_diff: None,
             last_diff_known: false,
             pages: Vec::new(),
             orgs: Vec::new(),
-            marks_before: Vec::new(),
-            marks_after: Vec::new(),
-            call_logs_before: Vec::new(),
-            call_logs_after: Vec::new(),
             bodies: Vec::new(),
             numbers: Arc::new(dvi::numbers([self.format_fonts()])),
-            numbered: 0,
-            log_next: 0,
+            log_last: None,
             log_queue: VecDeque::new(),
             logs_running: 0,
             unshipped: 0,
             ship_queue: VecDeque::new(),
-            old_pages: std::mem::take(&mut self.pages)
-                .into_iter()
-                .map(Some)
-                .collect(),
+            old_pages: std::mem::take(&mut self.pages).into_iter().map(Some).collect(),
             old_orgs_whole,
             old_orgs,
             old_fancy: fancy,
             old_marks: std::mem::take(&mut self.marks),
             old_pdf_tail: self.pdf.tail.clone(),
             pdf_tail: Arc::default(),
+            marks_before: Vec::new(),
+            marks_after: Vec::new(),
             old_call_logs: std::mem::take(&mut self.call_logs),
+            call_logs_before: Vec::new(),
+            call_logs_after: Vec::new(),
             rng: match opts.order {
                 Order::Random(s) => s.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1,
                 Order::Priority => 1,
             },
-            stats: Stats {
-                pieces: n,
-                work: vec![0; threads],
-                tasks: vec![0; threads],
-                ..Stats::default()
-            },
+            stats: Stats { pieces: n, work: vec![0; threads], tasks: vec![0; threads], ..Stats::default() },
             done: false,
-            deps,
-            restructure: false,
-            restructure_due: false,
-            due_at: None,
             inflight: 0,
             fold_defs: Vec::new(),
             predicted,
             memo_new: Vec::new(),
             last_readers: FxMap::default(),
             stalled: None,
-            rerun_log: std::env::var_os("PHITEX_RERUN").map(|_| Vec::new()),
-            mark_src: MarkSrc::Carried,
         };
+        let flags = Flags::new();
+        for &k in &order {
+            flags.set(k, DONE, state.seq.p[k as usize].status == Status::Done);
+        }
         for (k, key) in marks {
-            mark(&mut state, k, key);
+            mark(&mut state, &flags, k, key);
         }
         // (kept runs' paragraphs never broken go to the queue)
-        for k in 0..n {
-            if state.p[k].status == Status::Done && !lines_ready(&state, k) {
-                let r = state.p[k].run.clone().expect("a run");
+        for &k in &order {
+            if state.seq.p[k as usize].status == Status::Done && !lines_ready(&state, k) {
+                let r = state.seq.p[k as usize].run.clone().expect("a run");
                 let equal = equal_paras(Some(&r), &r);
                 queue_breaks(&mut state, k, Some(&r), &equal);
             }
         }
         state.stats.time_cut = time_cut;
         state.stats.time_setup = t_setup.elapsed();
+        let labels = state.seq.labels.clone();
         let sh = Shared {
             names,
-            seq,
+            labels,
+            flags,
+            board: self.board.clone(),
+            virt,
             generation: AtomicU64::new(0),
-            names_gen: AtomicUsize::new(0),
             park: Mutex::new(()),
             parked: Condvar::new(),
-            done: state
-                .p
-                .iter()
-                .map(|ps| AtomicBool::new(ps.status == Status::Done))
-                .collect(),
-            cancel: state.p.iter().map(|_| AtomicBool::new(false)).collect(),
-            progress: state.p.iter().map(|_| AtomicU64::new(0)).collect(),
-            board: self.board.clone(),
-            inline: state.p.iter().map(|ps| ps.inline).collect(),
-            laid: state.p.iter().map(|ps| (ps.expect.input.is_some(), ps.expect.cut)).collect(),
-            waiting: state.p.iter().map(|_| AtomicBool::new(false)).collect(),
-            restructuring: AtomicBool::new(false),
+            parked_n: AtomicUsize::new(0),
+            names_gen: AtomicUsize::new(0),
             drops: {
                 let (tx, rx) = std::sync::mpsc::channel::<Arc<Run>>();
                 let _ = std::thread::Builder::new().name("flow-drop".into()).spawn(move || {
@@ -2999,37 +2982,26 @@ impl Build {
                 });
                 tx
             },
-            stops: state.p.iter().map(|ps| ps.stops.clone()).collect(),
             state: Mutex::new(state),
             cv: Condvar::new(),
             font: self.font.clone(),
             fonts: self.fonts.clone(),
             opts,
-            restructure_ok: !last,
-            at_once,
-            lean: self.lean,
-            build_no: self.builds,
             memo_old,
             readers,
-            sched: std::env::var_os("PHITEX_SCHED").map(|_| Mutex::new(Vec::new())),
-            run_times: Mutex::new(std::mem::take(&mut self.run_times)),
-            read_cmds: Mutex::new(std::mem::take(&mut self.read_cmds)),
-            notes: Mutex::new(Vec::new()),
-            t_base: Instant::now(),
-            lock_wait: AtomicU64::new(0),
-            lock_n: AtomicU64::new(0),
+            lean: self.lean,
+            build_no: self.builds,
+            settled_at: AtomicU64::new(0),
         };
-        if let Some(b) = &sh.board {
-            let g = lock(&sh);
-            b.total.store(g.p.len(), Ordering::Relaxed);
-            b.settled.store(g.p.iter().filter(|ps| ps.status == Status::Done).count(), Ordering::Relaxed);
-            b.phase.store(2, Ordering::Relaxed);
+        {
+            let mut g = lock(&sh);
+            settle(&mut g, &sh);
+            if let Some(b) = &sh.board {
+                b.total.store(g.seq.live_ids().len(), Ordering::Relaxed);
+                b.phase.store(2, Ordering::Relaxed);
+            }
         }
         std::thread::scope(|s| {
-            if let Some(secs) = std::env::var("PHITEX_HANG_DUMP").ok().and_then(|v| v.parse::<u64>().ok()) {
-                let sh = &sh;
-                s.spawn(move || watchdog(sh, Duration::from_secs(secs.max(1))));
-            }
             for id in 0..threads {
                 let sh = &sh;
                 std::thread::Builder::new()
@@ -3042,71 +3014,42 @@ impl Build {
         if let Some(b) = &sh.board {
             b.phase.store(3, Ordering::Relaxed);
         }
-        // (the last build's page builder definitions the scan did not reach
-        // again — a fold that converged — stay as they were)
+        // (the last evaluation's page builder definitions the scan did not
+        // reach again — a fold that converged — stay as they were)
         let unreached: FoldDefs = {
             let mut g = lock(&sh);
             let mut out: FoldDefs = Vec::new();
             for (pos, keys) in std::mem::take(&mut g.predicted) {
-                let pid = sh.seq.piece(pos.0 as usize);
-                if g.fold_defs.iter().any(|x| x.0 == pid && x.1 == pos.1) {
+                if g.fold_defs.iter().any(|x| x.0 == pos.0 && x.1 == pos.1) {
                     continue;
                 }
-                let defs: Vec<(Key, Val)> = keys
-                    .into_iter()
-                    .filter_map(|k| sh.names.at(&k, pos).map(|v| (k, v)))
-                    .collect();
-                out.push((pid, pos.1, defs));
+                let defs: Vec<(Key, Val)> = keys.into_iter().filter_map(|k| sh.names.at(&k, pos).map(|v| (k, v))).collect();
+                out.push((pos.0, pos.1, defs));
             }
             out
         };
-        let virt = std::mem::take(&mut *sh.seq.virt.write().expect("virt"));
-        self.virt = virt.ids;
-        self.next_id = self.next_id.max(virt.next);
+        self.virt = std::mem::take(&mut *sh.virt.write().expect("virt"));
         let mut st = sh.state.into_inner().expect("state");
         self.readers = sh.readers;
-        self.run_times = sh.run_times.into_inner().expect("run times");
-        self.read_cmds = sh.read_cmds.into_inner().expect("read commands");
-        if let Some(notes) = st.rerun_log.take() {
-            write_reruns(&notes, &sh.names, sh.build_no, st.p.len());
-            st.rerun_log = Some(Vec::new());
-        }
-        if let Some(ev) = &sh.sched {
-            let waits = (sh.lock_wait.load(Ordering::Relaxed), sh.lock_n.load(Ordering::Relaxed));
-            write_sched(&ev.lock().expect("sched"), &st, threads, sh.build_no, sh.t_base.elapsed(), waits);
-            write_notes(&sh.notes.lock().expect("notes"));
-            if !st.restructure && std::env::var_os("PHITEX_SCHED_DEPS").is_some_and(|v| !v.is_empty()) {
-                write_deps(&st, &sh.seq, &sh.names, &sh.font, &self.run_times, &self.read_cmds);
-            }
-        }
-        // (a stalled scheduler is a bug of the core: the build fails with
-        // the pieces' states, it does not hang)
         if let Some(d) = st.stalled.take() {
             panic!("{d}");
         }
-        self.fold_vals = fold_vals_by_id(&sh.names, &st.p);
-        if st.restructure {
-            self.keep_round(st);
-            return None;
-        }
+        self.fold_vals.clone_from(&sh.names.fold_vals.read().expect("fold values"));
+        let order = st.seq.live_ids();
+        let dense: FxMap<PieceId, usize> = order.iter().enumerate().map(|(i, &k)| (k, i)).collect();
         let t_join = Instant::now();
-        let mut bodies: Vec<Arc<dvi::Body>> = st
-            .bodies
-            .iter()
-            .map(|b| b.clone().expect("every page shipped"))
-            .collect();
+        let mut bodies: Vec<Arc<dvi::Body>> = st.bodies.iter().map(|b| b.clone().expect("every page shipped")).collect();
         let numbers = dvi::numbers(
             std::iter::once(self.format_fonts())
-                .chain(st.p.iter().filter_map(|ps| ps.run.as_ref().map(|r| &r.fonts[..]))),
+                .chain(order.iter().filter_map(|&k| st.seq.p[k as usize].run.as_ref().map(|r| &r.fonts[..]))),
         );
-        // (how many fonts the job had loaded up to each piece: a page's
-        // virtual fonts' local fonts are numbered after those of the pieces
-        // before its own, and of the fonts the pages show)
+        // (how many fonts the job had loaded up to each piece)
         let loaded_by_piece: Vec<u32> = {
             let mut m = dvi::numbers([self.format_fonts()]);
-            st.p.iter()
-                .map(|ps| {
-                    if let Some(r) = &ps.run {
+            order
+                .iter()
+                .map(|&k| {
+                    if let Some(r) = &st.seq.p[k as usize].run {
                         dvi::extend(&mut m, &r.fonts);
                     }
                     m.len() as u32
@@ -3114,27 +3057,22 @@ impl Build {
                 .collect()
         };
         let mut errors = Vec::new();
-        // (PDF mode, from the first page's `\pdfoutput`: the PDF file is
-        // the fold over the pages, as the DVI file is)
         let mut pdf_answers = None;
         let (out, pdf, again) = if st.pages.first().is_some_and(|p| p.ship.pdf.is_some()) {
-            let live = live_pieces(&st.p);
-            let last = live.iter().rposition(|&l| l).unwrap_or(0);
             let format_fonts = self.format_fonts().len() as u32;
             let ship_fonts: Vec<u32> = st
                 .orgs
                 .iter()
-                .map(|o| match (o.call.0 as usize).checked_sub(1) {
-                    Some(k) => loaded_by_piece.get(k).or(loaded_by_piece.last()).copied().unwrap_or(format_fonts),
+                .map(|o| match dense.get(&o.call.0).and_then(|d| d.checked_sub(1)) {
+                    Some(d) => loaded_by_piece.get(d).or(loaded_by_piece.last()).copied().unwrap_or(format_fonts),
                     None => format_fonts,
                 })
                 .collect();
-            let w = pdf_file(&sh.names, &sh.font, &sh.fonts, last, &numbers, ship_fonts, &st.pages, &st.orgs, &st.pdf_tail, &mut bodies);
+            let w = pdf_file(&sh.names, &sh.font, &sh.fonts, order.last().copied(), &numbers, ship_fonts, &st.pages, &st.orgs, &st.pdf_tail, &mut bodies);
             errors.extend(w.errors.into_iter().map(|e| format!("pdf: {e}")));
             pdf_answers = Some(w.answers);
             (Vec::new(), w.bytes, w.again)
         } else {
-            // (XeTeX: the XDV file, its id byte and comment XeTeX's)
             let xdv = sh.names.given.xe.is_some();
             let (out, again) = dvi::assemble_as(&numbers, &st.pages, &mut bodies, sh.names.given.limits.dvi_buf_size, xdv);
             (out, Vec::new(), again)
@@ -3148,16 +3086,13 @@ impl Build {
             .chain(&st.marks_after)
             .copied()
             .collect();
-        // (a piece whose part was not made in the build: none, unless its
-        // lines were not all broken)
-        for ps in &mut st.p {
-            let run = ps.run.as_ref().expect("every piece ran");
-            if !ps.log.as_ref().is_some_and(|f| f.holds(run, &ps.lines)) {
-                ps.log = Some(Arc::new(logs::fragment(&ps.text, run, &ps.lines)));
+        for &k in &order {
+            let ps = &mut st.seq.p[k as usize];
+            let run = ps.run.clone().expect("every piece ran");
+            if !ps.log.as_ref().is_some_and(|f| f.holds(&run, &ps.lines)) {
+                ps.log = Some(Arc::new(logs::fragment(&ps.text, &run, &ps.lines)));
             }
         }
-        // (the kept calls' logs around the scan's: a page kept from the last
-        // build keeps what its routine wrote)
         let call_logs: CallLogs = st
             .call_logs_before
             .iter()
@@ -3165,37 +3100,20 @@ impl Build {
             .chain(&st.call_logs_after)
             .cloned()
             .collect();
-        // (the piece holding `\end` ends the document: the pieces after it
-        // are not in the log; CORE.md: the core is to not run them)
-        // (and in a session, the pieces after it up to the next job's start)
-        let live = live_pieces(&st.p);
+        let posts = st.seq.posts();
         let (log, writes, probes) = {
-            let idx: Vec<usize> = (0..st.p.len()).filter(|&k| live[k]).collect();
-            let frags: Vec<&Frag> = idx.iter().map(|&k| &**st.p[k].log.as_ref().expect("a part")).collect();
-            // (each page the page builder shipped does its whatsits where
-            // its call stands: its `\write`s expanded with the definitions
-            // reaching there)
-            let end = idx.len().checked_sub(1).map_or((0, 0), |j| {
-                (j, st.p[idx[j]].run.as_ref().map_or(0, |r| r.nodes_len()))
+            let frags: Vec<&Frag> = order.iter().map(|&k| &**st.seq.p[k as usize].log.as_ref().expect("a part")).collect();
+            let end = order.len().checked_sub(1).map_or((0, 0), |j| {
+                (j, st.seq.p[order[j] as usize].run.as_ref().map_or(0, |r| r.nodes_len()))
             });
             let places = logs::page_places(&frags, &marks, st.pages.len(), end);
             let mut page_io = Vec::with_capacity(st.pages.len());
             for (j, (pg, at)) in st.pages.iter().zip(&places).enumerate() {
-                let io = match at.map(|(x, i)| (idx.get(x).copied(), i)) {
-                    // (only a page whose body met a whatsit has events)
-                    Some((Some(k), i)) => match st.p[k].run.as_ref() {
+                let io = match at.map(|(x, i)| (order.get(x).copied(), i)) {
+                    Some((Some(k), i)) => match st.seq.p[k as usize].run.as_ref() {
                         Some(r) if bodies[j].io && pg.builder => {
-                            let mut env = JoinEnv {
-                                names: &sh.names,
-                                seq: &sh.seq,
-                                font: &sh.font,
-                                fonts: &sh.fonts,
-                                k,
-                                cut: false,
-                                split: false,
-                                stop: usize::MAX,
-                            };
-                            let r = regen(&mut env, &st.p[k].text, r);
+                            let mut env = JoinEnv { names: &sh.names, font: &sh.font, fonts: &sh.fonts, k, cut: false, split: false, stop: usize::MAX, virt: &sh.virt };
+                            let r = regen(&mut env, &st.seq.p[k as usize].text, r);
                             let pos = crate::pdf::content::write_positions(pg);
                             crate::graph::page_io(&r.chain, i, &mut env, &pg.b, &pos, &mut errors)
                         }
@@ -3205,31 +3123,26 @@ impl Build {
                 };
                 page_io.push(io);
             }
-            let parts: Vec<logs::Part<'_>> = idx
+            let parts: Vec<logs::Part<'_>> = order
                 .iter()
-                .map(|&k| &st.p[k])
-                .map(|ps| logs::Part {
-                    frag: ps.log.as_ref().expect("a part"),
-                    base: ps.base,
-                    post: ps.post.as_deref(),
+                .map(|&k| {
+                    let ps = &st.seq.p[k as usize];
+                    logs::Part { frag: ps.log.as_ref().expect("a part"), base: ps.base as usize, post: posts.get(&k).map(String::as_str) }
                 })
                 .collect();
-            let (log, writes, probes) = logs::replay_probed(
-                logs::gather(&parts, &marks, &call_logs, &st.pages, &page_io),
-                opts.etex,
-            );
-            let probes: Vec<logs::Probe> = probes.into_iter().map(|(x, n, f)| (idx[x], n, f)).collect();
+            let (log, writes, probes) = logs::replay_probed(logs::gather(&parts, &marks, &call_logs, &st.pages, &page_io), opts.etex);
+            let probes: Vec<(PieceId, u32, Vec<(String, String)>)> = probes.into_iter().map(|(x, nd, f)| (order[x], nd, f)).collect();
             (log, writes, probes)
         };
         // (each read of a file the run wrote, against what it had written of
         // it by the reading node; a read that saw something else runs again
-        // from its node, in another round)
-        let mut refuted: Vec<(usize, Key, u32)> = Vec::new();
+        // from its node, in another evaluation)
+        let mut refuted: Vec<(PieceId, Key, u32)> = Vec::new();
         for (k, node, files) in &probes {
-            let Some(r) = st.p[*k].run.as_ref() else { continue };
-            for (key, n, read) in r.all_reads() {
+            let Some(r) = st.seq.p[*k as usize].run.as_ref() else { continue };
+            for (key, nd, read) in r.all_reads() {
                 let Key::File(name) = key else { continue };
-                if n != node {
+                if nd != node {
                     continue;
                 }
                 let now = match files.iter().find(|f| *f.0 == **name) {
@@ -3237,83 +3150,63 @@ impl Build {
                     None => sh.names.given.file(name).map_or(Val::Void, Val::Bytes),
                 };
                 if now != *read {
-                    refuted.push((*k, key.clone(), *n));
+                    refuted.push((*k, key.clone(), *nd));
                 }
                 self.file_guess.insert(name.clone(), now.clone());
-                sh.names.set_fold_value(key, (*k as u32, *n), now);
+                sh.names.set_fold_value(key, (*k, *nd), now);
             }
         }
-        self.fold_vals = fold_vals_by_id(&sh.names, &st.p);
-        if !refuted.is_empty() {
-            if last {
-                errors.push("the files read back did not settle".into());
-            } else {
-                for (k, key, n) in refuted {
-                    dirty_from(&mut st.p[k].dirty, key, n);
-                }
-                self.keep_round(st);
-                return None;
-            }
-        }
+        self.fold_vals.clone_from(&sh.names.fold_vals.read().expect("fold values"));
         // (each piece's file and lines before it, for `source_place`)
-        {
-            let mut file: Vec<Option<Arc<str>>> = Vec::with_capacity(st.p.len());
-            for ps in &st.p {
-                let f = match ps.entry {
-                    Entry::Start => None,
-                    Entry::File(c) => st.p[c].got.input.as_ref().map(|x| x.name.clone()),
-                    Entry::Rest(c, _) | Entry::After(c, _) => file.get(c).cloned().flatten(),
+        self.places = order
+            .iter()
+            .map(|&k| {
+                let ps = &st.seq.p[k as usize];
+                let mut l = ps.list;
+                let file = loop {
+                    let li = &st.seq.lists[l as usize];
+                    match (&li.kind, li.caller) {
+                        (ListKind::Recut, Some(c)) => l = st.seq.p[c as usize].list,
+                        _ => break li.file_name().cloned(),
+                    }
                 };
-                file.push(f);
-            }
-            self.places = st.p.iter().zip(file).map(|(ps, f)| (ps.id, (f, ps.base as u32))).collect();
-        }
+                (k, (file, ps.base))
+            })
+            .collect();
         // (the files read, each once, in document order, where found)
         let mut files_read: Vec<(String, Option<String>)> = Vec::new();
-        {
-            let mut seen: FxSet<Arc<str>> = FxSet::default();
-            for (k, ps) in st.p.iter().enumerate() {
-                let Some(r) = ps.run.as_ref().filter(|_| live[k]) else { continue };
-                let mut fr: Vec<(u32, &Arc<str>, bool)> = r
-                    .all_reads()
-                    .iter()
-                    .filter_map(|(key, n, v)| match key {
-                        Key::File(name) => Some((*n, name, matches!(v, Val::Bytes(_)))),
-                        _ => None,
-                    })
-                    .collect();
-                fr.sort_by_key(|x| x.0);
-                for (_, name, found) in fr {
-                    if seen.insert(name.clone()) {
-                        files_read.push((name.to_string(), found.then(|| sh.names.given.path(name).to_string())));
-                    }
+        let mut read_names: FxSet<Arc<str>> = FxSet::default();
+        for &k in &order {
+            let Some(r) = st.seq.p[k as usize].run.as_ref() else { continue };
+            let mut fr: Vec<(u32, &Arc<str>, bool)> = r
+                .all_reads()
+                .iter()
+                .filter_map(|(key, n, v)| match key {
+                    Key::File(name) => Some((*n, name, matches!(v, Val::Bytes(_)))),
+                    _ => None,
+                })
+                .collect();
+            fr.sort_by_key(|x| x.0);
+            for (_, name, found) in fr {
+                if read_names.insert(name.clone()) {
+                    files_read.push((name.to_string(), found.then(|| sh.names.given.path(name).to_string())));
                 }
             }
         }
-        for (k, ps) in st.p.iter().enumerate() {
+        for &k in &order {
+            let ps = &st.seq.p[k as usize];
             let r = ps.run.as_ref().expect("every piece ran");
-            if live[k] {
-                for e in &r.errors {
-                    errors.push(format!("piece {k}: {e}"));
-                }
+            for e in &r.errors {
+                errors.push(format!("piece {}: {e}", dense[&k]));
             }
             if ps.runs == 0 {
                 st.stats.kept += 1;
             }
             st.stats.commands += r.nodes_len() as u64;
             if opts.dump {
-                let mut env = JoinEnv {
-                    names: &sh.names,
-                    seq: &sh.seq,
-                    font: &sh.font,
-                    fonts: &sh.fonts,
-                    k,
-                    cut: false,
-                    split: false,
-                    stop: usize::MAX,
-                };
+                let mut env = JoinEnv { names: &sh.names, font: &sh.font, fonts: &sh.fonts, k, cut: false, split: false, stop: usize::MAX, virt: &sh.virt };
                 let r = regen(&mut env, &ps.text, r);
-                dump_piece(&mut dump, k, ps, &r, &sh.names.cs);
+                dump_piece(&mut dump, dense[&k], ps, &r, &sh.names.cs, &st.seq);
             }
         }
         if let Some(sc) = &st.scan {
@@ -3321,24 +3214,19 @@ impl Build {
                 errors.push(format!("page builder: {e}"));
             }
         }
-        if last && st.restructure {
-            errors.push("the sequence of pieces did not settle (\\input)".into());
-        }
-
         if opts.dump {
             for (i, pg) in st.pages.iter().enumerate() {
                 let _ = writeln!(dump, "page {}: {} items", i + 1, pg.b.list.len());
             }
         }
-        let jobs = job_of(st.p.iter().map(|ps| ps.text.first() == Some(&crate::graph::JOB)));
+        let jobs = job_of(order.iter().map(|&k| st.seq.p[k as usize].text.first() == Some(&crate::graph::JOB)));
         let mut job_pages = vec![0usize; jobs.last().map_or(1, |j| j + 1)];
         for o in &st.orgs {
-            let j = jobs.get(o.call.0 as usize).copied().unwrap_or(0);
+            let j = dense.get(&o.call.0).and_then(|&d| jobs.get(d)).copied().unwrap_or(0);
             job_pages[j] += 1;
         }
         st.stats.time_join = t_join.elapsed();
         st.stats.pages = st.pages.len();
-        st.stats.wall = t0.elapsed();
         let mut fold_defs = std::mem::take(&mut st.fold_defs);
         fold_defs.extend(unreached);
         self.fold = FoldKept {
@@ -3346,58 +3234,99 @@ impl Build {
             defs: fold_defs,
             memo: std::mem::take(&mut st.memo_new),
         };
-        // (a piece quiet since it last ran in an edit drops its nodes now)
+        // (the loop-back: what was written and is read again)
+        let mut again_why: Option<&str> = None;
+        if !refuted.is_empty() {
+            if last {
+                errors.push("the files read back did not settle".into());
+            } else {
+                self.refuted = refuted;
+                again_why = Some("read-backs");
+            }
+        }
+        if again_why.is_none()
+            && let Some(a) = pdf_answers.as_ref()
+            && *a != *self.pdf.answers
+        {
+            if self.pdf.rounds < PDF_ROUNDS && !last {
+                self.pdf.rounds += 1;
+                again_why = Some("pdf");
+            } else {
+                errors.push(format!("! TeX capacity exceeded, sorry [pdf read-back rounds={PDF_ROUNDS}]."));
+            }
+        }
+        if let Some(a) = pdf_answers {
+            self.pdf.answers = Arc::new(a);
+        }
+        if again_why.is_none() && self.converge && !last && self.file_rounds < FILE_ROUNDS {
+            let xetex = self.xe.is_some();
+            let mut changed = false;
+            for (name, text) in &writes {
+                if !read_names.contains(name.as_str()) {
+                    continue;
+                }
+                let bytes: Vec<u8> = if xetex {
+                    text.as_bytes().to_vec()
+                } else {
+                    text.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?')).collect()
+                };
+                let now = sh.names.given.file(name);
+                if now.as_deref() != Some(&bytes[..]) {
+                    Arc::make_mut(&mut self.files).insert(Arc::from(name.as_str()), Arc::from(bytes));
+                    changed = true;
+                }
+            }
+            if changed {
+                self.file_rounds += 1;
+                again_why = Some("files");
+            }
+        }
+        let quiet_lean = again_why.is_none() && self.lean;
         let build_no = self.builds;
-        let lean = self.lean;
-        self.pieces =
-            st.p.into_iter()
-                .map(|ps| {
-                    let quiet = lean && ps.hot_until < build_no;
-                    let (run, log) = match ps.run {
-                        Some(r) if quiet && r.lean.is_none() => {
-                            (Some(Arc::new(r.leaned(&ps.text))), None)
-                        }
-                        r => (r, ps.log),
-                    };
-                    Kept {
-                        id: ps.id,
-                        text: ps.text,
-                        run,
-                        lines: ps.lines,
-                        srcs: ps.srcs,
-                        log,
-                        pending: None,
-                        got: ps.got,
-                        hot_until: ps.hot_until,
-                    }
-                })
-                .collect();
-        // (the edges are kept until the next build: no spare capacity)
+        if quiet_lean {
+            for &k in &order {
+                let ps = &mut st.seq.p[k as usize];
+                if ps.hot_until < build_no
+                    && let Some(r) = ps.run.clone()
+                    && r.lean.is_none()
+                {
+                    ps.run = Some(Arc::new(r.leaned(&ps.text)));
+                    ps.log = None;
+                }
+            }
+        }
         for (_, m) in self.readers.iter_mut() {
             m.shrink_to_fit();
+        }
+        self.pieces = order
+            .iter()
+            .map(|&k| {
+                let ps = &st.seq.p[k as usize];
+                Kept { id: k, text: ps.text.clone(), run: ps.run.clone(), lines: ps.lines.clone() }
+            })
+            .collect();
+        self.dense = dense;
+        // (the pieces the evaluation ended with)
+        st.stats.pieces = self.pieces.len();
+        if std::env::var_os("PHITEX_STRUCT").is_some() {
+            let all: Vec<String> = st.seq.labels().ids().iter().map(|&k| { let ps = &st.seq.p[k as usize]; format!("{k}:{:?}{}{}{}", ps.status, if ps.muted { "M" } else { "" }, if ps.alive { "" } else { "D" }, if ps.got.ends { "E" } else { "" }) }).collect();
+            eprintln!("end of evaluation: {} live; {}", self.pieces.len(), all.join(" "));
         }
         self.pages = st.pages.into_iter().zip(bodies).collect();
         self.page_orgs = st.orgs;
         self.marks = marks;
         self.call_logs = call_logs;
         self.pdf.tail = st.pdf_tail;
-        // (pdfTeX's read-backs: the fold answered otherwise than the nodes
-        // read — another round, the readers of the answers that changed
-        // run again; CORE.md, "pdfTeX's read-backs")
-        if let Some(a) = pdf_answers
-            && a != *self.pdf.answers
-        {
-            if self.pdf.rounds < PDF_ROUNDS {
-                self.pdf.rounds += 1;
-                self.pdf.answers = Arc::new(a);
-                self.carried.absorb(st.stats);
-                return None;
-            }
-            errors.push(format!("! TeX capacity exceeded, sorry [pdf read-back rounds={PDF_ROUNDS}]."));
+        for ps in &mut st.seq.p {
+            ps.prev = None;
+        }
+        self.seq = st.seq;
+        if again_why.is_some() {
+            return Eval::Again(st.stats);
         }
         st.stats.pdf_rounds = self.pdf.rounds;
         let origins = self.pages.iter().map(|(_, b)| b.pdf.as_ref().map_or_else(Vec::new, |p| p.origins.0.clone())).collect();
-        Some(Output {
+        Eval::Done(Box::new(Output {
             origins,
             dvi: out,
             pdf,
@@ -3408,634 +3337,38 @@ impl Build {
             writes,
             job_pages,
             files_read,
-        })
-    }
-}
-
-/// The PDF file of the pages (`pdf::fold`): the pages' streams (in
-/// `bodies`, made again where the fold says), what the job's end reads
-/// (the definitions reaching the end of piece `last`, the place before
-/// the next), the files the fold
-/// reads (given, in the input directories, then TeX Live's).
-/// The files the PDF fold reads: given, in the input directories, then
-/// TeX Live's.
-struct PdfFiles<'a> {
-    names: &'a Names,
-    font: &'a Arc<Font>,
-    /// The TFM files `\font` can load (a virtual font's local fonts).
-    fonts: &'a Arc<FontFiles>,
-    /// The end of the job.
-    at: Pos,
-}
-
-impl crate::pdf::fold::Files for PdfFiles<'_> {
-    fn get(&mut self, name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
-        self.names.given.pdf_found(name)
-    }
-    fn font_attr(&mut self, key: &str) -> Option<crate::pdf::what::Text> {
-        match self.names.reaching(&Key::FontAttr(Arc::from(key)), self.at, self.font).1 {
-            Val::Name(s) if !s.is_empty() => Some(s.chars().map(|c| u32::from(c).min(255) as u8).collect()),
-            _ => None,
-        }
-    }
-    fn vf(&mut self, name: &str) -> Option<Arc<[u8]>> {
-        match &self.names.given.finder {
-            Some((f, prog)) => f.find(name, KpseFormat::Vf, prog).and_then(|p| f.read(&p)),
-            None => crate::tfm::vf_file(name),
-        }
-    }
-    fn tfm(&mut self, name: &str) -> Option<Arc<[u8]>> {
-        match &self.names.given.finder {
-            Some((f, prog)) => f.find(name, KpseFormat::Tfm, prog).and_then(|p| f.read(&p)),
-            None => self.fonts.get(name),
-        }
-    }
-    fn glyph_unicode(&mut self, name: &str) -> Option<crate::pdf::font::unicode::Uni> {
-        use crate::pdf::font::unicode::Uni;
-        match self.names.reaching(&Key::GlyphUnicode(Arc::from(name)), self.at, self.font).1 {
-            Val::Int(c) => Some(Uni::Code(i64::from(c))),
-            Val::Name(s) => Some(Uni::Seq(s)),
-            _ => None,
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn pdf_file(
-    names: &Names,
-    font: &Arc<Font>,
-    fonts: &Arc<FontFiles>,
-    last: usize,
-    numbers: &dvi::Numbers,
-    ship_fonts: Vec<u32>,
-    pages: &[Page],
-    orgs: &[PageOrg],
-    tail: &crate::page::PdfEvents,
-    bodies: &mut [Arc<dvi::Body>],
-) -> crate::pdf::fold::Written {
-    use crate::val::{IntPar, TokPar};
-    let at = (last as u32 + 1, 0);
-    let read = |key: &Key| names.reaching(key, at, font).1;
-    let int = |p: IntPar| match read(&Key::IntPar(p)) {
-        Val::Int(i) => i,
-        _ => 0,
-    };
-    let esc = int(IntPar::Escapechar);
-    let text = |p: TokPar| match read(&Key::TokPar(p)) {
-        Val::Toks(t) if !t.is_empty() => {
-            let cs = &names.cs;
-            Some(Arc::from(crate::pdf::toks_text(&t, &|n| cs.name(n), esc, &mut |c| read(&Key::Cat(c)) == Val::Cat(11))))
-        }
-        _ => None,
-    };
-    let end = crate::pdf::fold::End {
-        compress_level: int(IntPar::Pdfcompresslevel),
-        gen_tounicode: int(IntPar::Pdfgentounicode),
-        omit_charset: int(IntPar::Pdfomitcharset),
-        info_omit_date: int(IntPar::Pdfinfoomitdate),
-        suppress_ptex_info: int(IntPar::Pdfsuppressptexinfo),
-        ptex_use_underscore: int(IntPar::Pdfptexuseunderscore),
-        omit_info_dict: int(IntPar::Pdfomitinfodict),
-        pages_attr: text(TokPar::Pdfpagesattr),
-        date: crate::pdf::pdf_date(names.given.pdf_date),
-        file_name: format!("{}.pdf", names.given.job),
-        banner: crate::graph::PDFTEX_BANNER.to_string(),
-        params: Arc::new(crate::pdf::read_params(&mut |k| read(k))),
-        page_width: match read(&Key::DimenPar(crate::val::DimenPar::Pdfpagewidth)) {
-            Val::Int(i) => i,
-            _ => 0,
-        },
-        page_height: match read(&Key::DimenPar(crate::val::DimenPar::Pdfpageheight)) {
-            Val::Int(i) => i,
-            _ => 0,
-        },
-        ship_fonts,
-    };
-    let mut pdf_bodies: Vec<Arc<crate::pdf::content::PageBody>> =
-        bodies.iter().map(|b| b.pdf.clone().unwrap_or_else(|| Arc::new(crate::pdf::content::empty()))).collect();
-    let events: Vec<&crate::page::PdfEvents> = orgs.iter().map(|o| &o.pdf).chain(std::iter::once(tail)).collect();
-    let w = crate::pdf::fold::assemble(pages, &mut pdf_bodies, &events, numbers, &end, &mut PdfFiles { names, font, fonts, at });
-    for (b, p) in bodies.iter_mut().zip(pdf_bodies) {
-        if !b.pdf.as_ref().is_some_and(|x| Arc::ptr_eq(x, &p)) {
-            let mut nb = dvi::Body { bytes: Vec::new(), fonts: Vec::new(), fixed: None, max_push: 0, io: p.io, pdf: None };
-            nb.pdf = Some(p);
-            *b = Arc::new(nb);
-        }
-    }
-    w
-}
-
-/// The join's reads (a page's `\write`s expanded where it was shipped):
-/// every piece has run, nothing parks.
-struct JoinEnv<'a> {
-    names: &'a Names,
-    seq: &'a Sequence,
-    font: &'a Arc<Font>,
-    fonts: &'a Arc<FontFiles>,
-    k: usize,
-    /// The run ran up to a cut the cutter missed: so does its run again.
-    cut: bool,
-    /// The run ended at an `\input` whose file is pieces: so does its run
-    /// again.
-    split: bool,
-    /// The run stopped here, where a text it was joined from begins: so
-    /// does its run again.
-    stop: usize,
-}
-
-/// A lean piece's run with its nodes again (`graph::Lean`): run again,
-/// reading only, over the names index as it is — for the join's page
-/// events and the dump.
-fn regen(env: &mut JoinEnv<'_>, text: &[char], r: &Arc<Run>) -> Arc<Run> {
-    if r.lean.is_none() {
-        return r.clone();
-    }
-    let entry = r.entry();
-    env.cut = r.ends_at_cut();
-    env.split = r.input().is_some();
-    env.stop = if env.cut { r.out().pos } else { usize::MAX };
-    Arc::new(run_piece(text, env, None, &[], Some(&entry)))
-}
-
-impl Env for JoinEnv<'_> {
-    fn cs(&self) -> &Arc<CsTable> {
-        &self.names.cs
-    }
-
-    fn limits(&self) -> crate::print::Limits {
-        self.names.given.limits
-    }
-
-    fn interaction_option(&self) -> Option<i32> {
-        self.names.given.interaction_option
-    }
-
-    fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
-        self.fonts.get(name)
-    }
-
-    fn xetex(&self) -> bool {
-        self.names.given.xe.is_some()
-    }
-
-    fn native_font(&mut self, name: &str, size: i32, tracing: i32) -> crate::native::Loaded {
-        self.names.given.native_font(name, size, tracing)
-    }
-
-    // (run again as it ran: up to its cut)
-    fn cut_ok(&mut self) -> bool {
-        self.cut
-    }
-
-    fn split_inputs(&mut self) -> bool {
-        self.split
-    }
-
-    fn stop_at(&mut self, pos: usize) -> bool {
-        pos == self.stop
-    }
-
-    fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32) {
-        let (def, val, lo, hi) = self.names.reaching(key, (self.k as u32, node), self.font);
-        (
-            val,
-            def.map_or(Src::Initial, |d| Src::Piece(self.seq.id_at(d))),
-            lo,
-            hi,
-        )
-    }
-
-    // (as the run read them: the folds' values its reads were validated
-    // against)
-    fn folds(&mut self, key: &Key) -> bool {
-        matches!(key, Key::Page(_))
-    }
-
-    fn fold_read(&mut self, key: &Key, node: u32) -> Option<Val> {
-        self.names.fold_value(key, (self.k as u32, node), self.font)
-    }
-
-    fn file(&mut self, name: &str) -> Option<Arc<[u8]>> {
-        self.names.given.file(name)
-    }
-
-    fn file_path(&mut self, name: &str) -> Arc<str> {
-        self.names.given.path(name)
-    }
-
-    fn jobname(&mut self) -> Arc<str> {
-        self.names.given.job.clone()
-    }
-
-    fn line_base(&mut self) -> i32 {
-        self.names.given.base(self.k) as i32
-    }
-}
-
-/// xdvipdfmx's finder in [`Build::xdv_pdf`], one more [`Kpse`]: the
-/// document's files first (those given in memory, then the input
-/// directories, as the picture specials name them, `./NAME` in the
-/// first), then the build's finder.
-struct DocFiles {
-    mem: Arc<FxMap<Arc<str>, Arc<[u8]>>>,
-    dirs: Arc<Vec<PathBuf>>,
-    inner: Arc<dyn crate::tfm::Kpse>,
-}
-
-impl crate::tfm::Kpse for DocFiles {
-    fn find(&self, name: &str, format: crate::tfm::KpseFormat, prog: &str) -> Option<String> {
-        let bare = name.strip_prefix("./").unwrap_or(name);
-        if self.mem.contains_key(bare) {
-            return Some(format!("./{bare}"));
-        }
-        if let Some(p) = self.dirs.iter().map(|d| d.join(bare)).find(|p| p.is_file()) {
-            return Some(p.to_string_lossy().into_owned());
-        }
-        self.inner.find(name, format, prog)
-    }
-
-    fn read(&self, path: &str) -> Option<Arc<[u8]>> {
-        let bare = path.strip_prefix("./").unwrap_or(path);
-        if let Some(b) = self.mem.get(bare) {
-            return Some(b.clone());
-        }
-        if std::path::Path::new(bare).is_relative()
-            && let Some(b) = self.dirs.iter().find_map(|d| std::fs::read(d.join(bare)).ok())
-        {
-            return Some(Arc::from(b));
-        }
-        self.inner.read(path)
-    }
-}
-
-/// Which pieces are the document's: in each job, those up to the first
-/// holding `\end` or `\dump` (TeX stops reading there; CORE.md: the core
-/// is to not run the others).
-fn live_pieces(p: &[PState]) -> Vec<bool> {
-    let mut live = vec![true; p.len()];
-    let mut ended = false;
-    for (k, ps) in p.iter().enumerate() {
-        if ps.text.first() == Some(&crate::graph::JOB) {
-            ended = false;
-        }
-        live[k] = !ended;
-        if ps.run.as_ref().is_some_and(|r| crate::graph::ends_document(r)) {
-            ended = true;
-        }
-    }
-    live
-}
-
-/// The job of each piece of a session (0 for all of a document that is
-/// not one).
-fn job_of(texts: impl Iterator<Item = bool>) -> Vec<usize> {
-    let mut j = 0usize;
-    let mut seen = false;
-    texts
-        .map(|starts| {
-            if starts && seen {
-                j += 1;
-            }
-            seen = true;
-            j
-        })
-        .collect()
-}
-
-fn dump_piece(out: &mut String, k: usize, ps: &PState, r: &Run, cs: &CsTable) {
-    let how = if ps.runs == 0 { "kept" } else { "ran" };
-    let _ = writeln!(
-        out,
-        "piece {k} (id {}) [{how}; {} nodes, {} run]: {} reads from before it, {} definitions after it, {} paragraphs; entered {:?}; {:?}",
-        ps.id,
-        r.nodes_len(),
-        r.ran,
-        r.read_count(),
-        r.exports.len(),
-        r.paras.len(),
-        ps.entry,
-        ps.text.iter().take(40).collect::<String>()
-    );
-    for (i, n) in r.chain.nodes.iter().enumerate() {
-        let _ = write!(out, "  n{i} {:?} {}", n.kind, Shown(&n.cmd, cs));
-        for rd in n.reads.iter() {
-            match rd.src {
-                Src::Node(d) => {
-                    let _ = write!(out, " | reads {} = {} from n{d}", Shown(&rd.key, cs), Shown(&rd.val, cs));
-                }
-                Src::Piece(p) => {
-                    let _ = write!(out, " | reads {} = {} from piece id {p}", Shown(&rd.key, cs), Shown(&rd.val, cs));
-                }
-                Src::Initial => {
-                    let _ = write!(out, " | reads {} = {} initial", Shown(&rd.key, cs), Shown(&rd.val, cs));
-                }
-            }
-        }
-        if let Some(phi) = n.phi() {
-            let _ = write!(out, " | φ test={}", phi.test);
-            for (key, after, before) in &phi.keys {
-                let _ = write!(out, " | {} = φ({} | {})", Shown(key, cs), Shown(after, cs), Shown(before, cs));
-            }
-        }
-        for d in n.defs() {
-            let _ = write!(
-                out,
-                " | defines {}{} = {}",
-                if d.global { "global " } else { "" },
-                Shown(&d.key, cs),
-                Shown(&d.val, cs)
-            );
-        }
-        out.push('\n');
-    }
-}
-
-/// One scheduler event, recorded when `PHITEX_SCHED` names a file
-/// (measurement only: times and counts, written at the round's end).
-#[derive(Clone, Copy)]
-struct Ev {
-    /// The worker; the kind: 0 a piece's run (`run_and_install`), 5 idle
-    /// (waiting for work), 6 parked (a read waiting for a definition), 7 a
-    /// pick, 8 a settled run that changes the sequence (`c`: what differs,
-    /// `Expect::differs`; `a`: 1 a join, which ends the round at once), 9 an
-    /// install's steps under the lock (`t`: the lock taken, the reads
-    /// validated again, the edges, the exports, the marks, the entries;
-    /// `a`: the reads), 16 + the task's kind a worker's task (16 run, 17 line
-    /// breaking, 18 the scan, 19 shipping, 20 the log); the piece.
-    wid: u16,
-    kind: u8,
-    k: u32,
-    /// Nanoseconds since the round began. A run: begun, reading begun (its
-    /// setup's lock taken), reading done, the install's lock taken, the
-    /// install done, the install's lock asked for. A task: begun, done, the
-    /// scheduler's lock taken again. Idle, parked, a pick: begun, done.
-    t: [u64; 6],
-    /// A run: the nodes it ran, the nodes it holds, its outcome (0 settled,
-    /// 1 stale: to run again, 2 abandoned, 3 kept again without running). A
-    /// pick: the pieces ready to start (at most 255), the tasks in
-    /// progress, the runs parked; and 1 if it found a task.
-    a: u64,
-    b: u64,
-    c: u32,
-    /// A run: its reads of names from before it, and their time.
-    d: u64,
-    e: u64,
-}
-
-impl Shared {
-    /// Nanoseconds since the round began (0 when not measuring).
-    fn now(&self) -> u64 {
-        if self.sched.is_some() {
-            u64::try_from(self.t_base.elapsed().as_nanos()).unwrap_or(u64::MAX)
-        } else {
-            0
-        }
-    }
-
-    fn ev(&self, e: Ev) {
-        if let Some(s) = &self.sched {
-            s.lock().expect("sched").push(e);
-        }
-    }
-}
-
-/// The pieces ready to start now (at most 255): what a pick chooses from.
-fn ready_count(g: &State, sh: &Shared) -> u64 {
-    let speculate = sh.opts.reads == Reads::Speculate;
-    g.unstarted.iter().filter(|&&k| entry_ready(g, k, speculate && !g.p[k].suspend)).take(255).count() as u64
-}
-
-/// Appends a round's reruns to the file `PHITEX_RERUN` names: a line
-/// `R build pieces`, then per settled piece marked to run again `M k len
-/// name from-node source old new`, the source `carried` (the round began
-/// with it), `piece k` (piece k's export), `fold k n` (a definition
-/// between piece k's nodes n and n+1: the page builder's, an output
-/// routine's) or `page` (the page builder's quantity as the scan has it);
-/// the values as `Debug` text, cut to 100 characters.
-fn write_reruns(notes: &[RerunNote], names: &Names, build_no: u64, pieces: usize) {
-    use std::io::Write as _;
-    let Some(path) = std::env::var_os("PHITEX_RERUN") else { return };
-    let cut = |v: Option<&Val>| -> String {
-        v.map_or_else(|| "-".to_string(), |v| format!("{v:?}").replace(['\t', '\n'], " ").chars().take(100).collect())
-    };
-    let mut s = String::new();
-    let _ = writeln!(s, "R\t{build_no}\t{pieces}");
-    for n in notes {
-        let name = match &n.key {
-            Key::Cs(c) => format!("\\{}", names.cs.name(*c)),
-            k => format!("{k:?}"),
-        };
-        let (src, new) = match &n.src {
-            MarkSrc::Carried => ("carried".to_string(), None),
-            MarkSrc::At((p, END), v) => (format!("piece {p}"), v.as_ref()),
-            MarkSrc::At((p, i), v) => (format!("fold {p} {i}"), v.as_ref()),
-            MarkSrc::Page(v) => ("page".to_string(), Some(v)),
-        };
-        let _ = writeln!(
-            s,
-            "M\t{}\t{}\t{}\t{}\t{src}\t{}\t{}",
-            n.k,
-            n.len,
-            name.replace(['\t', '\n'], " "),
-            n.from,
-            cut(n.old.as_ref()),
-            cut(new)
-        );
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = f.write_all(s.as_bytes());
-    }
-}
-
-/// Appends the slow nodes' notes to the file `PHITEX_SCHED` names.
-fn write_notes(notes: &[String]) {
-    use std::io::Write as _;
-    let Some(path) = std::env::var_os("PHITEX_SCHED") else { return };
-    if notes.is_empty() {
-        return;
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        for n in notes {
-            let _ = writeln!(f, "{n}");
-        }
-    }
-}
-
-/// Appends the last round's dependencies to the file `PHITEX_SCHED`
-/// names (measuring: the critical path with hindsight): per piece a line
-/// `G k entry-deps ran nodes ns ran` (the pieces its entry state came
-/// from, when it is not the state assumed at its cut; the reading time and
-/// nodes run of all its installed runs) and per read from before it a
-/// line `D k piece inner name init` (the piece whose definition answered
-/// it; `inner` 1: a definition between that piece's nodes, the page
-/// builder's or an output routine's; `init` 1: the value read is the one
-/// before any definition).
-fn write_deps(
-    st: &State,
-    seq: &Sequence,
-    names: &Names,
-    font: &Arc<Font>,
-    times: &FxMap<PieceId, (u64, u64)>,
-    cmds: &FxMap<PieceId, Vec<String>>,
-) {
-    use std::io::Write as _;
-    let cs = &names.cs;
-    let Some(path) = std::env::var_os("PHITEX_SCHED") else { return };
-    let mut s = String::new();
-    for (k, ps) in st.p.iter().enumerate() {
-        let Some(run) = &ps.run else { continue };
-        let entry: Vec<usize> = match ps.entry {
-            Entry::Start => Vec::new(),
-            Entry::File(c) => vec![c],
-            Entry::Rest(c, l) => std::iter::once(c).chain(l).collect(),
-            Entry::After(q, c) => {
-                if assumed_entry(&st.p, c).is_some_and(|a| run.entry() == a) {
-                    Vec::new()
-                } else {
-                    vec![q]
-                }
-            }
-        };
-        let e: Vec<String> = entry.iter().map(ToString::to_string).collect();
-        let (ns, ran) = times.get(&ps.id).copied().unwrap_or((0, 0));
-        let _ = writeln!(s, "G\t{k}\t{}\t{}\t{}\t{ns}\t{ran}", e.join(","), run.ran, run.nodes_len());
-        for i in 0..run.read_count() {
-            let Some(&src) = ps.srcs.get(i) else { continue };
-            let Some(pos) = seq.pos_of(src) else { continue };
-            let key = run.read_at(i).0;
-            let name = match key {
-                Key::Cs(n) => format!("\\{}", cs.name(*n)),
-                _ => format!("{key:?}"),
-            };
-            // (whether every value it read is the name's value before any
-            // definition, the format's or IniTeX's: what a cold build's
-            // prediction of no earlier write gets right)
-            let init = names.initial(key, font);
-            let vals = run.values_read(key);
-            let same = vals.iter().all(|x| x.2.seen_as(&init));
-            // (the value's content, and the one before any definition, as
-            // hashes of their text: a reader of a value depends only on the
-            // first piece that left the name at it)
-            let vh = vals.first().map_or(0, |x| crate::hash::hash_of(&format!("{:?}", x.2)));
-            let ih = crate::hash::hash_of(&format!("{init:?}"));
-            let _ = writeln!(
-                s,
-                "D\t{k}\t{}\t{}\t{}\t{}\t{vh}\t{ih}\t{}",
-                pos.0,
-                u8::from(pos.1 != END),
-                name.replace(['\t', '\n'], " "),
-                u8::from(same),
-                cmds.get(&ps.id).and_then(|v| v.get(i)).map_or("", String::as_str).replace(['\t', '\n'], " ")
-            );
-        }
-        for (key, val) in &run.exports {
-            let name = match key {
-                Key::Cs(n) => format!("\\{}", cs.name(*n)),
-                _ => format!("{key:?}"),
-            };
-            let _ = writeln!(s, "X\t{k}\t{}\t{}", name.replace(['\t', '\n'], " "), crate::hash::hash_of(&format!("{val:?}")));
-        }
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = f.write_all(s.as_bytes());
-    }
-}
-
-/// Appends a round's events to the file `PHITEX_SCHED` names, as text: a
-/// line for the round, one per piece (its runs, the nodes and text of its
-/// last run) and one per event (`Ev`'s fields in order).
-fn write_sched(ev: &[Ev], st: &State, threads: usize, build_no: u64, wall: Duration, waits: (u64, u64)) {
-    use std::io::Write as _;
-    let Some(path) = std::env::var_os("PHITEX_SCHED") else { return };
-    let mut s = String::new();
-    let _ = writeln!(
-        s,
-        "R\t{build_no}\t{threads}\t{}\t{}\t{}\t{}\t{}\t{}",
-        st.p.len(),
-        wall.as_nanos(),
-        ev.len(),
-        waits.0,
-        waits.1,
-        st.stats.time_setup.as_nanos()
-    );
-    for (k, ps) in st.p.iter().enumerate() {
-        let nodes = ps.run.as_ref().map_or(0, |r| r.nodes_len());
-        let _ = writeln!(s, "P\t{k}\t{}\t{nodes}\t{}", ps.runs, ps.text.len());
-    }
-    for e in ev {
-        let _ = writeln!(
-            s,
-            "E\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            e.wid, e.kind, e.k, e.t[0], e.t[1], e.t[2], e.t[3], e.t[4], e.a, e.b, e.c, e.t[5], e.d, e.e
-        );
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = f.write_all(s.as_bytes());
+        }))
     }
 }
 
 fn lock(sh: &Shared) -> MutexGuard<'_, State> {
-    if sh.sched.is_none() {
-        return sh.state.lock().expect("state");
-    }
-    let t = sh.now();
-    let g = sh.state.lock().expect("state");
-    sh.lock_wait.fetch_add(sh.now() - t, Ordering::Relaxed);
-    sh.lock_n.fetch_add(1, Ordering::Relaxed);
-    g
+    sh.state.lock().expect("state")
 }
 
 fn worker(sh: &Shared, id: usize) {
     let mut g = lock(sh);
-    // (the parked runs' generation when this idle worker last looked)
     let mut stall_seen: Option<u64> = None;
-    let wid = u16::try_from(id).unwrap_or(u16::MAX);
     loop {
         if g.done {
             return;
         }
-        let tp = sh.now();
-        let ready = if sh.sched.is_some() { ready_count(&g, sh) } else { 0 };
-        let picked = pick(&mut g, sh);
-        if sh.sched.is_some() {
-            let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
-            sh.ev(Ev {
-                wid,
-                kind: 7,
-                k: 0,
-                t: [tp, sh.now(), 0, 0, 0, 0],
-                a: ready,
-                b: g.inflight as u64,
-                c: u32::try_from(parked).unwrap_or(u32::MAX) << 1 | u32::from(picked.is_some()),
-                d: 0,
-                e: 0,
-            });
-        }
-        let Some(task) = picked else {
+        let Some(task) = pick(&mut g, sh) else {
             if finished(&g) {
-                // (a round ends with output only on the layout its runs
-                // say: `settle` laid it out again else)
-                debug_assert!(
-                    g.restructure || (0..g.p.len()).all(|k| g.p[k].got.same(&g.p[k].expect)),
-                    "a round ends with output on a layout a run refutes"
-                );
                 g.done = true;
                 sh.cv.notify_all();
                 return;
             }
-            // (nothing to do, nothing running, the round not finished:
+            // (nothing to do, nothing running, the evaluation not finished:
             // nothing will ever change that — or every run in progress is
             // parked and no definition came since the last look)
-            let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
+            let parked = sh.parked_n.load(Ordering::Acquire);
             let gen_now = sh.generation.load(Ordering::Acquire);
             if g.inflight == 0 || (parked == g.inflight && stall_seen == Some(gen_now)) {
-                stall(&mut g, sh, parked, "the scheduler stalled");
+                stall(&mut g, sh, "the scheduler stalled");
                 return;
             }
-            let ti = sh.now();
             let (g2, timeout) = sh.cv.wait_timeout(g, STALL_CHECK).expect("state");
             g = g2;
-            sh.ev(Ev { wid, kind: 5, k: 0, t: [ti, sh.now(), 0, 0, 0, 0], a: 0, b: 0, c: 0, d: 0, e: 0 });
             stall_seen = (timeout.timed_out() && g.inflight > 0).then_some(gen_now);
             continue;
         };
@@ -4043,31 +3376,11 @@ fn worker(sh: &Shared, id: usize) {
         g.stats.tasks[id] += 1;
         g.inflight += 1;
         drop(g);
-        let (tk, tto) = match &task {
-            Task::Run(k, _) | Task::Break(k, ..) | Task::Ship(k, ..) | Task::Log(k, ..) => (*k, 0),
-            Task::Scan { from, to, .. } => (*from, *to as u64),
-        };
-        let t0 = sh.now();
         let t = Instant::now();
-        let (work, kind) = execute(sh, task, wid);
+        let (work, kind) = execute(sh, task);
         let dt = t.elapsed();
-        let t1 = sh.now();
         g = lock(sh);
-        sh.ev(Ev {
-            wid,
-            kind: 16 + kind,
-            k: u32::try_from(tk).unwrap_or(u32::MAX),
-            t: [t0, t1, sh.now(), 0, 0, 0],
-            a: work,
-            b: tto,
-            c: 0,
-            d: 0,
-            e: 0,
-        });
         g.inflight -= 1;
-        if g.restructure && g.inflight == 0 {
-            sh.cv.notify_all();
-        }
         g.stats.work[id] += work;
         match kind {
             0 => g.stats.time_run += dt,
@@ -4079,220 +3392,193 @@ fn worker(sh: &Shared, id: usize) {
     }
 }
 
-
-/// The definitions of `key` between piece `k`'s nodes, for a dump.
-fn outside_ranges(names: &Names, key: &Key, k: usize, node: u32, font: &Arc<Font>) -> String {
-    let mut v = Vec::new();
-    for n in [0, node.saturating_sub(1), node, node + 1] {
-        let r = names.reaching(key, (k as u32, n), font);
-        v.push(format!("@{n}: {:?} {}..{}", r.0, r.2, r.3));
+/// The scheduler stalled, or the sequence would not settle: the
+/// evaluation ends, the runs parked stop, and the build fails with why.
+fn stall(g: &mut State, sh: &Shared, why: &str) {
+    let mut d = format!("{why}: ");
+    let live = g.seq.live_ids();
+    let unsettled: Vec<String> = live
+        .iter()
+        .filter(|&&k| g.seq.p[k as usize].status != Status::Done)
+        .take(8)
+        .map(|&k| {
+            let ps = &g.seq.p[k as usize];
+            format!(
+                "piece {k} {:?} entry {:?} dirty {:?} [{}]",
+                ps.status,
+                g.seq.entry_of(k),
+                ps.dirty.keys().take(4).collect::<Vec<_>>(),
+                ps.text.iter().take(40).collect::<String>().replace('\r', "|")
+            )
+        })
+        .collect();
+    let _ = write!(d, "{} pieces, {} running, {} parked; {}", live.len(), g.running.len(), sh.parked_n.load(Ordering::Acquire), unsettled.join("; "));
+    if g.stalled.is_none() {
+        g.stalled = Some(d);
     }
-    v.join(", ")
-}
-
-/// How many rounds in a row a build may lay its sequence out without
-/// progress (`Build::progress`: nothing placed that no round of this
-/// build had placed) before its last, which may not lay it out again.
-const MAX_STALLED_ROUNDS: usize = 8;
-
-/// The rounds a build lays its sequence out at most, progress or not,
-/// before its last (a bound past any document's files: each round with
-/// progress places at least one new file, join, cut or inline mark).
-const MAX_ROUNDS: usize = 4096;
-
-/// How many times a piece may run in one round before the build fails as
-/// a livelock ([`stall`]).
-const RUN_LIMIT: u32 = 4096;
-
-/// How long an idle worker waits before it looks whether every run in
-/// progress is parked for good.
-const STALL_CHECK: Duration = Duration::from_secs(2);
-
-/// The scheduler stalled: the round ends, the runs parked stop, and the
-/// build fails with the pieces' states.
-fn stall(g: &mut State, sh: &Shared, parked: usize, why: &str) {
-    let d = state_dump(g, sh, parked, why);
-    g.stalled = Some(d);
     g.done = true;
-    for c in &sh.cancel {
-        c.store(true, Ordering::Relaxed);
+    for &(_, k) in &g.running {
+        sh.flags.set(k, CANCEL, true);
     }
-    sh.restructuring.store(true, Ordering::Release);
+    let _p = sh.park.lock().expect("park");
+    sh.generation.fetch_add(1, Ordering::AcqRel);
+    sh.parked.notify_all();
     sh.cv.notify_all();
-    notify(sh, true);
-}
-
-/// The scheduler's state, for a stall's or a hang's dump: what runs and
-/// how far each run has got, the scan, the queues, and every piece not
-/// settled.
-fn state_dump(g: &State, sh: &Shared, parked: usize, why: &str) -> String {
-    let mut d = format!(
-        "{why}: {} running ({parked} parked), settled {}/{}, due at {:?}, scan at {} (free {}, done {}), {} to ship, {} logs queued ({} running), {} breaks queued;",
-        g.inflight,
-        g.settled,
-        g.p.len(),
-        g.due_at,
-        g.scan_next,
-        g.scan.is_some(),
-        g.scan_done,
-        g.unshipped,
-        g.log_queue.len(),
-        g.logs_running,
-        g.break_queue.len()
-    );
-    // (the piece the scan waits for: its paragraphs without lines, and
-    // whether a break of each is queued)
-    if let Some(ps) = g.p.get(g.scan_next)
-        && let Some(r) = ps.run.as_ref()
-    {
-        let missing: Vec<(usize, bool)> = (0..r.paras.len())
-            .filter(|&j| !ps.lines.get(j).is_some_and(Option::is_some))
-            .map(|j| (j, g.break_queue.iter().any(|q| q.0 == g.scan_next && q.1 == j)))
-            .collect();
-        let _ = write!(
-            d,
-            " the scan's piece {}: {} paragraphs, {} lines kept, without lines (queued) {:?}, {:?}, recheck {}, fold unchecked {};",
-            g.scan_next,
-            r.paras.len(),
-            ps.lines.len(),
-            missing.iter().take(8).collect::<Vec<_>>(),
-            ps.status,
-            ps.recheck,
-            ps.fold_unchecked
-        );
-    }
-    // (the piece a change waits at: why it is not final)
-    if let Some(k) = g.due_at
-        && let Some(ps) = g.p.get(k)
-    {
-        let _ = write!(
-            d,
-            " the due piece {k}: {:?}, dirty {}, fold unchecked {}, differs {:#x}, join {}/{}, entry holds {};",
-            ps.status,
-            ps.dirty.len(),
-            ps.fold_unchecked,
-            ps.got.differs(&ps.expect),
-            ps.got.join,
-            ps.expect.join,
-            ps.run.as_ref().is_some_and(|r| entry_holds(g, k, r))
-        );
-    }
-    let mut shown = 0;
-    for k in 0..g.p.len() {
-        let ps = &g.p[k];
-        if ps.status == Status::Done && ps.dirty.is_empty() {
-            continue;
-        }
-        if shown == 40 {
-            d.push_str(" ...");
-            break;
-        }
-        shown += 1;
-        let _ = write!(
-            d,
-            " piece {k}: {:?} entry {:?} enterable {} dirty {} parked {} run {};",
-            ps.status,
-            ps.entry,
-            entry_ready(g, k, false),
-            ps.dirty.len(),
-            sh.waiting[k].load(Ordering::Acquire),
-            ps.run.is_some()
-        );
-        if ps.status == Status::Running {
-            let _ = write!(
-                d,
-                " (this run: {} commands so far, run {} times this round)",
-                sh.progress[k].load(Ordering::Relaxed),
-                ps.runs
-            );
-        }
-    }
-    d
-}
-
-/// `PHITEX_HANG_DUMP=SECS`: every SECS seconds of a round, the
-/// scheduler's state on stderr ([`state_dump`]), so that a build cut off
-/// by a timeout says where it was.
-fn watchdog(sh: &Shared, every: Duration) {
-    let t0 = Instant::now();
-    let mut next = every;
-    loop {
-        std::thread::sleep(Duration::from_millis(100));
-        let g = lock(sh);
-        if g.done || finished(&g) {
-            return;
-        }
-        if t0.elapsed() >= next {
-            let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
-            eprintln!("{}", state_dump(&g, sh, parked, &format!("hang watchdog at {:.0} s", t0.elapsed().as_secs_f64())));
-            next += every;
-        }
-    }
 }
 
 fn finished(g: &State) -> bool {
-    if g.restructure {
-        return g.inflight == 0;
-    }
-    g.settled == g.p.len()
+    g.settled.is_none()
         && g.scan_done
         && g.unshipped == 0
         && g.log_queue.is_empty()
         && g.logs_running == 0
+        && g.inflight == 0
+        && g.unstarted.is_empty()
+        && g.running.is_empty()
 }
 
-/// Whether piece `r` read `key` only for whether it is `\outer`
-/// (`graph::Field::Outer`), and it still is or still is not: the piece
-/// need not run again for it.
-fn outer_still(g: &State, sh: &Shared, r: usize, key: &Key) -> bool {
-    let Some(vals) = g.p[r].run.as_ref().and_then(|run| run.outer_reads_only(key)) else {
+/// Whether piece `r` read `key` only for whether it is `\outer`, and it
+/// still is or still is not.
+fn outer_still(g: &State, sh: &Shared, r: PieceId, key: &Key) -> bool {
+    let Some(vals) = g.seq.p[r as usize].run.as_ref().and_then(|run| run.outer_reads_only(key)) else {
         return false;
     };
-    vals.iter().all(|(_, node, v)| sh.names.read_holds(key, (r as u32, *node), &sh.font, v))
+    vals.iter().all(|(_, node, v)| sh.names.read_holds(key, (r, *node), &sh.font, v))
+}
+
+/// `key` is dirty in `d` from node `from` on (the earliest wins).
+fn dirty_from(d: &mut Dirty, key: Key, from: u32) {
+    d.entry(key).and_modify(|f| *f = (*f).min(from)).or_insert(from);
 }
 
 /// Piece `k` read a definition of `key` since remade: it runs again from
-/// the first of its nodes reading the name (every node reading it is
-/// looked at again). Returns whether it was done.
-fn mark(g: &mut State, k: usize, key: Key) -> bool {
-    mark_from(g, k, key, 0)
+/// the first of its nodes reading the name. Whether it was done.
+fn mark(g: &mut State, flags: &Flags, k: PieceId, key: Key) -> bool {
+    mark_from(g, flags, k, key, 0)
 }
 
-/// [`mark`], its nodes from `from` on only (a definition between its own
-/// nodes reaches those after it).
-fn mark_from(g: &mut State, k: usize, key: Key, from: u32) -> bool {
-    // (a page builder's definition can reach a piece the scan has not read
-    // yet but that had settled)
-    if k < g.settled {
-        g.settled = k;
+/// [`mark`], its nodes from `from` on only.
+fn mark_from(g: &mut State, flags: &Flags, k: PieceId, key: Key, from: u32) -> bool {
+    if !g.seq.p[k as usize].live() {
+        return false;
     }
-    if let Some(log) = &mut g.rerun_log
-        && g.p[k].status == Status::Done
-    {
-        let old = g.p[k].run.as_ref().and_then(|r| r.values_read(&key).first().map(|x| x.2.clone()));
-        log.push(RerunNote { k, len: g.p[k].text.len(), key: key.clone(), from, src: g.mark_src.clone(), old });
+    // (the settled frontier comes back to it; a piece the scan has passed
+    // run again: the scan is made again from the start)
+    if g.settled.is_none_or(|s| g.seq.before(k, s)) {
+        g.settled = Some(k);
     }
-    let ps = &mut g.p[k];
+    if behind_scan(g, k) {
+        reset_scan(g);
+    }
+    let ord = g.seq.ord(k);
+    let ps = &mut g.seq.p[k as usize];
     dirty_from(&mut ps.dirty, key, from);
     if ps.status == Status::Done {
         ps.status = Status::Unstarted;
-        g.unstarted.insert(k);
+        g.unstarted.insert((ord, k));
         g.stats.reruns += 1;
+        flags.set(k, DONE, false);
         return true;
     }
     false
 }
 
+/// Whether the scan has fed piece `k` (whole or in part): run again, the
+/// scan is made again. A piece fed in part is not, when the scan itself
+/// marks it (a page quantity it read is another, a routine's definition
+/// reaches it: from a node after what was fed).
+fn behind_scan(g: &State, k: PieceId) -> bool {
+    // (the scan's own marks: from the page builder's reads and
+    // definitions, made by the thread running it)
+    let own = g.scan_thread == Some(std::thread::current().id());
+    if g.scan_part.is_some_and(|p| p.0 == k) {
+        return !own;
+    }
+    // (a piece a scan in flight is feeding)
+    if let Some(l) = g.scan_inflight
+        && !g.seq.before(l, k)
+    {
+        return !own;
+    }
+    match scan_at(g) {
+        Some((s, _)) => g.seq.before(k, s),
+        None => true,
+    }
+}
+
+/// The piece the scan feeds next, and how many of its items it has fed
+/// (none: the end).
+fn scan_at(g: &State) -> Option<(PieceId, u32)> {
+    if let Some(p) = g.scan_part {
+        return Some(p);
+    }
+    match g.scan_last {
+        Some(l) => g.seq.next_live(l).map(|k| (k, 0)),
+        None => g.seq.first_live().map(|k| (k, 0)),
+    }
+}
+
+/// The live piece after `last` (none: the first), for a cursor naming the
+/// last piece it handled.
+fn after_cursor(g: &State, last: Option<PieceId>) -> Option<PieceId> {
+    match last {
+        Some(l) => g.seq.next_live(l),
+        None => g.seq.first_live(),
+    }
+}
+
+/// The scheduler's sets keyed again by the labels, after a spread.
+fn rekey(g: &mut State, sh: &Shared) {
+    let now = g.seq.labels().spreads;
+    if now == g.spreads {
+        return;
+    }
+    g.spreads = now;
+    let l = g.seq.labels.clone();
+    let l = l.read().expect("labels");
+    g.unstarted = g.unstarted.iter().map(|&(_, k)| (l.of(k), k)).collect();
+    g.running = g.running.iter().map(|&(_, k)| (l.of(k), k)).collect();
+    let at = g.settled.map_or(u64::MAX, |k| l.of(k));
+    sh.settled_at.store(at, Ordering::Release);
+}
+
+/// The scan is made again from the first piece (a piece it had passed runs
+/// again: rare, a loop-back's).
+fn reset_scan(g: &mut State) {
+    g.scan_gen += 1;
+    g.scan = Some(Box::default());
+    g.scan_last = None;
+    g.scan_part = None;
+    g.scan_inflight = None;
+    g.scan_thread = None;
+    g.scan_done = false;
+    g.num_last = None;
+    g.numbers = g.numbers0.clone();
+    g.log_last = None;
+    g.matching = false;
+    g.pages.clear();
+    g.orgs.clear();
+    g.bodies.clear();
+    g.ship_queue.clear();
+    g.unshipped = 0;
+    g.marks_before.clear();
+    g.marks_after.clear();
+    g.call_logs_before.clear();
+    g.call_logs_after.clear();
+    g.pdf_tail = Arc::default();
+    g.old_pages.iter_mut().for_each(|x| *x = None);
+    g.old_orgs = Arc::default();
+}
+
 /// Piece `k`'s export of `key` as the names index holds it at `(k, END)`:
 /// none when a definition made between its nodes after its own last
-/// definition of `key` (an output routine's, where the page builder fired)
-/// is the one reaching its end.
-fn export_of(names: &Names, font: &Arc<Font>, k: usize, run: &Run, key: &Key) -> Option<Val> {
+/// definition of `key` is the one reaching its end.
+fn export_of(names: &Names, font: &Arc<Font>, k: PieceId, run: &Run, key: &Key) -> Option<Val> {
     let i = run.exports.binary_search_by(|(x, _)| x.cmp(key)).ok()?;
     if names.has_inner(key) {
         let last = run.resolve(key, run.nodes_len()).map(|(d, _)| d);
-        if let (Some(p), ..) = names.reaching(key, (k as u32, END), font)
-            && p.0 == k as u32
+        if let (Some(p), ..) = names.reaching(key, (k, END), font)
+            && p.0 == k
             && p.1 != END
             && last.is_none_or(|d| p.1 >= d)
         {
@@ -4304,12 +3590,12 @@ fn export_of(names: &Names, font: &Arc<Font>, k: usize, run: &Run, key: &Key) ->
 
 /// Sets piece `k`'s export of `key` as [`export_of`] gives it; whether it
 /// changed.
-fn refresh_export(names: &Names, font: &Arc<Font>, k: usize, run: &Run, key: &Key) -> bool {
+fn refresh_export(names: &Names, font: &Arc<Font>, k: PieceId, run: &Run, key: &Key) -> bool {
     let v = export_of(names, font, k, run, key);
-    if names.at(key, (k as u32, END)) == v {
+    if names.at(key, (k, END)) == v {
         return false;
     }
-    names.set((k as u32, END), key, v.as_ref());
+    names.set((k, END), key, v.as_ref());
     true
 }
 
@@ -4320,7 +3606,6 @@ fn changed_names(old: Option<&Run>, new: &Run) -> Vec<Key> {
     let b = &new.exports;
     let (mut i, mut j) = (0, 0);
     let mut out = Vec::new();
-    // (exports are sorted by name)
     while i < a.len() || j < b.len() {
         match (a.get(i), b.get(j)) {
             (Some(x), Some(y)) if x.0 == y.0 => {
@@ -4348,129 +3633,114 @@ fn changed_names(old: Option<&Run>, new: &Run) -> Vec<Key> {
     out
 }
 
-/// Piece `m`'s definitions of `keys` changed: the nodes after it that
-/// read those names from before `m` (or from `m`), by the edges. A
-/// settled reader whose every read of the name has the value it read (a
-/// new definer of the same value) is not one: its edge moves to the
-/// definer reaching it now.
-fn reached(g: &mut State, sh: &Shared, m: Pos, keys: &[Key]) -> Vec<(usize, Key)> {
+/// Is an edge's source (`src`, where it was defined) at or before `m`?
+fn src_at_or_before(sh: &Shared, src: PieceId, m: Pos) -> bool {
+    src == INITIAL || sh.pos_of(src).is_none_or(|p| !sh.before(m, p))
+}
+
+/// Place `m`'s definitions of `keys` changed: the readers after it whose
+/// read of the name now gives another value than they read (exact: a
+/// reader holding no read of the name, or reading the same value, is not
+/// one — its edge moves to the definer reaching it now).
+fn reached(g: &mut State, sh: &Shared, m: Pos, keys: &[Key]) -> Vec<(PieceId, Key)> {
     let mut out = Vec::new();
     for key in keys {
-        // (the shard stays locked while its readers are looked at and their
-        // edges moved: a run putting its edges in waits; see
-        // `run_and_install`)
         let mut shard = sh.readers.shard(key);
         let Some(rm) = shard.get(key) else {
             continue;
         };
-        let mut moves: Vec<(usize, PieceId)> = Vec::new();
+        let mut moves: Vec<(PieceId, PieceId)> = Vec::new();
+        let mut dead: Vec<PieceId> = Vec::new();
         for (&rid, &(node, src)) in rm {
-            let Some(rpos) = sh.seq.pos_of(rid) else {
-                continue;
-            };
-            // (a place between a piece's nodes reaches the piece's nodes
-            // after it: the piece's first reader may be before it, a later
-            // one after)
-            // (piece m.0's own nodes after m: `changed_at`, by its nodes'
-            // reads; its edge is its first reader's, which may be before m)
-            if (rpos.0, node) <= m || (m.1 != END && rpos.0 == m.0) {
+            let Some(ps) = g.seq.p.get(rid as usize) else { continue };
+            if !ps.alive {
+                dead.push(rid);
                 continue;
             }
-            if !src_at_or_before(&sh.seq, src, m) {
+            if !ps.live() {
                 continue;
             }
-            let r = rpos.0 as usize;
-            let ps = &g.p[r];
-            if ps.status == Status::Done
-                && let Some(run) = &ps.run
-                && reads_still(&sh.names, &sh.font, run, r, key)
-            {
-                let (def, ..) = sh.names.reaching(key, (rpos.0, node), &sh.font);
-                let def_id = def.map_or(INITIAL, |d| sh.seq.id_at(d));
-                if def_id != src {
-                    moves.push((r, def_id));
+            if !sh.before(m, (rid, node)) || (m.1 != END && rid == m.0) {
+                continue;
+            }
+            if !src_at_or_before(sh, src, m) {
+                continue;
+            }
+            // (only a reader holding a read of the name, whose value now
+            // differs from what it read)
+            match &ps.run {
+                Some(run) if ps.status == Status::Done || ps.status == Status::Unstarted => {
+                    if run.values_read(key).is_empty() {
+                        dead.push(rid);
+                        continue;
+                    }
+                    if reads_still(&sh.names, &sh.font, run, rid, key) {
+                        let (def, ..) = sh.names.reaching(key, (rid, node), &sh.font);
+                        let def_id = def.map_or(INITIAL, |d| sh.id_at(d));
+                        if def_id != src {
+                            moves.push((rid, def_id));
+                        }
+                        continue;
+                    }
                 }
-                continue;
+                _ => {}
             }
-            out.push((r, key.clone()));
+            out.push((rid, key.clone()));
+        }
+        if let Some(rm) = shard.get_mut(key) {
+            for d in dead {
+                rm.remove(d);
+            }
         }
         for (r, src) in moves {
-            move_edge_in(&mut shard, &mut g.p[r], key, src);
+            move_edge_in(&mut shard, &mut g.seq.p[r as usize], key, src);
         }
     }
     out
 }
 
-/// Whether piece `r`'s `run` read `key` with the values reaching it now:
-/// each of its reads of the name, at its node ([`Names::read_holds`]: a
-/// refuted read of a written file is given the file's bytes as the fold's
-/// value while the names index still answers what it had before).
-fn reads_still(names: &Names, font: &Arc<Font>, run: &Run, r: usize, key: &Key) -> bool {
+/// Whether piece `r`'s `run` read `key` with the values reaching it now.
+fn reads_still(names: &Names, font: &Arc<Font>, run: &Run, r: PieceId, key: &Key) -> bool {
     let vals = run.values_read(key);
-    !vals.is_empty()
-        && vals
-            .iter()
-            .all(|(_, node, v)| names.read_holds(key, (r as u32, *node), font, v))
+    !vals.is_empty() && vals.iter().all(|(_, node, v)| names.read_holds(key, (r, *node), font, v))
 }
 
 /// Piece `k`'s dirty names as it starts to run: those its last run read
-/// with values that no longer reach it. A name marked when its definer
-/// changed whose reads have their values again (it moved to a new piece
-/// that has run since, with the same value) is not: its edge moves to the
-/// definer reaching it now. (Taken from the piece.)
-fn still_dirty(g: &mut State, sh: &Shared, k: usize) -> Vec<(Key, u32)> {
-    let dirty = std::mem::take(&mut g.p[k].dirty);
-    let Some(run) = g.p[k].run.clone() else {
+/// with values that no longer reach it (the others' edges move).
+fn still_dirty(g: &mut State, sh: &Shared, k: PieceId) -> Vec<(Key, u32)> {
+    let dirty = std::mem::take(&mut g.seq.p[k as usize].dirty);
+    let Some(run) = g.seq.p[k as usize].run.clone() else {
         return dirty.into_iter().collect();
     };
     let any = !dirty.is_empty();
     let mut out = Vec::new();
     for (key, from) in dirty {
-        // (a name defined between some piece's nodes — the page builder's
-        // — may have marked this piece from one of its own fires: its
-        // nodes after the fire read another value though the first reader
-        // (the value recorded) does not, so it stays dirty)
         if from > 0 || sh.names.has_inner(&key) || !reads_still(&sh.names, &sh.font, &run, k, &key) {
             out.push((key, from));
             continue;
         }
         let node = run.values_read(&key)[0].1;
-        let (def, ..) = sh.names.reaching(&key, (k as u32, node), &sh.font);
-        let src = def.map_or(INITIAL, |d| sh.seq.id_at(d));
-        move_edge(&sh.readers, &mut g.p[k], &key, src);
+        let (def, ..) = sh.names.reaching(&key, (k, node), &sh.font);
+        let src = def.map_or(INITIAL, |d| sh.id_at(d));
+        move_edge(&sh.readers, &mut g.seq.p[k as usize], &key, src);
     }
-    g.p[k].recheck = any && out.is_empty();
+    g.seq.p[k as usize].recheck = any && out.is_empty();
     out
 }
 
 /// Piece `k`, chosen to run, whose every marked name reads its value
-/// again ([`PState::recheck`]): its run is kept, as at the round's start,
-/// if it is entered as it was. Whether it was.
-fn keep_again(g: &mut State, sh: &Shared, k: usize) -> bool {
-    let ps = &g.p[k];
-    let Some(run) = ps.run.clone() else { return false };
-    // (entered on a state assumed at its cut: not known yet)
-    let assumed = matches!(ps.entry, Entry::After(q, _) if !(g.p[q].status == Status::Done && g.p[q].dirty.is_empty()));
-    if assumed || !entry_holds(g, k, &run) {
+/// again: its run is kept if it is entered as it was. Whether it was.
+fn keep_again(g: &mut State, sh: &Shared, k: PieceId) -> bool {
+    let Some(run) = g.seq.p[k as usize].run.clone() else { return false };
+    if entry_assumed(g, k) || !entry_holds(g, k, &run) {
         return false;
     }
-    g.running.remove(&k);
-    // (Done implies no mark pending: a piece Done and dirty is neither run
-    // again nor settled, the scan waits at it)
-    debug_assert!(g.p[k].dirty.is_empty(), "piece {k} kept again with marks");
-    g.p[k].status = Status::Done;
-    if let Some(b) = &sh.board {
-        b.settled.fetch_add(1, Ordering::Relaxed);
-    }
-    g.p[k].entered = None;
-    if g.due_at == Some(k) {
-        g.due_at = None;
-    }
-    // (its paragraphs whose breaks a restructure or a rerun since the
-    // round began left without lines go to the queue: the scan waits for
-    // every line, and nothing else queues them for a kept run)
+    let ord = g.seq.ord(k);
+    g.running.remove(&(ord, k));
+    g.seq.p[k as usize].status = Status::Done;
+    g.seq.p[k as usize].entered = None;
     if !lines_ready(g, k) {
-        let ps = &mut g.p[k];
+        let ps = &mut g.seq.p[k as usize];
         ps.lines.resize(run.paras.len(), None);
         for (j, para) in run.paras.iter().enumerate() {
             if ps.lines[j].is_none() && !g.break_queue.iter().any(|q| q.0 == k && q.1 == j) {
@@ -4479,18 +3749,17 @@ fn keep_again(g: &mut State, sh: &Shared, k: usize) -> bool {
         }
     }
     g.stats.kept += 1;
-    sh.done[k].store(true, Ordering::Release);
+    sh.flags.set(k, DONE, true);
     settle(g, sh);
     true
 }
 
 /// Piece `ps`'s edge for `key` comes from `src` now (its reads unchanged).
-fn move_edge(readers: &Readers, ps: &mut PState, key: &Key, src: PieceId) {
+fn move_edge(readers: &Readers, ps: &mut Piece, key: &Key, src: PieceId) {
     move_edge_in(&mut readers.shard(key), ps, key, src);
 }
 
-/// [`move_edge`], `key`'s shard locked already.
-fn move_edge_in(shard: &mut FxMap<Key, ReadersOf>, ps: &mut PState, key: &Key, src: PieceId) {
+fn move_edge_in(shard: &mut FxMap<Key, ReadersOf>, ps: &mut Piece, key: &Key, src: PieceId) {
     if let Some(e) = shard.get_mut(key).and_then(|m| m.get_mut(ps.id)) {
         e.1 = src;
     }
@@ -4504,22 +3773,14 @@ fn move_edge_in(shard: &mut FxMap<Key, ReadersOf>, ps: &mut PState, key: &Key, s
 /// Gives each of piece `k`'s paragraphs its lines: a paragraph equal to
 /// one of `old`'s (or of the edited piece's predecessor) keeps its lines;
 /// the others are queued.
-///
-/// `equal.of(i, hint)` lists the old paragraphs that may equal paragraph `i`
-/// ([`equal_paras`], found before taking the lock), its own place first:
-/// the first of them with lines and equal to it gives them (compared only
-/// then: most have no lines, or are the same `Arc`).
-fn queue_breaks(g: &mut State, k: usize, old: Option<&Run>, equal: &ParaCands) {
-    let run = g.p[k].run.clone().expect("a run");
-    let old_lines = std::mem::take(&mut g.p[k].lines);
-    let prev_lines = match g.p[k].prev.take() {
+fn queue_breaks(g: &mut State, k: PieceId, old: Option<&Run>, equal: &ParaCands) {
+    let run = g.seq.p[k as usize].run.clone().expect("a run");
+    let old_lines = std::mem::take(&mut g.seq.p[k as usize].lines);
+    let prev_lines = match g.seq.p[k as usize].prev.take() {
         Some((_, l, _)) => l,
         None => old_lines,
     };
     let mut lines = vec![None; run.paras.len()];
-    // (where the last paragraph reused was, against its place: the next
-    // is looked for there first — paragraphs inserted or removed before
-    // shift the rest)
     let mut off: isize = 0;
     for (i, para) in run.paras.iter().enumerate() {
         let hint = (i as isize + off).max(0) as usize;
@@ -4537,14 +3798,9 @@ fn queue_breaks(g: &mut State, k: usize, old: Option<&Run>, equal: &ParaCands) {
             None => g.break_queue.push_back((k, i, para.clone())),
         }
     }
-    g.p[k].lines = lines;
+    g.seq.p[k as usize].lines = lines;
 }
 
-/// For each paragraph of `run`, the paragraphs of `old` that may equal
-/// it: its own place first, then those of the same lengths ([`queue_breaks`]
-/// compares one only where it has lines to give: a piece of thousands of
-/// paragraphs — a document read in one piece — is not compared with
-/// itself pair by pair).
 fn equal_paras(old: Option<&Run>, run: &Run) -> ParaCands {
     let Some(o) = old else { return ParaCands::default() };
     let shape = |p: &crate::item::Para| (p.before.len(), p.hlist.len(), p.after.len());
@@ -4594,36 +3850,82 @@ impl ParaCands {
     }
 }
 
+
+/// The state piece `k`'s run leaves, if it has run.
+fn out_of(seq: &Seq, k: PieceId) -> Option<RState> {
+    seq.p[k as usize].run.as_ref().map(|r| r.out())
+}
+
+/// The state a piece after a cut is assumed to be entered in: the
+/// canonical start, or the start of the file it is in (none: the file's
+/// caller has not run).
+fn assumed_entry(seq: &Seq, k: PieceId) -> Option<RState> {
+    match seq.ctx_of(k) {
+        None => Some(RState::start()),
+        Some(c) => out_of(seq, c).map(|o| RState::entered_after(&RState::file_start(&o))),
+    }
+}
+
+/// The state piece `k` is entered in now (none: a piece it is entered
+/// from has not run).
+fn entry_state(seq: &Seq, k: PieceId) -> Option<RState> {
+    Some(match seq.entry_of(k) {
+        Entry::Start => RState::start(),
+        Entry::File(c) => RState::file_start(&out_of(seq, c)?),
+        Entry::Rest(c) => {
+            let caller = out_of(seq, c)?;
+            let file = match seq.last_of(c) {
+                Some(l) => Some(out_of(seq, l)?),
+                None => None,
+            };
+            RState::rest(file.as_ref(), &caller)
+        }
+        // (a state no piece is entered in: the two are one piece once the
+        // run before says so; the assumption stands until then)
+        Entry::After(q) => match out_of(seq, q) {
+            Some(o) if o.enterable() && !o.halted() => RState::entered_after(&o),
+            _ => assumed_entry(seq, k)?,
+        },
+    })
+}
+
+/// Whether a run was entered in the state piece `k` is entered in now.
+fn entry_holds(g: &State, k: PieceId, r: &Run) -> bool {
+    entry_state(&g.seq, k).is_some_and(|e| r.entry() == e)
+}
+
+/// Whether piece `k` is entered on the state assumed at its cut (the
+/// piece before it has not settled its run).
+fn entry_assumed(g: &State, k: PieceId) -> bool {
+    matches!(g.seq.entry_of(k), Entry::After(q) if !(g.seq.p[q as usize].status == Status::Done && g.seq.p[q as usize].dirty.is_empty()))
+}
+
 /// Whether the pieces piece `k` is entered from have run (installed and
-/// valid; speculating: run at all). A piece after a cut runs on the state
-/// assumed there until the piece before it has run and left another.
-fn entry_ready(g: &State, k: usize, speculate: bool) -> bool {
-    let need = |c: usize| {
-        let ps = &g.p[c];
+/// valid; speculating: run at all).
+fn entry_ready(g: &State, k: PieceId, speculate: bool) -> bool {
+    let need = |c: PieceId| {
+        let ps = &g.seq.p[c as usize];
         if speculate {
             ps.run.is_some()
         } else {
             ps.status == Status::Done && ps.dirty.is_empty()
         }
     };
-    match g.p[k].entry {
+    match g.seq.entry_of(k) {
         Entry::Start => true,
         Entry::File(c) => need(c),
-        Entry::Rest(c, l) => need(c) && l.is_none_or(need),
-        Entry::After(q, c) => {
-            let Some(assumed) = assumed_entry(&g.p, c) else {
+        Entry::Rest(c) => need(c) && g.seq.last_of(c).is_none_or(need),
+        Entry::After(q) => {
+            let Some(assumed) = assumed_entry(&g.seq, k) else {
                 return false;
             };
-            // (a piece whose run on the assumption was given up waits for
-            // the piece before it)
-            if g.p[k].suspend {
-                return g.p[q].status == Status::Done && g.p[q].dirty.is_empty();
+            if g.seq.p[k as usize].suspend {
+                return g.seq.p[q as usize].status == Status::Done && g.seq.p[q as usize].dirty.is_empty();
             }
-            match &g.p[q].run {
-                // (the piece before reads on into this one: its text is not
-                // a place a piece begins; the sequence is laid out again —
-                // unless the layout knew and could not join them)
-                Some(_) if g.p[q].got.join && !g.p[q].expect.join => false,
+            match &g.seq.p[q as usize].run {
+                // (the piece before reads on into this one: its text is not a
+                // place a piece begins; the two are joined when it settles)
+                Some(_) if g.seq.p[q as usize].got.join => false,
                 Some(r) => {
                     let out = r.out();
                     !out.enterable() || out.halted() || RState::entered_after(&out) == assumed || need(q)
@@ -4634,112 +3936,9 @@ fn entry_ready(g: &State, k: usize, speculate: bool) -> bool {
     }
 }
 
-/// Whether the last build's run `i` was entered in the state the layout
-/// so far says its piece is (from the last build's runs of the pieces it
-/// is entered from; unknown where one has none): a run entered otherwise
-/// says nothing of the sequence (it began in the middle of a command, or
-/// in another file's place).
-fn old_entry_holds(out: &[Spec], olds: &[Kept], entry: Entry, i: usize) -> bool {
-    match old_entry(out, olds, entry, i) {
-        Err(()) => false,
-        Ok(x) => x.is_none_or(|(old, e)| old == e),
-    }
-}
-
-/// (`PHITEX_PLACE`) How old run `i`'s entry differs from the one
-/// [`old_entry_holds`] computes: the first difference of the two shown.
-fn entry_diff(out: &[Spec], olds: &[Kept], entry: Entry, i: usize) -> String {
-    let (old, e) = match old_entry(out, olds, entry, i) {
-        Err(()) => return "the piece before reads on into it".into(),
-        Ok(None) => return String::new(),
-        Ok(Some(x)) => x,
-    };
-    let (a, b) = (format!("{old:?}"), format!("{e:?}"));
-    let at = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
-    let w = |s: &str| s.chars().skip(at.saturating_sub(80)).take(240).collect::<String>();
-    format!("entry differs at {at}: old [{}] layout [{}]", w(&a), w(&b))
-}
-
-/// [`old_entry_holds`]'s two states: old run `i`'s entry and the one the
-/// layout so far gives its place (none: unknown, it holds; `Err`: the
-/// piece before reads on into it, it does not).
-fn old_entry(out: &[Spec], olds: &[Kept], entry: Entry, i: usize) -> Result<Option<(RState, RState)>, ()> {
-    let Some(run) = &olds[i].run else { return Ok(None) };
-    let prev = |c: usize| out[c].old.and_then(|j| olds[j].run.as_ref());
-    let state = match entry {
-        Entry::Start => Some(RState::start()),
-        Entry::File(c) => prev(c).map(|r| RState::file_start(&r.out())),
-        Entry::Rest(c, l) => match (prev(c), l.map(prev)) {
-            (Some(c), None) => Some(RState::rest(None, &c.out())),
-            (Some(c), Some(Some(l))) => Some(RState::rest(Some(&l.out()), &c.out())),
-            _ => None,
-        },
-        Entry::After(q, c) => {
-            let assumed = match c {
-                None => Some(RState::start()),
-                Some(c) => prev(c).map(|r| RState::entered_after(&RState::file_start(&r.out()))),
-            };
-            match prev(q) {
-                // (the piece before reads on into it)
-                Some(_) if out[q].expect.join => return Err(()),
-                Some(r) if r.out().enterable() && !r.out().halted() => Some(RState::entered_after(&r.out())),
-                _ => assumed,
-            }
-        }
-    };
-    Ok(state.map(|e| (run.entry(), e)))
-}
-
-/// The state a piece after a cut is assumed to be entered in: the
-/// canonical start, or the start of the file piece `c` calls (none: `c`
-/// has not run).
-fn assumed_entry(p: &[PState], c: Option<usize>) -> Option<RState> {
-    match c {
-        None => Some(RState::start()),
-        Some(c) => p[c].run.as_ref().map(|r| RState::entered_after(&RState::file_start(&r.out()))),
-    }
-}
-
-/// The state piece `k` is entered in now (none: a piece it is entered
-/// from has not run).
-fn entry_state(g: &State, k: usize) -> Option<RState> {
-    entry_state_in(&g.p, k)
-}
-
-fn entry_state_in(p: &[PState], k: usize) -> Option<RState> {
-    let out = |c: usize| p[c].run.as_ref().map(|r| r.out());
-    Some(match p[k].entry {
-        Entry::Start => RState::start(),
-        Entry::File(c) => RState::file_start(&out(c)?),
-        Entry::Rest(c, l) => {
-            let caller = out(c)?;
-            let file = match l {
-                Some(l) => Some(out(l)?),
-                None => None,
-            };
-            RState::rest(file.as_ref(), &caller)
-        }
-        // (a state no piece is entered in: the two are laid out as one
-        // piece, the assumption stands until then)
-        // (after a piece that stopped at a fatal error nothing is read: the
-        // pieces after it read nothing of its state — the log ends there)
-        Entry::After(q, c) => match out(q) {
-            Some(o) if o.enterable() && !o.halted() => RState::entered_after(&o),
-            _ => assumed_entry(p, c)?,
-        },
-    })
-}
-
-/// Whether a run was entered in the state piece `k` is entered in now.
-fn entry_holds(g: &State, k: usize, r: &Run) -> bool {
-    entry_state(g, k).is_some_and(|e| r.entry() == e)
-}
-
-fn lines_ready(g: &State, k: usize) -> bool {
-    let ps = &g.p[k];
-    ps.run
-        .as_ref()
-        .is_some_and(|r| ps.lines.len() == r.paras.len() && ps.lines.iter().all(Option::is_some))
+fn lines_ready(g: &State, k: PieceId) -> bool {
+    let ps = &g.seq.p[k as usize];
+    ps.run.as_ref().is_some_and(|r| ps.lines.len() == r.paras.len() && ps.lines.iter().all(Option::is_some))
 }
 
 fn rand(g: &mut State, n: usize) -> usize {
@@ -4751,21 +3950,74 @@ fn rand(g: &mut State, n: usize) -> usize {
     (x % n as u64) as usize
 }
 
-/// Compares the settled pieces with what the last build's scan was fed at
-/// their place, without feeding them; at the first that differs (or at the
-/// end, if the number of pieces differs) the scan resumes.
-fn advance_match(g: &mut State) {
-    let n = g.p.len();
-    while g.matching && g.scan_next < g.settled {
-        let k = g.scan_next;
-        if same_material(g, k) {
-            g.scan_next += 1;
+/// Whether piece `k` is before the settled frontier.
+fn is_settled(g: &State, k: PieceId) -> bool {
+    g.settled.is_none_or(|s| g.seq.before(k, s))
+}
+
+/// Moves the settled frontier over the pieces whose runs are final.
+fn settle(g: &mut State, sh: &Shared) {
+    while let Some(k) = g.settled {
+        let ps = &g.seq.p[k as usize];
+        if !ps.live() {
+            g.settled = g.seq.next_live(k);
+        } else if ps.status == Status::Done && ps.dirty.is_empty() {
+            // (what its run says of the sequence holds before it is final:
+            // a join with texts that came after it was run, a kept run's)
+            let got = ps.got.clone();
+            apply_structure(g, sh, k, &got, true);
+            rekey(g, sh);
+            if g.done {
+                return;
+            }
+            if g.settled != Some(k) {
+                continue;
+            }
+            let ps = &g.seq.p[k as usize];
+            if ps.live() && ps.status == Status::Done && ps.dirty.is_empty() {
+                g.settled = g.seq.next_live(k);
+            } else {
+                break;
+            }
         } else {
-            resume(g, k);
+            break;
         }
     }
-    if g.matching && g.scan_next == n && g.settled == n {
-        if g.old_runs.len() == n {
+    let at = g.settled.map_or(u64::MAX, |k| g.seq.ord(k));
+    sh.settled_at.store(at, Ordering::Release);
+}
+
+/// Whether piece `k`'s material is what the last evaluation's scan was fed
+/// for it.
+fn same_material(g: &State, k: PieceId) -> bool {
+    let Some(run) = g.seq.p[k as usize].run.as_ref() else { return false };
+    g.old_runs.get(&k).is_some_and(|o| {
+        Arc::ptr_eq(o, run)
+            || (o.paras.len() == run.paras.len()
+                && o.paras.iter().zip(&run.paras).all(|(a, b)| Arc::ptr_eq(a, b) || **a == **b)
+                && o.exports == run.exports)
+    })
+}
+
+/// Compares the settled pieces with what the last evaluation's scan was
+/// fed, piece by piece in order, without feeding them; at the first that
+/// differs the scan resumes.
+fn advance_match(g: &mut State) {
+    while g.matching {
+        let Some((k, _)) = scan_at(g) else { break };
+        if !is_settled(g, k) {
+            break;
+        }
+        if g.old_seq.get(g.match_j) == Some(&k) && same_material(g, k) {
+            g.match_j += 1;
+            g.scan_last = Some(k);
+            g.scan_part = None;
+        } else {
+            resume(g, Some(k));
+        }
+    }
+    if g.matching && scan_at(g).is_none() && g.settled.is_none() {
+        if g.match_j == g.old_seq.len() {
             // (the same material throughout: the same pages)
             for i in 0..g.old_pages.len() {
                 let (pg, b) = g.old_pages[i].take().expect("an old page");
@@ -4783,63 +4035,48 @@ fn advance_match(g: &mut State) {
             g.scan_done = true;
             g.matching = false;
         } else {
-            resume(g, n);
+            resume(g, None);
         }
     }
 }
 
-/// Whether piece `k`'s material is what the last build's scan was fed at
-/// its place.
-fn same_material(g: &State, k: usize) -> bool {
-    let run = g.p[k].run.as_ref().expect("a settled piece has a run");
-    // (and what the page builder may read of the piece's definitions:
-    // `\output`, what the default output ships with, and what a routine
-    // reads — a float's box, which LaTeX keeps in a register and never
-    // puts on the main vertical list: a cell edited in a table float is
-    // the same paragraphs, another page. All the definitions reaching the
-    // piece's end, a run made again saying something new of any of them
-    // is new material)
-    g.old_runs.get(k).and_then(Option::as_ref).is_some_and(|o| {
-        Arc::ptr_eq(o, run)
-            || (o.paras.len() == run.paras.len()
-                && o.paras
-                    .iter()
-                    .zip(&run.paras)
-                    .all(|(a, b)| Arc::ptr_eq(a, b) || **a == **b)
-                && o.exports == run.exports)
-    })
-}
-
-/// Once every piece is settled, as many as the last build's: the last
-/// piece whose material differs from it (none: the scan cannot converge on
-/// the last build's pages).
-fn last_diff(g: &mut State) -> Option<usize> {
-    let n = g.p.len();
-    if g.settled < n || g.old_runs.len() != n || g.old_orgs.is_empty() {
+/// Once every piece is settled: the last piece whose material differs
+/// from the last evaluation's, the two sequences compared from their ends
+/// (none: the scan cannot converge on the last pages).
+fn last_diff(g: &mut State) -> Option<PieceId> {
+    if g.settled.is_some() || g.old_orgs.is_empty() {
         return None;
     }
     if !g.last_diff_known {
-        g.last_diff = (0..n).rev().find(|&k| !same_material(g, k));
+        let new = g.seq.live_ids();
+        let (mut i, mut j) = (new.len(), g.old_seq.len());
+        while i > 0 && j > 0 && new[i - 1] == g.old_seq[j - 1] && same_material(g, new[i - 1]) {
+            i -= 1;
+            j -= 1;
+        }
+        g.last_diff = if i == 0 { None } else { Some(new[i - 1]) };
         g.last_diff_known = true;
     }
     g.last_diff
 }
 
-/// The scan resumes before piece `c`, the first whose material differs
-/// from the last build's (equal paragraphs are equal material: lines are a
-/// function of the paragraph): at the restart point of the last old page
-/// whose making call and restart point are before `c`; the pages before it
-/// and the marks of the calls before it are kept.
-fn resume(g: &mut State, c: usize) {
+/// The scan resumes before piece `c` (none: the end), the first whose
+/// material differs from the last evaluation's: at the restart point of
+/// the last old page whose making call and restart point are among the
+/// pieces matched; the pages before it and the marks of the calls before
+/// it are kept.
+fn resume(g: &mut State, _c: Option<PieceId>) {
     g.matching = false;
-    let before = |o: (u32, u32)| (o.0 as usize) < c;
+    let mj = g.match_j;
+    let old_at = |o: (u32, u32)| g.old_pos.get(&o.0).map(|&j| (j, o.1));
+    let before = |o: (u32, u32)| old_at(o).is_some_and(|(j, _)| j < mj);
     let at = (1..=g.old_orgs.len()).rev().find(|&p| {
         let o = &g.old_orgs[p - 1];
         before(o.call) && o.resume.is_some_and(|(s, _)| before(s))
     });
     let Some(p) = at else {
-        g.scan_next = 0;
-        g.scan_skip = 0;
+        g.scan_last = None;
+        g.scan_part = None;
         return;
     };
     let o = g.old_orgs[p - 1].clone();
@@ -4852,319 +4089,76 @@ fn resume(g: &mut State, c: usize) {
         g.orgs.push(g.old_orgs[i].clone());
         g.stats.pages_reused += 1;
     }
-    // (a point after its call: the call's mark is kept whole; before it:
-    // the call is made again, its pages before the point kept)
-    let (kept, call_from) = if s > o.call {
-        (ci + 1, None)
-    } else {
-        (ci, Some(g.old_marks[ci].0))
-    };
+    let (kept, call_from) = if old_at(s) > old_at(o.call) { (ci + 1, None) } else { (ci, Some(g.old_marks[ci].0)) };
     g.marks_before = g.old_marks[..kept].to_vec();
-    // (the calls made again from here log again)
     g.call_logs_before = g.old_call_logs.iter().filter(|c| (c.0 as usize) < kept).cloned().collect();
-    g.scan = Some(Box::new(Scan::resumed(
-        p as u32,
-        d,
-        call_from,
-        kept as u32,
-        o.last_call.clone(),
-        o.call,
-        o.fold.as_deref(),
-    )));
-    g.scan_next = s.0 as usize;
-    g.scan_skip = s.1;
+    g.scan = Some(Box::new(Scan::resumed(p as u32, d, call_from, kept as u32, o.last_call.clone(), o.call, o.fold.as_deref())));
+    g.scan_last = g.seq.prev_live(s.0);
+    g.scan_part = (s.1 > 0).then_some((s.0, s.1));
 }
 
-/// The round ends: no new task; the runs in progress waiting for a
-/// piece that will not run in it stop (they are not results), the others
-/// finish and are kept where they hold.
-fn restructure_now(g: &mut State, sh: &Shared) {
-    g.restructure = true;
-    sh.restructuring.store(true, Ordering::Release);
-    for &q in &g.running {
-        if sh.waiting[q].load(Ordering::Acquire) {
-            sh.cancel[q].store(true, Ordering::Relaxed);
+/// The fonts of the pieces the scan has fed whole numbered.
+fn number_through(g: &mut State) {
+    let Some(last) = g.scan_last else { return };
+    while g.num_last != Some(last) {
+        let Some(k) = after_cursor(g, g.num_last) else { break };
+        if let Some(r) = g.seq.p[k as usize].run.clone() {
+            dvi::extend(Arc::make_mut(&mut g.numbers), &r.fonts);
         }
-    }
-    let _p = sh.park.lock().expect("park");
-    sh.generation.fetch_add(1, Ordering::AcqRel);
-    sh.parked.notify_all();
-}
-
-/// Moves the settled frontier over the pieces whose runs are final; a
-/// settled run that says otherwise of the sequence than the layout assumed
-/// ends the round (now, if it reads on into the next text; once all have
-/// settled, else). Whether the round ends.
-fn settle(g: &mut State, sh: &Shared) -> bool {
-    let n = g.p.len();
-    while g.settled < n && g.p[g.settled].status == Status::Done && g.p[g.settled].dirty.is_empty()
-    {
-        // (a settled run that says otherwise of the sequence than the
-        // layout assumed changes it, once all have settled)
-        let k = g.settled;
-        // (the last round may not lay the sequence out again: its runs end
-        // where the layout says (`laid`); a run saying otherwise of the
-        // sequence there — a file, a cut, an `\endinput`, a run reading on
-        // into the next text — would leave its output not the document's:
-        // the build fails saying so, it neither stalls nor gives another
-        // DVI file)
-        if !sh.restructure_ok && !g.p[k].got.same(&g.p[k].expect) {
-            let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
-            let (got, exp) = (&g.p[k].got, &g.p[k].expect);
-            let what = if got.join != exp.join {
-                "reads on into the next piece's text (a group or command open at its end)"
-            } else if got.input.is_some() != exp.input.is_some() || got.stop != exp.stop {
-                "reads a file or stops where the layout did not place one"
-            } else if got.cut != exp.cut {
-                "ends at a cut the layout did not make"
-            } else if got.endinput != exp.endinput {
-                "ends its file (\\endinput) where the layout did not"
-            } else {
-                "ends the job where the layout did not"
-            };
-            let why = format!(
-                "the sequence of pieces did not settle ({MAX_STALLED_ROUNDS} rounds in a row placed nothing new, or {MAX_ROUNDS} in all): in the last, which may not lay it out again, piece {k}'s run {what}"
-            );
-            stall(g, sh, parked, &why);
-            return true;
-        }
-        if sh.restructure_ok && !g.p[k].got.same(&g.p[k].expect) {
-            if sh.sched.is_some() {
-                let t = sh.now();
-                let why = g.p[k].got.differs(&g.p[k].expect);
-                sh.ev(Ev { wid: 0, kind: 8, k: k as u32, t: [t, t, 0, 0, 0, 0], a: u64::from(g.p[k].got.join), b: 0, c: why, d: 0, e: 0 });
-            }
-            // (a settled run reading on into the next text where the layout
-            // did not join them: the pieces after it begin in the middle of
-            // a command, they wait for the sequence laid out again — the
-            // runs in progress finish and are kept where they hold. A run
-            // the layout already joined saying otherwise of something else
-            // — its job's end — waits as any other, for its page quantities
-            // to be validated: else it flips with them round after round)
-            if g.p[k].got.join && !g.p[k].expect.join {
-                if k + 1 < n && g.p[k + 1].status == Status::Running {
-                    sh.cancel[k + 1].store(true, Ordering::Relaxed);
-                }
-                // (once what it read of the page builder's definitions and
-                // quantities is confirmed: the scan reaches it and runs it
-                // again if they differ — a join made on the last round's
-                // routines is not the sequence's)
-                if !fold_confirmed(g, k) {
-                    for &q in &g.running {
-                        if q > k {
-                            sh.cancel[q].store(true, Ordering::Relaxed);
-                        }
-                    }
-                    g.due_at = Some(g.due_at.map_or(k, |d| d.min(k)));
-                    g.restructure_due = true;
-                    g.settled += 1;
-                    continue;
-                }
-                rounds_shown(g);
-                restructure_now(g, sh);
-                return true;
-            }
-            // (a run reading a file, ending its file or stopping where the
-            // layout did not say, final — no fold read unchecked, entered as
-            // its piece is: nothing can mark it again and give back its old
-            // `got` —: the pieces after it are laid out again, and none runs
-            // on the old layout, where the names the file defines are not
-            // defined yet (biglatex: the body ran 1.35 s before its class
-            // was read, all of it thrown away). The runs in progress after
-            // it stop; what they finished is kept as at any round's end.)
-            // (after a round that placed nothing new, the round runs to its
-            // end as before: what tells the layout the rest may come from
-            // the pieces after this one — TRIP's `\input tripos` reads a file
-            // the run itself writes at a shipout; ended at once, every round
-            // repeated the same change and never laid it out)
-            // (and only when the change's cause is known now: a file read as
-            // it is in the directories or given, not one this build writes —
-            // a fold value or a guess from an earlier round's probes says
-            // it does —, or an `\endinput`, a stop, a cut)
-            let cause_known = g.p[k].got.input.as_ref().is_none_or(|f| sh.names.file_as_given(&f.name));
-            if !sh.at_once || !cause_known {
-                g.restructure_due = true;
-                g.settled += 1;
-                continue;
-            }
-            for &q in &g.running {
-                if q > k {
-                    sh.cancel[q].store(true, Ordering::Relaxed);
-                }
-            }
-            if change_final(g, k) {
-                restructure_now(g, sh);
-                return true;
-            }
-            // (not final: the pieces after it wait, `due_at`)
-            g.due_at = Some(g.due_at.map_or(k, |d| d.min(k)));
-            g.restructure_due = true;
-        }
-        g.settled += 1;
-    }
-    if g.restructure_due && g.settled == n {
-        // (a run that said so may have run again since)
-        if (0..n).any(|k| !g.p[k].got.same(&g.p[k].expect)) {
-            // (not while such a run reads the page builder's quantities the
-            // scan has not validated yet: what it says of the sequence
-            // holds once they do — the scan may run it again —, else the
-            // next layout assumes what a refuted read made it say, and its
-            // run, on the validated value, says the other: the sequence
-            // flips round after round (trip's `\end` ending the job or not))
-            if (0..n).any(|k| !g.p[k].got.same(&g.p[k].expect) && !fold_confirmed(g, k)) {
-                return false;
-            }
-            rounds_shown(g);
-            restructure_now(g, sh);
-            return true;
-        }
-        g.restructure_due = false;
-    }
-    false
-}
-
-/// Whether what piece `k`'s run read of the page builder (its quantities,
-/// the definitions its routines made between nodes) holds for this round:
-/// none read, or the scan has gone past the piece (it checked them, or
-/// they are the last build's at the same material, or the run was made
-/// after the scan's definitions before it), or the scan is done — nothing
-/// will confirm them later, and a change waiting for that (a join, the
-/// round's end) would wait for ever, or the round end on a layout its runs
-/// refute.
-fn fold_confirmed(g: &State, k: usize) -> bool {
-    !g.p[k].fold_unchecked || k < g.scan_next || g.scan_done
-}
-
-/// Whether piece `k`'s settled run changes the sequence and nothing can
-/// give back its old `got`: done, unmarked, no fold read unchecked, entered
-/// as its piece is.
-fn change_final(g: &State, k: usize) -> bool {
-    let ps = &g.p[k];
-    ps.status == Status::Done
-        && ps.dirty.is_empty()
-        && fold_confirmed(g, k)
-        && !ps.got.same(&ps.expect)
-        && ps.run.as_ref().is_some_and(|r| entry_holds(g, k, r))
-}
-
-/// (`PHITEX_ROUNDS`) Why a round ends without output: each settled piece
-/// whose run says otherwise of the sequence than the layout assumed.
-fn rounds_shown(g: &State) {
-    if std::env::var_os("PHITEX_ROUNDS").is_none() {
-        return;
-    }
-    let show = |e: &Expect| {
-        format!(
-            "input {:?} stop {} endinput {} ends {} cut {} join {}",
-            e.input.as_ref().map(|f| (f.name.clone(), f.text.len())),
-            e.stop,
-            e.endinput,
-            e.ends,
-            e.cut,
-            e.join
-        )
-    };
-    for (k, ps) in g.p.iter().enumerate().filter(|(_, p)| p.status == Status::Done && !p.got.same(&p.expect)) {
-        eprintln!(
-            "round ends: piece {k} of {} (id {:?}, inline {}, entry {:?}, len {}, [{}]): got [{}] the layout assumed [{}]",
-            g.p.len(),
-            ps.id,
-            ps.inline,
-            ps.entry,
-            ps.text.len(),
-            ps.text.iter().take(50).collect::<String>().replace('\r', "|"),
-            show(&ps.got),
-            show(&ps.expect)
-        );
-        // (the reads of what the build makes itself — written files, the
-        // page builder's quantities —, which a run may say otherwise on)
-        if let Some(r) = &ps.run {
-            eprintln!(
-                "  run: {} nodes, crossed {}, entry {:016x}, text {:016x}, stops {:?}, dirty {}, fold unchecked {}, status {:?}",
-                r.nodes_len(),
-                r.crossed,
-                crate::hash::hash_of(&format!("{:?}", r.entry())),
-                crate::hash::hash_of(&*ps.text),
-                ps.stops,
-                ps.dirty.len(),
-                ps.fold_unchecked,
-                ps.status
-            );
-            if std::env::var_os("PHITEX_ROUNDS_READS").is_some() {
-                let mut rs: Vec<&(Key, u32, Val)> = r.all_reads().iter().collect();
-                rs.sort_by_key(|x| x.1);
-                for (key, n, v) in rs.iter().take(400) {
-                    eprintln!("  first-read n{n} {key:?} = {:016x}", crate::hash::hash_of(&format!("{v:?}")));
-                }
-            }
-            for (key, n, v) in r.all_reads().iter().filter(|x| matches!(x.0, Key::File(_) | Key::Page(_))) {
-                eprintln!("  read {key:?} at node {n}: {:016x}", crate::hash::hash_of(&format!("{v:?}")));
-            }
-        }
+        g.num_last = Some(k);
     }
 }
 
 /// The scheduler: a function of the state, choosing this thread's next
 /// piece of work.
 fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
-    if g.restructure {
+    if g.done {
         return None;
     }
-    let n = g.p.len();
-    if settle(g, sh) {
-        return None;
-    }
-    // (a change waiting to be final, now final: the round ends)
-    if let Some(d) = g.due_at
-        && change_final(g, d)
-    {
-        restructure_now(g, sh);
-        return None;
-    }
+    rekey(g, sh);
+    settle(g, sh);
     if g.matching {
         advance_match(g);
-        // (the matching may have confirmed the change waiting)
-        if let Some(d) = g.due_at
-            && change_final(g, d)
-        {
-            restructure_now(g, sh);
-            return None;
+    }
+    let scan_from = scan_at(g);
+    let mut scan_to = scan_from.map(|x| x.0);
+    let mut fed: Vec<PieceId> = Vec::new();
+    if g.scan.is_some() && !g.scan_done {
+        while let Some(k) = scan_to {
+            if is_settled(g, k) && lines_ready(g, k) {
+                fed.push(k);
+                scan_to = g.seq.next_live(k);
+            } else {
+                break;
+            }
         }
     }
-    let mut scan_to = g.scan_next;
-    // (while the scan is out, nothing to look for: its next pieces are
-    // counted when it is back)
-    while g.scan.is_some() && scan_to < g.settled && lines_ready(g, scan_to) {
-        scan_to += 1;
-    }
     // (a settled piece whose lines are all broken: its part of the log)
-    while g.log_next < g.settled && lines_ready(g, g.log_next) {
-        let k = g.log_next;
-        let ps = &g.p[k];
+    while let Some(k) = after_cursor(g, g.log_last) {
+        if !is_settled(g, k) || !lines_ready(g, k) {
+            break;
+        }
+        let ps = &g.seq.p[k as usize];
         let run = ps.run.as_ref().expect("a settled piece has a run");
         if !ps.log.as_ref().is_some_and(|f| f.holds(run, &ps.lines)) {
             g.log_queue.push_back(k);
         }
-        g.log_next += 1;
+        g.log_last = Some(k);
     }
-    let scan_finish = g.scan_next == n && g.settled == n && !g.scan_done;
-    let scan_ok = g.scan.is_some() && (scan_to > g.scan_next || scan_finish);
+    let scan_finish = g.scan.is_some() && !g.scan_done && scan_to.is_none() && g.settled.is_none();
+    let scan_ok = g.scan.is_some() && !g.scan_done && (!fed.is_empty() || scan_finish);
     let speculate = sh.opts.reads == Reads::Speculate;
-    let due = g.due_at.unwrap_or(usize::MAX);
     let ready = g
         .unstarted
         .iter()
-        .copied()
-        .take_while(|&k| k <= due)
-        .find(|&k| entry_ready(g, k, speculate && !g.p[k].suspend));
-    let run_ok = ready.is_some();
-    // (priority: pages out first, then the scan, the reading, line breaking)
+        .map(|x| x.1)
+        .find(|&k| entry_ready(g, k, speculate && !g.seq.p[k as usize].suspend));
     let mut kinds = [0u8; 5];
     let mut nk = 0;
     for (ok, kind) in [
         (!g.ship_queue.is_empty(), 3u8),
         (scan_ok, 2),
-        (run_ok, 0),
+        (ready.is_some(), 0),
         (!g.break_queue.is_empty(), 1),
         (!g.log_queue.is_empty(), 4),
     ] {
@@ -5186,18 +4180,15 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
             let k = match sh.opts.order {
                 Order::Random(_) => {
                     let i = rand(g, g.unstarted.len());
-                    let k = *g.unstarted.iter().nth(i).expect("an unstarted piece");
-                    if k <= due && entry_ready(g, k, speculate) {
-                        k
-                    } else {
-                        first
-                    }
+                    let k = g.unstarted.iter().nth(i).expect("an unstarted piece").1;
+                    if entry_ready(g, k, speculate && !g.seq.p[k as usize].suspend) { k } else { first }
                 }
                 Order::Priority => first,
             };
-            g.unstarted.remove(&k);
-            g.running.insert(k);
-            g.p[k].status = Status::Running;
+            let ord = g.seq.ord(k);
+            g.unstarted.remove(&(ord, k));
+            g.running.insert((ord, k));
+            g.seq.p[k as usize].status = Status::Running;
             let dirty = still_dirty(g, sh, k);
             Some(Task::Run(k, dirty))
         }
@@ -5210,41 +4201,27 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
             Some(Task::Break(k, j, para))
         }
         2 => {
-            let pieces = (g.scan_next..scan_to)
-                .map(|k| {
-                    let ps = &g.p[k];
+            let pieces = fed
+                .iter()
+                .map(|&k| {
+                    let ps = &g.seq.p[k as usize];
                     let r = ps.run.as_ref().expect("a settled piece has a run");
-                    let paras = r
-                        .paras
-                        .iter()
-                        .zip(&ps.lines)
-                        .map(|(p, l)| (p.clone(), l.clone().expect("lines ready")))
-                        .collect();
-                    (r.clone(), paras)
+                    let paras = r.paras.iter().zip(&ps.lines).map(|(p, l)| (p.clone(), l.clone().expect("lines ready"))).collect();
+                    (k, r.clone(), paras)
                 })
                 .collect();
             let predicted = g.predicted.iter().map(|x| x.0).collect();
-            let end_run = g.p.last().and_then(|ps| ps.run.clone());
+            let end_run = g.seq.live_ids().last().and_then(|&k| g.seq.p[k as usize].run.clone().map(|r| (k, r)));
             let scan = g.scan.take().expect("the scan is free");
-            let (from, skip) = (g.scan_next, std::mem::take(&mut g.scan_skip));
+            let from = scan_from.map(|x| x.0).or(end_run.as_ref().map(|x| x.0)).unwrap_or(0);
+            let skip = scan_from.map_or(0, |x| x.1);
             // (no convergence before a run whose page quantities the scan
             // has not validated)
-            let converge = if g.p[g.scan_next.min(g.p.len())..].iter().any(|ps| ps.fold_unchecked) {
-                None
-            } else {
-                last_diff(g).map(|after| (after, g.old_orgs.clone()))
-            };
-            Some(Task::Scan {
-                scan,
-                from,
-                skip,
-                converge,
-                to: scan_to,
-                pieces,
-                finish: scan_finish,
-                predicted,
-                end_run,
-            })
+            let unchecked = fed.iter().any(|&k| g.seq.p[k as usize].fold_unchecked);
+            let converge = if unchecked { None } else { last_diff(g).map(|after| (after, g.old_orgs.clone())) };
+            g.scan_inflight = fed.last().copied();
+            g.scan_thread = Some(std::thread::current().id());
+            Some(Task::Scan { scan, sgen: g.scan_gen, from, skip, converge, to: scan_to, pieces, finish: scan_finish, predicted, end_run })
         }
         4 => {
             let i = match sh.opts.order {
@@ -5253,13 +4230,8 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
             };
             let k = g.log_queue.remove(i).expect("a queued piece");
             g.logs_running += 1;
-            let ps = &g.p[k];
-            Some(Task::Log(
-                k,
-                ps.text.clone(),
-                ps.run.clone().expect("a run"),
-                ps.lines.clone(),
-            ))
+            let ps = &g.seq.p[k as usize];
+            Some(Task::Log(k, ps.text.clone(), ps.run.clone().expect("a run"), ps.lines.clone()))
         }
         _ => {
             let i = match sh.opts.order {
@@ -5267,69 +4239,44 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
                 Order::Priority => 0,
             };
             let pg = g.ship_queue.remove(i).expect("a page to ship");
-            Some(Task::Ship(pg, g.pages[pg].clone(), g.numbers.clone()))
+            Some(Task::Ship(pg, g.pages[pg].clone(), g.numbers.clone(), g.scan_gen))
         }
     }
 }
 
 /// Does a task (outside the scheduler's lock) and installs its result.
 /// Returns the work done and its kind.
-fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
+fn execute(sh: &Shared, task: Task) -> (u64, u8) {
     match task {
-        Task::Run(k, dirty) => (run_and_install(sh, k, &dirty, wid), 0),
+        Task::Run(k, dirty) => (run_and_install(sh, k, &dirty), 0),
         Task::Break(k, j, para) => {
             let lines = Arc::new(break_lines(&para));
             let mut g = lock(sh);
             // (the piece may have run again meanwhile: only its own paragraph)
-            let current = g.p[k]
-                .run
-                .as_ref()
-                .and_then(|r| r.paras.get(j))
-                .is_some_and(|q| Arc::ptr_eq(q, &para));
-            if current {
-                g.p[k].lines[j] = Some(lines);
+            let ps = &g.seq.p[k as usize];
+            let current = ps.alive && ps.run.as_ref().and_then(|r| r.paras.get(j)).is_some_and(|q| Arc::ptr_eq(q, &para));
+            if current && j < ps.lines.len() {
+                g.seq.p[k as usize].lines[j] = Some(lines);
             }
             g.stats.breaks_run += 1;
             drop(g);
             sh.cv.notify_all();
             (para.hlist.len() as u64, 1)
         }
-        Task::Scan {
-            mut scan,
-            from,
-            skip,
-            converge,
-            to,
-            pieces,
-            finish,
-            predicted,
-            end_run,
-        } => {
+        Task::Scan { mut scan, sgen, from, skip, converge, to, pieces, finish, predicted, end_run } => {
             let before = scan.fed;
             let mut converged = None;
             // (where the scan stopped, a fire's definitions having reached a
             // node it read: piece and item to go on from)
-            let mut stop: Option<(usize, u32)> = None;
-            let mut env = BuildFold {
-                sh,
-                k: from,
-                node: 0,
-                run: None,
-                predicted,
-                fired: Vec::new(),
-                routines: 0,
-                kept: 0,
-            };
-            // (the pieces whose page-quantity reads all held)
-            let mut checked: Vec<(usize, Arc<Run>)> = Vec::new();
-            'feed: for (d, (run, paras)) in pieces.iter().enumerate() {
-                let k = from + d;
+            let mut stop: Option<(PieceId, u32)> = None;
+            let mut env = BuildFold { sh, k: from, node: 0, run: None, predicted, fired: Vec::new(), routines: 0, kept: 0 };
+            let mut checked: Vec<(PieceId, Arc<Run>)> = Vec::new();
+            'feed: for (d, (k, run, paras)) in pieces.iter().enumerate() {
+                let k = *k;
                 env.k = k;
                 env.run = Some(run.clone());
                 let skip = if d == 0 { skip as usize } else { 0 };
                 let nodes = run.para_nodes();
-                // (its reads of the page builder's quantities, by node: each
-                // validated before the first item of a node at or after it)
                 let freads = page_reads(run);
                 let mut fr = 0usize;
                 let mut i = 0usize;
@@ -5348,11 +4295,11 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
                             break 'feed;
                         }
                         env.node = node;
-                        if env.pass((k as u32, node)) {
+                        if env.pass((k, node)) {
                             stop = Some((k, i as u32));
                             break 'feed;
                         }
-                        scan.feed(it, (k as u32, i as u32), &mut env);
+                        scan.feed(it, (k, i as u32), &mut env);
                         i += 1;
                         if scan.halt {
                             scan.halt = false;
@@ -5360,10 +4307,10 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
                             break 'feed;
                         }
                         // (the same restart point with the same fold state:
-                        // the pages after it are the last build's)
+                        // the pages after it are the last evaluation's)
                         if let Some((page, r, f)) = scan.just.take()
                             && let Some((after, olds)) = &converge
-                            && r.0.0 as usize > *after
+                            && sh.before((*after, END), (r.0.0, 0))
                             && let Some(j) = olds.iter().position(|o| o.resume == Some(r) && o.fold == f)
                         {
                             converged = Some((page as usize, j));
@@ -5371,8 +4318,6 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
                         }
                     }
                 }
-                // (the reads after its last node with material: the page as
-                // the piece's material leaves it)
                 if !check_page_reads(sh, &scan, k, &freads, &mut fr, None) {
                     stop = Some((k, i as u32));
                     break 'feed;
@@ -5380,47 +4325,62 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
                 checked.push((k, run.clone()));
             }
             if finish && converged.is_none() && stop.is_none() {
-                if let Some(r) = end_run {
-                    env.k = to.saturating_sub(1);
-                    env.node = r.nodes_len().saturating_sub(1) as u32;
-                    env.run = Some(r);
-                }
-                if env.pass((u32::MAX, 0)) {
-                    stop = Some((to, 0));
+                let end_org = match &end_run {
+                    Some((ek, r)) => {
+                        env.k = *ek;
+                        env.node = r.nodes_len().saturating_sub(1) as u32;
+                        env.run = Some(r.clone());
+                        (*ek, u32::MAX)
+                    }
+                    None => (0, u32::MAX),
+                };
+                if env.pass_all() {
+                    stop = end_run.as_ref().map(|(ek, _)| (*ek, u32::MAX));
                 } else {
-                    scan.finish((to as u32, 0), &mut env);
+                    scan.finish(end_org, &mut env);
                 }
             }
             let (routines, routines_kept) = (env.routines, env.kept);
             let work = scan.fed - before;
-            let (new, mut new_orgs) = scan.take_pages();
-            for o in &mut new_orgs {
-                let v = std::mem::take(Arc::make_mut(&mut o.pdf));
-                o.pdf = pdf_ids(&sh.seq, v);
-            }
-            let tail = (finish && stop.is_none() && converged.is_none()).then(|| pdf_ids(&sh.seq, std::mem::take(&mut scan.pdf)));
+            let (new, new_orgs) = scan.take_pages();
+            let tail = (finish && stop.is_none() && converged.is_none()).then(|| Arc::new(std::mem::take(&mut scan.pdf)));
             let mut g = lock(sh);
+            if sgen != g.scan_gen {
+                // (the scan was made again from the start meanwhile)
+                drop(g);
+                sh.cv.notify_all();
+                return (work, 2);
+            }
+            g.scan_inflight = None;
+            g.scan_thread = None;
             if let Some(t) = tail {
                 g.pdf_tail = t;
             }
             for (k, r) in checked {
-                if g.p[k].run.as_ref().is_some_and(|x| Arc::ptr_eq(x, &r)) {
-                    g.p[k].fold_unchecked = false;
+                if g.seq.p[k as usize].run.as_ref().is_some_and(|x| Arc::ptr_eq(x, &r)) {
+                    g.seq.p[k as usize].fold_unchecked = false;
                 }
             }
             g.stats.routines += routines;
             g.stats.routines_kept += routines_kept;
             let finish = finish && stop.is_none();
-            let to = match stop {
-                Some((k, i)) => {
-                    g.scan_skip = i;
-                    k
-                }
-                None => to,
+            let _ = to;
+            if std::env::var_os("PHITEX_STRUCT").is_some() {
+                let ids: Vec<String> = pieces.iter().map(|(k, _, _)| format!("{k}[{}]", g.seq.p[*k as usize].text.iter().take(12).collect::<String>().replace('\n', "|"))).collect();
+                eprintln!("scan: from {from} skip {skip} fed {} stop {stop:?} finish {finish}", ids.join(" "));
+            }
+            let part = match stop {
+                Some((k, i)) if i != u32::MAX => Some((k, i)),
+                _ => None,
             };
             // (the pieces the scan passed drop their nodes, if lean)
-            for k in g.scan_next.min(to)..to {
-                let ps = &mut g.p[k];
+            for &(k, _, _) in &pieces {
+                if part.is_some_and(|p| p.0 == k) {
+                    break;
+                }
+                g.scan_last = Some(k);
+                g.scan_part = None;
+                let ps = &mut g.seq.p[k as usize];
                 if let Some((full, l)) = ps.lean_later.take()
                     && ps.status == Status::Done
                     && ps.run.as_ref().is_some_and(|r| Arc::ptr_eq(r, &full))
@@ -5428,24 +4388,17 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
                     ps.run = Some(l);
                 }
             }
-            g.scan_next = to;
-            // (the fonts the pieces fed load, numbered)
-            while g.numbered < to {
-                let k = g.numbered;
-                if let Some(r) = g.p[k].run.clone() {
-                    dvi::extend(Arc::make_mut(&mut g.numbers), &r.fonts);
-                }
-                g.numbered += 1;
+            if matches!(stop, Some((_, u32::MAX))) {
+                g.scan_last = g.seq.live_ids().last().copied();
             }
+            if let Some(p) = part {
+                g.scan_last = g.seq.prev_live(p.0);
+                g.scan_part = (p.1 > 0).then_some(p);
+            }
+            number_through(&mut g);
             for (pg, org) in new.into_iter().zip(new_orgs) {
                 let i = g.pages.len();
-                // (unchanged lines are the same `Arc`s: a cheap comparison)
-                let same = g
-                    .old_pages
-                    .get(i)
-                    .and_then(Option::as_ref)
-                    .filter(|(op, _)| *op == pg)
-                    .map(|(_, b)| b.clone());
+                let same = g.old_pages.get(i).and_then(Option::as_ref).filter(|(op, _)| *op == pg).map(|(_, b)| b.clone());
                 g.pages.push(pg);
                 g.orgs.push(org);
                 if let Some(b) = same {
@@ -5458,18 +4411,20 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
                 }
             }
             for (k, r) in std::mem::take(&mut scan.late) {
-                g.orgs[k as usize].resume = Some(r);
+                if let Some(o) = g.orgs.get_mut(k as usize) {
+                    o.resume = Some(r);
+                }
             }
             if let Some((k, j)) = converged {
                 // (new page k and old page j have the same restart point,
-                // after the last difference: the fold from there is the
-                // last build's, its pages and marks shifted)
+                // after the last difference: the fold from there is the last
+                // evaluation's, its pages and marks shifted)
                 let olds = g.old_orgs.clone();
                 let made = g.pages.len();
                 let shift = k as i64 - j as i64;
                 let dmarks = i64::from(g.orgs[k].call_idx) - i64::from(olds[j].call_idx);
                 for i in (made as i64 - shift) as usize..g.old_pages.len() {
-                    let (pg, b) = g.old_pages[i].take().expect("an old page");
+                    let Some((pg, b)) = g.old_pages[i].take() else { continue };
                     g.pages.push(pg);
                     g.bodies.push(Some(b));
                     let mut o = olds[i].clone();
@@ -5482,13 +4437,7 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
                 let done = (g.marks_before.len() + scan.marks.len()) as i64;
                 let from = (done - dmarks) as usize;
                 let sh_ = |x: u32| (i64::from(x) + shift) as u32;
-                g.marks_after = g.old_marks[from.min(g.old_marks.len())..]
-                    .iter()
-                    .map(|&(a, b)| (sh_(a), sh_(b)))
-                    .collect();
-                // (the last build's calls from there, their marks and pages
-                // shifted as the pages are)
-                let page_ = |x: u32| (i64::from(x) + shift) as u32;
+                g.marks_after = g.old_marks[from.min(g.old_marks.len())..].iter().map(|&(a, b)| (sh_(a), sh_(b))).collect();
                 g.call_logs_after = g
                     .old_call_logs
                     .iter()
@@ -5497,14 +4446,15 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
                         let l = l
                             .iter()
                             .map(|e| match e {
-                                CallLog::Page(p) => CallLog::Page(page_(*p)),
+                                CallLog::Page(p) => CallLog::Page(sh_(*p)),
                                 CallLog::Text(t) => CallLog::Text(t.clone()),
                             })
                             .collect();
                         ((i64::from(*c) + dmarks) as u32, l)
                     })
                     .collect();
-                g.scan_next = g.p.len();
+                g.scan_last = g.seq.live_ids().last().copied();
+                g.scan_part = None;
                 g.pdf_tail = g.old_pdf_tail.clone();
                 g.scan_done = true;
             }
@@ -5514,27 +4464,24 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
             g.scan = Some(scan);
             drop(g);
             sh.cv.notify_all();
-            // (a lean piece's full run is the scan's alone now: freed on
-            // the drop thread, as a replaced run)
-            for (r, _) in pieces {
+            for (_, r, _) in pieces {
                 let _ = sh.drops.send(r);
             }
             (work, 2)
         }
-        Task::Ship(i, page, numbers) => {
-            // (at the file's start, with nothing defined: the join puts in
-            // or leaves out the `fnt_def`s, and writes again a page whose
-            // commands depend on where it lands)
+        Task::Ship(i, page, numbers, sgen) => {
             let body = Arc::new(dvi::page_body_in(&page, &numbers, &[], &[], 0, sh.names.given.limits.dvi_buf_size));
             let mut g = lock(sh);
-            if body.fixed.is_some() {
-                g.stats.bodies_fixed += 1;
-            }
-            g.bodies[i] = Some(body);
-            g.unshipped -= 1;
-            g.stats.pages_shipped += 1;
-            if let Some(b) = &sh.board {
-                b.pages.fetch_add(1, Ordering::Relaxed);
+            if sgen == g.scan_gen && i < g.bodies.len() {
+                if body.fixed.is_some() {
+                    g.stats.bodies_fixed += 1;
+                }
+                g.bodies[i] = Some(body);
+                g.unshipped -= 1;
+                g.stats.pages_shipped += 1;
+                if let Some(b) = &sh.board {
+                    b.pages.fetch_add(1, Ordering::Relaxed);
+                }
             }
             drop(g);
             sh.cv.notify_all();
@@ -5544,7 +4491,9 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
             let f = Arc::new(logs::fragment(&text, &run, &lines));
             let work = f.entries.len() as u64;
             let mut g = lock(sh);
-            g.p[k].log = Some(f);
+            if g.seq.p[k as usize].alive {
+                g.seq.p[k as usize].log = Some(f);
+            }
             g.logs_running -= 1;
             drop(g);
             sh.cv.notify_all();
@@ -5553,50 +4502,392 @@ fn execute(sh: &Shared, task: Task, wid: u16) -> (u64, u8) {
     }
 }
 
+/// Pieces leave the evaluation (taken out for good, or muted): their runs
+/// in progress stop, their definitions leave the names index (their
+/// readers marked), their edges go when taken out; a cursor on one moves
+/// to `replacement`.
+fn leave(g: &mut State, sh: &Shared, gone: &[PieceId], replacement: Option<PieceId>, out_for_good: bool) {
+    let mut touched: Vec<(PieceId, Vec<Key>)> = Vec::new();
+    for &x in gone {
+        let ord = g.seq.ord(x);
+        if g.running.remove(&(ord, x)) {
+            sh.flags.set(x, CANCEL, true);
+        }
+        g.unstarted.remove(&(ord, x));
+        sh.flags.set(x, DONE, false);
+        let mut keys: Vec<Key> = Vec::new();
+        if let Some(r) = g.seq.p[x as usize].run.clone() {
+            keys.extend(sh.names.drop_piece(x, &r.exports));
+            if out_for_good {
+                for i in 0..r.read_count() {
+                    let key = r.read_at(i).0;
+                    if let Some(m) = sh.readers.shard(key).get_mut(key) {
+                        m.remove(x);
+                    }
+                }
+            }
+        } else if let Some((r, _, _)) = g.seq.p[x as usize].prev.clone() {
+            keys.extend(sh.names.drop_piece(x, &r.exports));
+        }
+        // (the page builder's definitions between its nodes)
+        let mut i = 0;
+        while i < g.fold_defs.len() {
+            if g.fold_defs[i].0 == x {
+                let (_, node, defs) = g.fold_defs.remove(i);
+                for (key, _) in defs {
+                    sh.names.set((x, node), &key, None);
+                    keys.push(key);
+                }
+            } else {
+                i += 1;
+            }
+        }
+        let mut i = 0;
+        while i < g.predicted.len() {
+            if g.predicted[i].0.0 == x {
+                let (pos, ks) = g.predicted.remove(i);
+                for key in ks {
+                    sh.names.set(pos, &key, None);
+                    keys.push(key);
+                }
+            } else {
+                i += 1;
+            }
+        }
+        if out_for_good {
+            let ps = &mut g.seq.p[x as usize];
+            ps.run = None;
+            ps.lines.clear();
+            ps.log = None;
+            ps.lean_later = None;
+            ps.prev = None;
+            ps.dirty.clear();
+        }
+        if g.settled == Some(x) {
+            // (back to the first piece: `settle` walks on to the frontier)
+            g.settled = replacement.or_else(|| g.seq.first_live());
+        }
+        let gone_cursor = |c: Option<PieceId>| c == Some(x);
+        if gone_cursor(g.scan_last) || gone_cursor(g.num_last) || gone_cursor(g.scan_part.map(|p| p.0)) {
+            reset_scan(g);
+        }
+        if gone_cursor(g.log_last) {
+            g.log_last = None;
+        }
+        g.log_queue.retain(|&q| q != x);
+        keys.sort();
+        keys.dedup();
+        if !keys.is_empty() {
+            touched.push((x, keys));
+        }
+    }
+    for (x, keys) in touched {
+        changed_at(g, sh, (x, END), keys);
+    }
+}
+
+/// Pieces enter the evaluation (made, or unmuted): to run, their last run
+/// (if any) standing as the prediction of what they define.
+fn enter(g: &mut State, sh: &Shared, new: &[PieceId]) {
+    g.seq.set_bases();
+    let mut changed: Vec<(PieceId, Vec<Key>)> = Vec::new();
+    {
+        let mut b = sh.names.given.bases.write().expect("bases");
+        for &x in new {
+            b.insert(x, g.seq.p[x as usize].base);
+        }
+    }
+    for &x in new {
+        let ps = &mut g.seq.p[x as usize];
+        if !ps.live() {
+            continue;
+        }
+        ps.status = Status::Unstarted;
+        sh.flags.set(x, DONE, false);
+        sh.flags.set(x, CANCEL, false);
+        let pred = ps.run.clone().or(ps.prev.as_ref().map(|p| p.0.clone()));
+        let ord = g.seq.ord(x);
+        g.unstarted.insert((ord, x));
+        if let Some(r) = pred {
+            let mut keys = Vec::new();
+            for (key, val) in &r.exports {
+                sh.names.set((x, END), key, Some(val));
+                keys.push(key.clone());
+            }
+            changed.push((x, keys));
+        }
+        if g.settled.is_none_or(|s| g.seq.before(x, s)) {
+            g.settled = Some(x);
+        }
+    }
+    for (x, keys) in changed {
+        changed_at(g, sh, (x, END), keys);
+    }
+}
+
+/// The live piece after `k` and what is under it: entered in the state
+/// that leaves; run again if its run was entered otherwise.
+fn recheck_after(g: &mut State, sh: &Shared, k: PieceId) {
+    let end = g.seq.extent_end(k);
+    let Some(q) = g.seq.next_live(end) else { return };
+    let ps = &g.seq.p[q as usize];
+    if ps.status == Status::Done
+        && let Some(r) = ps.run.clone()
+        && !entry_holds(g, q, &r)
+    {
+        mark_entry(g, sh, q);
+    }
+    if g.seq.p[q as usize].status == Status::Running
+        && g.seq.p[q as usize].entered.as_ref().is_some_and(|e| entry_state(&g.seq, q).is_some_and(|now| now != *e))
+    {
+        sh.flags.set(q, CANCEL, true);
+    }
+}
+
+/// Piece `q`'s run was entered otherwise than it is now: it runs again.
+fn mark_entry(g: &mut State, sh: &Shared, q: PieceId) {
+    let ord = g.seq.ord(q);
+    g.seq.p[q as usize].status = Status::Unstarted;
+    g.unstarted.insert((ord, q));
+    g.stats.reruns += 1;
+    sh.flags.set(q, DONE, false);
+    if g.settled.is_none_or(|s| g.seq.before(q, s)) {
+        g.settled = Some(q);
+    }
+    if behind_scan(g, q) {
+        reset_scan(g);
+    }
+}
+
+/// Piece `k`'s run, installed and valid, says what it says of the sequence:
+/// where that differs from the sequence, the sequence is rewritten there
+/// (CORE.md, "Reduction": local rewrites). `was` is what its last run said.
+///
+/// A join (and a caller made to read on, `inline`/`nocut`) cannot be
+/// undone: it waits for the run to be final (`final_`: at the settled
+/// frontier). The rest (a file's pieces, a re-cut, what is muted) is
+/// undone by the run that says otherwise, and is applied at once.
+fn apply_structure(g: &mut State, sh: &Shared, k: PieceId, was: &Expect, final_: bool) {
+    let got = g.seq.p[k as usize].got.clone();
+    let count = |g: &mut State, sh: &Shared, what: &str| -> bool {
+        let ps = &mut g.seq.p[k as usize];
+        ps.edits += 1;
+        if std::env::var_os("PHITEX_STRUCT").is_some() {
+            eprintln!("structure: piece {k} {what} (rewrite {}) got {:?} [{}]", ps.edits, (got.join, got.cut, got.stop, got.input.is_some(), got.ends, got.endinput), ps.text.iter().take(30).collect::<String>().replace('\n', "|"));
+        }
+        if ps.edits > EDIT_LIMIT {
+            let why = format!(
+                "the sequence of pieces did not settle: piece {k}'s run rewrote it {EDIT_LIMIT} times [{}]",
+                ps.text.iter().take(50).collect::<String>().replace('\r', "|")
+            );
+            stall(g, sh, &why);
+            return false;
+        }
+        true
+    };
+    // (a run reading on past its text: it and the texts after it in its
+    // list are one piece)
+    if got.join && final_ {
+        let sibs = g.seq.join_siblings(k);
+        if !sibs.is_empty() {
+            if !count(g, sh, "join") {
+                return;
+            }
+            let prev: Prev = {
+                let ps = &g.seq.p[k as usize];
+                (ps.run.clone().expect("a run"), ps.lines.clone(), ps.text.clone())
+            };
+            let (j, removed) = g.seq.join(k, &sibs);
+            rekey(g, sh);
+            g.seq.p[j as usize].prev = Some(prev);
+            leave(g, sh, &removed, Some(j), true);
+            enter(g, sh, &[j]);
+            recheck_after(g, sh, j);
+            return;
+        }
+        // (its list's last text: a file's, read in its caller; a re-cut's,
+        // whose caller does not stop at the cut)
+        let l = g.seq.p[k as usize].list;
+        let (kind, caller) = {
+            let li = &g.seq.lists[l as usize];
+            (li.kind.clone(), li.caller)
+        };
+        if let Some(c) = caller
+            && g.seq.p[c as usize].live()
+        {
+            if !count(g, sh, "inline/nocut") {
+                return;
+            }
+            match kind {
+                ListKind::File(_) => g.seq.p[c as usize].inline = true,
+                _ => g.seq.p[c as usize].nocut = true,
+            }
+            let kids = remove_kids(g, c);
+            leave(g, sh, &kids, None, true);
+            mark_entry(g, sh, c);
+            recheck_after(g, sh, c);
+            return;
+        }
+    }
+    let mut changed = false;
+    // (a cut the cutter missed: the rest of the text cut again after it)
+    let recut_at = g.seq.p[k as usize].recut.map(|l| g.seq.lists[l as usize].stop);
+    let want_cut = got.cut.then_some(got.stop);
+    if recut_at != want_cut {
+        if !count(g, sh, "recut") {
+            return;
+        }
+        let kids = remove_kids(g, k);
+        leave(g, sh, &kids, None, true);
+        if let Some(stop) = want_cut {
+            let new = g.seq.make_recut(k, stop);
+            rekey(g, sh);
+            enter(g, sh, &new);
+        }
+        changed = true;
+    }
+    // (an `\input`: the file's pieces and the rest of the line after it)
+    let want = if g.seq.p[k as usize].inline { None } else { got.input.clone() };
+    let have = g.seq.p[k as usize].file.map(|l| {
+        let li = &g.seq.lists[l as usize];
+        (li.kind.clone(), li.stop)
+    });
+    let same = match (&want, &have) {
+        (None, None) => true,
+        (Some(f), Some((ListKind::File(h), stop))) => (Arc::ptr_eq(f, h) || **f == **h) && *stop == got.stop,
+        _ => false,
+    };
+    if !same && !(want.is_none() && have.is_none()) {
+        if !count(g, sh, "input") {
+            return;
+        }
+        if have.is_some() {
+            let kids = remove_kids(g, k);
+            leave(g, sh, &kids, None, true);
+        }
+        if let Some(f) = want {
+            if g.seq.depth(k) > 64 {
+                g.seq.p[k as usize].inline = true;
+                mark_entry(g, sh, k);
+            } else {
+                let new = g.seq.make_file(k, f, got.stop);
+                rekey(g, sh);
+                enter(g, sh, &new);
+            }
+        }
+        changed = true;
+    }
+    // (the job's end, a file's end: what follows is muted, or back)
+    let _ = was;
+    if (got.ends, got.endinput) != g.seq.p[k as usize].muting || changed {
+        g.seq.p[k as usize].muting = (got.ends, got.endinput);
+        let (muted, unmuted) = g.seq.recompute_mutes();
+        if std::env::var_os("PHITEX_STRUCT").is_some() {
+            eprintln!("mutes: after piece {k} (ends {} was {}, endinput {} was {}): muted {muted:?} unmuted {unmuted:?}", got.ends, was.ends, got.endinput, was.endinput);
+        }
+        if !muted.is_empty() {
+            leave(g, sh, &muted, None, false);
+        }
+        if !unmuted.is_empty() {
+            for &x in &unmuted {
+                let ps = &mut g.seq.p[x as usize];
+                if ps.run.is_some() && ps.prev.is_none() {
+                    ps.prev = ps.run.as_ref().map(|r| (r.clone(), ps.lines.clone(), ps.text.clone()));
+                }
+            }
+            enter(g, sh, &unmuted);
+        }
+        if !muted.is_empty() || !unmuted.is_empty() {
+            // (the entries after what changed)
+            for q in g.seq.live_ids() {
+                let ps = &g.seq.p[q as usize];
+                if ps.status == Status::Done
+                    && let Some(r) = ps.run.clone()
+                    && !entry_holds(g, q, &r)
+                {
+                    mark_entry(g, sh, q);
+                }
+            }
+        }
+    }
+    if changed {
+        recheck_after(g, sh, k);
+    }
+}
+
+/// Takes out what is under piece `k` (its file's pieces and rest, its
+/// re-cut's pieces): those taken out.
+fn remove_kids(g: &mut State, k: PieceId) -> Vec<PieceId> {
+    let end = g.seq.extent_end(k);
+    if end == k {
+        let ps = &mut g.seq.p[k as usize];
+        for l in [ps.file.take(), ps.recut.take()].into_iter().flatten() {
+            g.seq.lists[l as usize].alive = false;
+        }
+        return Vec::new();
+    }
+    let first = g.seq.labels().next(k).expect("a piece under it");
+    // (taken out one top-level piece at a time, each with what is under it)
+    let mut out = Vec::new();
+    let mut x = Some(first);
+    let end_ord = g.seq.ord(end);
+    while let Some(j) = x {
+        if g.seq.ord(j) > end_ord {
+            break;
+        }
+        let next_after = {
+            let e = g.seq.extent_end(j);
+            g.seq.labels().next(e)
+        };
+        out.extend(g.seq.remove_extent(j));
+        x = next_after;
+    }
+    let ps = &mut g.seq.p[k as usize];
+    for l in [ps.file.take(), ps.recut.take()].into_iter().flatten() {
+        g.seq.lists[l as usize].alive = false;
+    }
+    out
+}
+
 /// Runs piece `k` (marked running by whoever chose it) from its dirty
-/// nodes and installs the run: its exports into the names index, its
-/// reads as edges, the readers its changed definitions reach marked; its
-/// own reads validated against the index as it is now.
-fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64 {
-    let tb = sh.now();
-    let k32 = u32::try_from(k).unwrap_or(u32::MAX);
-    let (text, old, entry, strict, entry_assumed, old_srcs) = {
+/// nodes and installs the run: its exports into the names index, its reads
+/// as edges, the readers its changed definitions reach marked; its own
+/// reads validated against the index as it is now; what it says of the
+/// sequence made so.
+fn run_and_install(sh: &Shared, k: PieceId, dirty: &[(Key, u32)]) -> u64 {
+    let (text, old, entry, strict, entry_assumed, old_srcs, follows, inline, nocut, stops) = {
         let mut g = lock(sh);
-        // (kept again only if no mark came since it was picked: a mark
-        // made while it was Running is in its dirty names, not its status)
-        if std::mem::take(&mut g.p[k].recheck) && dirty.is_empty() && g.p[k].dirty.is_empty() && keep_again(&mut g, sh, k) {
+        let ord = g.seq.ord(k);
+        if !g.seq.p[k as usize].live() {
+            g.running.remove(&(ord, k));
             drop(g);
-            let t = sh.now();
-            sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, t, t, t, t, t], a: 0, b: 0, c: 3, d: 0, e: 0 });
             notify(sh, true);
             return 0;
         }
-        g.p[k].entered = entry_state(&g, k);
-        let ps = &g.p[k];
-        // (entered on the state assumed at the cut: the piece before it
-        // has not settled its run)
-        let entry_assumed =
-            matches!(ps.entry, Entry::After(q, _) if !(g.p[q].status == Status::Done && g.p[q].dirty.is_empty()));
+        if std::mem::take(&mut g.seq.p[k as usize].recheck)
+            && dirty.is_empty()
+            && g.seq.p[k as usize].dirty.is_empty()
+            && keep_again(&mut g, sh, k)
+        {
+            drop(g);
+            notify(sh, true);
+            return 0;
+        }
+        g.seq.p[k as usize].entered = entry_state(&g.seq, k);
+        let assumed = entry_assumed(&g, k);
+        let follows = g.seq.next_live(k).is_some();
+        let ps = &g.seq.p[k as usize];
         let old = match (&ps.run, &ps.prev) {
             (Some(r), _) => Some((r.clone(), ps.text.clone())),
             (None, Some((r, _, t))) => Some((r.clone(), t.clone())),
             (None, None) => None,
         };
-        // (the old run's edges' sources: nobody moves a running piece's
-        // edges — `reached` moves a settled piece's, `still_dirty` one's
-        // about to run)
-        (ps.text.clone(), old, ps.entered.clone(), ps.suspend, entry_assumed, ps.srcs.clone())
+        (ps.text.clone(), old, ps.entered.clone(), ps.suspend, assumed, ps.srcs.clone(), follows, ps.inline, ps.nocut, ps.stops.clone())
     };
-    sh.cancel[k].store(false, Ordering::Relaxed);
-    let tr = sh.now();
+    sh.flags.set(k, CANCEL, false);
     let mut env = PieceEnv {
         sh,
         k,
-        wid,
-        idx: (0, 0),
-        last_check: sh.now(),
-        node_ran: 0,
-        slow: Vec::new(),
         spec: sh.opts.reads == Reads::Speculate && !strict,
         strict,
         predicted: Vec::new(),
@@ -5605,102 +4896,59 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
         entry_assumed,
         seen: FxMap::default(),
         fold_read: false,
+        follows,
+        inline,
+        nocut,
+        stops,
     };
-    let run = Arc::new(run_piece(
-        &text,
-        &mut env,
-        old.as_ref().map(|(r, t)| (&**r, &t[..])),
-        dirty,
-        entry.as_ref(),
-    ));
-    let te = sh.now();
+    let run = Arc::new(run_piece(&text, &mut env, old.as_ref().map(|(r, t)| (&**r, &t[..])), dirty, entry.as_ref()));
     if run.abandoned {
-        // (not a result: the piece runs again, from its last run, its
-        // dirty names still dirty)
-        let ta = sh.now();
         let mut g = lock(sh);
-        let t = sh.now();
-        sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, tr, te, t, t, ta], a: run.ran, b: run.nodes_len() as u64, c: 2, d: env.idx.0, e: env.idx.1 });
         g.stats.abandoned += 1;
         g.stats.commands_run += run.ran;
-        g.p[k].suspend |= env.gave_up;
-        for (key, from) in dirty {
-            dirty_from(&mut g.p[k].dirty, key.clone(), *from);
+        let ord = g.seq.ord(k);
+        g.running.remove(&(ord, k));
+        if g.seq.p[k as usize].live() {
+            g.seq.p[k as usize].suspend |= env.gave_up;
+            for (key, from) in dirty {
+                dirty_from(&mut g.seq.p[k as usize].dirty, key.clone(), *from);
+            }
+            g.seq.p[k as usize].status = Status::Unstarted;
+            g.unstarted.insert((ord, k));
         }
-        g.p[k].status = Status::Unstarted;
-        g.running.remove(&k);
-        g.unstarted.insert(k);
         drop(g);
         notify(sh, true);
         return run.ran;
     }
     let steps = run.ran;
-    if std::env::var_os("PHITEX_GROUPS").is_some() {
-        let shown = run.groups_shown(&text);
-        eprintln!("groups: piece {k} ran {}: {shown}", run.ran);
-        // (a group opened in this run and open at its end: the nodes from
-        // its opener)
-        if let Some(at) = shown.split("opened at node ").nth(1).and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()).and_then(|x| x.parse::<usize>().ok())
-            && !shown.contains("(before the piece)")
-        {
-            let name = |x: u32| sh.names.cs.name(x).to_string();
-            eprintln!("groups: piece {k} from node {at}:{}", run.nodes_shown(&text, at.saturating_sub(2), 60, &name));
-        }
-    }
-    if std::env::var_os("PHITEX_CENSUS").is_some() {
-        eprintln!("census piece {k} ran {}: {}", run.ran, run.census());
-    }
     let t = Instant::now();
     let got = Expect::of(&run);
-    // (what the piece keeps once it has settled: the run without its nodes)
-    // (a run in an edit keeps its nodes a while: [`HOT_BUILDS`])
     let hot = sh.build_no > 1;
     let lean = (sh.lean && !hot).then(|| Arc::new(run.leaned(&text)));
-    // (what stood for this piece until now: its last run, or for an edited
-    // piece the run of the piece it replaces; nobody else installs this
-    // piece while it runs here)
     let old_run = old.map(|(r, _)| r);
     // (before the lock: each read validated against the names index as it
-    // is now, noting how many changes to the index that has seen; the
-    // names whose values this run changes; the paragraphs it kept)
+    // is now, noting how many changes to the index that has seen; the names
+    // whose values this run changes; the paragraphs it kept)
     let seen = sh.names_gen.load(Ordering::Acquire);
     let mut checks: Vec<(Option<Pos>, bool)> = run
         .reads
         .iter()
         .map(|(key, node, val)| {
-            let (def, now) = sh.names.read_now(key, (k as u32, *node), &sh.font);
+            let (def, now) = sh.names.read_now(key, (k, *node), &sh.font);
             (def, val.seen_as(&now))
         })
         .collect();
     let changed = changed_names(old_run.as_deref(), &run);
     let equal = equal_paras(old_run.as_deref(), &run);
-    // (a run reading the same names as the old one, in the same order,
-    // leaves the edges whose node and source are the same as they are)
     let same_keys = old_run.as_ref().is_some_and(|o| {
-        o.read_count() == run.reads.len()
-            && run
-                .reads
-                .iter()
-                .enumerate()
-                .all(|(i, b)| *o.read_at(i).0 == b.0)
+        o.read_count() == run.reads.len() && run.reads.iter().enumerate().all(|(i, b)| *o.read_at(i).0 == b.0)
     });
     let read_keys: FxSet<&Key> = if old_run.is_some() && !same_keys {
         run.reads.iter().map(|(key, _, _)| key).collect()
     } else {
         FxSet::default()
     };
-    // (from here on the run is installed: no return before the lock below,
-    // or the old run's edges taken out here would be lost while it stays)
-    // (the edges, before the scheduler's lock: the new run's, each with the
-    // piece whose definition answers it now, replace the old run's. In this
-    // order — `seen` taken, the reads validated, the edges in, then the
-    // lock — no mark is lost: an install changing one of these names under
-    // the lock either finds the edge (it went in before that install
-    // looked), or made its change after `seen` (the reads of that name are
-    // validated again under the lock below), or before it (then the read
-    // above already saw the new value). Each shard is locked once.)
-    let id = sh.seq.piece(k);
-    let mut srcs: Vec<PieceId> = checks.iter().map(|&(def, _)| def.map_or(INITIAL, |d| sh.seq.id_at(d))).collect();
+    let mut srcs: Vec<PieceId> = checks.iter().map(|&(def, _)| def.map_or(INITIAL, |d| sh.id_at(d))).collect();
     // (whether read `i` holds its name's edge: its first reader; the page
     // builder's quantities have none, the scan validates each read)
     let holds_edge = |i: usize| {
@@ -5734,69 +4982,60 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
             let mut m = sh.readers.0[sh_i].lock().expect("readers");
             while let Some(&(_, i)) = ins.get(a).filter(|x| x.0 == sh_i) {
                 let (key, node, _) = &run.reads[i];
-                Readers::insert(&mut m, key, id, (*node, srcs[i]));
+                Readers::insert(&mut m, key, k, (*node, srcs[i]));
                 a += 1;
             }
             while let Some(&(_, key)) = gone.get(b).filter(|x| x.0 == sh_i) {
                 if let Some(r) = m.get_mut(key) {
-                    r.remove(id);
+                    r.remove(k);
                 }
                 b += 1;
             }
         }
     }
-    let outcome;
-    let tl;
-    let ta = sh.now();
     {
         let mut g = lock(sh);
-        tl = sh.now();
         let held = Instant::now();
         g.stats.commands_run += run.ran;
-        // (names changed since the reads were validated: those reads again,
-        // and an edge whose source moved follows it; the index changes only
-        // under this lock)
+        let ord = g.seq.ord(k);
+        g.running.remove(&(ord, k));
+        if !g.seq.p[k as usize].live() {
+            // (taken out or muted while it ran: no result)
+            drop(g);
+            notify(sh, true);
+            return steps;
+        }
+        // (names changed since the reads were validated: those reads again)
         let now_gen = sh.names_gen.load(Ordering::Acquire);
         if now_gen != seen {
-            let since: FxSet<&Key> = g.names_log[seen..now_gen].iter().flatten().collect();
+            let since: FxSet<&Key> = g.names_log[seen.min(g.names_log.len())..now_gen.min(g.names_log.len())].iter().flatten().collect();
             for (i, ((key, node, val), c)) in run.reads.iter().zip(&mut checks).enumerate() {
                 if since.contains(key) {
-                    let (def, now) = sh.names.read_now(key, (k as u32, *node), &sh.font);
+                    let (def, now) = sh.names.read_now(key, (k, *node), &sh.font);
                     *c = (def, val.seen_as(&now));
-                    let src = def.map_or(INITIAL, |d| sh.seq.id_at(d));
+                    let src = def.map_or(INITIAL, |d| sh.id_at(d));
                     if src != srcs[i] {
                         srcs[i] = src;
                         if holds_edge(i) {
-                            Readers::insert(&mut sh.readers.shard(key), key, id, (*node, src));
+                            Readers::insert(&mut sh.readers.shard(key), key, k, (*node, src));
                         }
                     }
                 }
             }
         }
-        // (the edges: the new run's, each with the piece whose definition
-        // answers it now, replace the old run's; a read answered otherwise
-        // than it was is stale)
-        let tp1 = sh.now();
-        // (a read answered otherwise than it was is stale)
         let mut stale = Dirty::new();
         for ((key, _, _), &(_, same)) in run.reads.iter().zip(&checks) {
             if !same {
                 dirty_from(&mut stale, key.clone(), 0);
             }
         }
-        g.p[k].srcs = srcs;
-        let tp2 = sh.now();
+        g.seq.p[k as usize].srcs = srcs;
         let mut changed = changed;
         for key in &changed {
             refresh_export(&sh.names, &sh.font, k, &run, key);
         }
-        // (an export a definition between the piece's nodes may shadow:
-        // where its own last definition is may have moved)
         for (key, _) in &run.exports {
-            if sh.names.has_inner(key)
-                && !changed.contains(key)
-                && refresh_export(&sh.names, &sh.font, k, &run, key)
-            {
+            if sh.names.has_inner(key) && !changed.contains(key) && refresh_export(&sh.names, &sh.font, k, &run, key) {
                 changed.push(key.clone());
             }
         }
@@ -5804,222 +5043,74 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
             g.names_log.push(changed.clone());
         }
         sh.names_gen.store(g.names_log.len(), Ordering::Release);
-        g.p[k].run = Some(run.clone());
-        g.p[k].got = got.clone();
-        g.p[k].fold_unchecked = env.fold_read || run.reads.iter().any(|r| matches!(r.0, Key::Page(_)));
-        // (names marked while it ran — a definition made between its nodes
-        // reaching a node whose read the run's first reader of the same
-        // value stands for — are read again)
-        let late = std::mem::take(&mut g.p[k].dirty);
+        let was = std::mem::take(&mut g.seq.p[k as usize].got);
+        g.seq.p[k as usize].run = Some(run.clone());
+        g.seq.p[k as usize].got = got;
+        g.seq.p[k as usize].fold_unchecked = env.fold_read || run.reads.iter().any(|r| matches!(r.0, Key::Page(_)));
+        let late = std::mem::take(&mut g.seq.p[k as usize].dirty);
         for (key, from) in late {
             dirty_from(&mut stale, key, from);
         }
-        g.p[k].runs += 1;
+        g.seq.p[k as usize].runs += 1;
         g.stats.ran += 1;
-        // (a piece run again and again in one build: a livelock of the
-        // core, which fails the build with the pieces' states, as a stall)
-        if g.p[k].runs + 4 >= RUN_LIMIT {
-            for ((key, node, val), &(def, same)) in run.reads.iter().zip(&checks) {
-                if !same {
-                    let now = sh.names.reaching(key, (k as u32, *node), &sh.font);
-                    let o = outside_ranges(&sh.names, key, k, *node, &sh.font);
-                    // (the nodes holding a read of it, and their sources: none
-                    // is an entry no node stands for, which no rerun clears)
-                    let holders: Vec<(usize, String)> = (0..run.chain.nodes.len())
-                        .filter_map(|i| {
-                            let n = &run.chain.nodes[i];
-                            n.reads
-                                .iter()
-                                .find(|r| r.key == *key && (!matches!(r.src, Src::Node(_)) || i.abs_diff(*node as usize) < 4))
-                                .map(|r| (i, format!("{:?}/{:?}/{:?}", r.src, r.cond, r.val)))
-                        })
-                        .take(8)
-                        .collect();
-                    let entries: Vec<(u32, &Val)> = run.reads.iter().filter(|e| e.0 == *key).map(|e| (e.1, &e.2)).collect();
-                    eprintln!("livelock piece {k}: nodes reading {key:?} {holders:?}; its entries {entries:?}");
-                    eprintln!(
-                        "livelock piece {k}: read {key:?} at node {node} saw {} now {} (def {def:?}, reaching {:?} lo {} hi {}; {o})",
-                        format!("{val:?}").chars().take(80).collect::<String>(),
-                        format!("{:?}", now.1).chars().take(80).collect::<String>(),
-                        now.0,
-                        now.2,
-                        now.3
-                    );
-                }
-            }
-            // (the last runs before the limit, for the livelock's dump: the
-            // reads found stale and what the names index has around them)
-            let id = g.p[k].id;
-            let fires: Vec<(u32, usize)> = g.fold_defs.iter().filter(|x| x.0 == id).map(|x| (x.1, x.2.len())).collect();
-            let pred: Vec<Pos> = g.predicted.iter().map(|x| x.0).filter(|p| p.0 == k as u32).collect();
-            let log: Vec<&Vec<Key>> = g.names_log.iter().rev().take(4).collect();
-            eprintln!(
-                "livelock piece {k} run {}: ran {} of {} nodes, read again {:?}, fires here (node, defs) {:?}, predicted here {:?}, names changed last {:?}",
-                g.p[k].runs,
-                run.ran,
-                run.nodes_len(),
-                stale.iter().take(8).collect::<Vec<_>>(),
-                fires,
-                pred,
-                log
-            );
-        }
-        if g.p[k].runs == RUN_LIMIT {
+        if g.seq.p[k as usize].runs == RUN_LIMIT {
             let why = format!(
                 "piece {k} ran {RUN_LIMIT} times (a livelock): read again {:?}, its definitions that changed {:?}",
                 stale.keys().take(8).collect::<Vec<_>>(),
                 changed.iter().take(8).collect::<Vec<_>>()
             );
-            let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
-            stall(&mut g, sh, parked, &why);
+            stall(&mut g, sh, &why);
         }
-        let tp3 = sh.now();
-        g.running.remove(&k);
-        let marks = reached(&mut g, sh, (k as u32, END), &changed);
+        let marks = reached(&mut g, sh, (k, END), &changed);
         for (r, key) in marks {
             if outer_still(&g, sh, r, &key) {
                 continue;
             }
-            if g.rerun_log.is_some() {
-                g.mark_src = MarkSrc::At((k as u32, END), sh.names.at(&key, (k as u32, END)));
-            }
-            if mark(&mut g, r, key) {
-                sh.done[r].store(false, Ordering::Release);
-            } else if g.p[r].status == Status::Running {
-                // (its run read what is defined again: it stops)
-                sh.cancel[r].store(true, Ordering::Relaxed);
+            if !mark(&mut g, &sh.flags, r, key) && g.seq.p[r as usize].status == Status::Running {
+                sh.flags.set(r, CANCEL, true);
             }
         }
-        let tp4 = sh.now();
         queue_breaks(&mut g, k, old_run.as_deref(), &equal);
-        // (a run reading on past its text: the piece after it begins in
-        // the middle of a command, its run in progress is not a result)
-        if got.join && k + 1 < g.p.len() && g.p[k + 1].status == Status::Running {
-            sh.cancel[k + 1].store(true, Ordering::Relaxed);
-        }
-        // (entered in the state its predecessors leave now, or run again)
         let entered = entry_holds(&g, k, &run);
-        // (a change waiting at this piece: its new run says again, or not,
-        // when it settles)
-        if g.due_at == Some(k) {
-            g.due_at = None;
-        }
-        outcome = u32::from(!(stale.is_empty() && entered));
         if stale.is_empty() && entered {
-            g.p[k].lean_later = lean.map(|l| (run.clone(), l));
+            g.seq.p[k as usize].lean_later = lean.map(|l| (run.clone(), l));
             if hot {
-                g.p[k].hot_until = sh.build_no + HOT_BUILDS;
+                g.seq.p[k as usize].hot_until = sh.build_no + HOT_BUILDS;
             }
-            debug_assert!(g.p[k].dirty.is_empty(), "piece {k} installed Done with marks");
-            g.p[k].status = Status::Done;
+            g.seq.p[k as usize].status = Status::Done;
+            sh.flags.set(k, DONE, true);
             if let Some(b) = &sh.board {
                 b.settled.fetch_add(1, Ordering::Relaxed);
             }
-            sh.done[k].store(true, Ordering::Release);
-            // (a run reading another file, or ending its file, changes the
-            // sequence)
-            // (a run that says otherwise of the sequence than the layout
-            // assumed changes it, once it has settled: `pick`)
+            // (what the run says of the sequence: the sequence rewritten
+            // where it says otherwise)
+            apply_structure(&mut g, sh, k, &was, false);
         } else {
-            g.p[k].dirty = stale;
-            g.p[k].status = Status::Unstarted;
-            g.unstarted.insert(k);
+            g.seq.p[k as usize].dirty = stale;
+            g.seq.p[k as usize].status = Status::Unstarted;
+            g.unstarted.insert((ord, k));
             g.stats.reruns += 1;
         }
         // (the pieces entered in the state this one leaves)
-        for q in g.deps[k].clone() {
-            // (a run in progress entered otherwise than its piece is now
-            // stops: it is not a result)
-            if g.p[q].status == Status::Running
-                && g.p[q].entered.as_ref().is_some_and(|e| entry_state(&g, q).is_some_and(|now| now != *e))
-            {
-                sh.cancel[q].store(true, Ordering::Relaxed);
-            }
-            let stale_entry = g.p[q].status == Status::Done
-                && g.p[q].run.as_ref().is_some_and(|r| !entry_holds(&g, q, r));
-            if stale_entry {
-                g.p[q].status = Status::Unstarted;
-                g.unstarted.insert(q);
-                g.stats.reruns += 1;
-                sh.done[q].store(false, Ordering::Release);
-                if q < g.settled {
-                    g.settled = q;
+        if g.seq.p[k as usize].alive {
+            for q in g.seq.dependents(k) {
+                if g.seq.p[q as usize].status == Status::Running
+                    && g.seq.p[q as usize].entered.as_ref().is_some_and(|e| entry_state(&g.seq, q).is_some_and(|now| now != *e))
+                {
+                    sh.flags.set(q, CANCEL, true);
+                }
+                let stale_entry = g.seq.p[q as usize].status == Status::Done
+                    && g.seq.p[q as usize].run.as_ref().is_some_and(|r| !entry_holds(&g, q, r));
+                if stale_entry {
+                    mark_entry(&mut g, sh, q);
                 }
             }
         }
-        let tp5 = sh.now();
-        sh.ev(Ev { wid, kind: 9, k: k32, t: [tl, tp1, tp2, tp3, tp4, tp5], a: run.reads.len() as u64, b: 0, c: 0, d: 0, e: 0 });
-        // (the frontier moves now: every thread may be waiting in a run)
         settle(&mut g, sh);
         g.stats.time_confirm += t.elapsed();
         g.stats.time_held += held.elapsed();
     }
-    sh.ev(Ev { wid, kind: 0, k: k32, t: [tb, tr, te, tl, sh.now(), ta], a: run.ran, b: run.nodes_len() as u64, c: outcome, d: env.idx.0, e: env.idx.1 });
-    if sh.sched.is_some() && te - tr > SLOW_NODE && !env.slow.is_empty() {
-        let first = run.nodes_len().saturating_sub(usize::try_from(run.ran).unwrap_or(usize::MAX));
-        let mut notes = sh.notes.lock().expect("notes");
-        for &(ran, ns) in &env.slow {
-            let i = (first + usize::try_from(ran).unwrap_or(0)).saturating_sub(1).min(run.nodes_len().saturating_sub(1));
-            if run.chain.nodes.is_empty() {
-                break;
-            }
-            let n = &run.chain.nodes[i];
-            let what: Vec<String> = n
-                .reads
-                .iter()
-                .filter(|r| matches!(r.key, Key::File(_) | Key::FontLoaded(_) | Key::Font | Key::ReadStream(_)))
-                .map(|r| format!("{:?}", r.key))
-                .collect();
-            notes.push(format!(
-                "N\t{k}\t{ns}\t{i}\t{:?} {}\t{}",
-                n.kind,
-                crate::val::Shown(&n.cmd, &sh.names.cs),
-                what.join(" ").replace(['\t', '\n'], " ")
-            ));
-        }
-    }
-    if sh.sched.is_some() {
-        let mut m = sh.run_times.lock().expect("run times");
-        let e = m.entry(sh.seq.piece(k)).or_insert((0, 0));
-        e.0 += te - tr;
-        e.1 += run.ran;
-        drop(m);
-    }
-    if sh.sched.is_some() && std::env::var_os("PHITEX_SCHED_DEPS").is_some_and(|v| !v.is_empty()) {
-        // (what read each name from before the piece: its first reader)
-        let v: Vec<String> = run
-            .reads
-            .iter()
-            .map(|(key, node, _)| {
-                if *node as usize >= run.chain.nodes.len() {
-                    return String::new();
-                }
-                let n = &run.chain.nodes[*node as usize];
-                let r = n.reads.iter().find(|r| r.key == *key);
-                // (the nearest node before it defining the name in this
-                // piece, whatever its scope, looked for 5000 nodes back)
-                let lo = (*node as usize).saturating_sub(5000);
-                let def = (lo..*node as usize).rev().find(|&j| run.chain.nodes[j].defs().iter().any(|d| d.key == *key));
-                format!(
-                    "{:?} {} {:?}{} @{} def@{}",
-                    n.kind,
-                    crate::val::Shown(&n.cmd, &sh.names.cs),
-                    r.map(|r| r.field),
-                    if r.is_some_and(|r| r.cond.is_some()) { " phi" } else { "" },
-                    node,
-                    def.map_or_else(|| "-".to_string(), |j| j.to_string())
-                )
-            })
-            .collect();
-        sh.read_cmds.lock().expect("read commands").insert(sh.seq.piece(k), v);
-    }
-    {
-        let _p = sh.park.lock().expect("park");
-        sh.generation.fetch_add(1, Ordering::AcqRel);
-    }
-    sh.parked.notify_all();
-    sh.cv.notify_all();
-    // (the run it replaced goes to be freed elsewhere)
+    notify(sh, true);
     if let Some(o) = old_run {
         let _ = sh.drops.send(o);
     }
@@ -6029,62 +5120,39 @@ fn run_and_install(sh: &Shared, k: usize, dirty: &[(Key, u32)], wid: u16) -> u64
 /// A piece's reads of names from before it.
 struct PieceEnv<'a> {
     sh: &'a Shared,
-    k: usize,
-    /// The worker running it (for `PHITEX_SCHED`'s events).
-    wid: u16,
-    /// Measuring: reads of names from before the piece, and the time they
-    /// took (parks included).
-    idx: (u64, u64),
-    /// Measuring: when `check` last ran, and the nodes that took longer
-    /// than `SLOW_NODE` (the nodes run before them, the time).
-    last_check: u64,
-    node_ran: u64,
-    slow: Vec<(u64, u64)>,
+    k: PieceId,
     /// Reads run on predictions (`Reads::Speculate`, and not a piece whose
     /// speculation was given up).
     spec: bool,
-    /// Every read waits for the pieces before it that may define its name
-    /// (a piece whose speculating run was given up).
+    /// Every read waits for the pieces before it that may define its name.
     strict: bool,
-    /// The reads made on predictions: a definition not installed yet, or
-    /// none while earlier pieces may still make one (name, node, value).
+    /// The reads made on predictions (name, node, value).
     predicted: Vec<(Key, u32, Val)>,
     /// The names index's change count when the predictions were last
     /// checked.
     checked: usize,
-    /// The run was abandoned on predictions nothing confirmed (its piece
-    /// then reads strictly).
+    /// The run was abandoned on predictions nothing confirmed.
     gave_up: bool,
-    /// It was entered on the state assumed at its cut (a prediction too:
-    /// the piece before it had not settled).
+    /// It was entered on the state assumed at its cut.
     entry_assumed: bool,
-    /// Every read from before the piece so far: the name, its reader, the
-    /// value read.
+    /// Every read from before the piece so far.
     seen: FxMap<Key, Vec<(u32, Val)>>,
     /// A read found a definition the page builder made between a piece's
-    /// nodes (an output routine's, `Names::has_inner`): this round's scan
-    /// has not confirmed it yet ([`PState::fold_unchecked`]).
+    /// nodes, not confirmed by this evaluation's scan yet.
     fold_read: bool,
+    /// A piece follows it (a run reading past its text mid-command ends).
+    follows: bool,
+    /// Its `\input`s are read in it.
+    inline: bool,
+    /// It does not end at a cut the cutter missed.
+    nocut: bool,
+    /// Where the texts it was joined from begin.
+    stops: Arc<[usize]>,
 }
 
-/// Measuring: a run reading longer than this (ns) has its five slowest
-/// nodes noted with their commands (`PHITEX_SCHED`'s `N` lines).
-const SLOW_NODE: u64 = 1_000_000_000;
-
-/// How many builds a piece that ran in an edit keeps its nodes for.
-pub const HOT_BUILDS: u64 = 8;
-
-/// How often (in nodes run) a run on predictions looks at them again.
-const CHECK_EVERY: u64 = 1 << 12;
-/// Nodes after which a run on predictions an earlier piece has not
-/// confirmed yet is given up (its piece then waits for them).
-const GIVE_UP_AFTER: u64 = 1 << 18;
-
 impl PieceEnv<'_> {
-    /// Whether a read this run made — a prediction, or a definition since
-    /// made again (its piece ran again) — is refuted: the names index now
-    /// gives another value there. (`from..to`: the changes of the index
-    /// since it last looked.)
+    /// Whether a read this run made is refuted: the names index now gives
+    /// another value there.
     fn refuted(&self, from: usize, to: usize) -> bool {
         let sh = self.sh;
         let keys: Vec<Key> = {
@@ -6095,63 +5163,38 @@ impl PieceEnv<'_> {
             v.dedup();
             v
         };
-        keys.iter().any(|key| {
-            self.seen[key]
-                .iter()
-                .any(|(node, val)| sh.names.reaching(key, (self.k as u32, *node), &sh.font).1 != *val)
-        })
+        keys.iter().any(|key| self.seen[key].iter().any(|(node, val)| sh.names.reaching(key, (self.k, *node), &sh.font).1 != *val))
     }
 
     fn reach_now(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32) {
         let sh = self.sh;
         loop {
             let seen = sh.generation.load(Ordering::Acquire);
-            let (def, val, lo, hi) = sh.names.reaching(key, (self.k as u32, node), &sh.font);
-            // (the run is stopped — the sequence is laid out again, or a
-            // name it read was defined again —: no waiting, any value; it
-            // is not a result)
-            if sh.cancel[self.k].load(Ordering::Relaxed) {
+            let (def, val, lo, hi) = sh.names.reaching(key, (self.k, node), &sh.font);
+            if sh.flags.get(self.k, CANCEL) {
                 return (val, Src::Initial, lo, hi);
             }
-            let wait = |me: &Self| {
-                // (the round is ending: a run that would wait stops)
-                if sh.restructuring.load(Ordering::Acquire) {
-                    sh.cancel[me.k].store(true, Ordering::Relaxed);
-                    return false;
-                }
-                true
-            };
             let Some(d) = def else {
-                // (an undefined name while an earlier piece may still
-                // define it: wait for the earlier pieces, or run the first
-                // of them nobody has started)
+                // (an undefined name while an earlier piece may still define
+                // it: wait for the earlier pieces, or run the first of them
+                // nobody has started)
                 if self.spec || !(self.strict || matches!(val, Val::Meaning(Meaning::Undefined))) {
-                    if self.k > 0 {
-                        self.predicted.push((key.clone(), node, val.clone()));
-                    }
+                    self.predicted.push((key.clone(), node, val.clone()));
                     return (val, Src::Initial, lo, hi);
                 }
-                if !wait(self) {
-                    return (val, Src::Initial, lo, hi);
-                }
+                let me = sh.ord(self.k);
                 let leapfrog = {
                     let mut g = lock(sh);
-                    let ready = g
-                        .unstarted
-                        .iter()
-                        .copied()
-                        .take_while(|&e| e < self.k)
-                        .find(|&e| entry_ready(&g, e, false));
+                    let ready = g.unstarted.range(..(me, 0)).map(|x| x.1).find(|&e| entry_ready(&g, e, false));
                     if let Some(e) = ready {
-                        g.unstarted.remove(&e);
-                        g.running.insert(e);
-                        g.p[e].status = Status::Running;
+                        let eo = g.seq.ord(e);
+                        g.unstarted.remove(&(eo, e));
+                        g.running.insert((eo, e));
+                        g.seq.p[e as usize].status = Status::Running;
                         g.stats.parks += 1;
                         g.stats.leapfrogs += 1;
-                        Some((e, still_dirty(&mut g, self.sh, e)))
-                    } else if g.running.first().is_some_and(|&e| e < self.k)
-                        || g.unstarted.first().is_some_and(|&e| e < self.k)
-                    {
+                        Some((e, still_dirty(&mut g, sh, e)))
+                    } else if g.running.first().is_some_and(|x| x.0 < me) || g.unstarted.first().is_some_and(|x| x.0 < me) {
                         g.stats.parks += 1;
                         None
                     } else {
@@ -6159,24 +5202,18 @@ impl PieceEnv<'_> {
                     }
                 };
                 if let Some((e, dirty)) = leapfrog {
-                    run_and_install(sh, e, &dirty, self.wid);
+                    run_and_install(sh, e, &dirty);
                 } else {
-                    if !wait(self) {
-                        return (val, Src::Initial, lo, hi);
-                    }
-                    let tp = sh.now();
-                    park(sh, self.k, seen);
-                    sh.ev(Ev { wid: self.wid, kind: 6, k: self.k as u32, t: [tp, sh.now(), 0, 0, 0, 0], a: 0, b: 0, c: 0, d: 0, e: 0 });
+                    park(sh, seen);
                 }
                 continue;
             };
             if d.1 != END {
                 self.fold_read = true;
             }
-            let src = Src::Piece(sh.seq.id_at(d));
-            let d = d.0 as usize;
-            // (an element between this piece's own nodes is this run's)
-            if d == self.k || sh.done[d].load(Ordering::Acquire) {
+            let src = Src::Piece(sh.id_at(d));
+            let dk = d.0;
+            if dk == self.k || sh.flags.get(dk, DONE) {
                 return (val, src, lo, hi);
             }
             if self.spec {
@@ -6185,31 +5222,26 @@ impl PieceEnv<'_> {
             }
             // (the definition is being remade: park until it is installed,
             // or make it here if nobody has started)
-            if !wait(self) {
-                return (val, src, lo, hi);
-            }
             let leapfrog = {
                 let mut g = lock(sh);
-                match g.p[d].status {
+                match g.seq.p[dk as usize].status {
                     Status::Done => return (val, src, lo, hi),
+                    _ if !g.seq.p[dk as usize].live() => return (val, src, lo, hi),
                     Status::Unstarted => {
-                        // (not entered yet — it waits for the pieces it is
-                        // entered from —: the first of the pieces before it
-                        // that may run now runs here; a thread parked here
-                        // may be the only one, its own run nested in
-                        // others' it leapfrogged)
-                        let e = if entry_ready(&g, d, false) {
-                            Some(d)
+                        let e = if entry_ready(&g, dk, false) {
+                            Some(dk)
                         } else {
-                            g.unstarted.iter().copied().take_while(|&e| e < d).find(|&e| entry_ready(&g, e, false))
+                            let dord = g.seq.ord(dk);
+                            g.unstarted.range(..(dord, 0)).map(|x| x.1).find(|&e| entry_ready(&g, e, false))
                         };
                         g.stats.parks += 1;
                         e.map(|e| {
-                            g.unstarted.remove(&e);
-                            g.running.insert(e);
-                            g.p[e].status = Status::Running;
+                            let eo = g.seq.ord(e);
+                            g.unstarted.remove(&(eo, e));
+                            g.running.insert((eo, e));
+                            g.seq.p[e as usize].status = Status::Running;
                             g.stats.leapfrogs += 1;
-                            (e, still_dirty(&mut g, self.sh, e))
+                            (e, still_dirty(&mut g, sh, e))
                         })
                     }
                     Status::Running => {
@@ -6219,21 +5251,16 @@ impl PieceEnv<'_> {
                 }
             };
             if let Some((e, dirty)) = leapfrog {
-                run_and_install(sh, e, &dirty, self.wid);
+                run_and_install(sh, e, &dirty);
             } else {
-                if !wait(self) {
-                    return (val, Src::Initial, lo, hi);
-                }
-                let tp = sh.now();
-                park(sh, self.k, seen);
-                sh.ev(Ev { wid: self.wid, kind: 6, k: self.k as u32, t: [tp, sh.now(), 0, 0, 0, 0], a: 0, b: 0, c: 0, d: 0, e: 0 });
+                park(sh, seen);
             }
         }
     }
 
     /// Whether a piece before this one has not settled its run.
     fn unconfirmed(&self) -> bool {
-        (0..self.k).any(|e| !self.sh.done[e].load(Ordering::Acquire))
+        self.sh.settled_at.load(Ordering::Acquire) < self.sh.ord(self.k)
     }
 }
 
@@ -6242,13 +5269,12 @@ impl Env for PieceEnv<'_> {
         &self.sh.names.cs
     }
 
-    // (CORE.md "Reads of folds": predicted, validated by the fold)
     fn folds(&mut self, key: &Key) -> bool {
         matches!(key, Key::Page(_))
     }
 
     fn fold_read(&mut self, key: &Key, node: u32) -> Option<Val> {
-        self.sh.names.fold_value(key, (self.k as u32, node), &self.sh.font)
+        self.sh.names.fold_value(key, (self.k, node), &self.sh.font)
     }
 
     fn limits(&self) -> crate::print::Limits {
@@ -6276,38 +5302,14 @@ impl Env for PieceEnv<'_> {
     }
 
     fn check(&mut self, ran: u64, words: u64) -> Check {
-        // (a node's end: `ran` counts the nodes; the checks every 4096
-        // steps inside a node count steps, and are not node ends)
-        if self.sh.sched.is_some() && (ran == self.node_ran + 1 || self.node_ran == 0) {
-            let now = self.sh.now();
-            let gap = now - self.last_check;
-            // (the five slowest nodes of the run)
-            if self.slow.len() < 5 || gap > self.slow.iter().map(|x| x.1).min().unwrap_or(0) {
-                if self.slow.len() == 5
-                    && let Some(i) = self.slow.iter().enumerate().min_by_key(|x| x.1.1).map(|x| x.0)
-                {
-                    self.slow.swap_remove(i);
-                }
-                self.slow.push((ran, gap));
-            }
-            self.last_check = now;
-            self.node_ran = ran;
-        }
-        // (marked stale while it runs, or the sequence changes: it stops)
-        if self.sh.cancel[self.k].load(Ordering::Relaxed) {
+        if self.sh.flags.get(self.k, CANCEL) {
             return Check::Abandon;
         }
         let cap = self.sh.opts.main_memory;
         let periodic = ran.is_multiple_of(CHECK_EVERY);
-        if periodic {
-            self.sh.progress[self.k].store(ran, Ordering::Relaxed);
-        }
         if !(periodic || words > cap) {
             return Check::Go;
         }
-        // (validate while running: a read refuted — a prediction, or a
-        // definition made again since — abandons the run, which runs again
-        // on what is known then)
         let now = self.sh.names_gen.load(Ordering::Acquire);
         if now != self.checked {
             let from = self.checked;
@@ -6316,20 +5318,11 @@ impl Env for PieceEnv<'_> {
                 return Check::Abandon;
             }
         }
-        // (a long run, or one past the memory, on predictions not confirmed
-        // yet: given up; its piece waits for the pieces before it)
-        if (!self.predicted.is_empty() || self.entry_assumed)
-            && (ran >= GIVE_UP_AFTER || words > cap)
-            && self.unconfirmed()
-        {
+        if (!self.predicted.is_empty() || self.entry_assumed) && (ran >= GIVE_UP_AFTER || words > cap) && self.unconfirmed() {
             self.gave_up = true;
             return Check::Abandon;
         }
-        if words > cap {
-            Check::Exceeded(cap)
-        } else {
-            Check::Go
-        }
+        if words > cap { Check::Exceeded(cap) } else { Check::Go }
     }
 
     fn has_between(&mut self, key: &Key) -> bool {
@@ -6337,20 +5330,15 @@ impl Env for PieceEnv<'_> {
     }
 
     fn crossed_ends(&mut self) -> bool {
-        // (a piece follows: the layout joins it with this one; in the last
-        // round, which may not, `settle` fails the build there)
-        self.k + 1 < self.sh.inline.len()
+        self.follows
     }
 
     fn cut_ok(&mut self) -> bool {
-        // (the last round: where the layout re-cut the text, only)
-        self.sh.restructure_ok || self.sh.laid[self.k].1
+        !self.nocut
     }
 
     fn split_inputs(&mut self) -> bool {
-        // (the last round: an `\input` whose file the layout placed after
-        // the piece, only; any other is read in the piece)
-        (self.sh.restructure_ok || self.sh.laid[self.k].0) && !self.sh.inline[self.k]
+        !self.inline
     }
 
     fn give_up_deep(&mut self) -> bool {
@@ -6362,8 +5350,9 @@ impl Env for PieceEnv<'_> {
     }
 
     fn stop_at(&mut self, pos: usize) -> bool {
-        // (where the layout joined texts: the last round too)
-        self.sh.stops[self.k].binary_search(&pos).is_ok()
+        // (a piece whose re-cut's last text read on into the text after
+        // it: it reads its whole text, no stop)
+        !self.nocut && self.stops.binary_search(&pos).is_ok()
     }
 
     fn any_between(&mut self) -> bool {
@@ -6375,11 +5364,8 @@ impl Env for PieceEnv<'_> {
         if !sh.names.has_inner(key) {
             return None;
         }
-        let k = self.k as u32;
-        match sh.names.reaching(key, (k, node), &sh.font) {
-            (Some(p), val, ..) if p.0 == k && p.1 != END && p.1 >= after => {
-                Some((val, Src::Piece(sh.seq.id_at(p))))
-            }
+        match sh.names.reaching(key, (self.k, node), &sh.font) {
+            (Some(p), val, ..) if p.0 == self.k && p.1 != END && p.1 >= after => Some((val, Src::Piece(sh.id_at(p)))),
             _ => None,
         }
     }
@@ -6401,14 +5387,7 @@ impl Env for PieceEnv<'_> {
     }
 
     fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32) {
-        let t = self.sh.now();
         let r = self.reach_now(key, node);
-        if self.sh.sched.is_some() {
-            self.idx.0 += 1;
-            self.idx.1 += self.sh.now() - t;
-        }
-        // (every read from before the piece, to see it while running if
-        // its definition is made again)
         self.seen.entry(key.clone()).or_default().push((node, r.0.clone()));
         r
     }
@@ -6417,45 +5396,46 @@ impl Env for PieceEnv<'_> {
 /// What the page builder reads where it is called — node `node` of piece
 /// `k` (`run`): the piece's own definitions up to that node, else the
 /// names index before the place (a fire at the same place included).
-fn read_at(sh: &Shared, run: Option<&Run>, k: usize, node: u32, key: &Key) -> Val {
+fn read_at(sh: &Shared, run: Option<&Run>, k: PieceId, node: u32, key: &Key) -> Val {
     read_at_with(sh, run, k, node, key, true)
 }
 
-/// [`read_at`], the definitions made between the pieces' nodes at the
+/// [`read_at`], the definitions made between the piece's nodes at the
 /// node itself (where the page builder fired) seen or not.
-fn read_at_with(sh: &Shared, run: Option<&Run>, k: usize, node: u32, key: &Key, at_node: bool) -> Val {
+fn read_at_with(sh: &Shared, run: Option<&Run>, k: PieceId, node: u32, key: &Key, at_node: bool) -> Val {
     let local = run.and_then(|r| r.resolve(key, node as usize + 1));
     let to = if at_node { node.saturating_add(1) } else { node };
-    let (ipos, ival, ..) = sh.names.reaching(key, (k as u32, to), &sh.font);
+    let (ipos, ival, ..) = sh.names.reaching(key, (k, to), &sh.font);
     match (local, ipos) {
-        (Some((d, _)), Some(p)) if p.0 == k as u32 && p.1 != END && p.1 >= d => ival,
+        (Some((d, _)), Some(p)) if p.0 == k && p.1 != END && p.1 >= d => ival,
         (Some((_, v)), _) => v,
         (None, _) => ival,
     }
 }
 
-/// The page builder's environment in a scan task: it reads where the
-/// page builder is called, runs output routines there and installs its
+/// The page builder's environment in a scan task: it reads where the page
+/// builder is called, runs output routines there and installs its
 /// definitions.
 struct BuildFold<'a> {
     sh: &'a Shared,
-    k: usize,
+    k: PieceId,
     node: u32,
     run: Option<Arc<Run>>,
-    /// The last build's definitions' places not made again yet.
+    /// The last evaluation's definitions' places not made again yet, in
+    /// order.
     predicted: Vec<Pos>,
-    /// Where this build's page builder fired, in order.
+    /// Where this evaluation's page builder fired, in order.
     fired: Vec<Pos>,
     routines: usize,
     kept: usize,
 }
 
 impl BuildFold<'_> {
-    /// The scan is at `at`: the last build's page builder definitions
-    /// before it that this build's did not make again go (their readers
+    /// The scan is at `at`: the last evaluation's page builder definitions
+    /// before it that this one did not make again go (their readers
     /// marked). Whether a reader was marked (the scan stops).
     fn pass(&mut self, at: Pos) -> bool {
-        let n = self.predicted.partition_point(|&p| p < at);
+        let n = self.predicted.iter().take_while(|&&p| self.sh.before(p, at)).count();
         if n == 0 {
             return false;
         }
@@ -6463,14 +5443,23 @@ impl BuildFold<'_> {
         self.retract(gone)
     }
 
-    /// The last build's page builder definitions at `gone` go (their
+    /// [`BuildFold::pass`] to the end of the document.
+    fn pass_all(&mut self) -> bool {
+        if self.predicted.is_empty() {
+            return false;
+        }
+        let gone: Vec<Pos> = std::mem::take(&mut self.predicted);
+        self.retract(gone)
+    }
+
+    /// The last evaluation's page builder definitions at `gone` go (their
     /// readers marked); whether one was.
     fn retract(&mut self, gone: Vec<Pos>) -> bool {
         let sh = self.sh;
         let mut g = lock(sh);
         let mut any = false;
         for pos in gone {
-            let Ok(i) = g.predicted.binary_search_by_key(&pos, |x| x.0) else {
+            let Some(i) = g.predicted.iter().position(|x| x.0 == pos) else {
                 continue;
             };
             let (_, keys) = g.predicted.remove(i);
@@ -6581,7 +5570,7 @@ impl FoldEnv for BuildFold<'_> {
         // made, and this build's first fire there decides afresh — whether
         // it holds the insertions, which routine runs; a later fire at the
         // same place reads this build's)
-        let pos = (self.k as u32, self.node);
+        let pos = (self.k, self.node);
         let fresh = !self.predicted.contains(&pos) || self.fired.last() == Some(&pos);
         read_at_with(self.sh, self.run.as_deref(), self.k, self.node, key, fresh)
     }
@@ -6597,7 +5586,7 @@ impl FoldEnv for BuildFold<'_> {
 
     fn fire(&mut self, defs: Vec<(Key, Val)>, routine: Option<Routine>) -> Fired {
         let mut fired = Fired::default();
-        let pos = (self.k as u32, self.node);
+        let pos = (self.k, self.node);
         if self.fired.last() != Some(&pos) {
             self.fired.push(pos);
         }
@@ -6705,20 +5694,13 @@ impl Env for RoutineEnv<'_> {
 /// The page builder's definitions at `pos` (a fire, its routine's
 /// included) enter the names index there; the readers they reach are
 /// marked. Whether one was (the scan stops).
-fn install_fold_defs(
-    sh: &Shared,
-    pos: Pos,
-    defs: Vec<(Key, Val)>,
-    memo: Option<Arc<Memo>>,
-) -> bool {
+fn install_fold_defs(sh: &Shared, pos: Pos, defs: Vec<(Key, Val)>, memo: Option<Arc<Memo>>) -> bool {
     let mut g = lock(sh);
     if let Some(m) = memo {
         g.memo_new.push(m);
     }
     let mut changed: Vec<Key> = Vec::new();
-    // (what the last build defined here, made again: the names it no
-    // longer defines go)
-    if let Ok(i) = g.predicted.binary_search_by_key(&pos, |x| x.0) {
+    if let Some(i) = g.predicted.iter().position(|x| x.0 == pos) {
         let (_, keys) = g.predicted.remove(i);
         for key in keys {
             if !defs.iter().any(|d| d.0 == key) {
@@ -6734,8 +5716,7 @@ fn install_fold_defs(
         }
     }
     let moved = refresh_exports(&mut g, sh, pos, &changed);
-    let pid = sh.seq.piece(pos.0 as usize);
-    match g.fold_defs.iter_mut().find(|x| x.0 == pid && x.1 == pos.1) {
+    match g.fold_defs.iter_mut().find(|x| x.0 == pos.0 && x.1 == pos.1) {
         Some(x) => {
             for (key, val) in defs {
                 match x.2.iter_mut().find(|d| d.0 == key) {
@@ -6744,7 +5725,7 @@ fn install_fold_defs(
                 }
             }
         }
-        None => g.fold_defs.push((pid, pos.1, defs)),
+        None => g.fold_defs.push((pos.0, pos.1, defs)),
     }
     let any = changed_at(&mut g, sh, pos, changed) || moved;
     drop(g);
@@ -6752,41 +5733,33 @@ fn install_fold_defs(
     any
 }
 
-/// Definitions of `keys` between piece `pos.0`'s nodes changed: its
-/// exports of them, as [`export_of`] gives them.
+/// Definitions of `keys` between piece `pos.0`'s nodes changed: its exports
+/// of them, as [`export_of`] gives them.
 fn refresh_exports(g: &mut State, sh: &Shared, pos: Pos, keys: &[Key]) -> bool {
     if pos.1 == END {
         return false;
     }
-    let k = pos.0 as usize;
-    let Some(run) = g.p.get(k).and_then(|ps| ps.run.clone()) else {
+    let k = pos.0;
+    let Some(run) = g.seq.p.get(k as usize).and_then(|ps| ps.run.clone()) else {
         return false;
     };
-    let moved: Vec<Key> = keys
-        .iter()
-        .filter(|key| refresh_export(&sh.names, &sh.font, k, &run, key))
-        .cloned()
-        .collect();
-    // (the readers of the export see the definition between the nodes now,
-    // or the export again)
+    let moved: Vec<Key> = keys.iter().filter(|key| refresh_export(&sh.names, &sh.font, k, &run, key)).cloned().collect();
     changed_at(g, sh, (pos.0, END), moved)
 }
 
 /// The names `keys` changed at `pos`: logged, and their readers after it
-/// marked. Whether one was.
+/// whose values changed marked (a place between a piece's nodes reaches
+/// that piece's own nodes after it that read the name: by their reads,
+/// never by what the piece defines). Whether one was.
 fn changed_at(g: &mut State, sh: &Shared, pos: Pos, keys: Vec<Key>) -> bool {
     if keys.is_empty() {
         return false;
     }
-    let mut marks: Vec<(usize, Key, u32)> = reached(g, sh, pos, &keys).into_iter().map(|(r, k)| (r, k, 0)).collect();
-    // (a place between piece k's nodes reaches its own nodes after it,
-    // those reading the name from one of its earlier nodes included — not
-    // those before it: they run again from the first after it)
+    let mut marks: Vec<(PieceId, Key, u32)> = reached(g, sh, pos, &keys).into_iter().map(|(r, k)| (r, k, 0)).collect();
     if pos.1 != END
-        && let Some(run) = g.p.get(pos.0 as usize).and_then(|ps| ps.run.clone())
+        && let Some(run) = g.seq.p.get(pos.0 as usize).and_then(|ps| ps.run.clone())
     {
-        let k = pos.0 as usize;
-        // (a run with its nodes: which nodes read a name, looked up)
+        let k = pos.0;
         let last = if run.lean.is_none() {
             let fresh = g.last_readers.get(&k).is_some_and(|(r, _)| Arc::ptr_eq(r, &run));
             if !fresh {
@@ -6798,10 +5771,13 @@ fn changed_at(g: &mut State, sh: &Shared, pos: Pos, keys: Vec<Key>) -> bool {
             None
         };
         for key in &keys {
-            // (the page builder's quantities are the scan's to validate)
+            // (the page builder's quantities are the scan's to validate; a
+            // lean run's nodes after the place read the name if its reads
+            // from before the piece say so, or a definition of its own
+            // reaching across the place may be what they read)
             let after = match &last {
                 Some(m) => m.get(key).is_some_and(|&j| j > pos.1),
-                None => run.reads_after(key, pos.1),
+                None => run.values_read(key).iter().any(|x| x.1 > pos.1) || run.defines_across(key, pos.1),
             };
             if !matches!(key, Key::Page(_)) && after {
                 marks.push((k, key.clone(), pos.1 + 1));
@@ -6812,26 +5788,20 @@ fn changed_at(g: &mut State, sh: &Shared, pos: Pos, keys: Vec<Key>) -> bool {
     sh.names_gen.store(g.names_log.len(), Ordering::Release);
     let any = !marks.is_empty();
     for (r, key, from) in marks {
-        if g.rerun_log.is_some() {
-            g.mark_src = MarkSrc::At(pos, sh.names.at(&key, pos));
-        }
-        if mark_from(g, r, key, from) {
-            sh.done[r].store(false, Ordering::Release);
-        } else if g.p[r].status == Status::Running {
-            sh.cancel[r].store(true, Ordering::Relaxed);
+        if !mark_from(g, &sh.flags, r, key, from) && g.seq.p[r as usize].status == Status::Running {
+            sh.flags.set(r, CANCEL, true);
         }
     }
     any
 }
 
-/// Piece `k`'s run waits until a definition is installed (the
-/// generation moves from `seen`) or the round ends. Every thread parked
-/// so, none idle to look (`worker`), and nothing installed for a while:
-/// the scheduler stalled ([`stall`]).
-fn park(sh: &Shared, k: usize, seen: u64) {
-    let moved = || sh.generation.load(Ordering::Acquire) != seen || sh.restructuring.load(Ordering::Acquire);
+/// A run waits until a definition is installed (the generation moves from
+/// `seen`) or the evaluation ends. Every thread parked so, none idle to
+/// look, and nothing installed for a while: the scheduler stalled.
+fn park(sh: &Shared, seen: u64) {
+    let moved = || sh.generation.load(Ordering::Acquire) != seen;
     let mut p = sh.park.lock().expect("park");
-    sh.waiting[k].store(true, Ordering::Release);
+    sh.parked_n.fetch_add(1, Ordering::AcqRel);
     while !moved() {
         let (p2, t) = sh.parked.wait_timeout(p, STALL_CHECK).expect("park");
         p = p2;
@@ -6839,20 +5809,23 @@ fn park(sh: &Shared, k: usize, seen: u64) {
             drop(p);
             {
                 let mut g = lock(sh);
-                let parked = sh.waiting.iter().filter(|w| w.load(Ordering::Acquire)).count();
+                let parked = sh.parked_n.load(Ordering::Acquire);
+                if g.done {
+                    sh.parked_n.fetch_sub(1, Ordering::AcqRel);
+                    return;
+                }
                 if !moved() && parked == g.inflight && g.inflight == g.stats.work.len() {
-                    stall(&mut g, sh, parked, "the scheduler stalled");
+                    stall(&mut g, sh, "the scheduler stalled (every run parked)");
                 }
             }
             p = sh.park.lock().expect("park");
         }
     }
-    sh.waiting[k].store(false, Ordering::Release);
+    sh.parked_n.fetch_sub(1, Ordering::AcqRel);
 }
 
 /// The node that made the item at `path` inside `it`, which node `maker`
-/// made (`it` itself if `path` is empty; a box's items by its
-/// [`crate::item::Origins`]).
+/// made.
 fn inner_node(maker: u32, it: &crate::item::Item, path: &[usize]) -> Option<u32> {
     let Some((&first, rest)) = path.split_first() else { return Some(maker) };
     let (crate::item::Item::Box(b) | crate::item::Item::Append(b, _)) = it else { return Some(maker) };
@@ -6860,25 +5833,11 @@ fn inner_node(maker: u32, it: &crate::item::Item, path: &[usize]) -> Option<u32>
     inner_node(node, b.list.get(first)?, rest)
 }
 
-/// The folds' values the round validated, by piece id ([`Build::fold_vals`]).
-fn fold_vals_by_id(names: &Names, p: &[PState]) -> FxMap<(PieceId, u32, Key), Val> {
-    names
-        .fold_vals
-        .read()
-        .expect("fold values")
-        .iter()
-        .filter_map(|((k, n, key), v)| p.get(*k as usize).map(|ps| ((ps.id, *n, key.clone()), v.clone())))
-        .collect()
-}
-
-/// A run's reads of the page builder's quantities (`Key::Page`), by
-/// node: (the quantity, the node, the value read).
+/// A run's reads of the page builder's quantities, by node.
 fn page_reads(run: &Run) -> Vec<(u8, u32, Val)> {
     let mut v: Vec<(u8, u32, Val)> = (0..=INSERT_PENALTIES)
         .flat_map(|q| run.values_read(&Key::Page(q)).iter().map(move |(_, n, val)| (q, *n, val.clone())))
         .collect();
-    // (and `\pdfinsertht n`'s, `Key::Page(n)` above them: the reads are
-    // sorted by key)
     let all = run.all_reads();
     let a = all.partition_point(|x| x.0 < Key::Page(INSERT_PENALTIES + 1));
     for (key, n, val) in &all[a..] {
@@ -6890,26 +5849,21 @@ fn page_reads(run: &Run) -> Vec<(u8, u32, Val)> {
 }
 
 /// The scan is before the first item of node `upto` of piece `k` (`None`:
-/// after the piece's material): the reads of the page builder's quantities
-/// at nodes up to there (from `fr` on) are checked against the page as the
-/// scan has it (tex.web 421), the values kept for the next reads. At the
+/// after the piece's material): its reads of the page builder's quantities
+/// up to there are checked against the page as the scan has it. At the
 /// first read that saw another value its piece is marked from its node
 /// and `false` is returned: the scan stops there.
-fn check_page_reads(sh: &Shared, scan: &Scan, k: usize, reads: &[(u8, u32, Val)], fr: &mut usize, upto: Option<u32>) -> bool {
+fn check_page_reads(sh: &Shared, scan: &Scan, k: PieceId, reads: &[(u8, u32, Val)], fr: &mut usize, upto: Option<u32>) -> bool {
     while let Some((q, node, read)) = reads.get(*fr).filter(|r| upto.is_none_or(|u| r.1 <= u)) {
         *fr += 1;
         let key = Key::Page(*q);
         let now = Val::Int(scan.page_quantity(*q));
-        sh.names.set_fold_value(&key, (k as u32, *node), now.clone());
+        sh.names.set_fold_value(&key, (k, *node), now.clone());
         if now != *read {
             let mut g = lock(sh);
-            if g.rerun_log.is_some() {
-                g.mark_src = MarkSrc::Page(now.clone());
-            }
-            if mark_from(&mut g, k, key, *node) {
-                sh.done[k].store(false, Ordering::Release);
-            } else if g.p[k].status == Status::Running {
-                sh.cancel[k].store(true, Ordering::Relaxed);
+            let done = mark_from(&mut g, &sh.flags, k, key, *node);
+            if !done && g.seq.p[k as usize].status == Status::Running {
+                sh.flags.set(k, CANCEL, true);
             }
             return false;
         }
@@ -6926,6 +5880,323 @@ fn notify(sh: &Shared, work: bool) {
     sh.parked.notify_all();
     if work {
         sh.cv.notify_all();
+    }
+}
+
+/// The PDF file of the pages (`pdf::fold`): the pages' streams (in
+/// `bodies`, made again where the fold says), what the job's end reads
+/// (the definitions reaching the end of piece `last`, the place before
+/// the next), the files the fold
+/// reads (given, in the input directories, then TeX Live's).
+/// The files the PDF fold reads: given, in the input directories, then
+/// TeX Live's.
+struct PdfFiles<'a> {
+    names: &'a Names,
+    font: &'a Arc<Font>,
+    /// The TFM files `\font` can load (a virtual font's local fonts).
+    fonts: &'a Arc<FontFiles>,
+    /// The job's last piece: what the job's end reads is what reaches
+    /// after it.
+    last: Option<PieceId>,
+}
+
+impl crate::pdf::fold::Files for PdfFiles<'_> {
+    fn get(&mut self, name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
+        self.names.given.pdf_found(name)
+    }
+    fn font_attr(&mut self, key: &str) -> Option<crate::pdf::what::Text> {
+        match self.names.after(&Key::FontAttr(Arc::from(key)), self.last, self.font) {
+            Val::Name(s) if !s.is_empty() => Some(s.chars().map(|c| u32::from(c).min(255) as u8).collect()),
+            _ => None,
+        }
+    }
+    fn vf(&mut self, name: &str) -> Option<Arc<[u8]>> {
+        match &self.names.given.finder {
+            Some((f, prog)) => f.find(name, KpseFormat::Vf, prog).and_then(|p| f.read(&p)),
+            None => crate::tfm::vf_file(name),
+        }
+    }
+    fn tfm(&mut self, name: &str) -> Option<Arc<[u8]>> {
+        match &self.names.given.finder {
+            Some((f, prog)) => f.find(name, KpseFormat::Tfm, prog).and_then(|p| f.read(&p)),
+            None => self.fonts.get(name),
+        }
+    }
+    fn glyph_unicode(&mut self, name: &str) -> Option<crate::pdf::font::unicode::Uni> {
+        use crate::pdf::font::unicode::Uni;
+        match self.names.after(&Key::GlyphUnicode(Arc::from(name)), self.last, self.font) {
+            Val::Int(c) => Some(Uni::Code(i64::from(c))),
+            Val::Name(s) => Some(Uni::Seq(s)),
+            _ => None,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pdf_file(
+    names: &Names,
+    font: &Arc<Font>,
+    fonts: &Arc<FontFiles>,
+    last: Option<PieceId>,
+    numbers: &dvi::Numbers,
+    ship_fonts: Vec<u32>,
+    pages: &[Page],
+    orgs: &[PageOrg],
+    tail: &crate::page::PdfEvents,
+    bodies: &mut [Arc<dvi::Body>],
+) -> crate::pdf::fold::Written {
+    use crate::val::{IntPar, TokPar};
+    let read = |key: &Key| names.after(key, last, font);
+    let int = |p: IntPar| match read(&Key::IntPar(p)) {
+        Val::Int(i) => i,
+        _ => 0,
+    };
+    let esc = int(IntPar::Escapechar);
+    let text = |p: TokPar| match read(&Key::TokPar(p)) {
+        Val::Toks(t) if !t.is_empty() => {
+            let cs = &names.cs;
+            Some(Arc::from(crate::pdf::toks_text(&t, &|n| cs.name(n), esc, &mut |c| read(&Key::Cat(c)) == Val::Cat(11))))
+        }
+        _ => None,
+    };
+    let end = crate::pdf::fold::End {
+        compress_level: int(IntPar::Pdfcompresslevel),
+        gen_tounicode: int(IntPar::Pdfgentounicode),
+        omit_charset: int(IntPar::Pdfomitcharset),
+        info_omit_date: int(IntPar::Pdfinfoomitdate),
+        suppress_ptex_info: int(IntPar::Pdfsuppressptexinfo),
+        ptex_use_underscore: int(IntPar::Pdfptexuseunderscore),
+        omit_info_dict: int(IntPar::Pdfomitinfodict),
+        pages_attr: text(TokPar::Pdfpagesattr),
+        date: crate::pdf::pdf_date(names.given.pdf_date),
+        file_name: format!("{}.pdf", names.given.job),
+        banner: crate::graph::PDFTEX_BANNER.to_string(),
+        params: Arc::new(crate::pdf::read_params(&mut |k| read(k))),
+        page_width: match read(&Key::DimenPar(crate::val::DimenPar::Pdfpagewidth)) {
+            Val::Int(i) => i,
+            _ => 0,
+        },
+        page_height: match read(&Key::DimenPar(crate::val::DimenPar::Pdfpageheight)) {
+            Val::Int(i) => i,
+            _ => 0,
+        },
+        ship_fonts,
+    };
+    let mut pdf_bodies: Vec<Arc<crate::pdf::content::PageBody>> =
+        bodies.iter().map(|b| b.pdf.clone().unwrap_or_else(|| Arc::new(crate::pdf::content::empty()))).collect();
+    let events: Vec<&crate::page::PdfEvents> = orgs.iter().map(|o| &o.pdf).chain(std::iter::once(tail)).collect();
+    let w = crate::pdf::fold::assemble(pages, &mut pdf_bodies, &events, numbers, &end, &mut PdfFiles { names, font, fonts, last });
+    for (b, p) in bodies.iter_mut().zip(pdf_bodies) {
+        if !b.pdf.as_ref().is_some_and(|x| Arc::ptr_eq(x, &p)) {
+            let mut nb = dvi::Body { bytes: Vec::new(), fonts: Vec::new(), fixed: None, max_push: 0, io: p.io, pdf: None };
+            nb.pdf = Some(p);
+            *b = Arc::new(nb);
+        }
+    }
+    w
+}
+
+impl Names {
+    /// What `key` means after piece `last` (none: before any piece): the
+    /// job's end.
+    fn after(&self, key: &Key, last: Option<PieceId>, font: &Arc<Font>) -> Val {
+        match last {
+            Some(k) => self.at(key, (k, END)).unwrap_or_else(|| self.reaching(key, (k, END), font).1),
+            None => self.initial(key, font),
+        }
+    }
+}
+
+/// The join's reads (a page's `\write`s expanded where it was shipped):
+/// every piece has run, nothing parks.
+struct JoinEnv<'a> {
+    names: &'a Names,
+    font: &'a Arc<Font>,
+    fonts: &'a Arc<FontFiles>,
+    virt: &'a RwLock<Virt>,
+    k: PieceId,
+    /// The run ran up to a cut the cutter missed: so does its run again.
+    cut: bool,
+    /// The run ended at an `\input` whose file is pieces: so does its run
+    /// again.
+    split: bool,
+    /// The run stopped here: so does its run again.
+    stop: usize,
+}
+
+/// A lean piece's run with its nodes again: run again, reading only, over
+/// the names index as it is — for the join's page events and the dump.
+fn regen(env: &mut JoinEnv<'_>, text: &[char], r: &Arc<Run>) -> Arc<Run> {
+    if r.lean.is_none() {
+        return r.clone();
+    }
+    let entry = r.entry();
+    env.cut = r.ends_at_cut();
+    env.split = r.input().is_some();
+    env.stop = if env.cut { r.out().pos } else { usize::MAX };
+    Arc::new(run_piece(text, env, None, &[], Some(&entry)))
+}
+
+impl Env for JoinEnv<'_> {
+    fn cs(&self) -> &Arc<CsTable> {
+        &self.names.cs
+    }
+
+    fn limits(&self) -> crate::print::Limits {
+        self.names.given.limits
+    }
+
+    fn interaction_option(&self) -> Option<i32> {
+        self.names.given.interaction_option
+    }
+
+    fn font_file(&mut self, name: &str) -> Option<Arc<[u8]>> {
+        self.fonts.get(name)
+    }
+
+    fn xetex(&self) -> bool {
+        self.names.given.xe.is_some()
+    }
+
+    fn native_font(&mut self, name: &str, size: i32, tracing: i32) -> crate::native::Loaded {
+        self.names.given.native_font(name, size, tracing)
+    }
+
+    fn cut_ok(&mut self) -> bool {
+        self.cut
+    }
+
+    fn split_inputs(&mut self) -> bool {
+        self.split
+    }
+
+    fn stop_at(&mut self, pos: usize) -> bool {
+        pos == self.stop
+    }
+
+    fn reach(&mut self, key: &Key, node: u32) -> (Val, Src, u32, u32) {
+        let (def, val, lo, hi) = self.names.reaching(key, (self.k, node), self.font);
+        let src = match def {
+            None => Src::Initial,
+            Some(d) if d.1 == END => Src::Piece(d.0),
+            Some(d) => Src::Piece(self.virt.read().expect("virt").ids.get(&d).copied().unwrap_or(d.0)),
+        };
+        (val, src, lo, hi)
+    }
+
+    fn folds(&mut self, key: &Key) -> bool {
+        matches!(key, Key::Page(_))
+    }
+
+    fn fold_read(&mut self, key: &Key, node: u32) -> Option<Val> {
+        self.names.fold_value(key, (self.k, node), self.font)
+    }
+
+    fn file(&mut self, name: &str) -> Option<Arc<[u8]>> {
+        self.names.given.file(name)
+    }
+
+    fn file_path(&mut self, name: &str) -> Arc<str> {
+        self.names.given.path(name)
+    }
+
+    fn jobname(&mut self) -> Arc<str> {
+        self.names.given.job.clone()
+    }
+
+    fn line_base(&mut self) -> i32 {
+        self.names.given.base(self.k) as i32
+    }
+}
+
+/// xdvipdfmx's finder in [`Build::xdv_pdf`], one more [`Kpse`]: the
+/// document's files first (those given in memory, then the input
+/// directories, as the picture specials name them, `./NAME` in the
+/// first), then the build's finder.
+struct DocFiles {
+    mem: Arc<FxMap<Arc<str>, Arc<[u8]>>>,
+    dirs: Arc<Vec<PathBuf>>,
+    inner: Arc<dyn crate::tfm::Kpse>,
+}
+
+impl crate::tfm::Kpse for DocFiles {
+    fn find(&self, name: &str, format: crate::tfm::KpseFormat, prog: &str) -> Option<String> {
+        let bare = name.strip_prefix("./").unwrap_or(name);
+        if self.mem.contains_key(bare) {
+            return Some(format!("./{bare}"));
+        }
+        if let Some(p) = self.dirs.iter().map(|d| d.join(bare)).find(|p| p.is_file()) {
+            return Some(p.to_string_lossy().into_owned());
+        }
+        self.inner.find(name, format, prog)
+    }
+
+    fn read(&self, path: &str) -> Option<Arc<[u8]>> {
+        let bare = path.strip_prefix("./").unwrap_or(path);
+        if let Some(b) = self.mem.get(bare) {
+            return Some(b.clone());
+        }
+        if std::path::Path::new(bare).is_relative()
+            && let Some(b) = self.dirs.iter().find_map(|d| std::fs::read(d.join(bare)).ok())
+        {
+            return Some(Arc::from(b));
+        }
+        self.inner.read(path)
+    }
+}
+
+/// The job of each piece of a session (0 for all of a document that is
+/// not one).
+fn job_of(texts: impl Iterator<Item = bool>) -> Vec<usize> {
+    let mut j = 0usize;
+    let mut seen = false;
+    texts
+        .map(|starts| {
+            if starts && seen {
+                j += 1;
+            }
+            seen = true;
+            j
+        })
+        .collect()
+}
+
+fn dump_piece(out: &mut String, k: usize, ps: &Piece, r: &Run, cs: &CsTable, seq: &Seq) {
+    let how = if ps.runs == 0 { "kept" } else { "ran" };
+    let _ = writeln!(
+        out,
+        "piece {k} (id {}) [{how}; {} nodes, {} run]: {} reads from before it, {} definitions after it, {} paragraphs; entered {:?}; {:?}",
+        ps.id,
+        r.nodes_len(),
+        r.ran,
+        r.read_count(),
+        r.exports.len(),
+        r.paras.len(),
+        seq.entry_of(ps.id),
+        ps.text.iter().take(40).collect::<String>()
+    );
+    for (i, n) in r.chain.nodes.iter().enumerate() {
+        let _ = write!(out, "  n{i} {:?} {}", n.kind, Shown(&n.cmd, cs));
+        for rd in n.reads.iter() {
+            match rd.src {
+                Src::Node(d) => {
+                    let _ = write!(out, " | reads {} = {} from n{d}", Shown(&rd.key, cs), Shown(&rd.val, cs));
+                }
+                Src::Piece(p) => {
+                    let _ = write!(out, " | reads {} = {} from piece id {p}", Shown(&rd.key, cs), Shown(&rd.val, cs));
+                }
+                Src::Initial => {
+                    let _ = write!(out, " | reads {} = {} initial", Shown(&rd.key, cs), Shown(&rd.val, cs));
+                }
+            }
+        }
+        if let Some(c) = n.phi() {
+            let _ = write!(out, " | test={}", c.test);
+        }
+        for d in n.defs() {
+            let _ = write!(out, " | defines {}{} = {}", if d.global { "global " } else { "" }, Shown(&d.key, cs), Shown(&d.val, cs));
+        }
+        out.push('\n');
     }
 }
 
@@ -6964,67 +6235,51 @@ mod tests {
     use super::*;
 
     fn font() -> Arc<Font> {
-        let b = std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/testdata/cmr10.tfm"
-        ))
-        .unwrap();
+        let b = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/cmr10.tfm")).unwrap();
         Arc::new(Font::parse("cmr10", &b).unwrap())
     }
 
-    /// An element between piece 2's nodes 5 and 6 defines `\x`: node 6 on
-    /// read it, the nodes before read piece 0's, the pieces after read
-    /// piece 2's exports; a read is kept for the nodes it reaches.
+    /// Places are pieces (by their order labels, never their ids) and
+    /// nodes: an element between piece 12's nodes 5 and 6 defines `\x`:
+    /// node 6 on read it, the nodes before read piece 10's, the pieces
+    /// after read piece 12's exports.
     #[test]
     fn places_are_pieces_and_nodes() {
-        let given = Given::new(
-            Arc::new(Vec::new()),
-            Arc::from("texput"),
-            Arc::default(),
-            Vec::new(),
-        );
-        let (names, font) = (Names::new(given, true, Arc::new(CsTable::new()), None), font());
+        let labels: Arc<RwLock<Labels>> = Arc::default();
+        // (ids out of order: the labels decide)
+        labels.write().unwrap().insert_after(None, &[10, 11, 2, 13]);
+        let given = Given::new(Arc::new(Vec::new()), Arc::from("texput"), Arc::default());
+        let (names, font) = (Names::new(given, true, Arc::new(CsTable::new()), None, labels.clone()), font());
         let x = Key::Cs(names.cs.id("x"));
-        names.set((0, END), &x, Some(&Val::Int(1)));
+        names.set((10, END), &x, Some(&Val::Int(1)));
         names.set((2, 5), &x, Some(&Val::Int(2)));
         names.set((2, END), &x, Some(&Val::Int(3)));
-        assert!(matches!(
-            names.reaching(&x, (0, 7), &font),
-            (None, _, 0, END)
-        ));
-        assert!(matches!(
-            names.reaching(&x, (1, 7), &font),
-            (Some((0, END)), Val::Int(1), 0, END)
-        ));
-        assert!(matches!(
-            names.reaching(&x, (2, 3), &font),
-            (Some((0, END)), Val::Int(1), 0, 6)
-        ));
-        assert!(matches!(
-            names.reaching(&x, (2, 5), &font),
-            (Some((0, END)), Val::Int(1), 0, 6)
-        ));
-        assert!(matches!(
-            names.reaching(&x, (2, 6), &font),
-            (Some((2, 5)), Val::Int(2), 6, END)
-        ));
-        assert!(matches!(
-            names.reaching(&x, (3, 0), &font),
-            (Some((2, END)), Val::Int(3), 0, END)
-        ));
-        let seq = Sequence::new(vec![10, 11, 12, 13], 21, FxMap::default());
-        let v = seq.id_at((2, 5));
-        assert_eq!(v, 21, "an element between nodes gets a new id");
-        assert_eq!(seq.id_at((2, 5)), v, "and keeps it");
-        assert_eq!(seq.id_at((2, END)), 12);
-        assert_eq!(seq.pos_of(v), Some((2, 5)));
-        assert_eq!(seq.pos_of(14), None);
-        assert!(src_at_or_before(&seq, v, (2, END)) && !src_at_or_before(&seq, v, (2, 4)));
-        assert!(src_at_or_before(&seq, INITIAL, (0, 0)));
-        // (the next build keeps the id where the piece moved)
-        let ids = seq.virt.into_inner().expect("virt").ids;
-        let seq = Sequence::new(vec![9, 12, 13], 22, ids);
-        assert_eq!(seq.pos_of(v), Some((1, 5)));
-        assert_eq!(seq.id_at((1, 5)), v);
+        assert!(matches!(names.reaching(&x, (10, 7), &font), (None, _, 0, END)));
+        assert!(matches!(names.reaching(&x, (11, 7), &font), (Some((10, END)), Val::Int(1), 0, END)));
+        assert!(matches!(names.reaching(&x, (2, 3), &font), (Some((10, END)), Val::Int(1), 0, 6)));
+        assert!(matches!(names.reaching(&x, (2, 6), &font), (Some((2, 5)), Val::Int(2), 6, END)));
+        assert!(matches!(names.reaching(&x, (13, 0), &font), (Some((2, END)), Val::Int(3), 0, END)));
+        // (a piece put between two others: nothing moves)
+        labels.write().unwrap().insert_after(Some(11), &[40, 41]);
+        assert!(matches!(names.reaching(&x, (40, 0), &font), (Some((10, END)), Val::Int(1), 0, END)));
+        assert!(matches!(names.reaching(&x, (13, 0), &font), (Some((2, END)), Val::Int(3), 0, END)));
+        let l = labels.read().unwrap();
+        assert_eq!(l.ids(), vec![10, 11, 40, 41, 2, 13]);
+    }
+
+    /// Labels spread again when a gap runs out, keeping the order.
+    #[test]
+    fn labels_spread_in_order() {
+        let mut l = Labels::default();
+        l.insert_after(None, &[0, 1]);
+        for i in 2..200u32 {
+            l.insert_after(Some(0), &[i]);
+        }
+        let ids = l.ids();
+        assert_eq!(ids.len(), 200);
+        assert_eq!(ids[0], 0);
+        assert_eq!(*ids.last().unwrap(), 1);
+        // (each put right after 0: the latest first)
+        assert_eq!(ids[1], 199);
     }
 }

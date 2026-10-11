@@ -227,6 +227,10 @@ impl Session {
         let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()))?;
         let mut build = Build::new(phitex_flow::tfm::null_font());
         build.set_progress(Some(status.engine.clone()));
+        // (a job built to its fixpoint: the files it writes and reads back
+        // are a loop-back inside each update, evaluated again only where
+        // they changed)
+        build.set_converge(job.fixpoint);
         // (every file by kpathsea as the engine's program — TEXINPUTS from
         // the environment, `.` first —, the output directory before it, as
         // web2c's `open_input` tries `-output-directory` first)

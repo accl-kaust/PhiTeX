@@ -655,8 +655,9 @@ impl Build {
             .page_orgs
             .get(j)
             .and_then(|o| {
-                let node = self.material_node(o.call.0 as usize, o.call.1, &[])?;
-                Some(w.place(o.call.0, node))
+                let k = self.piece_index(o.call.0)?;
+                let node = self.material_node(k, o.call.1, &[])?;
+                Some(w.place(k as u32, node))
             })
             .unwrap_or(NOWHERE);
         // (XeTeX: as PDF output, from the page's corner, its origin an inch
