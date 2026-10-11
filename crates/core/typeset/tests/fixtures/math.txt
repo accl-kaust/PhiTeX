@@ -1,0 +1,1395 @@
+case 0
+text=x^2
+expect
+\mathord
+.\fam1 x
+^\fam0 2
+%
+\teni x
+\hbox(4.51111+0.0)x4.48613, shifted -3.62892
+.\sevenrm 2
+end
+case 1
+text=x_i^2
+expect
+\mathord
+.\fam1 x
+^\fam0 2
+_\fam1 i
+%
+\teni x
+\vbox(10.74295+0.0)x4.48613, shifted 2.60292
+.\hbox(4.51111+0.0)x4.48613
+..\sevenrm 2
+.\kern1.59991
+.\hbox(4.63193+0.0)x3.32928
+..\seveni i
+end
+case 2
+text=x_i
+expect
+\mathord
+.\fam1 x
+_\fam1 i
+%
+\teni x
+\hbox(4.63193+0.0)x3.32928, shifted 1.49998
+.\seveni i
+end
+case 3
+text=a+b=c
+expect
+\mathord
+.\fam1 a
+\mathbin
+.\fam0 +
+\mathord
+.\fam1 b
+\mathrel
+.\fam0 =
+\mathord
+.\fam1 c
+%
+\teni a
+\glue(\medmuskip) 2.22217 plus 1.11108 minus 2.22217
+\tenrm +
+\penalty 700
+\glue(\medmuskip) 2.22217 plus 1.11108 minus 2.22217
+\teni b
+\glue(\thickmuskip) 2.77771 plus 2.77771
+\tenrm =
+\penalty 500
+\glue(\thickmuskip) 2.77771 plus 2.77771
+\teni c
+end
+case 4
+text=-x+-y
+expect
+\mathbin
+.\fam2 ^^@
+\mathord
+.\fam1 x
+\mathbin
+.\fam0 +
+\mathbin
+.\fam2 ^^@
+\mathord
+.\fam1 y
+%
+\tensy ^^@
+\teni x
+\glue(\medmuskip) 2.22217 plus 1.11108 minus 2.22217
+\tenrm +
+\penalty 700
+\glue(\medmuskip) 2.22217 plus 1.11108 minus 2.22217
+\tensy ^^@
+\teni y
+\kern0.35878
+end
+case 5
+text={a\over b}
+expect
+\mathord
+.\fraction, thickness = default
+.\\mathord
+.\.\fam1 a
+./\mathord
+./.\fam1 b
+%
+\hbox(6.9512+3.44841)x6.73764
+.\hbox(6.9512+3.44841)x6.73764
+..\hbox(0.0+0.0)x1.2, shifted -2.5
+..\vbox(6.9512+3.44841)x4.33765
+...\hbox(3.01389+0.0)x4.33765
+....\seveni a
+...\kern1.23732
+...\rule(0.39998+0.0)x*
+...\kern0.88731
+...\hbox(4.8611+0.0)x4.33765, glue set 0.41049fil
+....\glue 0.0 plus 1.0fil minus 1.0fil
+....\seveni b
+....\glue 0.0 plus 1.0fil minus 1.0fil
+..\hbox(0.0+0.0)x1.2, shifted -2.5
+end
+case 6
+text=\sqrt{x+y}
+expect
+\radical"270370
+.\mathord
+..\fam1 x
+.\mathbin
+..\fam0 +
+.\mathord
+..\fam1 y
+%
+\hbox(7.79439+2.60558)x31.53236
+.\hbox(0.39998+9.6)x8.33336, shifted -6.99443
+..\tensy p
+.\vbox(7.79439+1.94444)x23.199
+..\kern0.39998
+..\rule(0.39998+0.0)x*
+..\kern1.1611
+..\hbox(5.83333+1.94444)x23.199
+...\teni x
+...\glue(\medmuskip) 2.22217 plus 1.11108 minus 2.22217
+...\tenrm +
+...\glue(\medmuskip) 2.22217 plus 1.11108 minus 2.22217
+...\teni y
+...\kern0.35878
+end
+case 7
+text=\sum_{i=1}^n x_i
+expect
+\mathop
+.\fam3 P
+^\fam1 n
+_\mathord
+_.\fam1 i
+_\mathrel
+_.\fam0 =
+_\mathord
+_.\fam0 1
+\mathord
+.\fam1 x
+_\fam1 i
+%
+\hbox(0.0+10.00012)x10.55559, shifted -7.50006
+.\tenex P
+\vbox(11.0418+0.0)x13.45433, shifted 3.00005
+.\hbox(3.01389+0.0)x5.44333
+..\seveni n
+.\kern3.39598
+.\hbox(4.63193+0.0)x13.45433
+..\seveni i
+..\sevenrm =
+..\sevenrm 1
+\glue(\thinmuskip) 1.66663
+\teni x
+\hbox(4.63193+0.0)x3.32928, shifted 1.49998
+.\seveni i
+end
+case 8
+text=\displaystyle\sum_{i=1}^n x_i
+expect
+\displaystyle
+\mathop
+.\fam3 P
+^\fam1 n
+_\mathord
+_.\fam1 i
+_\mathrel
+_.\fam0 =
+_\mathord
+_.\fam0 1
+\mathord
+.\fam1 x
+_\fam1 i
+%
+\vbox(16.51393+12.79865)x14.44447
+.\kern1.0
+.\hbox(3.01389+0.0)x14.44447, glue set 4.75058fil
+..\glue 0.0 plus 1.0fil minus 1.0fil
+..\seveni n
+..\glue 0.0 plus 1.0fil minus 1.0fil
+.\kern1.99998
+.\hbox(10.50006+5.50006)x14.44447
+..\hbox(1.0+15.00012)x14.44447, shifted -9.50006
+...\tenex X
+.\kern1.66666
+.\hbox(4.63193+0.0)x14.44447, glue set 0.74507fil
+..\glue 0.0 plus 1.0fil minus 1.0fil
+..\seveni i
+..\sevenrm =
+..\sevenrm 1
+..\glue 0.0 plus 1.0fil minus 1.0fil
+.\kern1.0
+\glue(\thinmuskip) 1.66663
+\teni x
+\hbox(4.63193+0.0)x3.32928, shifted 1.49998
+.\seveni i
+end
+case 9
+text=\int_0^1 f(x)\,dx
+expect
+\mathop\nolimits
+.\fam3 R
+^\fam0 1
+_\fam0 0
+\mathord
+.\fam1 f
+\mathopen
+.\fam0 (
+\mathord
+.\fam1 x
+\mathclose
+.\fam0 )
+\glue(\mskip) 3.0mu
+\mathord
+.\fam1 d
+\mathord
+.\fam1 x
+%
+\hbox(0.0+11.11122)x4.72223, shifted -8.0556
+.\tenex R
+\vbox(13.65012+0.0)x6.43057, shifted 3.5556
+.\hbox(4.51111+0.0)x4.48613, shifted 1.94444
+..\sevenrm 1
+.\kern4.6279
+.\hbox(4.51111+0.0)x4.48613
+..\sevenrm 0
+\glue(\thinmuskip) 1.66663
+\teni f
+\kern1.0764
+\tenrm (
+\teni x
+\tenrm )
+\glue 1.66663
+\teni d
+\teni x
+end
+case 10
+text=\displaystyle\int_0^1 f(x)\,dx
+expect
+\displaystyle
+\mathop\nolimits
+.\fam3 R
+^\fam0 1
+_\fam0 0
+\mathord
+.\fam1 f
+\mathopen
+.\fam0 (
+\mathord
+.\fam1 x
+\mathclose
+.\fam0 )
+\glue(\mskip) 3.0mu
+\mathord
+.\fam1 d
+\mathord
+.\fam1 x
+%
+\hbox(0.0+22.22246)x5.55557, shifted -13.61122
+.\tenex Z
+\vbox(24.76135+0.0)x8.93057, shifted 9.11122
+.\hbox(4.51111+0.0)x4.48613, shifted 4.44444
+..\sevenrm 1
+.\kern15.73914
+.\hbox(4.51111+0.0)x4.48613
+..\sevenrm 0
+\glue(\thinmuskip) 1.66663
+\teni f
+\kern1.0764
+\tenrm (
+\teni x
+\tenrm )
+\glue 1.66663
+\teni d
+\teni x
+end
+case 11
+text=\left( a\over b\right)
+expect
+\mathinner
+.\left"28300
+.\fraction, thickness = default
+.\\mathord
+.\.\fam1 a
+./\mathord
+./.\fam1 b
+.\right"29301
+%
+\hbox(8.50005+3.50006)x15.90436
+.\hbox(0.39998+11.60013)x4.58336, shifted -8.10007
+..\tenex ^^@
+.\hbox(6.9512+3.44841)x6.73764
+..\hbox(0.0+0.0)x1.2, shifted -2.5
+..\vbox(6.9512+3.44841)x4.33765
+...\hbox(3.01389+0.0)x4.33765
+....\seveni a
+...\kern1.23732
+...\rule(0.39998+0.0)x*
+...\kern0.88731
+...\hbox(4.8611+0.0)x4.33765, glue set 0.41049fil
+....\glue 0.0 plus 1.0fil minus 1.0fil
+....\seveni b
+....\glue 0.0 plus 1.0fil minus 1.0fil
+..\hbox(0.0+0.0)x1.2, shifted -2.5
+.\hbox(0.39998+11.60013)x4.58336, shifted -8.10007
+..\tenex ^^A
+end
+case 12
+text=\overline{ab}
+expect
+\overline
+.\mathord
+..\fam1 a
+.\mathord
+..\fam1 b
+%
+\vbox(8.94434+0.0)x9.57755
+.\kern0.39998
+.\rule(0.39998+0.0)x*
+.\kern1.19994
+.\hbox(6.94444+0.0)x9.57755
+..\teni a
+..\teni b
+end
+case 13
+text=\underline{x}y
+expect
+\underline
+.\fam1 x
+\mathord
+.\fam1 y
+%
+\vbox(4.30554+1.9999)x5.71527
+.\hbox(4.30554+0.0)x5.71527
+..\teni x
+.\kern1.19994
+.\rule(0.39998+0.0)x*
+\teni y
+\kern0.35878
+end
+case 14
+text=\hat a
+expect
+\accent\fam0 ^
+.\fam1 a
+%
+\vbox(6.94444+0.0)x5.28589
+.\hbox(6.94444+0.0)x0.0, shifted 0.14294
+..\tenrm ^
+.\kern-4.30554
+.\hbox(4.30554+0.0)x5.28589
+..\teni a
+end
+case 15
+text=\widehat{xyz}
+expect
+\accent\fam3 b
+.\mathord
+..\fam1 x
+.\mathord
+..\fam1 y
+.\mathord
+..\fam1 z
+%
+\vbox(7.5+1.94444)x16.06717
+.\hbox(7.5+0.0)x0.0, shifted 0.81136
+..\tenex d
+.\kern-4.30554
+.\hbox(4.30554+1.94444)x16.06717
+..\teni x
+..\teni y
+..\kern0.35878
+..\teni z
+..\kern0.4398
+end
+case 16
+text=\vec x_1
+expect
+\accent\fam1 ~
+.\fam1 x
+_\fam0 1
+%
+\vbox(7.14444+1.49998)x10.2014
+.\hbox(7.14444+0.0)x0.0, shifted -0.13367
+..\teni ~
+.\kern-4.30554
+.\hbox(4.30554+1.49998)x10.2014
+..\teni x
+..\hbox(4.51111+0.0)x4.48613, shifted 1.49998
+...\sevenrm 1
+end
+case 17
+text={a\atop b}
+expect
+\mathord
+.\fraction, thickness 0.0
+.\\mathord
+.\.\fam1 a
+./\mathord
+./.\fam1 b
+%
+\hbox(7.45119+3.44841)x6.73764
+.\hbox(7.45119+3.44841)x6.73764
+..\hbox(0.0+0.0)x1.2, shifted -2.5
+..\vbox(7.45119+3.44841)x4.33765
+...\hbox(3.01389+0.0)x4.33765
+....\seveni a
+...\kern3.02461
+...\hbox(4.8611+0.0)x4.33765, glue set 0.41049fil
+....\glue 0.0 plus 1.0fil minus 1.0fil
+....\seveni b
+....\glue 0.0 plus 1.0fil minus 1.0fil
+..\hbox(0.0+0.0)x1.2, shifted -2.5
+end
+case 18
+text={n\choose k}
+expect
+\mathord
+.\fraction, thickness 0.0, left-delimiter "28300, right-delimiter "29301
+.\\mathord
+.\.\fam1 n
+./\mathord
+./.\fam1 k
+%
+\hbox(8.50005+3.50006)x14.11005
+.\hbox(8.50005+3.50006)x14.11005
+..\hbox(0.39998+11.60013)x4.58336, shifted -8.10007
+...\tenex ^^@
+..\vbox(7.45119+3.44841)x4.94333
+...\hbox(3.01389+0.0)x4.94333
+....\seveni n
+...\kern3.02461
+...\hbox(4.8611+0.0)x4.94333, glue set 0.26158fil
+....\glue 0.0 plus 1.0fil minus 1.0fil
+....\seveni k
+....\kern0.16898
+....\glue 0.0 plus 1.0fil minus 1.0fil
+..\hbox(0.39998+11.60013)x4.58336, shifted -8.10007
+...\tenex ^^A
+end
+case 19
+text=\displaystyle{n\choose k}
+expect
+\displaystyle
+\mathord
+.\fraction, thickness 0.0, left-delimiter "28300, right-delimiter "29301
+.\\mathord
+.\.\fam1 n
+./\mathord
+./.\fam1 k
+%
+\hbox(14.5001+9.50012)x20.72464
+.\hbox(14.5001+9.50012)x20.72464
+..\hbox(0.39998+23.60025)x7.36115, shifted -14.10013
+...\tenex ^^R
+..\vbox(11.07062+6.85951)x6.00235
+...\hbox(4.30554+0.0)x6.00235
+....\teni n
+...\kern6.68015
+...\hbox(6.94444+0.0)x6.00235, glue set 0.24075fil
+....\glue 0.0 plus 1.0fil minus 1.0fil
+....\teni k
+....\kern0.3148
+....\glue 0.0 plus 1.0fil minus 1.0fil
+..\hbox(0.39998+23.60025)x7.36115, shifted -14.10013
+...\tenex ^^S
+end
+case 20
+text=x\mathbin{*}y
+expect
+\mathord
+.\fam1 x
+\mathbin
+.\mathbin
+..\fam2 ^^C
+\mathord
+.\fam1 y
+%
+\teni x
+\glue(\medmuskip) 2.22217 plus 1.11108 minus 2.22217
+\hbox(4.65279+0.0)x5.00002
+.\tensy ^^C
+\penalty 700
+\glue(\medmuskip) 2.22217 plus 1.11108 minus 2.22217
+\teni y
+\kern0.35878
+end
+case 21
+text=f'(x)
+expect
+\mathord
+.\fam1 f
+^\fam2 0
+\mathopen
+.\fam0 (
+\mathord
+.\fam1 x
+\mathclose
+.\fam0 )
+%
+\teni f
+\kern1.0764
+\hbox(3.8889+0.0)x2.80556, shifted -3.62892
+.\sevensy 0
+\tenrm (
+\teni x
+\tenrm )
+end
+case 22
+text=\lim_{n\to\infty}x_n
+expect
+\mathop
+.\mathord
+..\fam0 l
+.\mathord
+..\fam0 i
+.\mathord
+..\fam0 m
+_\mathord
+_.\fam1 n
+_\mathrel
+_.\fam2 !
+_\mathord
+_.\fam2 1
+\mathord
+.\fam1 x
+_\fam1 n
+%
+\hbox(6.94444+0.0)x13.88893
+.\tenrm l
+.\tenrm i
+.\tenrm m
+\hbox(3.01389+0.0)x21.38782, shifted 1.49998
+.\seveni n
+.\sevensy !
+.\sevensy 1
+\glue(\thinmuskip) 1.66663
+\teni x
+\hbox(3.01389+0.0)x5.44333, shifted 1.49998
+.\seveni n
+end
+case 23
+text=\displaystyle\lim_{n\to\infty}x_n
+expect
+\displaystyle
+\mathop
+.\mathord
+..\fam0 l
+.\mathord
+..\fam0 i
+.\mathord
+..\fam0 m
+_\mathord
+_.\fam1 n
+_\mathrel
+_.\fam2 !
+_\mathord
+_.\fam2 1
+\mathord
+.\fam1 x
+_\fam1 n
+%
+\vbox(6.94444+7.0)x20.88782
+.\hbox(6.94444+0.0)x20.88782, glue set 3.49945fil
+..\glue 0.0 plus 1.0fil minus 1.0fil
+..\tenrm l
+..\tenrm i
+..\tenrm m
+..\glue 0.0 plus 1.0fil minus 1.0fil
+.\kern2.98611
+.\hbox(3.01389+0.0)x20.88782
+..\seveni n
+..\sevensy !
+..\sevensy 1
+.\kern1.0
+\glue(\thinmuskip) 1.66663
+\teni x
+\hbox(3.01389+0.0)x5.44333, shifted 1.49998
+.\seveni n
+end
+case 24
+text=\bigl(x\bigr)
+expect
+\mathopen
+.\hbox(8.50005+3.50006)x4.58336
+..\mathon
+..\hbox(8.50005+3.50006)x4.58336
+...\hbox(0.39998+11.60013)x4.58336, shifted -8.10007
+....\tenex ^^@
+...\vbox(8.5+0.0)x0.0
+...\hbox(0.0+0.0)x0.0, shifted -2.5
+..\mathoff
+\mathord
+.\fam1 x
+\mathclose
+.\hbox(8.50005+3.50006)x4.58336
+..\mathon
+..\hbox(8.50005+3.50006)x4.58336
+...\hbox(0.39998+11.60013)x4.58336, shifted -8.10007
+....\tenex ^^A
+...\vbox(8.5+0.0)x0.0
+...\hbox(0.0+0.0)x0.0, shifted -2.5
+..\mathoff
+%
+\hbox(8.50005+3.50006)x4.58336
+.\mathon
+.\hbox(8.50005+3.50006)x4.58336
+..\hbox(0.39998+11.60013)x4.58336, shifted -8.10007
+...\tenex ^^@
+..\vbox(8.5+0.0)x0.0
+..\hbox(0.0+0.0)x0.0, shifted -2.5
+.\mathoff
+\teni x
+\hbox(8.50005+3.50006)x4.58336
+.\mathon
+.\hbox(8.50005+3.50006)x4.58336
+..\hbox(0.39998+11.60013)x4.58336, shifted -8.10007
+...\tenex ^^A
+..\vbox(8.5+0.0)x0.0
+..\hbox(0.0+0.0)x0.0, shifted -2.5
+.\mathoff
+end
+case 25
+text=\mathop{\rm sin}\nolimits x
+expect
+\mathop\nolimits
+.\mathord
+..\fam0 s
+.\mathord
+..\fam0 i
+.\mathord
+..\fam0 n
+\mathord
+.\fam1 x
+%
+\hbox(6.67859+0.0)x12.2778
+.\tenrm s
+.\tenrm i
+.\tenrm n
+\glue(\thinmuskip) 1.66663
+\teni x
+end
+case 26
+text=a\mathpunct{,}b
+expect
+\mathord
+.\fam1 a
+\mathpunct
+.\mathpunct
+..\fam1 ;
+\mathord
+.\fam1 b
+%
+\teni a
+\hbox(1.05554+1.94444)x2.77779
+.\teni ;
+\glue(\thinmuskip) 1.66663
+\teni b
+end
+case 27
+text=x^{\mathchoice{D}{T}{S}{s}}
+expect
+\mathord
+.\fam1 x
+^\mathchoice
+^D\mathord
+^D.\fam1 D
+^T\mathord
+^T.\fam1 T
+^S\mathord
+^S.\fam1 S
+^s\mathord
+^s.\fam1 s
+%
+\teni x
+\hbox(4.78334+0.0)x5.79308, shifted -3.62892
+.\seveni S
+end
+case 28
+text=\mathchoice{D}{T}{S}{s}
+expect
+\mathchoice
+D\mathord
+D.\fam1 D
+T\mathord
+T.\fam1 T
+S\mathord
+S.\fam1 S
+s\mathord
+s.\fam1 s
+%
+\teni T
+\kern1.3889
+end
+case 29
+text=a\nonscript\mskip 6mu b^{a\nonscript\mskip 6mu b}
+expect
+\mathord
+.\fam1 a
+\glue(\nonscript)
+\glue(\mskip) 6.0mu
+\mathord
+.\fam1 b
+^\mathord
+^.\fam1 a
+^\glue(\nonscript)
+^\glue(\mskip) 6.0mu
+^\mathord
+^.\fam1 b
+%
+\teni a
+\glue(\nonscript)
+\glue 3.33325
+\teni b
+\hbox(4.8611+0.0)x8.35431, shifted -3.62892
+.\seveni a
+.\glue(\nonscript)
+.\seveni b
+end
+case 30
+text=a\mkern3mu b\mskip 2mu plus 1mu minus 1mu c
+expect
+\mathord
+.\fam1 a
+\mkern3.0mu
+\mathord
+.\fam1 b
+\glue(\mskip) 2.0mu plus 1.0mu minus 1.0mu
+\mathord
+.\fam1 c
+%
+\teni a
+\kern 1.66663
+\teni b
+\glue 1.11108 plus 0.55554 minus 0.55554
+\teni c
+end
+case 31
+text=\vcenter{\hbox{x}}
+expect
+\vcenter
+.\vbox(4.30554+0.0)x5.2778
+..\hbox(4.30554+0.0)x5.2778
+...\tenrm x
+%
+\vbox(4.65277+-0.34723)x5.2778
+.\hbox(4.30554+0.0)x5.2778
+..\tenrm x
+end
+case 32
+text={\rm --}\ {\rm ``x''}
+expect
+\mathord
+.\mathbin
+..\fam2 ^^@
+.\mathbin
+..\fam2 ^^@
+\glue 3.33333 plus 1.66666 minus 1.11111
+\mathord
+.\mathord
+..\fam0 `
+.\mathord
+..\fam0 `
+.\mathord
+..\fam0 x
+.^\mathord
+.^.\fam2 0
+.^\mathord
+.^.\fam2 0
+%
+\hbox(5.83333+0.83333)x15.5556
+.\tensy ^^@
+.\tensy ^^@
+\glue 3.33333 plus 1.66666 minus 1.11111
+\hbox(7.51782+0.0)x15.38893
+.\tenrm \
+.\tenrm x
+.\hbox(3.8889+0.0)x5.11111, shifted -3.62892
+..\sevensy 0
+..\sevensy 0
+end
+case 33
+text=\left(\middle| x\right)
+expect
+\mathinner
+.\left"28300
+.\middle"26A30C
+.\mathord
+..\fam1 x
+.\right"29301
+%
+\hbox(7.5+2.5)x16.27086
+.\hbox(7.5+2.5)x3.8889
+..\tenrm (
+.\hbox(7.5+2.5)x2.77779
+..\tensy j
+.\teni x
+.\hbox(7.5+2.5)x3.8889
+..\tenrm )
+end
+case 34
+text=\sqrt{\sqrt{x^2}}
+expect
+\radical"270370
+.\radical"270370
+..\mathord
+...\fam1 x
+..^\fam0 2
+%
+\hbox(11.19997+1.20012)x28.53477
+.\hbox(0.39998+11.60013)x10.00002, shifted -10.40001
+..\tenex p
+.\vbox(11.19997+0.85002)x18.53476
+..\kern0.39998
+..\rule(0.39998+0.0)x*
+..\kern0.85007
+..\hbox(9.54994+0.85002)x18.53476
+...\hbox(0.39998+9.6)x8.33336, shifted -8.74998
+....\tensy p
+...\vbox(9.54994+0.0)x10.2014
+....\kern0.39998
+....\rule(0.39998+0.0)x*
+....\kern1.34999
+....\hbox(7.4+0.0)x10.2014
+.....\teni x
+.....\hbox(4.51111+0.0)x4.48613, shifted -2.88889
+......\sevenrm 2
+end
+case 35
+text=\left(\vcenter{\hrule height 30pt width 1pt}\right.
+expect
+\mathinner
+.\left"28300
+.\vcenter
+..\vbox(30.0+0.0)x1.0
+...\rule(30.0+0.0)x1.0
+.\right"0
+%
+\hbox(17.50014+12.50015)x10.11668
+.\hbox(0.39998+29.60031)x7.91669, shifted -17.10016
+..\tenex  
+.\vbox(17.5+12.5)x1.0
+..\rule(30.0+0.0)x1.0
+.\hbox(0.0+0.0)x1.2, shifted -2.5
+end
+case 36
+text=\displaystyle{a+b\over c}
+expect
+\displaystyle
+\mathord
+.\fraction, thickness = default
+.\\mathord
+.\.\fam1 a
+.\\mathbin
+.\.\fam0 +
+.\\mathord
+.\.\fam1 b
+./\mathord
+./.\fam1 c
+%
+\hbox(13.70952+6.85951)x24.19968
+.\hbox(13.70952+6.85951)x24.19968
+..\hbox(0.0+0.0)x1.2, shifted -2.5
+..\vbox(13.70952+6.85951)x21.79968
+...\hbox(6.94444+0.83333)x21.79968
+....\teni a
+....\glue(\medmuskip) 2.22217 plus 1.11108 minus 2.22217
+....\tenrm +
+....\glue(\medmuskip) 2.22217 plus 1.11108 minus 2.22217
+....\teni b
+...\kern3.23175
+...\rule(0.39998+0.0)x*
+...\kern4.85397
+...\hbox(4.30554+0.0)x21.79968, glue set 8.73607fil
+....\glue 0.0 plus 1.0fil minus 1.0fil
+....\teni c
+....\glue 0.0 plus 1.0fil minus 1.0fil
+..\hbox(0.0+0.0)x1.2, shifted -2.5
+end
+case 37
+text={\textstyle {1\over2}}^{1\over 2}
+expect
+\mathord
+.\textstyle
+.\mathord
+..\fraction, thickness = default
+..\\mathord
+..\.\fam0 1
+../\mathord
+../.\fam0 2
+^\fraction, thickness = default
+^\\mathord
+^\.\fam0 1
+^/\mathord
+^/.\fam0 2
+%
+\hbox(8.44843+3.44841)x6.38612
+.\hbox(8.44843+3.44841)x6.38612
+..\hbox(8.44843+3.44841)x6.38612
+...\hbox(0.0+0.0)x1.2, shifted -2.5
+...\vbox(8.44843+3.44841)x3.98613
+....\hbox(4.51111+0.0)x3.98613
+.....\sevenrm 1
+....\kern1.23732
+....\rule(0.39998+0.0)x*
+....\kern1.2373
+....\hbox(4.51111+0.0)x3.98613
+.....\sevenrm 2
+...\hbox(0.0+0.0)x1.2, shifted -2.5
+\hbox(5.90953+2.4095)x6.30283, shifted -5.97623
+.\hbox(0.0+0.0)x1.2, shifted -1.75
+.\vbox(5.90953+2.4095)x3.40283
+..\hbox(3.22221+0.0)x3.40283
+...\fiverm 1
+..\kern0.73732
+..\rule(0.39998+0.0)x*
+..\kern0.73729
+..\hbox(3.22221+0.0)x3.40283
+...\fiverm 2
+.\hbox(0.0+0.0)x1.2, shifted -1.75
+end
+case 38
+text=x\over\displaystyle y
+expect
+\displaystyle
+\mathord
+.\fam1 y
+this will begin denominator of:
+\fraction, thickness = default
+\\mathord
+\.\fam1 x
+%
+\hbox(6.9512+5.39285)x7.66159
+.\hbox(0.0+0.0)x1.2, shifted -2.5
+.\vbox(6.9512+5.39285)x5.2616
+..\hbox(3.01389+0.0)x5.2616, glue set 0.36343fil
+...\glue 0.0 plus 1.0fil minus 1.0fil
+...\seveni x
+...\glue 0.0 plus 1.0fil minus 1.0fil
+..\kern1.23732
+..\rule(0.39998+0.0)x*
+..\kern1.44287
+..\hbox(4.30554+1.94444)x5.2616
+...\teni y
+.\hbox(0.0+0.0)x1.2, shifted -2.5
+end
+case 39
+text=a=\,b\;c\!d
+expect
+\mathord
+.\fam1 a
+\mathrel
+.\fam0 =
+\glue(\mskip) 3.0mu
+\mathord
+.\fam1 b
+\glue(\mskip) 5.0mu plus 5.0mu
+\mathord
+.\fam1 c
+\glue(\mskip) -3.0mu
+\mathord
+.\fam1 d
+%
+\teni a
+\glue(\thickmuskip) 2.77771 plus 2.77771
+\tenrm =
+\penalty 500
+\glue 1.66663
+\glue(\thickmuskip) 2.77771 plus 2.77771
+\teni b
+\glue 2.77771 plus 2.77771
+\teni c
+\glue -1.66663
+\teni d
+end
+case 40
+text=\left\{x\right\}
+expect
+\mathinner
+.\left"266308
+.\mathord
+..\fam1 x
+.\right"267309
+%
+\hbox(7.5+2.5)x15.7153
+.\hbox(7.5+2.5)x5.00002
+..\tensy f
+.\teni x
+.\hbox(7.5+2.5)x5.00002
+..\tensy g
+end
+case 41
+text=\Bigg\langle x\Bigg\rangle
+expect
+\mathord
+.\hbox(17.50014+12.50015)x8.05559
+..\mathon
+..\hbox(17.50014+12.50015)x8.05559
+...\hbox(0.39998+29.60031)x8.05559, shifted -17.10016
+....\tenex *
+...\vbox(17.5+0.0)x0.0
+...\hbox(0.0+0.0)x0.0, shifted -2.5
+..\mathoff
+\mathord
+.\fam1 x
+\mathord
+.\hbox(17.50014+12.50015)x8.05559
+..\mathon
+..\hbox(17.50014+12.50015)x8.05559
+...\hbox(0.39998+29.60031)x8.05559, shifted -17.10016
+....\tenex +
+...\vbox(17.5+0.0)x0.0
+...\hbox(0.0+0.0)x0.0, shifted -2.5
+..\mathoff
+%
+\hbox(17.50014+12.50015)x8.05559
+.\mathon
+.\hbox(17.50014+12.50015)x8.05559
+..\hbox(0.39998+29.60031)x8.05559, shifted -17.10016
+...\tenex *
+..\vbox(17.5+0.0)x0.0
+..\hbox(0.0+0.0)x0.0, shifted -2.5
+.\mathoff
+\teni x
+\hbox(17.50014+12.50015)x8.05559
+.\mathon
+.\hbox(17.50014+12.50015)x8.05559
+..\hbox(0.39998+29.60031)x8.05559, shifted -17.10016
+...\tenex +
+..\vbox(17.5+0.0)x0.0
+..\hbox(0.0+0.0)x0.0, shifted -2.5
+.\mathoff
+end
+case 42
+text=\root 3\of x
+expect
+\mathchoice
+D\mkern5.0mu
+D\mathord
+D.\hbox(3.22221+0.0)x3.40283, shifted -3.94916
+D..\mathon
+D..\fiverm 3
+D..\mathoff
+D\mkern-10.0mu
+D\mathord
+D.\hbox(8.49092+1.90904)x14.04863
+D..\mathon
+D..\hbox(8.49092+1.90904)x14.04863
+D...\hbox(0.39998+9.6)x8.33336, shifted -7.69096
+D....\tensy p
+D...\vbox(8.49092+0.0)x5.71527
+D....\kern0.39998
+D....\rule(0.39998+0.0)x*
+D....\kern3.38542
+D....\hbox(4.30554+0.0)x5.71527
+D.....\teni x
+D..\mathoff
+T\mkern5.0mu
+T\mathord
+T.\hbox(3.22221+0.0)x3.40283, shifted -3.36331
+T..\mathon
+T..\fiverm 3
+T..\mathoff
+T\mkern-10.0mu
+T\mathord
+T.\hbox(8.00272+2.39725)x14.04863
+T..\mathon
+T..\hbox(8.00272+2.39725)x14.04863
+T...\hbox(0.39998+9.6)x8.33336, shifted -7.20276
+T....\tensy p
+T...\vbox(8.00272+0.0)x5.71527
+T....\kern0.39998
+T....\rule(0.39998+0.0)x*
+T....\kern2.89722
+T....\hbox(4.30554+0.0)x5.71527
+T.....\teni x
+T..\mathoff
+S\mkern5.0mu
+S\mathord
+S.\hbox(3.22221+0.0)x3.40283, shifted -2.51631
+S..\mathon
+S..\fiverm 3
+S..\mathoff
+S\mkern-10.0mu
+S\mathord
+S.\hbox(5.76689+1.57307)x11.1042
+S..\mathon
+S..\hbox(5.76689+1.57307)x11.1042
+S...\hbox(0.33998+6.66)x6.56947, shifted -5.08693
+S....\sevensy p
+S...\vbox(5.76689+0.0)x4.53473
+S....\kern0.33998
+S....\rule(0.33998+0.0)x*
+S....\kern2.07304
+S....\hbox(3.01389+0.0)x4.53473
+S.....\seveni x
+S..\mathoff
+s\mkern5.0mu
+s\mathord
+s.\hbox(3.22221+0.0)x3.40283, shifted -1.92766
+s..\mathon
+s..\fiverm 3
+s..\mathoff
+s\mkern-10.0mu
+s\mathord
+s.\hbox(4.24637+1.03363)x9.44456
+s..\mathon
+s..\hbox(4.24637+1.03363)x9.44456
+s...\hbox(0.28+4.72)x5.4862, shifted -3.68637
+s....\fivesy p
+s...\vbox(4.24637+0.0)x3.95836
+s....\kern0.28
+s....\rule(0.28+0.0)x*
+s....\kern1.5336
+s....\hbox(2.15277+0.0)x3.95836
+s.....\fivei x
+s..\mathoff
+%
+\kern 2.77771
+\hbox(3.22221+0.0)x3.40283, shifted -3.36331
+.\mathon
+.\fiverm 3
+.\mathoff
+\kern -5.55542
+\hbox(8.00272+2.39725)x14.04863
+.\mathon
+.\hbox(8.00272+2.39725)x14.04863
+..\hbox(0.39998+9.6)x8.33336, shifted -7.20276
+...\tensy p
+..\vbox(8.00272+0.0)x5.71527
+...\kern0.39998
+...\rule(0.39998+0.0)x*
+...\kern2.89722
+...\hbox(4.30554+0.0)x5.71527
+....\teni x
+.\mathoff
+end
+case 43
+text=\bf x+\it y
+expect
+\mathord
+.\fam6 x
+\mathbin
+.\fam0 +
+\mathord
+.\fam4 y
+%
+\tenbf x
+\glue(\medmuskip) 2.22217 plus 1.11108 minus 2.22217
+\tenrm +
+\penalty 700
+\glue(\medmuskip) 2.22217 plus 1.11108 minus 2.22217
+\tenit y
+\kern0.88472
+end
+case 44
+text=\mathrel{=}\mathrel{=}a\mathbin{+}
+expect
+\mathrel
+.\mathrel
+..\fam0 =
+\mathrel
+.\mathrel
+..\fam0 =
+\mathord
+.\fam1 a
+\mathbin
+.\mathbin
+..\fam0 +
+%
+\hbox(3.66875+0.0)x7.7778
+.\tenrm =
+\hbox(3.66875+0.0)x7.7778
+.\tenrm =
+\penalty 500
+\glue(\thickmuskip) 2.77771 plus 2.77771
+\teni a
+\hbox(5.83333+0.83333)x7.7778
+.\tenrm +
+end
+case 45
+text=(+)
+expect
+\mathopen
+.\fam0 (
+\mathbin
+.\fam0 +
+\mathclose
+.\fam0 )
+%
+\tenrm (
+\tenrm +
+\tenrm )
+end
+case 46
+text=\{a\mathpunct{;}+b\}
+expect
+\mathopen
+.\fam2 f
+\mathord
+.\fam1 a
+\mathpunct
+.\mathpunct
+..\fam0 ;
+\mathbin
+.\fam0 +
+\mathord
+.\fam1 b
+\mathclose
+.\fam2 g
+%
+\tensy f
+\teni a
+\hbox(4.30554+1.94444)x2.77779
+.\tenrm ;
+\glue(\thinmuskip) 1.66663
+\tenrm +
+\teni b
+\tensy g
+end
+case 47
+text=x\atopwithdelims[] y
+expect
+\mathord
+.\fam1 y
+this will begin denominator of:
+\fraction, thickness 0.0, left-delimiter "5B302, right-delimiter "5D303
+\\mathord
+\.\fam1 x
+%
+\hbox(8.50005+4.80951)x12.8681
+.\hbox(0.39998+11.60013)x4.16669, shifted -8.10007
+..\tenex ^^B
+.\vbox(7.45119+4.80951)x4.53473
+..\hbox(3.01389+0.0)x4.53473
+...\seveni x
+..\kern4.87183
+..\hbox(3.01389+1.3611)x4.53473, glue set 0.114fil
+...\glue 0.0 plus 1.0fil minus 1.0fil
+...\seveni y
+...\kern0.25116
+...\glue 0.0 plus 1.0fil minus 1.0fil
+.\hbox(0.39998+11.60013)x4.16669, shifted -8.10007
+..\tenex ^^C
+end
+case 48
+text=\displaystyle\prod\limits_k\coprod\nolimits^j
+expect
+\displaystyle
+\mathop\limits
+.\fam3 Q
+_\fam1 k
+\mathop\nolimits
+.\fam3 `
+^\fam1 j
+%
+\vbox(10.50006+13.02782)x12.7778
+.\hbox(10.50006+5.50006)x12.7778
+..\hbox(1.0+15.00012)x12.7778, shifted -9.50006
+...\tenex Y
+.\kern1.66666
+.\hbox(4.8611+0.0)x12.7778, glue set 4.17882fil
+..\glue 0.0 plus 1.0fil minus 1.0fil
+..\seveni k
+..\kern0.16898
+..\glue 0.0 plus 1.0fil minus 1.0fil
+.\kern1.0
+\glue(\thinmuskip) 1.66663
+\hbox(1.0+15.00012)x12.7778, shifted -9.50006
+.\tenex a
+\hbox(4.63193+1.3611)x4.21356, shifted -8.02786
+.\seveni j
+end
+case 49
+text=\hbox{a}^2_3\vrule height 9pt depth 2pt
+expect
+\mathord
+.\hbox(4.30554+0.0)x5.00002
+..\tenrm a
+^\fam0 2
+_\fam0 3
+\rule(9.0+2.0)x0.4
+%
+\hbox(4.30554+0.0)x5.00002
+.\tenrm a
+\vbox(10.62213+0.0)x4.48613, shifted 2.4821
+.\hbox(4.51111+0.0)x4.48613
+..\sevenrm 2
+.\kern1.59991
+.\hbox(4.51111+0.0)x4.48613
+..\sevenrm 3
+\rule(9.0+2.0)x0.4
+end
+case 50
+text=\penalty5 a\discretionary{x}{y}{}b
+expect
+\penalty 5
+\mathord
+.\fam1 a
+\discretionary
+.\tenrm x
+|\tenrm y
+\mathord
+.\fam1 b
+%
+\penalty 5
+\teni a
+\discretionary
+.\tenrm x
+|\tenrm y
+\teni b
+end
+case 51
+text=\mathaccent"7015 a^2
+expect
+\accent\fam0 ^^U
+.\fam1 a
+^\fam0 2
+%
+\vbox(8.14003+0.0)x9.77202
+.\kern1.19559
+.\hbox(6.94444+0.0)x0.0, shifted 0.14294
+..\tenrm ^^U
+.\kern-8.14003
+.\hbox(8.14003+0.0)x9.77202
+..\teni a
+..\hbox(4.51111+0.0)x4.48613, shifted -3.62892
+...\sevenrm 2
+end
+case 52
+text=\tilde{\tilde{A}}
+expect
+\accent\fam0 ~
+.\accent\fam0 ~
+..\fam1 A
+%
+\vbox(11.5794+0.0)x7.50002
+.\hbox(6.67859+0.0)x0.0, shifted 1.25
+..\tenrm ~
+.\kern-4.30554
+.\vbox(9.20636+0.0)x7.50002
+..\hbox(6.67859+0.0)x0.0, shifted 2.63893
+...\tenrm ~
+..\kern-4.30554
+..\hbox(6.83331+0.0)x7.50002
+...\teni A
+end
+case 53
+text=\dot\imath
+expect
+\accent\fam0 _
+.\fam1 {
+%
+\vbox(6.67859+0.0)x3.22456
+.\hbox(6.67859+0.0)x0.0, shifted 0.50117
+..\tenrm _
+.\kern-4.30554
+.\hbox(4.30554+0.0)x3.22456
+..\teni {
+end
+case 54
+text=AV\mathrel{AV}
+expect
+\mathord
+.\fam1 A
+\mathord
+.\fam1 V
+\mathrel
+.\mathord
+..\fam1 A
+.\mathord
+..\fam1 V
+%
+\teni A
+\teni V
+\kern2.22223
+\glue(\thickmuskip) 2.77771 plus 2.77771
+\hbox(6.83331+0.0)x15.55557
+.\teni A
+.\teni V
+.\kern2.22223
+end

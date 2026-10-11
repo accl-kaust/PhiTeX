@@ -24,6 +24,7 @@ pub mod fonts;
 pub mod glue;
 pub mod hyph;
 pub mod linebreak;
+pub mod math;
 pub mod node;
 pub mod pack;
 
