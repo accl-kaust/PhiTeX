@@ -64,7 +64,7 @@ use crate::page::{
 };
 use crate::show::RAW;
 use crate::tfm::{Font, FontFiles, Kpse, KpseFormat};
-use crate::val::{Key, Meaning, Shown, Tok, TokPar, Val};
+use crate::val::{Key, Meaning, Shown, Tok, Val};
 
 /// What a read does when the definition it finds is being remade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3776,6 +3776,12 @@ fn worker(sh: &Shared, id: usize) {
         }
         let Some(task) = picked else {
             if finished(&g) {
+                // (a round ends with output only on the layout its runs
+                // say: `settle` laid it out again else)
+                debug_assert!(
+                    g.restructure || (0..g.p.len()).all(|k| g.p[k].got.same(&g.p[k].expect)),
+                    "a round ends with output on a layout a run refutes"
+                );
                 g.done = true;
                 sh.cv.notify_all();
                 return;
@@ -3916,6 +3922,22 @@ fn state_dump(g: &State, sh: &Shared, parked: usize, why: &str) -> String {
             ps.status,
             ps.recheck,
             ps.fold_unchecked
+        );
+    }
+    // (the piece a change waits at: why it is not final)
+    if let Some(k) = g.due_at
+        && let Some(ps) = g.p.get(k)
+    {
+        let _ = write!(
+            d,
+            " the due piece {k}: {:?}, dirty {}, fold unchecked {}, differs {:#x}, join {}/{}, entry holds {};",
+            ps.status,
+            ps.dirty.len(),
+            ps.fold_unchecked,
+            ps.got.differs(&ps.expect),
+            ps.got.join,
+            ps.expect.join,
+            ps.run.as_ref().is_some_and(|r| entry_holds(g, k, r))
         );
     }
     let mut shown = 0;
@@ -4498,21 +4520,13 @@ fn advance_match(g: &mut State) {
 /// its place.
 fn same_material(g: &State, k: usize) -> bool {
     let run = g.p[k].run.as_ref().expect("a settled piece has a run");
-    // (and what the page builder reads after the piece: `\output`, what
-    // the default output ships with)
-    let keys: Vec<Key> = std::iter::once(Key::TokPar(TokPar::Output))
-        .chain(crate::page::ship_keys())
-        .collect();
-    let output = |r: &Run| -> Vec<Option<Val>> {
-        keys.iter()
-            .map(|key| {
-                r.exports
-                    .binary_search_by(|(x, _)| x.cmp(key))
-                    .ok()
-                    .map(|i| r.exports[i].1.clone())
-            })
-            .collect()
-    };
+    // (and what the page builder may read of the piece's definitions:
+    // `\output`, what the default output ships with, and what a routine
+    // reads — a float's box, which LaTeX keeps in a register and never
+    // puts on the main vertical list: a cell edited in a table float is
+    // the same paragraphs, another page. All the definitions reaching the
+    // piece's end, a run made again saying something new of any of them
+    // is new material)
     g.old_runs.get(k).and_then(Option::as_ref).is_some_and(|o| {
         Arc::ptr_eq(o, run)
             || (o.paras.len() == run.paras.len()
@@ -4520,7 +4534,7 @@ fn same_material(g: &State, k: usize) -> bool {
                     .iter()
                     .zip(&run.paras)
                     .all(|(a, b)| Arc::ptr_eq(a, b) || **a == **b)
-                && output(o) == output(run))
+                && o.exports == run.exports)
     })
 }
 
@@ -4662,7 +4676,7 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
                 // quantities is confirmed: the scan reaches it and runs it
                 // again if they differ — a join made on the last round's
                 // routines is not the sequence's)
-                if g.p[k].fold_unchecked {
+                if !fold_confirmed(g, k) {
                     for &q in &g.running {
                         if q > k {
                             sh.cancel[q].store(true, Ordering::Relaxed);
@@ -4724,7 +4738,7 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
             // next layout assumes what a refuted read made it say, and its
             // run, on the validated value, says the other: the sequence
             // flips round after round (trip's `\end` ending the job or not))
-            if (0..n).any(|k| !g.p[k].got.same(&g.p[k].expect) && g.p[k].fold_unchecked) {
+            if (0..n).any(|k| !g.p[k].got.same(&g.p[k].expect) && !fold_confirmed(g, k)) {
                 return false;
             }
             rounds_shown(g);
@@ -4736,6 +4750,18 @@ fn settle(g: &mut State, sh: &Shared) -> bool {
     false
 }
 
+/// Whether what piece `k`'s run read of the page builder (its quantities,
+/// the definitions its routines made between nodes) holds for this round:
+/// none read, or the scan has gone past the piece (it checked them, or
+/// they are the last build's at the same material, or the run was made
+/// after the scan's definitions before it), or the scan is done — nothing
+/// will confirm them later, and a change waiting for that (a join, the
+/// round's end) would wait for ever, or the round end on a layout its runs
+/// refute.
+fn fold_confirmed(g: &State, k: usize) -> bool {
+    !g.p[k].fold_unchecked || k < g.scan_next || g.scan_done
+}
+
 /// Whether piece `k`'s settled run changes the sequence and nothing can
 /// give back its old `got`: done, unmarked, no fold read unchecked, entered
 /// as its piece is.
@@ -4743,7 +4769,7 @@ fn change_final(g: &State, k: usize) -> bool {
     let ps = &g.p[k];
     ps.status == Status::Done
         && ps.dirty.is_empty()
-        && !ps.fold_unchecked
+        && fold_confirmed(g, k)
         && !ps.got.same(&ps.expect)
         && ps.run.as_ref().is_some_and(|r| entry_holds(g, k, r))
 }
@@ -4824,6 +4850,13 @@ fn pick(g: &mut State, sh: &Shared) -> Option<Task> {
     }
     if g.matching {
         advance_match(g);
+        // (the matching may have confirmed the change waiting)
+        if let Some(d) = g.due_at
+            && change_final(g, d)
+        {
+            restructure_now(g, sh);
+            return None;
+        }
     }
     let mut scan_to = g.scan_next;
     // (while the scan is out, nothing to look for: its next pieces are
