@@ -177,6 +177,10 @@ programs!(version, expr, detok, scan, ifs, groups, lastnode, glue, interaction, 
 // lines `\showbox` shows)
 programs!(micro, pdfmatch);
 
+// (pdfTeX's `\ignoreprimitiveerror`: `\vsplit`'s infinite shrinkage
+// logged as "ignored: …", not an error)
+programs!(ignoreerr);
+
 // (e-TeX with input and output: `\readline` on a stream, `\everyeof` after
 // an `\input` file, a file inside `\scantokens`, `\endinput` in a
 // `\scantokens` text, `\inputlineno` there, `\splitfirstmarks n` and
