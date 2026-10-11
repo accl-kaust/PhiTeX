@@ -2,7 +2,8 @@
 
     flow-fuzz-min.py BIN REPRO OUT
 
-BIN is phitex-flow. The text before the edit is cut after blank lines;
+BIN is phitex-flow. The text before the edit is cut after blank lines
+(after every line with FLOW_MIN_UNITS=lines: a LaTeX text has few);
 the paragraph holding the edit stays (its offset follows what goes before
 it); a paragraph goes while `BIN --fuzz-classify` gives the same class
 (the part before " | ", and whether the DVI or only the log differs).
@@ -17,6 +18,7 @@ and the system's `tex` ends on both texts (scripts/flow-fuzz-tex.py): a
 cut that makes TeX loop too is not ours.
 Run it under scripts/sandbox.
 """
+import os
 import re
 import subprocess
 import sys
@@ -32,7 +34,11 @@ ei = next(i for i, l in enumerate(head) if l.startswith('edit '))
 _, efile, at, dl, what = head[ei].split(' ', 4)
 at = int(at)
 in_main = efile == '-'
-units = re.split(r'(?<=\n\n)(?=[^\n])', text)
+if os.environ.get('FLOW_MIN_UNITS') == 'lines':
+    # (a LaTeX text has few blank lines: cut it line by line)
+    units = re.split(r'(?<=\n)(?=.)', text, flags=re.S)
+else:
+    units = re.split(r'(?<=\n\n)(?=[^\n])', text)
 starts, pos = [], 0
 for u in units:
     starts.append(pos)
@@ -94,7 +100,6 @@ def cold_loops(path):
     return 'cold ends'
 
 
-import os
 HANG = int(os.environ.get('FLOW_MIN_HANG', '60'))
 TEX = os.environ.get('FLOW_MIN_TEX')
 want = cls(src)
