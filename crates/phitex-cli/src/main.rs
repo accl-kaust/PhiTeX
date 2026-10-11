@@ -1,5 +1,5 @@
 //! `phitex`: TeX documents built and watched on phitex-red, TeX as graph
-//! reduction of pending thunks (AGENTS_BRIEF.md).
+//! reduction of pending thunks.
 //!
 //! - Bare `phitex` is the modern command line (`modern.rs`): `phitex
 //!   build`, `watch`, `check`, `clean`, `outline`.

@@ -33,7 +33,7 @@ byte for byte.
 
 | Crate | What it is |
 |---|---|
-| `phitex-red` | the engine: TeX as graph reduction (`AGENTS_BRIEF.md`, `crates/phitex-red/CONSTRUCTS.md`) |
+| `phitex-red` | the engine today: TeX as graph reduction (`crates/phitex-red/CONSTRUCTS.md`) |
 | `phitex-reduce`, `phitex-tex`, `phitex-typeset` | (stubs) the reduction core, TeX on it, Knuth's algorithms as pure functions |
 | `phitex-pdftex`, `phitex-xetex`, `phitex-luatex`, `phitex-lua` | (stubs) the engines, and Lua for LuaTeX |
 | `phitex-tfm`, `phitex-dvi`, `phitex-pdf` | (stubs) font metrics, DVI/XDV, pdfTeX's PDF backend |
@@ -46,7 +46,7 @@ byte for byte.
 | `phitex-syntax` | the old CST, kept for phitex-red until its rewrite |
 | `phitex-draw`, `phitex-codecs` | the viewer's pages, the codecs and PDF reader |
 
-`AGENTS_BRIEF.md` is the design, each crate's docs say what it is,
+Each crate's docs say what it is,
 and `AGENTS.md` the working rules.
 
 ## Building

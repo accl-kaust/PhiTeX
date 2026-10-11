@@ -1,9 +1,7 @@
 # AGENTS.md
 
-Rules for coding agents (and people) working in this repository. Read
-`AGENTS_BRIEF.md` first: it is the design. `crates/phitex-red/CONSTRUCTS.md`
-records the engine's constructs; each crate's own docs say what it is.
-Keep them current.
+Rules for coding agents (and people) working in this repository. Each
+crate's own docs say what it is; keep them current.
 
 ## Workflow
 
@@ -74,12 +72,9 @@ Keep them current.
   `phitex-xetex`, `phitex-luatex`. Engines add behaviour through
   `Engine`, never fork `phitex-tex`; only `phitex-luatex` links
   `phitex-lua`.
-
-- `AGENTS_BRIEF.md`'s Banned table holds everywhere, the CLI included:
-  no engine state outside phitex-red, no second source of truth (the
-  Build is the document's state), no cold-build path apart from the edit
-  path.
-- phitex-red depends on no crate holding TeX state.
+- TeX state lives only in the engine crates. There is no second source
+  of truth, the CLI included: the build is the document's state.
+- A cold build is an edit from nothing: there is no separate cold path.
 - Pure crates build for `wasm32-unknown-unknown` (`cargo xtask check`).
 - The scheduler affects speed, never results: every schedule gives
   byte-identical output.
