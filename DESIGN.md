@@ -16,6 +16,31 @@ onto phitex-red; they are in the history up to commit 77104f08.
 
 ## The crates
 
+The engines, in layers (stubs for now; phitex-red is taken apart into
+them). Each depends only on the layers below it:
+
+```
+phitex-cli
+  phitex-pdftex · phitex-xetex · phitex-luatex (+ phitex-lua)    the engines: what makes each one
+    phitex-tex                                                   TeX's semantics, shared; the Engine trait
+      phitex-reduce   phitex-typeset   phitex-source             core (no TeX) · pure Knuth · source text
+    phitex-tfm  phitex-dvi  phitex-pdf  phitex-otf  phitex-xdvipdfmx   fonts and backends
+```
+
+- `phitex-reduce`: the reduction core: thunks, their reads, reuse, the
+  loop-back fixpoint, the scheduler. Depends on nothing TeX.
+- `phitex-typeset`: Knuth's algorithms as pure functions (glue, packaging,
+  line breaking, hyphenation, math, alignment, page decisions). Never
+  depends on `phitex-reduce` or `phitex-tex`.
+- `phitex-tex`: TeX on the core, shared by every engine: 21-bit tokens,
+  expansion, macros, conditionals, registers, groups, modes; the `Engine`
+  trait. Engines add behaviour through it, never fork it.
+- `phitex-pdftex`, `phitex-xetex`, `phitex-luatex`: input decoding,
+  primitives, fonts, output; pdfLaTeX, XeLaTeX and LuaLaTeX are these with
+  the LaTeX format. `phitex-lua` (pure-Rust Lua) only for `phitex-luatex`.
+- `phitex-tfm`, `phitex-dvi`, `phitex-pdf`: TFM/VF, DVI/XDV, pdfTeX's PDF
+  backend.
+
 - `phitex-red`: TeX as graph reduction of pending thunks (CONSTRUCTS.md).
   The only engine.
 - `phitex-source`: source text as units with identities (positions that

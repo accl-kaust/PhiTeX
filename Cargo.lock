@@ -1468,6 +1468,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "phitex-dvi"
+version = "0.0.0"
+
+[[package]]
 name = "phitex-git"
 version = "0.0.0"
 dependencies = [
@@ -1478,6 +1482,21 @@ dependencies = [
 [[package]]
 name = "phitex-kpse"
 version = "0.0.0"
+
+[[package]]
+name = "phitex-lua"
+version = "0.0.0"
+
+[[package]]
+name = "phitex-luatex"
+version = "0.0.0"
+dependencies = [
+ "phitex-lua",
+ "phitex-otf",
+ "phitex-pdf",
+ "phitex-tex",
+ "phitex-tfm",
+]
 
 [[package]]
 name = "phitex-makeindex"
@@ -1496,6 +1515,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "phitex-pdf"
+version = "0.0.0"
+dependencies = [
+ "phitex-codecs",
+]
+
+[[package]]
+name = "phitex-pdftex"
+version = "0.0.0"
+dependencies = [
+ "phitex-dvi",
+ "phitex-pdf",
+ "phitex-tex",
+ "phitex-tfm",
+]
+
+[[package]]
 name = "phitex-red"
 version = "0.0.0"
 dependencies = [
@@ -1508,6 +1544,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "phitex-reduce"
+version = "0.0.0"
+
+[[package]]
 name = "phitex-source"
 version = "0.0.0"
 
@@ -1516,11 +1556,40 @@ name = "phitex-syntax"
 version = "0.0.0"
 
 [[package]]
+name = "phitex-tex"
+version = "0.0.0"
+dependencies = [
+ "phitex-reduce",
+ "phitex-source",
+ "phitex-tfm",
+ "phitex-typeset",
+]
+
+[[package]]
+name = "phitex-tfm"
+version = "0.0.0"
+
+[[package]]
+name = "phitex-typeset"
+version = "0.0.0"
+
+[[package]]
 name = "phitex-xdvipdfmx"
 version = "0.0.0"
 dependencies = [
  "libm",
  "phitex-codecs",
+]
+
+[[package]]
+name = "phitex-xetex"
+version = "0.0.0"
+dependencies = [
+ "phitex-dvi",
+ "phitex-otf",
+ "phitex-tex",
+ "phitex-tfm",
+ "phitex-xdvipdfmx",
 ]
 
 [[package]]
