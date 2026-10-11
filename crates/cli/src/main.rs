@@ -11,7 +11,7 @@
 //!
 //! Every build is a document session (`session.rs`); a watch's edits are
 //! updates of the same session. The native engine (`phitex-tex` on
-//! `phitex-reduce`) is being written; until it lands, builds report so.
+//! `phitex-defuse`) is being written; until it lands, builds report so.
 
 #![allow(
     clippy::many_single_char_names,

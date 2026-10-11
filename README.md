@@ -21,7 +21,7 @@ change reaches, and its output is the cold build's, byte for byte.
 
 ## Status
 
-- **The engine:** being written as layers: `phitex-reduce` (a TeX-free
+- **The engine:** being written as layers: `phitex-defuse` (a TeX-free
   def-use graph of fields) under `phitex-tex` (TeX's semantics on it),
   with `phitex-typeset` (Knuth's algorithms, pure). The PDF is the bar
   (byte-identical with pdfTeX 1.40.29). The previous engine, phitex-red,
@@ -34,7 +34,7 @@ change reaches, and its output is the cold build's, byte for byte.
 
 | Crate | What it is |
 |---|---|
-| `phitex-reduce`, `phitex-tex` | (stubs) the reduction core, TeX on it |
+| `phitex-defuse`, `phitex-tex` | (stubs) the reduction core, TeX on it |
 | `phitex-typeset` | Knuth's algorithms as pure functions: line breaking, hyphenation, math, alignments, the page builder |
 | `phitex-pdftex`, `phitex-xetex`, `phitex-luatex`, `phitex-lua` | (stubs) the engines, and Lua for LuaTeX |
 | `phitex-tfm`, `phitex-dvi`, `phitex-pdf` | (stubs) font metrics, DVI/XDV, pdfTeX's PDF backend |

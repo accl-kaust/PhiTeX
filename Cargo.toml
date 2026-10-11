@@ -5,6 +5,7 @@ members = [
     "crates/codecs",
     "crates/core/*",
     "crates/engines/*",
+    "crates/vendor/*",
     "crates/engines/luatex/lua",
     "crates/fonts/*",
     "crates/output/*",
