@@ -37,7 +37,13 @@ fn workspace_root() -> PathBuf {
 }
 
 /// Pure crates that must build for `wasm32-unknown-unknown`.
-const WASM_CRATES: &[&str] = &["phitex-codecs", "phitex-otf", "phitex-typeset", "phitex-xdvipdfmx"];
+const WASM_CRATES: &[&str] = &[
+    "phitex-codecs",
+    "phitex-otf",
+    "phitex-source",
+    "phitex-typeset",
+    "phitex-xdvipdfmx",
+];
 
 fn check() -> Result<()> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());

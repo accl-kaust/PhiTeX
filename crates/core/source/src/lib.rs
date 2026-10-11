@@ -27,10 +27,13 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub mod pass;
 pub mod syntax;
 pub mod tree;
 
-pub use syntax::{Green, Paragraphs, Red, SyntaxKind, VERBATIM_COMMANDS, VERBATIM_ENVIRONMENTS, lex};
+pub use syntax::{
+    Green, Paragraphs, Red, SyntaxKind, VERBATIM_COMMANDS, VERBATIM_ENVIRONMENTS, lex,
+};
 pub use tree::{Para, ParaId, Tree};
 
 /// A unit's identity, unique across every [`Source`] in the process (a
