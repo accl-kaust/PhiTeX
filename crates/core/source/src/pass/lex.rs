@@ -99,6 +99,9 @@ struct Soft {
     pre_expl: Option<Catcodes>,
     special: u128,
     open_spans: usize,
+    /// Its end was read inside an argument's braces opened in it: it
+    /// takes effect when the argument has been read (at its `}`).
+    ended: bool,
 }
 
 /// The commands a box's or an alignment's material follows: their group
@@ -326,6 +329,10 @@ fn args_end(b: &[u8], mut j: usize) -> usize {
 /// The catcode the tokenizer reads `c` with under `cat`.
 fn assumed(c: u8, cat: &Catcodes) -> u32 {
     match c {
+        c if cat.is_open(c) => 1,
+        c if cat.is_close(c) => 2,
+        c if cat.is_escape(c) => 0,
+        c if cat.is_other(c) && cat.is_letter(c) => 11,
         c if cat.is_other(c) => 12,
         b'\\' => 0,
         b'{' => 1,
@@ -343,6 +350,17 @@ fn assumed(c: u8, cat: &Catcodes) -> u32 {
         127 => 15,
         c if cat.is_letter(c) => 11,
         _ => 12,
+    }
+}
+
+/// `cat` with `c` back to its usual catcode as far as this regime goes
+/// (an other `\\ { } % #`, a letter `{`, a group's character no more).
+fn restored(cat: Catcodes, c: u8) -> Catcodes {
+    let r = cat.with_other(c, false).with_shaping(c, 16);
+    if structural(c) {
+        r.without_letter(c)
+    } else {
+        r
     }
 }
 
@@ -467,6 +485,43 @@ impl State<'_> {
     }
 }
 
+/// Whether the byte at `i` is the character of an alphabetic constant
+/// (`` \catcode`{ ``, ``=`}``): TeX reads it as a token only for its
+/// code, §442, so a brace there opens or closes no group.
+fn char_constant_at(st: &State<'_>, i: usize) -> bool {
+    let b = st.text.as_bytes();
+    if i == 0 || b[i - 1] != b'`' || b[i] == b'\\' {
+        return false;
+    }
+    let Some(t) = st
+        .tokens
+        .last()
+        .filter(|t| t.kind == TokKind::Text && t.end == i)
+    else {
+        return false;
+    };
+    let txt = &st.text[t.start..t.end];
+    txt.ends_with("=`")
+        || txt == "`"
+            && st.tokens[..st.tokens.len() - 1]
+                .iter()
+                .rev()
+                .find(|t| t.kind != TokKind::Space)
+                .is_some_and(|c| {
+                    c.kind == TokKind::Cs
+                        && matches!(
+                            &st.text[c.start + 1..c.end],
+                            "catcode"
+                                | "lccode"
+                                | "uccode"
+                                | "sfcode"
+                                | "mathcode"
+                                | "delcode"
+                                | "char"
+                        )
+                })
+}
+
 /// Reads `text` under `kind`'s regime and the changes visible in it.
 /// `scope` gives the macros and environments known to change catcodes
 /// (none when harvesting definitions).
@@ -523,7 +578,12 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
             }
         }
         let limit = verb.as_ref().map_or(b.len(), |v| v.start);
-        let (sk, mut end) = token_at(text, i, limit, &cat);
+        let (sk, mut end) = if char_constant_at(&st, i) {
+            // (`` `{ ``: the character's code, a number, §442; never a group)
+            (SyntaxKind::Text, i + 1)
+        } else {
+            token_at(text, i, limit, &cat)
+        };
         let mask = st.special | st.maybe_active;
         if sk == SyntaxKind::Text
             && mask != 0
@@ -556,7 +616,7 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
             }
         }
         let tk = match sk {
-            SyntaxKind::Brace if b[i] == b'{' => TokKind::Open,
+            SyntaxKind::Brace if b[i] == b'{' || cat.is_open(b[i]) => TokKind::Open,
             SyntaxKind::Brace | SyntaxKind::Other => TokKind::Close,
             SyntaxKind::Cs => TokKind::Cs,
             SyntaxKind::Space => TokKind::Space,
@@ -626,6 +686,18 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
                     soft.retain(|g| g.depth <= frames.len());
                     role = f.role;
                     pre_expl = f.pre_expl;
+                    if soft
+                        .last()
+                        .is_some_and(|g| g.ended && g.depth == frames.len())
+                        && let Some(g) = soft.pop()
+                    {
+                        // (the argument holding the group's end has been
+                        // read: the end runs before the text after it)
+                        st.end_from(g.open_spans, i);
+                        cat = g.cat;
+                        pre_expl = g.pre_expl;
+                        st.special = g.special;
+                    }
                     if bodies_ahead.0 > frames.len() {
                         bodies_ahead = (0, 0);
                     }
@@ -649,7 +721,23 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
                         pre_expl,
                         special: st.special,
                         open_spans: st.open.len(),
+                        ended: false,
                     });
+                } else if body_depth == 0
+                    && matches!(name, "endgroup" | "egroup" | "group_end:")
+                    && let Some(g) = soft.last_mut().filter(|g| {
+                        !g.ended
+                            && g.depth < frames.len()
+                            && frames[g.depth..]
+                                .iter()
+                                .skip(1)
+                                .all(|f| f.role == Role::MaybeArg)
+                            && role == Role::MaybeArg
+                    })
+                {
+                    // (braces around an argument are not a group, §473: the
+                    // end is the outer group's, run once the argument is read)
+                    g.ended = true;
                 } else if body_depth == 0
                     && matches!(name, "endgroup" | "egroup" | "group_end:")
                     && soft.last().is_some_and(|f| f.depth == frames.len())
@@ -755,8 +843,8 @@ fn switch(
             st.begin(i, "\\ProvidesExpl…", String::new(), sure);
         }
         "catcode" | "tex_catcode:D" => match catcode_assignment(b, end) {
-            Some((c, Some(v))) if assumed(c, &cat.with_other(c, false)) == v => {
-                *cat = cat.with_other(c, false);
+            Some((c, Some(v))) if assumed(c, &restored(*cat, c)) == v => {
+                *cat = restored(*cat, c);
                 let d = format!("{}=", c as char);
                 if let Some(k) = (floor..st.open.len()).rev().find(|&k| {
                     let h = &st.hazards[st.open[k]];
@@ -769,6 +857,20 @@ fn switch(
                     st.hazards[h].end = i;
                     st.retz();
                 }
+            }
+            Some((c, Some(v @ 0..=2))) if !structural(c) && c < 128 => {
+                *cat = cat.with_shaping(c, v);
+                st.begin(i, "\\catcode literal", format!("{}={v}", c as char), sure);
+            }
+            Some((c, Some(_))) if cat.is_shaping(c) => {
+                // (no longer an escape or a group's: then as from its usual
+                // catcode)
+                *cat = cat.with_shaping(c, 16);
+                switch(st, cat, pre_expl, name, i, end, floor, sure, scope);
+            }
+            Some((c @ (b'{' | b'}'), Some(11))) => {
+                *cat = cat.with_other(c, true).with_letter(c);
+                st.begin(i, "\\catcode literal", format!("{}=11", c as char), sure);
             }
             Some((c, Some(11))) if !structural(c) => {
                 *cat = cat.with_letter(c);
