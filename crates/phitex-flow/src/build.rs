@@ -1527,7 +1527,17 @@ struct State {
     unshipped: usize,
     ship_queue: VecDeque<usize>,
     old_pages: Vec<Option<(Page, Arc<dvi::Body>)>>,
+    /// The last build's pages' origins, as restart points: none after a
+    /// fancy fold (its restart points are not recorded).
     old_orgs: Arc<Vec<PageOrg>>,
+    /// The last build's pages' origins whatever the fold, given back with
+    /// its pages when the material is the same throughout: a page's PDF
+    /// events are its origin's (`PageOrg::pdf`), the fold's answers come
+    /// from them.
+    old_orgs_whole: Arc<Vec<PageOrg>>,
+    /// The last build's fold was fancy: pages kept whole are still a fancy
+    /// fold's (their origins are no restart points for the next build).
+    old_fancy: bool,
     old_marks: Vec<(u32, u32)>,
     /// The PDF events after the last page (the last build's, and this
     /// one's once the scan has finished).
@@ -2916,6 +2926,10 @@ impl Build {
         for m in fold.memo {
             memo_old.entry(memo_key(&m.page)).or_default().push(m);
         }
+        // (a fancy fold too, B2: its restart points carry its state)
+        let matching = !self.page_orgs.is_empty() || !self.marks.is_empty();
+        let old_orgs_whole = Arc::new(std::mem::take(&mut self.page_orgs));
+        let old_orgs = if fancy { Arc::default() } else { old_orgs_whole.clone() };
         let mut state = State {
             names_log: Vec::new(),
             p,
@@ -2927,8 +2941,7 @@ impl Build {
             scan_next: 0,
             scan_skip: 0,
             scan_done: false,
-            // (a fancy fold too, B2: its restart points carry its state)
-            matching: !self.page_orgs.is_empty() || !self.marks.is_empty(),
+            matching,
             old_runs: page_runs,
             last_diff: None,
             last_diff_known: false,
@@ -2950,11 +2963,9 @@ impl Build {
                 .into_iter()
                 .map(Some)
                 .collect(),
-            old_orgs: Arc::new(if fancy {
-                Vec::new()
-            } else {
-                std::mem::take(&mut self.page_orgs)
-            }),
+            old_orgs_whole,
+            old_orgs,
+            old_fancy: fancy,
             old_marks: std::mem::take(&mut self.marks),
             old_pdf_tail: self.pdf.tail.clone(),
             pdf_tail: Arc::default(),
@@ -4700,7 +4711,10 @@ fn advance_match(g: &mut State) {
                 g.bodies.push(Some(b));
                 g.stats.pages_reused += 1;
             }
-            g.orgs = g.old_orgs.to_vec();
+            g.orgs = g.old_orgs_whole.to_vec();
+            if let Some(s) = g.scan.as_mut() {
+                s.fancy |= g.old_fancy;
+            }
             g.marks_before = std::mem::take(&mut g.old_marks);
             g.pdf_tail = g.old_pdf_tail.clone();
             g.call_logs_before = std::mem::take(&mut g.old_call_logs);

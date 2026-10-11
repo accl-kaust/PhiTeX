@@ -2853,6 +2853,21 @@ suite, latex_docs one thread), `ldocs.sh`, `tripab.sh`, `tripdiff.sh`
   s, all on the cached format), its DVI right. The CLI's input
   directories are the document's, then one directory of links standing
   for TEXINPUTS.
+- **W4 (done, Q): the format cache and the main memory.** A format is
+  cached as `formats/ENGINE-KEY.fmt`, KEY a hash of the engine, the
+  TeX Live tree's stamp and the build's identity (`tex::build_id`):
+  `build.rs` hashes the sources the binary is built from (each crate's
+  `Cargo.toml`, `build.rs`, `src/`, `viewer/`; the workspace's
+  `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`; `rustc -V`; the
+  features), never the executable's path, time or bytes (they hold the
+  checkout's path): a copy of the binary, a relink, another worktree at
+  the same sources all read the format back; a change to any source makes
+  it again (test `format_cache_shared_by_copies`). A run that loads a
+  format has `Options::main_memory` = `MAIN_MEMORY` (the format's
+  `mem_top`, ours made with it) + `extra_mem_top` + `extra_mem_bot`, from
+  the environment, then texmf.cnf (kpathsea's `var_value`, `tex.ch`'s
+  bounds); `main_memory` given to such a run is ignored, as pdflatex
+  ignores it; `-ini` runs have `MAIN_MEMORY`.
 
 ## Tag numbers
 
@@ -3459,7 +3474,12 @@ answers (they are filed by the piece's id), so a reader of its
 it would end the build before the round that corrects it (the graphics
 document at one worker, speculating, random order 1:
 `pdf_graphics_speculating`). The fold has every event of the round in
-order and stops at the first, as pdfTeX does. Keys for A, if `ReadRef` takes over: `Key::PdfAns`,
+order and stops at the first, as pdfTeX does. A page an update keeps
+(the material the same throughout) keeps its origin, and with it its
+events (`State::old_orgs_whole`: after a fancy fold the restart points
+are dropped, never the origins of the pages kept, and the build that
+kept them is still a fancy fold's for the next: `State::old_fancy`;
+`ximage_again`, fuzz seed 19's `\mark` edit). Keys for A, if `ReadRef` takes over: `Key::PdfAns`,
 `Key::PdfLast`, `Key::PdfSeed`, `Key::PdfClock`, `Key::PdfDate`,
 `Key::PdfRandom`, `Key::PdfMatch`.
 
@@ -3507,7 +3527,7 @@ is a pure function or a fold step, no state shared with the others):
 | a page's content stream | `pdf/content.rs` | `content::page(&Page, &Ship, &Numbers, extra) -> PageBody` where the page is shipped; `content::page_body(&Page, &Ship, &Given)` and `form_body` in the fold: the stream, `fonts` (font, number, glyphs), `events` (marks and references in the walk's order: fonts, annotations, links and their pieces per line, destinations, beads, `\pdfrefobj`, forms, images), `links`/`beads` rectangles, `write_pos` (`\pdfsavepos` at each `\write`), the walk's state `entry`/`exit` (`WalkState`: colour stacks, matrix stack, the open links, the thread, the last position), `incomplete` (a form or image not known where the page was made), guesses (`ff`, `fixed`); `origins` (a non-version field, below). pdfTeX's whatsits are `Item::Whatsit(Whatsit::Pdf(what::What))`, made by their nodes (`graph/pdf.rs`) — done |
 | the fold | `pdf/fold.rs`, `pdf/fold/marks.rs`, `pdf/fold/image.rs` | `fold::assemble(pages, bodies, events, numbers, &End, &mut dyn Files) -> Written`: the PDF events before each page and after the last (`PageOrg::pdf`, the build's tail: `Item::Pdf` of the material, which the page builder hands to the pages in the order it meets them) are fold steps (`F::step`, part 53's commands: objects, forms, images, outlines, catalog, info, names, trailer, colour stacks, fonts, maps); each page is shipped as `pdf_ship_out` does (its walk's marks numbered in walk order, the page object with `/Group`, `/Annots`, `/B`, the raw objects, images and forms it refers to — forms shipped recursively — the marks, the resources); the end as "Finish the PDF file" (pages checked, destinations fixed, fonts, page tree, outlines, name tree, threads, catalog, info, xref, trailer). `Written::answers` are the read-backs' answers — done |
 | fonts | `pdf/font/` (`map.rs`, `enc.rs`, `t1.rs`), the font part of `fold.rs` | the map file (`map::Map`), encodings, Type 1 subsetting (`t1::writet1`), `fold::F::{do_pdf_font, write_fontdescriptor, write_enc, write_fontdictionary}`. To come: ToUnicode (`\pdfgentounicode`, `\pdfglyphtounicode`'s table as a document-level value) (virtual fonts: done, "Virtual fonts" below), PK fonts (Type 3), TrueType/OpenType, `\pdfmapfile`/`\pdfmapline` (document-level items the fold applies before the first font is initialized). How the TrueType/OpenType gap closes: the face (tables, cmap, glyf/loca, hmtx, post, CFF) is read through `partex-otf` (a pure library, linked, on the wall's allowlist), never a second parser copied from the old port; only the subset writer (which tables, in which order, pdfTeX's checksums and glyph renumbering) is the byte-exact port of `writettf.c` (and its CFF path for `.otf`), with the ttf2afm-style metrics and the map's `<[` encodings; PFB and encoding parsing through `partex-otf` where it has them, `writet1`'s writer kept. Files (map, pfb, enc, ttf/otf) are to be found through the build's kpathsea given (A's `Build::set_kpse`, `tfm::Kpse::find` with formats `FontMap`, `Type1`, `Enc`, program `pdftex`), not by `tfm::pdf_file`'s directory walk: `PdfFiles::get` switches to it when A's commit reaches this branch |
-| images | `pdf/image/mod.rs` (reading, at the node), `pdf/fold/image.rs` (writing) | `\pdfximage` reads the file (`Key::File`) at its node: `image::read_image`, `image::scale` (pdfTeX's `scale_image`); the fold writes JPEG as it is, PNG (`write_png`, IDAT copied or rows through `lib::png`, soft masks, palettes, the transparency group), a PDF page (`write_epdf` through `lib::pdfread`: objects copied, Type 1 fonts the map has replaced by the job's embedding unless `\pdfinclusioncopyfonts`) — done; `\pdfimageapplygamma`, JBIG2 are gaps |
+| images | `pdf/image/mod.rs` (reading, at the node), `pdf/fold/image.rs` (writing) | `\pdfximage` reads the file (`Key::File`) at its node: `image::read_image` (a JPEG's resolution as `read_jpg_info` has it: JFIF dpi or dpcm, units 0 none; an Exif file's TIFF fields; `jpgres`), `image::scale` (pdfTeX's `scale_image`); the fold writes JPEG as it is, PNG (`write_png`, IDAT copied or rows through `lib::png`, soft masks, palettes, the transparency group), a PDF page (`write_epdf` through `lib::pdfread`: objects copied, Type 1 fonts the map has replaced by the job's embedding unless `\pdfinclusioncopyfonts`) — done; `\pdfimageapplygamma`, JBIG2 are gaps |
 | links, dests, outlines | `pdf/content.rs` (rectangles), `pdf/fold/marks.rs` | links split per line box at their nesting level and threaded across pages by `WalkState::links`; destinations' duplicates the fold's; outlines, the name tree (`sort_dest_names`, `str_less_str`), threads and beads as pdfTeX writes them — done |
 | reads of the fold | `graph/pdf.rs`, `build.rs` (`PdfKept`, `Given::answer`) | `Key::PdfAns` answered from the last fold, rounds until they hold ("pdfTeX's read-backs" below); A's `ReadRef` may take this over later — the keys are listed there |
 

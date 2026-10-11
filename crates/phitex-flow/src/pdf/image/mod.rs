@@ -143,7 +143,20 @@ pub fn read_jpg_info(name: Vec<u8>, data: Arc<[u8]>, colorspace_ref: i32, pdf_12
                 y_res = x_res;
             }
         }
-        0xFFE1 => return Err("Exif JPEG images are not supported yet".into()),
+        // (Exif: the resolution its TIFF fields give, else none)
+        0xFFE1 => {
+            let length = usize::from(two(4)).wrapping_sub(2) & 0xFFFF;
+            if length > 5 {
+                // (`fread` of the signature short: pdfTeX returns, the image
+                // with no size)
+                if d.len() < 11 {
+                    return Err("invalid image dimensions".into());
+                }
+                if &d[6..11] == b"Exif\0" {
+                    (x_res, y_res) = read_app1_exif(d.get(11..).unwrap_or(&[]), length - 5);
+                }
+            }
+        }
         _ => {}
     }
     let mut i = 0;
@@ -192,6 +205,84 @@ pub fn read_jpg_info(name: Vec<u8>, data: Arc<[u8]>, colorspace_ref: i32, pdf_12
             _ => i += usize::from(two(i)),
         }
     }
+}
+
+/// writejpg.c's `read_exif_bytes`: `n` (2 or 4) bytes at `*p`, big- or
+/// little-endian, `*p` moved past them (bytes past the segment read as 0).
+fn read_exif_bytes(buf: &[u8], p: &mut usize, n: usize, big: bool) -> u32 {
+    let at = |i: usize| u32::from(buf.get(i).copied().unwrap_or(0));
+    let mut v = 0u32;
+    for j in 0..n {
+        let i = if big { *p + j } else { *p + n - 1 - j };
+        v = (v << 8) | at(i);
+    }
+    *p += n;
+    v
+}
+
+/// writejpg.c's `read_APP1_Exif`: the resolution an Exif segment's first
+/// IFD gives (`XResolution`, `YResolution`, `ResolutionUnit`; 72 dpi where
+/// one is missing), `(0, 0)` if it is not TIFF data. `seg` is what follows
+/// the signature, `length` the bytes pdfTeX reads of it. As in C: a
+/// rational is `num / den` in integers, and `num`, `den` and `value` are
+/// those of the last field that set them.
+fn read_app1_exif(seg: &[u8], length: usize) -> (i32, i32) {
+    let buf = &seg[..length.min(seg.len())];
+    let byte = |i: usize| buf.get(i).copied().unwrap_or(0);
+    let mut p = 0usize;
+    while p < length && byte(p) == 0 {
+        p += 1;
+    }
+    let tiff = p;
+    let big = match (byte(p), byte(p + 1)) {
+        (b'M', b'M') => true,
+        (b'I', b'I') => false,
+        _ => return (0, 0),
+    };
+    p += 2;
+    if read_exif_bytes(buf, &mut p, 2, big) != 42 {
+        return (0, 0);
+    }
+    let i = read_exif_bytes(buf, &mut p, 4, big) as usize;
+    p = tiff + i;
+    let mut num_fields = read_exif_bytes(buf, &mut p, 2, big) as i32;
+    let (mut value, mut num, mut den) = (0i32, 0i32, 0i32);
+    let (mut xres, mut yres, mut res_unit) = (72.0f64, 72.0f64, 1.0f64);
+    while num_fields > 0 {
+        num_fields -= 1;
+        let tag = read_exif_bytes(buf, &mut p, 2, big);
+        let ty = read_exif_bytes(buf, &mut p, 2, big);
+        read_exif_bytes(buf, &mut p, 4, big);
+        match ty {
+            1 | 7 => {
+                value = i32::from(byte(p));
+                p += 4;
+            }
+            3 => {
+                value = read_exif_bytes(buf, &mut p, 2, big) as i32;
+                p += 2;
+            }
+            4 | 9 => value = read_exif_bytes(buf, &mut p, 4, big) as i32,
+            5 | 10 => {
+                value = read_exif_bytes(buf, &mut p, 4, big) as i32;
+                let mut rp = tiff.wrapping_add(value as u32 as usize);
+                num = read_exif_bytes(buf, &mut rp, 4, big) as i32;
+                den = read_exif_bytes(buf, &mut rp, 4, big) as i32;
+            }
+            _ => p += 4,
+        }
+        match tag {
+            282 if den != 0 => xres = f64::from(num.wrapping_div(den)),
+            283 if den != 0 => yres = f64::from(num.wrapping_div(den)),
+            296 => match value {
+                2 => res_unit = 1.0,
+                3 => res_unit = 2.54,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    ((xres * res_unit) as i32, (yres * res_unit) as i32)
 }
 
 /// png.h's colour types.

@@ -14,7 +14,7 @@ use phitex_flow::build::MAIN_MEMORY;
 use phitex_flow::{Build, Font, Options, Order, Reads};
 
 /// The documents.
-const DOCS: [&str; 29] = [
+const DOCS: [&str; 30] = [
     "hello",
     "compressed",
     "mag",
@@ -35,6 +35,7 @@ const DOCS: [&str; 29] = [
     "outline",
     "ximage",
     "ximage2",
+    "jpgres",
     "random",
     "misc",
     "savepos",
@@ -89,9 +90,10 @@ fn pdftex(name: &str, src: &str) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
     let tmp = std::env::temp_dir().join(format!("phitex-flow-pdf-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).ok()?;
     std::fs::write(tmp.join(format!("{name}.tex")), src).ok()?;
-    // (the images as the graph finds them: kpathsea's plain path has no
-    // `tex/latex`, where `mwe` keeps them; the trailing colon keeps the default)
-    let inputs = input_dirs().iter().skip(1).fold(String::from("."), |s, d| format!("{s}:{}", d.display())) + ":";
+    // (the images as the graph finds them: the document's directory (its
+    // own images), and kpathsea's plain path has no `tex/latex`, where
+    // `mwe` keeps them; the trailing colon keeps the default)
+    let inputs = input_dirs().iter().fold(String::from("."), |s, d| format!("{s}:{}", d.display())) + ":";
     let st = Command::new("pdftex")
         .args(["-ini", "-etex", "-interaction=batchmode", &format!("{name}.tex")])
         .env("TEXINPUTS", inputs)
@@ -291,6 +293,42 @@ fn outline() {
 #[test]
 fn ximage() {
     check("ximage");
+}
+
+/// A JPEG's resolution as writejpg.c's `read_jpg_info` reads it: JFIF
+/// with units 0 (the aspect ratio only: none, `\\pdfimageresolution`'s or
+/// 72 dpi) and in dots per centimetre (× 2.54, truncated), and an Exif
+/// file with no JFIF segment (its TIFF fields, little- and big-endian, a
+/// field missing being 72).
+#[test]
+fn jpgres() {
+    check("jpgres");
+}
+
+/// A build updated after a file it reads changed, the material the same
+/// throughout: the last build's pages come back with their origins, and
+/// with them their PDF events, so the fold answers the images' read-backs
+/// as before (a fancy fold, an output routine fired, once kept the pages
+/// without their origins: the fold then answered nothing, the readers ran
+/// again, and the read-backs never settled).
+#[test]
+fn ximage_again() {
+    let text = "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\pdfcompresslevel=0\n\\font\\r=cmr10 \\r \\hsize=200pt \\vsize=300pt \\parindent=0pt\n\\output={\\shipout\\box255}\n\\openin1=again.dat \\read1 to\\x \\closein1\n\\pdfximage width 50pt {example-image.jpg}\\edef\\j{\\the\\pdflastximage}\n\\pdfrefximage\\j\\par\nA\\pdfrefximage\\pdflastximage\\par\n\\end\n";
+    for &o in &RUNS {
+        let mut b = Build::new(font());
+        common::give_kpse(&mut b, "pdftex");
+        b.set_jobname("again");
+        b.set_input_dirs(input_dirs());
+        b.set_pdf_date(0);
+        b.set_file("again.dat", "one\n");
+        let first = b.update(text, o);
+        assert!(first.errors.is_empty(), "({o:?}): errors on the graph: {:?}", first.errors);
+        b.set_file("again.dat", "two\n");
+        let out = b.update(text, o);
+        assert!(out.errors.is_empty(), "({o:?}): errors on the graph after the edit: {:?}", out.errors);
+        assert!(out.stats.pages_reused > 0, "({o:?}): the page was made again");
+        assert!(out.pdf == first.pdf, "({o:?}): the PDF file differs {}", first_difference(&out.pdf, &first.pdf));
+    }
 }
 
 /// `\pdfinclusioncopyfonts`, `\pdfimageresolution`, `\pdfpagebox` and a
