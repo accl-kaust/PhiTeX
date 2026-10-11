@@ -18,3 +18,5 @@ pub mod pdfread;
 pub mod pdftext;
 pub mod png;
 pub mod zlib;
+/// The pure-Rust port of zlib's deflate (byte-identical to pdfTeX's streams).
+pub mod deflate;
