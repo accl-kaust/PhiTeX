@@ -7,6 +7,8 @@
 #
 # (Inside the sandbox: every cargo command and every pdftex run goes
 # through scripts/sandbox.) OUTDIR defaults to target/trace-corpus.
+# REUSE_LOGS=1 re-parses the logs of an earlier run instead of running
+# the engines again.
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/../../.." && pwd)"
 out="${1:-$repo/target/trace-corpus}"
@@ -15,9 +17,14 @@ cargo build -q --profile fastdev -p phitex-trace
 bin="$repo/target/fastdev/phitex-trace"
 run() { # name engine main
   local name=$1 engine=$2 main=$3
-  "$bin" record "$main" --engine "$engine" --out "$out/$name.jsonl" --scratch "$out/scratch-$name" 2>>"$out/record.log"
+  local log="$out/scratch-$name/$(basename "${main%.tex}").log"
+  if [ -z "${REUSE_LOGS:-}" ] || [ ! -f "$log" ]; then
+    "$bin" record "$main" --engine "$engine" --out "$out/$name.jsonl" --scratch "$out/scratch-$name" 2>>"$out/record.log"
+  else
+    "$bin" parse "$log" --main "./$(basename "$main")" --engine "$engine" --out "$out/$name.jsonl" 2>>"$out/record.log"
+  fi
   "$bin" analyze "$out/$name.jsonl" --json "$out/$name.json" >"$out/$name.md"
-  "$bin" parse "$out/scratch-$name/$(basename "${main%.tex}").log" --main "./$(basename "$main")" --engine "$engine" --conservative --out "$out/$name.cons.jsonl" 2>>"$out/record.log"
+  "$bin" parse "$log" --main "./$(basename "$main")" --engine "$engine" --conservative --out "$out/$name.cons.jsonl" 2>>"$out/record.log"
   "$bin" analyze "$out/$name.cons.jsonl" --json "$out/$name.cons.json" >"$out/$name.cons.md"
   rm -f "$out/$name.jsonl" "$out/$name.cons.jsonl"
 }
