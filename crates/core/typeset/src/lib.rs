@@ -18,6 +18,7 @@
 pub mod arith;
 pub mod fonts;
 pub mod glue;
+pub mod linebreak;
 pub mod node;
 pub mod pack;
 

@@ -151,6 +151,32 @@ pub fn badness(t: Scaled, s: Scaled) -> i32 {
     }
 }
 
+/// `fract(x, n, d, max_answer)` (e-TeX, etex.ch): `x*n/d` rounded to
+/// the nearest integer, halves away from zero; `None` when `d = 0` or the
+/// magnitude would exceed `max_answer` (`num_error`, value 0).
+#[must_use]
+pub fn fract(x: i32, n: i32, d: i32, max_answer: i32) -> Option<i32> {
+    if d == 0 {
+        return None;
+    }
+    if x == 0 {
+        return Some(0);
+    }
+    let negative = (d < 0) ^ (x < 0) ^ (n < 0);
+    let (x, n, d) = (
+        i128::from(x).abs(),
+        i128::from(n).abs(),
+        i128::from(d).abs(),
+    );
+    // floor(x n / d + 1/2)
+    let a = (2 * x * n + d) / (2 * d);
+    if a > i128::from(max_answer) {
+        return None;
+    }
+    let a = i32::try_from(a).ok()?;
+    Some(if negative { -a } else { a })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +253,16 @@ mod tests {
         let d = xn_over_d(-UNITY, 7227, 100);
         assert_eq!((d.value, d.remainder), (-4_736_286, -72));
         assert!(xn_over_d(0o7777777777, 0o200000, 1).overflow);
+    }
+
+    #[test]
+    fn fract_rounds() {
+        assert_eq!(fract(10, 1, 4, MAX_DIMEN), Some(3));
+        assert_eq!(fract(-10, 1, 4, MAX_DIMEN), Some(-3));
+        assert_eq!(fract(10, 1, -3, MAX_DIMEN), Some(-3));
+        assert_eq!(fract(7, 0, 3, MAX_DIMEN), Some(0));
+        assert_eq!(fract(1, 2, 0, MAX_DIMEN), None);
+        assert_eq!(fract(MAX_DIMEN, 2, 1, MAX_DIMEN), None);
     }
 
     #[test]
