@@ -39,11 +39,9 @@ pub struct CharInfo {
     pub depth: Scaled,
     /// `char_italic`.
     pub italic: Scaled,
-    /// The size chain or extensible recipe.
+    /// The size chain or extensible recipe; whether the character has a
+    /// lig/kern program is [`Fonts::lig_kern`]'s to answer.
     pub tag: CharTag,
-    /// Whether the character has a lig/kern program (`lig_tag`). Only a
-    /// hint: [`Fonts::lig_kern`] is the answer.
-    pub has_lig_kern: bool,
 }
 
 /// The kind of a ligature instruction (§545): which of the two characters

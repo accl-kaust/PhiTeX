@@ -318,3 +318,9 @@ lk 121 97 kern -18205
 lk 121 101 kern -18205
 lk 121 111 kern -18205
 lk 123 45 lig 0 124
+param 2 218453
+param 3 109226
+param 4 72818
+param 5 282168
+param 6 655361
+param 7 72818
