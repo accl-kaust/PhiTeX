@@ -1134,3 +1134,11 @@ fn makeother_of_an_other_character_changes_nothing() {
     let (p, _) = pass(t, FileKind::Package);
     assert_eq!(p.hazards, []);
 }
+
+#[test]
+fn a_catcode_of_a_named_constant_is_that_characters() {
+    // (`\catcode\z@`: the character whose code is the constant, §440)
+    let t = "\\catcode\\z@=11 \\a";
+    let (p, _) = pass(t, FileKind::Document);
+    assert!(p.hazards.iter().all(|h| h.status != Status::Pending));
+}
