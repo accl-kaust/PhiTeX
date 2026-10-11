@@ -205,11 +205,12 @@ impl Graph {
         &self.succ[self.succ_start[i] as usize..self.succ_start[i + 1] as usize]
     }
 
-    /// Steps transitively dependent on any of `seeds` (the seeds excluded).
-    fn dependents(&self, seeds: &[u32], visited: &mut [u64]) -> u64 {
+    /// Steps transitively dependent on any of `seeds`, the steps in
+    /// `exclude` (the seeds' own line) not counted.
+    fn dependents(&self, seeds: &[u32], exclude: &[u32], visited: &mut [u64]) -> u64 {
         visited.fill(0);
         let mut stack: Vec<u32> = seeds.to_vec();
-        for &s in seeds {
+        for &s in seeds.iter().chain(exclude) {
             visited[s as usize / 64] |= 1 << (s % 64);
         }
         let mut count = 0;
@@ -467,14 +468,18 @@ impl Graph {
         let mut chain: Vec<f64> = self.longest.iter().map(|&l| f64::from(l)).collect();
         report.chain_length = quantiles(&mut chain);
 
-        // Edit impact.
+        // Edit impact: the steps of each line of the main file, and those
+        // of them that write.
+        let mut on_line: HashMap<u32, Vec<u32>> = HashMap::new();
         let mut by_line: HashMap<u32, Vec<u32>> = HashMap::new();
         for (i, node) in self.nodes.iter().enumerate() {
             if node.in_main
-                && node.writes.1 > node.writes.0
                 && let Some(l) = node.line
             {
-                by_line.entry(l).or_default().push(idx(i));
+                on_line.entry(l).or_default().push(idx(i));
+                if node.writes.1 > node.writes.0 {
+                    by_line.entry(l).or_default().push(idx(i));
+                }
             }
         }
         let mut lines: Vec<u32> = by_line.keys().copied().collect();
@@ -485,7 +490,12 @@ impl Graph {
         let mut visited = vec![0u64; n.div_ceil(64)];
         let mut impact: Vec<f64> = lines
             .iter()
-            .map(|l| pct(self.dependents(&by_line[l], &mut visited), steps))
+            .map(|l| {
+                pct(
+                    self.dependents(&by_line[l], &on_line[l], &mut visited),
+                    steps,
+                )
+            })
             .collect();
         report.edit_lines_sampled = lines.len() as u64;
         report.edit_impact_pct = quantiles(&mut impact);
