@@ -15,7 +15,9 @@
 #                    scripts/flow-fuzz-min.py (MIN=0 skips it).
 # Everything runs under scripts/sandbox (directly when already inside it).
 # Env: JOBS, EDITS (6), TIMEOUT (seconds a seed may take, 600), MIN (1),
-# MIN_LIMIT (seconds a cut-down may take, 900).
+# MIN_LIMIT (seconds a cut-down may take, 900); a shard of the plain
+# corpus: FROM, TO (the 1-thread seeds FROM..TO, default 0..SEEDS) and J8
+# (how many 8-thread seeds, from SEEDS on; default SEEDS/5).
 # LATEX=1: the LaTeX documents instead (fuzz::LATEX_DOCS but tiny, on the
 # saved format, made once into OUT/latex.fmt): SEEDS seeds (default 30)
 # of each document, one chunk a document, at 1 or 8 threads at random
@@ -60,7 +62,11 @@ run() { if [ -n "${PARTEX_SANDBOX:-}" ]; then "$@"; else scripts/sandbox "$@"; f
 BIN=target/release/phitex-flow
 run cargo build --release -q -p phitex-flow
 mkdir -p "$OUT"
-J8=$((SEEDS / 5))
+J8=${J8:-$((SEEDS / 5))}
+# (a shard of the 1-thread seeds: FROM.. TO; the 8-thread ones stay
+# SEEDS.. SEEDS+J8, so a sharded gate runs the same seeds as one job)
+FROM=${FROM:-0}
+TO=${TO:-$SEEDS}
 # (one line per chunk: threads, first seed, count[, LaTeX document])
 if [ "$LATEX" = 1 ]; then
 	# (the format, made once: every chunk reads it)
@@ -74,7 +80,7 @@ elif [ -n "${DOCS:-}" ]; then
 	done >"$OUT/chunks.txt"
 else
 	{
-		for ((s = 0; s < SEEDS; s += 100)); do echo "1 $s $((SEEDS - s < 100 ? SEEDS - s : 100))"; done
+		for ((s = FROM; s < TO; s += 100)); do echo "1 $s $((TO - s < 100 ? TO - s : 100))"; done
 		for ((s = 0; s < J8; s += 100)); do echo "8 $((SEEDS + s)) $((J8 - s < 100 ? J8 - s : 100))"; done
 	} >"$OUT/chunks.txt"
 fi
