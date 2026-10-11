@@ -11,7 +11,10 @@
 //! A function body runs in a fresh unit seeded with its captures and
 //! parameters. Loop-back fields are iterated in whole rounds.
 
-use super::{DOC_KIND, LIST_KIND, Lang, binop, has_proc, items, parse, parse_stmt, proc_field, tag, text, truthy};
+use super::{
+    DOC_KIND, FOLD, FOLD_STATE, LIST_KIND, Lang, OUT_KIND, binop, fold_init, fold_step, fold_text, has_proc, items,
+    parse, parse_stmt, proc_field, tag, text, truthy,
+};
 use defuse::{Field, FxHashMap, FxHashSet, Value, ValueId, Values};
 
 type Binding = (u64, ValueId);
@@ -378,7 +381,39 @@ impl Interp<'_> {
             "add" => {
                 let val = self.expr(u, a[0]);
                 u.seqs.last_mut().expect("unit frame").push(val);
+                let state = v.field(FOLD_STATE);
+                let decl = if u.kind() == Some(OUT_KIND) {
+                    None
+                } else {
+                    self.lookup(u, v.field(FOLD))
+                };
+                let Some(src) = decl else {
+                    self.define(u, state, ValueId::UNIT, false);
+                    return val;
+                };
+                let st = self
+                    .lookup(u, state)
+                    .filter(|&s| items(v, s).len() == 2)
+                    .unwrap_or_else(|| fold_init(v));
+                let (st, out) = fold_step(v, st, val, self.cap(u));
+                self.define(u, state, st, false);
+                if let Some((h, k)) = out {
+                    self.output(u, src, st, h, k, Vec::new());
+                }
                 val
+            }
+            "fold" => {
+                let src = self.expr(u, a[0]);
+                self.define(u, v.field(FOLD), src, false);
+                self.define(u, v.field(FOLD_STATE), fold_init(v), false);
+                src
+            }
+            "when" => {
+                let c = self.expr(u, a[0]);
+                if truthy(v, c) {
+                    self.run_list(u, &[a[1]]);
+                }
+                v.bool(truthy(v, c))
             }
             "take" | "replace" => {
                 let r = (t == "replace").then(|| self.expr(u, a[0]));
@@ -453,6 +488,57 @@ impl Interp<'_> {
             }
             _ => v.str("error: bad expression"),
         }
+    }
+
+    fn cap(&self, u: &Unit) -> i64 {
+        self.lookup(u, self.v.field("cap"))
+            .and_then(|c| self.v.as_int(c))
+            .unwrap_or(50)
+    }
+
+    /// Runs emitted fold output `k` in place: an `out` scope with `out`,
+    /// `k` and `state` defined, the fold text, then the fold continues with
+    /// what the text added and the elements still carried over.
+    fn output(&mut self, u: &mut Unit, src: ValueId, st: ValueId, h: ValueId, k: ValueId, rest: Vec<ValueId>) {
+        let v = self.v;
+        self.pos += 1;
+        Self::open_kind(u, Some(OUT_KIND.into()));
+        self.pos += 1;
+        for (n, x) in [("out", h), ("k", k), ("state", st)] {
+            self.define(u, v.field(n), x, false);
+        }
+        u.contribs.push((self.pos, v.seq_unit(h)));
+        match fold_text(v, src) {
+            Ok(ss) => {
+                self.run_list(u, &ss);
+            }
+            Err(_) => self.pos += 1,
+        }
+        // The resume node.
+        self.pos += 1;
+        let mut input = u.seqs.last().cloned().unwrap_or_default();
+        input.extend(rest);
+        let state = v.field(FOLD_STATE);
+        if let Some(src) = self.lookup(u, v.field(FOLD)) {
+            let cap = self.cap(u);
+            let mut st = st;
+            for (j, &e) in input.iter().enumerate() {
+                let (s2, out) = fold_step(v, st, e, cap);
+                st = s2;
+                if let Some((h, k)) = out {
+                    self.define(u, state, st, true);
+                    self.output(u, src, st, h, k, input[j + 1..].to_vec());
+                    self.pos += 1;
+                    Self::close(u);
+                    return;
+                }
+            }
+            self.define(u, state, st, true);
+        } else {
+            self.define(u, state, st, true);
+        }
+        self.pos += 1;
+        Self::close(u);
     }
 
     /// Applies a closure (memoized: applications are pure).

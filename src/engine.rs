@@ -286,6 +286,8 @@ pub struct Report {
     pub rounds: u64,
     /// Loop-back restarts from initial values.
     pub restarts: u64,
+    /// `nodes_run` by operation name.
+    pub runs_by_op: Vec<(&'static str, u64)>,
 
     /// Executions (complete runs).
     pub runs: u64,
@@ -326,6 +328,23 @@ pub struct Report {
     /// Speculative runs kept whose shape (children, claim, scope effect or
     /// definition set) differed from the node's previous shape.
     pub spec_shape_changes: u64,
+    /// Nodes parked on a node of each operation (by name).
+    pub waits_by_op: Vec<(&'static str, u64)>,
+}
+
+impl Report {
+    /// The count for operation `name` in `runs_by_op` or `waits_by_op`.
+    #[must_use]
+    pub fn by_op(counts: &[(&'static str, u64)], name: &str) -> u64 {
+        counts.iter().find(|c| c.0 == name).map_or(0, |c| c.1)
+    }
+}
+
+fn bump(counts: &mut Vec<(&'static str, u64)>, name: &'static str) {
+    match counts.iter_mut().find(|c| c.0 == name) {
+        Some(c) => c.1 += 1,
+        None => counts.push((name, 1)),
+    }
 }
 
 /// Evaluation errors.
@@ -1048,6 +1067,104 @@ impl Engine {
         self.nodes
             .get(s.ix as usize)
             .is_some_and(|n| n.gen_ == s.gen_ && n.state != State::Free)
+    }
+
+    /// Internal consistency after an evaluation (for tests and fuzzing):
+    /// every local definition indexed at its current depth, every settled
+    /// use bound where a fresh walk binds it and indexed among its site's
+    /// users, every decided pending effect reflected in the order.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn check_invariants(&self) -> Vec<String> {
+        let mut bad = Vec::new();
+        for i in 0..self.nodes.len() {
+            let s = self.slot_at(i);
+            if !self.live(s) {
+                continue;
+            }
+            let n = self.n(s);
+            if n.state == State::Inert || n.has(F_APP) {
+                continue;
+            }
+            let root = self.units[n.unit as usize].root;
+            for d in &n.defs {
+                if d.global {
+                    if self.global_ix.get(&(n.unit, d.field, n.label)) != Some(&s) {
+                        bad.push(format!("{s:?}: global {:?} not indexed", d.field));
+                    }
+                    continue;
+                }
+                let want = self.def_depth(root, n.label, d.field);
+                if self.local_depth.get(&(n.unit, d.field, n.label)) != Some(&want) {
+                    bad.push(format!(
+                        "{s:?}: local {} indexed at depth {:?}, now {want}",
+                        self.values.render(d.field.0),
+                        self.local_depth.get(&(n.unit, d.field, n.label))
+                    ));
+                }
+            }
+            if n.state != State::Done {
+                continue;
+            }
+            if n.has(F_EFF_DYN) && n.bound != n.effect {
+                bad.push(format!("{s:?}: bound effect {} but decided {}", n.bound, n.effect));
+            }
+            for u in &n.uses {
+                if u.kind != K_FIELD {
+                    continue;
+                }
+                let f = Field(ValueId(u.key));
+                let w = self.walk(n.unit, n.label, f);
+                if w.site != u.site {
+                    let desc = |x: Slot| {
+                        if self.live(x) {
+                            let a = self.args_vec(self.n(x).args);
+                            format!(
+                                "{x:?}@{} {}",
+                                self.n(x).label >> 32,
+                                a.first().map_or(String::new(), |&a| self.values.render(a))
+                            )
+                        } else {
+                            format!("{x:?}")
+                        }
+                    };
+                    bad.push(format!(
+                        "{}: use of {} bound to {}, walk finds {}",
+                        desc(s),
+                        self.values.render(f.0),
+                        desc(u.site),
+                        desc(w.site)
+                    ));
+                }
+                if self.users.get(&(site_key(n.unit, u.site), f, n.label)) != Some(&s) {
+                    bad.push(format!("{s:?}: use of {} missing from users", self.values.render(f.0)));
+                }
+            }
+        }
+        bad
+    }
+
+    /// A node's scheduling state, for diagnostics.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn debug_node(&self, id: NodeId) -> String {
+        let Some(&s) = self.ids.get(&id) else {
+            return "gone".into();
+        };
+        let n = self.n(s);
+        let on = if n.on != NIL && self.live(n.on) {
+            let o = self.n(n.on);
+            format!(
+                "{:?} state {:?} flags {:#x} args {}",
+                o.id,
+                o.state,
+                o.flags,
+                self.values.render(o.args)
+            )
+        } else {
+            format!("{:?}", n.on)
+        };
+        format!("{s:?} state {:?} flags {:#x} on {on}", n.state, n.flags)
     }
 
     /// The current reference to slot `i`.
@@ -2293,6 +2410,12 @@ impl Engine {
         // (previous site, users in (lx, end)) pairs.
         let mut prev: Vec<(Slot, u64)> = Vec::new();
         if global {
+            // Every use after `lx` bound to the latest global before it
+            // (wherever that lies: possibly inside a scope the walk below
+            // steps over) now reaches `x`.
+            if let Some((_, &g)) = self.global_ix.range((unit, f, 0)..(unit, f, lx)).next_back() {
+                prev.push((g, u64::MAX));
+            }
             let mut hi = lx;
             let mut last_rel: i64 = -1;
             loop {
@@ -2301,7 +2424,9 @@ impl Engine {
                     break;
                 };
                 if self.def_global(d, f) {
-                    prev.push((d, u64::MAX));
+                    if !prev.iter().any(|p| p.0 == d) {
+                        prev.push((d, u64::MAX));
+                    }
                     break;
                 }
                 let depth = self.def_depth(root, ld, f);
@@ -2736,6 +2861,7 @@ impl Engine {
         }
         self.leave_spec(s);
         self.dequeue(s);
+        self.refute_assumers(s);
         let old_eff = self.oitem(s).eff;
         self.nm(s).state = State::Inert;
         self.nm(s).epoch = self.n(s).epoch.wrapping_add(1);
@@ -3005,6 +3131,8 @@ impl Engine {
         self.nm(x).state = State::Parked;
         self.nm(x).on = on;
         if on != NIL {
+            let name = self.op(self.n(on).op).name();
+            bump(&mut self.report.waits_by_op, name);
             self.ax(on).waiters.push(x);
             if self.n(on).has(F_INPEND) {
                 self.report.pending_waits += 1;
@@ -3060,6 +3188,21 @@ impl Engine {
         deps.dedup();
         deps.retain(|&d| self.live(d));
         deps
+    }
+
+    /// `x` goes away (or out of the program) before finishing: speculation
+    /// that rested on it will never be confirmed, so it runs again.
+    fn refute_assumers(&mut self, x: Slot) {
+        let assumers = match self.aux_of(x) {
+            Some(a) if !a.assumers.is_empty() => a.assumers.clone(),
+            _ => return,
+        };
+        self.ax(x).assumers.clear();
+        for a in assumers {
+            if self.live(a.node) && self.n(a.node).epoch == a.epoch && self.n(a.node).state == State::Spec {
+                self.make_dirty(a.node);
+            }
+        }
     }
 
     // -------------------------------------------------------------- freeing
@@ -3137,6 +3280,7 @@ impl Engine {
                 }
             }
         }
+        self.refute_assumers(x);
         self.set_publishes(x, Vec::new());
         self.roots.remove(&x);
         self.claim_dirty.remove(&x);
@@ -3878,6 +4022,18 @@ impl Engine {
         if !matches!(st, State::Dirty | State::Parked) || (st == State::Parked && !r.speculative) {
             return;
         }
+        // A definition the run read was removed while it ran (its node
+        // freed or re-run by an unfolding parent applied in the same
+        // batch): only committed uses were re-bound, so run again.
+        if r.uses.iter().any(|u| {
+            (u.kind == K_FIELD || u.kind == K_CHAIN)
+                && u.site != NIL
+                && (!self.live(u.site) || self.n(u.site).def_value(Field(ValueId(u.key))).is_none())
+        }) {
+            count!(StaleSite);
+            self.make_dirty(x);
+            return;
+        }
         self.report.text_memo_hits += u64::from(r.memo[0]);
         self.report.text_memo_misses += u64::from(r.memo[1]);
         self.report.app_memo_hits += u64::from(r.memo[2]);
@@ -4546,6 +4702,8 @@ impl Engine {
                 self.report.created += 1;
                 if ran {
                     self.report.nodes_run += 1;
+                    let name = self.op(self.n(s).op).name();
+                    bump(&mut self.report.runs_by_op, name);
                 }
                 continue;
             }
@@ -4554,6 +4712,8 @@ impl Engine {
             self.report.rebinds += rebound as u64;
             if sig != snap.sig || args != snap.args {
                 self.report.nodes_run += 1;
+                let name = self.op(self.n(s).op).name();
+                bump(&mut self.report.runs_by_op, name);
                 if self.out_hash(s) == snap.out {
                     self.report.cutoffs += 1;
                 }

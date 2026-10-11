@@ -919,3 +919,178 @@ fn a_redone_pending_close_leaves_depths_consistent() {
     ]);
     assert_eq!(out(&eng, &prog, 15), "2");
 }
+
+// ------------------------------------------------------------------ folds
+
+/// A fold over `n` elements of heights from `h`, then `extra` lines.
+fn fold_program(n: usize, h: &dyn Fn(usize) -> i64, text: &str, extra: &[String]) -> Vec<String> {
+    let mut src = vec![format!("fold \"{text}\"")];
+    for i in 0..n {
+        src.push(format!("add {}", h(i)));
+    }
+    src.extend(extra.iter().cloned());
+    src
+}
+
+fn outputs(eng: &Engine, prog: &Program) -> Vec<String> {
+    let acc = eng.acc_value(prog.unit, common::out_field(eng.values()));
+    acc.map_or_default(|a| {
+        eng.values()
+            .seq_to_vec(a)
+            .iter()
+            .map(|&x| eng.values().render(x))
+            .collect()
+    })
+}
+
+/// Pseudo-random heights 1..=5.
+fn fold_height(i: usize) -> i64 {
+    1 + i64::try_from(((i as u64).wrapping_mul(2_654_435_761) >> 7) % 5).unwrap()
+}
+
+/// 1000 elements at capacity 63: 48 emitted outputs.
+fn fold_thousand(text: &str) -> Vec<String> {
+    let mut src = fold_program(1000, &fold_height, text, &[]);
+    src.insert(0, "cap = 63".into());
+    src
+}
+
+/// Line of element `i` in [`fold_thousand`].
+const fn elem(i: usize) -> usize {
+    i + 2
+}
+
+fn load_lines(src: &[String]) -> (Engine, Program, Report) {
+    let src: Vec<&str> = src.iter().map(String::as_str).collect();
+    load(&src)
+}
+
+#[test]
+fn fold_over_a_thousand_elements_emits_48_outputs() {
+    let (eng, prog, r) = load_lines(&fold_thousand("x = out"));
+    let outs = outputs(&eng, &prog);
+    assert_eq!(outs.len(), 48);
+    assert_eq!(Report::by_op(&r.runs_by_op, "output"), 48);
+    println!(
+        "cold: outputs {} waits on stmt nodes {}",
+        outs.len(),
+        Report::by_op(&r.waits_by_op, "stmt")
+    );
+}
+
+#[test]
+fn a_fold_edit_recomputes_only_until_the_state_realigns() {
+    let (mut eng, mut prog, _) = load_lines(&fold_thousand("x = out"));
+    let before = outputs(&eng, &prog);
+    // Element 500 one taller: output 25 grows, the state after it is the
+    // same as before (the next output starts at the same element).
+    prog.set_line(&mut eng, elem(500), format!("add {}", fold_height(500) + 1));
+    let r = eval(&mut eng, &prog);
+    let after = outputs(&eng, &prog);
+    let changed: Vec<usize> = (0..48).filter(|&k| before[k] != after[k]).map(|k| k + 1).collect();
+    assert_eq!(changed, [25]);
+    let recomputed = Report::by_op(&r.runs_by_op, "output");
+    println!(
+        "+1 at 500: outputs recomputed {recomputed}, nodes run {}, cutoffs {}",
+        r.nodes_run, r.cutoffs
+    );
+    assert_eq!(recomputed, 1);
+    assert!(r.nodes_run < 40, "{r:?}");
+    // One shorter: the state carried forward changes and the recompute runs
+    // on until the outputs line up again (output 47).
+    prog.set_line(&mut eng, elem(500), format!("add {}", fold_height(500) - 1));
+    let r = eval(&mut eng, &prog);
+    let after = outputs(&eng, &prog);
+    let changed: Vec<usize> = (0..48).filter(|&k| before[k] != after[k]).map(|k| k + 1).collect();
+    assert_eq!(changed.first(), Some(&25));
+    assert_eq!(changed.last(), Some(&46));
+    let recomputed = Report::by_op(&r.runs_by_op, "output");
+    println!(
+        "-1 at 500: outputs recomputed {recomputed}, nodes run {}, cutoffs {}",
+        r.nodes_run, r.cutoffs
+    );
+    assert!(recomputed >= 22, "{r:?}");
+    // A capacity change reaches every step.
+    prog.set_line(&mut eng, 0, "cap = 64".into());
+    let r = eval(&mut eng, &prog);
+    println!(
+        "cap 63 -> 64: outputs recomputed {}, nodes run {}",
+        Report::by_op(&r.runs_by_op, "output"),
+        r.nodes_run
+    );
+}
+
+#[test]
+fn an_output_prepends_elements_and_defines_a_field_read_later() {
+    let text = "when k == 10 add 30  when k == 10 add 31  when k == 10 global g = 7";
+    let mut src = fold_thousand(text);
+    src[elem(600)] = "add g - 5".into();
+    let (mut eng, mut prog, _) = load_lines(&src);
+    let outs = outputs(&eng, &prog);
+    println!("outputs with prepends: {}", outs.len());
+    // The two prepended elements follow the element that overflowed
+    // output 10 (3 high): 33, then 31 starts output 12.
+    assert_eq!(outs[10], "33");
+    // Element 600 read g = 7 from output 10's text: height 2.
+    assert_eq!(out(&eng, &prog, elem(600)), "2");
+    // Moving the prepend to output 12 re-runs from output 10 on.
+    prog.set_line(
+        &mut eng,
+        1,
+        "fold \"when k == 12 add 30  when k == 12 add 31  when k == 12 global g = 7\"".into(),
+    );
+    let r = eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, elem(600)), "2");
+    println!(
+        "prepend moved: outputs recomputed {}",
+        Report::by_op(&r.runs_by_op, "output")
+    );
+    // Reading the state as of an element: the nearest step at or before it.
+    prog.insert_line(&mut eng, elem(700), "s = fold.state".into());
+    eval(&mut eng, &prog);
+    assert!(out(&eng, &prog, elem(700)).starts_with('['));
+}
+
+#[test]
+fn speculation_resting_on_a_freed_node_is_refuted() {
+    // Removing the second fold frees the node a speculative `item` run
+    // assumed about; that run must not stay unconfirmed forever.
+    let src = [
+        "cap = 12",
+        "fold \"when k == 1 add 8  when k == 1 add 2\"",
+        "add 7",
+        "fold \"when k == 1 add 8  when k == 1 add 2\"",
+        "add 7",
+        "{ add 6  z = prev() }",
+        "item a = prev()",
+        "add 1",
+    ];
+    let (mut eng, mut prog) = Program::load(lines(&src));
+    eng.evaluate(&mut Greedy::speculative(Speculation::All, 512), &mut Threads(3))
+        .unwrap();
+    prog.remove_line(&mut eng, 3);
+    eng.evaluate(&mut Greedy::speculative(Speculation::All, 512), &mut Threads(3))
+        .unwrap();
+    assert_eq!(prog.result(&eng), reference(&prog.lines));
+    assert_eq!(eng.check_invariants(), [] as [std::string::String; 0]);
+}
+
+#[test]
+fn a_global_inside_a_skipped_scope_hands_its_users_on() {
+    // The new output's global state follows a global defined inside the
+    // `begin` scope the definition walk steps over.
+    let (mut eng, mut prog, _) = load(&[
+        "fold \"when k == 1 add 8  when k == 1 add 2\"",
+        "cap = 12",
+        "add 7",
+        "add 3",
+        "begin",
+        "add 3",
+        "add 7",
+        "end",
+        "s = fold.state",
+    ]);
+    prog.insert_line(&mut eng, 7, "add 7".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 9), "[7 3]");
+}

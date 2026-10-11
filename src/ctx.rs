@@ -345,7 +345,8 @@ impl<'a> Ctx<'a> {
             }
             let sn = e.n(site);
             let w = e.walk(sn.unit, sn.label, h);
-            if w.pending != NIL && !self.spec {
+            // A link crossing pending structure is not predicted.
+            if w.pending != NIL {
                 return self.stop(End::Wait(w.pending));
             }
             site = w.site;
