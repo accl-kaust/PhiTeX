@@ -4454,7 +4454,7 @@ fn move_edge_in(shard: &mut FxMap<Key, ReadersOf>, ps: &mut PState, key: &Key, s
 /// one of `old`'s (or of the edited piece's predecessor) keeps its lines;
 /// the others are queued.
 ///
-/// `equal.of(i)` lists the old paragraphs that may equal paragraph `i`
+/// `equal.of(i, hint)` lists the old paragraphs that may equal paragraph `i`
 /// ([`equal_paras`], found before taking the lock), its own place first:
 /// the first of them with lines and equal to it gives them (compared only
 /// then: most have no lines, or are the same `Arc`).
@@ -4466,14 +4466,20 @@ fn queue_breaks(g: &mut State, k: usize, old: Option<&Run>, equal: &ParaCands) {
         None => old_lines,
     };
     let mut lines = vec![None; run.paras.len()];
+    // (where the last paragraph reused was, against its place: the next
+    // is looked for there first — paragraphs inserted or removed before
+    // shift the rest)
+    let mut off: isize = 0;
     for (i, para) in run.paras.iter().enumerate() {
-        let reuse = equal.of(i).find_map(|j| {
+        let hint = (i as isize + off).max(0) as usize;
+        let reuse = equal.of(i, hint).find_map(|j| {
             let l = prev_lines.get(j as usize).cloned().flatten()?;
             let q = old?.paras.get(j as usize)?;
-            (Arc::ptr_eq(q, para) || **q == **para).then_some(l)
+            (Arc::ptr_eq(q, para) || **q == **para).then_some((j, l))
         });
         match reuse {
-            Some(l) => {
+            Some((j, l)) => {
+                off = j as isize - i as isize;
                 lines[i] = Some(l);
                 g.stats.breaks_reused += 1;
             }
@@ -4504,6 +4510,10 @@ fn equal_paras(old: Option<&Run>, run: &Run) -> ParaCands {
     ParaCands { olds: o.paras.len(), of, buckets }
 }
 
+/// The old paragraphs of a paragraph's lengths compared with it, nearest
+/// where it is looked for first ([`ParaCands::of`]).
+const NEAR_PARAS: usize = 16;
+
 /// [`equal_paras`]: for paragraph `i`, its own place (if `old` has one),
 /// then the old paragraphs in `buckets[of[i]]` (of its lengths).
 #[derive(Default)]
@@ -4514,10 +4524,22 @@ struct ParaCands {
 }
 
 impl ParaCands {
-    fn of(&self, i: usize) -> impl Iterator<Item = u32> + '_ {
+    /// Its own place, the place `hint`, then the old paragraphs of its
+    /// lengths nearest `hint`, at most [`NEAR_PARAS`] of them: a document
+    /// of thousands of paragraphs of one shape (a `.dtx`'s code lines) is
+    /// not compared pair by pair (one not found is broken again: the same
+    /// lines).
+    fn of(&self, i: usize, hint: usize) -> impl Iterator<Item = u32> + '_ {
         let own = (i < self.olds).then_some(i as u32);
-        let rest = self.of.get(i).copied().flatten().map_or(&[][..], |b| &self.buckets[b][..]);
-        own.into_iter().chain(rest.iter().copied().filter(move |&j| j as usize != i))
+        let hinted = (hint != i && hint < self.olds).then_some(hint as u32);
+        let b = self.of.get(i).copied().flatten().map_or(&[][..], |b| &self.buckets[b][..]);
+        let p = b.partition_point(|&j| (j as usize) < hint);
+        let near = (0..NEAR_PARAS)
+            .flat_map(move |d| [p.checked_add(d), p.checked_sub(d + 1)])
+            .filter_map(move |x| x.and_then(|x| b.get(x)).copied());
+        own.into_iter()
+            .chain(hinted)
+            .chain(near.filter(move |&j| j as usize != i && j as usize != hint))
     }
 }
 
