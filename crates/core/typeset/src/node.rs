@@ -109,13 +109,32 @@ pub enum MathKind {
     After,
 }
 
+/// Glue parameter codes (§224) for [`GlueKind::Param`].
+pub mod param {
+    /// `\lineskip`.
+    pub const LINE_SKIP: u8 = 0;
+    /// `\baselineskip`.
+    pub const BASELINE_SKIP: u8 = 1;
+    /// `\leftskip`.
+    pub const LEFT_SKIP: u8 = 7;
+    /// `\rightskip`.
+    pub const RIGHT_SKIP: u8 = 8;
+    /// `\topskip`.
+    pub const TOP_SKIP: u8 = 9;
+    /// `\splittopskip`.
+    pub const SPLIT_TOP_SKIP: u8 = 10;
+    /// `\parfillskip`.
+    pub const PAR_FILL_SKIP: u8 = 14;
+}
+
 /// What a glue node is (§149).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum GlueKind {
     /// Ordinary glue.
     #[default]
     Normal,
-    /// From glue parameter `n` (`\lineskip` 0, `\baselineskip` 1, ...).
+    /// From the glue parameter with this code ([`param`]); tex.web's
+    /// subtype is the code plus one.
     Param(u8),
     /// `cond_math_glue` (`\nonscript`).
     CondMath,
@@ -203,6 +222,16 @@ pub enum Node {
     Disc(Disc),
     /// A whatsit: opaque, the caller's handle; no dimensions (§1360).
     Whatsit(u32),
+    /// A language whatsit (§1341): `\language`, `\lefthyphenmin`,
+    /// `\righthyphenmin` for what follows; no dimensions.
+    Language {
+        /// Language number.
+        lang: u16,
+        /// Left hyphen minimum.
+        lhm: u8,
+        /// Right hyphen minimum.
+        rhm: u8,
+    },
     /// Math on/off with its surround width.
     Math(MathKind, Scaled),
     /// Glue.
@@ -224,6 +253,22 @@ impl Node {
             kind: GlueKind::Normal,
             leader: None,
         })
+    }
+
+    /// A glue node from a parameter.
+    #[must_use]
+    pub fn param_glue(code: u8, spec: Glue) -> Node {
+        Node::Glue(GlueNode {
+            spec,
+            kind: GlueKind::Param(code),
+            leader: None,
+        })
+    }
+
+    /// `precedes_break` (§148): `type < math_node`.
+    #[must_use]
+    pub fn precedes_break(&self) -> bool {
+        !self.is_discardable()
     }
 
     /// A box, rule or unset node's (width, height, depth, shift); `None`

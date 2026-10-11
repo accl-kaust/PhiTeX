@@ -109,6 +109,7 @@ fn scan_hlist(
             | Node::Mark(_)
             | Node::Adjust(_)
             | Node::Whatsit(_)
+            | Node::Language { .. }
             | Node::Penalty(_) => {}
         }
     }
