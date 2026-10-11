@@ -5,12 +5,13 @@ use std::io::{self, BufReader};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use phitex_trace::analyze::{Graph, markdown};
+use phitex_trace::analyze::{Graph, Report, markdown, table};
 use phitex_trace::parse::Options;
 use phitex_trace::record::{Engine, parse_log_file, record};
 
-const USAGE: &str = "usage:\n  phitex-trace record <main.tex> [--engine pdflatex|pdftex] [--out trace.jsonl] [--scratch DIR] [--conservative]\n  phitex-trace parse <job.log> --main <main.tex> [--engine NAME] [--out trace.jsonl] [--conservative]\n  phitex-trace analyze <trace.jsonl> [--json report.json] [--samples N]";
+const USAGE: &str = "usage:\n  phitex-trace record <main.tex> [--engine pdflatex|pdftex] [--out trace.jsonl] [--scratch DIR] [--conservative]\n  phitex-trace parse <job.log> --main <main.tex> [--engine NAME] [--out trace.jsonl] [--conservative]\n  phitex-trace analyze <trace.jsonl> [--json report.json] [--samples N]\n  phitex-trace table <report.json>...";
 
+#[allow(clippy::too_many_lines)]
 fn run(args: &[String]) -> Result<(), String> {
     let Some(cmd) = args.first() else {
         return Err(USAGE.to_owned());
@@ -107,6 +108,16 @@ fn run(args: &[String]) -> Result<(), String> {
                 let j = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
                 std::fs::write(&p, j).map_err(|e| format!("{p}: {e}"))?;
             }
+            Ok(())
+        }
+        "table" => {
+            let mut reports = Vec::new();
+            for p in &positional {
+                let text = std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}"))?;
+                reports
+                    .push(serde_json::from_str::<Report>(&text).map_err(|e| format!("{p}: {e}"))?);
+            }
+            print!("{}", table(&reports));
             Ok(())
         }
         _ => Err(USAGE.to_owned()),
