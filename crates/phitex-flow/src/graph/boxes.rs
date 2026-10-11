@@ -107,7 +107,16 @@ impl Exec<'_> {
         let top = self.glue_par(GluePar::Splittopskip);
         let s = crate::split::vsplit(&v.list, h, d, &top);
         if s.bad_shrink {
-            self.err("Infinite glue shrinkage found in box being split".into());
+            // (pdfTeX's `\ignoreprimitiveerror`, bit 0: this error only
+            // logged, as LaTeX's marks do their `\vsplit` to `\maxdimen`)
+            if self.int_par(IntPar::Ignoreprimitiveerror) & 1 != 0 {
+                let mut l = String::from(crate::show::RAW);
+                l.push(crate::show::NL);
+                l.push_str("ignored: Infinite glue shrinkage found in box being split");
+                self.log_raw(&l);
+            } else {
+                self.err("Infinite glue shrinkage found in box being split".into());
+            }
         }
         self.define(Key::SplitMarks, Val::SplitMarks(Arc::from(s.marks)), true);
         let rest = if s.rest.is_empty() {
