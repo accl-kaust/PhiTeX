@@ -5,17 +5,6 @@ crate's own docs say what it is; keep them current.
 
 ## Workflow
 
-- Work on your own branch, in a git worktree under `~/code/tmp/` (never
-  `/tmp`). Make small commits, each with its tests passing. Commit
-  messages say what changed and why, with the measured numbers. They
-  carry no tool or session links.
-- Before reporting a change done, run:
-  - `scripts/sandbox cargo fmt` and `scripts/sandbox cargo clippy --all-targets` (clean);
-  - the gates, on the pushed commit:
-
-        ACCL_COMMIT=<rev> scripts/accl/accl submit gate
-        scripts/accl/accl wait <job>
-
 - Fix bugs at their root, never at the symptom: a guard that hides a
   wrong value is not a fix.
 - Timings come from the accl cluster (alternating base and new runs on
