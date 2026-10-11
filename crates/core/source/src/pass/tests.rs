@@ -340,6 +340,8 @@ fn corpus_report() {
     // document bodies)
     let mut by_class: [Stats; 4] = Default::default();
     let mut class_files = [0usize; 4];
+    // (pending items: all improvements, and without B1, B2, B3)
+    let mut ab = [[0usize; 4]; 4];
     for line in corpus.lines().filter(|l| !l.trim().is_empty()) {
         let mut parts = line.split('\t');
         let label = parts.next().unwrap();
@@ -369,33 +371,70 @@ fn corpus_report() {
                 u32::try_from(texts.len() + k).unwrap(),
             );
         }
+        // (load order: the code the document loads, then its own files
+        // in the order listed; B3 off: no order)
+        let unordered = defs.clone();
+        let order: Vec<u32> = (texts.len()..texts.len() + lent.len())
+            .chain(0..texts.len())
+            .map(|k| u32::try_from(k).unwrap())
+            .collect();
+        defs.set_load_order(&order);
         let mut s = Stats::default();
         for (k, (n, t)) in texts.iter().enumerate() {
-            let p = analyze(
-                t,
-                FileKind::from_path(n),
-                Scope {
-                    document: &defs,
-                    file: u32::try_from(k).unwrap(),
-                    prelude: &prelude,
-                },
-            );
-            s.add(&Stats::of(&p, t));
             let kind = FileKind::from_path(n);
-            if n.ends_with("latex.ltx") || n.ends_with("plain.tex") {
-                by_class[0].add(&Stats::of(&p, t));
-                class_files[0] += 1;
-            } else if kind == FileKind::Package {
-                by_class[1].add(&Stats::of(&p, t));
-                class_files[1] += 1;
-            } else if let Some(d) = t.find("\\begin{document}") {
-                by_class[2].add(&Stats::of_range(&p, t, 0..d));
-                by_class[3].add(&Stats::of_range(&p, t, d..t.len()));
-                class_files[2] += 1;
-                class_files[3] += 1;
-            } else {
-                by_class[3].add(&Stats::of(&p, t));
-                class_files[3] += 1;
+            let scope = Scope {
+                document: &defs,
+                file: u32::try_from(k).unwrap(),
+                prelude: &prelude,
+            };
+            let p = analyze(t, kind, scope);
+            s.add(&Stats::of(&p, t));
+            // (the file's classes and their byte ranges)
+            let classes: Vec<(usize, std::ops::Range<usize>)> =
+                if n.ends_with("latex.ltx") || n.ends_with("plain.tex") {
+                    vec![(0, 0..t.len())]
+                } else if kind == FileKind::Package {
+                    vec![(1, 0..t.len())]
+                } else if let Some(d) = t.find("\\begin{document}") {
+                    vec![(2, 0..d), (3, d..t.len())]
+                } else {
+                    vec![(3, 0..t.len())]
+                };
+            let variants = [
+                analyze_with(
+                    t,
+                    kind,
+                    scope,
+                    Features {
+                        w_signatures: false,
+                        ..Features::default()
+                    },
+                ),
+                analyze_with(
+                    t,
+                    kind,
+                    scope,
+                    Features {
+                        lookthrough: false,
+                        ..Features::default()
+                    },
+                ),
+                analyze(
+                    t,
+                    kind,
+                    Scope {
+                        document: &unordered,
+                        ..scope
+                    },
+                ),
+            ];
+            for (c, r) in classes {
+                by_class[c].add(&Stats::of_range(&p, t, r.clone()));
+                class_files[c] += 1;
+                ab[0][c] += Stats::of_range(&p, t, r.clone()).pending_items;
+                for (v, q) in variants.iter().enumerate() {
+                    ab[v + 1][c] += Stats::of_range(q, t, r.clone()).pending_items;
+                }
             }
             if std::env::var("PHITEX_HAZARDS").is_ok() {
                 for h in p
@@ -446,6 +485,90 @@ fn corpus_report() {
     let _ = writeln!(out, "|---|---|---|---|---|---|---|---|---|---|---|---|");
     for (k, c) in CLASSES.iter().enumerate() {
         row(&mut out, c, class_files[k], &by_class[k]);
+    }
+    let _ = writeln!(
+        out,
+        "\nHints by file class (% of items; scope and paragraph: % of items and marks):\n\n| class | items | marks | claim K/P/Pd % | may_define Nothing/Names/Prefixes/Any % | scope None/Open/Close/Predicted/Pending % | paragraph None/Starts/Ends % |\n|---|---|---|---|---|---|---|"
+    );
+    let pcs = |v: &[usize]| {
+        let n: usize = v.iter().sum();
+        v.iter()
+            .map(|&x| format!("{:.1}", 100.0 * x as f64 / n.max(1) as f64))
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    for (k, c) in CLASSES.iter().enumerate() {
+        let s = &by_class[k];
+        let _ = writeln!(
+            out,
+            "| {c} | {} | {} | {} | {} | {} | {} |",
+            s.claims.iter().sum::<usize>(),
+            s.marks,
+            pcs(&s.claims),
+            pcs(&s.may_define),
+            pcs(&s.scope),
+            pcs(&s.implicit),
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\nPending items before/after each improvement (before: that one off, the others on):\n\n| class | all on | B1 off (expl3 :w) | B2 off (\\expandafter look-through) | B3 off (load order) |\n|---|---|---|---|---|"
+    );
+    for (k, c) in CLASSES.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "| {c} | {} | {} | {} | {} |",
+            ab[0][k], ab[1][k], ab[2][k], ab[3][k]
+        );
+    }
+    let set = |s: &DefSet| {
+        let g = |m: &std::collections::BTreeMap<String, bool>| {
+            m.iter()
+                .map(|(f, g)| if *g { format!("{f} (G)") } else { f.clone() })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!(
+            "names ({}): {}\n\nprefixes ({}): {}\n\nunbounded by ({}): {}\n",
+            s.names.len(),
+            g(&s.names),
+            s.prefixes.len(),
+            g(&s.prefixes),
+            s.unbounded.len(),
+            s.unbounded.join("; ")
+        )
+    };
+    if let Some(o) = prelude.output_defines(&Definitions::new()) {
+        let _ = writeln!(
+            out,
+            "\n`\\output` of the prelude (latex.ltx):\n\n{}",
+            set(&o)
+        );
+        let op = prelude.call_defines(&Definitions::new(), "@outputpage");
+        let _ = writeln!(out, "`\\@outputpage` alone:\n\n{}", set(&op));
+    }
+    if let Ok(lo) = std::env::var("PHITEX_LTOUTPUT") {
+        // (latex.ltx's own `\\output` is lost to a catcode hazard the
+        // lexer mispredicts before it; ltoutput.dtx has it, and calls
+        // into the prelude)
+        let mut d = Definitions::new();
+        d.harvest(&read(std::path::Path::new(&lo)), FileKind::Package, 0);
+        if let Some(o) = d.output_defines(&prelude) {
+            let _ = writeln!(
+                out,
+                "`\\output` of ltoutput.dtx (callees in the prelude):\n\n{}",
+                set(&o)
+            );
+        }
+        let op = d.call_defines(&prelude, "@outputpage");
+        let _ = writeln!(out, "`\\@outputpage` of ltoutput.dtx:\n\n{}", set(&op));
+    }
+    if let Ok(pl) = std::env::var("PHITEX_PLAIN") {
+        let mut d = Definitions::new();
+        d.harvest(&read(std::path::Path::new(&pl)), FileKind::Package, 0);
+        if let Some(o) = d.output_defines(&Definitions::new()) {
+            let _ = writeln!(out, "`\\output` of plain.tex:\n\n{}", set(&o));
+        }
     }
     let top = |m: &std::collections::BTreeMap<String, usize>, n: usize| {
         let mut v: Vec<_> = m.iter().collect();
@@ -505,4 +628,367 @@ fn nested_definitions_double_their_parameters() {
     let t = "\\def\\outer{\\def\\meta##1{##1}}\\meta{x}";
     let (p, _) = pass(t, FileKind::Document);
     assert_eq!(item(&p, "meta").status, Status::Predicted);
+}
+
+// ---------------------------------------------------------------------
+// Hints.
+
+fn hints<'p>(p: &'p Pass, name: &str) -> &'p Hints {
+    &item(p, name).hints
+}
+
+fn mark_at<'p>(p: &'p Pass, t: &str, at: &str) -> &'p Mark {
+    let b = t.find(at).unwrap_or_else(|| panic!("no {at}"));
+    p.marks
+        .iter()
+        .find(|m| p.atoms[m.atom].start == b)
+        .unwrap_or_else(|| panic!("no mark at {at}"))
+}
+
+fn names(m: &MayDefine) -> Vec<(String, bool)> {
+    match m {
+        MayDefine::Names(v) | MayDefine::Prefixes(v) => {
+            v.iter().map(|d| (d.field.clone(), d.global)).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+#[test]
+fn claims_known_predicted_pending() {
+    let t = "\\def\\foo#1{x}\\foo{ab} \\zork x \\relax";
+    let (p, _) = pass(t, FileKind::Document);
+    let foo = p.items.iter().rfind(|i| i.name == "foo").unwrap();
+    assert_eq!(
+        foo.hints.claim,
+        Claim::Predicted {
+            n_tokens: 4,
+            confirm: Assumption::MeaningIs {
+                cs: "foo".into(),
+                expected: MeaningShape::Macro { params: "m".into() }
+            },
+            also: vec![]
+        }
+    );
+    assert!(
+        matches!(hints(&p, "zork").claim, Claim::Pending { .. }),
+        "{:?}",
+        hints(&p, "zork")
+    );
+    assert_eq!(hints(&p, "relax").claim, Claim::Known(0));
+}
+
+#[test]
+fn prediction_rests_on_the_weakest_assumption() {
+    // (`\x` is redefined by the document: the kernel's meaning of
+    // `\textbf` is held more firmly than the document's of `\x`)
+    let t = "\\def\\x{1pt}\\hskip\\x";
+    let (p, _) = pass(t, FileKind::Document);
+    match &hints(&p, "hskip").claim {
+        Claim::Predicted { confirm, .. } => assert_eq!(
+            confirm,
+            &Assumption::MeaningIs {
+                cs: "x".into(),
+                expected: MeaningShape::Macro {
+                    params: String::new()
+                }
+            }
+        ),
+        c => panic!("{c:?}"),
+    }
+}
+
+#[test]
+fn definitions_name_what_they_define() {
+    let t = "\\def\\foo{}\\global\\def\\bar{}\\count12=3 \\tolerance=200 \\catcode`\\|=12 ";
+    let (p, _) = pass(t, FileKind::Document);
+    assert_eq!(
+        hints(&p, "def").may_define,
+        MayDefine::Names(vec![Def {
+            field: "cs:\\foo".into(),
+            global: false
+        }])
+    );
+    let d2 = p.items.iter().filter(|i| i.name == "def").nth(1).unwrap();
+    assert_eq!(names(&d2.hints.may_define), [("cs:\\bar".into(), true)]);
+    assert_eq!(hints(&p, "global").may_define, MayDefine::Nothing);
+    assert_eq!(
+        names(&hints(&p, "count").may_define),
+        [("count:12".into(), false)]
+    );
+    assert_eq!(
+        names(&hints(&p, "tolerance").may_define),
+        [("param:\\tolerance".into(), false)]
+    );
+    assert_eq!(
+        names(&hints(&p, "catcode").may_define),
+        [("catcode:124".into(), false)]
+    );
+}
+
+#[test]
+fn csname_defines_by_its_literal_prefix() {
+    let t = "\\csname e\\the\\x\\endcsname \\csname abc\\endcsname \\csname\\y\\endcsname";
+    let (p, _) = pass(t, FileKind::Document);
+    let cs: Vec<&Item> = p.items.iter().filter(|i| i.name == "csname").collect();
+    assert_eq!(
+        cs[0].hints.may_define,
+        MayDefine::Prefixes(vec![Def {
+            field: "cs:\\e".into(),
+            global: false
+        }])
+    );
+    assert_eq!(names(&cs[1].hints.may_define), [("cs:\\abc".into(), false)]);
+    assert_eq!(cs[2].hints.may_define, MayDefine::Any);
+}
+
+#[test]
+fn calls_define_what_their_bodies_define() {
+    let t = "\\def\\a{\\relax}\\def\\b{\\def\\@tempa{}}\\def\\c{\\csname\\x\\endcsname}\
+             \\def\\d{\\b\\a}\\a\\b\\c\\d\\zzz";
+    let (p, _) = pass(t, FileKind::Package);
+    let last = |n: &str| p.items.iter().rfind(|i| i.name == n).unwrap();
+    assert_eq!(last("a").hints.may_define, MayDefine::Nothing);
+    assert_eq!(
+        names(&last("b").hints.may_define),
+        [("cs:\\@tempa".into(), false)]
+    );
+    assert_eq!(last("c").hints.may_define, MayDefine::Any);
+    assert_eq!(
+        names(&last("d").hints.may_define),
+        [("cs:\\@tempa".into(), false)]
+    );
+    assert_eq!(last("zzz").hints.may_define, MayDefine::Any);
+}
+
+#[test]
+fn scopes_of_groups_and_environments() {
+    let t = "{\\begingroup x\\endgroup}\\bgroup\\egroup\\begin{itemize}\\end{itemize}";
+    let (p, _) = pass(t, FileKind::Document);
+    assert_eq!(
+        mark_at(&p, t, "{\\begingroup").hints.scope,
+        ScopeHint::Open(ScopeKind::Simple)
+    );
+    assert_eq!(mark_at(&p, t, "}\\bgroup").hints.scope, ScopeHint::Close);
+    assert_eq!(
+        hints(&p, "begingroup").scope,
+        ScopeHint::Open(ScopeKind::SemiSimple)
+    );
+    assert_eq!(hints(&p, "endgroup").scope, ScopeHint::Close);
+    assert!(matches!(
+        hints(&p, "bgroup").scope,
+        ScopeHint::Predicted {
+            effect: Effect::Open(ScopeKind::Simple),
+            ..
+        }
+    ));
+    assert_eq!(
+        hints(&p, "begin").scope,
+        ScopeHint::Predicted {
+            effect: Effect::Open(ScopeKind::Env("itemize".into())),
+            confirm: Assumption::MeaningIs {
+                cs: "begin".into(),
+                expected: MeaningShape::Kernel
+            }
+        }
+    );
+    assert!(matches!(
+        hints(&p, "end").scope,
+        ScopeHint::Predicted {
+            effect: Effect::Close,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn math_shifts_and_boxes_open_scopes() {
+    let t = "a $x$ $$y$$ \\hbox to 3pt{z}\\vbox{w}";
+    let (p, _) = pass(t, FileKind::Document);
+    let m = mark_at(&p, t, "$x");
+    assert_eq!(m.hints.scope, ScopeHint::Open(ScopeKind::Math));
+    assert_eq!(mark_at(&p, t, "$ $$").hints.scope, ScopeHint::Close);
+    let d = mark_at(&p, t, "$$y");
+    assert_eq!(d.hints.scope, ScopeHint::Open(ScopeKind::Display));
+    assert_eq!(d.hints.claim, Claim::Known(1));
+    assert_eq!(mark_at(&p, t, "$$ \\hbox").hints.scope, ScopeHint::Close);
+    let h = hints(&p, "hbox");
+    assert_eq!(h.scope, ScopeHint::Open(ScopeKind::HBox));
+    // (`to`, `3pt`, `{`: the box claims up to its brace)
+    assert_eq!(h.claim, Claim::Known("to 3pt{".len()));
+    assert_eq!(hints(&p, "vbox").scope, ScopeHint::Open(ScopeKind::VBox));
+    // (the box's own brace is its item's, not a mark)
+    assert!(
+        p.marks
+            .iter()
+            .all(|m| &t[p.atoms[m.atom].start..p.atoms[m.atom].end] != "{"
+                || p.atoms[m.atom].start != t.find("{z").unwrap())
+    );
+}
+
+#[test]
+fn paragraphs_start_and_end_as_tex_web_says() {
+    let t = "\\noindent\\vskip 1pt\\penalty5 \\kern1pt \\hbox{}\\unvbox0 \\vrule\\hrule\\par\n\nab";
+    let (p, _) = pass(t, FileKind::Document);
+    assert_eq!(hints(&p, "noindent").implicit, Implicit::StartsParagraph);
+    assert_eq!(hints(&p, "vskip").implicit, Implicit::EndsParagraph);
+    assert_eq!(hints(&p, "penalty").implicit, Implicit::None);
+    assert_eq!(hints(&p, "kern").implicit, Implicit::None);
+    assert_eq!(hints(&p, "hbox").implicit, Implicit::None);
+    assert_eq!(hints(&p, "unvbox").implicit, Implicit::EndsParagraph);
+    assert_eq!(hints(&p, "vrule").implicit, Implicit::StartsParagraph);
+    assert_eq!(hints(&p, "hrule").implicit, Implicit::EndsParagraph);
+    assert_eq!(hints(&p, "par").implicit, Implicit::EndsParagraph);
+    assert_eq!(
+        mark_at(&p, t, "ab").hints.implicit,
+        Implicit::StartsParagraph
+    );
+    assert!(
+        p.marks.iter().any(|m| p.atoms[m.atom].kind == AtomKind::Par
+            && m.hints.implicit == Implicit::EndsParagraph)
+    );
+    // (the second letter of a run is no mark)
+    assert!(!p.marks.iter().any(|m| p.atoms[m.atom].start == t.len() - 1));
+}
+
+#[test]
+fn reads_name_the_meaning_and_what_it_rests_on() {
+    let t = "\\def\\x{1pt}\\hskip\\x";
+    let (p, _) = pass(t, FileKind::Document);
+    let r = &hints(&p, "hskip").reads;
+    assert!(r.contains(&"cs:\\hskip".to_owned()) && r.contains(&"cs:\\x".to_owned()));
+}
+
+#[test]
+fn hints_serialise_as_json() {
+    let t = "\\def\\foo#1{x}\\foo{a}";
+    let (p, _) = pass(t, FileKind::Document);
+    let j = p.hints_jsonl(t);
+    assert!(j.contains(
+        r#""claim":{"Predicted":{"n_tokens":3,"confirm":{"MeaningIs":{"cs":"cs:\\foo","expected":{"Macro":{"params":"m"}}}},"also":[]}}"#
+    ), "{j}");
+    assert!(
+        j.contains(r#""may_define":{"Names":[{"field":"cs:\\foo","global":false}]}"#),
+        "{j}"
+    );
+    assert_eq!(j.lines().count(), p.items.len() + p.marks.len());
+}
+
+#[test]
+fn expl3_w_signatures_are_predicted() {
+    let t = "\\ExplSyntaxOn \\if_meaning:w \\a \\b \\fi: \\use_none_delimit_by_q_stop:w a{b}c \\q_stop \\int_value:w 12 \\scan_stop:";
+    let (p, _) = pass(t, FileKind::Package);
+    let im = item(&p, "if_meaning:w");
+    assert_eq!(im.status, Status::Predicted);
+    assert_eq!(im.end - im.atom - 1, 2);
+    let un = item(&p, "use_none_delimit_by_q_stop:w");
+    assert_eq!(un.status, Status::Predicted);
+    assert_eq!(p.atoms[un.end - 1].name(t), "q_stop");
+    assert_eq!(item(&p, "int_value:w").status, Status::Predicted);
+    let off = analyze_with(
+        t,
+        FileKind::Package,
+        Scope {
+            document: &Definitions::new(),
+            file: 0,
+            prelude: &Definitions::new(),
+        },
+        Features {
+            w_signatures: false,
+            ..Features::default()
+        },
+    );
+    assert_eq!(item(&off, "if_meaning:w").status, Status::Pending);
+}
+
+#[test]
+fn expandafter_looks_through_one_step() {
+    let t = "\\def\\b{}\\def\\c{{x}}\\expandafter\\textbf\\b{y}z \\expandafter\\textbf\\c w";
+    let (p, _) = pass(t, FileKind::Document);
+    let ea: Vec<&Item> = p.items.iter().filter(|i| i.name == "expandafter").collect();
+    assert_eq!(ea.len(), 2);
+    assert_eq!(ea[0].status, Status::Predicted);
+    // (`\textbf` reads `{y}` from the text after `\b`'s empty body)
+    assert_eq!(&t[p.atoms[ea[0].end].start..p.atoms[ea[0].end].end], "z");
+    // (`\c`'s body gives the argument: nothing more is consumed)
+    assert_eq!(ea[1].status, Status::Predicted);
+    assert_eq!(&t[p.atoms[ea[1].end].start..p.atoms[ea[1].end].end], "w");
+    match &ea[0].hints.claim {
+        Claim::Predicted { confirm, .. } => assert_eq!(
+            confirm,
+            &Assumption::MeaningIs {
+                cs: "b".into(),
+                expected: MeaningShape::Macro {
+                    params: String::new()
+                }
+            }
+        ),
+        c => panic!("{c:?}"),
+    }
+    // (`\textbf` and `\b` are its operands, not items)
+    assert!(
+        p.items
+            .iter()
+            .all(|i| i.name != "b" || p.atoms[i.atom].start < 20)
+    );
+}
+
+#[test]
+fn conflicting_definitions_bind_by_load_order() {
+    let f0 = "\\def\\foo#1{}";
+    let f1 = "\\def\\foo#1#2{}";
+    let doc = "\\foo{a}{b}";
+    let mut d = Definitions::new();
+    d.harvest(f0, FileKind::Package, 0);
+    d.harvest(f1, FileKind::Package, 1);
+    d.harvest(doc, FileKind::Document, 2);
+    let run = |d: &Definitions| {
+        analyze(
+            doc,
+            FileKind::Document,
+            Scope {
+                document: d,
+                file: 2,
+                prelude: &Definitions::new(),
+            },
+        )
+    };
+    let p = run(&d);
+    assert_eq!(item(&p, "foo").status, Status::Pending);
+    d.set_load_order(&[0, 1, 2]);
+    let p = run(&d);
+    let it = item(&p, "foo");
+    assert_eq!(it.status, Status::Predicted);
+    assert_eq!(it.end, p.atoms.len());
+    match &it.hints.claim {
+        Claim::Predicted { confirm, .. } => assert_eq!(
+            confirm,
+            &Assumption::MeaningIs {
+                cs: "foo".into(),
+                expected: MeaningShape::Macro {
+                    params: "mm".into()
+                }
+            }
+        ),
+        c => panic!("{c:?}"),
+    }
+    // (the document between the two: the earlier binds)
+    d.set_load_order(&[0, 2, 1]);
+    let p = run(&d);
+    let it = item(&p, "foo");
+    assert_eq!(it.status, Status::Predicted);
+    assert_eq!(&doc[p.atoms[it.end].start..], "{b}");
+}
+
+#[test]
+fn output_routine_definition_set() {
+    let t = "\\output={\\plainoutput}\\def\\plainoutput{\\shipout\\vbox{\\x}\\global\\advance\\count0 by 1 \\y}\
+             \\def\\x{\\def\\z{}}\\def\\y{\\csname q\\the\\count0\\endcsname}";
+    let mut d = Definitions::new();
+    d.harvest(t, FileKind::Package, 0);
+    let s = d.output_defines(&Definitions::new()).unwrap();
+    assert_eq!(s.names.get("cs:\\z"), Some(&false));
+    assert_eq!(s.names.get("count:0"), Some(&true));
+    assert_eq!(s.prefixes.get("cs:\\q"), Some(&false));
+    assert!(s.unbounded.is_empty(), "{:?}", s.unbounded);
 }

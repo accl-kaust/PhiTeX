@@ -9,9 +9,12 @@
 
 use super::atoms::{Atom, AtomKind};
 use super::defs::{Arg, Found, Lit, Shape, skip};
+use super::hints::{
+    self, Assumption, Claim, Closure, Effect, Hints, MeaningShape, ScopeHint, ScopeKind,
+};
 use super::lex::Lexed;
 use super::table::{Entry, Table, table};
-use super::{Cause, Item, Scope, Status};
+use super::{Cause, Features, FileKind, Item, Scope, Status};
 
 /// What a name resolves to.
 enum Res {
@@ -32,10 +35,27 @@ fn cause(kind: &'static str, detail: &str) -> Cause {
 struct R {
     status: Status,
     cause: Option<Cause>,
+    /// The causes of every prediction made on the way (their names are
+    /// what the predictions rest on).
+    noted: Vec<(&'static str, String)>,
 }
 
 impl R {
+    fn new() -> R {
+        R {
+            status: Status::Known,
+            cause: None,
+            noted: Vec::new(),
+        }
+    }
+
     fn worse(&mut self, s: Status, c: Option<Cause>) {
+        if s == Status::Predicted
+            && let Some(c) = &c
+            && !c.detail.is_empty()
+        {
+            self.noted.push((c.kind, c.detail.clone()));
+        }
         if s > self.status {
             self.status = s;
             self.cause = c;
@@ -54,9 +74,24 @@ struct Cx<'a> {
     scope: Scope<'a>,
     table: &'static Table,
     operand: Vec<bool>,
+    kind: FileKind,
+    features: Features,
+    /// Where every name is looked up, instead of where it stands (a text
+    /// made up by `\expandafter`'s look-through).
+    fixed_pos: Option<usize>,
 }
 
-pub(crate) fn classify(text: &str, atoms: &[Atom], lexed: &Lexed, scope: Scope<'_>) -> Vec<Item> {
+/// What `item` found besides the item: the predictions' causes.
+type Noted = Vec<(&'static str, String)>;
+
+pub(crate) fn classify(
+    text: &str,
+    atoms: &[Atom],
+    lexed: &Lexed,
+    scope: Scope<'_>,
+    kind: FileKind,
+    features: Features,
+) -> Vec<Item> {
     let mut hazard_tok = vec![false; lexed.tokens.len()];
     for h in &lexed.hazards {
         if h.status == Status::Pending && h.cause != "verbatim" {
@@ -70,12 +105,17 @@ pub(crate) fn classify(text: &str, atoms: &[Atom], lexed: &Lexed, scope: Scope<'
         scope,
         table: table(),
         operand: vec![false; atoms.len()],
+        kind,
+        features,
+        fixed_pos: None,
     };
     let mut items = Vec::new();
+    let mut closure = Closure::new(scope.document, scope.prelude);
     for a in 0..atoms.len() {
         if atoms[a].kind == AtomKind::Cs && !cx.operand[a] {
-            let mut it = cx.item(a);
+            let (mut it, noted, quantity) = cx.item(a);
             it.hazard = hazard_tok[atoms[a].tok];
+            it.hints = cx.hints(&it, &noted, quantity, &mut closure);
             items.push(it);
         }
     }
@@ -121,8 +161,13 @@ impl Cx<'_> {
         Some(q)
     }
 
-    #[allow(clippy::too_many_lines)]
     fn resolve(&self, name: &str, pos: usize, depth: u8) -> Res {
+        let pos = self.fixed_pos.unwrap_or(pos);
+        self.resolve_in(name, self.scope.file, pos, depth)
+    }
+
+    /// What `name` means at byte `pos` of file `file`.
+    fn resolve_in(&self, name: &str, file: u32, pos: usize, depth: u8) -> Res {
         if depth > 8 {
             return Res::Pending(cause("\\let chain too long", name));
         }
@@ -130,14 +175,17 @@ impl Cx<'_> {
         // file; else the fixed command or the kernel's, as predicted when
         // the document redefines it somewhere; else the document's own
         // definitions where they agree)
-        let doc = self.scope.document.find(name, Some((self.scope.file, pos)));
+        let doc = self.scope.document.find(name, Some((file, pos)));
         if let Found::One(s) = doc
-            && self
+            && self.scope.document.defined_before(name, file, pos)
+        {
+            // (a `\let` binds its target where it stands)
+            let (f, p) = self
                 .scope
                 .document
-                .defined_before(name, self.scope.file, pos)
-        {
-            return self.shape(s, pos, depth);
+                .bound_at(name, (file, pos))
+                .unwrap_or((file, pos));
+            return self.shape(s, f, p, depth);
         }
         let redefined = !matches!(doc, Found::None);
         if let Some(e) = self.table.commands.get(name) {
@@ -152,13 +200,13 @@ impl Cx<'_> {
             };
         }
         if !redefined && let Found::One(s) = self.scope.prelude.find(name, None) {
-            return self.shape(s, pos, depth);
+            return self.shape(s, file, pos, depth);
         }
         match doc {
-            Found::One(s) => return self.shape(s, pos, depth),
+            Found::One(s) => return self.shape(s, file, pos, depth),
             Found::Conflict => {
                 if let Found::One(s) = self.scope.prelude.find(name, None) {
-                    return self.shape(s, pos, depth);
+                    return self.shape(s, file, pos, depth);
                 }
                 return Res::Pending(cause("conflicting definitions", name));
             }
@@ -185,10 +233,10 @@ impl Cx<'_> {
         Res::Pending(cause("macro defined elsewhere", name))
     }
 
-    fn shape(&self, s: &Shape, pos: usize, depth: u8) -> Res {
+    fn shape(&self, s: &Shape, file: u32, pos: usize, depth: u8) -> Res {
         match s {
             Shape::Macro(args) => Res::Cmd(args.clone(), Status::Predicted),
-            Shape::Alias(t) => match self.resolve(t, pos, depth + 1) {
+            Shape::Alias(t) => match self.resolve_in(t, file, pos, depth + 1) {
                 Res::Cmd(a, st) => Res::Cmd(a, st.max(Status::Predicted)),
                 Res::Quantity(t, ix, st) => Res::Quantity(t, ix, st.max(Status::Predicted)),
                 p @ Res::Pending(_) => p,
@@ -213,6 +261,12 @@ impl Cx<'_> {
         if name == "exp_after:wN" {
             return Res::Pending(cause("\\expandafter", name));
         }
+        if sig.contains('w')
+            && self.features.w_signatures
+            && let Some(r) = self.w_signature(name, base)
+        {
+            return r;
+        }
         if name == "use:c" || name == "cs:w" || base.starts_with("cs_if_exist_use") {
             return Res::Pending(cause("\\csname", name));
         }
@@ -233,25 +287,47 @@ impl Cx<'_> {
         Res::Cmd(args, Status::Predicted)
     }
 
-    fn item(&mut self, a: usize) -> Item {
+    /// The item at `a`, the causes of its predictions, and whether it is
+    /// a quantity.
+    fn item(&mut self, a: usize) -> (Item, Noted, bool) {
         let name = self.name(a).to_owned();
         let tok = self.lexed.tokens[self.atoms[a].tok];
-        let mut r = R {
-            status: Status::Known,
-            cause: None,
-        };
-        let item = |end, consumes, r: R| Item {
-            atom: a,
-            name: name.clone(),
-            status: r.status,
-            cause: r.cause,
-            consumes,
-            end,
-            hazard: false,
+        let mut r = R::new();
+        let item = |end, consumes, r: R| {
+            (
+                Item {
+                    atom: a,
+                    name: name.clone(),
+                    status: r.status,
+                    cause: r.cause,
+                    consumes,
+                    end,
+                    hazard: false,
+                    hints: Hints::none(),
+                },
+                r.noted,
+                false,
+            )
         };
         if tok.tz == Status::Pending {
             r.pending("tokenization pending (catcode)", &name);
             return item(a + 1, true, r);
+        }
+        if self.features.lookthrough
+            && self.fixed_pos.is_none()
+            && matches!(
+                name.as_str(),
+                "expandafter" | "exp_after:wN" | "exp_after:w"
+            )
+            && let Some((end, st, noted)) = self.lookthrough(a)
+        {
+            r.worse(st, None);
+            r.worse(
+                Status::Predicted,
+                Some(cause("\\expandafter look-through", "")),
+            );
+            r.noted.extend(noted);
+            return item(end, true, r);
         }
         match self.resolve(&name, tok.start, 0) {
             Res::Pending(c) => {
@@ -260,20 +336,21 @@ impl Cx<'_> {
             }
             Res::Quantity(t, ix, st) => {
                 r.worse(st, None);
+                let quantity = |x: (Item, Noted, bool)| (x.0, x.1, true);
                 if t == 'c' || self.alone_in_group(a) {
-                    return item(a + 1, false, r);
+                    return quantity(item(a + 1, false, r));
                 }
                 let mut p = self.index(a + 1, ix, &mut r);
                 if matches!(self.kind(skip(self.atoms, p)), None | Some(AtomKind::Close)) {
                     // (a quantity mentioned, not assigned: an argument)
-                    return item(p, false, r);
+                    return quantity(item(p, false, r));
                 }
                 p = self.read(p, &Arg::Eq, &mut r);
                 p = match t {
                     't' => self.read(p, &Arg::Toks, &mut r),
                     _ => self.value(p, t, &mut r),
                 };
-                item(p, true, r)
+                quantity(item(p, true, r))
             }
             Res::Cmd(_, st) if self.alone_in_group(a) => {
                 r.worse(st, None);
@@ -715,7 +792,7 @@ impl Cx<'_> {
             r.pending("environment name computed", "");
             return e;
         };
-        let pos = self.atoms[q].start;
+        let pos = self.fixed_pos.unwrap_or(self.atoms[q].start);
         let args = match self
             .scope
             .document
@@ -994,5 +1071,467 @@ fn static_cause(c: &str) -> &'static str {
         "xparse embellishment" => "xparse embellishment",
         "xparse delimited optional argument" => "xparse delimited optional argument",
         _ => "other pending syntax",
+    }
+}
+
+/// The expl3 `:w` functions whose extent l3kernel fixes (B1).
+///
+/// The primitive copies are `\tex_let:D`/`\cs_new_eq:NN` of a primitive
+/// (l3basics.dtx "Primitive conditionals", "Expansion", "Copying
+/// primitives"; l3int.dtx `\int_value:w`, `\if_int_odd:w`, `\if_case:w`;
+/// l3skip.dtx `\if_dim:w`; l3prg.dtx `\if_predicate:w`; l3file.dtx
+/// `\if_eof:w`; l3expan.dtx `\__kernel_exp_not:w`); `\int_eval:w` is
+/// `\tex_the:D \__int_eval:w`, the latter `\tex_numexpr:D` (l3int.dtx).
+/// The delimited ones are l3basics.dtx's `\use_none_delimit_by_…:w` and
+/// `\use_i_delimit_by_…:nw` (`#1#2 \q_stop {#1}`), l3quark.dtx's
+/// `\use_none_delimit_by_s_stop:w` and l3tl.dtx's `\tl_head:w`
+/// (`#1#2 \q_stop`).
+fn w_primitive(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "if_meaning:w" => "ifx",
+        "if:w" | "if_charcode:w" => "if",
+        "if_catcode:w" => "ifcat",
+        "if_cs_exist:w" => "ifcsname",
+        "exp:w" => "romannumeral",
+        "if_int_compare:w" => "ifnum",
+        "__kernel_tl_to_str:w" => "detokenize",
+        "__kernel_exp_not:w" => "unexpanded",
+        "if_eof:w" => "ifeof",
+        "if_predicate:w" | "if_int_odd:w" => "ifodd",
+        "if_dim:w" => "ifdim",
+        "int_value:w" => "number",
+        "if_case:w" => "ifcase",
+        "int_eval:w" | "__int_eval:w" | "__fp_int_eval:w" | "__seq_int_eval:w"
+        | "__regex_int_eval:w" => "numexpr",
+        "dim_eval:w" | "__dim_eval:w" | "__box_dim_eval:w" => "dimexpr",
+        _ => return None,
+    })
+}
+
+fn w_delimited(name: &str) -> Option<Vec<Arg>> {
+    let until = |q: &str| Arg::Delimited(vec![Lit::Cs(q.to_owned())]);
+    Some(match name {
+        "use_none_delimit_by_q_nil:w" => vec![until("q_nil")],
+        "use_none_delimit_by_q_stop:w" => vec![until("q_stop")],
+        "use_none_delimit_by_q_recursion_stop:w" => vec![until("q_recursion_stop")],
+        "use_none_delimit_by_s_stop:w" => vec![until("s_stop")],
+        "use_i_delimit_by_q_nil:nw" => vec![Arg::M, until("q_nil")],
+        "use_i_delimit_by_q_stop:nw" | "tl_head:w" => vec![Arg::M, until("q_stop")],
+        "use_i_delimit_by_q_recursion_stop:nw" => vec![Arg::M, until("q_recursion_stop")],
+        "exp_end_continue_f:w" => Vec::new(),
+        _ => return None,
+    })
+}
+
+/// Whether `s` ends in a control word (`\abc`).
+fn ends_in_control_word(s: &str) -> bool {
+    let t = s.trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == '@');
+    t.len() < s.len() && t.ends_with('\\') && !t.ends_with("\\\\")
+}
+
+impl Cx<'_> {
+    fn w_signature(&self, name: &str, _base: &str) -> Option<Res> {
+        if let Some(p) = w_primitive(name) {
+            return match self.table.commands.get(p) {
+                Some(Entry::Command(a)) => Some(Res::Cmd(a.clone(), Status::Predicted)),
+                Some(Entry::Quantity(t, ix)) => Some(Res::Quantity(*t, *ix, Status::Predicted)),
+                None => None,
+            };
+        }
+        w_delimited(name).map(|a| Res::Cmd(a, Status::Predicted))
+    }
+
+    /// The text of the body `name` binds to at `pos`, as [`Cx::resolve`]
+    /// binds.
+    fn body_of(&self, name: &str, pos: usize) -> Option<String> {
+        let doc = self.scope.document;
+        let at = Some((self.scope.file, pos));
+        if doc.defined_before(name, self.scope.file, pos) {
+            return match doc.find_body(name, at) {
+                Found::One(b) => Some(b.text.clone()),
+                _ => None,
+            };
+        }
+        if self.table.commands.contains_key(name) {
+            return None;
+        }
+        if !doc.defines(name)
+            && let Found::One(b) = self.scope.prelude.find_body(name, None)
+        {
+            return Some(b.text.clone());
+        }
+        match doc.find_body(name, at) {
+            Found::One(b) => Some(b.text.clone()),
+            _ => None,
+        }
+    }
+
+    /// `\expandafter\a\b` with `\b` a macro without parameters whose body
+    /// is visible: `\a`'s extent read over `\b`'s body and the text after
+    /// (B2). The end atom, how sure, and the names it rests on.
+    fn lookthrough(&mut self, a: usize) -> Option<(usize, Status, Noted)> {
+        let (t1, t2) = (a + 1, a + 2);
+        let x1 = *self.atoms.get(t1)?;
+        let x2 = *self.atoms.get(t2)?;
+        if x2.kind != AtomKind::Cs || !matches!(x1.kind, AtomKind::Cs | AtomKind::Char(_)) {
+            return None;
+        }
+        let b = x2.name(self.text).to_owned();
+        let Res::Cmd(args, _) = self.resolve(&b, x2.start, 0) else {
+            return None;
+        };
+        if !args.is_empty() {
+            return None;
+        }
+        let body = self.body_of(&b, x2.start)?;
+        let mut noted: Noted = vec![("\\expandafter look-through", b)];
+        if x1.kind != AtomKind::Cs {
+            self.mark(t1);
+            self.mark(t2);
+            return Some((t2 + 1, Status::Predicted, noted));
+        }
+        let n1 = x1.name(self.text);
+        if matches!(n1, "expandafter" | "exp_after:wN" | "exp_after:w") {
+            return None;
+        }
+        let text = self.text;
+        let rest_start = self.atoms.get(t2 + 1).map_or(text.len(), |x| x.start);
+        let mut rest_end = (rest_start + 4096).min(text.len());
+        while !text.is_char_boundary(rest_end) {
+            rest_end += 1;
+        }
+        let rest = &text[rest_start..rest_end];
+        if ends_in_control_word(&body) && rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            return None;
+        }
+        let head = &text[x1.start..x1.end];
+        let sep = if ends_in_control_word(head) { " " } else { "" };
+        let syn = format!("{head}{sep}{body}{rest}");
+        let boundary = head.len() + sep.len() + body.len();
+        let lexed = super::lex::lex(&syn, self.kind, Some(self.scope));
+        let atoms = super::atoms::atoms(&syn, &lexed.tokens);
+        if atoms.first().map(|x| x.kind) != Some(AtomKind::Cs) {
+            return None;
+        }
+        let mut sub = Cx {
+            text: &syn,
+            atoms: &atoms,
+            lexed: &lexed,
+            scope: self.scope,
+            table: self.table,
+            operand: vec![false; atoms.len()],
+            kind: self.kind,
+            features: Features {
+                lookthrough: false,
+                ..self.features
+            },
+            fixed_pos: Some(self.atoms[a].start),
+        };
+        let (it, sub_noted, _) = sub.item(0);
+        if it.status == Status::Pending {
+            return None;
+        }
+        if it.end >= atoms.len() && rest_end < text.len() {
+            // (it ran off the window)
+            return None;
+        }
+        let e_byte = atoms.get(it.end).map_or(syn.len(), |x| x.start);
+        let end = if e_byte <= boundary {
+            t2 + 1
+        } else {
+            let real = rest_start + (e_byte - boundary);
+            if real >= text.len() {
+                self.atoms.len()
+            } else {
+                self.atoms.binary_search_by_key(&real, |x| x.start).ok()?
+            }
+        };
+        noted.extend(sub_noted);
+        self.mark(t1);
+        self.mark(t2);
+        Some((end.max(t2 + 1), it.status.max(Status::Predicted), noted))
+    }
+
+    /// What a prediction about `name` at `pos` rests on, and how weakly
+    /// it is held (0 weakest: a definition bound across files by load
+    /// order; 1 the document's; 2 the kernel's; 3 a convention).
+    fn assumption(&self, name: &str, pos: usize) -> (u8, Assumption) {
+        let pos = self.fixed_pos.unwrap_or(pos);
+        let mi = |expected| Assumption::MeaningIs {
+            cs: name.to_owned(),
+            expected,
+        };
+        let doc = self.scope.document;
+        let file = self.scope.file;
+        let f = doc.find(name, Some((file, pos)));
+        if let Found::One(s) = f
+            && doc.defined_before(name, file, pos)
+        {
+            let rank = u8::from(!doc.bound_across_files(name, file, pos));
+            return (rank, mi(shape_of(s)));
+        }
+        if self.table.commands.contains_key(name) {
+            return (2, mi(MeaningShape::Kernel));
+        }
+        let redefined = !matches!(f, Found::None);
+        if !redefined && let Found::One(s) = self.scope.prelude.find(name, None) {
+            return (2, mi(shape_of(s)));
+        }
+        match f {
+            Found::One(s) => return (1, mi(shape_of(s))),
+            Found::Conflict => {
+                if let Found::One(s) = self.scope.prelude.find(name, None) {
+                    return (2, mi(shape_of(s)));
+                }
+            }
+            Found::None => {}
+        }
+        if let Some(base) = name.strip_prefix("tex_")
+            && base.ends_with(":D")
+        {
+            return (3, mi(MeaningShape::Primitive));
+        }
+        if let Some((_, sig)) = name.rsplit_once(':') {
+            return (3, mi(MeaningShape::Expl3(sig.to_owned())));
+        }
+        if ["l_", "g_", "c_", "q_", "s_"]
+            .iter()
+            .any(|p| name.starts_with(p))
+        {
+            return (3, mi(MeaningShape::Register('c')));
+        }
+        (3, mi(MeaningShape::Kernel))
+    }
+
+    /// Whether `\global` stands before the item at `a` (through `\long`,
+    /// `\outer`, `\protected`).
+    fn prefixed_global(&self, a: usize) -> bool {
+        let mut b = a;
+        loop {
+            while b > 0 && self.kind(b - 1) == Some(AtomKind::Space) {
+                b -= 1;
+            }
+            if b == 0 || self.kind(b - 1) != Some(AtomKind::Cs) {
+                return false;
+            }
+            b -= 1;
+            match self.name(b) {
+                "global" | "tex_global:D" => return true,
+                "long" | "outer" | "protected" | "tex_long:D" | "tex_protected:D" => {}
+                _ => return false,
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn hints(&self, it: &Item, noted: &Noted, quantity: bool, closure: &mut Closure<'_>) -> Hints {
+        let a = it.atom;
+        let pos = self.atoms[a].start;
+        let name = it.name.as_str();
+        let next_open = {
+            let q = skip(self.atoms, a + 1);
+            (self.kind(q) == Some(AtomKind::Open)).then_some(q)
+        };
+        let boxk = match name {
+            "hbox" => Some(ScopeKind::HBox),
+            "vbox" | "vtop" | "vcenter" => Some(ScopeKind::VBox),
+            _ => None,
+        };
+        // (the claim: the atoms consumed; a box claims up to its `{`, the
+        // group claims the rest)
+        let mut n = if it.consumes {
+            it.end.saturating_sub(a + 1)
+        } else {
+            0
+        };
+        if boxk.is_some()
+            && it.end > a + 1
+            && self.kind(it.end - 1) == Some(AtomKind::Close)
+            && let o = self.atoms[it.end - 1].mate
+            && o != usize::MAX
+            && o > a
+        {
+            n = o - a;
+        }
+        let mut assume: Vec<(u8, Assumption)> = Vec::new();
+        for (kind, d) in noted {
+            if *kind == "visible environment definition" {
+                let at = Some((self.scope.file, pos));
+                let args = match self.scope.document.find_env(d, at) {
+                    Found::One(x) => Some(x),
+                    _ => match self.scope.prelude.find_env(d, None) {
+                        Found::One(x) => Some(x),
+                        _ => None,
+                    },
+                };
+                assume.push((
+                    1,
+                    Assumption::MeaningIs {
+                        cs: d.clone(),
+                        expected: MeaningShape::Macro {
+                            params: args.map_or_else(String::new, |x| hints::params_of(x)),
+                        },
+                    },
+                ));
+                assume.push((
+                    2,
+                    Assumption::MeaningIs {
+                        cs: "begin".to_owned(),
+                        expected: MeaningShape::Kernel,
+                    },
+                ));
+            } else {
+                assume.push(self.assumption(d, pos));
+            }
+        }
+        if it.status == Status::Predicted && assume.is_empty() {
+            assume.push(self.assumption(name, pos));
+        }
+        assume.sort_by_key(|x| x.0);
+        let mut seen: Vec<Assumption> = Vec::new();
+        for (_, x) in assume {
+            if !seen.contains(&x) {
+                seen.push(x);
+            }
+        }
+        let claim = match it.status {
+            Status::Known => Claim::Known(n),
+            Status::Predicted => {
+                let mut v = seen.iter().cloned();
+                match v.next() {
+                    Some(confirm) => Claim::Predicted {
+                        n_tokens: n,
+                        confirm,
+                        also: v.collect(),
+                    },
+                    None => Claim::Known(n),
+                }
+            }
+            Status::Pending => Claim::Pending {
+                cause: it.cause.as_ref().map_or("unknown", |c| c.kind),
+            },
+        };
+        // (what it may define: its own statement, and the bodies of the
+        // macros it calls)
+        let global = self.prefixed_global(a);
+        let set = if quantity && !self.table.commands.contains_key(name) {
+            if it.consumes {
+                let mut s = closure.assigned(name);
+                if global {
+                    s.names.values_mut().for_each(|g| *g = true);
+                    s.prefixes.values_mut().for_each(|g| *g = true);
+                }
+                s
+            } else {
+                hints::DefSet::default()
+            }
+        } else if quantity && !it.consumes {
+            hints::DefSet::default()
+        } else {
+            let e = hints::effects(self.text, self.atoms, a, a + 1, global);
+            closure.of(&e)
+        };
+        let may_define = set.may_define();
+        // (scope)
+        let own = |effect: Effect| -> ScopeHint {
+            if it.status == Status::Known {
+                match effect {
+                    Effect::Open(k) => ScopeHint::Open(k),
+                    Effect::Close => ScopeHint::Close,
+                }
+            } else {
+                ScopeHint::Predicted {
+                    effect,
+                    confirm: self.assumption(name, pos).1,
+                }
+            }
+        };
+        let alias = |to: &str| Assumption::MeaningIs {
+            cs: name.to_owned(),
+            expected: MeaningShape::Alias(to.to_owned()),
+        };
+        let kernel = || Assumption::MeaningIs {
+            cs: name.to_owned(),
+            expected: MeaningShape::Kernel,
+        };
+        let env = next_open.map(|o| super::atoms::group_text(self.atoms, o));
+        let scope = match name {
+            "begingroup" | "group_begin:" | "tex_begingroup:D" => {
+                own(Effect::Open(ScopeKind::SemiSimple))
+            }
+            "endgroup" | "group_end:" | "tex_endgroup:D" => own(Effect::Close),
+            "bgroup" => ScopeHint::Predicted {
+                effect: Effect::Open(ScopeKind::Simple),
+                confirm: alias("{"),
+            },
+            "egroup" => ScopeHint::Predicted {
+                effect: Effect::Close,
+                confirm: alias("}"),
+            },
+            "begin" => match env {
+                Some(Some(e)) => ScopeHint::Predicted {
+                    effect: Effect::Open(ScopeKind::Env(e)),
+                    confirm: kernel(),
+                },
+                Some(None) => ScopeHint::Pending {
+                    cause: "environment name computed",
+                },
+                None => ScopeHint::Pending {
+                    cause: "environment name not braced",
+                },
+            },
+            "end" => match env {
+                Some(Some(_)) => ScopeHint::Predicted {
+                    effect: Effect::Close,
+                    confirm: kernel(),
+                },
+                Some(None) => ScopeHint::Pending {
+                    cause: "environment name computed",
+                },
+                None => ScopeHint::None,
+            },
+            _ => match boxk {
+                Some(_) if it.status == Status::Pending => ScopeHint::Pending {
+                    cause: it.cause.as_ref().map_or("unknown", |c| c.kind),
+                },
+                Some(k) => own(Effect::Open(k)),
+                None => ScopeHint::None,
+            },
+        };
+        let implicit = hints::implicit_of(name, next_open.is_some());
+        let mut reads = vec![hints::cs(name)];
+        for (_, d) in noted {
+            let f = hints::cs(d);
+            if !reads.contains(&f) {
+                reads.push(f);
+            }
+        }
+        if quantity
+            && !it.consumes
+            && let Some(Entry::Quantity(_, None)) = self.table.commands.get(name)
+        {
+            reads.push(hints::param(name));
+        }
+        Hints {
+            claim,
+            may_define,
+            scope,
+            implicit,
+            reads,
+            cause: it.cause.as_ref().map(|c| c.kind),
+        }
+    }
+}
+
+/// The meaning a harvested shape is.
+fn shape_of(s: &Shape) -> MeaningShape {
+    match s {
+        Shape::Macro(args) => MeaningShape::Macro {
+            params: hints::params_of(args),
+        },
+        Shape::Alias(t) => MeaningShape::Alias(t.clone()),
+        Shape::Quantity(t) => MeaningShape::Register(*t),
+        Shape::Cond => MeaningShape::Conditional,
+        Shape::Opaque(_) => MeaningShape::Kernel,
     }
 }
