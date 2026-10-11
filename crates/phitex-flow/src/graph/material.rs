@@ -588,7 +588,9 @@ impl Exec<'_> {
     pub(super) fn new_graf(&mut self, indented: bool) {
         self.st.prev_graf = 0;
         let outer = self.st.level == 0 && !self.st.in_output();
-        if outer || !self.current_list(true).is_empty() {
+        // (tex.web 1091: `head<>tail`; a PDF event or a `\shipout` taken out
+        // of the list is no node of it)
+        if outer || self.current_list(true).iter().any(|i| !matches!(i, Item::BuildPage(_) | Item::End(_)) && !i.hoisted()) {
             let g = self.glue_par(GluePar::Parskip);
             self.vemit.push(param_glue(&g, GluePar::Parskip as u8));
         }
@@ -915,15 +917,17 @@ impl Exec<'_> {
         let mut list = Vec::new();
         if vertical && level == 0 {
             // (the main vertical list: what this piece contributed since its
-            // last paragraph's lines, which are a separate task's)
-            let mut from = 0;
-            for (j, n) in nodes.iter().enumerate() {
-                if n.para().is_some_and(|p| p.lb.is_some()) {
-                    from = j + 1;
-                }
-            }
-            for n in nodes.range(from, nodes.len()) {
-                if let Some(p) = n.para() {
+            // last paragraph's lines, which are a separate task's — the
+            // paragraphs after the last with lines, found from the end of
+            // the chain's index of nodes with a paragraph: as long as what
+            // came since, not as the piece)
+            let paras = self.chain.para_nodes();
+            let from = paras
+                .iter()
+                .rposition(|&j| nodes[j as usize].para().is_some_and(|p| p.lb.is_some()))
+                .map_or(0, |k| k + 1);
+            for &j in &paras[from..] {
+                if let Some(p) = nodes[j as usize].para() {
                     for it in p.before.iter().chain(&p.after) {
                         list.push(it.clone());
                     }
@@ -985,7 +989,13 @@ impl Exec<'_> {
         // paragraph or in this piece: that paragraph's tail, or the one
         // reaching the piece, tex.web 424)
         let nodes = &self.chain.nodes;
-        let lb = (0..nodes.len()).rev().find(|&j| nodes[j].para().is_some_and(|p| p.lb.is_some()));
+        let lb = self
+            .chain
+            .para_nodes()
+            .iter()
+            .rev()
+            .map(|&j| j as usize)
+            .find(|&j| nodes[j].para().is_some_and(|p| p.lb.is_some()));
         if let Some(j) = lb {
             return nodes[j].para().and_then(|p| match main_tail(p) {
                 Some(Val::Tail(t)) => Some((*t).clone()),

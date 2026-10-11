@@ -1466,7 +1466,8 @@ pub struct Nodes {
     tail: Vec<Arc<Node>>,
 }
 
-/// Past this many stretches, a chain's nodes are made one again.
+/// Past this many stretches, a chain's newest ones are made one
+/// ([`Nodes::settle`]).
 const MAX_SEGS: usize = 16;
 
 impl Nodes {
@@ -1499,18 +1500,47 @@ impl Nodes {
 
     /// The nodes added since become a stretch others can share.
     fn freeze(&mut self) {
-        if self.segs.len() > MAX_SEGS {
-            let all: Vec<Arc<Node>> = self.iter().cloned().collect();
-            self.segs.clear();
-            self.ends.clear();
-            self.tail = all;
-        }
         if self.tail.is_empty() {
             return;
         }
         let v = Arc::new(std::mem::take(&mut self.tail));
         let end = v.len() as u32;
         self.add_seg(Seg { v, start: 0, end });
+    }
+
+    /// Past `MAX_SEGS` stretches, the newest ones made one, as many as are
+    /// together at least as long as the one before the first of them: then
+    /// each stretch from there is longer than all the newer ones together,
+    /// so lengths at least double back from the newest (a chain keeps
+    /// `MAX_SEGS` and a logarithmic number more), and a node is copied only
+    /// into a stretch at least twice as long as the one it was in (a
+    /// logarithmic number of times) — not the whole chain each time it
+    /// passes `MAX_SEGS`, which a piece run again with its old nodes kept
+    /// between new ones does every few nodes (quadratic: listings.dtx's
+    /// last piece, 6M nodes).
+    fn settle(&mut self) {
+        let n = self.segs.len();
+        if n <= MAX_SEGS {
+            return;
+        }
+        let seg_len = |s: &Seg| (s.end - s.start) as usize;
+        let mut k = n - 1;
+        let mut sum = seg_len(&self.segs[k]);
+        while k > 0 && seg_len(&self.segs[k - 1]) <= sum {
+            k -= 1;
+            sum += seg_len(&self.segs[k]);
+        }
+        if k == n - 1 {
+            return;
+        }
+        let start = if k == 0 { 0 } else { self.ends[k - 1] as usize };
+        let end = self.in_segs();
+        let merged: Vec<Arc<Node>> = self.range(start, end).cloned().collect();
+        let len = merged.len() as u32;
+        self.segs.truncate(k);
+        self.ends.truncate(k);
+        self.segs.push(Seg { v: Arc::new(merged), start: 0, end: len });
+        self.ends.push(end as u32);
     }
 
     fn add_seg(&mut self, s: Seg) {
@@ -1529,6 +1559,7 @@ impl Nodes {
         let e = self.in_segs() as u32 + len;
         self.segs.push(s);
         self.ends.push(e);
+        self.settle();
     }
 
     /// Appends `other`'s nodes `a..b`, shared (`other` is frozen).
@@ -2889,12 +2920,10 @@ pub fn run_piece(
                             // (the same node at the same index, its operands
                             // from the same nodes: shared, not copied; and so
                             // on up to the next node that must be looked at)
-                            copy_to = Some(
-                                dirty
-                                    .iter()
-                                    .find(|&&d| d as usize > oi)
-                                    .map_or(oc.nodes.len(), |&d| d as usize),
-                            );
+                            // (`dirty` is in order: found by halving, not
+                            // looked through for each stretch shared)
+                            let k = dirty.partition_point(|&d| d as usize <= oi);
+                            copy_to = Some(dirty.get(k).map_or(oc.nodes.len(), |&d| d as usize));
                         } else {
                             let mut n = (**n).clone();
                             if let Some(e) = edit {

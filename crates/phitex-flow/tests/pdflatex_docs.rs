@@ -47,7 +47,7 @@ fn latex_dir() -> PathBuf {
 /// The documents of pdfTeX's PDF-only commands (`tests/latex/pdfdocs/`):
 /// hyperref, graphicx's three kinds of image, xcolor, `TikZ`, positions
 /// written to the `.aux` file, objects and forms by hand, virtual fonts.
-const PDFDOCS: [&str; 7] = ["hyper", "graphics", "color", "tikz", "zsavepos", "objs", "vfont"];
+const PDFDOCS: [&str; 8] = ["hyper", "graphics", "color", "tikz", "zsavepos", "objs", "vfont", "alignlink"];
 
 /// The directory of document `name`.
 fn doc_dir(name: &str) -> PathBuf {
@@ -476,6 +476,16 @@ fn pdf_objs() {
 #[test]
 fn pdf_vfont() {
     doc("vfont");
+}
+
+/// hyperref's links in amsmath's `\text` in `align` and `alignat`: each
+/// link reserves an annotation's object (`\pdfannot reserveobjnum`, a PDF
+/// event taken out of the list, no node), four times (`\mathchoice`); the
+/// display's math list is still empty where the alignment begins (tex.web
+/// 1145: no "Improper \halign inside $$'s").
+#[test]
+fn pdf_alignlink() {
+    doc("alignlink");
 }
 
 /// The graphics document at a schedule that speculated on a stale

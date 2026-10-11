@@ -1384,7 +1384,10 @@ impl Exec<'_> {
             self.math_off_save(t);
             return None;
         }
-        if !self.math_items().is_empty() {
+        // (a PDF event made in the formula — `\pdfannot reserveobjnum`,
+        // hyperref's link in amsmath's `\text` — is no node of it: TeX's
+        // math list is still empty)
+        if self.math_items().iter().any(|it| !it.hoisted()) {
             // (§776: TeX flushes the formula; not here)
             self.err("Improper \\halign inside $$'s".into());
         }
