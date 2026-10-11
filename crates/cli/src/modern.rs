@@ -659,7 +659,7 @@ fn clean_all(ui: &Ui) -> ! {
     match std::fs::remove_dir_all(&d) {
         Ok(()) => ui.line(&ui.st.green(&format!("removed {}", d.display()))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            ui.line(&format!("nothing cached ({})", d.display()))
+            ui.line(&format!("nothing cached ({})", d.display()));
         }
         Err(e) => {
             ui.error(&format!("{}: {e}", d.display()));
