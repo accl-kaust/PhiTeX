@@ -11,8 +11,8 @@ set -euo pipefail
 repo="$(cd "$(dirname "$0")/../../.." && pwd)"
 out="${1:-$repo/target/trace-corpus}"
 mkdir -p "$out"
-cargo build -q --release -p phitex-trace
-bin="$repo/target/release/phitex-trace"
+cargo build -q --profile fastdev -p phitex-trace
+bin="$repo/target/fastdev/phitex-trace"
 run() { # name engine main
   local name=$1 engine=$2 main=$3
   "$bin" record "$main" --engine "$engine" --out "$out/$name.jsonl" --scratch "$out/scratch-$name" 2>>"$out/record.log"
@@ -28,7 +28,11 @@ for f in "$repo"/oracle/fixtures/plain/*.tex; do
   run "plain-$(basename "${f%.tex}")" pdftex "$f"
 done
 echo "## default"
-"$bin" table "$out"/latex-[!.]*[!s].json "$out"/plain-[!.]*[!s].json
+plain=()
+for f in "$out"/latex-*.json "$out"/plain-*.json; do
+  case $f in *.cons.json) ;; *) plain+=("$f") ;; esac
+done
+"$bin" table "${plain[@]}"
 echo
 echo "## --conservative"
 "$bin" table "$out"/*.cons.json
