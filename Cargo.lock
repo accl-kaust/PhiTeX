@@ -344,6 +344,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "defuse"
+version = "0.1.0"
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1443,6 +1447,13 @@ name = "phitex-codecs"
 version = "0.0.0"
 
 [[package]]
+name = "phitex-defuse"
+version = "0.0.0"
+dependencies = [
+ "defuse",
+]
+
+[[package]]
 name = "phitex-diff"
 version = "0.0.0"
 dependencies = [
@@ -1531,10 +1542,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "phitex-reduce"
-version = "0.0.0"
-
-[[package]]
 name = "phitex-source"
 version = "0.0.0"
 
@@ -1542,7 +1549,7 @@ version = "0.0.0"
 name = "phitex-tex"
 version = "0.0.0"
 dependencies = [
- "phitex-reduce",
+ "phitex-defuse",
  "phitex-source",
  "phitex-tfm",
  "phitex-typeset",
