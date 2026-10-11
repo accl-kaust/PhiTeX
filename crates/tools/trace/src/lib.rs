@@ -69,4 +69,5 @@ pub mod hash;
 pub mod parse;
 pub mod prims;
 pub mod record;
+pub mod replay;
 pub mod step;

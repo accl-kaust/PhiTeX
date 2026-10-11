@@ -9,7 +9,7 @@ use phitex_trace::analyze::{Graph, Report, markdown, table};
 use phitex_trace::parse::Options;
 use phitex_trace::record::{Engine, parse_log_file, record};
 
-const USAGE: &str = "usage:\n  phitex-trace record <main.tex> [--engine pdflatex|pdftex] [--out trace.jsonl] [--scratch DIR] [--conservative]\n  phitex-trace parse <job.log> --main <main.tex> [--engine NAME] [--out trace.jsonl] [--conservative]\n  phitex-trace analyze <trace.jsonl> [--json report.json] [--samples N]\n  phitex-trace table <report.json>...";
+const USAGE: &str = "usage:\n  phitex-trace record <main.tex> [--engine pdflatex|pdftex] [--out trace.jsonl] [--scratch DIR] [--conservative]\n  phitex-trace parse <job.log> --main <main.tex> [--engine NAME] [--out trace.jsonl] [--conservative]\n  phitex-trace analyze <trace.jsonl> [--json report.json] [--samples N]\n  phitex-trace table <report.json>...\n  phitex-trace replay <trace.jsonl> --out-dir DIR [--doc NAME] [--dirs D1:D2] [--commit SHA] [--edits N]\n  phitex-trace validate <replay.jsonl> [<edits.jsonl>]\n  phitex-trace index <replay-dir>";
 
 #[allow(clippy::too_many_lines)]
 fn run(args: &[String]) -> Result<(), String> {
@@ -87,7 +87,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 conservative: flag("conservative").is_some(),
             };
             let engine = flag("engine").unwrap_or_else(|| "unknown".to_owned());
-            let r = parse_log_file(&PathBuf::from(input), &main, &engine, &out, opts)
+            let r = parse_log_file(&PathBuf::from(input), &main, &engine, None, &out, opts)
                 .map_err(|e| e.to_string())?;
             eprintln!(
                 "{}: {} steps ({} log lines not recognised)",
@@ -120,8 +120,114 @@ fn run(args: &[String]) -> Result<(), String> {
             print!("{}", table(&reports));
             Ok(())
         }
+        "replay" => replay(input, &flag),
+        "validate" => {
+            let f = std::fs::File::open(input).map_err(|e| format!("{input}: {e}"))?;
+            let n = phitex_trace::replay::validate(BufReader::with_capacity(1 << 20, f))
+                .map_err(|e| format!("{input}: {e}"))?;
+            if let Some(e) = positional.get(1) {
+                let f = std::fs::File::open(e).map_err(|x| format!("{e}: {x}"))?;
+                let k = phitex_trace::replay::validate_edits(BufReader::new(f), n)
+                    .map_err(|x| format!("{e}: {x}"))?;
+                eprintln!("{e}: {k} edits valid");
+            }
+            eprintln!("{input}: {n} steps valid");
+            Ok(())
+        }
+        "index" => {
+            let dir = PathBuf::from(input);
+            let mut metas = Vec::new();
+            let mut entries: Vec<_> = std::fs::read_dir(&dir)
+                .map_err(|e| format!("{input}: {e}"))?
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.join("meta.json").is_file())
+                .collect();
+            entries.sort();
+            for p in entries {
+                let text =
+                    std::fs::read_to_string(p.join("meta.json")).map_err(|e| e.to_string())?;
+                let v: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|e| e.to_string())?;
+                let name = p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?")
+                    .to_owned();
+                metas.push((name, v));
+            }
+            print!("{}", phitex_trace::replay::index(&metas));
+            Ok(())
+        }
         _ => Err(USAGE.to_owned()),
     }
+}
+
+/// Reads a file the log names: absolute, or relative to one of `dirs`.
+fn load(dirs: &[PathBuf], name: &str) -> Option<String> {
+    let p = std::path::Path::new(name);
+    let candidates: Vec<PathBuf> = if p.is_absolute() {
+        vec![p.to_path_buf()]
+    } else {
+        let rel = name.strip_prefix("./").unwrap_or(name);
+        dirs.iter().map(|d| d.join(rel)).collect()
+    };
+    candidates
+        .iter()
+        .find_map(|c| std::fs::read(c).ok())
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+fn replay(input: &str, flag: &dyn Fn(&str) -> Option<String>) -> Result<(), String> {
+    use phitex_trace::replay::{Provenance, convert, plan_edits, validate, validate_edits};
+    let out_dir = PathBuf::from(flag("out-dir").ok_or("--out-dir DIR")?);
+    std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    let dirs: Vec<PathBuf> = flag("dirs")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    let samples =
+        flag("edits").map_or(Ok(200), |s| s.parse::<usize>().map_err(|e| e.to_string()))?;
+    let open = || std::fs::File::open(input).map(|f| BufReader::with_capacity(1 << 20, f));
+    // The edits first, from the edit-impact analysis's sample (its graph
+    // is dropped before the conversion).
+    let edits = {
+        let g =
+            Graph::load(open().map_err(|e| format!("{input}: {e}"))?).map_err(|e| e.to_string())?;
+        plan_edits(&g, samples)
+    };
+    let prov = Provenance {
+        document: flag("doc").unwrap_or_else(|| input.to_owned()),
+        trace_commit: flag("commit").unwrap_or_default(),
+    };
+    let trace_out = out_dir.join("trace.jsonl");
+    let mut w = std::io::BufWriter::with_capacity(
+        1 << 20,
+        std::fs::File::create(&trace_out).map_err(|e| e.to_string())?,
+    );
+    let (meta, edit_values) = convert(open, |n| load(&dirs, n), &prov, &edits, &mut w)
+        .map_err(|e| format!("{input}: {e}"))?;
+    drop(w);
+    let mut text = String::new();
+    for e in &edit_values {
+        text.push_str(&serde_json::to_string(e).map_err(|e| e.to_string())?);
+        text.push('\n');
+    }
+    std::fs::write(out_dir.join("edits.jsonl"), text).map_err(|e| e.to_string())?;
+    std::fs::write(
+        out_dir.join("meta.json"),
+        serde_json::to_string_pretty(&meta).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let f = std::fs::File::open(&trace_out).map_err(|e| e.to_string())?;
+    let n = validate(BufReader::with_capacity(1 << 20, f))
+        .map_err(|e| format!("{}: {e}", trace_out.display()))?;
+    let f = std::fs::File::open(out_dir.join("edits.jsonl")).map_err(|e| e.to_string())?;
+    let k = validate_edits(BufReader::new(f), n).map_err(|e| format!("edits: {e}"))?;
+    eprintln!("{}: {n} steps, {k} edits, valid", out_dir.display());
+    Ok(())
 }
 
 fn main() -> ExitCode {

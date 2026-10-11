@@ -1557,6 +1557,7 @@ name = "phitex-trace"
 version = "0.0.0"
 dependencies = [
  "fastrand",
+ "phitex-source",
  "serde",
  "serde_json",
 ]
