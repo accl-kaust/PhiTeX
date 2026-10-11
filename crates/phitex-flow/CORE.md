@@ -938,10 +938,71 @@ matching of old runs by their text.
 - **Edits.** An edit rewrites the root list's texts (`Seq::edit_root`):
   the pieces whose text is the same keep their runs and identities; a
   kept run whose entry or reads changed runs again, as any read does.
-- **Deferred:** PDF object numbers as values (allocation in
-  `pdf/fold.rs`), laziness from the PDF root (nothing unreachable from
-  the shipped pages evaluated), BibTeX/MakeIndex as nodes of the build
-  rather than between iterations.
+- **BibTeX and makeindex are nodes of the build** (`Derive`,
+  `Build::set_derive`; the CLI's `tools::ToolDerive`): after an
+  evaluation, the files it wrote derive the `.bbl` of each `.aux` asking
+  for one (`\bibdata`) and the `.ind` of each `.idx`, by the in-process
+  ports (`partex-bibtex`, `partex-makeindex`), memoised by what each read
+  (its `.aux` lines, the `.bib`/`.bst`/`.ist` files: unchanged, nothing is
+  made). A derived file that differs from the build's version is a value
+  the next evaluation reads: only its readers run again. The CLI runs the
+  tools between runs only when the job is not built to its fixpoint.
+
+### The agreed design, part by part (2026-10-11)
+
+- *TeX translated into SSA as it runs; the SSA alone makes the document.*
+  The runs are the SSA: a node per command, its reads (each from the
+  node that made the value) and its results. Pages are folds over the
+  runs' material; the PDF a fold over the pages. Nothing reads the source
+  again but a piece that runs (again).
+- *Macros are functions (higher order).* A macro's meaning is a value
+  (`Val::Macro`: parameters and body) defined by a node; `\let` copies
+  it; a definition made by a macro is a function made by a function. A
+  call is an application: it reads the callee's meaning (an edge to the
+  node that made the function, `Src`) and its arguments are the tokens
+  the call consumed; its result is the body with the arguments, read in
+  place (`Pending::push_body`). An edit to a function marks exactly the
+  applications that read it, from their node; one whose function and
+  arguments are equal again is kept (the node chain realigns). The
+  application is not a node of its own: measured on latex.ltx (29M calls
+  for 3.13M command nodes, a node ≈3 µs to record), a node per call would
+  multiply the graph by ten for no edit it re-runs less (the command node
+  holding the call is the unit an edit re-runs from either way), and the
+  expansion memo the brief required was measured to have nothing to
+  memoise (CORE.md "Single-thread cost").
+- *The SSA rewrites itself as it evaluates; unevaluated text stays in
+  it.* A piece is `pending(entry; text)` until it runs; its run replaces
+  it, and what the run says of the text around it rewrites the sequence
+  there (above). Inside a run: an untaken arm stays text (only the taken
+  arm is read, the test is the node), a macro body stays tokens until an
+  application reads it, a piece after `\end` stays text (muted, never
+  run). An edit un-reduces exactly what read a changed value: the nodes
+  from the first such read, the rest kept.
+- *The PDF is the only root.* The bar is the PDF after convergence,
+  compared with pdfTeX's converged PDF; the log is not compared (the
+  thread-comparison tests compare the DVI/PDF and the written files), the
+  `.aux`/`.toc` are loop-back values. Object numbers are the PDF fold's
+  values: the fold numbers objects as pdfTeX writes them (byte identity
+  with pdfTeX is the bar), from the pages and events in order; a page
+  whose body is the same is not made again (its stream is kept), only the
+  fold runs. What is never demanded is never evaluated: pieces after the
+  job's end, files nobody reads (no round for them), derivations whose
+  inputs did not change.
+- *Edits.* Initial values: nothing written on the first update; the last
+  update's written and derived files after. An update evaluates the
+  edited pieces, then only readers whose read value changed, and loops
+  back while a file read back (or derived) changed.
+- *Parallel.* Every piece is a thunk a worker may reduce: entered in the
+  state its predecessor left, or assumed (the canonical start, or its
+  file's) and checked; reads of names not yet defined park (`Suspend`) or
+  are predicted from the last build (`Speculate`) and validated. Line
+  breaking per paragraph and shipping per page are tasks too. The page
+  builder is one fold over the settled pieces, in order.
+- **Not done:** the page builder's fold is sequential (a split of the
+  scan at page boundaries whose restart point is known — the convergence
+  test already finds them — would make it parallel); PDF assembly runs
+  the whole fold at every update (checkpoints of the fold state at page
+  boundaries would let an edit fold from the first changed page).
 
 ## Reads of folds (decided, 2026-10-10)
 

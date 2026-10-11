@@ -257,6 +257,39 @@ pub struct Output {
     /// order), with where it was found (`./name` for one the run wrote) or
     /// `None`: the CLI's `-recorder` (`.fls`) and a watch's dependencies.
     pub files_read: Vec<(String, Option<String>)>,
+    /// The files [`Build::set_derive`]'s function made this update (a
+    /// `.bbl`, an `.ind`), as the evaluations read them, and its other
+    /// files (a `.blg`, an `.ilg`): name and bytes.
+    pub derived: Vec<(String, Vec<u8>)>,
+    pub derived_side: Vec<(String, Vec<u8>)>,
+    /// What the derivations said (a line each).
+    pub notes: Vec<String>,
+}
+
+/// A file derived from the files a build writes: BibTeX's `.bbl` of an
+/// `.aux`, makeindex's `.ind` of an `.idx`.
+pub struct Derived {
+    /// The file the document reads (empty: none, only a note).
+    pub name: String,
+    /// Its bytes (none: the derivation made none).
+    pub bytes: Option<Vec<u8>>,
+    /// Its other file (`.blg`, `.ilg`), not read by the document.
+    pub side: Option<(String, Vec<u8>)>,
+    pub note: String,
+}
+
+/// The files derived from the files a build writes, by a pure function of
+/// them and of the files it reads itself (the `.bib` files, the styles):
+/// part of the build's loop-back ([`Build::set_converge`]), so a derived
+/// file is a value the next evaluation reads like any other, and only its
+/// readers run again when it changes (CORE.md, "Reduction": BibTeX and
+/// makeindex are nodes of the build, not runs between builds).
+pub trait Derive: Send {
+    /// What `writes` (each written file's name and text, TeX's
+    /// characters) derive. `known(name)`: the build holds a version of
+    /// file `name` (a derivation whose inputs are unchanged since its last
+    /// call, and whose output the build holds, may make nothing).
+    fn derive(&mut self, writes: &[(String, String)], known: &dyn Fn(&str) -> bool) -> Vec<Derived>;
 }
 
 
@@ -1981,6 +2014,12 @@ pub struct Build {
     /// Reads refuted after an evaluation (a file read back otherwise than
     /// it was predicted): their pieces run again from the node.
     refuted: Vec<(PieceId, Key, u32)>,
+    /// The files derived from the written ones ([`Build::set_derive`]).
+    derive: Option<Mutex<Box<dyn Derive>>>,
+    /// What the derivations made and said this update.
+    derived: Vec<(String, Vec<u8>)>,
+    derived_side: Vec<(String, Vec<u8>)>,
+    notes: Vec<String>,
 }
 
 /// The scheduler's state.
@@ -2229,7 +2268,21 @@ impl Build {
             file_rounds: 0,
             touched: Vec::new(),
             refuted: Vec::new(),
+            derive: None,
+            derived: Vec::new(),
+            derived_side: Vec::new(),
+            notes: Vec::new(),
         }
+    }
+
+    /// The files derived from the files the build writes (BibTeX,
+    /// makeindex: [`Derive`]), made inside the loop-back of
+    /// [`Build::set_converge`]: an evaluation that wrote what a derivation
+    /// reads is followed by the derivation, and its output, when it
+    /// differs from the version the build holds, is read by the next
+    /// evaluation (only its readers run again).
+    pub fn set_derive(&mut self, d: Option<Box<dyn Derive>>) {
+        self.derive = d.map(Mutex::new);
     }
 
     /// The files the build writes and reads back (`.aux`, `.toc`: a
@@ -2299,6 +2352,9 @@ impl Build {
         let time_cut = t0.elapsed();
         self.pdf.rounds = 0;
         self.file_rounds = 0;
+        self.derived.clear();
+        self.derived_side.clear();
+        self.notes.clear();
         let mut carried = Stats::default();
         let mut rounds = 0;
         loop {
@@ -3276,6 +3332,34 @@ impl Build {
                     changed = true;
                 }
             }
+            // (the files derived from the written ones — BibTeX's `.bbl`,
+            // makeindex's `.ind` —: values the next evaluation reads)
+            if let Some(d) = self.derive.as_ref() {
+                let made = {
+                    let files = &self.files;
+                    let known = |n: &str| files.contains_key(n);
+                    d.lock().expect("derive").derive(&writes, &known)
+                };
+                for f in made {
+                    self.notes.push(f.note);
+                    if let Some(side) = f.side {
+                        self.derived_side.retain(|x| x.0 != side.0);
+                        self.derived_side.push(side);
+                    }
+                    let Some(bytes) = f.bytes else { continue };
+                    if f.name.is_empty() {
+                        continue;
+                    }
+                    self.derived.retain(|x| x.0 != f.name);
+                    self.derived.push((f.name.clone(), bytes.clone()));
+                    if self.files.get(f.name.as_str()).is_none_or(|t| **t != *bytes) {
+                        Arc::make_mut(&mut self.files).insert(Arc::from(f.name.as_str()), Arc::from(bytes));
+                        if read_names.contains(f.name.as_str()) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
             if changed {
                 self.file_rounds += 1;
                 again_why = Some("files");
@@ -3337,6 +3421,9 @@ impl Build {
             writes,
             job_pages,
             files_read,
+            derived: self.derived.clone(),
+            derived_side: self.derived_side.clone(),
+            notes: self.notes.clone(),
         }))
     }
 }

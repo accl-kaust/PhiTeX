@@ -231,6 +231,14 @@ impl Session {
         // are a loop-back inside each update, evaluated again only where
         // they changed)
         build.set_converge(job.fixpoint);
+        // (BibTeX and makeindex are part of that loop-back: the files they
+        // make are values the next evaluation reads)
+        if job.fixpoint && job.tools {
+            build.set_derive(Some(Box::new(crate::tools::ToolDerive {
+                tools: crate::tools::Tools::default(),
+                dir: job.out_dir.clone(),
+            })));
+        }
         // (every file by kpathsea as the engine's program — TEXINPUTS from
         // the environment, `.` first —, the output directory before it, as
         // web2c's `open_input` tries `-output-directory` first)
@@ -364,7 +372,17 @@ impl Session {
                     self.given.insert(n.clone(), t);
                 }
             }
-            if self.job.tools {
+            if self.job.tools && self.job.fixpoint {
+                // (BibTeX and makeindex ran inside the build's loop-back:
+                // what they made is what the build read)
+                notes.extend(out.notes.iter().cloned());
+                for (n, b) in &out.derived_side {
+                    self.side.insert(n.clone(), b.clone());
+                }
+                for (n, b) in &out.derived {
+                    self.given.insert(n.clone(), tex::chars(b));
+                }
+            } else if self.job.tools {
                 self.status.set(format!("after run {k}: BibTeX and makeindex"));
                 let dir = self.job.out_dir.clone();
                 let made = {
