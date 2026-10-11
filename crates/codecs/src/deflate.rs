@@ -25,8 +25,9 @@ const WINDOW_SIZE: usize = 2 * W_SIZE;
 /// `memLevel` 8: `hash_bits` = 8 + 7.
 const HASH_BITS: u32 = 15;
 const HASH_SIZE: usize = 1 << HASH_BITS;
-const HASH_MASK: u32 = (HASH_SIZE - 1) as u32;
-const HASH_SHIFT: u32 = HASH_BITS.div_ceil(MIN_MATCH as u32);
+const HASH_MASK: u32 = (1 << HASH_BITS) - 1;
+/// `hash_shift`: (`hash_bits` + `MIN_MATCH` - 1) / `MIN_MATCH`.
+const HASH_SHIFT: u32 = HASH_BITS.div_ceil(3);
 const LIT_BUFSIZE: usize = 1 << (8 + 6);
 const MAX_DIST: usize = W_SIZE - MIN_LOOKAHEAD;
 const TOO_FAR: usize = 4096;
@@ -44,16 +45,22 @@ const END_BLOCK: usize = 256;
 const REP_3_6: usize = 16;
 const REPZ_3_10: usize = 17;
 const REPZ_11_138: usize = 18;
-const BUF_SIZE: i32 = 16;
+const BUF_SIZE: u32 = 16;
 const STORED_BLOCK: u32 = 0;
 const STATIC_TREES: u32 = 1;
 const DYN_TREES: u32 = 2;
 
-const EXTRA_LBITS: [u32; LENGTH_CODES] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
-const EXTRA_DBITS: [u32; D_CODES] =
-    [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+const EXTRA_LBITS: [u32; LENGTH_CODES] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+];
+const EXTRA_DBITS: [u32; D_CODES] = [
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13,
+];
 const EXTRA_BLBITS: [u32; BL_CODES] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 7];
-const BL_ORDER: [usize; BL_CODES] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+const BL_ORDER: [usize; BL_CODES] = [
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+];
 
 /// `configuration_table`: good, lazy, nice, chain; levels 1–3 are
 /// `deflate_fast`, 4–9 `deflate_slow`.
@@ -85,11 +92,12 @@ struct Static {
     dtree: [Ct; D_CODES],
     dist_code: [u8; 512],
     length_code: [u8; MAX_MATCH - MIN_MATCH + 1],
-    base_length: [u32; LENGTH_CODES],
-    base_dist: [u32; D_CODES],
+    base_length: [usize; LENGTH_CODES],
+    base_dist: [usize; D_CODES],
 }
 
-fn bi_reverse(mut code: u32, mut len: u32) -> u32 {
+/// `bi_reverse`: the first `len` bits of `code` reversed (`len` ≤ 15).
+fn bi_reverse(mut code: u16, mut len: usize) -> u16 {
     let mut res = 0;
     loop {
         res |= code & 1;
@@ -103,23 +111,21 @@ fn bi_reverse(mut code: u32, mut len: u32) -> u32 {
     res >> 1
 }
 
-fn gen_codes(tree: &mut [Ct], max_code: isize, bl_count: &[u16; MAX_BITS + 1]) {
+fn gen_codes(tree: &mut [Ct], max_code: usize, bl_count: &[u16; MAX_BITS + 1]) {
     let mut next_code = [0u16; MAX_BITS + 1];
     let mut code: u32 = 0;
     for bits in 1..=MAX_BITS {
         code = (code + u32::from(bl_count[bits - 1])) << 1;
-        next_code[bits] = code as u16;
+        // (`gen_codes`' Assert: the counts are those of a complete code
+        // of at most `MAX_BITS` bits, so a length's first code fits them)
+        next_code[bits] = u16::try_from(code).expect("a code of at most 15 bits");
     }
-    for n in 0..=max_code.max(-1) {
-        if n < 0 {
-            break;
-        }
-        let n = n as usize;
-        let len = tree[n].dl as usize;
+    for ct in &mut tree[..=max_code] {
+        let len = usize::from(ct.dl);
         if len == 0 {
             continue;
         }
-        tree[n].fc = bi_reverse(u32::from(next_code[len]), len as u32) as u16;
+        ct.fc = bi_reverse(next_code[len], len);
         next_code[len] = next_code[len].wrapping_add(1);
     }
 }
@@ -137,29 +143,29 @@ impl Static {
         let mut length = 0usize;
         let mut code = 0usize;
         while code < LENGTH_CODES - 1 {
-            s.base_length[code] = length as u32;
+            s.base_length[code] = length;
             for _ in 0..(1 << EXTRA_LBITS[code]) {
-                s.length_code[length] = code as u8;
+                s.length_code[length] = code_u8(code);
                 length += 1;
             }
             code += 1;
         }
-        s.length_code[length - 1] = code as u8;
+        s.length_code[length - 1] = code_u8(code);
         let mut dist = 0usize;
         code = 0;
         while code < 16 {
-            s.base_dist[code] = dist as u32;
+            s.base_dist[code] = dist;
             for _ in 0..(1 << EXTRA_DBITS[code]) {
-                s.dist_code[dist] = code as u8;
+                s.dist_code[dist] = code_u8(code);
                 dist += 1;
             }
             code += 1;
         }
         dist >>= 7;
         while code < D_CODES {
-            s.base_dist[code] = (dist << 7) as u32;
+            s.base_dist[code] = dist << 7;
             for _ in 0..(1 << (EXTRA_DBITS[code] - 7)) {
-                s.dist_code[256 + dist] = code as u8;
+                s.dist_code[256 + dist] = code_u8(code);
                 dist += 1;
             }
             code += 1;
@@ -186,27 +192,45 @@ impl Static {
             bl_count[8] += 1;
             n += 1;
         }
-        gen_codes(&mut s.ltree, (L_CODES + 1) as isize, &bl_count);
-        for n in 0..D_CODES {
-            s.dtree[n].dl = 5;
-            s.dtree[n].fc = bi_reverse(n as u32, 5) as u16;
+        gen_codes(&mut s.ltree, L_CODES + 1, &bl_count);
+        for (n, ct) in (0u16..).zip(&mut s.dtree) {
+            ct.dl = 5;
+            ct.fc = bi_reverse(n, 5);
         }
         s
     }
 
     fn d_code(&self, dist: usize) -> usize {
-        if dist < 256 { usize::from(self.dist_code[dist]) } else { usize::from(self.dist_code[256 + (dist >> 7)]) }
+        if dist < 256 {
+            usize::from(self.dist_code[dist])
+        } else {
+            usize::from(self.dist_code[256 + (dist >> 7)])
+        }
     }
 }
 
+/// A length or distance code (< `D_CODES`) as `tr_static_init` stores it.
+fn code_u8(code: usize) -> u8 {
+    u8::try_from(code).expect("a code is below 30")
+}
+
+/// A count or length below `1 << length` as `send_bits` takes it.
+fn bits(v: usize) -> u32 {
+    u32::try_from(v).expect("send_bits' value is at most 16 bits")
+}
+
+/// A tree node (< `HEAP_SIZE`) as `ct_data`'s `Dad` stores it.
+fn node_u16(n: usize) -> u16 {
+    u16::try_from(n).expect("a node is below HEAP_SIZE")
+}
+
 /// `smaller`: `n` sorts before `m` (by frequency, then depth).
-fn smaller(tree: &[Ct], n: i32, m: i32, depth: &[u8]) -> bool {
-    let (n, m) = (n as usize, m as usize);
+fn smaller(tree: &[Ct], n: usize, m: usize, depth: &[u8]) -> bool {
     tree[n].fc < tree[m].fc || (tree[n].fc == tree[m].fc && depth[n] <= depth[m])
 }
 
 /// `pqdownheap`: restore the heap property from node `k` down.
-fn pqdownheap(tree: &[Ct], heap: &mut [i32], heap_len: usize, depth: &[u8], mut k: usize) {
+fn pqdownheap(tree: &[Ct], heap: &mut [usize], heap_len: usize, depth: &[u8], mut k: usize) {
     let v = heap[k];
     let mut j = k << 1;
     while j <= heap_len {
@@ -243,6 +267,8 @@ struct State<'a> {
     prev: Vec<u16>,
     head: Vec<u16>,
     ins_h: u32,
+    /// `block_start` (C's `long`): negative once the window slid past
+    /// the block's start.
     block_start: isize,
     match_length: usize,
     prev_match: usize,
@@ -258,11 +284,11 @@ struct State<'a> {
     dyn_ltree: [Ct; HEAP_SIZE],
     dyn_dtree: [Ct; 2 * D_CODES + 1],
     bl_tree: [Ct; 2 * BL_CODES + 1],
-    l_max_code: isize,
-    d_max_code: isize,
-    bl_max_code: isize,
+    l_max_code: usize,
+    d_max_code: usize,
+    bl_max_code: usize,
     bl_count: [u16; MAX_BITS + 1],
-    heap: [i32; 2 * L_CODES + 1],
+    heap: [usize; 2 * L_CODES + 1],
     heap_len: usize,
     heap_max: usize,
     depth: [u8; 2 * L_CODES + 1],
@@ -273,13 +299,24 @@ struct State<'a> {
     static_len: u64,
     insert: usize,
     bi_buf: u16,
-    bi_valid: i32,
+    bi_valid: u32,
 }
 
 enum Block {
     NeedMore,
     Done,
     FinishDone,
+}
+
+/// A window position (< `WINDOW_SIZE` = 64K) as `head` and `prev` keep
+/// it (C's `Pos`, an `ush`).
+fn pos_u16(s: usize) -> u16 {
+    u16::try_from(s).expect("a position in the window")
+}
+
+/// A window position as `block_start` (C's `long`) counts it.
+fn isize_of(s: usize) -> isize {
+    isize::try_from(s).expect("a position in the window")
 }
 
 impl State<'_> {
@@ -290,22 +327,26 @@ impl State<'_> {
     }
 
     fn put_short(&mut self, w: u16) {
-        self.put_byte((w & 0xff) as u8);
-        self.put_byte((w >> 8) as u8);
+        self.out.extend_from_slice(&w.to_le_bytes());
     }
 
+    /// `send_bits`: `value` (below `1 << length`, `length` ≤ 16, as
+    /// zlib's Assert in `send_bits` has it) appended to the bit buffer,
+    /// its low 16 bits written once they are full. With `bi_valid` ≤ 16
+    /// the buffer and the new bits fit a `u32`: its low half is what C's
+    /// `bi_buf |= (ush)value << bi_valid` keeps, its high half the
+    /// `(ush)value >> (Buf_size - bi_valid)` carried over.
     fn send_bits(&mut self, value: u32, length: u32) {
-        let len = length as i32;
-        if self.bi_valid > BUF_SIZE - len {
-            let val = value as i32;
-            self.bi_buf |= ((val as u16) as u32).wrapping_shl(self.bi_valid as u32) as u16;
-            let b = self.bi_buf;
-            self.put_short(b);
-            self.bi_buf = (val as u16) >> (BUF_SIZE - self.bi_valid);
-            self.bi_valid += len - BUF_SIZE;
+        let acc = u32::from(self.bi_buf) | value << self.bi_valid;
+        let [b0, b1, b2, b3] = acc.to_le_bytes();
+        let total = self.bi_valid + length;
+        if total > BUF_SIZE {
+            self.out.extend_from_slice(&[b0, b1]);
+            self.bi_buf = u16::from_le_bytes([b2, b3]);
+            self.bi_valid = total - BUF_SIZE;
         } else {
-            self.bi_buf |= ((value as u16) as u32).wrapping_shl(self.bi_valid as u32) as u16;
-            self.bi_valid += len;
+            self.bi_buf = u16::from_le_bytes([b0, b1]);
+            self.bi_valid = total;
         }
     }
 
@@ -325,7 +366,7 @@ impl State<'_> {
             let b = self.bi_buf;
             self.put_short(b);
         } else if self.bi_valid > 0 {
-            let b = self.bi_buf as u8;
+            let [b, _] = self.bi_buf.to_le_bytes();
             self.put_byte(b);
         }
         self.bi_buf = 0;
@@ -380,25 +421,29 @@ impl State<'_> {
         for bits in 0..=MAX_BITS {
             self.bl_count[bits] = 0;
         }
-        let root = self.heap[self.heap_max] as usize;
+        let root = self.heap[self.heap_max];
         self.tree(w)[root].dl = 0;
         let mut h = self.heap_max + 1;
         while h < HEAP_SIZE {
-            let n = self.heap[h] as usize;
+            let n = self.heap[h];
             let tree = self.tree(w);
             let mut bits = usize::from(tree[usize::from(tree[n].dl)].dl) + 1;
             if bits > max_length {
                 bits = max_length;
                 overflow += 1;
             }
-            tree[n].dl = bits as u16;
+            tree[n].dl = node_u16(bits);
             h += 1;
-            if n as isize > max_code {
+            if n > max_code {
                 continue;
             }
             let f = u64::from(tree[n].fc);
             self.bl_count[bits] += 1;
-            let xbits = if n >= base { extra[n - base] as u64 } else { 0 };
+            let xbits = if n >= base {
+                u64::from(extra[n - base])
+            } else {
+                0
+            };
             self.opt_len = self.opt_len.wrapping_add(f * (bits as u64 + xbits));
             let stree_len = match w {
                 Which::L => Some(u64::from(self.st.ltree[n].dl)),
@@ -431,16 +476,18 @@ impl State<'_> {
             let mut n = self.bl_count[bits];
             while n != 0 {
                 h -= 1;
-                let m = self.heap[h] as usize;
-                if m as isize > max_code {
+                let m = self.heap[h];
+                if m > max_code {
                     continue;
                 }
                 let tree = self.tree(w);
                 if usize::from(tree[m].dl) != bits {
                     let fr = u64::from(tree[m].fc);
                     let old = u64::from(tree[m].dl);
-                    tree[m].dl = bits as u16;
-                    self.opt_len = self.opt_len.wrapping_add((bits as u64).wrapping_sub(old).wrapping_mul(fr));
+                    tree[m].dl = node_u16(bits);
+                    self.opt_len = self
+                        .opt_len
+                        .wrapping_add((bits as u64).wrapping_sub(old).wrapping_mul(fr));
                 }
                 n -= 1;
             }
@@ -454,37 +501,50 @@ impl State<'_> {
             Which::D => D_CODES,
             Which::Bl => BL_CODES,
         };
-        let mut max_code: isize = -1;
+        // (C's `max_code = -1`: `None`; at least two codes are made
+        // nonzero below, so it is a code after)
+        let mut max_code: Option<usize> = None;
         self.heap_len = 0;
         self.heap_max = HEAP_SIZE;
         for n in 0..elems {
             if self.tree(w)[n].fc != 0 {
                 self.heap_len += 1;
-                self.heap[self.heap_len] = n as i32;
-                max_code = n as isize;
+                self.heap[self.heap_len] = n;
+                max_code = Some(n);
                 self.depth[n] = 0;
             } else {
                 self.tree(w)[n].dl = 0;
             }
         }
         while self.heap_len < 2 {
-            let node = if max_code < 2 {
-                max_code += 1;
-                max_code as usize
-            } else {
-                0
+            let node = match max_code {
+                Some(m) if m >= 2 => 0,
+                m => {
+                    let next = m.map_or(0, |m| m + 1);
+                    max_code = Some(next);
+                    next
+                }
             };
             self.heap_len += 1;
-            self.heap[self.heap_len] = node as i32;
+            self.heap[self.heap_len] = node;
             self.tree(w)[node].fc = 1;
             self.depth[node] = 0;
             self.opt_len = self.opt_len.wrapping_sub(1);
             match w {
-                Which::L => self.static_len = self.static_len.wrapping_sub(u64::from(self.st.ltree[node].dl)),
-                Which::D => self.static_len = self.static_len.wrapping_sub(u64::from(self.st.dtree[node].dl)),
+                Which::L => {
+                    self.static_len = self
+                        .static_len
+                        .wrapping_sub(u64::from(self.st.ltree[node].dl))
+                }
+                Which::D => {
+                    self.static_len = self
+                        .static_len
+                        .wrapping_sub(u64::from(self.st.dtree[node].dl))
+                }
                 Which::Bl => {}
             }
         }
+        let max_code = max_code.expect("two codes at least");
         match w {
             Which::L => self.l_max_code = max_code,
             Which::D => self.d_max_code = max_code,
@@ -507,14 +567,14 @@ impl State<'_> {
             self.heap[self.heap_max] = n;
             self.heap_max -= 1;
             self.heap[self.heap_max] = m;
-            let (nu, mu) = (n as usize, m as usize);
+            let (nu, mu) = (n, m);
             let (dn, dm) = (self.depth[nu], self.depth[mu]);
             let tree = self.tree(w);
             tree[node].fc = tree[nu].fc.wrapping_add(tree[mu].fc);
-            tree[nu].dl = node as u16;
-            tree[mu].dl = node as u16;
+            tree[nu].dl = node_u16(node);
+            tree[mu].dl = node_u16(node);
             self.depth[node] = (if dn >= dm { dn } else { dm }).wrapping_add(1);
-            self.heap[1] = node as i32;
+            self.heap[1] = node;
             node += 1;
             self.pqdownheap(w, 1);
             if self.heap_len < 2 {
@@ -528,28 +588,31 @@ impl State<'_> {
         gen_codes(self.tree(w), max_code, &bl_count);
     }
 
-    fn scan_tree(&mut self, w: Which, max_code: isize) {
-        let mut prevlen: i32 = -1;
-        let mut nextlen = i32::from(self.tree(w)[0].dl);
-        let mut count = 0;
+    fn scan_tree(&mut self, w: Which, max_code: usize) {
+        // (C's `prevlen = -1`: no length yet)
+        let mut prevlen: Option<usize> = None;
+        let mut nextlen = usize::from(self.tree(w)[0].dl);
+        let mut count: usize = 0;
         let (mut max_count, mut min_count) = (7, 4);
         if nextlen == 0 {
             max_count = 138;
             min_count = 3;
         }
-        self.tree(w)[(max_code + 1) as usize].dl = 0xffff;
+        self.tree(w)[max_code + 1].dl = 0xffff;
         for n in 0..=max_code {
             let curlen = nextlen;
-            nextlen = i32::from(self.tree(w)[(n + 1) as usize].dl);
+            nextlen = usize::from(self.tree(w)[n + 1].dl);
             count += 1;
             if count < max_count && curlen == nextlen {
                 continue;
             }
             if count < min_count {
-                self.bl_tree[curlen as usize].fc = self.bl_tree[curlen as usize].fc.wrapping_add(count as u16);
+                // (`count` < `min_count` ≤ 4)
+                let c = u16::try_from(count).expect("a short run");
+                self.bl_tree[curlen].fc = self.bl_tree[curlen].fc.wrapping_add(c);
             } else if curlen != 0 {
-                if curlen != prevlen {
-                    self.bl_tree[curlen as usize].fc = self.bl_tree[curlen as usize].fc.wrapping_add(1);
+                if Some(curlen) != prevlen {
+                    self.bl_tree[curlen].fc = self.bl_tree[curlen].fc.wrapping_add(1);
                 }
                 self.bl_tree[REP_3_6].fc = self.bl_tree[REP_3_6].fc.wrapping_add(1);
             } else if count <= 10 {
@@ -558,7 +621,7 @@ impl State<'_> {
                 self.bl_tree[REPZ_11_138].fc = self.bl_tree[REPZ_11_138].fc.wrapping_add(1);
             }
             count = 0;
-            prevlen = curlen;
+            prevlen = Some(curlen);
             if nextlen == 0 {
                 max_count = 138;
                 min_count = 3;
@@ -572,10 +635,11 @@ impl State<'_> {
         }
     }
 
-    fn send_tree(&mut self, w: Which, max_code: isize) {
-        let mut prevlen: i32 = -1;
-        let mut nextlen = i32::from(self.tree(w)[0].dl);
-        let mut count = 0;
+    fn send_tree(&mut self, w: Which, max_code: usize) {
+        // (C's `prevlen = -1`: no length yet)
+        let mut prevlen: Option<usize> = None;
+        let mut nextlen = usize::from(self.tree(w)[0].dl);
+        let mut count: usize = 0;
         let (mut max_count, mut min_count) = (7, 4);
         if nextlen == 0 {
             max_count = 138;
@@ -583,35 +647,35 @@ impl State<'_> {
         }
         for n in 0..=max_code {
             let curlen = nextlen;
-            nextlen = i32::from(self.tree(w)[(n + 1) as usize].dl);
+            nextlen = usize::from(self.tree(w)[n + 1].dl);
             count += 1;
             if count < max_count && curlen == nextlen {
                 continue;
             }
             if count < min_count {
                 loop {
-                    self.send_code(curlen as usize, Tree::Bl);
+                    self.send_code(curlen, Tree::Bl);
                     count -= 1;
                     if count == 0 {
                         break;
                     }
                 }
             } else if curlen != 0 {
-                if curlen != prevlen {
-                    self.send_code(curlen as usize, Tree::Bl);
+                if Some(curlen) != prevlen {
+                    self.send_code(curlen, Tree::Bl);
                     count -= 1;
                 }
                 self.send_code(REP_3_6, Tree::Bl);
-                self.send_bits((count - 3) as u32, 2);
+                self.send_bits(bits(count - 3), 2);
             } else if count <= 10 {
                 self.send_code(REPZ_3_10, Tree::Bl);
-                self.send_bits((count - 3) as u32, 3);
+                self.send_bits(bits(count - 3), 3);
             } else {
                 self.send_code(REPZ_11_138, Tree::Bl);
-                self.send_bits((count - 11) as u32, 7);
+                self.send_bits(bits(count - 11), 7);
             }
             count = 0;
-            prevlen = curlen;
+            prevlen = Some(curlen);
             if nextlen == 0 {
                 max_count = 138;
                 min_count = 3;
@@ -636,27 +700,32 @@ impl State<'_> {
             }
             max_blindex -= 1;
         }
-        self.opt_len = self.opt_len.wrapping_add(3 * (max_blindex as u64 + 1) + 5 + 5 + 4);
+        self.opt_len = self
+            .opt_len
+            .wrapping_add(3 * (max_blindex as u64 + 1) + 5 + 5 + 4);
         max_blindex
     }
 
     fn send_all_trees(&mut self, lcodes: usize, dcodes: usize, blcodes: usize) {
-        self.send_bits((lcodes - 257) as u32, 5);
-        self.send_bits((dcodes - 1) as u32, 5);
-        self.send_bits((blcodes - 4) as u32, 4);
+        self.send_bits(bits(lcodes - 257), 5);
+        self.send_bits(bits(dcodes - 1), 5);
+        self.send_bits(bits(blcodes - 4), 4);
         for &r in &BL_ORDER[..blcodes] {
             let l = u32::from(self.bl_tree[r].dl);
             self.send_bits(l, 3);
         }
-        self.send_tree(Which::L, lcodes as isize - 1);
-        self.send_tree(Which::D, dcodes as isize - 1);
+        self.send_tree(Which::L, lcodes - 1);
+        self.send_tree(Which::D, dcodes - 1);
     }
 
     fn stored_block(&mut self, buf: Option<usize>, stored_len: usize, last: bool) {
         self.send_bits((STORED_BLOCK << 1) + u32::from(last), 3);
         self.bi_windup();
-        self.put_short(stored_len as u16);
-        self.put_short(!(stored_len as u16));
+        // (`_tr_stored_block` writes `(ush)stored_len`: a block is at most
+        // the window, and a stored one at most `MAX_STORED`)
+        let len = u16::try_from(stored_len).expect("a stored block fits 16 bits");
+        self.put_short(len);
+        self.put_short(!len);
         if let Some(b) = buf {
             let w = self.window[b..b + stored_len].to_vec();
             self.out.extend_from_slice(&w);
@@ -678,16 +747,16 @@ impl State<'_> {
                     self.send_code(code + LITERALS + 1, ltree);
                     let extra = EXTRA_LBITS[code];
                     if extra != 0 {
-                        lc -= self.st.base_length[code] as usize;
-                        self.send_bits(lc as u32, extra);
+                        lc -= self.st.base_length[code];
+                        self.send_bits(bits(lc), extra);
                     }
                     dist -= 1;
                     let code = self.st.d_code(dist);
                     self.send_code(code, dtree);
                     let extra = EXTRA_DBITS[code];
                     if extra != 0 {
-                        dist -= self.st.base_dist[code] as usize;
-                        self.send_bits(dist as u32, extra);
+                        dist -= self.st.base_dist[code];
+                        self.send_bits(bits(dist), extra);
                     }
                 }
                 if sx >= self.sym_next {
@@ -714,7 +783,7 @@ impl State<'_> {
             self.compress_block(Tree::StaticL, Tree::StaticD);
         } else {
             self.send_bits((DYN_TREES << 1) + u32::from(last), 3);
-            let (l, d) = ((self.l_max_code + 1) as usize, (self.d_max_code + 1) as usize);
+            let (l, d) = (self.l_max_code + 1, self.d_max_code + 1);
             self.send_all_trees(l, d, max_blindex + 1);
             self.compress_block(Tree::DynL, Tree::DynD);
         }
@@ -734,9 +803,13 @@ impl State<'_> {
     }
 
     fn tally_dist(&mut self, dist: usize, len: usize) -> bool {
-        self.sym_buf[self.sym_next] = dist as u8;
-        self.sym_buf[self.sym_next + 1] = (dist >> 8) as u8;
-        self.sym_buf[self.sym_next + 2] = len as u8;
+        // (`_tr_tally_dist`: `dist` ≤ `MAX_DIST`, `len` ≤ `MAX_MATCH` - `MIN_MATCH`)
+        let [d0, d1] = u16::try_from(dist)
+            .expect("dist below the window")
+            .to_le_bytes();
+        self.sym_buf[self.sym_next] = d0;
+        self.sym_buf[self.sym_next + 1] = d1;
+        self.sym_buf[self.sym_next + 2] = u8::try_from(len).expect("len below 256");
         self.sym_next += 3;
         let lc = usize::from(self.st.length_code[len]) + LITERALS + 1;
         self.dyn_ltree[lc].fc = self.dyn_ltree[lc].fc.wrapping_add(1);
@@ -757,18 +830,15 @@ impl State<'_> {
         self.update_hash(c);
         let h = self.head[self.ins_h as usize];
         self.prev[s & W_MASK] = h;
-        self.head[self.ins_h as usize] = s as u16;
+        self.head[self.ins_h as usize] = pos_u16(s);
         usize::from(h)
     }
 
     fn slide_hash(&mut self) {
-        for p in &mut self.head {
-            let m = usize::from(*p);
-            *p = if m >= W_SIZE { (m - W_SIZE) as u16 } else { NIL as u16 };
-        }
-        for p in &mut self.prev {
-            let m = usize::from(*p);
-            *p = if m >= W_SIZE { (m - W_SIZE) as u16 } else { NIL as u16 };
+        // (`slide_hash`: `m >= wsize ? m - wsize : NIL`, `NIL` being 0)
+        let w = pos_u16(W_SIZE);
+        for p in self.head.iter_mut().chain(&mut self.prev) {
+            *p = p.saturating_sub(w);
         }
     }
 
@@ -795,7 +865,7 @@ impl State<'_> {
                 self.window.copy_within(W_SIZE..W_SIZE + W_SIZE - more, 0);
                 self.match_start = self.match_start.wrapping_sub(W_SIZE);
                 self.strstart -= W_SIZE;
-                self.block_start -= W_SIZE as isize;
+                self.block_start -= isize_of(W_SIZE);
                 if self.insert > self.strstart {
                     self.insert = self.strstart;
                 }
@@ -816,7 +886,7 @@ impl State<'_> {
                     let c = self.window[str + MIN_MATCH - 1];
                     self.update_hash(c);
                     self.prev[str & W_MASK] = self.head[self.ins_h as usize];
-                    self.head[self.ins_h as usize] = str as u16;
+                    self.head[self.ins_h as usize] = pos_u16(str);
                     str += 1;
                     self.insert -= 1;
                     if self.lookahead + self.insert < MIN_MATCH {
@@ -838,7 +908,11 @@ impl State<'_> {
         let scan0 = self.strstart;
         let mut best_len = self.prev_length;
         let mut nice_match = self.nice_match;
-        let limit = if self.strstart > MAX_DIST { self.strstart - MAX_DIST } else { NIL };
+        let limit = if self.strstart > MAX_DIST {
+            self.strstart - MAX_DIST
+        } else {
+            NIL
+        };
         let strend = self.strstart + MAX_MATCH;
         let w = &self.window;
         let mut scan_end1 = w[scan0 + best_len - 1];
@@ -898,18 +972,23 @@ impl State<'_> {
             }
         }
         self.match_start = match_start;
-        if best_len <= self.lookahead { best_len } else { self.lookahead }
+        if best_len <= self.lookahead {
+            best_len
+        } else {
+            self.lookahead
+        }
     }
 
     fn block_ptr(&self) -> Option<usize> {
-        (self.block_start >= 0).then_some(self.block_start as usize)
+        usize::try_from(self.block_start).ok()
     }
 
     fn flush_block_only(&mut self, last: bool) {
         let buf = self.block_ptr();
-        let len = (self.strstart as isize - self.block_start) as usize;
+        let len = usize::try_from(isize_of(self.strstart) - self.block_start)
+            .expect("the block starts before strstart");
         self.flush_block(buf, len, last);
-        self.block_start = self.strstart as isize;
+        self.block_start = isize_of(self.strstart);
     }
 
     fn deflate_fast(&mut self, finish: bool) -> Block {
@@ -932,7 +1011,10 @@ impl State<'_> {
             }
             let bflush;
             if self.match_length >= MIN_MATCH {
-                bflush = self.tally_dist(self.strstart - self.match_start, self.match_length - MIN_MATCH);
+                bflush = self.tally_dist(
+                    self.strstart - self.match_start,
+                    self.match_length - MIN_MATCH,
+                );
                 self.lookahead -= self.match_length;
                 // (`max_insert_length` is `max_lazy_match`)
                 if self.match_length <= self.max_lazy_match && self.lookahead >= MIN_MATCH {
@@ -963,7 +1045,11 @@ impl State<'_> {
                 self.flush_block_only(false);
             }
         }
-        self.insert = if self.strstart < MIN_MATCH - 1 { self.strstart } else { MIN_MATCH - 1 };
+        self.insert = if self.strstart < MIN_MATCH - 1 {
+            self.strstart
+        } else {
+            MIN_MATCH - 1
+        };
         if finish {
             self.flush_block_only(true);
             return Block::FinishDone;
@@ -992,7 +1078,10 @@ impl State<'_> {
             self.prev_length = self.match_length;
             self.prev_match = self.match_start;
             self.match_length = MIN_MATCH - 1;
-            if hash_head != NIL && self.prev_length < self.max_lazy_match && self.strstart - hash_head <= MAX_DIST {
+            if hash_head != NIL
+                && self.prev_length < self.max_lazy_match
+                && self.strstart - hash_head <= MAX_DIST
+            {
                 self.match_length = self.longest_match(hash_head);
                 if self.match_length <= 5
                     && self.match_length == MIN_MATCH
@@ -1003,7 +1092,10 @@ impl State<'_> {
             }
             if self.prev_length >= MIN_MATCH && self.match_length <= self.prev_length {
                 let max_insert = self.strstart + self.lookahead - MIN_MATCH;
-                let bflush = self.tally_dist(self.strstart - 1 - self.prev_match, self.prev_length - MIN_MATCH);
+                let bflush = self.tally_dist(
+                    self.strstart - 1 - self.prev_match,
+                    self.prev_length - MIN_MATCH,
+                );
                 self.lookahead -= self.prev_length - 1;
                 self.prev_length -= 2;
                 loop {
@@ -1040,7 +1132,11 @@ impl State<'_> {
             self.tally_lit(c);
             self.match_available = false;
         }
-        self.insert = if self.strstart < MIN_MATCH - 1 { self.strstart } else { MIN_MATCH - 1 };
+        self.insert = if self.strstart < MIN_MATCH - 1 {
+            self.strstart
+        } else {
+            MIN_MATCH - 1
+        };
         if finish {
             self.flush_block_only(true);
             return Block::FinishDone;
@@ -1063,6 +1159,7 @@ enum Tree {
 }
 
 /// Adler-32 (RFC 1950), continued from `a`.
+#[must_use]
 pub fn adler32(a: u32, data: &[u8]) -> u32 {
     let (mut s1, mut s2) = (a & 0xffff, a >> 16);
     for chunk in data.chunks(5552) {
@@ -1079,8 +1176,14 @@ pub fn adler32(a: u32, data: &[u8]) -> u32 {
 /// `data` compressed by zlib at `level` (1–9), as `compress2` and
 /// pdfTeX's `writezip` make it: the zlib header, the deflate stream, the
 /// Adler-32 of the data.
+///
+/// # Panics
+///
+/// Never: its checked conversions hold zlib's own invariants (positions
+/// within the 64K window, codes of at most 15 bits).
+#[must_use]
 pub fn compress(data: &[u8], level: i32) -> Vec<u8> {
-    let level = level.clamp(1, 9) as usize;
+    let level = level.clamp(1, 9).unsigned_abs() as usize;
     let (good, lazy, nice, chain) = CONFIG[level];
     let mut s = State {
         st: Static::new(),
@@ -1136,12 +1239,15 @@ pub fn compress(data: &[u8], level: i32) -> Vec<u8> {
     } else {
         3
     };
-    let mut header: u32 = (8 + ((15 - 8) << 4)) << 8;
+    let mut header: u16 = (8 + ((15 - 8) << 4)) << 8;
     header |= level_flags << 6;
     header += 31 - header % 31;
-    s.out.push((header >> 8) as u8);
-    s.out.push((header & 0xff) as u8);
-    let _ = if s.level <= 3 { s.deflate_fast(true) } else { s.deflate_slow(true) };
+    s.out.extend_from_slice(&header.to_be_bytes());
+    let _ = if s.level <= 3 {
+        s.deflate_fast(true)
+    } else {
+        s.deflate_slow(true)
+    };
     let a = s.adler;
     s.out.extend(a.to_be_bytes());
     s.out
@@ -1159,10 +1265,15 @@ mod tests {
     #[test]
     fn empty_and_small() {
         // (`python3 -c "import zlib; print(zlib.compress(b'', 9).hex())"`)
-        assert_eq!(compress(b"", 9), [0x78, 0xda, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        assert_eq!(
+            compress(b"", 9),
+            [0x78, 0xda, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]
+        );
         assert_eq!(
             compress(b"hello hello hello", 9),
-            [120, 218, 203, 72, 205, 201, 201, 87, 200, 64, 144, 0, 58, 46, 6, 125]
+            [
+                120, 218, 203, 72, 205, 201, 201, 87, 200, 64, 144, 0, 58, 46, 6, 125
+            ]
         );
     }
 
@@ -1177,7 +1288,9 @@ mod tests {
         let mut at = 0;
         while let Some(k) = find(&pdf[at..], b"stream\n") {
             let start = at + k + 7;
-            let Some(len) = find(&pdf[start..], b"\nendstream") else { break };
+            let Some(len) = find(&pdf[start..], b"\nendstream") else {
+                break;
+            };
             let z = &pdf[start..start + len];
             at = start + len + b"\nendstream".len();
             if z.starts_with(&[0x78, 0xda]) {
