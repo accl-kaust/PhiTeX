@@ -35,7 +35,7 @@ use phitex_flow::print::Limits;
 use phitex_flow::{Build, Font, Options, Order, Output, Reads};
 
 /// The documents.
-const DOCS: [&str; 19] = [
+const DOCS: [&str; 20] = [
     "sections",
     "math",
     "tables",
@@ -55,6 +55,7 @@ const DOCS: [&str; 19] = [
     "hrefcell",
     "floatgoal",
     "enlarge",
+    "tabcr",
 ];
 
 /// The schedules: one thread; eight suspending, in priority order and in
@@ -672,6 +673,16 @@ fn doc_floatgoal() {
 #[test]
 fn doc_enlarge() {
     doc("enlarge");
+}
+
+/// A tabular's `\\` as an entry's first token (an empty last entry): it
+/// is `\protected`, so where the alignment looks for the entry's first
+/// token it is not expanded (etex.web's `get_x_or_protected`, §791) — its
+/// `\iffalse{\fi` is read in the entry, after the u template, and counted
+/// there (hyperref-doc's option table).
+#[test]
+fn doc_tabcr() {
+    doc("tabcr");
 }
 
 /// The document on the saved format run to the cross-run fixpoint
