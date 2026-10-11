@@ -15,7 +15,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{Program, Threads, generate};
+use common::{Program, Threads, generate_with};
 use defuse::{Engine, Greedy, Report, Rng, Speculation};
 
 struct Opts {
@@ -23,6 +23,8 @@ struct Opts {
     threads: usize,
     check: bool,
     scaling: bool,
+    /// Generate without evaluated text that starts with a computed piece.
+    bounded: bool,
     trace: Option<String>,
 }
 
@@ -33,6 +35,7 @@ fn main() {
         threads: std::thread::available_parallelism().map_or(4, std::num::NonZero::get),
         check: true,
         scaling: false,
+        bounded: false,
         trace: None,
     };
     let mut args = std::env::args().skip(1);
@@ -42,6 +45,7 @@ fn main() {
             "--threads" => o.threads = args.next().and_then(|s| s.parse().ok()).expect("--threads N"),
             "--no-check" => o.check = false,
             "--scaling" => o.scaling = true,
+            "--bounded" => o.bounded = true,
             "--trace" => o.trace = Some(args.next().expect("--trace FILE")),
             s => sizes.push(s.parse::<usize>().expect("size")),
         }
@@ -54,7 +58,7 @@ fn main() {
     defuse::obs::set_tracing(o.trace.is_some());
     for n in sizes {
         if o.scaling {
-            scaling(n);
+            scaling(n, o.bounded);
         } else {
             bench(n, &o);
         }
@@ -102,18 +106,30 @@ fn check(prog: &Program, eng: &Engine) -> Duration {
     t.elapsed()
 }
 
-fn scaling(n: usize) {
-    println!("== cold thread scaling, {n} lines");
+fn scaling(n: usize, bounded: bool) {
+    println!(
+        "== cold thread scaling, {n} lines{}",
+        if bounded { " (no unbounded evals)" } else { "" }
+    );
+    let lines = generate_with(42, n, !bounded);
+    let ti = Instant::now();
+    let reference = common::interp::interpret(&lines).expect("interpreter");
+    println!("interpreter {:.3?}", ti.elapsed());
     let mut base = None;
     for t in [1, 2, 4, 8, 16] {
-        let (mut eng, _) = Program::load(generate(42, n));
+        let tl = Instant::now();
+        let (mut eng, prog) = Program::load(lines.clone());
+        let load = tl.elapsed();
         let (d, r) = eval(&mut eng, t, false);
         let b = *base.get_or_insert(d);
+        assert_eq!(reference, prog.result(&eng), "cold result differs from the interpreter");
         println!(
-            "threads {t:>2}  {d:>10.3?}  speedup {:>5.2}  runs {}  steps {}",
+            "threads {t:>2}  load {load:>9.3?}  cold {d:>10.3?}  speedup {:>5.2}  runs {}  steps {}  critical path {}  rss {:.0} MB",
             b.as_secs_f64() / d.as_secs_f64(),
             r.runs,
-            r.steps
+            r.steps,
+            eng.critical_path(),
+            rss_mb()
         );
     }
 }
@@ -131,7 +147,7 @@ const KINDS: [&str; 7] = [
 fn bench(n: usize, o: &Opts) {
     println!("== {n} lines ({} threads)", o.threads);
     let t = Instant::now();
-    let (mut eng, mut prog) = Program::load(generate(42, n));
+    let (mut eng, mut prog) = Program::load(generate_with(42, n, !o.bounded));
     let load = t.elapsed();
     probes("load");
     let (t, r) = eval(&mut eng, o.threads, false);
