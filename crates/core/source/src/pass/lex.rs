@@ -272,20 +272,24 @@ pub(crate) fn catcode_assignment(b: &[u8], j: usize) -> Option<(u8, Option<u32>)
         while e < b.len() && (b[e].is_ascii_alphabetic() || b[e] == b'@') {
             e += 1;
         }
-        let v = match &b[s..e] {
-            b"active" => 13,
-            b"other" => 12,
-            b"letter" => 11,
-            b"z@" => 0,
-            b"@ne" => 1,
-            b"tw@" => 2,
-            b"thr@@" => 3,
-            b"sixt@@n" => 16,
-            _ => return Some((ch, None)),
-        };
-        return Some((ch, Some(v)));
+        return Some((ch, named_value(&b[s..e])));
     }
     Some((ch, None))
+}
+
+/// The value of a constant the kernel names (`\active`, `\z@`, ...).
+pub(crate) fn named_value(name: &[u8]) -> Option<u32> {
+    Some(match name {
+        b"active" => 13,
+        b"other" => 12,
+        b"letter" => 11,
+        b"z@" => 0,
+        b"@ne" => 1,
+        b"tw@" => 2,
+        b"thr@@" => 3,
+        b"sixt@@n" => 16,
+        _ => return None,
+    })
 }
 
 /// Past the `*`, `[…]` and `{…}` that follow `j`, and at least to the
@@ -843,66 +847,13 @@ fn switch(
             st.begin(i, "\\ProvidesExpl…", String::new(), sure);
         }
         "catcode" | "tex_catcode:D" => match catcode_assignment(b, end) {
-            Some((c, Some(v))) if assumed(c, &restored(*cat, c)) == v => {
-                *cat = restored(*cat, c);
-                let d = format!("{}=", c as char);
-                if let Some(k) = (floor..st.open.len()).rev().find(|&k| {
-                    let h = &st.hazards[st.open[k]];
-                    matches!(
-                        h.cause,
-                        "\\catcode to a shaping class" | "\\catcode literal"
-                    ) && h.detail.starts_with(&d)
-                }) {
-                    let h = st.open.remove(k);
-                    st.hazards[h].end = i;
-                    st.retz();
-                }
-            }
-            Some((c, Some(v @ 0..=2))) if !structural(c) && c < 128 => {
-                *cat = cat.with_shaping(c, v);
-                st.begin(i, "\\catcode literal", format!("{}={v}", c as char), sure);
-            }
-            Some((c, Some(_))) if cat.is_shaping(c) => {
-                // (no longer an escape or a group's: then as from its usual
-                // catcode)
-                *cat = cat.with_shaping(c, 16);
-                switch(st, cat, pre_expl, name, i, end, floor, sure, scope);
-            }
-            Some((c @ (b'{' | b'}'), Some(11))) => {
-                *cat = cat.with_other(c, true).with_letter(c);
-                st.begin(i, "\\catcode literal", format!("{}=11", c as char), sure);
-            }
-            Some((c, Some(11))) if !structural(c) => {
-                *cat = cat.with_letter(c);
-                st.begin(i, "\\catcode literal", format!("{}=11", c as char), sure);
-            }
-            Some((c, Some(12))) if matches!(c, b'\\' | b'{' | b'}' | b'%' | b'#') => {
-                *cat = cat.with_other(c, true);
-                st.begin(i, "\\catcode literal", format!("{}=12", c as char), sure);
-            }
-            Some((c, Some(12))) if !structural(c) => {
-                *cat = cat.without_letter(c);
-                st.begin(i, "\\catcode literal", format!("{}=12", c as char), sure);
-            }
-            Some((c, Some(v))) if !structural(c) && matches!(v, 3 | 4 | 7 | 8) => {}
-            Some((b'~', Some(13))) => {}
-            // (a byte past ASCII: UTF-8 text, which the kernel makes active
-            // anyway; the tokens here do not depend on it)
-            Some((c, _)) if c >= 128 => {}
-            Some((c, Some(_))) if !structural(c) && c < 128 => {
-                *cat = cat.without_letter(c);
-                st.special |= 1 << c;
-            }
-            Some((c, Some(v))) => pending(
-                st,
-                "\\catcode to a shaping class",
-                &format!("{}={v}", c as char),
+            Some((c, v)) => assign(st, cat, c, v, i, floor, sure),
+            None => st.begin(
+                i,
+                "\\catcode with computed operands",
+                String::new(),
+                Status::Pending,
             ),
-            Some((c, None)) if c < 128 && !structural(c) => {
-                *cat = cat.without_letter(c);
-                st.special |= 1 << c;
-            }
-            _ => pending(st, "\\catcode with computed operands", ""),
         },
         "@makeother" | "char_set_catcode_other:N" | "char_set_catcode_letter:N" => {
             let j = skip_sp(b, end);
@@ -972,6 +923,23 @@ fn switch(
                     s.prelude.changes_catcodes(name, None)
                 };
                 let (k, chars) = k;
+                let of_args = if s.document.defines(name) {
+                    s.document.arg_catcodes(name, Some((s.file, i)))
+                } else {
+                    s.prelude.arg_catcodes(name, None)
+                };
+                if matches!(k, 0 | 3) && !of_args.is_empty() {
+                    // (the catcodes of the characters its arguments name,
+                    // §442: read here, as it reads them)
+                    let n = of_args.iter().map(|&(p, _)| p).max().unwrap_or(0);
+                    let named = call_chars(b, end, n, cat);
+                    for &(p, v) in of_args {
+                        match named.get(usize::from(p) - 1).copied().flatten() {
+                            Some(c) => assign(st, cat, c, Some(v), i, floor, sure),
+                            None => pending(st, "macro changing catcodes of its arguments", name),
+                        }
+                    }
+                }
                 if k == 3 {
                     st.special |= chars;
                 } else if k == 2 {
@@ -989,5 +957,137 @@ fn switch(
                 }
             }
         }
+    }
+}
+
+/// The characters the `n` undelimited arguments from `j` name, each a
+/// control symbol, a one-letter control word, a character, or one of these
+/// braced (`None`: another argument).
+fn call_chars(b: &[u8], mut j: usize, n: u8, cat: &Catcodes) -> Vec<Option<u8>> {
+    let letter = |c: u8| c.is_ascii_alphabetic() || cat.is_letter(c);
+    let mut out = Vec::new();
+    for _ in 0..n {
+        // (spaces, an end of line and comments before an argument are
+        // skipped, §441, §347)
+        loop {
+            j = skip_sp(b, j);
+            match b.get(j) {
+                Some(b'%') => {
+                    j = b[j..]
+                        .iter()
+                        .position(|&c| c == b'\n')
+                        .map_or(b.len(), |k| j + k + 1);
+                }
+                Some(b'\n') if b.get(skip_sp(b, j + 1)) != Some(&b'\n') => j += 1,
+                _ => break,
+            }
+        }
+        let one = |j: usize| -> (Option<u8>, usize) {
+            match b.get(j) {
+                Some(b'\\') => match char_code(b, j) {
+                    Some((c, k)) if b[j + 1] == b'^' || !letter(c) => (Some(c), k),
+                    Some((c, k)) => {
+                        let e = (k..b.len()).find(|&e| !letter(b[e])).unwrap_or(b.len());
+                        (if e == k { Some(c) } else { None }, e)
+                    }
+                    None => (None, b.len()),
+                },
+                Some(&c) if c != b'{' && c != b'}' => (Some(c), j + 1),
+                _ => (None, j + 1),
+            }
+        };
+        if b.get(j) == Some(&b'{') {
+            let (c, k) = one(skip_sp(b, j + 1));
+            let k = skip_sp(b, k);
+            if b.get(k) == Some(&b'}') {
+                out.push(c);
+                j = k + 1;
+            } else {
+                out.push(None);
+                break;
+            }
+        } else {
+            let (c, k) = one(j);
+            out.push(c);
+            j = k;
+        }
+    }
+    out
+}
+
+/// `\catcode` of the character `c` set to `v` (`None`: a value not
+/// literal), §1232: the regime from `i` on.
+fn assign(
+    st: &mut State<'_>,
+    cat: &mut Catcodes,
+    c: u8,
+    v: Option<u32>,
+    i: usize,
+    floor: usize,
+    sure: Status,
+) {
+    match (c, v) {
+        (c, Some(v)) if assumed(c, &restored(*cat, c)) == v => {
+            *cat = restored(*cat, c);
+            let d = format!("{}=", c as char);
+            if let Some(k) = (floor..st.open.len()).rev().find(|&k| {
+                let h = &st.hazards[st.open[k]];
+                matches!(
+                    h.cause,
+                    "\\catcode to a shaping class" | "\\catcode literal"
+                ) && h.detail.starts_with(&d)
+            }) {
+                let h = st.open.remove(k);
+                st.hazards[h].end = i;
+                st.retz();
+            }
+        }
+        (c, Some(v @ 0..=2)) if !structural(c) && c < 128 => {
+            *cat = cat.with_shaping(c, v);
+            st.begin(i, "\\catcode literal", format!("{}={v}", c as char), sure);
+        }
+        (c, Some(_)) if cat.is_shaping(c) => {
+            // (no longer an escape or a group's: then as from its usual
+            // catcode)
+            *cat = cat.with_shaping(c, 16);
+            assign(st, cat, c, v, i, floor, sure);
+        }
+        (c @ (b'{' | b'}'), Some(11)) => {
+            *cat = cat.with_other(c, true).with_letter(c);
+            st.begin(i, "\\catcode literal", format!("{}=11", c as char), sure);
+        }
+        (c, Some(11)) if !structural(c) => {
+            *cat = cat.with_letter(c);
+            st.begin(i, "\\catcode literal", format!("{}=11", c as char), sure);
+        }
+        (c, Some(12)) if matches!(c, b'\\' | b'{' | b'}' | b'%' | b'#') => {
+            *cat = cat.with_other(c, true);
+            st.begin(i, "\\catcode literal", format!("{}=12", c as char), sure);
+        }
+        (c, Some(12)) if !structural(c) => {
+            *cat = cat.without_letter(c);
+            st.begin(i, "\\catcode literal", format!("{}=12", c as char), sure);
+        }
+        (c, Some(v)) if !structural(c) && matches!(v, 3 | 4 | 7 | 8) => {}
+        (b'~', Some(13)) => {}
+        // (a byte past ASCII: UTF-8 text, which the kernel makes active
+        // anyway; the tokens here do not depend on it)
+        (c, _) if c >= 128 => {}
+        (c, _) if !structural(c) => {
+            *cat = cat.without_letter(c);
+            st.special |= 1 << c;
+        }
+        (c, Some(v)) => st.begin(
+            i,
+            "\\catcode to a shaping class",
+            format!("{}={v}", c as char),
+            Status::Pending,
+        ),
+        (_, None) => st.begin(
+            i,
+            "\\catcode with computed operands",
+            String::new(),
+            Status::Pending,
+        ),
     }
 }
