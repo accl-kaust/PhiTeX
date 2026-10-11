@@ -262,6 +262,12 @@ fn chain_counts_pending_inside_reach() {
 #[test]
 #[ignore = "reads the corpus named by PHITEX_CORPUS"]
 fn corpus_report() {
+    const CLASSES: [&str; 4] = [
+        "kernel",
+        "packages/classes",
+        "document preambles",
+        "document bodies",
+    ];
     use std::fmt::Write as _;
     fn files(p: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         if p.is_dir() {
@@ -330,6 +336,10 @@ fn corpus_report() {
         );
     };
     let mut nfiles = 0;
+    // (by class: the kernel, packages and classes, document preambles,
+    // document bodies)
+    let mut by_class: [Stats; 4] = Default::default();
+    let mut class_files = [0usize; 4];
     for line in corpus.lines().filter(|l| !l.trim().is_empty()) {
         let mut parts = line.split('\t');
         let label = parts.next().unwrap();
@@ -371,6 +381,22 @@ fn corpus_report() {
                 },
             );
             s.add(&Stats::of(&p, t));
+            let kind = FileKind::from_path(n);
+            if n.ends_with("latex.ltx") || n.ends_with("plain.tex") {
+                by_class[0].add(&Stats::of(&p, t));
+                class_files[0] += 1;
+            } else if kind == FileKind::Package {
+                by_class[1].add(&Stats::of(&p, t));
+                class_files[1] += 1;
+            } else if let Some(d) = t.find("\\begin{document}") {
+                by_class[2].add(&Stats::of_range(&p, t, 0..d));
+                by_class[3].add(&Stats::of_range(&p, t, d..t.len()));
+                class_files[2] += 1;
+                class_files[3] += 1;
+            } else {
+                by_class[3].add(&Stats::of(&p, t));
+                class_files[3] += 1;
+            }
             if std::env::var("PHITEX_HAZARDS").is_ok() {
                 for h in p
                     .hazards
@@ -412,6 +438,15 @@ fn corpus_report() {
         total.add(&s);
     }
     row(&mut out, "**total**", nfiles, &total);
+    let _ = writeln!(out, "\nBy file class:\n");
+    let _ = writeln!(
+        out,
+        "| class | files | tokens | cs | brace pairs | extents K/P/Pd % | groups K/P/Pd % | pending | chain | chain % cs | chain (par) | catcode-pending bytes % |"
+    );
+    let _ = writeln!(out, "|---|---|---|---|---|---|---|---|---|---|---|---|");
+    for (k, c) in CLASSES.iter().enumerate() {
+        row(&mut out, c, class_files[k], &by_class[k]);
+    }
     let top = |m: &std::collections::BTreeMap<String, usize>, n: usize| {
         let mut v: Vec<_> = m.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
@@ -425,6 +460,12 @@ fn corpus_report() {
         "\nTop causes of Pending (of {}):\n\n| cause | count |\n|---|---|\n{}",
         total.pending_items,
         top(&total.causes, 20)
+    );
+    let _ = writeln!(
+        out,
+        "Top causes of Pending in document bodies (of {}):\n\n| cause | count |\n|---|---|\n{}",
+        by_class[3].pending_items,
+        top(&by_class[3].causes, 5)
     );
     let _ = writeln!(
         out,
