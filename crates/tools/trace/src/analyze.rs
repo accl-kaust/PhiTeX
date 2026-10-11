@@ -235,6 +235,52 @@ impl Graph {
         count
     }
 
+    /// The edit-impact sample: up to `samples` lines of the main file
+    /// that write something, shuffled with a fixed seed (1), each with
+    /// its steps, its writing steps and the steps transitively dependent
+    /// on those writes (the line's own steps excluded).
+    #[must_use]
+    pub fn edit_samples(&self, samples: usize) -> Vec<EditSample> {
+        let mut on_line: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut by_line: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (i, node) in self.nodes.iter().enumerate() {
+            if node.in_main
+                && let Some(l) = node.line
+            {
+                on_line.entry(l).or_default().push(idx(i));
+                if node.writes.1 > node.writes.0 {
+                    by_line.entry(l).or_default().push(idx(i));
+                }
+            }
+        }
+        let mut lines: Vec<u32> = by_line.keys().copied().collect();
+        lines.sort_unstable();
+        let mut rng = fastrand::Rng::with_seed(1);
+        rng.shuffle(&mut lines);
+        lines.truncate(samples);
+        let mut visited = vec![0u64; self.nodes.len().div_ceil(64)];
+        lines
+            .into_iter()
+            .map(|l| {
+                let impact = self.dependents(&by_line[&l], &on_line[&l], &mut visited);
+                EditSample {
+                    line: l,
+                    steps: on_line.remove(&l).unwrap_or_default(),
+                    writers: by_line.remove(&l).unwrap_or_default(),
+                    impact,
+                }
+            })
+            .collect()
+    }
+
+    /// The steps transitively dependent on `step`'s writes, the steps in
+    /// `exclude` not counted.
+    #[must_use]
+    pub fn dependents_of(&self, step: u32, exclude: &[u32]) -> u64 {
+        let mut visited = vec![0u64; self.nodes.len().div_ceil(64)];
+        self.dependents(&[step], exclude, &mut visited)
+    }
+
     /// The step of `\begin{document}`, if any.
     fn begin_document(&self) -> Option<usize> {
         let begin = self.names.iter().position(|n| n == "\\begin")?;
@@ -284,6 +330,18 @@ impl Graph {
     fn is_par(&self, i: usize) -> bool {
         self.nodes[i].kind == Kind::Primitive && self.names[self.nodes[i].name as usize] == "\\par"
     }
+}
+
+/// One sampled line of the edit-impact analysis.
+#[derive(Clone, Debug)]
+pub struct EditSample {
+    pub line: u32,
+    /// The line's steps.
+    pub steps: Vec<u32>,
+    /// Those of them that write.
+    pub writers: Vec<u32>,
+    /// Steps reached from the writers' writes, the line's own excluded.
+    pub impact: u64,
 }
 
 /// Quantiles of a distribution.
@@ -476,36 +534,9 @@ impl Graph {
         let mut chain: Vec<f64> = self.longest.iter().map(|&l| f64::from(l)).collect();
         report.chain_length = quantiles(&mut chain);
 
-        // Edit impact: the steps of each line of the main file, and those
-        // of them that write.
-        let mut on_line: HashMap<u32, Vec<u32>> = HashMap::new();
-        let mut by_line: HashMap<u32, Vec<u32>> = HashMap::new();
-        for (i, node) in self.nodes.iter().enumerate() {
-            if node.in_main
-                && let Some(l) = node.line
-            {
-                on_line.entry(l).or_default().push(idx(i));
-                if node.writes.1 > node.writes.0 {
-                    by_line.entry(l).or_default().push(idx(i));
-                }
-            }
-        }
-        let mut lines: Vec<u32> = by_line.keys().copied().collect();
-        lines.sort_unstable();
-        let mut rng = fastrand::Rng::with_seed(1);
-        rng.shuffle(&mut lines);
-        lines.truncate(samples);
-        let mut visited = vec![0u64; n.div_ceil(64)];
-        let mut impact: Vec<f64> = lines
-            .iter()
-            .map(|l| {
-                pct(
-                    self.dependents(&by_line[l], &on_line[l], &mut visited),
-                    steps,
-                )
-            })
-            .collect();
-        report.edit_lines_sampled = lines.len() as u64;
+        let samples = self.edit_samples(samples);
+        let mut impact: Vec<f64> = samples.iter().map(|e| pct(e.impact, steps)).collect();
+        report.edit_lines_sampled = samples.len() as u64;
         report.edit_impact_pct = quantiles(&mut impact);
 
         // Memo potential.

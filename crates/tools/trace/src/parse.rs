@@ -154,6 +154,8 @@ impl<W: FnMut(Step) -> io::Result<()>> Parser<W> {
             writes: Vec::new(),
             consumes,
             macro_call: None,
+            ch: None,
+            reshown: false,
         });
         Ok(())
     }
@@ -314,6 +316,14 @@ impl<W: FnMut(Step) -> io::Result<()>> Parser<W> {
                 r#macro: name.to_owned(),
                 args_text_hash: 0,
                 args: 0,
+                // (printed with another escape character, or none, the
+                // body's control sequences can't be told from its text)
+                body: if self.escape == Some('\\') {
+                    raw[p + 2..].to_owned()
+                } else {
+                    String::new()
+                },
+                body_hidden: self.escape != Some('\\'),
             });
             self.macro_arity = u32::try_from(arity).unwrap_or(u32::MAX);
             return Ok(());
@@ -342,7 +352,9 @@ impl<W: FnMut(Step) -> io::Result<()>> Parser<W> {
             && raw.starts_with('[')
         {
             self.parens(&raw[p + 1..]);
-        } else if raw.starts_with(['(', ')']) {
+        } else if raw.starts_with(['(', ')']) || raw.contains("(/") || raw.contains("(./") {
+            // (a file opened after a message on the same line: plain.tex's
+            // `hyphenation (/.../hyphen.tex))`)
             self.parens(raw);
         }
         Ok(())
@@ -387,11 +399,32 @@ impl<W: FnMut(Step) -> io::Result<()>> Parser<W> {
             return Ok(());
         }
         let mut inner = inner;
+        let mut mode_change = false;
         if let Some(p) = inner.find(": ")
             && MODES.contains(&&inner[..p])
         {
             inner = &inner[p + 2..];
+            mode_change = true;
         }
+        let before = self.next_id;
+        let prev_name = self
+            .pending
+            .as_ref()
+            .map(|s| (s.kind, s.name.clone(), s.ch));
+        self.command(inner)?;
+        // A command shown again after a mode change (TeX backs it up and
+        // reads it again in the new mode, §1090) is the same token.
+        if mode_change
+            && self.next_id == before + 1
+            && let Some(step) = self.pending.as_mut()
+            && prev_name == Some((step.kind, step.name.clone(), step.ch))
+        {
+            step.reshown = true;
+        }
+        Ok(())
+    }
+
+    fn command(&mut self, inner: &str) -> io::Result<()> {
         if let Some(t) = inner.strip_prefix("globally changing ") {
             self.write(t, true, false);
         } else if let Some(t) = inner.strip_prefix("changing ") {
@@ -454,6 +487,11 @@ impl<W: FnMut(Step) -> io::Result<()>> Parser<W> {
             }
         } else if let Some(class) = char_class(inner) {
             self.begin(Kind::Char, class, prims::char_reads(class), None)?;
+            if let Some(step) = self.pending.as_mut() {
+                step.ch = inner[class.len()..]
+                    .strip_prefix(' ')
+                    .and_then(|r| r.chars().next());
+            }
         } else if inner == "undefined" {
             self.begin(Kind::Primitive, "undefined", &[], None)?;
         } else {
@@ -684,6 +722,23 @@ mod tests {
         assert!(s[3].reads.contains(&"seq:prev".to_owned()));
         let plain = parse_str(log, Options::default());
         assert!(!plain[2].reads.iter().any(|r| r == "catcode:*"));
+    }
+
+    #[test]
+    fn characters_bodies_reshows_and_inline_files() {
+        let log = "hyphenation (/x/hyphen.tex))\n(./a.tex\n{vertical mode: the letter A}\n{horizontal mode: the letter A}\n\\foo #1->\\def \\y {#1}\n#1<-z\n{\\escapechar}\n{changing \\escapechar=92}\n{into escapechar=-1}\nfoo #1->def y {#1}\n#1<-z\n";
+        let s = parse_str(log, Options::default());
+        assert_eq!(s[0].ch, Some('A'));
+        assert_eq!(s[0].file.as_deref(), Some("./a.tex"));
+        assert!(!s[0].reshown);
+        assert!(s[1].reshown);
+        let call = s[2].macro_call.as_ref().expect("a call");
+        assert_eq!(call.body, "\\def \\y {#1}");
+        assert!(!call.body_hidden);
+        let hidden = s[4].macro_call.as_ref().expect("a call");
+        assert_eq!(s[4].name, "\\foo");
+        assert!(hidden.body_hidden);
+        assert_eq!(hidden.body, "");
     }
 
     #[test]

@@ -54,6 +54,15 @@ pub struct MacroCall {
     pub args_text_hash: u64,
     /// How many arguments the call took.
     pub args: u32,
+    /// The replacement text as the log prints it (`\\foo #1->body`: the
+    /// body), for the syntactic pass's harvest of what it defines.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body: String,
+    /// The body printed without `\\` as the escape character
+    /// (`\\escapechar=-1`): its control sequences can't be told from its
+    /// text, and `body` is left empty.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub body_hidden: bool,
 }
 
 /// One step.
@@ -76,6 +85,13 @@ pub struct Step {
     pub writes: Vec<Write>,
     pub consumes: Option<Consumes>,
     pub macro_call: Option<MacroCall>,
+    /// A character step's character (`{the letter A}`: `A`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ch: Option<char>,
+    /// The same token as the step before, shown again after a mode
+    /// change (a character or command that starts a paragraph).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reshown: bool,
 }
 
 /// The first line of a trace file: how it was recorded.
@@ -85,6 +101,12 @@ pub struct Meta {
     pub main: String,
     pub engine: String,
     pub conservative: bool,
+    /// The engine's banner, the log's first line (`This is pdfTeX, ...`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// The command line the recorder ran, with the tracing settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 /// A line of the trace file.

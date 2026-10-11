@@ -97,7 +97,7 @@ pub fn record(
             format!("\\pdfoutput=1 \\input plain\n{SETTINGS}\n\\input {main_s} \n\\end\n")
         }
     };
-    fs::write(&wrapper, text)?;
+    fs::write(&wrapper, &text)?;
     let mut cmd = Command::new(engine.name());
     if engine == Engine::Pdftex {
         cmd.args(["-ini", "-etex"]);
@@ -115,13 +115,24 @@ pub fn record(
     .env("TEXINPUTS", format!("{}:", dir.display()))
     .stdout(std::process::Stdio::null())
     .stderr(std::process::Stdio::null());
+    let command = format!(
+        "{} {} (wrapper: {})",
+        engine.name(),
+        if engine == Engine::Pdftex {
+            "-ini -etex -interaction=batchmode -jobname"
+        } else {
+            "-interaction=batchmode -jobname"
+        },
+        text.replace('\n', " ").trim()
+    );
     let status = cmd.status()?;
     let log = scratch.join(format!("{stem}.log"));
     let main_name = format!(
         "./{}",
         main.file_name().and_then(|s| s.to_str()).unwrap_or(&stem)
     );
-    let (steps, unrecognised) = parse_log_file(&log, &main_name, engine.name(), out, opts)?;
+    let (steps, unrecognised) =
+        parse_log_file(&log, &main_name, engine.name(), Some(command), out, opts)?;
     Ok(Recorded {
         log,
         steps,
@@ -136,9 +147,16 @@ pub fn parse_log_file(
     log: &Path,
     main: &str,
     engine: &str,
+    command: Option<String>,
     out: &Path,
     opts: Options,
 ) -> io::Result<(u64, u64)> {
+    let mut reader = BufReader::with_capacity(1 << 20, fs::File::open(log)?);
+    // The banner: `This is pdfTeX, Version 3.141592653-2.6-1.40.29 ...`.
+    let mut first = Vec::new();
+    io::BufRead::read_until(&mut reader, b'\n', &mut first)?;
+    let first = String::from_utf8_lossy(&first).trim_end().to_owned();
+    let version = first.starts_with("This is ").then_some(first);
     let reader = BufReader::with_capacity(1 << 20, fs::File::open(log)?);
     let mut writer = BufWriter::with_capacity(1 << 20, fs::File::create(out)?);
     let meta = Record::Meta {
@@ -146,6 +164,8 @@ pub fn parse_log_file(
             main: main.to_owned(),
             engine: engine.to_owned(),
             conservative: opts.conservative,
+            version,
+            command,
         },
     };
     serde_json::to_writer(&mut writer, &meta)?;
