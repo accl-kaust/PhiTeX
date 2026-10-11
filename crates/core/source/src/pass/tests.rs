@@ -548,9 +548,7 @@ fn corpus_report() {
         let _ = writeln!(out, "`\\@outputpage` alone:\n\n{}", set(&op));
     }
     if let Ok(lo) = std::env::var("PHITEX_LTOUTPUT") {
-        // (latex.ltx's own `\\output` is lost to a catcode hazard the
-        // lexer mispredicts before it; ltoutput.dtx has it, and calls
-        // into the prelude)
+        // (ltoutput.dtx's `\\output` alone, its callees in the prelude)
         let mut d = Definitions::new();
         d.harvest(&read(std::path::Path::new(&lo)), FileKind::Package, 0);
         if let Some(o) = d.output_defines(&prelude) {
