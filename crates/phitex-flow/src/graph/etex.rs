@@ -22,6 +22,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use super::material::{BoxContext, BoxKind};
+use super::expand::expands;
 use super::math::MathKind;
 use super::scan::{IVal, Lv, MAX_DIMEN, mult_and_add, nx_plus_y};
 use super::{EOL_UNREAD, Exec, GroupKind, Mode, PendingText, TState, TextKind};
@@ -386,6 +387,28 @@ impl Exec<'_> {
 
     /// The next token that is not a space, expanded (etex.web §1530:
     /// "get the next non-blank non-call token").
+    /// The next token neither blank nor expandable, a `\protected` macro
+    /// not expanded (etex.web's `get_x_or_protected`, where an alignment
+    /// looks for an entry's first token, §785 and §791: LaTeX's `\\` in a
+    /// tabular is `\protected`, and read there it would be expanded before
+    /// the u template, its `\iffalse{\fi` counted outside the entry).
+    pub(super) fn nonblank_x_or_protected(&mut self) -> Option<(Tok, Meaning)> {
+        loop {
+            let t = self.next_raw()?;
+            let m = self.tok_meaning(&t);
+            if self.noexp && expands(&m) {
+                return Some((t, Meaning::Prim(Prim::Relax)));
+            }
+            if t.key().is_some() && expands(&m) && !matches!(&m, Meaning::Macro(mac) if mac.protected) {
+                self.expand(&t, &m);
+                continue;
+            }
+            if !matches!(m, Meaning::Char(10, _)) {
+                return Some((t, m));
+            }
+        }
+    }
+
     pub(super) fn nonblank_x(&mut self) -> Option<(Tok, Meaning)> {
         loop {
             let x = self.next_x_m(false)?;
