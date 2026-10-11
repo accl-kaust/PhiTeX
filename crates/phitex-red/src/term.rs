@@ -145,3 +145,17 @@ pub struct Node {
     /// The thunk after it.
     pub next: Thunk,
 }
+
+/// What is kept at a paragraph boundary when interior nodes are dropped
+/// (`retain.rs`): enough to re-reduce from here and to decide reuse.
+#[derive(Clone, Debug)]
+pub struct Checkpoint {
+    /// The thunk at the boundary (its input position and env).
+    pub thunk: Thunk,
+    /// `thunk.env.hash()`, cached.
+    pub env_hash: u128,
+    /// The page fold's state when the main list reached here.
+    pub fold: Arc<crate::page::Fold>,
+    /// Index of the first node after the boundary in the chain.
+    pub node: NodeId,
+}

@@ -85,3 +85,12 @@ impl Env {
         crate::graph::env_after_group(self)
     }
 }
+
+impl Env {
+    /// A hash of everything this env answers (definitions, scope chains),
+    /// maintained incrementally: equal hashes mean equal envs (128 bits; a
+    /// collision is treated as impossible). O(1).
+    pub fn hash(&self) -> u128 {
+        crate::graph::env_hash(self)
+    }
+}

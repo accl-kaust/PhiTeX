@@ -9,6 +9,7 @@ pub mod term;
 pub mod env;
 pub mod ctx;
 pub mod prim;
+pub mod pool;
 // core
 pub mod graph;
 pub mod memo;

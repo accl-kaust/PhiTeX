@@ -118,3 +118,25 @@ Shared files (`lib.rs` `tok.rs` `val.rs` `item.rs` `term.rs` `env.rs` `ctx.rs`
 `prim.rs`) are the contract: do not change them. Need something more from them
 or from another agent's module? Write the call against the name you need and
 list it under `NEEDS` in your report.
+
+## Wave 1b contract (added after wave 1)
+
+* `graph.rs` is one module in three files (`include!`): `graph/envrep.rs`
+  (environment), `graph/chain.rs` (main chain, node store, answers),
+  `graph/reduce.rs` (reducing one thunk, `Ctx`). Each has one owner.
+* `Env::hash() -> u128`: incremental; equal hash = equal env. Edits stop at the
+  first new thunk whose (input position, env hash, page fold state) equals an
+  old one, and keep the old chain from there wholesale.
+* **Groups (replaces the save-stack-shaped frame):** a group is the env
+  snapshot taken at its opening plus the global definitions made inside it. At
+  its end the env is `snapshot + globals-in-group` (+ `\aftergroup` tokens
+  pushed). No restoring of shadowed values entry by entry.
+* **Fires:** after each main vertical list item, the page fold steps. A fire is
+  a node (`Op::Fire`) inserted between two main-list nodes: `\output` is reduced
+  as a thunk in the env at that point (Output group); the routine's global
+  definitions are the fire node's delta, applied before the next main node;
+  then `Fire.back` items are contributed again. Main reduction speculates "no
+  fire"; a node that read a page quantity is re-validated after a fire.
+* `pool::Pool`: pure applications are spawned on it; callers join.
+* `term::Checkpoint`: (thunk, env hash, fold, node) kept at paragraph
+  boundaries; interior nodes may be dropped and re-reduced from a checkpoint.
