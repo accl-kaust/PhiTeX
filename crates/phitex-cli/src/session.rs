@@ -177,6 +177,9 @@ pub struct Session {
     pub sync: crate::synctex::Writer,
     /// What the session does now, for a spinner.
     status: Arc<Status>,
+    /// TeX's main memory for the runs (`Options::main_memory`): texmf.cnf's
+    /// and the environment's (`tex::run_memory`) when a format is loaded.
+    main_memory: u64,
 }
 
 /// What a run reads as file `name`: the version given, else the disk's
@@ -241,6 +244,7 @@ impl Session {
         build.set_interaction(job.interaction);
         build.set_pdf_date(job.pdf_date);
         let mut format = None;
+        let main_memory = if job.ini { phitex_flow::build::MAIN_MEMORY } else { tree.main_memory };
         if !job.ini {
             let (bytes, path) = crate::format::ensure(&job.engine, &tree, job.threads, &status, note)?;
             build
@@ -261,6 +265,7 @@ impl Session {
             builds: 0,
             sync: crate::synctex::Writer::default(),
             status,
+            main_memory,
         })
     }
 
@@ -304,7 +309,13 @@ impl Session {
     pub fn build(&mut self) -> Report {
         let edit = self.builds > 0;
         self.builds += 1;
-        let opts = Options { threads: self.job.threads.max(1), reads: reads(edit), etex: self.etex(), ..Options::default() };
+        let opts = Options {
+            threads: self.job.threads.max(1),
+            reads: reads(edit),
+            etex: self.etex(),
+            main_memory: self.main_memory,
+            ..Options::default()
+        };
         let bound = if self.job.fixpoint { FIXPOINT_RUNS } else { 1 };
         self.fixpoint(opts, bound, if edit { "edit" } else { "cold" })
     }

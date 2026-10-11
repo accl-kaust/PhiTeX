@@ -444,6 +444,55 @@ fn watch_word_edit() {
     }
 }
 
+/// Two copies of the binary (other paths, other times) share the format
+/// cache: a format is cached under the build's identity (a hash of its
+/// sources, `tex::build_id`), not the executable's path, size or time.
+#[test]
+fn format_cache_shared_by_copies() {
+    let _one = one();
+    let base = scratch("copies");
+    let cache = base.join("cache");
+    let doc = base.join("doc");
+    std::fs::create_dir_all(&doc).expect("a directory");
+    std::fs::write(doc.join("x.tex"), "Hi.\n\\bye\n").expect("the document");
+    let fmts = || -> Vec<(PathBuf, std::time::SystemTime)> {
+        let mut v: Vec<_> = std::fs::read_dir(cache.join("formats"))
+            .map(|rd| {
+                rd.filter_map(Result::ok)
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "fmt"))
+                    .map(|p| {
+                        let t = std::fs::metadata(&p).and_then(|m| m.modified()).expect("a time");
+                        (p, t)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    };
+    let mut after = Vec::new();
+    for copy in ["a", "b"] {
+        let d = base.join(copy);
+        std::fs::create_dir_all(&d).expect("a directory");
+        let exe = d.join("tex");
+        std::fs::copy(env!("CARGO_BIN_EXE_phitex"), &exe).expect("a copy of the binary");
+        let out = command(&exe, &doc)
+            .env("PHITEX_CACHE_DIR", &cache)
+            .args(["-interaction=batchmode", "x.tex"])
+            .output()
+            .expect("phitex runs");
+        let errs = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "copy {copy}: phitex failed: {errs}");
+        if copy == "b" {
+            assert!(!errs.contains("making the"), "copy b made the format again: {errs}");
+        }
+        after.push(fmts());
+    }
+    assert_eq!(after[0].len(), 1, "one format: {:?}", after[0]);
+    assert_eq!(after[0], after[1], "the second copy wrote a format of its own");
+}
+
 /// A WebSocket text frame from a client (masked, RFC 6455).
 fn ws_frame(text: &str) -> Vec<u8> {
     let p = text.as_bytes();

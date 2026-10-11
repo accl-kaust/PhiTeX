@@ -133,6 +133,42 @@ pub fn kpse(progname: &str, engine: &str) -> Kpse {
     Kpse::new(&dir, progname, engine)
 }
 
+/// texmfmp.c's `setupboundvariable`: `name`'s value by kpathsea (the
+/// environment first, `name.progname` before `name`, then texmf.cnf) as C's
+/// `atoi` reads it; a negative value, or 0 where the default is not,
+/// keeps the default (web2c's "Bad value" warning).
+fn bound_var(k: &mut Kpse, name: &str, dflt: i64) -> i64 {
+    let Some(v) = k.var_value(name) else { return dflt };
+    let s = v.trim_ascii_start();
+    let (neg, digits) = match s.first() {
+        Some(b'-') => (true, &s[1..]),
+        Some(b'+') => (false, &s[1..]),
+        _ => (false, s),
+    };
+    let n = digits
+        .iter()
+        .take_while(|c| c.is_ascii_digit())
+        .fold(0i64, |n, c| n.saturating_mul(10).saturating_add(i64::from(c - b'0')));
+    let n = if neg { -n } else { n };
+    if n < 0 || (n == 0 && dflt > 0) { dflt } else { n }
+}
+
+/// The main memory of a run that loads a format, in words (tex.ch): the
+/// format's `mem_top` (its `main_memory`, as the format was made: ours are
+/// made with [`phitex_flow::build::MAIN_MEMORY`], TeX Live's texmf.cnf
+/// value; a `main_memory` given to the run is ignored, as pdflatex ignores
+/// it), and the run's own `extra_mem_top` above and `extra_mem_bot` below
+/// (`mem_max = mem_top + extra_mem_top`, `mem_min = mem_bot -
+/// extra_mem_bot`), each at most `sup_main_memory`. An `-ini` run has
+/// `main_memory` only (the `Options` default).
+pub fn run_memory(k: &mut Kpse) -> u64 {
+    const SUP_MAIN_MEMORY: i64 = 256_000_000;
+    let main = i64::try_from(phitex_flow::build::MAIN_MEMORY).unwrap_or(SUP_MAIN_MEMORY);
+    let top = bound_var(k, "extra_mem_top", 0).min(SUP_MAIN_MEMORY);
+    let bot = bound_var(k, "extra_mem_bot", 0).min(SUP_MAIN_MEMORY);
+    u64::try_from(main + top + bot).unwrap_or(0)
+}
+
 /// FNV-1a, 64 bits: the stamps' and the cache's keys (stable across
 /// runs and builds).
 #[derive(Clone, Copy)]
@@ -176,21 +212,12 @@ pub fn cache_dir() -> PathBuf {
     std::env::temp_dir().join("phitex-cache")
 }
 
-/// This executable's identity (its path, size and time): a format made by
-/// another build of phitex is never read back.
-pub fn exe_stamp() -> u64 {
-    let Ok(exe) = std::env::current_exe() else { return 0 };
-    let meta = std::fs::metadata(&exe).ok();
-    let time = meta
-        .as_ref()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos());
-    Fnv::new()
-        .add(exe.as_os_str().as_bytes())
-        .add(&meta.map_or(0, |m| m.len()).to_le_bytes())
-        .add(&time.to_le_bytes())
-        .0
+/// This build's identity: a hash of the sources it was built from
+/// (`build.rs`'s `build_id`), the same for the same sources in any
+/// checkout and for any copy of the binary: a format made by another
+/// build of phitex is never read back, one made by a copy of this one is.
+pub fn build_id() -> u64 {
+    u64::from_str_radix(env!("PHITEX_BUILD_ID"), 16).unwrap_or(0)
 }
 
 /// TeX Live for one program name: the finder a build is given, and the
@@ -203,6 +230,8 @@ pub struct Tree {
     /// The tree's stamp: the search paths and the `ls-R` databases'
     /// sizes and times.
     pub stamp: u64,
+    /// The main memory a run of a format has ([`run_memory`]).
+    pub main_memory: u64,
 }
 
 fn os(b: &[u8]) -> &Path {
@@ -215,14 +244,20 @@ impl Tree {
     pub fn open(e: &Engine) -> Tree {
         let mut k = kpse(e.name, e.kpse_engine);
         let stamp = stamp(&mut k);
-        Tree { kpse: Arc::new(Kpathsea::new(k)), prog: e.name, stamp }
+        let main_memory = run_memory(&mut k);
+        Tree { kpse: Arc::new(Kpathsea::new(k)), prog: e.name, stamp, main_memory }
     }
 
     /// The same tree for a format's build: the current directory is never
     /// searched (fmtutil runs in a scratch directory), so a format cached
     /// for the tree holds nothing of the directory it was made in.
     pub fn for_format(&self, e: &Engine) -> Tree {
-        Tree { kpse: Arc::new(Kpathsea::new(kpse(e.name, e.kpse_engine)).without_cwd()), prog: self.prog, stamp: self.stamp }
+        Tree {
+            kpse: Arc::new(Kpathsea::new(kpse(e.name, e.kpse_engine)).without_cwd()),
+            prog: self.prog,
+            stamp: self.stamp,
+            main_memory: self.main_memory,
+        }
     }
 
     /// The path of TeX Live's file `name` (as TEXINPUTS finds it), if any.

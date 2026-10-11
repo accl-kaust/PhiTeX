@@ -28,7 +28,7 @@ pub fn ensure(
     let key = Fnv::new()
         .add(e.name.as_bytes())
         .add(&tree.stamp.to_le_bytes())
-        .add(&tex::exe_stamp().to_le_bytes())
+        .add(&tex::build_id().to_le_bytes())
         .0;
     let path = dir.join(format!("{}-{key:016x}.fmt", e.name));
     if let Ok(b) = std::fs::read(&path) {
