@@ -1062,3 +1062,19 @@ fn another_escape_character_starts_control_sequences() {
     assert_eq!(names, ["begingroup", "catcode", "gdef", "endgroup", "x"]);
     assert_eq!(p.tokens.last().unwrap().tz, Status::Known);
 }
+
+#[test]
+fn a_catcode_set_of_a_macros_argument_is_read_at_the_call() {
+    // (`` \catcode\number`#1 ``: the character the argument names, §442,
+    // §440; the change made when the macro runs, §1232)
+    let t = "\\def\\mk#1{\\catcode\\number`#1=11 }\\mk\\@ \\a@b";
+    let (p, d) = pass(t, FileKind::Document);
+    assert_eq!(d.changes_catcodes("mk", None).0, 0);
+    assert_eq!(d.arg_catcodes("mk", None), &[(1, 11)]);
+    assert!(p.hazards.iter().all(|h| h.status != Status::Pending));
+    assert!(p.items.iter().any(|i| i.name == "a@b"));
+    // (an argument naming no character: pending)
+    let t = "\\def\\mk#1{\\catcode`#1=11 }\\mk{ab} \\a@b";
+    let (p, _) = pass(t, FileKind::Document);
+    assert_eq!(p.hazards[0].status, Status::Pending);
+}

@@ -90,7 +90,9 @@ pub struct Definitions {
     /// Per definition, whether its body changes catcodes: 0 no, 1 inside
     /// a group of its own (for the arguments it reads), 2 for good, 3 only
     /// of the characters in the mask (none that shape groups).
-    catcoders: HashMap<String, Vec<At<(u8, u128)>>>,
+    /// With them, the catcodes it sets of characters its arguments name
+    /// (`` \def\do#1{\catcode`#1=12 } ``): (parameter, catcode).
+    catcoders: HashMap<String, Vec<At<Catcoder>>>,
     env_catcoders: HashSet<String>,
     /// Characters some `\catcode` makes active.
     active: u128,
@@ -102,6 +104,11 @@ pub struct Definitions {
     /// definition in another file then wins after it (load order).
     order: Option<HashMap<u32, u32>>,
 }
+
+/// What a definition's body does to catcodes: the kind and characters
+/// ([`Definitions::changes_catcodes`]), and the (parameter, catcode)
+/// assignments to the characters its arguments name.
+type Catcoder = ((u8, u128), Vec<(u8, u32)>);
 
 /// The key the `\output` routine's text is kept under.
 pub const OUTPUT: &str = "\0output";
@@ -296,21 +303,32 @@ impl Definitions {
     /// (0 no, 1 for the arguments it reads, 2 for good).
     pub(crate) fn changes_catcodes(&self, name: &str, at: Option<(u32, usize)>) -> (u8, u128) {
         match find(self.catcoders.get(name), at, self.order.as_ref()) {
-            Found::One(k) => *k,
+            Found::One(k) => k.0,
             Found::None => (0, 0),
             Found::Conflict => {
                 // (bound to one of several definitions: the worst)
                 self.catcoders.get(name).map_or((0, 0), |v| {
+                    // (one setting its arguments' catcodes: for good, as
+                    // which is not known)
                     let k = v
                         .iter()
-                        .map(|d| d.what.0)
+                        .map(|d| if d.what.1.is_empty() { d.what.0.0 } else { 2 })
                         .filter(|&k| k != 3)
                         .max()
                         .unwrap_or(0);
-                    let m = v.iter().fold(0, |m, d| m | d.what.1);
+                    let m = v.iter().fold(0, |m, d| m | d.what.0.1);
                     if k == 0 && m != 0 { (3, m) } else { (k, m) }
                 })
             }
+        }
+    }
+
+    /// The catcodes the definition of `name` bound at `at` sets of the
+    /// characters its arguments name: (parameter, catcode).
+    pub(crate) fn arg_catcodes(&self, name: &str, at: Option<(u32, usize)>) -> &[(u8, u32)] {
+        match find(self.catcoders.get(name), at, self.order.as_ref()) {
+            Found::One(k) => &k.1,
+            _ => &[],
         }
     }
 
@@ -362,7 +380,7 @@ impl Definitions {
         }
     }
 
-    fn catcodes(&mut self, name: &str, file: u32, pos: usize, k: (u8, u128)) {
+    fn catcodes(&mut self, name: &str, file: u32, pos: usize, k: Catcoder) {
         if !matches!(
             name,
             "noexpand" | "expandafter" | "csname" | "string" | "meaning" | "the"
@@ -402,10 +420,12 @@ impl Definitions {
     fn definition(&mut self, text: &str, atoms: &[Atom], a: usize, file: u32) {
         let name = atoms[a].name(text);
         let pos = atoms[a].start;
-        let body_catcodes = |open: usize| -> (u8, u128) {
+        // (`plain`: its parameters are undelimited, so a call's
+        // arguments can be read as they come)
+        let body_catcodes = |open: usize, plain: bool| -> Catcoder {
             let close = atoms[open].mate;
             if close == usize::MAX {
-                return (0, 0);
+                return ((0, 0), Vec::new());
             }
             let body = &atoms[open + 1..close];
             let is =
@@ -416,6 +436,7 @@ impl Definitions {
             let mut first = None;
             let mut chars = 0u128;
             let mut shaping = false;
+            let mut of_args = Vec::new();
             for (k, x) in body.iter().enumerate() {
                 if x.kind != AtomKind::Cs {
                     continue;
@@ -432,11 +453,25 @@ impl Definitions {
                 first.get_or_insert(k);
                 let mut j = k + 1;
                 if n == "catcode" || n == "tex_catcode:D" {
+                    // (`\number` before an alphabetic constant: the same
+                    // number, §440)
+                    if body.get(j).is_some_and(|y| is(y, &["number"])) {
+                        j = skip(body, j + 1);
+                    }
                     if body.get(j).map(|y| y.kind) != Some(AtomKind::Char('`')) {
                         shaping = true;
                         continue;
                     }
                     j += 1;
+                    if let Some(AtomKind::Param(p @ 1..=9)) = body.get(j).map(|y| y.kind) {
+                        // (`` `#1 ``: the character the argument names, §442;
+                        // set to a literal catcode)
+                        match catcode_value(text, body, j + 1) {
+                            Some(v) if plain => of_args.push((p, v)),
+                            _ => shaping = true,
+                        }
+                        continue;
+                    }
                 } else if !(n == "@makeother" || n.starts_with("char_set_catcode")) {
                     shaping = true;
                     continue;
@@ -456,16 +491,18 @@ impl Definitions {
                     _ => shaping = true,
                 }
             }
-            let Some(k) = first else { return (0, 0) };
+            let Some(k) = first else {
+                return ((0, 0), of_args);
+            };
             if !shaping {
-                return (3, chars);
+                return (if chars == 0 { (0, 0) } else { (3, chars) }, of_args);
             }
             let opens = ["begingroup", "bgroup", "group_begin:"];
             // (a group opened first, here or closed by what it calls)
             if body[..k].iter().any(|x| is(x, &opens)) {
-                (1, chars)
+                ((1, chars), of_args)
             } else {
-                (2, chars)
+                ((2, chars), of_args)
             }
         };
         match name {
@@ -477,7 +514,8 @@ impl Definitions {
                     return;
                 };
                 let target = atoms[n].name(text).to_owned();
-                self.catcodes(&target, file, pos, body_catcodes(open));
+                let plain = args.iter().all(|a| *a == Arg::M);
+                self.catcodes(&target, file, pos, body_catcodes(open, plain));
                 self.add(&target, file, pos, Shape::Macro(args));
                 self.body(&target, text, atoms, open, file, pos);
             }
@@ -489,7 +527,8 @@ impl Definitions {
                 let Some((args, open)) = param_text(text, atoms, atoms[o].mate + 1) else {
                     return;
                 };
-                self.catcodes(&target, file, pos, body_catcodes(open));
+                let plain = args.iter().all(|a| *a == Arg::M);
+                self.catcodes(&target, file, pos, body_catcodes(open, plain));
                 self.add(&target, file, pos, Shape::Macro(args));
                 self.body(&target, text, atoms, open, file, pos);
             }
@@ -550,7 +589,8 @@ impl Definitions {
                 };
                 let (args, open) = newcommand_args(atoms, after);
                 let Some(open) = open else { return };
-                self.catcodes(&target, file, pos, body_catcodes(open));
+                let plain = args.iter().all(|a| *a == Arg::M);
+                self.catcodes(&target, file, pos, body_catcodes(open, plain));
                 self.add(&target, file, pos, Shape::Macro(args));
                 self.body(&target, text, atoms, open, file, pos);
             }
@@ -564,7 +604,7 @@ impl Definitions {
                 };
                 let (args, open) = newcommand_args(atoms, atoms[j].mate + 1);
                 let Some(open) = open else { return };
-                if matches!(body_catcodes(open).0, 1 | 2) {
+                if matches!(body_catcodes(open, false).0.0, 1 | 2) {
                     self.env_catcoders.insert(env.clone());
                 }
                 self.envs.entry(env).or_default().push(At {
@@ -746,6 +786,24 @@ fn newcommand_args(atoms: &[Atom], j: usize) -> (Vec<Arg>, Option<usize>) {
     args.extend(std::iter::repeat_n(Arg::M, n));
     let open = (atoms.get(j).map(|x| x.kind) == Some(AtomKind::Open)).then_some(j);
     (args, open)
+}
+
+/// A literal catcode from `j` in `atoms`: `=12`, ` 13`, `=\active`.
+fn catcode_value(text: &str, atoms: &[Atom], j: usize) -> Option<u32> {
+    let mut j = skip(atoms, j);
+    if atoms.get(j)?.kind == AtomKind::Char('=') {
+        j = skip(atoms, j + 1);
+    }
+    let x = atoms.get(j)?;
+    if x.kind == AtomKind::Cs {
+        return lex::named_value(x.name(text).as_bytes());
+    }
+    let mut v = None;
+    while let Some(AtomKind::Char(c @ '0'..='9')) = atoms.get(j).map(|y| y.kind) {
+        v = Some(v.unwrap_or(0) * 10 + c.to_digit(10)?);
+        j += 1;
+    }
+    v
 }
 
 #[allow(clippy::match_same_arms)]
