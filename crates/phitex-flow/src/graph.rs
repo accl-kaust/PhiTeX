@@ -2769,6 +2769,21 @@ pub fn run_piece(
     dirty: &[(Key, u32)],
     entry: Option<&RState>,
 ) -> Run {
+    run_piece_win(text, text.len(), env, old, dirty, entry)
+}
+
+/// [`run_piece`], the old run's text compared with the first `window`
+/// characters of `text` only (the reduction's: `text` runs to the end of
+/// its file, the old run read a stretch of it; the edit between them is
+/// found in that stretch, not in the rest of the file).
+pub fn run_piece_win(
+    text: &[char],
+    window: usize,
+    env: &mut dyn Env,
+    old: Option<(&Run, &[char])>,
+    dirty: &[(Key, u32)],
+    entry: Option<&RState>,
+) -> Run {
     // (a lean run has no nodes to keep: every node runs again)
     let old = old.filter(|(r, _)| r.lean.is_none());
     let mut outside: Outside = FxMap::default();
@@ -2782,7 +2797,7 @@ pub fn run_piece(
     // (`PHITEX_HANG_STEPS`: after a runaway print, the next commands one
     // by one, with their reads and definitions)
     let mut trace_left = 0u32;
-    let edit = old.and_then(|(_, t)| Edit::between(t, text));
+    let edit = old.and_then(|(_, t)| Edit::between(t, &text[..window.min(text.len())]));
     // (the edit changed how many lines are before the text after it: a node
     // there that read its line, `\inputlineno` in the piece's own text —
     // the lines before the piece, `Key::LineBase`, plus its line in the

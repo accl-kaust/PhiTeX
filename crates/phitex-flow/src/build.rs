@@ -42,6 +42,9 @@ pub use crate::graph::MAIN_MEMORY;
 /// The shipped pages' source places, for SyncTeX and the viewer.
 pub mod sync;
 
+/// Evaluation as graph reduction (the agreed design; the default engine).
+mod reduce;
+
 /// The cutter's default: a cut proposed every this many lines (at a line
 /// beginning with a control sequence, at brace depth 0), besides blank
 /// lines ([`Options::cut_lines`]).
@@ -2020,6 +2023,12 @@ pub struct Build {
     derived: Vec<(String, Vec<u8>)>,
     derived_side: Vec<(String, Vec<u8>)>,
     notes: Vec<String>,
+    /// Updates are evaluated by graph reduction ([`reduce`]); else by the
+    /// pieces' scheduler (`PHITEX_ENGINE=pieces`).
+    reduce: bool,
+    /// The reductions of the last evaluation, by place: the memo an edit
+    /// un-reduces against.
+    rmemo: reduce::RMemo,
 }
 
 /// The scheduler's state.
@@ -2272,7 +2281,15 @@ impl Build {
             derived: Vec::new(),
             derived_side: Vec::new(),
             notes: Vec::new(),
+            reduce: std::env::var("PHITEX_ENGINE").map_or(true, |v| v != "pieces"),
+            rmemo: reduce::RMemo::default(),
         }
+    }
+
+    /// Evaluates by graph reduction (`true`, the default) or by the
+    /// pieces' scheduler.
+    pub fn set_reduce(&mut self, on: bool) {
+        self.reduce = on;
     }
 
     /// The files derived from the files the build writes (BibTeX,
@@ -2329,6 +2346,9 @@ impl Build {
 
     /// Builds `src`: what changed, and what the changes reach.
     pub fn update(&mut self, src: &str, opts: Options) -> Output {
+        if self.reduce {
+            return self.reduce_update(src, opts);
+        }
         let t0 = Instant::now();
         self.builds += 1;
         self.etex_last = opts.etex;
