@@ -36,6 +36,8 @@ pub struct Graph {
     reads: Vec<u32>,
     writes: Vec<(u32, u64)>,
     fields: Vec<String>,
+    /// The field id of `seq:prev`.
+    seq_prev: u32,
     names: Vec<String>,
     /// Edges (from, to, field), in order of `to`.
     edges: Vec<(u32, u32, u32)>,
@@ -88,6 +90,9 @@ impl Graph {
         let mut main = String::new();
         let unknown_field = fields.get("?");
         debug_assert_eq!(unknown_field, 0);
+        // `seq:prev` (the parser's --conservative chain to the step before)
+        // is an ordering device, not a value a call could be keyed on.
+        let seq_prev = fields.get("seq:prev");
         for line in reader.lines() {
             let line = line?;
             if line.trim().is_empty() {
@@ -125,6 +130,7 @@ impl Graph {
             reads,
             writes,
             fields: fields.names,
+            seq_prev,
             names: names.names,
             edges: Vec::new(),
             pred_start: Vec::new(),
@@ -162,8 +168,10 @@ impl Graph {
                 if f == UNKNOWN {
                     continue;
                 }
-                call_hash = fnv1a_with(call_hash, &f.to_le_bytes());
-                call_hash = fnv1a_with(call_hash, &value[f as usize].to_le_bytes());
+                if f != self.seq_prev {
+                    call_hash = fnv1a_with(call_hash, &f.to_le_bytes());
+                    call_hash = fnv1a_with(call_hash, &value[f as usize].to_le_bytes());
+                }
                 if let Some(w) = last[f as usize] {
                     self.edges.push((w, idx(i), f));
                     best = best.max(self.longest[w as usize]);
