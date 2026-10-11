@@ -78,7 +78,12 @@ pub enum Ask {
     SetFile { file: String, text: String },
     /// Characters `start..end` (UTF-16 code units) of `file`'s buffer
     /// replaced by `text`.
-    Edit { file: String, start: usize, end: usize, text: String },
+    Edit {
+        file: String,
+        start: usize,
+        end: usize,
+        text: String,
+    },
 }
 
 /// The pages of the last build.
@@ -141,7 +146,10 @@ fn token() -> String {
         let t = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
-        let h = crate::tex::Fnv::new().add(&t.to_le_bytes()).add(&std::process::id().to_le_bytes()).0;
+        let h = crate::tex::Fnv::new()
+            .add(&t.to_le_bytes())
+            .add(&std::process::id().to_le_bytes())
+            .0;
         b[..8].copy_from_slice(&h.to_le_bytes());
         b[8..].copy_from_slice(&h.rotate_left(29).to_le_bytes());
     }
@@ -157,7 +165,9 @@ fn token() -> String {
 pub fn address_file(root: &std::path::Path) -> Option<PathBuf> {
     let root = std::fs::canonicalize(root).ok()?;
     let base = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
-    let h = crate::tex::Fnv::new().add(root.to_string_lossy().as_bytes()).0;
+    let h = crate::tex::Fnv::new()
+        .add(root.to_string_lossy().as_bytes())
+        .0;
     Some(base.join("phitex-view").join(format!("{h:016x}")))
 }
 
@@ -165,7 +175,10 @@ impl View {
     /// Serve the viewer on 127.0.0.1, on a free port (`PHITEX_VIEW_PORT`
     /// to choose it).
     pub fn start(editor: Option<crate::editor::Editor>) -> std::io::Result<View> {
-        let port: u16 = std::env::var("PHITEX_VIEW_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(0);
+        let port: u16 = std::env::var("PHITEX_VIEW_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(0);
         let listener = TcpListener::bind(("127.0.0.1", port))?;
         let port = listener.local_addr()?.port();
         let shared = Arc::new(Shared {
@@ -189,14 +202,18 @@ impl View {
             let _ = std::fs::write(&f, &url);
         }
         let s = shared.clone();
-        std::thread::Builder::new().name("phitex-view".into()).spawn(move || {
-            for conn in listener.incoming() {
-                let Ok(conn) = conn else { continue };
-                let _ = conn.set_nodelay(true);
-                let s = s.clone();
-                let _ = std::thread::Builder::new().name("phitex-view-conn".into()).spawn(move || serve(&s, conn));
-            }
-        })?;
+        std::thread::Builder::new()
+            .name("phitex-view".into())
+            .spawn(move || {
+                for conn in listener.incoming() {
+                    let Ok(conn) = conn else { continue };
+                    let _ = conn.set_nodelay(true);
+                    let s = s.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("phitex-view-conn".into())
+                        .spawn(move || serve(&s, conn));
+                }
+            })?;
         Ok(View { shared, url })
     }
 
@@ -215,11 +232,13 @@ impl View {
         std::mem::take(&mut *lock(&self.shared.asks))
     }
 
-
     /// A build began (`true`) or ended.
     pub fn building(&self, on: bool) {
         self.shared.building.store(on, Ordering::Relaxed);
-        broadcast(&self.shared, &format!("{{\"event\":\"preparing\",\"on\":{on}}}"));
+        broadcast(
+            &self.shared,
+            &format!("{{\"event\":\"preparing\",\"on\":{on}}}"),
+        );
     }
 
     /// A build is in: its PDF's pages hashed, the browsers told (they ask
@@ -228,7 +247,12 @@ impl View {
     pub fn built(&self, b: &Built) -> (Vec<usize>, usize) {
         let mut pages = lock(&self.shared.pages);
         let first = match (&pages.pdf, &b.pdf) {
-            (Some(old), Some(new)) => Some(old.iter().zip(new.iter()).take_while(|(x, y)| x == y).count()),
+            (Some(old), Some(new)) => Some(
+                old.iter()
+                    .zip(new.iter())
+                    .take_while(|(x, y)| x == y)
+                    .count(),
+            ),
             _ => None,
         };
         let sums = b
@@ -254,7 +278,10 @@ impl View {
         drop(pages);
         let items: Arc<str> = format!("[{}]", b.diagnostics.join(",")).into();
         *lock(&self.shared.diagnostics) = items.clone();
-        broadcast(&self.shared, &format!("{{\"event\":\"diagnostics\",\"items\":{items}}}"));
+        broadcast(
+            &self.shared,
+            &format!("{{\"event\":\"diagnostics\",\"items\":{items}}}"),
+        );
         broadcast(&self.shared, "{\"event\":\"settled\"}");
         (changed, n)
     }
@@ -269,7 +296,11 @@ pub fn ranges(ks: &[usize]) -> String {
         while j + 1 < ks.len() && ks[j + 1] == ks[j] + 1 {
             j += 1;
         }
-        out.push(if i == j { ks[i].to_string() } else { format!("{}–{}", ks[i], ks[j]) });
+        out.push(if i == j {
+            ks[i].to_string()
+        } else {
+            format!("{}–{}", ks[i], ks[j])
+        });
         i = j + 1;
     }
     out.join(", ")
@@ -283,9 +314,16 @@ fn broadcast(s: &Shared, text: &str) {
 fn serve(s: &Arc<Shared>, conn: TcpStream) {
     let Ok(mut w) = conn.try_clone() else { return };
     let mut r = BufReader::new(conn);
-    let Some(req) = ws::read_request(&mut r) else { return };
+    let Some(req) = ws::read_request(&mut r) else {
+        return;
+    };
     if req.method != "GET" {
-        let _ = ws::respond(&mut w, "405 Method Not Allowed", "text/plain", b"GET only\n");
+        let _ = ws::respond(
+            &mut w,
+            "405 Method Not Allowed",
+            "text/plain",
+            b"GET only\n",
+        );
         return;
     }
     let prefix = format!("/{}/", s.token);
@@ -361,7 +399,9 @@ fn socket(s: &Arc<Shared>, w: TcpStream, mut r: BufReader<TcpStream>) {
             Ok(ws::Message::Binary(_)) => continue,
             Ok(ws::Message::Close) | Err(_) => break,
         };
-        let Some(req) = json::parse(&text) else { continue };
+        let Some(req) = json::parse(&text) else {
+            continue;
+        };
         let reply = answer(s, &req);
         if !client.send(&reply) {
             break;
@@ -390,7 +430,12 @@ fn draws(s: &Shared, k: usize) -> Option<(Arc<str>, u64)> {
     let doc = phitex_draw::Pdf::open(&pdf)?;
     let d: Arc<str> = doc.draw(k, &mut lock(&s.fonts))?.into();
     if s.log {
-        eprintln!("viewer: page {} ({h:016x}) drawn in {:.1} ms, {} KB", k + 1, t.elapsed().as_secs_f64() * 1e3, d.len() / 1024);
+        eprintln!(
+            "viewer: page {} ({h:016x}) drawn in {:.1} ms, {} KB",
+            k + 1,
+            t.elapsed().as_secs_f64() * 1e3,
+            d.len() / 1024
+        );
     }
     lock(&s.pages).draws.insert(h, d.clone());
     Some((d, h))
@@ -420,7 +465,7 @@ fn answer(s: &Shared, req: &Value) -> String {
             let _ = write!(
                 out,
                 "true,\"json\":{{\"pages\":{},\"hashes\":{},\"history\":{history},\"build_ms\":{ms},\
-                 \"engine\":\"phitex-red\",\"fetches\":true,\"missing\":[],\"pending\":{},\"undefined_names\":[]}}}}",
+                 \"engine\":\"phitex\",\"fetches\":true,\"missing\":[],\"pending\":{},\"undefined_names\":[]}}}}",
                 hs.len(),
                 hashes_json(&hs),
                 u8::from(s.building.load(Ordering::Relaxed))
@@ -432,7 +477,10 @@ fn answer(s: &Shared, req: &Value) -> String {
         }
         "png" => match page.and_then(|k| draws(s, k)) {
             Some((d, h)) => {
-                let _ = write!(out, "true,\"draws\":{d},\"json\":{{\"hash\":\"{h:016x}\"}}}}");
+                let _ = write!(
+                    out,
+                    "true,\"draws\":{d},\"json\":{{\"hash\":\"{h:016x}\"}}}}"
+                );
             }
             None => out.push_str("false,\"error\":\"no such page\"}"),
         },
@@ -459,7 +507,9 @@ fn answer(s: &Shared, req: &Value) -> String {
                 "true,\"json\":{{\"ok\":true,\"pages\":{},\"history\":{history},\"painted_hash\":{},\
                  \"paint_ms\":{ms},\"total_ms\":{ms},\"stats\":{{\"rebuilt\":0,\"reused\":0,\"passes\":1}}}}",
                 hs.len(),
-                painted.as_ref().map_or("null".to_owned(), |(_, h)| format!("\"{h:016x}\""))
+                painted
+                    .as_ref()
+                    .map_or("null".to_owned(), |(_, h)| format!("\"{h:016x}\""))
             );
             if let Some((d, _)) = painted {
                 let _ = write!(out, ",\"draws\":{d}");
@@ -484,16 +534,25 @@ fn answer(s: &Shared, req: &Value) -> String {
         }
         "outline" => {
             let pdf = lock(&s.pages).pdf.clone();
-            let items = pdf.as_ref().and_then(phitex_draw::Pdf::open).map_or_else(|| "[]".to_owned(), |d| d.outline());
+            let items = pdf
+                .as_ref()
+                .and_then(phitex_draw::Pdf::open)
+                .map_or_else(|| "[]".to_owned(), |d| d.outline());
             let _ = write!(out, "true,\"json\":{{\"items\":{items}}}}}");
         }
         "diff" => out.push_str("true,\"json\":{}}"),
         o if o.starts_with("diff_") => {
-            out.push_str("false,\"error\":\"the diff against a past version is not in the flow CLI yet\"}");
+            out.push_str(
+                "false,\"error\":\"the diff against a past version is not in the flow CLI yet\"}",
+            );
         }
         "trace" | "check" => out.push_str("true,\"json\":{\"ok\":true,\"ms\":0}}"),
         _ => {
-            let _ = write!(out, "false,\"error\":{}}}", quote(&format!("no op {op:?} here")));
+            let _ = write!(
+                out,
+                "false,\"error\":{}}}",
+                quote(&format!("no op {op:?} here"))
+            );
         }
     }
     out
@@ -505,7 +564,10 @@ fn line_col(text: &[u8], at: usize) -> (usize, usize) {
     let at = at.min(text.len());
     let before = &text[..at];
     let line = before.split(|&c| c == b'\n').count();
-    let start = before.iter().rposition(|&c| c == b'\n').map_or(0, |p| p + 1);
+    let start = before
+        .iter()
+        .rposition(|&c| c == b'\n')
+        .map_or(0, |p| p + 1);
     let col = String::from_utf8_lossy(&before[start..]).chars().count() + 1;
     (line, col)
 }
@@ -517,7 +579,11 @@ fn line_bytes(text: &[u8], line: usize, col: usize) -> Option<(usize, usize, usi
     for _ in 1..line {
         lo += text.get(lo..)?.iter().position(|&c| c == b'\n')? + 1;
     }
-    let hi = lo + text[lo..].iter().position(|&c| c == b'\n').unwrap_or(text.len() - lo);
+    let hi = lo
+        + text[lo..]
+            .iter()
+            .position(|&c| c == b'\n')
+            .unwrap_or(text.len() - lo);
     let at = String::from_utf8_lossy(&text[lo..hi])
         .char_indices()
         .nth(col.saturating_sub(1))
@@ -555,13 +621,29 @@ fn forward(s: &Shared, req: &ws::Request) -> (&'static str, String) {
     let col: usize = req.param("col").and_then(|c| c.parse().ok()).unwrap_or(1);
     let path = std::fs::canonicalize(&file).or_else(|_| std::fs::canonicalize(s.root.join(&file)));
     let root = std::fs::canonicalize(&s.root).unwrap_or_else(|_| s.root.clone());
-    let Some(rel) = path.ok().and_then(|p| p.strip_prefix(&root).ok().map(|r| r.to_string_lossy().into_owned())) else {
-        return ("404 Not Found", format!("{file}: not a file of the project in {}\n", s.root.display()));
+    let Some(rel) = path.ok().and_then(|p| {
+        p.strip_prefix(&root)
+            .ok()
+            .map(|r| r.to_string_lossy().into_owned())
+    }) else {
+        return (
+            "404 Not Found",
+            format!(
+                "{file}: not a file of the project in {}\n",
+                s.root.display()
+            ),
+        );
     };
-    let Some((lo, hi, at)) = std::fs::read(root.join(&rel)).ok().and_then(|t| line_bytes(&t, line, col)) else {
+    let Some((lo, hi, at)) = std::fs::read(root.join(&rel))
+        .ok()
+        .and_then(|t| line_bytes(&t, line, col))
+    else {
         return ("404 Not Found", format!("{rel}: no line {line}\n"));
     };
-    let ev = format!("{{\"event\":\"sync\",\"file\":{},\"lo\":{lo},\"hi\":{hi},\"at\":{at}}}", quote(&rel));
+    let ev = format!(
+        "{{\"event\":\"sync\",\"file\":{},\"lo\":{lo},\"hi\":{hi},\"at\":{at}}}",
+        quote(&rel)
+    );
     let n = {
         let mut cs = lock(&s.clients);
         cs.retain(|c| c.send(&ev));
@@ -574,7 +656,7 @@ fn forward(s: &Shared, req: &ws::Request) -> (&'static str, String) {
 }
 
 /// Page `k`'s characters with their sources (`session.ts`'s `origins`:
-/// `{files, g}`): none, phitex-red records no origins yet.
+/// `{files, g}`): none, no engine records origins yet.
 fn origins(_s: &Shared, _k: usize) -> String {
     "{\"files\":[],\"g\":[]}".into()
 }
@@ -584,10 +666,12 @@ fn origins(_s: &Shared, _k: usize) -> String {
 pub fn sync_command(place: &str) -> i32 {
     let parsed = place.rsplit_once(':').and_then(|(rest, last)| {
         let last: usize = last.parse().ok()?;
-        Some(match rest.rsplit_once(':').map(|(f, l)| (f, l.parse::<usize>())) {
-            Some((f, Ok(l))) => (f.to_owned(), l, last),
-            _ => (rest.to_owned(), last, 1),
-        })
+        Some(
+            match rest.rsplit_once(':').map(|(f, l)| (f, l.parse::<usize>())) {
+                Some((f, Ok(l))) => (f.to_owned(), l, last),
+                _ => (rest.to_owned(), last, 1),
+            },
+        )
     });
     let Some((file, line, col)) = parsed else {
         eprintln!("phitex sync: give FILE:LINE[:COL]");
@@ -595,7 +679,9 @@ pub fn sync_command(place: &str) -> i32 {
     };
     let file = std::fs::canonicalize(&file).map_or(file, |p| p.to_string_lossy().into_owned());
     let here = std::env::current_dir().unwrap_or_default();
-    let url = here.ancestors().find_map(|d| address_file(d).and_then(|f| std::fs::read_to_string(f).ok()));
+    let url = here
+        .ancestors()
+        .find_map(|d| address_file(d).and_then(|f| std::fs::read_to_string(f).ok()));
     let Some(url) = url else {
         eprintln!("phitex sync: no `phitex watch` with a viewer runs here");
         return 1;
@@ -611,7 +697,9 @@ pub fn sync_command(place: &str) -> i32 {
             })
             .collect()
     };
-    let Some(rest) = url.trim().strip_prefix("http://") else { return 1 };
+    let Some(rest) = url.trim().strip_prefix("http://") else {
+        return 1;
+    };
     let (addr, path) = rest.split_once('/').unwrap_or((rest, ""));
     let req = format!(
         "GET /{path}sync?file={}&line={line}&col={col} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n",
@@ -644,9 +732,16 @@ pub fn sync_command(place: &str) -> i32 {
 /// Show `url` in the user's browser (`BROWSER`, else the desktop's
 /// opener). Whether one was started.
 pub fn open_browser(url: &str) -> bool {
-    let cmd = std::env::var("BROWSER").ok().filter(|b| !b.is_empty()).unwrap_or_else(|| {
-        if cfg!(target_os = "macos") { "open".into() } else { "xdg-open".into() }
-    });
+    let cmd = std::env::var("BROWSER")
+        .ok()
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                "open".into()
+            } else {
+                "xdg-open".into()
+            }
+        });
     std::process::Command::new(cmd)
         .arg(url)
         .stdin(std::process::Stdio::null())

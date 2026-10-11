@@ -33,8 +33,9 @@ const POLL: Duration = Duration::from_millis(20);
 
 /// The extensions of the files a change of rebuilds.
 const SOURCES: &[&str] = &[
-    "tex", "sty", "cls", "bib", "bst", "def", "cfg", "clo", "fd", "ltx", "ist", "bbx", "cbx", "lbx", "dbx",
-    "png", "jpg", "jpeg", "pdf", "eps", "mp", "txt", "dat", "csv", "tikz", "pgf", "inc",
+    "tex", "sty", "cls", "bib", "bst", "def", "cfg", "clo", "fd", "ltx", "ist", "bbx", "cbx",
+    "lbx", "dbx", "png", "jpg", "jpeg", "pdf", "eps", "mp", "txt", "dat", "csv", "tikz", "pgf",
+    "inc",
 ];
 
 pub type Stamp = (u64, SystemTime);
@@ -45,7 +46,9 @@ pub fn scan(root: &Path) -> HashMap<PathBuf, Stamp> {
     let mut out = HashMap::new();
     let mut todo = vec![(root.to_path_buf(), 0)];
     while let Some((d, depth)) = todo.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for e in rd.flatten() {
             let name = e.file_name();
             if name.to_string_lossy().starts_with('.') {
@@ -57,7 +60,10 @@ pub fn scan(root: &Path) -> HashMap<PathBuf, Stamp> {
                 if depth < 6 {
                     todo.push((p, depth + 1));
                 }
-            } else if p.extension().is_some_and(|x| SOURCES.contains(&&*x.to_string_lossy().to_ascii_lowercase())) {
+            } else if p
+                .extension()
+                .is_some_and(|x| SOURCES.contains(&&*x.to_string_lossy().to_ascii_lowercase()))
+            {
                 out.insert(p, (m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH)));
             }
         }
@@ -89,7 +95,9 @@ fn poller(root: PathBuf, ours: Ours, tx: mpsc::Sender<Event>) {
         {
             let ours = ours.lock().unwrap_or_else(PoisonError::into_inner);
             changed.retain(|p| {
-                let mine = ours.get(p).or_else(|| p.canonicalize().ok().and_then(|c| ours.get(&c)));
+                let mine = ours
+                    .get(p)
+                    .or_else(|| p.canonicalize().ok().and_then(|c| ours.get(&c)));
                 match mine {
                     Some(&h) => std::fs::read(p).map_or(true, |b| tex::Fnv::new().add(&b).0 != h),
                     None => true,
@@ -140,7 +148,10 @@ fn diagnostics(r: &session::Report, log: &str) -> Vec<String> {
     for (k, n, first) in crate::warnings::summarize(&r.log_text()) {
         v.push(format!(
             "{{\"severity\":\"warning\",\"code\":\"{k:?}\",\"message\":{},\"detail\":{}}}",
-            crate::json::quote(&format!("{n} × {}", first.first().cloned().unwrap_or_default())),
+            crate::json::quote(&format!(
+                "{n} × {}",
+                first.first().cloned().unwrap_or_default()
+            )),
             crate::json::quote(&format!("see {log}"))
         ));
     }
@@ -168,10 +179,17 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     spin.done();
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let main_file = root.join(&s.job.path);
-    let main_rel = s.job.path.to_string_lossy().trim_start_matches("./").to_owned();
+    let main_rel = s
+        .job
+        .path
+        .to_string_lossy()
+        .trim_start_matches("./")
+        .to_owned();
     let (tx, rx) = mpsc::channel::<Event>();
     // (the viewer: on a terminal unless --no-view; anywhere with --view)
-    let want_view = o.view.unwrap_or_else(|| std::io::IsTerminal::is_terminal(&std::io::stdout()));
+    let want_view = o
+        .view
+        .unwrap_or_else(|| std::io::IsTerminal::is_terminal(&std::io::stdout()));
     // (a terminal editor, or an unknown one: the viewer shows the place
     // instead of opening it)
     let editor = crate::editor::Editor::configured(o.editor.as_deref()).unwrap_or_else(|e| {
@@ -186,7 +204,10 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             Ok(v) => {
                 let tx = Mutex::new(tx.clone());
                 v.on_ask(Box::new(move || {
-                    let _ = tx.lock().unwrap_or_else(PoisonError::into_inner).send(Event::Asked);
+                    let _ = tx
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .send(Event::Asked);
                 }));
                 ui.stdout(&format!("phitex: the viewer is at {}", v.url()));
                 ui.pin(&format!("{} {}", st.dim("viewer:"), st.cyan(v.url())));
@@ -247,7 +268,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             Err(m) => {
                 spin.done();
                 ui.failed(&format!("build {builds} ({why})"), &m);
-                ui.stdout(&format!("phitex: build {builds} ({why}) failed inside the engine"));
+                ui.stdout(&format!(
+                    "phitex: build {builds} ({why}) failed inside the engine"
+                ));
                 if let Some(v) = &view {
                     let first = m.lines().next().unwrap_or("the engine panicked");
                     v.built(&Built {
@@ -298,7 +321,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         if let Some(v) = &view {
             let pdf = match r.main_output() {
                 Some(("pdf", b)) => Some(session::shared(b)),
-                Some((_, dvi)) => match crate::dvipdf::dvi_to_pdf(dvi, &format!("{}.pdf", s.job.jobname), s.job.pdf_date) {
+                Some((_, dvi)) => match crate::dvipdf::dvi_to_pdf(
+                    dvi,
+                    &format!("{}.pdf", s.job.jobname),
+                    s.job.pdf_date,
+                ) {
                     Ok(p) => Some(session::shared(&p)),
                     Err(e) => {
                         ui.warning(&format!("the viewer's PDF of the DVI file: {e}"));
@@ -307,7 +334,12 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 },
                 None => None,
             };
-            let log = s.job.out_dir.join(format!("{}.log", s.job.jobname)).display().to_string();
+            let log = s
+                .job
+                .out_dir
+                .join(format!("{}.log", s.job.jobname))
+                .display()
+                .to_string();
             status.set("drawing the pages for the viewer");
             let (changed, n) = v.built(&Built {
                 pdf,
@@ -321,18 +353,37 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 "; viewer: {} of {n} page{} redrawn{}",
                 changed.len(),
                 if n == 1 { "" } else { "s" },
-                if changed.is_empty() { String::new() } else { format!(" ({})", view::ranges(&changed)) }
+                if changed.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", view::ranges(&changed))
+                }
             ));
         }
         spin.done();
         ui.stdout(&line);
-        modern::report(t, s, &r, written.as_deref(), &Options { quiet: true, ..Options::default() }, ui, false);
+        modern::report(
+            t,
+            s,
+            &r,
+            written.as_deref(),
+            &Options {
+                quiet: true,
+                ..Options::default()
+            },
+            ui,
+            false,
+        );
     };
     rebuild(&mut s, "cold");
     let set = |s: &mut Session, buffers: &HashMap<String, String>, file: &str| {
         let text = buffers.get(file).map(|b| tex_text(b));
         if file == main_rel {
-            let t = text.unwrap_or_else(|| std::fs::read(&main_file).map(|b| tex::chars(&b)).unwrap_or_default());
+            let t = text.unwrap_or_else(|| {
+                std::fs::read(&main_file)
+                    .map(|b| tex::chars(&b))
+                    .unwrap_or_default()
+            });
             s.set_text(t);
         } else {
             s.set_buffer(file, text.as_deref());
@@ -359,7 +410,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 },
                 Event::Files(ps) => {
                     for p in ps {
-                        let rel = p.strip_prefix(&root).unwrap_or(&p).to_string_lossy().into_owned();
+                        let rel = p
+                            .strip_prefix(&root)
+                            .unwrap_or(&p)
+                            .to_string_lossy()
+                            .into_owned();
                         // (a buffer the editor saved is the file again)
                         if let Some(b) = buffers.get(&rel)
                             && std::fs::read(&p).is_ok_and(|d| d == b.as_bytes())
@@ -381,7 +436,12 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                                 buffers.insert(file.clone(), text);
                                 file
                             }
-                            Ask::Edit { file, start, end, text } => {
+                            Ask::Edit {
+                                file,
+                                start,
+                                end,
+                                text,
+                            } => {
                                 let cur = buffers.get(&file).cloned().unwrap_or_else(|| {
                                     std::fs::read(root.join(&file))
                                         .map(|b| String::from_utf8_lossy(&b).into_owned())

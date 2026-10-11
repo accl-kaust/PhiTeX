@@ -26,11 +26,18 @@ pub struct Style {
 
 impl Style {
     pub fn detect() -> Style {
-        Style { color: console::colors_enabled_stderr(), tty: console::user_attended_stderr() }
+        Style {
+            color: console::colors_enabled_stderr(),
+            tty: console::user_attended_stderr(),
+        }
     }
 
     fn paint(self, code: &str, s: &str) -> String {
-        if self.color { format!("\x1b[{code}m{s}\x1b[0m") } else { s.to_owned() }
+        if self.color {
+            format!("\x1b[{code}m{s}\x1b[0m")
+        } else {
+            s.to_owned()
+        }
     }
 
     pub fn red(self, s: &str) -> String {
@@ -66,7 +73,11 @@ impl Style {
 /// A duration for the terminal: milliseconds under a second.
 pub fn ms(d: Duration) -> String {
     let m = d.as_secs_f64() * 1e3;
-    if m >= 1000.0 { format!("{:.2} s", m / 1e3) } else { format!("{m:.1} ms") }
+    if m >= 1000.0 {
+        format!("{:.2} s", m / 1e3)
+    } else {
+        format!("{m:.1} ms")
+    }
 }
 
 fn plural(n: usize, one: &str, many: &str) -> String {
@@ -112,8 +123,17 @@ fn status_line(what: &str, s: &Status, elapsed: Duration) -> String {
 
 impl Ui {
     pub fn new(st: Style, verbose: u8, quiet: bool) -> Ui {
-        let target = if st.tty { ProgressDrawTarget::stderr() } else { ProgressDrawTarget::hidden() };
-        Ui { st, verbose, quiet, mp: MultiProgress::with_draw_target(target) }
+        let target = if st.tty {
+            ProgressDrawTarget::stderr()
+        } else {
+            ProgressDrawTarget::hidden()
+        };
+        Ui {
+            st,
+            verbose,
+            quiet,
+            mp: MultiProgress::with_draw_target(target),
+        }
     }
 
     /// A line on standard error, above the spinner if one runs.
@@ -178,14 +198,25 @@ impl Ui {
                 }
             }));
         }
-        Spin { pb, mp: self.mp.clone(), stop, updater }
+        Spin {
+            pb,
+            mp: self.mp.clone(),
+            stop,
+            updater,
+        }
     }
 
     /// A build that failed inside the engine (a panic caught): one line
     /// with the message's first line, and where the whole of it is.
     pub fn failed(&self, what: &str, msg: &str) {
-        let first = msg.lines().next().unwrap_or("the engine panicked without a message");
-        self.error(&format!("{what} failed inside the engine: {}", clip(first, 240)));
+        let first = msg
+            .lines()
+            .next()
+            .unwrap_or("the engine panicked without a message");
+        self.error(&format!(
+            "{what} failed inside the engine: {}",
+            clip(first, 240)
+        ));
         if self.verbose == 0 {
             self.line(&self.st.dim(
                 "  (-v shows the whole message as it happens; PHITEX_SCHED=FILE writes the scheduler's trace)",
@@ -279,18 +310,27 @@ fn payload(p: &(dyn Any + Send)) -> String {
 pub fn capture_panics(verbose: bool) {
     std::panic::set_hook(Box::new(move |info| {
         let msg = payload(info.payload());
-        let at = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        let at = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_default();
         if verbose {
             eprintln!("panic at {at}:\n{msg}");
         }
-        PANICS.lock().unwrap_or_else(PoisonError::into_inner).push(format!("{msg} (at {at})"));
+        PANICS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(format!("{msg} (at {at})"));
     }));
 }
 
 /// `f`, a panic in it (the engine's: a build whose pieces did not settle)
 /// an error instead of the process's end: the first panic's message.
 pub fn catch<T>(f: impl FnOnce() -> T) -> Result<T, String> {
-    PANICS.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    PANICS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
     std::panic::catch_unwind(AssertUnwindSafe(f)).map_err(|p| {
         let mut v = PANICS.lock().unwrap_or_else(PoisonError::into_inner);
         let first = v.first().cloned().unwrap_or_else(|| payload(&*p));
@@ -316,6 +356,9 @@ mod tests {
         capture_panics(false);
         assert_eq!(catch(|| 3).unwrap(), 3);
         let e = catch(|| -> u32 { panic!("the sequence of pieces did not settle") }).unwrap_err();
-        assert!(e.starts_with("the sequence of pieces did not settle"), "{e}");
+        assert!(
+            e.starts_with("the sequence of pieces did not settle"),
+            "{e}"
+        );
     }
 }

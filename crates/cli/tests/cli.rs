@@ -1,13 +1,16 @@
-//! The `phitex` binary on phitex-red, end to end:
+//! The `phitex` binary, end to end. The tests that build on the native
+//! engine are ignored until it lands (`phitex-tex` on `phitex-reduce`);
+//! they are the gate it must pass, against the pdfTeX oracles under
+//! `oracle/fixtures`:
 //!
 //! - `latex -interaction=batchmode NAME.tex` (phitex run as `latex`) on
-//!   phitex-red's LaTeX documents (`crates/engines/red/tests/latex/docs`):
+//!   the LaTeX documents (`oracle/fixtures/latex/docs`):
 //!   the DVI file and the written files are TeX Live's `latex`'s on the
 //!   first run (the recorded oracles), the format made on the graph and
 //!   cached;
 //! - `pdftex -ini -etex -interaction=batchmode NAME.tex` on the PDF
-//!   documents of phitex-red's `tests/pdf.rs` (eight `-ini` documents, the
-//!   ten plain ones): the PDF file is pdfTeX's, byte for byte;
+//!   documents (eight `-ini` documents, the ten plain ones): the PDF file
+//!   is pdfTeX's, byte for byte;
 //! - `phitex build --output-format dvi` to the cross-run fixpoint, against
 //!   `latex` run until its `.aux` settles (where `latex` is installed);
 //! - `phitex watch` (headless: no viewer) on a 48-page plain document: a
@@ -15,7 +18,7 @@
 //!   the cold build's of the edited text;
 //! - `pdflatex -interaction=batchmode NAME.tex` on the same documents:
 //!   the PDF file and the written files are the recorded `pdflatex`
-//!   oracles' (`crates/engines/red/tests/latex/pdf/`), byte for byte.
+//!   oracles' (`oracle/fixtures/latex/pdf/`), byte for byte.
 //!
 //! One heavy run at a time (a format build holds about 4 GB). The formats
 //! are kept in the target's temporary directory across runs.
@@ -30,12 +33,13 @@ use std::time::{Duration, Instant};
 static ONE: Mutex<()> = Mutex::new(());
 
 fn one() -> std::sync::MutexGuard<'static, ()> {
-    ONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    ONE.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// The oracle fixtures (`crates/engines/red/tests/fixtures`).
+/// The oracle fixtures (`oracle/fixtures`).
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../engines/red/tests/fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../oracle/fixtures")
 }
 
 fn docs_dir() -> PathBuf {
@@ -52,7 +56,11 @@ fn pdfdocs_dir() -> PathBuf {
 
 /// Where document `name` is: `tests/latex/pdfdocs/` if it is one of those.
 fn doc_dir(name: &str) -> PathBuf {
-    if pdfdocs_dir().join(format!("{name}.tex")).exists() { pdfdocs_dir() } else { docs_dir() }
+    if pdfdocs_dir().join(format!("{name}.tex")).exists() {
+        pdfdocs_dir()
+    } else {
+        docs_dir()
+    }
 }
 
 fn cache() -> PathBuf {
@@ -61,7 +69,9 @@ fn cache() -> PathBuf {
 
 /// A fresh directory for a test's run.
 fn scratch(name: &str) -> PathBuf {
-    let d = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cli").join(name);
+    let d = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("cli")
+        .join(name);
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).expect("a scratch directory");
     d
@@ -122,14 +132,21 @@ fn masked(dvi: &[u8]) -> Vec<u8> {
 }
 
 fn first_difference(a: &[u8], b: &[u8]) -> String {
-    let at = a.iter().zip(b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
+    let at = a
+        .iter()
+        .zip(b)
+        .position(|(x, y)| x != y)
+        .unwrap_or(a.len().min(b.len()));
     format!("at byte {at} (lengths {} and {})", a.len(), b.len())
 }
 
 /// Copies document `name` (`NAME.tex` and its `NAME-*` files) into `dir`.
 fn copy_doc(name: &str, dir: &Path) {
     let pre = format!("{name}-");
-    for e in std::fs::read_dir(doc_dir(name)).expect("the documents").flatten() {
+    for e in std::fs::read_dir(doc_dir(name))
+        .expect("the documents")
+        .flatten()
+    {
         let f = e.file_name().to_string_lossy().into_owned();
         if f == format!("{name}.tex") || f.starts_with(&pre) {
             std::fs::copy(e.path(), dir.join(&f)).expect("a copy");
@@ -138,17 +155,17 @@ fn copy_doc(name: &str, dir: &Path) {
 }
 
 /// `latex -interaction=batchmode NAME.tex` through phitex: the DVI file
-/// and the written files are the recorded oracle's. The `.aux` file read
-/// back at `\end{document}` in the same run is phitex-red's known gap
-/// (CORE.md, "LaTeX documents": until agent B's fixpoint lands), with
-/// exactly its two errors and an empty `.toc`.
+/// and the written files are the recorded oracle's. (The `.aux` file read
+/// back at `\end{document}` in the same run was the old engine's known
+/// gap, with exactly its two errors and an empty `.toc`; the check below
+/// still allows it.)
 fn latex_doc(name: &str) {
     tex_doc("latex", name);
 }
 
 /// `pdflatex -interaction=batchmode NAME.tex` through phitex: the PDF file
 /// and the written files are the recorded `pdflatex` oracle's
-/// (`crates/engines/red/tests/latex/pdf/`).
+/// (`oracle/fixtures/latex/pdf/`).
 fn pdflatex_doc(name: &str) {
     tex_doc("pdflatex", name);
 }
@@ -159,7 +176,11 @@ fn pdflatex_doc(name: &str) {
 fn tex_doc(program: &str, name: &str) {
     let _one = one();
     let pdf = program == "pdflatex";
-    let oracles = if pdf { fixtures().join("latex/pdf") } else { docs_dir() };
+    let oracles = if pdf {
+        fixtures().join("latex/pdf")
+    } else {
+        docs_dir()
+    };
     let dir = scratch(&format!("{program}-{name}"));
     copy_doc(name, &dir);
     let t = Instant::now();
@@ -169,29 +190,41 @@ fn tex_doc(program: &str, name: &str) {
         .expect("phitex runs");
     let term = String::from_utf8_lossy(&out.stdout);
     let errs = String::from_utf8_lossy(&out.stderr);
-    eprintln!("{name}: {program} through phitex in {:.2} s, status {:?}\n{errs}", t.elapsed().as_secs_f64(), out.status.code());
+    eprintln!(
+        "{name}: {program} through phitex in {:.2} s, status {:?}\n{errs}",
+        t.elapsed().as_secs_f64(),
+        out.status.code()
+    );
     // (in batch mode the errors are in the log only)
     let log = chars(&std::fs::read(dir.join(format!("{name}.log"))).unwrap_or_default());
     let gap = log.contains(&format!("I can't find file `{name}.aux'"));
     if !out.status.success() {
         let errors: Vec<&str> = log.lines().filter(|l| l.starts_with("! ")).collect();
         assert!(
-            gap && errors.iter().all(|e| e.contains(&format!("`{name}.aux'")) || e.contains("End of file on the terminal") || e.contains("Emergency stop")),
+            gap && errors.iter().all(|e| e.contains(&format!("`{name}.aux'"))
+                || e.contains("End of file on the terminal")
+                || e.contains("Emergency stop")),
             "{name}: phitex failed, not on the known .aux gap: {errors:?}\nterminal:\n{term}\nstderr:\n{errs}\nlog:\n{log}"
         );
-        eprintln!("{name}: the .aux read back at \\end{{document}} is phitex-red's known gap (agent B's fixpoint)");
+        eprintln!("{name}: the .aux read back at \\end{{document}} is the known gap");
     }
     let ext = if pdf { "pdf" } else { "dvi" };
     let want = std::fs::read(oracles.join(format!("{name}.{ext}"))).expect("the oracle");
     let got = std::fs::read(dir.join(format!("{name}.{ext}"))).unwrap_or_default();
-    let same = if pdf { got == want } else { masked(&got) == masked(&want) };
+    let same = if pdf {
+        got == want
+    } else {
+        masked(&got) == masked(&want)
+    };
     assert!(
         same,
         "{name}: the {ext} file is not {program}'s: {} (ours in {})",
         first_difference(&got, &want),
         dir.display()
     );
-    let writes = parse_writes(&chars(&std::fs::read(oracles.join(format!("{name}.writes"))).expect("NAME.writes")));
+    let writes = parse_writes(&chars(
+        &std::fs::read(oracles.join(format!("{name}.writes"))).expect("NAME.writes"),
+    ));
     for (n, w) in writes {
         let got = chars(&std::fs::read(dir.join(&n)).unwrap_or_default());
         if gap && Path::new(&n).extension().is_some_and(|e| e == "toc") && got.is_empty() {
@@ -202,51 +235,61 @@ fn tex_doc(program: &str, name: &str) {
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn latex_sections() {
     latex_doc("sections");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn latex_math() {
     latex_doc("math");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn latex_tables() {
     latex_doc("tables");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn latex_figures() {
     latex_doc("figures");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn latex_titlepage() {
     latex_doc("titlepage");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn latex_packages() {
     latex_doc("packages");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn latex_ams() {
     latex_doc("ams");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn latex_gfx() {
     latex_doc("gfx");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn latex_layout() {
     latex_doc("layout");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn latex_rules() {
     latex_doc("rules");
 }
@@ -257,7 +300,10 @@ fn plain() -> String {
     let s = std::fs::read_to_string(fixtures().join("dvi/plaintext.tex")).expect("plaintext.tex");
     let at = s.find("\\output={}\n").expect("plaintext.tex's body");
     let h = std::fs::read_to_string(fixtures().join("hyph/hyphen.tex")).expect("hyphen.tex");
-    s[..at].replace("% (\\input hyphen: no hyphenation patterns on the graph yet)\n", &h)
+    s[..at].replace(
+        "% (\\input hyphen: no hyphenation patterns on the graph yet)\n",
+        &h,
+    )
 }
 
 /// The PDF documents of phitex-red's `tests/pdf.rs`: the name of the file
@@ -265,15 +311,32 @@ fn plain() -> String {
 fn pdf_docs() -> Vec<(String, String, String)> {
     let pdf = fixtures().join("pdf");
     let mut v = Vec::new();
-    for name in ["hello", "compressed", "mag", "mixed1", "mixed2", "objstm", "rules", "guess"] {
+    for name in [
+        "hello",
+        "compressed",
+        "mag",
+        "mixed1",
+        "mixed2",
+        "objstm",
+        "rules",
+        "guess",
+    ] {
         let text = std::fs::read_to_string(pdf.join(format!("{name}.tex"))).expect("NAME.tex");
         v.push((name.to_owned(), text, name.to_owned()));
     }
     for body in ["story", "pages", "display", "table", "hyphens"] {
         for default in [false, true] {
-            let b = std::fs::read_to_string(fixtures().join(format!("tests/plain/{body}.tex"))).expect("a body");
-            let text = "\\pdfoutput=1\n".to_string() + &plain() + if default { "\\output={}\n" } else { "" } + &b;
-            let name = if default { format!("{body}-default") } else { body.to_owned() };
+            let b = std::fs::read_to_string(fixtures().join(format!("tests/plain/{body}.tex")))
+                .expect("a body");
+            let text = "\\pdfoutput=1\n".to_string()
+                + &plain()
+                + if default { "\\output={}\n" } else { "" }
+                + &b;
+            let name = if default {
+                format!("{body}-default")
+            } else {
+                body.to_owned()
+            };
             v.push((name.clone(), text, format!("plain-{name}")));
         }
     }
@@ -283,6 +346,7 @@ fn pdf_docs() -> Vec<(String, String, String)> {
 /// `pdftex -ini -etex -interaction=batchmode NAME.tex` through phitex:
 /// pdfTeX's PDF file, byte for byte.
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdftex_ini_documents() {
     let _one = one();
     let mut bad = Vec::new();
@@ -290,10 +354,16 @@ fn pdftex_ini_documents() {
         let dir = scratch(&format!("pdf-{name}"));
         std::fs::write(dir.join(format!("{name}.tex")), &text).expect("the document");
         let out = command(&as_program("pdftex"), &dir)
-            .args(["-ini", "-etex", "-interaction=batchmode", &format!("{name}.tex")])
+            .args([
+                "-ini",
+                "-etex",
+                "-interaction=batchmode",
+                &format!("{name}.tex"),
+            ])
             .output()
             .expect("phitex runs");
-        let want = std::fs::read(fixtures().join(format!("tests/pdf/{oracle}.pdf"))).expect("the oracle");
+        let want =
+            std::fs::read(fixtures().join(format!("tests/pdf/{oracle}.pdf"))).expect("the oracle");
         let got = std::fs::read(dir.join(format!("{name}.pdf"))).unwrap_or_default();
         if !out.status.success() || got != want {
             bad.push(format!(
@@ -304,12 +374,19 @@ fn pdftex_ini_documents() {
             ));
         }
     }
-    assert!(bad.is_empty(), "PDF files that are not pdfTeX's:\n{}", bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "PDF files that are not pdfTeX's:\n{}",
+        bad.join("\n")
+    );
 }
 
 /// Whether a program of TeX Live is there.
 fn have(program: &str) -> bool {
-    Command::new(program).arg("--version").output().is_ok_and(|o| o.status.success())
+    Command::new(program)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 /// `latex` run in `dir` until the `.aux` file settles (as latexmk runs
@@ -346,7 +423,13 @@ fn build_to_the_fixpoint() {
         let ours = scratch(&format!("fixpoint-{name}"));
         copy_doc(name, &ours);
         let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &ours)
-            .args(["build", "-v", "--output-format", "dvi", &format!("{name}.tex")])
+            .args([
+                "build",
+                "-v",
+                "--output-format",
+                "dvi",
+                &format!("{name}.tex"),
+            ])
             .output()
             .expect("phitex runs");
         let errs = String::from_utf8_lossy(&out.stderr);
@@ -375,7 +458,8 @@ fn big() -> String {
     let mut body = String::new();
     for k in 0..4 {
         for b in ["story", "pages", "display", "table", "hyphens"] {
-            let t = std::fs::read_to_string(fixtures().join(format!("plain/{b}.tex"))).expect("a plain body");
+            let t = std::fs::read_to_string(fixtures().join(format!("plain/{b}.tex")))
+                .expect("a plain body");
             let t = t.trim_end().strip_suffix("\\bye").unwrap_or(&t).to_string();
             let _ = write!(body, "\\message{{[part {k} {b}]}}\n{t}\n\n");
         }
@@ -398,7 +482,11 @@ fn until(lines: &mut impl Iterator<Item = String>, prefix: &str, seen: &mut Vec<
 /// The update's milliseconds in a build line (`update X ms`).
 fn update_ms(line: &str) -> f64 {
     let at = line.find("update ").expect("an update time") + "update ".len();
-    line[at..].split(' ').next().and_then(|n| n.parse().ok()).expect("a number")
+    line[at..]
+        .split(' ')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .expect("a number")
 }
 
 /// `phitex watch`, headless: a word edited in the file on disk is built as
@@ -407,13 +495,22 @@ fn update_ms(line: &str) -> f64 {
 /// budget (50 ms; phitex-red's budgets measure about 10 ms on this
 /// document) in a release build.
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn watch_word_edit() {
     let _one = one();
     let text = big();
     let dir = scratch("watch");
     std::fs::write(dir.join("big.tex"), &text).expect("the document");
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["watch", "--no-view", "--ini", "--etex", "-j", "8", "big.tex"])
+        .args([
+            "watch",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "-j",
+            "8",
+            "big.tex",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -444,7 +541,11 @@ fn watch_word_edit() {
         .args(["build", "--ini", "--etex", "-j", "8", "big.tex"])
         .output()
         .expect("phitex build runs");
-    assert!(out.status.success(), "the cold build failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "the cold build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let cold_pdf = std::fs::read(cold_dir.join("big.pdf")).expect("the cold PDF");
     assert!(
         watched == cold_pdf,
@@ -453,7 +554,10 @@ fn watch_word_edit() {
     );
     eprintln!("watch: a word edit's update took {ms:.2} ms on 48 pages");
     if !cfg!(debug_assertions) {
-        assert!(ms <= 50.0, "a word edit's update took {ms:.2} ms, over the brief's 50 ms");
+        assert!(
+            ms <= 50.0,
+            "a word edit's update took {ms:.2} ms, over the brief's 50 ms"
+        );
     }
 }
 
@@ -461,6 +565,7 @@ fn watch_word_edit() {
 /// cache: a format is cached under the build's identity (a hash of its
 /// sources, `tex::build_id`), not the executable's path, size or time.
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn format_cache_shared_by_copies() {
     let _one = one();
     let base = scratch("copies");
@@ -475,7 +580,9 @@ fn format_cache_shared_by_copies() {
                     .map(|e| e.path())
                     .filter(|p| p.extension().is_some_and(|x| x == "fmt"))
                     .map(|p| {
-                        let t = std::fs::metadata(&p).and_then(|m| m.modified()).expect("a time");
+                        let t = std::fs::metadata(&p)
+                            .and_then(|m| m.modified())
+                            .expect("a time");
                         (p, t)
                     })
                     .collect()
@@ -498,12 +605,18 @@ fn format_cache_shared_by_copies() {
         let errs = String::from_utf8_lossy(&out.stderr);
         assert!(out.status.success(), "copy {copy}: phitex failed: {errs}");
         if copy == "b" {
-            assert!(!errs.contains("making the"), "copy b made the format again: {errs}");
+            assert!(
+                !errs.contains("making the"),
+                "copy b made the format again: {errs}"
+            );
         }
         after.push(fmts());
     }
     assert_eq!(after[0].len(), 1, "one format: {:?}", after[0]);
-    assert_eq!(after[0], after[1], "the second copy wrote a format of its own");
+    assert_eq!(
+        after[0], after[1],
+        "the second copy wrote a format of its own"
+    );
 }
 
 /// A WebSocket text frame from a client (masked, RFC 6455).
@@ -543,7 +656,11 @@ fn ws_send(url: &str, request: &str) -> std::net::TcpStream {
         std::io::Read::read_exact(&mut s, &mut b).expect("the handshake's answer");
         head.push(b[0]);
     }
-    assert!(head.starts_with(b"HTTP/1.1 101"), "no upgrade: {}", String::from_utf8_lossy(&head));
+    assert!(
+        head.starts_with(b"HTTP/1.1 101"),
+        "no upgrade: {}",
+        String::from_utf8_lossy(&head)
+    );
     s.write_all(&ws_frame(request)).expect("the request");
     s
 }
@@ -552,6 +669,7 @@ fn ws_send(url: &str, request: &str) -> std::net::TcpStream {
 /// (`set_file` over the viewer's WebSocket, the file on disk untouched)
 /// is built as an edit; the PDF is the cold build's of the buffer's text.
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn watch_editor_buffer() {
     let _one = one();
     let body = std::fs::read_to_string(fixtures().join("plain/story.tex")).expect("a body");
@@ -569,7 +687,9 @@ fn watch_editor_buffer() {
     let stdout = child.stdout.take().expect("its output");
     let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
     let mut seen = Vec::new();
-    let url = until(&mut lines, "phitex: the viewer is at ", &mut seen)["phitex: the viewer is at ".len()..].to_owned();
+    let url = until(&mut lines, "phitex: the viewer is at ", &mut seen)
+        ["phitex: the viewer is at ".len()..]
+        .to_owned();
     until(&mut lines, "phitex: build 1 ", &mut seen);
     let at = body.find(" the ").expect("a word") + "\\pdfoutput=1\n".len() + plain().len();
     let edited = format!("{} thy {}", &text[..at], &text[at + 5..]);
@@ -580,9 +700,16 @@ fn watch_editor_buffer() {
     let _socket = ws_send(&url, &req);
     let line = until(&mut lines, "phitex: build 2 ", &mut seen);
     eprintln!("{line}");
-    assert!(line.contains("(editor)"), "the second build is not the editor's: {line}");
+    assert!(
+        line.contains("(editor)"),
+        "the second build is not the editor's: {line}"
+    );
     let watched = std::fs::read(dir.join("story.pdf")).expect("the watch's PDF");
-    assert_eq!(std::fs::read_to_string(dir.join("story.tex")).expect("the file"), text, "the file on disk changed");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("story.tex")).expect("the file"),
+        text,
+        "the file on disk changed"
+    );
     if let Some(mut i) = child.stdin.take() {
         let _ = i.write_all(b"q\n");
     }
@@ -593,9 +720,17 @@ fn watch_editor_buffer() {
         .args(["build", "--ini", "--etex", "story.tex"])
         .output()
         .expect("phitex build runs");
-    assert!(out.status.success(), "the cold build failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "the cold build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let cold_pdf = std::fs::read(cold_dir.join("story.pdf")).expect("the cold PDF");
-    assert!(watched == cold_pdf, "the buffer's build is not the cold build's: {}", first_difference(&watched, &cold_pdf));
+    assert!(
+        watched == cold_pdf,
+        "the buffer's build is not the cold build's: {}",
+        first_difference(&watched, &cold_pdf)
+    );
 }
 
 /// `s` as a JSON string.
@@ -619,51 +754,61 @@ fn json_string(s: &str) -> String {
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_sections() {
     pdflatex_doc("sections");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_math() {
     pdflatex_doc("math");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_tables() {
     pdflatex_doc("tables");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_figures() {
     pdflatex_doc("figures");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_titlepage() {
     pdflatex_doc("titlepage");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_packages() {
     pdflatex_doc("packages");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_ams() {
     pdflatex_doc("ams");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_gfx() {
     pdflatex_doc("gfx");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_layout() {
     pdflatex_doc("layout");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_rules() {
     pdflatex_doc("rules");
 }
@@ -679,36 +824,43 @@ fn pdflatex_pdfdoc(name: &str) {
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_pdfdoc_hyper() {
     pdflatex_pdfdoc("hyper");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_pdfdoc_graphics() {
     pdflatex_pdfdoc("graphics");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_pdfdoc_color() {
     pdflatex_pdfdoc("color");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_pdfdoc_tikz() {
     pdflatex_pdfdoc("tikz");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_pdfdoc_zsavepos() {
     pdflatex_pdfdoc("zsavepos");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_pdfdoc_objs() {
     pdflatex_pdfdoc("objs");
 }
 
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn pdflatex_pdfdoc_vfont() {
     pdflatex_pdfdoc("vfont");
 }
@@ -734,7 +886,12 @@ fn lualatex_external() {
     let mut last = None;
     for _ in 0..5 {
         let _ = Command::new("lualatex")
-            .args(["-interaction=batchmode", "-recorder", "-synctex=1", "lua.tex"])
+            .args([
+                "-interaction=batchmode",
+                "-recorder",
+                "-synctex=1",
+                "lua.tex",
+            ])
             .current_dir(&dir)
             .env("SOURCE_DATE_EPOCH", "0")
             .env("FORCE_SOURCE_DATE", "1")
@@ -757,11 +914,24 @@ fn lualatex_external() {
         .expect("phitex runs");
     let errs = String::from_utf8_lossy(&out.stderr);
     eprintln!("phitex build --engine lualatex:\n{errs}");
-    assert!(out.status.success(), "phitex build --engine lualatex failed:\n{errs}");
-    assert!(errs.contains("not incremental"), "the build does not say it is not incremental:\n{errs}");
+    assert!(
+        out.status.success(),
+        "phitex build --engine lualatex failed:\n{errs}"
+    );
+    assert!(
+        errs.contains("not incremental"),
+        "the build does not say it is not incremental:\n{errs}"
+    );
     let got = std::fs::read(dir.join("lua.pdf")).expect("phitex's PDF");
-    assert!(got == want, "the PDF is not lualatex's: {}", first_difference(&got, &want));
-    assert!(dir.join("lua.synctex.gz").is_file(), "lualatex's SyncTeX file is not there");
+    assert!(
+        got == want,
+        "the PDF is not lualatex's: {}",
+        first_difference(&got, &want)
+    );
+    assert!(
+        dir.join("lua.synctex.gz").is_file(),
+        "lualatex's SyncTeX file is not there"
+    );
 }
 
 /// A one-page job without a format (`--ini --etex`).
@@ -773,6 +943,7 @@ fn tiny() -> &'static str {
 /// file: `-o DIR` and `-j N` in the three positions, the output where
 /// `-o` says.
 #[test]
+#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
 fn options_in_any_position() {
     let _one = one();
     let dir = scratch("options");
@@ -783,8 +954,15 @@ fn options_in_any_position() {
         &["build", "--ini", "--etex", "t.tex", "-o", "out3", "-j", "2"],
     ];
     for (k, args) in lines.iter().enumerate() {
-        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir).args(*args).output().expect("phitex runs");
-        assert!(out.status.success(), "phitex {args:?} failed:\n{}", String::from_utf8_lossy(&out.stderr));
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args(*args)
+            .output()
+            .expect("phitex runs");
+        assert!(
+            out.status.success(),
+            "phitex {args:?} failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let dvi = dir.join(format!("out{}", k + 1)).join("t.dvi");
         assert!(dvi.is_file(), "phitex {args:?} wrote no {}", dvi.display());
     }
@@ -820,11 +998,28 @@ fn unknown_option_is_named() {
 #[test]
 fn help_is_sectioned() {
     let dir = scratch("help");
-    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir).arg("--help").output().expect("phitex runs");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .arg("--help")
+        .output()
+        .expect("phitex runs");
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
-    for section in ["Commands:", "Options:", "Examples:", "build", "watch", "--output-dir", "--jobs"] {
-        assert!(text.contains(section), "`{section}` is not in the help:\n{text}");
+    for section in [
+        "Commands:",
+        "Options:",
+        "Examples:",
+        "build",
+        "watch",
+        "--output-dir",
+        "--jobs",
+    ] {
+        assert!(
+            text.contains(section),
+            "`{section}` is not in the help:\n{text}"
+        );
     }
-    assert!(!text.contains('\x1b'), "escape sequences off a terminal:\n{text}");
+    assert!(
+        !text.contains('\x1b'),
+        "escape sequences off a terminal:\n{text}"
+    );
 }

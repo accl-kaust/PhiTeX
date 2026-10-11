@@ -14,17 +14,18 @@
 # PhiTeX
 
 A TeX engine in Rust that compiles a document by graph reduction of
-pending thunks (`phitex-red`): macros are functions, the PDF is the
-root, and the files a job writes and reads back are a loop-back reduced
-to a fixpoint. A cold build is an edit from nothing; an edit reduces
-again only what its change reaches, and its output is the cold build's,
-byte for byte.
+pending thunks: macros are functions, the PDF is the root, and the files
+a job writes and reads back are a loop-back reduced to a fixpoint. A
+cold build is an edit from nothing; an edit reduces again only what its
+change reaches, and its output is the cold build's, byte for byte.
 
 ## Status
 
-- **The engine:** phitex-red, being written; the PDF is the bar
-  (byte-identical with pdfTeX 1.40.29). XeTeX and SyncTeX are not on it
-  yet.
+- **The engine:** being written as layers: `phitex-reduce` (a TeX-free
+  def-use graph of fields) under `phitex-tex` (TeX's semantics on it),
+  with `phitex-typeset` (Knuth's algorithms, pure). The PDF is the bar
+  (byte-identical with pdfTeX 1.40.29). The previous engine, phitex-red,
+  was removed; its pdfTeX oracles are kept under `oracle/fixtures`.
 - **The cross-run fixpoint:** the files a job writes (`.aux`, `.toc`,
   `.bbl`, `.ind`) are read back inside the build until they settle,
   BibTeX and makeindex in process.
@@ -33,17 +34,16 @@ byte for byte.
 
 | Crate | What it is |
 |---|---|
-| `phitex-red` | the engine today: TeX as graph reduction (`crates/engines/red/CONSTRUCTS.md`) |
-| `phitex-reduce`, `phitex-tex`, `phitex-typeset` | (stubs) the reduction core, TeX on it, Knuth's algorithms as pure functions |
+| `phitex-reduce`, `phitex-tex` | (stubs) the reduction core, TeX on it |
+| `phitex-typeset` | Knuth's algorithms as pure functions: line breaking, hyphenation, math, alignments, the page builder |
 | `phitex-pdftex`, `phitex-xetex`, `phitex-luatex`, `phitex-lua` | (stubs) the engines, and Lua for LuaTeX |
 | `phitex-tfm`, `phitex-dvi`, `phitex-pdf` | (stubs) font metrics, DVI/XDV, pdfTeX's PDF backend |
-| `phitex-source` | source text as units with identities; the lexer, paragraphs and syntax tree |
+| `phitex-source` | source text as units with identities; the lexer, paragraphs, syntax tree and the syntactic pass |
 | `phitex-cli` | the `phitex` command |
 | `phitex-kpse` | kpathsea file lookup |
 | `phitex-bibtex`, `phitex-makeindex` | BibTeX and makeindex |
 | `phitex-otf`, `phitex-xdvipdfmx` | OpenType shaping, xdvipdfmx |
 | `phitex-doc`, `phitex-diff`, `phitex-git` | the document's structure, latexdiff, git |
-| `phitex-syntax` | the old CST, kept for phitex-red until its rewrite |
 | `phitex-draw`, `phitex-codecs` | the viewer's pages, the codecs and PDF reader |
 
 Each crate's docs say what it is; `AGENTS.md` holds the working rules.

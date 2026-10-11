@@ -219,7 +219,9 @@ pub fn json_str(out: &mut Vec<u8>, s: &str) {
             '\n' => out.extend_from_slice(b"\\n"),
             '\r' => out.extend_from_slice(b"\\r"),
             '\t' => out.extend_from_slice(b"\\t"),
-            c if u32::from(c) < 0x20 => out.extend_from_slice(format!("\\u{:04x}", u32::from(c)).as_bytes()),
+            c if u32::from(c) < 0x20 => {
+                out.extend_from_slice(format!("\\u{:04x}", u32::from(c)).as_bytes())
+            }
             c => {
                 let mut b = [0u8; 4];
                 out.extend_from_slice(c.encode_utf8(&mut b).as_bytes());

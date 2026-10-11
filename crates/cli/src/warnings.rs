@@ -26,8 +26,12 @@ impl Kind {
             Kind::Font => format!("{n} font warning{s}"),
             Kind::OverfullHbox => format!("{n} overfull \\hbox{}", if n == 1 { "" } else { "es" }),
             Kind::OverfullVbox => format!("{n} overfull \\vbox{}", if n == 1 { "" } else { "es" }),
-            Kind::UnderfullHbox => format!("{n} underfull \\hbox{}", if n == 1 { "" } else { "es" }),
-            Kind::UnderfullVbox => format!("{n} underfull \\vbox{}", if n == 1 { "" } else { "es" }),
+            Kind::UnderfullHbox => {
+                format!("{n} underfull \\hbox{}", if n == 1 { "" } else { "es" })
+            }
+            Kind::UnderfullVbox => {
+                format!("{n} underfull \\vbox{}", if n == 1 { "" } else { "es" })
+            }
             Kind::Other => format!("{n} other warning{s}"),
         }
     }
@@ -42,7 +46,9 @@ fn kind(line: &str) -> Option<Kind> {
             Kind::UndefinedCitation
         } else if r.starts_with("Label(s) may have changed") || r.contains("Rerun to get") {
             Kind::Rerun
-        } else if r.starts_with("There were undefined references") || r.starts_with("There were multiply") {
+        } else if r.starts_with("There were undefined references")
+            || r.starts_with("There were multiply")
+        {
             return None;
         } else {
             Kind::Other

@@ -2,7 +2,7 @@
 //! options anywhere on the line, a coloured sectioned `--help`, typos
 //! suggested). What to build comes from the command line, `phitex.toml`
 //! and the main file's magic comments (`config.rs`); the build is a
-//! session on phitex-red (`session.rs`), to the cross-run fixpoint,
+//! a document session (`session.rs`), to the cross-run fixpoint,
 //! BibTeX and makeindex included; the terminal is `ui.rs`.
 
 use std::path::{Path, PathBuf};
@@ -26,7 +26,7 @@ const STYLES: Styles = Styles::styled()
     .invalid(AnsiColor::Yellow.on_default());
 
 const ABOUT: &str = "\
-PhiTeX: TeX documents as graph reduction (phitex-red)
+PhiTeX: TeX documents as graph reduction
 
 A document is built to its fixpoint (BibTeX and makeindex included) and,
 under `watch`, kept up to date as its files and the editor's buffers
@@ -61,8 +61,8 @@ fn after_help() -> String {
 #[command(
     name = "phitex",
     bin_name = "phitex",
-    version = concat!(env!("CARGO_PKG_VERSION"), " (phitex-red)"),
-    about = "PhiTeX: TeX documents as graph reduction (phitex-red)",
+    version = env!("CARGO_PKG_VERSION"),
+    about = "PhiTeX: TeX documents as graph reduction",
     long_about = ABOUT,
     after_help = after_help(),
     styles = STYLES,
@@ -111,13 +111,21 @@ enum Sub {
     /// shown; both from <job>.synctex.gz, printed as TeX Live's `synctex`
     #[command(verbatim_doc_comment)]
     Sync {
-        #[arg(value_name = "ARGS", trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(
+            value_name = "ARGS",
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
         args: Vec<String>,
     },
     /// The document's structure, read from its source without TeX
     /// (`phitex outline --help`)
     Outline {
-        #[arg(value_name = "ARGS", trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(
+            value_name = "ARGS",
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
         args: Vec<String>,
     },
 }
@@ -127,7 +135,14 @@ enum Sub {
 #[allow(clippy::struct_excessive_bools)]
 struct Opts {
     /// Where the outputs go (TeX's -output-directory)
-    #[arg(short = 'o', long = "output-dir", alias = "output-directory", alias = "out-dir", value_name = "DIR", global = true)]
+    #[arg(
+        short = 'o',
+        long = "output-dir",
+        alias = "output-directory",
+        alias = "out-dir",
+        value_name = "DIR",
+        global = true
+    )]
     output_dir: Option<String>,
     /// pdflatex (default for LaTeX), latex, pdftex (default otherwise),
     /// etex, tex; lualatex runs the system's lualatex: NOT incremental
@@ -143,7 +158,13 @@ struct Opts {
     #[arg(long, global = true)]
     etex: bool,
     /// Threads (default: all cores)
-    #[arg(short = 'j', long = "jobs", alias = "threads", value_name = "N", global = true)]
+    #[arg(
+        short = 'j',
+        long = "jobs",
+        alias = "threads",
+        value_name = "N",
+        global = true
+    )]
     jobs: Option<usize>,
     /// batchmode (default), nonstopmode, scrollmode or errorstopmode
     #[arg(long, value_name = "MODE", value_parser = ["batchmode", "nonstopmode", "scrollmode", "errorstopmode"], global = true)]
@@ -259,9 +280,19 @@ impl Cli {
             copy_pdf: if o.no_copy_pdf {
                 Some(config::CopyPdf::Off)
             } else {
-                o.copy_pdf.map(|d| if d.is_empty() { config::CopyPdf::Invocation } else { config::CopyPdf::Dir(d) })
+                o.copy_pdf.map(|d| {
+                    if d.is_empty() {
+                        config::CopyPdf::Invocation
+                    } else {
+                        config::CopyPdf::Dir(d)
+                    }
+                })
             },
-            synctex: if o.no_synctex { Some(false) } else { o.synctex.map(|v| v.trim() != "0") },
+            synctex: if o.no_synctex {
+                Some(false)
+            } else {
+                o.synctex.map(|v| v.trim() != "0")
+            },
             recorder: o.recorder,
             all,
         }
@@ -277,7 +308,9 @@ fn parse(args: &[String]) -> Result<Options, clap::Error> {
         Some("c") => Some("check"),
         other => other,
     };
-    let line = std::iter::once("phitex").chain(first).chain(args.iter().skip(1).map(String::as_str));
+    let line = std::iter::once("phitex")
+        .chain(first)
+        .chain(args.iter().skip(1).map(String::as_str));
     Cli::try_parse_from(line).map(Cli::into_options)
 }
 
@@ -312,7 +345,8 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
     let found = config::find(&cwd)?;
     let (root, cfg, configured) = match (&o.file, found) {
         (None, Some((root, cfg))) => {
-            std::env::set_current_dir(&root).map_err(|e| format!("can't enter {}: {e}", root.display()))?;
+            std::env::set_current_dir(&root)
+                .map_err(|e| format!("can't enter {}: {e}", root.display()))?;
             (root, cfg, true)
         }
         (Some(_), Some((root, cfg))) if root == cwd => (root, cfg, true),
@@ -323,11 +357,10 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         (None, Some(c)) => copy_dir(c, &cwd, &root),
         (None, None) => None,
     };
-    let mut file = o
-        .file
-        .clone()
-        .or_else(|| cfg.main.clone())
-        .ok_or("no file given, and no phitex.toml names one (`main = \"paper.tex\"`)".to_owned())?;
+    let mut file =
+        o.file.clone().or_else(|| cfg.main.clone()).ok_or(
+            "no file given, and no phitex.toml names one (`main = \"paper.tex\"`)".to_owned(),
+        )?;
     let read = |f: &str| {
         std::fs::read(f)
             .or_else(|_| std::fs::read(format!("{f}.tex")))
@@ -353,11 +386,18 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         engine = engine.with_output(out)?;
     }
     let mut output_dir = o.output_dir.clone().or(cfg.output_dir);
-    if !configured && let Some(dir) = Path::new(&file).parent().filter(|d| !d.as_os_str().is_empty()) {
+    if !configured
+        && let Some(dir) = Path::new(&file)
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+    {
         let dir = dir.to_path_buf();
         output_dir = output_dir.map(|d| cwd.join(d).to_string_lossy().into_owned());
-        std::env::set_current_dir(&dir).map_err(|e| format!("can't enter {}: {e}", dir.display()))?;
-        file = Path::new(&file).file_name().map_or(file.clone(), |f| f.to_string_lossy().into_owned());
+        std::env::set_current_dir(&dir)
+            .map_err(|e| format!("can't enter {}: {e}", dir.display()))?;
+        file = Path::new(&file)
+            .file_name()
+            .map_or(file.clone(), |f| f.to_string_lossy().into_owned());
     }
     Ok(Target {
         file,
@@ -402,7 +442,10 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
         file: t.file.clone(),
         path,
         jobname: t.job(),
-        out_dir: t.output_dir.as_ref().map_or_else(|| PathBuf::from("."), PathBuf::from),
+        out_dir: t
+            .output_dir
+            .as_ref()
+            .map_or_else(|| PathBuf::from("."), PathBuf::from),
         // (batch mode, as the oracles run: the CLI shows the errors itself)
         threads: o.threads.unwrap_or_else(crate::default_threads),
         synctex: t.synctex,
@@ -413,12 +456,24 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
 
 /// What the spinner says is built: `pdflatex paper.tex`.
 pub fn what(t: &Target, job: &Job) -> String {
-    if job.ini { format!("{} (ini)", t.file) } else { format!("{} {}", t.engine.name, t.file) }
+    if job.ini {
+        format!("{} (ini)", t.file)
+    } else {
+        format!("{} {}", t.engine.name, t.file)
+    }
 }
 
 /// What a build did, for the terminal: each run (verbose), the tools, the
 /// errors as reports, the warnings, the result line.
-pub fn report(t: &Target, s: &Session, r: &Report, wrote: Option<&Path>, o: &Options, ui: &Ui, checked: bool) {
+pub fn report(
+    t: &Target,
+    s: &Session,
+    r: &Report,
+    wrote: Option<&Path>,
+    o: &Options,
+    ui: &Ui,
+    checked: bool,
+) {
     let st = ui.st;
     let job = &s.job;
     if o.verbose > 0 {
@@ -443,7 +498,11 @@ pub fn report(t: &Target, s: &Session, r: &Report, wrote: Option<&Path>, o: &Opt
     let text = r.log_text();
     crate::problems::show(ui, &r.out.errors, &text, &t.file);
     if r.out.errors.len() > 10 && o.verbose == 0 {
-        ui.line(&format!("  … {} errors in all (-v shows more; the log: {})", r.out.errors.len(), log.display()));
+        ui.line(&format!(
+            "  … {} errors in all (-v shows more; the log: {})",
+            r.out.errors.len(),
+            log.display()
+        ));
     }
     if !r.unsettled.is_empty() {
         ui.warning(&format!(
@@ -458,7 +517,11 @@ pub fn report(t: &Target, s: &Session, r: &Report, wrote: Option<&Path>, o: &Opt
         ui.line(&format!(
             "{}: {} ({})",
             st.yellow("warnings"),
-            warn.iter().filter(|l| !l.starts_with(' ')).cloned().collect::<Vec<_>>().join(", "),
+            warn.iter()
+                .filter(|l| !l.starts_with(' '))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
             log.display()
         ));
         for l in warn.iter().filter(|l| l.starts_with(' ')) {
@@ -544,12 +607,39 @@ fn build(t: &Target, o: &Options, ui: &Ui, write: bool) -> i32 {
 
 /// The files a build of job `job` writes (`clean`).
 const CLEAN: &[&str] = &[
-    "pdf", "dvi", "xdv", "log", "fls", "synctex.gz", "aux", "toc", "lof", "lot", "out", "bbl", "blg", "idx",
-    "ind", "ilg", "nav", "snm", "vrb", "bcf", "run.xml", "glo", "gls", "glg", "loa", "thm",
+    "pdf",
+    "dvi",
+    "xdv",
+    "log",
+    "fls",
+    "synctex.gz",
+    "aux",
+    "toc",
+    "lof",
+    "lot",
+    "out",
+    "bbl",
+    "blg",
+    "idx",
+    "ind",
+    "ilg",
+    "nav",
+    "snm",
+    "vrb",
+    "bcf",
+    "run.xml",
+    "glo",
+    "gls",
+    "glg",
+    "loa",
+    "thm",
 ];
 
 fn clean(t: &Target, ui: &Ui) -> i32 {
-    let dir = t.output_dir.as_ref().map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let dir = t
+        .output_dir
+        .as_ref()
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
     let mut n = 0;
     for ext in CLEAN {
         let p = dir.join(format!("{}.{ext}", t.job()));
@@ -557,7 +647,10 @@ fn clean(t: &Target, ui: &Ui) -> i32 {
             n += 1;
         }
     }
-    ui.line(&ui.st.green(&format!("removed {n} file{}", if n == 1 { "" } else { "s" })));
+    ui.line(&ui.st.green(&format!(
+        "removed {n} file{}",
+        if n == 1 { "" } else { "s" }
+    )));
     0
 }
 
@@ -565,7 +658,9 @@ fn clean_all(ui: &Ui) -> ! {
     let d = tex::cache_dir();
     match std::fs::remove_dir_all(&d) {
         Ok(()) => ui.line(&ui.st.green(&format!("removed {}", d.display()))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ui.line(&format!("nothing cached ({})", d.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            ui.line(&format!("nothing cached ({})", d.display()))
+        }
         Err(e) => {
             ui.error(&format!("{}: {e}", d.display()));
             std::process::exit(1);
@@ -602,7 +697,12 @@ pub fn main(args: &[String]) -> ! {
             std::process::exit(crate::view::sync_command(place));
         }
         Command::Outline => {
-            let rest: Vec<String> = args.iter().skip_while(|a| *a != "outline").skip(1).cloned().collect();
+            let rest: Vec<String> = args
+                .iter()
+                .skip_while(|a| *a != "outline")
+                .skip(1)
+                .cloned()
+                .collect();
             crate::outline::main(&rest);
         }
         _ => {}
@@ -614,7 +714,9 @@ pub fn main(args: &[String]) -> ! {
     #[cfg(not(target_family = "wasm"))]
     if let Some(p) = t.external {
         match command {
-            Command::Build | Command::Check => std::process::exit(crate::external::main_build(p, &t, &o, ui.st)),
+            Command::Build | Command::Check => {
+                std::process::exit(crate::external::main_build(p, &t, &o, ui.st))
+            }
             Command::Watch => crate::external::main_watch(p, &t, &o, ui.st),
             _ => {}
         }
@@ -647,7 +749,10 @@ mod tests {
         let o = parse(&v(&["watch", "--no-view", "--ini", "--etex", "a.tex"])).unwrap();
         assert!(o.ini && o.etex);
         assert_eq!(o.view, Some(false));
-        assert_eq!(parse(&v(&["b", "x.tex"])).unwrap().command, Some(Command::Build));
+        assert_eq!(
+            parse(&v(&["b", "x.tex"])).unwrap().command,
+            Some(Command::Build)
+        );
     }
 
     #[test]
@@ -669,9 +774,14 @@ mod tests {
         assert!(matches!(o.copy_pdf, Some(config::CopyPdf::Invocation)));
         assert_eq!(o.synctex, Some(false));
         assert_eq!(o.file.as_deref(), Some("x.tex"));
-        let e = parse(&v(&["build", "--frob", "x.tex"])).unwrap_err().to_string();
+        let e = parse(&v(&["build", "--frob", "x.tex"]))
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("--frob"), "{e}");
         assert!(parse(&v(&["clean", "--all"])).unwrap().all);
-        assert_eq!(parse(&v(&["sync", "a.tex:3"])).unwrap().file.as_deref(), Some("a.tex:3"));
+        assert_eq!(
+            parse(&v(&["sync", "a.tex:3"])).unwrap().file.as_deref(),
+            Some("a.tex:3")
+        );
     }
 }

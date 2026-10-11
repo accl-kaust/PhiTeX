@@ -54,13 +54,62 @@ pub struct Engine {
 /// `xetex xetex language.def -etex xetex.ini`, `xelatex xetex
 /// language.dat -etex xelatex.ini`.
 const ENGINES: [Engine; 7] = [
-    Engine { name: "tex", ini: "tex.ini", etex: false, kpse_engine: "tex", output: Output::Dvi, xetex: false },
-    Engine { name: "etex", ini: "etex.ini", etex: true, kpse_engine: "pdftex", output: Output::Dvi, xetex: false },
-    Engine { name: "pdftex", ini: "pdfetex.ini", etex: true, kpse_engine: "pdftex", output: Output::Pdf, xetex: false },
-    Engine { name: "latex", ini: "latex.ini", etex: true, kpse_engine: "pdftex", output: Output::Dvi, xetex: false },
-    Engine { name: "pdflatex", ini: "pdflatex.ini", etex: true, kpse_engine: "pdftex", output: Output::Pdf, xetex: false },
-    Engine { name: "xetex", ini: "xetex.ini", etex: true, kpse_engine: "xetex", output: Output::Pdf, xetex: true },
-    Engine { name: "xelatex", ini: "xelatex.ini", etex: true, kpse_engine: "xetex", output: Output::Pdf, xetex: true },
+    Engine {
+        name: "tex",
+        ini: "tex.ini",
+        etex: false,
+        kpse_engine: "tex",
+        output: Output::Dvi,
+        xetex: false,
+    },
+    Engine {
+        name: "etex",
+        ini: "etex.ini",
+        etex: true,
+        kpse_engine: "pdftex",
+        output: Output::Dvi,
+        xetex: false,
+    },
+    Engine {
+        name: "pdftex",
+        ini: "pdfetex.ini",
+        etex: true,
+        kpse_engine: "pdftex",
+        output: Output::Pdf,
+        xetex: false,
+    },
+    Engine {
+        name: "latex",
+        ini: "latex.ini",
+        etex: true,
+        kpse_engine: "pdftex",
+        output: Output::Dvi,
+        xetex: false,
+    },
+    Engine {
+        name: "pdflatex",
+        ini: "pdflatex.ini",
+        etex: true,
+        kpse_engine: "pdftex",
+        output: Output::Pdf,
+        xetex: false,
+    },
+    Engine {
+        name: "xetex",
+        ini: "xetex.ini",
+        etex: true,
+        kpse_engine: "xetex",
+        output: Output::Pdf,
+        xetex: true,
+    },
+    Engine {
+        name: "xelatex",
+        ini: "xelatex.ini",
+        etex: true,
+        kpse_engine: "xetex",
+        output: Output::Pdf,
+        xetex: true,
+    },
 ];
 
 /// The engine a program name (or a magic comment's, `phitex.toml`'s
@@ -93,7 +142,10 @@ impl Engine {
         // (XeTeX's formats write PDF, or with `-no-pdf` the XDV file)
         if self.xetex {
             return match out {
-                Output::Xdv | Output::Pdf => Ok(Engine { output: out, ..self }),
+                Output::Xdv | Output::Pdf => Ok(Engine {
+                    output: out,
+                    ..self
+                }),
                 Output::Dvi => Err(format!("{} writes XDV or PDF, not DVI", self.name)),
             };
         }
@@ -111,7 +163,9 @@ impl Engine {
 /// executable lives; if no `texmf.cnf` is reachable from there (a
 /// development build), the location of `tex` on `PATH`.
 pub fn kpse(progname: &str, engine: &str) -> Kpse {
-    let exe = std::env::current_exe().ok().and_then(|e| e.canonicalize().ok());
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.canonicalize().ok());
     let own = exe.as_ref().and_then(|e| e.parent().map(Path::to_path_buf));
     if let Some(dir) = &own {
         let mut k = Kpse::new(dir, progname, engine);
@@ -173,24 +227,32 @@ pub fn cache_dir() -> PathBuf {
     std::env::temp_dir().join("phitex-cache")
 }
 
-/// TeX Live for one program name: the finder a build is given.
+/// TeX Live for one program name: the finder a build is given (unused
+/// until the native engine, `phitex-tex` on `phitex-reduce`, lands).
+#[allow(dead_code)]
 pub struct Tree {
     /// kpathsea as the engine's program (its `progname`, `$engine`).
     kpse: Mutex<Kpse>,
 }
 
+#[allow(dead_code)]
 impl Tree {
     /// The tree for engine `e`: kpathsea as its program, made once (its
     /// `texmf.cnf` and `ls-R` read at the first lookup).
     pub fn open(e: &Engine) -> Tree {
-        Tree { kpse: Mutex::new(kpse(e.name, e.kpse_engine)) }
+        Tree {
+            kpse: Mutex::new(kpse(e.name, e.kpse_engine)),
+        }
     }
 
     /// Where file `name` is, by kpathsea in the format its extension
     /// names (pdfTeX's choices: a TFM, a VF, a map, a Type 1 font, an
     /// encoding, else an input).
     pub fn input(&self, name: &str) -> Option<PathBuf> {
-        let ext = Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("");
+        let ext = Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
         let format = match ext.to_ascii_lowercase().as_str() {
             "tfm" => Format::Tfm,
             "vf" => Format::Vf,
@@ -202,10 +264,12 @@ impl Tree {
             _ => Format::Tex,
         };
         let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
-        k.find_file(name.as_bytes(), format, false).map(|b| os(&b).to_path_buf())
+        k.find_file(name.as_bytes(), format, false)
+            .map(|b| os(&b).to_path_buf())
     }
 }
 
+#[allow(dead_code)]
 fn os(b: &[u8]) -> &Path {
     Path::new(OsStr::from_bytes(b))
 }
@@ -227,8 +291,22 @@ mod tests {
     #[test]
     fn engines() {
         assert_eq!(engine("pdfLaTeX").unwrap().ini, "pdflatex.ini");
-        assert_eq!(engine("latex").unwrap().with_output(Output::Pdf).unwrap().name, "pdflatex");
-        assert_eq!(engine("pdftex").unwrap().with_output(Output::Dvi).unwrap().name, "etex");
+        assert_eq!(
+            engine("latex")
+                .unwrap()
+                .with_output(Output::Pdf)
+                .unwrap()
+                .name,
+            "pdflatex"
+        );
+        assert_eq!(
+            engine("pdftex")
+                .unwrap()
+                .with_output(Output::Dvi)
+                .unwrap()
+                .name,
+            "etex"
+        );
         assert!(engine("tex").unwrap().with_output(Output::Pdf).is_err());
         let x = engine("XeLaTeX").unwrap();
         assert!(x.xetex && x.ini == "xelatex.ini" && x.output == Output::Pdf);
