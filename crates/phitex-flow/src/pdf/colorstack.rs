@@ -1,7 +1,7 @@
 //! utils.c's color stacks (`\pdfcolorstackinit`, `\pdfcolorstack`) and
 //! the `\pdfsave`/`\pdfsetmatrix` stacks used while shipping out: the
 //! fold's state from page to page, and a page's walk's (copied from
-//! partex-core's `pdf/colorstack.rs`).
+//! phitex-core's `pdf/colorstack.rs`).
 
 /// utils.c's `COLOR_DEFAULT`.
 const COLOR_DEFAULT: &[u8] = b"0 g 0 G";

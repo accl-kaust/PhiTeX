@@ -2,7 +2,7 @@
 # XeTeX tests, the regressions, clippy; everything into "$r".
 export SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1
 dist=$(kpsewhich -var-value TEXMFDIST)
-sed -i "s#/usr/share/texmf-dist#$dist#; s#/tmp/partex-xetex-fc-cache#$r/fc-cache#" scripts/xetex/fonts.conf
+sed -i "s#/usr/share/texmf-dist#$dist#; s#/tmp/phitex-xetex-fc-cache#$r/fc-cache#" scripts/xetex/fonts.conf
 if [ -n "${BLESS:-}" ]; then crates/phitex-flow/tests/xetex/bless.sh "$r/bless" > "$r/bless.log" 2>&1; export PHITEX_XETEX_ORACLE="$r/bless"; fi
 cargo run -q --release -p phitex-otf --example otf-index -- "$r/fonts.idx" > "$r/otf-index.log" 2>&1; echo "otf-index exit $?" >> "$r/summary.txt"
 cargo build --release -p phitex-flow --all-targets > "$r/build.log" 2>&1; echo "build exit $?" >> "$r/summary.txt"; grep -E "^error" -A8 "$r/build.log" | head -60 >> "$r/summary.txt"

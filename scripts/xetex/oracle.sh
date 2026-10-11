@@ -29,7 +29,7 @@ mkdir -p "$out"
 # builds its name database from the same list, in a cache of its own
 # (TEXMFVAR) so no user's database or system font enters it.
 export FONTCONFIG_FILE="$here/fonts.conf" OSFONTDIR=
-export TEXMFVAR="/tmp/partex-oracle-texmfvar-$engine"
+export TEXMFVAR="/tmp/phitex-oracle-texmfvar-$engine"
 export FORCE_SOURCE_DATE=1 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1700000000}"
 export TEXINPUTS="$(dirname "$src"):${TEXINPUTS:-}"
 cd "$out"

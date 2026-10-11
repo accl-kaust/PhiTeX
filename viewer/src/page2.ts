@@ -1,4 +1,4 @@
-// A page's draw list v2 (core-partex's pdfdraw: the PDF pdfTeX wrote, read
+// A page's draw list v2 (core-phitex's pdfdraw: the PDF pdfTeX wrote, read
 // back) drawn as SVG: the glyphs from the PDF's own embedded fonts (their
 // outlines, in the view's one glyph store, a `<use>` each, as pdf.js draws them), the
 // text over them invisible (for selecting and finding), and a `<path>` per

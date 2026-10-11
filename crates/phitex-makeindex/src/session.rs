@@ -1,5 +1,5 @@
 //! makeindex's output as blocks, made again only where what they read
-//! changed (partex's DESIGN 3.16, "Exactly the dirty work").
+//! changed (phitex's DESIGN 3.16, "Exactly the dirty work").
 //!
 //! A run scans the `.idx` files and sorts the entries as makeindex does:
 //! its comparison count, its progress dots and its duplicate marks are in

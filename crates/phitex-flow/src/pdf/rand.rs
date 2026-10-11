@@ -2,7 +2,7 @@
 //! `\pdfuniformdeviate`, `\pdfnormaldeviate`, `\pdfsetrandomseed`. The
 //! generator's state is a value (`val::Key::PdfRandom`, as
 //! [`Randoms::to_ints`]), each draw a definition of the next. Copied
-//! from partex-core's `random.rs`.
+//! from phitex-core's `random.rs`.
 
 /// `unity`.
 const UNITY: i32 = 0x1_0000;

@@ -1,5 +1,5 @@
 //! Versions: stable 128-bit content hashes (DESIGN 7.2), as in
-//! `partex-ssa::hash` (copied: φ depends on no crate of the workspace).
+//! `phitex-ssa::hash` (copied: φ depends on no crate of the workspace).
 //!
 //! A version is computed from a value's content when the value is made,
 //! independent of platform, pointer width and run: integers are fed

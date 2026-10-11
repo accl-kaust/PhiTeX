@@ -1,5 +1,5 @@
 //! Persistent sequences (DESIGN 7.6): a 32-way tree of `Arc` nodes with
-//! structural sharing, `partex-ssa::pvec`'s shape.
+//! structural sharing, `phitex-ssa::pvec`'s shape.
 //!
 //! - A sequence's version is the two-lane polynomial hash of its
 //!   elements' versions ([`Poly`]), which combines associatively, so it is

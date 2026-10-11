@@ -13,7 +13,7 @@
 //! function, memoised by content. N equal threads run whatever the
 //! scheduler picks. A cold build is an edit from nothing.
 //!
-//! Depends on no `partex-*` crate but the pure libraries `tests/wall.rs`
+//! Depends on no `phitex-*` crate but the pure libraries `tests/wall.rs`
 //! lists (phitex-kpse: kpathsea, the build's file finder; phitex-otf:
 //! OpenType, and phitex-xdvipdfmx: XDV to PDF, for XeTeX).
 

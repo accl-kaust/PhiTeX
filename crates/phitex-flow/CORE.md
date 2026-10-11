@@ -1,6 +1,6 @@
 # CORE: the command set of TeX on the graph
 
-> **Note (W, the CLI slice):** `crates/partex-core` is gone; the test font is `crates/phitex-flow/testdata/cmr10.tfm` (`concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/cmr10.tfm")`): rebase paths that named `../partex-core/testdata/cmr10.tfm`.
+> **Note (W, the CLI slice):** `crates/phitex-core` is gone; the test font is `crates/phitex-flow/testdata/cmr10.tfm` (`concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/cmr10.tfm")`): rebase paths that named `../phitex-core/testdata/cmr10.tfm`.
 
 ## Crates
 
@@ -27,11 +27,11 @@ What a lookup finds changes nothing about reads: the path's bytes are the
 `Key::File` read exactly as before (a font's, a PDF file's, as the build's
 `Env::font_file` and the fold's `Files`), so the graph keeps its shape.
 
-Never link, deleted: partex-core, partex-engine, partex-incr, partex-ssa, partex-trace, phitex-ir, partex-cli; copy pure bodies only, naming the source file in the commit.
+Never link, deleted: phitex-core, phitex-engine, phitex-incr, phitex-ssa, phitex-trace, phitex-ir, phitex-cli; copy pure bodies only, naming the source file in the commit.
 
 ## The command set
 
-Every TeX82 primitive (325: partex-core's `init_prim_tex`, less encTeX's 14),
+Every TeX82 primitive (325: phitex-core's `init_prim_tex`, less encTeX's 14),
 classified by what it is on the graph (AGENTS_BRIEF.md): **(i)** an
 expandable primitive or input rewriting — a *step* inside a node, which
 rewrites the input (`RState.pending`) and defines nothing; **(ii)** an
@@ -1759,7 +1759,7 @@ A's W2 and keep_again fixes): 229 passed, 0 over-invalidated, 71 failed.
   step 3 (the class option toggled) and rules seed 10 step 3 (an `\item`
   removed). The log first differs at a `Package:` line (amsmath,
   caption).
-- The repros are in `~/code/flinner/partex-phitex-runs/cmd-7878/fuzz-latex/latex/`.
+- The repros are in `~/code/flinner/phitex-runs/cmd-7878/fuzz-latex/latex/`.
 
 **Again on c89d1fec** (job 8044, the same 300 seeds; S's at-once and
 A's stack fixes not in): 237 passed, 0 over-invalidated, 62 timeouts
@@ -3414,7 +3414,7 @@ scanning and expanding `\x` hold 40 distinct reads (439 without
 stream (`pdf/content.rs`, made in the ship task where the DVI body is
 made), and the PDF file is a fold over the pages in document order
 (`pdf/fold.rs`): object numbering, object streams, fonts at the end
-(map file, encodings, Type 1 subsetting copied from partex's writet1),
+(map file, encodings, Type 1 subsetting copied from phitex's writet1),
 page tree, catalog, `/Info`, cross-reference table or stream. Streams
 are compressed by a copy of zlib's deflate (`pdf/zlib.rs`, the
 library pdfTeX links: equal to the system zlib's output). The date is a
@@ -3639,9 +3639,9 @@ protrusion (Q4): `PdfUnimpl`. Warnings pdfTeX prints to the log are
 collected (`Written::warnings`), not placed in the log.
 Sources for what is still to come, after the old crates were deleted:
 virtual fonts in PDF (`do_vf`, `do_vf_packet`) are
-`45ffd43:crates/partex-core/src/pdf/vf.rs`; protrusion is
-`45ffd43:crates/partex-engine/src/margin.rs` and font expansion is
-`45ffd43:crates/partex-engine/src/font.rs` (Q4). Read them with `git show
+`45ffd43:crates/phitex-core/src/pdf/vf.rs`; protrusion is
+`45ffd43:crates/phitex-engine/src/margin.rs` and font expansion is
+`45ffd43:crates/phitex-engine/src/font.rs` (Q4). Read them with `git show
 45ffd43:PATH`; the branch keeps 45ffd43 in its history.
 
 **pdfTeX work split** (modules another agent can take in parallel; each
@@ -3686,10 +3686,10 @@ host runs: `Files::apply_filter`, given as `native::Distiller` with
 `Fonts::with_distiller`, since the library runs no process; the CLI, the
 binary and the tests give `sh -c` on a scratch copy) and
 phitex-codecs (the PDF reader `\XeTeXpdffile` measures
-with). Copied: `icu_tables.rs` (from partex-core), `icu_linebreak.rs` and
-`.bin` (ICU's line-break rules, from partex-core), and `xpic.rs`
+with). Copied: `icu_tables.rs` (from phitex-core), `icu_linebreak.rs` and
+`.bin` (ICU's line-break rules, from phitex-core), and `xpic.rs`
 (XeTeX_pic.c's own image readers and poppler's page boxes, as
-partex-engine/src/xpic.rs ported them).
+phitex-engine/src/xpic.rs ported them).
 
 ### Construct → graph
 

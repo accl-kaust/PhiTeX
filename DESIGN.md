@@ -7,8 +7,8 @@ formats, LaTeX, pdfTeX's PDF mode, the conflicts and their resolutions).
 This file keeps what is not there: the crates, and the φ core's design
 (chapter 7, cited as `DESIGN 7.N`).
 
-The machine-mode engine (partex-core, partex-engine, partex-incr,
-partex-ssa, partex-trace, phitex-ir and the old CLI) and its design
+The machine-mode engine (phitex-core, phitex-engine, phitex-incr,
+phitex-ssa, phitex-trace, phitex-ir and the old CLI) and its design
 (chapters 1–6, appendix A: the dynamic SSA over an imperative engine,
 windows, checkpoints, the machine runtime) were removed when the CLI
 moved onto phitex-flow; they are in the history up to commit cc8ffa53349c.
@@ -80,7 +80,7 @@ evaluates; the client never holds the graph during an op.
 ### 7.2 Values and fields (primitive 1)
 
 ```rust
-#[repr(C, packed(8))] pub struct Ver(pub u128);    // partex-ssa's, copied
+#[repr(C, packed(8))] pub struct Ver(pub u128);    // phitex-ssa's, copied
 pub trait Value: Clone + Send + Sync + 'static {
     fn ver(&self) -> Ver;                           // O(1): cached in composites
     fn field(&self, f: u32) -> Option<Self> { None }
@@ -91,7 +91,7 @@ pub enum Sel { Whole, Field(u32), Name(NameId) }    // what an operand reads
 
 - A version is the content's: scalars by value, composites as a Merkle
   hash of their parts' versions made when the value is made (the stable
-  128-bit hasher of `partex-ssa::hash`, copied, not depended on).
+  128-bit hasher of `phitex-ssa::hash`, copied, not depended on).
 - A derived value's *memo key* is `Ver::node(op, operand versions)`
   (7.8). Its *version*, which cutoff compares, is its content's: a node
   whose operands changed but whose result is equal stops propagation.
@@ -447,7 +447,7 @@ impl<T: Value, M: Measure<T>> Seq<T, M> {
 }
 ```
 
-- The tree is `partex-ssa::pvec`'s (32-way, `Arc` nodes, the two-lane
+- The tree is `phitex-ssa::pvec`'s (32-way, `Arc` nodes, the two-lane
   polynomial hash `Poly`, so a sequence's version is its content's
   whatever its edit history). Elements carry an `ElemId` the client
   assigns (deterministically), which is the identity steps and scans

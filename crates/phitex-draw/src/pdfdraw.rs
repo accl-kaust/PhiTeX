@@ -1239,7 +1239,7 @@ impl Pdf {
     }
 
     /// Where page `k` (from 0) shows each glyph, in the order glyph origins
-    /// count them (`partex_core::srcmap`): x and y in PDF points from the
+    /// count them (`phitex_core::srcmap`): x and y in PDF points from the
     /// page's top left, as the draw list's.
     #[must_use]
     pub fn glyph_places(&self, k: usize) -> Vec<(f64, f64)> {

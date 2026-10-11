@@ -13,7 +13,7 @@
 //!
 //! What pdfTeX copies is a page's dictionary entries and the objects
 //! they refer to, each byte of a string or a stream as it is in the
-//! file: the writer (`partex-core`'s `pdf/epdf.rs`) prints these values.
+//! file: the writer (`phitex-core`'s `pdf/epdf.rs`) prints these values.
 //! An encrypted file is not read (xpdf reads one whose user password is
 //! empty), nor are the image filters decoded (no page's contents use
 //! them).

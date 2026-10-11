@@ -12,14 +12,14 @@
 set -euo pipefail
 
 # Memory is capped here, not by whoever types the command: every run joins
-# partex.slice (48G for all of them together) as its own scope, 16G and no
+# phitex.slice (48G for all of them together) as its own scope, 16G and no
 # swap each, at the lowest CPU and IO priority. A runaway test outside the
 # slice once took the whole desktop session down with it. PHITEX_NO_SLICE=1
 # opts out (CI, machines without a user systemd).
 if [ -z "${PHITEX_NO_SLICE:-}" ] && command -v systemd-run >/dev/null \
-   && ! grep -q partex.slice /proc/self/cgroup 2>/dev/null \
+   && ! grep -q phitex.slice /proc/self/cgroup 2>/dev/null \
    && systemctl --user is-active -q -- -.slice 2>/dev/null; then
-  exec systemd-run --user --scope -q --slice=partex.slice \
+  exec systemd-run --user --scope -q --slice=phitex.slice \
     -p "MemoryMax=${PHITEX_MEMORY_MAX:-16G}" -p MemorySwapMax=0 \
     nice -n 19 ionice -c 3 "$0" "$@"
 fi
@@ -65,12 +65,12 @@ args=(
   --setenv TERM "${TERM:-dumb}"
   --setenv LANG "${LANG:-C.UTF-8}"
   --setenv TEXMFVAR /tmp/texmf-var
-  --setenv PARTEX_SANDBOX 1
+  --setenv PHITEX_SANDBOX 1
 )
-# phitex's own switches (PARTEX_PERSIST_CHECK, PHITEX_SSA_WORKERS, ...) pass
+# phitex's own switches (PHITEX_PERSIST_CHECK, PHITEX_SSA_WORKERS, ...) pass
 # through.
 while IFS='=' read -r name value; do
-  [[ ($name == PARTEX_* || $name == PHITEX_*) && $name != PARTEX_SANDBOX ]] && args+=(--setenv "$name" "$value")
+  [[ $name == PHITEX_* && $name != PHITEX_SANDBOX ]] && args+=(--setenv "$name" "$value")
 done < <(env)
 # One compiler cache for every worktree: sccache's server starts inside each
 # sandbox (it runs rustc, so it stays in it), over one cache directory, with

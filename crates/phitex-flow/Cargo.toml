@@ -17,7 +17,7 @@ phitex-kpse = { path = "../phitex-kpse" }
 phitex-otf = { path = "../phitex-otf" }
 phitex-xdvipdfmx = { path = "../phitex-xdvipdfmx" }
 phitex-codecs = { path = "../phitex-codecs" }
-# (the CLI's global allocator, as partex-cli's: glibc's thread arenas grow
+# (the CLI's global allocator, as phitex-cli's: glibc's thread arenas grow
 # by mprotect under the address-space lock, which 8 threads building nodes
 # contend on)
 tikv-jemallocator = { version = "0.6", optional = true }

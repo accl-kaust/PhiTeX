@@ -588,7 +588,7 @@ mod tests {
 }
 
 /// Subsets of a TeX Live font against xdvipdfmx's own code (a C harness
-/// over sfnt.c, tt_table.c, tt_glyf.c): `PARTEX_XPDF_DUMP=dir` writes the
+/// over sfnt.c, tt_table.c, tt_glyf.c): `PHITEX_XPDF_DUMP=dir` writes the
 /// FontFile2 bytes and the glyph metrics for comparison.
 #[cfg(test)]
 mod font_tests {
@@ -695,7 +695,7 @@ mod font_tests {
 
     #[test]
     fn subsets() {
-        let dir = std::env::var("PARTEX_XPDF_DUMP").ok();
+        let dir = std::env::var("PHITEX_XPDF_DUMP").ok();
         for (name, path, identity, gids) in cases() {
             let Some((bytes, dump)) = subset(path, identity, &gids) else {
                 continue;

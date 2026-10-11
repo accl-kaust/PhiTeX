@@ -655,7 +655,7 @@ pub const INTERNAL: [(&str, Prim); 27] = [
     ("\u{0}pdfprimitive", Prim::PdfPrimitiveExec),
 ];
 
-/// Every TeX82 primitive (tex.web §1336: partex-core's `init_prim_tex` less
+/// Every TeX82 primitive (tex.web §1336: phitex-core's `init_prim_tex` less
 /// encTeX's 14), sorted by name: its name, its meaning here, and its
 /// command code in tex.web.
 pub const PRIMITIVES: [(&str, Prim, &str); 325] = [

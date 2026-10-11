@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."
 REPS=${1:-5}
 DOC=${2:-}
 OUT=${3:-target/flow-budgets.txt}
-run() { if [ -n "${PARTEX_SANDBOX:-}" ]; then "$@"; else scripts/sandbox "$@"; fi; }
+run() { if [ -n "${PHITEX_SANDBOX:-}" ]; then "$@"; else scripts/sandbox "$@"; fi; }
 run cargo build --release -q -p phitex-flow
 mkdir -p "$(dirname "$OUT")"
 {

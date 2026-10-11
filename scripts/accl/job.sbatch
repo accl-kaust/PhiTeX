@@ -1,5 +1,5 @@
 #!/bin/bash
-# One partex task on a commit, in the cluster image (on accl; submitted by
+# One phitex task on a commit, in the cluster image (on accl; submitted by
 # the local `accl` driver):
 #
 #   sbatch [slurm options] job.sbatch <commit> <task> [args...]
@@ -14,19 +14,19 @@
 # bubblewrap cannot nest inside Apptainer, so the checkout's
 # scripts/sandbox is replaced by a pass-through (in the workspace only).
 # The network is used only by `cargo fetch` and the upstream fetch, each
-# cached in ~/shared-cache/partex by the hash of what it depends on.
+# cached in ~/shared-cache/phitex by the hash of what it depends on.
 #
 # Results: written to $w/results, copied at the end to
-# ~/code/flinner/partex-phitex-runs/<task>-<job>/ (summary.txt, logs).
-#SBATCH -J partex -o partex-%j.out
+# ~/code/flinner/phitex-runs/<task>-<job>/ (summary.txt, logs).
+#SBATCH -J phitex -o phitex-%j.out
 set -euo pipefail
 commit=$1 task=$2
 shift 2
-sif=$HOME/shared-cache/partex/${ACCL_IMAGE:-partex-2026-09-25-tools}.sif
-cache=$HOME/shared-cache/partex
-here=$HOME/code/flinner/partex-phitex-accl
+sif=$HOME/shared-cache/phitex/${ACCL_IMAGE:-phitex-2026-09-25-tools}.sif
+cache=$HOME/shared-cache/phitex
+here=$HOME/code/flinner/phitex-accl
 w=/tmp/$USER-$SLURM_JOB_ID
-out=$HOME/code/flinner/partex-phitex-runs/$task-$SLURM_JOB_ID
+out=$HOME/code/flinner/phitex-runs/$task-$SLURM_JOB_ID
 r=$w/results
 # (a full node disk corrupts results silently: fail at once below 20 GB free)
 free=$(df -Pk /tmp | awk 'NR==2{print $4}'); [ "$free" -ge 20971520 ] || { echo "FAILED: /tmp on $(hostname) has only $((free/1048576)) GB free (need 20); leftovers: $(ls -d /tmp/$USER-* 2>/dev/null | wc -l) of ours"; exit 75; }
@@ -36,20 +36,20 @@ trap 'cp -a "$r/." "$out/" 2>/dev/null; rm -rf "$w"' EXIT
 exec > >(tee "$out/job.log") 2>&1
 [ -d "$here/tasks" ] && cp -a "$here/tasks" "$w/tasks"  # (machine mode's task scripts, gone with b8c6a5d; `cmd` needs none)
 
-git clone -q "$HOME/code/flinner/partex-phitex.git" "$w/partex"
-git -C "$w/partex" -c advice.detachedHead=false checkout -q "$commit"
-cd "$w/partex"
+git clone -q "$HOME/code/flinner/phitex.git" "$w/phitex"
+git -C "$w/phitex" -c advice.detachedHead=false checkout -q "$commit"
+cd "$w/phitex"
 echo "node $(hostname), $SLURM_CPUS_ON_NODE CPUs allocated, commit $(git rev-parse --short=12 HEAD), task $task $*"
 echo "start $(date +%T)"
 
 # `net` runs a fetch step with the network; `box` everything else, without.
 net() {
-  apptainer exec --containall --bind "$w" --home "$w" --pwd "$w/partex" \
+  apptainer exec --containall --bind "$w" --home "$w" --pwd "$w/phitex" \
     --env CARGO_HOME="$w/cargo" "$sif" "$@"
 }
 box() {
   apptainer exec --containall --net --network none --bind "$w" --home "$w" --pwd "$PWD" \
-    --env CARGO_HOME="$w/cargo",CARGO_NET_OFFLINE=true,TEXMFVAR="$w/texmf-var",PARTEX_SANDBOX=1,w="$w",r="$r" \
+    --env CARGO_HOME="$w/cargo",CARGO_NET_OFFLINE=true,TEXMFVAR="$w/texmf-var",PHITEX_SANDBOX=1,w="$w",r="$r" \
     "$sif" "$@"
 }
 

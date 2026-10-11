@@ -5,10 +5,10 @@
 #
 #   scripts/flow-gate-tally.sh JOB...
 #
-# Reads ~/code/flinner/partex-phitex-runs/cmd-JOB/ (where
+# Reads ~/code/flinner/phitex-runs/cmd-JOB/ (where
 # `scripts/accl/accl wait JOB` fetches a job's results).
 set -uo pipefail
-runs=${RUNS:-$HOME/code/flinner/partex-phitex-runs}
+runs=${RUNS:-$HOME/code/flinner/phitex-runs}
 dirs=()
 for j in "$@"; do
 	d="$runs/cmd-$j"

@@ -1,4 +1,4 @@
-//! Pure libraries copied from partex-engine (the wall, `tests/wall.rs`:
+//! Pure libraries copied from phitex-engine (the wall, `tests/wall.rs`:
 //! copied as they are, never linked): xpdf's reader of PDF files
 //! (`pdfread`, with `inflate` and the font-file readers `fofi`,
 //! `gfxfont`), libpng's reading (`png`), the stored zlib container (`zstored`, for the

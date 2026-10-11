@@ -1,5 +1,5 @@
 #!/bin/bash
-# Offload partex-PhiTeX work to the accl cluster (run locally, in the
+# Offload PhiTeX work to the accl cluster (run locally, in the
 # repository or a worktree of it: scripts/accl/accl ...):
 #
 #   accl submit <task> [args...]   snapshot the tree, push it, submit; prints the job id
@@ -21,13 +21,13 @@
 # .gitignore respected, the handoff notes and presentation/ left out)
 # made into a commit object with a scratch index: the branch, the index
 # and the stash are untouched. It is pushed to the `accl` remote as
-# refs/wip/<commit>. Results land in ~/code/flinner/partex-phitex-runs/<task>-<job>/
+# refs/wip/<commit>. Results land in ~/code/flinner/phitex-runs/<task>-<job>/
 # here and on accl.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 H=acclhead1
 slurm='export PATH=/opt/slurm/current/bin:$PATH;'
-runs=$HOME/code/flinner/partex-phitex-runs
+runs=$HOME/code/flinner/phitex-runs
 
 preset() {
   case $1 in
@@ -61,8 +61,8 @@ snap() {
 }
 
 sync_scripts() {
-  rsync -a --delete --exclude=accl "$here/" "$H:code/flinner/partex-phitex-accl/"
-  ssh $H "mkdir -p code/flinner/partex-phitex-runs"
+  rsync -a --delete --exclude=accl "$here/" "$H:code/flinner/phitex-accl/"
+  ssh $H "mkdir -p code/flinner/phitex-runs"
 }
 
 submit() {
@@ -71,7 +71,7 @@ submit() {
   sync_scripts
   opts="$(preset "$@") ${ACCL_OPTS:-}"
   echo "accl: commit $c, $opts" >&2
-  ssh $H "$slurm cd code/flinner/partex-phitex-runs && sbatch --parsable -J partex-$task $opts \$HOME/code/flinner/partex-phitex-accl/job.sbatch $c $(printf '%q ' "$@")"
+  ssh $H "$slurm cd code/flinner/phitex-runs && sbatch --parsable -J phitex-$task $opts \$HOME/code/flinner/phitex-accl/job.sbatch $c $(printf '%q ' "$@")"
 }
 
 state() { ssh $H "$slurm sacct -j $1 -n -X -o State" | awk '{print $1}' | head -1; }
@@ -85,16 +85,16 @@ wait_jobs() {
       sleep 20
     done
     mkdir -p "$runs"
-    rsync -a "$H:code/flinner/partex-phitex-runs/*-$j" "$runs/" 2>/dev/null || true
-    rsync -a "$H:code/flinner/partex-phitex-runs/partex-$j.out" "$runs/" 2>/dev/null || true
+    rsync -a "$H:code/flinner/phitex-runs/*-$j" "$runs/" 2>/dev/null || true
+    rsync -a "$H:code/flinner/phitex-runs/phitex-$j.out" "$runs/" 2>/dev/null || true
     local d
     d=$(ls -d "$runs"/*-"$j" 2>/dev/null | head -1)
     echo "== job $j: $s  ($d)"
-    if [ -n "$d" ] && [ -f "$d/summary.txt" ]; then cat "$d/summary.txt"; else tail -30 "$runs/partex-$j.out" 2>/dev/null; fi
+    if [ -n "$d" ] && [ -f "$d/summary.txt" ]; then cat "$d/summary.txt"; else tail -30 "$runs/phitex-$j.out" 2>/dev/null; fi
   done
 }
 
-CI=code/flinner/partex-phitex-ci
+CI=code/flinner/phitex-ci
 # the harness, its data and the stage script, as this tree has them
 ci_sync() {
   local repo
@@ -117,7 +117,7 @@ case $cmd in
   run) j=$(submit "$@"); echo "accl: job $j" >&2; wait_jobs "$j" ;;
   wait) wait_jobs "$@" ;;
   q) ssh $H "$slurm squeue -u \$USER -o '%.8i %.12j %.9T %.10M %.4C %.6m %R'" ;;
-  log) ssh $H "cat code/flinner/partex-phitex-runs/partex-$1.out" ;;
+  log) ssh $H "cat code/flinner/phitex-runs/phitex-$1.out" ;;
   cancel) ssh $H "$slurm scancel $*" ;;
   ci-oracle)
     ci_sync

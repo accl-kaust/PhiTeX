@@ -18,14 +18,14 @@
 # common.py). Results leave the container as files in /w/results, copied
 # to <run> by this script when the stage ends; the oracle cache is read-only
 # inside and filled from /w/oracle-new after.
-#SBATCH -J partex-ci -o partex-ci-%A_%a.out
+#SBATCH -J phitex-ci -o phitex-ci-%A_%a.out
 set -euo pipefail
 stage=$1 run=$2
 shift 2
-CI=$HOME/code/flinner/partex-phitex-ci
-image=${CI_IMAGE:-partex-ci-2026-09-25}
-sif=$HOME/shared-cache/partex/$image.sif
-cache=$HOME/shared-cache/partex
+CI=$HOME/code/flinner/phitex-ci
+image=${CI_IMAGE:-phitex-ci-2026-09-25}
+sif=$HOME/shared-cache/phitex/$image.sif
+cache=$HOME/shared-cache/phitex
 R=$CI/runs/$run
 oracle=$CI/oracle/$image
 w=/tmp/$USER-${SLURM_JOB_ID}-${SLURM_ARRAY_TASK_ID:-0}
@@ -38,7 +38,7 @@ echo "stage $stage, run $run, node $(hostname), job ${SLURM_JOB_ID} task ${SLURM
 box() {
   apptainer exec --containall --cleanenv --no-home --net --network none \
     --bind "$w:/w" --bind "$CI/harness:/h:ro" --bind "$oracle:/o:ro" --pwd /w \
-    --env TEXMFVAR=/w/texmf-var,CARGO_HOME=/w/cargo,CARGO_NET_OFFLINE=true,PARTEX_SANDBOX=1,CI_WORK=/w \
+    --env TEXMFVAR=/w/texmf-var,CARGO_HOME=/w/cargo,CARGO_NET_OFFLINE=true,PHITEX_SANDBOX=1,CI_WORK=/w \
     "$sif" "$@"
 }
 # out: the results to the run's directory; new oracle builds to the cache

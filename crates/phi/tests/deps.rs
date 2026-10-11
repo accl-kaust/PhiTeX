@@ -20,7 +20,7 @@ fn no_workspace_dependencies() {
         assert!(
             !l.contains("path")
                 && !l.contains("workspace")
-                && !name.starts_with("partex")
+                && !name.starts_with("phitex")
                 && !name.starts_with("phitex"),
             "crates/phi must not depend on the workspace: {l}"
         );

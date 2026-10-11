@@ -74,7 +74,7 @@ FORCED = [
     "latex/biblatex-chicago/biblatex-chicago.tex",
 ]
 
-# Packages whose documents need LuaTeX, which partex does not have.
+# Packages whose documents need LuaTeX, which phitex does not have.
 LUA = re.compile(r"\\(directlua|luaexec|luadirect)|\\usepackage(\[[^]]*\])?\{[^}]*\b(luacode|luatexja|luaotfload|luamplib|lua-[a-z]+|luatexbase|ltluatex|lualatex-math|luacolor|selnolig)\b")
 XE = re.compile(r"\\usepackage(\[[^]]*\])?\{[^}]*\b(fontspec|polyglossia|xeCJK|unicode-math|xltxtra|xunicode|mathspec|xgreek|bidi|xepersian|zhspacing|xetexko|ucharclasses|realscripts|metalogo|xltabular-x)\b|\\documentclass(\[[^]]*\])?\{(ctexart|ctexbook|ctexrep|ctexbeamer)\}")
 MAGIC = re.compile(r"^%\s*!\s*TEX\s+(?:TS-)?program\s*=\s*(\w+)", re.I | re.M)
@@ -178,14 +178,14 @@ def citations(aux):
 class Tools:
     """How the loop runs BibTeX, biber and makeindex for one side."""
 
-    def __init__(self, partex=None):
-        self.partex = partex
+    def __init__(self, phitex=None):
+        self.phitex = phitex
 
     def bibtex(self, stem):
-        return [self.partex, "-bibtex", stem] if self.partex else ["bibtex", stem]
+        return [self.phitex, "-bibtex", stem] if self.phitex else ["bibtex", stem]
 
     def makeindex(self, args):
-        return [self.partex, "-makeindex", *args] if self.partex else ["makeindex", *args]
+        return [self.phitex, "-makeindex", *args] if self.phitex else ["makeindex", *args]
 
     @staticmethod
     def biber(stem):
@@ -260,19 +260,19 @@ def oracle_cmd(engine, main):
     return [engine, "-no-shell-escape", "-interaction=nonstopmode", main]
 
 
-def side_env(engine, extra=None, partex=False, formats=None):
+def side_env(engine, extra=None, phitex=False, formats=None):
     e = {"HOME": str(WORK / "home"), "TEXMFVAR": str(WORK / "texmf-var")}
     if engine == "xelatex":
         e["FONTCONFIG_FILE"] = str(common.HERE.parent / "xetex" / "fonts.conf")
-        if partex:
-            e["PARTEX_XETEX"] = "1"
-    if partex:
-        e["PARTEX_CACHE_DIR"] = str(WORK / "cache")
-        e["PARTEX_STORE_DIR"] = str(WORK / "store")
+        if phitex:
+            e["PHITEX_XETEX"] = "1"
+    if phitex:
+        e["PHITEX_CACHE_DIR"] = str(WORK / "cache")
+        e["PHITEX_STORE_DIR"] = str(WORK / "store")
         e["NO_COLOR"] = "1"
         if formats:
             e["TEXFORMATS"] = f"{formats}:"
-            e["PARTEX_FORMATS"] = str(formats)
+            e["PHITEX_FORMATS"] = str(formats)
     if extra:
         e.update(extra)
     return common.env(e)
@@ -338,7 +338,7 @@ def oracle_one(doc, c, cache, new_cache=None):
     res = {"id": c["id"], "path": c["path"], "engine": c["engine"], "input_hash": h,
            "harness": HARNESS_VERSION}
     if c["engine"] == "lualatex":
-        res.update(status="excluded", reason="needs LuaTeX (partex has none)")
+        res.update(status="excluded", reason="needs LuaTeX (phitex has none)")
     else:
         r = loop(run_dir, oracle_cmd(c["engine"], c["main"]), Tools(), side_env(c["engine"]),
                  job, base, ist, log)

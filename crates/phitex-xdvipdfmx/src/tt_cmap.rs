@@ -1783,7 +1783,7 @@ mod font_tests {
 
     #[test]
     fn inverse_cmaps() {
-        let dir = std::env::var("PARTEX_XPDF_DUMP").ok();
+        let dir = std::env::var("PHITEX_XPDF_DUMP").ok();
         for &(name, path, want, font_md5) in CASES {
             let Some(out) = dump(path) else {
                 continue;

@@ -4088,7 +4088,7 @@ pub(crate) static SBCS: [[u16; 256]; 157] = [
 ];
 
 /// What a name (as `norm_name` leaves it) opens: a table of `SBCS`,
-/// `UTF8`, or `OTHER` (a converter partex does not have).
+/// `UTF8`, or `OTHER` (a converter phitex does not have).
 pub(crate) const UTF8: u16 = 0xffff;
 pub(crate) const OTHER: u16 = 0xfffe;
 

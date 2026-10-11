@@ -1,12 +1,12 @@
-# The CI image (docs/ci.md): the partex image (partex.def, built as
-# partex-2026-09-25-tools) with TeX Live's documentation tree and the
+# The CI image (docs/ci.md): the phitex image (phitex.def, built as
+# phitex-2026-09-25-tools) with TeX Live's documentation tree and the
 # language collections the manuals need, from the same Arch Linux Archive
 # snapshot, so the manuals' sources are the TeX Live 2026.1 tree's own
 # (svn r78408, as the installed packages): nothing is downloaded at CI
 # time. Built by build-image.sbatch:
-#   sbatch --qos=build4 build-image.sbatch partex-ci-2026-09-25 partex-ci.def
+#   sbatch --qos=build4 build-image.sbatch phitex-ci-2026-09-25 phitex-ci.def
 Bootstrap: localimage
-From: /home/mohaam0e/shared-cache/partex/partex-2026-09-25-tools.sif
+From: /home/mohaam0e/shared-cache/phitex/phitex-2026-09-25-tools.sif
 
 %post
     set -eu

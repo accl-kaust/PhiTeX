@@ -5,7 +5,7 @@
 //! as an `/Indexed` colour space), a PDF file's page (pdftoepdf.cc's
 //! `write_epdf`: a form, the objects it refers to copied after it under
 //! new numbers, its Type 1 fonts the map has replaced by pdfTeX's own
-//! embedding). Copied from partex-core's `pdf/image.rs`,
+//! embedding). Copied from phitex-core's `pdf/image.rs`,
 //! `pdf/writepng.rs` and `pdf/epdf.rs`, with the engine taken out.
 
 use std::sync::Arc;

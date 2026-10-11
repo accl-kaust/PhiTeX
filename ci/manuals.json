@@ -4,7 +4,7 @@
    "engine": "lualatex",
    "id": "generic_babel-japanese_babel-japanese-sample",
    "path": "generic/babel-japanese/babel-japanese-sample.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -16,13 +16,13 @@
    "engine": "lualatex",
    "id": "generic_chemfig_chemfig-en",
    "path": "generic/chemfig/chemfig-en.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "generic_crossrefenum_test_main-test",
    "path": "generic/crossrefenum/test/main-test.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -34,7 +34,7 @@
    "engine": "lualatex",
    "id": "generic_listofitems_listofitems-en",
    "path": "generic/listofitems/listofitems-en.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -340,13 +340,13 @@
    "engine": "lualatex",
    "id": "generic_tracklang_tracklang-manual",
    "path": "generic/tracklang/tracklang-manual.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "generic_tuple_tuple-doc-en",
    "path": "generic/tuple/tuple-doc-en.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -358,19 +358,19 @@
    "engine": "lualatex",
    "id": "generic_xstring_xstring-en",
    "path": "generic/xstring/xstring-en.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_abntexto-uece_abntexto-uece",
    "path": "latex/abntexto-uece/abntexto-uece.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_abntexto_abntexto",
    "path": "latex/abntexto/abntexto.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -412,7 +412,7 @@
    "engine": "lualatex",
    "id": "latex_aspen_aspen-doc",
    "path": "latex/aspen/aspen-doc.ltx",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -430,7 +430,7 @@
    "engine": "lualatex",
    "id": "latex_auto-pst-pdf-lua_auto-pst-pdf-lua-doc",
    "path": "latex/auto-pst-pdf-lua/auto-pst-pdf-lua-doc.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -487,13 +487,13 @@
    "engine": "lualatex",
    "id": "latex_biblatex-arthistory-bonn_arthistory-bonn",
    "path": "latex/biblatex-arthistory-bonn/arthistory-bonn.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_biblatex-gost_biblatex-gost",
    "path": "latex/biblatex-gost/biblatex-gost.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "xelatex",
@@ -505,13 +505,13 @@
    "engine": "lualatex",
    "id": "latex_biblatex-oxref_oxalph-doc",
    "path": "latex/biblatex-oxref/oxalph-doc.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_biblatex-unified_biblatex-unified",
    "path": "latex/biblatex-unified/biblatex-unified.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "id": "latex_biblatex_examples_30-style-numeric-bibtex",
@@ -551,7 +551,7 @@
    "engine": "lualatex",
    "id": "latex_bookshelf_spines",
    "path": "latex/bookshelf/spines.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -563,13 +563,13 @@
    "engine": "lualatex",
    "id": "latex_bxjaprnind_bxjaprnind",
    "path": "latex/bxjaprnind/bxjaprnind.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_bxjscls_bxjscls-manual",
    "path": "latex/bxjscls/bxjscls-manual.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -629,7 +629,7 @@
    "engine": "lualatex",
    "id": "latex_colorblind_colorblind_doc",
    "path": "latex/colorblind/colorblind_doc.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -659,7 +659,7 @@
    "engine": "lualatex",
    "id": "latex_creationboites_CreationBoites-doc",
    "path": "latex/creationboites/CreationBoites-doc.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -701,7 +701,7 @@
    "engine": "lualatex",
    "id": "latex_datatool_datatool-user",
    "path": "latex/datatool/datatool-user.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -713,7 +713,7 @@
    "engine": "lualatex",
    "id": "latex_derivative_derivative",
    "path": "latex/derivative/derivative.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -731,7 +731,7 @@
    "engine": "lualatex",
    "id": "latex_dijkstra_dijkstra-fr",
    "path": "latex/dijkstra/dijkstra-fr.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -749,7 +749,7 @@
    "engine": "lualatex",
    "id": "latex_draftfigure_draftfigure",
    "path": "latex/draftfigure/draftfigure.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -797,7 +797,7 @@
    "engine": "lualatex",
    "id": "latex_esindex_esindex",
    "path": "latex/esindex/esindex.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -809,7 +809,7 @@
    "engine": "lualatex",
    "id": "latex_euenc_test-euxlm",
    "path": "latex/euenc/test-euxlm.ltx",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -827,7 +827,7 @@
    "engine": "lualatex",
    "id": "latex_fancyhandout_fancyhandout-doc",
    "path": "latex/fancyhandout/fancyhandout-doc.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -863,7 +863,7 @@
    "engine": "lualatex",
    "id": "latex_flowfram_flowfram-manual",
    "path": "latex/flowfram/flowfram-manual.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -875,31 +875,31 @@
    "engine": "lualatex",
    "id": "latex_functional_functional",
    "path": "latex/functional/functional.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_gb4e-next_gb4e-next",
    "path": "latex/gb4e-next/gb4e-next.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_genealogy-profiles_genealogy-profiles",
    "path": "latex/genealogy-profiles/genealogy-profiles.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_glossaries-extra_glossaries-extra-manual",
    "path": "latex/glossaries-extra/glossaries-extra-manual.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_glossaries_glossaries-user",
    "path": "latex/glossaries/glossaries-user.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -983,7 +983,7 @@
    "engine": "lualatex",
    "id": "latex_jacow_JACoW_LaTeX_A4",
    "path": "latex/jacow/JACoW_LaTeX_A4.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1007,19 +1007,19 @@
    "engine": "lualatex",
    "id": "latex_keisennote_keisennote-doc",
    "path": "latex/keisennote/keisennote-doc.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_kkran_kkran-doc",
    "path": "latex/kkran/kkran-doc.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_kksymbols_kksymbols-doc",
    "path": "latex/kksymbols/kksymbols-doc.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1067,7 +1067,7 @@
    "engine": "lualatex",
    "id": "latex_latex-via-exemplos_latex-via-exemplos",
    "path": "latex/latex-via-exemplos/latex-via-exemplos.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1127,13 +1127,13 @@
    "engine": "lualatex",
    "id": "latex_lualatex-doc-de_lualatex-doc-DE",
    "path": "latex/lualatex-doc-de/lualatex-doc-DE.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_luatikz_luatikz",
    "path": "latex/luatikz/luatikz.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1163,19 +1163,19 @@
    "engine": "lualatex",
    "id": "latex_mensa-tex_doc_mensa-tex-doc",
    "path": "latex/mensa-tex/doc/mensa-tex-doc.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_mfirstuc_mfirstuc-manual",
    "path": "latex/mfirstuc/mfirstuc-manual.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_modernruler_modernruler-doc",
    "path": "latex/modernruler/modernruler-doc.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1187,13 +1187,13 @@
    "engine": "lualatex",
    "id": "latex_moodle_test_check_babel",
    "path": "latex/moodle/test/check_babel.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_movement-arrows_movement-arrows",
    "path": "latex/movement-arrows/movement-arrows.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1265,7 +1265,7 @@
    "engine": "lualatex",
    "id": "latex_non-decimal-units_non-decimal-units",
    "path": "latex/non-decimal-units/non-decimal-units.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1307,7 +1307,7 @@
    "engine": "lualatex",
    "id": "latex_parnotes_parnotes",
    "path": "latex/parnotes/parnotes.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1361,13 +1361,13 @@
    "engine": "lualatex",
    "id": "latex_prettytok_prettytok",
    "path": "latex/prettytok/prettytok.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_profsio_ProfSio-doc-fr",
    "path": "latex/profsio/ProfSio-doc-fr.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1421,7 +1421,7 @@
    "engine": "lualatex",
    "id": "latex_pythontex_pythontex_gallery",
    "path": "latex/pythontex/pythontex_gallery.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1433,7 +1433,7 @@
    "engine": "lualatex",
    "id": "latex_recorder-fingering_recorder-fingering",
    "path": "latex/recorder-fingering/recorder-fingering.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1451,13 +1451,13 @@
    "engine": "lualatex",
    "id": "latex_resolsysteme_ResolSysteme-doc",
    "path": "latex/resolsysteme/ResolSysteme-doc.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_robust-externalize_robust-externalize",
    "path": "latex/robust-externalize/robust-externalize.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1469,7 +1469,7 @@
    "engine": "lualatex",
    "id": "latex_rwth-ci_examples_DEMO-RWTHBeamer",
    "path": "latex/rwth-ci/examples/DEMO-RWTHBeamer.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1493,7 +1493,7 @@
    "engine": "lualatex",
    "id": "latex_sectionbreak_sectionbreak-doc",
    "path": "latex/sectionbreak/sectionbreak-doc.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1517,7 +1517,7 @@
    "engine": "lualatex",
    "id": "latex_sunpath_sunpath",
    "path": "latex/sunpath/sunpath.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1529,13 +1529,13 @@
    "engine": "lualatex",
    "id": "latex_tabularray-abnt_tabularray-abnt-pt-br",
    "path": "latex/tabularray-abnt/tabularray-abnt-pt-br.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_tabularray_tabularray",
    "path": "latex/tabularray/tabularray.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1547,7 +1547,7 @@
    "engine": "lualatex",
    "id": "latex_tagging_tagging",
    "path": "latex/tagging/tagging.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1649,13 +1649,13 @@
    "engine": "lualatex",
    "id": "latex_tkz-doc_tkz-doc",
    "path": "latex/tkz-doc/tkz-doc.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_tkz-elements_TKZdoc-elements-beginning",
    "path": "latex/tkz-elements/TKZdoc-elements-beginning.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1679,13 +1679,13 @@
    "engine": "lualatex",
    "id": "latex_toptesi_toptesi-it",
    "path": "latex/toptesi/toptesi-it.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_tuda-ci_DEMO-TUDaAnnouncement",
    "path": "latex/tuda-ci/DEMO-TUDaAnnouncement.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1709,25 +1709,25 @@
    "engine": "lualatex",
    "id": "latex_unicode-alphabets_unicode-alphabets",
    "path": "latex/unicode-alphabets/unicode-alphabets.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_unicode-math_unimath-symbols",
    "path": "latex/unicode-math/unimath-symbols.ltx",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_unigrazpub_examples_monografie_DEMO-monografie",
    "path": "latex/unigrazpub/examples/monografie/DEMO-monografie.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "lualatex",
    "id": "latex_uowthesistitlepage_uowthesistitlepage_doc",
    "path": "latex/uowthesistitlepage/uowthesistitlepage_doc.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1847,7 +1847,7 @@
    "engine": "lualatex",
    "id": "latex_zugferd_DEMO-rechnung-zugferd-Kleinunternehmen",
    "path": "latex/zugferd/DEMO-rechnung-zugferd-Kleinunternehmen.tex",
-   "reason": "needs LuaTeX (partex has none)"
+   "reason": "needs LuaTeX (phitex has none)"
   },
   {
    "engine": "pdflatex",
@@ -1869,7 +1869,7 @@
   }
  ],
  "harness": "1",
- "image": "partex-ci-2026-09-25",
+ "image": "phitex-ci-2026-09-25",
  "manuals": [
   {
    "dir": "generic/2up",

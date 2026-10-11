@@ -4,7 +4,7 @@
 //! PNG by dvipdfmx's `jpegimage.c`, `bmpimage.c`, `pngimage.c`; a PDF
 //! page's box as `pdfimage.cpp` reads it), the transform in `trans.c`'s
 //! arithmetic (`double` transforms, `float` corners). Copied from the old
-//! engine's port (partex-core's `xpic.rs`).
+//! engine's port (phitex-core's `xpic.rs`).
 
 use std::sync::Arc;
 

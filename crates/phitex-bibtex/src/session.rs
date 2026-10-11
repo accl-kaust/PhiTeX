@@ -1,5 +1,5 @@
 //! BibTeX as a program of calls, run again only where a version it read
-//! changed (partex's DESIGN 3.16, "Exactly the dirty work").
+//! changed (phitex's DESIGN 3.16, "Exactly the dirty work").
 //!
 //! A [`Session`] keeps what its last run did. Each run parses the `.aux`
 //! files, the style and the databases again (`READ`'s outputs are the

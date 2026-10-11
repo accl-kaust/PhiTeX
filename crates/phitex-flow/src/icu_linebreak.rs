@@ -528,7 +528,7 @@ mod tests {
         assert_eq!(line.breaks(&utf16("ไทย")), None);
     }
 
-    /// Against ICU4C itself: `PARTEX_LB_DIR` holds `cases.hex` (a text per
+    /// Against ICU4C itself: `PHITEX_LB_DIR` holds `cases.hex` (a text per
     /// line, its UTF-16 units in hex) and `exp_SET.txt` (ICU's breaks for
     /// each, from `ubrk_next`), as `target/x/icu` in the line break work
     /// made them.
@@ -538,7 +538,7 @@ mod tests {
         extern crate std;
         use RuleSet::*;
         use std::string::String;
-        let dir = std::env::var("PARTEX_LB_DIR").expect("PARTEX_LB_DIR");
+        let dir = std::env::var("PHITEX_LB_DIR").expect("PHITEX_LB_DIR");
         let cases = std::fs::read_to_string(std::format!("{dir}/cases.hex")).unwrap();
         let texts: Vec<Vec<u16>> = cases
             .lines()

@@ -1581,7 +1581,7 @@ mod tests {
 
 /// cmap, post and GSUB lookups of TeX Live fonts against xdvipdfmx's own
 /// code (a C harness over tt_cmap.c, tt_gsub.c, otl_opt.c, tt_post.c):
-/// the same dump; `PARTEX_XPDF_DUMP=dir` writes it.
+/// the same dump; `PHITEX_XPDF_DUMP=dir` writes it.
 #[cfg(test)]
 mod font_tests {
     extern crate std;
@@ -1839,7 +1839,7 @@ mod font_tests {
 
     #[test]
     fn lookups() {
-        let dir = std::env::var("PARTEX_XPDF_DUMP").ok();
+        let dir = std::env::var("PHITEX_XPDF_DUMP").ok();
         for &(name, path, want, font_md5) in CASES {
             let Some(out) = dump(path, FEATS) else {
                 continue;

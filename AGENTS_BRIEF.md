@@ -166,7 +166,7 @@ drifted. Stop and re-read this file.
 | A cold-build path separate from the edit path | A cold build is an edit from nothing. |
 | "The engine", an engine instance, a world struct (`Tex`) | Commands are functions; readers produce nodes. |
 | Moving eqtb, nest or the input stack "into the graph" | They do not exist; names have reaching definitions. |
-| Importing `partex-*` into the new crate | Copy an algorithm out as a pure function. |
+| Importing `phitex-*` into the new crate | Copy an algorithm out as a pure function. |
 
 ## Tests that hold the design
 
@@ -195,9 +195,9 @@ drifted. Stop and re-read this file.
 ## How we build it
 
 - **The wall.** All new code lives in `crates/phitex-flow`. It never
-  depends on `partex-core` or any crate that holds engine state (eqtb,
+  depends on `phitex-core` or any crate that holds engine state (eqtb,
   nest, input stack, a `Tex`/engine struct): Knuth's algorithms come
-  across by copying them out of `partex-core` as pure functions, and
+  across by copying them out of `phitex-core` as pure functions, and
   reaching for eqtb is a compile error. Pure libraries that hold no TeX
   state may be linked (decided by the user 2026-10-09): `phi`, and per
   explicit decision each of `phitex-otf` (OpenType shaping), the

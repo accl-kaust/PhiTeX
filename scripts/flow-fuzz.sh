@@ -31,8 +31,8 @@
 # In a cluster job (job.sbatch's `cmd`, which exports the results
 # directory $r into the container) OUT is copied at the end to
 # $r/$(basename OUT) (but the format), which the job copies to
-# ~/code/flinner/partex-phitex-runs/cmd-JOBID/; else under Slurm to
-# $HOME/code/flinner/partex-phitex-runs/cmd-$SLURM_JOB_ID/$(basename OUT),
+# ~/code/flinner/phitex-runs/cmd-JOBID/; else under Slurm to
+# $HOME/code/flinner/phitex-runs/cmd-$SLURM_JOB_ID/$(basename OUT),
 # where the runner fetches a job's results from (the run itself writes
 # inside the checkout, where the sandbox may write).
 set -euo pipefail
@@ -54,11 +54,11 @@ TIMEOUT=${TIMEOUT:-600}
 if [ -n "${r:-}" ]; then
 	KEEP="$r/$(basename "$OUT")"
 elif [ -n "${SLURM_JOB_ID:-}" ]; then
-	KEEP="$HOME/code/flinner/partex-phitex-runs/cmd-$SLURM_JOB_ID/$(basename "$OUT")"
+	KEEP="$HOME/code/flinner/phitex-runs/cmd-$SLURM_JOB_ID/$(basename "$OUT")"
 else
 	KEEP=
 fi
-run() { if [ -n "${PARTEX_SANDBOX:-}" ]; then "$@"; else scripts/sandbox "$@"; fi; }
+run() { if [ -n "${PHITEX_SANDBOX:-}" ]; then "$@"; else scripts/sandbox "$@"; fi; }
 BIN=target/release/phitex-flow
 run cargo build --release -q -p phitex-flow
 mkdir -p "$OUT"
@@ -120,7 +120,7 @@ fuzz_from() {
 	done
 }
 export -f chunk fuzz_from
-if [ -n "${PARTEX_SANDBOX:-}" ]; then
+if [ -n "${PHITEX_SANDBOX:-}" ]; then
 	xargs -P "$JOBS" -L 1 bash -c 'chunk "$@"' _ <"$OUT/chunks.txt"
 else
 	scripts/sandbox env BIN="$BIN" OUT="$OUT" EDITS="$EDITS" TIMEOUT="$TIMEOUT" bash -c "$(declare -f chunk fuzz_from); export -f chunk fuzz_from; xargs -P $JOBS -L 1 bash -c 'chunk \"\$@\"' _ <'$OUT/chunks.txt'"

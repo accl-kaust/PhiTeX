@@ -1,4 +1,4 @@
-# Apptainer image for partex runs on the accl cluster: Arch Linux pinned to
+# Apptainer image for phitex runs on the accl cluster: Arch Linux pinned to
 # an Arch Linux Archive snapshot, so pdfTeX, TeX Live, zlib and the fonts
 # are the versions the oracle outputs come from, and the repository's Rust
 # toolchain. Built by build-image.sbatch (kept outside the repository).

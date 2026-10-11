@@ -54,14 +54,14 @@ fn depends_on_the_listed_crates_only() {
     let deps = dependencies(&toml);
     assert!(deps.iter().any(|(n, _)| n == "phi"), "phi is a dependency");
     for (name, l) in &deps {
-        assert!(!name.starts_with("partex") || ALLOWED.contains(&name.as_str()), "no partex crate: {l}");
+        assert!(!name.starts_with("phitex") || ALLOWED.contains(&name.as_str()), "no phitex crate: {l}");
         assert!(ALLOWED.contains(&name.as_str()), "phitex-flow may depend on {ALLOWED:?} only: {l}");
     }
 }
 
 /// The crates of the machine-mode engine (deleted): never in phitex-flow's
 /// dependency closure, directly or through another crate.
-const NEVER: &[&str] = &["partex-core", "partex-engine", "partex-incr", "partex-ssa", "partex-trace", "phitex-ir", "partex-cli"];
+const NEVER: &[&str] = &["phitex-core", "phitex-engine", "phitex-incr", "phitex-ssa", "phitex-trace", "phitex-ir", "phitex-cli"];
 
 /// The transitive closure too (`cargo tree`, normal and build
 /// dependencies): a pure crate that linked an engine crate would bring
@@ -84,10 +84,10 @@ fn no_engine_crate_in_the_closure() {
 
 #[test]
 fn the_wall_forbids_unlisted_crates() {
-    let bad = "[dependencies]\nphi = { path = \"../phi\" }\npartex-core = { path = \"../partex-core\" }\n\
+    let bad = "[dependencies]\nphi = { path = \"../phi\" }\nphitex-core = { path = \"../phitex-core\" }\n\
                [dev-dependencies.serde]\nversion = \"1\"\n[target.'cfg(unix)'.dependencies]\nlibc = \"0.2\"\n";
     let names: Vec<String> = dependencies(bad).into_iter().map(|d| d.0).collect();
-    assert_eq!(names, ["phi", "partex-core", "serde", "libc"]);
+    assert_eq!(names, ["phi", "phitex-core", "serde", "libc"]);
 }
 
 /// The library runs no process (the finder, like every file, is a given

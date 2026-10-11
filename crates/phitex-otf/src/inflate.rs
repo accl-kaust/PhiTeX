@@ -1,4 +1,4 @@
-//! zlib's `inflate` (RFC 1950 and 1951), copied from partex-engine's
+//! zlib's `inflate` (RFC 1950 and 1951), copied from phitex-engine's
 //! `inflate.rs` (which reads PDF streams): here it opens compressed TECkit
 //! mappings (`zQmp`) and WOFF tables.
 

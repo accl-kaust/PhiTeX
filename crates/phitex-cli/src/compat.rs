@@ -10,7 +10,7 @@ use crate::session::{self, Job, Session};
 use crate::tex::{self, Output};
 
 /// The names that are the modern command line, not an engine's.
-const MODERN: &[&str] = &["phitex", "partex"];
+const MODERN: &[&str] = &["phitex", "phitex"];
 
 /// What an invocation is.
 #[derive(Debug, PartialEq, Eq)]

@@ -44,7 +44,7 @@ pub struct Entry {
     pub y: Option<f64>,
 }
 
-/// A glyph's origin, as a build gives it (`partex_core::GlyphOrigin`):
+/// A glyph's origin, as a build gives it (`phitex_core::GlyphOrigin`):
 /// bytes `start..end` of file `file` (an index into the build's file
 /// names), `synthesized` when the range is a call's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

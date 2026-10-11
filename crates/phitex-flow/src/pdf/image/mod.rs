@@ -3,7 +3,7 @@
 //! pdftex.web's `scale_image`): a pure function of the file's bytes and
 //! what the command asked for, made where the command is. Writing an
 //! image is the fold's (`fold::image`), at the first page showing it.
-//! Copied from partex-core's `pdf/image.rs`, `pdf/writepng.rs` and
+//! Copied from phitex-core's `pdf/image.rs`, `pdf/writepng.rs` and
 //! `pdf/epdf.rs`, with the engine taken out.
 
 use std::sync::Arc;
