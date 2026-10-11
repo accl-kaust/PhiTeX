@@ -353,9 +353,9 @@ impl<I, S: Copy> Arena<I, S> {
     }
 
     /// Up to `limit` `(key, item)` pairs with keys in `[lo, hi]`, in order.
-    pub(crate) fn range(&self, t: u32, lo: u64, hi: u64, out: &mut Vec<(u64, u32)>, limit: usize)
+    pub(crate) fn range<O>(&self, t: u32, lo: u64, hi: u64, out: &mut Vec<(u64, O)>, limit: usize)
     where
-        I: Copy + Into<u32>,
+        I: Copy + Into<O>,
     {
         if t == NIL || out.len() >= limit {
             return;

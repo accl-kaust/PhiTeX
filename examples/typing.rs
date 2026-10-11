@@ -93,12 +93,11 @@ fn rss_mb() -> f64 {
 
 fn check(prog: &Program, eng: &Engine) -> Duration {
     let t = Instant::now();
-    let (mut cold, p) = Program::load(prog.lines.clone());
-    cold.evaluate_sequential().expect("cold evaluate");
+    let want = common::interp::interpret(&prog.lines).expect("interpreter");
     assert_eq!(
-        p.result(&cold),
+        want,
         prog.result(eng),
-        "incremental result differs from a cold evaluation"
+        "incremental result differs from the interpreter"
     );
     t.elapsed()
 }
@@ -137,6 +136,17 @@ fn bench(n: usize, o: &Opts) {
     probes("load");
     let (t, r) = eval(&mut eng, o.threads, false);
     probes("cold evaluation");
+    let ti = Instant::now();
+    let reference = common::interp::interpret(&prog.lines).expect("interpreter");
+    let interp = ti.elapsed();
+    if o.check {
+        assert_eq!(reference, prog.result(&eng), "cold result differs from the interpreter");
+    }
+    println!(
+        "interpreter {interp:.3?}  engine load+cold {:.3?} ({:.2}x)",
+        load + t,
+        (load + t).as_secs_f64() / interp.as_secs_f64()
+    );
     println!(
         "load {load:.3?}  cold {t:.3?}  runs {}  stops {}  gated {}  pending waits {}  live {}  critical path {}  rss {:.0} MB",
         r.runs,

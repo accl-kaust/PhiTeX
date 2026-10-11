@@ -348,7 +348,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn read_output(&mut self, t: Slot) -> Result<ValueId, Stop> {
-        let key = u64::from(t);
+        let key = t.pack();
         if let Some(&v) = self.cache.get(&(K_OUTPUT, key)) {
             return Ok(v.unwrap_or(ValueId::UNIT));
         }

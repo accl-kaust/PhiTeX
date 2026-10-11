@@ -26,11 +26,13 @@
 //! ```
 #![allow(dead_code, clippy::many_single_char_names)] // AST code reads best with short names
 
+pub mod interp;
+
 use std::sync::{Arc, OnceLock, RwLock};
 
 use defuse::{
-    Claim, Ctx, Effect, Engine, Executor, Field, FxHashMap, Locality, NodeId, OpId, Operation, RunResult, SeqMonoid,
-    Stop, UnitId, Value, ValueId, Values,
+    Claim, Ctx, Effect, Engine, Executor, Field, FxHashMap, Locality, MayDefine, NodeId, OpId, Operation, RunResult,
+    SeqMonoid, Stop, UnitId, Value, ValueId, Values,
 };
 
 // ------------------------------------------------------------------- lexer
@@ -577,6 +579,72 @@ fn proc_decls(v: &Values, ast: ValueId, out: &mut Vec<(String, Option<Vec<String
     }
 }
 
+/// The literal text an expression's value starts with, and whether that is
+/// all of it (string literals joined by `+`).
+fn literal_prefix(v: &Values, e: ValueId) -> (String, bool) {
+    let (t, a) = tag(v, e);
+    match t.as_str() {
+        "str" => (text(v, a[0]), true),
+        "op" if text(v, a[0]) == "+" => {
+            let (l, full) = literal_prefix(v, a[1]);
+            if !full {
+                return (l, false);
+            }
+            let (r, full) = literal_prefix(v, a[2]);
+            (l + &r, full)
+        }
+        _ => (String::new(), false),
+    }
+}
+
+const KEYWORDS: [&str; 21] = [
+    "begin",
+    "end",
+    "endlist",
+    "page",
+    "if",
+    "else",
+    "eval",
+    "print",
+    "emit",
+    "loop",
+    "sumnext",
+    "listto",
+    "listuntil",
+    "mark",
+    "meaning",
+    "proc",
+    "do",
+    "global",
+    "return",
+    "fn",
+    "seq",
+];
+
+/// What `eval TEXT` with a computed part may define, from the literal text
+/// before the first computed piece: names starting with its first token.
+/// Advisory (the computed rest could start more statements; the engine
+/// re-binds if it does).
+fn eval_prefix(v: &Values, e: ValueId) -> MayDefine {
+    let (p, _) = literal_prefix(v, e);
+    let p = p.trim_start();
+    let id: String = p
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    let complete = id.len() < p.len();
+    let keyword = if complete {
+        KEYWORDS.contains(&id.as_str())
+    } else {
+        KEYWORDS.iter().any(|k| k.starts_with(id.as_str()))
+    };
+    if id.is_empty() || keyword || id.starts_with(|c: char| c.is_ascii_digit()) {
+        return MayDefine::Any;
+    }
+    // `id = {..}` also defines `id.x`: a prefix covers both.
+    MayDefine::Prefixes(vec![id])
+}
+
 /// What a literal `eval "TEXT"` may define, read statically: `None` if its
 /// text is not a literal, or opens, closes or unfolds further.
 fn eval_literal(v: &Values, expr: ValueId) -> Option<Vec<String>> {
@@ -878,26 +946,30 @@ impl Operation for StmtOp {
         !matches!(tag(v, args[0]).0.as_str(), "do" | "eval") || !text(v, f.0).starts_with("proc.")
     }
 
-    fn may_define(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+    fn may_define(&self, args: &[ValueId], v: &Values) -> MayDefine {
+        let names = |e: Option<Vec<String>>| match e {
+            Some(e) if e.is_empty() => MayDefine::Nothing,
+            Some(e) => MayDefine::Names(e.iter().map(|n| v.field(n)).collect()),
+            None => MayDefine::Any,
+        };
         let (t, a) = tag(v, args[0]);
         match t.as_str() {
             // Whatever `~name` means, it can only define its target.
-            "invoke" => Some(vec![v.field(&text(v, a[1]))]),
+            "invoke" => MayDefine::Names(vec![v.field(&text(v, a[1]))]),
             "do" => {
                 let p = self.1.read().expect("procs");
-                if !p.tracked {
-                    return None;
-                }
-                Some(p.union(&text(v, a[0]))?.iter().map(|n| v.field(n)).collect())
+                names(if p.tracked { p.union(&text(v, a[0])) } else { None })
             }
-            "eval" => Some(eval_literal(v, a[0])?.iter().map(|n| v.field(n)).collect()),
-            "block" => exports(v, &items(v, a[0])).map(|e| e.iter().map(|n| v.field(n)).collect()),
-            "if" => {
-                let mut e = exports(v, &items(v, a[1]))?;
+            "eval" => match eval_literal(v, a[0]) {
+                Some(e) => names(Some(e)),
+                None => eval_prefix(v, a[0]),
+            },
+            "block" => names(exports(v, &items(v, a[0]))),
+            "if" => names(exports(v, &items(v, a[1])).and_then(|mut e| {
                 e.extend(exports(v, &items(v, a[2]))?);
-                Some(e.iter().map(|n| v.field(n)).collect())
-            }
-            _ => None,
+                Some(e)
+            })),
+            _ => MayDefine::Any,
         }
     }
 
@@ -1421,8 +1493,14 @@ impl Executor for Threads {
 pub const SECTION: usize = 24;
 
 /// Generates a random program of about `n` lines using every feature.
-#[allow(clippy::too_many_lines)]
 pub fn generate(seed: u64, n: usize) -> Vec<String> {
+    generate_with(seed, n, true)
+}
+
+/// [`generate`], optionally without evaluated text that starts with a
+/// computed piece (the only unbounded definition sets it makes).
+#[allow(clippy::too_many_lines)]
+pub fn generate_with(seed: u64, n: usize, unbounded: bool) -> Vec<String> {
     let mut rng = defuse::Rng::new(seed);
     let mut lines: Vec<String> = vec![
         "loop fwd = 0".into(),
@@ -1432,6 +1510,7 @@ pub fn generate(seed: u64, n: usize) -> Vec<String> {
         "meaning say = \"emit\"".into(),
         "stopword = \"zz\"".into(),
         "proc bump(a) { global pb = a + 1 }".into(),
+        "proc show(a) { emit a * 3 }".into(),
         "f = fn(a) { t = a * 2 return t + g1 }".into(),
     ];
     for g in 0..32 {
@@ -1460,6 +1539,32 @@ pub fn generate(seed: u64, n: usize) -> Vec<String> {
             let k = rng.below(100);
             let name = format!("x{sec}_{i}");
             let src = pick(&mut rng, &locals);
+            // Computed definitions (evaluated text) on 0.3% of lines: 9 in
+            // 10 with a literal prefix, 1 in 10 starting with a computed
+            // piece (unbounded).
+            if rng.chance(3, 1000) {
+                let named = match rng.below(10) {
+                    0 if unbounded => {
+                        lines.push(format!("s{sec}_{i} = \"e{sec}_{i} = \""));
+                        lines.push(format!("eval s{sec}_{i} + {src}"));
+                        true
+                    }
+                    1 | 2 => {
+                        lines.push(format!("eval \"u{sec}_\" + {src} + \" = 1\""));
+                        false
+                    }
+                    _ => {
+                        lines.push(format!("eval \"e{sec}_{i} = \" + {src}"));
+                        true
+                    }
+                };
+                if named {
+                    lines.push(format!("{name} = e{sec}_{i} + 1"));
+                    locals.push(name);
+                }
+                i += 1;
+                continue;
+            }
             match rng.below(16) {
                 0..=3 => {
                     lines.push(format!("{name} = {src} + {k}"));
@@ -1508,11 +1613,13 @@ pub fn generate(seed: u64, n: usize) -> Vec<String> {
                     lines.push("endlist".into());
                     locals.push(name);
                 }
-                13 if sec % 8 == 1 => {
+                // 95% of procedure bodies define nothing.
+                13 if rng.chance(1, 20) => {
                     lines.push(format!("do bump({src})"));
                     lines.push(format!("{name} = pb + {k}"));
                     locals.push(name);
                 }
+                13 => lines.push(format!("do show({src})")),
                 14 => {
                     lines.push(format!(
                         "if {src} < {k} {{ global h{sec} = 1 }} else {{ global h{sec} = 2 }}"
@@ -1526,11 +1633,6 @@ pub fn generate(seed: u64, n: usize) -> Vec<String> {
                     lines.push("mark zz".into());
                     locals.push(name);
                     i += 2;
-                }
-                _ if sec % 8 == 0 && i == 5 => {
-                    lines.push(format!("eval \"e{sec} = \" + {src}"));
-                    lines.push(format!("{name} = e{sec} + 1"));
-                    locals.push(name);
                 }
                 _ => {
                     lines.push(format!("{name} = {src} * 2"));

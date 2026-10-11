@@ -3,7 +3,8 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
-use common::{Program, SECTION, Threads, generate};
+use common::interp::interpret;
+use common::{Program, SECTION, Threads, generate, generate_with};
 use defuse::{Engine, EvalError, Greedy, RandomScheduler, Report, Rng, Sequential, Speculation};
 
 fn lines(src: &[&str]) -> Vec<String> {
@@ -13,13 +14,17 @@ fn lines(src: &[&str]) -> Vec<String> {
 fn load(src: &[&str]) -> (Engine, Program, Report) {
     let (mut eng, prog) = Program::load(lines(src));
     let r = eng.evaluate_sequential().expect("evaluate");
+    assert_eq!(
+        prog.result(&eng),
+        reference(&prog.lines),
+        "engine != interpreter: {src:?}"
+    );
     (eng, prog, r)
 }
 
-fn cold(prog: &Program) -> Vec<u64> {
-    let (mut eng, p) = Program::load(prog.lines.clone());
-    eng.evaluate_sequential().expect("cold evaluate");
-    p.result(&eng)
+/// The sequential interpreter's result: the reference.
+fn reference(lines: &[String]) -> Vec<u64> {
+    interpret(lines).expect("interpreter")
 }
 
 fn out(eng: &Engine, prog: &Program, i: usize) -> String {
@@ -28,7 +33,12 @@ fn out(eng: &Engine, prog: &Program, i: usize) -> String {
 
 fn eval(eng: &mut Engine, prog: &Program) -> Report {
     let r = eng.evaluate_sequential().expect("evaluate");
-    assert_eq!(prog.result(eng), cold(prog), "incremental != cold: {:?}", prog.lines);
+    assert_eq!(
+        prog.result(eng),
+        reference(&prog.lines),
+        "incremental != interpreter: {:?}",
+        prog.lines
+    );
     r
 }
 
@@ -145,6 +155,35 @@ fn bounded_do_and_eval() {
 }
 
 #[test]
+fn replaced_child_in_a_reused_slot_is_demanded() {
+    // The eval's old child is freed and its replacement takes the same slot
+    // in the same step: it must still be demanded and run.
+    let (mut eng, mut prog, _) = load(&["g = 70", "eval \"u_\" + g + \" = 1\"", "page"]);
+    prog.set_line(&mut eng, 0, "g = 71".into());
+    eval(&mut eng, &prog);
+}
+
+#[test]
+fn slot_reused_steps_later_is_a_new_node() {
+    // A freed child's slot is taken by nodes created in later evaluations;
+    // references to the old node (generation-checked) never alias them.
+    let (mut eng, mut prog, _) = load(&["g = 70", "eval \"u_\" + g + \" = 1\"", "page"]);
+    prog.set_line(&mut eng, 0, "g = 71".into());
+    eval(&mut eng, &prog);
+    prog.insert_line(&mut eng, 1, "h = 1".into());
+    eval(&mut eng, &prog);
+    prog.insert_line(&mut eng, 2, "eval \"v_\" + h + \" = u_71 + 1\"".into());
+    eval(&mut eng, &prog);
+    for (i, t) in [(0, "g = 72"), (1, "h = 2"), (0, "g = 71"), (1, "h = 3")] {
+        prog.set_line(&mut eng, i, t.into());
+        eval(&mut eng, &prog);
+    }
+    eng.collect_garbage();
+    prog.set_line(&mut eng, 0, "g = 73".into());
+    eval(&mut eng, &prog);
+}
+
+#[test]
 fn freeing() {
     let (mut eng, mut prog, _) = load(&["c = 1", "if c { a = 1  b = 2 } else { d = 3 }"]);
     let before = eng.live_nodes();
@@ -155,9 +194,12 @@ fn freeing() {
     let (mut eng, mut prog, _) = load(&["f = fn(a) { t = a * 2  return t + 1 }", "y = f(3)", "w = f(4)"]);
     let live = eng.live_nodes();
     prog.set_line(&mut eng, 2, "w = 9".into());
-    let r = eval(&mut eng, &prog);
-    assert_eq!(r.freed, 3, "f(4) and its body");
+    eval(&mut eng, &prog);
+    // Unreferenced applications go at the next collection (amortized after
+    // builds), or when asked.
+    assert_eq!(eng.collect_garbage(), 3, "f(4) and its body");
     assert_eq!(eng.live_nodes(), live - 3);
+    assert_eq!(out(&eng, &prog, 1), "7");
 }
 
 // ------------------------------------------------------------------ claims
@@ -492,7 +534,11 @@ fn schedule_independence_ids_and_speculation() {
                 let r = eval(&mut eng).unwrap_or_else(|e| panic!("{name}: {e}"));
                 add(&mut spec, &r);
                 let got = prog.result(&eng);
-                assert_eq!(got, cold(&prog), "{name} seed {seed} step {step}: incremental != cold");
+                assert_eq!(
+                    got,
+                    reference(&prog.lines),
+                    "{name} seed {seed} step {step}: incremental != interpreter"
+                );
                 results.push(got);
                 reports.push(canonical(&r));
                 ids.push(prog.nodes.iter().flat_map(|&n| eng.children(n)).collect());
@@ -548,7 +594,7 @@ fn wrong_shape_prediction_rolls_back() {
     let r = eng
         .evaluate(&mut Greedy::speculative(Speculation::All, 64), &mut Sequential)
         .unwrap_or_else(|e| panic!("{e:?}"));
-    assert_eq!(prog.result(&eng), cold(&prog));
+    assert_eq!(prog.result(&eng), reference(&prog.lines));
     let (mut c, _) = Program::load(prog.lines.clone());
     c.evaluate_sequential().unwrap();
     assert_eq!(
@@ -582,43 +628,58 @@ fn speculation_off_on_random_identical_on_generated_programs() {
 
 /// The bound we claim: the cold critical path (longest chain of dependent
 /// waits, as heights) is at most this, independent of program size, for the
-/// generated programs (whose inherent dependency depth is bounded by their
-/// section length: chains never run from one section into the next, except
-/// through the header's globals, procedure names and the layout segments).
+/// generated programs without unbounded evaluated text (whose inherent
+/// dependency depth is bounded by their section length: chains never run
+/// from one section into the next, except through the header's names,
+/// procedure names and the layout segments).
 #[allow(clippy::cast_possible_truncation)]
 const CRITICAL_PATH_BOUND: u32 = SECTION as u32;
 
-// Known false since `do` got a static definition bound: a non-literal
-// top-level `eval` may redefine any top-level name (the header's `g*`), so
-// every later lookup of one waits for it, and its text depends on its own
-// section: a chain through all sections, linear in the number of evals. The
-// earlier passes were masked: uses parked on a nearer unbounded `do` and
-// found the eval already done on re-walk, so the wait never raised a height.
 #[test]
-#[ignore = "inherent eval chain across sections; see comment"]
 fn critical_path_is_bounded() {
-    let mut cps = Vec::new();
-    for n in [1_000, 4_000, 16_000, 64_000] {
-        let (mut e, _) = Program::load(generate(7, n));
-        e.evaluate_sequential().unwrap();
-        cps.push(e.critical_path());
-    }
-    eprintln!("critical paths: {cps:?}");
-    for &c in &cps {
+    let paths = |unbounded: bool| -> Vec<u32> {
+        [1_000, 4_000, 16_000, 64_000]
+            .into_iter()
+            .map(|n| {
+                let (mut e, _) = Program::load(generate_with(7, n, unbounded));
+                e.evaluate_sequential().unwrap();
+                e.critical_path()
+            })
+            .collect()
+    };
+    let bounded = paths(false);
+    eprintln!("critical paths, literal-prefix evals only: {bounded:?}");
+    for &c in &bounded {
         assert!(
             c <= CRITICAL_PATH_BOUND,
-            "critical path {c} > {CRITICAL_PATH_BOUND}: {cps:?}"
+            "critical path {c} > {CRITICAL_PATH_BOUND}: {bounded:?}"
         );
     }
-    // Not growing with size (64x more lines: the path may not double).
-    assert!(cps[3] < 2 * cps[0], "critical path grows with program size: {cps:?}");
+    assert!(
+        bounded[3] < 2 * bounded[0],
+        "critical path grows with program size: {bounded:?}"
+    );
+    // With 1 in 10 evals starting with a computed piece (0.03% of lines),
+    // each such eval may define any name, and its text depends on names
+    // looked up across the previous one: a real chain, growing with the
+    // number of them. Reported, not bounded.
+    eprintln!("critical paths, with unbounded evals: {:?}", paths(true));
+}
+
+#[test]
+fn generated_programs_match_the_interpreter() {
+    for (seed, n) in [(1, 1_000), (2, 4_000), (3, 16_000)] {
+        let (mut eng, prog) = Program::load(generate(seed, n));
+        eng.evaluate(&mut Greedy::default(), &mut Threads(4)).unwrap();
+        assert_eq!(prog.result(&eng), reference(&prog.lines), "seed {seed}, {n} lines");
+    }
 }
 
 #[test]
 fn record_sizes() {
     let (node, edge) = Engine::record_sizes();
     assert!(node <= 128, "node record {node} bytes");
-    assert!(edge <= 16, "use edge {edge} bytes");
+    assert!(edge <= 24, "use edge {edge} bytes");
 }
 
 #[test]
