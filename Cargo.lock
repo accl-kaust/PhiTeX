@@ -1553,6 +1553,15 @@ name = "phitex-tfm"
 version = "0.0.0"
 
 [[package]]
+name = "phitex-trace"
+version = "0.0.0"
+dependencies = [
+ "fastrand",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "phitex-typeset"
 version = "0.0.0"
 
