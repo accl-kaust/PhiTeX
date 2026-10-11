@@ -2629,23 +2629,7 @@ impl Engine {
             }
         } else {
             let site = self.walk(unit, lx, f).site;
-            let depth = self.order.fold(&OAug, root, 0, lx + 1).o;
-            let end = if depth == 0 {
-                u64::MAX
-            } else {
-                // The closing node's own reads are inside the scope, unless
-                // its brackets come before it (its kind read always is).
-                self.order
-                    .search_fwd(&OAug, root, lx, &|s: OSum| s.c >= 1)
-                    .map_or(u64::MAX, |e| {
-                        if f == self.kind_field || !self.brackets_before(root, e) {
-                            e + 1
-                        } else {
-                            e
-                        }
-                    })
-            };
-            prev.push((site, end));
+            prev.push((site, self.local_end(root, lx, f)));
         }
         self.ix_insert(unit, f, lx, x);
         self.stream_touch(unit, lx);
@@ -2660,6 +2644,128 @@ impl Engine {
                 self.move_user(from, x.pack(), f, l, u, x);
                 self.report.rebinds += 0;
             }
+        }
+    }
+
+    /// The brackets around `s` changed: re-binds its definitions and uses.
+    fn rescope_node(&mut self, unit: u32, s: Slot) {
+        // A global's reach (from it to the next global, at any depth)
+        // does not depend on the brackets: only local definitions
+        // re-register. Re-adding a local takes from a global exactly the
+        // readers that now reach the local.
+        let (plain, special): (Vec<Field>, Vec<Field>) = self
+            .n(s)
+            .defs
+            .iter()
+            .filter(|d| !d.global)
+            .map(|d| d.field)
+            .partition(|&f| !self.is_hidden(f));
+        for f in plain {
+            self.rescope_def(s, f);
+        }
+        let vals: Vec<(Field, ValueId)> = self.n(s).defs.iter().map(|d| (d.field, d.value)).collect();
+        for &f in &special {
+            self.remove_def(s, f);
+        }
+        for &f in &special {
+            self.add_def(s, f, false);
+        }
+        // Restore the values (re-registration resets them).
+        let n = self.nm(s);
+        for d in &mut n.defs {
+            if let Some(v) = vals.iter().find(|v| v.0 == d.field) {
+                d.value = v.1;
+            }
+        }
+        let uses: Vec<Use> = self.n(s).uses.to_vec();
+        let label = self.n(s).label;
+        let streams = self.aux_of(s).is_some_and(|a| a.stream.is_some());
+        // The previous link of each contribution chain read.
+        let mut link: Vec<(u64, Slot)> = Vec::new();
+        for u in uses {
+            if u.kind == K_CHAIN {
+                // A deeper link is read at the previous link's position:
+                // the run is redone only if one moved, or now crosses
+                // pending structure.
+                let prev = link.iter().rev().find(|l| l.0 == u.key).map(|l| l.1);
+                let same = !streams
+                    && prev.is_some_and(|p| {
+                        p != NIL && self.live(p) && {
+                            let w = self.walk(unit, self.n(p).label, Field(ValueId(u.key)));
+                            w.site == u.site && w.pending == NIL
+                        }
+                    });
+                if !same {
+                    self.make_dirty(s);
+                }
+                link.push((u.key, u.site));
+                continue;
+            }
+            if u.kind != K_FIELD {
+                continue;
+            }
+            let f = Field(ValueId(u.key));
+            let w = self.walk(unit, label, f);
+            if w.site != u.site {
+                self.move_user(site_key(unit, u.site), site_key(unit, w.site), f, label, s, w.site);
+            }
+            link.push((u.key, w.site));
+        }
+    }
+
+    /// Where the reach of a local definition of `f` at `lx` ends
+    /// (exclusive): the close of its scope.
+    fn local_end(&self, root: u32, lx: u64, f: Field) -> u64 {
+        let depth = self.order.fold(&OAug, root, 0, lx + 1).o;
+        if depth == 0 {
+            return u64::MAX;
+        }
+        // The closing node's own reads are inside the scope, unless its
+        // brackets come before it (its kind read always is).
+        self.order
+            .search_fwd(&OAug, root, lx, &|s: OSum| s.c >= 1)
+            .map_or(u64::MAX, |e| {
+                if f == self.kind_field || !self.brackets_before(root, e) {
+                    e + 1
+                } else {
+                    e
+                }
+            })
+    }
+
+    /// The brackets around `x`'s local definition of `f` changed: re-binds
+    /// exactly the uses whose reaching definition changed. Uses can leave
+    /// only past the (new) end of its scope; uses can arrive only from the
+    /// definition that reaches `x` itself. Unlike removing and adding the
+    /// definition, uses that stay are not touched.
+    fn rescope_def(&mut self, x: Slot, f: Field) {
+        let (unit, lx) = (self.n(x).unit, self.n(x).label);
+        let root = self.units[unit as usize].root;
+        // The index is keyed by depth.
+        self.ix_remove(unit, f, lx);
+        self.ix_insert(unit, f, lx, x);
+        let end = self.local_end(root, lx, f);
+        let from = x.pack();
+        if end < u64::MAX {
+            let leavers: Vec<(u64, Slot)> = self
+                .users
+                .range((from, f, end)..=(from, f, u64::MAX))
+                .map(|(&(_, _, l), &u)| (l, u))
+                .collect();
+            for (l, u) in leavers {
+                let site = self.walk(unit, l, f).site;
+                self.move_user(from, site_key(unit, site), f, l, u, site);
+            }
+        }
+        let site = self.walk(unit, lx, f).site;
+        let prev = site_key(unit, site);
+        let movers: Vec<(u64, Slot)> = self
+            .users
+            .range((prev, f, lx + 1)..(prev, f, end))
+            .map(|(&(_, _, l), &u)| (l, u))
+            .collect();
+        for (l, u) in movers {
+            self.move_user(prev, from, f, l, u, x);
         }
     }
 
@@ -2743,38 +2849,7 @@ impl Engine {
             if !self.live(s) || self.n(s).state == State::Inert {
                 continue;
             }
-            let defs: Vec<(Field, bool)> = self.n(s).defs.iter().map(|d| (d.field, d.global)).collect();
-            let vals: Vec<(Field, ValueId)> = self.n(s).defs.iter().map(|d| (d.field, d.value)).collect();
-            for &(f, _) in &defs {
-                self.remove_def(s, f);
-            }
-            for &(f, g) in &defs {
-                self.add_def(s, f, g);
-            }
-            // Restore the values (re-registration resets them).
-            let n = self.nm(s);
-            for d in &mut n.defs {
-                if let Some(v) = vals.iter().find(|v| v.0 == d.field) {
-                    d.value = v.1;
-                }
-            }
-            let uses: Vec<Use> = self.n(s).uses.to_vec();
-            let label = self.n(s).label;
-            for u in uses {
-                if u.kind == K_CHAIN {
-                    // A deeper chain link may have moved: read it again.
-                    self.make_dirty(s);
-                    continue;
-                }
-                if u.kind != K_FIELD {
-                    continue;
-                }
-                let f = Field(ValueId(u.key));
-                let w = self.walk(unit, label, f);
-                if w.site != u.site {
-                    self.move_user(site_key(unit, u.site), site_key(unit, w.site), f, label, s, w.site);
-                }
-            }
+            self.rescope_node(unit, s);
         }
     }
 
@@ -3635,37 +3710,7 @@ impl Engine {
             if !self.live(s) || self.n(s).state == State::Inert {
                 continue;
             }
-            let defs: Vec<(Field, bool, ValueId)> =
-                self.n(s).defs.iter().map(|d| (d.field, d.global, d.value)).collect();
-            for &(f, _, _) in &defs {
-                self.remove_def(s, f);
-            }
-            for &(f, g, _) in &defs {
-                self.add_def(s, f, g);
-            }
-            let n = self.nm(s);
-            for d in &mut n.defs {
-                if let Some(v) = defs.iter().find(|v| v.0 == d.field) {
-                    d.value = v.2;
-                }
-            }
-            let uses: Vec<Use> = self.n(s).uses.to_vec();
-            let l = self.n(s).label;
-            for u in uses {
-                if u.kind == K_CHAIN {
-                    // A deeper chain link may have moved: read it again.
-                    self.make_dirty(s);
-                    continue;
-                }
-                if u.kind != K_FIELD {
-                    continue;
-                }
-                let f = Field(ValueId(u.key));
-                let w = self.walk(unit, l, f);
-                if w.site != u.site {
-                    self.move_user(site_key(unit, u.site), site_key(unit, w.site), f, l, s, w.site);
-                }
-            }
+            self.rescope_node(unit, s);
         }
     }
 
