@@ -39,8 +39,10 @@ fn workspace_root() -> PathBuf {
 /// Pure crates that must build for `wasm32-unknown-unknown`.
 const WASM_CRATES: &[&str] = &[
     "phitex-codecs",
+    "phitex-dvi",
     "phitex-otf",
     "phitex-source",
+    "phitex-tfm",
     "phitex-typeset",
     "phitex-xdvipdfmx",
 ];
