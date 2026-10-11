@@ -316,6 +316,7 @@ pub struct Converter<'l> {
     /// Bodies by macro: the latest printed with `\\` before, else the
     /// first after (for calls printed under another `\\escapechar`).
     latest_body: HashMap<String, String>,
+    file_insts: std::collections::HashSet<u64>,
     pub first_body: HashMap<String, String>,
     pub counts: Counts,
 }
@@ -345,6 +346,7 @@ impl<'l> Converter<'l> {
             prim_names: std::collections::HashSet::new(),
             aliases: HashMap::new(),
             latest_body: HashMap::new(),
+            file_insts: std::collections::HashSet::new(),
             first_body: HashMap::new(),
             counts: Counts::default(),
         };
@@ -384,6 +386,7 @@ impl<'l> Converter<'l> {
         });
         let used = vec![false; text.as_ref().map_or(0, |t| t.keys.len())];
         let inst = self.inst();
+        self.file_insts.insert(inst);
         self.files.push(FileState {
             name: name.to_owned(),
             text,
@@ -622,20 +625,31 @@ impl<'l> Converter<'l> {
         self.close_claims(id, |inst, _| inst == f.inst);
     }
 
-    fn close_claims(&mut self, id: u64, mut done: impl FnMut(u64, u32) -> bool) {
-        let infos = &mut self.infos;
-        self.claims.retain(|&(inst, end, cid)| {
-            if done(inst, end) {
-                if let Some(info) = infos.get_mut(usize::try_from(cid).unwrap_or(usize::MAX)) {
-                    info.claim_n = u32::try_from(id - cid - 1).unwrap_or(NONE);
-                }
-                false
-            } else {
-                true
-            }
-        });
+    fn close_claims(&mut self, id: u64, done: impl FnMut(u64, u32) -> bool) {
+        close_claims(&mut self.claims, &mut self.infos, id, done);
     }
+}
 
+/// Ends the claims `done` says, at step `id`.
+fn close_claims(
+    claims: &mut Vec<(u64, u32, u64)>,
+    infos: &mut [Info],
+    id: u64,
+    mut done: impl FnMut(u64, u32) -> bool,
+) {
+    claims.retain(|&(inst, end, cid)| {
+        if done(inst, end) {
+            if let Some(info) = infos.get_mut(usize::try_from(cid).unwrap_or(usize::MAX)) {
+                info.claim_n = u32::try_from(id - cid - 1).unwrap_or(NONE);
+            }
+            false
+        } else {
+            true
+        }
+    });
+}
+
+impl Converter<'_> {
     /// Pass 1 over one step.
     ///
     /// # Panics
@@ -854,7 +868,13 @@ impl<'l> Converter<'l> {
         }
         if let Some((inst, j)) = joined_at {
             let j = u32::try_from(j).unwrap_or(NONE);
-            self.close_claims(id, |i, end| i == inst && end <= j);
+            // (a step read from another file ends the claims in files: an
+            // `\input`'s file name is its argument, not the file)
+            let in_file = found.is_some_and(|(f, _)| f.is_none());
+            let files = &self.file_insts;
+            close_claims(&mut self.claims, &mut self.infos, id, |i, end| {
+                (i == inst && end <= j) || (in_file && i != inst && files.contains(&i))
+            });
         }
         // Finished texts at the top go.
         while let Some(f) = self.stack.last()
@@ -1386,25 +1406,40 @@ pub struct EditPlan {
     pub impact_step: u64,
 }
 
-/// Chooses the edits: one per sampled line, the form and the line's
-/// writing step drawn with a fixed seed (2).
+/// Chooses `count` edits over the edit-impact sample's lines (the same
+/// `count` lines the analysis samples, seed 1): line by line in the
+/// sample's order, round after round while the document has fewer lines,
+/// each a form and one of the line's writing steps drawn with a fixed seed
+/// (2), no (form, step) twice; fewer when the lines' writers run out.
 #[must_use]
-pub fn plan_edits(g: &crate::analyze::Graph, samples: usize) -> Vec<EditPlan> {
+pub fn plan_edits(g: &crate::analyze::Graph, count: usize) -> Vec<EditPlan> {
     let mut rng = fastrand::Rng::with_seed(2);
-    g.edit_samples(samples)
-        .into_iter()
-        .map(|e| {
+    let samples = g.edit_samples(count);
+    let mut seen = std::collections::HashSet::new();
+    let mut plans = Vec::new();
+    let capacity: usize = samples.iter().map(|e| 3 * e.writers.len()).sum();
+    let mut misses = 0;
+    while plans.len() < count.min(capacity) && misses < 100 * count {
+        for e in &samples {
+            if plans.len() >= count {
+                break;
+            }
             let form = rng.u8(0..3);
             let target = e.writers[rng.usize(0..e.writers.len())];
-            EditPlan {
+            if !seen.insert((form, target)) {
+                misses += 1;
+                continue;
+            }
+            plans.push(EditPlan {
                 form,
                 target: u64::from(target),
                 line: e.line,
                 impact_line: e.impact,
                 impact_step: g.dependents_of(target, &e.steps),
-            }
-        })
-        .collect()
+            });
+        }
+    }
+    plans
 }
 
 fn edit_records(
