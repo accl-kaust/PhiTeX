@@ -1,9 +1,9 @@
 # AGENTS.md
 
 Rules for coding agents (and people) working in this repository. Read
-`AGENTS_BRIEF.md` first: it is the design. `crates/phitex-flow/CORE.md`
-records the engine's command set and decisions, `DESIGN.md` the crates
-and the φ core. Keep them current.
+`AGENTS_BRIEF.md` first: it is the design. `crates/phitex-red/CONSTRUCTS.md`
+records the engine's constructs, `DESIGN.md` the crates. Keep them
+current.
 
 ## Workflow
 
@@ -68,10 +68,10 @@ and the φ core. Keep them current.
 ## Architecture
 
 - `AGENTS_BRIEF.md`'s Banned table holds everywhere, the CLI included:
-  no engine state outside phitex-flow, no second source of truth (the
+  no engine state outside phitex-red, no second source of truth (the
   Build is the document's state), no cold-build path apart from the edit
   path.
-- phitex-flow depends on no crate holding TeX state (`tests/wall.rs`).
+- phitex-red depends on no crate holding TeX state.
 - Pure crates build for `wasm32-unknown-unknown` (`cargo xtask check`).
 - The scheduler affects speed, never results: every schedule gives
   byte-identical output.
@@ -80,8 +80,7 @@ and the φ core. Keep them current.
 
 - `cargo fmt` and `cargo clippy` (pedantic, workspace lints) are clean;
   `unsafe_code` is denied.
-- Performance claims need a benchmark (`phitex-flow --budgets`, the
-  cluster).
+- Performance claims need a benchmark on the accl cluster.
 - `upstream/` is fetched from pinned commits by
   `scripts/fetch-upstream.sh` and isn't committed. To change a pin,
   update the script and run `scripts/sandbox cargo xtask corpus`.

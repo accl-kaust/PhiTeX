@@ -1,12 +1,12 @@
-//! The `phitex` binary on phitex-flow, end to end:
+//! The `phitex` binary on phitex-red, end to end:
 //!
 //! - `latex -interaction=batchmode NAME.tex` (phitex run as `latex`) on
-//!   phitex-flow's LaTeX documents (`crates/phitex-flow/tests/latex/docs`):
+//!   phitex-red's LaTeX documents (`crates/phitex-red/tests/latex/docs`):
 //!   the DVI file and the written files are TeX Live's `latex`'s on the
 //!   first run (the recorded oracles), the format made on the graph and
 //!   cached;
 //! - `pdftex -ini -etex -interaction=batchmode NAME.tex` on the PDF
-//!   documents of phitex-flow's `tests/pdf.rs` (eight `-ini` documents, the
+//!   documents of phitex-red's `tests/pdf.rs` (eight `-ini` documents, the
 //!   ten plain ones): the PDF file is pdfTeX's, byte for byte;
 //! - `phitex build --output-format dvi` to the cross-run fixpoint, against
 //!   `latex` run until its `.aux` settles (where `latex` is installed);
@@ -15,11 +15,12 @@
 //!   the cold build's of the edited text;
 //! - `pdflatex -interaction=batchmode NAME.tex` on the same documents:
 //!   the PDF file and the written files are the recorded `pdflatex`
-//!   oracles' (`crates/phitex-flow/tests/latex/pdf/`), byte for byte.
+//!   oracles' (`crates/phitex-red/tests/latex/pdf/`), byte for byte.
 //!
 //! One heavy run at a time (a format build holds about 4 GB). The formats
 //! are kept in the target's temporary directory across runs.
 
+use std::fmt::Write as _;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -32,12 +33,13 @@ fn one() -> std::sync::MutexGuard<'static, ()> {
     ONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn flow() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../phitex-flow")
+/// The oracle fixtures (`crates/phitex-red/tests/fixtures`).
+fn fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../phitex-red/tests/fixtures")
 }
 
 fn docs_dir() -> PathBuf {
-    flow().join("tests/latex/docs")
+    fixtures().join("latex/docs")
 }
 
 /// The documents of pdfTeX's PDF-only commands (hyperref, graphicx,
@@ -45,7 +47,7 @@ fn docs_dir() -> PathBuf {
 /// fonts: `tests/latex/pdfdocs/`, their `pdflatex` oracles in
 /// `tests/latex/pdf/` beside the others').
 fn pdfdocs_dir() -> PathBuf {
-    flow().join("tests/latex/pdfdocs")
+    fixtures().join("latex/pdfdocs")
 }
 
 /// Where document `name` is: `tests/latex/pdfdocs/` if it is one of those.
@@ -137,7 +139,7 @@ fn copy_doc(name: &str, dir: &Path) {
 
 /// `latex -interaction=batchmode NAME.tex` through phitex: the DVI file
 /// and the written files are the recorded oracle's. The `.aux` file read
-/// back at `\end{document}` in the same run is phitex-flow's known gap
+/// back at `\end{document}` in the same run is phitex-red's known gap
 /// (CORE.md, "LaTeX documents": until agent B's fixpoint lands), with
 /// exactly its two errors and an empty `.toc`.
 fn latex_doc(name: &str) {
@@ -146,7 +148,7 @@ fn latex_doc(name: &str) {
 
 /// `pdflatex -interaction=batchmode NAME.tex` through phitex: the PDF file
 /// and the written files are the recorded `pdflatex` oracle's
-/// (`crates/phitex-flow/tests/latex/pdf/`).
+/// (`crates/phitex-red/tests/latex/pdf/`).
 fn pdflatex_doc(name: &str) {
     tex_doc("pdflatex", name);
 }
@@ -157,7 +159,7 @@ fn pdflatex_doc(name: &str) {
 fn tex_doc(program: &str, name: &str) {
     let _one = one();
     let pdf = program == "pdflatex";
-    let oracles = if pdf { flow().join("tests/latex/pdf") } else { docs_dir() };
+    let oracles = if pdf { fixtures().join("latex/pdf") } else { docs_dir() };
     let dir = scratch(&format!("{program}-{name}"));
     copy_doc(name, &dir);
     let t = Instant::now();
@@ -177,7 +179,7 @@ fn tex_doc(program: &str, name: &str) {
             gap && errors.iter().all(|e| e.contains(&format!("`{name}.aux'")) || e.contains("End of file on the terminal") || e.contains("Emergency stop")),
             "{name}: phitex failed, not on the known .aux gap: {errors:?}\nterminal:\n{term}\nstderr:\n{errs}\nlog:\n{log}"
         );
-        eprintln!("{name}: the .aux read back at \\end{{document}} is phitex-flow's known gap (agent B's fixpoint)");
+        eprintln!("{name}: the .aux read back at \\end{{document}} is phitex-red's known gap (agent B's fixpoint)");
     }
     let ext = if pdf { "pdf" } else { "dvi" };
     let want = std::fs::read(oracles.join(format!("{name}.{ext}"))).expect("the oracle");
@@ -249,16 +251,19 @@ fn latex_rules() {
     latex_doc("rules");
 }
 
-/// plain.tex as phitex-flow's tests make it (`tests/dvi/plaintext.tex`
+/// plain.tex as phitex-red's tests make it (`tests/dvi/plaintext.tex`
 /// before its body, with `hyphen.tex`).
 fn plain() -> String {
-    phitex_flow::fuzz::plain().expect("plain.tex of phitex-flow's tests")
+    let s = std::fs::read_to_string(fixtures().join("dvi/plaintext.tex")).expect("plaintext.tex");
+    let at = s.find("\\output={}\n").expect("plaintext.tex's body");
+    let h = std::fs::read_to_string(fixtures().join("hyph/hyphen.tex")).expect("hyphen.tex");
+    s[..at].replace("% (\\input hyphen: no hyphenation patterns on the graph yet)\n", &h)
 }
 
-/// The PDF documents of phitex-flow's `tests/pdf.rs`: the name of the file
+/// The PDF documents of phitex-red's `tests/pdf.rs`: the name of the file
 /// to typeset, its text and the oracle's name.
 fn pdf_docs() -> Vec<(String, String, String)> {
-    let pdf = flow().join("tests/pdf");
+    let pdf = fixtures().join("pdf");
     let mut v = Vec::new();
     for name in ["hello", "compressed", "mag", "mixed1", "mixed2", "objstm", "rules", "guess"] {
         let text = std::fs::read_to_string(pdf.join(format!("{name}.tex"))).expect("NAME.tex");
@@ -266,7 +271,7 @@ fn pdf_docs() -> Vec<(String, String, String)> {
     }
     for body in ["story", "pages", "display", "table", "hyphens"] {
         for default in [false, true] {
-            let b = std::fs::read_to_string(flow().join(format!("tests/plain/{body}.tex"))).expect("a body");
+            let b = std::fs::read_to_string(fixtures().join(format!("tests/plain/{body}.tex"))).expect("a body");
             let text = "\\pdfoutput=1\n".to_string() + &plain() + if default { "\\output={}\n" } else { "" } + &b;
             let name = if default { format!("{body}-default") } else { body.to_owned() };
             v.push((name.clone(), text, format!("plain-{name}")));
@@ -288,7 +293,7 @@ fn pdftex_ini_documents() {
             .args(["-ini", "-etex", "-interaction=batchmode", &format!("{name}.tex")])
             .output()
             .expect("phitex runs");
-        let want = std::fs::read(flow().join(format!("tests/pdf/{oracle}.pdf"))).expect("the oracle");
+        let want = std::fs::read(fixtures().join(format!("tests/pdf/{oracle}.pdf"))).expect("the oracle");
         let got = std::fs::read(dir.join(format!("{name}.pdf"))).unwrap_or_default();
         if !out.status.success() || got != want {
             bad.push(format!(
@@ -330,7 +335,7 @@ fn latex_fixpoint(name: &str, dir: &Path) -> Vec<u8> {
 /// `phitex build --output-format dvi` runs to the cross-run fixpoint: its
 /// DVI file is `latex`'s once `latex`'s `.aux` file settles.
 #[test]
-#[ignore = "waits on CORE.md's W2: phitex-flow's update after set_file of the run's .aux does not end (A/B; B's Fixpoint)"]
+#[ignore = "waits on CORE.md's W2: phitex-red's update after set_file of the run's .aux does not end (A/B; B's Fixpoint)"]
 fn build_to_the_fixpoint() {
     if !have("latex") {
         eprintln!("build_to_the_fixpoint: no `latex` here to compare with: not checked");
@@ -364,10 +369,18 @@ fn build_to_the_fixpoint() {
     }
 }
 
-/// The 48-page plain document of phitex-flow's budgets ("big"), in PDF
+/// The 48-page plain document of phitex-red's budgets ("big"), in PDF
 /// mode, as one `-ini` file.
 fn big() -> String {
-    let body = phitex_flow::fuzz::big_body(4).expect("the plain bodies");
+    let mut body = String::new();
+    for k in 0..4 {
+        for b in ["story", "pages", "display", "table", "hyphens"] {
+            let t = std::fs::read_to_string(fixtures().join(format!("plain/{b}.tex"))).expect("a plain body");
+            let t = t.trim_end().strip_suffix("\\bye").unwrap_or(&t).to_string();
+            let _ = write!(body, "\\message{{[part {k} {b}]}}\n{t}\n\n");
+        }
+    }
+    body.push_str("\\bye\n");
     "\\pdfoutput=1\n".to_string() + &plain() + &body
 }
 
@@ -391,7 +404,7 @@ fn update_ms(line: &str) -> f64 {
 /// `phitex watch`, headless: a word edited in the file on disk is built as
 /// an edit of the same Build; its PDF is the cold build's of the edited
 /// text, byte for byte, and the edit's update is within the brief's word
-/// budget (50 ms; phitex-flow's budgets measure about 10 ms on this
+/// budget (50 ms; phitex-red's budgets measure about 10 ms on this
 /// document) in a release build.
 #[test]
 fn watch_word_edit() {
@@ -541,7 +554,7 @@ fn ws_send(url: &str, request: &str) -> std::net::TcpStream {
 #[test]
 fn watch_editor_buffer() {
     let _one = one();
-    let body = std::fs::read_to_string(flow().join("tests/plain/story.tex")).expect("a body");
+    let body = std::fs::read_to_string(fixtures().join("plain/story.tex")).expect("a body");
     let text = "\\pdfoutput=1\n".to_string() + &plain() + &body;
     let dir = scratch("watch-editor");
     std::fs::write(dir.join("story.tex"), &text).expect("the document");

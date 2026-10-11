@@ -44,6 +44,6 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: >-
           cargo check --target wasm32-unknown-unknown -p phitex-codecs -p phitex-otf
-          -p phitex-xdvipdfmx -p phi
+          -p phitex-xdvipdfmx
       # (without TeX Live: the tests that compare with it skip themselves)
       - run: cargo test --workspace --quiet

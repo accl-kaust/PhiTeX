@@ -133,7 +133,7 @@ fn diagnostics(r: &session::Report, log: &str) -> Vec<String> {
         .map(|e| {
             format!(
                 "{{\"severity\":\"error\",\"code\":\"tex\",\"message\":{}}}",
-                crate::json::quote(crate::format::bare(e))
+                crate::json::quote(crate::problems::bare(e))
             )
         })
         .collect();
@@ -293,21 +293,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             if r.runs.len() == 1 { "" } else { "s" },
             r.pages(),
             if r.pages() == 1 { "" } else { "s" },
-            r.out.stats.pages_reused
+            r.out.pages_reused
         );
-        if s.job.synctex {
-            let y = s.sync.stats();
-            line.push_str(&format!(
-                "; synctex {:.2} ms ({} of {} page{} walked, {} compressed)",
-                y.ms,
-                y.walked,
-                y.pages,
-                if y.pages == 1 { "" } else { "s" },
-                y.compressed
-            ));
-        }
         if let Some(v) = &view {
-            v.set_sync(if s.job.synctex { s.sync.doc() } else { None });
             let pdf = match r.main_output() {
                 Some(("pdf", b)) => Some(session::shared(b)),
                 Some((_, dvi)) => match crate::dvipdf::dvi_to_pdf(dvi, &format!("{}.pdf", s.job.jobname), s.job.pdf_date) {

@@ -81,7 +81,7 @@ pub fn dvi_to_pdf(dvi: &[u8], pdf_name: &str, date: i64) -> Result<Vec<u8>, Stri
     Session::convert(
         options,
         Box::new(DpxFiles::new()),
-        Box::new(|level, data| phitex_flow::pdf::zlib::compress(data, level)),
+        Box::new(|level, data| phitex_codecs::deflate::compress(data, level)),
         dvi,
     )
     .map_err(|e| format!("dvipdfmx: {e}"))

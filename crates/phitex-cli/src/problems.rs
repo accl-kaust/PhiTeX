@@ -3,7 +3,7 @@
 //! the culprit underlined, the macros it was in as notes, TeX's help as
 //! the help note. Read from the transcript, where TeX lays each error out
 //! (`! message`, the context levels two lines each, `l.N` with the line
-//! split where it was read, the help to the blank line); phitex-flow's
+//! split where it was read, the help to the blank line); phitex-red's
 //! `Output::errors` are the messages, matched to these displays.
 
 use annotate_snippets::{Level, Renderer, Snippet};
@@ -218,7 +218,7 @@ pub fn show(ui: &Ui, errors: &[String], log: &str, main: &str) {
     let problems = parse(log, main);
     let mut used = vec![false; problems.len()];
     for e in errors.iter().take(max) {
-        let m = crate::format::bare(e);
+        let m = bare(e);
         let key = m.trim_end_matches('.');
         match (0..problems.len()).find(|&k| !used[k] && problems[k].message == key) {
             Some(k) => {
@@ -227,6 +227,14 @@ pub fn show(ui: &Ui, errors: &[String], log: &str, main: &str) {
             }
             None => ui.error(m),
         }
+    }
+}
+
+/// An error without the piece it was met in (`piece K: …`).
+pub fn bare(e: &str) -> &str {
+    match e.split_once(": ") {
+        Some((p, m)) if p.starts_with("piece ") => m,
+        _ => e,
     }
 }
 

@@ -35,7 +35,7 @@ grep -h -E "panicked|livelock" "$r"/tests/*.txt | cut -c1-300 | head -40 >> "$r/
 # oracle's; fonts as the oracle's fontconfig saw them)
 if [ -n "${CLI:-}" ]; then
   cargo build --release -p phitex-cli > "$r/cli-build.log" 2>&1; echo "cli build exit $?" >> "$r/summary.txt"
-  root=$PWD; oracle=${PHITEX_XETEX_ORACLE:-$root/crates/phitex-flow/tests/xetex/oracle}
+  root=$PWD; oracle=${PHITEX_XETEX_ORACLE:-$root/crates/phitex-red/tests/fixtures/xetex/oracle}
   for d in crates/phitex-flow/tests/xetex/docs/fontspec.tex crates/phitex-flow/tests/latex/docs/ams.tex; do
     n=$(basename "$d" .tex); w="$r/cli/$n"; mkdir -p "$w"; cp "$d" "$w/"
     ( cd "$w" && SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1 FONTCONFIG_FILE="$root/scripts/xetex/fonts.conf" PHITEX_CACHE_DIR="$r/cli-cache" \

@@ -277,32 +277,6 @@ impl Tools {
     }
 }
 
-/// The tools as the build's own derivation (`Build::set_derive`): BibTeX
-/// and makeindex inside the build's loop-back, on the files each
-/// evaluation wrote; their outputs are files the next evaluation reads,
-/// and only the readers of what changed run again.
-pub struct ToolDerive {
-    pub tools: Tools,
-    /// The job's directory (relative names of the files the tools read).
-    pub dir: PathBuf,
-}
-
-impl phitex_flow::build::Derive for ToolDerive {
-    fn derive(&mut self, writes: &[(String, String)], known: &dyn Fn(&str) -> bool) -> Vec<phitex_flow::build::Derived> {
-        let dir = self.dir.clone();
-        self.tools
-            .after_run(writes, &dir, &|n: &str| known(n) || dir.join(n).is_file())
-            .into_iter()
-            .map(|m| phitex_flow::build::Derived {
-                bytes: m.text.as_deref().map(crate::tex::bytes),
-                name: m.file,
-                side: m.side,
-                note: m.line,
-            })
-            .collect()
-    }
-}
-
 /// Whether this invocation is BibTeX (`bibtex`, or `phitex -bibtex`).
 pub fn bibtex_wanted(argv0: &str, args: &[String]) -> bool {
     stem(argv0) == "bibtex" || args.first().is_some_and(|a| a == "-bibtex" || a == "--bibtex")

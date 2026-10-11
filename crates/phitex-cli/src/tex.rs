@@ -1,18 +1,15 @@
-//! TeX Live as the flow builds see it: the engines by their program names
-//! (fmtutil.cnf's lines), and kpathsea, the finder a `Build` is given
-//! (`Build::set_kpse` with `phitex_flow::kpse::Kpathsea`): `\input` files
-//! by TEXINPUTS (from the environment, `.` first as texmf.cnf has it),
-//! TFM files, map files, fonts and encodings, each a lookup in the `ls-R`
-//! databases, no directory walked.
+//! TeX Live as the builds see it: the engines by their program names
+//! (fmtutil.cnf's lines), and kpathsea, the finder a `Build` is given:
+//! `\input` files by TEXINPUTS (from the environment, `.` first as
+//! texmf.cnf has it), TFM files, map files, fonts and encodings, each a
+//! lookup in the `ls-R` databases, no directory walked.
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Mutex, PoisonError};
 
 use phitex_kpse::{Format, Kpse};
-use phitex_flow::kpse::Kpathsea;
-use phitex_flow::tfm::{Kpse as _, KpseFormat};
 
 /// What a format writes when no `\pdfoutput` says otherwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,42 +130,6 @@ pub fn kpse(progname: &str, engine: &str) -> Kpse {
     Kpse::new(&dir, progname, engine)
 }
 
-/// texmfmp.c's `setupboundvariable`: `name`'s value by kpathsea (the
-/// environment first, `name.progname` before `name`, then texmf.cnf) as C's
-/// `atoi` reads it; a negative value, or 0 where the default is not,
-/// keeps the default (web2c's "Bad value" warning).
-fn bound_var(k: &mut Kpse, name: &str, dflt: i64) -> i64 {
-    let Some(v) = k.var_value(name) else { return dflt };
-    let s = v.trim_ascii_start();
-    let (neg, digits) = match s.first() {
-        Some(b'-') => (true, &s[1..]),
-        Some(b'+') => (false, &s[1..]),
-        _ => (false, s),
-    };
-    let n = digits
-        .iter()
-        .take_while(|c| c.is_ascii_digit())
-        .fold(0i64, |n, c| n.saturating_mul(10).saturating_add(i64::from(c - b'0')));
-    let n = if neg { -n } else { n };
-    if n < 0 || (n == 0 && dflt > 0) { dflt } else { n }
-}
-
-/// The main memory of a run that loads a format, in words (tex.ch): the
-/// format's `mem_top` (its `main_memory`, as the format was made: ours are
-/// made with [`phitex_flow::build::MAIN_MEMORY`], TeX Live's texmf.cnf
-/// value; a `main_memory` given to the run is ignored, as pdflatex ignores
-/// it), and the run's own `extra_mem_top` above and `extra_mem_bot` below
-/// (`mem_max = mem_top + extra_mem_top`, `mem_min = mem_bot -
-/// extra_mem_bot`), each at most `sup_main_memory`. An `-ini` run has
-/// `main_memory` only (the `Options` default).
-pub fn run_memory(k: &mut Kpse) -> u64 {
-    const SUP_MAIN_MEMORY: i64 = 256_000_000;
-    let main = i64::try_from(phitex_flow::build::MAIN_MEMORY).unwrap_or(SUP_MAIN_MEMORY);
-    let top = bound_var(k, "extra_mem_top", 0).min(SUP_MAIN_MEMORY);
-    let bot = bound_var(k, "extra_mem_bot", 0).min(SUP_MAIN_MEMORY);
-    u64::try_from(main + top + bot).unwrap_or(0)
-}
-
 /// FNV-1a, 64 bits: the stamps' and the cache's keys (stable across
 /// runs and builds).
 #[derive(Clone, Copy)]
@@ -212,79 +173,41 @@ pub fn cache_dir() -> PathBuf {
     std::env::temp_dir().join("phitex-cache")
 }
 
-/// This build's identity: a hash of the sources it was built from
-/// (`build.rs`'s `build_id`), the same for the same sources in any
-/// checkout and for any copy of the binary: a format made by another
-/// build of phitex is never read back, one made by a copy of this one is.
-pub fn build_id() -> u64 {
-    u64::from_str_radix(env!("PHITEX_BUILD_ID"), 16).unwrap_or(0)
-}
-
-/// TeX Live for one program name: the finder a build is given, and the
-/// tree's stamp.
+/// TeX Live for one program name: the finder a build is given.
 pub struct Tree {
     /// kpathsea as the engine's program (its `progname`, `$engine`).
-    pub kpse: Arc<Kpathsea>,
-    /// The program name it finds files as.
-    pub prog: &'static str,
-    /// The tree's stamp: the search paths and the `ls-R` databases'
-    /// sizes and times.
-    pub stamp: u64,
-    /// The main memory a run of a format has ([`run_memory`]).
-    pub main_memory: u64,
-}
-
-fn os(b: &[u8]) -> &Path {
-    Path::new(OsStr::from_bytes(b))
+    kpse: Mutex<Kpse>,
 }
 
 impl Tree {
     /// The tree for engine `e`: kpathsea as its program, made once (its
     /// `texmf.cnf` and `ls-R` read at the first lookup).
     pub fn open(e: &Engine) -> Tree {
-        let mut k = kpse(e.name, e.kpse_engine);
-        let stamp = stamp(&mut k);
-        let main_memory = run_memory(&mut k);
-        Tree { kpse: Arc::new(Kpathsea::new(k)), prog: e.name, stamp, main_memory }
+        Tree { kpse: Mutex::new(kpse(e.name, e.kpse_engine)) }
     }
 
-    /// The same tree for a format's build: the current directory is never
-    /// searched (fmtutil runs in a scratch directory), so a format cached
-    /// for the tree holds nothing of the directory it was made in.
-    pub fn for_format(&self, e: &Engine) -> Tree {
-        Tree {
-            kpse: Arc::new(Kpathsea::new(kpse(e.name, e.kpse_engine)).without_cwd()),
-            prog: self.prog,
-            stamp: self.stamp,
-            main_memory: self.main_memory,
-        }
-    }
-
-    /// The path of TeX Live's file `name` (as TEXINPUTS finds it), if any.
+    /// Where file `name` is, by kpathsea in the format its extension
+    /// names (pdfTeX's choices: a TFM, a VF, a map, a Type 1 font, an
+    /// encoding, else an input).
     pub fn input(&self, name: &str) -> Option<PathBuf> {
-        self.kpse.find(name, KpseFormat::Tex, self.prog).map(PathBuf::from)
+        let ext = Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("");
+        let format = match ext.to_ascii_lowercase().as_str() {
+            "tfm" => Format::Tfm,
+            "vf" => Format::Vf,
+            "map" => Format::FontMap,
+            "pfb" | "pfa" => Format::Type1,
+            "enc" => Format::Enc,
+            "otf" => Format::OpenType,
+            "ttf" | "ttc" => Format::TrueType,
+            _ => Format::Tex,
+        };
+        let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
+        k.find_file(name.as_bytes(), format, false).map(|b| os(&b).to_path_buf())
     }
 }
 
-/// The tree's stamp: the search paths of inputs and TFM files and the
-/// `ls-R` databases' sizes and times (a format is made again when the
-/// tree changes).
-fn stamp(kpse: &mut Kpse) -> u64 {
-    let tex_path = kpse.show_path(Format::Tex);
-    let tfm_path = kpse.show_path(Format::Tfm);
-    let mut h = Fnv::new().add(&tex_path).add(&tfm_path);
-    for elt in kpse.show_path(Format::Db).split(|&c| c == b':') {
-        let elt = elt.strip_prefix(b"!!").unwrap_or(elt);
-        if let Ok(m) = std::fs::metadata(os(elt).join("ls-R")) {
-            let t = m
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_nanos());
-            h = h.add(elt).add(&m.len().to_le_bytes()).add(&t.to_le_bytes());
-        }
-    }
-    h.0
+fn os(b: &[u8]) -> &Path {
+    Path::new(OsStr::from_bytes(b))
 }
 
 /// Bytes as TeX's characters, one each (what a `Build` reads).

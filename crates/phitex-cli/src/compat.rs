@@ -98,7 +98,6 @@ pub fn main(progname: &str, args: &[String]) -> ! {
     }
     let mut ini = progname == "initex";
     let mut etex = false;
-    let mut mode = None;
     let mut jobname = None;
     let mut out_dir = std::env::var("TEXMF_OUTPUT_DIRECTORY").ok().filter(|d| !d.is_empty());
     let mut output = None;
@@ -125,13 +124,16 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         let v = || value.clone().unwrap_or_default();
         match name {
             "version" => {
-                println!("phitex {} (on phitex-flow) as {progname}", env!("CARGO_PKG_VERSION"));
+                println!("phitex {} (on phitex-red) as {progname}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "help" => usage(progname),
             "ini" => ini = true,
             "etex" => etex = true,
-            "interaction" => mode = Some(interaction(&v()).unwrap_or_else(|| usage(progname))),
+            "interaction" => {
+                // (phitex-red runs every job to its end: the mode is checked, not kept)
+                interaction(&v()).unwrap_or_else(|| usage(progname));
+            }
             "jobname" => jobname = Some(v()),
             "output-directory" => out_dir = Some(v()),
             "output-format" => {
@@ -209,10 +211,7 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         out_dir: out_dir.map_or_else(|| PathBuf::from("."), PathBuf::from),
         // (TeX's own default; with no terminal input an error stops the
         // job, as TeX's does when its standard input is at its end)
-        interaction: mode.unwrap_or(3),
         threads: threads.unwrap_or_else(crate::default_threads),
-        fixpoint: false,
-        tools: false,
         synctex,
         recorder,
         pdf_date: session::pdf_date(),

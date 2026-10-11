@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The manual corpus (docs/ci.md): TeX Live's own documentation sources,
-built by TeX Live's engines to a settled fixpoint: the oracle a flow CI
+built by TeX Live's engines to a settled fixpoint: the oracle a CI
 will compare `phitex` with (the PDF and the files the job reads back; not
 the .log).
 

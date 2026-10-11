@@ -1,39 +1,20 @@
-//! A document's session: one `phitex_flow::Build`, kept for the process's
-//! life, and the jobs it runs: the format (cached, `format.rs`), then the
-//! document on it. The Build is the document's state; the session holds
+//! A document's session: one `phitex_red::api::Build`, kept for the
+//! process's life. The Build is the document's state; the session holds
 //! only what is given to it (the main file's text, the editor's unsaved
-//! buffers, the written files handed back as new versions) and writes
-//! what it made.
-//!
-//! **The cross-run fixpoint** (AGENTS_BRIEF §7): run k reads what run
-//! k−1 wrote, as new versions of those files (`Build::set_file`), with
-//! BibTeX and makeindex between runs; it stops when the written files are
-//! the versions the run read, after at most [`FIXPOINT_RUNS`] runs, and
-//! says which files did not settle. Each run is phitex-flow's
-//! `fixpoint::Fixpoint::run_reading` ([`Session::fixpoint`]).
+//! buffers, the written files handed back to a new Build) and writes what
+//! it made. The cross-run fixpoint is the Build's own loop-back.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use phitex_flow::graph::jobs;
-use phitex_flow::print::Limits;
-use phitex_flow::fixpoint::Fixpoint;
-use phitex_flow::{Build, Options, Output, Reads};
-
 use crate::tex::{self, Engine, Tree};
 
-/// The runs a fixpoint may take.
-pub const FIXPOINT_RUNS: usize = 5;
-
-/// What a session does now, for a terminal's spinner (`ui.rs`): its
-/// phase in words (the format, the run, the tools) and the engine's own
-/// board (the round, the pieces settled, the pages shipped).
+/// What a session does now, for a terminal's spinner (`ui.rs`).
 #[derive(Default)]
 pub struct Status {
     phase: Mutex<String>,
-    pub engine: Arc<phitex_flow::Progress>,
 }
 
 impl Status {
@@ -63,13 +44,7 @@ pub struct Job {
     pub jobname: String,
     /// Where the outputs go (`.`: here).
     pub out_dir: PathBuf,
-    /// 0 batch, 1 nonstop, 2 scroll, 3 errorstop.
-    pub interaction: i32,
     pub threads: usize,
-    /// Run to the fixpoint (else once, as TeX runs).
-    pub fixpoint: bool,
-    /// BibTeX and makeindex between runs.
-    pub tools: bool,
     /// `-synctex`.
     pub synctex: bool,
     /// `-recorder`: `JOB.fls`.
@@ -82,29 +57,39 @@ pub struct Job {
 #[derive(Clone, Debug, Default)]
 pub struct RunInfo {
     pub wall: Duration,
-    /// Why it ran: `cold`, `edit`, or the files that changed.
+    /// Why it ran: `cold` or `edit`.
     pub why: String,
+    /// Nodes reduced (not kept from the last build).
     pub commands_run: u64,
-    pub commands: u64,
-    pub pieces_ran: usize,
-    pub pieces: usize,
     pub pages: usize,
     pub pages_reused: usize,
+}
+
+/// What one build made.
+#[derive(Clone, Debug, Default)]
+pub struct Output {
+    /// The PDF (pdfTeX), else empty.
+    pub pdf: Vec<u8>,
+    /// The DVI (TeX, e-TeX), else empty.
+    pub dvi: Vec<u8>,
+    pub pages: usize,
+    /// The pages shipped as the last build shipped them.
+    pub pages_reused: usize,
+    pub errors: Vec<String>,
+    /// The terminal's and the log's text.
+    pub log: String,
+    /// The files TeX wrote.
+    pub writes: Vec<(String, String)>,
 }
 
 /// What a build made.
 pub struct Report {
     pub out: Output,
     pub runs: Vec<RunInfo>,
-    /// The written files still changing at the last run (the fixpoint's
-    /// bound reached: they oscillate, or need more runs).
+    /// The written files still changing when the Build stopped.
     pub unsettled: Vec<String>,
-    /// What the tools said.
     pub notes: Vec<String>,
     pub wall: Duration,
-    /// XeTeX's: `out.dvi` is an XDV file (`out.pdf` xdvipdfmx's of it,
-    /// unless `-no-pdf`).
-    pub xetex: bool,
 }
 
 impl Report {
@@ -113,7 +98,7 @@ impl Report {
         if !self.out.pdf.is_empty() {
             Some(("pdf", &self.out.pdf))
         } else if !self.out.dvi.is_empty() {
-            Some((if self.xetex { "xdv" } else { "dvi" }, &self.out.dvi))
+            Some(("dvi", &self.out.dvi))
         } else {
             None
         }
@@ -121,7 +106,7 @@ impl Report {
 
     /// The pages shipped.
     pub fn pages(&self) -> usize {
-        self.out.stats.pages
+        self.out.pages
     }
 
     /// TeX's history: 0 spotless, 1 warnings, 2 errors.
@@ -141,12 +126,7 @@ impl Report {
 
     /// The document job's transcript.
     pub fn log_text(&self) -> String {
-        let name = format!("x.{}", self.main_output().map_or("dvi", |(e, _)| e));
-        self.out
-            .job_logs(&Limits::TEX_LIVE, &name)
-            .pop()
-            .map(|l| l.log)
-            .unwrap_or_default()
+        self.out.log.clone()
     }
 }
 
@@ -161,44 +141,17 @@ pub struct Written {
 
 pub struct Session {
     pub job: Job,
-    build: Build,
     /// The main file's text, as TeX's characters.
     text: String,
-    /// The written files given to the build as new versions (the last
-    /// run's), and the tools' outputs.
+    /// The files the last build wrote (a new Build's warm start).
     given: BTreeMap<String, String>,
-    /// The tools' other files (`.blg`, `.ilg`), to write.
-    side: BTreeMap<String, Vec<u8>>,
-    tools: crate::tools::Tools,
-    /// The format the build starts from.
-    pub format: Option<PathBuf>,
     builds: usize,
-    /// `JOB.synctex.gz`, kept between builds (`synctex.rs`).
-    pub sync: crate::synctex::Writer,
     /// What the session does now, for a spinner.
     status: Arc<Status>,
-    /// TeX's main memory for the runs (`Options::main_memory`): texmf.cnf's
-    /// and the environment's (`tex::run_memory`) when a format is loaded.
-    main_memory: u64,
-    /// `PHITEX_ENGINE=red`: the reduction engine's build (made at the first build).
+    /// The Build (made at the first build).
     red: Option<phitex_red::api::Build>,
-}
-
-/// `PHITEX_ENGINE=red` selects phitex-red for build and watch.
-pub fn red_engine() -> bool {
-    std::env::var("PHITEX_ENGINE").is_ok_and(|v| v == "red")
-}
-
-/// What a run reads as file `name`: the version given, else the disk's
-/// (the output directory first, then here).
-fn read_back_in(given: &BTreeMap<String, String>, out_dir: &Path, name: &str) -> Option<String> {
-    if let Some(t) = given.get(name) {
-        return Some(t.clone());
-    }
-    [out_dir.join(name), PathBuf::from(name)]
-        .iter()
-        .find_map(|p| if p.is_file() { std::fs::read(p).ok() } else { None })
-        .map(|b| tex::chars(&b))
+    /// Unsaved buffers given before the Build was made.
+    buffers: Vec<(String, Option<String>)>,
 }
 
 /// `SOURCE_DATE_EPOCH`, else the time now.
@@ -213,79 +166,21 @@ pub fn pdf_date() -> i64 {
         })
 }
 
-/// How a build's reads that find a definition being remade go
-/// (`PHITEX_READS=suspend|speculate`; else `edit`'s default: cold builds
-/// suspend, edits speculate).
-fn reads(edit: bool) -> Reads {
-    match std::env::var("PHITEX_READS").as_deref() {
-        Ok("suspend") => Reads::Suspend,
-        Ok("speculate") => Reads::Speculate,
-        _ if edit => Reads::Speculate,
-        _ => Reads::Suspend,
-    }
-}
-
 impl Session {
-    /// A session for `job`: TeX Live's paths, the format (made if the
-    /// cache has none), the main file read. `note` hears what takes time;
-    /// `status` is told what the session does now.
-    pub fn new(job: Job, status: Arc<Status>, note: &mut dyn FnMut(&str)) -> Result<Session, String> {
-        let tree = Tree::open(&job.engine);
-        let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()))?;
-        let mut build = Build::new(phitex_flow::tfm::null_font());
-        build.set_progress(Some(status.engine.clone()));
-        // (a job built to its fixpoint: the files it writes and reads back
-        // are a loop-back inside each update, evaluated again only where
-        // they changed)
-        build.set_converge(job.fixpoint);
-        // (BibTeX and makeindex are part of that loop-back: the files they
-        // make are values the next evaluation reads)
-        if job.fixpoint && job.tools {
-            build.set_derive(Some(Box::new(crate::tools::ToolDerive {
-                tools: crate::tools::Tools::default(),
-                dir: job.out_dir.clone(),
-            })));
-        }
-        // (every file by kpathsea as the engine's program — TEXINPUTS from
-        // the environment, `.` first —, the output directory before it, as
-        // web2c's `open_input` tries `-output-directory` first)
-        build.set_kpse(tree.kpse.clone(), tree.prog);
+    /// A session for `job`: the main file read.
+    pub fn new(job: Job, status: Arc<Status>, _note: &mut dyn FnMut(&str)) -> Result<Session, String> {
         if job.engine.xetex {
-            build.set_xetex(crate::xetex::fonts(&job.engine, &tree, note)?);
+            return Err(format!("{}: XeTeX is not on phitex-red yet", job.engine.name));
         }
-        let mut dirs = Vec::new();
-        if job.out_dir != Path::new(".") {
-            dirs.push(job.out_dir.clone());
-        }
-        build.set_input_dirs(dirs);
-        build.set_jobname(&job.jobname);
-        build.set_limits(Limits::TEX_LIVE);
-        build.set_interaction(job.interaction);
-        build.set_pdf_date(job.pdf_date);
-        let mut format = None;
-        let main_memory = if job.ini { phitex_flow::build::MAIN_MEMORY } else { tree.main_memory };
-        if !job.ini && !red_engine() {
-            let (bytes, path) = crate::format::ensure(&job.engine, &tree, job.threads, &status, note)?;
-            build
-                .set_format(&bytes)
-                .map_err(|e| format!("{}: the format does not read: {e}", path.display()))?;
-            build.set_interaction_option(Some(job.interaction));
-            build.set_terminal(&[&format!("&{} {}", job.engine.name, job.file)]);
-            format = Some(path);
-        }
+        let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()))?;
         Ok(Session {
             job,
-            build,
             text: tex::chars(&text),
             given: BTreeMap::new(),
-            side: BTreeMap::new(),
-            tools: crate::tools::Tools::default(),
-            format,
             builds: 0,
-            sync: crate::synctex::Writer::default(),
             status,
-            main_memory,
             red: None,
+            buffers: Vec::new(),
         })
     }
 
@@ -297,176 +192,30 @@ impl Session {
     /// File `name`'s text from now on (an editor's unsaved buffer, TeX's
     /// characters), or none: as on disk again.
     pub fn set_buffer(&mut self, name: &str, text: Option<&str>) {
-        match text {
-            Some(t) => self.build.set_file(name, t),
-            None => self.build.remove_file(name),
-        }
-        if let Some(r) = &mut self.red {
-            r.edit(phitex_red::api::Edit::File { name: Arc::from(name), text: text.map(Arc::from) });
+        match &mut self.red {
+            Some(r) => r.edit(phitex_red::api::Edit::File { name: Arc::from(name), text: text.map(Arc::from) }),
+            None => self.buffers.push((name.to_owned(), text.map(str::to_owned))),
         }
     }
 
-    fn etex(&self) -> bool {
-        if self.job.ini { self.job.etex } else { self.job.engine.etex }
-    }
-
-    /// The build's source: the main file's text (with a format, as the
-    /// job that loads it, `graph::jobs`).
-    fn src(&self) -> String {
-        if self.job.ini { self.text.clone() } else { jobs(&[&self.text]) }
-    }
-
-    /// What a run reads as file `name`: the version given, else the disk's
-    /// (the output directory first, then here).
-    fn read_back(&self, name: &str) -> Option<String> {
-        read_back_in(&self.given, &self.job.out_dir, name)
-    }
-
-    fn give(&mut self, name: &str, text: String) {
-        self.build.set_file(name, &text);
-        self.given.insert(name.to_owned(), text);
-    }
-
-    /// Builds: the first time cold, then as an edit of what changed; to
-    /// the fixpoint if the job says so.
+    /// Builds: the first time cold, then as an edit of the main text as it
+    /// is now; the Build's loop-back fixpoint replaces the runs.
     pub fn build(&mut self) -> Report {
-        if red_engine() {
-            return self.build_red();
-        }
-        let edit = self.builds > 0;
-        self.builds += 1;
-        let opts = Options {
-            threads: self.job.threads.max(1),
-            reads: reads(edit),
-            etex: self.etex(),
-            main_memory: self.main_memory,
-            ..Options::default()
-        };
-        let bound = if self.job.fixpoint { FIXPOINT_RUNS } else { 1 };
-        self.fixpoint(opts, bound, if edit { "edit" } else { "cold" })
-    }
-
-    /// The cross-run fixpoint, at most `bound` runs: each run phitex-flow's
-    /// `Fixpoint::run_reading` (a written file compared with the version
-    /// the run read: given before, else on disk), then BibTeX and makeindex.
-    fn fixpoint(&mut self, opts: Options, bound: usize, first: &str) -> Report {
-        let t0 = Instant::now();
-        let src = self.src();
-        let mut runs: Vec<RunInfo> = Vec::new();
-        let mut notes = Vec::new();
-        let mut why = first.to_owned();
-        let mut changed: Vec<String> = Vec::new();
-        let mut last = None;
-        let mut fix = Fixpoint::new();
-        for k in 1..=bound {
-            let t = Instant::now();
-            self.status.set(format!("run {k} ({why})"));
-            let run = {
-                let (given, dir) = (&self.given, &self.job.out_dir);
-                fix.run_reading(&mut self.build, &src, opts, &|n| read_back_in(given, dir, n))
-            };
-            let out = run.out;
-            let s = &out.stats;
-            runs.push(RunInfo {
-                wall: t.elapsed(),
-                why: std::mem::take(&mut why),
-                commands_run: s.commands_run,
-                commands: s.commands,
-                pieces_ran: s.ran,
-                pieces: s.pieces,
-                pages: s.pages,
-                pages_reused: s.pages_reused,
-            });
-            // (the run's files are the next run's: `run_reading` gave them
-            // to the build; `given` is what a run reads, for `read_back`)
-            changed = run.changed;
-            for (n, t) in &out.writes {
-                if changed.contains(n) {
-                    let t = self.as_read(t);
-                    self.given.insert(n.clone(), t);
-                }
-            }
-            if self.job.tools && self.job.fixpoint {
-                // (BibTeX and makeindex ran inside the build's loop-back:
-                // what they made is what the build read)
-                notes.extend(out.notes.iter().cloned());
-                for (n, b) in &out.derived_side {
-                    self.side.insert(n.clone(), b.clone());
-                }
-                for (n, b) in &out.derived {
-                    self.given.insert(n.clone(), tex::chars(b));
-                }
-            } else if self.job.tools {
-                self.status.set(format!("after run {k}: BibTeX and makeindex"));
-                let dir = self.job.out_dir.clone();
-                let made = {
-                    let given = &self.given;
-                    let known = |n: &str| {
-                        given.contains_key(n) || dir.join(n).is_file() || Path::new(n).is_file()
-                    };
-                    self.tools.after_run(&out.writes, &dir, &known)
-                };
-                for m in made {
-                    notes.push(m.line);
-                    if let Some((n, b)) = m.side {
-                        self.side.insert(n, b);
-                    }
-                    if let Some(text) = m.text
-                        && self.read_back(&m.file).as_deref() != Some(text.as_str())
-                    {
-                        changed.push(m.file.clone());
-                        self.give(&m.file, text);
-                    }
-                }
-            }
-            last = Some(out);
-            if !self.job.fixpoint || changed.is_empty() || k == bound {
-                break;
-            }
-            why.clone_from(&changed.join(", "));
-            why.push_str(" changed");
-        }
-        let mut out = last.expect("a run");
-        let xetex = self.job.engine.xetex;
-        // (XeTeX's pages to PDF as `xetex` pipes them to `xdvipdfmx -q -E`,
-        // in process: unless `-no-pdf`)
-        if xetex && self.job.engine.output == tex::Output::Pdf && !out.dvi.is_empty() {
-            self.status.set("xdvipdfmx");
-            match self.build.xdv_pdf(&out.dvi) {
-                Some(Ok(pdf)) => out.pdf = pdf,
-                Some(Err(e)) => notes.push(format!("xdvipdfmx: {e} (the XDV file is written instead)")),
-                None => {}
-            }
-        }
-        self.status.set("");
-        self.status.engine.phase.store(0, std::sync::atomic::Ordering::Relaxed);
-        Report {
-            out,
-            runs,
-            unsettled: if self.job.fixpoint { changed } else { Vec::new() },
-            notes,
-            wall: t0.elapsed(),
-            xetex,
-        }
-    }
-
-    /// A build on phitex-red: one `Build` for the session, updated with the
-    /// main text as it is now; its loop-back fixpoint replaces the runs.
-    fn build_red(&mut self) -> Report {
         use phitex_red::api;
         let t0 = Instant::now();
         let why = if self.builds > 0 { "edit" } else { "cold" };
         self.builds += 1;
-        self.status.set(format!("red ({why})"));
+        self.status.set(why);
         let text: Arc<str> = Arc::from(self.text.as_str());
         let mut errors = Vec::new();
         let out = if let Some(b) = &mut self.red {
             Some(b.update(vec![api::Edit::Main(text)]))
         } else {
             let e = &self.job.engine;
+            let etex = if self.job.ini { self.job.etex } else { e.etex };
             let engine = if e.name.starts_with("pdf") {
                 api::Engine::Pdftex
-            } else if self.etex() {
+            } else if etex {
                 api::Engine::Etex
             } else {
                 api::Engine::Tex
@@ -500,6 +249,9 @@ impl Session {
             };
             match api::Build::new(opts, text) {
                 Ok(mut b) => {
+                    for (name, text) in self.buffers.drain(..) {
+                        b.edit(api::Edit::File { name: Arc::from(name.as_str()), text: text.map(|t| Arc::from(t.as_str())) });
+                    }
                     let o = b.update(Vec::new());
                     self.red = Some(b);
                     Some(o)
@@ -512,8 +264,6 @@ impl Session {
         };
         let o = out.unwrap_or_default();
         errors.extend(o.diags.iter().map(|d| d.msg.clone()));
-        let mut stats = phitex_flow::build::Stats::default();
-        stats.pages = o.pages;
         let writes: Vec<(String, String)> = o.written.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         for (n, t) in &writes {
             self.given.insert(n.clone(), t.clone());
@@ -524,17 +274,11 @@ impl Session {
             out: Output {
                 dvi: o.dvi,
                 pdf: o.pdf,
-                stats,
+                pages: o.pages,
+                pages_reused: o.pages - o.changed_pages.len(),
                 errors,
-                dump: String::new(),
-                log: o.log,
+                log: o.log.concat(),
                 writes,
-                job_pages: Vec::new(),
-                origins: Vec::new(),
-                files_read: Vec::new(),
-                derived: Vec::new(),
-                derived_side: Vec::new(),
-                notes: Vec::new(),
             },
             runs: vec![RunInfo {
                 wall,
@@ -542,29 +286,15 @@ impl Session {
                 commands_run: o.nodes_reduced as u64,
                 pages: o.pages,
                 pages_reused: o.pages - o.changed_pages.len(),
-                ..RunInfo::default()
             }],
             unsettled: o.unsettled.iter().map(ToString::to_string).collect(),
             notes: Vec::new(),
             wall,
-            xetex: false,
         }
     }
 
-    /// A file TeX wrote as its bytes: XeTeX writes UTF-8, TeX a byte per
-    /// character.
-    fn out_bytes(&self, t: &str) -> Vec<u8> {
-        if self.job.engine.xetex { t.as_bytes().to_vec() } else { tex::bytes(t) }
-    }
-
-    /// A file TeX wrote as a build reads it back (its bytes as TeX's
-    /// characters).
-    fn as_read(&self, t: &str) -> String {
-        if self.job.engine.xetex { tex::chars(t.as_bytes()) } else { t.to_owned() }
-    }
-
     /// Writes what the build made: `JOB.pdf` or `JOB.dvi`, the files
-    /// TeX wrote, the tools' files, `JOB.log`, `JOB.fls` (`-recorder`).
+    /// TeX wrote, `JOB.log`, `JOB.fls` (`-recorder`).
     pub fn write(&self, r: &Report) -> Result<Written, String> {
         let dir = &self.job.out_dir;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -582,43 +312,24 @@ impl Session {
         let ext = r.main_output().map_or(self.job.engine.output.ext(), |(e, _)| e);
         if let Some((e, b)) = r.main_output() {
             main = Some(put(&format!("{}.{e}", self.job.jobname), b)?);
-            if self.job.synctex {
-                let (n, b) = self.sync.file(&self.build, &self.job.jobname, &self.job.path, &r.out.files_read, self.job.threads);
-                put(&n, &b)?;
-            }
         }
         for (n, t) in &r.out.writes {
-            put(n, &self.out_bytes(t))?;
+            put(n, &tex::bytes(t))?;
         }
-        for (n, t) in &self.given {
-            if !r.out.writes.iter().any(|(m, _)| m == n) {
-                put(n, &tex::bytes(t))?;
-            }
-        }
-        for (n, b) in &self.side {
-            put(n, b)?;
-        }
-        let out_name = format!("{}.{ext}", self.job.jobname);
-        if let Some(l) = r.out.job_logs(&Limits::TEX_LIVE, &out_name).last() {
-            put(&format!("{}.log", self.job.jobname), &self.out_bytes(&l.log))?;
-        }
+        put(&format!("{}.log", self.job.jobname), &tex::bytes(&r.out.log))?;
         if self.job.recorder {
-            let fls = self.recorder(r, &out_name);
+            let fls = self.recorder(r, &format!("{}.{ext}", self.job.jobname));
             put(&format!("{}.fls", self.job.jobname), fls.as_bytes())?;
         }
         Ok(Written { main, files })
     }
 
-    /// `JOB.fls` as `-recorder` writes it, of what is known: the format,
-    /// the main file, the outputs. (The files a build read are not
-    /// reported by phitex-flow yet: asked for as `Output::files_read`.)
+    /// `JOB.fls` as `-recorder` writes it, of what is known: the main
+    /// file, the outputs.
     fn recorder(&self, r: &Report, out_name: &str) -> String {
         let mut s = String::new();
         let cwd = std::env::current_dir().unwrap_or_default();
         s.push_str(&format!("PWD {}\n", cwd.display()));
-        if let Some(f) = &self.format {
-            s.push_str(&format!("INPUT {}\n", f.display()));
-        }
         s.push_str(&format!("INPUT {}\n", self.job.path.display()));
         let dir = &self.job.out_dir;
         let out = |n: &str| dir.join(n).display().to_string();
@@ -634,20 +345,18 @@ impl Session {
 
     /// What the terminal shows of the document's job (TeX's own output).
     pub fn terminal(r: &Report) -> String {
-        let name = format!("x.{}", r.main_output().map_or("dvi", |(e, _)| e));
-        r.out.job_logs(&Limits::TEX_LIVE, &name).pop().map(|l| l.term).unwrap_or_default()
+        r.out.log.clone()
     }
 }
 
-/// The notes a job's options that phitex-flow cannot do yet give, once.
+/// The notes a job's options that phitex-red cannot do yet give, once.
 pub fn waiting_notes(job: &Job) -> Vec<String> {
     let mut v = Vec::new();
     if job.recorder {
-        v.push(
-            "-recorder: the .fls lists the format, the main file and the outputs; the files \
-             a build read wait on phitex-flow reporting them (Output::files_read, asked)"
-                .to_owned(),
-        );
+        v.push("-recorder: the .fls lists the main file and the outputs, not the files a build read".to_owned());
+    }
+    if job.synctex {
+        v.push("-synctex: phitex-red writes no SyncTeX yet".to_owned());
     }
     v
 }

@@ -99,29 +99,12 @@ pub struct Spin {
     updater: Option<std::thread::JoinHandle<()>>,
 }
 
-/// The spinner's line: what is built, the session's phase, the engine's
-/// round, pieces and pages, the time.
+/// The spinner's line: what is built, the session's phase, the time.
 fn status_line(what: &str, s: &Status, elapsed: Duration) -> String {
-    let e = &s.engine;
     let mut parts = vec![what.to_owned()];
     let phase = s.phase();
     if !phase.is_empty() {
         parts.push(phase);
-    }
-    let round = e.round.load(Ordering::Relaxed);
-    if round > 1 {
-        parts.push(format!("round {round}"));
-    }
-    let total = e.total.load(Ordering::Relaxed);
-    match e.phase.load(Ordering::Relaxed) {
-        1 => parts.push("laying out".to_owned()),
-        2 if total > 0 => parts.push(format!("{}/{total} pieces", e.settled.load(Ordering::Relaxed).min(total))),
-        3 => parts.push("writing the pages".to_owned()),
-        _ => {}
-    }
-    let pages = e.pages.load(Ordering::Relaxed);
-    if pages > 0 {
-        parts.push(plural(pages, "page", "pages"));
     }
     parts.push(format!("{:.1} s", elapsed.as_secs_f64()));
     parts.join(" · ")

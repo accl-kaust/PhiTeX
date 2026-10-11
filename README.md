@@ -13,39 +13,36 @@
 
 # PhiTeX
 
-A TeX engine in Rust that compiles a document as a dataflow graph over
-content-versioned values (`phitex-flow`): every command is a node, a
-macro call a step, a group's close emits nothing, and N equal threads
-evaluate the graph. A cold build is an edit from nothing; an edit re-runs
-only the nodes whose reads changed, and its output is the cold build's,
+A TeX engine in Rust that compiles a document by graph reduction of
+pending thunks (`phitex-red`): macros are functions, the PDF is the
+root, and the files a job writes and reads back are a loop-back reduced
+to a fixpoint. A cold build is an edit from nothing; an edit reduces
+again only what its change reaches, and its output is the cold build's,
 byte for byte.
 
 ## Status
 
-- **Exactness:** plain TeX, e-TeX, LaTeX (`latex`) and pdfLaTeX
-  (`pdflatex`) are byte-identical with TeX Live on the tested documents;
-  hyperref, images and colour in PDF mode come next, then XeTeX. The
-  `.log` may differ.
-- **Edits:** a word edit on a 48-page plain document is about 10 ms
-  (`phitex-flow --budgets`).
-- **The cross-run fixpoint:** `phitex build` runs the document again with
-  the files it wrote (`.aux`, `.toc`, `.bbl`, `.ind`) until they settle,
-  BibTeX and makeindex in process between runs.
+- **The engine:** phitex-red, being written; the PDF is the bar
+  (byte-identical with pdfTeX 1.40.29). XeTeX and SyncTeX are not on it
+  yet.
+- **The cross-run fixpoint:** the files a job writes (`.aux`, `.toc`,
+  `.bbl`, `.ind`) are read back inside the build until they settle,
+  BibTeX and makeindex in process.
 
 ## Layout
 
 | Crate | What it is |
 |---|---|
-| `phitex-flow` | the engine: TeX as a suspending dataflow graph (`AGENTS_BRIEF.md`, `crates/phitex-flow/CORE.md`) |
+| `phitex-red` | the engine: TeX as graph reduction (`AGENTS_BRIEF.md`, `crates/phitex-red/CONSTRUCTS.md`) |
+| `phitex-source` | source text as units with identities |
 | `phitex-cli` | the `phitex` command |
-| `phi` | the φ core |
 | `phitex-kpse` | kpathsea file lookup |
 | `phitex-bibtex`, `phitex-makeindex` | BibTeX and makeindex |
 | `phitex-otf`, `phitex-xdvipdfmx` | OpenType shaping, xdvipdfmx |
 | `phitex-syntax`, `phitex-doc`, `phitex-diff`, `phitex-git` | the source CST, the document's structure, latexdiff, git |
 | `phitex-draw`, `phitex-codecs` | the viewer's pages, the codecs and PDF reader |
 
-`AGENTS_BRIEF.md` is the design, `DESIGN.md` the crates and the φ core,
+`AGENTS_BRIEF.md` is the design, `DESIGN.md` the crates,
 and `AGENTS.md` the working rules.
 
 ## Building

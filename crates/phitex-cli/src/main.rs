@@ -1,17 +1,16 @@
-//! `phitex`: TeX documents built and watched on phitex-flow, the dataflow
-//! graph over content-versioned values (AGENTS_BRIEF.md, CORE.md).
+//! `phitex`: TeX documents built and watched on phitex-red, TeX as graph
+//! reduction of pending thunks (AGENTS_BRIEF.md).
 //!
 //! - Bare `phitex` is the modern command line (`modern.rs`): `phitex
-//!   build`, `watch`, `check`, `clean`, `sync`, `outline`.
+//!   build`, `watch`, `check`, `clean`, `outline`.
 //! - Under an engine's name (`pdflatex`, `latex`, `pdftex`, `etex`, `tex`)
 //!   or with `--compat=NAME`, it is that engine (`compat.rs`): web2c's
 //!   command line, one run.
 //! - As `bibtex` or `makeindex` (or `phitex -bibtex`, `-makeindex`), those
 //!   programs, in process (`tools.rs`).
 //!
-//! Every build is a session of one `phitex_flow::Build` (`session.rs`):
-//! the format (made on the graph, cached: `format.rs`), then the document
-//! on it; a watch's edits are updates of the same Build.
+//! Every build is a session of one `phitex_red::api::Build`
+//! (`session.rs`); a watch's edits are updates of the same Build.
 
 #![allow(
     clippy::many_single_char_names,
@@ -35,20 +34,17 @@ mod dvipdf;
 mod editor;
 #[cfg(not(target_family = "wasm"))]
 mod external;
-mod format;
 mod json;
 mod modern;
 mod outline;
 mod problems;
 mod session;
-mod synctex;
 mod tex;
 mod tools;
 mod ui;
 mod view;
 mod warnings;
 mod watch;
-mod xetex;
 mod ws;
 
 #[cfg(all(feature = "jemalloc", not(target_family = "wasm")))]

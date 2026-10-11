@@ -152,7 +152,7 @@ pub fn pdf_pages(p: &[u8]) -> usize {
 }
 
 pub fn fixture(dir: &str, name: &str) -> PathBuf {
-    root().join("crates/phitex-flow/tests").join(dir).join(name)
+    root().join("crates/phitex-red/tests/fixtures").join(dir).join(name)
 }
 
 pub fn read(p: &Path) -> String {

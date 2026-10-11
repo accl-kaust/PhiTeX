@@ -1,5 +1,5 @@
 //! Document-level: DVI/PDF against oracle outputs made by tex/pdftex.
-//! Fixtures are the inputs/oracles under crates/phitex-flow/tests/{dvi,pdf}
+//! Fixtures are the inputs/oracles under crates/phitex-red/tests/fixtures/{dvi,pdf}
 //! (data only). They load cmr fonts through kpse: TeX Live must be installed.
 mod common;
 use common::*;

@@ -10,7 +10,7 @@
 //! `lualatex` itself. `phitex watch` runs the whole build again when a
 //! file changes; an editor's unsaved buffers are not built (they need a
 //! saved file). No Lua VM is in phitex, nothing of this is in
-//! phitex-flow; native builds only.
+//! phitex-red; native builds only.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

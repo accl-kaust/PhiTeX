@@ -2,7 +2,7 @@
 //! options anywhere on the line, a coloured sectioned `--help`, typos
 //! suggested). What to build comes from the command line, `phitex.toml`
 //! and the main file's magic comments (`config.rs`); the build is a
-//! session on phitex-flow (`session.rs`), to the cross-run fixpoint,
+//! session on phitex-red (`session.rs`), to the cross-run fixpoint,
 //! BibTeX and makeindex included; the terminal is `ui.rs`.
 
 use std::path::{Path, PathBuf};
@@ -26,7 +26,7 @@ const STYLES: Styles = Styles::styled()
     .invalid(AnsiColor::Yellow.on_default());
 
 const ABOUT: &str = "\
-PhiTeX: TeX documents as dataflow graphs (phitex-flow)
+PhiTeX: TeX documents as graph reduction (phitex-red)
 
 A document is built to its fixpoint (BibTeX and makeindex included) and,
 under `watch`, kept up to date as its files and the editor's buffers
@@ -61,8 +61,8 @@ fn after_help() -> String {
 #[command(
     name = "phitex",
     bin_name = "phitex",
-    version = concat!(env!("CARGO_PKG_VERSION"), " (phitex-flow)"),
-    about = "PhiTeX: TeX documents as dataflow graphs (phitex-flow)",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (phitex-red)"),
+    about = "PhiTeX: TeX documents as graph reduction (phitex-red)",
     long_about = ABOUT,
     after_help = after_help(),
     styles = STYLES,
@@ -209,7 +209,6 @@ pub struct Options {
     pub etex: bool,
     pub output_dir: Option<String>,
     pub threads: Option<usize>,
-    pub interaction: Option<i32>,
     pub verbose: u8,
     pub quiet: bool,
     pub open: bool,
@@ -246,7 +245,6 @@ impl Cli {
             etex: o.etex,
             output_dir: o.output_dir,
             threads: o.jobs,
-            interaction: o.interaction.as_deref().and_then(crate::compat::interaction),
             verbose: o.verbose,
             quiet: o.quiet,
             open: o.open,
@@ -406,10 +404,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
         jobname: t.job(),
         out_dir: t.output_dir.as_ref().map_or_else(|| PathBuf::from("."), PathBuf::from),
         // (batch mode, as the oracles run: the CLI shows the errors itself)
-        interaction: o.interaction.unwrap_or(0),
         threads: o.threads.unwrap_or_else(crate::default_threads),
-        fixpoint: true,
-        tools: true,
         synctex: t.synctex,
         recorder: o.recorder,
         pdf_date: session::pdf_date(),
@@ -429,14 +424,11 @@ pub fn report(t: &Target, s: &Session, r: &Report, wrote: Option<&Path>, o: &Opt
     if o.verbose > 0 {
         for (k, run) in r.runs.iter().enumerate() {
             ui.line(&st.dim(&format!(
-                "  run {}: {} ({}): {} of {} commands, {} of {} pieces ran, {} pages ({} kept)",
+                "  run {}: {} ({}): {} nodes reduced, {} pages ({} kept)",
                 k + 1,
                 ms(run.wall),
                 run.why,
                 run.commands_run,
-                run.commands,
-                run.pieces_ran,
-                run.pieces,
                 run.pages,
                 run.pages_reused
             )));
@@ -584,13 +576,9 @@ fn clean_all(ui: &Ui) -> ! {
 
 /// Run the modern command line with `args`.
 pub fn main(args: &[String]) -> ! {
-    // (their own command lines: `outline`'s options, `sync --pdf` and
-    // `sync --tex`)
+    // (its own command line: `outline`'s options)
     if args.first().is_some_and(|a| a == "outline") {
         crate::outline::main(&args[1..]);
-    }
-    if args.first().is_some_and(|a| a == "sync") && args.iter().any(|a| a == "--pdf" || a == "--tex") {
-        std::process::exit(crate::synctex::sync_main(&args[1..]));
     }
     let o = match parse(args) {
         Ok(o) => o,
