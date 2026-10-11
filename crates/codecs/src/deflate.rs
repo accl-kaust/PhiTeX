@@ -530,19 +530,12 @@ impl State<'_> {
             self.tree(w)[node].fc = 1;
             self.depth[node] = 0;
             self.opt_len = self.opt_len.wrapping_sub(1);
-            match w {
-                Which::L => {
-                    self.static_len = self
-                        .static_len
-                        .wrapping_sub(u64::from(self.st.ltree[node].dl))
-                }
-                Which::D => {
-                    self.static_len = self
-                        .static_len
-                        .wrapping_sub(u64::from(self.st.dtree[node].dl))
-                }
-                Which::Bl => {}
-            }
+            let static_bits = match w {
+                Which::L => u64::from(self.st.ltree[node].dl),
+                Which::D => u64::from(self.st.dtree[node].dl),
+                Which::Bl => 0,
+            };
+            self.static_len = self.static_len.wrapping_sub(static_bits);
         }
         let max_code = max_code.expect("two codes at least");
         match w {
