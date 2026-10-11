@@ -2,8 +2,8 @@
 
 Rules for coding agents (and people) working in this repository. Read
 `AGENTS_BRIEF.md` first: it is the design. `crates/phitex-red/CONSTRUCTS.md`
-records the engine's constructs, `DESIGN.md` the crates. Keep them
-current.
+records the engine's constructs; each crate's own docs say what it is.
+Keep them current.
 
 ## Workflow
 
@@ -66,6 +66,14 @@ current.
   exact capacity limits) beyond what the oracle's outputs show.
 
 ## Architecture
+
+- The engines are layers, each depending only on those below:
+  `phitex-reduce` (the core, no TeX) and `phitex-typeset` (Knuth's
+  algorithms, pure: never depends on reduce or tex) under `phitex-tex`
+  (TeX's semantics, the `Engine` trait) under `phitex-pdftex`,
+  `phitex-xetex`, `phitex-luatex`. Engines add behaviour through
+  `Engine`, never fork `phitex-tex`; only `phitex-luatex` links
+  `phitex-lua`.
 
 - `AGENTS_BRIEF.md`'s Banned table holds everywhere, the CLI included:
   no engine state outside phitex-red, no second source of truth (the

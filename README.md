@@ -46,7 +46,7 @@ byte for byte.
 | `phitex-syntax` | the old CST, kept for phitex-red until its rewrite |
 | `phitex-draw`, `phitex-codecs` | the viewer's pages, the codecs and PDF reader |
 
-`AGENTS_BRIEF.md` is the design, `DESIGN.md` the crates,
+`AGENTS_BRIEF.md` is the design, each crate's docs say what it is,
 and `AGENTS.md` the working rules.
 
 ## Building
