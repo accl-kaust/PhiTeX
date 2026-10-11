@@ -7,6 +7,10 @@ publish = false
 description = "The DVI writer, and XeTeX's XDV"
 
 [dependencies]
+phitex-typeset = { path = "../../core/typeset" }
+
+[dev-dependencies]
+phitex-tfm = { path = "../../fonts/tfm" }
 
 [lints]
 workspace = true

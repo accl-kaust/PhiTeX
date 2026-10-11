@@ -40,8 +40,10 @@ fn workspace_root() -> PathBuf {
 const WASM_CRATES: &[&str] = &[
     "phitex-codecs",
     "phitex-defuse",
+    "phitex-dvi",
     "phitex-otf",
     "phitex-source",
+    "phitex-tfm",
     "phitex-typeset",
     "phitex-xdvipdfmx",
 ];
