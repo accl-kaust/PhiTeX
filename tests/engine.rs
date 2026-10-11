@@ -245,6 +245,113 @@ fn kind_read_binds_across_an_unfold() {
     assert_eq!(out(&eng, &prog, 2), "\"none\"");
 }
 
+// ---------------------------------------------------------- contributions
+
+#[test]
+fn prev_of_the_first_contributor_is_none() {
+    let (eng, prog, _) = load(&["p = prev()", "add 1", "q = prev()", "add 2", "r = before()"]);
+    assert_eq!(prog.render(&eng)[..5], ["\"none\"", "1", "1", "2", "[1 2]"]);
+}
+
+#[test]
+fn contributions_are_scoped_and_removals_seen_only_later() {
+    let (mut eng, mut prog, _) = load(&[
+        "add 1",        // 0
+        "add 2",        // 1
+        "a = before()", // 2
+        "take",         // 3: takes 2
+        "b = before()", // 4
+        "begin",        // 5
+        "c = prev()",   // 6: a new scope starts empty
+        "add 7",        // 7
+        "end",          // 8
+        "replace 5",    // 9: takes 1, puts 5
+        "d = before()", // 10
+        "e = prev()",   // 11
+    ]);
+    let r = prog.render(&eng);
+    assert_eq!(r[2], "[1 2]");
+    assert_eq!(r[3], "2");
+    assert_eq!(r[4], "[1]");
+    assert_eq!(r[6], "\"none\"");
+    assert_eq!(r[9], "1");
+    assert_eq!(r[10], "[5]");
+    assert_eq!(r[11], "5");
+    // Removing the take: earlier readers keep their value, later ones see 2.
+    prog.remove_line(&mut eng, 3);
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 2), "[1 2]");
+    assert_eq!(out(&eng, &prog, 3), "[1 2]");
+    assert_eq!(out(&eng, &prog, 8), "2");
+    prog.insert_line(&mut eng, 0, "take".into());
+    eval(&mut eng, &prog);
+    prog.set_line(&mut eng, 6, "x = 1".into());
+    eval(&mut eng, &prog);
+    prog.set_line(&mut eng, 8, "end".into());
+    eval(&mut eng, &prog);
+}
+
+#[test]
+fn a_middle_contribution_edit_reruns_only_its_readers() {
+    let mut src = vec!["add 0".to_string()];
+    for i in 1..40 {
+        src.push(format!("add {i}"));
+        src.push(format!("p{i} = prev()"));
+        // A derived field: an ordinary definition from the contribution.
+        src.push(format!("n{i} = p{i} * 0"));
+    }
+    let src: Vec<&str> = src.iter().map(String::as_str).collect();
+    let (mut eng, mut prog, _) = load(&src);
+    // `add 20` is line 58; its reader p20 is line 59.
+    prog.set_line(&mut eng, 58, "add 99".into());
+    let r = eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 59), "99");
+    // The contributor, its prev-reader, and the derived field (which cuts
+    // off: still 0).
+    println!("middle contribution edit: {r:?}");
+    assert!(r.nodes_run <= 3, "{r:?}");
+    assert!(r.cutoffs >= 1, "{r:?}");
+}
+
+#[test]
+fn random_contribution_edits_match_the_interpreter() {
+    let pool = [
+        "add 1",
+        "add 2",
+        "add x",
+        "take",
+        "replace 9",
+        "x = prev()",
+        "y = before()",
+        "begin",
+        "end",
+        "x = 3",
+        "eval \"add 4\"",
+        "if x { add 5 } else { take }",
+        "{ add 6  z = prev() }",
+    ];
+    for seed in 1..=4u64 {
+        let mut s: u64 = 0x9e37_79b9_7f4a_7c15 ^ seed;
+        let mut next = |m: usize| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            usize::try_from(s % m as u64).unwrap()
+        };
+        let src: Vec<&str> = (0..30).map(|_| pool[next(pool.len())]).collect();
+        let (mut eng, mut prog, _) = load(&src);
+        for _ in 0..400 {
+            let i = next(prog.lines.len() + 1);
+            match next(3) {
+                0 if i < prog.lines.len() => prog.remove_line(&mut eng, i),
+                1 if i < prog.lines.len() => prog.set_line(&mut eng, i, pool[next(pool.len())].into()),
+                _ => prog.insert_line(&mut eng, i, pool[next(pool.len())].into()),
+            }
+            eval(&mut eng, &prog);
+        }
+    }
+}
+
 #[test]
 fn freeing() {
     let (mut eng, mut prog, _) = load(&["c = 1", "if c { a = 1  b = 2 } else { d = 3 }"]);
@@ -757,4 +864,58 @@ fn probes_count_only_in_profile_builds() {
         assert!(snap.counters.is_empty() && snap.spans.is_empty());
         assert_eq!(defuse::obs::chrome_trace(), "{\"traceEvents\":[]}");
     }
+}
+
+#[test]
+fn opener_replaced_by_a_definition_reaches_past_the_old_close() {
+    // The new line's definition registers while the line still opened; the
+    // re-binding must not leave readers after the old close bound past it.
+    let (mut eng, mut prog, _) = load(&["begin", "x = 3", "end", "z = x"]);
+    prog.set_line(&mut eng, 0, "x = 0".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 3), "3");
+    prog.set_line(&mut eng, 0, "begin".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 3), "()");
+}
+
+#[test]
+fn opener_turned_pending_closer_keeps_the_bindings_it_reflected() {
+    // `begin` -> `end` (pending: items exist): the order keeps the opener's
+    // bound effect until the closer decides, then re-binds from it.
+    let (mut eng, mut prog, _) = load(&["begin", "item a = prev()", "eval \"add 4\"", "replace 9"]);
+    prog.set_line(&mut eng, 0, "end".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 3), "4");
+}
+
+#[test]
+fn a_pending_close_waits_readers_of_an_openers_marker() {
+    let (eng, prog, _) = load(&["add 1", "item a = prev()", "add 1", "begin", "end", "y = before()"]);
+    assert_eq!(out(&eng, &prog, 5), "[1 1]");
+}
+
+#[test]
+fn a_redone_pending_close_leaves_depths_consistent() {
+    // Re-binding while a decided close was back in work must not record
+    // definitions at the depth without it.
+    let (eng, prog, _) = load(&[
+        "begin",
+        "begin",
+        "begin",
+        "scope doc",
+        "y = 2",
+        "end",
+        "begin",
+        "item a = 1",
+        "begin",
+        "begin",
+        "begin",
+        "begin",
+        "z = 1",
+        "end",
+        "x = 1",
+        "w = x + 1",
+    ]);
+    assert_eq!(out(&eng, &prog, 15), "2");
 }

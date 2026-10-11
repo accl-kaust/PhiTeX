@@ -259,6 +259,7 @@ impl Parser<'_> {
                     return Ok(self.tagged("item", vec![self.s(&n), e]));
                 }
                 "end" => return simple(self, "end"),
+                "take" => return simple(self, "take"),
                 "endlist" => return simple(self, "endlist"),
                 "page" => return simple(self, "page"),
                 "if" => {
@@ -273,7 +274,7 @@ impl Parser<'_> {
                     };
                     return Ok(self.tagged("if", vec![c, t, e]));
                 }
-                "eval" | "print" | "emit" => {
+                "eval" | "print" | "emit" | "add" | "replace" => {
                     self.pos += 1;
                     let e = self.expr()?;
                     return Ok(self.tagged(&k, vec![e]));
@@ -464,11 +465,11 @@ impl Parser<'_> {
                 let body = self.l(body);
                 Ok(self.tagged("fn", vec![ps, body, ret]))
             }
-            Some(Tok::Ident(k)) if k == "kind" => {
+            Some(Tok::Ident(k)) if k == "kind" || k == "prev" || k == "before" => {
                 self.pos += 1;
                 self.eat("(")?;
                 self.eat(")")?;
-                Ok(self.tagged("kind", vec![]))
+                Ok(self.tagged(&k, vec![]))
             }
             Some(Tok::Ident(k)) if k == "layout" => {
                 self.pos += 1;
@@ -623,7 +624,7 @@ fn literal_prefix(v: &Values, e: ValueId) -> (String, bool) {
     }
 }
 
-const KEYWORDS: [&str; 25] = [
+const KEYWORDS: [&str; 30] = [
     "begin",
     "end",
     "endlist",
@@ -649,7 +650,17 @@ const KEYWORDS: [&str; 25] = [
     "item",
     "para",
     "kind",
+    "add",
+    "take",
+    "replace",
+    "prev",
+    "before",
 ];
+
+/// The contribution sequence `add`, `take` and `replace` write.
+pub fn items_seq(v: &Values) -> Field {
+    v.field("items")
+}
 
 /// The scope kind inside which an `item` opens an implicit scope, and the
 /// kind of that scope.
@@ -702,6 +713,9 @@ fn eval_literal(v: &Values, expr: ValueId) -> Option<Vec<String>> {
         let (t, a) = tag(v, s);
         if t == "assign" || t == "record" {
             out.push(text(v, a[0]));
+        }
+        if matches!(t.as_str(), "add" | "take" | "replace") {
+            out.push("items".into());
         }
     }
     Some(out)
@@ -851,6 +865,11 @@ fn eval_expr(cx: &mut Ctx<'_>, ops: Ops, e: ValueId) -> Result<ValueId, Stop> {
     Ok(match t.as_str() {
         "str" | "lit" => a[0],
         "kind" => cx.scope_kind()?.unwrap_or_else(|| v.str("none")),
+        "prev" => cx.prev_contribution(items_seq(v))?.unwrap_or_else(|| v.str("none")),
+        "before" => {
+            let s = cx.contributions_before_me(items_seq(v))?;
+            v.list(v.seq_to_vec(s))
+        }
         "var" => cx.use_field(v.field(&text(v, a[0])))?.unwrap_or(ValueId::UNIT),
         "op" => {
             let x = eval_expr(cx, ops, a[1])?;
@@ -962,6 +981,8 @@ impl Operation for StmtOp {
                 )
             }
             "sumnext" | "listto" | "listuntil" | "item" => Some(vec![(v.field(&text(v, a[0])), Locality::Local)]),
+            // A contribution is a definition of the sequence.
+            "add" | "take" | "replace" => Some(vec![(items_seq(v), Locality::Local)]),
             "proc" => Some(vec![(proc_field(v, a[0]), Locality::Local)]),
             "invoke" | "do" | "eval" | "seq" => None,
             "block" if exports(v, &items(v, a[0])).is_none_or(|e| !e.is_empty()) => None,
@@ -1079,12 +1100,12 @@ impl Operation for StmtOp {
             "assign" | "publish" | "item" => free_vars(v, a[1], &mut bound, &mut out),
             // Text substitution: a call reads only the procedure.
             "do" => out.push(format!("proc.{}", text(v, a[0]))),
-            "record" | "expr" | "print" | "emit" | "eval" | "invoke" => {
+            "record" | "expr" | "print" | "emit" | "eval" | "invoke" | "add" | "replace" => {
                 free_vars(v, args[0], &mut bound, &mut out);
             }
             "if" => free_vars(v, a[0], &mut bound, &mut out),
             "listuntil" => out.push(text(v, a[1])),
-            "block" | "begin" | "end" | "endlist" | "mark" | "loop" | "proc" | "scope" | "para" => {}
+            "block" | "begin" | "end" | "endlist" | "mark" | "loop" | "proc" | "scope" | "para" | "take" => {}
             _ => return None,
         }
         Some(out.iter().map(|n| v.field(n)).collect())
@@ -1270,6 +1291,20 @@ impl Operation for StmtOp {
                 Ok(v.list(vec![v.int(i64::try_from(xs.len()).unwrap_or(0)), v.int(sum)]))
             }
             "print" | "expr" | "return" => eval_expr(cx, ops, a[0]),
+            "add" => {
+                let val = eval_expr(cx, ops, a[0])?;
+                cx.push_contribution(items_seq(v), val);
+                Ok(val)
+            }
+            "take" | "replace" => {
+                let r = if t == "replace" {
+                    Some(eval_expr(cx, ops, a[0])?)
+                } else {
+                    None
+                };
+                let taken = cx.take_prev_contribution(items_seq(v), r)?;
+                Ok(taken.unwrap_or_else(|| v.str("none")))
+            }
             "item" => {
                 // Directly inside a `doc` scope, an item opens a `list` scope
                 // before itself; inside a `list`, it continues it.
@@ -1368,6 +1403,8 @@ impl Lang {
         cell.set(ops).expect("fresh");
         let out = out_field(eng.values());
         eng.declare_accumulator(out, Arc::new(SeqMonoid));
+        let seq = items_seq(eng.values());
+        eng.declare_sequence(seq);
         Lang { ops, procs }
     }
 

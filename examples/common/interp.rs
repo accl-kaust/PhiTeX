@@ -23,6 +23,8 @@ struct Unit {
     frames: Vec<FxHashMap<Field, Binding>>,
     /// Each frame's scope kind.
     kinds: Vec<Option<String>>,
+    /// Each frame's `items` contributions, in text order.
+    seqs: Vec<Vec<ValueId>>,
     globals: FxHashMap<Field, Binding>,
     env: FxHashMap<Field, ValueId>,
     /// `out` contributions, in text order.
@@ -34,6 +36,7 @@ impl Unit {
         Unit {
             frames: vec![FxHashMap::default()],
             kinds: vec![None],
+            seqs: vec![Vec::new()],
             ..Unit::default()
         }
     }
@@ -141,6 +144,7 @@ impl Interp<'_> {
     fn open_kind(u: &mut Unit, kind: Option<String>) {
         u.frames.push(FxHashMap::default());
         u.kinds.push(kind);
+        u.seqs.push(Vec::new());
     }
 
     fn close(u: &mut Unit) {
@@ -148,6 +152,7 @@ impl Interp<'_> {
         if u.frames.len() > 1 {
             u.frames.pop();
             u.kinds.pop();
+            u.seqs.pop();
         }
     }
 
@@ -370,6 +375,18 @@ impl Interp<'_> {
                 }
                 ValueId::UNIT
             }
+            "add" => {
+                let val = self.expr(u, a[0]);
+                u.seqs.last_mut().expect("unit frame").push(val);
+                val
+            }
+            "take" | "replace" => {
+                let r = (t == "replace").then(|| self.expr(u, a[0]));
+                let s = u.seqs.last_mut().expect("unit frame");
+                let taken = s.pop();
+                s.extend(r);
+                taken.unwrap_or_else(|| v.str("none"))
+            }
             "loop" | "endlist" | "mark" => ValueId::UNIT,
             "error" => v.str(&format!("error: {}", text(v, a[0]))),
             _ => v.str("error: bad statement"),
@@ -385,6 +402,12 @@ impl Interp<'_> {
         match t.as_str() {
             "str" | "lit" => a[0],
             "kind" => v.str(u.kind().unwrap_or("none")),
+            "prev" => u
+                .seqs
+                .last()
+                .and_then(|s| s.last().copied())
+                .unwrap_or_else(|| v.str("none")),
+            "before" => v.list(u.seqs.last().cloned().unwrap_or_default()),
             "var" => self.lookup(u, v.field(&text(v, a[0]))).unwrap_or(ValueId::UNIT),
             "op" => {
                 let x = self.expr(u, a[1]);

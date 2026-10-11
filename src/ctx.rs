@@ -3,11 +3,11 @@
 use std::sync::PoisonError;
 
 use crate::engine::{
-    AssumeKind, Effect, End, Engine, EvalError, K_FIELD, K_LOOP, K_OUTPUT, Locality, NIL, NodeId, OpId, RunResult,
-    Slot, Use, eff_code, eff_kind,
+    AssumeKind, Effect, End, Engine, EvalError, K_CHAIN, K_FIELD, K_LOOP, K_OUTPUT, Locality, NIL, NodeId, OpId,
+    RunResult, Slot, Use, eff_code, eff_kind,
 };
 use crate::hash::{FxHashMap, hash_words};
-use crate::value::{Field, ValueId, Values};
+use crate::value::{Field, Value, ValueId, Values};
 
 /// Returned (via `?`) when a value is not available yet; the engine re-runs
 /// the operation from the start once it is.
@@ -236,6 +236,168 @@ impl<'a> Ctx<'a> {
     pub fn define_with(&mut self, f: Field, v: ValueId, loc: Locality) {
         self.defs.retain(|d| d.0 != f);
         self.defs.push((f, v, loc == Locality::Global));
+    }
+
+    // ------------------------------------------------------ contributions
+    //
+    // A node's contribution to a declared sequence is a hidden local
+    // definition: `["c", element]`, or for a node that took the element
+    // before it, `["t", replacement, has_replacement, visible]` where
+    // `visible` is what later readers see as their previous element. Every
+    // scope opener defines the hidden field inside its scope as the start
+    // marker, so a reader's previous element is an ordinary binding within
+    // its scope.
+
+    fn seq_hidden(&self, seq: Field) -> Field {
+        self.eng
+            .seq_field(seq)
+            .expect("sequence not declared (Engine::declare_sequence)")
+    }
+
+    /// Whether this node opens a scope before itself: its sequences start
+    /// empty there. (A node with a pending effect decides it first.)
+    fn at_own_start(&self) -> bool {
+        self.eng.opens_before(self.slot, self.effect)
+    }
+
+    /// The element a hidden definition value shows to later readers.
+    fn visible(&self, v: Option<ValueId>) -> Option<ValueId> {
+        let v = v?;
+        if v == self.eng.seq_start {
+            return None;
+        }
+        let vals = self.values();
+        let xs = match &*vals.get(v) {
+            Value::List(xs) => xs.clone(),
+            _ => return None,
+        };
+        match vals.as_str(xs[0]).as_deref() {
+            Some("c") => Some(xs[1]),
+            Some("t") => (xs[3] != self.eng.seq_start).then_some(xs[3]),
+            _ => None,
+        }
+    }
+
+    /// This node's contribution to sequence `seq` (one per node and
+    /// sequence).
+    pub fn push_contribution(&mut self, seq: Field, elem: ValueId) {
+        let h = self.seq_hidden(seq);
+        let v = self.values().list(vec![self.values().str("c"), elem]);
+        self.defs.retain(|d| d.0 != h);
+        self.defs.push((h, v, false));
+    }
+
+    /// The contribution immediately before this node in its scope (`None`
+    /// at the scope's start): a binding to the node that produced it.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] until that node has run.
+    pub fn prev_contribution(&mut self, seq: Field) -> Result<Option<ValueId>, Stop> {
+        if self.at_own_start() {
+            return Ok(None);
+        }
+        let h = self.seq_hidden(seq);
+        let v = self.use_field(h)?;
+        Ok(self.visible(v))
+    }
+
+    /// All contributions in this node's scope before it, in order, as one
+    /// sequence value: each link of the chain of contributors back to the
+    /// scope's start is a binding.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] until every link has run.
+    pub fn contributions_before_me(&mut self, seq: Field) -> Result<ValueId, Stop> {
+        if self.at_own_start() {
+            return Ok(ValueId::NIL);
+        }
+        let h = self.seq_hidden(seq);
+        let mut val = self.use_field(h)?;
+        let e = self.eng;
+        let n = e.n(self.slot);
+        let mut site = e.walk(n.unit, n.label, h).site;
+        let vals = e.values();
+        let mut rev = Vec::new();
+        let mut skip = 0u64;
+        while let Some(v) = val.filter(|&v| v != e.seq_start) {
+            let xs = match &*vals.get(v) {
+                Value::List(xs) => xs.clone(),
+                _ => break,
+            };
+            if vals.as_str(xs[0]).as_deref() == Some("t") {
+                if vals.as_bool(xs[2]) == Some(true) {
+                    if skip > 0 {
+                        skip -= 1;
+                    } else {
+                        rev.push(xs[1]);
+                    }
+                }
+                skip += 1;
+            } else if skip > 0 {
+                skip -= 1;
+            } else {
+                rev.push(xs[1]);
+            }
+            if site == NIL {
+                break;
+            }
+            let sn = e.n(site);
+            let w = e.walk(sn.unit, sn.label, h);
+            if w.pending != NIL && !self.spec {
+                return self.stop(End::Wait(w.pending));
+            }
+            site = w.site;
+            let key = h.0.raw();
+            val = if site == NIL {
+                None
+            } else {
+                self.read_node(site, e.n(site).def_value(h), AssumeKind::Def(h))?
+            };
+            self.uses.push(Use {
+                key,
+                site,
+                kind: K_CHAIN,
+            });
+            self.sig_add(K_CHAIN, key, site, val);
+        }
+        rev.reverse();
+        Ok(rev
+            .into_iter()
+            .fold(ValueId::NIL, |a, x| vals.seq_concat(a, vals.seq_unit(x))))
+    }
+
+    /// Takes away the contribution before this node (`replacement`: puts
+    /// that in its place) for every later reader; returns what was taken.
+    /// A definition: later readers bind to this node.
+    ///
+    /// # Errors
+    ///
+    /// As [`Ctx::contributions_before_me`].
+    pub fn take_prev_contribution(
+        &mut self,
+        seq: Field,
+        replacement: Option<ValueId>,
+    ) -> Result<Option<ValueId>, Stop> {
+        let h = self.seq_hidden(seq);
+        let pre = self.contributions_before_me(seq)?;
+        let vals = self.values();
+        let mut xs = vals.seq_to_vec(pre);
+        let taken = xs.pop();
+        if let Some(r) = replacement {
+            xs.push(r);
+        }
+        let visible = xs.last().copied().unwrap_or(self.eng.seq_start);
+        let v = vals.list(vec![
+            vals.str("t"),
+            replacement.unwrap_or(ValueId::UNIT),
+            vals.bool(replacement.is_some()),
+            visible,
+        ]);
+        self.defs.retain(|d| d.0 != h);
+        self.defs.push((h, v, false));
+        Ok(taken)
     }
 
     /// Publishes `v` as the next round's value of loop-back field `f`.
