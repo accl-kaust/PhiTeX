@@ -1,0 +1,103 @@
+//! What the algorithms ask of fonts. Fonts are not loaded here: the caller
+//! answers through [`Fonts`] (tex.web's `char_info`, `lig_kern` program,
+//! `param` and `font_bchar`, §539–§576).
+
+use crate::arith::Scaled;
+
+/// A font, as the caller numbers them (tex.web's `internal_font_number`).
+pub type FontId = u32;
+
+/// What follows a character in its font's size chain (§544).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CharTag {
+    /// No successor.
+    #[default]
+    None,
+    /// `list_tag`: the next larger character.
+    List(u16),
+    /// `ext_tag`: an extensible recipe; `None` pieces are absent.
+    Extensible {
+        /// Top piece.
+        top: Option<u16>,
+        /// Middle piece.
+        mid: Option<u16>,
+        /// Bottom piece.
+        bot: Option<u16>,
+        /// Repeated piece.
+        rep: u16,
+    },
+}
+
+/// A character's metrics (§543, §554).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct CharInfo {
+    /// `char_width`.
+    pub width: Scaled,
+    /// `char_height`.
+    pub height: Scaled,
+    /// `char_depth`.
+    pub depth: Scaled,
+    /// `char_italic`.
+    pub italic: Scaled,
+    /// The size chain or extensible recipe.
+    pub tag: CharTag,
+    /// Whether the character has a lig/kern program (`lig_tag`). Only a
+    /// hint: [`Fonts::lig_kern`] is the answer.
+    pub has_lig_kern: bool,
+}
+
+/// The kind of a ligature instruction (§545): which of the two characters
+/// are retained around the ligature, and how many of the result's
+/// characters the scan passes over (`>`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LigOp {
+    /// `=:` op 0.
+    Plain,
+    /// `=:|` op 1: keep the right character.
+    KeepRight,
+    /// `=:|>` op 5.
+    KeepRightSkip,
+    /// `|=:` op 2: keep the left character.
+    KeepLeft,
+    /// `|=:>` op 6.
+    KeepLeftSkip,
+    /// `|=:|` op 3: keep both.
+    KeepBoth,
+    /// `|=:|>` op 7.
+    KeepBothSkip1,
+    /// `|=:|>>` op 11.
+    KeepBothSkip2,
+}
+
+/// One lig/kern instruction for a pair of characters (§545).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LigKern {
+    /// Insert a kern between the pair.
+    Kern(Scaled),
+    /// Form a ligature with character `result`.
+    Lig(LigOp, u16),
+}
+
+/// The left side of a lig/kern lookup: a character, or the font's left
+/// boundary (`bchar_label`, §545).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Left {
+    /// A character.
+    Char(u16),
+    /// The left boundary.
+    Boundary,
+}
+
+/// The caller's fonts.
+pub trait Fonts {
+    /// The metrics of `ch` in `font`, or `None` if it doesn't exist.
+    fn char_info(&self, font: FontId, ch: u16) -> Option<CharInfo>;
+    /// The lig/kern instruction for `left` followed by `right`, if any.
+    fn lig_kern(&self, font: FontId, left: Left, right: u16) -> Option<LigKern>;
+    /// `font_bchar`: the right boundary character, if the font has one.
+    fn bchar(&self, font: FontId) -> Option<u16>;
+    /// `param(n)` (§558), 1-based; 0 when absent.
+    fn param(&self, font: FontId, n: u16) -> Scaled;
+    /// The number of parameters (`font_params`), for math's checks (§1195).
+    fn param_count(&self, font: FontId) -> u16;
+}
