@@ -175,11 +175,11 @@ assignment command (§1224, §1228). The row applies to every listed name.
 | `\romannumeral` | §468, §471 | the `<number>`'s reads | — | — | `P`: `<number>` | lowercase roman numeral as catcode 12 (empty for `<=0`) | — | — |
 | `\meaning` | §468, §471, §296 | `cs[t]` or `cat` of a char token; `int.escapechar` | — | — | `K`: one token | the printed meaning (§296 `print_meaning`) as catcode-12 text | — | the printed form of a macro includes its parameter text and body, of a `\chardef` its value: a read of the whole meaning; of a primitive, its name |
 | `\fontname` | §468, §471 | `font[f].name, area, size` | — | — | `P`: `<font>` | the file name, with ` at <size>` if scaled (§1261) | — | — |
-| `\jobname` | §468, §471 | the job name (fixed by the first `\input`/first line, §532) | — | — | `K`: none | the job name | — | `job_name` is set by the *first* `\input` or `\openout`/`\jobname` (§532 `open_log_file`): a document-level constant fixed at the first use |
+| `\jobname` | §468, §471 | the job name (fixed by the first `\input`, §537) | — | — | `K`: none | the job name | — | `job_name` is set by the *first* `\input` (§537) or whatever first opens the log (§534 `open_log_file`): a document-level constant fixed at the first use |
 | `\the` | §265, §465, §413 | the internal quantity named by the next token(s): `int.p`, `dim.p`, `glue.p`, `mu.p`, `toks.p`, `count[n]`…, `box[n].wd`…, `font[f].*`, `cat[c]`…, `curfont`, `fam[s][k]`, `parshape` (length), `\lastpenalty`-family: **LIST**, `\pagegoal`-family: **PAGE**, `\spacefactor`/`\prevdepth`: **LIST**, `\inputlineno`: **INPUT**, `\badness`: last `hpack`/`vpack` result (§660, §676: **LIST**-adjacent global), `\deadcycles`/`\insertpenalties`: **PAGE** | — | — | `P`: one token naming the quantity, plus that quantity's own operand (`\count` `<8-bit number>`, `\fontdimen` `<number>` `<font>`, …) | the value as catcode-12 text (§465); for `\the\toks n`/`\the\everypar` the token list itself, unexpandable in `\edef` (§478) | — | the hazards of what it reads. `\the\font` gives the font's cs token (§465) |
 | `\ignorespaces` | §265, §1045 | `cs[*]` of the tokens it skips (expands them) | — | — | `Pd`: all following tokens that expand to spaces (§406 `get_x_token` until non-blank) | — | none | claims *through* expansion |
 | `\uppercase`, `\lowercase` | §1286, §1288 | `uc[c]`/`lc[c]` for each character token in the text; `cat[*]` for the braces | — | — | `P`: `<general text>` (`scan_toks(false,false)`) | the text with character codes replaced (catcodes kept), re-inserted (§1288 `back_list`) | — | re-emits text that is then *re-read*: the result's meaning depends on fields of the re-read |
-| `\input` | §376, §378, §537 | the file (by name and search path), `cat[*]` for the name, `int.endlinechar` | **INPUT**: pushes a file level; sets `job_name` if unset (§532) | — | `P`: `<file name>` (ends at space or a non-letter/non-other token, §526; expands while scanning §526 — `Pd` if a macro is in the name) | the file's lines, tokenised with the catcodes *in force when each line is read* | — | **INPUT**: `\endinput` and `\inputlineno` refer to this level; the file's text is spliced *lazily*: the catcodes that tokenise line k are those after lines 1..k-1 have run. `name_in_progress` (§378) makes an `\input` inside a file name insert `\relax` instead |
+| `\input` | §376, §378, §537 | the file (by name and search path), `cat[*]` for the name, `int.endlinechar` | **INPUT**: pushes a file level; sets `job_name` if unset (§537) | — | `P`: `<file name>` (ends at space or a non-letter/non-other token, §526; expands while scanning §526 — `Pd` if a macro is in the name) | the file's lines, tokenised with the catcodes *in force when each line is read* | — | **INPUT**: `\endinput` and `\inputlineno` refer to this level; the file's text is spliced *lazily*: the catcodes that tokenise line k are those after lines 1..k-1 have run. `name_in_progress` (§378) makes an `\input` inside a file name insert `\relax` instead |
 | `\endinput` | §376, §378, §362 | **INPUT** | **INPUT**: `force_eof` | — | `K`: none | — | — | **INPUT**: stops the *current file level* after the current line (§362); its effect depends on which file the token came from, not where it is in the text |
 | `\inputlineno` | §416, §424 | **INPUT** `line` | — | — | `K`: none | (operand) the line number of the innermost file | — | **INPUT** |
 | `\topmark`, `\firstmark`, `\botmark`, `\splitfirstmark`, `\splitbotmark` | §384, §386 | **MARKS** `cur_mark[c]` | — | — | `K`: none | the mark text (possibly empty) | — | **MARKS**: written by `fire_up` §1012 (`\topmark` := previous `\botmark`, `\firstmark`/`\botmark` from the marks on the page being shipped) and `vsplit` §979: reading them is reading the page builder's result for the page containing this token's expansion — which page that is depends on everything before |
@@ -221,7 +221,7 @@ Group codes are §269. Every group close runs `unsave` §281 (restores
 | Primitive | § | reads | defines | scope effects | claim | unfolds | contribution | hazards |
 |---|---|---|---|---|---|---|---|---|
 | `{` (catcode 1, `left_brace`) | §1063 | — | — | opens `simple_group` (in math mode: `math_group` with a new noad list §1150) | `K`: none (the matching `}` is a separate node) | — | in math mode: a sub-formula noad | **MODE**: in math it also pushes a list (**LIST**) |
-| `}` (catcode 2, `right_brace`) | §1068 | the group's code | undoes the group's `L` definitions | closes the current group; what it *does* depends on the group code: `simple_group` nothing; box groups package the list (§1085); `insert_group` builds an insert/adjust node (§1100); `output_group` ends the output routine (§1026); `disc_group` counts a discretionary part (§1119); `math_choice_group` (§1174); `math_group` finishes a noad (§1186); `semi_simple_group`, `math_shift_group`, `math_left_group`: errors (§1069) | `K`: none | `\aftergroup` tokens | the packaged box, insert, adjust, noad … to the enclosing list | **DEFERRED** (`\aftergroup`), **LIST** (packaging the list built inside), **PAGE** (`\output`'s end puts `\box255` back: §1026 `build_page`) |
+| `}` (catcode 2, `right_brace`) | §1068 | the group's code | undoes the group's `L` definitions | closes the current group; what it *does* depends on the group code: `simple_group` nothing; box groups package the list (§1085); `insert_group` builds an insert/adjust node (§1100); `output_group` ends the output routine (§1026); `disc_group` counts a discretionary part (§1118–§1119); `math_choice_group` (§1174); `math_group` finishes a noad (§1186); `semi_simple_group`, `math_shift_group`, `math_left_group`: errors (§1069) | `K`: none | `\aftergroup` tokens | the packaged box, insert, adjust, noad … to the enclosing list | **DEFERRED** (`\aftergroup`), **LIST** (packaging the list built inside), **PAGE** (`\output`'s end puts `\box255` back: §1026 `build_page`) |
 | `\begingroup` | §265, §1063 | — | — | opens `semi_simple_group` | `K`: none | — | — | — |
 | `\endgroup` | §265, §1063 | — | undoes `L` | closes `semi_simple_group` (error if the current group is another kind, §1065 `off_save` inserts what is missing) | `K`: none | `\aftergroup` tokens | — | **DEFERRED** |
 | `\aftergroup` | see assignments | | | | | | | |
@@ -426,8 +426,8 @@ helpers and `last_item` queries that read `pdf.*` document state.
 
 | Primitive | § | reads | defines | scope effects | claim | unfolds | contribution | hazards |
 |---|---|---|---|---|---|---|---|---|
-| integer parameters: `\pdfoutput` `\pdfcompresslevel` `\pdfobjcompresslevel` `\pdfdecimaldigits` `\pdfmovechars` `\pdfimageresolution` `\pdfpkresolution` `\pdfuniqueresname` `\pdfoptionpdfminorversion` `\pdfoptionalwaysusepdfpagebox` `\pdfoptionpdfinclusionerrorlevel` `\pdfmajorversion` `\pdfminorversion` `\pdfforcepagebox` `\pdfpagebox` `\pdfinclusionerrorlevel` `\pdfgamma` `\pdfimagegamma` `\pdfimagehicolor` `\pdfimageapplygamma` `\pdfadjustspacing` `\pdfprotrudechars` `\pdftracingfonts` `\pdfadjustinterwordglue` `\pdfprependkern` `\pdfappendkern` `\pdfgentounicode` `\pdfdraftmode` `\pdfinclusioncopyfonts` `\pdfsuppresswarningdupdest` `\pdfsuppresswarningdupmap` `\pdfsuppresswarningpagegroup` `\pdfinfoomitdate` `\pdfsuppressptexinfo` `\pdfomitcharset` `\pdfomitinfodict` `\pdfomitprocset` `\pdfptexuseunderscore` (38, pdfTeX §256) and `\ignoreprimitiveerror` (pdfTeX §1657) | pdfTeX §254, §256, §1657 | — | `int.p` `L/G`, `S` | — | `P`: `<optional =>` `<number>` | — | — | `\pdfoutput` decides DVI vs PDF and is frozen at the first shipout (§747, `check_pdfoutput` §1537: pdf-only primitives error in DVI mode); the `fixed_*` group is frozen at the first page (§683): a later change is an error, so these are document constants defined by their *first-page* value. `\pdfadjustspacing`, `\pdfprotrudechars`, `\pdfadjustinterwordglue`, `\pdfprependkern`, `\pdfappendkern` are read by `line_break`/`hpack`/the main loop for each paragraph and box (§1234, §729) |
-| dimension parameters: `\pdfhorigin` `\pdfvorigin` `\pdfpagewidth` `\pdfpageheight` `\pdflinkmargin` `\pdfdestmargin` `\pdfthreadmargin` `\pdffirstlineheight` `\pdflastlinedepth` `\pdfeachlineheight` `\pdfeachlinedepth` `\pdfignoreddimen` `\pdfpxdimen` (13) | pdfTeX §266 | — | `dim.p` `L/G`, `S` | — | `P` | — | — | `\pdfpagewidth`/`\pdfpageheight`/`\pdfhorigin`/`\pdfvorigin` are read at each `\shipout` (§644 `cur_page_width`); `\pdfpxdimen` is read by the `px` unit in every `<dimen>` scan (§480): a parameter read inside *claims* |
+| integer parameters: `\pdfoutput` `\pdfcompresslevel` `\pdfobjcompresslevel` `\pdfdecimaldigits` `\pdfmovechars` `\pdfimageresolution` `\pdfpkresolution` `\pdfuniqueresname` `\pdfoptionpdfminorversion` `\pdfoptionalwaysusepdfpagebox` `\pdfoptionpdfinclusionerrorlevel` `\pdfmajorversion` `\pdfminorversion` `\pdfforcepagebox` `\pdfpagebox` `\pdfinclusionerrorlevel` `\pdfgamma` `\pdfimagegamma` `\pdfimagehicolor` `\pdfimageapplygamma` `\pdfadjustspacing` `\pdfprotrudechars` `\pdftracingfonts` `\pdfadjustinterwordglue` `\pdfprependkern` `\pdfappendkern` `\pdfgentounicode` `\pdfdraftmode` `\pdfinclusioncopyfonts` `\pdfsuppresswarningdupdest` `\pdfsuppresswarningdupmap` `\pdfsuppresswarningpagegroup` `\pdfinfoomitdate` `\pdfsuppressptexinfo` `\pdfomitcharset` `\pdfomitinfodict` `\pdfomitprocset` `\pdfptexuseunderscore` (38, pdfTeX §256) and `\ignoreprimitiveerror` (pdfTeX §1657) | pdfTeX §254, §256, §1657 | — | `int.p` `L/G`, `S` | — | `P`: `<optional =>` `<number>` | — | — | `\pdfoutput` decides DVI vs PDF and is frozen at the first shipout (§747, `check_pdfoutput` §1537: pdf-only primitives error in DVI mode); the `fixed_*` group is frozen at the first page (§683): a later change is an error, so these are document constants defined by their *first-page* value. `\pdfadjustspacing`, `\pdfprotrudechars`, `\pdfadjustinterwordglue`, `\pdfprependkern`, `\pdfappendkern` are read by `line_break` for each paragraph (§1057–§1066) and by the main loop's kern insertion (§1234) |
+| dimension parameters: `\pdfhorigin` `\pdfvorigin` `\pdfpagewidth` `\pdfpageheight` `\pdflinkmargin` `\pdfdestmargin` `\pdfthreadmargin` `\pdffirstlineheight` `\pdflastlinedepth` `\pdfeachlineheight` `\pdfeachlinedepth` `\pdfignoreddimen` `\pdfpxdimen` (13) | pdfTeX §266 | — | `dim.p` `L/G`, `S` | — | `P` | — | — | `\pdfpagewidth`/`\pdfpageheight`/`\pdfhorigin`/`\pdfvorigin` are read at each `\shipout` (§644 `cur_page_width`); `\pdfpxdimen` is read by the `px` unit in every `<dimen>` scan (§481): a parameter read inside *claims* |
 | token parameters: `\pdfpagesattr` `\pdfpageattr` `\pdfpageresources` `\pdfpkmode` (4) | pdfTeX §248 | — | `toks.p` `L/G`, `S` | — | as token parameters | — | — | read at shipout (`\pdfpageattr`, `\pdfpageresources`, §763, §769) and at document end (`\pdfpagesattr`, §803), written verbatim as token text (`pdf_print_toks_ln`), not expanded |
 | `\pdftexversion`, `\pdftexrevision`, `\pdftexbanner` | pdfTeX §442, §494 | constants | — | — | `K` | revision/banner as text | — | — |
 | `\pdflastobj`, `\pdflastxform`, `\pdflastximage`, `\pdflastximagepages`, `\pdflastximagecolordepth`, `\pdflastannot`, `\pdflastlink`, `\pdfretval` | pdfTeX §442, §450 | `pdf.last_*`: the object number allocated by the *most recent* `\pdfobj`/`\pdfxform`/`\pdfximage`/`\pdfannot`/`\pdfstartlink` *in document order* (set when the primitive is scanned, §1544, §1548, §1552, §1558, §1560) | — | — | `K` | (operand) | — | a global "last value" register written by every allocation: a def-use chain in text order whose definitions are the allocating nodes; object *numbers* themselves are allocation-order values (PhiTeX's SSA modes relax object numbering) |
@@ -485,3 +485,314 @@ helpers and `last_item` queries that read `pdf.*` document state.
 | `\pdfspacefont` | pdfTeX §1524, §1528 | `<font>` | `pdf.space_font` `G` | — | `P` | — | nothing | global |
 | `\special` in pdfTeX | pdfTeX §1524, §1615 | as TeX's; text beginning with `pdf:` keywords is treated as a literal | | | | | a `special_node` written by `pdf_special` §727 as a page literal | — |
 
+## Findings
+
+Primitives whose spec needs something the core does not have. Each entry
+names the primitives, cites the oracle, and describes the smallest core
+notion that would cover it. Nothing more is proposed here.
+
+### F1. The current mode (**MODE**)
+
+`\ifvmode` `\ifhmode` `\ifmmode` `\ifinner` (§501), `\spacefactor`
+`\prevdepth` (§1243), `\par` (§1094–§1096), `\indent` `\noindent`
+`\quitvmode` (§1091, §1093, pdfTeX §1266), `\hrule` `\vrule` (§1056,
+§1094–§1095), `\hskip` `\hfil` `\hfill` `\hss` `\hfilneg` `\vskip` `\vfil`
+`\vfill` `\vss` `\vfilneg` `\mskip` `\mkern` (§1057–§1058, §1090, §1094),
+`\moveleft` `\moveright` `\raise` `\lower` (§1073), `\leaders` `\cleaders`
+`\xleaders` (§1078), `\box` `\copy` `\hbox` `\vbox` `\vtop` through
+`box_end` (§1076), `\unhbox` `\unhcopy` `\unvbox` `\unvcopy` (§1109–§1110),
+`\halign` `\valign` (§1130), `\eqno` `\leqno` (§1140), `\vadjust` (§1098),
+`\accent` (§1122, §1164), `\/` (§1112), `\ ` (§1030, §1090), `\-`
+`\discretionary` (§1116), `\setlanguage` (§1377), `$` (§1137, §1090),
+`\end` (§1045, §1094), `\pagediscards` `\splitdiscards` (pdfTeX §1861),
+`\pdfstartlink` `\pdfendlink` (pdfTeX §1560–§1561), `\beginL` `\endL`
+`\beginR` `\endR` (pdfTeX §1703), `\middle` (pdfTeX §1697), every
+character token (§1090, §1154).
+
+`main_control` dispatches on `abs(mode)+cur_cmd` (§1045). The mode is
+not a field: it is a property of *which list is being built*, and every
+list is opened by one node (`\hbox{`, `\vbox{`, `$`, `\insert n{`, a
+paragraph start, the output routine) and closed by another. The smallest
+covering notion is a *kind* on the scope a node opens, read by the nodes
+inside it as "the kind of my innermost enclosing list scope"; a paragraph
+start is then a node that opens a horizontal scope *implicitly* when a
+horizontal-material node appears in a vertical scope (§1090), and `\par`
+closes it. Every row flagged **MODE** reads that kind, and the ones that
+"start a paragraph" or "end the paragraph first" (§1090, §1094–§1095)
+open or close that implicit scope.
+
+### F2. The current list (**LIST**)
+
+`\lastbox` (§1080), `\unpenalty` `\unkern` `\unskip` (§1105),
+`\lastpenalty` `\lastkern` `\lastskip` (§424), `\lastnodetype` (pdfTeX
+§450), `\prevgraf` (§1244), `\spacefactor` `\prevdepth` (§1243), `\/`
+(§1113), `\displaylimits` `\limits` `\nolimits` (§1159), `\above` `\over`
+`\atop` `\abovewithdelims` `\overwithdelims` `\atopwithdelims` (§1181),
+`^` `_` (§1176), `\middle` (pdfTeX §1369), `\par` and `$$` as consumers
+of the whole list (§1096, §1145), `\beginL` family (the LR stack, pdfTeX
+§1705), `\badness` (§660, §667), `\predisplaydirection` (pdfTeX §254),
+`\showlists` (§1293), `\predisplaysize` `\displaywidth` `\displayindent`
+as defined by `$$` (§1145–§1146).
+
+These read or edit the *tail* of the list their enclosing scope is
+building, or consume the list as a whole. The smallest covering notion
+is that the contributions of the nodes in one list scope form a
+sequence, and a node may read "the contribution immediately before mine
+in my scope" (its type and value) or replace it; `\par`/`$$` read "all
+contributions before me in my scope". `space_factor` and `prev_depth`
+are then derived fields of that sequence (each contribution defines
+them), not state.
+
+### F3. The page builder (**PAGE**)
+
+`\pagegoal` `\pagetotal` `\pagestretch` `\pagefilstretch`
+`\pagefillstretch` `\pagefilllstretch` `\pageshrink` `\pagedepth` (§983,
+§421, §1245), `\deadcycles` `\insertpenalties` (§419, §1246), `\penalty`
+and every other main-vertical-list contribution as a trigger of
+`build_page` (§994, §1103), `\output` (§1025), `\end` (§1054), `\insert`
+(read by §1008–§1010 at page-building time), `\holdinginserts` `\vsize`
+`\maxdepth` `\topskip` `\maxdeadcycles` `\outputpenalty`
+`\savingvdiscards` (read then), `\pagediscards` `\splitdiscards`
+(pdfTeX §1861), `\pdfinsertht` (pdfTeX §498), `\pdfsnaprefpoint`
+`\pdfsnapy` `\pdfsnapycomp` (pdfTeX §1145), `\showlists` (§986),
+`\unskip` on an empty contribution list (§1106).
+
+The page builder is a fold over the main vertical list's contributions
+that, at breaks it chooses, defines `box[255]`, `int.outputpenalty`, the
+insert boxes, the marks, and *runs a token list* (`\output`) whose nodes
+then run with those definitions in scope and whose contributions go back
+to the fold. The smallest covering notion is a *reducer over the main
+vertical scope's contribution sequence* whose steps are nodes: each step
+reads the contributions since the previous break and the parameters in
+force at the break, defines the fields above, and unfolds `toks.output`
+in a scope of kind `output_group`. The `\pagegoal` family are reads of
+that reducer's accumulator at the reader's position in the sequence.
+
+### F4. Marks (**MARKS**)
+
+`\mark` `\marks` (§1101, pdfTeX §1809), `\topmark` `\firstmark`
+`\botmark` `\splitfirstmark` `\splitbotmark` and the `\…marks n` forms
+(§386, pdfTeX §412), `\vsplit` (§979).
+
+The five current marks are defined by the page reducer (F3) at each
+break and by each `\vsplit`, from the mark contributions in the material
+it took. With F3 in place they are ordinary fields defined by the
+reducer's steps and read by the output routine's unfold; outside the
+output routine they read the most recent step before the reader. No
+further notion is needed beyond F3 and "the most recent `\vsplit` node
+before me" for the split marks.
+
+### F5. Alignments (**ALIGN**)
+
+`\halign` `\valign` (§774–§812), `\noalign` (§785, §1133), `\omit`
+(§789), `\span` (§782, §791), `\cr` `\crcr` (§799), `&` (§789, §1128),
+`\tabskip` read per preamble column (§778), `\everycr` (§799),
+`\endtemplate` (§375, §1131).
+
+Cell boundaries are tokens of catcode 4 or meaning `car_ret`/`tab_mark`
+met *at alignment brace depth 0 while reading the body with expansion*
+(§342 maintains `align_state` in `get_next`). The body cannot be split
+into cells from the text alone, and the template parts are *inserted
+into the input* at each boundary. The smallest covering notion is a
+claim whose extent is decided by a boundary predicate evaluated on the
+*unfolded* token stream (a token of a given catcode or meaning at depth
+0 of this claim), with the claim's unfold being the template `u`/`v`
+texts spliced around each cell. Column widths (§796–§801) are then a
+fold over the cells' packaged contributions, as in F3, before the rows
+are contributed.
+
+### F6. The condition stack (**IF**)
+
+`\fi` `\or` `\else` met early (§510), `\currentiflevel` `\currentiftype`
+`\currentifbranch` (pdfTeX §1666), `\ifincsname` (pdfTeX §389, §1762),
+`\showifs` (pdfTeX §1691), `\unless` (pdfTeX §524).
+
+A conditional's claim extends to its `\fi`; the tokens of the taken
+branch are *inside* that claim. What TeX keeps on `cond_ptr` is which
+claims enclose the token being read. The smallest covering notion is that
+a node may read the chain of claims enclosing it (their kind and which
+branch it is in), the same structural read that F1 makes of scopes.
+`\ifincsname` reads the same chain for `\csname` claims.
+
+### F7. The input stack (**INPUT**)
+
+`\input` (§378, §537), `\endinput` (§362, §378), `\inputlineno` (§424),
+`\read` `\readline` (§482–§486, pdfTeX §508), `\openin` `\closein`
+(§1275), `\ifeof` (§505), `\scantokens` (pdfTeX §1753), `\everyeof`
+(pdfTeX §384), `\showgroups` (line numbers, pdfTeX §1679), `\jobname`
+(§537, §534).
+
+Two things here: (a) a file's text is spliced lazily, so the catcodes
+that tokenise line k are those after lines 1..k-1, and `\endinput`
+truncates the splice after the current line — the smallest covering
+notion is an unfold produced *line by line*, each line a node whose
+claim is the raw line and whose unfold is its tokenisation under the
+fields then in scope; `\inputlineno` and `\everyeof` are reads of that
+line node's position and end. (b) `\read` advances a per-stream
+position: a field `infile[n]` that every `\read n` both reads and
+defines, in document order, exactly as `\advance\count` does — no new
+notion, but the *content* read is external to the document.
+
+### F8. The terminal (**TERM**)
+
+`\read` from stream 16 or a closed stream (§484), `\pausing` (§363),
+`\message` `\errmessage` `\errhelp` (§1279, §1283), `\show` `\showbox`
+`\showthe` `\showlists` `\showgroups` `\showifs` `\showtokens`
+(§1293, pdfTeX §1677, §1691, §1684), `\batchmode` `\nonstopmode`
+`\scrollmode` `\errorstopmode` `\interactionmode` (§1265, pdfTeX §1692),
+error recovery in general (§82–§98).
+
+Only `\read` from the terminal affects the document; the rest write the
+log and terminal. The smallest covering notion is an external input
+stream for `\read16` (as F7(b), with the terminal as the file) and an
+output stream for everything else that the PDF comparison ignores.
+
+### F9. Deferred actions (**DEFERRED**)
+
+`\afterassignment` (§1268–§1269), `\aftergroup` (§1271, §280),
+`\write` `\openout` `\closeout` without `\immediate` (§1370–§1374),
+`\output` (§1025), `\shipout` as the moment of all of these (§638,
+§1373), `\pdfliteral shipout` (pdfTeX §1534), `\pdfsavepos` with
+`\pdflastxpos` `\pdflastypos` (pdfTeX §1621), `\pdfdest` (pdfTeX §1637),
+`\pdfstartlink` `\pdfendlink` `\pdfannot` `\pdfthread` `\pdfstartthread`
+`\pdfendthread` (geometry at shipout, pdfTeX §1630–§1637),
+`\pdfcolorstack` `\pdfsetmatrix` `\pdfsave` `\pdfrestore`
+`\pdfinterwordspaceon` `\pdfinterwordspaceoff` `\pdffakespace`
+`\pdfrunninglinkon` `\pdfrunninglinkoff` (shipout-order state, pdfTeX
+§727, §1630), `\pdfrefobj` `\pdfrefxform` `\pdfrefximage` (writing on
+first shipout, pdfTeX §1603), `\special` (§1368).
+
+Three different things: (a) `\afterassignment` and `\aftergroup` re-emit
+a token at another node's end: the smallest covering notion is an unfold
+*attached to a later node* (the next assignment node, the scope-closing
+node), i.e. a node may define a field "text to unfold at the close of my
+scope / after the next assignment" that the closing node reads. (b)
+`\write` and `\pdfliteral shipout` store text whose *reads bind at the
+shipout node*: a contribution that carries an un-reduced text, reduced in
+the scope of the shipout node (which is a step of F3's reducer). (c) The
+pdfTeX whatsits whose output depends on their *position on the page*
+(links, dests, annots, threads, `\pdfsavepos`) and on the order of
+earlier whatsits on the page (color stack, matrix, interword-space and
+running-link toggles): a contribution whose rendering is a function of
+the shipout's layout result, i.e. a fold over the shipped page's node
+list in shipout order. `\pdflastxpos`/`\pdflastypos` read the result of
+that fold for the most recently shipped `\pdfsavepos`.
+
+### F10. Definitions whose field identity is a value, and allocation-order globals
+
+`\csname` … `\endcsname` (§372), `\ifcsname` (pdfTeX §1767), `\font`
+`\letterspacefont` `\pdfcopyfont` (font numbers by load order, §1260,
+pdfTeX §705), `\fontdimen` growing the last font (§580), `\pdfobj`
+`\pdfxform` `\pdfximage` `\pdfannot` `\pdfstartlink` (object numbers,
+pdfTeX §1544–§1560) with `\pdflastobj` `\pdflastxform` `\pdflastximage`
+`\pdflastximagepages` `\pdflastximagecolordepth` `\pdflastannot`
+`\pdflastlink` `\pdfretval` (pdfTeX §450), `\pdffontname`
+`\pdffontobjnum` `\pdfpageref` `\pdfcolorstackinit` (allocation on
+read, pdfTeX §497), `\pdfmatch` `\pdflastmatch` (pdfTeX §497),
+`\pdfuniformdeviate` `\pdfnormaldeviate` `\pdfsetrandomseed` (pdfTeX
+§125, §497), `\pdfinfo` `\pdfcatalog` `\pdfnames` `\pdftrailer`
+`\pdfoutline` `\pdfmapline` `\pdfmapfile` `\pdfglyphtounicode`
+(append-only accumulators, pdfTeX §1528, §1563), `\jobname` (first-use
+constant, §537), `\mag` (§288), the `fixed_*` pdfTeX parameters frozen
+at the first page (pdfTeX §683, §747).
+
+`\csname` defines a field whose *name* is a reduction result: the
+smallest covering notion is a definition whose key is a value, resolved
+when the key's inputs are known, and reads of `cs[name]` that must wait
+for any unresolved value-keyed definition before them in scope. The
+allocation-order globals (`\pdflastobj`, font numbers, random state,
+`\pdfmatch` results) are a single field each, defined by every allocating
+node and read by the next reader: ordinary `G` fields, but the *value*
+is a count of earlier nodes, which the project's SSA modes already relax
+for object numbers and resource names. The accumulators are `G` fields
+whose definition is "previous value plus mine": `\advance`-shaped. The
+first-use constants (`\jobname`, `\mag`, `fixed_*`) are fields defined
+once by the first node that reads them.
+
+### F11. Unfolds that depend on who reads them
+
+`\noexpand` (§369, §358), `\unexpanded` (pdfTeX §1686, §478),
+`\protected` (pdfTeX §1772), `\the\toks` and `\the` of token
+parameters inside `\edef`/`\xdef`/`\write`/`\message`/`\pdfliteral`
+(§478), `\expanded` (pdfTeX §497), `\futurelet` (peeking, §1221).
+
+`\edef`'s body is reduced by a reader that stops at `\the\toks`,
+`\unexpanded`, `\noexpand` and `\protected` macros, where the main
+reader does not. The smallest covering notion is that an unfold may be
+requested in one of two modes (full, or `\edef`-style with these
+stops), and a `\def` body, `\write` text, etc. is the `\edef`-style
+reduction. `\noexpand` marks one token so that *only the immediately
+following* read sees it as `\relax`: a one-token-deep annotation on the
+unfolded text.
+
+### F12. Claims whose extent is decided by expansion or by meanings
+
+Expansion: `\csname` `\ifcsname` (to `\endcsname`, §372), `\ignorespaces`
+(§406), `\numexpr` `\dimexpr` `\glueexpr` `\muexpr` (pdfTeX §1782),
+every `<number>` `<dimen>` `<glue>` `<keyword>` `<file name>` operand
+(§440, §448, §461, §407, §526), the `{` of every `<general text>` (§403),
+`\parshape` and `\interlinepenalties` family (operand counts, §1248,
+pdfTeX §1864), `\halign` bodies (F5). Meanings: `\outer` (§336),
+conditionals' `\fi` matching (§494), `\endcsname` (§372), `\par` in
+macro arguments (§396), `\cr` `\span` `\omit` `\noalign` in alignments
+(§779, §785), `\else`/`\fi` ending a `<number>` operand (§510).
+
+A claim here is `Pd`: its extent is a function of the reduction of the
+text it is claiming. The smallest covering notion is a claim given as a
+*predicate over the unfolded stream* (stop at the first token that is
+not a digit / not a space / has meaning `end_cs_name`) rather than a
+span of text, resolved as the unfold proceeds; `P` claims are the
+special case where the predicate is decidable on the raw text under a
+stated assumption, and the catalogue marks them so that a checker can
+verify the assumption on the actual text.
+
+### F13. Definitions that are global without `\global`, or mutate a shared object
+
+`\hyphenchar` `\skewchar` (§1253), `\fontdimen` (§578), `\lpcode`
+`\rpcode` `\efcode` `\tagcode` `\knbscode` `\stbscode` `\shbscode`
+`\knbccode` `\knaccode` `\pdfnoligatures` `\pdffontexpand` `\pdffontattr`
+(pdfTeX §1432, §705), `\wd` `\ht` `\dp` (§1247: the box node is edited),
+`\box` `\unhbox` `\unvbox` `\vsplit` `\pdfxform` (void the register at
+the same level, §1079, §1110, pdfTeX §1548), `\hyphenation` (§934),
+`\patterns` (§960), `\batchmode` family and `\interactionmode` (§1265,
+pdfTeX §1443), `\openin` `\closein` (§1275), `\read` advancing a stream
+(§485), `\pdfmapfile` `\pdfmapline` `\pdfglyphtounicode` `\pdfspacefont`
+(pdfTeX §1528).
+
+`G` definitions are in the model. The two odd ones: `\wd`/`\ht`/`\dp`
+edit a box *object* that several registers may share (`\setbox1=\box0`
+moves, `\copy` copies) — the smallest covering notion is that a box
+value is a reference and `\wd` defines a field of the referent; and
+`\box n` voiding "at the same level" (§1079) overwrites the *current
+binding* without a new scope entry — a definition at the scope of the
+binding it reads, not at the current scope.
+
+### F14. Fields read by every later claim
+
+`\catcode` (§1232), `\endlinechar` (§348, §360), `\escapechar` (§470),
+`\globaldefs` (§1214), `\mathcode` `"8000` (§1155), `\uppercase`
+`\lowercase` re-reading (§1288), `\scantokens` (pdfTeX §1753), `\input`
+(F7).
+
+Tokenisation reads `cat[*]` and `int.endlinechar`; the claim of every
+later node depends on them. This is already in the model (claims read
+fields), but it means a non-literal `\catcode` makes all later claims
+`Pd` until it resolves, and `\globaldefs` makes the *scope* of later
+definitions a value. No new notion; recorded because the dependency is
+dense.
+
+### F15. External and non-reproducible inputs
+
+`\time` `\day` `\month` `\year` (§241), `\pdfcreationdate`
+`\pdffilemoddate` `\pdffilesize` `\pdfmdfivesum` `\pdffiledump`
+(pdfTeX §497), `\pdfelapsedtime` `\pdfrandomseed` `\pdfshellescape`
+(pdfTeX §450), `\pdfximage` (the image file, pdfTeX §1552), `\font`
+(the TFM, §560), `\input` `\openin` `\read` (files, F7),
+`\pdfuniformdeviate` `\pdfnormaldeviate` (seeded by the time unless
+`\pdfsetrandomseed`, pdfTeX §125).
+
+The smallest covering notion is a field defined by the *environment*
+node (the job's start: date, file system snapshot, seed, shell-escape
+setting) that these primitives read; a byte-identical rebuild then
+means re-supplying the same environment, which the oracle comparison
+already does for the date.
