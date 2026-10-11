@@ -30,6 +30,7 @@ phitex-codecs = { path = "../phitex-codecs" }
 phitex-doc = { path = "../phitex-doc" }
 phitex-draw = { path = "../phitex-draw" }
 phitex-flow = { path = "../phitex-flow", default-features = false }
+phitex-red = { path = "../phitex-red" }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }

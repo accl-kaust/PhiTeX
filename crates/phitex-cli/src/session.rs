@@ -180,6 +180,13 @@ pub struct Session {
     /// TeX's main memory for the runs (`Options::main_memory`): texmf.cnf's
     /// and the environment's (`tex::run_memory`) when a format is loaded.
     main_memory: u64,
+    /// `PHITEX_ENGINE=red`: the reduction engine's build (made at the first build).
+    red: Option<phitex_red::api::Build>,
+}
+
+/// `PHITEX_ENGINE=red` selects phitex-red for build and watch.
+pub fn red_engine() -> bool {
+    std::env::var("PHITEX_ENGINE").is_ok_and(|v| v == "red")
 }
 
 /// What a run reads as file `name`: the version given, else the disk's
@@ -257,7 +264,7 @@ impl Session {
         build.set_pdf_date(job.pdf_date);
         let mut format = None;
         let main_memory = if job.ini { phitex_flow::build::MAIN_MEMORY } else { tree.main_memory };
-        if !job.ini {
+        if !job.ini && !red_engine() {
             let (bytes, path) = crate::format::ensure(&job.engine, &tree, job.threads, &status, note)?;
             build
                 .set_format(&bytes)
@@ -278,6 +285,7 @@ impl Session {
             sync: crate::synctex::Writer::default(),
             status,
             main_memory,
+            red: None,
         })
     }
 
@@ -292,6 +300,9 @@ impl Session {
         match text {
             Some(t) => self.build.set_file(name, t),
             None => self.build.remove_file(name),
+        }
+        if let Some(r) = &mut self.red {
+            r.edit(phitex_red::api::Edit::File { name: Arc::from(name), text: text.map(Arc::from) });
         }
     }
 
@@ -319,6 +330,9 @@ impl Session {
     /// Builds: the first time cold, then as an edit of what changed; to
     /// the fixpoint if the job says so.
     pub fn build(&mut self) -> Report {
+        if red_engine() {
+            return self.build_red();
+        }
         let edit = self.builds > 0;
         self.builds += 1;
         let opts = Options {
@@ -433,6 +447,107 @@ impl Session {
             notes,
             wall: t0.elapsed(),
             xetex,
+        }
+    }
+
+    /// A build on phitex-red: one `Build` for the session, updated with the
+    /// main text as it is now; its loop-back fixpoint replaces the runs.
+    fn build_red(&mut self) -> Report {
+        use phitex_red::api;
+        let t0 = Instant::now();
+        let why = if self.builds > 0 { "edit" } else { "cold" };
+        self.builds += 1;
+        self.status.set(format!("red ({why})"));
+        let text: Arc<str> = Arc::from(self.text.as_str());
+        let mut errors = Vec::new();
+        let out = if let Some(b) = &mut self.red {
+            Some(b.update(vec![api::Edit::Main(text)]))
+        } else {
+            let e = &self.job.engine;
+            let engine = if e.name.starts_with("pdf") {
+                api::Engine::Pdftex
+            } else if self.etex() {
+                api::Engine::Etex
+            } else {
+                api::Engine::Tex
+            };
+            let format = if self.job.ini {
+                api::Format::Ini
+            } else if e.name.contains("latex") {
+                api::Format::Latex
+            } else {
+                api::Format::Plain
+            };
+            let tree = Arc::new(Tree::open(e));
+            let out_dir = self.job.out_dir.clone();
+            let finder: api::Finder = Arc::new(move |name: &str| {
+                let p = [out_dir.join(name)]
+                    .into_iter()
+                    .find(|p| out_dir != Path::new(".") && p.is_file())
+                    .or_else(|| tree.input(name))?;
+                let bytes = std::fs::read(&p).ok()?;
+                Some((Arc::from(p.to_string_lossy().as_ref()), Arc::from(bytes)))
+            });
+            let opts = api::Options {
+                engine,
+                format,
+                job_name: Arc::from(self.job.jobname.as_str()),
+                main_name: Arc::from(self.job.file.as_str()),
+                finder,
+                threads: self.job.threads,
+                givens: BTreeMap::new(),
+                previous: self.given.iter().map(|(k, v)| (Arc::from(k.as_str()), Arc::from(v.as_str()))).collect(),
+            };
+            match api::Build::new(opts, text) {
+                Ok(mut b) => {
+                    let o = b.update(Vec::new());
+                    self.red = Some(b);
+                    Some(o)
+                }
+                Err(e) => {
+                    errors.push(e);
+                    None
+                }
+            }
+        };
+        let o = out.unwrap_or_default();
+        errors.extend(o.diags.iter().map(|d| d.msg.clone()));
+        let mut stats = phitex_flow::build::Stats::default();
+        stats.pages = o.pages;
+        let writes: Vec<(String, String)> = o.written.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        for (n, t) in &writes {
+            self.given.insert(n.clone(), t.clone());
+        }
+        let wall = t0.elapsed();
+        self.status.set("");
+        Report {
+            out: Output {
+                dvi: o.dvi,
+                pdf: o.pdf,
+                stats,
+                errors,
+                dump: String::new(),
+                log: o.log,
+                writes,
+                job_pages: Vec::new(),
+                origins: Vec::new(),
+                files_read: Vec::new(),
+                derived: Vec::new(),
+                derived_side: Vec::new(),
+                notes: Vec::new(),
+            },
+            runs: vec![RunInfo {
+                wall,
+                why: why.to_owned(),
+                commands_run: o.nodes_reduced as u64,
+                pages: o.pages,
+                pages_reused: o.pages - o.changed_pages.len(),
+                ..RunInfo::default()
+            }],
+            unsettled: o.unsettled.iter().map(ToString::to_string).collect(),
+            notes: Vec::new(),
+            wall,
+            xetex: false,
         }
     }
 

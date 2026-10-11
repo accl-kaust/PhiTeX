@@ -1,8 +1,1189 @@
-//! E2: errors (with TeX's recovery: inserted/deleted tokens), warnings,
-//! `\show` `\showbox` `\showthe` `\showlists` `\showgroups` `\showtokens`.
-use crate::prim::Registry;
-pub fn register(_r: &mut Registry) {}
+//! E2: errors and warnings as `Emit::Diag`, the error count (100 errors end
+//! the job: `Key::Ended`), `\errmessage`'s help, the interaction modes, and
+//! `\show` `\showbox` `\showthe` `\showlists` `\showgroups` `\showtokens`
+//! `\showifs` (tex.web §1291–1298, e-TeX). Printing helpers shared with the
+//! rest of the engine: `print_scaled`, `print_spec`, token lists, meanings,
+//! `show_box` and `short_display` (tex.web §173–198, §262, §294–298).
+//!
+//! The caller of `error` does TeX's recovery (inserting/deleting tokens):
+//! nothing here touches the input.
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::ctx::Ctx;
+use crate::env::{GroupKind, Mode};
+use crate::item::{BoxNode, Item, Whatsit, RUNNING};
+use crate::prim::{gp, ip, mp, tag, tp, Kind, Level, Registry};
+use crate::term::Emit;
+use crate::tok::{Names, Tok, Toks};
+use crate::val::{FontId, Glue, Key, Meaning, Val};
+
+pub fn register(r: &mut Registry) {
+    r.add("show", 0, Kind::Command(show_whatever), 0);
+    r.add("showbox", 1, Kind::Command(show_whatever), 0);
+    r.add("showthe", 2, Kind::Command(show_whatever), 0);
+    r.add("showlists", 3, Kind::Command(show_whatever), 0);
+    r.add("showgroups", 4, Kind::Command(show_whatever), 1);
+    r.add("showtokens", 5, Kind::Command(show_whatever), 1);
+    r.add("showifs", 6, Kind::Command(show_whatever), 1);
+    r.add("batchmode", 0, Kind::Command(new_interaction), 0);
+    r.add("nonstopmode", 1, Kind::Command(new_interaction), 0);
+    r.add("scrollmode", 2, Kind::Command(new_interaction), 0);
+    r.add("errorstopmode", 3, Kind::Command(new_interaction), 0);
+}
+
+/// One diagnostic as TeX prints it. Errors have `msg` = `! Text.` (the
+/// period error() adds included); `\show` results start with `> `; warnings
+/// and box displays are plain text. `help` lines go to the log after it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Diag { pub msg: String, pub help: Vec<String>, pub line: i32 }
-/// Reports an error (emitted as `Emit::Diag`).
-pub fn error(_c: &mut dyn crate::ctx::Ctx, _msg: &str, _help: &[&str]) { todo!("E2") }
+
+impl Diag {
+    pub fn is_error(&self) -> bool {
+        self.msg.starts_with("! ")
+    }
+}
+
+/// `Key::Other(DIAG, ..)` numbers.
+const ERROR_COUNT: u32 = 0;
+const LONG_HELP_SEEN: u32 = 1;
+/// 0 spotless, 1 warning issued, 2 error message issued, 3 fatal.
+pub const HISTORY: u32 = 2;
+
+pub const ERROR_STOP_MODE: i32 = 3;
+
+fn key(n: u32) -> Key {
+    Key::Other(tag::DIAG, n)
+}
+
+fn emit(c: &mut dyn Ctx, msg: String, help: Vec<String>) {
+    let line = c.line_no();
+    c.emit(Emit::Diag(Arc::new(Diag { msg, help, line })));
+}
+
+fn raise_history(c: &mut dyn Ctx, h: i32) {
+    if c.int(&key(HISTORY)) < h {
+        c.define(key(HISTORY), Val::Int(h), true);
+    }
+}
+
+/// Reports an error (emitted as `Emit::Diag`): `! msg.` and its help. Counts
+/// it; the 100th error since the last paragraph ends the job (`Key::Ended`).
+pub fn error(c: &mut dyn Ctx, msg: &str, help: &[&str]) {
+    error_lines(c, msg, help.iter().map(|s| s.to_string()).collect());
+}
+
+fn error_lines(c: &mut dyn Ctx, msg: &str, help: Vec<String>) {
+    emit(c, format!("! {msg}."), help);
+    raise_history(c, 2);
+    count_error(c);
+}
+
+fn count_error(c: &mut dyn Ctx) {
+    let n = c.int(&key(ERROR_COUNT)) + 1;
+    c.define(key(ERROR_COUNT), Val::Int(n), true);
+    if n == 100 {
+        emit(c, "(That makes 100 errors; please try again.)".into(), Vec::new());
+        raise_history(c, 3);
+        c.define(Key::Ended, Val::Int(1), true);
+    }
+}
+
+/// A fatal error (`fatal_error`, `overflow`): reported, the job ends.
+pub fn fatal(c: &mut dyn Ctx, msg: &str, help: &[&str]) {
+    emit(c, "! Emergency stop.".into(), vec![msg.to_string()]);
+    let _ = help;
+    raise_history(c, 3);
+    c.define(Key::Ended, Val::Int(1), true);
+}
+
+/// `error_count:=0` at the end of each paragraph (tex.web §1096: `end_graf`).
+pub fn reset_error_count(c: &mut dyn Ctx) {
+    if c.int(&key(ERROR_COUNT)) != 0 {
+        c.define(key(ERROR_COUNT), Val::Int(0), true);
+    }
+}
+
+/// A warning or other log text (no `!`, not counted).
+pub fn warning(c: &mut dyn Ctx, msg: &str) {
+    raise_history(c, 1);
+    emit(c, msg.to_string(), Vec::new());
+}
+
+/// Log/terminal text that is not a warning (diagnostics, tracing).
+pub fn info(c: &mut dyn Ctx, msg: &str) {
+    emit(c, msg.to_string(), Vec::new());
+}
+
+/// `\errmessage` (tex.web §1283), the text already expanded.
+pub fn err_message(c: &mut dyn Ctx, text: &str) {
+    let eh = c.get(&Key::TokPar(tp::of("errhelp"))).toks();
+    let help: Vec<String> = if !eh.is_empty() {
+        let mut p = Printer::from_ctx(c, &eh);
+        p.token_list(&eh, 10_000_000);
+        p.s.split('\n').map(|s| s.to_string()).collect()
+    } else if c.int(&key(LONG_HELP_SEEN)) != 0 {
+        vec!["(That was another \\errmessage.)".into()]
+    } else {
+        if c.int(&Key::Interaction) < ERROR_STOP_MODE {
+            c.define(key(LONG_HELP_SEEN), Val::Int(1), true);
+        }
+        [
+            "This error message was generated by an \\errmessage",
+            "command, so I can't give any explicit help.",
+            "Pretend that you're Hercule Poirot: Examine all clues,",
+            "and deduce the truth by order and method.",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    };
+    error_lines(c, text, help);
+}
+
+/// `\batchmode` … `\errorstopmode` (§1264).
+fn new_interaction(c: &mut dyn Ctx, code: u16) {
+    c.define(Key::Interaction, Val::Int(code as i32), true);
+}
+
+// ---------------------------------------------------------------- printing
+
+/// TeX's printing into a string: `print_esc` reads `\escapechar`; single
+/// letter control sequences are followed by a space when their character is
+/// a letter (`letters`, read from catcodes by the caller).
+pub struct Printer {
+    pub s: String,
+    pub esc: i32,
+    names: HashMap<u32, Arc<str>>,
+    letters: HashMap<char, bool>,
+}
+
+fn ascii_letter(c: char) -> bool {
+    c.is_ascii_alphabetic()
+}
+
+impl Printer {
+    pub fn new(esc: i32) -> Self {
+        Printer { s: String::new(), esc, names: HashMap::new(), letters: HashMap::new() }
+    }
+
+    /// Learns the names of the control sequences in `toks`, and whether each
+    /// single-character one is a letter (`letter`).
+    pub fn learn(&mut self, names: &Names, toks: &[Tok], letter: &mut dyn FnMut(char) -> bool) {
+        for t in toks {
+            if let Tok::Cs(cs) = t {
+                if self.names.contains_key(cs) {
+                    continue;
+                }
+                let name = names.name(*cs);
+                let mut it = name.chars();
+                if let (Some(ch), None) = (it.next(), it.next()) {
+                    if !self.letters.contains_key(&ch) {
+                        let l = letter(ch);
+                        self.letters.insert(ch, l);
+                    }
+                }
+                self.names.insert(*cs, name);
+            }
+        }
+    }
+
+    /// A printer for `toks` with `\escapechar` and the catcodes of the
+    /// single-character control sequences in them read through `c`.
+    pub fn from_ctx(c: &mut dyn Ctx, toks: &[Tok]) -> Printer {
+        let esc = c.int(&Key::IntPar(ip::of("escapechar")));
+        let mut p = Printer::new(esc);
+        p.learn_ctx(c, toks);
+        p
+    }
+
+    pub fn learn_ctx(&mut self, c: &mut dyn Ctx, toks: &[Tok]) {
+        let mut found: Vec<(u32, Arc<str>)> = Vec::new();
+        for t in toks {
+            if let Tok::Cs(cs) = t {
+                if !self.names.contains_key(cs) && !found.iter().any(|(k, _)| k == cs) {
+                    found.push((*cs, c.names().name(*cs)));
+                }
+            }
+        }
+        for (cs, name) in found {
+            let mut it = name.chars();
+            if let (Some(ch), None) = (it.next(), it.next()) {
+                if !self.letters.contains_key(&ch) {
+                    let l = c.int(&Key::Cat(ch)) == 11;
+                    self.letters.insert(ch, l);
+                }
+            }
+            self.names.insert(cs, name);
+        }
+    }
+
+    /// `print(c)` for one character: `^^` notation for the unprintable ones.
+    pub fn ascii(&mut self, ch: char) {
+        let c = ch as u32;
+        if c < 32 {
+            self.s.push_str("^^");
+            self.s.push(char::from_u32(c + 64).unwrap_or('?'));
+        } else if c == 127 {
+            self.s.push_str("^^?");
+        } else {
+            self.s.push(ch);
+        }
+    }
+
+    pub fn str(&mut self, s: &str) {
+        for ch in s.chars() {
+            self.ascii(ch);
+        }
+    }
+
+    pub fn esc(&mut self, s: &str) {
+        if (0..256).contains(&self.esc) {
+            self.ascii(char::from_u32(self.esc as u32).unwrap_or('\\'));
+        }
+        self.str(s);
+    }
+
+    pub fn int(&mut self, n: i32) {
+        self.s.push_str(&n.to_string());
+    }
+
+    pub fn hex(&mut self, n: u32) {
+        self.s.push('"');
+        self.s.push_str(&format!("{n:X}"));
+    }
+
+    pub fn scaled(&mut self, x: i32) {
+        print_scaled(&mut self.s, x);
+    }
+
+    pub fn glue(&mut self, d: i32, order: u8, unit: &str) {
+        self.scaled(d);
+        if order > 3 {
+            self.s.push_str("foul");
+        } else if order > 0 {
+            self.s.push_str("fil");
+            for _ in 1..order {
+                self.s.push('l');
+            }
+        } else {
+            self.s.push_str(unit);
+        }
+    }
+
+    pub fn spec(&mut self, g: &Glue, unit: &str) {
+        self.scaled(g.width);
+        self.s.push_str(unit);
+        if g.stretch != 0 {
+            self.s.push_str(" plus ");
+            self.glue(g.stretch, g.stretch_order, unit);
+        }
+        if g.shrink != 0 {
+            self.s.push_str(" minus ");
+            self.glue(g.shrink, g.shrink_order, unit);
+        }
+    }
+
+    fn is_letter(&self, ch: char) -> bool {
+        self.letters.get(&ch).copied().unwrap_or_else(|| ch.is_ascii_alphabetic())
+    }
+
+    /// `print_cs` (§262): with the trailing space.
+    pub fn cs(&mut self, cs: u32) {
+        let Some(name) = self.names.get(&cs).cloned() else {
+            self.esc("IMPOSSIBLE.");
+            return;
+        };
+        let mut it = name.chars();
+        match (it.next(), it.next()) {
+            (None, _) => {
+                self.esc("csname");
+                self.esc("endcsname");
+                self.s.push(' ');
+            }
+            (Some(ch), None) => {
+                self.esc("");
+                self.ascii(ch);
+                if self.is_letter(ch) {
+                    self.s.push(' ');
+                }
+            }
+            _ => {
+                self.esc(&name);
+                self.s.push(' ');
+            }
+        }
+    }
+
+    /// `sprint_cs` (§263): no trailing space.
+    pub fn sprint_cs(&mut self, t: &Tok) {
+        match t {
+            Tok::Cs(cs) => {
+                let name = self.names.get(cs).cloned().unwrap_or_else(|| Arc::from(""));
+                if name.is_empty() {
+                    self.esc("csname");
+                    self.esc("endcsname");
+                } else {
+                    self.esc(&name);
+                }
+            }
+            Tok::Active(ch) => self.ascii(*ch),
+            _ => {}
+        }
+    }
+
+    fn tok(&mut self, t: &Tok, in_params: bool) {
+        match t {
+            Tok::Char { cat, ch } => {
+                self.ascii(*ch);
+                if *cat == 6 {
+                    self.ascii(*ch);
+                }
+            }
+            Tok::Cs(cs) => self.cs(*cs),
+            Tok::Active(ch) => self.ascii(*ch),
+            Tok::Param(0) => self.s.push_str(if in_params { "#" } else { "##" }),
+            Tok::Param(n) => {
+                self.s.push('#');
+                self.s.push(char::from(b'0' + n));
+            }
+            Tok::DontExpand => {
+                self.esc("notexpanded:");
+                self.s.push(' ');
+            }
+        }
+    }
+
+    /// `show_token_list` (§292) of a list, at most `limit` characters
+    /// (then `\ETC.`).
+    pub fn token_list(&mut self, toks: &[Tok], limit: usize) {
+        self.token_lists(&[(toks, false)], limit, &[]);
+    }
+
+    fn token_lists(&mut self, parts: &[(&[Tok], bool)], limit: usize, seps: &[&str]) {
+        let start = self.s.chars().count();
+        let mut tally = |s: &String| s.chars().count() - start;
+        for (i, (toks, params)) in parts.iter().enumerate() {
+            for t in toks.iter() {
+                if tally(&self.s) >= limit {
+                    self.esc("ETC.");
+                    return;
+                }
+                self.tok(t, *params);
+            }
+            if let Some(sep) = seps.get(i) {
+                if tally(&self.s) >= limit {
+                    self.esc("ETC.");
+                    return;
+                }
+                self.s.push_str(sep);
+            }
+        }
+    }
+
+    /// A macro's `#1#2->body` as `token_show` prints it.
+    pub fn macro_text(&mut self, m: &crate::val::Macro, limit: usize) {
+        let (s1, s2) = if m.brace_end { ("{->", "{") } else { ("->", "") };
+        self.token_lists(&[(&m.params, true), (&m.body, false)], limit, &[s1, s2]);
+    }
+
+    /// `print_meaning` (§296) of a meaning; `mark` is the current text of a
+    /// `\topmark`-like primitive.
+    pub fn meaning(&mut self, m: &Meaning, mark: Option<&Toks>) {
+        match m {
+            Meaning::Undefined => self.s.push_str("undefined"),
+            Meaning::Prim(id) => {
+                let name = crate::prim::registry().get(*id).name;
+                self.esc(name);
+                if let Some(t) = mark {
+                    self.s.push_str(":\n");
+                    self.token_list(t, 10_000_000);
+                }
+            }
+            Meaning::Macro(mac) => {
+                if mac.protected {
+                    self.esc("protected");
+                }
+                if mac.long {
+                    self.esc("long");
+                }
+                if mac.outer {
+                    self.esc("outer");
+                }
+                if mac.protected || mac.long || mac.outer {
+                    self.s.push(' ');
+                }
+                self.s.push_str("macro:\n");
+                self.macro_text(mac, 10_000_000);
+            }
+            Meaning::Char { cat, ch } => {
+                self.s.push_str(match cat {
+                    1 => "begin-group character ",
+                    2 => "end-group character ",
+                    3 => "math shift character ",
+                    4 => "alignment tab character ",
+                    6 => "macro parameter character ",
+                    7 => "superscript character ",
+                    8 => "subscript character ",
+                    10 => "blank space ",
+                    11 => "the letter ",
+                    _ => "the character ",
+                });
+                self.ascii(*ch);
+            }
+            Meaning::CharGiven(n) => {
+                self.esc("char");
+                self.hex(*n);
+            }
+            Meaning::MathCharGiven(n) => {
+                self.esc("mathchar");
+                self.hex(*n);
+            }
+            Meaning::Reg(bank, n) => {
+                self.esc(["count", "dimen", "skip", "muskip", "toks"][(*bank as usize).min(4)]);
+                self.int(*n as i32);
+            }
+            Meaning::Font(f) => {
+                let font = crate::font::fonts().font(*f);
+                self.s.push_str("select font ");
+                self.str(font.name());
+                let dsize = design_size(font.tfm());
+                if font.size() != dsize {
+                    self.s.push_str(" at ");
+                    self.scaled(font.size());
+                    self.s.push_str("pt");
+                }
+            }
+        }
+    }
+}
+
+/// The TFM design size in sp (tex.web §568).
+pub fn design_size(tfm: &[u8]) -> i32 {
+    let b = |i: usize| tfm.get(i).copied().unwrap_or(0) as i32;
+    ((b(28) << 16 | b(29) << 8 | b(30)) << 4) + (b(31) >> 4)
+}
+
+/// `print_scaled` (§103).
+pub fn print_scaled(out: &mut String, x: i32) {
+    let mut s = x as i64;
+    if s < 0 {
+        out.push('-');
+        s = -s;
+    }
+    out.push_str(&(s / 65536).to_string());
+    out.push('.');
+    let mut s = 10 * (s % 65536) + 5;
+    let mut delta: i64 = 10;
+    loop {
+        if delta > 65536 {
+            s += 0o100000 - 50000; // round the last digit
+        }
+        out.push(char::from(b'0' + (s / 65536) as u8));
+        s = 10 * (s % 65536);
+        delta *= 10;
+        if s <= delta {
+            break;
+        }
+    }
+}
+
+/// A token list as `show_token_list` prints it (no catcode reads: a
+/// single-character control sequence is followed by a space iff `letter`).
+pub fn token_list_text(names: &Names, toks: &[Tok], esc: i32, letter: &dyn Fn(char) -> bool, limit: usize) -> String {
+    let mut p = Printer::new(esc);
+    p.learn(names, toks, &mut |ch| letter(ch));
+    p.token_list(toks, limit);
+    p.s
+}
+
+/// A token list as printed now (catcodes and `\escapechar` read through `c`).
+pub fn toks_text(c: &mut dyn Ctx, toks: &[Tok], limit: usize) -> String {
+    let mut p = Printer::from_ctx(c, toks);
+    p.token_list(toks, limit);
+    p.s
+}
+
+/// `print_meaning` of a token's meaning, as `\meaning` gives it.
+pub fn meaning_text(c: &mut dyn Ctx, m: &Meaning) -> String {
+    let mark = mark_of(c, m);
+    let mut toks: Vec<Tok> = Vec::new();
+    if let Meaning::Macro(mac) = m {
+        toks.extend(mac.params.iter().copied());
+        toks.extend(mac.body.iter().copied());
+    }
+    if let Some(t) = &mark {
+        toks.extend(t.iter().copied());
+    }
+    let mut p = Printer::from_ctx(c, &toks);
+    p.meaning(m, mark.as_ref());
+    p.s
+}
+
+fn mark_of(c: &mut dyn Ctx, m: &Meaning) -> Option<Toks> {
+    if let Meaning::Prim(id) = m {
+        let which = match crate::prim::registry().get(*id).name {
+            "topmark" => 0,
+            "firstmark" => 1,
+            "botmark" => 2,
+            "splitfirstmark" => 3,
+            "splitbotmark" => 4,
+            _ => return None,
+        };
+        return Some(c.get(&Key::Mark(0, which)).toks());
+    }
+    None
+}
+
+// ---------------------------------------------------------------- boxes
+
+/// What box display reads: `\showboxdepth`, `\showboxbreadth`, `\escapechar`.
+#[derive(Clone, Copy, Debug)]
+pub struct ShowParams {
+    pub depth: i32,
+    pub breadth: i32,
+    pub esc: i32,
+}
+
+impl ShowParams {
+    pub fn read(c: &mut dyn Ctx) -> Self {
+        ShowParams {
+            depth: c.int(&Key::IntPar(ip::of("showboxdepth"))),
+            breadth: c.int(&Key::IntPar(ip::of("showboxbreadth"))),
+            esc: c.int(&Key::IntPar(ip::of("escapechar"))),
+        }
+    }
+}
+
+const MAX_PRINT_LINE: usize = 79;
+
+struct BoxShow {
+    p: Printer,
+    prefix: String,
+    depth: usize,
+    breadth: i32,
+}
+
+/// `show_box` (§198): the list displayed one item per line, nested levels
+/// prefixed by `.`. The text starts with a newline (TeX's `print_ln`).
+pub fn show_box(names: &Names, list: &[Item], sp: ShowParams) -> String {
+    let mut breadth = sp.breadth;
+    if breadth <= 0 {
+        breadth = 5;
+    }
+    let mut p = Printer::new(sp.esc);
+    p.learn(names, &list_toks(list), &mut |ch| ch.is_ascii_alphabetic());
+    let mut b = BoxShow { p, prefix: String::new(), depth: sp.depth.max(0) as usize, breadth };
+    // A negative \showboxdepth shows nothing below the top (depth_threshold < 0).
+    if sp.depth < 0 {
+        if !list.is_empty() {
+            b.p.s.push_str(" []");
+        }
+        return b.p.s;
+    }
+    b.list(list);
+    b.p.s
+}
+
+/// A box displayed as `\showbox` does (`> \box n=` excluded).
+pub fn show_box_node(names: &Names, bx: &Arc<BoxNode>, sp: ShowParams) -> String {
+    show_box(names, &[Item::Box(bx.clone())], sp)
+}
+
+impl BoxShow {
+    fn list(&mut self, list: &[Item]) {
+        if self.prefix.chars().count() > self.depth {
+            if !list.is_empty() {
+                self.p.s.push_str(" []");
+            }
+            return;
+        }
+        let mut n = 0;
+        for it in list {
+            self.p.s.push('\n');
+            let pre = self.prefix.clone();
+            self.p.s.push_str(&pre);
+            n += 1;
+            if n > self.breadth {
+                self.p.s.push_str("etc.");
+                return;
+            }
+            self.node(it);
+        }
+    }
+
+    fn nested(&mut self, list: &[Item], ch: char) {
+        self.prefix.push(ch);
+        self.list(list);
+        self.prefix.pop();
+    }
+
+    fn font_and_char(&mut self, f: FontId, c: u16) {
+        let id = crate::font::font_id_text(f);
+        self.p.esc(&id);
+        self.p.s.push(' ');
+        self.p.ascii(char::from_u32(c as u32).unwrap_or('?'));
+    }
+
+    fn rule_dimen(&mut self, d: i32) {
+        if d == RUNNING {
+            self.p.s.push('*');
+        } else {
+            self.p.scaled(d);
+        }
+    }
+
+    fn mark(&mut self, toks: &Toks) {
+        self.p.s.push('{');
+        self.p.token_list(toks, MAX_PRINT_LINE - 10);
+        self.p.s.push('}');
+    }
+
+    fn write_whatsit(&mut self, s: &str, stream: u8) {
+        self.p.esc(s);
+        if stream < 16 {
+            self.p.int(stream as i32);
+        } else if stream == 16 {
+            self.p.s.push('*');
+        } else {
+            self.p.s.push('-');
+        }
+    }
+
+    fn node(&mut self, it: &Item) {
+        match it {
+            Item::Char { font, c } => self.font_and_char(*font, *c),
+            Item::Box(b) => {
+                self.p.esc(if b.vertical { "v" } else { "h" });
+                self.p.s.push_str("box(");
+                self.p.scaled(b.height);
+                self.p.s.push('+');
+                self.p.scaled(b.depth);
+                self.p.s.push_str(")x");
+                self.p.scaled(b.width);
+                let g = b.set.ratio;
+                if g != 0.0 && b.set.sign != 0 {
+                    self.p.s.push_str(", glue set ");
+                    if b.set.sign < 0 {
+                        self.p.s.push_str("- ");
+                    }
+                    if g.abs() > 20000.0 {
+                        if g > 0.0 {
+                            self.p.s.push('>');
+                        } else {
+                            self.p.s.push_str("< -");
+                        }
+                        self.p.glue(20000 * 65536, b.set.order, "");
+                    } else {
+                        let r = 65536.0 * g;
+                        let r = if r >= 0.0 { (r + 0.5).floor() } else { (r - 0.5).ceil() };
+                        self.p.glue(r as i32, b.set.order, "");
+                    }
+                }
+                if b.shift != 0 {
+                    self.p.s.push_str(", shifted ");
+                    self.p.scaled(b.shift);
+                }
+                if !b.vertical && b.lr == 2 {
+                    self.p.s.push_str(", display");
+                }
+                self.nested(&b.list, '.');
+            }
+            Item::Rule { w, h, d } => {
+                self.p.esc("rule(");
+                self.rule_dimen(*h);
+                self.p.s.push('+');
+                self.rule_dimen(*d);
+                self.p.s.push_str(")x");
+                self.rule_dimen(*w);
+            }
+            Item::Ins(ins) => {
+                self.p.esc("insert");
+                self.p.int(ins.class as i32);
+                self.p.s.push_str(", natural size ");
+                self.p.scaled(ins.height);
+                self.p.s.push_str("; split(");
+                self.p.spec(&ins.split_top, "");
+                self.p.s.push(',');
+                self.p.scaled(ins.split_max_depth);
+                self.p.s.push_str("); float cost ");
+                self.p.int(ins.float_cost);
+                self.nested(&ins.list, '.');
+            }
+            Item::Whatsit(w) => match &**w {
+                Whatsit::Open { stream, name, area, ext } => {
+                    self.write_whatsit("openout", *stream);
+                    self.p.s.push('=');
+                    let full = format!("{area}{name}{ext}");
+                    if full.contains(' ') {
+                        self.p.s.push('"');
+                        self.p.str(&full);
+                        self.p.s.push('"');
+                    } else {
+                        self.p.str(&full);
+                    }
+                }
+                Whatsit::Write { stream, toks } => {
+                    self.write_whatsit("write", *stream);
+                    self.mark(toks);
+                }
+                Whatsit::Close { stream } => self.write_whatsit("closeout", *stream),
+                Whatsit::Special { toks } => {
+                    self.p.esc("special");
+                    self.mark(toks);
+                }
+                Whatsit::Language { lang, lhm, rhm } => {
+                    self.p.esc("setlanguage");
+                    self.p.int(*lang as i32);
+                    self.p.s.push_str(" (hyphenmin ");
+                    self.p.int(*lhm as i32);
+                    self.p.s.push(',');
+                    self.p.int(*rhm as i32);
+                    self.p.s.push(')');
+                }
+                Whatsit::Pdf(_) => self.p.esc("pdfwhatsit"),
+            },
+            Item::Glue { g, sub, leader } => {
+                if *sub >= 100 {
+                    self.p.esc("");
+                    if *sub == 101 {
+                        self.p.s.push('c');
+                    } else if *sub == 102 {
+                        self.p.s.push('x');
+                    }
+                    self.p.s.push_str("leaders ");
+                    self.p.spec(g, "");
+                    if let Some(l) = leader {
+                        self.nested(std::slice::from_ref(&**l), '.');
+                    }
+                } else {
+                    self.p.esc("glue");
+                    if *sub != 0 {
+                        self.p.s.push('(');
+                        if *sub < 98 {
+                            let i = (*sub - 1) as usize;
+                            let name = gp::NAMES.get(i).or_else(|| mp::NAMES.get(i - gp::NAMES.len().min(i))).copied().unwrap_or("?");
+                            self.p.esc(name);
+                        } else if *sub == 98 {
+                            self.p.esc("nonscript");
+                        } else {
+                            self.p.esc("mskip");
+                        }
+                        self.p.s.push(')');
+                    }
+                    if *sub != 98 {
+                        self.p.s.push(' ');
+                        if *sub < 98 {
+                            self.p.spec(g, "");
+                        } else {
+                            self.p.spec(g, "mu");
+                        }
+                    }
+                }
+            }
+            Item::Kern { w, sub } => {
+                if *sub != 3 {
+                    self.p.esc("kern");
+                    if *sub != 0 {
+                        self.p.s.push(' ');
+                    }
+                    self.p.scaled(*w);
+                    if *sub == 2 {
+                        self.p.s.push_str(" (for accent)");
+                    }
+                } else {
+                    self.p.esc("mkern");
+                    self.p.scaled(*w);
+                    self.p.s.push_str("mu");
+                }
+            }
+            Item::MarginKern { w, right, .. } => {
+                self.p.esc("kern");
+                self.p.scaled(*w);
+                self.p.s.push_str(if *right { " (right margin)" } else { " (left margin)" });
+            }
+            Item::Math { w, sub } => {
+                if *sub > 1 {
+                    self.p.esc(if sub & 1 == 1 { "end" } else { "begin" });
+                    self.p.s.push(if *sub > 8 {
+                        'R'
+                    } else if *sub > 4 {
+                        'L'
+                    } else {
+                        'M'
+                    });
+                } else {
+                    self.p.esc("math");
+                    self.p.s.push_str(if *sub == 0 { "on" } else { "off" });
+                    if *w != 0 {
+                        self.p.s.push_str(", surrounded ");
+                        self.p.scaled(*w);
+                    }
+                }
+            }
+            Item::Lig { font, c, orig, left, right } => {
+                self.font_and_char(*font, *c);
+                self.p.s.push_str(" (ligature ");
+                if *left {
+                    self.p.s.push('|');
+                }
+                for &o in orig.iter() {
+                    self.p.ascii(char::from_u32(o as u32).unwrap_or('?'));
+                }
+                if *right {
+                    self.p.s.push('|');
+                }
+                self.p.s.push(')');
+            }
+            Item::Penalty(n) => {
+                self.p.esc("penalty ");
+                self.p.int(*n);
+            }
+            Item::Disc(d) => {
+                self.p.esc("discretionary");
+                if d.replace > 0 {
+                    self.p.s.push_str(" replacing ");
+                    self.p.int(d.replace as i32);
+                }
+                self.nested(&d.pre, '.');
+                self.nested(&d.post, '|');
+            }
+            Item::Mark { class, toks } => {
+                self.p.esc("mark");
+                if *class != 0 {
+                    self.p.s.push('s');
+                    self.p.int(*class as i32);
+                }
+                self.mark(toks);
+            }
+            Item::Adjust(l) => {
+                self.p.esc("vadjust");
+                self.nested(l, '.');
+            }
+            Item::Unset(_) => self.p.esc("unset"),
+            Item::Noad(_) => self.p.esc("noad"),
+        }
+    }
+}
+
+/// `short_display` (§174): characters, `[]` for boxes, `|` for rules, a
+/// space for glue, `$` for math; the font shown when it changes. `font` is
+/// `font_in_short_display` (None: none yet), updated.
+pub fn short_display(names: &Names, list: &[Item], esc: i32, font: &mut Option<FontId>) -> String {
+    let mut p = Printer::new(esc);
+    let _ = names;
+    short(&mut p, list, font);
+    p.s
+}
+
+fn short(p: &mut Printer, list: &[Item], font: &mut Option<FontId>) {
+    for it in list {
+        match it {
+            Item::Char { font: f, c } => {
+                if *font != Some(*f) {
+                    let id = crate::font::font_id_text(*f);
+                    p.esc(&id);
+                    p.s.push(' ');
+                    *font = Some(*f);
+                }
+                p.ascii(char::from_u32(*c as u32).unwrap_or('?'));
+            }
+            Item::Box(_) | Item::Ins(_) | Item::Whatsit(_) | Item::Mark { .. } | Item::Adjust(_) | Item::Unset(_) => p.s.push_str("[]"),
+            Item::Rule { .. } => p.s.push('|'),
+            Item::Glue { g, .. } => {
+                if *g != Glue::default() {
+                    p.s.push(' ');
+                }
+            }
+            Item::Math { sub, .. } => p.s.push_str(if *sub >= 4 { "[]" } else { "$" }),
+            Item::Lig { font: f, orig, .. } => {
+                let chars: Vec<Item> = orig.iter().map(|&c| Item::Char { font: *f, c }).collect();
+                short(p, &chars, font);
+            }
+            Item::Disc(d) => {
+                short(p, &d.pre, font);
+                short(p, &d.post, font);
+            }
+            _ => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------- \show…
+
+fn mode_name(m: Mode) -> &'static str {
+    match m {
+        Mode::Vertical { inner: false } => "vertical mode",
+        Mode::Vertical { inner: true } => "internal vertical mode",
+        Mode::Horizontal { inner: false } => "horizontal mode",
+        Mode::Horizontal { inner: true } => "restricted horizontal mode",
+        Mode::Math { display: true } => "display math mode",
+        Mode::Math { display: false } => "math mode",
+    }
+}
+
+fn group_name(k: GroupKind) -> &'static str {
+    match k {
+        GroupKind::Bottom => "bottom level",
+        GroupKind::Simple => "simple",
+        GroupKind::SemiSimple => "semi simple",
+        GroupKind::Hbox => "hbox",
+        GroupKind::AdjustedHbox => "adjusted hbox",
+        GroupKind::Vbox => "vbox",
+        GroupKind::Vtop => "vtop",
+        GroupKind::Align => "align",
+        GroupKind::NoAlign => "no align",
+        GroupKind::Output => "output",
+        GroupKind::Disc => "disc",
+        GroupKind::Insert => "insert",
+        GroupKind::Vcenter => "vcenter",
+        GroupKind::Math => "math",
+        GroupKind::MathChoice => "math choice",
+        GroupKind::MathShift => "math shift",
+        GroupKind::MathLeft => "math left",
+    }
+}
+
+/// The `\if` names by `\currentiftype` (1-based; +32 under `\unless`).
+const IF_NAMES: &[&str] = &[
+    "if", "ifcat", "ifnum", "ifdim", "ifodd", "ifvmode", "ifhmode", "ifmmode", "ifinner", "ifvoid",
+    "ifhbox", "ifvbox", "ifx", "ifeof", "iftrue", "iffalse", "ifcase", "ifdefined", "ifcsname",
+    "iffontchar", "ifincsname", "ifpdfprimitive", "ifpdfabsnum", "ifpdfabsdim",
+];
+
+const SHOW_HELP: [&str; 5] = [
+    "This isn't an error message; I'm just \\showing something.",
+    "Type `I\\show...' to show more (e.g., \\show\\cs,",
+    "\\showthe\\count10, \\showbox255, \\showlists).",
+    "And type `I\\tracingonline=1\\show...' to show boxes and",
+    "lists on your terminal as well as in the transcript file.",
+];
+
+/// `common_ending` (§1298): the shown text as an error that is not counted
+/// unless TeX would have stopped for it.
+fn common_ending(c: &mut dyn Ctx, msg: String) {
+    let interaction = c.int(&Key::Interaction);
+    if interaction < ERROR_STOP_MODE {
+        // help0; error; decr(error_count)
+        emit(c, format!("{msg}."), Vec::new());
+        raise_history(c, 2);
+    } else {
+        let n = if c.int(&Key::IntPar(ip::of("tracingonline"))) > 0 { 3 } else { 5 };
+        let help = SHOW_HELP[..n].iter().map(|s| s.to_string()).collect();
+        emit(c, format!("{msg}."), help);
+        raise_history(c, 2);
+        count_error(c);
+    }
+}
+
+/// The diagnostic of a long `\show` (to the log), then `! OK.`.
+fn long_ending(c: &mut dyn Ctx, shown: String) {
+    raise_history(c, 1);
+    emit(c, shown, Vec::new());
+    let mut msg = String::from("! OK");
+    if c.int(&Key::IntPar(ip::of("tracingonline"))) <= 0 {
+        msg.push_str(" (see the transcript file)");
+    }
+    common_ending(c, msg);
+}
+
+fn show_whatever(c: &mut dyn Ctx, code: u16) {
+    match code {
+        0 => {
+            // \show
+            let Some(t) = c.next() else { return };
+            let m = c.meaning(&t);
+            let mut s = String::from("> ");
+            if matches!(t, Tok::Cs(_) | Tok::Active(_)) {
+                let mut p = Printer::from_ctx(c, &[t]);
+                p.sprint_cs(&t);
+                s.push_str(&p.s);
+                s.push('=');
+            }
+            s.push_str(&meaning_text(c, &m));
+            common_ending(c, s);
+        }
+        1 => {
+            // \showbox
+            let n = crate::scan::scan_register_num(c);
+            let b = c.get(&Key::Box(n));
+            let mut s = String::from("> ");
+            let esc = c.int(&Key::IntPar(ip::of("escapechar")));
+            let mut p = Printer::new(esc);
+            p.esc("box");
+            s.push_str(&p.s);
+            s.push_str(&n.to_string());
+            s.push('=');
+            match b {
+                Val::Box(Some(bx)) => {
+                    let sp = ShowParams::read(c);
+                    let toks = list_toks(std::slice::from_ref(&Item::Box(bx.clone())));
+                    let pr = Printer::from_ctx(c, &toks);
+                    let mut b = BoxShow { p: pr, prefix: String::new(), depth: 0, breadth: sp.breadth };
+                    if b.breadth <= 0 {
+                        b.breadth = 5;
+                    }
+                    if sp.depth < 0 {
+                        b.p.s.push_str(" []");
+                    } else {
+                        b.depth = sp.depth as usize;
+                        b.list(&[Item::Box(bx.clone())]);
+                    }
+                    s.push_str(&b.p.s);
+                }
+                _ => s.push_str("void"),
+            }
+            long_ending(c, s);
+        }
+        2 | 5 => {
+            // \showthe, \showtokens
+            let text = if code == 5 {
+                let t = crate::scan::scan_general_text(c);
+                toks_text(c, &t, 10_000_000)
+            } else {
+                the_text(c)
+            };
+            common_ending(c, format!("> {text}"));
+        }
+        3 => {
+            // \showlists (the innermost list's mode and auxiliary values)
+            let m = c.mode();
+            let mut s = String::from("\n");
+            s.push_str("\n### ");
+            s.push_str(mode_name(m));
+            match m {
+                Mode::Vertical { .. } => {
+                    let pd = c.int(&Key::PrevDepth);
+                    s.push_str("\nprevdepth ");
+                    if pd <= -65_536_000 {
+                        s.push_str("ignored");
+                    } else {
+                        print_scaled(&mut s, pd);
+                    }
+                    let pg = c.int(&Key::PrevGraf);
+                    if pg != 0 {
+                        s.push_str(&format!(", prevgraf {pg} line{}", if pg == 1 { "" } else { "s" }));
+                    }
+                }
+                Mode::Horizontal { inner } => {
+                    let sf = c.int(&Key::SpaceFactor);
+                    s.push_str(&format!("\nspacefactor {sf}"));
+                    if !inner {
+                        let cl = c.int(&Key::Clang);
+                        if cl > 0 {
+                            s.push_str(&format!(", current language {cl}"));
+                        }
+                    }
+                }
+                Mode::Math { .. } => {}
+            }
+            long_ending(c, s);
+        }
+        4 => {
+            // \showgroups (the innermost group, then the bottom level)
+            let k = c.group_kind();
+            let d = c.group_depth();
+            let mut s = String::from("\n");
+            if k != GroupKind::Bottom {
+                s.push_str(&format!("\n### {} group (level {d})", group_name(k)));
+            }
+            s.push_str("\n### bottom level");
+            long_ending(c, s);
+        }
+        6 => {
+            // \showifs
+            let conds = match c.get(&Key::Conds) {
+                Val::Conds(v) => v,
+                _ => Arc::from(Vec::new()),
+            };
+            let esc = c.int(&Key::IntPar(ip::of("escapechar")));
+            let mut p = Printer::new(esc);
+            p.s.push_str("\n");
+            if conds.is_empty() {
+                p.s.push_str("\n### no active conditionals");
+            } else {
+                let mut n = conds.len();
+                for cd in conds.iter().rev() {
+                    p.s.push_str(&format!("\n### level {n}: "));
+                    let mut kind = cd.kind as usize;
+                    if kind > 32 {
+                        p.esc("unless");
+                        kind -= 32;
+                    }
+                    p.esc(IF_NAMES.get(kind.wrapping_sub(1)).copied().unwrap_or("if"));
+                    if cd.state == 2 {
+                        p.esc("else");
+                    }
+                    if cd.line != 0 {
+                        p.s.push_str(&format!(" entered on line {}", cd.line));
+                    }
+                    n -= 1;
+                }
+            }
+            let s = p.s;
+            long_ending(c, s);
+        }
+        _ => {}
+    }
+}
+
+/// The tokens inside a list's marks/writes/specials (for names and catcodes).
+fn list_toks(l: &[Item]) -> Vec<Tok> {
+    fn walk(l: &[Item], out: &mut Vec<Tok>) {
+        for it in l {
+            match it {
+                Item::Box(b) => walk(&b.list, out),
+                Item::Mark { toks, .. } => out.extend(toks.iter().copied()),
+                Item::Whatsit(w) => match &**w {
+                    Whatsit::Write { toks, .. } | Whatsit::Special { toks } => out.extend(toks.iter().copied()),
+                    _ => {}
+                },
+                Item::Ins(i) => walk(&i.list, out),
+                Item::Adjust(a) => walk(a, out),
+                Item::Disc(d) => {
+                    walk(&d.pre, out);
+                    walk(&d.post, out);
+                }
+                Item::Glue { leader: Some(l), .. } => walk(std::slice::from_ref(&**l), out),
+                _ => {}
+            }
+        }
+    }
+    let mut v = Vec::new();
+    walk(l, &mut v);
+    v
+}
+
+/// `the_toks` (§465) as text: `\showthe`'s value.
+pub fn the_text(c: &mut dyn Ctx) -> String {
+    let Some(t) = c.next_x() else { return String::new() };
+    let (v, level) = crate::scan::scan_internal(c, t, Level::Tok, false);
+    let mut s = String::new();
+    match (level, v) {
+        (Level::Int, v) => s.push_str(&v.int().to_string()),
+        (Level::Dimen, v) => {
+            print_scaled(&mut s, v.int());
+            s.push_str("pt");
+        }
+        (Level::Glue, v) => {
+            let mut p = Printer::new(92);
+            p.spec(&v.glue(), "pt");
+            s = p.s;
+        }
+        (Level::Mu, v) => {
+            let mut p = Printer::new(92);
+            p.spec(&v.glue(), "mu");
+            s = p.s;
+        }
+        (Level::Ident, Val::Font(f)) => {
+            let esc = c.int(&Key::IntPar(ip::of("escapechar")));
+            let mut p = Printer::new(esc);
+            p.esc(&crate::font::font_id_text(f));
+            p.s.push(' ');
+            s = p.s;
+        }
+        (_, Val::Toks(t)) => s = toks_text(c, &t, 10_000_000),
+        (_, v) => s.push_str(&v.int().to_string()),
+    }
+    s
+}
