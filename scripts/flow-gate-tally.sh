@@ -42,5 +42,6 @@ for d in "${dirs[@]}"; do
 	[ -f "$d/cli.txt" ] || continue
 	echo "== $(head -1 "$d/summary.txt")"
 	grep -hE '^test result' "$d/cli.txt" "$d/flow-pdf.txt" "$d/synctex.txt" 2>/dev/null
-	grep -hE '^test .* FAILED$' "$d/cli.txt" "$d/flow-pdf.txt" "$d/synctex.txt" 2>/dev/null
+	grep -hE '^test .* FAILED$' "$d/cli.txt" "$d/flow-pdf.txt" "$d/synctex.txt" 2>/dev/null || true
 done
+exit 0

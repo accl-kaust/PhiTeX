@@ -69,3 +69,5 @@ n=$(find target -name '*.synctex.gz' -newer "$R/cli.txt" 2>/dev/null | wc -l)
 	echo "== synctex (exit $t; $n .synctex.gz files written)"
 	grep -E '^test |^test result|tall' "$R/synctex.txt" | head -60
 } | tee "$R/summary.txt"
+# (the job's status: the byte-for-byte tests; SyncTeX's are reported only)
+[ "$s" = 0 ] && [ "$f" = 0 ]
