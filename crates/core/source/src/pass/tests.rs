@@ -1078,3 +1078,59 @@ fn a_catcode_set_of_a_macros_argument_is_read_at_the_call() {
     let (p, _) = pass(t, FileKind::Document);
     assert_eq!(p.hazards[0].status, Status::Pending);
 }
+
+#[test]
+fn a_catcode_in_a_token_list_or_a_nested_body_is_not_run() {
+    // (a token list's value is stored, §1226; a definition's body runs
+    // when its macro is called, §1218)
+    let t = "\\def\\x{\\toks@{\\catcode`\\{=12 }}\\x {a}";
+    let (p, d) = pass(t, FileKind::Package);
+    assert_eq!(d.changes_catcodes("x", None).0, 0);
+    assert!(p.hazards.iter().all(|h| h.status != Status::Pending));
+    let t = "\\def\\x{\\edef\\noexpand\\y{\\catcode`\\{=12 }}\\x {a}";
+    let (_, d) = pass(t, FileKind::Package);
+    assert_eq!(d.changes_catcodes("x", None).0, 0);
+    // (called where it is defined: run)
+    let t = "\\def\\x{\\def\\y{\\catcode`\\{=12 }\\y}\\x {a}";
+    let (_, d) = pass(t, FileKind::Package);
+    assert_eq!(d.changes_catcodes("x", None).0, 2);
+}
+
+#[test]
+fn a_macro_setting_literal_catcodes_sets_them_at_the_call() {
+    // (`\@makeother\[`, `` \catcode`\$=3 ``: the catcodes the call sets,
+    // §1232, not characters pending wherever they occur)
+    let t = "\\def\\sc{\\@makeother\\[\\catcode`\\$=3 \\catcode`\\|=13 }\\sc [a] |b|";
+    let (p, d) = pass(t, FileKind::Package);
+    assert_eq!(
+        d.set_catcodes("sc", None),
+        &[(b'[', 12), (b'$', 3), (b'|', 13)]
+    );
+    let pending: Vec<_> = p
+        .hazards
+        .iter()
+        .filter(|h| h.status == Status::Pending)
+        .map(|h| &t[h.start..h.end])
+        .collect();
+    // (each `|` pending to the next on its line, the last to the line's end)
+    assert_eq!(pending, ["|b|", "|"]);
+}
+
+#[test]
+fn a_macro_ending_the_callers_group_ends_its_catcode_changes() {
+    // (the `\endgroup` the macro runs ends the group and what was set in
+    // it, §1063, §283; here in a macro it defines and calls)
+    let t = "\\begingroup\\catcode`\\_=11 \\def\\x{\\def\\y{\\endgroup}\\y}\\x \\a_b";
+    let (p, d) = pass(t, FileKind::Package);
+    assert!(d.ends_group("x", None));
+    assert_eq!(p.hazards[0].end, t.rfind("\\x").unwrap());
+    assert!(!p.items.iter().any(|i| i.name == "a_b"));
+}
+
+#[test]
+fn makeother_of_an_other_character_changes_nothing() {
+    // (`\@makeother\=`: `=` is other already, §232)
+    let t = "\\@makeother\\= a=b";
+    let (p, _) = pass(t, FileKind::Package);
+    assert_eq!(p.hazards, []);
+}
