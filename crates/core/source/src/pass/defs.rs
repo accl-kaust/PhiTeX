@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::FileKind;
 use super::atoms::{self, Atom, AtomKind};
+use super::hints::{Closure, DefSet, Effects, effects};
 use super::lex::{self, changes_catcodes};
 
 /// One argument a command reads (see the table module's spec letters).
@@ -93,6 +94,23 @@ pub struct Definitions {
     env_catcoders: HashSet<String>,
     /// Characters some `\catcode` makes active.
     active: u128,
+    /// Per definition with a visible body, its text and what running it
+    /// defines directly. The output routine set by `\output{…}` is kept
+    /// under [`OUTPUT`].
+    bodies: HashMap<String, Vec<At<Body>>>,
+    /// The order the files load in (file → rank), when known: a later
+    /// definition in another file then wins after it (load order).
+    order: Option<HashMap<u32, u32>>,
+}
+
+/// The key the `\output` routine's text is kept under.
+pub const OUTPUT: &str = "\0output";
+
+/// A definition's body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Body {
+    pub text: String,
+    pub effects: Effects,
 }
 
 pub(crate) enum Found<'a, T> {
@@ -101,19 +119,35 @@ pub(crate) enum Found<'a, T> {
     Conflict,
 }
 
-fn find<T: PartialEq>(v: Option<&Vec<At<T>>>, at: Option<(u32, usize)>) -> Found<'_, T> {
+fn find<'v, T: PartialEq>(
+    v: Option<&'v Vec<At<T>>>,
+    at: Option<(u32, usize)>,
+    order: Option<&HashMap<u32, u32>>,
+) -> Found<'v, T> {
     let Some(v) = v else { return Found::None };
     let Some((file, pos)) = at else {
         return v.last().map_or(Found::None, |d| Found::One(&d.what));
     };
     // (document order binds: the nearest definition before the use in its
-    // file; otherwise the definitions must agree)
+    // file, or, when the files' load order is known, the last one loaded
+    // before it; otherwise the definitions must agree)
     if let Some(d) = v
         .iter()
         .filter(|d| d.file == file && d.pos < pos)
         .max_by_key(|d| d.pos)
     {
         return Found::One(&d.what);
+    }
+    if let Some(o) = order {
+        let rank = |f: u32| o.get(&f).copied().unwrap_or(u32::MAX);
+        let me = (rank(file), pos);
+        if let Some(d) = v
+            .iter()
+            .filter(|d| (rank(d.file), d.pos) < me && rank(d.file) != u32::MAX)
+            .max_by_key(|d| (rank(d.file), d.pos))
+        {
+            return Found::One(&d.what);
+        }
     }
     if v.iter().all(|d| d.what == v[0].what) {
         Found::One(&v[0].what)
@@ -142,7 +176,94 @@ impl Definitions {
     /// What `name` is at `at` (file, byte) or, without a place, by its
     /// last definition (a format's).
     pub(crate) fn find(&self, name: &str, at: Option<(u32, usize)>) -> Found<'_, Shape> {
-        find(self.macros.get(name), at)
+        find(self.macros.get(name), at, self.order.as_ref())
+    }
+
+    /// Where the definition of `name` bound at `at` stands, when one in
+    /// its file (or, by load order, before it) binds.
+    pub(crate) fn bound_at(&self, name: &str, at: (u32, usize)) -> Option<(u32, usize)> {
+        let v = self.macros.get(name)?;
+        let (file, pos) = at;
+        if let Some(d) = v
+            .iter()
+            .filter(|d| d.file == file && d.pos < pos)
+            .max_by_key(|d| d.pos)
+        {
+            return Some((d.file, d.pos));
+        }
+        let o = self.order.as_ref()?;
+        let rank = |f: u32| o.get(&f).copied().unwrap_or(u32::MAX);
+        v.iter()
+            .filter(|d| (rank(d.file), d.pos) < (rank(file), pos) && rank(d.file) != u32::MAX)
+            .max_by_key(|d| (rank(d.file), d.pos))
+            .map(|d| (d.file, d.pos))
+    }
+
+    /// The body bound at `at` (as [`Definitions::find`] binds).
+    pub(crate) fn find_body(&self, name: &str, at: Option<(u32, usize)>) -> Found<'_, Body> {
+        find(self.bodies.get(name), at, self.order.as_ref())
+    }
+
+    /// Every shape `name` is given.
+    pub(crate) fn shapes(&self, name: &str) -> Option<Vec<&Shape>> {
+        self.macros
+            .get(name)
+            .map(|v| v.iter().map(|d| &d.what).collect())
+    }
+
+    /// What each visible body of `name` defines directly.
+    pub(crate) fn effects(&self, name: &str) -> Option<Vec<&Effects>> {
+        self.bodies
+            .get(name)
+            .map(|v| v.iter().map(|d| &d.what.effects).collect())
+    }
+
+    /// Declares the order the files load in: `files[0]` first. A use then
+    /// binds to the last definition loaded before it, in any file.
+    pub fn set_load_order(&mut self, files: &[u32]) {
+        self.order = Some(
+            files
+                .iter()
+                .enumerate()
+                .map(|(k, &f)| (f, u32::try_from(k).unwrap_or(u32::MAX)))
+                .collect(),
+        );
+    }
+
+    /// Whether a load order is declared.
+    #[must_use]
+    pub fn ordered(&self) -> bool {
+        self.order.is_some()
+    }
+
+    /// The file of the definition of `name` bound at `at`, if it binds
+    /// to one in another file by load order.
+    pub(crate) fn bound_across_files(&self, name: &str, file: u32, pos: usize) -> bool {
+        let Some(o) = &self.order else { return false };
+        let Some(v) = self.macros.get(name) else {
+            return false;
+        };
+        if v.iter().any(|d| d.file == file && d.pos < pos) {
+            return false;
+        }
+        let rank = |f: u32| o.get(&f).copied().unwrap_or(u32::MAX);
+        v.iter()
+            .any(|d| rank(d.file) < rank(file) && rank(d.file) != u32::MAX)
+    }
+
+    /// What running the `\output` routine may define, from the last
+    /// `\output{…}` assignment seen and every macro it calls (through the
+    /// definitions of `self`, then `prelude`).
+    #[must_use]
+    pub fn output_defines(&self, prelude: &Definitions) -> Option<DefSet> {
+        let mut c = Closure::new(self, prelude);
+        self.bodies.contains_key(OUTPUT).then(|| c.call(OUTPUT))
+    }
+
+    /// What calling `name` may define (through `self`, then `prelude`).
+    #[must_use]
+    pub fn call_defines(&self, prelude: &Definitions, name: &str) -> DefSet {
+        Closure::new(self, prelude).call(name)
     }
 
     /// Whether the document defines `name` anywhere.
@@ -152,13 +273,18 @@ impl Definitions {
 
     /// Whether `name` is defined in `file` before `pos`.
     pub(crate) fn defined_before(&self, name: &str, file: u32, pos: usize) -> bool {
-        self.macros
-            .get(name)
-            .is_some_and(|v| v.iter().any(|d| d.file == file && d.pos < pos))
+        self.macros.get(name).is_some_and(|v| {
+            v.iter().any(|d| d.file == file && d.pos < pos)
+                || self.order.as_ref().is_some_and(|o| {
+                    let rank = |f: u32| o.get(&f).copied().unwrap_or(u32::MAX);
+                    v.iter()
+                        .any(|d| rank(d.file) < rank(file) && rank(d.file) != u32::MAX)
+                })
+        })
     }
 
     pub(crate) fn find_env(&self, name: &str, at: Option<(u32, usize)>) -> Found<'_, Vec<Arg>> {
-        find(self.envs.get(name), at)
+        find(self.envs.get(name), at, self.order.as_ref())
     }
 
     /// The characters the document makes active somewhere.
@@ -169,7 +295,7 @@ impl Definitions {
     /// Whether the definition of `name` bound at `at` changes catcodes
     /// (0 no, 1 for the arguments it reads, 2 for good).
     pub(crate) fn changes_catcodes(&self, name: &str, at: Option<(u32, usize)>) -> (u8, u128) {
-        match find(self.catcoders.get(name), at) {
+        match find(self.catcoders.get(name), at, self.order.as_ref()) {
             Found::One(k) => *k,
             Found::None => (0, 0),
             Found::Conflict => {
@@ -215,6 +341,22 @@ impl Definitions {
             return;
         }
         let v = self.macros.entry(name.to_owned()).or_default();
+        if !v.iter().any(|d| d.file == file && d.what == what) || v.iter().all(|d| d.file != file) {
+            v.push(At { file, pos, what });
+        }
+    }
+
+    /// Keeps the body whose `{` is `atoms[open]`.
+    fn body(&mut self, name: &str, text: &str, atoms: &[Atom], open: usize, file: u32, pos: usize) {
+        let close = atoms[open].mate;
+        if close == usize::MAX {
+            return;
+        }
+        let what = Body {
+            text: text[atoms[open].end..atoms[close].start].to_owned(),
+            effects: effects(text, atoms, open + 1, close, false),
+        };
+        let v = self.bodies.entry(name.to_owned()).or_default();
         if !v.iter().any(|d| d.file == file && d.what == what) || v.iter().all(|d| d.file != file) {
             v.push(At { file, pos, what });
         }
@@ -337,6 +479,7 @@ impl Definitions {
                 let target = atoms[n].name(text).to_owned();
                 self.catcodes(&target, file, pos, body_catcodes(open));
                 self.add(&target, file, pos, Shape::Macro(args));
+                self.body(&target, text, atoms, open, file, pos);
             }
             "@namedef" => {
                 let o = skip(atoms, a + 1);
@@ -348,6 +491,38 @@ impl Definitions {
                 };
                 self.catcodes(&target, file, pos, body_catcodes(open));
                 self.add(&target, file, pos, Shape::Macro(args));
+                self.body(&target, text, atoms, open, file, pos);
+            }
+            "output" => {
+                // (the output routine: `\output{…}` or `\output={…}`)
+                let mut j = skip(atoms, a + 1);
+                if atoms.get(j).map(|x| x.kind) == Some(AtomKind::Char('=')) {
+                    j = skip(atoms, j + 1);
+                }
+                if atoms.get(j).map(|x| x.kind) == Some(AtomKind::Open) {
+                    self.body(OUTPUT, text, atoms, j, file, pos);
+                }
+            }
+            "cs_new:Npn"
+            | "cs_new_protected:Npn"
+            | "cs_new_nopar:Npn"
+            | "cs_new_protected_nopar:Npn"
+            | "cs_set:Npn"
+            | "cs_set_protected:Npn"
+            | "cs_gset:Npn"
+            | "cs_gset_protected:Npn"
+            | "cs_new:Npx"
+            | "cs_new:Npe"
+            | "cs_set_nopar:Npn"
+            | "cs_gset_nopar:Npn" => {
+                let Some(n) = cs_at(atoms, skip(atoms, a + 1)) else {
+                    return;
+                };
+                let Some((_, open)) = param_text(text, atoms, n + 1) else {
+                    return;
+                };
+                let target = atoms[n].name(text).to_owned();
+                self.body(&target, text, atoms, open, file, pos);
             }
             "let" => {
                 let Some(n) = cs_at(atoms, skip(atoms, a + 1)) else {
@@ -377,6 +552,7 @@ impl Definitions {
                 let Some(open) = open else { return };
                 self.catcodes(&target, file, pos, body_catcodes(open));
                 self.add(&target, file, pos, Shape::Macro(args));
+                self.body(&target, text, atoms, open, file, pos);
             }
             "newenvironment" | "renewenvironment" => {
                 let mut j = skip(atoms, a + 1);
