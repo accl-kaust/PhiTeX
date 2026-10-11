@@ -55,8 +55,8 @@ crate's own docs say what it is; keep them current.
 ## Architecture
 
 - The engines are layers, each depending only on those below:
-  `phitex-reduce` (the core, no TeX) and `phitex-typeset` (Knuth's
-  algorithms, pure: never depends on reduce or tex) under `phitex-tex`
+  `phitex-defuse` (the core, no TeX) and `phitex-typeset` (Knuth's
+  algorithms, pure: never depends on defuse or tex) under `phitex-tex`
   (TeX's semantics, the `Engine` trait) under `phitex-pdftex`,
   `phitex-xetex`, `phitex-luatex`. Engines add behaviour through
   `Engine`, never fork `phitex-tex`; only `phitex-luatex` links

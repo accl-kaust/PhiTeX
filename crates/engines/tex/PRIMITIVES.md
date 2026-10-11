@@ -1,7 +1,7 @@
 # Primitive catalogue
 
 Every primitive of TeX82 (`tex.web`), e-TeX (`etex.ch`) and pdfTeX
-(`pdftex.web`) as a node spec on `phitex-reduce`. The core knows fields,
+(`pdftex.web`) as a node spec on `phitex-defuse`. The core knows fields,
 scopes, claims and unfolds, nothing of TeX; `phitex-tex` gives each
 primitive a spec in those terms. Where a primitive needs something the
 core does not have, the row says so in **hazards** and the primitive is

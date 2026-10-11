@@ -1,7 +1,7 @@
 //! A document's session, kept for the process's life. The session holds
 //! only what is given to it (the main file's text, the editor's unsaved
 //! buffers, the files the last build wrote) and writes what the build
-//! made. There is no native engine yet: `phitex-tex` on `phitex-reduce`
+//! made. There is no native engine yet: `phitex-tex` on `phitex-defuse`
 //! is being written, and until it lands every build reports that. The
 //! external engines (`external.rs`) are unaffected.
 
@@ -32,7 +32,7 @@ impl Status {
 }
 
 /// What to build, and how. (Some fields are read only by the native
-/// engine to come: `phitex-tex` on `phitex-reduce`.)
+/// engine to come: `phitex-tex` on `phitex-defuse`.)
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct Job {
@@ -212,7 +212,7 @@ impl Session {
         self.builds += 1;
         self.status.set(why);
         let errors = vec![format!(
-            "{}: no native engine yet (phitex-tex on phitex-reduce is being written); run TeX Live's {0} instead",
+            "{}: no native engine yet (phitex-tex on phitex-defuse is being written); run TeX Live's {0} instead",
             self.job.engine.name
         )];
         let wall = t0.elapsed();

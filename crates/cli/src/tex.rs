@@ -228,7 +228,7 @@ pub fn cache_dir() -> PathBuf {
 }
 
 /// TeX Live for one program name: the finder a build is given (unused
-/// until the native engine, `phitex-tex` on `phitex-reduce`, lands).
+/// until the native engine, `phitex-tex` on `phitex-defuse`, lands).
 #[allow(dead_code)]
 pub struct Tree {
     /// kpathsea as the engine's program (its `progname`, `$engine`).
