@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use phitex_syntax::VERBATIM_ENVIRONMENTS;
+use phitex_source::VERBATIM_ENVIRONMENTS;
 
 use crate::defs::Meaning;
 use crate::known::{self, AssetKind, CounterOp, Definer, InputKind, LEVELS, Matter};
@@ -892,7 +892,7 @@ impl<'p> Fold<'p> {
                 continue;
             }
             if known::construct(&def.name).is_some()
-                || phitex_syntax::VERBATIM_COMMANDS.contains(&&*def.name)
+                || phitex_source::VERBATIM_COMMANDS.contains(&&*def.name)
             {
                 breaks(&def.name, format!("redefined by {by}"), Some(loc));
             }

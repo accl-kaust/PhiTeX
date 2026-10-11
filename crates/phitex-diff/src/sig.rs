@@ -940,7 +940,7 @@ enum T {
 }
 
 fn flat_tokens(text: &str) -> Vec<(T, &str)> {
-    use phitex_syntax::{SyntaxKind as K, lex};
+    use phitex_source::{SyntaxKind as K, lex};
     let green = lex(text);
     let mut out = Vec::new();
     let mut at = 0;

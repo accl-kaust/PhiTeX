@@ -34,12 +34,13 @@ byte for byte.
 | Crate | What it is |
 |---|---|
 | `phitex-red` | the engine: TeX as graph reduction (`AGENTS_BRIEF.md`, `crates/phitex-red/CONSTRUCTS.md`) |
-| `phitex-source` | source text as units with identities |
+| `phitex-source` | source text as units with identities; the lexer, paragraphs and syntax tree |
 | `phitex-cli` | the `phitex` command |
 | `phitex-kpse` | kpathsea file lookup |
 | `phitex-bibtex`, `phitex-makeindex` | BibTeX and makeindex |
 | `phitex-otf`, `phitex-xdvipdfmx` | OpenType shaping, xdvipdfmx |
-| `phitex-syntax`, `phitex-doc`, `phitex-diff`, `phitex-git` | the source CST, the document's structure, latexdiff, git |
+| `phitex-doc`, `phitex-diff`, `phitex-git` | the document's structure, latexdiff, git |
+| `phitex-syntax` | the old CST, kept for phitex-red until its rewrite |
 | `phitex-draw`, `phitex-codecs` | the viewer's pages, the codecs and PDF reader |
 
 `AGENTS_BRIEF.md` is the design, `DESIGN.md` the crates,

@@ -1,7 +1,7 @@
 //! Text as TeX reads and writes it: a title as `\write` prints it, a key,
 //! a comma list, an integer expression, a path.
 
-use phitex_syntax::{Green, SyntaxKind, lex};
+use phitex_source::{Green, SyntaxKind, lex};
 
 /// A token list as TeX's `\write` prints it (tex.web §262, §294): a
 /// control word followed by a space, the spaces TeX's input skips gone (a

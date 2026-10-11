@@ -29,7 +29,7 @@ use crate::emit::{self, Em};
 use crate::myers::patience as lcs;
 use crate::tok::{self, Kind, SECTIONS, Tok};
 use crate::{Baseline, Body, Change, ChangeKind, DiffOut, Flat, Loc, Signatures, find_body, loads};
-use phitex_syntax::{SyntaxKind, Tree};
+use phitex_source::{SyntaxKind, Tree};
 use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -440,7 +440,7 @@ impl Side {
     fn paras_text(&self, a: usize, b: usize) -> String {
         self.tree.paras()[a..b]
             .iter()
-            .map(phitex_syntax::Para::text)
+            .map(phitex_source::Para::text)
             .collect()
     }
 
@@ -747,7 +747,7 @@ fn shift(t: &mut Tok, f: impl Fn(usize) -> usize + Copy) {
 
 /// Whether paragraph `g` holds a group its text does not close, or ends
 /// in a verbatim run (which may be one its text does not end).
-fn open_at_end(g: &phitex_syntax::Green) -> bool {
+fn open_at_end(g: &phitex_source::Green) -> bool {
     g.children()
         .last()
         .is_some_and(|c| c.kind() == SyntaxKind::Verbatim)

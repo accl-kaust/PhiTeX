@@ -7,7 +7,7 @@
 //!   longer inputs is deleted text where it was, a new one is added text.
 //! - The preamble is the new version's, unmarked, with latexdiff's
 //!   definitions before `\begin{document}`.
-//! - The bodies are read from their CST ([`phitex_syntax`]) into tokens
+//! - The bodies are read from their CST ([`phitex_source`]) into tokens
 //!   (words, commands with their arguments, math as a unit; [`tok`]), by a
 //!   signature table ([`sig`]) extended from the preambles.
 //! - Paragraphs are aligned first; the runs of paragraphs that differ are
@@ -446,7 +446,7 @@ struct Body {
 /// `text` (comments and verbatim are not read: the CST has them as
 /// tokens). Without them, the text is all body.
 fn find_body(text: &str) -> Body {
-    use phitex_syntax::{SyntaxKind as K, Tree};
+    use phitex_source::{SyntaxKind as K, Tree};
     let tree = Tree::parse(text);
     let mut begin = None;
     let mut end = None;

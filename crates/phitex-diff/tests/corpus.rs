@@ -5,7 +5,7 @@
 //! them with pdflatex and compares with latexdiff.)
 
 use phitex_diff::{ChangeKind, Dir, Files, Options, diff};
-use phitex_syntax::{Green, SyntaxKind, lex};
+use phitex_source::{Green, SyntaxKind, lex};
 use std::path::Path;
 
 fn corpus() -> Vec<std::path::PathBuf> {

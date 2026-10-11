@@ -19,14 +19,18 @@ onto phitex-red; they are in the history up to commit 77104f08.
 - `phitex-red`: TeX as graph reduction of pending thunks (CONSTRUCTS.md).
   The only engine.
 - `phitex-source`: source text as units with identities (positions that
-  edits never move).
+  edits never move), the lexer and the paragraph splitter (TeX's shape
+  without running TeX), and the paragraph tree that `phitex-doc` and
+  `phitex-diff` read.
 - `phitex-cli`: the `phitex` binary on phitex-red: `build` (the document
   to its loop-back fixpoint, BibTeX and makeindex inside it), `watch` (the
   same Build kept, edits as updates, the live viewer), the engines'
   command lines by program name (`pdflatex`, `latex`, `pdftex`, `etex`,
   `tex`), `outline`, `sync`, `clean`.
-- `phitex-syntax`, `phitex-doc`, `phitex-diff`, `phitex-git`: the CST, the
-  document's structure without TeX, latexdiff natively, git.
+- `phitex-doc`, `phitex-diff`, `phitex-git`: the document's structure
+  without TeX, latexdiff natively, git.
+- `phitex-syntax`: the old paragraph CST, now in `phitex-source`; kept
+  only for phitex-red's `edit.rs` until the engine is rewritten.
 - `phitex-draw`: the viewer's pages from the PDF's bytes.
 - `phitex-codecs`: inflate, MD5, PNG, a PDF reader and its page text.
 - `phitex-kpse`, `phitex-bibtex`, `phitex-makeindex`, `phitex-otf`,

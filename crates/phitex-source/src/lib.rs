@@ -9,14 +9,29 @@
 //! byte offset, its order) is computed on demand, never stored.
 //!
 //! What a unit is belongs to the [`Split`] given to the source: one line
-//! ([`Lines`]) for now. An edit returns a [`Splice`]: the ids it removed
-//! and the ids it made, so what read the old text is a lookup by id.
+//! ([`Lines`]), or one paragraph ([`Paragraphs`], LaTeX-aware: never inside
+//! a group or a verbatim run). An edit returns a [`Splice`]: the ids it
+//! removed and the ids it made, so what read the old text is a lookup by
+//! id.
+//!
+//! [`syntax`] reads TeX's shape in a text without running TeX (the lexer,
+//! the paragraph splitter); [`tree`] keeps a source cut into paragraphs
+//! with their syntax trees, for what reads the source that way (the
+//! outline, latexdiff).
+
+#![allow(clippy::many_single_char_names)]
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+pub mod syntax;
+pub mod tree;
+
+pub use syntax::{Green, Paragraphs, Red, SyntaxKind, VERBATIM_COMMANDS, VERBATIM_ENVIRONMENTS, lex};
+pub use tree::{Para, ParaId, Tree};
 
 /// A unit's identity, unique across every [`Source`] in the process (a
 /// position from an `\input` file never names a unit of the main one).
@@ -91,8 +106,9 @@ struct Unit {
 }
 
 /// A text as units.
+#[derive(Clone)]
 pub struct Source {
-    split: Box<dyn Split>,
+    split: Arc<dyn Split>,
     units: Vec<Unit>,
     /// id → its place in `units` (the order index: a B-tree or a tree of
     /// lengths when a splice shifting a `Vec` costs too much).
@@ -111,11 +127,11 @@ impl Source {
     /// `text` cut into lines.
     #[must_use]
     pub fn new(text: &str) -> Source {
-        Source::with_split(text, Box::new(Lines))
+        Source::with_split(text, Arc::new(Lines))
     }
 
     #[must_use]
-    pub fn with_split(text: &str, split: Box<dyn Split>) -> Source {
+    pub fn with_split(text: &str, split: Arc<dyn Split>) -> Source {
         let (ends, _) = split.split(text, None);
         let mut s = Source {
             split,
@@ -156,6 +172,13 @@ impl Source {
     #[must_use]
     pub fn next(&self, u: UnitId) -> Option<UnitId> {
         self.units.get(self.at(u) + 1).map(|u| u.id)
+    }
+
+    /// Where `u` is in the order of the units (for arrays kept parallel
+    /// to them; never to be stored).
+    #[must_use]
+    pub fn index(&self, u: UnitId) -> usize {
+        self.at(u)
     }
 
     /// Whether `u` is (still) a unit of this source.
@@ -343,22 +366,22 @@ impl Source {
 
     /// Replace the whole text (a file the build wrote again): units whose
     /// text came back at either end keep their ids.
+    ///
+    /// # Panics
+    ///
+    /// If a unit is 4 GB or more.
     pub fn replace(&mut self, text: &str) -> Splice {
-        match (self.start(), self.units.last()) {
-            (Some(a), Some(l)) => {
-                let b = Pos {
-                    unit: l.id,
-                    off: u32::try_from(l.text.len()).expect("a unit under 4 GB"),
-                };
-                self.edit(a, b, text)
-            }
-            _ => {
-                *self = Source::with_split(text, std::mem::replace(&mut self.split, Box::new(Lines)));
-                Splice {
-                    removed: Vec::new(),
-                    inserted: self.units.iter().map(|u| u.id).collect(),
-                }
-            }
+        if let (Some(a), Some(l)) = (self.start(), self.units.last()) {
+            let b = Pos {
+                unit: l.id,
+                off: u32::try_from(l.text.len()).expect("a unit under 4 GB"),
+            };
+            return self.edit(a, b, text);
+        }
+        *self = Source::with_split(text, Arc::clone(&self.split));
+        Splice {
+            removed: Vec::new(),
+            inserted: self.units.iter().map(|u| u.id).collect(),
         }
     }
 
@@ -400,6 +423,10 @@ impl Cursor {
     }
 
     /// Where it is.
+    ///
+    /// # Panics
+    ///
+    /// If the unit is 4 GB or more.
     #[must_use]
     pub fn pos(&self) -> Pos {
         Pos {

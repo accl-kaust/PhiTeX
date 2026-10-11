@@ -3,7 +3,7 @@
 //! labels, references, citations, the file graph, environments and the
 //! document's own definitions, kept up to date as the document is edited.
 //!
-//! **Data.** A [`Project`] keeps a [`phitex_syntax::Tree`] per file and,
+//! **Data.** A [`Project`] keeps a [`phitex_source::Tree`] per file and,
 //! beside each paragraph, its [`ParaFacts`]: the facts the paragraph
 //! states ([`Fact`]: a heading, a label, an `\input`, …, at an offset in
 //! the paragraph), the state reading leaves at its end ([`State`]:
@@ -13,7 +13,7 @@
 //! not its position, not the files around it.
 //!
 //! **Edits.** [`Project::edit`] replaces a byte range of a file: the tree
-//! reparses the paragraphs it touches ([`phitex_syntax::Tree::edit`]),
+//! reparses the paragraphs it touches ([`phitex_source::Tree::edit`]),
 //! and only those are read again; then the next ones while the state
 //! they begin in changed; then, if a definition changed, the paragraphs
 //! that call it (or a macro whose code calls it); then the files a new
@@ -50,7 +50,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
-use phitex_syntax::{ParaId, Splice, Tree};
+use phitex_source::{ParaId, Tree, tree::Splice};
 
 pub use bib::Bib;
 pub use defs::{Args, Def, Spec};

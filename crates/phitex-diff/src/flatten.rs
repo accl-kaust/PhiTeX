@@ -3,7 +3,7 @@
 //! file's bytes.
 
 use crate::Files;
-use phitex_syntax::{Green, SyntaxKind, lex};
+use phitex_source::{Green, SyntaxKind, lex};
 
 /// A run of the flat text that came from one file.
 #[derive(Clone, Debug, PartialEq, Eq)]

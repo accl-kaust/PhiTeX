@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use phitex_syntax::{Green, ParaId, SyntaxKind, lex};
+use phitex_source::{Green, ParaId, SyntaxKind, lex};
 
 use crate::defs::{Args, Def, Defs, Meaning, Spec, call_key, substitute, xparse};
 use crate::known::{self, Construct, CounterOp, Definer, InputKind};

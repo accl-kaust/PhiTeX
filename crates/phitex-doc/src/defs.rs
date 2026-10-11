@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use phitex_syntax::ParaId;
+use phitex_source::ParaId;
 
 use crate::known::Definer;
 use crate::{FileId, FxMap, Name};

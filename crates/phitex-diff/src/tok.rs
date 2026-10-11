@@ -7,7 +7,7 @@
 //! trailing white space to it (a blank line is a token of its own).
 
 use crate::sig::{Class, EnvKind, Signatures};
-use phitex_syntax::{Green, SyntaxKind as K, Tree, VERBATIM_COMMANDS, VERBATIM_ENVIRONMENTS};
+use phitex_source::{Green, SyntaxKind as K, Tree, VERBATIM_COMMANDS, VERBATIM_ENVIRONMENTS};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// A lexeme: a CST token, with text split into words and single
