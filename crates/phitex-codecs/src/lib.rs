@@ -1,7 +1,7 @@
 //! Pure codecs and readers, no TeX state: zlib's inflate, MD5, PNG
 //! reading (libpng's semantics, as pdfTeX's `writepng` sees them), a PDF
 //! reader and the text of its pages. Used by `phitex-draw` (the viewer's
-//! pages), `partex-xdvipdfmx` and the CLI.
+//! pages), `phitex-xdvipdfmx` and the CLI.
 //!
 //! `no_std` + `alloc`.
 

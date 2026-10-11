@@ -736,7 +736,7 @@ impl<E: MathEnv> Ctx<'_, E> {
         let mut f: Option<Arc<Font>> = None;
         let mut c: u32 = 0;
         let mut ext: Option<u8> = None;
-        let mut assembly: Option<Vec<partex_otf::math::GlyphPart>> = None;
+        let mut assembly: Option<Vec<phitex_otf::math::GlyphPart>> = None;
         let mut w = 0;
         'found: for (z0, x0) in [(d.small_fam, d.small_char), (d.large_fam, d.large_char)] {
             // (§707; XeTeX's character is a quarterword)
@@ -824,7 +824,7 @@ impl<E: MathEnv> Ctx<'_, E> {
     /// xetex.web §749 `build_opentype_assembly`: a box at least `s` high
     /// (wide if `horiz`) of the parts `a` of font `f`, as few copies of the
     /// extenders as do, their overlaps glue that stretches.
-    fn opentype_assembly(f: &Arc<Font>, a: &[partex_otf::math::GlyphPart], s: i32, horiz: bool) -> BoxNode {
+    fn opentype_assembly(f: &Arc<Font>, a: &[phitex_otf::math::GlyphPart], s: i32, horiz: bool) -> BoxNode {
         let mut b = BoxNode { vertical: !horiz, ..BoxNode::default() };
         let min_o = native::native(f).map_or(0, |nf| nf.xf.ot_min_connector_overlap());
         let mut n: u32 = 0;
@@ -1823,7 +1823,7 @@ impl<E: MathEnv> Ctx<'_, E> {
         let k = match &script.0 {
             Some(sf) => match native::native(sf) {
                 Some(snf) => {
-                    let cmd = if sup { partex_otf::xetex::ScriptKind::Sup } else { partex_otf::xetex::ScriptKind::Sub };
+                    let cmd = if sup { phitex_otf::xetex::ScriptKind::Sup } else { phitex_otf::xetex::ScriptKind::Sub };
                     nf.xf.ot_math_kern(u32::from(g.gid), &snf.xf, u32::from(script.1), cmd, shift)
                 }
                 None => 0,

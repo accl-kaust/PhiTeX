@@ -28,7 +28,7 @@ pub fn bin_dir() -> Option<PathBuf> {
 
 /// kpathsea as program `prog` (engine `engine`), if a TeX Live is found.
 pub fn kpathsea_as(prog: &str, engine: &str) -> Option<Kpathsea> {
-    let mut k = partex_kpse::Kpse::new(&bin_dir()?, prog, engine);
+    let mut k = phitex_kpse::Kpse::new(&bin_dir()?, prog, engine);
     k.var_value("TEXMF")?;
     Some(Kpathsea::new(k))
 }

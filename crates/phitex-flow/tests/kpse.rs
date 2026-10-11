@@ -1,4 +1,4 @@
-//! The build's file finder (`kpse::Kpathsea`, partex-kpse) against TeX
+//! The build's file finder (`kpse::Kpathsea`, phitex-kpse) against TeX
 //! Live's `kpsewhich`: for the files the LaTeX documents, the plain and
 //! the PDF tests read, the path found is `kpsewhich -progname=PROG
 //! -format=FORMAT NAME`'s, or none where it finds none. Skipped where

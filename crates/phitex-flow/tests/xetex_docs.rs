@@ -15,7 +15,7 @@
 //!
 //! The oracles are `tests/xetex/oracle/` (`tests/xetex/bless.sh` makes
 //! them; `PHITEX_XETEX_ORACLE=DIR` reads another blessing). The installed
-//! fonts are given as partex-otf's font index (`otf-index`, the faces
+//! fonts are given as phitex-otf's font index (`otf-index`, the faces
 //! fontconfig lists with `scripts/xetex/fonts.conf`: TeX Live's
 //! `fonts/opentype` and `fonts/truetype`), in the file
 //! `PHITEX_FONT_INDEX` names; files are found by `kpsewhich`. Without an
@@ -96,7 +96,7 @@ fn kpathsea() -> Arc<dyn phitex_flow::tfm::Kpse> {
                 .and_then(|f| f.parent().map(Path::to_path_buf))
         })
         .unwrap_or_else(|| PathBuf::from("/usr/bin"));
-    Arc::new(phitex_flow::kpse::Kpathsea::new(partex_kpse::Kpse::new(&dir, "xetex", "xetex")))
+    Arc::new(phitex_flow::kpse::Kpathsea::new(phitex_kpse::Kpse::new(&dir, "xetex", "xetex")))
 }
 
 /// xdvipdfmx's distiller (dvipdfmx.cfg's `D` line: `rungs` for an EPS
@@ -113,7 +113,7 @@ fn distiller() -> phitex_flow::native::Distiller {
         let inp = dir.join(base);
         let out = dir.join("distilled.pdf");
         let r = std::fs::write(&inp, data).ok().and_then(|()| {
-            let cmd = partex_xdvipdfmx::io::filter_command(
+            let cmd = phitex_xdvipdfmx::io::filter_command(
                 template,
                 inp.as_os_str().as_bytes(),
                 out.as_os_str().as_bytes(),

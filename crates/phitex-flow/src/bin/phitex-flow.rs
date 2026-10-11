@@ -35,7 +35,7 @@ fn tex_live(prog: &str) -> Option<Arc<phitex_flow::kpse::Kpathsea>> {
                 .and_then(|f| f.parent().map(std::path::Path::to_path_buf))
         })
     })?;
-    let mut k = partex_kpse::Kpse::new(&dir, prog, prog);
+    let mut k = phitex_kpse::Kpse::new(&dir, prog, prog);
     k.var_value("TEXMF")?;
     Some(Arc::new(phitex_flow::kpse::Kpathsea::new(k)))
 }
@@ -858,7 +858,7 @@ fn distiller() -> phitex_flow::native::Distiller {
         let inp = dir.join(base);
         let out = dir.join("distilled.pdf");
         let r = std::fs::write(&inp, data).ok().and_then(|()| {
-            let cmd = partex_xdvipdfmx::io::filter_command(
+            let cmd = phitex_xdvipdfmx::io::filter_command(
                 template,
                 inp.as_os_str().as_bytes(),
                 out.as_os_str().as_bytes(),

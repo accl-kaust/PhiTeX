@@ -1,5 +1,5 @@
 //! TeX Live's kpathsea as a build is given it: [`tfm::Kpse`] over
-//! `partex-kpse` (texmf.cnf, the `ls-R` databases, the search paths), so
+//! `phitex-kpse` (texmf.cnf, the `ls-R` databases, the search paths), so
 //! a name becomes a path by a database lookup and no build walks TeX
 //! Live's tree. A given of the build, never a node: the bytes of the path
 //! found are what a read of `Key::File` (or a font's, a PDF file's) finds,
@@ -12,14 +12,14 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use partex_kpse::Format;
+use phitex_kpse::Format;
 
 use crate::tfm::{self, KpseFormat};
 
 /// kpathsea for a program (`kpathsea_instance`), behind the trait's
 /// `&self`: lookups are rare (each name once per build), so one lock.
 pub struct Kpathsea {
-    k: Mutex<partex_kpse::Kpse>,
+    k: Mutex<phitex_kpse::Kpse>,
     /// The current directory left out of every search path
     /// ([`Kpathsea::without_cwd`]).
     no_cwd: bool,
@@ -70,7 +70,7 @@ pub fn pdf_format(name: &str) -> KpseFormat {
 impl Kpathsea {
     /// Over an instance made for the program (`Kpse::new(selfdir,
     /// progname, engine)`).
-    pub fn new(k: partex_kpse::Kpse) -> Kpathsea {
+    pub fn new(k: phitex_kpse::Kpse) -> Kpathsea {
         Kpathsea { k: Mutex::new(k), no_cwd: false }
     }
 
@@ -85,7 +85,7 @@ impl Kpathsea {
 
     /// The instance, for what the trait does not ask (`show_path`,
     /// `var_value`…).
-    pub fn with<R>(&self, f: impl FnOnce(&mut partex_kpse::Kpse) -> R) -> R {
+    pub fn with<R>(&self, f: impl FnOnce(&mut phitex_kpse::Kpse) -> R) -> R {
         f(&mut self.k.lock().unwrap_or_else(PoisonError::into_inner))
     }
 }

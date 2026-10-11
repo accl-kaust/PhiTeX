@@ -14,8 +14,8 @@
 //! scheduler picks. A cold build is an edit from nothing.
 //!
 //! Depends on no `partex-*` crate but the pure libraries `tests/wall.rs`
-//! lists (partex-kpse: kpathsea, the build's file finder; partex-otf:
-//! OpenType, and partex-xdvipdfmx: XDV to PDF, for XeTeX).
+//! lists (phitex-kpse: kpathsea, the build's file finder; phitex-otf:
+//! OpenType, and phitex-xdvipdfmx: XDV to PDF, for XeTeX).
 
 #![allow(
     clippy::missing_panics_doc,

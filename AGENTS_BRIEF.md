@@ -200,7 +200,7 @@ drifted. Stop and re-read this file.
   across by copying them out of `partex-core` as pure functions, and
   reaching for eqtb is a compile error. Pure libraries that hold no TeX
   state may be linked (decided by the user 2026-10-09): `phi`, and per
-  explicit decision each of `partex-otf` (OpenType shaping), the
+  explicit decision each of `phitex-otf` (OpenType shaping), the
   PNG/deflate/PDF-writing code, font parsers; `tests/wall.rs` is the
   allowlist.
 - **The minimal system** (2026-10-09) is the base: `crates/phitex-flow`

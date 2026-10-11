@@ -7,10 +7,10 @@ publish = false
 description = "TeX as graph reduction of pending thunks (CONSTRUCTS.md)"
 
 [dependencies]
-partex-kpse = { path = "../partex-kpse" }
-partex-otf = { path = "../partex-otf" }
-partex-bibtex = { path = "../partex-bibtex" }
-partex-makeindex = { path = "../partex-makeindex" }
+phitex-kpse = { path = "../phitex-kpse" }
+phitex-otf = { path = "../phitex-otf" }
+phitex-bibtex = { path = "../phitex-bibtex" }
+phitex-makeindex = { path = "../phitex-makeindex" }
 phitex-codecs = { path = "../phitex-codecs" }
 phitex-syntax = { path = "../phitex-syntax" }
 

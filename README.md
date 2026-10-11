@@ -39,9 +39,9 @@ byte for byte.
 | `phitex-flow` | the engine: TeX as a suspending dataflow graph (`AGENTS_BRIEF.md`, `crates/phitex-flow/CORE.md`) |
 | `phitex-cli` | the `phitex` command |
 | `phi` | the φ core |
-| `partex-kpse` | kpathsea file lookup |
-| `partex-bibtex`, `partex-makeindex` | BibTeX and makeindex |
-| `partex-otf`, `partex-xdvipdfmx` | OpenType shaping, xdvipdfmx |
+| `phitex-kpse` | kpathsea file lookup |
+| `phitex-bibtex`, `phitex-makeindex` | BibTeX and makeindex |
+| `phitex-otf`, `phitex-xdvipdfmx` | OpenType shaping, xdvipdfmx |
 | `phitex-syntax`, `phitex-doc`, `phitex-diff`, `phitex-git` | the source CST, the document's structure, latexdiff, git |
 | `phitex-draw`, `phitex-codecs` | the viewer's pages, the codecs and PDF reader |
 

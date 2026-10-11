@@ -10,7 +10,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use partex_kpse::{Format, Kpse};
+use phitex_kpse::{Format, Kpse};
 use phitex_flow::kpse::Kpathsea;
 use phitex_flow::tfm::{Kpse as _, KpseFormat};
 

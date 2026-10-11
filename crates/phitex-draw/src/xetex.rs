@@ -1,5 +1,5 @@
 //! `XeTeX`'s pages: the glyphs xdvipdfmx's glyph runs give
-//! (`partex_xdvipdfmx::glyphrun`), drawn from their own fonts' outlines
+//! (`phitex_xdvipdfmx::glyphrun`), drawn from their own fonts' outlines
 //! (OpenType and TrueType through skrifa, a TFM font's Type 1 from its
 //! `.pfb`), the PDF giving the paths and rules ([`crate::Pdf::draw_with`]).
 //! The Overleaf extension core's `xetex::extra`.
@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use partex_xdvipdfmx::api::{GlyphRun, GlyphSource};
+use phitex_xdvipdfmx::api::{GlyphRun, GlyphSource};
 
 use crate::esc;
 use crate::pdfdraw::Extra;

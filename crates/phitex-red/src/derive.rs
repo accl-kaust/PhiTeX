@@ -1,5 +1,5 @@
 //! D4: BibTeX and makeindex as functions inside the fixpoint
-//! (`.aux` → `.bbl`, `.idx` → `.ind`), via partex-bibtex / partex-makeindex.
+//! (`.aux` → `.bbl`, `.idx` → `.ind`), via phitex-bibtex / phitex-makeindex.
 //!
 //! [`derive`] is a pure function of the files the job wrote and the files
 //! it reads (`.bst`, `.bib`, `.ist`, `\@input` aux files); it is memoised
@@ -57,7 +57,7 @@ fn lookup(written: &Written, files: Lookup<'_>, name: &str) -> Option<Arc<[u8]>>
         .or_else(|| files(name))
 }
 
-impl partex_bibtex::Files for Reader<'_> {
+impl phitex_bibtex::Files for Reader<'_> {
     fn aux(&mut self, name: &[u8]) -> Option<Vec<u8>> {
         self.get_vec(name)
     }
@@ -75,7 +75,7 @@ impl partex_bibtex::Files for Reader<'_> {
     }
 }
 
-impl partex_makeindex::Files for Reader<'_> {
+impl phitex_makeindex::Files for Reader<'_> {
     fn read(&mut self, name: &[u8]) -> Option<Vec<u8>> {
         self.get_vec(name)
     }
@@ -158,7 +158,7 @@ pub fn derive(
                 continue;
             }
             out.extend(memoised(0, name, written, files, |r| {
-                let o = partex_bibtex::run(name.as_bytes(), &partex_bibtex::Options::default(), r);
+                let o = phitex_bibtex::run(name.as_bytes(), &phitex_bibtex::Options::default(), r);
                 let mut v = Vec::new();
                 if let Some(b) = o.bbl {
                     v.push((Arc::from(format!("{job}.bbl")), text(b.contents)));
@@ -171,7 +171,7 @@ pub fn derive(
         } else if let Some(job) = name.strip_suffix(".idx") {
             out.extend(memoised(1, name, written, files, |r| {
                 let args = vec![name.as_bytes().to_vec()];
-                let o = partex_makeindex::run(&args, b" (TeX Live 2026)", r);
+                let o = phitex_makeindex::run(&args, b" (TeX Live 2026)", r);
                 let mut v = Vec::new();
                 if let Some(f) = o.ind {
                     v.push((Arc::from(format!("{job}.ind")), text(f.contents)));

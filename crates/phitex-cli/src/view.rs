@@ -111,7 +111,7 @@ struct Shared {
     fonts: Mutex<phitex_draw::Fonts>,
     /// The viewer's text fonts, by file name, read when first asked.
     text_fonts: Mutex<BTreeMap<String, Option<Arc<[u8]>>>>,
-    kpse: Mutex<Option<partex_kpse::Kpse>>,
+    kpse: Mutex<Option<phitex_kpse::Kpse>>,
     /// Log each page drawn (`PHITEX_VIEW_LOG=1`).
     log: bool,
     /// The directory the watch runs in: the project's files are named from
@@ -347,7 +347,7 @@ fn text_font(s: &Shared, name: &str) -> Option<Arc<[u8]>> {
     let f = {
         let mut k = lock(&s.kpse);
         let k = k.get_or_insert_with(|| crate::tex::kpse("phitex", "pdftex"));
-        k.find_file(name.as_bytes(), partex_kpse::Format::OpenType, false)
+        k.find_file(name.as_bytes(), phitex_kpse::Format::OpenType, false)
             .and_then(|p| std::fs::read(&*String::from_utf8_lossy(&p)).ok())
             .map(Arc::from)
     };

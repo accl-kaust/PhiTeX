@@ -1548,38 +1548,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "partex-bibtex"
-version = "0.0.0"
-
-[[package]]
-name = "partex-kpse"
-version = "0.0.0"
-
-[[package]]
-name = "partex-makeindex"
-version = "0.0.0"
-
-[[package]]
-name = "partex-otf"
-version = "0.0.0"
-dependencies = [
- "brotli-decompressor",
- "harfrust",
- "libm",
- "read-fonts",
- "skrifa",
- "unicode-bidi",
-]
-
-[[package]]
-name = "partex-xdvipdfmx"
-version = "0.0.0"
-dependencies = [
- "libm",
- "phitex-codecs",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1593,6 +1561,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "phitex-bibtex"
+version = "0.0.0"
+
+[[package]]
 name = "phitex-cli"
 version = "0.0.0"
 dependencies = [
@@ -1600,16 +1572,16 @@ dependencies = [
  "clap",
  "console",
  "indicatif",
- "partex-bibtex",
- "partex-kpse",
- "partex-makeindex",
- "partex-otf",
- "partex-xdvipdfmx",
+ "phitex-bibtex",
  "phitex-codecs",
  "phitex-doc",
  "phitex-draw",
  "phitex-flow",
+ "phitex-kpse",
+ "phitex-makeindex",
+ "phitex-otf",
  "phitex-red",
+ "phitex-xdvipdfmx",
  "tikv-jemallocator",
 ]
 
@@ -1636,8 +1608,8 @@ name = "phitex-draw"
 version = "0.0.0"
 dependencies = [
  "miniz_oxide",
- "partex-xdvipdfmx",
  "phitex-codecs",
+ "phitex-xdvipdfmx",
  "skrifa",
 ]
 
@@ -1645,11 +1617,11 @@ dependencies = [
 name = "phitex-flow"
 version = "0.0.0"
 dependencies = [
- "partex-kpse",
- "partex-otf",
- "partex-xdvipdfmx",
  "phi",
  "phitex-codecs",
+ "phitex-kpse",
+ "phitex-otf",
+ "phitex-xdvipdfmx",
  "tikv-jemallocator",
 ]
 
@@ -1662,14 +1634,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "phitex-kpse"
+version = "0.0.0"
+
+[[package]]
+name = "phitex-makeindex"
+version = "0.0.0"
+
+[[package]]
+name = "phitex-otf"
+version = "0.0.0"
+dependencies = [
+ "brotli-decompressor",
+ "harfrust",
+ "libm",
+ "read-fonts",
+ "skrifa",
+ "unicode-bidi",
+]
+
+[[package]]
 name = "phitex-red"
 version = "0.0.0"
 dependencies = [
- "partex-bibtex",
- "partex-kpse",
- "partex-makeindex",
- "partex-otf",
+ "phitex-bibtex",
  "phitex-codecs",
+ "phitex-kpse",
+ "phitex-makeindex",
+ "phitex-otf",
  "phitex-syntax",
 ]
 
@@ -1680,6 +1672,14 @@ version = "0.0.0"
 [[package]]
 name = "phitex-syntax"
 version = "0.0.0"
+
+[[package]]
+name = "phitex-xdvipdfmx"
+version = "0.0.0"
+dependencies = [
+ "libm",
+ "phitex-codecs",
+]
 
 [[package]]
 name = "pin-project-lite"

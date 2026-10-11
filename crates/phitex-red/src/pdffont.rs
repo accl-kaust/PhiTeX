@@ -1,5 +1,5 @@
 //! E5: fonts in the PDF: pdftex.map, Type 1 subsetting, TrueType/OTF via
-//! partex-otf, VF, encodings, ToUnicode.
+//! phitex-otf, VF, encodings, ToUnicode.
 //!
 //! `FontSet` is the back end's font table. The page writer (E1) calls
 //! [`FontSet::resource`] for every (font, expansion) a page uses (that
@@ -1747,13 +1747,13 @@ impl FontSet {
             }
             Some(k @ (FileKind::TrueType | FileKind::OpenType)) => {
                 let file = entry.file.clone().unwrap_or_default();
-                let face = (self.loader)(&file).and_then(|d| partex_otf::Face::new(d, 0));
+                let face = (self.loader)(&file).and_then(|d| phitex_otf::Face::new(d, 0));
                 match face {
                     None => self.warnings.push(format!("pdfTeX warning: cannot open font file {file}")),
                     Some(face) => {
                         let upem = i32::from(face.units_per_em()).max(1);
                         let sc = |v: i32| t1_round(f64::from(v) * 1000.0 / f64::from(upem));
-                        if let Some(h) = face.table(partex_otf::tag(b"head")) {
+                        if let Some(h) = face.table(phitex_otf::tag(b"head")) {
                             if h.len() >= 44 {
                                 let g = |o: usize| i32::from(i16::from_be_bytes([h[o], h[o + 1]]));
                                 bbox = [sc(g(36)), sc(g(38)), sc(g(40)), sc(g(42))];
@@ -1769,7 +1769,7 @@ impl FontSet {
                         if let Some(a) = face.italic_angle() {
                             italic = t1_round(f64::from(a) / 65536.0);
                         }
-                        let truetype = k == FileKind::TrueType || face.outlines() == partex_otf::face::Outlines::TrueType;
+                        let truetype = k == FileKind::TrueType || face.outlines() == phitex_otf::face::Outlines::TrueType;
                         if entry.embed != Embed::None {
                             let ckey = format!("ot\u{0}{file}\u{0}{}", opts.compress_level);
                             let b = match self.cache.get(&ckey).cloned() {
@@ -1782,7 +1782,7 @@ impl FontSet {
                                         dict = format!("/Length1 {}{}", raw.len(), flate(z));
                                         (z, d)
                                     } else {
-                                        let raw = face.table(partex_otf::tag(b"CFF ")).map_or_else(|| face.data().to_vec(), <[u8]>::to_vec);
+                                        let raw = face.table(phitex_otf::tag(b"CFF ")).map_or_else(|| face.data().to_vec(), <[u8]>::to_vec);
                                         let (z, d) = stream_data(&raw, opts.compress_level);
                                         dict = format!("/Subtype /Type1C{}", flate(z));
                                         (z, d)

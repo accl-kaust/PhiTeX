@@ -4,10 +4,10 @@
 
 ## Crates
 
-Pure, link them: partex-kpse (kpathsea: texmf.cnf, ls-R, path search; the input finder the CLI gives the build), partex-otf (OpenType faces/shaping/OT math/TECkit; X, and Q for TrueType embedding), partex-xdvipdfmx (XDV→PDF byte for byte; X's backend; its image readers are dvipdfmx's, for the PDF it writes: XeTeX's pictures are measured by XeTeX's own readers, X's xpic.rs copy, not dvipdfmx's, and pdfTeX's by pdfTeX's), phitex-codecs (inflate, md5, png, pdfread, pdftext, zlib crc; yours), partex-bibtex and partex-makeindex (in-process, between fixpoint runs), phi (allowed, unused), phitex-syntax/doc/draw/diff/git (CLI/viewer).
+Pure, link them: phitex-kpse (kpathsea: texmf.cnf, ls-R, path search; the input finder the CLI gives the build), phitex-otf (OpenType faces/shaping/OT math/TECkit; X, and Q for TrueType embedding), phitex-xdvipdfmx (XDV→PDF byte for byte; X's backend; its image readers are dvipdfmx's, for the PDF it writes: XeTeX's pictures are measured by XeTeX's own readers, X's xpic.rs copy, not dvipdfmx's, and pdfTeX's by pdfTeX's), phitex-codecs (inflate, md5, png, pdfread, pdftext, zlib crc; yours), phitex-bibtex and phitex-makeindex (in-process, between fixpoint runs), phi (allowed, unused), phitex-syntax/doc/draw/diff/git (CLI/viewer).
 
 **The file finder is a given of the build, never a node** (agent K).
-`kpse::Kpathsea` is `tfm::Kpse` over partex-kpse: kpathsea's own lookup
+`kpse::Kpathsea` is `tfm::Kpse` over phitex-kpse: kpathsea's own lookup
 (texmf.cnf, the `ls-R` databases, `kpse_find_file(name, format, false)`
 as the program `Build::set_kpse` names: `kpsewhich -progname=PROG
 -format=FORMAT NAME` is its oracle, `tests/kpse.rs`), each `KpseFormat`
@@ -942,7 +942,7 @@ matching of old runs by their text.
   `Build::set_derive`; the CLI's `tools::ToolDerive`): after an
   evaluation, the files it wrote derive the `.bbl` of each `.aux` asking
   for one (`\bibdata`) and the `.ind` of each `.idx`, by the in-process
-  ports (`partex-bibtex`, `partex-makeindex`), memoised by what each read
+  ports (`phitex-bibtex`, `phitex-makeindex`), memoised by what each read
   (its `.aux` lines, the `.bib`/`.bst`/`.ist` files: unchanged, nothing is
   made). A derived file that differs from the build's version is a value
   the next evaluation reads: only its readers run again. The CLI runs the
@@ -3652,7 +3652,7 @@ is a pure function or a fold step, no state shared with the others):
 | numbers, zlib, MD5 | `pdf/num.rs`, `pdf/zlib.rs`, `pdf/md5.rs` | `num::Out` (pdfTeX's printing), `zlib::compress(data, level)`, `md5::md5` — done |
 | a page's content stream | `pdf/content.rs` | `content::page(&Page, &Ship, &Numbers, extra) -> PageBody` where the page is shipped; `content::page_body(&Page, &Ship, &Given)` and `form_body` in the fold: the stream, `fonts` (font, number, glyphs), `events` (marks and references in the walk's order: fonts, annotations, links and their pieces per line, destinations, beads, `\pdfrefobj`, forms, images), `links`/`beads` rectangles, `write_pos` (`\pdfsavepos` at each `\write`), the walk's state `entry`/`exit` (`WalkState`: colour stacks, matrix stack, the open links, the thread, the last position), `incomplete` (a form or image not known where the page was made), guesses (`ff`, `fixed`); `origins` (a non-version field, below). pdfTeX's whatsits are `Item::Whatsit(Whatsit::Pdf(what::What))`, made by their nodes (`graph/pdf.rs`) — done |
 | the fold | `pdf/fold.rs`, `pdf/fold/marks.rs`, `pdf/fold/image.rs` | `fold::assemble(pages, bodies, events, numbers, &End, &mut dyn Files) -> Written`: the PDF events before each page and after the last (`PageOrg::pdf`, the build's tail: `Item::Pdf` of the material, which the page builder hands to the pages in the order it meets them) are fold steps (`F::step`, part 53's commands: objects, forms, images, outlines, catalog, info, names, trailer, colour stacks, fonts, maps); each page is shipped as `pdf_ship_out` does (its walk's marks numbered in walk order, the page object with `/Group`, `/Annots`, `/B`, the raw objects, images and forms it refers to — forms shipped recursively — the marks, the resources); the end as "Finish the PDF file" (pages checked, destinations fixed, fonts, page tree, outlines, name tree, threads, catalog, info, xref, trailer). `Written::answers` are the read-backs' answers — done |
-| fonts | `pdf/font/` (`map.rs`, `enc.rs`, `t1.rs`), the font part of `fold.rs` | the map file (`map::Map`), encodings, Type 1 subsetting (`t1::writet1`), `fold::F::{do_pdf_font, write_fontdescriptor, write_enc, write_fontdictionary}`. To come: ToUnicode (`\pdfgentounicode`, `\pdfglyphtounicode`'s table as a document-level value) (virtual fonts: done, "Virtual fonts" below), PK fonts (Type 3), TrueType/OpenType, `\pdfmapfile`/`\pdfmapline` (document-level items the fold applies before the first font is initialized). How the TrueType/OpenType gap closes: the face (tables, cmap, glyf/loca, hmtx, post, CFF) is read through `partex-otf` (a pure library, linked, on the wall's allowlist), never a second parser copied from the old port; only the subset writer (which tables, in which order, pdfTeX's checksums and glyph renumbering) is the byte-exact port of `writettf.c` (and its CFF path for `.otf`), with the ttf2afm-style metrics and the map's `<[` encodings; PFB and encoding parsing through `partex-otf` where it has them, `writet1`'s writer kept. Files (map, pfb, enc, ttf/otf) are to be found through the build's kpathsea given (A's `Build::set_kpse`, `tfm::Kpse::find` with formats `FontMap`, `Type1`, `Enc`, program `pdftex`), not by `tfm::pdf_file`'s directory walk: `PdfFiles::get` switches to it when A's commit reaches this branch |
+| fonts | `pdf/font/` (`map.rs`, `enc.rs`, `t1.rs`), the font part of `fold.rs` | the map file (`map::Map`), encodings, Type 1 subsetting (`t1::writet1`), `fold::F::{do_pdf_font, write_fontdescriptor, write_enc, write_fontdictionary}`. To come: ToUnicode (`\pdfgentounicode`, `\pdfglyphtounicode`'s table as a document-level value) (virtual fonts: done, "Virtual fonts" below), PK fonts (Type 3), TrueType/OpenType, `\pdfmapfile`/`\pdfmapline` (document-level items the fold applies before the first font is initialized). How the TrueType/OpenType gap closes: the face (tables, cmap, glyf/loca, hmtx, post, CFF) is read through `phitex-otf` (a pure library, linked, on the wall's allowlist), never a second parser copied from the old port; only the subset writer (which tables, in which order, pdfTeX's checksums and glyph renumbering) is the byte-exact port of `writettf.c` (and its CFF path for `.otf`), with the ttf2afm-style metrics and the map's `<[` encodings; PFB and encoding parsing through `phitex-otf` where it has them, `writet1`'s writer kept. Files (map, pfb, enc, ttf/otf) are to be found through the build's kpathsea given (A's `Build::set_kpse`, `tfm::Kpse::find` with formats `FontMap`, `Type1`, `Enc`, program `pdftex`), not by `tfm::pdf_file`'s directory walk: `PdfFiles::get` switches to it when A's commit reaches this branch |
 | images | `pdf/image/mod.rs` (reading, at the node), `pdf/fold/image.rs` (writing) | `\pdfximage` reads the file (`Key::File`) at its node: `image::read_image` (a JPEG's resolution as `read_jpg_info` has it: JFIF dpi or dpcm, units 0 none; an Exif file's TIFF fields; `jpgres`), `image::scale` (pdfTeX's `scale_image`); the fold writes JPEG as it is, PNG (`write_png`, IDAT copied or rows through `lib::png`, soft masks, palettes, the transparency group), a PDF page (`write_epdf` through `lib::pdfread`: objects copied, Type 1 fonts the map has replaced by the job's embedding unless `\pdfinclusioncopyfonts`) — done; `\pdfimageapplygamma`, JBIG2 are gaps |
 | links, dests, outlines | `pdf/content.rs` (rectangles), `pdf/fold/marks.rs` | links split per line box at their nesting level and threaded across pages by `WalkState::links`; destinations' duplicates the fold's; outlines, the name tree (`sort_dest_names`, `str_less_str`), threads and beads as pdfTeX writes them — done |
 | reads of the fold | `graph/pdf.rs`, `build.rs` (`PdfKept`, `Given::answer`) | `Key::PdfAns` answered from the last fold, rounds until they hold ("pdfTeX's read-backs" below); A's `ReadRef` may take this over later — the keys are listed there |
@@ -3662,11 +3662,11 @@ is a pure function or a fold step, no state shared with the others):
 The engine is a given of the build: `Build::set_xetex(fonts)` (the CLI's
 `--xetex [--font-index FILE] [--pdf OUT.pdf]`), with e-TeX's extended mode
 as `Options::etex` says. `fonts` is `tfm::Fonts`: the installed fonts'
-index (partex-otf's `FontIndex`, made by `otf-index` from what fontconfig
+index (phitex-otf's `FontIndex`, made by `otf-index` from what fontconfig
 lists with `scripts/xetex/fonts.conf`: TeX Live's `fonts/opentype` and
 `fonts/truetype`, nothing of the system's) and the file finder
 (`tfm::Kpse`: `find(name, format, prog) -> Option<path>`, `read(path)`;
-`kpse::Kpathsea` is TeX Live's kpathsea over partex-kpse, `tfm::DirKpse`
+`kpse::Kpathsea` is TeX Live's kpathsea over phitex-kpse, `tfm::DirKpse`
 walks directories).
 Both are givens, never searched for by a node. `tfm::Kpse` is flow's one
 file-finding interface: `Build::set_kpse` takes it for `\input`, and
@@ -3678,9 +3678,9 @@ index the installed fonts as fontconfig lists them (`fc-list` in XeTeX's
 kpathsea cannot answer) and write `JOB.pdf` through xdvipdfmx in process
 (`-no-pdf`: the XDV file).
 
-Linked (tests/wall.rs allows them): partex-otf (faces, HarfBuzz-equal
+Linked (tests/wall.rs allows them): phitex-otf (faces, HarfBuzz-equal
 shaping, TECkit mappings, OpenType math tables, `xetex::fontmgr`),
-partex-xdvipdfmx (XDV to PDF, itself on phitex-codecs since W's
+phitex-xdvipdfmx (XDV to PDF, itself on phitex-codecs since W's
 extraction; EPS pictures through dvipdfmx.cfg's `D` distiller, which the
 host runs: `Files::apply_filter`, given as `native::Distiller` with
 `Fonts::with_distiller`, since the library runs no process; the CLI, the
@@ -3712,8 +3712,8 @@ partex-engine/src/xpic.rs ported them).
 | `\XeTeXpicfile`, `\XeTeXpdffile` | A value measured from the file's bytes (a read of `Key::File`) and the keywords (`xpic::picture`); `Item::Pic`. |
 | `\XeTeXglyph` | `Item::Glyph`. |
 | `\pdfsavepos` | `Whatsit::SavePos` (`\pdflastxpos`/`ypos` stay 0: gap). |
-| XDV | DVI's fold (`dvi::assemble_as(…, xdv)`): id byte 7, " XeTeX output" comment, `define_native_font` (252, partex-otf's `font_def`), `set_glyphs` (253), `set_text_and_glyphs` (254, `\XeTeXgenerateactualtext`), pictures as `pdf:image matrix … page … (path)` specials. |
-| PDF | `Build::xdv_pdf(xdv)`: partex-xdvipdfmx in process, as `xdvipdfmx -q -E -o JOB.pdf`, its files through the same `Kpse`, zlib's deflate from `pdf::zlib`, dated `SOURCE_DATE_EPOCH` (`Build::set_pdf_date`). |
+| XDV | DVI's fold (`dvi::assemble_as(…, xdv)`): id byte 7, " XeTeX output" comment, `define_native_font` (252, phitex-otf's `font_def`), `set_glyphs` (253), `set_text_and_glyphs` (254, `\XeTeXgenerateactualtext`), pictures as `pdf:image matrix … page … (path)` specials. |
+| PDF | `Build::xdv_pdf(xdv)`: phitex-xdvipdfmx in process, as `xdvipdfmx -q -E -o JOB.pdf`, its files through the same `Kpse`, zlib's deflate from `pdf::zlib`, dated `SOURCE_DATE_EPOCH` (`Build::set_pdf_date`). |
 | `xelatex.fmt` | `Build::format`: the code tables are definitions, so a wide table is saved sparsely (only what was defined). The new keys are format keys 50–53. A native font cannot be dumped (XeTeX's error). |
 | `\strcmp`, `\filesize`, `\shellescape`, `\ifprimitive`, … (pdfTeX's names XeTeX has) | `XETEX_PRIMITIVES` (95, sorted). `\primitive` is pdfTeX's `\pdfprimitive` (`Prim::PdfPrimitive`, its frozen token `\0pdfprimitive`), `\ifprimitive` is `IfKind::PdfPrimitive`; both find XeTeX's own names too (`primitive_of`). |
 
@@ -3759,7 +3759,7 @@ opentype tree here, so `cjk.tex` sets its CJK text in Latin Modern
   `synctex_against_xetex`: forward 98.5%, inverse 98.6%, positions 100%
   (job 8065).
 - graphicx's `dvips` driver under xelatex (`gfx`): xelatex's PDF (job
-  8077). partex-xdvipdfmx ports `spc_dvips.c` (`PSfile=` EPS through the
+  8077). phitex-xdvipdfmx ports `spc_dvips.c` (`PSfile=` EPS through the
   host's distiller, `ps:`, `" `) and `mpost.c`'s inline PostScript
   interpreter; not PSTricks's `PST:`/`pst:` (ghostscript as a calculator)
   nor MetaPost files and fonts.

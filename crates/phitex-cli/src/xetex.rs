@@ -6,7 +6,7 @@
 //!
 //! The index is `fc-list`'s faces in fontconfig's order (XeTeX's
 //! `FcFontList` objects: XeTeX's name matching depends on the order), each
-//! face's names read from its file (partex-otf's `FaceEntry`). It is kept
+//! face's names read from its file (phitex-otf's `FaceEntry`). It is kept
 //! in the cache directory under the hash of `fc-list`'s output: a cache of
 //! the installed fonts, made again when they change, never of a document.
 
@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use partex_otf::index::{FaceEntry, FontIndex, VARIABLE};
+use phitex_otf::index::{FaceEntry, FontIndex, VARIABLE};
 use phitex_flow::native::Fonts;
 
 use crate::tex::{self, Engine, Fnv, Tree};
@@ -155,7 +155,7 @@ fn distiller() -> phitex_flow::native::Distiller {
         let inp = dir.join(base);
         let out = dir.join("distilled.pdf");
         let r = std::fs::write(&inp, data).ok().and_then(|()| {
-            let cmd = partex_xdvipdfmx::io::filter_command(
+            let cmd = phitex_xdvipdfmx::io::filter_command(
                 template,
                 inp.as_os_str().as_bytes(),
                 out.as_os_str().as_bytes(),

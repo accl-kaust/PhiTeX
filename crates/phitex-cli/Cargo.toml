@@ -21,11 +21,11 @@ annotate-snippets = "=0.11.5"
 clap = { version = "=4.6.7", features = ["derive", "wrap_help"] }
 console = "=0.16.4"
 indicatif = "=0.18.6"
-partex-bibtex = { path = "../partex-bibtex" }
-partex-kpse = { path = "../partex-kpse" }
-partex-makeindex = { path = "../partex-makeindex" }
-partex-otf = { path = "../partex-otf" }
-partex-xdvipdfmx = { path = "../partex-xdvipdfmx" }
+phitex-bibtex = { path = "../phitex-bibtex" }
+phitex-kpse = { path = "../phitex-kpse" }
+phitex-makeindex = { path = "../phitex-makeindex" }
+phitex-otf = { path = "../phitex-otf" }
+phitex-xdvipdfmx = { path = "../phitex-xdvipdfmx" }
 phitex-codecs = { path = "../phitex-codecs" }
 phitex-doc = { path = "../phitex-doc" }
 phitex-draw = { path = "../phitex-draw" }

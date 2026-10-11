@@ -9,13 +9,13 @@ const ALLOWED: &[&str] = &[
     "phi",
     // (XeTeX, user-approved pure libraries, AGENTS_BRIEF §"How we build it":
     // OpenType faces and shaping; XDV to PDF)
-    "partex-otf",
-    "partex-xdvipdfmx",
+    "phitex-otf",
+    "phitex-xdvipdfmx",
     // (pure codecs: the PDF reader XeTeX's \XeTeXpdffile measures with)
     "phitex-codecs",
     // (kpathsea, user-approved pure library: texmf.cnf, ls-R and the path
     // search; the file finder a build is given, `kpse::Kpathsea`)
-    "partex-kpse",
+    "phitex-kpse",
     // (the CLI's global allocator, an optional feature: no TeX in it)
     "tikv-jemallocator",
 ];

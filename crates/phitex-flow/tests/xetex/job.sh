@@ -4,7 +4,7 @@ export SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1
 dist=$(kpsewhich -var-value TEXMFDIST)
 sed -i "s#/usr/share/texmf-dist#$dist#; s#/tmp/partex-xetex-fc-cache#$r/fc-cache#" scripts/xetex/fonts.conf
 if [ -n "${BLESS:-}" ]; then crates/phitex-flow/tests/xetex/bless.sh "$r/bless" > "$r/bless.log" 2>&1; export PHITEX_XETEX_ORACLE="$r/bless"; fi
-cargo run -q --release -p partex-otf --example otf-index -- "$r/fonts.idx" > "$r/otf-index.log" 2>&1; echo "otf-index exit $?" >> "$r/summary.txt"
+cargo run -q --release -p phitex-otf --example otf-index -- "$r/fonts.idx" > "$r/otf-index.log" 2>&1; echo "otf-index exit $?" >> "$r/summary.txt"
 cargo build --release -p phitex-flow --all-targets > "$r/build.log" 2>&1; echo "build exit $?" >> "$r/summary.txt"; grep -E "^error" -A8 "$r/build.log" | head -60 >> "$r/summary.txt"
 # (the format first, alone, with a limit; then the rest on the format it saved, with a limit)
 PHITEX_FONT_INDEX="$r/fonts.idx" timeout ${FMT_LIMIT:-30m} cargo test --release -p phitex-flow --test xetex_docs -- --exact xelatex_format --nocapture > "$r/format.txt" 2>&1; echo "xelatex_format exit $? (124: over ${FMT_LIMIT:-30m})" >> "$r/summary.txt"
@@ -55,15 +55,15 @@ if [ -n "${CLI_TESTS:-}" ]; then
   cargo test --release -p phitex-cli --test cli > "$r/cli-tests.txt" 2>&1; echo "phitex-cli --test cli exit $?" >> "$r/summary.txt"
   grep -E "^test result|FAILED|panicked" "$r/cli-tests.txt" | head -20 >> "$r/summary.txt"
 fi
-# (DPX=1: partex-xdvipdfmx's own tests)
+# (DPX=1: phitex-xdvipdfmx's own tests)
 if [ -n "${DPX:-}" ]; then
-  cargo test --release -p partex-xdvipdfmx > "$r/dpx-tests.txt" 2>&1; echo "partex-xdvipdfmx tests exit $?" >> "$r/summary.txt"
+  cargo test --release -p phitex-xdvipdfmx > "$r/dpx-tests.txt" 2>&1; echo "phitex-xdvipdfmx tests exit $?" >> "$r/summary.txt"
   grep -E "^test result|FAILED|panicked" "$r/dpx-tests.txt" | head -20 >> "$r/summary.txt"
 fi
 if [ "${REGRESS:-1}" != 0 ]; then
 cargo test --release -p phitex-flow --lib --test wall --test shapes --test dvi --test plain --test pdf --test etex --test output > "$r/regress.txt" 2>&1; echo "regress exit $?" >> "$r/summary.txt"
 grep -E "^test result|FAILED|panicked" "$r/regress.txt" | head -40 >> "$r/summary.txt"
 fi
-if [ -n "${CLIPPY:-}" ]; then cargo clippy -p phitex-flow -p phitex-cli -p partex-xdvipdfmx --all-targets -- -D warnings > "$r/clippy.txt" 2>&1; echo "clippy (-D warnings: phitex-flow, phitex-cli, partex-xdvipdfmx) exit $?, $(grep -c ^error $r/clippy.txt) errors" >> "$r/summary.txt"; fi
+if [ -n "${CLIPPY:-}" ]; then cargo clippy -p phitex-flow -p phitex-cli -p phitex-xdvipdfmx --all-targets -- -D warnings > "$r/clippy.txt" 2>&1; echo "clippy (-D warnings: phitex-flow, phitex-cli, phitex-xdvipdfmx) exit $?, $(grep -c ^error $r/clippy.txt) errors" >> "$r/summary.txt"; fi
 mkdir -p "$r/out"; cp -r target/tmp/xetex-docs "$r/out/" 2>/dev/null; cp -r target/release/build/*/out/xetex-docs "$r/out/" 2>/dev/null
 true

@@ -572,9 +572,9 @@ mod tests {
         tm: [f64; 4],
         rgba: u32,
         text: &str,
-    ) -> partex_xdvipdfmx::api::GlyphRun {
-        partex_xdvipdfmx::api::GlyphRun {
-            source: partex_xdvipdfmx::api::GlyphSource::Native {
+    ) -> phitex_xdvipdfmx::api::GlyphRun {
+        phitex_xdvipdfmx::api::GlyphRun {
+            source: phitex_xdvipdfmx::api::GlyphSource::Native {
                 font_file: b"/nowhere/Font.otf".to_vec(),
                 face_index: 0,
                 gid,
@@ -585,7 +585,7 @@ mod tests {
             ctm: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             tm,
             rgba,
-            color: partex_xdvipdfmx::glyphrun::ColorSpec::Gray(0.0),
+            color: phitex_xdvipdfmx::glyphrun::ColorSpec::Gray(0.0),
             text: Some(text.into()),
             cluster: u32::from(gid),
             actual_text: false,

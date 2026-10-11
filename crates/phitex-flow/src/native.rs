@@ -1,6 +1,6 @@
 //! XeTeX's native fonts and what is set in them (xetex.web §744–§756,
 //! `XeTeX_ext.c`), as values: a native font is a font value carrying the
-//! OpenType face (partex-otf's `XeTeXFont`, shared by `Arc` like a macro's
+//! OpenType face (phitex-otf's `XeTeXFont`, shared by `Arc` like a macro's
 //! body); a word set in it is an item whose glyphs are a pure function of
 //! (the font, the text, the default direction, `\XeTeXuseglyphmetrics`).
 //! There is no font cache and no layout engine state: the direction of the
@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use partex_otf::xetex::{Diagnostic, NativeLayout, XeTeXFont};
+use phitex_otf::xetex::{Diagnostic, NativeLayout, XeTeXFont};
 
 use crate::tfm::Font;
 use crate::val::Glue;
@@ -42,7 +42,7 @@ impl std::fmt::Debug for NativeFont {
 }
 
 /// `first_math_fontdimen` plus the MATH constants.
-pub const MATH_FONT_DIMENS: usize = 10 + partex_otf::math::LAST_CONSTANT as usize;
+pub const MATH_FONT_DIMENS: usize = 10 + phitex_otf::math::LAST_CONSTANT as usize;
 
 /// What loading a native font gives: the font, and what XeTeX prints
 /// meanwhile.
@@ -152,7 +152,7 @@ pub fn native(f: &Font) -> Option<&Arc<NativeFont>> {
 
 /// `is_rtl` of a script tag (0: none).
 pub fn script_rtl(script: u32) -> bool {
-    script != 0 && partex_otf::xetex::script_is_rtl(script)
+    script != 0 && phitex_otf::xetex::script_is_rtl(script)
 }
 
 /// The UTF-16 units of scalar value `c`.
@@ -334,7 +334,7 @@ pub fn is_math(f: &Font) -> bool {
 pub use crate::tfm::Fonts;
 
 /// XeTeX's output driver in process: the PDF `xdvipdfmx -q -E -o
-/// PDF_NAME` makes of `xdv` (partex-xdvipdfmx, linked), its files found by
+/// PDF_NAME` makes of `xdv` (phitex-xdvipdfmx, linked), its files found by
 /// `kpse`, its streams compressed by zlib's deflate (`pdf::zlib`), its date
 /// `SOURCE_DATE_EPOCH` = `epoch`.
 pub fn xdv_to_pdf(
@@ -344,14 +344,14 @@ pub fn xdv_to_pdf(
     pdf_name: &str,
     epoch: i64,
 ) -> Result<Vec<u8>, String> {
-    let options = partex_xdvipdfmx::api::Options {
+    let options = phitex_xdvipdfmx::api::Options {
         pdf_filename: Some(pdf_name.as_bytes().to_vec()),
         source_date_epoch: Some(epoch),
-        ..partex_xdvipdfmx::api::Options::default()
+        ..phitex_xdvipdfmx::api::Options::default()
     };
     let files = Box::new(Files(kpse.clone(), distiller.cloned()));
-    let deflate: partex_xdvipdfmx::obj::Deflate = Box::new(|level, data| crate::pdf::zlib::compress(data, level));
-    partex_xdvipdfmx::api::Session::convert(options, files, deflate, xdv).map_err(|e| e.to_string())
+    let deflate: phitex_xdvipdfmx::obj::Deflate = Box::new(|level, data| crate::pdf::zlib::compress(data, level));
+    phitex_xdvipdfmx::api::Session::convert(options, files, deflate, xdv).map_err(|e| e.to_string())
 }
 
 /// xdvipdfmx's file finder over the build's.
@@ -359,15 +359,15 @@ struct Files(Arc<dyn crate::tfm::Kpse>, Option<Distiller>);
 
 /// xdvipdfmx's distiller as the host runs it (`dpx_file_apply_filter`):
 /// given `dvipdfmx.cfg`'s template (`%i`, `%o`, `%b`, `%v`:
-/// `partex_xdvipdfmx::io::filter_command`), the input's path and bytes and
+/// `phitex_xdvipdfmx::io::filter_command`), the input's path and bytes and
 /// the PDF version (15: 1.5), the PDF it made. The library runs no process
 /// (tests/wall.rs): the CLI and the tests give one.
 pub type Distiller = Arc<dyn Fn(&[u8], &str, &[u8], i32) -> Option<Vec<u8>> + Send + Sync>;
 
-impl partex_xdvipdfmx::io::Files for Files {
-    fn find(&mut self, name: &[u8], format: partex_xdvipdfmx::io::Format, progname: &[u8]) -> Option<Vec<u8>> {
+impl phitex_xdvipdfmx::io::Files for Files {
+    fn find(&mut self, name: &[u8], format: phitex_xdvipdfmx::io::Format, progname: &[u8]) -> Option<Vec<u8>> {
         use crate::tfm::KpseFormat as K;
-        use partex_xdvipdfmx::io::Format as F;
+        use phitex_xdvipdfmx::io::Format as F;
         let f = match format {
             F::Fontmap => K::FontMap,
             F::Type1 => K::Type1,

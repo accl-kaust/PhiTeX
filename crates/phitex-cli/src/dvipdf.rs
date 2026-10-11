@@ -1,13 +1,13 @@
 //! A DVI file shown in the live viewer: made a PDF by dvipdfmx, in
-//! process (`partex-xdvipdfmx`), its files through kpathsea as dvipdfmx
+//! process (`phitex-xdvipdfmx`), its files through kpathsea as dvipdfmx
 //! finds them. Only for the viewer: the build's output is the DVI file.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use partex_kpse::{Format as KpseFormat, Kpse};
-use partex_xdvipdfmx::api::{Options, Session};
-use partex_xdvipdfmx::io::{Files, Format};
+use phitex_kpse::{Format as KpseFormat, Kpse};
+use phitex_xdvipdfmx::api::{Options, Session};
+use phitex_xdvipdfmx::io::{Files, Format};
 
 fn kpse_format(format: Format) -> KpseFormat {
     match format {

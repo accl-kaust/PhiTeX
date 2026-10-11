@@ -16,18 +16,18 @@ pub fn root() -> PathBuf {
 }
 
 /// TeX Live's kpathsea, found from the `tex` on `PATH` (fonts, maps, …).
-fn kpse() -> &'static Mutex<partex_kpse::Kpse> {
-    static K: OnceLock<Mutex<partex_kpse::Kpse>> = OnceLock::new();
+fn kpse() -> &'static Mutex<phitex_kpse::Kpse> {
+    static K: OnceLock<Mutex<phitex_kpse::Kpse>> = OnceLock::new();
     K.get_or_init(|| {
         let dir = std::env::var_os("PATH")
             .and_then(|p| std::env::split_paths(&p).find(|d| d.join("tex").is_file()))
             .unwrap_or_else(|| PathBuf::from("/usr/bin"));
-        Mutex::new(partex_kpse::Kpse::new(&dir, "tex", "pdftex"))
+        Mutex::new(phitex_kpse::Kpse::new(&dir, "tex", "pdftex"))
     })
 }
 
 fn kpse_find(name: &str) -> Option<(Arc<str>, Arc<[u8]>)> {
-    use partex_kpse::Format as F;
+    use phitex_kpse::Format as F;
     let fmt = match Path::new(name).extension().and_then(|e| e.to_str()) {
         Some("tfm") => F::Tfm,
         Some("vf") => F::Vf,

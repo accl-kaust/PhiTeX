@@ -1,4 +1,4 @@
-//! BibTeX and makeindex, in process (`partex-bibtex`, `partex-makeindex`):
+//! BibTeX and makeindex, in process (`phitex-bibtex`, `phitex-makeindex`):
 //! between the runs of a build's fixpoint, as latexmk runs them, on the
 //! `.aux` and `.idx` files the run wrote (held in memory, the build's
 //! written values), their outputs (`.bbl`, `.ind`) given to the next run
@@ -10,7 +10,7 @@ use std::io::{Read as _, Write as _};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 
-use partex_kpse::{Format, Kpse};
+use phitex_kpse::{Format, Kpse};
 
 /// What a tool made for the build: the file the next run reads (`.bbl`,
 /// `.ind`) and its text (TeX's characters), its other file (`.blg`,
@@ -84,7 +84,7 @@ impl ToolFiles<'_> {
     }
 }
 
-impl partex_bibtex::Files for ToolFiles<'_> {
+impl phitex_bibtex::Files for ToolFiles<'_> {
     fn aux(&mut self, name: &[u8]) -> Option<Vec<u8>> {
         let d = self.get(name);
         self.read.push(Lookup::Aux(name.to_vec(), d.as_ref().map(|d| aux_digest(d))));
@@ -104,7 +104,7 @@ impl partex_bibtex::Files for ToolFiles<'_> {
     }
 }
 
-impl partex_makeindex::Files for ToolFiles<'_> {
+impl phitex_makeindex::Files for ToolFiles<'_> {
     fn read(&mut self, name: &[u8]) -> Option<Vec<u8>> {
         let d = self.get(name);
         self.read.push(Lookup::Read(name.to_vec(), d.clone()));
@@ -161,8 +161,8 @@ fn bound(kpse: &mut Kpse, name: &str, default: i64) -> i64 {
 }
 
 /// BibTeX's options, from `texmf.cnf` and the command line.
-fn bib_options(kpse: &mut Kpse, terse: bool, min_crossrefs: i64) -> partex_bibtex::Options {
-    partex_bibtex::Options {
+fn bib_options(kpse: &mut Kpse, terse: bool, min_crossrefs: i64) -> phitex_bibtex::Options {
+    phitex_bibtex::Options {
         terse,
         min_crossrefs,
         max_strings: bound(kpse, "max_strings", 4000),
@@ -226,7 +226,7 @@ impl Tools {
                 }
                 let t = std::time::Instant::now();
                 let opts = bib_options(files.kpse, false, 2);
-                let out = partex_bibtex::run(name.as_bytes(), &opts, &mut files);
+                let out = phitex_bibtex::run(name.as_bytes(), &opts, &mut files);
                 self.bib_last.insert(name.clone(), std::mem::take(&mut files.read));
                 made.push(Made {
                     file: out.bbl.as_ref().map_or(bbl, |f| String::from_utf8_lossy(&f.name).into_owned()),
@@ -247,7 +247,7 @@ impl Tools {
                     continue;
                 }
                 let t = std::time::Instant::now();
-                let out = partex_makeindex::run(&[name.as_bytes().to_vec()], &mi_version(), &mut files);
+                let out = phitex_makeindex::run(&[name.as_bytes().to_vec()], &mi_version(), &mut files);
                 self.mi_last.insert(name.clone(), std::mem::take(&mut files.read));
                 made.push(Made {
                     file: out.ind.as_ref().map_or(ind, |f| String::from_utf8_lossy(&f.name).into_owned()),
@@ -350,7 +350,7 @@ pub fn bibtex_main(args: &[String]) -> ! {
     let opts = bib_options(&mut kpse, terse, min_crossrefs);
     let served = HashMap::new();
     let mut fs = ToolFiles { kpse: &mut kpse, dir: PathBuf::from("."), served: &served, read: Vec::new() };
-    let out = partex_bibtex::run(files[0].as_bytes(), &opts, &mut fs);
+    let out = phitex_bibtex::run(files[0].as_bytes(), &opts, &mut fs);
     for f in [&out.blg, &out.bbl].into_iter().flatten() {
         let name = String::from_utf8_lossy(&f.name).into_owned();
         if let Err(e) = std::fs::write(&name, &f.contents) {
@@ -374,7 +374,7 @@ pub fn makeindex_main(args: &[String]) -> ! {
     let mut kpse = crate::tex::kpse("makeindex", "");
     let served = HashMap::new();
     let mut fs = ToolFiles { kpse: &mut kpse, dir: PathBuf::from("."), served: &served, read: Vec::new() };
-    let out = partex_makeindex::run(&args, &mi_version(), &mut fs);
+    let out = phitex_makeindex::run(&args, &mi_version(), &mut fs);
     let mut failed = false;
     for f in [&out.ind, &out.ilg].into_iter().flatten() {
         let name = String::from_utf8_lossy(&f.name).into_owned();

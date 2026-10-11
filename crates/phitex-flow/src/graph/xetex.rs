@@ -457,7 +457,7 @@ impl Exec<'_> {
 
     /// XeTeX's `last_item` codes (xetex.web §1450–1457).
     fn xe_item(&mut self, k: u8) -> IVal {
-        use partex_otf::xetex::what;
+        use phitex_otf::xetex::what;
         const NOT_NATIVE: &str = "; not a native platform font";
         const NOT_OT: &str = "; not an OpenType Layout font";
         const NOT_AAT_GR: &str = "; not an AAT or Graphite font";
@@ -826,19 +826,19 @@ impl Exec<'_> {
         let (f, diags) = self.env.native_font(name, s, tracing);
         for d in diags {
             let line = match d {
-                partex_otf::xetex::Diagnostic::UnknownFeature { feature, font } => {
+                phitex_otf::xetex::Diagnostic::UnknownFeature { feature, font } => {
                     format!("Unknown feature `{feature}' in font `{font}'.")
                 }
-                partex_otf::xetex::Diagnostic::MappingLoaded { mapping, font } => {
+                phitex_otf::xetex::Diagnostic::MappingLoaded { mapping, font } => {
                     format!("Loaded mapping `{mapping}' for font `{font}'.")
                 }
-                partex_otf::xetex::Diagnostic::MappingNotFound { mapping, font } => {
+                phitex_otf::xetex::Diagnostic::MappingNotFound { mapping, font } => {
                     format!("Font mapping `{mapping}' for font `{font}' not found.")
                 }
-                partex_otf::xetex::Diagnostic::MappingNotUsable { mapping, font } => {
+                phitex_otf::xetex::Diagnostic::MappingNotUsable { mapping, font } => {
                     format!("Font mapping `{mapping}' for font `{font}' not usable;\nbad mapping file or incorrect mapping type.")
                 }
-                partex_otf::xetex::Diagnostic::FontPath(p) => format!(" -> {p}"),
+                phitex_otf::xetex::Diagnostic::FontPath(p) => format!(" -> {p}"),
             };
             self.log_raw(&format!("{}{}{line}", crate::show::RAW, crate::show::NL));
         }

@@ -858,13 +858,13 @@ pub fn vf_file(name: &str) -> Option<Arc<[u8]>> {
     v
 }
 
-/// Shapers (partex-otf's: HarfRust's plans and a memo of results, a cache
+/// Shapers (phitex-otf's: HarfRust's plans and a memo of results, a cache
 /// that never changes a result) lent to whoever shapes a word: a native
 /// word is a pure function of its font, text and direction, and the
 /// shaper only saves building a plan again. Kept here with the font file
 /// cache: no TeX state.
-pub fn with_shaper<R>(f: impl FnOnce(&mut partex_otf::shape::Shaper) -> R) -> R {
-    static POOL: std::sync::OnceLock<std::sync::Mutex<Vec<partex_otf::shape::Shaper>>> = std::sync::OnceLock::new();
+pub fn with_shaper<R>(f: impl FnOnce(&mut phitex_otf::shape::Shaper) -> R) -> R {
+    static POOL: std::sync::OnceLock<std::sync::Mutex<Vec<phitex_otf::shape::Shaper>>> = std::sync::OnceLock::new();
     let pool = POOL.get_or_init(Default::default);
     let mut sh = pool
         .lock()
@@ -987,20 +987,20 @@ impl Kpse for DirKpse {
 }
 
 /// The build's given for XeTeX's native fonts: the installed fonts' index
-/// (what fontconfig lists, partex-otf's `FontIndex`) and the file finder
+/// (what fontconfig lists, phitex-otf's `FontIndex`) and the file finder
 /// (kpathsea's `OPENTYPEFONTS`, `TTFONTS`, the mappings), both given, never
 /// searched for; each load a pure function of (name, size, tracing),
 /// memoised for the build (a fresh `FontManager` per load: no state
 /// crosses loads).
 pub struct Fonts {
-    index: Arc<partex_otf::index::FontIndex>,
+    index: Arc<phitex_otf::index::FontIndex>,
     kpse: Arc<dyn Kpse>,
     distiller: Option<crate::native::Distiller>,
     memo: std::sync::Mutex<std::collections::HashMap<(String, i32, i32), crate::native::Loaded>>,
 }
 
 impl Fonts {
-    pub fn new(index: Arc<partex_otf::index::FontIndex>, kpse: Arc<dyn Kpse>) -> Fonts {
+    pub fn new(index: Arc<phitex_otf::index::FontIndex>, kpse: Arc<dyn Kpse>) -> Fonts {
         Fonts { index, kpse, distiller: None, memo: std::sync::Mutex::default() }
     }
 
@@ -1017,10 +1017,10 @@ impl Fonts {
         self.distiller.as_ref()
     }
 
-    /// The fonts of an index file (partex-otf's `otf-index` output: the
+    /// The fonts of an index file (phitex-otf's `otf-index` output: the
     /// faces fontconfig lists, in its order), found and read by `kpse`.
     pub fn from_index_bytes(index: &[u8], kpse: Arc<dyn Kpse>) -> Option<Fonts> {
-        let idx = partex_otf::index::FontIndex::from_bytes(index)?;
+        let idx = phitex_otf::index::FontIndex::from_bytes(index)?;
         Some(Fonts::new(Arc::new(idx), kpse))
     }
 
@@ -1036,9 +1036,9 @@ impl Fonts {
         if let Some(l) = self.memo.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key) {
             return l.clone();
         }
-        let mut mgr = partex_otf::xetex::fontmgr::FontManager::new(self.index.clone());
+        let mut mgr = phitex_otf::xetex::fontmgr::FontManager::new(self.index.clone());
         let src = Source(&*self.kpse);
-        let (xf, diags) = partex_otf::xetex::find_native_font(&mut mgr, &src, name, s, tracing);
+        let (xf, diags) = phitex_otf::xetex::find_native_font(&mut mgr, &src, name, s, tracing);
         let f = xf.map(|xf| {
             // (`load_native_font`: the size asked, or the design size
             // scaled)
@@ -1057,21 +1057,21 @@ impl Fonts {
     }
 }
 
-/// partex-otf's file source over the build's finder.
+/// phitex-otf's file source over the build's finder.
 struct Source<'a>(&'a dyn Kpse);
 
-impl partex_otf::FontSource for Source<'_> {
+impl phitex_otf::FontSource for Source<'_> {
     fn read(&self, path: &str) -> Option<Arc<[u8]>> {
         self.0.read(path)
     }
 
-    fn find_file(&self, name: &str, format: partex_otf::KpseFormat) -> Option<String> {
+    fn find_file(&self, name: &str, format: phitex_otf::KpseFormat) -> Option<String> {
         use KpseFormat as K;
         let f = match format {
-            partex_otf::KpseFormat::OpenType => K::OpenType,
-            partex_otf::KpseFormat::TrueType => K::TrueType,
-            partex_otf::KpseFormat::Type1 => K::Type1,
-            partex_otf::KpseFormat::MiscFonts => K::MiscFonts,
+            phitex_otf::KpseFormat::OpenType => K::OpenType,
+            phitex_otf::KpseFormat::TrueType => K::TrueType,
+            phitex_otf::KpseFormat::Type1 => K::Type1,
+            phitex_otf::KpseFormat::MiscFonts => K::MiscFonts,
         };
         self.0.find(name, f, "xetex")
     }

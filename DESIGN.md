@@ -30,8 +30,8 @@ that version.
   document's structure without TeX, latexdiff natively, git.
 - `phitex-draw`: the viewer's pages from the PDF's bytes.
 - `phitex-codecs`: inflate, MD5, PNG, a PDF reader and its page text.
-- `partex-kpse`, `partex-bibtex`, `partex-makeindex`, `partex-otf`,
-  `partex-xdvipdfmx`: kpathsea, BibTeX, makeindex, OpenType shaping,
+- `phitex-kpse`, `phitex-bibtex`, `phitex-makeindex`, `phitex-otf`,
+  `phitex-xdvipdfmx`: kpathsea, BibTeX, makeindex, OpenType shaping,
   xdvipdfmx, ported as pure libraries.
 
 ---
