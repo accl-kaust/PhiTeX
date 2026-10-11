@@ -12,6 +12,10 @@
 //! a match never reaches past the input's end: `nice_match` is capped by
 //! the lookahead).
 
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+
 const MIN_MATCH: usize = 3;
 const MAX_MATCH: usize = 258;
 const MIN_LOOKAHEAD: usize = MAX_MATCH + MIN_MATCH + 1;

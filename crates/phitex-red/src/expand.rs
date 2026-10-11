@@ -48,7 +48,9 @@ pub fn expand(c: &mut dyn Ctx, t: Tok) {
             let d = *registry().get(id);
             match d.kind {
                 Kind::Expand(f) => f(c, d.code),
-                Kind::If(_) => crate::cond::begin_if(c, id, d.code),
+                Kind::If(_) => {
+                    crate::cond::begin_if(c, id, d.code);
+                }
                 _ => c.back(t),
             }
         }
@@ -1125,6 +1127,7 @@ mod re {
 // ---------------------------------------------------------------- registration
 
 pub fn register(r: &mut Registry) {
+    r.add("relax", 0, Kind::Command(|_, _| {}), 0);
     r.add("expandafter", 0, Kind::Expand(expandafter), 0);
     r.add("noexpand", 0, Kind::Expand(noexpand), 0);
     r.add("csname", 0, Kind::Expand(csname), 0);

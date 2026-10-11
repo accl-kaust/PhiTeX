@@ -31,6 +31,35 @@ const MAX_DIMEN: i32 = 0o7777777777;
 /// `Key::Other(tag::PAGE, DISCARDS)`: `\pagediscards` (`Val::Data(Items)` or `Val::Void`).
 pub const DISCARDS: u32 = 0;
 
+/// `Key::Other(tag::PAGE, n)` read-backs of the fold, answered by it:
+/// `\lastpenalty` `\lastkern` `\lastskip` `\lastnodetype` on the current page
+/// (main vertical list empty), and whether the page is empty.
+pub const LAST_PENALTY: u32 = 1;
+pub const LAST_KERN: u32 = 2;
+pub const LAST_GLUE: u32 = 3;
+pub const LAST_NODE_TYPE: u32 = 4;
+pub const EMPTY: u32 = 5;
+
+pub fn last_penalty(c: &mut dyn Ctx) -> i32 {
+    c.int(&Key::Other(tag::PAGE, LAST_PENALTY))
+}
+pub fn last_kern(c: &mut dyn Ctx) -> i32 {
+    c.int(&Key::Other(tag::PAGE, LAST_KERN))
+}
+pub fn last_glue(c: &mut dyn Ctx) -> Option<Glue> {
+    match c.get(&Key::Other(tag::PAGE, LAST_GLUE)) {
+        Val::Glue(g) => Some(g),
+        _ => None,
+    }
+}
+pub fn last_node_type(c: &mut dyn Ctx) -> i32 {
+    c.int(&Key::Other(tag::PAGE, LAST_NODE_TYPE))
+}
+/// `page_head=page_tail` (nothing on the page, nothing held).
+pub fn page_empty(c: &mut dyn Ctx) -> bool {
+    c.int(&Key::Other(tag::PAGE, EMPTY)) != 0
+}
+
 /// The page quantities, in `Key::Page` order.
 pub const QUANTITIES: &[&str] = &[
     "pagegoal", "pagetotal", "pagestretch", "pagefilstretch", "pagefillstretch",
@@ -290,6 +319,11 @@ impl Fold {
             Key::Page(k) => Some(Val::Int(self.quantity(*k))),
             Key::Mark(c, w) if *w < 3 => Some(Val::Toks(self.mark(*c, *w).unwrap_or_else(|| Arc::from(Vec::new())))),
             Key::Other(t, DISCARDS) if *t == tag::PAGE => Some(self.discards_val()),
+            Key::Other(t, LAST_PENALTY) if *t == tag::PAGE => Some(Val::Int(self.last_penalty)),
+            Key::Other(t, LAST_KERN) if *t == tag::PAGE => Some(Val::Int(self.last_kern)),
+            Key::Other(t, LAST_GLUE) if *t == tag::PAGE => Some(self.last_glue.map_or(Val::Void, Val::Glue)),
+            Key::Other(t, LAST_NODE_TYPE) if *t == tag::PAGE => Some(Val::Int(self.last_node_type)),
+            Key::Other(t, EMPTY) if *t == tag::PAGE => Some(Val::Int(i32::from(self.is_empty()))),
             _ => None,
         }
     }
@@ -461,7 +495,10 @@ impl Fold {
             if w > dimen - rh {
                 w = dimen - rh;
             }
-            let (q, mut best_hd) = crate::boxes::vert_break(&p.list, w, p.split_max_depth);
+            let mut l: Vec<Item> = p.list.to_vec();
+            let vb = crate::boxes::vert_break(&mut l, w, p.split_max_depth);
+            let q = (vb.at < l.len()).then_some(vb.at);
+            let mut best_hd = vb.best_height_plus_depth;
             r.height += best_hd;
             if count != 1000 {
                 best_hd = x_over_n(best_hd, 1000).0.wrapping_mul(count);

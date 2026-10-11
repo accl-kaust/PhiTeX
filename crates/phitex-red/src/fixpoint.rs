@@ -78,6 +78,12 @@ fn file_val(t: Option<&Arc<str>>) -> Val {
     }
 }
 
+impl crate::graph::Answers for RwLock<Answers> {
+    fn answer(&self, _g: &Graph, key: &Key, _at: &crate::term::Thunk) -> Option<Val> {
+        self.read().unwrap().answer(key)
+    }
+}
+
 /// Shared handle the graph consults on every read of a driver key.
 pub type Oracle = Arc<RwLock<Answers>>;
 
@@ -150,7 +156,7 @@ pub fn build(opts: &Options, graph: &mut Graph) -> Converged {
         givens: opts.givens.clone(),
         files: opts.previous.iter().map(|(k, v)| (k.clone(), Some(v.clone()))).collect(),
     }));
-    graph.set_oracle(oracle.clone());
+    graph.set_answers(oracle.clone());
     // A warm graph may hold reads of an older answer set.
     {
         let keys = stale(graph, &oracle.read().unwrap());
@@ -163,7 +169,8 @@ pub fn build(opts: &Options, graph: &mut Graph) -> Converged {
         rounds += 1;
         graph.reduce();
         let (mut written, pages) = collect(graph);
-        for (name, t) in crate::derive::derive(&written) {
+        let list: Vec<(Arc<str>, Arc<str>)> = written.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (name, t) in crate::derive::derive(&list, &|n: &str| graph.find(n)) {
             written.insert(name, t);
         }
         // The next answers: this round's set; names written before but not now read as absent.

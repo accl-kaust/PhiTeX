@@ -15,7 +15,8 @@ fn doc(n: usize) -> String {
 
 fn edit_word(b: &mut Build, src: &str, para: usize) -> Output {
     let at = src.find(&format!("Paragraph {para} has some")).unwrap() + format!("Paragraph {para} has ").len();
-    b.update(vec![Change::Splice { path: "job.tex".into(), start: at, end: at + 4, text: "many".into() }])
+    let e = splice(b, at, at + 4, "many");
+    b.update(vec![e])
 }
 
 #[test]
@@ -60,8 +61,10 @@ fn edit_and_undo_restores_bytes() {
     let src = doc(15);
     let (mut b, first) = build_with(opts(false, true), &src, &[]);
     let at = src.find("Paragraph 3 has some").unwrap() + "Paragraph 3 has ".len();
-    b.update(vec![Change::Splice { path: "job.tex".into(), start: at, end: at + 4, text: "many".into() }]);
-    let back = b.update(vec![Change::Splice { path: "job.tex".into(), start: at, end: at + 4, text: "some".into() }]);
+    let e = splice(&b, at, at + 4, "many");
+    b.update(vec![e]);
+    let e = splice(&b, at, at + 4, "some");
+    let back = b.update(vec![e]);
     assert_eq!(back.pdf, first.pdf);
 }
 

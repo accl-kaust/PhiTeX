@@ -1047,7 +1047,8 @@ fn is_math_shift(c: &mut dyn Ctx, t: &Option<Tok>) -> bool {
 
 /// Finish an alignment in a display (tex.web 1206–1207).
 fn finish_display(c: &mut dyn Ctx, items: Vec<Item>, aux: i32) {
-    let t = crate::assign::do_assignments(c);
+    crate::list::do_assignments(c);
+    let t = c.next_x();
     if !is_math_shift(c, &t) {
         if let Some(t) = t {
             c.back(t);

@@ -298,7 +298,7 @@ fn in_key(i: &Input) -> InKey {
 }
 
 fn reads_hold(g: &Graph, t: &Thunk, n: &Node) -> bool {
-    n.reads.iter().all(|r| crate::graph::read_holds(g, t, r))
+    n.reads.iter().all(|r| g.holds(t, &r.0, &r.1))
 }
 
 /// Applies `changes` to the chain: returns the new chain and what changed.
@@ -383,7 +383,10 @@ pub fn update(graph: &Graph, old: &Chain, changes: &Changes) -> (Chain, Report) 
                 counterpart = None;
             }
         }
-        let Some(node) = crate::graph::reduce(graph, &thunk) else { break };
+        if Graph::done(&thunk) || graph.halted() {
+            break;
+        }
+        let node = (*graph.reduce_one(&thunk)).clone();
         let origin = match counterpart {
             // same items (definitions may differ: later nodes' reads decide): folds see no change
             Some(j) if old.nodes[j].out.emits == node.out.emits => {
@@ -415,5 +418,15 @@ pub fn update(graph: &Graph, old: &Chain, changes: &Changes) -> (Chain, Report) 
 }
 
 fn graph_halted(g: &Graph) -> bool {
-    crate::graph::halted(g)
+    g.halted()
+}
+
+/// Un-reduces the main chain from the first node that read one of `keys`
+/// (their answers changed: a loop-back file, an editor buffer); the next
+/// `Graph::reduce` re-reduces from there (memo hits keep what still holds).
+pub fn invalidate_reads(g: &Graph, keys: &[crate::val::Key]) {
+    let nodes = g.nodes();
+    if let Some(i) = nodes.iter().position(|n| n.reads.iter().any(|(k, _)| keys.contains(k))) {
+        g.truncate_chain(i);
+    }
 }

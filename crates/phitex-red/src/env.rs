@@ -43,6 +43,9 @@ pub struct Delta(pub Vec<Change>);
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
     Def { key: Key, val: Val, global: bool },
+    /// A change where the value lives (TeX's direct `eqtb` store, e.g.
+    /// `box(n):=null` by `\box`): no save entry, the entry keeps its level.
+    Replace { key: Key, val: Val },
     OpenGroup(GroupKind),
     /// Closing the innermost group: its local definitions go, `\aftergroup`
     /// tokens are pushed onto the input by the closer.

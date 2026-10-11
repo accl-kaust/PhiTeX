@@ -309,10 +309,8 @@ pub fn register(r: &mut Registry) {
         ("pdfrestore", RESTORE),
         ("pdfsetrandomseed", SETRANDOMSEED),
         ("pdfresettimer", RESETTIMER),
-        ("pdfglyphtounicode", G2U),
-        ("pdfmapfile", MAPFILE),
-        ("pdfmapline", MAPLINE),
-        ("pdfnoligatures", NOLIG),
+        // `\pdfglyphtounicode` `\pdfmapfile` `\pdfmapline`: pdffont.rs's;
+        // `\pdfnoligatures`: font.rs's.
         ("quitvmode", QUITVMODE),
     ];
     for &(n, code) in cmds {
@@ -777,13 +775,15 @@ fn do_ximage(c: &mut dyn Ctx, immediate: bool) {
         return;
     };
     let res = c.int(&Key::IntPar(ip::of("pdfimageresolution")));
-    let info = match crate::image::info(&name, &bytes, page, named.as_deref(), pagebox, res) {
-        Ok(i) => i,
-        Err(e) => {
-            error(c, &format!("pdfTeX error (\\pdfximage): {e}"), &[]);
-            return;
-        }
-    };
+    let mut iparams = crate::image::Params::read(c);
+    iparams.image_resolution = res;
+    // GAP: `named` pages are not looked up by image.rs (page number only).
+    let req = crate::image::Request { page: page as i32, page_box: i32::from(pagebox) };
+    let info = crate::image::info_with(&bytes, &req, &iparams);
+    if let Some(e) = &info.error {
+        error(c, &format!("pdfTeX error (\\pdfximage): {e}"), &[]);
+        return;
+    }
     let (x, y) = (info.width, info.height);
     // pdftex `scale_image`
     if w == RUNNING && h == RUNNING && d == RUNNING {
@@ -822,12 +822,12 @@ fn do_ximage(c: &mut dyn Ctx, immediate: bool) {
         height: h,
         depth: d,
         pages: info.pages,
-        colordepth: info.colordepth,
+        colordepth: i32::from(info.bits),
     };
     set_obj(c, id, PdfObj::Image(Arc::new(img)));
     c.define(Key::PdfLast(L_XIMAGE), Val::Int(id as i32), true);
     c.define(Key::PdfLast(L_XIMAGE_PAGES), Val::Int(info.pages), true);
-    c.define(Key::PdfLast(L_XIMAGE_DEPTH), Val::Int(info.colordepth), true);
+    c.define(Key::PdfLast(L_XIMAGE_DEPTH), Val::Int(i32::from(info.bits)), true);
 }
 
 fn do_refximage(c: &mut dyn Ctx) {

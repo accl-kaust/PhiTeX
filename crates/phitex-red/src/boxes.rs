@@ -17,7 +17,7 @@ use crate::tok::Tok;
 use crate::val::{Glue, Key, Meaning, Val};
 
 /// Module tag for `Key::Other` (boxes).
-pub const TAG: u8 = 11;
+pub const TAG: u8 = crate::prim::tag::BOXES;
 const IGNORE_DEPTH: i32 = -65_536_000;
 const AWFUL_BAD: i32 = 0o7777777777;
 const INF_BAD: i32 = 10_000;
@@ -40,12 +40,12 @@ pub fn split_discards_key() -> Key {
 const MAKE_BOX: [(&str, u16); 7] =
     [("box", 0), ("copy", 1), ("lastbox", 2), ("vsplit", 3), ("vtop", 4), ("vbox", 5), ("hbox", 6)];
 const MOVES: [(&str, u16); 4] = [("moveright", 0), ("moveleft", 1), ("lower", 2), ("raise", 3)];
-const UNPACK: [(&str, u16, u8); 6] = [
+// `\pagediscards` (code 4) is page.rs's (the fold holds the discards).
+const UNPACK: [(&str, u16, u8); 5] = [
     ("unhbox", 0, 0),
     ("unhcopy", 1, 0),
     ("unvbox", 2, 0),
     ("unvcopy", 3, 0),
-    ("pagediscards", 4, 1),
     ("splitdiscards", 5, 1),
 ];
 
@@ -481,8 +481,7 @@ fn box_end_item(c: &mut dyn Ctx, ctx: BoxContext, it: Option<Item>) {
                 c.define(Key::SpaceFactor, Val::Int(1000), false);
                 c.item(Item::Box(b));
             } else {
-                let n = crate::math::box_noad(b);
-                c.item(n);
+                crate::math::box_noad(c, b);
             }
         }
         BoxContext::SetBox(n, g) => {

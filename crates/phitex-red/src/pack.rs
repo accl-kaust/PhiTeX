@@ -159,9 +159,9 @@ pub fn hpack_with(list: Vec<Item>, spec: Spec, p: &Params, fonts: &dyn crate::fo
                 d = d.max(*rd);
             }
             Item::Unset(u) => {
-                x = x.wrapping_add(u.width());
-                h = h.max(u.height());
-                d = d.max(u.depth());
+                x = x.wrapping_add(u.width);
+                h = h.max(u.height);
+                d = d.max(u.depth);
             }
             Item::Ins(_) | Item::Mark { .. } if migrate => {
                 adjust.push(it);
@@ -233,9 +233,9 @@ pub fn vpack(list: Vec<Item>, spec: Spec, max_depth: i32, p: &Params) -> Packed 
                 w = w.max(*rw);
             }
             Item::Unset(u) => {
-                x = x.wrapping_add(d).wrapping_add(u.height());
-                d = u.depth();
-                w = w.max(u.width());
+                x = x.wrapping_add(d).wrapping_add(u.height);
+                d = u.depth;
+                w = w.max(u.width);
             }
             Item::Glue { g, leader, .. } => {
                 x = x.wrapping_add(d);

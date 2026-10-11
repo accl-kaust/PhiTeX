@@ -68,7 +68,7 @@ pub fn group_code(k: GroupKind) -> i32 {
 /// mode a math group (C5's).
 pub fn left_brace(c: &mut dyn Ctx) {
     if matches!(c.mode(), Mode::Math { .. }) {
-        crate::math::math_left_brace(c);
+        crate::math::left_brace(c);
     } else {
         c.open_group(GroupKind::Simple);
     }

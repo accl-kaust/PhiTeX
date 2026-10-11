@@ -136,14 +136,7 @@ pub fn register(r: &mut Registry) {
     r.add("vcenter", 0, Kind::Command(cmd_vcenter), 0);
     r.add("eqno", 0, Kind::Command(cmd_eqno), 0);
     r.add("leqno", 1, Kind::Command(cmd_eqno), 0);
-    r.add("textfont", 0, Kind::Quantity { level: Level::Ident, key: fam_key }, 0);
-    r.add("scriptfont", 1, Kind::Quantity { level: Level::Ident, key: fam_key }, 0);
-    r.add("scriptscriptfont", 2, Kind::Quantity { level: Level::Ident, key: fam_key }, 0);
-}
-
-fn fam_key(c: &mut dyn Ctx, code: u16) -> Key {
-    let f = crate::scan::scan_four_bit_int(c);
-    Key::FamFont(code as u8, f)
+    // `\textfont` `\scriptfont` `\scriptscriptfont`: registered by assign.rs.
 }
 
 // ------------------------------------------------------------------ helpers
@@ -962,6 +955,13 @@ fn is_math_shift(c: &mut dyn Ctx, t: Tok) -> bool {
     classify(c, t) == Cl::MathShift
 }
 
+/// `flush_math` (tex.web 719): the current math list's contents are dropped.
+pub fn flush_math(c: &mut dyn Ctx) {
+    let m = c.mode();
+    let _ = c.close_list();
+    c.open_list(m);
+}
+
 /// `$` in any mode (the token itself is `t`).
 pub fn math_shift(c: &mut dyn Ctx, t: Tok) {
     match c.mode() {
@@ -1340,7 +1340,7 @@ fn norm_min(h: i32) -> i32 {
     h.clamp(1, 63)
 }
 
-fn resume_after_display(c: &mut dyn Ctx) {
+pub fn resume_after_display(c: &mut dyn Ctx) {
     c.close_group();
     let pg = c.int(&Key::PrevGraf);
     c.define(Key::PrevGraf, Val::Int(pg + 3), false);

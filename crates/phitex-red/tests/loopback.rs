@@ -36,12 +36,8 @@ fn no_loopback_one_round() {
 fn edit_that_moves_label_reconverges() {
     let (mut b, _) = build_with(opts(false, true), DOC, &[]);
     let at = DOC.find("Second.").unwrap();
-    let out = b.update(vec![Change::Splice {
-        path: "job.tex".into(),
-        start: at,
-        end: at,
-        text: "Extra.\\par\\penalty-10000 ".into(),
-    }]);
+    let e = splice(&b, at, at, "Extra.\\par\\penalty-10000 ");
+    let out = b.update(vec![e]);
     assert!(out.rounds <= 3, "rounds = {}", out.rounds);
     assert!(msgs(&out).iter().any(|s| s == "ref=3"), "{:?}", msgs(&out));
 }

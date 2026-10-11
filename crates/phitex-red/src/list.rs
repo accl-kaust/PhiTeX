@@ -357,7 +357,7 @@ pub fn char_like(c: &mut dyn Ctx, t: Tok, ch: u16) {
     match c.mode() {
         Mode::Vertical { .. } => back_into_paragraph(c, t),
         Mode::Horizontal { .. } => main_loop(c, ch, false),
-        Mode::Math { .. } => crate::math::set_math_char_code(c, ch),
+        Mode::Math { .. } => crate::math::letter(c, u32::from(ch)),
     }
 }
 
@@ -373,7 +373,7 @@ fn char_num_cmd(c: &mut dyn Ctx, _code: u16) {
         }
         Mode::Math { .. } => {
             let ch = scan::scan_char_num(c);
-            crate::math::set_math_char_code(c, ch);
+            crate::math::letter(c, u32::from(ch));
         }
     }
 }
@@ -805,7 +805,7 @@ fn accent_cmd(c: &mut dyn Ctx, _code: u16) {
             let t = self_tok(c, "accent");
             back_into_paragraph(c, t);
         }
-        Mode::Math { .. } => crate::math::math_ac(c),
+        Mode::Math { .. } => crate::math::math_ac(c, true),
         Mode::Horizontal { .. } => make_accent(c),
     }
 }
@@ -1347,7 +1347,7 @@ fn start_par_cmd(c: &mut dyn Ctx, code: u16) {
                     c.item(Item::Box(b));
                     set_space_factor(c, 1000);
                 } else {
-                    crate::math::append_box_noad(c, b);
+                    crate::math::box_noad(c, b);
                 }
             }
         }
@@ -1406,6 +1406,15 @@ pub enum Para {
     Empty,
     /// Broken into lines, emitted to the enclosing vertical list; its last line.
     Broken(Option<Arc<BoxNode>>),
+}
+
+/// `line_break(display_widow_penalty)` before a display: the paragraph's
+/// last line (`None`: the paragraph was empty).
+pub fn display_break(c: &mut dyn Ctx) -> Option<Arc<BoxNode>> {
+    match finish_paragraph(c, true) {
+        Para::Broken(l) => l,
+        Para::Empty => None,
+    }
 }
 
 /// Closes the current paragraph list and breaks it into lines appended to the
@@ -1522,6 +1531,15 @@ pub fn line_params(
     };
     let etex = c.etex();
     let empty = || -> Arc<[i32]> { Arc::from(Vec::new()) };
+    let mut lp_codes = std::collections::BTreeMap::new();
+    let mut rp_codes = std::collections::BTreeMap::new();
+    for (which, f, ch, v) in font_codes {
+        if which == crate::font::code::LP {
+            lp_codes.insert((f, ch), v);
+        } else if which == crate::font::code::RP {
+            rp_codes.insert((f, ch), v);
+        }
+    }
     crate::linebreak::LineParams {
         pretolerance: ipar(c, "pretolerance"),
         tolerance: ipar(c, "tolerance"),
@@ -1535,15 +1553,18 @@ pub fn line_params(
         final_hyphen_demerits: ipar(c, "finalhyphendemerits"),
         inter_line_penalty: ipar(c, "interlinepenalty"),
         club_penalty: ipar(c, "clubpenalty"),
-        widow_penalty: if display { ipar(c, "displaywidowpenalty") } else { ipar(c, "widowpenalty") },
+        widow_penalty: ipar(c, "widowpenalty"),
+        display_widow_penalty: ipar(c, "displaywidowpenalty"),
         broken_penalty: ipar(c, "brokenpenalty"),
         inter_line_penalties: if etex { ints(c, Key::PenShape(0)) } else { empty() },
         club_penalties: if etex { ints(c, Key::PenShape(1)) } else { empty() },
-        widow_penalties: if etex { ints(c, Key::PenShape(if display { 3 } else { 2 })) } else { empty() },
+        widow_penalties: if etex { ints(c, Key::PenShape(2)) } else { empty() },
+        display_widow_penalties: if etex { ints(c, Key::PenShape(3)) } else { empty() },
+        display,
         hsize: dpar(c, "hsize"),
         hang_indent: dpar(c, "hangindent"),
         hang_after: ipar(c, "hangafter"),
-        par_shape,
+        parshape: par_shape,
         left_skip: gpar(c, "leftskip"),
         right_skip: gpar(c, "rightskip"),
         par_fill_skip: gpar(c, "parfillskip"),
@@ -1554,17 +1575,17 @@ pub fn line_params(
         prev_graf,
         last_line_fit: if etex { ipar(c, "lastlinefit") } else { 0 },
         uc_hyph: ipar(c, "uchyph"),
-        init_lang,
-        init_lhm,
-        init_rhm,
-        langs,
-        hyphen_chars,
-        lc_codes,
+        lang: i32::from(init_lang),
+        lhm: i32::from(init_lhm),
+        rhm: i32::from(init_rhm),
+        langs: langs.into_iter().map(|(l, p, e)| (l, (p, e))).collect(),
+        hyphen_chars: hyphen_chars.into_iter().collect(),
+        lc: lc_codes.into_iter().collect(),
         adjust_spacing,
         protrude_chars,
-        font_codes,
+        lp_codes,
+        rp_codes,
         pack: crate::boxes::read_params(c),
-        tracing_paragraphs: ipar(c, "tracingparagraphs"),
     }
 }
 

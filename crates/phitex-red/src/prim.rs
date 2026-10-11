@@ -78,8 +78,31 @@ impl Registry {
         crate::output::register(&mut r);
         crate::io::register(&mut r);
         crate::pdfprim::register(&mut r);
+        crate::pdffont::register(&mut r);
         crate::diag::register(&mut r);
         r
+    }
+}
+
+/// The session's registry: no name registered twice.
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn no_duplicate_names() {
+        let r = super::registry();
+        let mut seen = std::collections::HashMap::new();
+        let mut dups = Vec::new();
+        for d in &r.defs {
+            if seen.insert(d.name, ()).is_some() {
+                dups.push(d.name);
+            }
+        }
+        assert!(dups.is_empty(), "registered twice: {dups:?}");
+    }
+
+    #[test]
+    fn relax_registered() {
+        assert!(super::registry().by_name("relax").is_some());
     }
 }
 
@@ -101,6 +124,7 @@ pub mod tag {
     pub const LIST: u8 = 8;
     pub const DIAG: u8 = 9;
     pub const EXPAND: u8 = 10;
+    pub const BOXES: u8 = 11;
 }
 
 /// Integer parameters (tex.web 236, then e-TeX, then pdfTeX).

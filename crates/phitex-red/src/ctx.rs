@@ -41,6 +41,9 @@ pub trait Ctx {
         self.get(key).int()
     }
     fn define(&mut self, key: Key, val: Val, global: bool);
+    /// Changes `key` where it lives (no save entry, not affected by `\global`):
+    /// TeX's direct `box(n):=…`.
+    fn replace(&mut self, key: Key, val: Val);
     /// `\globaldefs` applied by the caller; this is the raw change.
     fn open_group(&mut self, kind: GroupKind);
     /// Closes the innermost group, pushing its `\aftergroup` tokens.

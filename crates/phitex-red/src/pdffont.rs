@@ -1634,12 +1634,12 @@ impl FontSet {
             for &i in idxs {
                 let (first, last, widths) = self.widths(i, used, size);
                 let wobj = w.alloc();
-                w.object(wobj, widths.as_bytes());
+                w.write_obj(wobj, widths.as_bytes());
                 let body = format!(
                     "<< /Type /Font\n/Subtype /Type1\n/BaseFont /{}\n/FirstChar {first}\n/LastChar {last}\n/Widths {wobj} 0 R\n>>",
                     pdf_name(tfm)
                 );
-                w.object(self.insts[i].obj, body.as_bytes());
+                w.write_obj(self.insts[i].obj, body.as_bytes());
             }
             return;
         };
@@ -1736,7 +1736,7 @@ impl FontSet {
                     };
                     if let Some(b) = built {
                         let o = w.alloc();
-                        w.stream(o, &b.dict, &b.data);
+                        w.write_encoded(o, &b.dict, &b.data, false);
                         file_ref = Some(("FontFile", o));
                         if !b.tag.is_empty() {
                             base_name = format!("{}+{}", b.tag, ps_name);
@@ -1794,7 +1794,7 @@ impl FontSet {
                                 }
                             };
                             let o = w.alloc();
-                            w.stream(o, &b.dict, &b.data);
+                            w.write_encoded(o, &b.dict, &b.data, false);
                             file_ref = Some((if truetype { "FontFile2" } else { "FontFile3" }, o));
                         }
                         if truetype {
@@ -1840,7 +1840,7 @@ impl FontSet {
                 d.push_str(&format!("/{k} {f} 0 R\n"));
             }
             d.push_str(">>");
-            w.object(o, d.as_bytes());
+            w.write_obj(o, d.as_bytes());
             Some(o)
         };
         // --- /Encoding: /Differences for the used codes
@@ -1858,7 +1858,7 @@ impl FontSet {
                     prev = Some(c);
                 }
                 s.push_str("]\n>>");
-                w.object(o, s.as_bytes());
+                w.write_obj(o, s.as_bytes());
                 Some(o)
             }
             _ => None,
@@ -1880,7 +1880,7 @@ impl FontSet {
                 let cmap = tounicode_cmap(&cname, &m);
                 let (z, d) = stream_data(cmap.as_bytes(), opts.compress_level);
                 let o = w.alloc();
-                w.stream(o, flate(z).trim_start(), &d);
+                w.write_encoded(o, flate(z).trim_start(), &d, false);
                 tu_obj = Some(o);
             }
         }
@@ -1888,7 +1888,7 @@ impl FontSet {
         for &i in idxs {
             let (first, last, widths) = self.widths(i, used, size);
             let wobj = w.alloc();
-            w.object(wobj, widths.as_bytes());
+            w.write_obj(wobj, widths.as_bytes());
             let mut d = format!(
                 "<< /Type /Font\n/Subtype /{subtype}\n/BaseFont /{}\n/FirstChar {first}\n/LastChar {last}\n/Widths {wobj} 0 R\n",
                 pdf_name(&base_name)
@@ -1903,7 +1903,7 @@ impl FontSet {
                 d.push_str(&format!("/ToUnicode {o} 0 R\n"));
             }
             d.push_str(">>");
-            w.object(self.insts[i].obj, d.as_bytes());
+            w.write_obj(self.insts[i].obj, d.as_bytes());
         }
     }
 

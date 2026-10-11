@@ -152,11 +152,8 @@ struct PageAnswers {
 }
 
 impl Answers for PageAnswers {
-    fn answer(&self, key: &Key) -> Option<Val> {
-        match key {
-            Key::Page(k) => Some(Val::Int(self.fold.quantity(*k))),
-            _ => None,
-        }
+    fn answer(&self, _g: &Graph, key: &Key, _at: &Thunk) -> Option<Val> {
+        self.fold.answer(key)
     }
 }
 
@@ -370,7 +367,7 @@ impl Sched {
             }
             // Reduce one real node.
             let ans = PageAnswers { fold: fold.clone() };
-            let node = graph.reduce_one(&cur, &ans, &self.halt);
+            let node = (*graph.reduce_with(&cur, &ans, &self.halt)).clone();
             feed(&mut fold, &cur.env, main_depth, &node);
             cur = node.next.clone();
             let end = ended(&node);
@@ -435,14 +432,14 @@ impl Sched {
                 if budget.load(Ordering::Relaxed) >= max_nodes {
                     break;
                 }
-                let n = g.reduce_one(&t, &ans, &c.cancel);
+                let n = g.reduce_with(&t, &ans, &c.cancel);
                 if c.cancel.load(Ordering::Relaxed) {
                     break;
                 }
                 let end = ended(&n);
                 t = n.next.clone();
                 budget.fetch_add(1, Ordering::Relaxed);
-                c.nodes.lock().unwrap().push(n);
+                c.nodes.lock().unwrap().push((*n).clone());
                 if end {
                     break;
                 }
@@ -515,7 +512,12 @@ fn feed(fold: &mut Fold, env: &Env, main_depth: u32, node: &Node) {
         match e {
             Emit::Open(_) => d += 1,
             Emit::Close => d = d.saturating_sub(1),
-            _ if d == main_depth => fold.step(e),
+            Emit::Item(it) if d == main_depth => {
+                // GAP: a fire (`page::Fire`) is not applied here: the output
+                // routine's node (`Op::Fire`, `output::fire`) is not wired yet.
+                let (f, _fire) = crate::page::step(fold, it, &mut |k: &Key| env.lookup(k));
+                *fold = f;
+            }
             _ => {}
         }
     }

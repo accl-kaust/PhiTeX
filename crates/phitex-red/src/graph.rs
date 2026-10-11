@@ -342,6 +342,10 @@ impl EnvRep {
     fn apply_change(&mut self, c: &Change) {
         match c {
             Change::Def { key, val, global } => self.define(key, val, *global),
+            Change::Replace { key, val } => {
+                let level = self.entry(key).level;
+                self.defs = self.defs.insert(key.clone(), Entry { val: val.clone(), level });
+            }
             Change::OpenGroup(kind) => {
                 let depth = self.depth() + 1;
                 self.group = Some(Arc::new(GroupFrame { kind: *kind, depth, saves: None, after: None, up: self.group.clone() }));
@@ -676,7 +680,16 @@ pub struct Graph {
     memo_on: bool,
     halted: AtomicBool,
     relax: Option<PrimId>,
+    // ---- the build's main chain (api.rs / fixpoint.rs / edit.rs)
+    root: RwLock<Option<Thunk>>,
+    chain: RwLock<Vec<Arc<Node>>>,
+    /// The texts as the chain was last reduced from them.
+    reduced_texts: RwLock<HashMap<TextId, Arc<str>>>,
+    finder: RwLock<Option<Finder>>,
 }
+
+/// The file finder: a name as TeX asks for it → (the found name, its bytes).
+pub type Finder = Arc<dyn Fn(&str) -> Option<(Arc<str>, Arc<[u8]>)> + Send + Sync>;
 
 impl Graph {
     pub fn new(opts: GraphOpts) -> Graph {
@@ -691,6 +704,94 @@ impl Graph {
             memo_on: opts.memo,
             halted: AtomicBool::new(false),
             relax: crate::prim::registry().by_name("relax"),
+            root: RwLock::new(None),
+            chain: RwLock::new(Vec::new()),
+            reduced_texts: RwLock::new(HashMap::new()),
+            finder: RwLock::new(None),
+        }
+    }
+
+    // ---- the build's main chain
+
+    /// Files are looked up through `f` (else read from disk).
+    pub fn set_finder(&self, f: Finder) {
+        *self.finder.write().unwrap() = Some(f);
+    }
+    /// An input file's bytes through the finder (or the disk).
+    pub fn find(&self, name: &str) -> Option<Arc<[u8]>> {
+        let f = self.finder.read().unwrap().clone();
+        match f {
+            Some(f) => f(name).map(|(_, b)| b),
+            None => std::fs::read(name).ok().map(Arc::from),
+        }
+    }
+    /// Registers a source text; its id.
+    pub fn add_text(&self, name: Arc<str>, data: Arc<str>) -> TextId {
+        self.intern_text(name, data)
+    }
+    /// Text `id` is now `data` (the chain still holds the old one until re-reduced).
+    pub fn set_text(&self, id: TextId, data: Arc<str>) {
+        let mut t = self.texts.lock().unwrap();
+        if let Some(e) = t.list.get_mut(id as usize) {
+            e.1 = data;
+        }
+    }
+    /// Text `id` as the chain was last reduced from it.
+    pub fn reduced_text(&self, id: TextId) -> Option<Arc<str>> {
+        self.reduced_texts.read().unwrap().get(&id).cloned()
+    }
+    /// The root thunk of the main chain; the chain is emptied.
+    pub fn set_root(&self, t: Thunk) {
+        *self.root.write().unwrap() = Some(t);
+        self.chain.write().unwrap().clear();
+    }
+    /// The main chain's nodes, in order.
+    pub fn nodes(&self) -> Vec<Arc<Node>> {
+        self.chain.read().unwrap().clone()
+    }
+    /// The main chain as `edit.rs` takes it.
+    pub fn chain(&self) -> crate::edit::Chain {
+        let start = self.root.read().unwrap().clone().unwrap_or_else(|| self.start(self.initial_env(), Input::default()));
+        crate::edit::Chain { start, nodes: self.chain.read().unwrap().iter().map(|n| (**n).clone()).collect() }
+    }
+    /// Replaces the main chain (after `edit::update`).
+    pub fn set_chain(&self, c: crate::edit::Chain) {
+        *self.root.write().unwrap() = Some(c.start);
+        *self.chain.write().unwrap() = c.nodes.into_iter().map(Arc::new).collect();
+    }
+    /// Keeps the first `n` nodes of the main chain.
+    pub fn truncate_chain(&self, n: usize) {
+        self.chain.write().unwrap().truncate(n);
+    }
+    /// Nodes made in this graph so far (memo hits included).
+    pub fn nodes_reduced(&self) -> usize {
+        self.len()
+    }
+    /// The thunk after the main chain's last node.
+    fn chain_end(&self) -> Option<Thunk> {
+        match self.chain.read().unwrap().last() {
+            Some(n) => Some(n.next.clone()),
+            None => self.root.read().unwrap().clone(),
+        }
+    }
+    /// The env after the main chain (the job's end env once reduced).
+    pub fn end_env(&self) -> Env {
+        self.chain_end().map_or_else(|| self.initial_env(), |t| t.env)
+    }
+    /// Reduces the main chain to the job's end (sequentially).
+    pub fn reduce(&self) {
+        {
+            let t = self.texts.lock().unwrap();
+            let mut r = self.reduced_texts.write().unwrap();
+            for (i, (_, d)) in t.list.iter().enumerate() {
+                r.insert(i as TextId, d.clone());
+            }
+        }
+        let Some(mut t) = self.chain_end() else { return };
+        while !Graph::done(&t) && !self.halted() {
+            let n = self.reduce_one(&t);
+            t = n.next.clone();
+            self.chain.write().unwrap().push(n);
         }
     }
 
@@ -777,6 +878,16 @@ impl Graph {
             self.memo.insert(&t.input, n.clone());
         }
         n
+    }
+
+    /// Reduces `t` into one node with answers `ans` over the graph's and a
+    /// cancel flag (speculation); never memoised.
+    pub fn reduce_with<'a>(&'a self, t: &Thunk, ans: &'a dyn Answers, cancel: &'a AtomicBool) -> Arc<Node> {
+        let mut r = Reducing::new(self, t);
+        r.over = Some(ans);
+        r.cancel = Some(cancel);
+        let op = r.step();
+        r.finish(op)
     }
 
     /// The job has nothing more to reduce from `t`.
@@ -876,11 +987,14 @@ impl Graph {
             }
         }
         match key {
-            Key::File(n) => match std::fs::read(&**n) {
-                Ok(b) => Val::Bytes(b.into()),
-                Err(_) => Val::Void,
+            Key::File(n) => match self.find(n) {
+                Some(b) => Val::Bytes(b),
+                None => Val::Void,
             },
             Key::LineNo => Val::Int(line_of(&t.input)),
+            // GAP: with no page fold answering (no `sched::Sched` driving the
+            // build), the page reads as empty.
+            Key::Other(tg, crate::page::EMPTY) if *tg == crate::prim::tag::PAGE => Val::Int(1),
             _ => t.env.lookup(key),
         }
     }
@@ -892,6 +1006,7 @@ impl Graph {
             Key::Other(pk::TAG, n) if pk::class(*n) == pk::class(pk::CHAIN) => self.ext_holds(t, n & 0xffff, v),
             Key::LineNo => Val::Int(line_of(&t.input)) == *v,
             Key::Page(_) | Key::File(_) | Key::JobName | Key::Given(_) => self.answer(k, t) == *v,
+            Key::Other(tg, _) if *tg == crate::prim::tag::PAGE => self.answer(k, t) == *v,
             _ => t.env.lookup(k) == *v,
         }
     }
@@ -990,9 +1105,17 @@ pub struct Reducing<'g> {
     spans: Vec<Span>,
     emits: Vec<Emit>,
     delta: Vec<Change>,
+    /// Per-reduction answers (speculation's snapshot) over the graph's.
+    over: Option<&'g dyn Answers>,
+    /// Per-reduction cancel flag (a speculative chain's).
+    cancel: Option<&'g AtomicBool>,
 }
 
 impl<'g> Reducing<'g> {
+    fn stopped(&self) -> bool {
+        self.g.halted() || self.cancel.is_some_and(|c| c.load(Ordering::Relaxed))
+    }
+
     pub fn new(g: &'g Graph, t: &Thunk) -> Reducing<'g> {
         Reducing {
             g,
@@ -1003,6 +1126,8 @@ impl<'g> Reducing<'g> {
             spans: Vec::new(),
             emits: Vec::new(),
             delta: Vec::new(),
+            over: None,
+            cancel: None,
         }
     }
 
@@ -1019,12 +1144,13 @@ impl<'g> Reducing<'g> {
 
     /// One raw token with its span.
     fn take(&mut self) -> Option<(Tok, Option<Span>)> {
-        if self.g.halted() {
+        if self.stopped() {
             return None;
         }
+        let names = self.g.names.clone();
         let Reducing { env, rec, input, .. } = self;
         let mut f = |k: &Key| rec.get(env, k);
-        match crate::tokenize::next_token(&mut f, input) {
+        match crate::tokenize::next_token(&mut f, &names, input) {
             Some((t, inp, sp)) => {
                 self.input = inp;
                 if let Some(s) = sp {
@@ -1156,20 +1282,19 @@ impl<'g> Reducing<'g> {
                         self.back(t);
                         crate::list::new_graf(self, true);
                     }
-                    Mode::Horizontal { .. } => crate::list::chars(self, t),
-                    Mode::Math { .. } => crate::math::math_char(self, t),
+                    _ => crate::list::char_tok(self, t),
                 }
                 Op::Chars
             }
-            Meaning::MathCharGiven(_) => {
+            Meaning::MathCharGiven(v) => {
                 match self.mode() {
-                    Mode::Math { .. } => crate::math::math_char(self, t),
+                    Mode::Math { .. } => crate::math::math_given(self, v),
                     _ => self.insert_dollar(t),
                 }
                 Op::Chars
             }
             Meaning::Reg(..) | Meaning::Font(_) => {
-                crate::assign::assign_token(self, t, 0);
+                crate::assign::assign_meaning(self, t, 0);
                 self.relax_op()
             }
         }
@@ -1197,7 +1322,7 @@ impl<'g> Reducing<'g> {
                     return;
                 }
                 Meaning::Reg(..) | Meaning::Font(_) => {
-                    crate::assign::assign_token(self, t, p);
+                    crate::assign::assign_meaning(self, t, p);
                     return;
                 }
                 _ => {
@@ -1220,7 +1345,7 @@ impl<'g> Reducing<'g> {
         match crate::macros::match_args(self, t, &f) {
             Some(args) => {
                 let args: Arc<[Toks]> = args.into();
-                let body = self.g.memo.apply(&f, &args, || crate::macros::substitute(&f, &args));
+                let body = self.g.memo.apply(&f, &args, || crate::macros::substitute(&f.body, &args));
                 self.push(body, TokKind::Macro);
                 Op::Apply { f, args }
             }
@@ -1239,20 +1364,20 @@ impl<'g> Reducing<'g> {
                     self.back(t);
                     crate::list::new_graf(self, true);
                 }
-                _ => crate::math::math_shift(self),
+                _ => crate::math::math_shift(self, t),
             },
-            4 => crate::align::align_tab(self, t),
+            4 => crate::align::tab_mark(self, t),
             6 => {
                 let msg = format!("You can't use `macro parameter character #' in {}", Self::mode_name(mode));
                 crate::diag::error(self, &msg, &["Sorry, but I'm not programmed to handle this case;", "I'll just pretend that you didn't ask for it."]);
             }
             7 | 8 => match mode {
-                Mode::Math { .. } => crate::math::sub_sup(self, t),
+                Mode::Math { .. } => crate::math::sub_sup(self, t, cat == 7),
                 _ => self.insert_dollar(t),
             },
             10 => {
                 if let Mode::Horizontal { .. } = mode {
-                    crate::list::chars(self, t);
+                    crate::list::char_tok(self, t);
                 }
             }
             11 | 12 => match mode {
@@ -1260,8 +1385,7 @@ impl<'g> Reducing<'g> {
                     self.back(t);
                     crate::list::new_graf(self, true);
                 }
-                Mode::Horizontal { .. } => crate::list::chars(self, t),
-                Mode::Math { .. } => crate::math::math_char(self, t),
+                _ => crate::list::char_tok(self, t),
             },
             _ => {}
         }
@@ -1381,7 +1505,7 @@ impl Ctx for Reducing<'_> {
                 Meaning::Undefined if matches!(t, Tok::Cs(_) | Tok::Active(_)) => self.undefined(),
                 _ => return Some(t),
             }
-            if self.g.halted() {
+            if self.stopped() {
                 return None;
             }
         }
@@ -1400,7 +1524,7 @@ impl Ctx for Reducing<'_> {
 
     fn push_text(&mut self, name: Arc<str>, data: Arc<str>) -> TextId {
         let id = self.g.intern_text(name, data.clone());
-        self.input = self.input.push(crate::tokenize::open_text(id, data));
+        self.input = self.input.push(crate::tokenize::text_source(id, data));
         id
     }
 
@@ -1468,11 +1592,14 @@ impl Ctx for Reducing<'_> {
                 Val::Data(Arc::new(ItemsDatum { items: t.into_iter().collect(), whole: false }))
             }
             Key::LineNo => Val::Int(self.line_no()),
-            Key::Page(_) | Key::File(_) | Key::JobName | Key::Given(_) => {
+            Key::Page(_) | Key::File(_) | Key::JobName | Key::Given(_) | Key::Other(crate::prim::tag::PAGE, _) => {
                 if self.rec.written.contains(key) {
                     return self.env.lookup(key);
                 }
-                let v = self.g.answer(key, &self.start);
+                let v = match self.over.and_then(|a| a.answer(self.g, key, &self.start)) {
+                    Some(v) => v,
+                    None => self.g.answer(key, &self.start),
+                };
                 self.rec.record(key.clone(), &v);
                 v
             }
@@ -1503,6 +1630,11 @@ impl Ctx for Reducing<'_> {
             self.rec.written.insert(key.clone());
         }
         self.change(Change::Def { key, val, global });
+    }
+
+    fn replace(&mut self, key: Key, val: Val) {
+        self.rec.written.insert(key.clone());
+        self.change(Change::Replace { key, val });
     }
 
     fn open_group(&mut self, kind: GroupKind) {
@@ -1639,6 +1771,6 @@ impl Ctx for Reducing<'_> {
         self.g.pdf
     }
     fn halted(&self) -> bool {
-        self.g.halted()
+        self.stopped()
     }
 }

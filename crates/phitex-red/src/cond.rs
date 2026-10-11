@@ -13,7 +13,7 @@ use crate::ctx::Ctx;
 use crate::env::Mode;
 use crate::prim::{registry, Kind, Level, PrimId, Registry};
 use crate::scan;
-use crate::term::TokKind;
+use crate::term::{Span, TokKind};
 use crate::tok::Tok;
 use crate::val::{Cond, Key, Meaning, Val};
 
@@ -138,7 +138,7 @@ fn cond_meaning(ctx: &mut dyn Ctx, t: &Tok) -> Option<Option<u16>> {
 /// `pass_text`: skips raw to the next `\fi`/`\else`/`\or` at this level
 /// (nesting on every conditional meaning) and consumes it. `None`: the input
 /// ended first ("Incomplete \if").
-fn pass_text(ctx: &mut dyn Ctx) -> Option<u16> {
+fn pass_text(ctx: &mut dyn Ctx, spans: &mut Vec<Span>) -> Option<u16> {
     let mut depth = 0i32;
     loop {
         if ctx.halted() {
@@ -147,7 +147,7 @@ fn pass_text(ctx: &mut dyn Ctx) -> Option<u16> {
         let mut hit: Option<Tok> = None;
         // Only a control sequence or active character can be a conditional;
         // the meaning is looked up here, outside the raw skip.
-        ctx.skip_raw(
+        let sk = ctx.skip_raw(
             &mut |t: &Tok, _d: i32| {
                 if matches!(t, Tok::Cs(_) | Tok::Active(_)) {
                     hit = Some(*t);
@@ -158,6 +158,7 @@ fn pass_text(ctx: &mut dyn Ctx) -> Option<u16> {
             },
             &mut |_t: &Tok| 0,
         );
+        spans.extend(sk);
         let t = hit?;
         match cond_meaning(ctx, &t) {
             Some(None) => depth += 1,
@@ -190,16 +191,25 @@ fn incomplete(ctx: &mut dyn Ctx, line: u32) {
 // ---- the select
 
 /// A conditional primitive `prim` (code `code`) was met while expanding.
-pub fn begin_if(ctx: &mut dyn Ctx, prim: PrimId, code: u16) {
-    begin(ctx, prim, code, false);
+/// Returns the test's value and the span of the arm passed unreduced (if any).
+pub fn begin_if(ctx: &mut dyn Ctx, prim: PrimId, code: u16) -> (bool, Option<Span>) {
+    begin(ctx, prim, code, false)
 }
 
 /// `\unless` followed by `prim`.
-pub fn begin_unless(ctx: &mut dyn Ctx, prim: PrimId, code: u16) {
-    begin(ctx, prim, code, true);
+pub fn begin_unless(ctx: &mut dyn Ctx, prim: PrimId, code: u16) -> (bool, Option<Span>) {
+    begin(ctx, prim, code, true)
 }
 
-fn begin(ctx: &mut dyn Ctx, prim: PrimId, code: u16, negate: bool) {
+/// The skipped spans as one span (first text's extent).
+fn hull(spans: &[Span]) -> Option<Span> {
+    let f = spans.first()?;
+    let to = spans.iter().filter(|s| s.text == f.text).map(|s| s.to).max().unwrap_or(f.to);
+    Some(Span { text: f.text, from: f.from, to })
+}
+
+fn begin(ctx: &mut dyn Ctx, prim: PrimId, code: u16, negate: bool) -> (bool, Option<Span>) {
+    let mut skipped: Vec<Span> = Vec::new();
     let line = ctx.line_no().max(0) as u32;
     let mut c = conds(ctx);
     let idx = c.len();
@@ -209,24 +219,24 @@ fn begin(ctx: &mut dyn Ctx, prim: PrimId, code: u16, negate: bool) {
     if code == IF_CASE {
         let mut n = scan::scan_int(ctx);
         while n != 0 {
-            let Some(k) = pass_text(ctx) else {
+            let Some(k) = pass_text(ctx, &mut skipped) else {
                 incomplete(ctx, line);
                 truncate(ctx, idx);
-                return;
+                return (false, hull(&skipped));
             };
             if conds(ctx).len() == idx + 1 {
                 if k == OR {
                     n -= 1;
                 } else {
                     common_ending(ctx, idx, k);
-                    return;
+                    return (false, hull(&skipped));
                 }
             } else if k == FI {
                 pop(ctx); // a conditional opened during the test
             }
         }
         set_state(ctx, idx, 3);
-        return;
+        return (true, hull(&skipped));
     }
 
     let b = match registry().get(prim).kind {
@@ -235,19 +245,19 @@ fn begin(ctx: &mut dyn Ctx, prim: PrimId, code: u16, negate: bool) {
     } != negate;
     if b {
         set_state(ctx, idx, 1);
-        return;
+        return (true, None);
     }
     // The false arm: pass it; it stays an unreduced thunk.
     loop {
-        let Some(k) = pass_text(ctx) else {
+        let Some(k) = pass_text(ctx, &mut skipped) else {
             incomplete(ctx, line);
             truncate(ctx, idx);
-            return;
+            return (false, hull(&skipped));
         };
         if conds(ctx).len() == idx + 1 {
             if k != OR {
                 common_ending(ctx, idx, k);
-                return;
+                return (false, hull(&skipped));
             }
             crate::diag::error(
                 ctx,
@@ -303,7 +313,7 @@ fn fi_or_else(ctx: &mut dyn Ctx, code: u16) {
     let line = c.last().map_or(0, |x| x.line);
     let mut k = code;
     while k != FI {
-        match pass_text(ctx) {
+        match pass_text(ctx, &mut Vec::new()) {
             Some(n) => k = n,
             None => {
                 incomplete(ctx, line);

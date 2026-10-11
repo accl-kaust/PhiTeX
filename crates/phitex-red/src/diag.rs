@@ -619,7 +619,7 @@ impl BoxShow {
     }
 
     fn font_and_char(&mut self, f: FontId, c: u16) {
-        let id = crate::font::font_id_text(f);
+        let id = font_id_pure(f);
         self.p.esc(&id);
         self.p.s.push(' ');
         self.p.ascii(char::from_u32(c as u32).unwrap_or('?'));
@@ -866,6 +866,13 @@ impl BoxShow {
     }
 }
 
+/// A font's identifier where no `Ctx` is at hand (box displays).
+/// GAP: TeX prints the control sequence `\font` defined (`font_id_text`),
+/// which lives in env; the pure displays print the TFM name instead.
+fn font_id_pure(f: FontId) -> String {
+    crate::font::fonts().font(f).name().to_string()
+}
+
 /// `short_display` (§174): characters, `[]` for boxes, `|` for rules, a
 /// space for glue, `$` for math; the font shown when it changes. `font` is
 /// `font_in_short_display` (None: none yet), updated.
@@ -881,7 +888,7 @@ fn short(p: &mut Printer, list: &[Item], font: &mut Option<FontId>) {
         match it {
             Item::Char { font: f, c } => {
                 if *font != Some(*f) {
-                    let id = crate::font::font_id_text(*f);
+                    let id = font_id_pure(*f);
                     p.esc(&id);
                     p.s.push(' ');
                     *font = Some(*f);
@@ -1178,7 +1185,11 @@ pub fn the_text(c: &mut dyn Ctx) -> String {
         (Level::Ident, Val::Font(f)) => {
             let esc = c.int(&Key::IntPar(ip::of("escapechar")));
             let mut p = Printer::new(esc);
-            p.esc(&crate::font::font_id_text(f));
+            let id = match crate::font::font_id_text(c, f) {
+                Some(Tok::Cs(cs)) => c.names().name(cs).to_string(),
+                _ => font_id_pure(f),
+            };
+            p.esc(&id);
             p.s.push(' ');
             s = p.s;
         }

@@ -49,6 +49,27 @@ pub struct FireIn {
     pub penalty: i32,
 }
 
+impl FireIn {
+    /// The page builder's fire (`page::Fire`) as the output routine's input;
+    /// `None` when there is no box255.
+    pub fn from_fire(f: &crate::page::Fire) -> Option<FireIn> {
+        let empty = || -> Toks { Arc::from(Vec::<Tok>::new()) };
+        Some(FireIn {
+            box255: f.box255.clone()?,
+            inserts: f.inserts.iter().map(|(n, b)| (*n as u8, b.clone())).collect(),
+            marks: f
+                .marks
+                .iter()
+                .map(|(c, m)| {
+                    let g = |i: usize| m[i].clone().unwrap_or_else(empty);
+                    (*c, g(0), g(1), g(2))
+                })
+                .collect(),
+            penalty: f.output_penalty,
+        })
+    }
+}
+
 /// Applies `\output` at a fire (tex.web 1012, 1017, 1023–1025).
 pub fn fire(c: &mut dyn Ctx, f: &FireIn) {
     c.define(Key::IntPar(ip::of("outputpenalty")), Val::Int(f.penalty), true);

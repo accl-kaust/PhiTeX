@@ -8,7 +8,7 @@ fn dvi_case(name: &str) {
     let tex = read(&fixture("dvi", &format!("{name}.tex")));
     let want = std::fs::read(fixture("dvi", &format!("{name}.dvi"))).unwrap();
     let (_, out) = build_with(opts(false, false), &tex, &[]);
-    let got = out.dvi.as_deref().unwrap_or_else(|| panic!("{name}: no DVI; diags {:?}", msgs(&out)));
+    let got = dvi(&out).unwrap_or_else(|| panic!("{name}: no DVI; diags {:?}", msgs(&out)));
     assert!(dvi_body(got) == dvi_body(&want), "{name}: DVI differs ({} vs {} bytes)", got.len(), want.len());
 }
 
@@ -27,7 +27,7 @@ fn pdf_case(name: &str) {
     let tex = read(&fixture("pdf", &format!("{name}.tex")));
     let want = std::fs::read(fixture("pdf", &format!("{name}.pdf"))).unwrap();
     let (_, out) = build_with(opts(false, true), &tex, &[]);
-    let got = out.pdf.as_deref().unwrap_or_else(|| panic!("{name}: no PDF; diags {:?}", msgs(&out)));
+    let got = pdf(&out).unwrap_or_else(|| panic!("{name}: no PDF; diags {:?}", msgs(&out)));
     assert!(got.starts_with(b"%PDF-"), "{name}: not a PDF");
     // Object numbers / resource names may differ (relaxed); pages may not.
     assert_eq!(pdf_pages(got), pdf_pages(&want), "{name}: page count");
@@ -40,14 +40,13 @@ pdf_tests!(pdf_hello, pdf_annot, pdf_rules, pdf_literal, pdf_mag, pdf_misc, pdf_
 /// `\message` output of the core cases equals tex's log (between the
 /// file's open paren and close paren).
 #[test]
-#[ignore = "needs Output::log (terminal transcript), not in the agreed Output yet"]
 fn core_logs() {
     for n in ["arith", "case", "conds", "edef", "expandafter", "futurelet", "groups", "macros", "the"] {
         let tex = read(&fixture("core", &format!("{n}.tex")));
         let want = read(&fixture("core", &format!("{n}.log")));
         let (_, out) = build_with(opts(false, false), &tex, &[]);
         let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-        let got = norm(&out.log);
+        let got = norm(&out.log.join("\n"));
         let w = norm(&want);
         let body = w.split_once(' ').map_or(w.as_str(), |x| x.1).trim_end_matches(')').trim();
         assert!(got.contains(body), "{n}: log differs\n got: {got}\nwant: {body}");

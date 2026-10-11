@@ -39,6 +39,8 @@ pub struct Job<'a> {
     pub creation_date: Arc<str>,
     /// Bytes hashed into `/ID` (job name, date, …).
     pub id_seed: Vec<u8>,
+    /// Support files for fonts (map, enc, pfb, vf …) by name.
+    pub loader: crate::pdffont::Loader,
 }
 
 /// The file and what the job reads back from it.
@@ -1430,7 +1432,7 @@ fn resources(
             let n = match font_objs.get(f) {
                 Some(&n) => n,
                 None => {
-                    let n = fs.obj(w, *f);
+                    let n = fs.resource(w, *f, 0).1;
                     font_objs.insert(*f, n);
                     n
                 }
@@ -1505,7 +1507,7 @@ impl Pdf {
         };
         let mut built = Built::default();
         let mut w = Writer::new(minor, level, objc, pj.ids + 1);
-        let mut fs = crate::pdffont::FontSet::new();
+        let mut fs = crate::pdffont::FontSet::new(job.loader.clone());
 
         // ---- page contents (rendered or reused)
         self.pages.truncate(job.pages.len());
@@ -1603,7 +1605,7 @@ impl Pdf {
         // ---- glyphs
         for o in outs.iter().chain(xouts.iter().map(|x| &x.4)) {
             for (f, c) in &o.glyphs {
-                fs.use_glyph(*f, *c);
+                fs.use_glyph(&mut w, *f, 0, *c);
             }
         }
 
@@ -1915,7 +1917,22 @@ impl Pdf {
         }
 
         // ---- fonts (E5)
-        fs.write(&mut w);
+        {
+            let tag = crate::prim::tag::PDF;
+            let none = Val::Void;
+            let ops = pget(gp, &Key::Other(tag, crate::pdffont::MAP_OPS)).unwrap_or(&none);
+            let gu = pget(gp, &Key::Other(tag, crate::pdffont::GLYPH_UNI)).unwrap_or(&none);
+            let (map_ops, glyph_uni) = crate::pdffont::WriteOpts::from_vals(ops, gu);
+            let fo = crate::pdffont::WriteOpts {
+                compress_level: level,
+                gen_tounicode: ipar(gp, "pdfgentounicode", 0) > 0,
+                omit_charset: ipar(gp, "pdfomitcharset", 0) > 0,
+                map_ops,
+                glyph_uni,
+            };
+            fs.write(&mut w, &fo);
+            built.warnings.extend(fs.take_warnings());
+        }
 
         // ---- pages tree
         {

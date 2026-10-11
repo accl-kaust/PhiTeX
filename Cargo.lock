@@ -1609,6 +1609,7 @@ dependencies = [
  "phitex-doc",
  "phitex-draw",
  "phitex-flow",
+ "phitex-red",
  "tikv-jemallocator",
 ]
 
@@ -1658,6 +1659,18 @@ version = "0.0.0"
 dependencies = [
  "gix",
  "phitex-diff",
+]
+
+[[package]]
+name = "phitex-red"
+version = "0.0.0"
+dependencies = [
+ "partex-bibtex",
+ "partex-kpse",
+ "partex-makeindex",
+ "partex-otf",
+ "phitex-codecs",
+ "phitex-syntax",
 ]
 
 [[package]]

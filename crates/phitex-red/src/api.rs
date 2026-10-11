@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use crate::edit::{Changes, Chain, Origin};
 use crate::env::{Change, Delta, Env};
-use crate::graph::Graph;
+use crate::graph::{Graph, GraphOpts};
+use crate::tok::Names;
 use crate::output::Shipped;
 use crate::term::{Emit, Input, TextId, Thunk};
 use crate::val::{FileName, Key, Val};
@@ -47,7 +48,42 @@ pub enum Format {
 }
 
 /// The file finder: a name as TeX asks for it → (the found name, its bytes).
-pub type Finder = Arc<dyn Fn(&str) -> Option<(Arc<str>, Arc<[u8]>)> + Send + Sync>;
+pub type Finder = crate::graph::Finder;
+
+/// The session's name interner: formats are shared by every build, so the
+/// control-sequence numbers in their envs must be too.
+pub fn names() -> Arc<Names> {
+    static N: OnceLock<Arc<Names>> = OnceLock::new();
+    N.get_or_init(|| Arc::new(Names::default())).clone()
+}
+
+fn new_graph(opts: &Options) -> Graph {
+    // GAP: `sched_opts(opts.threads)` is not used: the graph reduces the main
+    // chain sequentially (`Graph::reduce`); `sched::Sched` is not driven from here.
+    let _ = sched_opts(opts.threads);
+    let g = Graph::new(GraphOpts { etex: opts.engine.etex(), pdf: opts.engine.pdf(), names: names(), answers: None, memo: true });
+    g.set_finder(opts.finder.clone());
+    g
+}
+
+/// pdfTeX's job parameters as the env at the job's end holds them.
+fn end_params(env: &Env) -> Vec<(Key, Val)> {
+    let mut v = Vec::new();
+    for i in 0..crate::prim::ip::NAMES.len() as u16 {
+        v.push((Key::IntPar(i), env.lookup(&Key::IntPar(i))));
+    }
+    for i in 0..crate::prim::dp::NAMES.len() as u16 {
+        v.push((Key::DimenPar(i), env.lookup(&Key::DimenPar(i))));
+    }
+    for i in 0..crate::prim::tp::NAMES.len() as u16 {
+        v.push((Key::TokPar(i), env.lookup(&Key::TokPar(i))));
+    }
+    for k in [crate::pdffont::MAP_OPS, crate::pdffont::GLYPH_UNI] {
+        let key = Key::Other(crate::prim::tag::PDF, k);
+        v.push((key.clone(), env.lookup(&key)));
+    }
+    v
+}
 
 #[derive(Clone)]
 pub struct Options {
@@ -124,7 +160,7 @@ pub struct Build {
     cold: bool,
     last_pages: Vec<Arc<Shipped>>,
     written: BTreeMap<FileName, Arc<str>>,
-    pdf: crate::pdf::Writer,
+    pdf: crate::pdf::Pdf,
 }
 
 // ------------------------------------------------------------------ formats
@@ -169,12 +205,12 @@ fn layered(finder: Finder, buffers: Arc<RwLock<HashMap<Arc<str>, Arc<str>>>>) ->
 }
 
 fn text_thunk(env: Env, text: TextId, data: Arc<str>) -> Thunk {
-    Thunk { env, input: Input::default().push(crate::input::open(text, data)) }
+    Thunk { env, input: Input::default().push(crate::tokenize::text_source(text, data)) }
 }
 
 /// The env a job starts in: iniTeX's, or the format's (reduced once per process).
 pub fn format_env(opts: &Options) -> Result<Env, String> {
-    let ini_env = crate::graph::initial_env(opts.engine.etex(), opts.engine.pdf());
+    let ini_env = crate::graph::initial_env(&names(), opts.engine.etex(), opts.engine.pdf());
     let Some(ini) = ini_file(opts.engine, opts.format) else { return Ok(ini_env) };
     let key = (opts.engine, opts.format);
     if let Some(e) = formats().lock().unwrap().get(&key) {
@@ -182,7 +218,7 @@ pub fn format_env(opts: &Options) -> Result<Env, String> {
     }
     let (_, bytes) = (opts.finder)(ini).ok_or_else(|| format!("{ini}: not found"))?;
     let data: Arc<str> = Arc::from(String::from_utf8_lossy(&bytes).as_ref());
-    let mut g = Graph::new(opts.finder.clone(), opts.engine.etex(), opts.engine.pdf(), sched_opts(opts.threads));
+    let mut g = new_graph(opts);
     let id = g.add_text(Arc::from(ini), data.clone());
     g.set_root(text_thunk(ini_env, id, data));
     let fopts = crate::fixpoint::Options {
@@ -209,7 +245,7 @@ impl Build {
         let finder = layered(opts.finder.clone(), buffers.clone());
         let opts = Options { finder, ..opts };
         let env = format_env(&opts)?;
-        let mut graph = Graph::new(opts.finder.clone(), opts.engine.etex(), opts.engine.pdf(), sched_opts(opts.threads));
+        let graph = new_graph(&opts);
         let main = graph.add_text(opts.main_name.clone(), main_text.clone());
         graph.set_root(text_thunk(env, main, main_text.clone()));
         Ok(Build {
@@ -223,7 +259,7 @@ impl Build {
             files_changed: Vec::new(),
             cold: true,
             last_pages: Vec::new(),
-            pdf: crate::pdf::Writer::default(),
+            pdf: crate::pdf::Pdf::new(),
         })
     }
 
@@ -294,7 +330,7 @@ impl Build {
             }
             if !self.files_changed.is_empty() {
                 let keys = std::mem::take(&mut self.files_changed);
-                crate::edit::invalidate_reads(&mut self.graph, &keys);
+                crate::edit::invalidate_reads(&self.graph, &keys);
             }
         }
         self.changes = Changes::default();
@@ -326,16 +362,32 @@ impl Build {
             .pages
             .iter()
             .enumerate()
-            .filter(|(i, p)| self.last_pages.get(*i).is_none_or(|q| !Arc::ptr_eq(p, q) && **p != **q))
+            .filter(|(i, p)| self.last_pages.get(*i).is_none_or(|q| !Arc::ptr_eq(p, q) && **p != *q))
             .map(|(i, _)| i)
             .collect();
         let (pdf, dvi) = if conv.pages.is_empty() {
             (Vec::new(), Vec::new())
         } else if self.opts.engine.pdf() {
-            (self.pdf.write(&conv.pages), Vec::new())
+            let env = self.graph.end_env();
+            let params = end_params(&env);
+            let names = names();
+            let pj = crate::pdfprim::job(&env);
+            let job = crate::pdf::Job {
+                pages: &conv.pages,
+                params: &params,
+                names: &names,
+                pdf: &pj,
+                creation_date: Arc::from(""),
+                id_seed: self.opts.job_name.as_bytes().to_vec(),
+                loader: {
+                    let f = self.opts.finder.clone();
+                    Arc::new(move |n: &str| f(n).map(|(_, b)| b))
+                },
+            };
+            (self.pdf.write(&job).bytes, Vec::new())
         } else {
             let comment = format!(" phitex-red output {}", self.opts.job_name);
-            (Vec::new(), crate::dvi::write(&conv.pages, &comment))
+            (Vec::new(), crate::dvi::write_dvi(&conv.pages, crate::font::fonts(), &names(), &comment))
         };
         self.last_pages = conv.pages.clone();
         self.written = conv.written.clone();
