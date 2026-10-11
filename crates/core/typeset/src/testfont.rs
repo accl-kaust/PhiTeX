@@ -35,6 +35,11 @@ impl Fonts for TestFonts {
     fn lig_kern(&self, font: FontId, left: Left, right: u16) -> Option<LigKern> {
         self.ligkern.get(&(font, left, right)).copied()
     }
+    fn has_left_boundary(&self, font: FontId) -> bool {
+        self.ligkern
+            .keys()
+            .any(|k| k.0 == font && k.1 == Left::Boundary)
+    }
     fn bchar(&self, font: FontId) -> Option<u16> {
         self.bchar.get(&font).copied()
     }

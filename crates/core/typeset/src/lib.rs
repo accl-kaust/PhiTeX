@@ -13,11 +13,16 @@
 
 // tex.web's octal constants and one-letter variables are kept so that the
 // code reads against the cited sections.
-#![allow(clippy::unreadable_literal, clippy::many_single_char_names)]
+#![allow(
+    clippy::unreadable_literal,
+    clippy::many_single_char_names,
+    clippy::similar_names
+)]
 
 pub mod arith;
 pub mod fonts;
 pub mod glue;
+pub mod hyph;
 pub mod linebreak;
 pub mod node;
 pub mod pack;

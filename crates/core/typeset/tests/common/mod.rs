@@ -2,12 +2,252 @@
 //! nodes the fixtures use, and a font without characters.
 #![allow(dead_code, clippy::unreadable_literal, clippy::format_push_string)]
 
+use std::collections::HashMap;
+
 use phitex_typeset::arith::{Scaled, UNITY};
-use phitex_typeset::fonts::{CharInfo, FontId, Fonts, Left, LigKern};
+use phitex_typeset::fonts::{CharInfo, FontId, Fonts, Left, LigKern, LigOp};
 use phitex_typeset::glue::{Glue, GlueSign, Order};
-use phitex_typeset::node::{BoxKind, GlueKind, KernKind, Node, RUNNING};
+use phitex_typeset::node::{BoxKind, Disc, GlueKind, KernKind, Ligature, Node, RUNNING};
 
 pub struct NoFonts;
+
+/// One font from `fixtures/<name>.txt` (made by `gen/hyph.py`), as font 0.
+#[derive(Default)]
+pub struct TableFont {
+    pub chars: HashMap<u16, CharInfo>,
+    pub lk: HashMap<(Left, u16), LigKern>,
+    pub bchar: Option<u16>,
+}
+
+impl TableFont {
+    pub fn parse(text: &str) -> TableFont {
+        let mut f = TableFont::default();
+        for l in text.lines() {
+            let w: Vec<&str> = l.split(' ').collect();
+            let n = |i: usize| w[i].parse::<i32>().unwrap();
+            match w[0] {
+                "char" => {
+                    f.chars.insert(
+                        u16::try_from(n(1)).unwrap(),
+                        CharInfo {
+                            width: n(2),
+                            height: n(3),
+                            depth: n(4),
+                            italic: n(5),
+                            ..CharInfo::default()
+                        },
+                    );
+                }
+                "lk" => {
+                    let left = if n(1) < 0 {
+                        Left::Boundary
+                    } else {
+                        Left::Char(u16::try_from(n(1)).unwrap())
+                    };
+                    let v = if w[3] == "kern" {
+                        LigKern::Kern(n(4))
+                    } else {
+                        let op = match n(4) {
+                            0 => LigOp::Plain,
+                            1 => LigOp::KeepRight,
+                            2 => LigOp::KeepLeft,
+                            3 => LigOp::KeepBoth,
+                            5 => LigOp::KeepRightSkip,
+                            6 => LigOp::KeepLeftSkip,
+                            7 => LigOp::KeepBothSkip1,
+                            11 => LigOp::KeepBothSkip2,
+                            o => panic!("op {o}"),
+                        };
+                        LigKern::Lig(op, u16::try_from(n(5)).unwrap())
+                    };
+                    f.lk.insert((left, u16::try_from(n(2)).unwrap()), v);
+                }
+                "bchar" => f.bchar = Some(u16::try_from(n(1)).unwrap()),
+                _ => panic!("{l}"),
+            }
+        }
+        f
+    }
+}
+
+impl Fonts for TableFont {
+    fn char_info(&self, _: FontId, ch: u16) -> Option<CharInfo> {
+        self.chars.get(&ch).copied()
+    }
+    fn lig_kern(&self, _: FontId, left: Left, right: u16) -> Option<LigKern> {
+        self.lk.get(&(left, right)).copied()
+    }
+    fn has_left_boundary(&self, _: FontId) -> bool {
+        self.lk.keys().any(|k| k.0 == Left::Boundary)
+    }
+    fn bchar(&self, _: FontId) -> Option<u16> {
+        self.bchar
+    }
+    fn param(&self, _: FontId, _: u16) -> Scaled {
+        0
+    }
+    fn param_count(&self, _: FontId) -> u16 {
+        0
+    }
+}
+
+/// `print_ASCII` (§68) for codes below 128.
+pub fn ascii(c: u16) -> String {
+    if (32..127).contains(&c) {
+        char::from(u8::try_from(c).unwrap()).to_string()
+    } else if c < 64 {
+        format!("^^{}", char::from(u8::try_from(c + 64).unwrap()))
+    } else {
+        format!("^^{}", char::from(u8::try_from(c - 64).unwrap()))
+    }
+}
+
+/// Parses a decimal like `-0.27779` as TeX scans it (§448, §452).
+pub fn parse_dimen(s: &str) -> Scaled {
+    let (neg, s) = s.strip_prefix('-').map_or((false, s), |r| (true, r));
+    let (i, f) = s.split_once('.').unwrap_or((s, ""));
+    let digits: Vec<u8> = f.bytes().map(|b| b - b'0').take(17).collect();
+    let v = i.parse::<Scaled>().unwrap() * UNITY + phitex_typeset::arith::round_decimals(&digits);
+    if neg { -v } else { v }
+}
+
+fn parse_glue_text(s: &str) -> Glue {
+    // "3.33333 plus 1.66666fil minus 1.11111"
+    let mut g = Glue::ZERO;
+    let mut it = s.split(' ');
+    g.width = parse_dimen(it.next().unwrap());
+    let amount = |x: &str| -> (Scaled, Order) {
+        for (suf, o) in [
+            ("filll", Order::Filll),
+            ("fill", Order::Fill),
+            ("fil", Order::Fil),
+        ] {
+            if let Some(v) = x.strip_suffix(suf) {
+                return (parse_dimen(v), o);
+            }
+        }
+        (parse_dimen(x), Order::Normal)
+    };
+    while let Some(k) = it.next() {
+        let (v, o) = amount(it.next().unwrap());
+        if k == "plus" {
+            (g.stretch, g.stretch_order) = (v, o);
+        } else {
+            (g.shrink, g.shrink_order) = (v, o);
+        }
+    }
+    g
+}
+
+fn parse_chars(s: &str) -> Vec<u16> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'^' && b.get(i + 1) == Some(&b'^') {
+            let k = u16::from(b[i + 2]);
+            out.push(if k >= 64 { k - 64 } else { k + 64 });
+            i += 3;
+        } else {
+            out.push(u16::from(b[i]));
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Parses `show_box` output for the nodes the fixtures use, at `prefix`.
+pub fn parse_list(lines: &[&str], prefix: &str) -> Vec<Node> {
+    let mut out: Vec<Node> = Vec::new();
+    let mut i = 0;
+    let mut pending_replace: Option<(usize, usize)> = None; // (disc index, count)
+    while i < lines.len() {
+        let l = lines[i];
+        let body = &l[prefix.len()..];
+        i += 1;
+        let node = if let Some(rest) = body.strip_prefix("\\tenrm ") {
+            if let Some((c, lig)) = rest.split_once(" (ligature ") {
+                let lig = lig.strip_suffix(')').unwrap();
+                let left_hit = lig.starts_with('|');
+                let lig = lig.strip_prefix('|').unwrap_or(lig);
+                let right_hit = lig.ends_with('|') && !lig.is_empty();
+                let lig = if right_hit {
+                    &lig[..lig.len() - 1]
+                } else {
+                    lig
+                };
+                Node::Lig(Ligature {
+                    font: 0,
+                    ch: parse_chars(c)[0],
+                    original: parse_chars(lig),
+                    left_hit,
+                    right_hit,
+                })
+            } else {
+                Node::Char {
+                    font: 0,
+                    ch: parse_chars(rest)[0],
+                }
+            }
+        } else if let Some(rest) = body.strip_prefix("\\glue(\\") {
+            let (name, g) = rest.split_once(") ").unwrap();
+            let code = (0..=14).find(|c| param_name(*c) == name).unwrap();
+            Node::param_glue(code, parse_glue_text(g))
+        } else if let Some(rest) = body.strip_prefix("\\glue ") {
+            Node::glue(parse_glue_text(rest))
+        } else if let Some(rest) = body.strip_prefix("\\kern ") {
+            Node::Kern(parse_dimen(rest), KernKind::Explicit)
+        } else if let Some(rest) = body.strip_prefix("\\kern") {
+            Node::Kern(parse_dimen(rest), KernKind::Normal)
+        } else if let Some(rest) = body.strip_prefix("\\penalty ") {
+            Node::Penalty(rest.parse().unwrap())
+        } else if let Some(rest) = body.strip_prefix("\\discretionary") {
+            let mut pre = Vec::new();
+            let mut post = Vec::new();
+            let dot = format!("{prefix}.");
+            let bar = format!("{prefix}|");
+            let start = i;
+            while i < lines.len() && (lines[i].starts_with(&dot) || lines[i].starts_with(&bar)) {
+                i += 1;
+            }
+            let sub: Vec<&str> = lines[start..i].to_vec();
+            let pre_lines: Vec<&str> = sub
+                .iter()
+                .copied()
+                .filter(|x| x.starts_with(&dot))
+                .collect();
+            let post_lines: Vec<&str> = sub
+                .iter()
+                .copied()
+                .filter(|x| x.starts_with(&bar))
+                .collect();
+            pre.extend(parse_list(&pre_lines, &dot));
+            post.extend(parse_list(&post_lines, &bar));
+            if let Some(n) = rest.strip_prefix(" replacing ") {
+                pending_replace = Some((out.len(), n.parse().unwrap()));
+            }
+            out.push(Node::Disc(Disc {
+                pre,
+                post,
+                replace: Vec::new(),
+            }));
+            continue;
+        } else {
+            panic!("parse_list: {l}");
+        };
+        if let Some((d, n)) = pending_replace
+            && let Node::Disc(disc) = &mut out[d]
+        {
+            disc.replace.push(node);
+            if disc.replace.len() == n {
+                pending_replace = None;
+            }
+            continue;
+        }
+        out.push(node);
+    }
+    out
+}
 
 impl Fonts for NoFonts {
     fn char_info(&self, _: FontId, _: u16) -> Option<CharInfo> {
@@ -15,6 +255,9 @@ impl Fonts for NoFonts {
     }
     fn lig_kern(&self, _: FontId, _: Left, _: u16) -> Option<LigKern> {
         None
+    }
+    fn has_left_boundary(&self, _: FontId) -> bool {
+        false
     }
     fn bchar(&self, _: FontId) -> Option<u16> {
         None
@@ -158,6 +401,25 @@ pub fn show_list(list: &[Node], prefix: &str, out: &mut String) {
                 out.push_str(&scaled(*w));
             }
             Node::Penalty(p) => out.push_str(&format!("\\penalty {p}")),
+            Node::Char { ch, .. } => {
+                out.push_str("\\tenrm ");
+                out.push_str(&ascii(*ch));
+            }
+            Node::Lig(l) => {
+                out.push_str("\\tenrm ");
+                out.push_str(&ascii(l.ch));
+                out.push_str(" (ligature ");
+                if l.left_hit {
+                    out.push('|');
+                }
+                for c in &l.original {
+                    out.push_str(&ascii(*c));
+                }
+                if l.right_hit {
+                    out.push('|');
+                }
+                out.push(')');
+            }
             Node::Disc(d) => {
                 out.push_str("\\discretionary");
                 if !d.replace.is_empty() {
