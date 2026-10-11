@@ -32,7 +32,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use defuse::{
     Brackets, Claim, Ctx, Effect, Engine, Executor, Field, FxHashMap, Locality, MayDefine, NodeId, OpId, Operation,
-    RunResult, SeqMonoid, Stop, UnitId, Value, ValueId, Values,
+    RunResult, SeqMonoid, Stop, UnitId, Until, Value, ValueId, Values,
 };
 
 // ------------------------------------------------------------------- lexer
@@ -260,6 +260,34 @@ impl Parser<'_> {
                 }
                 "end" => return simple(self, "end"),
                 "take" => return simple(self, "take"),
+                "collect" => {
+                    // collect NAME until CLASS [if FIELD [and FIELD]...] [guess N]
+                    self.pos += 1;
+                    let n = self.ident()?;
+                    if !self.is_kw("until") {
+                        return Err("collect needs until".into());
+                    }
+                    self.pos += 1;
+                    let class = self.ident()?;
+                    let field = if self.is_kw("if") {
+                        self.pos += 1;
+                        let mut fs = vec![self.ident()?];
+                        while self.is_kw("and") {
+                            self.pos += 1;
+                            fs.push(self.ident()?);
+                        }
+                        fs.join(" ")
+                    } else {
+                        String::new()
+                    };
+                    let guess = if self.is_kw("guess") {
+                        self.pos += 1;
+                        self.v.int(self.int()?)
+                    } else {
+                        ValueId::UNIT
+                    };
+                    return Ok(self.tagged("collect", vec![self.s(&n), self.s(&class), self.s(&field), guess]));
+                }
                 "fold" => {
                     self.pos += 1;
                     let e = self.expr()?;
@@ -644,7 +672,7 @@ fn literal_prefix(v: &Values, e: ValueId) -> (String, bool) {
     }
 }
 
-const KEYWORDS: [&str; 32] = [
+const KEYWORDS: [&str; 33] = [
     "begin",
     "end",
     "endlist",
@@ -677,6 +705,7 @@ const KEYWORDS: [&str; 32] = [
     "before",
     "fold",
     "when",
+    "collect",
 ];
 
 /// The kind of the scope an emitted fold output's text runs in.
@@ -946,6 +975,18 @@ pub struct Ops {
     pub output: OpId,
 }
 
+/// A node's class for a stream claim: its statement tag, or the operation's
+/// name.
+fn node_class(ops: Ops, v: &Values, op: OpId, args: &[ValueId]) -> String {
+    if op == ops.stmt {
+        tag(v, args[0]).0
+    } else if op == ops.output {
+        "output".into()
+    } else {
+        String::new()
+    }
+}
+
 /// The fold's capacity at a step's position.
 fn fold_cap(cx: &mut Ctx<'_>) -> Result<i64, Stop> {
     let v = cx.values();
@@ -1145,7 +1186,9 @@ impl Operation for StmtOp {
                         .collect(),
                 )
             }
-            "sumnext" | "listto" | "listuntil" | "item" => Some(vec![(v.field(&text(v, a[0])), Locality::Local)]),
+            "sumnext" | "listto" | "listuntil" | "item" | "collect" => {
+                Some(vec![(v.field(&text(v, a[0])), Locality::Local)])
+            }
             // A contribution is a definition of the sequence.
             "take" | "replace" => Some(vec![(items_seq(v), Locality::Local)]),
             "fold" => Some(vec![
@@ -1279,6 +1322,39 @@ impl Operation for StmtOp {
         }
     }
 
+    fn until(&self, args: &[ValueId], v: &Values, cand: OpId, cand_args: &[ValueId]) -> Until {
+        let a = tag(v, args[0]).1;
+        if node_class(ops(&self.0), v, cand, cand_args) != text(v, a[1]) {
+            return Until::No;
+        }
+        match text(v, a[2]) {
+            f if f.is_empty() => Until::Yes,
+            f if !f.contains(' ') => Until::Read(v.field(&f)),
+            f => Until::ReadEach(f.split(' ').map(|f| v.field(f)).collect()),
+        }
+    }
+
+    fn until_values(&self, _: &[ValueId], v: &Values, _: OpId, _: &[ValueId], fields: &[Option<ValueId>]) -> bool {
+        fields.iter().all(|x| x.is_some_and(|x| truthy(v, x)))
+    }
+
+    fn until_value(&self, _: &[ValueId], v: &Values, _: OpId, _: &[ValueId], value: Option<ValueId>) -> bool {
+        value.is_some_and(|x| truthy(v, x))
+    }
+
+    fn until_predict(
+        &self,
+        args: &[ValueId],
+        v: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Option<usize> {
+        let (t, a) = tag(v, args[0]);
+        if t != "collect" {
+            return None;
+        }
+        v.as_int(a[3]).and_then(|n| usize::try_from(n).ok())
+    }
+
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         let (t, a) = tag(v, args[0]);
         let mut out = Vec::new();
@@ -1297,6 +1373,7 @@ impl Operation for StmtOp {
             "if" => free_vars(v, a[0], &mut bound, &mut out),
             "listuntil" => out.push(text(v, a[1])),
             "block" | "begin" | "end" | "endlist" | "mark" | "loop" | "proc" | "scope" | "para" | "take" => {}
+            // `collect` reads the following text's outputs, not fields.
             _ => return None,
         }
         Some(out.iter().map(|n| v.field(n)).collect())
@@ -1536,6 +1613,12 @@ impl Operation for StmtOp {
                 }
                 cx.define_with(state, st, Locality::Global);
                 Ok(st)
+            }
+            "collect" => {
+                let outs = cx.claim_stream()?;
+                let l = v.list(outs);
+                cx.define(v.field(&text(v, a[0])), l);
+                Ok(l)
             }
             "fold" => {
                 let src = eval_expr(cx, ops, a[0])?;
@@ -1805,7 +1888,9 @@ impl Program {
     pub fn insert_line(&mut self, eng: &mut Engine, i: usize, text: String) {
         let ast = Lang::rewrite(eng.values(), &self.loops, parse_stmt(eng.values(), &text));
         self.procs_edit(eng, None, Some(&text));
-        let n = if i == 0 {
+        let n = if self.nodes.is_empty() {
+            eng.push(self.unit, self.lang.ops.stmt, vec![ast])
+        } else if i == 0 {
             eng.insert_before(self.nodes[0], self.lang.ops.stmt, vec![ast])
         } else {
             eng.insert_after(self.nodes[i - 1], self.lang.ops.stmt, vec![ast])

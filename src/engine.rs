@@ -141,6 +141,22 @@ pub enum Claim {
     Pending,
 }
 
+/// A stream claim's test of one candidate node (see [`Ctx::claim_stream`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Until {
+    /// The claim goes on past it.
+    No,
+    /// The claim ends before it.
+    Yes,
+    /// Decided by [`Operation::until_value`] from the value `field` has at
+    /// the candidate's position.
+    Read(Field),
+    /// Decided by [`Operation::until_values`] from the values each field
+    /// has there: a test resting on several facts. Each is a recorded read,
+    /// so a change in any one runs the claimer again.
+    ReadEach(Vec<Field>),
+}
+
 /// Where a pending node is indexed: `pending` (an unbounded definition
 /// set), `pending_eff` (a scope effect), and its bounded definition set.
 #[derive(Clone, Debug)]
@@ -217,6 +233,53 @@ pub trait Operation: Send + Sync {
         _following: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
     ) -> Claim {
         Claim::None
+    }
+
+    /// For a stream claimer ([`Ctx::claim_stream`]): the test of candidate
+    /// node `cand` (its class is its operation and text).
+    fn until(&self, _args: &[ValueId], _values: &Values, _cand: OpId, _cand_args: &[ValueId]) -> Until {
+        Until::No
+    }
+
+    /// For [`Until::Read`]: whether the claim ends before `cand`, given the
+    /// value the field has there.
+    fn until_value(
+        &self,
+        _args: &[ValueId],
+        _values: &Values,
+        _cand: OpId,
+        _cand_args: &[ValueId],
+        _value: Option<ValueId>,
+    ) -> bool {
+        false
+    }
+
+    /// For [`Until::ReadEach`]: whether the claim ends before `cand`, given
+    /// the values the fields have there, in order.
+    fn until_values(
+        &self,
+        _args: &[ValueId],
+        _values: &Values,
+        _cand: OpId,
+        _cand_args: &[ValueId],
+        _fields: &[Option<ValueId>],
+    ) -> bool {
+        false
+    }
+
+    /// For a stream claimer: where its claim ends, predicted from the text of
+    /// the following siblings (the index of the sibling it ends before).
+    /// The engine then speculates on the claimer (under
+    /// [`Speculation::Predicted`](crate::Speculation)), confirming the
+    /// prediction by testing that sibling; a wrong prediction only costs a
+    /// re-run.
+    fn until_predict(
+        &self,
+        _args: &[ValueId],
+        _values: &Values,
+        _following: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Option<usize> {
+        None
     }
 
     /// Fields the node may read (a hint): a node whose hinted inputs are
@@ -419,6 +482,10 @@ const F_CLAIM_DYN: u16 = 256;
 const F_TAINT: u16 = 512;
 const F_CLAIMER: u16 = 1024;
 const F_PARKSET: u16 = 2048;
+/// Runs of one stream claimer in one evaluation taken as a cycle.
+const STREAM_RUN_LIMIT: u32 = 4096;
+/// A stream claimer with a predicted extent: eligible for speculation.
+const F_PREDICT: u16 = 4096;
 const F_HINT: u16 = 8192;
 const F_MAYBE: u16 = 16384;
 const PREFIX_SEED: u64 = 0x9e37_79b9;
@@ -516,7 +583,6 @@ pub(crate) struct Aux {
     claimed_by: Option<Slot>,
     /// The kind of the scope this node opens (`None`: no kind).
     kind: Option<ValueId>,
-    /// For a pending effect: the effect the bindings around it reflect.
     pub(crate) body: Option<u32>,
     assumers: Vec<Assume>,
     assume_left: u32,
@@ -524,6 +590,9 @@ pub(crate) struct Aux {
     /// For a pending claim: 1 + the label of the last sibling it could take
     /// (0: not computed yet, i.e. unbounded).
     reach1: u64,
+    /// For a stream claimer: the label range `(after, end]` whose structure
+    /// its last run read.
+    stream: Option<(u64, u64)>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -759,6 +828,14 @@ pub struct Engine {
     local_ix: BTreeMap<(u32, Field, u32, u64), Slot>,
     /// The depth each local definition is indexed under.
     local_depth: FxHashMap<(u32, Field, u64), u32>,
+    /// Stream claimers by `(unit, first label, slot)`.
+    stream_ix: BTreeSet<(u32, u64, u64)>,
+    /// Runs of each stream claimer in this evaluation.
+    stream_runs: FxHashMap<Slot, u32>,
+    /// The labels `stream_touch` saw this evaluation, in order: a claim
+    /// that ran meanwhile is checked against those after its start.
+    pub(crate) touch_log: Vec<(u32, u64)>,
+    in_eval: bool,
     /// Global definitions: `(unit, field, label)`.
     global_ix: BTreeMap<(u32, Field, u64), Slot>,
     users: BTreeMap<(u64, Field, u64), Slot>,
@@ -901,6 +978,10 @@ impl Engine {
             defs_ix: BTreeMap::new(),
             local_ix: BTreeMap::new(),
             local_depth: FxHashMap::default(),
+            stream_ix: BTreeSet::new(),
+            stream_runs: FxHashMap::default(),
+            touch_log: Vec::new(),
+            in_eval: false,
             global_ix: BTreeMap::new(),
             users: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -1488,6 +1569,9 @@ impl Engine {
         let maybe = decl.is_none() && opr.may_define(&av, &self.values) != MayDefine::Any;
         self.set_flag(s, F_MAYBE, maybe);
         self.set_flag(s, F_HINT, hint);
+        let predict = opr.until_predict(&av, &self.values, &mut std::iter::empty()).is_some();
+        self.set_flag(s, F_PREDICT, predict);
+        self.stream_touch(self.n(s).unit, self.n(s).label);
         self.set_flag(s, F_CLAIMER, claim_hook != Claim::None);
         self.set_flag(s, F_CLAIM_DYN, claim_hook == Claim::Pending);
         self.set_flag(s, F_EFF_DYN, eff == Effect::Pending);
@@ -1638,6 +1722,9 @@ impl Engine {
         if hints.is_some() {
             flags |= F_HINT;
         }
+        if opr.until_predict(&av, &self.values, &mut std::iter::empty()).is_some() {
+            flags |= F_PREDICT;
+        }
         if decl.is_none() && opr.may_define(&av, &self.values) != MayDefine::Any {
             flags |= F_MAYBE;
         }
@@ -1693,6 +1780,7 @@ impl Engine {
         }
         let label = self.alloc_label(unit, after);
         self.nm(s).label = label;
+        self.stream_touch(unit, label);
         let item = self.oitem(s);
         self.nm(s).bound = item.eff;
         let root = self.units[unit as usize].root;
@@ -1943,6 +2031,7 @@ impl Engine {
                     self.attach_labels(x);
                 }
                 self.rebuild_watches(unit);
+                self.restream(unit);
                 return;
             }
             assert!(!whole, "unit label space exhausted");
@@ -2499,6 +2588,7 @@ impl Engine {
             prev.push((site, end));
         }
         self.ix_insert(unit, f, lx, x);
+        self.stream_touch(unit, lx);
         for (site, end) in prev {
             let from = site_key(unit, site);
             let movers: Vec<(u64, Slot)> = self
@@ -2527,6 +2617,7 @@ impl Engine {
             return;
         }
         self.ix_remove(unit, f, label);
+        self.stream_touch(unit, label);
         let from = x.pack();
         let users: Vec<(u64, Slot)> = self
             .users
@@ -2548,6 +2639,7 @@ impl Engine {
         self.nm(p).bound = e;
         let n = self.n(p);
         let (unit, lp) = (n.unit, n.label);
+        self.stream_touch(unit, lp);
         let root = self.units[unit as usize].root;
         let before = self.order.fold(&OAug, root, 0, lp);
         let depth_after = |eff: u8| {
@@ -3221,6 +3313,91 @@ impl Engine {
         deps
     }
 
+    /// Records the label range a stream claimer's run read the structure of.
+    fn set_stream(&mut self, x: Slot, range: Option<(u64, u64)>) {
+        let old = self.aux_of(x).and_then(|a| a.stream);
+        if old == range {
+            return;
+        }
+        // Keyed by the claimer's own label: the start of its range moves
+        // as its unfolded text comes and goes.
+        let (unit, own) = (self.n(x).unit, self.n(x).label);
+        if old.is_some() {
+            self.stream_ix.remove(&(unit, own, x.pack()));
+        }
+        if range.is_some() {
+            self.stream_ix.insert((unit, own, x.pack()));
+        }
+        self.ax(x).stream = range;
+    }
+
+    /// The unit was relabelled: recorded stream ranges are stale, so the
+    /// claimers re-key and run again.
+    fn restream(&mut self, unit: u32) {
+        let keys: Vec<(u32, u64, u64)> = self
+            .stream_ix
+            .range((unit, 0, 0)..=(unit, u64::MAX, u64::MAX))
+            .copied()
+            .collect();
+        for k in keys {
+            self.stream_ix.remove(&k);
+            let x = Slot::unpack(k.2);
+            self.ax(x).stream = None;
+            if self.live(x) {
+                self.make_dirty(x);
+            }
+        }
+    }
+
+    /// The structure at `label` changed (a node, definition or scope effect
+    /// there came, went or changed): stream claimers that read it run again.
+    /// A range ends just before the node after its delimiter, so that node
+    /// going counts too.
+    fn stream_touch(&mut self, unit: u32, label: u64) {
+        if self.in_eval {
+            self.touch_log.push((unit, label));
+        }
+        if self.stream_ix.is_empty() {
+            return;
+        }
+        let hit: Vec<Slot> = self
+            .stream_ix
+            .range((unit, 0, 0)..(unit, label, 0))
+            .map(|&(_, _, x)| Slot::unpack(x))
+            .filter(|&x| {
+                self.live(x)
+                    && self
+                        .aux_of(x)
+                        .and_then(|a| a.stream)
+                        .is_some_and(|(_, e)| label <= e.saturating_add(1))
+                    && self.stream_bounds(x).1 < label
+            })
+            .collect();
+        for x in hit {
+            self.make_dirty(x);
+        }
+    }
+
+    /// The label range a stream claim of `s` scans: after `s` and what it
+    /// unfolded, up to the end of its parent's unfolded text (or the unit).
+    pub(crate) fn stream_bounds(&self, s: Slot) -> (u32, u64, u64) {
+        let n = self.n(s);
+        let after = self.n(self.subtree_end(s)).label;
+        let end = if n.parent == NIL || !self.live(n.parent) {
+            u64::MAX
+        } else {
+            self.n(self.subtree_end(n.parent)).label
+        };
+        (n.unit, after, end)
+    }
+
+    /// The next node after `label` in `unit`'s order.
+    pub(crate) fn order_next(&self, unit: u32, label: u64) -> Option<(u64, Slot)> {
+        self.order
+            .next(self.units[unit as usize].root, label)
+            .map(|(k, i)| (k, i.slot))
+    }
+
     /// `x` goes away (or out of the program) before finishing: speculation
     /// that rested on it will never be confirmed, so it runs again.
     fn refute_assumers(&mut self, x: Slot) {
@@ -3312,6 +3489,9 @@ impl Engine {
             }
         }
         self.refute_assumers(x);
+        self.set_stream(x, None);
+        let (u, l) = (self.n(x).unit, self.n(x).label);
+        self.stream_touch(u, l);
         self.set_publishes(x, Vec::new());
         self.roots.remove(&x);
         self.claim_dirty.remove(&x);
@@ -4065,6 +4245,18 @@ impl Engine {
             self.make_dirty(x);
             return;
         }
+        // The structure a stream claim scanned changed while it ran.
+        if let Some((a, e)) = r.stream {
+            let (unit, a) = (self.n(x).unit, a.min(self.stream_bounds(x).1));
+            if self.touch_log[r.touch_seq.min(self.touch_log.len())..]
+                .iter()
+                .any(|&(u, l)| u == unit && a < l && l <= e.saturating_add(1))
+            {
+                count!(StaleSite);
+                self.make_dirty(x);
+                return;
+            }
+        }
         self.report.text_memo_hits += u64::from(r.memo[0]);
         self.report.text_memo_misses += u64::from(r.memo[1]);
         self.report.app_memo_hits += u64::from(r.memo[2]);
@@ -4176,12 +4368,31 @@ impl Engine {
         }
         self.nm(x).on = NIL;
         self.set_children(x, &r.children, provisional);
+        // A stream claim may have read its own previous unfolding, which
+        // the line above just replaced: those reads are gone.
+        let read_freed = r.stream.is_some()
+            && r.uses.iter().any(|u| {
+                (u.kind == K_FIELD || u.kind == K_CHAIN)
+                    && u.site != NIL
+                    && (!self.live(u.site) || self.n(u.site).def_value(Field(ValueId(u.key))).is_none())
+            });
         if let Some(body) = self.aux_of(x).and_then(|a| a.body) {
             for &(f, v) in &r.env {
                 self.set_env_slot(body, f, v);
             }
         }
         self.set_uses(x, r.uses);
+        if r.stream.is_some() {
+            // A stream claim reads forward: a node it takes that reads the
+            // claim back is a cycle that never parks (each run feeds the
+            // next). Bound the runs per evaluation.
+            let runs = self.stream_runs.entry(x).or_insert(0);
+            *runs += 1;
+            if *runs == STREAM_RUN_LIMIT {
+                self.errors.push(EvalError::Cycle(vec![self.n(x).id]));
+            }
+        }
+        self.set_stream(x, r.stream);
         let mut changed = self.set_defs(x, &r.defs);
         if self.n(x).has(F_EFF_DYN)
             && let Some(e) = r.effect
@@ -4220,6 +4431,10 @@ impl Engine {
             self.spec_done.remove(&x);
         }
         self.update_taint(x);
+        if read_freed {
+            count!(StaleSite);
+            self.make_dirty(x);
+        }
         // The run's own epoch bump (from rebinding during apply) must not
         // invalidate it.
         if self.n(x).state != State::Dirty || self.n(x).epoch != r.epoch {
@@ -4635,6 +4850,8 @@ impl Engine {
             self.restart_loops();
         }
         self.spec_done.clear();
+        self.stream_runs.clear();
+        self.touch_log.clear();
         let restarted = self.feedback;
         let mut result = self.evaluate_inner(sched, exec);
         self.feedback = self.has_feedback();
@@ -4753,6 +4970,14 @@ impl Engine {
     }
 
     fn evaluate_inner(&mut self, sched: &mut dyn Scheduler, exec: &mut dyn Executor) -> Result<(), EvalError> {
+        self.in_eval = true;
+        let r = self.rounds(sched, exec);
+        self.in_eval = false;
+        self.touch_log.clear();
+        r
+    }
+
+    fn rounds(&mut self, sched: &mut dyn Scheduler, exec: &mut dyn Executor) -> Result<(), EvalError> {
         loop {
             self.report.rounds += 1;
             self.drain(sched, exec)?;
@@ -4882,7 +5107,7 @@ impl Engine {
                             cands.push(Candidate {
                                 node: n.id,
                                 slot: s,
-                                has_prediction: n.has(F_RAN),
+                                has_prediction: n.has(F_RAN) || n.has(F_PREDICT),
                                 waiting: false,
                             });
                         }
@@ -4897,7 +5122,7 @@ impl Engine {
                         cands.push(Candidate {
                             node: n.id,
                             slot: s,
-                            has_prediction: n.has(F_RAN),
+                            has_prediction: n.has(F_RAN) || n.has(F_PREDICT),
                             waiting: true,
                         });
                     }
@@ -5030,6 +5255,9 @@ pub struct RunResult {
     /// The kind of the scope the run's effect opens.
     pub(crate) kind: Option<ValueId>,
     pub(crate) claim: Option<usize>,
+    pub(crate) stream: Option<(u64, u64)>,
+    /// The length of `touch_log` when the run started.
+    pub(crate) touch_seq: usize,
     pub(crate) assumptions: Vec<(Slot, AssumeKind, ValueId)>,
     pub(crate) sig: u64,
     pub(crate) error: Option<EvalError>,

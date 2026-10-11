@@ -43,7 +43,7 @@ mod value;
 pub use ctx::{Ctx, Stop};
 pub use engine::{
     Brackets, Claim, Effect, Engine, EvalError, Locality, MayDefine, Monoid, NodeId, OpId, Operation, Report,
-    RunResult, SeqMonoid, SumMonoid, UnitId,
+    RunResult, SeqMonoid, SumMonoid, UnitId, Until,
 };
 pub use hash::{FxHashMap, FxHashSet, FxHasher, hash_bytes, hash_words};
 pub use sched::{Candidate, Executor, Greedy, Job, RandomScheduler, Rng, Scheduler, Sequential, Speculation};

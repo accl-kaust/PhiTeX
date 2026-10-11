@@ -352,6 +352,127 @@ fn random_contribution_edits_match_the_interpreter() {
     }
 }
 
+// ---------------------------------------------------------- stream claims
+
+#[test]
+fn a_stream_claim_ends_at_the_first_node_of_a_class_after_unfolding() {
+    let (mut eng, mut prog, _) = load(&[
+        "collect l until mark",
+        "1",
+        "eval \"2  3\"",
+        "mark a",
+        "4",
+        "mark b",
+        "z = l",
+    ]);
+    assert_eq!(out(&eng, &prog, 0), "[1 2 3]");
+    assert_eq!(out(&eng, &prog, 4), "4", "claimed nodes still run");
+    // The delimiter arrives by unfolding.
+    prog.set_line(&mut eng, 3, "eval \"mark a\"".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 0), "[1 2 3]");
+    // The first delimiter goes: the claim runs on to the next.
+    prog.set_line(&mut eng, 3, "5".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 0), "[1 2 3 5 4]");
+    assert_eq!(out(&eng, &prog, 6), "[1 2 3 5 4]");
+    // Without any, it would take the reader of its own result: a cycle.
+    prog.set_line(&mut eng, 5, "6".into());
+    assert!(matches!(eng.evaluate_sequential(), Err(EvalError::Cycle(_))));
+}
+
+#[test]
+fn a_stream_claim_predicate_reads_a_definition_inside_the_claim() {
+    let (mut eng, mut prog, _) = load(&[
+        "collect l until mark if go", // 0
+        "1",                          // 1
+        "mark a",                     // 2: go unset: goes on
+        "go = true",                  // 3: inside the claim
+        "2",                          // 4
+        "mark a",                     // 5: the claim ends here
+        "3",                          // 6
+    ]);
+    assert_eq!(out(&eng, &prog, 0), "[1 () true 2]");
+    prog.set_line(&mut eng, 3, "go = false".into());
+    let r = eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 0), "[1 () false 2 () 3]");
+    println!("definition inside the claim changed: nodes run {}", r.nodes_run);
+    // The definition comes by unfolding: the claim waits for exactly it.
+    prog.set_line(&mut eng, 3, "eval \"go = true\"".into());
+    let r = eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 0), "[1 () true 2]");
+    println!(
+        "definition by unfolding: waits on stmt nodes {}",
+        Report::by_op(&r.waits_by_op, "stmt")
+    );
+}
+
+#[test]
+fn a_predicted_stream_claim_confirms_on_every_named_field() {
+    // The claim ends at the `mark` where both facts hold; a change in
+    // either one re-runs it, under every scheduler.
+    let src = [
+        "collect l until mark if go and ok guess 3",
+        "go = true",
+        "1",
+        "mark a",
+        "ok = true",
+        "2",
+        "mark a",
+        "3",
+    ];
+    for sched in 0..3 {
+        let (mut eng, mut prog) = Program::load(lines(&src));
+        let run = |eng: &mut Engine| match sched {
+            0 => eng.evaluate_sequential().map(|_| ()),
+            1 => eng
+                .evaluate(&mut Greedy::speculative(Speculation::Predicted, 64), &mut Sequential)
+                .map(|_| ()),
+            _ => eng
+                .evaluate(&mut RandomScheduler::new(7, true), &mut Sequential)
+                .map(|_| ()),
+        };
+        run(&mut eng).unwrap();
+        assert_eq!(prog.result(&eng), reference(&prog.lines));
+        assert_eq!(prog.render(&eng)[0], "[true 1 () true 2]");
+        for (i, line, want) in [
+            (4, "ok = false", "[true 1 () false 2 () 3]"),
+            (1, "go = false", "[false 1 () false 2 () 3]"),
+            (4, "ok = true", "[false 1 () true 2 () 3]"),
+            (1, "go = true", "[true 1 () true 2]"),
+        ] {
+            prog.set_line(&mut eng, i, line.into());
+            run(&mut eng).unwrap();
+            assert_eq!(prog.result(&eng), reference(&prog.lines), "{line}");
+            assert_eq!(prog.render(&eng)[0], want, "{line}");
+        }
+    }
+}
+
+#[test]
+fn a_predicted_stream_claim_speculates_and_confirms() {
+    for guess in [3, 2, 4] {
+        // The claim ends before sibling 3 (`mark`); guesses off by one each
+        // way only cost a re-run.
+        let src = format!("collect l until mark guess {guess}");
+        let lines = lines(&[&src, "a = 1", "b = a + 1", "c = b + 1", "mark a", "d = 9"]);
+        let (mut eng, mut prog) = Program::load(lines);
+        let mut sched = Greedy::speculative(Speculation::Predicted, 64);
+        eng.evaluate(&mut sched, &mut Sequential).unwrap();
+        assert_eq!(prog.result(&eng), reference(&prog.lines), "guess {guess}");
+        assert_eq!(prog.render(&eng)[0], "[1 2 3]");
+        // An edit upstream: the claimer may run before the chain settles.
+        prog.set_line(&mut eng, 1, "a = 5".into());
+        let r = eng.evaluate(&mut sched, &mut Sequential).unwrap();
+        assert_eq!(prog.result(&eng), reference(&prog.lines), "guess {guess}");
+        assert_eq!(prog.render(&eng)[0], "[5 6 7]");
+        println!(
+            "guess {guess}: speculations {} confirmations {} mispredictions {}",
+            r.speculations, r.confirmations, r.mispredictions
+        );
+    }
+}
+
 #[test]
 fn freeing() {
     let (mut eng, mut prog, _) = load(&["c = 1", "if c { a = 1  b = 2 } else { d = 3 }"]);

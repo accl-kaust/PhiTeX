@@ -4,7 +4,7 @@ use std::sync::PoisonError;
 
 use crate::engine::{
     AssumeKind, Effect, End, Engine, EvalError, K_CHAIN, K_FIELD, K_LOOP, K_OUTPUT, Locality, NIL, NodeId, OpId,
-    RunResult, Slot, Use, eff_code, eff_kind,
+    RunResult, Slot, State, Until, Use, eff_code, eff_kind,
 };
 use crate::hash::{FxHashMap, hash_words};
 use crate::value::{Field, Value, ValueId, Values};
@@ -36,6 +36,8 @@ pub struct Ctx<'a> {
     effect: Option<u8>,
     kind: Option<ValueId>,
     claim: Option<usize>,
+    stream: Option<(u64, u64)>,
+    touch_seq: usize,
     assumptions: Vec<(Slot, AssumeKind, ValueId)>,
     sig: u64,
     error: Option<EvalError>,
@@ -63,6 +65,8 @@ impl<'a> Ctx<'a> {
             effect: None,
             kind: None,
             claim: None,
+            stream: None,
+            touch_seq: eng.touch_log.len(),
             assumptions: Vec::new(),
             memo: Default::default(),
             sig: 0,
@@ -462,6 +466,98 @@ impl<'a> Ctx<'a> {
         Ok(self.use_field(f)?.filter(|&k| k != ValueId::UNIT))
     }
 
+    /// A stream claim: the outputs of the nodes after this one, in text order
+    /// after unfolding (a node that unfolded is replaced by its text), up to
+    /// the first for which this node's [`Operation::until`] test fires (that
+    /// node is not taken), or the end of the enclosing text. The nodes run as
+    /// usual; this node waits only on the nodes up to that end, and on the
+    /// definition each test reads at its candidate's position. A change in
+    /// that range (a node, definition or scope effect coming, going or
+    /// changing, or a taken output changing) runs this node again.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] until each node up to the end has run, and each read
+    /// definition is known.
+    pub fn claim_stream(&mut self) -> Result<Vec<ValueId>, Stop> {
+        self.check()?;
+        let e = self.eng;
+        let (unit, after, bound) = e.stream_bounds(self.slot);
+        let n = e.n(self.slot);
+        let op = e.op(n.op).clone();
+        let args = e.args_vec(n.args);
+        let vals = e.values();
+        let (open, close) = (e.open_op(), e.close_op());
+        let mut outs = Vec::new();
+        let mut label = after;
+        let mut end = bound;
+        while let Some((l, c)) = e.order_next(unit, label).filter(|&(l, _)| l <= bound) {
+            label = l;
+            let cn = e.n(c);
+            if cn.state == State::Inert || cn.is_app() {
+                continue;
+            }
+            if self.spec && !cn.has_ran() {
+                // Its unfolding is not known even approximately.
+                return self.stop(End::Unpredictable);
+            }
+            let out = self.read_output(c)?;
+            if !e.children_of(c).is_empty() || cn.op == open || cn.op == close {
+                continue;
+            }
+            let cargs = e.args_vec(cn.args);
+            let fire = match op.until(&args, vals, cn.op, &cargs) {
+                Until::No => false,
+                Until::Yes => true,
+                Until::Read(f) => {
+                    let v = self.use_field_at(c, f)?;
+                    op.until_value(&args, vals, cn.op, &cargs, v)
+                }
+                Until::ReadEach(fs) => {
+                    let mut vs = Vec::with_capacity(fs.len());
+                    for f in fs {
+                        vs.push(self.use_field_at(c, f)?);
+                    }
+                    op.until_values(&args, vals, cn.op, &cargs, &vs)
+                }
+            };
+            if fire {
+                // Up to the next node: the delimiter's own unfolding (should
+                // it unfold later) lies in the range.
+                end = e.order_next(unit, l).map_or(u64::MAX, |(k, _)| k - 1);
+                break;
+            }
+            outs.push(out);
+        }
+        self.stream = Some((after, end));
+        self.sig = self.sig.wrapping_add(hash_words(22, &[after, end]));
+        Ok(outs)
+    }
+
+    /// The value field `f` has at node `at`'s position (a binding there;
+    /// re-read on any change, like a contribution chain link).
+    fn use_field_at(&mut self, at: Slot, f: Field) -> Result<Option<ValueId>, Stop> {
+        let e = self.eng;
+        let an = e.n(at);
+        let w = e.walk(an.unit, an.label, f);
+        if w.pending != NIL {
+            return self.stop(End::Wait(w.pending));
+        }
+        let v = if w.site == NIL {
+            e.units[an.unit as usize].env.get(&f).copied()
+        } else {
+            self.read_node(w.site, e.n(w.site).def_value(f), AssumeKind::Def(f))?
+        };
+        let key = f.0.raw();
+        self.uses.push(Use {
+            key,
+            site: w.site,
+            kind: K_CHAIN,
+        });
+        self.sig_add(K_CHAIN, key, w.site, v);
+        Ok(v)
+    }
+
     /// Resolves this node's pending claim: it claims the next `n` siblings.
     pub fn claim(&mut self, n: usize) {
         self.claim = Some(n);
@@ -623,6 +719,8 @@ impl<'a> Ctx<'a> {
             effect: self.effect,
             kind: self.kind,
             claim: self.claim,
+            stream: self.stream,
+            touch_seq: self.touch_seq,
             assumptions: self.assumptions,
             sig: self.sig,
             error: self.error,
