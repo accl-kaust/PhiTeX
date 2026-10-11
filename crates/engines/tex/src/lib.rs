@@ -11,7 +11,7 @@
 //! written. An engine adds behaviour through it, never by forking what is
 //! here.
 //!
-//! `PRIMITIVES.md` beside this crate catalogues every TeX82, e-TeX and
+//! `PRIMITIVES.md` beside this crate catalogues every `TeX82`, e-TeX and
 //! pdfTeX primitive as a node spec on the core (reads, defines, scope,
 //! claim, unfold, contribution, hazards) and lists what the core lacks.
 
