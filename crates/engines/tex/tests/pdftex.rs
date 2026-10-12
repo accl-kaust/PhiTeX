@@ -106,6 +106,7 @@ const PENDING: &[&str] = &[
     "objstm2",
     "outlinetree",
     "ownpdf",
+    "ownpdf0",
     "png",
     "png8",
 ];
