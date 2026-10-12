@@ -5,7 +5,10 @@ mod common;
 
 use common::interp::{interpret, interpret_env};
 use common::{Program, SECTION, Threads, env_values, generate, generate_with};
-use defuse::{Engine, EvalError, Field, Greedy, RandomScheduler, Report, Rng, Sequential, Speculation, ValueId};
+use defuse::{
+    Cause, Engine, EvalError, Field, Greedy, Limits, RandomScheduler, Report, Rng, Sequential, Speculation, ValueId,
+    WaitOn,
+};
 
 fn lines(src: &[&str]) -> Vec<String> {
     src.iter().map(|s| (*s).to_string()).collect()
@@ -376,9 +379,11 @@ fn a_stream_claim_ends_at_the_first_node_of_a_class_after_unfolding() {
     eval(&mut eng, &prog);
     assert_eq!(out(&eng, &prog, 0), "[1 2 3 5 4]");
     assert_eq!(out(&eng, &prog, 6), "[1 2 3 5 4]");
-    // Without any, it would take the reader of its own result: a cycle.
+    // Without any, it would take the reader of its own result: each run
+    // feeds the next, which the run budget ends, naming the claimer.
     prog.set_line(&mut eng, 5, "6".into());
-    assert!(matches!(eng.evaluate_sequential(), Err(EvalError::Cycle(_))));
+    let e = eng.evaluate_sequential().expect_err("a claim that feeds itself");
+    assert!(matches!(e, EvalError::RunawayNode { runs: 65, .. }), "{e}");
 }
 
 #[test]
@@ -427,7 +432,7 @@ fn a_stream_claim_follows_its_range_through_label_renumbering() {
     // The delimiter goes: the range runs on to the next delimiter.
     let mark = prog.lines.iter().position(|l| l == "mark a").unwrap();
     prog.set_line(&mut eng, mark, "6".into());
-    assert!(matches!(eng.evaluate_sequential(), Err(EvalError::Cycle(_))));
+    assert!(matches!(eng.evaluate_sequential(), Err(EvalError::RunawayNode { .. })));
 }
 
 #[test]
@@ -1644,6 +1649,165 @@ fn an_environment_read_waits_until_the_field_is_supplied_or_declared_absent() {
     eng.set_environment([(f, six)]);
     eng.evaluate_sequential().expect("evaluate");
     assert_eq!(out(&eng).as_deref(), Some("6"));
+}
+
+// ------------------------------------------------------- never hanging
+
+#[test]
+fn a_node_past_its_run_budget_ends_the_evaluation_naming_it_and_why() {
+    // A loop-back that never settles re-runs its publisher every round;
+    // with a budget of three runs the fourth is the error, with the loop
+    // field as the cause of the last runs.
+    let (mut eng, prog) = Program::load(lines(&["loop n = 0", "n = n + 1"]));
+    eng.set_limits(Limits {
+        runs_per_node: 3,
+        ..Limits::default()
+    });
+    let e = eng.evaluate_sequential().expect_err("never settles");
+    let EvalError::RunawayNode { node, runs, causes } = e else {
+        panic!("{e}");
+    };
+    assert_eq!(runs, 4);
+    assert!(prog.node_ids(&eng).contains(&node), "the publisher is named");
+    assert!(
+        !causes.is_empty() && causes.iter().all(|c| matches!(c, Cause::Loop { .. })),
+        "{causes:?}"
+    );
+    // Within the default budget the usual non-convergence verdict stands.
+    let (mut eng, _) = Program::load(lines(&["loop n = 0", "n = n + 1"]));
+    assert!(matches!(
+        eng.evaluate_sequential(),
+        Err(EvalError::NonConvergence { .. })
+    ));
+}
+
+/// An executor that loses every result: the engine must not spin on it.
+struct Lossy;
+
+impl defuse::Executor for Lossy {
+    fn execute(&mut self, _: usize, _: &(dyn Fn(usize) -> defuse::RunResult + Sync), _: &mut Vec<defuse::RunResult>) {}
+}
+
+#[test]
+fn rounds_that_apply_nothing_end_the_evaluation_listing_the_waiters() {
+    let (mut eng, prog) = Program::load(lines(&["x = 1", "y = x + 1", "z = y + 1"]));
+    eng.set_limits(Limits {
+        idle_rounds: 5,
+        ..Limits::default()
+    });
+    let e = eng
+        .evaluate(&mut Greedy::default(), &mut Lossy)
+        .expect_err("nothing is ever applied");
+    let EvalError::NoProgress { rounds, waiters } = e else {
+        panic!("{e}");
+    };
+    assert_eq!(rounds, 6);
+    let ids = prog.node_ids(&eng);
+    assert!(
+        !waiters.is_empty() && waiters.iter().all(|w| ids.contains(&w.node)),
+        "{waiters:?}"
+    );
+    assert!(waiters.iter().all(|w| w.on == WaitOn::Queued));
+}
+
+#[test]
+fn a_deadline_ends_the_evaluation_with_the_nodes_still_to_run() {
+    let (mut eng, prog) = Program::load(generate(3, 20));
+    eng.set_limits(Limits {
+        total_runs: Some(5),
+        ..Limits::default()
+    });
+    let e = eng.evaluate_sequential().expect_err("five runs allowed");
+    let EvalError::Deadline { runs, waiters } = e else {
+        panic!("{e}");
+    };
+    // The limit is checked between rounds: the first round ran its batch.
+    assert!(runs >= 5, "{runs}");
+    let ids = prog.node_ids(&eng);
+    assert!(!waiters.is_empty() && waiters.iter().all(|w| ids.contains(&w.node)));
+    // Lifting the limit finishes the rest.
+    eng.set_limits(Limits::default());
+    eng.evaluate_sequential().expect("the rest");
+    assert_eq!(prog.result(&eng), reference(&prog.lines));
+    // A zero time limit is reached at the first round.
+    let (mut eng, _) = Program::load(generate(3, 20));
+    eng.set_limits(Limits {
+        time: Some(std::time::Duration::ZERO),
+        ..Limits::default()
+    });
+    assert!(matches!(eng.evaluate_sequential(), Err(EvalError::Deadline { .. })));
+}
+
+/// `["deep"]` unfolds a `["deep"]` child without end; `["wide", n]`
+/// unfolds n leaves.
+struct Unfolder;
+
+impl defuse::Operation for Unfolder {
+    fn defs(&self, _: &[ValueId], _: &defuse::Values) -> Option<Vec<(Field, defuse::Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut defuse::Ctx<'_>) -> Result<ValueId, defuse::Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let me = cx.op();
+        match &*v.get(a[0]) {
+            defuse::Value::Str(s) if &**s == "deep" => {
+                let deep = v.str("deep");
+                cx.child(me, vec![deep]);
+            }
+            defuse::Value::Str(s) if &**s == "wide" => {
+                let count = v.as_int(a[1]).unwrap_or(0);
+                for index in 0..count {
+                    let leaf = v.str("leaf");
+                    let key = v.int(index);
+                    cx.child(me, vec![leaf, key]);
+                }
+            }
+            _ => {}
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+fn unfolding_past_the_creation_budget_ends_the_evaluation_naming_the_creator() {
+    use std::sync::Arc;
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Unfolder));
+    eng.set_limits(Limits {
+        unfold_depth: 8,
+        children_per_node: 3,
+        ..Limits::default()
+    });
+    let u = eng.new_unit();
+    let deep = eng.values().str("deep");
+    eng.push(u, op, vec![deep]);
+    let e = eng.evaluate_sequential().expect_err("unfolds without end");
+    let EvalError::RunawayCreation { depth, last, .. } = e else {
+        panic!("{e}");
+    };
+    assert!(depth > 8, "{depth}");
+    assert_eq!(last.len(), 1);
+    assert!(last[0].1.contains("deep"), "{last:?}");
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Unfolder));
+    eng.set_limits(Limits {
+        children_per_node: 3,
+        ..Limits::default()
+    });
+    let u = eng.new_unit();
+    let wide = eng.values().str("wide");
+    let five = eng.values().int(5);
+    let w = eng.push(u, op, vec![wide, five]);
+    let e = eng.evaluate_sequential().expect_err("five children, three allowed");
+    let EvalError::RunawayCreation {
+        node, created, last, ..
+    } = e
+    else {
+        panic!("{e}");
+    };
+    assert_eq!((node, created), (w, 5));
+    assert_eq!(last.len(), 4, "the last four children: {last:?}");
 }
 
 #[test]
