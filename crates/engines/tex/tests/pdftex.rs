@@ -92,7 +92,27 @@ fn find(h: &[u8], n: &[u8]) -> Option<usize> {
 }
 
 /// The documents that do not pass yet: un-ignored as they are fixed.
-const PENDING: &[&str] = &["berasizes", "interword", "misc", "pageref", "tounicode"];
+/// The documents not yet byte-identical: the first five on phitex-tex
+/// gaps (virtual fonts, interword byte 34, misc byte 15, object order of
+/// `\pdfpageref`, tounicode byte 22199); the rest use the writer's slice-2
+/// methods (links, outlines, objects, forms, images, object streams) at
+/// call sites phitex-tex has not wired yet.
+const PENDING: &[&str] = &[
+    "berasizes",
+    "interword",
+    "misc",
+    "pageref",
+    "tounicode",
+    "csform",
+    "jpeg",
+    "linkbreak",
+    "objstm2",
+    "outlinetree",
+    "ownpdf",
+    "png",
+    "png8",
+    "tounicode2",
+];
 
 /// Gate 1: `pdftex -ini` on `oracle/fixtures/pdf/*.tex` with a `.pdf`
 /// oracle: byte-identical; for the documents on a backend gap, whether
