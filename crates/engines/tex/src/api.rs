@@ -345,6 +345,9 @@ pub struct Stats {
     pub rounds: u64,
     /// Live nodes after.
     pub live: usize,
+    /// The longest chain of dependent nodes after the evaluation
+    /// ([`Engine::critical_path`]).
+    pub critical_path: u32,
     /// Expansions whose tokens read on into the text after them, and how
     /// many siblings they claimed for it.
     pub tails: u64,
@@ -890,6 +893,7 @@ impl Build {
         self.g
             .settle(self.unit, &self.opts.finder, &mut stats, self.opts.fixpoint);
         stats.live = self.g.eng.live_nodes();
+        stats.critical_path = self.g.eng.critical_path();
         self.stats = stats;
     }
 
