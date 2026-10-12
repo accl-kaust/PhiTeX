@@ -853,6 +853,9 @@ pub struct Engine {
     /// that ran meanwhile is checked against those after its start.
     pub(crate) touch_log: Vec<(u32, u64)>,
     in_eval: bool,
+    /// Set while a balanced, newly created text gets its scope kinds: a
+    /// local definition there has no readers yet.
+    fresh_scope: bool,
     /// The environment: fields defined before every text unit (text order
     /// -1), below the unit's own [`Engine::set_env`] entries.
     environment: FxHashMap<Field, ValueId>,
@@ -1006,6 +1009,7 @@ impl Engine {
             stream_runs: FxHashMap::default(),
             touch_log: Vec::new(),
             in_eval: false,
+            fresh_scope: false,
             environment: FxHashMap::default(),
             env_next: None,
             global_ix: BTreeMap::new(),
@@ -1934,6 +1938,8 @@ impl Engine {
 
     /// Phase 2: the node's static scope effect (re-binding the region it
     /// changes unless `region` is false).
+    /// (Without `region`, the caller re-binds and then calls
+    /// `set_created_kind`.)
     fn set_created_effect(&mut self, s: Slot, region: bool) {
         let eff = self.statics(self.n(s).op, self.n(s).args).eff;
         if eff == Effect::Pending || eff == Effect::None {
@@ -1943,8 +1949,15 @@ impl Engine {
         self.sync_order(s);
         if region {
             self.effect_region_changed(s, EFF_NONE);
+            self.set_kind(s, eff_kind(eff));
         }
-        self.set_kind(s, eff_kind(eff));
+    }
+
+    fn set_created_kind(&mut self, s: Slot) {
+        let eff = self.statics(self.n(s).op, self.n(s).args).eff;
+        if eff != Effect::Pending && eff != Effect::None {
+            self.set_kind(s, eff_kind(eff));
+        }
     }
 
     /// Phase 3: definitions, pending structure, initial height, claims.
@@ -2663,6 +2676,11 @@ impl Engine {
                 global,
             });
             n.defs = defs.into_boxed_slice();
+        }
+        if self.fresh_scope && !global {
+            self.ix_insert(unit, f, lx, x);
+            self.stream_touch(unit, lx);
+            return;
         }
         let root = self.units[unit as usize].root;
         // (previous site, users in (lx, end)) pairs.
@@ -4130,7 +4148,8 @@ impl Engine {
             let span = self
                 .order
                 .fold(&OAug, root, self.n(first).label, self.n(last).label + 1);
-            if span.c != 0 || span.o != 0 {
+            let balanced = span.c == 0 && span.o == 0;
+            if !balanced {
                 // Unbalanced: re-bind as if added one at a time.
                 let effs: Vec<u8> = created.iter().map(|&c| self.n(c).effect).collect();
                 for &c in &created {
@@ -4145,6 +4164,13 @@ impl Engine {
                     }
                 }
             }
+            // Balanced, every opener's scope lies in the new text, where
+            // nothing has run: its markers have no readers to take.
+            self.fresh_scope = balanced;
+            for &c in &created {
+                self.set_created_kind(c);
+            }
+            self.fresh_scope = false;
             for &c in &created {
                 self.bind_created(c);
                 self.structure_edit(c);
