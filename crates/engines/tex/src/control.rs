@@ -1020,7 +1020,7 @@ impl Run<'_, '_> {
             } else {
                 format!("{name}.tex")
             };
-            let Some(x) = self.get(&format!("file:{key}"))? else {
+            let Some(x) = self.read_file(&key)? else {
                 return Err(Halt::File(key));
             };
             let xs = list_of(v, x);
@@ -1200,8 +1200,7 @@ impl Run<'_, '_> {
                             let n = self.scan_four_bit_int()?;
                             self.scan_optional_equals()?;
                             let name = self.scan_file_name()?;
-                            let x = v.list(vec![v.str(&name)]);
-                            self.set(&format!("write:{n}"), x, true);
+                            self.open_out(i64::from(n), &name);
                         }
                         _ => {
                             let n = self.scan_four_bit_int()?;
@@ -1222,6 +1221,97 @@ impl Run<'_, '_> {
 
     /// `write_out` (§1370–§1371): the tokens expanded, to the log.
     pub(crate) fn write_out(&mut self, k: i32, body: &[Tok]) -> R<()> {
+        let s = self.expand_late(body)?;
+        let open = (0..16).contains(&k)
+            && self
+                .get(&format!("write:{k}"))?
+                .is_some_and(|x| x != ValueId::UNIT);
+        if open {
+            let v = self.v;
+            let e = v.list(vec![v.int(i64::from(k)), v.str(&s)]);
+            let su = v.seq_unit(e);
+            self.contribute("writes", su);
+            // the file's text (§1370: `print` with `\newlinechar`, then
+            // `print_ln`)
+            let name = self
+                .get(&format!("write:{k}"))?
+                .and_then(|x| list_of(v, x).first().map(|&n| str_of(v, n)))
+                .unwrap_or_default();
+            let nl = self.int("param:newlinechar")?;
+            let mut line: String = s
+                .chars()
+                .map(|c| {
+                    if i64::from(u32::from(c)) == nl {
+                        '\n'
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            line.push('\n');
+            let e = v.list(vec![v.str(&name), v.str(&line)]);
+            let su = v.seq_unit(e);
+            self.contribute("streams", su);
+        } else {
+            self.log("wlog", &s)?;
+        }
+        Ok(())
+    }
+
+    /// `\openout` done (§1374): the stream names the file (`.tex` if it
+    /// has no extension), which starts empty: its text accumulates in
+    /// the `streams` sequence, and `wopen:<name>` tells later readers
+    /// of the file that this run wrote it.
+    pub(crate) fn open_out(&mut self, n: i64, name: &str) {
+        let v = self.v;
+        let base = name.rsplit('/').next().unwrap_or(name);
+        let name = if base.contains('.') {
+            name.to_owned()
+        } else {
+            format!("{name}.tex")
+        };
+        self.set(&format!("write:{n}"), v.list(vec![v.str(&name)]), true);
+        self.set(&format!("wopen:{name}"), v.int(1), true);
+        let su = v.seq_unit(v.list(vec![v.str(&name)]));
+        self.contribute("streams", su);
+    }
+
+    /// The file `key` as TeX reads it here: if this run opened it for
+    /// writing before this point, the text written to it so far (TeX
+    /// reads what it wrote, as LaTeX's `\enddocument` reads the `.aux`
+    /// file); else the client's `file:` field (a loop-back field for a
+    /// file the job writes: the previous round's text).
+    pub(crate) fn read_file(&mut self, key: &str) -> R<Option<ValueId>> {
+        let v = self.v;
+        if self.get(&format!("wopen:{key}"))?.is_none() {
+            return self.get(&format!("file:{key}"));
+        }
+        let f = v.field("streams");
+        let before = self.cx.acc_range(f, None)?;
+        let mut all = v.seq_to_vec(before);
+        all.extend(
+            self.contribs
+                .iter()
+                .filter(|(g, _)| *g == f)
+                .flat_map(|(_, x)| v.seq_to_vec(*x)),
+        );
+        let mut text = String::new();
+        for e in all {
+            let xs = list_of(v, e);
+            if xs.first().map(|&n| str_of(v, n)).as_deref() != Some(key) {
+                continue;
+            }
+            match xs.get(1) {
+                Some(&t) => text.push_str(&str_of(v, t)),
+                None => text.clear(),
+            }
+        }
+        Ok(Some(v.list(vec![v.str(&format!("./{key}")), v.str(&text)])))
+    }
+
+    /// §1371: a token list expanded as `\write` expands it at
+    /// `\shipout` (also `\pdfliteral shipout`), shown as a string.
+    pub(crate) fn expand_late(&mut self, body: &[Tok]) -> R<String> {
         let mut toks = vec![Tok::ch(1, u32::from(b'{'))];
         toks.extend(body.iter().cloned());
         toks.push(Tok::ch(2, u32::from(b'}')));
@@ -1231,18 +1321,7 @@ impl Run<'_, '_> {
         self.get_token()?;
         let mut s = String::new();
         self.show_toks_into(&mut s, &expanded)?;
-        let open = (0..16).contains(&k)
-            && self
-                .get(&format!("write:{k}"))?
-                .is_some_and(|x| x != ValueId::UNIT);
-        if open {
-            let e = self.v.list(vec![self.v.int(i64::from(k)), self.v.str(&s)]);
-            let su = self.v.seq_unit(e);
-            self.contribute("writes", su);
-        } else {
-            self.log("wlog", &s)?;
-        }
-        Ok(())
+        Ok(s)
     }
 
     /// The input left as one source line, for `\inputlineno`.

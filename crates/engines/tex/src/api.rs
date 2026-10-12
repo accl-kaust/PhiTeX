@@ -15,7 +15,7 @@ use phitex_defuse::{
 };
 use phitex_source::pass::{self, AtomKind};
 
-use crate::ops::{Dvi, Exec, Mark, OutPage, Put, Shared};
+use crate::ops::{Dvi, Exec, Files, Mark, OutPage, Put, Shared};
 use crate::run::{Ops, slice_args};
 use crate::val::{field_name, int_of, list_of, str_of};
 
@@ -34,6 +34,17 @@ pub struct Options {
     pub comment: String,
     /// Where `\input`, `\openin` and fonts come from.
     pub finder: Finder,
+    /// The job's start (`SOURCE_DATE_EPOCH` with `FORCE_SOURCE_DATE`):
+    /// `\time`, `\day`, `\month`, `\year` (§241) and the PDF file's
+    /// date; `None` keeps the prelude's.
+    pub epoch: Option<i64>,
+    /// Whether the files the job writes and reads back (`.aux`, `.toc`,
+    /// ...) go round to their fixpoint (as `latexmk` runs LaTeX until
+    /// they settle), or are absent before the job writes them (one run
+    /// from nothing).
+    pub fixpoint: bool,
+    /// `\jobname` while the prelude runs (`latex` for `latex.ini`).
+    pub prelude_jobname: String,
 }
 
 impl Default for Options {
@@ -43,6 +54,9 @@ impl Default for Options {
             jobname: "texput".to_owned(),
             comment: String::new(),
             finder: Arc::new(|_| None),
+            epoch: None,
+            fixpoint: false,
+            prelude_jobname: "texput".to_owned(),
         }
     }
 }
@@ -83,10 +97,62 @@ fn import(v: &Values, t: &Tree) -> ValueId {
 
 type Env = Arc<Vec<(String, Tree)>>;
 
-/// Prelude environments by the hash of the prelude's text.
-fn env_cache() -> &'static Mutex<HashMap<u64, Env>> {
-    static C: OnceLock<Mutex<HashMap<u64, Env>>> = OnceLock::new();
+/// A prelude's environment with what it read: each file's name and the
+/// hash of what the finder gave (0: absent).
+struct Cached {
+    reads: Vec<(String, u64)>,
+    env: Env,
+}
+
+/// Prelude environments by the hash of the prelude's text; each is good
+/// while the files it read are unchanged.
+fn env_cache() -> &'static Mutex<HashMap<u64, Vec<Arc<Cached>>>> {
+    static C: OnceLock<Mutex<HashMap<u64, Vec<Arc<Cached>>>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The hash of a file as the finder gives it.
+fn file_hash(f: Option<&(String, Vec<u8>)>) -> u64 {
+    f.map_or(0, |(path, bytes)| {
+        let mut b = path.as_bytes().to_vec();
+        b.push(0);
+        b.extend_from_slice(bytes);
+        phitex_defuse::hash_bytes(3, &b).max(1)
+    })
+}
+
+/// The texts of the files written: the `streams` entries (`[name]` opens
+/// a file empty, `[name, text]` adds to it), in the order first opened.
+pub(crate) fn stream_texts(v: &Values, entries: &[ValueId]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for &e in entries {
+        let xs = list_of(v, e);
+        let name = xs.first().map(|&n| str_of(v, n)).unwrap_or_default();
+        let k = if let Some(k) = out.iter().position(|(n, _)| *n == name) {
+            k
+        } else {
+            out.push((name, String::new()));
+            out.len() - 1
+        };
+        match xs.get(1) {
+            Some(&t) => out[k].1.push_str(&str_of(v, t)),
+            None => out[k].1.clear(),
+        }
+    }
+    out
+}
+
+/// `\time`, `\day`, `\month`, `\year` at `t` seconds since 1970 (UTC,
+/// as with `SOURCE_DATE_EPOCH`).
+fn date_params(t: i64) -> [(&'static str, i64); 4] {
+    let d = phitex_pdf::pdf_date(t);
+    let n = |a: usize, b: usize| d.get(a..b).and_then(|x| x.parse().ok()).unwrap_or(0);
+    [
+        ("param:time", n(10, 12) * 60 + n(12, 14)),
+        ("param:day", n(8, 10)),
+        ("param:month", n(6, 8)),
+        ("param:year", n(2, 6)),
+    ]
 }
 
 /// The nodes of a text: slices starting at the pass's atoms (characters
@@ -141,6 +207,12 @@ pub struct Stats {
     pub tail_siblings: u64,
     /// Children that ran out of text (a claim measured short: a bug).
     pub starved: u64,
+    /// Loop-back rounds the engine ran (the files read back, to their
+    /// fixpoint).
+    pub loop_rounds: u64,
+    /// Nodes that waited on a value not known yet, and stops.
+    pub pending_waits: u64,
+    pub stops: u64,
 }
 
 impl Stats {
@@ -151,6 +223,9 @@ impl Stats {
         self.created += r.created;
         self.freed += r.freed;
         self.rounds += 1;
+        self.loop_rounds += r.rounds;
+        self.pending_waits += r.pending_waits;
+        self.stops += r.stops;
     }
 }
 
@@ -160,8 +235,13 @@ struct Graph {
     ops: Ops,
     mark: OpId,
     dvi: OpId,
-    /// The files supplied so far.
+    files_op: OpId,
+    /// The files supplied so far, with the hash of what the finder gave.
     files: Vec<(Field, ValueId)>,
+    reads: Vec<(String, u64)>,
+    /// The files the job writes and reads back: loop-back fields
+    /// (`fixpoint`), or absent before the job writes them.
+    written: Vec<String>,
 }
 
 impl Graph {
@@ -173,9 +253,12 @@ impl Graph {
         let outpage = eng.register(Arc::new(OutPage(shared.clone())));
         let dvi = eng.register(Arc::new(Dvi));
         let mark = eng.register(Arc::new(Mark));
+        let files_op = eng.register(Arc::new(Files));
         let ops = Ops { exec, put, outpage };
         let _ = shared.set(ops);
-        for f in ["items", "log", "needs", "defs", "pages", "writes", "tails"] {
+        for f in [
+            "items", "log", "needs", "defs", "pages", "writes", "tails", "streams",
+        ] {
             let fld = eng.values().field(f);
             eng.declare_accumulator(fld, Arc::new(SeqMonoid));
         }
@@ -186,13 +269,59 @@ impl Graph {
             ops,
             mark,
             dvi,
+            files_op,
             files: Vec::new(),
+            reads: Vec::new(),
+            written: Vec::new(),
         }
+    }
+
+    /// The names of the files the job opened for writing.
+    fn opened(&self, unit: UnitId) -> Vec<String> {
+        let v = self.eng.values();
+        let f = v.field("streams");
+        let entries = self
+            .eng
+            .acc_value(unit, f)
+            .map(|s| v.seq_to_vec(s))
+            .unwrap_or_default();
+        stream_texts(v, &entries)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect()
+    }
+
+    /// A file the job writes is read back: from the previous round
+    /// (`fixpoint`: a loop-back field, absent in round one, as LaTeX's
+    /// `\@input` finds no `.aux` on a first run), or absent.
+    fn written_file(&mut self, name: &str, fixpoint: bool) {
+        let v = self.eng.values();
+        let f = v.field(&format!("file:{name}"));
+        self.files.retain(|(g, _)| *g != f);
+        self.reads.retain(|(n, _)| n != name);
+        let absent = v.list(Vec::new());
+        if fixpoint {
+            self.eng.declare_loopback(f, absent);
+        } else {
+            self.files.push((f, absent));
+        }
+        self.written.push(name.to_owned());
+    }
+
+    /// The environment: the files supplied, and the loop-back files.
+    fn environment(&self, fixpoint: bool) -> Vec<(Field, ValueId)> {
+        let v = self.eng.values();
+        let mut env = self.files.clone();
+        if fixpoint {
+            let names = self.written.iter().map(|n| v.str(n)).collect();
+            env.push((v.field("loopfiles"), v.list(names)));
+        }
+        env
     }
 
     /// Evaluates; when the graph asks for files, supplies them and
     /// evaluates again.
-    fn settle(&mut self, unit: UnitId, finder: &Finder, stats: &mut Stats) {
+    fn settle(&mut self, unit: UnitId, finder: &Finder, stats: &mut Stats, fixpoint: bool) {
         let needs_f = self.eng.values().field("needs");
         loop {
             let t0 = std::time::Instant::now();
@@ -204,28 +333,56 @@ impl Graph {
                 eprintln!("round: {:?}, {} nodes run", t0.elapsed(), r.nodes_run);
             }
             stats.add(&r);
+            let opened = self.opened(unit);
+            let mut asked = false;
+            // a file supplied from the finder that the job turns out to
+            // write is read back instead
+            for name in &opened {
+                if self.written.contains(name) {
+                    continue;
+                }
+                let f = self.eng.values().field(&format!("file:{name}"));
+                if self.files.iter().any(|(g, _)| *g == f) {
+                    self.written_file(name, fixpoint);
+                    asked = true;
+                }
+            }
             let v = self.eng.values();
             let needs = self
                 .eng
                 .acc_value(unit, needs_f)
                 .map(|n| v.seq_to_vec(n))
                 .unwrap_or_default();
-            let mut asked = false;
-            for x in needs {
-                let xs = list_of(v, x);
-                let kind = xs.first().map(|&k| str_of(v, k)).unwrap_or_default();
+            let needs: Vec<(String, String)> = needs
+                .into_iter()
+                .map(|x| {
+                    let xs = list_of(v, x);
+                    (
+                        xs.first().map(|&k| str_of(v, k)).unwrap_or_default(),
+                        xs.get(2).map(|&n| str_of(v, n)).unwrap_or_default(),
+                    )
+                })
+                .collect();
+            for (kind, name) in needs {
                 if kind == "starve" {
                     stats.starved += 1;
                 }
                 if kind != "file" {
                     continue;
                 }
-                let name = xs.get(2).map(|&n| str_of(v, n)).unwrap_or_default();
-                let f = v.field(&format!("file:{name}"));
-                if self.files.iter().any(|(g, _)| *g == f) {
+                let f = self.eng.values().field(&format!("file:{name}"));
+                if self.files.iter().any(|(g, _)| *g == f) || self.written.contains(&name) {
                     continue;
                 }
-                let val = match finder(&name) {
+                if opened.contains(&name) {
+                    self.written_file(&name, fixpoint);
+                    asked = true;
+                    continue;
+                }
+                let found = finder(&name);
+                let v = self.eng.values();
+                self.reads.push((name.clone(), file_hash(found.as_ref())));
+                let val = match found {
                     Some((path, bytes)) => {
                         let text: String = bytes.iter().map(|&b| char::from(b)).collect();
                         v.list(vec![v.str(&path), v.str(&text)])
@@ -238,7 +395,7 @@ impl Graph {
             if !asked {
                 break;
             }
-            let env = self.files.clone();
+            let env = self.environment(fixpoint);
             self.eng.set_environment(env);
         }
         let v = self.eng.values();
@@ -292,15 +449,30 @@ fn as_file(text: &str) -> String {
     }
 }
 
-/// INITEX's state, and the prelude's on top of it.
-fn prelude_env(prelude: Option<&str>, finder: &Finder) -> Env {
-    let key = prelude.map_or(0, |p| phitex_defuse::hash_bytes(7, p.as_bytes()));
-    if let Some(e) = env_cache()
+/// INITEX's state, and the prelude's on top of it: a format, `\dump`
+/// ending it (or its text's end). Cached by the prelude's text, and good
+/// while every file it read is what the finder gives now.
+fn prelude_env(prelude: Option<&str>, opts: &Options) -> Env {
+    let finder = &opts.finder;
+    let key = prelude.map_or(0, |p| {
+        let mut b = p.as_bytes().to_vec();
+        b.push(0);
+        b.extend_from_slice(opts.prelude_jobname.as_bytes());
+        phitex_defuse::hash_bytes(7, &b)
+    });
+    let candidates: Vec<Arc<Cached>> = env_cache()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get(&key)
-    {
-        return e.clone();
+        .cloned()
+        .unwrap_or_default();
+    for c in candidates {
+        if c.reads
+            .iter()
+            .all(|(n, h)| file_hash(finder(n).as_ref()) == *h)
+        {
+            return c.env.clone();
+        }
     }
     let mut g = Graph::new();
     let unit = g.eng.new_unit();
@@ -310,12 +482,17 @@ fn prelude_env(prelude: Option<&str>, finder: &Finder) -> Env {
         g.eng.set_env(unit, f, *x);
     }
     if let Some(p) = prelude {
+        {
+            let v = g.eng.values();
+            let (f, x) = (v.field("jobname"), v.str(&opts.prelude_jobname));
+            g.eng.set_env(unit, f, x);
+        }
         g.push_text(unit, &as_file(p));
         // the point the prelude's final bindings are read at
         let end = g.eng.push(unit, g.mark, Vec::new());
         let mut stats = Stats::default();
         let t0 = std::time::Instant::now();
-        g.settle(unit, finder, &mut stats);
+        g.settle(unit, finder, &mut stats, false);
         if std::env::var_os("PHITEX_TEX_TIME").is_some() {
             eprintln!("prelude settle {:?}", t0.elapsed());
         }
@@ -330,6 +507,13 @@ fn prelude_env(prelude: Option<&str>, finder: &Finder) -> Env {
                     }
                     let f = Field(n);
                     let name = field_name(v, f);
+                    // open files are not dumped
+                    if ["wopen:", "write:", "file:", "read:"]
+                        .iter()
+                        .any(|p| name.starts_with(p))
+                    {
+                        continue;
+                    }
                     let x = g
                         .eng
                         .reaching_def(end, f)
@@ -345,10 +529,16 @@ fn prelude_env(prelude: Option<&str>, finder: &Finder) -> Env {
     let v = g.eng.values();
     let out: Vec<(String, Tree)> = env.into_iter().map(|(k, x)| (k, export(v, x))).collect();
     let e = Arc::new(out);
+    let c = Arc::new(Cached {
+        reads: g.reads.clone(),
+        env: e.clone(),
+    });
     env_cache()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .insert(key, e.clone());
+        .entry(key)
+        .or_default()
+        .push(c);
     e
 }
 
@@ -379,7 +569,7 @@ impl Build {
     #[must_use]
     pub fn with(opts: Options, prelude: Option<&str>, document: &str) -> Build {
         let t0 = std::time::Instant::now();
-        let env = prelude_env(prelude, &opts.finder);
+        let env = prelude_env(prelude, &opts);
         let t1 = t0.elapsed();
         let mut g = Graph::new();
         let unit = g.eng.new_unit();
@@ -391,13 +581,41 @@ impl Build {
             }
             sets.push((v.field("jobname"), v.str(&opts.jobname)));
             sets.push((v.field("dvicomment"), v.str(&opts.comment)));
+            sets.push((
+                v.field("pdfdate"),
+                v.str(&phitex_pdf::pdf_date(opts.epoch.unwrap_or(0))),
+            ));
+            if let Some(t) = opts.epoch {
+                // §241 fix_date_and_time, at the job's start
+                for (k, x) in date_params(t) {
+                    sets.push((v.field(k), v.int(x)));
+                }
+            }
             for (f, x) in sets {
                 g.eng.set_env(unit, f, x);
+            }
+        }
+        // §1337: `\everyjob`, before the job's first line
+        let every = env
+            .iter()
+            .find(|(k, _)| k == "param:everyjob")
+            .map(|(_, t)| import(g.eng.values(), t));
+        if let Some(t) = every {
+            let v = g.eng.values();
+            let toks = crate::val::toks_of(v, Some(t));
+            if !toks.is_empty() {
+                let frame = v.list(vec![v.str("t"), crate::val::toks_value(v, &toks)]);
+                let args = vec![v.list(vec![frame]), v.int(1)];
+                let exec = g.ops.exec;
+                g.eng.push(unit, exec, args);
             }
         }
         let nodes = g.push_text(unit, &as_file(document));
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
+        let files_op = g.files_op;
+        let files = g.eng.push(unit, files_op, Vec::new());
+        g.eng.add_root(files);
         let mut b = Build {
             g,
             unit,
@@ -418,7 +636,8 @@ impl Build {
 
     fn settle(&mut self) {
         let mut stats = Stats::default();
-        self.g.settle(self.unit, &self.opts.finder, &mut stats);
+        self.g
+            .settle(self.unit, &self.opts.finder, &mut stats, self.opts.fixpoint);
         stats.live = self.g.eng.live_nodes();
         self.stats = stats;
     }
@@ -479,7 +698,29 @@ impl Build {
         self.settle();
     }
 
-    /// The DVI file and the log.
+    /// The files the job wrote (`\openout`, `\write`), with their text,
+    /// in the order first opened: what TeX leaves in them.
+    #[must_use]
+    pub fn files(&self) -> Vec<(String, String)> {
+        let v = self.g.eng.values();
+        let f = v.field("streams");
+        let entries = self
+            .g
+            .eng
+            .acc_value(self.unit, f)
+            .map(|s| v.seq_to_vec(s))
+            .unwrap_or_default();
+        stream_texts(v, &entries)
+    }
+
+    /// Whether the output is a PDF file (`\pdfoutput` at the first
+    /// `\shipout`); else DVI.
+    #[must_use]
+    pub fn is_pdf(&self) -> bool {
+        self.output().0.starts_with(b"%PDF")
+    }
+
+    /// The output file (DVI or PDF) and the log.
     #[must_use]
     pub fn output(&self) -> (Vec<u8>, String) {
         let v = self.g.eng.values();
