@@ -1,6 +1,7 @@
 // The pages drawn by MuPDF (Artifex's WebAssembly build, `mupdf` on npm,
 // AGPL-3.0-or-later): a build's PDF opened once, a page drawn to RGBA
-// pixels at a scale, the outline read as the panel's entries. Host-neutral:
+// pixels at a scale with its text and links, the outline read as the
+// panel's entries. Host-neutral:
 // the host loads the `mupdf` module (the CLI's page from the watch's
 // `mupdf/`, the Overleaf extension's offscreen document from its `dist/`;
 // MuPDF finds its .wasm beside it) and gives it here.
@@ -8,7 +9,16 @@
 import type { Entry } from "./outline.ts";
 import type { Link } from "./types.ts";
 
-/** A page drawn: its pixels (`pw` by `ph`, RGBA, white under), its size in PDF points, its links. */
+/** A line of a page's text: its start on the baseline, its width, its font size (PDF points, from the page's top left). */
+export interface TextLine {
+  x: number;
+  y: number;
+  w: number;
+  size: number;
+  text: string;
+}
+
+/** A page drawn: its pixels (`pw` by `ph`, RGBA, white under), its size in PDF points, its links, its text. */
 export interface Drawn {
   rgba: Uint8ClampedArray;
   pw: number;
@@ -16,6 +26,7 @@ export interface Drawn {
   w: number;
   h: number;
   links: Link[];
+  text: TextLine[];
 }
 
 /** MuPDF's outline item (its `loadOutline()`). */
@@ -61,7 +72,7 @@ export class MupdfDoc {
             rgba[o + 3] = 255;
           }
         }
-        return { rgba, pw, ph, w: x1 - x0, h: y1 - y0, links: this.links(page, x0, y0) };
+        return { rgba, pw, ph, w: x1 - x0, h: y1 - y0, links: this.links(page, x0, y0), text: this.text(page, x0, y0) };
       } finally {
         pix.destroy();
       }
@@ -84,6 +95,32 @@ export class MupdfDoc {
     return out;
   }
 
+  /** A page's text, line by line (MuPDF's structured text), from its top left. */
+  private text(page: any, x0: number, y0: number): TextLine[] {
+    const out: TextLine[] = [];
+    let line: TextLine | null = null;
+    let right = 0;
+    const st = page.toStructuredText("preserve-whitespace");
+    try {
+      st.walk({
+        beginLine: (bbox: number[]) => {
+          line = null;
+          right = bbox[2] - x0;
+        },
+        onChar: (c: string, origin: number[], _font: unknown, size: number) => {
+          line ??= { x: origin[0] - x0, y: origin[1] - y0, w: 0, size, text: "" };
+          line.text += c;
+        },
+        endLine: () => {
+          if (line?.text.trim()) out.push({ ...line, w: Math.max(right - line.x, 0) });
+        },
+      });
+    } finally {
+      st.destroy();
+    }
+    return out;
+  }
+
   /** The PDF's outline (its bookmarks) as the panel's entries. */
   outline(): Entry[] {
     const conv = (items: Item[] | null | undefined): Entry[] =>
@@ -96,11 +133,36 @@ export class MupdfDoc {
   }
 }
 
-/** A drawn page on a canvas (for a host that shows it in the page). */
-export function toCanvas(d: Drawn): HTMLCanvasElement {
+const SVG = "http://www.w3.org/2000/svg";
+
+/**
+ * A drawn page for a host that shows it in the page: its canvas, and over
+ * it its text, transparent, for selecting, copying and finding (an SVG in
+ * PDF points: each line stretched to its width, so it scales with the page).
+ */
+export function toCanvas(d: Drawn): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "phx-page";
   const c = document.createElement("canvas");
   c.width = d.pw;
   c.height = d.ph;
   c.getContext("2d")!.putImageData(new ImageData(d.rgba as Uint8ClampedArray<ArrayBuffer>, d.pw, d.ph), 0, 0);
-  return c;
+  const svg = document.createElementNS(SVG, "svg");
+  svg.setAttribute("class", "phx-text");
+  svg.setAttribute("viewBox", `0 0 ${d.w} ${d.h}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  for (const l of d.text) {
+    const t = document.createElementNS(SVG, "text");
+    t.setAttribute("x", String(l.x));
+    t.setAttribute("y", String(l.y));
+    t.setAttribute("font-size", String(l.size));
+    if (l.w > 0) {
+      t.setAttribute("textLength", String(l.w));
+      t.setAttribute("lengthAdjust", "spacingAndGlyphs");
+    }
+    t.textContent = l.text;
+    svg.append(t);
+  }
+  el.append(c, svg);
+  return el;
 }
