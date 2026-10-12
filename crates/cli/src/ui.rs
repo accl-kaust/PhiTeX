@@ -97,6 +97,39 @@ fn clip(s: &str, max: usize) -> String {
     out
 }
 
+/// Every message, besides the terminal: the viewer's console. Kept until
+/// a sink is set (the messages before the viewer started), then sent to
+/// it as they come.
+#[derive(Default)]
+struct Tap {
+    sink: Option<Box<dyn Fn(Value) + Send>>,
+    early: Vec<Value>,
+}
+
+impl Tap {
+    fn tell(&mut self, v: Value) {
+        match &self.sink {
+            Some(f) => f(v),
+            None if self.early.len() < 2000 => self.early.push(v),
+            None => {}
+        }
+    }
+}
+
+/// The terminal's last line, below what is printed: the spinner while a
+/// build runs, else the watch's status (a terminal only).
+#[derive(Default)]
+struct Bottom {
+    spin: Option<String>,
+    idle: Option<String>,
+}
+
+impl Bottom {
+    fn shown(&self) -> Option<&String> {
+        self.spin.as_ref().or(self.idle.as_ref())
+    }
+}
+
 /// The terminal: what is printed, and the spinner.
 pub struct Ui {
     pub st: Style,
@@ -104,13 +137,14 @@ pub struct Ui {
     pub quiet: bool,
     /// `--json`: events on standard output, nothing else.
     pub json: bool,
-    /// The spinner's line, while one runs (a terminal only).
-    spinning: Arc<Mutex<Option<String>>>,
+    bottom: Arc<Mutex<Bottom>>,
+    tap: Arc<Mutex<Tap>>,
 }
 
 /// A spinner while a build runs, until [`Spin::done`].
 pub struct Spin {
-    spinning: Arc<Mutex<Option<String>>>,
+    bottom: Arc<Mutex<Bottom>>,
+    tap: Arc<Mutex<Tap>>,
     stop: Arc<AtomicBool>,
     updater: Option<std::thread::JoinHandle<()>>,
 }
@@ -128,6 +162,38 @@ fn status_line(what: &str, s: &Status, elapsed: Duration) -> String {
 
 const TICKS: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// `s` without its colours.
+pub fn plain(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c == '\x1b' {
+            // (`ESC [ … m`)
+            for d in it.by_ref() {
+                if d.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The bottom line written again, over what it was.
+fn redraw(e: &mut impl std::io::Write, b: &Bottom) {
+    let _ = write!(e, "\r\x1b[2K");
+    if let Some(l) = b.shown() {
+        let _ = write!(e, "{l}");
+    }
+    let _ = e.flush();
+}
+
 impl Ui {
     pub fn new(st: Style, verbose: u8, quiet: bool, json: bool) -> Ui {
         Ui {
@@ -135,21 +201,47 @@ impl Ui {
             verbose,
             quiet,
             json,
-            spinning: Arc::new(Mutex::new(None)),
+            bottom: Arc::default(),
+            tap: Arc::default(),
+        }
+    }
+
+    /// Every message from now on (and those so far) also to `sink`, as
+    /// `{"kind": …, "text": …}` (the text without colours) or, for
+    /// [`Ui::event`]'s, `{"kind": "event", "event": {…}}`.
+    pub fn tap(&self, sink: Box<dyn Fn(Value) + Send>) {
+        let mut t = lock(&self.tap);
+        for v in t.early.drain(..) {
+            sink(v);
+        }
+        t.sink = Some(sink);
+    }
+
+    fn tell(&self, kind: &str, text: &str) {
+        lock(&self.tap).tell(json!({"kind": kind, "text": plain(text)}));
+    }
+
+    /// `s` on standard error, above the bottom line.
+    fn print(&self, s: &str) {
+        if self.json {
+            return;
+        }
+        let b = lock(&self.bottom);
+        let mut e = std::io::stderr().lock();
+        let shown = b.shown().is_some();
+        if shown {
+            let _ = write!(e, "\r\x1b[2K");
+        }
+        let _ = writeln!(e, "{s}");
+        if shown {
+            redraw(&mut e, &b);
         }
     }
 
     /// A line on standard error, above the spinner if one runs.
     pub fn line(&self, s: &str) {
-        if self.json {
-            return;
-        }
-        let spin = self.spinning.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut e = std::io::stderr().lock();
-        if spin.is_some() {
-            let _ = write!(e, "\r\x1b[2K");
-        }
-        let _ = writeln!(e, "{s}");
+        self.print(s);
+        self.tell("line", s);
     }
 
     /// `--json`: one event, a line on standard output.
@@ -159,46 +251,97 @@ impl Ui {
             let _ = writeln!(o, "{v}");
             let _ = o.flush();
         }
+        lock(&self.tap).tell(json!({"kind": "event", "event": v}));
     }
 
     /// What the session says it is doing (`phitex: …`, dim), unless `-q`.
     pub fn note(&self, s: &str) {
         if !self.quiet {
-            self.line(&self.st.dim(&format!("phitex: {s}")));
+            self.print(&self.st.dim(&format!("phitex: {s}")));
         }
-        self.event(&json!({"event": "note", "message": s}));
+        self.tell("note", s);
+        self.event_only(&json!({"event": "note", "message": s}));
     }
 
     pub fn error(&self, s: &str) {
-        self.line(&format!("{}: {s}", self.st.red("error")));
-        self.event(&json!({"event": "error", "message": s}));
+        self.print(&format!("{}: {s}", self.st.red("error")));
+        self.tell("error", s);
+        self.event_only(&json!({"event": "error", "message": s}));
     }
 
     pub fn warning(&self, s: &str) {
-        self.line(&format!("{}: {s}", self.st.yellow("warning")));
-        self.event(&json!({"event": "warning", "message": s}));
+        self.print(&format!("{}: {s}", self.st.yellow("warning")));
+        self.tell("warning", s);
+        self.event_only(&json!({"event": "warning", "message": s}));
+    }
+
+    /// `--json`'s event, not told again (its line was).
+    fn event_only(&self, v: &Value) {
+        if self.json {
+            let mut o = std::io::stdout().lock();
+            let _ = writeln!(o, "{v}");
+            let _ = o.flush();
+        }
+    }
+
+    /// The watch's status, below what is printed while no build runs (a
+    /// terminal only; none: no line), and told: `ok` its mark (none: dim).
+    pub fn status(&self, text: Option<&str>, ok: Option<bool>) {
+        let st = self.st;
+        let line = text.map(|t| {
+            let w = crate::keys::width().unwrap_or(80);
+            let mark = match ok {
+                Some(true) => st.green("●"),
+                Some(false) => st.red("●"),
+                None => st.dim("●"),
+            };
+            format!("{mark} {}", st.dim(&clip(t, w.saturating_sub(3))))
+        });
+        if st.tty && !self.json {
+            let mut b = lock(&self.bottom);
+            b.idle = line;
+            if b.spin.is_none() {
+                redraw(&mut std::io::stderr().lock(), &b);
+            }
+        }
+        lock(&self.tap).tell(json!({"kind": "status", "text": text.unwrap_or(""), "ok": ok}));
+    }
+
+    /// The screen cleared, the bottom line again.
+    pub fn clear(&self) {
+        if self.st.tty && !self.json {
+            let b = lock(&self.bottom);
+            let mut e = std::io::stderr().lock();
+            let _ = write!(e, "\x1b[2J\x1b[H");
+            redraw(&mut e, &b);
+        }
     }
 
     /// A spinner on standard error (a terminal only) showing `what` and
-    /// what `status` says, until it is done.
+    /// what `status` says, until it is done; the viewer is told it began.
     pub fn spin(&self, what: String, status: Arc<Status>) -> Spin {
+        lock(&self.tap).tell(json!({"kind": "busy", "text": what}));
         let stop = Arc::new(AtomicBool::new(false));
         let mut updater = None;
         if self.st.tty && !self.json {
-            let (spinning, stop) = (self.spinning.clone(), stop.clone());
+            let (bottom, stop) = (self.bottom.clone(), stop.clone());
             let t0 = Instant::now();
             updater = Some(std::thread::spawn(move || {
                 let mut k = 0;
                 while !stop.load(Ordering::Relaxed) {
+                    let w = crate::keys::width().unwrap_or(80);
                     let line = format!(
                         "{} {}",
                         TICKS[k % TICKS.len()],
-                        status_line(&what, &status, t0.elapsed())
+                        clip(
+                            &status_line(&what, &status, t0.elapsed()),
+                            w.saturating_sub(3)
+                        )
                     );
                     {
-                        let mut s = spinning.lock().unwrap_or_else(PoisonError::into_inner);
-                        let _ = write!(std::io::stderr(), "\r\x1b[2K{line}");
-                        *s = Some(line);
+                        let mut b = lock(&bottom);
+                        b.spin = Some(line);
+                        redraw(&mut std::io::stderr().lock(), &b);
                     }
                     k += 1;
                     std::thread::sleep(Duration::from_millis(80));
@@ -206,7 +349,8 @@ impl Ui {
             }));
         }
         Spin {
-            spinning: self.spinning.clone(),
+            bottom: self.bottom.clone(),
+            tap: self.tap.clone(),
             stop,
             updater,
         }
@@ -288,10 +432,11 @@ impl Spin {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(u) = self.updater {
             let _ = u.join();
-            let mut s = self.spinning.lock().unwrap_or_else(PoisonError::into_inner);
-            let _ = write!(std::io::stderr(), "\r\x1b[2K");
-            *s = None;
+            let mut b = lock(&self.bottom);
+            b.spin = None;
+            redraw(&mut std::io::stderr().lock(), &b);
         }
+        lock(&self.tap).tell(json!({"kind": "busy", "text": ""}));
     }
 }
 
@@ -344,6 +489,11 @@ pub fn catch<T>(f: impl FnOnce() -> T) -> Result<T, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_text() {
+        assert_eq!(plain("\x1b[1;31merror\x1b[0m: x"), "error: x");
+    }
 
     #[test]
     fn clips_and_times() {
