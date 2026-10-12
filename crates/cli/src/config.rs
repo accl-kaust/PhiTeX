@@ -1,23 +1,29 @@
 //! What the modern command line builds (DESIGN.md, "Command line and
-//! terminal"): `phitex.toml` if there is one, else the file named on the
-//! command line, with the `% !TEX program` and `% !TEX root` magic
+//! terminal"): the user's `phitex.toml` (`$XDG_CONFIG_HOME/phitex/`, else
+//! `~/.config/phitex/`) under the project's `phitex.toml` if there is one,
+//! the file named on the command line, with the `% !TEX program` and `% !TEX root` magic
 //! comments its first lines may hold.
 //!
-//! `phitex.toml` is read as the small subset of TOML it needs: `key =
-//! value` lines with quoted strings, booleans and integers, `#` comments,
-//! and `[build]` (or any other) table headers, which are ignored.
+//! Both files are TOML (`toml`, `serde`); the project's settings win key by
+//! key over the user's ([`Config::over`]).
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Deserializer};
+
 /// The settings of a build.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Config {
     /// The main file.
+    #[serde(alias = "file")]
     pub main: Option<String>,
     /// The engine, as a program name (`pdflatex`, `pdftex`, `latex`,
     /// `tex`).
+    #[serde(alias = "program")]
     pub engine: Option<String>,
     /// Where the outputs go (`-output-directory`).
+    #[serde(alias = "output-directory", alias = "out-dir")]
     pub output_dir: Option<String>,
     pub shell_escape: Option<bool>,
     /// A program to show the PDF with (`phitex watch --open`).
@@ -26,10 +32,14 @@ pub struct Config {
     pub editor: Option<String>,
     /// Where to copy the final PDF after each successful build (`copy-pdf
     /// = true | "dir"`).
+    #[serde(default, deserialize_with = "copy_pdf")]
     pub copy_pdf: Option<CopyPdf>,
     /// Whether `phitex build` and `phitex watch` write `<job>.synctex.gz`
     /// (`synctex = false`: not; on by default, DESIGN 4.5).
     pub synctex: Option<bool>,
+    /// The cache's size limit in bytes (`cache-limit = "4GB"`; 0: no cache).
+    #[serde(default, deserialize_with = "size")]
+    pub cache_limit: Option<u64>,
 }
 
 /// `copy-pdf`'s value.
@@ -46,88 +56,108 @@ pub enum CopyPdf {
 /// The name of the configuration file.
 pub const FILE: &str = "phitex.toml";
 
+/// `copy-pdf = true | false | "dir"`.
+fn copy_pdf<'de, D: Deserializer<'de>>(d: D) -> Result<Option<CopyPdf>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Bool(bool),
+        Dir(String),
+    }
+    Ok(Some(match Raw::deserialize(d)? {
+        Raw::Bool(true) => CopyPdf::Invocation,
+        Raw::Bool(false) => CopyPdf::Off,
+        Raw::Dir(s) => CopyPdf::Dir(s),
+    }))
+}
+
+/// `cache-limit = "4GB" | bytes`.
+fn size<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Bytes(u64),
+        Text(String),
+    }
+    match Raw::deserialize(d)? {
+        Raw::Bytes(n) => Ok(Some(n)),
+        Raw::Text(t) => parse_size(&t).map(Some).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "`{t}` is not a size (\"500MB\", \"4GB\", \"2GiB\", bytes, or 0: no cache)"
+            ))
+        }),
+    }
+}
+
 /// Parse `phitex.toml`'s `text`.
 pub fn parse(text: &str) -> Result<Config, String> {
-    let mut c = Config::default();
-    for (n, line) in text.lines().enumerate() {
-        let line = strip_comment(line).trim();
-        if line.is_empty() || (line.starts_with('[') && line.ends_with(']')) {
-            continue;
-        }
-        let err = |what: &str| format!("{FILE}:{}: {what}", n + 1);
-        let (key, value) = line
-            .split_once('=')
-            .ok_or_else(|| err("expected `key = value`"))?;
-        let (key, value) = (key.trim(), value.trim());
-        let string = || -> Result<String, String> {
-            unquote(value).ok_or_else(|| err(&format!("`{key}` must be a quoted string")))
-        };
-        let boolean = || -> Result<bool, String> {
-            match value {
-                "true" => Ok(true),
-                "false" => Ok(false),
-                _ => Err(err(&format!("`{key}` must be true or false"))),
-            }
-        };
-        match key.trim_matches('"') {
-            "main" | "file" => c.main = Some(string()?),
-            "engine" | "program" => c.engine = Some(string()?),
-            "output-dir" | "output-directory" | "out-dir" | "output_dir" => {
-                c.output_dir = Some(string()?);
-            }
-            "shell-escape" | "shell_escape" => c.shell_escape = Some(boolean()?),
-            "viewer" => c.viewer = Some(string()?),
-            "editor" => c.editor = Some(string()?),
-            "synctex" => c.synctex = Some(boolean()?),
-            "copy-pdf" | "copy_pdf" => {
-                c.copy_pdf = Some(match value {
-                    "true" => CopyPdf::Invocation,
-                    "false" => CopyPdf::Off,
-                    _ => CopyPdf::Dir(unquote(value).ok_or_else(|| {
-                        err("`copy-pdf` must be true, false or a quoted directory")
-                    })?),
-                });
-            }
-            k => return Err(err(&format!("unknown key `{k}`"))),
-        }
+    parse_named(text, FILE)
+}
+
+/// Parse `text`, its errors naming it `name`.
+fn parse_named(text: &str, name: &str) -> Result<Config, String> {
+    toml::from_str(text).map_err(|e| format!("{name}: {}", e.to_string().trim_end()))
+}
+
+/// A size: bytes, or a number with a unit (`500MB`, `4 GB`, `2GiB`).
+#[must_use]
+pub fn parse_size(s: &str) -> Option<u64> {
+    s.trim()
+        .parse::<bytesize::ByteSize>()
+        .ok()
+        .map(|b| b.as_u64())
+}
+
+/// The user's settings file: `$XDG_CONFIG_HOME/phitex/phitex.toml`, else
+/// `~/.config/phitex/phitex.toml`.
+#[must_use]
+pub fn user_file() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .map(|h| PathBuf::from(h).join(".config"))
+        })?;
+    Some(base.join("phitex").join(FILE))
+}
+
+/// The user's settings (none there: the defaults). They name no main
+/// file: that is the project's.
+pub fn user() -> Result<Config, String> {
+    let Some(p) = user_file() else {
+        return Ok(Config::default());
+    };
+    let Ok(text) = std::fs::read_to_string(&p) else {
+        return Ok(Config::default());
+    };
+    let c = parse_named(&text, &p.display().to_string())?;
+    if c.main.is_some() {
+        return Err(format!(
+            "{}: `main` belongs in a project's phitex.toml, not the user's",
+            p.display()
+        ));
     }
     Ok(c)
 }
 
-/// `line` without a `#` comment (outside quotes).
-fn strip_comment(line: &str) -> &str {
-    let mut quoted = false;
-    for (i, c) in line.char_indices() {
-        match c {
-            '"' => quoted = !quoted,
-            '#' if !quoted => return &line[..i],
-            _ => {}
+impl Config {
+    /// These settings over `under`'s: each one set here wins.
+    #[must_use]
+    pub fn over(self, under: Config) -> Config {
+        Config {
+            main: self.main.or(under.main),
+            engine: self.engine.or(under.engine),
+            output_dir: self.output_dir.or(under.output_dir),
+            shell_escape: self.shell_escape.or(under.shell_escape),
+            viewer: self.viewer.or(under.viewer),
+            editor: self.editor.or(under.editor),
+            copy_pdf: self.copy_pdf.or(under.copy_pdf),
+            synctex: self.synctex.or(under.synctex),
+            cache_limit: self.cache_limit.or(under.cache_limit),
         }
     }
-    line
-}
-
-/// A TOML basic or literal string's value.
-fn unquote(v: &str) -> Option<String> {
-    if let Some(s) = v.strip_prefix('\'') {
-        return s.strip_suffix('\'').map(str::to_owned);
-    }
-    let s = v.strip_prefix('"')?.strip_suffix('"')?;
-    let mut out = String::new();
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next()? {
-                'n' => out.push('\n'),
-                't' => out.push('\t'),
-                c @ ('\\' | '"') => out.push(c),
-                _ => return None,
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    Some(out)
 }
 
 /// `phitex.toml` in `dir` or the nearest directory above it: the
@@ -191,9 +221,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn toml_subset() {
+    fn toml() {
         let c = parse(
-            "# my paper\n[build]\nmain = \"paper.tex\"  # the root\nengine = 'pdflatex'\n\
+            "# my paper\nmain = \"paper.tex\"  # the root\nengine = 'pdflatex'\n\
              output-dir = \"out\"\nshell-escape = false\nviewer = \"zathura\"\neditor = \"code\"\n",
         )
         .unwrap();
@@ -208,9 +238,21 @@ mod tests {
                 editor: Some("code".into()),
                 copy_pdf: None,
                 synctex: None,
+                cache_limit: None,
             }
         );
         assert_eq!(parse("synctex = false").unwrap().synctex, Some(false));
+        assert_eq!(
+            parse("cache-limit = \"500MB\"").unwrap().cache_limit,
+            Some(500_000_000)
+        );
+        assert_eq!(parse("cache-limit = 0").unwrap().cache_limit, Some(0));
+        assert!(parse("cache-limit = \"lots\"").is_err());
+        let user = parse("engine = \"tex\"\nsynctex = false").unwrap();
+        let project = parse("engine = \"pdflatex\"").unwrap();
+        let c = project.over(user);
+        assert_eq!(c.engine.as_deref(), Some("pdflatex"));
+        assert_eq!(c.synctex, Some(false));
         assert_eq!(
             parse("copy-pdf = true").unwrap().copy_pdf,
             Some(CopyPdf::Invocation)
@@ -226,9 +268,11 @@ mod tests {
             Some(CopyPdf::Dir("../pdfs".into()))
         );
         assert!(parse("copy-pdf = yes").is_err());
+        let e = parse("mian = \"x\"").unwrap_err();
+        assert!(e.starts_with("phitex.toml: ") && e.contains("mian"), "{e}");
         assert_eq!(
-            parse("mian = \"x\"").unwrap_err(),
-            "phitex.toml:1: unknown key `mian`"
+            parse("cache-limit = \"2GiB\"").unwrap().cache_limit,
+            Some(2 << 30)
         );
         assert!(parse("main = paper.tex").is_err());
     }

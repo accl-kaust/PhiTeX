@@ -47,13 +47,17 @@ fn after_help() -> String {
   {l}phitex build paper.tex{l:#}              the PDF beside it, pdflatex for LaTeX
   {l}phitex watch -o out paper.tex{l:#}       rebuild on each change, the viewer in the browser
   {l}phitex build --json paper.tex{l:#}       the build's events as JSON lines
-  {l}phitex clean --all{l:#}                  remove the cache of formats
+  {l}phitex clean paper.tex{l:#}              remove its outputs and its part of the cache
+  {l}phitex clean --all{l:#}                  remove the whole cache, every document's
 
 {h}Configuration:{h:#}
   Without a file, `phitex.toml` (here or above) names it:
       main = \"paper.tex\"   engine = \"pdflatex\"   output-dir = \"out\"
       copy-pdf = true   (or a directory, relative to phitex.toml's)
-      synctex = false   shell-escape = true   editor = \"code\"
+      synctex = false   shell-escape = true   editor = \"code\"   viewer = \"zathura\"
+      cache-limit = \"4GB\"   (0: no cache; or PHITEX_CACHE_LIMIT)
+  ~/.config/phitex/phitex.toml holds your own defaults; a project's
+  phitex.toml wins over it key by key.
   A `% !TEX program = …` or `% !TEX root = …` comment in the file is honoured.
 
 {h}TeX's own command line:{h:#}
@@ -98,7 +102,7 @@ enum Sub {
     },
     /// Remove the files a build writes
     Clean {
-        /// The cache of formats and TeX Live's links too (no file needed)
+        /// The whole cache, every document's (no file needed)
         #[arg(long)]
         all: bool,
         #[arg(value_name = "FILE")]
@@ -285,6 +289,8 @@ pub struct Target {
     /// watch: a program `--open` starts on the output instead of the
     /// browser (`viewer` in `phitex.toml`).
     pub viewer: Option<String>,
+    /// The cache's limit (`cache-limit`; none: the default).
+    pub cache_limit: Option<u64>,
 }
 
 impl Target {
@@ -300,6 +306,7 @@ impl Target {
 pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let found = config::find(&cwd)?;
+    let user = config::user()?;
     let (root, cfg, configured) = match (&o.file, found) {
         (None, Some((root, cfg))) => {
             std::env::set_current_dir(&root)
@@ -309,6 +316,8 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         (Some(_), Some((root, cfg))) if root == cwd => (root, cfg, true),
         _ => (cwd.clone(), config::Config::default(), false),
     };
+    // (the project's settings over the user's, key by key)
+    let cfg = cfg.over(user);
     let copy_pdf = match (&o.copy_pdf, &cfg.copy_pdf) {
         (Some(c), _) => copy_dir(c, &cwd, &cwd),
         (None, Some(c)) => copy_dir(c, &cwd, &root),
@@ -364,6 +373,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         shell_escape: o.shell_escape || cfg.shell_escape.unwrap_or(false),
         editor: o.editor.clone().or(cfg.editor),
         viewer: cfg.viewer,
+        cache_limit: cfg.cache_limit,
     })
 }
 
@@ -562,6 +572,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     if let (Some(m), Some(d), true) = (&main, &t.copy_pdf, r.out.errors.is_empty()) {
         copy_pdf(m, d, ui);
     }
+    cache_summary(t, ui);
     i32::from(!r.out.errors.is_empty())
 }
 
@@ -595,6 +606,26 @@ const CLEAN: &[&str] = &[
     "thm",
 ];
 
+/// The cache's line (dim, not with `-q`) and `cache` event: after a
+/// build, and when a watch ends.
+pub fn cache_summary(t: &Target, ui: &Ui) {
+    match crate::cache::Cache::open(t.cache_limit) {
+        Ok(c) => {
+            if !ui.quiet {
+                ui.line(&ui.st.dim(&c.summary()));
+            }
+            ui.event(&json!({
+                "event": "cache",
+                "dir": c.dir.display().to_string(),
+                "bytes": c.usage(),
+                "limit": c.limit,
+            }));
+        }
+        Err(e) => ui.warning(&e),
+    }
+}
+
+/// `phitex clean`: the document's outputs and its part of the cache.
 fn clean(t: &Target, ui: &Ui) -> i32 {
     let dir = t
         .output_dir
@@ -607,23 +638,42 @@ fn clean(t: &Target, ui: &Ui) -> i32 {
             n += 1;
         }
     }
+    let freed = match crate::cache::Cache::open(t.cache_limit) {
+        Ok(c) => c.clear_doc(Path::new(&t.file)).unwrap_or_else(|e| {
+            ui.warning(&format!("the document's cache: {e}"));
+            0
+        }),
+        Err(e) => {
+            ui.warning(&e);
+            0
+        }
+    };
     ui.line(&ui.st.green(&format!(
-        "removed {n} file{}",
-        if n == 1 { "" } else { "s" }
+        "removed {n} file{} and {} of cache",
+        if n == 1 { "" } else { "s" },
+        crate::cache::size(freed)
     )));
-    ui.event(&json!({"event": "clean", "removed": n}));
+    ui.event(&json!({"event": "clean", "removed": n, "cache_bytes": freed}));
     0
 }
 
+/// `phitex clean --all`: the whole cache, every document's.
 fn clean_all(ui: &Ui) -> ! {
-    let d = tex::cache_dir();
-    match std::fs::remove_dir_all(&d) {
-        Ok(()) => ui.line(&ui.st.green(&format!("removed {}", d.display()))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            ui.line(&format!("nothing cached ({})", d.display()));
+    let c = crate::cache::Cache::open(None).unwrap_or_else(|e| {
+        ui.error(&e);
+        std::process::exit(crate::EXIT_USAGE);
+    });
+    let dir = crate::cache::home_relative(&c.dir);
+    match c.clear_all() {
+        Ok(b) => {
+            ui.line(&ui.st.green(&format!(
+                "removed {} of cache ({dir})",
+                crate::cache::size(b)
+            )));
+            ui.event(&json!({"event": "clean", "cache_bytes": b}));
         }
         Err(e) => {
-            ui.error(&format!("{}: {e}", d.display()));
+            ui.error(&format!("{dir}: {e}"));
             std::process::exit(crate::EXIT_USAGE);
         }
     }

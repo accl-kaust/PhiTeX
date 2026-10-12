@@ -28,6 +28,7 @@
     clippy::needless_pass_by_value
 )]
 
+mod cache;
 mod compat;
 mod config;
 mod dvipdf;
