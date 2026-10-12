@@ -1,0 +1,45 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input png
+(../../oracle/fixtures/pdf/png.tex
+
+Completed box being shipped out [0]
+\vbox(500.0+0.0)x300.0, glue set 470.0fill
+.\pdfrefximage(15.0+0.0)x20.0
+.\glue(\topskip) 0.0
+.\hbox(15.0+0.0)x300.0, glue set 10.00006
+..\hbox(0.0+0.0)x0.0
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfrefximage(15.0+0.0)x20.0
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfrefximage(15.0+0.0)x20.0
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfrefximage(15.0+0.0)x20.0
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfrefximage(15.0+0.0)x20.0
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfrefximage(15.0+0.0)x20.0
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfrefximage(15.0+0.0)x20.0
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfrefximage(15.0+0.0)x20.0
+..\penalty 10000
+..\glue(\parfillskip) 0.0
+..\glue(\rightskip) 0.0
+.\hbox(0.0+0.0)x300.0
+.\glue 0.0 plus 1.0fill
+
+ <../../oracle/fixtures/pdf/png-gray.png (PNG copy)> <../../oracle/fixtures/pdf
+/png-gray16.png> <../../oracle/fixtures/pdf/png-rgb16.png> <../../oracle/fixtur
+es/pdf/png-pal.png> <../../oracle/fixtures/pdf/png-paltrns.png> <../../oracle/f
+ixtures/pdf/png-rgba.png> <../../oracle/fixtures/pdf/png-graya.png> <../../orac
+le/fixtures/pdf/png-gama.png> )
+Output written on png-trace.pdf (1 page, 4575 bytes).
+PDF statistics:
+ 19 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 41 words of extra memory for PDF output out of 10000 (max. 10000000)
+

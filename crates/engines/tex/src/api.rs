@@ -446,11 +446,26 @@ impl Graph {
             _ => {}
         }
         let mut out = format!("evaluation: {e}\n{e:?}");
-        // REDUCE-GAP: the engine has no accessor for a node's operation
-        // and arguments; `debug_node` gives its state and what it waits
-        // on (with that node's arguments)
+        let v = self.eng.values();
         for id in ids {
-            let _ = write!(out, "\n  {id:?}: {}", self.eng.debug_node(id));
+            let what = self.eng.node_info(id).map_or_else(
+                || "gone".to_owned(),
+                |i| {
+                    let args: Vec<String> = i
+                        .args
+                        .iter()
+                        .map(|&a| v.render(a).chars().take(200).collect())
+                        .collect();
+                    format!(
+                        "{} {:?}, parent {:?}, args {}",
+                        i.op,
+                        i.state,
+                        i.parent,
+                        args.join(" ")
+                    )
+                },
+            );
+            let _ = write!(out, "\n  {id:?}: {what}");
         }
         out
     }

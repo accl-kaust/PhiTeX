@@ -482,6 +482,31 @@ pub enum EvalError {
     },
 }
 
+/// A node as the client sees it ([`Engine::node_info`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeInfo {
+    /// Its operation's name.
+    pub op: &'static str,
+    pub args: Vec<ValueId>,
+    pub unit: UnitId,
+    /// The node whose run unfolded it, if any.
+    pub parent: Option<NodeId>,
+    pub state: NodeState,
+}
+
+/// A node's state, coarsely.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum NodeState {
+    /// To run (or being run) in the current or next evaluation.
+    Dirty,
+    /// Waiting for something.
+    Parked,
+    /// Ran, and nothing it read has changed since.
+    Done,
+    /// Taken by a claim: not run.
+    Inert,
+}
+
 /// Why a node had to run again (for [`EvalError::RunawayNode`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cause {
@@ -1677,6 +1702,32 @@ impl Engine {
     }
 
     // ----------------------------------------------------------- public reads
+
+    /// What a node is, for naming it in messages: its operation, its
+    /// arguments, its unit, its parent (the node whose run made it) and
+    /// its state. `None` for a node that is gone.
+    #[must_use]
+    pub fn node_info(&self, node: NodeId) -> Option<NodeInfo> {
+        let &s = self.ids.get(&node)?;
+        if !self.live(s) {
+            return None;
+        }
+        let n = self.n(s);
+        let state = match n.state {
+            State::Dirty | State::Spec => NodeState::Dirty,
+            State::Parked => NodeState::Parked,
+            State::Done => NodeState::Done,
+            State::Inert => NodeState::Inert,
+            State::Free => return None,
+        };
+        Some(NodeInfo {
+            op: self.op(n.op).name(),
+            args: self.args_vec(n.args),
+            unit: UnitId(n.unit),
+            parent: (n.parent != NIL && self.live(n.parent)).then(|| self.n(n.parent).id),
+            state,
+        })
+    }
 
     /// The output of `node` from its last completed run.
     #[must_use]
@@ -5835,41 +5886,38 @@ impl Engine {
 
     /// Of `parked`, the nodes waiting for an environment field, and those
     /// waiting (through any chain of waits) on one of them: a node parked
-    /// on one, or a range reader whose range holds one.
+    /// on one, or a range reader whose range holds one. A walk from the
+    /// environment waiters over the waiter lists and the range readers'
+    /// stabs: linear in the stalled set.
     fn env_stalled(&self, parked: &[Slot]) -> FxHashSet<Slot> {
-        let mut stalled: FxHashSet<Slot> = self
+        let parked_set: FxHashSet<Slot> = parked.iter().copied().collect();
+        let mut stalled: FxHashSet<Slot> = FxHashSet::default();
+        let mut todo: Vec<Slot> = self
             .env_waiters
             .values()
             .flatten()
             .copied()
             .filter(|&x| self.live(x) && self.n(x).state == State::Parked && self.n(x).on == NIL)
             .collect();
-        loop {
-            let before = stalled.len();
-            for &x in parked {
-                if stalled.contains(&x) {
-                    continue;
-                }
-                let on = self.n(x).on;
-                if on != NIL && stalled.contains(&on) {
-                    stalled.insert(x);
-                    continue;
-                }
-                if let Some((_, anchor)) = self.aux_of(x).and_then(|a| a.watch) {
-                    let (unit, label) = (self.n(x).unit, self.n(x).label);
-                    let lo = self.watch_key(x, anchor).0;
-                    if stalled
-                        .iter()
-                        .any(|&s| self.n(s).unit == unit && lo <= self.n(s).label && self.n(s).label < label)
-                    {
-                        stalled.insert(x);
+        while let Some(s) = todo.pop() {
+            if !stalled.insert(s) {
+                continue;
+            }
+            if let Some(a) = self.aux_of(s) {
+                for &w in &a.waiters {
+                    if parked_set.contains(&w) && self.n(w).on == s {
+                        todo.push(w);
                     }
                 }
             }
-            if stalled.len() == before {
-                return stalled;
+            let (unit, label) = (self.n(s).unit, self.n(s).label);
+            for (r, _) in self.stab(unit, label) {
+                if parked_set.contains(&r) && self.n(r).on == NIL {
+                    todo.push(r);
+                }
             }
         }
+        stalled
     }
 
     fn rounds(&mut self, sched: &mut dyn Scheduler, exec: &mut dyn Executor) -> Result<(), EvalError> {
