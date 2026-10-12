@@ -65,6 +65,9 @@ pub struct Options {
     /// numbers and resource names). A document the relaxed mode does
     /// not cover is built in exact mode, with a warning in the log.
     pub exact_objects: bool,
+    /// Where the build reports what it runs ([`Build::progress`]), for
+    /// a reader that polls it during the cold build; `None` makes one.
+    pub progress: Option<Arc<crate::exec::Progress>>,
 }
 
 impl Default for Options {
@@ -81,6 +84,7 @@ impl Default for Options {
             time_limit: Some(std::time::Duration::from_secs(600)),
             threads: None,
             exact_objects: true,
+            progress: None,
         }
     }
 }
@@ -430,6 +434,8 @@ struct Graph {
     threads: usize,
     /// Why the relaxed PDF mode gave way to exact mode, once it has.
     pdf_exact: Option<String>,
+    /// What the executor runs now, for readers on other threads.
+    watch: crate::exec::Watch,
 }
 
 impl Graph {
@@ -484,6 +490,7 @@ impl Graph {
             written: Vec::new(),
             threads: crate::exec::threads(threads),
             pdf_exact: None,
+            watch: crate::exec::Watch::new(crate::exec::threads(threads), None),
         }
     }
 
@@ -581,7 +588,7 @@ impl Graph {
         let needs_f = self.eng.values().field("needs");
         loop {
             let t0 = std::time::Instant::now();
-            let mut ex = crate::exec::Threads::new(self.threads);
+            let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();
             let r = match self
                 .eng
@@ -864,6 +871,9 @@ impl Build {
         let env = cached.env.clone();
         let t1 = t0.elapsed();
         let mut g = Graph::new(opts.time_limit, opts.threads);
+        if let Some(p) = &opts.progress {
+            g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
+        }
         let unit = g.eng.new_unit();
         {
             let v = g.eng.values();
@@ -932,12 +942,27 @@ impl Build {
     }
 
     fn settle(&mut self) {
+        // the text nodes' offsets in the document, for the progress
+        let mut offsets = std::collections::HashMap::new();
+        let mut off = 0u64;
+        for (k, n) in &self.nodes {
+            offsets.insert(n.raw(), off);
+            off += u64::try_from(k.len().saturating_sub(1)).unwrap_or(0);
+        }
+        self.g.watch.offsets = Arc::new(offsets);
         let mut stats = Stats::default();
         self.g.queries.clear();
         self.g
             .settle(self.unit, &self.opts.finder, &mut stats, self.opts.fixpoint);
         stats.live = self.g.eng.live_nodes();
         self.stats = stats;
+    }
+
+    /// What the build runs now, readable from another thread while
+    /// [`Build::with`] or [`Build::edit`] runs (the CLI polls it).
+    #[must_use]
+    pub fn progress(&self) -> Arc<crate::exec::Progress> {
+        self.g.watch.progress.clone()
     }
 
     /// Why the PDF file was written in exact mode though

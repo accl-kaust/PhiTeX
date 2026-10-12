@@ -25,8 +25,10 @@
 //! rule: no `unsafe`; borrowed closures reach the workers through
 //! rayon's scoped API or `std::thread::scope`.
 
-use std::sync::OnceLock;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use phitex_defuse::{Executor, RunResult};
 
@@ -72,10 +74,129 @@ pub(crate) fn clock() -> &'static dyn Clock {
     &StdClock
 }
 
+/// What a build runs now, readable from another thread while it runs
+/// (`Build::progress`): one slot per worker holding the job it runs
+/// ([`Progress::pack`]: the operation and the node's byte offset in the
+/// document; 0 when idle), the jobs finished in this evaluation and
+/// the jobs known so far (growing as nodes unfold). Workers only store
+/// into atomics (relaxed), once at a job's start and once at its end.
+#[derive(Debug)]
+pub struct Progress {
+    slots: Box<[AtomicU64]>,
+    done: AtomicU64,
+    total: AtomicU64,
+}
+
+impl Progress {
+    /// The offset of a node not in the document's own text (one a run
+    /// unfolded).
+    pub const INSIDE: u64 = (1 << 48) - 1;
+
+    /// Slots for `workers` workers and the evaluating thread (a reader
+    /// can make it before the build: [`crate::Options::progress`]).
+    #[must_use]
+    pub fn new(workers: usize) -> Progress {
+        Progress {
+            slots: (0..=workers).map(|_| AtomicU64::new(0)).collect(),
+            done: AtomicU64::new(0),
+            total: AtomicU64::new(0),
+        }
+    }
+
+    /// A slot's value: `op` (1 a text node, 2 a box put, 3 an output
+    /// page, 0 another) in the top 16 bits, the byte offset below.
+    #[must_use]
+    pub fn pack(op: u16, offset: u64) -> u64 {
+        (u64::from(op) + 1) << 48 | offset.min(Self::INSIDE)
+    }
+
+    /// A slot's value as `(op, offset)`; `None` when idle.
+    #[must_use]
+    pub fn unpack(x: u64) -> Option<(u16, u64)> {
+        let op = u16::try_from(x >> 48).ok()?.checked_sub(1)?;
+        Some((op, x & Self::INSIDE))
+    }
+
+    /// What each worker runs now.
+    #[must_use]
+    pub fn running(&self) -> Vec<Option<(u16, u64)>> {
+        self.slots
+            .iter()
+            .map(|s| Self::unpack(s.load(Ordering::Relaxed)))
+            .collect()
+    }
+
+    /// The jobs finished in this evaluation.
+    #[must_use]
+    pub fn done(&self) -> u64 {
+        self.done.load(Ordering::Relaxed)
+    }
+
+    /// The jobs known so far in this evaluation.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.total.load(Ordering::Relaxed)
+    }
+}
+
+/// The progress of a build and its text nodes' offsets, by node.
+#[derive(Clone)]
+pub(crate) struct Watch {
+    pub progress: Arc<Progress>,
+    pub offsets: Arc<HashMap<u64, u64>>,
+}
+
+impl Watch {
+    pub(crate) fn new(workers: usize, given: Option<Arc<Progress>>) -> Watch {
+        Watch {
+            progress: given.unwrap_or_else(|| Arc::new(Progress::new(workers))),
+            offsets: Arc::new(HashMap::new()),
+        }
+    }
+}
+
+thread_local! {
+    /// The slot of the job this thread runs, while it runs one.
+    static CURRENT: RefCell<Option<(Watch, usize)>> = const { RefCell::new(None) };
+    /// This thread's worker number, for its slot.
+    static WORKER: usize = {
+        static NEXT: AtomicUsize = AtomicUsize::new(1);
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    };
+}
+
+/// The slot of the calling thread: 0 for the evaluating thread, a
+/// worker's own otherwise.
+fn slot(n: usize) -> usize {
+    #[cfg(feature = "rayon")]
+    if let Some(i) = rayon::current_thread_index() {
+        return (i + 1) % n;
+    }
+    if std::thread::current()
+        .name()
+        .is_some_and(|t| t.starts_with("phitex-"))
+    {
+        WORKER.with(|w| *w % n)
+    } else {
+        0
+    }
+}
+
+/// A run begins: `op` on `node` (the job's slot says so).
+pub(crate) fn note(op: u16, node: u64) {
+    CURRENT.with(|c| {
+        if let Some((w, i)) = &*c.borrow() {
+            let off = w.offsets.get(&node).copied().unwrap_or(Progress::INSIDE);
+            w.progress.slots[*i].store(Progress::pack(op, off), Ordering::Relaxed);
+        }
+    });
+}
+
 /// The executor of an evaluation, with its counters: the time its jobs
 /// ran (summed over jobs), and the most jobs running at once.
 pub(crate) struct Threads {
     pub n: usize,
+    watch: Option<Watch>,
     busy: AtomicU64,
     running: AtomicUsize,
     peak: AtomicUsize,
@@ -85,10 +206,34 @@ impl Threads {
     pub(crate) fn new(n: usize) -> Threads {
         Threads {
             n,
+            watch: None,
             busy: AtomicU64::new(0),
             running: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
         }
+    }
+
+    /// The executor reporting to `w`; its counters begin again.
+    pub(crate) fn watched(mut self, w: &Watch) -> Threads {
+        w.progress.done.store(0, Ordering::Relaxed);
+        w.progress.total.store(0, Ordering::Relaxed);
+        self.watch = Some(w.clone());
+        self
+    }
+
+    /// One node's run, its slot set around it.
+    fn node_job<R>(&self, f: impl FnOnce() -> R) -> R {
+        let Some(w) = &self.watch else {
+            return self.job(f);
+        };
+        let i = slot(w.progress.slots.len());
+        let prev = CURRENT.with(|c| c.borrow_mut().replace((w.clone(), i)));
+        let r = self.job(f);
+        CURRENT.with(|c| *c.borrow_mut() = prev);
+        // the slot is clear before the job counts as done
+        w.progress.slots[i].store(0, Ordering::Relaxed);
+        w.progress.done.fetch_add(1, Ordering::Relaxed);
+        r
     }
 
     /// The jobs' summed run time (zero without a clock).
@@ -146,13 +291,18 @@ impl Executor for Threads {
         run: &(dyn Fn(usize) -> RunResult + Sync),
         out: &mut Vec<RunResult>,
     ) {
+        if let Some(w) = &self.watch {
+            w.progress
+                .total
+                .fetch_add(u64::try_from(n).unwrap_or(0), Ordering::Relaxed);
+        }
         if self.n <= 1 || n < GRAIN {
-            out.extend((0..n).map(|i| self.job(|| run(i))));
+            out.extend((0..n).map(|i| self.node_job(|| run(i))));
             return;
         }
         let slots: Vec<OnceLock<RunResult>> = (0..n).map(|_| OnceLock::new()).collect();
         self.parallel_each(n, &|i| {
-            let _ = slots[i].set(self.job(|| run(i)));
+            let _ = slots[i].set(self.node_job(|| run(i)));
         });
         out.extend(
             slots
@@ -241,7 +391,10 @@ fn parallel(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) 
     };
     std::thread::scope(|sc| {
         for _ in 1..threads.min(n.div_ceil(grain)) {
-            sc.spawn(work);
+            std::thread::Builder::new()
+                .name("phitex-worker".to_owned())
+                .spawn_scoped(sc, work)
+                .expect("a worker thread");
         }
         work();
     });

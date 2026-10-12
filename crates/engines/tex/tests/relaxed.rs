@@ -14,6 +14,15 @@ use std::path::{Path, PathBuf};
 
 use phitex_tex::Options;
 
+/// The page writers' counter is the process's: the tests that build
+/// relaxed documents take turns.
+static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn turn() -> std::sync::MutexGuard<'static, ()> {
+    TURN.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn pdf_fixtures() -> PathBuf {
     common::fixtures().join("pdf")
 }
@@ -32,6 +41,7 @@ fn relaxed(name: &str, dir: &Path) -> Options {
 #[test]
 #[ignore = "heavy: the LaTeX format"]
 fn relaxed_pdflatex() {
+    let _turn = turn();
     let oracles = common::fixtures().join("latex/pdf");
     let docs = common::fixtures().join("latex/docs");
     let only = std::env::var("PHITEX_GATE").ok();
@@ -81,6 +91,7 @@ fn relaxed_pdflatex() {
 /// file equals the relaxed cold build byte for byte.
 #[test]
 fn relaxed_page_edit() {
+    let _turn = turn();
     let dir = pdf_fixtures();
     let mut pages = String::new();
     for k in 1..=6 {
@@ -111,6 +122,7 @@ fn relaxed_page_edit() {
 /// every PDF fixture.
 #[test]
 fn relaxed_threads() {
+    let _turn = turn();
     let dir = pdf_fixtures();
     let mut names: Vec<String> = std::fs::read_dir(&dir)
         .expect("the fixtures")
