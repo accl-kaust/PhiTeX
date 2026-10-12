@@ -20,7 +20,7 @@ fn log_gate(n: &str) -> Result<(), String> {
     let opts = common::options("./core.tex", "texput", "", &dir);
     let b = common::build(opts, None, &doc);
     let (_, log) = b.output();
-    let log = log.trim_end_matches('\n');
+    let log = common::log_excerpt(&log);
     match common::first_difference(log.as_bytes(), want.as_bytes()) {
         None => Ok(()),
         Some(d) => Err(format!("pdf/{n}: FAIL {d}")),

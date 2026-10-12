@@ -112,3 +112,19 @@ pub fn plain() -> String {
         &h,
     )
 }
+
+/// The log as the `.log` fixtures keep it: from the first file opened to
+/// the last `)`; their capture leaves out the banner before and §642's
+/// line after ("Output written on ..." or "No pages of output."), which
+/// `ini.rs` checks against whole oracle logs.
+pub fn log_excerpt(log: &str) -> String {
+    let t = log.trim_end_matches('\n');
+    match t.rsplit_once('\n') {
+        Some((head, last))
+            if last.starts_with("Output written on ") || last == "No pages of output." =>
+        {
+            head.to_owned()
+        }
+        _ => t.to_owned(),
+    }
+}

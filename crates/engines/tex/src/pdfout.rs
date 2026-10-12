@@ -375,7 +375,7 @@ pub(crate) fn ship(
     bx: &BoxNode,
     side: &Side,
     ids: &[u32],
-) -> R<()> {
+) -> R<u64> {
     let v = r.v;
     let xs = list_of(v, page);
     let p = xs.get(3).map(|&l| list_of(v, l)).unwrap_or_default();
@@ -394,7 +394,7 @@ pub(crate) fn ship(
     });
     let fonts = fonts_for(r, ids, space)?;
     let whats = side.whats.clone();
-    let err = step(r, page, &fonts, |st, fonts| {
+    let (err, shown) = step(r, page, &fonts, |st, fonts| {
         page_params(v, st.params_mut(), &p);
         let mut wh = |h: u32, _leaders: bool| -> Option<Whatsit> {
             if let Some(&d) = resolved.get(&h) {
@@ -410,14 +410,26 @@ pub(crate) fn ship(
                 None
             }
         };
-        st.ship_out_with(bx, fonts, &mut wh).err()
+        let e = st.ship_out_with(bx, fonts, &mut wh).err();
+        let (content, w, h) = st.last_page_shown();
+        let words = [
+            u64::from_ne_bytes(i64::from(w).to_ne_bytes()),
+            u64::from_ne_bytes(i64::from(h).to_ne_bytes()),
+        ];
+        (
+            e,
+            phitex_defuse::hash_words(phitex_defuse::hash_bytes(0, content), &words),
+        )
     })?;
+    // the rotation and the rest of the page's dictionary: `\pdfpageattr`
+    let attr = p.get(15).map(|&a| str_of(v, a)).unwrap_or_default();
+    let shown = phitex_defuse::hash_bytes(shown, attr.as_bytes());
     if let Some(e) = err {
         // PDF-BACKEND-GAP: the writer's errors are pdfTeX's fatal errors;
         // they go to the log, the job going on
         r.log("error", &format!("pdfTeX error: {e}"))?;
     }
-    Ok(())
+    Ok(shown)
 }
 
 /// The PDF file: the state that reaches the end, finished.
