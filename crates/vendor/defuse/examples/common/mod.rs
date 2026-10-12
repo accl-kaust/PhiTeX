@@ -27,6 +27,8 @@
 #![allow(dead_code, clippy::many_single_char_names)] // AST code reads best with short names
 
 pub mod interp;
+pub mod json;
+pub mod trace;
 
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -710,6 +712,8 @@ const KEYWORDS: [&str; 33] = [
 
 /// The kind of the scope an emitted fold output's text runs in.
 pub const OUT_KIND: &str = "out";
+/// How many following siblings `claim_limit` scans for a block's close.
+const CLAIM_LIMIT_SCAN: usize = 256;
 /// The fold declaration (its text) and the fold state, ordinary fields.
 const FOLD: &str = "fold";
 const FOLD_STATE: &str = "fold.state";
@@ -1290,10 +1294,13 @@ impl Operation for StmtOp {
         following: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
     ) -> Option<usize> {
         // A delimiter claim never extends past the enclosing block's close.
+        // The scan is capped: a close further away than that counts as no
+        // bound (the claim then reaches everything after it: slower binding,
+        // never a different result).
         if tag(v, args[0]).0 != "listuntil" {
             return None;
         }
-        for (n, (_, a)) in following.enumerate() {
+        for (n, (_, a)) in following.take(CLAIM_LIMIT_SCAN).enumerate() {
             if tag(v, a[0]).0 == "end" {
                 return Some(n);
             }
@@ -1728,13 +1735,16 @@ impl Operation for ApplyOp {
 pub struct Lang {
     pub ops: Ops,
     pub procs: ProcTable,
+    /// The statement operation itself (its static hooks derive a trace).
+    pub stmt: Arc<dyn Operation>,
 }
 
 impl Lang {
     pub fn install(eng: &mut Engine) -> Lang {
         let cell = Arc::new(OnceLock::new());
         let procs = ProcTable::default();
-        let stmt = eng.register(Arc::new(StmtOp(cell.clone(), procs.clone())));
+        let stmt_op: Arc<dyn Operation> = Arc::new(StmtOp(cell.clone(), procs.clone()));
+        let stmt = eng.register(stmt_op.clone());
         let apply = eng.register(Arc::new(ApplyOp(cell.clone())));
         let output = eng.register(Arc::new(OutputOp));
         let ops = Ops { stmt, apply, output };
@@ -1743,7 +1753,11 @@ impl Lang {
         eng.declare_accumulator(out, Arc::new(SeqMonoid));
         let seq = items_seq(eng.values());
         eng.declare_sequence(seq);
-        Lang { ops, procs }
+        Lang {
+            ops,
+            procs,
+            stmt: stmt_op,
+        }
     }
 
     /// Declares the loop-back fields of `asts` and returns their names.
