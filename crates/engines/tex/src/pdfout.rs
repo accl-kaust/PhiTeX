@@ -2,9 +2,9 @@
 //! writer's state (`phitex_pdf::PdfState`) after each step that touches
 //! it, a step being a PDF command when TeX reads it or a `\shipout`.
 //!
-//! The field `pdf:state` holds a key: the hash of the key before and of
-//! the step's input, so the same history gives the same key whatever ran
-//! before. The key names a memo entry, the state after the step and the
+//! The field `pdf:state` holds a key: the digest of the state after the
+//! step (`PdfState::digest`, the bytes so far, the forms' table), so an
+//! equal state gives an equal key however it was made. The key names a memo entry, the state after the step and the
 //! file's bytes so far (`PdfBytes`, append-only: chunks shared between
 //! entries). What TeX reads back (`\pdfcolorstackinit`'s number,
 //! `\pdffontobjnum`, ...) comes from the state the step made. At the end
@@ -68,12 +68,14 @@ pub(crate) struct Fold {
     st: PdfState,
     bytes: PdfBytes,
     forms: Forms,
+    /// A hash of `bytes`, chunk by chunk.
+    bytes_hash: u64,
 }
 
 type States = Mutex<HashMap<u64, Arc<Fold>>>;
 
 /// The writer's states by key: a pure function's memo (the key is the
-/// hash of the inputs that made the state).
+/// state's digest: [`step_forms`]).
 fn states() -> &'static States {
     static S: OnceLock<States> = OnceLock::new();
     S.get_or_init(|| Mutex::new(HashMap::new()))
@@ -338,11 +340,12 @@ pub(crate) fn step_forms<T>(
     fonts: &Fonts,
     f: impl FnOnce(&mut PdfState, &mut Forms, &Fonts) -> T,
 ) -> R<T> {
+    // the inputs were read where they were made; the key is the state
+    let _ = input;
     let v = r.v;
-    let (k0, before) = before(r)?;
-    let before_known = before.is_some();
-    let (mut st, mut bytes, mut forms) = if let Some(a) = before {
-        (a.st.clone(), a.bytes.clone(), a.forms.clone())
+    let (_, before) = before(r)?;
+    let (mut st, mut bytes, mut forms, bytes_hash) = if let Some(a) = before {
+        (a.st.clone(), a.bytes.clone(), a.forms.clone(), a.bytes_hash)
     } else {
         {
             let date = r
@@ -355,7 +358,7 @@ pub(crate) fn step_forms<T>(
                 output_file_name: format!("{jobname}.pdf"),
                 ..PdfParams::default()
             };
-            (PdfState::new(p), PdfBytes::new(), Forms::default())
+            (PdfState::new(p), PdfBytes::new(), Forms::default(), 0)
         }
     };
     // the parameters a write reads (the version, compression: fixed
@@ -379,21 +382,29 @@ pub(crate) fn step_forms<T>(
         pm.major_version = ps[4];
     }
     let out = f(&mut st, &mut forms, fonts);
+    let n0 = bytes.chunks().len();
     st.flush(&mut bytes);
-    // a fresh state's key names what it was made from
-    let seed = if before_known {
-        k0
-    } else {
-        let date = r.get("pdfdate")?.map_or(0, ValueId::raw);
-        let job = r.get("jobname")?.map_or(0, ValueId::raw);
-        phitex_defuse::hash_words(k0, &[date, job])
-    };
-    let k1 = phitex_defuse::hash_words(seed, &[input.raw()]).max(1);
+    // the key is the state the step made (the writer's, the file's
+    // bytes so far, the forms'), not how it was made: a step that leaves
+    // it equal leaves `pdf:state` equal, and what reads it is not run
+    let mut bytes_hash = bytes_hash;
+    for c in &bytes.chunks()[n0..] {
+        bytes_hash = phitex_defuse::hash_bytes(bytes_hash, &c.bytes);
+    }
+    let fh = phitex_defuse::hash_bytes(0, format!("{:?}", (&forms.whats, &forms.fonts)).as_bytes());
+    let k1 = phitex_defuse::hash_words(st.digest(), &[bytes_hash, fh]).max(1);
     states()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .entry(k1)
-        .or_insert_with(|| Arc::new(Fold { st, bytes, forms }));
+        .or_insert_with(|| {
+            Arc::new(Fold {
+                st,
+                bytes,
+                forms,
+                bytes_hash,
+            })
+        });
     r.set(
         "pdf:state",
         v.int(i64::from_ne_bytes(k1.to_ne_bytes())),

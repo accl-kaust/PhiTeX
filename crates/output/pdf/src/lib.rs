@@ -83,6 +83,7 @@
 )]
 
 mod color;
+mod digest;
 pub mod enc;
 mod finish;
 pub use finish::{Chunk, PdfBytes, finish};
@@ -442,6 +443,28 @@ struct FontState {
     expand: Option<Expansion>,
 }
 
+impl std::fmt::Debug for FontState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FontState")
+            .field("name", &self.name)
+            .field("metrics", &self.metrics)
+            .field("map", &self.map)
+            .field("file", &digest::opt(self.file.as_ref()))
+            .field("enc", &digest::opt(self.enc.as_ref()))
+            .field("used", &self.used)
+            .field("size", &self.size)
+            .field("num", &self.num)
+            .field("chars", &self.chars)
+            .field("attr", &self.attr)
+            .field("nobuiltin_tounicode", &self.nobuiltin_tounicode)
+            .field("has_space", &self.has_space)
+            .field("kind", &self.kind)
+            .field("vf", &self.vf)
+            .field("expand", &self.expand)
+            .finish()
+    }
+}
+
 impl FontState {
     /// `is_valid_char`.
     fn valid(&self, c: u16) -> bool {
@@ -479,7 +502,7 @@ fn int(n: usize) -> i64 {
 }
 
 /// The object stream being filled (pdfTeX §680's `pdf_os_*`).
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 struct ObjStm {
     /// `pdf_os_enable`.
     enable: bool,
@@ -495,7 +518,7 @@ struct ObjStm {
 
 /// The data of raw objects, forms, images and marks (`obj_aux` and the
 /// structures it points to).
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 struct Aux {
     /// `\pdfobj` data (`obj_data_ptr`).
     raw: BTreeMap<usize, Arc<objects::RawObj>>,
@@ -526,7 +549,7 @@ pub type PdfWriter = PdfState;
 /// the bytes written (see [`PdfBytes`]). Cloning it is cheap: the large
 /// immutable parts (font files, images, forms' boxes, objects' texts)
 /// are shared.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct PdfState {
     p: PdfParams,
