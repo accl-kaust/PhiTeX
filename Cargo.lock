@@ -1438,6 +1438,7 @@ dependencies = [
  "phitex-draw",
  "phitex-kpse",
  "phitex-makeindex",
+ "phitex-tex",
  "phitex-xdvipdfmx",
  "tikv-jemallocator",
 ]

@@ -190,15 +190,12 @@ pub fn cache_dir() -> PathBuf {
     std::env::temp_dir().join("phitex-cache")
 }
 
-/// TeX Live for one program name: the finder a build is given (unused
-/// until the native engine, `phitex-tex` on `phitex-defuse`, lands).
-#[allow(dead_code)]
+/// TeX Live for one program name: the finder a build is given.
 pub struct Tree {
     /// kpathsea as the engine's program (its `progname`, `$engine`).
     kpse: Mutex<Kpse>,
 }
 
-#[allow(dead_code)]
 impl Tree {
     /// The tree for engine `e`: kpathsea as its program, made once (its
     /// `texmf.cnf` and `ls-R` read at the first lookup).
@@ -232,7 +229,6 @@ impl Tree {
     }
 }
 
-#[allow(dead_code)]
 fn os(b: &[u8]) -> &Path {
     Path::new(OsStr::from_bytes(b))
 }
