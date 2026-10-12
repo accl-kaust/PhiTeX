@@ -4,7 +4,7 @@ use std::sync::PoisonError;
 
 use crate::engine::{
     AssumeKind, Effect, End, Engine, EvalError, K_CHAIN, K_FIELD, K_LOOP, K_OUTPUT, Locality, NIL, NodeId, OpId,
-    RunResult, Slot, State, Until, Use, eff_code, eff_kind,
+    RunResult, Slot, State, Until, Use, WalkResult, eff_code, eff_kind,
 };
 use crate::hash::{FxHashMap, hash_words};
 use crate::value::{Field, Value, ValueId, Values};
@@ -26,6 +26,8 @@ pub struct Ctx<'a> {
     steps: u64,
     stopped: Option<End>,
     cache: FxHashMap<(u8, u64), Option<ValueId>>,
+    /// Walks the gate did for this run (same node, same batch state).
+    pub(crate) walks: Vec<(Field, WalkResult)>,
     uses: Vec<Use>,
     defs: Vec<(Field, ValueId, bool)>,
     children: Vec<(OpId, ValueId)>,
@@ -55,6 +57,7 @@ impl<'a> Ctx<'a> {
             steps: 0,
             stopped: None,
             cache: FxHashMap::default(),
+            walks: Vec::new(),
             uses: Vec::new(),
             defs: Vec::new(),
             children: Vec::new(),
@@ -194,7 +197,11 @@ impl<'a> Ctx<'a> {
             self.cache.insert((K_FIELD, key), None);
             return Ok(None);
         }
-        let w = e.walk(n.unit, n.label, f);
+        let w = self
+            .walks
+            .iter()
+            .find(|x| x.0 == f)
+            .map_or_else(|| e.walk(n.unit, n.label, f), |x| x.1);
         let crossed = w.pending;
         if crossed != NIL && !self.spec {
             return self.stop(End::Wait(crossed));
@@ -703,7 +710,13 @@ impl<'a> Ctx<'a> {
             (None, Ok(v)) => End::Output(v),
             (None, Err(_)) => End::Unpredictable,
         };
+        let child_heights = if matches!(end, End::Output(_)) && !n.is_app() {
+            self.eng.child_heights(self.slot, &self.children)
+        } else {
+            Vec::new()
+        };
         RunResult {
+            child_heights,
             node: n.id,
             slot: self.slot,
             epoch: n.epoch,

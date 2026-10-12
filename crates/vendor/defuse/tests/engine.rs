@@ -1330,3 +1330,177 @@ fn a_node_parked_on_a_target_a_claim_makes_inert_is_woken() {
         assert_eq!(prog.result(&eng), reference(&prog.lines), "seed {seed} after undo");
     }
 }
+
+// ---------------------------------------------------------- trace replay
+
+#[test]
+fn the_trace_loader_rejects_malformed_input() {
+    use common::trace::load_trace;
+    let meta = |n: usize| format!("{{\"meta\": {{\"version\": 1, \"document\": \"d\", \"steps\": {n}}}}}\n");
+    let cases: Vec<(String, &str)> = vec![
+        (
+            meta(1) + "{\"id\": \"a\", \"class\": \"c\", \"pos\": 1, \"reads\": [], \"writes\": [], \"bogus\": 1}\n",
+            "unknown step key",
+        ),
+        (
+            "{\"meta\": {\"version\": 2, \"document\": \"d\", \"steps\": 0}}\n".to_string(),
+            "version",
+        ),
+        (
+            meta(2)
+                + "{\"id\": \"a\", \"class\": \"c\", \"pos\": 1, \"reads\": [], \"writes\": []}\n{\"id\": \"a\", \"class\": \"c\", \"pos\": 2, \"reads\": [], \"writes\": []}\n",
+            "duplicate step id",
+        ),
+        (
+            meta(2)
+                + "{\"id\": \"a\", \"class\": \"c\", \"pos\": 1, \"depth\": 0, \"reads\": [], \"writes\": [], \"scope\": \"open\"}\n{\"id\": \"b\", \"class\": \"c\", \"pos\": 2, \"depth\": 0, \"reads\": [], \"writes\": []}\n",
+            "depth",
+        ),
+        (
+            meta(2)
+                + "{\"id\": \"a\", \"class\": \"c\", \"pos\": 2, \"reads\": [], \"writes\": []}\n{\"id\": \"b\", \"class\": \"c\", \"pos\": 1, \"reads\": [], \"writes\": []}\n",
+            "pos",
+        ),
+        (
+            meta(1)
+                + "{\"id\": \"a\", \"class\": \"c\", \"pos\": 1, \"reads\": [], \"writes\": [{\"field\": \"x\", \"locality\": \"nowhere\"}]}\n",
+            "locality",
+        ),
+        (
+            meta(1)
+                + "{\"id\": \"a\", \"class\": \"c\", \"pos\": 1, \"reads\": [], \"writes\": [], \"claim\": {\"predicted\": {\"n\": 1, \"until\": {\"class\": \"m\", \"inert\": true}}}}\n",
+            "stream claim",
+        ),
+        (meta(1) + "{\"id\": \"a\" \"class\": \"c\"}\n", "expected ','"),
+        (
+            meta(1) + "{\"id\": \"a\", \"class\": \"c\", \"pos\": 1, \"reads\": []}\n",
+            "`writes`",
+        ),
+        (
+            meta(3) + "{\"id\": \"a\", \"class\": \"c\", \"pos\": 1, \"reads\": [], \"writes\": []}\n",
+            "meta.steps",
+        ),
+        (
+            meta(1)
+                + "{\"id\": \"a\", \"class\": \"c\", \"pos\": 1, \"reads\": [], \"writes\": [], \"scope_kind\": \"A\"}\n",
+            "scope_kind",
+        ),
+        (
+            meta(1) + "{\"id\": \"a\", \"class\": \"c\", \"pos\": 1, \"reads\": [], \"writes\": [], \"writes\": []}\n",
+            "duplicate key",
+        ),
+    ];
+    for (text, want) in cases {
+        let err = load_trace(&text).err().unwrap_or_else(|| panic!("accepted: {text}"));
+        assert!(err.contains(want), "{text}: {err} should mention {want:?}");
+    }
+    // Edits too.
+    let e = common::trace::load_edits("{\"op\": \"delete\", \"step\": \"a\", \"writes\": []}\n").expect_err("rejected");
+    assert!(e.contains("unknown key"), "{e}");
+    let e = common::trace::load_edits("{\"op\": \"rename\", \"step\": \"a\"}\n").expect_err("rejected");
+    assert!(e.contains("unknown op"), "{e}");
+}
+
+#[test]
+fn a_toy_derived_trace_round_trips_and_replays_like_a_cold_run() {
+    use common::trace::{self, Doc};
+    let lines = common::generate_with(5, 400, true);
+    let t = trace::from_toy(&lines, "toy");
+    let text = trace::trace_jsonl(&t);
+    let back = trace::load_trace(&text).expect("the writer's output loads");
+    assert_eq!(back.steps, t.steps);
+    assert_eq!(trace::trace_jsonl(&back), text);
+    let mut eng = Engine::new();
+    let mut doc = Doc::load(&mut eng, &t);
+    eng.evaluate_sequential().unwrap();
+    let mut e2 = Engine::new();
+    let d2 = Doc::load(&mut e2, &t);
+    e2.evaluate(&mut RandomScheduler::new(3, true), &mut Sequential)
+        .unwrap();
+    assert_eq!(doc.result(&eng), d2.result(&e2), "cold results agree across schedulers");
+    for (k, e) in trace::generated_edits(&t, 11, 60).iter().enumerate() {
+        doc.apply(&mut eng, &e.edit).unwrap();
+        eng.evaluate_sequential().unwrap();
+        let snap = doc.snapshot();
+        let mut e3 = Engine::new();
+        let d3 = Doc::load(&mut e3, &snap);
+        e3.evaluate(&mut Greedy::speculative(Speculation::All, 64), &mut Threads(3))
+            .unwrap();
+        assert_eq!(
+            doc.result(&eng),
+            d3.result(&e3),
+            "edit {k}: incremental equals a cold replay"
+        );
+        assert!(eng.check_invariants().is_empty(), "edit {k}");
+    }
+}
+
+#[test]
+fn trace_steps_exercise_scopes_claims_contributions_folds_and_the_environment() {
+    use common::trace::{self, Doc};
+    let text = concat!(
+        "{\"meta\": {\"version\": 1, \"document\": \"m\", \"steps\": 12, \"sequences\": [\"items\"], \"env\": {\"ts\": 1}}}\n",
+        "{\"id\": \"env\", \"class\": \"stamp\", \"pos\": 0, \"reads\": [], \"env_reads\": [\"ts\"], \"writes\": [{\"field\": \"t\", \"locality\": \"global\"}]}\n",
+        "{\"id\": \"open\", \"class\": \"begin\", \"pos\": 1, \"reads\": [], \"writes\": [], \"scope\": \"open\", \"scope_kind\": \"A\"}\n",
+        "{\"id\": \"fold\", \"class\": \"fold\", \"pos\": 2, \"reads\": [\"t\"], \"writes\": [], \"fold\": {\"sequence\": \"items\", \"step_class\": \"add\"}}\n",
+        "{\"id\": \"it1\", \"class\": \"item\", \"pos\": 3, \"reads\": [], \"writes\": [], \"scope\": \"pending\", \"starts_implicit\": \"B\"}\n",
+        "{\"id\": \"a1\", \"class\": \"add\", \"pos\": 4, \"reads\": [\"t\"], \"writes\": [], \"contributes\": \"items\", \"fold\": {\"sequence\": \"items\", \"step_class\": \"add\"}}\n",
+        "{\"id\": \"it2\", \"class\": \"item\", \"pos\": 5, \"reads\": [], \"writes\": [], \"scope\": \"pending\", \"starts_implicit\": \"B\"}\n",
+        "{\"id\": \"a2\", \"class\": \"add\", \"pos\": 6, \"reads\": [], \"writes\": [], \"contributes\": \"items\", \"reads_prev_contribution\": \"items\", \"fold\": {\"sequence\": \"items\", \"step_class\": \"add\"}}\n",
+        "{\"id\": \"coll\", \"class\": \"collect\", \"pos\": 7, \"reads\": [], \"writes\": [{\"field\": \"l\", \"locality\": \"local\"}], \"claim\": {\"predicted\": {\"n\": 2, \"until\": {\"class\": \"mark\", \"inert\": false, \"confirm\": [\"t\"]}}}}\n",
+        "{\"id\": \"ev\", \"class\": \"eval\", \"pos\": 8, \"reads\": [\"t\"], \"writes\": null, \"may_define\": {\"names\": [{\"name\": \"x\", \"locality\": \"local\"}]}, \"children\": [{\"id\": \"ev.1\", \"class\": \"assign\", \"pos\": 0, \"reads\": [\"t\"], \"writes\": [{\"field\": \"x\", \"locality\": \"local\"}]}], \"cause\": \"eval\", \"prior\": {\"children\": 1}}\n",
+        "{\"id\": \"mk\", \"class\": \"mark\", \"pos\": 9, \"reads\": [\"x\"], \"writes\": []}\n",
+        "{\"id\": \"close\", \"class\": \"end\", \"pos\": 10, \"reads\": [], \"writes\": [], \"scope\": {\"closes\": 2, \"opens\": 0, \"before\": false}}\n",
+        "{\"id\": \"after\", \"class\": \"assign\", \"pos\": 11, \"reads\": [\"x\", \"t\", \"l\"], \"writes\": [{\"field\": \"y\", \"locality\": \"local\"}], \"claim\": {\"count_from\": \"missing\"}}\n",
+    );
+    let tr = trace::load_trace(text).expect("loads");
+    let run = |spec: bool, env: i64| {
+        let mut eng = Engine::new();
+        let doc = Doc::load(&mut eng, &tr);
+        eng.set_environment(vec![(eng.values().field("ts"), eng.values().int(env))]);
+        let r = if spec {
+            eng.evaluate(&mut Greedy::speculative(Speculation::Predicted, 64), &mut Threads(2))
+                .unwrap()
+        } else {
+            eng.evaluate_sequential().unwrap()
+        };
+        (
+            doc.result(&eng),
+            r,
+            eng.children(doc.nodes[8]).len(),
+            eng.critical_path(),
+        )
+    };
+    let (seq, _, kids, _) = run(false, 1);
+    let (spec, r, _, _) = run(true, 1);
+    assert_eq!(seq, spec, "schedule independence");
+    assert_eq!(kids, 1, "the eval unfolded its child");
+    println!(
+        "speculations {} confirmations {} mispredictions {}",
+        r.speculations, r.confirmations, r.mispredictions
+    );
+    // The environment: a different stamp changes exactly the readers of t
+    // and what depends on them; the same stamp gives the same ids.
+    let (other, _, _, _) = run(false, 2);
+    assert_ne!(seq, other);
+    assert_eq!(seq[1], other[1], "the opener reads nothing");
+    let mut eng = Engine::new();
+    let mut doc = Doc::load(&mut eng, &tr);
+    eng.set_environment(vec![(eng.values().field("ts"), eng.values().int(1))]);
+    eng.evaluate_sequential().unwrap();
+    assert_eq!(doc.result(&eng), seq);
+    eng.set_environment(vec![(eng.values().field("ts"), eng.values().int(2))]);
+    let r = eng.evaluate_sequential().unwrap();
+    assert_eq!(doc.result(&eng), other);
+    assert!(r.nodes_run < 12, "only readers of ts re-ran: {}", r.nodes_run);
+    // An edit that makes the eval define nothing releases x's readers.
+    doc.apply(&mut eng, &trace::Edit::ChangeWrites("ev".into(), Some(Vec::new())))
+        .unwrap();
+    eng.evaluate_sequential().unwrap();
+    let snap = doc.snapshot();
+    let mut e2 = Engine::new();
+    let d2 = Doc::load(&mut e2, &snap);
+    e2.set_environment(vec![(e2.values().field("ts"), e2.values().int(2))]);
+    e2.evaluate_sequential().unwrap();
+    assert_eq!(doc.result(&eng), d2.result(&e2));
+}
