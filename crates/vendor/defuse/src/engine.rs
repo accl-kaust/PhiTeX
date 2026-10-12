@@ -4728,7 +4728,12 @@ impl Engine {
                 && (!self.live(u.site) || self.n(u.site).def_value(Field(ValueId(u.key))).is_none())
         }) {
             count!(StaleSite);
-            self.make_dirty(x);
+            if r.speculative {
+                // A guess that read a definition not produced yet (or gone):
+                // dropped, and the node keeps its state. Dirtying a parked
+                // node here would undo its wait every round.
+                self.set_flag(x, F_NOSPEC, true);
+            }
             return;
         }
         // The structure a stream claim scanned changed while it ran (or
@@ -4742,7 +4747,9 @@ impl Engine {
                     .any(|&(u, l)| u == unit && a < l && l <= e)
             {
                 count!(StaleSite);
-                self.make_dirty(x);
+                if r.speculative {
+                    self.set_flag(x, F_NOSPEC, true);
+                }
                 return;
             }
         }
