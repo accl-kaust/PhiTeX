@@ -154,6 +154,9 @@ pub(crate) struct Run<'c, 'a> {
     own: FxHashMap<Field, Option<ValueId>>,
     pub defs: Vec<(Field, ValueId, Locality)>,
     pub contribs: Vec<(Field, ValueId)>,
+    /// Items appended to lists in this run, per list, in order; they
+    /// extend the lists' fields when the run ends (`flush_lists`).
+    pub list_appends: Vec<(i64, ValueId)>,
     pub kids: Vec<(OpId, Vec<ValueId>)>,
     pub effect: Effect,
     pub cur: Cur,
@@ -188,6 +191,7 @@ impl<'c, 'a> Run<'c, 'a> {
             own: FxHashMap::default(),
             defs: Vec::new(),
             contribs: Vec::new(),
+            list_appends: Vec::new(),
             kids: Vec::new(),
             effect: Effect::None,
             cur: Cur {
@@ -1092,6 +1096,7 @@ impl<'c, 'a> Run<'c, 'a> {
             own: self.own.clone(),
             defs: self.defs.clone(),
             contribs: self.contribs.clone(),
+            list_appends: self.list_appends.clone(),
             kids: self.kids.clone(),
             effect: self.effect,
             cur: self.cur.clone(),
@@ -1109,6 +1114,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.own = s.own;
         self.defs = s.defs;
         self.contribs = s.contribs;
+        self.list_appends = s.list_appends;
         self.kids = s.kids;
         self.effect = s.effect;
         self.cur = s.cur;
@@ -1172,6 +1178,7 @@ struct Snapshot {
     own: FxHashMap<Field, Option<ValueId>>,
     defs: Vec<(Field, ValueId, Locality)>,
     contribs: Vec<(Field, ValueId)>,
+    list_appends: Vec<(i64, ValueId)>,
     kids: Vec<(OpId, Vec<ValueId>)>,
     effect: Effect,
     cur: Cur,
