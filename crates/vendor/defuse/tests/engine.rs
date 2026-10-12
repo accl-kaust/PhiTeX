@@ -1500,6 +1500,68 @@ fn deleting_an_outer_opener_rebinds_a_reader_past_an_inner_openers_definition() 
 }
 
 #[test]
+fn trace_format_takes_provenance_equal_positions_bounded_unfolds_and_nested_edits() {
+    use common::trace::{self, Doc};
+    let text = concat!(
+        "{\"meta\": {\"version\": 1, \"document\": \"m\", \"steps\": 5, \"sequences\": [], \"env\": {}, \"provenance\": {\"tool\": \"gen\", \"run\": 7}}}\n",
+        "{\"id\": \"a\", \"class\": \"assign\", \"pos\": 1, \"reads\": [], \"writes\": [{\"field\": \"x\", \"locality\": \"local\"}]}\n",
+        // Static writes and a bounded unfolding together; the same position as `a`.
+        "{\"id\": \"u\", \"class\": \"call\", \"pos\": 1, \"reads\": [\"x\"], \"writes\": [{\"field\": \"r\", \"locality\": \"local\"}], \"may_define\": {\"names\": [{\"name\": \"y\", \"locality\": \"local\"}]}, \"children\": [{\"id\": \"u.1\", \"class\": \"assign\", \"pos\": 0, \"reads\": [\"x\"], \"writes\": [{\"field\": \"y\", \"locality\": \"local\"}]}]}\n",
+        "{\"id\": \"c\", \"class\": \"collect\", \"pos\": 2, \"reads\": [], \"writes\": [{\"field\": \"l\", \"locality\": \"local\"}], \"claim\": {\"until\": {\"class\": \"mark\", \"inert\": false, \"confirm\": [\"never\"]}}}\n",
+        "{\"id\": \"m\", \"class\": \"mark\", \"pos\": 3, \"reads\": [\"y\", \"r\"], \"writes\": []}\n",
+        "{\"id\": \"z\", \"class\": \"assign\", \"pos\": 4, \"reads\": [\"y\", \"r\", \"l\"], \"writes\": [{\"field\": \"z\", \"locality\": \"local\"}]}\n",
+    );
+    let tr = trace::load_trace(text).expect("loads");
+    assert!(tr.meta.provenance.is_some());
+    assert!(trace::trace_jsonl(&tr).contains("\"provenance\": {\"run\": 7, \"tool\": \"gen\"}"));
+    let mut eng = Engine::new();
+    let mut doc = Doc::load(&mut eng, &tr);
+    let r = eng.evaluate_sequential().expect("cold");
+    // The mark (reading inside the claimer's range) is the delimiter on
+    // its class alone, its unconfirmed field notwithstanding; the collect
+    // takes the unfold's text, not the mark.
+    assert_eq!(r.runs, 6, "every step and the child ran once: {}", r.runs);
+    let before = doc.result(&eng);
+    // A nested edit: the child's reads change; the call runs again.
+    let e = trace::load_edits("{\"op\": \"change_reads\", \"step\": \"u.1\", \"reads\": []}\n").expect("edit");
+    doc.apply(&mut eng, &e[0].edit).expect("apply");
+    let r = eng.evaluate_sequential().expect("after the edit");
+    assert!(
+        r.nodes_run >= 2 && r.nodes_run <= 5,
+        "the call, its child and readers: {}",
+        r.nodes_run
+    );
+    let got = doc.result(&eng);
+    let mut e2 = Engine::new();
+    let d2 = Doc::load(&mut e2, &doc.snapshot());
+    e2.evaluate_sequential().expect("cold replay");
+    assert_eq!(got, d2.result(&e2), "incremental == cold after the nested edit");
+    assert_ne!(got, before, "the child's output changed");
+    // Deleting a nested step and inserting after one.
+    let e = trace::load_edits(concat!(
+        "{\"op\": \"delete\", \"step\": \"u.1\"}\n",
+        "{\"op\": \"insert_after\", \"step\": \"m\", \"new\": {\"id\": \"n\", \"class\": \"assign\", \"pos\": 3, \"reads\": [\"y\"], \"writes\": []}}\n",
+    ))
+    .expect("edits");
+    for e in &e {
+        doc.apply(&mut eng, &e.edit).expect("apply");
+        eng.evaluate_sequential().expect("after the edit");
+        let mut e2 = Engine::new();
+        let d2 = Doc::load(&mut e2, &doc.snapshot());
+        e2.evaluate_sequential().expect("cold replay");
+        assert_eq!(doc.result(&eng), d2.result(&e2), "incremental == cold after {e:?}");
+    }
+    // Positions may not go backwards, and a bound needs a pending set or children.
+    let bad = text.replace(
+        "\"pos\": 3, \"reads\": [\"y\", \"r\"]",
+        "\"pos\": 0, \"reads\": [\"y\", \"r\"]",
+    );
+    assert!(trace::load_trace(&bad).is_err());
+    let bad = text.replace("\"children\": [{\"id\": \"u.1\", \"class\": \"assign\", \"pos\": 0, \"reads\": [\"x\"], \"writes\": [{\"field\": \"y\", \"locality\": \"local\"}]}]", "\"children\": []");
+    assert!(trace::load_trace(&bad).is_err());
+}
+
+#[test]
 fn trace_steps_exercise_scopes_claims_contributions_folds_and_the_environment() {
     use common::trace::{self, Doc};
     let text = concat!(
