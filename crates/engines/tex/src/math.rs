@@ -10,11 +10,15 @@
 //! list's last noad: the list gets a delete marker and the new noad.
 
 use phitex_defuse::{Effect, ValueId, Values};
+use phitex_typeset::arith::{MAX_DIMEN, half};
 use phitex_typeset::glue::Glue;
+use phitex_typeset::glue::GlueSign;
+use phitex_typeset::linebreak::INF_PENALTY;
 use phitex_typeset::math::{
     Delimiter, Field, Fraction, Limits, MItem, MList, MathParams, Noad, NoadKind, Style,
 };
-use phitex_typeset::node::{GlueKind, MathKind, Node};
+use phitex_typeset::node::{BoxNode, GlueKind, KernKind, MathKind, Node};
+use phitex_typeset::pack::PackParams;
 use phitex_typeset::pack::Spec;
 
 use crate::build::Mode;
@@ -220,18 +224,21 @@ impl Run<'_, '_> {
         self.log("error", "Missing $ inserted")
     }
 
-    /// `init_math` (§1138–§1139).
-    // REDUCE-GAP: display math (§1145) is not in this slice yet; `$$`
-    // in a paragraph is an error and the formula is set as text.
+    /// `init_math` (§1138–§1139, §1145).
     pub(crate) fn init_math(&mut self, md: &Mode) -> R<()> {
         self.get_token()?;
         if self.cur.cmd == cmd::MATH_SHIFT && md.m > 0 {
-            self.log("error", "display math is not supported")?;
-        } else {
-            self.back_cur();
+            return self.init_display(md);
         }
-        self.push_math(md, group::MATH_SHIFT, vec![self.v.int(0)])?;
+        self.back_cur();
+        self.go_into_math(md, 0)
+    }
+
+    /// §1139: ordinary math mode; `code` is the formula's kind (0 text,
+    /// 2 `\eqno`, 3 `\leqno`), kept in the group's kind.
+    fn go_into_math(&mut self, md: &Mode, code: i64) -> R<()> {
         let v = self.v;
+        self.push_math(md, group::MATH_SHIFT, -203, vec![v.int(code)])?;
         self.set("param:fam", v.int(-1), false);
         let e = self.get("param:everymath")?;
         let toks = crate::val::toks_of(v, e);
@@ -239,10 +246,117 @@ impl Run<'_, '_> {
         Ok(())
     }
 
+    /// §1145: `$$` in a paragraph. The paragraph so far is broken into
+    /// lines (with `\displaywidowpenalty`); the display's group keeps
+    /// `[1, vertical list, its mode]`.
+    fn init_display(&mut self, md: &Mode) -> R<()> {
+        let v = self.v;
+        let (items, _) = self.list_items(md.lid)?;
+        let w = if items.is_empty() {
+            -MAX_DIMEN
+        } else {
+            let last = self.line_break(md, &items, true)?;
+            self.pre_display_size(last.as_ref())?
+        };
+        self.set(&format!("par:{}", md.vlid), ValueId::UNIT, true);
+        // §1149
+        let pg = self.int32(&format!("pg:{}", md.vlid))?;
+        let shape: Vec<i32> = self
+            .get("parshape")?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default()
+            .iter()
+            .map(|&x| i32::try_from(int_of(v, x)).unwrap_or(0))
+            .collect();
+        let (l, s) = if shape.len() < 2 {
+            let hi = self.param("hangindent")?;
+            let ha = self.param("hangafter")?;
+            let hsize = self.param("hsize")?;
+            if hi != 0 && ((ha >= 0 && pg + 2 > ha) || (pg + 1 < -ha)) {
+                (hsize - hi.abs(), hi.max(0))
+            } else {
+                (hsize, 0)
+            }
+        } else {
+            let n = i32::try_from(shape.len() / 2).unwrap_or(1);
+            let k = usize::try_from(if pg + 2 >= n { n } else { pg + 2 }).unwrap_or(1);
+            (shape[2 * k - 1], shape[2 * k - 2])
+        };
+        let vm = md.vm;
+        let extra = vec![v.int(1), v.int(md.vlid), v.int(i64::from(vm))];
+        self.push_math(md, group::MATH_SHIFT, 203, extra)?;
+        self.set("param:fam", v.int(-1), false);
+        self.set("param:predisplaysize", v.int(i64::from(w)), false);
+        self.set("param:displaywidth", v.int(i64::from(l)), false);
+        self.set("param:displayindent", v.int(i64::from(s)), false);
+        let e = self.get("param:everydisplay")?;
+        let toks = crate::val::toks_of(v, e);
+        self.push_toks(toks);
+        let mut outer = md.clone();
+        outer.m = vm;
+        outer.km = vm;
+        outer.lid = md.vlid;
+        self.build_page(&outer)
+    }
+
+    /// §1146: the width of the paragraph's last line up to its last
+    /// visible item, plus two quads; `max_dimen` if glue stretched or
+    /// shrank before it.
+    fn pre_display_size(&mut self, last: Option<&BoxNode>) -> R<i32> {
+        let Some(b) = last else { return Ok(-MAX_DIMEN) };
+        let f = self.int("font")?;
+        let quad = self.font_dimen(f, 6)?;
+        let view = self.font_view(&b.list)?;
+        let mut v = b.shift + 2 * quad;
+        let mut w = -MAX_DIMEN;
+        let cw = |font: u32, ch: u16| view.char_dims(font, u32::from(ch)).map_or(0, |d| d.width);
+        for n in &b.list {
+            let (d, found) = match n {
+                Node::Char { font, ch } => (cw(*font, *ch), true),
+                Node::Lig(l) => (cw(l.font, l.ch), true),
+                Node::Box(x) => (x.width, true),
+                Node::Rule(r) => (r.width, true),
+                Node::Kern(k, _) | Node::Math(_, k) => (*k, false),
+                Node::Glue(g) => {
+                    let q = &g.spec;
+                    match b.glue.sign {
+                        GlueSign::Stretching
+                            if b.glue.order == q.stretch_order && q.stretch != 0 =>
+                        {
+                            v = MAX_DIMEN;
+                        }
+                        GlueSign::Shrinking if b.glue.order == q.shrink_order && q.shrink != 0 => {
+                            v = MAX_DIMEN;
+                        }
+                        _ => {}
+                    }
+                    let leaders = matches!(
+                        g.kind,
+                        GlueKind::ALeaders | GlueKind::CLeaders | GlueKind::XLeaders
+                    );
+                    (q.width, leaders)
+                }
+                _ => (0, false),
+            };
+            if found {
+                if v < MAX_DIMEN {
+                    v += d;
+                    w = v;
+                } else {
+                    w = MAX_DIMEN;
+                    break;
+                }
+            } else if v < MAX_DIMEN {
+                v += d;
+            }
+        }
+        Ok(w)
+    }
+
     /// `push_math` (§1136): a math group whose list is this node's.
-    fn push_math(&mut self, md: &Mode, grp: i64, extra: Vec<ValueId>) -> R<i64> {
+    fn push_math(&mut self, md: &Mode, grp: i64, m: i32, extra: Vec<ValueId>) -> R<i64> {
         let sid = self.node_raw();
-        let kind = self.kind_value(md, grp, sid, sid, -203, extra)?;
+        let kind = self.kind_value(md, grp, sid, sid, m, extra)?;
         self.open_scope_here(kind);
         Ok(sid)
     }
@@ -310,7 +424,7 @@ impl Run<'_, '_> {
                     self.back_cur();
                     self.scan_left_brace()?;
                     let v = self.v;
-                    self.push_math(md, group::MATH, vec![v.int(code), v.int(md.lid)])?;
+                    self.push_math(md, group::MATH, -203, vec![v.int(code), v.int(md.lid)])?;
                     return Ok(None);
                 }
             };
@@ -452,6 +566,7 @@ impl Run<'_, '_> {
                 self.push_math(
                     md,
                     group::MATH_CHOICE,
+                    -203,
                     vec![v.int(0), v.int(md.lid), u, u, u],
                 )?;
             }
@@ -466,7 +581,15 @@ impl Run<'_, '_> {
                     self.log("error", "Extra $, or forgotten }")?;
                 }
             }
-            cmd::EQ_NO => self.log("error", "\\eqno is not supported")?,
+            cmd::EQ_NO => {
+                // §1140: start_eq_no, in a display only
+                if md.m > 0 && md.group == group::MATH_SHIFT {
+                    let code = 2 + i64::from(self.cur.chr);
+                    self.go_into_math(md, code)?;
+                } else {
+                    self.log("error", "You can't use \\eqno here")?;
+                }
+            }
             cmd::SPACER | cmd::NO_BOUNDARY => {}
             cmd::EX_SPACE => {
                 // §1041 `app_space` with space factor 1000
@@ -621,7 +744,7 @@ impl Run<'_, '_> {
         }
         let d = self.scan_delimiter(false)?;
         if t == LEFT_NOAD {
-            let sid = self.push_math(md, group::MATH_LEFT, vec![v.int(md.lid)])?;
+            let sid = self.push_math(md, group::MATH_LEFT, -203, vec![v.int(md.lid)])?;
             self.append(sid, v.list(vec![v.int(T_LEFT), v.int(d)]));
         } else {
             let right = v.list(vec![v.int(T_RIGHT), v.int(d)]);
@@ -734,22 +857,67 @@ impl Run<'_, '_> {
         Ok(())
     }
 
-    /// `after_math` (§1194, §1196): the formula in text.
+    /// `after_math` (§1194): the `$` that ends a formula.
     pub(crate) fn after_math(&mut self, md: &Mode) -> R<()> {
+        let code = md.extra.first().map_or(0, |&y| int_of(self.v, y));
+        match code {
+            1 => {
+                self.check_dollar()?;
+                self.finish_display(md, None, false, 1)
+            }
+            2 | 3 => {
+                // the end of an equation number: then of the display
+                self.check_dollar()?;
+                let hl = self.formula_hlist(md, Style::TEXT, false)?;
+                let view = self.font_view(&hl)?;
+                let a = phitex_typeset::pack::hpack(
+                    hl,
+                    Spec::Additional(0),
+                    &view,
+                    &PackParams::default(),
+                    false,
+                )
+                .node;
+                self.unsave_extras(md)?;
+                let dmd = self.outer_mode(md)?;
+                self.finish_display(&dmd, Some(a), code == 3, 2)
+            }
+            _ => self.finish_text_math(md),
+        }
+    }
+
+    /// §1197: "Display math should end with $$".
+    fn check_dollar(&mut self) -> R<()> {
+        self.get_x_token()?;
+        if self.cur.cmd != cmd::MATH_SHIFT {
+            self.back_cur();
+            self.log("error", "Display math should end with $$")?;
+        }
+        Ok(())
+    }
+
+    /// The formula of the math list `md.lid` as an hlist (§1194–§1195).
+    fn formula_hlist(&mut self, md: &Mode, style: Style, penalties: bool) -> R<Vec<Node>> {
         let v = self.v;
         let mut list = self.fin_mlist(md.lid, None)?;
         if self.insufficient_fonts()? {
-            // §1195 "Math formula deleted: Insufficient symbol fonts"
             self.log("error", "Math formula deleted: Insufficient symbol fonts")?;
             list.clear();
         }
-        let surround = self.param("mathsurround")?;
-        let outer = self.outer_mode(md)?;
         let mut side = Side::default();
         let mlist = decode_mlist(v, &list, &mut side);
-        let hl = self.mlist_to_hlist(mlist, Style::TEXT, outer.m > 0)?;
+        self.mlist_to_hlist(mlist, style, penalties)
+    }
+
+    /// §1196: the formula in text.
+    fn finish_text_math(&mut self, md: &Mode) -> R<()> {
+        let v = self.v;
+        let surround = self.param("mathsurround")?;
+        let outer = self.outer_mode(md)?;
+        let hl = self.formula_hlist(md, Style::TEXT, outer.m > 0)?;
         self.effect = Effect::Close;
         self.unsave_extras(md)?;
+        let side = Side::default();
         let mut out = vec![Node::Math(MathKind::Before, surround)];
         out.extend(hl);
         out.push(Node::Math(MathKind::After, surround));
@@ -759,6 +927,168 @@ impl Run<'_, '_> {
         }
         self.set_space_factor(&outer, 1000);
         Ok(())
+    }
+
+    /// §1199–§1205: the display `dmd` (with the equation number `a`, at
+    /// the left if `left`) goes to the vertical list; then §1200.
+    #[allow(clippy::too_many_lines)]
+    fn finish_display(&mut self, dmd: &Mode, a: Option<BoxNode>, left: bool, closes: u8) -> R<()> {
+        let v = self.v;
+        let x = |i: usize| dmd.extra.get(i).map_or(0, |&y| int_of(v, y));
+        let vlid = x(1);
+        let vkm = i32::try_from(x(2)).unwrap_or(1);
+        let danger = self.insufficient_fonts()?;
+        let p = self.formula_hlist(dmd, Style::DISPLAY, false)?;
+        let view = self.font_view(&p)?;
+        let pp = PackParams::default();
+        let natural = phitex_typeset::pack::hpack(p.clone(), Spec::Additional(0), &view, &pp, true);
+        let t = natural.adjustments.clone();
+        let mut b = natural.node;
+        let mut w = b.width;
+        let z = self.param("displaywidth")?;
+        let s = self.param("displayindent")?;
+        let (mut e, q) = match &a {
+            Some(a) if !danger => {
+                let f2 = self.int("fam:0:2")?;
+                let mq = self.font_dimen(f2, 6)?;
+                (a.width, a.width + mq)
+            }
+            _ => (0, 0),
+        };
+        if w + q > z {
+            // §1201
+            let mut shrink = [0i64; 4];
+            for n in &b.list {
+                if let Node::Glue(g) = n {
+                    shrink[g.spec.shrink_order as usize] += i64::from(g.spec.shrink);
+                }
+            }
+            let list = std::mem::take(&mut b.list);
+            if e != 0
+                && (i64::from(w) - shrink[0] + i64::from(q) <= i64::from(z)
+                    || shrink[1..].iter().any(|&x| x != 0))
+            {
+                b = phitex_typeset::pack::hpack(list, Spec::Exactly(z - q), &view, &pp, false).node;
+            } else {
+                e = 0;
+                b = if w > z {
+                    phitex_typeset::pack::hpack(list, Spec::Exactly(z), &view, &pp, false).node
+                } else {
+                    BoxNode { list, ..b }
+                };
+            }
+            w = b.width;
+        }
+        // §1202
+        let mut d = half(z - w);
+        if e > 0 && d < 2 * e {
+            d = half(z - w - e);
+            if matches!(b.list.first(), Some(Node::Glue(_))) {
+                d = 0;
+            }
+        }
+        // §1203
+        let mut vm = dmd.clone();
+        vm.m = vkm;
+        vm.km = vkm;
+        vm.lid = vlid;
+        vm.vlid = vlid;
+        let side = Side::default();
+        let pen = |r: &mut Self, n: i32| {
+            let y = nodes::penalty_node(r.v, n);
+            r.append(vlid, y);
+        };
+        let pre = self.param("predisplaypenalty")?;
+        pen(self, pre);
+        let presize = self.param("predisplaysize")?;
+        let (g1, mut g2) = if d + s <= presize || left {
+            (3u8, 4u8)
+        } else {
+            (5, 6)
+        };
+        let skip = |r: &mut Self, c: u8| -> R<()> {
+            let name = match c {
+                3 => "abovedisplayskip",
+                4 => "belowdisplayskip",
+                5 => "abovedisplayshortskip",
+                _ => "belowdisplayshortskip",
+            };
+            let g = r.glue_param(name)?;
+            let y = nodes::encode(r.v, &Node::param_glue(c, g), &Side::default());
+            r.append(vlid, y);
+            Ok(())
+        };
+        let mut a = a;
+        if left && e == 0 {
+            if let Some(mut ab) = a.take() {
+                ab.shift = s;
+                let y = nodes::encode_box(v, &ab, &side);
+                self.append_to_vlist(&vm, y)?;
+            }
+            pen(self, INF_PENALTY);
+        } else {
+            skip(self, g1)?;
+        }
+        // §1204
+        if e != 0 {
+            let r = Node::Kern(z - w - e - d, KernKind::Normal);
+            let ab = a.take().map(Node::Box);
+            let list: Vec<Node> = if left {
+                d = 0;
+                ab.into_iter().chain([r, Node::Box(b)]).collect()
+            } else {
+                std::iter::once(Node::Box(b)).chain([r]).chain(ab).collect()
+            };
+            let view2 = self.font_view(&list)?;
+            b = phitex_typeset::pack::hpack(list, Spec::Additional(0), &view2, &pp, false).node;
+        }
+        b.shift = s + d;
+        let y = nodes::encode_box(v, &b, &side);
+        self.append_to_vlist(&vm, y)?;
+        // §1205
+        if let Some(mut ab) = a.take().filter(|_| e == 0 && !left) {
+            pen(self, INF_PENALTY);
+            ab.shift = s + z - ab.width;
+            let y = nodes::encode_box(v, &ab, &side);
+            self.append_to_vlist(&vm, y)?;
+            g2 = 0;
+        }
+        for n in &t {
+            let y = nodes::encode(v, n, &side);
+            self.append(vlid, y);
+        }
+        let post = self.param("postdisplaypenalty")?;
+        pen(self, post);
+        if g2 > 0 {
+            skip(self, g2)?;
+        }
+        // §1200 resume_after_display
+        self.effect = if closes == 1 {
+            Effect::Close
+        } else {
+            Effect::Scope(phitex_defuse::Brackets {
+                closes,
+                opens: 0,
+                before: false,
+                kind: None,
+            })
+        };
+        self.unsave_extras(dmd)?;
+        let pg = self.int(&format!("pg:{vlid}"))?;
+        self.set(&format!("pg:{vlid}"), v.int(pg + 3), true);
+        let id = self.node_raw();
+        let lang = i64::from(phitex_typeset::hyph::cur_lang(self.param("language")?));
+        let lhm = Self::norm_min(self.param("lefthyphenmin")?);
+        let rhm = Self::norm_min(self.param("righthyphenmin")?);
+        let packed = (lhm * 64 + rhm) * 65536 + lang;
+        let rec = v.list(vec![v.int(id), v.int(lang), v.int(packed)]);
+        self.set(&format!("par:{vlid}"), rec, true);
+        // §443: an optional space
+        self.get_x_token()?;
+        if self.cur.cmd != cmd::SPACER {
+            self.back_cur();
+        }
+        self.build_page(&vm)
     }
 
     /// §1195: whether families 2 and 3 lack their parameters.

@@ -98,3 +98,11 @@ fn dvi_fixtures() {
         ("dvi", "accent", false, false),
     ]);
 }
+
+#[test]
+fn display() {
+    run(&[
+        ("plain", "display", false, true),
+        ("plain", "display", true, true),
+    ]);
+}

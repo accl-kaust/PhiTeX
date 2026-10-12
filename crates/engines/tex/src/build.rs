@@ -324,7 +324,7 @@ impl Run<'_, '_> {
     // -------------------------------------------------------- paragraphs
 
     /// `norm_min` (§1091).
-    fn norm_min(h: i32) -> i64 {
+    pub(crate) fn norm_min(h: i32) -> i64 {
         i64::from(h.clamp(1, 63))
     }
 
@@ -400,7 +400,7 @@ impl Run<'_, '_> {
             let (items, _) = self.list_items(md.lid)?;
             let v = self.v;
             if !items.is_empty() {
-                self.line_break(md, &items)?;
+                self.line_break(md, &items, false)?;
             }
             self.set(&format!("par:{}", md.vlid), ValueId::UNIT, true);
             self.normal_paragraph()?;
@@ -489,7 +489,14 @@ impl Run<'_, '_> {
     /// `line_break` (§815) and `post_line_break` (§877–§890): the lines
     /// go to the enclosing vertical list.
     #[allow(clippy::too_many_lines)]
-    fn line_break(&mut self, md: &Mode, items: &[ValueId]) -> R<()> {
+    /// `line_break` (§815): the lines go to the vertical list; the last
+    /// line's box is returned (`just_box`, for a display, §1146).
+    pub(crate) fn line_break(
+        &mut self,
+        md: &Mode,
+        items: &[ValueId],
+        display: bool,
+    ) -> R<Option<BoxNode>> {
         let v = self.v;
         let mut side = Side::default();
         let list: List = items
@@ -570,9 +577,10 @@ impl Run<'_, '_> {
             uc_hyph,
             hyphen_char: &hcf,
         };
-        let para = phitex_typeset::linebreak::line_break(list, false, &params, &view, &mut hy);
+        let para = phitex_typeset::linebreak::line_break(list, display, &params, &view, &mut hy);
         let mut vm = md.clone();
         vm.lid = md.vlid;
+        let just_box = para.lines.last().map(|l| l.packed.node.clone());
         for line in para.lines {
             let b = nodes::encode_box(v, &line.packed.node, &side);
             self.append_to_vlist(&vm, b)?;
@@ -590,7 +598,7 @@ impl Run<'_, '_> {
             v.int(i64::from(para.prev_graf)),
             true,
         );
-        Ok(())
+        Ok(just_box)
     }
 
     /// The hyphenation patterns and exceptions so far, entered once per
