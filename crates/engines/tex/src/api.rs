@@ -409,7 +409,7 @@ impl Graph {
         let ops = Ops { exec, put, outpage };
         let _ = shared.set(ops);
         for f in [
-            "items", "log", "needs", "defs", "pages", "writes", "tails", "streams",
+            "items", "log", "needs", "defs", "pages", "writes", "tails", "streams", "pdfcmds",
         ] {
             let fld = eng.values().field(f);
             eng.declare_accumulator(fld, Arc::new(SeqMonoid));

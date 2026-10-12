@@ -25,6 +25,9 @@ use crate::val::{int_of, list_of, str_of};
 /// `pdftex_banner` of the oracle's pdfTeX.
 pub(crate) const BANNER: &str = "This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) kpathsea version 6.4.2";
 
+/// A number for `pdftexspace` if none is free.
+const SPACE_FONT: FontId = FontId::MAX - 1;
+
 /// A font map by TFM name.
 type Map = BTreeMap<Vec<u8>, MapEntry>;
 
@@ -42,7 +45,7 @@ enum Got {
     Text(ValueId),
 }
 
-fn file(cx: &mut Ctx<'_>, name: &str) -> Result<Got, Stop> {
+fn file_of(cx: &mut Ctx<'_>, name: &str) -> Result<Got, Stop> {
     let v = cx.values();
     let Some(x) = cx.use_env(v.field(&format!("file:{name}")))? else {
         return Ok(Got::Absent);
@@ -59,8 +62,9 @@ struct Font {
     enc: Option<Vec<u8>>,
 }
 
+/// The fonts, and `\pdfspacefont`'s (`pdftexspace`) number if loaded.
 #[derive(Default)]
-struct Fonts(HashMap<FontId, Font>);
+struct Fonts(HashMap<FontId, Font>, Option<FontId>);
 
 impl FontSource for Fonts {
     fn metrics(&self, f: FontId) -> &ScaledFont {
@@ -89,6 +93,9 @@ impl FontSource for Fonts {
     }
     fn encoding_file(&self, f: FontId) -> Option<Vec<u8>> {
         self.0.get(&f)?.enc.clone()
+    }
+    fn space_font(&self) -> Option<FontId> {
+        self.1
     }
 }
 
@@ -162,6 +169,11 @@ fn whatsit(v: &Values, d: ValueId) -> Option<Whatsit> {
         ),
         "mx" => Whatsit::SetMatrix(text(1)),
         "save" => Whatsit::Save,
+        "iwon" => Whatsit::InterwordSpaceOn,
+        "iwoff" => Whatsit::InterwordSpaceOff,
+        "fake" => Whatsit::FakeSpace,
+        "rloff" => Whatsit::RunningLinkOff,
+        "rlon" => Whatsit::RunningLinkOn,
         "restore" => Whatsit::Restore,
         _ => return None,
     })
@@ -180,7 +192,7 @@ pub(crate) fn write(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop
         .unwrap_or_default();
     // the fonts, with their map entries and files
     let mut fonts = Fonts::default();
-    let map = match file(cx, "pdftex.map")? {
+    let map = match file_of(cx, "pdftex.map")? {
         Got::Absent => None,
         Got::Text(m) => {
             let key = m.raw();
@@ -201,41 +213,115 @@ pub(crate) fn write(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop
     };
     let items = cx_maps(cx)?;
     let map = apply_map_items(cx, map, items)?;
+    // the fonts the pages use, and those the font commands name
+    let mut wanted: Vec<(u32, String, ValueId, i32)> = Vec::new();
     for &page in pages {
         let xs = list_of(v, page);
         for fx in xs.get(2).map(|&l| list_of(v, l)).unwrap_or_default() {
             let ys = list_of(v, fx);
             let id = u32::try_from(ys.first().map_or(0, |&y| int_of(v, y))).unwrap_or(0);
-            if fonts.0.contains_key(&id) {
-                continue;
-            }
             let name = ys.get(1).map(|&y| str_of(v, y)).unwrap_or_default();
             let s = i32::try_from(ys.get(3).map_or(0, |&y| int_of(v, y))).unwrap_or(0);
-            let Some(l) = ys.get(2).and_then(|&f| crate::fonts::load(v, f, s)) else {
-                continue;
-            };
-            let entry = map.as_ref().and_then(|m| m.get(name.as_bytes()).cloned());
-            let mut get = |n: Option<&[u8]>| -> Result<Option<Vec<u8>>, Stop> {
-                let Some(n) = n else { return Ok(None) };
-                let n = String::from_utf8_lossy(n).into_owned();
-                Ok(match file(cx, &n)? {
-                    Got::Absent => None,
-                    Got::Text(b) => Some(bytes_of(&str_of(v, b))),
-                })
-            };
-            let ff = get(entry.as_ref().and_then(|e| e.ff_name.as_deref()))?;
-            let enc = get(entry.as_ref().and_then(|e| e.encname.as_deref()))?;
-            fonts.0.insert(
-                id,
-                Font {
-                    name: name.into_bytes(),
-                    metrics: l.at.clone(),
-                    entry,
-                    ff,
-                    enc,
-                },
-            );
+            if let Some(&file) = ys.get(2) {
+                wanted.push((id, name, file, s));
+            }
         }
+    }
+    // `pdf_read_dummy_font`: `pdftexspace` at its design size, for
+    // `\pdfinterwordspaceon` and `\pdffakespace`
+    // PDF-BACKEND-GAP: `\pdfspacefont` naming another font
+    let spaces = pages.iter().any(|&p| {
+        list_of(v, p).get(4).is_some_and(|&d| {
+            list_of(v, d).iter().any(|&e| {
+                list_of(v, e).get(1).is_some_and(|&x| {
+                    matches!(
+                        list_of(v, x).first().map(|&k| str_of(v, k)).as_deref(),
+                        Some("iwon" | "fake")
+                    )
+                })
+            })
+        })
+    });
+    if spaces && let Got::Text(_) = file_of(cx, "pdftexspace.tfm")? {
+        let x = cx.use_env(v.field("file:pdftexspace.tfm"))?;
+        if let Some(x) = x {
+            // REDUCE-GAP: pdfTeX loads the space font at the shipout that
+            // first needs it, as the next internal font number; here the
+            // number after the job's last font (the engine's `fontcount`
+            // does not count it)
+            let n = cx
+                .use_field(v.field("fontcount"))?
+                .map_or(0, |c| int_of(v, c));
+            let id = u32::try_from(n + 1).unwrap_or(SPACE_FONT);
+            wanted.push((id, "pdftexspace".to_owned(), x, -1000));
+            fonts.1 = Some(id);
+        }
+    }
+    // the font commands as read: `\pdffontattr`, `\pdfincludechars`,
+    // `\pdfnobuiltintounicode`, `\pdffontobjnum`/`\pdffontname`,
+    // `\pdfglyphtounicode`
+    // PDF-BACKEND-GAP: given to the writer before the first page, in
+    // their order, not between the pages (the writer as a fold over the
+    // document)
+    let cmds_x = cx.acc_range(v.field("pdfcmds"), None)?;
+    let mut cmds: Vec<(String, u32, Vec<u8>, Vec<u8>)> = Vec::new();
+    for e in v.seq_to_vec(cmds_x) {
+        let ys = list_of(v, e);
+        let kind = ys.first().map(|&k| str_of(v, k)).unwrap_or_default();
+        let t = |k: usize| {
+            ys.get(k)
+                .map(|&y| bytes_of(&str_of(v, y)))
+                .unwrap_or_default()
+        };
+        if kind == "glyphtounicode" {
+            cmds.push((kind, 0, t(1), t(2)));
+            continue;
+        }
+        if kind == "map" {
+            continue;
+        }
+        let f = ys.get(1).map_or(0, |&y| int_of(v, y));
+        let id = u32::try_from(f).unwrap_or(0);
+        if let Some(i) = crate::fonts::info(v, cx.use_field(v.field(&format!("fontinfo:{f}")))?)
+            && let Some(file) = i.file
+        {
+            wanted.push((id, i.name, file, i.s));
+        }
+        cmds.push((kind, id, t(2), Vec::new()));
+    }
+    for (id, name, file, s) in wanted {
+        if fonts.0.contains_key(&id) {
+            continue;
+        }
+        let Some(l) = crate::fonts::load(v, file, s) else {
+            continue;
+        };
+        let entry = if Some(id) == fonts.1 {
+            // `mapfile.c`: the line pdfTeX adds for its space font
+            parse_line(b"pdftexspace PdfTeX-Space <pdftexspace.pfb")
+        } else {
+            map.as_ref().and_then(|m| m.get(name.as_bytes()).cloned())
+        };
+        let mut get = |n: Option<&[u8]>| -> Result<Option<Vec<u8>>, Stop> {
+            let Some(n) = n else { return Ok(None) };
+            let n = String::from_utf8_lossy(n).into_owned();
+            Ok(match file_of(cx, &n)? {
+                Got::Absent => None,
+                Got::Text(b) => Some(bytes_of(&str_of(v, b))),
+            })
+        };
+        let ff = get(entry.as_ref().and_then(|e| e.ff_name.as_deref()))?;
+        let enc = get(entry.as_ref().and_then(|e| e.encname.as_deref()))?;
+        fonts.0.insert(
+            id,
+            Font {
+                name: name.into_bytes(),
+                metrics: l.at.clone(),
+                entry,
+                ff,
+                enc,
+            },
+        );
     }
     let mut params = PdfParams {
         date,
@@ -261,6 +347,19 @@ pub(crate) fn write(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop
             .map(|&y| bytes_of(&str_of(v, y)))
             .unwrap_or_default();
         let _ = w.colorstack_init(page, direct, &init);
+    }
+    for (kind, id, t, u) in &cmds {
+        match kind.as_str() {
+            "glyphtounicode" => w.glyph_to_unicode(t, u),
+            "fontattr" => w.font_attr(*id, t, &fonts),
+            "includechars" => {
+                let _ = w.include_chars(*id, t, &fonts);
+            }
+            "fontobjnum" => {
+                let _ = w.font_objnum(*id, &fonts);
+            }
+            _ => w.no_builtin_tounicode(*id, &fonts),
+        }
     }
     for &page in pages {
         let xs = list_of(v, page);
@@ -292,7 +391,13 @@ pub(crate) fn write(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop
                 None
             }
         };
-        let _ = w.ship_out_with(&bx, &fonts, &mut wh);
+        if let Err(e) = w.ship_out_with(&bx, &fonts, &mut wh) {
+            // PDF-BACKEND-GAP: the writer's errors are pdfTeX's fatal
+            // errors; they reach no log yet
+            if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+                eprintln!("pdf: {e}");
+            }
+        }
     }
     for (f, set) in [
         ("pdf:info", PdfWriter::info as fn(&mut PdfWriter, &[u8])),
@@ -325,7 +430,12 @@ pub(crate) fn write(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop
     let suppress = int(cx, "param:pdfsuppressptexinfo")?;
     w.params_mut().info_omit_date = omit;
     w.params_mut().suppress_ptex_info = suppress;
-    let bytes = w.finish().unwrap_or_default();
+    let bytes = w.finish().unwrap_or_else(|e| {
+        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+            eprintln!("pdf: {e}");
+        }
+        Vec::new()
+    });
     let s: String = bytes.iter().map(|&b| char::from(b)).collect();
     Ok(v.intern(Value::Str(s.into_boxed_str())))
 }
@@ -368,7 +478,7 @@ fn apply_map_items(
             _ => (' ', t),
         };
         let entries: Vec<MapEntry> = if is_file {
-            match file(cx, rest.trim())? {
+            match file_of(cx, rest.trim())? {
                 Got::Text(b) => parse_map(&bytes_of(&str_of(v, b))).into_values().collect(),
                 Got::Absent => Vec::new(),
             }
