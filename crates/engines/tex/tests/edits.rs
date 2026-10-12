@@ -2,6 +2,8 @@
 //! equals a cold build of the same text, and the counters show how many
 //! nodes the edit re-ran.
 
+#![allow(clippy::many_single_char_names)]
+
 mod common;
 
 /// The byte ranges of the words (runs of ASCII letters not after `\`).

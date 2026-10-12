@@ -12,7 +12,8 @@ use phitex_typeset::glue::{Glue, Order};
 
 use crate::prims::PRIMS;
 
-// Command codes (§207–§210).
+// Command codes (§207–§210), the table whole.
+#[allow(dead_code)]
 pub(crate) mod cmd {
     pub const RELAX: u8 = 0;
     pub const LEFT_BRACE: u8 = 1;
@@ -140,7 +141,6 @@ pub(crate) mod cmd {
 }
 
 // eqtb regions (§222–§236), as tex.web numbers them.
-pub(crate) const GLUE_BASE: i32 = 2882;
 pub(crate) const SKIP_BASE: i32 = 2900;
 pub(crate) const MU_SKIP_BASE: i32 = 3156;
 pub(crate) const OUTPUT_ROUTINE_LOC: i32 = 3413;
@@ -151,15 +151,14 @@ pub(crate) const LC_CODE_BASE: i32 = 4239;
 pub(crate) const UC_CODE_BASE: i32 = 4495;
 pub(crate) const SF_CODE_BASE: i32 = 4751;
 pub(crate) const MATH_CODE_BASE: i32 = 5007;
-pub(crate) const INT_BASE: i32 = 5263;
 pub(crate) const DEL_CODE_BASE: i32 = 5574;
 pub(crate) const COUNT_BASE: i32 = 5318;
-pub(crate) const DIMEN_BASE: i32 = 5830;
 pub(crate) const SCALED_BASE: i32 = 5851;
 /// `no_expand_flag` (§358).
 pub(crate) const NO_EXPAND_FLAG: i32 = 257;
 
 /// Group codes (§269).
+#[allow(dead_code)]
 pub(crate) mod group {
     pub const BOTTOM: i64 = 0;
     pub const SIMPLE: i64 = 1;
@@ -359,24 +358,15 @@ pub(crate) fn prim_name(c: u8, chr: i32) -> Option<&'static str> {
 impl Mean {
     pub(crate) fn cmd_chr(&self) -> (u8, i32) {
         match self {
-            Mean::Prim(_, c, h) => (*c, *h),
+            Mean::Prim(_, c, h) | Mean::Reg(c, h) => (*c, *h),
             Mean::Macro(m) => (cmd::CALL + m.flags, 0),
             Mean::Char(c, h) => (*c, i32::try_from(*h).unwrap_or(0)),
             Mean::Undefined => (cmd::UNDEFINED_CS, 0),
             Mean::Font(f) => (cmd::SET_FONT, i32::try_from(*f).unwrap_or(0)),
             Mean::CharDef(n) => (cmd::CHAR_GIVEN, i32::try_from(*n).unwrap_or(0)),
             Mean::MathCharDef(n) => (cmd::MATH_GIVEN, i32::try_from(*n).unwrap_or(0)),
-            Mean::Reg(c, h) => (*c, *h),
             Mean::NotExpanded => (cmd::RELAX, NO_EXPAND_FLAG),
         }
-    }
-
-    pub(crate) fn cmd(&self) -> u8 {
-        self.cmd_chr().0
-    }
-
-    pub(crate) fn chr(&self) -> i32 {
-        self.cmd_chr().1
     }
 
     pub(crate) fn encode(&self, v: &Values) -> ValueId {

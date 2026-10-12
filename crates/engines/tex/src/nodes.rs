@@ -6,7 +6,7 @@
 //! [`Side`] table.
 
 use phitex_defuse::{Value, ValueId, Values};
-use phitex_typeset::glue::{Glue, GlueSet, GlueSign, Order};
+use phitex_typeset::glue::{Glue, GlueSet, GlueSign};
 use phitex_typeset::node::{
     BoxKind, BoxNode, Disc, GlueKind, GlueNode, Insert, KernKind, Ligature, List, MathKind, Node,
     Rule,
@@ -104,7 +104,7 @@ pub(crate) fn encode_list(v: &Values, list: &[Node], side: &Side) -> ValueId {
 pub(crate) fn encode_box(v: &Values, b: &BoxNode, side: &Side) -> ValueId {
     v.list(vec![
         i(v, T_BOX),
-        i(v, if b.kind == BoxKind::H { 0 } else { 1 }),
+        i(v, i64::from(b.kind != BoxKind::H)),
         i(v, i64::from(b.width)),
         i(v, i64::from(b.height)),
         i(v, i64::from(b.depth)),
@@ -401,8 +401,4 @@ pub(crate) fn int_field(v: &Values, x: ValueId, k: usize) -> i32 {
         Value::List(xs) => xs.get(k).map_or(0, |&y| n32(v, y)),
         _ => 0,
     }
-}
-
-pub(crate) fn order_of(o: Order) -> i64 {
-    o as i64
 }

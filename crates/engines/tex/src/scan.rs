@@ -1,8 +1,6 @@
 //! Scanning (§402–§463, §473–§479, §577–§578): numbers, dimensions,
 //! glue, keywords, token lists and internal quantities, inside one run.
 
-use std::rc::Rc;
-
 use phitex_typeset::arith::{nx_plus_y, round_decimals, xn_over_d};
 use phitex_typeset::glue::{Glue, Order};
 
@@ -216,24 +214,23 @@ impl Run<'_, '_> {
             let mut vacuous = true;
             val = 0;
             loop {
-                let d: i32;
                 let (cat, c) = (self.cur.tok.cat(), self.cur.tok.chr());
                 let cs = self.cur.is_cs();
-                if !cs
+                let d: i32 = if !cs
                     && cat == Some(12)
                     && (48..=57).contains(&c)
                     && i32::try_from(c - 48).unwrap_or(99) < self.radix
                 {
-                    d = i32::try_from(c - 48).unwrap_or(0);
+                    i32::try_from(c - 48).unwrap_or(0)
                 } else if self.radix == 16
                     && !cs
                     && (cat == Some(11) || cat == Some(12))
                     && (65..=70).contains(&c)
                 {
-                    d = i32::try_from(c - 55).unwrap_or(0);
+                    i32::try_from(c - 55).unwrap_or(0)
                 } else {
                     break;
-                }
+                };
                 vacuous = false;
                 if val >= m && (val > m || d > 7 || self.radix != 10) {
                     if ok_so_far {
@@ -278,16 +275,16 @@ impl Run<'_, '_> {
                     let x = self.scan_something_internal(3, false)?;
                     let x = coerce_glue(x);
                     if let IVal::Mu(g) = x {
-                        return self.attach_sign(g.width, negative, arith_error);
+                        return Ok(Self::attach_sign(g.width, negative, arith_error));
                     }
                     val = x.int();
                     if matches!(x, IVal::Mu(_)) {
-                        return self.attach_sign(val, negative, arith_error);
+                        return Ok(Self::attach_sign(val, negative, arith_error));
                     }
                 } else {
                     let x = self.scan_something_internal(1, false)?;
                     if let IVal::Dimen(d) = x {
-                        return self.attach_sign(d, negative, arith_error);
+                        return Ok(Self::attach_sign(d, negative, arith_error));
                     }
                     val = x.int();
                 }
@@ -375,7 +372,7 @@ impl Run<'_, '_> {
                 Some(r) => (r, false),
                 None => (0, true),
             };
-            return self.attach_sign(r, negative, arith_error || err);
+            return Ok(Self::attach_sign(r, negative, arith_error || err));
         }
         if mu {
             // §456
@@ -417,7 +414,7 @@ impl Run<'_, '_> {
         } else if self.scan_keyword("sp")? {
             // goto done
             self.optional_space()?;
-            return self.attach_sign(val, negative, arith_error);
+            return Ok(Self::attach_sign(val, negative, arith_error));
         } else {
             // "Illegal unit of measure (pt inserted)"
             None
@@ -444,16 +441,16 @@ impl Run<'_, '_> {
             (val * 65536 + f, false)
         };
         self.optional_space()?;
-        self.attach_sign(v, negative, err)
+        Ok(Self::attach_sign(v, negative, err))
     }
 
-    fn attach_sign(&mut self, val: i32, negative: bool, arith_error: bool) -> R<i32> {
+    fn attach_sign(val: i32, negative: bool, arith_error: bool) -> i32 {
         let mut v = val;
         if arith_error || v.unsigned_abs() >= 0o10000000000 {
             // "Dimension too large"
             v = MAX_DIMEN;
         }
-        Ok(if negative { -v } else { v })
+        if negative { -v } else { v }
     }
 
     /// §443.
@@ -586,7 +583,6 @@ impl Run<'_, '_> {
                 // §414
                 let n = self.scan_char_num()?;
                 let name = match m {
-                    crate::val::CAT_CODE_BASE => "cat",
                     LC_CODE_BASE => "lc",
                     UC_CODE_BASE => "uc",
                     SF_CODE_BASE => "sf",
@@ -884,19 +880,6 @@ impl Run<'_, '_> {
                 return Ok((w, h, d));
             }
         }
-    }
-
-    /// A token list of characters (for `\csname`-like scanning).
-    pub(crate) fn chars_of(toks: &[Tok]) -> Rc<str> {
-        let mut s = String::new();
-        for t in toks {
-            print::push_code(&mut s, t.chr());
-        }
-        Rc::from(s)
-    }
-
-    pub(crate) fn count_reg(&mut self, n: i32) -> R<i32> {
-        self.int32(&format!("count:{n}"))
     }
 
     pub(crate) fn _unused_bases() -> (i32, i32, i32) {

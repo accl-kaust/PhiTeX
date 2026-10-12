@@ -357,7 +357,7 @@ impl Run<'_, '_> {
         let ep = self.get("param:everypar")?;
         let toks = crate::val::toks_of(v, ep);
         self.push_toks(toks);
-        if md.km == 1 && md.depth == 0 || md.lid == 0 && md.km == 1 {
+        if md.km == 1 && (md.depth == 0 || md.lid == 0) {
             self.build_page_mark(md)?;
         }
         Ok(())
@@ -385,14 +385,13 @@ impl Run<'_, '_> {
     }
 
     /// `head_for_vmode` (§1095).
-    pub(crate) fn head_for_vmode(&mut self, md: &Mode) -> R<()> {
+    pub(crate) fn head_for_vmode(&mut self, md: &Mode) {
         if md.m < 0 {
             // off_save (or "You can't use \hrule here")
-            return Ok(());
+            return;
         }
         self.back_cur();
         self.back_input(Tok::cs("par"));
-        Ok(())
     }
 
     /// `end_graf` (§1096).
@@ -412,7 +411,6 @@ impl Run<'_, '_> {
 
     /// The fonts the nodes use.
     pub(crate) fn font_view(&mut self, list: &[Node]) -> R<crate::fonts::View> {
-        let mut ids = std::collections::BTreeSet::new();
         fn walk(l: &[Node], ids: &mut std::collections::BTreeSet<u32>) {
             for n in l {
                 match n {
@@ -439,6 +437,7 @@ impl Run<'_, '_> {
                 }
             }
         }
+        let mut ids = std::collections::BTreeSet::new();
         walk(list, &mut ids);
         let mut view = crate::fonts::View::default();
         for f in ids {
@@ -1129,13 +1128,13 @@ impl Run<'_, '_> {
                 // §1086 `package`
                 self.effect = Effect::Close;
                 let x = |i: usize| md.extra.get(i).map_or(0, |&y| int_of(v, y));
-                let (ctx, spec_code, size) = (x(0), x(1), i32::try_from(x(2)).unwrap_or(0));
+                let (ctx, spec_code, amount) = (x(0), x(1), i32::try_from(x(2)).unwrap_or(0));
                 let spec = if spec_code == 0 {
-                    Spec::Exactly(size)
+                    Spec::Exactly(amount)
                 } else {
-                    Spec::Additional(size)
+                    Spec::Additional(amount)
                 };
-                let d = self.param("boxmaxdepth")?;
+                let depth_limit = self.param("boxmaxdepth")?;
                 let (items, _) = self.list_items(md.sid)?;
                 let mut side = Side::default();
                 let list: List = items
@@ -1149,7 +1148,7 @@ impl Run<'_, '_> {
                     phitex_typeset::pack::hpack(list, spec, &view, &pp, adjusted)
                 } else {
                     let pp = self.pack_params(false)?;
-                    let mut p = phitex_typeset::pack::vpackage(list, spec, d, &pp);
+                    let mut p = phitex_typeset::pack::vpackage(list, spec, depth_limit, &pp);
                     if md.group == group::VTOP {
                         // §1087
                         let h = match p.node.list.first() {
@@ -1167,7 +1166,7 @@ impl Run<'_, '_> {
                 self.unsave_extras(md)?;
                 let b = nodes::encode_box(v, &packed.node, &side);
                 let outer = self.outer_mode(md)?;
-                if ctx >= BOX_FLAG && ctx < SHIP_OUT_FLAG && ctx < BOX_FLAG + 256 {
+                if (BOX_FLAG..SHIP_OUT_FLAG).contains(&ctx) && ctx < BOX_FLAG + 256 {
                     // a local \setbox lands outside the group
                     let lvl = v.int(outer.depth);
                     let val = v.list(vec![lvl, b]);
@@ -1231,8 +1230,8 @@ impl Run<'_, '_> {
             group::MATH => self.math_group_end(md),
             group::VCENTER => self.vcenter_end(md),
             group::MATH_CHOICE => self.build_choices(md),
-            // "Extra }, or forgotten $" / "\right" (§1069)
-            group::MATH_SHIFT | group::MATH_LEFT | group::SEMI_SIMPLE => Ok(()),
+            // MATH_SHIFT, MATH_LEFT: "Extra }, or forgotten $" / "\right"
+            // (§1069); SEMI_SIMPLE: off_save
             _ => Ok(()),
         }
     }
@@ -1692,23 +1691,20 @@ impl Run<'_, '_> {
                     } else {
                         self.get_next_or_end()?;
                     }
-                    match got {
-                        Some(c) => {
-                            self.adjust_sf(c, sf)?;
-                            lig_stack.push(Item {
-                                ch: c,
-                                lig: false,
-                                ptr: None,
-                            });
-                            cur_r = Some(c);
-                            if cur_r == false_bchar {
-                                cur_r = None;
-                            }
+                    if let Some(c) = got {
+                        self.adjust_sf(c, sf)?;
+                        lig_stack.push(Item {
+                            ch: c,
+                            lig: false,
+                            ptr: None,
+                        });
+                        cur_r = Some(c);
+                        if cur_r == false_bchar {
+                            cur_r = None;
                         }
-                        None => {
-                            cur_r = bchar;
-                            lig_stack.clear();
-                        }
+                    } else {
+                        cur_r = bchar;
+                        lig_stack.clear();
                     }
                     at = L::Lig;
                 }

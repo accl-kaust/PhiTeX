@@ -1,4 +1,4 @@
-//! The primitives of TeX82 (tex.web's `primitive` calls, §226–§1344),
+//! The primitives of `TeX82` (tex.web's `primitive` calls, §226–§1344),
 //! with the command and modifier codes tex.web gives them (§207–§210,
 //! §222–§247): generated from `tex.web`.
 

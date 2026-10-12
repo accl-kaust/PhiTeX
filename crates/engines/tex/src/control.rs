@@ -7,12 +7,10 @@ use std::rc::Rc;
 use phitex_defuse::ValueId;
 use phitex_typeset::glue::Glue;
 
-use crate::run::{Frame, Halt, R, Run, Src};
-use crate::scan::IVal;
+use crate::run::{Halt, R, Run};
 use crate::val::{
     CAT_CODE_BASE, DEL_CODE_BASE, MATH_CODE_BASE, Macro, Mean, OUTPUT_ROUTINE_LOC, SF_CODE_BASE,
-    TOKS_BASE, Tok, cmd, glue_of, glue_value, int_of, list_of, quantity_field, str_of, toks_of,
-    toks_value,
+    TOKS_BASE, Tok, cmd, glue_of, glue_value, int_of, list_of, quantity_field, str_of, toks_value,
 };
 
 const BOX_FLAG: i64 = 0o10000000000;
@@ -79,7 +77,7 @@ impl Run<'_, '_> {
                 if v {
                     self.its_all_over(&md)?;
                 } else if h {
-                    self.head_for_vmode(&md)?;
+                    self.head_for_vmode(&md);
                 }
             }
             cmd::HRULE | cmd::VRULE => {
@@ -101,7 +99,7 @@ impl Run<'_, '_> {
                     self.back_cur();
                     self.new_graf(&md, true)?;
                 } else if h {
-                    self.head_for_vmode(&md)?;
+                    self.head_for_vmode(&md);
                 }
             }
             cmd::VSKIP | cmd::HSKIP | cmd::MSKIP => {
@@ -111,7 +109,7 @@ impl Run<'_, '_> {
                     self.back_cur();
                     self.new_graf(&md, true)?;
                 } else if h {
-                    self.head_for_vmode(&md)?;
+                    self.head_for_vmode(&md);
                 }
             }
             cmd::KERN | cmd::MKERN => {
@@ -188,7 +186,7 @@ impl Run<'_, '_> {
                 if v {
                     self.unpackage(&md)?;
                 } else if h {
-                    self.head_for_vmode(&md)?;
+                    self.head_for_vmode(&md);
                 }
             }
             cmd::HALIGN | cmd::VALIGN => {
@@ -196,7 +194,7 @@ impl Run<'_, '_> {
                     self.back_cur();
                     self.new_graf(&md, true)?;
                 } else if c == cmd::HALIGN && h {
-                    self.head_for_vmode(&md)?;
+                    self.head_for_vmode(&md);
                 } else {
                     self.log("error", "\\halign is not supported")?;
                 }
@@ -529,7 +527,7 @@ impl Run<'_, '_> {
                 self.set(&format!("fam:{size}:{n}"), v.int(f), global);
             }
             cmd::REGISTER | cmd::ADVANCE | cmd::MULTIPLY | cmd::DIVIDE => {
-                self.do_register_command(global)?
+                self.do_register_command(global)?;
             }
             cmd::SET_BOX => {
                 // §1241
@@ -681,6 +679,7 @@ impl Run<'_, '_> {
     }
 
     /// `do_register_command` (§1236–§1240).
+    #[allow(clippy::too_many_lines)]
     fn do_register_command(&mut self, global: bool) -> R<()> {
         let q = self.cur.cmd;
         let v = self.v;
@@ -734,7 +733,10 @@ impl Run<'_, '_> {
                 if q == cmd::ADVANCE {
                     let s = cur + i64::from(x);
                     // web2c: integer overflow wraps silently
-                    Some(i32::try_from(s).unwrap_or_else(|_| s as i32))
+                    // the low 32 bits
+                    #[allow(clippy::cast_possible_truncation)]
+                    let w = s as i32;
+                    Some(w)
                 } else {
                     Some(x)
                 }
@@ -1213,8 +1215,7 @@ impl Run<'_, '_> {
         self.get_token()?;
         let mut s = String::new();
         self.show_toks_into(&mut s, &expanded)?;
-        let open = k >= 0
-            && k < 16
+        let open = (0..16).contains(&k)
             && self
                 .get(&format!("write:{k}"))?
                 .is_some_and(|x| x != ValueId::UNIT);
@@ -1233,11 +1234,6 @@ impl Run<'_, '_> {
         let lines = self.v.field("lines");
         let x = self.cx.acc_range(lines, None)?;
         Ok(i32::try_from(int_of(self.v, x) + self.lines_entered).unwrap_or(0))
-    }
-
-    pub(crate) fn _unused(&self) -> (Option<Src>, Option<Frame>, Option<IVal>) {
-        let _ = toks_of;
-        (None, None, None)
     }
 }
 
