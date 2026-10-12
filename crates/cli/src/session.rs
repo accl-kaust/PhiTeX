@@ -3,18 +3,19 @@
 //! an edit from nothing, every later one an edit of the main text as it
 //! is now; the session writes what the build made.
 //!
-//! Native today: `tex` (plain.tex through `tex.ini`) and `-ini` jobs, DVI
-//! out (`phitex-tex` writes no PDF yet, `\pdfoutput` or not). The other
-//! formats (`etex`, LaTeX's) come with its next slices, and until then a
-//! build says so.
+//! Native today: `tex`, `etex` and `pdftex` (their formats' ini files as
+//! the prelude, its evaluated state kept in the cache) and `-ini` jobs,
+//! DVI or PDF out. LaTeX's formats wait for `phitex-tex`'s LaTeX prelude,
+//! and until then a build says so.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use phitex_tex::{Build, Finder, Options};
 
+use crate::cache::Cache;
 use crate::tex::{self, Engine};
 
 /// What a session does now, for a terminal's spinner (`ui.rs`).
@@ -66,6 +67,11 @@ pub struct Job {
     pub shell_escape: bool,
     /// The PDF's date (`SOURCE_DATE_EPOCH`, else now).
     pub pdf_date: i64,
+    /// The files the job reads back (`.aux`, `.toc`) to their fixpoint, as
+    /// `latexmk` runs LaTeX until they settle; else one run.
+    pub fixpoint: bool,
+    /// The cache's size limit (`cache-limit`).
+    pub cache_limit: Option<u64>,
 }
 
 /// One run of a build.
@@ -177,8 +183,13 @@ pub struct Session {
     written: Mutex<BTreeMap<PathBuf, u64>>,
     /// What the session does now, for a spinner.
     status: Arc<Status>,
-    /// Unsaved editor buffers, by file name (`None`: as on disk again).
-    buffers: Vec<(String, Option<String>)>,
+    /// Unsaved editor buffers, by file name (`None`: as on disk again),
+    /// which the finder reads first.
+    buffers: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    /// The files other than the main one changed since the last build.
+    changed: Vec<String>,
+    /// The formats' evaluated states (none: no cache).
+    cache: Option<Cache>,
 }
 
 /// `SOURCE_DATE_EPOCH`, else the time now.
@@ -202,6 +213,7 @@ impl Session {
     ) -> Result<Session, String> {
         let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()))?;
         let tree = Arc::new(tex::Tree::open(&job.engine));
+        let cache = Cache::open(job.cache_limit).ok();
         Ok(Session {
             job,
             text: tex::chars(&text),
@@ -212,7 +224,9 @@ impl Session {
             builds: 0,
             written: Mutex::new(BTreeMap::new()),
             status,
-            buffers: Vec::new(),
+            buffers: Arc::default(),
+            changed: Vec::new(),
+            cache,
         })
     }
 
@@ -221,12 +235,15 @@ impl Session {
         self.text = text;
     }
 
-    /// File `name`'s text from now on (an editor's unsaved buffer, TeX's
-    /// characters), or none: as on disk again.
+    /// File `name` changed: its text from now on is `text` (an editor's
+    /// unsaved buffer, TeX's characters), or none: as on disk.
     pub fn set_buffer(&mut self, name: &str, text: Option<&str>) {
-        self.buffers.retain(|(n, _)| n != name);
-        self.buffers
-            .push((name.to_owned(), text.map(str::to_owned)));
+        let name = plain_name(name);
+        let mut bufs = self.buffers.lock().unwrap_or_else(PoisonError::into_inner);
+        bufs.retain(|(n, _)| *n != name);
+        bufs.push((name.clone(), text.map(str::to_owned)));
+        drop(bufs);
+        self.changed.push(name);
     }
 
     /// Builds: the first time from nothing, then as an edit of the main
@@ -263,33 +280,71 @@ impl Session {
             .built_text
             .as_deref()
             .and_then(|old| first_difference_line(old, &text));
-        if let Some(b) = &mut self.build {
-            b.edit(&text);
-        } else {
-            let prelude = match self.prelude() {
-                Ok(p) => p,
-                Err(e) => return fail(e),
-            };
-            let opts = Options {
-                name: self.printed_name(),
-                jobname: self.job.jobname.clone(),
-                comment: dvi_comment(self.job.pdf_date),
-                finder: self.finder(),
-            };
-            self.build = Some(Build::with(opts, prelude.as_deref(), &text));
+        let changed = std::mem::take(&mut self.changed);
+        let reread = self
+            .build
+            .as_ref()
+            .map(|b| self.reads_of(b, &changed))
+            .unwrap_or_default();
+        // (an evaluation error panics, naming the nodes: the build is
+        // reported failed and dropped, the next one cold)
+        let ran = crate::ui::catch(|| -> Result<(), String> {
+            if let Some(b) = &mut self.build {
+                for name in &reread {
+                    b.edit_file(name, None);
+                }
+                b.edit(&text);
+            } else {
+                let (prelude, cached) = self.prelude()?;
+                let opts = Options {
+                    name: self.printed_name(),
+                    jobname: self.job.jobname.clone(),
+                    comment: dvi_comment(self.job.pdf_date),
+                    finder: self.finder(),
+                    epoch: Some(self.job.pdf_date),
+                    fixpoint: self.job.fixpoint,
+                    prelude_jobname: self.job.engine.name.to_owned(),
+                    prelude_bytes: cached.as_ref().map(|(_, b)| b.clone()),
+                };
+                let b = Build::with(opts, prelude.as_deref(), &text);
+                self.store_prelude(&b, prelude.as_deref(), cached.map(|(k, _)| k));
+                self.build = Some(b);
+            }
+            Ok(())
+        });
+        match ran {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return fail(e),
+            Err(e) => {
+                self.build = None;
+                self.built_text = None;
+                return fail(format!("the engine stopped: {e}"));
+            }
         }
         let b = self.build.as_ref().expect("built above");
-        let (dvi, log) = b.output();
+        let (bytes, log) = b.output();
+        let pdf = b.is_pdf();
         let s = &b.stats;
         let errors = log
             .lines()
             .filter(|l| l.starts_with("! "))
             .map(str::to_owned)
             .collect();
-        let pages = dvi_pages(&dvi);
-        let hashes: Vec<u64> = dvi_page_bytes(&dvi)
-            .iter()
-            .map(|p| tex::Fnv::new().add(p).0)
+        let (pages, hashes) = if pdf {
+            // (no page of a PDF told apart yet: each has the file's hash)
+            let n = pdf_pages(&log, &bytes);
+            (n, vec![tex::Fnv::new().add(&bytes).0; n])
+        } else {
+            let h = dvi_page_bytes(&bytes)
+                .iter()
+                .map(|p| tex::Fnv::new().add(p).0)
+                .collect();
+            (dvi_pages(&bytes), h)
+        };
+        let writes = b
+            .files()
+            .into_iter()
+            .map(|(n, t)| (plain_name(&n), t))
             .collect();
         let pages_changed: Vec<usize> = (0..hashes.len())
             .filter(|&k| self.page_hashes.get(k) != Some(&hashes[k]))
@@ -301,13 +356,14 @@ impl Session {
         let wall = t0.elapsed();
         Report {
             out: Output {
-                dvi,
+                pdf: if pdf { bytes.clone() } else { Vec::new() },
+                dvi: if pdf { Vec::new() } else { bytes },
+                writes,
                 pages,
                 pages_changed,
                 page_hashes: hashes,
                 errors,
                 log,
-                ..Output::default()
             },
             edit_line,
             runs: vec![RunInfo {
@@ -328,35 +384,85 @@ impl Session {
 
     /// The main text with the editor's buffer for it, if there is one.
     fn text_now(&self) -> String {
-        let name = self.job.path.to_string_lossy();
+        let name = plain_name(&self.job.path.to_string_lossy());
         self.buffers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .rev()
-            .find(|(n, _)| *n == self.job.file || *n == name)
+            .find(|(n, _)| *n == plain_name(&self.job.file) || *n == name)
             .and_then(|(_, t)| t.clone())
             .unwrap_or_else(|| self.text.clone())
     }
 
-    /// The format's text: none for `-ini`; `tex`'s is its ini file
-    /// (`\input plain \dump`). The other formats wait for the engine.
-    fn prelude(&self) -> Result<Option<String>, String> {
+    /// The format's text (its ini file read, as `-ini` reads it: none
+    /// for `-ini` jobs), and its evaluated state from the cache with the
+    /// key it was stored with. LaTeX's formats wait for the engine.
+    #[allow(clippy::type_complexity, reason = "one caller")]
+    fn prelude(&self) -> Result<(Option<String>, Option<([u8; 32], Vec<u8>)>), String> {
         if self.job.ini {
-            return Ok(None);
+            return Ok((None, None));
         }
-        if self.job.engine.name != "tex" {
+        if !NATIVE.contains(&self.job.engine.name) {
             return Err(format!(
-                "{}: its format is not native yet (phitex-tex runs plain TeX; e-TeX's and LaTeX's \
-                 formats come with its next slices): use tex, or -ini",
-                self.job.engine.name
+                "{}: its format is not native yet (phitex-tex runs plain TeX, e-TeX and pdfTeX; \
+                 LaTeX's format comes with its next slice): use {}, or -ini",
+                self.job.engine.name,
+                NATIVE.join(", ")
             ));
         }
         let ini = self.job.engine.ini;
-        let p = self
-            .tree
+        self.tree
             .input(ini)
             .ok_or_else(|| format!("can't find {ini} (kpathsea)"))?;
-        let b = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-        Ok(Some(tex::chars(&b)))
+        let text = format!("\\input {ini}\n");
+        let cached = self
+            .cache
+            .as_ref()
+            .and_then(|c| c.format(&self.format_name(&text)));
+        Ok((Some(text), cached))
+    }
+
+    /// The format's name in the cache: its engine, and its text's hash.
+    fn format_name(&self, text: &str) -> String {
+        format!(
+            "{}-{:016x}",
+            self.job.engine.name,
+            tex::Fnv::new().add(text.as_bytes()).0
+        )
+    }
+
+    /// The prelude's evaluated state stored, unless the cache has it
+    /// under the same key.
+    fn store_prelude(&self, b: &Build, prelude: Option<&str>, had: Option<[u8; 32]>) {
+        let (Some(c), Some(text)) = (&self.cache, prelude) else {
+            return;
+        };
+        let key = b.prelude_key();
+        if had != Some(key) {
+            let _ = c.put_format(&self.format_name(text), &key, &b.export_prelude());
+        }
+    }
+
+    /// The names the build asked the finder for that stand for one of
+    /// `changed` (as found, or as named).
+    fn reads_of(&self, b: &Build, changed: &[String]) -> Vec<String> {
+        if changed.is_empty() {
+            return Vec::new();
+        }
+        b.reads()
+            .into_iter()
+            .map(|(n, _)| n)
+            .filter(|n| {
+                let found = self.tree.input(n).map(|p| plain_name(&p.to_string_lossy()));
+                changed.iter().any(|c| {
+                    *c == plain_name(n)
+                        || *c == format!("{}.tex", plain_name(n))
+                        || found.as_ref() == Some(c)
+                        || found.as_deref().is_some_and(|f| same_file(f, c))
+                })
+            })
+            .collect()
     }
 
     /// The main file's name as TeX prints it (`./story.tex`).
@@ -369,13 +475,27 @@ impl Session {
         }
     }
 
-    /// Files by kpathsea, as TeX names them.
+    /// Files by kpathsea, as TeX names them: an editor's buffer for one
+    /// first.
     fn finder(&self) -> Finder {
         let tree = self.tree.clone();
+        let buffers = self.buffers.clone();
         Arc::new(move |name: &str| {
             let p = tree.input(name)?;
-            let bytes = std::fs::read(&p).ok()?;
-            Some((p.to_string_lossy().into_owned(), bytes))
+            let shown = p.to_string_lossy().into_owned();
+            let key = plain_name(&shown);
+            let buffered = buffers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .rev()
+                .find(|(n, _)| *n == key || same_file(n, &key))
+                .and_then(|(_, t)| t.clone());
+            let bytes = match buffered {
+                Some(t) => tex::bytes(&t),
+                None => std::fs::read(&p).ok()?,
+            };
+            Some((shown, bytes))
         })
     }
 
@@ -428,6 +548,13 @@ impl Session {
         let cwd = std::env::current_dir().unwrap_or_default();
         s.push_str(&format!("PWD {}\n", cwd.display()));
         s.push_str(&format!("INPUT {}\n", self.job.path.display()));
+        if let Some(b) = &self.build {
+            for (n, found) in b.reads() {
+                if let Some(p) = self.tree.input(&n).filter(|_| found) {
+                    s.push_str(&format!("INPUT {}\n", p.display()));
+                }
+            }
+        }
         let dir = &self.job.out_dir;
         let out = |n: &str| dir.join(n).display().to_string();
         for (n, _) in &r.out.writes {
@@ -452,12 +579,6 @@ impl Session {
 /// The notes a job's options that the native engine cannot do yet give, once.
 pub fn waiting_notes(job: &Job) -> Vec<String> {
     let mut v = Vec::new();
-    if job.recorder {
-        v.push(
-            "-recorder: the .fls lists the main file and the outputs, not the files a build read"
-                .to_owned(),
-        );
-    }
     if job.synctex {
         v.push("-synctex: the native engine writes no SyncTeX yet".to_owned());
     }
@@ -465,6 +586,37 @@ pub fn waiting_notes(job: &Job) -> Vec<String> {
         v.push("-shell-escape: the native engine runs no \\write18 yet".to_owned());
     }
     v
+}
+
+/// The formats the engine runs (their ini files as the prelude).
+const NATIVE: [&str; 3] = ["tex", "etex", "pdftex"];
+
+/// A file's name without a leading `./`.
+fn plain_name(n: &str) -> String {
+    n.strip_prefix("./").unwrap_or(n).to_owned()
+}
+
+/// Whether two names are one file on disk.
+fn same_file(a: &str, b: &str) -> bool {
+    match (Path::new(a).canonicalize(), Path::new(b).canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// The pages a PDF job shipped: the log's `Output written on … (N pages`,
+/// else the page objects outside object streams.
+fn pdf_pages(log: &str, pdf: &[u8]) -> usize {
+    log.rfind("Output written on ")
+        .and_then(|i| log[i..].find('(').map(|j| &log[i + j + 1..]))
+        .and_then(|t| t.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| {
+            let pat = b"/Type /Page";
+            pdf.windows(pat.len() + 1)
+                .filter(|w| w.starts_with(pat) && w[pat.len()] != b's')
+                .count()
+        })
 }
 
 /// Shared bytes of a report's output, for the viewer.

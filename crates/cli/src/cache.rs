@@ -1,17 +1,14 @@
 //! The cache on disk: `formats/` (a format's evaluated state, shared by
-//! every document; keyed by `phitex-tex`'s prelude key) and `docs/ID/`
+//! every document; named by its engine and its ini text's hash, and
+//! stored with `phitex-tex`'s prelude key, which the engine checks against
+//! the files the prelude read) and `docs/ID/`
 //! (one document's, ID a hash of its main file's path). Entries are
 //! written whole (a temporary file renamed), so processes can share the
 //! cache. A size limit holds it: after each write the entries used least
 //! recently (their files' times, set on each use) go until it fits, the
 //! ones a build is using kept. `phitex clean` empties the document's part,
 //! `phitex clean --all` all of it.
-//!
-//! Nothing stores here yet: `phitex-tex`'s format export
-//! (`Build::prelude_key`, `export_prelude`) lands with its LaTeX slice,
-//! and [`Cache::format`] / [`Cache::put_format`] are its two ends.
 
-use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -58,31 +55,25 @@ impl Cache {
         self.dir.join("docs").join(format!("{id:016x}"))
     }
 
-    fn format_path(&self, key: &[u8; 32]) -> PathBuf {
-        let hex = key.iter().fold(String::new(), |mut h, b| {
-            let _ = write!(h, "{b:02x}");
-            h
-        });
-        self.dir.join("formats").join(hex)
+    fn format_path(&self, name: &str) -> PathBuf {
+        self.dir.join("formats").join(name)
     }
 
-    /// A format's evaluated state, by its key (its use noted).
-    #[expect(
-        dead_code,
-        reason = "phitex-tex's export_prelude reads it back (its LaTeX slice)"
-    )]
-    pub fn format(&self, key: &[u8; 32]) -> Option<Vec<u8>> {
-        self.get(&self.format_path(key))
+    /// A format's evaluated state stored as `name`, with the key the
+    /// engine gave it (its use noted).
+    pub fn format(&self, name: &str) -> Option<([u8; 32], Vec<u8>)> {
+        let b = self.get(&self.format_path(name))?;
+        let key = b.get(..32)?.try_into().ok()?;
+        Some((key, b[32..].to_vec()))
     }
 
-    /// A format's evaluated state stored, the cache held to its limit.
-    #[expect(
-        dead_code,
-        reason = "phitex-tex's export_prelude writes it (its LaTeX slice)"
-    )]
-    pub fn put_format(&self, key: &[u8; 32], bytes: &[u8]) -> io::Result<()> {
-        let p = self.format_path(key);
-        self.put(&p, bytes, std::slice::from_ref(&p))
+    /// A format's evaluated state stored as `name` with its key, the
+    /// cache held to its limit.
+    pub fn put_format(&self, name: &str, key: &[u8; 32], bytes: &[u8]) -> io::Result<()> {
+        let p = self.format_path(name);
+        let mut b = key.to_vec();
+        b.extend_from_slice(bytes);
+        self.put(&p, &b, std::slice::from_ref(&p))
     }
 
     /// The bytes at `path` in the cache, its use noted (none: no cache,
