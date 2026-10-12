@@ -455,15 +455,23 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             if n <= 0 {
                 r.log("error", "pdfTeX error (pageref): invalid page number")?;
             }
-            let f = format!("pdf:pageref:{n}");
-            let obj = if let Some(x) = r.get(&f)? {
-                int_of(v, x)
+            // `get_obj(obj_type_page, n, false)`: the writer's object for
+            // page n, made by the step if no page or reference made it
+            let input = v.list(vec![v.str("pageref"), v.int(i64::from(n))]);
+            let got = crate::pdfout::command(r, input, &[], |st, _| Some(st.page_ref(n)))?;
+            if let Some(o) = got {
+                o.to_string()
             } else {
-                let o = alloc_obj(r)?;
-                r.set(&f, v.int(o), true);
-                o
-            };
-            obj.to_string()
+                let f = format!("pdf:pageref:{n}");
+                let obj = if let Some(x) = r.get(&f)? {
+                    int_of(v, x)
+                } else {
+                    let o = alloc_obj(r)?;
+                    r.set(&f, v.int(o), true);
+                    o
+                };
+                obj.to_string()
+            }
         }
         cv::LEFT_MARGIN_KERN | cv::RIGHT_MARGIN_KERN => {
             // margin kerns come from \pdfprotrudechars, which the line
@@ -1647,7 +1655,7 @@ fn whatsit(r: &mut Run<'_, '_>, md: &Mode, data: Vec<ValueId>) {
 
 /// An empty box of the given dimensions: what a reference to a form or
 /// an image takes in its list (pdfTeX §1365 packs them as rules).
-fn space_box(r: &mut Run<'_, '_>, md: &Mode, w: i32, h: i32, d: i32) -> R<()> {
+fn space_box(r: &mut Run<'_, '_>, md: &Mode, w: i32, h: i32, d: i32) {
     let v = r.v;
     let b = BoxNode {
         kind: BoxKind::H,
@@ -1657,15 +1665,9 @@ fn space_box(r: &mut Run<'_, '_>, md: &Mode, w: i32, h: i32, d: i32) -> R<()> {
         ..BoxNode::default()
     };
     let x = nodes::encode_box(v, &b, &nodes::Side::default());
-    if md.m.abs() == 1 {
-        r.append_to_vlist(md, x)?;
-    } else {
-        r.append(md.lid, x);
-        if md.m.abs() == 102 {
-            r.set_space_factor(md, 1000);
-        }
-    }
-    Ok(())
+    // pdfTeX §1357: a node in the list as it is, in any mode (no
+    // interline glue, `prev_depth` and the space factor unchanged)
+    r.append(md.lid, x);
 }
 
 /// `scan_pdf_ext_toks` as a value.
@@ -1747,6 +1749,13 @@ fn action(r: &mut Run<'_, '_>) -> R<ValueId> {
     } else if r.scan_keyword("nonewwindow")? {
         window = 2;
     }
+    if window > 0 {
+        // pdfTeX §1546: "Scan an optional space"
+        r.get_x_token()?;
+        if r.cur.cmd != cmd::SPACER {
+            r.back_cur();
+        }
+    }
     Ok(v.list(vec![
         v.str(kind),
         file,
@@ -1778,16 +1787,37 @@ fn identifier(r: &mut Run<'_, '_>) -> R<ValueId> {
 }
 
 /// An optional `reserveobjnum` or `useobjnum n` (pdfTeX §1349): the
-/// object number, and whether it is only reserved.
-fn obj_num_option(r: &mut Run<'_, '_>) -> R<(i64, bool)> {
+/// number `useobjnum` gives, and whether the number is only reserved.
+fn obj_num_option(r: &mut Run<'_, '_>) -> R<(Option<i64>, bool)> {
     if r.scan_keyword("reserveobjnum")? {
-        return Ok((alloc_obj(r)?, true));
+        return Ok((None, true));
     }
     if r.scan_keyword("useobjnum")? {
         let n = r.scan_int()?;
-        return Ok((i64::from(n), false));
+        return Ok((Some(i64::from(n)), false));
     }
-    Ok((alloc_obj(r)?, false))
+    Ok((None, false))
+}
+
+/// A number from the writer's step, or (in DVI mode, no writer) the
+/// TeX side's count.
+fn or_alloc(r: &mut Run<'_, '_>, n: Option<usize>) -> R<i64> {
+    match n {
+        Some(n) => Ok(i64::try_from(n).unwrap_or(0)),
+        None => alloc_obj(r),
+    }
+}
+
+/// `\immediate` before a pdfTeX extension (pdfTeX §1375): `\pdfobj`,
+/// `\pdfxform` and `\pdfximage` are written now; the others are as
+/// without it.
+pub(crate) fn immediate(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
+    ext(r, md, true)
+}
+
+/// Whether the file is PDF (the writer's steps run).
+fn pdf_mode(r: &mut Run<'_, '_>) -> R<bool> {
+    Ok(r.param("pdfoutput")? > 0)
 }
 
 /// Appends `text` to the accumulated string field `name`.
@@ -1803,6 +1833,12 @@ fn append_text(r: &mut Run<'_, '_>, name: &str, text: ValueId) -> R<()> {
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::match_same_arms)]
 pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
+    ext(r, md, false)
+}
+
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::match_same_arms)]
+fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
     let v = r.v;
     let s = |x: &str| v.str(x);
     match r.cur.chr {
@@ -1861,22 +1897,66 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
         ex::RESTORE => whatsit(r, md, vec![s("pdf:restore")]),
         ex::OBJ => {
             // pdfTeX §1355: not a node; the object is made now
-            let (n, reserved) = obj_num_option(r)?;
-            if !reserved {
-                let stream = r.scan_keyword("stream")?;
-                let at = if stream { attr(r)? } else { s("") };
-                let file = r.scan_keyword("file")?;
-                let data = ext_value(r)?;
-                // PDF-BACKEND-GAP: the object's text, written by
-                // phitex-pdf when it supports objects
-                let o = v.list(vec![
-                    v.int(i64::from(stream)),
-                    at,
-                    v.int(i64::from(file)),
-                    data,
-                ]);
-                r.set(&format!("pdf:obj:{n}"), o, true);
+            let (use_n, reserved) = obj_num_option(r)?;
+            if reserved {
+                let input = v.list(vec![s("objreserve")]);
+                let got = crate::pdfout::command(r, input, &[], |st, _| Some(st.obj_reserve()))?;
+                let n = or_alloc(r, got)?;
+                r.set("pdf:lastobj", v.int(n), true);
+                return Ok(());
             }
+            let stream = r.scan_keyword("stream")?;
+            let at = if stream { attr(r)? } else { s("") };
+            let file = r.scan_keyword("file")?;
+            let data = ext_value(r)?;
+            let text = str_of(v, data);
+            // `file{...}`: the file's bytes, read now
+            let (body, fv) = if file {
+                let fv = r.file(&text)?.unwrap_or(ValueId::UNIT);
+                let b = file_bytes(r, &text)?.unwrap_or_default();
+                (phitex_pdf::ObjBody::File(b), fv)
+            } else {
+                (phitex_pdf::ObjBody::Text(bytes(&text)), ValueId::UNIT)
+            };
+            let attr_b = Some(bytes(&str_of(v, at))).filter(|a| !a.is_empty());
+            let input = v.list(vec![
+                s("obj"),
+                v.int(use_n.unwrap_or(0)),
+                v.int(i64::from(stream)),
+                at,
+                v.int(i64::from(file)),
+                data,
+                fv,
+                v.int(i64::from(immediate)),
+            ]);
+            let got = crate::pdfout::command(r, input, &[], |st, _| {
+                let (n, refused) = st.obj(use_n, stream, attr_b, body);
+                let err = if immediate {
+                    st.write_obj(n).err()
+                } else {
+                    None
+                };
+                Some((n, refused, err))
+            })?;
+            let n = match got {
+                Some((n, refused, err)) => {
+                    if refused {
+                        r.set("pdf:retval", v.int(-1), true);
+                        r.log(
+                            "error",
+                            "pdfTeX warning (ext1): invalid object number being ignored",
+                        )?;
+                    }
+                    if let Some(e) = err {
+                        r.log("error", &format!("pdfTeX error: {e}"))?;
+                    }
+                    i64::try_from(n).unwrap_or(0)
+                }
+                None => match use_n {
+                    Some(n) => n,
+                    None => alloc_obj(r)?,
+                },
+            };
             r.set("pdf:lastobj", v.int(n), true);
         }
         ex::REFOBJ => {
@@ -1893,7 +1973,12 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
             };
             let k = r.scan_register_num()?;
             let b = r.box_reg(k)?;
-            let o = alloc_obj(r)?;
+            let got = if pdf_mode(r)? {
+                xform_step(r, b, at, res, immediate)?
+            } else {
+                None
+            };
+            let o = or_alloc(r, got)?;
             let fx = r.int("pdf:xformcount")? + 1;
             r.set("pdf:xformcount", v.int(fx), true);
             let bx = b.unwrap_or(ValueId::UNIT);
@@ -1931,9 +2016,9 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
             };
             let g = |k: usize| i32::try_from(crate::val::int_at(v, x, k)).unwrap_or(0);
             whatsit(r, md, vec![s("pdf:refxform"), v.int(i64::from(n))]);
-            space_box(r, md, g(4), g(5), g(6))?;
+            space_box(r, md, g(4), g(5), g(6));
         }
-        ex::XIMAGE => ximage(r)?,
+        ex::XIMAGE => ximage(r, immediate)?,
         ex::REFXIMAGE => {
             let n = r.scan_int()?;
             let x = r.get(&format!("pdf:ximage:{n}"))?;
@@ -1944,17 +2029,24 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
                 );
             };
             let g = |k: usize| i32::try_from(crate::val::int_at(v, x, k)).unwrap_or(0);
-            // PDF-BACKEND-GAP: phitex-pdf does not place images; the
-            // node carries the object and the box its dimensions
+            // the node carries the object (placed by the writer,
+            // `pdf_place_image`) and the box its dimensions
             whatsit(r, md, vec![s("pdf:refximage"), v.int(i64::from(n))]);
-            space_box(r, md, g(0), g(1), g(2))?;
+            space_box(r, md, g(0), g(1), g(2));
         }
         ex::ANNOT => {
-            let (n, reserved) = obj_num_option(r)?;
+            let (use_n, reserved) = obj_num_option(r)?;
+            // `pdf_new_objnum` unless `useobjnum` gave it
+            let n = if let Some(n) = use_n {
+                n
+            } else {
+                let input = v.list(vec![s("newobjnum"), s("annot")]);
+                let got = crate::pdfout::command(r, input, &[], |st, _| Some(st.new_objnum()))?;
+                or_alloc(r, got)?
+            };
             if !reserved {
                 let (w, h, d) = alt_rule(r)?;
                 let data = ext_value(r)?;
-                // PDF-BACKEND-GAP: annotations
                 whatsit(
                     r,
                     md,
@@ -1980,8 +2072,9 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
             let (w, h, d) = alt_rule(r)?;
             let at = attr(r)?;
             let act = action(r)?;
-            let n = alloc_obj(r)?;
-            // PDF-BACKEND-GAP: links
+            let input = v.list(vec![s("newobjnum"), s("link")]);
+            let got = crate::pdfout::command(r, input, &[], |st, _| Some(st.new_objnum()))?;
+            let n = or_alloc(r, got)?;
             whatsit(
                 r,
                 md,
@@ -2015,9 +2108,19 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
                 0
             };
             let title = ext_value(r)?;
-            // PDF-BACKEND-GAP: outlines
             let e = v.list(vec![at, act, v.int(i64::from(count)), title]);
             append_text(r, "pdf:outlines", e)?;
+            // pdfTeX §1560: the entry's objects are written now
+            let input = v.list(vec![s("outline"), e]);
+            let a = crate::pdfout::action_of(v, act);
+            let at_b = Some(bytes(&str_of(v, at))).filter(|a| !a.is_empty());
+            let tb = bytes(&str_of(v, title));
+            let err = crate::pdfout::command(r, input, &[], |st, _| {
+                a.map(|a| st.outline(at_b, &a, count, &tb).err())
+            })?;
+            if let Some(Some(e)) = err {
+                r.log("error", &format!("pdfTeX error: {e}"))?;
+            }
         }
         ex::DEST => {
             let id = identifier(r)?;
@@ -2052,7 +2155,6 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
                 r.log("error", "pdfTeX error (ext1): destination type missing")?;
                 v.list(vec![s("xyz")])
             };
-            // PDF-BACKEND-GAP: destinations
             whatsit(r, md, vec![s("pdf:dest"), id, kind]);
         }
         ex::THREAD | ex::START_THREAD => {
@@ -2064,7 +2166,6 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
             } else {
                 "pdf:startthread"
             };
-            // PDF-BACKEND-GAP: threads and beads
             whatsit(
                 r,
                 md,
@@ -2099,17 +2200,21 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
         ex::CATALOG => {
             let t = ext_value(r)?;
             append_text(r, "pdf:catalog", t)?;
-            // PDF-BACKEND-GAP: `openaction`'s action to the writer
-            // (`Action` from the scanned value)
+            let mut oa = ValueId::UNIT;
             if r.scan_keyword("openaction")? {
-                let a = action(r)?;
-                r.set("pdf:openaction", a, true);
+                oa = action(r)?;
+                r.set("pdf:openaction", oa, true);
             }
+            let a = (oa != ValueId::UNIT)
+                .then(|| crate::pdfout::action_of(v, oa))
+                .flatten();
             let tb = bytes(&str_of(v, t));
-            let input = v.list(vec![s("catalog"), t]);
-            crate::pdfout::command(r, input, &[], |st, _| {
-                let _ = st.catalog(&tb, None);
-            })?;
+            let input = v.list(vec![s("catalog"), t, oa]);
+            let err =
+                crate::pdfout::command(r, input, &[], |st, _| st.catalog(&tb, a.as_ref()).err())?;
+            if let Some(e) = err {
+                r.log("error", &format!("pdfTeX error: {e}"))?;
+            }
         }
         ex::NAMES => {
             let t = ext_value(r)?;
@@ -2225,25 +2330,42 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
 
 /// `\pdfximage` (pdfTeX §1358, `scale_image` §1359): the image's size
 /// from its header.
-fn ximage(r: &mut Run<'_, '_>) -> R<()> {
+#[allow(clippy::too_many_lines)]
+fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
     let v = r.v;
     let (mut w, mut h, mut d) = alt_rule(r)?;
     let at = attr(r)?;
-    let page = if r.scan_keyword("page")? {
+    let mut named = None;
+    let page = if r.scan_keyword("named")? {
+        named = Some(ext_string(r)?);
+        1
+    } else if r.scan_keyword("page")? {
         r.scan_int()?
     } else {
         1
     };
-    let _cs = if r.scan_keyword("colorspace")? {
+    let cs = if r.scan_keyword("colorspace")? {
         r.scan_int()?
     } else {
         0
     };
-    for k in ["mediabox", "cropbox", "bleedbox", "trimbox", "artbox"] {
-        if r.scan_keyword(k)? {
+    let mut page_box = 0;
+    for (k, kw) in ["mediabox", "cropbox", "bleedbox", "trimbox", "artbox"]
+        .iter()
+        .enumerate()
+    {
+        if r.scan_keyword(kw)? {
+            page_box = k + 1;
             break;
         }
     }
+    if page_box == 0 {
+        page_box = usize::try_from(r.param("pdfpagebox")?)
+            .ok()
+            .filter(|b| (1..=5).contains(b))
+            .unwrap_or(2);
+    }
+    let rule = (w, h, d);
     let name = ext_string(r)?;
     let data = file_bytes(r, &name)?.unwrap_or_default();
     let img = image_info(&data, page);
@@ -2299,9 +2421,36 @@ fn ximage(r: &mut Run<'_, '_>) -> R<()> {
     } else if d == running {
         d = 0;
     }
-    let n = alloc_obj(r)?;
-    // PDF-BACKEND-GAP: the image's stream, written by phitex-pdf when it
-    // supports images
+    // the writer reads the image now (pdfTeX §1358); its size and what
+    // TeX reads back come from the step
+    let mut pages = pages;
+    let mut depth = depth;
+    let got = if pdf_mode(r)? {
+        ximage_step(
+            r,
+            XImageScan {
+                rule,
+                attr: at,
+                page,
+                named,
+                colorspace: cs,
+                page_box,
+                name: name.clone(),
+                data: data.clone(),
+                immediate,
+            },
+        )?
+    } else {
+        None
+    };
+    if let Some((_, i)) = &got {
+        w = i.width;
+        h = i.height;
+        d = i.depth;
+        pages = i.pages;
+        depth = i.colordepth;
+    }
+    let n = or_alloc(r, got.map(|g| g.0))?;
     r.set(
         &format!("pdf:ximage:{n}"),
         v.list(vec![
@@ -2322,6 +2471,186 @@ fn ximage(r: &mut Run<'_, '_>) -> R<()> {
     r.set("pdf:lastximagepages", v.int(i64::from(pages)), true);
     r.set("pdf:lastximagecolordepth", v.int(i64::from(depth)), true);
     Ok(())
+}
+
+/// What `\\pdfximage` scanned.
+struct XImageScan {
+    rule: (i32, i32, i32),
+    attr: ValueId,
+    page: i32,
+    named: Option<String>,
+    colorspace: i32,
+    page_box: usize,
+    name: String,
+    data: Vec<u8>,
+    immediate: bool,
+}
+
+/// `\\pdfximage` as a step (pdfTeX §1358, writeimg.c `read_image`):
+/// the image's object number and what TeX reads of it.
+fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<Option<(usize, phitex_pdf::XImageInfo)>> {
+    let v = r.v;
+    let fv = r.file(&x.name)?.unwrap_or(ValueId::UNIT);
+    let mut ps = Vec::new();
+    for p in [
+        "pdfimageresolution",
+        "pdfinclusionerrorlevel",
+        "pdfimagehicolor",
+        "pdfimageapplygamma",
+        "pdfgamma",
+        "pdfimagegamma",
+        "pdfinclusioncopyfonts",
+    ] {
+        ps.push(r.param(p)?);
+    }
+    let input = v.list(vec![
+        v.str("ximage"),
+        v.int(i64::from(x.rule.0)),
+        v.int(i64::from(x.rule.1)),
+        v.int(i64::from(x.rule.2)),
+        x.attr,
+        v.int(i64::from(x.page)),
+        v.str(x.named.as_deref().unwrap_or("")),
+        v.int(i64::from(x.colorspace)),
+        v.int(i64::try_from(x.page_box).unwrap_or(0)),
+        v.str(&x.name),
+        fv,
+        v.list(ps.iter().map(|&p| v.int(i64::from(p))).collect()),
+        v.int(i64::from(x.immediate)),
+    ]);
+    let attr = Some(bytes(&str_of(v, x.attr))).filter(|a| !a.is_empty());
+    let page_box = match x.page_box {
+        1 => phitex_pdf::PageBox::Media,
+        3 => phitex_pdf::PageBox::Bleed,
+        4 => phitex_pdf::PageBox::Trim,
+        5 => phitex_pdf::PageBox::Art,
+        _ => phitex_pdf::PageBox::Crop,
+    };
+    let spec = phitex_pdf::ImageSpec {
+        width: x.rule.0,
+        height: x.rule.1,
+        depth: x.rule.2,
+        attr,
+        page: x.page,
+        named: x.named.map(|n| bytes(&n)),
+        colorspace: x.colorspace,
+        page_box,
+        // `img_name`: the name as the finder found it
+        name: bytes(
+            &list_of(v, fv)
+                .first()
+                .map_or_else(|| x.name.clone(), |&p| str_of(v, p)),
+        ),
+        data: std::sync::Arc::from(x.data),
+        image_resolution: ps[0],
+        inclusion_errorlevel: ps[1],
+    };
+    let immediate = x.immediate;
+    let got = crate::pdfout::command(r, input, &[], |st, fs| {
+        let pm = st.params_mut();
+        pm.image_hicolor = ps[2];
+        pm.image_apply_gamma = ps[3];
+        pm.gamma = ps[4];
+        pm.image_gamma = ps[5];
+        pm.inclusion_copy_fonts = ps[6];
+        Some(st.ximage(spec).and_then(|n| {
+            if immediate {
+                st.write_ximage(n, fs)?;
+            }
+            let i = st.ximage_info(n).ok_or_else(|| {
+                phitex_pdf::PdfError::Unsupported("image without its data".to_owned())
+            })?;
+            Ok((n, i))
+        }))
+    })?;
+    match got {
+        Some(Ok(g)) => Ok(Some(g)),
+        Some(Err(e)) => {
+            r.log("error", &format!("pdfTeX error: {e}"))?;
+            Ok(None)
+        }
+        None => Ok(None),
+    }
+}
+
+/// `\\pdfxform` as a step (pdfTeX §1357): the box goes to the writer,
+/// its whatsits given handles of the forms' table (the writer meets
+/// them when it ships the form); `\\immediate`: shipped now. A
+/// `\\pdfliteral shipout` in the box is expanded here.
+fn xform_step(
+    r: &mut Run<'_, '_>,
+    b: Option<ValueId>,
+    at: ValueId,
+    res: ValueId,
+    immediate: bool,
+) -> R<Option<usize>> {
+    let v = r.v;
+    let Some(b) = b else { return Ok(None) };
+    let mut side = nodes::Side::default();
+    let Some(Node::Box(mut bx)) = nodes::decode(v, b, &mut side) else {
+        return Ok(None);
+    };
+    let mut data = Vec::new();
+    for w in side.whats.clone() {
+        data.push(crate::pdfout::writer_whatsit(r, w)?);
+    }
+    let view = r.font_view(std::slice::from_ref(&Node::Box(bx.clone())))?;
+    let ids: Vec<u32> = view.fonts.keys().copied().collect();
+    let mut all: std::collections::BTreeSet<u32> = ids.iter().copied().collect();
+    all.extend(crate::pdfout::forms_here(r)?.fonts);
+    let all: Vec<u32> = all.into_iter().collect();
+    let at_b = Some(bytes(&str_of(v, at))).filter(|a| !a.is_empty());
+    let res_b = Some(bytes(&str_of(v, res))).filter(|a| !a.is_empty());
+    let input = v.list(vec![
+        v.str("xform"),
+        at,
+        res,
+        b,
+        v.int(i64::from(immediate)),
+    ]);
+    let got = crate::pdfout::command_forms(r, input, &all, |st, forms, fs| {
+        let base = forms.next_handle();
+        remap_whatsits(&mut bx.list, base);
+        for (k, d) in data.into_iter().enumerate() {
+            if let Some(d) = d {
+                forms.whats.insert(base + u32::try_from(k).unwrap_or(0), d);
+            }
+        }
+        forms.fonts.extend(ids.iter().copied());
+        let n = st.xform(at_b, res_b, bx);
+        let mut err = None;
+        if immediate {
+            let whats = &forms.whats;
+            let mut wh = |h: u32, _leaders: bool| whats.get(&h).cloned();
+            err = st.write_xform(n, fs, &mut wh).err();
+        }
+        Some((n, err))
+    })?;
+    Ok(match got {
+        Some((n, err)) => {
+            if let Some(e) = err {
+                r.log("error", &format!("pdfTeX error: {e}"))?;
+            }
+            Some(n)
+        }
+        None => None,
+    })
+}
+
+/// A form's whatsit handles moved to the forms' table's, from `base`.
+fn remap_whatsits(l: &mut [Node], base: u32) {
+    for n in l {
+        match n {
+            Node::Whatsit(k) => *k += base,
+            Node::Box(b) => remap_whatsits(&mut b.list, base),
+            Node::Glue(g) => {
+                if let Some(x) = &mut g.leader {
+                    remap_whatsits(std::slice::from_mut(&mut **x), base);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// `ext_xn_over_d` (utils.c): `x*n/d` in doubles, rounded.
@@ -2694,57 +3023,11 @@ pub(crate) fn writer_data(r: &mut Run<'_, '_>, xs: &[ValueId]) -> R<Option<Value
         "pdf:fakespace" => Some(v.list(vec![v.str("fake")])),
         "pdf:runninglinkoff" => Some(v.list(vec![v.str("rloff")])),
         "pdf:runninglinkon" => Some(v.list(vec![v.str("rlon")])),
-        "pdf:refobj" => backend_gap_object(),
-        "pdf:refxform" => backend_gap_form(),
-        "pdf:refximage" => backend_gap_image(),
-        "pdf:annot" => backend_gap_annot(),
-        "pdf:startlink" | "pdf:endlink" => backend_gap_link(),
-        "pdf:dest" => backend_gap_dest(),
-        "pdf:thread" | "pdf:startthread" | "pdf:endthread" => backend_gap_thread(),
+        // the node's data as it is ([`crate::pdfout`] reads it)
+        "pdf:refobj" | "pdf:refxform" | "pdf:refximage" | "pdf:annot" | "pdf:startlink"
+        | "pdf:endlink" | "pdf:dest" | "pdf:thread" | "pdf:startthread" | "pdf:endthread" => {
+            Some(v.list(xs.to_vec()))
+        }
         _ => None,
     })
-}
-
-// PDF-BACKEND-GAP: `\pdfrefobj` (pdfTeX §1366 `pdf_append_list` to the
-// page's object list): the writer would take the object number and write
-// `pdf:obj:<n>` (stream flag, attr, file flag, data) at the end.
-fn backend_gap_object() -> Option<ValueId> {
-    None
-}
-
-// PDF-BACKEND-GAP: `\pdfrefxform` (`pdf_place_form`): the form's box
-// (`pdf:xform:<n>`: box, attr, resources, number, w, h, d) shipped as an
-// XObject and placed at the whatsit's position.
-fn backend_gap_form() -> Option<ValueId> {
-    None
-}
-
-// PDF-BACKEND-GAP: `\pdfrefximage` (`pdf_place_image`): the image
-// (`pdf:ximage:<n>`) read and written, placed at the whatsit's position.
-fn backend_gap_image() -> Option<ValueId> {
-    None
-}
-
-// PDF-BACKEND-GAP: `\pdfannot` (`do_annot`): object number, width,
-// height, depth, data; the rectangle from the whatsit's position.
-fn backend_gap_annot() -> Option<ValueId> {
-    None
-}
-
-// PDF-BACKEND-GAP: `\pdfstartlink`/`\pdfendlink` (`do_link`,
-// `end_link`): object number, w, h, d, attr, action; rectangles per line.
-fn backend_gap_link() -> Option<ValueId> {
-    None
-}
-
-// PDF-BACKEND-GAP: `\pdfdest` (`do_dest`): identifier, kind, position;
-// the names tree at the end.
-fn backend_gap_dest() -> Option<ValueId> {
-    None
-}
-
-// PDF-BACKEND-GAP: `\pdfthread`, `\pdfstartthread`, `\pdfendthread`
-// (`do_thread`, beads): identifier, w, h, d, attr.
-fn backend_gap_thread() -> Option<ValueId> {
-    None
 }
