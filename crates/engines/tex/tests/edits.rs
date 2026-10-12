@@ -185,3 +185,50 @@ fn tiny_mark_edit() {
     );
     assert!(d.is_none());
 }
+
+/// A file `\input` by the document changes: the build equals a cold
+/// build with the new file; the finder's answers list the inputs and
+/// the TFMs.
+#[test]
+fn edit_input_file() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("edit-input");
+    let _ = std::fs::create_dir_all(&dir);
+    std::fs::write(dir.join("part.tex"), "Some words in a part.\n").unwrap();
+    let prelude = common::plain();
+    let doc = "\\font\\x=cmr12 \\input part\nAnd the {\\x main} text.\\par\\end\n";
+    let opts = || common::options("./main.tex", "main", "", &dir);
+    let mut b = common::build(opts(), Some(&prelude), doc);
+    let reads = b.reads();
+    assert!(
+        reads.iter().any(|(n, hit)| n == "part.tex" && *hit),
+        "{reads:?}"
+    );
+    assert!(
+        reads.iter().any(|(n, _)| std::path::Path::new(n)
+            .extension()
+            .is_some_and(|e| e == "tfm")),
+        "{reads:?}"
+    );
+    let new = "Other words, quite different, in the part.\n";
+    b.edit_file("part.tex", Some(new.as_bytes()));
+    std::fs::write(dir.join("part.tex"), new).unwrap();
+    let cold = common::build(opts(), Some(&prelude), doc);
+    assert_eq!(b.output().0, cold.output().0, "edit_file differs from cold");
+}
+
+/// The prelude's environment exported and given back builds the same.
+#[test]
+fn prelude_round_trip() {
+    let fx = common::fixtures().join("plain");
+    let src = common::read(&fx.join("story.tex"));
+    let prelude = common::plain();
+    let opts = || common::options("./story.tex", "story", "", &fx);
+    let a = common::build(opts(), Some(&prelude), &src);
+    let bytes = a.export_prelude();
+    let mut o = opts();
+    o.prelude_bytes = Some(bytes.clone());
+    let b = common::build(o, Some(&prelude), &src);
+    assert_eq!(a.prelude_key(), b.prelude_key());
+    assert_eq!(b.export_prelude(), bytes);
+    assert_eq!(a.output().0, b.output().0);
+}

@@ -45,6 +45,10 @@ pub struct Options {
     pub fixpoint: bool,
     /// `\jobname` while the prelude runs (`latex` for `latex.ini`).
     pub prelude_jobname: String,
+    /// A prelude's environment from [`Build::export_prelude`]: used
+    /// instead of evaluating the prelude when its key matches (the same
+    /// prelude text, every file it read unchanged).
+    pub prelude_bytes: Option<Vec<u8>>,
 }
 
 impl Default for Options {
@@ -57,6 +61,7 @@ impl Default for Options {
             epoch: None,
             fixpoint: false,
             prelude_jobname: "texput".to_owned(),
+            prelude_bytes: None,
         }
     }
 }
@@ -100,6 +105,8 @@ type Env = Arc<Vec<(String, Tree)>>;
 /// A prelude's environment with what it read: each file's name and the
 /// hash of what the finder gave (0: absent).
 struct Cached {
+    key: [u8; 32],
+    text_key: u64,
     reads: Vec<(String, u64)>,
     env: Env,
 }
@@ -140,6 +147,137 @@ pub(crate) fn stream_texts(v: &Values, entries: &[ValueId]) -> Vec<(String, Stri
         }
     }
     out
+}
+
+fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
+    out.extend_from_slice(&(b.len() as u64).to_le_bytes());
+    out.extend_from_slice(b);
+}
+
+fn put_tree(out: &mut Vec<u8>, t: &Tree) {
+    match t {
+        Tree::Leaf(Value::Unit) => out.push(0),
+        Tree::Leaf(Value::Bool(b)) => out.extend([1, u8::from(*b)]),
+        Tree::Leaf(Value::Int(i)) => {
+            out.push(2);
+            out.extend_from_slice(&i.to_le_bytes());
+        }
+        Tree::Leaf(Value::Str(x)) => {
+            out.push(3);
+            put_bytes(out, x.as_bytes());
+        }
+        Tree::Leaf(_) => out.push(4),
+        Tree::List(xs) | Tree::Seq(xs) => {
+            out.push(if matches!(t, Tree::List(_)) { 5 } else { 6 });
+            out.extend_from_slice(&(xs.len() as u64).to_le_bytes());
+            for x in xs {
+                put_tree(out, x);
+            }
+        }
+    }
+}
+
+/// A reader over serialised bytes.
+struct Rd<'a>(&'a [u8]);
+
+impl Rd<'_> {
+    fn take(&mut self, n: usize) -> Option<&[u8]> {
+        if self.0.len() < n {
+            return None;
+        }
+        let (a, b) = self.0.split_at(n);
+        self.0 = b;
+        Some(a)
+    }
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+    }
+    fn string(&mut self) -> Option<String> {
+        let n = usize::try_from(self.u64()?).ok()?;
+        String::from_utf8(self.take(n)?.to_vec()).ok()
+    }
+    fn tree(&mut self) -> Option<Tree> {
+        let tag = self.take(1)?[0];
+        Some(match tag {
+            0 => Tree::Leaf(Value::Unit),
+            1 => Tree::Leaf(Value::Bool(self.take(1)?[0] != 0)),
+            2 => Tree::Leaf(Value::Int(i64::from_le_bytes(
+                self.take(8)?.try_into().ok()?,
+            ))),
+            3 => Tree::Leaf(Value::Str(self.string()?.into_boxed_str())),
+            4 => Tree::Leaf(Value::Nil),
+            5 | 6 => {
+                let n = usize::try_from(self.u64()?).ok()?;
+                let mut xs = Vec::with_capacity(n.min(1 << 20));
+                for _ in 0..n {
+                    xs.push(self.tree()?);
+                }
+                if tag == 5 {
+                    Tree::List(xs)
+                } else {
+                    Tree::Seq(xs)
+                }
+            }
+            _ => return None,
+        })
+    }
+}
+
+/// The key of a prelude: its text and jobname, and what it read.
+fn prelude_key_of(text_key: u64, reads: &[(String, u64)]) -> [u8; 32] {
+    let mut b = text_key.to_le_bytes().to_vec();
+    for (n, h) in reads {
+        b.extend_from_slice(n.as_bytes());
+        b.push(0);
+        b.extend_from_slice(&h.to_le_bytes());
+    }
+    let mut out = [0u8; 32];
+    for (k, chunk) in out.chunks_mut(8).enumerate() {
+        let seed = 11 + u64::try_from(k).unwrap_or(0);
+        chunk.copy_from_slice(&phitex_defuse::hash_bytes(seed, &b).to_le_bytes());
+    }
+    out
+}
+
+/// `[key][reads][env]`, as [`Build::export_prelude`] writes it.
+fn serialise(c: &Cached) -> Vec<u8> {
+    let mut out = c.key.to_vec();
+    out.extend_from_slice(&c.text_key.to_le_bytes());
+    out.extend_from_slice(&(c.reads.len() as u64).to_le_bytes());
+    for (n, h) in &c.reads {
+        put_bytes(&mut out, n.as_bytes());
+        out.extend_from_slice(&h.to_le_bytes());
+    }
+    out.extend_from_slice(&(c.env.len() as u64).to_le_bytes());
+    for (k, t) in c.env.iter() {
+        put_bytes(&mut out, k.as_bytes());
+        put_tree(&mut out, t);
+    }
+    out
+}
+
+fn deserialise(b: &[u8]) -> Option<Cached> {
+    let mut r = Rd(b);
+    let key: [u8; 32] = r.take(32)?.try_into().ok()?;
+    let text_key = r.u64()?;
+    let n = usize::try_from(r.u64()?).ok()?;
+    let mut reads = Vec::new();
+    for _ in 0..n {
+        let name = r.string()?;
+        reads.push((name, r.u64()?));
+    }
+    let n = usize::try_from(r.u64()?).ok()?;
+    let mut env = Vec::new();
+    for _ in 0..n {
+        let k = r.string()?;
+        env.push((k, r.tree()?));
+    }
+    Some(Cached {
+        key,
+        text_key,
+        reads,
+        env: Arc::new(env),
+    })
 }
 
 /// `\time`, `\day`, `\month`, `\year` at `t` seconds since 1970 (UTC,
@@ -239,6 +377,8 @@ struct Graph {
     /// The files supplied so far, with the hash of what the finder gave.
     files: Vec<(Field, ValueId)>,
     reads: Vec<(String, u64)>,
+    /// The finder's answers since the last evaluation began.
+    queries: Vec<(String, bool)>,
     /// The files the job writes and reads back: loop-back fields
     /// (`fixpoint`), or absent before the job writes them.
     written: Vec<String>,
@@ -272,6 +412,7 @@ impl Graph {
             files_op,
             files: Vec::new(),
             reads: Vec::new(),
+            queries: Vec::new(),
             written: Vec::new(),
         }
     }
@@ -380,6 +521,7 @@ impl Graph {
                     continue;
                 }
                 let found = finder(&name);
+                self.queries.push((name.clone(), found.is_some()));
                 let v = self.eng.values();
                 self.reads.push((name.clone(), file_hash(found.as_ref())));
                 let val = match found {
@@ -452,7 +594,7 @@ fn as_file(text: &str) -> String {
 /// INITEX's state, and the prelude's on top of it: a format, `\dump`
 /// ending it (or its text's end). Cached by the prelude's text, and good
 /// while every file it read is what the finder gives now.
-fn prelude_env(prelude: Option<&str>, opts: &Options) -> Env {
+fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     let finder = &opts.finder;
     let key = prelude.map_or(0, |p| {
         let mut b = p.as_bytes().to_vec();
@@ -466,12 +608,18 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Env {
         .get(&key)
         .cloned()
         .unwrap_or_default();
-    for c in candidates {
+    let given = opts
+        .prelude_bytes
+        .as_deref()
+        .and_then(deserialise)
+        .filter(|c| c.text_key == key)
+        .map(Arc::new);
+    for c in given.into_iter().chain(candidates) {
         if c.reads
             .iter()
             .all(|(n, h)| file_hash(finder(n).as_ref()) == *h)
         {
-            return c.env.clone();
+            return c;
         }
     }
     let mut g = Graph::new();
@@ -530,16 +678,18 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Env {
     let out: Vec<(String, Tree)> = env.into_iter().map(|(k, x)| (k, export(v, x))).collect();
     let e = Arc::new(out);
     let c = Arc::new(Cached {
+        key: prelude_key_of(key, &g.reads),
+        text_key: key,
         reads: g.reads.clone(),
-        env: e.clone(),
+        env: e,
     });
     env_cache()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .entry(key)
         .or_default()
-        .push(c);
-    e
+        .push(c.clone());
+    c
 }
 
 /// A document built on the graph, kept for edits.
@@ -550,6 +700,7 @@ pub struct Build {
     /// The nodes of the text, with their keys.
     nodes: Vec<(String, NodeId)>,
     dvi: NodeId,
+    prelude: Arc<Cached>,
     /// What the last build or edit ran.
     pub stats: Stats,
 }
@@ -569,7 +720,8 @@ impl Build {
     #[must_use]
     pub fn with(opts: Options, prelude: Option<&str>, document: &str) -> Build {
         let t0 = std::time::Instant::now();
-        let env = prelude_env(prelude, &opts);
+        let cached = prelude_env(prelude, &opts);
+        let env = cached.env.clone();
         let t1 = t0.elapsed();
         let mut g = Graph::new();
         let unit = g.eng.new_unit();
@@ -622,6 +774,7 @@ impl Build {
             opts,
             nodes,
             dvi,
+            prelude: cached,
             stats: Stats::default(),
         };
         b.settle();
@@ -636,6 +789,7 @@ impl Build {
 
     fn settle(&mut self) {
         let mut stats = Stats::default();
+        self.g.queries.clear();
         self.g
             .settle(self.unit, &self.opts.finder, &mut stats, self.opts.fixpoint);
         stats.live = self.g.eng.live_nodes();
@@ -696,6 +850,60 @@ impl Build {
         nodes.extend_from_slice(&self.nodes[a + old_mid..]);
         self.nodes = nodes;
         self.settle();
+    }
+
+    /// A file other than the document changed (`None`: as the finder
+    /// gives it again): its `file:` field is replaced, and the nodes that
+    /// read it run again.
+    pub fn edit_file(&mut self, name: &str, text: Option<&[u8]>) {
+        let v = self.g.eng.values();
+        let f = v.field(&format!("file:{name}"));
+        let Some(k) = self.g.files.iter().position(|(g, _)| *g == f) else {
+            return;
+        };
+        let old = list_of(v, self.g.files[k].1);
+        let found = match text {
+            Some(t) => Some((
+                old.first()
+                    .map_or_else(|| format!("./{name}"), |&p| str_of(v, p)),
+                t.to_vec(),
+            )),
+            None => (self.opts.finder)(name),
+        };
+        let val = match &found {
+            Some((path, bytes)) => {
+                let t: String = bytes.iter().map(|&b| char::from(b)).collect();
+                v.list(vec![v.str(path), v.str(&t)])
+            }
+            None => v.list(Vec::new()),
+        };
+        self.g.files[k].1 = val;
+        if let Some(r) = self.g.reads.iter_mut().find(|(n, _)| n == name) {
+            r.1 = file_hash(found.as_ref());
+        }
+        let env = self.g.environment(self.opts.fixpoint);
+        self.g.eng.set_environment(env);
+        self.settle();
+    }
+
+    /// The finder's answers in the last evaluation: each name asked for,
+    /// and whether it was found.
+    #[must_use]
+    pub fn reads(&self) -> Vec<(String, bool)> {
+        self.g.queries.clone()
+    }
+
+    /// The prelude's key: its text and every file it read.
+    #[must_use]
+    pub fn prelude_key(&self) -> [u8; 32] {
+        self.prelude.key
+    }
+
+    /// The prelude's environment, serialised, for
+    /// [`Options::prelude_bytes`].
+    #[must_use]
+    pub fn export_prelude(&self) -> Vec<u8> {
+        serialise(&self.prelude)
     }
 
     /// The files the job wrote (`\openout`, `\write`), with their text,
