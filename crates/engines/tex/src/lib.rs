@@ -46,7 +46,7 @@ mod run;
 mod scan;
 mod val;
 
-pub use api::{Build, Finder, Options, Stats};
+pub use api::{Build, Diagnostic, Finder, Options, Severity, Stats};
 pub use exec::{Progress, SpawnWorker, set_spawn_worker};
 pub use pdfrelaxed::pages_written as pdf_pages_written;
 pub(crate) use phitex_defuse::FxHashMap;

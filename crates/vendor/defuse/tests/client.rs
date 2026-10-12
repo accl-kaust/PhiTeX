@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use defuse::{Claim, Ctx, Engine, Field, Locality, OpId, Operation, Stop, Value, ValueId, Values};
+use defuse::{Claim, Ctx, Engine, Field, Locality, NodeId, OpId, Operation, Stop, Value, ValueId, Values};
 
 /// `["p"]` unfolds a child `["c"]`; `["c"]` outputs the text of its
 /// first following sibling (or "none") and claims it; `["s", x]` outputs x.
@@ -582,4 +582,280 @@ fn a_continuation_stays_at_its_nodes_depth() {
         cur = owned[0];
     }
     assert_eq!(eng.children(cur), Vec::new(), "the last continuation unfolds nothing");
+}
+
+/// `["b", k]` defines `x`; `["a"]` reads `x` and leaves `["w", x]` as its
+/// continuation (`Ctx::follow`), which leaves `["w", n-1]` in turn.
+/// Changing `b` re-runs `a`, whose continuations are made again.
+struct ClaimCont;
+
+static CLAIM_CONT: std::sync::OnceLock<OpId> = std::sync::OnceLock::new();
+
+impl Operation for ClaimCont {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(if tag(v, a) == "b" {
+            vec![(v.field("x"), Locality::Local)]
+        } else {
+            Vec::new()
+        })
+    }
+    fn claim(&self, a: &[ValueId], v: &Values, _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>) -> Claim {
+        if tag(v, a) == "k" { Claim::Pending } else { Claim::None }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let op = CLAIM_CONT.get().copied().unwrap();
+        let int = |i: usize| match a.get(i).map(|&x| v.get(x)).as_deref() {
+            Some(Value::Int(n)) => *n,
+            _ => 0,
+        };
+        match tag(v, &a).as_str() {
+            "b" => cx.define(v.field("x"), v.int(int(1))),
+            "a" => {
+                let n = cx.use_field(v.field("x"))?.and_then(|y| v.as_int(y)).unwrap_or(0);
+                cx.child(op, vec![v.str("w"), v.int(1)]);
+                cx.follow(op, vec![v.str("w"), v.int(n)]);
+            }
+            "k" => {
+                // claims as many following siblings as `x` says, and
+                // leaves their text as its continuations
+                let n = cx.use_field(v.field("x"))?.and_then(|y| v.as_int(y)).unwrap_or(0);
+                let n = usize::try_from(n).unwrap_or(0);
+                let mut got = 0;
+                while got < n && cx.following(got).is_some() {
+                    got += 1;
+                }
+                for i in 0..got {
+                    cx.follow(op, vec![v.str("w"), v.int(i64::try_from(i).unwrap_or(0))]);
+                }
+                cx.claim(got);
+            }
+            "e" => {
+                let n = cx.use_env(v.field("e"))?.and_then(|y| v.as_int(y)).unwrap_or(0);
+                cx.child(op, vec![v.str("w"), v.int(1)]);
+                cx.follow(op, vec![v.str("w"), v.int(n)]);
+            }
+            "w" if int(1) > 0 => {
+                cx.follow(op, vec![v.str("w"), v.int(int(1) - 1)]);
+            }
+            _ => {}
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+fn continuations_made_again_after_a_change() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(ClaimCont));
+    let _ = CLAIM_CONT.set(op);
+    let u = eng.new_unit();
+    let v = eng.values();
+    let (b, a, z) = (vec![v.str("b"), v.int(3)], vec![v.str("a")], vec![v.str("w"), v.int(0)]);
+    let nb = eng.push(u, op, b);
+    eng.push(u, op, a);
+    eng.push(u, op, z);
+    eng.evaluate_sequential().expect("cold");
+    let b2 = vec![eng.values().str("b"), eng.values().int(5)];
+    eng.replace(nb, op, b2);
+    eng.evaluate_sequential().expect("after the change");
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+}
+
+/// A node waiting for an environment field leaves its continuations once
+/// the field is supplied.
+#[test]
+fn continuations_after_an_environment_wait() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(ClaimCont));
+    let _ = CLAIM_CONT.set(op);
+    let u = eng.new_unit();
+    let v = eng.values();
+    let (e, z) = (vec![v.str("e")], vec![v.str("w"), v.int(0)]);
+    eng.push(u, op, e.clone());
+    eng.push(u, op, e);
+    eng.push(u, op, z);
+    eng.evaluate_sequential().expect("waiting");
+    let f = eng.values().field("e");
+    let three = eng.values().int(3);
+    eng.set_environment([(f, three)]);
+    eng.evaluate_sequential().expect("supplied");
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+}
+
+/// A node that claims as many following siblings as a field says and
+/// leaves their text as continuations; the field changes, so the claim
+/// shrinks and grows.
+#[test]
+fn continuations_of_a_claim_that_changes() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(ClaimCont));
+    let _ = CLAIM_CONT.set(op);
+    let u = eng.new_unit();
+    let v = eng.values();
+    let nb = eng.push(u, op, vec![v.str("b"), v.int(3)]);
+    let v = eng.values();
+    eng.push(u, op, vec![v.str("k")]);
+    for i in 0..6 {
+        let v = eng.values();
+        let a = vec![v.str("w"), v.int(i)];
+        eng.push(u, op, a);
+    }
+    eng.evaluate_sequential().expect("cold");
+    for x in [1, 5, 0, 4, 2] {
+        let v = eng.values();
+        let b = vec![v.str("b"), v.int(x)];
+        eng.replace(nb, op, b);
+        eng.evaluate_sequential().expect("after the change");
+        assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+    }
+}
+
+/// `["ap", k]` contributes `k` to `acc` and reads nothing; `["o"]` opens a
+/// scope; `["rd"]` reads the contributions since the nearest `o` before it,
+/// anchored at that opener's id (a node the run does not hold).
+struct ListOps;
+
+impl Operation for ListOps {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn effect(&self, a: &[ValueId], v: &Values) -> defuse::Effect {
+        if tag(v, a) == "o" {
+            defuse::Effect::Open
+        } else {
+            defuse::Effect::None
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match tag(v, &a).as_str() {
+            "ap" => {
+                let k = a[1];
+                cx.contribute(v.field("acc"), v.seq_unit(k));
+                Ok(ValueId::UNIT)
+            }
+            "rd" => {
+                let opener = cx.prev_sibling_where(&|_, a| tag(v, a) == "o");
+                cx.acc_range(v.field("acc"), opener)
+            }
+            _ => Ok(ValueId::UNIT),
+        }
+    }
+}
+
+#[test]
+fn a_range_read_anchored_at_an_opener_the_run_does_not_hold() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(ListOps));
+    let acc = eng.values().field("acc");
+    eng.declare_accumulator(acc, Arc::new(defuse::SeqMonoid));
+    let u = eng.new_unit();
+    let mk = |eng: &mut Engine, t: &str, k: i64| {
+        let v = eng.values();
+        let a = if t == "ap" {
+            vec![v.str(t), v.int(k)]
+        } else {
+            vec![v.str(t)]
+        };
+        eng.push(u, op, a)
+    };
+    mk(&mut eng, "ap", 100);
+    mk(&mut eng, "o", 0);
+    let a1 = mk(&mut eng, "ap", 1);
+    mk(&mut eng, "ap", 2);
+    mk(&mut eng, "ap", 3);
+    let rd = mk(&mut eng, "rd", 0);
+    eng.evaluate_sequential().expect("evaluate");
+    let items = |eng: &Engine| -> Vec<i64> {
+        let v = eng.values();
+        v.seq_to_vec(eng.output(rd).expect("rd output"))
+            .into_iter()
+            .filter_map(|x| v.as_int(x))
+            .collect()
+    };
+    assert_eq!(items(&eng), vec![1, 2, 3], "from the opener, not the unit start");
+    // Appends read nothing, so they do not chain: the reader waits for them
+    // all at once.
+    assert!(eng.critical_path() <= 2, "critical path {}", eng.critical_path());
+    let v = eng.values();
+    let a = vec![v.str("ap"), v.int(9)];
+    eng.replace(a1, op, a);
+    eng.evaluate_sequential().expect("after the edit");
+    assert_eq!(items(&eng), vec![9, 2, 3]);
+}
+
+/// `["rec", k]` contributes `k` and outputs its own id as a number; `["rd",
+/// raw]` reads the contributions after the node whose id is `raw`.
+struct RecOps;
+
+impl Operation for RecOps {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match tag(v, &a).as_str() {
+            "rec" => {
+                cx.contribute(v.field("acc"), v.seq_unit(a[1]));
+                // The id's 64 bits, as the toy's integer.
+                Ok(v.int(i64::from_ne_bytes(cx.node().raw().to_ne_bytes())))
+            }
+            "rd" => {
+                let from = v
+                    .as_int(a[1])
+                    .map(|r| NodeId::from_raw(u64::from_ne_bytes(r.to_ne_bytes())));
+                cx.acc_range(v.field("acc"), from)
+            }
+            _ => Ok(ValueId::UNIT),
+        }
+    }
+}
+
+#[test]
+fn a_recorded_node_id_anchors_a_later_range_read() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(RecOps));
+    let acc = eng.values().field("acc");
+    eng.declare_accumulator(acc, Arc::new(defuse::SeqMonoid));
+    let u = eng.new_unit();
+    let push = |eng: &mut Engine, t: &str, k: i64| {
+        let v = eng.values();
+        eng.push(u, op, vec![v.str(t), v.int(k)])
+    };
+    push(&mut eng, "rec", 1);
+    let a = push(&mut eng, "rec", 2);
+    let b = push(&mut eng, "rec", 3);
+    push(&mut eng, "rec", 4);
+    // The reader anchors at `a` through the number `a` output.
+    let raw = i64::from_ne_bytes(a.raw().to_ne_bytes());
+    let c = push(&mut eng, "rd", raw);
+    eng.evaluate_sequential().expect("evaluate");
+    let items = |eng: &Engine| -> Vec<i64> {
+        let v = eng.values();
+        v.seq_to_vec(eng.output(c).expect("output"))
+            .into_iter()
+            .filter_map(|x| v.as_int(x))
+            .collect()
+    };
+    assert_eq!(items(&eng), vec![3, 4], "exactly the contributions after a");
+    assert_eq!(eng.output(a).and_then(|o| eng.values().as_int(o)), Some(raw));
+    // Replacing `a` keeps its id and changes nothing after it: the reader
+    // keeps its result without running.
+    let v = eng.values();
+    let na = vec![v.str("rec"), v.int(20)];
+    eng.replace(a, op, na);
+    let r = eng.evaluate_sequential().expect("after replacing a");
+    assert_eq!(r.nodes_run, 1, "{r:?}");
+    assert_eq!(items(&eng), vec![3, 4]);
+    // A change inside the range runs the reader again.
+    let v = eng.values();
+    let nb = vec![v.str("rec"), v.int(30)];
+    eng.replace(b, op, nb);
+    let r = eng.evaluate_sequential().expect("after replacing b");
+    assert!(r.nodes_run >= 2, "{r:?}");
+    assert_eq!(items(&eng), vec![30, 4]);
 }

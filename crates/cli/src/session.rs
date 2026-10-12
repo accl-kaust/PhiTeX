@@ -17,22 +17,56 @@ use phitex_tex::{Build, Finder, Options};
 use crate::cache::Cache;
 use crate::tex::{self, Engine};
 
-/// What a session does now, for a terminal's spinner (`ui.rs`).
+/// What a session does now, for a terminal's spinner (`ui.rs`), and
+/// the phases it went through, each with its time (the watch's summary).
 #[derive(Default)]
 pub struct Status {
-    phase: Mutex<String>,
+    now: Mutex<Phases>,
+}
+
+#[derive(Default)]
+struct Phases {
+    /// The phase running, and since when (none: between phases).
+    current: Option<(String, Instant)>,
+    done: Vec<(String, Duration)>,
 }
 
 impl Status {
+    /// Phase `phase` from now on (empty: none); the last one ends.
     pub fn set(&self, phase: impl Into<String>) {
-        *self.phase.lock().unwrap_or_else(PoisonError::into_inner) = phase.into();
+        let phase = phase.into();
+        let mut p = self.now.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((name, t)) = p.current.take() {
+            p.done.push((name, t.elapsed()));
+        }
+        if !phase.is_empty() {
+            p.current = Some((phase, Instant::now()));
+        }
     }
 
     pub fn phase(&self) -> String {
-        self.phase
+        self.now
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+            .current
+            .as_ref()
+            .map(|c| c.0.clone())
+            .unwrap_or_default()
+    }
+
+    /// The phases ended, each with its time, and the one running with its
+    /// time so far (last).
+    pub fn phases(&self) -> (Vec<(String, Duration)>, Option<(String, Duration)>) {
+        let p = self.now.lock().unwrap_or_else(PoisonError::into_inner);
+        (
+            p.done.clone(),
+            p.current.as_ref().map(|(n, t)| (n.clone(), t.elapsed())),
+        )
+    }
+
+    /// The phases ended so far, forgotten.
+    pub fn take(&self) -> Vec<(String, Duration)> {
+        std::mem::take(&mut self.now.lock().unwrap_or_else(PoisonError::into_inner).done)
     }
 }
 
@@ -97,6 +131,12 @@ impl RunInfo {
     /// How parallel the run was: `4 threads · 1.6× parallel (at most
     /// 2.1×)`, the engine's work over its wall time, and its nodes over
     /// its longest chain (none: one thread, or no clock).
+    /// The engine's work over its wall time (none: one thread, no clock).
+    pub fn speedup(&self) -> Option<f64> {
+        (self.threads >= 2 && !self.engine_wall.is_zero())
+            .then(|| self.busy.as_secs_f64() / self.engine_wall.as_secs_f64())
+    }
+
     #[allow(clippy::cast_precision_loss)]
     pub fn parallel(&self) -> Option<String> {
         if self.threads < 2 || self.engine_wall.is_zero() {
@@ -149,6 +189,45 @@ pub struct Report {
     pub unsettled: Vec<String>,
     pub notes: Vec<String>,
     pub wall: Duration,
+    /// The engine's own account of why it stopped (its state dumped: for
+    /// `-v` and a bug report, not the error shown).
+    pub internal: Option<String>,
+    /// The errors and warnings at their places, by file then byte.
+    pub diagnostics: Vec<phitex_tex::Diagnostic>,
+}
+
+/// An engine's stop said in a sentence: what gave out, without its dump
+/// (`RunawayCreation { node: …, depth: 4097, … }` as "it nested deeper than
+/// its limit (4097 levels)").
+pub fn engine_stop(e: &str) -> String {
+    let num = |key: &str| {
+        e.split(key).nth(1).and_then(|r| {
+            let d: String = r
+                .trim_start()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            (!d.is_empty()).then_some(d)
+        })
+    };
+    let what = if e.contains("RunawayCreation") {
+        format!(
+            "it nested deeper than its limit ({} levels)",
+            num("depth:").unwrap_or_else(|| "4096".to_owned())
+        )
+    } else if e.contains("Deadline") {
+        "it ran past its time limit".to_owned()
+    } else {
+        // (the first clause, before any dump)
+        let first = e.lines().next().unwrap_or(e);
+        let cut = first
+            .find([':', '[', '{', '('])
+            .map_or(first, |k| &first[..k]);
+        cut.trim().to_owned()
+    };
+    format!(
+        "PhiTeX's engine stopped: {what}. This is a bug in PhiTeX, not in the document (-v shows the engine's details)"
+    )
 }
 
 impl Report {
@@ -245,11 +324,16 @@ impl Session {
     pub fn new(
         job: Job,
         status: Arc<Status>,
-        _note: &mut dyn FnMut(&str),
+        note: &mut dyn FnMut(&str),
     ) -> Result<Session, String> {
         let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()))?;
         let tree = Arc::new(tex::Tree::open(&job.engine));
         let cache = Cache::open(job.cache_limit).ok();
+        if let Some(c) = &cache
+            && let Some(w) = c.unkept()
+        {
+            note(&w);
+        }
         Ok(Session {
             job,
             text: tex::chars(&text),
@@ -289,14 +373,13 @@ impl Session {
         let t0 = Instant::now();
         let why = if self.build.is_some() { "edit" } else { "cold" };
         self.builds += 1;
-        self.status.set(why);
         let r = self.run(why, t0);
         self.status.set("");
         r
     }
 
     fn run(&mut self, why: &str, t0: Instant) -> Report {
-        let fail = |e: String| Report {
+        let fail = |e: String, internal: Option<String>| Report {
             out: Output {
                 errors: vec![e],
                 ..Output::default()
@@ -310,6 +393,8 @@ impl Session {
             unsettled: Vec::new(),
             notes: Vec::new(),
             wall: t0.elapsed(),
+            internal,
+            diagnostics: Vec::new(),
         };
         let text = self.text_now();
         let edit_line = self
@@ -326,12 +411,15 @@ impl Session {
         // reported failed and dropped, the next one cold)
         let ran = crate::ui::catch(|| -> Result<(), String> {
             if let Some(b) = &mut self.build {
+                self.status.set("engine");
                 for name in &reread {
                     b.edit_file(name, None);
                 }
                 b.edit(&text);
             } else {
+                self.status.set("format");
                 let (prelude, cached) = self.prelude()?;
+                self.status.set("engine");
                 let opts = Options {
                     name: self.printed_name(),
                     jobname: self.job.jobname.clone(),
@@ -352,13 +440,14 @@ impl Session {
         });
         match ran {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => return fail(e),
+            Ok(Err(e)) => return fail(e, None),
             Err(e) => {
                 self.build = None;
                 self.built_text = None;
-                return fail(format!("the engine stopped: {e}"));
+                return fail(engine_stop(&e), Some(e));
             }
         }
+        self.status.set("output");
         let b = self.build.as_ref().expect("built above");
         let (bytes, log) = b.output();
         let pdf = b.is_pdf();
@@ -407,6 +496,8 @@ impl Session {
                 critical_path: s.critical_path,
                 peak_running: s.peak_running,
             }],
+            internal: None,
+            diagnostics: b.diagnostics(),
             unsettled: Vec::new(),
             notes: vec![format!(
                 "{} nodes run of {} live, {} runs, {} cutoffs",
@@ -414,6 +505,16 @@ impl Session {
             )],
             wall,
         }
+    }
+
+    /// File `name`'s bytes as a diagnostic names it: the main text as the
+    /// build read it, another file from the disk (none: not readable).
+    pub fn source(&self, name: &str) -> Option<Vec<u8>> {
+        let n = plain_name(name);
+        if n == plain_name(&self.job.path.to_string_lossy()) {
+            return self.built_text.as_deref().map(tex::bytes);
+        }
+        std::fs::read(&n).ok()
     }
 
     /// The main text with the editor's buffer for it, if there is one.
@@ -606,7 +707,7 @@ impl Session {
 pub fn waiting_notes(job: &Job) -> Vec<String> {
     let mut v = Vec::new();
     if job.synctex {
-        v.push("-synctex: the native engine writes no SyncTeX yet".to_owned());
+        v.push("no SyncTeX yet (-synctex)".to_owned());
     }
     if job.shell_escape {
         v.push("-shell-escape: the native engine runs no \\write18 yet".to_owned());
