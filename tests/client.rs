@@ -711,3 +711,78 @@ fn continuations_of_a_claim_that_changes() {
         assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
     }
 }
+
+/// `["ap", k]` contributes `k` to `acc` and reads nothing; `["o"]` opens a
+/// scope; `["rd"]` reads the contributions since the nearest `o` before it,
+/// anchored at that opener's id (a node the run does not hold).
+struct ListOps;
+
+impl Operation for ListOps {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn effect(&self, a: &[ValueId], v: &Values) -> defuse::Effect {
+        if tag(v, a) == "o" {
+            defuse::Effect::Open
+        } else {
+            defuse::Effect::None
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match tag(v, &a).as_str() {
+            "ap" => {
+                let k = a[1];
+                cx.contribute(v.field("acc"), v.seq_unit(k));
+                Ok(ValueId::UNIT)
+            }
+            "rd" => {
+                let opener = cx.prev_sibling_where(&|_, a| tag(v, a) == "o");
+                cx.acc_range(v.field("acc"), opener)
+            }
+            _ => Ok(ValueId::UNIT),
+        }
+    }
+}
+
+#[test]
+fn a_range_read_anchored_at_an_opener_the_run_does_not_hold() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(ListOps));
+    let acc = eng.values().field("acc");
+    eng.declare_accumulator(acc, Arc::new(defuse::SeqMonoid));
+    let u = eng.new_unit();
+    let mk = |eng: &mut Engine, t: &str, k: i64| {
+        let v = eng.values();
+        let a = if t == "ap" {
+            vec![v.str(t), v.int(k)]
+        } else {
+            vec![v.str(t)]
+        };
+        eng.push(u, op, a)
+    };
+    mk(&mut eng, "ap", 100);
+    mk(&mut eng, "o", 0);
+    let a1 = mk(&mut eng, "ap", 1);
+    mk(&mut eng, "ap", 2);
+    mk(&mut eng, "ap", 3);
+    let rd = mk(&mut eng, "rd", 0);
+    eng.evaluate_sequential().expect("evaluate");
+    let items = |eng: &Engine| -> Vec<i64> {
+        let v = eng.values();
+        v.seq_to_vec(eng.output(rd).expect("rd output"))
+            .into_iter()
+            .filter_map(|x| v.as_int(x))
+            .collect()
+    };
+    assert_eq!(items(&eng), vec![1, 2, 3], "from the opener, not the unit start");
+    // Appends read nothing, so they do not chain: the reader waits for them
+    // all at once.
+    assert!(eng.critical_path() <= 2, "critical path {}", eng.critical_path());
+    let v = eng.values();
+    let a = vec![v.str("ap"), v.int(9)];
+    eng.replace(a1, op, a);
+    eng.evaluate_sequential().expect("after the edit");
+    assert_eq!(items(&eng), vec![9, 2, 3]);
+}

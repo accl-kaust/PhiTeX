@@ -1207,6 +1207,9 @@ impl Iterator for Following<'_> {
             let s = item.slot;
             let n = &e.nodes[s.ix as usize];
             if n.parent == self.parent {
+                // A sibling's unfolded text (children, continuations) is
+                // its own: the next sibling comes after it.
+                self.label = e.unfolded_end(s);
                 self.slots.push(s);
                 return Some((n.op, e.args_vec(n.args)));
             }
@@ -1214,6 +1217,7 @@ impl Iterator for Following<'_> {
                 // Past the parent's text: on to the parent's siblings.
                 self.parent = e.nodes[self.parent.ix as usize].parent;
                 if n.parent == self.parent {
+                    self.label = e.unfolded_end(s);
                     self.slots.push(s);
                     return Some((n.op, e.args_vec(n.args)));
                 }
@@ -2544,6 +2548,19 @@ impl Engine {
         let item = self.oitem(s);
         let root = self.units[unit as usize].root;
         self.order.update(&OAug, root, label, &mut |i| *i = item);
+    }
+
+    /// The label of the last node `x` unfolded (children and continuations,
+    /// transitively), or `x`'s own label.
+    fn unfolded_end(&self, x: Slot) -> u64 {
+        match self
+            .aux_of(x)
+            .filter(|a| a.body.is_none())
+            .and_then(|a| a.children.last().copied())
+        {
+            Some(c) => self.n(self.subtree_end(c)).label,
+            None => self.n(x).label,
+        }
     }
 
     fn subtree_end(&self, mut x: Slot) -> Slot {
@@ -4581,7 +4598,10 @@ impl Engine {
 
     fn stab_contrib(&mut self, unit: u32, label: u64, f: Field) {
         for (r, w) in self.stab(unit, label) {
-            if w.field != f || w.waiting {
+            // A reader already due to run re-reads its range then: no fold
+            // per contribution changing before it (a replaced text changes
+            // every contribution, each with every later reader in range).
+            if w.field != f || w.waiting || matches!(self.n(r).state, State::Dirty | State::Parked) {
                 continue;
             }
             let lo = self.watch_key(r, w.anchor).0;
