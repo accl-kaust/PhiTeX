@@ -744,3 +744,61 @@ fn env_wait_field_names_survive_the_evaluation() {
     let name = eng.values().render(f.0);
     assert_eq!(name, "\"fresh-42\"");
 }
+
+/// `["w", n]` does one step of work and leaves the rest, `["w", n-1]`,
+/// for after itself. The rest is not nested in the step: it belongs at
+/// the step's own depth, as its next sibling. With `Ctx::child` the only
+/// way to leave it, every step is one level deeper than the one before,
+/// so a chain of 5000 steps (a long loop, a long file) trips
+/// `Limits::unfold_depth` (4096) although nothing is nested, and every
+/// walk over the chain pays its depth. Wanted: a way for a node to leave
+/// its continuation as its following sibling at its own depth (for
+/// example `Ctx::follow(op, args)`), so the depth grows only with real
+/// nesting.
+struct Walk;
+
+static WALK: std::sync::OnceLock<OpId> = std::sync::OnceLock::new();
+
+impl Operation for Walk {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn claim(
+        &self,
+        _: &[ValueId],
+        _: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Claim {
+        Claim::None
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let n = match a.get(1).map(|&x| v.get(x)).as_deref() {
+            Some(Value::Int(n)) => *n,
+            _ => 0,
+        };
+        if n > 0 {
+            let op = WALK.get().copied().unwrap();
+            cx.child(op, vec![v.str("w"), v.int(n - 1)]);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+#[ignore = "engine gap: a continuation can only be a child, one level deeper per step"]
+fn a_continuation_stays_at_its_nodes_depth() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Walk));
+    let _ = WALK.set(op);
+    eng.set_limits(phitex_defuse::Limits {
+        unfold_depth: 4096,
+        ..phitex_defuse::Limits::default()
+    });
+    let u = eng.new_unit();
+    let v = eng.values();
+    let args = vec![v.str("w"), v.int(5000)];
+    eng.push(u, op, args);
+    eng.evaluate_sequential().expect("a chain of 5000 steps is not nested");
+}
