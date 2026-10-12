@@ -1148,7 +1148,6 @@ fn continuations_after_an_environment_wait() {
 /// leaves their text as continuations; the field changes, so the claim
 /// shrinks and grows.
 #[test]
-#[ignore = "engine gap: `stale node reference` in alloc_labels (set_children, apply) on a re-run"]
 fn continuations_of_a_claim_that_changes() {
     let mut eng = Engine::new();
     let op = eng.register(Arc::new(Cont));
