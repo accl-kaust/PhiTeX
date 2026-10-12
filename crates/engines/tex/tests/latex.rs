@@ -335,3 +335,36 @@ fn etex_story() {
         panic!("etex story.dvi: {d}");
     }
 }
+
+/// `latex` and `pdflatex` end to end on a one-line `article`: the format
+/// from TeX Live's `latex.ini` (`pdflatex.ini`) through the kpathsea
+/// finder, then the document: one page, the run not panicking.
+fn hello(pdf: bool) -> Build {
+    let dir = common::fixtures().join("latex/hello");
+    let src = common::read(&dir.join("hello.tex"));
+    let want = std::fs::read(dir.join("hello.dvi")).expect("the oracle");
+    let comment = if pdf { String::new() } else { common::dvi_comment(&want) };
+    let opts = options("hello", &dir, &comment, false, pdf);
+    let t0 = std::time::Instant::now();
+    let b = common::build(opts, Some(&prelude(pdf)), &src);
+    eprintln!("{:?}: {}", t0.elapsed(), report("hello", &b));
+    let (out, log) = b.output();
+    eprintln!("{} bytes\n{log}", out.len());
+    b
+}
+
+#[test]
+#[ignore = "heavy: the LaTeX format; expl3-code.tex loading is being measured"]
+fn latex_hello() {
+    let b = hello(false);
+    assert_eq!(b.pages().len(), 1);
+    assert!(!b.is_pdf());
+}
+
+#[test]
+#[ignore = "heavy: the LaTeX format; expl3-code.tex loading is being measured"]
+fn pdflatex_hello() {
+    let b = hello(true);
+    assert_eq!(b.pages().len(), 1);
+    assert!(b.is_pdf());
+}
