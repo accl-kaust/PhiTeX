@@ -22,8 +22,6 @@ pub(crate) enum Halt {
     /// the end of its parent's text (the claim at the call measures what
     /// a body's tail takes, so this is a bug when it happens).
     Starve,
-    /// The command reads a file the client has not supplied yet.
-    File(String),
     /// The input ended for good inside a command (§360: in batch mode,
     /// "*** (job aborted, no legal \end found)").
     Fatal,
@@ -184,6 +182,21 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(x);
         }
         Ok(self.cx.use_field(f)?)
+    }
+
+    /// The file `key` from the client (`file:<key>`): `None` if it is
+    /// absent; until the client supplies it or says it is absent, the
+    /// node waits ([`phitex_defuse::Ctx::use_env`]). A file the job
+    /// writes and reads back is a loop-back field: the previous round's.
+    pub(crate) fn file(&mut self, key: &str) -> R<Option<ValueId>> {
+        let v = self.v;
+        let f = v.field(&format!("file:{key}"));
+        let x = if self.cx.is_loopback(f) {
+            self.get_f(f)?
+        } else {
+            self.cx.use_env(f)?
+        };
+        Ok(x.filter(|&x| !crate::val::list_of(v, x).is_empty()))
     }
 
     pub(crate) fn get(&mut self, name: &str) -> R<Option<ValueId>> {
@@ -944,7 +957,6 @@ impl<'c, 'a> Run<'c, 'a> {
                 Ok(()) => "ok".to_owned(),
                 Err(Halt::Stop(_)) => "stop".to_owned(),
                 Err(Halt::Starve) => "starve".to_owned(),
-                Err(Halt::File(f)) => format!("file {f}"),
                 Err(Halt::Fatal) => "fatal".to_owned(),
             };
             eprintln!(
@@ -954,10 +966,8 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         self.restore(snap);
-        match res {
-            Err(Halt::Stop(s)) => return Err(Halt::Stop(s)),
-            Err(Halt::File(f)) => return Err(Halt::File(f)),
-            _ => {}
+        if let Err(Halt::Stop(s)) = res {
+            return Err(Halt::Stop(s));
         }
         for _ in before..after {
             if !self.pull()? {

@@ -12,6 +12,7 @@ phitex-typeset = { path = "../../core/typeset" }
 phitex-source = { path = "../../core/source" }
 phitex-tfm = { path = "../../fonts/tfm" }
 phitex-dvi = { path = "../../output/dvi" }
+phitex-pdf = { path = "../../output/pdf" }
 phitex-codecs = { path = "../../codecs" }
 
 [dev-dependencies]
