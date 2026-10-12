@@ -301,5 +301,9 @@ sock.onOpen = () => {
   started = true;
   void session.start();
 };
-sock.onClose = () => panel.msg("not connected to phitex watch (retrying)", true);
+// (never connected: the card says so, not "Reading" forever; a browser add-on
+// blocking WebSockets to this machine is the usual cause)
+const unreached = "Can't reach phitex watch over its WebSocket (retrying). Is it still running? A browser add-on blocking connections to localhost also does this: try a private window, or allow 127.0.0.1 in the add-on.";
+sock.onClose = () => (started ? panel.msg("not connected to phitex watch (retrying)", true) : panel.error(unreached));
+setTimeout(() => started || panel.error(unreached), 3000);
 sock.connect();
