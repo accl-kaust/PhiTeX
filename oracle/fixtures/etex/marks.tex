@@ -1,0 +1,9 @@
+% \marks classes through the page builder's \output: \topmarks,
+% \firstmarks, \botmarks per class, class 0 as \mark.
+\font\tenrm=cmr10 \tenrm
+\output={\message{[\topmarks1|\firstmarks1|\botmarks1|\topmarks2|\firstmarks2|\botmarks2|\topmark|\firstmark|\botmark]}\setbox0\box255 \deadcycles=0 }
+\vsize=30pt
+\hbox{a}\marks1{x1}\marks2{y1}\hbox{b}\marks1{x2}\penalty-10000
+\hbox{c}\penalty-10000
+\hbox{d}\marks2{y2}\mark{z}\marks0{zz}\penalty-10000
+\message{[\topmarks1|\botmarks2|\botmarks3]}
