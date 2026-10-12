@@ -749,12 +749,9 @@ fn env_wait_field_names_survive_the_evaluation() {
 /// for after itself. The rest is not nested in the step: it belongs at
 /// the step's own depth, as its next sibling. With `Ctx::child` the only
 /// way to leave it, every step is one level deeper than the one before,
-/// so a chain of 5000 steps (a long loop, a long file) trips
-/// `Limits::unfold_depth` (4096) although nothing is nested, and every
-/// walk over the chain pays its depth. Wanted: a way for a node to leave
-/// its continuation as its following sibling at its own depth (for
-/// example `Ctx::follow(op, args)`), so the depth grows only with real
-/// nesting.
+/// so a chain of 5000 steps (a long loop, a long file) would trip
+/// `Limits::unfold_depth` (4096) although nothing is nested.
+/// `Ctx::follow` leaves the continuation at the node's own depth.
 struct Walk;
 
 static WALK: std::sync::OnceLock<OpId> = std::sync::OnceLock::new();
@@ -780,14 +777,13 @@ impl Operation for Walk {
         };
         if n > 0 {
             let op = WALK.get().copied().unwrap();
-            cx.child(op, vec![v.str("w"), v.int(n - 1)]);
+            cx.follow(op, vec![v.str("w"), v.int(n - 1)]);
         }
         Ok(ValueId::UNIT)
     }
 }
 
 #[test]
-#[ignore = "engine gap: a continuation can only be a child, one level deeper per step"]
 fn a_continuation_stays_at_its_nodes_depth() {
     let mut eng = Engine::new();
     let op = eng.register(Arc::new(Walk));
@@ -829,6 +825,8 @@ fn item_text(n: usize, salt: i64) -> Vec<(String, i64)> {
                 "u"
             } else if i == 3 || i == n / 2 {
                 "r"
+            } else if i % 7 == 3 {
+                "f"
             } else {
                 "d"
             };
@@ -881,6 +879,15 @@ impl Operation for Item {
             "c" => {
                 claim = usize::from(cx.following(0).is_some());
                 cx.define(v.field("y"), v.int(k));
+                let op = ITEM.get().copied().unwrap();
+                cx.follow(op, vec![v.str("i"), v.str("d"), v.int(k)]);
+            }
+            "f" => {
+                let op = ITEM.get().copied().unwrap();
+                let old = cx.use_field(x)?.and_then(|y| v.as_int(y)).unwrap_or(0);
+                cx.child(op, vec![v.str("i"), v.str("d"), v.int(k)]);
+                cx.follow(op, vec![v.str("i"), v.str("d"), v.int(old % 5)]);
+                cx.follow(op, vec![v.str("i"), v.str("c"), v.int(k + 1)]);
             }
             "u" => {
                 let op = ITEM.get().copied().unwrap();
@@ -1005,4 +1012,167 @@ fn growing_the_text_costs_a_cold_evaluation() {
         te.as_secs_f64() <= 1.5 * tc.as_secs_f64(),
         "edit {te:?} against cold {tc:?}"
     );
+}
+
+/// `["b", k]` defines `x`; `["a"]` reads `x` and leaves `["w", x]` as its
+/// continuation (`Ctx::follow`), which leaves `["w", n-1]` in turn.
+/// Changing `b` re-runs `a`, whose continuations are made again.
+struct Cont;
+
+static CONT: std::sync::OnceLock<OpId> = std::sync::OnceLock::new();
+
+impl Operation for Cont {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(if tag(v, a) == "b" {
+            vec![(v.field("x"), Locality::Local)]
+        } else {
+            Vec::new()
+        })
+    }
+    fn claim(
+        &self,
+        a: &[ValueId],
+        v: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Claim {
+        if tag(v, a) == "k" {
+            Claim::Pending
+        } else {
+            Claim::None
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let op = CONT.get().copied().unwrap();
+        let int = |i: usize| match a.get(i).map(|&x| v.get(x)).as_deref() {
+            Some(Value::Int(n)) => *n,
+            _ => 0,
+        };
+        match tag(v, &a).as_str() {
+            "b" => cx.define(v.field("x"), v.int(int(1))),
+            "a" => {
+                let n = cx
+                    .use_field(v.field("x"))?
+                    .and_then(|y| v.as_int(y))
+                    .unwrap_or(0);
+                cx.child(op, vec![v.str("w"), v.int(1)]);
+                cx.follow(op, vec![v.str("w"), v.int(n)]);
+            }
+            "k" => {
+                // claims as many following siblings as `x` says, and
+                // leaves their text as its continuations
+                let n = cx
+                    .use_field(v.field("x"))?
+                    .and_then(|y| v.as_int(y))
+                    .unwrap_or(0);
+                let n = usize::try_from(n).unwrap_or(0);
+                let mut got = 0;
+                while got < n && cx.following(got).is_some() {
+                    got += 1;
+                }
+                for i in 0..got {
+                    cx.follow(op, vec![v.str("w"), v.int(i64::try_from(i).unwrap_or(0))]);
+                }
+                cx.claim(got);
+            }
+            "e" => {
+                let n = cx
+                    .use_env(v.field("e"))?
+                    .and_then(|y| v.as_int(y))
+                    .unwrap_or(0);
+                cx.child(op, vec![v.str("w"), v.int(1)]);
+                cx.follow(op, vec![v.str("w"), v.int(n)]);
+            }
+            "w" if int(1) > 0 => {
+                cx.follow(op, vec![v.str("w"), v.int(int(1) - 1)]);
+            }
+            _ => {}
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+fn continuations_made_again_after_a_change() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Cont));
+    let _ = CONT.set(op);
+    let u = eng.new_unit();
+    let v = eng.values();
+    let (b, a, z) = (
+        vec![v.str("b"), v.int(3)],
+        vec![v.str("a")],
+        vec![v.str("w"), v.int(0)],
+    );
+    let nb = eng.push(u, op, b);
+    eng.push(u, op, a);
+    eng.push(u, op, z);
+    eng.evaluate_sequential().expect("cold");
+    let b2 = vec![eng.values().str("b"), eng.values().int(5)];
+    eng.replace(nb, op, b2);
+    eng.evaluate_sequential().expect("after the change");
+    assert!(
+        eng.check_invariants().is_empty(),
+        "{:?}",
+        eng.check_invariants()
+    );
+}
+
+/// A node waiting for an environment field leaves its continuations once
+/// the field is supplied.
+#[test]
+fn continuations_after_an_environment_wait() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Cont));
+    let _ = CONT.set(op);
+    let u = eng.new_unit();
+    let v = eng.values();
+    let (e, z) = (vec![v.str("e")], vec![v.str("w"), v.int(0)]);
+    eng.push(u, op, e.clone());
+    eng.push(u, op, e);
+    eng.push(u, op, z);
+    eng.evaluate_sequential().expect("waiting");
+    let f = eng.values().field("e");
+    let three = eng.values().int(3);
+    eng.set_environment([(f, three)]);
+    eng.evaluate_sequential().expect("supplied");
+    assert!(
+        eng.check_invariants().is_empty(),
+        "{:?}",
+        eng.check_invariants()
+    );
+}
+
+/// A node that claims as many following siblings as a field says and
+/// leaves their text as continuations; the field changes, so the claim
+/// shrinks and grows.
+#[test]
+#[ignore = "engine gap: `stale node reference` in alloc_labels (set_children, apply) on a re-run"]
+fn continuations_of_a_claim_that_changes() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Cont));
+    let _ = CONT.set(op);
+    let u = eng.new_unit();
+    let v = eng.values();
+    let nb = eng.push(u, op, vec![v.str("b"), v.int(3)]);
+    let v = eng.values();
+    eng.push(u, op, vec![v.str("k")]);
+    for i in 0..6 {
+        let v = eng.values();
+        let a = vec![v.str("w"), v.int(i)];
+        eng.push(u, op, a);
+    }
+    eng.evaluate_sequential().expect("cold");
+    for x in [1, 5, 0, 4, 2] {
+        let v = eng.values();
+        let b = vec![v.str("b"), v.int(x)];
+        eng.replace(nb, op, b);
+        eng.evaluate_sequential().expect("after the change");
+        assert!(
+            eng.check_invariants().is_empty(),
+            "{:?}",
+            eng.check_invariants()
+        );
+    }
 }
