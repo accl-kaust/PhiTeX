@@ -1151,7 +1151,7 @@ impl Ctx<'_> {
                         | Node::Ins(_)
                         | Node::Mark(_)
                         | Node::Adjust(_)
-                        | Node::Whatsit(_)
+                        | Node::Whatsit(..)
                         | Node::Language { .. }
                         | Node::Penalty(_)
                         | Node::Disc(_)) => n,

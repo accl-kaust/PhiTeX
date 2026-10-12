@@ -33,6 +33,7 @@ use phitex_typeset::fonts::{CharInfo, FontId, Fonts, Left, LigKern};
 use phitex_typeset::glue::{Glue, GlueSet, GlueSign, Order};
 use phitex_typeset::node::{
     BoxKind, BoxNode, Disc, GlueKind, GlueNode, KernKind, Ligature, MathKind, Node, RUNNING, Rule,
+    WhatsitSize,
 };
 use phitex_typeset::pack::{PackParams, Spec, hpack, vpackage};
 
@@ -482,25 +483,24 @@ impl Reader<'_> {
                 }));
                 continue;
             } else if body.starts_with('\\') {
-                // a whatsit; a form or image is followed by the empty box
-                // of its size that phitex-tex puts after it
+                // a whatsit; a form or image carries its size
                 self.whatsits.push((self.next, body.to_owned()));
                 self.next += 1;
                 if let Some(r) = body
                     .strip_prefix("\\pdfrefxform")
                     .or_else(|| body.strip_prefix("\\pdfrefximage"))
                 {
-                    let ([w, h, d], _) = rule_spec(r);
-                    out.push(Node::Whatsit(self.next - 1));
-                    Node::Box(BoxNode {
-                        kind: BoxKind::H,
-                        width: w,
-                        height: h,
-                        depth: d,
-                        ..BoxNode::default()
-                    })
+                    let ([width, height, depth], _) = rule_spec(r);
+                    Node::Whatsit(
+                        self.next - 1,
+                        Some(WhatsitSize {
+                            width,
+                            height,
+                            depth,
+                        }),
+                    )
                 } else {
-                    Node::Whatsit(self.next - 1)
+                    Node::Whatsit(self.next - 1, None)
                 }
             } else {
                 panic!("box display: {l}");

@@ -261,7 +261,7 @@ impl Hyphenator for TexHyphenator<'_> {
                     }
                     Some(&c) => (c, l.font),
                 },
-                Node::Kern(_, KernKind::Normal) | Node::Whatsit(_) => {
+                Node::Kern(_, KernKind::Normal) | Node::Whatsit(..) => {
                     prev_s = s;
                     s += 1;
                     continue;
@@ -370,7 +370,7 @@ impl Hyphenator for TexHyphenator<'_> {
                 Some(Node::Char { .. } | Node::Lig(_) | Node::Kern(_, KernKind::Normal)) => s += 1,
                 Some(
                     Node::Kern(..)
-                    | Node::Whatsit(_)
+                    | Node::Whatsit(..)
                     | Node::Language { .. }
                     | Node::Glue(_)
                     | Node::Penalty(_)

@@ -1653,21 +1653,14 @@ fn whatsit(r: &mut Run<'_, '_>, md: &Mode, data: Vec<ValueId>) {
     r.append(md.lid, node);
 }
 
-/// An empty box of the given dimensions: what a reference to a form or
-/// an image takes in its list (pdfTeX §1365 packs them as rules).
-fn space_box(r: &mut Run<'_, '_>, md: &Mode, w: i32, h: i32, d: i32) {
+/// A whatsit with a size (pdfTeX §1357: `pdf_width`, `pdf_height`,
+/// `pdf_depth` of a `\pdfrefxform` or `\pdfrefximage` node), in
+/// any mode as it is.
+fn sized_whatsit(r: &mut Run<'_, '_>, md: &Mode, data: Vec<ValueId>, whd: [i32; 3]) {
     let v = r.v;
-    let b = BoxNode {
-        kind: BoxKind::H,
-        width: w,
-        height: h,
-        depth: d,
-        ..BoxNode::default()
-    };
-    let x = nodes::encode_box(v, &b, &nodes::Side::default());
-    // pdfTeX §1357: a node in the list as it is, in any mode (no
-    // interline glue, `prev_depth` and the space factor unchanged)
-    r.append(md.lid, x);
+    let mut xs = vec![v.int(nodes::T_WHATSIT), v.list(data)];
+    xs.extend(whd.map(|d| v.int(i64::from(d))));
+    r.append(md.lid, v.list(xs));
 }
 
 /// `scan_pdf_ext_toks` as a value.
@@ -2015,8 +2008,12 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 );
             };
             let g = |k: usize| i32::try_from(crate::val::int_at(v, x, k)).unwrap_or(0);
-            whatsit(r, md, vec![s("pdf:refxform"), v.int(i64::from(n))]);
-            space_box(r, md, g(4), g(5), g(6));
+            sized_whatsit(
+                r,
+                md,
+                vec![s("pdf:refxform"), v.int(i64::from(n))],
+                [g(4), g(5), g(6)],
+            );
         }
         ex::XIMAGE => ximage(r, immediate)?,
         ex::REFXIMAGE => {
@@ -2031,8 +2028,12 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             let g = |k: usize| i32::try_from(crate::val::int_at(v, x, k)).unwrap_or(0);
             // the node carries the object (placed by the writer,
             // `pdf_place_image`) and the box its dimensions
-            whatsit(r, md, vec![s("pdf:refximage"), v.int(i64::from(n))]);
-            space_box(r, md, g(0), g(1), g(2));
+            sized_whatsit(
+                r,
+                md,
+                vec![s("pdf:refximage"), v.int(i64::from(n))],
+                [g(0), g(1), g(2)],
+            );
         }
         ex::ANNOT => {
             let (use_n, reserved) = obj_num_option(r)?;
@@ -2641,7 +2642,7 @@ fn xform_step(
 fn remap_whatsits(l: &mut [Node], base: u32) {
     for n in l {
         match n {
-            Node::Whatsit(k) => *k += base,
+            Node::Whatsit(k, _) => *k += base,
             Node::Box(b) => remap_whatsits(&mut b.list, base),
             Node::Glue(g) => {
                 if let Some(x) = &mut g.leader {
@@ -2902,8 +2903,9 @@ impl Walk<'_> {
                     h += x.width;
                 }
                 Node::Rule(x) => h += x.width,
-                Node::Whatsit(k) => {
+                Node::Whatsit(k, size) => {
                     self.at.insert(*k, (h, base));
+                    h += size.map_or(0, |s| s.width);
                 }
                 Node::Glue(x) => h += g.glue(x),
                 Node::Kern(w, _) | Node::Math(_, w) => h += *w,
@@ -2944,8 +2946,9 @@ impl Walk<'_> {
                     };
                     v += ht + dp;
                 }
-                Node::Whatsit(k) => {
+                Node::Whatsit(k, size) => {
                     self.at.insert(*k, (left, v));
+                    v += size.map_or(0, |s| s.height + s.depth);
                 }
                 Node::Glue(x) => v += g.glue(x),
                 Node::Kern(w, _) => v += *w,
