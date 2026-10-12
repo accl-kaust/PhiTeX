@@ -17,22 +17,56 @@ use phitex_tex::{Build, Finder, Options};
 use crate::cache::Cache;
 use crate::tex::{self, Engine};
 
-/// What a session does now, for a terminal's spinner (`ui.rs`).
+/// What a session does now, for a terminal's spinner (`ui.rs`), and
+/// the phases it went through, each with its time (the watch's summary).
 #[derive(Default)]
 pub struct Status {
-    phase: Mutex<String>,
+    now: Mutex<Phases>,
+}
+
+#[derive(Default)]
+struct Phases {
+    /// The phase running, and since when (none: between phases).
+    current: Option<(String, Instant)>,
+    done: Vec<(String, Duration)>,
 }
 
 impl Status {
+    /// Phase `phase` from now on (empty: none); the last one ends.
     pub fn set(&self, phase: impl Into<String>) {
-        *self.phase.lock().unwrap_or_else(PoisonError::into_inner) = phase.into();
+        let phase = phase.into();
+        let mut p = self.now.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((name, t)) = p.current.take() {
+            p.done.push((name, t.elapsed()));
+        }
+        if !phase.is_empty() {
+            p.current = Some((phase, Instant::now()));
+        }
     }
 
     pub fn phase(&self) -> String {
-        self.phase
+        self.now
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+            .current
+            .as_ref()
+            .map(|c| c.0.clone())
+            .unwrap_or_default()
+    }
+
+    /// The phases ended, each with its time, and the one running with its
+    /// time so far (last).
+    pub fn phases(&self) -> (Vec<(String, Duration)>, Option<(String, Duration)>) {
+        let p = self.now.lock().unwrap_or_else(PoisonError::into_inner);
+        (
+            p.done.clone(),
+            p.current.as_ref().map(|(n, t)| (n.clone(), t.elapsed())),
+        )
+    }
+
+    /// The phases ended so far, forgotten.
+    pub fn take(&self) -> Vec<(String, Duration)> {
+        std::mem::take(&mut self.now.lock().unwrap_or_else(PoisonError::into_inner).done)
     }
 }
 
@@ -332,7 +366,6 @@ impl Session {
         let t0 = Instant::now();
         let why = if self.build.is_some() { "edit" } else { "cold" };
         self.builds += 1;
-        self.status.set(why);
         let r = self.run(why, t0);
         self.status.set("");
         r
@@ -370,12 +403,15 @@ impl Session {
         // reported failed and dropped, the next one cold)
         let ran = crate::ui::catch(|| -> Result<(), String> {
             if let Some(b) = &mut self.build {
+                self.status.set("engine");
                 for name in &reread {
                     b.edit_file(name, None);
                 }
                 b.edit(&text);
             } else {
+                self.status.set("format");
                 let (prelude, cached) = self.prelude()?;
+                self.status.set("engine");
                 let opts = Options {
                     name: self.printed_name(),
                     jobname: self.job.jobname.clone(),
@@ -403,6 +439,7 @@ impl Session {
                 return fail(engine_stop(&e), Some(e));
             }
         }
+        self.status.set("output");
         let b = self.build.as_ref().expect("built above");
         let (bytes, log) = b.output();
         let pdf = b.is_pdf();

@@ -84,6 +84,8 @@ pub enum Key {
     Rebuild,
     Open,
     Problems,
+    Warnings,
+    Summary,
     Clear,
     Help,
     Quit,
@@ -96,7 +98,9 @@ impl Key {
         Some(match c {
             'r' | 'R' | '\n' | '\r' => Key::Rebuild,
             'o' | 'O' => Key::Open,
-            'p' | 'P' | 'e' | 'w' => Key::Problems,
+            'p' | 'P' | 'e' => Key::Problems,
+            'w' | 'W' => Key::Warnings,
+            's' | 'S' => Key::Summary,
             'c' | 'C' | '\x0c' => Key::Clear,
             'h' | 'H' | '?' => Key::Help,
             'q' | 'Q' | '\x03' | '\x04' => Key::Quit,
@@ -107,11 +111,19 @@ impl Key {
     }
 }
 
+/// The keys, at the status line's right end.
+pub const BAR: &str = "h: keys";
+
 /// The keys, for `h`.
 pub const HELP: &[(&str, &str)] = &[
     ("r, Enter", "build again now"),
     ("o", "open the viewer (or the --open program on the output)"),
-    ("p", "show the last build's errors and warnings again"),
+    ("p", "show the last build's errors again"),
+    ("w", "show the last build's warnings"),
+    (
+        "s",
+        "how the last build went: its phases, reuse, parallelism",
+    ),
     ("c", "clear the screen"),
     ("h, ?", "these keys"),
     ("q, Ctrl-C", "quit"),
