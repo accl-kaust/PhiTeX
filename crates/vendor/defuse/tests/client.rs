@@ -399,3 +399,54 @@ fn a_reopened_scope_sees_the_enclosing_definitions() {
         "the reopened scope lost the enclosing definition"
     );
 }
+
+/// `["i"]` has a pending definition set (`defs` None, `may_define` Any)
+/// and reads the environment field `file`; when it has it, it defines
+/// `x` to it. `["r"]` reads `x` and outputs it (or "none").
+struct ToyFile;
+
+impl Operation for ToyFile {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        if tag(v, a) == "i" { None } else { Some(Vec::new()) }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        if tag(v, &a) == "i" {
+            // An environment read: the node waits while the client has
+            // neither supplied the field nor declared it absent.
+            if let Some(x) = cx.use_env(v.field("file"))? {
+                cx.define(v.field("x"), x);
+            }
+            return Ok(ValueId::UNIT);
+        }
+        Ok(cx.use_field(v.field("x"))?.unwrap_or_else(|| v.str("none")))
+    }
+}
+
+/// An unfolding node whose environment input the client has not supplied yet:
+/// a node with a pending definition set whose environment field is
+/// undefined on the first evaluation. Later readers must not run ahead
+/// of it with what it would have defined missing (they wait, or re-run
+/// once the field is supplied and it defines `x`).
+#[test]
+fn a_reader_waits_for_a_pending_node_whose_file_is_not_supplied() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(ToyFile));
+    let u = eng.new_unit();
+    let _i = eng.push(u, op, vec![eng.values().str("i")]);
+    let r = eng.push(u, op, vec![eng.values().str("r")]);
+    eng.add_root(r);
+    eng.evaluate_sequential().expect("evaluate");
+    let first = eng.output(r).map(|x| eng.values().render(x));
+    let f = eng.values().field("file");
+    let five = eng.values().int(5);
+    eng.set_environment(vec![(f, five)]);
+    eng.evaluate_sequential().expect("evaluate");
+    let second = eng.output(r).map(|x| eng.values().render(x));
+    assert_eq!(second.as_deref(), Some("5"), "r did not re-run after i defined x");
+    assert_eq!(
+        first, None,
+        "r ran ahead of i on the first evaluation (saw {first:?}) while i's file was undefined"
+    );
+}
