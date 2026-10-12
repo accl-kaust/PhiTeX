@@ -1292,16 +1292,20 @@ impl PdfWriter {
                                 .into(),
                         ));
                     }
+                    // copyFont: an object already copied is followed by a
+                    // space, a new one is not
+                    let seen = c.objs.iter().any(|o| o.r == *r);
                     self.ep_name(k);
                     self.ep_puts(b" ");
                     self.ep_object(c, v)?;
-                    self.ep_puts(b" ");
+                    if seen {
+                        self.ep_puts(b" ");
+                    }
                 }
                 Obj::Dict(_) => {
                     self.ep_name(k);
                     self.ep_puts(b" ");
                     self.ep_object(c, v)?;
-                    self.ep_puts(b" ");
                 }
                 _ => {
                     return Err(fail(

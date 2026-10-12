@@ -24,8 +24,8 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use phitex_pdf::map::{MapEntry, parse_map};
 use phitex_pdf::{
-    Action, ColorStackCmd, DestKind, FontSource, Ident, LiteralMode, PdfParams, PdfWriter,
-    VirtualFont, Whatsit,
+    Action, ColorStackCmd, DestKind, FontSource, Ident, ImageSpec, LiteralMode, ObjBody, PageBox,
+    PdfParams, PdfWriter, VirtualFont, Whatsit,
 };
 use phitex_tfm::ScaledFont;
 use phitex_typeset::arith::{Scaled, UNITY};
@@ -41,11 +41,15 @@ const PT: Scaled = 65536;
 // ---- files ----
 
 fn kpse(name: &str) -> Option<Vec<u8>> {
+    std::fs::read(kpse_path(name)?).ok()
+}
+
+fn kpse_path(name: &str) -> Option<String> {
     thread_local! {
         static CACHE: std::cell::RefCell<HashMap<String, Option<String>>> =
             std::cell::RefCell::new(HashMap::new());
     }
-    let path = CACHE.with(|c| {
+    CACHE.with(|c| {
         c.borrow_mut()
             .entry(name.to_owned())
             .or_insert_with(|| {
@@ -58,8 +62,7 @@ fn kpse(name: &str) -> Option<Vec<u8>> {
                 (!s.is_empty()).then(|| s.to_owned())
             })
             .clone()
-    })?;
-    std::fs::read(path).ok()
+    })
 }
 
 fn oracle(name: &str) -> Vec<u8> {
@@ -1383,5 +1386,319 @@ fn xform() {
     let z = j.xform(2, None, None);
     j.nums.xforms.extend([x, x, y, z]);
     j.ship();
+    j.finish();
+}
+
+#[test]
+fn obj() {
+    let mut j = Job::new("obj", 0);
+    j.font("r", "cmr10", None);
+    j.w.params_mut().compress_level = 0;
+    let t = |s: &str| ObjBody::Text(s.as_bytes().to_vec());
+    let file = oracle("obj.tex");
+    let (a, _) = j.w.obj(None, false, None, t("<< /A 1 >>"));
+    let (b, _) = j.w.obj(None, false, None, t("[1 2 3]"));
+    j.w.write_obj(b).unwrap();
+    let c = j.w.obj_reserve();
+    j.w.obj(
+        Some(i64::try_from(c).unwrap()),
+        false,
+        None,
+        t("(reserved)"),
+    );
+    let (d, _) = j.w.obj(None, true, Some(b"/X 1".to_vec()), t("q Q"));
+    let (k, _) = j.w.obj(None, true, None, t("BT ET"));
+    j.w.write_obj(k).unwrap();
+    let (k, _) = j.w.obj(None, false, None, ObjBody::File(file.clone()));
+    j.w.write_obj(k).unwrap();
+    let (e, _) = j.w.obj(None, true, None, ObjBody::File(file));
+    j.read();
+    j.nums.objs.extend([a, d, e, c]);
+    assert!(j.w.obj(Some(999), false, None, t("bad")).1);
+    j.w.catalog(b"/PageMode /UseNone", None).unwrap();
+    j.w.info(b"/Title (Objects) /Author (Q)");
+    j.w.names(b"/EmbeddedFiles << /Names [] >>");
+    j.w.trailer(b"/Extra 1");
+    let p = j.w.params_mut();
+    p.page_attr = Some(b"/Rotate 0".to_vec());
+    p.pages_attr = Some(b"/CropBox [0 0 200 300]".to_vec());
+    p.page_resources = Some(b"/Pattern << >>".to_vec());
+    j.ship();
+    j.finish();
+}
+
+#[test]
+fn rerun() {
+    let mut j = Job::new("rerun", 0);
+    j.font("r", "cmr10", None);
+    j.w.params_mut().compress_level = 0;
+    let t = |s: &str| ObjBody::Text(s.as_bytes().to_vec());
+    j.w.obj(None, false, None, t("1"));
+    j.w.obj(None, false, None, t("2"));
+    let (n, _) = j.w.obj(None, false, None, t("3"));
+    assert!(n > 2);
+    let (k, _) = j.w.obj(None, false, None, t("4"));
+    j.w.write_obj(k).unwrap();
+    let (x, _) = j.w.obj(None, false, None, t(&format!("({k})")));
+    j.read();
+    j.nums.objs.push_back(x);
+    j.ship_all();
+    j.finish();
+}
+
+fn name(s: &str) -> Ident {
+    Ident::Name(s.as_bytes().to_vec())
+}
+
+fn goto(id: Ident) -> Action {
+    Action::Goto {
+        file: None,
+        id,
+        new_window: 0,
+        struct_id: None,
+    }
+}
+
+#[test]
+fn outline() {
+    let mut j = Job::new("outline", 0);
+    j.font("r", "cmr10", None);
+    j.w.params_mut().compress_level = 0;
+    j.w.outline(None, &goto(name("a")), 2, b"First").unwrap();
+    j.w.outline(None, &goto(name("b")), 0, b"Sub one").unwrap();
+    j.w.outline(
+        Some(b"/C [1 0 0]".to_vec()),
+        &goto(name("c")),
+        -1,
+        b"Sub two",
+    )
+    .unwrap();
+    j.w.outline(None, &goto(Ident::Num(3)), 0, b"Deep").unwrap();
+    j.w.outline(
+        None,
+        &Action::User(b"<< /S /URI /URI (http://y) >>".to_vec()),
+        0,
+        b"Second",
+    )
+    .unwrap();
+    j.w.outline(
+        None,
+        &Action::Page {
+            file: None,
+            page: 1,
+            spec: b"/XYZ 0 0 null".to_vec(),
+            new_window: 0,
+            struct_id: None,
+        },
+        0,
+        b"Third (with) parens",
+    )
+    .unwrap();
+    j.read();
+    j.ship_all();
+    j.finish();
+}
+
+#[test]
+fn thread() {
+    let mut j = Job::new("thread", 0);
+    j.font("r", "cmr10", None);
+    j.w.params_mut().compress_level = 0;
+    j.read();
+    j.ship();
+    let l = j.w.new_objnum();
+    j.nums.links.push_back(l);
+    j.ship();
+    j.finish();
+}
+
+#[test]
+fn annot() {
+    let mut j = Job::new("annot", 0);
+    j.font("r", "cmr10", None);
+    j.w.params_mut().compress_level = 0;
+    let a = j.w.new_objnum();
+    let ra = j.w.new_objnum();
+    j.nums.annots.extend([a, ra]);
+    // the links in reading order: 2 + U, N, P, M, R, T + nested 2 + across 1
+    for _ in 0..10 {
+        let l = j.w.new_objnum();
+        j.nums.links.push_back(l);
+    }
+    j.nums.new_window.push_back(1);
+    j.read();
+    j.ship_all();
+    j.finish();
+}
+
+/// `\\pdfximage` of `file`: an oracle fixture's file by its name, any
+/// other by its `kpsewhich` path.
+fn image(file: &str, res: i32, f: impl FnOnce(&mut ImageSpec)) -> ImageSpec {
+    let local = format!(
+        "{}/../../../oracle/fixtures/pdf/{file}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let (name, data) = match std::fs::read(&local) {
+        Ok(d) => (file.to_owned(), d),
+        Err(_) => {
+            let p = kpse_path(file).unwrap();
+            let d = std::fs::read(&p).unwrap();
+            (p, d)
+        }
+    };
+    let mut s = ImageSpec {
+        width: RUNNING,
+        height: RUNNING,
+        depth: RUNNING,
+        attr: None,
+        page: 1,
+        named: None,
+        colorspace: 0,
+        page_box: PageBox::Crop,
+        name: name.into_bytes(),
+        data: data.into(),
+        image_resolution: res,
+        inclusion_errorlevel: 0,
+    };
+    f(&mut s);
+    s
+}
+
+#[test]
+fn savepos() {
+    let mut j = Job::new("savepos", 0);
+    j.font("r", "cmr10", None);
+    j.w.params_mut().compress_level = 0;
+    j.read();
+    j.ship_all();
+    j.finish();
+}
+
+#[test]
+fn misc() {
+    let mut j = Job::new("misc", 0);
+    let r = j.font("r", "cmr10", None);
+    j.w.params_mut().compress_level = 0;
+    let b = j.font("b", "cmbx10", None);
+    j.w.font_attr(b, b"/Extra (bold)", &j.src);
+    j.w.include_chars(b, b"xyz", &j.src).unwrap();
+    j.w.font_name(r, &j.src).unwrap();
+    j.w.font_objnum(r, &j.src).unwrap();
+    j.w.font_name(b, &j.src).unwrap();
+    j.w.font_objnum(b, &j.src).unwrap();
+    j.w.map_line(b"+cmbx10 CMBX10 <cmbx10.pfb");
+    j.read();
+    j.ship_all();
+    j.finish();
+}
+
+#[test]
+fn jpgres() {
+    let mut j = Job::new("jpgres", 0);
+    j.font("r", "cmr10", None);
+    j.w.params_mut().compress_level = 0;
+    j.read();
+    for (f, res) in [
+        ("jpg-jfif0.jpg", 0),
+        ("jpg-jfif0.jpg", 96),
+        ("jpg-jfifcm.jpg", 0),
+        ("jpg-exif.jpg", 0),
+        ("jpg-exifcm.jpg", 0),
+        ("jpg-exifcm.jpg", 72),
+    ] {
+        let n = j.w.ximage(image(f, res, |_| {})).unwrap();
+        j.nums.ximages.push_back(n);
+    }
+    j.ship_all();
+    j.finish();
+}
+
+#[test]
+#[ignore = "needs font replacement on PDF inclusion"]
+fn ximage() {
+    let mut j = Job::new("ximage", 0);
+    j.font("r", "cmr10", None);
+    j.w.params_mut().compress_level = 0;
+    j.read();
+    let p = j.w.ximage(image("example-image.png", 0, |_| {})).unwrap();
+    let jp =
+        j.w.ximage(image("example-image.jpg", 0, |s| s.width = 50 * PT))
+            .unwrap();
+    let f =
+        j.w.ximage(image("example-image.pdf", 0, |s| {
+            s.height = 40 * PT;
+            s.depth = 5 * PT;
+        }))
+        .unwrap();
+    let q =
+        j.w.ximage(image("example-image-a.png", 0, |s| {
+            s.width = 30 * PT;
+            s.height = 20 * PT;
+            s.attr = Some(b"/Interpolate true".to_vec());
+        }))
+        .unwrap();
+    j.nums.ximages.extend([p, jp, f, q, jp, f]);
+    j.ship_all();
+    j.finish();
+}
+
+#[test]
+fn ximage2() {
+    let mut j = Job::new("ximage2", 0);
+    j.font("r", "cmr10", None);
+    let p = j.w.params_mut();
+    p.compress_level = 0;
+    p.inclusion_copy_fonts = 1;
+    j.read();
+    let a =
+        j.w.ximage(image("example-image-a.pdf", 300, |_| {}))
+            .unwrap();
+    let b =
+        j.w.ximage(image("example-image-a.jpg", 300, |_| {}))
+            .unwrap();
+    let c =
+        j.w.ximage(image("example-image-b.pdf", 300, |s| {
+            s.page_box = PageBox::Media
+        }))
+        .unwrap();
+    j.nums.ximages.extend([a, b, c]);
+    j.ship_all();
+    j.finish();
+}
+
+#[test]
+fn readback() {
+    let mut j = Job::new("readback", 0);
+    j.font("r", "cmr10", None);
+    j.w.params_mut().compress_level = 0;
+    j.read();
+    j.w.obj(None, false, None, ObjBody::Text(b"1".to_vec()));
+    let r = j.ids["r"];
+    let params = PackParams {
+        overfull_rule: 0,
+        ..PackParams::default()
+    };
+    let b = hpack(
+        vec![Node::Char {
+            font: r,
+            ch: u16::from(b'x'),
+        }],
+        Spec::Additional(0),
+        &j.src,
+        &params,
+        false,
+    )
+    .node;
+    j.w.xform(None, None, b);
+    j.w.ximage(image("example-image.png", 0, |_| {})).unwrap();
+    let a = j.w.new_objnum();
+    j.nums.annots.push_back(a);
+    let l = j.w.new_objnum();
+    j.nums.links.push_back(l);
+    assert!(
+        j.w.obj(Some(9999), false, None, ObjBody::Text(b"x".to_vec()))
+            .1
+    );
+    j.ship_all();
     j.finish();
 }
