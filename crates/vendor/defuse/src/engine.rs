@@ -379,6 +379,9 @@ pub struct Report {
     /// declared absent), and the nodes waiting on them, when the
     /// evaluation ended.
     pub env_stalled: u64,
+    /// The nodes waiting for an environment field, with the field each
+    /// one waits for (what the client has to supply or declare absent).
+    pub env_waits: Vec<(NodeId, Field)>,
     /// Nodes held back before running because a hinted input was missing.
     pub gated: u64,
     /// Speculative runs kept (with outstanding assumptions).
@@ -5500,7 +5503,8 @@ impl Engine {
     }
 
     /// Of `parked`, the nodes waiting for an environment field, and those
-    /// waiting (through any chain of waits) on one of them.
+    /// waiting (through any chain of waits) on one of them: a node parked
+    /// on one, or a range reader whose range holds one.
     fn env_stalled(&self, parked: &[Slot]) -> FxHashSet<Slot> {
         let mut stalled: FxHashSet<Slot> = self
             .env_waiters
@@ -5512,9 +5516,23 @@ impl Engine {
         loop {
             let before = stalled.len();
             for &x in parked {
+                if stalled.contains(&x) {
+                    continue;
+                }
                 let on = self.n(x).on;
                 if on != NIL && stalled.contains(&on) {
                     stalled.insert(x);
+                    continue;
+                }
+                if let Some((_, anchor)) = self.aux_of(x).and_then(|a| a.watch) {
+                    let (unit, label) = (self.n(x).unit, self.n(x).label);
+                    let lo = self.watch_key(x, anchor).0;
+                    if stalled
+                        .iter()
+                        .any(|&s| self.n(s).unit == unit && lo <= self.n(s).label && self.n(s).label < label)
+                    {
+                        stalled.insert(x);
+                    }
                 }
             }
             if stalled.len() == before {
@@ -5538,6 +5556,15 @@ impl Engine {
                 let stalled = self.env_stalled(&parked);
                 if stalled.len() == parked.len() {
                     self.report.env_stalled = stalled.len() as u64;
+                    let mut waits: Vec<(NodeId, Field)> = self
+                        .env_waiters
+                        .iter()
+                        .flat_map(|(&f, xs)| xs.iter().map(move |&x| (x, f)))
+                        .filter(|&(x, _)| stalled.contains(&x))
+                        .map(|(x, f)| (self.n(x).id, f))
+                        .collect();
+                    waits.sort_unstable();
+                    self.report.env_waits = waits;
                     return Ok(());
                 }
                 let mut ids: Vec<NodeId> = parked
