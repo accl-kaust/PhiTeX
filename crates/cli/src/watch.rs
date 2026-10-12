@@ -5,7 +5,8 @@
 //! written and the viewer told which pages changed. The files are watched
 //! by the system (`notify`: inotify, FSEvents, kqueue). On a terminal,
 //! keys (`keys.rs`: `r` rebuilds, `o` opens the viewer, `p` shows the
-//! problems again, `h` lists them, `q` quits) and a status line below
+//! errors again, `w` the warnings, `s` how the build went, `h` lists
+//! them, `q` quits; a live tree of the build's phases while it runs) and a status line below
 //! what is printed; on a pipe, the same as lines (its end quits). Every
 //! message the terminal shows is the viewer's too (its console).
 
@@ -13,6 +14,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -24,6 +26,7 @@ use crate::keys::{self, Key};
 use crate::modern::{self, Options, Target, Ui, ms};
 use crate::session::{self, Session, Status};
 use crate::tex;
+use crate::ui::pad;
 use crate::view::{self, Ask, Built, View};
 
 /// What wakes the watch.
@@ -124,7 +127,13 @@ fn diagnostics(r: &session::Report, log: &str) -> Vec<Value> {
         .out
         .errors
         .iter()
-        .map(|e| json!({"severity": "error", "code": "tex", "message": crate::problems::bare(e)}))
+        .map(|e| match &r.internal {
+            // (the engine's stop: its sentence, the dump under it)
+            Some(d) => json!({"severity": "error", "code": "engine", "message": e, "detail": d}),
+            None => {
+                json!({"severity": "error", "code": "tex", "message": crate::problems::bare(e)})
+            }
+        })
         .collect();
     for (k, n, first) in crate::warnings::summarize(&r.log_text()) {
         v.push(json!({
@@ -149,9 +158,66 @@ fn line_key(l: &str) -> Key {
     }
 }
 
+/// The keys answered where they are read, a build running or not: they
+/// need nothing of the build.
+struct Here {
+    ui: Ui,
+    /// The viewer's address (none: no viewer, or `--open` starts a program
+    /// on the output: the watch's own loop opens that).
+    url: Option<String>,
+    building: Arc<AtomicBool>,
+    /// For the cache's line on the way out.
+    target: Target,
+}
+
+fn help(ui: &Ui) {
+    for (k, what) in keys::HELP {
+        ui.line(&format!("  {}  {what}", ui.st.bold(&format!("{k:>9}"))));
+    }
+}
+
+impl Here {
+    /// Key `k` answered here (true), or for the watch's loop.
+    fn answer(&self, k: Key) -> bool {
+        let ui = &self.ui;
+        let busy = self.building.load(Ordering::Relaxed);
+        match k {
+            Key::Help => help(ui),
+            Key::Clear => ui.clear(),
+            Key::Other(c) => ui.line(&format!(
+                "phitex watch: `{c}` is no key here (h lists them)"
+            )),
+            Key::Open if self.url.is_some() => {
+                let url = self.url.as_deref().unwrap_or_default();
+                if !view::open_browser(url) {
+                    ui.warning(&format!("could not start a browser: open {url}"));
+                }
+            }
+            // (q or Ctrl-C while a build runs: out now, the build dropped)
+            Key::Quit if busy => {
+                ui.finish();
+                keys::restore();
+                ui.line(&ui.st.dim("stopped during a build"));
+                modern::cache_summary(&self.target, ui);
+                std::process::exit(0);
+            }
+            Key::Rebuild | Key::Problems | Key::Warnings | Key::Summary if busy => {
+                ui.line(
+                    &ui.st
+                        .dim("phitex watch: a build is running; this comes after it"),
+                );
+                return false;
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
 /// Standard input's keys (a terminal's, one at a time; escape sequences,
-/// the arrows', dropped) or lines, to `tx`; its end quits.
-fn read_keys(tx: &mpsc::Sender<Event>, raw: bool) {
+/// the arrows', dropped) or lines, to `tx` (those not answered `here`);
+/// its end quits.
+fn read_keys(tx: &mpsc::Sender<Event>, raw: bool, here: &Here) {
     if raw {
         let mut bytes = std::io::stdin().lock().bytes();
         let mut text = Vec::new();
@@ -169,13 +235,6 @@ fn read_keys(tx: &mpsc::Sender<Event>, raw: bool) {
                 }
                 continue;
             }
-            // (Ctrl-C: out at once, a build running or not, as the
-            // terminal's own Ctrl-C would)
-            if b == 0x03 {
-                keys::restore();
-                eprintln!();
-                std::process::exit(130);
-            }
             // (a character's bytes, whole)
             text.push(b);
             let Ok(t) = std::str::from_utf8(&text) else {
@@ -187,6 +246,7 @@ fn read_keys(tx: &mpsc::Sender<Event>, raw: bool) {
             let k = t.chars().next().and_then(Key::of);
             text.clear();
             if let Some(k) = k
+                && !here.answer(k)
                 && tx.send(Event::Key(k)).is_err()
             {
                 return;
@@ -195,7 +255,8 @@ fn read_keys(tx: &mpsc::Sender<Event>, raw: bool) {
     } else {
         for l in std::io::stdin().lock().lines() {
             let Ok(l) = l else { break };
-            if tx.send(Event::Key(line_key(&l))).is_err() {
+            let k = line_key(&l);
+            if !here.answer(k) && tx.send(Event::Key(k)).is_err() {
                 return;
             }
         }
@@ -217,6 +278,57 @@ struct Last {
     cold: Option<Duration>,
     /// The last change's time from its save to the viewer's screen.
     screen: Option<Duration>,
+    /// The builds, and the edits' times (those that changed something).
+    builds: usize,
+    edits: Vec<Duration>,
+    /// The last build's summary, for `s`.
+    summary: Vec<String>,
+}
+
+/// The quit line: `✓ 9 builds · fastest edit 9.2 ms · median 412 ms ·
+/// cold 15.38 s`.
+fn farewell(st: crate::ui::Style, l: &Last) -> Option<String> {
+    if l.builds == 0 {
+        return None;
+    }
+    let sep = st.dim(" · ");
+    let mut parts = vec![format!(
+        "{} build{}",
+        l.builds,
+        if l.builds == 1 { "" } else { "s" }
+    )];
+    let mut e = l.edits.clone();
+    e.sort();
+    if let Some(f) = e.first() {
+        parts.push(format!("fastest edit {}", st.bold(&ms(*f))));
+        parts.push(format!("median {}", ms(e[e.len() / 2])));
+    }
+    if let Some(c) = l.cold {
+        parts.push(format!("cold {}", ms(c)));
+    }
+    Some(format!(
+        "{} {}",
+        st.green(st.sym("✓", "done:")),
+        parts.join(&sep)
+    ))
+}
+
+/// `rows` as a tree under `head`: `├─ name  value`, the last `└─`.
+fn tree(st: crate::ui::Style, head: String, rows: &[(String, String)]) -> Vec<String> {
+    let mut out = vec![head];
+    for (k, (name, value)) in rows.iter().enumerate() {
+        let branch = if k + 1 == rows.len() {
+            "└─"
+        } else {
+            "├─"
+        };
+        out.push(format!(
+            "  {} {} {value}",
+            st.dim(branch),
+            crate::ui::pad(name, 14, false)
+        ));
+    }
+    out
 }
 
 /// `cold / wall` as `14×` or `2.5×`, when an edit beat the cold build.
@@ -239,6 +351,21 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         ui.error(&e);
         std::process::exit(crate::EXIT_USAGE);
     });
+    // (the banner: what is built into what, by which engine)
+    if !ui.quiet {
+        let threads = job
+            .threads
+            .or_else(|| std::env::var("PHITEX_THREADS").ok()?.parse().ok())
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
+        ui.line(&format!(
+            "{} {}  {} → {}  {}",
+            st.bold("PhiTeX"),
+            st.dim(env!("CARGO_PKG_VERSION")),
+            st.bold(&t.file),
+            st.bold(&format!("{}.{}", job.jobname, job.engine.output.ext())),
+            st.dim(&format!("{} · {threads} threads", job.engine.name))
+        ));
+    }
     for n in session::waiting_notes(&job) {
         ui.line(&format!("{}: {n}", st.yellow("note")));
     }
@@ -262,9 +389,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // (a terminal editor, or an unknown one: the viewer shows the place
     // instead of opening it)
     let editor = crate::editor::Editor::configured(t.editor.as_deref()).unwrap_or_else(|e| {
-        ui.note(&format!(
-            "editor `{e}`: not one the viewer can open (a terminal editor?): a double-click on a page shows the \
-             place; --editor names one it can (code, emacsclient, nvim, …)"
+        ui.line(&format!(
+            "{}: editor `{e}`: the viewer can't open it (--editor code, nvim, emacsclient, …)",
+            st.yellow("note")
         ));
         None
     });
@@ -286,7 +413,12 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                         .unwrap_or_else(PoisonError::into_inner)
                         .send(Event::Clients(n));
                 }));
-                ui.line(&format!("{} {}", st.dim("viewer:"), st.cyan(v.url())));
+                ui.line(&format!(
+                    "{}  {}  {}",
+                    st.dim("viewer"),
+                    st.cyan(v.url()),
+                    st.dim("(o opens it)")
+                ));
                 ui.event(&json!({"event": "viewer", "url": v.url()}));
                 if o.open && t.viewer.is_none() && !view::open_browser(v.url()) {
                     ui.warning("could not start a browser");
@@ -308,33 +440,41 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         std::process::exit(crate::EXIT_USAGE);
     });
     let raw = !ui.json && keys::raw();
+    let building = Arc::new(AtomicBool::new(false));
     {
         let tx = tx.clone();
+        let here = Here {
+            ui: ui.clone(),
+            url: view
+                .as_ref()
+                .filter(|_| t.viewer.is_none())
+                .map(|v| v.url().to_owned()),
+            building: building.clone(),
+            target: t.clone(),
+        };
         std::thread::Builder::new()
             .name("phitex-watch-stdin".into())
-            .spawn(move || read_keys(&tx, raw))
+            .spawn(move || read_keys(&tx, raw, &here))
             .expect("a thread");
     }
     drop(tx);
-    let help = |ui: &Ui| {
-        for (k, what) in keys::HELP {
-            ui.line(&format!("  {}  {what}", st.bold(&format!("{k:>9}"))));
-        }
-    };
     if raw {
-        ui.line(&st.dim("phitex watch: h lists the keys, q quits"));
+        ui.keys(keys::BAR);
     }
+    let last = RefCell::new(Last::default());
     let quit = |ui: &Ui| -> ! {
-        ui.status(None, None);
+        ui.finish();
         keys::restore();
+        if let Some(l) = farewell(st, &last.borrow()) {
+            ui.line(&l);
+        }
         modern::cache_summary(t, ui);
         std::process::exit(0);
     };
-    let last = RefCell::new(Last::default());
     // (the status line: the last build and the browsers watching)
     let show = |ui: &Ui, l: &Last| {
         let sep = " · ";
-        let mut parts = vec![format!("watching {main_rel}")];
+        let mut parts = vec![main_rel.clone()];
         if let Some((b, _)) = &l.build {
             parts.push(b.clone());
             if let Some(d) = l.screen {
@@ -347,9 +487,6 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 1 => "1 viewer".to_owned(),
                 n => format!("{n} viewers"),
             });
-        }
-        if raw {
-            parts.push("h: keys".to_owned());
         }
         ui.status(Some(&parts.join(sep)), l.build.as_ref().map(|b| b.1));
     };
@@ -365,6 +502,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // (`since`: when the change came; none for the cold build)
     let mut rebuild = |s: &mut Session, why: &str, since: Option<Instant>| {
         builds += 1;
+        last.borrow_mut().builds = builds;
+        status.take();
+        building.store(true, Ordering::Relaxed);
         if let Some(v) = &view {
             v.building(true);
         }
@@ -375,6 +515,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             Ok(r) => r,
             Err(m) => {
                 spin.done();
+                building.store(false, Ordering::Relaxed);
                 ui.failed(&format!("build {builds} ({why})"), &m);
                 let first = m.lines().next().unwrap_or("the engine panicked");
                 ui.event(
@@ -400,7 +541,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             }
         };
         let failed = !r.out.errors.is_empty();
-        status.set("writing the outputs");
+        status.set("writing files");
         // (the watcher waits on the lock while the files are written, then
         // knows them as the watch's own; a build with errors leaves the last
         // good output in place)
@@ -448,7 +589,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 .join(format!("{}.log", s.job.jobname))
                 .display()
                 .to_string();
-            status.set("drawing the pages for the viewer");
+            status.set("viewer");
             if !failed {
                 last_hashes.clone_from(&r.out.page_hashes);
             }
@@ -464,6 +605,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             status.set("");
         }
         spin.done();
+        building.store(false, Ordering::Relaxed);
         // (the place edited: the main file's first changed line)
         let place = match r.edit_line {
             Some(l) => why
@@ -481,63 +623,135 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         };
         let nodes = r.runs.last().map_or(0, |x| x.commands_run);
         let changed = &r.out.pages_changed;
+        // (a save that changed nothing the build reads (vim writes twice)
+        // keeps the last change's time to the screen)
+        let noop = !failed && builds > 1 && nodes == 0 && changed.is_empty();
+        let warnings: usize = crate::warnings::summarize(&r.log_text())
+            .iter()
+            .map(|w| w.1)
+            .sum();
+        let live = r.runs.last().map_or(0, |x| x.live);
+        // (aligned columns: what changed, the work, the time; then the
+        // speed against the cold build, parallelism when there was some,
+        // the warnings)
         let mut facts = Vec::new();
         if failed {
             let n = r.out.errors.len();
             facts.push(st.red(&format!("{n} error{}", if n == 1 { "" } else { "s" })));
-            facts.push(if last.borrow().good.is_some() {
-                "last good output kept".to_owned()
-            } else {
-                "nothing written".to_owned()
-            });
+            if last.borrow().good.is_some() {
+                facts.push("last good PDF kept".to_owned());
+            }
+        } else if noop {
+            facts.push("unchanged".to_owned());
         } else {
-            let live = r.runs.last().map_or(0, |x| x.live);
-            // (an edit: what it ran of what the document has, the rest kept)
-            #[allow(clippy::cast_precision_loss)]
-            facts.push(if builds > 1 && live > 0 {
-                let kept = 100.0 * (1.0 - nodes as f64 / live as f64).max(0.0);
-                format!("{nodes} of {live} nodes run ({kept:.0}% kept)")
-            } else {
-                format!("{nodes} nodes run")
-            });
             let n = r.pages();
-            let s = if n == 1 { "" } else { "s" };
             facts.push(if builds == 1 {
-                format!("{n} page{s}")
+                format!("{n} page{}", if n == 1 { "" } else { "s" })
             } else if changed.is_empty() {
-                format!("no page of {n} changed")
+                "no page changed".to_owned()
             } else {
                 format!(
-                    "{} of {n} page{s} changed ({})",
-                    changed.len(),
+                    "page{} {}",
+                    if changed.len() == 1 { "" } else { "s" },
                     view::ranges(changed)
                 )
             });
+            facts.push(if builds > 1 && live > 0 {
+                format!("{nodes}/{live} nodes")
+            } else {
+                format!("{nodes} nodes")
+            });
         }
-        facts.push(st.bold(&ms(r.wall)));
+        let mut tail = Vec::new();
         let cold = last.borrow().cold;
         match cold {
             None if !failed => last.borrow_mut().cold = Some(r.wall),
-            Some(c) if !failed => {
+            Some(c) if !failed && !noop => {
+                last.borrow_mut().edits.push(r.wall);
                 if let Some(x) = faster(c, r.wall) {
-                    facts.push(st.green(&format!("{x} faster than cold")));
+                    tail.push(st.green(&format!("{x} faster")));
                 }
             }
             _ => {}
         }
-        // (a save that changed nothing the build reads (vim writes twice)
-        // keeps the last change's time to the screen)
-        let noop = !failed && builds > 1 && nodes == 0 && changed.is_empty();
+        if let Some(p) = r
+            .runs
+            .last()
+            .and_then(session::RunInfo::speedup)
+            .filter(|&p| p >= 1.2)
+        {
+            tail.push(st.cyan(&format!("{p:.1}× parallel")));
+        }
+        if warnings > 0 {
+            tail.push(st.yellow(&format!(
+                "{warnings} warning{} (w)",
+                if warnings == 1 { "" } else { "s" }
+            )));
+        }
         let mark = if failed {
             st.red(st.sym("✗", "failed:"))
         } else {
             st.green(st.sym("✓", "ok:"))
         };
-        ui.line(&format!(
-            "{mark} build {builds}  {}  {}",
-            st.cyan(&place),
-            facts.join(st.sym(" · ", ", "))
-        ));
+        let sep = st.dim(st.sym(" · ", ", "));
+        let mut out = format!(
+            "{mark} {}  {}  {}  {}",
+            pad(&builds.to_string(), 2, true),
+            pad(&st.cyan(&place), 10, false),
+            pad(&facts.join(&sep), 26, false),
+            pad(&st.bold(&ms(r.wall)), 9, true)
+        );
+        if !tail.is_empty() {
+            out.push_str("  ");
+            out.push_str(&tail.join("  "));
+        }
+        ui.line(out.trim_end());
+        // (for `s`: the build's phases, its reuse, its parallelism)
+        {
+            let mut rows = Vec::new();
+            if builds > 1 && live > 0 {
+                let kept = live.saturating_sub(usize::try_from(nodes).unwrap_or(live));
+                rows.push((
+                    "reuse".to_owned(),
+                    format!("{kept}/{live} nodes kept ({}%)", kept * 100 / live.max(1)),
+                ));
+            } else {
+                rows.push(("nodes".to_owned(), format!("{nodes} run")));
+            }
+            for (name, d) in status.take() {
+                rows.push((name, ms(d)));
+            }
+            if let Some(x) = r.runs.last() {
+                // (a run too short to measure says only its threads)
+                let mut p = match x.speedup().filter(|_| x.engine_wall.as_millis() >= 50) {
+                    Some(p) => format!("{p:.1}× on {} threads", x.threads),
+                    None => format!(
+                        "{} thread{}",
+                        x.threads,
+                        if x.threads == 1 { "" } else { "s" }
+                    ),
+                };
+                // (the chain is the whole document's: an edit that ran fewer
+                // nodes says nothing by it)
+                if let Some(c) = x
+                    .critical_path
+                    .filter(|&c| c > 0 && x.commands_run >= c as u64)
+                {
+                    p.push_str(&format!(" · longest chain {c} nodes"));
+                }
+                if x.peak_running > 0 {
+                    p.push_str(&format!(" · at most {} at once", x.peak_running));
+                }
+                rows.push(("parallel".to_owned(), p));
+            }
+            let head = format!(
+                "{}  {}  {}",
+                st.bold(&format!("build {builds}")),
+                st.cyan(&place),
+                st.bold(&ms(r.wall))
+            );
+            last.borrow_mut().summary = tree(st, head, &rows);
+        }
         ui.event(&json!({
             "event": "build",
             "build": builds,
@@ -548,6 +762,13 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             "pages": r.pages(),
             "pages_changed": changed,
             "nodes_run": nodes,
+            "parallel": r.runs.last().map(|x| json!({
+                "threads": x.threads,
+                "busy_ms": x.busy.as_secs_f64() * 1e3,
+                "engine_ms": x.engine_wall.as_secs_f64() * 1e3,
+                "critical_path": x.critical_path,
+                "peak_running": x.peak_running,
+            })),
             "wall_ms": r.wall.as_secs_f64() * 1e3,
             "errors": r.out.errors,
         }));
@@ -564,14 +785,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             false,
         );
         // (the status line: the build's facts, without the colours)
-        let warnings: usize = crate::warnings::summarize(&r.log_text())
-            .iter()
-            .map(|w| w.1)
-            .sum();
-        let mut brief = vec![format!(
-            "build {builds} {}",
-            if failed { "failed" } else { "ok" }
-        )];
+        let mut brief = vec![format!("build {builds}")];
         if failed {
             let n = r.out.errors.len();
             brief.push(format!("{n} error{}", if n == 1 { "" } else { "s" }));
@@ -588,11 +802,6 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         }
         {
             let mut l = last.borrow_mut();
-            if let (Some(c), false) = (l.cold.filter(|_| builds > 1), failed)
-                && let Some(x) = faster(c, r.wall)
-            {
-                brief.push(format!("{x} faster than cold"));
-            }
             if !noop {
                 l.screen = None;
             }
@@ -660,22 +869,36 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                         }
                     }
                     Key::Problems => match &last.borrow().problems {
-                        Some((errors, log)) => {
-                            let n = errors.len();
+                        Some((errors, _)) if errors.is_empty() => {
+                            ui.line(&st.green("no errors"));
+                        }
+                        Some((errors, log)) => crate::problems::show(ui, errors, log, &t.file),
+                        None => ui.line("phitex watch: no build yet"),
+                    },
+                    Key::Warnings => match &last.borrow().problems {
+                        Some((_, log)) => {
                             let ws = crate::warnings::summarize(log);
-                            if n == 0 && ws.is_empty() {
-                                ui.line(&st.green("no errors, no warnings"));
+                            if ws.is_empty() {
+                                ui.line(&st.green("no warnings"));
                             }
-                            crate::problems::show(ui, errors, log, &t.file);
                             for (k, n, first) in ws {
-                                ui.warning(&format!(
-                                    "{n} × {k:?}: {}",
-                                    first.first().cloned().unwrap_or_default()
-                                ));
+                                ui.warning(&format!("{n} × {k:?}"));
+                                for l in first {
+                                    ui.line(&st.dim(&format!("  {l}")));
+                                }
                             }
                         }
                         None => ui.line("phitex watch: no build yet"),
                     },
+                    Key::Summary => {
+                        let l = last.borrow();
+                        if l.summary.is_empty() {
+                            ui.line("phitex watch: no build yet");
+                        }
+                        for line in &l.summary {
+                            ui.line(line);
+                        }
+                    }
                     Key::Clear => ui.clear(),
                     Key::Help => help(ui),
                     Key::Other(c) => ui.line(&format!(

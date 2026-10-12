@@ -272,7 +272,7 @@ fn parse(args: &[String]) -> Result<Options, clap::Error> {
 }
 
 /// What to build.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Target {
     /// The main file, as TeX is given it (from the directory the build
     /// runs in).
@@ -400,7 +400,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
             .as_ref()
             .map_or_else(|| PathBuf::from("."), PathBuf::from),
         // (batch mode, as the oracles run: the CLI shows the errors itself)
-        threads: o.threads.unwrap_or_else(crate::default_threads),
+        threads: o.threads,
         synctex: t.synctex,
         recorder: false,
         shell_escape: t.shell_escape,
@@ -438,11 +438,12 @@ pub fn report(
     if o.verbose > 0 {
         for (k, run) in r.runs.iter().enumerate() {
             ui.line(&st.dim(&format!(
-                "  run {}: {} ({}): {} nodes reduced",
+                "  run {}: {} ({}): {} nodes reduced{}",
                 k + 1,
                 ms(run.wall),
                 run.why,
                 run.commands_run,
+                run.parallel().map(|p| format!(", {p}")).unwrap_or_default(),
             )));
         }
     }
@@ -450,6 +451,9 @@ pub fn report(
         for n in &r.notes {
             ui.line(&st.dim(&format!("  {n}")));
         }
+    }
+    if let (Some(d), true) = (&r.internal, o.verbose > 0 || ui.verbose > 0) {
+        ui.line(&st.dim(&format!("  the engine's details: {d}")));
     }
     let log = job.out_dir.join(format!("{}.log", job.jobname));
     let text = r.log_text();
