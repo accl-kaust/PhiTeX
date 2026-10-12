@@ -29,6 +29,7 @@ mod api;
 mod build;
 mod control;
 mod etex;
+mod exec;
 mod expand;
 mod fonts;
 mod log;
