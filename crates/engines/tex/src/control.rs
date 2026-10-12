@@ -39,6 +39,9 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn dispatch(&mut self) -> R<()> {
         let md = self.mode()?;
+        if crate::etex::command(self, &md)? {
+            return Ok(());
+        }
         let am = md.m.abs();
         let (v, h) = (am == 1, am == 102);
         let c = self.cur.cmd;
@@ -338,6 +341,7 @@ impl Run<'_, '_> {
                 return Ok(());
             }
         }
+        let protected = crate::etex::take_protected(&mut a);
         // §1214
         let gd = self.param("globaldefs")?;
         if gd != 0 {
@@ -351,6 +355,9 @@ impl Run<'_, '_> {
         }
         let global = a >= 4;
         let v = self.v;
+        if crate::etex::prefixed(self, global)? {
+            return self.after_assignment();
+        }
         match self.cur.cmd {
             cmd::SET_FONT => {
                 // §1217
@@ -368,7 +375,8 @@ impl Run<'_, '_> {
                 let p = self.get_r_token()?;
                 let (params, body) = self.scan_toks(true, e)?;
                 let m = Mean::Macro(Rc::new(Macro {
-                    flags: u8::try_from(a % 4).unwrap_or(0),
+                    flags: u8::try_from(a % 4).unwrap_or(0)
+                        | if protected { crate::etex::PROTECTED } else { 0 },
                     params,
                     body,
                 }));
@@ -1102,6 +1110,9 @@ impl Run<'_, '_> {
 
     /// `show_whatever` (§1293): shown in the log.
     fn show_whatever(&mut self) -> R<()> {
+        if self.cur.chr >= 4 {
+            return crate::etex::show(self);
+        }
         let mut s = String::from("> ");
         match self.cur.chr {
             0 => {

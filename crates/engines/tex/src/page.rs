@@ -51,8 +51,9 @@ impl Run<'_, '_> {
         let Some(Node::Box(bx)) = nodes::decode(v, b, &mut side) else {
             return Ok(());
         };
+        let pos = crate::pdfprim::positions(self, &bx)?;
         // §1366: the whatsits in the order `hlist_out`/`vlist_out` meet them
-        for w in side.whats.clone() {
+        for (wi, w) in side.whats.clone().into_iter().enumerate() {
             let xs = list_of(v, w);
             let kind = xs.first().map(|&k| str_of(v, k)).unwrap_or_default();
             match kind.as_str() {
@@ -71,7 +72,10 @@ impl Run<'_, '_> {
                     let n = xs.get(1).map_or(0, |&y| int_of(v, y));
                     self.set(&format!("write:{n}"), ValueId::UNIT, true);
                 }
-                _ => {}
+                k => {
+                    let at = u32::try_from(wi).ok().and_then(|i| pos.at.get(&i).copied());
+                    crate::pdfprim::at_shipout(self, k, at, &pos)?;
+                }
             }
         }
         let view = self.font_view(std::slice::from_ref(&Node::Box(bx)))?;
@@ -220,8 +224,12 @@ impl Run<'_, '_> {
         if bot.is_some() {
             top = bot;
         }
+        crate::etex::fire_marks(self, &f.marks, side)?;
         for &k in &f.marks {
             let m = side.marks.get(k as usize).copied();
+            if crate::etex::is_class_mark(v, m) {
+                continue;
+            }
             if first.is_none() {
                 first = m;
             }

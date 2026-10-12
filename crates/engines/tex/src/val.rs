@@ -10,8 +10,6 @@ use std::sync::OnceLock;
 use phitex_defuse::{Field, Value, ValueId, Values};
 use phitex_typeset::glue::{Glue, Order};
 
-use crate::prims::PRIMS;
-
 // Command codes (§207–§210), the table whole.
 #[allow(dead_code)]
 pub(crate) mod cmd {
@@ -326,12 +324,20 @@ pub(crate) const OUT_PARAM_CAT: u8 = 5;
 
 fn prim_index() -> &'static std::collections::HashMap<&'static str, (u8, i32)> {
     static M: OnceLock<std::collections::HashMap<&'static str, (u8, i32)>> = OnceLock::new();
-    M.get_or_init(|| PRIMS.iter().map(|&(n, c, h)| (n, (c, h))).collect())
+    M.get_or_init(|| {
+        crate::etex::all_prims()
+            .map(|&(n, c, h)| (n, (c, h)))
+            .collect()
+    })
 }
 
 fn prim_names() -> &'static std::collections::HashMap<(u8, i32), &'static str> {
     static M: OnceLock<std::collections::HashMap<(u8, i32), &'static str>> = OnceLock::new();
-    M.get_or_init(|| PRIMS.iter().map(|&(n, c, h)| ((c, h), n)).collect())
+    M.get_or_init(|| {
+        crate::etex::all_prims()
+            .map(|&(n, c, h)| ((c, h), n))
+            .collect()
+    })
 }
 
 /// The primitive named `name` (frozen and internal ones included).
@@ -345,7 +351,9 @@ pub(crate) fn prim(name: &str) -> Option<(&'static str, u8, i32)> {
         _ => {}
     }
     prim_index().get(base).map(|&(c, h)| {
-        let n = PRIMS.iter().find(|p| p.0 == base).map_or("", |p| p.0);
+        let n = crate::etex::all_prims()
+            .find(|p| p.0 == base)
+            .map_or("", |p| p.0);
         (n, c, h)
     })
 }
@@ -359,7 +367,7 @@ impl Mean {
     pub(crate) fn cmd_chr(&self) -> (u8, i32) {
         match self {
             Mean::Prim(_, c, h) | Mean::Reg(c, h) => (*c, *h),
-            Mean::Macro(m) => (cmd::CALL + m.flags, 0),
+            Mean::Macro(m) => (cmd::CALL + (m.flags & 3), 0),
             Mean::Char(c, h) => (*c, i32::try_from(*h).unwrap_or(0)),
             Mean::Undefined => (cmd::UNDEFINED_CS, 0),
             Mean::Font(f) => (cmd::SET_FONT, i32::try_from(*f).unwrap_or(0)),
@@ -570,7 +578,8 @@ pub(crate) fn initex(v: &Values) -> Vec<(String, ValueId)> {
         "cs:\u{10FFFE}endgraf".to_owned(),
         v.list(vec![v.str("prim"), v.str("\u{10FFFE}endgraf")]),
     ));
-    for &(n, _, _) in PRIMS {
+    out.extend(crate::pdfprim::initex(v));
+    for &(n, _, _) in crate::etex::all_prims() {
         out.push((format!("cs:{n}"), v.list(vec![v.str("prim"), v.str(n)])));
     }
     // §552: the null font's name

@@ -27,6 +27,7 @@ pub trait Engine: Send + Sync {
 mod api;
 mod build;
 mod control;
+mod etex;
 mod expand;
 mod fonts;
 mod log;
@@ -34,6 +35,7 @@ mod math;
 mod nodes;
 mod ops;
 mod page;
+mod pdfprim;
 mod prims;
 mod print;
 mod run;

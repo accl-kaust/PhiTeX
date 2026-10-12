@@ -504,13 +504,15 @@ impl Run<'_, '_> {
         Ok(g)
     }
 
+    /// A register or box number: e-TeX's `scan_register_num` (pdfTeX
+    /// §1809, 0..32767) wherever tex.web reads one.
     pub(crate) fn scan_eight_bit_int(&mut self) -> R<i32> {
-        let n = self.scan_int()?;
-        Ok(if (0..=255).contains(&n) { n } else { 0 })
+        self.scan_register_num()
     }
 
     pub(crate) fn scan_char_num(&mut self) -> R<i32> {
-        self.scan_eight_bit_int()
+        let n = self.scan_int()?;
+        Ok(if (0..=255).contains(&n) { n } else { 0 })
     }
 
     pub(crate) fn scan_four_bit_int(&mut self) -> R<i32> {
@@ -645,6 +647,11 @@ impl Run<'_, '_> {
                 // §422
                 let md = self.mode()?;
                 IVal::Int(self.int32(&format!("pg:{}", md.vlid))?)
+            }
+            cmd::SET_PAGE_INT | cmd::SET_SHAPE | cmd::ASSIGN_FONT_INT
+                if crate::etex::is_internal(c, m) =>
+            {
+                crate::etex::internal(self)?
             }
             cmd::SET_PAGE_INT => {
                 // §419
@@ -802,7 +809,7 @@ impl Run<'_, '_> {
                 // §478
                 loop {
                     self.get_next_or_end()?;
-                    if self.cur.cmd <= cmd::MAX_COMMAND {
+                    if self.cur.cmd <= cmd::MAX_COMMAND || crate::etex::protect(&mut self.cur) {
                         break;
                     }
                     if self.cur.cmd == cmd::THE {

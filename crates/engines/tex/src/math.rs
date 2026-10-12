@@ -173,7 +173,7 @@ pub(crate) fn decode_mlist(v: &Values, items: &[ValueId], side: &mut Side) -> ML
                 right: delimiter(n(5)),
             })),
             T_LEFT => out.push(MItem::Left(delimiter(n(1)))),
-            T_RIGHT => out.push(MItem::Right(delimiter(n(1)), false)),
+            T_RIGHT => out.push(MItem::Right(delimiter(n(1)), n(2) != 0)),
             T_STYLE => out.push(MItem::Style(Style(u8::try_from(n(1)).unwrap_or(2)))),
             T_CHOICE => out.push(MItem::Choice(Box::new([
                 sub(1, side),
@@ -450,7 +450,7 @@ impl Run<'_, '_> {
     }
 
     /// `scan_delimiter` (§1160).
-    fn scan_delimiter(&mut self, radical: bool) -> R<i64> {
+    pub(crate) fn scan_delimiter(&mut self, radical: bool) -> R<i64> {
         let mut val = if radical {
             self.scan_twenty_seven_bit_int()?
         } else {
@@ -700,7 +700,7 @@ impl Run<'_, '_> {
 
     /// `fin_mlist` (§1184–§1185): the list `lid`, with the incompleat
     /// noad and `p` (a right delimiter) in place.
-    fn fin_mlist(&mut self, lid: i64, p: Option<ValueId>) -> R<Vec<ValueId>> {
+    pub(crate) fn fin_mlist(&mut self, lid: i64, p: Option<ValueId>) -> R<Vec<ValueId>> {
         let v = self.v;
         let (items, _) = self.list_items(lid)?;
         let inc = self
