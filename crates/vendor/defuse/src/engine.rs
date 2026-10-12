@@ -974,7 +974,9 @@ impl Default for Engine {
     }
 }
 
-/// Iterates the following siblings of a node, as text.
+/// Iterates the nodes following a node as text, skipping what lies inside
+/// them: its later siblings, then (an unfolded child's text sits inline
+/// after its parent) the parent's later siblings, and so on up.
 pub(crate) struct Following<'a> {
     eng: &'a Engine,
     unit: u32,
@@ -998,8 +1000,13 @@ impl Iterator for Following<'_> {
                 self.slots.push(s);
                 return Some((n.op, e.args_vec(n.args)));
             }
-            if !e.descends(s, self.parent) {
-                return None;
+            while !e.descends(s, self.parent) {
+                // Past the parent's text: on to the parent's siblings.
+                self.parent = e.nodes[self.parent.ix as usize].parent;
+                if n.parent == self.parent {
+                    self.slots.push(s);
+                    return Some((n.op, e.args_vec(n.args)));
+                }
             }
         }
     }
@@ -2335,13 +2342,19 @@ impl Engine {
         self.order.get(root, label).is_some_and(|i| i.eff & EFF_BEFORE != 0)
     }
 
-    /// The scope depth at which the node at `label` defines `f`: where the
-    /// node lies (after its brackets if they come before it), except that
-    /// an opener's kind is defined inside the scope it opens.
-    fn def_depth(&self, root: u32, label: u64, f: Field) -> u32 {
+    /// Whether the node at `label` defines `f` inside its own brackets:
+    /// after them if they come before it; an opener's kind (and sequence
+    /// marker) inside the scope it opens. Its other definitions lie
+    /// outside: a plain opener defines in the enclosing scope.
+    fn def_inside(&self, root: u32, label: u64, f: Field) -> bool {
         let opener_mark = (f == self.kind_field || self.is_seq_hidden(f))
             && self.order.get(root, label).is_some_and(|i| eff_opens(i.eff) > 0);
-        let inside = opener_mark || self.brackets_before(root, label);
+        opener_mark || self.brackets_before(root, label)
+    }
+
+    /// The scope depth at which the node at `label` defines `f`.
+    fn def_depth(&self, root: u32, label: u64, f: Field) -> u32 {
+        let inside = self.def_inside(root, label, f);
         self.order
             .fold(&OAug, root, 0, if inside { label + 1 } else { label })
             .o
@@ -2887,14 +2900,21 @@ impl Engine {
     /// Where the reach of a local definition of `f` at `lx` ends
     /// (exclusive): the close of its scope.
     fn local_end(&self, root: u32, lx: u64, f: Field) -> u64 {
-        let depth = self.order.fold(&OAug, root, 0, lx + 1).o;
-        if depth == 0 {
+        if self.def_depth(root, lx, f) == 0 {
             return u64::MAX;
         }
+        // The first unmatched close after the definition's brackets: the
+        // node's own brackets count unless the definition lies inside
+        // them (then they are matched, or close the scope it is in).
+        let after = if self.def_inside(root, lx, f) {
+            lx
+        } else {
+            lx.saturating_sub(1)
+        };
         // The closing node's own reads are inside the scope, unless its
         // brackets come before it (its kind read always is).
         self.order
-            .search_fwd(&OAug, root, lx, &|s: OSum| s.c >= 1)
+            .search_fwd(&OAug, root, after, &|s: OSum| s.c >= 1)
             .map_or(u64::MAX, |e| {
                 if f == self.kind_field || !self.brackets_before(root, e) {
                     e + 1
@@ -3716,6 +3736,13 @@ impl Engine {
         (n.unit, after, end)
     }
 
+    /// The node before `label` in `unit`'s order.
+    fn order_prev(&self, unit: u32, label: u64) -> Option<(u64, Slot)> {
+        self.order
+            .prev(self.units[unit as usize].root, label)
+            .map(|(k, i)| (k, i.slot))
+    }
+
     /// The next node after `label` in `unit`'s order.
     pub(crate) fn order_next(&self, unit: u32, label: u64) -> Option<(u64, Slot)> {
         self.order
@@ -4216,7 +4243,22 @@ impl Engine {
         let ids = self.child_ids(x, specs);
         let old = self.aux_of(x).map_or_else(Default::default, |a| a.children.clone());
         let old_ids: Vec<NodeId> = old.iter().map(|&c| self.n(c).id).collect();
-        if old_ids == ids {
+        let body = self.aux_of(x).and_then(|a| a.body);
+        let unit = body.unwrap_or(self.n(x).unit);
+        // The children follow the claimed text (a body is a unit of its
+        // own). A claim that changed moved that anchor: children already
+        // there are made again at the new place.
+        let anchor = if body.is_some() {
+            None
+        } else {
+            let last_claimed = self.aux_of(x).and_then(|a| a.claimed.last().copied());
+            Some(last_claimed.map_or(x, |c| self.subtree_end(c)))
+        };
+        let placed = match (anchor, old.first()) {
+            (Some(a), Some(&c)) => self.order_prev(unit, self.n(c).label).is_some_and(|(_, p)| p == a),
+            _ => true,
+        };
+        if old_ids == ids && placed {
             if !provisional {
                 for &c in &old {
                     self.clear_prov(c);
@@ -4225,24 +4267,20 @@ impl Engine {
             return;
         }
         let mut pre = 0;
-        while pre < old.len() && pre < ids.len() && old_ids[pre] == ids[pre] {
+        while placed && pre < old.len() && pre < ids.len() && old_ids[pre] == ids[pre] {
             pre += 1;
         }
         let mut suf = 0;
-        while suf < old.len() - pre && suf < ids.len() - pre && old_ids[old.len() - 1 - suf] == ids[ids.len() - 1 - suf]
+        while placed
+            && suf < old.len() - pre
+            && suf < ids.len() - pre
+            && old_ids[old.len() - 1 - suf] == ids[ids.len() - 1 - suf]
         {
             suf += 1;
         }
         self.free_span(&old[pre..old.len() - suf], false);
-        let body = self.aux_of(x).and_then(|a| a.body);
-        let unit = body.unwrap_or(self.n(x).unit);
         let mut after = if pre == 0 {
-            if body.is_some() {
-                None
-            } else {
-                let last_claimed = self.aux_of(x).and_then(|a| a.claimed.last().copied());
-                Some(last_claimed.map_or(x, |c| self.subtree_end(c)))
-            }
+            anchor
         } else {
             Some(self.subtree_end(old[pre - 1]))
         };
@@ -4698,6 +4736,11 @@ impl Engine {
             self.nm(x).state = State::Dirty;
         }
         self.nm(x).on = NIL;
+        if self.n(x).has(F_CLAIM_DYN) {
+            // Before the children: they follow the claimed text.
+            let k = r.claim.unwrap_or(0);
+            self.claim_count(x, k);
+        }
         {
             span!(Children);
             self.set_children(x, &r.children, &r.child_heights, provisional);
@@ -4738,10 +4781,6 @@ impl Engine {
                 self.ax(x).kind = r.kind;
             }
             self.change_effect(x, e);
-        }
-        if self.n(x).has(F_CLAIM_DYN) {
-            let k = r.claim.unwrap_or(0);
-            self.claim_count(x, k);
         }
         if self.n(x).output != output || !self.n(x).has(F_RAN) {
             changed = true;

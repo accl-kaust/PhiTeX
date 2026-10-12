@@ -780,9 +780,13 @@ fn fold_step(v: &Values, st: ValueId, e: ValueId, cap: i64) -> (ValueId, Option<
     }
 }
 
+/// The name of the contribution sequence `add`, `take` and `replace`
+/// write: not an identifier, so no program variable shares its field.
+pub const ITEMS_SEQ: &str = "#items";
+
 /// The contribution sequence `add`, `take` and `replace` write.
 pub fn items_seq(v: &Values) -> Field {
-    v.field("items")
+    v.field(ITEMS_SEQ)
 }
 
 /// The scope kind inside which an `item` opens an implicit scope, and the
@@ -842,7 +846,7 @@ fn eval_literal(v: &Values, expr: ValueId) -> Option<Vec<String>> {
             out.push(text(v, a[0]));
         }
         if matches!(t.as_str(), "take" | "replace") {
-            out.push("items".into());
+            out.push(ITEMS_SEQ.into());
         }
         if t == "fold" {
             out.push(FOLD.into());
@@ -1237,7 +1241,7 @@ impl Operation for StmtOp {
             "add" | "resume" => names(fold().map(|mut e| {
                 e.push(FOLD_STATE.into());
                 if t == "add" {
-                    e.push("items".into());
+                    e.push(ITEMS_SEQ.into());
                 }
                 e
             })),

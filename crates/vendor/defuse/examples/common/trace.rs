@@ -551,6 +551,7 @@ fn sequences_in(steps: &[Step], out: &mut Vec<String>) {
 }
 
 /// A parsed trace.
+#[derive(Clone, Debug)]
 pub struct Trace {
     pub meta: Meta,
     pub steps: Vec<Step>,
@@ -1143,10 +1144,13 @@ impl Doc {
     pub fn snapshot(&self) -> Trace {
         let mut meta = self.meta.clone();
         meta.steps = self.steps.len();
-        Trace {
-            meta,
-            steps: self.steps.clone(),
+        // Inserted steps carry whatever position their edit gave them; a
+        // trace's top-level positions increase.
+        let mut steps = self.steps.clone();
+        for (i, s) in steps.iter_mut().enumerate() {
+            s.pos = i64::try_from(i).unwrap_or(0);
         }
+        Trace { meta, steps }
     }
 }
 
@@ -1546,4 +1550,79 @@ pub fn causes(eng: &Engine, doc: &Doc) -> BTreeMap<String, (u64, u64)> {
         }
     }
     out
+}
+
+// ------------------------------------------------------------- minimising
+
+/// The steps at `path` (`[]`: the top level; `[i, j]`: the children of
+/// step `j` among the children of step `i`).
+fn steps_at<'a>(t: &'a mut Trace, path: &[usize]) -> &'a mut Vec<Step> {
+    let mut v = &mut t.steps;
+    for &i in path {
+        v = &mut v[i].children;
+    }
+    v
+}
+
+fn without(t: &Trace, path: &[usize], lo: usize, hi: usize) -> Trace {
+    let mut t2 = t.clone();
+    steps_at(&mut t2, path).drain(lo..hi);
+    t2.meta.steps = t2.steps.len();
+    t2
+}
+
+fn count_steps(steps: &[Step]) -> usize {
+    steps.iter().map(|s| 1 + count_steps(&s.children)).sum()
+}
+
+/// Drops the steps at `path` the failure does not need (chunks halving
+/// down to single steps), then recurses into the survivors' children.
+fn shrink_at(t: &mut Trace, path: &mut Vec<usize>, bad: &dyn Fn(&Trace) -> bool, progress: &dyn Fn(usize)) {
+    let len = steps_at(t, path).len();
+    let mut chunk = (len / 2).max(1);
+    loop {
+        let mut lo = 0;
+        while lo < steps_at(t, path).len() {
+            let hi = (lo + chunk).min(steps_at(t, path).len());
+            let t2 = without(t, path, lo, hi);
+            if bad(&t2) {
+                *t = t2;
+                progress(count_steps(&t.steps));
+            } else {
+                lo = hi;
+            }
+        }
+        if chunk == 1 {
+            break;
+        }
+        chunk /= 2;
+    }
+    let mut i = 0;
+    while i < steps_at(t, path).len() {
+        if !steps_at(t, path)[i].children.is_empty() {
+            path.push(i);
+            shrink_at(t, path, bad, progress);
+            path.pop();
+        }
+        i += 1;
+    }
+}
+
+/// Minimises a trace whose replay fails (`bad`): the fewest steps, at
+/// every level, that still fail. The edits are left as they are (an edit
+/// naming a dropped step makes the replay invalid, so that step stays).
+/// `progress` is told the step count after each reduction.
+pub fn shrink(t: &Trace, bad: &dyn Fn(&Trace) -> bool, progress: &dyn Fn(usize)) -> Trace {
+    assert!(bad(t), "the case must fail before shrinking");
+    let mut t = t.clone();
+    let mut path = Vec::new();
+    // Until a pass drops nothing: a smaller trace may make more droppable.
+    loop {
+        let before = count_steps(&t.steps);
+        shrink_at(&mut t, &mut path, bad, progress);
+        if count_steps(&t.steps) == before {
+            break;
+        }
+    }
+    t
 }
