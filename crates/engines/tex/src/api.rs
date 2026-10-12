@@ -8,6 +8,7 @@
 //! it). A node reads its own slice and the siblings its command claims.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use phitex_defuse::{
@@ -420,6 +421,31 @@ impl Graph {
         }
     }
 
+    /// An evaluation error as a reader can act on it: the error, and
+    /// each node it names with what it is.
+    fn diagnose(&self, e: &phitex_defuse::EvalError) -> String {
+        use phitex_defuse::EvalError as E;
+        let mut ids: Vec<NodeId> = Vec::new();
+        match e {
+            E::Cycle(ns) => ids.extend(ns.iter().copied()),
+            E::RunawayNode { node, .. }
+            | E::RunawayCreation { node, .. }
+            | E::UndeclaredDefinition { node, .. } => ids.push(*node),
+            E::NoProgress { waiters, .. } | E::Deadline { waiters, .. } => {
+                ids.extend(waiters.iter().take(20).map(|w| w.node));
+            }
+            _ => {}
+        }
+        let mut out = format!("evaluation: {e}\n{e:?}");
+        // REDUCE-GAP: the engine has no accessor for a node's operation
+        // and arguments; `debug_node` gives its state and what it waits
+        // on (with that node's arguments)
+        for id in ids {
+            let _ = write!(out, "\n  {id:?}: {}", self.eng.debug_node(id));
+        }
+        out
+    }
+
     /// The names of the files the job opened for writing.
     fn opened(&self, unit: UnitId) -> Vec<String> {
         let v = self.eng.values();
@@ -470,10 +496,10 @@ impl Graph {
         let needs_f = self.eng.values().field("needs");
         loop {
             let t0 = std::time::Instant::now();
-            let r = self
-                .eng
-                .evaluate_sequential()
-                .unwrap_or_else(|e| panic!("evaluation: {e:?}"));
+            let r = match self.eng.evaluate_sequential() {
+                Ok(r) => r,
+                Err(e) => panic!("{}", self.diagnose(&e)),
+            };
             if std::env::var_os("PHITEX_TEX_TIME").is_some() {
                 eprintln!("round: {:?}, {} nodes run", t0.elapsed(), r.nodes_run);
             }
