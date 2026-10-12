@@ -42,6 +42,7 @@ const WASM_CRATES: &[&str] = &[
     "phitex-defuse",
     "phitex-dvi",
     "phitex-otf",
+    "phitex-pdf",
     "phitex-source",
     "phitex-tex",
     "phitex-tfm",

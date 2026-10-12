@@ -548,14 +548,21 @@ pub fn lex(text: &str) -> Green {
 /// The catcode regime a text is read under, as far as the shape of its
 /// tokens goes: which ASCII bytes are letters (catcode 11, and so make up
 /// control-sequence names), and whether spaces are ignored (catcode 9, as
-/// under expl3's `\ExplSyntaxOn`). Braces, `\`, `%` and `#` keep their
-/// plain catcodes.
+/// under expl3's `\ExplSyntaxOn`), which of `\ { } % #` are other
+/// characters (or letters), and which other characters are escapes or
+/// open or close groups (catcodes 0, 1 and 2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Catcodes {
     letters: u128,
     /// Characters that normally shape tokens (`\\`, `{`, `}`, `%`, `#`)
     /// read as other characters (catcode 12).
     other: u128,
+    /// Other characters of catcode 1 (begin-group).
+    open: u128,
+    /// Other characters of catcode 2 (end-group).
+    close: u128,
+    /// Other characters of catcode 0 (escape).
+    escape: u128,
     pub ignore_spaces: bool,
 }
 
@@ -564,6 +571,9 @@ impl Catcodes {
     pub const PLAIN: Catcodes = Catcodes {
         letters: ((1u128 << 26) - 1) << b'A' | ((1u128 << 26) - 1) << b'a',
         other: 0,
+        open: 0,
+        close: 0,
+        escape: 0,
         ignore_spaces: false,
     };
 
@@ -581,6 +591,9 @@ impl Catcodes {
         Catcodes {
             letters: self.with_letter(b'_').with_letter(b':').letters,
             other: self.other,
+            open: self.open,
+            close: self.close,
+            escape: self.escape,
             ignore_spaces: true,
         }
     }
@@ -620,6 +633,50 @@ impl Catcodes {
         r
     }
 
+    /// This regime with `c` (not one of `\\ { } % #`) of catcode `v`
+    /// when it is 0, 1 or 2, or of none of them.
+    #[must_use]
+    pub const fn with_shaping(self, c: u8, v: u32) -> Catcodes {
+        let mut r = self;
+        if c < 128 {
+            r.open &= !(1 << c);
+            r.close &= !(1 << c);
+            r.escape &= !(1 << c);
+            match v {
+                0 => r.escape |= 1 << c,
+                1 => r.open |= 1 << c,
+                2 => r.close |= 1 << c,
+                _ => {}
+            }
+        }
+        r
+    }
+
+    /// Whether `c` is an escape character in place of `\\`.
+    #[must_use]
+    pub const fn is_escape(&self, c: u8) -> bool {
+        c < 128 && self.escape >> c & 1 == 1
+    }
+
+    /// Whether `c` (not one of `\\ { } % #`) is an escape, or opens or
+    /// closes a group.
+    #[must_use]
+    pub const fn is_shaping(&self, c: u8) -> bool {
+        c < 128 && (self.open | self.close | self.escape) >> c & 1 == 1
+    }
+
+    /// Whether `c` opens a group in place of `{`.
+    #[must_use]
+    pub const fn is_open(&self, c: u8) -> bool {
+        c < 128 && self.open >> c & 1 == 1
+    }
+
+    /// Whether `c` (not `{` or `}`) closes a group.
+    #[must_use]
+    pub const fn is_close(&self, c: u8) -> bool {
+        c < 128 && self.close >> c & 1 == 1
+    }
+
     #[must_use]
     pub const fn is_other(&self, c: u8) -> bool {
         c < 128 && self.other >> c & 1 == 1
@@ -639,6 +696,7 @@ pub(crate) fn token_at(text: &str, i: usize, limit: usize, cat: &Catcodes) -> (S
     let b = text.as_bytes();
     match b[i] {
         b'{' | b'}' if !cat.is_other(b[i]) => (SyntaxKind::Brace, i + 1),
+        c if cat.is_open(c) || cat.is_close(c) => (SyntaxKind::Brace, i + 1),
         _ => scan(b, i, limit.min(b.len()), cat),
     }
 }
@@ -669,12 +727,15 @@ fn scan(b: &[u8], mut i: usize, limit: usize, cat: &Catcodes) -> (SyntaxKind, us
     let kind = match b[i] {
         c if cat.other != 0 && cat.is_other(c) => {
             i += 1;
-            while i < limit && (!TEXT_END[b[i] as usize] || cat.is_other(b[i])) {
+            while i < limit
+                && (!TEXT_END[b[i] as usize] || cat.is_other(b[i]))
+                && !cat.is_shaping(b[i])
+            {
                 i += 1;
             }
             SyntaxKind::Text
         }
-        b'\\' => {
+        c if c == b'\\' || cat.is_escape(c) => {
             i += 1;
             if i < limit {
                 if cat.is_letter(b[i]) {
@@ -715,7 +776,10 @@ fn scan(b: &[u8], mut i: usize, limit: usize, cat: &Catcodes) -> (SyntaxKind, us
             SyntaxKind::Param
         }
         _ => {
-            while i < limit && (!TEXT_END[b[i] as usize] || cat.other != 0 && cat.is_other(b[i])) {
+            while i < limit
+                && (!TEXT_END[b[i] as usize] || cat.other != 0 && cat.is_other(b[i]))
+                && !cat.is_shaping(b[i])
+            {
                 i += 1;
             }
             SyntaxKind::Text

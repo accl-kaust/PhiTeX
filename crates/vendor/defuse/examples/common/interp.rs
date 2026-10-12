@@ -11,18 +11,23 @@
 //! A function body runs in a fresh unit seeded with its captures and
 //! parameters. Loop-back fields are iterated in whole rounds.
 
-use super::{DOC_KIND, LIST_KIND, Lang, binop, has_proc, items, parse, parse_stmt, proc_field, tag, text, truthy};
+use super::{
+    DOC_KIND, FOLD, FOLD_STATE, LIST_KIND, Lang, OUT_KIND, binop, fold_init, fold_step, fold_text, has_proc, items,
+    parse, parse_stmt, proc_field, tag, text, truthy,
+};
 use defuse::{Field, FxHashMap, FxHashSet, Value, ValueId, Values};
 
 type Binding = (u64, ValueId);
 
 /// One unit of text: the program, or one function application's body.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Unit {
     /// Local frames; the first is the unit's own (never closed).
     frames: Vec<FxHashMap<Field, Binding>>,
     /// Each frame's scope kind.
     kinds: Vec<Option<String>>,
+    /// Each frame's `items` contributions, in text order.
+    seqs: Vec<Vec<ValueId>>,
     globals: FxHashMap<Field, Binding>,
     env: FxHashMap<Field, ValueId>,
     /// `out` contributions, in text order.
@@ -34,6 +39,7 @@ impl Unit {
         Unit {
             frames: vec![FxHashMap::default()],
             kinds: vec![None],
+            seqs: vec![Vec::new()],
             ..Unit::default()
         }
     }
@@ -43,6 +49,16 @@ impl Unit {
     }
 }
 
+/// A stream claim being looked ahead (see `collect_ahead`).
+#[derive(Clone)]
+struct Collect {
+    class: String,
+    field: String,
+    outs: Vec<ValueId>,
+    done: bool,
+}
+
+#[derive(Clone)]
 struct Interp<'v> {
     v: &'v Values,
     pos: u64,
@@ -51,6 +67,10 @@ struct Interp<'v> {
     apps: FxHashMap<ValueId, ValueId>,
     running: FxHashSet<ValueId>,
     error: Option<String>,
+    collect: Option<Collect>,
+    /// Nodes visited so far (to tell stream elements from statements that
+    /// unfolded).
+    visits: u64,
 }
 
 /// Runs `lines` and returns [`super::Program::result`]'s vector: each line's
@@ -61,6 +81,12 @@ struct Interp<'v> {
 /// A cycle (a function applied to itself), conflicting publications of a
 /// loop-back field, or no convergence within the engine's round limit.
 pub fn interpret(lines: &[String]) -> Result<Vec<u64>, String> {
+    interpret_env(lines, &[])
+}
+
+/// Interprets `lines` with the environment `env` (integer fields defined
+/// before the first line).
+pub fn interpret_env(lines: &[String], env: &[(&str, i64)]) -> Result<Vec<u64>, String> {
     let v = Values::new();
     let asts: Vec<ValueId> = lines.iter().map(|l| parse_stmt(&v, l)).collect();
     let mut loops = FxHashMap::default();
@@ -82,6 +108,8 @@ pub fn interpret(lines: &[String]) -> Result<Vec<u64>, String> {
         apps: FxHashMap::default(),
         running: FxHashSet::default(),
         error: None,
+        collect: None,
+        visits: 0,
     };
     for _round in 0..64 {
         it.pos = 0;
@@ -89,6 +117,9 @@ pub fn interpret(lines: &[String]) -> Result<Vec<u64>, String> {
         // Applications may read loop-back fields.
         it.apps.clear();
         let mut u = Unit::new();
+        for &(f, x) in env {
+            u.env.insert(v.field(f), v.int(x));
+        }
         let outs = it.run_list(&mut u, &asts);
         if let Some(e) = it.error.take() {
             return Err(e);
@@ -141,6 +172,7 @@ impl Interp<'_> {
     fn open_kind(u: &mut Unit, kind: Option<String>) {
         u.frames.push(FxHashMap::default());
         u.kinds.push(kind);
+        u.seqs.push(Vec::new());
     }
 
     fn close(u: &mut Unit) {
@@ -148,6 +180,7 @@ impl Interp<'_> {
         if u.frames.len() > 1 {
             u.frames.pop();
             u.kinds.pop();
+            u.seqs.pop();
         }
     }
 
@@ -158,8 +191,15 @@ impl Interp<'_> {
         let mut last_page = 0;
         let mut i = 0;
         while i < stmts.len() {
+            if self.collect.as_ref().is_some_and(|c| c.done) {
+                break;
+            }
             self.pos += 1;
             let (t, a) = tag(v, stmts[i]);
+            // A stream claim tests each candidate before it runs.
+            let fires = self.fires(u, &t);
+            self.visits += 1;
+            let visits = self.visits;
             let rest = &stmts[i + 1..];
             let claim = match t.as_str() {
                 "sumnext" => usize::try_from(v.as_int(a[1]).unwrap_or(0).max(0))
@@ -201,6 +241,11 @@ impl Interp<'_> {
                 };
                 self.define(u, v.field(&text(v, a[0])), val, false);
                 val
+            } else if t == "collect" {
+                let outs = self.collect_ahead(u, &a, &stmts[i + 1..]);
+                let l = v.list(outs);
+                self.define(u, v.field(&text(v, a[0])), l, false);
+                l
             } else if t == "page" {
                 let xs: Vec<ValueId> = u
                     .contribs
@@ -218,11 +263,65 @@ impl Interp<'_> {
                 self.stmt(u, &t, &a)
             };
             outs[i] = Some(out);
+            if self.visits == visits {
+                self.element(fires, out);
+            }
             // Claimed text keeps its positions but does not run.
             self.pos += claim as u64;
             i += 1 + claim;
         }
         outs
+    }
+
+    /// Whether the claim being looked ahead ends before a node of `class`
+    /// here.
+    fn fires(&self, u: &Unit, class: &str) -> bool {
+        let v = self.v;
+        self.collect.as_ref().is_some_and(|c| {
+            c.class == class
+                && (c.field.is_empty()
+                    || c.field
+                        .split(' ')
+                        .all(|f| self.lookup(u, v.field(f)).is_some_and(|x| truthy(v, x))))
+        })
+    }
+
+    /// A node that unfolded nothing: an element of the stream.
+    fn element(&mut self, fires: bool, out: ValueId) {
+        if let Some(c) = &mut self.collect
+            && !c.done
+        {
+            if fires {
+                c.done = true;
+            } else {
+                c.outs.push(out);
+            }
+        }
+    }
+
+    /// A node the engine has that is no statement here (a fold output's
+    /// scope opener, output and resume nodes).
+    fn visit(&mut self, u: &Unit, class: &str, out: ValueId) {
+        let fires = self.fires(u, class);
+        self.visits += 1;
+        self.element(fires, out);
+    }
+
+    /// `collect NAME until CLASS [if FIELD]`: runs the following text on a
+    /// copy of the state until the claim ends, and returns the outputs of
+    /// the elements before it.
+    fn collect_ahead(&self, u: &Unit, a: &[ValueId], rest: &[ValueId]) -> Vec<ValueId> {
+        let v = self.v;
+        let mut it = self.clone();
+        let mut cu = u.clone();
+        it.collect = Some(Collect {
+            class: text(v, a[1]),
+            field: text(v, a[2]),
+            outs: Vec::new(),
+            done: false,
+        });
+        it.run_list(&mut cu, rest);
+        it.collect.map_or_else(Vec::new, |c| c.outs)
     }
 
     fn claimed_values(&mut self, u: &mut Unit, lines: &[ValueId]) -> Vec<ValueId> {
@@ -265,6 +364,8 @@ impl Interp<'_> {
                 v.list(vals)
             }
             "block" => {
+                // The scope markers: never an element.
+                self.visits += 1;
                 Self::open(u);
                 self.run_list(u, &items(v, a[0]));
                 Self::close(u);
@@ -276,6 +377,7 @@ impl Interp<'_> {
             }
             "if" => {
                 let c = self.expr(u, a[0]);
+                self.visits += 1;
                 Self::open(u);
                 self.run_list(u, &items(v, if truthy(v, c) { a[1] } else { a[2] }));
                 Self::close(u);
@@ -370,6 +472,50 @@ impl Interp<'_> {
                 }
                 ValueId::UNIT
             }
+            "add" => {
+                let val = self.expr(u, a[0]);
+                u.seqs.last_mut().expect("unit frame").push(val);
+                let state = v.field(FOLD_STATE);
+                let decl = if u.kind() == Some(OUT_KIND) {
+                    None
+                } else {
+                    self.lookup(u, v.field(FOLD))
+                };
+                let Some(src) = decl else {
+                    self.define(u, state, ValueId::UNIT, false);
+                    return val;
+                };
+                let st = self
+                    .lookup(u, state)
+                    .filter(|&s| items(v, s).len() == 2)
+                    .unwrap_or_else(|| fold_init(v));
+                let (st, out) = fold_step(v, st, val, self.cap(u));
+                self.define(u, state, st, false);
+                if let Some((h, k)) = out {
+                    self.output(u, src, st, h, k, Vec::new());
+                }
+                val
+            }
+            "fold" => {
+                let src = self.expr(u, a[0]);
+                self.define(u, v.field(FOLD), src, false);
+                self.define(u, v.field(FOLD_STATE), fold_init(v), false);
+                src
+            }
+            "when" => {
+                let c = self.expr(u, a[0]);
+                if truthy(v, c) {
+                    self.run_list(u, &[a[1]]);
+                }
+                v.bool(truthy(v, c))
+            }
+            "take" | "replace" => {
+                let r = (t == "replace").then(|| self.expr(u, a[0]));
+                let s = u.seqs.last_mut().expect("unit frame");
+                let taken = s.pop();
+                s.extend(r);
+                taken.unwrap_or_else(|| v.str("none"))
+            }
             "loop" | "endlist" | "mark" => ValueId::UNIT,
             "error" => v.str(&format!("error: {}", text(v, a[0]))),
             _ => v.str("error: bad statement"),
@@ -385,6 +531,12 @@ impl Interp<'_> {
         match t.as_str() {
             "str" | "lit" => a[0],
             "kind" => v.str(u.kind().unwrap_or("none")),
+            "prev" => u
+                .seqs
+                .last()
+                .and_then(|s| s.last().copied())
+                .unwrap_or_else(|| v.str("none")),
+            "before" => v.list(u.seqs.last().cloned().unwrap_or_default()),
             "var" => self.lookup(u, v.field(&text(v, a[0]))).unwrap_or(ValueId::UNIT),
             "op" => {
                 let x = self.expr(u, a[1]);
@@ -432,6 +584,69 @@ impl Interp<'_> {
         }
     }
 
+    fn cap(&self, u: &Unit) -> i64 {
+        self.lookup(u, self.v.field("cap"))
+            .and_then(|c| self.v.as_int(c))
+            .unwrap_or(50)
+    }
+
+    /// Runs emitted fold output `k` in place: an `out` scope with `out`,
+    /// `k` and `state` defined, the fold text, then the fold continues with
+    /// what the text added and the elements still carried over.
+    fn output(&mut self, u: &mut Unit, src: ValueId, st: ValueId, h: ValueId, k: ValueId, rest: Vec<ValueId>) {
+        let v = self.v;
+        self.pos += 1;
+        self.visit(u, "scope", ValueId::UNIT);
+        Self::open_kind(u, Some(OUT_KIND.into()));
+        self.pos += 1;
+        self.visit(u, "output", h);
+        for (n, x) in [("out", h), ("k", k), ("state", st)] {
+            self.define(u, v.field(n), x, false);
+        }
+        u.contribs.push((self.pos, v.seq_unit(h)));
+        match fold_text(v, src) {
+            Ok(ss) => {
+                self.run_list(u, &ss);
+            }
+            Err(e) => {
+                self.pos += 1;
+                self.visit(u, "error", v.str(&format!("error: {e}")));
+            }
+        }
+        // The resume node (an element unless it emits).
+        self.pos += 1;
+        let fires = self.fires(u, "resume");
+        self.visits += 1;
+        let visits = self.visits;
+        let mut input = u.seqs.last().cloned().unwrap_or_default();
+        input.extend(rest);
+        let state = v.field(FOLD_STATE);
+        if let Some(src) = self.lookup(u, v.field(FOLD)) {
+            let cap = self.cap(u);
+            let mut st = st;
+            for (j, &e) in input.iter().enumerate() {
+                let (s2, out) = fold_step(v, st, e, cap);
+                st = s2;
+                if let Some((h, k)) = out {
+                    self.define(u, state, st, true);
+                    self.output(u, src, st, h, k, input[j + 1..].to_vec());
+                    self.pos += 1;
+                    Self::close(u);
+                    return;
+                }
+            }
+            self.define(u, state, st, true);
+            if self.visits == visits {
+                self.element(fires, st);
+            }
+        } else {
+            self.define(u, state, st, true);
+            self.element(fires, st);
+        }
+        self.pos += 1;
+        Self::close(u);
+    }
+
     /// Applies a closure (memoized: applications are pure).
     fn apply(&mut self, args: &[ValueId]) -> ValueId {
         let v = self.v;
@@ -455,8 +670,10 @@ impl Interp<'_> {
                 u.env.insert(v.field(&text(v, *p)), x);
             }
             let pos = self.pos;
+            let (collect, visits) = (self.collect.take(), self.visits);
             self.run_list(&mut u, &items(v, c[1]));
             let r = self.expr(&mut u, c[2]);
+            (self.collect, self.visits) = (collect, visits);
             self.pos = pos;
             r
         } else {

@@ -99,6 +99,9 @@ struct Soft {
     pre_expl: Option<Catcodes>,
     special: u128,
     open_spans: usize,
+    /// Its end was read inside an argument's braces opened in it: it
+    /// takes effect when the argument has been read (at its `}`).
+    ended: bool,
 }
 
 /// The commands a box's or an alignment's material follows: their group
@@ -250,6 +253,15 @@ pub(crate) fn catcode_assignment(b: &[u8], j: usize) -> Option<(u8, Option<u32>)
             }
             u8::from_str_radix(std::str::from_utf8(&b[s..j]).ok()?, 16).ok()?
         }
+        // (a constant the kernel names, `\z@`: its value, §440)
+        b'\\' => {
+            let s = j + 1;
+            j = s;
+            while j < b.len() && (b[j].is_ascii_alphabetic() || b[j] == b'@') {
+                j += 1;
+            }
+            u8::try_from(named_value(&b[s..j])?).ok()?
+        }
         _ => return None,
     };
     j = skip_sp(b, j);
@@ -269,20 +281,24 @@ pub(crate) fn catcode_assignment(b: &[u8], j: usize) -> Option<(u8, Option<u32>)
         while e < b.len() && (b[e].is_ascii_alphabetic() || b[e] == b'@') {
             e += 1;
         }
-        let v = match &b[s..e] {
-            b"active" => 13,
-            b"other" => 12,
-            b"letter" => 11,
-            b"z@" => 0,
-            b"@ne" => 1,
-            b"tw@" => 2,
-            b"thr@@" => 3,
-            b"sixt@@n" => 16,
-            _ => return Some((ch, None)),
-        };
-        return Some((ch, Some(v)));
+        return Some((ch, named_value(&b[s..e])));
     }
     Some((ch, None))
+}
+
+/// The value of a constant the kernel names (`\active`, `\z@`, ...).
+pub(crate) fn named_value(name: &[u8]) -> Option<u32> {
+    Some(match name {
+        b"active" => 13,
+        b"other" => 12,
+        b"letter" => 11,
+        b"z@" => 0,
+        b"@ne" => 1,
+        b"tw@" => 2,
+        b"thr@@" => 3,
+        b"sixt@@n" => 16,
+        _ => return None,
+    })
 }
 
 /// Past the `*`, `[…]` and `{…}` that follow `j`, and at least to the
@@ -326,6 +342,10 @@ fn args_end(b: &[u8], mut j: usize) -> usize {
 /// The catcode the tokenizer reads `c` with under `cat`.
 fn assumed(c: u8, cat: &Catcodes) -> u32 {
     match c {
+        c if cat.is_open(c) => 1,
+        c if cat.is_close(c) => 2,
+        c if cat.is_escape(c) => 0,
+        c if cat.is_other(c) && cat.is_letter(c) => 11,
         c if cat.is_other(c) => 12,
         b'\\' => 0,
         b'{' => 1,
@@ -343,6 +363,17 @@ fn assumed(c: u8, cat: &Catcodes) -> u32 {
         127 => 15,
         c if cat.is_letter(c) => 11,
         _ => 12,
+    }
+}
+
+/// `cat` with `c` back to its usual catcode as far as this regime goes
+/// (an other `\\ { } % #`, a letter `{`, a group's character no more).
+fn restored(cat: Catcodes, c: u8) -> Catcodes {
+    let r = cat.with_other(c, false).with_shaping(c, 16);
+    if structural(c) {
+        r.without_letter(c)
+    } else {
+        r
     }
 }
 
@@ -467,6 +498,43 @@ impl State<'_> {
     }
 }
 
+/// Whether the byte at `i` is the character of an alphabetic constant
+/// (`` \catcode`{ ``, ``=`}``): TeX reads it as a token only for its
+/// code, §442, so a brace there opens or closes no group.
+fn char_constant_at(st: &State<'_>, i: usize) -> bool {
+    let b = st.text.as_bytes();
+    if i == 0 || b[i - 1] != b'`' || b[i] == b'\\' {
+        return false;
+    }
+    let Some(t) = st
+        .tokens
+        .last()
+        .filter(|t| t.kind == TokKind::Text && t.end == i)
+    else {
+        return false;
+    };
+    let txt = &st.text[t.start..t.end];
+    txt.ends_with("=`")
+        || txt == "`"
+            && st.tokens[..st.tokens.len() - 1]
+                .iter()
+                .rev()
+                .find(|t| t.kind != TokKind::Space)
+                .is_some_and(|c| {
+                    c.kind == TokKind::Cs
+                        && matches!(
+                            &st.text[c.start + 1..c.end],
+                            "catcode"
+                                | "lccode"
+                                | "uccode"
+                                | "sfcode"
+                                | "mathcode"
+                                | "delcode"
+                                | "char"
+                        )
+                })
+}
+
 /// Reads `text` under `kind`'s regime and the changes visible in it.
 /// `scope` gives the macros and environments known to change catcodes
 /// (none when harvesting definitions).
@@ -523,7 +591,12 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
             }
         }
         let limit = verb.as_ref().map_or(b.len(), |v| v.start);
-        let (sk, mut end) = token_at(text, i, limit, &cat);
+        let (sk, mut end) = if char_constant_at(&st, i) {
+            // (`` `{ ``: the character's code, a number, §442; never a group)
+            (SyntaxKind::Text, i + 1)
+        } else {
+            token_at(text, i, limit, &cat)
+        };
         let mask = st.special | st.maybe_active;
         if sk == SyntaxKind::Text
             && mask != 0
@@ -556,7 +629,7 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
             }
         }
         let tk = match sk {
-            SyntaxKind::Brace if b[i] == b'{' => TokKind::Open,
+            SyntaxKind::Brace if b[i] == b'{' || cat.is_open(b[i]) => TokKind::Open,
             SyntaxKind::Brace | SyntaxKind::Other => TokKind::Close,
             SyntaxKind::Cs => TokKind::Cs,
             SyntaxKind::Space => TokKind::Space,
@@ -626,6 +699,18 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
                     soft.retain(|g| g.depth <= frames.len());
                     role = f.role;
                     pre_expl = f.pre_expl;
+                    if soft
+                        .last()
+                        .is_some_and(|g| g.ended && g.depth == frames.len())
+                        && let Some(g) = soft.pop()
+                    {
+                        // (the argument holding the group's end has been
+                        // read: the end runs before the text after it)
+                        st.end_from(g.open_spans, i);
+                        cat = g.cat;
+                        pre_expl = g.pre_expl;
+                        st.special = g.special;
+                    }
                     if bodies_ahead.0 > frames.len() {
                         bodies_ahead = (0, 0);
                     }
@@ -649,7 +734,23 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
                         pre_expl,
                         special: st.special,
                         open_spans: st.open.len(),
+                        ended: false,
                     });
+                } else if body_depth == 0
+                    && matches!(name, "endgroup" | "egroup" | "group_end:")
+                    && let Some(g) = soft.last_mut().filter(|g| {
+                        !g.ended
+                            && g.depth < frames.len()
+                            && frames[g.depth..]
+                                .iter()
+                                .skip(1)
+                                .all(|f| f.role == Role::MaybeArg)
+                            && role == Role::MaybeArg
+                    })
+                {
+                    // (braces around an argument are not a group, §473: the
+                    // end is the outer group's, run once the argument is read)
+                    g.ended = true;
                 } else if body_depth == 0
                     && matches!(name, "endgroup" | "egroup" | "group_end:")
                     && soft.last().is_some_and(|f| f.depth == frames.len())
@@ -657,6 +758,25 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
                 {
                     // (a group written as commands ends the catcode changes
                     // made in it, as a brace group does)
+                    st.end_from(f.open_spans, i);
+                    cat = f.cat;
+                    pre_expl = f.pre_expl;
+                    st.special = f.special;
+                } else if body_depth == 0
+                    && !st.names_follow()
+                    && !st.after_equals()
+                    && soft.last().is_some_and(|f| f.depth == frames.len())
+                    && scope.is_some_and(|s| {
+                        if s.document.defines(name) {
+                            s.document.ends_group(name, Some((s.file, i)))
+                        } else {
+                            s.prelude.ends_group(name, None)
+                        }
+                    })
+                    && let Some(f) = soft.pop()
+                {
+                    // (a macro running the `\endgroup` of a group begun
+                    // here: its catcode changes end, §1063)
                     st.end_from(f.open_spans, i);
                     cat = f.cat;
                     pre_expl = f.pre_expl;
@@ -755,70 +875,20 @@ fn switch(
             st.begin(i, "\\ProvidesExpl…", String::new(), sure);
         }
         "catcode" | "tex_catcode:D" => match catcode_assignment(b, end) {
-            Some((c, Some(v))) if assumed(c, &cat.with_other(c, false)) == v => {
-                *cat = cat.with_other(c, false);
-                let d = format!("{}=", c as char);
-                if let Some(k) = (floor..st.open.len()).rev().find(|&k| {
-                    let h = &st.hazards[st.open[k]];
-                    matches!(
-                        h.cause,
-                        "\\catcode to a shaping class" | "\\catcode literal"
-                    ) && h.detail.starts_with(&d)
-                }) {
-                    let h = st.open.remove(k);
-                    st.hazards[h].end = i;
-                    st.retz();
-                }
-            }
-            Some((c, Some(11))) if !structural(c) => {
-                *cat = cat.with_letter(c);
-                st.begin(i, "\\catcode literal", format!("{}=11", c as char), sure);
-            }
-            Some((c, Some(12))) if matches!(c, b'\\' | b'{' | b'}' | b'%' | b'#') => {
-                *cat = cat.with_other(c, true);
-                st.begin(i, "\\catcode literal", format!("{}=12", c as char), sure);
-            }
-            Some((c, Some(12))) if !structural(c) => {
-                *cat = cat.without_letter(c);
-                st.begin(i, "\\catcode literal", format!("{}=12", c as char), sure);
-            }
-            Some((c, Some(v))) if !structural(c) && matches!(v, 3 | 4 | 7 | 8) => {}
-            Some((b'~', Some(13))) => {}
-            // (a byte past ASCII: UTF-8 text, which the kernel makes active
-            // anyway; the tokens here do not depend on it)
-            Some((c, _)) if c >= 128 => {}
-            Some((c, Some(_))) if !structural(c) && c < 128 => {
-                *cat = cat.without_letter(c);
-                st.special |= 1 << c;
-            }
-            Some((c, Some(v))) => pending(
-                st,
-                "\\catcode to a shaping class",
-                &format!("{}={v}", c as char),
+            Some((c, v)) => assign(st, cat, c, v, i, floor, sure),
+            None => st.begin(
+                i,
+                "\\catcode with computed operands",
+                String::new(),
+                Status::Pending,
             ),
-            Some((c, None)) if c < 128 && !structural(c) => {
-                *cat = cat.without_letter(c);
-                st.special |= 1 << c;
-            }
-            _ => pending(st, "\\catcode with computed operands", ""),
         },
         "@makeother" | "char_set_catcode_other:N" | "char_set_catcode_letter:N" => {
-            let j = skip_sp(b, end);
-            match char_code(b, j) {
-                Some((c, _)) if !structural(c) => {
-                    *cat = if name.ends_with("letter:N") {
-                        cat.with_letter(c)
-                    } else {
-                        cat.without_letter(c)
-                    };
-                    st.begin(
-                        i,
-                        "\\@makeother / char_set_catcode",
-                        (c as char).to_string(),
-                        sure,
-                    );
-                }
-                _ => pending(st, "\\@makeother of a shaping character", ""),
+            // (`\catcode` to 12, or 11, by another name)
+            let v = if name.ends_with("letter:N") { 11 } else { 12 };
+            match char_code(b, skip_sp(b, end)) {
+                Some((c, _)) => assign(st, cat, c, Some(v), i, floor, sure),
+                None => pending(st, "\\@makeother of a shaping character", ""),
             }
         }
         "dospecials" | "@sanitize" | "obeylines" | "obeyspaces" | "@vobeyspaces"
@@ -870,8 +940,38 @@ fn switch(
                     s.prelude.changes_catcodes(name, None)
                 };
                 let (k, chars) = k;
+                let of_args = if s.document.defines(name) {
+                    s.document.arg_catcodes(name, Some((s.file, i)))
+                } else {
+                    s.prelude.arg_catcodes(name, None)
+                };
+                if matches!(k, 0 | 3) && !of_args.is_empty() {
+                    // (the catcodes of the characters its arguments name,
+                    // §442: read here, as it reads them)
+                    let n = of_args.iter().map(|&(p, _)| p).max().unwrap_or(0);
+                    let named = call_chars(b, end, n, cat);
+                    for &(p, v) in of_args {
+                        match named.get(usize::from(p) - 1).copied().flatten() {
+                            Some(c) => assign(st, cat, c, Some(v), i, floor, sure),
+                            None => pending(st, "macro changing catcodes of its arguments", name),
+                        }
+                    }
+                }
                 if k == 3 {
-                    st.special |= chars;
+                    // (the characters set to a literal catcode: as a
+                    // `\catcode` here would, §1232; the others pending
+                    // where they occur)
+                    let set = if s.document.defines(name) {
+                        s.document.set_catcodes(name, Some((s.file, i)))
+                    } else {
+                        s.prelude.set_catcodes(name, None)
+                    };
+                    let mut known = 0u128;
+                    for &(c, v) in set {
+                        assign(st, cat, c, Some(v), i, floor, sure);
+                        known |= 1 << c;
+                    }
+                    st.special |= chars & !known;
                 } else if k == 2 {
                     pending(st, "macro changing catcodes", name);
                 } else if k == 1 {
@@ -887,5 +987,137 @@ fn switch(
                 }
             }
         }
+    }
+}
+
+/// The characters the `n` undelimited arguments from `j` name, each a
+/// control symbol, a one-letter control word, a character, or one of these
+/// braced (`None`: another argument).
+fn call_chars(b: &[u8], mut j: usize, n: u8, cat: &Catcodes) -> Vec<Option<u8>> {
+    let letter = |c: u8| c.is_ascii_alphabetic() || cat.is_letter(c);
+    let mut out = Vec::new();
+    for _ in 0..n {
+        // (spaces, an end of line and comments before an argument are
+        // skipped, §441, §347)
+        loop {
+            j = skip_sp(b, j);
+            match b.get(j) {
+                Some(b'%') => {
+                    j = b[j..]
+                        .iter()
+                        .position(|&c| c == b'\n')
+                        .map_or(b.len(), |k| j + k + 1);
+                }
+                Some(b'\n') if b.get(skip_sp(b, j + 1)) != Some(&b'\n') => j += 1,
+                _ => break,
+            }
+        }
+        let one = |j: usize| -> (Option<u8>, usize) {
+            match b.get(j) {
+                Some(b'\\') => match char_code(b, j) {
+                    Some((c, k)) if b[j + 1] == b'^' || !letter(c) => (Some(c), k),
+                    Some((c, k)) => {
+                        let e = (k..b.len()).find(|&e| !letter(b[e])).unwrap_or(b.len());
+                        (if e == k { Some(c) } else { None }, e)
+                    }
+                    None => (None, b.len()),
+                },
+                Some(&c) if c != b'{' && c != b'}' => (Some(c), j + 1),
+                _ => (None, j + 1),
+            }
+        };
+        if b.get(j) == Some(&b'{') {
+            let (c, k) = one(skip_sp(b, j + 1));
+            let k = skip_sp(b, k);
+            if b.get(k) == Some(&b'}') {
+                out.push(c);
+                j = k + 1;
+            } else {
+                out.push(None);
+                break;
+            }
+        } else {
+            let (c, k) = one(j);
+            out.push(c);
+            j = k;
+        }
+    }
+    out
+}
+
+/// `\catcode` of the character `c` set to `v` (`None`: a value not
+/// literal), §1232: the regime from `i` on.
+fn assign(
+    st: &mut State<'_>,
+    cat: &mut Catcodes,
+    c: u8,
+    v: Option<u32>,
+    i: usize,
+    floor: usize,
+    sure: Status,
+) {
+    match (c, v) {
+        (c, Some(v)) if assumed(c, &restored(*cat, c)) == v => {
+            *cat = restored(*cat, c);
+            let d = format!("{}=", c as char);
+            if let Some(k) = (floor..st.open.len()).rev().find(|&k| {
+                let h = &st.hazards[st.open[k]];
+                matches!(
+                    h.cause,
+                    "\\catcode to a shaping class" | "\\catcode literal"
+                ) && h.detail.starts_with(&d)
+            }) {
+                let h = st.open.remove(k);
+                st.hazards[h].end = i;
+                st.retz();
+            }
+        }
+        (c, Some(v @ 0..=2)) if !structural(c) && c < 128 => {
+            *cat = cat.with_shaping(c, v);
+            st.begin(i, "\\catcode literal", format!("{}={v}", c as char), sure);
+        }
+        (c, Some(_)) if cat.is_shaping(c) => {
+            // (no longer an escape or a group's: then as from its usual
+            // catcode)
+            *cat = cat.with_shaping(c, 16);
+            assign(st, cat, c, v, i, floor, sure);
+        }
+        (c @ (b'{' | b'}'), Some(11)) => {
+            *cat = cat.with_other(c, true).with_letter(c);
+            st.begin(i, "\\catcode literal", format!("{}=11", c as char), sure);
+        }
+        (c, Some(11)) if !structural(c) => {
+            *cat = cat.with_letter(c);
+            st.begin(i, "\\catcode literal", format!("{}=11", c as char), sure);
+        }
+        (c, Some(12)) if matches!(c, b'\\' | b'{' | b'}' | b'%' | b'#') => {
+            *cat = cat.with_other(c, true);
+            st.begin(i, "\\catcode literal", format!("{}=12", c as char), sure);
+        }
+        (c, Some(12)) if !structural(c) => {
+            *cat = cat.without_letter(c);
+            st.begin(i, "\\catcode literal", format!("{}=12", c as char), sure);
+        }
+        (c, Some(v)) if !structural(c) && matches!(v, 3 | 4 | 7 | 8) => {}
+        (b'~', Some(13)) => {}
+        // (a byte past ASCII: UTF-8 text, which the kernel makes active
+        // anyway; the tokens here do not depend on it)
+        (c, _) if c >= 128 => {}
+        (c, _) if !structural(c) => {
+            *cat = cat.without_letter(c);
+            st.special |= 1 << c;
+        }
+        (c, Some(v)) => st.begin(
+            i,
+            "\\catcode to a shaping class",
+            format!("{}={v}", c as char),
+            Status::Pending,
+        ),
+        (_, None) => st.begin(
+            i,
+            "\\catcode with computed operands",
+            String::new(),
+            Status::Pending,
+        ),
     }
 }
