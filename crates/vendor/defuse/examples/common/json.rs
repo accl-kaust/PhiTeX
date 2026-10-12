@@ -293,3 +293,22 @@ pub fn quote(s: &str) -> String {
     out.push('"');
     out
 }
+
+/// `j` as JSON text (objects with their keys in order).
+pub fn write(j: &Json) -> String {
+    match j {
+        Json::Null => "null".to_string(),
+        Json::Bool(b) => b.to_string(),
+        Json::Int(i) => i.to_string(),
+        Json::Float(f) => f.to_string(),
+        Json::Str(s) => quote(s),
+        Json::Arr(xs) => format!("[{}]", xs.iter().map(write).collect::<Vec<_>>().join(", ")),
+        Json::Obj(o) => format!(
+            "{{{}}}",
+            o.iter()
+                .map(|(k, v)| format!("{}: {}", quote(k), write(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}

@@ -3848,6 +3848,10 @@ impl Engine {
             let mut l = self.aux_of(by).map_or_else(Default::default, |a| a.claimed.clone());
             l.retain(|&s| s != x);
             self.ax(by).claimed = l;
+            // The claimed text is one of the claimer's inputs: it runs
+            // again (and its claim is recomputed) whatever freed `x`.
+            self.claim_dirty.insert(by);
+            self.make_dirty(by);
         }
         let defs: Vec<Field> = self.n(x).defs.iter().map(|d| d.field).collect();
         for f in defs {
