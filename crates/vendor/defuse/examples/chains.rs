@@ -63,14 +63,17 @@ fn stream_chain(n: usize) -> Vec<String> {
 
 fn eval(eng: &mut Engine, threads: usize) -> (Duration, Report) {
     let t = Instant::now();
+    // `SPEC=off|predicted|all` picks the speculation of the threaded runs.
+    let spec = match std::env::var("SPEC").as_deref() {
+        Ok("off") => Speculation::Off,
+        Ok("all") => Speculation::All,
+        _ => Speculation::Predicted,
+    };
     let r = if threads <= 1 {
         eng.evaluate_sequential().expect("evaluate")
     } else {
-        eng.evaluate(
-            &mut Greedy::speculative(Speculation::Predicted, 256),
-            &mut Threads(threads),
-        )
-        .expect("evaluate")
+        eng.evaluate(&mut Greedy::speculative(spec, 256), &mut Threads(threads))
+            .expect("evaluate")
     };
     (t.elapsed(), r)
 }

@@ -114,7 +114,7 @@ fn check(prog: &Program, eng: &Engine) -> Duration {
         let _ = std::fs::write("target/fail/lines.txt", prog.lines.join("\n"));
         let rendered = prog.render(eng);
         panic!(
-            "incremental result differs from the interpreter: first at line {i} {:?}: engine {:?}; program written to target/fail/lines.txt ({} lines)",
+            "incremental result differs from the interpreter: first at line {i} {:?}: engine {:?}; program written to target/fail/lines.txt ({} lines); shrink with `cargo run --release --example shrink -- target/fail/before.txt target/fail/edits.txt`",
             prog.lines.get(i),
             rendered.get(i),
             prog.lines.len()
@@ -198,8 +198,18 @@ fn bench(n: usize, o: &Opts) {
     let mut stats: Vec<Vec<(Duration, Report)>> = vec![Vec::new(); KINDS.len()];
     for round in 0..o.edits {
         for (kind, name) in KINDS.iter().enumerate() {
+            let before = if o.check { prog.lines.clone() } else { Vec::new() };
+            prog.edit_log.clear();
             if !edit(&mut rng, &mut eng, &mut prog, kind, round) {
                 continue;
+            }
+            if o.check {
+                // For a repro of a failed check: the program before the edit
+                // and the edit, as `examples/shrink.rs` takes them.
+                let _ = std::fs::create_dir_all("target/fail");
+                let _ = std::fs::write("target/fail/before.txt", before.join("\n"));
+                let _ = std::fs::write("target/fail/edits.txt", common::shrink::edits_text(&prog.edit_log));
+                let _ = std::fs::write("target/fail/edit.txt", format!("{name} round {round}"));
             }
             let (t, r) = eval(&mut eng, o.threads, true);
             if o.check {
