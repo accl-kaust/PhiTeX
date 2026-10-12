@@ -91,9 +91,7 @@ pub struct Output {
     pub pdf: Vec<u8>,
     /// The DVI (TeX, e-TeX), else empty.
     pub dvi: Vec<u8>,
-    /// The pages shipped (none: not known; the engine does not count a
-    /// PDF file's yet).
-    pub pages: Option<usize>,
+    pub pages: usize,
     /// The pages (from 1) that differ from the last build's.
     pub pages_changed: Vec<usize>,
     /// Each page's hash, first first.
@@ -130,8 +128,8 @@ impl Report {
         }
     }
 
-    /// The pages shipped (none: not known).
-    pub fn pages(&self) -> Option<usize> {
+    /// The pages shipped.
+    pub fn pages(&self) -> usize {
         self.out.pages
     }
 
@@ -332,15 +330,8 @@ impl Session {
             .collect();
         // (a PDF file's pages: not known until the engine reports them;
         // the viewer counts the PDF's itself and draws each page again)
-        let (pages, hashes) = if pdf {
-            (None, Vec::new())
-        } else {
-            let h = dvi_page_bytes(&bytes)
-                .iter()
-                .map(|p| tex::Fnv::new().add(p).0)
-                .collect();
-            (Some(dvi_pages(&bytes)), h)
-        };
+        let hashes = b.pages();
+        let pages = hashes.len();
         let writes = b
             .files()
             .into_iter()
@@ -644,54 +635,6 @@ fn first_difference_line(a: &str, b: &str) -> Option<usize> {
             .count()
             + 1,
     )
-}
-
-/// A DVI file's pages' bytes, first first: each from its `bop` to the
-/// next `bop` or the postamble (§583, the back pointers from the
-/// postamble's last page, §590).
-fn dvi_page_bytes(dvi: &[u8]) -> Vec<&[u8]> {
-    let word = |i: usize| {
-        dvi.get(i..i + 4)
-            .map(|b| i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-    };
-    let mut k = dvi.len();
-    while k > 0 && dvi[k - 1] == 223 {
-        k -= 1;
-    }
-    let Some(q) = k
-        .checked_sub(5)
-        .and_then(word)
-        .and_then(|q| usize::try_from(q).ok())
-    else {
-        return Vec::new();
-    };
-    let mut starts = Vec::new();
-    let mut p = word(q + 1).unwrap_or(-1);
-    while let Ok(b) = usize::try_from(p) {
-        if b >= q || starts.len() > dvi.len() / 45 {
-            return Vec::new();
-        }
-        starts.push(b);
-        p = word(b + 41).unwrap_or(-1);
-    }
-    starts.reverse();
-    let ends = starts.iter().skip(1).copied().chain(std::iter::once(q));
-    starts.iter().zip(ends).map(|(&a, e)| &dvi[a..e]).collect()
-}
-
-/// The pages of a DVI file: the postamble's total (§642), found from the
-/// end (§643: `post_post`, `q`, id, then the 223s).
-fn dvi_pages(dvi: &[u8]) -> usize {
-    let mut k = dvi.len();
-    while k > 0 && dvi[k - 1] == 223 {
-        k -= 1;
-    }
-    let Some(q) = k.checked_sub(5).and_then(|i| dvi.get(i..i + 4)) else {
-        return 0;
-    };
-    let q = u32::from_be_bytes([q[0], q[1], q[2], q[3]]) as usize;
-    dvi.get(q + 27..q + 29)
-        .map_or(0, |t| usize::from(u16::from_be_bytes([t[0], t[1]])))
 }
 
 #[cfg(test)]

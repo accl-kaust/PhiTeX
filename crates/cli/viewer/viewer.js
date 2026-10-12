@@ -3742,21 +3742,7 @@ var Pages = class {
       const d = await this.open().catch(() => null);
       return { ok: true, json: { items: d?.outline() ?? [] } };
     }
-    const r = await this.sock.request(op);
-    const j = r.json;
-    if (!r.ok || !j) return r;
-    if (o.op === "pages" && Array.isArray(j.pages)) j.pages = await this.sized(j.pages);
-    else if (Array.isArray(j.hashes)) {
-      j.hashes = await this.sized(j.hashes);
-      j.pages = j.hashes.length;
-    }
-    return r;
-  }
-  /** `hashes` as many as the PDF's pages. */
-  async sized(hashes) {
-    const d = await this.open().catch(() => null);
-    if (!d) return hashes;
-    return Array.from({ length: d.pages }, (_, k) => hashes[k] ?? `pdf${this.docVersion}:${k}`);
+    return this.sock.request(op);
   }
   onEvent(cb) {
     this.sock.onEvent(cb);
