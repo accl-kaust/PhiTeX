@@ -547,7 +547,10 @@ impl Graph {
         let needs_f = self.eng.values().field("needs");
         loop {
             let t0 = std::time::Instant::now();
-            let r = match self.eng.evaluate_sequential() {
+            let r = match self.eng.evaluate(
+                &mut phitex_defuse::Greedy::default(),
+                &mut crate::exec::Threads::from_env(),
+            ) {
                 Ok(r) => r,
                 Err(e) => panic!("{}", self.diagnose(&e)),
             };

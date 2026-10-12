@@ -836,7 +836,7 @@ button.btn:hover { background: var(--accent2); }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
-.phx-text ::selection { fill: transparent; background: rgb(0 100 255 / 25%); }
+.phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: rgb(0 100 255 / 25%); }
 .stage.stale .slot canvas { opacity: .45; filter: grayscale(1); }
 .banner { position: sticky; top: -12px; z-index: 1; display: none; margin: -12px -12px 10px; padding: 6px 10px; text-align: left; font-size: 12px;
   background: var(--bg-warning-03, #fcf1e3); color: var(--warn); border-bottom: 1px solid var(--divider); }
@@ -3285,6 +3285,38 @@ var PreviewSession = class {
 };
 
 // viewer/src/mupdf.ts
+var COMBINING = {
+  "\xA8": "\u0308",
+  "\xB4": "\u0301",
+  "`": "\u0300",
+  "\u02C6": "\u0302",
+  "^": "\u0302",
+  "\u02DC": "\u0303",
+  "~": "\u0303",
+  "\xAF": "\u0304",
+  "\u02C9": "\u0304",
+  "\u02D8": "\u0306",
+  "\u02D9": "\u0307",
+  "\u02DA": "\u030A",
+  "\xB8": "\u0327",
+  "\u02C7": "\u030C",
+  "\u02DD": "\u030B",
+  "\u02DB": "\u0328"
+};
+function compose(cs) {
+  const out = cs.map((c) => ({ ...c }));
+  const over = (a, b) => b !== void 0 && !COMBINING[b.c] && b.c.trim() !== "" && (a.x + a.r) / 2 >= b.x - 0.5 && (a.x + a.r) / 2 <= b.r + 0.5;
+  for (let k = 0; k < out.length; k++) {
+    const a = out[k];
+    const mark = COMBINING[a.c];
+    if (!mark) continue;
+    const on = over(a, out[k + 1]) ? k + 1 : over(a, out[k - 1]) ? k - 1 : -1;
+    if (on < 0) continue;
+    out[on].c = (out[on].c + mark).normalize("NFC");
+    a.c = "";
+  }
+  return out.filter((c) => c.c !== "");
+}
 var MupdfDoc = class {
   m;
   doc;
@@ -3341,20 +3373,28 @@ var MupdfDoc = class {
   text(page, x0, y0) {
     const out = [];
     let line = null;
+    let chars = [];
     let right = 0;
     const st = page.toStructuredText("preserve-whitespace");
     try {
       st.walk({
         beginLine: (bbox) => {
           line = null;
+          chars = [];
           right = bbox[2] - x0;
         },
-        onChar: (c, origin, _font, size) => {
+        onChar: (c, origin, _font, size, quad) => {
           line ??= { x: origin[0] - x0, y: origin[1] - y0, w: 0, size, text: "" };
-          line.text += c;
+          const x = Math.min(quad[0], quad[4]) - x0;
+          chars.push({ c, x, r: Math.max(quad[2], quad[6], x + x0) - x0 });
         },
         endLine: () => {
-          if (line?.text.trim()) out.push({ ...line, w: Math.max(right - line.x, 0) });
+          if (!line) return;
+          const cs = compose(chars);
+          const text = cs.map((c) => c.c).join("");
+          if (!text.trim()) return;
+          const xs = cs.flatMap((c) => Array.from({ length: c.c.length }, () => c.x));
+          out.push({ ...line, text, xs, w: Math.max(right - line.x, 0) });
         }
       });
     } finally {
@@ -3385,10 +3425,10 @@ function toCanvas(d) {
   svg.setAttribute("preserveAspectRatio", "none");
   for (const l of d.text) {
     const t = document.createElementNS(SVG, "text");
-    t.setAttribute("x", String(l.x));
+    t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
     t.setAttribute("y", String(l.y));
     t.setAttribute("font-size", String(l.size));
-    if (l.w > 0) {
+    if (!l.xs && l.w > 0) {
       t.setAttribute("textLength", String(l.w));
       t.setAttribute("lengthAdjust", "spacingAndGlyphs");
     }
