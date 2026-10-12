@@ -1,0 +1,22 @@
+[package]
+name = "defuse"
+version = "0.1.0"
+edition = "2024"
+description = "Incremental, parallel, field-level def-use graph evaluator"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+
+[features]
+# Observability probes (counters, timed spans, Chrome traces): see `obs`.
+# Off by default; release builds compile every probe out.
+profile = []
+
+[profile.release]
+debug = 1
+
+# `cargo build --profile profiling --features profile`: release code with
+# full debug info, for perf and for the `obs` probes.
+[profile.profiling]
+inherits = "release"
+debug = true

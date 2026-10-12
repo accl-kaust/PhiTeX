@@ -375,7 +375,7 @@ pub fn bibtex_main(args: &[String]) -> ! {
         match opt {
             Some("terse") => terse = true,
             Some("min-crossrefs") => {
-                min_crossrefs = it.next().and_then(|v| v.parse().ok()).unwrap_or(0)
+                min_crossrefs = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
             }
             Some(o) if o.starts_with("min-crossrefs=") => {
                 min_crossrefs = o["min-crossrefs=".len()..].parse().unwrap_or(0);

@@ -37,6 +37,7 @@
 mod atoms;
 mod classify;
 mod defs;
+mod hints;
 mod lex;
 mod report;
 mod table;
@@ -45,7 +46,11 @@ mod tests;
 
 use crate::syntax::Catcodes;
 pub use atoms::{Atom, AtomKind};
-pub use defs::{Arg, Definitions, Lit, Shape};
+pub use defs::{Arg, Definitions, Lit, OUTPUT, Shape};
+pub use hints::{
+    Assumption, Claim, Def, DefSet, Effect, Hints, Implicit, Mark, MayDefine, MeaningShape,
+    ScopeHint, ScopeKind,
+};
 pub use lex::{Hazard, TokKind, Token};
 pub use report::Stats;
 
@@ -156,6 +161,8 @@ pub struct Item {
     pub end: usize,
     /// Whether it opens a pending catcode hazard.
     pub hazard: bool,
+    /// What it tells the engine.
+    pub hints: Hints,
 }
 
 /// What the pass found in one text.
@@ -169,6 +176,61 @@ pub struct Pass {
     pub unmatched_closes: Vec<usize>,
     pub groups: Vec<GroupPair>,
     pub items: Vec<Item>,
+    /// The hints of structure that is not a control sequence (`{`, `}`,
+    /// `$`, `$$`, a blank line, a run of characters), outside definition
+    /// bodies.
+    pub marks: Vec<Mark>,
+}
+
+impl Pass {
+    /// Every item's and mark's hints, one JSON object per line in text
+    /// order: `{"atom", "start", "end", "name", "hints"}` (`name` is the
+    /// control sequence's name, or a mark's text).
+    #[must_use]
+    pub fn hints_jsonl(&self, text: &str) -> String {
+        let mut o = String::new();
+        let (mut i, mut m) = (0, 0);
+        while i < self.items.len() || m < self.marks.len() {
+            let take_item = m >= self.marks.len()
+                || i < self.items.len() && self.items[i].atom < self.marks[m].atom;
+            if take_item {
+                let it = &self.items[i];
+                hints::line_json(
+                    &mut o,
+                    it.atom,
+                    &self.atoms[it.atom],
+                    text,
+                    Some(&it.name),
+                    &it.hints,
+                );
+                i += 1;
+            } else {
+                let mk = &self.marks[m];
+                hints::line_json(&mut o, mk.atom, &self.atoms[mk.atom], text, None, &mk.hints);
+                m += 1;
+            }
+        }
+        o
+    }
+}
+
+/// The improvements the pass may use (all on by default; off, for the
+/// corpus report's before/after).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Features {
+    /// Extents of expl3's `:w` functions from l3kernel's conventions.
+    pub w_signatures: bool,
+    /// One step of `\expandafter` look-through.
+    pub lookthrough: bool,
+}
+
+impl Default for Features {
+    fn default() -> Features {
+        Features {
+            w_signatures: true,
+            lookthrough: true,
+        }
+    }
 }
 
 /// The definitions a text's uses may bind to: those of its own document
@@ -186,6 +248,12 @@ pub struct Scope<'a> {
 /// definitions are `scope.document`.
 #[must_use]
 pub fn analyze(text: &str, kind: FileKind, scope: Scope<'_>) -> Pass {
+    analyze_with(text, kind, scope, Features::default())
+}
+
+/// [`analyze`] with only `features`.
+#[must_use]
+pub fn analyze_with(text: &str, kind: FileKind, scope: Scope<'_>, features: Features) -> Pass {
     let lexed = lex::lex(text, kind, Some(scope));
     let atoms = atoms::atoms(text, &lexed.tokens);
     let braces = lexed
@@ -203,7 +271,8 @@ pub fn analyze(text: &str, kind: FileKind, scope: Scope<'_>) -> Pass {
         })
         .collect();
     let groups = atoms::group_pairs(text, &atoms, &lexed.tokens);
-    let items = classify::classify(text, &atoms, &lexed, scope);
+    let items = classify::classify(text, &atoms, &lexed, scope, kind, features);
+    let marks = hints::marks(text, &atoms, &lexed.tokens, &items);
     Pass {
         tokens: lexed.tokens,
         hazards: lexed.hazards,
@@ -212,5 +281,6 @@ pub fn analyze(text: &str, kind: FileKind, scope: Scope<'_>) -> Pass {
         unmatched_closes: lexed.unmatched_closes,
         groups,
         items,
+        marks,
     }
 }

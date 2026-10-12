@@ -1,5 +1,5 @@
 //! The `phitex` binary, end to end. The tests that build on the native
-//! engine are ignored until it lands (`phitex-tex` on `phitex-reduce`);
+//! engine are ignored until it lands (`phitex-tex` on `phitex-defuse`);
 //! they are the gate it must pass, against the pdfTeX oracles under
 //! `oracle/fixtures`:
 //!
@@ -235,61 +235,61 @@ fn tex_doc(program: &str, name: &str) {
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn latex_sections() {
     latex_doc("sections");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn latex_math() {
     latex_doc("math");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn latex_tables() {
     latex_doc("tables");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn latex_figures() {
     latex_doc("figures");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn latex_titlepage() {
     latex_doc("titlepage");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn latex_packages() {
     latex_doc("packages");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn latex_ams() {
     latex_doc("ams");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn latex_gfx() {
     latex_doc("gfx");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn latex_layout() {
     latex_doc("layout");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn latex_rules() {
     latex_doc("rules");
 }
@@ -346,7 +346,7 @@ fn pdf_docs() -> Vec<(String, String, String)> {
 /// `pdftex -ini -etex -interaction=batchmode NAME.tex` through phitex:
 /// pdfTeX's PDF file, byte for byte.
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdftex_ini_documents() {
     let _one = one();
     let mut bad = Vec::new();
@@ -495,7 +495,7 @@ fn update_ms(line: &str) -> f64 {
 /// budget (50 ms; phitex-red's budgets measure about 10 ms on this
 /// document) in a release build.
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn watch_word_edit() {
     let _one = one();
     let text = big();
@@ -565,7 +565,7 @@ fn watch_word_edit() {
 /// cache: a format is cached under the build's identity (a hash of its
 /// sources, `tex::build_id`), not the executable's path, size or time.
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn format_cache_shared_by_copies() {
     let _one = one();
     let base = scratch("copies");
@@ -669,7 +669,7 @@ fn ws_send(url: &str, request: &str) -> std::net::TcpStream {
 /// (`set_file` over the viewer's WebSocket, the file on disk untouched)
 /// is built as an edit; the PDF is the cold build's of the buffer's text.
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn watch_editor_buffer() {
     let _one = one();
     let body = std::fs::read_to_string(fixtures().join("plain/story.tex")).expect("a body");
@@ -754,61 +754,61 @@ fn json_string(s: &str) -> String {
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_sections() {
     pdflatex_doc("sections");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_math() {
     pdflatex_doc("math");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_tables() {
     pdflatex_doc("tables");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_figures() {
     pdflatex_doc("figures");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_titlepage() {
     pdflatex_doc("titlepage");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_packages() {
     pdflatex_doc("packages");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_ams() {
     pdflatex_doc("ams");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_gfx() {
     pdflatex_doc("gfx");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_layout() {
     pdflatex_doc("layout");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_rules() {
     pdflatex_doc("rules");
 }
@@ -824,43 +824,43 @@ fn pdflatex_pdfdoc(name: &str) {
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_pdfdoc_hyper() {
     pdflatex_pdfdoc("hyper");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_pdfdoc_graphics() {
     pdflatex_pdfdoc("graphics");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_pdfdoc_color() {
     pdflatex_pdfdoc("color");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_pdfdoc_tikz() {
     pdflatex_pdfdoc("tikz");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_pdfdoc_zsavepos() {
     pdflatex_pdfdoc("zsavepos");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_pdfdoc_objs() {
     pdflatex_pdfdoc("objs");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn pdflatex_pdfdoc_vfont() {
     pdflatex_pdfdoc("vfont");
 }
@@ -943,7 +943,7 @@ fn tiny() -> &'static str {
 /// file: `-o DIR` and `-j N` in the three positions, the output where
 /// `-o` says.
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-reduce is being written"]
+#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn options_in_any_position() {
     let _one = one();
     let dir = scratch("options");

@@ -7,7 +7,7 @@ publish = false
 description = "TeX's semantics on the reduction core: 21-bit tokens, expansion, macros, conditionals, registers, groups, modes; the Engine trait the engines implement"
 
 [dependencies]
-phitex-reduce = { path = "../../core/reduce" }
+phitex-defuse = { path = "../../core/defuse" }
 phitex-typeset = { path = "../../core/typeset" }
 phitex-source = { path = "../../core/source" }
 phitex-tfm = { path = "../../fonts/tfm" }

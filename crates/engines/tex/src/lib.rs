@@ -3,7 +3,7 @@
 //! Tokens are a 21-bit character with its catcode, or a control sequence;
 //! pdfTeX simply never makes a character above 255. Expansion, macros,
 //! conditionals, registers, grouping, modes and the input stack are
-//! reductions on `phitex-reduce`; the algorithms they need come from
+//! reductions on `phitex-defuse`; the algorithms they need come from
 //! `phitex-typeset`.
 //!
 //! What differs between engines is asked of an [`Engine`]: how input bytes
