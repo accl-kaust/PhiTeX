@@ -337,6 +337,9 @@ pub struct Counts {
     /// meaning), and an undefined field never ends the claim.
     #[serde(default)]
     pub confirm_dropped: u64,
+    /// Openers' contributions written as a step before the opener.
+    #[serde(default)]
+    pub opener_contributions: u64,
 }
 
 struct Interner {
@@ -1377,6 +1380,12 @@ impl Converter<'_> {
         let reads: Vec<u32> = s.reads.iter().map(|r| field(r)).collect();
         let writes: Vec<u32> = s.writes.iter().map(|w| field(&w.field)).collect();
         let leaf = t.end[i] as usize == i + 1;
+        if st.stack.is_empty()
+            && self.infos[i].h.scope == 1
+            && material(self.string(self.infos[i].class))
+        {
+            t.top_level += 1;
+        }
         for (c, depth, set) in std::mem::take(&mut st.resolve) {
             // (a claimer with a pending definition set binds the
             // delimiter's reads only once it runs: a read its bound
@@ -1480,6 +1489,7 @@ impl Converter<'_> {
                 pos = last + 1;
                 self.counts.pos_clamped += 1;
             }
+            st.prev_pos = st.last_pos;
             st.last_pos = Some(pos);
         }
         let _ = write!(o, ",\"pos\":{pos}");
@@ -1599,9 +1609,7 @@ impl Converter<'_> {
         let list = if st.in_par { "hlist" } else { "vlist" };
         // (an opener contributes nothing: what it opens, a box or a
         // formula, goes to the list when it closes, §1086, §1196)
-        let contributes = if sc == 1 {
-            None
-        } else if h_only {
+        let contributes = if h_only {
             Some("hlist")
         } else if v_only {
             Some("vlist")
@@ -1610,9 +1618,34 @@ impl Converter<'_> {
         } else {
             None
         };
+        // (an opener's contribution is a step of its own before it: the
+        // engine takes no contribution from a step that opens a scope)
+        let mut pre = String::new();
         if let Some(c) = contributes {
             self.counts.contributes += 1;
-            let _ = write!(o, ",\"contributes\":\"{c}\"");
+            if sc == 1 {
+                self.counts.opener_contributions += 1;
+                let mut cpos = pos;
+                if top_level {
+                    if st.prev_pos.is_none_or(|p| pos - 1 > p) {
+                        cpos = pos - 1;
+                    } else {
+                        o = o.replacen(
+                            &format!(",\"pos\":{pos}"),
+                            &format!(",\"pos\":{}", pos + 1),
+                            1,
+                        );
+                        st.last_pos = Some(pos + 1);
+                    }
+                }
+                let _ = write!(
+                    pre,
+                    "{{\"id\":\"s{i}c\",\"class\":\"contribution\",\"pos\":{cpos},\"reads\":[],\"writes\":[],\"contributes\":\"{c}\"}}{}",
+                    if top_level { "\n" } else { "," }
+                );
+            } else {
+                let _ = write!(o, ",\"contributes\":\"{c}\"");
+            }
         }
         if LIST_READERS.contains(&name) {
             self.counts.reads_prev += 1;
@@ -1692,6 +1725,7 @@ impl Converter<'_> {
                 o.push('\n');
             }
         }
+        out.write_all(pre.as_bytes())?;
         out.write_all(o.as_bytes())
     }
 
@@ -1800,6 +1834,8 @@ struct EmitState {
     stack: Vec<(u32, u32)>,
     depth: Option<i64>,
     last_pos: Option<i64>,
+    /// The top-level `pos` before the current step's.
+    prev_pos: Option<i64>,
     /// Whether a paragraph is being built (approximate: see `REPLAY.md`).
     in_par: bool,
     env: Vec<&'static str>,
@@ -1851,6 +1887,15 @@ fn env_of(class: &str) -> Option<&'static str> {
 /// The environment a parameter read is (`\time` and its kin).
 fn env_of_param(p: &str) -> Option<&'static str> {
     matches!(p, "time" | "day" | "month" | "year").then_some("time")
+}
+
+/// Whether a step of this class adds material to a list.
+fn material(class: &str) -> bool {
+    class == "char"
+        || class == "space"
+        || H_MATERIAL.contains(&class)
+        || V_MATERIAL.contains(&class)
+        || EITHER_MATERIAL.contains(&class)
 }
 
 /// Horizontal material (tex.web §1090: it starts a paragraph in

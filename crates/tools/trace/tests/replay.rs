@@ -23,7 +23,10 @@ fn flatten(mut v: Value, out: &mut Vec<Value>) {
         .and_then(|k| k.as_array().cloned())
         .unwrap_or_default();
     v["n_children"] = kids.len().into();
-    out.push(v);
+    // (an opener's contribution, a step of its own, is no trace step)
+    if v["class"] != "contribution" {
+        out.push(v);
+    }
     for k in kids {
         flatten(k, out);
     }

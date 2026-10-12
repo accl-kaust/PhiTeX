@@ -80,9 +80,10 @@ one top-level step per line, the steps a call unfolds nested in its
   and horizontal material (`\hskip`, `\unhbox`, `\vrule`, ...) to `hlist`;
   vertical material (`\vskip`, `\hrule`, `\unvbox`, ...) to `vlist`;
   material either list takes (`\kern`, `\penalty`, `\hbox`, `\special`,
-  ...) to the current one. A step that opens a scope contributes nothing
-  (the box or formula goes to the list when it closes, tex.web §1086,
-  §1196). The current list is a guess: the trace does not show the mode;
+  ...) to the current one. A step that opens a scope does not contribute
+  itself (the engine takes no contribution from an opener): its
+  contribution is a step of its own just before it, id `s<id>c`, class
+  `contribution`, no reads or writes (`counts.opener_contributions`). The current list is a guess: the trace does not show the mode;
   a paragraph is taken to start at horizontal material or an implicit
   starter and to end at vertical material, an implicit closer or `\par`.
 - **`reads_prev_contribution`**: the catalogue's F2 readers (`\lastbox`,
@@ -118,8 +119,15 @@ one top-level step per line, the steps a call unfolds nested in its
   `inserted` on an edit's new step. **`prior`** is not written (cold
   traces). **`unfold`**, **`limit`**, **`count_from`** are not written.
 
-**Edits** (`edits.jsonl`, v1 ops, `expect.steps_reached` the edit-impact
-analysis's steps reached): the analysis's sample as before (the main
+**Edits** (`edits.jsonl`, v1 ops). `expect.steps_reached` is the
+edit-impact analysis's steps reached: an upper bound over the recorded
+def-use edges, with no cutoff (a step reached is counted whether or not
+its value would change), excluding the edited step's own steps (its
+line's, or the deleted call's subtree). A run that executes no more than
+the bound is consistent with it; the ratio of nodes run to the bound
+measures the engine's cutoff. (The engine side would rather call it
+`reached_bound`; the client's loader accepts only `steps_reached`, so the
+name stays until the loader changes.) the analysis's sample as before (the main
 file's lines that write, seed 1, 200 lines; a form and one of the line's
 writing steps, seed 2). v1 edits name top-level steps, so a sampled step
 inside a call is reached through its top-level ancestor: `change_writes`
@@ -227,5 +235,5 @@ The join's (`steps`, `fields`, `macro_calls`, `joined_exact`,
 `confirm_dropped`, `may1_none`/`_names`/`_prefixes`/`_any` (pending
 sets), `may_unsound`, `may_own_writes`, `scope_unmatched`,
 `implicit_dropped`, `pos_clamped`, `contributes`, `reads_prev`, `folds`,
-`env_steps`, `edits`. (`consumes_*`, `claim_*`, `may_*` are the older
+`env_steps`, `opener_contributions`, `edits`. (`consumes_*`, `claim_*`, `may_*` are the older
 format's, kept for comparison.)

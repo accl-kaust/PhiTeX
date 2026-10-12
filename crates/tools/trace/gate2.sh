@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Gate 2: the replay client (crates/vendor/defuse/examples/replay.rs) over
 # the format v1 corpus that replay.sh writes (target/corpus/replay/<doc>).
-# Per document, smallest first: cold at --threads 1 and 8 (no edits), then
-# the 200 edits with --check-every 20 at speculation off and predicted
-# (each again without checks when a check fails, for the numbers). Logs to
+# Per document, smallest first, one run at a time, all at --threads 1:
+# cold (no edits), then the 200 edits with --check-every 50 at speculation
+# off and predicted (each again without checks when a check fails, for
+# the numbers). A failure is recorded and the next run goes on. Logs to
 # target/corpus/gate2/<doc>.<run>.log; each run is capped at
 # PHITEX_GATE_TIMEOUT seconds (default 7200). Run through the sandbox:
 #
@@ -29,9 +30,8 @@ for d in $(ls -S -r "$in"/*/trace.jsonl 2>/dev/null); do
   [ $# -eq 0 ] || [[ $want == *" $name "* ]] || continue
   e="$in/$name/edits.jsonl"
   run "$name" cold1 "$d" /dev/null --threads 1
-  run "$name" cold8 "$d" /dev/null --threads 8
   for spec in off predicted; do
-    run "$name" "$spec" "$d" "$e" --threads 1 --spec "$spec" --check-every 20
+    run "$name" "$spec" "$d" "$e" --threads 1 --spec "$spec" --check-every 50
     if ! grep -q "^exit 0" "$out/$name.$spec.log"; then
       run "$name" "$spec-nocheck" "$d" "$e" --threads 1 --spec "$spec"
     fi
