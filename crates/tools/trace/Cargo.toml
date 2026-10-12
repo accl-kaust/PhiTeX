@@ -8,7 +8,7 @@ description = "Measures the def-use structure of real documents from pdfTeX's e-
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["unbounded_depth"] }
 fastrand = "2"
 phitex-source = { path = "../../core/source" }
 

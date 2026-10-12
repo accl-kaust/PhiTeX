@@ -838,7 +838,7 @@ fn close_claims(
     claims.retain(|&(inst, end, cid)| {
         if done(inst, end) {
             if let Some(info) = infos.get_mut(usize::try_from(cid).unwrap_or(usize::MAX)) {
-                info.claim_n = u32::try_from(id - cid - 1).unwrap_or(NONE);
+                info.claim_n = u32::try_from(id.saturating_sub(cid + 1)).unwrap_or(NONE);
             }
             false
         } else {

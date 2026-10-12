@@ -10,6 +10,15 @@ use std::io::BufRead;
 
 use serde_json::{Map, Value};
 
+/// A line as JSON (nested `children` run deeper than `serde_json`'s default
+/// recursion limit).
+fn parse(text: &str) -> Result<Value, serde_json::Error> {
+    use serde::Deserialize;
+    let mut d = serde_json::Deserializer::from_str(text);
+    d.disable_recursion_limit();
+    Value::deserialize(&mut d)
+}
+
 fn fail(line: usize, what: impl std::fmt::Display) -> String {
     format!("line {line}: {what}")
 }
@@ -403,7 +412,7 @@ pub fn trace<R: BufRead>(reader: R) -> Result<Vec<String>, String> {
         .filter(|(_, l)| l.as_ref().map_or(true, |l| !l.trim().is_empty()));
     let (i, first) = lines.next().ok_or("empty trace")?;
     let first = first.map_err(|e| e.to_string())?;
-    let v: Value = serde_json::from_str(&first).map_err(|e| fail(i + 1, e))?;
+    let v: Value = parse(&first).map_err(|e| fail(i + 1, e))?;
     let m = v
         .get("meta")
         .and_then(Value::as_object)
@@ -449,7 +458,7 @@ pub fn trace<R: BufRead>(reader: R) -> Result<Vec<String>, String> {
     for (i, l) in lines {
         let line = i + 1;
         let l = l.map_err(|e| e.to_string())?;
-        let v: Value = serde_json::from_str(&l).map_err(|e| fail(line, e))?;
+        let v: Value = parse(&l).map_err(|e| fail(line, e))?;
         if v.get("meta").is_some() {
             return Err(fail(line, "a second meta line"));
         }
@@ -508,7 +517,7 @@ pub fn edits<R: BufRead, S: std::hash::BuildHasher>(
         if l.trim().is_empty() {
             continue;
         }
-        let v: Value = serde_json::from_str(&l).map_err(|e| fail(line, e))?;
+        let v: Value = parse(&l).map_err(|e| fail(line, e))?;
         let o = v
             .as_object()
             .ok_or_else(|| fail(line, "an edit must be an object"))?;
@@ -588,7 +597,7 @@ pub fn all_ids<R: BufRead>(reader: R) -> Result<HashSet<String>, String> {
         if l.trim().is_empty() {
             continue;
         }
-        let v: Value = serde_json::from_str(&l).map_err(|e| fail(i + 1, e))?;
+        let v: Value = parse(&l).map_err(|e| fail(i + 1, e))?;
         step(i + 1, &v, &mut ids)?;
     }
     Ok(ids)
