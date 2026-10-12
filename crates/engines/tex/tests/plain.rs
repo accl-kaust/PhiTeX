@@ -32,7 +32,14 @@ fn gate(dir: &str, body: &str, default: bool, plain: bool) -> Result<String, Str
     let s = &b.stats;
     let report = format!(
         "{name}: {} nodes run, {} runs, {} live, {} rounds, tails {}/{}, starved {}, critical path {}",
-        s.nodes_run, s.runs, s.live, s.rounds, s.tails, s.tail_siblings, s.starved, s.critical_path
+        s.nodes_run,
+        s.runs,
+        s.live,
+        s.rounds,
+        s.tails,
+        s.tail_siblings,
+        s.starved,
+        s.critical_path.unwrap_or(0)
     );
     match common::first_difference(&dvi, &want) {
         None => Ok(report),
