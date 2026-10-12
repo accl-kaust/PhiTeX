@@ -2,9 +2,11 @@
 //! outlines, the name tree, threads, the catalog, `/Info`, and the
 //! cross-reference table or stream with the trailer.
 
+use std::sync::Arc;
+
 use crate::{
     LiteralMode, OBJ_TYPE_OTHERS, OBJ_TYPE_PAGE, OBJ_TYPE_PAGES, PAGES_TREE_KIDS_MAX, PdfError,
-    PdfWriter, int, pdf_error, substr_of_str,
+    PdfState, int, pdf_error, substr_of_str,
 };
 
 /// The hexadecimal MD5 of `s` (`convertStringToHexString`).
@@ -18,7 +20,114 @@ fn md5_hex(s: &[u8]) -> String {
         })
 }
 
-impl PdfWriter {
+/// A step's bytes: what it appended to the file and the objects (by
+/// number) that begin in them.
+#[derive(Clone, Debug)]
+pub struct Chunk {
+    /// The bytes.
+    pub bytes: Arc<[u8]>,
+    /// The objects written directly (not in an object stream) that begin
+    /// in `bytes`, in order.
+    pub objs: Vec<usize>,
+}
+
+/// The file's bytes so far, append-only: one [`Chunk`] per
+/// [`PdfState::flush`]. The state never reads them back; it only counts
+/// them, so a state cloned after step `k` continues from these bytes
+/// truncated to `k` chunks.
+#[derive(Clone, Debug, Default)]
+pub struct PdfBytes {
+    chunks: Vec<Chunk>,
+    len: usize,
+}
+
+impl PdfBytes {
+    /// No bytes.
+    #[must_use]
+    pub fn new() -> PdfBytes {
+        PdfBytes::default()
+    }
+
+    /// The chunks, one per step.
+    #[must_use]
+    pub fn chunks(&self) -> &[Chunk] {
+        &self.chunks
+    }
+
+    /// The number of bytes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether there are no bytes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The first `steps` chunks only (to continue from a state cloned
+    /// after that many flushes).
+    pub fn truncate(&mut self, steps: usize) {
+        self.chunks.truncate(steps);
+        self.len = self.chunks.iter().map(|c| c.bytes.len()).sum();
+    }
+
+    /// The chunk that object `n` begins in.
+    #[must_use]
+    pub fn chunk_of(&self, n: usize) -> Option<usize> {
+        self.chunks.iter().position(|c| c.objs.contains(&n))
+    }
+}
+
+/// The whole file: the bytes flushed, then the end of the file (fonts,
+/// pages tree, outlines, names, threads, catalog, `/Info`, the
+/// cross-reference table or stream and the trailer); empty without pages
+/// (or with `\pdfdraftmode`).
+///
+/// # Errors
+/// A font that cannot be embedded, or what pdfTeX stops at; `bytes` not
+/// the ones `state` flushed.
+pub fn finish(state: PdfState, bytes: &PdfBytes) -> Result<Vec<u8>, PdfError> {
+    if bytes.len() != state.base {
+        return Err(PdfError::Unsupported(
+            "finish: the bytes are not the ones the state flushed".into(),
+        ));
+    }
+    let Some(tail) = state.finish_tail()? else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(bytes.len() + tail.len());
+    for c in &bytes.chunks {
+        out.extend_from_slice(&c.bytes);
+    }
+    out.extend_from_slice(&tail);
+    Ok(out)
+}
+
+impl PdfState {
+    /// Moves the bytes written since the last flush to `bytes` as one
+    /// chunk (possibly empty): a step's end.
+    ///
+    /// # Panics
+    /// If `bytes` are not the ones this state flushed before.
+    pub fn flush(&mut self, bytes: &mut PdfBytes) {
+        assert_eq!(bytes.len, self.base, "flush: not this state's bytes");
+        let b = std::mem::take(&mut self.out);
+        self.base += b.len();
+        bytes.len += b.len();
+        bytes.chunks.push(Chunk {
+            bytes: b.into(),
+            objs: std::mem::take(&mut self.chunk_objs),
+        });
+    }
+
+    /// The number of bytes flushed.
+    #[must_use]
+    pub fn flushed(&self) -> usize {
+        self.base
+    }
+
     /// `\pdfcolorstackinit [page] [direct] {...}`: the new stack's
     /// number (`\pdfcolorstackinit` expands to it).
     ///
@@ -45,11 +154,19 @@ impl PdfWriter {
     /// table or stream and the trailer; no file at all without pages (or
     /// with `\pdfdraftmode`).
     ///
+    /// The writer never flushed (see [`PdfState::flush`]): the whole
+    /// file is `finish(self, &PdfBytes::new())`.
+    ///
     /// # Errors
     /// A font that cannot be embedded, or what pdfTeX stops at.
-    pub fn finish(mut self) -> Result<Vec<u8>, PdfError> {
+    pub fn finish(self) -> Result<Vec<u8>, PdfError> {
+        finish(self, &PdfBytes::new())
+    }
+
+    /// The end of the file after the bytes flushed: `None` for no file.
+    fn finish_tail(mut self) -> Result<Option<Vec<u8>>, PdfError> {
         if self.total_pages == 0 || self.fixed_draftmode != 0 {
-            return Ok(Vec::new());
+            return Ok(None);
         }
         if self.total_pages % PAGES_TREE_KIDS_MAX != 0 {
             self.objs[self.last_pages].info = self.total_pages % PAGES_TREE_KIDS_MAX;
@@ -137,7 +254,7 @@ impl PdfWriter {
         self.print_ln(b"%%EOF");
         match self.error.take() {
             Some(e) => Err(e),
-            None => Ok(self.out),
+            None => Ok(Some(self.out)),
         }
     }
 

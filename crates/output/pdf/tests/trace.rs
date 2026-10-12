@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use phitex_pdf::map::{MapEntry, parse_map};
 use phitex_pdf::{
     Action, ColorStackCmd, DestKind, FontSource, Ident, ImageSpec, LiteralMode, ObjBody, PageBox,
-    PdfParams, PdfWriter, VirtualFont, Whatsit,
+    PdfBytes, PdfParams, PdfWriter, VirtualFont, Whatsit,
 };
 use phitex_tfm::ScaledFont;
 use phitex_typeset::arith::{Scaled, UNITY};
@@ -942,6 +942,8 @@ struct Job {
     handles: u32,
     /// The fonts `do_vf` saw.
     vf_done: std::collections::BTreeSet<FontId>,
+    /// The bytes flushed, a chunk a page.
+    bytes: PdfBytes,
 }
 
 /// pdfTeX's banner on the machine that made the fixtures.
@@ -969,6 +971,7 @@ impl Job {
             taken: Vec::new(),
             handles: 0,
             vf_done: std::collections::BTreeSet::new(),
+            bytes: PdfBytes::new(),
         }
     }
 
@@ -1065,6 +1068,7 @@ impl Job {
         self.w
             .ship_out_with(&b, &self.src, &mut |h, _| ws[&h].clone())
             .unwrap();
+        self.w.flush(&mut self.bytes);
     }
 
     /// Ships the remaining pages.
@@ -1097,9 +1101,14 @@ impl Job {
             .unwrap();
     }
 
+    /// The file.
+    fn output(self) -> Vec<u8> {
+        phitex_pdf::finish(self.w, &self.bytes).unwrap()
+    }
+
     fn finish(self) {
         let name = self.name;
-        let got = self.w.finish().unwrap();
+        let got = self.output();
         let want = oracle(&format!("{name}.pdf"));
         compare(name, &got, &want);
     }
@@ -1893,4 +1902,89 @@ fn tounicode2() {
     j.read();
     j.ship_all();
     j.finish();
+}
+
+// ---- the state as a value ----
+
+/// Runs `setup`, ships `k` pages, snapshots the state and its bytes,
+/// and ships the rest; then runs the same job again to page `k` and
+/// continues from the snapshot instead. Both files are the oracle's.
+fn split_run(name: &'static str, level: i32, setup: &dyn Fn(&mut Job), k: usize) {
+    let mut a = Job::new(name, level);
+    setup(&mut a);
+    for _ in 0..k {
+        a.ship();
+    }
+    let state = a.w.clone();
+    let bytes = a.bytes.clone();
+    assert_eq!(bytes.chunks().len(), k);
+    a.ship_all();
+    let straight = a.output();
+    let mut b = Job::new(name, level);
+    setup(&mut b);
+    for _ in 0..k {
+        b.ship();
+    }
+    b.w = state;
+    b.bytes = bytes;
+    b.ship_all();
+    let resumed = b.output();
+    assert!(straight == resumed, "{name}: resumed at page {k} differs");
+    compare(name, &resumed, &oracle(&format!("{name}.pdf")));
+}
+
+#[test]
+fn snapshot_objstm() {
+    // objects left in an object stream across the snapshot
+    let setup = |j: &mut Job| {
+        j.font("tenrm", "cmr10", None);
+        j.w.params_mut().minor_version = 5;
+        j.w.params_mut().obj_compress_level = 2;
+        j.read();
+    };
+    for k in [1, 7, 30] {
+        split_run("objstm", 9, &setup, k);
+    }
+}
+
+#[test]
+fn snapshot_annot() {
+    let setup = |j: &mut Job| {
+        j.font("r", "cmr10", None);
+        j.w.params_mut().compress_level = 0;
+        let a = j.w.new_objnum();
+        let ra = j.w.new_objnum();
+        j.nums.annots.extend([a, ra]);
+        for _ in 0..10 {
+            let l = j.w.new_objnum();
+            j.nums.links.push_back(l);
+        }
+        j.nums.new_window.push_back(1);
+        j.read();
+    };
+    split_run("annot", 0, &setup, 1);
+}
+
+#[test]
+fn snapshot_ownpdf() {
+    // images and included documents shared by the clone
+    let setup = |j: &mut Job| {
+        j.font("r", "cmr10", None);
+        let p = j.w.params_mut();
+        p.compress_level = 0;
+        p.inclusion_copy_fonts = 1;
+        j.read();
+        let a = j.w.ximage(image("hello.pdf", 0, |_| {})).unwrap();
+        let b =
+            j.w.ximage(image("objstm.pdf", 0, |s| {
+                s.width = 100 * PT;
+                s.page = 2;
+            }))
+            .unwrap();
+        let c =
+            j.w.ximage(image("colorstack.pdf", 0, |s| s.page_box = PageBox::Trim))
+                .unwrap();
+        j.nums.ximages.extend([a, b, c, a]);
+    };
+    split_run("ownpdf", 0, &setup, 1);
 }
