@@ -1,0 +1,41 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input obj
+(./obj.tex<<obj.tex>>
+pdfTeX warning (\pdfobj): invalid object number being ignored
+-1 12347
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0, glue set 281.16669fill
+.\glue(\topskip) 0.0
+.\hbox(6.83331+0.0)x200.0, glue set 192.49998fil
+..\hbox(0.0+0.0)x0.0
+..\r A
+..\pdfrefobj{<< /A 1 >>}
+..\pdfrefobj attr{/X 1} stream{q Q}
+..\pdfrefobj stream file{obj.tex}
+..\pdfrefobj{(reserved)}
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\glue(\parskip) 0.0
+.\glue(\baselineskip) 5.16669
+.\hbox(6.83331+0.0)x200.0, glue set 192.91664fil
+..\hbox(0.0+0.0)x0.0
+..\r B
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\hbox(0.0+0.0)x200.0
+.\glue 0.0 plus 1.0fill
+
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}<<obj.tex>> )</usr/share/tex
+mf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb>
+Output written on obj-trace.pdf (1 page, 12479 bytes).
+PDF statistics:
+ 19 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 33 words of extra memory for PDF output out of 10000 (max. 10000000)
+
