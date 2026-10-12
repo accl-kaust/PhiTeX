@@ -343,7 +343,11 @@ fn hello(pdf: bool) -> Build {
     let dir = common::fixtures().join("latex/hello");
     let src = common::read(&dir.join("hello.tex"));
     let want = std::fs::read(dir.join("hello.dvi")).expect("the oracle");
-    let comment = if pdf { String::new() } else { common::dvi_comment(&want) };
+    let comment = if pdf {
+        String::new()
+    } else {
+        common::dvi_comment(&want)
+    };
     let opts = options("hello", &dir, &comment, false, pdf);
     let t0 = std::time::Instant::now();
     let b = common::build(opts, Some(&prelude(pdf)), &src);

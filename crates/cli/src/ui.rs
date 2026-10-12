@@ -87,6 +87,21 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
+/// `s`'s width on a terminal (its characters without the colours).
+pub fn width(s: &str) -> usize {
+    plain(s).chars().count()
+}
+
+/// `s` padded with spaces to `w` columns (on the left with `right`).
+pub fn pad(s: &str, w: usize, right: bool) -> String {
+    let fill = " ".repeat(w.saturating_sub(width(s)));
+    if right {
+        format!("{fill}{s}")
+    } else {
+        format!("{s}{fill}")
+    }
+}
+
 /// `s` cut to `max` characters, an ellipsis where it is cut.
 fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -116,21 +131,43 @@ impl Tap {
     }
 }
 
-/// The terminal's last line, below what is printed: the spinner while a
-/// build runs, else the watch's status (a terminal only).
+/// The terminal's last lines, below what is printed: the build's live
+/// tree while it runs, else the watch's status line (a terminal only).
 #[derive(Default)]
 struct Bottom {
-    spin: Option<String>,
+    spin: Vec<String>,
     idle: Option<String>,
+    /// The keys shown at the status line's right end.
+    keys: Option<&'static str>,
+    /// The lines on the screen now.
+    drawn: usize,
+    /// Nothing drawn below any more (the watch is quitting).
+    gone: bool,
 }
 
 impl Bottom {
-    fn shown(&self) -> Option<&String> {
-        self.spin.as_ref().or(self.idle.as_ref())
+    fn shown(&self) -> &[String] {
+        if self.spin.is_empty() {
+            self.idle.as_slice()
+        } else {
+            &self.spin
+        }
+    }
+
+    /// The lines on the screen erased, the cursor at the first's start.
+    fn erase(&mut self, e: &mut impl std::io::Write) {
+        if self.drawn > 0 {
+            let _ = write!(e, "\r\x1b[2K");
+            for _ in 1..self.drawn {
+                let _ = write!(e, "\x1b[1A\x1b[2K");
+            }
+            self.drawn = 0;
+        }
     }
 }
 
 /// The terminal: what is printed, and the spinner.
+#[derive(Clone)]
 pub struct Ui {
     pub st: Style,
     pub verbose: u8,
@@ -149,15 +186,89 @@ pub struct Spin {
     updater: Option<std::thread::JoinHandle<()>>,
 }
 
-/// The spinner's line: what is built, the session's phase, the time.
-fn status_line(what: &str, s: &Status, elapsed: Duration) -> String {
+/// The live tree under the spinner's line, once a build has run a
+/// while: each phase ended with its time, the one running with its time
+/// so far, the cores busy and the memory held.
+fn tree(st: Style, s: &Status, tick: char, load: Option<(f64, u64)>, w: usize) -> Vec<String> {
+    let (done, now) = s.phases();
+    let n = done.len() + usize::from(now.is_some());
+    let mut out = Vec::with_capacity(n);
+    let branch = |k: usize| if k + 1 == n { "└─" } else { "├─" };
+    for (k, (name, d)) in done.iter().enumerate() {
+        out.push(format!(
+            "  {} {} {} {}",
+            st.dim(branch(k)),
+            st.green("✓"),
+            pad(name, 14, false),
+            st.dim(&pad(&ms(*d), 9, true))
+        ));
+    }
+    if let Some((name, d)) = now {
+        let mut l = format!(
+            "  {} {} {} {}",
+            st.dim(branch(done.len())),
+            st.cyan(&tick.to_string()),
+            pad(&name, 14, false),
+            pad(&ms(d), 9, true)
+        );
+        if let Some((cores, rss)) = load {
+            let mem = bytesize::ByteSize::b(rss).display().si().to_string();
+            l.push_str(&st.dim(&format!("   {cores:.1} cores busy · {mem}")));
+        }
+        out.push(l);
+    }
+    // (cut to the terminal: a wrapped line would break the redraw)
+    out.into_iter()
+        .map(|l| {
+            if width(&l) > w {
+                clip(&plain(&l), w)
+            } else {
+                l
+            }
+        })
+        .collect()
+}
+
+/// The spinner's line: what is built, the session's phase, the time, and
+/// (`load`) the cores busy lately and the memory held.
+fn status_line(what: &str, s: &Status, elapsed: Duration, load: Option<(f64, u64)>) -> String {
     let mut parts = vec![what.to_owned()];
     let phase = s.phase();
     if !phase.is_empty() {
         parts.push(phase);
     }
     parts.push(format!("{:.1} s", elapsed.as_secs_f64()));
+    if let Some((cores, rss)) = load {
+        parts.push(format!("{cores:.1} cores busy"));
+        parts.push(bytesize::ByteSize::b(rss).display().si().to_string());
+    }
     parts.join(" · ")
+}
+
+/// The cores busy since the last sample, and the memory now.
+struct Load {
+    last: Option<(Instant, Duration)>,
+    now: Option<(f64, u64)>,
+}
+
+impl Load {
+    fn sample(&mut self) {
+        let Some((cpu, rss)) = crate::keys::usage() else {
+            return;
+        };
+        let t = Instant::now();
+        match self.last {
+            Some((t0, c0)) => {
+                let dt = t.duration_since(t0).as_secs_f64();
+                if dt >= 0.4 {
+                    let cores = cpu.saturating_sub(c0).as_secs_f64() / dt;
+                    self.now = Some((cores, rss));
+                    self.last = Some((t, cpu));
+                }
+            }
+            None => self.last = Some((t, cpu)),
+        }
+    }
 }
 
 const TICKS: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -185,12 +296,16 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The bottom line written again, over what it was.
-fn redraw(e: &mut impl std::io::Write, b: &Bottom) {
-    let _ = write!(e, "\r\x1b[2K");
-    if let Some(l) = b.shown() {
-        let _ = write!(e, "{l}");
+/// The bottom lines written again, over what they were.
+fn redraw(e: &mut impl std::io::Write, b: &mut Bottom) {
+    b.erase(e);
+    if b.gone {
+        let _ = e.flush();
+        return;
     }
+    let lines = b.shown();
+    let _ = write!(e, "{}", lines.join("\n"));
+    b.drawn = lines.len();
     let _ = e.flush();
 }
 
@@ -226,15 +341,13 @@ impl Ui {
         if self.json {
             return;
         }
-        let b = lock(&self.bottom);
+        let mut b = lock(&self.bottom);
         let mut e = std::io::stderr().lock();
-        let shown = b.shown().is_some();
-        if shown {
-            let _ = write!(e, "\r\x1b[2K");
-        }
+        let shown = b.drawn > 0;
+        b.erase(&mut e);
         let _ = writeln!(e, "{s}");
         if shown {
-            redraw(&mut e, &b);
+            redraw(&mut e, &mut b);
         }
     }
 
@@ -254,10 +367,10 @@ impl Ui {
         lock(&self.tap).tell(json!({"kind": "event", "event": v}));
     }
 
-    /// What the session says it is doing (`phitex: …`, dim), unless `-q`.
+    /// What the session says (`note: …`), unless `-q`.
     pub fn note(&self, s: &str) {
         if !self.quiet {
-            self.print(&self.st.dim(&format!("phitex: {s}")));
+            self.print(&format!("{}: {s}", self.st.yellow("note")));
         }
         self.tell("note", s);
         self.event_only(&json!({"event": "note", "message": s}));
@@ -288,32 +401,56 @@ impl Ui {
     /// terminal only; none: no line), and told: `ok` its mark (none: dim).
     pub fn status(&self, text: Option<&str>, ok: Option<bool>) {
         let st = self.st;
-        let line = text.map(|t| {
-            let w = crate::keys::width().unwrap_or(80);
-            let mark = match ok {
-                Some(true) => st.green("●"),
-                Some(false) => st.red("●"),
-                None => st.dim("●"),
-            };
-            format!("{mark} {}", st.dim(&clip(t, w.saturating_sub(3))))
-        });
         if st.tty && !self.json {
             let mut b = lock(&self.bottom);
-            b.idle = line;
-            if b.spin.is_none() {
-                redraw(&mut std::io::stderr().lock(), &b);
+            b.idle = text.map(|t| {
+                let w = crate::keys::width().unwrap_or(80).saturating_sub(1);
+                let mark = match ok {
+                    Some(true) => st.green("●"),
+                    Some(false) => st.red("●"),
+                    None => st.dim("●"),
+                };
+                // (the keys at the right end, when there is room)
+                let keys = b.keys.unwrap_or("");
+                let room = w.saturating_sub(2);
+                let fits = !keys.is_empty() && t.chars().count() + 3 + keys.len() <= room;
+                if fits {
+                    let gap = room - t.chars().count() - keys.len();
+                    format!("{mark} {}{}{}", st.dim(t), " ".repeat(gap), st.dim(keys))
+                } else {
+                    format!("{mark} {}", st.dim(&clip(t, room)))
+                }
+            });
+            if b.spin.is_empty() {
+                redraw(&mut std::io::stderr().lock(), &mut b);
             }
         }
         lock(&self.tap).tell(json!({"kind": "status", "text": text.unwrap_or(""), "ok": ok}));
     }
 
-    /// The screen cleared, the bottom line again.
+    /// The bottom lines erased for good, a build's tree too (the watch
+    /// quits).
+    pub fn finish(&self) {
+        if self.st.tty && !self.json {
+            let mut b = lock(&self.bottom);
+            b.gone = true;
+            redraw(&mut std::io::stderr().lock(), &mut b);
+        }
+    }
+
+    /// `keys` at the status line's right end from now on.
+    pub fn keys(&self, keys: &'static str) {
+        lock(&self.bottom).keys = Some(keys);
+    }
+
+    /// The screen cleared, the bottom lines again.
     pub fn clear(&self) {
         if self.st.tty && !self.json {
-            let b = lock(&self.bottom);
+            let mut b = lock(&self.bottom);
             let mut e = std::io::stderr().lock();
             let _ = write!(e, "\x1b[2J\x1b[H");
-            redraw(&mut e, &b);
+            b.drawn = 0;
+            redraw(&mut e, &mut b);
         }
     }
 
@@ -322,32 +459,56 @@ impl Ui {
     pub fn spin(&self, what: String, status: Arc<Status>) -> Spin {
         lock(&self.tap).tell(json!({"kind": "busy", "text": what}));
         let stop = Arc::new(AtomicBool::new(false));
-        let mut updater = None;
-        if self.st.tty && !self.json {
-            let (bottom, stop) = (self.bottom.clone(), stop.clone());
-            let t0 = Instant::now();
-            updater = Some(std::thread::spawn(move || {
-                let mut k = 0;
-                while !stop.load(Ordering::Relaxed) {
-                    let w = crate::keys::width().unwrap_or(80);
-                    let line = format!(
-                        "{} {}",
-                        TICKS[k % TICKS.len()],
-                        clip(
-                            &status_line(&what, &status, t0.elapsed()),
-                            w.saturating_sub(3)
-                        )
-                    );
-                    {
-                        let mut b = lock(&bottom);
-                        b.spin = Some(line);
-                        redraw(&mut std::io::stderr().lock(), &b);
-                    }
-                    k += 1;
-                    std::thread::sleep(Duration::from_millis(80));
+        // (the line drawn on a terminal; told to the viewer every second)
+        let draw = self.st.tty && !self.json;
+        let (bottom, tap, stopping) = (self.bottom.clone(), self.tap.clone(), stop.clone());
+        let st = self.st;
+        let t0 = Instant::now();
+        let updater = Some(std::thread::spawn(move || {
+            let mut k = 0usize;
+            let mut load = Load {
+                last: None,
+                now: None,
+            };
+            while !stopping.load(Ordering::Relaxed) {
+                if k.is_multiple_of(6) {
+                    load.sample();
                 }
-            }));
-        }
+                let text = status_line(&what, &status, t0.elapsed(), load.now);
+                if draw {
+                    let w = crate::keys::width().unwrap_or(80).saturating_sub(1);
+                    let tick = TICKS[k % TICKS.len()];
+                    let elapsed = t0.elapsed();
+                    let mut lines = vec![format!(
+                        "{} {}",
+                        st.cyan(&tick.to_string()),
+                        clip(&text, w.saturating_sub(2))
+                    )];
+                    // (a quick build shows only the spinner: a tree that
+                    // flashed would be noise)
+                    if elapsed >= Duration::from_millis(300) {
+                        lines[0] = format!(
+                            "{} {}",
+                            st.cyan(&tick.to_string()),
+                            pad(
+                                &clip(&what, w.saturating_sub(12)),
+                                w.saturating_sub(11),
+                                false
+                            ) + &st.bold(&pad(&format!("{:.1} s", elapsed.as_secs_f64()), 9, true))
+                        );
+                        lines.extend(tree(st, &status, tick, load.now, w));
+                    }
+                    let mut b = lock(&bottom);
+                    b.spin = lines;
+                    redraw(&mut std::io::stderr().lock(), &mut b);
+                }
+                if k % 12 == 11 {
+                    lock(&tap).tell(json!({"kind": "busy", "text": text}));
+                }
+                k += 1;
+                std::thread::sleep(Duration::from_millis(80));
+            }
+        }));
         Spin {
             bottom: self.bottom.clone(),
             tap: self.tap.clone(),
@@ -433,8 +594,10 @@ impl Spin {
         if let Some(u) = self.updater {
             let _ = u.join();
             let mut b = lock(&self.bottom);
-            b.spin = None;
-            redraw(&mut std::io::stderr().lock(), &b);
+            if !b.spin.is_empty() {
+                b.spin.clear();
+                redraw(&mut std::io::stderr().lock(), &mut b);
+            }
         }
         lock(&self.tap).tell(json!({"kind": "busy", "text": ""}));
     }

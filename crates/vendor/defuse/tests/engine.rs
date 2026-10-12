@@ -6,8 +6,8 @@ mod common;
 use common::interp::{interpret, interpret_env};
 use common::{Program, SECTION, Threads, env_values, generate, generate_with};
 use defuse::{
-    Cause, Engine, EvalError, Field, Greedy, Limits, RandomScheduler, Report, Rng, Sequential, Speculation, ValueId,
-    WaitOn,
+    Cause, Engine, EvalError, Field, Greedy, Limits, NodeId, RandomScheduler, Report, Rng, Sequential, Speculation,
+    ValueId, WaitOn,
 };
 
 fn lines(src: &[&str]) -> Vec<String> {
@@ -2004,4 +2004,32 @@ fn an_opener_that_contributes_keeps_its_start_marker() {
     let r = eng.evaluate_sequential().unwrap();
     assert_eq!(r.nodes_run, 0);
     assert_eq!(doc.result(&eng), first);
+}
+
+#[test]
+fn the_critical_chain_names_each_wait_and_its_cause() {
+    let (eng, prog, r) = load(&["a = 1", "b = a + 1", "c = b + 1", "d = 7"]);
+    let ids = prog.node_ids(&eng);
+    assert_eq!(r.critical_path, eng.critical_path());
+    assert!(r.max_ready >= 1);
+    let chain = eng.critical_chain();
+    let x = eng.values().field("x");
+    let _ = x;
+    let names: Vec<NodeId> = chain.iter().map(|c| c.0).collect();
+    assert_eq!(names, vec![ids[2], ids[1], ids[0]], "{chain:?}");
+    assert!(
+        matches!(chain[0].1, defuse::Cause::Changed { site: Some(s), .. } if s == ids[1]),
+        "{:?}",
+        chain[0]
+    );
+    assert!(
+        matches!(chain[1].1, defuse::Cause::Changed { site: Some(s), .. } if s == ids[0]),
+        "{:?}",
+        chain[1]
+    );
+    assert!(
+        matches!(chain[2].1, defuse::Cause::Created { by: None }),
+        "{:?}",
+        chain[2]
+    );
 }

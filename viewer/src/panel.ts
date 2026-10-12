@@ -277,7 +277,9 @@ button.btn:hover { background: var(--accent2); }
 .diag:first-child { border-top: 0; }
 .diag[data-line] { cursor: pointer; } .diag[data-line]:hover { background: var(--light2); }
 .diag .icon { margin-top: 1px; }
-.diag .detail { margin: 4px 0 0; padding: 4px 6px; font: 11px/1.35 "DM Mono", monospace; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--divider); border-radius: 4px; max-height: 12em; overflow: auto; }
+.folded { margin-top: 6px; text-align: left; font-size: 11px; }
+.folded summary { cursor: pointer; color: var(--fg2); }
+.diag .detail, .folded .detail { margin: 4px 0 0; padding: 4px 6px; font: 11px/1.35 "DM Mono", monospace; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--divider); border-radius: 4px; max-height: 12em; overflow: auto; }
 .diag.error .icon { color: var(--danger); } .diag.warning .icon { color: var(--warn); } .diag.info .icon { color: var(--info); }
 .diag .where { color: var(--fg2); white-space: nowrap; margin-left: auto; padding-left: 8px; font-family: "DM Mono", monospace; font-size: 11px; }
 .stage { position: relative; flex: 1; overflow: auto; background: var(--light3); padding: 12px; text-align: center; min-height: 0; }
@@ -831,6 +833,16 @@ export class Panel {
     if (needed) return this.engineCard(needed, e.message);
     const empty = this.$("#empty");
     empty.innerHTML = `<div class="load"><h3></h3><div class="count"></div><div class="note"></div></div>`;
+    // (the engine itself gave out: its sentence, its dump folded away)
+    if (e.code === "engine") {
+      empty.querySelector("h3")!.textContent = "PhiTeX's engine stopped";
+      empty.querySelector(".count")!.textContent = e.message;
+      empty.querySelector(".note")!.textContent = "Your document is probably fine. Save again to retry.";
+      if (e.detail) empty.querySelector(".load")!.append(foldedDetail(e.detail, "Engine details"));
+      this.reportLink(empty.querySelector(".load")!);
+      empty.style.display = "";
+      return true;
+    }
     empty.querySelector("h3")!.textContent = "The build stopped before a page could be shown";
     empty.querySelector(".count")!.textContent = e.message + (e.file && e.line ? ` (${e.file}:${e.line})` : "");
     empty.querySelector(".note")!.textContent = this.words.stopped;
@@ -930,7 +942,8 @@ export class Panel {
       }
       row.innerHTML = `${icon(d.severity, 16)}<span class="text"></span><span class="where"></span>`;
       row.querySelector(".text")!.textContent = d.message;
-      if (d.detail) {
+      if (d.detail && d.code === "engine") row.querySelector(".text")!.append(foldedDetail(d.detail, "Engine details"));
+      else if (d.detail) {
         const pre = document.createElement("pre");
         pre.className = "detail";
         pre.textContent = d.detail;
@@ -1612,4 +1625,17 @@ export class Panel {
     this.viewer.set(k, img, hash ?? null);
     this.nav();
   }
+}
+
+/** A long detail (an engine's dump) folded under `label`, opened on a click. */
+function foldedDetail(text: string, label: string): HTMLElement {
+  const d = document.createElement("details");
+  d.className = "folded";
+  const sum = document.createElement("summary");
+  sum.textContent = label;
+  const pre = document.createElement("pre");
+  pre.className = "detail";
+  pre.textContent = text;
+  d.append(sum, pre);
+  return d;
 }

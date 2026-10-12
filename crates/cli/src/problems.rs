@@ -26,6 +26,90 @@ pub struct Problem {
     /// The levels above the line, innermost first (`\a #1->\b {#1}`).
     pub context: Vec<String>,
     pub help: Vec<String>,
+    /// A warning, not an error.
+    pub warning: bool,
+    /// What the underline says.
+    pub label: Option<String>,
+}
+
+/// The engine's diagnostic as a problem: its line cut from `source` (the
+/// file's bytes; none: not readable, the place only), the culprit at its
+/// bytes.
+pub fn from_diagnostic(
+    d: &phitex_tex::Diagnostic,
+    source: Option<&[u8]>,
+    verbose: bool,
+) -> Problem {
+    let mut p = Problem {
+        message: d.message.trim_end_matches('.').to_owned(),
+        file: Some(d.file.trim_start_matches("./").to_owned()),
+        line: Some(d.line),
+        help: d
+            .help
+            .iter()
+            .flat_map(|h| h.lines())
+            .map(str::to_owned)
+            .collect(),
+        warning: d.severity == phitex_tex::Severity::Warning,
+        ..Problem::default()
+    };
+    // (TeX's help for an undefined name speaks to its prompt, `type I`:
+    // the underline says it instead)
+    if d.message.starts_with("Undefined control sequence") && !verbose {
+        p.help.clear();
+        p.label = Some("not defined".to_owned());
+    }
+    if let Some(src) = source.filter(|s| d.range.0 <= s.len()) {
+        let (a, b) = (d.range.0, d.range.1.clamp(d.range.0, src.len()));
+        let start = src[..a]
+            .iter()
+            .rposition(|&c| c == b'\n')
+            .map_or(0, |k| k + 1);
+        let end = src[a..]
+            .iter()
+            .position(|&c| c == b'\n' || c == b'\r')
+            .map_or(src.len(), |k| a + k);
+        let line = &src[start..end];
+        // (the text as UTF-8 when it is, else a character a byte: the
+        // underline's bytes then counted in the text shown)
+        let lossy = std::str::from_utf8(line).is_err();
+        let text = if lossy {
+            crate::tex::chars(line)
+        } else {
+            String::from_utf8_lossy(line).into_owned()
+        };
+        let pos = |k: usize| {
+            if lossy {
+                crate::tex::chars(&line[..k]).len()
+            } else {
+                k
+            }
+        };
+        p.start = pos(a - start);
+        p.end = pos(b.min(end) - start).max(p.start + 1);
+        // (a whole token at least: the control sequence's name, a word)
+        if b <= a {
+            let rest = &line[a - start..];
+            let n = match rest.first() {
+                Some(b'\\') => {
+                    1 + rest[1..]
+                        .iter()
+                        .take_while(|c| c.is_ascii_alphabetic())
+                        .count()
+                        .max(1)
+                }
+                Some(_) => rest
+                    .iter()
+                    .take_while(|c| !c.is_ascii_whitespace())
+                    .count()
+                    .max(1),
+                None => 1,
+            };
+            p.end = pos((a - start + n).min(line.len())).max(p.start + 1);
+        }
+        p.text = text;
+    }
+    p
 }
 
 /// The file names `line` opens with `(` and closes with `)`, as TeX
@@ -208,7 +292,12 @@ pub fn render(p: &Problem, color: bool) -> String {
         .line
         .filter(|_| p.text.is_empty())
         .map(|n| format!("at {origin}:{n}"));
-    let mut m = Level::Error.title(&p.message);
+    let level = if p.warning {
+        Level::Warning
+    } else {
+        Level::Error
+    };
+    let mut m = level.title(&p.message);
     if let Some(n) = p.line.filter(|_| !p.text.is_empty()) {
         let end = p.end.min(p.text.len()).max(1);
         let start = p.start.min(end - 1);
@@ -217,7 +306,10 @@ pub fn render(p: &Problem, color: bool) -> String {
                 .line_start(n)
                 .origin(&origin)
                 .fold(false)
-                .annotation(Level::Error.span(start..end)),
+                .annotation(match &p.label {
+                    Some(l) => level.span(start..end).label(l),
+                    None => level.span(start..end),
+                }),
         );
     }
     if let Some(at) = &at {
@@ -254,6 +346,32 @@ pub fn show(ui: &Ui, errors: &[String], log: &str, main: &str) {
             None => ui.error(m),
         }
     }
+}
+
+/// The build's errors (or `warnings`) at their places, each as a
+/// compiler's report.
+pub fn rendered(
+    s: &crate::session::Session,
+    r: &crate::session::Report,
+    warnings: bool,
+    color: bool,
+    verbose: bool,
+) -> Vec<String> {
+    let want = if warnings {
+        phitex_tex::Severity::Warning
+    } else {
+        phitex_tex::Severity::Error
+    };
+    r.diagnostics
+        .iter()
+        .filter(|d| d.severity == want)
+        .map(|d| {
+            render(
+                &from_diagnostic(d, s.source(&d.file).as_deref(), verbose),
+                color,
+            )
+        })
+        .collect()
 }
 
 /// An error without the piece it was met in (`piece K: …`).
