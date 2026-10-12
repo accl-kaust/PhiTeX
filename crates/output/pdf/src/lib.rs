@@ -540,6 +540,8 @@ pub struct PdfState {
     zip: Option<Vec<u8>>,
     stream_length_offset: usize,
     save_offset: usize,
+    /// The last page's content stream, uncompressed, and its size.
+    page_shown: (Vec<u8>, Scaled, Scaled),
     objs: Vec<Obj>,
     /// `obj_ptr`: the objects counted for the user (object streams are
     /// not).
@@ -676,6 +678,7 @@ impl PdfState {
             zip: None,
             stream_length_offset: 0,
             save_offset: 0,
+            page_shown: (Vec::new(), 0, 0),
             objs: vec![Obj::default()],
             obj_ptr: 0,
             head: [0; HEAD_TAB_MAX + 1],
@@ -769,6 +772,13 @@ impl PdfState {
     /// The parameters, to change as TeX's registers change.
     pub fn params_mut(&mut self) -> &mut PdfParams {
         &mut self.p
+    }
+
+    /// What the last page shipped shows: its content stream
+    /// (uncompressed), width and height; no object numbers.
+    #[must_use]
+    pub fn last_page_shown(&self) -> (&[u8], Scaled, Scaled) {
+        (&self.page_shown.0, self.page_shown.1, self.page_shown.2)
     }
 
     /// The number of pages shipped.

@@ -705,3 +705,42 @@ fn stalled_nodes_with_pending_claims_and_effects_are_cheap() {
         "rounds with nothing to run took {times:?} (the first {first:?})"
     );
 }
+
+/// `["w"]` waits for an environment field whose name it makes as it
+/// runs (no one else holds the name's value).
+struct ToyFreshName;
+
+impl Operation for ToyFreshName {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        None
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        // enough garbage for the evaluation's value sweep to run
+        for k in 0..20_000 {
+            let _ = v.str(&format!("garbage-{k}"));
+        }
+        let name = format!("fresh-{}", 40 + 2);
+        cx.use_env(v.field(&name))?;
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// The fields `Report::env_waits` names can be read back by name after
+/// the evaluation (their name values are not swept with the run's
+/// garbage; the second evaluation is the first that sweeps).
+#[test]
+fn env_wait_field_names_survive_the_evaluation() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(ToyFreshName));
+    let u = eng.new_unit();
+    let first = eng.push(u, eng.open_op(), Vec::new());
+    let _ = first;
+    eng.evaluate_sequential().expect("evaluate");
+    let w = eng.push(u, op, Vec::new());
+    eng.add_root(w);
+    let rep = eng.evaluate_sequential().expect("evaluate");
+    let (_, f) = rep.env_waits.first().copied().expect("a wait");
+    let name = eng.values().render(f.0);
+    assert_eq!(name, "\"fresh-42\"");
+}

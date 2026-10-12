@@ -150,8 +150,8 @@ impl Log {
 }
 
 /// The log of a document: the file opened, the events, the end
-/// (`final_cleanup`, §1335).
-pub(crate) fn layout(v: &Values, name: &str, events: Option<ValueId>) -> String {
+/// (`final_cleanup`, §1335), then `end` on a line of its own (§642).
+pub(crate) fn layout(v: &Values, name: &str, events: Option<ValueId>, end: &str) -> String {
     let mut log = Log::default();
     log.raw('(');
     log.print(name, -1);
@@ -165,5 +165,6 @@ pub(crate) fn layout(v: &Values, name: &str, events: Option<ValueId>) -> String 
         }
     }
     log.print(" )", -1);
+    log.print_nl(end, -1);
     log.text
 }

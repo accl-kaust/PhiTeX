@@ -1250,6 +1250,13 @@ impl PdfState {
                 ),
             ));
         }
+        if shipping_page {
+            let data = match &self.zip {
+                Some(z) => z.clone(),
+                None => self.out[self.save_offset - self.base..].to_vec(),
+            };
+            self.page_shown = (data, self.cur_page_width, self.cur_page_height);
+        }
         self.end_stream();
         if shipping_page {
             self.write_page_object(last_stream, last_resources);
