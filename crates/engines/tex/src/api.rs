@@ -390,6 +390,15 @@ struct Graph {
 impl Graph {
     fn new() -> Graph {
         let mut eng = Engine::new();
+        eng.set_limits(phitex_defuse::Limits {
+            // a node's children are bounded by the text it reads (one per
+            // `\hyphenation` word, per character of a long run), not by a
+            // constant
+            children_per_node: 1 << 24,
+            // TeX's own nesting limits are far below this
+            unfold_depth: 4096,
+            ..phitex_defuse::Limits::default()
+        });
         let shared: Shared = Arc::new(OnceLock::new());
         let exec = eng.register(Arc::new(Exec(shared.clone())));
         let put = eng.register(Arc::new(Put(shared.clone())));
