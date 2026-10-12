@@ -256,6 +256,22 @@ impl Values {
         }
     }
 
+    #[must_use]
+    pub fn as_bool(&self, id: ValueId) -> Option<bool> {
+        match *self.get(id) {
+            Value::Bool(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self, id: ValueId) -> Option<String> {
+        match &*self.get(id) {
+            Value::Str(s) => Some(s.to_string()),
+            _ => None,
+        }
+    }
+
     /// Frees every value not reachable from `live`. Returns how many.
     pub(crate) fn sweep(&self, live: &FxHashSet<ValueId>) -> usize {
         let mut marked: FxHashSet<ValueId> = FxHashSet::default();

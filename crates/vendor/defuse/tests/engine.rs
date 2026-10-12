@@ -3,8 +3,8 @@
 #[path = "../examples/common/mod.rs"]
 mod common;
 
-use common::interp::interpret;
-use common::{Program, SECTION, Threads, generate, generate_with};
+use common::interp::{interpret, interpret_env};
+use common::{Program, SECTION, Threads, env_values, generate, generate_with};
 use defuse::{Engine, EvalError, Greedy, RandomScheduler, Report, Rng, Sequential, Speculation};
 
 fn lines(src: &[&str]) -> Vec<String> {
@@ -243,6 +243,234 @@ fn kind_read_binds_across_an_unfold() {
     prog.set_line(&mut eng, 0, "begin".into());
     eval(&mut eng, &prog);
     assert_eq!(out(&eng, &prog, 2), "\"none\"");
+}
+
+// ---------------------------------------------------------- contributions
+
+#[test]
+fn prev_of_the_first_contributor_is_none() {
+    let (eng, prog, _) = load(&["p = prev()", "add 1", "q = prev()", "add 2", "r = before()"]);
+    assert_eq!(prog.render(&eng)[..5], ["\"none\"", "1", "1", "2", "[1 2]"]);
+}
+
+#[test]
+fn contributions_are_scoped_and_removals_seen_only_later() {
+    let (mut eng, mut prog, _) = load(&[
+        "add 1",        // 0
+        "add 2",        // 1
+        "a = before()", // 2
+        "take",         // 3: takes 2
+        "b = before()", // 4
+        "begin",        // 5
+        "c = prev()",   // 6: a new scope starts empty
+        "add 7",        // 7
+        "end",          // 8
+        "replace 5",    // 9: takes 1, puts 5
+        "d = before()", // 10
+        "e = prev()",   // 11
+    ]);
+    let r = prog.render(&eng);
+    assert_eq!(r[2], "[1 2]");
+    assert_eq!(r[3], "2");
+    assert_eq!(r[4], "[1]");
+    assert_eq!(r[6], "\"none\"");
+    assert_eq!(r[9], "1");
+    assert_eq!(r[10], "[5]");
+    assert_eq!(r[11], "5");
+    // Removing the take: earlier readers keep their value, later ones see 2.
+    prog.remove_line(&mut eng, 3);
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 2), "[1 2]");
+    assert_eq!(out(&eng, &prog, 3), "[1 2]");
+    assert_eq!(out(&eng, &prog, 8), "2");
+    prog.insert_line(&mut eng, 0, "take".into());
+    eval(&mut eng, &prog);
+    prog.set_line(&mut eng, 6, "x = 1".into());
+    eval(&mut eng, &prog);
+    prog.set_line(&mut eng, 8, "end".into());
+    eval(&mut eng, &prog);
+}
+
+#[test]
+fn a_middle_contribution_edit_reruns_only_its_readers() {
+    let mut src = vec!["add 0".to_string()];
+    for i in 1..40 {
+        src.push(format!("add {i}"));
+        src.push(format!("p{i} = prev()"));
+        // A derived field: an ordinary definition from the contribution.
+        src.push(format!("n{i} = p{i} * 0"));
+    }
+    let src: Vec<&str> = src.iter().map(String::as_str).collect();
+    let (mut eng, mut prog, _) = load(&src);
+    // `add 20` is line 58; its reader p20 is line 59.
+    prog.set_line(&mut eng, 58, "add 99".into());
+    let r = eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 59), "99");
+    // The contributor, its prev-reader, and the derived field (which cuts
+    // off: still 0).
+    println!("middle contribution edit: {r:?}");
+    assert!(r.nodes_run <= 3, "{r:?}");
+    assert!(r.cutoffs >= 1, "{r:?}");
+}
+
+#[test]
+fn random_contribution_edits_match_the_interpreter() {
+    let pool = [
+        "add 1",
+        "add 2",
+        "add x",
+        "take",
+        "replace 9",
+        "x = prev()",
+        "y = before()",
+        "begin",
+        "end",
+        "x = 3",
+        "eval \"add 4\"",
+        "if x { add 5 } else { take }",
+        "{ add 6  z = prev() }",
+    ];
+    for seed in 1..=4u64 {
+        let mut s: u64 = 0x9e37_79b9_7f4a_7c15 ^ seed;
+        let mut next = |m: usize| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            usize::try_from(s % m as u64).unwrap()
+        };
+        let src: Vec<&str> = (0..30).map(|_| pool[next(pool.len())]).collect();
+        let (mut eng, mut prog, _) = load(&src);
+        for _ in 0..400 {
+            let i = next(prog.lines.len() + 1);
+            match next(3) {
+                0 if i < prog.lines.len() => prog.remove_line(&mut eng, i),
+                1 if i < prog.lines.len() => prog.set_line(&mut eng, i, pool[next(pool.len())].into()),
+                _ => prog.insert_line(&mut eng, i, pool[next(pool.len())].into()),
+            }
+            eval(&mut eng, &prog);
+        }
+    }
+}
+
+// ---------------------------------------------------------- stream claims
+
+#[test]
+fn a_stream_claim_ends_at_the_first_node_of_a_class_after_unfolding() {
+    let (mut eng, mut prog, _) = load(&[
+        "collect l until mark",
+        "1",
+        "eval \"2  3\"",
+        "mark a",
+        "4",
+        "mark b",
+        "z = l",
+    ]);
+    assert_eq!(out(&eng, &prog, 0), "[1 2 3]");
+    assert_eq!(out(&eng, &prog, 4), "4", "claimed nodes still run");
+    // The delimiter arrives by unfolding.
+    prog.set_line(&mut eng, 3, "eval \"mark a\"".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 0), "[1 2 3]");
+    // The first delimiter goes: the claim runs on to the next.
+    prog.set_line(&mut eng, 3, "5".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 0), "[1 2 3 5 4]");
+    assert_eq!(out(&eng, &prog, 6), "[1 2 3 5 4]");
+    // Without any, it would take the reader of its own result: a cycle.
+    prog.set_line(&mut eng, 5, "6".into());
+    assert!(matches!(eng.evaluate_sequential(), Err(EvalError::Cycle(_))));
+}
+
+#[test]
+fn a_stream_claim_predicate_reads_a_definition_inside_the_claim() {
+    let (mut eng, mut prog, _) = load(&[
+        "collect l until mark if go", // 0
+        "1",                          // 1
+        "mark a",                     // 2: go unset: goes on
+        "go = true",                  // 3: inside the claim
+        "2",                          // 4
+        "mark a",                     // 5: the claim ends here
+        "3",                          // 6
+    ]);
+    assert_eq!(out(&eng, &prog, 0), "[1 () true 2]");
+    prog.set_line(&mut eng, 3, "go = false".into());
+    let r = eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 0), "[1 () false 2 () 3]");
+    println!("definition inside the claim changed: nodes run {}", r.nodes_run);
+    // The definition comes by unfolding: the claim waits for exactly it.
+    prog.set_line(&mut eng, 3, "eval \"go = true\"".into());
+    let r = eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 0), "[1 () true 2]");
+    println!(
+        "definition by unfolding: waits on stmt nodes {}",
+        Report::by_op(&r.waits_by_op, "stmt")
+    );
+}
+
+#[test]
+fn a_predicted_stream_claim_confirms_on_every_named_field() {
+    // The claim ends at the `mark` where both facts hold; a change in
+    // either one re-runs it, under every scheduler.
+    let src = [
+        "collect l until mark if go and ok guess 3",
+        "go = true",
+        "1",
+        "mark a",
+        "ok = true",
+        "2",
+        "mark a",
+        "3",
+    ];
+    for sched in 0..3 {
+        let (mut eng, mut prog) = Program::load(lines(&src));
+        let run = |eng: &mut Engine| match sched {
+            0 => eng.evaluate_sequential().map(|_| ()),
+            1 => eng
+                .evaluate(&mut Greedy::speculative(Speculation::Predicted, 64), &mut Sequential)
+                .map(|_| ()),
+            _ => eng
+                .evaluate(&mut RandomScheduler::new(7, true), &mut Sequential)
+                .map(|_| ()),
+        };
+        run(&mut eng).unwrap();
+        assert_eq!(prog.result(&eng), reference(&prog.lines));
+        assert_eq!(prog.render(&eng)[0], "[true 1 () true 2]");
+        for (i, line, want) in [
+            (4, "ok = false", "[true 1 () false 2 () 3]"),
+            (1, "go = false", "[false 1 () false 2 () 3]"),
+            (4, "ok = true", "[false 1 () true 2 () 3]"),
+            (1, "go = true", "[true 1 () true 2]"),
+        ] {
+            prog.set_line(&mut eng, i, line.into());
+            run(&mut eng).unwrap();
+            assert_eq!(prog.result(&eng), reference(&prog.lines), "{line}");
+            assert_eq!(prog.render(&eng)[0], want, "{line}");
+        }
+    }
+}
+
+#[test]
+fn a_predicted_stream_claim_speculates_and_confirms() {
+    for guess in [3, 2, 4] {
+        // The claim ends before sibling 3 (`mark`); guesses off by one each
+        // way only cost a re-run.
+        let src = format!("collect l until mark guess {guess}");
+        let lines = lines(&[&src, "a = 1", "b = a + 1", "c = b + 1", "mark a", "d = 9"]);
+        let (mut eng, mut prog) = Program::load(lines);
+        let mut sched = Greedy::speculative(Speculation::Predicted, 64);
+        eng.evaluate(&mut sched, &mut Sequential).unwrap();
+        assert_eq!(prog.result(&eng), reference(&prog.lines), "guess {guess}");
+        assert_eq!(prog.render(&eng)[0], "[1 2 3]");
+        // An edit upstream: the claimer may run before the chain settles.
+        prog.set_line(&mut eng, 1, "a = 5".into());
+        let r = eng.evaluate(&mut sched, &mut Sequential).unwrap();
+        assert_eq!(prog.result(&eng), reference(&prog.lines), "guess {guess}");
+        assert_eq!(prog.render(&eng)[0], "[5 6 7]");
+        println!(
+            "guess {guess}: speculations {} confirmations {} mispredictions {}",
+            r.speculations, r.confirmations, r.mispredictions
+        );
+    }
 }
 
 #[test]
@@ -756,5 +984,321 @@ fn probes_count_only_in_profile_builds() {
     } else {
         assert!(snap.counters.is_empty() && snap.spans.is_empty());
         assert_eq!(defuse::obs::chrome_trace(), "{\"traceEvents\":[]}");
+    }
+}
+
+#[test]
+fn opener_replaced_by_a_definition_reaches_past_the_old_close() {
+    // The new line's definition registers while the line still opened; the
+    // re-binding must not leave readers after the old close bound past it.
+    let (mut eng, mut prog, _) = load(&["begin", "x = 3", "end", "z = x"]);
+    prog.set_line(&mut eng, 0, "x = 0".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 3), "3");
+    prog.set_line(&mut eng, 0, "begin".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 3), "()");
+}
+
+#[test]
+fn opener_turned_pending_closer_keeps_the_bindings_it_reflected() {
+    // `begin` -> `end` (pending: items exist): the order keeps the opener's
+    // bound effect until the closer decides, then re-binds from it.
+    let (mut eng, mut prog, _) = load(&["begin", "item a = prev()", "eval \"add 4\"", "replace 9"]);
+    prog.set_line(&mut eng, 0, "end".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 3), "4");
+}
+
+#[test]
+fn a_pending_close_waits_readers_of_an_openers_marker() {
+    let (eng, prog, _) = load(&["add 1", "item a = prev()", "add 1", "begin", "end", "y = before()"]);
+    assert_eq!(out(&eng, &prog, 5), "[1 1]");
+}
+
+#[test]
+fn a_redone_pending_close_leaves_depths_consistent() {
+    // Re-binding while a decided close was back in work must not record
+    // definitions at the depth without it.
+    let (eng, prog, _) = load(&[
+        "begin",
+        "begin",
+        "begin",
+        "scope doc",
+        "y = 2",
+        "end",
+        "begin",
+        "item a = 1",
+        "begin",
+        "begin",
+        "begin",
+        "begin",
+        "z = 1",
+        "end",
+        "x = 1",
+        "w = x + 1",
+    ]);
+    assert_eq!(out(&eng, &prog, 15), "2");
+}
+
+// ------------------------------------------------------------------ folds
+
+/// A fold over `n` elements of heights from `h`, then `extra` lines.
+fn fold_program(n: usize, h: &dyn Fn(usize) -> i64, text: &str, extra: &[String]) -> Vec<String> {
+    let mut src = vec![format!("fold \"{text}\"")];
+    for i in 0..n {
+        src.push(format!("add {}", h(i)));
+    }
+    src.extend(extra.iter().cloned());
+    src
+}
+
+fn outputs(eng: &Engine, prog: &Program) -> Vec<String> {
+    let acc = eng.acc_value(prog.unit, common::out_field(eng.values()));
+    acc.map_or_else(Vec::new, |a| {
+        eng.values()
+            .seq_to_vec(a)
+            .iter()
+            .map(|&x| eng.values().render(x))
+            .collect()
+    })
+}
+
+/// Pseudo-random heights 1..=5.
+fn fold_height(i: usize) -> i64 {
+    1 + i64::try_from(((i as u64).wrapping_mul(2_654_435_761) >> 7) % 5).unwrap()
+}
+
+/// 1000 elements at capacity 63: 48 emitted outputs.
+fn fold_thousand(text: &str) -> Vec<String> {
+    let mut src = fold_program(1000, &fold_height, text, &[]);
+    src.insert(0, "cap = 63".into());
+    src
+}
+
+/// Line of element `i` in [`fold_thousand`].
+const fn elem(i: usize) -> usize {
+    i + 2
+}
+
+fn load_lines(src: &[String]) -> (Engine, Program, Report) {
+    let src: Vec<&str> = src.iter().map(String::as_str).collect();
+    load(&src)
+}
+
+#[test]
+fn fold_over_a_thousand_elements_emits_48_outputs() {
+    let (eng, prog, r) = load_lines(&fold_thousand("x = out"));
+    let outs = outputs(&eng, &prog);
+    assert_eq!(outs.len(), 48);
+    assert_eq!(Report::by_op(&r.runs_by_op, "output"), 48);
+    println!(
+        "cold: outputs {} waits on stmt nodes {}",
+        outs.len(),
+        Report::by_op(&r.waits_by_op, "stmt")
+    );
+}
+
+#[test]
+fn a_fold_edit_recomputes_only_until_the_state_realigns() {
+    let (mut eng, mut prog, _) = load_lines(&fold_thousand("x = out"));
+    let before = outputs(&eng, &prog);
+    // Element 500 one taller: output 25 grows, the state after it is the
+    // same as before (the next output starts at the same element).
+    prog.set_line(&mut eng, elem(500), format!("add {}", fold_height(500) + 1));
+    let r = eval(&mut eng, &prog);
+    let after = outputs(&eng, &prog);
+    let changed: Vec<usize> = (0..48).filter(|&k| before[k] != after[k]).map(|k| k + 1).collect();
+    assert_eq!(changed, [25]);
+    let recomputed = Report::by_op(&r.runs_by_op, "output");
+    println!(
+        "+1 at 500: outputs recomputed {recomputed}, nodes run {}, cutoffs {}",
+        r.nodes_run, r.cutoffs
+    );
+    assert_eq!(recomputed, 1);
+    assert!(r.nodes_run < 40, "{r:?}");
+    // One shorter: the state carried forward changes and the recompute runs
+    // on until the outputs line up again (output 47).
+    prog.set_line(&mut eng, elem(500), format!("add {}", fold_height(500) - 1));
+    let r = eval(&mut eng, &prog);
+    let after = outputs(&eng, &prog);
+    let changed: Vec<usize> = (0..48).filter(|&k| before[k] != after[k]).map(|k| k + 1).collect();
+    assert_eq!(changed.first(), Some(&25));
+    assert_eq!(changed.last(), Some(&46));
+    let recomputed = Report::by_op(&r.runs_by_op, "output");
+    println!(
+        "-1 at 500: outputs recomputed {recomputed}, nodes run {}, cutoffs {}",
+        r.nodes_run, r.cutoffs
+    );
+    assert!(recomputed >= 22, "{r:?}");
+    // A capacity change reaches every step.
+    prog.set_line(&mut eng, 0, "cap = 64".into());
+    let r = eval(&mut eng, &prog);
+    println!(
+        "cap 63 -> 64: outputs recomputed {}, nodes run {}",
+        Report::by_op(&r.runs_by_op, "output"),
+        r.nodes_run
+    );
+}
+
+#[test]
+fn an_output_prepends_elements_and_defines_a_field_read_later() {
+    let text = "when k == 10 add 30  when k == 10 add 31  when k == 10 global g = 7";
+    let mut src = fold_thousand(text);
+    src[elem(600)] = "add g - 5".into();
+    let (mut eng, mut prog, _) = load_lines(&src);
+    let outs = outputs(&eng, &prog);
+    println!("outputs with prepends: {}", outs.len());
+    // The two prepended elements follow the element that overflowed
+    // output 10 (3 high): 33, then 31 starts output 12.
+    assert_eq!(outs[10], "33");
+    // Element 600 read g = 7 from output 10's text: height 2.
+    assert_eq!(out(&eng, &prog, elem(600)), "2");
+    // Moving the prepend to output 12 re-runs from output 10 on.
+    prog.set_line(
+        &mut eng,
+        1,
+        "fold \"when k == 12 add 30  when k == 12 add 31  when k == 12 global g = 7\"".into(),
+    );
+    let r = eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, elem(600)), "2");
+    println!(
+        "prepend moved: outputs recomputed {}",
+        Report::by_op(&r.runs_by_op, "output")
+    );
+    // Reading the state as of an element: the nearest step at or before it.
+    prog.insert_line(&mut eng, elem(700), "s = fold.state".into());
+    eval(&mut eng, &prog);
+    assert!(out(&eng, &prog, elem(700)).starts_with('['));
+}
+
+#[test]
+fn speculation_resting_on_a_freed_node_is_refuted() {
+    // Removing the second fold frees the node a speculative `item` run
+    // assumed about; that run must not stay unconfirmed forever.
+    let src = [
+        "cap = 12",
+        "fold \"when k == 1 add 8  when k == 1 add 2\"",
+        "add 7",
+        "fold \"when k == 1 add 8  when k == 1 add 2\"",
+        "add 7",
+        "{ add 6  z = prev() }",
+        "item a = prev()",
+        "add 1",
+    ];
+    let (mut eng, mut prog) = Program::load(lines(&src));
+    eng.evaluate(&mut Greedy::speculative(Speculation::All, 512), &mut Threads(3))
+        .unwrap();
+    prog.remove_line(&mut eng, 3);
+    eng.evaluate(&mut Greedy::speculative(Speculation::All, 512), &mut Threads(3))
+        .unwrap();
+    assert_eq!(prog.result(&eng), reference(&prog.lines));
+    assert_eq!(eng.check_invariants(), [] as [std::string::String; 0]);
+}
+
+#[test]
+fn a_global_inside_a_skipped_scope_hands_its_users_on() {
+    // The new output's global state follows a global defined inside the
+    // `begin` scope the definition walk steps over.
+    let (mut eng, mut prog, _) = load(&[
+        "fold \"when k == 1 add 8  when k == 1 add 2\"",
+        "cap = 12",
+        "add 7",
+        "add 3",
+        "begin",
+        "add 3",
+        "add 7",
+        "end",
+        "s = fold.state",
+    ]);
+    prog.insert_line(&mut eng, 7, "add 7".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 9), "[7 3]");
+}
+
+// ---------------------------------------------------------- environment
+
+const ENV_SRC: [&str; 9] = [
+    "a = x + 1",
+    "b = y * 2",
+    "c = a + b",
+    "{ z = y + 1 }",
+    "collect l until mark if go",
+    "1",
+    "mark a",
+    "x = 100",
+    "d = x",
+];
+
+fn env_eval(eng: &mut Engine, prog: &Program, env: &[(&str, i64)], sched: u8) -> Report {
+    eng.set_environment(env_values(eng, env));
+    let r = match sched {
+        0 => eng.evaluate_sequential(),
+        1 => eng.evaluate(&mut Greedy::speculative(Speculation::All, 64), &mut Threads(3)),
+        _ => eng.evaluate(&mut RandomScheduler::new(11, true), &mut Sequential),
+    }
+    .expect("evaluate");
+    assert_eq!(
+        prog.result(eng),
+        interpret_env(&prog.lines, env).expect("interpreter"),
+        "{env:?}"
+    );
+    r
+}
+
+#[test]
+fn equal_environments_give_identical_ids_and_results() {
+    let env = [("x", 1), ("y", 2), ("go", 1)];
+    for sched in 0..3 {
+        let (mut e1, p1) = Program::load(lines(&ENV_SRC));
+        env_eval(&mut e1, &p1, &env, sched);
+        let (mut e2, p2) = Program::load(lines(&ENV_SRC));
+        // The same environment supplied in another order.
+        let rev: Vec<(&str, i64)> = env.iter().rev().copied().collect();
+        env_eval(&mut e2, &p2, &rev, sched);
+        assert_eq!(p1.nodes, p2.nodes);
+        assert_eq!(p1.result(&e1), p2.result(&e2));
+        assert_eq!(
+            p1.render(&e1),
+            ["2", "4", "6", "()", "[1]", "1", "()", "100", "100", "<>"]
+        );
+        // Supplying an equal environment again runs nothing.
+        let r = env_eval(&mut e1, &p1, &env, sched);
+        assert_eq!(r.nodes_run, 0, "sched {sched}");
+    }
+}
+
+#[test]
+fn changing_one_environment_field_reruns_only_its_readers() {
+    for sched in 0..3 {
+        let (mut eng, prog) = Program::load(lines(&ENV_SRC));
+        env_eval(&mut eng, &prog, &[("x", 1), ("y", 2), ("go", 1)], sched);
+        let ids: Vec<_> = prog.nodes.clone();
+        // x: its reader `a`, then `c`.
+        let r = env_eval(&mut eng, &prog, &[("x", 5), ("y", 2), ("go", 1)], sched);
+        assert_eq!(prog.render(&eng)[..3], ["6", "4", "10"]);
+        assert_eq!(
+            Report::by_op(&r.runs_by_op, "stmt"),
+            2,
+            "sched {sched}: {:?}",
+            r.runs_by_op
+        );
+        // y: `b`, `c` and the block's child.
+        let r = env_eval(&mut eng, &prog, &[("x", 5), ("y", 3), ("go", 1)], sched);
+        assert_eq!(prog.render(&eng)[..4], ["6", "6", "12", "()"]);
+        assert_eq!(
+            Report::by_op(&r.runs_by_op, "stmt"),
+            3,
+            "sched {sched}: {:?}",
+            r.runs_by_op
+        );
+        // go goes: only the claim re-runs, and runs on past `mark`.
+        let r = env_eval(&mut eng, &prog, &[("x", 5), ("y", 3)], sched);
+        assert_eq!(r.nodes_run, 1, "sched {sched}");
+        assert_eq!(prog.render(&eng)[4], "[1 () 100 100]");
+        // An unread field changes nothing.
+        let r = env_eval(&mut eng, &prog, &[("x", 5), ("y", 3), ("w", 9)], sched);
+        assert_eq!(r.nodes_run, 0, "sched {sched}");
+        assert_eq!(prog.nodes, ids);
     }
 }

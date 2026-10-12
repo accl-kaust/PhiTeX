@@ -37,6 +37,8 @@ pub enum Counter {
     MoveUser,
     /// Nodes re-bound because a scope boundary changed.
     RegionNode,
+    /// Runs discarded because a definition they read went away meanwhile.
+    StaleSite,
     /// Re-bound nodes revalidated without running.
     RevalidateOk,
     /// Re-bound nodes that had to run after all.
@@ -58,7 +60,7 @@ pub enum Counter {
 }
 
 impl Counter {
-    pub const ALL: [Counter; 20] = [
+    pub const ALL: [Counter; 21] = [
         Counter::Walk,
         Counter::WalkLevel,
         Counter::Step,
@@ -70,6 +72,7 @@ impl Counter {
         Counter::Dirty,
         Counter::MoveUser,
         Counter::RegionNode,
+        Counter::StaleSite,
         Counter::RevalidateOk,
         Counter::RevalidateMiss,
         Counter::ClaimRecompute,
@@ -95,6 +98,7 @@ impl Counter {
             Counter::Dirty => "dirty",
             Counter::MoveUser => "move_user",
             Counter::RegionNode => "region_node",
+            Counter::StaleSite => "stale_site",
             Counter::RevalidateOk => "revalidate_ok",
             Counter::RevalidateMiss => "revalidate_miss",
             Counter::ClaimRecompute => "claim_recompute",

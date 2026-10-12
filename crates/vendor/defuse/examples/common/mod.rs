@@ -32,7 +32,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use defuse::{
     Brackets, Claim, Ctx, Effect, Engine, Executor, Field, FxHashMap, Locality, MayDefine, NodeId, OpId, Operation,
-    RunResult, SeqMonoid, Stop, UnitId, Value, ValueId, Values,
+    RunResult, SeqMonoid, Stop, UnitId, Until, Value, ValueId, Values,
 };
 
 // ------------------------------------------------------------------- lexer
@@ -259,6 +259,46 @@ impl Parser<'_> {
                     return Ok(self.tagged("item", vec![self.s(&n), e]));
                 }
                 "end" => return simple(self, "end"),
+                "take" => return simple(self, "take"),
+                "collect" => {
+                    // collect NAME until CLASS [if FIELD [and FIELD]...] [guess N]
+                    self.pos += 1;
+                    let n = self.ident()?;
+                    if !self.is_kw("until") {
+                        return Err("collect needs until".into());
+                    }
+                    self.pos += 1;
+                    let class = self.ident()?;
+                    let field = if self.is_kw("if") {
+                        self.pos += 1;
+                        let mut fs = vec![self.ident()?];
+                        while self.is_kw("and") {
+                            self.pos += 1;
+                            fs.push(self.ident()?);
+                        }
+                        fs.join(" ")
+                    } else {
+                        String::new()
+                    };
+                    let guess = if self.is_kw("guess") {
+                        self.pos += 1;
+                        self.v.int(self.int()?)
+                    } else {
+                        ValueId::UNIT
+                    };
+                    return Ok(self.tagged("collect", vec![self.s(&n), self.s(&class), self.s(&field), guess]));
+                }
+                "fold" => {
+                    self.pos += 1;
+                    let e = self.expr()?;
+                    return Ok(self.tagged("fold", vec![e]));
+                }
+                "when" => {
+                    self.pos += 1;
+                    let c = self.expr()?;
+                    let st = self.stmt()?;
+                    return Ok(self.tagged("when", vec![c, st]));
+                }
                 "endlist" => return simple(self, "endlist"),
                 "page" => return simple(self, "page"),
                 "if" => {
@@ -273,7 +313,7 @@ impl Parser<'_> {
                     };
                     return Ok(self.tagged("if", vec![c, t, e]));
                 }
-                "eval" | "print" | "emit" => {
+                "eval" | "print" | "emit" | "add" | "replace" => {
                     self.pos += 1;
                     let e = self.expr()?;
                     return Ok(self.tagged(&k, vec![e]));
@@ -464,11 +504,11 @@ impl Parser<'_> {
                 let body = self.l(body);
                 Ok(self.tagged("fn", vec![ps, body, ret]))
             }
-            Some(Tok::Ident(k)) if k == "kind" => {
+            Some(Tok::Ident(k)) if k == "kind" || k == "prev" || k == "before" => {
                 self.pos += 1;
                 self.eat("(")?;
                 self.eat(")")?;
-                Ok(self.tagged("kind", vec![]))
+                Ok(self.tagged(&k, vec![]))
             }
             Some(Tok::Ident(k)) if k == "layout" => {
                 self.pos += 1;
@@ -600,6 +640,15 @@ fn proc_decls(v: &Values, ast: ValueId, out: &mut Vec<(String, Option<Vec<String
         };
         out.push((text(v, a[0]), e));
     }
+    if t == "fold" {
+        let (lt, la) = tag(v, a[0]);
+        let e = if lt == "str" {
+            Some(fold_text(v, la[0]).map_or_else(|_| Vec::new(), |ss| fold_exports(v, &ss)))
+        } else {
+            None
+        };
+        out.push((FOLD_DECL.into(), e));
+    }
     for x in items(v, ast) {
         proc_decls(v, x, out);
     }
@@ -623,7 +672,7 @@ fn literal_prefix(v: &Values, e: ValueId) -> (String, bool) {
     }
 }
 
-const KEYWORDS: [&str; 25] = [
+const KEYWORDS: [&str; 33] = [
     "begin",
     "end",
     "endlist",
@@ -649,7 +698,87 @@ const KEYWORDS: [&str; 25] = [
     "item",
     "para",
     "kind",
+    "add",
+    "take",
+    "replace",
+    "prev",
+    "before",
+    "fold",
+    "when",
+    "collect",
 ];
+
+/// The kind of the scope an emitted fold output's text runs in.
+pub const OUT_KIND: &str = "out";
+/// The fold declaration (its text) and the fold state, ordinary fields.
+const FOLD: &str = "fold";
+const FOLD_STATE: &str = "fold.state";
+/// The procedure-table entry for fold texts: what an emitted output's text
+/// may define visibly after it.
+const FOLD_DECL: &str = "\u{1}fold";
+
+/// Statements an emitted output's text may contain: no brackets, no
+/// further unfolding (so the emitting node's own effect stays none).
+fn fold_text_ok(v: &Values, s: ValueId) -> bool {
+    let (t, a) = tag(v, s);
+    match t.as_str() {
+        "assign" | "record" | "add" | "take" | "replace" | "emit" | "print" | "expr" => true,
+        "when" => fold_text_ok(v, a[1]),
+        _ => false,
+    }
+}
+
+/// The globals a fold text defines (its `add`s run inside the output's
+/// scope and emit nothing further).
+fn fold_exports(v: &Values, ss: &[ValueId]) -> Vec<String> {
+    let mut out = Vec::new();
+    for &s in ss {
+        let (t, a) = tag(v, s);
+        match t.as_str() {
+            "assign" | "record" if truthy(v, a[2]) => out.push(text(v, a[0])),
+            "when" => out.extend(fold_exports(v, &[a[1]])),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The parsed text of a fold declaration, if every statement is allowed.
+fn fold_text(v: &Values, src: ValueId) -> Result<Vec<ValueId>, String> {
+    let ss = parse(v, &text(v, src))?;
+    if ss.iter().all(|&s| fold_text_ok(v, s)) {
+        Ok(ss)
+    } else {
+        Err("unsupported statement in fold text".into())
+    }
+}
+
+/// The fold's initial state: `[height, outputs so far]`.
+fn fold_init(v: &Values) -> ValueId {
+    v.list(vec![v.int(0), v.int(0)])
+}
+
+/// One fold step: elements are heights packed onto outputs of capacity
+/// `cap` (read at the step's position). Returns the new state and, when
+/// an output is emitted, `(its height, its index)`.
+fn fold_step(v: &Values, st: ValueId, e: ValueId, cap: i64) -> (ValueId, Option<(ValueId, ValueId)>) {
+    let xs = items(v, st);
+    let (h, c) = match xs[..] {
+        [h, c] => (v.as_int(h).unwrap_or(0), v.as_int(c).unwrap_or(0)),
+        _ => (0, 0),
+    };
+    let e = v.as_int(e).unwrap_or(0);
+    if h > 0 && h.wrapping_add(e) > cap {
+        (v.list(vec![v.int(e), v.int(c + 1)]), Some((v.int(h), v.int(c + 1))))
+    } else {
+        (v.list(vec![v.int(h.wrapping_add(e)), v.int(c)]), None)
+    }
+}
+
+/// The contribution sequence `add`, `take` and `replace` write.
+pub fn items_seq(v: &Values) -> Field {
+    v.field("items")
+}
 
 /// The scope kind inside which an `item` opens an implicit scope, and the
 /// kind of that scope.
@@ -699,9 +828,20 @@ fn eval_literal(v: &Values, expr: ValueId) -> Option<Vec<String>> {
     // No wrapper scope: its top-level assignments define in place.
     let mut out = exports(v, &ss)?;
     for &s in &ss {
+        let mut s = s;
+        while tag(v, s).0 == "when" {
+            s = tag(v, s).1[1];
+        }
         let (t, a) = tag(v, s);
         if t == "assign" || t == "record" {
             out.push(text(v, a[0]));
+        }
+        if matches!(t.as_str(), "take" | "replace") {
+            out.push("items".into());
+        }
+        if t == "fold" {
+            out.push(FOLD.into());
+            out.push(FOLD_STATE.into());
         }
     }
     Some(out)
@@ -738,7 +878,9 @@ fn exports(v: &Values, stmts: &[ValueId]) -> Option<Vec<String>> {
         let (t, a) = tag(v, s);
         match t.as_str() {
             "assign" | "record" if truthy(v, a[2]) => out.push(text(v, a[0])),
-            "eval" | "do" | "invoke" | "seq" => return None,
+            // An `add` may emit a fold output whose text defines globals.
+            "eval" | "do" | "invoke" | "seq" | "add" => return None,
+            "when" => out.extend(exports(v, &[a[1]])?),
             "block" => out.extend(exports(v, &items(v, a[0]))?),
             "if" => {
                 out.extend(exports(v, &items(v, a[1]))?);
@@ -794,7 +936,11 @@ fn free_vars(v: &Values, e: ValueId, bound: &mut Vec<String>, out: &mut Vec<Stri
                 free_vars(v, items(v, fe)[1], bound, out);
             }
         }
-        "expr" | "print" | "eval" | "return" | "emit" => free_vars(v, a[0], bound, out),
+        "expr" | "print" | "eval" | "return" | "emit" | "add" | "replace" | "fold" => free_vars(v, a[0], bound, out),
+        "when" => {
+            free_vars(v, a[0], bound, out);
+            free_vars(v, a[1], bound, out);
+        }
         "block" | "seq" => {
             for s in items(v, a[0]) {
                 free_vars(v, s, bound, out);
@@ -826,6 +972,80 @@ fn free_vars(v: &Values, e: ValueId, bound: &mut Vec<String>, out: &mut Vec<Stri
 pub struct Ops {
     pub stmt: OpId,
     pub apply: OpId,
+    pub output: OpId,
+}
+
+/// A node's class for a stream claim: its statement tag, or the operation's
+/// name.
+fn node_class(ops: Ops, v: &Values, op: OpId, args: &[ValueId]) -> String {
+    if op == ops.stmt {
+        tag(v, args[0]).0
+    } else if op == ops.output {
+        "output".into()
+    } else {
+        String::new()
+    }
+}
+
+/// The fold's capacity at a step's position.
+fn fold_cap(cx: &mut Ctx<'_>) -> Result<i64, Stop> {
+    let v = cx.values();
+    Ok(cx.use_field(v.field("cap"))?.and_then(|c| v.as_int(c)).unwrap_or(50))
+}
+
+/// Unfolds emitted output `k` (height `h`, state after it `st`): the fold
+/// text runs in an `out` scope with `out`, `k` and `state` defined, then a
+/// `resume` node continues the fold with what the text prepended and
+/// `rest` (elements still carried over).
+fn unfold_output(cx: &mut Ctx<'_>, ops: Ops, src: ValueId, st: ValueId, h: ValueId, k: ValueId, rest: ValueId) {
+    let v = cx.values();
+    cx.child(ops.stmt, vec![v.list(vec![v.str("scope"), v.str(OUT_KIND)])]);
+    cx.child(ops.output, vec![h, k, st]);
+    match fold_text(v, src) {
+        Ok(ss) => {
+            for s in ss {
+                cx.child(ops.stmt, vec![s]);
+            }
+        }
+        Err(e) => {
+            cx.child(ops.stmt, vec![v.list(vec![v.str("error"), v.str(&e)])]);
+        }
+    }
+    cx.child(ops.stmt, vec![v.list(vec![v.str("resume"), st, rest])]);
+    cx.close_scope();
+}
+
+/// An emitted fold output: defines `out`, `k` and `state` inside its
+/// scope and contributes its height to `out`. Arguments `[h, k, state]`.
+struct OutputOp;
+
+impl Operation for OutputOp {
+    fn name(&self) -> &'static str {
+        "output"
+    }
+
+    fn defs(&self, _: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(
+            ["out", "k", "state"]
+                .iter()
+                .map(|n| (v.field(n), Locality::Local))
+                .collect(),
+        )
+    }
+
+    fn reads(&self, _: &[ValueId], _: &Values) -> Option<Vec<Field>> {
+        Some(Vec::new())
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        for (n, &x) in ["out", "k", "state"].iter().zip(&a) {
+            cx.define(v.field(n), x);
+        }
+        cx.contribute(out_field(v), v.seq_unit(a[0]));
+        Ok(a[0])
+    }
 }
 
 /// One operation for every statement kind; the AST is its argument.
@@ -851,6 +1071,11 @@ fn eval_expr(cx: &mut Ctx<'_>, ops: Ops, e: ValueId) -> Result<ValueId, Stop> {
     Ok(match t.as_str() {
         "str" | "lit" => a[0],
         "kind" => cx.scope_kind()?.unwrap_or_else(|| v.str("none")),
+        "prev" => cx.prev_contribution(items_seq(v))?.unwrap_or_else(|| v.str("none")),
+        "before" => {
+            let s = cx.contributions_before_me(items_seq(v))?;
+            v.list(v.seq_to_vec(s))
+        }
         "var" => cx.use_field(v.field(&text(v, a[0])))?.unwrap_or(ValueId::UNIT),
         "op" => {
             let x = eval_expr(cx, ops, a[1])?;
@@ -961,9 +1186,19 @@ impl Operation for StmtOp {
                         .collect(),
                 )
             }
-            "sumnext" | "listto" | "listuntil" | "item" => Some(vec![(v.field(&text(v, a[0])), Locality::Local)]),
+            "sumnext" | "listto" | "listuntil" | "item" | "collect" => {
+                Some(vec![(v.field(&text(v, a[0])), Locality::Local)])
+            }
+            // A contribution is a definition of the sequence.
+            "take" | "replace" => Some(vec![(items_seq(v), Locality::Local)]),
+            "fold" => Some(vec![
+                (v.field(FOLD), Locality::Local),
+                (v.field(FOLD_STATE), Locality::Local),
+            ]),
             "proc" => Some(vec![(proc_field(v, a[0]), Locality::Local)]),
-            "invoke" | "do" | "eval" | "seq" => None,
+            // A fold step may emit an output (unfolded text); `when` runs
+            // its statement inline.
+            "invoke" | "do" | "eval" | "seq" | "add" | "resume" | "when" => None,
             "block" if exports(v, &items(v, a[0])).is_none_or(|e| !e.is_empty()) => None,
             "if" => {
                 let then = exports(v, &items(v, a[1]));
@@ -989,7 +1224,23 @@ impl Operation for StmtOp {
             None => MayDefine::Any,
         };
         let (t, a) = tag(v, args[0]);
+        let fold = || {
+            let p = self.1.read().expect("procs");
+            if p.tracked { p.union(FOLD_DECL) } else { None }
+        };
         match t.as_str() {
+            "add" | "resume" => names(fold().map(|mut e| {
+                e.push(FOLD_STATE.into());
+                if t == "add" {
+                    e.push("items".into());
+                }
+                e
+            })),
+            "when" => match self.defs(&[a[1]], v) {
+                Some(d) if d.is_empty() => MayDefine::Nothing,
+                Some(d) => MayDefine::Names(d.into_iter().map(|d| d.0).collect()),
+                None => self.may_define(&[a[1]], v),
+            },
             // Whatever `~name` means, it can only define its target.
             "invoke" => MayDefine::Names(vec![v.field(&text(v, a[1]))]),
             "do" => {
@@ -1071,6 +1322,39 @@ impl Operation for StmtOp {
         }
     }
 
+    fn until(&self, args: &[ValueId], v: &Values, cand: OpId, cand_args: &[ValueId]) -> Until {
+        let a = tag(v, args[0]).1;
+        if node_class(ops(&self.0), v, cand, cand_args) != text(v, a[1]) {
+            return Until::No;
+        }
+        match text(v, a[2]) {
+            f if f.is_empty() => Until::Yes,
+            f if !f.contains(' ') => Until::Read(v.field(&f)),
+            f => Until::ReadEach(f.split(' ').map(|f| v.field(f)).collect()),
+        }
+    }
+
+    fn until_values(&self, _: &[ValueId], v: &Values, _: OpId, _: &[ValueId], fields: &[Option<ValueId>]) -> bool {
+        fields.iter().all(|x| x.is_some_and(|x| truthy(v, x)))
+    }
+
+    fn until_value(&self, _: &[ValueId], v: &Values, _: OpId, _: &[ValueId], value: Option<ValueId>) -> bool {
+        value.is_some_and(|x| truthy(v, x))
+    }
+
+    fn until_predict(
+        &self,
+        args: &[ValueId],
+        v: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Option<usize> {
+        let (t, a) = tag(v, args[0]);
+        if t != "collect" {
+            return None;
+        }
+        v.as_int(a[3]).and_then(|n| usize::try_from(n).ok())
+    }
+
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         let (t, a) = tag(v, args[0]);
         let mut out = Vec::new();
@@ -1079,12 +1363,17 @@ impl Operation for StmtOp {
             "assign" | "publish" | "item" => free_vars(v, a[1], &mut bound, &mut out),
             // Text substitution: a call reads only the procedure.
             "do" => out.push(format!("proc.{}", text(v, a[0]))),
-            "record" | "expr" | "print" | "emit" | "eval" | "invoke" => {
+            "record" | "expr" | "print" | "emit" | "eval" | "invoke" | "replace" | "when" | "fold" => {
                 free_vars(v, args[0], &mut bound, &mut out);
+            }
+            "add" => {
+                free_vars(v, args[0], &mut bound, &mut out);
+                out.extend([FOLD, FOLD_STATE, "cap"].map(String::from));
             }
             "if" => free_vars(v, a[0], &mut bound, &mut out),
             "listuntil" => out.push(text(v, a[1])),
-            "block" | "begin" | "end" | "endlist" | "mark" | "loop" | "proc" | "scope" | "para" => {}
+            "block" | "begin" | "end" | "endlist" | "mark" | "loop" | "proc" | "scope" | "para" | "take" => {}
+            // `collect` reads the following text's outputs, not fields.
             _ => return None,
         }
         Some(out.iter().map(|n| v.field(n)).collect())
@@ -1232,7 +1521,9 @@ impl Operation for StmtOp {
                 Ok(l)
             }
             "listuntil" => {
-                let stop = cx.use_field(v.field(&text(v, a[1])))?.map_or_default(|x| text(v, x));
+                let stop = cx
+                    .use_field(v.field(&text(v, a[1])))?
+                    .map_or_else(String::new, |x| text(v, x));
                 // Up to the mark, never past the block's close.
                 let mut n = 0;
                 while let Some((op, args)) = cx.following(n) {
@@ -1270,6 +1561,87 @@ impl Operation for StmtOp {
                 Ok(v.list(vec![v.int(i64::try_from(xs.len()).unwrap_or(0)), v.int(sum)]))
             }
             "print" | "expr" | "return" => eval_expr(cx, ops, a[0]),
+            "add" => {
+                let val = eval_expr(cx, ops, a[0])?;
+                cx.push_contribution(items_seq(v), val);
+                let state = v.field(FOLD_STATE);
+                // Inside an output's text, an element is only prepended.
+                let decl = if cx.scope_kind()?.is_some_and(|k| text(v, k) == OUT_KIND) {
+                    None
+                } else {
+                    cx.use_field(v.field(FOLD))?
+                };
+                let Some(src) = decl else {
+                    cx.define_with(state, ValueId::UNIT, Locality::Local);
+                    return Ok(val);
+                };
+                let st = cx.use_field(state)?.filter(|&s| items(v, s).len() == 2);
+                let st = st.unwrap_or_else(|| fold_init(v));
+                let cap = fold_cap(cx)?;
+                let (st, out) = fold_step(v, st, val, cap);
+                cx.define_with(state, st, Locality::Local);
+                if let Some((h, k)) = out {
+                    unfold_output(cx, ops, src, st, h, k, ValueId::NIL);
+                }
+                Ok(val)
+            }
+            "resume" => {
+                // The output's text ran: its contributions are prepended to
+                // the rest of the fold's input (after any carried over from
+                // an enclosing output), one emitted output at a time.
+                let state = v.field(FOLD_STATE);
+                let pre = cx.contributions_before_me(items_seq(v))?;
+                let mut input = v.seq_to_vec(pre);
+                input.extend(v.seq_to_vec(a[1]));
+                let Some(src) = cx.use_field(v.field(FOLD))? else {
+                    cx.define_with(state, a[0], Locality::Global);
+                    return Ok(a[0]);
+                };
+                let cap = fold_cap(cx)?;
+                let mut st = a[0];
+                for (j, &e) in input.iter().enumerate() {
+                    let (s2, out) = fold_step(v, st, e, cap);
+                    st = s2;
+                    if let Some((h, k)) = out {
+                        let rest = input[j + 1..]
+                            .iter()
+                            .fold(ValueId::NIL, |acc, &x| v.seq_concat(acc, v.seq_unit(x)));
+                        cx.define_with(state, st, Locality::Global);
+                        unfold_output(cx, ops, src, st, h, k, rest);
+                        return Ok(st);
+                    }
+                }
+                cx.define_with(state, st, Locality::Global);
+                Ok(st)
+            }
+            "collect" => {
+                let outs = cx.claim_stream()?;
+                let l = v.list(outs);
+                cx.define(v.field(&text(v, a[0])), l);
+                Ok(l)
+            }
+            "fold" => {
+                let src = eval_expr(cx, ops, a[0])?;
+                cx.define(v.field(FOLD), src);
+                cx.define(v.field(FOLD_STATE), fold_init(v));
+                Ok(src)
+            }
+            "when" => {
+                let c = eval_expr(cx, ops, a[0])?;
+                if truthy(v, c) {
+                    cx.child(ops.stmt, vec![a[1]]);
+                }
+                Ok(v.bool(truthy(v, c)))
+            }
+            "take" | "replace" => {
+                let r = if t == "replace" {
+                    Some(eval_expr(cx, ops, a[0])?)
+                } else {
+                    None
+                };
+                let taken = cx.take_prev_contribution(items_seq(v), r)?;
+                Ok(taken.unwrap_or_else(|| v.str("none")))
+            }
             "item" => {
                 // Directly inside a `doc` scope, an item opens a `list` scope
                 // before itself; inside a `list`, it continues it.
@@ -1364,10 +1736,13 @@ impl Lang {
         let procs = ProcTable::default();
         let stmt = eng.register(Arc::new(StmtOp(cell.clone(), procs.clone())));
         let apply = eng.register(Arc::new(ApplyOp(cell.clone())));
-        let ops = Ops { stmt, apply };
+        let output = eng.register(Arc::new(OutputOp));
+        let ops = Ops { stmt, apply, output };
         cell.set(ops).expect("fresh");
         let out = out_field(eng.values());
         eng.declare_accumulator(out, Arc::new(SeqMonoid));
+        let seq = items_seq(eng.values());
+        eng.declare_sequence(seq);
         Lang { ops, procs }
     }
 
@@ -1405,6 +1780,13 @@ pub struct Program {
     pub unit: UnitId,
     pub lines: Vec<String>,
     pub nodes: Vec<NodeId>,
+}
+
+/// The environment `env` (integer fields) as the engine takes it.
+pub fn env_values(eng: &Engine, env: &[(&str, i64)]) -> Vec<(Field, ValueId)> {
+    env.iter()
+        .map(|&(f, x)| (eng.values().field(f), eng.values().int(x)))
+        .collect()
 }
 
 impl Program {
@@ -1503,7 +1885,8 @@ impl Program {
         eng.refresh_where(&|op, args, v| {
             op == stmt && {
                 let (t, a) = tag(v, args[0]);
-                t == "do" && changed.contains(&text(v, a[0]))
+                (t == "do" && changed.contains(&text(v, a[0])))
+                    || (matches!(t.as_str(), "add" | "resume") && changed.iter().any(|c| c == FOLD_DECL))
             }
         });
     }
@@ -1512,7 +1895,9 @@ impl Program {
     pub fn insert_line(&mut self, eng: &mut Engine, i: usize, text: String) {
         let ast = Lang::rewrite(eng.values(), &self.loops, parse_stmt(eng.values(), &text));
         self.procs_edit(eng, None, Some(&text));
-        let n = if i == 0 {
+        let n = if self.nodes.is_empty() {
+            eng.push(self.unit, self.lang.ops.stmt, vec![ast])
+        } else if i == 0 {
             eng.insert_before(self.nodes[0], self.lang.ops.stmt, vec![ast])
         } else {
             eng.insert_after(self.nodes[i - 1], self.lang.ops.stmt, vec![ast])
