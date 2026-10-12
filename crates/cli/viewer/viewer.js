@@ -220,8 +220,10 @@ var Viewer = class {
     const s = this.slots[k];
     if (!s) return;
     if (hash) this.asked.delete(`${k}:${hash}`);
+    const resized = !!img.w && !!img.h && (img.w !== this.size.w || img.h !== this.size.h);
     if (img.w && img.h) this.size = { w: img.w, h: img.h };
     s.img = img;
+    if (resized) queueMicrotask(() => this.redraw());
     s.drawn = hash ?? s.hash;
     this.toPaint.add(s);
     if (!this.paintFrame) this.paintFrame = requestAnimationFrame(() => this.paintSome());
@@ -258,6 +260,16 @@ var Viewer = class {
     if (at) {
       const b = at.el.getBoundingClientRect();
       this.scroller.scrollTop += b.top + frac * b.height - v.top;
+    }
+    const want = Math.round(this.size.w * (96 / 72) * this.host.scale() * (window.devicePixelRatio || 1));
+    let coarse = false;
+    for (const s of this.slots) {
+      const c = s.img?.canvas.querySelector("canvas");
+      if (c && c.width < want - 1) s.drawn = null, coarse = true;
+    }
+    if (coarse) {
+      this.asked.clear();
+      this.wantVisible();
     }
   }
   /** Scroll page `k` into view, as Overleaf's page buttons do. */
@@ -722,32 +734,9 @@ function safeColor(c, or) {
   return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
 }
 var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false };
-function approximateFraction(x) {
-  if (Math.floor(x) === x) return [x, 1];
-  const xinv = 1 / x;
-  const limit = 8;
-  if (xinv > limit) return [1, limit];
-  if (Math.floor(xinv) === xinv) return [1, xinv];
-  const x_ = x > 1 ? xinv : x;
-  let a = 0, b = 1, c = 1, d = 1;
-  for (; ; ) {
-    const p = a + c, q = b + d;
-    if (q > limit) break;
-    if (x_ <= p / q) {
-      c = p;
-      d = q;
-    } else {
-      a = p;
-      b = q;
-    }
-  }
-  if (x_ - a / b < c / d - x_) return x_ === x ? [a, b] : [b, a];
-  return x_ === x ? [c, d] : [d, c];
-}
 function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
-  const step = approximateFraction(dpr)[1];
-  const w = cssWidth, h = d.h * cssWidth / d.w;
-  return [w - w % step, h - h % step];
+  const snap = (x) => Math.floor(x * dpr) / dpr;
+  return [snap(cssWidth), snap(d.h * cssWidth / d.w)];
 }
 var PATHS = {
   preview: "M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z",
@@ -842,17 +831,12 @@ button.btn:hover { background: var(--accent2); }
 .stage { position: relative; flex: 1; overflow: auto; background: var(--light3); padding: 12px; text-align: center; min-height: 0; }
 .stage .slot { background: #fff; box-shadow: 0 1px 3px rgba(27,34,44,.25); border-radius: 2px; }
 .stage img { max-width: 100%; }
-/* PDF.js pages: the canvas, and pdf.js's text layer over it (its own rules, the ones that place and hide the text) */
-.pdfjs-page { position: relative; width: 100%; height: 100%; background: #fff; }
-.pdfjs-page canvas { display: block; }
-.textLayer { position: absolute; inset: 0 auto auto 0; overflow: clip; line-height: 1; transform-origin: 0 0; z-index: 0;
-  --min-font-size: 1; --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size)); --min-font-size-inv: calc(1 / var(--min-font-size)); }
-.textLayer :is(span, br) { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; }
-.textLayer > :not(.markedContent), .textLayer .markedContent span:not(.markedContent) { z-index: 1; --font-height: 0;
-  font-size: calc(var(--text-scale-factor) * var(--font-height)); --scale-x: 1; --rotate: 0deg;
-  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv)); }
-.textLayer .markedContent { display: contents; }
-.textLayer ::selection { background: rgb(0 100 255 / 25%); }
+/* a page: MuPDF's canvas, and its text over it, transparent (selected, copied, found) */
+.phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
+.phx-page canvas { display: block; width: 100%; height: 100%; }
+.phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
+.phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
+.phx-text ::selection { fill: transparent; background: rgb(0 100 255 / 25%); }
 .stage.stale .slot canvas { opacity: .45; filter: grayscale(1); }
 .banner { position: sticky; top: -12px; z-index: 1; display: none; margin: -12px -12px 10px; padding: 6px 10px; text-align: left; font-size: 12px;
   background: var(--bg-warning-03, #fcf1e3); color: var(--warn); border-bottom: 1px solid var(--divider); }
@@ -1004,7 +988,7 @@ footer .msg.err { color: var(--danger); }
 .win.docked .sum:hover { background: var(--dark3); }
 .win.docked .sum .first { color: var(--fg-dark); }
 .win.docked .sum .n.error { color: var(--danger-dark); } .win.docked .sum .n.warning { color: var(--warn-dark); } .win.docked .sum .n.info { color: #97b6e5; }
-/* as Overleaf's pdf.js viewer: the scrollbar always there, pages 12 px apart and centered, and the
+/* as Overleaf's viewer: the scrollbar always there, pages 12 px apart and centered, and the
    viewer min-height 100% with the first page's margin collapsing through it (so it scrolls by 12 px, as native) */
 .win.docked .viewer { min-height: 100%; }
 .win.docked .stage { background: transparent; padding: 0; overflow-y: scroll; overflow-x: auto; }
@@ -1654,10 +1638,14 @@ var Panel = class {
     for (const f of this.listeners) f(s);
   }
   /**
-   * The zoom, 1 being 100% (a PDF point at 96/72 CSS pixels). Fit is
-   * pdf.js's "page-width", as Overleaf's viewer: (clientWidth − 40) / the
-   * page's width, 40 being its SCROLLBAR_PADDING.
+   * The zoom, 1 being 100% (a PDF point at 96/72 CSS pixels). Fit is the
+   * page's width, as Overleaf's viewer fits it: (clientWidth − 40) / the
+   * page's width, 40 being its scrollbar's padding.
    */
+  /** Device pixels per PDF point at the current zoom: the size pages are drawn at. */
+  pixelsPerPoint() {
+    return 96 / 72 * this.scale() * (window.devicePixelRatio || 1);
+  }
   scale() {
     if (this.prefs.zoom !== "fit") return Number(this.prefs.zoom);
     const pageW = (this.last?.w ?? 612) * (96 / 72);
@@ -3328,7 +3316,7 @@ var MupdfDoc = class {
             rgba[o + 3] = 255;
           }
         }
-        return { rgba, pw, ph, w: x1 - x0, h: y1 - y0, links: this.links(page, x0, y0) };
+        return { rgba, pw, ph, w: x1 - x0, h: y1 - y0, links: this.links(page, x0, y0), text: this.text(page, x0, y0) };
       } finally {
         pix.destroy();
       }
@@ -3349,6 +3337,31 @@ var MupdfDoc = class {
     }
     return out;
   }
+  /** A page's text, line by line (MuPDF's structured text), from its top left. */
+  text(page, x0, y0) {
+    const out = [];
+    let line = null;
+    let right = 0;
+    const st = page.toStructuredText("preserve-whitespace");
+    try {
+      st.walk({
+        beginLine: (bbox) => {
+          line = null;
+          right = bbox[2] - x0;
+        },
+        onChar: (c, origin, _font, size) => {
+          line ??= { x: origin[0] - x0, y: origin[1] - y0, w: 0, size, text: "" };
+          line.text += c;
+        },
+        endLine: () => {
+          if (line?.text.trim()) out.push({ ...line, w: Math.max(right - line.x, 0) });
+        }
+      });
+    } finally {
+      st.destroy();
+    }
+    return out;
+  }
   /** The PDF's outline (its bookmarks) as the panel's entries. */
   outline() {
     const conv = (items) => (items ?? []).map((i) => ({ t: i.title ?? "", p: i.page ?? null, y: null, k: conv(i.down) }));
@@ -3358,12 +3371,32 @@ var MupdfDoc = class {
     this.doc.destroy();
   }
 };
+var SVG = "http://www.w3.org/2000/svg";
 function toCanvas(d) {
+  const el = document.createElement("div");
+  el.className = "phx-page";
   const c = document.createElement("canvas");
   c.width = d.pw;
   c.height = d.ph;
   c.getContext("2d").putImageData(new ImageData(d.rgba, d.pw, d.ph), 0, 0);
-  return c;
+  const svg = document.createElementNS(SVG, "svg");
+  svg.setAttribute("class", "phx-text");
+  svg.setAttribute("viewBox", `0 0 ${d.w} ${d.h}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  for (const l of d.text) {
+    const t = document.createElementNS(SVG, "text");
+    t.setAttribute("x", String(l.x));
+    t.setAttribute("y", String(l.y));
+    t.setAttribute("font-size", String(l.size));
+    if (l.w > 0) {
+      t.setAttribute("textLength", String(l.w));
+      t.setAttribute("lengthAdjust", "spacingAndGlyphs");
+    }
+    t.textContent = l.text;
+    svg.append(t);
+  }
+  el.append(c, svg);
+  return el;
 }
 
 // viewer/src/compare.ts
@@ -3734,7 +3767,7 @@ var Pages = class {
     const o = op;
     if (o.op === "png") {
       const d = await this.open().catch(() => null);
-      const drawn = d?.draw(o.page ?? 0, 96 / 72 * (window.devicePixelRatio || 1) * 1.25);
+      const drawn = d?.draw(o.page ?? 0, panel.pixelsPerPoint());
       if (!drawn) return { ok: false, json: { error: "no such page" } };
       return { ok: true, canvas: toCanvas(drawn), size: [drawn.w, drawn.h], links: drawn.links };
     }
@@ -3908,5 +3941,7 @@ sock.onOpen = () => {
   started = true;
   void session.start();
 };
-sock.onClose = () => panel.msg("not connected to phitex watch (retrying)", true);
+var unreached = "Can't reach phitex watch over its WebSocket (retrying). Is it still running? A browser add-on blocking connections to localhost also does this: try a private window, or allow 127.0.0.1 in the add-on.";
+sock.onClose = () => started ? panel.msg("not connected to phitex watch (retrying)", true) : panel.error(unreached);
+setTimeout(() => started || panel.error(unreached), 3e3);
 sock.connect();

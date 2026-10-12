@@ -1,5 +1,5 @@
 // The pages, continuous: every page stacked in the scroll view, as Overleaf's
-// pdf.js viewer shows them. Only the pages near the view are drawn, and a
+// viewer shows them. Only the pages near the view are drawn, and a
 // page is drawn again only when its box changed (each page's hash, from the
 // core). The page most in view is the one an edit paints first.
 
@@ -18,7 +18,7 @@ export interface ViewerHost {
   dbl?(k: number, x: number, y: number): void;
   /** A click on a link to a web address (http, https or mailto): opened by the host (absent: in a new tab). */
   link?(uri: string): void;
-  /** A page box's CSS size at `cssWidth` (pdf.js's rounding). */
+  /** A page box's CSS size at `cssWidth` (on whole device pixels). */
   box(d: { w: number; h: number }, cssWidth: number): [number, number];
 }
 
@@ -267,8 +267,11 @@ export class Viewer {
     const s = this.slots[k];
     if (!s) return;
     if (hash) this.asked.delete(`${k}:${hash}`);
+    const resized = !!img.w && !!img.h && (img.w !== this.size.w || img.h !== this.size.h);
     if (img.w && img.h) this.size = { w: img.w, h: img.h };
     s.img = img;
+    // (the first page's size known: the pages at it, drawn again if coarser)
+    if (resized) queueMicrotask(() => this.redraw());
     s.drawn = hash ?? s.hash;
     // (painted at the next frame, a few a frame, those on screen first: a
     // burst of pages never stalls a scroll)
@@ -311,6 +314,18 @@ export class Viewer {
     if (at) {
       const b = at.el.getBoundingClientRect();
       this.scroller.scrollTop += b.top + frac * b.height - v.top;
+    }
+    // (a page drawn coarser than its box now is drawn again at the new size;
+    // until then its old bitmap scales)
+    const want = Math.round(this.size.w * (96 / 72) * this.host.scale() * (window.devicePixelRatio || 1));
+    let coarse = false;
+    for (const s of this.slots) {
+      const c = s.img?.canvas.querySelector("canvas");
+      if (c && c.width < want - 1) (s.drawn = null), (coarse = true);
+    }
+    if (coarse) {
+      this.asked.clear();
+      this.wantVisible();
     }
   }
 

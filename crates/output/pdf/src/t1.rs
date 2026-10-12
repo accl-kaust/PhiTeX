@@ -182,6 +182,9 @@ pub struct FontDesc {
     pub tx_tree: Option<BTreeSet<usize>>,
     /// `builtin_glyph_names`.
     pub builtin: Option<GlyphNames>,
+    /// `all_glyphs`: the whole font (an included PDF's font without a
+    /// `/CharSet`).
+    pub all_glyphs: bool,
 }
 
 /// What `writet1` leaves in `fb` and the lengths.
@@ -1490,7 +1493,7 @@ impl<'a> T1<'a> {
 
     /// `t1_mark_glyphs`.
     fn mark_glyphs(&mut self) -> Result<(), PdfError> {
-        if self.synthetic {
+        if self.synthetic || self.fd.all_glyphs {
             for e in &mut self.cs_tab {
                 if e.valid {
                     e.used = true;

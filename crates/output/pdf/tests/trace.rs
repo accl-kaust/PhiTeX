@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use phitex_pdf::map::{MapEntry, parse_map};
+use phitex_pdf::map::{MapEntry, parse_map, parse_map_ps};
 use phitex_pdf::{
     Action, ColorStackCmd, DestKind, FontSource, Ident, ImageSpec, LiteralMode, ObjBody, PageBox,
     PdfBytes, PdfParams, PdfWriter, VirtualFont, Whatsit,
@@ -94,6 +94,7 @@ struct Fnt {
 struct Src {
     fonts: Vec<Fnt>,
     map: BTreeMap<Vec<u8>, MapEntry>,
+    ps_map: BTreeMap<(Vec<u8>, i32, i32), MapEntry>,
     space: Option<FontId>,
 }
 
@@ -124,6 +125,7 @@ impl Src {
         Src {
             fonts: Vec::new(),
             map: parse_map(&kpse("pdftex.map").unwrap()),
+            ps_map: parse_map_ps(&kpse("pdftex.map").unwrap()),
             space: None,
         }
     }
@@ -237,6 +239,9 @@ impl FontSource for Src {
     }
     fn space_font(&self) -> Option<FontId> {
         self.space
+    }
+    fn map_by_ps_name(&self, ps: &[u8], slant: i32, extend: i32) -> Option<MapEntry> {
+        self.ps_map.get(&(ps.to_vec(), slant, extend)).cloned()
     }
 }
 
@@ -1634,7 +1639,6 @@ fn jpgres() {
 }
 
 #[test]
-#[ignore = "needs font replacement on PDF inclusion"]
 fn ximage() {
     let mut j = Job::new("ximage", 0);
     j.font("r", "cmr10", None);
@@ -1789,6 +1793,29 @@ fn ownpdf() {
     let p = j.w.params_mut();
     p.compress_level = 0;
     p.inclusion_copy_fonts = 1;
+    j.read();
+    let a = j.w.ximage(image("hello.pdf", 0, |_| {})).unwrap();
+    let b =
+        j.w.ximage(image("objstm.pdf", 0, |s| {
+            s.width = 100 * PT;
+            s.page = 2;
+        }))
+        .unwrap();
+    let c =
+        j.w.ximage(image("colorstack.pdf", 0, |s| s.page_box = PageBox::Trim))
+            .unwrap();
+    j.nums.ximages.extend([a, b, c, a]);
+    j.ship_all();
+    j.finish();
+}
+
+#[test]
+fn ownpdf0() {
+    let mut j = Job::new("ownpdf0", 0);
+    j.font("r", "cmr10", None);
+    let p = j.w.params_mut();
+    p.compress_level = 0;
+    p.inclusion_copy_fonts = 0;
     j.read();
     let a = j.w.ximage(image("hello.pdf", 0, |_| {})).unwrap();
     let b =
@@ -2002,4 +2029,342 @@ fn ttf() {
     j.read();
     j.ship_all();
     j.finish();
+}
+
+// ---- object sets of the LaTeX oracles ----
+
+/// An object with the objects it refers to, followed (fonts' objects
+/// form no cycles): streams decoded, without `/Length`, `/Filter` and
+/// `/DecodeParms`, numbers as the reader read them.
+fn canon(doc: &phitex_codecs::pdfread::Doc, o: &phitex_codecs::pdfread::Obj, out: &mut Vec<u8>) {
+    use phitex_codecs::pdfread::Obj;
+    match o {
+        Obj::Ref(_) => canon(doc, &doc.follow(o), out),
+        Obj::Array(a) => {
+            out.push(b'[');
+            for x in a {
+                canon(doc, x, out);
+                out.push(b' ');
+            }
+            out.push(b']');
+        }
+        Obj::Dict(d) => {
+            out.extend_from_slice(b"<<");
+            for (k, v) in &d.0 {
+                out.push(b'/');
+                out.extend_from_slice(k);
+                out.push(b' ');
+                canon(doc, v, out);
+                out.push(b' ');
+            }
+            out.extend_from_slice(b">>");
+        }
+        Obj::Stream(s) => {
+            out.extend_from_slice(b"<<");
+            for (k, v) in &s.dict.0 {
+                if matches!(&k[..], b"Length" | b"Filter" | b"DecodeParms") {
+                    continue;
+                }
+                out.push(b'/');
+                out.extend_from_slice(k);
+                out.push(b' ');
+                canon(doc, v, out);
+                out.push(b' ');
+            }
+            out.extend_from_slice(b">>stream ");
+            out.extend_from_slice(&doc.decode(s));
+        }
+        other => out.extend_from_slice(format!("{other:?}").as_bytes()),
+    }
+}
+
+/// [`canon`] of a font dictionary without its `/Encoding`: an encoding
+/// object is shared by the fonts of an encoding file, its differences
+/// the codes all of them use (`fe_entry`'s `tx_tree`).
+fn canon_font(doc: &phitex_codecs::pdfread::Doc, r: phitex_codecs::pdfread::Ref) -> Vec<u8> {
+    use phitex_codecs::pdfread::Obj;
+    let mut out = Vec::new();
+    if let Obj::Dict(mut d) = doc.fetch(r) {
+        d.0.retain(|(k, _)| &k[..] != b"Encoding");
+        canon(doc, &Obj::Dict(d), &mut out);
+    }
+    out
+}
+
+/// The fonts of a file's pages and of their forms, by reference.
+fn pdf_fonts(doc: &phitex_codecs::pdfread::Doc) -> Vec<phitex_codecs::pdfread::Ref> {
+    use phitex_codecs::pdfread::{Dict, Obj};
+    fn walk(
+        doc: &phitex_codecs::pdfread::Doc,
+        res: &Dict,
+        out: &mut Vec<phitex_codecs::pdfread::Ref>,
+        seen: &mut Vec<phitex_codecs::pdfread::Ref>,
+    ) {
+        if let Obj::Dict(f) = doc.lookup(res, b"Font") {
+            for (_, v) in &f.0 {
+                if let Obj::Ref(r) = v
+                    && !out.contains(r)
+                {
+                    out.push(*r);
+                }
+            }
+        }
+        if let Obj::Dict(x) = doc.lookup(res, b"XObject") {
+            for (_, v) in &x.0 {
+                if let Obj::Ref(r) = v
+                    && !seen.contains(r)
+                {
+                    seen.push(*r);
+                    // an included PDF's page: its fonts are copied or
+                    // replaced (the image fixtures check those)
+                    if let Obj::Stream(s) = doc.fetch(*r)
+                        && s.dict.get(b"PTEX.FileName").is_none()
+                        && let Obj::Dict(r2) = doc.lookup(&s.dict, b"Resources")
+                    {
+                        walk(doc, &r2, out, seen);
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+    for i in 1..=doc.num_pages() {
+        if let Some(p) = doc.page(i)
+            && let Some(r) = &p.resources
+        {
+            walk(doc, r, &mut out, &mut seen);
+        }
+    }
+    out
+}
+
+/// The codes a subset Type 1 font of pdfTeX used: its `/Encoding`'s
+/// `/Differences`, else the `dup <code> /<name> put` of its program.
+fn used_codes(doc: &phitex_codecs::pdfread::Doc, font: &phitex_codecs::pdfread::Dict) -> Vec<u16> {
+    use phitex_codecs::pdfread::Obj;
+    if let Obj::Dict(e) = doc.lookup(font, b"Encoding")
+        && let Obj::Array(a) = doc.lookup(&e, b"Differences")
+    {
+        // the codes of the glyphs of the font's /CharSet
+        let charset: Option<Vec<Vec<u8>>> = match doc.lookup(font, b"FontDescriptor") {
+            Obj::Dict(desc) => match doc.lookup(&desc, b"CharSet") {
+                Obj::Str(cs) => Some(
+                    cs.split(|&c| c == b'/')
+                        .filter(|g| !g.is_empty())
+                        .map(<[u8]>::to_vec)
+                        .collect(),
+                ),
+                _ => None,
+            },
+            _ => None,
+        };
+        let mut code = 0;
+        let mut out = Vec::new();
+        for x in a {
+            match x {
+                Obj::Int(i) => code = i,
+                Obj::Name(n) => {
+                    if charset.as_ref().is_none_or(|c| c.contains(&n)) {
+                        out.push(u16::try_from(code).unwrap());
+                    }
+                    code += 1;
+                }
+                _ => {}
+            }
+        }
+        return out;
+    }
+    let Obj::Dict(desc) = doc.lookup(font, b"FontDescriptor") else {
+        return Vec::new();
+    };
+    let Obj::Stream(s) = doc.lookup(&desc, b"FontFile") else {
+        return Vec::new();
+    };
+    let data = doc.decode(&s);
+    let n1 = doc.lookup(&s.dict, b"Length1").as_int().unwrap_or(0);
+    let text = String::from_utf8_lossy(&data[..usize::try_from(n1).unwrap().min(data.len())]);
+    let mut out = Vec::new();
+    for l in text.lines() {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        if w.len() == 4 && w[0] == "dup" && w[2].starts_with('/') && w[3] == "put" {
+            out.push(w[1].parse().unwrap());
+        }
+    }
+    out
+}
+
+/// `\pdfglyphtounicode`s of `glyphtounicode.tex`.
+fn glyph_to_unicode_tex() -> Vec<(Vec<u8>, Vec<u8>)> {
+    let t = kpse("glyphtounicode.tex").unwrap();
+    let t = String::from_utf8_lossy(&t);
+    let mut out = Vec::new();
+    for l in t.lines() {
+        if let Some(r) = l.strip_prefix("\\pdfglyphtounicode{")
+            && let Some((g, r)) = r.split_once("}{")
+            && let Some((u, _)) = r.split_once('}')
+        {
+            out.push((g.as_bytes().to_vec(), u.as_bytes().to_vec()));
+        }
+    }
+    out
+}
+
+/// The font dictionary phitex-pdf writes for TFM `name` at `at` with
+/// `codes` used, canonical.
+fn font_alone(
+    name: &str,
+    at: Option<Scaled>,
+    codes: &[u16],
+    tounicode: Option<&[(Vec<u8>, Vec<u8>)]>,
+) -> Option<Vec<u8>> {
+    let mut src = Src::new();
+    let f = src.font(name, at);
+    let mut w = PdfWriter::new(PdfParams {
+        date: phitex_pdf::pdf_date(0),
+        banner: BANNER.to_owned(),
+        output_file_name: "x.pdf".to_owned(),
+        ..PdfParams::default()
+    });
+    if let Some(t) = tounicode {
+        w.params_mut().gen_tounicode = 1;
+        for (g, u) in t {
+            w.glyph_to_unicode(g, u);
+        }
+    }
+    let list: Vec<Node> = codes.iter().map(|&ch| Node::Char { font: f, ch }).collect();
+    let params = PackParams {
+        overfull_rule: 0,
+        ..PackParams::default()
+    };
+    let b = hpack(list, Spec::Additional(0), &src, &params, false).node;
+    let page = vpackage(vec![Node::Box(b)], Spec::Additional(0), 0, &params).node;
+    w.ship_out_with(&page, &src, &mut |_, _| None).ok()?;
+    let pdf: std::sync::Arc<[u8]> = w.finish().ok()?.into();
+    let doc = phitex_codecs::pdfread::Doc::open(&pdf).ok()?;
+    let r = *pdf_fonts(&doc).first()?;
+    Some(canon_font(&doc, r))
+}
+
+/// The sizes LaTeX loads fonts at, tried after the design size.
+const LATEX_SIZES: [Scaled; 14] = [
+    5 * PT,
+    6 * PT,
+    7 * PT,
+    8 * PT,
+    9 * PT,
+    10 * PT,
+    655_360 + 62_259, // 10.95pt
+    12 * PT,
+    943_718,   // 14.4pt
+    1_133_773, // 17.28pt
+    1_360_527, // 20.74pt
+    1_630_535, // 24.88pt
+    11 * PT,
+    PT * 10 + PT / 2,
+];
+
+/// Each Type 1 font of the LaTeX oracles (`oracle/fixtures/latex/pdf`)
+/// as phitex-pdf writes it alone, with the codes the file's subset
+/// shows used: the font dictionary with all it refers to (widths,
+/// encoding, descriptor, the subset font program, `/ToUnicode`) equal
+/// to pdfTeX's, object numbers aside.
+#[test]
+#[ignore = "heavy: every font of the LaTeX oracles at every LaTeX size; run with --ignored"]
+fn latex_font_objects() {
+    use phitex_codecs::pdfread::{Doc, Obj};
+    let dir = format!(
+        "{}/../../../oracle/fixtures/latex/pdf",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let map = parse_map(&kpse("pdftex.map").unwrap());
+    let g2u = glyph_to_unicode_tex();
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .strip_suffix(".pdf")
+                .map(str::to_owned)
+        })
+        .collect();
+    names.sort();
+    let only = std::env::var("PHITEX_GATE").ok();
+    names.retain(|n| only.as_ref().is_none_or(|o| o == n));
+    let (mut ok, mut failed) = (0, Vec::new());
+    for name in names {
+        let data: std::sync::Arc<[u8]> = std::fs::read(format!("{dir}/{name}.pdf")).unwrap().into();
+        let doc = Doc::open(&data).unwrap();
+        for r in pdf_fonts(&doc) {
+            let Obj::Dict(font) = doc.fetch(r) else {
+                continue;
+            };
+            if doc.lookup(&font, b"Subtype").as_name() != Some(b"Type1") {
+                continue;
+            }
+            let Some(base) = doc.lookup(&font, b"BaseFont").as_name().map(<[u8]>::to_vec) else {
+                continue;
+            };
+            let Obj::Dict(desc) = doc.lookup(&font, b"FontDescriptor") else {
+                continue;
+            };
+            if !matches!(doc.lookup(&desc, b"FontFile"), Obj::Stream(_)) {
+                continue;
+            }
+            let ps = if base.len() > 7 && base[6] == b'+' {
+                base[7..].to_vec()
+            } else {
+                base.clone()
+            };
+            let want = canon_font(&doc, r);
+            let codes = used_codes(&doc, &font);
+            let tu = matches!(doc.lookup(&font, b"ToUnicode"), Obj::Stream(_));
+            let candidates: Vec<&MapEntry> = map
+                .values()
+                .filter(|m| m.ps_name.as_deref() == Some(&ps[..]) && m.is_type1())
+                .collect();
+            let mut found = false;
+            let mut closest: Option<(usize, String)> = None;
+            'c: for m in &candidates {
+                let tfm = String::from_utf8_lossy(&m.tfm_name).into_owned();
+                if kpse(&format!("{tfm}.tfm")).is_none() {
+                    continue;
+                }
+                for at in std::iter::once(None).chain(LATEX_SIZES.iter().map(|&s| Some(s))) {
+                    let got = font_alone(&tfm, at, &codes, tu.then_some(&g2u[..]));
+                    if got.as_deref() == Some(&want[..]) {
+                        found = true;
+                        break 'c;
+                    }
+                    if let Some(g) = &got {
+                        let d = g.iter().zip(&want).take_while(|(a, b)| a == b).count();
+                        if closest.as_ref().is_none_or(|c| c.0 < d) {
+                            let w = String::from_utf8_lossy(
+                                &want[d.saturating_sub(40)..(d + 60).min(want.len())],
+                            )
+                            .into_owned();
+                            let gg = String::from_utf8_lossy(
+                                &g[d.saturating_sub(40)..(d + 60).min(g.len())],
+                            )
+                            .into_owned();
+                            closest =
+                                Some((d, format!("{tfm} {at:?} at {d}: want {w:?} got {gg:?}")));
+                        }
+                    }
+                }
+            }
+            if found {
+                ok += 1;
+            } else {
+                failed.push(format!(
+                    "{name}: {} ({})",
+                    String::from_utf8_lossy(&base),
+                    closest.map(|c| c.1).unwrap_or_default()
+                ));
+            }
+        }
+    }
+    eprintln!("{ok} fonts equal");
+    assert!(failed.is_empty(), "fonts differing: {failed:#?}");
 }

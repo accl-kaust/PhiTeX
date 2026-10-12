@@ -225,7 +225,10 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         synctex,
         recorder,
         shell_escape,
-        pdf_date: session::pdf_date(),
+        pdf_date: session::pdf_date(&engine),
+        // (one run, as the program's)
+        fixpoint: false,
+        cache_limit: None,
     };
     for n in session::waiting_notes(&job) {
         eprintln!("{progname}: {n}");
