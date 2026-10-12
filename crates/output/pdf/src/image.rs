@@ -12,7 +12,7 @@ use phitex_typeset::arith::Scaled;
 use phitex_typeset::node::RUNNING;
 
 use crate::num::{ONE_HUNDRED_BP, ONE_HUNDRED_INCH, TEN_POW};
-use crate::{OBJ_TYPE_XIMAGE, PdfError, PdfState, int, pdf_error};
+use crate::{FontSource, OBJ_TYPE_XIMAGE, PdfError, PdfState, int, pdf_error};
 
 /// `one_inch`.
 const ONE_INCH: Scaled = (ONE_HUNDRED_INCH + 50) / 100;
@@ -165,6 +165,17 @@ struct InObj {
     r: Ref,
     objnum: usize,
     written: bool,
+    kind: InKind,
+}
+
+/// `InObjType`.
+#[derive(Clone, Debug)]
+enum InKind {
+    Other,
+    /// `objFont`: a replaced font, its descriptor's key and its encoding.
+    Font(crate::epdffont::FdKey, usize),
+    /// `objFontDesc`: written by the font descriptors.
+    FontDesc,
 }
 
 /// An open document (`PdfDocument`).
@@ -501,6 +512,9 @@ struct Copy<'d> {
     doc: &'d Doc,
     objs: Vec<InObj>,
     name: Vec<u8>,
+    /// `encodingList`: the encodings of replaced fonts, newest last.
+    encs: Vec<(usize, crate::epdffont::Names)>,
+    src: &'d dyn FontSource,
 }
 
 impl PdfState {
@@ -778,8 +792,8 @@ impl PdfState {
     ///
     /// # Errors
     /// What writing the image meets.
-    pub fn write_ximage(&mut self, n: usize) -> Result<(), PdfError> {
-        self.pdf_write_image(n)
+    pub fn write_ximage(&mut self, n: usize, src: &dyn FontSource) -> Result<(), PdfError> {
+        self.pdf_write_image(n, src)
     }
 
     // ---- on the page ----
@@ -844,7 +858,11 @@ impl PdfState {
     // ---- writing ----
 
     /// `pdf_write_image` (pdfTeX §1628) with `write_image`.
-    pub(crate) fn pdf_write_image(&mut self, n: usize) -> Result<(), PdfError> {
+    pub(crate) fn pdf_write_image(
+        &mut self,
+        n: usize,
+        src: &dyn FontSource,
+    ) -> Result<(), PdfError> {
         let Some(x) = self.aux.ximages.get_mut(&n) else {
             return Ok(());
         };
@@ -862,7 +880,7 @@ impl PdfState {
         }
         match &image.kind {
             Kind::Pdf(p) => {
-                let r = self.write_epdf(&image, p);
+                let r = self.write_epdf(&image, p, src);
                 // delete_image: the document closed when no image of it
                 // is left to write
                 let d = &mut self.epdf_docs[p.doc];
@@ -1178,6 +1196,7 @@ impl PdfState {
             r,
             objnum,
             written: false,
+            kind: InKind::Other,
         });
         Ok(objnum)
     }
@@ -1271,7 +1290,7 @@ impl PdfState {
         Ok(())
     }
 
-    /// `copyFontResources`, without font replacement.
+    /// `copyFontResources`.
     fn ep_fonts(&mut self, c: &mut Copy<'_>, o: &Obj) -> Result<(), PdfError> {
         let Obj::Dict(d) = o else {
             return Err(fail(
@@ -1286,11 +1305,33 @@ impl PdfState {
         for (k, v) in &d.0 {
             match v {
                 Obj::Ref(r) => {
-                    if self.fixed_inclusion_copy_font == 0 && Self::ep_maybe_replaced(c, *r) {
-                        return Err(PdfError::Unsupported(
-                            "replacing an included PDF's Type 1 fonts (\\pdfinclusioncopyfonts=0)"
-                                .into(),
-                        ));
+                    if !c.objs.iter().any(|o| o.r == *r)
+                        && let Some(rep) = self.replacement(c.doc, *r, c.src)?
+                    {
+                        // copyFont, replacing the font
+                        let (key, fd_objnum) = self.epdf_fd(&rep);
+                        // addFontDesc
+                        if !c.objs.iter().any(|o| o.r == rep.desc_ref) {
+                            c.objs.push(InObj {
+                                r: rep.desc_ref,
+                                objnum: fd_objnum,
+                                written: false,
+                                kind: InKind::FontDesc,
+                            });
+                        }
+                        self.ep_name(k);
+                        // addEncoding, then addFont
+                        let enc = self.new_objnum_();
+                        c.encs.push((enc, rep.names));
+                        let objnum = self.new_objnum_();
+                        c.objs.push(InObj {
+                            r: *r,
+                            objnum,
+                            written: false,
+                            kind: InKind::Font(key, enc),
+                        });
+                        self.ep_puts(format!(" {objnum} 0 R ").as_bytes());
+                        continue;
                     }
                     // copyFont: an object already copied is followed by a
                     // space, a new one is not
@@ -1320,33 +1361,6 @@ impl PdfState {
         }
         self.ep_puts(b">>\n");
         Ok(())
-    }
-
-    /// Whether `copyFont` might replace font `r` (a Type 1 font with its
-    /// file): whether the map has its name is not known here.
-    fn ep_maybe_replaced(c: &Copy<'_>, r: Ref) -> bool {
-        if c.objs.iter().any(|o| o.r == r) {
-            return false;
-        }
-        let doc = c.doc;
-        let Obj::Dict(dict) = doc.fetch(r) else {
-            return false;
-        };
-        if doc.lookup(&dict, b"Subtype").as_name() != Some(b"Type1") {
-            return false;
-        }
-        if !matches!(doc.lookup(&dict, b"BaseFont"), Obj::Name(_)) {
-            return false;
-        }
-        let Some(Obj::Ref(desc)) = dict.get(b"FontDescriptor") else {
-            return false;
-        };
-        let Obj::Dict(fd) = doc.fetch(*desc) else {
-            return false;
-        };
-        matches!(doc.lookup(&fd, b"FontFile"), Obj::Stream(_))
-            || matches!(doc.lookup(&fd, b"FontFile3"),
-                Obj::Stream(s) if doc.lookup(&s.dict, b"Subtype").as_name() == Some(b"Type1C"))
     }
 
     /// `copyProcSet`.
@@ -1401,11 +1415,44 @@ impl PdfState {
             if !c.objs[i].written {
                 c.objs[i].written = true;
                 let o = c.doc.fetch(c.objs[i].r);
-                let level = if matches!(o, Obj::Stream(_)) { 0 } else { 2 };
-                self.begin_obj(c.objs[i].objnum, level);
-                self.ep_object(c, &o)?;
-                self.ep_puts(b"\n");
-                self.end_obj();
+                match c.objs[i].kind.clone() {
+                    InKind::FontDesc => {}
+                    InKind::Font(key, enc) => {
+                        // copyFontDict
+                        self.begin_obj(c.objs[i].objnum, 2);
+                        let Obj::Dict(d) = &o else {
+                            return Err(fail(&c.name, "PDF inclusion: invalid dict type"));
+                        };
+                        self.ep_puts(b"<<\n");
+                        for (k, v) in &d.0 {
+                            if k.starts_with(b"FontDescriptor")
+                                || k.starts_with(b"BaseFont")
+                                || k.starts_with(b"Encoding")
+                            {
+                                continue;
+                            }
+                            self.ep_name(k);
+                            self.ep_puts(b" ");
+                            self.ep_object(c, v)?;
+                            self.ep_puts(b"\n");
+                        }
+                        let fd = self.epdf_fds.get(&key).map_or(0, |e| e.objnum);
+                        let fname = self.epdf_fn_objnum(&key);
+                        self.ep_puts(format!("/FontDescriptor {fd} 0 R\n").as_bytes());
+                        self.ep_puts(format!("/BaseFont {fname} 0 R\n").as_bytes());
+                        self.ep_puts(format!("/Encoding {enc} 0 R\n").as_bytes());
+                        self.ep_puts(b">>");
+                        self.ep_puts(b"\n");
+                        self.end_obj();
+                    }
+                    InKind::Other => {
+                        let level = if matches!(o, Obj::Stream(_)) { 0 } else { 2 };
+                        self.begin_obj(c.objs[i].objnum, level);
+                        self.ep_object(c, &o)?;
+                        self.ep_puts(b"\n");
+                        self.end_obj();
+                    }
+                }
             }
             i += 1;
         }
@@ -1414,7 +1461,12 @@ impl PdfState {
 
     /// `write_epdf`: the image's dictionary begun.
     #[allow(clippy::too_many_lines)]
-    fn write_epdf(&mut self, image: &Image, im: &PdfImage) -> Result<(), PdfError> {
+    fn write_epdf(
+        &mut self,
+        image: &Image,
+        im: &PdfImage,
+        src: &dyn FontSource,
+    ) -> Result<(), PdfError> {
         let file = image.name.clone();
         let sep: &[u8] = if self.p.ptex_use_underscore > 0 {
             b"_"
@@ -1436,6 +1488,8 @@ impl PdfState {
             doc: &doc,
             objs,
             name: file.clone(),
+            encs: Vec::new(),
+            src,
         };
         let page_obj = doc.fetch(page.dict_ref);
         let empty = Dict::default();
@@ -1555,6 +1609,10 @@ impl PdfState {
                 self.begin_stream();
                 self.end_stream();
             }
+        }
+        // writeEncodings: `encodingList` is newest first
+        for (objnum, names) in std::mem::take(&mut c.encs).into_iter().rev() {
+            self.epdf_write_enc(&names, objnum);
         }
         if let Some((val, gd)) = sep_group {
             self.begin_obj(val, 2);
