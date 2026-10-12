@@ -313,3 +313,25 @@ fn sections_edits() {
     }
     assert!(failed.is_empty(), "edits differing from cold: {failed:?}");
 }
+
+/// The `etex` job: the format from `etex.ini` (`etex.src`, `language.def`
+/// and the patterns, e-TeX mode) as the prelude, then `story.tex`; the
+/// DVI file is `etex story.tex`'s (`oracle/fixtures/plain/story-etex.dvi`,
+/// TeX Live 2026, `SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1`).
+#[test]
+#[ignore = "heavy: the e-TeX format"]
+fn etex_story() {
+    let dir = common::fixtures().join("plain");
+    let want = std::fs::read(dir.join("story-etex.dvi")).expect("the oracle");
+    let src = common::read(&dir.join("story.tex"));
+    let opts = Options {
+        epoch: Some(0),
+        prelude_jobname: "etex".to_owned(),
+        ..common::options("./story.tex", "story", &common::dvi_comment(&want), &dir)
+    };
+    let b = common::build(opts, Some("\\input etex.ini\n"), &src);
+    eprintln!("{}", report("story", &b));
+    if let Some(d) = common::first_difference(&masked(&b.output().0), &masked(&want)) {
+        panic!("etex story.dvi: {d}");
+    }
+}
