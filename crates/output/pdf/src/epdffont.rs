@@ -44,6 +44,7 @@ fn table(t: &[Option<&str>; 256]) -> Names {
 }
 
 /// `FoFiType1::undoPFB`: the segments of a PFB file joined.
+// xpdf FoFiType1.cc
 fn undo_pfb(file: &[u8]) -> Vec<u8> {
     if file.first() != Some(&0x80) {
         return file.to_vec();
@@ -61,6 +62,7 @@ fn undo_pfb(file: &[u8]) -> Vec<u8> {
 }
 
 /// `FoFiType1::getNextLine`.
+// xpdf FoFiType1.cc
 fn next_line(f: &[u8], mut line: usize) -> Option<usize> {
     while line < f.len() && f[line] != b'\n' && f[line] != b'\r' {
         line += 1;
@@ -80,6 +82,7 @@ fn cstr(buf: &[u8]) -> &[u8] {
 }
 
 /// `FoFiType1::parse`'s encoding: `None` when the program has none.
+// xpdf FoFiType1.cc
 #[allow(clippy::too_many_lines)]
 fn fofi_type1_encoding(file: &[u8]) -> Option<Names> {
     let f = undo_pfb(file);
@@ -213,6 +216,7 @@ fn fofi_type1_encoding(file: &[u8]) -> Option<Names> {
 }
 
 /// `Gfx8BitFont`'s `enc` for a Type 1 font with an embedded program.
+// xpdf GfxFont.cc, "build the font encoding"
 pub(crate) fn char_names(doc: &Doc, font: &Dict, font_file: Option<&[u8]>) -> Names {
     let enc_obj = doc.lookup(font, b"Encoding");
     let named = |n: &[u8]| -> Option<Names> {
