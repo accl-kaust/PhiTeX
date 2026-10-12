@@ -178,10 +178,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                         .unwrap_or_else(PoisonError::into_inner)
                         .send(Event::Asked);
                 }));
-                ui.stdout(&format!("phitex: the viewer is at {}", v.url()));
                 ui.line(&format!("{} {}", st.dim("viewer:"), st.cyan(v.url())));
                 ui.event(&json!({"event": "viewer", "url": v.url()}));
-                if o.open && !view::open_browser(v.url()) {
+                if o.open && t.viewer.is_none() && !view::open_browser(v.url()) {
                     ui.warning("could not start a browser");
                 }
                 Some(v)
@@ -223,6 +222,12 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // (the editor's buffers, as Unicode text, by file name)
     let mut buffers: HashMap<String, String> = HashMap::new();
     let mut builds = 0usize;
+    // (the last output written without errors, and its PDF for the viewer)
+    let mut last_good: Option<PathBuf> = None;
+    let mut last_pdf = None;
+    // (`viewer = "zathura"`: --open starts it on the output, once)
+    let open_cmd = t.viewer.clone().filter(|_| o.open);
+    let mut started = false;
     let mut rebuild = |s: &mut Session, why: &str| {
         builds += 1;
         if let Some(v) = &view {
@@ -236,16 +241,13 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             Err(m) => {
                 spin.done();
                 ui.failed(&format!("build {builds} ({why})"), &m);
-                ui.stdout(&format!(
-                    "phitex: build {builds} ({why}) failed inside the engine"
-                ));
                 let first = m.lines().next().unwrap_or("the engine panicked");
                 ui.event(
                     &json!({"event": "failed", "build": builds, "why": why, "message": first}),
                 );
                 if let Some(v) = &view {
                     v.built(&Built {
-                        pdf: None,
+                        pdf: last_pdf.clone(),
                         history: 2,
                         ms: 0.0,
                         diagnostics: vec![
@@ -257,11 +259,13 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 return;
             }
         };
+        let failed = !r.out.errors.is_empty();
         status.set("writing the outputs");
-        // (the poller waits on the lock while the files are written, then
-        // knows them as the watch's own)
+        // (the watcher waits on the lock while the files are written, then
+        // knows them as the watch's own; a build with errors leaves the last
+        // good output in place)
         let mut mine = ours.lock().unwrap_or_else(PoisonError::into_inner);
-        let written = match s.write(&r) {
+        let written = match s.write(&r, !failed) {
             Ok(w) => {
                 let ours = &mut *mine;
                 for (p, h) in &w.files {
@@ -277,33 +281,27 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         };
         drop(mine);
         status.set("");
-        let update = r.runs.first().map(|x| x.wall).unwrap_or_default();
-        let mut line = format!(
-            "phitex: build {builds} ({why}) in {} (update {:.2} ms; {} run{}); {} page{}, {} kept",
-            ms(r.wall),
-            update.as_secs_f64() * 1e3,
-            r.runs.len(),
-            if r.runs.len() == 1 { "" } else { "s" },
-            r.pages(),
-            if r.pages() == 1 { "" } else { "s" },
-            r.out.pages_reused
-        );
+        if !failed && let Some(out) = &written {
+            last_good = Some(out.clone());
+        }
         if let Some(v) = &view {
-            let pdf = match r.main_output() {
-                Some(("pdf", b)) => Some(session::shared(b)),
-                Some((_, dvi)) => match crate::dvipdf::dvi_to_pdf(
-                    dvi,
-                    &format!("{}.pdf", s.job.jobname),
-                    s.job.pdf_date,
-                ) {
-                    Ok(p) => Some(session::shared(&p)),
-                    Err(e) => {
-                        ui.warning(&format!("the viewer's PDF of the DVI file: {e}"));
-                        None
-                    }
-                },
-                None => None,
-            };
+            if !failed {
+                last_pdf = match r.main_output() {
+                    Some(("pdf", b)) => Some(session::shared(b)),
+                    Some((_, dvi)) => match crate::dvipdf::dvi_to_pdf(
+                        dvi,
+                        &format!("{}.pdf", s.job.jobname),
+                        s.job.pdf_date,
+                    ) {
+                        Ok(p) => Some(session::shared(&p)),
+                        Err(e) => {
+                            ui.warning(&format!("the viewer's PDF of the DVI file: {e}"));
+                            None
+                        }
+                    },
+                    None => None,
+                };
+            }
             let log = s
                 .job
                 .out_dir
@@ -311,27 +309,86 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 .display()
                 .to_string();
             status.set("drawing the pages for the viewer");
-            let (changed, n) = v.built(&Built {
-                pdf,
+            v.built(&Built {
+                pdf: last_pdf.clone(),
                 history: r.history(),
                 ms: r.wall.as_secs_f64() * 1e3,
                 diagnostics: diagnostics(&r, &log),
             });
             v.building(false);
             status.set("");
-            line.push_str(&format!(
-                "; viewer: {} of {n} page{} redrawn{}",
-                changed.len(),
-                if n == 1 { "" } else { "s" },
-                if changed.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", view::ranges(&changed))
-                }
-            ));
         }
         spin.done();
-        ui.stdout(&line);
+        // (the place edited: the main file's first changed line)
+        let place = match r.edit_line {
+            Some(l) => why
+                .split(", ")
+                .map(|w| {
+                    if w == main_rel || w == format!("{main_rel} (editor)") {
+                        format!("{main_rel}:{l}")
+                    } else {
+                        w.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+            None => why.to_owned(),
+        };
+        let nodes = r.runs.last().map_or(0, |x| x.commands_run);
+        let changed = &r.out.pages_changed;
+        let mut facts = Vec::new();
+        if failed {
+            let n = r.out.errors.len();
+            facts.push(st.red(&format!("{n} error{}", if n == 1 { "" } else { "s" })));
+            facts.push(if last_good.is_some() {
+                "last good output kept".to_owned()
+            } else {
+                "nothing written".to_owned()
+            });
+        } else {
+            facts.push(format!("{nodes} nodes run"));
+            facts.push(if builds == 1 {
+                format!(
+                    "{} page{}",
+                    r.pages(),
+                    if r.pages() == 1 { "" } else { "s" }
+                )
+            } else if changed.is_empty() {
+                format!("no page of {} changed", r.pages())
+            } else {
+                format!(
+                    "{} of {} page{} changed ({})",
+                    changed.len(),
+                    r.pages(),
+                    if r.pages() == 1 { "" } else { "s" },
+                    view::ranges(changed)
+                )
+            });
+        }
+        facts.push(st.bold(&ms(r.wall)));
+        let mark = if failed {
+            st.red(st.sym("✗", "failed:"))
+        } else {
+            st.green(st.sym("✓", "ok:"))
+        };
+        ui.line(&format!(
+            "{mark} build {builds}  {}  {}",
+            st.cyan(&place),
+            facts.join(st.sym(" · ", ", "))
+        ));
+        ui.event(&json!({
+            "event": "build",
+            "build": builds,
+            "why": why,
+            "edit": r.edit_line.map(|l| format!("{main_rel}:{l}")),
+            "ok": !failed,
+            "output": written.as_ref().map(|p| p.display().to_string()),
+            "pages": r.pages(),
+            "pages_changed": changed,
+            "nodes_run": nodes,
+            "wall_ms": r.wall.as_secs_f64() * 1e3,
+            "errors": r.out.errors,
+        }));
         modern::report(
             t,
             s,
@@ -342,7 +399,15 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 ..Options::default()
             },
             ui,
+            false,
         );
+        // (--open with a viewer program: started on the first output)
+        if let (Some(cmd), Some(out), false) = (&open_cmd, &last_good, started) {
+            started = true;
+            if let Err(e) = view::open_with(cmd, out) {
+                ui.warning(&format!("can't start {cmd}: {e}"));
+            }
+        }
     };
     rebuild(&mut s, "cold");
     let set = |s: &mut Session, buffers: &HashMap<String, String>, file: &str| {

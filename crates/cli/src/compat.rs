@@ -245,7 +245,7 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         std::process::exit(crate::EXIT_INTERNAL);
     });
     print!("{}", Session::terminal(&r));
-    if let Err(e) = s.write(&r) {
+    if let Err(e) = s.write(&r, true) {
         eprintln!("{progname}: {e}");
         std::process::exit(1);
     }

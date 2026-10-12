@@ -469,24 +469,30 @@ fn big() -> String {
 }
 
 /// Reads `child`'s lines until one starts with `prefix`; the lines read.
-fn until(lines: &mut impl Iterator<Item = String>, prefix: &str, seen: &mut Vec<String>) -> String {
+/// The watch's next `--json` event with `key` equal to `value`.
+fn until(
+    lines: &mut impl Iterator<Item = String>,
+    key: &str,
+    value: &serde_json::Value,
+    seen: &mut Vec<String>,
+) -> serde_json::Value {
     for l in lines.by_ref() {
         seen.push(l.clone());
-        if l.starts_with(prefix) {
-            return l;
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&l)
+            && v[key] == *value
+        {
+            return v;
         }
     }
-    panic!("the watch ended before `{prefix}`:\n{}", seen.join("\n"));
+    panic!(
+        "the watch ended before {key} = {value}:\n{}",
+        seen.join("\n")
+    );
 }
 
-/// The update's milliseconds in a build line (`update X ms`).
-fn update_ms(line: &str) -> f64 {
-    let at = line.find("update ").expect("an update time") + "update ".len();
-    line[at..]
-        .split(' ')
-        .next()
-        .and_then(|n| n.parse().ok())
-        .expect("a number")
+/// A build event's milliseconds.
+fn update_ms(ev: &serde_json::Value) -> f64 {
+    ev["wall_ms"].as_f64().expect("wall_ms")
 }
 
 /// `phitex watch`, headless: a word edited in the file on disk is built as
@@ -504,6 +510,7 @@ fn watch_word_edit() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--json",
             "--no-view",
             "--ini",
             "--etex",
@@ -519,7 +526,7 @@ fn watch_word_edit() {
     let stdout = child.stdout.take().expect("its output");
     let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
     let mut seen = Vec::new();
-    let cold = until(&mut lines, "phitex: build 1 ", &mut seen);
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
     eprintln!("{cold}");
     // (a word of the body, as long as the one it replaces)
     let at = text.rfind("\\message{[part 2 story]}").expect("part 2");
@@ -527,7 +534,7 @@ fn watch_word_edit() {
     let edited = format!("{} thy {}", &text[..word], &text[word + 5..]);
     std::thread::sleep(Duration::from_millis(50));
     std::fs::write(dir.join("big.tex"), &edited).expect("the edit");
-    let line = until(&mut lines, "phitex: build 2 ", &mut seen);
+    let line = until(&mut lines, "build", &2.into(), &mut seen);
     eprintln!("{line}");
     let ms = update_ms(&line);
     let watched = std::fs::read(dir.join("big.pdf")).expect("the watch's PDF");
@@ -677,7 +684,7 @@ fn watch_editor_buffer() {
     let dir = scratch("watch-editor");
     std::fs::write(dir.join("story.tex"), &text).expect("the document");
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["watch", "--ini", "--etex", "-j", "8", "story.tex"])
+        .args(["watch", "--json", "--ini", "--etex", "-j", "8", "story.tex"])
         .env("XDG_RUNTIME_DIR", &dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -687,10 +694,11 @@ fn watch_editor_buffer() {
     let stdout = child.stdout.take().expect("its output");
     let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
     let mut seen = Vec::new();
-    let url = until(&mut lines, "phitex: the viewer is at ", &mut seen)
-        ["phitex: the viewer is at ".len()..]
+    let url = until(&mut lines, "event", &"viewer".into(), &mut seen)["url"]
+        .as_str()
+        .expect("the viewer's url")
         .to_owned();
-    until(&mut lines, "phitex: build 1 ", &mut seen);
+    until(&mut lines, "build", &1.into(), &mut seen);
     let at = body.find(" the ").expect("a word") + "\\pdfoutput=1\n".len() + plain().len();
     let edited = format!("{} thy {}", &text[..at], &text[at + 5..]);
     let req = format!(
@@ -698,10 +706,10 @@ fn watch_editor_buffer() {
         json_string(&edited)
     );
     let _socket = ws_send(&url, &req);
-    let line = until(&mut lines, "phitex: build 2 ", &mut seen);
+    let line = until(&mut lines, "build", &2.into(), &mut seen);
     eprintln!("{line}");
     assert!(
-        line.contains("(editor)"),
+        line["why"].as_str().is_some_and(|w| w.contains("(editor)")),
         "the second build is not the editor's: {line}"
     );
     let watched = std::fs::read(dir.join("story.pdf")).expect("the watch's PDF");
@@ -970,6 +978,81 @@ fn exit_statuses() {
     assert_eq!(status(&["x.tex"]), Some(2));
     std::fs::write(dir.join("bad.tex"), "\\undefinedcs\n\\bye\n").expect("the document");
     assert_eq!(status(&["build", "--engine", "tex", "bad.tex"]), Some(1));
+}
+
+/// `phitex watch --json` on a plain document (`tex`): a word edited on
+/// disk is build 2, an edit of the line it is on, fewer nodes run than
+/// cold, and its DVI file is a cold build's of the edited text; an edit
+/// that makes an error is build 3, not ok, the last good DVI file kept.
+#[test]
+fn watch_plain_edit() {
+    let _one = one();
+    let text = std::fs::read_to_string(fixtures().join("plain/story.tex")).expect("story.tex");
+    let dir = scratch("watch-plain");
+    std::fs::write(dir.join("story.tex"), &text).expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--json",
+            "--no-view",
+            "--engine",
+            "tex",
+            "story.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let at = text.find(" the ").expect("a word");
+    let line = text[..at].matches('\n').count() + 1;
+    let edited = format!("{} thy {}", &text[..at], &text[at + 5..]);
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(dir.join("story.tex"), &edited).expect("the edit");
+    let ev = until(&mut lines, "build", &2.into(), &mut seen);
+    assert_eq!(ev["ok"], true, "{ev}");
+    assert_eq!(ev["edit"], format!("story.tex:{line}"), "{ev}");
+    assert!(
+        ev["nodes_run"].as_u64() < cold["nodes_run"].as_u64(),
+        "the edit ran no fewer nodes than cold: {ev} {cold}"
+    );
+    let watched = std::fs::read(dir.join("story.dvi")).expect("the watch's DVI");
+    let broken = edited.replacen(" thy ", " \\undefinedcs ", 1);
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(dir.join("story.tex"), &broken).expect("the broken edit");
+    let ev = until(&mut lines, "build", &3.into(), &mut seen);
+    assert_eq!(ev["ok"], false, "{ev}");
+    assert_eq!(
+        std::fs::read(dir.join("story.dvi")).expect("the DVI"),
+        watched,
+        "the last good DVI file was not kept"
+    );
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    let cold_dir = scratch("watch-plain-cold");
+    std::fs::write(cold_dir.join("story.tex"), &edited).expect("the edited document");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &cold_dir)
+        .args(["build", "--no-synctex", "--engine", "tex", "story.tex"])
+        .output()
+        .expect("phitex build runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cold_dvi = std::fs::read(cold_dir.join("story.dvi")).expect("the cold DVI");
+    assert!(
+        masked(&watched) == masked(&cold_dvi),
+        "the watch's DVI after the edit is not the cold build's: {}",
+        first_difference(&watched, &cold_dvi)
+    );
 }
 
 /// XeLaTeX and LuaLaTeX are not supported, by any name, and nothing

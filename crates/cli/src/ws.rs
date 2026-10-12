@@ -5,6 +5,7 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::time::Duration;
 
 use tungstenite::WebSocket;
 use tungstenite::protocol::Role;
@@ -95,12 +96,13 @@ pub fn respond(w: &mut impl Write, status: &str, ctype: &str, body: &[u8]) -> io
     w.flush()
 }
 
-/// The upgrade answered (RFC 6455 §4.2.2); the socket as a WebSocket, a
-/// second handle on it for sending from other threads.
-pub fn upgrade(
-    mut conn: TcpStream,
-    req: &Request,
-) -> io::Result<(WebSocket<TcpStream>, WebSocket<TcpStream>)> {
+/// How long a read waits before the socket is let go for a send.
+pub const POLL: Duration = Duration::from_millis(20);
+
+/// The upgrade answered (RFC 6455 §4.2.2); the socket as one WebSocket,
+/// its reads waiting at most [`POLL`]: its reader and its senders share
+/// it under one lock, so a pong never lands inside a frame being sent.
+pub fn upgrade(mut conn: TcpStream, req: &Request) -> io::Result<WebSocket<TcpStream>> {
     let key = req.header("sec-websocket-key").unwrap_or("");
     write!(
         conn,
@@ -109,11 +111,15 @@ pub fn upgrade(
         tungstenite::handshake::derive_accept_key(key.trim().as_bytes())
     )?;
     conn.flush()?;
-    let out = conn.try_clone()?;
-    Ok((
-        WebSocket::from_raw_socket(conn, Role::Server, None),
-        WebSocket::from_raw_socket(out, Role::Server, None),
-    ))
+    conn.set_read_timeout(Some(POLL))?;
+    Ok(WebSocket::from_raw_socket(conn, Role::Server, None))
+}
+
+/// Whether a read error is only the wait running out.
+#[must_use]
+pub fn timed_out(e: &tungstenite::Error) -> bool {
+    matches!(e, tungstenite::Error::Io(e)
+        if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut))
 }
 
 #[cfg(test)]

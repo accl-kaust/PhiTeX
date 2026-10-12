@@ -152,18 +152,6 @@ impl Ui {
         let _ = writeln!(e, "{s}");
     }
 
-    /// A line on standard output (the spinner's line cleared first).
-    pub fn stdout(&self, s: &str) {
-        if self.json {
-            return;
-        }
-        let spin = self.spinning.lock().unwrap_or_else(PoisonError::into_inner);
-        if spin.is_some() {
-            let _ = write!(std::io::stderr(), "\r\x1b[2K");
-        }
-        println!("{s}");
-    }
-
     /// `--json`: one event, a line on standard output.
     pub fn event(&self, v: &Value) {
         if self.json {

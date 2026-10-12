@@ -88,8 +88,8 @@ pub struct Output {
     /// The DVI (TeX, e-TeX), else empty.
     pub dvi: Vec<u8>,
     pub pages: usize,
-    /// The pages shipped as the last build shipped them.
-    pub pages_reused: usize,
+    /// The pages (from 1) that differ from the last build's.
+    pub pages_changed: Vec<usize>,
     pub errors: Vec<String>,
     /// The terminal's and the log's text.
     pub log: String,
@@ -100,6 +100,9 @@ pub struct Output {
 /// What a build made.
 pub struct Report {
     pub out: Output,
+    /// The first line (from 1) of the main text that differs from the
+    /// last build's (none: cold, or the main text unchanged).
+    pub edit_line: Option<usize>,
     pub runs: Vec<RunInfo>,
     /// The written files still changing when the Build stopped.
     pub unsettled: Vec<String>,
@@ -160,6 +163,10 @@ pub struct Session {
     text: String,
     /// The document's state: none before the first build.
     build: Option<Build>,
+    /// The main text the last build built.
+    built_text: Option<String>,
+    /// The last build's pages' hashes.
+    page_hashes: Vec<u64>,
     /// kpathsea as the job's program: the build's finder.
     tree: Arc<tex::Tree>,
     builds: usize,
@@ -197,6 +204,8 @@ impl Session {
             job,
             text: tex::chars(&text),
             build: None,
+            built_text: None,
+            page_hashes: Vec::new(),
             tree,
             builds: 0,
             written: Mutex::new(BTreeMap::new()),
@@ -242,11 +251,16 @@ impl Session {
                 why: why.to_owned(),
                 ..RunInfo::default()
             }],
+            edit_line: None,
             unsettled: Vec::new(),
             notes: Vec::new(),
             wall: t0.elapsed(),
         };
         let text = self.text_now();
+        let edit_line = self
+            .built_text
+            .as_deref()
+            .and_then(|old| first_difference_line(old, &text));
         if let Some(b) = &mut self.build {
             b.edit(&text);
         } else {
@@ -271,21 +285,34 @@ impl Session {
             .map(str::to_owned)
             .collect();
         let pages = dvi_pages(&dvi);
+        let hashes: Vec<u64> = dvi_page_bytes(&dvi)
+            .iter()
+            .map(|p| tex::Fnv::new().add(p).0)
+            .collect();
+        let pages_changed: Vec<usize> = (0..hashes.len())
+            .filter(|&k| self.page_hashes.get(k) != Some(&hashes[k]))
+            .map(|k| k + 1)
+            .collect();
+        let pages_reused = hashes.len() - pages_changed.len();
+        self.page_hashes = hashes;
+        self.built_text = Some(text);
         let wall = t0.elapsed();
         Report {
             out: Output {
                 dvi,
                 pages,
+                pages_changed,
                 errors,
                 log,
                 ..Output::default()
             },
+            edit_line,
             runs: vec![RunInfo {
                 wall,
                 why: why.to_owned(),
                 commands_run: s.nodes_run,
                 pages,
-                pages_reused: 0,
+                pages_reused,
             }],
             unsettled: Vec::new(),
             notes: vec![format!(
@@ -349,9 +376,9 @@ impl Session {
         })
     }
 
-    /// Writes what the build made: `JOB.pdf` or `JOB.dvi`, the files
-    /// TeX wrote, `JOB.log`, `JOB.fls` (`-recorder`).
-    pub fn write(&self, r: &Report) -> Result<Written, String> {
+    /// Writes what the build made: `JOB.pdf` or `JOB.dvi` (with `main_too`),
+    /// the files TeX wrote, `JOB.log`, `JOB.fls` (`-recorder`).
+    pub fn write(&self, r: &Report, main_too: bool) -> Result<Written, String> {
         let dir = &self.job.out_dir;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let mut files = Vec::new();
@@ -374,7 +401,7 @@ impl Session {
         let ext = r
             .main_output()
             .map_or(self.job.engine.output.ext(), |(e, _)| e);
-        if let Some((e, b)) = r.main_output() {
+        if let Some((e, b)) = r.main_output().filter(|_| main_too) {
             main = Some(put(&format!("{}.{e}", self.job.jobname), b)?);
         }
         for (n, t) in &r.out.writes {
@@ -464,6 +491,57 @@ fn dvi_comment(epoch: i64) -> String {
     )
 }
 
+/// The first line (from 1) where `b` differs from `a` (none: equal).
+#[allow(clippy::naive_bytecount, reason = "once a build, on one text")]
+fn first_difference_line(a: &str, b: &str) -> Option<usize> {
+    let at = a.bytes().zip(b.bytes()).position(|(x, y)| x != y);
+    let at = match at {
+        Some(i) => i,
+        None if a.len() == b.len() => return None,
+        None => a.len().min(b.len()),
+    };
+    Some(
+        b.as_bytes()[..at.min(b.len())]
+            .iter()
+            .filter(|&&c| c == b'\n')
+            .count()
+            + 1,
+    )
+}
+
+/// A DVI file's pages' bytes, first first: each from its `bop` to the
+/// next `bop` or the postamble (§583, the back pointers from the
+/// postamble's last page, §590).
+fn dvi_page_bytes(dvi: &[u8]) -> Vec<&[u8]> {
+    let word = |i: usize| {
+        dvi.get(i..i + 4)
+            .map(|b| i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let mut k = dvi.len();
+    while k > 0 && dvi[k - 1] == 223 {
+        k -= 1;
+    }
+    let Some(q) = k
+        .checked_sub(5)
+        .and_then(word)
+        .and_then(|q| usize::try_from(q).ok())
+    else {
+        return Vec::new();
+    };
+    let mut starts = Vec::new();
+    let mut p = word(q + 1).unwrap_or(-1);
+    while let Ok(b) = usize::try_from(p) {
+        if b >= q || starts.len() > dvi.len() / 45 {
+            return Vec::new();
+        }
+        starts.push(b);
+        p = word(b + 41).unwrap_or(-1);
+    }
+    starts.reverse();
+    let ends = starts.iter().skip(1).copied().chain(std::iter::once(q));
+    starts.iter().zip(ends).map(|(&a, e)| &dvi[a..e]).collect()
+}
+
 /// The pages of a DVI file: the postamble's total (§642), found from the
 /// end (§643: `post_post`, `q`, id, then the 223s).
 fn dvi_pages(dvi: &[u8]) -> usize {
@@ -482,6 +560,14 @@ fn dvi_pages(dvi: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_lines() {
+        assert_eq!(first_difference_line("a\nb\nc", "a\nb\nc"), None);
+        assert_eq!(first_difference_line("a\nb\nc", "a\nx\nc"), Some(2));
+        assert_eq!(first_difference_line("a\n", "a\nb\n"), Some(2));
+        assert_eq!(first_difference_line("x", "y"), Some(1));
+    }
 
     #[test]
     fn comment() {
