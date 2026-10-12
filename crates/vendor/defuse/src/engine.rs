@@ -482,6 +482,31 @@ pub enum EvalError {
     },
 }
 
+/// A node as the client sees it ([`Engine::node_info`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeInfo {
+    /// Its operation's name.
+    pub op: &'static str,
+    pub args: Vec<ValueId>,
+    pub unit: UnitId,
+    /// The node whose run unfolded it, if any.
+    pub parent: Option<NodeId>,
+    pub state: NodeState,
+}
+
+/// A node's state, coarsely.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum NodeState {
+    /// To run (or being run) in the current or next evaluation.
+    Dirty,
+    /// Waiting for something.
+    Parked,
+    /// Ran, and nothing it read has changed since.
+    Done,
+    /// Taken by a claim: not run.
+    Inert,
+}
+
 /// Why a node had to run again (for [`EvalError::RunawayNode`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cause {
@@ -1677,6 +1702,32 @@ impl Engine {
     }
 
     // ----------------------------------------------------------- public reads
+
+    /// What a node is, for naming it in messages: its operation, its
+    /// arguments, its unit, its parent (the node whose run made it) and
+    /// its state. `None` for a node that is gone.
+    #[must_use]
+    pub fn node_info(&self, node: NodeId) -> Option<NodeInfo> {
+        let &s = self.ids.get(&node)?;
+        if !self.live(s) {
+            return None;
+        }
+        let n = self.n(s);
+        let state = match n.state {
+            State::Dirty | State::Spec => NodeState::Dirty,
+            State::Parked => NodeState::Parked,
+            State::Done => NodeState::Done,
+            State::Inert => NodeState::Inert,
+            State::Free => return None,
+        };
+        Some(NodeInfo {
+            op: self.op(n.op).name(),
+            args: self.args_vec(n.args),
+            unit: UnitId(n.unit),
+            parent: (n.parent != NIL && self.live(n.parent)).then(|| self.n(n.parent).id),
+            state,
+        })
+    }
 
     /// The output of `node` from its last completed run.
     #[must_use]
