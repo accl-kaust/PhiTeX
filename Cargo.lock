@@ -1554,6 +1554,8 @@ name = "phitex-tex"
 version = "0.0.0"
 dependencies = [
  "phitex-defuse",
+ "phitex-dvi",
+ "phitex-kpse",
  "phitex-source",
  "phitex-tfm",
  "phitex-typeset",

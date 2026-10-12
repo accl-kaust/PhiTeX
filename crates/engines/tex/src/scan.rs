@@ -1,0 +1,877 @@
+//! Scanning (§402–§463, §473–§479, §577–§578): numbers, dimensions,
+//! glue, keywords, token lists and internal quantities, inside one run.
+
+use std::rc::Rc;
+
+use phitex_typeset::arith::{nx_plus_y, round_decimals, xn_over_d};
+use phitex_typeset::glue::{Glue, Order};
+
+use crate::print;
+use crate::run::{R, Run};
+use crate::val::{
+    COUNT_BASE, DEL_CODE_BASE, LC_CODE_BASE, MATCH_CAT, MATH_CODE_BASE, MATH_FONT_BASE, MU_SKIP_BASE,
+    OUT_PARAM_CAT, SCALED_BASE, SF_CODE_BASE, SKIP_BASE, TOKS_BASE, Tok, UC_CODE_BASE, cmd, glue_of,
+    quantity_field, toks_of,
+};
+
+pub(crate) const MAX_DIMEN: i32 = 0o7777777777;
+const INFINITY: i32 = 0o17777777777;
+
+/// An internal quantity (`cur_val` with `cur_val_level`, §410).
+#[derive(Clone, Debug)]
+pub(crate) enum IVal {
+    Int(i32),
+    Dimen(i32),
+    Glue(Glue),
+    Mu(Glue),
+    Ident(i64),
+    Toks(Vec<Tok>),
+}
+
+impl IVal {
+    pub(crate) fn level(&self) -> u8 {
+        match self {
+            IVal::Int(_) => 0,
+            IVal::Dimen(_) => 1,
+            IVal::Glue(_) => 2,
+            IVal::Mu(_) => 3,
+            IVal::Ident(_) => 4,
+            IVal::Toks(_) => 5,
+        }
+    }
+
+    pub(crate) fn int(&self) -> i32 {
+        match self {
+            IVal::Int(x) | IVal::Dimen(x) => *x,
+            IVal::Glue(g) | IVal::Mu(g) => g.width,
+            IVal::Ident(f) => i32::try_from(*f).unwrap_or(0),
+            IVal::Toks(_) => 0,
+        }
+    }
+
+    /// What `\the` prints (§465).
+    pub(crate) fn print(&self, s: &mut String) {
+        match self {
+            IVal::Int(x) => print::print_int(s, i64::from(*x)),
+            IVal::Dimen(x) => {
+                print::print_scaled(s, *x);
+                s.push_str("pt");
+            }
+            IVal::Glue(g) => print::print_spec(s, g, "pt"),
+            IVal::Mu(g) => print::print_spec(s, g, "mu"),
+            IVal::Ident(_) | IVal::Toks(_) => {}
+        }
+    }
+}
+
+fn neg_glue(g: &Glue) -> Glue {
+    Glue {
+        width: -g.width,
+        stretch: -g.stretch,
+        shrink: -g.shrink,
+        ..*g
+    }
+}
+
+impl Run<'_, '_> {
+    /// §406: the next non-blank non-call token.
+    pub(crate) fn skip_blanks_x(&mut self) -> R<()> {
+        loop {
+            self.get_x_token()?;
+            if self.cur.cmd != cmd::SPACER {
+                return Ok(());
+            }
+        }
+    }
+
+    /// §404: the next non-blank non-relax non-call token.
+    pub(crate) fn skip_blanks_relax_x(&mut self) -> R<()> {
+        loop {
+            self.get_x_token()?;
+            if self.cur.cmd != cmd::SPACER && self.cur.cmd != cmd::RELAX {
+                return Ok(());
+            }
+        }
+    }
+
+    pub(crate) fn back_cur(&mut self) {
+        let t = self.cur.tok.clone();
+        self.back_input(t);
+    }
+
+    /// §441: the next non-blank non-sign token; whether it is negative.
+    fn skip_signs(&mut self) -> R<bool> {
+        let mut negative = false;
+        loop {
+            self.skip_blanks_x()?;
+            if self.is_other(b'-') {
+                negative = !negative;
+                continue;
+            }
+            if !self.is_other(b'+') {
+                return Ok(negative);
+            }
+        }
+    }
+
+    pub(crate) fn is_other(&self, c: u8) -> bool {
+        !self.cur.is_cs() && self.cur.tok == Tok::ch(12, u32::from(c))
+    }
+
+    /// `scan_keyword` (§407).
+    pub(crate) fn scan_keyword(&mut self, s: &str) -> R<bool> {
+        let mut matched: Vec<Tok> = Vec::new();
+        let bytes = s.as_bytes();
+        let mut k = 0;
+        while k < bytes.len() {
+            self.get_x_token()?;
+            let c = bytes[k];
+            if !self.cur.is_cs()
+                && (self.cur.chr == i32::from(c) || self.cur.chr == i32::from(c) - i32::from(b'a') + i32::from(b'A'))
+            {
+                matched.push(self.cur.tok.clone());
+                k += 1;
+            } else if self.cur.cmd != cmd::SPACER || !matched.is_empty() {
+                self.back_cur();
+                if !matched.is_empty() {
+                    self.push_toks(matched);
+                }
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// `scan_left_brace` (§403).
+    pub(crate) fn scan_left_brace(&mut self) -> R<()> {
+        self.skip_blanks_relax_x()?;
+        if self.cur.cmd != cmd::LEFT_BRACE {
+            // "Missing { inserted"
+            self.back_cur();
+            self.cur.tok = Tok::ch(1, u32::from(b'{'));
+            self.cur.cmd = cmd::LEFT_BRACE;
+            self.cur.chr = i32::from(b'{');
+        }
+        Ok(())
+    }
+
+    /// `scan_optional_equals` (§405).
+    pub(crate) fn scan_optional_equals(&mut self) -> R<()> {
+        self.skip_blanks_x()?;
+        if !self.is_other(b'=') {
+            self.back_cur();
+        }
+        Ok(())
+    }
+
+    /// `scan_int` (§440).
+    pub(crate) fn scan_int(&mut self) -> R<i32> {
+        self.radix = 0;
+        let mut ok_so_far = true;
+        let negative = self.skip_signs()?;
+        let mut val: i32;
+        if self.is_other(b'`') {
+            // §442
+            self.get_token()?;
+            let t = self.cur.tok.clone();
+            val = match &t {
+                Tok::S(n) => {
+                    let mut cs = n.chars();
+                    match (cs.next(), cs.next()) {
+                        (Some(c), None) if !n.starts_with('\u{10FFFE}') => i32::try_from(u32::from(c)).unwrap_or(256),
+                        _ => 256,
+                    }
+                }
+                Tok::C(_) => i32::try_from(t.chr()).unwrap_or(0),
+            };
+            if val > 255 {
+                // "Improper alphabetic constant"
+                val = i32::from(b'0');
+                self.back_cur();
+            } else {
+                // §443
+                self.get_x_token()?;
+                if self.cur.cmd != cmd::SPACER {
+                    self.back_cur();
+                }
+            }
+        } else if self.cur.cmd >= cmd::CHAR_GIVEN && self.cur.cmd <= cmd::MAX_INTERNAL {
+            val = self.scan_something_internal(0, false)?.int();
+        } else {
+            // §444
+            self.radix = 10;
+            let mut m = 214_748_364;
+            if self.is_other(b'\'') {
+                self.radix = 8;
+                m = 0o2000000000;
+                self.get_x_token()?;
+            } else if self.is_other(b'"') {
+                self.radix = 16;
+                m = 0o1000000000;
+                self.get_x_token()?;
+            }
+            let mut vacuous = true;
+            val = 0;
+            loop {
+                let d: i32;
+                let (cat, c) = (self.cur.tok.cat(), self.cur.tok.chr());
+                let cs = self.cur.is_cs();
+                if !cs && cat == Some(12) && (48..=57).contains(&c) && i32::try_from(c - 48).unwrap_or(99) < self.radix {
+                    d = i32::try_from(c - 48).unwrap_or(0);
+                } else if self.radix == 16 && !cs && (cat == Some(11) || cat == Some(12)) && (65..=70).contains(&c) {
+                    d = i32::try_from(c - 55).unwrap_or(0);
+                } else {
+                    break;
+                }
+                vacuous = false;
+                if val >= m && (val > m || d > 7 || self.radix != 10) {
+                    if ok_so_far {
+                        // "Number too big"
+                        ok_so_far = false;
+                    }
+                    val = INFINITY;
+                } else {
+                    val = val * self.radix + d;
+                }
+                self.get_x_token()?;
+            }
+            if vacuous {
+                // "Missing number, treated as zero"
+                self.back_cur();
+            } else if self.cur.cmd != cmd::SPACER {
+                self.back_cur();
+            }
+        }
+        Ok(if negative { -val } else { val })
+    }
+
+    pub(crate) fn scan_normal_dimen(&mut self) -> R<i32> {
+        self.scan_dimen(false, false, None)
+    }
+
+    /// `scan_dimen` (§448–§460); `shortcut` is an integer already scanned.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn scan_dimen(&mut self, mu: bool, inf: bool, shortcut: Option<i32>) -> R<i32> {
+        let mut f: i32 = 0;
+        let mut arith_error = false;
+        self.cur_order = Order::Normal;
+        let mut negative = false;
+        let mut val: i32;
+        if let Some(v) = shortcut {
+            val = v;
+        } else {
+            negative = self.skip_signs()?;
+            if self.cur.cmd >= cmd::CHAR_GIVEN && self.cur.cmd <= cmd::MAX_INTERNAL {
+                // §449
+                if mu {
+                    let x = self.scan_something_internal(3, false)?;
+                    let x = coerce_glue(x);
+                    if let IVal::Mu(g) = x {
+                        return self.attach_sign(g.width, negative, arith_error);
+                    }
+                    val = x.int();
+                    if matches!(x, IVal::Mu(_)) {
+                        return self.attach_sign(val, negative, arith_error);
+                    }
+                } else {
+                    let x = self.scan_something_internal(1, false)?;
+                    if let IVal::Dimen(d) = x {
+                        return self.attach_sign(d, negative, arith_error);
+                    }
+                    val = x.int();
+                }
+            } else {
+                self.back_cur();
+                if self.is_other(b',') {
+                    self.cur.tok = Tok::ch(12, u32::from(b'.'));
+                }
+                if self.is_other(b'.') {
+                    self.radix = 10;
+                    val = 0;
+                } else {
+                    val = self.scan_int()?;
+                }
+                if self.is_other(b',') {
+                    self.cur.tok = Tok::ch(12, u32::from(b'.'));
+                }
+                if self.radix == 10 && self.is_other(b'.') {
+                    // §452
+                    let mut digits: Vec<u8> = Vec::new();
+                    self.get_token()?;
+                    loop {
+                        self.get_x_token()?;
+                        let c = self.cur.tok.chr();
+                        if self.cur.is_cs() || self.cur.tok.cat() != Some(12) || !(48..=57).contains(&c) {
+                            break;
+                        }
+                        if digits.len() < 17 {
+                            digits.push(u8::try_from(c - 48).unwrap_or(0));
+                        }
+                    }
+                    f = round_decimals(&digits);
+                    if self.cur.cmd != cmd::SPACER {
+                        self.back_cur();
+                    }
+                }
+            }
+        }
+        if val < 0 {
+            negative = !negative;
+            val = -val;
+        }
+        // §453
+        if inf && self.scan_keyword("fil")? {
+            // §454
+            self.cur_order = Order::Fil;
+            while self.scan_keyword("l")? {
+                self.cur_order = match self.cur_order {
+                    Order::Fil => Order::Fill,
+                    _ => Order::Filll,
+                };
+            }
+            return self.attach_fraction(val, f, negative);
+        }
+        // §455
+        let save_val = val;
+        self.skip_blanks_x()?;
+        let v: Option<i32> = if self.cur.cmd < cmd::CHAR_GIVEN || self.cur.cmd > cmd::MAX_INTERNAL {
+            self.back_cur();
+            if mu {
+                None
+            } else if self.scan_keyword("em")? {
+                let q = self.font_param_cur(6)?;
+                self.optional_space()?;
+                Some(q)
+            } else if self.scan_keyword("ex")? {
+                let q = self.font_param_cur(5)?;
+                self.optional_space()?;
+                Some(q)
+            } else {
+                None
+            }
+        } else if mu {
+            let x = coerce_glue(self.scan_something_internal(3, false)?);
+            Some(x.int())
+        } else {
+            Some(self.scan_something_internal(1, false)?.int())
+        };
+        if let Some(v) = v {
+            let r = nx_plus_y(save_val, v, xn_over_d(v, f, 0o200000).value);
+            let (r, err) = match r {
+                Some(r) => (r, false),
+                None => (0, true),
+            };
+            return self.attach_sign(r, negative, arith_error || err);
+        }
+        if mu {
+            // §456
+            let _ = self.scan_keyword("mu")?;
+            return self.attach_fraction(val, f, negative);
+        }
+        if self.scan_keyword("true")? {
+            // §457
+            let mag = self.param("mag")?;
+            if mag != 1000 && mag > 0 {
+                let d = xn_over_d(val, 1000, mag);
+                val = d.value;
+                f = i32::try_from((1000 * i64::from(f) + 0o200000 * i64::from(d.remainder)) / i64::from(mag))
+                    .unwrap_or(0);
+                val += f / 0o200000;
+                f %= 0o200000;
+            }
+        }
+        if self.scan_keyword("pt")? {
+            return self.attach_fraction(val, f, negative);
+        }
+        // §458
+        let conv = if self.scan_keyword("in")? {
+            Some((7227, 100))
+        } else if self.scan_keyword("pc")? {
+            Some((12, 1))
+        } else if self.scan_keyword("cm")? {
+            Some((7227, 254))
+        } else if self.scan_keyword("mm")? {
+            Some((7227, 2540))
+        } else if self.scan_keyword("bp")? {
+            Some((7227, 7200))
+        } else if self.scan_keyword("dd")? {
+            Some((1238, 1157))
+        } else if self.scan_keyword("cc")? {
+            Some((14856, 1157))
+        } else if self.scan_keyword("sp")? {
+            // goto done
+            self.optional_space()?;
+            return self.attach_sign(val, negative, arith_error);
+        } else {
+            // "Illegal unit of measure (pt inserted)"
+            None
+        };
+        if let Some((num, denom)) = conv {
+            let d = xn_over_d(val, num, denom);
+            val = d.value;
+            f = i32::try_from((i64::from(num) * i64::from(f) + 0o200000 * i64::from(d.remainder)) / i64::from(denom))
+                .unwrap_or(0);
+            val += f / 0o200000;
+            f %= 0o200000;
+        }
+        let _ = &mut arith_error;
+        self.attach_fraction(val, f, negative)
+    }
+
+    fn attach_fraction(&mut self, val: i32, f: i32, negative: bool) -> R<i32> {
+        let (v, err) = if val >= 0o40000 { (val, true) } else { (val * 65536 + f, false) };
+        self.optional_space()?;
+        self.attach_sign(v, negative, err)
+    }
+
+    fn attach_sign(&mut self, val: i32, negative: bool, arith_error: bool) -> R<i32> {
+        let mut v = val;
+        if arith_error || v.unsigned_abs() >= 0o10000000000 {
+            // "Dimension too large"
+            v = MAX_DIMEN;
+        }
+        Ok(if negative { -v } else { v })
+    }
+
+    /// §443.
+    pub(crate) fn optional_space(&mut self) -> R<()> {
+        self.get_x_token()?;
+        if self.cur.cmd != cmd::SPACER {
+            self.back_cur();
+        }
+        Ok(())
+    }
+
+    /// The `em` and `ex` of the current font (§558).
+    fn font_param_cur(&mut self, k: i32) -> R<i32> {
+        let f = self.int("font")?;
+        self.font_dimen(f, k)
+    }
+
+    pub(crate) fn font_dimen(&mut self, f: i64, k: i32) -> R<i32> {
+        self.int32(&format!("fd:{f}:{k}"))
+    }
+
+    /// `scan_glue` (§461–§462).
+    pub(crate) fn scan_glue(&mut self, level: u8) -> R<Glue> {
+        let mu = level == 3;
+        let negative = self.skip_signs()?;
+        let width;
+        if self.cur.cmd >= cmd::CHAR_GIVEN && self.cur.cmd <= cmd::MAX_INTERNAL {
+            let x = self.scan_something_internal(level, negative)?;
+            match x {
+                IVal::Glue(g) | IVal::Mu(g) => return Ok(g),
+                IVal::Int(n) => width = self.scan_dimen(mu, false, Some(n))?,
+                other => width = other.int(),
+            }
+        } else {
+            self.back_cur();
+            let w = self.scan_dimen(mu, false, None)?;
+            width = if negative { -w } else { w };
+        }
+        let mut g = Glue {
+            width,
+            ..Glue::ZERO
+        };
+        if self.scan_keyword("plus")? {
+            g.stretch = self.scan_dimen(mu, true, None)?;
+            g.stretch_order = self.cur_order;
+        }
+        if self.scan_keyword("minus")? {
+            g.shrink = self.scan_dimen(mu, true, None)?;
+            g.shrink_order = self.cur_order;
+        }
+        Ok(g)
+    }
+
+    pub(crate) fn scan_eight_bit_int(&mut self) -> R<i32> {
+        let n = self.scan_int()?;
+        Ok(if (0..=255).contains(&n) { n } else { 0 })
+    }
+
+    pub(crate) fn scan_char_num(&mut self) -> R<i32> {
+        self.scan_eight_bit_int()
+    }
+
+    pub(crate) fn scan_four_bit_int(&mut self) -> R<i32> {
+        let n = self.scan_int()?;
+        Ok(if (0..=15).contains(&n) { n } else { 0 })
+    }
+
+    pub(crate) fn scan_fifteen_bit_int(&mut self) -> R<i32> {
+        let n = self.scan_int()?;
+        Ok(if (0..=0o77777).contains(&n) { n } else { 0 })
+    }
+
+    pub(crate) fn scan_twenty_seven_bit_int(&mut self) -> R<i32> {
+        let n = self.scan_int()?;
+        Ok(if (0..=0o777777777).contains(&n) { n } else { 0 })
+    }
+
+    /// `scan_font_ident` (§577).
+    pub(crate) fn scan_font_ident(&mut self) -> R<i64> {
+        self.skip_blanks_x()?;
+        Ok(match self.cur.cmd {
+            cmd::DEF_FONT => self.int("font")?,
+            cmd::SET_FONT => i64::from(self.cur.chr),
+            cmd::DEF_FAMILY => {
+                let m = self.cur.chr;
+                let n = self.scan_four_bit_int()?;
+                self.fam_font(m - MATH_FONT_BASE, n)?
+            }
+            _ => {
+                // "Missing font identifier"
+                self.back_cur();
+                0
+            }
+        })
+    }
+
+    pub(crate) fn fam_font(&mut self, size: i32, n: i32) -> R<i64> {
+        self.int(&format!("fam:{size}:{n}"))
+    }
+
+    /// `find_font_dimen` (§578): the font and parameter number, `None`
+    /// where tex.web points at `fmem_ptr` (an error).
+    pub(crate) fn find_font_dimen(&mut self, writing: bool) -> R<Option<(i64, i32)>> {
+        let n = self.scan_int()?;
+        let f = self.scan_font_ident()?;
+        let _ = writing;
+        if n <= 0 {
+            return Ok(None);
+        }
+        let count = self.int32(&format!("fdn:{f}"))?;
+        if n > count {
+            let last = self.int("fontcount")?;
+            if f < last || f == 0 {
+                return Ok(None);
+            }
+            // §580: the parameters of the last font grow
+            let v = self.v.int(i64::from(n));
+            self.set(&format!("fdn:{f}"), v, true);
+        }
+        Ok(Some((f, n)))
+    }
+
+    /// `scan_something_internal` (§413–§430).
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn scan_something_internal(&mut self, level: u8, negative: bool) -> R<IVal> {
+        let m = self.cur.chr;
+        let c = self.cur.cmd;
+        let mut val = match c {
+            cmd::DEF_CODE => {
+                // §414
+                let n = self.scan_char_num()?;
+                let name = match m {
+                    crate::val::CAT_CODE_BASE => "cat",
+                    LC_CODE_BASE => "lc",
+                    UC_CODE_BASE => "uc",
+                    SF_CODE_BASE => "sf",
+                    MATH_CODE_BASE => "mc",
+                    DEL_CODE_BASE => "dc",
+                    _ => "cat",
+                };
+                IVal::Int(self.int32(&format!("{name}:{n}"))?)
+            }
+            cmd::TOKS_REGISTER | cmd::ASSIGN_TOKS | cmd::DEF_FAMILY | cmd::SET_FONT | cmd::DEF_FONT => {
+                // §415
+                if level != 5 {
+                    // "Missing number, treated as zero"
+                    self.back_cur();
+                    IVal::Dimen(0)
+                } else if c <= cmd::ASSIGN_TOKS {
+                    let loc = if c < cmd::ASSIGN_TOKS {
+                        TOKS_BASE + self.scan_eight_bit_int()?
+                    } else {
+                        m
+                    };
+                    let x = self.get(&quantity_field(cmd::ASSIGN_TOKS, loc))?;
+                    IVal::Toks(toks_of(self.v, x))
+                } else {
+                    self.back_cur();
+                    IVal::Ident(self.scan_font_ident()?)
+                }
+            }
+            cmd::ASSIGN_INT => IVal::Int(self.int32(&quantity_field(c, m))?),
+            cmd::ASSIGN_DIMEN => IVal::Dimen(self.int32(&quantity_field(c, m))?),
+            cmd::ASSIGN_GLUE => {
+                let x = self.get(&quantity_field(c, m))?;
+                IVal::Glue(glue_of(self.v, x))
+            }
+            cmd::ASSIGN_MU_GLUE => {
+                let x = self.get(&quantity_field(c, m))?;
+                IVal::Mu(glue_of(self.v, x))
+            }
+            cmd::SET_AUX => {
+                // §418
+                let md = self.mode()?;
+                if md.m.abs() != m {
+                    // "Improper \spacefactor"
+                    if level == 5 { IVal::Int(0) } else { IVal::Dimen(0) }
+                } else if m == 1 {
+                    IVal::Dimen(self.prev_depth(&md)?)
+                } else {
+                    IVal::Int(self.space_factor(&md)?)
+                }
+            }
+            cmd::SET_PREV_GRAF => {
+                // §422
+                let md = self.mode()?;
+                IVal::Int(self.int32(&format!("pg:{}", md.vlid))?)
+            }
+            cmd::SET_PAGE_INT => {
+                // §419
+                IVal::Int(if m == 0 {
+                    self.int32("deadcycles")?
+                } else {
+                    self.int32("inspen")?
+                })
+            }
+            cmd::SET_PAGE_DIMEN => {
+                // §421
+                // REDUCE-GAP: resumable fold: the page so far is not a
+                // binding while the document runs; the empty page's.
+                IVal::Dimen(if m == 0 { MAX_DIMEN } else { 0 })
+            }
+            cmd::SET_SHAPE => {
+                // §423
+                let x = self.get("parshape")?;
+                IVal::Int(x.map_or(0, |x| i32::try_from(crate::val::list_of(self.v, x).len() / 2).unwrap_or(0)))
+            }
+            cmd::SET_BOX_DIMEN => {
+                // §420
+                let n = self.scan_eight_bit_int()?;
+                let b = self.box_reg(n)?;
+                IVal::Dimen(b.map_or(0, |b| crate::nodes::box_dim(self.v, b, m)))
+            }
+            cmd::CHAR_GIVEN | cmd::MATH_GIVEN => IVal::Int(m),
+            cmd::ASSIGN_FONT_DIMEN => {
+                // §425
+                match self.find_font_dimen(false)? {
+                    Some((f, n)) => IVal::Dimen(self.font_dimen(f, n)?),
+                    None => IVal::Dimen(0),
+                }
+            }
+            cmd::ASSIGN_FONT_INT => {
+                // §426
+                let f = self.scan_font_ident()?;
+                IVal::Int(self.int32(&format!("{}:{f}", if m == 0 { "hc" } else { "sc" }))?)
+            }
+            cmd::REGISTER => {
+                // §427
+                let n = self.scan_eight_bit_int()?;
+                match m {
+                    0 => IVal::Int(self.int32(&format!("count:{n}"))?),
+                    1 => IVal::Dimen(self.int32(&format!("dimen:{n}"))?),
+                    2 => {
+                        let x = self.get(&format!("skip:{n}"))?;
+                        IVal::Glue(glue_of(self.v, x))
+                    }
+                    _ => {
+                        let x = self.get(&format!("muskip:{n}"))?;
+                        IVal::Mu(glue_of(self.v, x))
+                    }
+                }
+            }
+            cmd::LAST_ITEM => self.last_item(m)?,
+            _ => {
+                // §428: "You can't use x after \the"
+                self.back_cur();
+                if level == 5 { IVal::Int(0) } else { IVal::Dimen(0) }
+            }
+        };
+        // §429
+        while val.level() > level {
+            val = match val {
+                IVal::Glue(g) => IVal::Dimen(g.width),
+                IVal::Mu(g) => IVal::Glue(g),
+                IVal::Dimen(d) => IVal::Int(d),
+                IVal::Int(_) | IVal::Ident(_) | IVal::Toks(_) => IVal::Int(0),
+            };
+        }
+        // §430
+        if negative {
+            val = match val {
+                IVal::Int(x) => IVal::Int(-x),
+                IVal::Dimen(x) => IVal::Dimen(-x),
+                IVal::Glue(g) => IVal::Glue(neg_glue(&g)),
+                IVal::Mu(g) => IVal::Mu(neg_glue(&g)),
+                other => other,
+            };
+        }
+        Ok(val)
+    }
+
+    /// `scan_toks` (§473–§479): the parameter text (for a macro) and the
+    /// body.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn scan_toks(&mut self, macro_def: bool, xpand: bool) -> R<(Vec<Tok>, Vec<Tok>)> {
+        let mut params: Vec<Tok> = Vec::new();
+        let mut body: Vec<Tok> = Vec::new();
+        let mut hash_brace: Option<Tok> = None;
+        let mut t: u32 = 0; // parameters so far
+        if macro_def {
+            // §474
+            loop {
+                self.get_token()?;
+                let tok = self.cur.tok.clone();
+                if !tok.is_cs_or_active() && matches!(tok.cat(), Some(1 | 2)) {
+                    if tok.cat() == Some(2) {
+                        // §475 "Missing { inserted": `\def\a}` is `\def\a{}`
+                        return Ok((params, body));
+                    }
+                    break;
+                }
+                if self.cur.cmd == cmd::MAC_PARAM {
+                    // §476
+                    let s = Tok::ch(MATCH_CAT, tok.chr());
+                    self.get_token()?;
+                    let nt = self.cur.tok.clone();
+                    if !nt.is_cs_or_active() && nt.cat() == Some(1) {
+                        hash_brace = Some(nt.clone());
+                        let _ = s;
+                        params.push(nt);
+                        return self.scan_body(params, body, xpand, macro_def, t, hash_brace);
+                    }
+                    if t == 9 {
+                        // "You already have nine parameters"
+                        continue;
+                    }
+                    t += 1;
+                    if nt != Tok::ch(12, u32::from(b'0') + t) {
+                        // "Parameters must be numbered consecutively"
+                        self.back_input(nt);
+                    }
+                    params.push(s);
+                    continue;
+                }
+                params.push(tok);
+            }
+        } else {
+            self.scan_left_brace()?;
+        }
+        body.clear();
+        self.scan_body(params, body, xpand, macro_def, t, hash_brace)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn scan_body(
+        &mut self,
+        params: Vec<Tok>,
+        mut body: Vec<Tok>,
+        xpand: bool,
+        macro_def: bool,
+        t: u32,
+        hash_brace: Option<Tok>,
+    ) -> R<(Vec<Tok>, Vec<Tok>)> {
+        // §477
+        let mut unbalance = 1;
+        loop {
+            if xpand {
+                // §478
+                loop {
+                    self.get_next_or_end()?;
+                    if self.cur.cmd <= cmd::MAX_COMMAND {
+                        break;
+                    }
+                    if self.cur.cmd == cmd::THE {
+                        let q = self.the_toks()?;
+                        body.extend(q);
+                    } else if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
+                        break;
+                    } else {
+                        self.expand()?;
+                    }
+                }
+                self.x_token()?;
+            } else {
+                self.get_token()?;
+            }
+            let tok = self.cur.tok.clone();
+            if !tok.is_cs_or_active() && matches!(tok.cat(), Some(1 | 2)) {
+                if tok.cat() == Some(1) {
+                    unbalance += 1;
+                } else {
+                    unbalance -= 1;
+                    if unbalance == 0 {
+                        break;
+                    }
+                }
+            } else if self.cur.cmd == cmd::MAC_PARAM && macro_def {
+                // §479
+                let s = tok.clone();
+                if xpand {
+                    self.get_x_token()?;
+                } else {
+                    self.get_token()?;
+                }
+                if self.cur.cmd != cmd::MAC_PARAM {
+                    let nt = self.cur.tok.clone();
+                    let c = nt.chr();
+                    if nt.is_cs_or_active() || nt.cat() != Some(12) || c <= 48 || c > 48 + t {
+                        // "Illegal parameter number in definition"
+                        self.back_input(nt);
+                        body.push(s);
+                        continue;
+                    }
+                    body.push(Tok::ch(OUT_PARAM_CAT, c - 48));
+                    continue;
+                }
+                body.push(self.cur.tok.clone());
+                continue;
+            }
+            body.push(tok);
+        }
+        if let Some(h) = hash_brace {
+            body.push(h);
+        }
+        Ok((params, body))
+    }
+
+    /// `scan_rule_spec` (§463): width, height, depth (`RUNNING` where not
+    /// given).
+    pub(crate) fn scan_rule_spec(&mut self, vrule: bool) -> R<(i32, i32, i32)> {
+        let running = phitex_typeset::node::RUNNING;
+        let (mut w, mut h, mut d) = if vrule { (26214, running, running) } else { (running, 26214, 0) };
+        loop {
+            if self.scan_keyword("width")? {
+                w = self.scan_normal_dimen()?;
+            } else if self.scan_keyword("height")? {
+                h = self.scan_normal_dimen()?;
+            } else if self.scan_keyword("depth")? {
+                d = self.scan_normal_dimen()?;
+            } else {
+                return Ok((w, h, d));
+            }
+        }
+    }
+
+    /// A token list of characters (for `\csname`-like scanning).
+    pub(crate) fn chars_of(toks: &[Tok]) -> Rc<str> {
+        let mut s = String::new();
+        for t in toks {
+            print::push_code(&mut s, t.chr());
+        }
+        Rc::from(s)
+    }
+
+    pub(crate) fn count_reg(&mut self, n: i32) -> R<i32> {
+        self.int32(&format!("count:{n}"))
+    }
+
+    pub(crate) fn _unused_bases() -> (i32, i32, i32) {
+        (COUNT_BASE, SCALED_BASE, SKIP_BASE + MU_SKIP_BASE)
+    }
+}
+
+/// §451: glue coerced to its width (the level stays mu for mu glue).
+fn coerce_glue(x: IVal) -> IVal {
+    match x {
+        IVal::Glue(g) => IVal::Dimen(g.width),
+        IVal::Mu(g) => IVal::Mu(Glue {
+            width: g.width,
+            ..Glue::ZERO
+        }),
+        other => other,
+    }
+}
