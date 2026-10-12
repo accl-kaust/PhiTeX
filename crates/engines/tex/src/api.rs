@@ -362,9 +362,32 @@ pub struct Stats {
     /// Nodes that waited on a value not known yet, and stops.
     pub pending_waits: u64,
     pub stops: u64,
+    /// The executor's threads.
+    pub threads: usize,
+    /// The evaluate calls' wall time, summed (zero without a clock).
+    pub wall: std::time::Duration,
+    /// The node runs' time, summed over every job (zero without a
+    /// clock): parallelism is `busy / wall`.
+    pub busy: std::time::Duration,
+    /// The most jobs that ran at once.
+    pub peak_running: usize,
+    /// The longest chain of dependent waits among the live nodes after
+    /// the last evaluation (the engine's `critical_path`), in nodes.
+    pub critical_path: Option<usize>,
 }
 
 impl Stats {
+    /// The executor's counters of one evaluation begun at `c0`.
+    fn add_exec(&mut self, ex: &crate::exec::Threads, c0: Option<u64>, eng: &Engine) {
+        if let (Some(a), Some(b)) = (c0, crate::exec::clock().now()) {
+            self.wall += std::time::Duration::from_nanos(b.saturating_sub(a));
+        }
+        self.threads = ex.n;
+        self.busy += ex.busy();
+        self.peak_running = self.peak_running.max(ex.peak());
+        self.critical_path = usize::try_from(eng.critical_path()).ok();
+    }
+
     fn add(&mut self, r: &Report) {
         self.nodes_run += r.nodes_run;
         self.runs += r.runs;
@@ -530,14 +553,17 @@ impl Graph {
 
     /// Evaluates; when the graph asks for files, supplies them and
     /// evaluates again.
+    #[allow(clippy::too_many_lines)]
     fn settle(&mut self, unit: UnitId, finder: &Finder, stats: &mut Stats, fixpoint: bool) {
         let needs_f = self.eng.values().field("needs");
         loop {
             let t0 = std::time::Instant::now();
-            let r = match self.eng.evaluate(
-                &mut phitex_defuse::Greedy::default(),
-                &mut crate::exec::Threads(self.threads),
-            ) {
+            let mut ex = crate::exec::Threads::new(self.threads);
+            let c0 = crate::exec::clock().now();
+            let r = match self
+                .eng
+                .evaluate(&mut phitex_defuse::Greedy::default(), &mut ex)
+            {
                 Ok(r) => r,
                 Err(e) => panic!("{}", self.diagnose(&e)),
             };
@@ -545,6 +571,7 @@ impl Graph {
                 eprintln!("round: {:?}, {} nodes run", t0.elapsed(), r.nodes_run);
             }
             stats.add(&r);
+            stats.add_exec(&ex, c0, &self.eng);
             let opened = self.opened(unit);
             let mut asked = false;
             // a file supplied from the finder that the job turns out to
