@@ -97,6 +97,12 @@ impl RunInfo {
     /// How parallel the run was: `4 threads · 1.6× parallel (at most
     /// 2.1×)`, the engine's work over its wall time, and its nodes over
     /// its longest chain (none: one thread, or no clock).
+    /// The engine's work over its wall time (none: one thread, no clock).
+    pub fn speedup(&self) -> Option<f64> {
+        (self.threads >= 2 && !self.engine_wall.is_zero())
+            .then(|| self.busy.as_secs_f64() / self.engine_wall.as_secs_f64())
+    }
+
     #[allow(clippy::cast_precision_loss)]
     pub fn parallel(&self) -> Option<String> {
         if self.threads < 2 || self.engine_wall.is_zero() {
@@ -645,7 +651,7 @@ impl Session {
 pub fn waiting_notes(job: &Job) -> Vec<String> {
     let mut v = Vec::new();
     if job.synctex {
-        v.push("-synctex: the native engine writes no SyncTeX yet".to_owned());
+        v.push("no SyncTeX yet (-synctex)".to_owned());
     }
     if job.shell_escape {
         v.push("-shell-escape: the native engine runs no \\write18 yet".to_owned());
