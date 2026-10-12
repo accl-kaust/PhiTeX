@@ -11,7 +11,7 @@ use phitex_typeset::node::{BoxKind, BoxNode, GlueKind, GlueNode, Node, RUNNING};
 use crate::num::{ONE_BP, ONE_HUNDRED_BP, TEN_POW, divide_scaled, round_xn_over_d};
 use crate::{
     BILLION, ColorStackCmd, FontSource, FontState, FontType, LiteralMode, MAX_DIMEN, OBJ_TYPE_FONT,
-    OBJ_TYPE_OTHERS, OBJ_TYPE_PAGE, OBJ_TYPE_PAGES, PAGES_TREE_KIDS_MAX, PdfError, PdfWriter,
+    OBJ_TYPE_OTHERS, OBJ_TYPE_PAGE, OBJ_TYPE_PAGES, PAGES_TREE_KIDS_MAX, PdfError, PdfState,
     Whatsit, WhatsitSource, int, pdf_error, substr_of_str,
 };
 
@@ -83,7 +83,7 @@ fn round_tenth(s: i32) -> i32 {
     if s >= 0 { (s + 5) / 10 } else { (s - 5) / 10 }
 }
 
-impl PdfWriter {
+impl PdfState {
     // ---- fonts on the page (pdfTeX §692–§693) ----
 
     pub(crate) fn font(&self, f: FontId) -> &FontState {
@@ -93,6 +93,7 @@ impl PdfWriter {
     pub(crate) fn font_mut(&mut self, f: FontId) -> &mut FontState {
         self.fonts
             .get_mut(&f)
+            .map(std::sync::Arc::make_mut)
             .expect("a font is loaded before it is used")
     }
 
@@ -209,9 +210,11 @@ impl PdfWriter {
                     .or_else(|| src.encoding_file(f))
             }
         });
+        let file: Option<std::sync::Arc<[u8]>> = file.map(Into::into);
+        let enc: Option<std::sync::Arc<[u8]>> = enc.map(Into::into);
         self.fonts.insert(
             f,
-            FontState {
+            std::sync::Arc::new(FontState {
                 name,
                 metrics: src.metrics(f).clone(),
                 map,
@@ -227,7 +230,7 @@ impl PdfWriter {
                 kind: FontType::New,
                 vf: None,
                 expand: src.expansion(f),
-            },
+            }),
         );
     }
 
@@ -413,7 +416,7 @@ impl PdfWriter {
             let b = self
                 .fonts
                 .get(&self.pdf_f)
-                .map_or(0, FontState::auto_expand_ratio);
+                .map_or(0, |s| s.auto_expand_ratio());
             must_set_text_pos = v != 0 || s.abs() >= 0o100000 || a != self.tm_a || a != b;
         }
         if must_set_text_pos {

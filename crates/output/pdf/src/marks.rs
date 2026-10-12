@@ -9,7 +9,7 @@ use phitex_typeset::node::RUNNING;
 use crate::ship::Frame;
 use crate::{
     Action, DestKind, Ident, NAME_TREE_KIDS_MAX, OBJ_TYPE_DEST, OBJ_TYPE_OTHERS, OBJ_TYPE_OUTLINE,
-    OBJ_TYPE_PAGE, OBJ_TYPE_STRUCT_DEST, OBJ_TYPE_THREAD, PDF_MAX_LINK_LEVEL, PdfError, PdfWriter,
+    OBJ_TYPE_PAGE, OBJ_TYPE_STRUCT_DEST, OBJ_TYPE_THREAD, PDF_MAX_LINK_LEVEL, PdfError, PdfState,
     Rect, int, pdf_error,
 };
 
@@ -165,7 +165,7 @@ fn concat(to: &mut Option<Vec<u8>>, s: &[u8]) {
     to.get_or_insert_with(Vec::new).extend_from_slice(s);
 }
 
-impl PdfWriter {
+impl PdfState {
     // ---- on the page ----
 
     /// `set_rect_dimens` (w, h, d of the node; `RUNNING` when not given).
