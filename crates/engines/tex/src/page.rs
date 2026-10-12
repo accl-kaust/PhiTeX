@@ -133,6 +133,15 @@ impl Run<'_, '_> {
             xs.push(v.int(i64::from(self.param(p)?)));
         }
         xs.push(self.get("pdf:colorstacks")?.unwrap_or(ValueId::UNIT));
+        for p in ["pdfobjcompresslevel", "pdfgentounicode"] {
+            xs.push(v.int(i64::from(self.param(p)?)));
+        }
+        for p in ["pdfpageattr", "pdfpagesattr", "pdfpageresources"] {
+            let toks = toks_of(v, self.get(&format!("param:{p}"))?);
+            let mut s = String::new();
+            self.show_toks_into(&mut s, &toks)?;
+            xs.push(v.str(&s));
+        }
         Ok(v.list(xs))
     }
 
