@@ -322,4 +322,11 @@ pub(crate) const PRIMS: &[(&str, u8, i32)] = &[
     ("special", 59, 3),
     ("immediate", 59, 4),
     ("setlanguage", 59, 5),
+    ("abovedisplayshortskip", 75, 2887),
+    ("belowdisplayshortskip", 75, 2888),
+    ("displaywidowpenalty", 73, 5270),
+    ("doublehyphendemerits", 73, 5277),
+    ("finalhyphendemerits", 73, 5278),
+    ("delimitershortfall", 74, 5840),
+    ("nulldelimiterspace", 74, 5841),
 ];

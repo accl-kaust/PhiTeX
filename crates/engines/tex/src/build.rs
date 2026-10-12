@@ -1266,7 +1266,7 @@ impl Run<'_, '_> {
                         self.cur.chr
                     };
                     let next = self.main_loop(md, f, &view, u32::try_from(ch).unwrap_or(0), &mut sf, &mut out, &mut cancel_boundary)?;
-                    if !next {
+                    if next {
                         continue;
                     }
                 }
@@ -1358,7 +1358,7 @@ impl Run<'_, '_> {
 
     /// `main_loop` (§1034–§1040) from character `ch`: true when the
     /// token after the characters is in `cur` (`goto reswitch`), false
-    /// at `goto big_switch`.
+    /// at `goto big_switch` (or at the end of the node's text).
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn main_loop(
         &mut self,
@@ -1408,6 +1408,7 @@ impl Run<'_, '_> {
         let mut lft_hit = false;
         let mut rt_hit = false;
         let mut ins_disc = false;
+        let mut input_done = false;
         let lookup = |l: Option<u32>, r: Option<u32>| -> Option<phitex_tfm::LigKernStep> {
             let r = u8::try_from(r?).ok()?;
             let l = match l {
@@ -1495,7 +1496,7 @@ impl Run<'_, '_> {
                 L::Move => {
                     // §1036
                     let Some(top) = lig_stack.last().copied() else {
-                        return Ok(true);
+                        return Ok(!input_done);
                     };
                     cur_q = out.len();
                     cur_l = Some(top.ch);
@@ -1520,9 +1521,12 @@ impl Run<'_, '_> {
                     at = L::Lookahead;
                 }
                 L::Lookahead => {
-                    // §1038
+                    // §1038; at the end of the node's text the next token
+                    // is not a character (characters are one node)
                     let mut got: Option<u32> = None;
-                    if self.get_next()? {
+                    if !self.has_input() {
+                        input_done = true;
+                    } else if self.get_next()? {
                         if !matches!(self.cur.cmd, cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN) {
                             self.x_token()?;
                         }

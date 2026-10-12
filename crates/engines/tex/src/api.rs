@@ -244,6 +244,9 @@ impl Graph {
         for (s, e) in slices(text) {
             let piece = &text[s..e];
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
+            if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+                eprintln!("node {piece:?}");
+            }
             let args = slice_args(self.eng.values(), piece, starts);
             let n = self.eng.push(unit, self.ops.exec, args);
             out.push((key(piece, starts), n));
