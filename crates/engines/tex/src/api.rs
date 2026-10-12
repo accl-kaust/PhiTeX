@@ -317,6 +317,32 @@ impl Graph {
             sets.push((f, m1));
             continue;
         }
+        // how many lines: from the supplier's text, to where the braces
+        // opened before it close (a construct's lines in one round)
+        let inc = chain.last().map_or(1, |&sup| {
+            let Some(i) = top.iter().position(|&t| t == sup) else { return 1 };
+            let have = self.eng.claimed(sup).len().max(usize::try_from(self.hints.get(&sup.raw()).copied().unwrap_or(0)).unwrap_or(0));
+            let mut depth = 1i64;
+            let mut k = 0i64;
+            for t in top.iter().skip(i + 1 + have) {
+                k += 1;
+                let text = self.args.get(&t.raw()).map(|a| line_text(self.eng.values(), a)).unwrap_or_default();
+                let mut prev = ' ';
+                for c in text.chars() {
+                    match c {
+                        '%' if prev != '\\' => break,
+                        '{' if prev != '\\' => depth += 1,
+                        '}' if prev != '\\' => depth -= 1,
+                        _ => {}
+                    }
+                    prev = if prev == '\\' && c == '\\' { ' ' } else { c };
+                }
+                if depth <= 0 {
+                    break;
+                }
+            }
+            k.max(1)
+        });
         for n in chain {
             if !given.insert(n.raw()) {
                 continue;
@@ -328,7 +354,7 @@ impl Graph {
             // only now appeared runs again
             let prev = self.hints.get(&n.raw()).copied().unwrap_or(0);
             // doubling: a construct over many lines takes few rounds
-            let k = prev.max(i64::try_from(claimed).unwrap_or(0)) + prev.max(1);
+            let k = prev.max(i64::try_from(claimed).unwrap_or(0)) + inc;
             self.hints.insert(n.raw(), k);
             let h = v.list(vec![v.int(k), v.int(nonce)]);
             sets.push((f, h));
@@ -583,4 +609,13 @@ impl Build {
     pub fn hints(&self) -> usize {
         self.hints_set.len()
     }
+}
+
+/// The text of a client line node.
+fn line_text(v: &Values, args: &[ValueId]) -> String {
+    let Some(&fs) = args.first() else { return String::new() };
+    list_of(v, fs)
+        .first()
+        .and_then(|&f| list_of(v, f).get(1).map(|&t| str_of(v, t)))
+        .unwrap_or_default()
 }
