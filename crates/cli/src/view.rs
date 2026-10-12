@@ -330,8 +330,8 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
             };
         }
         "ws" if req.is_upgrade() => {
-            if let Ok((rd, out)) = ws::upgrade(r.into_inner(), &req) {
-                socket(s, rd, out);
+            if let Ok(sock) = ws::upgrade(r.into_inner(), &req) {
+                socket(s, sock);
             }
         }
         f if f.starts_with("fonts/") => {
@@ -365,17 +365,25 @@ fn text_font(s: &Shared, name: &str) -> Option<Arc<[u8]>> {
     f
 }
 
-/// A WebSocket's requests, answered in order until it closes (pings are
-/// answered by `tungstenite`).
-fn socket(s: &Arc<Shared>, mut rd: WebSocket<TcpStream>, out: WebSocket<TcpStream>) {
+/// A WebSocket's requests, answered in order until it closes. Its reads
+/// and the broadcasts take turns on the one lock (pings are answered by
+/// `tungstenite` inside the reads).
+fn socket(s: &Arc<Shared>, sock: WebSocket<TcpStream>) {
     let client = Arc::new(Client {
-        out: Mutex::new(out),
+        out: Mutex::new(sock),
     });
     lock(&s.clients).push(client.clone());
     loop {
-        let text = match rd.read() {
+        let msg = lock(&client.out).read();
+        let text = match msg {
             Ok(Message::Text(t)) => t,
-            Ok(Message::Close(_)) | Err(_) => break,
+            Ok(Message::Close(_)) => break,
+            Err(e) if ws::timed_out(&e) => {
+                // (the lock let go a moment: a waiting broadcast goes first)
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            Err(_) => break,
             Ok(_) => continue,
         };
         let Ok(req) = serde_json::from_str::<Value>(text.as_str()) else {
@@ -581,6 +589,28 @@ fn to_source(
 /// `{files, g}`): none, no engine records origins yet.
 fn origins(_s: &Shared, _k: usize) -> Value {
     json!({"files": [], "g": []})
+}
+
+/// Start viewer program `cmd` (its words; `{file}` where the file goes,
+/// else the file last) on `file`, not waited for.
+pub fn open_with(cmd: &str, file: &std::path::Path) -> std::io::Result<()> {
+    let f = file.display().to_string();
+    let mut words: Vec<String> = cmd.split_whitespace().map(str::to_owned).collect();
+    if words.is_empty() {
+        return Err(std::io::Error::other("an empty command"));
+    }
+    if !words.iter().any(|w| w.contains("{file}")) {
+        words.push("{file}".to_owned());
+    }
+    let words: Vec<String> = words.iter().map(|w| w.replace("{file}", &f)).collect();
+    let mut c = std::process::Command::new(&words[0])
+        .args(&words[1..])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    std::thread::spawn(move || c.wait());
+    Ok(())
 }
 
 /// Show `url` in the user's browser (`BROWSER`, else the desktop's

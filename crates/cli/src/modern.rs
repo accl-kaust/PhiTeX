@@ -156,7 +156,8 @@ struct Opts {
     /// Run \write18's commands (minted, …)
     #[arg(long, global = true)]
     shell_escape: bool,
-    /// watch: open the viewer in the browser
+    /// watch: open the viewer in the browser (or start phitex.toml's
+    /// `viewer`, zathura or the like, on the output)
     #[arg(long, global = true)]
     open: bool,
     /// watch: no live viewer
@@ -281,6 +282,9 @@ pub struct Target {
     pub shell_escape: bool,
     /// watch: the editor a double-click opens (`--editor`, `phitex.toml`).
     pub editor: Option<String>,
+    /// watch: a program `--open` starts on the output instead of the
+    /// browser (`viewer` in `phitex.toml`).
+    pub viewer: Option<String>,
 }
 
 impl Target {
@@ -359,6 +363,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         synctex: o.synctex.or(cfg.synctex).unwrap_or(true),
         shell_escape: o.shell_escape || cfg.shell_escape.unwrap_or(false),
         editor: o.editor.clone().or(cfg.editor),
+        viewer: cfg.viewer,
     })
 }
 
@@ -404,7 +409,17 @@ pub fn what(t: &Target, job: &Job) -> String {
 
 /// What a build did, for the terminal: each run (verbose), the tools, the
 /// errors as reports, the warnings, the result line.
-pub fn report(t: &Target, s: &Session, r: &Report, wrote: Option<&Path>, o: &Options, ui: &Ui) {
+/// With `summary`, the `build` event and the result line too (a watch
+/// prints its own).
+pub fn report(
+    t: &Target,
+    s: &Session,
+    r: &Report,
+    wrote: Option<&Path>,
+    o: &Options,
+    ui: &Ui,
+    summary: bool,
+) {
     let st = ui.st;
     let job = &s.job;
     if o.verbose > 0 {
@@ -444,7 +459,8 @@ pub fn report(t: &Target, s: &Session, r: &Report, wrote: Option<&Path>, o: &Opt
     }
     let warnings: usize = crate::warnings::summarize(&text).iter().map(|g| g.1).sum();
     let run = r.runs.last().cloned().unwrap_or_default();
-    ui.event(&json!({
+    if summary {
+        ui.event(&json!({
         "event": "build",
         "why": run.why,
         "ok": r.out.errors.is_empty(),
@@ -455,7 +471,8 @@ pub fn report(t: &Target, s: &Session, r: &Report, wrote: Option<&Path>, o: &Opt
         "errors": r.out.errors,
         "warnings": warnings,
         "log": log.display().to_string(),
-    }));
+        }));
+    }
     let warn = crate::warnings::lines(&text, o.verbose > 0);
     if !warn.is_empty() && !o.quiet {
         ui.line(&format!(
@@ -471,6 +488,9 @@ pub fn report(t: &Target, s: &Session, r: &Report, wrote: Option<&Path>, o: &Opt
         for l in warn.iter().filter(|l| l.starts_with(' ')) {
             ui.line(&st.dim(l));
         }
+    }
+    if !summary {
+        return;
     }
     ui.result(&crate::ui::Outcome {
         output: wrote,
@@ -529,7 +549,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
         }
     };
     status.set("writing the outputs");
-    let main = match s.write(&r) {
+    let main = match s.write(&r, true) {
         Ok(w) => w.main,
         Err(e) => {
             spin.done();
@@ -538,7 +558,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
         }
     };
     spin.done();
-    report(t, &s, &r, main.as_deref(), o, ui);
+    report(t, &s, &r, main.as_deref(), o, ui, true);
     if let (Some(m), Some(d), true) = (&main, &t.copy_pdf, r.out.errors.is_empty()) {
         copy_pdf(m, d, ui);
     }
