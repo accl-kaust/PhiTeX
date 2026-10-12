@@ -533,3 +533,53 @@ fn env_wait_field_names_survive_the_evaluation() {
     let name = eng.values().render(f.0);
     assert_eq!(name, "\"fresh-42\"");
 }
+
+/// `["w", n]`: no claim, empty defs; when n > 0 it continues with ["w", n-1]
+/// as a continuation at its own depth.
+struct Cont;
+
+impl Operation for Cont {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let n = match &*v.get(a[1]) {
+            Value::Int(n) => *n,
+            _ => 0,
+        };
+        if n > 0 {
+            let op = cx.op();
+            cx.follow(op, vec![v.str("w"), v.int(n - 1)]);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+fn a_continuation_stays_at_its_nodes_depth() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Cont));
+    let u = eng.new_unit();
+    let w = eng.push(u, op, vec![eng.values().str("w"), eng.values().int(5000)]);
+    eng.add_root(w);
+    // With children instead of continuations: RunawayCreation at the depth limit.
+    eng.evaluate_sequential().expect("a continuation chain is not nesting");
+    assert_eq!(eng.live_nodes(), 5001);
+    // Every continuation is a top-level node (no parent), owned by its creator.
+    let info = eng.node_info(w).expect("root");
+    assert_eq!(info.parent, None);
+    let mut cur = w;
+    for _ in 0..5000 {
+        let owned = eng.children(cur);
+        assert_eq!(owned.len(), 1, "one continuation, owned by its creator");
+        assert_eq!(
+            eng.node_info(owned[0]).expect("live").parent,
+            None,
+            "at the creator's depth"
+        );
+        cur = owned[0];
+    }
+    assert_eq!(eng.children(cur), Vec::new(), "the last continuation unfolds nothing");
+}

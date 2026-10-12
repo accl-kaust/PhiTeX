@@ -34,6 +34,8 @@ pub struct Ctx<'a> {
     uses: Vec<Use>,
     defs: Vec<(Field, ValueId, bool)>,
     children: Vec<(OpId, ValueId)>,
+    /// Continuations: nodes to go after this one at its own depth.
+    follows: Vec<(OpId, ValueId)>,
     env: Vec<(Field, ValueId)>,
     publishes: Vec<(Field, ValueId)>,
     contribs: Vec<(Field, ValueId)>,
@@ -66,6 +68,7 @@ impl<'a> Ctx<'a> {
             uses: Vec::new(),
             defs: Vec::new(),
             children: Vec::new(),
+            follows: Vec::new(),
             env: Vec::new(),
             publishes: Vec::new(),
             contribs: Vec::new(),
@@ -480,6 +483,20 @@ impl<'a> Ctx<'a> {
         self.children.len() - 1
     }
 
+    /// Unfolds a continuation: a node placed right after this one (after
+    /// its children) at this node's own depth, before its following
+    /// siblings. It sees what those siblings see, including this node's
+    /// definitions; it may claim and open scopes like a pushed sibling; it
+    /// is made and freed with this node's run like a child. Continuations
+    /// come after every child in text order, in the order they are
+    /// unfolded; returns the position among them.
+    pub fn follow(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
+        let a = self.values().list(args);
+        self.follows.push((op, a));
+        self.steps += 1;
+        self.follows.len() - 1
+    }
+
     /// Unfolds a scope-opening marker.
     pub fn open_scope(&mut self) {
         let op = self.eng.open_op();
@@ -766,8 +783,10 @@ impl<'a> Ctx<'a> {
         v
     }
 
-    pub(crate) fn finish(self, r: Result<ValueId, Stop>) -> RunResult {
+    pub(crate) fn finish(mut self, r: Result<ValueId, Stop>) -> RunResult {
         let n = self.eng.n(self.slot);
+        let follows = self.follows.len();
+        self.children.append(&mut self.follows);
         let end = match (self.stopped, r) {
             (Some(e), _) => e,
             (None, Ok(v)) => End::Output(v),
@@ -788,6 +807,7 @@ impl<'a> Ctx<'a> {
             uses: self.uses,
             defs: self.defs,
             children: self.children,
+            follows,
             env: self.env,
             publishes: self.publishes,
             contribs: self.contribs,
