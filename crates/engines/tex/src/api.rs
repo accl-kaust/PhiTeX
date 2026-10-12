@@ -359,6 +359,27 @@ pub struct Stats {
     pub stops: u64,
 }
 
+/// A round's counters (`PHITEX_TEX_TIME`).
+fn print_round(t: std::time::Duration, r: &Report) {
+    eprintln!(
+        "round: {t:?}, {} nodes run, {} runs, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} pending, {} created, {} freed, spec {}/{}/{}, by op {:?}",
+        r.nodes_run,
+        r.runs,
+        r.cutoffs,
+        r.rebinds,
+        r.restarts,
+        r.rounds,
+        r.stops,
+        r.pending_waits,
+        r.created,
+        r.freed,
+        r.speculations,
+        r.confirmations,
+        r.mispredictions,
+        r.runs_by_op
+    );
+}
+
 impl Stats {
     fn add(&mut self, r: &Report) {
         self.nodes_run += r.nodes_run;
@@ -531,24 +552,7 @@ impl Graph {
                 Err(e) => panic!("{}", self.diagnose(&e)),
             };
             if std::env::var_os("PHITEX_TEX_TIME").is_some() {
-                eprintln!(
-                    "round: {:?}, {} nodes run, {} runs, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} pending, {} created, {} freed, spec {}/{}/{}, by op {:?}",
-                    t0.elapsed(),
-                    r.nodes_run,
-                    r.runs,
-                    r.cutoffs,
-                    r.rebinds,
-                    r.restarts,
-                    r.rounds,
-                    r.stops,
-                    r.pending_waits,
-                    r.created,
-                    r.freed,
-                    r.speculations,
-                    r.confirmations,
-                    r.mispredictions,
-                    r.runs_by_op
-                );
+                print_round(t0.elapsed(), &r);
             }
             stats.add(&r);
             let opened = self.opened(unit);
