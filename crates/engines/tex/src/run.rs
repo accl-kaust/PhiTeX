@@ -177,6 +177,17 @@ pub(crate) struct Run<'c, 'a> {
 impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn new(cx: &'c mut Ctx<'a>, ops: Ops) -> Self {
         let v = cx.values();
+        let op = cx.op();
+        let code = if op == ops.exec {
+            1
+        } else if op == ops.put {
+            2
+        } else if op == ops.outpage {
+            3
+        } else {
+            0
+        };
+        crate::exec::note(code, cx.node().raw());
         Run {
             cx,
             v,
