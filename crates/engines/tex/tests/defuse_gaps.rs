@@ -730,7 +730,6 @@ impl Operation for ToyFreshName {
 /// the evaluation (their name values are not swept with the run's
 /// garbage; the second evaluation is the first that sweeps).
 #[test]
-#[ignore = "engine: the value sweep frees the names of the fields env_waits reports (env_waiters not in the live set)"]
 fn env_wait_field_names_survive_the_evaluation() {
     let mut eng = Engine::new();
     let op = eng.register(Arc::new(ToyFreshName));
