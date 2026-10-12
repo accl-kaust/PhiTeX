@@ -31,6 +31,7 @@ tungstenite = "=0.30.0"
 toml = "=1.1.8"
 serde = { version = "=1.0.229", features = ["derive"] }
 bytesize = "=2.7.0"
+jiff = "=0.2.38"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }

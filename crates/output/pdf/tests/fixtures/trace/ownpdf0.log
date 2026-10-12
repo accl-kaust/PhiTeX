@@ -1,0 +1,65 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input ownpdf0
+(../../oracle/fixtures/pdf/ownpdf0.tex
+
+pdfTeX warning: pdftex (file ../../oracle/fixtures/pdf/objstm.pdf): PDF inclusi
+on: found PDF version <1.5>, but at most version <1.4> allowed
+
+Overfull \hbox (44.54019pt too wide) in paragraph at lines 7--7
+[]
+
+\hbox(444.5398+0.0)x300.0
+.\pdfrefximage(444.5398+0.0)x344.54019
+.\glue(\rightskip) 0.0
+
+
+Completed box being shipped out [0]
+\vbox(500.0+0.0)x300.0
+.\glue(\topskip) 0.0
+.\hbox(244.53961+0.0)x300.0
+..\hbox(0.0+0.0)x0.0
+..\r A
+..\pdfrefximage(244.53961+0.0)x244.53961
+..\penalty 10000
+..\glue(\parfillskip) 0.0
+..\glue(\rightskip) 0.0
+.\pdfrefximage(75.46443+0.0)x100.0
+.\glue(\parskip) 0.0
+.\glue(\baselineskip) 12.0
+.\hbox(0.0+0.0)x300.0
+..\hbox(0.0+0.0)x0.0
+..\glue(\rightskip) 0.0
+
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map} <../../oracle/fixtures/pdf/
+hello.pdf> <../../oracle/fixtures/pdf/objstm.pdf>
+
+Completed box being shipped out [0]
+\vbox(500.0+0.0)x300.0
+.\glue(\topskip) 0.0
+.\hbox(444.5398+0.0)x300.0
+..\pdfrefximage(444.5398+0.0)x344.54019
+..\glue(\rightskip) 0.0
+
+ <../../oracle/fixtures/pdf/colorstack.pdf>
+
+Completed box being shipped out [0]
+\vbox(500.0+0.0)x300.0, glue set 255.46039fill
+.\glue(\topskip) 0.0
+.\hbox(244.53961+0.0)x300.0
+..\pdfrefximage(244.53961+0.0)x244.53961
+..\penalty 10000
+..\glue(\parfillskip) 0.0
+..\glue(\rightskip) 0.0
+.\hbox(0.0+0.0)x300.0
+.\glue 0.0 plus 1.0fill
+
+ )</usr/share/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb>
+Output written on ownpdf0-trace.pdf (3 pages, 21035 bytes).
+PDF statistics:
+ 32 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 16 words of extra memory for PDF output out of 10000 (max. 10000000)
+

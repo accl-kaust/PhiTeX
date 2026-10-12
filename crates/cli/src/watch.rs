@@ -353,20 +353,16 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             });
         } else {
             facts.push(format!("{nodes} nodes run"));
+            let n = r.pages();
+            let s = if n == 1 { "" } else { "s" };
             facts.push(if builds == 1 {
-                format!(
-                    "{} page{}",
-                    r.pages(),
-                    if r.pages() == 1 { "" } else { "s" }
-                )
+                format!("{n} page{s}")
             } else if changed.is_empty() {
-                format!("no page of {} changed", r.pages())
+                format!("no page of {n} changed")
             } else {
                 format!(
-                    "{} of {} page{} changed ({})",
+                    "{} of {n} page{s} changed ({})",
                     changed.len(),
-                    r.pages(),
-                    if r.pages() == 1 { "" } else { "s" },
                     view::ranges(changed)
                 )
             });

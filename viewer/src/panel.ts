@@ -178,41 +178,10 @@ export interface PanelPrefs {
 
 const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false };
 
-/**
- * pdf.js's approximateFraction (pdfjs-dist 5.1.91, web/pdf_viewer.mjs): x as
- * a fraction a/b with b ≤ 8. pdf.js sizes a page box with
- * `round(down, scale × width, b px)`, b from the device pixel ratio, so its
- * canvas lands on whole device pixels; the same here makes our page the
- * size of Overleaf's, to the pixel.
- */
-export function approximateFraction(x: number): [number, number] {
-  if (Math.floor(x) === x) return [x, 1];
-  const xinv = 1 / x;
-  const limit = 8;
-  if (xinv > limit) return [1, limit];
-  if (Math.floor(xinv) === xinv) return [1, xinv];
-  const x_ = x > 1 ? xinv : x;
-  let a = 0, b = 1, c = 1, d = 1;
-  for (;;) {
-    const p = a + c, q = b + d;
-    if (q > limit) break;
-    if (x_ <= p / q) {
-      c = p;
-      d = q;
-    } else {
-      a = p;
-      b = q;
-    }
-  }
-  if (x_ - a / b < c / d - x_) return x_ === x ? [a, b] : [b, a];
-  return x_ === x ? [c, d] : [d, c];
-}
-
-/** A page's CSS size at `cssWidth`, rounded down as pdf.js does at this device pixel ratio. */
+/** A page's CSS size at `cssWidth`, each side rounded down to whole device pixels (its canvas then on the pixel grid). */
 export function pageBox(d: { w: number; h: number }, cssWidth: number, dpr = globalThis.devicePixelRatio || 1): [number, number] {
-  const step = approximateFraction(dpr)[1];
-  const w = cssWidth, h = (d.h * cssWidth) / d.w;
-  return [w - (w % step), h - (h % step)];
+  const snap = (x: number) => Math.floor(x * dpr) / dpr;
+  return [snap(cssWidth), snap((d.h * cssWidth) / d.w)];
 }
 
 const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
@@ -314,17 +283,12 @@ button.btn:hover { background: var(--accent2); }
 .stage { position: relative; flex: 1; overflow: auto; background: var(--light3); padding: 12px; text-align: center; min-height: 0; }
 .stage .slot { background: #fff; box-shadow: 0 1px 3px rgba(27,34,44,.25); border-radius: 2px; }
 .stage img { max-width: 100%; }
-/* PDF.js pages: the canvas, and pdf.js's text layer over it (its own rules, the ones that place and hide the text) */
-.pdfjs-page { position: relative; width: 100%; height: 100%; background: #fff; }
-.pdfjs-page canvas { display: block; }
-.textLayer { position: absolute; inset: 0 auto auto 0; overflow: clip; line-height: 1; transform-origin: 0 0; z-index: 0;
-  --min-font-size: 1; --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size)); --min-font-size-inv: calc(1 / var(--min-font-size)); }
-.textLayer :is(span, br) { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; }
-.textLayer > :not(.markedContent), .textLayer .markedContent span:not(.markedContent) { z-index: 1; --font-height: 0;
-  font-size: calc(var(--text-scale-factor) * var(--font-height)); --scale-x: 1; --rotate: 0deg;
-  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv)); }
-.textLayer .markedContent { display: contents; }
-.textLayer ::selection { background: rgb(0 100 255 / 25%); }
+/* a page: MuPDF's canvas, and its text over it, transparent (selected, copied, found) */
+.phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
+.phx-page canvas { display: block; width: 100%; height: 100%; }
+.phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
+.phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
+.phx-text ::selection { fill: transparent; background: rgb(0 100 255 / 25%); }
 .stage.stale .slot canvas { opacity: .45; filter: grayscale(1); }
 .banner { position: sticky; top: -12px; z-index: 1; display: none; margin: -12px -12px 10px; padding: 6px 10px; text-align: left; font-size: 12px;
   background: var(--bg-warning-03, #fcf1e3); color: var(--warn); border-bottom: 1px solid var(--divider); }
@@ -476,7 +440,7 @@ footer .msg.err { color: var(--danger); }
 .win.docked .sum:hover { background: var(--dark3); }
 .win.docked .sum .first { color: var(--fg-dark); }
 .win.docked .sum .n.error { color: var(--danger-dark); } .win.docked .sum .n.warning { color: var(--warn-dark); } .win.docked .sum .n.info { color: #97b6e5; }
-/* as Overleaf's pdf.js viewer: the scrollbar always there, pages 12 px apart and centered, and the
+/* as Overleaf's viewer: the scrollbar always there, pages 12 px apart and centered, and the
    viewer min-height 100% with the first page's margin collapsing through it (so it scrolls by 12 px, as native) */
 .win.docked .viewer { min-height: 100%; }
 .win.docked .stage { background: transparent; padding: 0; overflow-y: scroll; overflow-x: auto; }
@@ -1214,10 +1178,15 @@ export class Panel {
   }
 
   /**
-   * The zoom, 1 being 100% (a PDF point at 96/72 CSS pixels). Fit is
-   * pdf.js's "page-width", as Overleaf's viewer: (clientWidth − 40) / the
-   * page's width, 40 being its SCROLLBAR_PADDING.
+   * The zoom, 1 being 100% (a PDF point at 96/72 CSS pixels). Fit is the
+   * page's width, as Overleaf's viewer fits it: (clientWidth − 40) / the
+   * page's width, 40 being its scrollbar's padding.
    */
+  /** Device pixels per PDF point at the current zoom: the size pages are drawn at. */
+  pixelsPerPoint(): number {
+    return (96 / 72) * this.scale() * (window.devicePixelRatio || 1);
+  }
+
   private scale(): number {
     if (this.prefs.zoom !== "fit") return Number(this.prefs.zoom);
     const pageW = (this.last?.w ?? 612) * (96 / 72);
