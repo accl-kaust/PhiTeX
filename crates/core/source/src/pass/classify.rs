@@ -750,6 +750,9 @@ impl Cx<'_> {
                 r.pending("delimiter not in enclosing group", "");
                 q
             }
+            Arg::Pdf(name) => self.pdf(name, p, r),
+            Arg::Array(ty) => self.array(p, *ty, r),
+            Arg::Delim => self.delim(p, r),
             Arg::Pending(c) => {
                 r.worse(
                     Status::Pending,
@@ -869,13 +872,371 @@ impl Cx<'_> {
                             p += 1;
                         }
                         Res::Pending(_) => {
-                            r.pending("expression lookahead into macro", &nm);
+                            // (etex.ch `scan_expr`: a macro may supply
+                            // any part of the expression; it ends at
+                            // `\relax` if one follows on the line)
+                            if let Some(e) = self.relax_on_line(p + 1) {
+                                r.worse(Status::Predicted, Some(cause("expression", &nm)));
+                                return e + 1;
+                            }
+                            r.pending("expression", &nm);
                             return p + 1;
                         }
                     }
                 }
                 _ => return p,
             }
+        }
+    }
+
+    /// The first `\relax` from `p` on the same line, outside groups.
+    fn relax_on_line(&self, mut p: usize) -> Option<usize> {
+        let line_end = |a: usize| self.text[a..].find('\n').map_or(self.text.len(), |k| a + k);
+        let end = line_end(self.atoms.get(p)?.start);
+        while p < self.atoms.len() && self.atoms[p].start < end {
+            match self.atoms[p].kind {
+                AtomKind::Cs if self.name(p) == "relax" => return Some(p),
+                AtomKind::Close | AtomKind::Par => return None,
+                AtomKind::Open => p = self.jump(p),
+                _ => p += 1,
+            }
+        }
+        None
+    }
+
+    /// The keyword `kw` from `p`; if absent, a macro at `p` might supply
+    /// it (TeX expands while it looks for a keyword, tex.web §407).
+    fn pdf_kw(&mut self, p: usize, kw: &str, r: &mut R) -> Option<usize> {
+        let e = self.keyword(p, kw);
+        if e.is_none() {
+            let s = skip(self.atoms, p);
+            self.lookahead(s, "keyword lookahead into macro", r);
+        }
+        e
+    }
+
+    /// The first of `kws` found from `p`.
+    fn pdf_kws(&mut self, p: usize, kws: &[&str], r: &mut R) -> Option<usize> {
+        let e = kws.iter().find_map(|k| self.keyword(p, k));
+        if e.is_none() {
+            let s = skip(self.atoms, p);
+            self.lookahead(s, "keyword lookahead into macro", r);
+        }
+        e
+    }
+
+    /// pdfTeX's `scan_alt_rule` (pdfTeX §1550): `width`, `height`,
+    /// `depth` dimens, any number, any order.
+    fn pdf_rule(&mut self, mut p: usize, r: &mut R) -> usize {
+        while let Some(e) = self.pdf_kws(p, &["width", "height", "depth"], r) {
+            p = self.value(e, 'd', r);
+        }
+        p
+    }
+
+    /// An optional `kw` followed by general text.
+    fn pdf_opt_text(&mut self, p: usize, kw: &str, r: &mut R) -> usize {
+        match self.pdf_kw(p, kw, r) {
+            Some(e) => self.read(e, &Arg::Group, r),
+            None => p,
+        }
+    }
+
+    /// pdfTeX's `scan_action` (pdfTeX §1554): `user` text, or `goto` /
+    /// `thread`, an optional `file` text, an optional `struct` (text,
+    /// `name` text or `num` int), then `page` int and text, `name` text
+    /// or `num` int, then an optional `newwindow`/`nonewwindow`.
+    fn pdf_action(&mut self, p: usize, r: &mut R) -> usize {
+        if let Some(e) = self.pdf_kw(p, "user", r) {
+            return self.read(e, &Arg::Group, r);
+        }
+        let Some(mut q) = self.pdf_kws(p, &["goto", "thread"], r) else {
+            r.pending("pdfTeX action without user/goto/thread", "");
+            return p;
+        };
+        let file = self.pdf_kw(q, "file", r);
+        if let Some(e) = file {
+            q = self.read(e, &Arg::Group, r);
+        }
+        if let Some(e) = self.pdf_kw(q, "struct", r) {
+            q = if file.is_some() {
+                self.read(e, &Arg::Group, r)
+            } else if let Some(e) = self.pdf_kw(e, "name", r) {
+                self.read(e, &Arg::Group, r)
+            } else if let Some(e) = self.pdf_kw(e, "num", r) {
+                self.value(e, 'i', r)
+            } else {
+                e
+            };
+        }
+        if let Some(e) = self.pdf_kw(q, "page", r) {
+            q = self.value(e, 'i', r);
+            q = self.read(q, &Arg::Group, r);
+        } else if let Some(e) = self.pdf_kw(q, "name", r) {
+            q = self.read(e, &Arg::Group, r);
+        } else if let Some(e) = self.pdf_kw(q, "num", r) {
+            q = self.value(e, 'i', r);
+        } else {
+            r.pending("pdfTeX action without page/name/num", "");
+            return q;
+        }
+        match self.pdf_kws(q, &["newwindow", "nonewwindow"], r) {
+            Some(e) => self.optional_space(e),
+            None => q,
+        }
+    }
+
+    /// One optional space (tex.web §443 "Scan an optional space").
+    fn optional_space(&self, p: usize) -> usize {
+        if self.kind(p) == Some(AtomKind::Space) {
+            p + 1
+        } else {
+            p
+        }
+    }
+
+    /// A pdfTeX command's keyword syntax (pdftex.web; sections as
+    /// "pdfTeX §N"), from `p`, past the command.
+    #[allow(clippy::too_many_lines)]
+    fn pdf(&mut self, name: &str, p: usize, r: &mut R) -> usize {
+        let g = |cx: &mut Self, q: usize, r: &mut R| cx.read(q, &Arg::Group, r);
+        match name {
+            // pdfTeX §1536: [shipout] [direct|page] text
+            "pdfliteral" => {
+                let q = self.pdf_kw(p, "shipout", r).unwrap_or(p);
+                let q = self.pdf_kws(q, &["direct", "page"], r).unwrap_or(q);
+                g(self, q, r)
+            }
+            // pdfTeX §1537: int, then set/push text, or pop/current
+            "pdfcolorstack" => {
+                let q = self.value(p, 'i', r);
+                if let Some(e) = self.pdf_kws(q, &["set", "push"], r) {
+                    g(self, e, r)
+                } else if let Some(e) = self.pdf_kws(q, &["pop", "current"], r) {
+                    e
+                } else {
+                    r.pending("pdfTeX \\pdfcolorstack without set/push/pop/current", "");
+                    q
+                }
+            }
+            // pdfTeX §495 (pdf_colorstack_init_code): [page] [direct|page] text
+            "pdfcolorstackinit" => {
+                let q = self.pdf_kw(p, "page", r).unwrap_or(p);
+                let q = self.pdf_kws(q, &["direct", "page"], r).unwrap_or(q);
+                g(self, q, r)
+            }
+            // pdfTeX §1542: reserveobjnum, or [useobjnum int]
+            // [stream [attr text]] [file] text
+            "pdfobj" => {
+                if let Some(e) = self.pdf_kw(p, "reserveobjnum", r) {
+                    return self.optional_space(e);
+                }
+                let mut q = p;
+                if let Some(e) = self.pdf_kw(q, "useobjnum", r) {
+                    q = self.value(e, 'i', r);
+                }
+                if let Some(e) = self.pdf_kw(q, "stream", r) {
+                    q = self.pdf_opt_text(e, "attr", r);
+                }
+                let q = self.pdf_kw(q, "file", r).unwrap_or(q);
+                g(self, q, r)
+            }
+            // pdfTeX §1546: [attr text] [resources text] register number
+            "pdfxform" => {
+                let q = self.pdf_opt_text(p, "attr", r);
+                let q = self.pdf_opt_text(q, "resources", r);
+                self.value(q, 'i', r)
+            }
+            // pdfTeX §1550 `scan_image`: rule spec, [attr text],
+            // [named text | page int], [colorspace int], [a page box
+            // (`scan_pdf_box_spec`)], file name text
+            "pdfximage" => {
+                let q = self.pdf_rule(p, r);
+                let mut q = self.pdf_opt_text(q, "attr", r);
+                if let Some(e) = self.pdf_kw(q, "named", r) {
+                    q = g(self, e, r);
+                } else if let Some(e) = self.pdf_kw(q, "page", r) {
+                    q = self.value(e, 'i', r);
+                }
+                if let Some(e) = self.pdf_kw(q, "colorspace", r) {
+                    q = self.value(e, 'i', r);
+                }
+                let q = self
+                    .pdf_kws(
+                        q,
+                        &["mediabox", "cropbox", "bleedbox", "trimbox", "artbox"],
+                        r,
+                    )
+                    .unwrap_or(q);
+                g(self, q, r)
+            }
+            // pdfTeX §1556: reserveobjnum, or [useobjnum int] rule spec text
+            "pdfannot" => {
+                if let Some(e) = self.pdf_kw(p, "reserveobjnum", r) {
+                    return self.optional_space(e);
+                }
+                let mut q = p;
+                if let Some(e) = self.pdf_kw(q, "useobjnum", r) {
+                    q = self.value(e, 'i', r);
+                }
+                let q = self.pdf_rule(q, r);
+                g(self, q, r)
+            }
+            // pdfTeX §1558, §1555 `new_annot_whatsit`: rule spec,
+            // [attr text], action
+            "pdfstartlink" => {
+                let q = self.pdf_rule(p, r);
+                let q = self.pdf_opt_text(q, "attr", r);
+                self.pdf_action(q, r)
+            }
+            // pdfTeX §1563: [struct int] (num int | name text), then
+            // xyz [zoom int] | fitbh | fitbv | fitb | fith | fitv |
+            // fitr rule spec | fit (longest first)
+            "pdfdest" => {
+                let mut q = p;
+                if let Some(e) = self.pdf_kw(q, "struct", r) {
+                    q = self.value(e, 'i', r);
+                }
+                if let Some(e) = self.pdf_kw(q, "num", r) {
+                    q = self.value(e, 'i', r);
+                } else if let Some(e) = self.pdf_kw(q, "name", r) {
+                    q = g(self, e, r);
+                } else {
+                    r.pending("pdfTeX \\pdfdest without num/name", "");
+                    return q;
+                }
+                if let Some(e) = self.pdf_kw(q, "xyz", r) {
+                    return match self.pdf_kw(e, "zoom", r) {
+                        Some(z) => self.value(z, 'i', r),
+                        None => self.optional_space(e),
+                    };
+                }
+                if let Some(e) = self.pdf_kw(q, "fitr", r) {
+                    return self.pdf_rule(e, r);
+                }
+                if let Some(e) =
+                    self.pdf_kws(q, &["fitbh", "fitbv", "fitb", "fith", "fitv", "fit"], r)
+                {
+                    self.optional_space(e)
+                } else {
+                    r.pending("pdfTeX \\pdfdest without a destination type", "");
+                    q
+                }
+            }
+            // pdfTeX §1565, §1566, §1564 `scan_thread_id`: rule spec,
+            // [attr text], num int | name text
+            "pdfthread" | "pdfstartthread" => {
+                let q = self.pdf_rule(p, r);
+                let q = self.pdf_opt_text(q, "attr", r);
+                if let Some(e) = self.pdf_kw(q, "num", r) {
+                    self.value(e, 'i', r)
+                } else if let Some(e) = self.pdf_kw(q, "name", r) {
+                    g(self, e, r)
+                } else {
+                    r.pending("pdfTeX thread without num/name", "");
+                    q
+                }
+            }
+            // pdfTeX §1561: [attr text] action [count int] text
+            "pdfoutline" => {
+                let q = self.pdf_opt_text(p, "attr", r);
+                let mut q = self.pdf_action(q, r);
+                if let Some(e) = self.pdf_kw(q, "count", r) {
+                    q = self.value(e, 'i', r);
+                }
+                g(self, q, r)
+            }
+            // pdfTeX §1577: text [openaction action]
+            "pdfcatalog" => {
+                let q = g(self, p, r);
+                match self.pdf_kw(q, "openaction", r) {
+                    Some(e) => self.pdf_action(e, r),
+                    None => q,
+                }
+            }
+            // pdfTeX §495 (pdf_mdfive_sum_code): [file] text
+            "pdfmdfivesum" => {
+                let q = self.pdf_kw(p, "file", r).unwrap_or(p);
+                g(self, q, r)
+            }
+            // pdfTeX §495 (pdf_file_dump_code): [offset int] [length int] text
+            "pdffiledump" => {
+                let mut q = p;
+                if let Some(e) = self.pdf_kw(q, "offset", r) {
+                    q = self.value(e, 'i', r);
+                }
+                if let Some(e) = self.pdf_kw(q, "length", r) {
+                    q = self.value(e, 'i', r);
+                }
+                g(self, q, r)
+            }
+            // pdfTeX §495 (pdf_match_code): [icase] [subcount int] text text
+            "pdfmatch" => {
+                let mut q = self.pdf_kw(p, "icase", r).unwrap_or(p);
+                if let Some(e) = self.pdf_kw(q, "subcount", r) {
+                    q = self.value(e, 'i', r);
+                }
+                let q = g(self, q, r);
+                g(self, q, r)
+            }
+            // pdfTeX §703 `read_expand_font`: font, [=], stretch,
+            // shrink and step ints, [autoexpand]
+            "pdffontexpand" => {
+                let q = self.read(p, &Arg::Tok, r);
+                let q = self.read(q, &Arg::Eq, r);
+                let q = self.value(q, 'i', r);
+                let q = self.value(q, 'i', r);
+                let q = self.value(q, 'i', r);
+                match self.pdf_kw(q, "autoexpand", r) {
+                    Some(e) => self.optional_space(e),
+                    None => q,
+                }
+            }
+            _ => unreachable!("no pdfTeX syntax for {name}"),
+        }
+    }
+
+    /// An array parameter (tex.web §1248 `set_shape`; etex.ch's
+    /// `\interlinepenalties` and kin): `[=] n`, then `n` values (`ty`
+    /// `'P'`: `\parshape`'s `n` pairs of dimens). The count must be
+    /// written out: otherwise the extent is pending.
+    fn array(&mut self, p: usize, ty: char, r: &mut R) -> usize {
+        let p = self.read(p, &Arg::Eq, r);
+        let s = skip(self.atoms, p);
+        let mut d = s;
+        let mut n: usize = 0;
+        while let Some(AtomKind::Char(c)) = self.kind(d) {
+            let Some(v) = c.to_digit(10) else { break };
+            n = n.saturating_mul(10).saturating_add(v as usize);
+            d += 1;
+        }
+        let q = self.value(s, 'i', r);
+        if d == s {
+            r.pending("array parameter", "count not written out");
+            return q;
+        }
+        let mut q = q;
+        for _ in 0..n.min(10_000) {
+            if ty == 'P' {
+                q = self.value(q, 'd', r);
+                q = self.value(q, 'd', r);
+            } else {
+                q = self.value(q, ty, r);
+            }
+        }
+        q
+    }
+
+    /// A delimiter (tex.web §1160 `scan_delimiter`): a character, or
+    /// `\delimiter` and an int; a macro may expand to either.
+    fn delim(&mut self, p: usize, r: &mut R) -> usize {
+        let q = skip(self.atoms, p);
+        match self.kind(q) {
+            Some(AtomKind::Cs) if self.name(q) == "delimiter" => {
+                self.mark(q);
+                self.value(q + 1, 'i', r)
+            }
+            _ => self.read(p, &Arg::Tok, r),
         }
     }
 
