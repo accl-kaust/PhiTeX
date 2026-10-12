@@ -4,11 +4,11 @@
 // PDF, never replacing it. Experimental, and says so.
 //
 // Quality of life: drag by the header, resize from the corner, collapse to
-// a pill (Alt+Shift+P toggles), position/size/zoom/format remembered; a
+// a pill (Alt+Shift+P toggles), position/size/zoom remembered; a
 // build that ships nothing keeps the last good page, dimmed, with why;
 // diagnostics jump to their line.
 
-import type { Draws, PageImage, Status } from "./session.ts";
+import type { PageImage, Status } from "./session.ts";
 import type { PackageState } from "./packages.ts";
 import { ENGINES, errorNeeds, type Engine } from "./engines.ts";
 import { Viewer } from "./viewer.ts";
@@ -75,7 +75,6 @@ export interface PanelEvents {
   onReload(): void;
   /** Clean recompile: the project read again, typeset from the start. */
   onClean(): void;
-  onFormat(f: PageFormat): void;
   onGoto(file: string, line: number): void;
   /** A double-click on page `k` at (x, y), PDF points from its top left: to the source. */
   onSyncSource?(k: number, x: number, y: number): void;
@@ -151,8 +150,6 @@ export function safeColor(c: unknown, or: string): string {
 /** What a host may leave out: a control whose event it doesn't handle is hidden. */
 export interface PanelOptions {
   words?: Partial<PanelWords>;
-  /** The PDF.js page format offered (default: yes). */
-  pdfjs?: boolean;
   /** One of the host's own files by its path (the license): its address (default: the path as it is). */
   fileUrl?(path: string): string;
   /** The document's contents beside the pages (outline.ts: the host gives them, `outline`), `t` or ☰ to show or hide. */
@@ -169,37 +166,17 @@ export interface Prefs {
   save(p: PanelPrefs): void;
 }
 
-/** How pages are drawn: vector (SVG from the draw lists) or pdfjs (our PDF, by pdf.js, with its text layer). */
-export type PageFormat = "vector" | "pdfjs";
-/** A stored format, an older version's "png" read as vector. */
-export const pageFormat = (f: unknown): PageFormat => (f === "pdfjs" ? "pdfjs" : "vector");
-
 export interface PanelPrefs {
   x: number | null;
   y: number | null;
   w: number;
   h: number;
   zoom: string;
-  format: PageFormat;
   collapsed: boolean;
   details: boolean;
 }
 
-const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", format: "vector", collapsed: false, details: false };
-
-/** PhiTeX's fonts (the PDF base 14) as the browser's. */
-function cssFont(name: string, px: number): string {
-  const bold = /Bold/.test(name),
-    italic = /Italic|Oblique/.test(name);
-  const family = /^Times/.test(name)
-    ? '"Times New Roman", Times, "Liberation Serif", "Nimbus Roman", "Noto Serif", serif'
-    : /^Helvetica/.test(name)
-      ? 'Helvetica, Arial, "Liberation Sans", "Nimbus Sans", "Noto Sans", sans-serif'
-      : /^Courier/.test(name)
-        ? '"Courier New", Courier, "Liberation Mono", "DM Mono", monospace'
-        : '"Noto Serif", serif';
-  return `${italic ? "italic " : ""}${bold ? "bold " : ""}${px}px ${family}`;
-}
+const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false };
 
 /**
  * pdf.js's approximateFraction (pdfjs-dist 5.1.91, web/pdf_viewer.mjs): x as
@@ -239,42 +216,6 @@ export function pageBox(d: { w: number; h: number }, cssWidth: number, dpr = glo
 }
 
 const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
-
-/**
- * A draw list as SVG: a <text> per line (words on one baseline in one
- * font), a <tspan> per word at PhiTeX's x, each word but a line's last
- * followed by a space, so the text selects and copies as text (and Ctrl+F
- * finds it). Crisp at any zoom; positions are PhiTeX's, glyphs the browser's.
- */
-export function svg(d: Draws, cssWidth: number): string {
-  const lines = new Map<string, [number, string, number | undefined][]>();
-  const order: string[] = [];
-  for (const [x, y, size, f, text, width] of d.t) {
-    const k = `${y}|${size}|${f}`;
-    if (!lines.has(k)) {
-      lines.set(k, []);
-      order.push(k);
-    }
-    lines.get(k)!.push([x, text, width]);
-  }
-  let body = "";
-  for (const k of order) {
-    const [y, size, f] = k.split("|");
-    const words = lines.get(k)!.sort((a, b) => a[0] - b[0]);
-    // (each word fitted to the width PhiTeX laid it out with: the browser's glyphs, TeX's layout)
-    const spans = words
-      .map(([x, t, width], i) => {
-        const fit = width && [...t].length > 1 ? ` textLength="${width}" lengthAdjust="spacingAndGlyphs"` : "";
-        const space = i < words.length - 1 ? `<tspan> </tspan>` : "";
-        return `<tspan x="${x}"${fit}>${esc(t)}</tspan>${space}`;
-      })
-      .join("");
-    body += `<text y="${y}" style="font:${esc(cssFont(d.f[Number(f)], Number(size)))}">${spans}</text>\n`;
-  }
-  for (const [x, y, w, h] of d.r) body += `<rect x="${x}" y="${y}" width="${Math.max(w, 0.4)}" height="${Math.max(h, 0.4)}"/>`;
-  const [w, h] = pageBox(d, cssWidth);
-  return `<svg class="page" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${d.w} ${d.h}" width="${w}" height="${h}" preserveAspectRatio="none" xml:space="preserve"><rect class="paper" width="${d.w}" height="${d.h}"/>${body}</svg>`;
-}
 
 /** Material icons (Apache-2.0), inline: no dependency on the page's icon font. */
 const PATHS: Record<string, string> = {
@@ -371,11 +312,7 @@ button.btn:hover { background: var(--accent2); }
 .diag.error .icon { color: var(--danger); } .diag.warning .icon { color: var(--warn); } .diag.info .icon { color: var(--info); }
 .diag .where { color: var(--fg2); white-space: nowrap; margin-left: auto; padding-left: 8px; font-family: "DM Mono", monospace; font-size: 11px; }
 .stage { position: relative; flex: 1; overflow: auto; background: var(--light3); padding: 12px; text-align: center; min-height: 0; }
-.stage svg.page { display: inline-block; vertical-align: top; user-select: text; cursor: text; }
-.stage svg.page .paper { fill: #fff; }
-.stage svg.page text { fill: #000; white-space: pre; }
-.stage svg.page ::selection { fill: #fff; background: var(--info); }
-.stage svg.page, .stage img { background: #fff; box-shadow: 0 1px 3px rgba(27,34,44,.25); border-radius: 2px; }
+.stage .slot { background: #fff; box-shadow: 0 1px 3px rgba(27,34,44,.25); border-radius: 2px; }
 .stage img { max-width: 100%; }
 /* PDF.js pages: the canvas, and pdf.js's text layer over it (its own rules, the ones that place and hide the text) */
 .pdfjs-page { position: relative; width: 100%; height: 100%; background: #fff; }
@@ -388,7 +325,7 @@ button.btn:hover { background: var(--accent2); }
   transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv)); }
 .textLayer .markedContent { display: contents; }
 .textLayer ::selection { background: rgb(0 100 255 / 25%); }
-.stage.stale svg.page, .stage.stale img { opacity: .45; filter: grayscale(1); }
+.stage.stale .slot canvas { opacity: .45; filter: grayscale(1); }
 .banner { position: sticky; top: -12px; z-index: 1; display: none; margin: -12px -12px 10px; padding: 6px 10px; text-align: left; font-size: 12px;
   background: var(--bg-warning-03, #fcf1e3); color: var(--warn); border-bottom: 1px solid var(--divider); }
 .stage.stale .banner { display: block; }
@@ -415,7 +352,7 @@ footer .msg.err { color: var(--danger); }
 .win:not(.docked) .show-docked { display: none; }
 .win.docked { background: var(--pdf-bg, var(--pane, #2f3a4c)); border: 0; }
 /* Overleaf's "dark mode PDF preview" (.pdf-dark-mode on the pane): its own filter, no shadow */
-.win.docked.pdf-dark .stage svg.page, .win.docked.pdf-dark .stage img { filter: invert(95%) hue-rotate(180deg) brightness(90%) contrast(90%); box-shadow: none; }
+.win.docked.pdf-dark .stage .slot canvas { filter: invert(95%) hue-rotate(180deg) brightness(90%) contrast(90%); box-shadow: none; }
 .win.docked.light .sum { background: var(--light2); color: var(--fg2); border-bottom-color: var(--divider); }
 .win.docked.light .sum:hover { background: var(--light3); } .win.docked.light .sum .first { color: var(--fg); }
 .win.docked.light .sum .n.error { color: var(--danger); } .win.docked.light .sum .n.warning { color: var(--warn); } .win.docked.light .sum .n.info { color: var(--info); }
@@ -561,11 +498,11 @@ footer .msg.err { color: var(--danger); }
 @keyframes phitex-mark-in { from { opacity: 0; transform: scale(1.15); } }
 .slot .mark.fade { opacity: 0; transition: opacity 1.2s; }
 .slot .mark.sel { transition: none; animation: none; }
-.slot svg.page, .slot img { display: block; width: 100%; height: 100%; margin: 0; box-shadow: none !important; border-radius: 0 !important; }
+.slot canvas { display: block; width: 100%; height: 100%; margin: 0; box-shadow: none !important; border-radius: 0 !important; }
 .win.docked .slot { box-shadow: rgba(35,40,47,.05) 0 5px 5px, rgba(35,40,47,.03) 0 3px 14px, rgba(35,40,47,.08) 0 8px 10px; }
 .win.docked.pdf-dark .slot { filter: invert(95%) hue-rotate(180deg) brightness(90%) contrast(90%); box-shadow: none; }
 .stage.stale .slot { opacity: .45; filter: grayscale(1); }
-.win.docked .stage svg.page, .win.docked .stage img { border-radius: 0;
+.win.docked .stage .slot { border-radius: 0;
   box-shadow: rgba(35,40,47,.05) 0 5px 5px, rgba(35,40,47,.03) 0 3px 14px, rgba(35,40,47,.08) 0 8px 10px; }
 .win.docked .banner { margin: 0; top: 0; }
 .win.docked .empty { color: var(--fg2-dark); }
@@ -622,7 +559,7 @@ export class Panel {
   <div class="bar">
     <label>Main <select id="main" title="The file PhiTeX typesets"></select></label>
     <label>Zoom <select id="zoom"><option value="fit">Fit</option><option value="0.75">75%</option><option value="1">100%</option><option value="1.5">150%</option><option value="2">200%</option></select></label>
-    <label title="Vector: drawn as SVG, updated in place as you type. PDF.js: our PDF drawn by pdf.js, as Overleaf's viewer draws a PDF.">View <select id="fmt"><option value="vector">Vector</option><option value="pdfjs">PDF.js</option></select></label>
+
     <span class="grow"></span>
     <label class="show-docked" title="Check against a fresh build every 5 s"><input type="checkbox" id="dbg2"> Debug check</label>
     <button class="ib show-docked" id="tour" title="Take the tour" aria-label="Take the tour" style="width:auto;padding:0 6px;font-size:12px;color:var(--info)">Take the tour</button>
@@ -672,7 +609,6 @@ export class Panel {
     // (what the host doesn't handle, not offered)
     if (!ev.onTour) this.$("#tour").style.display = "none";
     if (!ev.onNews) this.$("#news").style.display = "none";
-    if (opts.pdfjs === false) this.$("#fmt").closest("label")!.style.display = "none";
     this.$("#byline").onclick = (e) => {
       e.stopPropagation();
       this.$("#about").classList.toggle("open");
@@ -688,12 +624,6 @@ export class Panel {
     };
     this.$<HTMLSelectElement>("#main").onchange = (e) => ev.onMain((e.target as HTMLSelectElement).value);
     this.$<HTMLSelectElement>("#zoom").onchange = (e) => this.zoomTo((e.target as HTMLSelectElement).value);
-    this.$<HTMLSelectElement>("#fmt").onchange = (e) => {
-      this.prefs.format = (e.target as HTMLSelectElement).value as PanelPrefs["format"];
-      this.save();
-      this.viewer.invalidate();
-      ev.onFormat(this.prefs.format);
-    };
     this.$("#min").onclick = () => this.collapse(!this.prefs.collapsed);
     this.$("#chip").onclick = () => this.prefs.collapsed && this.collapse(false);
     this.$("#lat").onclick = () => {
@@ -734,7 +664,6 @@ export class Panel {
         this.nav();
         ev.onPage(k);
       },
-      svg: (img, w) => ("draws" in img ? svg(img.draws, w) : null),
       scale: () => this.scale(),
       box: (d, w) => pageBox(d, w),
       dbl: (k, x, y) => ev.onSyncSource?.(k, x, y),
@@ -760,12 +689,9 @@ export class Panel {
     this.place();
     store?.load().then((p) => {
       this.prefs = { ...DEFAULTS, ...p };
-      // (an older version's "png", gone: vector)
-      this.prefs.format = pageFormat(this.prefs.format);
       // (a size saved while hidden, by an older version)
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
-      if (this.prefs.format !== "vector") ev.onFormat(this.prefs.format);
     });
   }
 
@@ -831,7 +757,6 @@ export class Panel {
     s.left = `${Math.max(0, Math.min(x, window.innerWidth - 120))}px`;
     s.top = `${Math.max(0, Math.min(y, window.innerHeight - 40))}px`;
     this.$<HTMLSelectElement>("#zoom").value = p.zoom;
-    this.$<HTMLSelectElement>("#fmt").value = p.format;
     this.win.classList.toggle("details-open", p.details);
     this.collapse(p.collapsed, false);
   }
@@ -1295,8 +1220,7 @@ export class Panel {
    */
   private scale(): number {
     if (this.prefs.zoom !== "fit") return Number(this.prefs.zoom);
-    const d = this.last && "draws" in this.last ? this.last.draws : null;
-    const pageW = (d?.w ?? 612) * (96 / 72);
+    const pageW = (this.last?.w ?? 612) * (96 / 72);
     return Math.max(this.$("#stage").clientWidth - (this.docked ? 40 : 24), 200) / pageW;
   }
 
@@ -1387,8 +1311,7 @@ export class Panel {
     );
     const stage = this.$("#stage");
     const pageH = () => {
-      const d = this.last && "draws" in this.last ? this.last.draws : null;
-      return (d?.h ?? 792) * (96 / 72);
+      return (this.last?.h ?? 792) * (96 / 72);
     };
     const panel = this;
     bindKeys(window, {
@@ -1440,15 +1363,6 @@ export class Panel {
     this.save();
     this.redraw();
     this.emit();
-  }
-
-  /** The page format, set from outside (the popup). */
-  formatTo(f: PanelPrefs["format"]): void {
-    if (this.prefs.format === f) return;
-    this.prefs.format = f;
-    this.$<HTMLSelectElement>("#fmt").value = f;
-    this.viewer.invalidate();
-    this.ev.onFormat(f);
   }
 
   toggleDebug(): void {
@@ -1711,8 +1625,7 @@ export class Panel {
   }
 
   page(img: PageImage | null, k: number, n: number, hash?: string | null): void {
-    const empty = !img || ("draws" in img && !img.draws.t.length && !img.draws.r.length);
-    if (empty) {
+    if (!img) {
       // (nothing new to show: the pages shown stay, dimmed; see stale())
       if (!this.last) {
         this.$("#empty").textContent = n ? "This page is empty." : "No page shipped yet.";
