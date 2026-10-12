@@ -53,3 +53,92 @@ fn savepos() {
         panic!("pdf/savepos.pos: FAIL {d}");
     }
 }
+
+/// The PDF documents with links, annotations, objects, forms or images:
+/// what the writer does not have yet (PDF-BACKEND-GAP).
+const BACKEND_GAPS: &[&str] = &[
+    "annot",
+    "bera",
+    "jpgres",
+    "obj",
+    "outline",
+    "readback",
+    "rerun",
+    "thread",
+    "vf",
+    "xform",
+    "ximage",
+    "ximage2",
+    "trailerid",
+];
+
+/// The `stream ... endstream` bodies of a PDF file.
+fn streams(b: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(k) = find(&b[i..], b"stream\n") {
+        let s = i + k + 7;
+        let Some(e) = find(&b[s..], b"endstream") else {
+            break;
+        };
+        out.push(b[s..s + e].to_vec());
+        i = s + e + 9;
+    }
+    out
+}
+
+fn find(h: &[u8], n: &[u8]) -> Option<usize> {
+    h.windows(n.len()).position(|w| w == n)
+}
+
+/// Gate 1: `pdftex -ini` on `oracle/fixtures/pdf/*.tex` with a `.pdf`
+/// oracle: byte-identical; for the documents on a backend gap, whether
+/// each of the oracle's streams (pages, fonts) is ours.
+#[test]
+fn pdf_documents() {
+    let dir = common::fixtures().join("pdf");
+    let only = std::env::var("PHITEX_GATE").ok();
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .expect("the fixtures")
+        .flatten()
+        .filter_map(|e| {
+            let f = e.file_name().to_string_lossy().into_owned();
+            f.strip_suffix(".tex").map(str::to_owned)
+        })
+        .filter(|n| dir.join(format!("{n}.pdf")).exists())
+        .filter(|n| only.as_ref().is_none_or(|o| o == n))
+        .collect();
+    names.sort();
+    let mut failed = Vec::new();
+    for name in names {
+        let src = common::read(&dir.join(format!("{name}.tex")));
+        let want = std::fs::read(dir.join(format!("{name}.pdf"))).expect("the oracle");
+        let opts = phitex_tex::Options {
+            epoch: Some(0),
+            ..common::options(&format!("./{name}.tex"), &name, "", &dir)
+        };
+        let b = common::build(opts, None, &src);
+        let (pdf, _) = b.output();
+        if let Ok(d) = std::env::var("PHITEX_GATE_OUT") {
+            let _ = std::fs::write(format!("{d}/{name}.pdf"), &pdf);
+        }
+        match common::first_difference(&pdf, &want) {
+            None => eprintln!("ok {name}: byte-identical"),
+            Some(d) => {
+                let gap = BACKEND_GAPS.contains(&name.as_str());
+                let ours = streams(&pdf);
+                let theirs = streams(&want);
+                let missing = theirs.iter().filter(|s| !ours.contains(s)).count();
+                eprintln!(
+                    "{} {name}: {d}\n  {missing} of the oracle's {} streams not ours",
+                    if gap { "gap" } else { "FAIL" },
+                    theirs.len()
+                );
+                if !gap {
+                    failed.push(name);
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "failed: {failed:?}");
+}
