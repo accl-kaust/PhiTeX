@@ -220,8 +220,10 @@ var Viewer = class {
     const s = this.slots[k];
     if (!s) return;
     if (hash) this.asked.delete(`${k}:${hash}`);
+    const resized = !!img.w && !!img.h && (img.w !== this.size.w || img.h !== this.size.h);
     if (img.w && img.h) this.size = { w: img.w, h: img.h };
     s.img = img;
+    if (resized) queueMicrotask(() => this.redraw());
     s.drawn = hash ?? s.hash;
     this.toPaint.add(s);
     if (!this.paintFrame) this.paintFrame = requestAnimationFrame(() => this.paintSome());
@@ -258,6 +260,16 @@ var Viewer = class {
     if (at) {
       const b = at.el.getBoundingClientRect();
       this.scroller.scrollTop += b.top + frac * b.height - v.top;
+    }
+    const want = Math.round(this.size.w * (96 / 72) * this.host.scale() * (window.devicePixelRatio || 1));
+    let coarse = false;
+    for (const s of this.slots) {
+      const c = s.img?.canvas.querySelector("canvas");
+      if (c && c.width < want - 1) s.drawn = null, coarse = true;
+    }
+    if (coarse) {
+      this.asked.clear();
+      this.wantVisible();
     }
   }
   /** Scroll page `k` into view, as Overleaf's page buttons do. */
@@ -1630,6 +1642,10 @@ var Panel = class {
    * page's width, as Overleaf's viewer fits it: (clientWidth − 40) / the
    * page's width, 40 being its scrollbar's padding.
    */
+  /** Device pixels per PDF point at the current zoom: the size pages are drawn at. */
+  pixelsPerPoint() {
+    return 96 / 72 * this.scale() * (window.devicePixelRatio || 1);
+  }
   scale() {
     if (this.prefs.zoom !== "fit") return Number(this.prefs.zoom);
     const pageW = (this.last?.w ?? 612) * (96 / 72);
@@ -3751,7 +3767,7 @@ var Pages = class {
     const o = op;
     if (o.op === "png") {
       const d = await this.open().catch(() => null);
-      const drawn = d?.draw(o.page ?? 0, 96 / 72 * (window.devicePixelRatio || 1) * 1.25);
+      const drawn = d?.draw(o.page ?? 0, panel.pixelsPerPoint());
       if (!drawn) return { ok: false, json: { error: "no such page" } };
       return { ok: true, canvas: toCanvas(drawn), size: [drawn.w, drawn.h], links: drawn.links };
     }
@@ -3925,5 +3941,7 @@ sock.onOpen = () => {
   started = true;
   void session.start();
 };
-sock.onClose = () => panel.msg("not connected to phitex watch (retrying)", true);
+var unreached = "Can't reach phitex watch over its WebSocket (retrying). Is it still running? A browser add-on blocking connections to localhost also does this: try a private window, or allow 127.0.0.1 in the add-on.";
+sock.onClose = () => started ? panel.msg("not connected to phitex watch (retrying)", true) : panel.error(unreached);
+setTimeout(() => started || panel.error(unreached), 3e3);
 sock.connect();

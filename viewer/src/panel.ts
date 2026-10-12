@@ -1182,6 +1182,11 @@ export class Panel {
    * page's width, as Overleaf's viewer fits it: (clientWidth − 40) / the
    * page's width, 40 being its scrollbar's padding.
    */
+  /** Device pixels per PDF point at the current zoom: the size pages are drawn at. */
+  pixelsPerPoint(): number {
+    return (96 / 72) * this.scale() * (window.devicePixelRatio || 1);
+  }
+
   private scale(): number {
     if (this.prefs.zoom !== "fit") return Number(this.prefs.zoom);
     const pageW = (this.last?.w ?? 612) * (96 / 72);
