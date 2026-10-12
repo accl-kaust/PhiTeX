@@ -8,17 +8,17 @@
 //!   path begins with a random token, so no other page in the browser can
 //!   read the document.
 //! - **Pages.** The build's PDF bytes (a DVI build's made a PDF by
-//!   dvipdfmx for the viewer: `dvipdf.rs`): each page's hash
-//!   (`phitex_draw`, its content and size, pages whose bytes did not move
-//!   keeping theirs), and a page's draw list when the browser asks, kept
-//!   by hash. After a build, `{"event":"settled"}`: the browser asks for
-//!   the pages whose hashes changed; the watch prints which (kept and
-//!   redrawn, first pages first).
+//!   dvipdfmx for the viewer: `dvipdf.rs`) at `doc.pdf`, and each page's
+//!   hash as the build gives it. The browser draws the pages itself with
+//!   MuPDF (`mupdf/`, its WebAssembly build as published, and
+//!   `viewer/src/mupdf.ts`). After a build, `{"event":"settled"}`: the
+//!   browser loads the new PDF and draws again the pages whose hashes
+//!   changed.
 //! - **Protocol.** The Overleaf extension's core requests (`session.ts`'s
 //!   `CoreReq`) as JSON over the WebSocket: `{"id":N,"op":…}`, answered
-//!   `{"id":N,"ok":…,"json":…,"draws":…}` (`serde_json`); unasked, events
+//!   `{"id":N,"ok":…,"json":…}` (`serde_json`); unasked, events
 //!   `settled`, `preparing`, `diagnostics`. Ops: `open`, `status`, `pages`,
-//!   `png` (a page's draw list), `diagnostics`, `outline`, `source` (a
+//!   `diagnostics`, `source` (a
 //!   double-click's or an error's place: the editor opens there), and the
 //!   editor's buffer: `set_file {file, text}` and `edit {file, start, end,
 //!   text}` (UTF-16 offsets) become the Build's new versions of the file,
@@ -27,14 +27,12 @@
 //!   double-click finds and forward search highlights. The diff ops
 //!   (`diff_*`) say they are not there.
 
-use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
 
 use serde_json::{Value, json};
 use tungstenite::{Message, WebSocket};
@@ -45,15 +43,25 @@ use crate::ws;
 const INDEX: &[u8] = include_bytes!("../viewer/index.html");
 const SCRIPT: &[u8] = include_bytes!("../viewer/viewer.js");
 
-/// Fonts the viewer draws text in when a page's font has no outlines
-/// (`page2.ts`'s `FILES`), found by kpathsea.
-const FONTS: [&str; 6] = [
-    "lmroman10-regular.otf",
-    "lmroman10-bold.otf",
-    "lmroman10-italic.otf",
-    "lmroman10-bolditalic.otf",
-    "lmmono10-regular.otf",
-    "latinmodern-math.otf",
+/// MuPDF's WebAssembly build, as published (`mupdf` on npm, its `dist/`,
+/// fetched pinned into `upstream/mupdf/` by `scripts/fetch-mupdf.sh`): the
+/// browser draws the pages with it.
+const MUPDF: [(&str, &str, &[u8]); 3] = [
+    (
+        "mupdf.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../../upstream/mupdf/dist/mupdf.js"),
+    ),
+    (
+        "mupdf-wasm.js",
+        "text/javascript; charset=utf-8",
+        include_bytes!("../../../upstream/mupdf/dist/mupdf-wasm.js"),
+    ),
+    (
+        "mupdf-wasm.wasm",
+        "application/wasm",
+        include_bytes!("../../../upstream/mupdf/dist/mupdf-wasm.wasm"),
+    ),
 ];
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -64,6 +72,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct Built {
     /// The PDF to show (none: no pages, or a DVI that dvipdfmx refused).
     pub pdf: Option<Arc<[u8]>>,
+    /// Its pages' hashes, first first (the build's: what changed).
+    pub hashes: Vec<u64>,
     /// TeX's history (0 spotless … 2 errors).
     pub history: i32,
     pub ms: f64,
@@ -90,12 +100,9 @@ pub enum Ask {
 #[derive(Default)]
 struct Pages {
     pdf: Option<Arc<[u8]>>,
-    sums: Vec<phitex_draw::PageSum>,
     hashes: Vec<u64>,
     history: i32,
     ms: f64,
-    /// Draw lists, by page hash (those of the pages there are now).
-    draws: HashMap<u64, Arc<str>>,
 }
 
 struct Client {
@@ -112,13 +119,6 @@ struct Shared {
     token: String,
     pages: Mutex<Pages>,
     clients: Mutex<Vec<Arc<Client>>>,
-    /// Parsed font programs, across pages and builds.
-    fonts: Mutex<phitex_draw::Fonts>,
-    /// The viewer's text fonts, by file name, read when first asked.
-    text_fonts: Mutex<BTreeMap<String, Option<Arc<[u8]>>>>,
-    kpse: Mutex<Option<phitex_kpse::Kpse>>,
-    /// Log each page drawn (`PHITEX_VIEW_LOG=1`).
-    log: bool,
     /// The directory the watch runs in: the project's files are named from
     /// it.
     root: PathBuf,
@@ -172,10 +172,6 @@ impl View {
             token: token(),
             pages: Mutex::new(Pages::default()),
             clients: Mutex::new(Vec::new()),
-            fonts: Mutex::new(phitex_draw::Fonts::new()),
-            text_fonts: Mutex::new(BTreeMap::new()),
-            kpse: Mutex::new(None),
-            log: std::env::var("PHITEX_VIEW_LOG").is_ok_and(|v| v == "1"),
             root: std::env::current_dir()?,
             editor,
             diagnostics: Mutex::new(json!([])),
@@ -224,40 +220,23 @@ impl View {
         );
     }
 
-    /// A build is in: its PDF's pages hashed, the browsers told (they ask
-    /// for the pages that changed). The pages (from 1) whose hashes
+    /// A build is in: its PDF and pages' hashes kept, the browsers told
+    /// (they draw the pages that changed). The pages (from 1) whose hashes
     /// changed, and how many there are.
     pub fn built(&self, b: &Built) -> (Vec<usize>, usize) {
         let mut pages = lock(&self.shared.pages);
-        let first = match (&pages.pdf, &b.pdf) {
-            (Some(old), Some(new)) => Some(
-                old.iter()
-                    .zip(new.iter())
-                    .take_while(|(x, y)| x == y)
-                    .count(),
-            ),
-            _ => None,
-        };
-        let sums = b
-            .pdf
-            .as_ref()
-            .and_then(phitex_draw::Pdf::open)
-            .map(|p| p.hashes_since(&pages.sums, first))
-            .unwrap_or_default();
-        let hashes: Vec<u64> = sums.iter().map(|s| s.hash).collect();
-        let changed: Vec<usize> = hashes
+        let changed: Vec<usize> = b
+            .hashes
             .iter()
             .enumerate()
             .filter(|&(k, h)| pages.hashes.get(k) != Some(h))
             .map(|(k, _)| k + 1)
             .collect();
-        pages.draws.retain(|h, _| hashes.contains(h));
         pages.pdf.clone_from(&b.pdf);
-        pages.sums = sums;
         pages.history = b.history;
         pages.ms = b.ms;
-        let n = hashes.len();
-        pages.hashes = hashes;
+        let n = b.hashes.len();
+        pages.hashes.clone_from(&b.hashes);
         drop(pages);
         let items = Value::from(b.diagnostics.clone());
         broadcast(
@@ -334,35 +313,16 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
                 socket(s, sock);
             }
         }
-        f if f.starts_with("fonts/") => {
-            let _ = match text_font(s, &f[6..]) {
-                Some(b) => ws::respond(&mut w, "200 OK", "font/otf", &b),
-                None => ws::respond(&mut w, "404 Not Found", "text/plain", b"no such font\n"),
+        f if f.starts_with("mupdf/") => {
+            let _ = match MUPDF.iter().find(|(n, _, _)| *n == &f[6..]) {
+                Some((_, ctype, b)) => ws::respond(&mut w, "200 OK", ctype, b),
+                None => ws::respond(&mut w, "404 Not Found", "text/plain", b"not found\n"),
             };
         }
         _ => {
             let _ = ws::respond(&mut w, "404 Not Found", "text/plain", b"not found\n");
         }
     }
-}
-
-/// One of the viewer's text fonts, by file name.
-fn text_font(s: &Shared, name: &str) -> Option<Arc<[u8]>> {
-    if !FONTS.contains(&name) {
-        return None;
-    }
-    if let Some(f) = lock(&s.text_fonts).get(name) {
-        return f.clone();
-    }
-    let f = {
-        let mut k = lock(&s.kpse);
-        let k = k.get_or_insert_with(|| crate::tex::kpse("phitex", "pdftex"));
-        k.find_file(name.as_bytes(), phitex_kpse::Format::OpenType, false)
-            .and_then(|p| std::fs::read(&*String::from_utf8_lossy(&p)).ok())
-            .map(Arc::from)
-    };
-    lock(&s.text_fonts).insert(name.to_owned(), f.clone());
-    f
 }
 
 /// A WebSocket's requests, answered in order until it closes. Its reads
@@ -402,31 +362,6 @@ fn hashes_json(hs: &[u64]) -> Value {
     hs.iter().map(|h| format!("{h:016x}")).collect()
 }
 
-/// Page `k`'s draw list and hash, drawn now or kept.
-fn draw_list(s: &Shared, k: usize) -> Option<(Arc<str>, u64)> {
-    let (pdf, h) = {
-        let p = lock(&s.pages);
-        let h = *p.hashes.get(k)?;
-        if let Some(d) = p.draws.get(&h) {
-            return Some((d.clone(), h));
-        }
-        (p.pdf.clone()?, h)
-    };
-    let t = Instant::now();
-    let doc = phitex_draw::Pdf::open(&pdf)?;
-    let d: Arc<str> = doc.draw(k, &mut lock(&s.fonts))?.into();
-    if s.log {
-        eprintln!(
-            "viewer: page {} ({h:016x}) drawn in {:.1} ms, {} KB",
-            k + 1,
-            t.elapsed().as_secs_f64() * 1e3,
-            d.len() / 1024
-        );
-    }
-    lock(&s.pages).draws.insert(h, d.clone());
-    Some((d, h))
-}
-
 fn ask(s: &Shared, a: Ask) {
     lock(&s.asks).push(a);
     if let Some(w) = lock(&s.wake).as_ref() {
@@ -440,7 +375,6 @@ fn index(v: &Value) -> Option<usize> {
 }
 
 /// The reply to request `req` (`session.ts`'s `CoreRes`, with its `id`).
-/// A page's draw list (JSON already) is put in as it is.
 fn answer(s: &Shared, req: &Value) -> String {
     let id = req.get("id").and_then(index).unwrap_or(0);
     let op = req.get("op").and_then(Value::as_str).unwrap_or("");
@@ -452,7 +386,6 @@ fn answer(s: &Shared, req: &Value) -> String {
     };
     let ok = |json: Value| json!({"id": id, "ok": true, "json": json});
     let fail = |e: &str| json!({"id": id, "ok": false, "error": e});
-    let mut draws = None;
     let reply = match op {
         "open" | "status" => {
             let (hs, history, ms) = state();
@@ -469,13 +402,7 @@ fn answer(s: &Shared, req: &Value) -> String {
             }))
         }
         "pages" => ok(json!({"pages": hashes_json(&state().0)})),
-        "png" => match page.and_then(|k| draw_list(s, k)) {
-            Some((d, h)) => {
-                draws = Some(d);
-                ok(json!({"hash": format!("{h:016x}")}))
-            }
-            None => fail("no such page"),
-        },
+        "png" => fail("the pages are drawn in the browser (MuPDF), from doc.pdf"),
         "set_file" | "edit" => {
             let file = text("file").unwrap_or_default();
             let body = text("text").unwrap_or_default();
@@ -493,14 +420,11 @@ fn answer(s: &Shared, req: &Value) -> String {
             // (answered with the last build's pages; the edit's build
             // pushes `settled` when it is in)
             let (hs, history, ms) = state();
-            let painted = page.and_then(|k| draw_list(s, k));
-            let hash = painted.as_ref().map(|(_, h)| format!("{h:016x}"));
-            draws = painted.map(|(d, _)| d);
             ok(json!({
                 "ok": true,
                 "pages": hs.len(),
                 "history": history,
-                "painted_hash": hash,
+                "painted_hash": null,
                 "paint_ms": ms,
                 "total_ms": ms,
                 "stats": {"rebuilt": 0, "reused": 0, "passes": 1},
@@ -520,15 +444,8 @@ fn answer(s: &Shared, req: &Value) -> String {
             }
         }
         "diagnostics" => ok(json!({"items": lock(&s.diagnostics).clone()})),
-        "outline" => {
-            let pdf = lock(&s.pages).pdf.clone();
-            let items = pdf
-                .as_ref()
-                .and_then(phitex_draw::Pdf::open)
-                .and_then(|d| serde_json::from_str::<Value>(&d.outline()).ok())
-                .unwrap_or_else(|| json!([]));
-            ok(json!({"items": items}))
-        }
+        // (the browser reads the outline from the PDF itself, with MuPDF)
+        "outline" => ok(json!({"items": []})),
         "diff" => ok(json!({})),
         o if o.starts_with("diff_") => {
             fail("the diff against a past version is not in the CLI yet")
@@ -536,12 +453,7 @@ fn answer(s: &Shared, req: &Value) -> String {
         "trace" | "check" => ok(json!({"ok": true, "ms": 0})),
         _ => fail(&format!("no op {op:?} here")),
     };
-    let mut out = reply.to_string();
-    if let Some(d) = draws {
-        out.pop();
-        let _ = write!(out, ",\"draws\":{d}}}");
-    }
-    out
+    reply.to_string()
 }
 
 /// The line and column (from 1; the column in characters) of byte `at`
