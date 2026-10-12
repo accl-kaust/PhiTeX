@@ -1535,6 +1535,7 @@ dependencies = [
  "annotate-snippets",
  "bytesize",
  "clap",
+ "jiff",
  "notify",
  "phitex-bibtex",
  "phitex-codecs",
