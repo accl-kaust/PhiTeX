@@ -1184,6 +1184,8 @@ pub(crate) struct Following<'a> {
     /// The label the next sibling is searched after.
     pub(crate) label: u64,
     parent: Slot,
+    /// The labels of the node's own unfolded text: skipped.
+    owned: Option<(u64, u64)>,
     pub(crate) slots: Vec<Slot>,
 }
 
@@ -1195,6 +1197,13 @@ impl Iterator for Following<'_> {
         loop {
             let (k, item) = e.order.next(e.units[self.unit as usize].root, self.label)?;
             self.label = k;
+            if let Some((lo, hi)) = self.owned
+                && lo <= k
+                && k <= hi
+            {
+                self.label = hi;
+                continue;
+            }
             let s = item.slot;
             let n = &e.nodes[s.ix as usize];
             if n.parent == self.parent {
@@ -3578,15 +3587,19 @@ impl Engine {
 
     pub(crate) fn following(&self, s: Slot) -> Following<'_> {
         let n = self.n(s);
-        let start = self
-            .aux_of(s)
-            .and_then(|a| a.claimed.last().copied())
-            .map_or(n.label, |_| n.label);
+        // What `s` unfolded (children and continuations) follows its claimed
+        // text and is its own: a continuation is a sibling in the tree, but
+        // not one `s` may claim.
+        let owned = self.aux_of(s).and_then(|a| a.children.first().copied()).map(|first| {
+            let end = self.subtree_end(s);
+            (self.n(first).label, self.n(end).label)
+        });
         Following {
             eng: self,
             unit: n.unit,
-            label: start,
+            label: n.label,
             parent: n.parent,
+            owned,
             slots: Vec::new(),
         }
     }
