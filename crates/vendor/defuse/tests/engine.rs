@@ -1467,6 +1467,39 @@ fn a_toy_derived_trace_round_trips_and_replays_like_a_cold_run() {
 }
 
 #[test]
+fn deleting_an_outer_opener_rebinds_a_reader_past_an_inner_openers_definition() {
+    // `B` opens a scope and defines `f` (an opener's own definitions lie
+    // in the enclosing scope); inside `A`, that is invisible to `R`
+    // after `A`'s close. Deleting `A` leaves its close unmatched and
+    // `B`'s definition at the top level: `R` now reads it, as in a cold
+    // evaluation of the edited document.
+    use common::trace::{self, Doc};
+    let text = concat!(
+        "{\"meta\": {\"version\": 1, \"document\": \"m\", \"steps\": 5, \"sequences\": [], \"env\": {}}}\n",
+        "{\"id\": \"A\", \"class\": \"a\", \"pos\": 1, \"reads\": [], \"writes\": [], \"scope\": \"open\", \"scope_kind\": \"k1\"}\n",
+        "{\"id\": \"B\", \"class\": \"b\", \"pos\": 2, \"reads\": [], \"writes\": [{\"field\": \"f\", \"locality\": \"local\"}], \"scope\": \"open\", \"scope_kind\": \"k2\"}\n",
+        "{\"id\": \"cB\", \"class\": \"c\", \"pos\": 3, \"reads\": [], \"writes\": [], \"scope\": \"close\"}\n",
+        "{\"id\": \"cA\", \"class\": \"c\", \"pos\": 4, \"reads\": [], \"writes\": [], \"scope\": \"close\"}\n",
+        "{\"id\": \"R\", \"class\": \"r\", \"pos\": 5, \"reads\": [\"f\"], \"writes\": []}\n",
+    );
+    let tr = trace::load_trace(text).expect("loads");
+    let mut eng = Engine::new();
+    let mut doc = Doc::load(&mut eng, &tr);
+    eng.evaluate_sequential().expect("cold");
+    let before = doc.result(&eng);
+    let edit = trace::load_edits("{\"op\": \"delete\", \"step\": \"A\"}\n").expect("edit");
+    doc.apply(&mut eng, &edit[0].edit).expect("apply");
+    eng.evaluate_sequential().expect("after the edit");
+    let got = doc.result(&eng);
+    let mut e2 = Engine::new();
+    let d2 = Doc::load(&mut e2, &doc.snapshot());
+    e2.evaluate_sequential().expect("cold replay");
+    let want = d2.result(&e2);
+    assert_eq!(got, want, "incremental != cold after deleting the outer opener");
+    assert_ne!(got[3], before[4], "R now reads B's definition");
+}
+
+#[test]
 fn trace_steps_exercise_scopes_claims_contributions_folds_and_the_environment() {
     use common::trace::{self, Doc};
     let text = concat!(
