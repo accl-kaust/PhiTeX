@@ -4,7 +4,11 @@
 //!
 //! `cargo run --release --example replay -- TRACE.jsonl [EDITS.jsonl]
 //!     [--threads N] [--spec off|predicted|all] [--check] [--check-every K] [--edits N]
-//!     [--env FIELD=INT]...`
+//!     [--dump-at N DIR] [--shrink DIR] [--env FIELD=INT]...`
+//! `--shrink DIR` minimises the trace to the fewest steps for which the
+//! first `--edits N` edits still give a result a cold replay does not.
+//! `--dump-at N DIR` writes the document after edit N as `DIR/trace.jsonl`
+//! with the remaining edits as `DIR/edits.jsonl`: a case starting there.
 //! `cargo run --release --example replay -- --from-toy N [OUT.jsonl]`
 //!     writes a trace derived from the generated N-line toy program (and
 //!     `OUT.edits.jsonl` with 200 generated edits), or replays it directly.
@@ -22,6 +26,7 @@ use defuse::{Engine, Field, Greedy, Report, Speculation, ValueId};
 /// One edit's wall time, nodes run, and the trace's expectation.
 type Sample = (Duration, u64, Option<u64>);
 
+#[derive(Clone)]
 struct Opts {
     threads: usize,
     spec: Speculation,
@@ -30,6 +35,12 @@ struct Opts {
     env: Vec<(String, i64)>,
     /// At most this many edits (0 = the cold evaluation only).
     max_edits: usize,
+    /// After this many edits, write the document as a trace and the
+    /// remaining edits to this directory (a case that starts there).
+    dump_at: Option<(usize, String)>,
+    /// Minimise the trace for the first edit's divergence, into this
+    /// directory.
+    shrink: Option<String>,
 }
 
 fn eval(eng: &mut Engine, o: &Opts) -> Result<Report, String> {
@@ -75,6 +86,54 @@ fn cold(t: &Trace, o: &Opts) -> Result<(Engine, Doc, Report, Duration, Duration)
     Ok((eng, doc, r, load, t1.elapsed()))
 }
 
+/// Whether a cold evaluation, then the edits, gives a result a cold
+/// evaluation of the edited document does not (sequentially).
+fn diverges(t: &Trace, edits: &[EditLine], o: &Opts) -> bool {
+    let Ok((mut eng, mut doc, _, _, _)) = cold(t, o) else {
+        return false;
+    };
+    for e in edits {
+        if doc.apply(&mut eng, &e.edit).is_err() || eval(&mut eng, o).is_err() {
+            return false;
+        }
+    }
+    let Ok((e2, d2, _, _, _)) = cold(&doc.snapshot(), o) else {
+        return false;
+    };
+    doc.result(&eng) != d2.result(&e2)
+}
+
+/// `--shrink DIR`: the fewest steps for which the edits' incremental
+/// result still differs from a cold replay; written as a case to `DIR`.
+fn shrink_case(t: &Trace, edits: &[EditLine], o: &Opts, dir: &str) {
+    let seq = Opts {
+        threads: 1,
+        spec: Speculation::Off,
+        ..o.clone()
+    };
+    let edits: Vec<EditLine> = edits.iter().take(o.max_edits).cloned().collect();
+    if !diverges(t, &edits, &seq) {
+        println!("the edits' incremental result equals a cold replay (sequentially): nothing to shrink");
+        std::process::exit(1);
+    }
+    let min = trace::shrink(t, &|t2| diverges(t2, &edits, &seq), &|n| eprintln!("{n} steps"));
+    std::fs::create_dir_all(dir).expect("shrink dir");
+    std::fs::write(format!("{dir}/trace.jsonl"), trace::trace_jsonl(&min)).expect("write trace");
+    let text: String = edits.iter().map(|e| edit_json(&e.edit) + "\n").collect();
+    std::fs::write(format!("{dir}/edits.jsonl"), text).expect("write edits");
+    println!(
+        "MIN {} top-level steps: {dir}/trace.jsonl, {dir}/edits.jsonl ({} edits)",
+        min.steps.len(),
+        edits.len()
+    );
+    for s in &min.steps {
+        println!("{}", trace::step_json(s));
+    }
+    for e in &edits {
+        println!("edit {}", edit_json(&e.edit));
+    }
+}
+
 fn pct(ts: &mut [Duration], p: usize) -> Duration {
     ts.sort();
     ts[(ts.len() - 1) * p / 100]
@@ -83,41 +142,48 @@ fn pct(ts: &mut [Duration], p: usize) -> Duration {
 #[allow(clippy::too_many_lines)]
 fn main() {
     let mut args = std::env::args().skip(1);
-    let mut o = Opts {
+    let mut opts = Opts {
         threads: 1,
         spec: Speculation::Off,
         check: false,
         check_every: 0,
         env: Vec::new(),
         max_edits: usize::MAX,
+        dump_at: None,
+        shrink: None,
     };
     let mut paths = Vec::new();
     let mut from_toy: Option<usize> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--threads" => o.threads = args.next().and_then(|s| s.parse().ok()).expect("--threads N"),
+            "--threads" => opts.threads = args.next().and_then(|s| s.parse().ok()).expect("--threads N"),
             "--spec" => {
-                o.spec = match args.next().as_deref() {
+                opts.spec = match args.next().as_deref() {
                     Some("off") => Speculation::Off,
                     Some("predicted") => Speculation::Predicted,
                     Some("all") => Speculation::All,
                     _ => panic!("--spec off|predicted|all"),
                 }
             }
-            "--check" => o.check = true,
-            "--check-every" => o.check_every = args.next().and_then(|s| s.parse().ok()).expect("--check-every K"),
-            "--edits" => o.max_edits = args.next().and_then(|s| s.parse().ok()).expect("--edits N"),
+            "--check" => opts.check = true,
+            "--check-every" => opts.check_every = args.next().and_then(|s| s.parse().ok()).expect("--check-every K"),
+            "--edits" => opts.max_edits = args.next().and_then(|s| s.parse().ok()).expect("--edits N"),
+            "--shrink" => opts.shrink = Some(args.next().expect("--shrink DIR")),
+            "--dump-at" => {
+                let n = args.next().and_then(|s| s.parse().ok()).expect("--dump-at N DIR");
+                opts.dump_at = Some((n, args.next().expect("--dump-at N DIR")));
+            }
             "--env" => {
                 let kv = args.next().expect("--env FIELD=INT");
                 let (f, x) = kv.split_once('=').expect("--env FIELD=INT");
-                o.env.push((f.to_string(), x.parse().expect("--env FIELD=INT")));
+                opts.env.push((f.to_string(), x.parse().expect("--env FIELD=INT")));
             }
             "--from-toy" => from_toy = Some(args.next().and_then(|s| s.parse().ok()).expect("--from-toy N")),
             s => paths.push(s.to_string()),
         }
     }
-    if o.check && o.check_every == 0 {
-        o.check_every = 1;
+    if opts.check && opts.check_every == 0 {
+        opts.check_every = 1;
     }
     let (trace, edits) = if let Some(n) = from_toy {
         let t0 = Instant::now();
@@ -173,6 +239,10 @@ fn main() {
         };
         (t, edits)
     };
+    if let Some(dir) = &opts.shrink {
+        shrink_case(&trace, &edits, &opts, dir);
+        return;
+    }
     println!(
         "trace {:?}: {} steps, {} sequences, {} env fields; {} edits; threads {} spec {:?}",
         trace.meta.document,
@@ -180,10 +250,10 @@ fn main() {
         trace.meta.sequences.len(),
         trace.meta.env.len(),
         edits.len(),
-        o.threads,
-        o.spec
+        opts.threads,
+        opts.spec
     );
-    let (mut eng, mut doc, r, load, t) = cold(&trace, &o).unwrap_or_else(|e| {
+    let (mut eng, mut doc, r, load, t) = cold(&trace, &opts).unwrap_or_else(|e| {
         eprintln!("cold evaluation failed: {e}");
         std::process::exit(1);
     });
@@ -214,8 +284,8 @@ fn main() {
             .collect();
         println!("causes: {}", items.join("; "));
     }
-    if o.check {
-        let (e2, d2, _, _, _) = cold(&trace, &o).expect("second cold");
+    if opts.check {
+        let (e2, d2, _, _, _) = cold(&trace, &opts).expect("second cold");
         assert_eq!(doc.result(&eng), d2.result(&e2), "two cold evaluations differ");
     }
     let mut stats: Vec<(&'static str, Vec<Sample>)> = vec![
@@ -225,7 +295,7 @@ fn main() {
         ("delete", Vec::new()),
     ];
     let mut mismatches = 0;
-    for (k, EditLine { edit, expect_reached }) in edits.iter().take(o.max_edits).enumerate() {
+    for (k, EditLine { edit, expect_reached }) in edits.iter().take(opts.max_edits).enumerate() {
         let kind = match edit {
             Edit::ChangeWrites(..) => 0,
             Edit::ChangeReads(..) => 1,
@@ -237,7 +307,7 @@ fn main() {
             eprintln!("edit {}: {e}", k + 1);
             std::process::exit(1);
         }
-        let r = eval(&mut eng, &o).unwrap_or_else(|e| {
+        let r = eval(&mut eng, &opts).unwrap_or_else(|e| {
             eprintln!("edit {}: evaluation failed: {e}", k + 1);
             std::process::exit(1);
         });
@@ -255,9 +325,21 @@ fn main() {
             );
         }
         stats[kind].1.push((wall, r.nodes_run, *expect_reached));
-        if o.check_every > 0 && (k + 1) % o.check_every == 0 {
+        if let Some((n, dir)) = &opts.dump_at
+            && k + 1 == *n
+        {
+            std::fs::create_dir_all(dir).expect("dump dir");
+            std::fs::write(format!("{dir}/trace.jsonl"), trace::trace_jsonl(&doc.snapshot())).expect("write trace");
+            let rest: String = edits[k + 1..].iter().map(|e| edit_json(&e.edit) + "\n").collect();
+            std::fs::write(format!("{dir}/edits.jsonl"), rest).expect("write edits");
+            println!(
+                "after edit {n}: wrote {dir}/trace.jsonl and {dir}/edits.jsonl ({} edits)",
+                edits.len() - k - 1
+            );
+        }
+        if opts.check_every > 0 && (k + 1) % opts.check_every == 0 {
             let snap = doc.snapshot();
-            let (e2, d2, _, _, _) = cold(&snap, &o).unwrap_or_else(|e| {
+            let (e2, d2, _, _, _) = cold(&snap, &opts).unwrap_or_else(|e| {
                 eprintln!("edit {}: cold replay failed: {e}", k + 1);
                 std::process::exit(1);
             });
@@ -315,7 +397,7 @@ fn main() {
     if mismatches > 0 {
         println!("{mismatches} edits ran more nodes than the trace's bound");
     }
-    if o.check_every > 0 {
+    if opts.check_every > 0 {
         println!("incremental results equal cold replays at every checked edit");
     }
 }
