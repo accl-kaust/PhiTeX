@@ -171,8 +171,11 @@ pub(crate) mod group {
     pub const MATH: i64 = 9;
     pub const DISC: i64 = 10;
     pub const INSERT: i64 = 11;
+    pub const VCENTER: i64 = 12;
+    pub const MATH_CHOICE: i64 = 13;
     pub const SEMI_SIMPLE: i64 = 14;
     pub const MATH_SHIFT: i64 = 15;
+    pub const MATH_LEFT: i64 = 16;
 }
 
 /// A token (§289): a character with its category, or a control sequence.

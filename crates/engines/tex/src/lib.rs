@@ -27,6 +27,7 @@ mod control;
 mod expand;
 mod fonts;
 mod log;
+mod math;
 mod nodes;
 mod ops;
 mod page;

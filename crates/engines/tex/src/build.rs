@@ -55,7 +55,7 @@ impl Run<'_, '_> {
     /// The mode and current list: the scope kind, and in vertical mode
     /// whether a paragraph is open (§211).
     pub(crate) fn mode(&mut self) -> R<Mode> {
-        let k = self.cx.scope_kind()?;
+        let k = self.scope_kind()?;
         let v = self.v;
         let (group, sid, lid, km, depth, extra) = match k {
             Some(k) => {
@@ -101,7 +101,7 @@ impl Run<'_, '_> {
     /// A scope kind: `[group, sid, list, mode, depth, parent kind,
     /// extra…]`; the parent is the kind the group's end returns to.
     pub(crate) fn kind_value(&mut self, md: &Mode, grp: i64, sid: i64, lid: i64, m: i32, extra: Vec<ValueId>) -> R<ValueId> {
-        let parent = self.cx.scope_kind()?.unwrap_or(ValueId::UNIT);
+        let parent = self.scope_kind()?.unwrap_or(ValueId::UNIT);
         Ok(self.kind_with_parent(md, grp, sid, lid, m, extra, parent))
     }
 
@@ -770,9 +770,12 @@ impl Run<'_, '_> {
                     self.build_page_mark(md)?;
                 }
             } else {
-                if md.m.abs() == 102 {
+                let b = if md.m.abs() == 102 {
                     self.set_space_factor(md, 1000);
-                }
+                    b
+                } else {
+                    crate::math::box_noad(v, b)
+                };
                 self.append(md.lid, b);
             }
         } else if ctx < SHIP_OUT_FLAG {
@@ -1027,7 +1030,7 @@ impl Run<'_, '_> {
     pub(crate) fn handle_right_brace(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
         // a paragraph inside a vertical group ends first (`end_graf`)
-        if md.m == 102 && matches!(md.group, group::VBOX | group::VTOP | group::INSERT | group::OUTPUT) {
+        if md.m == 102 && matches!(md.group, group::VBOX | group::VTOP | group::INSERT | group::OUTPUT | group::VCENTER) {
             let t = self.cur.tok.clone();
             self.back_input(t);
             self.back_input(Tok::cs("\u{10FFFE}endgraf"));
@@ -1121,7 +1124,11 @@ impl Run<'_, '_> {
             }
             group::DISC => self.build_discretionary(md),
             group::OUTPUT => crate::page::output_end(self, md),
-            group::MATH_SHIFT | group::SEMI_SIMPLE | group::MATH => Ok(()),
+            group::MATH => self.math_group_end(md),
+            group::VCENTER => self.vcenter_end(md),
+            group::MATH_CHOICE => self.build_choices(md),
+            // "Extra }, or forgotten $" / "\right" (§1069)
+            group::MATH_SHIFT | group::MATH_LEFT | group::SEMI_SIMPLE => Ok(()),
             _ => Ok(()),
         }
     }
@@ -1151,7 +1158,7 @@ impl Run<'_, '_> {
 
     fn kind_outer(&mut self, _md: &Mode) -> R<Mode> {
         let v = self.v;
-        let cur = self.cx.scope_kind()?.unwrap_or(ValueId::UNIT);
+        let cur = self.scope_kind()?.unwrap_or(ValueId::UNIT);
         let k = list_of(v, cur).get(5).copied().unwrap_or(ValueId::UNIT);
         if k == ValueId::UNIT {
             return Ok(Mode {
@@ -1214,7 +1221,7 @@ impl Run<'_, '_> {
             let sid = self.node_raw();
             let mut outer = md.clone();
             outer.depth -= 1;
-            let cur = self.cx.scope_kind()?.unwrap_or(ValueId::UNIT);
+            let cur = self.scope_kind()?.unwrap_or(ValueId::UNIT);
             let parent = list_of(v, cur).get(5).copied().unwrap_or(ValueId::UNIT);
             let kind = self.kind_with_parent(&outer, group::DISC, sid, sid, -102, extra, parent);
             self.effect = Effect::Scope(Brackets {
@@ -1312,7 +1319,7 @@ impl Run<'_, '_> {
     }
 
     /// A space (§1041–§1044).
-    fn space_glue(&mut self, f: u32, sf: i32, normal: bool) -> R<Node> {
+    pub(crate) fn space_glue(&mut self, f: u32, sf: i32, normal: bool) -> R<Node> {
         let ss = self.glue_param("spaceskip")?;
         let zero = |g: &Glue| g.width == 0 && g.stretch == 0 && g.shrink == 0;
         let fi = i64::from(f);
@@ -1783,22 +1790,6 @@ impl Run<'_, '_> {
         let rest = r.rest.map(|rb| nodes::encode_box(v, &rb, &side));
         self.modify_box_reg(n, rest)?;
         Ok(Some(nodes::encode_box(v, &r.page.node, &side)))
-    }
-
-    /// `init_math` (§1138): math is not in this slice beyond passing
-    /// through; the formula is skipped to its closing `$`.
-    pub(crate) fn init_math(&mut self, _md: &Mode) -> R<()> {
-        self.log("error", "math is not supported")?;
-        loop {
-            self.get_token()?;
-            if self.cur.cmd == cmd::MATH_SHIFT || !self.has_input() {
-                return Ok(());
-            }
-        }
-    }
-
-    pub(crate) fn after_math(&mut self, _md: &Mode) -> R<()> {
-        Ok(())
     }
 }
 

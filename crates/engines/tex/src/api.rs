@@ -193,7 +193,11 @@ impl Graph {
     fn settle(&mut self, unit: UnitId, finder: &Finder, stats: &mut Stats) {
         let needs_f = self.eng.values().field("needs");
         loop {
+            let t0 = std::time::Instant::now();
             let r = self.eng.evaluate_sequential().unwrap_or_else(|e| panic!("evaluation: {e:?}"));
+            if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+                eprintln!("round: {:?}, {} nodes run", t0.elapsed(), r.nodes_run);
+            }
             stats.add(&r);
             let v = self.eng.values();
             let needs = self.eng.acc_value(unit, needs_f).map(|n| v.seq_to_vec(n)).unwrap_or_default();
@@ -241,7 +245,10 @@ impl Graph {
     /// The text's nodes pushed onto `unit`.
     fn push_text(&mut self, unit: UnitId, text: &str) -> Vec<(String, NodeId)> {
         let mut out = Vec::new();
-        for (s, e) in slices(text) {
+        let t0 = std::time::Instant::now();
+        let sl = slices(text);
+        let t1 = t0.elapsed();
+        for (s, e) in sl {
             let piece = &text[s..e];
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
             if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
@@ -250,6 +257,9 @@ impl Graph {
             let args = slice_args(self.eng.values(), piece, starts);
             let n = self.eng.push(unit, self.ops.exec, args);
             out.push((key(piece, starts), n));
+        }
+        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+            eprintln!("push_text: slices {t1:?}, push {:?}, {} nodes", t0.elapsed() - t1, out.len());
         }
         out
     }
@@ -287,7 +297,11 @@ fn prelude_env(prelude: Option<&str>, finder: &Finder) -> Env {
         // the point the prelude's final bindings are read at
         let end = g.eng.push(unit, g.mark, Vec::new());
         let mut stats = Stats::default();
+        let t0 = std::time::Instant::now();
         g.settle(unit, finder, &mut stats);
+        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+            eprintln!("prelude settle {:?}", t0.elapsed());
+        }
         let v = g.eng.values();
         let defs_f = v.field("defs");
         let mut seen = std::collections::HashSet::new();
@@ -340,7 +354,9 @@ impl Build {
     /// [`Build::new`] with options.
     #[must_use]
     pub fn with(opts: Options, prelude: Option<&str>, document: &str) -> Build {
+        let t0 = std::time::Instant::now();
         let env = prelude_env(prelude, &opts.finder);
+        let t1 = t0.elapsed();
         let mut g = Graph::new();
         let unit = g.eng.new_unit();
         {
@@ -367,6 +383,9 @@ impl Build {
             stats: Stats::default(),
         };
         b.settle();
+        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+            eprintln!("time: prelude {t1:?}, document {:?}", t0.elapsed() - t1);
+        }
         b
     }
 
