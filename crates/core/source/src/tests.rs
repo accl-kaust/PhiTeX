@@ -112,7 +112,10 @@ fn at_byte_and_cursor() {
         }
     }
     assert_eq!(got, "ab\ncd\n");
-    assert_eq!(s.slice(s.at_byte(1).unwrap(), s.at_byte(5).unwrap()), "b\ncd");
+    assert_eq!(
+        s.slice(s.at_byte(1).unwrap(), s.at_byte(5).unwrap()),
+        "b\ncd"
+    );
 }
 
 /// Random edits: the text is the string edited the same way, and ids of

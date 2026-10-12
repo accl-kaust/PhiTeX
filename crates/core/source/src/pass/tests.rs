@@ -1142,3 +1142,221 @@ fn a_catcode_of_a_named_constant_is_that_characters() {
     let (p, _) = pass(t, FileKind::Document);
     assert!(p.hazards.iter().all(|h| h.status != Status::Pending));
 }
+
+// ---------------------------------------------------------------------
+// e-TeX's and pdfTeX's syntax.
+
+/// The text after `name`'s extent.
+fn after<'t>(p: &Pass, t: &'t str, name: &str) -> &'t str {
+    let it = item(p, name);
+    p.atoms.get(it.end).map_or("", |a| &t[a.start..])
+}
+
+fn known(p: &Pass, name: &str) -> bool {
+    matches!(hints(p, name).claim, Claim::Known(_))
+}
+
+#[test]
+fn expressions_end_at_relax_or_wait() {
+    let t = "\\count1=\\numexpr 2*\\count3+(4-1)/2\\relax X";
+    let (p, _) = pass(t, FileKind::Document);
+    assert_eq!(after(&p, t, "count"), "X");
+    assert!(known(&p, "count"));
+    // (a macro the pass cannot see: the end is the line's `\relax`)
+    let t = "\\dimen0=\\dimexpr\\zork*2\\relax X\n";
+    let (p, _) = pass(t, FileKind::Document);
+    assert_eq!(after(&p, t, "dimen"), "X\n");
+    assert!(matches!(hints(&p, "dimen").claim, Claim::Predicted { .. }));
+    let t = "\\dimen0=\\dimexpr\\zork*2\n\\relax X";
+    let (p, _) = pass(t, FileKind::Document);
+    assert_eq!(
+        hints(&p, "dimen").claim,
+        Claim::Pending {
+            cause: "expression"
+        }
+    );
+}
+
+#[test]
+fn etex_general_text_and_conditionals() {
+    for c in [
+        "detokenize",
+        "unexpanded",
+        "expanded",
+        "scantokens",
+        "showtokens",
+    ] {
+        let t = format!("\\{c}{{a{{b}}\\x}} X");
+        let (p, _) = pass(&t, FileKind::Document);
+        assert_eq!(after(&p, &t, c).trim_start(), "X", "{c}");
+        assert!(known(&p, c), "{c}");
+    }
+    let t = "\\ifdefined\\foo A\\fi \\ifcsname a\\string b\\endcsname B\\fi \\iffontchar\\tenrm`a C\\fi";
+    let (p, _) = pass(t, FileKind::Document);
+    assert!(after(&p, t, "ifdefined").starts_with("A\\fi"));
+    assert!(after(&p, t, "ifcsname").trim_start().starts_with("B\\fi"));
+    assert!(after(&p, t, "iffontchar").trim_start().starts_with("C\\fi"));
+    // (`\scantokens` runs its text: it may define anything)
+    let (p, _) = pass("\\scantokens{\\def\\x{}}", FileKind::Document);
+    assert_eq!(hints(&p, "scantokens").may_define, MayDefine::Any);
+}
+
+#[test]
+fn etex_prefixes_marks_and_middle() {
+    let t = "\\protected\\def\\x{a} \\unless\\ifx a b\\fi \\marks3{m} \\topmarks2 \\middle\\delimiter\"426830A X";
+    let (p, _) = pass(t, FileKind::Document);
+    assert!(known(&p, "protected"));
+    assert_eq!(
+        names(&hints(&p, "def").may_define),
+        [("cs:\\x".to_owned(), false)]
+    );
+    assert!(after(&p, t, "marks").starts_with(" \\topmarks"));
+    assert!(after(&p, t, "topmarks").starts_with("\\middle"));
+    assert_eq!(after(&p, t, "middle").trim_start(), "X");
+    let t = "\\left( \\middle| \\right. X";
+    let (p, _) = pass(t, FileKind::Document);
+    assert!(after(&p, t, "middle").starts_with(" \\right"));
+    assert!(known(&p, "middle"));
+}
+
+#[test]
+fn array_parameters_count_from_the_first_operand() {
+    let t = "\\interlinepenalties=3 100 200 300 X";
+    let (p, _) = pass(t, FileKind::Document);
+    assert_eq!(after(&p, t, "interlinepenalties"), "X");
+    assert!(known(&p, "interlinepenalties"));
+    let t = "\\parshape 2 1pt 2pt 3pt 4pt X";
+    let (p, _) = pass(t, FileKind::Document);
+    assert_eq!(after(&p, t, "parshape"), "X");
+    let t = "\\clubpenalties\\count1 1 2 X";
+    let (p, _) = pass(t, FileKind::Document);
+    assert!(matches!(
+        hints(&p, "clubpenalties").claim,
+        Claim::Pending { .. }
+    ));
+}
+
+#[test]
+fn readline_defines_its_control_sequence() {
+    let (p, _) = pass("\\readline5 to \\line X", FileKind::Document);
+    assert_eq!(
+        names(&hints(&p, "readline").may_define),
+        [("cs:\\line".to_owned(), false)]
+    );
+}
+
+#[test]
+fn pdftex_keyword_syntax() {
+    let cases = [
+        ("pdfliteral", "\\pdfliteral direct{0 g} X"),
+        ("pdfliteral", "\\pdfliteral shipout page{q} X"),
+        ("pdfobj", "\\pdfobj reserveobjnum X"),
+        (
+            "pdfobj",
+            "\\pdfobj useobjnum 5 stream attr{/A 1} file{x.dat} X",
+        ),
+        (
+            "pdfannot",
+            "\\pdfannot width 2pt height 1pt depth 0pt{/Subtype/Text} X",
+        ),
+        (
+            "pdfstartlink",
+            "\\pdfstartlink attr{/C[1 0 0]} goto name{sec.1} X",
+        ),
+        ("pdfstartlink", "\\pdfstartlink user{/S/URI} X"),
+        (
+            "pdfstartlink",
+            "\\pdfstartlink goto file{a.pdf} page 3{/Fit} newwindow X",
+        ),
+        ("pdfdest", "\\pdfdest name{a} xyz zoom 2 X"),
+        ("pdfdest", "\\pdfdest num 7 fitbh X"),
+        ("pdfdest", "\\pdfdest name{a} fitr width 1pt height 2pt X"),
+        ("pdfoutline", "\\pdfoutline goto num 4 count -2{Title} X"),
+        ("pdfthread", "\\pdfthread attr{/I} name{t} X"),
+        ("pdfxform", "\\pdfxform attr{/A} resources{/R} 3 X"),
+        ("pdfximage", "\\pdfximage width 3cm page 2 cropbox{a.pdf} X"),
+        ("pdfcolorstack", "\\pdfcolorstack0 push{1 0 0 rg} X"),
+        ("pdfcolorstack", "\\pdfcolorstack0 pop X"),
+        (
+            "pdfcolorstackinit",
+            "\\pdfcolorstackinit page direct{0 g} X",
+        ),
+        (
+            "pdfcatalog",
+            "\\pdfcatalog{/PageMode/UseNone} openaction goto page 1{/Fit} X",
+        ),
+        ("pdfmdfivesum", "\\pdfmdfivesum file{a.tex} X"),
+        ("pdffiledump", "\\pdffiledump offset 0 length 10{a.tex} X"),
+        ("pdfmatch", "\\pdfmatch icase subcount 2{a(b)}{xab} X"),
+        (
+            "pdffontexpand",
+            "\\pdffontexpand\\tenrm 20 20 5 autoexpand X",
+        ),
+    ];
+    for (c, t) in cases {
+        let (p, _) = pass(t, FileKind::Document);
+        assert_eq!(after(&p, t, c).trim_start(), "X", "{t}");
+        assert!(known(&p, c), "{t}: {:?}", hints(&p, c));
+    }
+}
+
+#[test]
+fn pdftex_object_commands_define_their_last_globals() {
+    let cases = [
+        ("pdfobj", "\\pdfobj{1}", vec!["misc:pdflastobj"]),
+        ("pdfxform", "\\pdfxform 2", vec!["misc:pdflastxform"]),
+        (
+            "pdfximage",
+            "\\pdfximage{a.png}",
+            vec![
+                "misc:pdflastximage",
+                "misc:pdflastximagecolordepth",
+                "misc:pdflastximagepages",
+            ],
+        ),
+        ("pdfannot", "\\pdfannot{x}", vec!["misc:pdflastannot"]),
+        (
+            "pdfstartlink",
+            "\\pdfstartlink user{x}",
+            vec!["misc:pdflastlink"],
+        ),
+    ];
+    for (c, t, want) in cases {
+        let (p, _) = pass(t, FileKind::Document);
+        let got = names(&hints(&p, c).may_define);
+        let want: Vec<(String, bool)> = want.iter().map(|f| ((*f).to_owned(), true)).collect();
+        assert_eq!(got, want, "{t}");
+    }
+    for t in [
+        "\\pdfdest name{a} fit",
+        "\\pdfliteral{q}",
+        "\\pdfoutline user{x}{t}",
+    ] {
+        let (p, _) = pass(t, FileKind::Document);
+        assert!(
+            p.items
+                .iter()
+                .all(|i| i.hints.may_define == MayDefine::Nothing),
+            "{t}"
+        );
+    }
+}
+
+#[test]
+fn pdftex_parameters_are_assignments() {
+    let t = "\\pdfcompresslevel=9 \\pdfpagebox 2 \\pdfhorigin 1in \\pdfpageattr{/R 0} X";
+    let (p, _) = pass(t, FileKind::Document);
+    for (c, f) in [
+        ("pdfcompresslevel", "param:\\pdfcompresslevel"),
+        ("pdfpagebox", "param:\\pdfpagebox"),
+        ("pdfhorigin", "param:\\pdfhorigin"),
+    ] {
+        assert!(known(&p, c), "{c}");
+        assert_eq!(
+            names(&hints(&p, c).may_define),
+            [(f.to_owned(), false)],
+            "{c}"
+        );
+    }
+    assert_eq!(after(&p, t, "pdfpageattr").trim_start(), "X");
+}
