@@ -2,8 +2,7 @@
 //! only what is given to it (the main file's text, the editor's unsaved
 //! buffers, the files the last build wrote) and writes what the build
 //! made. There is no native engine yet: `phitex-tex` on `phitex-defuse`
-//! is being written, and until it lands every build reports that. The
-//! external engines (`external.rs`) are unaffected.
+//! is being written, and until it lands every build reports that.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
