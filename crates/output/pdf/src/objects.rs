@@ -5,10 +5,11 @@
 
 use phitex_typeset::arith::Scaled;
 use phitex_typeset::node::BoxNode;
+use std::sync::Arc;
 
 use crate::{
     FontSource, Ident, OBJ_TYPE_DEST, OBJ_TYPE_OBJ, OBJ_TYPE_OTHERS, OBJ_TYPE_PAGE, OBJ_TYPE_XFORM,
-    Obj, PDF_OS_MAX_OBJS, PdfError, PdfWriter, WhatsitSource, int, pdf_error,
+    Obj, PDF_OS_MAX_OBJS, PdfError, PdfState, WhatsitSource, int, pdf_error,
 };
 
 /// What a `\pdfobj` holds.
@@ -30,8 +31,9 @@ pub(crate) struct RawObj {
 
 /// A form: the box (until shipped), its attributes and resources, its
 /// size, and its number for `/Fm` (`obj_info`).
+#[derive(Clone)]
 pub(crate) struct XForm {
-    pub boxed: Option<BoxNode>,
+    pub boxed: Option<Arc<BoxNode>>,
     pub attr: Option<Vec<u8>>,
     pub resources: Option<Vec<u8>>,
     pub width: Scaled,
@@ -39,7 +41,7 @@ pub(crate) struct XForm {
     pub depth: Scaled,
 }
 
-impl PdfWriter {
+impl PdfState {
     // ---- the table (pdfTeX §698) ----
 
     /// `pdf_create_obj(t, i)`; a named destination or thread has `i` 0
@@ -158,6 +160,7 @@ impl PdfWriter {
         } else {
             self.objs[i].offset = int(self.offset());
             self.objs[i].os_idx = -1;
+            self.chunk_objs.push(i);
         }
     }
 
@@ -311,11 +314,11 @@ impl PdfWriter {
         });
         self.aux.raw.insert(
             k,
-            RawObj {
+            Arc::new(RawObj {
                 stream,
                 attr: if stream { attr } else { None },
                 body,
-            },
+            }),
         );
         (k, refused)
     }
@@ -367,7 +370,7 @@ impl PdfWriter {
             }
         }
         // `delete_toks`: the text is gone once written
-        if let Some(r) = self.aux.raw.get_mut(&n) {
+        if let Some(r) = self.aux.raw.get_mut(&n).map(Arc::make_mut) {
             r.body = ObjBody::Text(Vec::new());
             r.attr = None;
         }
@@ -415,7 +418,7 @@ impl PdfWriter {
                 width: b.width,
                 height: b.height,
                 depth: b.depth,
-                boxed: Some(b),
+                boxed: Some(Arc::new(b)),
                 attr,
                 resources,
             },

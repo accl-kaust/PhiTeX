@@ -2,7 +2,7 @@
 //! links, destinations, threads, outlines, images and fonts;
 //! byte-identical with pdfTeX 1.40.29.
 //!
-//! [`PdfWriter`] is `pdf_ship_out` (pdfTeX §750–§771) with
+//! [`PdfState`] is `pdf_ship_out` (pdfTeX §750–§771) with
 //! `pdf_hlist_out` and `pdf_vlist_out` (pdfTeX §729–§746) over
 //! [`phitex_typeset`] nodes, the text state machine of pdfTeX §691–§693,
 //! the object table and object streams of pdfTeX §694–§702, the
@@ -21,31 +21,49 @@
 //! in that order, so the TeX side calls the writer at the same moments:
 //!
 //! * **When the command is read** (`\immediate` or not): `\pdfobj`
-//!   ([`PdfWriter::obj`], [`PdfWriter::obj_reserve`]), `\pdfxform`
-//!   ([`PdfWriter::xform`]), `\pdfximage` ([`PdfWriter::ximage`]),
+//!   ([`PdfState::obj`], [`PdfState::obj_reserve`]), `\pdfxform`
+//!   ([`PdfState::xform`]), `\pdfximage` ([`PdfState::ximage`]),
 //!   `\pdfannot` and `\pdfstartlink` (their object number,
-//!   [`PdfWriter::new_objnum`]), `\pdfoutline` ([`PdfWriter::outline`]),
+//!   [`PdfState::new_objnum`]), `\pdfoutline` ([`PdfState::outline`]),
 //!   `\pdfcatalog`, `\pdfinfo`, `\pdfnames`, `\pdftrailer`,
-//!   `\pdftrailerid` ([`PdfWriter::catalog`] and its siblings),
-//!   `\pdfpageref` ([`PdfWriter::page_ref`]), `\pdfcolorstackinit`
-//!   ([`PdfWriter::colorstack_init`]), `\pdffontattr`,
+//!   `\pdftrailerid` ([`PdfState::catalog`] and its siblings),
+//!   `\pdfpageref` ([`PdfState::page_ref`]), `\pdfcolorstackinit`
+//!   ([`PdfState::colorstack_init`]), `\pdffontattr`,
 //!   `\pdfincludechars`, `\pdffontobjnum`, `\pdfmapline`, `\pdfmapfile`,
 //!   `\pdfglyphtounicode`, `\pdfnobuiltintounicode`. With `\immediate`,
 //!   `\pdfobj`, `\pdfxform` and `\pdfximage` are then written at once
-//!   ([`PdfWriter::write_obj`], [`PdfWriter::write_xform`],
-//!   [`PdfWriter::write_ximage`]).
-//! * **At `\shipout`**: [`PdfWriter::ship_out_with`] (or
-//!   [`PdfWriter::ship_out`] for lists without pdfTeX whatsits) walks the
+//!   ([`PdfState::write_obj`], [`PdfState::write_xform`],
+//!   [`PdfState::write_ximage`]).
+//! * **At `\shipout`**: [`PdfState::ship_out_with`] (or
+//!   [`PdfState::ship_out`] for lists without pdfTeX whatsits) walks the
 //!   box; each whatsit is asked for its data ([`Whatsit`]) when it is
 //!   met, so positions are those of the walk. The objects, forms and
 //!   images the page refers to, its annotations, links, destinations and
 //!   beads are written after its contents, as pdfTeX writes them.
-//! * **At the end**: [`PdfWriter::finish`] writes the fonts, the page
-//!   tree, outlines, the name tree, threads, the catalog, the `/Info`
+//! * **At the end**: [`finish`] writes the fonts, the page tree,
+//!   outlines, the name tree, threads, the catalog, the `/Info`
 //!   dictionary and the cross-reference table or stream.
 //!
+//! # State and bytes
+//!
+//! The writer is a fold over the document: [`PdfState`] is everything
+//! pdfTeX remembers (the object table and counters, fonts, images,
+//! forms, destinations, outlines, threads, colour stacks, the map), and
+//! it is `Clone` (cheaply: font files, images, forms' boxes and objects'
+//! texts are shared) so the TeX side can snapshot it after any step and
+//! read `\pdflastobj`, `\pdfpageref` and their siblings from the state
+//! the step left. The bytes go to [`PdfBytes`], append-only: after a
+//! step, [`PdfState::flush`] moves what it wrote there as one [`Chunk`],
+//! with the numbers of the objects that begin in it. The state never
+//! reads the bytes back; it only counts them, so object offsets are known
+//! as objects begin. To redo the document from step `k`, continue from
+//! the state cloned after `k` flushes with the bytes truncated to `k`
+//! chunks ([`PdfBytes::truncate`]). [`finish`]`(state, &bytes)` appends
+//! the end of the file. [`PdfState::finish`] is the same for a writer
+//! never flushed.
+//!
 //! The parameters pdfTeX reads when it writes ([`PdfParams`]) can change
-//! between calls ([`PdfWriter::params_mut`]): each is read when pdfTeX
+//! between calls ([`PdfState::params_mut`]): each is read when pdfTeX
 //! reads it (`\pdfpagesattr` at the end, `\pdfpageattr` at each page, the
 //! version and `\pdfobjcompresslevel` when the first byte is written).
 //!
@@ -68,8 +86,10 @@
 mod color;
 pub mod enc;
 mod finish;
+pub use finish::{Chunk, PdfBytes, finish};
 mod font;
 mod image;
+mod macnames;
 pub mod map;
 mod marks;
 pub mod num;
@@ -82,6 +102,7 @@ mod vf;
 mod whatsit;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use phitex_tfm::ScaledFont;
 use phitex_typeset::arith::Scaled;
@@ -96,7 +117,7 @@ pub use crate::whatsit::{
     Action, ColorStackCmd, DestKind, Ident, LiteralMode, Whatsit, WhatsitSource,
 };
 
-/// The texts of a shipped list's whatsits for [`PdfWriter::ship_out`]:
+/// The texts of a shipped list's whatsits for [`PdfState::ship_out`]:
 /// the node's handle and whether leaders are being output, answered
 /// with a `\special`'s text (or `None` for a whatsit not written).
 pub type Whatsits<'a> = dyn FnMut(u32, bool) -> Option<Vec<u8>> + 'a;
@@ -385,12 +406,13 @@ enum FontType {
 
 /// What pdfTeX keeps per TeX font (pdfTeX §708, `font_used`), with the
 /// caller's data for it.
+#[derive(Clone)]
 struct FontState {
     name: Vec<u8>,
     metrics: ScaledFont,
     map: Option<MapEntry>,
-    file: Option<Vec<u8>>,
-    enc: Option<Vec<u8>>,
+    file: Option<Arc<[u8]>>,
+    enc: Option<Arc<[u8]>>,
     used: bool,
     /// `pdf_font_size`.
     size: Scaled,
@@ -449,7 +471,7 @@ fn int(n: usize) -> i64 {
 }
 
 /// The object stream being filled (pdfTeX §680's `pdf_os_*`).
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ObjStm {
     /// `pdf_os_enable`.
     enable: bool,
@@ -465,10 +487,10 @@ struct ObjStm {
 
 /// The data of raw objects, forms, images and marks (`obj_aux` and the
 /// structures it points to).
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Aux {
     /// `\pdfobj` data (`obj_data_ptr`).
-    raw: BTreeMap<usize, objects::RawObj>,
+    raw: BTreeMap<usize, Arc<objects::RawObj>>,
     /// `\pdfxform` data.
     xforms: BTreeMap<usize, objects::XForm>,
     /// `\pdfximage` data.
@@ -489,11 +511,23 @@ struct Aux {
     names: BTreeMap<usize, Vec<u8>>,
 }
 
-/// The PDF writer: pdfTeX's state across pages.
+/// The writer before the split: the state and its bytes in one.
+pub type PdfWriter = PdfState;
+
+/// The PDF writer's state: pdfTeX's state across pages, everything but
+/// the bytes written (see [`PdfBytes`]). Cloning it is cheap: the large
+/// immutable parts (font files, images, forms' boxes, objects' texts)
+/// are shared.
+#[derive(Clone)]
 #[allow(clippy::struct_excessive_bools)]
-pub struct PdfWriter {
+pub struct PdfState {
     p: PdfParams,
+    /// The bytes written since the last [`PdfState::flush`].
     out: Vec<u8>,
+    /// The bytes flushed before `out`.
+    base: usize,
+    /// The objects begun in `out`.
+    chunk_objs: Vec<usize>,
     /// The stream being compressed (`zip_write_state=zip_writing`).
     zip: Option<Vec<u8>>,
     stream_length_offset: usize,
@@ -574,7 +608,7 @@ pub struct PdfWriter {
     /// The first fatal error met while walking a list.
     error: Option<PdfError>,
     stacks: color::Stacks,
-    fonts: BTreeMap<FontId, FontState>,
+    fonts: BTreeMap<FontId, Arc<FontState>>,
     /// `\pdfmapline` and `\pdfmapfile` entries: replacing (`=`) or
     /// deleting (`-`) ones, and those added only where the map has none
     /// (`+`).
@@ -620,13 +654,15 @@ pub struct PdfWriter {
     last_byte: u8,
 }
 
-impl PdfWriter {
+impl PdfState {
     /// A writer; nothing is written before the first page or object.
     #[must_use]
-    pub fn new(params: PdfParams) -> PdfWriter {
-        PdfWriter {
+    pub fn new(params: PdfParams) -> PdfState {
+        PdfState {
             p: params,
             out: Vec::new(),
+            base: 0,
+            chunk_objs: Vec::new(),
             zip: None,
             stream_length_offset: 0,
             save_offset: 0,
@@ -823,7 +859,7 @@ impl PdfWriter {
 
     /// `pdf_offset`.
     fn offset(&self) -> usize {
-        self.out.len()
+        self.base + self.out.len()
     }
 
     /// `pdf_begin_stream`.
@@ -853,7 +889,7 @@ impl PdfWriter {
             self.offset() - self.save_offset
         };
         let digits = length.to_string();
-        let at = self.stream_length_offset;
+        let at = self.stream_length_offset - self.base;
         self.out[at..at + digits.len()].copy_from_slice(digits.as_bytes());
         self.end_raw_stream();
     }

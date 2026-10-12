@@ -5,7 +5,7 @@
 use phitex_typeset::arith::Scaled;
 use phitex_typeset::fonts::FontId;
 
-use crate::{FontSource, FontType, LiteralMode, PdfWriter, pdf_error};
+use crate::{FontSource, FontType, LiteralMode, PdfState, pdf_error};
 
 const SET_CHAR_127: u8 = 127;
 const SET1: u8 = 128;
@@ -79,7 +79,7 @@ impl Packet<'_> {
     }
 }
 
-impl PdfWriter {
+impl PdfState {
     /// `do_vf`: the font's type, from its virtual font if it has one.
     pub(crate) fn do_vf(&mut self, f: FontId, src: &dyn FontSource) {
         let vf = src.virtual_font(f);
