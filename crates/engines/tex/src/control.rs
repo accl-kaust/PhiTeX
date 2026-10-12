@@ -149,14 +149,14 @@ impl Run<'_, '_> {
                 if v {
                     self.normal_paragraph()?;
                     if md.m > 0 {
-                        self.build_page_mark(&md);
+                        self.build_page_mark(&md)?;
                     }
                 } else if h {
                     self.end_graf(&md)?;
                     if md.m == 102 && md.vm == 1 {
                         let mut vm = md.clone();
                         vm.lid = md.vlid;
-                        self.build_page_mark(&vm);
+                        self.build_page_mark(&vm)?;
                     }
                 }
             }
@@ -203,7 +203,7 @@ impl Run<'_, '_> {
                 let node = crate::nodes::penalty_node(self.v, n);
                 self.append(md.lid, node);
                 if md.m == 1 {
-                    self.build_page_mark(&md);
+                    self.build_page_mark(&md)?;
                 }
             }
             cmd::REMOVE_ITEM => self.delete_last(&md)?,

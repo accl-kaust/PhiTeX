@@ -629,9 +629,7 @@ impl Run<'_, '_> {
             }
             cmd::SET_PAGE_DIMEN => {
                 // §421
-                // REDUCE-GAP: resumable fold: the page so far is not a
-                // binding while the document runs; the empty page's.
-                IVal::Dimen(if m == 0 { MAX_DIMEN } else { 0 })
+                IVal::Dimen(self.page_dimen(m)?)
             }
             cmd::SET_SHAPE => {
                 // §423

@@ -18,9 +18,9 @@ use crate::val::{Mean, Tok, cmd, int_of, str_of};
 pub(crate) enum Halt {
     /// A value is not known yet (the engine re-runs the node).
     Stop(Stop),
-    /// The command needs more input than the node can claim.
-    // REDUCE-GAP: a child cannot claim its ancestors' following siblings;
-    // the client supplies them through `hint:<node>` fields.
+    /// The command needs more input than the node can claim: a child at
+    /// the end of its parent's text (the claim at the call measures what
+    /// a body's tail takes, so this is a bug when it happens).
     Starve,
     /// The command reads a file the client has not supplied yet.
     File(String),
@@ -42,7 +42,6 @@ pub(crate) type R<T> = Result<T, Halt>;
 pub(crate) struct Ops {
     pub exec: OpId,
     pub put: OpId,
-    pub fin: OpId,
     pub outpage: OpId,
 }
 
@@ -62,8 +61,12 @@ pub(crate) struct Src {
     pub loc: usize,
     /// 0 `mid_line`, 1 `skip_blanks`, 2 `new_line` (§303).
     pub state: u8,
-    /// -2 until the line is read (`\endlinechar` not yet applied).
+    /// -2 until the segment is reached (`\endlinechar` not yet applied).
     pub endch: i64,
+    /// Whether the segment begins a line (it is counted), and whether it
+    /// ends one (`\endlinechar` goes after it).
+    pub starts: bool,
+    pub ends: bool,
 }
 
 pub(crate) const MID_LINE: u8 = 0;
@@ -91,7 +94,11 @@ pub(crate) struct Run<'c, 'a> {
     pub ops: Ops,
     pub frames: VecDeque<Frame>,
     pub pulled: usize,
-    pub hint: i64,
+    /// Whether the node is the document's text (no parent): the end of
+    /// its following siblings is the end of the file.
+    pub top: bool,
+    /// Whether `\end` takes every following sibling.
+    pub claim_rest: bool,
     own: FxHashMap<Field, Option<ValueId>>,
     pub defs: Vec<(Field, ValueId, Locality)>,
     pub contribs: Vec<(Field, ValueId)>,
@@ -103,7 +110,7 @@ pub(crate) struct Run<'c, 'a> {
     mcache: FxHashMap<ValueId, Mean>,
     /// Lines entered by this run (for `\inputlineno`).
     pub lines_entered: i64,
-    /// Whether the run ends with input exhausted for good (`hint` -1).
+    /// Whether the input is exhausted for good (the file ended).
     pub eof: bool,
     /// `radix` (§438) and `cur_order` (§447).
     pub radix: i32,
@@ -119,7 +126,8 @@ impl<'c, 'a> Run<'c, 'a> {
             ops,
             frames: VecDeque::new(),
             pulled: 0,
-            hint: 0,
+            top: false,
+            claim_rest: false,
             own: FxHashMap::default(),
             defs: Vec::new(),
             contribs: Vec::new(),
@@ -266,7 +274,8 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
-    /// Takes the next sibling's text into the input.
+    /// Takes the next sibling's text into the input (§362: the next line,
+    /// or the rest of this one).
     fn pull(&mut self) -> R<bool> {
         if self.eof {
             return Ok(false);
@@ -275,11 +284,11 @@ impl<'c, 'a> Run<'c, 'a> {
             Some((op, args)) if op == self.ops.exec => {
                 self.pulled += 1;
                 let frames = decode_frames(self.v, &args);
-                self.frames.extend(frames);
+                self.push_back_frames(frames);
                 Ok(true)
             }
             _ => {
-                if self.hint < 0 {
+                if self.top {
                     self.eof = true;
                     Ok(false)
                 } else {
@@ -289,11 +298,50 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
+    /// Appends frames; a segment continuing the line of the last one joins
+    /// it (a control sequence's name may run across nodes).
+    pub(crate) fn push_back_frames(&mut self, frames: Vec<Frame>) {
+        for f in frames {
+            if let (Some(Frame::Src(last)), Frame::Src(next)) = (self.frames.back_mut(), &f)
+                && !last.ends
+                && !next.starts
+                && last.endch == -2
+                && next.endch == -2
+            {
+                last.buf.extend_from_slice(&next.buf);
+                last.ends = next.ends;
+                continue;
+            }
+            self.frames.push_back(f);
+        }
+    }
+
+    /// Whether the first character of the next sibling's text, if it
+    /// continues this line, is a letter (§356: a control word's name
+    /// goes on).
+    fn next_continues_name(&mut self) -> R<bool> {
+        let Some(Frame::Src(last)) = self.frames.back() else { return Ok(false) };
+        if last.ends {
+            return Ok(false);
+        }
+        let Some((op, args)) = self.cx.following(self.pulled) else { return Ok(false) };
+        if op != self.ops.exec {
+            return Ok(false);
+        }
+        match decode_frames(self.v, &args).first() {
+            Some(Frame::Src(s)) if !s.starts => match s.buf.first() {
+                Some(&c) => Ok(self.cat(c)? == 11),
+                None => Ok(false),
+            },
+            _ => Ok(false),
+        }
+    }
+
     /// Whether there is input left without claiming more siblings.
     pub(crate) fn has_input(&self) -> bool {
         self.frames.iter().any(|f| match f {
             Frame::Toks(t, p) => *p < t.len(),
-            Frame::Src(s) => s.loc < s.buf.len() || s.endch == -2,
+            Frame::Src(s) => s.loc < s.buf.len() || (s.endch == -2 && s.ends),
         })
     }
 
@@ -334,16 +382,24 @@ impl<'c, 'a> Run<'c, 'a> {
         if let Some(Frame::Src(s)) = self.frames.front()
             && s.endch == -2
         {
-            let e = self.int("param:endlinechar")?;
-            self.lines_entered += 1;
-            let line = self.v.int(1);
-            self.contribute("lines", line);
+            let (starts, ends) = (s.starts, s.ends);
+            // `\endlinechar` is read where the line's last segment is
+            // reached; §360 reads it as the line begins. They differ only
+            // when a line changes it before its end.
+            let e = if ends { self.int("param:endlinechar")? } else { -1 };
+            if starts {
+                self.lines_entered += 1;
+                let line = self.v.int(1);
+                self.contribute("lines", line);
+            }
             if let Some(Frame::Src(s)) = self.frames.front_mut() {
-                if (0..256).contains(&e) {
+                if ends && (0..256).contains(&e) {
                     s.buf.push(u32::try_from(e).unwrap_or(13));
                 }
                 s.endch = e;
-                s.state = NEW_LINE;
+                if starts {
+                    s.state = NEW_LINE;
+                }
             }
         }
         loop {
@@ -451,6 +507,28 @@ impl<'c, 'a> Run<'c, 'a> {
     /// §354–§356: a control sequence after an escape character.
     fn scan_cs(&mut self) -> R<Tok> {
         loop {
+            // a name cut by a node boundary goes on in the next node
+            if self.frames.len() == 1
+                && let Some(Frame::Src(s)) = self.frames.front()
+                && !s.ends
+            {
+                let rest: Vec<u32> = s.buf[s.loc.min(s.buf.len())..].to_vec();
+                let mut letters = true;
+                for &c in &rest {
+                    if self.cat(c)? != 11 {
+                        letters = false;
+                        break;
+                    }
+                }
+                let more = if rest.is_empty() {
+                    matches!(self.cx.following(self.pulled), Some((op, _)) if op == self.ops.exec)
+                } else {
+                    letters && self.next_continues_name()?
+                };
+                if more && self.pull()? {
+                    continue;
+                }
+            }
             let (loc, limit_plus) = match self.frames.front() {
                 Some(Frame::Src(s)) => (s.loc, s.buf.len()),
                 _ => return Ok(Tok::cs("")),
@@ -619,46 +697,140 @@ impl<'c, 'a> Run<'c, 'a> {
 
     // ------------------------------------------------------------ the end
 
-    /// The input left, as the frames of one child.
-    pub(crate) fn leftover(&mut self) -> Option<Vec<ValueId>> {
+    /// What is left of the node's own and claimed text, and the tokens a
+    /// command put back or an expansion produced, as child nodes: one per
+    /// token (a run of characters is one node), and the text not yet read
+    /// as one node per segment.
+    pub(crate) fn leftover(&self) -> Vec<Vec<ValueId>> {
         let v = self.v;
-        let mut frames: Vec<ValueId> = Vec::new();
-        let mut toks: Vec<ValueId> = Vec::new();
-        let flush = |toks: &mut Vec<ValueId>, frames: &mut Vec<ValueId>| {
-            if !toks.is_empty() {
-                let l = v.list(std::mem::take(toks));
-                frames.push(v.list(vec![v.str("t"), l]));
-            }
+        let mut out: Vec<Vec<ValueId>> = Vec::new();
+        let mut run: Vec<ValueId> = Vec::new();
+        let node = |toks: Vec<ValueId>| -> Vec<ValueId> {
+            let l = v.list(toks);
+            vec![v.list(vec![v.list(vec![v.str("t"), l])]), v.int(0)]
         };
         for f in &self.frames {
             match f {
-                Frame::Toks(t, p) => toks.extend(t[*p..].iter().map(|x| x.encode(v))),
+                Frame::Toks(t, p) => {
+                    for tok in &t[*p..] {
+                        let ch = matches!(tok.cat(), Some(11 | 12));
+                        if ch {
+                            run.push(tok.encode(v));
+                            continue;
+                        }
+                        if !run.is_empty() {
+                            out.push(node(std::mem::take(&mut run)));
+                        }
+                        out.push(node(vec![tok.encode(v)]));
+                    }
+                }
                 Frame::Src(s) => {
-                    flush(&mut toks, &mut frames);
-                    if s.loc >= s.buf.len() && s.endch != -2 {
+                    if !run.is_empty() {
+                        out.push(node(std::mem::take(&mut run)));
+                    }
+                    if s.loc >= s.buf.len() && !(s.endch == -2 && s.ends) {
                         continue;
                     }
-                    let text: String = s.buf[s.loc..].iter().map(|&c| char::from_u32(c).unwrap_or('?')).collect();
-                    frames.push(v.list(vec![
+                    let text: String = s.buf[s.loc.min(s.buf.len())..]
+                        .iter()
+                        .map(|&c| char::from_u32(c).unwrap_or('?'))
+                        .collect();
+                    let starts = s.starts && s.loc == 0;
+                    let fr = v.list(vec![
                         v.str("s"),
                         v.str(&text),
                         v.int(i64::from(s.state)),
                         v.int(s.endch),
-                    ]));
+                        v.int(i64::from(starts) | (i64::from(s.ends) << 1)),
+                    ]);
+                    out.push(vec![v.list(vec![fr]), v.int(0)]);
                 }
             }
         }
-        flush(&mut toks, &mut frames);
-        (!frames.is_empty()).then(|| vec![v.list(frames)])
+        if !run.is_empty() {
+            out.push(node(run));
+        }
+        out
     }
 
-    /// Ends the run: definitions, contributions, children, the input left
-    /// (one child), the claim and the scope effect.
+    /// The tokens of an expansion may end in a command that reads on into
+    /// the text after them (`\newcount\foo`: `\alloc@`'s fifth argument):
+    /// their extent is decided here, at the call, by reading them in a
+    /// trial run whose effects are dropped; the siblings the trial reads
+    /// are claimed, so the expansion's children find them in their own
+    /// text (a child never reads past its parent).
+    pub(crate) fn measure_tail(&mut self) -> R<()> {
+        if !self.frames.iter().any(|f| matches!(f, Frame::Toks(t, p) if *p < t.len())) {
+            return Ok(());
+        }
+        let snap = self.snapshot();
+        let before = self.pulled;
+        let mut steps = 0u32;
+        let res: R<()> = (|| {
+            while self.has_input() && steps < 100_000 {
+                steps += 1;
+                self.command()?;
+            }
+            Ok(())
+        })();
+        let after = self.pulled;
+        self.restore(snap);
+        match res {
+            Err(Halt::Stop(s)) => return Err(Halt::Stop(s)),
+            Err(Halt::File(f)) => return Err(Halt::File(f)),
+            _ => {}
+        }
+        for _ in before..after {
+            if !self.pull()? {
+                break;
+            }
+        }
+        if after > before {
+            let n = self.v.int(i64::try_from(after - before).unwrap_or(0));
+            self.contribute("tails", self.v.seq_unit(n));
+        }
+        Ok(())
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            frames: self.frames.clone(),
+            pulled: self.pulled,
+            own: self.own.clone(),
+            defs: self.defs.clone(),
+            contribs: self.contribs.clone(),
+            kids: self.kids.clone(),
+            effect: self.effect,
+            cur: self.cur.clone(),
+            conds: self.conds.clone(),
+            lines_entered: self.lines_entered,
+            eof: self.eof,
+            claim_rest: self.claim_rest,
+        }
+    }
+
+    fn restore(&mut self, s: Snapshot) {
+        self.frames = s.frames;
+        self.pulled = s.pulled;
+        self.own = s.own;
+        self.defs = s.defs;
+        self.contribs = s.contribs;
+        self.kids = s.kids;
+        self.effect = s.effect;
+        self.cur = s.cur;
+        self.conds = s.conds;
+        self.lines_entered = s.lines_entered;
+        self.eof = s.eof;
+        self.claim_rest = s.claim_rest;
+    }
+
+    /// Ends the run: definitions, contributions, children (what the
+    /// command made, then the input left), the claim and the scope effect.
     pub(crate) fn finish(mut self) -> ValueId {
         for (f, x, l) in std::mem::take(&mut self.defs) {
             self.cx.define_with(f, x, l);
         }
-        if !self.defs.is_empty() || !self.own.is_empty() {
+        if !self.own.is_empty() {
             let names: Vec<ValueId> = self.own.keys().map(|f| f.0).collect();
             let l = self.v.list(names);
             let s = self.v.seq_unit(l);
@@ -670,21 +842,13 @@ impl<'c, 'a> Run<'c, 'a> {
         for (op, args) in std::mem::take(&mut self.kids) {
             self.cx.child(op, args);
         }
-        if let Some(args) = self.leftover() {
+        for args in self.leftover() {
             self.cx.child(self.ops.exec, args);
         }
         let mut n = self.pulled;
-        if !self.eof && self.hint > i64::try_from(n).unwrap_or(0) {
-            // re-emit the siblings the hint asks for, for the children
-            let want = usize::try_from(self.hint).unwrap_or(0);
-            while n < want {
-                match self.cx.following(n) {
-                    Some((op, args)) if op == self.ops.exec => {
-                        self.cx.child(op, args);
-                        n += 1;
-                    }
-                    _ => break,
-                }
+        if self.claim_rest {
+            while matches!(self.cx.following(n), Some((op, _)) if op == self.ops.exec) {
+                n += 1;
             }
         }
         self.cx.claim(n);
@@ -692,13 +856,11 @@ impl<'c, 'a> Run<'c, 'a> {
         ValueId::UNIT
     }
 
-    /// Ends a run that cannot finish: nothing defined but `ended` (so that
-    /// nothing after it runs on a wrong state), and the need, for the
-    /// client.
+    /// Ends a run that cannot finish: nothing defined, and the need, for
+    /// the client (a file it has not supplied yet; or a child that ran out
+    /// of text, which is a bug).
     pub(crate) fn stall(self, need: &str, what: ValueId) -> ValueId {
         let v = self.v;
-        // nothing after a stalled command runs until it is answered
-        self.cx.define_with(v.field("ended"), v.int(2), Locality::Global);
         let id = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
         let e = v.list(vec![v.str(need), id, what]);
         self.cx.contribute(v.field("needs"), v.seq_unit(e));
@@ -706,6 +868,22 @@ impl<'c, 'a> Run<'c, 'a> {
         self.cx.set_effect(Effect::None);
         ValueId::UNIT
     }
+}
+
+/// A run's state, to undo a trial.
+struct Snapshot {
+    frames: VecDeque<Frame>,
+    pulled: usize,
+    own: FxHashMap<Field, Option<ValueId>>,
+    defs: Vec<(Field, ValueId, Locality)>,
+    contribs: Vec<(Field, ValueId)>,
+    kids: Vec<(OpId, Vec<ValueId>)>,
+    effect: Effect,
+    cur: Cur,
+    conds: Vec<u8>,
+    lines_entered: i64,
+    eof: bool,
+    claim_rest: bool,
 }
 
 fn is_hex(c: u32) -> bool {
@@ -739,6 +917,8 @@ pub(crate) fn decode_frames(v: &Values, args: &[ValueId]) -> Vec<Frame> {
                     loc: 0,
                     state: u8::try_from(xs.get(2).map_or(2, |&x| int_of(v, x))).unwrap_or(2),
                     endch: xs.get(3).map_or(-2, |&x| int_of(v, x)),
+                    starts: xs.get(4).is_none_or(|&x| int_of(v, x) & 1 != 0),
+                    ends: xs.get(4).is_none_or(|&x| int_of(v, x) & 2 != 0),
                 }));
             }
             _ => {}
@@ -766,6 +946,8 @@ pub(crate) fn src_frame(line: &str, endlinechar: i64) -> Frame {
         loc: 0,
         state: NEW_LINE,
         endch: endlinechar,
+        starts: true,
+        ends: true,
     })
 }
 
@@ -781,6 +963,27 @@ pub(crate) fn line_args(v: &Values, line: &str) -> Vec<ValueId> {
         end -= 1;
     }
     let text: String = bytes[..end].iter().map(|&b| char::from(b)).collect();
-    let frame = v.list(vec![v.str("s"), v.str(&text), v.int(i64::from(NEW_LINE)), v.int(-2)]);
-    vec![v.list(vec![frame])]
+    let frame = v.list(vec![v.str("s"), v.str(&text), v.int(i64::from(NEW_LINE)), v.int(-2), v.int(3)]);
+    vec![v.list(vec![frame]), v.int(1)]
+}
+
+/// The text of a node from the document: a slice of its lines, as
+/// segments (each the part of one line the slice holds).
+pub(crate) fn slice_args(v: &Values, text: &str, starts_line: bool) -> Vec<ValueId> {
+    let mut frames = Vec::new();
+    let mut starts = starts_line;
+    let mut rest = text;
+    while !rest.is_empty() {
+        let (seg, ends, next) = match rest.find('\n') {
+            Some(k) => (&rest[..k], true, &rest[k + 1..]),
+            None => (rest, false, ""),
+        };
+        let seg: String = if ends { seg.trim_end_matches([' ', '\t', '\r']).to_owned() } else { seg.to_owned() };
+        let state = if starts { NEW_LINE } else { MID_LINE };
+        let flags = i64::from(starts) | (i64::from(ends) << 1);
+        frames.push(v.list(vec![v.str("s"), v.str(&seg), v.int(i64::from(state)), v.int(-2), v.int(flags)]));
+        starts = ends;
+        rest = next;
+    }
+    vec![v.list(frames), v.int(1)]
 }
