@@ -209,7 +209,7 @@ const panel = new Panel(
       openFailed: "Restart phitex watch, then reload this page.",
       reading: "Reading the document from phitex watch.",
       keptIn: "this machine",
-      preparing: "Readying the next rebuild… {s} s",
+      preparing: "Building… {s} s",
       stopped: "The build stopped: its problems are listed above (e).",
       notReady: "This engine does not run here yet.",
       realPdf: "",
