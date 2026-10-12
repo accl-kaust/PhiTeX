@@ -312,19 +312,21 @@ fn main() {
             std::process::exit(1);
         });
         let wall = t0.elapsed();
-        // The trace's number is an upper bound (no cutoff): more than it is
-        // a finding; the ratio measures the cutoff.
+        // The trace's number is an upper bound (no cutoff) on the steps
+        // reached from the edited step, which itself is not counted (nor
+        // is an inserted one): more than it is a finding; the ratio
+        // measures the cutoff.
+        let reached = r.nodes_run.saturating_sub(1);
         if let Some(bound) = expect_reached
-            && r.nodes_run > *bound
+            && reached > *bound
         {
             mismatches += 1;
             println!(
-                "edit {}: {} nodes ran, above the trace's bound of {bound}",
-                k + 1,
-                r.nodes_run
+                "edit {}: {reached} nodes ran besides the edited one, above the trace's bound of {bound}",
+                k + 1
             );
         }
-        stats[kind].1.push((wall, r.nodes_run, *expect_reached));
+        stats[kind].1.push((wall, reached, *expect_reached));
         if let Some((n, dir)) = &opts.dump_at
             && k + 1 == *n
         {
@@ -373,7 +375,7 @@ fn main() {
     }
     println!(
         "{:<14} {:>5} {:>11} {:>11} {:>8} {:>10}",
-        "edit", "n", "p50", "p99", "run~", "bound~"
+        "edit", "n", "p50", "p99", "reached~", "bound~"
     );
     for (name, s) in &mut stats {
         if s.is_empty() {
