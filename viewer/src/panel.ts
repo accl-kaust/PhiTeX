@@ -288,7 +288,7 @@ button.btn:hover { background: var(--accent2); }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
-.phx-text ::selection { fill: transparent; background: rgb(0 100 255 / 25%); }
+.phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: rgb(0 100 255 / 25%); }
 .stage.stale .slot canvas { opacity: .45; filter: grayscale(1); }
 .banner { position: sticky; top: -12px; z-index: 1; display: none; margin: -12px -12px 10px; padding: 6px 10px; text-align: left; font-size: 12px;
   background: var(--bg-warning-03, #fcf1e3); color: var(--warn); border-bottom: 1px solid var(--divider); }
