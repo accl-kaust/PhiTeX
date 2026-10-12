@@ -1012,6 +1012,24 @@ paragraph plus the pages, instead of every vertical item of the document.
   `OutPage` node, in an `output_group`, with `\box255`, the marks and the
   insert boxes defined as §1017 leaves them.
 
+### 4.7 Conditions (approved with the design)
+
+1. One `OutPage` node per page, never one per `build_page` call: the fast
+   path (a segment added whole because it cannot hold a break) is the
+   normal case and the item-by-item path the exception. A test asserts
+   critical path ≤ longest paragraph + pages on `story`, `pages`,
+   `hyphens` and `display`.
+2. A segment's parameters are the contributing node's own reads, bound to
+   their last definer. `\vsize` or `\maxdepth` changed inside an output
+   routine reach the next page's first segment because the output node's
+   own contribution (its put-back material, §1026) is a segment at its
+   position, made after those definitions; a test changes `\vsize` in
+   `\output` and checks the next page against TeX.
+3. An edit inside page k re-runs `OutPage` k, and later `OutPage` nodes
+   only when page k's break moves; the 20-edit `sections` gate shows it
+   with the engine counters.
+
 The gate: story's and pages' critical path at most a few per cent of the
 nodes run; all outputs byte-identical; edits equal cold; at 1 and 4
-threads.
+threads. Order of work: the `Ctx::follow` switch, the LaTeX article run,
+the list fix, then this.
