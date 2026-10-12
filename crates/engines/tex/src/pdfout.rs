@@ -38,19 +38,15 @@ fn maps() -> &'static MapCache {
 
 /// A file the writer reads (`pdftex.map`, a `.pfb`, an `.enc`).
 enum Got {
-    /// The client has not supplied it yet: asked for.
-    Waiting,
     Absent,
     Text(ValueId),
 }
 
 fn file(cx: &mut Ctx<'_>, name: &str) -> Result<Got, Stop> {
     let v = cx.values();
-    let Some(x) = cx.use_field(v.field(&format!("file:{name}")))? else {
-        let id = v.int(i64::from_ne_bytes(cx.node().raw().to_ne_bytes()));
-        let e = v.list(vec![v.str("file"), id, v.str(name)]);
-        cx.contribute(v.field("needs"), v.seq_unit(e));
-        return Ok(Got::Waiting);
+    crate::run::ask(name);
+    let Some(x) = cx.use_env(v.field(&format!("file:{name}")))? else {
+        return Ok(Got::Absent);
     };
     Ok(list_of(v, x).get(1).map_or(Got::Absent, |&t| Got::Text(t)))
 }
@@ -234,12 +230,7 @@ pub(crate) fn write(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop
         .unwrap_or_default();
     // the fonts, with their map entries and files
     let mut fonts = Fonts::default();
-    let mut waiting = false;
     let map = match file(cx, "pdftex.map")? {
-        Got::Waiting => {
-            waiting = true;
-            None
-        }
         Got::Absent => None,
         Got::Text(m) => {
             let key = m.raw();
@@ -276,10 +267,6 @@ pub(crate) fn write(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop
                 let Some(n) = n else { return Ok(None) };
                 let n = String::from_utf8_lossy(n).into_owned();
                 Ok(match file(cx, &n)? {
-                    Got::Waiting => {
-                        waiting = true;
-                        None
-                    }
                     Got::Absent => None,
                     Got::Text(b) => Some(bytes_of(&str_of(v, b))),
                 })
@@ -297,9 +284,6 @@ pub(crate) fn write(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop
                 },
             );
         }
-    }
-    if waiting {
-        return Ok(ValueId::UNIT);
     }
     let mut params = PdfParams {
         date,

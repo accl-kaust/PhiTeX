@@ -379,6 +379,8 @@ struct Graph {
     reads: Vec<(String, u64)>,
     /// The finder's answers since the last evaluation began.
     queries: Vec<(String, bool)>,
+    /// The files the finder does not have.
+    absent: Vec<Field>,
     /// The files the job writes and reads back: loop-back fields
     /// (`fixpoint`), or absent before the job writes them.
     written: Vec<String>,
@@ -413,6 +415,7 @@ impl Graph {
             files: Vec::new(),
             reads: Vec::new(),
             queries: Vec::new(),
+            absent: Vec::new(),
             written: Vec::new(),
         }
     }
@@ -439,12 +442,13 @@ impl Graph {
         let v = self.eng.values();
         let f = v.field(&format!("file:{name}"));
         self.files.retain(|(g, _)| *g != f);
+        self.absent.retain(|g| *g != f);
         self.reads.retain(|(n, _)| n != name);
-        let absent = v.list(Vec::new());
         if fixpoint {
+            let absent = v.list(Vec::new());
             self.eng.declare_loopback(f, absent);
         } else {
-            self.files.push((f, absent));
+            self.absent.push(f);
         }
         self.written.push(name.to_owned());
     }
@@ -483,11 +487,12 @@ impl Graph {
                     continue;
                 }
                 let f = self.eng.values().field(&format!("file:{name}"));
-                if self.files.iter().any(|(g, _)| *g == f) {
+                if self.files.iter().any(|(g, _)| *g == f) || self.absent.contains(&f) {
                     self.written_file(name, fixpoint);
                     asked = true;
                 }
             }
+            let asked_names = crate::run::take_asked();
             let v = self.eng.values();
             let needs = self
                 .eng
@@ -504,15 +509,17 @@ impl Graph {
                     )
                 })
                 .collect();
-            for (kind, name) in needs {
+            for (kind, _) in &needs {
                 if kind == "starve" {
                     stats.starved += 1;
                 }
-                if kind != "file" {
-                    continue;
-                }
+            }
+            for name in asked_names {
                 let f = self.eng.values().field(&format!("file:{name}"));
-                if self.files.iter().any(|(g, _)| *g == f) || self.written.contains(&name) {
+                if self.files.iter().any(|(g, _)| *g == f)
+                    || self.absent.contains(&f)
+                    || self.written.contains(&name)
+                {
                     continue;
                 }
                 if opened.contains(&name) {
@@ -524,14 +531,13 @@ impl Graph {
                 self.queries.push((name.clone(), found.is_some()));
                 let v = self.eng.values();
                 self.reads.push((name.clone(), file_hash(found.as_ref())));
-                let val = match found {
-                    Some((path, bytes)) => {
-                        let text: String = bytes.iter().map(|&b| char::from(b)).collect();
-                        v.list(vec![v.str(&path), v.str(&text)])
-                    }
-                    None => v.list(Vec::new()),
-                };
-                self.files.push((f, val));
+                if let Some((path, bytes)) = found {
+                    let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+                    let val = v.list(vec![v.str(&path), v.str(&text)]);
+                    self.files.push((f, val));
+                } else {
+                    self.absent.push(f);
+                }
                 asked = true;
             }
             if !asked {
@@ -539,6 +545,7 @@ impl Graph {
             }
             let env = self.environment(fixpoint);
             self.eng.set_environment(env);
+            self.eng.set_environment_absent(self.absent.clone());
         }
         let v = self.eng.values();
         let tails_f = v.field("tails");
@@ -858,7 +865,13 @@ impl Build {
     pub fn edit_file(&mut self, name: &str, text: Option<&[u8]>) {
         let v = self.g.eng.values();
         let f = v.field(&format!("file:{name}"));
-        let Some(k) = self.g.files.iter().position(|(g, _)| *g == f) else {
+        let k = if let Some(k) = self.g.files.iter().position(|(g, _)| *g == f) {
+            k
+        } else if self.g.absent.contains(&f) {
+            self.g.absent.retain(|g| *g != f);
+            self.g.files.push((f, v.list(Vec::new())));
+            self.g.files.len() - 1
+        } else {
             return;
         };
         let old = list_of(v, self.g.files[k].1);
@@ -877,12 +890,19 @@ impl Build {
             }
             None => v.list(Vec::new()),
         };
-        self.g.files[k].1 = val;
+        if found.is_none() {
+            self.g.files.remove(k);
+            self.g.absent.push(f);
+        } else {
+            self.g.files[k].1 = val;
+        }
         if let Some(r) = self.g.reads.iter_mut().find(|(n, _)| n == name) {
             r.1 = file_hash(found.as_ref());
         }
         let env = self.g.environment(self.opts.fixpoint);
         self.g.eng.set_environment(env);
+        let absent = self.g.absent.clone();
+        self.g.eng.set_environment_absent(absent);
         self.settle();
     }
 

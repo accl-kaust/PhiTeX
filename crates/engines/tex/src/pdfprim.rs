@@ -23,7 +23,7 @@ use phitex_typeset::node::{BoxKind, BoxNode, GlueNode, Node};
 use crate::build::Mode;
 use crate::expand::str_toks;
 use crate::nodes;
-use crate::run::{Halt, R, Run};
+use crate::run::{R, Run};
 use crate::scan::IVal;
 use crate::val::{Mean, Tok, cmd, int_of, list_of, str_of, toks_of};
 
@@ -409,8 +409,8 @@ fn hex_upper(b: &[u8]) -> String {
 
 /// A file's bytes, or the need for it.
 fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Vec<u8>>> {
-    let Some(x) = r.get(&format!("file:{name}"))? else {
-        return Err(Halt::File(name.to_owned()));
+    let Some(x) = r.file(name)? else {
+        return Ok(None);
     };
     let xs = list_of(r.v, x);
     Ok(xs.get(1).map(|&t| bytes(&str_of(r.v, t))))

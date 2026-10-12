@@ -472,13 +472,17 @@ struct ToyFile;
 
 impl Operation for ToyFile {
     fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        if tag(v, a) == "i" { None } else { Some(Vec::new()) }
+        if tag(v, a) == "i" {
+            None
+        } else {
+            Some(Vec::new())
+        }
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
         let a = cx.args();
         if tag(v, &a) == "i" {
-            if let Some(x) = cx.use_field(v.field("file"))? {
+            if let Some(x) = cx.use_env(v.field("file"))? {
                 cx.define(v.field("x"), x);
             }
             return Ok(ValueId::UNIT);
@@ -507,9 +511,106 @@ fn a_reader_waits_for_a_pending_node_whose_file_is_not_supplied() {
     eng.set_environment(vec![(f, five)]);
     eng.evaluate_sequential().expect("evaluate");
     let second = eng.output(r).map(|x| eng.values().render(x));
-    assert_eq!(second.as_deref(), Some("5"), "r did not re-run after i defined x");
+    assert_eq!(
+        second.as_deref(),
+        Some("5"),
+        "r did not re-run after i defined x"
+    );
     assert_eq!(
         first, None,
         "r ran ahead of i on the first evaluation (saw {first:?}) while i's file was undefined"
     );
+}
+
+/// As [`ToyFile`], with `["i"]`'s claim and scope effect pending (known
+/// when it runs), as every TeX command node has them.
+struct ToyFilePending;
+
+impl Operation for ToyFilePending {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        ToyFile.defs(a, v)
+    }
+    fn claim(
+        &self,
+        a: &[ValueId],
+        v: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Claim {
+        if tag(v, a) == "i" {
+            Claim::Pending
+        } else {
+            Claim::None
+        }
+    }
+    fn effect(&self, a: &[ValueId], v: &Values) -> phitex_defuse::Effect {
+        if tag(v, a) == "i" {
+            phitex_defuse::Effect::Pending
+        } else {
+            phitex_defuse::Effect::None
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let a = cx.args();
+        if tag(cx.values(), &a) == "i" {
+            cx.claim(0);
+            cx.set_effect(phitex_defuse::Effect::None);
+        }
+        ToyFile.run(cx)
+    }
+}
+
+/// A node waiting on an environment field with its claim pending: the
+/// evaluation must end with it stalled (`Report::env_stalled`), not as a
+/// cycle; supplying the field finishes it.
+#[test]
+fn an_env_wait_with_a_pending_claim_is_not_a_cycle() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(ToyFilePending));
+    let u = eng.new_unit();
+    let _i = eng.push(u, op, vec![eng.values().str("i")]);
+    let r = eng.push(u, op, vec![eng.values().str("r")]);
+    eng.add_root(r);
+    let rep = eng.evaluate_sequential();
+    assert!(rep.is_ok(), "an env wait ended as {:?}", rep.err());
+    let f = eng.values().field("file");
+    let five = eng.values().int(5);
+    eng.set_environment(vec![(f, five)]);
+    eng.evaluate_sequential().expect("evaluate");
+    let got = eng.output(r).map(|x| eng.values().render(x));
+    assert_eq!(got.as_deref(), Some("5"));
+}
+
+/// As [`ToyFile`]; `["a"]` reads the fold of the accumulator `acc` over
+/// the unit (as the TeX client's DVI node reads the pages).
+struct ToyFileAcc;
+
+impl Operation for ToyFileAcc {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        ToyFile.defs(a, v)
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let a = cx.args();
+        let v = cx.values();
+        if tag(v, &a) == "a" {
+            return cx.acc_range(v.field("acc"), None);
+        }
+        ToyFile.run(cx)
+    }
+}
+
+/// A node waiting on an environment field before an accumulator reader:
+/// the evaluation ends with both stalled (`Report::env_stalled`), not as
+/// a cycle.
+#[test]
+fn an_env_wait_before_an_accumulator_reader_is_not_a_cycle() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(ToyFileAcc));
+    let acc = eng.values().field("acc");
+    eng.declare_accumulator(acc, Arc::new(phitex_defuse::SeqMonoid));
+    let u = eng.new_unit();
+    let _i = eng.push(u, op, vec![eng.values().str("i")]);
+    let a = eng.push(u, op, vec![eng.values().str("a")]);
+    eng.add_root(a);
+    let rep = eng.evaluate_sequential();
+    assert!(rep.is_ok(), "an env wait ended as {:?}", rep.err());
 }
