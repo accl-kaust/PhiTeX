@@ -27,6 +27,8 @@
 #![allow(dead_code, clippy::many_single_char_names)] // AST code reads best with short names
 
 pub mod interp;
+pub mod json;
+pub mod trace;
 
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -1728,13 +1730,16 @@ impl Operation for ApplyOp {
 pub struct Lang {
     pub ops: Ops,
     pub procs: ProcTable,
+    /// The statement operation itself (its static hooks derive a trace).
+    pub stmt: Arc<dyn Operation>,
 }
 
 impl Lang {
     pub fn install(eng: &mut Engine) -> Lang {
         let cell = Arc::new(OnceLock::new());
         let procs = ProcTable::default();
-        let stmt = eng.register(Arc::new(StmtOp(cell.clone(), procs.clone())));
+        let stmt_op: Arc<dyn Operation> = Arc::new(StmtOp(cell.clone(), procs.clone()));
+        let stmt = eng.register(stmt_op.clone());
         let apply = eng.register(Arc::new(ApplyOp(cell.clone())));
         let output = eng.register(Arc::new(OutputOp));
         let ops = Ops { stmt, apply, output };
@@ -1743,7 +1748,11 @@ impl Lang {
         eng.declare_accumulator(out, Arc::new(SeqMonoid));
         let seq = items_seq(eng.values());
         eng.declare_sequence(seq);
-        Lang { ops, procs }
+        Lang {
+            ops,
+            procs,
+            stmt: stmt_op,
+        }
     }
 
     /// Declares the loop-back fields of `asts` and returns their names.
