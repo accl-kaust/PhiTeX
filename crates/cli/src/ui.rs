@@ -131,6 +131,7 @@ impl Bottom {
 }
 
 /// The terminal: what is printed, and the spinner.
+#[derive(Clone)]
 pub struct Ui {
     pub st: Style,
     pub verbose: u8,
@@ -149,15 +150,46 @@ pub struct Spin {
     updater: Option<std::thread::JoinHandle<()>>,
 }
 
-/// The spinner's line: what is built, the session's phase, the time.
-fn status_line(what: &str, s: &Status, elapsed: Duration) -> String {
+/// The spinner's line: what is built, the session's phase, the time, and
+/// (`load`) the cores busy lately and the memory held.
+fn status_line(what: &str, s: &Status, elapsed: Duration, load: Option<(f64, u64)>) -> String {
     let mut parts = vec![what.to_owned()];
     let phase = s.phase();
     if !phase.is_empty() {
         parts.push(phase);
     }
     parts.push(format!("{:.1} s", elapsed.as_secs_f64()));
+    if let Some((cores, rss)) = load {
+        parts.push(format!("{cores:.1} cores busy"));
+        parts.push(bytesize::ByteSize::b(rss).display().si().to_string());
+    }
     parts.join(" · ")
+}
+
+/// The cores busy since the last sample, and the memory now.
+struct Load {
+    last: Option<(Instant, Duration)>,
+    now: Option<(f64, u64)>,
+}
+
+impl Load {
+    fn sample(&mut self) {
+        let Some((cpu, rss)) = crate::keys::usage() else {
+            return;
+        };
+        let t = Instant::now();
+        match self.last {
+            Some((t0, c0)) => {
+                let dt = t.duration_since(t0).as_secs_f64();
+                if dt >= 0.4 {
+                    let cores = cpu.saturating_sub(c0).as_secs_f64() / dt;
+                    self.now = Some((cores, rss));
+                    self.last = Some((t, cpu));
+                }
+            }
+            None => self.last = Some((t, cpu)),
+        }
+    }
 }
 
 const TICKS: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -322,32 +354,39 @@ impl Ui {
     pub fn spin(&self, what: String, status: Arc<Status>) -> Spin {
         lock(&self.tap).tell(json!({"kind": "busy", "text": what}));
         let stop = Arc::new(AtomicBool::new(false));
-        let mut updater = None;
-        if self.st.tty && !self.json {
-            let (bottom, stop) = (self.bottom.clone(), stop.clone());
-            let t0 = Instant::now();
-            updater = Some(std::thread::spawn(move || {
-                let mut k = 0;
-                while !stop.load(Ordering::Relaxed) {
+        // (the line drawn on a terminal; told to the viewer every second)
+        let draw = self.st.tty && !self.json;
+        let (bottom, tap, stopping) = (self.bottom.clone(), self.tap.clone(), stop.clone());
+        let t0 = Instant::now();
+        let updater = Some(std::thread::spawn(move || {
+            let mut k = 0usize;
+            let mut load = Load {
+                last: None,
+                now: None,
+            };
+            while !stopping.load(Ordering::Relaxed) {
+                if k.is_multiple_of(6) {
+                    load.sample();
+                }
+                let text = status_line(&what, &status, t0.elapsed(), load.now);
+                if draw {
                     let w = crate::keys::width().unwrap_or(80);
                     let line = format!(
                         "{} {}",
                         TICKS[k % TICKS.len()],
-                        clip(
-                            &status_line(&what, &status, t0.elapsed()),
-                            w.saturating_sub(3)
-                        )
+                        clip(&text, w.saturating_sub(3))
                     );
-                    {
-                        let mut b = lock(&bottom);
-                        b.spin = Some(line);
-                        redraw(&mut std::io::stderr().lock(), &b);
-                    }
-                    k += 1;
-                    std::thread::sleep(Duration::from_millis(80));
+                    let mut b = lock(&bottom);
+                    b.spin = Some(line);
+                    redraw(&mut std::io::stderr().lock(), &b);
                 }
-            }));
-        }
+                if k % 12 == 11 {
+                    lock(&tap).tell(json!({"kind": "busy", "text": text}));
+                }
+                k += 1;
+                std::thread::sleep(Duration::from_millis(80));
+            }
+        }));
         Spin {
             bottom: self.bottom.clone(),
             tap: self.tap.clone(),
@@ -433,8 +472,9 @@ impl Spin {
         if let Some(u) = self.updater {
             let _ = u.join();
             let mut b = lock(&self.bottom);
-            b.spin = None;
-            redraw(&mut std::io::stderr().lock(), &b);
+            if b.spin.take().is_some() {
+                redraw(&mut std::io::stderr().lock(), &b);
+            }
         }
         lock(&self.tap).tell(json!({"kind": "busy", "text": ""}));
     }

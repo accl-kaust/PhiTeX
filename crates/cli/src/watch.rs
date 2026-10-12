@@ -13,6 +13,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -124,7 +125,13 @@ fn diagnostics(r: &session::Report, log: &str) -> Vec<Value> {
         .out
         .errors
         .iter()
-        .map(|e| json!({"severity": "error", "code": "tex", "message": crate::problems::bare(e)}))
+        .map(|e| match &r.internal {
+            // (the engine's stop: its sentence, the dump under it)
+            Some(d) => json!({"severity": "error", "code": "engine", "message": e, "detail": d}),
+            None => {
+                json!({"severity": "error", "code": "tex", "message": crate::problems::bare(e)})
+            }
+        })
         .collect();
     for (k, n, first) in crate::warnings::summarize(&r.log_text()) {
         v.push(json!({
@@ -149,9 +156,62 @@ fn line_key(l: &str) -> Key {
     }
 }
 
+/// The keys answered where they are read, a build running or not: they
+/// need nothing of the build.
+struct Here {
+    ui: Ui,
+    /// The viewer's address (none: no viewer, or `--open` starts a program
+    /// on the output: the watch's own loop opens that).
+    url: Option<String>,
+    building: Arc<AtomicBool>,
+}
+
+fn help(ui: &Ui) {
+    for (k, what) in keys::HELP {
+        ui.line(&format!("  {}  {what}", ui.st.bold(&format!("{k:>9}"))));
+    }
+}
+
+impl Here {
+    /// Key `k` answered here (true), or for the watch's loop.
+    fn answer(&self, k: Key) -> bool {
+        let ui = &self.ui;
+        let busy = self.building.load(Ordering::Relaxed);
+        match k {
+            Key::Help => help(ui),
+            Key::Clear => ui.clear(),
+            Key::Other(c) => ui.line(&format!(
+                "phitex watch: `{c}` is no key here (h lists them)"
+            )),
+            Key::Open if self.url.is_some() => {
+                let url = self.url.as_deref().unwrap_or_default();
+                if !view::open_browser(url) {
+                    ui.warning(&format!("could not start a browser: open {url}"));
+                }
+            }
+            // (q while a build runs: out now, as Ctrl-C)
+            Key::Quit if busy => {
+                ui.status(None, None);
+                keys::restore();
+                std::process::exit(0);
+            }
+            Key::Rebuild | Key::Problems if busy => {
+                ui.line(
+                    &ui.st
+                        .dim("phitex watch: a build is running; this comes after it"),
+                );
+                return false;
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
 /// Standard input's keys (a terminal's, one at a time; escape sequences,
-/// the arrows', dropped) or lines, to `tx`; its end quits.
-fn read_keys(tx: &mpsc::Sender<Event>, raw: bool) {
+/// the arrows', dropped) or lines, to `tx` (those not answered `here`);
+/// its end quits.
+fn read_keys(tx: &mpsc::Sender<Event>, raw: bool, here: &Here) {
     if raw {
         let mut bytes = std::io::stdin().lock().bytes();
         let mut text = Vec::new();
@@ -187,6 +247,7 @@ fn read_keys(tx: &mpsc::Sender<Event>, raw: bool) {
             let k = t.chars().next().and_then(Key::of);
             text.clear();
             if let Some(k) = k
+                && !here.answer(k)
                 && tx.send(Event::Key(k)).is_err()
             {
                 return;
@@ -195,7 +256,8 @@ fn read_keys(tx: &mpsc::Sender<Event>, raw: bool) {
     } else {
         for l in std::io::stdin().lock().lines() {
             let Ok(l) = l else { break };
-            if tx.send(Event::Key(line_key(&l))).is_err() {
+            let k = line_key(&l);
+            if !here.answer(k) && tx.send(Event::Key(k)).is_err() {
                 return;
             }
         }
@@ -308,19 +370,23 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         std::process::exit(crate::EXIT_USAGE);
     });
     let raw = !ui.json && keys::raw();
+    let building = Arc::new(AtomicBool::new(false));
     {
         let tx = tx.clone();
+        let here = Here {
+            ui: ui.clone(),
+            url: view
+                .as_ref()
+                .filter(|_| t.viewer.is_none())
+                .map(|v| v.url().to_owned()),
+            building: building.clone(),
+        };
         std::thread::Builder::new()
             .name("phitex-watch-stdin".into())
-            .spawn(move || read_keys(&tx, raw))
+            .spawn(move || read_keys(&tx, raw, &here))
             .expect("a thread");
     }
     drop(tx);
-    let help = |ui: &Ui| {
-        for (k, what) in keys::HELP {
-            ui.line(&format!("  {}  {what}", st.bold(&format!("{k:>9}"))));
-        }
-    };
     if raw {
         ui.line(&st.dim("phitex watch: h lists the keys, q quits"));
     }
@@ -365,6 +431,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // (`since`: when the change came; none for the cold build)
     let mut rebuild = |s: &mut Session, why: &str, since: Option<Instant>| {
         builds += 1;
+        building.store(true, Ordering::Relaxed);
         if let Some(v) = &view {
             v.building(true);
         }
@@ -375,6 +442,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             Ok(r) => r,
             Err(m) => {
                 spin.done();
+                building.store(false, Ordering::Relaxed);
                 ui.failed(&format!("build {builds} ({why})"), &m);
                 let first = m.lines().next().unwrap_or("the engine panicked");
                 ui.event(
@@ -464,6 +532,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             status.set("");
         }
         spin.done();
+        building.store(false, Ordering::Relaxed);
         // (the place edited: the main file's first changed line)
         let place = match r.edit_line {
             Some(l) => why
