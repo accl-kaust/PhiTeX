@@ -644,3 +644,64 @@ fn many_readers_stalled_behind_an_env_wait_are_cheap() {
         "a round with nothing new took {second:?} (the first {first:?})"
     );
 }
+
+/// Every node has its claim and scope effect pending (known when it
+/// runs), reads `x`, and claims nothing; `["i"]` first waits for the
+/// environment field `file`.
+struct ToyPendingAll;
+
+impl Operation for ToyPendingAll {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        ToyFile.defs(a, v)
+    }
+    fn claim(
+        &self,
+        _: &[ValueId],
+        _: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Claim {
+        Claim::Pending
+    }
+    fn effect(&self, _: &[ValueId], _: &Values) -> phitex_defuse::Effect {
+        phitex_defuse::Effect::Pending
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        cx.claim(0);
+        cx.set_effect(phitex_defuse::Effect::None);
+        ToyFile.run(cx)
+    }
+}
+
+/// The cost of a round that ends with 15 000 nodes stalled behind one
+/// environment wait, when every node's claim and scope effect are
+/// pending: a round that supplies an unrelated field (nothing to run)
+/// should cost well under a second.
+#[test]
+fn stalled_nodes_with_pending_claims_and_effects_are_cheap() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(ToyPendingAll));
+    let u = eng.new_unit();
+    let _i = eng.push(u, op, vec![eng.values().str("i")]);
+    let mut last = None;
+    for _ in 0..15_000 {
+        last = Some(eng.push(u, op, vec![eng.values().str("r")]));
+    }
+    eng.add_root(last.unwrap());
+    let t0 = std::time::Instant::now();
+    eng.evaluate_sequential().expect("evaluate");
+    let first = t0.elapsed();
+    let mut times = Vec::new();
+    for k in 0..3 {
+        let g = eng.values().field(&format!("other{k}"));
+        let one = eng.values().int(1);
+        eng.set_environment(vec![(g, one)]);
+        let t = std::time::Instant::now();
+        eng.evaluate_sequential().expect("evaluate");
+        times.push(t.elapsed());
+    }
+    eprintln!("first {first:?}, then {times:?}");
+    assert!(
+        times.iter().all(|t| t.as_secs_f64() < 1.0),
+        "rounds with nothing to run took {times:?} (the first {first:?})"
+    );
+}
