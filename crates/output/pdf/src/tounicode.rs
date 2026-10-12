@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::PdfWriter;
+use crate::PdfState;
 use crate::enc::GlyphNames;
 
 /// A glyph's Unicode: a code point, a UTF-16BE hex string
@@ -260,7 +260,7 @@ fn cmap(names: &GlyphNames, tfm: &[u8], name: &[u8], tree: &Tree) -> Vec<u8> {
     o
 }
 
-impl PdfWriter {
+impl PdfState {
     /// `\pdfglyphtounicode{glyph}{unistr}` (`deftounicode`): ignored
     /// when invalid (a warning).
     pub fn glyph_to_unicode(&mut self, glyph: &[u8], unistr: &[u8]) {
