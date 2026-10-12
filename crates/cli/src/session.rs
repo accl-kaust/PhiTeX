@@ -189,15 +189,18 @@ pub struct Session {
     cache: Option<Cache>,
 }
 
-/// `SOURCE_DATE_EPOCH`, else the time now.
-pub fn pdf_date() -> i64 {
+/// The job's clock as engine `e` reads it, in seconds whose UTC fields are
+/// the job's date and time: `SOURCE_DATE_EPOCH` (TeX Live's engines but
+/// Knuth's `tex`, which ignores it), else the local time now.
+pub fn pdf_date(e: &Engine) -> i64 {
     std::env::var("SOURCE_DATE_EPOCH")
         .ok()
+        .filter(|_| e.name != "tex")
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or_else(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
+            let now = jiff::Timestamp::now();
+            let off = jiff::tz::TimeZone::system().to_offset(now);
+            now.as_second() + i64::from(off.seconds())
         })
 }
 

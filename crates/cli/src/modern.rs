@@ -404,7 +404,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
         synctex: t.synctex,
         recorder: false,
         shell_escape: t.shell_escape,
-        pdf_date: session::pdf_date(),
+        pdf_date: session::pdf_date(&t.engine),
         // (the files the job reads back, .aux and .toc, to their fixpoint)
         fixpoint: true,
         cache_limit: t.cache_limit,
