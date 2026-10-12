@@ -661,6 +661,8 @@ pub(crate) struct Def {
     pub(crate) field: Field,
     pub(crate) value: ValueId,
     pub(crate) global: bool,
+    /// The scope depth a local definition is indexed at (0 for a global).
+    pub(crate) depth: u32,
 }
 
 const F_RAN: u16 = 1;
@@ -1040,7 +1042,6 @@ pub struct Engine {
     /// Local definitions by scope depth: `(unit, field, depth, label)`.
     local_ix: BTreeMap<(u32, Field, u32, u64), Slot>,
     /// The depth each local definition is indexed under.
-    local_depth: FxHashMap<(u32, Field, u64), u32>,
     /// Runs of each stream claimer in this evaluation.
     stream_runs: FxHashMap<Slot, u32>,
     /// The labels `stream_touch` saw this evaluation, in order: a claim
@@ -1073,7 +1074,11 @@ pub struct Engine {
     causes: FxHashMap<Slot, Vec<Cause>>,
     /// Nodes past half their run budget (`> 0`: causes are recorded).
     tracing: u32,
-    created_in_eval: FxHashMap<Slot, (u32, Vec<(String, String)>)>,
+    created_in_eval: FxHashMap<Slot, (u32, Vec<(OpId, ValueId)>)>,
+    /// While a run of fresh siblings is bound: (label, effect in the order,
+    /// scope depth before it), sorted by label. Their definitions' depths
+    /// come from here instead of a fold each.
+    run_depths: Vec<(u64, u8, u32)>,
     idle_rounds: u32,
     eval_runs: u64,
     #[cfg(not(target_arch = "wasm32"))]
@@ -1229,7 +1234,6 @@ impl Engine {
             monoids: FxHashMap::default(),
             defs_ix: BTreeMap::new(),
             local_ix: BTreeMap::new(),
-            local_depth: FxHashMap::default(),
             stream_runs: FxHashMap::default(),
             touch_log: Vec::new(),
             in_eval: false,
@@ -1245,6 +1249,7 @@ impl Engine {
             causes: FxHashMap::default(),
             tracing: 0,
             created_in_eval: FxHashMap::default(),
+            run_depths: Vec::new(),
             idle_rounds: 0,
             eval_runs: 0,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1559,11 +1564,11 @@ impl Engine {
                     continue;
                 }
                 let want = self.def_depth(root, n.label, d.field);
-                if self.local_depth.get(&(n.unit, d.field, n.label)) != Some(&want) {
+                if d.depth != want {
                     bad.push(format!(
-                        "{s:?}: local {} indexed at depth {:?}, now {want}",
+                        "{s:?}: local {} indexed at depth {}, now {want}",
                         self.values.render(d.field.0),
-                        self.local_depth.get(&(n.unit, d.field, n.label))
+                        d.depth
                     ));
                 }
             }
@@ -2240,6 +2245,13 @@ impl Engine {
         if provisional {
             flags |= F_PROV;
         }
+        // A static effect goes into the order with the record: one
+        // insertion instead of an insertion and an update.
+        let effect = if eff == Effect::Pending {
+            EFF_NONE
+        } else {
+            eff_code(eff)
+        };
         let node = Node {
             id,
             args,
@@ -2256,7 +2268,7 @@ impl Engine {
             aux: NO_AUX,
             on: NIL,
             state: State::Dirty,
-            effect: EFF_NONE,
+            effect,
             bound: EFF_NONE,
             flags,
             uses: Box::new([]),
@@ -2306,8 +2318,10 @@ impl Engine {
         if eff == Effect::Pending || eff == Effect::None {
             return;
         }
-        self.nm(s).effect = eff_code(eff);
-        self.sync_order(s);
+        if self.n(s).effect != eff_code(eff) {
+            self.nm(s).effect = eff_code(eff);
+            self.sync_order(s);
+        }
         if region {
             self.effect_region_changed(s, EFF_NONE);
             self.set_kind(s, eff_kind(eff));
@@ -2344,7 +2358,36 @@ impl Engine {
                     in_text.insert(self.canon(f), h);
                 }
             }
-            self.structure_edit(c);
+        }
+        self.structure_edit_run(created);
+    }
+
+    /// [`Self::structure_edit`] for a run of consecutive fresh siblings:
+    /// the claims reaching into it are those reaching its first node (the
+    /// claimers inside it are fresh, already marked), and the range readers
+    /// over it are found with one query.
+    fn structure_edit_run(&mut self, created: &[Slot]) {
+        let (Some(&first), Some(&last)) = (created.first(), created.last()) else {
+            return;
+        };
+        let n = self.n(first);
+        let (unit, lo) = (n.unit, n.label);
+        let hi = self.n(last).label;
+        self.dirty_reaching_claims(unit, lo);
+        if let Some((_, i)) = self.order.prev(self.units[unit as usize].root, lo) {
+            let p = i.slot;
+            self.claimer_near(p);
+        }
+        let u = &self.units[unit as usize];
+        let from = lo.saturating_sub(u.max_span);
+        let readers: Vec<Slot> = u
+            .watches
+            .range((from, Slot { ix: 0, gen_: 0 })..=(hi, NIL))
+            .map(|((_, r), _)| *r)
+            .filter(|&r| lo < self.n(r).label)
+            .collect();
+        for r in readers {
+            self.make_dirty(r);
         }
     }
 
@@ -2616,7 +2659,7 @@ impl Engine {
     fn detach_labels(&mut self, x: Slot) {
         let n = self.n(x);
         let (unit, label) = (n.unit, n.label);
-        let defs: Vec<Field> = n.defs.iter().map(|d| d.field).collect();
+        let defs: Vec<(Field, u32)> = n.defs.iter().map(|d| (d.field, d.depth)).collect();
         let uses: Vec<(u64, Field)> = n
             .uses
             .iter()
@@ -2627,8 +2670,8 @@ impl Engine {
         let root = self.units[unit as usize].root;
         let (r, _) = self.order.remove(&OAug, root, label);
         self.units[unit as usize].root = r;
-        for f in defs {
-            self.ix_remove(unit, f, label);
+        for (f, depth) in defs {
+            self.ix_remove(unit, f, label, depth);
         }
         for (s, f) in uses {
             self.users.remove(&(s, f, label));
@@ -2697,6 +2740,16 @@ impl Engine {
 
     /// The scope depth at which the node at `label` defines `f`.
     fn def_depth(&self, root: u32, label: u64, f: Field) -> u32 {
+        if let Ok(i) = self.run_depths.binary_search_by_key(&label, |r| r.0) {
+            let (_, eff, before) = self.run_depths[i];
+            let inside =
+                ((f == self.kind_field || self.is_seq_hidden(f)) && eff_opens(eff) > 0) || eff & EFF_BEFORE != 0;
+            return if inside {
+                eff_opens(eff) + before.saturating_sub(eff_closes(eff))
+            } else {
+                before
+            };
+        }
         let inside = self.def_inside(root, label, f);
         self.order
             .fold(&OAug, root, 0, if inside { label + 1 } else { label })
@@ -2711,14 +2764,22 @@ impl Engine {
             let root = self.units[unit as usize].root;
             let depth = self.def_depth(root, label, f);
             self.local_ix.insert((unit, f, depth, label), x);
-            self.local_depth.insert((unit, f, label), depth);
+            for d in &mut self.nm(x).defs {
+                if d.field == f {
+                    d.depth = depth;
+                }
+            }
         }
     }
 
-    fn ix_remove(&mut self, unit: u32, f: Field, label: u64) {
+    /// The depth `x`'s definition of `f` is indexed at.
+    fn indexed_depth(&self, x: Slot, f: Field) -> u32 {
+        self.n(x).defs.iter().find(|d| d.field == f).map_or(0, |d| d.depth)
+    }
+
+    fn ix_remove(&mut self, unit: u32, f: Field, label: u64, depth: u32) {
         self.defs_ix.remove(&(unit, f, label));
-        self.global_ix.remove(&(unit, f, label));
-        if let Some(depth) = self.local_depth.remove(&(unit, f, label)) {
+        if self.global_ix.remove(&(unit, f, label)).is_none() {
             self.local_ix.remove(&(unit, f, depth, label));
         }
     }
@@ -3116,6 +3177,7 @@ impl Engine {
                 field: f,
                 value,
                 global,
+                depth: 0,
             });
             n.defs = defs.into_boxed_slice();
         }
@@ -3288,7 +3350,8 @@ impl Engine {
         let (unit, lx) = (self.n(x).unit, self.n(x).label);
         let root = self.units[unit as usize].root;
         // The index is keyed by depth.
-        self.ix_remove(unit, f, lx);
+        let depth = self.indexed_depth(x, f);
+        self.ix_remove(unit, f, lx, depth);
         self.ix_insert(unit, f, lx, x);
         let end = self.local_end(root, lx, f);
         let from = x.pack();
@@ -3319,6 +3382,7 @@ impl Engine {
     fn remove_def(&mut self, x: Slot, f: Field) {
         let n = self.n(x);
         let (unit, label) = (n.unit, n.label);
+        let depth = self.indexed_depth(x, f);
         {
             let n = self.nm(x);
             let mut defs = std::mem::take(&mut n.defs).into_vec();
@@ -3328,7 +3392,7 @@ impl Engine {
         if self.n(x).has(F_APP) {
             return;
         }
-        self.ix_remove(unit, f, label);
+        self.ix_remove(unit, f, label, depth);
         self.stream_touch(unit, label);
         let from = x.pack();
         let users: Vec<(u64, Slot)> = self
@@ -4721,16 +4785,23 @@ impl Engine {
             let n_new = u32::try_from(ids.len() - pre - suf).unwrap_or(u32::MAX);
             let e = self.created_in_eval.entry(x).or_default();
             e.0 = e.0.saturating_add(n_new);
-            for &(op, args) in &specs[pre..ids.len() - suf] {
+            for &spec in &specs[pre..ids.len() - suf] {
                 if e.1.len() == 4 {
                     e.1.remove(0);
                 }
-                e.1.push((String::new(), self.values.render(args).chars().take(80).collect()));
-                let k = e.1.len() - 1;
-                e.1[k].0 = self.ops[op.0 as usize].name().to_string();
+                e.1.push(spec);
             }
             let (created_n, last) = (e.0, e.1.clone());
             if created_n > self.limits.children_per_node || depth > self.limits.unfold_depth {
+                let last = last
+                    .iter()
+                    .map(|&(op, args)| {
+                        (
+                            self.ops[op.0 as usize].name().to_string(),
+                            self.values.render(args).chars().take(80).collect(),
+                        )
+                    })
+                    .collect();
                 self.errors.push(EvalError::RunawayCreation {
                     node: self.n(x).id,
                     created: created_n,
@@ -4781,6 +4852,17 @@ impl Engine {
                     }
                 }
             }
+            // The run's scope depths: one fold at its start, then a prefix
+            // count of the brackets inside it.
+            let mut depth = self.order.fold(&OAug, root, 0, self.n(first).label).o;
+            let mut rd = std::mem::take(&mut self.run_depths);
+            rd.clear();
+            for &c in &created {
+                let eff = self.oitem(c).eff;
+                rd.push((self.n(c).label, eff, depth));
+                depth = eff_opens(eff) + depth.saturating_sub(eff_closes(eff));
+            }
+            self.run_depths = rd;
             // Balanced, every opener's scope lies in the new text, where
             // nothing has run: its markers have no readers to take.
             self.fresh_scope = balanced;
@@ -4789,6 +4871,7 @@ impl Engine {
             }
             self.fresh_scope = false;
             self.bind_fresh(&created, &heights[pre.min(heights.len())..]);
+            self.run_depths.clear();
         }
         kids.extend_from_slice(&created);
         kids.extend_from_slice(&old[old.len() - suf..]);
