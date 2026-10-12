@@ -110,8 +110,8 @@ class Pages implements CoreTransport {
     const o = op as { op: string; page?: number };
     if (o.op === "png") {
       const d = await this.open().catch(() => null);
-      // (sharp at 125% zoom on this screen; a closer zoom scales the canvas)
-      const drawn = d?.draw(o.page ?? 0, (96 / 72) * (window.devicePixelRatio || 1) * 1.25);
+      // (at the zoom shown, on this screen's pixels: the viewer asks again after a zoom in)
+      const drawn = d?.draw(o.page ?? 0, panel.pixelsPerPoint());
       if (!drawn) return { ok: false, json: { error: "no such page" } };
       return { ok: true, canvas: toCanvas(drawn), size: [drawn.w, drawn.h], links: drawn.links };
     }
