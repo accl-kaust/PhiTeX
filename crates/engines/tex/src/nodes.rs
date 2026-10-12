@@ -246,6 +246,7 @@ pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
     let xs = match &*v.get(x) {
         Value::List(xs) => xs.clone(),

@@ -439,7 +439,7 @@ fn a_reopened_scope_sees_the_enclosing_definitions() {
     let mut eng = Engine::new();
     let op = eng.register(Arc::new(Toy5));
     let u = eng.new_unit();
-    let mut node = |e: &mut Engine, t: &str, n: Option<i64>| {
+    let node = |e: &mut Engine, t: &str, n: Option<i64>| {
         let mut a = vec![e.values().str(t)];
         if let Some(n) = n {
             a.push(e.values().int(n));
