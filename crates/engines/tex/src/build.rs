@@ -381,7 +381,7 @@ impl Run<'_, '_> {
         {
             self.set("parshape", v.list(Vec::new()), false);
         }
-        Ok(())
+        crate::etex::normal_paragraph(self)
     }
 
     /// `head_for_vmode` (§1095).
@@ -548,16 +548,16 @@ impl Run<'_, '_> {
             hang_indent: self.param("hangindent")?,
             hang_after: self.param("hangafter")?,
             par_shape,
-            last_line_fit: 0,
+            last_line_fit: self.param("lastlinefit")?,
             inter_line_penalty: self.param("interlinepenalty")?,
             club_penalty: self.param("clubpenalty")?,
             widow_penalty: self.param("widowpenalty")?,
             display_widow_penalty: self.param("displaywidowpenalty")?,
             broken_penalty: self.param("brokenpenalty")?,
-            inter_line_penalties: Vec::new(),
-            club_penalties: Vec::new(),
-            widow_penalties: Vec::new(),
-            display_widow_penalties: Vec::new(),
+            inter_line_penalties: crate::etex::penalties(self, 1)?,
+            club_penalties: crate::etex::penalties(self, 2)?,
+            widow_penalties: crate::etex::penalties(self, 3)?,
+            display_widow_penalties: crate::etex::penalties(self, 4)?,
             prev_graf: self.int32(&format!("pg:{}", md.vlid))?,
             lang,
             pack: self.pack_params(true)?,
@@ -1860,6 +1860,9 @@ impl Run<'_, '_> {
     /// `\badness` (§424).
     pub(crate) fn last_item(&mut self, m: i32) -> R<crate::scan::IVal> {
         use crate::scan::IVal;
+        if m >= 100 {
+            return crate::etex::last_item(self, m);
+        }
         if m > 2 {
             return Ok(IVal::Int(if m == 3 {
                 self.input_line_no()?
@@ -1946,15 +1949,7 @@ impl Run<'_, '_> {
         let smd = self.param("splitmaxdepth")?;
         let pp = self.pack_params(false)?;
         let r = phitex_typeset::page::vsplit(bx.list, h, smd, stk, false, &pp);
-        let marks: Vec<ValueId> = r
-            .marks
-            .iter()
-            .filter_map(|&k| side.marks.get(k as usize).copied())
-            .collect();
-        if let Some(&first) = marks.first() {
-            self.set("mark:splitfirst", first, true);
-            self.set("mark:splitbot", *marks.last().unwrap_or(&first), true);
-        }
+        crate::etex::split_marks(self, &r.marks, &side)?;
         let rest = r.rest.map(|rb| nodes::encode_box(v, &rb, &side));
         self.modify_box_reg(n, rest)?;
         Ok(Some(nodes::encode_box(v, &r.page.node, &side)))

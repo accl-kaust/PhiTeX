@@ -24,6 +24,10 @@ impl Run<'_, '_> {
     pub(crate) fn expand(&mut self) -> R<()> {
         let saved = (self.radix, self.cur_order);
         let c = self.cur.cmd;
+        if crate::etex::expand(self)? {
+            (self.radix, self.cur_order) = saved;
+            return Ok(());
+        }
         if (cmd::CALL..cmd::END_TEMPLATE).contains(&c) {
             self.macro_call()?;
         } else {
@@ -98,7 +102,7 @@ impl Run<'_, '_> {
             }
         }
         (self.radix, self.cur_order) = saved;
-        Ok(())
+        crate::etex::after_expand(self, c)
     }
 
     /// `insert_relax` (§379).
@@ -110,6 +114,7 @@ impl Run<'_, '_> {
 
     /// §372–§374.
     fn cs_name(&mut self) -> R<()> {
+        let _in_csname = crate::etex::InCsname::enter();
         let mut name = String::new();
         loop {
             self.get_x_token()?;
@@ -341,10 +346,12 @@ impl Run<'_, '_> {
 
     /// `conditional` (§498–§509).
     #[allow(clippy::too_many_lines)]
-    fn conditional(&mut self) -> R<()> {
+    pub(crate) fn conditional(&mut self) -> R<()> {
         self.conds.push(IF_CODE);
         let save = self.conds.len();
-        let this_if = self.cur.chr;
+        crate::etex::if_begin(self, self.cur.chr)?;
+        let negate = self.cur.chr >= crate::etex::UNLESS_CODE;
+        let this_if = self.cur.chr % crate::etex::UNLESS_CODE;
         let b = match this_if {
             0 | 1 => {
                 let (m, n) = self.x_char_or_active()?;
@@ -443,6 +450,7 @@ impl Run<'_, '_> {
             }
             14 => true,
             15 => false,
+            17.. => crate::etex::if_test(self, this_if)?,
             _ => {
                 // §509
                 let mut n = self.scan_int()?;
@@ -463,7 +471,7 @@ impl Run<'_, '_> {
                 return Ok(());
             }
         };
-        if b {
+        if b != negate {
             self.change_if_limit(ELSE_CODE, save);
             return Ok(());
         }
@@ -518,6 +526,9 @@ impl Run<'_, '_> {
 
     /// `the_toks` (§465–§466).
     pub(crate) fn the_toks(&mut self) -> R<Vec<Tok>> {
+        if self.cur.cmd == cmd::THE && self.cur.chr != 0 {
+            return crate::etex::the_toks(self);
+        }
         self.get_x_token()?;
         let val = self.scan_something_internal(5, false)?;
         Ok(match val {
@@ -604,7 +615,13 @@ impl Run<'_, '_> {
         let esc = self.int("param:escapechar")?;
         match m {
             Mean::Macro(mac) => {
-                match mac.flags {
+                if mac.flags & crate::etex::PROTECTED != 0 {
+                    print::print_esc(s, "protected", esc);
+                    if mac.flags.trailing_zeros() >= 2 {
+                        s.push(' ');
+                    }
+                }
+                match mac.flags & 3 {
                     0 => s.push_str("macro"),
                     1 => print::print_esc(s, "long macro", esc),
                     2 => print::print_esc(s, "outer macro", esc),
@@ -654,7 +671,7 @@ impl Run<'_, '_> {
                 } else {
                     print::print_esc(s, name, esc);
                 }
-                if c == cmd::TOP_BOT_MARK {
+                if c == cmd::TOP_BOT_MARK && h < crate::etex::MARKS_CODE {
                     s.push(':');
                     let name = ["top", "first", "bot", "splitfirst", "splitbot"]
                         [usize::try_from(h).unwrap_or(0).min(4)];
@@ -721,6 +738,7 @@ impl Run<'_, '_> {
         for i in drop.into_iter().rev() {
             self.frames.remove(i);
         }
+        crate::etex::force_eof(self);
     }
 
     /// `start_input` (§537): the file's lines are read next; a marker

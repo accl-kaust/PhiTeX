@@ -708,10 +708,10 @@ impl<'c, 'a> Run<'c, 'a> {
                 return Ok(false);
             };
             if let Tok::S(n) = &t
-                && &**n == "\u{10FFFE}eof"
+                && n.starts_with("\u{10FFFE}eof")
             {
-                // §362: the end of an \input file
-                self.log("close", ")")?;
+                // §362: the end of an \input file (or a pseudo file)
+                crate::etex::end_of_file(self, &n.clone())?;
                 continue;
             }
             break t;
