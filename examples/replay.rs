@@ -261,8 +261,30 @@ fn main() {
                 eprintln!("edit {}: cold replay failed: {e}", k + 1);
                 std::process::exit(1);
             });
-            if doc.result(&eng) != d2.result(&e2) {
+            let (a, b) = (doc.result(&eng), d2.result(&e2));
+            if a != b {
                 eprintln!("edit {}: incremental result differs from a cold replay", k + 1);
+                let diff: Vec<usize> = (0..a.len().min(b.len())).filter(|&i| a[i] != b[i]).collect();
+                eprintln!(
+                    "{} of {} steps differ (lengths {} and {})",
+                    diff.len(),
+                    a.len(),
+                    a.len(),
+                    b.len()
+                );
+                for &i in diff.iter().take(8) {
+                    let show = |e: &Engine, d: &Doc| {
+                        e.output(d.nodes[i])
+                            .map_or_else(|| "none".to_string(), |v| e.values().render(v))
+                    };
+                    eprintln!(
+                        "  step {} ({}): incremental {} | cold {}",
+                        i,
+                        doc.steps[i].id,
+                        show(&eng, &doc),
+                        show(&e2, &d2)
+                    );
+                }
                 std::process::exit(1);
             }
         }

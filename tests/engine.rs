@@ -382,6 +382,37 @@ fn a_stream_claim_ends_at_the_first_node_of_a_class_after_unfolding() {
 }
 
 #[test]
+fn a_stream_claim_follows_its_range_through_label_renumbering() {
+    // Inserting at one spot halves the label gap each time, so the unit
+    // renumbers its labels several times; the claim's recorded range is
+    // kept by node, and an edit inside it, before or after a renumbering,
+    // still runs the claimer.
+    let (mut eng, mut prog, _) = load(&["collect l until mark", "1", "mark a", "2", "z = l"]);
+    assert_eq!(out(&eng, &prog, 0), "[1]");
+    for k in 0..70 {
+        prog.insert_line(&mut eng, 2, format!("{}", k + 10));
+        let r = eval(&mut eng, &prog);
+        assert!(r.nodes_run >= 1, "insert {k}: the claimer runs");
+    }
+    assert!(out(&eng, &prog, 0).starts_with("[1 79 78"));
+    // Renumberings outside the range: the delimiter and the range's end
+    // move while the claimer does not run.
+    let after = prog.lines.len() - 1;
+    for k in 0..70 {
+        prog.insert_line(&mut eng, after, format!("{}", k + 100));
+        eval(&mut eng, &prog);
+    }
+    assert!(out(&eng, &prog, 0).starts_with("[1 79 78"));
+    prog.set_line(&mut eng, 1, "5".into());
+    eval(&mut eng, &prog);
+    assert!(out(&eng, &prog, 0).starts_with("[5 79 78"));
+    // The delimiter goes: the range runs on to the next delimiter.
+    let mark = prog.lines.iter().position(|l| l == "mark a").unwrap();
+    prog.set_line(&mut eng, mark, "6".into());
+    assert!(matches!(eng.evaluate_sequential(), Err(EvalError::Cycle(_))));
+}
+
+#[test]
 fn a_stream_claim_predicate_reads_a_definition_inside_the_claim() {
     let (mut eng, mut prog, _) = load(&[
         "collect l until mark if go", // 0
