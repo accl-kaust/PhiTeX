@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use phitex_defuse::{Ctx, Stop, Value, ValueId, Values};
-use phitex_pdf::map::{MapEntry, parse_map};
+use phitex_pdf::map::{MapEntry, parse_line, parse_map};
 use phitex_pdf::{EndData, FontSource, PdfParams, PdfWriter};
 use phitex_tfm::ScaledFont;
 use phitex_typeset::fonts::FontId;
@@ -28,7 +28,10 @@ pub(crate) const BANNER: &str = "This is pdfTeX, Version 3.141592653-2.6-1.40.29
 /// `COLOR_DEFAULT` (`utils.c`).
 const COLOR_DEFAULT: &str = "0 g 0 G";
 
-type MapCache = Mutex<HashMap<u64, Arc<BTreeMap<Vec<u8>, MapEntry>>>>;
+/// A font map by TFM name.
+type Map = BTreeMap<Vec<u8>, MapEntry>;
+
+type MapCache = Mutex<HashMap<u64, Arc<Map>>>;
 
 /// Parsed map files: a pure function's memo by the file's value.
 fn maps() -> &'static MapCache {
@@ -249,6 +252,8 @@ pub(crate) fn write(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop
             }))
         }
     };
+    let items = cx_maps(cx)?;
+    let map = apply_map_items(cx, map, items)?;
     for &page in pages {
         let xs = list_of(v, page);
         for fx in xs.get(2).map(|&l| list_of(v, l)).unwrap_or_default() {
@@ -366,4 +371,69 @@ pub(crate) fn write(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop
     let bytes = w.finish_with(&end).unwrap_or_default();
     let s: String = bytes.iter().map(|&b| char::from(b)).collect();
     Ok(v.intern(Value::Str(s.into_boxed_str())))
+}
+
+/// `\pdfmapfile` and `\pdfmapline` items, in order.
+fn cx_maps(cx: &mut Ctx<'_>) -> Result<Vec<(bool, String)>, Stop> {
+    let v = cx.values();
+    let items = cx.use_field(v.field("pdf:maps"))?;
+    Ok(items
+        .map(|x| list_of(v, x))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| {
+            let ys = list_of(v, e);
+            let file = ys.first().map(|&k| str_of(v, k)).as_deref() == Some("file");
+            (file, ys.get(1).map(|&t| str_of(v, t)).unwrap_or_default())
+        })
+        .collect())
+}
+
+/// The map after the document's map items (`pdfmapfile`,
+/// `pdfmapline`, `mapfile.c`): `+` adds what is not there, `=` replaces,
+/// `-` removes; without a prefix the item replaces the default map.
+// PDF-BACKEND-GAP: pdfTeX applies an item when it is shipped out, before
+// the fonts of later pages; here all of them before the first page.
+fn apply_map_items(
+    cx: &mut Ctx<'_>,
+    map: Option<Arc<Map>>,
+    items: Vec<(bool, String)>,
+) -> Result<Option<Arc<Map>>, Stop> {
+    if items.is_empty() {
+        return Ok(map);
+    }
+    let v = cx.values();
+    let mut m: BTreeMap<Vec<u8>, MapEntry> = map.map(|m| (*m).clone()).unwrap_or_default();
+    for (is_file, text) in items {
+        let t = text.trim_start();
+        let (mode, rest) = match t.chars().next() {
+            Some(c @ ('+' | '=' | '-')) => (c, &t[1..]),
+            _ => (' ', t),
+        };
+        let entries: Vec<MapEntry> = if is_file {
+            match file(cx, rest.trim())? {
+                Got::Text(b) => parse_map(&bytes_of(&str_of(v, b))).into_values().collect(),
+                Got::Absent => Vec::new(),
+            }
+        } else {
+            parse_line(&bytes_of(rest)).into_iter().collect()
+        };
+        if mode == ' ' {
+            m.clear();
+        }
+        for e in entries {
+            match mode {
+                '+' => {
+                    m.entry(e.tfm_name.clone()).or_insert(e);
+                }
+                '-' => {
+                    m.remove(&e.tfm_name);
+                }
+                _ => {
+                    m.insert(e.tfm_name.clone(), e);
+                }
+            }
+        }
+    }
+    Ok(Some(Arc::new(m)))
 }
