@@ -113,7 +113,7 @@ class Pages implements CoreTransport {
       // (sharp at 125% zoom on this screen; a closer zoom scales the canvas)
       const drawn = d?.draw(o.page ?? 0, (96 / 72) * (window.devicePixelRatio || 1) * 1.25);
       if (!drawn) return { ok: false, json: { error: "no such page" } };
-      return { ok: true, canvas: toCanvas(drawn), size: [drawn.w, drawn.h] };
+      return { ok: true, canvas: toCanvas(drawn), size: [drawn.w, drawn.h], links: drawn.links };
     }
     if (o.op === "outline") {
       const d = await this.open().catch(() => null);
@@ -147,7 +147,6 @@ const panel = new Panel(
     onMain: () => {},
     onReload: () => void session.resync(),
     onClean: () => void session.resync(),
-    onFormat: () => {},
     onGoto: (file, line) => source(file, line),
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
   },
@@ -169,7 +168,6 @@ const panel = new Panel(
     },
   },
   {
-    pdfjs: false,
     outline: true,
     keys: true,
     header: true,
@@ -200,7 +198,6 @@ panel.shown(true);
 const host: EditorHost = { loadProject: async () => ({}), onOpen() {}, onChanges() {} };
 // (byte offsets of the file on disk: the watch reads it to find the line)
 const session = new PreviewSession(host, pages, panel, {
-  format: "vector",
   checkEveryMs: 0,
   remote: { source: (file, start, end) => void sock.request({ op: "source", file, start, end }) },
 });
