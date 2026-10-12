@@ -169,6 +169,13 @@ fn read_keys(tx: &mpsc::Sender<Event>, raw: bool) {
                 }
                 continue;
             }
+            // (Ctrl-C: out at once, a build running or not, as the
+            // terminal's own Ctrl-C would)
+            if b == 0x03 {
+                keys::restore();
+                eprintln!();
+                std::process::exit(130);
+            }
             // (a character's bytes, whole)
             text.push(b);
             let Ok(t) = std::str::from_utf8(&text) else {
