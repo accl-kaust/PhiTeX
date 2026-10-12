@@ -42,6 +42,8 @@ pub fn finder(dir: &Path) -> Finder {
             "map" => phitex_kpse::Format::FontMap,
             "pfb" | "pfa" => phitex_kpse::Format::Type1,
             "enc" => phitex_kpse::Format::Enc,
+            "ttf" | "ttc" => phitex_kpse::Format::TrueType,
+            "vf" => phitex_kpse::Format::Vf,
             _ => phitex_kpse::Format::Tex,
         };
         let mut k = kpse().lock().ok()?;
