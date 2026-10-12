@@ -2613,7 +2613,7 @@ var PreviewSession = class {
       r.json = d.json;
     }
     this.opened = true;
-    const latex = r.json.engine === "phitex" || r.json.engine === "partex";
+    const latex = r.json.engine === "phitex";
     if (latex !== this.latex) this.lastWarned = 0;
     this.latex = latex;
     this.coreFetches = !!r.json.fetches;

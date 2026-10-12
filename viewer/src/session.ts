@@ -525,8 +525,7 @@ export class PreviewSession {
       r.json = d.json;
     }
     this.opened = true;
-    // (the Overleaf extension's core, on the partex engine still, says "partex")
-    const latex = r.json.engine === "phitex" || r.json.engine === "partex";
+    const latex = r.json.engine === "phitex";
     // (diagnosed before this was known: say it again with it)
     if (latex !== this.latex) this.lastWarned = 0;
     this.latex = latex;
