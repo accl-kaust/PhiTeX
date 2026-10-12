@@ -60,6 +60,13 @@ pub trait Scheduler {
 /// Runs a batch of jobs, possibly concurrently; results in index order.
 pub trait Executor {
     fn execute(&mut self, n: usize, run: &(dyn Fn(usize) -> RunResult + Sync), out: &mut Vec<RunResult>);
+
+    /// Runs `f(i)` for every `i < n`, possibly concurrently, and returns
+    /// once all have run. The engine's parallel passes over a batch of
+    /// results go through it; the default runs them in order.
+    fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        (0..n).for_each(f);
+    }
 }
 
 /// Runs jobs one after another on the calling thread.
