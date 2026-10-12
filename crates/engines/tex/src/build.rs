@@ -223,7 +223,10 @@ impl Run<'_, '_> {
 
     /// `tail_append` to list `lid`.
     pub(crate) fn append(&mut self, lid: i64, node: ValueId) {
-        self.list_appends.push((lid, node));
+        let v = self.v;
+        let e = v.list(vec![v.int(lid), node]);
+        let s = v.seq_unit(e);
+        self.contribute("items", s);
     }
 
     /// A point where tex.web calls `build_page` on the main list.
@@ -231,42 +234,29 @@ impl Run<'_, '_> {
         self.build_page(md)
     }
 
-    /// The lists' fields extended by the run's appends: a list is carried
-    /// by its own field, so a reader depends on the list's last append,
-    /// not on every item before it.
-    pub(crate) fn flush_lists(&mut self) -> R<()> {
-        let v = self.v;
-        let appends = std::mem::take(&mut self.list_appends);
-        let mut lids: Vec<i64> = appends.iter().map(|(l, _)| *l).collect();
-        lids.sort_unstable();
-        lids.dedup();
-        for lid in lids {
-            let name = format!("list:{lid}");
-            let mut cur = self.get(&name)?.unwrap_or(ValueId::NIL);
-            for &(l, n) in &appends {
-                if l == lid {
-                    cur = v.seq_concat(cur, v.seq_unit(n));
-                }
-            }
-            self.set(&name, cur, true);
-        }
-        Ok(())
-    }
-
     /// The contents of list `lid` so far, and how many of them are
-    /// still contributions (after the last `build_page`): the list's
-    /// field, which each append extends.
+    /// still contributions (after the last `build_page`).
+    // REDUCE-GAP: acc_range anchors only at a node id the run holds;
+    // a list's opener is known as a value, so its readers fold from the
+    // unit's start and keep their list's items.
     pub(crate) fn list_items(&mut self, lid: i64) -> R<(Vec<ValueId>, usize)> {
         let v = self.v;
-        let all = self.get(&format!("list:{lid}"))?.unwrap_or(ValueId::NIL);
+        let f = v.field("items");
+        let all = self.cx.acc_range(f, None)?;
         let mut out: Vec<ValueId> = Vec::new();
         let mut since_bp = 0usize;
-        let mine = self
-            .list_appends
+        let own: Vec<ValueId> = self
+            .contribs
             .iter()
-            .filter(|(l, _)| *l == lid)
-            .map(|(_, n)| *n);
-        for n in v.seq_to_vec(all).into_iter().chain(mine) {
+            .filter(|(g, _)| *g == f)
+            .map(|(_, x)| *x)
+            .collect();
+        let mut push = |x: ValueId, out: &mut Vec<ValueId>| {
+            let Value::List(xs) = &*v.get(x) else { return };
+            if xs.len() != 2 || int_of(v, xs[0]) != lid {
+                return;
+            }
+            let n = xs[1];
             match nodes::tag(v, n) {
                 T_DELETE => {
                     if since_bp > 0 {
@@ -279,6 +269,14 @@ impl Run<'_, '_> {
                     out.push(n);
                     since_bp += 1;
                 }
+            }
+        };
+        for x in v.seq_to_vec(all) {
+            push(x, &mut out);
+        }
+        for s in own {
+            for x in v.seq_to_vec(s) {
+                push(x, &mut out);
             }
         }
         Ok((out, since_bp))
