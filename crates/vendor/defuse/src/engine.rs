@@ -1861,7 +1861,7 @@ impl Engine {
         id: NodeId,
         provisional: bool,
     ) -> Slot {
-        let s = self.create_raw(unit, after, op, args, parent, id, provisional);
+        let s = self.create_raw(unit, after, None, op, args, parent, id, provisional);
         self.set_created_effect(s, true);
         self.bind_created(s, None);
         s
@@ -1874,6 +1874,7 @@ impl Engine {
         &mut self,
         unit: u32,
         after: Option<Slot>,
+        label: Option<u64>,
         op: OpId,
         args: ValueId,
         parent: Slot,
@@ -1955,7 +1956,7 @@ impl Engine {
         if parent == NIL && self.units[unit as usize].owner != NIL && after.is_none() {
             // A body-unit child placed at the start.
         }
-        let label = self.alloc_label(unit, after);
+        let label = label.unwrap_or_else(|| self.alloc_label(unit, after));
         self.nm(s).label = label;
         self.stream_touch(unit, label);
         let item = self.oitem(s);
@@ -2192,21 +2193,32 @@ impl Engine {
     // ------------------------------------------------------------- labels
 
     fn alloc_label(&mut self, unit: u32, after: Option<Slot>) -> u64 {
+        self.alloc_labels(unit, after, 1)[0]
+    }
+
+    /// `k` labels for nodes to go, in order, right after `after` (the
+    /// unit's start: `None`): spread over the gap, which is widened by one
+    /// renumbering when it has no room for them.
+    fn alloc_labels(&mut self, unit: u32, after: Option<Slot>, k: usize) -> Vec<u64> {
+        let k = k.max(1) as u64;
         loop {
             let lo = after.map_or(0, |a| self.n(a).label);
             let root = self.units[unit as usize].root;
             let hi = self.order.next(root, lo).map_or(u64::MAX, |(k, _)| k);
-            if hi == u64::MAX && u64::MAX - lo > 2 * GAP {
-                return lo + GAP;
+            if hi == u64::MAX && (u64::MAX - lo) / GAP > k + 1 {
+                return (1..=k).map(|i| lo + GAP * i).collect();
             }
-            if hi - lo >= 2 {
-                return lo + (hi - lo) / 2;
+            if hi - lo > k {
+                let step = (hi - lo) / (k + 1);
+                return (1..=k).map(|i| lo + step * i).collect();
             }
-            self.relabel_around(unit, lo);
+            self.relabel_around(unit, lo, k + 1);
         }
     }
 
-    fn relabel_around(&mut self, unit: u32, lo: u64) {
+    /// Renumbers the labels around `lo` so that at least `need` labels fit
+    /// between any two neighbours there.
+    fn relabel_around(&mut self, unit: u32, lo: u64, need: u64) {
         let mut w = 8usize;
         loop {
             let root = self.units[unit as usize].root;
@@ -2240,7 +2252,7 @@ impl Engine {
             let count = window.len() as u64;
             let gap = (hi_b - lo_b) / (count + 2);
             let whole = lo_b == 0 && hi_b == u64::MAX;
-            if gap >= 2 * w as u64 || (whole && gap >= 2) {
+            if gap >= (2 * w as u64).max(need) || (whole && gap >= need.max(2)) {
                 // Stream ranges summarised under the old labels: those of
                 // claimers before the window reaching into it, and of the
                 // window's own (attached before every label is final).
@@ -2399,12 +2411,16 @@ impl Engine {
         };
         let mut depth = self.order.fold(&OAug, root, 0, bhi).o;
         let mut hi = label;
+        // Closes the node at `bhi` makes before it opens (a separator that
+        // closes a scope and opens the next): they close that many scopes
+        // around it, so the opener of the level outside it lies past them.
+        let mut extra = 0;
         loop {
             count!(WalkLevel);
             let opener = if depth == 0 {
                 None
             } else {
-                self.order.search_back(&OAug, root, bhi, &|s: OSum| s.o >= 1)
+                self.order.search_back(&OAug, root, bhi, &|s: OSum| s.o > extra)
             };
             // The opener's own definitions inside its scope (its kind, or
             // all of them if it opens before itself) count at this level.
@@ -2421,6 +2437,7 @@ impl Engine {
                 Some(k) if depth > 0 => {
                     // The opener's definitions outside its scope count at
                     // the next level out.
+                    extra = self.order.get(root, k).map_or(0, |i| eff_closes(i.eff));
                     bhi = k;
                     hi = (k + 1).min(hi);
                     depth -= 1;
@@ -3564,6 +3581,8 @@ impl Engine {
         count!(Dirty);
         self.nm(x).state = State::Dirty;
         self.nm(x).floor = 0;
+        // New information: a stopped speculation may be tried again.
+        self.set_flag(x, F_NOSPEC, false);
         self.sync_pending(x);
         self.sync_order_lazy(x);
         self.enqueue(x);
@@ -4243,9 +4262,13 @@ impl Engine {
             .collect()
     }
 
+    #[allow(clippy::too_many_lines)]
     fn set_children(&mut self, x: Slot, specs: &[(OpId, ValueId)], heights: &[u32], provisional: bool) {
-        let ids = self.child_ids(x, specs);
         let old = self.aux_of(x).map_or_else(Default::default, |a| a.children.clone());
+        if old.is_empty() && specs.is_empty() {
+            return;
+        }
+        let ids = self.child_ids(x, specs);
         let old_ids: Vec<NodeId> = old.iter().map(|&c| self.n(c).id).collect();
         let body = self.aux_of(x).and_then(|a| a.body);
         let unit = body.unwrap_or(self.n(x).unit);
@@ -4283,10 +4306,17 @@ impl Engine {
             suf += 1;
         }
         self.free_span(&old[pre..old.len() - suf], false);
-        let mut after = if pre == 0 {
+        let after = if pre == 0 {
             anchor
         } else {
             Some(self.subtree_end(old[pre - 1]))
+        };
+        // Labels for the whole run of new children at once: one by one,
+        // each would halve the gap and soon force a renumbering.
+        let labels = if ids.len() > pre + suf {
+            self.alloc_labels(unit, after, ids.len() - pre - suf)
+        } else {
+            Vec::new()
         };
         let mut kids: Vec<Slot> = old[..pre].to_vec();
         let parent = if body.is_some() { NIL } else { x };
@@ -4296,12 +4326,20 @@ impl Engine {
         let mut created = Vec::new();
         for i in pre..ids.len() - suf {
             let (op, args) = specs[i];
-            let c = self.create_raw(unit, after, op, args, parent, ids[i], provisional);
+            let c = self.create_raw(
+                unit,
+                after,
+                Some(labels[i - pre]),
+                op,
+                args,
+                parent,
+                ids[i],
+                provisional,
+            );
             if body.is_some() {
                 // Body nodes belong to the application.
                 self.nm(c).parent = x;
             }
-            after = Some(c);
             created.push(c);
         }
         if let (Some(&first), Some(&last)) = (created.first(), created.last()) {
@@ -4643,7 +4681,13 @@ impl Engine {
                     self.set_flag(x, F_NOSPEC, true);
                     return;
                 }
-                _ => return,
+                _ => {
+                    // Stopped (waiting on something unresolved): the same
+                    // guess would stop again every round until then; it
+                    // is tried again once something it depends on changes.
+                    self.set_flag(x, F_NOSPEC, true);
+                    return;
+                }
             }
             if r.error.is_some() {
                 return;
@@ -4732,7 +4776,14 @@ impl Engine {
         self.touch(x);
         let provisional = r.speculative && !r.assumptions.is_empty();
         if r.speculative && self.shape_changes(x, &r) {
+            // A guess that changes the structure (claim, unfolding, scope
+            // effect or definition set) is not applied: it would re-bind
+            // and dirty its surroundings on a value that may still change,
+            // and the next guess would undo it (a chain of pending claims
+            // storms this way). The node runs at its level.
             self.report.spec_shape_changes += 1;
+            self.set_flag(x, F_NOSPEC, true);
+            return;
         }
         self.report.runs += 1;
         if self.n(x).state == State::Parked {
