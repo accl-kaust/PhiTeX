@@ -1076,7 +1076,8 @@ impl Ttf<'_> {
         let mut sum: u32 = 0;
         let mut i = 0usize;
         for &b in &self.out[..save_offset] {
-            tmp = (tmp << 8).wrapping_add(u32::from(b));
+            // `fb_array` is `char *`: a byte from 0x80 on is negative
+            tmp = (tmp << 8).wrapping_add(i32::from(b.cast_signed()).cast_unsigned());
             i += 1;
             if i.is_multiple_of(4) {
                 sum = sum.wrapping_add(tmp);
