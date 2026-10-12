@@ -457,7 +457,20 @@ pub fn report(
     }
     let log = job.out_dir.join(format!("{}.log", job.jobname));
     let text = r.log_text();
-    crate::problems::show(ui, &r.out.errors, &text, &t.file);
+    // (the engine's places when it gave them, else the transcript's)
+    let placed = crate::problems::rendered(s, r, false, st.color, o.verbose > 0 || ui.verbose > 0);
+    if placed.is_empty() {
+        crate::problems::show(ui, &r.out.errors, &text, &t.file);
+    } else {
+        let max = if o.verbose > 0 || ui.verbose > 0 {
+            100
+        } else {
+            10
+        };
+        for p in placed.iter().take(max) {
+            ui.line(p);
+        }
+    }
     if r.out.errors.len() > 10 && o.verbose == 0 {
         ui.line(&format!(
             "  … {} errors in all (-v shows more; the log: {})",
