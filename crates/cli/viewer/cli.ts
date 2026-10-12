@@ -119,25 +119,7 @@ class Pages implements CoreTransport {
       const d = await this.open().catch(() => null);
       return { ok: true, json: { items: d?.outline() ?? [] } };
     }
-    const r = await this.sock.request(op);
-    // (the pages as the PDF has them: a page the build gave no hash —
-    // the engine does not hash a PDF file's pages yet — has one of this
-    // PDF, so it is drawn again after each build)
-    const j = r.json as { pages?: unknown; hashes?: unknown } | undefined;
-    if (!r.ok || !j) return r;
-    if (o.op === "pages" && Array.isArray(j.pages)) j.pages = await this.sized(j.pages);
-    else if (Array.isArray(j.hashes)) {
-      j.hashes = await this.sized(j.hashes);
-      j.pages = (j.hashes as string[]).length;
-    }
-    return r;
-  }
-
-  /** `hashes` as many as the PDF's pages. */
-  private async sized(hashes: string[]): Promise<string[]> {
-    const d = await this.open().catch(() => null);
-    if (!d) return hashes;
-    return Array.from({ length: d.pages }, (_, k) => hashes[k] ?? `pdf${this.docVersion}:${k}`);
+    return this.sock.request(op);
   }
 
   onEvent(cb: (e: CoreEvent) => void): void {
