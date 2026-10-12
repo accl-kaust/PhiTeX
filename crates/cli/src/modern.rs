@@ -405,6 +405,9 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
         recorder: false,
         shell_escape: t.shell_escape,
         pdf_date: session::pdf_date(),
+        // (the files the job reads back, .aux and .toc, to their fixpoint)
+        fixpoint: true,
+        cache_limit: t.cache_limit,
     })
 }
 
