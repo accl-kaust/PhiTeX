@@ -30,11 +30,24 @@
 //!  "prior": {"children": 2}, "cause": "tag"}
 //! ```
 //!
-//! Required: `id` (unique, nested steps included), `class`, `pos` (strictly
-//! increasing at the top level), `reads`, and `writes` or `may_define`
-//! (`writes: null` is a definition set pending until the step runs; the
-//! hint then bounds it). Everything else defaults to absent. Unknown keys,
+//! Required: `id` (unique, nested steps included), `class`, `pos`
+//! (non-decreasing at the top level; file order is text order), `reads`,
+//! and `writes` or `may_define` (`writes: null` is a definition set
+//! pending until the step runs; the hint then bounds it). A step with
+//! static `writes` that also unfolds `children` may carry `may_define`
+//! too: the hint bounds what the unfolded text defines (the step's own
+//! definitions are added to it). Everything else defaults to absent.
+//! `meta` may carry `provenance` (any JSON, kept as is). A claim's
+//! `known` count is in steps: claimed text with no steps of its own
+//! claims nothing (`known: 0`), since a claim takes nodes. Unknown keys,
 //! wrong types and inconsistent depths are errors naming the line.
+//!
+//! A claim's delimiter is decided on the candidate's text alone: the
+//! first step of `until.class`. The `confirm` fields are the recording's
+//! information (what the predicate read there) and are not re-checked:
+//! a replay keeps the recorded structure, nothing is read at the
+//! delimiter, and a delimiter reading inside the claimer's bound is not
+//! a cycle.
 //!
 //! `edits.jsonl` holds one edit per line, applied in order:
 //!
@@ -44,6 +57,10 @@
 //! {"op": "insert_after", "step": "s1", "new": {step}}
 //! {"op": "delete", "step": "s1"}
 //! ```
+//!
+//! An edit may name a nested step: the change is made in its top-level
+//! ancestor's recorded unfolding, which runs again (its unfolded text is
+//! what the engine re-creates).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -128,6 +145,8 @@ pub struct Meta {
     pub steps: usize,
     pub sequences: Vec<String>,
     pub env: Vec<(String, Json)>,
+    /// Kept as given, never read.
+    pub provenance: Option<Json>,
 }
 
 #[derive(Clone, Debug)]
@@ -464,8 +483,11 @@ pub fn step_of(line: usize, v: &Json) -> Result<Step, String> {
     if !has_writes && !has_bound {
         return Err(fail(line, "`writes` (or `may_define` for a pending set) is required"));
     }
-    if s.writes.is_some() && has_bound {
-        return Err(fail(line, "`may_define` only goes with `writes: null`"));
+    if s.writes.is_some() && has_bound && s.children.is_empty() {
+        return Err(fail(
+            line,
+            "`may_define` goes with `writes: null`, or with `children` (bounding the unfolding)",
+        ));
     }
     if s.scope_kind.is_some()
         && !matches!(
@@ -514,6 +536,7 @@ fn meta_of(line: usize, v: &Json) -> Result<Meta, String> {
                     m.env.push((f.clone(), val.clone()));
                 }
             }
+            "provenance" => m.provenance = Some(x.clone()),
             _ => return Err(fail(line, format!("unknown meta key {k:?}"))),
         }
     }
@@ -574,8 +597,8 @@ pub fn load_trace(text: &str) -> Result<Trace, String> {
             return Err(fail(line, "a second meta line"));
         }
         let s = step_of(line, &v)?;
-        if last_pos.is_some_and(|p| s.pos <= p) {
-            return Err(fail(line, format!("`pos` {} is not after the previous step's", s.pos)));
+        if last_pos.is_some_and(|p| s.pos < p) {
+            return Err(fail(line, format!("`pos` {} is before the previous step's", s.pos)));
         }
         last_pos = Some(s.pos);
         if let (Some(d), Some(want)) = (depth, s.depth)
@@ -776,10 +799,25 @@ impl Operation for TraceOp {
 
     fn may_define(&self, args: &[ValueId], v: &Values) -> MayDefine {
         let s = self.step(args);
-        if s.writes.is_some() && !s.children.is_empty() {
-            // The unfolded text's definitions are what the hint bounds.
-            return match s.unfold.as_deref() {
-                Some("unknown") | None => bound_of(v, &s.may_define),
+        if let Some(ws) = &s.writes
+            && !s.children.is_empty()
+        {
+            // The hint bounds the unfolded text; the step's own static
+            // definitions (made by its run, the set being pending) join it.
+            let own = ws.iter().map(|w| w.field.clone());
+            return match (s.unfold.as_deref(), &s.may_define) {
+                (Some("unknown") | None, Bound::Any) => MayDefine::Any,
+                (Some("unknown") | None, Bound::Prefixes(ps)) => {
+                    MayDefine::Prefixes(ps.iter().map(|w| w.field.clone()).chain(own).collect())
+                }
+                (Some("unknown") | None, Bound::Names(ns)) => MayDefine::Names(
+                    ns.iter()
+                        .map(|w| &w.field)
+                        .chain(ws.iter().map(|w| &w.field))
+                        .map(|f| v.field(f))
+                        .collect(),
+                ),
+                (Some("unknown") | None, Bound::None) => MayDefine::Names(own.map(|f| v.field(&f)).collect()),
                 _ => MayDefine::Nothing,
             };
         }
@@ -840,14 +878,12 @@ impl Operation for TraceOp {
         if u.inert || Some(&cand) != self.me.get() {
             return Until::No;
         }
-        let c = self.step(cand_args);
-        if c.class != u.class {
-            return Until::No;
-        }
-        match u.confirm.len() {
-            0 => Until::Yes,
-            1 => Until::Read(v.field(&u.confirm[0])),
-            _ => Until::ReadEach(u.confirm.iter().map(|f| v.field(f)).collect()),
+        let _ = v;
+        // The class decides; the confirm fields are recorded information.
+        if self.step(cand_args).class == u.class {
+            Until::Yes
+        } else {
+            Until::No
         }
     }
 
@@ -1082,12 +1118,89 @@ impl Doc {
             .ok_or_else(|| format!("no top-level step {id:?}"))
     }
 
+    /// The indices down to the step `id` (`[i]`: top-level).
+    fn path_of(&self, id: &str) -> Result<Vec<usize>, String> {
+        fn find(steps: &[Step], id: &str, path: &mut Vec<usize>) -> bool {
+            for (i, s) in steps.iter().enumerate() {
+                path.push(i);
+                if s.id == id || find(&s.children, id, path) {
+                    return true;
+                }
+                path.pop();
+            }
+            false
+        }
+        let mut path = Vec::new();
+        if find(&self.steps, id, &mut path) {
+            Ok(path)
+        } else {
+            Err(format!("no step {id:?}"))
+        }
+    }
+
+    /// An edit of a nested step: made in the recorded unfolding, every
+    /// step on the path gets a new revision, and the top-level ancestor
+    /// runs again (it creates the changed text).
+    fn apply_nested(&mut self, eng: &mut Engine, tr: &TraceOp, path: &[usize], e: &Edit) -> Result<(), String> {
+        let (top, rest) = path.split_first().expect("a path");
+        let mut s = &mut self.steps[*top];
+        s.rev += 1;
+        let (last, inner) = rest.split_last().expect("nested");
+        for &i in inner {
+            s = &mut s.children[i];
+            s.rev += 1;
+        }
+        // `s` is the parent of the edited step, `last` its index.
+        match e {
+            Edit::ChangeWrites(_, ws) => {
+                let c = &mut s.children[*last];
+                if c.writes.is_none() && ws.is_some() && c.may_define != Bound::Any {
+                    c.may_define = Bound::Any;
+                }
+                c.writes.clone_from(ws);
+                c.rev += 1;
+            }
+            Edit::ChangeReads(_, rs) => {
+                let c = &mut s.children[*last];
+                c.reads.clone_from(rs);
+                c.rev += 1;
+            }
+            Edit::InsertAfter(_, new) => {
+                collect_ids(std::slice::from_ref(new), &mut self.ids)?;
+                let s = &mut self.steps[*top];
+                let mut s = s;
+                for &i in inner {
+                    s = &mut s.children[i];
+                }
+                s.children.insert(last + 1, new.as_ref().clone());
+            }
+            Edit::Delete(_) => {
+                let gone = s.children.remove(*last);
+                let mut ids = FxHashSet::default();
+                collect_ids(std::slice::from_ref(&gone), &mut ids).expect("were unique");
+                for g in ids {
+                    self.ids.remove(&g);
+                }
+            }
+        }
+        let k = tr.register(eng.values(), &self.steps[*top]);
+        eng.replace(self.nodes[*top], self.op, vec![k]);
+        Ok(())
+    }
+
     /// Applies one edit to the engine and to the kept steps.
     pub fn apply(&mut self, eng: &mut Engine, e: &Edit) -> Result<(), String> {
         let tr = TraceOp {
             table: self.table.clone(),
             me: Arc::new(std::sync::OnceLock::from(self.op)),
         };
+        let id = match e {
+            Edit::ChangeWrites(id, _) | Edit::ChangeReads(id, _) | Edit::InsertAfter(id, _) | Edit::Delete(id) => id,
+        };
+        if self.index_of(id).is_err() {
+            let path = self.path_of(id)?;
+            return self.apply_nested(eng, &tr, &path, e);
+        }
         match e {
             Edit::ChangeWrites(id, ws) => {
                 let i = self.index_of(id)?;
@@ -1290,8 +1403,13 @@ pub fn trace_jsonl(t: &Trace) -> String {
             format!("{}: {val}", json::quote(f))
         })
         .collect();
+    let prov = t
+        .meta
+        .provenance
+        .as_ref()
+        .map_or_else(String::new, |p| format!(", \"provenance\": {}", json::write(p)));
     let mut out = format!(
-        "{{\"meta\": {{\"version\": 1, \"document\": {}, \"steps\": {}, \"sequences\": {}, \"env\": {{{}}}}}}}\n",
+        "{{\"meta\": {{\"version\": 1, \"document\": {}, \"steps\": {}, \"sequences\": {}, \"env\": {{{}}}{prov}}}}}\n",
         json::quote(&t.meta.document),
         t.steps.len(),
         strs(&t.meta.sequences),
@@ -1468,6 +1586,7 @@ pub fn from_toy(lines: &[String], document: &str) -> Trace {
             steps: steps.len(),
             sequences,
             env: Vec::new(),
+            provenance: None,
         },
         steps,
     }

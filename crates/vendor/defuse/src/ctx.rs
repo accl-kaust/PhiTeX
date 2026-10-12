@@ -516,8 +516,8 @@ impl<'a> Ctx<'a> {
                 // Its unfolding is not known even approximately.
                 return self.stop(End::Unpredictable);
             }
-            let out = self.read_output(c)?;
             if !e.children_of(c).is_empty() || cn.op == open || cn.op == close {
+                self.read_output(c)?;
                 continue;
             }
             let cargs = e.args_vec(cn.args);
@@ -538,11 +538,12 @@ impl<'a> Ctx<'a> {
             };
             if fire {
                 // The range runs to the node after the delimiter: its own
-                // unfolding (should it unfold later) lies within.
+                // unfolding (should it unfold later) lies within. The
+                // delimiter's output is not taken (nor waited for).
                 delim = c;
                 break;
             }
-            outs.push(out);
+            outs.push(self.read_output(c)?);
         }
         self.stream = Some(StreamRange {
             after: after_n,
