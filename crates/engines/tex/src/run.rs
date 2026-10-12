@@ -51,6 +51,46 @@ pub(crate) enum Frame {
     /// A line of a file (§300): its characters (with `\endlinechar`
     /// appended once read), position and state.
     Src(Src),
+    /// The lines of a file not reached yet: its text (a string value)
+    /// and the byte offset of the next line. A line becomes a [`Src`]
+    /// frame when it is reached, so the rest of a file is one frame, and
+    /// one child when a node leaves it (never one per line).
+    File(FileRest),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FileRest {
+    pub id: ValueId,
+    pub text: std::sync::Arc<phitex_defuse::Value>,
+    pub off: usize,
+}
+
+impl FileRest {
+    pub(crate) fn new(v: &Values, id: ValueId, off: usize) -> FileRest {
+        FileRest { id, text: v.get(id), off }
+    }
+
+    fn str(&self) -> &str {
+        match &*self.text {
+            phitex_defuse::Value::Str(s) => s,
+            _ => "",
+        }
+    }
+
+    /// Whether lines are left.
+    pub(crate) fn has_lines(&self) -> bool {
+        self.off < self.str().len()
+    }
+
+    /// The next line, with its end of line; the offset moves past it.
+    fn take_line(&mut self) -> String {
+        let s = self.str();
+        let rest = &s[self.off..];
+        let n = rest.find('\n').map_or(rest.len(), |k| k + 1);
+        let line = rest[..n].to_owned();
+        self.off += n;
+        line
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -335,7 +375,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Takes the next sibling's text into the input (§362: the next line,
     /// or the rest of this one).
-    fn pull(&mut self) -> R<bool> {
+    pub(crate) fn pull(&mut self) -> R<bool> {
         if self.eof || self.no_pull {
             return Ok(false);
         }
@@ -419,6 +459,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.frames.iter().any(|f| match f {
             Frame::Toks(t, p) => *p < t.len(),
             Frame::Src(s) => s.loc < s.buf.len() || (s.ends && s.endch < -1),
+            Frame::File(f) => f.has_lines(),
         })
     }
 
@@ -446,6 +487,17 @@ impl<'c, 'a> Run<'c, 'a> {
                         return Ok(Some(t));
                     }
                     self.frames.pop_front();
+                }
+                Frame::File(f) => {
+                    if f.has_lines() {
+                        let line = f.take_line();
+                        let args = line_args(self.v, &line);
+                        for fr in decode_frames(self.v, &args).into_iter().rev() {
+                            self.frames.push_front(fr);
+                        }
+                    } else {
+                        self.frames.pop_front();
+                    }
                 }
             }
         }
@@ -896,6 +948,15 @@ impl<'c, 'a> Run<'c, 'a> {
                     frs.push(fr);
                     out.push(vec![v.list(frs), v.int(0)]);
                 }
+                Frame::File(f) => {
+                    if !run.is_empty() {
+                        out.push(node(std::mem::take(&mut run)));
+                    }
+                    if f.has_lines() {
+                        let fr = v.list(vec![v.str("f"), f.id, v.int(i64::try_from(f.off).unwrap_or(0))]);
+                        out.push(vec![v.list(vec![fr]), v.int(0)]);
+                    }
+                }
             }
         }
         if !run.is_empty() {
@@ -1141,6 +1202,12 @@ pub(crate) fn decode_frames(v: &Values, args: &[ValueId]) -> Vec<Frame> {
             Some("t") => {
                 let toks = crate::val::toks_of(v, xs.get(1).copied());
                 out.push(Frame::Toks(Rc::from(toks), 0));
+            }
+            Some("f") => {
+                if let (Some(&id), Some(&o)) = (xs.get(1), xs.get(2)) {
+                    let off = usize::try_from(int_of(v, o)).unwrap_or(0);
+                    out.push(Frame::File(FileRest::new(v, id, off)));
+                }
             }
             Some("s") => {
                 let text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();

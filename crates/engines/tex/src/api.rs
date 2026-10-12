@@ -50,6 +50,10 @@ pub struct Options {
     /// instead of evaluating the prelude when its key matches (the same
     /// prelude text, every file it read unchanged).
     pub prelude_bytes: Option<Vec<u8>>,
+    /// The wall time one evaluation (the prelude, a build, an edit) may
+    /// take; past it the build ends with the engine's deadline error,
+    /// naming what waits, in the log. `None`: no limit.
+    pub time_limit: Option<std::time::Duration>,
 }
 
 impl Default for Options {
@@ -63,6 +67,7 @@ impl Default for Options {
             fixpoint: false,
             prelude_jobname: "texput".to_owned(),
             prelude_bytes: None,
+            time_limit: Some(std::time::Duration::from_secs(600)),
         }
     }
 }
@@ -388,7 +393,7 @@ struct Graph {
 }
 
 impl Graph {
-    fn new() -> Graph {
+    fn new(time: Option<std::time::Duration>) -> Graph {
         let mut eng = Engine::new();
         eng.set_limits(phitex_defuse::Limits {
             // a node's children are bounded by the text it reads (one per
@@ -397,6 +402,7 @@ impl Graph {
             children_per_node: 1 << 24,
             // TeX's own nesting limits are far below this
             unfold_depth: 4096,
+            time,
             ..phitex_defuse::Limits::default()
         });
         let shared: Shared = Arc::new(OnceLock::new());
@@ -688,7 +694,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             return c;
         }
     }
-    let mut g = Graph::new();
+    let mut g = Graph::new(opts.time_limit);
     let unit = g.eng.new_unit();
     let mut env: Vec<(String, ValueId)> = crate::val::initex(g.eng.values());
     for (name, x) in &env {
@@ -790,7 +796,7 @@ impl Build {
         let cached = prelude_env(prelude, &opts);
         let env = cached.env.clone();
         let t1 = t0.elapsed();
-        let mut g = Graph::new();
+        let mut g = Graph::new(opts.time_limit);
         let unit = g.eng.new_unit();
         {
             let v = g.eng.values();
