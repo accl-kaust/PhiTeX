@@ -16,8 +16,6 @@ use phitex_kpse::{Format, Kpse};
 pub enum Output {
     Dvi,
     Pdf,
-    /// XeTeX's `-no-pdf`: the XDV file, not given to xdvipdfmx.
-    Xdv,
 }
 
 impl Output {
@@ -25,7 +23,6 @@ impl Output {
         match self {
             Output::Dvi => "dvi",
             Output::Pdf => "pdf",
-            Output::Xdv => "xdv",
         }
     }
 }
@@ -44,23 +41,18 @@ pub struct Engine {
     pub kpse_engine: &'static str,
     /// What the format writes.
     pub output: Output,
-    /// XeTeX: native fonts, XDV pages given to xdvipdfmx (in process).
-    pub xetex: bool,
 }
 
 /// fmtutil.cnf: `tex tex - tex.ini`, `etex pdftex language.def … *etex.ini`,
 /// `pdftex pdftex language.def … *pdfetex.ini`, `latex pdftex language.dat
-/// … *latex.ini`, `pdflatex pdftex language.dat … *pdflatex.ini`,
-/// `xetex xetex language.def -etex xetex.ini`, `xelatex xetex
-/// language.dat -etex xelatex.ini`.
-const ENGINES: [Engine; 7] = [
+/// … *latex.ini`, `pdflatex pdftex language.dat … *pdflatex.ini`.
+const ENGINES: [Engine; 5] = [
     Engine {
         name: "tex",
         ini: "tex.ini",
         etex: false,
         kpse_engine: "tex",
         output: Output::Dvi,
-        xetex: false,
     },
     Engine {
         name: "etex",
@@ -68,7 +60,6 @@ const ENGINES: [Engine; 7] = [
         etex: true,
         kpse_engine: "pdftex",
         output: Output::Dvi,
-        xetex: false,
     },
     Engine {
         name: "pdftex",
@@ -76,7 +67,6 @@ const ENGINES: [Engine; 7] = [
         etex: true,
         kpse_engine: "pdftex",
         output: Output::Pdf,
-        xetex: false,
     },
     Engine {
         name: "latex",
@@ -84,7 +74,6 @@ const ENGINES: [Engine; 7] = [
         etex: true,
         kpse_engine: "pdftex",
         output: Output::Dvi,
-        xetex: false,
     },
     Engine {
         name: "pdflatex",
@@ -92,23 +81,6 @@ const ENGINES: [Engine; 7] = [
         etex: true,
         kpse_engine: "pdftex",
         output: Output::Pdf,
-        xetex: false,
-    },
-    Engine {
-        name: "xetex",
-        ini: "xetex.ini",
-        etex: true,
-        kpse_engine: "xetex",
-        output: Output::Pdf,
-        xetex: true,
-    },
-    Engine {
-        name: "xelatex",
-        ini: "xelatex.ini",
-        etex: true,
-        kpse_engine: "xetex",
-        output: Output::Pdf,
-        xetex: true,
     },
 ];
 
@@ -117,9 +89,10 @@ const ENGINES: [Engine; 7] = [
 pub fn engine(name: &str) -> Result<Engine, String> {
     let n = name.trim().to_ascii_lowercase();
     match n.as_str() {
-        "luatex" | "lualatex" | "luahbtex" | "lualatex-dev" | "dvilualatex" => Err(format!(
-            "{n} is not on the graph: `phitex build --engine {n}` runs the system's {n} as an external \
-             process (not incremental)"
+        "xetex" | "xelatex" | "xelatex-dev" | "luatex" | "lualatex" | "luahbtex"
+        | "lualatex-dev" | "dvilualatex" => Err(format!(
+            "{n} is not supported yet: phitex runs pdflatex, latex, pdftex, etex and tex \
+             (there is no external TeX compiler)"
         )),
         "pdfetex" => engine("pdftex"),
         "initex" | "virtex" => engine("tex"),
@@ -138,16 +111,6 @@ impl Engine {
     pub fn with_output(self, out: Output) -> Result<Engine, String> {
         if self.output == out {
             return Ok(self);
-        }
-        // (XeTeX's formats write PDF, or with `-no-pdf` the XDV file)
-        if self.xetex {
-            return match out {
-                Output::Xdv | Output::Pdf => Ok(Engine {
-                    output: out,
-                    ..self
-                }),
-                Output::Dvi => Err(format!("{} writes XDV or PDF, not DVI", self.name)),
-            };
         }
         match (self.name, out) {
             ("latex", Output::Pdf) => engine("pdflatex"),
@@ -308,10 +271,9 @@ mod tests {
             "etex"
         );
         assert!(engine("tex").unwrap().with_output(Output::Pdf).is_err());
-        let x = engine("XeLaTeX").unwrap();
-        assert!(x.xetex && x.ini == "xelatex.ini" && x.output == Output::Pdf);
-        assert_eq!(x.with_output(Output::Xdv).unwrap().output.ext(), "xdv");
-        assert!(x.with_output(Output::Dvi).is_err());
+        for n in ["XeLaTeX", "xetex", "lualatex", "luatex"] {
+            assert!(engine(n).unwrap_err().contains("not supported"), "{n}");
+        }
         assert!(engine("foo").is_err());
     }
 

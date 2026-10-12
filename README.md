@@ -81,11 +81,9 @@ with `--compat=NAME`, it takes that engine's command line and runs once:
 The formats are made on the graph from TeX Live's ini files the first
 time they are needed, and cached (`$XDG_CACHE_HOME/phitex`).
 
-LuaLaTeX is not on the graph: `phitex build --engine lualatex` (or a `%
-!TEX program = lualatex` comment) runs the system's `lualatex` as an
-external process to the fixpoint (BibTeX, makeindex, biber between runs;
-SyncTeX from lualatex), and `phitex watch` runs the whole build again on
-each saved change. It is not incremental.
+XeLaTeX and LuaLaTeX are not supported yet: `--engine xelatex|lualatex`
+(or a `% !TEX program` naming them) is an error. PhiTeX never runs an
+external TeX compiler.
 
 ## License
 

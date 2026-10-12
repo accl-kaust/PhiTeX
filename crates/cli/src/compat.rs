@@ -95,16 +95,6 @@ fn usage(progname: &str) -> ! {
 /// Run as the engine `progname` with `args`; never returns.
 #[allow(clippy::too_many_lines, reason = "one option an arm")]
 pub fn main(progname: &str, args: &[String]) -> ! {
-    // (LuaTeX's names: the system's program, run as it is: not on the graph)
-    #[cfg(not(target_family = "wasm"))]
-    if let Some(p) = crate::external::program_of(progname) {
-        let Some(path) = crate::external::find_program(p) else {
-            eprintln!("{progname}: `{p}` is not on PATH (phitex runs the system's {p})");
-            std::process::exit(2);
-        };
-        let st = std::process::Command::new(path).args(args).status();
-        std::process::exit(st.ok().and_then(|s| s.code()).unwrap_or(1));
-    }
     let mut ini = progname == "initex";
     let mut etex = false;
     let mut jobname = None;
@@ -154,7 +144,6 @@ pub fn main(progname: &str, args: &[String]) -> ! {
                 output = Some(match v().as_str() {
                     "dvi" => Output::Dvi,
                     "pdf" => Output::Pdf,
-                    "xdv" => Output::Xdv,
                     _ => usage(progname),
                 });
             }
@@ -172,15 +161,11 @@ pub fn main(progname: &str, args: &[String]) -> ! {
             | "parse-first-line"
             | "no-parse-first-line"
             | "output-comment"
+            | "shell-escape"
             | "no-shell-escape"
             | "shell-restricted"
             | "src-specials"
             | "cnf-line" => {}
-            "shell-escape" => {
-                eprintln!("{progname}: -shell-escape: \\write18 is not run by phitex");
-            }
-            // (XeTeX's: the XDV file, xdvipdfmx not run)
-            "no-pdf" => output = Some(Output::Xdv),
             "draftmode" | "mktex" | "no-mktex" | "kpathsea-debug" | "ipc" | "ipc-start" | "enc"
             | "mltex" => {
                 eprintln!("{progname}: -{name} is not supported by phitex");

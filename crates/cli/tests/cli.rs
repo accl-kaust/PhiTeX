@@ -865,73 +865,26 @@ fn pdflatex_pdfdoc_vfont() {
     pdflatex_pdfdoc("vfont");
 }
 
-/// A small `LuaLaTeX` document (a reference, `\directlua`).
-const LUA_DOC: &str = "\\documentclass{article}\n\\begin{document}\n\\section{One}\\label{one}\nSee section~\\ref{one}; \
-six times seven is \\directlua{tex.print(6*7)}.\n\\end{document}\n";
-
-/// `phitex build --engine lualatex`: the system's `lualatex` run as an
-/// external process to the fixpoint; its PDF is `lualatex`'s own, run
-/// until its `.aux` file settles, with the same flags.
+/// XeLaTeX and LuaLaTeX are not supported, by any name, and nothing
+/// external runs in their place.
 #[test]
-fn lualatex_external() {
-    if !have("lualatex") {
-        eprintln!("lualatex_external: no `lualatex` here to compare with: not checked");
-        return;
+fn xelatex_lualatex_refused() {
+    let dir = scratch("refused");
+    std::fs::write(dir.join("a.tex"), "\\documentclass{article}\n").expect("the document");
+    std::fs::write(dir.join("b.tex"), "% !TEX program = lualatex\n\\relax\n")
+        .expect("the document");
+    let bin = Path::new(env!("CARGO_BIN_EXE_phitex"));
+    for (args, file) in [
+        (&["build", "--engine", "xelatex", "a.tex"][..], "a.pdf"),
+        (&["build", "--engine", "lualatex", "a.tex"][..], "a.pdf"),
+        (&["build", "b.tex"][..], "b.pdf"),
+    ] {
+        let out = command(bin, &dir).args(args).output().expect("phitex runs");
+        let errs = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?} succeeded");
+        assert!(errs.contains("not supported"), "{args:?}: {errs}");
+        assert!(!dir.join(file).exists(), "{args:?} wrote {file}");
     }
-    let _one = one();
-    // (in the same directory, one after the other: LuaTeX's /ID hashes the
-    // output file's full name)
-    let dir = scratch("lua");
-    std::fs::write(dir.join("lua.tex"), LUA_DOC).expect("the document");
-    let mut last = None;
-    for _ in 0..5 {
-        let _ = Command::new("lualatex")
-            .args([
-                "-interaction=batchmode",
-                "-recorder",
-                "-synctex=1",
-                "lua.tex",
-            ])
-            .current_dir(&dir)
-            .env("SOURCE_DATE_EPOCH", "0")
-            .env("FORCE_SOURCE_DATE", "1")
-            .output();
-        let aux = std::fs::read(dir.join("lua.aux")).ok();
-        if aux == last {
-            break;
-        }
-        last = aux;
-    }
-    let want = std::fs::read(dir.join("lua.pdf")).expect("lualatex's PDF");
-    for e in std::fs::read_dir(&dir).expect("the directory").flatten() {
-        if e.file_name() != "lua.tex" {
-            let _ = std::fs::remove_file(e.path());
-        }
-    }
-    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["build", "--engine", "lualatex", "lua.tex"])
-        .output()
-        .expect("phitex runs");
-    let errs = String::from_utf8_lossy(&out.stderr);
-    eprintln!("phitex build --engine lualatex:\n{errs}");
-    assert!(
-        out.status.success(),
-        "phitex build --engine lualatex failed:\n{errs}"
-    );
-    assert!(
-        errs.contains("not incremental"),
-        "the build does not say it is not incremental:\n{errs}"
-    );
-    let got = std::fs::read(dir.join("lua.pdf")).expect("phitex's PDF");
-    assert!(
-        got == want,
-        "the PDF is not lualatex's: {}",
-        first_difference(&got, &want)
-    );
-    assert!(
-        dir.join("lua.synctex.gz").is_file(),
-        "lualatex's SyncTeX file is not there"
-    );
 }
 
 /// A one-page job without a format (`--ini --etex`).
