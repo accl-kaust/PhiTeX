@@ -32,6 +32,10 @@
 //! | `E` | `\begin`'s environment name and that environment's arguments |
 //! | `*` | if a `*` follows, the next letter is skipped |
 //! | `U`*name* | up to `\`*name* (the rest of the spec) |
+//! | `A` | an array parameter: a count, then that many integers |
+//! | `H` | `\parshape`: a count, then that many dimen pairs |
+//! | `D` | a delimiter |
+//! | `@`*name* | pdfTeX command *name*'s keyword syntax |
 //! | `!`*cause* | pending, for *cause* (the rest of the spec) |
 //!
 //! A spec `#x` is an internal quantity of type `x` (`i`, `d`, `g`, `t`;
@@ -69,6 +73,11 @@ pdflastypos pdfshellescape pdfelapsedtime pdfrandomseed lastnodetype currentgrou
 currentgrouptype currentiflevel currentiftype currentifbranch eTeXversion predisplaydirection \
 lastlinefit savingvdiscards savinghyphcodes TeXXeTstate interactionmode pdftexversion \
 pdfforcepagebox pdfoptionalwaysusepdfpagebox pdfsuppresswarningpagegroup pdfpkfixeddpi \
+pdfpagebox pdfgamma pdfimagegamma pdfimagehicolor pdfimageapplygamma pdfinfoomitdate \
+pdfsuppressptexinfo pdfsuppresswarningdupdest pdfsuppresswarningdupmap pdfomitcharset \
+pdfomitinfodict pdfomitprocset pdfptexuseunderscore pdfprependkern pdfappendkern \
+pdfadjustinterwordglue pdfinclusioncopyfonts pdfretval pdflastximagepages pdflastximagecolordepth \
+synctex pdfmovechars pdfoptionpdfinclusionerrorlevel pdfoptionpdfminorversion \
 @ne tw@ thr@@ sixt@@n @cclv @cclvi @m @M @MM @xxxii m@ne @tempcnta @tempcntb count@ \
 @currdepth @listdepth @enumdepth @itemdepth @lowpenalty @medpenalty @highpenalty @secpenalty";
 
@@ -77,7 +86,8 @@ boxmaxdepth hfuzz vfuzz delimitershortfall nulldelimiterspace scriptspace predis
 displaywidth displayindent overfullrule hangindent hoffset voffset emergencystretch pagegoal \
 pagetotal pagestretch pagefilstretch pagefillstretch pagefilllstretch pageshrink pagedepth \
 prevdepth pdfpagewidth pdfpageheight pdfhorigin pdfvorigin pdflinkmargin pdfdestmargin \
-pdfthreadmargin pdfpxdimen z@ p@ maxdimen @tempdima @tempdimb @tempdimc dimen@ dimen@i dimen@ii \
+pdfthreadmargin pdfpxdimen pdfeachlineheight pdfeachlinedepth pdffirstlineheight \
+pdflastlinedepth pdfignoreddimen z@ p@ maxdimen @tempdima @tempdimb @tempdimc dimen@ dimen@i dimen@ii \
 textwidth textheight linewidth columnwidth columnsep columnseprule marginparwidth marginparsep \
 oddsidemargin evensidemargin topmargin headheight headsep footskip labelwidth labelsep leftmargin \
 rightmargin itemindent listparindent fboxsep fboxrule arraycolsep tabcolsep arrayrulewidth \
@@ -145,9 +155,11 @@ const COMMANDS: &[(&str, &str)] = &[
     ("closeout", "i"),
     ("openin", "ief"),
     ("closein", "i"),
+    // §1225 `read_to_cs`; etex.ch: `\readline` (defines its cs)
     ("read", "itN"),
     ("readline", "itN"),
     ("special", "B"),
+    // §1101 `make_mark`; etex.ch: `\marks` a register number first
     ("mark", "B"),
     ("marks", "iB"),
     ("insert", "iB"),
@@ -172,15 +184,17 @@ const COMMANDS: &[(&str, &str)] = &[
     ("delimiter", "i"),
     ("mathchar", "i"),
     ("char", "i"),
-    ("left", "N"),
-    ("right", "N"),
-    ("middle", "N"),
+    // §1191 `math_left_right`, §1160 `scan_delimiter`; etex.ch: `\middle`
+    ("left", "D"),
+    ("right", "D"),
+    ("middle", "D"),
     ("over", ""),
     ("atop", ""),
     ("above", "d"),
-    ("overwithdelims", "NN"),
-    ("atopwithdelims", "NN"),
-    ("abovewithdelims", "NNd"),
+    // §1181 `math_fraction`: two delimiters (§1160), `\above` a dimen
+    ("overwithdelims", "DD"),
+    ("atopwithdelims", "DD"),
+    ("abovewithdelims", "DDd"),
     ("mathchoice", "BBBB"),
     ("displaystyle", ""),
     ("textstyle", ""),
@@ -281,104 +295,151 @@ const COMMANDS: &[(&str, &str)] = &[
     ("botmark", ""),
     ("splitfirstmark", ""),
     ("splitbotmark", ""),
-    ("parshape", "!array parameter"),
+    // §1248 `set_shape`: a count, then that many dimen pairs
+    ("parshape", "H"),
     ("vadjust", "B"),
-    // e-TeX's
+    // e-TeX's (etex.ch, by procedure)
+    // `\protected` a prefix (§1213 `prefixed_command`), `\unless` one
+    // of the conditional (`expand`, §366)
     ("unless", ""),
+    // `conditional` (§498): `if_def_code` one token, `if_cs_code` up to
+    // `\endcsname`, `if_font_char_code` a font and a character code
     ("ifdefined", "N"),
     ("ifcsname", "C"),
     ("iffontchar", "Ni"),
-    ("scantokens", "!\\scantokens"),
+    // `pseudo_start`: general text, run as a file (may define anything)
+    ("scantokens", "B"),
+    // `conv_toks`/`the_toks`, `scan_general_text`: general text
     ("detokenize", "B"),
     ("unexpanded", "B"),
+    ("showtokens", "B"),
+    // `scan_expr`: up to `\relax`, or the first token no operand takes
     ("numexpr", "X"),
     ("dimexpr", "X"),
     ("glueexpr", "X"),
     ("muexpr", "X"),
+    // `last_item` (§424): glue and mu-glue operands
     ("gluestretch", "g"),
     ("glueshrink", "g"),
     ("gluestretchorder", "g"),
     ("glueshrinkorder", "g"),
     ("mutoglue", "g"),
     ("gluetomu", "g"),
+    // `fetch_box`'s kin: `\pagediscards`, `\splitdiscards` (no operand)
     ("pagediscards", ""),
     ("splitdiscards", ""),
-    ("interlinepenalties", "!array parameter"),
-    ("clubpenalties", "!array parameter"),
-    ("widowpenalties", "!array parameter"),
-    ("displaywidowpenalties", "!array parameter"),
+    // `set_shape` (§1248): a count, then that many integers
+    ("interlinepenalties", "A"),
+    ("clubpenalties", "A"),
+    ("widowpenalties", "A"),
+    ("displaywidowpenalties", "A"),
+    // `top_bot_mark` (§386): a register number
     ("topmarks", "i"),
     ("firstmarks", "i"),
     ("botmarks", "i"),
     ("splitfirstmarks", "i"),
     ("splitbotmarks", "i"),
+    // `last_item`: `font_char_wd_code` … a font and a character code
     ("fontcharwd", "Ni"),
     ("fontcharht", "Ni"),
     ("fontchardp", "Ni"),
     ("fontcharic", "Ni"),
+    // `last_item`: `par_shape_length_code` … an index
     ("parshapelength", "i"),
     ("parshapeindent", "i"),
     ("parshapedimen", "i"),
-    // pdfTeX's
-    ("pdfliteral", "K"),
-    ("pdfobj", "!pdfTeX keyword syntax"),
-    ("pdfannot", "!pdfTeX keyword syntax"),
-    ("pdfstartlink", "!pdfTeX keyword syntax"),
-    ("pdfendlink", ""),
-    ("pdfdest", "!pdfTeX keyword syntax"),
-    ("pdfoutline", "!pdfTeX keyword syntax"),
-    ("pdfxform", "!pdfTeX keyword syntax"),
-    ("pdfximage", "!pdfTeX keyword syntax"),
-    ("pdfcolorstack", "!pdfTeX keyword syntax"),
-    ("pdfcolorstackinit", "!pdfTeX keyword syntax"),
+    // `last_item`: `e_TeX_version_code`, `conv_toks`: `eTeX_revision_code`
+    ("eTeXrevision", ""),
+    // TeX--XeT: `\beginL` … (`valign` with chr codes, no operand)
+    ("beginL", ""),
+    ("endL", ""),
+    ("beginR", ""),
+    ("endR", ""),
+    // pdfTeX's (pdftex.web, "pdfTeX §N"; `@` rows: keyword syntax read
+    // by `Cx::pdf`)
+    ("pdfliteral", "@pdfliteral"),               // §1536
+    ("pdfobj", "@pdfobj"),                       // §1542
+    ("pdfannot", "@pdfannot"),                   // §1556
+    ("pdfstartlink", "@pdfstartlink"),           // §1558, §1554 `scan_action`
+    ("pdfendlink", ""),                          // §1559
+    ("pdfdest", "@pdfdest"),                     // §1563
+    ("pdfoutline", "@pdfoutline"),               // §1561
+    ("pdfthread", "@pdfthread"),                 // §1565
+    ("pdfstartthread", "@pdfstartthread"),       // §1566
+    ("pdfendthread", ""),                        // §1567
+    ("pdfxform", "@pdfxform"),                   // §1546
+    ("pdfximage", "@pdfximage"),                 // §1550 `scan_image`
+    ("pdfcolorstack", "@pdfcolorstack"),         // §1537
+    ("pdfcolorstackinit", "@pdfcolorstackinit"), // §495
+    ("pdfcatalog", "@pdfcatalog"),               // §1577
+    ("pdfmdfivesum", "@pdfmdfivesum"),           // §495
+    ("pdffiledump", "@pdffiledump"),             // §495
+    ("pdfmatch", "@pdfmatch"),                   // §495
+    ("pdffontexpand", "@pdffontexpand"),         // §703 `read_expand_font`
+    // general text (`scan_pdf_ext_toks`, pdfTeX §1535)
     ("pdfinfo", "B"),
-    ("pdfcatalog", "K"),
     ("pdfnames", "B"),
     ("pdftrailer", "B"),
-    ("pdfrefxform", "i"),
-    ("pdfrefximage", "i"),
-    ("pdfrefobj", "i"),
+    ("pdftrailerid", "B"),
     ("pdfsetmatrix", "B"),
-    ("pdfsave", ""),
-    ("pdfrestore", ""),
-    ("pdfstrcmp", "BB"),
+    ("pdfmapfile", "B"),
+    ("pdfmapline", "B"),
+    ("pdfspacefont", "B"),
     ("pdfescapestring", "B"),
     ("pdfescapename", "B"),
     ("pdfescapehex", "B"),
     ("pdfunescapehex", "B"),
-    ("pdfmdfivesum", "K"),
     ("pdffilesize", "B"),
     ("pdffilemoddate", "B"),
-    ("pdffiledump", "K"),
-    ("pdfcreationdate", ""),
-    ("pdfresettimer", ""),
+    ("pdfstrcmp", "BB"),
+    ("pdfglyphtounicode", "BB"),
+    ("expanded", "B"),
+    // an object or register number (`scan_int`)
+    ("pdfrefxform", "i"),
+    ("pdfrefximage", "i"),
+    ("pdfrefobj", "i"),
+    ("pdfxformname", "i"),
+    ("pdfximagebbox", "ii"),
+    ("pdfpageref", "i"),
     ("pdfuniformdeviate", "i"),
-    ("pdfnormaldeviate", ""),
     ("pdfsetrandomseed", "i"),
-    ("pdfsavepos", ""),
+    ("pdfsnapycomp", "i"),
+    ("pdflastmatch", "i"),
+    ("pdfinsertht", "i"),
+    ("leftmarginkern", "i"),
+    ("rightmarginkern", "i"),
+    // pdfTeX §1572 `new_snap_node`: glue
+    ("pdfsnapy", "g"),
+    // a font (`scan_font_ident`), then what follows
+    ("pdffontattr", "NB"),
+    ("pdfincludechars", "NB"),
+    ("pdfnoligatures", "N"),
+    ("pdffontsize", "N"),
+    ("pdffontname", "N"),
+    ("pdffontobjnum", "N"),
+    ("pdfnobuiltintounicode", "N"),
+    ("pdfcopyfont", "NN"),
+    ("letterspacefont", "NNi"),
+    // `\pdfprimitive` one token; `\ifpdfprimitive` one token
     ("pdfprimitive", "N"),
     ("ifpdfprimitive", "N"),
     ("ifincsname", ""),
     ("ifpdfabsnum", "ici"),
     ("ifpdfabsdim", "dcd"),
-    ("pdfmatch", "K"),
-    ("expanded", "B"),
+    // no operand
+    ("pdfsave", ""),
+    ("pdfrestore", ""),
+    ("pdfsavepos", ""),
+    ("pdfsnaprefpoint", ""),
+    ("pdfcreationdate", ""),
+    ("pdfresettimer", ""),
+    ("pdfnormaldeviate", ""),
     ("pdftexrevision", ""),
     ("pdftexbanner", ""),
-    ("pdfglyphtounicode", "BB"),
-    ("pdfmapfile", "B"),
-    ("pdfmapline", "B"),
-    ("pdfnoligatures", "N"),
-    ("pdffontsize", "N"),
     ("quitvmode", ""),
     ("pdfinterwordspaceon", ""),
     ("pdfinterwordspaceoff", ""),
-    ("pdfpageref", "i"),
-    ("pdffontname", "N"),
-    ("pdffontobjnum", "N"),
-    ("pdfincludechars", "NB"),
-    ("pdfstrcmp", "BB"),
-    ("pdfpagebox", "!pdfTeX keyword syntax"),
+    ("pdffakespace", ""),
     ("pdfrunninglinkoff", ""),
     ("pdfrunninglinkon", ""),
     // plain TeX's
@@ -872,6 +933,9 @@ pub(crate) fn compile(spec: &str) -> Vec<Arg> {
             'l' => Arg::LetTarget,
             'F' => Arg::FontSize,
             'K' => Arg::Keywords,
+            'A' => Arg::Array('i'),
+            'H' => Arg::Array('P'),
+            'D' => Arg::Delim,
             'Y' => Arg::Tikz,
             ';' => Arg::Semicolon,
             'V' => Arg::Verb,
@@ -883,6 +947,10 @@ pub(crate) fn compile(spec: &str) -> Vec<Arg> {
             }
             '!' => {
                 out.push(Arg::Pending(spec[k + 1..].to_owned()));
+                return out;
+            }
+            '@' => {
+                out.push(Arg::Pdf(spec[k + 1..].to_owned()));
                 return out;
             }
             _ => unreachable!("spec letter {c}"),
