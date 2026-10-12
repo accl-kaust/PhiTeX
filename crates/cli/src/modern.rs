@@ -272,7 +272,7 @@ fn parse(args: &[String]) -> Result<Options, clap::Error> {
 }
 
 /// What to build.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Target {
     /// The main file, as TeX is given it (from the directory the build
     /// runs in).
