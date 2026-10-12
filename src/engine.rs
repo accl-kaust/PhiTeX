@@ -3564,6 +3564,8 @@ impl Engine {
         count!(Dirty);
         self.nm(x).state = State::Dirty;
         self.nm(x).floor = 0;
+        // New information: a stopped speculation may be tried again.
+        self.set_flag(x, F_NOSPEC, false);
         self.sync_pending(x);
         self.sync_order_lazy(x);
         self.enqueue(x);
@@ -4643,7 +4645,13 @@ impl Engine {
                     self.set_flag(x, F_NOSPEC, true);
                     return;
                 }
-                _ => return,
+                _ => {
+                    // Stopped (waiting on something unresolved): the same
+                    // guess would stop again every round until then; it
+                    // is tried again once something it depends on changes.
+                    self.set_flag(x, F_NOSPEC, true);
+                    return;
+                }
             }
             if r.error.is_some() {
                 return;
@@ -4732,7 +4740,14 @@ impl Engine {
         self.touch(x);
         let provisional = r.speculative && !r.assumptions.is_empty();
         if r.speculative && self.shape_changes(x, &r) {
+            // A guess that changes the structure (claim, unfolding, scope
+            // effect or definition set) is not applied: it would re-bind
+            // and dirty its surroundings on a value that may still change,
+            // and the next guess would undo it (a chain of pending claims
+            // storms this way). The node runs at its level.
             self.report.spec_shape_changes += 1;
+            self.set_flag(x, F_NOSPEC, true);
+            return;
         }
         self.report.runs += 1;
         if self.n(x).state == State::Parked {
