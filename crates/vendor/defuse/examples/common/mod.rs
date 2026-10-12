@@ -712,6 +712,8 @@ const KEYWORDS: [&str; 33] = [
 
 /// The kind of the scope an emitted fold output's text runs in.
 pub const OUT_KIND: &str = "out";
+/// How many following siblings `claim_limit` scans for a block's close.
+const CLAIM_LIMIT_SCAN: usize = 256;
 /// The fold declaration (its text) and the fold state, ordinary fields.
 const FOLD: &str = "fold";
 const FOLD_STATE: &str = "fold.state";
@@ -1292,10 +1294,13 @@ impl Operation for StmtOp {
         following: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
     ) -> Option<usize> {
         // A delimiter claim never extends past the enclosing block's close.
+        // The scan is capped: a close further away than that counts as no
+        // bound (the claim then reaches everything after it: slower binding,
+        // never a different result).
         if tag(v, args[0]).0 != "listuntil" {
             return None;
         }
-        for (n, (_, a)) in following.enumerate() {
+        for (n, (_, a)) in following.take(CLAIM_LIMIT_SCAN).enumerate() {
             if tag(v, a[0]).0 == "end" {
                 return Some(n);
             }
