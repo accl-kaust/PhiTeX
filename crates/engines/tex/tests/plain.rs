@@ -106,3 +106,11 @@ fn display() {
         ("plain", "display", true, true),
     ]);
 }
+
+#[test]
+fn table() {
+    run(&[
+        ("plain", "table", false, true),
+        ("plain", "table", true, true),
+    ]);
+}

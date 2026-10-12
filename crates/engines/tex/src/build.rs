@@ -421,6 +421,7 @@ impl Run<'_, '_> {
                         ids.insert(g.font);
                     }
                     Node::Box(b) => walk(&b.list, ids),
+                    Node::Unset(u) => walk(&u.list, ids),
                     Node::Disc(d) => {
                         walk(&d.pre, ids);
                         walk(&d.post, ids);
@@ -1122,7 +1123,12 @@ impl Run<'_, '_> {
         if md.m == 102
             && matches!(
                 md.group,
-                group::VBOX | group::VTOP | group::INSERT | group::OUTPUT | group::VCENTER
+                group::VBOX
+                    | group::VTOP
+                    | group::INSERT
+                    | group::OUTPUT
+                    | group::VCENTER
+                    | group::NO_ALIGN
             )
         {
             let t = self.cur.tok.clone();
@@ -1236,6 +1242,8 @@ impl Run<'_, '_> {
             group::DISC => self.build_discretionary(md),
             group::OUTPUT => crate::page::output_end(self, md),
             group::MATH => self.math_group_end(md),
+            group::ALIGN => self.align_right_brace(md),
+            group::NO_ALIGN => self.noalign_end(md),
             group::VCENTER => self.vcenter_end(md),
             group::MATH_CHOICE => self.build_choices(md),
             // MATH_SHIFT, MATH_LEFT: "Extra }, or forgotten $" / "\right"
