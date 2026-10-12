@@ -1209,6 +1209,10 @@ impl Run<'_, '_> {
                         }
                     }
                 } else {
+                    // pdfTeX §1375: `\immediate\pdfobj`, `\pdfxform`, `\pdfximage`
+                    if self.cur.cmd == cmd::EXTENSION {
+                        return crate::pdfprim::immediate(self, md);
+                    }
                     self.back_cur();
                 }
             }
