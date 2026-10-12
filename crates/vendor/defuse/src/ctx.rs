@@ -4,7 +4,7 @@ use std::sync::PoisonError;
 
 use crate::engine::{
     AssumeKind, Effect, End, Engine, EvalError, K_CHAIN, K_FIELD, K_LOOP, K_OUTPUT, Locality, NIL, NodeId, OpId,
-    RunResult, Slot, State, Until, Use, WalkResult, eff_code, eff_kind,
+    RunResult, Slot, State, StreamRange, Until, Use, WalkResult, eff_code, eff_kind,
 };
 use crate::hash::{FxHashMap, hash_words};
 use crate::value::{Field, Value, ValueId, Values};
@@ -41,8 +41,9 @@ pub struct Ctx<'a> {
     effect: Option<u8>,
     kind: Option<ValueId>,
     claim: Option<usize>,
-    stream: Option<(u64, u64)>,
+    stream: Option<StreamRange>,
     touch_seq: usize,
+    relabels: u64,
     assumptions: Vec<(Slot, AssumeKind, ValueId)>,
     sig: u64,
     error: Option<EvalError>,
@@ -74,6 +75,7 @@ impl<'a> Ctx<'a> {
             claim: None,
             stream: None,
             touch_seq: eng.touch_log.len(),
+            relabels: eng.relabels,
             assumptions: Vec::new(),
             memo: Default::default(),
             sig: 0,
@@ -493,7 +495,9 @@ impl<'a> Ctx<'a> {
     pub fn claim_stream(&mut self) -> Result<Vec<ValueId>, Stop> {
         self.check()?;
         let e = self.eng;
-        let (unit, after, bound) = e.stream_bounds(self.slot);
+        let (unit, after_n, bound_n) = e.stream_bounds(self.slot);
+        let after = e.n(after_n).label;
+        let bound = if bound_n == NIL { u64::MAX } else { e.n(bound_n).label };
         let n = e.n(self.slot);
         let op = e.op(n.op).clone();
         let args = e.args_vec(n.args);
@@ -501,7 +505,7 @@ impl<'a> Ctx<'a> {
         let (open, close) = (e.open_op(), e.close_op());
         let mut outs = Vec::new();
         let mut label = after;
-        let mut end = bound;
+        let mut delim = bound_n;
         while let Some((l, c)) = e.order_next(unit, label).filter(|&(l, _)| l <= bound) {
             label = l;
             let cn = e.n(c);
@@ -533,15 +537,18 @@ impl<'a> Ctx<'a> {
                 }
             };
             if fire {
-                // Up to the next node: the delimiter's own unfolding (should
-                // it unfold later) lies in the range.
-                end = e.order_next(unit, l).map_or(u64::MAX, |(k, _)| k - 1);
+                // The range runs to the node after the delimiter: its own
+                // unfolding (should it unfold later) lies within.
+                delim = c;
                 break;
             }
             outs.push(out);
         }
-        self.stream = Some((after, end));
-        self.sig = self.sig.wrapping_add(hash_words(22, &[after, end]));
+        self.stream = Some(StreamRange {
+            after: after_n,
+            end: delim,
+        });
+        self.sig = self.sig.wrapping_add(hash_words(22, &[after_n.pack(), delim.pack()]));
         Ok(outs)
     }
 
@@ -752,6 +759,7 @@ impl<'a> Ctx<'a> {
             claim: self.claim,
             stream: self.stream,
             touch_seq: self.touch_seq,
+            relabels: self.relabels,
             assumptions: self.assumptions,
             sig: self.sig,
             error: self.error,

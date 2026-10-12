@@ -607,9 +607,17 @@ pub(crate) struct Aux {
     /// For a pending claim: 1 + the label of the last sibling it could take
     /// (0: not computed yet, i.e. unbounded).
     reach1: u64,
-    /// For a stream claimer: the label range `(after, end]` whose structure
-    /// its last run read.
-    stream: Option<(u64, u64)>,
+    /// For a stream claimer: the range whose structure its last run read.
+    stream: Option<StreamRange>,
+}
+
+/// The range a stream claim read, as nodes (labels change under
+/// renumbering): after `after`'s label, up to and including the node
+/// after `end` (the delimiter; `NIL`: to the end of the unit).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) struct StreamRange {
+    pub(crate) after: Slot,
+    pub(crate) end: Slot,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -623,6 +631,8 @@ pub(crate) struct OItem {
     /// `reach`, or 0 while the claimer waits for a recompute: a structure
     /// edit hits each pending claim once per flush.
     hit: u64,
+    /// The last label a stream claimer's recorded range covers (0: none).
+    sreach: u64,
 }
 
 impl From<OItem> for Slot {
@@ -641,6 +651,7 @@ pub(crate) struct OSum {
     pend: u32,
     maxr: u64,
     maxhit: u64,
+    maxs: u64,
 }
 
 struct OAug;
@@ -659,6 +670,7 @@ impl Aug<OItem, OSum> for OAug {
             pend: u32::from(i.pend),
             maxr: i.reach,
             maxhit: i.hit,
+            maxs: i.sreach,
         }
     }
 
@@ -671,6 +683,7 @@ impl Aug<OItem, OSum> for OAug {
             pend: a.pend + b.pend,
             maxr: a.maxr.max(b.maxr),
             maxhit: a.maxhit.max(b.maxhit),
+            maxs: a.maxs.max(b.maxs),
         }
     }
 }
@@ -852,14 +865,15 @@ pub struct Engine {
     local_ix: BTreeMap<(u32, Field, u32, u64), Slot>,
     /// The depth each local definition is indexed under.
     local_depth: FxHashMap<(u32, Field, u64), u32>,
-    /// Stream claimers by `(unit, first label, slot)`.
-    stream_ix: BTreeSet<(u32, u64, u64)>,
     /// Runs of each stream claimer in this evaluation.
     stream_runs: FxHashMap<Slot, u32>,
     /// The labels `stream_touch` saw this evaluation, in order: a claim
     /// that ran meanwhile is checked against those after its start.
     pub(crate) touch_log: Vec<(u32, u64)>,
     in_eval: bool,
+    /// Label renumberings so far: a stream claim's run that spans one has
+    /// read labels that no longer mean the same.
+    pub(crate) relabels: u64,
     /// Set while a balanced, newly created text gets its scope kinds: a
     /// local definition there has no readers yet.
     fresh_scope: bool,
@@ -1013,10 +1027,10 @@ impl Engine {
             defs_ix: BTreeMap::new(),
             local_ix: BTreeMap::new(),
             local_depth: FxHashMap::default(),
-            stream_ix: BTreeSet::new(),
             stream_runs: FxHashMap::default(),
             touch_log: Vec::new(),
             in_eval: false,
+            relabels: 0,
             fresh_scope: false,
             environment: FxHashMap::default(),
             env_next: None,
@@ -2123,6 +2137,10 @@ impl Engine {
             h: n.height,
             reach,
             hit: if self.claim_dirty.contains(&s) { 0 } else { reach },
+            sreach: self
+                .aux_of(s)
+                .and_then(|a| a.stream)
+                .map_or(0, |r| self.stream_labels(s, r).1),
         }
     }
 
@@ -2216,6 +2234,16 @@ impl Engine {
             let gap = (hi_b - lo_b) / (count + 2);
             let whole = lo_b == 0 && hi_b == u64::MAX;
             if gap >= 2 * w as u64 || (whole && gap >= 2) {
+                // Stream ranges summarised under the old labels: those of
+                // claimers before the window reaching into it, and of the
+                // window's own (attached before every label is final).
+                let mut streams = self.stream_reaching(unit, first);
+                streams.extend(
+                    window
+                        .iter()
+                        .copied()
+                        .filter(|&x| self.aux_of(x).is_some_and(|a| a.stream.is_some())),
+                );
                 for &x in &window {
                     self.detach_labels(x);
                 }
@@ -2223,8 +2251,11 @@ impl Engine {
                     self.nm(x).label = lo_b + gap * (i as u64 + 1);
                     self.attach_labels(x);
                 }
+                for x in streams {
+                    self.sync_order(x);
+                }
                 self.rebuild_watches(unit);
-                self.restream(unit);
+                self.relabels += 1;
                 return;
             }
             assert!(!whole, "unit label space exhausted");
@@ -2959,6 +2990,7 @@ impl Engine {
                     h: 0,
                     reach: 0,
                     hit: 0,
+                    sreach: 0,
                 }),
             )
             .o
@@ -3604,40 +3636,15 @@ impl Engine {
         deps
     }
 
-    /// Records the label range a stream claimer's run read the structure of.
-    fn set_stream(&mut self, x: Slot, range: Option<(u64, u64)>) {
-        let old = self.aux_of(x).and_then(|a| a.stream);
-        if old == range {
+    /// Records the range a stream claimer's run read the structure of; its
+    /// end label goes into the order summary (`OSum::maxs`), so a touch
+    /// finds the claimers reaching it without a scan.
+    fn set_stream(&mut self, x: Slot, range: Option<StreamRange>) {
+        if self.aux_of(x).and_then(|a| a.stream) == range {
             return;
         }
-        // Keyed by the claimer's own label: the start of its range moves
-        // as its unfolded text comes and goes.
-        let (unit, own) = (self.n(x).unit, self.n(x).label);
-        if old.is_some() {
-            self.stream_ix.remove(&(unit, own, x.pack()));
-        }
-        if range.is_some() {
-            self.stream_ix.insert((unit, own, x.pack()));
-        }
         self.ax(x).stream = range;
-    }
-
-    /// The unit was relabelled: recorded stream ranges are stale, so the
-    /// claimers re-key and run again.
-    fn restream(&mut self, unit: u32) {
-        let keys: Vec<(u32, u64, u64)> = self
-            .stream_ix
-            .range((unit, 0, 0)..=(unit, u64::MAX, u64::MAX))
-            .copied()
-            .collect();
-        for k in keys {
-            self.stream_ix.remove(&k);
-            let x = Slot::unpack(k.2);
-            self.ax(x).stream = None;
-            if self.live(x) {
-                self.make_dirty(x);
-            }
-        }
+        self.sync_order(x);
     }
 
     /// The structure at `label` changed (a node, definition or scope effect
@@ -3648,20 +3655,14 @@ impl Engine {
         if self.in_eval {
             self.touch_log.push((unit, label));
         }
-        if self.stream_ix.is_empty() {
-            return;
-        }
         let hit: Vec<Slot> = self
-            .stream_ix
-            .range((unit, 0, 0)..(unit, label, 0))
-            .map(|&(_, _, x)| Slot::unpack(x))
+            .stream_reaching(unit, label)
+            .into_iter()
             .filter(|&x| {
-                self.live(x)
-                    && self
-                        .aux_of(x)
-                        .and_then(|a| a.stream)
-                        .is_some_and(|(_, e)| label <= e.saturating_add(1))
-                    && self.stream_bounds(x).1 < label
+                self.aux_of(x).and_then(|a| a.stream).is_some_and(|r| {
+                    let (a, e) = self.stream_labels(x, r);
+                    a < label && label <= e
+                })
             })
             .collect();
         for x in hit {
@@ -3669,15 +3670,48 @@ impl Engine {
         }
     }
 
+    /// The stream claimers before `label` whose summarised range end
+    /// reaches it (a superset of those whose range covers it: a claimer's
+    /// range starts after its own unfolded text).
+    fn stream_reaching(&self, unit: u32, label: u64) -> Vec<Slot> {
+        let root = self.units[unit as usize].root;
+        let mut before = label;
+        let mut hit = Vec::new();
+        while let Some(k) = self.order.search_back(&OAug, root, before, &|s: OSum| s.maxs >= label) {
+            if let Some(i) = self.order.get(root, k) {
+                hit.push(i.slot);
+            }
+            before = k;
+        }
+        hit
+    }
+
+    /// The labels a recorded range spans now: `(a, e]`. A boundary node
+    /// that is gone widens the range (the claimer re-runs anyway).
+    fn stream_labels(&self, x: Slot, r: StreamRange) -> (u64, u64) {
+        let a = if self.live(r.after) {
+            self.n(r.after).label
+        } else {
+            self.n(x).label
+        };
+        let e = if r.end != NIL && self.live(r.end) {
+            self.order_next(self.n(x).unit, self.n(r.end).label)
+                .map_or(u64::MAX, |(k, _)| k)
+        } else {
+            u64::MAX
+        };
+        (a, e)
+    }
+
     /// The label range a stream claim of `s` scans: after `s` and what it
     /// unfolded, up to the end of its parent's unfolded text (or the unit).
-    pub(crate) fn stream_bounds(&self, s: Slot) -> (u32, u64, u64) {
+    pub(crate) fn stream_bounds(&self, s: Slot) -> (u32, Slot, Slot) {
         let n = self.n(s);
-        let after = self.n(self.subtree_end(s)).label;
+        let after = self.subtree_end(s);
         let end = if n.parent == NIL || !self.live(n.parent) {
-            u64::MAX
+            NIL
         } else {
-            self.n(self.subtree_end(n.parent)).label
+            self.subtree_end(n.parent)
         };
         (n.unit, after, end)
     }
@@ -3877,6 +3911,7 @@ impl Engine {
                     h: 0,
                     reach: 0,
                     hit: 0,
+                    sreach: 0,
                 }),
             )
             .o
@@ -4538,12 +4573,15 @@ impl Engine {
             self.make_dirty(x);
             return;
         }
-        // The structure a stream claim scanned changed while it ran.
-        if let Some((a, e)) = r.stream {
-            let (unit, a) = (self.n(x).unit, a.min(self.stream_bounds(x).1));
-            if self.touch_log[r.touch_seq.min(self.touch_log.len())..]
-                .iter()
-                .any(|&(u, l)| u == unit && a < l && l <= e.saturating_add(1))
+        // The structure a stream claim scanned changed while it ran (or
+        // the labels it compares against were renumbered meanwhile).
+        if let Some(sr) = r.stream {
+            let unit = self.n(x).unit;
+            let (a, e) = self.stream_labels(x, sr);
+            if r.relabels != self.relabels
+                || self.touch_log[r.touch_seq.min(self.touch_log.len())..]
+                    .iter()
+                    .any(|&(u, l)| u == unit && a < l && l <= e)
             {
                 count!(StaleSite);
                 self.make_dirty(x);
@@ -5606,9 +5644,11 @@ pub struct RunResult {
     /// The kind of the scope the run's effect opens.
     pub(crate) kind: Option<ValueId>,
     pub(crate) claim: Option<usize>,
-    pub(crate) stream: Option<(u64, u64)>,
+    pub(crate) stream: Option<StreamRange>,
     /// The length of `touch_log` when the run started.
     pub(crate) touch_seq: usize,
+    /// `Engine::relabels` when the run started.
+    pub(crate) relabels: u64,
     pub(crate) assumptions: Vec<(Slot, AssumeKind, ValueId)>,
     pub(crate) sig: u64,
     pub(crate) error: Option<EvalError>,
