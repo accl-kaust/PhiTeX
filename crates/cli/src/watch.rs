@@ -2,15 +2,19 @@
 //! disk, or an editor's unsaved buffer (the viewer's `set_file` and
 //! `edit`), is given to the same `Build` as a new version of that file,
 //! and the build runs again as an edit (to the fixpoint); the outputs are
-//! written and the viewer told which pages changed. On standard input: `r`
-//! rebuilds, `q` (or its end) quits.
+//! written and the viewer told which pages changed. The files are watched
+//! by the system (`notify`: inotify, FSEvents, kqueue). On standard input:
+//! `r` rebuilds, `q` (or its end) quits.
 
 use std::collections::HashMap;
 use std::io::BufRead as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
+
+use notify::{EventKind, RecursiveMode, Watcher as _};
+use serde_json::{Value, json};
 
 use crate::modern::{self, Options, Target, Ui, ms};
 use crate::session::{self, Session, Status};
@@ -28,9 +32,6 @@ enum Event {
     Quit,
 }
 
-/// How often the project's files are looked at.
-const POLL: Duration = Duration::from_millis(20);
-
 /// The extensions of the files a change of rebuilds.
 const SOURCES: &[&str] = &[
     "tex", "sty", "cls", "bib", "bst", "def", "cfg", "clo", "fd", "ltx", "ist", "bbx", "cbx",
@@ -38,60 +39,37 @@ const SOURCES: &[&str] = &[
     "inc",
 ];
 
-pub type Stamp = (u64, SystemTime);
-
-/// The project's source files under `root` (to depth 6, no hidden
-/// directories) with their sizes and times.
-pub fn scan(root: &Path) -> HashMap<PathBuf, Stamp> {
-    let mut out = HashMap::new();
-    let mut todo = vec![(root.to_path_buf(), 0)];
-    while let Some((d, depth)) = todo.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else {
-            continue;
-        };
-        for e in rd.flatten() {
-            let name = e.file_name();
-            if name.to_string_lossy().starts_with('.') {
-                continue;
-            }
-            let p = e.path();
-            let Ok(m) = e.metadata() else { continue };
-            if m.is_dir() {
-                if depth < 6 {
-                    todo.push((p, depth + 1));
-                }
-            } else if p
-                .extension()
-                .is_some_and(|x| SOURCES.contains(&&*x.to_string_lossy().to_ascii_lowercase()))
-            {
-                out.insert(p, (m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH)));
-            }
-        }
-    }
-    out
+/// Whether a change of `p` (under `root`) is one of the project's
+/// sources: a source's extension, in no hidden directory.
+fn source(root: &Path, p: &Path) -> bool {
+    let rel = p.strip_prefix(root).unwrap_or(p);
+    !rel.components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        && p.extension()
+            .is_some_and(|x| SOURCES.contains(&&*x.to_string_lossy().to_ascii_lowercase()))
 }
 
 /// The files the watch wrote itself, with their bytes' hashes: a change
 /// to one of them that leaves those bytes is the watch's own.
 type Ours = Arc<Mutex<HashMap<PathBuf, u64>>>;
 
-fn poller(root: PathBuf, ours: Ours, tx: mpsc::Sender<Event>) {
-    let mut last = scan(&root);
-    loop {
-        std::thread::sleep(POLL);
-        let now = scan(&root);
-        let mut changed: Vec<PathBuf> = Vec::new();
-        for (p, st) in &now {
-            if last.get(p) != Some(st) {
-                changed.push(p.clone());
-            }
+/// The system's file events under `root`, as the project's changed
+/// sources (the watch's own writes left out).
+fn watcher(
+    root: &Path,
+    ours: Ours,
+    tx: mpsc::Sender<Event>,
+) -> notify::Result<notify::RecommendedWatcher> {
+    let r = root.to_path_buf();
+    let mut w = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
+        let Ok(ev) = ev else { return };
+        if !matches!(
+            ev.kind,
+            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+        ) {
+            return;
         }
-        for p in last.keys() {
-            if !now.contains_key(p) {
-                changed.push(p.clone());
-            }
-        }
-        last = now;
+        let mut changed: Vec<PathBuf> = ev.paths.into_iter().filter(|p| source(&r, p)).collect();
         {
             let ours = ours.lock().unwrap_or_else(PoisonError::into_inner);
             changed.retain(|p| {
@@ -104,10 +82,12 @@ fn poller(root: PathBuf, ours: Ours, tx: mpsc::Sender<Event>) {
                 }
             });
         }
-        if !changed.is_empty() && tx.send(Event::Files(changed)).is_err() {
-            return;
+        if !changed.is_empty() {
+            let _ = tx.send(Event::Files(changed));
         }
-    }
+    })?;
+    w.watch(root, RecursiveMode::Recursive)?;
+    Ok(w)
 }
 
 /// `s` with UTF-16 code units `start..end` replaced by `text` (the
@@ -133,27 +113,20 @@ fn tex_text(s: &str) -> String {
 }
 
 /// The diagnostics of a build for the viewer.
-fn diagnostics(r: &session::Report, log: &str) -> Vec<String> {
-    let mut v: Vec<String> = r
+fn diagnostics(r: &session::Report, log: &str) -> Vec<Value> {
+    let mut v: Vec<Value> = r
         .out
         .errors
         .iter()
-        .map(|e| {
-            format!(
-                "{{\"severity\":\"error\",\"code\":\"tex\",\"message\":{}}}",
-                crate::json::quote(crate::problems::bare(e))
-            )
-        })
+        .map(|e| json!({"severity": "error", "code": "tex", "message": crate::problems::bare(e)}))
         .collect();
     for (k, n, first) in crate::warnings::summarize(&r.log_text()) {
-        v.push(format!(
-            "{{\"severity\":\"warning\",\"code\":\"{k:?}\",\"message\":{},\"detail\":{}}}",
-            crate::json::quote(&format!(
-                "{n} × {}",
-                first.first().cloned().unwrap_or_default()
-            )),
-            crate::json::quote(&format!("see {log}"))
-        ));
+        v.push(json!({
+            "severity": "warning",
+            "code": format!("{k:?}"),
+            "message": format!("{n} × {}", first.first().cloned().unwrap_or_default()),
+            "detail": format!("see {log}"),
+        }));
     }
     v
 }
@@ -164,7 +137,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     let st = ui.st;
     let job = modern::job(t, o).unwrap_or_else(|e| {
         ui.error(&e);
-        std::process::exit(2);
+        std::process::exit(crate::EXIT_USAGE);
     });
     for n in session::waiting_notes(&job) {
         ui.line(&format!("{}: {n}", st.yellow("note")));
@@ -174,7 +147,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     let spin = ui.spin(what.clone(), status.clone());
     let mut s = Session::new(job, status.clone(), &mut |n: &str| ui.note(n)).unwrap_or_else(|e| {
         ui.error(&e);
-        std::process::exit(1);
+        std::process::exit(crate::EXIT_USAGE);
     });
     spin.done();
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -186,21 +159,17 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         .trim_start_matches("./")
         .to_owned();
     let (tx, rx) = mpsc::channel::<Event>();
-    // (the viewer: on a terminal unless --no-view; anywhere with --view)
-    let want_view = o
-        .view
-        .unwrap_or_else(|| std::io::IsTerminal::is_terminal(&std::io::stdout()));
     // (a terminal editor, or an unknown one: the viewer shows the place
     // instead of opening it)
-    let editor = crate::editor::Editor::configured(o.editor.as_deref()).unwrap_or_else(|e| {
+    let editor = crate::editor::Editor::configured(t.editor.as_deref()).unwrap_or_else(|e| {
         ui.note(&format!(
             "editor `{e}`: not one the viewer can open (a terminal editor?): a double-click on a page shows the \
              place; --editor names one it can (code, emacsclient, nvim, …)"
         ));
         None
     });
-    let view = if want_view {
-        match View::start(editor) {
+    let view = if o.view {
+        match View::start(editor, o.port) {
             Ok(v) => {
                 let tx = Mutex::new(tx.clone());
                 v.on_ask(Box::new(move || {
@@ -210,7 +179,8 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                         .send(Event::Asked);
                 }));
                 ui.stdout(&format!("phitex: the viewer is at {}", v.url()));
-                ui.pin(&format!("{} {}", st.dim("viewer:"), st.cyan(v.url())));
+                ui.line(&format!("{} {}", st.dim("viewer:"), st.cyan(v.url())));
+                ui.event(&json!({"event": "viewer", "url": v.url()}));
                 if o.open && !view::open_browser(v.url()) {
                     ui.warning("could not start a browser");
                 }
@@ -225,13 +195,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         None
     };
     let ours: Ours = Arc::default();
-    {
-        let (root, ours, tx) = (root.clone(), ours.clone(), tx.clone());
-        std::thread::Builder::new()
-            .name("phitex-watch-files".into())
-            .spawn(move || poller(root, ours, tx))
-            .expect("a thread");
-    }
+    // (kept for the watch's life: dropping it stops the events)
+    let _files = watcher(&root, ours.clone(), tx.clone()).unwrap_or_else(|e| {
+        ui.error(&format!("can't watch {}: {e}", root.display()));
+        std::process::exit(crate::EXIT_USAGE);
+    });
     {
         let tx = tx.clone();
         std::thread::Builder::new()
@@ -271,16 +239,18 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 ui.stdout(&format!(
                     "phitex: build {builds} ({why}) failed inside the engine"
                 ));
+                let first = m.lines().next().unwrap_or("the engine panicked");
+                ui.event(
+                    &json!({"event": "failed", "build": builds, "why": why, "message": first}),
+                );
                 if let Some(v) = &view {
-                    let first = m.lines().next().unwrap_or("the engine panicked");
                     v.built(&Built {
                         pdf: None,
                         history: 2,
                         ms: 0.0,
-                        diagnostics: vec![format!(
-                            "{{\"severity\":\"error\",\"code\":\"engine\",\"message\":{}}}",
-                            crate::json::quote(first)
-                        )],
+                        diagnostics: vec![
+                            json!({"severity": "error", "code": "engine", "message": first}),
+                        ],
                     });
                     v.building(false);
                 }
@@ -372,7 +342,6 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 ..Options::default()
             },
             ui,
-            false,
         );
     };
     rebuild(&mut s, "cold");

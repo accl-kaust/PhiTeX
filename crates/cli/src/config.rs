@@ -22,6 +22,8 @@ pub struct Config {
     pub shell_escape: Option<bool>,
     /// A program to show the PDF with (`phitex watch --open`).
     pub viewer: Option<String>,
+    /// The editor a double-click on the viewer's page opens (`--editor`).
+    pub editor: Option<String>,
     /// Where to copy the final PDF after each successful build (`copy-pdf
     /// = true | "dir"`).
     pub copy_pdf: Option<CopyPdf>,
@@ -75,6 +77,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
             }
             "shell-escape" | "shell_escape" => c.shell_escape = Some(boolean()?),
             "viewer" => c.viewer = Some(string()?),
+            "editor" => c.editor = Some(string()?),
             "synctex" => c.synctex = Some(boolean()?),
             "copy-pdf" | "copy_pdf" => {
                 c.copy_pdf = Some(match value {
@@ -191,7 +194,7 @@ mod tests {
     fn toml_subset() {
         let c = parse(
             "# my paper\n[build]\nmain = \"paper.tex\"  # the root\nengine = 'pdflatex'\n\
-             output-dir = \"out\"\nshell-escape = false\nviewer = \"zathura\"\n",
+             output-dir = \"out\"\nshell-escape = false\nviewer = \"zathura\"\neditor = \"code\"\n",
         )
         .unwrap();
         assert_eq!(
@@ -202,6 +205,7 @@ mod tests {
                 output_dir: Some("out".into()),
                 shell_escape: Some(false),
                 viewer: Some("zathura".into()),
+                editor: Some("code".into()),
                 copy_pdf: None,
                 synctex: None,
             }

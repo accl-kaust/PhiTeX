@@ -665,7 +665,7 @@ fn ws_send(url: &str, request: &str) -> std::net::TcpStream {
     s
 }
 
-/// `phitex watch --view`, headless: an editor's unsaved buffer
+/// `phitex watch` with its viewer, headless: an editor's unsaved buffer
 /// (`set_file` over the viewer's WebSocket, the file on disk untouched)
 /// is built as an edit; the PDF is the cold build's of the buffer's text.
 #[test]
@@ -677,7 +677,7 @@ fn watch_editor_buffer() {
     let dir = scratch("watch-editor");
     std::fs::write(dir.join("story.tex"), &text).expect("the document");
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["watch", "--view", "--ini", "--etex", "-j", "8", "story.tex"])
+        .args(["watch", "--ini", "--etex", "-j", "8", "story.tex"])
         .env("XDG_RUNTIME_DIR", &dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -902,19 +902,20 @@ fn tex_plain_documents() {
     );
 }
 
-/// `phitex check`: the build runs and nothing is written.
+/// `phitex build --json`: every line on standard output is a JSON event,
+/// the build's last, with its pages and output; nothing else is printed.
 #[test]
-fn check_writes_nothing() {
+fn build_json_events() {
     let _one = one();
-    let dir = scratch("check");
+    let dir = scratch("json");
     std::fs::copy(fixtures().join("plain/story.tex"), dir.join("story.tex")).expect("the document");
     let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
-            "check",
+            "build",
+            "--json",
+            "--no-synctex",
             "--engine",
             "tex",
-            "--output-format",
-            "dvi",
             "story.tex",
         ])
         .output()
@@ -924,12 +925,51 @@ fn check_writes_nothing() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let files: Vec<_> = std::fs::read_dir(&dir)
-        .expect("the directory")
-        .flatten()
-        .map(|e| e.file_name())
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let events: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{l}: {e}")))
         .collect();
-    assert_eq!(files, vec![std::ffi::OsString::from("story.tex")]);
+    let b = events.last().expect("an event");
+    assert_eq!(b["event"], "build", "{events:?}");
+    assert_eq!(b["ok"], true, "{b}");
+    assert!(b["pages"].as_u64().is_some_and(|n| n > 0), "{b}");
+    assert!(
+        b["output"]
+            .as_str()
+            .is_some_and(|o| o.ends_with("story.dvi")),
+        "{b}"
+    );
+    assert!(dir.join("story.dvi").is_file());
+}
+
+/// The exit statuses: 2 for a file that is not there or an unknown
+/// command, 1 for a document with errors.
+#[test]
+fn exit_statuses() {
+    let _one = one();
+    let dir = scratch("exits");
+    let bin = Path::new(env!("CARGO_BIN_EXE_phitex"));
+    let status = |args: &[&str]| {
+        command(bin, &dir)
+            .args(args)
+            .output()
+            .expect("phitex runs")
+            .status
+            .code()
+    };
+    assert_eq!(
+        status(&["build", "--engine", "tex", "nothere.tex"]),
+        Some(2)
+    );
+    assert_eq!(status(&["check", "x.tex"]), Some(2));
+    assert_eq!(status(&["x.tex"]), Some(2));
+    std::fs::write(dir.join("bad.tex"), "\\undefinedcs\n\\bye\n").expect("the document");
+    assert_eq!(status(&["build", "--engine", "tex", "bad.tex"]), Some(1));
 }
 
 /// XeLaTeX and LuaLaTeX are not supported, by any name, and nothing
@@ -1029,6 +1069,11 @@ fn help_is_sectioned() {
         "Examples:",
         "build",
         "watch",
+        "clean",
+        "--json",
+        "--no-view",
+        "--shell-escape",
+        "Exit status",
         "--output-dir",
         "--jobs",
     ] {
