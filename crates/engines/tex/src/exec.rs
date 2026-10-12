@@ -18,13 +18,15 @@
 //! Which thread: the evaluation (`Build::with`, `Build::edit`) blocks in
 //! `for_each` until a batch has run, so on wasm32 it must run in a
 //! worker, never on the browser's main thread (which may not block).
-//! Natively any thread may run it. Threads come from `PHITEX_THREADS`,
-//! else the available parallelism (on wasm32: `navigator.hardwareConcurrency`
-//! as the host passes it through `PHITEX_THREADS`, else 1). Workspace
+//! Natively any thread may run it. The thread count is
+//! `Options::threads`, else `PHITEX_THREADS`, else the available
+//! parallelism; on wasm32 the host registers its worker callback before
+//! the first build (without it the build runs in order). Workspace
 //! rule: no `unsafe`; borrowed closures reach the workers through
 //! rayon's scoped API or `std::thread::scope`.
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use phitex_defuse::{Executor, RunResult};
 
@@ -44,25 +46,88 @@ pub fn set_spawn_worker(f: SpawnWorker) {
     let _ = SPAWN.set(f);
 }
 
-/// The executor of an evaluation.
-pub(crate) struct Threads(pub usize);
+/// A clock for the executor's counters: nanoseconds from some fixed
+/// point, `None` where the target has none (wasm32: the host's clock is
+/// not reachable from here).
+pub(crate) trait Clock: Sync {
+    fn now(&self) -> Option<u64>;
+}
+
+/// `std::time::Instant` from the first reading.
+struct StdClock;
+
+impl Clock for StdClock {
+    fn now(&self) -> Option<u64> {
+        static EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
+        if cfg!(target_arch = "wasm32") {
+            return None;
+        }
+        let e = *EPOCH.get_or_init(std::time::Instant::now);
+        u64::try_from(e.elapsed().as_nanos()).ok()
+    }
+}
+
+/// The executor's clock.
+pub(crate) fn clock() -> &'static dyn Clock {
+    &StdClock
+}
+
+/// The executor of an evaluation, with its counters: the time its jobs
+/// ran (summed over jobs), and the most jobs running at once.
+pub(crate) struct Threads {
+    pub n: usize,
+    busy: AtomicU64,
+    running: AtomicUsize,
+    peak: AtomicUsize,
+}
 
 impl Threads {
-    /// `PHITEX_THREADS`, else the available parallelism; 1 where this
-    /// target cannot run threads.
-    pub(crate) fn from_env() -> Threads {
-        static N: OnceLock<usize> = OnceLock::new();
-        Threads(*N.get_or_init(|| {
-            if !threads_possible() {
-                return 1;
-            }
-            std::env::var("PHITEX_THREADS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .filter(|&n| n > 0)
-                .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
-        }))
+    pub(crate) fn new(n: usize) -> Threads {
+        Threads {
+            n,
+            busy: AtomicU64::new(0),
+            running: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        }
     }
+
+    /// The jobs' summed run time (zero without a clock).
+    pub(crate) fn busy(&self) -> std::time::Duration {
+        std::time::Duration::from_nanos(self.busy.load(Ordering::Relaxed))
+    }
+
+    /// The most jobs that ran at once.
+    pub(crate) fn peak(&self) -> usize {
+        self.peak.load(Ordering::Relaxed)
+    }
+
+    /// Runs one job, counted.
+    fn job<R>(&self, f: impl FnOnce() -> R) -> R {
+        let c = self.running.fetch_add(1, Ordering::Relaxed) + 1;
+        self.peak.fetch_max(c, Ordering::Relaxed);
+        let t0 = clock().now();
+        let r = f();
+        if let (Some(a), Some(b)) = (t0, clock().now()) {
+            self.busy.fetch_add(b.saturating_sub(a), Ordering::Relaxed);
+        }
+        self.running.fetch_sub(1, Ordering::Relaxed);
+        r
+    }
+}
+
+/// The thread count: `given`, else `PHITEX_THREADS`, else the available
+/// parallelism; 1 where this target cannot run threads.
+pub(crate) fn threads(given: Option<usize>) -> usize {
+    if !threads_possible() {
+        return 1;
+    }
+    given.filter(|&n| n > 0).unwrap_or_else(|| {
+        std::env::var("PHITEX_THREADS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
+    })
 }
 
 /// Whether this target can run workers at all.
@@ -81,13 +146,13 @@ impl Executor for Threads {
         run: &(dyn Fn(usize) -> RunResult + Sync),
         out: &mut Vec<RunResult>,
     ) {
-        if self.0 <= 1 || n < GRAIN {
-            out.extend((0..n).map(run));
+        if self.n <= 1 || n < GRAIN {
+            out.extend((0..n).map(|i| self.job(|| run(i))));
             return;
         }
         let slots: Vec<OnceLock<RunResult>> = (0..n).map(|_| OnceLock::new()).collect();
-        self.for_each(n, &|i| {
-            let _ = slots[i].set(run(i));
+        self.parallel_each(n, &|i| {
+            let _ = slots[i].set(self.job(|| run(i)));
         });
         out.extend(
             slots
@@ -97,13 +162,21 @@ impl Executor for Threads {
     }
 
     fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync)) {
-        if self.0 <= 1 || n < GRAIN || !threads_possible() {
+        self.parallel_each(n, &|i| self.job(|| f(i)));
+    }
+}
+
+impl Threads {
+    /// `f(i)` for every `i < n`, on the pool when the batch is large
+    /// enough.
+    fn parallel_each(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        if self.n <= 1 || n < GRAIN || !threads_possible() {
             (0..n).for_each(f);
             return;
         }
-        let grain = (n / (self.0 * 8)).clamp(4, GRAIN);
-        trace(n, self.0);
-        parallel(self.0, n, grain, f);
+        let grain = (n / (self.n * 8)).clamp(4, GRAIN);
+        trace(n, self.n);
+        parallel(self.n, n, grain, f);
     }
 }
 

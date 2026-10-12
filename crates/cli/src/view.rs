@@ -80,6 +80,10 @@ pub struct Built {
     pub ms: f64,
     /// Its errors and warnings, each a JSON object.
     pub diagnostics: Vec<Value>,
+    /// The time from the change (a save, an editor's keystroke) to now
+    /// (none: no change, a cold build): the viewer adds its drawing to it
+    /// for the ⚡ chip.
+    pub since_ms: Option<f64>,
 }
 
 /// What the browsers ask the watch for.
@@ -87,6 +91,8 @@ pub struct Built {
 pub enum Ask {
     /// Build again (the console's Rebuild).
     Rebuild,
+    /// A change reached the screen this long after it was made.
+    Painted(u64),
     /// File `file`'s text is the editor's buffer from now on.
     SetFile { file: String, text: String },
     /// Characters `start..end` (UTF-16 code units) of `file`'s buffer
@@ -282,7 +288,10 @@ impl View {
             &json!({"event": "diagnostics", "items": items}).to_string(),
         );
         *lock(&self.shared.diagnostics) = items;
-        broadcast(&self.shared, "{\"event\":\"settled\"}");
+        broadcast(
+            &self.shared,
+            &json!({"event": "settled", "since_ms": b.since_ms}).to_string(),
+        );
         (changed, n)
     }
 }
@@ -502,6 +511,14 @@ fn answer(s: &Shared, req: &Value) -> String {
             }
         }
         "diagnostics" => ok(json!({"items": lock(&s.diagnostics).clone()})),
+        "painted" => {
+            // (in microseconds: Ask stays Eq)
+            if let Some(ms) = req.get("ms").and_then(Value::as_f64) {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                ask(s, Ask::Painted((ms.max(0.0) * 1e3) as u64));
+            }
+            ok(json!({}))
+        }
         "rebuild" => {
             ask(s, Ask::Rebuild);
             ok(json!({}))
