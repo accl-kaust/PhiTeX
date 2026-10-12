@@ -358,6 +358,25 @@ pub struct PdfWriter {
     // the font files' state across fonts
     subset_tags: BTreeSet<[u8; 6]>,
     last_arg_other_subr3: i32,
+    /// What `pdf_out_colorstack_startpage` writes on the next page.
+    page_start: Vec<Vec<u8>>,
+}
+
+/// What the document gives the end of the file: `\pdfcatalog`,
+/// `\pdfinfo` and `\pdftrailer` text, `\pdfinfoomitdate` and
+/// `\pdfsuppressptexinfo` (pdfTeX §806–§815).
+#[derive(Clone, Debug, Default)]
+pub struct EndData {
+    /// `pdf_catalog_toks` as a string.
+    pub catalog: Vec<u8>,
+    /// `pdf_info_toks` as a string.
+    pub info: Vec<u8>,
+    /// `pdf_trailer_toks` as a string.
+    pub trailer: Vec<u8>,
+    /// `\pdfinfoomitdate`.
+    pub info_omit_date: i32,
+    /// `\pdfsuppressptexinfo`.
+    pub suppress_ptex_info: i32,
 }
 
 impl PdfWriter {
@@ -400,7 +419,22 @@ impl PdfWriter {
             fonts: BTreeMap::new(),
             subset_tags: BTreeSet::new(),
             last_arg_other_subr3: 3,
+            page_start: Vec::new(),
         }
+    }
+
+    /// The parameters, for those pdfTeX reads again at each page
+    /// (`\pdfhorigin`, `\pdfpagewidth`, `\mag`, ...).
+    pub fn params_mut(&mut self) -> &mut PdfParams {
+        &mut self.p
+    }
+
+    /// The literals `pdf_out_colorstack_startpage` writes at the start of
+    /// the next page's stream (pdfTeX's "Start stream of page/form
+    /// contents"), each as a special (`PDF:`, `PDF:page:`,
+    /// `PDF:direct:`).
+    pub fn set_page_start(&mut self, literals: Vec<Vec<u8>>) {
+        self.page_start = literals;
     }
 
     /// The number of pages shipped.
@@ -1259,6 +1293,9 @@ impl PdfWriter {
             self.print_real(self.p.mag, 3);
             self.print_ln(b" 0 0 cm");
         }
+        for lit in std::mem::take(&mut self.page_start) {
+            self.special(&lit);
+        }
         self.box_out(page, fonts, whatsits);
         self.total_pages += 1;
         self.cur_s = -1;
@@ -1707,7 +1744,17 @@ impl PdfWriter {
     ///
     /// # Errors
     /// A font that cannot be embedded.
-    pub fn finish(mut self) -> Result<Vec<u8>, PdfError> {
+    pub fn finish(self) -> Result<Vec<u8>, PdfError> {
+        self.finish_with(&EndData::default())
+    }
+
+    /// [`PdfWriter::finish`] with the document's catalog, info and
+    /// trailer entries.
+    ///
+    /// # Errors
+    /// A font that cannot be embedded.
+    #[allow(clippy::too_many_lines)]
+    pub fn finish_with(mut self, end: &EndData) -> Result<Vec<u8>, PdfError> {
         if self.total_pages == 0 {
             return Ok(Vec::new());
         }
@@ -1740,19 +1787,41 @@ impl PdfWriter {
         let root = self.new_dict(OBJ_TYPE_OTHERS, 0);
         self.print_ln(b"/Type /Catalog");
         self.indirect_ln(b"Pages", self.last_pages);
+        // PDF-BACKEND-GAP: /Threads, /Outlines, /Names and /OpenAction
+        if !end.catalog.is_empty() {
+            self.print_ln(&end.catalog);
+        }
         self.end_dict();
-        // §807–§810
+        // §807–§810: pdf_print_info
         self.new_dict(OBJ_TYPE_OTHERS, 0);
-        self.print_ln(b"/Producer (pdfTeX-1.40.29)");
-        self.print_ln(b"/Creator (TeX)");
+        let given = |k: &[u8]| end.info.windows(k.len()).any(|w| w == k);
+        if !given(b"/Producer") {
+            self.print_ln(b"/Producer (pdfTeX-1.40.29)");
+        }
+        if !end.info.is_empty() {
+            self.print_ln(&end.info);
+        }
+        if !given(b"/Creator") {
+            self.print_ln(b"/Creator (TeX)");
+        }
         let date = self.p.date.clone();
-        self.print(format!("/CreationDate ({date})\n").as_bytes());
-        self.print(format!("/ModDate ({date})\n").as_bytes());
-        self.print_ln(b"/Trapped /False");
-        let banner = self.p.banner.clone();
-        self.print(b"/PTEX.Fullbanner ");
-        self.print_str(banner.as_bytes());
-        self.pdf_out(b'\n');
+        if end.info_omit_date == 0 {
+            if !given(b"/CreationDate") {
+                self.print(format!("/CreationDate ({date})\n").as_bytes());
+            }
+            if !given(b"/ModDate") {
+                self.print(format!("/ModDate ({date})\n").as_bytes());
+            }
+        }
+        if !given(b"/Trapped") {
+            self.print_ln(b"/Trapped /False");
+        }
+        if end.suppress_ptex_info.rem_euclid(2) == 0 {
+            let banner = self.p.banner.clone();
+            self.print(b"/PTEX.Fullbanner ");
+            self.print_str(banner.as_bytes());
+            self.pdf_out(b'\n');
+        }
         self.end_dict();
         // §812–§813
         let obj_ptr = self.objs.len() - 1;
@@ -1787,6 +1856,10 @@ impl PdfWriter {
         self.print_int_ln(int(obj_ptr) + 1);
         self.indirect_ln(b"Root", root);
         self.indirect_ln(b"Info", obj_ptr);
+        if !end.trailer.is_empty() {
+            self.print_ln(&end.trailer);
+        }
+        // PDF-BACKEND-GAP: \pdftrailerid (print_ID_alt)
         // print_ID (utils.c)
         let mut m = self.p.date.clone().into_bytes();
         m.extend_from_slice(self.p.output_file_name.as_bytes());
