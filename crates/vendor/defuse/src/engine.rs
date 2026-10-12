@@ -379,6 +379,9 @@ pub struct Report {
     /// declared absent), and the nodes waiting on them, when the
     /// evaluation ended.
     pub env_stalled: u64,
+    /// The nodes waiting for an environment field, with the field each
+    /// one waits for (what the client has to supply or declare absent).
+    pub env_waits: Vec<(NodeId, Field)>,
     /// Nodes held back before running because a hinted input was missing.
     pub gated: u64,
     /// Speculative runs kept (with outstanding assumptions).
@@ -3386,6 +3389,8 @@ impl Engine {
         }
         self.set_uses(s, Vec::new());
         self.clear_contribs(s);
+        // Not a sibling for anyone now: a reader anchored on it re-anchors.
+        self.unanchor_watches(s);
         self.set_publishes(s, Vec::new());
         self.drop_watch(s);
         let readers = self.aux_of(s).map_or_else(Default::default, |a| a.out_readers.clone());
@@ -3413,6 +3418,9 @@ impl Engine {
         self.ax(s).claimed_by = None;
         self.nm(s).state = State::Dirty;
         self.nm(s).epoch = self.n(s).epoch.wrapping_add(1);
+        // A sibling again: a reader whose range spans it may anchor on it.
+        let (unit, label) = (self.n(s).unit, self.n(s).label);
+        self.stab_structure(unit, label);
         let st = self.statics(self.n(s).op, self.n(s).args);
         if let Some(d) = &st.decl {
             for &(f, l) in d {
@@ -4191,6 +4199,21 @@ impl Engine {
 
     fn stab_structure(&mut self, unit: u32, label: u64) {
         for (r, _) in self.stab(unit, label) {
+            self.make_dirty(r);
+        }
+    }
+
+    /// Readers whose range starts right after `s` run again: they chose
+    /// `s` as their anchor (a previous sibling), and it is gone as one.
+    fn unanchor_watches(&mut self, s: Slot) {
+        let unit = self.n(s).unit;
+        let from = self.n(s).label + 1;
+        let readers: Vec<Slot> = self.units[unit as usize]
+            .watches
+            .range((from, Slot { ix: 0, gen_: 0 })..=(from, NIL))
+            .map(|((_, r), _)| *r)
+            .collect();
+        for r in readers {
             self.make_dirty(r);
         }
     }
@@ -5480,7 +5503,8 @@ impl Engine {
     }
 
     /// Of `parked`, the nodes waiting for an environment field, and those
-    /// waiting (through any chain of waits) on one of them.
+    /// waiting (through any chain of waits) on one of them: a node parked
+    /// on one, or a range reader whose range holds one.
     fn env_stalled(&self, parked: &[Slot]) -> FxHashSet<Slot> {
         let mut stalled: FxHashSet<Slot> = self
             .env_waiters
@@ -5492,9 +5516,23 @@ impl Engine {
         loop {
             let before = stalled.len();
             for &x in parked {
+                if stalled.contains(&x) {
+                    continue;
+                }
                 let on = self.n(x).on;
                 if on != NIL && stalled.contains(&on) {
                     stalled.insert(x);
+                    continue;
+                }
+                if let Some((_, anchor)) = self.aux_of(x).and_then(|a| a.watch) {
+                    let (unit, label) = (self.n(x).unit, self.n(x).label);
+                    let lo = self.watch_key(x, anchor).0;
+                    if stalled
+                        .iter()
+                        .any(|&s| self.n(s).unit == unit && lo <= self.n(s).label && self.n(s).label < label)
+                    {
+                        stalled.insert(x);
+                    }
                 }
             }
             if stalled.len() == before {
@@ -5518,6 +5556,15 @@ impl Engine {
                 let stalled = self.env_stalled(&parked);
                 if stalled.len() == parked.len() {
                     self.report.env_stalled = stalled.len() as u64;
+                    let mut waits: Vec<(NodeId, Field)> = self
+                        .env_waiters
+                        .iter()
+                        .flat_map(|(&f, xs)| xs.iter().map(move |&x| (x, f)))
+                        .filter(|&(x, _)| stalled.contains(&x))
+                        .map(|(x, f)| (self.n(x).id, f))
+                        .collect();
+                    waits.sort_unstable();
+                    self.report.env_waits = waits;
                     return Ok(());
                 }
                 let mut ids: Vec<NodeId> = parked

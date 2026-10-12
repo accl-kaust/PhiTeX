@@ -557,6 +557,18 @@ fn collect_ids(steps: &[Step], seen: &mut FxHashSet<String>) -> Result<(), Strin
     Ok(())
 }
 
+/// Every environment field the steps read (nested included).
+pub fn env_reads_in(steps: &[Step], out: &mut Vec<String>) {
+    for s in steps {
+        for f in &s.env_reads {
+            if !out.contains(f) {
+                out.push(f.clone());
+            }
+        }
+        env_reads_in(&s.children, out);
+    }
+}
+
 fn sequences_in(steps: &[Step], out: &mut Vec<String>) {
     for s in steps {
         for q in [&s.contributes, &s.reads_prev].into_iter().flatten() {
@@ -910,7 +922,7 @@ impl Operation for TraceOp {
 
     fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
         let s = self.step(args);
-        let mut out: Vec<Field> = s.reads.iter().chain(&s.env_reads).map(|f| v.field(f)).collect();
+        let mut out: Vec<Field> = s.reads.iter().map(|f| v.field(f)).collect();
         if let ClaimSpec::CountFrom(f) = &s.claim {
             out.push(v.field(f));
         }
@@ -955,8 +967,15 @@ impl Operation for TraceOp {
         } else if s.scope == Scope::Pending {
             cx.set_effect(Effect::None);
         }
-        for f in s.reads.iter().chain(&s.env_reads) {
+        for f in &s.reads {
             let x = cx.use_field(v.field(f))?;
+            seen.push(x.map_or(0, ValueId::raw));
+        }
+        // Environment reads wait for the client to supply the field (or
+        // declare it absent); the replay declares absent what its
+        // environment lacks.
+        for f in &s.env_reads {
+            let x = cx.use_env(v.field(f))?;
             seen.push(x.map_or(0, ValueId::raw));
         }
         if let Some(q) = &s.reads_prev {
