@@ -525,20 +525,19 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             }
             _ => {}
         }
-        // (a save that changed nothing the build reads: vim writes twice)
+        // (a save that changed nothing the build reads (vim writes twice)
+        // keeps the last change's time to the screen)
         let noop = !failed && builds > 1 && nodes == 0 && changed.is_empty();
         let mark = if failed {
             st.red(st.sym("✗", "failed:"))
         } else {
             st.green(st.sym("✓", "ok:"))
         };
-        if !noop || ui.verbose > 0 {
-            ui.line(&format!(
-                "{mark} build {builds}  {}  {}",
-                st.cyan(&place),
-                facts.join(st.sym(" · ", ", "))
-            ));
-        }
+        ui.line(&format!(
+            "{mark} build {builds}  {}  {}",
+            st.cyan(&place),
+            facts.join(st.sym(" · ", ", "))
+        ));
         ui.event(&json!({
             "event": "build",
             "build": builds,
