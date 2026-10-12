@@ -1651,6 +1651,58 @@ fn an_environment_read_waits_until_the_field_is_supplied_or_declared_absent() {
     assert_eq!(out(&eng).as_deref(), Some("6"));
 }
 
+/// `["link", k]` has a pending definition set: it reads `f(k-1)` (`k` 0:
+/// the environment's `file`) and defines `f(k)` to it.
+struct Link;
+
+impl defuse::Operation for Link {
+    fn defs(&self, _: &[ValueId], _: &defuse::Values) -> Option<Vec<(Field, defuse::Locality)>> {
+        None
+    }
+    fn run(&self, cx: &mut defuse::Ctx<'_>) -> Result<ValueId, defuse::Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let k = v.as_int(a[1]).unwrap_or(0);
+        let got = if k == 0 {
+            cx.use_env(v.field("file"))?
+        } else {
+            cx.use_field(v.field(&format!("f{}", k - 1)))?
+        };
+        if let Some(x) = got {
+            cx.define(v.field(&format!("f{k}")), x);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+fn thousands_of_nodes_stalled_in_a_chain_behind_an_environment_wait_cost_linear_time() {
+    use std::sync::Arc;
+    let n = 4000;
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Link));
+    let u = eng.new_unit();
+    let link = eng.values().str("link");
+    for k in 0..n {
+        let kk = eng.values().int(k);
+        eng.push(u, op, vec![link, kk]);
+    }
+    let t = std::time::Instant::now();
+    let rep = eng.evaluate_sequential().expect("stalled, not a cycle");
+    assert_eq!(rep.env_stalled, u64::try_from(n).unwrap());
+    assert_eq!(rep.env_waits.len(), 1);
+    // A second evaluation with nothing new re-walks the same chain.
+    let rep = eng.evaluate_sequential().expect("still stalled");
+    assert_eq!(rep.env_stalled, u64::try_from(n).unwrap());
+    assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+    let f = eng.values().field("file");
+    let seven = eng.values().int(7);
+    eng.set_environment([(f, seven)]);
+    let rep = eng.evaluate_sequential().expect("supplied");
+    assert_eq!(rep.env_stalled, 0);
+    assert_eq!(rep.nodes_run, u64::try_from(n).unwrap());
+}
+
 // ------------------------------------------------------- never hanging
 
 #[test]
@@ -1669,6 +1721,16 @@ fn a_node_past_its_run_budget_ends_the_evaluation_naming_it_and_why() {
     };
     assert_eq!(runs, 4);
     assert!(prog.node_ids(&eng).contains(&node), "the publisher is named");
+    // The node is readable from its id: the message can name it.
+    let info = eng.node_info(node).expect("the node is there");
+    assert_eq!(info.op, "stmt");
+    assert!(
+        eng.values().render(info.args[0]).contains("\"n\""),
+        "{:?}",
+        eng.values().render(info.args[0])
+    );
+    assert_eq!(info.parent, None);
+    assert_eq!(info.unit, prog.unit);
     assert!(
         !causes.is_empty() && causes.iter().all(|c| matches!(c, Cause::Loop { .. })),
         "{causes:?}"

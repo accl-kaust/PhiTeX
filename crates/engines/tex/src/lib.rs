@@ -36,6 +36,7 @@ mod math;
 mod nodes;
 mod ops;
 mod page;
+mod pdfout;
 mod pdfprim;
 mod prims;
 mod print;
