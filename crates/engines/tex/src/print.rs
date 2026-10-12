@@ -153,7 +153,7 @@ pub(crate) fn print_scaled(out: &mut String, s: i32) {
 pub(crate) fn print_glue(out: &mut String, d: i32, o: Order, unit: &str) {
     print_scaled(out, d);
     if o == Order::Normal {
-        out.push_str(unit)
+        out.push_str(unit);
     } else {
         out.push_str("fil");
         for _ in 1..(o as usize) {
