@@ -24,6 +24,7 @@ pub trait Engine: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
+mod align;
 mod api;
 mod build;
 mod control;

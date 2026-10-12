@@ -376,3 +376,91 @@ fn a_claimer_reruns_when_the_sibling_it_claims_is_replaced() {
         "(claimer's output, acc) after the edit differ from cold"
     );
 }
+
+/// Scopes: `["O"]` opens one with itself inside it (`before`); `["C"]`
+/// closes one and opens one after itself; `["E"]` closes one;
+/// `["d", n]` defines `x` locally as n; `["r"]` reads `x`.
+struct Toy5;
+
+impl Operation for Toy5 {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(if tag(v, a) == "d" {
+            vec![(v.field("x"), Locality::Local)]
+        } else {
+            Vec::new()
+        })
+    }
+    fn claim(
+        &self,
+        _: &[ValueId],
+        _: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Claim {
+        Claim::None
+    }
+    fn effect(&self, a: &[ValueId], v: &Values) -> phitex_defuse::Effect {
+        use phitex_defuse::{Brackets, Effect};
+        match tag(v, a).as_str() {
+            "O" => Effect::Scope(Brackets {
+                closes: 0,
+                opens: 1,
+                before: true,
+                kind: None,
+            }),
+            "C" => Effect::Scope(Brackets {
+                closes: 1,
+                opens: 1,
+                before: false,
+                kind: None,
+            }),
+            "E" => Effect::Close,
+            _ => Effect::None,
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match tag(v, &a).as_str() {
+            "d" => {
+                cx.define(v.field("x"), a.get(1).copied().unwrap_or(ValueId::UNIT));
+                Ok(ValueId::UNIT)
+            }
+            "r" => Ok(cx.use_field(v.field("x"))?.unwrap_or_else(|| v.str("none"))),
+            _ => Ok(ValueId::UNIT),
+        }
+    }
+}
+
+/// A definition in a group reaches a group that a node closes and
+/// reopens inside it (`closes: 1, opens: 1` after the node): `r1` sees
+/// `x = 1` like `r0`. Seen: `r1` sees the value from outside the group.
+#[test]
+fn a_reopened_scope_sees_the_enclosing_definitions() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Toy5));
+    let u = eng.new_unit();
+    let mut node = |e: &mut Engine, t: &str, n: Option<i64>| {
+        let mut a = vec![e.values().str(t)];
+        if let Some(n) = n {
+            a.push(e.values().int(n));
+        }
+        e.push(u, op, a)
+    };
+    node(&mut eng, "d", Some(0));
+    node(&mut eng, "O", None);
+    node(&mut eng, "d", Some(1));
+    node(&mut eng, "O", None);
+    let r0 = node(&mut eng, "r", None);
+    node(&mut eng, "C", None);
+    let r1 = node(&mut eng, "r", None);
+    node(&mut eng, "E", None);
+    node(&mut eng, "E", None);
+    eng.evaluate_sequential().expect("evaluate");
+    let out = |e: &Engine, n| e.output(n).map(|x| e.values().render(x));
+    assert_eq!(out(&eng, r0).as_deref(), Some("1"));
+    assert_eq!(
+        out(&eng, r1).as_deref(),
+        Some("1"),
+        "the reopened scope lost the enclosing definition"
+    );
+}

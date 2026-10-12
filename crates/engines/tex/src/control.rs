@@ -51,6 +51,8 @@ impl Run<'_, '_> {
         }
         match c {
             cmd::RELAX => {}
+            cmd::IGNORE => self.do_endv(&md)?,
+            cmd::NO_ALIGN if self.cur.chr == 1 => self.align_peek(&md)?,
             cmd::SPACER => {
                 if h {
                     self.char_run(&md, false)?;
@@ -195,8 +197,11 @@ impl Run<'_, '_> {
                     self.new_graf(&md, true)?;
                 } else if c == cmd::HALIGN && h {
                     self.head_for_vmode(&md);
+                } else if c == cmd::HALIGN && v {
+                    self.init_align(&md)?;
                 } else {
-                    self.log("error", "\\halign is not supported")?;
+                    // REDUCE-GAP: \valign and alignments in displays
+                    self.log("error", "this alignment is not supported")?;
                 }
             }
             cmd::INSERT => self.begin_insert_or_adjust(&md, false)?,
