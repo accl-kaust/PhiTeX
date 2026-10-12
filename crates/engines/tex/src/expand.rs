@@ -1,0 +1,787 @@
+//! Expansion (§366–§401, §465–§510): macro calls, conditionals,
+//! `\expandafter`, `\noexpand`, `\csname`, `\the`, the conversions, marks
+//! and `\input`, inside one run.
+
+use std::rc::Rc;
+
+use phitex_defuse::Value;
+
+use crate::print;
+use crate::run::{Frame, Halt, R, Run};
+use crate::val::{MATCH_CAT, Macro, Mean, OUT_PARAM_CAT, Tok, cmd, int_of, str_of};
+
+// §489
+pub(crate) const IF_CODE: u8 = 1;
+pub(crate) const FI_CODE: i32 = 2;
+pub(crate) const ELSE_CODE: i32 = 3;
+pub(crate) const OR_CODE: i32 = 4;
+
+/// A conditional begun before this run is in its taken branch (§510).
+const OUTSIDE_LIMIT: u8 = 4;
+
+impl Run<'_, '_> {
+    /// `expand` (§366): `cur` is expandable.
+    pub(crate) fn expand(&mut self) -> R<()> {
+        let saved = (self.radix, self.cur_order);
+        let c = self.cur.cmd;
+        if c >= cmd::CALL && c < cmd::END_TEMPLATE {
+            self.macro_call()?;
+        } else {
+            match c {
+                cmd::TOP_BOT_MARK => {
+                    // §386
+                    let name = ["top", "first", "bot", "splitfirst", "splitbot"]
+                        [usize::try_from(self.cur.chr).unwrap_or(0).min(4)];
+                    let m = self.get(&format!("mark:{name}"))?;
+                    let toks = crate::val::toks_of(self.v, m);
+                    self.push_toks(toks);
+                }
+                cmd::EXPAND_AFTER => {
+                    // §368
+                    self.get_token()?;
+                    let t = self.cur.tok.clone();
+                    self.get_token()?;
+                    if self.cur.cmd > cmd::MAX_COMMAND {
+                        self.expand()?;
+                    } else {
+                        let u = self.cur.tok.clone();
+                        self.back_input(u);
+                    }
+                    self.back_input(t);
+                }
+                cmd::NO_EXPAND => {
+                    // §369
+                    self.get_token()?;
+                    let t = self.cur.tok.clone();
+                    let cs = t.is_cs_or_active();
+                    self.back_input(t);
+                    if cs {
+                        self.back_input(Tok::cs("\u{10FFFE}notexpanded"));
+                    }
+                }
+                cmd::CS_NAME => self.cs_name()?,
+                cmd::CONVERT => self.conv_toks()?,
+                cmd::THE => {
+                    let toks = self.the_toks()?;
+                    self.push_toks(toks);
+                }
+                cmd::IF_TEST => self.conditional()?,
+                cmd::FI_OR_ELSE => {
+                    // §510
+                    let limit = self.conds.last().copied().unwrap_or(OUTSIDE_LIMIT);
+                    if self.cur.chr > i32::from(limit) {
+                        if limit == IF_CODE {
+                            self.insert_relax();
+                        }
+                        // "Extra \or/\else/\fi": ignored
+                    } else {
+                        while self.cur.chr != FI_CODE {
+                            self.pass_text()?;
+                        }
+                        self.conds.pop();
+                    }
+                }
+                cmd::INPUT => {
+                    if self.cur.chr > 0 {
+                        self.end_input();
+                    } else {
+                        self.start_input()?;
+                    }
+                }
+                _ => {
+                    // §370: "Undefined control sequence" (dropped)
+                    self.log("error", "Undefined control sequence")?;
+                }
+            }
+        }
+        (self.radix, self.cur_order) = saved;
+        Ok(())
+    }
+
+    /// `insert_relax` (§379).
+    pub(crate) fn insert_relax(&mut self) {
+        let t = self.cur.tok.clone();
+        self.back_input(t);
+        self.back_input(Tok::cs("\u{10FFFE}relax"));
+    }
+
+    /// §372–§374.
+    fn cs_name(&mut self) -> R<()> {
+        let mut name = String::new();
+        loop {
+            self.get_x_token()?;
+            if self.cur.is_cs() {
+                break;
+            }
+            print::push_code(&mut name, self.cur.tok.chr() & 0xFF);
+        }
+        if self.cur.cmd != cmd::END_CS_NAME {
+            // §373: back_error
+            let t = self.cur.tok.clone();
+            self.back_input(t);
+        }
+        let t = Tok::S(Rc::from(name));
+        if self.mean_of(&t)? == Mean::Undefined {
+            let relax = Mean::Prim("relax", cmd::RELAX, 256).encode(self.v);
+            let f = t.field_name().unwrap_or_default();
+            self.set(&f, relax, false);
+        }
+        self.back_input(t);
+        Ok(())
+    }
+
+    /// `macro_call` (§389–§400).
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn macro_call(&mut self) -> R<()> {
+        let Mean::Macro(m) = self.cur.mean.clone() else {
+            return Ok(());
+        };
+        let name = self.cur.tok.clone();
+        let p: &[Tok] = &m.params;
+        let len = p.len();
+        let is_match = |t: &Tok| t.cat() == Some(MATCH_CAT);
+        let long = m.flags & 1 != 0;
+        let mut long_state = long;
+        let mut pstack: Vec<Vec<Tok>> = Vec::new();
+        let mut r = 0usize;
+        let par = Tok::cs("par");
+        if len > 0 {
+            loop {
+                // §391
+                let s: Option<usize> = if is_match(&p[r]) {
+                    r += 1;
+                    Some(r)
+                } else {
+                    None
+                };
+                let mut param: Vec<Tok> = Vec::new();
+                let mut m_count = 0usize;
+                let mut rbrace: Option<usize> = None;
+                'cont: loop {
+                    self.get_token()?;
+                    let tok = self.cur.tok.clone();
+                    if r < len && !is_match(&p[r]) && tok == p[r] {
+                        // §394
+                        r += 1;
+                        if r >= len || is_match(&p[r]) {
+                            break 'cont;
+                        }
+                        continue 'cont;
+                    }
+                    // §397
+                    if s != Some(r) {
+                        let Some(s0) = s else {
+                            // §398: "Use of \x doesn't match its definition"
+                            self.log("error", "doesn't match its definition")?;
+                            return Ok(());
+                        };
+                        let mut t = s0;
+                        loop {
+                            param.push(p[t].clone());
+                            m_count += 1;
+                            let mut u = t + 1;
+                            let mut v = s0;
+                            let mut resumed = false;
+                            loop {
+                                if u == r {
+                                    if tok != p[v] {
+                                        break;
+                                    }
+                                    r = v + 1;
+                                    resumed = true;
+                                    break;
+                                }
+                                if p[u] != p[v] {
+                                    break;
+                                }
+                                u += 1;
+                                v += 1;
+                            }
+                            if resumed {
+                                continue 'cont;
+                            }
+                            t += 1;
+                            if t == r {
+                                break;
+                            }
+                        }
+                        r = s0;
+                    }
+                    if tok == par && !long_state {
+                        // §396: a runaway argument; the \par is read again
+                        self.back_input(tok);
+                        return Ok(());
+                    }
+                    match tok.cat() {
+                        Some(1) if !tok.is_cs_or_active() => {
+                            // §399
+                            let mut unbalance = 1;
+                            param.push(tok);
+                            loop {
+                                self.get_token()?;
+                                let t2 = self.cur.tok.clone();
+                                if t2 == par && !long_state {
+                                    self.back_input(t2);
+                                    return Ok(());
+                                }
+                                if !t2.is_cs_or_active() {
+                                    match t2.cat() {
+                                        Some(1) => unbalance += 1,
+                                        Some(2) => {
+                                            unbalance -= 1;
+                                            if unbalance == 0 {
+                                                rbrace = Some(param.len());
+                                                param.push(t2);
+                                                break;
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                param.push(t2);
+                            }
+                        }
+                        Some(2) if !tok.is_cs_or_active() => {
+                            // §395: an extra }, and a \par inserted
+                            self.back_input(tok);
+                            self.back_input(par.clone());
+                            long_state = false;
+                            continue 'cont;
+                        }
+                        _ => {
+                            // §393
+                            if tok == crate::val::space_tok() && (r >= len || is_match(&p[r])) {
+                                continue 'cont;
+                            }
+                            param.push(tok);
+                        }
+                    }
+                    m_count += 1;
+                    if r < len && !is_match(&p[r]) {
+                        continue 'cont;
+                    }
+                    break 'cont;
+                }
+                // found: §400
+                if s.is_some() {
+                    if m_count == 1
+                        && let (Some(rb), Some(last)) = (rbrace, param.last())
+                        && last.cat() == Some(2)
+                        && !last.is_cs_or_active()
+                        && rb == param.len() - 1
+                    {
+                        param.pop();
+                        param.remove(0);
+                    }
+                    pstack.push(param);
+                }
+                if r >= len {
+                    break;
+                }
+            }
+        }
+        let _ = name;
+        // §390
+        let mut body = Vec::with_capacity(m.body.len());
+        for t in &m.body {
+            if t.cat() == Some(OUT_PARAM_CAT) && !t.is_cs_or_active() {
+                let k = usize::try_from(t.chr()).unwrap_or(1);
+                if let Some(a) = pstack.get(k.wrapping_sub(1)) {
+                    body.extend(a.iter().cloned());
+                }
+            } else {
+                body.push(t.clone());
+            }
+        }
+        self.push_toks(body);
+        Ok(())
+    }
+
+    /// `pass_text` (§494): to the `\or`, `\else` or `\fi` at this level.
+    pub(crate) fn pass_text(&mut self) -> R<()> {
+        let mut l = 0;
+        loop {
+            if !self.get_next()? {
+                return Ok(());
+            }
+            if self.cur.cmd == cmd::FI_OR_ELSE {
+                if l == 0 {
+                    return Ok(());
+                }
+                if self.cur.chr == FI_CODE {
+                    l -= 1;
+                }
+            } else if self.cur.cmd == cmd::IF_TEST {
+                l += 1;
+            }
+        }
+    }
+
+    /// `get_x_token_or_active_char` (§506): `(cmd, chr)` for `\if`.
+    fn x_char_or_active(&mut self) -> R<(u8, i32)> {
+        self.get_x_token()?;
+        let (mut c, mut h) = (self.cur.cmd, self.cur.chr);
+        if c == cmd::RELAX && h == crate::val::NO_EXPAND_FLAG {
+            if self.cur.tok.cat() == Some(13) && !matches!(self.cur.tok, Tok::S(_)) {
+                c = cmd::ACTIVE_CHAR;
+                h = i32::try_from(self.cur.tok.chr()).unwrap_or(0);
+            } else {
+                c = cmd::ACTIVE_CHAR;
+                h = 256;
+            }
+        }
+        if c > cmd::ACTIVE_CHAR || h > 255 {
+            return Ok((cmd::RELAX, 256));
+        }
+        Ok((c, h))
+    }
+
+    /// `conditional` (§498–§509).
+    #[allow(clippy::too_many_lines)]
+    fn conditional(&mut self) -> R<()> {
+        self.conds.push(IF_CODE);
+        let save = self.conds.len();
+        let this_if = self.cur.chr;
+        let b = match this_if {
+            0 | 1 => {
+                let (m, n) = self.x_char_or_active()?;
+                let (c, h) = self.x_char_or_active()?;
+                if this_if == 0 { n == h } else { m == c }
+            }
+            2 | 3 => {
+                let n = if this_if == 2 {
+                    self.scan_int()?
+                } else {
+                    self.scan_normal_dimen()?
+                };
+                self.skip_blanks_x()?;
+                let rel = match &self.cur.tok {
+                    Tok::C(_) if self.cur.tok.cat() == Some(12) && (60..=62).contains(&self.cur.tok.chr()) => {
+                        self.cur.tok.chr()
+                    }
+                    _ => {
+                        let t = self.cur.tok.clone();
+                        self.back_input(t);
+                        61
+                    }
+                };
+                let x = if this_if == 2 {
+                    self.scan_int()?
+                } else {
+                    self.scan_normal_dimen()?
+                };
+                match rel {
+                    60 => n < x,
+                    61 => n == x,
+                    _ => n > x,
+                }
+            }
+            4 => self.scan_int()? % 2 != 0,
+            5..=8 => {
+                let m = self.mode()?.m;
+                match this_if {
+                    5 => m.abs() == 1,
+                    6 => m.abs() == 102,
+                    7 => m.abs() == 203,
+                    _ => m < 0,
+                }
+            }
+            9..=11 => {
+                let n = self.scan_eight_bit_int()?;
+                let bx = self.box_reg(n)?;
+                match bx {
+                    None => this_if == 9,
+                    Some(b) => {
+                        let hl = crate::nodes::box_is_h(self.v, b);
+                        match this_if {
+                            9 => false,
+                            10 => hl,
+                            _ => !hl,
+                        }
+                    }
+                }
+            }
+            12 => {
+                // §507
+                if !self.get_next()? {
+                    false
+                } else {
+                    let m1 = self.cur.mean.clone();
+                    let t1 = self.cur.tok.clone();
+                    let (p, q) = self.cur_cmd_chr_for_ifx(&t1, &m1);
+                    if !self.get_next()? {
+                        false
+                    } else {
+                        let m2 = self.cur.mean.clone();
+                        let t2 = self.cur.tok.clone();
+                        let (c2, h2) = self.cur_cmd_chr_for_ifx(&t2, &m2);
+                        if c2 != p {
+                            false
+                        } else if c2 < cmd::CALL {
+                            h2 == q
+                        } else {
+                            match (&m1, &m2) {
+                                (Mean::Macro(a), Mean::Macro(b)) => {
+                                    Rc::ptr_eq(a, b) || (a.params == b.params && a.body == b.body)
+                                }
+                                _ => false,
+                            }
+                        }
+                    }
+                }
+            }
+            13 => {
+                let n = self.scan_four_bit_int()?;
+                let st = self.get(&format!("read:{n}"))?;
+                st.is_none_or(|x| matches!(&*self.v.get(x), Value::Unit))
+            }
+            14 => true,
+            15 => false,
+            _ => {
+                // §509
+                let mut n = self.scan_int()?;
+                while n != 0 {
+                    self.pass_text()?;
+                    if self.conds.len() == save {
+                        if self.cur.chr == OR_CODE {
+                            n -= 1;
+                        } else {
+                            return self.common_ending(save);
+                        }
+                    } else if self.cur.chr == FI_CODE {
+                        self.conds.pop();
+                    }
+                }
+                self.change_if_limit(OR_CODE, save);
+                return Ok(());
+            }
+        };
+        if b {
+            self.change_if_limit(ELSE_CODE, save);
+            return Ok(());
+        }
+        // §500
+        loop {
+            self.pass_text()?;
+            if !self.has_cur_cond(save) {
+                // the input ended
+                break;
+            }
+            if self.conds.len() == save {
+                if self.cur.chr != OR_CODE {
+                    break;
+                }
+                // "Extra \or": ignored
+            } else if self.cur.chr == FI_CODE {
+                self.conds.pop();
+            }
+        }
+        self.common_ending(save)
+    }
+
+    fn has_cur_cond(&self, save: usize) -> bool {
+        self.conds.len() >= save
+    }
+
+    fn cur_cmd_chr_for_ifx(&self, _t: &Tok, m: &Mean) -> (u8, i32) {
+        (self.cur.cmd, if matches!(m, Mean::Macro(_)) { 0 } else { self.cur.chr })
+    }
+
+    fn common_ending(&mut self, save: usize) -> R<()> {
+        if self.cur.chr == FI_CODE {
+            self.conds.truncate(save - 1);
+        } else {
+            self.change_if_limit(FI_CODE, save);
+        }
+        Ok(())
+    }
+
+    fn change_if_limit(&mut self, l: i32, save: usize) {
+        if let Some(x) = self.conds.get_mut(save - 1) {
+            *x = u8::try_from(l).unwrap_or(4);
+        }
+    }
+
+    /// `the_toks` (§465–§466).
+    pub(crate) fn the_toks(&mut self) -> R<Vec<Tok>> {
+        self.get_x_token()?;
+        let val = self.scan_something_internal(5, false)?;
+        Ok(match val {
+            crate::scan::IVal::Toks(t) => t,
+            crate::scan::IVal::Ident(f) => vec![self.font_id_tok(f)?],
+            other => {
+                let mut s = String::new();
+                other.print(&mut s);
+                str_toks(&s)
+            }
+        })
+    }
+
+    /// The font identifier token of font `f` (§1257: `font_id_text`).
+    pub(crate) fn font_id_tok(&mut self, f: i64) -> R<Tok> {
+        let x = self.get(&format!("fontid:{f}"))?;
+        let name = x.map(|x| str_of(self.v, x)).unwrap_or_else(|| "nullfont".to_owned());
+        Ok(Tok::S(Rc::from(format!("\u{10FFFE}F{f}\u{2}{name}"))))
+    }
+
+    /// `conv_toks` (§470–§472).
+    fn conv_toks(&mut self) -> R<()> {
+        let c = self.cur.chr;
+        let mut s = String::new();
+        match c {
+            0 => {
+                let n = self.scan_int()?;
+                print::print_int(&mut s, i64::from(n));
+            }
+            1 => {
+                let n = self.scan_int()?;
+                print::print_roman_int(&mut s, i64::from(n));
+            }
+            2 => {
+                self.get_token()?;
+                let esc = self.int("param:escapechar")?;
+                if self.cur.is_cs() {
+                    print::sprint_cs(&mut s, &self.cur.tok, esc);
+                } else {
+                    print::push_code(&mut s, self.cur.tok.chr());
+                }
+            }
+            3 => {
+                self.get_token()?;
+                let (t, m) = (self.cur.tok.clone(), self.cur.mean.clone());
+                let (c, h) = (self.cur.cmd, self.cur.chr);
+                let _ = t;
+                self.print_meaning(&mut s, &m, c, h)?;
+            }
+            4 => {
+                let f = self.scan_font_ident()?;
+                self.print_font_name(&mut s, f)?;
+            }
+            _ => {
+                let j = self.get("jobname")?;
+                s.push_str(&j.map(|x| str_of(self.v, x)).unwrap_or_else(|| "texput".to_owned()));
+            }
+        }
+        self.push_toks(str_toks(&s));
+        Ok(())
+    }
+
+    pub(crate) fn print_font_name(&mut self, s: &mut String, f: i64) -> R<()> {
+        let info = self.get(&format!("fontinfo:{f}"))?;
+        if let Some(info) = info {
+            let xs = crate::val::list_of(self.v, info);
+            let name = xs.first().map(|&x| str_of(self.v, x)).unwrap_or_default();
+            s.push_str(&name);
+            let size = xs.get(1).map_or(0, |&x| int_of(self.v, x));
+            let dsize = xs.get(2).map_or(0, |&x| int_of(self.v, x));
+            if size != dsize {
+                s.push_str(" at ");
+                print::print_scaled(s, i32::try_from(size).unwrap_or(0));
+                s.push_str("pt");
+            }
+        } else {
+            s.push_str("nullfont");
+        }
+        Ok(())
+    }
+
+    /// `print_meaning` (§296) with `print_cmd_chr` (§298 and the others).
+    pub(crate) fn print_meaning(&mut self, s: &mut String, m: &Mean, c: u8, h: i32) -> R<()> {
+        let esc = self.int("param:escapechar")?;
+        match m {
+            Mean::Macro(mac) => {
+                match mac.flags {
+                    0 => s.push_str("macro"),
+                    1 => print::print_esc(s, "long macro", esc),
+                    2 => print::print_esc(s, "outer macro", esc),
+                    _ => {
+                        print::print_esc(s, "long", esc);
+                        print::print_esc(s, "outer macro", esc);
+                    }
+                }
+                s.push(':');
+                self.show_macro(s, mac, esc)?;
+            }
+            Mean::Undefined => s.push_str("undefined"),
+            Mean::Char(cat, ch) => {
+                if let Some(n) = print::chr_cmd_name(*cat) {
+                    s.push_str(n);
+                    print::push_code(s, *ch);
+                }
+            }
+            Mean::CharDef(n) => {
+                print::print_esc(s, "char", esc);
+                print::print_hex(s, *n);
+            }
+            Mean::MathCharDef(n) => {
+                print::print_esc(s, "mathchar", esc);
+                print::print_hex(s, *n);
+            }
+            Mean::Font(f) => {
+                s.push_str("select font ");
+                self.print_font_name(s, *f)?;
+            }
+            Mean::Reg(rc, loc) => {
+                let (name, base) = match *rc {
+                    cmd::ASSIGN_INT => ("count", crate::val::COUNT_BASE),
+                    cmd::ASSIGN_DIMEN => ("dimen", crate::val::SCALED_BASE),
+                    cmd::ASSIGN_GLUE => ("skip", crate::val::SKIP_BASE),
+                    cmd::ASSIGN_MU_GLUE => ("muskip", crate::val::MU_SKIP_BASE),
+                    _ => ("toks", crate::val::TOKS_BASE),
+                };
+                print::print_esc(s, name, esc);
+                print::print_int(s, i64::from(loc - base));
+            }
+            Mean::NotExpanded => print::print_esc(s, "relax", esc),
+            Mean::Prim(name, pc, _) => {
+                if *pc == cmd::SET_FONT {
+                    s.push_str("select font ");
+                    self.print_font_name(s, 0)?;
+                } else {
+                    print::print_esc(s, name, esc);
+                }
+                if c == cmd::TOP_BOT_MARK {
+                    s.push(':');
+                    let name = ["top", "first", "bot", "splitfirst", "splitbot"][usize::try_from(h).unwrap_or(0).min(4)];
+                    let mk = self.get(&format!("mark:{name}"))?;
+                    let toks = crate::val::toks_of(self.v, mk);
+                    self.show_toks_into(s, &toks)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn show_macro(&mut self, s: &mut String, m: &Macro, _esc: i64) -> R<()> {
+        let mut all = m.params.clone();
+        all.push(crate::val::end_match());
+        all.extend(m.body.iter().cloned());
+        self.show_toks_into(s, &all)
+    }
+
+    /// `show_token_list` with the current `\escapechar` and category codes.
+    pub(crate) fn show_toks_into(&mut self, s: &mut String, toks: &[Tok]) -> R<()> {
+        let esc = self.int("param:escapechar")?;
+        // single-character names: their current category code (§262)
+        let mut cats: crate::FxHashMap<u32, i64> = crate::FxHashMap::default();
+        for t in toks {
+            if let Tok::S(n) = t {
+                let mut cs = n.chars();
+                if let (Some(c), None) = (cs.next(), cs.next()) {
+                    let k = u32::from(c);
+                    if let std::collections::hash_map::Entry::Vacant(e) = cats.entry(k) {
+                        e.insert(i64::from(self.cat(k)?));
+                    }
+                }
+            }
+        }
+        print::show_toks(s, toks, esc, &mut |c| cats.get(&c).copied().unwrap_or(12));
+        Ok(())
+    }
+
+    /// `\endinput` (§362): the rest of the current file is skipped once
+    /// its current line is done.
+    fn end_input(&mut self) {
+        let mut seen_line = false;
+        let mut drop = Vec::new();
+        for (i, f) in self.frames.iter().enumerate() {
+            match f {
+                Frame::Src(_) => {
+                    if seen_line {
+                        drop.push(i);
+                    }
+                    seen_line = true;
+                }
+                Frame::Toks(t, p) => {
+                    if seen_line && t[*p..].iter().any(|x| matches!(x, Tok::S(n) if n.starts_with("\u{10FFFE}eof"))) {
+                        break;
+                    }
+                }
+            }
+        }
+        for i in drop.into_iter().rev() {
+            self.frames.remove(i);
+        }
+    }
+
+    /// `start_input` (§537): the file's lines are read next; a marker
+    /// prints its `)` when it ends.
+    fn start_input(&mut self) -> R<()> {
+        let name = self.scan_file_name()?;
+        let key = if name.contains('.') { name.clone() } else { format!("{name}.tex") };
+        let x = self.get(&format!("file:{key}"))?;
+        let x = match x {
+            Some(x) => Some(x),
+            None => {
+                if key == name {
+                    None
+                } else {
+                    self.get(&format!("file:{name}"))?
+                }
+            }
+        };
+        let Some(x) = x else {
+            return Err(Halt::File(key));
+        };
+        let xs = crate::val::list_of(self.v, x);
+        if xs.len() < 2 {
+            self.log("error", "I can't find file")?;
+            return Ok(());
+        }
+        let path = str_of(self.v, xs[0]);
+        let text = str_of(self.v, xs[1]);
+        self.log("open", &path)?;
+        let mut frames: Vec<Frame> = Vec::new();
+        for line in split_lines(&text) {
+            let args = crate::run::line_args(self.v, &line);
+            frames.extend(crate::run::decode_frames(self.v, &args));
+        }
+        self.frames
+            .push_front(Frame::Toks(Rc::from(vec![Tok::cs("\u{10FFFE}eof")]), 0));
+        for f in frames.into_iter().rev() {
+            self.frames.push_front(f);
+        }
+        Ok(())
+    }
+
+    /// `scan_file_name` (§526).
+    pub(crate) fn scan_file_name(&mut self) -> R<String> {
+        self.skip_blanks_x()?;
+        let mut name = String::new();
+        loop {
+            if self.cur.cmd > cmd::OTHER_CHAR || self.cur.chr > 255 || self.cur.is_cs() && !matches!(self.cur.mean, Mean::Char(..)) {
+                let t = self.cur.tok.clone();
+                self.back_input(t);
+                break;
+            }
+            if self.cur.chr == 32 {
+                break;
+            }
+            print::push_code(&mut name, u32::try_from(self.cur.chr).unwrap_or(0));
+            self.get_x_token()?;
+        }
+        Ok(name)
+    }
+}
+
+/// The lines of a file's text, each with its end of line.
+pub(crate) fn split_lines(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = text.split_inclusive('\n').map(str::to_owned).collect();
+    if out.last().is_some_and(|l| l.is_empty()) {
+        out.pop();
+    }
+    out
+}
+
+/// `str_toks` (§464).
+pub(crate) fn str_toks(s: &str) -> Vec<Tok> {
+    s.chars()
+        .map(|c| {
+            if c == ' ' {
+                crate::val::space_tok()
+            } else {
+                Tok::ch(12, u32::from(c))
+            }
+        })
+        .collect()
+}

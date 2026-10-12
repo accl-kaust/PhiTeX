@@ -11,6 +11,10 @@ phitex-defuse = { path = "../../core/defuse" }
 phitex-typeset = { path = "../../core/typeset" }
 phitex-source = { path = "../../core/source" }
 phitex-tfm = { path = "../../fonts/tfm" }
+phitex-dvi = { path = "../../output/dvi" }
+
+[dev-dependencies]
+phitex-kpse = { path = "../../tools/kpse" }
 
 [lints]
 workspace = true

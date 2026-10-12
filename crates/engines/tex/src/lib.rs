@@ -20,3 +20,21 @@ pub trait Engine: Send + Sync {
     /// Its program name (`pdftex`, `xetex`, `luatex`).
     fn name(&self) -> &'static str;
 }
+
+mod api;
+mod build;
+mod control;
+mod expand;
+mod fonts;
+mod log;
+mod nodes;
+mod ops;
+mod page;
+mod prims;
+mod print;
+mod run;
+mod scan;
+mod val;
+
+pub use api::{Build, Finder, Options, Stats};
+pub(crate) use phitex_defuse::FxHashMap;
