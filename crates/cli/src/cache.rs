@@ -191,7 +191,7 @@ impl Cache {
             return format!("cache: off (cache-limit = 0) · {dir}");
         }
         format!(
-            "cache: {} of {} in {dir} · `phitex clean` clears this document's, `phitex clean --all` everything",
+            "cache: {} of {} in {dir} (phitex clean)",
             size(self.usage()),
             size(self.limit)
         )

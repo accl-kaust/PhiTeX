@@ -221,7 +221,7 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         out_dir: out_dir.map_or_else(|| PathBuf::from("."), PathBuf::from),
         // (TeX's own default; with no terminal input an error stops the
         // job, as TeX's does when its standard input is at its end)
-        threads: threads.unwrap_or_else(crate::default_threads),
+        threads,
         synctex,
         recorder,
         shell_escape,

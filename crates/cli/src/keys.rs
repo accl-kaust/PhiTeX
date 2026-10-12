@@ -60,12 +60,32 @@ pub fn width() -> Option<usize> {
     None
 }
 
+/// This process's CPU time so far (all its threads) and resident memory
+/// (Linux: `/proc/self/stat`; elsewhere none).
+pub fn usage() -> Option<(std::time::Duration, u64)> {
+    #[cfg(target_os = "linux")]
+    {
+        let s = std::fs::read_to_string("/proc/self/stat").ok()?;
+        // (after the command's `(…)`: state is field 3, utime 14, stime 15, rss 24)
+        let f: Vec<&str> = s.get(s.rfind(')')? + 2..)?.split_whitespace().collect();
+        let n = |k: usize| f.get(k - 3).and_then(|x| x.parse::<u64>().ok());
+        let ticks = rustix::param::clock_ticks_per_second().max(1);
+        let cpu = n(14)? + n(15)?;
+        let cpu = std::time::Duration::from_micros(cpu * 1_000_000 / ticks);
+        return Some((cpu, n(24)? * rustix::param::page_size() as u64));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
 /// What a key asks of the watch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
     Rebuild,
     Open,
     Problems,
+    Warnings,
+    Summary,
     Clear,
     Help,
     Quit,
@@ -78,7 +98,9 @@ impl Key {
         Some(match c {
             'r' | 'R' | '\n' | '\r' => Key::Rebuild,
             'o' | 'O' => Key::Open,
-            'p' | 'P' | 'e' | 'w' => Key::Problems,
+            'p' | 'P' | 'e' => Key::Problems,
+            'w' | 'W' => Key::Warnings,
+            's' | 'S' => Key::Summary,
             'c' | 'C' | '\x0c' => Key::Clear,
             'h' | 'H' | '?' => Key::Help,
             'q' | 'Q' | '\x03' | '\x04' => Key::Quit,
@@ -89,11 +111,19 @@ impl Key {
     }
 }
 
+/// The keys, at the status line's right end.
+pub const BAR: &str = "h: keys";
+
 /// The keys, for `h`.
 pub const HELP: &[(&str, &str)] = &[
     ("r, Enter", "build again now"),
     ("o", "open the viewer (or the --open program on the output)"),
-    ("p", "show the last build's errors and warnings again"),
+    ("p", "show the last build's errors again"),
+    ("w", "show the last build's warnings"),
+    (
+        "s",
+        "how the last build went: its phases, reuse, parallelism",
+    ),
     ("c", "clear the screen"),
     ("h, ?", "these keys"),
     ("q, Ctrl-C", "quit"),

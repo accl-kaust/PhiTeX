@@ -17,31 +17,62 @@ use phitex_tex::{Build, Finder, Options};
 use crate::cache::Cache;
 use crate::tex::{self, Engine};
 
-/// What a session does now, for a terminal's spinner (`ui.rs`).
+/// What a session does now, for a terminal's spinner (`ui.rs`), and
+/// the phases it went through, each with its time (the watch's summary).
 #[derive(Default)]
 pub struct Status {
-    phase: Mutex<String>,
+    now: Mutex<Phases>,
+}
+
+#[derive(Default)]
+struct Phases {
+    /// The phase running, and since when (none: between phases).
+    current: Option<(String, Instant)>,
+    done: Vec<(String, Duration)>,
 }
 
 impl Status {
+    /// Phase `phase` from now on (empty: none); the last one ends.
     pub fn set(&self, phase: impl Into<String>) {
-        *self.phase.lock().unwrap_or_else(PoisonError::into_inner) = phase.into();
+        let phase = phase.into();
+        let mut p = self.now.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((name, t)) = p.current.take() {
+            p.done.push((name, t.elapsed()));
+        }
+        if !phase.is_empty() {
+            p.current = Some((phase, Instant::now()));
+        }
     }
 
     pub fn phase(&self) -> String {
-        self.phase
+        self.now
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+            .current
+            .as_ref()
+            .map(|c| c.0.clone())
+            .unwrap_or_default()
+    }
+
+    /// The phases ended, each with its time, and the one running with its
+    /// time so far (last).
+    pub fn phases(&self) -> (Vec<(String, Duration)>, Option<(String, Duration)>) {
+        let p = self.now.lock().unwrap_or_else(PoisonError::into_inner);
+        (
+            p.done.clone(),
+            p.current.as_ref().map(|(n, t)| (n.clone(), t.elapsed())),
+        )
+    }
+
+    /// The phases ended so far, forgotten.
+    pub fn take(&self) -> Vec<(String, Duration)> {
+        std::mem::take(&mut self.now.lock().unwrap_or_else(PoisonError::into_inner).done)
     }
 }
 
 /// What to build, and how.
 #[derive(Clone, Debug)]
-#[allow(
-    dead_code,
-    reason = "threads and etex: the engine has no such options yet"
-)]
+#[allow(dead_code, reason = "etex: the engine has no such option yet")]
 pub struct Job {
     /// The format's engine (with `ini`, only its paths: kpathsea's
     /// program name).
@@ -57,7 +88,8 @@ pub struct Job {
     pub jobname: String,
     /// Where the outputs go (`.`: here).
     pub out_dir: PathBuf,
-    pub threads: usize,
+    /// The engine's threads (none: `PHITEX_THREADS`, else all the cores).
+    pub threads: Option<usize>,
     /// `-synctex`.
     pub synctex: bool,
     /// `-recorder`: `JOB.fls`.
@@ -83,6 +115,48 @@ pub struct RunInfo {
     pub commands_run: u64,
     /// Nodes the build has after it (those not run were kept).
     pub live: usize,
+    /// The engine's threads, and its work summed over them (none: no
+    /// clock, wasm): busy / wall is how parallel the run was.
+    pub threads: usize,
+    pub busy: Duration,
+    pub engine_wall: Duration,
+    /// The longest chain of nodes each waiting on the last (none: not
+    /// known): nodes run / it is the most parallel the run could be.
+    pub critical_path: Option<usize>,
+    /// The most nodes running at once.
+    pub peak_running: usize,
+}
+
+impl RunInfo {
+    /// How parallel the run was: `4 threads · 1.6× parallel (at most
+    /// 2.1×)`, the engine's work over its wall time, and its nodes over
+    /// its longest chain (none: one thread, or no clock).
+    /// The engine's work over its wall time (none: one thread, no clock).
+    pub fn speedup(&self) -> Option<f64> {
+        (self.threads >= 2 && !self.engine_wall.is_zero())
+            .then(|| self.busy.as_secs_f64() / self.engine_wall.as_secs_f64())
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    pub fn parallel(&self) -> Option<String> {
+        if self.threads < 2 || self.engine_wall.is_zero() {
+            return None;
+        }
+        let p = self.busy.as_secs_f64() / self.engine_wall.as_secs_f64();
+        let mut s = format!("{} threads · {p:.1}× parallel", self.threads);
+        // (the chain is the whole document's: on an edit that ran fewer
+        // nodes than it, the bound says nothing)
+        if let Some(c) = self
+            .critical_path
+            .filter(|&c| c > 0 && self.commands_run >= c as u64)
+        {
+            let _ = std::fmt::Write::write_fmt(
+                &mut s,
+                format_args!(" (at most {:.1}×)", self.commands_run as f64 / c as f64),
+            );
+        }
+        Some(s)
+    }
 }
 
 /// What one build made.
@@ -115,6 +189,43 @@ pub struct Report {
     pub unsettled: Vec<String>,
     pub notes: Vec<String>,
     pub wall: Duration,
+    /// The engine's own account of why it stopped (its state dumped: for
+    /// `-v` and a bug report, not the error shown).
+    pub internal: Option<String>,
+}
+
+/// An engine's stop said in a sentence: what gave out, without its dump
+/// (`RunawayCreation { node: …, depth: 4097, … }` as "it nested deeper than
+/// its limit (4097 levels)").
+pub fn engine_stop(e: &str) -> String {
+    let num = |key: &str| {
+        e.split(key).nth(1).and_then(|r| {
+            let d: String = r
+                .trim_start()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            (!d.is_empty()).then_some(d)
+        })
+    };
+    let what = if e.contains("RunawayCreation") {
+        format!(
+            "it nested deeper than its limit ({} levels)",
+            num("depth:").unwrap_or_else(|| "4096".to_owned())
+        )
+    } else if e.contains("Deadline") {
+        "it ran past its time limit".to_owned()
+    } else {
+        // (the first clause, before any dump)
+        let first = e.lines().next().unwrap_or(e);
+        let cut = first
+            .find([':', '[', '{', '('])
+            .map_or(first, |k| &first[..k]);
+        cut.trim().to_owned()
+    };
+    format!(
+        "PhiTeX's engine stopped: {what}. This is a bug in PhiTeX, not in the document (-v shows the engine's details)"
+    )
 }
 
 impl Report {
@@ -255,14 +366,13 @@ impl Session {
         let t0 = Instant::now();
         let why = if self.build.is_some() { "edit" } else { "cold" };
         self.builds += 1;
-        self.status.set(why);
         let r = self.run(why, t0);
         self.status.set("");
         r
     }
 
     fn run(&mut self, why: &str, t0: Instant) -> Report {
-        let fail = |e: String| Report {
+        let fail = |e: String, internal: Option<String>| Report {
             out: Output {
                 errors: vec![e],
                 ..Output::default()
@@ -276,6 +386,7 @@ impl Session {
             unsettled: Vec::new(),
             notes: Vec::new(),
             wall: t0.elapsed(),
+            internal,
         };
         let text = self.text_now();
         let edit_line = self
@@ -292,12 +403,15 @@ impl Session {
         // reported failed and dropped, the next one cold)
         let ran = crate::ui::catch(|| -> Result<(), String> {
             if let Some(b) = &mut self.build {
+                self.status.set("engine");
                 for name in &reread {
                     b.edit_file(name, None);
                 }
                 b.edit(&text);
             } else {
+                self.status.set("format");
                 let (prelude, cached) = self.prelude()?;
+                self.status.set("engine");
                 let opts = Options {
                     name: self.printed_name(),
                     jobname: self.job.jobname.clone(),
@@ -307,6 +421,7 @@ impl Session {
                     fixpoint: self.job.fixpoint,
                     prelude_jobname: self.job.engine.name.to_owned(),
                     prelude_bytes: cached.as_ref().map(|(_, b)| b.clone()),
+                    threads: self.job.threads,
                     ..Options::default()
                 };
                 let b = Build::with(opts, prelude.as_deref(), &text);
@@ -317,13 +432,14 @@ impl Session {
         });
         match ran {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => return fail(e),
+            Ok(Err(e)) => return fail(e, None),
             Err(e) => {
                 self.build = None;
                 self.built_text = None;
-                return fail(format!("the engine stopped: {e}"));
+                return fail(engine_stop(&e), Some(e));
             }
         }
+        self.status.set("output");
         let b = self.build.as_ref().expect("built above");
         let (bytes, log) = b.output();
         let pdf = b.is_pdf();
@@ -366,7 +482,13 @@ impl Session {
                 why: why.to_owned(),
                 commands_run: s.nodes_run,
                 live: s.live,
+                threads: s.threads,
+                busy: s.busy,
+                engine_wall: s.wall,
+                critical_path: s.critical_path,
+                peak_running: s.peak_running,
             }],
+            internal: None,
             unsettled: Vec::new(),
             notes: vec![format!(
                 "{} nodes run of {} live, {} runs, {} cutoffs",
@@ -566,7 +688,7 @@ impl Session {
 pub fn waiting_notes(job: &Job) -> Vec<String> {
     let mut v = Vec::new();
     if job.synctex {
-        v.push("-synctex: the native engine writes no SyncTeX yet".to_owned());
+        v.push("no SyncTeX yet (-synctex)".to_owned());
     }
     if job.shell_escape {
         v.push("-shell-escape: the native engine runs no \\write18 yet".to_owned());

@@ -1184,6 +1184,8 @@ pub(crate) struct Following<'a> {
     /// The label the next sibling is searched after.
     pub(crate) label: u64,
     parent: Slot,
+    /// The labels of the node's own unfolded text: skipped.
+    owned: Option<(u64, u64)>,
     pub(crate) slots: Vec<Slot>,
 }
 
@@ -1195,9 +1197,19 @@ impl Iterator for Following<'_> {
         loop {
             let (k, item) = e.order.next(e.units[self.unit as usize].root, self.label)?;
             self.label = k;
+            if let Some((lo, hi)) = self.owned
+                && lo <= k
+                && k <= hi
+            {
+                self.label = hi;
+                continue;
+            }
             let s = item.slot;
             let n = &e.nodes[s.ix as usize];
             if n.parent == self.parent {
+                // A sibling's unfolded text (children, continuations) is
+                // its own: the next sibling comes after it.
+                self.label = e.unfolded_end(s);
                 self.slots.push(s);
                 return Some((n.op, e.args_vec(n.args)));
             }
@@ -1205,6 +1217,7 @@ impl Iterator for Following<'_> {
                 // Past the parent's text: on to the parent's siblings.
                 self.parent = e.nodes[self.parent.ix as usize].parent;
                 if n.parent == self.parent {
+                    self.label = e.unfolded_end(s);
                     self.slots.push(s);
                     return Some((n.op, e.args_vec(n.args)));
                 }
@@ -2537,6 +2550,19 @@ impl Engine {
         self.order.update(&OAug, root, label, &mut |i| *i = item);
     }
 
+    /// The label of the last node `x` unfolded (children and continuations,
+    /// transitively), or `x`'s own label.
+    fn unfolded_end(&self, x: Slot) -> u64 {
+        match self
+            .aux_of(x)
+            .filter(|a| a.body.is_none())
+            .and_then(|a| a.children.last().copied())
+        {
+            Some(c) => self.n(self.subtree_end(c)).label,
+            None => self.n(x).label,
+        }
+    }
+
     fn subtree_end(&self, mut x: Slot) -> Slot {
         loop {
             let mut best = x;
@@ -3578,15 +3604,19 @@ impl Engine {
 
     pub(crate) fn following(&self, s: Slot) -> Following<'_> {
         let n = self.n(s);
-        let start = self
-            .aux_of(s)
-            .and_then(|a| a.claimed.last().copied())
-            .map_or(n.label, |_| n.label);
+        // What `s` unfolded (children and continuations) follows its claimed
+        // text and is its own: a continuation is a sibling in the tree, but
+        // not one `s` may claim.
+        let owned = self.aux_of(s).and_then(|a| a.children.first().copied()).map(|first| {
+            let end = self.subtree_end(s);
+            (self.n(first).label, self.n(end).label)
+        });
         Following {
             eng: self,
             unit: n.unit,
-            label: start,
+            label: n.label,
             parent: n.parent,
+            owned,
             slots: Vec::new(),
         }
     }
@@ -4568,7 +4598,10 @@ impl Engine {
 
     fn stab_contrib(&mut self, unit: u32, label: u64, f: Field) {
         for (r, w) in self.stab(unit, label) {
-            if w.field != f || w.waiting {
+            // A reader already due to run re-reads its range then: no fold
+            // per contribution changing before it (a replaced text changes
+            // every contribution, each with every later reader in range).
+            if w.field != f || w.waiting || matches!(self.n(r).state, State::Dirty | State::Parked) {
                 continue;
             }
             let lo = self.watch_key(r, w.anchor).0;
