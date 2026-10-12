@@ -3,10 +3,9 @@
 //! an edit from nothing, every later one an edit of the main text as it
 //! is now; the session writes what the build made.
 //!
-//! Native today: `tex`, `etex` and `pdftex` (their formats' ini files as
-//! the prelude, its evaluated state kept in the cache) and `-ini` jobs,
-//! DVI or PDF out. LaTeX's formats wait for `phitex-tex`'s LaTeX prelude,
-//! and until then a build says so.
+//! Every format runs from its ini file as the prelude (`tex.ini`,
+//! `etex.ini`, `pdfetex.ini`, `latex.ini`, `pdflatex.ini`), its evaluated
+//! state kept in the cache; `-ini` jobs have none. DVI or PDF out.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -385,19 +384,11 @@ impl Session {
 
     /// The format's text (its ini file read, as `-ini` reads it: none
     /// for `-ini` jobs), and its evaluated state from the cache with the
-    /// key it was stored with. LaTeX's formats wait for the engine.
+    /// key it was stored with.
     #[allow(clippy::type_complexity, reason = "one caller")]
     fn prelude(&self) -> Result<(Option<String>, Option<([u8; 32], Vec<u8>)>), String> {
         if self.job.ini {
             return Ok((None, None));
-        }
-        if !NATIVE.contains(&self.job.engine.name) {
-            return Err(format!(
-                "{}: its format is not native yet (phitex-tex runs plain TeX, e-TeX and pdfTeX; \
-                 LaTeX's format comes with its next slice): use {}, or -ini",
-                self.job.engine.name,
-                NATIVE.join(", ")
-            ));
         }
         let ini = self.job.engine.ini;
         self.tree
@@ -575,9 +566,6 @@ pub fn waiting_notes(job: &Job) -> Vec<String> {
     }
     v
 }
-
-/// The formats the engine runs (their ini files as the prelude).
-const NATIVE: [&str; 3] = ["tex", "etex", "pdftex"];
 
 /// A file's name without a leading `./`.
 fn plain_name(n: &str) -> String {

@@ -1,5 +1,5 @@
 // The pages, continuous: every page stacked in the scroll view, as Overleaf's
-// pdf.js viewer shows them. Only the pages near the view are drawn, and a
+// viewer shows them. Only the pages near the view are drawn, and a
 // page is drawn again only when its box changed (each page's hash, from the
 // core). The page most in view is the one an edit paints first.
 
@@ -18,7 +18,7 @@ export interface ViewerHost {
   dbl?(k: number, x: number, y: number): void;
   /** A click on a link to a web address (http, https or mailto): opened by the host (absent: in a new tab). */
   link?(uri: string): void;
-  /** A page box's CSS size at `cssWidth` (pdf.js's rounding). */
+  /** A page box's CSS size at `cssWidth` (on whole device pixels). */
   box(d: { w: number; h: number }, cssWidth: number): [number, number];
 }
 
