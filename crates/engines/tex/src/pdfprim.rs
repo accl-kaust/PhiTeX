@@ -2612,13 +2612,11 @@ pub(crate) fn writer_data(r: &mut Run<'_, '_>, xs: &[ValueId]) -> R<Option<Value
             };
             lit(mode, &t)
         }
-        // pdf_out_setmatrix: the matrix, then " 0 0 cm", at the origin
-        // PDF-BACKEND-GAP: the matrix stack (`pdfsetmatrix`, utils.c)
-        // only checks the format and transforms link rectangles
-        "pdf:setmatrix" => lit(0, &format!("{} 0 0 cm", text(1))),
+        // pdf_out_setmatrix (the writer keeps the matrix stack)
+        "pdf:setmatrix" => Some(v.list(vec![v.str("mx"), v.str(&text(1))])),
         // pdf_out_save, pdf_out_restore
-        "pdf:save" => lit(0, "q"),
-        "pdf:restore" => lit(0, "Q"),
+        "pdf:save" => Some(v.list(vec![v.str("save")])),
+        "pdf:restore" => Some(v.list(vec![v.str("restore")])),
         "pdf:colorstack" => Some(v.list(vec![
             v.str("cs"),
             xs.get(1).copied().unwrap_or(ValueId::UNIT),

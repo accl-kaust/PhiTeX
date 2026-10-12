@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use phitex_defuse::{Ctx, Stop, Value, ValueId, Values};
 use phitex_pdf::map::{MapEntry, parse_line, parse_map};
-use phitex_pdf::{EndData, FontSource, PdfParams, PdfWriter};
+use phitex_pdf::{ColorStackCmd, FontSource, LiteralMode, PdfParams, PdfWriter, Whatsit};
 use phitex_tfm::ScaledFont;
 use phitex_typeset::fonts::FontId;
 use phitex_typeset::node::Node;
@@ -24,9 +24,6 @@ use crate::val::{int_of, list_of, str_of};
 
 /// `pdftex_banner` of the oracle's pdfTeX.
 pub(crate) const BANNER: &str = "This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) kpathsea version 6.4.2";
-
-/// `COLOR_DEFAULT` (`utils.c`).
-const COLOR_DEFAULT: &str = "0 g 0 G";
 
 /// A font map by TFM name.
 type Map = BTreeMap<Vec<u8>, MapEntry>;
@@ -95,101 +92,6 @@ impl FontSource for Fonts {
     }
 }
 
-/// A colour stack (`colstack_type`, `utils.c`), page mode only.
-struct Stack {
-    saved: Vec<Option<String>>,
-    current: Option<String>,
-    mode: i64,
-    page_start: bool,
-}
-
-/// A literal as `phitex-pdf` takes it: a special with the mode's prefix
-/// (`literal`, pdfTeX §693).
-fn special(mode: i64, s: &str) -> Vec<u8> {
-    let pre = match mode {
-        1 => "PDF:page:",
-        2 => "PDF:direct:",
-        _ => "PDF:",
-    };
-    let mut b = pre.as_bytes().to_vec();
-    b.extend(bytes_of(s));
-    b
-}
-
-/// The stacks `\pdfcolorstackinit` made by this page (stack 0 is
-/// pdfTeX's own: `colstacks_first_init`).
-fn grow_stacks(v: &Values, stacks: &mut Vec<Stack>, defs: Option<ValueId>) {
-    if stacks.is_empty() {
-        stacks.push(Stack {
-            saved: Vec::new(),
-            current: Some(COLOR_DEFAULT.to_owned()),
-            mode: 2,
-            page_start: true,
-        });
-    }
-    let defs = defs.map(|d| list_of(v, d)).unwrap_or_default();
-    for d in defs.iter().skip(stacks.len() - 1) {
-        let xs = list_of(v, *d);
-        let s = xs.get(2).map(|&y| str_of(v, y)).unwrap_or_default();
-        stacks.push(Stack {
-            saved: Vec::new(),
-            current: (!s.is_empty()).then_some(s),
-            mode: xs.get(1).map_or(0, |&y| int_of(v, y)),
-            page_start: xs.first().is_some_and(|&y| int_of(v, y) != 0),
-        });
-    }
-}
-
-/// `pdf_out_colorstack_startpage`.
-fn page_start(stacks: &[Stack]) -> Vec<Vec<u8>> {
-    let mut out = Vec::new();
-    for st in stacks {
-        // colorstackskippagestart
-        if !st.page_start {
-            continue;
-        }
-        match &st.current {
-            Some(c) if c != COLOR_DEFAULT => out.push(special(st.mode, c)),
-            _ => {}
-        }
-    }
-    out
-}
-
-/// `pdf_out_colorstack` (pdfTeX): the literal a colour stack command
-/// writes, if any.
-fn colorstack(stacks: &mut [Stack], n: i64, act: &str, text: &str) -> Option<Vec<u8>> {
-    // PDF-BACKEND-GAP: "Color stack n is not initialized for use!" goes
-    // to the log, which the writer does not reach
-    let st = stacks.get_mut(usize::try_from(n).ok()?)?;
-    match act {
-        "set" => {
-            st.current = Some(text.to_owned());
-            (!text.is_empty()).then(|| special(st.mode, text))
-        }
-        "push" => {
-            let old = st.current.take();
-            st.saved.push(old);
-            st.current = (!text.is_empty()).then(|| text.to_owned());
-            (!text.is_empty()).then(|| special(st.mode, text))
-        }
-        "pop" => {
-            let prev = st.saved.pop()?;
-            st.current = prev;
-            st.current
-                .as_deref()
-                .filter(|c| !c.is_empty())
-                .map(|c| special(st.mode, c))
-        }
-        "current" => st
-            .current
-            .as_deref()
-            .filter(|c| !c.is_empty())
-            .map(|c| special(st.mode, c)),
-        _ => None,
-    }
-}
-
 /// The text of a list of strings, run together (`concat_tokens`).
 fn joined(v: &Values, x: Option<ValueId>) -> Vec<u8> {
     let mut out = Vec::new();
@@ -217,6 +119,52 @@ fn page_params(v: &Values, p: &mut PdfParams, xs: &[ValueId]) {
     p.minor_version = param(v, xs, 9);
     p.major_version = param(v, xs, 10);
     p.mag = param(v, xs, 11);
+    p.obj_compress_level = param(v, xs, 13);
+    p.gen_tounicode = param(v, xs, 14);
+    let text = |k: usize| {
+        xs.get(k)
+            .map(|&t| bytes_of(&str_of(v, t)))
+            .filter(|t| !t.is_empty())
+    };
+    p.page_attr = text(15);
+    p.pages_attr = text(16);
+    p.page_resources = text(17);
+}
+
+/// The writer's data for a whatsit `\shipout` resolved
+/// ([`crate::pdfprim::writer_data`]).
+fn whatsit(v: &Values, d: ValueId) -> Option<Whatsit> {
+    let ys = list_of(v, d);
+    let kind = ys.first().map(|&k| str_of(v, k)).unwrap_or_default();
+    let text = |k: usize| {
+        ys.get(k)
+            .map(|&t| bytes_of(&str_of(v, t)))
+            .unwrap_or_default()
+    };
+    let int = |k: usize| ys.get(k).map_or(0, |&n| int_of(v, n));
+    Some(match kind.as_str() {
+        "lit" => Whatsit::Literal(
+            match int(1) {
+                2 => LiteralMode::DirectAlways,
+                1 => LiteralMode::DirectPage,
+                _ => LiteralMode::SetOrigin,
+            },
+            text(2),
+        ),
+        "cs" => Whatsit::ColorStack(
+            usize::try_from(int(1)).unwrap_or(usize::MAX),
+            match str_of(v, ys.get(2).copied()?).as_str() {
+                "set" => ColorStackCmd::Set(text(3)),
+                "push" => ColorStackCmd::Push(text(3)),
+                "pop" => ColorStackCmd::Pop,
+                _ => ColorStackCmd::Current,
+            },
+        ),
+        "mx" => Whatsit::SetMatrix(text(1)),
+        "save" => Whatsit::Save,
+        "restore" => Whatsit::Restore,
+        _ => return None,
+    })
 }
 
 /// The PDF file of `pages` (each `[box, counts, fonts, pdf, data]`).
@@ -301,7 +249,19 @@ pub(crate) fn write(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop
         page_params(v, &mut params, &p);
     }
     let mut w = PdfWriter::new(params);
-    let mut stacks: Vec<Stack> = Vec::new();
+    // `\pdfcolorstackinit` (when read: before the pages that use them)
+    let last = pages.last().map(|&p| list_of(v, p)).unwrap_or_default();
+    let last = last.get(3).map(|&l| list_of(v, l)).unwrap_or_default();
+    for d in last.get(12).map(|&l| list_of(v, l)).unwrap_or_default() {
+        let xs = list_of(v, d);
+        let page = xs.first().is_some_and(|&y| int_of(v, y) != 0);
+        let direct = xs.get(1).is_some_and(|&y| int_of(v, y) == 2);
+        let init = xs
+            .get(2)
+            .map(|&y| bytes_of(&str_of(v, y)))
+            .unwrap_or_default();
+        let _ = w.colorstack_init(page, direct, &init);
+    }
     for &page in pages {
         let xs = list_of(v, page);
         let mut side = Side::default();
@@ -310,8 +270,6 @@ pub(crate) fn write(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop
         };
         let p = xs.get(3).map(|&l| list_of(v, l)).unwrap_or_default();
         page_params(v, w.params_mut(), &p);
-        grow_stacks(v, &mut stacks, p.get(12).copied());
-        w.set_page_start(page_start(&stacks));
         let mut resolved: HashMap<u32, ValueId> = HashMap::new();
         for e in xs.get(4).map(|&l| list_of(v, l)).unwrap_or_default() {
             let ys = list_of(v, e);
@@ -320,54 +278,54 @@ pub(crate) fn write(cx: &mut Ctx<'_>, pages: &[ValueId]) -> Result<ValueId, Stop
             }
         }
         let whats = side.whats.clone();
-        let mut wh = |h: u32, _leaders: bool| -> Option<Vec<u8>> {
+        let mut wh = |h: u32, _leaders: bool| -> Option<Whatsit> {
             if let Some(&d) = resolved.get(&h) {
-                let ys = list_of(v, d);
-                let kind = ys.first().map(|&k| str_of(v, k)).unwrap_or_default();
-                let text = |k: usize| ys.get(k).map(|&t| str_of(v, t)).unwrap_or_default();
-                return match kind.as_str() {
-                    "lit" => Some(special(ys.get(1).map_or(0, |&m| int_of(v, m)), &text(2))),
-                    "cs" => colorstack(
-                        &mut stacks,
-                        ys.get(1).map_or(0, |&n| int_of(v, n)),
-                        &text(2),
-                        &text(3),
-                    ),
-                    _ => None,
-                };
+                return whatsit(v, d);
             }
             let w = *whats.get(h as usize)?;
             let ys = list_of(v, w);
             if ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special") {
-                Some(bytes_of(
+                Some(Whatsit::Special(bytes_of(
                     &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
-                ))
+                )))
             } else {
                 None
             }
         };
-        let _ = w.ship_out(&bx, &fonts, &mut wh);
+        let _ = w.ship_out_with(&bx, &fonts, &mut wh);
     }
-    let get_str = |cx: &mut Ctx<'_>, f: &str| -> Result<Vec<u8>, Stop> {
+    for (f, set) in [
+        ("pdf:info", PdfWriter::info as fn(&mut PdfWriter, &[u8])),
+        ("pdf:names", PdfWriter::names),
+        ("pdf:trailer", PdfWriter::trailer),
+        ("pdf:trailerid", PdfWriter::trailer_id),
+    ] {
         let x = cx.use_field(v.field(f))?;
-        Ok(joined(v, x))
-    };
-    let catalog = get_str(cx, "pdf:catalog")?;
-    let info = get_str(cx, "pdf:info")?;
-    let trailer = get_str(cx, "pdf:trailer")?;
+        let t = if f == "pdf:trailerid" {
+            x.map(|x| bytes_of(&str_of(v, x))).unwrap_or_default()
+        } else {
+            joined(v, x)
+        };
+        if !t.is_empty() {
+            set(&mut w, &t);
+        }
+    }
+    // PDF-BACKEND-GAP: `\pdfcatalog ... openaction` (the action is
+    // written when it is read)
+    let catalog = joined(v, cx.use_field(v.field("pdf:catalog"))?);
+    if !catalog.is_empty() {
+        let _ = w.catalog(&catalog, None);
+    }
     let int = |cx: &mut Ctx<'_>, f: &str| -> Result<i32, Stop> {
         Ok(cx
             .use_field(v.field(f))?
             .map_or(0, |x| i32::try_from(int_of(v, x)).unwrap_or(0)))
     };
-    let end = EndData {
-        catalog,
-        info,
-        trailer,
-        info_omit_date: int(cx, "param:pdfinfoomitdate")?,
-        suppress_ptex_info: int(cx, "param:pdfsuppressptexinfo")?,
-    };
-    let bytes = w.finish_with(&end).unwrap_or_default();
+    let omit = int(cx, "param:pdfinfoomitdate")?;
+    let suppress = int(cx, "param:pdfsuppressptexinfo")?;
+    w.params_mut().info_omit_date = omit;
+    w.params_mut().suppress_ptex_info = suppress;
+    let bytes = w.finish().unwrap_or_default();
     let s: String = bytes.iter().map(|&b| char::from(b)).collect();
     Ok(v.intern(Value::Str(s.into_boxed_str())))
 }

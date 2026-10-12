@@ -1,0 +1,34 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input ximage2
+(./ximage2.tex
+
+pdfTeX warning: pdftex (file /usr/share/texmf-dist/tex/latex/mwe/example-image-
+a.pdf): PDF inclusion: found PDF version <1.5>, but at most version <1.4> allow
+ed
+
+
+pdfTeX warning: pdftex (file /usr/share/texmf-dist/tex/latex/mwe/example-image-
+b.pdf): PDF inclusion: found PDF version <1.5>, but at most version <1.4> allow
+ed
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x321.2
+.\pdfrefximage(240.9+0.0)x321.2
+.\pdfrefximage(72.27+0.0)x96.36
+.\pdfrefximage(240.9+0.0)x321.2
+.\glue(\topskip) 0.0
+.\hbox(0.0+0.0)x200.0
+.\glue 0.0 plus 1.0fill
+
+ </usr/share/texmf-dist/tex/latex/mwe/example-image-a.pdf> </usr/share/texmf-di
+st/tex/latex/mwe/example-image-a.jpg> </usr/share/texmf-dist/tex/latex/mwe/exam
+ple-image-b.pdf> )
+Output written on ximage2-trace.pdf (1 page, 43544 bytes).
+PDF statistics:
+ 21 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 16 words of extra memory for PDF output out of 10000 (max. 10000000)
+
