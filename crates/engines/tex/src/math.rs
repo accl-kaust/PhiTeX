@@ -11,7 +11,9 @@
 
 use phitex_defuse::{Effect, ValueId, Values};
 use phitex_typeset::glue::Glue;
-use phitex_typeset::math::{Delimiter, Field, Fraction, Limits, MItem, MList, MathParams, Noad, NoadKind, Style};
+use phitex_typeset::math::{
+    Delimiter, Field, Fraction, Limits, MItem, MList, MathParams, Noad, NoadKind, Style,
+};
 use phitex_typeset::node::{GlueKind, MathKind, Node};
 use phitex_typeset::pack::Spec;
 
@@ -51,7 +53,15 @@ fn math_char(v: &Values, fam: i32, ch: i32) -> ValueId {
 }
 
 fn noad(v: &Values, t: i64, a: i64, b: i64, nuc: ValueId, sup: ValueId, sub: ValueId) -> ValueId {
-    v.list(vec![v.int(T_NOAD), v.int(t), v.int(a), v.int(b), nuc, sup, sub])
+    v.list(vec![
+        v.int(T_NOAD),
+        v.int(t),
+        v.int(a),
+        v.int(b),
+        nuc,
+        sup,
+        sub,
+    ])
 }
 
 fn sub_box(v: &Values, b: ValueId) -> ValueId {
@@ -94,7 +104,11 @@ fn decode_field(v: &Values, f: ValueId, side: &mut Side) -> Field {
             Some(Node::Box(b)) => Field::SubBox(b),
             _ => Field::Empty,
         },
-        4 => Field::SubMlist(decode_mlist(v, &xs.get(1).map(|&l| list_of(v, l)).unwrap_or_default(), side)),
+        4 => Field::SubMlist(decode_mlist(
+            v,
+            &xs.get(1).map(|&l| list_of(v, l)).unwrap_or_default(),
+            side,
+        )),
         _ => Field::Empty,
     }
 }
@@ -105,7 +119,13 @@ pub(crate) fn decode_mlist(v: &Values, items: &[ValueId], side: &mut Side) -> ML
     for &x in items {
         let xs = list_of(v, x);
         let n = |i: usize| xs.get(i).map_or(0, |&y| int_of(v, y));
-        let sub = |i: usize, side: &mut Side| decode_mlist(v, &xs.get(i).map(|&l| list_of(v, l)).unwrap_or_default(), side);
+        let sub = |i: usize, side: &mut Side| {
+            decode_mlist(
+                v,
+                &xs.get(i).map(|&l| list_of(v, l)).unwrap_or_default(),
+                side,
+            )
+        };
         match nodes::tag(v, x) {
             T_NOAD => {
                 let kind = match n(1) {
@@ -123,7 +143,10 @@ pub(crate) fn decode_mlist(v: &Values, items: &[ValueId], side: &mut Side) -> ML
                     24 => NoadKind::Radical(delimiter(n(2))),
                     26 => NoadKind::Under,
                     27 => NoadKind::Over,
-                    28 => NoadKind::Accent(u8::try_from(n(2)).unwrap_or(0), u16::try_from(n(3)).unwrap_or(0)),
+                    28 => NoadKind::Accent(
+                        u8::try_from(n(2)).unwrap_or(0),
+                        u16::try_from(n(3)).unwrap_or(0),
+                    ),
                     29 => NoadKind::Vcenter,
                     _ => NoadKind::Ord,
                 };
@@ -148,7 +171,12 @@ pub(crate) fn decode_mlist(v: &Values, items: &[ValueId], side: &mut Side) -> ML
             T_LEFT => out.push(MItem::Left(delimiter(n(1)))),
             T_RIGHT => out.push(MItem::Right(delimiter(n(1)), false)),
             T_STYLE => out.push(MItem::Style(Style(u8::try_from(n(1)).unwrap_or(2)))),
-            T_CHOICE => out.push(MItem::Choice(Box::new([sub(1, side), sub(2, side), sub(3, side), sub(4, side)]))),
+            T_CHOICE => out.push(MItem::Choice(Box::new([
+                sub(1, side),
+                sub(2, side),
+                sub(3, side),
+                sub(4, side),
+            ]))),
             _ => {
                 if let Some(nd) = nodes::decode(v, x, side) {
                     out.push(MItem::Node(nd));
@@ -421,7 +449,11 @@ impl Run<'_, '_> {
                 // §1172
                 let u = ValueId::UNIT;
                 self.scan_left_brace()?;
-                self.push_math(md, group::MATH_CHOICE, vec![v.int(0), v.int(md.lid), u, u, u])?;
+                self.push_math(
+                    md,
+                    group::MATH_CHOICE,
+                    vec![v.int(0), v.int(md.lid), u, u, u],
+                )?;
             }
             cmd::SUB_MARK | cmd::SUP_MARK => self.sub_sup(md)?,
             cmd::ABOVE => self.math_fraction(md)?,
@@ -472,13 +504,18 @@ impl Run<'_, '_> {
         let k = if self.cur.cmd == cmd::SUP_MARK { 5 } else { 6 };
         let (items, _) = self.list_items(md.lid)?;
         let last = items.last().copied();
-        let scripts = last.filter(|&x| nodes::tag(v, x) == T_NOAD || nodes::tag(v, x) == T_FRACTION);
+        let scripts =
+            last.filter(|&x| nodes::tag(v, x) == T_NOAD || nodes::tag(v, x) == T_FRACTION);
         let base = match scripts {
             Some(x) if nodes::tag(v, x) == T_NOAD && is_empty_field(v, list_of(v, x)[k]) => Some(x),
             Some(_) => {
                 self.log(
                     "error",
-                    if k == 5 { "Double superscript" } else { "Double subscript" },
+                    if k == 5 {
+                        "Double superscript"
+                    } else {
+                        "Double subscript"
+                    },
                 )?;
                 None
             }
@@ -543,7 +580,9 @@ impl Run<'_, '_> {
     fn fin_mlist(&mut self, lid: i64, p: Option<ValueId>) -> R<Vec<ValueId>> {
         let v = self.v;
         let (items, _) = self.list_items(lid)?;
-        let inc = self.get(&format!("inc:{lid}"))?.filter(|&x| x != ValueId::UNIT);
+        let inc = self
+            .get(&format!("inc:{lid}"))?
+            .filter(|&x| x != ValueId::UNIT);
         let Some(inc) = inc else {
             let mut out = items;
             out.extend(p);
@@ -606,7 +645,9 @@ impl Run<'_, '_> {
         self.effect = Effect::Close;
         self.unsave_extras(md)?;
         let (outer_items, _) = self.list_items(outer_lid)?;
-        let Some(&tail) = outer_items.last() else { return Ok(()) };
+        let Some(&tail) = outer_items.last() else {
+            return Ok(());
+        };
         if nodes::tag(v, tail) != T_NOAD {
             return Ok(());
         }
@@ -642,7 +683,10 @@ impl Run<'_, '_> {
         };
         let (items, _) = self.list_items(md.sid)?;
         let mut side = Side::default();
-        let list: Vec<Node> = items.iter().filter_map(|&y| nodes::decode(v, y, &mut side)).collect();
+        let list: Vec<Node> = items
+            .iter()
+            .filter_map(|&y| nodes::decode(v, y, &mut side))
+            .collect();
         let pp = self.pack_params(false)?;
         let p = phitex_typeset::pack::vpack(list, spec, &pp);
         self.effect = Effect::Close;
@@ -672,7 +716,8 @@ impl Run<'_, '_> {
             outer.depth -= 1;
             let cur = self.scope_kind()?.unwrap_or(ValueId::UNIT);
             let parent = list_of(v, cur).get(5).copied().unwrap_or(ValueId::UNIT);
-            let kind = self.kind_with_parent(&outer, group::MATH_CHOICE, sid, sid, -203, extra, parent);
+            let kind =
+                self.kind_with_parent(&outer, group::MATH_CHOICE, sid, sid, -203, extra, parent);
             self.effect = Effect::Scope(phitex_defuse::Brackets {
                 closes: 1,
                 opens: 1,
@@ -729,7 +774,12 @@ impl Run<'_, '_> {
     }
 
     /// `mlist_to_hlist` with the families and parameters of eqtb.
-    pub(crate) fn mlist_to_hlist(&mut self, mlist: MList, style: Style, penalties: bool) -> R<Vec<Node>> {
+    pub(crate) fn mlist_to_hlist(
+        &mut self,
+        mlist: MList,
+        style: Style,
+        penalties: bool,
+    ) -> R<Vec<Node>> {
         let mut fam_fnt = [[None; 16]; 3];
         let mut view = crate::fonts::View::default();
         let mut skew = crate::FxHashMap::default();
@@ -757,8 +807,8 @@ impl Run<'_, '_> {
             rel_penalty: self.param("relpenalty")?,
             skew_char: &sk,
         };
-        let (h, _diags) = phitex_typeset::math::mlist_to_hlist(mlist, style, penalties, &params, &view);
+        let (h, _diags) =
+            phitex_typeset::math::mlist_to_hlist(mlist, style, penalties, &params, &view);
         Ok(h)
     }
 }
-

@@ -9,9 +9,9 @@ use phitex_typeset::glue::{Glue, Order};
 use crate::print;
 use crate::run::{R, Run};
 use crate::val::{
-    COUNT_BASE, DEL_CODE_BASE, LC_CODE_BASE, MATCH_CAT, MATH_CODE_BASE, MATH_FONT_BASE, MU_SKIP_BASE,
-    OUT_PARAM_CAT, SCALED_BASE, SF_CODE_BASE, SKIP_BASE, TOKS_BASE, Tok, UC_CODE_BASE, cmd, glue_of,
-    quantity_field, toks_of,
+    COUNT_BASE, DEL_CODE_BASE, LC_CODE_BASE, MATCH_CAT, MATH_CODE_BASE, MATH_FONT_BASE,
+    MU_SKIP_BASE, OUT_PARAM_CAT, SCALED_BASE, SF_CODE_BASE, SKIP_BASE, TOKS_BASE, Tok,
+    UC_CODE_BASE, cmd, glue_of, quantity_field, toks_of,
 };
 
 pub(crate) const MAX_DIMEN: i32 = 0o7777777777;
@@ -127,7 +127,8 @@ impl Run<'_, '_> {
             self.get_x_token()?;
             let c = bytes[k];
             if !self.cur.is_cs()
-                && (self.cur.chr == i32::from(c) || self.cur.chr == i32::from(c) - i32::from(b'a') + i32::from(b'A'))
+                && (self.cur.chr == i32::from(c)
+                    || self.cur.chr == i32::from(c) - i32::from(b'a') + i32::from(b'A'))
             {
                 matched.push(self.cur.tok.clone());
                 k += 1;
@@ -178,7 +179,9 @@ impl Run<'_, '_> {
                 Tok::S(n) => {
                     let mut cs = n.chars();
                     match (cs.next(), cs.next()) {
-                        (Some(c), None) if !n.starts_with('\u{10FFFE}') => i32::try_from(u32::from(c)).unwrap_or(256),
+                        (Some(c), None) if !n.starts_with('\u{10FFFE}') => {
+                            i32::try_from(u32::from(c)).unwrap_or(256)
+                        }
                         _ => 256,
                     }
                 }
@@ -216,9 +219,17 @@ impl Run<'_, '_> {
                 let d: i32;
                 let (cat, c) = (self.cur.tok.cat(), self.cur.tok.chr());
                 let cs = self.cur.is_cs();
-                if !cs && cat == Some(12) && (48..=57).contains(&c) && i32::try_from(c - 48).unwrap_or(99) < self.radix {
+                if !cs
+                    && cat == Some(12)
+                    && (48..=57).contains(&c)
+                    && i32::try_from(c - 48).unwrap_or(99) < self.radix
+                {
                     d = i32::try_from(c - 48).unwrap_or(0);
-                } else if self.radix == 16 && !cs && (cat == Some(11) || cat == Some(12)) && (65..=70).contains(&c) {
+                } else if self.radix == 16
+                    && !cs
+                    && (cat == Some(11) || cat == Some(12))
+                    && (65..=70).contains(&c)
+                {
                     d = i32::try_from(c - 55).unwrap_or(0);
                 } else {
                     break;
@@ -301,7 +312,10 @@ impl Run<'_, '_> {
                     loop {
                         self.get_x_token()?;
                         let c = self.cur.tok.chr();
-                        if self.cur.is_cs() || self.cur.tok.cat() != Some(12) || !(48..=57).contains(&c) {
+                        if self.cur.is_cs()
+                            || self.cur.tok.cat() != Some(12)
+                            || !(48..=57).contains(&c)
+                        {
                             break;
                         }
                         if digits.len() < 17 {
@@ -374,8 +388,10 @@ impl Run<'_, '_> {
             if mag != 1000 && mag > 0 {
                 let d = xn_over_d(val, 1000, mag);
                 val = d.value;
-                f = i32::try_from((1000 * i64::from(f) + 0o200000 * i64::from(d.remainder)) / i64::from(mag))
-                    .unwrap_or(0);
+                f = i32::try_from(
+                    (1000 * i64::from(f) + 0o200000 * i64::from(d.remainder)) / i64::from(mag),
+                )
+                .unwrap_or(0);
                 val += f / 0o200000;
                 f %= 0o200000;
             }
@@ -409,8 +425,11 @@ impl Run<'_, '_> {
         if let Some((num, denom)) = conv {
             let d = xn_over_d(val, num, denom);
             val = d.value;
-            f = i32::try_from((i64::from(num) * i64::from(f) + 0o200000 * i64::from(d.remainder)) / i64::from(denom))
-                .unwrap_or(0);
+            f = i32::try_from(
+                (i64::from(num) * i64::from(f) + 0o200000 * i64::from(d.remainder))
+                    / i64::from(denom),
+            )
+            .unwrap_or(0);
             val += f / 0o200000;
             f %= 0o200000;
         }
@@ -419,7 +438,11 @@ impl Run<'_, '_> {
     }
 
     fn attach_fraction(&mut self, val: i32, f: i32, negative: bool) -> R<i32> {
-        let (v, err) = if val >= 0o40000 { (val, true) } else { (val * 65536 + f, false) };
+        let (v, err) = if val >= 0o40000 {
+            (val, true)
+        } else {
+            (val * 65536 + f, false)
+        };
         self.optional_space()?;
         self.attach_sign(v, negative, err)
     }
@@ -573,7 +596,11 @@ impl Run<'_, '_> {
                 };
                 IVal::Int(self.int32(&format!("{name}:{n}"))?)
             }
-            cmd::TOKS_REGISTER | cmd::ASSIGN_TOKS | cmd::DEF_FAMILY | cmd::SET_FONT | cmd::DEF_FONT => {
+            cmd::TOKS_REGISTER
+            | cmd::ASSIGN_TOKS
+            | cmd::DEF_FAMILY
+            | cmd::SET_FONT
+            | cmd::DEF_FONT => {
                 // §415
                 if level != 5 {
                     // "Missing number, treated as zero"
@@ -607,7 +634,11 @@ impl Run<'_, '_> {
                 let md = self.mode()?;
                 if md.m.abs() != m {
                     // "Improper \spacefactor"
-                    if level == 5 { IVal::Int(0) } else { IVal::Dimen(0) }
+                    if level == 5 {
+                        IVal::Int(0)
+                    } else {
+                        IVal::Dimen(0)
+                    }
                 } else if m == 1 {
                     IVal::Dimen(self.prev_depth(&md)?)
                 } else {
@@ -634,7 +665,9 @@ impl Run<'_, '_> {
             cmd::SET_SHAPE => {
                 // §423
                 let x = self.get("parshape")?;
-                IVal::Int(x.map_or(0, |x| i32::try_from(crate::val::list_of(self.v, x).len() / 2).unwrap_or(0)))
+                IVal::Int(x.map_or(0, |x| {
+                    i32::try_from(crate::val::list_of(self.v, x).len() / 2).unwrap_or(0)
+                }))
             }
             cmd::SET_BOX_DIMEN => {
                 // §420
@@ -675,7 +708,11 @@ impl Run<'_, '_> {
             _ => {
                 // §428: "You can't use x after \the"
                 self.back_cur();
-                if level == 5 { IVal::Int(0) } else { IVal::Dimen(0) }
+                if level == 5 {
+                    IVal::Int(0)
+                } else {
+                    IVal::Dimen(0)
+                }
             }
         };
         // §429
@@ -775,7 +812,8 @@ impl Run<'_, '_> {
                     if self.cur.cmd == cmd::THE {
                         let q = self.the_toks()?;
                         body.extend(q);
-                    } else if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
+                    } else if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND
+                    {
                         break;
                     } else {
                         self.expand()?;
@@ -830,7 +868,11 @@ impl Run<'_, '_> {
     /// given).
     pub(crate) fn scan_rule_spec(&mut self, vrule: bool) -> R<(i32, i32, i32)> {
         let running = phitex_typeset::node::RUNNING;
-        let (mut w, mut h, mut d) = if vrule { (26214, running, running) } else { (running, 26214, 0) };
+        let (mut w, mut h, mut d) = if vrule {
+            (26214, running, running)
+        } else {
+            (running, 26214, 0)
+        };
         loop {
             if self.scan_keyword("width")? {
                 w = self.scan_normal_dimen()?;

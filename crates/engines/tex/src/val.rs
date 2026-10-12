@@ -424,15 +424,33 @@ impl Mean {
                 params: toks_of(v, xs.get(2).copied()),
                 body: toks_of(v, xs.get(3).copied()),
             })),
-            "char" => Mean::Char(u8::try_from(n(1)).unwrap_or(0), u32::try_from(n(2)).unwrap_or(0)),
+            "char" => Mean::Char(
+                u8::try_from(n(1)).unwrap_or(0),
+                u32::try_from(n(2)).unwrap_or(0),
+            ),
             "font" => Mean::Font(n(1)),
             "chardef" => Mean::CharDef(n(1)),
             "mathchardef" => Mean::MathCharDef(n(1)),
-            "countdef" => Mean::Reg(cmd::ASSIGN_INT, COUNT_BASE + i32::try_from(n(1)).unwrap_or(0)),
-            "dimendef" => Mean::Reg(cmd::ASSIGN_DIMEN, SCALED_BASE + i32::try_from(n(1)).unwrap_or(0)),
-            "skipdef" => Mean::Reg(cmd::ASSIGN_GLUE, SKIP_BASE + i32::try_from(n(1)).unwrap_or(0)),
-            "muskipdef" => Mean::Reg(cmd::ASSIGN_MU_GLUE, MU_SKIP_BASE + i32::try_from(n(1)).unwrap_or(0)),
-            "toksdef" => Mean::Reg(cmd::ASSIGN_TOKS, TOKS_BASE + i32::try_from(n(1)).unwrap_or(0)),
+            "countdef" => Mean::Reg(
+                cmd::ASSIGN_INT,
+                COUNT_BASE + i32::try_from(n(1)).unwrap_or(0),
+            ),
+            "dimendef" => Mean::Reg(
+                cmd::ASSIGN_DIMEN,
+                SCALED_BASE + i32::try_from(n(1)).unwrap_or(0),
+            ),
+            "skipdef" => Mean::Reg(
+                cmd::ASSIGN_GLUE,
+                SKIP_BASE + i32::try_from(n(1)).unwrap_or(0),
+            ),
+            "muskipdef" => Mean::Reg(
+                cmd::ASSIGN_MU_GLUE,
+                MU_SKIP_BASE + i32::try_from(n(1)).unwrap_or(0),
+            ),
+            "toksdef" => Mean::Reg(
+                cmd::ASSIGN_TOKS,
+                TOKS_BASE + i32::try_from(n(1)).unwrap_or(0),
+            ),
             "notexpanded" => Mean::NotExpanded,
             _ => Mean::Undefined,
         }
@@ -504,8 +522,9 @@ pub(crate) fn glue_of(v: &Values, id: Option<ValueId>) -> Glue {
 }
 
 pub(crate) fn i32_of(v: &Values, id: Option<ValueId>) -> i32 {
-    id.and_then(|x| v.as_int(x))
-        .map_or(0, |i| i32::try_from(i).unwrap_or(if i < 0 { i32::MIN } else { i32::MAX }))
+    id.and_then(|x| v.as_int(x)).map_or(0, |i| {
+        i32::try_from(i).unwrap_or(if i < 0 { i32::MIN } else { i32::MAX })
+    })
 }
 
 /// INITEX's state (§222–§240) that differs from zero, void, empty and
@@ -557,11 +576,17 @@ pub(crate) fn initex(v: &Values) -> Vec<(String, ValueId)> {
     }
     let relax = Mean::Prim("relax", cmd::RELAX, 256).encode(v);
     out.push(("cs:\u{10FFFE}relax".to_owned(), relax));
-    out.push(("cs:\u{10FFFE}endgraf".to_owned(), v.list(vec![v.str("prim"), v.str("\u{10FFFE}endgraf")])));
+    out.push((
+        "cs:\u{10FFFE}endgraf".to_owned(),
+        v.list(vec![v.str("prim"), v.str("\u{10FFFE}endgraf")]),
+    ));
     for &(n, _, _) in PRIMS {
         out.push((format!("cs:{n}"), v.list(vec![v.str("prim"), v.str(n)])));
     }
     // §552: the null font's name
-    out.push(("fontinfo:0".to_owned(), v.list(vec![v.str("nullfont"), v.int(0), v.int(0)])));
+    out.push((
+        "fontinfo:0".to_owned(),
+        v.list(vec![v.str("nullfont"), v.int(0), v.int(0)]),
+    ));
     out
 }

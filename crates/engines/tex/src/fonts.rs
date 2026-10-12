@@ -27,14 +27,20 @@ fn cache() -> &'static Cache {
 }
 
 pub(crate) fn bytes_of(text: &str) -> Vec<u8> {
-    text.chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(0)).collect()
+    text.chars()
+        .map(|c| u8::try_from(u32::from(c)).unwrap_or(0))
+        .collect()
 }
 
 /// The TFM in file value `file` (a `[path, bytes]` list) at size `s`
 /// (§568: `s<0` is `scaled -s`).
 pub(crate) fn load(v: &Values, file: ValueId, s: i32) -> Option<Arc<Loaded>> {
     let key = (file.raw(), s);
-    if let Some(x) = cache().lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
+    if let Some(x) = cache()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+    {
         return x.clone();
     }
     let xs = list_of(v, file);
@@ -73,7 +79,10 @@ pub(crate) struct Info {
 pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
     let x = x?;
     let xs = list_of(v, x);
-    let n = |k: usize| xs.get(k).map_or(0, |&y| i32::try_from(int_of(v, y)).unwrap_or(0));
+    let n = |k: usize| {
+        xs.get(k)
+            .map_or(0, |&y| i32::try_from(int_of(v, y)).unwrap_or(0))
+    };
     Some(Info {
         name: xs.first().map(|&y| str_of(v, y)).unwrap_or_default(),
         size: n(1),
@@ -152,11 +161,14 @@ impl Fonts for View {
     }
 
     fn has_left_boundary(&self, font: FontId) -> bool {
-        self.get(font).is_some_and(|(l, _)| l.tfm.bchar_label().is_some())
+        self.get(font)
+            .is_some_and(|(l, _)| l.tfm.bchar_label().is_some())
     }
 
     fn bchar(&self, font: FontId) -> Option<u16> {
-        self.get(font).and_then(|(l, _)| l.tfm.bchar()).map(u16::from)
+        self.get(font)
+            .and_then(|(l, _)| l.tfm.bchar())
+            .map(u16::from)
     }
 
     fn param(&self, font: FontId, n: u16) -> i32 {

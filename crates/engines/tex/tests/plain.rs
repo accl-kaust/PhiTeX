@@ -4,12 +4,26 @@ mod common;
 
 fn gate(dir: &str, body: &str, default: bool, plain: bool) -> Result<String, String> {
     let fx = common::fixtures().join(dir);
-    let name = if default { format!("{body}-default") } else { body.to_owned() };
-    let want = std::fs::read(fx.join(format!("{name}.dvi"))).map_err(|e| format!("{name}.dvi: {e}"))?;
+    let name = if default {
+        format!("{body}-default")
+    } else {
+        body.to_owned()
+    };
+    let want =
+        std::fs::read(fx.join(format!("{name}.dvi"))).map_err(|e| format!("{name}.dvi: {e}"))?;
     let src = common::read(&fx.join(format!("{body}.tex")));
-    let doc = if default { format!("\\output={{}}\n{src}") } else { src };
+    let doc = if default {
+        format!("\\output={{}}\n{src}")
+    } else {
+        src
+    };
     let prelude = plain.then(common::plain);
-    let opts = common::options(&format!("./{body}.tex"), body, &common::dvi_comment(&want), &fx);
+    let opts = common::options(
+        &format!("./{body}.tex"),
+        body,
+        &common::dvi_comment(&want),
+        &fx,
+    );
     let b = common::build(opts, prelude.as_deref(), &doc);
     let (dvi, log) = b.output();
     if let Ok(d) = std::env::var("PHITEX_GATE_OUT") {
@@ -23,7 +37,14 @@ fn gate(dir: &str, body: &str, default: bool, plain: bool) -> Result<String, Str
     match common::first_difference(&dvi, &want) {
         None => Ok(report),
         Some(d) => {
-            let tail: String = log.chars().rev().take(1500).collect::<Vec<_>>().into_iter().rev().collect();
+            let tail: String = log
+                .chars()
+                .rev()
+                .take(1500)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
             Err(format!("{report}\n  FAIL {d}\n--- log tail ---\n{tail}"))
         }
     }
@@ -50,7 +71,10 @@ fn run(cases: &[(&str, &str, bool, bool)]) {
 
 #[test]
 fn story() {
-    run(&[("plain", "story", false, true), ("plain", "story", true, true)]);
+    run(&[
+        ("plain", "story", false, true),
+        ("plain", "story", true, true),
+    ]);
 }
 
 #[test]

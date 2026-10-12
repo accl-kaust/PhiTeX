@@ -100,7 +100,15 @@ impl Run<'_, '_> {
 
     /// A scope kind: `[group, sid, list, mode, depth, parent kind,
     /// extra…]`; the parent is the kind the group's end returns to.
-    pub(crate) fn kind_value(&mut self, md: &Mode, grp: i64, sid: i64, lid: i64, m: i32, extra: Vec<ValueId>) -> R<ValueId> {
+    pub(crate) fn kind_value(
+        &mut self,
+        md: &Mode,
+        grp: i64,
+        sid: i64,
+        lid: i64,
+        m: i32,
+        extra: Vec<ValueId>,
+    ) -> R<ValueId> {
         let parent = self.scope_kind()?.unwrap_or(ValueId::UNIT);
         Ok(self.kind_with_parent(md, grp, sid, lid, m, extra, parent))
     }
@@ -276,7 +284,9 @@ impl Run<'_, '_> {
 
     pub(crate) fn prev_depth(&mut self, md: &Mode) -> R<i32> {
         let x = self.get(&format!("pd:{}", md.vlid))?;
-        Ok(x.map_or(IGNORE_DEPTH, |x| i32::try_from(int_of(self.v, x)).unwrap_or(0)))
+        Ok(x.map_or(IGNORE_DEPTH, |x| {
+            i32::try_from(int_of(self.v, x)).unwrap_or(0)
+        }))
     }
 
     pub(crate) fn set_prev_depth(&mut self, md: &Mode, d: i32) {
@@ -322,7 +332,11 @@ impl Run<'_, '_> {
     pub(crate) fn new_graf(&mut self, md: &Mode, indented: bool) -> R<()> {
         let v = self.v;
         self.set(&format!("pg:{}", md.vlid), v.int(0), true);
-        let nonempty = if md.km == 1 { true } else { !self.list_items(md.vlid)?.0.is_empty() };
+        let nonempty = if md.km == 1 {
+            true
+        } else {
+            !self.list_items(md.vlid)?.0.is_empty()
+        };
         if nonempty {
             let g = self.glue_param("parskip")?;
             let n = nodes::glue_node(v, &g, GlueKind::Param(2));
@@ -361,7 +375,10 @@ impl Run<'_, '_> {
         if self.param("hangafter")? != 1 {
             self.set("param:hangafter", v.int(1), false);
         }
-        if self.get("parshape")?.is_some_and(|x| !list_of(v, x).is_empty()) {
+        if self
+            .get("parshape")?
+            .is_some_and(|x| !list_of(v, x).is_empty())
+        {
             self.set("parshape", v.list(Vec::new()), false);
         }
         Ok(())
@@ -476,21 +493,31 @@ impl Run<'_, '_> {
     fn line_break(&mut self, md: &Mode, items: &[ValueId]) -> R<()> {
         let v = self.v;
         let mut side = Side::default();
-        let list: List = items.iter().filter_map(|&x| nodes::decode(v, x, &mut side)).collect();
+        let list: List = items
+            .iter()
+            .filter_map(|&x| nodes::decode(v, x, &mut side))
+            .collect();
         let view = self.font_view(&list)?;
-        let shape = self.get("parshape")?.map(|x| list_of(v, x)).unwrap_or_default();
+        let shape = self
+            .get("parshape")?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default();
         let par_shape: Vec<(i32, i32)> = shape
             .chunks(2)
             .map(|c| {
                 (
                     i32::try_from(int_of(v, c[0])).unwrap_or(0),
-                    c.get(1).map_or(0, |&w| i32::try_from(int_of(v, w)).unwrap_or(0)),
+                    c.get(1)
+                        .map_or(0, |&w| i32::try_from(int_of(v, w)).unwrap_or(0)),
                 )
             })
             .collect();
         let packed = md.para.map_or(0, |_| 0);
         let _ = packed;
-        let rec = self.get(&format!("par:{}", md.vlid))?.map(|x| list_of(v, x)).unwrap_or_default();
+        let rec = self
+            .get(&format!("par:{}", md.vlid))?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default();
         let pg_packed = rec.get(2).map_or(0, |&x| int_of(v, x));
         let lang = phitex_typeset::linebreak::LangState {
             lang: u16::try_from(pg_packed % 65536).unwrap_or(0),
@@ -559,7 +586,11 @@ impl Run<'_, '_> {
                 self.append(md.vlid, x);
             }
         }
-        self.set(&format!("pg:{}", md.vlid), v.int(i64::from(para.prev_graf)), true);
+        self.set(
+            &format!("pg:{}", md.vlid),
+            v.int(i64::from(para.prev_graf)),
+            true,
+        );
         Ok(())
     }
 
@@ -571,7 +602,11 @@ impl Run<'_, '_> {
         let x = self.get("patterns")?;
         let key = x.map_or(0, ValueId::raw);
         let cache = C.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-        if let Some(p) = cache.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
+        if let Some(p) = cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+        {
             return Ok(p.clone());
         }
         let v = self.v;
@@ -580,7 +615,10 @@ impl Run<'_, '_> {
             for e in list_of(v, x) {
                 let xs = list_of(v, e);
                 let lang = u16::try_from(xs.first().map_or(0, |&l| int_of(v, l))).unwrap_or(0);
-                let kind = xs.get(1).map(|&k| crate::val::str_of(v, k)).unwrap_or_default();
+                let kind = xs
+                    .get(1)
+                    .map(|&k| crate::val::str_of(v, k))
+                    .unwrap_or_default();
                 for w in xs.get(2).map(|&l| list_of(v, l)).unwrap_or_default() {
                     let word = crate::val::str_of(v, w);
                     if kind == "p" {
@@ -718,7 +756,11 @@ impl Run<'_, '_> {
                 // §1083
                 let k = c - 4;
                 let (grp, spec) = if k == 102 {
-                    let g = if ctx < BOX_FLAG && md.m.abs() == 1 { group::ADJUSTED_HBOX } else { group::HBOX };
+                    let g = if ctx < BOX_FLAG && md.m.abs() == 1 {
+                        group::ADJUSTED_HBOX
+                    } else {
+                        group::HBOX
+                    };
                     (g, self.scan_spec()?)
                 } else if k == 1 {
                     (group::VBOX, self.scan_spec()?)
@@ -780,13 +822,19 @@ impl Run<'_, '_> {
             }
         } else if ctx < SHIP_OUT_FLAG {
             // §1077
-            let (n, global) = if ctx < BOX_FLAG + 256 { (ctx - BOX_FLAG, false) } else { (ctx - BOX_FLAG - 256, true) };
+            let (n, global) = if ctx < BOX_FLAG + 256 {
+                (ctx - BOX_FLAG, false)
+            } else {
+                (ctx - BOX_FLAG - 256, true)
+            };
             self.set_box_reg(md, n, b, global);
         } else if let Some(b) = b {
             if ctx > SHIP_OUT_FLAG {
                 // §1078
                 self.skip_blanks_relax_x()?;
-                if (self.cur.cmd == cmd::HSKIP && md.m.abs() != 1) || (self.cur.cmd == cmd::VSKIP && md.m.abs() == 1) {
+                if (self.cur.cmd == cmd::HSKIP && md.m.abs() != 1)
+                    || (self.cur.cmd == cmd::VSKIP && md.m.abs() == 1)
+                {
                     let g = self.glue_of_cur()?;
                     let kind = match ctx - LEADER_FLAG {
                         0 => GlueKind::ALeaders,
@@ -795,7 +843,11 @@ impl Run<'_, '_> {
                     };
                     let mut side = Side::default();
                     let leader = nodes::decode(v, b, &mut side).map(Box::new);
-                    let node = Node::Glue(phitex_typeset::node::GlueNode { spec: g, kind, leader });
+                    let node = Node::Glue(phitex_typeset::node::GlueNode {
+                        spec: g,
+                        kind,
+                        leader,
+                    });
                     let x = nodes::encode(v, &node, &side);
                     self.append(md.lid, x);
                 } else {
@@ -835,7 +887,11 @@ impl Run<'_, '_> {
     pub(crate) fn append_glue(&mut self, md: &Mode) -> R<()> {
         let s = self.cur.chr;
         let g = self.glue_of_cur()?;
-        let kind = if s > 4 { GlueKind::Mu } else { GlueKind::Normal };
+        let kind = if s > 4 {
+            GlueKind::Mu
+        } else {
+            GlueKind::Normal
+        };
         let n = nodes::glue_node(self.v, &g, kind);
         self.append(md.lid, n);
         Ok(())
@@ -864,7 +920,9 @@ impl Run<'_, '_> {
     pub(crate) fn unpackage(&mut self, md: &Mode) -> R<()> {
         let c = self.cur.chr;
         let n = self.scan_eight_bit_int()?;
-        let Some(b) = self.box_reg(n)? else { return Ok(()) };
+        let Some(b) = self.box_reg(n)? else {
+            return Ok(());
+        };
         let v = self.v;
         let h = nodes::box_is_h(v, b);
         if md.m.abs() == 203 || (md.m.abs() == 1 && h) || (md.m.abs() == 102 && !h) {
@@ -884,7 +942,9 @@ impl Run<'_, '_> {
     /// `append_italic_correction` (§1113).
     pub(crate) fn append_italic_correction(&mut self, md: &Mode) -> R<()> {
         let (items, _) = self.list_items(md.lid)?;
-        let Some(&last) = items.last() else { return Ok(()) };
+        let Some(&last) = items.last() else {
+            return Ok(());
+        };
         let v = self.v;
         let mut side = Side::default();
         let (f, c) = match nodes::decode(v, last, &mut side) {
@@ -922,7 +982,12 @@ impl Run<'_, '_> {
         } else {
             self.scan_left_brace()?;
             let sid = self.node_raw();
-            let extra = vec![v.int(0), v.int(md.lid), v.list(Vec::new()), v.list(Vec::new())];
+            let extra = vec![
+                v.int(0),
+                v.int(md.lid),
+                v.list(Vec::new()),
+                v.list(Vec::new()),
+            ];
             let kind = self.kind_value(md, group::DISC, sid, sid, -102, extra)?;
             self.open_scope_here(kind);
         }
@@ -946,14 +1011,18 @@ impl Run<'_, '_> {
         let x = self.font_dimen(i64::from(f), 5)?;
         let slant = self.font_dimen(i64::from(f), 1)?;
         let s = f64::from(slant) / 65536.0;
-        let a = view.char_dims(f, u32::try_from(a_ch).unwrap_or(0)).map_or(0, |d| d.width);
+        let a = view
+            .char_dims(f, u32::try_from(a_ch).unwrap_or(0))
+            .map_or(0, |d| d.width);
         self.do_assignments()?;
         // §1124
         let f2 = u32::try_from(self.int("font")?).unwrap_or(0);
         let mut view2 = crate::fonts::View::default();
         self.add_font(&mut view2, f2)?;
         let q: Option<u32> = match self.cur.cmd {
-            cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN => Some(u32::try_from(self.cur.chr).unwrap_or(0)),
+            cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN => {
+                Some(u32::try_from(self.cur.chr).unwrap_or(0))
+            }
             cmd::CHAR_NUM => Some(u32::try_from(self.scan_char_num()?).unwrap_or(0)),
             _ => {
                 self.back_cur();
@@ -970,7 +1039,13 @@ impl Run<'_, '_> {
                 let (w, h) = (d.width, d.height);
                 let mut p = p_char;
                 if h != x {
-                    let pp = phitex_typeset::pack::hpack(vec![p], Spec::Additional(0), &view, &PackParams::default(), false);
+                    let pp = phitex_typeset::pack::hpack(
+                        vec![p],
+                        Spec::Additional(0),
+                        &view,
+                        &PackParams::default(),
+                        false,
+                    );
                     let mut bx = pp.node;
                     bx.shift = x - h;
                     p = Node::Box(bx);
@@ -1019,7 +1094,14 @@ impl Run<'_, '_> {
         self.scan_left_brace()?;
         let v = self.v;
         let sid = self.node_raw();
-        let kind = self.kind_value(md, group::INSERT, sid, sid, -1, vec![v.int(i64::from(n)), v.int(md.lid)])?;
+        let kind = self.kind_value(
+            md,
+            group::INSERT,
+            sid,
+            sid,
+            -1,
+            vec![v.int(i64::from(n)), v.int(md.lid)],
+        )?;
         self.open_scope_here(kind);
         self.normal_paragraph()?;
         Ok(())
@@ -1030,7 +1112,12 @@ impl Run<'_, '_> {
     pub(crate) fn handle_right_brace(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
         // a paragraph inside a vertical group ends first (`end_graf`)
-        if md.m == 102 && matches!(md.group, group::VBOX | group::VTOP | group::INSERT | group::OUTPUT | group::VCENTER) {
+        if md.m == 102
+            && matches!(
+                md.group,
+                group::VBOX | group::VTOP | group::INSERT | group::OUTPUT | group::VCENTER
+            )
+        {
             let t = self.cur.tok.clone();
             self.back_input(t);
             self.back_input(Tok::cs("\u{10FFFE}endgraf"));
@@ -1043,11 +1130,18 @@ impl Run<'_, '_> {
                 self.effect = Effect::Close;
                 let x = |i: usize| md.extra.get(i).map_or(0, |&y| int_of(v, y));
                 let (ctx, spec_code, size) = (x(0), x(1), i32::try_from(x(2)).unwrap_or(0));
-                let spec = if spec_code == 0 { Spec::Exactly(size) } else { Spec::Additional(size) };
+                let spec = if spec_code == 0 {
+                    Spec::Exactly(size)
+                } else {
+                    Spec::Additional(size)
+                };
                 let d = self.param("boxmaxdepth")?;
                 let (items, _) = self.list_items(md.sid)?;
                 let mut side = Side::default();
-                let list: List = items.iter().filter_map(|&y| nodes::decode(v, y, &mut side)).collect();
+                let list: List = items
+                    .iter()
+                    .filter_map(|&y| nodes::decode(v, y, &mut side))
+                    .collect();
                 let adjusted = md.group == group::ADJUSTED_HBOX;
                 let packed = if md.group == group::HBOX || adjusted {
                     let view = self.font_view(&list)?;
@@ -1059,7 +1153,9 @@ impl Run<'_, '_> {
                     if md.group == group::VTOP {
                         // §1087
                         let h = match p.node.list.first() {
-                            Some(n @ (Node::Box(_) | Node::Rule(_))) => n.box_dims().map_or(0, |b| b.1),
+                            Some(n @ (Node::Box(_) | Node::Rule(_))) => {
+                                n.box_dims().map_or(0, |b| b.1)
+                            }
                             _ => 0,
                         };
                         p.node.depth = p.node.depth - h + p.node.height;
@@ -1075,7 +1171,11 @@ impl Run<'_, '_> {
                     // a local \setbox lands outside the group
                     let lvl = v.int(outer.depth);
                     let val = v.list(vec![lvl, b]);
-                    let def = v.list(vec![v.str(&format!("box:{}", ctx - BOX_FLAG)), val, v.int(0)]);
+                    let def = v.list(vec![
+                        v.str(&format!("box:{}", ctx - BOX_FLAG)),
+                        val,
+                        v.int(0),
+                    ]);
                     let put = self.ops.put;
                     self.kid(put, vec![v.list(vec![def]), v.list(Vec::new())]);
                     let _ = SHIP_OUT_FLAG;
@@ -1099,8 +1199,12 @@ impl Run<'_, '_> {
                 let f = self.param("floatingpenalty")?;
                 let (items, _) = self.list_items(md.sid)?;
                 let mut side = Side::default();
-                let list: List = items.iter().filter_map(|&y| nodes::decode(v, y, &mut side)).collect();
-                let p = phitex_typeset::pack::vpack(list, Spec::Additional(0), &PackParams::default());
+                let list: List = items
+                    .iter()
+                    .filter_map(|&y| nodes::decode(v, y, &mut side))
+                    .collect();
+                let p =
+                    phitex_typeset::pack::vpack(list, Spec::Additional(0), &PackParams::default());
                 self.unsave_extras(md)?;
                 let outer = self.outer_mode(md)?;
                 let node = if n < 255 {
@@ -1202,7 +1306,11 @@ impl Run<'_, '_> {
         for &y in &items {
             if let Some(n) = nodes::decode(v, y, &mut side) {
                 match n {
-                    Node::Char { .. } | Node::Kern(..) | Node::Box(_) | Node::Rule(_) | Node::Lig(_) => list.push(n),
+                    Node::Char { .. }
+                    | Node::Kern(..)
+                    | Node::Box(_)
+                    | Node::Rule(_)
+                    | Node::Lig(_) => list.push(n),
                     _ => break, // "Improper discretionary list"
                 }
             }
@@ -1234,8 +1342,14 @@ impl Run<'_, '_> {
         }
         self.effect = Effect::Close;
         let mut s2 = Side::default();
-        let pre = md.extra.get(2).map_or_else(Vec::new, |&l| nodes::decode_list(v, l, &mut s2));
-        let post = md.extra.get(3).map_or_else(Vec::new, |&l| nodes::decode_list(v, l, &mut s2));
+        let pre = md
+            .extra
+            .get(2)
+            .map_or_else(Vec::new, |&l| nodes::decode_list(v, l, &mut s2));
+        let post = md
+            .extra
+            .get(3)
+            .map_or_else(Vec::new, |&l| nodes::decode_list(v, l, &mut s2));
         let d = Node::Disc(Disc {
             pre,
             post,
@@ -1272,14 +1386,25 @@ impl Run<'_, '_> {
                     } else {
                         self.cur.chr
                     };
-                    let next = self.main_loop(md, f, &view, u32::try_from(ch).unwrap_or(0), &mut sf, &mut out, &mut cancel_boundary)?;
+                    let next = self.main_loop(
+                        md,
+                        f,
+                        &view,
+                        u32::try_from(ch).unwrap_or(0),
+                        &mut sf,
+                        &mut out,
+                        &mut cancel_boundary,
+                    )?;
                     if next {
                         continue;
                     }
                 }
                 cmd::NO_BOUNDARY => {
                     self.get_x_token()?;
-                    if matches!(self.cur.cmd, cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN | cmd::CHAR_NUM) {
+                    if matches!(
+                        self.cur.cmd,
+                        cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN | cmd::CHAR_NUM
+                    ) {
                         cancel_boundary = true;
                     }
                     continue;
@@ -1301,7 +1426,13 @@ impl Run<'_, '_> {
             self.get_x_token()?;
             if !matches!(
                 self.cur.cmd,
-                cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN | cmd::CHAR_NUM | cmd::NO_BOUNDARY | cmd::SPACER | cmd::EX_SPACE
+                cmd::LETTER
+                    | cmd::OTHER_CHAR
+                    | cmd::CHAR_GIVEN
+                    | cmd::CHAR_NUM
+                    | cmd::NO_BOUNDARY
+                    | cmd::SPACER
+                    | cmd::EX_SPACE
             ) {
                 self.back_cur();
                 break;
@@ -1324,7 +1455,11 @@ impl Run<'_, '_> {
         let zero = |g: &Glue| g.width == 0 && g.stretch == 0 && g.shrink == 0;
         let fi = i64::from(f);
         let font_glue = |r: &mut Self| -> R<Glue> {
-            Ok(Glue::new(r.font_dimen(fi, 2)?, r.font_dimen(fi, 3)?, r.font_dimen(fi, 4)?))
+            Ok(Glue::new(
+                r.font_dimen(fi, 2)?,
+                r.font_dimen(fi, 3)?,
+                r.font_dimen(fi, 4)?,
+            ))
         };
         if normal {
             return Ok(if zero(&ss) {
@@ -1510,7 +1645,11 @@ impl Run<'_, '_> {
                     at = L::Move1;
                 }
                 L::Move1 => {
-                    at = if lig_stack.last().is_some_and(|t| t.lig) { L::MoveLig } else { L::Move2 };
+                    at = if lig_stack.last().is_some_and(|t| t.lig) {
+                        L::MoveLig
+                    } else {
+                        L::Move2
+                    };
                 }
                 L::Move2 => {
                     let cl = cur_l.unwrap_or(0);
@@ -1534,7 +1673,10 @@ impl Run<'_, '_> {
                     if !self.has_input() {
                         input_done = true;
                     } else if self.get_next()? {
-                        if !matches!(self.cur.cmd, cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN) {
+                        if !matches!(
+                            self.cur.cmd,
+                            cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN
+                        ) {
                             self.x_token()?;
                         }
                         match self.cur.cmd {
@@ -1676,7 +1818,11 @@ impl Run<'_, '_> {
                         _ => {
                             cur_l = Some(rem);
                             lig_present = true;
-                            at = if lig_stack.is_empty() { L::Wrapup } else { L::Move1 };
+                            at = if lig_stack.is_empty() {
+                                L::Wrapup
+                            } else {
+                                L::Move1
+                            };
                             continue;
                         }
                     }
@@ -1723,13 +1869,25 @@ impl Run<'_, '_> {
         let last = items.last().copied();
         let tag = last.map_or(-1, |x| nodes::tag(v, x));
         Ok(match m {
-            0 => IVal::Int(if tag == nodes::T_PENALTY { nodes::int_field(v, last.unwrap_or(ValueId::UNIT), 1) } else { 0 }),
-            1 => IVal::Dimen(if tag == nodes::T_KERN { nodes::int_field(v, last.unwrap_or(ValueId::UNIT), 1) } else { 0 }),
+            0 => IVal::Int(if tag == nodes::T_PENALTY {
+                nodes::int_field(v, last.unwrap_or(ValueId::UNIT), 1)
+            } else {
+                0
+            }),
+            1 => IVal::Dimen(if tag == nodes::T_KERN {
+                nodes::int_field(v, last.unwrap_or(ValueId::UNIT), 1)
+            } else {
+                0
+            }),
             _ => {
                 if tag == nodes::T_GLUE {
                     let x = last.unwrap_or(ValueId::UNIT);
                     let g = nodes::glue_of_node(v, x);
-                    if nodes::int_field(v, x, 2) == 2 { IVal::Mu(g) } else { IVal::Glue(g) }
+                    if nodes::int_field(v, x, 2) == 2 {
+                        IVal::Mu(g)
+                    } else {
+                        IVal::Glue(g)
+                    }
                 } else {
                     IVal::Glue(Glue::ZERO)
                 }
@@ -1769,7 +1927,9 @@ impl Run<'_, '_> {
 
     /// `\vsplit` (§977): the box split off register `n` at height `h`.
     fn vsplit(&mut self, n: i32, h: i32) -> R<Option<ValueId>> {
-        let Some(b) = self.box_reg(n)? else { return Ok(None) };
+        let Some(b) = self.box_reg(n)? else {
+            return Ok(None);
+        };
         let v = self.v;
         let mut side = Side::default();
         let Some(Node::Box(bx)) = nodes::decode(v, b, &mut side) else {
@@ -1782,7 +1942,11 @@ impl Run<'_, '_> {
         let smd = self.param("splitmaxdepth")?;
         let pp = self.pack_params(false)?;
         let r = phitex_typeset::page::vsplit(bx.list, h, smd, stk, false, &pp);
-        let marks: Vec<ValueId> = r.marks.iter().filter_map(|&k| side.marks.get(k as usize).copied()).collect();
+        let marks: Vec<ValueId> = r
+            .marks
+            .iter()
+            .filter_map(|&k| side.marks.get(k as usize).copied())
+            .collect();
         if let Some(&first) = marks.first() {
             self.set("mark:splitfirst", first, true);
             self.set("mark:splitbot", *marks.last().unwrap_or(&first), true);

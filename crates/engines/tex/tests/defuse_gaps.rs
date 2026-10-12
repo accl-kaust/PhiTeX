@@ -3,7 +3,9 @@
 
 use std::sync::Arc;
 
-use phitex_defuse::{Claim, Ctx, Engine, Field, Locality, OpId, Operation, Stop, Value, ValueId, Values};
+use phitex_defuse::{
+    Claim, Ctx, Engine, Field, Locality, OpId, Operation, Stop, Value, ValueId, Values,
+};
 
 /// `["p"]` unfolds a child `["c"]`; `["c"]` outputs the text of its
 /// first following sibling (or "none") and claims it; `["s", x]` outputs x.
@@ -13,8 +15,17 @@ impl Operation for Toy {
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         Some(Vec::new())
     }
-    fn claim(&self, a: &[ValueId], v: &Values, _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>) -> Claim {
-        if tag(v, a) == "c" { Claim::Pending } else { Claim::None }
+    fn claim(
+        &self,
+        a: &[ValueId],
+        v: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Claim {
+        if tag(v, a) == "c" {
+            Claim::Pending
+        } else {
+            Claim::None
+        }
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
@@ -28,7 +39,10 @@ impl Operation for Toy {
             "c" => {
                 let f = cx.following(0);
                 cx.claim(usize::from(f.is_some()));
-                Ok(f.map_or_else(|| v.str("none"), |(_, xs)| xs.get(1).copied().unwrap_or(ValueId::UNIT)))
+                Ok(f.map_or_else(
+                    || v.str("none"),
+                    |(_, xs)| xs.get(1).copied().unwrap_or(ValueId::UNIT),
+                ))
             }
             _ => Ok(a.get(1).copied().unwrap_or(ValueId::UNIT)),
         }
@@ -55,11 +69,19 @@ fn a_child_claims_its_parents_following_sibling() {
     let _ = OP.set(op);
     let u = eng.new_unit();
     let p = eng.push(u, op, vec![eng.values().str("p")]);
-    let _s = eng.push(u, op, vec![eng.values().str("s"), eng.values().str("sibling")]);
+    let _s = eng.push(
+        u,
+        op,
+        vec![eng.values().str("s"), eng.values().str("sibling")],
+    );
     eng.evaluate_sequential().expect("evaluate");
     let c = eng.children(p)[0];
     let got = eng.output(c).map(|x| eng.values().render(x));
-    assert_eq!(got.as_deref(), Some("\"sibling\""), "the child saw no following sibling");
+    assert_eq!(
+        got.as_deref(),
+        Some("\"sibling\""),
+        "the child saw no following sibling"
+    );
 }
 
 /// `["c"]` claims its following sibling (a pending claim); `["d"]` has a
@@ -68,13 +90,30 @@ struct Toy2;
 
 impl Operation for Toy2 {
     fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
-        if tag(v, a) == "d" { None } else { Some(Vec::new()) }
+        if tag(v, a) == "d" {
+            None
+        } else {
+            Some(Vec::new())
+        }
     }
-    fn claim(&self, a: &[ValueId], v: &Values, _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>) -> Claim {
-        if matches!(tag(v, a).as_str(), "r" | "f") { Claim::None } else { Claim::Pending }
+    fn claim(
+        &self,
+        a: &[ValueId],
+        v: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Claim {
+        if matches!(tag(v, a).as_str(), "r" | "f") {
+            Claim::None
+        } else {
+            Claim::Pending
+        }
     }
     fn effect(&self, a: &[ValueId], v: &Values) -> phitex_defuse::Effect {
-        if matches!(tag(v, a).as_str(), "r" | "f") { phitex_defuse::Effect::None } else { phitex_defuse::Effect::Pending }
+        if matches!(tag(v, a).as_str(), "r" | "f") {
+            phitex_defuse::Effect::None
+        } else {
+            phitex_defuse::Effect::Pending
+        }
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
@@ -122,4 +161,106 @@ fn a_reader_parked_on_a_node_that_becomes_claimed_is_woken() {
     eng.evaluate_sequential().expect("evaluate");
     let got = eng.output(r).map(|x| eng.values().render(x));
     assert_eq!(got.as_deref(), Some("\"none\""));
+}
+
+/// `["c"]` claims 3 following siblings when the first one's text is "x",
+/// else 1, and then unfolds a child `["k"]`; `["k"]` and `["s", t]`
+/// contribute their text to `acc`; `["f"]` reads `acc`.
+struct Toy3;
+
+impl Operation for Toy3 {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn claim(
+        &self,
+        a: &[ValueId],
+        v: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Claim {
+        if tag(v, a) == "c" {
+            Claim::Pending
+        } else {
+            Claim::None
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let acc = v.field("acc");
+        match tag(v, &a).as_str() {
+            "c" => {
+                let first = cx.following(0).and_then(|(_, xs)| xs.get(1).copied());
+                let n = if first.is_some_and(|x| matches!(&*v.get(x), Value::Str(s) if &**s == "x")) {
+                    3
+                } else {
+                    1
+                };
+                for i in 0..n {
+                    let _ = cx.following(i);
+                }
+                cx.claim(n);
+                if n == 1 {
+                    let op = OP3.get().copied().unwrap();
+                    cx.child(op, vec![v.str("k")]);
+                }
+                Ok(ValueId::UNIT)
+            }
+            "k" => {
+                cx.contribute(acc, v.seq_unit(v.str("k")));
+                Ok(ValueId::UNIT)
+            }
+            "f" => cx.acc_range(acc, None),
+            _ => {
+                let t = a.get(1).copied().unwrap_or(ValueId::UNIT);
+                cx.contribute(acc, v.seq_unit(t));
+                Ok(ValueId::UNIT)
+            }
+        }
+    }
+}
+
+static OP3: std::sync::OnceLock<OpId> = std::sync::OnceLock::new();
+
+fn toy3_unit(eng: &mut Engine, op: OpId, x: &str) -> (Vec<phitex_defuse::NodeId>, phitex_defuse::NodeId) {
+    let u = eng.new_unit();
+    let mut ns = Vec::new();
+    let c = eng.values().str("c");
+    ns.push(eng.push(u, op, vec![c]));
+    for t in [x, "y", "z", "w"] {
+        let a = vec![eng.values().str("s"), eng.values().str(t)];
+        ns.push(eng.push(u, op, a));
+    }
+    let f = eng.values().str("f");
+    let f = eng.push(u, op, vec![f]);
+    (ns, f)
+}
+
+/// A claimer's claim shrinks after an edit (3 siblings → 1) and it
+/// unfolds a new child: the child's
+/// place in text order follows the new claim, so its contribution comes
+/// before the siblings released from the claim, as in a cold evaluation
+/// of the edited unit.
+#[test]
+fn a_child_moves_back_when_its_parents_claim_shrinks() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Toy3));
+    let _ = OP3.set(op);
+    let acc = eng.values().field("acc");
+    eng.declare_accumulator(acc, Arc::new(phitex_defuse::SeqMonoid));
+    let (ns, f) = toy3_unit(&mut eng, op, "x");
+    eng.evaluate_sequential().expect("evaluate");
+    let a = vec![eng.values().str("s"), eng.values().str("x2")];
+    eng.replace(ns[1], op, a);
+    eng.evaluate_sequential().expect("evaluate after the edit");
+    let got = eng.output(f).map(|x| eng.values().render(x));
+
+    let mut cold = Engine::new();
+    let op2 = cold.register(Arc::new(Toy3));
+    let acc2 = cold.values().field("acc");
+    cold.declare_accumulator(acc2, Arc::new(phitex_defuse::SeqMonoid));
+    let (_, f2) = toy3_unit(&mut cold, op2, "x2");
+    cold.evaluate_sequential().expect("cold evaluate");
+    let want = cold.output(f2).map(|x| cold.values().render(x));
+    assert_eq!(got, want, "edited order differs from cold");
 }
