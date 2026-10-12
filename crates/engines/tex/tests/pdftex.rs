@@ -54,23 +54,13 @@ fn savepos() {
     }
 }
 
-/// The PDF documents with links, annotations, objects, forms or images:
-/// what the writer does not have yet (PDF-BACKEND-GAP).
-const BACKEND_GAPS: &[&str] = &[
-    "annot",
-    "bera",
-    "jpgres",
-    "obj",
-    "outline",
-    "readback",
-    "rerun",
-    "thread",
-    "vf",
-    "xform",
-    "ximage",
-    "ximage2",
-    "trailerid",
-];
+/// The PDF documents not yet byte-identical, compared by their streams
+/// (PDF-BACKEND-GAP): bera and vf use virtual fonts; ximage and ximage2
+/// place `\pdfrefximage` in vertical mode, where pdfTeX's page builder
+/// does not count the node's height (pdfTeX §1000: a whatsit) but
+/// `vpack` does, and phitex-typeset's whatsit has no dimensions (an
+/// empty box stands for it).
+const BACKEND_GAPS: &[&str] = &["bera", "vf", "ximage", "ximage2"];
 
 /// The `stream ... endstream` bodies of a PDF file.
 fn streams(b: &[u8]) -> Vec<Vec<u8>> {
@@ -92,24 +82,8 @@ fn find(h: &[u8], n: &[u8]) -> Option<usize> {
 }
 
 /// The documents that do not pass yet: un-ignored as they are fixed.
-/// The documents not yet byte-identical: berasizes (virtual fonts) and
-/// pageref (object order of `\pdfpageref`: the writer as a fold); the
-/// rest use the writer's slice-2 methods (links, outlines, objects,
-/// forms, images, object streams) at call sites phitex-tex has not wired
-/// yet.
-const PENDING: &[&str] = &[
-    "berasizes",
-    "pageref",
-    "csform",
-    "jpeg",
-    "linkbreak",
-    "objstm2",
-    "outlinetree",
-    "ownpdf",
-    "ownpdf0",
-    "png",
-    "png8",
-];
+/// berasizes: virtual fonts.
+const PENDING: &[&str] = &["berasizes"];
 
 /// Gate 1: `pdftex -ini` on `oracle/fixtures/pdf/*.tex` with a `.pdf`
 /// oracle: byte-identical; for the documents on a backend gap, whether
@@ -120,7 +94,7 @@ fn pdf_documents() {
 }
 
 #[test]
-#[ignore = "berasizes: virtual fonts; pageref: object order (the writer as a fold); nine documents on unwired writer call sites"]
+#[ignore = "berasizes: virtual fonts"]
 fn pdf_documents_pending() {
     pdf_gate(true);
 }
@@ -172,4 +146,74 @@ fn pdf_gate(pending: bool) {
         }
     }
     assert!(failed.is_empty(), "failed: {failed:?}");
+}
+
+/// The writer as a fold: edits on PDF documents (objects, forms, links,
+/// outlines, page references, images), each equal to a cold build.
+#[test]
+fn pdf_edits() {
+    let dir = common::fixtures().join("pdf");
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        (
+            "annot",
+            &[
+                ("link text", "lnik text"),
+                ("(Hi)", "(Ho)"),
+                ("zoom 2000", "zoom 1000"),
+            ],
+        ),
+        (
+            "objstm2",
+            &[
+                ("<< /A 1 >>", "<< /A 2 >>"),
+                ("{First}", "{Fist}"),
+                ("B\\par", "BB\\par"),
+            ],
+        ),
+        (
+            "xform",
+            &[
+                ("X\\pdfliteral", "Z\\pdfliteral"),
+                ("width 20pt", "width 30pt"),
+            ],
+        ),
+        (
+            "pageref",
+            &[("A\\a", "AA\\a"), ("\\pdfpageref 3", "\\pdfpageref 4")],
+        ),
+        ("outlinetree", &[("{One.A}", "{One.Z}"), ("{Two}", "{Too}")]),
+        (
+            "csform",
+            &[
+                ("1 0 0 rg", "0 1 0 rg"),
+                ("D\\pdfrefxform", "DD\\pdfrefxform"),
+            ],
+        ),
+        ("linkbreak", &[("several", "sevral"), ("Then", "Thn")]),
+        ("png", &[("{png-gray.png}", "{png-rgba.png}")]),
+    ];
+    let mut failed = Vec::new();
+    for &(name, edits) in cases {
+        let src = common::read(&dir.join(format!("{name}.tex")));
+        let opts = || phitex_tex::Options {
+            epoch: Some(0),
+            ..common::options(&format!("./{name}.tex"), name, "", &dir)
+        };
+        let mut b = common::build(opts(), None, &src);
+        let mut text = src.clone();
+        for &(from, to) in edits {
+            assert!(text.contains(from), "{name}: {from:?}");
+            text = text.replacen(from, to, 1);
+            b.edit(&text);
+            let cold = common::build(opts(), None, &text);
+            match common::first_difference(&b.output().0, &cold.output().0) {
+                None => eprintln!("ok {name} {from:?}: equals cold"),
+                Some(d) => {
+                    eprintln!("FAIL {name} {from:?}: {d}");
+                    failed.push(format!("{name} {from:?}"));
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "edits differing from cold: {failed:?}");
 }

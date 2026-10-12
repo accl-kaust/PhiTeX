@@ -10,12 +10,15 @@
 //! `\pdffontobjnum`, ...) comes from the state the step made. At the end
 //! the `Dvi` node finishes the state that reaches it.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use phitex_defuse::{Ctx, Stop, Value, ValueId, Values};
-use phitex_pdf::map::{MapEntry, parse_line, parse_map};
-use phitex_pdf::{ColorStackCmd, FontSource, LiteralMode, PdfBytes, PdfParams, PdfState, Whatsit};
+use phitex_pdf::map::{MapEntry, parse_line, parse_map, parse_map_ps};
+use phitex_pdf::{
+    Action, ColorStackCmd, DestKind, FontSource, Ident, LiteralMode, PdfBytes, PdfParams, PdfState,
+    Whatsit,
+};
 use phitex_tfm::ScaledFont;
 use phitex_typeset::fonts::FontId;
 use phitex_typeset::node::BoxNode;
@@ -39,7 +42,35 @@ fn maps() -> &'static MapCache {
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-type States = Mutex<HashMap<u64, Arc<(PdfState, PdfBytes)>>>;
+/// What the fold carries beside the writer: the whatsits of the forms'
+/// boxes (`\pdfxform`), by the handles their boxes were given (from
+/// [`FORM_HANDLES`] up), and the fonts those boxes use.
+#[derive(Clone, Default)]
+pub(crate) struct Forms {
+    pub whats: BTreeMap<u32, Whatsit>,
+    pub fonts: BTreeSet<u32>,
+}
+
+/// The first handle of a form's whatsits: a page's are below.
+pub(crate) const FORM_HANDLES: u32 = 0x8000_0000;
+
+impl Forms {
+    /// The next free handle.
+    pub(crate) fn next_handle(&self) -> u32 {
+        self.whats
+            .last_key_value()
+            .map_or(FORM_HANDLES, |(&k, _)| k + 1)
+    }
+}
+
+/// One state of the fold: the writer, the file so far, the forms.
+pub(crate) struct Fold {
+    st: PdfState,
+    bytes: PdfBytes,
+    forms: Forms,
+}
+
+type States = Mutex<HashMap<u64, Arc<Fold>>>;
 
 /// The writer's states by key: a pure function's memo (the key is the
 /// hash of the inputs that made the state).
@@ -64,6 +95,44 @@ pub(crate) struct Fonts {
     by_id: HashMap<FontId, Font>,
     files: HashMap<Vec<u8>, Arc<[u8]>>,
     space: Option<FontId>,
+    ps: Option<Arc<PsMap>>,
+    /// The files asked for and not given (a dry run's findings).
+    missed: std::cell::RefCell<BTreeSet<Vec<u8>>>,
+}
+
+/// `pdftex.map`'s `ps_tree`.
+type PsMap = BTreeMap<(Vec<u8>, i32, i32), MapEntry>;
+
+type PsCache = Mutex<HashMap<u64, Arc<PsMap>>>;
+
+fn ps_maps() -> &'static PsCache {
+    static C: OnceLock<PsCache> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// `pdftex.map` by PostScript name: a pure function's memo.
+fn default_ps_map(r: &mut Run<'_, '_>) -> R<Option<Arc<PsMap>>> {
+    let v = r.v;
+    let Some(x) = r.file("pdftex.map")? else {
+        return Ok(None);
+    };
+    let Some(&m) = list_of(v, x).get(1) else {
+        return Ok(None);
+    };
+    let key = m.raw();
+    if let Some(c) = ps_maps()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+    {
+        return Ok(Some(c.clone()));
+    }
+    let parsed = Arc::new(parse_map_ps(&bytes_of(&str_of(v, m))));
+    ps_maps()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, parsed.clone());
+    Ok(Some(parsed))
 }
 
 impl FontSource for Fonts {
@@ -95,7 +164,17 @@ impl FontSource for Fonts {
         self.by_id.get(&f)?.enc.as_ref().map(|b| b.to_vec())
     }
     fn file(&self, name: &[u8]) -> Option<Vec<u8>> {
-        self.files.get(name).map(|b| b.to_vec())
+        let f = self.files.get(name).map(|b| b.to_vec());
+        if f.is_none() {
+            self.missed.borrow_mut().insert(name.to_vec());
+        }
+        f
+    }
+    fn map_by_ps_name(&self, ps_name: &[u8], slant: i32, extend: i32) -> Option<MapEntry> {
+        self.ps
+            .as_ref()?
+            .get(&(ps_name.to_vec(), slant, extend))
+            .cloned()
     }
     fn space_font(&self) -> Option<FontId> {
         self.space
@@ -223,6 +302,23 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
     Ok(out)
 }
 
+/// The fold's state where this node is (`pdf:state`), if a step made
+/// one.
+fn before(r: &mut Run<'_, '_>) -> R<(u64, Option<Arc<Fold>>)> {
+    let k0 = u64::from_ne_bytes(r.int("pdf:state")?.to_ne_bytes());
+    let a = states()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&k0)
+        .cloned();
+    Ok((k0, a))
+}
+
+/// The forms' part of the fold's state where this node is.
+pub(crate) fn forms_here(r: &mut Run<'_, '_>) -> R<Forms> {
+    Ok(before(r)?.1.map(|a| a.forms.clone()).unwrap_or_default())
+}
+
 /// A step of the fold: the state after the previous step (a fresh one
 /// at the start), `f` applied, the bytes it wrote flushed; `input` is
 /// everything the step depends on.
@@ -232,16 +328,21 @@ pub(crate) fn step<T>(
     fonts: &Fonts,
     f: impl FnOnce(&mut PdfState, &Fonts) -> T,
 ) -> R<T> {
+    step_forms(r, input, fonts, |st, _, fs| f(st, fs))
+}
+
+/// [`step`], the forms' table in reach.
+pub(crate) fn step_forms<T>(
+    r: &mut Run<'_, '_>,
+    input: ValueId,
+    fonts: &Fonts,
+    f: impl FnOnce(&mut PdfState, &mut Forms, &Fonts) -> T,
+) -> R<T> {
     let v = r.v;
-    let k0 = u64::from_ne_bytes(r.int("pdf:state")?.to_ne_bytes());
-    let before = states()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&k0)
-        .cloned();
+    let (k0, before) = before(r)?;
     let before_known = before.is_some();
-    let (mut st, mut bytes) = if let Some(a) = before {
-        (a.0.clone(), a.1.clone())
+    let (mut st, mut bytes, mut forms) = if let Some(a) = before {
+        (a.st.clone(), a.bytes.clone(), a.forms.clone())
     } else {
         {
             let date = r
@@ -254,10 +355,30 @@ pub(crate) fn step<T>(
                 output_file_name: format!("{jobname}.pdf"),
                 ..PdfParams::default()
             };
-            (PdfState::new(p), PdfBytes::new())
+            (PdfState::new(p), PdfBytes::new(), Forms::default())
         }
     };
-    let out = f(&mut st, fonts);
+    // the parameters a write reads (the version, compression: fixed
+    // at the first write, pdfTeX §792), as they are at this step
+    {
+        let mut ps = [0; 5];
+        for (p, n) in ps.iter_mut().zip([
+            "pdfcompresslevel",
+            "pdfobjcompresslevel",
+            "pdfdecimaldigits",
+            "pdfminorversion",
+            "pdfmajorversion",
+        ]) {
+            *p = r.param(n)?;
+        }
+        let pm = st.params_mut();
+        pm.compress_level = ps[0].clamp(0, 9);
+        pm.obj_compress_level = ps[1];
+        pm.decimal_digits = ps[2];
+        pm.minor_version = ps[3];
+        pm.major_version = ps[4];
+    }
+    let out = f(&mut st, &mut forms, fonts);
     st.flush(&mut bytes);
     // a fresh state's key names what it was made from
     let seed = if before_known {
@@ -272,7 +393,7 @@ pub(crate) fn step<T>(
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .entry(k1)
-        .or_insert_with(|| Arc::new((st, bytes)));
+        .or_insert_with(|| Arc::new(Fold { st, bytes, forms }));
     r.set(
         "pdf:state",
         v.int(i64::from_ne_bytes(k1.to_ne_bytes())),
@@ -294,6 +415,20 @@ pub(crate) fn command<T: Default>(
     }
     let fs = fonts_for(r, fonts, false)?;
     step(r, input, &fs, f)
+}
+
+/// [`command`], the forms' table in reach.
+pub(crate) fn command_forms<T: Default>(
+    r: &mut Run<'_, '_>,
+    input: ValueId,
+    fonts: &[u32],
+    f: impl FnOnce(&mut PdfState, &mut Forms, &Fonts) -> T,
+) -> R<T> {
+    if r.param("pdfoutput")? <= 0 {
+        return Ok(T::default());
+    }
+    let fs = fonts_for(r, fonts, false)?;
+    step_forms(r, input, &fs, f)
 }
 
 fn param(v: &Values, xs: &[ValueId], k: usize) -> i32 {
@@ -363,8 +498,145 @@ fn whatsit(v: &Values, d: ValueId) -> Option<Whatsit> {
         "rloff" => Whatsit::RunningLinkOff,
         "rlon" => Whatsit::RunningLinkOn,
         "restore" => Whatsit::Restore,
+        // pdfTeX §1366 ff.: the nodes as `\pdfrefobj` ... `\pdfendthread`
+        // made them ([`crate::pdfprim::extension`])
+        "pdf:refobj" => Whatsit::RefObj(usize::try_from(int(1)).unwrap_or(0)),
+        "pdf:refxform" => Whatsit::RefXForm(usize::try_from(int(1)).unwrap_or(0)),
+        "pdf:refximage" => Whatsit::RefXImage(usize::try_from(int(1)).unwrap_or(0)),
+        "pdf:annot" => Whatsit::Annot {
+            objnum: usize::try_from(int(1)).unwrap_or(0),
+            width: dim(int(2)),
+            height: dim(int(3)),
+            depth: dim(int(4)),
+            data: text(5),
+        },
+        "pdf:startlink" => Whatsit::StartLink {
+            objnum: usize::try_from(int(1)).unwrap_or(0),
+            width: dim(int(2)),
+            height: dim(int(3)),
+            depth: dim(int(4)),
+            attr: some(text(5)),
+            action: action(v, ys.get(6).copied()?)?,
+        },
+        "pdf:endlink" => Whatsit::EndLink,
+        "pdf:dest" => {
+            let k = list_of(v, ys.get(2).copied()?);
+            let kn = k.first().map(|&x| str_of(v, x)).unwrap_or_default();
+            let ki = |j: usize| dim(k.get(j).map_or(0, |&x| int_of(v, x)));
+            Whatsit::Dest {
+                id: ident(v, ys.get(1).copied()?),
+                struct_num: None,
+                kind: match kn.as_str() {
+                    "fit" => DestKind::Fit,
+                    "fith" => DestKind::FitH,
+                    "fitv" => DestKind::FitV,
+                    "fitb" => DestKind::FitB,
+                    "fitbh" => DestKind::FitBH,
+                    "fitbv" => DestKind::FitBV,
+                    "fitr" => DestKind::FitR(ki(1), ki(2), ki(3)),
+                    _ => DestKind::Xyz((k.len() > 1).then(|| ki(1))),
+                },
+            }
+        }
+        "pdf:thread" | "pdf:startthread" => Whatsit::Thread {
+            start: kind == "pdf:startthread",
+            id: ident(v, ys.get(1).copied()?),
+            width: dim(int(2)),
+            height: dim(int(3)),
+            depth: dim(int(4)),
+            attr: some(text(5)),
+        },
+        "pdf:endthread" => Whatsit::EndThread,
+        "pdf:savepos" => Whatsit::SavePos,
         _ => return None,
     })
+}
+
+fn dim(x: i64) -> i32 {
+    i32::try_from(x).unwrap_or(0)
+}
+
+/// `attr{...}`: absent when empty.
+fn some(t: Vec<u8>) -> Option<Vec<u8>> {
+    (!t.is_empty()).then_some(t)
+}
+
+/// An identifier as [`crate::pdfprim`] scans it: `["num", n]` or
+/// `["name", text]`.
+fn ident(v: &Values, x: ValueId) -> Ident {
+    let ys = list_of(v, x);
+    match ys.first().map(|&k| str_of(v, k)).as_deref() {
+        Some("name" | "struct") => Ident::Name(
+            ys.get(1)
+                .map(|&t| bytes_of(&str_of(v, t)))
+                .unwrap_or_default(),
+        ),
+        _ => Ident::Num(dim(ys.get(1).map_or(0, |&n| int_of(v, n)))),
+    }
+}
+
+/// An action as `scan_action` read it (pdfTeX §1360): `["user", text]`
+/// or `[kind, file, page, id, window]`.
+fn action(v: &Values, x: ValueId) -> Option<Action> {
+    let ys = list_of(v, x);
+    let kind = ys.first().map(|&k| str_of(v, k)).unwrap_or_default();
+    let text = |k: usize| {
+        ys.get(k)
+            .map(|&t| bytes_of(&str_of(v, t)))
+            .unwrap_or_default()
+    };
+    if kind == "user" {
+        return Some(Action::User(text(1)));
+    }
+    let file = some(text(1));
+    let window = u8::try_from(ys.get(4).map_or(0, |&n| int_of(v, n))).unwrap_or(0);
+    match kind.as_str() {
+        "goto" => {
+            let page = ys.get(2).copied().filter(|&p| p != ValueId::UNIT);
+            if let Some(p) = page {
+                let ps = list_of(v, p);
+                return Some(Action::Page {
+                    file,
+                    page: dim(ps.first().map_or(0, |&n| int_of(v, n))),
+                    spec: ps
+                        .get(1)
+                        .map(|&t| bytes_of(&str_of(v, t)))
+                        .unwrap_or_default(),
+                    new_window: window,
+                    struct_id: None,
+                });
+            }
+            Some(Action::Goto {
+                file,
+                id: ident(v, ys.get(3).copied()?),
+                new_window: window,
+                struct_id: None,
+            })
+        }
+        "thread" => Some(Action::Thread {
+            file,
+            id: ident(v, ys.get(3).copied()?),
+        }),
+        _ => None,
+    }
+}
+
+/// The writer's whatsit of a node's data as `\shipout` resolves it, or
+/// `None` for what the writer does not see.
+pub(crate) fn writer_whatsit(r: &mut Run<'_, '_>, w: ValueId) -> R<Option<Whatsit>> {
+    let v = r.v;
+    let xs = list_of(v, w);
+    if xs.first().map(|&k| str_of(v, k)).as_deref() == Some("special") {
+        return Ok(Some(Whatsit::Special(bytes_of(
+            &xs.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
+        ))));
+    }
+    Ok(crate::pdfprim::writer_data(r, &xs)?.and_then(|d| whatsit(v, d)))
+}
+
+/// The action of `\pdfcatalog ... openaction` (pdfTeX §1564).
+pub(crate) fn action_of(v: &Values, x: ValueId) -> Option<Action> {
+    action(v, x)
 }
 
 /// `pdf_ship_out` as a step: `page` is the `pages` entry (box, counts,
@@ -392,11 +664,56 @@ pub(crate) fn ship(
             Some("iwon" | "fake")
         )
     });
-    let fonts = fonts_for(r, ids, space)?;
+    // the fonts of the forms the page may ship too
+    let mut all: BTreeSet<u32> = ids.iter().copied().collect();
+    all.extend(forms_here(r)?.fonts);
+    let all: Vec<u32> = all.into_iter().collect();
+    let mut fonts = fonts_for(r, &all, space)?;
     let whats = side.whats.clone();
-    let (err, shown) = step(r, page, &fonts, |st, fonts| {
+    let images = resolved
+        .values()
+        .any(|&d| list_of(v, d).first().map(|&k| str_of(v, k)).as_deref() == Some("pdf:refximage"))
+        || forms_here(r)?
+            .whats
+            .values()
+            .any(|w| matches!(w, Whatsit::RefXImage(_)));
+    if images {
+        // an included PDF's fonts replaced by the map's (`copyFont`
+        // off): the files a dry run of the page asks for, read now
+        fonts.ps = default_ps_map(r)?;
+        if let (_, Some(a)) = before(r)? {
+            let mut st = a.st.clone();
+            let forms = &a.forms;
+            page_params(v, st.params_mut(), &p);
+            let mut wh = |h: u32, _l: bool| -> Option<Whatsit> {
+                if h >= FORM_HANDLES {
+                    return forms.whats.get(&h).cloned();
+                }
+                resolved.get(&h).and_then(|&d| whatsit(v, d))
+            };
+            let _ = st.ship_out_with(bx, &fonts, &mut wh);
+        }
+        for n in std::mem::take(&mut *fonts.missed.borrow_mut()) {
+            if let Some(b) = file_bytes(r, &String::from_utf8_lossy(&n))? {
+                fonts.files.insert(n, b);
+            }
+        }
+    }
+    let margins = [
+        r.param("pdflinkmargin")?,
+        r.param("pdfdestmargin")?,
+        r.param("pdfthreadmargin")?,
+    ];
+    let (err, shown) = step_forms(r, page, &fonts, |st, forms, fonts| {
         page_params(v, st.params_mut(), &p);
+        let pm = st.params_mut();
+        pm.link_margin = margins[0];
+        pm.dest_margin = margins[1];
+        pm.thread_margin = margins[2];
         let mut wh = |h: u32, _leaders: bool| -> Option<Whatsit> {
+            if h >= FORM_HANDLES {
+                return forms.whats.get(&h).cloned();
+            }
             if let Some(&d) = resolved.get(&h) {
                 return whatsit(v, d);
             }
@@ -446,7 +763,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     else {
         return Ok(v.str(""));
     };
-    let mut st = a.0.clone();
+    let mut st = a.st.clone();
     let int = |cx: &mut Ctx<'_>, f: &str| -> Result<i32, Stop> {
         Ok(cx
             .use_field(v.field(f))?
@@ -454,7 +771,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     };
     st.params_mut().info_omit_date = int(cx, "param:pdfinfoomitdate")?;
     st.params_mut().suppress_ptex_info = int(cx, "param:pdfsuppressptexinfo")?;
-    let bytes = phitex_pdf::finish(st, &a.1).unwrap_or_else(|e| {
+    let bytes = phitex_pdf::finish(st, &a.bytes).unwrap_or_else(|e| {
         if std::env::var_os("PHITEX_TEX_TIME").is_some() {
             eprintln!("pdf: {e}");
         }
