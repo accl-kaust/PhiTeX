@@ -1,18 +1,19 @@
-//! The terminal chrome of the modern command line: colours (console's
-//! detection of standard error: a terminal, `NO_COLOR`, `CLICOLOR_FORCE`),
-//! a spinner on standard error while a build runs (indicatif; nothing of
-//! it off a terminal), lines printed above it, the result line, and the
-//! engine's panics caught and shown as one line, the whole message with
-//! `-v`.
+//! The terminal chrome of the modern command line: colours on standard
+//! error (a terminal, unless `NO_COLOR`; `CLICOLOR_FORCE` forces them), a
+//! spinner while a build runs (a terminal only), lines printed above it,
+//! the result line, and the engine's panics caught and shown as one line,
+//! the whole message with `-v`. With `--json` none of it: one JSON object
+//! a line on standard output ([`Ui::event`]).
 
 use std::any::Any;
+use std::io::{IsTerminal as _, Write as _};
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use serde_json::{Value, json};
 
 use crate::session::Status;
 
@@ -26,9 +27,11 @@ pub struct Style {
 
 impl Style {
     pub fn detect() -> Style {
+        let tty = std::io::stderr().is_terminal();
+        let set = |v: &str| std::env::var_os(v).is_some_and(|x| !x.is_empty() && x != "0");
         Style {
-            color: console::colors_enabled_stderr(),
-            tty: console::user_attended_stderr(),
+            color: set("CLICOLOR_FORCE") || (tty && std::env::var_os("NO_COLOR").is_none()),
+            tty,
         }
     }
 
@@ -99,13 +102,15 @@ pub struct Ui {
     pub st: Style,
     pub verbose: u8,
     pub quiet: bool,
-    mp: MultiProgress,
+    /// `--json`: events on standard output, nothing else.
+    pub json: bool,
+    /// The spinner's line, while one runs (a terminal only).
+    spinning: Arc<Mutex<Option<String>>>,
 }
 
 /// A spinner while a build runs, until [`Spin::done`].
 pub struct Spin {
-    pb: ProgressBar,
-    mp: MultiProgress,
+    spinning: Arc<Mutex<Option<String>>>,
     stop: Arc<AtomicBool>,
     updater: Option<std::thread::JoinHandle<()>>,
 }
@@ -121,33 +126,51 @@ fn status_line(what: &str, s: &Status, elapsed: Duration) -> String {
     parts.join(" · ")
 }
 
+const TICKS: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
 impl Ui {
-    pub fn new(st: Style, verbose: u8, quiet: bool) -> Ui {
-        let target = if st.tty {
-            ProgressDrawTarget::stderr()
-        } else {
-            ProgressDrawTarget::hidden()
-        };
+    pub fn new(st: Style, verbose: u8, quiet: bool, json: bool) -> Ui {
         Ui {
             st,
             verbose,
             quiet,
-            mp: MultiProgress::with_draw_target(target),
+            json,
+            spinning: Arc::new(Mutex::new(None)),
         }
     }
 
     /// A line on standard error, above the spinner if one runs.
     pub fn line(&self, s: &str) {
-        if self.st.tty {
-            let _ = self.mp.println(s);
-        } else {
-            eprintln!("{s}");
+        if self.json {
+            return;
         }
+        let spin = self.spinning.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut e = std::io::stderr().lock();
+        if spin.is_some() {
+            let _ = write!(e, "\r\x1b[2K");
+        }
+        let _ = writeln!(e, "{s}");
     }
 
-    /// A line on standard output (the spinner lifted while it is written).
+    /// A line on standard output (the spinner's line cleared first).
     pub fn stdout(&self, s: &str) {
-        self.mp.suspend(|| println!("{s}"));
+        if self.json {
+            return;
+        }
+        let spin = self.spinning.lock().unwrap_or_else(PoisonError::into_inner);
+        if spin.is_some() {
+            let _ = write!(std::io::stderr(), "\r\x1b[2K");
+        }
+        println!("{s}");
+    }
+
+    /// `--json`: one event, a line on standard output.
+    pub fn event(&self, v: &Value) {
+        if self.json {
+            let mut o = std::io::stdout().lock();
+            let _ = writeln!(o, "{v}");
+            let _ = o.flush();
+        }
     }
 
     /// What the session says it is doing (`phitex: …`, dim), unless `-q`.
@@ -155,52 +178,47 @@ impl Ui {
         if !self.quiet {
             self.line(&self.st.dim(&format!("phitex: {s}")));
         }
+        self.event(&json!({"event": "note", "message": s}));
     }
 
     pub fn error(&self, s: &str) {
         self.line(&format!("{}: {s}", self.st.red("error")));
+        self.event(&json!({"event": "error", "message": s}));
     }
 
     pub fn warning(&self, s: &str) {
         self.line(&format!("{}: {s}", self.st.yellow("warning")));
-    }
-
-    /// A line kept above the spinner, for as long as the process runs (a
-    /// terminal only): the viewer's URL.
-    pub fn pin(&self, s: &str) {
-        if !self.st.tty {
-            return;
-        }
-        let pb = self.mp.add(ProgressBar::no_length());
-        pb.set_style(ProgressStyle::with_template("{msg}").expect("a template"));
-        pb.set_message(s.to_owned());
+        self.event(&json!({"event": "warning", "message": s}));
     }
 
     /// A spinner on standard error (a terminal only) showing `what` and
     /// what `status` says, until it is done.
     pub fn spin(&self, what: String, status: Arc<Status>) -> Spin {
-        let pb = self.mp.add(ProgressBar::new_spinner());
-        pb.set_style(
-            ProgressStyle::with_template("{spinner:.cyan.bold} {msg}")
-                .expect("a template")
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
-        );
         let stop = Arc::new(AtomicBool::new(false));
         let mut updater = None;
-        if self.st.tty {
-            pb.enable_steady_tick(Duration::from_millis(80));
-            let (pb, stop) = (pb.clone(), stop.clone());
+        if self.st.tty && !self.json {
+            let (spinning, stop) = (self.spinning.clone(), stop.clone());
             let t0 = Instant::now();
             updater = Some(std::thread::spawn(move || {
+                let mut k = 0;
                 while !stop.load(Ordering::Relaxed) {
-                    pb.set_message(status_line(&what, &status, t0.elapsed()));
-                    std::thread::sleep(Duration::from_millis(100));
+                    let line = format!(
+                        "{} {}",
+                        TICKS[k % TICKS.len()],
+                        status_line(&what, &status, t0.elapsed())
+                    );
+                    {
+                        let mut s = spinning.lock().unwrap_or_else(PoisonError::into_inner);
+                        let _ = write!(std::io::stderr(), "\r\x1b[2K{line}");
+                        *s = Some(line);
+                    }
+                    k += 1;
+                    std::thread::sleep(Duration::from_millis(80));
                 }
             }));
         }
         Spin {
-            pb,
-            mp: self.mp.clone(),
+            spinning: self.spinning.clone(),
             stop,
             updater,
         }
@@ -252,13 +270,10 @@ impl Ui {
         }
         let subject = match o.output {
             Some(p) => st.bold(&p.display().to_string()),
-            None if o.checked => format!("{} {}", st.bold(o.file), st.dim("(not written)")),
             None => st.bold(o.file),
         };
         let mark = if o.errors > 0 {
             st.red(st.sym("✗", "failed:"))
-        } else if o.checked {
-            st.green(st.sym("✓", "checked:"))
         } else {
             st.green(st.sym("✓", "finished:"))
         };
@@ -278,8 +293,6 @@ pub struct Outcome<'a> {
     pub warnings: usize,
     pub runs: usize,
     pub engine: Option<&'a str>,
-    /// `check`: nothing written on purpose.
-    pub checked: bool,
 }
 
 impl Spin {
@@ -287,9 +300,10 @@ impl Spin {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(u) = self.updater {
             let _ = u.join();
+            let mut s = self.spinning.lock().unwrap_or_else(PoisonError::into_inner);
+            let _ = write!(std::io::stderr(), "\r\x1b[2K");
+            *s = None;
         }
-        self.pb.finish_and_clear();
-        self.mp.remove(&self.pb);
     }
 }
 

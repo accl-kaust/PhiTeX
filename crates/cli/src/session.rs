@@ -62,6 +62,8 @@ pub struct Job {
     pub synctex: bool,
     /// `-recorder`: `JOB.fls`.
     pub recorder: bool,
+    /// `-shell-escape`: `\write18` runs its commands.
+    pub shell_escape: bool,
     /// The PDF's date (`SOURCE_DATE_EPOCH`, else now).
     pub pdf_date: i64,
 }
@@ -428,6 +430,9 @@ pub fn waiting_notes(job: &Job) -> Vec<String> {
     }
     if job.synctex {
         v.push("-synctex: the native engine writes no SyncTeX yet".to_owned());
+    }
+    if job.shell_escape {
+        v.push("-shell-escape: the native engine runs no \\write18 yet".to_owned());
     }
     v
 }

@@ -1,6 +1,6 @@
-//! The modern command line: `phitex build`, `phitex watch`, … (clap: the
-//! options anywhere on the line, a coloured sectioned `--help`, typos
-//! suggested). What to build comes from the command line, `phitex.toml`
+//! The modern command line: `phitex build`, `phitex watch`, `phitex
+//! clean` (clap: the options anywhere on the line, a coloured sectioned
+//! `--help`, typos suggested). What to build comes from the command line, `phitex.toml`
 //! and the main file's magic comments (`config.rs`); the build is a
 //! a document session (`session.rs`), to the cross-run fixpoint,
 //! BibTeX and makeindex included; the terminal is `ui.rs`.
@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 use clap::builder::styling::{AnsiColor, Styles};
 use clap::{Args, ColorChoice, Parser, Subcommand};
+
+use serde_json::json;
 
 use crate::config;
 use crate::session::{self, Job, Report, Session, Status};
@@ -30,7 +32,10 @@ PhiTeX: TeX documents as graph reduction
 
 A document is built to its fixpoint (BibTeX and makeindex included) and,
 under `watch`, kept up to date as its files and the editor's buffers
-change, the pages live in the browser.";
+change, the pages live in the browser. It never stops for input.
+
+Exit status: 0 built (warnings allowed), 1 the document has errors,
+2 a usage, configuration or file error, 3 PhiTeX itself failed.";
 
 /// The sections after the options (styled as clap's headers; the escapes
 /// are stripped when colour is off).
@@ -41,14 +46,14 @@ fn after_help() -> String {
         "{h}Examples:{h:#}
   {l}phitex build paper.tex{l:#}              the PDF beside it, pdflatex for LaTeX
   {l}phitex watch -o out paper.tex{l:#}       rebuild on each change, the viewer in the browser
-  {l}phitex -j 4 check paper.tex{l:#}         build on four threads, write nothing
-  {l}phitex sync paper.tex:120{l:#}           the watch's viewer shows that line
+  {l}phitex build --json paper.tex{l:#}       the build's events as JSON lines
   {l}phitex clean --all{l:#}                  remove the cache of formats
 
 {h}Configuration:{h:#}
   Without a file, `phitex.toml` (here or above) names it:
       main = \"paper.tex\"   engine = \"pdflatex\"   output-dir = \"out\"
       copy-pdf = true   (or a directory, relative to phitex.toml's)
+      synctex = false   shell-escape = true   editor = \"code\"
   A `% !TEX program = …` or `% !TEX root = …` comment in the file is honoured.
 
 {h}TeX's own command line:{h:#}
@@ -67,7 +72,6 @@ fn after_help() -> String {
     after_help = after_help(),
     styles = STYLES,
     color = ColorChoice::Auto,
-    infer_subcommands = true,
     arg_required_else_help = true,
     disable_help_subcommand = true
 )]
@@ -92,11 +96,6 @@ enum Sub {
         #[arg(value_name = "FILE")]
         file: Option<String>,
     },
-    /// Build without writing the outputs
-    Check {
-        #[arg(value_name = "FILE")]
-        file: Option<String>,
-    },
     /// Remove the files a build writes
     Clean {
         /// The cache of formats and TeX Live's links too (no file needed)
@@ -104,29 +103,6 @@ enum Sub {
         all: bool,
         #[arg(value_name = "FILE")]
         file: Option<String>,
-    },
-    /// FILE:LINE[:COL]: the watch's viewer shows that line. `--pdf PAGE X Y
-    /// [FILE.tex]`: the source of what is at (X, Y) (big points from the
-    /// page's top left); `--tex FILE LINE [FILE.tex]`: where that line is
-    /// shown; both from <job>.synctex.gz, printed as TeX Live's `synctex`
-    #[command(verbatim_doc_comment)]
-    Sync {
-        #[arg(
-            value_name = "ARGS",
-            trailing_var_arg = true,
-            allow_hyphen_values = true
-        )]
-        args: Vec<String>,
-    },
-    /// The document's structure, read from its source without TeX
-    /// (`phitex outline --help`)
-    Outline {
-        #[arg(
-            value_name = "ARGS",
-            trailing_var_arg = true,
-            allow_hyphen_values = true
-        )]
-        args: Vec<String>,
     },
 }
 
@@ -166,9 +142,6 @@ struct Opts {
         global = true
     )]
     jobs: Option<usize>,
-    /// batchmode (default), nonstopmode, scrollmode or errorstopmode
-    #[arg(long, value_name = "MODE", value_parser = ["batchmode", "nonstopmode", "scrollmode", "errorstopmode"], global = true)]
-    interaction: Option<String>,
     /// Each run, each warning's first lines, an engine failure's whole
     /// message (-vv: more)
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
@@ -176,15 +149,22 @@ struct Opts {
     /// Only problems and the result
     #[arg(short, long, global = true)]
     quiet: bool,
+    /// The build's events on standard output, one JSON object a line
+    /// (nothing else is printed)
+    #[arg(long, global = true)]
+    json: bool,
+    /// Run \write18's commands (minted, …)
+    #[arg(long, global = true)]
+    shell_escape: bool,
     /// watch: open the viewer in the browser
     #[arg(long, global = true)]
     open: bool,
-    /// watch: serve the live viewer (the default on a terminal)
-    #[arg(long, global = true, overrides_with = "no_view")]
-    view: bool,
     /// watch: no live viewer
-    #[arg(long, global = true, overrides_with = "view")]
+    #[arg(long, global = true)]
     no_view: bool,
+    /// watch: the viewer's port (default: a free one)
+    #[arg(long, value_name = "N", global = true)]
+    port: Option<u16>,
     /// watch: where a double-click on a page opens its source (code,
     /// emacsclient, nvim, … or a command with {file} {line} {col}; else
     /// PHITEX_EDITOR, VISUAL, EDITOR)
@@ -196,25 +176,16 @@ struct Opts {
     copy_pdf: Option<String>,
     #[arg(long, global = true, hide = true)]
     no_copy_pdf: bool,
-    /// Write <job>.synctex.gz (the default; --synctex=0: not)
-    #[arg(long, value_name = "N", num_args = 0..=1, require_equals = true, default_missing_value = "1", global = true)]
-    synctex: Option<String>,
-    /// No <job>.synctex.gz
+    /// No <job>.synctex.gz (written by default)
     #[arg(long, global = true)]
     no_synctex: bool,
-    /// Write <job>.fls
-    #[arg(long, global = true)]
-    recorder: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Build,
     Watch,
-    Check,
     Clean,
-    Sync,
-    Outline,
 }
 
 /// The modern command line's options, as the rest of the program reads
@@ -232,12 +203,14 @@ pub struct Options {
     pub threads: Option<usize>,
     pub verbose: u8,
     pub quiet: bool,
+    pub json: bool,
+    pub shell_escape: bool,
     pub open: bool,
-    pub view: Option<bool>,
+    pub view: bool,
+    pub port: Option<u16>,
     pub editor: Option<String>,
     pub copy_pdf: Option<config::CopyPdf>,
     pub synctex: Option<bool>,
-    pub recorder: bool,
     pub all: bool,
 }
 
@@ -246,10 +219,7 @@ impl Cli {
         let (command, file, all) = match self.command {
             Some(Sub::Build { file }) => (Some(Command::Build), file, false),
             Some(Sub::Watch { file }) => (Some(Command::Watch), file, false),
-            Some(Sub::Check { file }) => (Some(Command::Check), file, false),
             Some(Sub::Clean { all, file }) => (Some(Command::Clean), file, all),
-            Some(Sub::Sync { args }) => (Some(Command::Sync), args.into_iter().next(), false),
-            Some(Sub::Outline { args }) => (Some(Command::Outline), args.into_iter().next(), false),
             None => (None, None, false),
         };
         let o = self.opts;
@@ -267,14 +237,11 @@ impl Cli {
             threads: o.jobs,
             verbose: o.verbose,
             quiet: o.quiet,
+            json: o.json,
+            shell_escape: o.shell_escape,
             open: o.open,
-            view: if o.view {
-                Some(true)
-            } else if o.no_view {
-                Some(false)
-            } else {
-                None
-            },
+            view: !o.no_view,
+            port: o.port,
             editor: o.editor,
             copy_pdf: if o.no_copy_pdf {
                 Some(config::CopyPdf::Off)
@@ -287,29 +254,15 @@ impl Cli {
                     }
                 })
             },
-            synctex: if o.no_synctex {
-                Some(false)
-            } else {
-                o.synctex.map(|v| v.trim() != "0")
-            },
-            recorder: o.recorder,
+            synctex: o.no_synctex.then_some(false),
             all,
         }
     }
 }
 
-/// The command line's options (`args` after the program's name). The
-/// letters `b`, `w` and `c` are `build`, `watch` and `check`.
+/// The command line's options (`args` after the program's name).
 fn parse(args: &[String]) -> Result<Options, clap::Error> {
-    let first = match args.first().map(String::as_str) {
-        Some("b") => Some("build"),
-        Some("w") => Some("watch"),
-        Some("c") => Some("check"),
-        other => other,
-    };
-    let line = std::iter::once("phitex")
-        .chain(first)
-        .chain(args.iter().skip(1).map(String::as_str));
+    let line = std::iter::once("phitex").chain(args.iter().map(String::as_str));
     Cli::try_parse_from(line).map(Cli::into_options)
 }
 
@@ -324,6 +277,10 @@ pub struct Target {
     /// Where to copy the PDF after a successful build.
     pub copy_pdf: Option<PathBuf>,
     pub synctex: bool,
+    /// `\write18` runs commands.
+    pub shell_escape: bool,
+    /// watch: the editor a double-click opens (`--editor`, `phitex.toml`).
+    pub editor: Option<String>,
 }
 
 impl Target {
@@ -400,6 +357,8 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         copy_pdf,
         // (on unless asked otherwise)
         synctex: o.synctex.or(cfg.synctex).unwrap_or(true),
+        shell_escape: o.shell_escape || cfg.shell_escape.unwrap_or(false),
+        editor: o.editor.clone().or(cfg.editor),
     })
 }
 
@@ -428,7 +387,8 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
         // (batch mode, as the oracles run: the CLI shows the errors itself)
         threads: o.threads.unwrap_or_else(crate::default_threads),
         synctex: t.synctex,
-        recorder: o.recorder,
+        recorder: false,
+        shell_escape: t.shell_escape,
         pdf_date: session::pdf_date(),
     })
 }
@@ -444,15 +404,7 @@ pub fn what(t: &Target, job: &Job) -> String {
 
 /// What a build did, for the terminal: each run (verbose), the tools, the
 /// errors as reports, the warnings, the result line.
-pub fn report(
-    t: &Target,
-    s: &Session,
-    r: &Report,
-    wrote: Option<&Path>,
-    o: &Options,
-    ui: &Ui,
-    checked: bool,
-) {
+pub fn report(t: &Target, s: &Session, r: &Report, wrote: Option<&Path>, o: &Options, ui: &Ui) {
     let st = ui.st;
     let job = &s.job;
     if o.verbose > 0 {
@@ -491,6 +443,19 @@ pub fn report(
         ));
     }
     let warnings: usize = crate::warnings::summarize(&text).iter().map(|g| g.1).sum();
+    let run = r.runs.last().cloned().unwrap_or_default();
+    ui.event(&json!({
+        "event": "build",
+        "why": run.why,
+        "ok": r.out.errors.is_empty(),
+        "output": wrote.map(|p| p.display().to_string()),
+        "pages": r.pages(),
+        "wall_ms": r.wall.as_secs_f64() * 1e3,
+        "nodes_run": run.commands_run,
+        "errors": r.out.errors,
+        "warnings": warnings,
+        "log": log.display().to_string(),
+    }));
     let warn = crate::warnings::lines(&text, o.verbose > 0);
     if !warn.is_empty() && !o.quiet {
         ui.line(&format!(
@@ -517,7 +482,6 @@ pub fn report(
         warnings,
         runs: r.runs.len(),
         engine: (!job.ini).then_some(t.engine.name),
-        checked,
     });
 }
 
@@ -533,18 +497,18 @@ fn copy_pdf(main: &Path, dir: &Path, ui: &Ui) {
     }
 }
 
-/// `phitex build` / `phitex check`: one session to the fixpoint. The exit
-/// status.
-fn build(t: &Target, o: &Options, ui: &Ui, write: bool) -> i32 {
+/// `phitex build`: one session to the fixpoint. The exit status.
+fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     let job = match job(t, o) {
         Ok(j) => j,
         Err(e) => {
             ui.error(&e);
-            return 2;
+            return crate::EXIT_USAGE;
         }
     };
     for n in session::waiting_notes(&job) {
         ui.line(&format!("{}: {n}", ui.st.yellow("note")));
+        ui.event(&json!({"event": "note", "message": n}));
     }
     let status = Arc::new(Status::default());
     let spin = ui.spin(what(t, &job), status.clone());
@@ -553,7 +517,7 @@ fn build(t: &Target, o: &Options, ui: &Ui, write: bool) -> i32 {
         Err(e) => {
             spin.done();
             ui.error(&e);
-            return 1;
+            return crate::EXIT_USAGE;
         }
     };
     let r = match crate::ui::catch(|| s.build()) {
@@ -561,23 +525,20 @@ fn build(t: &Target, o: &Options, ui: &Ui, write: bool) -> i32 {
         Err(m) => {
             spin.done();
             ui.failed("the build", &m);
-            return 1;
+            return crate::EXIT_INTERNAL;
         }
     };
-    let mut main = None;
-    if write {
-        status.set("writing the outputs");
-        match s.write(&r) {
-            Ok(w) => main = w.main,
-            Err(e) => {
-                spin.done();
-                ui.error(&e);
-                return 1;
-            }
+    status.set("writing the outputs");
+    let main = match s.write(&r) {
+        Ok(w) => w.main,
+        Err(e) => {
+            spin.done();
+            ui.error(&e);
+            return crate::EXIT_USAGE;
         }
-    }
+    };
     spin.done();
-    report(t, &s, &r, main.as_deref(), o, ui, !write);
+    report(t, &s, &r, main.as_deref(), o, ui);
     if let (Some(m), Some(d), true) = (&main, &t.copy_pdf, r.out.errors.is_empty()) {
         copy_pdf(m, d, ui);
     }
@@ -630,6 +591,7 @@ fn clean(t: &Target, ui: &Ui) -> i32 {
         "removed {n} file{}",
         if n == 1 { "" } else { "s" }
     )));
+    ui.event(&json!({"event": "clean", "removed": n}));
     0
 }
 
@@ -642,7 +604,7 @@ fn clean_all(ui: &Ui) -> ! {
         }
         Err(e) => {
             ui.error(&format!("{}: {e}", d.display()));
-            std::process::exit(1);
+            std::process::exit(crate::EXIT_USAGE);
         }
     }
     std::process::exit(0);
@@ -650,52 +612,27 @@ fn clean_all(ui: &Ui) -> ! {
 
 /// Run the modern command line with `args`.
 pub fn main(args: &[String]) -> ! {
-    // (its own command line: `outline`'s options)
-    if args.first().is_some_and(|a| a == "outline") {
-        crate::outline::main(&args[1..]);
-    }
     let o = match parse(args) {
         Ok(o) => o,
         Err(e) => e.exit(),
     };
-    let ui = Ui::new(Style::detect(), o.verbose, o.quiet);
+    let ui = Ui::new(Style::detect(), o.verbose, o.quiet, o.json);
     crate::ui::capture_panics(o.verbose > 0);
     if o.all {
         clean_all(&ui);
     }
     let Some(command) = o.command else {
-        ui.error("no command given: build, watch, check, clean, sync or outline (`phitex --help`)");
-        std::process::exit(2);
+        ui.error("no command given: build, watch or clean (`phitex --help`)");
+        std::process::exit(crate::EXIT_USAGE);
     };
-    match command {
-        Command::Sync => {
-            let Some(place) = o.file.as_deref() else {
-                ui.error("sync: give FILE:LINE[:COL]");
-                std::process::exit(2);
-            };
-            std::process::exit(crate::view::sync_command(place));
-        }
-        Command::Outline => {
-            let rest: Vec<String> = args
-                .iter()
-                .skip_while(|a| *a != "outline")
-                .skip(1)
-                .cloned()
-                .collect();
-            crate::outline::main(&rest);
-        }
-        _ => {}
-    }
     let t = resolve(&o).unwrap_or_else(|e| {
         ui.error(&e);
-        std::process::exit(2);
+        std::process::exit(crate::EXIT_USAGE);
     });
     match command {
-        Command::Build => std::process::exit(build(&t, &o, &ui, true)),
-        Command::Check => std::process::exit(build(&t, &o, &ui, false)),
+        Command::Build => std::process::exit(build(&t, &o, &ui)),
         Command::Clean => std::process::exit(clean(&t, &ui)),
         Command::Watch => crate::watch::main(&t, &o, &ui),
-        Command::Sync | Command::Outline => unreachable!("answered above"),
     }
 }
 
@@ -717,11 +654,20 @@ mod tests {
         assert!(parse(&v(&["build", "--frob"])).is_err());
         let o = parse(&v(&["watch", "--no-view", "--ini", "--etex", "a.tex"])).unwrap();
         assert!(o.ini && o.etex);
-        assert_eq!(o.view, Some(false));
-        assert_eq!(
-            parse(&v(&["b", "x.tex"])).unwrap().command,
-            Some(Command::Build)
-        );
+        assert!(!o.view);
+        let o = parse(&v(&["build", "--json", "--shell-escape", "x.tex"])).unwrap();
+        assert!(o.json && o.shell_escape && o.view);
+        for gone in [
+            &["b", "x.tex"][..],
+            &["check", "x.tex"],
+            &["sync", "a.tex:3"],
+            &["outline", "x.tex"],
+            &["x.tex"],
+            &["build", "--interaction=nonstopmode", "x.tex"],
+            &["watch", "--view", "x.tex"],
+        ] {
+            assert!(parse(&v(gone)).is_err(), "{gone:?}");
+        }
     }
 
     #[test]
@@ -737,7 +683,7 @@ mod tests {
             assert_eq!(o.threads, Some(2), "{line:?}");
             assert_eq!(o.file.as_deref(), Some("f.tex"), "{line:?}");
         }
-        let o = parse(&v(&["build", "--copy-pdf", "--synctex=0", "-vv", "x.tex"])).unwrap();
+        let o = parse(&v(&["build", "--copy-pdf", "--no-synctex", "-vv", "x.tex"])).unwrap();
         assert_eq!(o.verbose, 2);
         assert_eq!(parse(&v(&["-v", "build", "x.tex"])).unwrap().verbose, 1);
         assert!(matches!(o.copy_pdf, Some(config::CopyPdf::Invocation)));
@@ -748,9 +694,5 @@ mod tests {
             .to_string();
         assert!(e.contains("--frob"), "{e}");
         assert!(parse(&v(&["clean", "--all"])).unwrap().all);
-        assert_eq!(
-            parse(&v(&["sync", "a.tex:3"])).unwrap().file.as_deref(),
-            Some("a.tex:3")
-        );
     }
 }
