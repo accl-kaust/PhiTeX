@@ -43,6 +43,8 @@ struct Fd {
     ff_objnum: usize,
     /// `write_ttf_glyph_names`.
     ttf_glyph_names: bool,
+    /// `fn_objnum`: the font name object of an included PDF's font.
+    fn_objnum: usize,
     /// `fe->glyph_names` of a reencoded TrueType font.
     enc: Option<GlyphNames>,
 }
@@ -361,6 +363,18 @@ impl PdfState {
         if fd.fm.is_fontfile() {
             self.write_fontfile(fd)?;
         }
+        if fd.fn_objnum != 0 {
+            // write_fontname_object
+            self.begin_obj(fd.fn_objnum, 1);
+            self.pdf_out(b'/');
+            if let Some(t) = fd.desc.subset_tag {
+                self.print(&t);
+                self.pdf_out(b'+');
+            }
+            self.print(&fd.desc.fontname.clone());
+            self.pdf_out(b'\n');
+            self.end_obj();
+        }
         if fd.objnum == 0 {
             fd.objnum = self.new_objnum_();
         }
@@ -444,11 +458,13 @@ impl PdfState {
                 gl_tree: BTreeSet::new(),
                 tx_tree: None,
                 builtin: None,
+                all_glyphs: false,
             },
             file: self.font(f).file.clone(),
             ff_found: false,
             ff_objnum: 0,
             ttf_glyph_names: false,
+            fn_objnum: 0,
             enc: None,
         }
     }
@@ -669,6 +685,32 @@ impl PdfState {
         }
         self.fixed_gen_tounicode = self.p.gen_tounicode;
         let mut t = FontTables::default();
+        // the descriptors of included PDF files' fonts (`epdf.c`), in
+        // `fd_tree` before the TeX fonts'
+        for (key, e) in self.epdf_fds.clone() {
+            let mut font_dim = [(0, false); 11];
+            font_dim[t1::dim::STEMV] = (e.stemv, true);
+            t.fds.push(Fd {
+                objnum: e.objnum,
+                fm: e.fm.clone(),
+                desc: FontDesc {
+                    fontname: e.fm.ps_name.clone().unwrap_or_default(),
+                    subset_tag: None,
+                    font_dim,
+                    gl_tree: e.glyphs.clone(),
+                    tx_tree: None,
+                    builtin: None,
+                    all_glyphs: e.all_glyphs,
+                },
+                file: e.file.clone(),
+                ff_found: false,
+                ff_objnum: 0,
+                ttf_glyph_names: false,
+                fn_objnum: e.fn_objnum,
+                enc: None,
+            });
+            t.fd_tree.insert(key, t.fds.len() - 1);
+        }
         let mut k = self.head[OBJ_TYPE_FONT];
         while k != 0 {
             let f = FontId::try_from(self.objs[k].info).unwrap_or(0);
@@ -702,11 +744,13 @@ impl PdfState {
                         gl_tree: BTreeSet::new(),
                         tx_tree: None,
                         builtin: None,
+                        all_glyphs: false,
                     },
                     file: None,
                     ff_found: false,
                     ff_objnum: 0,
                     ttf_glyph_names: false,
+                    fn_objnum: 0,
                     enc: None,
                 },
             );

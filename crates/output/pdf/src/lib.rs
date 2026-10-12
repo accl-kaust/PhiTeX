@@ -73,9 +73,8 @@
 //! the whatsit as pdfTeX places its node.
 //!
 //! Not in this crate: PK (Type 3) fonts, OpenType (CFF) font files, TrueType subfonts,
-//! `\pdfimageapplygamma`, JBIG2 images, the font replacement of included
-//! PDF files (`\pdfinclusioncopyfonts=0` with a Type 1 font in the file's
-//! page), `\pdfsnapy`, `\pdfuniqueresname`.
+//! `\pdfimageapplygamma`, JBIG2 images, the replacement of included PDF
+//! files' Type 1C fonts, `\pdfsnapy`, `\pdfuniqueresname`.
 
 #![allow(
     clippy::unreadable_literal,
@@ -87,6 +86,8 @@ mod color;
 pub mod enc;
 mod finish;
 pub use finish::{Chunk, PdfBytes, finish};
+mod encodings;
+mod epdffont;
 mod font;
 mod image;
 mod macnames;
@@ -351,6 +352,13 @@ pub trait FontSource {
     fn virtual_font(&self, _f: FontId) -> Option<VirtualFont> {
         None
     }
+    /// `lookup_fontmap` in the default map: the entry (`ps_tree`, the
+    /// first of the map file's lines for a TFM name that is a Type 1 font
+    /// with a font file included) of the PostScript name with slant and
+    /// extend, for the font replacement of included PDF files.
+    fn map_by_ps_name(&self, _ps_name: &[u8], _slant: i32, _extend: i32) -> Option<MapEntry> {
+        None
+    }
     /// `pdf_read_dummy_font`: the font `\pdfspacefont` names
     /// (`pdftexspace`), loaded now at its design size.
     fn space_font(&self) -> Option<FontId> {
@@ -609,6 +617,8 @@ pub struct PdfState {
     error: Option<PdfError>,
     stacks: color::Stacks,
     fonts: BTreeMap<FontId, Arc<FontState>>,
+    /// `fd_tree`'s descriptors of included PDF files' fonts.
+    epdf_fds: BTreeMap<epdffont::FdKey, epdffont::EpdfFd>,
     /// `\pdfmapline` and `\pdfmapfile` entries: replacing (`=`) or
     /// deleting (`-`) ones, and those added only where the map has none
     /// (`+`).
@@ -725,6 +735,7 @@ impl PdfState {
             dummy_font: 0,
             error: None,
             stacks: color::Stacks::default(),
+            epdf_fds: BTreeMap::new(),
             fonts: BTreeMap::new(),
             map_over: BTreeMap::new(),
             map_add: BTreeMap::new(),
