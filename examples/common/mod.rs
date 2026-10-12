@@ -1916,6 +1916,12 @@ impl Program {
     }
 
     /// Inserts a new line before line `i`.
+    /// The ids of the program's top-level nodes.
+    #[must_use]
+    pub fn node_ids(&self, _eng: &Engine) -> Vec<NodeId> {
+        self.nodes.clone()
+    }
+
     pub fn insert_line(&mut self, eng: &mut Engine, i: usize, text: String) {
         self.edit_log.push(shrink::Ed::Ins(i, text.clone()));
         let ast = Lang::rewrite(eng.values(), &self.loops, parse_stmt(eng.values(), &text));
