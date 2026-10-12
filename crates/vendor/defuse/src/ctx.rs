@@ -3,7 +3,7 @@
 use std::sync::PoisonError;
 
 use crate::engine::{
-    AssumeKind, Effect, End, Engine, EvalError, K_CHAIN, K_FIELD, K_LOOP, K_OUTPUT, Locality, NIL, NodeId, OpId,
+    AssumeKind, Effect, End, Engine, EvalError, K_CHAIN, K_ENV, K_FIELD, K_LOOP, K_OUTPUT, Locality, NIL, NodeId, OpId,
     RunResult, Slot, State, StreamRange, Until, Use, WalkResult, eff_code, eff_kind,
 };
 use crate::hash::{FxHashMap, hash_words};
@@ -229,6 +229,37 @@ impl<'a> Ctx<'a> {
             kind: K_FIELD,
         });
         self.sig_add(K_FIELD, key, w.site, v);
+        Ok(v)
+    }
+
+    /// Reads the environment's `f` (what the client supplied with
+    /// [`Engine::set_environment`]): `None` if it declared the field absent
+    /// ([`Engine::set_environment_absent`]), and otherwise, until it does
+    /// either, the node waits (the evaluation ends with it stalled, not
+    /// as a cycle, and it runs again when the field arrives). Unlike
+    /// [`Ctx::use_field`], a definition in the text does not shadow it.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop`] while the field is neither supplied nor absent.
+    pub fn use_env(&mut self, f: Field) -> Result<Option<ValueId>, Stop> {
+        self.check()?;
+        let e = self.eng;
+        let key = f.0.raw();
+        if let Some(&v) = self.cache.get(&(K_ENV, key)) {
+            return Ok(v);
+        }
+        let n = e.n(self.slot);
+        let Ok(v) = e.env_value(n.unit, f) else {
+            return self.stop(End::WaitEnv(f));
+        };
+        self.cache.insert((K_ENV, key), v);
+        self.uses.push(Use {
+            key,
+            site: NIL,
+            kind: K_ENV,
+        });
+        self.sig_add(K_ENV, key, NIL, v);
         Ok(v)
     }
 

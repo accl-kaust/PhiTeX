@@ -5,7 +5,7 @@ mod common;
 
 use common::interp::{interpret, interpret_env};
 use common::{Program, SECTION, Threads, env_values, generate, generate_with};
-use defuse::{Engine, EvalError, Greedy, RandomScheduler, Report, Rng, Sequential, Speculation};
+use defuse::{Engine, EvalError, Field, Greedy, RandomScheduler, Report, Rng, Sequential, Speculation, ValueId};
 
 fn lines(src: &[&str]) -> Vec<String> {
     src.iter().map(|s| (*s).to_string()).collect()
@@ -1559,6 +1559,73 @@ fn trace_format_takes_provenance_equal_positions_bounded_unfolds_and_nested_edit
     assert!(trace::load_trace(&bad).is_err());
     let bad = text.replace("\"children\": [{\"id\": \"u.1\", \"class\": \"assign\", \"pos\": 0, \"reads\": [\"x\"], \"writes\": [{\"field\": \"y\", \"locality\": \"local\"}]}]", "\"children\": []");
     assert!(trace::load_trace(&bad).is_err());
+}
+
+/// `["i"]` (pending definition set) reads the environment's `file` with
+/// `use_env` and defines `x` to it when supplied; `["r"]` reads `x`.
+struct EnvToy;
+
+impl defuse::Operation for EnvToy {
+    fn defs(&self, a: &[ValueId], v: &defuse::Values) -> Option<Vec<(Field, defuse::Locality)>> {
+        match &*v.get(a[0]) {
+            defuse::Value::Str(s) if &**s == "i" => None,
+            _ => Some(Vec::new()),
+        }
+    }
+    fn run(&self, cx: &mut defuse::Ctx<'_>) -> Result<ValueId, defuse::Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        if matches!(&*v.get(a[0]), defuse::Value::Str(s) if &**s == "i") {
+            if let Some(x) = cx.use_env(v.field("file"))? {
+                cx.define(v.field("x"), x);
+            }
+            return Ok(ValueId::UNIT);
+        }
+        Ok(cx.use_field(v.field("x"))?.unwrap_or_else(|| v.str("none")))
+    }
+}
+
+#[test]
+fn an_environment_read_waits_until_the_field_is_supplied_or_declared_absent() {
+    use std::sync::Arc;
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(EnvToy));
+    let u = eng.new_unit();
+    let i = eng.values().str("i");
+    let i = eng.push(u, op, vec![i]);
+    let rr = eng.values().str("r");
+    let r = eng.push(u, op, vec![rr]);
+    eng.add_root(r);
+    let out = |e: &Engine| e.output(r).map(|x| e.values().render(x));
+    // Neither supplied nor absent: `i` waits for the environment and `r`
+    // waits on `i`'s pending definitions; no cycle, no output.
+    let rep = eng.evaluate_sequential().expect("stalled is not an error");
+    assert_eq!(rep.env_stalled, 2);
+    assert_eq!(out(&eng), None);
+    assert_eq!(eng.output(i), None);
+    // Declared absent: `i` defines nothing, `r` reads none.
+    let f = eng.values().field("file");
+    eng.set_environment_absent([f]);
+    let rep = eng.evaluate_sequential().expect("evaluate");
+    assert_eq!(rep.env_stalled, 0);
+    assert_eq!(out(&eng).as_deref(), Some("\"none\""));
+    // Supplied: both run again.
+    let five = eng.values().int(5);
+    eng.set_environment([(f, five)]);
+    eng.set_environment_absent([]);
+    let rep = eng.evaluate_sequential().expect("evaluate");
+    assert_eq!(out(&eng).as_deref(), Some("5"));
+    assert_eq!(rep.nodes_run, 2);
+    // Withdrawn again: `i` waits; its last definition stands until the
+    // field is known, so `r` keeps its value (its binding did not change).
+    eng.set_environment([]);
+    let rep = eng.evaluate_sequential().expect("stalled again");
+    assert_eq!(rep.env_stalled, 1);
+    assert_eq!(out(&eng).as_deref(), Some("5"));
+    let six = eng.values().int(6);
+    eng.set_environment([(f, six)]);
+    eng.evaluate_sequential().expect("evaluate");
+    assert_eq!(out(&eng).as_deref(), Some("6"));
 }
 
 #[test]
