@@ -173,7 +173,20 @@ pub(crate) struct XImage {
     pub color: i32,
     /// `img_group_ref`: -1 a PDF page's group to be numbered, a PNG's
     /// object, or 0.
-    group_ref: i32,
+    pub(crate) group_ref: i32,
+}
+
+impl XImage {
+    /// What TeX reads of the image.
+    pub(crate) fn info(&self) -> XImageInfo {
+        XImageInfo {
+            width: self.width,
+            height: self.height,
+            depth: self.depth,
+            pages: self.pages,
+            colordepth: self.bits,
+        }
+    }
 }
 
 /// An object of an included file copied (`InObj`).
@@ -772,13 +785,7 @@ impl PdfState {
     /// Image `n`'s size and numbers.
     #[must_use]
     pub fn ximage_info(&self, n: usize) -> Option<XImageInfo> {
-        self.aux.ximages.get(&n).map(|x| XImageInfo {
-            width: x.width,
-            height: x.height,
-            depth: x.depth,
-            pages: x.pages,
-            colordepth: x.bits,
-        })
+        self.aux.ximages.get(&n).map(XImage::info)
     }
 
     /// Whether `n` is a `\pdfximage` (`pdf_check_obj(obj_type_ximage, n)`).
