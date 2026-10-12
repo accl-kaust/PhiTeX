@@ -58,12 +58,7 @@ fn marks_penalties() {
     run(&["marks", "linepens"]);
 }
 
-/// A node that closes a group and opens another (`\middle`, like
-/// `\discretionary`'s and `\mathchoice`'s `}{`) does not see the
-/// definitions of the groups around them: `\count1=7
-/// \discretionary{}{\the\count1}{}` reads 5 from outside.
 #[test]
-#[ignore = "close-and-open brackets lose the enclosing groups' definitions"]
 fn middle() {
     run(&["middle"]);
 }
