@@ -60,6 +60,24 @@ pub fn width() -> Option<usize> {
     None
 }
 
+/// This process's CPU time so far (all its threads) and resident memory
+/// (Linux: `/proc/self/stat`; elsewhere none).
+pub fn usage() -> Option<(std::time::Duration, u64)> {
+    #[cfg(target_os = "linux")]
+    {
+        let s = std::fs::read_to_string("/proc/self/stat").ok()?;
+        // (after the command's `(…)`: state is field 3, utime 14, stime 15, rss 24)
+        let f: Vec<&str> = s.get(s.rfind(')')? + 2..)?.split_whitespace().collect();
+        let n = |k: usize| f.get(k - 3).and_then(|x| x.parse::<u64>().ok());
+        let ticks = rustix::param::clock_ticks_per_second().max(1);
+        let cpu = n(14)? + n(15)?;
+        let cpu = std::time::Duration::from_micros(cpu * 1_000_000 / ticks);
+        return Some((cpu, n(24)? * rustix::param::page_size() as u64));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
 /// What a key asks of the watch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {

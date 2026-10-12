@@ -149,6 +149,43 @@ pub struct Report {
     pub unsettled: Vec<String>,
     pub notes: Vec<String>,
     pub wall: Duration,
+    /// The engine's own account of why it stopped (its state dumped: for
+    /// `-v` and a bug report, not the error shown).
+    pub internal: Option<String>,
+}
+
+/// An engine's stop said in a sentence: what gave out, without its dump
+/// (`RunawayCreation { node: …, depth: 4097, … }` as "it nested deeper than
+/// its limit (4097 levels)").
+pub fn engine_stop(e: &str) -> String {
+    let num = |key: &str| {
+        e.split(key).nth(1).and_then(|r| {
+            let d: String = r
+                .trim_start()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            (!d.is_empty()).then_some(d)
+        })
+    };
+    let what = if e.contains("RunawayCreation") {
+        format!(
+            "it nested deeper than its limit ({} levels)",
+            num("depth:").unwrap_or_else(|| "4096".to_owned())
+        )
+    } else if e.contains("Deadline") {
+        "it ran past its time limit".to_owned()
+    } else {
+        // (the first clause, before any dump)
+        let first = e.lines().next().unwrap_or(e);
+        let cut = first
+            .find([':', '[', '{', '('])
+            .map_or(first, |k| &first[..k]);
+        cut.trim().to_owned()
+    };
+    format!(
+        "PhiTeX's engine stopped: {what}. This is a bug in PhiTeX, not in the document (-v shows the engine's details)"
+    )
 }
 
 impl Report {
@@ -296,7 +333,7 @@ impl Session {
     }
 
     fn run(&mut self, why: &str, t0: Instant) -> Report {
-        let fail = |e: String| Report {
+        let fail = |e: String, internal: Option<String>| Report {
             out: Output {
                 errors: vec![e],
                 ..Output::default()
@@ -310,6 +347,7 @@ impl Session {
             unsettled: Vec::new(),
             notes: Vec::new(),
             wall: t0.elapsed(),
+            internal,
         };
         let text = self.text_now();
         let edit_line = self
@@ -352,11 +390,11 @@ impl Session {
         });
         match ran {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => return fail(e),
+            Ok(Err(e)) => return fail(e, None),
             Err(e) => {
                 self.build = None;
                 self.built_text = None;
-                return fail(format!("the engine stopped: {e}"));
+                return fail(engine_stop(&e), Some(e));
             }
         }
         let b = self.build.as_ref().expect("built above");
@@ -407,6 +445,7 @@ impl Session {
                 critical_path: s.critical_path,
                 peak_running: s.peak_running,
             }],
+            internal: None,
             unsettled: Vec::new(),
             notes: vec![format!(
                 "{} nodes run of {} live, {} runs, {} cutoffs",

@@ -452,6 +452,9 @@ pub fn report(
             ui.line(&st.dim(&format!("  {n}")));
         }
     }
+    if let (Some(d), true) = (&r.internal, o.verbose > 0 || ui.verbose > 0) {
+        ui.line(&st.dim(&format!("  the engine's details: {d}")));
+    }
     let log = job.out_dir.join(format!("{}.log", job.jobname));
     let text = r.log_text();
     crate::problems::show(ui, &r.out.errors, &text, &t.file);
