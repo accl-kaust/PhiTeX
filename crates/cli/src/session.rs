@@ -90,6 +90,8 @@ pub struct Output {
     pub pages: usize,
     /// The pages (from 1) that differ from the last build's.
     pub pages_changed: Vec<usize>,
+    /// Each page's hash, first first.
+    pub page_hashes: Vec<u64>,
     pub errors: Vec<String>,
     /// The terminal's and the log's text.
     pub log: String,
@@ -294,7 +296,7 @@ impl Session {
             .map(|k| k + 1)
             .collect();
         let pages_reused = hashes.len() - pages_changed.len();
-        self.page_hashes = hashes;
+        self.page_hashes.clone_from(&hashes);
         self.built_text = Some(text);
         let wall = t0.elapsed();
         Report {
@@ -302,6 +304,7 @@ impl Session {
                 dvi,
                 pages,
                 pages_changed,
+                page_hashes: hashes,
                 errors,
                 log,
                 ..Output::default()
