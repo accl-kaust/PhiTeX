@@ -1721,6 +1721,16 @@ fn a_node_past_its_run_budget_ends_the_evaluation_naming_it_and_why() {
     };
     assert_eq!(runs, 4);
     assert!(prog.node_ids(&eng).contains(&node), "the publisher is named");
+    // The node is readable from its id: the message can name it.
+    let info = eng.node_info(node).expect("the node is there");
+    assert_eq!(info.op, "stmt");
+    assert!(
+        eng.values().render(info.args[0]).contains("\"n\""),
+        "{:?}",
+        eng.values().render(info.args[0])
+    );
+    assert_eq!(info.parent, None);
+    assert_eq!(info.unit, prog.unit);
     assert!(
         !causes.is_empty() && causes.iter().all(|c| matches!(c, Cause::Loop { .. })),
         "{causes:?}"
