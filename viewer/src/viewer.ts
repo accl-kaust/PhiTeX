@@ -3,16 +3,13 @@
 // page is drawn again only when its box changed (each page's hash, from the
 // core). The page most in view is the one an edit paints first.
 
-import type { PageImage } from "./types.ts";
-import { patch, type Draws2, type Link } from "./page2.ts";
+import type { Link, PageImage } from "./types.ts";
 
 export interface ViewerHost {
   /** Draw page `k` (the viewer wants it: in view, and not drawn at its hash). */
   need(k: number): void;
   /** The page most in view changed. */
   inView(k: number): void;
-  /** A page as markup: the SVG of its draws at `cssWidth`, or null for a PNG. */
-  svg(img: PageImage, cssWidth: number): string | null;
   /** CSS pixels per PDF point at the current zoom (1 is 100%). */
   scale(): number;
   /** Text selected on the pages: its boxes by page, in PDF points from each page's top left. */
@@ -132,18 +129,16 @@ export class Viewer {
     });
   }
 
-  /** The link under a pointer event (its page's draw list's `L`), if any. */
+  /** The link under a pointer event (its page's, from MuPDF), if any. */
   private linkAt(e: MouseEvent): Link | null {
     const el = (e.target as Element).closest<HTMLElement>(".slot");
     if (!el) return null;
     const img = this.slots[Number(el.dataset.k)]?.img;
-    if (!img || !("draws" in img)) return null;
-    const d = img.draws as unknown as Draws2;
-    if (!d.L?.length) return null;
+    if (!img?.links?.length) return null;
     const r = el.getBoundingClientRect();
-    const x = ((e.clientX - r.left) / r.width) * d.w;
-    const y = ((e.clientY - r.top) / r.height) * d.h;
-    return d.L.find((l) => x >= l[0] && x <= l[2] && y >= l[1] && y <= l[3]) ?? null;
+    const x = ((e.clientX - r.left) / r.width) * img.w;
+    const y = ((e.clientY - r.top) / r.height) * img.h;
+    return img.links.find((l) => x >= l[0] && x <= l[2] && y >= l[1] && y <= l[3]) ?? null;
   }
 
   /** Scroll to page `k`, `top` points from its top (null: its top). */
@@ -272,8 +267,7 @@ export class Viewer {
     const s = this.slots[k];
     if (!s) return;
     if (hash) this.asked.delete(`${k}:${hash}`);
-    if ("draws" in img) this.size = { w: img.draws.w, h: img.draws.h };
-    else if ("w" in img && img.w && img.h) this.size = { w: img.w, h: img.h };
+    if (img.w && img.h) this.size = { w: img.w, h: img.h };
     s.img = img;
     s.drawn = hash ?? s.hash;
     // (painted at the next frame, a few a frame, those on screen first: a
@@ -306,19 +300,14 @@ export class Viewer {
 
   /**
    * The zoom changed: each page at its new size, the view kept on the same
-   * place of the page in view. A page drawn from a draw list scales as it
-   * is (its drawing and its picture fill the slot), so only pages of other
-   * kinds are drawn again: a zoom touches no page's drawing.
+   * place of the page in view (a page's canvas fills its slot: it scales).
    */
   redraw(): void {
     const at = this.slots[this.current];
     const v = this.scroller.getBoundingClientRect();
     const before = at?.el.getBoundingClientRect();
     const frac = before?.height ? (v.top - before.top) / before.height : 0;
-    for (const s of this.slots) {
-      this.sizeSlot(s);
-      if (s.img && !("draws" in s.img && (s.img.draws as unknown as Draws2).v === 2)) this.paint(s);
-    }
+    for (const s of this.slots) this.sizeSlot(s);
     if (at) {
       const b = at.el.getBoundingClientRect();
       this.scroller.scrollTop += b.top + frac * b.height - v.top;
@@ -349,36 +338,12 @@ export class Viewer {
 
   private draw(s: Slot): void {
     if (!s.img) return;
-    const w = this.size.w * (96 / 72) * this.host.scale();
     this.sizeSlot(s);
-    // (v2, from the PDF: updated by parts, not drawn again whole)
-    if ("draws" in s.img && (s.img.draws as unknown as Draws2).v === 2) {
-      const [bw, bh] = this.host.box(this.size, w);
-      patch(s.el, s.img.draws as unknown as Draws2, bw, bh);
-      return;
-    }
-    const markup = this.host.svg(s.img, w);
-    if (markup !== null) {
-      s.el.innerHTML = markup;
-      return;
-    }
-    if ("canvas" in s.img) {
-      // (drawn already: swapped in whole, so the page never blanks)
-      s.img.canvas.style.width = "100%";
-      s.img.canvas.style.height = "100%";
-      if (s.el.firstChild !== s.img.canvas) s.el.replaceChildren(s.img.canvas);
-      // (pdf.js's text layer, laid out at a CSS pixel per PDF point: scaled to the page)
-      const tl = s.img.canvas.querySelector<HTMLElement>(".textLayer");
-      if (tl) tl.style.transform = `scale(${s.el.getBoundingClientRect().width / s.img.w || parseFloat(s.el.style.width) / s.img.w})`;
-      return;
-    }
-    if (!("png" in s.img)) return;
-    const url = URL.createObjectURL(new Blob([s.img.png as BlobPart], { type: "image/png" }));
-    const im = document.createElement("img");
-    im.alt = `page ${Number(s.el.dataset.k) + 1}`;
-    im.onload = () => URL.revokeObjectURL(url);
-    im.src = url;
-    s.el.replaceChildren(im);
+    // (drawn already: swapped in whole, so the page never blanks)
+    const c = s.img.canvas;
+    c.style.width = "100%";
+    c.style.height = "100%";
+    if (s.el.firstChild !== c) s.el.replaceChildren(c);
   }
 
   /** Turn `n` pages (back if negative) from the page at the view's top, as a PDF viewer's Page Down / Page Up: back from inside a page goes to its own top first. */

@@ -61,14 +61,12 @@ export type CoreReq =
   | { op: "latexdiff"; req: DiffReq };
 
 // (the page types the renderer shares: PhiTeX's viewer/src, vendored)
-import type { Draws, PageImage } from "./types.ts";
-export type { Draws, PageImage };
+import type { Link, PageImage } from "./types.ts";
+export type { PageImage };
 
 export interface CoreRes {
   ok: boolean;
   json?: any;
-  png?: Uint8Array;
-  draws?: Draws;
   pdf?: Uint8Array;
   /** (`package`: the file's text, null: none; and where from) */
   text?: string | null;
@@ -76,6 +74,8 @@ export interface CoreRes {
   /** (a page drawn from the PDF, in the tab: its canvas and size in PDF points) */
   canvas?: HTMLElement;
   size?: [number, number];
+  /** (its links, from MuPDF) */
+  links?: Link[];
   /** (`package`: a binary file, handed to the core by the offscreen document) */
   delivered?: boolean;
   error?: string;
@@ -199,8 +199,6 @@ export interface Options {
   fuel: number;
   /** 1: the one-worker start (the offscreen document's two-worker start otherwise, where the machine allows it). */
   workers?: 1;
-  /** Pages as draw lists (vector: real text, a few KB) or PNGs (PhiTeX's: a grey box a glyph). */
-  format: "vector" | "pdfjs";
   dpi: number;
   checkEveryMs: number;
   /** Where files the project doesn't have come from (packages.ts; default: nowhere). */
@@ -226,16 +224,9 @@ export interface Options {
 
 // (fuel is per chunk: 10^5 steps is far more than plain documents need, and
 // a runaway recursion costs ~70 ms a keystroke, not 700)
-const defaults: Options = { fuel: 100_000, format: "vector", dpi: 96, checkEveryMs: 5000 };
+const defaults: Options = { fuel: 100_000, dpi: 96, checkEveryMs: 5000 };
 
-const image = (r: CoreRes): PageImage | null =>
-  r.draws
-    ? { draws: r.draws }
-    : r.canvas && r.size
-      ? { canvas: r.canvas, w: r.size[0], h: r.size[1] }
-      : r.png?.length
-        ? { png: r.png, w: r.size?.[0], h: r.size?.[1] }
-        : null;
+const image = (r: CoreRes): PageImage | null => (r.canvas && r.size ? { canvas: r.canvas, w: r.size[0], h: r.size[1], links: r.links } : null);
 
 export function guessMain(files: Record<string, string>): string | null {
   const names = Object.keys(files).filter((n) => /\.tex$/i.test(n));
@@ -427,20 +418,11 @@ export class PreviewSession {
     return f;
   }
 
-  /** The pages' request: 0 their draw lists (vector), -1 the PDF, drawn in the tab by pdf.js. */
+  /** The pages' request: -1, the PDF (the host draws its pages with MuPDF). */
   private dpi(): number {
-    return this.o.format === "pdfjs" ? -1 : 0;
+    return -1;
   }
 
-  setFormat(f: Options["format"]): Promise<void> {
-    this.o.format = f;
-    // (every page again, in the new format)
-    if (this.sink.layout) {
-      this.hashes = [];
-      return this.layout();
-    }
-    return this.showPage();
-  }
 
   private now(): number {
     return (this.o.now ?? (() => performance.now()))();
@@ -543,7 +525,8 @@ export class PreviewSession {
       r.json = d.json;
     }
     this.opened = true;
-    const latex = r.json.engine === "phitex";
+    // (the Overleaf extension's core, on the partex engine still, says "partex")
+    const latex = r.json.engine === "phitex" || r.json.engine === "partex";
     // (diagnosed before this was known: say it again with it)
     if (latex !== this.latex) this.lastWarned = 0;
     this.latex = latex;
@@ -1291,7 +1274,6 @@ export class PreviewSession {
           `fixed point      ${j.total_ms.toFixed(2)} ms (every page, the .aux/.bbl loops)${j.wrong ? " · first paint was superseded" : ""}`,
           `keystroke→page   ${e2e.toFixed(1)} ms = queued ${(tSend - t0).toFixed(1)} + round trip ${(tBack - tSend).toFixed(1)} + paint ${(this.now() - tBack).toFixed(1)}`,
           `rebuilt          ${j.stats.rebuilt} of ${j.stats.rebuilt + j.stats.reused} chunks, ${j.stats.passes} pass${j.stats.passes === 1 ? "" : "es"}`,
-          r.draws ? `page             vector, ${r.draws.t.length} words` : j.png_bytes ? `page             PNG ${(j.png_bytes / 1024).toFixed(0)} KB (${j.png_compress_ms.toFixed(1)} ms to compress)` : "",
           `batching         ${this.keystrokes} edits → ${this.builds} builds (one in flight; the rest merged)`,
         ]
           .filter(Boolean)

@@ -6,14 +6,16 @@
 // MuPDF finds its .wasm beside it) and gives it here.
 
 import type { Entry } from "./outline.ts";
+import type { Link } from "./types.ts";
 
-/** A page drawn: its pixels (`pw` by `ph`, RGBA, white under) and its size in PDF points. */
+/** A page drawn: its pixels (`pw` by `ph`, RGBA, white under), its size in PDF points, its links. */
 export interface Drawn {
   rgba: Uint8ClampedArray;
   pw: number;
   ph: number;
   w: number;
   h: number;
+  links: Link[];
 }
 
 /** MuPDF's outline item (its `loadOutline()`). */
@@ -59,13 +61,27 @@ export class MupdfDoc {
             rgba[o + 3] = 255;
           }
         }
-        return { rgba, pw, ph, w: x1 - x0, h: y1 - y0 };
+        return { rgba, pw, ph, w: x1 - x0, h: y1 - y0, links: this.links(page, x0, y0) };
       } finally {
         pix.destroy();
       }
     } finally {
       page.destroy();
     }
+  }
+
+  /** A page's links, from its top left (`x0`, `y0`: its box's corner). */
+  private links(page: any, x0: number, y0: number): Link[] {
+    const out: Link[] = [];
+    for (const l of page.getLinks() as any[]) {
+      const [a, b, c, d] = l.getBounds();
+      if (l.isExternal()) out.push([a - x0, b - y0, c - x0, d - y0, l.getURI()]);
+      else {
+        const dest = this.doc.resolveLinkDestination(l);
+        if (dest.page >= 0) out.push([a - x0, b - y0, c - x0, d - y0, dest.page, Number.isFinite(dest.y) ? dest.y : null]);
+      }
+    }
+    return out;
   }
 
   /** The PDF's outline (its bookmarks) as the panel's entries. */
