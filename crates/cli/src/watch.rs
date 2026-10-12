@@ -515,6 +515,10 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             });
         }
         facts.push(st.bold(&ms(r.wall)));
+        let par = r.runs.last().and_then(session::RunInfo::parallel);
+        if let Some(p) = &par {
+            facts.push(st.dim(p));
+        }
         let cold = last.borrow().cold;
         match cold {
             None if !failed => last.borrow_mut().cold = Some(r.wall),
@@ -548,6 +552,13 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             "pages": r.pages(),
             "pages_changed": changed,
             "nodes_run": nodes,
+            "parallel": r.runs.last().map(|x| json!({
+                "threads": x.threads,
+                "busy_ms": x.busy.as_secs_f64() * 1e3,
+                "engine_ms": x.engine_wall.as_secs_f64() * 1e3,
+                "critical_path": x.critical_path,
+                "peak_running": x.peak_running,
+            })),
             "wall_ms": r.wall.as_secs_f64() * 1e3,
             "errors": r.out.errors,
         }));
@@ -580,6 +591,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             brief.push(format!("{n} page{}", if n == 1 { "" } else { "s" }));
         }
         brief.push(ms(r.wall));
+        if let Some(p) = &par {
+            brief.push(p.clone());
+        }
         if warnings > 0 {
             brief.push(format!(
                 "{warnings} warning{}",

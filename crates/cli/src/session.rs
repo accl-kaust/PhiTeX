@@ -38,10 +38,7 @@ impl Status {
 
 /// What to build, and how.
 #[derive(Clone, Debug)]
-#[allow(
-    dead_code,
-    reason = "threads and etex: the engine has no such options yet"
-)]
+#[allow(dead_code, reason = "etex: the engine has no such option yet")]
 pub struct Job {
     /// The format's engine (with `ini`, only its paths: kpathsea's
     /// program name).
@@ -57,7 +54,8 @@ pub struct Job {
     pub jobname: String,
     /// Where the outputs go (`.`: here).
     pub out_dir: PathBuf,
-    pub threads: usize,
+    /// The engine's threads (none: `PHITEX_THREADS`, else all the cores).
+    pub threads: Option<usize>,
     /// `-synctex`.
     pub synctex: bool,
     /// `-recorder`: `JOB.fls`.
@@ -83,6 +81,42 @@ pub struct RunInfo {
     pub commands_run: u64,
     /// Nodes the build has after it (those not run were kept).
     pub live: usize,
+    /// The engine's threads, and its work summed over them (none: no
+    /// clock, wasm): busy / wall is how parallel the run was.
+    pub threads: usize,
+    pub busy: Duration,
+    pub engine_wall: Duration,
+    /// The longest chain of nodes each waiting on the last (none: not
+    /// known): nodes run / it is the most parallel the run could be.
+    pub critical_path: Option<usize>,
+    /// The most nodes running at once.
+    pub peak_running: usize,
+}
+
+impl RunInfo {
+    /// How parallel the run was: `4 threads · 1.6× parallel (at most
+    /// 2.1×)`, the engine's work over its wall time, and its nodes over
+    /// its longest chain (none: one thread, or no clock).
+    #[allow(clippy::cast_precision_loss)]
+    pub fn parallel(&self) -> Option<String> {
+        if self.threads < 2 || self.engine_wall.is_zero() {
+            return None;
+        }
+        let p = self.busy.as_secs_f64() / self.engine_wall.as_secs_f64();
+        let mut s = format!("{} threads · {p:.1}× parallel", self.threads);
+        // (the chain is the whole document's: on an edit that ran fewer
+        // nodes than it, the bound says nothing)
+        if let Some(c) = self
+            .critical_path
+            .filter(|&c| c > 0 && self.commands_run >= c as u64)
+        {
+            let _ = std::fmt::Write::write_fmt(
+                &mut s,
+                format_args!(" (at most {:.1}×)", self.commands_run as f64 / c as f64),
+            );
+        }
+        Some(s)
+    }
 }
 
 /// What one build made.
@@ -307,6 +341,7 @@ impl Session {
                     fixpoint: self.job.fixpoint,
                     prelude_jobname: self.job.engine.name.to_owned(),
                     prelude_bytes: cached.as_ref().map(|(_, b)| b.clone()),
+                    threads: self.job.threads,
                     ..Options::default()
                 };
                 let b = Build::with(opts, prelude.as_deref(), &text);
@@ -366,6 +401,11 @@ impl Session {
                 why: why.to_owned(),
                 commands_run: s.nodes_run,
                 live: s.live,
+                threads: s.threads,
+                busy: s.busy,
+                engine_wall: s.wall,
+                critical_path: s.critical_path,
+                peak_running: s.peak_running,
             }],
             unsettled: Vec::new(),
             notes: vec![format!(
