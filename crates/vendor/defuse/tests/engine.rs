@@ -1302,3 +1302,31 @@ fn changing_one_environment_field_reruns_only_its_readers() {
         assert_eq!(prog.nodes, ids);
     }
 }
+
+#[test]
+fn a_node_parked_on_a_target_a_claim_makes_inert_is_woken() {
+    // `y = x` parks on the eval (a pending definition set) while the eval
+    // unfolds; the claim then takes the eval. The parked node must be
+    // woken: it re-binds past the now-inert eval, under every schedule.
+    let src = ["n = 0", "sumnext n", "eval \"x = 1\"", "y = x", "z = y"];
+    for seed in 0..24u64 {
+        let (mut eng, mut prog) = Program::load(lines(&src));
+        let run = |eng: &mut Engine, m: u64| match m % 3 {
+            0 => eng.evaluate_sequential().map(|_| ()),
+            1 => eng
+                .evaluate(&mut Greedy::speculative(Speculation::All, 64), &mut Threads(3))
+                .map(|_| ()),
+            _ => eng
+                .evaluate(&mut RandomScheduler::new(m, m.is_multiple_of(2)), &mut Sequential)
+                .map(|_| ()),
+        };
+        run(&mut eng, seed).unwrap_or_else(|e| panic!("seed {seed}: {e:?}"));
+        assert_eq!(prog.result(&eng), reference(&prog.lines), "seed {seed}");
+        prog.set_line(&mut eng, 0, "n = 1".into());
+        run(&mut eng, seed).unwrap_or_else(|e| panic!("seed {seed} after edit: {e:?}"));
+        assert_eq!(prog.result(&eng), reference(&prog.lines), "seed {seed} after edit");
+        prog.set_line(&mut eng, 0, "n = 0".into());
+        run(&mut eng, seed).unwrap_or_else(|e| panic!("seed {seed} after undo: {e:?}"));
+        assert_eq!(prog.result(&eng), reference(&prog.lines), "seed {seed} after undo");
+    }
+}

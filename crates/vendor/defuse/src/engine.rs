@@ -157,6 +157,17 @@ pub enum Until {
     ReadEach(Vec<Field>),
 }
 
+/// What an operation's hooks say about a text from the text alone (see
+/// [`Engine::statics`]).
+pub(crate) struct Static {
+    decl: Option<Vec<(Field, Locality)>>,
+    eff: Effect,
+    claim: Claim,
+    reads: Option<Vec<Field>>,
+    may_define: MayDefine,
+    predict: bool,
+}
+
 /// Where a pending node is indexed: `pending` (an unbounded definition
 /// set), `pending_eff` (a scope effect), and its bounded definition set.
 #[derive(Clone, Debug)]
@@ -184,6 +195,12 @@ pub enum MayDefine {
 }
 
 /// A client operation.
+///
+/// The text-only hooks (`defs`, `may_define`, `effect`, `claim` with no
+/// following text, `reads`, `until_predict` with no following text) are
+/// called once per distinct text and their answers memoized: if what they
+/// depend on besides the text changes, the client says so with
+/// [`Engine::refresh_where`].
 pub trait Operation: Send + Sync {
     fn name(&self) -> &'static str {
         "op"
@@ -836,6 +853,9 @@ pub struct Engine {
     /// that ran meanwhile is checked against those after its start.
     pub(crate) touch_log: Vec<(u32, u64)>,
     in_eval: bool,
+    /// Set while a balanced, newly created text gets its scope kinds: a
+    /// local definition there has no readers yet.
+    fresh_scope: bool,
     /// The environment: fields defined before every text unit (text order
     /// -1), below the unit's own [`Engine::set_env`] entries.
     environment: FxHashMap<Field, ValueId>,
@@ -860,6 +880,8 @@ pub struct Engine {
     loop_pubs: FxHashMap<Field, BTreeMap<NodeId, ValueId>>,
     pub(crate) memo: FxHashMap<(OpId, ValueId), Slot>,
     pub(crate) text_memo: RwLock<FxHashMap<(ValueId, ValueId), ValueId>>,
+    /// The text-only hooks of each (operation, text), computed once.
+    statics: RwLock<FxHashMap<(OpId, ValueId), Arc<Static>>>,
     /// Dirty demanded nodes by height (a bucket queue: entries are removed
     /// lazily, an entry is live iff its node is `F_QUEUED` at that height).
     queue: Vec<Vec<(NodeId, Slot)>>,
@@ -987,6 +1009,7 @@ impl Engine {
             stream_runs: FxHashMap::default(),
             touch_log: Vec::new(),
             in_eval: false,
+            fresh_scope: false,
             environment: FxHashMap::default(),
             env_next: None,
             global_ix: BTreeMap::new(),
@@ -1002,6 +1025,7 @@ impl Engine {
             loop_pubs: FxHashMap::default(),
             memo: FxHashMap::default(),
             text_memo: RwLock::new(FxHashMap::default()),
+            statics: RwLock::new(FxHashMap::default()),
             queue: Vec::new(),
             queue_min: 0,
             queue_len: 0,
@@ -1067,12 +1091,66 @@ impl Engine {
         self.seqs.iter().any(|s| s.1 == f)
     }
 
+    /// The text-only hooks of `op` on `args`: computed on first use (by
+    /// any thread) and shared by every node with that text.
+    pub(crate) fn statics(&self, op: OpId, args: ValueId) -> Arc<Static> {
+        if let Some(st) = self
+            .statics
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&(op, args))
+        {
+            return st.clone();
+        }
+        let av = self.args_vec(args);
+        let opr = self.op(op);
+        let v = &self.values;
+        let decl = opr.defs(&av, v);
+        let st = Arc::new(Static {
+            may_define: if decl.is_none() {
+                opr.may_define(&av, v)
+            } else {
+                MayDefine::Nothing
+            },
+            decl,
+            eff: opr.effect(&av, v),
+            claim: opr.claim(&av, v, &mut std::iter::empty()),
+            reads: opr.reads(&av, v),
+            predict: opr.until_predict(&av, v, &mut std::iter::empty()).is_some(),
+        });
+        self.statics
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry((op, args))
+            .or_insert(st)
+            .clone()
+    }
+
+    /// Drops the memoized hooks of texts no longer live; keeps the fields
+    /// the rest name.
+    fn statics_live(&mut self, live: &mut FxHashSet<ValueId>) {
+        let st = self.statics.get_mut().unwrap_or_else(PoisonError::into_inner);
+        st.retain(|(_, a), _| live.contains(a));
+        for x in st.values() {
+            let fields = x
+                .decl
+                .iter()
+                .flatten()
+                .map(|d| d.0)
+                .chain(x.reads.iter().flatten().copied());
+            live.extend(fields.map(|f| f.0));
+            if let MayDefine::Names(fs) = &x.may_define {
+                live.extend(fs.iter().map(|f| f.0));
+            }
+        }
+    }
+
     /// Whether `s`'s operation statically declares (hidden) field `f`.
     fn declares(&self, s: Slot, f: Field) -> bool {
         let n = self.n(s);
-        let av = self.args_vec(n.args);
-        self.op(n.op)
-            .defs(&av, &self.values)
+        self.statics(n.op, n.args)
+            .decl
+            .as_ref()
             .is_some_and(|d| d.iter().any(|&(g, _)| self.canon(g) == f))
     }
 
@@ -1540,6 +1618,21 @@ impl Engine {
     /// If the engine holds more than `u32::MAX` node slots.
     pub fn refresh_where(&mut self, pred: &dyn Fn(OpId, &[ValueId], &Values) -> bool) {
         span!(Edit);
+        // The hooks' answers for those texts may have changed.
+        let stale: Vec<(OpId, ValueId)> = self
+            .statics
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter(|&(op, a)| pred(op, &self.args_vec(a), &self.values))
+            .collect();
+        let st = self.statics.get_mut().unwrap_or_else(PoisonError::into_inner);
+        for k in stale {
+            st.remove(&k);
+        }
         let hit: Vec<Slot> = (0..self.nodes.len())
             .filter(|&i| {
                 let n = &self.nodes[i];
@@ -1566,17 +1659,16 @@ impl Engine {
         }
         self.nm(s).op = op;
         self.nm(s).args = args;
-        let av = self.args_vec(args);
-        let opr = self.op(op).clone();
-        let decl = opr.defs(&av, &self.values);
-        let eff = opr.effect(&av, &self.values);
-        let claim_hook = opr.claim(&av, &self.values, &mut std::iter::empty());
-        let hint = opr.reads(&av, &self.values).is_some();
+        let st = self.statics(op, args);
+        let decl = st.decl.clone();
+        let eff = st.eff;
+        let claim_hook = st.claim;
+        let hint = st.reads.is_some();
         let inert = self.n(s).state == State::Inert;
-        let maybe = decl.is_none() && opr.may_define(&av, &self.values) != MayDefine::Any;
+        let maybe = decl.is_none() && st.may_define != MayDefine::Any;
         self.set_flag(s, F_MAYBE, maybe);
         self.set_flag(s, F_HINT, hint);
-        let predict = opr.until_predict(&av, &self.values, &mut std::iter::empty()).is_some();
+        let predict = st.predict;
         self.set_flag(s, F_PREDICT, predict);
         self.stream_touch(self.n(s).unit, self.n(s).label);
         self.set_flag(s, F_CLAIMER, claim_hook != Claim::None);
@@ -1760,14 +1852,10 @@ impl Engine {
         provisional: bool,
     ) -> Slot {
         count!(Create);
-        let av = self.args_vec(args);
-        let opr = self.op(op).clone();
-        let decl = opr.defs(&av, &self.values);
-        let eff = opr.effect(&av, &self.values);
-        let claim_hook = opr.claim(&av, &self.values, &mut std::iter::empty());
-        let hints = opr.reads(&av, &self.values);
+        let st = self.statics(op, args);
+        let (eff, claim_hook) = (st.eff, st.claim);
         let mut flags = 0;
-        if decl.is_none() {
+        if st.decl.is_none() {
             flags |= F_DYN;
         }
         if eff == Effect::Pending {
@@ -1779,13 +1867,13 @@ impl Engine {
         if claim_hook == Claim::Pending {
             flags |= F_CLAIM_DYN;
         }
-        if hints.is_some() {
+        if st.reads.is_some() {
             flags |= F_HINT;
         }
-        if opr.until_predict(&av, &self.values, &mut std::iter::empty()).is_some() {
+        if st.predict {
             flags |= F_PREDICT;
         }
-        if decl.is_none() && opr.may_define(&av, &self.values) != MayDefine::Any {
+        if st.decl.is_none() && st.may_define != MayDefine::Any {
             flags |= F_MAYBE;
         }
         if provisional {
@@ -1850,9 +1938,10 @@ impl Engine {
 
     /// Phase 2: the node's static scope effect (re-binding the region it
     /// changes unless `region` is false).
+    /// (Without `region`, the caller re-binds and then calls
+    /// `set_created_kind`.)
     fn set_created_effect(&mut self, s: Slot, region: bool) {
-        let av = self.args_vec(self.n(s).args);
-        let eff = self.op(self.n(s).op).effect(&av, &self.values);
+        let eff = self.statics(self.n(s).op, self.n(s).args).eff;
         if eff == Effect::Pending || eff == Effect::None {
             return;
         }
@@ -1860,19 +1949,24 @@ impl Engine {
         self.sync_order(s);
         if region {
             self.effect_region_changed(s, EFF_NONE);
+            self.set_kind(s, eff_kind(eff));
         }
-        self.set_kind(s, eff_kind(eff));
+    }
+
+    fn set_created_kind(&mut self, s: Slot) {
+        let eff = self.statics(self.n(s).op, self.n(s).args).eff;
+        if eff != Effect::Pending && eff != Effect::None {
+            self.set_kind(s, eff_kind(eff));
+        }
     }
 
     /// Phase 3: definitions, pending structure, initial height, claims.
     fn bind_created(&mut self, s: Slot) {
         let (unit, label) = (self.n(s).unit, self.n(s).label);
-        let av = self.args_vec(self.n(s).args);
-        let opr = self.op(self.n(s).op).clone();
-        let decl = opr.defs(&av, &self.values);
-        let hints = opr.reads(&av, &self.values);
-        if let Some(d) = decl {
-            for (f, l) in d {
+        let st = self.statics(self.n(s).op, self.n(s).args);
+        let hints = st.reads.clone();
+        if let Some(d) = &st.decl {
+            for &(f, l) in d {
                 let f = self.canon(f);
                 self.add_def(s, f, l == Locality::Global);
             }
@@ -1905,8 +1999,7 @@ impl Engine {
         let id = NodeId(hash_words(12, &[u64::from(op.0), args.0]));
         let body = self.alloc_unit(NIL);
         let mut flags = F_APP;
-        let av = self.args_vec(args);
-        if self.op(op).reads(&av, &self.values).is_some() {
+        if self.statics(op, args).reads.is_some() {
             flags |= F_HINT;
         }
         let node = Node {
@@ -2436,8 +2529,7 @@ impl Engine {
         let n = self.n(s);
         let bounded = n.has(F_DYN) && n.has(F_MAYBE);
         let bound = if bounded {
-            let av = self.args_vec(n.args);
-            self.op(n.op).may_define(&av, &self.values)
+            self.statics(n.op, n.args).may_define.clone()
         } else {
             MayDefine::Nothing
         };
@@ -2585,6 +2677,11 @@ impl Engine {
             });
             n.defs = defs.into_boxed_slice();
         }
+        if self.fresh_scope && !global {
+            self.ix_insert(unit, f, lx, x);
+            self.stream_touch(unit, lx);
+            return;
+        }
         let root = self.units[unit as usize].root;
         // (previous site, users in (lx, end)) pairs.
         let mut prev: Vec<(Slot, u64)> = Vec::new();
@@ -2629,23 +2726,7 @@ impl Engine {
             }
         } else {
             let site = self.walk(unit, lx, f).site;
-            let depth = self.order.fold(&OAug, root, 0, lx + 1).o;
-            let end = if depth == 0 {
-                u64::MAX
-            } else {
-                // The closing node's own reads are inside the scope, unless
-                // its brackets come before it (its kind read always is).
-                self.order
-                    .search_fwd(&OAug, root, lx, &|s: OSum| s.c >= 1)
-                    .map_or(u64::MAX, |e| {
-                        if f == self.kind_field || !self.brackets_before(root, e) {
-                            e + 1
-                        } else {
-                            e
-                        }
-                    })
-            };
-            prev.push((site, end));
+            prev.push((site, self.local_end(root, lx, f)));
         }
         self.ix_insert(unit, f, lx, x);
         self.stream_touch(unit, lx);
@@ -2660,6 +2741,128 @@ impl Engine {
                 self.move_user(from, x.pack(), f, l, u, x);
                 self.report.rebinds += 0;
             }
+        }
+    }
+
+    /// The brackets around `s` changed: re-binds its definitions and uses.
+    fn rescope_node(&mut self, unit: u32, s: Slot) {
+        // A global's reach (from it to the next global, at any depth)
+        // does not depend on the brackets: only local definitions
+        // re-register. Re-adding a local takes from a global exactly the
+        // readers that now reach the local.
+        let (plain, special): (Vec<Field>, Vec<Field>) = self
+            .n(s)
+            .defs
+            .iter()
+            .filter(|d| !d.global)
+            .map(|d| d.field)
+            .partition(|&f| !self.is_hidden(f));
+        for f in plain {
+            self.rescope_def(s, f);
+        }
+        let vals: Vec<(Field, ValueId)> = self.n(s).defs.iter().map(|d| (d.field, d.value)).collect();
+        for &f in &special {
+            self.remove_def(s, f);
+        }
+        for &f in &special {
+            self.add_def(s, f, false);
+        }
+        // Restore the values (re-registration resets them).
+        let n = self.nm(s);
+        for d in &mut n.defs {
+            if let Some(v) = vals.iter().find(|v| v.0 == d.field) {
+                d.value = v.1;
+            }
+        }
+        let uses: Vec<Use> = self.n(s).uses.to_vec();
+        let label = self.n(s).label;
+        let streams = self.aux_of(s).is_some_and(|a| a.stream.is_some());
+        // The previous link of each contribution chain read.
+        let mut link: Vec<(u64, Slot)> = Vec::new();
+        for u in uses {
+            if u.kind == K_CHAIN {
+                // A deeper link is read at the previous link's position:
+                // the run is redone only if one moved, or now crosses
+                // pending structure.
+                let prev = link.iter().rev().find(|l| l.0 == u.key).map(|l| l.1);
+                let same = !streams
+                    && prev.is_some_and(|p| {
+                        p != NIL && self.live(p) && {
+                            let w = self.walk(unit, self.n(p).label, Field(ValueId(u.key)));
+                            w.site == u.site && w.pending == NIL
+                        }
+                    });
+                if !same {
+                    self.make_dirty(s);
+                }
+                link.push((u.key, u.site));
+                continue;
+            }
+            if u.kind != K_FIELD {
+                continue;
+            }
+            let f = Field(ValueId(u.key));
+            let w = self.walk(unit, label, f);
+            if w.site != u.site {
+                self.move_user(site_key(unit, u.site), site_key(unit, w.site), f, label, s, w.site);
+            }
+            link.push((u.key, w.site));
+        }
+    }
+
+    /// Where the reach of a local definition of `f` at `lx` ends
+    /// (exclusive): the close of its scope.
+    fn local_end(&self, root: u32, lx: u64, f: Field) -> u64 {
+        let depth = self.order.fold(&OAug, root, 0, lx + 1).o;
+        if depth == 0 {
+            return u64::MAX;
+        }
+        // The closing node's own reads are inside the scope, unless its
+        // brackets come before it (its kind read always is).
+        self.order
+            .search_fwd(&OAug, root, lx, &|s: OSum| s.c >= 1)
+            .map_or(u64::MAX, |e| {
+                if f == self.kind_field || !self.brackets_before(root, e) {
+                    e + 1
+                } else {
+                    e
+                }
+            })
+    }
+
+    /// The brackets around `x`'s local definition of `f` changed: re-binds
+    /// exactly the uses whose reaching definition changed. Uses can leave
+    /// only past the (new) end of its scope; uses can arrive only from the
+    /// definition that reaches `x` itself. Unlike removing and adding the
+    /// definition, uses that stay are not touched.
+    fn rescope_def(&mut self, x: Slot, f: Field) {
+        let (unit, lx) = (self.n(x).unit, self.n(x).label);
+        let root = self.units[unit as usize].root;
+        // The index is keyed by depth.
+        self.ix_remove(unit, f, lx);
+        self.ix_insert(unit, f, lx, x);
+        let end = self.local_end(root, lx, f);
+        let from = x.pack();
+        if end < u64::MAX {
+            let leavers: Vec<(u64, Slot)> = self
+                .users
+                .range((from, f, end)..=(from, f, u64::MAX))
+                .map(|(&(_, _, l), &u)| (l, u))
+                .collect();
+            for (l, u) in leavers {
+                let site = self.walk(unit, l, f).site;
+                self.move_user(from, site_key(unit, site), f, l, u, site);
+            }
+        }
+        let site = self.walk(unit, lx, f).site;
+        let prev = site_key(unit, site);
+        let movers: Vec<(u64, Slot)> = self
+            .users
+            .range((prev, f, lx + 1)..(prev, f, end))
+            .map(|(&(_, _, l), &u)| (l, u))
+            .collect();
+        for (l, u) in movers {
+            self.move_user(prev, from, f, l, u, x);
         }
     }
 
@@ -2743,38 +2946,7 @@ impl Engine {
             if !self.live(s) || self.n(s).state == State::Inert {
                 continue;
             }
-            let defs: Vec<(Field, bool)> = self.n(s).defs.iter().map(|d| (d.field, d.global)).collect();
-            let vals: Vec<(Field, ValueId)> = self.n(s).defs.iter().map(|d| (d.field, d.value)).collect();
-            for &(f, _) in &defs {
-                self.remove_def(s, f);
-            }
-            for &(f, g) in &defs {
-                self.add_def(s, f, g);
-            }
-            // Restore the values (re-registration resets them).
-            let n = self.nm(s);
-            for d in &mut n.defs {
-                if let Some(v) = vals.iter().find(|v| v.0 == d.field) {
-                    d.value = v.1;
-                }
-            }
-            let uses: Vec<Use> = self.n(s).uses.to_vec();
-            let label = self.n(s).label;
-            for u in uses {
-                if u.kind == K_CHAIN {
-                    // A deeper chain link may have moved: read it again.
-                    self.make_dirty(s);
-                    continue;
-                }
-                if u.kind != K_FIELD {
-                    continue;
-                }
-                let f = Field(ValueId(u.key));
-                let w = self.walk(unit, label, f);
-                if w.site != u.site {
-                    self.move_user(site_key(unit, u.site), site_key(unit, w.site), f, label, s, w.site);
-                }
-            }
+            self.rescope_node(unit, s);
         }
     }
 
@@ -3006,6 +3178,19 @@ impl Engine {
         self.make_dirty(c);
     }
 
+    /// Nodes parked on `x` (by a wait, a gate or a needed child) run again:
+    /// `x` is going away, so it will never finish for them.
+    fn release_waiters(&mut self, x: Slot, waiters: &[Slot]) {
+        for &w in waiters {
+            if self.live(w) && w != x && self.n(w).on == x {
+                self.nm(w).on = NIL;
+                if self.n(w).state == State::Parked {
+                    self.make_dirty(w);
+                }
+            }
+        }
+    }
+
     fn make_inert(&mut self, s: Slot, by: Slot) {
         if self.n(s).state == State::Inert {
             self.ax(s).claimed_by = Some(by);
@@ -3045,6 +3230,8 @@ impl Engine {
         self.leave_spec(s);
         self.dequeue(s);
         self.refute_assumers(s);
+        let waiters = std::mem::take(&mut self.ax(s).waiters);
+        self.release_waiters(s, &waiters);
         let old_eff = self.oitem(s).eff;
         self.nm(s).state = State::Inert;
         self.nm(s).epoch = self.n(s).epoch.wrapping_add(1);
@@ -3061,15 +3248,14 @@ impl Engine {
         self.ax(s).claimed_by = None;
         self.nm(s).state = State::Dirty;
         self.nm(s).epoch = self.n(s).epoch.wrapping_add(1);
-        let av = self.args_vec(self.n(s).args);
-        let opr = self.op(self.n(s).op).clone();
-        if let Some(d) = opr.defs(&av, &self.values) {
-            for (f, l) in d {
+        let st = self.statics(self.n(s).op, self.n(s).args);
+        if let Some(d) = &st.decl {
+            for &(f, l) in d {
                 let f = self.canon(f);
                 self.add_def(s, f, l == Locality::Global);
             }
         }
-        let eff = opr.effect(&av, &self.values);
+        let eff = st.eff;
         self.nm(s).effect = if eff == Effect::Pending {
             EFF_NONE
         } else {
@@ -3540,14 +3726,7 @@ impl Engine {
             }
             self.make_dirty(r);
         }
-        for w in waiters {
-            if self.live(w) && w != x && self.n(w).on == x {
-                self.nm(w).on = NIL;
-                if self.n(w).state == State::Parked {
-                    self.make_dirty(w);
-                }
-            }
-        }
+        self.release_waiters(x, &waiters);
         self.refute_assumers(x);
         self.set_stream(x, None);
         let (u, l) = (self.n(x).unit, self.n(x).label);
@@ -3635,37 +3814,7 @@ impl Engine {
             if !self.live(s) || self.n(s).state == State::Inert {
                 continue;
             }
-            let defs: Vec<(Field, bool, ValueId)> =
-                self.n(s).defs.iter().map(|d| (d.field, d.global, d.value)).collect();
-            for &(f, _, _) in &defs {
-                self.remove_def(s, f);
-            }
-            for &(f, g, _) in &defs {
-                self.add_def(s, f, g);
-            }
-            let n = self.nm(s);
-            for d in &mut n.defs {
-                if let Some(v) = defs.iter().find(|v| v.0 == d.field) {
-                    d.value = v.2;
-                }
-            }
-            let uses: Vec<Use> = self.n(s).uses.to_vec();
-            let l = self.n(s).label;
-            for u in uses {
-                if u.kind == K_CHAIN {
-                    // A deeper chain link may have moved: read it again.
-                    self.make_dirty(s);
-                    continue;
-                }
-                if u.kind != K_FIELD {
-                    continue;
-                }
-                let f = Field(ValueId(u.key));
-                let w = self.walk(unit, l, f);
-                if w.site != u.site {
-                    self.move_user(site_key(unit, u.site), site_key(unit, w.site), f, l, s, w.site);
-                }
-            }
+            self.rescope_node(unit, s);
         }
     }
 
@@ -4007,7 +4156,8 @@ impl Engine {
             let span = self
                 .order
                 .fold(&OAug, root, self.n(first).label, self.n(last).label + 1);
-            if span.c != 0 || span.o != 0 {
+            let balanced = span.c == 0 && span.o == 0;
+            if !balanced {
                 // Unbalanced: re-bind as if added one at a time.
                 let effs: Vec<u8> = created.iter().map(|&c| self.n(c).effect).collect();
                 for &c in &created {
@@ -4022,6 +4172,13 @@ impl Engine {
                     }
                 }
             }
+            // Balanced, every opener's scope lies in the new text, where
+            // nothing has run: its markers have no readers to take.
+            self.fresh_scope = balanced;
+            for &c in &created {
+                self.set_created_kind(c);
+            }
+            self.fresh_scope = false;
             for &c in &created {
                 self.bind_created(c);
                 self.structure_edit(c);
@@ -4427,7 +4584,10 @@ impl Engine {
             self.nm(x).state = State::Dirty;
         }
         self.nm(x).on = NIL;
-        self.set_children(x, &r.children, provisional);
+        {
+            span!(Children);
+            self.set_children(x, &r.children, provisional);
+        }
         // A stream claim may have read its own previous unfolding, which
         // the line above just replaced: those reads are gone.
         let read_freed = r.stream.is_some()
@@ -4453,7 +4613,10 @@ impl Engine {
             }
         }
         self.set_stream(x, r.stream);
-        let mut changed = self.set_defs(x, &r.defs);
+        let mut changed = {
+            span!(Defs);
+            self.set_defs(x, &r.defs)
+        };
         if self.n(x).has(F_EFF_DYN)
             && let Some(e) = r.effect
         {
@@ -4882,6 +5045,7 @@ impl Engine {
                 live.insert(*b);
             }
         }
+        self.statics_live(&mut live);
         self.accs_arena_live(&mut live);
         // Built accumulator values are rebuilt on demand.
         self.acc_cache.write().unwrap_or_else(PoisonError::into_inner).clear();
@@ -5092,9 +5256,8 @@ impl Engine {
         if !n.has(F_HINT) || n.has(F_APP) {
             return None;
         }
-        let av = self.args_vec(n.args);
-        let fields = self.op(n.op).reads(&av, &self.values)?;
-        for f in fields {
+        let st = self.statics(n.op, n.args);
+        for &f in st.reads.as_ref()? {
             if self.loop_vals.contains_key(&f) {
                 continue;
             }
