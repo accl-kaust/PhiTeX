@@ -518,28 +518,70 @@ struct ObjStm {
 
 /// The data of raw objects, forms, images and marks (`obj_aux` and the
 /// structures it points to).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct Aux {
     /// `\pdfobj` data (`obj_data_ptr`).
-    raw: BTreeMap<usize, Arc<objects::RawObj>>,
+    raw: digest::TMap<usize, Arc<objects::RawObj>>,
     /// `\pdfxform` data.
-    xforms: BTreeMap<usize, objects::XForm>,
+    xforms: digest::TMap<usize, objects::XForm>,
     /// `\pdfximage` data.
-    ximages: BTreeMap<usize, image::XImage>,
+    ximages: digest::TMap<usize, image::XImage>,
     /// `obj_annot_ptr`: annotations' and links' rectangles and data.
-    marks: BTreeMap<usize, marks::Mark>,
+    marks: digest::TMap<usize, marks::Mark>,
     /// `obj_dest_ptr`: destinations met.
-    dests: BTreeMap<usize, marks::Dest>,
+    dests: digest::TMap<usize, marks::Dest>,
     /// Outline entries.
-    outlines: BTreeMap<usize, marks::Outline>,
+    outlines: digest::TMap<usize, marks::Outline>,
     /// `obj_thread_first`.
-    thread_first: BTreeMap<usize, usize>,
+    thread_first: digest::TMap<usize, usize>,
     /// Beads.
-    beads: BTreeMap<usize, marks::Bead>,
+    beads: digest::TMap<usize, marks::Bead>,
     /// `obj_aux` of a page object: the page was shipped.
     pages_made: BTreeSet<usize>,
     /// Named objects' names (`obj_info` < 0 is a string).
-    names: BTreeMap<usize, Vec<u8>>,
+    names: digest::TMap<usize, Vec<u8>>,
+}
+
+impl Default for Aux {
+    fn default() -> Aux {
+        Aux {
+            raw: digest::TMap::new("raw"),
+            xforms: digest::TMap::new("xforms"),
+            ximages: digest::TMap::new("ximages"),
+            marks: digest::TMap::new("marks"),
+            dests: digest::TMap::new("dests"),
+            outlines: digest::TMap::new("outlines"),
+            thread_first: digest::TMap::new("thread_first"),
+            beads: digest::TMap::new("beads"),
+            pages_made: BTreeSet::new(),
+            names: digest::TMap::new("names"),
+        }
+    }
+}
+
+impl PdfState {
+    /// Brings the tracked collections' sums up to date.
+    pub(crate) fn refresh_digests(&mut self) {
+        let a = &mut self.aux;
+        a.raw.refresh();
+        a.xforms.refresh();
+        a.ximages.refresh();
+        a.marks.refresh();
+        a.dests.refresh();
+        a.outlines.refresh();
+        a.thread_first.refresh();
+        a.beads.refresh();
+        a.names.refresh();
+        self.objs.refresh();
+        self.index.refresh();
+        self.fonts.refresh();
+        self.epdf_fds.refresh();
+        self.map_over.refresh();
+        self.map_add.refresh();
+        self.glyph_unicode.refresh();
+        self.dest_names.refresh();
+        self.epdf_docs.refresh();
+    }
 }
 
 /// The writer before the split: the state and its bytes in one.
@@ -565,13 +607,13 @@ pub struct PdfState {
     save_offset: usize,
     /// The last page's content stream, uncompressed, and its size.
     page_shown: (Vec<u8>, Scaled, Scaled),
-    objs: Vec<Obj>,
+    objs: digest::TVec<Obj>,
     /// `obj_ptr`: the objects counted for the user (object streams are
     /// not).
     obj_ptr: usize,
     head: [usize; HEAD_TAB_MAX + 1],
     /// `avl_find_obj`: objects by type and identifier.
-    index: BTreeMap<(usize, Ident), usize>,
+    index: digest::TMap<(usize, Ident), usize>,
     aux: Aux,
     os: ObjStm,
     version_written: bool,
@@ -641,16 +683,16 @@ pub struct PdfState {
     /// The first fatal error met while walking a list.
     error: Option<PdfError>,
     stacks: color::Stacks,
-    fonts: BTreeMap<FontId, Arc<FontState>>,
+    fonts: digest::TMap<FontId, Arc<FontState>>,
     /// `fd_tree`'s descriptors of included PDF files' fonts.
-    epdf_fds: BTreeMap<epdffont::FdKey, epdffont::EpdfFd>,
+    epdf_fds: digest::TMap<epdffont::FdKey, epdffont::EpdfFd>,
     /// `\pdfmapline` and `\pdfmapfile` entries: replacing (`=`) or
     /// deleting (`-`) ones, and those added only where the map has none
     /// (`+`).
-    map_over: BTreeMap<Vec<u8>, Option<MapEntry>>,
-    map_add: BTreeMap<Vec<u8>, MapEntry>,
+    map_over: digest::TMap<Vec<u8>, Option<MapEntry>>,
+    map_add: digest::TMap<Vec<u8>, MapEntry>,
     /// `glyph_unicode_tree`.
-    glyph_unicode: BTreeMap<Vec<u8>, tounicode::Uni>,
+    glyph_unicode: digest::TMap<Vec<u8>, tounicode::Uni>,
     /// `fixed_gen_tounicode`.
     fixed_gen_tounicode: i32,
     // the font files' state across fonts
@@ -672,9 +714,9 @@ pub struct PdfState {
     xform_count: i64,
     ximage_count: i64,
     /// `dest_names`.
-    dest_names: Vec<(Vec<u8>, usize)>,
+    dest_names: digest::TVec<(Vec<u8>, usize)>,
     /// The included PDF files (`pdfDocuments`).
-    epdf_docs: Vec<image::EpdfDoc>,
+    epdf_docs: digest::TVec<image::EpdfDoc>,
     /// `transparent_page_group` and whether it was written (`writepng.c`).
     png_group: usize,
     png_group_written: bool,
@@ -692,6 +734,7 @@ pub struct PdfState {
 impl PdfState {
     /// A writer; nothing is written before the first page or object.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn new(params: PdfParams) -> PdfState {
         PdfState {
             p: params,
@@ -702,10 +745,14 @@ impl PdfState {
             stream_length_offset: 0,
             save_offset: 0,
             page_shown: (Vec::new(), 0, 0),
-            objs: vec![Obj::default()],
+            objs: {
+                let mut o = digest::TVec::new("objs");
+                o.push(Obj::default());
+                o
+            },
             obj_ptr: 0,
             head: [0; HEAD_TAB_MAX + 1],
-            index: BTreeMap::new(),
+            index: digest::TMap::new("index"),
             aux: Aux::default(),
             os: ObjStm::default(),
             version_written: false,
@@ -761,11 +808,11 @@ impl PdfState {
             dummy_font: 0,
             error: None,
             stacks: color::Stacks::default(),
-            epdf_fds: BTreeMap::new(),
-            fonts: BTreeMap::new(),
-            map_over: BTreeMap::new(),
-            map_add: BTreeMap::new(),
-            glyph_unicode: BTreeMap::new(),
+            epdf_fds: digest::TMap::new("epdf_fds"),
+            fonts: digest::TMap::new("fonts"),
+            map_over: digest::TMap::new("map_over"),
+            map_add: digest::TMap::new("map_add"),
+            glyph_unicode: digest::TMap::new("glyph_unicode"),
             fixed_gen_tounicode: 0,
             subset_tags: BTreeSet::new(),
             last_arg_other_subr3: 3,
@@ -781,8 +828,8 @@ impl PdfState {
             obj_count: 0,
             xform_count: 0,
             ximage_count: 0,
-            dest_names: Vec::new(),
-            epdf_docs: Vec::new(),
+            dest_names: digest::TVec::new("dest_names"),
+            epdf_docs: digest::TVec::new("epdf_docs"),
             png_group: 0,
             png_group_written: false,
             map_read: false,
