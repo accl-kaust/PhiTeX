@@ -375,6 +375,10 @@ pub struct Report {
     pub stops: u64,
     /// Waits on pending structure (definition sets, claims, scope effects).
     pub pending_waits: u64,
+    /// Nodes left waiting for an environment field not yet supplied (nor
+    /// declared absent), and the nodes waiting on them, when the
+    /// evaluation ended.
+    pub env_stalled: u64,
     /// Nodes held back before running because a hinted input was missing.
     pub gated: u64,
     /// Speculative runs kept (with outstanding assumptions).
@@ -469,6 +473,8 @@ pub(crate) const K_LOOP: u8 = 2;
 /// A link of a contribution chain past the first (see
 /// [`Ctx::contributions_before_me`]): `key` is the sequence's hidden field.
 pub(crate) const K_CHAIN: u8 = 3;
+/// A read of the environment ([`Ctx::use_env`]): `key` is the field.
+pub(crate) const K_ENV: u8 = 4;
 
 /// A recorded read: 16 bytes.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -882,6 +888,12 @@ pub struct Engine {
     environment: FxHashMap<Field, ValueId>,
     /// The environment for the next evaluation, applied at its start.
     env_next: Option<FxHashMap<Field, ValueId>>,
+    /// Environment fields declared absent ([`Ctx::use_env`] reads them as
+    /// `None` instead of waiting), and those for the next evaluation.
+    env_absent: FxHashSet<Field>,
+    env_absent_next: Option<FxHashSet<Field>>,
+    /// Nodes parked on an environment field neither supplied nor absent.
+    env_waiters: FxHashMap<Field, Vec<Slot>>,
     /// Global definitions: `(unit, field, label)`.
     global_ix: BTreeMap<(u32, Field, u64), Slot>,
     users: BTreeMap<(u64, Field, u64), Slot>,
@@ -1041,6 +1053,9 @@ impl Engine {
             fresh_scope: false,
             environment: FxHashMap::default(),
             env_next: None,
+            env_absent: FxHashSet::default(),
+            env_absent_next: None,
+            env_waiters: FxHashMap::default(),
             global_ix: BTreeMap::new(),
             users: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -1760,6 +1775,13 @@ impl Engine {
         self.env_next = Some(env.into_iter().collect());
     }
 
+    /// Declares environment fields absent for the next evaluation: a
+    /// [`Ctx::use_env`] of one reads `None` instead of waiting. The set
+    /// replaces the previous one, like the environment itself.
+    pub fn set_environment_absent(&mut self, fields: impl IntoIterator<Item = Field>) {
+        self.env_absent_next = Some(fields.into_iter().collect());
+    }
+
     /// The environment of the last evaluation (or of the next, once
     /// supplied).
     pub fn environment(&self) -> impl Iterator<Item = (Field, ValueId)> + '_ {
@@ -1771,17 +1793,33 @@ impl Engine {
     }
 
     fn apply_environment(&mut self) {
-        let Some(next) = self.env_next.take() else {
+        let mut changed: Vec<Field> = Vec::new();
+        if let Some(next) = self.env_next.take() {
+            let old = std::mem::replace(&mut self.environment, next);
+            changed.extend(
+                old.iter()
+                    .filter(|&(f, v)| self.environment.get(f) != Some(v))
+                    .map(|(&f, _)| f)
+                    .chain(self.environment.keys().filter(|f| !old.contains_key(f)).copied()),
+            );
+        }
+        if let Some(next) = self.env_absent_next.take() {
+            let old = std::mem::replace(&mut self.env_absent, next);
+            changed.extend(old.symmetric_difference(&self.env_absent).copied());
+        }
+        if changed.is_empty() {
             return;
-        };
-        let old = std::mem::replace(&mut self.environment, next);
-        let mut changed: Vec<Field> = old
-            .iter()
-            .filter(|&(f, v)| self.environment.get(f) != Some(v))
-            .map(|(&f, _)| f)
-            .chain(self.environment.keys().filter(|f| !old.contains_key(f)).copied())
-            .collect();
+        }
         changed.sort_unstable();
+        changed.dedup();
+        // Nodes that waited for one of these fields run again.
+        for &f in &changed {
+            for x in self.env_waiters.remove(&f).unwrap_or_default() {
+                if self.live(x) && self.n(x).state == State::Parked && self.n(x).on == NIL {
+                    self.make_dirty(x);
+                }
+            }
+        }
         for unit in 0..u32::try_from(self.units.len()).expect("unit count") {
             let u = &self.units[unit as usize];
             if !u.live || u.owner != NIL {
@@ -1792,6 +1830,19 @@ impl Engine {
                     self.dirty_field_users(site_key(unit, NIL), f);
                 }
             }
+        }
+    }
+
+    /// The environment's value of `f` for a node of `unit`: `Err(())` when
+    /// neither supplied nor declared absent (a body sees none).
+    pub(crate) fn env_value(&self, unit: u32, f: Field) -> Result<Option<ValueId>, ()> {
+        if self.units[unit as usize].owner != NIL {
+            return Ok(None);
+        }
+        match self.environment.get(&f) {
+            Some(&v) => Ok(Some(v)),
+            None if self.env_absent.contains(&f) => Ok(None),
+            None => Err(()),
         }
     }
 
@@ -4187,7 +4238,7 @@ impl Engine {
         let old = std::mem::replace(&mut self.nm(x).uses, new.into_boxed_slice());
         for u in &old {
             match u.kind {
-                K_FIELD | K_CHAIN if has_label => {
+                K_FIELD | K_CHAIN | K_ENV if has_label => {
                     self.users
                         .remove(&(site_key(unit, u.site), Field(ValueId(u.key)), label));
                 }
@@ -4208,7 +4259,7 @@ impl Engine {
         let new: Vec<Use> = self.n(x).uses.to_vec();
         for u in new {
             match u.kind {
-                K_FIELD | K_CHAIN if has_label => {
+                K_FIELD | K_CHAIN | K_ENV if has_label => {
                     self.users
                         .insert((site_key(unit, u.site), Field(ValueId(u.key)), label), x);
                 }
@@ -4483,6 +4534,10 @@ impl Engine {
                     }
                 }
                 K_LOOP => (0, self.loop_vals.get(&Field(ValueId(u.key))).copied()),
+                K_ENV => match self.env_value(self.n(x).unit, Field(ValueId(u.key))) {
+                    Ok(v) => (0, v),
+                    Err(()) => return false,
+                },
                 K_OUTPUT => {
                     let t = Slot::unpack(u.key);
                     if !self.live(t) || !self.settled(t) {
@@ -4736,6 +4791,16 @@ impl Engine {
                     let h = (self.n(t).height + 1).max(self.n(x).height);
                     self.set_height(x, h);
                 }
+                return;
+            }
+            End::WaitEnv(f) => {
+                // Until the client supplies the field (or declares it
+                // absent): the node stays in work, so what it may define
+                // keeps its readers waiting too.
+                self.report.stops += 1;
+                self.apply_partial(x, &r);
+                self.park(x, NIL);
+                self.env_waiters.entry(f).or_default().push(x);
                 return;
             }
             End::NeedApp(op, args) => {
@@ -5414,6 +5479,30 @@ impl Engine {
         r
     }
 
+    /// Of `parked`, the nodes waiting for an environment field, and those
+    /// waiting (through any chain of waits) on one of them.
+    fn env_stalled(&self, parked: &[Slot]) -> FxHashSet<Slot> {
+        let mut stalled: FxHashSet<Slot> = self
+            .env_waiters
+            .values()
+            .flatten()
+            .copied()
+            .filter(|&x| self.live(x) && self.n(x).state == State::Parked && self.n(x).on == NIL)
+            .collect();
+        loop {
+            let before = stalled.len();
+            for &x in parked {
+                let on = self.n(x).on;
+                if on != NIL && stalled.contains(&on) {
+                    stalled.insert(x);
+                }
+            }
+            if stalled.len() == before {
+                return stalled;
+            }
+        }
+    }
+
     fn rounds(&mut self, sched: &mut dyn Scheduler, exec: &mut dyn Executor) -> Result<(), EvalError> {
         loop {
             self.report.rounds += 1;
@@ -5424,7 +5513,18 @@ impl Engine {
                     self.report.rounds -= 1;
                     continue;
                 }
-                let mut ids: Vec<NodeId> = parked.iter().map(|&s| self.n(s).id).collect();
+                // Nodes waiting for the environment, and those waiting on
+                // them, stay parked until the client supplies it.
+                let stalled = self.env_stalled(&parked);
+                if stalled.len() == parked.len() {
+                    self.report.env_stalled = stalled.len() as u64;
+                    return Ok(());
+                }
+                let mut ids: Vec<NodeId> = parked
+                    .iter()
+                    .filter(|s| !stalled.contains(s))
+                    .map(|&s| self.n(s).id)
+                    .collect();
                 ids.sort_unstable();
                 return Err(EvalError::Cycle(ids));
             }
@@ -5705,6 +5805,8 @@ pub(crate) fn eff_kind(e: Effect) -> Option<ValueId> {
 pub(crate) enum End {
     Output(ValueId),
     Wait(Slot),
+    /// Waiting for an environment field neither supplied nor absent.
+    WaitEnv(Field),
     Raise(u32),
     NeedApp(OpId, ValueId),
     NeedChild(usize),
