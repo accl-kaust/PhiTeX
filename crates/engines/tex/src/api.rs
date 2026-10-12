@@ -531,7 +531,24 @@ impl Graph {
                 Err(e) => panic!("{}", self.diagnose(&e)),
             };
             if std::env::var_os("PHITEX_TEX_TIME").is_some() {
-                eprintln!("round: {:?}, {} nodes run", t0.elapsed(), r.nodes_run);
+                eprintln!(
+                    "round: {:?}, {} nodes run, {} runs, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} pending, {} created, {} freed, spec {}/{}/{}, by op {:?}",
+                    t0.elapsed(),
+                    r.nodes_run,
+                    r.runs,
+                    r.cutoffs,
+                    r.rebinds,
+                    r.restarts,
+                    r.rounds,
+                    r.stops,
+                    r.pending_waits,
+                    r.created,
+                    r.freed,
+                    r.speculations,
+                    r.confirmations,
+                    r.mispredictions,
+                    r.runs_by_op
+                );
             }
             stats.add(&r);
             let opened = self.opened(unit);
