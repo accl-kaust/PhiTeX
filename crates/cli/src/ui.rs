@@ -238,7 +238,9 @@ impl Ui {
         if o.errors > 0 {
             facts.push(st.red(&plural(o.errors, "error", "errors")));
         }
-        facts.push(plural(o.pages, "page", "pages"));
+        if let Some(n) = o.pages {
+            facts.push(plural(n, "page", "pages"));
+        }
         if let Some(b) = o.bytes.filter(|_| self.verbose > 0) {
             facts.push(format!("{b} bytes"));
         }
@@ -274,7 +276,7 @@ pub struct Outcome<'a> {
     /// The output written (none: not written, or no pages).
     pub output: Option<&'a Path>,
     pub file: &'a str,
-    pub pages: usize,
+    pub pages: Option<usize>,
     pub bytes: Option<usize>,
     pub wall: Duration,
     pub errors: usize,

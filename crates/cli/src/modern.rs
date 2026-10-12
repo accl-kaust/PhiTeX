@@ -438,13 +438,11 @@ pub fn report(
     if o.verbose > 0 {
         for (k, run) in r.runs.iter().enumerate() {
             ui.line(&st.dim(&format!(
-                "  run {}: {} ({}): {} nodes reduced, {} pages ({} kept)",
+                "  run {}: {} ({}): {} nodes reduced",
                 k + 1,
                 ms(run.wall),
                 run.why,
                 run.commands_run,
-                run.pages,
-                run.pages_reused
             )));
         }
     }

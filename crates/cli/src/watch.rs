@@ -353,23 +353,20 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             });
         } else {
             facts.push(format!("{nodes} nodes run"));
-            facts.push(if builds == 1 {
-                format!(
-                    "{} page{}",
-                    r.pages(),
-                    if r.pages() == 1 { "" } else { "s" }
-                )
-            } else if changed.is_empty() {
-                format!("no page of {} changed", r.pages())
-            } else {
-                format!(
-                    "{} of {} page{} changed ({})",
-                    changed.len(),
-                    r.pages(),
-                    if r.pages() == 1 { "" } else { "s" },
-                    view::ranges(changed)
-                )
-            });
+            if let Some(n) = r.pages() {
+                let s = if n == 1 { "" } else { "s" };
+                facts.push(if builds == 1 {
+                    format!("{n} page{s}")
+                } else if changed.is_empty() {
+                    format!("no page of {n} changed")
+                } else {
+                    format!(
+                        "{} of {n} page{s} changed ({})",
+                        changed.len(),
+                        view::ranges(changed)
+                    )
+                });
+            }
         }
         facts.push(st.bold(&ms(r.wall)));
         let mark = if failed {
