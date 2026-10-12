@@ -849,7 +849,7 @@ impl PdfWriter {
             return Ok(());
         };
         let attr = x.attr.take();
-        let image = x.image.take();
+        let image = x.image.clone();
         self.begin_dict(n, 0);
         if let Some(a) = &attr {
             self.print_toks_ln(a);

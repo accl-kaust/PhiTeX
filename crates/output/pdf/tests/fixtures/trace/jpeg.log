@@ -1,0 +1,48 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input jpeg
+(../../oracle/fixtures/pdf/jpeg.tex
+
+Completed box being shipped out [0]
+\vbox(500.0+0.0)x300.0
+.\glue(\topskip) 0.0
+.\hbox(48.18+3.0)x300.0, glue set 41.27824
+..\hbox(0.0+0.0)x0.0
+..\r A
+..\pdfrefximage(48.18+0.0)x64.24
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfrefximage(30.0+0.0)x40.0
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\pdfrefximage(30.0+3.0)x44.0
+..\penalty 10000
+..\glue(\parfillskip) 0.0
+..\glue(\rightskip) 0.0
+
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map} <../../oracle/fixtures/pdf/
+jpg-jfif0.jpg> </usr/share/texmf-dist/tex/latex/mwe/example-image.jpg> <../../o
+racle/fixtures/pdf/jpg-exif.jpg>
+
+Completed box being shipped out [0]
+\vbox(500.0+0.0)x300.0, glue set 421.82fill
+.\pdfrefximage(30.0+0.0)x40.0
+.\glue(\topskip) 0.0
+.\hbox(48.18+0.0)x300.0, glue set 139.45685
+..\hbox(0.0+0.0)x0.0
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\hbox(48.18+0.0)x64.24
+...\pdfrefximage(48.18+0.0)x64.24
+..\penalty 10000
+..\glue(\parfillskip) 0.0
+..\glue(\rightskip) 0.0
+.\hbox(0.0+0.0)x300.0
+.\glue 0.0 plus 1.0fill
+
+ )</usr/share/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb>
+Output written on jpeg-trace.pdf (2 pages, 24970 bytes).
+PDF statistics:
+ 16 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 16 words of extra memory for PDF output out of 10000 (max. 10000000)
+

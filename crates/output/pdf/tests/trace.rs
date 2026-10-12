@@ -622,6 +622,18 @@ fn log_lines(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut join = false;
     for l in text.lines() {
+        // character 0 is `\newlinechar` in INITEX: `\f ` and an empty line
+        if l.is_empty()
+            && let Some(p) = out.last_mut()
+            && p.starts_with('.')
+            && p.ends_with(' ')
+            && p.trim_start_matches('.').starts_with('\\')
+            && !p.trim_start_matches('.').trim_end().contains(' ')
+        {
+            p.push_str("^^@");
+            join = false;
+            continue;
+        }
         if join {
             out.last_mut().unwrap().push_str(l);
         } else {
@@ -1539,7 +1551,7 @@ fn image(file: &str, res: i32, f: impl FnOnce(&mut ImageSpec)) -> ImageSpec {
         env!("CARGO_MANIFEST_DIR")
     );
     let (name, data) = if let Ok(d) = std::fs::read(&local) {
-        (file.to_owned(), d)
+        (format!("./{file}"), d)
     } else {
         let p = kpse_path(file).unwrap();
         let d = std::fs::read(&p).unwrap();
@@ -1698,6 +1710,187 @@ fn readback() {
         j.w.obj(Some(9999), false, None, ObjBody::Text(b"x".to_vec()))
             .1
     );
+    j.ship_all();
+    j.finish();
+}
+
+// ---- goldens made for this crate (see the README) ----
+
+/// The PNG fixtures, each `width 20pt`.
+fn png_job(name: &'static str, hicolor: i32) {
+    let mut j = Job::new(name, 0);
+    j.font("r", "cmr10", None);
+    j.w.params_mut().image_hicolor = hicolor;
+    j.read();
+    for f in [
+        "png-gray.png",
+        "png-gray16.png",
+        "png-rgb16.png",
+        "png-pal.png",
+        "png-paltrns.png",
+        "png-rgba.png",
+        "png-graya.png",
+        "png-gama.png",
+    ] {
+        let n = j.w.ximage(image(f, 0, |s| s.width = 20 * PT)).unwrap();
+        j.nums.ximages.push_back(n);
+    }
+    j.ship_all();
+    j.finish();
+}
+
+#[test]
+fn png() {
+    png_job("png", 1);
+}
+
+#[test]
+fn png8() {
+    png_job("png8", 0);
+}
+
+#[test]
+fn jpeg() {
+    let mut j = Job::new("jpeg", 0);
+    j.font("r", "cmr10", None);
+    j.w.params_mut().compress_level = 0;
+    j.read();
+    let a = j.w.ximage(image("jpg-jfif0.jpg", 0, |_| {})).unwrap();
+    let b =
+        j.w.ximage(image("example-image.jpg", 0, |s| {
+            s.width = 40 * PT;
+            s.attr = Some(b"/Interpolate true".to_vec());
+        }))
+        .unwrap();
+    let c =
+        j.w.ximage(image("jpg-exif.jpg", 0, |s| {
+            s.height = 30 * PT;
+            s.depth = 3 * PT;
+        }))
+        .unwrap();
+    j.nums.ximages.extend([a, b, c, b, a]);
+    j.ship_all();
+    j.finish();
+}
+
+#[test]
+fn ownpdf() {
+    let mut j = Job::new("ownpdf", 0);
+    j.font("r", "cmr10", None);
+    let p = j.w.params_mut();
+    p.compress_level = 0;
+    p.inclusion_copy_fonts = 1;
+    j.read();
+    let a = j.w.ximage(image("hello.pdf", 0, |_| {})).unwrap();
+    let b =
+        j.w.ximage(image("objstm.pdf", 0, |s| {
+            s.width = 100 * PT;
+            s.page = 2;
+        }))
+        .unwrap();
+    let c =
+        j.w.ximage(image("colorstack.pdf", 0, |s| s.page_box = PageBox::Trim))
+            .unwrap();
+    j.nums.ximages.extend([a, b, c, a]);
+    j.ship_all();
+    j.finish();
+}
+
+#[test]
+fn linkbreak() {
+    let mut j = Job::new("linkbreak", 0);
+    j.font("r", "cmr10", None);
+    j.w.params_mut().compress_level = 0;
+    j.read();
+    let l = j.w.new_objnum();
+    j.nums.links.push_back(l);
+    j.ship();
+    let l = j.w.new_objnum();
+    j.nums.links.push_back(l);
+    j.ship_all();
+    j.finish();
+}
+
+#[test]
+fn outlinetree() {
+    let mut j = Job::new("outlinetree", 0);
+    j.font("r", "cmr10", None);
+    j.w.params_mut().compress_level = 0;
+    let n = |k| goto(Ident::Num(k));
+    j.w.outline(None, &n(1), 3, b"One").unwrap();
+    j.w.outline(None, &n(2), -2, b"One.A").unwrap();
+    j.w.outline(None, &n(3), 0, b"One.A.i").unwrap();
+    j.w.outline(None, &n(4), 0, b"One.A.ii").unwrap();
+    j.w.outline(None, &n(5), 0, b"One.B").unwrap();
+    j.w.outline(None, &goto(name("x")), 1, b"Two").unwrap();
+    let page = Action::Page {
+        file: None,
+        page: 2,
+        spec: b"/Fit".to_vec(),
+        new_window: 0,
+        struct_id: None,
+    };
+    j.w.outline(None, &page, 1, b"Two.A").unwrap();
+    j.w.outline(None, &n(1), 0, b"Two.A.i").unwrap();
+    j.w.outline(Some(b"/F 2".to_vec()), &goto(name("x")), 0, b"Three")
+        .unwrap();
+    j.read();
+    j.ship_all();
+    j.finish();
+}
+
+#[test]
+fn csform() {
+    let mut j = Job::new("csform", 0);
+    j.font("r", "cmr10", None);
+    j.w.params_mut().compress_level = 0;
+    assert_eq!(j.w.colorstack_init(true, true, b"0 g 0 G").unwrap(), 1);
+    j.read();
+    let f = j.xform(0, None, None);
+    let g = j.xform(1, None, None);
+    j.nums.xforms.extend([f, g, g, f]);
+    j.ship_all();
+    j.finish();
+}
+
+#[test]
+fn objstm2() {
+    let mut j = Job::new("objstm2", 9);
+    j.font("r", "cmr10", None);
+    let p = j.w.params_mut();
+    p.minor_version = 5;
+    p.obj_compress_level = 2;
+    let t = |s: &str| ObjBody::Text(s.as_bytes().to_vec());
+    let (a, _) = j.w.obj(None, false, None, t("<< /A 1 >>"));
+    let (b, _) = j.w.obj(None, false, None, t("[1 2]"));
+    j.w.write_obj(b).unwrap();
+    let (d, _) = j.w.obj(None, true, None, t("q Q"));
+    j.w.outline(None, &goto(name("a")), 0, b"First").unwrap();
+    j.w.outline(None, &goto(name("b")), 0, b"Second").unwrap();
+    j.read();
+    let f = j.xform(0, None, None);
+    j.w.info(b"/Title (Streams)");
+    j.w.catalog(b"/PageMode /UseOutlines", None).unwrap();
+    j.nums.objs.extend([a, d]);
+    j.nums.xforms.push_back(f);
+    let n = j.w.new_objnum();
+    j.nums.annots.push_back(n);
+    j.ship_all();
+    j.finish();
+}
+
+#[test]
+fn tounicode2() {
+    let mut j = Job::new("tounicode2", 0);
+    j.w.params_mut().gen_tounicode = 1;
+    j.w.params_mut().compress_level = 0;
+    j.font("r", "cmr10", None);
+    j.font("i", "cmmi10", None);
+    j.font("s", "cmsy10", None);
+    j.font("t", "cmtt10", None);
+    j.w.glyph_to_unicode(b"ff", b"0066 0066");
+    j.w.glyph_to_unicode(b"dotlessi", b"0131");
+    j.read();
     j.ship_all();
     j.finish();
 }
