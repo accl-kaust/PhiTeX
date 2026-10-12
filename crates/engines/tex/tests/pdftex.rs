@@ -108,7 +108,6 @@ const PENDING: &[&str] = &[
     "ownpdf",
     "png",
     "png8",
-    "tounicode2",
 ];
 
 /// Gate 1: `pdftex -ini` on `oracle/fixtures/pdf/*.tex` with a `.pdf`

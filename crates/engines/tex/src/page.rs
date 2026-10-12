@@ -85,11 +85,12 @@ impl Run<'_, '_> {
                 }
             }
         }
-        let view = self.font_view(std::slice::from_ref(&Node::Box(bx)))?;
+        let page_box = Node::Box(bx);
+        let view = self.font_view(std::slice::from_ref(&page_box))?;
         let mut fonts = Vec::new();
         let mut ids: Vec<u32> = view.fonts.keys().copied().collect();
         ids.sort_unstable();
-        for f in ids {
+        for &f in &ids {
             let info = self.get(&format!("fontinfo:{f}"))?;
             let Some(i) = crate::fonts::info(v, info) else {
                 continue;
@@ -105,6 +106,11 @@ impl Run<'_, '_> {
         let cs = v.list(counts.iter().map(|&c| v.int(i64::from(c))).collect());
         let pdf = self.pdf_page_params(pos.pdf)?;
         let page = v.list(vec![b, cs, v.list(fonts), pdf, v.list(pdf_data)]);
+        if pos.pdf
+            && let Node::Box(bx) = &page_box
+        {
+            crate::pdfout::ship(self, page, bx, &side, &ids)?;
+        }
         let su = v.seq_unit(page);
         self.contribute("pages", su);
         self.log("shipend", "]")?;
@@ -486,7 +492,7 @@ pub(crate) fn dvi(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
             .is_some_and(|&x| crate::val::int_at(v, x, 0) != 0)
     });
     if pdf {
-        return crate::pdfout::write(cx, &all);
+        return crate::pdfout::finish(cx);
     }
     let comment = cx
         .use_field(v.field("dvicomment"))?
