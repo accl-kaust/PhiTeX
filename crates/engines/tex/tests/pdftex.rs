@@ -92,7 +92,7 @@ fn find(h: &[u8], n: &[u8]) -> Option<usize> {
 }
 
 /// The documents that do not pass yet: un-ignored as they are fixed.
-const PENDING: &[&str] = &["berasizes", "interword", "misc", "pageref", "tounicode"];
+const PENDING: &[&str] = &["berasizes", "pageref"];
 
 /// Gate 1: `pdftex -ini` on `oracle/fixtures/pdf/*.tex` with a `.pdf`
 /// oracle: byte-identical; for the documents on a backend gap, whether
@@ -103,7 +103,7 @@ fn pdf_documents() {
 }
 
 #[test]
-#[ignore = "berasizes: virtual fonts; interword: byte 34; misc: byte 15; pageref: object order; tounicode: byte 22199"]
+#[ignore = "berasizes: virtual fonts; pageref: object order (the writer as a fold)"]
 fn pdf_documents_pending() {
     pdf_gate(true);
 }
