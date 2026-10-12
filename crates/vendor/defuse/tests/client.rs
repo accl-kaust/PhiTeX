@@ -450,3 +450,50 @@ fn a_reader_waits_for_a_pending_node_whose_file_is_not_supplied() {
         "r ran ahead of i on the first evaluation (saw {first:?}) while i's file was undefined"
     );
 }
+
+// ---- an environment wait before an accumulator reader (client report)
+
+/// `["i"]`: pending definition set; reads env field `file` with `use_env`
+/// and, if supplied, defines `x`.  `["a"]`: reads the fold of the
+/// accumulator `acc` over the unit.
+struct EnvAccOp;
+
+impl Operation for EnvAccOp {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        if tag(v, a) == "i" { None } else { Some(Vec::new()) }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match tag(v, &a).as_str() {
+            "i" => {
+                if let Some(x) = cx.use_env(v.field("file"))? {
+                    cx.define(v.field("x"), x);
+                }
+                Ok(ValueId::UNIT)
+            }
+            "a" => cx.acc_range(v.field("acc"), None),
+            _ => Ok(cx.use_field(v.field("x"))?.unwrap_or_else(|| v.str("none"))),
+        }
+    }
+}
+
+#[test]
+fn an_env_wait_before_an_accumulator_reader_is_not_a_cycle() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(EnvAccOp));
+    let acc = eng.values().field("acc");
+    eng.declare_accumulator(acc, Arc::new(defuse::SeqMonoid));
+    let u = eng.new_unit();
+    let i = eng.push(u, op, vec![eng.values().str("i")]);
+    let a = eng.push(u, op, vec![eng.values().str("a")]);
+    eng.add_root(a);
+    let rep = eng.evaluate_sequential();
+    assert!(rep.is_ok(), "an env wait ended as {:?}", rep.err());
+    let rep = rep.unwrap();
+    assert_eq!(
+        rep.env_stalled, 2,
+        "i waits for the field, a waits on the range holding i"
+    );
+    assert_eq!(rep.env_waits, vec![(i, eng.values().field("file"))]);
+}
