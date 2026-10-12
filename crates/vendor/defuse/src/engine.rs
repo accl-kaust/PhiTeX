@@ -79,9 +79,18 @@ const NO_AUX: u32 = u32::MAX;
 pub struct NodeId(pub(crate) u64);
 
 impl NodeId {
+    /// The id as a number, to store as a value and rebuild with
+    /// [`NodeId::from_raw`] (e.g. a node recording an opener's id for a
+    /// later range read anchored at it).
     #[must_use]
     pub fn raw(self) -> u64 {
         self.0
+    }
+
+    /// The id a [`NodeId::raw`] number stands for.
+    #[must_use]
+    pub const fn from_raw(raw: u64) -> Self {
+        NodeId(raw)
     }
 }
 
@@ -417,6 +426,13 @@ pub struct Report {
     pub spec_shape_changes: u64,
     /// Nodes parked on a node of each operation (by name).
     pub waits_by_op: Vec<(&'static str, u64)>,
+    /// The longest chain of dependent waits after the evaluation (the
+    /// greatest height of a finished node): the runs that could not
+    /// overlap, whatever the thread count. See [`Engine::critical_chain`].
+    pub critical_path: u32,
+    /// The largest batch of jobs handed to the executor in one step: the
+    /// most that could run at once.
+    pub max_ready: usize,
 }
 
 impl Report {
@@ -530,6 +546,13 @@ pub enum Cause {
     /// The structure around it changed (a claim, a scope, text coming or
     /// going, a range it reads).
     Structure,
+    /// An accumulator range it reads over `field`, settled last by `from`
+    /// (for [`Engine::critical_chain`]).
+    Range { field: Field, from: Option<NodeId> },
+    /// Its creation: unfolded by `by` (a parent, or the node whose run
+    /// made it a continuation), with its starting height (for
+    /// [`Engine::critical_chain`]).
+    Created { by: Option<NodeId> },
 }
 
 /// What a node is waiting for when an evaluation stops without finishing.
@@ -1820,6 +1843,96 @@ impl Engine {
             .unwrap_or(0)
     }
 
+    /// The chain of waits behind the longest one: from the finished node
+    /// of the greatest height back to one that waited for nothing, each
+    /// with what gave it its height (the read whose site finished last: a
+    /// definition, an output, an accumulator range and its last
+    /// contributor, or its creation with a starting height). Empty when
+    /// nothing has finished.
+    #[must_use]
+    pub fn critical_chain(&self) -> Vec<(NodeId, Cause)> {
+        let mut chain = Vec::new();
+        let Some(mut x) = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.state == State::Done)
+            .max_by_key(|(_, n)| (n.height, std::cmp::Reverse(n.id)))
+            .map(|(i, n)| Slot {
+                ix: u32::try_from(i).unwrap_or(u32::MAX),
+                gen_: n.gen_,
+            })
+        else {
+            return chain;
+        };
+        loop {
+            let n = self.n(x);
+            let h = n.height;
+            // The read whose site stands highest; ties: the first recorded.
+            let mut best: Option<(u32, Slot, Cause)> = None;
+            let mut offer = |cand: (u32, Slot, Cause)| {
+                if best.as_ref().is_none_or(|b| cand.0 > b.0) {
+                    best = Some(cand);
+                }
+            };
+            for u in &n.uses {
+                match u.kind {
+                    K_FIELD if u.site != NIL && self.live(u.site) => {
+                        let site = self.n(u.site);
+                        offer((
+                            site.height,
+                            u.site,
+                            Cause::Changed {
+                                field: Field(ValueId(u.key)),
+                                site: Some(site.id),
+                            },
+                        ));
+                    }
+                    K_OUTPUT => {
+                        let t = Slot::unpack(u.key);
+                        if self.live(t) {
+                            offer((self.n(t).height, t, Cause::Output { of: self.n(t).id }));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some((field, anchor)) = self.aux_of(x).and_then(|a| a.watch) {
+                let lo = self.watch_key(x, anchor).0;
+                let root = self.units[n.unit as usize].root;
+                let top = self.order.fold(&OAug, root, lo, n.label).maxh;
+                let last = self
+                    .order
+                    .search_back(&OAug, root, n.label, &|s: OSum| s.maxh >= top)
+                    .filter(|&k| k >= lo)
+                    .and_then(|k| self.order.get(root, k))
+                    .map(|i| i.slot)
+                    .filter(|&s| self.live(s));
+                offer((
+                    top,
+                    last.unwrap_or(NIL),
+                    Cause::Range {
+                        field,
+                        from: last.map(|s| self.n(s).id),
+                    },
+                ));
+            }
+            match best {
+                Some((bh, site, cause)) if site != NIL && bh + 1 == h && bh < h => {
+                    chain.push((n.id, cause));
+                    x = site;
+                }
+                _ => {
+                    // Nothing it read explains its height: it started
+                    // there (hints at its creation, or a wait that resolved).
+                    let by = (n.parent != NIL && self.live(n.parent)).then(|| self.n(n.parent).id);
+                    chain.push((n.id, Cause::Created { by }));
+                    return chain;
+                }
+            }
+        }
+    }
+
     /// Bytes per node record and per use edge.
     #[must_use]
     pub fn record_sizes() -> (usize, usize) {
@@ -2569,7 +2682,7 @@ impl Engine {
             let mut best_l = self.n(x).label;
             if let Some(a) = self.aux_of(x) {
                 if a.body.is_none()
-                    && let Some(&c) = a.children.last()
+                    && let Some(&c) = a.children.iter().rev().find(|&&c| self.live(c))
                 {
                     let e = self.subtree_end(c);
                     if self.n(e).label > best_l {
@@ -2577,7 +2690,7 @@ impl Engine {
                         best_l = self.n(e).label;
                     }
                 }
-                if let Some(&c) = a.claimed.last()
+                if let Some(&c) = a.claimed.iter().rev().find(|&&c| self.live(c))
                     && self.n(c).label > best_l
                 {
                     best = c;
@@ -4801,8 +4914,10 @@ impl Engine {
             suf += 1;
         }
         self.free_span(&old[pre..old.len() - suf], false);
+        // The anchor, now that the replaced text is gone (what it unfolded
+        // or claimed may have been the end of the kept text).
         let after = if pre == 0 {
-            anchor
+            anchor.map(|a| if self.live(a) { a } else { x })
         } else {
             Some(self.subtree_end(old[pre - 1]))
         };
@@ -5885,10 +6000,11 @@ impl Engine {
                         Cause::Rebind { field, .. }
                         | Cause::Changed { field, .. }
                         | Cause::Loop { field }
-                        | Cause::Environment { field } => {
+                        | Cause::Environment { field }
+                        | Cause::Range { field, .. } => {
                             live.insert(field.0);
                         }
-                        Cause::Output { .. } | Cause::Woken { .. } | Cause::Structure => {}
+                        Cause::Output { .. } | Cause::Woken { .. } | Cause::Structure | Cause::Created { .. } => {}
                     }
                 }
             }
@@ -6005,6 +6121,7 @@ impl Engine {
     }
 
     fn finalize_report(&mut self) {
+        self.report.critical_path = self.critical_path();
         let touched = std::mem::take(&mut self.touched);
         for (id, snap) in touched {
             let Some(&s) = self.ids.get(&id) else {
@@ -6323,6 +6440,7 @@ impl Engine {
             self.report.steps += 1;
             count!(Step);
             count!(Job, batch.len());
+            self.report.max_ready = self.report.max_ready.max(batch.len());
             count!(SpecJob, batch.iter().filter(|j| j.speculative).count());
             let fuel = sched.fuel();
             results.clear();
