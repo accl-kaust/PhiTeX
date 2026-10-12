@@ -910,8 +910,9 @@ fn tex_plain_documents() {
     );
 }
 
-/// `phitex build --json`: every line on standard output is a JSON event,
-/// the build's last, with its pages and output; nothing else is printed.
+/// `phitex build --json`: every line on standard output is a JSON event:
+/// the build's, with its pages and output, then the cache's; nothing else
+/// is printed.
 #[test]
 fn build_json_events() {
     let _one = one();
@@ -942,8 +943,13 @@ fn build_json_events() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{l}: {e}")))
         .collect();
-    let b = events.last().expect("an event");
-    assert_eq!(b["event"], "build", "{events:?}");
+    let b = events
+        .iter()
+        .find(|e| e["event"] == "build")
+        .expect("a build event");
+    let c = events.last().expect("an event");
+    assert_eq!(c["event"], "cache", "{events:?}");
+    assert!(c["limit"].as_u64().is_some(), "{c}");
     assert_eq!(b["ok"], true, "{b}");
     assert!(b["pages"].as_u64().is_some_and(|n| n > 0), "{b}");
     assert!(

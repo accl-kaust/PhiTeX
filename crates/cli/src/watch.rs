@@ -433,9 +433,15 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         let mut again = false;
         for e in events {
             match e {
-                Event::Quit => std::process::exit(0),
+                Event::Quit => {
+                    modern::cache_summary(t, ui);
+                    std::process::exit(0);
+                }
                 Event::Line(l) => match l.trim() {
-                    "q" | "quit" => std::process::exit(0),
+                    "q" | "quit" => {
+                        modern::cache_summary(t, ui);
+                        std::process::exit(0);
+                    }
                     "r" | "" => {
                         again = true;
                         why.push("asked".to_owned());
@@ -501,6 +507,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             rebuild(&mut s, &why.join(", "));
         }
     }
+    modern::cache_summary(t, ui);
     std::process::exit(0);
 }
 
