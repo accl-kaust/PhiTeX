@@ -169,6 +169,9 @@ pub(crate) struct Run<'c, 'a> {
     /// `radix` (§438) and `cur_order` (§447).
     pub radix: i32,
     pub cur_order: phitex_typeset::glue::Order,
+    /// The objects this run made at read time in relaxed PDF mode (their
+    /// owner keys: the node and the occurrence).
+    pub pdf_occ: usize,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -203,6 +206,7 @@ impl<'c, 'a> Run<'c, 'a> {
             eof: false,
             radix: 0,
             cur_order: phitex_typeset::glue::Order::Normal,
+            pdf_occ: 0,
         }
     }
 

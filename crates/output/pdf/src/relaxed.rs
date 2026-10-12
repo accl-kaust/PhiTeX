@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+use phitex_typeset::arith::Scaled;
 use phitex_typeset::fonts::FontId;
 use phitex_typeset::node::{BoxNode, Node};
 
@@ -127,6 +128,10 @@ pub struct Piece {
     made: Option<(usize, Made)>,
     /// Why the document cannot be written in relaxed mode, if it cannot.
     fallback: Option<String>,
+    /// A page's `cur_page_height`; for a form written before the page
+    /// that references it, the one it was written under (a form's
+    /// origin is the page's: pdfTeX writes it after that page).
+    height: Option<Scaled>,
 }
 
 impl Piece {
@@ -134,6 +139,33 @@ impl Piece {
     #[must_use]
     pub fn handle(&self) -> Option<usize> {
         self.made.as_ref().map(|m| m.0)
+    }
+
+    /// A digest of everything the finish reads (a memo key: equal
+    /// pieces give equal keys).
+    #[must_use]
+    pub fn digest(&self) -> u64 {
+        let mut b = self.bytes.clone();
+        let fonts: Vec<(FontId, u64, &[bool; 256])> = self
+            .fonts
+            .iter()
+            .map(|(f, u)| (*f, u.key, &u.state.chars))
+            .collect();
+        let made = self.made.as_ref().map(|m| m.0);
+        b.extend_from_slice(
+            format!(
+                "{:?}|{}|{fonts:?}|{:?}|{:?}|{made:?}|{:?}|{:?}",
+                self.defs, self.owner, self.dest_names, self.dest_refs, self.fallback, self.height
+            )
+            .as_bytes(),
+        );
+        key_of("piece", &b)
+    }
+
+    /// A page's `cur_page_height`.
+    #[must_use]
+    pub fn page_height(&self) -> Option<Scaled> {
+        self.height
     }
 
     /// Why the document falls back to exact mode, if it does.
@@ -436,7 +468,14 @@ fn translate(
     };
     match w {
         Whatsit::RefXForm(h) if h >= HANDLE_BASE => {
-            match piece(h, fallback).and_then(|p| p.made.clone()) {
+            let p = piece(h, fallback);
+            if let Some(ph) = p.as_ref().and_then(|p| p.height)
+                && ph != st.cur_page_height
+            {
+                fallback
+                    .get_or_insert_with(|| "a form written under another page height".to_owned());
+            }
+            match p.and_then(|p| p.made.clone()) {
                 Some((_, Made::Form(x))) => Whatsit::RefXForm(st.import_form(h, &x, im)),
                 _ => Whatsit::RefXForm(0),
             }
@@ -547,6 +586,14 @@ pub fn page(
     for l in &mut st.link_stack {
         l.objnum = 0;
     }
+    // `cur_page_height` as `pdf_ship_out` sets it: the forms
+    // the page references must have been written under it
+    let ph = if params.page_height != 0 {
+        params.page_height
+    } else {
+        page.height + page.depth + 2 * (params.v_origin + params.v_offset)
+    };
+    st.cur_page_height = ph;
     let mut ws = BTreeMap::new();
     collect(page, wh, &mut ws);
     let ws: BTreeMap<u32, Whatsit> = ws
@@ -565,7 +612,7 @@ pub fn page(
         Ok(h)
     };
     let leaf = leaf_handle((n - 1) / KIDS);
-    piece(
+    let mut p = piece(
         &st,
         owner,
         &im,
@@ -573,7 +620,9 @@ pub fn page(
         &mut other,
         None,
         fallback,
-    )
+    )?;
+    p.height = Some(ph);
+    Ok(p)
 }
 
 /// The key a font's PDF font is shared by (`init_font`'s test: a
@@ -679,6 +728,7 @@ fn piece(
             .collect(),
         made,
         fallback,
+        height: None,
     })
 }
 
@@ -796,7 +846,7 @@ pub fn obj(
     let fixed = HashMap::from([(k, h)]);
     piece(
         &st,
-        format!("object {h}"),
+        format!("object {h} (owner key {key:016x})"),
         &Imports::default(),
         &fixed,
         &mut other,
@@ -817,7 +867,11 @@ fn has_handle(t: &[u8]) -> bool {
     found
 }
 
-/// `\pdfxform` made on its own: the box shipped as a form now.
+/// `\pdfxform` made on its own: the box shipped as a form now, under
+/// `cur_page_height` `height` (the form's origin): for an `\immediate`
+/// one the last page's, which is what pdfTeX had; else the one the
+/// pages that reference it must have (`checked`), as pdfTeX writes it
+/// after the first.
 ///
 /// # Errors
 /// What the writer stops at.
@@ -831,6 +885,7 @@ pub fn xform(
     fonts: &dyn FontSource,
     wh: &mut WhatsitSource<'_>,
     env: &PageEnv<'_>,
+    (height, checked): (Scaled, bool),
 ) -> Result<Piece, PdfError> {
     let mut st = node_state(params);
     for (file, t) in env.maps {
@@ -841,6 +896,7 @@ pub fn xform(
         }
     }
     st.stacks = env.carry.stacks.clone();
+    st.cur_page_height = height;
     let mut im = Imports::default();
     let mut fallback = None;
     let mut ws = BTreeMap::new();
@@ -864,15 +920,17 @@ pub fn xform(
         Ok(h)
     };
     let fixed = HashMap::from([(k, read_handle(key, 0))]);
-    piece(
+    let mut p = piece(
         &st,
-        format!("form {}", read_handle(key, 0)),
+        format!("form {} (owner key {key:016x})", read_handle(key, 0)),
         &im,
         &fixed,
         &mut other,
         made,
         fallback,
-    )
+    )?;
+    p.height = checked.then_some(height);
+    Ok(p)
 }
 
 /// `\pdfximage` made on its own: the image read and written now.
@@ -904,7 +962,7 @@ pub fn ximage(
     let fixed = HashMap::from([(k, read_handle(key, 0))]);
     piece(
         &st,
-        format!("image {}", read_handle(key, 0)),
+        format!("image {} (owner key {key:016x})", read_handle(key, 0)),
         &Imports::default(),
         &fixed,
         &mut other,
@@ -954,13 +1012,12 @@ pub fn finish_relaxed(
             return Err(format!("{}: {f}", p.owner));
         }
     }
-    let mut owners: HashMap<usize, &str> = HashMap::new();
-    for p in &all {
+    // a handle defined by two pieces (or twice by one) has two owners
+    let mut owners: HashMap<usize, (usize, &str)> = HashMap::new();
+    for (i, p) in all.iter().enumerate() {
         for &(h, _) in &p.defs {
-            if let Some(o) = owners.insert(h, &p.owner)
-                && o != p.owner
-            {
-                return Err(format!("handle {h}: {o} and {}", p.owner));
+            if let Some((_, o)) = owners.insert(h, (i, &p.owner)) {
+                return Err(format!("handle {h} has two owners: {o} and {}", p.owner));
             }
         }
     }
@@ -1186,5 +1243,21 @@ fn parse_ident(b: &[u8]) -> Ident {
         )
     } else {
         Ident::Name(b.strip_prefix(b"name ").unwrap_or(b).to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two owners of one handle: the finish refuses, naming both.
+    #[test]
+    fn forced_collision() {
+        let p = PdfParams::default();
+        let body = |t: &str| ObjBody::Text(t.as_bytes().to_vec());
+        let a = obj(&p, 7, None, false, None, body("<< /A 1 >>")).unwrap();
+        let b = obj(&p, 7, None, false, None, body("<< /B 2 >>")).unwrap();
+        let e = finish_relaxed(&p, &[], &[Arc::new(a), Arc::new(b)], &[]).unwrap_err();
+        assert!(e.contains("two owners: object "), "{e}");
     }
 }

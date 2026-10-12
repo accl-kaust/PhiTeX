@@ -95,11 +95,40 @@ struct Font {
 #[derive(Default)]
 pub(crate) struct Fonts {
     by_id: HashMap<FontId, Font>,
-    files: HashMap<Vec<u8>, Arc<[u8]>>,
+    pub(crate) files: HashMap<Vec<u8>, Arc<[u8]>>,
     space: Option<FontId>,
-    ps: Option<Arc<PsMap>>,
+    pub(crate) ps: Option<Arc<PsMap>>,
     /// The files asked for and not given (a dry run's findings).
-    missed: std::cell::RefCell<BTreeSet<Vec<u8>>>,
+    pub(crate) missed: std::cell::RefCell<BTreeSet<Vec<u8>>>,
+}
+
+impl Fonts {
+    /// A digest of the fonts as the writer sees them (a memo key):
+    /// names, sizes, map entries, the files' bytes.
+    pub(crate) fn digest(&self) -> u64 {
+        let mut ids: Vec<&FontId> = self.by_id.keys().collect();
+        ids.sort_unstable();
+        let mut h = 0;
+        for f in ids {
+            let x = &self.by_id[f];
+            let words = [
+                u64::from(*f),
+                u64::from_ne_bytes(i64::from(x.metrics.size).to_ne_bytes()),
+            ];
+            h = phitex_defuse::hash_words(h, &words);
+            h = phitex_defuse::hash_bytes(h, &x.name);
+            h = phitex_defuse::hash_bytes(h, format!("{:?}", x.entry).as_bytes());
+            for b in [&x.ff, &x.enc] {
+                h = phitex_defuse::hash_bytes(h, b.as_deref().unwrap_or_default());
+            }
+        }
+        let mut files: Vec<_> = self.files.iter().collect();
+        files.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        for (n, b) in files {
+            h = phitex_defuse::hash_bytes(phitex_defuse::hash_bytes(h, n), b);
+        }
+        phitex_defuse::hash_words(h, &[u64::from(self.space.unwrap_or(0))])
+    }
 }
 
 /// `pdftex.map`'s `ps_tree`.
@@ -113,7 +142,7 @@ fn ps_maps() -> &'static PsCache {
 }
 
 /// `pdftex.map` by PostScript name: a pure function's memo.
-fn default_ps_map(r: &mut Run<'_, '_>) -> R<Option<Arc<PsMap>>> {
+pub(crate) fn default_ps_map(r: &mut Run<'_, '_>) -> R<Option<Arc<PsMap>>> {
     let v = r.v;
     let Some(x) = r.file("pdftex.map")? else {
         return Ok(None);
@@ -184,7 +213,7 @@ impl FontSource for Fonts {
 }
 
 /// A file's bytes, `None` if absent.
-fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Arc<[u8]>>> {
+pub(crate) fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Arc<[u8]>>> {
     let v = r.v;
     Ok(r.file(name)?.and_then(|x| {
         list_of(v, x)
@@ -424,6 +453,10 @@ pub(crate) fn command<T: Default>(
     if r.param("pdfoutput")? <= 0 {
         return Ok(T::default());
     }
+    if crate::pdfrelaxed::on(r)? {
+        crate::pdfrelaxed::fall_back(r, "a command the relaxed mode does not cover");
+        return Ok(T::default());
+    }
     let fs = fonts_for(r, fonts, false)?;
     step(r, input, &fs, f)
 }
@@ -438,6 +471,10 @@ pub(crate) fn command_forms<T: Default>(
     if r.param("pdfoutput")? <= 0 {
         return Ok(T::default());
     }
+    if crate::pdfrelaxed::on(r)? {
+        crate::pdfrelaxed::fall_back(r, "a command the relaxed mode does not cover");
+        return Ok(T::default());
+    }
     let fs = fonts_for(r, fonts, false)?;
     step_forms(r, input, &fs, f)
 }
@@ -448,7 +485,7 @@ fn param(v: &Values, xs: &[ValueId], k: usize) -> i32 {
 }
 
 /// The page's parameters as `\shipout` read them.
-fn page_params(v: &Values, p: &mut PdfParams, xs: &[ValueId]) {
+pub(crate) fn page_params(v: &Values, p: &mut PdfParams, xs: &[ValueId]) {
     p.h_origin = param(v, xs, 1);
     p.v_origin = param(v, xs, 2);
     p.page_width = param(v, xs, 3);
@@ -474,7 +511,7 @@ fn page_params(v: &Values, p: &mut PdfParams, xs: &[ValueId]) {
 
 /// The writer's data for a whatsit `\shipout` resolved
 /// ([`crate::pdfprim::writer_data`]).
-fn whatsit(v: &Values, d: ValueId) -> Option<Whatsit> {
+pub(crate) fn whatsit(v: &Values, d: ValueId) -> Option<Whatsit> {
     let ys = list_of(v, d);
     let kind = ys.first().map(|&k| str_of(v, k)).unwrap_or_default();
     let text = |k: usize| {
@@ -652,6 +689,7 @@ pub(crate) fn action_of(v: &Values, x: ValueId) -> Option<Action> {
 
 /// `pdf_ship_out` as a step: `page` is the `pages` entry (box, counts,
 /// fonts, parameters, whatsit data).
+#[allow(clippy::too_many_lines)]
 pub(crate) fn ship(
     r: &mut Run<'_, '_>,
     page: ValueId,
@@ -675,6 +713,25 @@ pub(crate) fn ship(
             Some("iwon" | "fake")
         )
     });
+    if crate::pdfrelaxed::on(r)? {
+        let fonts = fonts_for(r, ids, space)?;
+        let whats = side.whats.clone();
+        let mut wh = |h: u32| -> Option<Whatsit> {
+            if let Some(&d) = resolved.get(&h) {
+                return whatsit(v, d);
+            }
+            let w = *whats.get(h as usize)?;
+            let ys = list_of(v, w);
+            (ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special")).then(|| {
+                Whatsit::Special(bytes_of(
+                    &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
+                ))
+            })
+        };
+        let shown = crate::pdfrelaxed::ship(r, &p, bx, &fonts, &mut wh)?;
+        let attr = p.get(15).map(|&a| str_of(v, a)).unwrap_or_default();
+        return Ok(phitex_defuse::hash_bytes(shown, attr.as_bytes()));
+    }
     // the fonts of the forms the page may ship too
     let mut all: BTreeSet<u32> = ids.iter().copied().collect();
     all.extend(forms_here(r)?.fonts);
