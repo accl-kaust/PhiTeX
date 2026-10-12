@@ -5627,7 +5627,10 @@ impl Engine {
         !dead.is_empty()
     }
 
-    fn sweep_values(&mut self) {
+    /// Frees the values nothing holds any more. What the report and the
+    /// error name (environment waits, waiters, causes) stays until the next
+    /// evaluation, so the client can render it.
+    fn sweep_values(&mut self, err: Option<&EvalError>) {
         let len = self.values.len();
         if self.values_at_sweep == 0 {
             // The first evaluation's values are nearly all live: just take
@@ -5669,6 +5672,11 @@ impl Engine {
         for (f, v) in self.environment.iter().chain(self.env_next.iter().flatten()) {
             live.insert(f.0);
             live.insert(*v);
+        }
+        live.extend(self.env_waiters.keys().map(|f| f.0));
+        live.extend(self.report.env_waits.iter().map(|(_, f)| f.0));
+        if let Some(e) = err {
+            Self::error_fields(e, &mut live);
         }
         for u in &self.units {
             if !u.live {
@@ -5722,6 +5730,40 @@ impl Engine {
         self.values_at_sweep = self.values.len();
     }
 
+    /// The fields an error names.
+    fn error_fields(e: &EvalError, live: &mut FxHashSet<ValueId>) {
+        let waiter_fields = |ws: &[Waiter], live: &mut FxHashSet<ValueId>| {
+            for w in ws {
+                match w.on {
+                    WaitOn::Range { field } | WaitOn::Environment(field) => {
+                        live.insert(field.0);
+                    }
+                    WaitOn::Node(_) | WaitOn::Queued => {}
+                }
+            }
+        };
+        match e {
+            EvalError::ConflictingPublication { field } | EvalError::UndeclaredDefinition { field, .. } => {
+                live.insert(field.0);
+            }
+            EvalError::RunawayNode { causes, .. } => {
+                for c in causes {
+                    match c {
+                        Cause::Rebind { field, .. }
+                        | Cause::Changed { field, .. }
+                        | Cause::Loop { field }
+                        | Cause::Environment { field } => {
+                            live.insert(field.0);
+                        }
+                        Cause::Output { .. } | Cause::Woken { .. } | Cause::Structure => {}
+                    }
+                }
+            }
+            EvalError::NoProgress { waiters, .. } | EvalError::Deadline { waiters, .. } => waiter_fields(waiters, live),
+            EvalError::Cycle(_) | EvalError::NonConvergence { .. } | EvalError::RunawayCreation { .. } => {}
+        }
+    }
+
     fn accs_arena_live(&self, live: &mut FxHashSet<ValueId>) {
         self.accs_arena.for_each(&mut |item: &ValueId, _| {
             live.insert(*item);
@@ -5772,7 +5814,7 @@ impl Engine {
         if result.is_ok() {
             self.collect_apps(false);
         }
-        self.sweep_values();
+        self.sweep_values(result.as_ref().err());
         self.finalize_report();
         let report = std::mem::take(&mut self.report);
         result.map(|()| report)
