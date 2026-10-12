@@ -16,6 +16,38 @@ export interface TextLine {
   w: number;
   size: number;
   text: string;
+  /** Each character's left edge (none: the line stretched to `w`). */
+  xs?: number[];
+}
+
+/** TeX's accents, set as glyphs of their own over a letter: as combining marks. */
+const COMBINING: Record<string, string> = {
+  "\u00a8": "\u0308", "\u00b4": "\u0301", "`": "\u0300", "\u02c6": "\u0302", "^": "\u0302", "\u02dc": "\u0303", "~": "\u0303",
+  "\u00af": "\u0304", "\u02c9": "\u0304", "\u02d8": "\u0306", "\u02d9": "\u0307", "\u02da": "\u030a", "\u00b8": "\u0327",
+  "\u02c7": "\u030c", "\u02dd": "\u030b", "\u02db": "\u0328",
+};
+
+/** A character of a line: its text, its left and right edges. */
+type Ch = { c: string; x: number; r: number };
+
+/**
+ * A line's characters with each accent that sits on a letter (its middle
+ * over the letter: TeX's \accent puts it before, a cedilla's \oalign
+ * after) made one character with it, `¨` `O` as `Ö`.
+ */
+export function compose(cs: Ch[]): Ch[] {
+  const out = cs.map((c) => ({ ...c }));
+  const over = (a: Ch, b: Ch | undefined) => b !== undefined && !COMBINING[b.c] && b.c.trim() !== "" && (a.x + a.r) / 2 >= b.x - 0.5 && (a.x + a.r) / 2 <= b.r + 0.5;
+  for (let k = 0; k < out.length; k++) {
+    const a = out[k];
+    const mark = COMBINING[a.c];
+    if (!mark) continue;
+    const on = over(a, out[k + 1]) ? k + 1 : over(a, out[k - 1]) ? k - 1 : -1;
+    if (on < 0) continue;
+    out[on].c = (out[on].c + mark).normalize("NFC");
+    a.c = "";
+  }
+  return out.filter((c) => c.c !== "");
 }
 
 /** A page drawn: its pixels (`pw` by `ph`, RGBA, white under), its size in PDF points, its links, its text. */
@@ -99,20 +131,29 @@ export class MupdfDoc {
   private text(page: any, x0: number, y0: number): TextLine[] {
     const out: TextLine[] = [];
     let line: TextLine | null = null;
+    let chars: Ch[] = [];
     let right = 0;
     const st = page.toStructuredText("preserve-whitespace");
     try {
       st.walk({
         beginLine: (bbox: number[]) => {
           line = null;
+          chars = [];
           right = bbox[2] - x0;
         },
-        onChar: (c: string, origin: number[], _font: unknown, size: number) => {
+        onChar: (c: string, origin: number[], _font: unknown, size: number, quad: number[]) => {
           line ??= { x: origin[0] - x0, y: origin[1] - y0, w: 0, size, text: "" };
-          line.text += c;
+          const x = Math.min(quad[0], quad[4]) - x0;
+          chars.push({ c, x, r: Math.max(quad[2], quad[6], x + x0) - x0 });
         },
         endLine: () => {
-          if (line?.text.trim()) out.push({ ...line, w: Math.max(right - line.x, 0) });
+          if (!line) return;
+          const cs = compose(chars);
+          const text = cs.map((c) => c.c).join("");
+          if (!text.trim()) return;
+          // (one position a UTF-16 unit, as the SVG counts them)
+          const xs = cs.flatMap((c) => Array.from({ length: c.c.length }, () => c.x));
+          out.push({ ...line, text, xs, w: Math.max(right - line.x, 0) });
         },
       });
     } finally {
@@ -153,10 +194,11 @@ export function toCanvas(d: Drawn): HTMLElement {
   svg.setAttribute("preserveAspectRatio", "none");
   for (const l of d.text) {
     const t = document.createElementNS(SVG, "text");
-    t.setAttribute("x", String(l.x));
+    // (each character where its glyph is: a stand-in font's widths never move it)
+    t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
     t.setAttribute("y", String(l.y));
     t.setAttribute("font-size", String(l.size));
-    if (l.w > 0) {
+    if (!l.xs && l.w > 0) {
       t.setAttribute("textLength", String(l.w));
       t.setAttribute("lengthAdjust", "spacingAndGlyphs");
     }
