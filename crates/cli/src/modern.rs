@@ -400,7 +400,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
             .as_ref()
             .map_or_else(|| PathBuf::from("."), PathBuf::from),
         // (batch mode, as the oracles run: the CLI shows the errors itself)
-        threads: o.threads.unwrap_or_else(crate::default_threads),
+        threads: o.threads,
         synctex: t.synctex,
         recorder: false,
         shell_escape: t.shell_escape,
@@ -438,11 +438,12 @@ pub fn report(
     if o.verbose > 0 {
         for (k, run) in r.runs.iter().enumerate() {
             ui.line(&st.dim(&format!(
-                "  run {}: {} ({}): {} nodes reduced",
+                "  run {}: {} ({}): {} nodes reduced{}",
                 k + 1,
                 ms(run.wall),
                 run.why,
                 run.commands_run,
+                run.parallel().map(|p| format!(", {p}")).unwrap_or_default(),
             )));
         }
     }

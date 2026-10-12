@@ -58,11 +58,6 @@ pub const EXIT_USAGE: i32 = 2;
 /// The exit status of a failure inside PhiTeX (a panic caught).
 pub const EXIT_INTERNAL: i32 = 3;
 
-/// The threads a build runs on by default: all the cores.
-pub fn default_threads() -> usize {
-    std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
-}
-
 fn main() {
     let mut raw = std::env::args();
     let argv0 = raw.next().unwrap_or_default();
