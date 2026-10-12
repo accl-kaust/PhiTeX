@@ -5835,41 +5835,38 @@ impl Engine {
 
     /// Of `parked`, the nodes waiting for an environment field, and those
     /// waiting (through any chain of waits) on one of them: a node parked
-    /// on one, or a range reader whose range holds one.
+    /// on one, or a range reader whose range holds one. A walk from the
+    /// environment waiters over the waiter lists and the range readers'
+    /// stabs: linear in the stalled set.
     fn env_stalled(&self, parked: &[Slot]) -> FxHashSet<Slot> {
-        let mut stalled: FxHashSet<Slot> = self
+        let parked_set: FxHashSet<Slot> = parked.iter().copied().collect();
+        let mut stalled: FxHashSet<Slot> = FxHashSet::default();
+        let mut todo: Vec<Slot> = self
             .env_waiters
             .values()
             .flatten()
             .copied()
             .filter(|&x| self.live(x) && self.n(x).state == State::Parked && self.n(x).on == NIL)
             .collect();
-        loop {
-            let before = stalled.len();
-            for &x in parked {
-                if stalled.contains(&x) {
-                    continue;
-                }
-                let on = self.n(x).on;
-                if on != NIL && stalled.contains(&on) {
-                    stalled.insert(x);
-                    continue;
-                }
-                if let Some((_, anchor)) = self.aux_of(x).and_then(|a| a.watch) {
-                    let (unit, label) = (self.n(x).unit, self.n(x).label);
-                    let lo = self.watch_key(x, anchor).0;
-                    if stalled
-                        .iter()
-                        .any(|&s| self.n(s).unit == unit && lo <= self.n(s).label && self.n(s).label < label)
-                    {
-                        stalled.insert(x);
+        while let Some(s) = todo.pop() {
+            if !stalled.insert(s) {
+                continue;
+            }
+            if let Some(a) = self.aux_of(s) {
+                for &w in &a.waiters {
+                    if parked_set.contains(&w) && self.n(w).on == s {
+                        todo.push(w);
                     }
                 }
             }
-            if stalled.len() == before {
-                return stalled;
+            let (unit, label) = (self.n(s).unit, self.n(s).label);
+            for (r, _) in self.stab(unit, label) {
+                if parked_set.contains(&r) && self.n(r).on == NIL {
+                    todo.push(r);
+                }
             }
         }
+        stalled
     }
 
     fn rounds(&mut self, sched: &mut dyn Scheduler, exec: &mut dyn Executor) -> Result<(), EvalError> {
