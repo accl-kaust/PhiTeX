@@ -3,7 +3,8 @@
 //! browser draws again only those.
 //!
 //! - **Server.** A thread accepts connections on a free port; each is
-//!   served on a thread of its own (`ws.rs`: HTTP, then a WebSocket). Every
+//!   served on a thread of its own (`ws.rs`: HTTP, then a `tungstenite`
+//!   WebSocket). Every
 //!   path begins with a random token, so no other page in the browser can
 //!   read the document.
 //! - **Pages.** The build's PDF bytes (a DVI build's made a PDF by
@@ -15,8 +16,8 @@
 //!   redrawn, first pages first).
 //! - **Protocol.** The Overleaf extension's core requests (`session.ts`'s
 //!   `CoreReq`) as JSON over the WebSocket: `{"id":N,"op":…}`, answered
-//!   `{"id":N,"ok":…,"json":…,"draws":…}`; unasked, events `settled`,
-//!   `preparing`, `diagnostics`, `sync`. Ops: `open`, `status`, `pages`,
+//!   `{"id":N,"ok":…,"json":…,"draws":…}` (`serde_json`); unasked, events
+//!   `settled`, `preparing`, `diagnostics`. Ops: `open`, `status`, `pages`,
 //!   `png` (a page's draw list), `diagnostics`, `outline`, `source` (a
 //!   double-click's or an error's place: the editor opens there), and the
 //!   editor's buffer: `set_file {file, text}` and `edit {file, start, end,
@@ -25,9 +26,6 @@
 //!   source lines (the build's SyncTeX records, `synctex.rs`): what a
 //!   double-click finds and forward search highlights. The diff ops
 //!   (`diff_*`) say they are not there.
-//! - **Forward search.** `GET /TOKEN/sync?file=F&line=L` (what `phitex
-//!   sync F:L` asks) pushes `{"event":"sync",…}`; the address is kept in a
-//!   file per directory ([`address_file`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -38,7 +36,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
-use crate::json::{self, Value, quote};
+use serde_json::{Value, json};
+use tungstenite::{Message, WebSocket};
+
 use crate::ws;
 
 /// The viewer's page and its script (`scripts/viewer-bundle.sh`).
@@ -68,7 +68,7 @@ pub struct Built {
     pub history: i32,
     pub ms: f64,
     /// Its errors and warnings, each a JSON object.
-    pub diagnostics: Vec<String>,
+    pub diagnostics: Vec<Value>,
 }
 
 /// What the browsers ask the watch for.
@@ -99,12 +99,12 @@ struct Pages {
 }
 
 struct Client {
-    out: Mutex<TcpStream>,
+    out: Mutex<WebSocket<TcpStream>>,
 }
 
 impl Client {
     fn send(&self, text: &str) -> bool {
-        ws::send_text(&mut *lock(&self.out), text).is_ok()
+        lock(&self.out).send(Message::text(text)).is_ok()
     }
 }
 
@@ -123,7 +123,7 @@ struct Shared {
     /// it.
     root: PathBuf,
     editor: Option<crate::editor::Editor>,
-    diagnostics: Mutex<Arc<str>>,
+    diagnostics: Mutex<Value>,
     asks: Mutex<Vec<Ask>>,
     wake: Mutex<Option<Box<dyn Fn() + Send>>>,
     building: AtomicBool,
@@ -159,26 +159,13 @@ fn token() -> String {
     })
 }
 
-/// Where the viewer of the watch in `root` keeps its address (for
-/// `phitex sync`): `$XDG_RUNTIME_DIR/phitex-view/`, else the temporary
-/// directory's, a file named by the directory's hash.
-pub fn address_file(root: &std::path::Path) -> Option<PathBuf> {
-    let root = std::fs::canonicalize(root).ok()?;
-    let base = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
-    let h = crate::tex::Fnv::new()
-        .add(root.to_string_lossy().as_bytes())
-        .0;
-    Some(base.join("phitex-view").join(format!("{h:016x}")))
-}
-
 impl View {
-    /// Serve the viewer on 127.0.0.1, on a free port (`PHITEX_VIEW_PORT`
-    /// to choose it).
-    pub fn start(editor: Option<crate::editor::Editor>) -> std::io::Result<View> {
-        let port: u16 = std::env::var("PHITEX_VIEW_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(0);
+    /// Serve the viewer on 127.0.0.1, on `port` (none: a free one).
+    pub fn start(
+        editor: Option<crate::editor::Editor>,
+        port: Option<u16>,
+    ) -> std::io::Result<View> {
+        let port = port.unwrap_or(0);
         let listener = TcpListener::bind(("127.0.0.1", port))?;
         let port = listener.local_addr()?.port();
         let shared = Arc::new(Shared {
@@ -191,16 +178,12 @@ impl View {
             log: std::env::var("PHITEX_VIEW_LOG").is_ok_and(|v| v == "1"),
             root: std::env::current_dir()?,
             editor,
-            diagnostics: Mutex::new(Arc::from("[]")),
+            diagnostics: Mutex::new(json!([])),
             asks: Mutex::new(Vec::new()),
             wake: Mutex::new(None),
             building: AtomicBool::new(false),
         });
         let url = format!("http://127.0.0.1:{port}/{}/", shared.token);
-        if let Some(f) = address_file(&shared.root) {
-            let _ = f.parent().map(std::fs::create_dir_all);
-            let _ = std::fs::write(&f, &url);
-        }
         let s = shared.clone();
         std::thread::Builder::new()
             .name("phitex-view".into())
@@ -237,7 +220,7 @@ impl View {
         self.shared.building.store(on, Ordering::Relaxed);
         broadcast(
             &self.shared,
-            &format!("{{\"event\":\"preparing\",\"on\":{on}}}"),
+            &json!({"event": "preparing", "on": on}).to_string(),
         );
     }
 
@@ -276,12 +259,12 @@ impl View {
         let n = hashes.len();
         pages.hashes = hashes;
         drop(pages);
-        let items: Arc<str> = format!("[{}]", b.diagnostics.join(",")).into();
-        *lock(&self.shared.diagnostics) = items.clone();
+        let items = Value::from(b.diagnostics.clone());
         broadcast(
             &self.shared,
-            &format!("{{\"event\":\"diagnostics\",\"items\":{items}}}"),
+            &json!({"event": "diagnostics", "items": items}).to_string(),
         );
+        *lock(&self.shared.diagnostics) = items;
         broadcast(&self.shared, "{\"event\":\"settled\"}");
         (changed, n)
     }
@@ -346,13 +329,9 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
                 None => ws::respond(&mut w, "404 Not Found", "text/plain", b"no PDF yet\n"),
             };
         }
-        "sync" => {
-            let (status, text) = forward(s, &req);
-            let _ = ws::respond(&mut w, status, "text/plain; charset=utf-8", text.as_bytes());
-        }
         "ws" if req.is_upgrade() => {
-            if ws::upgrade(&mut w, &req).is_ok() {
-                socket(s, w, r);
+            if let Ok(sock) = ws::upgrade(r.into_inner(), &req) {
+                socket(s, sock);
             }
         }
         f if f.starts_with("fonts/") => {
@@ -386,20 +365,28 @@ fn text_font(s: &Shared, name: &str) -> Option<Arc<[u8]>> {
     f
 }
 
-/// A WebSocket's requests, answered in order until it closes.
-fn socket(s: &Arc<Shared>, w: TcpStream, mut r: BufReader<TcpStream>) {
-    let client = Arc::new(Client { out: Mutex::new(w) });
+/// A WebSocket's requests, answered in order until it closes. Its reads
+/// and the broadcasts take turns on the one lock (pings are answered by
+/// `tungstenite` inside the reads).
+fn socket(s: &Arc<Shared>, sock: WebSocket<TcpStream>) {
+    let client = Arc::new(Client {
+        out: Mutex::new(sock),
+    });
     lock(&s.clients).push(client.clone());
     loop {
-        let msg = ws::read_message(&mut r, &mut |p| {
-            let _ = ws::send_pong(&mut *lock(&client.out), p);
-        });
+        let msg = lock(&client.out).read();
         let text = match msg {
-            Ok(ws::Message::Text(t)) => t,
-            Ok(ws::Message::Binary(_)) => continue,
-            Ok(ws::Message::Close) | Err(_) => break,
+            Ok(Message::Text(t)) => t,
+            Ok(Message::Close(_)) => break,
+            Err(e) if ws::timed_out(&e) => {
+                // (the lock let go a moment: a waiting broadcast goes first)
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            Err(_) => break,
+            Ok(_) => continue,
         };
-        let Some(req) = json::parse(&text) else {
+        let Ok(req) = serde_json::from_str::<Value>(text.as_str()) else {
             continue;
         };
         let reply = answer(s, &req);
@@ -407,17 +394,16 @@ fn socket(s: &Arc<Shared>, w: TcpStream, mut r: BufReader<TcpStream>) {
             break;
         }
     }
-    let _ = ws::send_close(&mut *lock(&client.out));
+    let _ = lock(&client.out).close(None);
     lock(&s.clients).retain(|c| !Arc::ptr_eq(c, &client));
 }
 
-fn hashes_json(hs: &[u64]) -> String {
-    let v: Vec<String> = hs.iter().map(|h| format!("\"{h:016x}\"")).collect();
-    format!("[{}]", v.join(","))
+fn hashes_json(hs: &[u64]) -> Value {
+    hs.iter().map(|h| format!("{h:016x}")).collect()
 }
 
 /// Page `k`'s draw list and hash, drawn now or kept.
-fn draws(s: &Shared, k: usize) -> Option<(Arc<str>, u64)> {
+fn draw_list(s: &Shared, k: usize) -> Option<(Arc<str>, u64)> {
     let (pdf, h) = {
         let p = lock(&s.pages);
         let h = *p.hashes.get(k)?;
@@ -448,41 +434,47 @@ fn ask(s: &Shared, a: Ask) {
     }
 }
 
+/// A number as an index or count (none if negative or not whole).
+fn index(v: &Value) -> Option<usize> {
+    v.as_u64().and_then(|n| usize::try_from(n).ok())
+}
+
 /// The reply to request `req` (`session.ts`'s `CoreRes`, with its `id`).
+/// A page's draw list (JSON already) is put in as it is.
 fn answer(s: &Shared, req: &Value) -> String {
-    let id = req.get("id").and_then(Value::index).unwrap_or(0);
-    let op = req.get("op").and_then(Value::str).unwrap_or("");
-    let page = req.get("page").and_then(Value::index);
-    let text = |k: &str| req.get(k).and_then(Value::str).map(str::to_owned);
+    let id = req.get("id").and_then(index).unwrap_or(0);
+    let op = req.get("op").and_then(Value::as_str).unwrap_or("");
+    let page = req.get("page").and_then(index);
+    let text = |k: &str| req.get(k).and_then(Value::as_str).map(str::to_owned);
     let state = || {
         let p = lock(&s.pages);
         (p.hashes.clone(), p.history, p.ms)
     };
-    let mut out = format!("{{\"id\":{id},\"ok\":");
-    match op {
+    let ok = |json: Value| json!({"id": id, "ok": true, "json": json});
+    let fail = |e: &str| json!({"id": id, "ok": false, "error": e});
+    let mut draws = None;
+    let reply = match op {
         "open" | "status" => {
             let (hs, history, ms) = state();
-            let _ = write!(
-                out,
-                "true,\"json\":{{\"pages\":{},\"hashes\":{},\"history\":{history},\"build_ms\":{ms},\
-                 \"engine\":\"phitex\",\"fetches\":true,\"missing\":[],\"pending\":{},\"undefined_names\":[]}}}}",
-                hs.len(),
-                hashes_json(&hs),
-                u8::from(s.building.load(Ordering::Relaxed))
-            );
+            ok(json!({
+                "pages": hs.len(),
+                "hashes": hashes_json(&hs),
+                "history": history,
+                "build_ms": ms,
+                "engine": "phitex",
+                "fetches": true,
+                "missing": [],
+                "pending": u8::from(s.building.load(Ordering::Relaxed)),
+                "undefined_names": [],
+            }))
         }
-        "pages" => {
-            let (hs, _, _) = state();
-            let _ = write!(out, "true,\"json\":{{\"pages\":{}}}}}", hashes_json(&hs));
-        }
-        "png" => match page.and_then(|k| draws(s, k)) {
+        "pages" => ok(json!({"pages": hashes_json(&state().0)})),
+        "png" => match page.and_then(|k| draw_list(s, k)) {
             Some((d, h)) => {
-                let _ = write!(
-                    out,
-                    "true,\"draws\":{d},\"json\":{{\"hash\":\"{h:016x}\"}}}}"
-                );
+                draws = Some(d);
+                ok(json!({"hash": format!("{h:016x}")}))
             }
-            None => out.push_str("false,\"error\":\"no such page\"}"),
+            None => fail("no such page"),
         },
         "set_file" | "edit" => {
             let file = text("file").unwrap_or_default();
@@ -492,8 +484,8 @@ fn answer(s: &Shared, req: &Value) -> String {
             } else {
                 Ask::Edit {
                     file,
-                    start: req.get("start").and_then(Value::index).unwrap_or(0),
-                    end: req.get("end").and_then(Value::index).unwrap_or(0),
+                    start: req.get("start").and_then(index).unwrap_or(0),
+                    end: req.get("end").and_then(index).unwrap_or(0),
                     text: body,
                 }
             };
@@ -501,59 +493,53 @@ fn answer(s: &Shared, req: &Value) -> String {
             // (answered with the last build's pages; the edit's build
             // pushes `settled` when it is in)
             let (hs, history, ms) = state();
-            let painted = page.and_then(|k| draws(s, k));
-            let _ = write!(
-                out,
-                "true,\"json\":{{\"ok\":true,\"pages\":{},\"history\":{history},\"painted_hash\":{},\
-                 \"paint_ms\":{ms},\"total_ms\":{ms},\"stats\":{{\"rebuilt\":0,\"reused\":0,\"passes\":1}}}}",
-                hs.len(),
-                painted
-                    .as_ref()
-                    .map_or("null".to_owned(), |(_, h)| format!("\"{h:016x}\""))
-            );
-            if let Some((d, _)) = painted {
-                let _ = write!(out, ",\"draws\":{d}");
-            }
-            out.push('}');
+            let painted = page.and_then(|k| draw_list(s, k));
+            let hash = painted.as_ref().map(|(_, h)| format!("{h:016x}"));
+            draws = painted.map(|(d, _)| d);
+            ok(json!({
+                "ok": true,
+                "pages": hs.len(),
+                "history": history,
+                "painted_hash": hash,
+                "paint_ms": ms,
+                "total_ms": ms,
+                "stats": {"rebuilt": 0, "reused": 0, "passes": 1},
+            }))
         }
-        "origins" => {
-            let _ = write!(out, "true,\"json\":{}}}", origins(s, page.unwrap_or(0)));
-        }
+        "origins" => ok(origins(s, page.unwrap_or(0))),
         "source" => {
             let file = text("file").unwrap_or_default();
             let at = req
                 .get("line")
-                .and_then(Value::index)
-                .map(|l| (l, req.get("col").and_then(Value::index).unwrap_or(1)));
-            let start = req.get("start").and_then(Value::index).unwrap_or(0);
-            let _ = write!(out, "{}}}", to_source(s, &file, start, at));
+                .and_then(index)
+                .map(|l| (l, req.get("col").and_then(index).unwrap_or(1)));
+            let start = req.get("start").and_then(index).unwrap_or(0);
+            match to_source(s, &file, start, at) {
+                Ok(place) => ok(json!({"place": place})),
+                Err(e) => fail(e),
+            }
         }
-        "diagnostics" => {
-            let d = lock(&s.diagnostics).clone();
-            let _ = write!(out, "true,\"json\":{{\"items\":{d}}}}}");
-        }
+        "diagnostics" => ok(json!({"items": lock(&s.diagnostics).clone()})),
         "outline" => {
             let pdf = lock(&s.pages).pdf.clone();
             let items = pdf
                 .as_ref()
                 .and_then(phitex_draw::Pdf::open)
-                .map_or_else(|| "[]".to_owned(), |d| d.outline());
-            let _ = write!(out, "true,\"json\":{{\"items\":{items}}}}}");
+                .and_then(|d| serde_json::from_str::<Value>(&d.outline()).ok())
+                .unwrap_or_else(|| json!([]));
+            ok(json!({"items": items}))
         }
-        "diff" => out.push_str("true,\"json\":{}}"),
+        "diff" => ok(json!({})),
         o if o.starts_with("diff_") => {
-            out.push_str(
-                "false,\"error\":\"the diff against a past version is not in the flow CLI yet\"}",
-            );
+            fail("the diff against a past version is not in the CLI yet")
         }
-        "trace" | "check" => out.push_str("true,\"json\":{\"ok\":true,\"ms\":0}}"),
-        _ => {
-            let _ = write!(
-                out,
-                "false,\"error\":{}}}",
-                quote(&format!("no op {op:?} here"))
-            );
-        }
+        "trace" | "check" => ok(json!({"ok": true, "ms": 0})),
+        _ => fail(&format!("no op {op:?} here")),
+    };
+    let mut out = reply.to_string();
+    if let Some(d) = draws {
+        out.pop();
+        let _ = write!(out, ",\"draws\":{d}}}");
     }
     out
 }
@@ -572,34 +558,20 @@ fn line_col(text: &[u8], at: usize) -> (usize, usize) {
     (line, col)
 }
 
-/// The bytes of line `line` (from 1) of `text`, without its end, and the
-/// byte of column `col` (characters, from 1) in it.
-fn line_bytes(text: &[u8], line: usize, col: usize) -> Option<(usize, usize, usize)> {
-    let mut lo = 0;
-    for _ in 1..line {
-        lo += text.get(lo..)?.iter().position(|&c| c == b'\n')? + 1;
-    }
-    let hi = lo
-        + text[lo..]
-            .iter()
-            .position(|&c| c == b'\n')
-            .unwrap_or(text.len() - lo);
-    let at = String::from_utf8_lossy(&text[lo..hi])
-        .char_indices()
-        .nth(col.saturating_sub(1))
-        .map_or(hi, |(i, _)| lo + i);
-    Some((lo, hi, at.min(hi)))
-}
-
 /// A double-click's source, byte `start` of `file`, or an error's line
 /// and column `at`: shown, and opened in the editor if there is one. The
-/// reply's tail (`ok` and the rest).
-fn to_source(s: &Shared, file: &str, start: usize, at: Option<(usize, usize)>) -> String {
+/// place, `FILE:LINE:COL`.
+fn to_source(
+    s: &Shared,
+    file: &str,
+    start: usize,
+    at: Option<(usize, usize)>,
+) -> Result<String, &'static str> {
     if file.is_empty() || file.starts_with('/') || file.contains("..") {
-        return "false,\"error\":\"not a file of the project\"".into();
+        return Err("not a file of the project");
     }
     let Ok(text) = std::fs::read(s.root.join(file)) else {
-        return "false,\"error\":\"no such file\"".into();
+        return Err("no such file");
     };
     let (line, col) = at.unwrap_or_else(|| line_col(&text, start));
     let place = format!("{file}:{line}:{col}");
@@ -610,123 +582,35 @@ fn to_source(s: &Shared, file: &str, start: usize, at: Option<(usize, usize)>) -
         },
         None => eprintln!("source: {place} (--editor or PHITEX_EDITOR opens it)"),
     }
-    format!("true,\"json\":{{\"place\":{}}}", quote(&place))
-}
-
-/// Forward search: `sync?file=F&line=L[&col=C]`, the browsers told to show
-/// that line.
-fn forward(s: &Shared, req: &ws::Request) -> (&'static str, String) {
-    let file = req.param("file").unwrap_or_default();
-    let line: usize = req.param("line").and_then(|l| l.parse().ok()).unwrap_or(1);
-    let col: usize = req.param("col").and_then(|c| c.parse().ok()).unwrap_or(1);
-    let path = std::fs::canonicalize(&file).or_else(|_| std::fs::canonicalize(s.root.join(&file)));
-    let root = std::fs::canonicalize(&s.root).unwrap_or_else(|_| s.root.clone());
-    let Some(rel) = path.ok().and_then(|p| {
-        p.strip_prefix(&root)
-            .ok()
-            .map(|r| r.to_string_lossy().into_owned())
-    }) else {
-        return (
-            "404 Not Found",
-            format!(
-                "{file}: not a file of the project in {}\n",
-                s.root.display()
-            ),
-        );
-    };
-    let Some((lo, hi, at)) = std::fs::read(root.join(&rel))
-        .ok()
-        .and_then(|t| line_bytes(&t, line, col))
-    else {
-        return ("404 Not Found", format!("{rel}: no line {line}\n"));
-    };
-    let ev = format!(
-        "{{\"event\":\"sync\",\"file\":{},\"lo\":{lo},\"hi\":{hi},\"at\":{at}}}",
-        quote(&rel)
-    );
-    let n = {
-        let mut cs = lock(&s.clients);
-        cs.retain(|c| c.send(&ev));
-        cs.len()
-    };
-    if n == 0 {
-        return ("503 Service Unavailable", "no viewer is open\n".into());
-    }
-    ("200 OK", format!("{rel}:{line} sent to {n} viewer(s)\n"))
+    Ok(place)
 }
 
 /// Page `k`'s characters with their sources (`session.ts`'s `origins`:
 /// `{files, g}`): none, no engine records origins yet.
-fn origins(_s: &Shared, _k: usize) -> String {
-    "{\"files\":[],\"g\":[]}".into()
+fn origins(_s: &Shared, _k: usize) -> Value {
+    json!({"files": [], "g": []})
 }
 
-/// `phitex sync FILE:LINE[:COL]`: the viewer of the watch running here
-/// shows that line. The exit status.
-pub fn sync_command(place: &str) -> i32 {
-    let parsed = place.rsplit_once(':').and_then(|(rest, last)| {
-        let last: usize = last.parse().ok()?;
-        Some(
-            match rest.rsplit_once(':').map(|(f, l)| (f, l.parse::<usize>())) {
-                Some((f, Ok(l))) => (f.to_owned(), l, last),
-                _ => (rest.to_owned(), last, 1),
-            },
-        )
-    });
-    let Some((file, line, col)) = parsed else {
-        eprintln!("phitex sync: give FILE:LINE[:COL]");
-        return 2;
-    };
-    let file = std::fs::canonicalize(&file).map_or(file, |p| p.to_string_lossy().into_owned());
-    let here = std::env::current_dir().unwrap_or_default();
-    let url = here
-        .ancestors()
-        .find_map(|d| address_file(d).and_then(|f| std::fs::read_to_string(f).ok()));
-    let Some(url) = url else {
-        eprintln!("phitex sync: no `phitex watch` with a viewer runs here");
-        return 1;
-    };
-    let enc = |v: &str| -> String {
-        v.bytes()
-            .map(|b| {
-                if b.is_ascii_alphanumeric() || b"-_./".contains(&b) {
-                    char::from(b).to_string()
-                } else {
-                    format!("%{b:02X}")
-                }
-            })
-            .collect()
-    };
-    let Some(rest) = url.trim().strip_prefix("http://") else {
-        return 1;
-    };
-    let (addr, path) = rest.split_once('/').unwrap_or((rest, ""));
-    let req = format!(
-        "GET /{path}sync?file={}&line={line}&col={col} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n",
-        enc(&file)
-    );
-    let answer = TcpStream::connect(addr).and_then(|mut c| {
-        std::io::Write::write_all(&mut c, req.as_bytes())?;
-        let mut a = String::new();
-        std::io::Read::read_to_string(&mut c, &mut a)?;
-        Ok(a)
-    });
-    match answer {
-        Ok(a) => {
-            let (head, body) = a.split_once("\r\n\r\n").unwrap_or((&a, ""));
-            let ok = head.starts_with("HTTP/1.1 200");
-            if ok {
-                print!("{body}");
-            } else {
-                eprint!("phitex sync: {body}");
-            }
-            i32::from(!ok)
-        }
-        Err(e) => {
-            eprintln!("phitex sync: the watch's viewer did not answer ({e})");
-            1
-        }
+/// Start viewer program `cmd` (its words; `{file}` where the file goes,
+/// else the file last) on `file`, not waited for.
+pub fn open_with(cmd: &str, file: &std::path::Path) -> std::io::Result<()> {
+    let f = file.display().to_string();
+    let mut words: Vec<String> = cmd.split_whitespace().map(str::to_owned).collect();
+    if words.is_empty() {
+        return Err(std::io::Error::other("an empty command"));
     }
+    if !words.iter().any(|w| w.contains("{file}")) {
+        words.push("{file}".to_owned());
+    }
+    let words: Vec<String> = words.iter().map(|w| w.replace("{file}", &f)).collect();
+    let mut c = std::process::Command::new(&words[0])
+        .args(&words[1..])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    std::thread::spawn(move || c.wait());
+    Ok(())
 }
 
 /// Show `url` in the user's browser (`BROWSER`, else the desktop's
@@ -764,8 +648,6 @@ mod tests {
         assert_eq!(line_col(t, 0), (1, 1));
         assert_eq!(line_col(t, 3), (2, 1));
         assert_eq!(line_col(t, 6), (2, 3));
-        assert_eq!(line_bytes(t, 2, 3), Some((3, 8, 6)));
-        assert_eq!(line_bytes(t, 9, 1), None);
     }
 
     #[test]
