@@ -217,3 +217,34 @@ fn pdf_edits() {
     }
     assert!(failed.is_empty(), "edits differing from cold: {failed:?}");
 }
+
+/// The fold's key is the state: an edit whose page writes the same
+/// state (a zero kern on page 1) leaves `pdf:state` equal, so the steps
+/// after it (page 2's `\pdfpageref`s and shipout) are cut off; an edit
+/// that changes the page runs them.
+#[test]
+fn pdf_state_cutoff() {
+    let dir = common::fixtures().join("pdf");
+    let src = common::read(&dir.join("pageref.tex"));
+    let opts = || phitex_tex::Options {
+        epoch: Some(0),
+        ..common::options("./pageref.tex", "pageref", "", &dir)
+    };
+    let run = |to: &str| {
+        let mut b = common::build(opts(), None, &src);
+        let text = src.replacen("A\\a\\par", to, 1);
+        assert_ne!(text, src);
+        b.edit(&text);
+        let cold = common::build(opts(), None, &text);
+        assert_eq!(
+            common::first_difference(&b.output().0, &cold.output().0),
+            None,
+            "{to}: edit differs from cold"
+        );
+        (b.stats.nodes_run, b.stats.cutoffs)
+    };
+    let (same, same_cut) = run("A\\kern0pt\\a\\par");
+    let (changed, _) = run("Z\\a\\par");
+    eprintln!("same state: {same} nodes run, {same_cut} cutoffs; changed: {changed} nodes run");
+    assert!(same < changed, "no cutoff: {same} >= {changed}");
+}
