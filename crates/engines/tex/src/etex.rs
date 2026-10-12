@@ -935,6 +935,7 @@ fn pseudo_start(r: &mut Run<'_, '_>) -> R<()> {
             endch: -2,
             starts: false,
             ends: true,
+            origin: None,
         }));
     }
     Ok(())

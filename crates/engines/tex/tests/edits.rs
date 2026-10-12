@@ -264,3 +264,37 @@ fn page_hashes_and_output_line() {
     let cold = common::build(opts(), Some(&prelude), &new);
     assert_eq!(cold.pages(), after);
 }
+
+/// An edit costs what a cold build of the same text costs (a cold build
+/// is an edit from nothing): `story` with `\pdfoutput=1` under the
+/// `pdfetex.ini` prelude, then the text grown to three pages with marks
+/// and footnotes (`target/gate/{orig,big}.tex`, from the CLI's repro).
+#[test]
+#[ignore = "heavy: the cost of an edit against a cold build (counters with PHITEX_TEX_TIME)"]
+fn edit_costs_a_cold_build() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/gate");
+    let orig = common::read(&dir.join("orig.tex"));
+    let big = common::read(&dir.join("big.tex"));
+    let opts = || phitex_tex::Options {
+        epoch: Some(0),
+        prelude_jobname: "pdftex".to_owned(),
+        ..common::options("./story.tex", "story", "", &dir)
+    };
+    let pre = "\\input pdfetex.ini\n";
+    let show = |what: &str, t: std::time::Duration, s: &phitex_tex::Stats| {
+        eprintln!("== {what} {t:?}: {s:?}");
+    };
+    eprintln!("== cold big");
+    let t0 = std::time::Instant::now();
+    let cold = common::build(opts(), Some(pre), &big);
+    show("cold big", t0.elapsed(), &cold.stats);
+    eprintln!("== cold orig");
+    let t0 = std::time::Instant::now();
+    let mut b = common::build(opts(), Some(pre), &orig);
+    show("cold orig", t0.elapsed(), &b.stats);
+    eprintln!("== edit orig -> big");
+    let t0 = std::time::Instant::now();
+    b.edit(&big);
+    show("edit", t0.elapsed(), &b.stats);
+    assert_eq!(b.output().0, cold.output().0);
+}

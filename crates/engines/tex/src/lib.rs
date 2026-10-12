@@ -45,6 +45,6 @@ mod run;
 mod scan;
 mod val;
 
-pub use api::{Build, Finder, Options, Stats};
+pub use api::{Build, Diagnostic, Finder, Options, Severity, Stats};
 pub use exec::{SpawnWorker, set_spawn_worker};
 pub(crate) use phitex_defuse::FxHashMap;
