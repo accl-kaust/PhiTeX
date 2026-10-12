@@ -92,17 +92,14 @@ fn find(h: &[u8], n: &[u8]) -> Option<usize> {
 }
 
 /// The documents that do not pass yet: un-ignored as they are fixed.
-/// The documents not yet byte-identical: the first five on phitex-tex
-/// gaps (virtual fonts, interword byte 34, misc byte 15, object order of
-/// `\pdfpageref`, tounicode byte 22199); the rest use the writer's slice-2
-/// methods (links, outlines, objects, forms, images, object streams) at
-/// call sites phitex-tex has not wired yet.
+/// The documents not yet byte-identical: berasizes (virtual fonts) and
+/// pageref (object order of `\pdfpageref`: the writer as a fold); the
+/// rest use the writer's slice-2 methods (links, outlines, objects,
+/// forms, images, object streams) at call sites phitex-tex has not wired
+/// yet.
 const PENDING: &[&str] = &[
     "berasizes",
-    "interword",
-    "misc",
     "pageref",
-    "tounicode",
     "csform",
     "jpeg",
     "linkbreak",
@@ -123,7 +120,7 @@ fn pdf_documents() {
 }
 
 #[test]
-#[ignore = "berasizes: virtual fonts; interword: byte 34; misc: byte 15; pageref: object order; tounicode: byte 22199"]
+#[ignore = "berasizes: virtual fonts; pageref: object order (the writer as a fold); nine documents on unwired writer call sites"]
 fn pdf_documents_pending() {
     pdf_gate(true);
 }

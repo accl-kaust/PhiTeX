@@ -431,6 +431,7 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
         cv::FONT_NAME | cv::FONT_OBJNUM => {
             let f = r.scan_font_ident()?;
             let (name, obj) = font_num(r, f)?;
+            pdf_cmd(r, "fontobjnum", f, "");
             (if c == cv::FONT_NAME { name } else { obj }).to_string()
         }
         cv::FONT_SIZE => {
@@ -1613,6 +1614,14 @@ impl Run<'_, '_> {
 
 // ------------------------------------------------- whatsits and objects
 
+/// A font command the PDF writer takes when it is read, in document
+/// order (the `pdfcmds` sequence).
+fn pdf_cmd(r: &mut Run<'_, '_>, kind: &str, f: i64, text: &str) {
+    let v = r.v;
+    let e = v.list(vec![v.str(kind), v.int(f), v.str(text)]);
+    r.contribute("pdfcmds", v.seq_unit(e));
+}
+
 fn whatsit(r: &mut Run<'_, '_>, md: &Mode, data: Vec<ValueId>) {
     let v = r.v;
     let node = v.list(vec![v.int(nodes::T_WHATSIT), v.list(data)]);
@@ -2088,19 +2097,16 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
             r.set("pdf:trailerid", t, true);
         }
         ex::INCLUDE_CHARS | ex::FONT_ATTR => {
+            let attr = r.cur.chr == ex::FONT_ATTR;
             let f = r.scan_font_ident()?;
             let t = ext_value(r)?;
-            let k = if r.cur.chr == ex::FONT_ATTR || r.cur.cmd != cmd::EXTENSION {
-                "fontattr"
-            } else {
-                "includechars"
-            };
-            let _ = k;
-            let name = if matches!(r.cur.chr, ex::FONT_ATTR) {
+            let name = if attr {
                 format!("pdf:fontattr:{f}")
             } else {
                 format!("pdf:includechars:{f}")
             };
+            let ts = str_of(v, t);
+            pdf_cmd(r, if attr { "fontattr" } else { "includechars" }, f, &ts);
             r.set(&name, t, true);
         }
         ex::MAP_FILE | ex::MAP_LINE => {
@@ -2112,6 +2118,8 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
             };
             let e = v.list(vec![s(k), t]);
             append_text(r, "pdf:maps", e)?;
+            let e = v.list(vec![s("map"), s(k), t]);
+            r.contribute("pdfcmds", v.seq_unit(e));
         }
         ex::RESET_TIMER => {}
         ex::SET_RANDOM_SEED => {
@@ -2138,10 +2146,13 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
             let a = ext_value(r)?;
             let b = ext_value(r)?;
             append_text(r, "pdf:glyphtounicode", v.list(vec![a, b]))?;
+            let e = v.list(vec![v.str("glyphtounicode"), a, b]);
+            r.contribute("pdfcmds", v.seq_unit(e));
         }
         ex::NOBUILTIN_TOUNICODE => {
             let f = r.scan_font_ident()?;
             r.set(&format!("pdf:nobuiltintounicode:{f}"), v.int(1), true);
+            pdf_cmd(r, "nobuiltintounicode", f, "");
         }
         ex::INTERWORD_SPACE_ON => whatsit(r, md, vec![s("pdf:interwordspaceon")]),
         ex::INTERWORD_SPACE_OFF => whatsit(r, md, vec![s("pdf:interwordspaceoff")]),
@@ -2623,6 +2634,11 @@ pub(crate) fn writer_data(r: &mut Run<'_, '_>, xs: &[ValueId]) -> R<Option<Value
             v.str(&text(2)),
             v.str(&text(3)),
         ])),
+        "pdf:interwordspaceon" => Some(v.list(vec![v.str("iwon")])),
+        "pdf:interwordspaceoff" => Some(v.list(vec![v.str("iwoff")])),
+        "pdf:fakespace" => Some(v.list(vec![v.str("fake")])),
+        "pdf:runninglinkoff" => Some(v.list(vec![v.str("rloff")])),
+        "pdf:runninglinkon" => Some(v.list(vec![v.str("rlon")])),
         "pdf:refobj" => backend_gap_object(),
         "pdf:refxform" => backend_gap_form(),
         "pdf:refximage" => backend_gap_image(),
