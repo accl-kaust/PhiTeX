@@ -660,7 +660,8 @@ pub fn load_edits(text: &str) -> Result<Vec<EditLine>, String> {
                 match k.as_str() {
                     // An upper bound: every step reachable from the edited
                     // step's writes over the recorded def-use edges, with
-                    // no cutoff (`reached_bound` is its newer name).
+                    // no cutoff, the edited (or inserted) step itself not
+                    // counted (`reached_bound` is its newer name).
                     "steps_reached" | "reached_bound" => {
                         expect_reached = Some(
                             x.as_int()

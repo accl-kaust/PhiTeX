@@ -151,7 +151,15 @@ fn bench(name: &str, lines: Vec<String>, threads: &[usize], rounds: usize) {
         for k in 0..rounds {
             let (i, text) = edit(k);
             prog.set_line(&mut eng, i, text);
+            if defuse::obs::enabled() {
+                defuse::obs::reset();
+            }
             let (d, r) = eval(&mut eng, threads);
+            if defuse::obs::enabled() && k == 0 {
+                // Profiling builds: the engine's counters for the first round.
+                print!("probes ({label}, first round):\n{}", defuse::obs::snapshot());
+                println!("report: {r:?}");
+            }
             assert_eq!(
                 prog.result(&eng),
                 interpret(&prog.lines).expect("interpreter"),
