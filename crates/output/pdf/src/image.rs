@@ -111,7 +111,7 @@ enum Kind {
 }
 
 /// A read image (`image_entry`).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct Image {
     name: Vec<u8>,
     width: i32,
@@ -123,6 +123,23 @@ struct Image {
     bits: i32,
     data: Arc<[u8]>,
     kind: Kind,
+}
+
+impl std::fmt::Debug for Image {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Image")
+            .field("name", &self.name)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("x_res", &self.x_res)
+            .field("y_res", &self.y_res)
+            .field("color", &self.color)
+            .field("colorspace_ref", &self.colorspace_ref)
+            .field("bits", &self.bits)
+            .field("data", &crate::digest::Blob(&self.data))
+            .field("kind", &self.kind)
+            .finish()
+    }
 }
 
 impl Image {
