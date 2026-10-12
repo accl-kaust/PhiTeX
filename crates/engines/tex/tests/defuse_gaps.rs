@@ -1,6 +1,8 @@
 //! The engine's behaviour where the TeX client needs it, on a toy client
 //! (no TeX): each test is self-contained, to forward as an engine report.
 
+#![allow(clippy::many_single_char_names)]
+
 use std::sync::Arc;
 
 use phitex_defuse::{
