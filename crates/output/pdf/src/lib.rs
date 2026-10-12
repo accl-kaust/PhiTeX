@@ -72,7 +72,7 @@
 //! moves the position past them; the writer places the form or image at
 //! the whatsit as pdfTeX places its node.
 //!
-//! Not in this crate: PK (Type 3) fonts, OpenType (CFF) font files,
+//! Not in this crate: PK (Type 3) fonts, OpenType (CFF) font files, TrueType subfonts,
 //! `\pdfimageapplygamma`, JBIG2 images, the font replacement of included
 //! PDF files (`\pdfinclusioncopyfonts=0` with a Type 1 font in the file's
 //! page), `\pdfsnapy`, `\pdfuniqueresname`.

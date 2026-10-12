@@ -1988,3 +1988,18 @@ fn snapshot_ownpdf() {
     };
     split_run("ownpdf", 0, &setup, 1);
 }
+
+#[test]
+fn ttf() {
+    let mut j = Job::new("ttf", 0);
+    j.font("r", "cmr10", None);
+    j.w.map_line(
+        b"=Arvo-Italic-tlf-ot1 Arvo-Italic \" AutoEnc_zmrji7vzn237ysql425ntisraa ReEncodeFont \" <[a_zmrji7.enc <<Arvo-Italic.ttf",
+    );
+    j.font("a", "Arvo-tlf-ot1", None);
+    j.font("i", "Arvo-Italic-tlf-ot1", None);
+    j.font("b", "Arvo-Bold-tlf-ot1", Some(12 * PT));
+    j.read();
+    j.ship_all();
+    j.finish();
+}
