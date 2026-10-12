@@ -3,8 +3,10 @@
 # (DESIGN 4.8): the renderer (viewer/src: viewer.ts, page2.ts, sync.ts,
 # css.ts; the Overleaf extension draws its pages with the same files, taken
 # from the PhiTeX commit it pins) and the CLI's host for it
-# (crates/cli/viewer/cli.ts). The bundle is committed (the build
-# needs no node); CI checks it is what these sources make.
+# (crates/cli/viewer/cli.ts), not minified. The bundle is committed (the
+# build needs no node); CI checks it is what these sources make. MuPDF,
+# which the page loads to draw the pages, is not bundled: see
+# scripts/fetch-mupdf.sh.
 #
 #   scripts/viewer-bundle.sh            # make viewer.js
 #   scripts/viewer-bundle.sh --check    # fail if viewer.js is not what they make
@@ -34,7 +36,7 @@ fi
 target="$out"
 $check && target="$work/viewer.js"
 run "$work/node_modules/.bin/esbuild" "$repo/crates/cli/viewer/cli.ts" \
-  --bundle --format=esm --target=es2022 --minify --legal-comments=none --log-level=warning \
+  --bundle --format=esm --target=es2022 --legal-comments=none --log-level=warning \
   --banner:js="// phitex's live viewer: viewer/src and crates/cli/viewer/cli.ts; made by scripts/viewer-bundle.sh (AGPL-3.0-only)" \
   --outfile="$target"
 if $check; then

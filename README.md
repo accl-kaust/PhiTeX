@@ -44,7 +44,7 @@ change reaches, and its output is the cold build's, byte for byte.
 | `phitex-bibtex`, `phitex-makeindex` | BibTeX and makeindex |
 | `phitex-otf`, `phitex-xdvipdfmx` | OpenType shaping, xdvipdfmx |
 | `phitex-doc`, `phitex-diff`, `phitex-git` | the document's structure, latexdiff, git |
-| `phitex-draw`, `phitex-codecs` | the viewer's pages, the codecs and PDF reader |
+| `phitex-codecs` | the codecs and PDF reader |
 
 Each crate's docs say what it is; `AGENTS.md` holds the working rules.
 

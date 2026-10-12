@@ -37,6 +37,9 @@ for spec in "${REPOS[@]}"; do
   echo "$name @ ${commit:0:12} ok"
 done
 
+# MuPDF's WebAssembly build, the live viewer's (pinned by its tarball's hash).
+scripts/fetch-mupdf.sh
+
 # CTAN documentation sources have no immutable Git tag. Pin every downloaded
 # file by SHA-256 so a mirror update cannot silently change the PDF oracle.
 fetch_doc() {

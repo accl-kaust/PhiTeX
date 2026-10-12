@@ -225,6 +225,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // (the last output written without errors, and its PDF for the viewer)
     let mut last_good: Option<PathBuf> = None;
     let mut last_pdf = None;
+    let mut last_hashes: Vec<u64> = Vec::new();
     // (`viewer = "zathura"`: --open starts it on the output, once)
     let open_cmd = t.viewer.clone().filter(|_| o.open);
     let mut started = false;
@@ -248,6 +249,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 if let Some(v) = &view {
                     v.built(&Built {
                         pdf: last_pdf.clone(),
+                        hashes: last_hashes.clone(),
                         history: 2,
                         ms: 0.0,
                         diagnostics: vec![
@@ -309,8 +311,12 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 .display()
                 .to_string();
             status.set("drawing the pages for the viewer");
+            if !failed {
+                last_hashes.clone_from(&r.out.page_hashes);
+            }
             v.built(&Built {
                 pdf: last_pdf.clone(),
+                hashes: last_hashes.clone(),
                 history: r.history(),
                 ms: r.wall.as_secs_f64() * 1e3,
                 diagnostics: diagnostics(&r, &log),

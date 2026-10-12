@@ -101,6 +101,12 @@ impl<'a> Ctx<'a> {
         self.eng.args_vec(self.eng.n(self.slot).args)
     }
 
+    /// This node's operation.
+    #[must_use]
+    pub fn op(&self) -> OpId {
+        self.eng.n(self.slot).op
+    }
+
     /// Whether this run is speculative.
     #[must_use]
     pub fn is_speculative(&self) -> bool {

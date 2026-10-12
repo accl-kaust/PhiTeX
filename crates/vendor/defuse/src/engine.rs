@@ -434,13 +434,129 @@ fn bump(counts: &mut Vec<(&'static str, u64)>, name: &'static str) {
     }
 }
 
-/// Evaluation errors.
+/// Evaluation errors. An evaluation never runs on without progress:
+/// each way it can fail to finish ends with the nodes and the reason
+/// (see [`Limits`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EvalError {
     Cycle(Vec<NodeId>),
-    NonConvergence { rounds: u64 },
-    ConflictingPublication { field: Field },
-    UndeclaredDefinition { node: NodeId, field: Field },
+    NonConvergence {
+        rounds: u64,
+    },
+    ConflictingPublication {
+        field: Field,
+    },
+    UndeclaredDefinition {
+        node: NodeId,
+        field: Field,
+    },
+    /// A node ran more than [`Limits::runs_per_node`] times in one
+    /// evaluation: its run count, and why its last runs were needed
+    /// (oldest first).
+    RunawayNode {
+        node: NodeId,
+        runs: u32,
+        causes: Vec<Cause>,
+    },
+    /// A node created more than [`Limits::children_per_node`] children
+    /// in one evaluation, or unfolded deeper than [`Limits::unfold_depth`]:
+    /// the count, the depth, and the last children (operation name,
+    /// arguments) it made.
+    RunawayCreation {
+        node: NodeId,
+        created: u32,
+        depth: u32,
+        last: Vec<(String, String)>,
+    },
+    /// [`Limits::idle_rounds`] rounds in a row applied no result while
+    /// these nodes waited.
+    NoProgress {
+        rounds: u32,
+        waiters: Vec<Waiter>,
+    },
+    /// [`Limits::total_runs`] or [`Limits::time`] was reached with these
+    /// nodes still waiting or queued.
+    Deadline {
+        runs: u64,
+        waiters: Vec<Waiter>,
+    },
+}
+
+/// Why a node had to run again (for [`EvalError::RunawayNode`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Cause {
+    /// A use of `field` now reaches another definition.
+    Rebind {
+        field: Field,
+        from: Option<NodeId>,
+        to: Option<NodeId>,
+    },
+    /// The definition of `field` at `site` (the unit's start: `None`)
+    /// changed its value.
+    Changed { field: Field, site: Option<NodeId> },
+    /// The output of `of`, which it reads, changed.
+    Output { of: NodeId },
+    /// The node it waited on finished (or went away).
+    Woken { by: NodeId },
+    /// A loop-back field's value for the next round.
+    Loop { field: Field },
+    /// The environment's `field` changed.
+    Environment { field: Field },
+    /// The structure around it changed (a claim, a scope, text coming or
+    /// going, a range it reads).
+    Structure,
+}
+
+/// What a node is waiting for when an evaluation stops without finishing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Waiter {
+    pub node: NodeId,
+    pub on: WaitOn,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WaitOn {
+    /// Parked until that node finishes (its definitions, claim, scope
+    /// effect or output).
+    Node(NodeId),
+    /// Parked until every node in its accumulator range has finished.
+    Range { field: Field },
+    /// Parked until the client supplies that environment field.
+    Environment(Field),
+    /// Not parked: dirty and queued, waiting for its turn.
+    Queued,
+}
+
+/// Bounds on one evaluation; exceeding one ends it with an error naming
+/// the nodes involved ([`Engine::set_limits`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// Applied runs of one node (default 64).
+    pub runs_per_node: u32,
+    /// Children one node creates (default 4096).
+    pub children_per_node: u32,
+    /// Depth of unfolding, a child of a child and so on (default 256).
+    pub unfold_depth: u32,
+    /// Rounds in a row that apply no result (default 256).
+    pub idle_rounds: u32,
+    /// Applied runs in the whole evaluation (default none).
+    pub total_runs: Option<u64>,
+    /// Wall time, checked between rounds (default none; ignored on
+    /// targets without a clock, such as wasm).
+    pub time: Option<std::time::Duration>,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            runs_per_node: 64,
+            children_per_node: 4096,
+            unfold_depth: 256,
+            idle_rounds: 256,
+            total_runs: None,
+            time: None,
+        }
+    }
 }
 
 impl fmt::Display for EvalError {
@@ -451,6 +567,32 @@ impl fmt::Display for EvalError {
             EvalError::ConflictingPublication { field } => write!(f, "conflicting publications for {field:?}"),
             EvalError::UndeclaredDefinition { node, field } => {
                 write!(f, "node {node:?}: definition of {field:?} contradicts its declaration")
+            }
+            EvalError::RunawayNode { node, runs, causes } => {
+                write!(f, "node {node:?} ran {runs} times; last causes: {causes:?}")
+            }
+            EvalError::RunawayCreation {
+                node,
+                created,
+                depth,
+                last,
+            } => write!(
+                f,
+                "node {node:?} created {created} children at depth {depth}; last: {last:?}"
+            ),
+            EvalError::NoProgress { rounds, waiters } => {
+                write!(
+                    f,
+                    "{rounds} rounds without progress; {} nodes waiting: {waiters:?}",
+                    waiters.len()
+                )
+            }
+            EvalError::Deadline { runs, waiters } => {
+                write!(
+                    f,
+                    "deadline after {runs} runs; {} nodes waiting: {waiters:?}",
+                    waiters.len()
+                )
             }
         }
     }
@@ -897,6 +1039,20 @@ pub struct Engine {
     env_absent_next: Option<FxHashSet<Field>>,
     /// Nodes parked on an environment field neither supplied nor absent.
     env_waiters: FxHashMap<Field, Vec<Slot>>,
+    limits: Limits,
+    /// Per evaluation: applied runs per node, the causes of the last runs
+    /// of nodes past half their budget (`tracing` says any exist),
+    /// children created per node, rounds in a row applying nothing, runs
+    /// in all, and the start time.
+    runs_in_eval: FxHashMap<Slot, u32>,
+    causes: FxHashMap<Slot, Vec<Cause>>,
+    /// Nodes past half their run budget (`> 0`: causes are recorded).
+    tracing: u32,
+    created_in_eval: FxHashMap<Slot, (u32, Vec<(String, String)>)>,
+    idle_rounds: u32,
+    eval_runs: u64,
+    #[cfg(not(target_arch = "wasm32"))]
+    eval_start: Option<std::time::Instant>,
     /// Global definitions: `(unit, field, label)`.
     global_ix: BTreeMap<(u32, Field, u64), Slot>,
     users: BTreeMap<(u64, Field, u64), Slot>,
@@ -1059,6 +1215,15 @@ impl Engine {
             env_absent: FxHashSet::default(),
             env_absent_next: None,
             env_waiters: FxHashMap::default(),
+            limits: Limits::default(),
+            runs_in_eval: FxHashMap::default(),
+            causes: FxHashMap::default(),
+            tracing: 0,
+            created_in_eval: FxHashMap::default(),
+            idle_rounds: 0,
+            eval_runs: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            eval_start: None,
             global_ix: BTreeMap::new(),
             users: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -1241,6 +1406,67 @@ impl Engine {
     #[must_use]
     pub fn close_op(&self) -> OpId {
         self.close_op
+    }
+
+    /// Bounds an evaluation (see [`Limits`]); exceeding one is an error.
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
+    }
+
+    #[must_use]
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
+    /// Records why `x` is about to run again, for nodes past half their
+    /// run budget (the last four causes are kept).
+    fn note(&mut self, x: Slot, cause: Cause) {
+        if self.tracing == 0 || !self.live(x) {
+            return;
+        }
+        let half = self.limits.runs_per_node / 2;
+        if self.runs_in_eval.get(&x).is_none_or(|&c| c < half) {
+            return;
+        }
+        let v = self.causes.entry(x).or_default();
+        if v.len() == 4 {
+            v.remove(0);
+        }
+        v.push(cause);
+    }
+
+    /// The nodes an unfinished evaluation leaves waiting or queued.
+    fn waiters(&self) -> Vec<Waiter> {
+        let mut out: Vec<Waiter> = Vec::new();
+        for &(_, s) in &self.parked {
+            if !self.live(s) {
+                continue;
+            }
+            let n = self.n(s);
+            let on = if n.on != NIL && self.live(n.on) {
+                WaitOn::Node(self.n(n.on).id)
+            } else if let Some((f, _)) = self.env_waiters.iter().find(|(_, xs)| xs.contains(&s)) {
+                WaitOn::Environment(*f)
+            } else if let Some((field, _)) = self.aux_of(s).and_then(|a| a.watch) {
+                WaitOn::Range { field }
+            } else {
+                WaitOn::Queued
+            };
+            out.push(Waiter { node: n.id, on });
+        }
+        for level in &self.queue {
+            for &(_, s) in level {
+                if self.live(s) && self.n(s).state == State::Dirty {
+                    out.push(Waiter {
+                        node: self.n(s).id,
+                        on: WaitOn::Queued,
+                    });
+                }
+            }
+        }
+        out.sort_by_key(|w| w.node);
+        out.dedup_by_key(|w| w.node);
+        out
     }
 
     pub fn set_max_rounds(&mut self, rounds: u64) {
@@ -1830,7 +2056,7 @@ impl Engine {
             }
             for &f in &changed {
                 if !self.units[unit as usize].env.contains_key(&f) {
-                    self.dirty_field_users(site_key(unit, NIL), f);
+                    self.dirty_field_users(site_key(unit, NIL), f, &Cause::Environment { field: f });
                 }
             }
         }
@@ -1861,7 +2087,7 @@ impl Engine {
     fn set_env_slot(&mut self, unit: u32, field: Field, value: ValueId) {
         let old = self.units[unit as usize].env.insert(field, value);
         if old != Some(value) {
-            self.dirty_field_users(site_key(unit, NIL), field);
+            self.dirty_field_users(site_key(unit, NIL), field, &Cause::Environment { field });
         }
     }
 
@@ -2797,14 +3023,21 @@ impl Engine {
         self.touch(u);
         self.users.insert((to, f, label), u);
         let unit = self.n(u).unit;
+        let mut old_site = NIL;
         let n = self.nm(u);
         let mut uses = std::mem::take(&mut n.uses).into_vec();
         for us in &mut uses {
             if (us.kind == K_FIELD || us.kind == K_CHAIN) && us.key == f.0.0 && site_key(unit, us.site) == from {
+                old_site = us.site;
                 us.site = to_slot;
             }
         }
         n.uses = uses.into_boxed_slice();
+        if self.tracing > 0 {
+            let id = |e: &Engine, s: Slot| (s != NIL && e.live(s)).then(|| e.n(s).id);
+            let (from, to) = (id(self, old_site), id(self, to_slot));
+            self.note(u, Cause::Rebind { field: f, from, to });
+        }
         let st = self.n(u).state;
         let only_rebind = st == State::Done || (st == State::Dirty && self.n(u).has(F_REBIND));
         self.make_dirty(u);
@@ -3167,7 +3400,11 @@ impl Engine {
                         d.value = v;
                     }
                 }
-                self.dirty_field_users(s.pack(), f);
+                let cause = Cause::Changed {
+                    field: f,
+                    site: Some(self.n(s).id),
+                };
+                self.dirty_field_users(s.pack(), f, &cause);
             }
         }
     }
@@ -3357,7 +3594,10 @@ impl Engine {
             if self.live(w) && w != x && self.n(w).on == x {
                 self.nm(w).on = NIL;
                 if self.n(w).state == State::Parked {
-                    self.make_dirty(w);
+                    if self.tracing > 0 {
+                        self.note(w, Cause::Woken { by: self.n(x).id });
+                    }
+                    self.make_dirty_quiet(w);
                 }
             }
         }
@@ -3615,6 +3855,14 @@ impl Engine {
 
     /// Marks `x` as needing a re-run.
     pub(crate) fn make_dirty(&mut self, x: Slot) {
+        if self.tracing > 0 {
+            self.note(x, Cause::Structure);
+        }
+        self.make_dirty_quiet(x);
+    }
+
+    /// `make_dirty` with the cause already noted.
+    fn make_dirty_quiet(&mut self, x: Slot) {
         if !self.live(x) || self.n(x).state == State::Inert {
             return;
         }
@@ -3647,14 +3895,17 @@ impl Engine {
         self.enqueue(x);
     }
 
-    fn dirty_field_users(&mut self, site: u64, f: Field) {
+    fn dirty_field_users(&mut self, site: u64, f: Field, cause: &Cause) {
         let users: Vec<Slot> = self
             .users
             .range((site, f, 0)..=(site, f, u64::MAX))
             .map(|(_, &u)| u)
             .collect();
         for u in users {
-            self.make_dirty(u);
+            if self.tracing > 0 {
+                self.note(u, cause.clone());
+            }
+            self.make_dirty_quiet(u);
         }
     }
 
@@ -3664,8 +3915,13 @@ impl Engine {
             .get(&f)
             .map_or_else(Default::default, |s| s.iter().copied().collect());
         users.sort_unstable();
+        if self.tracing > 0 {
+            for &u in &users {
+                self.note(u, Cause::Loop { field: f });
+            }
+        }
         for u in users {
-            self.make_dirty(u);
+            self.make_dirty_quiet(u);
         }
     }
 
@@ -3700,6 +3956,9 @@ impl Engine {
         for w in waiters {
             if self.live(w) && self.n(w).state == State::Parked && self.n(w).on == x {
                 count!(Wake);
+                if self.tracing > 0 {
+                    self.note(w, Cause::Woken { by: self.n(x).id });
+                }
                 self.dequeue(w);
                 self.nm(w).state = State::Dirty;
                 let hw = self.n(w).height.max(h);
@@ -4398,6 +4657,37 @@ impl Engine {
         // scope effects (a balanced span changes no binding outside itself,
         // so needs no re-binding), then the definitions.
         let mut created = Vec::new();
+        let depth = {
+            let mut d = 0u32;
+            let mut p = x;
+            while p != NIL && self.live(p) {
+                d += 1;
+                p = self.n(p).parent;
+            }
+            d
+        };
+        if ids.len() > pre + suf {
+            let n_new = u32::try_from(ids.len() - pre - suf).unwrap_or(u32::MAX);
+            let e = self.created_in_eval.entry(x).or_default();
+            e.0 = e.0.saturating_add(n_new);
+            for &(op, args) in &specs[pre..ids.len() - suf] {
+                if e.1.len() == 4 {
+                    e.1.remove(0);
+                }
+                e.1.push((String::new(), self.values.render(args).chars().take(80).collect()));
+                let k = e.1.len() - 1;
+                e.1[k].0 = self.ops[op.0 as usize].name().to_string();
+            }
+            let (created_n, last) = (e.0, e.1.clone());
+            if created_n > self.limits.children_per_node || depth > self.limits.unfold_depth {
+                self.errors.push(EvalError::RunawayCreation {
+                    node: self.n(x).id,
+                    created: created_n,
+                    depth,
+                    last,
+                });
+            }
+        }
         for i in pre..ids.len() - suf {
             let (op, args) = specs[i];
             let c = self.create_raw(
@@ -4513,7 +4803,11 @@ impl Engine {
                         d.value = v;
                     }
                 }
-                self.dirty_field_users(x.pack(), f);
+                let cause = Cause::Changed {
+                    field: f,
+                    site: Some(self.n(x).id),
+                };
+                self.dirty_field_users(x.pack(), f, &cause);
             }
         }
         changed
@@ -4881,6 +5175,23 @@ impl Engine {
             return;
         }
         self.report.runs += 1;
+        self.eval_runs += 1;
+        {
+            let c = self.runs_in_eval.entry(x).or_insert(0);
+            *c += 1;
+            let c = *c;
+            if c * 2 == self.limits.runs_per_node || c * 2 == self.limits.runs_per_node + 1 {
+                self.tracing += 1;
+            }
+            if c > self.limits.runs_per_node {
+                let causes = self.causes.remove(&x).unwrap_or_default();
+                self.errors.push(EvalError::RunawayNode {
+                    node: self.n(x).id,
+                    runs: c,
+                    causes,
+                });
+            }
+        }
         if self.n(x).state == State::Parked {
             self.dequeue(x);
             self.nm(x).state = State::Dirty;
@@ -4937,7 +5248,10 @@ impl Engine {
             self.nm(x).output = output;
             let readers = self.aux_of(x).map_or_else(Default::default, |a| a.out_readers.clone());
             for rd in readers {
-                self.make_dirty(rd);
+                if self.tracing > 0 {
+                    self.note(rd, Cause::Output { of: self.n(x).id });
+                }
+                self.make_dirty_quiet(rd);
             }
         }
         let _ = changed;
@@ -5382,6 +5696,16 @@ impl Engine {
         }
         self.spec_done.clear();
         self.stream_runs.clear();
+        self.runs_in_eval.clear();
+        self.causes.clear();
+        self.tracing = 0;
+        self.created_in_eval.clear();
+        self.idle_rounds = 0;
+        self.eval_runs = 0;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.eval_start = Some(std::time::Instant::now());
+        }
         self.apply_environment();
         self.touch_log.clear();
         let restarted = self.feedback;
@@ -5698,6 +6022,12 @@ impl Engine {
             let Some((level, at_level)) = self.queue_first() else {
                 return Ok(());
             };
+            if self.past_deadline() {
+                return Err(EvalError::Deadline {
+                    runs: self.eval_runs,
+                    waiters: self.waiters(),
+                });
+            }
             self.level = level;
             ready.clear();
             #[cfg(feature = "profile")]
@@ -5781,11 +6111,33 @@ impl Engine {
             }
             span!(ApplyBatch);
             results.sort_by_key(|r| r.node);
+            let runs_before = self.report.runs;
             for r in results.drain(..) {
                 self.apply(r);
             }
             self.settle_deferred();
+            if self.report.runs == runs_before {
+                self.idle_rounds += 1;
+                if self.idle_rounds > self.limits.idle_rounds {
+                    return Err(EvalError::NoProgress {
+                        rounds: self.idle_rounds,
+                        waiters: self.waiters(),
+                    });
+                }
+            } else {
+                self.idle_rounds = 0;
+            }
         }
+    }
+
+    /// Whether the evaluation's run or time limit is reached.
+    fn past_deadline(&self) -> bool {
+        let runs = self.limits.total_runs.is_some_and(|m| self.eval_runs >= m);
+        #[cfg(not(target_arch = "wasm32"))]
+        let time = matches!((self.limits.time, self.eval_start), (Some(t), Some(s)) if s.elapsed() >= t);
+        #[cfg(target_arch = "wasm32")]
+        let time = false;
+        runs || time
     }
 
     fn sanitize(ready: &[(NodeId, Slot)], cands: &[Candidate], batch: &mut Vec<Job>) {
