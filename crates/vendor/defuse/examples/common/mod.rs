@@ -28,6 +28,7 @@
 
 pub mod interp;
 pub mod json;
+pub mod shrink;
 pub mod trace;
 
 use std::sync::{Arc, OnceLock, RwLock};
@@ -1794,6 +1795,9 @@ pub struct Program {
     pub unit: UnitId,
     pub lines: Vec<String>,
     pub nodes: Vec<NodeId>,
+    /// Every edit made through `set_line`/`insert_line`/`remove_line`
+    /// since the log was last cleared (for a failure's repro).
+    pub edit_log: Vec<shrink::Ed>,
 }
 
 /// The environment `env` (integer fields) as the engine takes it.
@@ -1831,6 +1835,7 @@ impl Program {
         (
             eng,
             Program {
+                edit_log: Vec::new(),
                 lang,
                 loops,
                 unit,
@@ -1842,6 +1847,7 @@ impl Program {
 
     /// Replaces line `i`.
     pub fn set_line(&mut self, eng: &mut Engine, i: usize, text: String) {
+        self.edit_log.push(shrink::Ed::Set(i, text.clone()));
         let ast = Lang::rewrite(eng.values(), &self.loops, parse_stmt(eng.values(), &text));
         let old = self.lines[i].clone();
         self.procs_edit(eng, Some(&old), Some(&text));
@@ -1907,6 +1913,7 @@ impl Program {
 
     /// Inserts a new line before line `i`.
     pub fn insert_line(&mut self, eng: &mut Engine, i: usize, text: String) {
+        self.edit_log.push(shrink::Ed::Ins(i, text.clone()));
         let ast = Lang::rewrite(eng.values(), &self.loops, parse_stmt(eng.values(), &text));
         self.procs_edit(eng, None, Some(&text));
         let n = if self.nodes.is_empty() {
@@ -1923,6 +1930,7 @@ impl Program {
 
     /// Removes line `i`.
     pub fn remove_line(&mut self, eng: &mut Engine, i: usize) {
+        self.edit_log.push(shrink::Ed::Rm(i));
         let n = self.nodes.remove(i);
         eng.remove(n);
         let old = self.lines.remove(i);

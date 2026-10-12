@@ -1504,3 +1504,67 @@ fn trace_steps_exercise_scopes_claims_contributions_folds_and_the_environment() 
     e2.evaluate_sequential().unwrap();
     assert_eq!(doc.result(&eng), d2.result(&e2));
 }
+
+#[test]
+fn a_claim_growing_over_a_page_makes_that_page_absent_as_an_anchor() {
+    // Found by the typing benchmark's checked edits (shrunk to 24 lines):
+    // `sumnext ... 21` takes the `page` at line 9; the last page's segment
+    // must then start where the previous live page is, as the interpreter
+    // has it, not at the inert one.
+    let src = [
+        "emit x184_5 + 67",
+        "sumnext x184_8 2",
+        "x184_19 = 28",
+        "~say x184_20 x184_19",
+        "p184_21 = {x: 2, w: 28, c: 8}",
+        "x184_21 = layout(p184_21)",
+        "~dbl x184_22 x184_21",
+        "x184_23 = x184_19 + 28",
+        "end",
+        "page",
+        "begin",
+        "x185_0 = g29 + 92",
+        "~dbl x185_1 g9",
+        "emit g18 + 0",
+        "x188_19 = x188_15 + 11",
+        "s188_20 = \"e188_20 = \"",
+        "eval s188_20 + g23",
+        "x188_20 = e188_20 + 1",
+        "x188_21 = x188_15 + 25",
+        "x188_22 = x188_18 * 2",
+        "p188_23 = {x: 86, w: 26, c: 3}",
+        "x188_23 = layout(p188_23)",
+        "end",
+        "page",
+    ];
+    let (mut eng, mut prog, _) = load(&src);
+    prog.set_line(&mut eng, 1, "sumnext x184_8 21".into());
+    eval(&mut eng, &prog);
+    let (mut cold, p2) = Program::load(prog.lines.clone());
+    cold.evaluate_sequential().unwrap();
+    assert_eq!(p2.result(&cold), reference(&prog.lines), "cold");
+}
+
+#[test]
+fn an_opener_that_contributes_keeps_its_start_marker() {
+    // Reported by the client: an opener step that also contributes to a
+    // sequence, followed by a reader of the previous contribution, re-ran
+    // without end (binding the opener's marker re-registered it with no
+    // value, so every read looked stale). The contribution of an opener is
+    // not supported (its marker wins); the reader sees the scope's start.
+    use common::trace::{self, Doc};
+    let text = concat!(
+        "{\"meta\": {\"version\": 1, \"document\": \"m\", \"steps\": 2, \"sequences\": [\"items\"]}}\n",
+        "{\"id\": \"a\", \"class\": \"begin\", \"pos\": 0, \"reads\": [], \"writes\": [], \"scope\": \"open\", \"contributes\": \"items\"}\n",
+        "{\"id\": \"b\", \"class\": \"x\", \"pos\": 1, \"reads\": [], \"writes\": [], \"reads_prev_contribution\": \"items\"}\n",
+    );
+    let t = trace::load_trace(text).expect("loads");
+    let mut eng = Engine::new();
+    let doc = Doc::load(&mut eng, &t);
+    let r = eng.evaluate_sequential().unwrap();
+    assert!(r.runs <= 4, "runs {}", r.runs);
+    let first = doc.result(&eng);
+    let r = eng.evaluate_sequential().unwrap();
+    assert_eq!(r.nodes_run, 0);
+    assert_eq!(doc.result(&eng), first);
+}
