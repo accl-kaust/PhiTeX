@@ -3386,6 +3386,8 @@ impl Engine {
         }
         self.set_uses(s, Vec::new());
         self.clear_contribs(s);
+        // Not a sibling for anyone now: a reader anchored on it re-anchors.
+        self.unanchor_watches(s);
         self.set_publishes(s, Vec::new());
         self.drop_watch(s);
         let readers = self.aux_of(s).map_or_else(Default::default, |a| a.out_readers.clone());
@@ -3413,6 +3415,9 @@ impl Engine {
         self.ax(s).claimed_by = None;
         self.nm(s).state = State::Dirty;
         self.nm(s).epoch = self.n(s).epoch.wrapping_add(1);
+        // A sibling again: a reader whose range spans it may anchor on it.
+        let (unit, label) = (self.n(s).unit, self.n(s).label);
+        self.stab_structure(unit, label);
         let st = self.statics(self.n(s).op, self.n(s).args);
         if let Some(d) = &st.decl {
             for &(f, l) in d {
@@ -4191,6 +4196,21 @@ impl Engine {
 
     fn stab_structure(&mut self, unit: u32, label: u64) {
         for (r, _) in self.stab(unit, label) {
+            self.make_dirty(r);
+        }
+    }
+
+    /// Readers whose range starts right after `s` run again: they chose
+    /// `s` as their anchor (a previous sibling), and it is gone as one.
+    fn unanchor_watches(&mut self, s: Slot) {
+        let unit = self.n(s).unit;
+        let from = self.n(s).label + 1;
+        let readers: Vec<Slot> = self.units[unit as usize]
+            .watches
+            .range((from, Slot { ix: 0, gen_: 0 })..=(from, NIL))
+            .map(|((_, r), _)| *r)
+            .collect();
+        for r in readers {
             self.make_dirty(r);
         }
     }
