@@ -1,34 +1,30 @@
 //! The page builder and `\output` (§980–§1028), `\shipout` (§638) and
 //! the DVI file (§583–§645).
 //!
-// REDUCE-GAP: resumable fold. The page builder is a fold over the main
-// vertical list; the core has no fold that can stop, run a subprogram
-// (`\output`) and resume. It is stood in for by `Fin`, a root at the
-// end of the document that reads the whole main list and builds pages
-// until one fires; `\output` then runs as children of `Fin` (`OutPage`
-// opens the output group, an `Exec` child reads the output routine),
-// and the group's `}` (`output_end`) makes a new `Fin` child with what
-// is left to contribute. Every page is recomputed on any change of the
-// main list. Commands between two pages of the document do not see
-// what the first page's `\output` did (`\pageno`, marks): it runs at
-// the end.
-//
-// REDUCE-GAP: `\pagegoal`, `\pagetotal` and the other page quantities
-// read during the document are those of an empty page: the page
-// builder runs after the document.
+//! The page builder is a fold over the main vertical list: each node that
+//! calls `build_page` in tex.web (§1035 and the rest) is a step. It reads
+//! the field `page:state` (the builder's state as a value: its key, how
+//! many of list 0's items it has taken, and the contributions waiting
+//! before them), contributes what the list gained since, and defines the
+//! new state. When a page fires, the output routine is the step's
+//! unfolding: an `OutPage` child opens the output group with `\box255`
+//! and the marks defined, an `Exec` child holds the routine's tokens, and
+//! the group's `}` (`output_end`) is again a step of the fold.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use phitex_defuse::{Ctx, Stop, Value, ValueId};
 use phitex_typeset::glue::Glue;
-use phitex_typeset::node::{BoxKind, BoxNode, GlueKind, List, Node};
+use phitex_typeset::node::{List, Node};
 use phitex_typeset::pack::{PackParams, Spec};
 use phitex_typeset::page::{InsertClass, Outcome, PageBuilder, PageParams};
 
 use crate::build::Mode;
 use crate::nodes::{self, Side};
 use crate::run::{Halt, R, Run};
-use crate::val::{Tok, group, int_of, list_of, str_of, toks_of};
+use crate::val::{group, int_of, list_of, str_of, toks_of};
 
-const MAX_DEAD_CYCLES_GUARD: i64 = 1000;
 
 impl Run<'_, '_> {
     /// `ship_out` (§638–§640): the page goes to the `pages` accumulator
@@ -109,215 +105,249 @@ impl Run<'_, '_> {
             skip: crate::val::glue_of(v, self.get(&format!("skip:{n}"))?),
         })
     }
-}
 
-/// The main vertical list as TeX's contributions: list 0's items, the
-/// deletions applied.
-fn main_list(r: &mut Run<'_, '_>) -> R<Vec<ValueId>> {
-    let (items, _) = r.list_items(0)?;
-    Ok(items)
-}
-
-/// `Fin`: the page builder over what is left of the main vertical list
-/// (§994–§1028), and `its_all_over` (§1054) once it is empty.
-#[allow(clippy::too_many_lines)]
-pub(crate) fn fin(r: &mut Run<'_, '_>, args: &[ValueId]) -> R<()> {
-    let v = r.v;
-    if r.int("ended")? != 1 {
-        return Ok(());
+    /// The page builder's state where this node is.
+    pub(crate) fn page_state(&mut self) -> R<State> {
+        let x = self.get("page:state")?;
+        Ok(State::decode(self.v, x))
     }
-    let mut queue: std::collections::VecDeque<ValueId> = match args.first() {
-        Some(&q) => list_of(v, q).into(),
-        None => main_list(r)?.into(),
-    };
-    let params = PageParams {
-        vsize: r.param("vsize")?,
-        max_depth: r.param("maxdepth")?,
-        top_skip: r.glue_param("topskip")?,
-        holding_inserts: r.param("holdinginserts")?,
-        saving_vdiscards: false,
-    };
-    let mut side = Side::default();
-    let mut pb = PageBuilder::new();
-    let mut guard = 0;
-    loop {
-        let Some(x) = queue.pop_front() else {
-            // §1054 its_all_over
-            let dead = r.int("deadcycles")?;
-            if pb.page.is_empty() && dead == 0 {
-                return Ok(());
-            }
-            guard += 1;
-            if guard > MAX_DEAD_CYCLES_GUARD {
-                return Ok(());
-            }
-            let w = r.param("hsize")?;
-            let b = BoxNode {
-                kind: BoxKind::H,
-                width: w,
-                ..BoxNode::default()
-            };
-            let fill = Glue {
-                stretch: 65536,
-                stretch_order: phitex_typeset::glue::Order::Fill,
-                ..Glue::ZERO
-            };
-            queue.push_back(nodes::encode_box(v, &b, &side));
-            queue.push_back(nodes::glue_node(v, &fill, GlueKind::Normal));
-            queue.push_back(nodes::penalty_node(v, -0o10000000000));
-            continue;
+
+    /// `build_page` (§994): a step of the fold, in outer vertical mode.
+    pub(crate) fn build_page(&mut self, md: &Mode) -> R<()> {
+        if md.lid != 0 || md.km != 1 {
+            return Ok(());
+        }
+        let m = nodes::marker(self.v, nodes::T_BUILD_PAGE);
+        self.append(0, m);
+        let mut st = self.page_state()?;
+        let (items, _) = self.list_items(0)?;
+        let mut queue: VecDeque<ValueId> = st.pending.drain(..).collect();
+        queue.extend(items.iter().skip(st.consumed).copied());
+        st.consumed = items.len();
+        self.page_steps(st, queue)
+    }
+
+    /// Contributes `queue` to the page: until it is empty or a page fires
+    /// with an output routine to run.
+    fn page_steps(&mut self, mut st: State, mut queue: VecDeque<ValueId>) -> R<()> {
+        let v = self.v;
+        let params = PageParams {
+            vsize: self.param("vsize")?,
+            max_depth: self.param("maxdepth")?,
+            top_skip: self.glue_param("topskip")?,
+            holding_inserts: self.param("holdinginserts")?,
+            saving_vdiscards: false,
         };
-        let Some(p) = nodes::decode(v, x, &mut side) else { continue };
-        let next = queue.front().and_then(|&y| {
-            let mut s2 = Side::default();
-            nodes::decode(v, y, &mut s2)
-        });
-        let mut halt: Option<Halt> = None;
-        let out = {
-            let mut class = |n: u16| match r.insert_class(n) {
-                Ok(c) => c,
-                Err(h) => {
-                    halt.get_or_insert(h);
-                    InsertClass {
-                        box_height_plus_depth: None,
-                        box_is_hbox: false,
-                        count: 0,
-                        dimen: 0,
-                        skip: Glue::ZERO,
+        let (mut pb, mut side) = builder(st.key);
+        while let Some(x) = queue.pop_front() {
+            let Some(p) = nodes::decode(v, x, &mut side) else { continue };
+            let next = queue.front().and_then(|&y| nodes::decode(v, y, &mut Side::default()));
+            let mut halt: Option<Halt> = None;
+            let out = {
+                let mut class = |n: u16| match self.insert_class(n) {
+                    Ok(c) => c,
+                    Err(h) => {
+                        halt.get_or_insert(h);
+                        InsertClass {
+                            box_height_plus_depth: None,
+                            box_is_hbox: false,
+                            count: 0,
+                            dimen: 0,
+                            skip: Glue::ZERO,
+                        }
                     }
-                }
+                };
+                pb.contribute(p, next.as_ref(), &params, &mut class)
             };
-            pb.contribute(p, next.as_ref(), &params, &mut class)
-        };
-        if let Some(h) = halt {
-            return Err(h);
-        }
-        match out {
-            Outcome::Done => {}
-            Outcome::Wait(k) => {
-                if queue.is_empty() {
-                    // contributed again once the end appends its box
-                    let k = nodes::encode(v, &k, &side);
-                    let w = r.param("hsize")?;
-                    let b = BoxNode {
-                        kind: BoxKind::H,
-                        width: w,
-                        ..BoxNode::default()
-                    };
-                    let _ = b;
-                    queue.push_front(k);
-                    // its_all_over's material follows the kern
-                    let dead = r.int("deadcycles")?;
-                    let _ = dead;
-                    let fill = Glue {
-                        stretch: 65536,
-                        stretch_order: phitex_typeset::glue::Order::Fill,
-                        ..Glue::ZERO
-                    };
-                    let bx = BoxNode {
-                        kind: BoxKind::H,
-                        width: r.param("hsize")?,
-                        ..BoxNode::default()
-                    };
-                    queue.push_back(nodes::encode_box(v, &bx, &side));
-                    queue.push_back(nodes::glue_node(v, &fill, GlueKind::Normal));
-                    queue.push_back(nodes::penalty_node(v, -0o10000000000));
-                } else {
-                    let k = nodes::encode(v, &k, &side);
-                    queue.push_front(k);
+            if let Some(h) = halt {
+                return Err(h);
+            }
+            match out {
+                Outcome::Done => {}
+                Outcome::Wait(k) => {
+                    // a kern waits for what follows it (§1000)
+                    st.pending = vec![nodes::encode(v, &k, &side)];
+                    st.pending.extend(queue);
+                    st.key = remember(pb, side);
+                    self.set("page:state", st.encode(v), true);
+                    return Ok(());
+                }
+                Outcome::Fire(f) => {
+                    let mut rest: Vec<ValueId> = f.contributions.iter().map(|n| nodes::encode(v, n, &side)).collect();
+                    rest.extend(queue);
+                    st.pending = rest;
+                    st.key = remember(pb, side.clone());
+                    if self.fire(&st, *f, &side)? {
+                        // the output routine runs; its end steps the fold
+                        return Ok(());
+                    }
+                    let pending = std::mem::take(&mut st.pending);
+                    queue = pending.into();
+                    let (p2, s2) = builder(st.key);
+                    pb = p2;
+                    side = s2;
                 }
             }
-            Outcome::Fire(f) => return fire(r, *f, &side, queue),
         }
+        st.key = remember(pb, side);
+        self.set("page:state", st.encode(v), true);
+        Ok(())
+    }
+
+    /// `fire_up` (§1012–§1025) after the page builder chose the page:
+    /// true if an output routine runs (as children).
+    fn fire(&mut self, st: &State, f: phitex_typeset::page::Fired, side: &Side) -> R<bool> {
+        let v = self.v;
+        // §1012: marks
+        let bot = self.get("mark:bot")?.filter(|&x| x != ValueId::UNIT);
+        let mut top = self.get("mark:top")?.filter(|&x| x != ValueId::UNIT);
+        let mut first = None;
+        let mut new_bot = bot;
+        if bot.is_some() {
+            top = bot;
+        }
+        for &k in &f.marks {
+            let m = side.marks.get(k as usize).copied();
+            if first.is_none() {
+                first = m;
+            }
+            new_bot = m;
+        }
+        if top.is_some() && first.is_none() {
+            first = top;
+        }
+        for (name, m) in [("mark:top", top), ("mark:first", first), ("mark:bot", new_bot)] {
+            self.set(name, m.unwrap_or(ValueId::UNIT), true);
+        }
+        // §1018–§1021: insertion boxes
+        for (n, list) in &f.inserts {
+            let old = self.box_reg(i32::from(*n))?;
+            let mut s2 = Side::default();
+            let mut l: List = match old.and_then(|b| nodes::decode(v, b, &mut s2)) {
+                Some(Node::Box(b)) => b.list,
+                _ => Vec::new(),
+            };
+            l.extend(list.iter().cloned());
+            let p = phitex_typeset::pack::vpack(l, Spec::Additional(0), &PackParams::default());
+            let merged = merge(s2, side);
+            let b = nodes::encode_box(v, &p.node, &merged);
+            self.set(&format!("box:{n}"), v.list(vec![v.int(0), b]), true);
+        }
+        let b255 = nodes::encode_box(v, &f.box255.node, side);
+        let held: Vec<ValueId> = f.held_inserts.iter().map(|n| nodes::encode(v, n, side)).collect();
+        self.set("param:outputpenalty", v.int(i64::from(f.output_penalty)), true);
+        let output = self.get("param:output")?;
+        let otoks = toks_of(v, output);
+        if otoks.is_empty() {
+            // §1023: the default output routine
+            self.ship_out(b255)?;
+            let mut st2 = st.clone();
+            let mut q = held;
+            q.append(&mut st2.pending);
+            st2.pending = q;
+            self.set("page:state", st2.encode(v), true);
+            return Ok(false);
+        }
+        // §1025
+        let dead = self.int("deadcycles")? + 1;
+        self.set("deadcycles", v.int(dead), true);
+        self.set("page:state", st.encode(v), true);
+        let op = self.ops.outpage;
+        self.kid(op, vec![b255, v.list(held)]);
+        let mut toks = otoks;
+        if !toks.is_empty() {
+            toks.remove(0);
+        }
+        let frame = v.list(vec![v.str("t"), crate::val::toks_value(v, &toks)]);
+        let exec = self.ops.exec;
+        self.kid(exec, vec![v.list(vec![frame]), v.int(0)]);
+        Ok(true)
+    }
+
+    /// `\pagegoal` and the other page quantities (§421): the fold's state
+    /// where this node is.
+    pub(crate) fn page_dimen(&mut self, m: i32) -> R<i32> {
+        let st = self.page_state()?;
+        let (pb, _) = builder(st.key);
+        Ok(if pb.contents == phitex_typeset::page::Contents::Empty && m == 0 {
+            MAX_DIMEN
+        } else {
+            pb.so_far[usize::try_from(m).unwrap_or(0).min(7)]
+        })
+    }
+
+    /// Whether the page and its contributions are empty (§1054).
+    pub(crate) fn page_empty(&mut self) -> R<bool> {
+        let st = self.page_state()?;
+        let (items, _) = self.list_items(0)?;
+        let (pb, _) = builder(st.key);
+        Ok(pb.page.is_empty() && st.pending.is_empty() && items.len() <= st.consumed)
     }
 }
 
-/// `fire_up` (§1012–§1025), after the page builder chose the page.
-fn fire(
-    r: &mut Run<'_, '_>,
-    f: phitex_typeset::page::Fired,
-    side: &Side,
-    rest: std::collections::VecDeque<ValueId>,
-) -> R<()> {
-    let v = r.v;
-    // §1012: marks
-    let bot = r.get("mark:bot")?.filter(|&x| x != ValueId::UNIT);
-    let mut top = r.get("mark:top")?.filter(|&x| x != ValueId::UNIT);
-    let mut first = None;
-    let mut new_bot = bot;
-    if bot.is_some() {
-        top = bot;
-    }
-    for &k in &f.marks {
-        let m = side.marks.get(k as usize).copied();
-        if first.is_none() {
-            first = m;
-        }
-        new_bot = m;
-    }
-    if top.is_some() && first.is_none() {
-        first = top;
-    }
-    let marks = v.list(vec![
-        top.unwrap_or(ValueId::UNIT),
-        first.unwrap_or(ValueId::UNIT),
-        new_bot.unwrap_or(ValueId::UNIT),
-    ]);
-    // §1018–§1021: insertion boxes
-    let mut ins = Vec::new();
-    for (n, list) in &f.inserts {
-        let old = r.box_reg(i32::from(*n))?;
-        let mut s2 = Side::default();
-        let mut l: List = match old.and_then(|b| nodes::decode(v, b, &mut s2)) {
-            Some(Node::Box(b)) => b.list,
-            _ => Vec::new(),
-        };
-        l.extend(list.iter().cloned());
-        let p = phitex_typeset::pack::vpack(l, Spec::Additional(0), &PackParams::default());
-        let merged = merge(s2, side);
-        ins.push(v.list(vec![v.int(i64::from(*n)), nodes::encode_box(v, &p.node, &merged)]));
-    }
-    let b255 = nodes::encode_box(v, &f.box255.node, side);
-    let held = nodes::encode_list(v, &f.held_inserts, side);
-    let mut cont: Vec<ValueId> = f.contributions.iter().map(|n| nodes::encode(v, n, side)).collect();
-    cont.extend(rest);
-    let cont = v.list(cont);
-    let output = r.get("param:output")?;
-    let otoks = toks_of(v, output);
-    if otoks.is_empty() {
-        // §1023: the default output routine
-        for x in list_of(v, ins_list(v, &ins)) {
-            let xs = list_of(v, x);
-            let n = xs.first().map_or(0, |&y| int_of(v, y));
-            let val = v.list(vec![v.int(0), xs[1]]);
-            r.set(&format!("box:{n}"), val, true);
-        }
-        set_marks(r, marks);
-        r.set("param:outputpenalty", v.int(i64::from(f.output_penalty)), true);
-        r.ship_out(b255)?;
-        let mut q = list_of(v, held);
-        q.extend(list_of(v, cont));
-        let fin = r.ops.fin;
-        r.kid(fin, vec![v.list(q)]);
-        return Ok(());
-    }
-    let dead = r.int("deadcycles")? + 1;
-    let out = OutArgs {
-        b255,
-        penalty: f.output_penalty,
-        marks,
-        ins: ins_list(v, &ins),
-        held,
-        cont,
-        dead,
-    };
-    let op = r.ops.outpage;
-    r.kid(op, out.encode(v, &otoks));
-    Ok(())
+const MAX_DIMEN: i32 = 0o7777777777;
+
+/// The fold's state as a value: the builder's key (a pure function's
+/// memo, [`builder`]), the items of list 0 it has taken, and what waits
+/// before the rest.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct State {
+    pub key: u64,
+    pub consumed: usize,
+    pub pending: Vec<ValueId>,
 }
 
-fn ins_list(v: &phitex_defuse::Values, ins: &[ValueId]) -> ValueId {
-    v.list(ins.to_vec())
+impl State {
+    fn decode(v: &phitex_defuse::Values, x: Option<ValueId>) -> State {
+        let Some(x) = x else { return State::default() };
+        let xs = list_of(v, x);
+        State {
+            key: u64::from_ne_bytes(xs.first().map_or(0, |&k| int_of(v, k)).to_ne_bytes()),
+            consumed: usize::try_from(xs.get(1).map_or(0, |&k| int_of(v, k))).unwrap_or(0),
+            pending: xs.get(2).map(|&p| list_of(v, p)).unwrap_or_default(),
+        }
+    }
+
+    fn encode(&self, v: &phitex_defuse::Values) -> ValueId {
+        v.list(vec![
+            v.int(i64::from_ne_bytes(self.key.to_ne_bytes())),
+            v.int(i64::try_from(self.consumed).unwrap_or(0)),
+            v.list(self.pending.clone()),
+        ])
+    }
+}
+
+type Builders = Mutex<HashMap<u64, (PageBuilder, Side)>>;
+
+fn builders() -> &'static Builders {
+    static B: OnceLock<Builders> = OnceLock::new();
+    B.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The builder a key names (0: the empty page).
+fn builder(key: u64) -> (PageBuilder, Side) {
+    if key == 0 {
+        return (PageBuilder::new(), Side::default());
+    }
+    builders()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| (PageBuilder::new(), Side::default()))
+}
+
+/// The key of a builder: a hash of its content, so the same page gives
+/// the same state value whatever ran before.
+fn remember(pb: PageBuilder, side: Side) -> u64 {
+    let k = phitex_defuse::hash_bytes(17, format!("{pb:?}|{:?}|{:?}", side.marks, side.whats).as_bytes());
+    let k = if k == 0 { 1 } else { k };
+    builders()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(k)
+        .or_insert((pb, side));
+    k
 }
 
 fn merge(a: Side, b: &Side) -> Side {
@@ -330,102 +360,43 @@ fn merge(a: Side, b: &Side) -> Side {
     s
 }
 
-fn set_marks(r: &mut Run<'_, '_>, marks: ValueId) {
-    let v = r.v;
-    let xs = list_of(v, marks);
-    for (i, name) in ["mark:top", "mark:first", "mark:bot"].iter().enumerate() {
-        let m = xs.get(i).copied().unwrap_or(ValueId::UNIT);
-        r.set(name, m, true);
-    }
-}
-
-/// What `OutPage` is given.
-struct OutArgs {
-    b255: ValueId,
-    penalty: i32,
-    marks: ValueId,
-    ins: ValueId,
-    held: ValueId,
-    cont: ValueId,
-    dead: i64,
-}
-
-impl OutArgs {
-    fn encode(&self, v: &phitex_defuse::Values, toks: &[Tok]) -> Vec<ValueId> {
-        vec![
-            self.b255,
-            v.int(i64::from(self.penalty)),
-            self.marks,
-            self.ins,
-            self.held,
-            self.cont,
-            v.int(self.dead),
-            crate::val::toks_value(v, toks),
-        ]
-    }
-}
-
-/// `OutPage`: §1025, the output routine begins: the page in `\box255`,
-/// the output group opened (its kind keeps what the page builder
-/// resumes with), and the routine's tokens read by an `Exec` child.
+/// `OutPage`: §1025, the output routine begins: `\box255` defined, the
+/// output group opened (its kind keeps the held-over insertions).
 pub(crate) fn out_page(r: &mut Run<'_, '_>, args: &[ValueId]) -> R<()> {
     let v = r.v;
     let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
     r.set("box:255", v.list(vec![v.int(0), a(0)]), true);
-    r.set("param:outputpenalty", a(1), true);
-    set_marks(r, a(2));
-    for x in list_of(v, a(3)) {
-        let xs = list_of(v, x);
-        let n = xs.first().map_or(0, |&y| int_of(v, y));
-        r.set(&format!("box:{n}"), v.list(vec![v.int(0), xs[1]]), true);
-    }
-    r.set("deadcycles", a(6), true);
-    r.set("ended", v.int(0), true);
     let md = r.mode()?;
     let sid = r.node_raw();
-    let kind = r.kind_value(&md, group::OUTPUT, sid, sid, -1, vec![a(4), a(5)])?;
+    let kind = r.kind_value(&md, group::OUTPUT, sid, sid, -1, vec![a(1)])?;
     r.open_scope_here(kind);
     r.normal_paragraph()?;
-    // the routine without its `{` (scan_left_brace, §1025)
-    let mut toks = toks_of(v, Some(a(7)));
-    if !toks.is_empty() {
-        toks.remove(0);
-    }
-    let frame = v.list(vec![v.str("t"), crate::val::toks_value(v, &toks)]);
-    let exec = r.ops.exec;
-    r.kid(exec, vec![v.list(vec![frame])]);
     Ok(())
 }
 
 /// The output group's `}` (§1026): the routine's list goes after the
-/// held-over insertions, both before the contributions the page left,
-/// and the page builder resumes.
+/// held-over insertions, both before the contributions the page left;
+/// then a step of the fold.
 pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
     let v = r.v;
     r.effect = phitex_defuse::Effect::Close;
     r.unsave_extras(md)?;
     let (items, _) = r.list_items(md.sid)?;
     let held = md.extra.first().map(|&x| list_of(v, x)).unwrap_or_default();
-    let cont = md.extra.get(1).map(|&x| list_of(v, x)).unwrap_or_default();
+    let mut st = r.page_state()?;
     let mut q = held;
     q.extend(items);
-    q.extend(cont);
-    r.set("ended", v.int(1), true);
+    q.append(&mut st.pending);
     r.set("inspen", v.int(0), true);
-    let fin = r.ops.fin;
-    r.kid(fin, vec![v.list(q)]);
-    // the `}` was the routine's last token: nothing follows it
-    r.frames.clear();
-    r.eof = true;
-    Ok(())
+    let outer = r.outer_mode(md)?;
+    let _ = outer;
+    r.page_steps(st, q.into())
 }
 
 /// `Dvi`: the pages, written (§583–§645). The comment and `\mag` are
 /// read at the end.
 pub(crate) fn dvi(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     let v = cx.values();
-    let raw = i64::from_ne_bytes(cx.node().raw().to_ne_bytes());
-    let _ = cx.use_field(v.field(&format!("hint:{raw}")))?;
     let pages = cx.acc_range(v.field("pages"), None)?;
     let comment = cx.use_field(v.field("dvicomment"))?.map(|x| str_of(v, x)).unwrap_or_default();
     let mag = cx.use_field(v.field("param:mag"))?.map_or(1000, |x| int_of(v, x));

@@ -33,7 +33,7 @@ pub(crate) const T_DELETE: i64 = 99;
 pub(crate) const T_BUILD_PAGE: i64 = 98;
 
 /// Marks and whatsits met while decoding, numbered.
-#[derive(Default)]
+#[derive(Clone, Default, Debug)]
 pub(crate) struct Side {
     pub marks: Vec<ValueId>,
     pub whats: Vec<ValueId>,

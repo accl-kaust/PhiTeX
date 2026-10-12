@@ -222,11 +222,8 @@ impl Run<'_, '_> {
     }
 
     /// A point where tex.web calls `build_page` on the main list.
-    pub(crate) fn build_page_mark(&mut self, md: &Mode) {
-        if md.lid == 0 {
-            let m = nodes::marker(self.v, T_BUILD_PAGE);
-            self.append(0, m);
-        }
+    pub(crate) fn build_page_mark(&mut self, md: &Mode) -> R<()> {
+        self.build_page(md)
     }
 
     /// The contents of list `lid` so far, and how many of them are
@@ -347,7 +344,7 @@ impl Run<'_, '_> {
         let toks = crate::val::toks_of(v, ep);
         self.push_toks(toks);
         if md.km == 1 && md.depth == 0 || md.lid == 0 && md.km == 1 {
-            self.build_page_mark(md);
+            self.build_page_mark(md)?;
         }
         Ok(())
     }
@@ -770,7 +767,7 @@ impl Run<'_, '_> {
             if md.m.abs() == 1 {
                 self.append_to_vlist(md, b)?;
                 if md.m > 0 {
-                    self.build_page_mark(md);
+                    self.build_page_mark(md)?;
                 }
             } else {
                 if md.m.abs() == 102 {
@@ -1118,7 +1115,7 @@ impl Run<'_, '_> {
                 let y = nodes::encode(v, &node, &side);
                 self.append(outer.lid, y);
                 if outer.lid == 0 && outer.m == 1 {
-                    self.build_page_mark(&outer);
+                    self.build_page_mark(&outer)?;
                 }
                 Ok(())
             }
@@ -1729,15 +1726,34 @@ impl Run<'_, '_> {
         })
     }
 
-    /// `its_all_over` (§1054): the end waits for the page builder (the
-    /// root `Fin`), and nothing after `\end` is read.
+    /// `its_all_over` (§1054): the end, once the page and its
+    /// contributions are empty and no output routine is pending; else a
+    /// last page is forced out and `\end` read again.
     pub(crate) fn its_all_over(&mut self, md: &Mode) -> R<()> {
         if md.m < 0 {
             return Ok(());
         }
-        self.set("ended", self.v.int(1), true);
-        self.frames.clear();
-        Ok(())
+        if self.page_empty()? && self.int("deadcycles")? == 0 {
+            // nothing after `\end` is read
+            self.claim_rest = true;
+            self.frames.clear();
+            return Ok(());
+        }
+        self.back_input(Tok::cs("end"));
+        let v = self.v;
+        let w = self.param("hsize")?;
+        let b = null_box(v, w);
+        self.append(0, b);
+        let fill = Glue {
+            stretch: 65536,
+            stretch_order: phitex_typeset::glue::Order::Fill,
+            ..Glue::ZERO
+        };
+        let g = nodes::glue_node(v, &fill, GlueKind::Normal);
+        self.append(0, g);
+        let p = nodes::penalty_node(v, -0o10000000000);
+        self.append(0, p);
+        self.build_page(md)
     }
 
     /// `\vsplit` (§977): the box split off register `n` at height `h`.

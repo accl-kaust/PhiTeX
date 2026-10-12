@@ -1,7 +1,6 @@
 //! The operations: `Exec` (one command of TeX's input), `Put`
-//! (definitions that land outside a group that just closed), `Fin`
-//! (the page builder, [`crate::page`]), `OutPage` (an output routine
-//! begins) and `Dvi` (the file).
+//! (definitions that land outside a group that just closed), `OutPage`
+//! (an output routine begins, [`crate::page`]) and `Dvi` (the file).
 
 use std::sync::{Arc, OnceLock};
 
@@ -42,8 +41,10 @@ fn run_node(cx: &mut Ctx<'_>, o: Ops, body: impl FnOnce(&mut Run<'_, '_>) -> R<(
     }
 }
 
-/// One command (§1030): the first token of the node's input decides;
-/// what is left of the input is the node's last child.
+/// One command (§1030) of the node's text: the first token decides; the
+/// command reads on into the siblings it claims; what it produced
+/// (expansion, tokens put back) and the text it did not read are its
+/// children.
 pub(crate) struct Exec(pub Shared);
 
 impl Operation for Exec {
@@ -67,25 +68,12 @@ impl Operation for Exec {
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let args = cx.args();
-        if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
-            eprintln!("exec run {} {}", cx.node().raw(), args.first().map(|&a| cx.values().render(a)).unwrap_or_default().chars().take(60).collect::<String>());
-        }
         run_node(cx, ops(&self.0), |r| {
-            let raw = r.node_raw();
-            r.hint = r.get(&format!("hint:{raw}"))?.map_or(0, |h| crate::val::int_at(r.v, h, 0));
-            if args.is_empty() {
-                return Ok(());
-            }
-            // after `\end` (or a stall) nothing runs
-            if r.int("ended")? != 0 {
-                return Ok(());
-            }
-            if r.hint < 0 {
-                r.eof = true;
-            }
+            r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
             let fs = decode_frames(r.v, &args);
             r.frames.extend(fs);
-            r.command()
+            r.command()?;
+            r.measure_tail()
         })
     }
 }
@@ -171,38 +159,6 @@ impl Operation for Put {
     }
 }
 
-/// The page builder (a root at the end of the document, and again
-/// after each `\output`).
-pub(crate) struct Fin(pub Shared);
-
-impl Operation for Fin {
-    fn name(&self) -> &'static str {
-        "fin"
-    }
-    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
-        None
-    }
-    fn may_define_field(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
-        client_only(v, f)
-    }
-    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        let args = cx.args();
-        let tr = std::env::var_os("PHITEX_TEX_TRACE").is_some();
-        if tr {
-            eprintln!("fin run {}", cx.node().raw());
-        }
-        let r = run_node(cx, ops(&self.0), |r| {
-            let raw = r.node_raw();
-            let _ = r.get(&format!("hint:{raw}"))?;
-            crate::page::fin(r, &args)
-        });
-        if tr {
-            eprintln!("fin result {:?}", r.as_ref().map(|_| ()).map_err(|_| "stop"));
-        }
-        r
-    }
-}
-
 /// An output routine begins (§1025).
 pub(crate) struct OutPage(pub Shared);
 
@@ -240,7 +196,7 @@ impl Operation for Dvi {
     }
 }
 
-/// The end of the prelude: where its final bindings are read.
+/// The end of the prelude: the point its final bindings are read at.
 pub(crate) struct Mark;
 
 impl Operation for Mark {
@@ -255,11 +211,11 @@ impl Operation for Mark {
     }
 }
 
-/// Whether a node may define `f`: the fields only the client sets
-/// (`hint:`, `file:`) are never defined by a node.
+/// Whether a node may define `f`: files (`file:`) come only from the
+/// client.
 fn client_only(v: &Values, f: Field) -> bool {
     match &*v.get(f.0) {
-        phitex_defuse::Value::Str(s) => !(s.starts_with("hint:") || s.starts_with("file:")),
+        phitex_defuse::Value::Str(s) => !s.starts_with("file:"),
         _ => true,
     }
 }
