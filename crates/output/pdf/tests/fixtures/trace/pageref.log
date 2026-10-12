@@ -1,0 +1,45 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input pageref
+(./pageref.tex
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0
+.\glue(\topskip) 0.0
+.\hbox(6.83331+0.0)x200.0, glue set 187.49997fil
+..\hbox(0.0+0.0)x0.0
+..\r A
+..\r 1
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0, glue set 291.22224fill
+.\glue(\topskip) 0.0
+.\hbox(6.83331+1.94444)x200.0, glue set 180.13882fil
+..\hbox(0.0+0.0)x0.0
+..\r B
+..\r 3
+..\r ,
+..\r 7
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\hbox(0.0+0.0)x200.0
+.\glue 0.0 plus 1.0fill
+
+ )
+pdfTeX warning (dest): Page 3 has been referenced but does not exist!
+
+</usr/share/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb>
+Output written on pageref-trace.pdf (2 pages, 11190 bytes).
+PDF statistics:
+ 14 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 1 words of extra memory for PDF output out of 10000 (max. 10000000)
+
