@@ -28,7 +28,7 @@ fn main() {
                     args.next()
                         .and_then(|s| Sched::parse(&s))
                         .expect("--sched seq|spec|spec:T|random"),
-                )
+                );
             }
             "--out" => out = args.next().expect("--out DIR"),
             s => paths.push(s.to_string()),
@@ -65,7 +65,7 @@ fn main() {
         std::process::exit(1);
     };
     let (min, eds) = shrink::minimize(start, eds, sched, &|lines, edits| {
-        eprintln!("{lines} lines, {edits} edits")
+        eprintln!("{lines} lines, {edits} edits");
     });
     let _ = std::fs::create_dir_all(&out);
     std::fs::write(format!("{out}/min.txt"), min.join("\n")).expect("write");

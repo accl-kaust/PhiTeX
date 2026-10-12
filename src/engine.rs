@@ -2709,10 +2709,13 @@ impl Engine {
         {
             let n = self.nm(x);
             let mut defs = std::mem::take(&mut n.defs).into_vec();
+            // Re-registering keeps the value (a marker an opener already
+            // holds; a run's value when only the locality changes).
+            let value = defs.iter().find(|d| d.field == f).map_or(ValueId::NONE, |d| d.value);
             defs.retain(|d| d.field != f);
             defs.push(Def {
                 field: f,
-                value: ValueId::NONE,
+                value,
                 global,
             });
             n.defs = defs.into_boxed_slice();
@@ -5655,7 +5658,8 @@ impl Engine {
             let s = i.slot;
             let m = self.n(s);
             if m.parent == n.parent {
-                if pred(m.op, &self.args_vec(m.args)) {
+                // A sibling a claim took is not there for anyone.
+                if m.state != State::Inert && pred(m.op, &self.args_vec(m.args)) {
                     return Some(m.id);
                 }
             } else if !self.descends(s, n.parent) {

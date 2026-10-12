@@ -39,7 +39,7 @@
 //! `edits.jsonl` holds one edit per line, applied in order:
 //!
 //! ```text
-//! {"op": "change_writes", "step": "s1", "writes": [...], "expect": {"steps_reached": 3}}
+//! {"op": "change_writes", "step": "s1", "writes": [...], "expect": {"reached_bound": 3}}
 //! {"op": "change_reads", "step": "s1", "reads": [...]}
 //! {"op": "insert_after", "step": "s1", "new": {step}}
 //! {"op": "delete", "step": "s1"}
@@ -634,7 +634,10 @@ pub fn load_edits(text: &str) -> Result<Vec<EditLine>, String> {
             let eo = e.as_obj().ok_or_else(|| fail(line, "`expect` must be an object"))?;
             for (k, x) in eo {
                 match k.as_str() {
-                    "steps_reached" => {
+                    // An upper bound: every step reachable from the edited
+                    // step's writes over the recorded def-use edges, with
+                    // no cutoff (`reached_bound` is its newer name).
+                    "steps_reached" | "reached_bound" => {
                         expect_reached = Some(
                             x.as_int()
                                 .and_then(|n| u64::try_from(n).ok())

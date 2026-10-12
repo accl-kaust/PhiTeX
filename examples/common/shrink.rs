@@ -41,13 +41,14 @@ pub fn apply(eng: &mut Engine, p: &mut Program, e: &Ed) {
 }
 
 pub fn edits_text(eds: &[Ed]) -> String {
+    use std::fmt::Write as _;
     let mut s = String::new();
     for e in eds {
-        match e {
-            Ed::Rm(i) => s.push_str(&format!("rm {i}\n")),
-            Ed::Set(i, l) => s.push_str(&format!("set {i}|{l}\n")),
-            Ed::Ins(i, l) => s.push_str(&format!("ins {i}|{l}\n")),
-        }
+        let _ = match e {
+            Ed::Rm(i) => writeln!(s, "rm {i}"),
+            Ed::Set(i, l) => writeln!(s, "set {i}|{l}"),
+            Ed::Ins(i, l) => writeln!(s, "ins {i}|{l}"),
+        };
     }
     s
 }
