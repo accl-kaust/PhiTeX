@@ -171,13 +171,19 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
             encode_list(v, &d.post, side),
             encode_list(v, &d.replace, side),
         ]),
-        Node::Whatsit(k) => v.list(vec![
-            i(v, T_WHATSIT),
-            side.whats
-                .get(*k as usize)
-                .copied()
-                .unwrap_or(ValueId::UNIT),
-        ]),
+        Node::Whatsit(k, dims) => {
+            let mut xs = vec![
+                i(v, T_WHATSIT),
+                side.whats
+                    .get(*k as usize)
+                    .copied()
+                    .unwrap_or(ValueId::UNIT),
+            ];
+            if let Some(s) = dims {
+                xs.extend([s.width, s.height, s.depth].map(|d| i(v, i64::from(d))));
+            }
+            v.list(xs)
+        }
         Node::Language { lang, lhm, rhm } => v.list(vec![
             i(v, T_LANGUAGE),
             i(v, i64::from(*lang)),
@@ -311,7 +317,13 @@ pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
         }),
         T_WHATSIT => {
             side.whats.push(xs.get(1).copied().unwrap_or(ValueId::UNIT));
-            Node::Whatsit(u32::try_from(side.whats.len() - 1).unwrap_or(0))
+            // a size: pdfTeX's `\pdfrefxform`, `\pdfrefximage`
+            let dims = (xs.len() >= 5).then(|| phitex_typeset::node::WhatsitSize {
+                width: g(2),
+                height: g(3),
+                depth: g(4),
+            });
+            Node::Whatsit(u32::try_from(side.whats.len() - 1).unwrap_or(0), dims)
         }
         T_LANGUAGE => Node::Language {
             lang: u16::try_from(g(1)).unwrap_or(0),

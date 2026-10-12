@@ -55,12 +55,8 @@ fn savepos() {
 }
 
 /// The PDF documents not yet byte-identical, compared by their streams
-/// (PDF-BACKEND-GAP): bera and vf use virtual fonts; ximage and ximage2
-/// place `\pdfrefximage` in vertical mode, where pdfTeX's page builder
-/// does not count the node's height (pdfTeX §1000: a whatsit) but
-/// `vpack` does, and phitex-typeset's whatsit has no dimensions (an
-/// empty box stands for it).
-const BACKEND_GAPS: &[&str] = &["bera", "vf", "ximage", "ximage2"];
+/// (PDF-BACKEND-GAP): bera and vf use virtual fonts.
+const BACKEND_GAPS: &[&str] = &["bera", "vf"];
 
 /// The `stream ... endstream` bodies of a PDF file.
 fn streams(b: &[u8]) -> Vec<Vec<u8>> {
