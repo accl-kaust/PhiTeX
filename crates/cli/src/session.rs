@@ -305,6 +305,7 @@ impl Session {
                     fixpoint: self.job.fixpoint,
                     prelude_jobname: self.job.engine.name.to_owned(),
                     prelude_bytes: cached.as_ref().map(|(_, b)| b.clone()),
+                    ..Options::default()
                 };
                 let b = Build::with(opts, prelude.as_deref(), &text);
                 self.store_prelude(&b, prelude.as_deref(), cached.map(|(k, _)| k));
