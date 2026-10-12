@@ -1080,7 +1080,19 @@ impl<'c, 'a> Run<'c, 'a> {
         let id = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
         let e = v.list(vec![v.str(need), id, what]);
         self.cx.contribute(v.field("needs"), v.seq_unit(e));
-        self.cx.claim(0);
+        // REDUCE-GAP: environment field pending (engine treats undefined
+        // as absent). A node waiting on a file the client has not
+        // supplied cannot stop the nodes after it; what they would run
+        // without the file is garbage (LaTeX's format without
+        // `expl3.ltx` loops for ever). It claims them until the file
+        // comes, so they wait unrun.
+        let mut n = 0;
+        if need == "file" {
+            while matches!(self.cx.following(n), Some((op, _)) if op == self.ops.exec) {
+                n += 1;
+            }
+        }
+        self.cx.claim(n);
         self.cx.set_effect(Effect::None);
         ValueId::UNIT
     }
