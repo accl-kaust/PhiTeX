@@ -164,6 +164,8 @@ pub(crate) mod group {
     pub const ADJUSTED_HBOX: i64 = 3;
     pub const VBOX: i64 = 4;
     pub const VTOP: i64 = 5;
+    pub const ALIGN: i64 = 6;
+    pub const NO_ALIGN: i64 = 7;
     pub const OUTPUT: i64 = 8;
     pub const MATH: i64 = 9;
     pub const DISC: i64 = 10;
@@ -348,6 +350,8 @@ pub(crate) fn prim(name: &str) -> Option<(&'static str, u8, i32)> {
         "\u{10FFFE}endgraf" => return Some(("\u{10FFFE}endgraf", cmd::PAR_END, 1)),
         "\u{10FFFE}notexpanded" => return Some(("\u{10FFFE}notexpanded", cmd::DONT_EXPAND, 0)),
         "\u{10FFFE}endv" => return Some(("\u{10FFFE}endv", cmd::IGNORE, 0)),
+        // internal: `align_peek` after a row or `\noalign` (§785)
+        "\u{10FFFE}alignpeek" => return Some(("\u{10FFFE}alignpeek", cmd::NO_ALIGN, 1)),
         _ => {}
     }
     prim_index().get(base).map(|&(c, h)| {
@@ -578,6 +582,9 @@ pub(crate) fn initex(v: &Values) -> Vec<(String, ValueId)> {
         "cs:\u{10FFFE}endgraf".to_owned(),
         v.list(vec![v.str("prim"), v.str("\u{10FFFE}endgraf")]),
     ));
+    for n in ["\u{10FFFE}alignpeek", "\u{10FFFE}cr"] {
+        out.push((format!("cs:{n}"), v.list(vec![v.str("prim"), v.str(n)])));
+    }
     out.extend(crate::pdfprim::initex(v));
     for &(n, _, _) in crate::etex::all_prims() {
         out.push((format!("cs:{n}"), v.list(vec![v.str("prim"), v.str(n)])));

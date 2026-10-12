@@ -9,7 +9,7 @@ use phitex_defuse::{Value, ValueId, Values};
 use phitex_typeset::glue::{Glue, GlueSet, GlueSign};
 use phitex_typeset::node::{
     BoxKind, BoxNode, Disc, GlueKind, GlueNode, Insert, KernKind, Ligature, List, MathKind, Node,
-    Rule,
+    Rule, Unset,
 };
 
 use crate::val::{glue_of, glue_value, int_of, list_of};
@@ -28,6 +28,9 @@ pub(crate) const T_MATH: i64 = 10;
 pub(crate) const T_GLUE: i64 = 11;
 pub(crate) const T_KERN: i64 = 12;
 pub(crate) const T_PENALTY: i64 = 13;
+/// `[T_UNSET, span, width, height, depth, stretch, its order, shrink,
+/// its order, list]` (dimensions where a box has them).
+pub(crate) const T_UNSET: i64 = 14;
 /// "Remove the last node of the list" (`\unskip` and its kind, §1105).
 pub(crate) const T_DELETE: i64 = 99;
 /// A point where tex.web calls `build_page` (§994).
@@ -196,7 +199,18 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
         ]),
         Node::Kern(w, k) => v.list(vec![i(v, T_KERN), i(v, i64::from(*w)), i(v, kern_code(*k))]),
         Node::Penalty(p) => v.list(vec![i(v, T_PENALTY), i(v, i64::from(*p))]),
-        Node::Unset(_) => v.list(vec![i(v, T_PENALTY), i(v, 0)]),
+        Node::Unset(u) => v.list(vec![
+            i(v, T_UNSET),
+            i(v, i64::from(u.span_count)),
+            i(v, i64::from(u.width)),
+            i(v, i64::from(u.height)),
+            i(v, i64::from(u.depth)),
+            i(v, i64::from(u.stretch)),
+            i(v, u.stretch_order as i64),
+            i(v, i64::from(u.shrink)),
+            i(v, u.shrink_order as i64),
+            encode_list(v, &u.list, side),
+        ]),
     }
 }
 
@@ -232,6 +246,7 @@ pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
     let xs = match &*v.get(x) {
         Value::List(xs) => xs.clone(),
@@ -322,6 +337,19 @@ pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
         }),
         T_KERN => Node::Kern(g(1), kern_kind(i64::from(g(2)))),
         T_PENALTY => Node::Penalty(g(1)),
+        T_UNSET => Node::Unset(Unset {
+            span_count: u16::try_from(g(1)).unwrap_or(0),
+            width: g(2),
+            height: g(3),
+            depth: g(4),
+            stretch: g(5),
+            stretch_order: crate::val::order(i64::from(g(6))),
+            shrink: g(7),
+            shrink_order: crate::val::order(i64::from(g(8))),
+            list: xs
+                .get(9)
+                .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
+        }),
         _ => return None,
     })
 }
