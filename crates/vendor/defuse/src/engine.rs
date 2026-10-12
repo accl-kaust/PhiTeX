@@ -4719,11 +4719,14 @@ impl Engine {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn set_children(&mut self, x: Slot, specs: &[(OpId, ValueId)], heights: &[u32], provisional: bool) {
+    fn set_children(&mut self, x: Slot, specs: &[(OpId, ValueId)], follows: usize, heights: &[u32], provisional: bool) {
         let old = self.aux_of(x).map_or_else(Default::default, |a| a.children.clone());
         if old.is_empty() && specs.is_empty() {
             return;
         }
+        // Continuations are the last `follows` specs: siblings of `x` in the
+        // tree (its own depth), owned by its run like children.
+        let follows_at = specs.len().saturating_sub(follows);
         let ids = self.child_ids(x, specs);
         let old_ids: Vec<NodeId> = old.iter().map(|&c| self.n(c).id).collect();
         let body = self.aux_of(x).and_then(|a| a.body);
@@ -4740,7 +4743,10 @@ impl Engine {
         let placed = match (anchor, old.first()) {
             (Some(a), Some(&c)) => self.order_prev(unit, self.n(c).label).is_some_and(|(_, p)| p == a),
             _ => true,
-        };
+        } && old
+            .iter()
+            .enumerate()
+            .all(|(i, &c)| (self.n(c).parent != x) == (i >= follows_at));
         if old_ids == ids && placed {
             if !provisional {
                 for &c in &old {
@@ -4820,17 +4826,18 @@ impl Engine {
         }
         for i in pre..ids.len() - suf {
             let (op, args) = specs[i];
+            let follow = i >= follows_at;
             let c = self.create_raw(
                 unit,
                 after,
                 Some(labels[i - pre]),
                 op,
                 args,
-                parent,
+                if follow { self.n(x).parent } else { parent },
                 ids[i],
                 provisional,
             );
-            if body.is_some() {
+            if body.is_some() && !follow {
                 // Body nodes belong to the application.
                 self.nm(c).parent = x;
             }
@@ -5346,7 +5353,7 @@ impl Engine {
         }
         {
             span!(Children);
-            self.set_children(x, &r.children, &r.child_heights, provisional);
+            self.set_children(x, &r.children, r.follows, &r.child_heights, provisional);
         }
         // A stream claim may have read its own previous unfolding, which
         // the line above just replaced: those reads are gone.
@@ -5544,10 +5551,12 @@ impl Engine {
         let old = self.aux_of(x).map_or_else(Default::default, |a| a.children.clone());
         let old_specs: Vec<(OpId, ValueId)> = old.iter().map(|&c| (self.n(c).op, self.n(c).args)).collect();
         let mut specs = r.children.clone();
+        let mut follows = r.follows;
         if specs.len() < old_specs.len() && old_specs[..specs.len()] == specs[..] {
             specs = old_specs;
+            follows = old.iter().filter(|&&c| self.n(c).parent != x).count();
         }
-        self.set_children(x, &specs, &[], false);
+        self.set_children(x, &specs, follows, &[], false);
         if let Some(body) = self.aux_of(x).and_then(|a| a.body) {
             for &(f, v) in &r.env {
                 self.set_env_slot(body, f, v);
@@ -6416,6 +6425,9 @@ pub struct RunResult {
     pub(crate) uses: Vec<Use>,
     pub(crate) defs: Vec<(Field, ValueId, bool)>,
     pub(crate) children: Vec<(OpId, ValueId)>,
+    /// How many at the end of `children` are continuations (at the node's
+    /// own depth).
+    pub(crate) follows: usize,
     /// The starting height of each child (see [`Engine::child_heights`]),
     /// or empty when not computed.
     pub(crate) child_heights: Vec<u32>,
