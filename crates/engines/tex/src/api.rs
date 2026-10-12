@@ -54,6 +54,10 @@ pub struct Options {
     /// take; past it the build ends with the engine's deadline error,
     /// naming what waits, in the log. `None`: no limit.
     pub time_limit: Option<std::time::Duration>,
+    /// The threads the engine's batches run on: `None` takes
+    /// `PHITEX_THREADS`, else the available parallelism; `Some(1)` runs
+    /// them in order. The output is the same at any count.
+    pub threads: Option<usize>,
 }
 
 impl Default for Options {
@@ -68,6 +72,7 @@ impl Default for Options {
             prelude_jobname: "texput".to_owned(),
             prelude_bytes: None,
             time_limit: Some(std::time::Duration::from_secs(600)),
+            threads: None,
         }
     }
 }
@@ -357,9 +362,32 @@ pub struct Stats {
     /// Nodes that waited on a value not known yet, and stops.
     pub pending_waits: u64,
     pub stops: u64,
+    /// The executor's threads.
+    pub threads: usize,
+    /// The evaluate calls' wall time, summed (zero without a clock).
+    pub wall: std::time::Duration,
+    /// The node runs' time, summed over every job (zero without a
+    /// clock): parallelism is `busy / wall`.
+    pub busy: std::time::Duration,
+    /// The most jobs that ran at once.
+    pub peak_running: usize,
+    /// The longest chain of dependent waits among the live nodes after
+    /// the last evaluation (the engine's `critical_path`), in nodes.
+    pub critical_path: Option<usize>,
 }
 
 impl Stats {
+    /// The executor's counters of one evaluation begun at `c0`.
+    fn add_exec(&mut self, ex: &crate::exec::Threads, c0: Option<u64>, eng: &Engine) {
+        if let (Some(a), Some(b)) = (c0, crate::exec::clock().now()) {
+            self.wall += std::time::Duration::from_nanos(b.saturating_sub(a));
+        }
+        self.threads = ex.n;
+        self.busy += ex.busy();
+        self.peak_running = self.peak_running.max(ex.peak());
+        self.critical_path = usize::try_from(eng.critical_path()).ok();
+    }
+
     fn add(&mut self, r: &Report) {
         self.nodes_run += r.nodes_run;
         self.runs += r.runs;
@@ -390,10 +418,12 @@ struct Graph {
     /// The files the job writes and reads back: loop-back fields
     /// (`fixpoint`), or absent before the job writes them.
     written: Vec<String>,
+    /// The executor's threads ([`Options::threads`]).
+    threads: usize,
 }
 
 impl Graph {
-    fn new(time: Option<std::time::Duration>) -> Graph {
+    fn new(time: Option<std::time::Duration>, threads: Option<usize>) -> Graph {
         let mut eng = Engine::new();
         eng.set_limits(phitex_defuse::Limits {
             // a node's children are bounded by the text it reads (one per
@@ -433,6 +463,7 @@ impl Graph {
             queries: Vec::new(),
             absent: Vec::new(),
             written: Vec::new(),
+            threads: crate::exec::threads(threads),
         }
     }
 
@@ -522,14 +553,17 @@ impl Graph {
 
     /// Evaluates; when the graph asks for files, supplies them and
     /// evaluates again.
+    #[allow(clippy::too_many_lines)]
     fn settle(&mut self, unit: UnitId, finder: &Finder, stats: &mut Stats, fixpoint: bool) {
         let needs_f = self.eng.values().field("needs");
         loop {
             let t0 = std::time::Instant::now();
-            let r = match self.eng.evaluate(
-                &mut phitex_defuse::Greedy::default(),
-                &mut crate::exec::Threads::from_env(),
-            ) {
+            let mut ex = crate::exec::Threads::new(self.threads);
+            let c0 = crate::exec::clock().now();
+            let r = match self
+                .eng
+                .evaluate(&mut phitex_defuse::Greedy::default(), &mut ex)
+            {
                 Ok(r) => r,
                 Err(e) => panic!("{}", self.diagnose(&e)),
             };
@@ -537,6 +571,7 @@ impl Graph {
                 eprintln!("round: {:?}, {} nodes run", t0.elapsed(), r.nodes_run);
             }
             stats.add(&r);
+            stats.add_exec(&ex, c0, &self.eng);
             let opened = self.opened(unit);
             let mut asked = false;
             // a file supplied from the finder that the job turns out to
@@ -697,7 +732,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             return c;
         }
     }
-    let mut g = Graph::new(opts.time_limit);
+    let mut g = Graph::new(opts.time_limit, opts.threads);
     let unit = g.eng.new_unit();
     let mut env: Vec<(String, ValueId)> = crate::val::initex(g.eng.values());
     for (name, x) in &env {
@@ -799,7 +834,7 @@ impl Build {
         let cached = prelude_env(prelude, &opts);
         let env = cached.env.clone();
         let t1 = t0.elapsed();
-        let mut g = Graph::new(opts.time_limit);
+        let mut g = Graph::new(opts.time_limit, opts.threads);
         let unit = g.eng.new_unit();
         {
             let v = g.eng.values();
