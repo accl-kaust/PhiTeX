@@ -3,7 +3,7 @@
 //! timing each and checking the incremental result against a cold replay.
 //!
 //! `cargo run --release --example replay -- TRACE.jsonl [EDITS.jsonl]
-//!     [--threads N] [--spec off|predicted|all] [--check] [--check-every K]
+//!     [--threads N] [--spec off|predicted|all] [--check] [--check-every K] [--edits N]
 //!     [--env FIELD=INT]...`
 //! `cargo run --release --example replay -- --from-toy N [OUT.jsonl]`
 //!     writes a trace derived from the generated N-line toy program (and
@@ -28,6 +28,8 @@ struct Opts {
     check: bool,
     check_every: usize,
     env: Vec<(String, i64)>,
+    /// At most this many edits (0 = the cold evaluation only).
+    max_edits: usize,
 }
 
 fn eval(eng: &mut Engine, o: &Opts) -> Result<Report, String> {
@@ -87,6 +89,7 @@ fn main() {
         check: false,
         check_every: 0,
         env: Vec::new(),
+        max_edits: usize::MAX,
     };
     let mut paths = Vec::new();
     let mut from_toy: Option<usize> = None;
@@ -103,6 +106,7 @@ fn main() {
             }
             "--check" => o.check = true,
             "--check-every" => o.check_every = args.next().and_then(|s| s.parse().ok()).expect("--check-every K"),
+            "--edits" => o.max_edits = args.next().and_then(|s| s.parse().ok()).expect("--edits N"),
             "--env" => {
                 let kv = args.next().expect("--env FIELD=INT");
                 let (f, x) = kv.split_once('=').expect("--env FIELD=INT");
@@ -197,6 +201,11 @@ fn main() {
         eng.live_nodes(),
         eng.critical_path()
     );
+    if defuse::obs::enabled() {
+        // Profiling builds: the engine's counters and spans for the cold run.
+        print!("probes (cold evaluation):\n{}", defuse::obs::snapshot());
+        defuse::obs::reset();
+    }
     let causes = trace::causes(&eng, &doc);
     if !causes.is_empty() {
         let items: Vec<String> = causes
@@ -216,7 +225,7 @@ fn main() {
         ("delete", Vec::new()),
     ];
     let mut mismatches = 0;
-    for (k, EditLine { edit, expect_reached }) in edits.iter().enumerate() {
+    for (k, EditLine { edit, expect_reached }) in edits.iter().take(o.max_edits).enumerate() {
         let kind = match edit {
             Edit::ChangeWrites(..) => 0,
             Edit::ChangeReads(..) => 1,
@@ -233,11 +242,17 @@ fn main() {
             std::process::exit(1);
         });
         let wall = t0.elapsed();
-        if let Some(want) = expect_reached
-            && *want != r.nodes_run
+        // The trace's number is an upper bound (no cutoff): more than it is
+        // a finding; the ratio measures the cutoff.
+        if let Some(bound) = expect_reached
+            && r.nodes_run > *bound
         {
             mismatches += 1;
-            println!("edit {}: {} nodes ran, the trace expected {want}", k + 1, r.nodes_run);
+            println!(
+                "edit {}: {} nodes ran, above the trace's bound of {bound}",
+                k + 1,
+                r.nodes_run
+            );
         }
         stats[kind].1.push((wall, r.nodes_run, *expect_reached));
         if o.check_every > 0 && (k + 1) % o.check_every == 0 {
@@ -246,15 +261,37 @@ fn main() {
                 eprintln!("edit {}: cold replay failed: {e}", k + 1);
                 std::process::exit(1);
             });
-            if doc.result(&eng) != d2.result(&e2) {
+            let (a, b) = (doc.result(&eng), d2.result(&e2));
+            if a != b {
                 eprintln!("edit {}: incremental result differs from a cold replay", k + 1);
+                let diff: Vec<usize> = (0..a.len().min(b.len())).filter(|&i| a[i] != b[i]).collect();
+                eprintln!(
+                    "{} of {} steps differ (lengths {} and {})",
+                    diff.len(),
+                    a.len(),
+                    a.len(),
+                    b.len()
+                );
+                for &i in diff.iter().take(8) {
+                    let show = |e: &Engine, d: &Doc| {
+                        e.output(d.nodes[i])
+                            .map_or_else(|| "none".to_string(), |v| e.values().render(v))
+                    };
+                    eprintln!(
+                        "  step {} ({}): incremental {} | cold {}",
+                        i,
+                        doc.steps[i].id,
+                        show(&eng, &doc),
+                        show(&e2, &d2)
+                    );
+                }
                 std::process::exit(1);
             }
         }
     }
     println!(
         "{:<14} {:>5} {:>11} {:>11} {:>8} {:>10}",
-        "edit", "n", "p50", "p99", "run~", "expected~"
+        "edit", "n", "p50", "p99", "run~", "bound~"
     );
     for (name, s) in &mut stats {
         if s.is_empty() {
@@ -276,7 +313,7 @@ fn main() {
         );
     }
     if mismatches > 0 {
-        println!("{mismatches} edits ran a different number of nodes than the trace expected");
+        println!("{mismatches} edits ran more nodes than the trace's bound");
     }
     if o.check_every > 0 {
         println!("incremental results equal cold replays at every checked edit");
