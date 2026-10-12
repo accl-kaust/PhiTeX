@@ -154,12 +154,20 @@ impl Operation for Put {
                 Err(_) => {}
             }
         }
+        let mut names = Vec::new();
         for e in list_of(v, a(0)) {
             let xs = list_of(v, e);
             let name = xs.first().map(|&n| str_of(v, n)).unwrap_or_default();
             let g = xs.get(2).is_some_and(|&g| int_of(v, g) != 0);
             let val = xs.get(1).copied().unwrap_or(ValueId::UNIT);
-            cx.define_with(v.field(&name), val, if g { Locality::Global } else { Locality::Local });
+            let f = v.field(&name);
+            names.push(f.0);
+            cx.define_with(f, val, if g { Locality::Global } else { Locality::Local });
+        }
+        // the fields defined, for the prelude's export (as `Run::finish`)
+        if !names.is_empty() {
+            let s = v.seq_unit(v.list(names));
+            cx.contribute(v.field("defs"), s);
         }
         if !carry.is_empty() {
             cx.define_with(v.field("lvlfix"), v.list(fix), Locality::Local);

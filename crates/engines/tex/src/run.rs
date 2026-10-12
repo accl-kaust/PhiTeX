@@ -102,6 +102,8 @@ pub(crate) struct Run<'c, 'a> {
     /// In a trial (`measure_tail`): the scope kind its own commands
     /// opened and closed so far, in place of the node's.
     pub trial_kind: Option<Option<ValueId>>,
+    /// In a trial, the groups it opens get list ids of their own.
+    pub trial_ids: Option<std::cell::Cell<i64>>,
     /// While looking for the command's first token: a node's command
     /// begins in its own text (the next sibling's begins in its own).
     pub no_pull: bool,
@@ -135,6 +137,7 @@ impl<'c, 'a> Run<'c, 'a> {
             top: false,
             claim_rest: false,
             trial_kind: None,
+            trial_ids: None,
             no_pull: false,
             own: FxHashMap::default(),
             defs: Vec::new(),
@@ -157,7 +160,14 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     pub(crate) fn node_raw(&self) -> i64 {
-        i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes())
+        let id = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+        match &self.trial_ids {
+            Some(c) => {
+                c.set(c.get() + 1);
+                id ^ c.get().wrapping_mul(0x9E37_79B9_7F4A_7C15_u64 as i64)
+            }
+            None => id,
+        }
     }
 
     // ------------------------------------------------------------ fields
@@ -823,16 +833,30 @@ impl<'c, 'a> Run<'c, 'a> {
         let snap = self.snapshot();
         let before = self.pulled;
         let mut steps = 0u32;
+        self.trial_ids = Some(std::cell::Cell::new(0));
         let res: R<()> = (|| {
-            while self.has_input() && steps < 100_000 {
+            // the tokens' extent: the trial ends when they are read (the
+            // text after them is the siblings' own); `\end` ends it too,
+            // since its repetitions wait on the page builder
+            let toks_left =
+                |r: &Self| r.frames.iter().any(|f| matches!(f, Frame::Toks(t, p) if *p < t.len()));
+            while toks_left(self) && steps < 100_000 {
                 steps += 1;
                 self.effect = phitex_defuse::Effect::None;
                 self.command()?;
+                if steps < 30 && std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+                    let md = self.mode()?;
+                    eprintln!("    trial {:?} mode {} group {} lid {}", self.cur.tok, md.m, md.group, md.lid);
+                }
                 self.trial_scope()?;
+                if self.cur.cmd == crate::val::cmd::STOP {
+                    break;
+                }
             }
             Ok(())
         })();
         self.trial_kind = None;
+        self.trial_ids = None;
         let after = self.pulled;
         if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
             let r = match &res {
