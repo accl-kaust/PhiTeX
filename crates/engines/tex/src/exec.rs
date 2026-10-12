@@ -18,9 +18,10 @@
 //! Which thread: the evaluation (`Build::with`, `Build::edit`) blocks in
 //! `for_each` until a batch has run, so on wasm32 it must run in a
 //! worker, never on the browser's main thread (which may not block).
-//! Natively any thread may run it. Threads come from `PHITEX_THREADS`,
-//! else the available parallelism (on wasm32: `navigator.hardwareConcurrency`
-//! as the host passes it through `PHITEX_THREADS`, else 1). Workspace
+//! Natively any thread may run it. The thread count is
+//! `Options::threads`, else `PHITEX_THREADS`, else the available
+//! parallelism; on wasm32 the host registers its worker callback before
+//! the first build (without it the build runs in order). Workspace
 //! rule: no `unsafe`; borrowed closures reach the workers through
 //! rayon's scoped API or `std::thread::scope`.
 
@@ -47,22 +48,19 @@ pub fn set_spawn_worker(f: SpawnWorker) {
 /// The executor of an evaluation.
 pub(crate) struct Threads(pub usize);
 
-impl Threads {
-    /// `PHITEX_THREADS`, else the available parallelism; 1 where this
-    /// target cannot run threads.
-    pub(crate) fn from_env() -> Threads {
-        static N: OnceLock<usize> = OnceLock::new();
-        Threads(*N.get_or_init(|| {
-            if !threads_possible() {
-                return 1;
-            }
-            std::env::var("PHITEX_THREADS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .filter(|&n| n > 0)
-                .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
-        }))
+/// The thread count: `given`, else `PHITEX_THREADS`, else the available
+/// parallelism; 1 where this target cannot run threads.
+pub(crate) fn threads(given: Option<usize>) -> usize {
+    if !threads_possible() {
+        return 1;
     }
+    given.filter(|&n| n > 0).unwrap_or_else(|| {
+        std::env::var("PHITEX_THREADS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
+    })
 }
 
 /// Whether this target can run workers at all.
@@ -118,10 +116,7 @@ fn parallel(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) 
     use rayon::prelude::*;
     let pool = pool(threads);
     pool.install(|| {
-        (0..n)
-            .into_par_iter()
-            .with_min_len(grain)
-            .for_each(f);
+        (0..n).into_par_iter().with_min_len(grain).for_each(f);
     });
 }
 
