@@ -3,23 +3,25 @@
 // the Overleaf extension and VS Code show the same), here on `phitex
 // watch`, which builds from disk: the session in its remote mode
 // (Options.remote) asks the watch for the pages over a WebSocket, as the
-// extension's session asks its core (CoreReq ops: pages, png, status,
-// origins; and the watch's own: outline, diagnostics, source), and shows
+// extension's session asks its core (CoreReq ops: pages, status, origins;
+// and the watch's own: diagnostics, source), and shows
 // what the watch tells (page, progress, diagnostics, settled, superseded,
 // sync). The page's keys, the contents beside the pages and the problems
 // are the panel's (PanelOptions.keys, .outline).
+//
+// The pages are drawn here, with MuPDF (viewer/src/mupdf.ts), from the
+// watch's doc.pdf: the `png` and `outline` requests are answered in the
+// page, the PDF loaded again after each build.
 //
 // Bundled by scripts/viewer-bundle.sh into viewer.js.
 
 import { Panel } from "../../../viewer/src/panel.ts";
 import { PreviewSession, type CoreEvent, type CoreRes, type CoreTransport, type EditorHost } from "../../../viewer/src/session.ts";
-import { setFontBase } from "../../../viewer/src/page2.ts";
+import { MupdfDoc, toCanvas } from "../../../viewer/src/mupdf.ts";
 import { DiffControls, LATEXDIFF_LOOK, type DiffRunner } from "../../../viewer/src/compare.ts";
 import type { DiffLook } from "../../../viewer/src/panel.ts";
 import { COMMITS_CSS, Commits, type Commit } from "../../../viewer/src/commits.ts";
 
-// (the text fonts, from the server)
-setFontBase(new URL("fonts/", location.href).href);
 
 /** The watch's core, over a WebSocket: requests answered in order, events pushed; joined again when it drops. */
 class Socket implements CoreTransport {
@@ -64,7 +66,69 @@ class Socket implements CoreTransport {
   }
 }
 
+/**
+ * The watch's core with the pages drawn here: `png` and `outline` answered
+ * by MuPDF from doc.pdf (loaded again after each `settled`), the rest
+ * asked of the watch.
+ */
+class Pages implements CoreTransport {
+  private sock: Socket;
+  private mupdf: Promise<any> | null = null;
+  private doc: MupdfDoc | null = null;
+  /** The builds settled, and the one the open PDF is of. */
+  private version = 0;
+  private docVersion = -1;
+  private loading: Promise<MupdfDoc | null> | null = null;
+
+  constructor(sock: Socket) {
+    this.sock = sock;
+    sock.onEvent((e) => {
+      if (e.event === "settled") this.version++;
+    });
+  }
+
+  private async open(): Promise<MupdfDoc | null> {
+    if (this.doc && this.docVersion === this.version) return this.doc;
+    if (this.loading) return this.loading;
+    const v = this.version;
+    this.loading = (async () => {
+      // (MuPDF's module, from the watch, its .wasm beside it)
+      this.mupdf ??= import(new URL("mupdf/mupdf.js", location.href).href);
+      const m = await this.mupdf;
+      const r = await fetch(new URL("doc.pdf", location.href), { cache: "no-store" });
+      if (!r.ok) return null;
+      const pdf = new Uint8Array(await r.arrayBuffer());
+      this.doc?.destroy();
+      this.doc = new MupdfDoc(m, pdf);
+      this.docVersion = v;
+      return this.doc;
+    })().finally(() => (this.loading = null));
+    return this.loading;
+  }
+
+  async request(op: object): Promise<CoreRes> {
+    const o = op as { op: string; page?: number };
+    if (o.op === "png") {
+      const d = await this.open().catch(() => null);
+      // (sharp at 125% zoom on this screen; a closer zoom scales the canvas)
+      const drawn = d?.draw(o.page ?? 0, (96 / 72) * (window.devicePixelRatio || 1) * 1.25);
+      if (!drawn) return { ok: false, json: { error: "no such page" } };
+      return { ok: true, canvas: toCanvas(drawn), size: [drawn.w, drawn.h], links: drawn.links };
+    }
+    if (o.op === "outline") {
+      const d = await this.open().catch(() => null);
+      return { ok: true, json: { items: d?.outline() ?? [] } };
+    }
+    return this.sock.request(op);
+  }
+
+  onEvent(cb: (e: CoreEvent) => void): void {
+    this.sock.onEvent(cb);
+  }
+}
+
 const sock = new Socket();
+const pages = new Pages(sock);
 /** A place in a file (1-based line and column): the watch opens it in the editor (`--editor`). */
 const source = (file: string, line: number, col = 1) => void sock.request({ op: "source", file, line, col });
 
@@ -83,7 +147,6 @@ const panel = new Panel(
     onMain: () => {},
     onReload: () => void session.resync(),
     onClean: () => void session.resync(),
-    onFormat: () => {},
     onGoto: (file, line) => source(file, line),
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
   },
@@ -105,7 +168,6 @@ const panel = new Panel(
     },
   },
   {
-    pdfjs: false,
     outline: true,
     keys: true,
     header: true,
@@ -135,8 +197,7 @@ panel.shown(true);
 
 const host: EditorHost = { loadProject: async () => ({}), onOpen() {}, onChanges() {} };
 // (byte offsets of the file on disk: the watch reads it to find the line)
-const session = new PreviewSession(host, sock, panel, {
-  format: "vector",
+const session = new PreviewSession(host, pages, panel, {
   checkEveryMs: 0,
   remote: { source: (file, start, end) => void sock.request({ op: "source", file, start, end }) },
 });
