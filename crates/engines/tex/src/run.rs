@@ -214,8 +214,15 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn set_f(&mut self, f: Field, val: ValueId, global: bool) {
         self.own.insert(f, Some(val));
         self.defs.retain(|d| d.0 != f);
-        self.defs
-            .push((f, val, if global { Locality::Global } else { Locality::Local }));
+        self.defs.push((
+            f,
+            val,
+            if global {
+                Locality::Global
+            } else {
+                Locality::Local
+            },
+        ));
     }
 
     pub(crate) fn contribute(&mut self, name: &str, val: ValueId) {
@@ -263,7 +270,10 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn set_cur(&mut self, tok: Tok) -> R<()> {
         let mean = self.mean_of(&tok)?;
         let (c, h) = match (&tok, &mean) {
-            (Tok::C(_), _) if !tok.is_cs_or_active() => (tok.cat().unwrap_or(0), i32::try_from(tok.chr()).unwrap_or(0)),
+            (Tok::C(_), _) if !tok.is_cs_or_active() => (
+                tok.cat().unwrap_or(0),
+                i32::try_from(tok.chr()).unwrap_or(0),
+            ),
             _ => mean.cmd_chr(),
         };
         self.cur = Cur {
@@ -336,11 +346,15 @@ impl<'c, 'a> Run<'c, 'a> {
     /// continues this line, is a letter (§356: a control word's name
     /// goes on).
     fn next_continues_name(&mut self) -> R<bool> {
-        let Some(Frame::Src(last)) = self.frames.back() else { return Ok(false) };
+        let Some(Frame::Src(last)) = self.frames.back() else {
+            return Ok(false);
+        };
         if last.ends {
             return Ok(false);
         }
-        let Some((op, args)) = self.cx.following(self.pulled) else { return Ok(false) };
+        let Some((op, args)) = self.cx.following(self.pulled) else {
+            return Ok(false);
+        };
         if op != self.ops.exec {
             return Ok(false);
         }
@@ -355,7 +369,9 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Whether the next sibling's text continues this line.
     fn next_is_continuation(&self) -> bool {
-        let Some(Frame::Src(last)) = self.frames.back() else { return false };
+        let Some(Frame::Src(last)) = self.frames.back() else {
+            return false;
+        };
         if last.ends || self.frames.len() != 1 {
             return false;
         }
@@ -415,7 +431,7 @@ impl<'c, 'a> Run<'c, 'a> {
             // §362: a line is counted as it begins
             let starts = s.starts;
             if starts {
-                    self.lines_entered += 1;
+                self.lines_entered += 1;
                 let line = self.v.int(1);
                 self.contribute("lines", line);
             }
@@ -477,7 +493,7 @@ impl<'c, 'a> Run<'c, 'a> {
                         return Ok(match state {
                             MID_LINE => Some(Tok::ch(10, 32)), // §348
                             SKIP_BLANKS => break,              // §350
-                            _ => Some(Tok::cs("par")),          // §351
+                            _ => Some(Tok::cs("par")),         // §351
                         });
                     }
                     14 => {
@@ -599,7 +615,11 @@ impl<'c, 'a> Run<'c, 'a> {
             let c0 = self.buf(k);
             let mut cat = self.cat(c0)?;
             k += 1;
-            self.set_state(if cat == 11 || cat == 10 { SKIP_BLANKS } else { MID_LINE });
+            self.set_state(if cat == 11 || cat == 10 {
+                SKIP_BLANKS
+            } else {
+                MID_LINE
+            });
             if cat == 11 && k < limit_plus {
                 // §356
                 loop {
@@ -617,7 +637,9 @@ impl<'c, 'a> Run<'c, 'a> {
                     k -= 1;
                 }
                 if k > loc + 1 {
-                    let name: String = (loc..k).map(|i| char::from_u32(self.buf(i)).unwrap_or('?')).collect();
+                    let name: String = (loc..k)
+                        .map(|i| char::from_u32(self.buf(i)).unwrap_or('?'))
+                        .collect();
                     if let Some(Frame::Src(s)) = self.frames.front_mut() {
                         s.loc = k;
                     }
@@ -630,7 +652,9 @@ impl<'c, 'a> Run<'c, 'a> {
             if let Some(Frame::Src(s)) = self.frames.front_mut() {
                 s.loc = loc + 1;
             }
-            return Ok(Tok::S(Rc::from(char::from_u32(c).unwrap_or('?').to_string())));
+            return Ok(Tok::S(Rc::from(
+                char::from_u32(c).unwrap_or('?').to_string(),
+            )));
         }
     }
 
@@ -827,7 +851,11 @@ impl<'c, 'a> Run<'c, 'a> {
     /// are claimed, so the expansion's children find them in their own
     /// text (a child never reads past its parent).
     pub(crate) fn measure_tail(&mut self) -> R<()> {
-        if !self.frames.iter().any(|f| matches!(f, Frame::Toks(t, p) if *p < t.len())) {
+        if !self
+            .frames
+            .iter()
+            .any(|f| matches!(f, Frame::Toks(t, p) if *p < t.len()))
+        {
             return Ok(());
         }
         let snap = self.snapshot();
@@ -838,15 +866,21 @@ impl<'c, 'a> Run<'c, 'a> {
             // the tokens' extent: the trial ends when they are read (the
             // text after them is the siblings' own); `\end` ends it too,
             // since its repetitions wait on the page builder
-            let toks_left =
-                |r: &Self| r.frames.iter().any(|f| matches!(f, Frame::Toks(t, p) if *p < t.len()));
+            let toks_left = |r: &Self| {
+                r.frames
+                    .iter()
+                    .any(|f| matches!(f, Frame::Toks(t, p) if *p < t.len()))
+            };
             while toks_left(self) && steps < 100_000 {
                 steps += 1;
                 self.effect = phitex_defuse::Effect::None;
                 self.command()?;
                 if steps < 30 && std::env::var_os("PHITEX_TEX_TRACE").is_some() {
                     let md = self.mode()?;
-                    eprintln!("    trial {:?} mode {} group {} lid {}", self.cur.tok, md.m, md.group, md.lid);
+                    eprintln!(
+                        "    trial {:?} mode {} group {} lid {}",
+                        self.cur.tok, md.m, md.group, md.lid
+                    );
                 }
                 self.trial_scope()?;
                 if self.cur.cmd == crate::val::cmd::STOP {
@@ -866,7 +900,11 @@ impl<'c, 'a> Run<'c, 'a> {
                 Err(Halt::File(f)) => format!("file {f}"),
                 Err(Halt::Fatal) => "fatal".to_owned(),
             };
-            eprintln!("  tail: {steps} steps, pulled {}, {r}, top {}", after - before, self.top);
+            eprintln!(
+                "  tail: {steps} steps, pulled {}, {r}, top {}",
+                after - before,
+                self.top
+            );
         }
         self.restore(snap);
         match res {
@@ -1016,7 +1054,8 @@ struct Snapshot {
 }
 
 fn is_hex(c: u32) -> bool {
-    (u32::from(b'0')..=u32::from(b'9')).contains(&c) || (u32::from(b'a')..=u32::from(b'f')).contains(&c)
+    (u32::from(b'0')..=u32::from(b'9')).contains(&c)
+        || (u32::from(b'a')..=u32::from(b'f')).contains(&c)
 }
 
 fn hex(c: u32) -> u32 {
@@ -1031,9 +1070,13 @@ fn hex(c: u32) -> u32 {
 pub(crate) fn decode_frames(v: &Values, args: &[ValueId]) -> Vec<Frame> {
     let mut out = Vec::new();
     let Some(&l) = args.first() else { return out };
-    let Value::List(fs) = &*v.get(l) else { return out };
+    let Value::List(fs) = &*v.get(l) else {
+        return out;
+    };
     for &f in fs.iter() {
-        let Value::List(xs) = &*v.get(f) else { continue };
+        let Value::List(xs) = &*v.get(f) else {
+            continue;
+        };
         match xs.first().map(|&t| str_of(v, t)).as_deref() {
             Some("t") => {
                 let toks = crate::val::toks_of(v, xs.get(1).copied());
@@ -1092,7 +1135,13 @@ pub(crate) fn line_args(v: &Values, line: &str) -> Vec<ValueId> {
         end -= 1;
     }
     let text: String = bytes[..end].iter().map(|&b| char::from(b)).collect();
-    let frame = v.list(vec![v.str("s"), v.str(&text), v.int(i64::from(NEW_LINE)), v.int(-2), v.int(3)]);
+    let frame = v.list(vec![
+        v.str("s"),
+        v.str(&text),
+        v.int(i64::from(NEW_LINE)),
+        v.int(-2),
+        v.int(3),
+    ]);
     vec![v.list(vec![frame]), v.int(1)]
 }
 
@@ -1107,10 +1156,20 @@ pub(crate) fn slice_args(v: &Values, text: &str, starts_line: bool) -> Vec<Value
             Some(k) => (&rest[..k], true, &rest[k + 1..]),
             None => (rest, false, ""),
         };
-        let seg: String = if ends { seg.trim_end_matches([' ', '\t', '\r']).to_owned() } else { seg.to_owned() };
+        let seg: String = if ends {
+            seg.trim_end_matches([' ', '\t', '\r']).to_owned()
+        } else {
+            seg.to_owned()
+        };
         let state = if starts { NEW_LINE } else { MID_LINE };
         let flags = i64::from(starts) | (i64::from(ends) << 1);
-        frames.push(v.list(vec![v.str("s"), v.str(&seg), v.int(i64::from(state)), v.int(-2), v.int(flags)]));
+        frames.push(v.list(vec![
+            v.str("s"),
+            v.str(&seg),
+            v.int(i64::from(state)),
+            v.int(-2),
+            v.int(flags),
+        ]));
         starts = ends;
         rest = next;
     }

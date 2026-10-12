@@ -10,8 +10,9 @@ use phitex_typeset::glue::Glue;
 use crate::run::{Frame, Halt, R, Run, Src};
 use crate::scan::IVal;
 use crate::val::{
-    CAT_CODE_BASE, DEL_CODE_BASE, MATH_CODE_BASE, Macro, Mean, OUTPUT_ROUTINE_LOC, SF_CODE_BASE, TOKS_BASE, Tok,
-    cmd, glue_of, glue_value, int_of, list_of, quantity_field, str_of, toks_of, toks_value,
+    CAT_CODE_BASE, DEL_CODE_BASE, MATH_CODE_BASE, Macro, Mean, OUTPUT_ROUTINE_LOC, SF_CODE_BASE,
+    TOKS_BASE, Tok, cmd, glue_of, glue_value, int_of, list_of, quantity_field, str_of, toks_of,
+    toks_value,
 };
 
 const BOX_FLAG: i64 = 0o10000000000;
@@ -57,7 +58,12 @@ impl Run<'_, '_> {
                     self.char_run(&md, false)?;
                 }
             }
-            cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN | cmd::CHAR_NUM | cmd::NO_BOUNDARY | cmd::EX_SPACE => {
+            cmd::LETTER
+            | cmd::OTHER_CHAR
+            | cmd::CHAR_GIVEN
+            | cmd::CHAR_NUM
+            | cmd::NO_BOUNDARY
+            | cmd::EX_SPACE => {
                 if v {
                     self.back_cur();
                     self.new_graf(&md, true)?;
@@ -204,7 +210,10 @@ impl Run<'_, '_> {
             cmd::MARK => {
                 // §1101
                 let (_, body) = self.scan_toks(false, true)?;
-                let node = self.v.list(vec![self.v.int(crate::nodes::T_MARK), toks_value(self.v, &body)]);
+                let node = self.v.list(vec![
+                    self.v.int(crate::nodes::T_MARK),
+                    toks_value(self.v, &body),
+                ]);
                 self.append(md.lid, node);
             }
             cmd::BREAK_PENALTY => {
@@ -221,7 +230,8 @@ impl Run<'_, '_> {
                 if h {
                     self.append_italic_correction(&md)?;
                 } else if am == 203 {
-                    let node = crate::nodes::kern_node(self.v, 0, phitex_typeset::node::KernKind::Normal);
+                    let node =
+                        crate::nodes::kern_node(self.v, 0, phitex_typeset::node::KernKind::Normal);
                     self.append(md.lid, node);
                 }
             }
@@ -279,7 +289,11 @@ impl Run<'_, '_> {
                 // §1288
                 let b = self.cur.chr;
                 let (_, body) = self.scan_toks(false, false)?;
-                let table = if b == crate::val::LC_CODE_BASE { "lc" } else { "uc" };
+                let table = if b == crate::val::LC_CODE_BASE {
+                    "lc"
+                } else {
+                    "uc"
+                };
                 let mut out = Vec::with_capacity(body.len());
                 for t in body {
                     match &t {
@@ -287,7 +301,10 @@ impl Run<'_, '_> {
                             let ch = t.chr() & 0xFF;
                             let e = self.int(&format!("{table}:{ch}"))?;
                             if e != 0 {
-                                out.push(Tok::ch(t.cat().unwrap_or(0), u32::try_from(e).unwrap_or(0)));
+                                out.push(Tok::ch(
+                                    t.cat().unwrap_or(0),
+                                    u32::try_from(e).unwrap_or(0),
+                                ));
                             } else {
                                 out.push(t);
                             }
@@ -511,7 +528,9 @@ impl Run<'_, '_> {
                 let f = self.scan_font_ident()?;
                 self.set(&format!("fam:{size}:{n}"), v.int(f), global);
             }
-            cmd::REGISTER | cmd::ADVANCE | cmd::MULTIPLY | cmd::DIVIDE => self.do_register_command(global)?,
+            cmd::REGISTER | cmd::ADVANCE | cmd::MULTIPLY | cmd::DIVIDE => {
+                self.do_register_command(global)?
+            }
             cmd::SET_BOX => {
                 // §1241
                 let n = self.scan_eight_bit_int()?;
@@ -558,7 +577,11 @@ impl Run<'_, '_> {
                 let c = self.cur.chr;
                 self.scan_optional_equals()?;
                 let n = self.scan_int()?;
-                self.set(if c == 0 { "deadcycles" } else { "inspen" }, v.int(i64::from(n)), true);
+                self.set(
+                    if c == 0 { "deadcycles" } else { "inspen" },
+                    v.int(i64::from(n)),
+                    true,
+                );
             }
             cmd::SET_BOX_DIMEN => {
                 // §1247
@@ -606,7 +629,11 @@ impl Run<'_, '_> {
                 let f = self.scan_font_ident()?;
                 self.scan_optional_equals()?;
                 let x = self.scan_int()?;
-                self.set(&format!("{}:{f}", if n == 0 { "hc" } else { "sc" }), v.int(i64::from(x)), true);
+                self.set(
+                    &format!("{}:{f}", if n == 0 { "hc" } else { "sc" }),
+                    v.int(i64::from(x)),
+                    true,
+                );
             }
             cmd::DEF_FONT => self.new_font(global)?,
             cmd::SET_INTERACTION => {
@@ -661,15 +688,30 @@ impl Run<'_, '_> {
         let (field, p): (String, u8) = if q == cmd::REGISTER {
             let p = u8::try_from(self.cur.chr).unwrap_or(0);
             let n = self.scan_eight_bit_int()?;
-            (format!("{}:{n}", ["count", "dimen", "skip", "muskip"][usize::from(p.min(3))]), p)
+            (
+                format!(
+                    "{}:{n}",
+                    ["count", "dimen", "skip", "muskip"][usize::from(p.min(3))]
+                ),
+                p,
+            )
         } else {
             self.get_x_token()?;
             if self.cur.cmd >= cmd::ASSIGN_INT && self.cur.cmd <= cmd::ASSIGN_MU_GLUE {
-                (quantity_field(self.cur.cmd, self.cur.chr), self.cur.cmd - cmd::ASSIGN_INT)
+                (
+                    quantity_field(self.cur.cmd, self.cur.chr),
+                    self.cur.cmd - cmd::ASSIGN_INT,
+                )
             } else if self.cur.cmd == cmd::REGISTER {
                 let p = u8::try_from(self.cur.chr).unwrap_or(0);
                 let n = self.scan_eight_bit_int()?;
-                (format!("{}:{n}", ["count", "dimen", "skip", "muskip"][usize::from(p.min(3))]), p)
+                (
+                    format!(
+                        "{}:{n}",
+                        ["count", "dimen", "skip", "muskip"][usize::from(p.min(3))]
+                    ),
+                    p,
+                )
             } else {
                 // "You can't use x after \advance"
                 return Ok(());
@@ -684,7 +726,11 @@ impl Run<'_, '_> {
         if p < 2 {
             let cur = i64::from(crate::val::i32_of(v, old));
             let r: Option<i32> = if q < cmd::MULTIPLY {
-                let x = if p == 0 { self.scan_int()? } else { self.scan_normal_dimen()? };
+                let x = if p == 0 {
+                    self.scan_int()?
+                } else {
+                    self.scan_normal_dimen()?
+                };
                 if q == cmd::ADVANCE {
                     let s = cur + i64::from(x);
                     // web2c: integer overflow wraps silently
@@ -715,7 +761,11 @@ impl Run<'_, '_> {
             let s = glue_of(v, old);
             let r: Option<Glue> = if q < cmd::MULTIPLY {
                 let g = self.scan_glue(p)?;
-                if q == cmd::ADVANCE { Some(add_glue(&g, &s)) } else { Some(g) }
+                if q == cmd::ADVANCE {
+                    Some(add_glue(&g, &s))
+                } else {
+                    Some(g)
+                }
             } else {
                 let x = self.scan_int()?;
                 if q == cmd::MULTIPLY {
@@ -760,7 +810,11 @@ impl Run<'_, '_> {
         // §1258
         let s: i32 = if self.scan_keyword("at")? {
             let s = self.scan_normal_dimen()?;
-            if s <= 0 || s >= 0o1000000000 { 10 * 65536 } else { s }
+            if s <= 0 || s >= 0o1000000000 {
+                10 * 65536
+            } else {
+                s
+            }
         } else if self.scan_keyword("scaled")? {
             let n = self.scan_int()?;
             if n <= 0 || n > 32768 { -1000 } else { -n }
@@ -825,7 +879,11 @@ impl Run<'_, '_> {
         for (k, p) in params.iter().enumerate() {
             self.set(&format!("fd:{f}:{}", k + 1), v.int(i64::from(*p)), true);
         }
-        self.set(&format!("fdn:{f}"), v.int(i64::try_from(params.len()).unwrap_or(0)), true);
+        self.set(
+            &format!("fdn:{f}"),
+            v.int(i64::try_from(params.len()).unwrap_or(0)),
+            true,
+        );
         let hc = self.int("param:defaulthyphenchar")?;
         let sc = self.int("param:defaultskewchar")?;
         self.set(&format!("hc:{f}"), v.int(hc), true);
@@ -899,7 +957,9 @@ impl Run<'_, '_> {
                         let c = u32::try_from(self.cur.chr).unwrap_or(0);
                         let lc = self.int(&format!("lc:{c}"))?;
                         if lc != 0 {
-                            word.push(char::from_u32(u32::try_from(lc).unwrap_or(0)).unwrap_or('?'));
+                            word.push(
+                                char::from_u32(u32::try_from(lc).unwrap_or(0)).unwrap_or('?'),
+                            );
                         }
                     }
                 }
@@ -940,14 +1000,21 @@ impl Run<'_, '_> {
         if c != 0 {
             self.scan_optional_equals()?;
             let name = self.scan_file_name()?;
-            let key = if name.contains('.') { name.clone() } else { format!("{name}.tex") };
+            let key = if name.contains('.') {
+                name.clone()
+            } else {
+                format!("{name}.tex")
+            };
             let Some(x) = self.get(&format!("file:{key}"))? else {
                 return Err(Halt::File(key));
             };
             let xs = list_of(v, x);
             if xs.len() >= 2 {
                 let text = str_of(v, xs[1]);
-                let lines: Vec<ValueId> = crate::expand::split_lines(&text).iter().map(|l| v.str(l)).collect();
+                let lines: Vec<ValueId> = crate::expand::split_lines(&text)
+                    .iter()
+                    .map(|l| v.str(l))
+                    .collect();
                 let st = v.list(vec![v.int(1), v.list(lines)]);
                 self.set(&field, st, true);
             }
@@ -968,7 +1035,10 @@ impl Run<'_, '_> {
             let open = st.filter(|&x| x != ValueId::UNIT);
             let Some(st) = open else {
                 // §484: from the terminal: a fatal error in batch mode
-                self.log("error", "*** (cannot \\read from terminal in nonstop modes)")?;
+                self.log(
+                    "error",
+                    "*** (cannot \\read from terminal in nonstop modes)",
+                )?;
                 return Ok(out);
             };
             let xs = list_of(v, st);
@@ -1069,7 +1139,11 @@ impl Run<'_, '_> {
                 } else {
                     String::new()
                 };
-                let w = v.list(vec![v.str(if c == 0 { "open" } else { "close" }), v.int(i64::from(n)), v.str(&name)]);
+                let w = v.list(vec![
+                    v.str(if c == 0 { "open" } else { "close" }),
+                    v.int(i64::from(n)),
+                    v.str(&name),
+                ]);
                 let node = v.list(vec![v.int(crate::nodes::T_WHATSIT), w]);
                 self.append(md.lid, node);
             }
@@ -1077,7 +1151,11 @@ impl Run<'_, '_> {
                 // \write (§1352)
                 let k = self.scan_int()?;
                 let (_, body) = self.scan_toks(false, false)?;
-                let w = v.list(vec![v.str("write"), v.int(i64::from(k)), toks_value(v, &body)]);
+                let w = v.list(vec![
+                    v.str("write"),
+                    v.int(i64::from(k)),
+                    toks_value(v, &body),
+                ]);
                 let node = v.list(vec![v.int(crate::nodes::T_WHATSIT), w]);
                 self.append(md.lid, node);
             }
@@ -1135,7 +1213,11 @@ impl Run<'_, '_> {
         self.get_token()?;
         let mut s = String::new();
         self.show_toks_into(&mut s, &expanded)?;
-        let open = k >= 0 && k < 16 && self.get(&format!("write:{k}"))?.is_some_and(|x| x != ValueId::UNIT);
+        let open = k >= 0
+            && k < 16
+            && self
+                .get(&format!("write:{k}"))?
+                .is_some_and(|x| x != ValueId::UNIT);
         if open {
             let e = self.v.list(vec![self.v.int(i64::from(k)), self.v.str(&s)]);
             let su = self.v.seq_unit(e);

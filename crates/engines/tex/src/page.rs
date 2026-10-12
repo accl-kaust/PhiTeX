@@ -25,7 +25,6 @@ use crate::nodes::{self, Side};
 use crate::run::{Halt, R, Run};
 use crate::val::{group, int_of, list_of, str_of, toks_of};
 
-
 impl Run<'_, '_> {
     /// `ship_out` (§638–§640): the page goes to the `pages` accumulator
     /// with its `\count0..9` and fonts; its `\write`s and `\openout`s
@@ -81,9 +80,16 @@ impl Run<'_, '_> {
         ids.sort_unstable();
         for f in ids {
             let info = self.get(&format!("fontinfo:{f}"))?;
-            let Some(i) = crate::fonts::info(v, info) else { continue };
+            let Some(i) = crate::fonts::info(v, info) else {
+                continue;
+            };
             let Some(file) = i.file else { continue };
-            fonts.push(v.list(vec![v.int(i64::from(f)), v.str(&i.name), file, v.int(i64::from(i.s))]));
+            fonts.push(v.list(vec![
+                v.int(i64::from(f)),
+                v.str(&i.name),
+                file,
+                v.int(i64::from(i.s)),
+            ]));
         }
         let cs = v.list(counts.iter().map(|&c| v.int(i64::from(c))).collect());
         let page = v.list(vec![b, cs, v.list(fonts)]);
@@ -140,8 +146,12 @@ impl Run<'_, '_> {
         };
         let (mut pb, mut side) = builder(st.key);
         while let Some(x) = queue.pop_front() {
-            let Some(p) = nodes::decode(v, x, &mut side) else { continue };
-            let next = queue.front().and_then(|&y| nodes::decode(v, y, &mut Side::default()));
+            let Some(p) = nodes::decode(v, x, &mut side) else {
+                continue;
+            };
+            let next = queue
+                .front()
+                .and_then(|&y| nodes::decode(v, y, &mut Side::default()));
             let mut halt: Option<Halt> = None;
             let out = {
                 let mut class = |n: u16| match self.insert_class(n) {
@@ -173,7 +183,11 @@ impl Run<'_, '_> {
                     return Ok(());
                 }
                 Outcome::Fire(f) => {
-                    let mut rest: Vec<ValueId> = f.contributions.iter().map(|n| nodes::encode(v, n, &side)).collect();
+                    let mut rest: Vec<ValueId> = f
+                        .contributions
+                        .iter()
+                        .map(|n| nodes::encode(v, n, &side))
+                        .collect();
                     rest.extend(queue);
                     st.pending = rest;
                     st.key = remember(pb, side.clone());
@@ -216,7 +230,11 @@ impl Run<'_, '_> {
         if top.is_some() && first.is_none() {
             first = top;
         }
-        for (name, m) in [("mark:top", top), ("mark:first", first), ("mark:bot", new_bot)] {
+        for (name, m) in [
+            ("mark:top", top),
+            ("mark:first", first),
+            ("mark:bot", new_bot),
+        ] {
             self.set(name, m.unwrap_or(ValueId::UNIT), true);
         }
         // §1018–§1021: insertion boxes
@@ -234,8 +252,16 @@ impl Run<'_, '_> {
             self.set(&format!("box:{n}"), v.list(vec![v.int(0), b]), true);
         }
         let b255 = nodes::encode_box(v, &f.box255.node, side);
-        let held: Vec<ValueId> = f.held_inserts.iter().map(|n| nodes::encode(v, n, side)).collect();
-        self.set("param:outputpenalty", v.int(i64::from(f.output_penalty)), true);
+        let held: Vec<ValueId> = f
+            .held_inserts
+            .iter()
+            .map(|n| nodes::encode(v, n, side))
+            .collect();
+        self.set(
+            "param:outputpenalty",
+            v.int(i64::from(f.output_penalty)),
+            true,
+        );
         let output = self.get("param:output")?;
         let otoks = toks_of(v, output);
         if otoks.is_empty() {
@@ -269,11 +295,13 @@ impl Run<'_, '_> {
     pub(crate) fn page_dimen(&mut self, m: i32) -> R<i32> {
         let st = self.page_state()?;
         let (pb, _) = builder(st.key);
-        Ok(if pb.contents == phitex_typeset::page::Contents::Empty && m == 0 {
-            MAX_DIMEN
-        } else {
-            pb.so_far[usize::try_from(m).unwrap_or(0).min(7)]
-        })
+        Ok(
+            if pb.contents == phitex_typeset::page::Contents::Empty && m == 0 {
+                MAX_DIMEN
+            } else {
+                pb.so_far[usize::try_from(m).unwrap_or(0).min(7)]
+            },
+        )
     }
 
     /// Whether the page and its contributions are empty (§1054).
@@ -340,7 +368,10 @@ fn builder(key: u64) -> (PageBuilder, Side) {
 /// The key of a builder: a hash of its content, so the same page gives
 /// the same state value whatever ran before.
 fn remember(pb: PageBuilder, side: Side) -> u64 {
-    let k = phitex_defuse::hash_bytes(17, format!("{pb:?}|{:?}|{:?}", side.marks, side.whats).as_bytes());
+    let k = phitex_defuse::hash_bytes(
+        17,
+        format!("{pb:?}|{:?}|{:?}", side.marks, side.whats).as_bytes(),
+    );
     let k = if k == 0 { 1 } else { k };
     builders()
         .lock()
@@ -398,8 +429,13 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
 pub(crate) fn dvi(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     let v = cx.values();
     let pages = cx.acc_range(v.field("pages"), None)?;
-    let comment = cx.use_field(v.field("dvicomment"))?.map(|x| str_of(v, x)).unwrap_or_default();
-    let mag = cx.use_field(v.field("param:mag"))?.map_or(1000, |x| int_of(v, x));
+    let comment = cx
+        .use_field(v.field("dvicomment"))?
+        .map(|x| str_of(v, x))
+        .unwrap_or_default();
+    let mag = cx
+        .use_field(v.field("param:mag"))?
+        .map_or(1000, |x| int_of(v, x));
     let mut w = phitex_dvi::DviWriter::new(i32::try_from(mag).unwrap_or(1000), &comment);
     for page in v.seq_to_vec(pages) {
         let xs = list_of(v, page);
@@ -408,7 +444,14 @@ pub(crate) fn dvi(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
             continue;
         };
         let mut counts = [0i32; 10];
-        for (k, c) in xs.get(1).map(|&l| list_of(v, l)).unwrap_or_default().iter().enumerate().take(10) {
+        for (k, c) in xs
+            .get(1)
+            .map(|&l| list_of(v, l))
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .take(10)
+        {
             counts[k] = i32::try_from(int_of(v, *c)).unwrap_or(0);
         }
         let mut defs = std::collections::HashMap::new();
@@ -438,7 +481,9 @@ pub(crate) fn dvi(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
             let w = *whats.get(h as usize)?;
             let ys = list_of(v, w);
             if ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special") {
-                Some(crate::fonts::bytes_of(&ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default()))
+                Some(crate::fonts::bytes_of(
+                    &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
+                ))
             } else {
                 None
             }

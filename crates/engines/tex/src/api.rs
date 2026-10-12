@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use phitex_defuse::{Engine, Field, NodeId, OpId, Report, SeqMonoid, SumMonoid, UnitId, Value, ValueId, Values};
+use phitex_defuse::{
+    Engine, Field, NodeId, OpId, Report, SeqMonoid, SumMonoid, UnitId, Value, ValueId, Values,
+};
 use phitex_source::pass::{self, AtomKind};
 
 use crate::ops::{Dvi, Exec, Mark, OutPage, Put, Shared};
@@ -194,13 +196,20 @@ impl Graph {
         let needs_f = self.eng.values().field("needs");
         loop {
             let t0 = std::time::Instant::now();
-            let r = self.eng.evaluate_sequential().unwrap_or_else(|e| panic!("evaluation: {e:?}"));
+            let r = self
+                .eng
+                .evaluate_sequential()
+                .unwrap_or_else(|e| panic!("evaluation: {e:?}"));
             if std::env::var_os("PHITEX_TEX_TIME").is_some() {
                 eprintln!("round: {:?}, {} nodes run", t0.elapsed(), r.nodes_run);
             }
             stats.add(&r);
             let v = self.eng.values();
-            let needs = self.eng.acc_value(unit, needs_f).map(|n| v.seq_to_vec(n)).unwrap_or_default();
+            let needs = self
+                .eng
+                .acc_value(unit, needs_f)
+                .map(|n| v.seq_to_vec(n))
+                .unwrap_or_default();
             let mut asked = false;
             for x in needs {
                 let xs = list_of(v, x);
@@ -259,7 +268,11 @@ impl Graph {
             out.push((key(piece, starts), n));
         }
         if std::env::var_os("PHITEX_TEX_TIME").is_some() {
-            eprintln!("push_text: slices {t1:?}, push {:?}, {} nodes", t0.elapsed() - t1, out.len());
+            eprintln!(
+                "push_text: slices {t1:?}, push {:?}, {} nodes",
+                t0.elapsed() - t1,
+                out.len()
+            );
         }
         out
     }
@@ -282,7 +295,11 @@ fn as_file(text: &str) -> String {
 /// INITEX's state, and the prelude's on top of it.
 fn prelude_env(prelude: Option<&str>, finder: &Finder) -> Env {
     let key = prelude.map_or(0, |p| phitex_defuse::hash_bytes(7, p.as_bytes()));
-    if let Some(e) = env_cache().lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
+    if let Some(e) = env_cache()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+    {
         return e.clone();
     }
     let mut g = Graph::new();
@@ -313,7 +330,10 @@ fn prelude_env(prelude: Option<&str>, finder: &Finder) -> Env {
                     }
                     let f = Field(n);
                     let name = field_name(v, f);
-                    let x = g.eng.reaching_def(end, f).and_then(|d| g.eng.def_value(d, f));
+                    let x = g
+                        .eng
+                        .reaching_def(end, f)
+                        .and_then(|d| g.eng.def_value(d, f));
                     if let Some(x) = x {
                         env.retain(|(k, _)| *k != name);
                         env.push((name, x));
@@ -413,7 +433,10 @@ impl Build {
             a += 1;
         }
         let mut b = 0;
-        while b < old.len() - a && b < new.len() - a && old[old.len() - 1 - b].0 == new[new.len() - 1 - b].0 {
+        while b < old.len() - a
+            && b < new.len() - a
+            && old[old.len() - 1 - b].0 == new[new.len() - 1 - b].0
+        {
             b += 1;
         }
         let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
@@ -458,7 +481,12 @@ impl Build {
             .g
             .eng
             .output(self.dvi)
-            .map(|x| str_of(v, x).chars().map(|c| u8::try_from(u32::from(c)).unwrap_or(0)).collect())
+            .map(|x| {
+                str_of(v, x)
+                    .chars()
+                    .map(|c| u8::try_from(u32::from(c)).unwrap_or(0))
+                    .collect()
+            })
             .unwrap_or_default();
         let log_f = v.field("log");
         let log = crate::log::layout(v, &self.opts.name, self.g.eng.acc_value(self.unit, log_f));

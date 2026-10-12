@@ -76,7 +76,12 @@ pub(crate) fn sprint_cs(out: &mut String, t: &Tok, escape: i64) {
 }
 
 /// `show_token_list` (§292–§294) without a limit.
-pub(crate) fn show_toks(out: &mut String, toks: &[Tok], escape: i64, cat: &mut dyn FnMut(u32) -> i64) {
+pub(crate) fn show_toks(
+    out: &mut String,
+    toks: &[Tok],
+    escape: i64,
+    cat: &mut dyn FnMut(u32) -> i64,
+) {
     let mut match_chr = u32::from(b'#');
     let mut n = b'0';
     for t in toks {

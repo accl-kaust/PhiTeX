@@ -21,16 +21,37 @@ fn ops(s: &Shared) -> Ops {
 /// Runs `body` as one node: its definitions, contributions and
 /// children go out only if it finishes; a starved or file-waiting run
 /// records its need for the client instead.
-fn run_node(cx: &mut Ctx<'_>, o: Ops, body: impl FnOnce(&mut Run<'_, '_>) -> R<()>) -> Result<ValueId, Stop> {
+fn run_node(
+    cx: &mut Ctx<'_>,
+    o: Ops,
+    body: impl FnOnce(&mut Run<'_, '_>) -> R<()>,
+) -> Result<ValueId, Stop> {
     let trace = std::env::var_os("PHITEX_TEX_TRACE").is_some();
     if trace {
-        let a = cx.args().first().map(|&x| cx.values().render(x)).unwrap_or_default();
-        eprintln!("run {} {}", cx.node().raw() % 100_000, a.chars().take(70).collect::<String>());
+        let a = cx
+            .args()
+            .first()
+            .map(|&x| cx.values().render(x))
+            .unwrap_or_default();
+        eprintln!(
+            "run {} {}",
+            cx.node().raw() % 100_000,
+            a.chars().take(70).collect::<String>()
+        );
     }
     let mut r = Run::new(cx, o);
     let res = body(&mut r);
     if trace {
-        eprintln!("  -> {}", match &res { Ok(()) => "ok".to_owned(), Err(Halt::Stop(_)) => "stop".to_owned(), Err(Halt::Starve) => "starve".to_owned(), Err(Halt::Fatal) => "fatal".to_owned(), Err(Halt::File(f)) => format!("file {f}") });
+        eprintln!(
+            "  -> {}",
+            match &res {
+                Ok(()) => "ok".to_owned(),
+                Err(Halt::Stop(_)) => "stop".to_owned(),
+                Err(Halt::Starve) => "starve".to_owned(),
+                Err(Halt::Fatal) => "fatal".to_owned(),
+                Err(Halt::File(f)) => format!("file {f}"),
+            }
+        );
     }
     match res {
         Ok(()) => Ok(r.finish()),
@@ -72,7 +93,12 @@ impl Operation for Exec {
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::Pending
     }
-    fn claim(&self, _: &[ValueId], _: &Values, _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>) -> Claim {
+    fn claim(
+        &self,
+        _: &[ValueId],
+        _: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Claim {
         Claim::Pending
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
@@ -103,7 +129,10 @@ impl Operation for Put {
                 let xs = list_of(v, e);
                 let name = xs.first().map(|&n| str_of(v, n)).unwrap_or_default();
                 let g = xs.get(2).is_some_and(|&g| int_of(v, g) != 0);
-                out.push((v.field(&name), if g { Locality::Global } else { Locality::Local }));
+                out.push((
+                    v.field(&name),
+                    if g { Locality::Global } else { Locality::Local },
+                ));
             }
         }
         if args.get(1).is_some_and(|&c| !list_of(v, c).is_empty()) {

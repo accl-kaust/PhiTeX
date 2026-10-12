@@ -15,6 +15,9 @@
 //! pdfTeX primitive as a node spec on the core (reads, defines, scope,
 //! claim, unfold, contribution, hazards) and lists what the core lacks.
 
+// tex.web's names (p, q, r, s, t) and its octal and hex codes, kept
+#![allow(clippy::many_single_char_names, clippy::unreadable_literal)]
+
 /// What makes an engine that engine.
 pub trait Engine: Send + Sync {
     /// Its program name (`pdftex`, `xetex`, `luatex`).

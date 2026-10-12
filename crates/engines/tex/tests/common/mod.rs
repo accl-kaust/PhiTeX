@@ -67,7 +67,13 @@ pub fn first_difference(got: &[u8], want: &[u8]) -> Option<String> {
     let show = |b: &[u8]| -> String {
         b[n.saturating_sub(40).min(b.len())..(n + 40).min(b.len())]
             .iter()
-            .map(|&c| if (32..127).contains(&c) || c == b'\n' { char::from(c) } else { '?' })
+            .map(|&c| {
+                if (32..127).contains(&c) || c == b'\n' {
+                    char::from(c)
+                } else {
+                    '?'
+                }
+            })
             .collect()
     };
     Some(format!(
@@ -82,7 +88,9 @@ pub fn first_difference(got: &[u8], want: &[u8]) -> Option<String> {
 /// The DVI preamble's comment of an oracle file.
 pub fn dvi_comment(dvi: &[u8]) -> String {
     let k = usize::from(dvi.get(14).copied().unwrap_or(0));
-    dvi.get(15..15 + k).map(|b| b.iter().map(|&c| char::from(c)).collect()).unwrap_or_default()
+    dvi.get(15..15 + k)
+        .map(|b| b.iter().map(|&c| char::from(c)).collect())
+        .unwrap_or_default()
 }
 
 /// plain.tex as the oracle's plain fixtures load it.
@@ -90,5 +98,8 @@ pub fn plain() -> String {
     let s = read(&fixtures().join("dvi/plaintext.tex"));
     let at = s.find("\\output={}\n").expect("plaintext.tex's body");
     let h = read(&fixtures().join("hyph/hyphen.tex"));
-    s[..at].replace("% (\\input hyphen: no hyphenation patterns on the graph yet)\n", &h)
+    s[..at].replace(
+        "% (\\input hyphen: no hyphenation patterns on the graph yet)\n",
+        &h,
+    )
 }

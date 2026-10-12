@@ -359,7 +359,10 @@ impl Run<'_, '_> {
                 };
                 self.skip_blanks_x()?;
                 let rel = match &self.cur.tok {
-                    Tok::C(_) if self.cur.tok.cat() == Some(12) && (60..=62).contains(&self.cur.tok.chr()) => {
+                    Tok::C(_)
+                        if self.cur.tok.cat() == Some(12)
+                            && (60..=62).contains(&self.cur.tok.chr()) =>
+                    {
                         self.cur.tok.chr()
                     }
                     _ => {
@@ -487,7 +490,14 @@ impl Run<'_, '_> {
     }
 
     fn cur_cmd_chr_for_ifx(&self, _t: &Tok, m: &Mean) -> (u8, i32) {
-        (self.cur.cmd, if matches!(m, Mean::Macro(_)) { 0 } else { self.cur.chr })
+        (
+            self.cur.cmd,
+            if matches!(m, Mean::Macro(_)) {
+                0
+            } else {
+                self.cur.chr
+            },
+        )
     }
 
     fn common_ending(&mut self, save: usize) -> R<()> {
@@ -523,7 +533,9 @@ impl Run<'_, '_> {
     /// The font identifier token of font `f` (§1257: `font_id_text`).
     pub(crate) fn font_id_tok(&mut self, f: i64) -> R<Tok> {
         let x = self.get(&format!("fontid:{f}"))?;
-        let name = x.map(|x| str_of(self.v, x)).unwrap_or_else(|| "nullfont".to_owned());
+        let name = x
+            .map(|x| str_of(self.v, x))
+            .unwrap_or_else(|| "nullfont".to_owned());
         Ok(Tok::S(Rc::from(format!("\u{10FFFE}F{f}\u{2}{name}"))))
     }
 
@@ -562,7 +574,10 @@ impl Run<'_, '_> {
             }
             _ => {
                 let j = self.get("jobname")?;
-                s.push_str(&j.map(|x| str_of(self.v, x)).unwrap_or_else(|| "texput".to_owned()));
+                s.push_str(
+                    &j.map(|x| str_of(self.v, x))
+                        .unwrap_or_else(|| "texput".to_owned()),
+                );
             }
         }
         self.push_toks(str_toks(&s));
@@ -645,7 +660,8 @@ impl Run<'_, '_> {
                 }
                 if c == cmd::TOP_BOT_MARK {
                     s.push(':');
-                    let name = ["top", "first", "bot", "splitfirst", "splitbot"][usize::try_from(h).unwrap_or(0).min(4)];
+                    let name = ["top", "first", "bot", "splitfirst", "splitbot"]
+                        [usize::try_from(h).unwrap_or(0).min(4)];
                     let mk = self.get(&format!("mark:{name}"))?;
                     let toks = crate::val::toks_of(self.v, mk);
                     self.show_toks_into(s, &toks)?;
@@ -696,7 +712,11 @@ impl Run<'_, '_> {
                     seen_line = true;
                 }
                 Frame::Toks(t, p) => {
-                    if seen_line && t[*p..].iter().any(|x| matches!(x, Tok::S(n) if n.starts_with("\u{10FFFE}eof"))) {
+                    if seen_line
+                        && t[*p..]
+                            .iter()
+                            .any(|x| matches!(x, Tok::S(n) if n.starts_with("\u{10FFFE}eof")))
+                    {
                         break;
                     }
                 }
@@ -711,7 +731,11 @@ impl Run<'_, '_> {
     /// prints its `)` when it ends.
     fn start_input(&mut self) -> R<()> {
         let name = self.scan_file_name()?;
-        let key = if name.contains('.') { name.clone() } else { format!("{name}.tex") };
+        let key = if name.contains('.') {
+            name.clone()
+        } else {
+            format!("{name}.tex")
+        };
         let x = self.get(&format!("file:{key}"))?;
         let x = match x {
             Some(x) => Some(x),
@@ -752,7 +776,10 @@ impl Run<'_, '_> {
         self.skip_blanks_x()?;
         let mut name = String::new();
         loop {
-            if self.cur.cmd > cmd::OTHER_CHAR || self.cur.chr > 255 || self.cur.is_cs() && !matches!(self.cur.mean, Mean::Char(..)) {
+            if self.cur.cmd > cmd::OTHER_CHAR
+                || self.cur.chr > 255
+                || self.cur.is_cs() && !matches!(self.cur.mean, Mean::Char(..))
+            {
                 let t = self.cur.tok.clone();
                 self.back_input(t);
                 break;

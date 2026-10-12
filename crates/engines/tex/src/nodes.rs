@@ -8,7 +8,8 @@
 use phitex_defuse::{Value, ValueId, Values};
 use phitex_typeset::glue::{Glue, GlueSet, GlueSign, Order};
 use phitex_typeset::node::{
-    BoxKind, BoxNode, Disc, GlueKind, GlueNode, Insert, KernKind, Ligature, List, MathKind, Node, Rule,
+    BoxKind, BoxNode, Disc, GlueKind, GlueNode, Insert, KernKind, Ligature, List, MathKind, Node,
+    Rule,
 };
 
 use crate::val::{glue_of, glue_value, int_of, list_of};
@@ -124,7 +125,11 @@ pub(crate) fn encode_box(v: &Values, b: &BoxNode, side: &Side) -> ValueId {
 
 pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
     match n {
-        Node::Char { font, ch } => v.list(vec![i(v, T_CHAR), i(v, i64::from(*font)), i(v, i64::from(*ch))]),
+        Node::Char { font, ch } => v.list(vec![
+            i(v, T_CHAR),
+            i(v, i64::from(*font)),
+            i(v, i64::from(*ch)),
+        ]),
         Node::Box(b) => encode_box(v, b, side),
         Node::Rule(r) => v.list(vec![
             i(v, T_RULE),
@@ -143,7 +148,10 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
         ]),
         Node::Mark(k) => v.list(vec![
             i(v, T_MARK),
-            side.marks.get(*k as usize).copied().unwrap_or(ValueId::UNIT),
+            side.marks
+                .get(*k as usize)
+                .copied()
+                .unwrap_or(ValueId::UNIT),
         ]),
         Node::Adjust(l) => v.list(vec![i(v, T_ADJUST), encode_list(v, l, side)]),
         Node::Lig(l) => v.list(vec![
@@ -162,7 +170,10 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
         ]),
         Node::Whatsit(k) => v.list(vec![
             i(v, T_WHATSIT),
-            side.whats.get(*k as usize).copied().unwrap_or(ValueId::UNIT),
+            side.whats
+                .get(*k as usize)
+                .copied()
+                .unwrap_or(ValueId::UNIT),
         ]),
         Node::Language { lang, lhm, rhm } => v.list(vec![
             i(v, T_LANGUAGE),
@@ -179,7 +190,9 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
             i(v, T_GLUE),
             glue_value(v, &g.spec),
             i(v, glue_kind_code(g.kind)),
-            g.leader.as_ref().map_or(ValueId::UNIT, |l| encode(v, l, side)),
+            g.leader
+                .as_ref()
+                .map_or(ValueId::UNIT, |l| encode(v, l, side)),
         ]),
         Node::Kern(w, k) => v.list(vec![i(v, T_KERN), i(v, i64::from(*w)), i(v, kern_code(*k))]),
         Node::Penalty(p) => v.list(vec![i(v, T_PENALTY), i(v, i64::from(*p))]),
@@ -188,7 +201,10 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
 }
 
 pub(crate) fn decode_list(v: &Values, x: ValueId, side: &mut Side) -> List {
-    list_of(v, x).into_iter().filter_map(|n| decode(v, n, side)).collect()
+    list_of(v, x)
+        .into_iter()
+        .filter_map(|n| decode(v, n, side))
+        .collect()
 }
 
 pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode {
@@ -210,7 +226,9 @@ pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode
                 xs.get(8).map_or(0, |&x| int_of(v, x)).to_ne_bytes(),
             )),
         },
-        list: xs.get(9).map_or_else(Vec::new, |&l| decode_list(v, l, side)),
+        list: xs
+            .get(9)
+            .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
     }
 }
 
@@ -238,27 +256,43 @@ pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
             depth: g(3),
             split_top_skip: glue_of(v, xs.get(4).copied()),
             float_cost: g(5),
-            list: xs.get(6).map_or_else(Vec::new, |&l| decode_list(v, l, side)),
+            list: xs
+                .get(6)
+                .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
         }),
         T_MARK => {
             side.marks.push(xs.get(1).copied().unwrap_or(ValueId::UNIT));
             Node::Mark(u32::try_from(side.marks.len() - 1).unwrap_or(0))
         }
-        T_ADJUST => Node::Adjust(xs.get(1).map_or_else(Vec::new, |&l| decode_list(v, l, side))),
+        T_ADJUST => Node::Adjust(
+            xs.get(1)
+                .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
+        ),
         T_LIG => Node::Lig(Ligature {
             font: u32::try_from(g(1)).unwrap_or(0),
             ch: u16::try_from(g(2)).unwrap_or(0),
             original: xs
                 .get(3)
-                .map(|&l| list_of(v, l).into_iter().map(|c| u16::try_from(int_of(v, c)).unwrap_or(0)).collect())
+                .map(|&l| {
+                    list_of(v, l)
+                        .into_iter()
+                        .map(|c| u16::try_from(int_of(v, c)).unwrap_or(0))
+                        .collect()
+                })
                 .unwrap_or_default(),
             left_hit: g(4) != 0,
             right_hit: g(5) != 0,
         }),
         T_DISC => Node::Disc(Disc {
-            pre: xs.get(1).map_or_else(Vec::new, |&l| decode_list(v, l, side)),
-            post: xs.get(2).map_or_else(Vec::new, |&l| decode_list(v, l, side)),
-            replace: xs.get(3).map_or_else(Vec::new, |&l| decode_list(v, l, side)),
+            pre: xs
+                .get(1)
+                .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
+            post: xs
+                .get(2)
+                .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
+            replace: xs
+                .get(3)
+                .map_or_else(Vec::new, |&l| decode_list(v, l, side)),
         }),
         T_WHATSIT => {
             side.whats.push(xs.get(1).copied().unwrap_or(ValueId::UNIT));
@@ -269,7 +303,14 @@ pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
             lhm: u8::try_from(g(2)).unwrap_or(0),
             rhm: u8::try_from(g(3)).unwrap_or(0),
         },
-        T_MATH => Node::Math(if g(1) == 0 { MathKind::Before } else { MathKind::After }, g(2)),
+        T_MATH => Node::Math(
+            if g(1) == 0 {
+                MathKind::Before
+            } else {
+                MathKind::After
+            },
+            g(2),
+        ),
         T_GLUE => Node::Glue(GlueNode {
             spec: glue_of(v, xs.get(1).copied()),
             kind: glue_kind(i64::from(g(2))),
@@ -327,7 +368,12 @@ pub(crate) fn box_with_dim(v: &Values, b: ValueId, m: i32, d: i32) -> ValueId {
 
 /// A glue node of `g`.
 pub(crate) fn glue_node(v: &Values, g: &Glue, kind: GlueKind) -> ValueId {
-    v.list(vec![i(v, T_GLUE), glue_value(v, g), i(v, glue_kind_code(kind)), ValueId::UNIT])
+    v.list(vec![
+        i(v, T_GLUE),
+        glue_value(v, g),
+        i(v, glue_kind_code(kind)),
+        ValueId::UNIT,
+    ])
 }
 
 pub(crate) fn penalty_node(v: &Values, p: i32) -> ValueId {
