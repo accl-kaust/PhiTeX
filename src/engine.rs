@@ -684,8 +684,10 @@ pub(crate) struct Def {
     pub(crate) field: Field,
     pub(crate) value: ValueId,
     pub(crate) global: bool,
-    /// The scope depth a local definition is indexed at (0 for a global).
-    pub(crate) depth: u32,
+    /// The depth a local definition is indexed at (0 for a global): its
+    /// scope depth less the unit's pending depth shift at its label (see
+    /// [`Engine::shift_at`]).
+    pub(crate) depth: i32,
 }
 
 const F_RAN: u16 = 1;
@@ -834,6 +836,8 @@ pub(crate) struct OItem {
     hit: u64,
     /// The last label a stream claimer's recorded range covers (0: none).
     sreach: u64,
+    /// Whether the node holds local definitions.
+    ld: bool,
 }
 
 impl From<OItem> for Slot {
@@ -853,6 +857,8 @@ pub(crate) struct OSum {
     maxr: u64,
     maxhit: u64,
     maxs: u64,
+    /// Nodes holding local definitions.
+    ld: u32,
 }
 
 struct OAug;
@@ -872,6 +878,7 @@ impl Aug<OItem, OSum> for OAug {
             maxr: i.reach,
             maxhit: i.hit,
             maxs: i.sreach,
+            ld: u32::from(i.ld),
         }
     }
 
@@ -885,6 +892,7 @@ impl Aug<OItem, OSum> for OAug {
             maxr: a.maxr.max(b.maxr),
             maxhit: a.maxhit.max(b.maxhit),
             maxs: a.maxs.max(b.maxs),
+            ld: a.ld + b.ld,
         }
     }
 }
@@ -1014,6 +1022,10 @@ pub(crate) struct Unit {
     watches: BTreeMap<(u64, Slot), Watch>,
     max_span: u64,
     live: bool,
+    /// Pending depth shifts `(lo, hi, delta)`: the scope depth of every
+    /// label in `[lo, hi)` changed by `delta` since its definitions were
+    /// indexed. Queries add them; a sweep re-keys and retires them.
+    shifts: Vec<(u64, u64, i32)>,
 }
 
 #[derive(Clone)]
@@ -1063,7 +1075,7 @@ pub struct Engine {
     monoids: FxHashMap<Field, Arc<dyn Monoid>>,
     defs_ix: BTreeMap<(u32, Field, u64), Slot>,
     /// Local definitions by scope depth: `(unit, field, depth, label)`.
-    local_ix: BTreeMap<(u32, Field, u32, u64), Slot>,
+    local_ix: BTreeMap<(u32, Field, i32, u64), Slot>,
     /// The depth each local definition is indexed under.
     /// Runs of each stream claimer in this evaluation.
     stream_runs: FxHashMap<Slot, u32>,
@@ -1109,6 +1121,9 @@ pub struct Engine {
     /// Global definitions: `(unit, field, label)`.
     global_ix: BTreeMap<(u32, Field, u64), Slot>,
     users: BTreeMap<(u64, Field, u64), Slot>,
+    /// Of those, the chain reads (read at another node's position, so not
+    /// found by position): keyed the same way.
+    chain_users: BTreeMap<(u64, Field, u64), Slot>,
     /// Pending nodes with an unbounded definition set.
     pending: BTreeMap<(u32, u64), Slot>,
     /// Pending nodes whose scope effect is unknown.
@@ -1292,6 +1307,7 @@ impl Engine {
             eval_start: None,
             global_ix: BTreeMap::new(),
             users: BTreeMap::new(),
+            chain_users: BTreeMap::new(),
             pending: BTreeMap::new(),
             pending_eff: BTreeMap::new(),
             pending_f: BTreeMap::new(),
@@ -1600,11 +1616,11 @@ impl Engine {
                     continue;
                 }
                 let want = self.def_depth(root, n.label, d.field);
-                if d.depth != want {
+                let have = d.depth + self.shift_at(n.unit, n.label);
+                if have != i32::try_from(want).unwrap_or(i32::MAX) {
                     bad.push(format!(
-                        "{s:?}: local {} indexed at depth {}, now {want}",
-                        self.values.render(d.field.0),
-                        d.depth
+                        "{s:?}: local {} indexed at depth {have}, now {want}",
+                        self.values.render(d.field.0)
                     ));
                 }
             }
@@ -1959,6 +1975,7 @@ impl Engine {
             watches: BTreeMap::new(),
             max_span: 0,
             live: true,
+            shifts: Vec::new(),
         };
         if let Some(i) = self.free_units.pop() {
             self.units[i as usize] = u;
@@ -2649,6 +2666,7 @@ impl Engine {
                 .aux_of(s)
                 .and_then(|a| a.stream)
                 .map_or(0, |r| self.stream_labels(s, r).1),
+            ld: n.defs.iter().any(|d| !d.global),
         }
     }
 
@@ -2798,12 +2816,12 @@ impl Engine {
     fn detach_labels(&mut self, x: Slot) {
         let n = self.n(x);
         let (unit, label) = (n.unit, n.label);
-        let defs: Vec<(Field, u32)> = n.defs.iter().map(|d| (d.field, d.depth)).collect();
-        let uses: Vec<(u64, Field)> = n
+        let defs: Vec<(Field, i32)> = n.defs.iter().map(|d| (d.field, d.depth)).collect();
+        let uses: Vec<(u64, Field, bool)> = n
             .uses
             .iter()
-            .filter(|u| u.kind == K_FIELD)
-            .map(|u| (site_key(unit, u.site), Field(ValueId(u.key))))
+            .filter(|u| matches!(u.kind, K_FIELD | K_CHAIN | K_ENV))
+            .map(|u| (site_key(unit, u.site), Field(ValueId(u.key)), u.kind == K_CHAIN))
             .collect();
         let pend = n.has(F_INPEND);
         let root = self.units[unit as usize].root;
@@ -2812,8 +2830,11 @@ impl Engine {
         for (f, depth) in defs {
             self.ix_remove(unit, f, label, depth);
         }
-        for (s, f) in uses {
+        for (s, f, chain) in uses {
             self.users.remove(&(s, f, label));
+            if chain {
+                self.chain_users.remove(&(s, f, label));
+            }
         }
         if pend {
             self.pending_index(x, false);
@@ -2830,11 +2851,11 @@ impl Engine {
         let n = self.n(x);
         let (unit, label) = (n.unit, n.label);
         let defs: Vec<Field> = n.defs.iter().map(|d| d.field).collect();
-        let uses: Vec<(u64, Field)> = n
+        let uses: Vec<(u64, Field, bool)> = n
             .uses
             .iter()
-            .filter(|u| u.kind == K_FIELD)
-            .map(|u| (site_key(unit, u.site), Field(ValueId(u.key))))
+            .filter(|u| matches!(u.kind, K_FIELD | K_CHAIN | K_ENV))
+            .map(|u| (site_key(unit, u.site), Field(ValueId(u.key)), u.kind == K_CHAIN))
             .collect();
         let pend = n.has(F_INPEND);
         let item = self.oitem(x);
@@ -2844,8 +2865,11 @@ impl Engine {
         for f in defs {
             self.ix_insert(unit, f, label, x);
         }
-        for (s, f) in uses {
+        for (s, f, chain) in uses {
             self.users.insert((s, f, label), x);
+            if chain {
+                self.chain_users.insert((s, f, label), x);
+            }
         }
         if pend {
             self.pending_index(x, true);
@@ -2901,7 +2925,7 @@ impl Engine {
             self.global_ix.insert((unit, f, label), x);
         } else {
             let root = self.units[unit as usize].root;
-            let depth = self.def_depth(root, label, f);
+            let depth = self.stored_depth(unit, label, self.def_depth(root, label, f));
             self.local_ix.insert((unit, f, depth, label), x);
             for d in &mut self.nm(x).defs {
                 if d.field == f {
@@ -2912,15 +2936,120 @@ impl Engine {
     }
 
     /// The depth `x`'s definition of `f` is indexed at.
-    fn indexed_depth(&self, x: Slot, f: Field) -> u32 {
+    fn indexed_depth(&self, x: Slot, f: Field) -> i32 {
         self.n(x).defs.iter().find(|d| d.field == f).map_or(0, |d| d.depth)
     }
 
-    fn ix_remove(&mut self, unit: u32, f: Field, label: u64, depth: u32) {
+    fn ix_remove(&mut self, unit: u32, f: Field, label: u64, depth: i32) {
         self.defs_ix.remove(&(unit, f, label));
         if self.global_ix.remove(&(unit, f, label)).is_none() {
             self.local_ix.remove(&(unit, f, depth, label));
         }
+    }
+
+    /// The pending depth shift at `label`: what the scope depth of the
+    /// labels there gained since their definitions were indexed.
+    fn shift_at(&self, unit: u32, label: u64) -> i32 {
+        self.units[unit as usize]
+            .shifts
+            .iter()
+            .filter(|&&(lo, hi, _)| lo <= label && label < hi)
+            .map(|s| s.2)
+            .sum()
+    }
+
+    /// The depth a definition at `label` with scope depth `depth` is
+    /// indexed at.
+    fn stored_depth(&self, unit: u32, label: u64, depth: u32) -> i32 {
+        i32::try_from(depth).unwrap_or(i32::MAX) - self.shift_at(unit, label)
+    }
+
+    /// `[lo, hi)` cut at the pending shifts' boundaries: pieces with the
+    /// shift on each, in label order.
+    fn shift_pieces(&self, unit: u32, lo: u64, hi: u64) -> Vec<(u64, u64, i32)> {
+        let shifts = &self.units[unit as usize].shifts;
+        if shifts.is_empty() {
+            return vec![(lo, hi, 0)];
+        }
+        let mut cuts = vec![lo];
+        for &(a, b, _) in shifts {
+            if lo < a && a < hi {
+                cuts.push(a);
+            }
+            if lo < b && b < hi {
+                cuts.push(b);
+            }
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        (0..cuts.len())
+            .map(|i| {
+                let a = cuts[i];
+                let b = cuts.get(i + 1).copied().unwrap_or(hi);
+                (a, b, self.shift_at(unit, a))
+            })
+            .collect()
+    }
+
+    /// The latest local definition of `f` at scope depth `depth` with a
+    /// label in `[lo, hi)`.
+    fn latest_local(&self, unit: u32, f: Field, depth: u32, lo: u64, hi: u64) -> Option<(u64, Slot)> {
+        if lo >= hi {
+            return None;
+        }
+        let d = i32::try_from(depth).unwrap_or(i32::MAX);
+        for (a, b, s) in self.shift_pieces(unit, lo, hi).into_iter().rev() {
+            if let Some((&(_, _, _, l), &x)) = self
+                .local_ix
+                .range((unit, f, d - s, a)..(unit, f, d - s, b))
+                .next_back()
+            {
+                return Some((l, x));
+            }
+        }
+        None
+    }
+
+    /// The local definitions at scope depth `depth` with labels in
+    /// `[lo, hi)`, as (label, node, field), in label order. Subtrees of
+    /// the order without definitions, or lying entirely deeper, are skipped.
+    fn locals_at_depth(&self, unit: u32, depth: u32, lo: u64, hi: u64) -> Vec<(u64, Slot, Field)> {
+        self.locals_in(unit, Some(depth), lo, hi)
+            .into_iter()
+            .map(|(l, x, f, _)| (l, x, f))
+            .collect()
+    }
+
+    /// The local definitions with labels in `[lo, hi)` at scope depth
+    /// `depth` (any depth: `None`), as (label, node, field, depth), in
+    /// label order. Subtrees of the order without definitions, or lying
+    /// entirely deeper than `depth`, are skipped.
+    fn locals_in(&self, unit: u32, depth: Option<u32>, lo: u64, hi: u64) -> Vec<(u64, Slot, Field, u32)> {
+        let root = self.units[unit as usize].root;
+        let mut out = Vec::new();
+        if lo >= hi {
+            return out;
+        }
+        let mut before = OSum::default();
+        let skip = |before: OSum, sum: OSum| sum.ld == 0 || depth.is_some_and(|d| before.o.saturating_sub(sum.c) > d);
+        self.order
+            .visit(&OAug, root, lo, hi, &mut before, &skip, &mut |l, i: &OItem, _| {
+                if !i.ld {
+                    return;
+                }
+                let x = i.slot;
+                let shift = self.shift_at(unit, l);
+                for df in &self.n(x).defs {
+                    if df.global {
+                        continue;
+                    }
+                    let d = u32::try_from(df.depth + shift).unwrap_or(0);
+                    if depth.is_none_or(|want| want == d) {
+                        out.push((l, x, df.field, d));
+                    }
+                }
+            });
+        out
     }
 
     /// The reaching definition of `f` for a use at `label`, and the nearest
@@ -2956,11 +3085,7 @@ impl Engine {
             // The opener's own definitions inside its scope (its kind, or
             // all of them if it opens before itself) count at this level.
             let lo = opener.unwrap_or(0);
-            if let Some((&(_, _, _, l), &d)) = self
-                .local_ix
-                .range((unit, f, depth, lo)..(unit, f, depth, hi))
-                .next_back()
-            {
+            if let Some((l, d)) = self.latest_local(unit, f, depth, lo, hi) {
                 local = Some((l, d, depth));
                 break;
             }
@@ -3107,11 +3232,18 @@ impl Engine {
                 Ok(()) => return Some((p, s)),
                 Err(open) if open == p => {
                     // `p` lies at depth 0, as does everything back to the
-                    // close of the previous top-level scope: skip to it.
-                    hi = self
+                    // close of the previous top-level scope: skip to it,
+                    // except that an opener there with a definition of `f`
+                    // after it may hold the definition in its scope.
+                    let prev = self
                         .order
                         .search_back(&OAug, root, p, &|s: OSum| s.c >= 1)
                         .map_or(0, |k| k + 1);
+                    hi = self
+                        .defs_ix
+                        .range((unit, f, prev)..(unit, f, p))
+                        .next_back()
+                        .map_or(prev, |(&(_, _, l), _)| l + 1);
                 }
                 Err(open) => hi = open.min(p),
             }
@@ -3125,22 +3257,39 @@ impl Engine {
     /// an extra close makes `T`'s own close the ignored one), plus wherever a
     /// close was ignored at depth 0 after `p` (the caller has ruled that
     /// out). Only definitions of `f` in `T` can change visibility then;
-    /// elsewhere the shift is uniform.
+    /// elsewhere the shift is uniform. At depth 0, `T` is the outermost
+    /// scope `p` itself opens now (the order holds its last effect): were
+    /// it to open less, that scope's definitions would join the top level,
+    /// visible past its close.
     /// `Err(open)`: it cannot, nor can any effect in `(open, p)`.
     fn effect_scope(&self, unit: u32, p: u64, label: u64, f: Field) -> Result<(), u64> {
         let root = self.units[unit as usize].root;
         let depth = self.order.fold(&OAug, root, 0, p).o;
-        if depth == 0 {
-            return Err(p);
-        }
-        let open = self
-            .order
-            .search_back(&OAug, root, p, &|s: OSum| s.o >= depth)
-            .unwrap_or(0);
-        let close = self
-            .order
-            .search_fwd(&OAug, root, p, &|s: OSum| s.c >= depth)
-            .unwrap_or(u64::MAX);
+        let (open, close) = if depth == 0 {
+            let opens = self.order.get(root, p).map_or(0, |i| eff_opens(i.eff));
+            if opens == 0 {
+                return Err(p);
+            }
+            let close = self
+                .order
+                .search_fwd(&OAug, root, p, &|s: OSum| s.c >= opens)
+                .unwrap_or(u64::MAX);
+            if label <= close {
+                // The use lies inside: the latest definition before it
+                // reaches it, in or out of the scope.
+                return Err(p);
+            }
+            (p, close)
+        } else {
+            (
+                self.order
+                    .search_back(&OAug, root, p, &|s: OSum| s.o >= depth)
+                    .unwrap_or(0),
+                self.order
+                    .search_fwd(&OAug, root, p, &|s: OSum| s.c >= depth)
+                    .unwrap_or(u64::MAX),
+            )
+        };
         // An opener's start-of-sequence marker lies inside its scope.
         let from = if self.is_seq_hidden(f) { open } else { open + 1 };
         if self
@@ -3323,6 +3472,7 @@ impl Engine {
         if self.fresh_scope && !global {
             self.ix_insert(unit, f, lx, x);
             self.stream_touch(unit, lx);
+            self.sync_order_lazy(x);
             return;
         }
         let root = self.units[unit as usize].root;
@@ -3373,6 +3523,7 @@ impl Engine {
         }
         self.ix_insert(unit, f, lx, x);
         self.stream_touch(unit, lx);
+        self.sync_order_lazy(x);
         for (site, end) in prev {
             let from = site_key(unit, site);
             let movers: Vec<(u64, Slot)> = self
@@ -3459,6 +3610,12 @@ impl Engine {
         if self.def_depth(root, lx, f) == 0 {
             return u64::MAX;
         }
+        self.scope_end_at(root, lx, f)
+    }
+
+    /// Where a local definition of `f` at `lx` inside some scope stops
+    /// reaching (exclusive): the close of that scope, whatever the depth.
+    fn scope_end_at(&self, root: u32, lx: u64, f: Field) -> u64 {
         // The first unmatched close after the definition's brackets: the
         // node's own brackets count unless the definition lies inside
         // them (then they are matched, or close the scope it is in).
@@ -3533,6 +3690,7 @@ impl Engine {
         }
         self.ix_remove(unit, f, label, depth);
         self.stream_touch(unit, label);
+        self.sync_order_lazy(x);
         let from = x.pack();
         let users: Vec<(u64, Slot)> = self
             .users
@@ -3549,58 +3707,301 @@ impl Engine {
     /// its pending status changed): re-bind everything whose visibility may
     /// have changed, i.e. the region from it to where depth returns to 0.
     fn effect_region_changed(&mut self, p: Slot, old: u8) {
-        span!(Region);
         let e = self.oitem(p).eff;
         self.nm(p).bound = e;
-        let n = self.n(p);
-        let (unit, lp) = (n.unit, n.label);
+        let (unit, lp) = (self.n(p).unit, self.n(p).label);
         self.stream_touch(unit, lp);
+        self.effect_changed(unit, lp, old, e);
+        if self.n(p).state != State::Inert {
+            // Its own definitions may have moved into or out of its brackets.
+            self.rescope_node(unit, p);
+        }
+    }
+
+    /// The scope effect at `label` changed from `old` to `new` (the order
+    /// holds `new`, or nothing when the node is gone). Re-binds exactly the
+    /// uses whose reaching definition changed: at every enclosing level
+    /// whose close moved, the uses between the old and the new close either
+    /// leave the definitions directly in that scope or reach them now.
+    /// Records the depth shift of the labels after `label` for the index
+    /// instead of re-keying them.
+    #[allow(clippy::too_many_lines)]
+    fn effect_changed(&mut self, unit: u32, label: u64, old: u8, new: u8) {
+        span!(Region);
+        let (co, oo) = (eff_closes(old), eff_opens(old));
+        let (cn, on) = (eff_closes(new), eff_opens(new));
+        if (co, oo) == (cn, on) {
+            return;
+        }
+        self.flush_order();
         let root = self.units[unit as usize].root;
-        let before = self.order.fold(&OAug, root, 0, lp);
-        let depth_after = |eff: u8| {
-            OAug.combine(
-                before,
-                OAug.leaf(&OItem {
-                    slot: p,
-                    eff,
-                    pend: false,
-                    work: false,
-                    h: 0,
-                    reach: 0,
-                    hit: 0,
-                    sreach: 0,
-                }),
-            )
-            .o
-        };
-        let d_old = depth_after(old);
-        let d_new = depth_after(self.oitem(p).eff);
-        let reach = |d: u32| {
+        let before = self.order.fold(&OAug, root, 0, label);
+        let d0 = before.o;
+        // The first position after `label` where `d` closes accumulate.
+        let fwd = |e: &Self, d: u32| -> u64 {
             if d == 0 {
-                lp
+                label
             } else {
-                self.order
-                    .search_fwd(&OAug, root, lp, &|s: OSum| s.c >= d)
+                e.order
+                    .search_fwd(&OAug, root, label, &|s: OSum| s.c >= d)
                     .unwrap_or(u64::MAX)
             }
         };
-        let end = reach(d_old).max(reach(d_new));
-        // A node after its own brackets is inside the region.
-        let before_p = (old | self.oitem(p).eff) & EFF_BEFORE != 0;
-        if end == lp && !before_p {
-            return;
+        // Where the enclosing level `j` (1: innermost) closes when the node
+        // at `label` has `c` closes and `o` opens.
+        let close_at = |e: &Self, j: u32, c: u32, o: u32| -> u64 { if j <= c { label } else { fwd(e, j - c + o) } };
+        // The depth shift of the labels after `label`: `delta` until one
+        // version runs out of scopes, then one less per close that version
+        // ignores, until both have.
+        let after = |c: u32, o: u32| o + d0.saturating_sub(c);
+        let (da, dn) = (after(co, oo), after(cn, on));
+        let delta = i64::from(dn) - i64::from(da);
+        if delta != 0 {
+            let steps = delta.unsigned_abs();
+            let sign = delta.signum();
+            let lo_d = da.min(dn);
+            let mut from = label + 1;
+            for i in 1..=steps {
+                let to = fwd(self, lo_d + u32::try_from(i).expect("depth"));
+                let shift = i32::try_from(delta - sign * i64::try_from(i - 1).expect("depth")).expect("depth shift");
+                if from < to {
+                    self.units[unit as usize].shifts.push((from, to, shift));
+                }
+                if to == u64::MAX {
+                    break;
+                }
+                from = to;
+            }
         }
-        // p's own definitions are inside the scope it opens: their reach
-        // changes with its brackets, so they re-register too.
-        let mut region = Vec::new();
-        self.order.range(root, lp, end.max(lp), &mut region, usize::MAX);
-        self.report.scope_region += region.len() as u64;
-        count!(RegionNode, region.len());
-        for (_, s) in region {
-            if !self.live(s) || self.n(s).state == State::Inert {
+        // The enclosing openers, innermost first (as the walk finds them).
+        let mut openers = Vec::new();
+        let (mut bhi, mut extra, mut depth) = (label, 0, d0);
+        while depth > 0 {
+            let Some(k) = self.order.search_back(&OAug, root, bhi, &|s: OSum| s.o > extra) else {
+                break;
+            };
+            openers.push(k);
+            extra = self.order.get(root, k).map_or(0, |i| eff_closes(i.eff));
+            bhi = k;
+            depth -= 1;
+        }
+        // A scope closing at `e` holds the closer's own reads too, unless
+        // its brackets come before it (its kind read always): the end of
+        // the use positions in the scope, for `f`.
+        let use_end = |e: &Self, k: u64, f: Field| -> u64 {
+            if k == u64::MAX || (f != e.kind_field && e.brackets_before(root, k)) {
+                k
+            } else {
+                k + 1
+            }
+        };
+        let mut cands: Vec<(u64, Slot, Field)> = Vec::new();
+        // Users of `x`'s definition of `f` at positions `[lo, hi)`.
+        let users_of = |e: &Self, from: u64, f: Field, lo: u64, hi: u64, out: &mut Vec<(u64, Slot, Field)>| {
+            if lo < hi {
+                out.extend(
+                    e.users
+                        .range((from, f, lo)..(from, f, hi))
+                        .map(|(&(_, _, l), &u)| (l, u, f)),
+                );
+            }
+        };
+        // The chain reads of `x`'s definition of `f`, wherever they were
+        // made: they are read at other nodes' positions, so any change in
+        // the definition's reach may concern them.
+        let chains_of = |e: &Self, from: u64, f: Field, out: &mut Vec<(u64, Slot, Field)>| {
+            out.extend(
+                e.chain_users
+                    .range((from, f, 0)..=(from, f, u64::MAX))
+                    .map(|(&(_, _, l), &u)| (l, u, f)),
+            );
+        };
+        // The uses of `f` in `[lo, hi)` that a local definition at `d`
+        // (visible there now) may take: those bound to what reaches `at`,
+        // and those bound to a global before `d` (a later local wins).
+        let arrivals = |e: &Self, f: Field, d: u64, at: u64, lo: u64, hi: u64, out: &mut Vec<(u64, Slot, Field)>| {
+            if lo >= hi {
+                return;
+            }
+            let o = site_key(unit, e.walk(unit, at, f).site);
+            users_of(e, o, f, lo, hi, out);
+            chains_of(e, o, f, out);
+            let globals: Vec<Slot> = e.global_ix.range((unit, f, 0)..(unit, f, d)).map(|(_, &g)| g).collect();
+            for g in globals {
+                if g.pack() != o {
+                    users_of(e, g.pack(), f, lo, hi, out);
+                    chains_of(e, g.pack(), f, out);
+                }
+            }
+        };
+        for (i, &t) in openers.iter().enumerate() {
+            let j = u32::try_from(i + 1).expect("depth");
+            let (a, b) = (close_at(self, j, co, oo), close_at(self, j, cn, on));
+            if a == b {
+                // This level closes where it did; a level around it may
+                // still differ (one node can close several at once).
                 continue;
             }
-            self.rescope_node(unit, s);
+            let depth = d0 - j + 1;
+            if b < a {
+                // The scope closes earlier: the uses in [b, a) leave the
+                // definitions directly in it.
+                for (_, x, f) in self.locals_at_depth(unit, depth, t, b) {
+                    users_of(self, x.pack(), f, use_end(self, b, f), use_end(self, a, f), &mut cands);
+                    chains_of(self, x.pack(), f, &mut cands);
+                }
+            } else {
+                // The scope closes later: the uses in [a, b) may reach its
+                // definitions now (per field, the latest directly in it).
+                let mut latest: Vec<(Field, u64)> = Vec::new();
+                for (l, _, f) in self.locals_at_depth(unit, depth, t, a) {
+                    match latest.iter_mut().find(|e| e.0 == f) {
+                        Some(e) => e.1 = e.1.max(l),
+                        None => latest.push((f, l)),
+                    }
+                }
+                for (f, d) in latest {
+                    arrivals(self, f, d, t, use_end(self, a, f), use_end(self, b, f), &mut cands);
+                }
+            }
+            // What lies between the old and the new close changed level.
+            // Inside some scope its definitions still stop at the first
+            // unmatched close after them (the closes after the change are
+            // what they were); only the unit's top level, which never
+            // closes, makes a difference: text expelled to it reaches past
+            // its old scope's end now, text absorbed from it no longer
+            // reaches past `b`.
+            if j == d0 {
+                if b < a {
+                    for (l, _, f) in self.locals_at_depth(unit, 0, b + 1, a) {
+                        arrivals(self, f, l, l, self.scope_end_at(root, l, f), u64::MAX, &mut cands);
+                    }
+                } else {
+                    // Everything in (a, b) was top-level: whatever scope
+                    // holds it now, its definitions stop at that scope's end.
+                    for (l, x, f, _) in self.locals_in(unit, None, a + 1, b) {
+                        users_of(self, x.pack(), f, self.scope_end_at(root, l, f), u64::MAX, &mut cands);
+                        chains_of(self, x.pack(), f, &mut cands);
+                    }
+                }
+            }
+        }
+        // The scopes the node itself opens or opened: what lies in one it
+        // gains was in an enclosing level before, and what lies in one it
+        // loses joins an enclosing level now. For an enclosing opener the
+        // level rule above covers the move (the closes coincide); only the
+        // unit's top level, which never closes, needs it here.
+        for m in 1..=oo.max(on) {
+            let e = fwd(self, m);
+            if m > oo {
+                // Gained: its direct definitions were visible to the end.
+                if m - oo > d0 {
+                    let depth = d0 + on - m + 1;
+                    for (_, x, f) in self.locals_at_depth(unit, depth, label + 1, e) {
+                        users_of(self, x.pack(), f, use_end(self, e, f), u64::MAX, &mut cands);
+                        chains_of(self, x.pack(), f, &mut cands);
+                    }
+                }
+            } else if m > on && m - on > d0 {
+                // Lost: its direct definitions are top-level now, visible
+                // past its close.
+                for (l, _, f) in self.locals_at_depth(unit, 0, label + 1, e) {
+                    arrivals(self, f, l, l, use_end(self, e, f), u64::MAX, &mut cands);
+                }
+            }
+        }
+        cands.sort_unstable();
+        cands.dedup();
+        self.report.scope_region += cands.len() as u64;
+        count!(RegionNode, cands.len());
+        for (l, u, f) in cands {
+            if !self.live(u) || self.n(u).state == State::Inert {
+                continue;
+            }
+            // Every read of `f` the node made: a chain link is read at the
+            // previous link's position, so the node runs again; a plain read
+            // re-binds in place.
+            let reads: Vec<Use> = self
+                .n(u)
+                .uses
+                .iter()
+                .filter(|x| (x.kind == K_FIELD || x.kind == K_CHAIN) && x.key == f.0.0)
+                .copied()
+                .collect();
+            if reads.iter().any(|x| x.kind == K_CHAIN) {
+                self.make_dirty(u);
+                continue;
+            }
+            for use_ in reads {
+                let w = self.walk(unit, l, f);
+                if w.site != use_.site {
+                    self.move_user(site_key(unit, use_.site), site_key(unit, w.site), f, l, u, w.site);
+                }
+            }
+        }
+        // Small ranges are re-keyed at once; large ones stay lazy until
+        // the sweeps retire them (or too many accumulate).
+        if !self.units[unit as usize].shifts.is_empty() {
+            self.sweep_shifts(unit, 4096);
+            while self.units[unit as usize].shifts.len() > 16 {
+                self.sweep_shifts(unit, usize::MAX);
+            }
+        }
+    }
+
+    /// Re-keys the definitions under the oldest pending shift of `unit`, up
+    /// to `budget` nodes, and retires the shift once its range is done.
+    /// Returns whether anything is left pending.
+    fn sweep_shifts(&mut self, unit: u32, budget: usize) -> bool {
+        let Some(&(lo, hi, delta)) = self.units[unit as usize].shifts.first() else {
+            return false;
+        };
+        let root = self.units[unit as usize].root;
+        let mut nodes: Vec<(u64, Slot)> = Vec::new();
+        self.order
+            .range(root, lo, hi.saturating_sub(1), &mut nodes, budget.saturating_add(1));
+        let more = nodes.len() > budget;
+        if more {
+            nodes.pop();
+        }
+        for &(l, x) in &nodes {
+            if !self.live(x) || self.n(x).has(F_APP) {
+                continue;
+            }
+            let defs: Vec<(Field, i32)> = self
+                .n(x)
+                .defs
+                .iter()
+                .filter(|d| !d.global)
+                .map(|d| (d.field, d.depth))
+                .collect();
+            for (f, d) in defs {
+                self.local_ix.remove(&(unit, f, d, l));
+                self.local_ix.insert((unit, f, d + delta, l), x);
+                for df in &mut self.nm(x).defs {
+                    if df.field == f {
+                        df.depth = d + delta;
+                    }
+                }
+            }
+        }
+        let shifts = &mut self.units[unit as usize].shifts;
+        if more {
+            shifts[0].0 = nodes.last().map_or(hi, |n| n.0 + 1);
+        } else {
+            shifts.remove(0);
+        }
+        !shifts.is_empty()
+    }
+
+    /// Retires pending depth shifts a little at a time (after an
+    /// evaluation), so a bracket edit never pays for the whole unit at once.
+    fn sweep_all_shifts(&mut self, budget: usize) {
+        for u in 0..self.units.len() {
+            if self.units[u].live && !self.units[u].shifts.is_empty() {
+                let unit = u32::try_from(u).expect("unit");
+                self.sweep_shifts(unit, budget);
+            }
         }
     }
 
@@ -4530,44 +4931,8 @@ impl Engine {
 
     /// After removing a bracket node at `label`: re-bind the region it
     /// shaped, starting from the node after it.
-    fn effect_region_changed_at(&mut self, unit: u32, label: u64, old: u8, _next_eff: u8, next: Slot) {
-        span!(Region);
-        let root = self.units[unit as usize].root;
-        let before = self.order.fold(&OAug, root, 0, label);
-        let d = OAug
-            .combine(
-                before,
-                OAug.leaf(&OItem {
-                    slot: NIL,
-                    eff: old,
-                    pend: false,
-                    work: false,
-                    h: 0,
-                    reach: 0,
-                    hit: 0,
-                    sreach: 0,
-                }),
-            )
-            .o
-            .max(before.o);
-        let end = if d == 0 {
-            label
-        } else {
-            self.order
-                .search_fwd(&OAug, root, label, &|s: OSum| s.c >= d)
-                .unwrap_or(u64::MAX)
-        };
-        let mut region = Vec::new();
-        self.order.range(root, label, end, &mut region, usize::MAX);
-        let _ = next;
-        self.report.scope_region += region.len() as u64;
-        count!(RegionNode, region.len());
-        for (_, s) in region {
-            if !self.live(s) || self.n(s).state == State::Inert {
-                continue;
-            }
-            self.rescope_node(unit, s);
-        }
+    fn effect_region_changed_at(&mut self, unit: u32, label: u64, old: u8, _next_eff: u8, _next: Slot) {
+        self.effect_changed(unit, label, old, EFF_NONE);
     }
 
     // ------------------------------------------------------- accumulators
@@ -4790,8 +5155,11 @@ impl Engine {
         for u in &old {
             match u.kind {
                 K_FIELD | K_CHAIN | K_ENV if has_label => {
-                    self.users
-                        .remove(&(site_key(unit, u.site), Field(ValueId(u.key)), label));
+                    let key = (site_key(unit, u.site), Field(ValueId(u.key)), label);
+                    self.users.remove(&key);
+                    if u.kind == K_CHAIN {
+                        self.chain_users.remove(&key);
+                    }
                 }
                 K_OUTPUT => {
                     let t = Slot::unpack(u.key);
@@ -4811,8 +5179,11 @@ impl Engine {
         for u in new {
             match u.kind {
                 K_FIELD | K_CHAIN | K_ENV if has_label => {
-                    self.users
-                        .insert((site_key(unit, u.site), Field(ValueId(u.key)), label), x);
+                    let key = (site_key(unit, u.site), Field(ValueId(u.key)), label);
+                    self.users.insert(key, x);
+                    if u.kind == K_CHAIN {
+                        self.chain_users.insert(key, x);
+                    }
                 }
                 K_OUTPUT => {
                     let t = Slot::unpack(u.key);
@@ -6064,6 +6435,7 @@ impl Engine {
             self.collect_apps(false);
         }
         self.sweep_values(result.as_ref().err());
+        self.sweep_all_shifts(50_000);
         self.finalize_report();
         let report = std::mem::take(&mut self.report);
         result.map(|()| report)

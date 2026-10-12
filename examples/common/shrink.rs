@@ -86,8 +86,10 @@ pub enum Sched {
     Seq,
     /// Speculative greedy on this many threads.
     Spec(usize),
-    /// Random order, a new seed per evaluation (every other one speculative).
-    Random,
+    /// Random order, a new seed per evaluation (every other one
+    /// speculative): the seeds count on from this base at the start of a
+    /// replay, so a replay runs the schedules the original run did.
+    Random(u64),
 }
 
 impl Sched {
@@ -95,12 +97,22 @@ impl Sched {
         match s {
             "seq" => Some(Sched::Seq),
             "spec" => Some(Sched::Spec(3)),
-            "random" => Some(Sched::Random),
+            "random" => Some(Sched::Random(0)),
+            s if s.starts_with("random:") => s[7..].parse().ok().map(Sched::Random),
             s => s.strip_prefix("spec:").and_then(|t| t.parse().ok()).map(Sched::Spec),
         }
     }
 
-    pub const ALL: [Sched; 3] = [Sched::Seq, Sched::Spec(3), Sched::Random];
+    pub const ALL: [Sched; 3] = [Sched::Seq, Sched::Spec(3), Sched::Random(0)];
+}
+
+/// The seed the next random-order evaluation takes.
+pub fn counter() -> u64 {
+    COUNTER.with(Cell::get)
+}
+
+pub fn set_counter(v: u64) {
+    COUNTER.with(|c| c.set(v));
 }
 
 thread_local! { static COUNTER: Cell<u64> = const { Cell::new(0) }; }
@@ -117,7 +129,7 @@ pub fn evaluate(eng: &mut Engine, sched: Sched) -> bool {
         Sched::Spec(t) => eng
             .evaluate(&mut Greedy::speculative(Speculation::All, 512), &mut Threads(t))
             .is_ok(),
-        Sched::Random => eng
+        Sched::Random(_) => eng
             .evaluate(&mut RandomScheduler::new(m, m.is_multiple_of(2)), &mut Sequential)
             .is_ok(),
     }
@@ -132,6 +144,9 @@ pub fn ok(eng: &mut Engine, p: &Program, sched: Sched) -> bool {
 /// Whether `start` is fine cold, every edit but the last keeps it fine, and
 /// the last one breaks it.
 pub fn replay_bad(start: &[String], eds: &[Ed], sched: Sched) -> bool {
+    if let Sched::Random(base) = sched {
+        set_counter(base);
+    }
     let (mut eng, mut p) = Program::load(start.to_vec());
     if !ok(&mut eng, &p, sched) {
         return false;
@@ -255,6 +270,10 @@ pub fn report(start: &[String], eds: &[Ed], sched: Sched) {
     }
     println!("EDITS");
     print!("{}", edits_text(eds));
+    println!("SCHED {sched:?}");
+    if let Sched::Random(base) = sched {
+        set_counter(base);
+    }
     let (mut eng, mut p) = Program::load(start.to_vec());
     evaluate(&mut eng, sched);
     for e in eds {
