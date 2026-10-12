@@ -431,7 +431,14 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
         cv::FONT_NAME | cv::FONT_OBJNUM => {
             let f = r.scan_font_ident()?;
             let (name, obj) = font_num(r, f)?;
-            pdf_cmd(r, "fontobjnum", f, "");
+            let fid = u32::try_from(f).unwrap_or(0);
+            let input = pdf_input(r, "fontobjnum", f, ValueId::UNIT)?;
+            let got = crate::pdfout::command(r, input, &[fid], |st, fs| {
+                let n = st.font_name(fid, fs).ok()?;
+                let o = st.font_objnum(fid, fs).ok()?;
+                Some((n, o))
+            })?;
+            let (name, obj) = got.unwrap_or((name, obj));
             (if c == cv::FONT_NAME { name } else { obj }).to_string()
         }
         cv::FONT_SIZE => {
@@ -606,7 +613,17 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
                 .map(|x| list_of(v, x))
                 .unwrap_or_default();
             // stack 0 is pdfTeX's own ("0 g 0 G")
-            let n = stacks.len() + 1;
+            let input = v.list(vec![
+                v.str("colorstackinit"),
+                v.int(i64::from(page)),
+                v.int(mode),
+                v.str(&s),
+            ]);
+            let init = bytes(&s);
+            let got = crate::pdfout::command(r, input, &[], |st, _| {
+                st.colorstack_init(page, mode == 2, &init).ok()
+            })?;
+            let n = got.unwrap_or(stacks.len() + 1);
             stacks.push(v.list(vec![v.int(i64::from(page)), v.int(mode), v.str(&s)]));
             r.set("pdf:colorstacks", v.list(stacks), true);
             n.to_string()
@@ -1614,12 +1631,12 @@ impl Run<'_, '_> {
 
 // ------------------------------------------------- whatsits and objects
 
-/// A font command the PDF writer takes when it is read, in document
-/// order (the `pdfcmds` sequence).
-fn pdf_cmd(r: &mut Run<'_, '_>, kind: &str, f: i64, text: &str) {
+/// The input of a font command's writer step: the command, the font
+/// as loaded (its `fontinfo`), and the data.
+fn pdf_input(r: &mut Run<'_, '_>, kind: &str, f: i64, data: ValueId) -> R<ValueId> {
     let v = r.v;
-    let e = v.list(vec![v.str(kind), v.int(f), v.str(text)]);
-    r.contribute("pdfcmds", v.seq_unit(e));
+    let info = r.get(&format!("fontinfo:{f}"))?.unwrap_or(ValueId::UNIT);
+    Ok(v.list(vec![v.str(kind), v.int(f), info, data]))
 }
 
 fn whatsit(r: &mut Run<'_, '_>, md: &Mode, data: Vec<ValueId>) {
@@ -2075,26 +2092,45 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
         ex::INFO => {
             let t = ext_value(r)?;
             append_text(r, "pdf:info", t)?;
+            let tb = bytes(&str_of(v, t));
+            let input = v.list(vec![s("info"), t]);
+            crate::pdfout::command(r, input, &[], |st, _| st.info(&tb))?;
         }
         ex::CATALOG => {
             let t = ext_value(r)?;
             append_text(r, "pdf:catalog", t)?;
+            // PDF-BACKEND-GAP: `openaction`'s action to the writer
+            // (`Action` from the scanned value)
             if r.scan_keyword("openaction")? {
                 let a = action(r)?;
                 r.set("pdf:openaction", a, true);
             }
+            let tb = bytes(&str_of(v, t));
+            let input = v.list(vec![s("catalog"), t]);
+            crate::pdfout::command(r, input, &[], |st, _| {
+                let _ = st.catalog(&tb, None);
+            })?;
         }
         ex::NAMES => {
             let t = ext_value(r)?;
             append_text(r, "pdf:names", t)?;
+            let tb = bytes(&str_of(v, t));
+            let input = v.list(vec![s("names"), t]);
+            crate::pdfout::command(r, input, &[], |st, _| st.names(&tb))?;
         }
         ex::TRAILER => {
             let t = ext_value(r)?;
             append_text(r, "pdf:trailer", t)?;
+            let tb = bytes(&str_of(v, t));
+            let input = v.list(vec![s("trailer"), t]);
+            crate::pdfout::command(r, input, &[], |st, _| st.trailer(&tb))?;
         }
         ex::TRAILER_ID => {
             let t = ext_value(r)?;
             r.set("pdf:trailerid", t, true);
+            let tb = bytes(&str_of(v, t));
+            let input = v.list(vec![s("trailerid"), t]);
+            crate::pdfout::command(r, input, &[], |st, _| st.trailer_id(&tb))?;
         }
         ex::INCLUDE_CHARS | ex::FONT_ATTR => {
             let attr = r.cur.chr == ex::FONT_ATTR;
@@ -2105,9 +2141,17 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
             } else {
                 format!("pdf:includechars:{f}")
             };
-            let ts = str_of(v, t);
-            pdf_cmd(r, if attr { "fontattr" } else { "includechars" }, f, &ts);
             r.set(&name, t, true);
+            let fid = u32::try_from(f).unwrap_or(0);
+            let tb = bytes(&str_of(v, t));
+            let input = pdf_input(r, if attr { "fontattr" } else { "includechars" }, f, t)?;
+            crate::pdfout::command(r, input, &[fid], |st, fs| {
+                if attr {
+                    st.font_attr(fid, &tb, fs);
+                } else {
+                    let _ = st.include_chars(fid, &tb, fs);
+                }
+            })?;
         }
         ex::MAP_FILE | ex::MAP_LINE => {
             let t = ext_value(r)?;
@@ -2118,8 +2162,16 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
             };
             let e = v.list(vec![s(k), t]);
             append_text(r, "pdf:maps", e)?;
-            let e = v.list(vec![s("map"), s(k), t]);
-            r.contribute("pdfcmds", v.seq_unit(e));
+            let input = v.list(vec![s("map"), s(k), t]);
+            let tb = bytes(&str_of(v, t));
+            let file = k == "file";
+            crate::pdfout::command(r, input, &[], |st, fs| {
+                if file {
+                    st.map_file(&tb, fs);
+                } else {
+                    st.map_line(&tb);
+                }
+            })?;
         }
         ex::RESET_TIMER => {}
         ex::SET_RANDOM_SEED => {
@@ -2146,13 +2198,16 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
             let a = ext_value(r)?;
             let b = ext_value(r)?;
             append_text(r, "pdf:glyphtounicode", v.list(vec![a, b]))?;
-            let e = v.list(vec![v.str("glyphtounicode"), a, b]);
-            r.contribute("pdfcmds", v.seq_unit(e));
+            let (ab, bb) = (bytes(&str_of(v, a)), bytes(&str_of(v, b)));
+            let input = v.list(vec![v.str("glyphtounicode"), a, b]);
+            crate::pdfout::command(r, input, &[], |st, _| st.glyph_to_unicode(&ab, &bb))?;
         }
         ex::NOBUILTIN_TOUNICODE => {
             let f = r.scan_font_ident()?;
             r.set(&format!("pdf:nobuiltintounicode:{f}"), v.int(1), true);
-            pdf_cmd(r, "nobuiltintounicode", f, "");
+            let fid = u32::try_from(f).unwrap_or(0);
+            let input = pdf_input(r, "nobuiltintounicode", f, ValueId::UNIT)?;
+            crate::pdfout::command(r, input, &[fid], |st, fs| st.no_builtin_tounicode(fid, fs))?;
         }
         ex::INTERWORD_SPACE_ON => whatsit(r, md, vec![s("pdf:interwordspaceon")]),
         ex::INTERWORD_SPACE_OFF => whatsit(r, md, vec![s("pdf:interwordspaceoff")]),

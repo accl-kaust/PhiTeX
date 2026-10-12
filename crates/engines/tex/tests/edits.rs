@@ -232,3 +232,35 @@ fn prelude_round_trip() {
     assert_eq!(b.export_prelude(), bytes);
     assert_eq!(a.output().0, b.output().0);
 }
+
+/// `Build::pages` and §642's log line on `pages.tex`: four pages, the
+/// line pdfTeX's `tex` writes; an edit on the last page changes that
+/// page's hash only.
+#[test]
+fn page_hashes_and_output_line() {
+    let fx = common::fixtures().join("plain");
+    let src = common::read(&fx.join("pages.tex"));
+    let want = std::fs::read(fx.join("pages.dvi")).expect("pages.dvi");
+    let comment = common::dvi_comment(&want);
+    let prelude = common::plain();
+    let opts = || common::options("./pages.tex", "pages", &comment, &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let (dvi, log) = b.output();
+    assert_eq!(dvi, want);
+    let before = b.pages();
+    assert_eq!(before.len(), 4);
+    let line = format!(
+        "Output written on pages.dvi (4 pages, {} bytes).",
+        want.len()
+    );
+    assert_eq!(log.trim_end().rsplit('\n').next(), Some(line.as_str()));
+    let new = src.replace("Fourteen.", "Fourteem.");
+    assert_ne!(new, src);
+    b.edit(&new);
+    let after = b.pages();
+    assert_eq!(after.len(), 4);
+    let changed: Vec<usize> = (0..4).filter(|&i| before[i] != after[i]).collect();
+    assert_eq!(changed, vec![3], "pages whose hash changed");
+    let cold = common::build(opts(), Some(&prelude), &new);
+    assert_eq!(cold.pages(), after);
+}

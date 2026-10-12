@@ -409,7 +409,7 @@ impl Graph {
         let ops = Ops { exec, put, outpage };
         let _ = shared.set(ops);
         for f in [
-            "items", "log", "needs", "defs", "pages", "writes", "tails", "streams", "pdfcmds",
+            "items", "log", "needs", "defs", "pages", "pagehash", "writes", "tails", "streams",
         ] {
             let fld = eng.values().field(f);
             eng.declare_accumulator(fld, Arc::new(SeqMonoid));
@@ -722,7 +722,8 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
                     let f = Field(n);
                     let name = field_name(v, f);
                     // open files are not dumped
-                    if ["wopen:", "write:", "file:", "read:"]
+                    // nor is the PDF writer's state (pdfTeX dumps no objects)
+                    if ["wopen:", "write:", "file:", "read:", "pdf:state"]
                         .iter()
                         .any(|p| name.starts_with(p))
                     {
@@ -1011,7 +1012,7 @@ impl Build {
     #[must_use]
     pub fn output(&self) -> (Vec<u8>, String) {
         let v = self.g.eng.values();
-        let dvi = self
+        let dvi: Vec<u8> = self
             .g
             .eng
             .output(self.dvi)
@@ -1022,9 +1023,52 @@ impl Build {
                     .collect()
             })
             .unwrap_or_default();
+        let n = self.pages().len();
+        let end = if n == 0 {
+            "No pages of output.".to_owned()
+        } else {
+            // §642 (pdfTeX §794): the file's name, its pages and bytes
+            let ext = if dvi.starts_with(b"%PDF") {
+                "pdf"
+            } else {
+                "dvi"
+            };
+            format!(
+                "Output written on {}.{ext} ({n} page{}, {} bytes).",
+                self.opts.jobname,
+                if n == 1 { "" } else { "s" },
+                dvi.len()
+            )
+        };
         let log_f = v.field("log");
-        let log = crate::log::layout(v, &self.opts.name, self.g.eng.acc_value(self.unit, log_f));
+        let log = crate::log::layout(
+            v,
+            &self.opts.name,
+            self.g.eng.acc_value(self.unit, log_f),
+            &end,
+        );
         (dvi, log)
+    }
+
+    /// The pages shipped, first first: a hash of what each shows (a PDF
+    /// page's content stream, uncompressed, with its size and
+    /// `\pdfpageattr`; a DVI page's `bop`..`eop` bytes, the back pointer
+    /// left out), with no object numbers or file offsets, so a page
+    /// an edit leaves alone keeps its hash.
+    #[must_use]
+    pub fn pages(&self) -> Vec<u64> {
+        let v = self.g.eng.values();
+        let f = v.field("pagehash");
+        self.g
+            .eng
+            .acc_value(self.unit, f)
+            .map(|s| {
+                v.seq_to_vec(s)
+                    .into_iter()
+                    .map(|x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The `\write` streams' lines: `(stream, text)`.

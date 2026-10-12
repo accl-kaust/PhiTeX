@@ -14,7 +14,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use phitex_defuse::{Ctx, Stop, Value, ValueId};
+use phitex_defuse::{Ctx, Stop, Value, ValueId, Values};
 use phitex_typeset::glue::Glue;
 use phitex_typeset::node::{List, Node};
 use phitex_typeset::pack::{PackParams, Spec};
@@ -85,11 +85,12 @@ impl Run<'_, '_> {
                 }
             }
         }
-        let view = self.font_view(std::slice::from_ref(&Node::Box(bx)))?;
+        let page_box = Node::Box(bx);
+        let view = self.font_view(std::slice::from_ref(&page_box))?;
         let mut fonts = Vec::new();
         let mut ids: Vec<u32> = view.fonts.keys().copied().collect();
         ids.sort_unstable();
-        for f in ids {
+        for &f in &ids {
             let info = self.get(&format!("fontinfo:{f}"))?;
             let Some(i) = crate::fonts::info(v, info) else {
                 continue;
@@ -105,8 +106,14 @@ impl Run<'_, '_> {
         let cs = v.list(counts.iter().map(|&c| v.int(i64::from(c))).collect());
         let pdf = self.pdf_page_params(pos.pdf)?;
         let page = v.list(vec![b, cs, v.list(fonts), pdf, v.list(pdf_data)]);
+        let shown = match &page_box {
+            Node::Box(bx) if pos.pdf => crate::pdfout::ship(self, page, bx, &side, &ids)?,
+            _ => dvi_shown(v, page),
+        };
         let su = v.seq_unit(page);
         self.contribute("pages", su);
+        let h = v.seq_unit(v.int(i64::from_ne_bytes(shown.to_ne_bytes())));
+        self.contribute("pagehash", h);
         self.log("shipend", "]")?;
         self.set("deadcycles", v.int(0), true);
         Ok(())
@@ -486,7 +493,7 @@ pub(crate) fn dvi(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
             .is_some_and(|&x| crate::val::int_at(v, x, 0) != 0)
     });
     if pdf {
-        return crate::pdfout::write(cx, &all);
+        return crate::pdfout::finish(cx);
     }
     let comment = cx
         .use_field(v.field("dvicomment"))?
@@ -497,59 +504,78 @@ pub(crate) fn dvi(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         .map_or(1000, |x| int_of(v, x));
     let mut w = phitex_dvi::DviWriter::new(i32::try_from(mag).unwrap_or(1000), &comment);
     for page in v.seq_to_vec(pages) {
-        let xs = list_of(v, page);
-        let mut side = Side::default();
-        let Some(Node::Box(bx)) = xs.first().and_then(|&b| nodes::decode(v, b, &mut side)) else {
-            continue;
-        };
-        let mut counts = [0i32; 10];
-        for (k, c) in xs
-            .get(1)
-            .map(|&l| list_of(v, l))
-            .unwrap_or_default()
-            .iter()
-            .enumerate()
-            .take(10)
-        {
-            counts[k] = i32::try_from(int_of(v, *c)).unwrap_or(0);
-        }
-        let mut defs = std::collections::HashMap::new();
-        for fx in xs.get(2).map(|&l| list_of(v, l)).unwrap_or_default() {
-            let ys = list_of(v, fx);
-            let id = u32::try_from(ys.first().map_or(0, |&y| int_of(v, y))).unwrap_or(0);
-            let name = ys.get(1).map(|&y| str_of(v, y)).unwrap_or_default();
-            let s = i32::try_from(ys.get(3).map_or(0, |&y| int_of(v, y))).unwrap_or(0);
-            if let Some(&file) = ys.get(2)
-                && let Some(l) = crate::fonts::load(v, file, s)
-            {
-                defs.insert(id, crate::fonts::font_def(&l, &name));
-            }
-        }
-        let fonts = |f: u32| {
-            defs.get(&f).cloned().unwrap_or(phitex_dvi::FontDef {
-                checksum: [0; 4],
-                size: 0,
-                design_size: 0,
-                area: Vec::new(),
-                name: Vec::new(),
-                widths: Vec::new(),
-            })
-        };
-        let whats = side.whats.clone();
-        let mut wh = |h: u32, _leaders: bool| -> Option<Vec<u8>> {
-            let w = *whats.get(h as usize)?;
-            let ys = list_of(v, w);
-            if ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special") {
-                Some(crate::fonts::bytes_of(
-                    &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
-                ))
-            } else {
-                None
-            }
-        };
-        let _ = w.ship_out(&bx, counts, &fonts, &mut wh);
+        dvi_page(v, &mut w, page);
     }
     let bytes = w.finish();
     let s: String = bytes.iter().map(|&b| char::from(b)).collect();
     Ok(v.intern(Value::Str(s.into_boxed_str())))
+}
+
+/// One page of the `pages` contribution into `w` (§640).
+fn dvi_page(v: &Values, w: &mut phitex_dvi::DviWriter, page: ValueId) {
+    let xs = list_of(v, page);
+    let mut side = Side::default();
+    let Some(Node::Box(bx)) = xs.first().and_then(|&b| nodes::decode(v, b, &mut side)) else {
+        return;
+    };
+    let mut counts = [0i32; 10];
+    for (k, c) in xs
+        .get(1)
+        .map(|&l| list_of(v, l))
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .take(10)
+    {
+        counts[k] = i32::try_from(int_of(v, *c)).unwrap_or(0);
+    }
+    let mut defs = std::collections::HashMap::new();
+    for fx in xs.get(2).map(|&l| list_of(v, l)).unwrap_or_default() {
+        let ys = list_of(v, fx);
+        let id = u32::try_from(ys.first().map_or(0, |&y| int_of(v, y))).unwrap_or(0);
+        let name = ys.get(1).map(|&y| str_of(v, y)).unwrap_or_default();
+        let s = i32::try_from(ys.get(3).map_or(0, |&y| int_of(v, y))).unwrap_or(0);
+        if let Some(&file) = ys.get(2)
+            && let Some(l) = crate::fonts::load(v, file, s)
+        {
+            defs.insert(id, crate::fonts::font_def(&l, &name));
+        }
+    }
+    let fonts = |f: u32| {
+        defs.get(&f).cloned().unwrap_or(phitex_dvi::FontDef {
+            checksum: [0; 4],
+            size: 0,
+            design_size: 0,
+            area: Vec::new(),
+            name: Vec::new(),
+            widths: Vec::new(),
+        })
+    };
+    let whats = side.whats.clone();
+    let mut wh = |h: u32, _leaders: bool| -> Option<Vec<u8>> {
+        let w = *whats.get(h as usize)?;
+        let ys = list_of(v, w);
+        if ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special") {
+            Some(crate::fonts::bytes_of(
+                &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
+            ))
+        } else {
+            None
+        }
+    };
+    let _ = w.ship_out(&bx, counts, &fonts, &mut wh);
+}
+
+/// What a DVI page shows: the hash of its `bop`..`eop` bytes written
+/// alone, the back pointer left out (it names the previous page's
+/// place).
+fn dvi_shown(v: &Values, page: ValueId) -> u64 {
+    let mut w = phitex_dvi::DviWriter::new(1000, "");
+    let at = w.location();
+    dvi_page(v, &mut w, page);
+    let b = &w.bytes()[at..];
+    if b.len() < 45 {
+        return phitex_defuse::hash_bytes(0, b);
+    }
+    phitex_defuse::hash_bytes(phitex_defuse::hash_bytes(0, &b[..41]), &b[45..])
 }
