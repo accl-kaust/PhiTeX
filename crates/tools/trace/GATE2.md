@@ -22,10 +22,9 @@ the vendored defuse subtree has no commit of its own).
 
 At the stop, 20 of the 33 documents were converted with the current
 converter (a7f885c1), and the v1 rules (`src/v1.rs`) accepted all 20.
-- LaTeX docs/: all 20 except latex-math, which was not reached in this pass.
-- pdfdocs/ and plain/: not reached in this pass.
-The earlier pass converted latex-math and all five plain/ documents
-(accepted).
+These are the 20 documents of LaTeX docs/. The pdfdocs/ and plain/
+documents were not reached in this pass; an earlier pass converted the
+five plain/ documents, and they were accepted.
 
 ## Indicative runs (earlier conversion, engine before a047cc99, threads 1)
 
