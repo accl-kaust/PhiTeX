@@ -674,10 +674,14 @@ impl<'a> T1<'a> {
     /// `t1_scan_keys`.
     #[allow(clippy::cast_possible_truncation)]
     fn scan_keys(&mut self) -> Result<(), PdfError> {
-        if (self.fm.extend != 0 || self.fm.slant != 0)
-            && (self.prefix(b"/FontMatrix") || self.prefix(b"/ItalicAngle"))
-        {
-            return Err(PdfError::Unsupported("SlantFont and ExtendFont".into()));
+        if self.fm.extend != 0 || self.fm.slant != 0 {
+            if self.prefix(b"/FontMatrix") {
+                return self.modify_fm();
+            }
+            if self.prefix(b"/ItalicAngle") {
+                self.modify_italic();
+                return Ok(());
+            }
         }
         if self.prefix(b"/FontType") {
             let p = &self.line[9..];
@@ -760,6 +764,76 @@ impl<'a> T1<'a> {
         };
         self.fd.font_dim[k] = (v as f32 as i32, true);
         Ok(())
+    }
+
+    /// `t1_modify_fm`: the font matrix slanted, then extended.
+    #[allow(clippy::cast_possible_truncation)]
+    fn modify_fm(&mut self) -> Result<(), PdfError> {
+        let Some(open) = self.line.iter().position(|&c| c == b'[' || c == b'{') else {
+            return fail("FontMatrix: an array expected");
+        };
+        let c = self.line[open];
+        let mut p = open + 1;
+        let mut a = [0f32; 6];
+        for x in &mut a {
+            let (v, q) = scan_num(&self.line, p)?;
+            *x = v;
+            p = q;
+        }
+        if self.fm.slant != 0 {
+            let s = f64::from(self.fm.slant) * 1e-3;
+            a[0] = (f64::from(a[0]) + f64::from(a[1]) * s) as f32;
+            a[2] = (f64::from(a[2]) + f64::from(a[3]) * s) as f32;
+            a[4] = (f64::from(a[4]) + f64::from(a[5]) * s) as f32;
+        }
+        if self.fm.extend != 0 {
+            let e = f64::from(self.fm.extend) * 1e-3;
+            a[0] = (f64::from(a[0]) * e) as f32;
+            a[2] = (f64::from(a[2]) * e) as f32;
+            a[4] = (f64::from(a[4]) * e) as f32;
+        }
+        let close = if c == b'[' { b']' } else { b'}' };
+        while p < self.line.len() && self.line[p] != close {
+            p += 1;
+        }
+        if p == self.line.len() {
+            return fail(format!(
+                "FontMatrix: cannot find the corresponding character to '{}'",
+                char::from(c)
+            ));
+        }
+        let mut l = self.line[..=open].to_vec();
+        for x in a {
+            l.extend_from_slice(fmt_g(f64::from(x)).as_bytes());
+            l.push(b' ');
+        }
+        l.extend_from_slice(&self.line[p..]);
+        self.line = l;
+        eol(&mut self.line);
+        Ok(())
+    }
+
+    /// `t1_modify_italic`.
+    #[allow(clippy::cast_possible_truncation)]
+    fn modify_italic(&mut self) {
+        if self.fm.slant == 0 {
+            return;
+        }
+        let Some(sp) = self.line.iter().position(|&c| c == b' ') else {
+            return;
+        };
+        let Ok((a, r)) = scan_num(&self.line, sp + 1) else {
+            return;
+        };
+        let a = (f64::from(a)
+            - (f64::from(self.fm.slant) * 1e-3).atan() * (180.0 / std::f64::consts::PI))
+            as f32;
+        let mut l = self.line[..=sp].to_vec();
+        l.extend_from_slice(fmt_g(f64::from(a)).as_bytes());
+        l.extend_from_slice(&self.line[r..]);
+        self.line = l;
+        eol(&mut self.line);
+        self.fd.font_dim[dim::ITALIC_ANGLE] = (f64::from(a).round() as i32, true);
     }
 
     /// `t1_scan_param`.
@@ -1513,6 +1587,52 @@ impl<'a> T1<'a> {
             }
         }
         self.stop_eexec()
+    }
+}
+
+/// `t1_scan_num` at `p`: the number (a `float`) and where it ends.
+#[allow(clippy::cast_possible_truncation)]
+fn scan_num(line: &[u8], mut p: usize) -> Result<(f32, usize), PdfError> {
+    if line.get(p) == Some(&b' ') {
+        p += 1;
+    }
+    let Some((v, _)) = c_float(&line[p.min(line.len())..]) else {
+        return fail("a number expected");
+    };
+    while line
+        .get(p)
+        .is_some_and(|c| c.is_ascii_digit() || matches!(c, b'.' | b'e' | b'E' | b'+' | b'-'))
+    {
+        p += 1;
+    }
+    Ok((v as f32, p))
+}
+
+/// C's `%g`.
+pub(crate) fn fmt_g(x: f64) -> String {
+    if x == 0.0 {
+        return if x.is_sign_negative() {
+            "-0".into()
+        } else {
+            "0".into()
+        };
+    }
+    let e = format!("{x:.5e}");
+    let (mant, exp) = e.split_once('e').unwrap_or((&e, "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let strip = |s: &str| -> String {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_owned()
+        } else {
+            s.to_owned()
+        }
+    };
+    if (-4..6).contains(&exp) {
+        let prec = usize::try_from(5 - exp).unwrap_or(0);
+        strip(&format!("{x:.prec$}"))
+    } else {
+        let sign = if exp < 0 { '-' } else { '+' };
+        format!("{}e{sign}{:02}", strip(mant), exp.abs())
     }
 }
 
