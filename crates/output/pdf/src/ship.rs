@@ -706,9 +706,14 @@ impl PdfState {
                     None
                 }
                 Node::Rule(r) => Some((r.height, r.depth, r.width)),
-                Node::Whatsit(h) => {
+                Node::Whatsit(h, size) => {
                     if let Some(w) = wh(*h, self.doing_leaders) {
                         self.whatsit(&w, fr, false, src, wh);
+                    }
+                    // "Output a Form/Image node in a hlist":
+                    // `cur_h:=edge+pdf_width(p)`
+                    if let Some(s) = size {
+                        self.cur_h += s.width;
                     }
                     None
                 }
@@ -842,9 +847,14 @@ impl PdfState {
                     None
                 }
                 Node::Rule(r) => Some((r.height, r.depth, r.width)),
-                Node::Whatsit(h) => {
+                Node::Whatsit(h, size) => {
                     if let Some(w) = wh(*h, self.doing_leaders) {
                         self.whatsit(&w, &fr, true, src, wh);
+                    }
+                    // "Output a Form/Image node in a vlist":
+                    // `cur_v:=save_v+pdf_depth(p)` after its height
+                    if let Some(s) = size {
+                        self.cur_v += s.height + s.depth;
                     }
                     None
                 }
