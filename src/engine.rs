@@ -3178,6 +3178,19 @@ impl Engine {
         self.make_dirty(c);
     }
 
+    /// Nodes parked on `x` (by a wait, a gate or a needed child) run again:
+    /// `x` is going away, so it will never finish for them.
+    fn release_waiters(&mut self, x: Slot, waiters: &[Slot]) {
+        for &w in waiters {
+            if self.live(w) && w != x && self.n(w).on == x {
+                self.nm(w).on = NIL;
+                if self.n(w).state == State::Parked {
+                    self.make_dirty(w);
+                }
+            }
+        }
+    }
+
     fn make_inert(&mut self, s: Slot, by: Slot) {
         if self.n(s).state == State::Inert {
             self.ax(s).claimed_by = Some(by);
@@ -3217,6 +3230,8 @@ impl Engine {
         self.leave_spec(s);
         self.dequeue(s);
         self.refute_assumers(s);
+        let waiters = std::mem::take(&mut self.ax(s).waiters);
+        self.release_waiters(s, &waiters);
         let old_eff = self.oitem(s).eff;
         self.nm(s).state = State::Inert;
         self.nm(s).epoch = self.n(s).epoch.wrapping_add(1);
@@ -3711,14 +3726,7 @@ impl Engine {
             }
             self.make_dirty(r);
         }
-        for w in waiters {
-            if self.live(w) && w != x && self.n(w).on == x {
-                self.nm(w).on = NIL;
-                if self.n(w).state == State::Parked {
-                    self.make_dirty(w);
-                }
-            }
-        }
+        self.release_waiters(x, &waiters);
         self.refute_assumers(x);
         self.set_stream(x, None);
         let (u, l) = (self.n(x).unit, self.n(x).label);
