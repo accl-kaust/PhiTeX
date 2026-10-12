@@ -34,13 +34,16 @@ mod config;
 mod dvipdf;
 mod editor;
 #[cfg(not(target_family = "wasm"))]
-mod external;
 mod json;
 mod modern;
 mod outline;
 mod problems;
 mod session;
 mod tex;
+#[expect(
+    dead_code,
+    reason = "BibTeX and makeindex between runs: the native session uses them next"
+)]
 mod tools;
 mod ui;
 mod view;
