@@ -1781,24 +1781,27 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
     let s = |x: &str| v.str(x);
     match r.cur.chr {
         ex::LITERAL => {
-            // pdfTeX §1353
+            // pdfTeX §1353 ("Implement \\pdfliteral")
+            let late = r.scan_keyword("shipout")?;
             let mode = if r.scan_keyword("direct")? {
                 "direct"
             } else if r.scan_keyword("page")? {
                 "page"
-            } else if r.scan_keyword("shipout")? {
-                "shipout"
             } else {
                 "origin"
             };
-            let text = if mode == "shipout" {
+            let text = if late {
                 // expanded when shipped out
                 let (_, body) = r.scan_toks(false, false)?;
                 crate::val::toks_value(v, &body)
             } else {
                 ext_value(r)?
             };
-            whatsit(r, md, vec![s("pdf:literal"), s(mode), text]);
+            whatsit(
+                r,
+                md,
+                vec![s("pdf:literal"), s(mode), text, v.int(i64::from(late))],
+            );
         }
         ex::COLORSTACK => {
             let n = r.scan_int()?;
@@ -2559,7 +2562,7 @@ impl Walk<'_> {
 
 /// A pdfTeX whatsit met by `\shipout` (pdfTeX §1366 ff.): what TeX reads
 /// back of it.
-#[allow(clippy::unnecessary_wraps, clippy::match_same_arms)]
+#[allow(clippy::unnecessary_wraps)]
 pub(crate) fn at_shipout(
     r: &mut Run<'_, '_>,
     kind: &str,
@@ -2567,27 +2570,112 @@ pub(crate) fn at_shipout(
     p: &Positions,
 ) -> R<()> {
     let v = r.v;
-    match kind {
-        "pdf:savepos" => {
-            // pdfTeX §1408, and in DVI mode §1407
-            let (h, vv) = pos.unwrap_or((0, 0));
-            let (x, y) = if p.pdf {
-                (h, p.page_height - vv)
-            } else {
-                (h + 4_736_286, p.page_height - vv - 4_736_286)
-            };
-            r.set("pdf:lastxpos", v.int(i64::from(x)), true);
-            r.set("pdf:lastypos", v.int(i64::from(y)), true);
-        }
-        "pdf:literal" | "pdf:colorstack" | "pdf:setmatrix" | "pdf:save" | "pdf:restore"
-        | "pdf:refobj" | "pdf:refxform" | "pdf:refximage" | "pdf:annot" | "pdf:startlink"
-        | "pdf:endlink" | "pdf:dest" | "pdf:thread" | "pdf:startthread" | "pdf:endthread" => {
-            // PDF-BACKEND-GAP: phitex-tex writes DVI; the page's PDF
-            // operators, annotations and objects at `pos` are
-            // phitex-pdf's once the engine has a PDF output
-        }
-        _ => {}
+    if kind == "pdf:savepos" {
+        // pdfTeX §1408, and in DVI mode §1407
+        let (h, vv) = pos.unwrap_or((0, 0));
+        let (x, y) = if p.pdf {
+            (h, p.page_height - vv)
+        } else {
+            (h + 4_736_286, p.page_height - vv - 4_736_286)
+        };
+        r.set("pdf:lastxpos", v.int(i64::from(x)), true);
+        r.set("pdf:lastypos", v.int(i64::from(y)), true);
     }
-    let _ = toks_of;
     Ok(())
+}
+
+/// What the PDF writer makes of a pdfTeX whatsit when the page is
+/// shipped (`pdf_hlist_out`'s whatsit cases, pdfTeX §1366 ff.): a literal
+/// `["lit", mode, text]` (`literal`, pdfTeX §693: 0 `set_origin`, 1
+/// `direct_page`, 2 `direct_always`), or a colour stack command
+/// `["cs", n, action, text]` whose literal depends on the stacks'
+/// state, the writer's fold over the pages.
+pub(crate) fn writer_data(r: &mut Run<'_, '_>, xs: &[ValueId]) -> R<Option<ValueId>> {
+    let v = r.v;
+    let kind = xs.first().map(|&k| str_of(v, k)).unwrap_or_default();
+    let text = |k: usize| xs.get(k).map(|&t| str_of(v, t)).unwrap_or_default();
+    let lit = |mode: i64, t: &str| Some(v.list(vec![v.str("lit"), v.int(mode), v.str(t)]));
+    Ok(match kind.as_str() {
+        "pdf:literal" => {
+            // pdf_out_literal
+            let mode = match text(1).as_str() {
+                "direct" => 2,
+                "page" => 1,
+                _ => 0,
+            };
+            let late = xs.get(3).is_some_and(|&l| int_of(v, l) != 0);
+            let t = if late {
+                let toks = toks_of(v, xs.get(2).copied());
+                r.expand_late(&toks)?
+            } else {
+                text(2)
+            };
+            lit(mode, &t)
+        }
+        // pdf_out_setmatrix: the matrix, then " 0 0 cm", at the origin
+        // PDF-BACKEND-GAP: the matrix stack (`pdfsetmatrix`, utils.c)
+        // only checks the format and transforms link rectangles
+        "pdf:setmatrix" => lit(0, &format!("{} 0 0 cm", text(1))),
+        // pdf_out_save, pdf_out_restore
+        "pdf:save" => lit(0, "q"),
+        "pdf:restore" => lit(0, "Q"),
+        "pdf:colorstack" => Some(v.list(vec![
+            v.str("cs"),
+            xs.get(1).copied().unwrap_or(ValueId::UNIT),
+            v.str(&text(2)),
+            v.str(&text(3)),
+        ])),
+        "pdf:refobj" => backend_gap_object(),
+        "pdf:refxform" => backend_gap_form(),
+        "pdf:refximage" => backend_gap_image(),
+        "pdf:annot" => backend_gap_annot(),
+        "pdf:startlink" | "pdf:endlink" => backend_gap_link(),
+        "pdf:dest" => backend_gap_dest(),
+        "pdf:thread" | "pdf:startthread" | "pdf:endthread" => backend_gap_thread(),
+        _ => None,
+    })
+}
+
+// PDF-BACKEND-GAP: `\pdfrefobj` (pdfTeX §1366 `pdf_append_list` to the
+// page's object list): the writer would take the object number and write
+// `pdf:obj:<n>` (stream flag, attr, file flag, data) at the end.
+fn backend_gap_object() -> Option<ValueId> {
+    None
+}
+
+// PDF-BACKEND-GAP: `\pdfrefxform` (`pdf_place_form`): the form's box
+// (`pdf:xform:<n>`: box, attr, resources, number, w, h, d) shipped as an
+// XObject and placed at the whatsit's position.
+fn backend_gap_form() -> Option<ValueId> {
+    None
+}
+
+// PDF-BACKEND-GAP: `\pdfrefximage` (`pdf_place_image`): the image
+// (`pdf:ximage:<n>`) read and written, placed at the whatsit's position.
+fn backend_gap_image() -> Option<ValueId> {
+    None
+}
+
+// PDF-BACKEND-GAP: `\pdfannot` (`do_annot`): object number, width,
+// height, depth, data; the rectangle from the whatsit's position.
+fn backend_gap_annot() -> Option<ValueId> {
+    None
+}
+
+// PDF-BACKEND-GAP: `\pdfstartlink`/`\pdfendlink` (`do_link`,
+// `end_link`): object number, w, h, d, attr, action; rectangles per line.
+fn backend_gap_link() -> Option<ValueId> {
+    None
+}
+
+// PDF-BACKEND-GAP: `\pdfdest` (`do_dest`): identifier, kind, position;
+// the names tree at the end.
+fn backend_gap_dest() -> Option<ValueId> {
+    None
+}
+
+// PDF-BACKEND-GAP: `\pdfthread`, `\pdfstartthread`, `\pdfendthread`
+// (`do_thread`, beads): identifier, w, h, d, attr.
+fn backend_gap_thread() -> Option<ValueId> {
+    None
 }

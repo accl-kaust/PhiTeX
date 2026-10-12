@@ -1559,6 +1559,7 @@ dependencies = [
  "phitex-defuse",
  "phitex-dvi",
  "phitex-kpse",
+ "phitex-pdf",
  "phitex-source",
  "phitex-tfm",
  "phitex-typeset",

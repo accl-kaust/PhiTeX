@@ -33,13 +33,16 @@ pub fn finder(dir: &Path) -> Finder {
         if p.is_file() {
             return Some((format!("./{name}"), std::fs::read(&p).ok()?));
         }
-        let fmt = if std::path::Path::new(name)
+        let ext = Path::new(name)
             .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("tfm"))
-        {
-            phitex_kpse::Format::Tfm
-        } else {
-            phitex_kpse::Format::Tex
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let fmt = match ext.as_str() {
+            "tfm" => phitex_kpse::Format::Tfm,
+            "map" => phitex_kpse::Format::FontMap,
+            "pfb" | "pfa" => phitex_kpse::Format::Type1,
+            "enc" => phitex_kpse::Format::Enc,
+            _ => phitex_kpse::Format::Tex,
         };
         let mut k = kpse().lock().ok()?;
         let path = k.as_mut()?.find_file(name.as_bytes(), fmt, false)?;
@@ -54,6 +57,7 @@ pub fn options(name: &str, jobname: &str, comment: &str, dir: &Path) -> Options 
         jobname: jobname.to_owned(),
         comment: comment.to_owned(),
         finder: finder(dir),
+        ..Options::default()
     }
 }
 
