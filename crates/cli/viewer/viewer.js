@@ -1523,9 +1523,9 @@ var Panel = class {
     }
     card.querySelector("h3").textContent = r.h;
     const pct = r.pct ?? (r.total ? Math.round(100 * (r.done ?? 0) / r.total) : void 0);
-    const bar = card.querySelector(".bar");
-    bar.classList.toggle("busy", pct === void 0);
-    bar.querySelector("i").style.width = pct === void 0 ? "" : `${pct}%`;
+    const bar2 = card.querySelector(".bar");
+    bar2.classList.toggle("busy", pct === void 0);
+    bar2.querySelector("i").style.width = pct === void 0 ? "" : `${pct}%`;
     card.querySelector(".count").textContent = r.total ? `${r.done ?? 0} of ${r.total}` : "";
     const names = card.querySelector(".names");
     names.innerHTML = "";
@@ -1830,13 +1830,13 @@ var Panel = class {
    * The diff's style, a popover under the bar (null: shut): latexdiff's
    * markup and subtype, and the two colors, `change` called on each pick.
    */
-  diffSettings(look, change, defaults2) {
+  diffSettings(look2, change, defaults2) {
     const el = this.$("#diffset");
-    if (!look) {
+    if (!look2) {
       el.className = "diffset";
       return;
     }
-    look = { ...look, add_color: safeColor(look.add_color, "#0000ff"), del_color: safeColor(look.del_color, "#ff0000") };
+    look2 = { ...look2, add_color: safeColor(look2.add_color, "#0000ff"), del_color: safeColor(look2.del_color, "#ff0000") };
     const MARKUP = [
       ["underline", "Underline"],
       ["ctraditional", "Color + font"],
@@ -1855,18 +1855,18 @@ var Panel = class {
       ["#0072b2", "#d55e00", "Colorblind-safe"],
       ["#7e22ce", "#6b7280", "Purple / gray"]
     ];
-    const seg = (key, opts) => `<div class="opts">${opts.map(([v, t]) => `<button data-k="${key}" data-v="${v}" aria-pressed="${look[key] === v}">${t}</button>`).join("")}</div>`;
+    const seg = (key, opts) => `<div class="opts">${opts.map(([v, t]) => `<button data-k="${key}" data-v="${v}" aria-pressed="${look2[key] === v}">${t}</button>`).join("")}</div>`;
     const deco = (add) => {
-      const c = add ? look.add_color : look.del_color;
-      if (look.markup === "invisible" && !add) return "display:none";
-      const strike = !add && /^(underline|fontstrike|culinechbar)$/.test(look.markup);
-      const line = add && /^(underline|culinechbar)$/.test(look.markup) ? `text-decoration: underline wavy ${c}; text-underline-offset: 3px;` : "";
-      return `color:${c};${strike ? `text-decoration: line-through ${c};` : ""}${line}${look.markup === "bold" && add ? "font-weight:700;" : ""}`;
+      const c = add ? look2.add_color : look2.del_color;
+      if (look2.markup === "invisible" && !add) return "display:none";
+      const strike = !add && /^(underline|fontstrike|culinechbar)$/.test(look2.markup);
+      const line = add && /^(underline|culinechbar)$/.test(look2.markup) ? `text-decoration: underline wavy ${c}; text-underline-offset: 3px;` : "";
+      return `color:${c};${strike ? `text-decoration: line-through ${c};` : ""}${line}${look2.markup === "bold" && add ? "font-weight:700;" : ""}`;
     };
-    el.innerHTML = `<h4>Style</h4>${seg("markup", MARKUP)}<h4>Colors</h4><div class="opts">${PAIRS.map(([a, d, t]) => `<button class="pair" data-pair="${a},${d}" aria-pressed="${look.add_color === a && look.del_color === d}"><i style="background:${a}"></i><i style="background:${d}"></i>${t}</button>`).join("")}</div><div class="row"><span>Added</span><input type="color" data-c="add_color" value="${look.add_color}"><span>Deleted</span><input type="color" data-c="del_color" value="${look.del_color}"></div><h4>Mode</h4>${seg("subtype", SUB)}<div class="sample">The results are <span style="${deco(false)}">good</span> <span style="${deco(true)}">excellent</span>.</div><div class="foot"><small>As latexdiff's --type, --subtype</small><button data-reset="1">Reset</button></div>`;
+    el.innerHTML = `<h4>Style</h4>${seg("markup", MARKUP)}<h4>Colors</h4><div class="opts">${PAIRS.map(([a, d, t]) => `<button class="pair" data-pair="${a},${d}" aria-pressed="${look2.add_color === a && look2.del_color === d}"><i style="background:${a}"></i><i style="background:${d}"></i>${t}</button>`).join("")}</div><div class="row"><span>Added</span><input type="color" data-c="add_color" value="${look2.add_color}"><span>Deleted</span><input type="color" data-c="del_color" value="${look2.del_color}"></div><h4>Mode</h4>${seg("subtype", SUB)}<div class="sample">The results are <span style="${deco(false)}">good</span> <span style="${deco(true)}">excellent</span>.</div><div class="foot"><small>As latexdiff's --type, --subtype</small><button data-reset="1">Reset</button></div>`;
     el.className = "diffset on";
     const set = (l) => {
-      const next = { ...look, ...l };
+      const next = { ...look2, ...l };
       change?.(next);
       this.diffSettings(next, change, defaults2);
     };
@@ -3456,8 +3456,8 @@ var DiffControls = class {
     try {
       const r = await this.run.start(
         v,
-        (busy) => {
-          if (this.state) this.state.busy = busy, this.bar();
+        (busy2) => {
+          if (this.state) this.state.busy = busy2, this.bar();
         },
         (n) => {
           const st = this.state;
@@ -3695,6 +3695,8 @@ click: From \xB7 shift-click: To \xB7 double-click: against its first parent`;
 // crates/cli/viewer/cli.ts
 var Socket = class {
   ws;
+  /** The wait before the next try (doubled to 30 s while the watch is away). */
+  wait = 1e3;
   next = 1;
   waiting = /* @__PURE__ */ new Map();
   events = [];
@@ -3702,11 +3704,34 @@ var Socket = class {
   };
   onClose = () => {
   };
-  connect() {
+  /**
+   * Join the watch: first asked over HTTP whether it is there, so a tab
+   * left open after its watch ended never opens WebSockets to a dead port
+   * (Firefox opens one WebSocket at a time to an address, and delays
+   * those after failures: such a tab would hold back every other's).
+   */
+  async connect() {
+    if (document.hidden) return void addEventListener("visibilitychange", () => void this.connect(), { once: true });
+    if (!await this.there()) return this.again();
+    this.open();
+  }
+  /** Whether the watch answers HTTP here. */
+  async there() {
+    try {
+      return (await fetch(new URL("ping", location.href), { cache: "no-store" })).ok;
+    } catch {
+      return false;
+    }
+  }
+  again() {
+    setTimeout(() => void this.connect(), this.wait);
+    this.wait = Math.min(this.wait * 2, 3e4);
+  }
+  open() {
     const url = new URL("ws", location.href);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     this.ws = new WebSocket(url);
-    this.ws.onopen = () => this.onOpen();
+    this.ws.onopen = () => (this.wait = 1e3, this.onOpen());
     this.ws.onmessage = (m) => {
       const r = JSON.parse(m.data);
       if (r.event) return this.events.forEach((f) => f(r));
@@ -3717,14 +3742,14 @@ var Socket = class {
       for (const f of this.waiting.values()) f({ ok: false, error: "closed" });
       this.waiting.clear();
       this.onClose();
-      setTimeout(() => this.connect(), 1e3);
+      this.again();
     };
   }
   request(op) {
     const id = this.next++;
     return new Promise((ok) => {
       this.waiting.set(id, ok);
-      if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ id, ...op }));
+      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ id, ...op }));
       else this.waiting.delete(id), ok({ ok: false, error: "not connected" });
     });
   }
@@ -3941,7 +3966,126 @@ sock.onOpen = () => {
   started = true;
   void session.start();
 };
-var unreached = "Can't reach phitex watch over its WebSocket (retrying). Is it still running? A browser add-on blocking connections to localhost also does this: try a private window, or allow 127.0.0.1 in the add-on.";
-sock.onClose = () => started ? panel.msg("not connected to phitex watch (retrying)", true) : panel.error(unreached);
-setTimeout(() => started || panel.error(unreached), 3e3);
-sock.connect();
+var unreached = async () => {
+  if (started) return;
+  if (!await sock.there()) return panel.error("phitex watch isn't answering here: is it still running? (trying again)");
+  if (sock.ws?.readyState === WebSocket.CONNECTING)
+    return panel.error(
+      "phitex watch answers, but the browser hasn't opened the WebSocket to it yet. Firefox opens one at a time to this machine and waits longer after failures: another tab connecting to 127.0.0.1 (an old phitex viewer?) holds it back. Closing such tabs lets it through."
+    );
+  panel.error("phitex watch answers, but the browser refused the WebSocket to it (trying again): a browser add-on blocking connections to 127.0.0.1? Try a private window, or allow 127.0.0.1 in the add-on.");
+};
+sock.onClose = () => started ? panel.msg("not connected to phitex watch (retrying)", true) : void unreached();
+setTimeout(() => void unreached(), 3e3);
+void sock.connect();
+document.head.append(Object.assign(document.createElement("style"), {
+  textContent: `
+#phx-bar { position: fixed; left: 0; right: 0; bottom: 0; height: 24px; z-index: 15; display: flex; align-items: center; gap: 8px;
+  padding: 0 10px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; background: #f4f5f6; color: #3c4655; border-top: 1px solid #e0e3e8;
+  cursor: pointer; user-select: none; white-space: nowrap; overflow: hidden; }
+#phx-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: #9aa3b0; flex: none; }
+#phx-bar .dot.ok { background: #2e9e4f; } #phx-bar .dot.bad { background: #d23f3f; }
+#phx-bar .dot.busy { background: #2f7de1; animation: phx-pulse 1s infinite alternate; }
+@keyframes phx-pulse { to { opacity: .3; } }
+#phx-bar .text { overflow: hidden; text-overflow: ellipsis; flex: 1; }
+#phx-bar .new { flex: none; border-radius: 8px; padding: 0 7px; background: #d23f3f; color: #fff; }
+#phx-bar .new.warn { background: #c98a00; }
+#phx-bar .hint { flex: none; opacity: .6; }
+#phx-con { position: fixed; left: 0; right: 0; bottom: 24px; height: 38vh; z-index: 15; display: flex; flex-direction: column;
+  background: #fbfbfc; color: #1b222c; border-top: 1px solid #d6dae1; box-shadow: 0 -6px 20px rgba(0,0,0,.12); }
+#phx-con[hidden] { display: none; }
+#phx-con header { display: flex; align-items: center; gap: 8px; padding: 4px 10px; font: 12px system-ui, sans-serif; border-bottom: 1px solid #e7e9ee; }
+#phx-con header button { border: 0; background: #e7e9ee; color: inherit; border-radius: 6px; padding: 1px 9px; cursor: pointer; font: inherit; }
+#phx-con header button:first-of-type { margin-left: auto; }
+#phx-con .log { flex: 1; overflow: auto; margin: 0; padding: 6px 10px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+#phx-con .error { color: #c62828; } #phx-con .warning { color: #9a6700; } #phx-con .note, #phx-con .dim { color: #6b7280; }
+#phx-con .ok { color: #1f7a3a; } #phx-con .busy { color: #2f7de1; }
+@media (prefers-color-scheme: dark) {
+  #phx-bar { background: #161b22; color: #c9d1d9; border-color: #2f3a4c; }
+  #phx-con { background: #0f141a; color: #e6edf3; border-color: #2f3a4c; }
+  #phx-con header { border-color: #2f3a4c; } #phx-con header button { background: #2f3a4c; }
+  #phx-con .error { color: #ff7b72; } #phx-con .warning { color: #e3b341; } #phx-con .ok { color: #56d364; }
+}`
+}));
+pane.style.bottom = "24px";
+var bar = document.createElement("div");
+bar.id = "phx-bar";
+bar.title = "phitex watch's status: click (or `) for everything it printed";
+bar.innerHTML = `<span class="dot"></span><span class="text">phitex watch</span><span class="new" hidden></span><span class="hint">\` terminal</span>`;
+var con = document.createElement("div");
+con.id = "phx-con";
+con.hidden = true;
+con.innerHTML = `<header><b>Terminal</b><small>what phitex watch printed</small><button type="button" data-a="rebuild" title="Build again (r in the terminal)">Rebuild</button><button type="button" data-a="clear">Clear</button><button type="button" data-a="close">Close</button></header><pre class="log"></pre>`;
+document.body.append(con, bar);
+var log = con.querySelector(".log");
+var dot = bar.querySelector(".dot");
+var barText = bar.querySelector(".text");
+var badge = bar.querySelector(".new");
+var status = { kind: "status", text: "" };
+var busy = "";
+var unseen = { errors: 0, warnings: 0 };
+var showBar = () => {
+  dot.className = "dot" + (busy ? " busy" : status.ok === true ? " ok" : status.ok === false ? " bad" : "");
+  barText.textContent = busy ? `${busy}\u2026` : status.text || "phitex watch";
+  const n = unseen.errors + unseen.warnings;
+  badge.hidden = n === 0 || !con.hidden;
+  badge.className = "new" + (unseen.errors ? "" : " warn");
+  badge.textContent = unseen.errors ? `${unseen.errors} error${unseen.errors > 1 ? "s" : ""}` : `${n} warning${n > 1 ? "s" : ""}`;
+};
+var look = (s) => {
+  const t = s.text ?? "";
+  if (s.kind !== "line") return s.kind;
+  if (/^(error|✗|failed:)/.test(t)) return "error";
+  if (/^warning/.test(t)) return "warning";
+  if (/^(✓|ok:|finished:)/.test(t)) return "ok";
+  if (/^(phitex:|viewer:|\s)/.test(t)) return "dim";
+  return "";
+};
+var said = (s, live) => {
+  if (s.kind === "status") return void (status = s, showBar());
+  if (s.kind === "busy") return void (busy = s.text ?? "", showBar());
+  if (s.kind === "event") return;
+  const at = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+  const line = document.createElement("div");
+  line.className = look(s);
+  line.textContent = s.kind === "note" ? `phitex: ${s.text}` : s.kind === "error" || s.kind === "warning" ? `${s.kind}: ${s.text}` : s.text ?? "";
+  log.append(line);
+  while (log.childElementCount > 2e3) log.firstElementChild.remove();
+  if (at) log.scrollTop = log.scrollHeight;
+  if (live && con.hidden) {
+    if (line.className === "error") unseen.errors++;
+    else if (line.className === "warning") unseen.warnings++;
+    showBar();
+  }
+};
+var toggle = (open = con.hidden) => {
+  con.hidden = !open;
+  if (open) unseen = { errors: 0, warnings: 0 }, log.scrollTop = log.scrollHeight;
+  showBar();
+};
+bar.onclick = () => toggle();
+con.querySelector("header").onclick = (e) => {
+  const a = e.target.dataset?.a;
+  if (a === "close") toggle(false);
+  if (a === "clear") log.replaceChildren();
+  if (a === "rebuild") void sock.request({ op: "rebuild" });
+};
+addEventListener("keydown", (e) => {
+  const t = e.target;
+  if (t?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t?.tagName ?? "")) return;
+  if (e.key === "`" && !e.ctrlKey && !e.metaKey && !e.altKey) toggle(), e.preventDefault();
+  else if (e.key === "Escape" && !con.hidden) toggle(false);
+});
+sock.onEvent((e) => {
+  if (e.event === "console") said(e.item, true);
+});
+var backlog = async () => {
+  const r = await sock.request({ op: "console" });
+  if (!r.ok) return;
+  log.replaceChildren();
+  for (const s of r.json?.items ?? []) said(s, false);
+  if (r.json?.status) said(r.json.status, false);
+};
+var opened = sock.onOpen;
+sock.onOpen = () => (opened(), void backlog());
+showBar();

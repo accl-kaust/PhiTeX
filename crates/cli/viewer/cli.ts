@@ -25,18 +25,46 @@ import { COMMITS_CSS, Commits, type Commit } from "../../../viewer/src/commits.t
 
 /** The watch's core, over a WebSocket: requests answered in order, events pushed; joined again when it drops. */
 class Socket implements CoreTransport {
-  private ws!: WebSocket;
+  ws?: WebSocket;
+  /** The wait before the next try (doubled to 30 s while the watch is away). */
+  private wait = 1000;
   private next = 1;
   private waiting = new Map<number, (r: CoreRes) => void>();
   private events: ((e: CoreEvent) => void)[] = [];
   onOpen: () => void = () => {};
   onClose: () => void = () => {};
 
-  connect(): void {
+  /**
+   * Join the watch: first asked over HTTP whether it is there, so a tab
+   * left open after its watch ended never opens WebSockets to a dead port
+   * (Firefox opens one WebSocket at a time to an address, and delays
+   * those after failures: such a tab would hold back every other's).
+   */
+  async connect(): Promise<void> {
+    if (document.hidden) return void addEventListener("visibilitychange", () => void this.connect(), { once: true });
+    if (!(await this.there())) return this.again();
+    this.open();
+  }
+
+  /** Whether the watch answers HTTP here. */
+  async there(): Promise<boolean> {
+    try {
+      return (await fetch(new URL("ping", location.href), { cache: "no-store" })).ok;
+    } catch {
+      return false;
+    }
+  }
+
+  private again(): void {
+    setTimeout(() => void this.connect(), this.wait);
+    this.wait = Math.min(this.wait * 2, 30000);
+  }
+
+  private open(): void {
     const url = new URL("ws", location.href);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     this.ws = new WebSocket(url);
-    this.ws.onopen = () => this.onOpen();
+    this.ws.onopen = () => ((this.wait = 1000), this.onOpen());
     this.ws.onmessage = (m) => {
       const r = JSON.parse(m.data as string);
       if (r.event) return this.events.forEach((f) => f(r));
@@ -48,7 +76,7 @@ class Socket implements CoreTransport {
       this.waiting.clear();
       this.onClose();
       // (the watch restarted, or the network blinked: try again)
-      setTimeout(() => this.connect(), 1000);
+      this.again();
     };
   }
 
@@ -56,7 +84,7 @@ class Socket implements CoreTransport {
     const id = this.next++;
     return new Promise((ok) => {
       this.waiting.set(id, ok);
-      if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ id, ...op }));
+      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ id, ...op }));
       else (this.waiting.delete(id), ok({ ok: false, error: "not connected" } as CoreRes));
     });
   }
@@ -303,7 +331,141 @@ sock.onOpen = () => {
 };
 // (never connected: the card says so, not "Reading" forever; a browser add-on
 // blocking WebSockets to this machine is the usual cause)
-const unreached = "Can't reach phitex watch over its WebSocket (retrying). Is it still running? A browser add-on blocking connections to localhost also does this: try a private window, or allow 127.0.0.1 in the add-on.";
-sock.onClose = () => (started ? panel.msg("not connected to phitex watch (retrying)", true) : panel.error(unreached));
-setTimeout(() => started || panel.error(unreached), 3000);
-sock.connect();
+// (never connected: the card says why, not "Reading" forever)
+const unreached = async () => {
+  if (started) return;
+  if (!(await sock.there())) return panel.error("phitex watch isn't answering here: is it still running? (trying again)");
+  if (sock.ws?.readyState === WebSocket.CONNECTING)
+    return panel.error(
+      "phitex watch answers, but the browser hasn't opened the WebSocket to it yet. Firefox opens one at a time to this machine and waits longer after failures: another tab connecting to 127.0.0.1 (an old phitex viewer?) holds it back. Closing such tabs lets it through.",
+    );
+  panel.error("phitex watch answers, but the browser refused the WebSocket to it (trying again): a browser add-on blocking connections to 127.0.0.1? Try a private window, or allow 127.0.0.1 in the add-on.");
+};
+sock.onClose = () => (started ? panel.msg("not connected to phitex watch (retrying)", true) : void unreached());
+setTimeout(() => void unreached(), 3000);
+void sock.connect();
+
+// ---- The terminal's messages (the watch's console, view.rs) ----
+// Every line phitex watch prints (notes, errors, warnings, each build's
+// result, the browsers that come and go), in a drawer under the pages, and
+// its status line in a bar along the bottom: click it, or press `, to open
+// the drawer.
+
+/** A message as the watch tells it (ui.rs `Ui::tap`). */
+type Said = { kind: string; text?: string; ok?: boolean | null; event?: unknown };
+
+document.head.append(Object.assign(document.createElement("style"), {
+  textContent: `
+#phx-bar { position: fixed; left: 0; right: 0; bottom: 0; height: 24px; z-index: 15; display: flex; align-items: center; gap: 8px;
+  padding: 0 10px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; background: #f4f5f6; color: #3c4655; border-top: 1px solid #e0e3e8;
+  cursor: pointer; user-select: none; white-space: nowrap; overflow: hidden; }
+#phx-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: #9aa3b0; flex: none; }
+#phx-bar .dot.ok { background: #2e9e4f; } #phx-bar .dot.bad { background: #d23f3f; }
+#phx-bar .dot.busy { background: #2f7de1; animation: phx-pulse 1s infinite alternate; }
+@keyframes phx-pulse { to { opacity: .3; } }
+#phx-bar .text { overflow: hidden; text-overflow: ellipsis; flex: 1; }
+#phx-bar .new { flex: none; border-radius: 8px; padding: 0 7px; background: #d23f3f; color: #fff; }
+#phx-bar .new.warn { background: #c98a00; }
+#phx-bar .hint { flex: none; opacity: .6; }
+#phx-con { position: fixed; left: 0; right: 0; bottom: 24px; height: 38vh; z-index: 15; display: flex; flex-direction: column;
+  background: #fbfbfc; color: #1b222c; border-top: 1px solid #d6dae1; box-shadow: 0 -6px 20px rgba(0,0,0,.12); }
+#phx-con[hidden] { display: none; }
+#phx-con header { display: flex; align-items: center; gap: 8px; padding: 4px 10px; font: 12px system-ui, sans-serif; border-bottom: 1px solid #e7e9ee; }
+#phx-con header button { border: 0; background: #e7e9ee; color: inherit; border-radius: 6px; padding: 1px 9px; cursor: pointer; font: inherit; }
+#phx-con header button:first-of-type { margin-left: auto; }
+#phx-con .log { flex: 1; overflow: auto; margin: 0; padding: 6px 10px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+#phx-con .error { color: #c62828; } #phx-con .warning { color: #9a6700; } #phx-con .note, #phx-con .dim { color: #6b7280; }
+#phx-con .ok { color: #1f7a3a; } #phx-con .busy { color: #2f7de1; }
+@media (prefers-color-scheme: dark) {
+  #phx-bar { background: #161b22; color: #c9d1d9; border-color: #2f3a4c; }
+  #phx-con { background: #0f141a; color: #e6edf3; border-color: #2f3a4c; }
+  #phx-con header { border-color: #2f3a4c; } #phx-con header button { background: #2f3a4c; }
+  #phx-con .error { color: #ff7b72; } #phx-con .warning { color: #e3b341; } #phx-con .ok { color: #56d364; }
+}`,
+}));
+// (the pages above the bar)
+pane.style.bottom = "24px";
+const bar = document.createElement("div");
+bar.id = "phx-bar";
+bar.title = "phitex watch's status: click (or `) for everything it printed";
+bar.innerHTML = `<span class="dot"></span><span class="text">phitex watch</span><span class="new" hidden></span><span class="hint">\` terminal</span>`;
+const con = document.createElement("div");
+con.id = "phx-con";
+con.hidden = true;
+con.innerHTML = `<header><b>Terminal</b><small>what phitex watch printed</small><button type="button" data-a="rebuild" title="Build again (r in the terminal)">Rebuild</button><button type="button" data-a="clear">Clear</button><button type="button" data-a="close">Close</button></header><pre class="log"></pre>`;
+document.body.append(con, bar);
+const log = con.querySelector<HTMLElement>(".log")!;
+const dot = bar.querySelector<HTMLElement>(".dot")!;
+const barText = bar.querySelector<HTMLElement>(".text")!;
+const badge = bar.querySelector<HTMLElement>(".new")!;
+let status: Said = { kind: "status", text: "" };
+let busy = "";
+let unseen = { errors: 0, warnings: 0 };
+
+const showBar = () => {
+  dot.className = "dot" + (busy ? " busy" : status.ok === true ? " ok" : status.ok === false ? " bad" : "");
+  barText.textContent = busy ? `${busy}…` : status.text || "phitex watch";
+  const n = unseen.errors + unseen.warnings;
+  badge.hidden = n === 0 || !con.hidden;
+  badge.className = "new" + (unseen.errors ? "" : " warn");
+  badge.textContent = unseen.errors ? `${unseen.errors} error${unseen.errors > 1 ? "s" : ""}` : `${n} warning${n > 1 ? "s" : ""}`;
+};
+/** The class a line is shown in: its kind, or what it begins with. */
+const look = (s: Said): string => {
+  const t = s.text ?? "";
+  if (s.kind !== "line") return s.kind;
+  if (/^(error|✗|failed:)/.test(t)) return "error";
+  if (/^warning/.test(t)) return "warning";
+  if (/^(✓|ok:|finished:)/.test(t)) return "ok";
+  if (/^(phitex:|viewer:|\s)/.test(t)) return "dim";
+  return "";
+};
+const said = (s: Said, live: boolean) => {
+  if (s.kind === "status") return void ((status = s), showBar());
+  if (s.kind === "busy") return void ((busy = s.text ?? ""), showBar());
+  if (s.kind === "event") return;
+  const at = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+  const line = document.createElement("div");
+  line.className = look(s);
+  line.textContent = s.kind === "note" ? `phitex: ${s.text}` : s.kind === "error" || s.kind === "warning" ? `${s.kind}: ${s.text}` : s.text ?? "";
+  log.append(line);
+  while (log.childElementCount > 2000) log.firstElementChild!.remove();
+  if (at) log.scrollTop = log.scrollHeight;
+  if (live && con.hidden) {
+    if (line.className === "error") unseen.errors++;
+    else if (line.className === "warning") unseen.warnings++;
+    showBar();
+  }
+};
+const toggle = (open = con.hidden) => {
+  con.hidden = !open;
+  if (open) (unseen = { errors: 0, warnings: 0 }), (log.scrollTop = log.scrollHeight);
+  showBar();
+};
+bar.onclick = () => toggle();
+con.querySelector("header")!.onclick = (e) => {
+  const a = (e.target as HTMLElement).dataset?.a;
+  if (a === "close") toggle(false);
+  if (a === "clear") log.replaceChildren();
+  if (a === "rebuild") void sock.request({ op: "rebuild" });
+};
+addEventListener("keydown", (e) => {
+  const t = e.target as HTMLElement;
+  if (t?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t?.tagName ?? "")) return;
+  if (e.key === "`" && !e.ctrlKey && !e.metaKey && !e.altKey) (toggle(), e.preventDefault());
+  else if (e.key === "Escape" && !con.hidden) toggle(false);
+});
+sock.onEvent((e: any) => {
+  if (e.event === "console") said(e.item as Said, true);
+});
+/** The messages so far: on each (re)connection, the drawer filled again. */
+const backlog = async () => {
+  const r = await sock.request({ op: "console" });
+  if (!r.ok) return;
+  log.replaceChildren();
+  for (const s of (r.json?.items ?? []) as Said[]) said(s, false);
+  if (r.json?.status) said(r.json.status as Said, false);
+};
+const opened = sock.onOpen;
+sock.onOpen = () => (opened(), void backlog());
+showBar();

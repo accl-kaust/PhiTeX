@@ -1976,9 +1976,145 @@ impl Program {
     }
 }
 
-/// Runs batches on scoped OS threads (examples and tests only: the library
-/// never spawns threads).
+/// Runs batches on a persistent pool of OS threads (examples and tests
+/// only: the library never spawns threads). `Threads(n)` uses up to `n`
+/// threads of the pool, the caller among them.
 pub struct Threads(pub usize);
+
+/// A pool that runs borrowed closures: the caller blocks until every index
+/// has run, so the borrow outlives every use of it.
+struct Pool {
+    /// One job at a time: held by the caller for the whole of `run`.
+    gate: std::sync::Mutex<()>,
+    state: std::sync::Mutex<PoolJob>,
+    wake: std::sync::Condvar,
+    done: std::sync::Condvar,
+}
+
+/// The current job: a borrowed `Fn(usize)` passed as a raw pointer (valid
+/// while `remaining > 0`, which the caller waits for), the next index, the
+/// workers allowed in, and a generation so a worker never runs a job twice.
+struct PoolJob {
+    f: *const (dyn Fn(usize) + Sync),
+    n: usize,
+    grain: usize,
+    next: usize,
+    workers: usize,
+    active: usize,
+    remaining: usize,
+    generation: u64,
+}
+
+// SAFETY: the pointer is only dereferenced between the caller setting it and
+// the caller returning from `run`, which waits for every index to finish.
+unsafe impl Send for PoolJob {}
+
+static POOL: OnceLock<&'static Pool> = OnceLock::new();
+
+fn pool() -> &'static Pool {
+    POOL.get_or_init(|| {
+        let p: &'static Pool = Box::leak(Box::new(Pool {
+            gate: std::sync::Mutex::new(()),
+            state: std::sync::Mutex::new(PoolJob {
+                f: std::ptr::null::<fn(usize)>() as *const (dyn Fn(usize) + Sync),
+                n: 0,
+                grain: 1,
+                next: 0,
+                workers: 0,
+                active: 0,
+                remaining: 0,
+                generation: 0,
+            }),
+            wake: std::sync::Condvar::new(),
+            done: std::sync::Condvar::new(),
+        }));
+        let n = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+        for _ in 1..n {
+            std::thread::Builder::new()
+                .name("defuse-worker".into())
+                .spawn(move || p.worker())
+                .expect("spawn worker");
+        }
+        p
+    })
+}
+
+impl Pool {
+    fn worker(&self) {
+        let mut seen = 0u64;
+        loop {
+            let (f, n, grain, generation) = {
+                let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                loop {
+                    if st.generation != seen && st.next < st.n && st.active < st.workers {
+                        st.active += 1;
+                        break;
+                    }
+                    st = self.wake.wait(st).unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                (st.f, st.n, st.grain, st.generation)
+            };
+            seen = generation;
+            self.chunks(f, n, grain);
+            let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            st.active -= 1;
+        }
+    }
+
+    /// Runs chunks of the current job until its indexes run out.
+    fn chunks(&self, f: *const (dyn Fn(usize) + Sync), n: usize, grain: usize) {
+        loop {
+            let start = {
+                let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if st.next >= n {
+                    return;
+                }
+                let s = st.next;
+                st.next = (s + grain).min(n);
+                s
+            };
+            let end = (start + grain).min(n);
+            // SAFETY: see `PoolJob`; the caller of `run` is blocked in it.
+            let f = unsafe { &*f };
+            for i in start..end {
+                f(i);
+            }
+            let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            st.remaining -= end - start;
+            if st.remaining == 0 {
+                self.done.notify_all();
+            }
+        }
+    }
+
+    /// Runs `f(i)` for `i < n` on up to `threads` threads (this one included).
+    fn run(&self, threads: usize, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        let _gate = self.gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let grain = (n / (threads * 8)).clamp(4, 64);
+        // SAFETY: the pointer outlives its uses: this call returns only once
+        // every index has run, and no worker touches it after that.
+        let f: &'static (dyn Fn(usize) + Sync) = unsafe { std::mem::transmute(f) };
+        {
+            let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            st.f = std::ptr::from_ref(f);
+            st.n = n;
+            st.grain = grain;
+            st.next = 0;
+            st.workers = threads - 1;
+            st.remaining = n;
+            st.generation += 1;
+        }
+        self.wake.notify_all();
+        self.chunks(std::ptr::from_ref(f), n, grain);
+        let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        while st.remaining > 0 {
+            st = self.done.wait(st).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        // Workers still inside `chunks` only find `next >= n` from here on;
+        // the pointer is dead once this job's generation is replaced.
+        st.n = 0;
+    }
+}
 
 impl Executor for Threads {
     fn execute(&mut self, n: usize, run: &(dyn Fn(usize) -> RunResult + Sync), out: &mut Vec<RunResult>) {
@@ -1986,32 +2122,19 @@ impl Executor for Threads {
             out.extend((0..n).map(run));
             return;
         }
-        // Dynamic distribution in small grains: job costs vary a lot (a gated
-        // job is a few lookups), so equal static chunks leave threads idle.
-        // The engine orders the results itself.
-        let grain = (n / (self.0 * 8)).clamp(4, 64);
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let workers = self.0.min(n.div_ceil(grain));
-        std::thread::scope(|s| {
-            let handles: Vec<_> = (0..workers)
-                .map(|_| {
-                    s.spawn(|| {
-                        let mut mine = Vec::new();
-                        loop {
-                            let start = next.fetch_add(grain, std::sync::atomic::Ordering::Relaxed);
-                            if start >= n {
-                                break;
-                            }
-                            mine.extend((start..(start + grain).min(n)).map(run));
-                        }
-                        mine
-                    })
-                })
-                .collect();
-            for h in handles {
-                out.extend(h.join().expect("worker panicked"));
-            }
+        let slots: Vec<OnceLock<RunResult>> = (0..n).map(|_| OnceLock::new()).collect();
+        self.for_each(n, &|i| {
+            let _ = slots[i].set(run(i));
         });
+        out.extend(slots.into_iter().map(|s| s.into_inner().expect("every job ran")));
+    }
+
+    fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        if self.0 <= 1 || n < 64 {
+            (0..n).for_each(f);
+            return;
+        }
+        pool().run(self.0, n, f);
     }
 }
 
