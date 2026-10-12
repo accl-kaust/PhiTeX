@@ -2,7 +2,7 @@
 //! pending thunks.
 //!
 //! - Bare `phitex` is the modern command line (`modern.rs`): `phitex
-//!   build`, `watch`, `check`, `clean`, `outline`.
+//!   build`, `watch`, `clean`.
 //! - Under an engine's name (`pdflatex`, `latex`, `pdftex`, `etex`, `tex`)
 //!   or with `--compat=NAME`, it is that engine (`compat.rs`): web2c's
 //!   command line, one run.
@@ -10,8 +10,7 @@
 //!   programs, in process (`tools.rs`).
 //!
 //! Every build is a document session (`session.rs`); a watch's edits are
-//! updates of the same session. The native engine (`phitex-tex` on
-//! `phitex-defuse`) is being written; until it lands, builds report so.
+//! updates of the same session, on `phitex-tex`.
 
 #![allow(
     clippy::many_single_char_names,
@@ -29,14 +28,12 @@
     clippy::needless_pass_by_value
 )]
 
+mod cache;
 mod compat;
 mod config;
 mod dvipdf;
 mod editor;
-#[cfg(not(target_family = "wasm"))]
-mod json;
 mod modern;
-mod outline;
 mod problems;
 mod session;
 mod tex;
@@ -54,6 +51,11 @@ mod ws;
 #[cfg(all(feature = "jemalloc", not(target_family = "wasm")))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// The exit status of a usage, configuration or file error.
+pub const EXIT_USAGE: i32 = 2;
+/// The exit status of a failure inside PhiTeX (a panic caught).
+pub const EXIT_INTERNAL: i32 = 3;
 
 /// The threads a build runs on by default: all the cores.
 pub fn default_threads() -> usize {
