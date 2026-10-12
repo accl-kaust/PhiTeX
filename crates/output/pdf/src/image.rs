@@ -12,7 +12,7 @@ use phitex_typeset::arith::Scaled;
 use phitex_typeset::node::RUNNING;
 
 use crate::num::{ONE_HUNDRED_BP, ONE_HUNDRED_INCH, TEN_POW};
-use crate::{OBJ_TYPE_XIMAGE, PdfError, PdfWriter, int, pdf_error};
+use crate::{OBJ_TYPE_XIMAGE, PdfError, PdfState, int, pdf_error};
 
 /// `one_inch`.
 const ONE_INCH: Scaled = (ONE_HUNDRED_INCH + 50) / 100;
@@ -503,7 +503,7 @@ struct Copy<'d> {
     name: Vec<u8>,
 }
 
-impl PdfWriter {
+impl PdfState {
     // ---- reading (writeimg.c) ----
 
     /// `\pdfximage` (pdfTeX §1552): the image's object number

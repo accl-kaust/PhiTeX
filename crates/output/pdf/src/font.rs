@@ -19,7 +19,7 @@ use crate::enc::{self, GlyphNames};
 use crate::map::{self, MapEntry};
 use crate::num::divide_scaled;
 use crate::t1::{self, FontDesc, dim};
-use crate::{FontSource, FontType, OBJ_TYPE_FONT, PdfError, PdfWriter, int, pdf_error};
+use crate::{FontSource, FontType, OBJ_TYPE_FONT, PdfError, PdfState, int, pdf_error};
 
 /// `fo_entry`.
 struct Fo {
@@ -38,11 +38,13 @@ struct Fd {
     objnum: usize,
     fm: MapEntry,
     desc: FontDesc,
-    file: Option<Vec<u8>>,
+    file: Option<std::sync::Arc<[u8]>>,
     ff_found: bool,
     ff_objnum: usize,
     /// `write_ttf_glyph_names`.
     ttf_glyph_names: bool,
+    /// `fe->glyph_names` of a reencoded TrueType font.
+    enc: Option<GlyphNames>,
 }
 
 /// `fe_entry`.
@@ -72,7 +74,7 @@ enum MapMode {
     Delete,
 }
 
-impl PdfWriter {
+impl PdfState {
     // ---- the TeX side's font commands ----
 
     /// `\pdffontattr f {...}`.
@@ -337,6 +339,7 @@ impl PdfWriter {
                 &file,
                 &fd.fm,
                 &mut fd.desc,
+                fd.enc.as_ref(),
                 fd.ttf_glyph_names,
                 &mut self.subset_tags,
             )?;
@@ -446,6 +449,7 @@ impl PdfWriter {
             ff_found: false,
             ff_objnum: 0,
             ttf_glyph_names: false,
+            enc: None,
         }
     }
 
@@ -525,6 +529,7 @@ impl PdfWriter {
                         .extend(marked.iter().copied());
                     if fm.is_truetype() {
                         fd.ttf_glyph_names = true;
+                        fd.enc = Some(t.fe_tree[k].names.clone());
                     }
                 }
             } else {
@@ -702,6 +707,7 @@ impl PdfWriter {
                     ff_found: false,
                     ff_objnum: 0,
                     ttf_glyph_names: false,
+                    enc: None,
                 },
             );
             let r = self.write_fontdescriptor(&mut fd);
