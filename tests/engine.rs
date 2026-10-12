@@ -382,6 +382,24 @@ fn a_stream_claim_ends_at_the_first_node_of_a_class_after_unfolding() {
 }
 
 #[test]
+fn a_range_reader_re_anchors_when_its_previous_sibling_is_claimed_or_released() {
+    // The last `page` reads the output since the previous `page`. A claim
+    // growing over that page takes it out of the siblings (the reader
+    // re-anchors on the unit's start); shrinking back returns it.
+    let (mut eng, mut prog, _) = load(&["emit 1", "sumnext s 1", "0", "page", "end", "page"]);
+    assert_eq!(out(&eng, &prog, 5), "[0 0]");
+    prog.set_line(&mut eng, 1, "sumnext s 2".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 5), "[1 1]", "the claimed page is not an anchor");
+    prog.set_line(&mut eng, 1, "sumnext s 1".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 5), "[0 0]", "the released page anchors again");
+    prog.set_line(&mut eng, 1, "sumnext s 3".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 5), "[1 1]");
+}
+
+#[test]
 fn a_stream_claim_follows_its_range_through_label_renumbering() {
     // Inserting at one spot halves the label gap each time, so the unit
     // renumbers its labels several times; the claim's recorded range is

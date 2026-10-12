@@ -79,7 +79,18 @@ fn cold(t: &Trace, o: &Opts) -> Result<(Engine, Doc, Report, Duration, Duration)
     let t0 = Instant::now();
     let mut eng = Engine::new();
     let doc = Doc::load(&mut eng, t);
-    eng.set_environment(env_of(&eng, t, o));
+    let env = env_of(&eng, t, o);
+    // Environment fields the steps read but the environment lacks are
+    // declared absent (an unsupplied one would leave its readers waiting).
+    let mut read = Vec::new();
+    trace::env_reads_in(&t.steps, &mut read);
+    let absent: Vec<Field> = read
+        .iter()
+        .map(|f| eng.values().field(f))
+        .filter(|f| !env.iter().any(|(g, _)| g == f))
+        .collect();
+    eng.set_environment_absent(absent);
+    eng.set_environment(env);
     let load = t0.elapsed();
     let t1 = Instant::now();
     let r = eval(&mut eng, o)?;
