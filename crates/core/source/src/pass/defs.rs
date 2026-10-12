@@ -52,6 +52,14 @@ pub enum Arg {
     /// An argument delimited by `{` (`#1#{`).
     UntilOpen,
     Pending(String),
+    /// A pdfTeX command's keyword syntax, by the command's name
+    /// (pdftex.web's `scan_action`, `scan_image`, `do_dest` …).
+    Pdf(String),
+    /// An array parameter (`\parshape`, `\interlinepenalties`): a
+    /// count, then that many values of this type (`'P'`: dimen pairs).
+    Array(char),
+    /// A delimiter (tex.web §1160 `scan_delimiter`).
+    Delim,
 }
 
 /// A token of parameter text.

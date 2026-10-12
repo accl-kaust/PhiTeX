@@ -8,12 +8,7 @@ fn texts(t: &Tree) -> Vec<&str> {
 /// The tokens of a text, depth first, with their text (groups by
 /// their braces).
 fn tokens(text: &str) -> Vec<(SyntaxKind, &str)> {
-    fn walk<'a>(
-        g: &Green,
-        text: &'a str,
-        at: &mut usize,
-        out: &mut Vec<(SyntaxKind, &'a str)>,
-    ) {
+    fn walk<'a>(g: &Green, text: &'a str, at: &mut usize, out: &mut Vec<(SyntaxKind, &'a str)>) {
         match g {
             Green::Token { kind, len } => {
                 out.push((*kind, &text[*at..*at + len]));
