@@ -118,10 +118,7 @@ fn parallel(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) 
     use rayon::prelude::*;
     let pool = pool(threads);
     pool.install(|| {
-        (0..n)
-            .into_par_iter()
-            .with_min_len(grain)
-            .for_each(f);
+        (0..n).into_par_iter().with_min_len(grain).for_each(f);
     });
 }
 
