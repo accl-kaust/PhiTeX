@@ -17,8 +17,9 @@
 //! - **Protocol.** The Overleaf extension's core requests (`session.ts`'s
 //!   `CoreReq`) as JSON over the WebSocket: `{"id":N,"op":…}`, answered
 //!   `{"id":N,"ok":…,"json":…}` (`serde_json`); unasked, events
-//!   `settled`, `preparing`, `diagnostics`. Ops: `open`, `status`, `pages`,
-//!   `diagnostics`, `source` (a
+//!   `settled`, `preparing`, `diagnostics`, `console` (each message the
+//!   terminal shows, and its status line). Ops: `open`, `status`, `pages`,
+//!   `diagnostics`, `console` (the messages so far), `rebuild`, `source` (a
 //!   double-click's or an error's place: the editor opens there), and the
 //!   editor's buffer: `set_file {file, text}` and `edit {file, start, end,
 //!   text}` (UTF-16 offsets) become the Build's new versions of the file,
@@ -84,6 +85,8 @@ pub struct Built {
 /// What the browsers ask the watch for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ask {
+    /// Build again (the console's Rebuild).
+    Rebuild,
     /// File `file`'s text is the editor's buffer from now on.
     SetFile { file: String, text: String },
     /// Characters `start..end` (UTF-16 code units) of `file`'s buffer
@@ -127,7 +130,15 @@ struct Shared {
     asks: Mutex<Vec<Ask>>,
     wake: Mutex<Option<Box<dyn Fn() + Send>>>,
     building: AtomicBool,
+    /// The terminal's messages so far (the last [`CONSOLE`]), and its
+    /// status line: what a browser that joins shows first.
+    console: Mutex<(std::collections::VecDeque<Value>, Value)>,
+    /// Told how many browsers are connected when that changes.
+    on_clients: Mutex<Option<Box<dyn Fn(usize) + Send>>>,
 }
+
+/// The messages a browser that joins is shown.
+const CONSOLE: usize = 2000;
 
 /// The live viewer of a watch.
 pub struct View {
@@ -178,6 +189,8 @@ impl View {
             asks: Mutex::new(Vec::new()),
             wake: Mutex::new(None),
             building: AtomicBool::new(false),
+            console: Mutex::new((std::collections::VecDeque::new(), Value::Null)),
+            on_clients: Mutex::new(None),
         });
         let url = format!("http://127.0.0.1:{port}/{}/", shared.token);
         let s = shared.clone();
@@ -204,6 +217,31 @@ impl View {
     /// Call `wake` when a browser asks the watch for something.
     pub fn on_ask(&self, wake: Box<dyn Fn() + Send>) {
         *lock(&self.shared.wake) = Some(wake);
+    }
+
+    /// Call `f` with how many browsers are connected when that changes.
+    pub fn on_clients(&self, f: Box<dyn Fn(usize) + Send>) {
+        *lock(&self.shared.on_clients) = Some(f);
+    }
+
+    /// Where the terminal's messages go ([`crate::ui::Ui::tap`]): kept,
+    /// and pushed to the browsers as `{"event":"console","item":…}`.
+    pub fn console(&self) -> Box<dyn Fn(Value) + Send> {
+        let s = self.shared.clone();
+        Box::new(move |item: Value| {
+            {
+                let mut c = lock(&s.console);
+                if item["kind"] == "status" {
+                    c.1 = item.clone();
+                } else {
+                    if c.0.len() == CONSOLE {
+                        c.0.pop_front();
+                    }
+                    c.0.push_back(item.clone());
+                }
+            }
+            broadcast(&s, &json!({"event": "console", "item": item}).to_string());
+        })
     }
 
     /// What the browsers asked for since last taken.
@@ -298,6 +336,10 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
         "" | "index.html" => {
             let _ = ws::respond(&mut w, "200 OK", "text/html; charset=utf-8", INDEX);
         }
+        // (whether the watch is here, before the browser opens a WebSocket)
+        "ping" => {
+            let _ = ws::respond(&mut w, "200 OK", "text/plain", b"phitex watch\n");
+        }
         "viewer.js" => {
             let _ = ws::respond(&mut w, "200 OK", "text/javascript; charset=utf-8", SCRIPT);
         }
@@ -332,7 +374,12 @@ fn socket(s: &Arc<Shared>, sock: WebSocket<TcpStream>) {
     let client = Arc::new(Client {
         out: Mutex::new(sock),
     });
-    lock(&s.clients).push(client.clone());
+    let n = {
+        let mut c = lock(&s.clients);
+        c.push(client.clone());
+        c.len()
+    };
+    clients(s, n);
     loop {
         let msg = lock(&client.out).read();
         let text = match msg {
@@ -355,7 +402,18 @@ fn socket(s: &Arc<Shared>, sock: WebSocket<TcpStream>) {
         }
     }
     let _ = lock(&client.out).close(None);
-    lock(&s.clients).retain(|c| !Arc::ptr_eq(c, &client));
+    let n = {
+        let mut c = lock(&s.clients);
+        c.retain(|c| !Arc::ptr_eq(c, &client));
+        c.len()
+    };
+    clients(s, n);
+}
+
+fn clients(s: &Shared, n: usize) {
+    if let Some(f) = lock(&s.on_clients).as_ref() {
+        f(n);
+    }
 }
 
 fn hashes_json(hs: &[u64]) -> Value {
@@ -444,6 +502,14 @@ fn answer(s: &Shared, req: &Value) -> String {
             }
         }
         "diagnostics" => ok(json!({"items": lock(&s.diagnostics).clone()})),
+        "rebuild" => {
+            ask(s, Ask::Rebuild);
+            ok(json!({}))
+        }
+        "console" => {
+            let c = lock(&s.console);
+            ok(json!({"items": c.0.iter().collect::<Vec<_>>(), "status": c.1}))
+        }
         // (the browser reads the outline from the PDF itself, with MuPDF)
         "outline" => ok(json!({"items": []})),
         "diff" => ok(json!({})),

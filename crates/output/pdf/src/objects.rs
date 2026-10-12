@@ -31,7 +31,7 @@ pub(crate) struct RawObj {
 
 /// A form: the box (until shipped), its attributes and resources, its
 /// size, and its number for `/Fm` (`obj_info`).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct XForm {
     pub boxed: Option<Arc<BoxNode>>,
     pub attr: Option<Vec<u8>>,

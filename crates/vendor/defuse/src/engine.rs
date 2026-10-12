@@ -3544,6 +3544,9 @@ impl Engine {
         let root = self.units[unit as usize].root;
         let mut before = label;
         let mut hit = Vec::new();
+        if self.order.sum(&OAug, root).maxhit < label {
+            return;
+        }
         while let Some(k) = self
             .order
             .search_back(&OAug, root, before, &|s: OSum| s.maxhit >= label)
@@ -4149,6 +4152,11 @@ impl Engine {
         let root = self.units[unit as usize].root;
         let mut before = label;
         let mut hit = Vec::new();
+        // The unit's summary says at once when no range reaches this far
+        // (the common case: a search would still descend to `label`).
+        if self.order.sum(&OAug, root).maxs < label {
+            return hit;
+        }
         while let Some(k) = self.order.search_back(&OAug, root, before, &|s: OSum| s.maxs >= label) {
             if let Some(i) = self.order.get(root, k) {
                 hit.push(i.slot);

@@ -773,7 +773,7 @@ impl PdfState {
     }
 
     fn ol(&mut self, k: usize) -> &mut Outline {
-        self.aux.outlines.entry(k).or_default()
+        self.aux.outlines.get_or_insert_with(k, Outline::default)
     }
 
     /// `\pdfoutline [attr{...}] <action> [count n] {title}` (pdfTeX
@@ -1002,7 +1002,9 @@ impl PdfState {
         let mut dests = 0;
         let n = self.dest_names.len();
         if n > 0 {
-            let mut names = std::mem::take(&mut self.dest_names);
+            // at the end: the names leave the state
+            let mut names: Vec<(Vec<u8>, usize)> = (*self.dest_names).clone();
+            self.dest_names.clear();
             let r = isize::try_from(n).unwrap_or(isize::MAX) - 1;
             sort_dest_names(&mut names, 0, r);
             // obj_info and obj_aux of the nodes: the limits

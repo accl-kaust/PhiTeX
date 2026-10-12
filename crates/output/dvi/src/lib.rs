@@ -642,7 +642,8 @@ impl DviWriter {
                     None
                 }
                 Node::Rule(r) => Some((r.height, r.depth, r.width)),
-                Node::Whatsit(h) => {
+                // a sized whatsit is pdfTeX's, refused in DVI mode
+                Node::Whatsit(h, _) => {
                     self.out_what(*h, wh);
                     None
                 }
@@ -784,7 +785,8 @@ impl DviWriter {
                     None
                 }
                 Node::Rule(r) => Some((r.height, r.depth, r.width)),
-                Node::Whatsit(h) => {
+                // a sized whatsit is pdfTeX's, refused in DVI mode
+                Node::Whatsit(h, _) => {
                     self.out_what(*h, wh);
                     None
                 }

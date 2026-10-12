@@ -103,12 +103,18 @@ fn scan_hlist(
                 }
             }
             Node::Kern(w, _) | Node::Math(_, w) => hdx.2 += w,
+            Node::Whatsit(_, Some(s)) => {
+                // pdfTeX: "Incorporate a whatsit node into an hbox"
+                hdx.2 += s.width;
+                hdx.0 = hdx.0.max(s.height);
+                hdx.1 = hdx.1.max(s.depth);
+            }
             // The replacement text is part of the hlist in tex.web.
             Node::Disc(d) => scan_hlist(&d.replace, fonts, t, hdx),
             Node::Ins(_)
             | Node::Mark(_)
             | Node::Adjust(_)
-            | Node::Whatsit(_)
+            | Node::Whatsit(_, None)
             | Node::Language { .. }
             | Node::Penalty(_) => {}
         }
@@ -219,6 +225,12 @@ pub fn vpackage(list: List, spec: Spec, max_depth: Scaled, params: &PackParams) 
             Node::Kern(k, _) => {
                 x += d + k;
                 d = 0;
+            }
+            Node::Whatsit(_, Some(s)) => {
+                // pdfTeX: "Incorporate a whatsit node into a vbox"
+                x += d + s.height;
+                d = s.depth;
+                w = w.max(s.width);
             }
             _ => {}
         }

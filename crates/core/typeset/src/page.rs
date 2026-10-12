@@ -49,7 +49,7 @@ pub fn prune_page_top(list: List, split_top_skip: Glue, save: bool) -> (List, Li
                 out.extend(it);
                 break;
             }
-            Node::Whatsit(_) | Node::Language { .. } | Node::Mark(_) | Node::Ins(_) => out.push(p),
+            Node::Whatsit(..) | Node::Language { .. } | Node::Mark(_) | Node::Ins(_) => out.push(p),
             Node::Glue(_) | Node::Kern(..) | Node::Penalty(_) => {
                 if save {
                     discards.push(p);
@@ -107,7 +107,13 @@ pub fn vert_break(list: &mut List, h: Scaled, d: Scaled) -> VertBreak {
                     prev_dp = dp;
                     Next::NotFound
                 }
-                Node::Whatsit(_) | Node::Language { .. } | Node::Mark(_) | Node::Ins(_) => {
+                Node::Whatsit(_, Some(s)) => {
+                    // pdfTeX: "Process whatsit p in vert_break loop"
+                    active[0] += prev_dp + s.height;
+                    prev_dp = s.depth;
+                    Next::NotFound
+                }
+                Node::Whatsit(..) | Node::Language { .. } | Node::Mark(_) | Node::Ins(_) => {
                     Next::NotFound
                 }
                 Node::Glue(_) => {
@@ -398,7 +404,7 @@ fn node_type(n: &Node) -> i32 {
         Node::Adjust(_) => 6,
         Node::Lig(_) => 7,
         Node::Disc(_) => 8,
-        Node::Whatsit(_) | Node::Language { .. } => 9,
+        Node::Whatsit(..) | Node::Language { .. } => 9,
         Node::Math(..) => 10,
         Node::Glue(_) => 11,
         Node::Kern(..) => 12,
@@ -518,7 +524,14 @@ impl PageBuilder {
                 self.so_far[7] = dp;
                 pi = None;
             }
-            Node::Whatsit(_) | Node::Language { .. } | Node::Mark(_) => pi = None,
+            Node::Whatsit(_, Some(s)) => {
+                // pdfTeX: "Prepare to move whatsit p to the current
+                // page": its size counts, the page stays empty
+                self.so_far[1] += self.so_far[7] + s.height;
+                self.so_far[7] = s.depth;
+                pi = None;
+            }
+            Node::Whatsit(..) | Node::Language { .. } | Node::Mark(_) => pi = None,
             Node::Glue(_) => {
                 if self.contents < Contents::BoxThere {
                     return self.discard(p, params);
