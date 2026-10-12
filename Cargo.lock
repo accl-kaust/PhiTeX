@@ -1543,6 +1543,7 @@ dependencies = [
  "phitex-makeindex",
  "phitex-tex",
  "phitex-xdvipdfmx",
+ "rustix",
  "serde",
  "serde_json",
  "tikv-jemallocator",
