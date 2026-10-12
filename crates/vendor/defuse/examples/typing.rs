@@ -3,7 +3,7 @@
 //! evaluation (unless `--no-check`).
 //!
 //! `cargo run --release --example typing [sizes..] [--edits N] [--threads N]
-//!  [--no-check] [--scaling] [--trace FILE]`
+//!  [--no-check] [--scaling] [--bounded] [--slow] [--trace FILE]`
 //!
 //! Built with `--profile profiling --features profile`, it also prints the
 //! engine's probe counters and span times (`defuse::obs`) after the cold
@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use common::{Program, Threads, generate_with};
 use defuse::{Engine, Greedy, Report, Rng, Speculation};
 
+#[allow(clippy::struct_excessive_bools)]
 struct Opts {
     edits: usize,
     threads: usize,
@@ -25,6 +26,8 @@ struct Opts {
     scaling: bool,
     /// Generate without evaluated text that starts with a computed piece.
     bounded: bool,
+    /// Print each edit slower than 50 ms.
+    slow: bool,
     trace: Option<String>,
 }
 
@@ -36,6 +39,7 @@ fn main() {
         check: true,
         scaling: false,
         bounded: false,
+        slow: false,
         trace: None,
     };
     let mut args = std::env::args().skip(1);
@@ -46,6 +50,7 @@ fn main() {
             "--no-check" => o.check = false,
             "--scaling" => o.scaling = true,
             "--bounded" => o.bounded = true,
+            "--slow" => o.slow = true,
             "--trace" => o.trace = Some(args.next().expect("--trace FILE")),
             s => sizes.push(s.parse::<usize>().expect("size")),
         }
@@ -190,6 +195,12 @@ fn bench(n: usize, o: &Opts) {
                 println!(
                     "{name:<17} {t:>10.3?}  {:>6} {:>6} {:>6} {:>6} {:>6}  ok ({c:.0?})",
                     r.nodes_run, r.cutoffs, r.rebinds, r.pending_waits, r.runs
+                );
+            }
+            if o.slow && t > Duration::from_millis(50) {
+                println!(
+                    "slow {name:<12} round {round:>3} {t:>10.3?}  run {} cut {} rebnd {} waits {} execs {} rounds {} region {}",
+                    r.nodes_run, r.cutoffs, r.rebinds, r.pending_waits, r.runs, r.rounds, r.scope_region
                 );
             }
             stats[kind].push((t, r));
