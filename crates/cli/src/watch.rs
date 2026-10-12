@@ -15,7 +15,7 @@ use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use notify::{EventKind, RecursiveMode, Watcher as _};
 use serde_json::{Value, json};
@@ -213,6 +213,22 @@ struct Last {
     /// The last output written without errors.
     good: Option<PathBuf>,
     viewers: usize,
+    /// The first good build's time (cold): what an edit is measured by.
+    cold: Option<Duration>,
+    /// The last change's time from its save to the viewer's screen.
+    screen: Option<Duration>,
+}
+
+/// `cold / wall` as `14×` or `2.5×`, when an edit beat the cold build.
+fn faster(cold: Duration, wall: Duration) -> Option<String> {
+    let x = cold.as_secs_f64() / wall.as_secs_f64().max(1e-6);
+    (x >= 1.5).then(|| {
+        if x < 10.0 {
+            format!("{x:.1}×")
+        } else {
+            format!("{x:.0}×")
+        }
+    })
 }
 
 /// Watch target `t`; never returns.
@@ -321,6 +337,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         let mut parts = vec![format!("watching {main_rel}")];
         if let Some((b, _)) = &l.build {
             parts.push(b.clone());
+            if let Some(d) = l.screen {
+                parts.push(format!("⚡ {} to the screen", ms(d)));
+            }
         }
         if view.is_some() {
             parts.push(match l.viewers {
@@ -343,7 +362,8 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // (`viewer = "zathura"`: --open starts it on the output, once)
     let open_cmd = t.viewer.clone().filter(|_| o.open);
     let mut started = false;
-    let mut rebuild = |s: &mut Session, why: &str| {
+    // (`since`: when the change came; none for the cold build)
+    let mut rebuild = |s: &mut Session, why: &str, since: Option<Instant>| {
         builds += 1;
         if let Some(v) = &view {
             v.building(true);
@@ -366,6 +386,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                         hashes: last_hashes.clone(),
                         history: 2,
                         ms: 0.0,
+                        since_ms: None,
                         diagnostics: vec![
                             json!({"severity": "error", "code": "engine", "message": first}),
                         ],
@@ -436,6 +457,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 hashes: last_hashes.clone(),
                 history: r.history(),
                 ms: r.wall.as_secs_f64() * 1e3,
+                since_ms: since.map(|t| t.elapsed().as_secs_f64() * 1e3),
                 diagnostics: diagnostics(&r, &log),
             });
             v.building(false);
@@ -469,7 +491,15 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 "nothing written".to_owned()
             });
         } else {
-            facts.push(format!("{nodes} nodes run"));
+            let live = r.runs.last().map_or(0, |x| x.live);
+            // (an edit: what it ran of what the document has, the rest kept)
+            #[allow(clippy::cast_precision_loss)]
+            facts.push(if builds > 1 && live > 0 {
+                let kept = 100.0 * (1.0 - nodes as f64 / live as f64).max(0.0);
+                format!("{nodes} of {live} nodes run ({kept:.0}% kept)")
+            } else {
+                format!("{nodes} nodes run")
+            });
             let n = r.pages();
             let s = if n == 1 { "" } else { "s" };
             facts.push(if builds == 1 {
@@ -485,16 +515,30 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             });
         }
         facts.push(st.bold(&ms(r.wall)));
+        let cold = last.borrow().cold;
+        match cold {
+            None if !failed => last.borrow_mut().cold = Some(r.wall),
+            Some(c) if !failed => {
+                if let Some(x) = faster(c, r.wall) {
+                    facts.push(st.green(&format!("{x} faster than cold")));
+                }
+            }
+            _ => {}
+        }
+        // (a save that changed nothing the build reads: vim writes twice)
+        let noop = !failed && builds > 1 && nodes == 0 && changed.is_empty();
         let mark = if failed {
             st.red(st.sym("✗", "failed:"))
         } else {
             st.green(st.sym("✓", "ok:"))
         };
-        ui.line(&format!(
-            "{mark} build {builds}  {}  {}",
-            st.cyan(&place),
-            facts.join(st.sym(" · ", ", "))
-        ));
+        if !noop || ui.verbose > 0 {
+            ui.line(&format!(
+                "{mark} build {builds}  {}  {}",
+                st.cyan(&place),
+                facts.join(st.sym(" · ", ", "))
+            ));
+        }
         ui.event(&json!({
             "event": "build",
             "build": builds,
@@ -545,6 +589,14 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         }
         {
             let mut l = last.borrow_mut();
+            if let (Some(c), false) = (l.cold.filter(|_| builds > 1), failed)
+                && let Some(x) = faster(c, r.wall)
+            {
+                brief.push(format!("{x} faster than cold"));
+            }
+            if !noop {
+                l.screen = None;
+            }
             l.build = Some((brief.join(" · "), !failed));
             l.problems = Some((r.out.errors.clone(), r.log_text()));
             show(ui, &l);
@@ -558,7 +610,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             }
         }
     };
-    rebuild(&mut s, "cold");
+    rebuild(&mut s, "cold", None);
     let set = |s: &mut Session, buffers: &HashMap<String, String>, file: &str| {
         let text = buffers.get(file).map(|b| tex_text(b));
         if file == main_rel {
@@ -573,6 +625,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         }
     };
     while let Ok(first) = rx.recv() {
+        let came = Instant::now();
         // (what came meanwhile is one edit)
         let mut events = vec![first];
         while let Ok(e) = rx.recv_timeout(Duration::from_millis(2)) {
@@ -664,6 +717,12 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 Event::Asked => {
                     for a in view.as_ref().map(View::take_asks).unwrap_or_default() {
                         let file = match a {
+                            Ask::Painted(us) => {
+                                let mut l = last.borrow_mut();
+                                l.screen = Some(Duration::from_micros(us));
+                                show(ui, &l);
+                                continue;
+                            }
                             Ask::Rebuild => {
                                 why.push("asked in the viewer".to_owned());
                                 again = true;
@@ -701,7 +760,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         }
         if again {
             why.dedup();
-            rebuild(&mut s, &why.join(", "));
+            rebuild(&mut s, &why.join(", "), Some(came));
         }
     }
     quit(ui)
