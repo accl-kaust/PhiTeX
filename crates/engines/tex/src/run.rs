@@ -88,6 +88,7 @@ impl Cur {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Run<'c, 'a> {
     pub cx: &'c mut Ctx<'a>,
     pub v: &'a Values,
@@ -101,6 +102,7 @@ pub(crate) struct Run<'c, 'a> {
     pub claim_rest: bool,
     /// In a trial (`measure_tail`): the scope kind its own commands
     /// opened and closed so far, in place of the node's.
+    #[allow(clippy::option_option)]
     pub trial_kind: Option<Option<ValueId>>,
     /// In a trial, the groups it opens get list ids of their own.
     pub trial_ids: Option<std::cell::Cell<i64>>,
@@ -164,7 +166,9 @@ impl<'c, 'a> Run<'c, 'a> {
         match &self.trial_ids {
             Some(c) => {
                 c.set(c.get() + 1);
-                id ^ c.get().wrapping_mul(0x9E37_79B9_7F4A_7C15_u64 as i64)
+                id ^ c
+                    .get()
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15_u64.cast_signed())
             }
             None => id,
         }
@@ -462,8 +466,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 let cat = self.cat(c)?;
                 match cat {
                     // §345
-                    9 => break,
-                    10 if state != MID_LINE => break,
+                    x if x == 9 || (x == 10 && state != MID_LINE) => break,
                     0 => return self.scan_cs().map(Some),
                     13 => {
                         self.set_state(MID_LINE);
@@ -630,7 +633,7 @@ impl<'c, 'a> Run<'c, 'a> {
                         break;
                     }
                 }
-                if self.reduce_expanded(k, cat)? {
+                if self.reduce_expanded(k, cat) {
                     continue;
                 }
                 if cat != 11 {
@@ -645,7 +648,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     }
                     return Ok(Tok::S(Rc::from(name)));
                 }
-            } else if self.reduce_expanded(k, cat)? {
+            } else if self.reduce_expanded(k, cat) {
                 continue;
             }
             let c = self.buf(loc);
@@ -667,21 +670,21 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// §355: with `buffer[k-1]` of category `cat`, reduces an expanded code
     /// there; true if it did (`goto start_cs`).
-    fn reduce_expanded(&mut self, k: usize, cat: u8) -> R<bool> {
+    fn reduce_expanded(&mut self, k: usize, cat: u8) -> bool {
         let Some(Frame::Src(s)) = self.frames.front_mut() else {
-            return Ok(false);
+            return false;
         };
         let limit = s.buf.len() - 1;
         if k > limit || cat != 7 || k >= limit {
-            return Ok(false);
+            return false;
         }
         let cur = s.buf[k - 1];
         if s.buf[k] != cur {
-            return Ok(false);
+            return false;
         }
         let c = s.buf[k + 1];
         if c >= 0o200 {
-            return Ok(false);
+            return false;
         }
         let mut d = 2;
         if is_hex(c) && k + 2 <= limit && is_hex(s.buf[k + 2]) {
@@ -695,7 +698,7 @@ impl<'c, 'a> Run<'c, 'a> {
             c - 0o100
         };
         s.buf.drain(k..k + d);
-        Ok(true)
+        true
     }
 
     /// `get_next` with the meaning (§357–§358).
@@ -1073,7 +1076,7 @@ pub(crate) fn decode_frames(v: &Values, args: &[ValueId]) -> Vec<Frame> {
     let Value::List(fs) = &*v.get(l) else {
         return out;
     };
-    for &f in fs.iter() {
+    for &f in fs {
         let Value::List(xs) = &*v.get(f) else {
             continue;
         };

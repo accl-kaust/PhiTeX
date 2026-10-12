@@ -24,7 +24,7 @@ impl Run<'_, '_> {
     pub(crate) fn expand(&mut self) -> R<()> {
         let saved = (self.radix, self.cur_order);
         let c = self.cur.cmd;
-        if c >= cmd::CALL && c < cmd::END_TEMPLATE {
+        if (cmd::CALL..cmd::END_TEMPLATE).contains(&c) {
             self.macro_call()?;
         } else {
             match c {
@@ -409,15 +409,11 @@ impl Run<'_, '_> {
             }
             12 => {
                 // §507
-                if !self.get_next()? {
-                    false
-                } else {
+                if self.get_next()? {
                     let m1 = self.cur.mean.clone();
                     let t1 = self.cur.tok.clone();
                     let (p, q) = self.cur_cmd_chr_for_ifx(&t1, &m1);
-                    if !self.get_next()? {
-                        false
-                    } else {
+                    if self.get_next()? {
                         let m2 = self.cur.mean.clone();
                         let t2 = self.cur.tok.clone();
                         let (c2, h2) = self.cur_cmd_chr_for_ifx(&t2, &m2);
@@ -433,7 +429,11 @@ impl Run<'_, '_> {
                                 _ => false,
                             }
                         }
+                    } else {
+                        false
                     }
+                } else {
+                    false
                 }
             }
             13 => {
@@ -452,7 +452,8 @@ impl Run<'_, '_> {
                         if self.cur.chr == OR_CODE {
                             n -= 1;
                         } else {
-                            return self.common_ending(save);
+                            self.common_ending(save);
+                            return Ok(());
                         }
                     } else if self.cur.chr == FI_CODE {
                         self.conds.pop();
@@ -482,7 +483,8 @@ impl Run<'_, '_> {
                 self.conds.pop();
             }
         }
-        self.common_ending(save)
+        self.common_ending(save);
+        Ok(())
     }
 
     fn has_cur_cond(&self, save: usize) -> bool {
@@ -500,13 +502,12 @@ impl Run<'_, '_> {
         )
     }
 
-    fn common_ending(&mut self, save: usize) -> R<()> {
+    fn common_ending(&mut self, save: usize) {
         if self.cur.chr == FI_CODE {
             self.conds.truncate(save - 1);
         } else {
             self.change_if_limit(FI_CODE, save);
         }
-        Ok(())
     }
 
     fn change_if_limit(&mut self, l: i32, save: usize) {
@@ -533,9 +534,7 @@ impl Run<'_, '_> {
     /// The font identifier token of font `f` (§1257: `font_id_text`).
     pub(crate) fn font_id_tok(&mut self, f: i64) -> R<Tok> {
         let x = self.get(&format!("fontid:{f}"))?;
-        let name = x
-            .map(|x| str_of(self.v, x))
-            .unwrap_or_else(|| "nullfont".to_owned());
+        let name = x.map_or_else(|| "nullfont".to_owned(), |x| str_of(self.v, x));
         Ok(Tok::S(Rc::from(format!("\u{10FFFE}F{f}\u{2}{name}"))))
     }
 
@@ -574,10 +573,7 @@ impl Run<'_, '_> {
             }
             _ => {
                 let j = self.get("jobname")?;
-                s.push_str(
-                    &j.map(|x| str_of(self.v, x))
-                        .unwrap_or_else(|| "texput".to_owned()),
-                );
+                s.push_str(&j.map_or_else(|| "texput".to_owned(), |x| str_of(self.v, x)));
             }
         }
         self.push_toks(str_toks(&s));
@@ -797,7 +793,7 @@ impl Run<'_, '_> {
 /// The lines of a file's text, each with its end of line.
 pub(crate) fn split_lines(text: &str) -> Vec<String> {
     let mut out: Vec<String> = text.split_inclusive('\n').map(str::to_owned).collect();
-    if out.last().is_some_and(|l| l.is_empty()) {
+    if out.last().is_some_and(std::string::String::is_empty) {
         out.pop();
     }
     out

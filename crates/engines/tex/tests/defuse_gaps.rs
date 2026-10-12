@@ -191,7 +191,8 @@ impl Operation for Toy3 {
         match tag(v, &a).as_str() {
             "c" => {
                 let first = cx.following(0).and_then(|(_, xs)| xs.get(1).copied());
-                let n = if first.is_some_and(|x| matches!(&*v.get(x), Value::Str(s) if &**s == "x")) {
+                let n = if first.is_some_and(|x| matches!(&*v.get(x), Value::Str(s) if &**s == "x"))
+                {
                     3
                 } else {
                     1
@@ -222,7 +223,11 @@ impl Operation for Toy3 {
 
 static OP3: std::sync::OnceLock<OpId> = std::sync::OnceLock::new();
 
-fn toy3_unit(eng: &mut Engine, op: OpId, x: &str) -> (Vec<phitex_defuse::NodeId>, phitex_defuse::NodeId) {
+fn toy3_unit(
+    eng: &mut Engine,
+    op: OpId,
+    x: &str,
+) -> (Vec<phitex_defuse::NodeId>, phitex_defuse::NodeId) {
     let u = eng.new_unit();
     let mut ns = Vec::new();
     let c = eng.values().str("c");

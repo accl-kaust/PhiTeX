@@ -152,13 +152,12 @@ pub(crate) fn print_scaled(out: &mut String, s: i32) {
 /// `print_glue` (§177).
 pub(crate) fn print_glue(out: &mut String, d: i32, o: Order, unit: &str) {
     print_scaled(out, d);
-    match o {
-        Order::Normal => out.push_str(unit),
-        _ => {
-            out.push_str("fil");
-            for _ in 1..(o as usize) {
-                out.push('l');
-            }
+    if o == Order::Normal {
+        out.push_str(unit)
+    } else {
+        out.push_str("fil");
+        for _ in 1..(o as usize) {
+            out.push('l');
         }
     }
 }

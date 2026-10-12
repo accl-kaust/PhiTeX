@@ -33,7 +33,10 @@ pub fn finder(dir: &Path) -> Finder {
         if p.is_file() {
             return Some((format!("./{name}"), std::fs::read(&p).ok()?));
         }
-        let fmt = if name.ends_with(".tfm") {
+        let fmt = if std::path::Path::new(name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("tfm"))
+        {
             phitex_kpse::Format::Tfm
         } else {
             phitex_kpse::Format::Tex

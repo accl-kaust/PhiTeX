@@ -270,7 +270,7 @@ impl Graph {
         if std::env::var_os("PHITEX_TEX_TIME").is_some() {
             eprintln!(
                 "push_text: slices {t1:?}, push {:?}, {} nodes",
-                t0.elapsed() - t1,
+                t0.elapsed().checked_sub(t1).unwrap(),
                 out.len()
             );
         }
@@ -372,6 +372,10 @@ impl Build {
     }
 
     /// [`Build::new`] with options.
+    ///
+    /// # Panics
+    ///
+    /// If the engine reports an evaluation error (a cycle).
     #[must_use]
     pub fn with(opts: Options, prelude: Option<&str>, document: &str) -> Build {
         let t0 = std::time::Instant::now();
@@ -404,7 +408,10 @@ impl Build {
         };
         b.settle();
         if std::env::var_os("PHITEX_TEX_TIME").is_some() {
-            eprintln!("time: prelude {t1:?}, document {:?}", t0.elapsed() - t1);
+            eprintln!(
+                "time: prelude {t1:?}, document {:?}",
+                t0.elapsed().checked_sub(t1).unwrap()
+            );
         }
         b
     }
@@ -459,12 +466,11 @@ impl Build {
         }
         for k in common..new_mid {
             let args = args_of(&self.g, a + k);
-            let n = match nodes.last() {
-                Some(&(_, p)) => self.g.eng.insert_after(p, exec, args),
-                None => {
-                    let first = self.nodes.get(a + old_mid).map_or(self.dvi, |x| x.1);
-                    self.g.eng.insert_before(first, exec, args)
-                }
+            let n = if let Some(&(_, p)) = nodes.last() {
+                self.g.eng.insert_after(p, exec, args)
+            } else {
+                let first = self.nodes.get(a + old_mid).map_or(self.dvi, |x| x.1);
+                self.g.eng.insert_before(first, exec, args)
             };
             nodes.push((new[a + k].0.clone(), n));
         }

@@ -191,7 +191,7 @@ impl Run<'_, '_> {
                     rest.extend(queue);
                     st.pending = rest;
                     st.key = remember(pb, side.clone());
-                    if self.fire(&st, *f, &side)? {
+                    if self.fire(&st, &f, &side)? {
                         // the output routine runs; its end steps the fold
                         return Ok(());
                     }
@@ -210,7 +210,7 @@ impl Run<'_, '_> {
 
     /// `fire_up` (§1012–§1025) after the page builder chose the page:
     /// true if an output routine runs (as children).
-    fn fire(&mut self, st: &State, f: phitex_typeset::page::Fired, side: &Side) -> R<bool> {
+    fn fire(&mut self, st: &State, f: &phitex_typeset::page::Fired, side: &Side) -> R<bool> {
         let v = self.v;
         // §1012: marks
         let bot = self.get("mark:bot")?.filter(|&x| x != ValueId::UNIT);
