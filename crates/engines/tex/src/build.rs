@@ -583,6 +583,7 @@ impl Run<'_, '_> {
         vm.lid = md.vlid;
         let just_box = para.lines.last().map(|l| l.packed.node.clone());
         for line in para.lines {
+            self.box_report(true, line.packed.report, true);
             let b = nodes::encode_box(v, &line.packed.node, &side);
             self.append_to_vlist(&vm, b)?;
             for a in &line.packed.adjustments {
@@ -1177,6 +1178,8 @@ impl Run<'_, '_> {
                     p
                 };
                 self.set("badness", v.int(i64::from(packed.badness)), true);
+                let h = md.group == group::HBOX || adjusted;
+                self.box_report(h, packed.report, false);
                 self.unsave_extras(md)?;
                 let b = nodes::encode_box(v, &packed.node, &side);
                 let outer = self.outer_mode(md)?;
@@ -1857,6 +1860,31 @@ impl Run<'_, '_> {
         }
     }
 
+    /// The box reports of §660–§667 and §674–§678, as diagnostics (the
+    /// log keeps the oracle's text).
+    fn box_report(&mut self, h: bool, r: Option<phitex_typeset::pack::Report>, in_par: bool) {
+        use phitex_typeset::pack::Report;
+        let Some(r) = r else { return };
+        let what = if h { "\\hbox" } else { "\\vbox" };
+        let mut s = match r {
+            Report::Underfull(b) => format!("Underfull {what} (badness {b})"),
+            Report::Loose(b) => format!("Loose {what} (badness {b})"),
+            Report::Tight(b) => format!("Tight {what} (badness {b})"),
+            Report::Overfull(x) => {
+                let mut d = String::new();
+                crate::print::print_scaled(&mut d, x);
+                format!(
+                    "Overfull {what} ({d}pt too {})",
+                    if h { "wide" } else { "high" }
+                )
+            }
+        };
+        if in_par {
+            s.push_str(" in paragraph");
+        }
+        self.diag(false, &s);
+    }
+
     /// `char_warning` (§581).
     fn char_warning(&mut self, f: u32, c: u32) -> R<()> {
         if self.param("tracinglostchars")? > 0 {
@@ -1868,6 +1896,7 @@ impl Run<'_, '_> {
                 s.push_str(&i.name);
             }
             s.push('!');
+            self.diag(false, &s);
             self.log("diag", &s)?;
         }
         Ok(())
