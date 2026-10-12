@@ -99,6 +99,9 @@ pub(crate) struct Run<'c, 'a> {
     pub top: bool,
     /// Whether `\end` takes every following sibling.
     pub claim_rest: bool,
+    /// While looking for the command's first token: a node's command
+    /// begins in its own text (the next sibling's begins in its own).
+    pub no_pull: bool,
     own: FxHashMap<Field, Option<ValueId>>,
     pub defs: Vec<(Field, ValueId, Locality)>,
     pub contribs: Vec<(Field, ValueId)>,
@@ -128,6 +131,7 @@ impl<'c, 'a> Run<'c, 'a> {
             pulled: 0,
             top: false,
             claim_rest: false,
+            no_pull: false,
             own: FxHashMap::default(),
             defs: Vec::new(),
             contribs: Vec::new(),
@@ -277,7 +281,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Takes the next sibling's text into the input (§362: the next line,
     /// or the rest of this one).
     fn pull(&mut self) -> R<bool> {
-        if self.eof {
+        if self.eof || self.no_pull {
             return Ok(false);
         }
         match self.cx.following(self.pulled) {
@@ -305,8 +309,6 @@ impl<'c, 'a> Run<'c, 'a> {
             if let (Some(Frame::Src(last)), Frame::Src(next)) = (self.frames.back_mut(), &f)
                 && !last.ends
                 && !next.starts
-                && last.endch == -2
-                && next.endch == -2
             {
                 last.buf.extend_from_slice(&next.buf);
                 last.ends = next.ends;
@@ -330,10 +332,24 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         match decode_frames(self.v, &args).first() {
             Some(Frame::Src(s)) if !s.starts => match s.buf.first() {
-                Some(&c) => Ok(self.cat(c)? == 11),
+                Some(&c) => Ok(matches!(self.cat(c)?, 7 | 11)),
                 None => Ok(false),
             },
             _ => Ok(false),
+        }
+    }
+
+    /// Whether the next sibling's text continues this line.
+    fn next_is_continuation(&self) -> bool {
+        let Some(Frame::Src(last)) = self.frames.back() else { return false };
+        if last.ends || self.frames.len() != 1 {
+            return false;
+        }
+        match self.cx.following(self.pulled) {
+            Some((op, args)) if op == self.ops.exec => {
+                matches!(decode_frames(self.v, &args).first(), Some(Frame::Src(s)) if !s.starts)
+            }
+            _ => false,
         }
     }
 
@@ -341,7 +357,7 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn has_input(&self) -> bool {
         self.frames.iter().any(|f| match f {
             Frame::Toks(t, p) => *p < t.len(),
-            Frame::Src(s) => s.loc < s.buf.len() || (s.endch == -2 && s.ends),
+            Frame::Src(s) => s.loc < s.buf.len() || (s.ends && s.endch < -1),
         })
     }
 
@@ -382,26 +398,21 @@ impl<'c, 'a> Run<'c, 'a> {
         if let Some(Frame::Src(s)) = self.frames.front()
             && s.endch == -2
         {
-            let (starts, ends) = (s.starts, s.ends);
-            // `\endlinechar` is read where the line's last segment is
-            // reached; §360 reads it as the line begins. They differ only
-            // when a line changes it before its end.
-            let e = if ends { self.int("param:endlinechar")? } else { -1 };
+            // §362: a line is counted as it begins
+            let starts = s.starts;
             if starts {
-                self.lines_entered += 1;
+                    self.lines_entered += 1;
                 let line = self.v.int(1);
                 self.contribute("lines", line);
             }
             if let Some(Frame::Src(s)) = self.frames.front_mut() {
-                if ends && (0..256).contains(&e) {
-                    s.buf.push(u32::try_from(e).unwrap_or(13));
-                }
-                s.endch = e;
+                s.endch = -3;
                 if starts {
                     s.state = NEW_LINE;
                 }
             }
         }
+        self.end_line_char()?;
         loop {
             let (c, state) = {
                 let Some(Frame::Src(s)) = self.frames.front_mut() else {
@@ -414,6 +425,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 s.loc += 1;
                 (c, s.state)
             };
+            // the line's end is reached after its last character (§360)
             let mut c = c;
             // reswitch
             loop {
@@ -428,6 +440,11 @@ impl<'c, 'a> Run<'c, 'a> {
                         return Ok(Some(Tok::ch(13, c)));
                     }
                     7 => {
+                        // `^^` cut by a node boundary
+                        let near_end = matches!(self.frames.front(), Some(Frame::Src(s)) if s.loc + 2 > s.buf.len());
+                        if near_end && self.next_is_continuation() {
+                            self.pull()?;
+                        }
                         if let Some(x) = self.sup_mark(c) {
                             c = x;
                             continue;
@@ -460,11 +477,28 @@ impl<'c, 'a> Run<'c, 'a> {
                 }
             }
             // goto switch
+            self.end_line_char()?;
             let done = matches!(self.frames.front(), Some(Frame::Src(s)) if s.loc >= s.buf.len());
             if done {
                 return Ok(None);
             }
         }
+    }
+
+    /// At the end of a segment that ends its line: `\endlinechar` goes
+    /// after it (§360; read here, where the line's end is reached).
+    fn end_line_char(&mut self) -> R<()> {
+        let due = matches!(self.frames.front(), Some(Frame::Src(s)) if s.ends && s.endch == -3 && s.loc >= s.buf.len());
+        if due {
+            let e = self.int("param:endlinechar")?;
+            if let Some(Frame::Src(s)) = self.frames.front_mut() {
+                if (0..256).contains(&e) {
+                    s.buf.push(u32::try_from(e).unwrap_or(13));
+                }
+                s.endch = e;
+            }
+        }
+        Ok(())
     }
 
     fn set_state(&mut self, st: u8) {
@@ -473,9 +507,14 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
+    /// The rest of the line goes, its end too (§347, §348).
     fn finish_line(&mut self) {
         if let Some(Frame::Src(s)) = self.frames.front_mut() {
             s.loc = s.buf.len();
+            if s.endch < -1 {
+                // the end has not been reached: nothing will follow
+                s.endch = -1;
+            }
         }
     }
 
@@ -515,13 +554,18 @@ impl<'c, 'a> Run<'c, 'a> {
                 let rest: Vec<u32> = s.buf[s.loc.min(s.buf.len())..].to_vec();
                 let mut letters = true;
                 for &c in &rest {
-                    if self.cat(c)? != 11 {
+                    if !matches!(self.cat(c)?, 7 | 11) {
                         letters = false;
                         break;
                     }
                 }
-                let more = if rest.is_empty() {
-                    matches!(self.cx.following(self.pulled), Some((op, _)) if op == self.ops.exec)
+                let last_sup = match rest.last() {
+                    Some(&c) => self.cat(c)? == 7,
+                    None => false,
+                };
+                let more = if rest.is_empty() || (letters && last_sup) {
+                    // `\` or `^^` at the cut: what follows is the name
+                    self.next_is_continuation()
                 } else {
                     letters && self.next_continues_name()?
                 };
@@ -728,20 +772,21 @@ impl<'c, 'a> Run<'c, 'a> {
                     if !run.is_empty() {
                         out.push(node(std::mem::take(&mut run)));
                     }
-                    if s.loc >= s.buf.len() && !(s.endch == -2 && s.ends) {
+                    let end_due = s.ends && s.endch < -1;
+                    if s.loc >= s.buf.len() && !end_due {
                         continue;
                     }
                     let text: String = s.buf[s.loc.min(s.buf.len())..]
                         .iter()
                         .map(|&c| char::from_u32(c).unwrap_or('?'))
                         .collect();
-                    let starts = s.starts && s.loc == 0;
+                    let starts = s.starts && s.endch == -2;
                     let fr = v.list(vec![
                         v.str("s"),
                         v.str(&text),
                         v.int(i64::from(s.state)),
-                        v.int(s.endch),
-                        v.int(i64::from(starts) | (i64::from(s.ends) << 1)),
+                        v.int(-2),
+                        v.int(i64::from(starts) | (i64::from(end_due) << 1)),
                     ]);
                     out.push(vec![v.list(vec![fr]), v.int(0)]);
                 }

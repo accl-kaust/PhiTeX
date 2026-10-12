@@ -22,8 +22,17 @@ fn ops(s: &Shared) -> Ops {
 /// children go out only if it finishes; a starved or file-waiting run
 /// records its need for the client instead.
 fn run_node(cx: &mut Ctx<'_>, o: Ops, body: impl FnOnce(&mut Run<'_, '_>) -> R<()>) -> Result<ValueId, Stop> {
+    let trace = std::env::var_os("PHITEX_TEX_TRACE").is_some();
+    if trace {
+        let a = cx.args().first().map(|&x| cx.values().render(x)).unwrap_or_default();
+        eprintln!("run {} {}", cx.node().raw() % 100_000, a.chars().take(70).collect::<String>());
+    }
     let mut r = Run::new(cx, o);
-    match body(&mut r) {
+    let res = body(&mut r);
+    if trace {
+        eprintln!("  -> {}", match &res { Ok(()) => "ok".to_owned(), Err(Halt::Stop(_)) => "stop".to_owned(), Err(Halt::Starve) => "starve".to_owned(), Err(Halt::Fatal) => "fatal".to_owned(), Err(Halt::File(f)) => format!("file {f}") });
+    }
+    match res {
         Ok(()) => Ok(r.finish()),
         Err(Halt::Stop(s)) => Err(s),
         Err(Halt::Starve) => {

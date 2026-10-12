@@ -21,7 +21,10 @@ pub(crate) const LEADER_FLAG: i64 = BOX_FLAG + 513;
 impl Run<'_, '_> {
     /// The node's command: expand once, or do one command (§1030).
     pub(crate) fn command(&mut self) -> R<()> {
-        if !self.get_next()? {
+        self.no_pull = true;
+        let got = self.get_next();
+        self.no_pull = false;
+        if !got? {
             return Ok(());
         }
         if self.cur.cmd > cmd::MAX_COMMAND {

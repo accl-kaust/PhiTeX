@@ -42,10 +42,22 @@ impl Log {
             self.print_ln();
             return;
         }
-        let mut s = String::new();
-        crate::print::push_code(&mut s, c);
-        for ch in s.chars() {
-            self.raw(ch);
+        // §49: characters 32..126 print as themselves, others in `^^`
+        // form
+        if (32..127).contains(&c) {
+            self.raw(char::from_u32(c).unwrap_or('?'));
+        } else if c < 128 {
+            self.raw('^');
+            self.raw('^');
+            self.raw(char::from_u32(if c < 64 { c + 64 } else { c - 64 }).unwrap_or('?'));
+        } else if c < 256 {
+            let hex = |d: u32| char::from_digit(d, 16).unwrap_or('0');
+            self.raw('^');
+            self.raw('^');
+            self.raw(hex(c / 16));
+            self.raw(hex(c % 16));
+        } else {
+            self.raw(char::from_u32(c).unwrap_or('?'));
         }
     }
 
