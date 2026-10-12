@@ -497,3 +497,39 @@ fn an_env_wait_before_an_accumulator_reader_is_not_a_cycle() {
     );
     assert_eq!(rep.env_waits, vec![(i, eng.values().field("file"))]);
 }
+
+/// Waits for an environment field whose name it makes as it runs (no
+/// one else holds the name's value); interns garbage first so the sweep
+/// has work.
+struct FreshName;
+
+impl Operation for FreshName {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        None
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        for k in 0..20_000 {
+            let _ = v.str(&format!("garbage-{k}"));
+        }
+        let name = format!("fresh-{}", 40 + 2);
+        cx.use_env(v.field(&name))?;
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+fn env_wait_field_names_survive_the_evaluation() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(FreshName));
+    let u = eng.new_unit();
+    let _first = eng.push(u, eng.open_op(), Vec::new());
+    eng.evaluate_sequential().expect("evaluate");
+    let w = eng.push(u, op, Vec::new());
+    eng.add_root(w);
+    let rep = eng.evaluate_sequential().expect("evaluate");
+    let (_, f) = rep.env_waits.first().copied().expect("a wait");
+    // panics today: "unknown or freed value"
+    let name = eng.values().render(f.0);
+    assert_eq!(name, "\"fresh-42\"");
+}
