@@ -269,3 +269,108 @@ fn a_child_moves_back_when_its_parents_claim_shrinks() {
     let want = cold.output(f2).map(|x| cold.values().render(x));
     assert_eq!(got, want, "edited order differs from cold");
 }
+
+/// `["p", t]` unfolds children `["c"]` and `["s", t]`; `["c"]` claims its
+/// following sibling and outputs that sibling's text; `["s", t]`
+/// contributes `t` to `acc`; `["f"]` reads `acc`.
+struct Toy4;
+
+impl Operation for Toy4 {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn claim(
+        &self,
+        a: &[ValueId],
+        v: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Claim {
+        if tag(v, a) == "c" {
+            Claim::Pending
+        } else {
+            Claim::None
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let acc = v.field("acc");
+        match tag(v, &a).as_str() {
+            "p" => {
+                let op = OP4.get().copied().unwrap();
+                cx.child(op, vec![v.str("c")]);
+                let t = a.get(1).copied().unwrap_or(ValueId::UNIT);
+                cx.child(op, vec![v.str("s"), t]);
+                Ok(ValueId::UNIT)
+            }
+            "c" => {
+                let f = cx.following(0);
+                cx.claim(usize::from(f.is_some()));
+                Ok(f.map_or_else(
+                    || v.str("none"),
+                    |(_, xs)| xs.get(1).copied().unwrap_or(ValueId::UNIT),
+                ))
+            }
+            "f" => cx.acc_range(acc, None),
+            _ => {
+                let t = a.get(1).copied().unwrap_or(ValueId::UNIT);
+                cx.contribute(acc, v.seq_unit(t));
+                Ok(ValueId::UNIT)
+            }
+        }
+    }
+}
+
+static OP4: std::sync::OnceLock<OpId> = std::sync::OnceLock::new();
+
+fn toy4_unit(
+    eng: &mut Engine,
+    op: OpId,
+    t: &str,
+) -> (phitex_defuse::NodeId, phitex_defuse::NodeId) {
+    let u = eng.new_unit();
+    let a = vec![eng.values().str("p"), eng.values().str(t)];
+    let p = eng.push(u, op, a);
+    let f = eng.values().str("f");
+    let f = eng.push(u, op, vec![f]);
+    (p, f)
+}
+
+/// A parent's edit replaces the child that its other child claims: the
+/// claimer must see the new sibling (re-run, keep the claim), so the
+/// replaced child stays inert, as in a cold evaluation. Seen: the claimer
+/// keeps its old output and the new sibling runs unclaimed.
+#[test]
+fn a_claimer_reruns_when_the_sibling_it_claims_is_replaced() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Toy4));
+    let _ = OP4.set(op);
+    let acc = eng.values().field("acc");
+    eng.declare_accumulator(acc, Arc::new(phitex_defuse::SeqMonoid));
+    let (p, f) = toy4_unit(&mut eng, op, "old");
+    eng.evaluate_sequential().expect("evaluate");
+    let a = vec![eng.values().str("p"), eng.values().str("new")];
+    eng.replace(p, op, a);
+    eng.evaluate_sequential().expect("evaluate after the edit");
+    let c = eng.children(p)[0];
+    let got = (
+        eng.output(c).map(|x| eng.values().render(x)),
+        eng.output(f).map(|x| eng.values().render(x)),
+    );
+
+    let mut cold = Engine::new();
+    let op2 = cold.register(Arc::new(Toy4));
+    let acc2 = cold.values().field("acc");
+    cold.declare_accumulator(acc2, Arc::new(phitex_defuse::SeqMonoid));
+    let (p2, f2) = toy4_unit(&mut cold, op2, "new");
+    cold.evaluate_sequential().expect("cold evaluate");
+    let c2 = cold.children(p2)[0];
+    let want = (
+        cold.output(c2).map(|x| cold.values().render(x)),
+        cold.output(f2).map(|x| cold.values().render(x)),
+    );
+    assert_eq!(
+        got, want,
+        "(claimer's output, acc) after the edit differ from cold"
+    );
+}

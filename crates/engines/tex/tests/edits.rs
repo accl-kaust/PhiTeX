@@ -164,3 +164,24 @@ fn tiny_edit() {
         cold.output().1
     );
 }
+
+/// An edit inside a mark the output routine reads.
+#[test]
+fn tiny_mark_edit() {
+    let fx = common::fixtures().join("dvi");
+    let src = "\\catcode`\\{=1 \\catcode`\\}=2\n\\font\\tenrm=cmr10 \\tenrm \\hsize=100pt \\vsize=100pt\n\\output={\\shipout\\vbox{\\hbox{\\firstmark}\\box255}}\n\\vskip 1pt\n\\mark{Galaxy}\\hbox{x}\n\\end\n".to_owned();
+    let opts = || common::options("./t.tex", "t", "", &fx);
+    let mut b = common::build(opts(), None, &src);
+    let text = src.replacen("Galaxy", "alaxyG", 1);
+    eprintln!("--- edit");
+    b.edit(&text);
+    eprintln!("--- cold");
+    let cold = common::build(opts(), None, &text);
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    eprintln!(
+        "tiny mark: {} nodes run: {}",
+        b.stats.nodes_run,
+        d.as_deref().unwrap_or("equals cold")
+    );
+    assert!(d.is_none());
+}
