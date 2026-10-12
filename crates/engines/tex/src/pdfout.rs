@@ -47,7 +47,6 @@ enum Got {
 
 fn file(cx: &mut Ctx<'_>, name: &str) -> Result<Got, Stop> {
     let v = cx.values();
-    crate::run::ask(name);
     let Some(x) = cx.use_env(v.field(&format!("file:{name}")))? else {
         return Ok(Got::Absent);
     };

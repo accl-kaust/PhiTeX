@@ -492,7 +492,16 @@ impl Graph {
                     asked = true;
                 }
             }
-            let asked_names = crate::run::take_asked();
+            let asked_names: Vec<String> = {
+                let v = self.eng.values();
+                r.env_waits
+                    .iter()
+                    .filter_map(|&(_, f)| field_name(v, f).strip_prefix("file:").map(str::to_owned))
+                    .collect()
+            };
+            if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+                eprintln!("  waits: {} {:?}", r.env_stalled, asked_names);
+            }
             let v = self.eng.values();
             let needs = self
                 .eng
