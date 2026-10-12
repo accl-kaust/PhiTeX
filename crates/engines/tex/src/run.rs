@@ -67,7 +67,11 @@ pub(crate) struct FileRest {
 
 impl FileRest {
     pub(crate) fn new(v: &Values, id: ValueId, off: usize) -> FileRest {
-        FileRest { id, text: v.get(id), off }
+        FileRest {
+            id,
+            text: v.get(id),
+            off,
+        }
     }
 
     fn str(&self) -> &str {
@@ -953,7 +957,11 @@ impl<'c, 'a> Run<'c, 'a> {
                         out.push(node(std::mem::take(&mut run)));
                     }
                     if f.has_lines() {
-                        let fr = v.list(vec![v.str("f"), f.id, v.int(i64::try_from(f.off).unwrap_or(0))]);
+                        let fr = v.list(vec![
+                            v.str("f"),
+                            f.id,
+                            v.int(i64::try_from(f.off).unwrap_or(0)),
+                        ]);
                         out.push(vec![v.list(vec![fr]), v.int(0)]);
                     }
                 }
