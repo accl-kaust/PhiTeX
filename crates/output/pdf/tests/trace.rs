@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use phitex_pdf::map::{MapEntry, parse_map};
+use phitex_pdf::map::{MapEntry, parse_map, parse_map_ps};
 use phitex_pdf::{
     Action, ColorStackCmd, DestKind, FontSource, Ident, ImageSpec, LiteralMode, ObjBody, PageBox,
     PdfBytes, PdfParams, PdfWriter, VirtualFont, Whatsit,
@@ -94,6 +94,7 @@ struct Fnt {
 struct Src {
     fonts: Vec<Fnt>,
     map: BTreeMap<Vec<u8>, MapEntry>,
+    ps_map: BTreeMap<(Vec<u8>, i32, i32), MapEntry>,
     space: Option<FontId>,
 }
 
@@ -124,6 +125,7 @@ impl Src {
         Src {
             fonts: Vec::new(),
             map: parse_map(&kpse("pdftex.map").unwrap()),
+            ps_map: parse_map_ps(&kpse("pdftex.map").unwrap()),
             space: None,
         }
     }
@@ -237,6 +239,9 @@ impl FontSource for Src {
     }
     fn space_font(&self) -> Option<FontId> {
         self.space
+    }
+    fn map_by_ps_name(&self, ps: &[u8], slant: i32, extend: i32) -> Option<MapEntry> {
+        self.ps_map.get(&(ps.to_vec(), slant, extend)).cloned()
     }
 }
 
@@ -1634,7 +1639,6 @@ fn jpgres() {
 }
 
 #[test]
-#[ignore = "needs font replacement on PDF inclusion"]
 fn ximage() {
     let mut j = Job::new("ximage", 0);
     j.font("r", "cmr10", None);
@@ -1789,6 +1793,29 @@ fn ownpdf() {
     let p = j.w.params_mut();
     p.compress_level = 0;
     p.inclusion_copy_fonts = 1;
+    j.read();
+    let a = j.w.ximage(image("hello.pdf", 0, |_| {})).unwrap();
+    let b =
+        j.w.ximage(image("objstm.pdf", 0, |s| {
+            s.width = 100 * PT;
+            s.page = 2;
+        }))
+        .unwrap();
+    let c =
+        j.w.ximage(image("colorstack.pdf", 0, |s| s.page_box = PageBox::Trim))
+            .unwrap();
+    j.nums.ximages.extend([a, b, c, a]);
+    j.ship_all();
+    j.finish();
+}
+
+#[test]
+fn ownpdf0() {
+    let mut j = Job::new("ownpdf0", 0);
+    j.font("r", "cmr10", None);
+    let p = j.w.params_mut();
+    p.compress_level = 0;
+    p.inclusion_copy_fonts = 0;
     j.read();
     let a = j.w.ximage(image("hello.pdf", 0, |_| {})).unwrap();
     let b =

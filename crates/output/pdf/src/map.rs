@@ -340,6 +340,37 @@ fn check(fm: &mut MapEntry) -> bool {
 #[must_use]
 pub fn parse_map(bytes: &[u8]) -> BTreeMap<Vec<u8>, MapEntry> {
     let mut map = BTreeMap::new();
+    for fm in map_lines(bytes) {
+        map.entry(fm.tfm_name.clone()).or_insert(fm);
+    }
+    map
+}
+
+/// A map file's `ps_tree`: the entries by PostScript name, slant and
+/// extend, of the lines kept by TFM name that are Type 1 fonts with a
+/// font file included, the first of a key kept.
+#[must_use]
+pub fn parse_map_ps(bytes: &[u8]) -> BTreeMap<(Vec<u8>, i32, i32), MapEntry> {
+    let mut tfm = std::collections::BTreeSet::new();
+    let mut ps = BTreeMap::new();
+    for fm in map_lines(bytes) {
+        if !tfm.insert(fm.tfm_name.clone()) {
+            continue;
+        }
+        if let Some(n) = fm.ps_name.clone()
+            && fm.is_type1()
+            && fm.is_fontfile()
+            && fm.is_included()
+        {
+            ps.entry((n, fm.slant, fm.extend)).or_insert(fm);
+        }
+    }
+    ps
+}
+
+/// The entries of a map file's lines, in order.
+fn map_lines(bytes: &[u8]) -> Vec<MapEntry> {
+    let mut map = Vec::new();
     let mut pos = 0;
     while pos < bytes.len() {
         let mut line = Vec::new();
@@ -360,7 +391,7 @@ pub fn parse_map(bytes: &[u8]) -> BTreeMap<Vec<u8>, MapEntry> {
         }
         line.pop();
         if let Some(fm) = parse_line(&line) {
-            map.entry(fm.tfm_name.clone()).or_insert(fm);
+            map.push(fm);
         }
     }
     map

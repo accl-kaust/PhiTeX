@@ -1262,7 +1262,7 @@ impl PdfState {
         }
         for k in self.ximage_list.clone() {
             if !self.is_written(k)
-                && let Err(e) = self.pdf_write_image(k)
+                && let Err(e) = self.pdf_write_image(k, src)
             {
                 self.fail(e);
             }
