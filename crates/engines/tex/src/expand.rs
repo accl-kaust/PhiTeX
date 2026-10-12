@@ -87,7 +87,7 @@ impl Run<'_, '_> {
                 }
                 cmd::INPUT => {
                     if self.cur.chr > 0 {
-                        self.end_input();
+                        self.end_input()?;
                     } else {
                         self.start_input()?;
                     }
@@ -712,33 +712,47 @@ impl Run<'_, '_> {
     }
 
     /// `\endinput` (§362): the rest of the current file is skipped once
-    /// its current line is done.
-    fn end_input(&mut self) {
-        let mut seen_line = false;
-        let mut drop = Vec::new();
-        for (i, f) in self.frames.iter().enumerate() {
-            match f {
-                Frame::Src(_) => {
-                    if seen_line {
-                        drop.push(i);
+    /// its current line is done. The rest may be in the siblings that
+    /// follow (a run's leftover input becomes children): they are pulled
+    /// in until the file's end marker is reached.
+    fn end_input(&mut self) -> R<()> {
+        loop {
+            let mut seen_line = false;
+            let mut drop = Vec::new();
+            let mut found = false;
+            for (i, f) in self.frames.iter().enumerate() {
+                match f {
+                    Frame::Src(_) => {
+                        if seen_line {
+                            drop.push(i);
+                        }
+                        seen_line = true;
                     }
-                    seen_line = true;
-                }
-                Frame::Toks(t, p) => {
-                    if seen_line
-                        && t[*p..]
+                    Frame::File(_) => {
+                        if seen_line {
+                            drop.push(i);
+                        }
+                    }
+                    Frame::Toks(t, p) => {
+                        if t[*p..]
                             .iter()
                             .any(|x| matches!(x, Tok::S(n) if n.starts_with("\u{10FFFE}eof")))
-                    {
-                        break;
+                        {
+                            found = true;
+                            break;
+                        }
                     }
                 }
             }
-        }
-        for i in drop.into_iter().rev() {
-            self.frames.remove(i);
+            for i in drop.into_iter().rev() {
+                self.frames.remove(i);
+            }
+            if found || !self.pull()? {
+                break;
+            }
         }
         crate::etex::force_eof(self);
+        Ok(())
     }
 
     /// `start_input` (§537): the file's lines are read next; a marker
@@ -771,18 +785,11 @@ impl Run<'_, '_> {
             return Ok(());
         }
         let path = str_of(self.v, xs[0]);
-        let text = str_of(self.v, xs[1]);
         self.log("open", &path)?;
-        let mut frames: Vec<Frame> = Vec::new();
-        for line in split_lines(&text) {
-            let args = crate::run::line_args(self.v, &line);
-            frames.extend(crate::run::decode_frames(self.v, &args));
-        }
         self.frames
             .push_front(Frame::Toks(Rc::from(vec![Tok::cs("\u{10FFFE}eof")]), 0));
-        for f in frames.into_iter().rev() {
-            self.frames.push_front(f);
-        }
+        self.frames
+            .push_front(Frame::File(crate::run::FileRest::new(self.v, xs[1], 0)));
         Ok(())
     }
 
