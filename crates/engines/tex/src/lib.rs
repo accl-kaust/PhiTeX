@@ -29,6 +29,7 @@ mod api;
 mod build;
 mod control;
 mod etex;
+mod exec;
 mod expand;
 mod fonts;
 mod log;
@@ -45,4 +46,5 @@ mod scan;
 mod val;
 
 pub use api::{Build, Finder, Options, Stats};
+pub use exec::{SpawnWorker, set_spawn_worker};
 pub(crate) use phitex_defuse::FxHashMap;
