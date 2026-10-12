@@ -19,7 +19,7 @@ pub(crate) type Names = Vec<Option<Vec<u8>>>;
 
 /// A font descriptor made for an included file's font
 /// (`epdf_create_fontdescriptor`), kept until the fonts are written.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct EpdfFd {
     pub fm: MapEntry,
     /// `fd_objnum`, given when the descriptor is made.
@@ -34,6 +34,20 @@ pub(crate) struct EpdfFd {
     pub all_glyphs: bool,
     /// The font file.
     pub file: Option<Arc<[u8]>>,
+}
+
+impl std::fmt::Debug for EpdfFd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EpdfFd")
+            .field("fm", &self.fm)
+            .field("objnum", &self.objnum)
+            .field("fn_objnum", &self.fn_objnum)
+            .field("stemv", &self.stemv)
+            .field("glyphs", &self.glyphs)
+            .field("all_glyphs", &self.all_glyphs)
+            .field("file", &crate::digest::opt(self.file.as_ref()))
+            .finish()
+    }
 }
 
 /// The key of `fd_tree`: font file, slant, extend.
