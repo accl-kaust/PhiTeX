@@ -1009,6 +1009,8 @@ pub struct Doc {
     pub nodes: Vec<NodeId>,
     pub unit: UnitId,
     pub meta: Meta,
+    /// Every id in the document (nested steps included).
+    ids: FxHashSet<String>,
 }
 
 fn env_value(v: &Values, x: &Json) -> ValueId {
@@ -1056,6 +1058,8 @@ impl Doc {
             .map(|(f, x)| (eng.values().field(f), env_value(eng.values(), x)))
             .collect();
         eng.set_environment(env);
+        let mut ids = FxHashSet::default();
+        collect_ids(&t.steps, &mut ids).expect("validated");
         Doc {
             op,
             table,
@@ -1063,6 +1067,7 @@ impl Doc {
             nodes,
             unit,
             meta: t.meta.clone(),
+            ids,
         }
     }
 
@@ -1101,9 +1106,7 @@ impl Doc {
             }
             Edit::InsertAfter(id, new) => {
                 let i = self.index_of(id)?;
-                let mut seen = FxHashSet::default();
-                collect_ids(&self.steps, &mut seen)?;
-                collect_ids(std::slice::from_ref(new), &mut seen)?;
+                collect_ids(std::slice::from_ref(new), &mut self.ids)?;
                 let k = tr.register(eng.values(), new);
                 let n = eng.insert_after(self.nodes[i], self.op, vec![k]);
                 eng.add_root(n);
@@ -1114,7 +1117,12 @@ impl Doc {
                 let i = self.index_of(id)?;
                 eng.remove(self.nodes[i]);
                 self.nodes.remove(i);
-                self.steps.remove(i);
+                let gone = self.steps.remove(i);
+                let mut ids = FxHashSet::default();
+                collect_ids(std::slice::from_ref(&gone), &mut ids).expect("were unique");
+                for g in ids {
+                    self.ids.remove(&g);
+                }
             }
         }
         Ok(())

@@ -620,6 +620,9 @@ pub(crate) struct OItem {
     work: bool,
     h: u32,
     reach: u64,
+    /// `reach`, or 0 while the claimer waits for a recompute: a structure
+    /// edit hits each pending claim once per flush.
+    hit: u64,
 }
 
 impl From<OItem> for Slot {
@@ -637,6 +640,7 @@ pub(crate) struct OSum {
     maxh: u32,
     pend: u32,
     maxr: u64,
+    maxhit: u64,
 }
 
 struct OAug;
@@ -654,6 +658,7 @@ impl Aug<OItem, OSum> for OAug {
             maxh: i.h,
             pend: u32::from(i.pend),
             maxr: i.reach,
+            maxhit: i.hit,
         }
     }
 
@@ -665,6 +670,7 @@ impl Aug<OItem, OSum> for OAug {
             maxh: a.maxh.max(b.maxh),
             pend: a.pend + b.pend,
             maxr: a.maxr.max(b.maxr),
+            maxhit: a.maxhit.max(b.maxhit),
         }
     }
 }
@@ -958,7 +964,8 @@ impl Default for Engine {
 pub(crate) struct Following<'a> {
     eng: &'a Engine,
     unit: u32,
-    label: u64,
+    /// The label the next sibling is searched after.
+    pub(crate) label: u64,
     parent: Slot,
     pub(crate) slots: Vec<Slot>,
 }
@@ -2094,6 +2101,12 @@ impl Engine {
     fn oitem(&self, s: Slot) -> OItem {
         let n = self.n(s);
         let inert = n.state == State::Inert;
+        let reach = if !inert && n.has(F_INPEND) && n.has(F_CLAIM_DYN) {
+            self.aux_of(s)
+                .map_or(u64::MAX, |a| a.reach1.checked_sub(1).unwrap_or(u64::MAX))
+        } else {
+            0
+        };
         OItem {
             slot: s,
             // A pending effect keeps the one the bindings reflect until the
@@ -2108,12 +2121,8 @@ impl Engine {
             pend: !inert && n.has(F_INPEND),
             work: n.in_work(),
             h: n.height,
-            reach: if !inert && n.has(F_INPEND) && n.has(F_CLAIM_DYN) {
-                self.aux_of(s)
-                    .map_or(u64::MAX, |a| a.reach1.checked_sub(1).unwrap_or(u64::MAX))
-            } else {
-                0
-            },
+            reach,
+            hit: if self.claim_dirty.contains(&s) { 0 } else { reach },
         }
     }
 
@@ -2946,6 +2955,7 @@ impl Engine {
                     work: false,
                     h: 0,
                     reach: 0,
+                    hit: 0,
                 }),
             )
             .o
@@ -3056,18 +3066,21 @@ impl Engine {
         let root = self.units[unit as usize].root;
         let mut before = label;
         let mut hit = Vec::new();
-        while let Some(k) = self.order.search_back(&OAug, root, before, &|s: OSum| s.maxr >= label) {
+        while let Some(k) = self
+            .order
+            .search_back(&OAug, root, before, &|s: OSum| s.maxhit >= label)
+        {
             if let Some(i) = self.order.get(root, k) {
                 hit.push(i.slot);
             }
             before = k;
         }
-        // Their bounds are refreshed now (a scan to the syntactic bound), so
-        // a claim stops reaching as soon as its bound exists; the claims
-        // themselves are recomputed with the next flush.
+        // Their bounds and claims are recomputed with the next flush, once
+        // for all the edits before it: a hit claim is not hit again until
+        // then (its hit reach is 0).
         for c in hit {
-            self.refresh_reach(c);
             self.claim_dirty.insert(c);
+            self.sync_order(c);
         }
     }
 
@@ -3110,6 +3123,8 @@ impl Engine {
             for (_, _, c) in batch {
                 if self.live(c) {
                     self.recompute_claim(c);
+                    // Reachable by structure edits again.
+                    self.sync_order(c);
                 }
             }
         }
@@ -3240,11 +3255,7 @@ impl Engine {
         let kids = self.aux_of(s).map_or_else(Default::default, |a| a.children.clone());
         if !kids.is_empty() {
             self.ax(s).children.clear();
-            for k in kids.into_iter().rev() {
-                if self.live(k) {
-                    self.free_node(k);
-                }
-            }
+            self.free_span(&kids, false);
         }
         let defs: Vec<Field> = self.n(s).defs.iter().map(|d| d.field).collect();
         for f in defs {
@@ -3693,17 +3704,70 @@ impl Engine {
     // -------------------------------------------------------------- freeing
 
     #[allow(clippy::too_many_lines)]
+    /// Frees a run of sibling subtrees. A balanced run (its brackets close
+    /// what they open) changes no binding outside itself, so its effects
+    /// are cleared first and the nodes go without region re-binding: the
+    /// cost is the run's size, not the unit's. (Freed one at a time, a
+    /// close removed before its open would re-bind up to the unit's end.)
+    /// `quiet` skips the check: the whole unit is going.
+    fn free_span(&mut self, kids: &[Slot], quiet: bool) {
+        let live: Vec<Slot> = kids.iter().copied().filter(|&k| self.live(k)).collect();
+        let Some((&first, &last)) = live.first().zip(live.last()) else {
+            return;
+        };
+        let balanced = quiet || {
+            let unit = self.n(first).unit;
+            let root = self.units[unit as usize].root;
+            let lo = self.n(first).label;
+            let hi = self.n(self.subtree_end(last)).label;
+            let span = self.order.fold(&OAug, root, lo, hi + 1);
+            span.c == 0 && span.o == 0
+        };
+        if balanced {
+            for &k in &live {
+                if self.oitem(k).eff != EFF_NONE {
+                    self.nm(k).effect = EFF_NONE;
+                    self.nm(k).bound = EFF_NONE;
+                    self.sync_order(k);
+                }
+            }
+        }
+        for &k in live.iter().rev() {
+            if self.live(k) {
+                self.free_node(k);
+            }
+        }
+    }
+
+    /// The readers of `x`'s output forget it and run again.
+    fn detach_readers(&mut self, x: Slot, readers: &[Slot]) {
+        let key = x.pack();
+        for &r in readers {
+            if !self.live(r) || r == x {
+                continue;
+            }
+            let n = self.nm(r);
+            if n.uses.iter().any(|u| u.kind == K_OUTPUT && u.key == key) {
+                let uses: Vec<Use> = n
+                    .uses
+                    .iter()
+                    .copied()
+                    .filter(|u| !(u.kind == K_OUTPUT && u.key == key))
+                    .collect();
+                n.uses = uses.into_boxed_slice();
+            }
+            self.make_dirty(r);
+        }
+    }
+
     fn free_node(&mut self, x: Slot) {
         count!(Free);
         self.touch(x);
         let kids = self.aux_of(x).map_or_else(Default::default, |a| a.children.clone());
         if !kids.is_empty() {
             self.ax(x).children.clear();
-        }
-        for c in kids.into_iter().rev() {
-            if self.live(c) {
-                self.free_node(c);
-            }
+            let dying_unit = self.n(x).has(F_APP);
+            self.free_span(&kids, dying_unit);
         }
         let claimed = self.aux_of(x).map_or_else(Default::default, |a| a.claimed.clone());
         if !claimed.is_empty() {
@@ -3740,23 +3804,7 @@ impl Engine {
             .map_or_else(Default::default, |a| (a.out_readers.clone(), a.waiters.clone()));
         // Readers and waiters drop their references to `x` (its slot may be
         // reused), keeping demand counts balanced.
-        for r in readers {
-            if !self.live(r) || r == x {
-                continue;
-            }
-            let key = x.pack();
-            let n = self.nm(r);
-            if n.uses.iter().any(|u| u.kind == K_OUTPUT && u.key == key) {
-                let uses: Vec<Use> = n
-                    .uses
-                    .iter()
-                    .copied()
-                    .filter(|u| !(u.kind == K_OUTPUT && u.key == key))
-                    .collect();
-                n.uses = uses.into_boxed_slice();
-            }
-            self.make_dirty(r);
-        }
+        self.detach_readers(x, &readers);
         self.release_waiters(x, &waiters);
         self.refute_assumers(x);
         self.set_stream(x, None);
@@ -3825,6 +3873,7 @@ impl Engine {
                     work: false,
                     h: 0,
                     reach: 0,
+                    hit: 0,
                 }),
             )
             .o
@@ -4146,11 +4195,7 @@ impl Engine {
         {
             suf += 1;
         }
-        for &c in &old[pre..old.len() - suf] {
-            if self.live(c) {
-                self.free_node(c);
-            }
-        }
+        self.free_span(&old[pre..old.len() - suf], false);
         let body = self.aux_of(x).and_then(|a| a.body);
         let unit = body.unwrap_or(self.n(x).unit);
         let mut after = if pre == 0 {

@@ -116,8 +116,15 @@ fn main() {
         o.check_every = 1;
     }
     let (trace, edits) = if let Some(n) = from_toy {
+        let t0 = Instant::now();
         let lines = common::generate_with(42, n, true);
+        let t1 = Instant::now();
         let t = trace::from_toy(&lines, &format!("toy-{n}"));
+        println!(
+            "generated {n} lines in {:.3?}, derived the trace in {:.3?}",
+            t1 - t0,
+            t1.elapsed()
+        );
         let edits = trace::generated_edits(&t, 7, 200);
         if let Some(out) = paths.first() {
             std::fs::write(out, trace::trace_jsonl(&t)).expect("write trace");
