@@ -1206,8 +1206,10 @@ impl<'c, 'a> Run<'c, 'a> {
         for (op, args) in std::mem::take(&mut self.kids) {
             self.cx.child(op, args);
         }
+        // the input left is what follows the command: its continuation,
+        // at its own depth
         for args in self.leftover() {
-            self.cx.child(self.ops.exec, args);
+            self.cx.follow(self.ops.exec, args);
         }
         let mut n = self.pulled;
         if self.claim_rest {
