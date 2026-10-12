@@ -750,14 +750,14 @@ impl Run<'_, '_> {
         } else {
             format!("{name}.tex")
         };
-        let x = self.get(&format!("file:{key}"))?;
+        let x = self.read_file(&key)?;
         let x = match x {
             Some(x) => Some(x),
             None => {
                 if key == name {
                     None
                 } else {
-                    self.get(&format!("file:{name}"))?
+                    self.read_file(&name)?
                 }
             }
         };

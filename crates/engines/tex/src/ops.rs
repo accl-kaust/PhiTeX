@@ -265,3 +265,42 @@ fn client_only(v: &Values, f: Field) -> bool {
         _ => true,
     }
 }
+
+/// The files the job writes, read back by the next round: for each name
+/// in the client's `loopfiles`, the text its streams accumulated
+/// (`streams`) is published as the next round's `file:<name>`.
+pub(crate) struct Files;
+
+impl Operation for Files {
+    fn name(&self) -> &'static str {
+        "files"
+    }
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let names: Vec<String> = cx
+            .use_field(v.field("loopfiles"))?
+            .map(|x| list_of(v, x).iter().map(|&n| str_of(v, n)).collect())
+            .unwrap_or_default();
+        if names.is_empty() {
+            return Ok(ValueId::UNIT);
+        }
+        let all = cx.acc_range(v.field("streams"), None)?;
+        let texts = crate::api::stream_texts(v, &v.seq_to_vec(all));
+        for name in names {
+            let f = v.field(&format!("file:{name}"));
+            if !cx.is_loopback(f) {
+                continue;
+            }
+            // a file the job did not write this round is absent next round
+            let x = texts.iter().find(|(n, _)| *n == name).map_or_else(
+                || v.list(Vec::new()),
+                |(_, t)| v.list(vec![v.str(&format!("./{name}")), v.str(t)]),
+            );
+            cx.publish(f, x);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
