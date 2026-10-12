@@ -103,11 +103,23 @@ fn rss_mb() -> f64 {
 fn check(prog: &Program, eng: &Engine) -> Duration {
     let t = Instant::now();
     let want = common::interp::interpret(&prog.lines).expect("interpreter");
-    assert_eq!(
-        want,
-        prog.result(eng),
-        "incremental result differs from the interpreter"
-    );
+    let got = prog.result(eng);
+    if want != got {
+        let i = want
+            .iter()
+            .zip(&got)
+            .position(|(a, b)| a != b)
+            .unwrap_or(want.len().min(got.len()));
+        let _ = std::fs::create_dir_all("target/fail");
+        let _ = std::fs::write("target/fail/lines.txt", prog.lines.join("\n"));
+        let rendered = prog.render(eng);
+        panic!(
+            "incremental result differs from the interpreter: first at line {i} {:?}: engine {:?}; program written to target/fail/lines.txt ({} lines)",
+            prog.lines.get(i),
+            rendered.get(i),
+            prog.lines.len()
+        );
+    }
     t.elapsed()
 }
 
@@ -191,6 +203,7 @@ fn bench(n: usize, o: &Opts) {
             }
             let (t, r) = eval(&mut eng, o.threads, true);
             if o.check {
+                eprintln!("checking {name} round {round}");
                 let c = check(&prog, &eng);
                 println!(
                     "{name:<17} {t:>10.3?}  {:>6} {:>6} {:>6} {:>6} {:>6}  ok ({c:.0?})",
