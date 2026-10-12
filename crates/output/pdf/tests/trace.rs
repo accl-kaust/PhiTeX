@@ -1538,13 +1538,12 @@ fn image(file: &str, res: i32, f: impl FnOnce(&mut ImageSpec)) -> ImageSpec {
         "{}/../../../oracle/fixtures/pdf/{file}",
         env!("CARGO_MANIFEST_DIR")
     );
-    let (name, data) = match std::fs::read(&local) {
-        Ok(d) => (file.to_owned(), d),
-        Err(_) => {
-            let p = kpse_path(file).unwrap();
-            let d = std::fs::read(&p).unwrap();
-            (p, d)
-        }
+    let (name, data) = if let Ok(d) = std::fs::read(&local) {
+        (file.to_owned(), d)
+    } else {
+        let p = kpse_path(file).unwrap();
+        let d = std::fs::read(&p).unwrap();
+        (p, d)
     };
     let mut s = ImageSpec {
         width: RUNNING,
@@ -1658,7 +1657,7 @@ fn ximage2() {
             .unwrap();
     let c =
         j.w.ximage(image("example-image-b.pdf", 300, |s| {
-            s.page_box = PageBox::Media
+            s.page_box = PageBox::Media;
         }))
         .unwrap();
     j.nums.ximages.extend([a, b, c]);
