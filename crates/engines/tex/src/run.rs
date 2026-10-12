@@ -118,6 +118,8 @@ pub(crate) struct Run<'c, 'a> {
     /// Conditionals begun in this run: their `if_limit` (§489).
     pub conds: Vec<u8>,
     mcache: FxHashMap<ValueId, Mean>,
+    /// `align_state` as this run has it (§309), once read.
+    pub astate: Option<i64>,
     /// Lines entered by this run (for `\inputlineno`).
     pub lines_entered: i64,
     /// Whether the input is exhausted for good (the file ended).
@@ -154,6 +156,7 @@ impl<'c, 'a> Run<'c, 'a> {
             },
             conds: Vec::new(),
             mcache: FxHashMap::default(),
+            astate: None,
             lines_entered: 0,
             eof: false,
             radix: 0,
@@ -293,6 +296,17 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// `back_input` (§325): `t` is read next.
     pub(crate) fn back_input(&mut self, t: Tok) {
+        // §325: a brace put back is counted again when read
+        if let Some(s) = self.astate
+            && matches!(t, Tok::C(_))
+            && !t.is_cs_or_active()
+        {
+            match t.cat() {
+                Some(1) => self.set_astate(s - 1),
+                Some(2) => self.set_astate(s + 1),
+                _ => {}
+            }
+        }
         if let Some(Frame::Toks(_, _)) = self.frames.front() {
             // a fresh one-token list, as tex.web makes one
         }
@@ -703,19 +717,49 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// `get_next` with the meaning (§357–§358).
     pub(crate) fn get_next(&mut self) -> R<bool> {
-        let t = loop {
-            let Some(t) = self.next_tok()? else {
-                return Ok(false);
+        loop {
+            let t = loop {
+                let Some(t) = self.next_tok()? else {
+                    return Ok(false);
+                };
+                if let Tok::S(n) = &t {
+                    if n.starts_with("\u{10FFFE}eof") {
+                        // §362: the end of an \input file (or a pseudo file)
+                        crate::etex::end_of_file(self, &n.clone())?;
+                        continue;
+                    }
+                    if &**n == "\u{10FFFE}uend" {
+                        // §324: the end of a u template
+                        self.align_u_end()?;
+                        continue;
+                    }
+                }
+                break t;
             };
             if let Tok::S(n) = &t
-                && n.starts_with("\u{10FFFE}eof")
+                && let Some(k) = n.strip_prefix("\u{10FFFE}endv:")
             {
-                // §362: the end of an \input file (or a pseudo file)
-                crate::etex::end_of_file(self, &n.clone())?;
+                // §789: the end of a v template (`endv`, §380)
+                let chr = k.parse().unwrap_or(0);
+                self.cur = Cur {
+                    tok: t.clone(),
+                    cmd: cmd::IGNORE,
+                    chr,
+                    mean: Mean::Prim("\u{10FFFE}endv", cmd::IGNORE, chr),
+                };
+                return Ok(true);
+            }
+            if !self.get_next_rest(t)? {
+                return Ok(false);
+            }
+            if self.align_token()? {
                 continue;
             }
-            break t;
-        };
+            return Ok(true);
+        }
+    }
+
+    fn get_next_rest(&mut self, t: Tok) -> R<bool> {
         if let Tok::S(n) = &t
             && &**n == "\u{10FFFE}notexpanded"
         {
@@ -976,6 +1020,7 @@ impl<'c, 'a> Run<'c, 'a> {
             lines_entered: self.lines_entered,
             eof: self.eof,
             claim_rest: self.claim_rest,
+            astate: self.astate,
         }
     }
 
@@ -992,6 +1037,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.lines_entered = s.lines_entered;
         self.eof = s.eof;
         self.claim_rest = s.claim_rest;
+        self.astate = s.astate;
     }
 
     /// Ends the run: definitions, contributions, children (what the
@@ -1054,6 +1100,7 @@ struct Snapshot {
     lines_entered: i64,
     eof: bool,
     claim_rest: bool,
+    astate: Option<i64>,
 }
 
 fn is_hex(c: u32) -> bool {
