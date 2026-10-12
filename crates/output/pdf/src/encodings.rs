@@ -1,5 +1,7 @@
 //! `FontEncodingTables.cc` (xpdf): the base encodings of a PDF font.
 
+// xpdf FontEncodingTables.cc
+
 /// `macRomanEncoding`.
 pub(crate) const MAC_ROMAN: [Option<&str>; 256] = [
     None,
