@@ -82,8 +82,6 @@ pub struct RunInfo {
     pub why: String,
     /// Nodes reduced (not kept from the last build).
     pub commands_run: u64,
-    pub pages: usize,
-    pub pages_reused: usize,
 }
 
 /// What one build made.
@@ -93,7 +91,9 @@ pub struct Output {
     pub pdf: Vec<u8>,
     /// The DVI (TeX, e-TeX), else empty.
     pub dvi: Vec<u8>,
-    pub pages: usize,
+    /// The pages shipped (none: not known; the engine does not count a
+    /// PDF file's yet).
+    pub pages: Option<usize>,
     /// The pages (from 1) that differ from the last build's.
     pub pages_changed: Vec<usize>,
     /// Each page's hash, first first.
@@ -130,8 +130,8 @@ impl Report {
         }
     }
 
-    /// The pages shipped.
-    pub fn pages(&self) -> usize {
+    /// The pages shipped (none: not known).
+    pub fn pages(&self) -> Option<usize> {
         self.out.pages
     }
 
@@ -330,16 +330,16 @@ impl Session {
             .filter(|l| l.starts_with("! "))
             .map(str::to_owned)
             .collect();
+        // (a PDF file's pages: not known until the engine reports them;
+        // the viewer counts the PDF's itself and draws each page again)
         let (pages, hashes) = if pdf {
-            // (no page of a PDF told apart yet: each has the file's hash)
-            let n = pdf_pages(&log, &bytes);
-            (n, vec![tex::Fnv::new().add(&bytes).0; n])
+            (None, Vec::new())
         } else {
             let h = dvi_page_bytes(&bytes)
                 .iter()
                 .map(|p| tex::Fnv::new().add(p).0)
                 .collect();
-            (dvi_pages(&bytes), h)
+            (Some(dvi_pages(&bytes)), h)
         };
         let writes = b
             .files()
@@ -350,7 +350,6 @@ impl Session {
             .filter(|&k| self.page_hashes.get(k) != Some(&hashes[k]))
             .map(|k| k + 1)
             .collect();
-        let pages_reused = hashes.len() - pages_changed.len();
         self.page_hashes.clone_from(&hashes);
         self.built_text = Some(text);
         let wall = t0.elapsed();
@@ -370,8 +369,6 @@ impl Session {
                 wall,
                 why: why.to_owned(),
                 commands_run: s.nodes_run,
-                pages,
-                pages_reused,
             }],
             unsettled: Vec::new(),
             notes: vec![format!(
@@ -602,21 +599,6 @@ fn same_file(a: &str, b: &str) -> bool {
         (Ok(x), Ok(y)) => x == y,
         _ => false,
     }
-}
-
-/// The pages a PDF job shipped: the log's `Output written on … (N pages`,
-/// else the page objects outside object streams.
-fn pdf_pages(log: &str, pdf: &[u8]) -> usize {
-    log.rfind("Output written on ")
-        .and_then(|i| log[i..].find('(').map(|j| &log[i + j + 1..]))
-        .and_then(|t| t.split(' ').next())
-        .and_then(|n| n.parse().ok())
-        .unwrap_or_else(|| {
-            let pat = b"/Type /Page";
-            pdf.windows(pat.len() + 1)
-                .filter(|w| w.starts_with(pat) && w[pat.len()] != b's')
-                .count()
-        })
 }
 
 /// Shared bytes of a report's output, for the viewer.
