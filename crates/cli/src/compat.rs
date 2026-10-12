@@ -96,6 +96,7 @@ fn usage(progname: &str) -> ! {
 #[allow(clippy::too_many_lines, reason = "one option an arm")]
 pub fn main(progname: &str, args: &[String]) -> ! {
     let mut ini = progname == "initex";
+    let mut shell_escape = false;
     let mut etex = false;
     let mut jobname = None;
     let mut out_dir = std::env::var("TEXMF_OUTPUT_DIRECTORY")
@@ -161,11 +162,11 @@ pub fn main(progname: &str, args: &[String]) -> ! {
             | "parse-first-line"
             | "no-parse-first-line"
             | "output-comment"
-            | "shell-escape"
-            | "no-shell-escape"
             | "shell-restricted"
             | "src-specials"
             | "cnf-line" => {}
+            "shell-escape" => shell_escape = true,
+            "no-shell-escape" => shell_escape = false,
             "draftmode" | "mktex" | "no-mktex" | "kpathsea-debug" | "ipc" | "ipc-start" | "enc"
             | "mltex" => {
                 eprintln!("{progname}: -{name} is not supported by phitex");
@@ -223,6 +224,7 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         threads: threads.unwrap_or_else(crate::default_threads),
         synctex,
         recorder,
+        shell_escape,
         pdf_date: session::pdf_date(),
     };
     for n in session::waiting_notes(&job) {
@@ -234,9 +236,16 @@ pub fn main(progname: &str, args: &[String]) -> ! {
             eprintln!("{progname}: {e}");
             std::process::exit(1);
         });
-    let r = s.build();
+    crate::ui::capture_panics(false);
+    let r = crate::ui::catch(|| s.build()).unwrap_or_else(|m| {
+        eprintln!(
+            "{progname}: phitex failed: {}",
+            m.lines().next().unwrap_or("")
+        );
+        std::process::exit(crate::EXIT_INTERNAL);
+    });
     print!("{}", Session::terminal(&r));
-    if let Err(e) = s.write(&r) {
+    if let Err(e) = s.write(&r, true) {
         eprintln!("{progname}: {e}");
         std::process::exit(1);
     }
