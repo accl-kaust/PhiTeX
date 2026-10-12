@@ -43,6 +43,13 @@ impl Run<'_, '_> {
         let am = md.m.abs();
         let (v, h) = (am == 1, am == 102);
         let c = self.cur.cmd;
+        if am == 203 {
+            if self.math_command(&md)? {
+                return Ok(());
+            }
+        } else if crate::math::non_math(c) {
+            return self.insert_dollar_sign();
+        }
         match c {
             cmd::RELAX => {}
             cmd::SPACER => {
@@ -240,8 +247,6 @@ impl Run<'_, '_> {
                     self.new_graf(&md, true)?;
                 } else if h {
                     self.init_math(&md)?;
-                } else {
-                    self.after_math(&md)?;
                 }
             }
             cmd::TOKS_REGISTER..=cmd::SET_INTERACTION => self.prefixed_command()?,

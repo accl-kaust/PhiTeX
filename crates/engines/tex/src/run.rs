@@ -99,6 +99,9 @@ pub(crate) struct Run<'c, 'a> {
     pub top: bool,
     /// Whether `\end` takes every following sibling.
     pub claim_rest: bool,
+    /// In a trial (`measure_tail`): the scope kind its own commands
+    /// opened and closed so far, in place of the node's.
+    pub trial_kind: Option<Option<ValueId>>,
     /// While looking for the command's first token: a node's command
     /// begins in its own text (the next sibling's begins in its own).
     pub no_pull: bool,
@@ -131,6 +134,7 @@ impl<'c, 'a> Run<'c, 'a> {
             pulled: 0,
             top: false,
             claim_rest: false,
+            trial_kind: None,
             no_pull: false,
             own: FxHashMap::default(),
             defs: Vec::new(),
@@ -769,11 +773,14 @@ impl<'c, 'a> Run<'c, 'a> {
                     }
                 }
                 Frame::Src(s) => {
-                    if !run.is_empty() {
-                        out.push(node(std::mem::take(&mut run)));
-                    }
+                    // a run of characters stays with the text after it,
+                    // so ligatures and kerns join them (§1034)
+                    let head = std::mem::take(&mut run);
                     let end_due = s.ends && s.endch < -1;
                     if s.loc >= s.buf.len() && !end_due {
+                        if !head.is_empty() {
+                            out.push(node(head));
+                        }
                         continue;
                     }
                     let text: String = s.buf[s.loc.min(s.buf.len())..]
@@ -788,7 +795,12 @@ impl<'c, 'a> Run<'c, 'a> {
                         v.int(-2),
                         v.int(i64::from(starts) | (i64::from(end_due) << 1)),
                     ]);
-                    out.push(vec![v.list(vec![fr]), v.int(0)]);
+                    let mut frs = Vec::new();
+                    if !head.is_empty() {
+                        frs.push(v.list(vec![v.str("t"), v.list(head)]));
+                    }
+                    frs.push(fr);
+                    out.push(vec![v.list(frs), v.int(0)]);
                 }
             }
         }
@@ -814,11 +826,24 @@ impl<'c, 'a> Run<'c, 'a> {
         let res: R<()> = (|| {
             while self.has_input() && steps < 100_000 {
                 steps += 1;
+                self.effect = phitex_defuse::Effect::None;
                 self.command()?;
+                self.trial_scope()?;
             }
             Ok(())
         })();
+        self.trial_kind = None;
         let after = self.pulled;
+        if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+            let r = match &res {
+                Ok(()) => "ok".to_owned(),
+                Err(Halt::Stop(_)) => "stop".to_owned(),
+                Err(Halt::Starve) => "starve".to_owned(),
+                Err(Halt::File(f)) => format!("file {f}"),
+                Err(Halt::Fatal) => "fatal".to_owned(),
+            };
+            eprintln!("  tail: {steps} steps, pulled {}, {r}, top {}", after - before, self.top);
+        }
         self.restore(snap);
         match res {
             Err(Halt::Stop(s)) => return Err(Halt::Stop(s)),
@@ -834,6 +859,41 @@ impl<'c, 'a> Run<'c, 'a> {
             let n = self.v.int(i64::try_from(after - before).unwrap_or(0));
             self.contribute("tails", self.v.seq_unit(n));
         }
+        Ok(())
+    }
+
+    /// The scope kind the node is in: in a trial, the one its own
+    /// commands made.
+    pub(crate) fn scope_kind(&mut self) -> R<Option<ValueId>> {
+        match self.trial_kind {
+            Some(k) => Ok(k),
+            None => Ok(self.cx.scope_kind()?),
+        }
+    }
+
+    /// A trial follows the scopes its commands open and close, so the
+    /// commands after them see the mode and group they would (a kind
+    /// keeps its parent at index 5).
+    fn trial_scope(&mut self) -> R<()> {
+        let v = self.v;
+        let parent = |k: Option<ValueId>| {
+            k.and_then(|k| crate::val::list_of(v, k).get(5).copied())
+                .filter(|&p| p != ValueId::UNIT)
+        };
+        let mut cur = self.scope_kind()?;
+        match self.effect {
+            phitex_defuse::Effect::Close => cur = parent(cur),
+            phitex_defuse::Effect::Scope(b) => {
+                for _ in 0..b.closes {
+                    cur = parent(cur);
+                }
+                if b.opens > 0 {
+                    cur = b.kind;
+                }
+            }
+            _ => return Ok(()),
+        }
+        self.trial_kind = Some(cur);
         Ok(())
     }
 
