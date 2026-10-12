@@ -319,6 +319,22 @@ fn allocator(name: &str) -> Option<u32> {
     })
 }
 
+/// The globals a pdfTeX object command sets (pdftex.web's `pdf_last_…`).
+fn pdf_last(name: &str) -> &'static [&'static str] {
+    match name {
+        "pdfobj" => &["pdflastobj"],
+        "pdfxform" => &["pdflastxform"],
+        "pdfximage" => &[
+            "pdflastximage",
+            "pdflastximagepages",
+            "pdflastximagecolordepth",
+        ],
+        "pdfannot" => &["pdflastannot"],
+        "pdfstartlink" => &["pdflastlink"],
+        _ => &[],
+    }
+}
+
 /// Commands that read in (and run) text the pass cannot see.
 const LOADERS: &[&str] = &[
     "input",
@@ -661,9 +677,15 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
             }
             _ if DEFINERS.contains(&n) => {
                 if matches!(n, "read" | "readline") {
-                    // (`\read n to \x`)
+                    // (`\read n to \x`, tex.web §1225: the number and
+                    // `to` may run past the item's own atom)
                     let mut q = k;
-                    while q < hi && !(atoms[q].kind == AtomKind::Cs) {
+                    while q < atoms.len()
+                        && !matches!(
+                            atoms[q].kind,
+                            AtomKind::Cs | AtomKind::Open | AtomKind::Close | AtomKind::Par
+                        )
+                    {
                         q += 1;
                     }
                     k = target(&mut e, q, gl);
@@ -734,6 +756,18 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                     }
                 }
                 k = q;
+            }
+            // pdfTeX's allocation-order globals (pdfTeX §1542 `pdf_last_obj`,
+            // §1546 `pdf_last_xform`, §1550 `pdf_last_ximage` and its pages
+            // and colour depth, §1556 `pdf_last_annot`, §1558
+            // `pdf_last_link`): the item's syntax is read by the table
+            "pdfobj" | "pdfxform" | "pdfximage" | "pdfannot" | "pdfstartlink" => {
+                for f in pdf_last(n) {
+                    e.names.push(Def {
+                        field: format!("misc:{f}"),
+                        global: true,
+                    });
+                }
             }
             "newif" => {
                 if let Some(tn) = name_at(k)
