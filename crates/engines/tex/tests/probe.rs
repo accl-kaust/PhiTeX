@@ -13,5 +13,8 @@ fn probe() {
     let pre = std::env::var("PHITEX_PROBE_PLAIN").ok().map(|_| common::plain());
     let b = common::build(opts, pre.as_deref(), &doc);
     let (dvi, log) = b.output();
+    if let Ok(o) = std::env::var("PHITEX_PROBE_OUT") {
+        let _ = std::fs::write(o, &dvi);
+    }
     println!("{log}\n-- {} dvi bytes, {} nodes run, {} live", dvi.len(), b.stats.nodes_run, b.stats.live);
 }
