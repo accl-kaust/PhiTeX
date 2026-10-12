@@ -122,16 +122,20 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         "replay" => replay(input, &flag),
         "validate" => {
-            let f = std::fs::File::open(input).map_err(|e| format!("{input}: {e}"))?;
-            let n = phitex_trace::replay::validate(BufReader::with_capacity(1 << 20, f))
-                .map_err(|e| format!("{input}: {e}"))?;
+            let open = |p: &str| {
+                std::fs::File::open(p)
+                    .map(|f| BufReader::with_capacity(1 << 20, f))
+                    .map_err(|e| format!("{p}: {e}"))
+            };
+            let tops =
+                phitex_trace::v1::trace(open(input)?).map_err(|e| format!("{input}: {e}"))?;
             if let Some(e) = positional.get(1) {
-                let f = std::fs::File::open(e).map_err(|x| format!("{e}: {x}"))?;
-                let k = phitex_trace::replay::validate_edits(BufReader::new(f), n)
+                let mut ids = phitex_trace::v1::all_ids(open(input)?)?;
+                let k = phitex_trace::v1::edits(open(e)?, tops.clone(), &mut ids)
                     .map_err(|x| format!("{e}: {x}"))?;
                 eprintln!("{e}: {k} edits valid");
             }
-            eprintln!("{input}: {n} steps valid");
+            eprintln!("{input}: {} top-level steps valid", tops.len());
             Ok(())
         }
         "index" => {
@@ -179,7 +183,7 @@ fn load(dirs: &[PathBuf], name: &str) -> Option<String> {
 }
 
 fn replay(input: &str, flag: &dyn Fn(&str) -> Option<String>) -> Result<(), String> {
-    use phitex_trace::replay::{Provenance, convert, plan_edits, validate, validate_edits};
+    use phitex_trace::replay::{Provenance, convert, plan_edits};
     let out_dir = PathBuf::from(flag("out-dir").ok_or("--out-dir DIR")?);
     std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
     let dirs: Vec<PathBuf> = flag("dirs")
@@ -191,13 +195,11 @@ fn replay(input: &str, flag: &dyn Fn(&str) -> Option<String>) -> Result<(), Stri
     let samples =
         flag("edits").map_or(Ok(200), |s| s.parse::<usize>().map_err(|e| e.to_string()))?;
     let open = || std::fs::File::open(input).map(|f| BufReader::with_capacity(1 << 20, f));
-    // The edits first, from the edit-impact analysis's sample (its graph
-    // is dropped before the conversion).
-    let edits = {
-        let g =
-            Graph::load(open().map_err(|e| format!("{input}: {e}"))?).map_err(|e| e.to_string())?;
-        plan_edits(&g, samples)
-    };
+    // The edits, from the edit-impact analysis's sample; its graph also
+    // gives the expectations of edits retargeted to a top-level call.
+    let graph =
+        Graph::load(open().map_err(|e| format!("{input}: {e}"))?).map_err(|e| e.to_string())?;
+    let edits = plan_edits(&graph, samples);
     let prov = Provenance {
         document: flag("doc").unwrap_or_else(|| input.to_owned()),
         trace_commit: flag("commit").unwrap_or_default(),
@@ -207,26 +209,49 @@ fn replay(input: &str, flag: &dyn Fn(&str) -> Option<String>) -> Result<(), Stri
         1 << 20,
         std::fs::File::create(&trace_out).map_err(|e| e.to_string())?,
     );
-    let (meta, edit_values) = convert(open, |n| load(&dirs, n), &prov, &edits, &mut w)
-        .map_err(|e| format!("{input}: {e}"))?;
+    let c = convert(
+        open,
+        |n| load(&dirs, n),
+        &prov,
+        &edits,
+        Some(&graph),
+        &mut w,
+    )
+    .map_err(|e| format!("{input}: {e}"))?;
     drop(w);
-    let mut text = String::new();
-    for e in &edit_values {
-        text.push_str(&serde_json::to_string(e).map_err(|e| e.to_string())?);
-        text.push('\n');
-    }
-    std::fs::write(out_dir.join("edits.jsonl"), text).map_err(|e| e.to_string())?;
+    drop(graph);
+    let lines = |vs: &[serde_json::Value]| -> Result<String, String> {
+        let mut text = String::new();
+        for e in vs {
+            text.push_str(&serde_json::to_string(e).map_err(|e| e.to_string())?);
+            text.push('\n');
+        }
+        Ok(text)
+    };
+    let edits_out = out_dir.join("edits.jsonl");
+    std::fs::write(&edits_out, lines(&c.edits)?).map_err(|e| e.to_string())?;
+    std::fs::write(out_dir.join("edits.meta.jsonl"), lines(&c.edits_meta)?)
+        .map_err(|e| e.to_string())?;
     std::fs::write(
         out_dir.join("meta.json"),
-        serde_json::to_string_pretty(&meta).map_err(|e| e.to_string())?,
+        serde_json::to_string_pretty(&c.meta).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    let f = std::fs::File::open(&trace_out).map_err(|e| e.to_string())?;
-    let n = validate(BufReader::with_capacity(1 << 20, f))
+    let rd = |p: &PathBuf| {
+        std::fs::File::open(p)
+            .map(|f| BufReader::with_capacity(1 << 20, f))
+            .map_err(|e| format!("{}: {e}", p.display()))
+    };
+    let tops = phitex_trace::v1::trace(rd(&trace_out)?)
         .map_err(|e| format!("{}: {e}", trace_out.display()))?;
-    let f = std::fs::File::open(out_dir.join("edits.jsonl")).map_err(|e| e.to_string())?;
-    let k = validate_edits(BufReader::new(f), n).map_err(|e| format!("edits: {e}"))?;
-    eprintln!("{}: {n} steps, {k} edits, valid", out_dir.display());
+    let n = tops.len();
+    let mut ids = phitex_trace::v1::all_ids(rd(&trace_out)?)?;
+    let k = phitex_trace::v1::edits(rd(&edits_out)?, tops, &mut ids)
+        .map_err(|e| format!("{}: {e}", edits_out.display()))?;
+    eprintln!(
+        "{}: {n} top-level steps, {k} edits, valid (format v1)",
+        out_dir.display()
+    );
     Ok(())
 }
 

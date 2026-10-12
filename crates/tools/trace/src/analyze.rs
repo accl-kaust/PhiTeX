@@ -281,6 +281,14 @@ impl Graph {
         self.dependents(&[step], exclude, &mut visited)
     }
 
+    /// The steps transitively dependent on any of `steps`, those steps
+    /// not counted.
+    #[must_use]
+    pub fn dependents_of_steps(&self, steps: &[u32]) -> u64 {
+        let mut visited = vec![0u64; self.nodes.len().div_ceil(64)];
+        self.dependents(steps, steps, &mut visited)
+    }
+
     /// The step of `\begin{document}`, if any.
     fn begin_document(&self) -> Option<usize> {
         let begin = self.names.iter().position(|n| n == "\\begin")?;

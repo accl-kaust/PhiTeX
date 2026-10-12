@@ -8,10 +8,26 @@ use std::path::PathBuf;
 use phitex_trace::analyze::Graph;
 use phitex_trace::parse::Options;
 use phitex_trace::record::{Engine, record};
-use phitex_trace::replay::{Provenance, convert, plan_edits, validate, validate_edits};
+use phitex_trace::replay::{Provenance, convert, plan_edits};
+use phitex_trace::v1;
 use serde_json::{Value, json};
 
 const DOC: &str = "\\def\\x{Hello}\n\\expandafter\\def\\csname e\\the\\count0\\endcsname{y}\n\\def\\m#1{[#1]}\n\\def\\mk#1{\\def#1{z}}\n\\begingroup \\count1=5 \\m{ab}\\endgroup\n\\mk\\y\n\\x\n\\bye\n";
+
+/// The steps in id order, children after their parent (`children` kept
+/// as the count of direct children).
+fn flatten(mut v: Value, out: &mut Vec<Value>) {
+    let kids = v
+        .as_object_mut()
+        .and_then(|o| o.remove("children"))
+        .and_then(|k| k.as_array().cloned())
+        .unwrap_or_default();
+    v["n_children"] = kids.len().into();
+    out.push(v);
+    for k in kids {
+        flatten(k, out);
+    }
+}
 
 fn scratch() -> PathBuf {
     let base = std::env::var_os("CLAUDE_JOB_DIR").map_or_else(
@@ -59,23 +75,24 @@ fn run() -> Run {
         document: "tiny".to_owned(),
         trace_commit: "test".to_owned(),
     };
-    let (meta, edit_values) = convert(open, load, &prov, &edits, &mut buf).expect("converts");
-    let n = validate(buf.as_slice()).expect("the output validates");
+    let c = convert(open, load, &prov, &edits, Some(&g), &mut buf).expect("converts");
+    // The engine's loader's rules (format v1), trace and edits.
+    let tops = v1::trace(buf.as_slice()).expect("the trace is format v1");
     let mut edit_text = Vec::new();
-    for e in &edit_values {
+    for e in &c.edits {
         serde_json::to_writer(&mut edit_text, e).expect("json");
         edit_text.push(b'\n');
     }
+    let mut ids = v1::all_ids(buf.as_slice()).expect("ids");
     assert_eq!(
-        validate_edits(edit_text.as_slice(), n).expect("the edits validate"),
-        edit_values.len() as u64
+        v1::edits(edit_text.as_slice(), tops, &mut ids).expect("the edits are format v1"),
+        c.edits.len() as u64
     );
     let text = String::from_utf8(buf).expect("utf-8");
-    let steps: Vec<Value> = text
-        .lines()
-        .skip(1)
-        .map(|l| serde_json::from_str(l).expect("json"))
-        .collect();
+    let mut steps = Vec::new();
+    for l in text.lines().skip(1) {
+        flatten(serde_json::from_str(l).expect("json"), &mut steps);
+    }
     let trace: Vec<Value> = std::fs::read_to_string(&out)
         .expect("the trace")
         .lines()
@@ -84,26 +101,11 @@ fn run() -> Run {
         .collect();
     assert_eq!(steps.len(), trace.len());
     Run {
-        meta,
+        meta: c.meta,
         steps,
-        edits: edit_values,
+        edits: c.edits,
         trace,
     }
-}
-
-/// The output step whose trace step has this name and writes this field.
-fn writing<'r>(r: &'r Run, name: &str, field: &str) -> (usize, &'r Value) {
-    let i = r
-        .trace
-        .iter()
-        .position(|t| {
-            t["name"] == name
-                && t["writes"]
-                    .as_array()
-                    .is_some_and(|w| w.iter().any(|w| w["field"] == field))
-        })
-        .unwrap_or_else(|| panic!("no {name} writing {field}"));
-    (i, &r.steps[i])
 }
 
 fn named<'r>(r: &'r Run, name: &str) -> (usize, &'r Value) {
@@ -116,7 +118,6 @@ fn named<'r>(r: &'r Run, name: &str) -> (usize, &'r Value) {
 }
 
 #[test]
-#[allow(clippy::many_single_char_names)]
 fn tiny_document_replays() {
     let r = run();
     assert_eq!(r.meta["document"], "tiny");
@@ -128,59 +129,32 @@ fn tiny_document_replays() {
         r.meta["pdftex_version"]
     );
     assert_ne!(r.edits.len(), 0);
-
-    // `\def\x{Hello}`: a known extent (the body is no step), names `\x`.
-    let (_, d) = writing(&r, "\\def", "cs:\\x");
-    assert_eq!(d["consumes"], json!({"Known": 0}));
-    assert_eq!(d["hints"]["claim"], json!({"Known": 0}));
-    assert_eq!(d["may_define"], json!({"Names": ["cs:\\x"]}));
-    assert_eq!(d["source"]["position"], "exact");
-    assert_eq!(d["source"]["line"], 1);
-
-    // `\expandafter\def\csname e\the\count0\endcsname`: the literal prefix.
-    let (_, e) = writing(&r, "\\def", "cs:\\e1");
-    assert_eq!(e["may_define"], json!({"Prefixes": ["cs:\\e"]}));
-    assert_eq!(e["source"]["line"], 2);
-    // ... and `\expandafter` itself: pending, as the pass says.
-    let (_, x) = named(&r, "\\expandafter");
-    assert_eq!(x["consumes"], "Pending");
-    assert_eq!(x["hints"]["claim"], "Pending");
-    assert_eq!(x["hints"]["cause"], "\\expandafter");
-
-    // `\mk\y` runs `\def#1{z}` from `\mk`'s body: its target is no
-    // literal there, so it may define anything.
-    let (_, y) = writing(&r, "\\def", "cs:\\y");
-    assert_eq!(y["may_define"], "Any");
-    assert_eq!(y["source"]["position"], "call-site");
-    // `\mk` the call: its body defines through a parameter.
-    let (_, mk) = named(&r, "\\mk");
-    assert_eq!(mk["may_define"], "Any");
-
-    // `\m{ab}`: the call produces the steps of `[#1]`.
+    // ids are the trace's, as strings; the flattened order is the trace's.
+    for (i, s) in r.steps.iter().enumerate() {
+        assert_eq!(s["id"], format!("s{i}"));
+    }
+    // `\def\x{Hello}`: a primitive, its writes as the log shows them.
+    let (_, d) = named(&r, "\\def");
+    assert_eq!(d["class"], "\\def");
+    assert_eq!(
+        d["writes"],
+        json!([{"field": "cs:\\x", "locality": "local"}])
+    );
+    // `\m{ab}`: a call; the steps of `[#1]` are its children.
     let (m, mv) = named(&r, "\\m");
-    let produced: Vec<u64> = mv["unfold"]["produced"]
-        .as_array()
-        .expect("an unfold")
-        .iter()
-        .map(|v| v.as_u64().expect("an id"))
-        .collect();
-    assert_eq!(produced.first(), Some(&(m as u64 + 1)));
+    assert!(mv["n_children"].as_u64().is_some_and(|n| n > 0));
+    assert!(mv["writes"].is_null(), "a call's definitions are pending");
+    assert!(mv.get("may_define").is_some());
     assert_eq!(r.trace[m + 1]["ch"], "[");
-    assert!(mv["consumes"]["Known"].is_u64());
-    assert!(r.steps[m + 1]["unfold"].is_null());
-
-    // Nesting across `\begingroup ... \endgroup`.
+    // `\begingroup ... \endgroup`: open and close.
     let (b, bv) = named(&r, "\\begingroup");
-    assert_eq!(bv["nesting_depth"], 0);
-    assert_eq!(bv["hints"]["scope"], json!({"Known": "Open"}));
-    let (_, c) = writing(&r, "\\count", "count:1");
-    assert_eq!(c["nesting_depth"], 1);
+    assert_eq!(bv["scope"], "open");
     let (eg, egv) = named(&r, "\\endgroup");
     assert!(eg > b);
-    assert_eq!(egv["hints"]["scope"], json!({"Known": "Close"}));
-    assert_eq!(r.steps[eg + 1]["nesting_depth"], 0);
-
-    // Text order follows the source where the steps joined it.
-    let order = |v: &Value| v["text_order"].as_u64().expect("an order");
-    assert!(order(d) < order(e) && order(e) < order(bv) && order(bv) < order(egv));
+    assert_eq!(egv["scope"], "close");
+    // edits name top-level steps (`s...`), inserted steps are `e...`.
+    for e in &r.edits {
+        assert!(e["step"].as_str().is_some_and(|s| s.starts_with('s')));
+        assert!(e["expect"]["steps_reached"].is_u64());
+    }
 }

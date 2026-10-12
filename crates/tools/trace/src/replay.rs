@@ -20,25 +20,23 @@ use std::io::{self, BufRead};
 use std::rc::Rc;
 
 use phitex_source::pass::{self, AtomKind, Definitions, FileKind, GroupKind, Scope, Status};
-use serde::ser::SerializeSeq;
-use serde::{Serialize, Serializer};
+use serde::Serialize;
 
 use crate::hash::fnv1a;
 use crate::step::{Kind, Record, Step};
 
 /// The conventions the converter follows, for `meta`.
 pub const CONVENTIONS: &[&str] = &[
-    "text_order = file_index * 2^32 + byte_offset; files numbered in order of first appearance in the trace",
-    "nesting_depth = the group level \\tracinggroups reports at the step",
-    "join: a step matches the next unconsumed atom with its name (or character) in the innermost text of a modelled input stack (macro bodies as the log prints them, over the file the log says is read); window 64 atoms forward and 8 back in a body, 512 forward (resynchronised at the log's line) and 8 back in a file",
-    "source.position: exact (joined to a file atom), call-site (joined to a macro body: the call's position), line (not joined: the log's line in the step's file), inherited (the previous step's)",
-    "unfold.produced: a call's following steps until the next call at the same or a shallower expansion level (the level is the join's input-stack depth)",
-    "consumes: macro calls Known(steps until the next macro call), Pending if the pass says the call's extent is pending or the call did not join; primitives Known(steps up to the first step joined past the pass's extent) unless the pass says Pending; null for steps that consume nothing",
-    "hints.claim: the pass's status for the joined atom (Known/Predicted with n as in consumes and confirm field cs:\\name), Pending where the join failed; Known(0) for characters and groups",
-    "hints.scope: direction from the step (group characters, \\begingroup/\\endgroup, \\begin/\\end); Known when the pass pairs it Known, else Predicted with the field that decides it (catcode:123/125 or cs:\\name)",
-    "may_define: field names (cs:\\x) from the pass's definition harvest at the joined atom; a primitive definer's literal target; Prefixes(cs:\\lit) for a \\csname target with literal prefix lit (checked against the trace's writes); a macro call: what its own body defines directly (not through the macros it calls, whose steps carry their own); Any for a definer whose target is not literal or did not join",
-    "hints.cause: the pass's cause kind; join-failed where the step did not join",
-    "reads keep \"?\" (a read the log does not show); writes drop the value hash",
+    "format v1 (crates/vendor/defuse/examples/common/trace.rs); see REPLAY.md",
+    "id = s<trace id>; class = the primitive's or macro's name, char, space, {, }, font, page",
+    "pos = file_index * 2^32 + byte_offset (files numbered in order of first appearance), made strictly increasing at the top level",
+    "join: a step matches the next unconsumed atom with its name (or character) in the innermost text of a modelled input stack (macro bodies as the log prints them, over the file the log says is read)",
+    "children: a call's following steps until one read from the call's own text or below, nested",
+    "writes null + may_define: a step with children and no writes of its own; the pass's bound, any where a subtree write breaks it",
+    "claim: the pass's Hints::claim, counts 0 (claimed text is no step); predicted/until end at the next sibling's class; null where that would be a cycle",
+    "scope: the pass's ScopeHint (V/H/M/D kinds); implicit paragraph starts and ends as pending with starts_implicit/closes_implicit H",
+    "contributes / reads_prev_contribution on hlist/vlist by the material's kind (the mode is a guess); fold on page",
+    "reads drop \"?\"; env_reads time and files",
 ];
 
 /// How a step is read from the texts: the key of the atom it matches.
@@ -99,7 +97,38 @@ struct AtomInfo {
     scope: u8,
     /// Its arguments are not executed now (a definition's body).
     skip: bool,
+    /// The pass's [`pass::Hints`], in format v1's terms.
+    hints: AtomHints,
 }
+
+/// An atom's [`pass::Hints`] (an item's or a mark's), compact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AtomHints {
+    /// 0 none, 1 open, 2 close, 3 pending.
+    scope: u8,
+    /// The opened scope's kind: 0 none, else `V`, `H`, `M`, `D`.
+    kind: u8,
+    /// 0 none, 1 starts a paragraph, 2 ends one.
+    implicit: u8,
+    /// 0 Known (a nonzero extent), 1 Predicted, 2 Pending, 3 no claim.
+    claim: u8,
+    /// The field a prediction confirms (a string).
+    confirm: u32,
+    /// A pending claim's cause (a string).
+    cause: u32,
+    /// What it may define (`Converter::may1`).
+    may: u32,
+}
+
+const NO_HINTS: AtomHints = AtomHints {
+    scope: 0,
+    kind: 0,
+    implicit: 0,
+    claim: 3,
+    confirm: NONE,
+    cause: NONE,
+    may: 0,
+};
 
 const NO_INFO: AtomInfo = AtomInfo {
     status: 0,
@@ -109,7 +138,39 @@ const NO_INFO: AtomInfo = AtomInfo {
     may: 0,
     scope: 0,
     skip: false,
+    hints: NO_HINTS,
 };
+
+/// What a step may define, with localities (format v1's `may_define`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum May1 {
+    None,
+    Names(Vec<(String, bool)>),
+    Prefixes(Vec<(String, bool)>),
+    Any,
+}
+
+impl May1 {
+    fn of(m: &pass::MayDefine) -> May1 {
+        let defs = |v: &[pass::Def]| v.iter().map(|d| (d.field.clone(), d.global)).collect();
+        match m {
+            pass::MayDefine::Nothing => May1::None,
+            pass::MayDefine::Names(v) => May1::Names(defs(v)),
+            pass::MayDefine::Prefixes(v) => May1::Prefixes(defs(v)),
+            pass::MayDefine::Any => May1::Any,
+        }
+    }
+
+    /// Whether a write of `field` is within the bound.
+    fn covers(&self, field: &str) -> bool {
+        match self {
+            May1::None => false,
+            May1::Names(v) => v.iter().any(|(f, _)| f == field),
+            May1::Prefixes(v) => v.iter().any(|(f, _)| field.starts_with(f.as_str())),
+            May1::Any => true,
+        }
+    }
+}
 
 /// A text the join reads: a file or a macro body.
 struct Text {
@@ -143,7 +204,6 @@ struct Frame {
 
 /// A file of the document.
 struct FileState {
-    name: String,
     text: Option<Rc<Text>>,
     used: Vec<bool>,
     cursor: usize,
@@ -172,6 +232,10 @@ struct Info {
     cause: u32,
     next_call: u64,
     unfold_end: u64,
+    /// Format v1's `class` (a string).
+    class: u32,
+    /// The pass's hints for the joined atom (or the trace's own view).
+    h: AtomHints,
 }
 
 /// Counts for `meta` and `INDEX.md`.
@@ -217,6 +281,62 @@ pub struct Counts {
     pub files_read: u64,
     pub bodies: u64,
     pub edits: u64,
+    /// Format v1: top-level steps (the rest are nested `children`).
+    #[serde(default)]
+    pub top_level: u64,
+    /// Claims written: `known`, `predicted`, `until`, and `null` (a
+    /// predicted or pending claim with no delimiter to name).
+    #[serde(default)]
+    pub claim1_known: u64,
+    #[serde(default)]
+    pub claim1_predicted: u64,
+    #[serde(default)]
+    pub claim1_until: u64,
+    #[serde(default)]
+    pub claim1_null: u64,
+    /// Stream claims whose next step is no sibling leaf or reads what the
+    /// claimer's subtree writes.
+    #[serde(default)]
+    pub claim_fallback: u64,
+    /// Pending definition sets (`writes: null`) by bound.
+    #[serde(default)]
+    pub may1_none: u64,
+    #[serde(default)]
+    pub may1_names: u64,
+    #[serde(default)]
+    pub may1_prefixes: u64,
+    #[serde(default)]
+    pub may1_any: u64,
+    /// ... of them `any` because the pass's bound missed a write of the
+    /// subtree.
+    #[serde(default)]
+    pub may_unsound: u64,
+    /// Steps with children and writes of their own (no bound can be
+    /// given: the engine takes `any`).
+    #[serde(default)]
+    pub may_own_writes: u64,
+    /// Top-level closes at depth 0, written `pending`.
+    #[serde(default)]
+    pub scope_unmatched: u64,
+    /// Paragraph effects dropped for an explicit scope effect.
+    #[serde(default)]
+    pub implicit_dropped: u64,
+    /// Top-level `pos` moved forward to keep it increasing.
+    #[serde(default)]
+    pub pos_clamped: u64,
+    #[serde(default)]
+    pub contributes: u64,
+    #[serde(default)]
+    pub reads_prev: u64,
+    #[serde(default)]
+    pub folds: u64,
+    #[serde(default)]
+    pub env_steps: u64,
+    /// Predicted claims written without their confirm field: no step
+    /// before the delimiter defines it (a primitive's or the format's
+    /// meaning), and an undefined field never ends the claim.
+    #[serde(default)]
+    pub confirm_dropped: u64,
 }
 
 struct Interner {
@@ -294,6 +414,8 @@ pub struct Converter<'l> {
     strings: Interner,
     defines: Vec<MayDefine>,
     define_ids: HashMap<MayDefine, u32>,
+    may1: Vec<May1>,
+    may1_ids: HashMap<May1, u32>,
     doc: Definitions,
     files: Vec<FileState>,
     file_ids: HashMap<String, u32>,
@@ -331,6 +453,8 @@ impl<'l> Converter<'l> {
             strings: Interner::new(),
             defines: Vec::new(),
             define_ids: HashMap::new(),
+            may1: Vec::new(),
+            may1_ids: HashMap::new(),
             doc: Definitions::new(),
             files: Vec::new(),
             file_ids: HashMap::new(),
@@ -352,7 +476,75 @@ impl<'l> Converter<'l> {
         };
         let none = c.define(MayDefine::None);
         debug_assert_eq!(none, 0);
+        let none = c.define1(May1::None);
+        debug_assert_eq!(none, 0);
         c
+    }
+
+    fn define1(&mut self, m: May1) -> u32 {
+        if let Some(&i) = self.may1_ids.get(&m) {
+            return i;
+        }
+        let i = u32::try_from(self.may1.len()).expect("fewer than 2^32");
+        self.may1.push(m.clone());
+        self.may1_ids.insert(m, i);
+        i
+    }
+
+    /// An item's or mark's hints, compact.
+    fn hints_of(&mut self, h: &pass::Hints) -> AtomHints {
+        let kind = |k: &pass::ScopeKind| match k {
+            pass::ScopeKind::VBox => 1,
+            pass::ScopeKind::HBox => 2,
+            pass::ScopeKind::Math => 3,
+            pass::ScopeKind::Display => 4,
+            _ => 0,
+        };
+        let (scope, k) = match &h.scope {
+            pass::ScopeHint::None => (0, 0),
+            pass::ScopeHint::Open(k)
+            | pass::ScopeHint::Predicted {
+                effect: pass::Effect::Open(k),
+                ..
+            } => (1, kind(k)),
+            pass::ScopeHint::Close
+            | pass::ScopeHint::Predicted {
+                effect: pass::Effect::Close,
+                ..
+            } => (2, 0),
+            pass::ScopeHint::Pending { .. } => (3, 0),
+        };
+        let mut out = AtomHints {
+            scope,
+            kind: k,
+            implicit: match h.implicit {
+                pass::Implicit::None => 0,
+                pass::Implicit::StartsParagraph => 1,
+                pass::Implicit::EndsParagraph => 2,
+            },
+            claim: 3,
+            confirm: NONE,
+            cause: NONE,
+            may: 0,
+        };
+        match &h.claim {
+            pass::Claim::Known(0) => {}
+            pass::Claim::Known(_) => out.claim = 0,
+            pass::Claim::Predicted { confirm, .. } => {
+                out.claim = 1;
+                let f = match confirm {
+                    pass::Assumption::MeaningIs { cs, .. } => format!("cs:\\{cs}"),
+                    pass::Assumption::CatcodeIs { byte, .. } => format!("catcode:{byte}"),
+                };
+                out.confirm = self.strings.get(&f);
+            }
+            pass::Claim::Pending { cause } => {
+                out.claim = 2;
+                out.cause = self.strings.get(cause);
+            }
+        }
+        out.may = self.define1(May1::of(&h.may_define));
+        out
     }
 
     fn define(&mut self, m: MayDefine) -> u32 {
@@ -388,7 +580,6 @@ impl<'l> Converter<'l> {
         let inst = self.inst();
         self.file_insts.insert(inst);
         self.files.push(FileState {
-            name: name.to_owned(),
             text,
             used,
             cursor: 0,
@@ -446,6 +637,10 @@ impl<'l> Converter<'l> {
         let mut item_of = vec![NONE; p.atoms.len()];
         for (k, it) in p.items.iter().enumerate() {
             item_of[it.atom] = u32::try_from(k).unwrap_or(NONE);
+        }
+        let mut mark_of = vec![NONE; p.atoms.len()];
+        for (k, m) in p.marks.iter().enumerate() {
+            mark_of[m.atom] = u32::try_from(k).unwrap_or(NONE);
         }
         let mut brace_status: HashMap<usize, Status> = HashMap::new();
         for b in &p.braces {
@@ -511,6 +706,9 @@ impl<'l> Converter<'l> {
                 info.consumes = it.consumes;
                 info.end = u32::try_from(it.end.saturating_sub(first)).unwrap_or(NONE);
                 info.cause = it.cause.as_ref().map_or(NONE, |c| self.strings.get(c.kind));
+                info.hints = self.hints_of(&it.hints);
+            } else if let Some(m) = p.marks.get(mark_of[a] as usize) {
+                info.hints = self.hints_of(&m.hints);
             }
             let st = match atom.kind {
                 AtomKind::Open | AtomKind::Close => brace_status.get(&atom.tok).copied(),
@@ -674,6 +872,7 @@ impl Converter<'_> {
             prev.cause = NONE;
             prev.may = 0;
             prev.scope = 0;
+            prev.h = NO_HINTS;
             info.next_call = 0;
             info.unfold_end = 0;
             for c in &mut self.claims {
@@ -779,6 +978,8 @@ impl Converter<'_> {
             cause: NONE,
             next_call: 0,
             unfold_end: 0,
+            class: 0,
+            h: NO_HINTS,
         };
         let mut level = u32::try_from(self.stack.len()).unwrap_or(NONE);
         let mut atom_info = None;
@@ -982,9 +1183,40 @@ impl Converter<'_> {
             info.may = self.define(MayDefine::Any);
         }
 
-        // Unfolds: a call ends the open calls at its level or deeper.
-        if s.kind == Kind::Macro {
-            self.counts.macro_calls += 1;
+        // Format v1's view: the class, and the pass's hints for the joined
+        // atom; where nothing joined, what the trace itself shows.
+        let class = match s.kind {
+            Kind::Macro if s.name == "\\output" && keys.is_empty() => "page".to_owned(),
+            Kind::Primitive | Kind::If | Kind::Macro => s.name.clone(),
+            Kind::Char if s.name == "blank space" => "space".to_owned(),
+            Kind::Char => "char".to_owned(),
+            Kind::GroupBegin => "{".to_owned(),
+            Kind::GroupEnd => "}".to_owned(),
+            Kind::Font => "font".to_owned(),
+        };
+        info.class = self.strings.get(&class);
+        if let Some(ai) = atom_info {
+            info.h = ai.hints;
+        } else {
+            info.h.scope = match s.kind {
+                Kind::GroupBegin => 1,
+                Kind::GroupEnd => 2,
+                Kind::Primitive if name == "begingroup" => 1,
+                Kind::Primitive if name == "endgroup" => 2,
+                _ => 0,
+            };
+            if is_cs && !keys.is_empty() {
+                info.h.claim = 2;
+                info.h.cause = self.strings.get("join-failed");
+            }
+            if s.kind == Kind::Macro || definer {
+                info.h.may = self.define1(May1::Any);
+            }
+        }
+
+        // Unfolds: a step read from a call's own text or below (the text
+        // after the call, or an argument written there) ends the call.
+        {
             let infos = &mut self.infos;
             self.calls.retain(|&(l, c)| {
                 if l >= level {
@@ -994,6 +1226,10 @@ impl Converter<'_> {
                     true
                 }
             });
+        }
+        if s.kind == Kind::Macro {
+            self.counts.macro_calls += 1;
+            let infos = &mut self.infos;
             if let Some(c) = self.last_call.replace(id) {
                 infos[usize::try_from(c).expect("an index")].next_call = id;
             }
@@ -1064,72 +1300,399 @@ impl Converter<'_> {
         c
     }
 
-    /// The output record of step `s` (pass 2).
-    ///
-    /// # Panics
-    ///
-    /// When `s` was not joined in pass 1.
+    /// Pass 1.5's first half: each step's subtree end (a macro call's
+    /// unfold, clipped to its parent's) and its top-level ancestor.
     #[must_use]
-    pub fn out_step<'s>(&'s self, s: &'s Step) -> OutStep<'s> {
-        let info = &self.infos[usize::try_from(s.id).expect("an index")];
-        let consumes = match info.consumes {
-            0 => None,
-            1 => Some(OutConsumes::Known(info.next_call.saturating_sub(s.id + 1))),
-            2 => Some(OutConsumes::Known(u64::from(info.claim_n))),
-            _ => Some(OutConsumes::Pending),
-        };
-        let n = u64::from(info.claim_n);
-        let claim = match info.claim {
-            0 => OutClaim::Known(n),
-            1 => OutClaim::Predicted(n, self.string(info.confirm)),
-            _ => OutClaim::Pending,
-        };
-        let scope = match info.scope {
-            1 => Some(OutScope::Known(Dir::Open)),
-            2 => Some(OutScope::Known(Dir::Close)),
-            3 => Some(OutScope::Predicted(
-                Dir::Open,
-                self.string(info.scope_confirm),
-            )),
-            4 => Some(OutScope::Predicted(
-                Dir::Close,
-                self.string(info.scope_confirm),
-            )),
-            _ => None,
-        };
-        let unfold = (s.kind == Kind::Macro).then(|| Unfold {
-            produced: Produced(s.id + 1..info.unfold_end.max(s.id + 1)),
-        });
-        OutStep {
-            id: s.id,
-            text_order: info.order,
-            nesting_depth: s.depth,
-            reads: &s.reads,
-            writes: s
-                .writes
-                .iter()
-                .map(|w| OutWrite {
-                    name: &w.field,
-                    global: w.global,
-                })
-                .collect(),
-            consumes,
-            may_define: &self.defines[info.may as usize],
-            unfold,
-            hints: Hints {
-                claim,
-                scope,
-                cause: (info.cause != NONE).then(|| self.string(info.cause)),
-            },
-            source: OutSource {
-                file: self
-                    .files
-                    .get(info.file as usize)
-                    .map_or("", |f| f.name.as_str()),
-                line: info.line,
-                position: ["exact", "call-site", "line", "inherited"][info.precision as usize],
-            },
+    fn tree(&self) -> Tree {
+        let n = self.infos.len();
+        let mut end = vec![0u32; n];
+        let mut top = vec![0u32; n];
+        let mut stack: Vec<u32> = Vec::new();
+        let mut top_level = 0;
+        for i in 0..n {
+            while let Some(&t) = stack.last()
+                && end[t as usize] as usize <= i
+            {
+                stack.pop();
+            }
+            let mut e = usize::try_from(self.infos[i].unfold_end)
+                .unwrap_or(usize::MAX)
+                .max(i + 1);
+            if let Some(&p) = stack.last() {
+                e = e.min(end[p as usize] as usize);
+            }
+            end[i] = u32::try_from(e).expect("fewer than 2^32 steps");
+            let me = u32::try_from(i).expect("fewer than 2^32 steps");
+            top[i] = stack.first().copied().unwrap_or(me);
+            if stack.is_empty() {
+                top_level += 1;
+            }
+            if e > i + 1 {
+                stack.push(me);
+            }
         }
+        Tree {
+            end,
+            top,
+            top_level,
+            unsound: Vec::new(),
+            delim: HashMap::new(),
+        }
+    }
+
+    /// Whether step `i` claims as a stream (`predicted`, or a pending
+    /// claim whose cause is a delimiter the trace shows).
+    fn stream_claimer(&self, i: usize) -> bool {
+        let h = self.infos[i].h;
+        h.claim == 1 || (h.claim == 2 && delimited(self.string(h.cause)))
+    }
+
+    /// Pass 1.5's second half over one step: definition bounds checked
+    /// against the writes of the subtrees they bound, and each stream
+    /// claim's delimiter (the next sibling, a leaf that reads nothing the
+    /// claimer's subtree writes).
+    #[allow(clippy::many_single_char_names)]
+    fn shape(&mut self, s: &Step, t: &mut Tree, st: &mut ShapeState) {
+        let i = usize::try_from(s.id).expect("an index");
+        let me = u32::try_from(i).expect("fewer than 2^32 steps");
+        if t.unsound.is_empty() {
+            t.unsound = vec![false; self.infos.len()];
+        }
+        while let Some(&(a, _)) = st.stack.last()
+            && t.end[a as usize] as usize <= i
+        {
+            let (a, set) = st.stack.pop().expect("one");
+            if let Some(set) = set {
+                st.resolve.push((a, st.stack.len(), set));
+            }
+        }
+        let mut field = |f: &str| -> u32 {
+            if let Some(&k) = st.fields.get(f) {
+                return k;
+            }
+            let k = u32::try_from(st.fields.len()).expect("fewer than 2^32 fields");
+            st.fields.insert(f.to_owned(), k);
+            k
+        };
+        let reads: Vec<u32> = s.reads.iter().map(|r| field(r)).collect();
+        let writes: Vec<u32> = s.writes.iter().map(|w| field(&w.field)).collect();
+        let leaf = t.end[i] as usize == i + 1;
+        for (c, depth, set) in std::mem::take(&mut st.resolve) {
+            // (a claimer with a pending definition set binds the
+            // delimiter's reads only once it runs: a read its bound
+            // covers would wait on the claim it ends)
+            let cu = c as usize;
+            let pending_set = t.end[cu] as usize > cu + 1;
+            let reads_claim = |r: &str| {
+                pending_set
+                    && (t.unsound[cu]
+                        || st.own_writes.contains(&c)
+                        || self.may1[self.infos[cu].h.may as usize].covers(r))
+            };
+            let blocked = s.reads.iter().any(|r| reads_claim(r));
+            // (a reader of the list reads the claimer's contribution)
+            let class = self.string(self.infos[i].class);
+            let blocked = blocked || LIST_READERS.contains(&class) || class == "page";
+            if depth == st.stack.len() && leaf && !blocked && !reads.iter().any(|r| set.contains(r))
+            {
+                let confirm = self.string(self.infos[cu].h.confirm);
+                // (the confirm field is read at the delimiter: one the
+                // claim itself may define would wait on the claim)
+                let defined = st
+                    .fields
+                    .get(confirm)
+                    .is_some_and(|f| st.written.contains(f) && !set.contains(f))
+                    && !reads_claim(confirm);
+                t.delim.insert(c, (self.infos[i].class, defined));
+            } else {
+                self.counts.claim_fallback += 1;
+            }
+        }
+        if !writes.is_empty() {
+            for (a, set) in &mut st.stack {
+                let may = &self.may1[self.infos[*a as usize].h.may as usize];
+                if s.writes.iter().any(|w| !may.covers(&w.field)) {
+                    t.unsound[*a as usize] = true;
+                }
+                if let Some(set) = set {
+                    set.extend(writes.iter().copied());
+                }
+            }
+        }
+        st.written.extend(writes.iter().copied());
+        if !leaf && !s.writes.is_empty() && self.stream_claimer(i) {
+            st.own_writes.insert(me);
+        }
+        let set = self.stream_claimer(i).then(|| {
+            writes
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<u32>>()
+        });
+        if leaf {
+            if let Some(set) = set {
+                st.resolve.push((me, st.stack.len(), set));
+            }
+        } else {
+            st.stack.push((me, set));
+        }
+    }
+
+    #[allow(clippy::many_single_char_names)]
+    /// Pass 2 over one step: its format v1 record, nested in its parent's
+    /// `children` (the record stays open while its own children follow).
+    #[allow(clippy::too_many_lines)]
+    fn emit<W: io::Write>(
+        &mut self,
+        s: &Step,
+        t: &Tree,
+        st: &mut EmitState,
+        out: &mut W,
+    ) -> io::Result<()> {
+        let i = usize::try_from(s.id).expect("an index");
+        while let Some(&(e, _)) = st.stack.last()
+            && e as usize <= i
+        {
+            st.stack.pop();
+            out.write_all(b"]}")?;
+            if st.stack.is_empty() {
+                out.write_all(b"\n")?;
+            }
+        }
+        if let Some(top) = st.stack.last_mut() {
+            if top.1 > 0 {
+                out.write_all(b",")?;
+            }
+            top.1 += 1;
+        }
+        let top_level = st.stack.is_empty();
+        let info = self.infos[i];
+        let class = self.string(info.class).to_owned();
+        let has_children = t.end[i] as usize > i + 1;
+        let mut o = String::with_capacity(256);
+        let _ = write!(o, "{{\"id\":\"s{i}\",\"class\":{}", q(&class));
+        // pos: the text order, strictly increasing at the top level.
+        let mut pos = i64::try_from(info.order).unwrap_or(i64::MAX);
+        if top_level {
+            if let Some(last) = st.last_pos
+                && pos <= last
+            {
+                pos = last + 1;
+                self.counts.pos_clamped += 1;
+            }
+            st.last_pos = Some(pos);
+        }
+        let _ = write!(o, ",\"pos\":{pos}");
+        // reads, and the environment's.
+        let mut env: Vec<&str> = Vec::new();
+        if let Some(e) = env_of(&class) {
+            env.push(e);
+        }
+        let mut reads: Vec<&str> = Vec::new();
+        for r in &s.reads {
+            if r == "?" {
+                continue;
+            }
+            if let Some(e) = r.strip_prefix("param:\\").and_then(env_of_param) {
+                if !env.contains(&e) {
+                    env.push(e);
+                }
+                continue;
+            }
+            if !reads.contains(&r.as_str()) {
+                reads.push(r);
+            }
+        }
+        o.push_str(",\"reads\":[");
+        for (k, r) in reads.iter().enumerate() {
+            if k > 0 {
+                o.push(',');
+            }
+            o.push_str(&q(r));
+        }
+        o.push(']');
+        // writes, or a pending set and its bound.
+        if has_children && s.writes.is_empty() {
+            let may = if t.unsound[i] {
+                self.counts.may_unsound += 1;
+                May1::Any
+            } else {
+                self.may1[info.h.may as usize].clone()
+            };
+            match &may {
+                May1::None => self.counts.may1_none += 1,
+                May1::Names(_) => self.counts.may1_names += 1,
+                May1::Prefixes(_) => self.counts.may1_prefixes += 1,
+                May1::Any => self.counts.may1_any += 1,
+            }
+            o.push_str(",\"writes\":null,\"may_define\":");
+            o.push_str(&may_json(&may));
+        } else {
+            if has_children {
+                self.counts.may_own_writes += 1;
+            }
+            o.push_str(",\"writes\":[");
+            for (k, w) in s.writes.iter().enumerate() {
+                if k > 0 {
+                    o.push(',');
+                }
+                let _ = write!(
+                    o,
+                    "{{\"field\":{},\"locality\":\"{}\"}}",
+                    q(&w.field),
+                    if w.global { "global" } else { "local" }
+                );
+            }
+            o.push(']');
+        }
+        // scope.
+        let (mut sc, kind, mut imp) = (info.h.scope, info.h.kind, info.h.implicit);
+        if imp != 0 && sc != 0 {
+            self.counts.implicit_dropped += 1;
+            imp = 0;
+        }
+        if imp != 0 {
+            sc = 3;
+        }
+        if top_level {
+            if sc == 2 && st.depth == Some(0) {
+                self.counts.scope_unmatched += 1;
+                sc = 3;
+            }
+            st.depth = match (sc, st.depth) {
+                (0, d) => d,
+                (1, Some(d)) => Some(d + 1),
+                (2, Some(d)) => Some(d - 1),
+                _ => None,
+            };
+        }
+        match sc {
+            1 => {
+                o.push_str(",\"scope\":\"open\"");
+                if kind != 0 {
+                    let k = ["V", "H", "M", "D"][usize::from(kind - 1)];
+                    let _ = write!(o, ",\"scope_kind\":\"{k}\"");
+                }
+            }
+            2 => o.push_str(",\"scope\":\"close\""),
+            3 => {
+                o.push_str(",\"scope\":\"pending\"");
+                match imp {
+                    1 => o.push_str(",\"starts_implicit\":\"H\""),
+                    2 => o.push_str(",\"closes_implicit\":\"H\""),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        // the current list: contributions, reads of the one before, the
+        // page builder's fold.
+        let name = class.as_str();
+        let h_only = H_MATERIAL.contains(&name) || name == "char";
+        let v_only = V_MATERIAL.contains(&name);
+        if h_only || imp == 1 {
+            st.in_par = true;
+        }
+        if v_only {
+            st.in_par = false;
+        }
+        let list = if st.in_par { "hlist" } else { "vlist" };
+        // (an opener contributes nothing: what it opens, a box or a
+        // formula, goes to the list when it closes, §1086, §1196)
+        let contributes = if sc == 1 {
+            None
+        } else if h_only {
+            Some("hlist")
+        } else if v_only {
+            Some("vlist")
+        } else if EITHER_MATERIAL.contains(&name) || (name == "space" && st.in_par) {
+            Some(list)
+        } else {
+            None
+        };
+        if let Some(c) = contributes {
+            self.counts.contributes += 1;
+            let _ = write!(o, ",\"contributes\":\"{c}\"");
+        }
+        if LIST_READERS.contains(&name) {
+            self.counts.reads_prev += 1;
+            let _ = write!(o, ",\"reads_prev_contribution\":\"{list}\"");
+        }
+        if imp == 2 || name == "\\par" {
+            st.in_par = false;
+        }
+        if name == "page" {
+            self.counts.folds += 1;
+            o.push_str(",\"fold\":{\"sequence\":\"vlist\",\"step_class\":\"page\"}");
+        }
+        // claim.
+        let delim = t.delim.get(&u32::try_from(i).expect("an index"));
+        match (info.h.claim, delim) {
+            (0, _) => {
+                self.counts.claim1_known += 1;
+                o.push_str(",\"claim\":{\"known\":0}");
+            }
+            (1, Some(&(c, defined))) => {
+                self.counts.claim1_predicted += 1;
+                let confirm = if defined {
+                    q(self.string(info.h.confirm))
+                } else {
+                    self.counts.confirm_dropped += 1;
+                    String::new()
+                };
+                let _ = write!(
+                    o,
+                    ",\"claim\":{{\"predicted\":{{\"n\":0,\"until\":{{\"class\":{},\"inert\":false,\"confirm\":[{confirm}]}}}}}}",
+                    q(self.string(c)),
+                );
+            }
+            (2, Some(&(c, _))) => {
+                self.counts.claim1_until += 1;
+                let _ = write!(
+                    o,
+                    ",\"claim\":{{\"until\":{{\"class\":{},\"inert\":false,\"confirm\":[]}}}}",
+                    q(self.string(c))
+                );
+            }
+            (1 | 2, None) => {
+                self.counts.claim1_null += 1;
+                o.push_str(",\"claim\":null,\"value_dep\":true");
+            }
+            _ => {}
+        }
+        if !env.is_empty() {
+            self.counts.env_steps += 1;
+            o.push_str(",\"env_reads\":[");
+            for (k, e) in env.iter().enumerate() {
+                if k > 0 {
+                    o.push(',');
+                }
+                o.push_str(&q(e));
+            }
+            o.push(']');
+            for e in env {
+                if !st.env.contains(&e) {
+                    st.env.push(e);
+                }
+            }
+        }
+        let cause = match (info.h.claim, delim) {
+            (2, None) if info.h.cause != NONE => info.h.cause,
+            _ => info.cause,
+        };
+        if cause != NONE {
+            let _ = write!(o, ",\"cause\":{}", q(self.string(cause)));
+        }
+        if has_children {
+            o.push_str(",\"children\":[");
+            st.stack.push((t.end[i], 0));
+        } else {
+            o.push('}');
+            if top_level {
+                o.push('\n');
+            }
+        }
+        out.write_all(o.as_bytes())
     }
 
     fn string(&self, i: u32) -> &str {
@@ -1202,85 +1765,194 @@ fn find(
         .find(|&j| !used[j] && want.contains(&keys[j]))
 }
 
-/// `consumes`.
-#[derive(Debug, Serialize)]
-pub enum OutConsumes {
-    Known(u64),
-    Pending,
+/// The nesting of the output and what pass 1.5 decided per step.
+pub struct Tree {
+    /// Each step's subtree end (exclusive).
+    end: Vec<u32>,
+    /// Each step's top-level ancestor (itself at the top level).
+    top: Vec<u32>,
+    top_level: u64,
+    /// A pending definition set whose bound a write in its subtree breaks.
+    unsound: Vec<bool>,
+    /// A stream claimer's delimiter class (a string), and whether its
+    /// confirm field has a definition before the delimiter.
+    delim: HashMap<u32, (u32, bool)>,
 }
 
-#[derive(Debug, Serialize)]
-pub enum OutClaim<'a> {
-    Known(u64),
-    Predicted(u64, &'a str),
-    Pending,
+#[derive(Default)]
+struct ShapeState {
+    /// Open subtrees, with the fields a stream claimer's subtree writes.
+    stack: Vec<(u32, Option<std::collections::HashSet<u32>>)>,
+    /// Claimers whose delimiter is the next step: (claimer, stack depth,
+    /// fields its subtree writes).
+    resolve: Vec<(u32, usize, std::collections::HashSet<u32>)>,
+    fields: HashMap<String, u32>,
+    /// Claimers with children and writes of their own (their bound is
+    /// `any`).
+    own_writes: std::collections::HashSet<u32>,
+    /// The fields written so far.
+    written: std::collections::HashSet<u32>,
 }
 
-#[derive(Debug, Serialize)]
-pub enum Dir {
-    Open,
-    Close,
+#[derive(Default)]
+struct EmitState {
+    /// Open records: (subtree end, children written).
+    stack: Vec<(u32, u32)>,
+    depth: Option<i64>,
+    last_pos: Option<i64>,
+    /// Whether a paragraph is being built (approximate: see `REPLAY.md`).
+    in_par: bool,
+    env: Vec<&'static str>,
 }
 
-#[derive(Debug, Serialize)]
-pub enum OutScope<'a> {
-    Known(Dir),
-    Predicted(Dir, &'a str),
+/// A JSON string.
+fn q(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_owned())
 }
 
-/// A range of step ids, written as a list.
-#[derive(Debug)]
-pub struct Produced(pub std::ops::Range<u64>);
-
-impl Serialize for Produced {
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut seq = s.serialize_seq(usize::try_from(self.0.end - self.0.start).ok())?;
-        for i in self.0.clone() {
-            seq.serialize_element(&i)?;
-        }
-        seq.end()
+fn may_json(m: &May1) -> String {
+    let list = |key: &str, v: &[(String, bool)]| {
+        let items: Vec<String> = v
+            .iter()
+            .map(|(f, g)| {
+                format!(
+                    "{{\"{key}\":{},\"locality\":\"{}\"}}",
+                    q(f),
+                    if *g { "global" } else { "local" }
+                )
+            })
+            .collect();
+        items.join(",")
+    };
+    match m {
+        May1::None => "\"none\"".to_owned(),
+        May1::Any => "\"any\"".to_owned(),
+        May1::Names(v) => format!("{{\"names\":[{}]}}", list("name", v)),
+        May1::Prefixes(v) => format!("{{\"prefixes\":[{}]}}", list("prefix", v)),
     }
 }
 
-#[derive(Debug, Serialize)]
-pub struct Unfold {
-    pub produced: Produced,
+/// Whether a pending claim's cause is a delimiter the trace shows (the
+/// claim ends where the trace's next step begins).
+fn delimited(cause: &str) -> bool {
+    cause.contains("delimit") || cause.contains("verbatim") || cause.contains("parameter text")
 }
 
-#[derive(Debug, Serialize)]
-pub struct Hints<'a> {
-    pub claim: OutClaim<'a>,
-    pub scope: Option<OutScope<'a>>,
-    pub cause: Option<&'a str>,
+/// The environment a primitive reads: the clock or the file system.
+fn env_of(class: &str) -> Option<&'static str> {
+    match class {
+        "\\time" | "\\day" | "\\month" | "\\year" | "\\pdfcreationdate" => Some("time"),
+        "\\input" | "\\openin" | "\\read" | "\\readline" | "\\pdffilesize" | "\\pdffilemoddate"
+        | "\\pdfmdfivesum" | "\\pdffiledump" | "\\pdfximage" => Some("files"),
+        _ => None,
+    }
 }
 
-#[derive(Debug, Serialize)]
-pub struct OutWrite<'a> {
-    pub name: &'a str,
-    pub global: bool,
+/// The environment a parameter read is (`\time` and its kin).
+fn env_of_param(p: &str) -> Option<&'static str> {
+    matches!(p, "time" | "day" | "month" | "year").then_some("time")
 }
 
-#[derive(Debug, Serialize)]
-pub struct OutSource<'a> {
-    pub file: &'a str,
-    pub line: u32,
-    pub position: &'a str,
-}
+/// Horizontal material (tex.web §1090: it starts a paragraph in
+/// vertical mode).
+const H_MATERIAL: &[&str] = &[
+    "\\char",
+    "\\hskip",
+    "\\hfil",
+    "\\hfill",
+    "\\hss",
+    "\\hfilneg",
+    "\\unhbox",
+    "\\unhcopy",
+    "\\discretionary",
+    "\\-",
+    "\\accent",
+    "\\ ",
+    "\\vrule",
+    "\\valign",
+    "\\noboundary",
+    "\\indent",
+    "\\noindent",
+    "\\quitvmode",
+];
 
-/// A step in the replay format.
-#[derive(Debug, Serialize)]
-pub struct OutStep<'a> {
-    pub id: u64,
-    pub text_order: u64,
-    pub nesting_depth: u32,
-    pub reads: &'a [String],
-    pub writes: Vec<OutWrite<'a>>,
-    pub consumes: Option<OutConsumes>,
-    pub may_define: &'a MayDefine,
-    pub unfold: Option<Unfold>,
-    pub hints: Hints<'a>,
-    pub source: OutSource<'a>,
-}
+/// Vertical material (§1094: it ends the paragraph in horizontal mode).
+const V_MATERIAL: &[&str] = &[
+    "\\vskip",
+    "\\vfil",
+    "\\vfill",
+    "\\vss",
+    "\\vfilneg",
+    "\\hrule",
+    "\\unvbox",
+    "\\unvcopy",
+    "\\halign",
+];
+
+/// Material the current mode's list takes.
+const EITHER_MATERIAL: &[&str] = &[
+    "\\kern",
+    "\\penalty",
+    "\\hbox",
+    "\\vbox",
+    "\\vtop",
+    "\\box",
+    "\\copy",
+    "\\mark",
+    "\\marks",
+    "\\special",
+    "\\write",
+    "\\openout",
+    "\\closeout",
+    "\\immediate",
+    "\\insert",
+    "\\vadjust",
+    "\\leaders",
+    "\\cleaders",
+    "\\xleaders",
+    "\\pdfliteral",
+    "\\pdfrefxform",
+    "\\pdfrefximage",
+    "\\pdfdest",
+    "\\pdfstartlink",
+    "\\pdfendlink",
+    "\\pdfannot",
+    "\\pdfsave",
+    "\\pdfrestore",
+    "\\pdfsetmatrix",
+    "\\pdfcolorstack",
+    "\\pdfsavepos",
+];
+
+/// The current list's readers (the catalogue's F2): the contribution
+/// before (or the whole list, `\par`).
+const LIST_READERS: &[&str] = &[
+    "\\lastbox",
+    "\\unpenalty",
+    "\\unkern",
+    "\\unskip",
+    "\\lastpenalty",
+    "\\lastkern",
+    "\\lastskip",
+    "\\lastnodetype",
+    "\\prevgraf",
+    "\\spacefactor",
+    "\\prevdepth",
+    "\\/",
+    "\\displaylimits",
+    "\\limits",
+    "\\nolimits",
+    "\\above",
+    "\\over",
+    "\\atop",
+    "\\abovewithdelims",
+    "\\overwithdelims",
+    "\\atopwithdelims",
+    "\\middle",
+    "\\par",
+    "\\badness",
+    "\\showlists",
+];
 
 /// Reads the steps of a trace.
 pub fn steps<R: BufRead>(
@@ -1308,10 +1980,12 @@ pub struct Provenance {
     pub trace_commit: String,
 }
 
-/// Converts the trace `open` reads (opened three times: three passes) to the
-/// replay format on `out`, reading source files through `load`, and makes
-/// the records of the planned `edits`. Returns the meta object (written
-/// first) and the edit records.
+/// Converts the trace `open` reads (opened four times: four passes) to
+/// format v1 on `out`, reading source files through `load`, and makes the
+/// records of the planned `edits` (`graph`, the edit-impact analysis's,
+/// gives the expectations of edits retargeted to a top-level call).
+/// Returns the provenance object (for `meta.json`), the edit records and
+/// their provenance (one per edit, for `edits.meta.jsonl`).
 ///
 /// # Errors
 ///
@@ -1321,8 +1995,9 @@ pub fn convert<R: BufRead, W: io::Write>(
     load: impl FnMut(&str) -> Option<String>,
     prov: &Provenance,
     edits: &[EditPlan],
+    graph: Option<&crate::analyze::Graph>,
     out: &mut W,
-) -> io::Result<(serde_json::Value, Vec<serde_json::Value>)> {
+) -> io::Result<Converted> {
     let mut c = Converter::new(load);
     // Pass 0: each macro's first body printed with `\\`.
     steps(open()?, |s| {
@@ -1355,6 +2030,14 @@ pub fn convert<R: BufRead, W: io::Write>(
         Ok(())
     })?;
     c.finish_join();
+    // Pass 1.5: the nesting, the bounds, the delimiters.
+    let mut tree = c.tree();
+    let mut shape = ShapeState::default();
+    steps(open()?, |s| {
+        c.shape(&s, &mut tree, &mut shape);
+        Ok(())
+    })?;
+    drop(shape);
     let meta = meta.unwrap_or(crate::step::Meta {
         main: String::new(),
         engine: String::new(),
@@ -1362,10 +2045,46 @@ pub fn convert<R: BufRead, W: io::Write>(
         version: None,
         command: None,
     });
+    // Pass 2: the records, nested.
+    let wanted: std::collections::HashSet<u64> = edits.iter().map(|e| e.target).collect();
+    let mut target_writes: HashMap<u64, Vec<crate::step::Write>> = HashMap::new();
+    let mut st = EmitState {
+        depth: Some(0),
+        ..EmitState::default()
+    };
+    // (the meta line comes first: it declares the whole environment a
+    // step may read, `meta.json` names the part the steps read)
+    let env = ["files", "time"];
+    writeln!(
+        out,
+        "{{\"meta\":{{\"version\":1,\"document\":{},\"steps\":{},\"sequences\":[\"vlist\",\"hlist\"],\"env\":{{{}}}}}}}",
+        q(&prov.document),
+        tree.top_level,
+        env.iter()
+            .map(|e| format!("{}:1", q(e)))
+            .collect::<Vec<_>>()
+            .join(",")
+    )?;
+    steps(open()?, |s| {
+        if wanted.contains(&s.id) {
+            target_writes.insert(s.id, s.writes.clone());
+        }
+        c.emit(&s, &tree, &mut st, out)
+    })?;
+    while st.stack.pop().is_some() {
+        out.write_all(b"]}")?;
+        if st.stack.is_empty() {
+            out.write_all(b"\n")?;
+        }
+    }
+    out.flush()?;
     let mut counts = c.tally();
     counts.fields = fields.len() as u64;
-    counts.edits = edits.len() as u64;
+    counts.top_level = tree.top_level;
+    let (edit_values, edit_meta) = edit_records(&c, edits, &tree, &target_writes, graph);
+    counts.edits = edit_values.len() as u64;
     let meta_v = serde_json::json!({
+        "format": 1,
         "document": prov.document,
         "main": meta.main,
         "engine": meta.engine,
@@ -1374,23 +2093,24 @@ pub fn convert<R: BufRead, W: io::Write>(
         "trace_commit": prov.trace_commit,
         "conservative": meta.conservative,
         "conventions": CONVENTIONS,
+        "env_read": st.env,
         "counts": counts,
     });
-    serde_json::to_writer(&mut *out, &serde_json::json!({ "meta": meta_v }))?;
-    out.write_all(b"\n")?;
-    let wanted: std::collections::HashSet<u64> = edits.iter().map(|e| e.target).collect();
-    let mut targets: HashMap<u64, serde_json::Value> = HashMap::new();
-    steps(open()?, |s| {
-        let o = c.out_step(&s);
-        if wanted.contains(&s.id) {
-            targets.insert(s.id, serde_json::to_value(&o).map_err(io::Error::other)?);
-        }
-        serde_json::to_writer(&mut *out, &o).map_err(io::Error::other)?;
-        out.write_all(b"\n")
-    })?;
-    out.flush()?;
-    let edit_values = edit_records(edits, &targets, counts.steps);
-    Ok((meta_v, edit_values))
+    Ok(Converted {
+        meta: meta_v,
+        edits: edit_values,
+        edits_meta: edit_meta,
+    })
+}
+
+/// What [`convert`] returns beside the trace.
+pub struct Converted {
+    /// The provenance and counts (`meta.json`).
+    pub meta: serde_json::Value,
+    /// The edits, format v1 (`edits.jsonl`).
+    pub edits: Vec<serde_json::Value>,
+    /// Each edit's provenance (`edits.meta.jsonl`).
+    pub edits_meta: Vec<serde_json::Value>,
 }
 
 /// An edit chosen from the edit-impact sample.
@@ -1442,261 +2162,96 @@ pub fn plan_edits(g: &crate::analyze::Graph, count: usize) -> Vec<EditPlan> {
     plans
 }
 
+/// The edits, format v1, and their provenance. An edit names a top-level
+/// step: a sampled step inside a call is reached through its top-level
+/// ancestor (see `REPLAY.md`), and an ancestor an earlier edit deleted
+/// moves to the top-level step before it.
 fn edit_records(
+    c: &Converter<'_>,
     edits: &[EditPlan],
-    targets: &HashMap<u64, serde_json::Value>,
-    steps: u64,
-) -> Vec<serde_json::Value> {
-    edits
-        .iter()
-        .enumerate()
-        .map(|(k, e)| {
-            let mut v = match e.form {
-                0 => serde_json::json!({ "change_writes": e.target }),
-                1 => {
-                    let mut step = targets.get(&e.target).cloned().unwrap_or_default();
-                    // A new step after the target writing the same fields:
-                    // it shadows the target's writes for the steps after.
-                    let names: Vec<String> = step["writes"]
-                        .as_array()
-                        .map(|w| {
-                            w.iter()
-                                .filter_map(|x| x["name"].as_str())
-                                .filter(|n| n.starts_with("cs:"))
-                                .map(str::to_owned)
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    step["id"] = (steps + k as u64).into();
-                    step["reads"] = serde_json::json!([]);
-                    step["consumes"] = serde_json::Value::Null;
-                    step["unfold"] = serde_json::Value::Null;
-                    step["may_define"] = if names.is_empty() {
-                        "None".into()
-                    } else {
-                        serde_json::json!({ "Names": names })
-                    };
-                    step["hints"] = serde_json::json!({"claim": {"Known": 0}, "scope": null, "cause": "inserted"});
-                    serde_json::json!({ "insert_after": e.target, "step": step })
-                }
-                _ => serde_json::json!({ "delete": e.target }),
-            };
-            v["line"] = e.line.into();
-            v["expected_impact"] = e.impact_line.into();
-            v["expected_impact_step"] = e.impact_step.into();
-            v
-        })
-        .collect()
-}
-
-/// Checks a replay file: the meta line, then steps with dense ids and
-/// every field of the format in its shape. Returns the step count.
-///
-/// # Errors
-///
-/// The first violation, with its line.
-pub fn validate<R: BufRead>(reader: R) -> Result<u64, String> {
-    let mut lines = reader.lines();
-    let first = lines.next().ok_or("empty")?.map_err(|e| e.to_string())?;
-    let meta: serde_json::Value = serde_json::from_str(&first).map_err(|e| format!("meta: {e}"))?;
-    let m = meta.get("meta").ok_or("line 1 is not {\"meta\": ...}")?;
-    for k in [
-        "document",
-        "engine",
-        "pdftex_version",
-        "trace_commit",
-        "conventions",
-        "counts",
-    ] {
-        if m.get(k).is_none() {
-            return Err(format!("meta lacks {k}"));
+    t: &Tree,
+    writes: &HashMap<u64, Vec<crate::step::Write>>,
+    graph: Option<&crate::analyze::Graph>,
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    let mut deleted: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let (mut out, mut meta) = (Vec::new(), Vec::new());
+    for (k, e) in edits.iter().enumerate() {
+        let target = u32::try_from(e.target).expect("an index");
+        let mut anchor = t.top[target as usize];
+        while deleted.contains(&anchor) && anchor > 0 {
+            anchor = t.top[anchor as usize - 1];
         }
-    }
-    let declared = m["counts"]["steps"].as_u64().ok_or("meta.counts.steps")?;
-    let mut n = 0u64;
-    let mut produced_max: Vec<(u64, u64)> = Vec::new();
-    for (k, line) in lines.enumerate() {
-        let line = line.map_err(|e| e.to_string())?;
-        let at = k + 2;
-        let v: serde_json::Value =
-            serde_json::from_str(&line).map_err(|e| format!("line {at}: {e}"))?;
-        check_step(&v, n).map_err(|e| format!("line {at}: {e}"))?;
-        if let Some(p) = v["unfold"]["produced"].as_array()
-            && let Some(last) = p.last().and_then(serde_json::Value::as_u64)
-        {
-            produced_max.push((n, last));
+        if deleted.contains(&anchor) {
+            continue;
         }
-        n += 1;
-    }
-    if n != declared {
-        return Err(format!("{n} steps, meta says {declared}"));
-    }
-    if let Some((id, last)) = produced_max.iter().find(|(_, l)| *l >= n) {
-        return Err(format!("step {id} produces {last}, past the last step"));
-    }
-    Ok(n)
-}
-
-/// One step's shape; `id` must be `expect`.
-///
-/// # Errors
-///
-/// What is wrong.
-#[allow(clippy::too_many_lines, clippy::many_single_char_names)]
-pub fn check_step(v: &serde_json::Value, expect: u64) -> Result<(), String> {
-    use serde_json::Value;
-    let o = v.as_object().ok_or("not an object")?;
-    let keys = [
-        "id",
-        "text_order",
-        "nesting_depth",
-        "reads",
-        "writes",
-        "consumes",
-        "may_define",
-        "unfold",
-        "hints",
-        "source",
-    ];
-    for k in keys {
-        if !o.contains_key(k) {
-            return Err(format!("no {k}"));
-        }
-    }
-    if o.len() != keys.len() {
-        return Err("unexpected keys".to_owned());
-    }
-    if o["id"].as_u64() != Some(expect) {
-        return Err(format!("id {} is not {expect}", o["id"]));
-    }
-    o["text_order"].as_u64().ok_or("text_order")?;
-    let d = o["nesting_depth"].as_u64().ok_or("nesting_depth")?;
-    u32::try_from(d).map_err(|_| "nesting_depth not u32")?;
-    let reads = o["reads"].as_array().ok_or("reads")?;
-    if !reads.iter().all(Value::is_string) {
-        return Err("reads: not strings".to_owned());
-    }
-    for w in o["writes"].as_array().ok_or("writes")? {
-        let w = w.as_object().ok_or("writes: not objects")?;
-        if w.len() != 2 || !w["name"].is_string() || !w["global"].is_boolean() {
-            return Err("writes: {name, global}".to_owned());
-        }
-    }
-    let known_n = |x: &Value| -> bool {
-        x.as_object()
-            .is_some_and(|m| m.len() == 1 && m.get("Known").is_some_and(Value::is_u64))
-    };
-    match &o["consumes"] {
-        Value::Null => {}
-        Value::String(s) if s == "Pending" => {}
-        x if known_n(x) => {}
-        x => return Err(format!("consumes {x}")),
-    }
-    match &o["may_define"] {
-        Value::String(s) if s == "None" || s == "Any" => {}
-        Value::Object(m)
-            if m.len() == 1
-                && ["Names", "Prefixes"].iter().any(|k| {
-                    m.get(*k)
-                        .and_then(Value::as_array)
-                        .is_some_and(|a| !a.is_empty() && a.iter().all(Value::is_string))
-                }) => {}
-        x => return Err(format!("may_define {x}")),
-    }
-    match &o["unfold"] {
-        Value::Null => {}
-        Value::Object(m) if m.len() == 1 => {
-            let p = m
-                .get("produced")
-                .and_then(Value::as_array)
-                .ok_or("unfold.produced")?;
-            let mut prev = expect;
-            for x in p {
-                let x = x.as_u64().ok_or("unfold.produced: ids")?;
-                if x <= prev {
-                    return Err("unfold.produced: not increasing after the step".to_owned());
-                }
-                prev = x;
+        let direct = anchor == target;
+        let ws: Vec<serde_json::Value> = writes
+            .get(&e.target)
+            .map(|w| {
+                w.iter()
+                    .map(|w| {
+                        serde_json::json!({"field": w.field,
+                            "locality": if w.global { "global" } else { "local" }})
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (op, v, expect) = match e.form {
+            0 if direct => (
+                "change_writes",
+                serde_json::json!({"op": "change_writes", "step": format!("s{target}"),
+                    "writes": ws}),
+                e.impact_step,
+            ),
+            2 => {
+                deleted.insert(anchor);
+                let expect = if direct {
+                    e.impact_step
+                } else {
+                    let sub: Vec<u32> = (anchor..t.end[anchor as usize]).collect();
+                    graph.map_or(e.impact_step, |g| g.dependents_of_steps(&sub))
+                };
+                (
+                    "delete",
+                    serde_json::json!({"op": "delete", "step": format!("s{anchor}")}),
+                    expect,
+                )
             }
-        }
-        x => return Err(format!("unfold {x}")),
+            _ => {
+                let new = serde_json::json!({"id": format!("e{k}"), "class": "inserted",
+                    "pos": i64::try_from(c.infos[anchor as usize].order).unwrap_or(0),
+                    "reads": [], "writes": ws, "cause": "inserted"});
+                (
+                    "insert_after",
+                    serde_json::json!({"op": "insert_after", "step": format!("s{anchor}"),
+                        "new": new}),
+                    e.impact_step,
+                )
+            }
+        };
+        let mut v = v;
+        v["expect"] = serde_json::json!({ "steps_reached": expect });
+        out.push(v);
+        let form = ["change_writes", "insert_after", "delete"][usize::from(e.form.min(2))];
+        meta.push(serde_json::json!({
+            "edit": out.len(),
+            "op": op,
+            "form": form,
+            "target": format!("s{target}"),
+            "anchor": format!("s{anchor}"),
+            "line": e.line,
+            "expected_impact": e.impact_line,
+            "expected_impact_step": e.impact_step,
+        }));
     }
-    let h = o["hints"].as_object().ok_or("hints")?;
-    if h.len() != 3 {
-        return Err("hints: {claim, scope, cause}".to_owned());
-    }
-    let dir = |x: &Value| x.as_str().is_some_and(|s| s == "Open" || s == "Close");
-    match &h["claim"] {
-        Value::String(s) if s == "Pending" => {}
-        x if known_n(x) => {}
-        Value::Object(m)
-            if m.len() == 1
-                && m.get("Predicted")
-                    .and_then(Value::as_array)
-                    .is_some_and(|a| a.len() == 2 && a[0].is_u64() && a[1].is_string()) => {}
-        x => return Err(format!("hints.claim {x}")),
-    }
-    match &h["scope"] {
-        Value::Null => {}
-        Value::Object(m) if m.len() == 1 && m.get("Known").is_some_and(dir) => {}
-        Value::Object(m)
-            if m.len() == 1
-                && m.get("Predicted")
-                    .and_then(Value::as_array)
-                    .is_some_and(|a| a.len() == 2 && dir(&a[0]) && a[1].is_string()) => {}
-        x => return Err(format!("hints.scope {x}")),
-    }
-    if !(h["cause"].is_null() || h["cause"].is_string()) {
-        return Err("hints.cause".to_owned());
-    }
-    let s = o["source"].as_object().ok_or("source")?;
-    if !s.get("file").is_some_and(Value::is_string)
-        || !s.get("line").is_some_and(Value::is_u64)
-        || !s.get("position").is_some_and(Value::is_string)
-    {
-        return Err("source: {file, line, position}".to_owned());
-    }
-    Ok(())
-}
-
-/// Checks an edits file against the steps of its replay file.
-///
-/// # Errors
-///
-/// The first violation.
-pub fn validate_edits<R: BufRead>(reader: R, steps: u64) -> Result<u64, String> {
-    let mut n = 0;
-    for (k, line) in reader.lines().enumerate() {
-        let line = line.map_err(|e| e.to_string())?;
-        let v: serde_json::Value =
-            serde_json::from_str(&line).map_err(|e| format!("edit {k}: {e}"))?;
-        let id = ["change_writes", "insert_after", "delete"]
-            .iter()
-            .find_map(|f| v.get(*f).and_then(serde_json::Value::as_u64))
-            .ok_or(format!("edit {k}: no form"))?;
-        if id >= steps {
-            return Err(format!("edit {k}: step {id} out of range"));
-        }
-        if let Some(s) = v.get("step") {
-            let sid = s["id"].as_u64().ok_or(format!("edit {k}: step id"))?;
-            check_step(s, sid).map_err(|e| format!("edit {k}: {e}"))?;
-        }
-        if v.get("expected_impact")
-            .and_then(serde_json::Value::as_u64)
-            .is_none()
-        {
-            return Err(format!("edit {k}: expected_impact"));
-        }
-        n += 1;
-    }
-    Ok(n)
+    (out, meta)
 }
 
 /// The `INDEX.md` table over replay directories' `meta.json`s.
 #[must_use]
 pub fn index(metas: &[(String, serde_json::Value)]) -> String {
     let mut s = String::from(
-        "| document | steps | fields | consumes null / Known / Pending % | may_define None / Names / Prefixes / Any % | unfolded % | join failures (% of steps) | unkeyed | edits |\n|---|---|---|---|---|---|---|---|---|\n",
+        "| document | steps | top-level | fields | claim known / predicted / until / null % | pending sets: may_define none / names / prefixes / any % (unsound) | join failures (% of steps) | pos clamped | edits |\n|---|---|---|---|---|---|---|---|---|\n",
     );
     #[allow(clippy::cast_precision_loss)]
     let pct = |a: u64, b: u64| {
@@ -1711,21 +2266,24 @@ pub fn index(metas: &[(String, serde_json::Value)]) -> String {
             continue;
         };
         let n = c.steps;
+        let sets = c.may1_none + c.may1_names + c.may1_prefixes + c.may1_any;
         let _ = writeln!(
             s,
-            "| `{name}` | {n} | {} | {:.1} / {:.1} / {:.1} | {:.1} / {:.2} / {:.3} / {:.2} | {:.1} | {} ({:.2}%) | {} | {} |",
+            "| `{name}` | {n} | {} | {} | {:.1} / {:.1} / {:.2} / {:.1} | {:.1} / {:.1} / {:.1} / {:.1} ({}) | {} ({:.2}%) | {} | {} |",
+            c.top_level,
             c.fields,
-            pct(c.consumes_null, n),
-            pct(c.consumes_known, n),
-            pct(c.consumes_pending, n),
-            pct(c.may_none, n),
-            pct(c.may_names, n),
-            pct(c.may_prefixes, n),
-            pct(c.may_any, n),
-            pct(c.unfolded, n),
+            pct(c.claim1_known, n),
+            pct(c.claim1_predicted, n),
+            pct(c.claim1_until, n),
+            pct(c.claim1_null, n),
+            pct(c.may1_none, sets),
+            pct(c.may1_names, sets),
+            pct(c.may1_prefixes, sets),
+            pct(c.may1_any, sets),
+            c.may_unsound,
             c.join_failures,
             pct(c.join_failures, n),
-            c.unkeyed,
+            c.pos_clamped,
             c.edits,
         );
     }
@@ -1734,46 +2292,26 @@ pub fn index(metas: &[(String, serde_json::Value)]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_step, expl_names, validate};
-    use serde_json::json;
-
-    fn step() -> serde_json::Value {
-        json!({"id": 0, "text_order": 5, "nesting_depth": 0, "reads": ["count:1"],
-            "writes": [{"name": "cs:\\x", "global": false}], "consumes": {"Known": 0},
-            "may_define": {"Names": ["cs:\\x"]}, "unfold": null,
-            "hints": {"claim": {"Predicted": [0, "cs:\\def"]}, "scope": null, "cause": null},
-            "source": {"file": "a.tex", "line": 1, "position": "exact"}})
-    }
-
-    #[test]
-    fn the_validator_checks_shapes() {
-        assert_eq!(check_step(&step(), 0), Ok(()));
-        assert!(check_step(&step(), 1).is_err());
-        let mut s = step();
-        s["consumes"] = json!({"Known": -1});
-        assert!(check_step(&s, 0).is_err());
-        let mut s = step();
-        s["may_define"] = json!({"Names": []});
-        assert!(check_step(&s, 0).is_err());
-        let mut s = step();
-        s["unfold"] = json!({"produced": [0]});
-        assert!(check_step(&s, 0).is_err());
-        let mut s = step();
-        s["hints"]["scope"] = json!({"Known": "Sideways"});
-        assert!(check_step(&s, 0).is_err());
-        let file = format!(
-            "{}\n{}\n",
-            json!({"meta": {"document": "d", "engine": "e", "pdftex_version": null,
-                "trace_commit": "c", "conventions": [], "counts": {"steps": 1}}}),
-            step()
-        );
-        assert_eq!(validate(file.as_bytes()), Ok(1));
-        assert!(validate(file.replace("\"steps\":1", "\"steps\":2").as_bytes()).is_err());
-    }
+    use super::{May1, delimited, expl_names, may_json};
 
     #[test]
     fn expl_bodies_are_told() {
         assert!(expl_names("\\exp_after:wN \\use_i:nn"));
         assert!(!expl_names("\\def \\x {a_b:c}"));
+    }
+
+    #[test]
+    fn bounds_are_written_with_localities() {
+        let m = May1::Names(vec![("cs:\\x".to_owned(), true)]);
+        assert_eq!(
+            may_json(&m),
+            r#"{"names":[{"name":"cs:\\x","locality":"global"}]}"#
+        );
+        assert!(m.covers("cs:\\x") && !m.covers("cs:\\y"));
+        let p = May1::Prefixes(vec![("cs:\\e".to_owned(), false)]);
+        assert!(p.covers("cs:\\e12"));
+        assert_eq!(may_json(&May1::None), "\"none\"");
+        assert!(delimited("delimiter not in enclosing group"));
+        assert!(!delimited("macro defined elsewhere"));
     }
 }
