@@ -107,11 +107,16 @@ class Pages implements CoreTransport {
   private version = 0;
   private docVersion = -1;
   private loading: Promise<MupdfDoc | null> | null = null;
+  /** A change on its way to the screen: ms from its save to `settled`, and when that came. */
+  private change: { since: number; at: number } | null = null;
 
   constructor(sock: Socket) {
     this.sock = sock;
     sock.onEvent((e) => {
-      if (e.event === "settled") this.version++;
+      if (e.event !== "settled") return;
+      this.version++;
+      const since = (e as { since_ms?: number | null }).since_ms;
+      this.change = typeof since === "number" ? { since, at: performance.now() } : null;
     });
   }
 
@@ -141,6 +146,17 @@ class Pages implements CoreTransport {
       // (at the zoom shown, on this screen's pixels: the viewer asks again after a zoom in)
       const drawn = d?.draw(o.page ?? 0, panel.pixelsPerPoint());
       if (!drawn) return { ok: false, json: { error: "no such page" } };
+      // (the first page drawn after a change: on the screen at the next frame;
+      // the ⚡ chip and the watch's status line say how long from the save)
+      const c = this.change;
+      if (c) {
+        this.change = null;
+        requestAnimationFrame(() => {
+          const ms = c.since + performance.now() - c.at;
+          panel.painted(ms);
+          void this.sock.request({ op: "painted", ms });
+        });
+      }
       return { ok: true, canvas: toCanvas(drawn), size: [drawn.w, drawn.h], links: drawn.links };
     }
     if (o.op === "outline") {

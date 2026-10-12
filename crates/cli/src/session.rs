@@ -81,6 +81,8 @@ pub struct RunInfo {
     pub why: String,
     /// Nodes reduced (not kept from the last build).
     pub commands_run: u64,
+    /// Nodes the build has after it (those not run were kept).
+    pub live: usize,
 }
 
 /// What one build made.
@@ -363,6 +365,7 @@ impl Session {
                 wall,
                 why: why.to_owned(),
                 commands_run: s.nodes_run,
+                live: s.live,
             }],
             unsettled: Vec::new(),
             notes: vec![format!(

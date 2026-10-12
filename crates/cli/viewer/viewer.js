@@ -3805,10 +3805,15 @@ var Pages = class {
   version = 0;
   docVersion = -1;
   loading = null;
+  /** A change on its way to the screen: ms from its save to `settled`, and when that came. */
+  change = null;
   constructor(sock2) {
     this.sock = sock2;
     sock2.onEvent((e) => {
-      if (e.event === "settled") this.version++;
+      if (e.event !== "settled") return;
+      this.version++;
+      const since = e.since_ms;
+      this.change = typeof since === "number" ? { since, at: performance.now() } : null;
     });
   }
   async open() {
@@ -3834,6 +3839,15 @@ var Pages = class {
       const d = await this.open().catch(() => null);
       const drawn = d?.draw(o.page ?? 0, panel.pixelsPerPoint());
       if (!drawn) return { ok: false, json: { error: "no such page" } };
+      const c = this.change;
+      if (c) {
+        this.change = null;
+        requestAnimationFrame(() => {
+          const ms = c.since + performance.now() - c.at;
+          panel.painted(ms);
+          void this.sock.request({ op: "painted", ms });
+        });
+      }
       return { ok: true, canvas: toCanvas(drawn), size: [drawn.w, drawn.h], links: drawn.links };
     }
     if (o.op === "outline") {
