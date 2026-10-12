@@ -140,6 +140,17 @@ impl Run<'_, '_> {
 
     /// `macro_call` (§389–§400).
     #[allow(clippy::too_many_lines)]
+    /// §396: "Paragraph ended before \\x was complete".
+    fn runaway(&mut self, name: &Tok) -> R<()> {
+        let mut s = String::from("Paragraph ended before ");
+        let mut cs = String::new();
+        self.show_toks_into(&mut cs, std::slice::from_ref(name))?;
+        s.push_str(cs.trim_end());
+        s.push_str(" was complete");
+        self.log("error", &s)
+    }
+
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn macro_call(&mut self) -> R<()> {
         let Mean::Macro(m) = self.cur.mean.clone() else {
             return Ok(());
@@ -217,6 +228,7 @@ impl Run<'_, '_> {
                     }
                     if tok == par && !long_state {
                         // §396: a runaway argument; the \par is read again
+                        self.runaway(&name)?;
                         self.back_input(tok);
                         return Ok(());
                     }
@@ -229,6 +241,7 @@ impl Run<'_, '_> {
                                 self.get_token()?;
                                 let t2 = self.cur.tok.clone();
                                 if t2 == par && !long_state {
+                                    self.runaway(&name)?;
                                     self.back_input(t2);
                                     return Ok(());
                                 }
@@ -789,7 +802,9 @@ impl Run<'_, '_> {
         self.frames
             .push_front(Frame::Toks(Rc::from(vec![Tok::cs("\u{10FFFE}eof")]), 0));
         self.frames
-            .push_front(Frame::File(crate::run::FileRest::new(self.v, xs[1], 0)));
+            .push_front(Frame::File(crate::run::FileRest::new(
+                self.v, xs[1], 0, xs[0],
+            )));
         Ok(())
     }
 

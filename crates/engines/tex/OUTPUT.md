@@ -918,3 +918,118 @@ fixed numbers (static `cs`), not a prefix.
 With these, the reads of later nodes that wait for page breaking are
 those of the 15 entries in 2.15, `\if@nobreak` only after pending
 floats. For plain, only `\pageno`.
+
+## 4. The page builder over paragraph results (design, not built)
+
+### 4.1 Today
+
+`build_page` (§994) is a step of the fold per vertical item: at every
+point tex.web calls it, the node reads the main list since the last call
+(`list_items(0)`) and `page:state`, and defines `page:state`. Every node
+that contributes vertical material therefore waits on the previous step,
+and `append_to_vlist` (§679) reads `pd:` (`prev_depth`) from the node
+before it. The page fold is a chain as long as the number of `build_page`
+calls (lines, glue, penalties), and every paragraph's last line sits on
+it. On `pages.tex` this chain is most of the critical path.
+
+### 4.2 What a node contributes instead
+
+A node that adds to the main vertical list (a paragraph's `\par`, a box,
+glue, a penalty, a mark, an insert in vertical mode, an output routine's
+material) contributes one **segment** to an accumulator `vseg`, and reads
+neither `page:state` nor `prev_depth`:
+
+- the items in order, as today's `items` entries for list 0 (boxes and
+  rules, glue, kerns, penalties, marks, inserts, `\vadjust` material,
+  whatsits, the delete markers of `\unskip`/`\unkern`/`\unpenalty`/
+  `\lastbox` on the main list);
+- the interline glue **not** yet resolved for its first box: the box's
+  height, and `\baselineskip`, `\lineskip`, `\lineskiplimit` as they are
+  at the append (§679 is then computed by the fold from the previous
+  segment's last depth);
+- its last depth (or `ignore_depth`, §679's `prev_depth` after it);
+- the page parameters at its `build_page` point, the ones §987–§1008 read
+  there: `\vsize`, `\maxdepth`, `\topskip`, `\holdinginserts`,
+  `\vbadness`; and for each insert class it holds, `\count`, `\dimen`,
+  `\skip` n and the box's `\ht`+`\dp` (§1009) as read at that point;
+- a summary for the fast path: natural height, stretch per order, shrink,
+  and whether it holds a penalty ≤ −10000, a mark, an insert, or a glue or
+  penalty breakpoint.
+
+Parameters read at the contribution are ordinary definitions (the
+node's own reads), not a chain: they bind to their last definer.
+
+### 4.3 The page fold
+
+The fold runs in `OutPage` nodes, one per page, not in the contributing
+nodes. `OutPage k` reads the segments after page k−1's break
+(`acc_range("vseg", from = OutPage k−1)`), runs §980–§1008 over them in
+order with the carried state (`page_so_far`, the insert state, the best
+break so far, the held contributions), stops at page k's break, fires the
+output routine (§1012–§1025) as today, and leaves `OutPage k+1` as its
+continuation (`Ctx::follow`). The items after the break and the output
+routine's own vertical material go first in page k+1 (§1026): the output
+node contributes them as a segment at its own position.
+
+The fold's fast path: while page k's total plus a segment's natural
+height stays below the goal minus the segment's shrink, and the segment
+has no penalty ≤ −10000, no insert and no mark, the segment is added
+whole (§1004's totals and §1007's `insert_penalties` unchanged) with no
+item-by-item step. Otherwise it is stepped through item by item, as
+today.
+
+### 4.4 Readers of the page state
+
+Only nodes that read the page state wait for the fold at their position:
+`\pagegoal`, `\pagetotal` and the other §1245 dimensions, `\outputpenalty`
+and `\insertpenalties` outside the output routine, `\showlists`, `\vsize`
+read inside the output routine (it is the routine's own read). They read
+`page:state` as published by the `OutPage` node covering their position;
+nothing else does.
+
+### 4.5 The chain after
+
+A paragraph depends on its own horizontal list (read from the list's
+opener, §2 of the list fix) and on definitions. The page fold is a chain
+of `OutPage` nodes: one per page. The critical path becomes the longest
+paragraph plus the pages, instead of every vertical item of the document.
+
+### 4.6 What must stay exact
+
+- §987 fixes `page_goal` from `\vsize` and `page_max_depth` from
+  `\maxdepth` when the first box or insert reaches an empty page: the
+  segment carries the values at its own `build_page` point, and the fold
+  uses the segment's values, never later ones.
+- §1000's `\topskip` glue, §1001's discard of glue and penalties at the
+  top of an empty page, §1009's insert placement and split (`\vsplit` of
+  an insert box), and §1005's `\holdinginserts` are steps of the fold, as
+  they are today.
+- `\lastskip`, `\lastpenalty`, `\lastkern`, `\lastbox` on the main list
+  read the contributions since the last `build_page` point. They read
+  their own segment and the ones before it back to the last `OutPage`,
+  not the page.
+- The output routine still runs where tex.web runs it: inside the
+  `OutPage` node, in an `output_group`, with `\box255`, the marks and the
+  insert boxes defined as §1017 leaves them.
+
+### 4.7 Conditions (approved with the design)
+
+1. One `OutPage` node per page, never one per `build_page` call: the fast
+   path (a segment added whole because it cannot hold a break) is the
+   normal case and the item-by-item path the exception. A test asserts
+   critical path ≤ longest paragraph + pages on `story`, `pages`,
+   `hyphens` and `display`.
+2. A segment's parameters are the contributing node's own reads, bound to
+   their last definer. `\vsize` or `\maxdepth` changed inside an output
+   routine reach the next page's first segment because the output node's
+   own contribution (its put-back material, §1026) is a segment at its
+   position, made after those definitions; a test changes `\vsize` in
+   `\output` and checks the next page against TeX.
+3. An edit inside page k re-runs `OutPage` k, and later `OutPage` nodes
+   only when page k's break moves; the 20-edit `sections` gate shows it
+   with the engine counters.
+
+The gate: story's and pages' critical path at most a few per cent of the
+nodes run; all outputs byte-identical; edits equal cold; at 1 and 4
+threads. Order of work: the `Ctx::follow` switch, the LaTeX article run,
+the list fix, then this.

@@ -120,6 +120,8 @@ struct Cached {
     text_key: u64,
     reads: Vec<(String, u64)>,
     env: Env,
+    /// The prelude's evaluation errors: such a prelude is not cached.
+    errors: Vec<String>,
 }
 
 /// Prelude environments by the hash of the prelude's text; each is good
@@ -288,6 +290,7 @@ fn deserialise(b: &[u8]) -> Option<Cached> {
         text_key,
         reads,
         env: Arc::new(env),
+        errors: Vec::new(),
     })
 }
 
@@ -376,6 +379,27 @@ pub struct Stats {
     pub critical_path: Option<usize>,
 }
 
+/// A round's counters (`PHITEX_TEX_TIME`).
+fn print_round(t: std::time::Duration, r: &Report) {
+    eprintln!(
+        "round: {t:?}, {} nodes run, {} runs, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} pending, {} created, {} freed, spec {}/{}/{}, by op {:?}",
+        r.nodes_run,
+        r.runs,
+        r.cutoffs,
+        r.rebinds,
+        r.restarts,
+        r.rounds,
+        r.stops,
+        r.pending_waits,
+        r.created,
+        r.freed,
+        r.speculations,
+        r.confirmations,
+        r.mispredictions,
+        r.runs_by_op
+    );
+}
+
 impl Stats {
     /// The executor's counters of one evaluation begun at `c0`.
     fn add_exec(&mut self, ex: &crate::exec::Threads, c0: Option<u64>, eng: &Engine) {
@@ -404,6 +428,8 @@ impl Stats {
 /// An engine with the operations registered.
 struct Graph {
     eng: Engine,
+    /// The evaluation errors met (the engine's), as messages.
+    eval_errors: Vec<String>,
     ops: Ops,
     mark: OpId,
     dvi: OpId,
@@ -445,7 +471,8 @@ impl Graph {
         let ops = Ops { exec, put, outpage };
         let _ = shared.set(ops);
         for f in [
-            "items", "log", "needs", "defs", "pages", "pagehash", "writes", "tails", "streams",
+            "items", "log", "diags", "needs", "defs", "pages", "pagehash", "writes", "tails",
+            "streams",
         ] {
             let fld = eng.values().field(f);
             eng.declare_accumulator(fld, Arc::new(SeqMonoid));
@@ -464,6 +491,7 @@ impl Graph {
             absent: Vec::new(),
             written: Vec::new(),
             threads: crate::exec::threads(threads),
+            eval_errors: Vec::new(),
         }
     }
 
@@ -565,10 +593,15 @@ impl Graph {
                 .evaluate(&mut phitex_defuse::Greedy::default(), &mut ex)
             {
                 Ok(r) => r,
-                Err(e) => panic!("{}", self.diagnose(&e)),
+                Err(e) => {
+                    // the build ends here; the error is a diagnostic
+                    let m = self.diagnose(&e);
+                    self.eval_errors.push(m);
+                    return;
+                }
             };
             if std::env::var_os("PHITEX_TEX_TIME").is_some() {
-                eprintln!("round: {:?}, {} nodes run", t0.elapsed(), r.nodes_run);
+                print_round(t0.elapsed(), &r);
             }
             stats.add(&r);
             stats.add_exec(&ex, c0, &self.eng);
@@ -793,14 +826,41 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         text_key: key,
         reads: g.reads.clone(),
         env: e,
+        errors: g.eval_errors.clone(),
     });
-    env_cache()
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(key)
-        .or_default()
-        .push(c.clone());
+    if c.errors.is_empty() {
+        env_cache()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(key)
+            .or_default()
+            .push(c.clone());
+    }
     c
+}
+
+/// How bad a [`Diagnostic`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+/// A message about the document, at a place in one of its files.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Diagnostic {
+    /// The file: the document's name, or an `\input` file's path.
+    pub file: String,
+    /// Bytes of that file.
+    pub range: (usize, usize),
+    /// The line of `range.0`, from 1.
+    pub line: usize,
+    pub severity: Severity,
+    pub message: String,
+    /// TeX's two-line context (§318): the line up to the error point,
+    /// then the rest of it below.
+    pub context: String,
+    pub help: Option<String>,
 }
 
 /// A document built on the graph, kept for edits.
@@ -1092,6 +1152,144 @@ impl Build {
             &end,
         );
         (dvi, log)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    /// The diagnostics of the last build or edit: TeX's errors and
+    /// warnings (box reports, missing characters) where the input was,
+    /// and the engine's evaluation errors; by file, then byte.
+    #[must_use]
+    pub fn diagnostics(&self) -> Vec<Diagnostic> {
+        let v = self.g.eng.values();
+        // the document's text and its nodes' spans
+        let mut doc = String::new();
+        let mut spans = Vec::new();
+        for (k, _) in &self.nodes {
+            let piece = k.get(1..).unwrap_or("");
+            spans.push(doc.len());
+            doc.push_str(piece);
+        }
+        // every node under a node of the text, to that node
+        let mut top: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+        for (i, (_, n)) in self.nodes.iter().enumerate() {
+            let mut stack = vec![*n];
+            while let Some(x) = stack.pop() {
+                if top.insert(x.raw(), i).is_none() {
+                    stack.extend(self.g.eng.children(x));
+                }
+            }
+        }
+        let docname = self.opts.name.clone();
+        let mut out = Vec::new();
+        let f = v.field("diags");
+        let entries = self
+            .g
+            .eng
+            .acc_value(self.unit, f)
+            .map(|s| v.seq_to_vec(s))
+            .unwrap_or_default();
+        for e in entries {
+            let xs = list_of(v, e);
+            let int = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
+            let error = int(0) != 0;
+            let message = xs.get(1).map(|&x| str_of(v, x)).unwrap_or_default();
+            let seg = xs.get(5).map(|&x| str_of(v, x)).unwrap_or_default();
+            let loc = usize::try_from(int(6)).unwrap_or(0);
+            let before: String = seg.chars().take(loc).collect();
+            let (file, text, at) = if int(3) >= 0
+                && let Some(&n) = xs.get(2)
+                && n != ValueId::UNIT
+            {
+                // a line of an `\input` file: its characters are bytes
+                let name = str_of(v, n);
+                let bytes = (self.opts.finder)(name.trim_start_matches("./"))
+                    .map(|(_, b)| b)
+                    .unwrap_or_default();
+                let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+                let at = usize::try_from(int(3)).unwrap_or(0) + loc;
+                (name, text, at)
+            } else {
+                let node = u64::from_ne_bytes(int(4).to_ne_bytes());
+                let i = top.get(&node).copied().unwrap_or(0);
+                let from = spans.get(i).copied().unwrap_or(0);
+                let at = doc
+                    .get(from..)
+                    .and_then(|d| (!seg.is_empty()).then(|| d.find(&seg)).flatten())
+                    .map_or(from, |k| from + k + before.len());
+                let at = if self.nodes.is_empty() { 0 } else { at };
+                (docname.clone(), doc.clone(), at)
+            };
+            // the line around `at`, as characters; `at` in the file's
+            // bytes (the document's text is UTF-8, a file's characters
+            // are its bytes)
+            let chars: Vec<char> = text.chars().collect();
+            let ci = if file == docname {
+                text.get(..at.min(text.len()))
+                    .map_or(0, |t| t.chars().count())
+            } else {
+                at.min(chars.len())
+            };
+            let line = chars[..ci].iter().filter(|&&c| c == '\n').count() + 1;
+            let ls = chars[..ci]
+                .iter()
+                .rposition(|&c| c == '\n')
+                .map_or(0, |k| k + 1);
+            let le = chars[ci..]
+                .iter()
+                .position(|&c| c == '\n')
+                .map_or(chars.len(), |k| ci + k);
+            let before: String = chars[ls..ci].iter().collect();
+            let after: String = chars[ci..le]
+                .iter()
+                .collect::<String>()
+                .trim_end_matches('\r')
+                .to_owned();
+            let undefined = message == "Undefined control sequence";
+            let start = if undefined {
+                before.rfind('\\').map_or(at, |k| at - (before.len() - k))
+            } else {
+                at
+            };
+            let lead = format!("l.{line} ");
+            let context = format!(
+                "{lead}{before}\n{}{after}",
+                " ".repeat(lead.len() + before.chars().count())
+            );
+            let help = undefined.then(|| {
+                "The control sequence at the end of the top line\n\
+                 of your error message was never \\def'ed. If you have\n\
+                 misspelled it (e.g., `\\hobx'), type `I' and the correct\n\
+                 spelling (e.g., `I\\hbox'). Otherwise just continue,\n\
+                 and I'll forget about whatever was undefined."
+                    .to_owned()
+            });
+            out.push(Diagnostic {
+                file,
+                range: (start, at),
+                line,
+                severity: if error {
+                    Severity::Error
+                } else {
+                    Severity::Warning
+                },
+                message,
+                context,
+                help,
+            });
+        }
+        for m in self.prelude.errors.iter().chain(&self.g.eval_errors) {
+            out.push(Diagnostic {
+                file: docname.clone(),
+                range: (0, 0),
+                line: 1,
+                severity: Severity::Error,
+                message: m.clone(),
+                context: String::new(),
+                help: None,
+            });
+        }
+        out.sort_by(|a, b| (&a.file, a.range.0).cmp(&(&b.file, b.range.0)));
+        out
     }
 
     /// The pages shipped, first first: a hash of what each shows (a PDF

@@ -583,6 +583,7 @@ impl Run<'_, '_> {
         vm.lid = md.vlid;
         let just_box = para.lines.last().map(|l| l.packed.node.clone());
         for line in para.lines {
+            self.box_report(true, line.packed.report, true);
             let b = nodes::encode_box(v, &line.packed.node, &side);
             self.append_to_vlist(&vm, b)?;
             for a in &line.packed.adjustments {
@@ -1177,6 +1178,8 @@ impl Run<'_, '_> {
                     p
                 };
                 self.set("badness", v.int(i64::from(packed.badness)), true);
+                let h = md.group == group::HBOX || adjusted;
+                self.box_report(h, packed.report, false);
                 self.unsave_extras(md)?;
                 let b = nodes::encode_box(v, &packed.node, &side);
                 let outer = self.outer_mode(md)?;
@@ -1387,8 +1390,10 @@ impl Run<'_, '_> {
         let f = u32::try_from(self.int("font")?).unwrap_or(0);
         let mut view = crate::fonts::View::default();
         self.add_font(&mut view, f)?;
-        let mut sf = self.space_factor(md)?;
-        let sf0 = sf;
+        // the space factor is read from before this node only where
+        // §1034 or a space needs the old value: a word of letters sets it
+        // without reading it, so words do not chain on each other
+        let mut sf = SF_UNREAD;
         let mut out: Vec<Node> = Vec::new();
         let mut cancel_boundary = cancel;
         loop {
@@ -1425,6 +1430,9 @@ impl Run<'_, '_> {
                     continue;
                 }
                 cmd::SPACER | cmd::EX_SPACE => {
+                    if sf == SF_UNREAD {
+                        sf = self.space_factor(md)?;
+                    }
                     let normal = c == cmd::EX_SPACE || sf == 1000;
                     let g = self.space_glue(f, sf, normal)?;
                     out.push(g);
@@ -1458,7 +1466,7 @@ impl Run<'_, '_> {
             let x = nodes::encode(v, n, &side);
             self.append(md.lid, x);
         }
-        if sf != sf0 {
+        if sf != SF_UNREAD {
             self.set_space_factor(md, sf);
         }
         Ok(())
@@ -1496,9 +1504,13 @@ impl Run<'_, '_> {
         Ok(Node::glue(g))
     }
 
-    /// `adjust_space_factor` (§1034).
-    fn adjust_sf(&mut self, ch: u32, sf: &mut i32) -> R<()> {
+    /// `adjust_space_factor` (§1034); `SF_UNREAD` while the old value is
+    /// not needed (an `sf_code` of 0 leaves it so).
+    fn adjust_sf(&mut self, md: &Mode, ch: u32, sf: &mut i32) -> R<()> {
         let s = self.int32(&format!("sf:{ch}"))?;
+        if s > 1000 && *sf == SF_UNREAD {
+            *sf = self.space_factor(md)?;
+        }
         if s == 1000 {
             *sf = 1000;
         } else if s < 1000 {
@@ -1552,7 +1564,7 @@ impl Run<'_, '_> {
         let false_bchar: Option<u32> = tfm.false_bchar().map(u32::from);
         let hyphen_char = view.hyphen.get(&f).copied().unwrap_or(-1);
         let para = md.m > 0;
-        self.adjust_sf(ch, sf)?;
+        self.adjust_sf(md, ch, sf)?;
         let mut lig_stack: Vec<Item> = vec![Item {
             ch,
             lig: false,
@@ -1708,7 +1720,7 @@ impl Run<'_, '_> {
                         self.get_next_or_end()?;
                     }
                     if let Some(c) = got {
-                        self.adjust_sf(c, sf)?;
+                        self.adjust_sf(md, c, sf)?;
                         lig_stack.push(Item {
                             ch: c,
                             lig: false,
@@ -1848,6 +1860,31 @@ impl Run<'_, '_> {
         }
     }
 
+    /// The box reports of §660–§667 and §674–§678, as diagnostics (the
+    /// log keeps the oracle's text).
+    fn box_report(&mut self, h: bool, r: Option<phitex_typeset::pack::Report>, in_par: bool) {
+        use phitex_typeset::pack::Report;
+        let Some(r) = r else { return };
+        let what = if h { "\\hbox" } else { "\\vbox" };
+        let mut s = match r {
+            Report::Underfull(b) => format!("Underfull {what} (badness {b})"),
+            Report::Loose(b) => format!("Loose {what} (badness {b})"),
+            Report::Tight(b) => format!("Tight {what} (badness {b})"),
+            Report::Overfull(x) => {
+                let mut d = String::new();
+                crate::print::print_scaled(&mut d, x);
+                format!(
+                    "Overfull {what} ({d}pt too {})",
+                    if h { "wide" } else { "high" }
+                )
+            }
+        };
+        if in_par {
+            s.push_str(" in paragraph");
+        }
+        self.diag(false, &s);
+    }
+
     /// `char_warning` (§581).
     fn char_warning(&mut self, f: u32, c: u32) -> R<()> {
         if self.param("tracinglostchars")? > 0 {
@@ -1859,6 +1896,7 @@ impl Run<'_, '_> {
                 s.push_str(&i.name);
             }
             s.push('!');
+            self.diag(false, &s);
             self.log("diag", &s)?;
         }
         Ok(())
@@ -1996,3 +2034,6 @@ pub(crate) fn _unused(_: ValueId) -> Option<Glue> {
     let _ = glue_of;
     None
 }
+
+/// The space factor not read yet in a run of characters.
+const SF_UNREAD: i32 = i32::MIN;
