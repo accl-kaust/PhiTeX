@@ -22,8 +22,6 @@ pub(crate) enum Halt {
     /// the end of its parent's text (the claim at the call measures what
     /// a body's tail takes, so this is a bug when it happens).
     Starve,
-    /// The command reads a file the client has not supplied yet.
-    File(String),
     /// The input ended for good inside a command (§360: in batch mode,
     /// "*** (job aborted, no legal \end found)").
     Fatal,
@@ -184,6 +182,22 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(x);
         }
         Ok(self.cx.use_field(f)?)
+    }
+
+    /// The file `key` from the client (`file:<key>`): `None` if it is
+    /// absent; until the client supplies it or says it is absent, the
+    /// node waits ([`phitex_defuse::Ctx::use_env`]). A file the job
+    /// writes and reads back is a loop-back field: the previous round's.
+    pub(crate) fn file(&mut self, key: &str) -> R<Option<ValueId>> {
+        let v = self.v;
+        let f = v.field(&format!("file:{key}"));
+        let x = if self.cx.is_loopback(f) {
+            self.get_f(f)?
+        } else {
+            ask(key);
+            self.cx.use_env(f)?
+        };
+        Ok(x.filter(|&x| !crate::val::list_of(v, x).is_empty()))
     }
 
     pub(crate) fn get(&mut self, name: &str) -> R<Option<ValueId>> {
@@ -944,7 +958,6 @@ impl<'c, 'a> Run<'c, 'a> {
                 Ok(()) => "ok".to_owned(),
                 Err(Halt::Stop(_)) => "stop".to_owned(),
                 Err(Halt::Starve) => "starve".to_owned(),
-                Err(Halt::File(f)) => format!("file {f}"),
                 Err(Halt::Fatal) => "fatal".to_owned(),
             };
             eprintln!(
@@ -954,10 +967,8 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         self.restore(snap);
-        match res {
-            Err(Halt::Stop(s)) => return Err(Halt::Stop(s)),
-            Err(Halt::File(f)) => return Err(Halt::File(f)),
-            _ => {}
+        if let Err(Halt::Stop(s)) = res {
+            return Err(Halt::Stop(s));
         }
         for _ in before..after {
             if !self.pull()? {
@@ -1080,19 +1091,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let id = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
         let e = v.list(vec![v.str(need), id, what]);
         self.cx.contribute(v.field("needs"), v.seq_unit(e));
-        // REDUCE-GAP: environment field pending (engine treats undefined
-        // as absent). A node waiting on a file the client has not
-        // supplied cannot stop the nodes after it; what they would run
-        // without the file is garbage (LaTeX's format without
-        // `expl3.ltx` loops for ever). It claims them until the file
-        // comes, so they wait unrun.
-        let mut n = 0;
-        if need == "file" {
-            while matches!(self.cx.following(n), Some((op, _)) if op == self.ops.exec) {
-                n += 1;
-            }
-        }
-        self.cx.claim(n);
+        self.cx.claim(0);
         self.cx.set_effect(Effect::None);
         ValueId::UNIT
     }
@@ -1236,4 +1235,22 @@ pub(crate) fn slice_args(v: &Values, text: &str, starts_line: bool) -> Vec<Value
         rest = next;
     }
     vec![v.list(frames), v.int(1)]
+}
+
+thread_local! {
+    /// The files asked for by nodes now waiting for them.
+    static ASKED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+// REDUCE-GAP: the engine does not say which environment fields the
+// stalled nodes wait on (`Report::env_stalled` counts them); a node
+// records the file name here before `use_env`, and the client, which
+// evaluates on this thread, takes the names after the evaluation.
+pub(crate) fn ask(name: &str) {
+    ASKED.with(|a| a.borrow_mut().push(name.to_owned()));
+}
+
+/// The names asked for since the last call.
+pub(crate) fn take_asked() -> Vec<String> {
+    ASKED.with(|a| std::mem::take(&mut *a.borrow_mut()))
 }

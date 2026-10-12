@@ -7,7 +7,7 @@ use std::rc::Rc;
 use phitex_defuse::ValueId;
 use phitex_typeset::glue::Glue;
 
-use crate::run::{Halt, R, Run};
+use crate::run::{R, Run};
 use crate::val::{
     CAT_CODE_BASE, DEL_CODE_BASE, MATH_CODE_BASE, Macro, Mean, OUTPUT_ROUTINE_LOC, SF_CODE_BASE,
     TOKS_BASE, Tok, cmd, glue_of, glue_value, int_of, list_of, quantity_field, str_of, toks_value,
@@ -872,8 +872,9 @@ impl Run<'_, '_> {
     /// can't be had.
     fn read_font_info(&mut self, name: &str, s: i32) -> R<i64> {
         let key = format!("{name}.tfm");
-        let Some(file) = self.get(&format!("file:{key}"))? else {
-            return Err(Halt::File(key));
+        let Some(file) = self.file(&key)? else {
+            self.log("error", "Font not loadable")?;
+            return Ok(0);
         };
         let v = self.v;
         let Some(l) = crate::fonts::load(v, file, s) else {
@@ -1021,7 +1022,7 @@ impl Run<'_, '_> {
                 format!("{name}.tex")
             };
             let Some(x) = self.read_file(&key)? else {
-                return Err(Halt::File(key));
+                return Ok(());
             };
             let xs = list_of(v, x);
             if xs.len() >= 2 {
@@ -1284,7 +1285,7 @@ impl Run<'_, '_> {
     pub(crate) fn read_file(&mut self, key: &str) -> R<Option<ValueId>> {
         let v = self.v;
         if self.get(&format!("wopen:{key}"))?.is_none() {
-            return self.get(&format!("file:{key}"));
+            return self.file(key);
         }
         let f = v.field("streams");
         let before = self.cx.acc_range(f, None)?;

@@ -49,7 +49,6 @@ fn run_node(
                 Err(Halt::Stop(_)) => "stop".to_owned(),
                 Err(Halt::Starve) => "starve".to_owned(),
                 Err(Halt::Fatal) => "fatal".to_owned(),
-                Err(Halt::File(f)) => format!("file {f}"),
             }
         );
     }
@@ -63,10 +62,6 @@ fn run_node(
         Err(Halt::Fatal) => {
             let u = ValueId::UNIT;
             Ok(r.stall("fatal", u))
-        }
-        Err(Halt::File(name)) => {
-            let n = r.v.str(&name);
-            Ok(r.stall("file", n))
         }
     }
 }
