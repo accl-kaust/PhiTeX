@@ -52,6 +52,8 @@ impl Run<'_, '_> {
             return Ok(());
         };
         let pos = crate::pdfprim::positions(self, &bx)?;
+        // what the PDF writer makes of the page's pdfTeX whatsits
+        let mut pdf_data = Vec::new();
         // §1366: the whatsits in the order `hlist_out`/`vlist_out` meet them
         for (wi, w) in side.whats.clone().into_iter().enumerate() {
             let xs = list_of(v, w);
@@ -65,8 +67,7 @@ impl Run<'_, '_> {
                 "open" => {
                     let n = xs.get(1).map_or(0, |&y| int_of(v, y));
                     let name = xs.get(2).map(|&y| str_of(v, y)).unwrap_or_default();
-                    let x = v.list(vec![v.str(&name)]);
-                    self.set(&format!("write:{n}"), x, true);
+                    self.open_out(n, &name);
                 }
                 "close" => {
                     let n = xs.get(1).map_or(0, |&y| int_of(v, y));
@@ -75,6 +76,12 @@ impl Run<'_, '_> {
                 k => {
                     let at = u32::try_from(wi).ok().and_then(|i| pos.at.get(&i).copied());
                     crate::pdfprim::at_shipout(self, k, at, &pos)?;
+                    if pos.pdf
+                        && let Some(d) = crate::pdfprim::writer_data(self, &xs)?
+                    {
+                        let h = i64::try_from(wi).unwrap_or(0);
+                        pdf_data.push(v.list(vec![v.int(h), d]));
+                    }
                 }
             }
         }
@@ -96,12 +103,46 @@ impl Run<'_, '_> {
             ]));
         }
         let cs = v.list(counts.iter().map(|&c| v.int(i64::from(c))).collect());
-        let page = v.list(vec![b, cs, v.list(fonts)]);
+        let pdf = self.pdf_page_params(pos.pdf)?;
+        let page = v.list(vec![b, cs, v.list(fonts), pdf, v.list(pdf_data)]);
         let su = v.seq_unit(page);
         self.contribute("pages", su);
         self.log("shipend", "]")?;
         self.set("deadcycles", v.int(0), true);
         Ok(())
+    }
+
+    /// The parameters pdfTeX reads at each page (pdfTeX §750–§757), with
+    /// whether the file is PDF and the colour stacks made so far.
+    fn pdf_page_params(&mut self, pdf: bool) -> R<ValueId> {
+        let v = self.v;
+        let mut xs = vec![v.int(i64::from(pdf))];
+        for p in [
+            "pdfhorigin",
+            "pdfvorigin",
+            "pdfpagewidth",
+            "pdfpageheight",
+            "hoffset",
+            "voffset",
+            "pdfcompresslevel",
+            "pdfdecimaldigits",
+            "pdfminorversion",
+            "pdfmajorversion",
+            "mag",
+        ] {
+            xs.push(v.int(i64::from(self.param(p)?)));
+        }
+        xs.push(self.get("pdf:colorstacks")?.unwrap_or(ValueId::UNIT));
+        for p in ["pdfobjcompresslevel", "pdfgentounicode"] {
+            xs.push(v.int(i64::from(self.param(p)?)));
+        }
+        for p in ["pdfpageattr", "pdfpagesattr", "pdfpageresources"] {
+            let toks = toks_of(v, self.get(&format!("param:{p}"))?);
+            let mut s = String::new();
+            self.show_toks_into(&mut s, &toks)?;
+            xs.push(v.str(&s));
+        }
+        Ok(v.list(xs))
     }
 
     fn insert_class(&mut self, n: u16) -> R<InsertClass> {
@@ -437,6 +478,16 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
 pub(crate) fn dvi(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     let v = cx.values();
     let pages = cx.acc_range(v.field("pages"), None)?;
+    let all = v.seq_to_vec(pages);
+    // the format pdfTeX fixed at the first `\shipout` (`fix_pdfoutput`)
+    let pdf = all.first().is_some_and(|&p| {
+        list_of(v, p)
+            .get(3)
+            .is_some_and(|&x| crate::val::int_at(v, x, 0) != 0)
+    });
+    if pdf {
+        return crate::pdfout::write(cx, &all);
+    }
     let comment = cx
         .use_field(v.field("dvicomment"))?
         .map(|x| str_of(v, x))

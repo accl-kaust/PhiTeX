@@ -7,7 +7,7 @@ use std::rc::Rc;
 use phitex_defuse::Value;
 
 use crate::print;
-use crate::run::{Frame, Halt, R, Run};
+use crate::run::{Frame, R, Run};
 use crate::val::{MATCH_CAT, Macro, Mean, OUT_PARAM_CAT, Tok, cmd, int_of, str_of};
 
 // §489
@@ -750,19 +750,20 @@ impl Run<'_, '_> {
         } else {
             format!("{name}.tex")
         };
-        let x = self.get(&format!("file:{key}"))?;
+        let x = self.read_file(&key)?;
         let x = match x {
             Some(x) => Some(x),
             None => {
                 if key == name {
                     None
                 } else {
-                    self.get(&format!("file:{name}"))?
+                    self.read_file(&name)?
                 }
             }
         };
         let Some(x) = x else {
-            return Err(Halt::File(key));
+            self.log("error", "I can't find file")?;
+            return Ok(());
         };
         let xs = crate::val::list_of(self.v, x);
         if xs.len() < 2 {
