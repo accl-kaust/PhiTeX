@@ -436,7 +436,7 @@ impl Graph {
         let ops = Ops { exec, put, outpage };
         let _ = shared.set(ops);
         for f in [
-            "items", "log", "needs", "defs", "pages", "pagehash", "writes", "tails", "streams",
+            "log", "needs", "defs", "pages", "pagehash", "writes", "tails", "streams",
         ] {
             let fld = eng.values().field(f);
             eng.declare_accumulator(fld, Arc::new(SeqMonoid));
@@ -753,7 +753,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
                     let name = field_name(v, f);
                     // open files are not dumped
                     // nor is the PDF writer's state (pdfTeX dumps no objects)
-                    if ["wopen:", "write:", "file:", "read:", "pdf:state"]
+                    if ["wopen:", "write:", "file:", "read:", "pdf:state", "list:"]
                         .iter()
                         .any(|p| name.starts_with(p))
                     {

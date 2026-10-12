@@ -40,7 +40,7 @@ fn run_node(
         );
     }
     let mut r = Run::new(cx, o);
-    let res = body(&mut r);
+    let res = body(&mut r).and_then(|()| r.flush_lists());
     if trace {
         eprintln!(
             "  -> {}",
