@@ -805,6 +805,7 @@ struct Snap {
     sites: Vec<(u64, u64)>,
 }
 
+#[derive(Copy, Clone)]
 pub(crate) struct WalkResult {
     pub(crate) site: Slot,
     pub(crate) pending: Slot,
@@ -1834,7 +1835,7 @@ impl Engine {
     ) -> Slot {
         let s = self.create_raw(unit, after, op, args, parent, id, provisional);
         self.set_created_effect(s, true);
-        self.bind_created(s);
+        self.bind_created(s, None);
         s
     }
 
@@ -1960,8 +1961,35 @@ impl Engine {
         }
     }
 
+    /// Binds a run of freshly created siblings, with the heights the
+    /// parallel phase computed for them (if any; one per node, in order).
+    /// In-text siblings' definitions raise those heights.
+    fn bind_fresh(&mut self, created: &[Slot], heights: &[u32]) {
+        let mut in_text: FxHashMap<Field, u32> = FxHashMap::default();
+        for (k, &c) in created.iter().enumerate() {
+            let st = self.statics(self.n(c).op, self.n(c).args);
+            let pre_h = heights.get(k).map(|&h| {
+                let mut h = h;
+                for f in st.reads.iter().flatten() {
+                    if let Some(&d) = in_text.get(f) {
+                        h = h.max(d + 1);
+                    }
+                }
+                h
+            });
+            self.bind_created(c, pre_h);
+            if let Some(d) = &st.decl {
+                let h = self.n(c).height;
+                for &(f, _) in d {
+                    in_text.insert(self.canon(f), h);
+                }
+            }
+            self.structure_edit(c);
+        }
+    }
+
     /// Phase 3: definitions, pending structure, initial height, claims.
-    fn bind_created(&mut self, s: Slot) {
+    fn bind_created(&mut self, s: Slot, height: Option<u32>) {
         let (unit, label) = (self.n(s).unit, self.n(s).label);
         let st = self.statics(self.n(s).op, self.n(s).args);
         let hints = st.reads.clone();
@@ -1972,7 +2000,10 @@ impl Engine {
             }
         }
         self.sync_pending(s);
-        if let Some(h) = hints {
+        if let Some(h) = height {
+            // Precomputed in the parallel phase.
+            self.set_height(s, h);
+        } else if let Some(h) = hints {
             // Order derived from the static structure: start above the
             // hinted inputs, so most nodes find their inputs ready.
             let mut height = 0;
@@ -4094,7 +4125,7 @@ impl Engine {
             .collect()
     }
 
-    fn set_children(&mut self, x: Slot, specs: &[(OpId, ValueId)], provisional: bool) {
+    fn set_children(&mut self, x: Slot, specs: &[(OpId, ValueId)], heights: &[u32], provisional: bool) {
         let ids = self.child_ids(x, specs);
         let old = self.aux_of(x).map_or_else(Default::default, |a| a.children.clone());
         let old_ids: Vec<NodeId> = old.iter().map(|&c| self.n(c).id).collect();
@@ -4179,10 +4210,7 @@ impl Engine {
                 self.set_created_kind(c);
             }
             self.fresh_scope = false;
-            for &c in &created {
-                self.bind_created(c);
-                self.structure_edit(c);
-            }
+            self.bind_fresh(&created, &heights[pre.min(heights.len())..]);
         }
         kids.extend_from_slice(&created);
         kids.extend_from_slice(&old[old.len() - suf..]);
@@ -4586,7 +4614,7 @@ impl Engine {
         self.nm(x).on = NIL;
         {
             span!(Children);
-            self.set_children(x, &r.children, provisional);
+            self.set_children(x, &r.children, &r.child_heights, provisional);
         }
         // A stream claim may have read its own previous unfolding, which
         // the line above just replaced: those reads are gone.
@@ -4788,7 +4816,7 @@ impl Engine {
         if specs.len() < old_specs.len() && old_specs[..specs.len()] == specs[..] {
             specs = old_specs;
         }
-        self.set_children(x, &specs, false);
+        self.set_children(x, &specs, &[], false);
         if let Some(body) = self.aux_of(x).and_then(|a| a.body) {
             for &(f, v) in &r.env {
                 self.set_env_slot(body, f, v);
@@ -5251,31 +5279,72 @@ impl Engine {
 
     /// Checks a node's hinted inputs before starting it (read-only, so it
     /// runs in the parallel phase): why it must not start yet, if so.
-    fn gate_check(&self, x: Slot) -> Option<End> {
+    /// The starting height of each child `x` will unfold, computed in the
+    /// parallel phase from the batch's state: above the hinted inputs as
+    /// bound at `x`'s position (in-text siblings are added at commit).
+    /// An estimate: it decides when a node is tried, never a result.
+    pub(crate) fn child_heights(&self, x: Slot, specs: &[(OpId, ValueId)]) -> Vec<u32> {
+        let n = self.n(x);
+        let own = n.height + 1;
+        specs
+            .iter()
+            .map(|&(op, args)| {
+                let st = self.statics(op, args);
+                let Some(h) = &st.reads else { return 0 };
+                let mut height = 0;
+                for &f in h {
+                    if self.loop_vals.contains_key(&f) {
+                        continue;
+                    }
+                    if n.def_value(f).is_some() || n.defs.iter().any(|d| d.field == f) {
+                        height = height.max(own);
+                        continue;
+                    }
+                    let w = self.walk(n.unit, n.label, f);
+                    if w.site != NIL {
+                        height = height.max(self.n(w.site).height + 1);
+                    }
+                    if w.pending != NIL {
+                        height = height.max(self.n(w.pending).height + 1);
+                    }
+                }
+                height
+            })
+            .collect()
+    }
+
+    /// The gate's walks, which the run reuses (the batch state is fixed
+    /// while jobs run).
+    fn gate_walks(&self, x: Slot) -> Result<Vec<(Field, WalkResult)>, End> {
         let n = self.n(x);
         if !n.has(F_HINT) || n.has(F_APP) {
-            return None;
+            return Ok(Vec::new());
         }
         let st = self.statics(n.op, n.args);
-        for &f in st.reads.as_ref()? {
+        let Some(reads) = st.reads.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let mut walks = Vec::with_capacity(reads.len());
+        for &f in reads {
             if self.loop_vals.contains_key(&f) {
                 continue;
             }
             let w = self.walk(n.unit, n.label, f);
             if w.pending != NIL {
-                return Some(End::Gated(w.pending));
+                return Err(End::Gated(w.pending));
             }
             if w.site != NIL {
                 let t = self.n(w.site);
                 if t.in_work() {
-                    return Some(End::Gated(w.site));
+                    return Err(End::Gated(w.site));
                 }
                 if t.height >= self.level {
-                    return Some(End::GateRaise(t.height + 1));
+                    return Err(End::GateRaise(t.height + 1));
                 }
             }
+            walks.push((f, w));
         }
-        None
+        Ok(walks)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -5418,11 +5487,14 @@ impl Engine {
         // Borrowed, not cloned: every worker would bump the same count.
         let op = &**self.op(n.op);
         let mut cx = Ctx::new(self, job.slot, job.speculative, fuel);
-        if !job.speculative
-            && let Some(e) = self.gate_check(job.slot)
-        {
-            let r = cx.stop(e);
-            return cx.finish(r);
+        if !job.speculative {
+            match self.gate_walks(job.slot) {
+                Ok(walks) => cx.walks = walks,
+                Err(e) => {
+                    let r = cx.stop(e);
+                    return cx.finish(r);
+                }
+            }
         }
         let r = op.run(&mut cx);
         cx.finish(r)
@@ -5475,6 +5547,9 @@ pub struct RunResult {
     pub(crate) uses: Vec<Use>,
     pub(crate) defs: Vec<(Field, ValueId, bool)>,
     pub(crate) children: Vec<(OpId, ValueId)>,
+    /// The starting height of each child (see [`Engine::child_heights`]),
+    /// or empty when not computed.
+    pub(crate) child_heights: Vec<u32>,
     pub(crate) env: Vec<(Field, ValueId)>,
     pub(crate) publishes: Vec<(Field, ValueId)>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
