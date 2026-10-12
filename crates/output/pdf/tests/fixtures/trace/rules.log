@@ -1,0 +1,130 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input rules
+(./rules.tex
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0, glue set 195.71114fill
+.\glue(\topskip) 0.0
+.\hbox(8.33333+2.33333)x200.0, glue set 4.04169fil
+..\hbox(0.0+0.0)x10.0
+..\tenrm T
+..\kern-0.83334
+..\tenrm e
+..\tenrm x
+..\tenrm t
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\big b
+..\big i
+..\big g
+..\big g
+..\big e
+..\big r
+..\glue 4.0 plus 2.0 minus 1.33333
+..\big t
+..\big e
+..\big x
+..\big t
+..\glue 4.0 plus 2.0 minus 1.33333
+..\tenrm s
+..\tenrm m
+..\tenrm a
+..\tenrm l
+..\tenrm l
+..\glue 3.33333 plus 1.66666 minus 1.11111
+..\bf b
+..\kern0.31944
+..\bf o
+..\bf l
+..\bf d
+..\glue 3.83331 plus 1.91666 minus 1.27777
+..\mi m
+..\mi a
+..\mi t
+..\mi h
+..\glue 0.0
+..\tenrm a
+..\tenrm g
+..\tenrm a
+..\tenrm i
+..\tenrm n
+..\tenrm .
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\rule(0.4+0.0)x*
+.\glue 5.0
+.\hbox(10.0+2.0)x200.0, glue set 76.26663fil
+..\rule(10.0+*)x0.3
+..\glue 0.0 plus 1.0fil
+..\rule(2.0+1.0)x3.0
+..\glue 10.0
+..\hbox(4.30554+1.94444)x11.11115, shifted -3.0
+...\tenrm u
+...\tenrm p
+..\hbox(6.94444+0.0)x23.0556, shifted 2.0
+...\tenrm d
+...\tenrm o
+...\kern-0.27779
+...\tenrm w
+...\tenrm n
+..\glue 0.0 plus 1.0fil
+.\rule(2.0+1.0)x50.0
+.\hbox(6.94444+0.0)x200.0, glue set 189.44441fil
+..\tenrm a
+..\leaders 0.0 plus 1.0fil
+...\hbox(1.05554+0.0)x10.0, glue set 3.61111fil
+....\glue 0.0 plus 1.0fil minus 1.0fil
+....\tenrm .
+....\glue 0.0 plus 1.0fil minus 1.0fil
+..\tenrm b
+.\glue(\baselineskip) 5.05556
+.\hbox(6.94444+0.0)x200.0, glue set 92.49998fil
+..\tenrm a
+..\cleaders 0.0 plus 1.0fil
+...\rule(0.4+0.0)x*
+..\tenrm b
+..\xleaders 0.0 plus 1.0fil
+...\hbox(4.30554+0.0)x7.0, glue set 1.83334fil
+....\glue 0.0 plus 1.0fil minus 1.0fil
+....\tenrm -
+....\glue 0.0 plus 1.0fil minus 1.0fil
+..\tenrm c
+.\glue(\lineskip) 0.0
+.\vbox(30.0+0.0)x20.0, glue set 29.40001fil
+..\rule(0.4+0.0)x10.0
+..\glue 0.0 plus 1.0fil
+..\rule(0.2+0.0)x20.0
+.\glue(\lineskip) 0.0
+.\vbox(24.27777+0.0)x28.05562, shifted 30.0
+..\hbox(6.94444+0.0)x28.05562
+...\tenrm m
+...\tenrm o
+...\kern-0.27779
+...\tenrm v
+...\kern-0.27779
+...\tenrm e
+...\tenrm d
+..\kern 3.0
+..\glue(\baselineskip) 3.9857
+..\hbox(8.0143+2.33333)x28.00008
+...\big a
+...\big g
+...\big a
+...\big i
+...\big n
+.\hbox(0.0+0.0)x200.0
+.\glue 0.0 plus 1.0fill
+
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map} )</usr/share/texmf-dist/fon
+ts/type1/public/amsfonts/cm/cmbx10.pfb></usr/share/texmf-dist/fonts/type1/publi
+c/amsfonts/cm/cmmi10.pfb></usr/share/texmf-dist/fonts/type1/public/amsfonts/cm/
+cmr10.pfb>
+Output written on rules-trace.pdf (1 page, 35335 bytes).
+PDF statistics:
+ 18 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 1 words of extra memory for PDF output out of 10000 (max. 10000000)
+

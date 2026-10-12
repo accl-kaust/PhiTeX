@@ -1,0 +1,76 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (INITEX)  1 JAN 1970 00:00
+ restricted \write18 enabled.
+ %&-line parsing enabled.
+**\tracingoutput=1 \tracingonline=0 \showboxbreadth=100000 \showboxdepth=100000
+ \input colorstack
+(./colorstack.tex
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0
+.\pdfcolorstack 1 push {1 0 0 rg 1 0 0 RG}
+.\glue(\topskip) 0.0
+.\hbox(6.83331+0.0)x200.0, glue set 171.52774fil
+..\hbox(0.0+0.0)x0.0
+..\r A
+..\pdfcolorstack 1 pop
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\r B
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\pdfcolorstack 0 push {0 0 1 rg}
+..\r C
+..\pdfcolorstack 1 push {0.2 g}
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+
+{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0
+.\glue(\topskip) 0.0
+.\hbox(6.83331+0.0)x200.0, glue set 182.2222fil
+..\hbox(0.0+0.0)x0.0
+..\r D
+..\pdfcolorstack 0 pop
+..\pdfcolorstack 1 set {0 1 0 rg}
+..\pdfcolorstack 1 current
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\r E
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\pdfcolorstack 2 push {0.5 g}
+.\glue(\parskip) 0.0
+.\glue(\baselineskip) 5.16669
+.\hbox(6.83331+0.0)x200.0, glue set 182.29164fil
+..\hbox(0.0+0.0)x0.0
+..\r F
+..\pdfcolorstack 2 pop
+..\pdfcolorstack 3 current
+..\glue 3.33333 plus 1.66498 minus 1.11221
+..\r G
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+
+
+Completed box being shipped out [0]
+\vbox(300.0+0.0)x200.0, glue set 293.16669fill
+.\glue(\topskip) 0.0
+.\hbox(6.83331+0.0)x200.0, glue set 192.49998fil
+..\hbox(0.0+0.0)x0.0
+..\r H
+..\pdfcolorstack 1 pop
+..\penalty 10000
+..\glue(\parfillskip) 0.0 plus 1.0fil
+..\glue(\rightskip) 0.0
+.\hbox(0.0+0.0)x200.0
+.\glue 0.0 plus 1.0fill
+
+ )</usr/share/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb>
+Output written on colorstack-trace.pdf (3 pages, 12408 bytes).
+PDF statistics:
+ 16 PDF objects out of 1000 (max. 8388607)
+ 0 named destinations out of 1000 (max. 500000)
+ 1 words of extra memory for PDF output out of 10000 (max. 10000000)
+
