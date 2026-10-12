@@ -317,6 +317,8 @@ impl Run<'_, '_> {
                 Node::Box(x) => (x.width, true),
                 Node::Rule(r) => (r.width, true),
                 Node::Kern(k, _) | Node::Math(_, k) => (*k, false),
+                // pdfTeX §1146: "Let d be the width of the whatsit p"
+                Node::Whatsit(_, Some(s)) => (s.width, false),
                 Node::Glue(g) => {
                     let q = &g.spec;
                     match b.glue.sign {

@@ -33,6 +33,7 @@ mod compat;
 mod config;
 mod dvipdf;
 mod editor;
+mod keys;
 mod modern;
 mod problems;
 mod session;

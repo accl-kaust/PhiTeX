@@ -55,12 +55,8 @@ fn savepos() {
 }
 
 /// The PDF documents not yet byte-identical, compared by their streams
-/// (PDF-BACKEND-GAP): bera and vf use virtual fonts; ximage and ximage2
-/// place `\pdfrefximage` in vertical mode, where pdfTeX's page builder
-/// does not count the node's height (pdfTeX §1000: a whatsit) but
-/// `vpack` does, and phitex-typeset's whatsit has no dimensions (an
-/// empty box stands for it).
-const BACKEND_GAPS: &[&str] = &["bera", "vf", "ximage", "ximage2"];
+/// (PDF-BACKEND-GAP): bera and vf use virtual fonts.
+const BACKEND_GAPS: &[&str] = &["bera", "vf"];
 
 /// The `stream ... endstream` bodies of a PDF file.
 fn streams(b: &[u8]) -> Vec<Vec<u8>> {
@@ -216,4 +212,35 @@ fn pdf_edits() {
         }
     }
     assert!(failed.is_empty(), "edits differing from cold: {failed:?}");
+}
+
+/// The fold's key is the state: an edit whose page writes the same
+/// state (a zero kern on page 1) leaves `pdf:state` equal, so the steps
+/// after it (page 2's `\pdfpageref`s and shipout) are cut off; an edit
+/// that changes the page runs them.
+#[test]
+fn pdf_state_cutoff() {
+    let dir = common::fixtures().join("pdf");
+    let src = common::read(&dir.join("pageref.tex"));
+    let opts = || phitex_tex::Options {
+        epoch: Some(0),
+        ..common::options("./pageref.tex", "pageref", "", &dir)
+    };
+    let run = |to: &str| {
+        let mut b = common::build(opts(), None, &src);
+        let text = src.replacen("A\\a\\par", to, 1);
+        assert_ne!(text, src);
+        b.edit(&text);
+        let cold = common::build(opts(), None, &text);
+        assert_eq!(
+            common::first_difference(&b.output().0, &cold.output().0),
+            None,
+            "{to}: edit differs from cold"
+        );
+        (b.stats.nodes_run, b.stats.cutoffs)
+    };
+    let (same, same_cut) = run("A\\kern0pt\\a\\par");
+    let (changed, _) = run("Z\\a\\par");
+    eprintln!("same state: {same} nodes run, {same_cut} cutoffs; changed: {changed} nodes run");
+    assert!(same < changed, "no cutoff: {same} >= {changed}");
 }

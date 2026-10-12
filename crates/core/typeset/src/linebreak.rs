@@ -766,7 +766,12 @@ pub fn line_break(
                         rhm: *rhm,
                     };
                 }
-                Node::Whatsit(_) | Node::Mark(_) | Node::Ins(_) | Node::Adjust(_) => {}
+                Node::Whatsit(_, size) => {
+                    // pdfTeX: "Advance past a whatsit node in the
+                    // line_break loop"
+                    b.add_width(size.map_or(0, |s| s.width));
+                }
+                Node::Mark(_) | Node::Ins(_) | Node::Adjust(_) => {}
                 Node::Glue(_) => {
                     // §868
                     if auto_breaking {

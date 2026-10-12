@@ -196,6 +196,19 @@ pub struct Unset {
     pub list: List,
 }
 
+/// The size of a whatsit that takes room (pdfTeX's `pdf_width`,
+/// `pdf_height`, `pdf_depth` of a `\pdfrefxform` or `\pdfrefximage`
+/// node).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WhatsitSize {
+    /// Width.
+    pub width: Scaled,
+    /// Height.
+    pub height: Scaled,
+    /// Depth.
+    pub depth: Scaled,
+}
+
 /// A list item.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Node {
@@ -220,8 +233,13 @@ pub enum Node {
     Lig(Ligature),
     /// A discretionary.
     Disc(Disc),
-    /// A whatsit: opaque, the caller's handle; no dimensions (§1360).
-    Whatsit(u32),
+    /// A whatsit: opaque, the caller's handle (§1341), and its size if
+    /// it has one: pdfTeX's `\pdfrefxform` and `\pdfrefximage` nodes
+    /// carry the form's or image's dimensions, which packaging, line
+    /// breaking and the page builder count (pdfTeX §1365, "Incorporate a
+    /// whatsit node into an hbox/vbox", "Prepare to move whatsit p to the
+    /// current page"); other whatsits have none (§1360).
+    Whatsit(u32, Option<WhatsitSize>),
     /// A language whatsit (§1341): `\language`, `\lefthyphenmin`,
     /// `\righthyphenmin` for what follows; no dimensions.
     Language {

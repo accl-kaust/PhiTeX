@@ -218,7 +218,7 @@ impl PdfState {
                     self.map_over.insert(name, Some(e));
                 }
                 None => {
-                    self.map_add.entry(name).or_insert(e);
+                    self.map_add.get_or_insert_with(name, || e);
                 }
             },
         }
@@ -687,7 +687,7 @@ impl PdfState {
         let mut t = FontTables::default();
         // the descriptors of included PDF files' fonts (`epdf.c`), in
         // `fd_tree` before the TeX fonts'
-        for (key, e) in self.epdf_fds.clone() {
+        for (key, e) in (*self.epdf_fds).clone() {
             let mut font_dim = [(0, false); 11];
             font_dim[t1::dim::STEMV] = (e.stemv, true);
             t.fds.push(Fd {
