@@ -12,232 +12,6 @@ function errorNeeds(message) {
   return null;
 }
 
-// viewer/src/page2.ts
-var NS = "http://www.w3.org/2000/svg";
-var FAMILY = {
-  roman: "PhxLMRoman, PhxLMMath, serif",
-  bold: "PhxLMBold, PhxLMMath, serif",
-  italic: "PhxLMItalic, PhxLMMath, serif",
-  bolditalic: "PhxLMBoldItalic, PhxLMMath, serif",
-  mono: "PhxLMMono, monospace",
-  math: "PhxLMMath, PhxLMRoman, serif"
-};
-var FILES = [
-  ["PhxLMRoman", "lmroman10-regular.otf"],
-  ["PhxLMBold", "lmroman10-bold.otf"],
-  ["PhxLMItalic", "lmroman10-italic.otf"],
-  ["PhxLMBoldItalic", "lmroman10-bolditalic.otf"],
-  ["PhxLMMono", "lmmono10-regular.otf"],
-  ["PhxLMMath", "latinmodern-math.otf"]
-];
-var fonts;
-var fontBase = "fonts/";
-var loadFonts = () => fonts ??= Promise.all(
-  FILES.map(async ([family, file]) => {
-    const r = await fetch(fontBase + file);
-    const f = new FontFace(family, await r.arrayBuffer());
-    document.fonts.add(await f.load());
-  })
-).then(() => void 0);
-var esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-function fnv(s) {
-  let x = 2166136261;
-  for (let i = 0; i < s.length; i++) x = Math.imul(x ^ s.charCodeAt(i), 16777619);
-  return (x >>> 0).toString(16);
-}
-function clips(d) {
-  const out = /* @__PURE__ */ new Map();
-  const resolve = (cid, depth = 0) => {
-    const have = out.get(cid);
-    if (have) return have;
-    const c = d.C?.[cid];
-    if (!c || depth > 64) return void 0;
-    const [path, evenOdd, parent] = c;
-    const up = parent ? resolve(parent, depth + 1) : void 0;
-    const id = `k${fnv(`${path}|${evenOdd}|${up?.id ?? ""}`)}`;
-    const markup = `<clipPath id="${id}" clipPathUnits="userSpaceOnUse"${up ? ` clip-path="url(#${up.id})"` : ""}><path d="${esc(path)}"${evenOdd ? ' clip-rule="evenodd"' : ""}/></clipPath>`;
-    const r = { id, markup };
-    out.set(cid, r);
-    return r;
-  };
-  for (const cid of Object.keys(d.C ?? {})) resolve(cid);
-  return out;
-}
-function elements(d) {
-  const cl = d.C ? clips(d) : void 0;
-  const clip = (m, c) => {
-    const k = c != null ? cl?.get(c) : void 0;
-    return k ? `<g clip-path="url(#${k.id})">${m}</g>` : m;
-  };
-  const path = (e) => {
-    const [d_, fill, stroke, w, c] = e;
-    return clip(`<path d="${d_}" fill="${fill ?? "none"}" stroke="${stroke ?? "none"}" stroke-width="${w}"/>`, c);
-  };
-  const image2 = (e) => {
-    const [id, a, b, c_, d_, e_, f, c] = e;
-    return typeof id === "string" ? clip(`<use href="#i${esc(id)}" transform="matrix(${a} ${b} ${c_} ${d_} ${e_} ${f})"/>`, c) : "";
-  };
-  const gid = (fr, c) => `g${d.F?.[fr] ?? fr}_${c}`;
-  const text = (r) => {
-    if (r[0] === -1) {
-      const [, size2, y2, xs2, , fr, codes, colour2, m, c2] = r;
-      if (m) return clip(`<g transform="matrix(${m.join(" ")} ${xs2} ${y2})"${colour2 ? ` fill="${esc(colour2)}"` : ""}><use href="#${gid(fr, codes[0])}"/></g>`, c2);
-      const k = size2 / 1e3;
-      const x = xs2.split(" ");
-      return clip(`<g transform="translate(0 ${y2}) scale(${k} ${-k})"${colour2 ? ` fill="${esc(colour2)}"` : ""}>${codes.map((g, i) => `<use href="#${gid(fr, g)}" x="${(+x[i] / k).toFixed(1)}"/>`).join("")}</g>`, c2);
-    }
-    const [f, size, y, xs, txt, outlined, colour, c] = r;
-    return clip(`<text x="${xs}" y="${y}" font-size="${size}" font-family="${esc(FAMILY[d.f[f]] ?? FAMILY.roman)}"${outlined ? ' fill-opacity="0"' : colour ? ` style="fill:${esc(colour)}"` : ""}>${esc(txt)}</text>`, c);
-  };
-  const out = [];
-  const lists = [d.p ?? [], d.r ?? [], d.t ?? []];
-  const one = (l, i) => {
-    const e = lists[l][i];
-    if (e === void 0) return;
-    const m = l === 0 ? path(e) : l === 1 ? image2(e) : text(e);
-    if (m) out.push(m);
-  };
-  if (d.o) for (const [l, first, n] of d.o) for (let i = first; i < first + n; i++) one(l, i);
-  else for (const l of [0, 1, 2]) for (let i = 0; i < lists[l].length; i++) one(l, i);
-  return out;
-}
-function store(el, d) {
-  if (!d.g && !d.I && !d.C) return;
-  const root = el.getRootNode();
-  let defs = root.getElementById?.("phx-glyphs") ?? null;
-  if (!defs) {
-    const svg2 = document.createElementNS(NS, "svg");
-    svg2.setAttribute("style", "position:absolute;width:0;height:0;overflow:hidden");
-    svg2.setAttribute("aria-hidden", "true");
-    svg2.innerHTML = `<defs id="phx-glyphs"></defs>`;
-    (root instanceof Document ? root.body : root).appendChild(svg2);
-    defs = svg2.firstElementChild;
-  }
-  const have = defs.__ids ??= /* @__PURE__ */ new Set();
-  let fresh = "";
-  for (const [id, url] of Object.entries(d.I ?? {})) {
-    if (have.has("i" + id)) continue;
-    have.add("i" + id);
-    fresh += `<image id="i${esc(id)}" width="1" height="1" preserveAspectRatio="none" href="${esc(url)}"/>`;
-  }
-  for (const { id, markup } of d.C ? clips(d).values() : []) {
-    if (have.has(id)) continue;
-    have.add(id);
-    fresh += markup;
-  }
-  for (const [k, p] of Object.entries(d.g ?? {})) {
-    const [fr, c] = k.split(":");
-    const id = `g${d.F?.[+fr] ?? fr}_${c}`;
-    if (have.has(id)) continue;
-    have.add(id);
-    fresh += `<path id="${id}" d="${p}"/>`;
-  }
-  if (fresh) defs.insertAdjacentHTML("beforeend", fresh);
-}
-function patch(el, d, w, h) {
-  void loadFonts();
-  let svg2 = el.querySelector(":scope > svg.page");
-  if (!svg2 || svg2.dataset.v !== "2") {
-    el.innerHTML = `<svg class="page" xmlns="${NS}" data-v="2" preserveAspectRatio="none" xml:space="preserve"><rect class="paper"/><g class="c"></g></svg>`;
-    svg2 = el.firstElementChild;
-  }
-  svg2.setAttribute("viewBox", `0 0 ${d.w} ${d.h}`);
-  svg2.setAttribute("width", String(w));
-  svg2.setAttribute("height", String(h));
-  const paper = svg2.querySelector("rect.paper");
-  paper.setAttribute("width", String(d.w));
-  paper.setAttribute("height", String(d.h));
-  store(el, d);
-  const g = svg2.querySelector("g.c");
-  const keys = elements(d);
-  const old = /* @__PURE__ */ new Map();
-  for (const c of Array.from(g.children)) {
-    const k = c.__k ?? "";
-    const l = old.get(k);
-    if (l) l.push(c);
-    else old.set(k, [c]);
-  }
-  const fresh = [];
-  const slots = keys.map((k) => old.get(k)?.pop() ?? (fresh.push(k), fresh.length - 1));
-  if (!fresh.length && slots.length === g.children.length && slots.every((s, i) => s === g.children[i])) return void (el.querySelector(":scope > img.ras") || raster(el, svg2));
-  const made = [];
-  if (fresh.length) {
-    const tmp = document.createElementNS(NS, "g");
-    tmp.innerHTML = fresh.join("");
-    made.push(...Array.from(tmp.children));
-    made.forEach((m, i) => m.__k = fresh[i]);
-  }
-  const want = slots.map((s) => typeof s === "number" ? made[s] : s);
-  const keep = new Set(want);
-  for (const c of Array.from(g.children)) if (!keep.has(c)) c.remove();
-  let at = g.firstChild;
-  for (const n of want) {
-    if (at === n) at = at.nextSibling;
-    else g.insertBefore(n, at);
-  }
-  live(el, svg2);
-  raster(el, svg2);
-}
-var RASTER_MS = 250;
-function live(el, svg2) {
-  svg2.classList.remove("ras");
-  const img = el.querySelector(":scope > img.ras");
-  if (img) URL.revokeObjectURL(img.src), img.remove();
-}
-function raster(el, svg2) {
-  clearTimeout(el.__ras);
-  const gen = el.__gen = (el.__gen ?? 0) + 1;
-  el.__ras = setTimeout(() => void picture(el, svg2, gen), RASTER_MS);
-}
-async function picture(el, svg2, gen) {
-  if (!svg2.isConnected || el.__gen !== gen) return;
-  const root = el.getRootNode();
-  const defs = root.getElementById?.("phx-glyphs");
-  const g = svg2.querySelector("g.c");
-  if (!g) return;
-  const parts = [];
-  const refs = /* @__PURE__ */ new Set();
-  const ref = (m) => {
-    for (const r of m.matchAll(/(?:href="#|url\(#)([^")]+)/g)) refs.add(r[1]);
-  };
-  for (const c of Array.from(g.children)) {
-    if (c.tagName === "text") continue;
-    const m = c.outerHTML;
-    parts.push(m);
-    ref(m);
-  }
-  if (!parts.length) return;
-  const out = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (let todo = [...refs]; todo.length; ) {
-    const id = todo.pop();
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const e = defs?.querySelector(`#${CSS.escape(id)}`);
-    if (!e) continue;
-    const m = e.outerHTML;
-    out.push(m);
-    for (const r of m.matchAll(/url\(#([^)]+)\)/g)) todo.push(r[1]);
-  }
-  const vb = svg2.getAttribute("viewBox") ?? "";
-  const [, , vw, vh] = vb.split(" ");
-  const src = `<svg xmlns="${NS}" viewBox="${vb}" width="${vw}" height="${vh}" preserveAspectRatio="none"><defs>${out.join("")}</defs>${parts.join("")}</svg>`;
-  const img = new Image();
-  img.className = "ras";
-  img.alt = "";
-  img.src = URL.createObjectURL(new Blob([src], { type: "image/svg+xml" }));
-  try {
-    await img.decode();
-  } catch {
-    URL.revokeObjectURL(img.src);
-    return;
-  }
-  if (!svg2.isConnected || el.__gen !== gen) return void URL.revokeObjectURL(img.src);
-  live(el, svg2);
-  el.insertBefore(img, svg2);
-  svg2.classList.add("ras");
-}
-
 // viewer/src/viewer.ts
 var LETTER = { w: 612, h: 792 };
 var Viewer = class {
@@ -324,18 +98,16 @@ var Viewer = class {
       if (el) el.style.cursor = this.linkAt(e) ? "pointer" : "";
     });
   }
-  /** The link under a pointer event (its page's draw list's `L`), if any. */
+  /** The link under a pointer event (its page's, from MuPDF), if any. */
   linkAt(e) {
     const el = e.target.closest(".slot");
     if (!el) return null;
     const img = this.slots[Number(el.dataset.k)]?.img;
-    if (!img || !("draws" in img)) return null;
-    const d = img.draws;
-    if (!d.L?.length) return null;
+    if (!img?.links?.length) return null;
     const r = el.getBoundingClientRect();
-    const x = (e.clientX - r.left) / r.width * d.w;
-    const y = (e.clientY - r.top) / r.height * d.h;
-    return d.L.find((l) => x >= l[0] && x <= l[2] && y >= l[1] && y <= l[3]) ?? null;
+    const x = (e.clientX - r.left) / r.width * img.w;
+    const y = (e.clientY - r.top) / r.height * img.h;
+    return img.links.find((l) => x >= l[0] && x <= l[2] && y >= l[1] && y <= l[3]) ?? null;
   }
   /** Scroll to page `k`, `top` points from its top (null: its top). */
   goToPlace(k, top) {
@@ -448,8 +220,7 @@ var Viewer = class {
     const s = this.slots[k];
     if (!s) return;
     if (hash) this.asked.delete(`${k}:${hash}`);
-    if ("draws" in img) this.size = { w: img.draws.w, h: img.draws.h };
-    else if ("w" in img && img.w && img.h) this.size = { w: img.w, h: img.h };
+    if (img.w && img.h) this.size = { w: img.w, h: img.h };
     s.img = img;
     s.drawn = hash ?? s.hash;
     this.toPaint.add(s);
@@ -476,19 +247,14 @@ var Viewer = class {
   }
   /**
    * The zoom changed: each page at its new size, the view kept on the same
-   * place of the page in view. A page drawn from a draw list scales as it
-   * is (its drawing and its picture fill the slot), so only pages of other
-   * kinds are drawn again: a zoom touches no page's drawing.
+   * place of the page in view (a page's canvas fills its slot: it scales).
    */
   redraw() {
     const at = this.slots[this.current];
     const v = this.scroller.getBoundingClientRect();
     const before = at?.el.getBoundingClientRect();
     const frac = before?.height ? (v.top - before.top) / before.height : 0;
-    for (const s of this.slots) {
-      this.sizeSlot(s);
-      if (s.img && !("draws" in s.img && s.img.draws.v === 2)) this.paint(s);
-    }
+    for (const s of this.slots) this.sizeSlot(s);
     if (at) {
       const b = at.el.getBoundingClientRect();
       this.scroller.scrollTop += b.top + frac * b.height - v.top;
@@ -514,33 +280,11 @@ var Viewer = class {
   }
   draw(s) {
     if (!s.img) return;
-    const w = this.size.w * (96 / 72) * this.host.scale();
     this.sizeSlot(s);
-    if ("draws" in s.img && s.img.draws.v === 2) {
-      const [bw, bh] = this.host.box(this.size, w);
-      patch(s.el, s.img.draws, bw, bh);
-      return;
-    }
-    const markup = this.host.svg(s.img, w);
-    if (markup !== null) {
-      s.el.innerHTML = markup;
-      return;
-    }
-    if ("canvas" in s.img) {
-      s.img.canvas.style.width = "100%";
-      s.img.canvas.style.height = "100%";
-      if (s.el.firstChild !== s.img.canvas) s.el.replaceChildren(s.img.canvas);
-      const tl = s.img.canvas.querySelector(".textLayer");
-      if (tl) tl.style.transform = `scale(${s.el.getBoundingClientRect().width / s.img.w || parseFloat(s.el.style.width) / s.img.w})`;
-      return;
-    }
-    if (!("png" in s.img)) return;
-    const url = URL.createObjectURL(new Blob([s.img.png], { type: "image/png" }));
-    const im = document.createElement("img");
-    im.alt = `page ${Number(s.el.dataset.k) + 1}`;
-    im.onload = () => URL.revokeObjectURL(url);
-    im.src = url;
-    s.el.replaceChildren(im);
+    const c = s.img.canvas;
+    c.style.width = "100%";
+    c.style.height = "100%";
+    if (s.el.firstChild !== c) s.el.replaceChildren(c);
   }
   /** Turn `n` pages (back if negative) from the page at the view's top, as a PDF viewer's Page Down / Page Up: back from inside a page goes to its own top first. */
   turn(n) {
@@ -598,21 +342,14 @@ var Viewer = class {
 
 // viewer/src/css.ts
 var VIEWER_CSS = `
-.slot { position: relative; contain: layout paint; }
-/* (a page as a picture while it is unchanged, its live text over it; see page2.ts raster) */
-.slot > img.ras { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; user-select: none; }
-.slot > svg.page { position: relative; }
-.slot > svg.page.ras g.c > :not(text) { display: none; }
-.slot > svg.page.ras rect.paper { fill: none; }
-.slot > svg.page.ras { background: transparent; }
-.slot svg.page, .slot img { display: block; width: 100%; height: 100%; margin: 0; }
-.slot svg.page text { white-space: pre; }
+.slot { position: relative; contain: layout paint; background: #fff; }
+.slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
 `;
 
 // viewer/src/problems.ts
-var esc2 = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+var esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 function place(file, line, col, text) {
-  return `<a href="#" class="phx-place" data-file="${esc2(file)}" data-line="${Number(line) || 1}" data-col="${Number(col) || 1}">${esc2(text ?? `${file}${line ? `:${line}` : ""}${col ? `:${col}` : ""}`)}</a>`;
+  return `<a href="#" class="phx-place" data-file="${esc(file)}" data-line="${Number(line) || 1}" data-col="${Number(col) || 1}">${esc(text ?? `${file}${line ? `:${line}` : ""}${col ? `:${col}` : ""}`)}</a>`;
 }
 function problemHtml(p) {
   return item(p);
@@ -630,13 +367,13 @@ function item(p) {
     const a = chars.slice(0, p.excerpt.start).join("");
     const b = chars.slice(p.excerpt.start, p.excerpt.start + p.excerpt.len).join("");
     const c = chars.slice(p.excerpt.start + p.excerpt.len).join("");
-    ex = `<pre class="phx-excerpt">${p.line ? `<span class="phx-ln">${Number(p.line)} \u2502 </span>` : ""}${esc2(a)}<mark>${esc2(b)}</mark>${esc2(c)}</pre>`;
+    ex = `<pre class="phx-excerpt">${p.line ? `<span class="phx-ln">${Number(p.line)} \u2502 </span>` : ""}${esc(a)}<mark>${esc(b)}</mark>${esc(c)}</pre>`;
   }
-  const ctx = p.context.length ? `<details class="phx-ctx"><summary>in ${p.context.map((m) => `<code>${esc2(m.name)}</code>`).join(" \u2190 ")}</summary>${p.context.map((m) => `<pre><b>${esc2(m.name)}</b> ${esc2(m.before)}<mark>\u2038</mark>${esc2(m.after)}</pre>`).join("")}</details>` : "";
+  const ctx = p.context.length ? `<details class="phx-ctx"><summary>in ${p.context.map((m) => `<code>${esc(m.name)}</code>`).join(" \u2190 ")}</summary>${p.context.map((m) => `<pre><b>${esc(m.name)}</b> ${esc(m.before)}<mark>\u2038</mark>${esc(m.after)}</pre>`).join("")}</details>` : "";
   const inc = p.included.length ? `<div class="phx-inc">included from ${p.included.map((i) => place(i.file, i.line, 1)).join(", ")}</div>` : "";
-  const box = p.box ? `<pre class="phx-excerpt">${esc2(p.box.excerpt)}</pre>` : "";
-  const list = (cls, xs) => xs.length ? `<ul class="${cls}">${xs.map((x) => `<li>${esc2(x)}</li>`).join("")}</ul>` : "";
-  return `<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${esc2(String(p.severity))}</span>${p.code ? `<code class="phx-code">${esc2(p.code)}</code>` : ""}<span>${esc2(p.message)}</span></div>${where ? `<div class="phx-where">${where}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...p.help, ...p.suggestions])}</li>`;
+  const box = p.box ? `<pre class="phx-excerpt">${esc(p.box.excerpt)}</pre>` : "";
+  const list = (cls, xs) => xs.length ? `<ul class="${cls}">${xs.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : "";
+  return `<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${esc(String(p.severity))}</span>${p.code ? `<code class="phx-code">${esc(p.code)}</code>` : ""}<span>${esc(p.message)}</span></div>${where ? `<div class="phx-where">${where}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...p.help, ...p.suggestions])}</li>`;
 }
 var PROBLEMS_CSS = `
 .phx-problems { position: fixed; inset: 0; z-index: 10; background: rgba(0, 0, 0, 0.45); overflow: auto; padding: 48px 16px; }
@@ -670,7 +407,7 @@ var PROBLEMS_CSS = `
 `;
 
 // viewer/src/outline.ts
-var esc3 = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+var esc2 = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 var Outline = class {
   el;
   /** The items in document order, flat, with their rows. */
@@ -718,7 +455,7 @@ var Outline = class {
       const p = `${path}/${e.t}`;
       const kids = e.k.length ? list(e.k, p, depth + 1) : "";
       const cls = [e.k.length ? "parent" : "", this.folded.has(p) ? "folded" : ""].filter(Boolean).join(" ");
-      return `<li data-i="${i}" data-path="${esc3(p)}" class="${cls}"><div class="phx-row" style="--d:${depth}">${e.k.length ? `<span class="phx-fold" aria-hidden="true"></span>` : `<span class="phx-dot"></span>`}<a href="#" class="phx-t" title="${esc3(e.t)}">${esc3(e.t)}</a>${e.p != null ? `<span class="phx-p">${Number(e.p) + 1}</span>` : ""}</div>${kids}</li>`;
+      return `<li data-i="${i}" data-path="${esc2(p)}" class="${cls}"><div class="phx-row" style="--d:${depth}">${e.k.length ? `<span class="phx-fold" aria-hidden="true"></span>` : `<span class="phx-dot"></span>`}<a href="#" class="phx-t" title="${esc2(e.t)}">${esc2(e.t)}</a>${e.p != null ? `<span class="phx-p">${Number(e.p) + 1}</span>` : ""}</div>${kids}</li>`;
     }).join("")}</ul>`;
     this.el.innerHTML = list(items, "", 0);
     for (const li of this.el.querySelectorAll("li")) {
@@ -910,8 +647,8 @@ function anonymizer(paths) {
     if (stem.length >= 4 && stem !== base) pairs.push([stem, alias.replace(/\.[A-Za-z0-9]+$/, "")]);
   });
   pairs.sort((a, b) => b[0].length - a[0].length);
-  const esc6 = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = pairs.length ? new RegExp(pairs.map(([p]) => `(?<![A-Za-z0-9_])${esc6(p)}(?![A-Za-z0-9_])`).join("|"), "g") : null;
+  const esc4 = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = pairs.length ? new RegExp(pairs.map(([p]) => `(?<![A-Za-z0-9_])${esc4(p)}(?![A-Za-z0-9_])`).join("|"), "g") : null;
   const map = new Map(pairs);
   return (s) => (re ? s.replace(re, (m) => map.get(m) ?? m) : s).replace(/`[^'\n]{1,80}'/g, "`\u2026'").replace(/\/home\/[^/\s]+\//g, "~/").replace(/\/Users\/[^/\s]+\//g, "~/");
 }
@@ -984,13 +721,7 @@ var OVERLEAF_WORDS = {
 function safeColor(c, or) {
   return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
 }
-var pageFormat = (f) => f === "pdfjs" ? "pdfjs" : "vector";
-var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", format: "vector", collapsed: false, details: false };
-function cssFont(name, px) {
-  const bold = /Bold/.test(name), italic = /Italic|Oblique/.test(name);
-  const family = /^Times/.test(name) ? '"Times New Roman", Times, "Liberation Serif", "Nimbus Roman", "Noto Serif", serif' : /^Helvetica/.test(name) ? 'Helvetica, Arial, "Liberation Sans", "Nimbus Sans", "Noto Sans", sans-serif' : /^Courier/.test(name) ? '"Courier New", Courier, "Liberation Mono", "DM Mono", monospace' : '"Noto Serif", serif';
-  return `${italic ? "italic " : ""}${bold ? "bold " : ""}${px}px ${family}`;
-}
+var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false };
 function approximateFraction(x) {
   if (Math.floor(x) === x) return [x, 1];
   const xinv = 1 / x;
@@ -1018,34 +749,6 @@ function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
   const w = cssWidth, h = d.h * cssWidth / d.w;
   return [w - w % step, h - h % step];
 }
-var esc4 = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
-function svg(d, cssWidth) {
-  const lines = /* @__PURE__ */ new Map();
-  const order = [];
-  for (const [x, y, size, f, text, width] of d.t) {
-    const k = `${y}|${size}|${f}`;
-    if (!lines.has(k)) {
-      lines.set(k, []);
-      order.push(k);
-    }
-    lines.get(k).push([x, text, width]);
-  }
-  let body = "";
-  for (const k of order) {
-    const [y, size, f] = k.split("|");
-    const words = lines.get(k).sort((a, b) => a[0] - b[0]);
-    const spans = words.map(([x, t, width], i) => {
-      const fit = width && [...t].length > 1 ? ` textLength="${width}" lengthAdjust="spacingAndGlyphs"` : "";
-      const space = i < words.length - 1 ? `<tspan> </tspan>` : "";
-      return `<tspan x="${x}"${fit}>${esc4(t)}</tspan>${space}`;
-    }).join("");
-    body += `<text y="${y}" style="font:${esc4(cssFont(d.f[Number(f)], Number(size)))}">${spans}</text>
-`;
-  }
-  for (const [x, y, w2, h2] of d.r) body += `<rect x="${x}" y="${y}" width="${Math.max(w2, 0.4)}" height="${Math.max(h2, 0.4)}"/>`;
-  const [w, h] = pageBox(d, cssWidth);
-  return `<svg class="page" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${d.w} ${d.h}" width="${w}" height="${h}" preserveAspectRatio="none" xml:space="preserve"><rect class="paper" width="${d.w}" height="${d.h}"/>${body}</svg>`;
-}
 var PATHS = {
   preview: "M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z",
   chevron_left: "M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z",
@@ -1060,7 +763,7 @@ var PATHS = {
   info: "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"
 };
 var icon = (name, size = 18) => `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
-var CSS2 = `
+var CSS = `
 :host { all: initial; }
 * { box-sizing: border-box; }
 .win {
@@ -1137,11 +840,7 @@ button.btn:hover { background: var(--accent2); }
 .diag.error .icon { color: var(--danger); } .diag.warning .icon { color: var(--warn); } .diag.info .icon { color: var(--info); }
 .diag .where { color: var(--fg2); white-space: nowrap; margin-left: auto; padding-left: 8px; font-family: "DM Mono", monospace; font-size: 11px; }
 .stage { position: relative; flex: 1; overflow: auto; background: var(--light3); padding: 12px; text-align: center; min-height: 0; }
-.stage svg.page { display: inline-block; vertical-align: top; user-select: text; cursor: text; }
-.stage svg.page .paper { fill: #fff; }
-.stage svg.page text { fill: #000; white-space: pre; }
-.stage svg.page ::selection { fill: #fff; background: var(--info); }
-.stage svg.page, .stage img { background: #fff; box-shadow: 0 1px 3px rgba(27,34,44,.25); border-radius: 2px; }
+.stage .slot { background: #fff; box-shadow: 0 1px 3px rgba(27,34,44,.25); border-radius: 2px; }
 .stage img { max-width: 100%; }
 /* PDF.js pages: the canvas, and pdf.js's text layer over it (its own rules, the ones that place and hide the text) */
 .pdfjs-page { position: relative; width: 100%; height: 100%; background: #fff; }
@@ -1154,7 +853,7 @@ button.btn:hover { background: var(--accent2); }
   transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv)); }
 .textLayer .markedContent { display: contents; }
 .textLayer ::selection { background: rgb(0 100 255 / 25%); }
-.stage.stale svg.page, .stage.stale img { opacity: .45; filter: grayscale(1); }
+.stage.stale .slot canvas { opacity: .45; filter: grayscale(1); }
 .banner { position: sticky; top: -12px; z-index: 1; display: none; margin: -12px -12px 10px; padding: 6px 10px; text-align: left; font-size: 12px;
   background: var(--bg-warning-03, #fcf1e3); color: var(--warn); border-bottom: 1px solid var(--divider); }
 .stage.stale .banner { display: block; }
@@ -1181,7 +880,7 @@ footer .msg.err { color: var(--danger); }
 .win:not(.docked) .show-docked { display: none; }
 .win.docked { background: var(--pdf-bg, var(--pane, #2f3a4c)); border: 0; }
 /* Overleaf's "dark mode PDF preview" (.pdf-dark-mode on the pane): its own filter, no shadow */
-.win.docked.pdf-dark .stage svg.page, .win.docked.pdf-dark .stage img { filter: invert(95%) hue-rotate(180deg) brightness(90%) contrast(90%); box-shadow: none; }
+.win.docked.pdf-dark .stage .slot canvas { filter: invert(95%) hue-rotate(180deg) brightness(90%) contrast(90%); box-shadow: none; }
 .win.docked.light .sum { background: var(--light2); color: var(--fg2); border-bottom-color: var(--divider); }
 .win.docked.light .sum:hover { background: var(--light3); } .win.docked.light .sum .first { color: var(--fg); }
 .win.docked.light .sum .n.error { color: var(--danger); } .win.docked.light .sum .n.warning { color: var(--warn); } .win.docked.light .sum .n.info { color: var(--info); }
@@ -1327,11 +1026,11 @@ footer .msg.err { color: var(--danger); }
 @keyframes phitex-mark-in { from { opacity: 0; transform: scale(1.15); } }
 .slot .mark.fade { opacity: 0; transition: opacity 1.2s; }
 .slot .mark.sel { transition: none; animation: none; }
-.slot svg.page, .slot img { display: block; width: 100%; height: 100%; margin: 0; box-shadow: none !important; border-radius: 0 !important; }
+.slot canvas { display: block; width: 100%; height: 100%; margin: 0; box-shadow: none !important; border-radius: 0 !important; }
 .win.docked .slot { box-shadow: rgba(35,40,47,.05) 0 5px 5px, rgba(35,40,47,.03) 0 3px 14px, rgba(35,40,47,.08) 0 8px 10px; }
 .win.docked.pdf-dark .slot { filter: invert(95%) hue-rotate(180deg) brightness(90%) contrast(90%); box-shadow: none; }
 .stage.stale .slot { opacity: .45; filter: grayscale(1); }
-.win.docked .stage svg.page, .win.docked .stage img { border-radius: 0;
+.win.docked .stage .slot { border-radius: 0;
   box-shadow: rgba(35,40,47,.05) 0 5px 5px, rgba(35,40,47,.03) 0 3px 14px, rgba(35,40,47,.08) 0 8px 10px; }
 .win.docked .banner { margin: 0; top: 0; }
 .win.docked .empty { color: var(--fg2-dark); }
@@ -1359,13 +1058,13 @@ var Panel = class {
   viewer;
   $ = (sel) => this.root.querySelector(sel);
   words;
-  constructor(ev, store2, opts = {}) {
-    this.store = store2;
+  constructor(ev, store, opts = {}) {
+    this.store = store;
     this.ev = ev;
     const w = this.words = { ...OVERLEAF_WORDS, ...opts.words };
     const host2 = document.createElement("phitex-preview");
     this.root = host2.attachShadow({ mode: "open" });
-    this.root.innerHTML = `<style>${VIEWER_CSS}${PROBLEMS_CSS}${OUTLINE_CSS}${CSS2}</style>
+    this.root.innerHTML = `<style>${VIEWER_CSS}${PROBLEMS_CSS}${OUTLINE_CSS}${CSS}</style>
 <div class="win" role="dialog" aria-label="PhiTeX preview">
   <header>
     <span class="icon" aria-hidden="true">preview</span>
@@ -1384,7 +1083,7 @@ var Panel = class {
   <div class="bar">
     <label>Main <select id="main" title="The file PhiTeX typesets"></select></label>
     <label>Zoom <select id="zoom"><option value="fit">Fit</option><option value="0.75">75%</option><option value="1">100%</option><option value="1.5">150%</option><option value="2">200%</option></select></label>
-    <label title="Vector: drawn as SVG, updated in place as you type. PDF.js: our PDF drawn by pdf.js, as Overleaf's viewer draws a PDF.">View <select id="fmt"><option value="vector">Vector</option><option value="pdfjs">PDF.js</option></select></label>
+
     <span class="grow"></span>
     <label class="show-docked" title="Check against a fresh build every 5 s"><input type="checkbox" id="dbg2"> Debug check</label>
     <button class="ib show-docked" id="tour" title="Take the tour" aria-label="Take the tour" style="width:auto;padding:0 6px;font-size:12px;color:var(--info)">Take the tour</button>
@@ -1432,7 +1131,6 @@ var Panel = class {
     if (license) license.href = opts.fileUrl?.(w.license) ?? w.license;
     if (!ev.onTour) this.$("#tour").style.display = "none";
     if (!ev.onNews) this.$("#news").style.display = "none";
-    if (opts.pdfjs === false) this.$("#fmt").closest("label").style.display = "none";
     this.$("#byline").onclick = (e) => {
       e.stopPropagation();
       this.$("#about").classList.toggle("open");
@@ -1448,12 +1146,6 @@ var Panel = class {
     };
     this.$("#main").onchange = (e) => ev.onMain(e.target.value);
     this.$("#zoom").onchange = (e) => this.zoomTo(e.target.value);
-    this.$("#fmt").onchange = (e) => {
-      this.prefs.format = e.target.value;
-      this.save();
-      this.viewer.invalidate();
-      ev.onFormat(this.prefs.format);
-    };
     this.$("#min").onclick = () => this.collapse(!this.prefs.collapsed);
     this.$("#chip").onclick = () => this.prefs.collapsed && this.collapse(false);
     this.$("#lat").onclick = () => {
@@ -1493,7 +1185,6 @@ var Panel = class {
         this.nav();
         ev.onPage(k);
       },
-      svg: (img, w2) => "draws" in img ? svg(img.draws, w2) : null,
       scale: () => this.scale(),
       box: (d, w2) => pageBox(d, w2),
       dbl: (k, x, y) => ev.onSyncSource?.(k, x, y),
@@ -1515,12 +1206,10 @@ var Panel = class {
       }
     }).observe(this.win);
     this.place();
-    store2?.load().then((p) => {
+    store?.load().then((p) => {
       this.prefs = { ...DEFAULTS, ...p };
-      this.prefs.format = pageFormat(this.prefs.format);
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
-      if (this.prefs.format !== "vector") ev.onFormat(this.prefs.format);
     });
   }
   /**
@@ -1574,7 +1263,6 @@ var Panel = class {
     s.left = `${Math.max(0, Math.min(x, window.innerWidth - 120))}px`;
     s.top = `${Math.max(0, Math.min(y, window.innerHeight - 40))}px`;
     this.$("#zoom").value = p.zoom;
-    this.$("#fmt").value = p.format;
     this.win.classList.toggle("details-open", p.details);
     this.collapse(p.collapsed, false);
   }
@@ -1972,8 +1660,7 @@ var Panel = class {
    */
   scale() {
     if (this.prefs.zoom !== "fit") return Number(this.prefs.zoom);
-    const d = this.last && "draws" in this.last ? this.last.draws : null;
-    const pageW = (d?.w ?? 612) * (96 / 72);
+    const pageW = (this.last?.w ?? 612) * (96 / 72);
     return Math.max(this.$("#stage").clientWidth - (this.docked ? 40 : 24), 200) / pageW;
   }
   goPage(k) {
@@ -2054,8 +1741,7 @@ var Panel = class {
     );
     const stage = this.$("#stage");
     const pageH = () => {
-      const d = this.last && "draws" in this.last ? this.last.draws : null;
-      return (d?.h ?? 792) * (96 / 72);
+      return (this.last?.h ?? 792) * (96 / 72);
     };
     const panel2 = this;
     bindKeys(window, {
@@ -2103,14 +1789,6 @@ var Panel = class {
     this.redraw();
     this.emit();
   }
-  /** The page format, set from outside (the popup). */
-  formatTo(f) {
-    if (this.prefs.format === f) return;
-    this.prefs.format = f;
-    this.$("#fmt").value = f;
-    this.viewer.invalidate();
-    this.ev.onFormat(f);
-  }
   toggleDebug() {
     this.debugOn = !this.debugOn;
     this.$("#dbg").setAttribute("aria-pressed", String(this.debugOn));
@@ -2151,9 +1829,9 @@ var Panel = class {
       el.innerHTML = "";
       return;
     }
-    const esc6 = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
-    const n = d.busy ? `<span class="n busy">${esc6(d.busy)}</span>` : `<span class="n">${d.changes ? `${d.at > 0 ? `${d.at} / ` : ""}${d.changes} change${d.changes === 1 ? "" : "s"}` : "no changes"}</span>`;
-    el.innerHTML = `<span class="what" title="${esc6(d.title)}">Diff vs ${esc6(d.title)} <small>${esc6(d.when)}</small></span><button data-a="prev" title="Previous change (Shift+N)" ${d.busy || !d.changes ? "disabled" : ""}>\u2039</button>${n}<button data-a="next" title="Next change (N)" ${d.busy || !d.changes ? "disabled" : ""}>\u203A</button><span class="sep"></span><button data-a="toggle" class="${d.showing === "current" ? "cur" : ""}" title="Show the ${d.showing === "diff" ? "current version" : "diff"} (D)">${d.showing === "diff" ? "Current" : "Diff"}</button><button data-a="pdf" title="Download the diff PDF" ${d.busy ? "disabled" : ""}>\u2B07 PDF</button><button data-a="tex" title="Download diff.tex" ${d.busy ? "disabled" : ""}>\u2B07 .tex</button><button data-a="settings" title="Diff style: colors, markup" aria-label="Diff style">\u2699</button><button data-a="close" title="Stop comparing" aria-label="Stop comparing">\u2715</button>`;
+    const esc4 = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+    const n = d.busy ? `<span class="n busy">${esc4(d.busy)}</span>` : `<span class="n">${d.changes ? `${d.at > 0 ? `${d.at} / ` : ""}${d.changes} change${d.changes === 1 ? "" : "s"}` : "no changes"}</span>`;
+    el.innerHTML = `<span class="what" title="${esc4(d.title)}">Diff vs ${esc4(d.title)} <small>${esc4(d.when)}</small></span><button data-a="prev" title="Previous change (Shift+N)" ${d.busy || !d.changes ? "disabled" : ""}>\u2039</button>${n}<button data-a="next" title="Next change (N)" ${d.busy || !d.changes ? "disabled" : ""}>\u203A</button><span class="sep"></span><button data-a="toggle" class="${d.showing === "current" ? "cur" : ""}" title="Show the ${d.showing === "diff" ? "current version" : "diff"} (D)">${d.showing === "diff" ? "Current" : "Diff"}</button><button data-a="pdf" title="Download the diff PDF" ${d.busy ? "disabled" : ""}>\u2B07 PDF</button><button data-a="tex" title="Download diff.tex" ${d.busy ? "disabled" : ""}>\u2B07 .tex</button><button data-a="settings" title="Diff style: colors, markup" aria-label="Diff style">\u2699</button><button data-a="close" title="Stop comparing" aria-label="Stop comparing">\u2715</button>`;
     el.className = "diffbar on";
     el.onclick = (e) => {
       const a = e.target.closest("button[data-a]")?.dataset.a;
@@ -2341,8 +2019,7 @@ var Panel = class {
     this.viewer.mark(k, boxes2, scroll);
   }
   page(img, k, n, hash) {
-    const empty = !img || "draws" in img && !img.draws.t.length && !img.draws.r.length;
-    if (empty) {
+    if (!img) {
       if (!this.last) {
         this.$("#empty").textContent = n ? "This page is empty." : "No page shipped yet.";
         this.$("#empty").style.display = "";
@@ -2681,8 +2358,8 @@ function traceRes(r) {
     ...j.draw_ms !== void 0 ? { drawer: true, draw_ms: Math.round(j.draw_ms), kept: j.kept } : {}
   };
 }
-var defaults = { fuel: 1e5, format: "vector", dpi: 96, checkEveryMs: 5e3 };
-var image = (r) => r.draws ? { draws: r.draws } : r.canvas && r.size ? { canvas: r.canvas, w: r.size[0], h: r.size[1] } : r.png?.length ? { png: r.png, w: r.size?.[0], h: r.size?.[1] } : null;
+var defaults = { fuel: 1e5, dpi: 96, checkEveryMs: 5e3 };
+var image = (r) => r.canvas && r.size ? { canvas: r.canvas, w: r.size[0], h: r.size[1], links: r.links } : null;
 function guessMain(files) {
   const names = Object.keys(files).filter((n) => /\.tex$/i.test(n));
   const score = (n) => {
@@ -2849,17 +2526,9 @@ var PreviewSession = class {
     }
     return f;
   }
-  /** The pages' request: 0 their draw lists (vector), -1 the PDF, drawn in the tab by pdf.js. */
+  /** The pages' request: -1, the PDF (the host draws its pages with MuPDF). */
   dpi() {
-    return this.o.format === "pdfjs" ? -1 : 0;
-  }
-  setFormat(f) {
-    this.o.format = f;
-    if (this.sink.layout) {
-      this.hashes = [];
-      return this.layout();
-    }
-    return this.showPage();
+    return -1;
   }
   now() {
     return (this.o.now ?? (() => performance.now()))();
@@ -3600,7 +3269,6 @@ var PreviewSession = class {
           `fixed point      ${j.total_ms.toFixed(2)} ms (every page, the .aux/.bbl loops)${j.wrong ? " \xB7 first paint was superseded" : ""}`,
           `keystroke\u2192page   ${e2e.toFixed(1)} ms = queued ${(tSend - t0).toFixed(1)} + round trip ${(tBack - tSend).toFixed(1)} + paint ${(this.now() - tBack).toFixed(1)}`,
           `rebuilt          ${j.stats.rebuilt} of ${j.stats.rebuilt + j.stats.reused} chunks, ${j.stats.passes} pass${j.stats.passes === 1 ? "" : "es"}`,
-          r.draws ? `page             vector, ${r.draws.t.length} words` : j.png_bytes ? `page             PNG ${(j.png_bytes / 1024).toFixed(0)} KB (${j.png_compress_ms.toFixed(1)} ms to compress)` : "",
           `batching         ${this.keystrokes} edits \u2192 ${this.builds} builds (one in flight; the rest merged)`
         ].filter(Boolean).join("\n")
       );
@@ -3660,13 +3328,26 @@ var MupdfDoc = class {
             rgba[o + 3] = 255;
           }
         }
-        return { rgba, pw, ph, w: x1 - x0, h: y1 - y0 };
+        return { rgba, pw, ph, w: x1 - x0, h: y1 - y0, links: this.links(page, x0, y0) };
       } finally {
         pix.destroy();
       }
     } finally {
       page.destroy();
     }
+  }
+  /** A page's links, from its top left (`x0`, `y0`: its box's corner). */
+  links(page, x0, y0) {
+    const out = [];
+    for (const l of page.getLinks()) {
+      const [a, b, c, d] = l.getBounds();
+      if (l.isExternal()) out.push([a - x0, b - y0, c - x0, d - y0, l.getURI()]);
+      else {
+        const dest = this.doc.resolveLinkDestination(l);
+        if (dest.page >= 0) out.push([a - x0, b - y0, c - x0, d - y0, dest.page, Number.isFinite(dest.y) ? dest.y : null]);
+      }
+    }
+    return out;
   }
   /** The PDF's outline (its bookmarks) as the panel's entries. */
   outline() {
@@ -3832,7 +3513,7 @@ function ago(t, now = Date.now() / 1e3) {
     }
   return "just now";
 }
-var esc5 = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+var esc3 = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 var ROW = 24;
 var LANE = 12;
 var COLORS = ["#3e63dd", "#e5484d", "#30a46c", "#f5a524", "#8e4ec6", "#12a594", "#d6409f", "#978365"];
@@ -3950,7 +3631,7 @@ var Commits = class {
     this.el.scrollTop = scroll;
   }
   html() {
-    if (this.error) return `<div class="note err">${esc5(this.error)}</div>`;
+    if (this.error) return `<div class="note err">${esc3(this.error)}</div>`;
     if (!this.commits.length) return `<div class="note">${this.loading ? "reading the history\u2026" : "no commits"}</div>`;
     const { rows, width } = layout(this.commits);
     const W = (width + 1) * LANE;
@@ -3962,16 +3643,16 @@ var Commits = class {
     const lines = this.commits.map((c, i) => {
       const r = rows[i];
       const col = COLORS[r.lane % COLORS.length];
-      const svg2 = r.down.map(([a, b]) => `<path d="M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}" stroke="${COLORS[b % COLORS.length]}" fill="none" stroke-width="1.6"/>`);
-      svg2.push(c.parents.length > 1 ? `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4.5" fill="Canvas" stroke="${col}" stroke-width="2"/>` : `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4" fill="${col}"/>`);
-      const pills = c.refs.map((f) => `<span class="pill ${KINDS.has(f.kind) ? f.kind : "branch"}">${esc5(f.name)}</span>`).join("");
+      const svg = r.down.map(([a, b]) => `<path d="M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}" stroke="${COLORS[b % COLORS.length]}" fill="none" stroke-width="1.6"/>`);
+      svg.push(c.parents.length > 1 ? `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4.5" fill="Canvas" stroke="${col}" stroke-width="2"/>` : `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4" fill="${col}"/>`);
+      const pills = c.refs.map((f) => `<span class="pill ${KINDS.has(f.kind) ? f.kind : "branch"}">${esc3(f.name)}</span>`).join("");
       const lo = this.to ? ti : -1;
       const cls = i === fi ? " from" : i === ti ? " to" : fi >= 0 && i > lo && i < fi ? " inrange" : "";
       const end = i === fi ? '<span class="end">FROM</span>' : i === ti ? '<span class="end">TO</span>' : "";
       const title = `${c.subject}
 ${c.author}, ${new Date(c.time * 1e3).toLocaleString()}
 click: From \xB7 shift-click: To \xB7 double-click: against its first parent`;
-      return `<div class="row${cls}" data-i="${i}" title="${esc5(title)}"><svg width="${W}" height="${ROW}">${svg2.join("")}</svg><span class="txt">${end}<span class="sha">${esc5(c.short)}</span>${pills}${c.parents.length > 1 ? "<i>merge:</i> " : ""}${esc5(c.subject)}<span class="who">${esc5(c.author)}, ${ago(c.time)}</span></span></div>`;
+      return `<div class="row${cls}" data-i="${i}" title="${esc3(title)}"><svg width="${W}" height="${ROW}">${svg.join("")}</svg><span class="txt">${end}<span class="sha">${esc3(c.short)}</span>${pills}${c.parents.length > 1 ? "<i>merge:</i> " : ""}${esc3(c.subject)}<span class="who">${esc3(c.author)}, ${ago(c.time)}</span></span></div>`;
     });
     const more = this.more ? `<div class="note"><button type="button" data-more>${this.loading ? "reading\u2026" : "more\u2026"}</button></div>` : "";
     return top + lines.join("") + more;
@@ -4055,7 +3736,7 @@ var Pages = class {
       const d = await this.open().catch(() => null);
       const drawn = d?.draw(o.page ?? 0, 96 / 72 * (window.devicePixelRatio || 1) * 1.25);
       if (!drawn) return { ok: false, json: { error: "no such page" } };
-      return { ok: true, canvas: toCanvas(drawn), size: [drawn.w, drawn.h] };
+      return { ok: true, canvas: toCanvas(drawn), size: [drawn.w, drawn.h], links: drawn.links };
     }
     if (o.op === "outline") {
       const d = await this.open().catch(() => null);
@@ -4088,8 +3769,6 @@ var panel = new Panel(
     },
     onReload: () => void session.resync(),
     onClean: () => void session.resync(),
-    onFormat: () => {
-    },
     onGoto: (file, line) => source(file, line),
     onSyncSource: (k, x, y) => void session.toSource(k, x, y)
   },
@@ -4110,7 +3789,6 @@ var panel = new Panel(
     }
   },
   {
-    pdfjs: false,
     outline: true,
     keys: true,
     header: true,
@@ -4140,7 +3818,6 @@ var host = { loadProject: async () => ({}), onOpen() {
 }, onChanges() {
 } };
 var session = new PreviewSession(host, pages, panel, {
-  format: "vector",
   checkEveryMs: 0,
   remote: { source: (file, start, end) => void sock.request({ op: "source", file, start, end }) }
 });
