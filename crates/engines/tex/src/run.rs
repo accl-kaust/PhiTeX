@@ -194,7 +194,6 @@ impl<'c, 'a> Run<'c, 'a> {
         let x = if self.cx.is_loopback(f) {
             self.get_f(f)?
         } else {
-            ask(key);
             self.cx.use_env(f)?
         };
         Ok(x.filter(|&x| !crate::val::list_of(v, x).is_empty()))
@@ -1235,22 +1234,4 @@ pub(crate) fn slice_args(v: &Values, text: &str, starts_line: bool) -> Vec<Value
         rest = next;
     }
     vec![v.list(frames), v.int(1)]
-}
-
-thread_local! {
-    /// The files asked for by nodes now waiting for them.
-    static ASKED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-// REDUCE-GAP: the engine does not say which environment fields the
-// stalled nodes wait on (`Report::env_stalled` counts them); a node
-// records the file name here before `use_env`, and the client, which
-// evaluates on this thread, takes the names after the evaluation.
-pub(crate) fn ask(name: &str) {
-    ASKED.with(|a| a.borrow_mut().push(name.to_owned()));
-}
-
-/// The names asked for since the last call.
-pub(crate) fn take_asked() -> Vec<String> {
-    ASKED.with(|a| std::mem::take(&mut *a.borrow_mut()))
 }

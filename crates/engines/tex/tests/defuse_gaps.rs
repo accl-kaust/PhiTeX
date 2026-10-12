@@ -602,7 +602,6 @@ impl Operation for ToyFileAcc {
 /// the evaluation ends with both stalled (`Report::env_stalled`), not as
 /// a cycle.
 #[test]
-#[ignore = "engine: an env wait before an acc_range reader ends as Cycle, not env_stalled (reported)"]
 fn an_env_wait_before_an_accumulator_reader_is_not_a_cycle() {
     let mut eng = Engine::new();
     let op = eng.register(Arc::new(ToyFileAcc));
@@ -614,4 +613,34 @@ fn an_env_wait_before_an_accumulator_reader_is_not_a_cycle() {
     eng.add_root(a);
     let rep = eng.evaluate_sequential();
     assert!(rep.is_ok(), "an env wait ended as {:?}", rep.err());
+}
+
+/// An evaluation that ends with many nodes stalled behind one node waiting
+/// for an environment field costs time linear in them: 15 000 readers
+/// behind it evaluate in well under a second (the TeX client's plain
+/// prelude, one environment field per round, took about 30 s a round).
+#[test]
+fn many_readers_stalled_behind_an_env_wait_are_cheap() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(ToyFile));
+    let u = eng.new_unit();
+    let _i = eng.push(u, op, vec![eng.values().str("i")]);
+    let mut last = None;
+    for _ in 0..15_000 {
+        last = Some(eng.push(u, op, vec![eng.values().str("r")]));
+    }
+    eng.add_root(last.unwrap());
+    let t0 = std::time::Instant::now();
+    eng.evaluate_sequential().expect("evaluate");
+    let first = t0.elapsed();
+    let t1 = std::time::Instant::now();
+    let g = eng.values().field("other");
+    let one = eng.values().int(1);
+    eng.set_environment(vec![(g, one)]);
+    eng.evaluate_sequential().expect("evaluate");
+    let second = t1.elapsed();
+    assert!(
+        second.as_secs_f64() < 1.0,
+        "a round with nothing new took {second:?} (the first {first:?})"
+    );
 }
