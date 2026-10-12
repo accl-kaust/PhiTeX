@@ -121,8 +121,30 @@ fn tex_text(s: &str) -> String {
     tex::chars(s.as_bytes())
 }
 
-/// The diagnostics of a build for the viewer.
+/// The diagnostics of a build for the viewer: the engine's, at their
+/// places, else the transcript's.
 fn diagnostics(r: &session::Report, log: &str) -> Vec<Value> {
+    if r.internal.is_none() && !r.diagnostics.is_empty() {
+        return r
+            .diagnostics
+            .iter()
+            .map(|d| {
+                let mut detail = d.context.clone();
+                if let Some(h) = &d.help {
+                    detail.push_str("\n\n");
+                    detail.push_str(h);
+                }
+                json!({
+                    "severity": if d.severity == phitex_tex::Severity::Error { "error" } else { "warning" },
+                    "code": "tex",
+                    "message": d.message,
+                    "file": d.file.trim_start_matches("./"),
+                    "line": d.line,
+                    "detail": detail,
+                })
+            })
+            .collect();
+    }
     let mut v: Vec<Value> = r
         .out
         .errors
@@ -271,6 +293,8 @@ struct Last {
     build: Option<(String, bool)>,
     /// Its errors and its log's text, for `p`.
     problems: Option<(Vec<String>, String)>,
+    /// Its errors and warnings at their places, rendered, for `p` and `w`.
+    placed: (Vec<String>, Vec<String>),
     /// The last output written without errors.
     good: Option<PathBuf>,
     viewers: usize,
@@ -626,10 +650,19 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         // (a save that changed nothing the build reads (vim writes twice)
         // keeps the last change's time to the screen)
         let noop = !failed && builds > 1 && nodes == 0 && changed.is_empty();
-        let warnings: usize = crate::warnings::summarize(&r.log_text())
-            .iter()
-            .map(|w| w.1)
-            .sum();
+        let placed = (
+            crate::problems::rendered(s, &r, false, st.color, ui.verbose > 0),
+            crate::problems::rendered(s, &r, true, st.color, ui.verbose > 0),
+        );
+        let warnings: usize = if r.diagnostics.is_empty() {
+            crate::warnings::summarize(&r.log_text())
+                .iter()
+                .map(|w| w.1)
+                .sum()
+        } else {
+            placed.1.len()
+        };
+        last.borrow_mut().placed = placed;
         let live = r.runs.last().map_or(0, |x| x.live);
         // (aligned columns: what changed, the work, the time; then the
         // speed against the cold build, parallelism when there was some,
@@ -866,6 +899,24 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                                 }
                             }
                             _ => ui.line("phitex watch: no viewer (--no-view) and no output yet"),
+                        }
+                    }
+                    Key::Problems if !last.borrow().placed.0.is_empty() => {
+                        for p in &last.borrow().placed.0 {
+                            ui.line(p);
+                        }
+                    }
+                    Key::Warnings if !last.borrow().placed.1.is_empty() => {
+                        let l = last.borrow();
+                        let max = if ui.verbose > 0 { usize::MAX } else { 20 };
+                        for p in l.placed.1.iter().take(max) {
+                            ui.line(p);
+                        }
+                        if l.placed.1.len() > max {
+                            ui.line(&st.dim(&format!(
+                                "… {} warnings in all (-v shows every one)",
+                                l.placed.1.len()
+                            )));
                         }
                     }
                     Key::Problems => match &last.borrow().problems {

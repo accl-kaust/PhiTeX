@@ -367,10 +367,10 @@ impl Ui {
         lock(&self.tap).tell(json!({"kind": "event", "event": v}));
     }
 
-    /// What the session says it is doing (`phitex: …`, dim), unless `-q`.
+    /// What the session says (`note: …`), unless `-q`.
     pub fn note(&self, s: &str) {
         if !self.quiet {
-            self.print(&self.st.dim(&format!("phitex: {s}")));
+            self.print(&format!("{}: {s}", self.st.yellow("note")));
         }
         self.tell("note", s);
         self.event_only(&json!({"event": "note", "message": s}));

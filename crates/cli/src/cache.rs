@@ -48,6 +48,28 @@ impl Cache {
         })
     }
 
+    /// Why formats would not be kept from run to run (none: they are):
+    /// the directory can't be written, or it is the temporary one (no
+    /// `$HOME`), so the format is built again, unseen, every time.
+    pub fn unkept(&self) -> Option<String> {
+        let formats = self.dir.join("formats");
+        let probe = formats.join(format!(".probe-{}", std::process::id()));
+        let wrote = std::fs::create_dir_all(&formats).and_then(|()| std::fs::write(&probe, b""));
+        let _ = std::fs::remove_file(&probe);
+        if let Err(e) = wrote {
+            return Some(format!(
+                "can't write the cache at {} ({e}): the format is built again every run (PHITEX_CACHE_DIR sets the cache)",
+                self.dir.display()
+            ));
+        }
+        self.dir.starts_with(std::env::temp_dir()).then(|| {
+            format!(
+                "the cache is in {} (no $HOME): it may not last (PHITEX_CACHE_DIR sets it)",
+                self.dir.display()
+            )
+        })
+    }
+
     /// The directory of the document whose main file is `main`.
     pub fn doc_dir(&self, main: &Path) -> PathBuf {
         let p = main.canonicalize().unwrap_or_else(|_| main.to_path_buf());

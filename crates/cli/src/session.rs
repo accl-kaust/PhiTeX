@@ -192,6 +192,8 @@ pub struct Report {
     /// The engine's own account of why it stopped (its state dumped: for
     /// `-v` and a bug report, not the error shown).
     pub internal: Option<String>,
+    /// The errors and warnings at their places, by file then byte.
+    pub diagnostics: Vec<phitex_tex::Diagnostic>,
 }
 
 /// An engine's stop said in a sentence: what gave out, without its dump
@@ -322,11 +324,16 @@ impl Session {
     pub fn new(
         job: Job,
         status: Arc<Status>,
-        _note: &mut dyn FnMut(&str),
+        note: &mut dyn FnMut(&str),
     ) -> Result<Session, String> {
         let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()))?;
         let tree = Arc::new(tex::Tree::open(&job.engine));
         let cache = Cache::open(job.cache_limit).ok();
+        if let Some(c) = &cache
+            && let Some(w) = c.unkept()
+        {
+            note(&w);
+        }
         Ok(Session {
             job,
             text: tex::chars(&text),
@@ -387,6 +394,7 @@ impl Session {
             notes: Vec::new(),
             wall: t0.elapsed(),
             internal,
+            diagnostics: Vec::new(),
         };
         let text = self.text_now();
         let edit_line = self
@@ -489,6 +497,7 @@ impl Session {
                 peak_running: s.peak_running,
             }],
             internal: None,
+            diagnostics: b.diagnostics(),
             unsettled: Vec::new(),
             notes: vec![format!(
                 "{} nodes run of {} live, {} runs, {} cutoffs",
@@ -496,6 +505,16 @@ impl Session {
             )],
             wall,
         }
+    }
+
+    /// File `name`'s bytes as a diagnostic names it: the main text as the
+    /// build read it, another file from the disk (none: not readable).
+    pub fn source(&self, name: &str) -> Option<Vec<u8>> {
+        let n = plain_name(name);
+        if n == plain_name(&self.job.path.to_string_lossy()) {
+            return self.built_text.as_deref().map(tex::bytes);
+        }
+        std::fs::read(&n).ok()
     }
 
     /// The main text with the editor's buffer for it, if there is one.
