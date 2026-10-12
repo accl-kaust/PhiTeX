@@ -1,0 +1,8 @@
+% pdfTeX's random numbers: \pdfsetrandomseed, \pdfrandomseed,
+% \pdfuniformdeviate, \pdfnormaldeviate; run as core.tex.
+\pdfsetrandomseed 12345
+\message{[\the\pdfrandomseed, \pdfuniformdeviate 100, \pdfuniformdeviate 1000, \pdfuniformdeviate -50, \pdfuniformdeviate 0]}
+\message{[\pdfnormaldeviate, \pdfnormaldeviate, \pdfnormaldeviate]}
+\count1=\pdfuniformdeviate 1000000 \message{[\the\count1]}
+\pdfsetrandomseed 1 \message{[\the\pdfrandomseed, \pdfuniformdeviate 65536, \pdfnormaldeviate]}
+\pdfsetrandomseed -7 \message{[\pdfuniformdeviate 10, \pdfuniformdeviate 10, \pdfuniformdeviate 10]}
