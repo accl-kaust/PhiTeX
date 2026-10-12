@@ -325,8 +325,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // instead of opening it)
     let editor = crate::editor::Editor::configured(t.editor.as_deref()).unwrap_or_else(|e| {
         ui.note(&format!(
-            "editor `{e}`: not one the viewer can open (a terminal editor?): a double-click on a page shows the \
-             place; --editor names one it can (code, emacsclient, nvim, …)"
+            "editor `{e}`: the viewer can't open it (--editor code, nvim, emacsclient, …)"
         ));
         None
     });
@@ -388,7 +387,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     }
     drop(tx);
     if raw {
-        ui.line(&st.dim("phitex watch: h lists the keys, q quits"));
+        ui.line(&st.dim("h: keys · q: quit"));
     }
     let quit = |ui: &Ui| -> ! {
         ui.status(None, None);
@@ -400,7 +399,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // (the status line: the last build and the browsers watching)
     let show = |ui: &Ui, l: &Last| {
         let sep = " · ";
-        let mut parts = vec![format!("watching {main_rel}")];
+        let mut parts = vec![main_rel.clone()];
         if let Some((b, _)) = &l.build {
             parts.push(b.clone());
             if let Some(d) = l.screen {
@@ -550,66 +549,68 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         };
         let nodes = r.runs.last().map_or(0, |x| x.commands_run);
         let changed = &r.out.pages_changed;
+        // (a save that changed nothing the build reads (vim writes twice)
+        // keeps the last change's time to the screen)
+        let noop = !failed && builds > 1 && nodes == 0 && changed.is_empty();
+        // (short: what changed, the work, the time; parallelism only when
+        // there was some, the speed only against the cold build)
         let mut facts = Vec::new();
         if failed {
             let n = r.out.errors.len();
             facts.push(st.red(&format!("{n} error{}", if n == 1 { "" } else { "s" })));
-            facts.push(if last.borrow().good.is_some() {
-                "last good output kept".to_owned()
-            } else {
-                "nothing written".to_owned()
-            });
+            if last.borrow().good.is_some() {
+                facts.push("last good PDF kept".to_owned());
+            }
+        } else if noop {
+            facts.push("unchanged".to_owned());
         } else {
-            let live = r.runs.last().map_or(0, |x| x.live);
-            // (an edit: what it ran of what the document has, the rest kept)
-            #[allow(clippy::cast_precision_loss)]
-            facts.push(if builds > 1 && live > 0 {
-                let kept = 100.0 * (1.0 - nodes as f64 / live as f64).max(0.0);
-                format!("{nodes} of {live} nodes run ({kept:.0}% kept)")
-            } else {
-                format!("{nodes} nodes run")
-            });
             let n = r.pages();
-            let s = if n == 1 { "" } else { "s" };
             facts.push(if builds == 1 {
-                format!("{n} page{s}")
+                format!("{n} page{}", if n == 1 { "" } else { "s" })
             } else if changed.is_empty() {
-                format!("no page of {n} changed")
+                "no page changed".to_owned()
             } else {
                 format!(
-                    "{} of {n} page{s} changed ({})",
-                    changed.len(),
+                    "page{} {}",
+                    if changed.len() == 1 { "" } else { "s" },
                     view::ranges(changed)
                 )
             });
+            let live = r.runs.last().map_or(0, |x| x.live);
+            facts.push(if builds > 1 && live > 0 {
+                format!("{nodes}/{live} nodes")
+            } else {
+                format!("{nodes} nodes")
+            });
         }
         facts.push(st.bold(&ms(r.wall)));
-        let par = r.runs.last().and_then(session::RunInfo::parallel);
-        if let Some(p) = &par {
-            facts.push(st.dim(p));
+        if let Some(p) = r
+            .runs
+            .last()
+            .and_then(session::RunInfo::speedup)
+            .filter(|&p| p >= 1.2)
+        {
+            facts.push(st.cyan(&format!("{p:.1}× parallel")));
         }
         let cold = last.borrow().cold;
         match cold {
             None if !failed => last.borrow_mut().cold = Some(r.wall),
-            Some(c) if !failed => {
+            Some(c) if !failed && !noop => {
                 if let Some(x) = faster(c, r.wall) {
-                    facts.push(st.green(&format!("{x} faster than cold")));
+                    facts.push(st.green(&format!("{x} faster")));
                 }
             }
             _ => {}
         }
-        // (a save that changed nothing the build reads (vim writes twice)
-        // keeps the last change's time to the screen)
-        let noop = !failed && builds > 1 && nodes == 0 && changed.is_empty();
         let mark = if failed {
             st.red(st.sym("✗", "failed:"))
         } else {
             st.green(st.sym("✓", "ok:"))
         };
         ui.line(&format!(
-            "{mark} build {builds}  {}  {}",
+            "{mark} {builds}  {}  {}",
             st.cyan(&place),
-            facts.join(st.sym(" · ", ", "))
+            facts.join(st.dim(st.sym(" · ", ", ")).as_str())
         ));
         ui.event(&json!({
             "event": "build",
@@ -648,10 +649,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             .iter()
             .map(|w| w.1)
             .sum();
-        let mut brief = vec![format!(
-            "build {builds} {}",
-            if failed { "failed" } else { "ok" }
-        )];
+        let mut brief = vec![format!("build {builds}")];
         if failed {
             let n = r.out.errors.len();
             brief.push(format!("{n} error{}", if n == 1 { "" } else { "s" }));
@@ -660,9 +658,6 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             brief.push(format!("{n} page{}", if n == 1 { "" } else { "s" }));
         }
         brief.push(ms(r.wall));
-        if let Some(p) = &par {
-            brief.push(p.clone());
-        }
         if warnings > 0 {
             brief.push(format!(
                 "{warnings} warning{}",
@@ -671,11 +666,6 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         }
         {
             let mut l = last.borrow_mut();
-            if let (Some(c), false) = (l.cold.filter(|_| builds > 1), failed)
-                && let Some(x) = faster(c, r.wall)
-            {
-                brief.push(format!("{x} faster than cold"));
-            }
             if !noop {
                 l.screen = None;
             }
