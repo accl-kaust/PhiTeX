@@ -1,5 +1,603 @@
 // phitex's live viewer: viewer/src and crates/cli/viewer/cli.ts; made by scripts/viewer-bundle.sh (AGPL-3.0-only)
-var k={pdflatex:{label:"pdfLaTeX",ready:!0},xelatex:{label:"XeLaTeX",ready:!0},lualatex:{label:"LuaLaTeX",ready:!1}};function be(o){return/LuaTeX is required|requires LuaTeX/i.test(o)?"lualatex":/requires either XeTeX or|XeTeX or LuaTeX|(fontspec|unicode-math|polyglossia)\b.*(XeTeX|LuaTeX)/i.test(o)?"xelatex":null}var V="http://www.w3.org/2000/svg",ve={roman:"PhxLMRoman, PhxLMMath, serif",bold:"PhxLMBold, PhxLMMath, serif",italic:"PhxLMItalic, PhxLMMath, serif",bolditalic:"PhxLMBoldItalic, PhxLMMath, serif",mono:"PhxLMMono, monospace",math:"PhxLMMath, PhxLMRoman, serif"},Qe=[["PhxLMRoman","lmroman10-regular.otf"],["PhxLMBold","lmroman10-bold.otf"],["PhxLMItalic","lmroman10-italic.otf"],["PhxLMBoldItalic","lmroman10-bolditalic.otf"],["PhxLMMono","lmmono10-regular.otf"],["PhxLMMath","latinmodern-math.otf"]],et,we="fonts/",ye=o=>{we=o},tt=()=>et??=Promise.all(Qe.map(async([o,e])=>{let t=await fetch(we+e),i=new FontFace(o,await t.arrayBuffer());document.fonts.add(await i.load())})).then(()=>{}),L=o=>o.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");function it(o){let e=2166136261;for(let t=0;t<o.length;t++)e=Math.imul(e^o.charCodeAt(t),16777619);return(e>>>0).toString(16)}function ke(o){let e=new Map,t=(i,s=0)=>{let n=e.get(i);if(n)return n;let r=o.C?.[i];if(!r||s>64)return;let[l,c,d]=r,a=d?t(d,s+1):void 0,h=`k${it(`${l}|${c}|${a?.id??""}`)}`,p=`<clipPath id="${h}" clipPathUnits="userSpaceOnUse"${a?` clip-path="url(#${a.id})"`:""}><path d="${L(l)}"${c?' clip-rule="evenodd"':""}/></clipPath>`,g={id:h,markup:p};return e.set(i,g),g};for(let i of Object.keys(o.C??{}))t(i);return e}function st(o){let e=o.C?ke(o):void 0,t=(a,h)=>{let p=h!=null?e?.get(h):void 0;return p?`<g clip-path="url(#${p.id})">${a}</g>`:a},i=a=>{let[h,p,g,u,f]=a;return t(`<path d="${h}" fill="${p??"none"}" stroke="${g??"none"}" stroke-width="${u}"/>`,f)},s=a=>{let[h,p,g,u,f,m,b,v]=a;return typeof h=="string"?t(`<use href="#i${L(h)}" transform="matrix(${p} ${g} ${u} ${f} ${m} ${b})"/>`,v):""},n=(a,h)=>`g${o.F?.[a]??a}_${h}`,r=a=>{if(a[0]===-1){let[,y,E,T,,D,fe,X,ue,me]=a;if(ue)return t(`<g transform="matrix(${ue.join(" ")} ${T} ${E})"${X?` fill="${L(X)}"`:""}><use href="#${n(D,fe[0])}"/></g>`,me);let re=y/1e3,Je=T.split(" ");return t(`<g transform="translate(0 ${E}) scale(${re} ${-re})"${X?` fill="${L(X)}"`:""}>${fe.map((Ze,Ye)=>`<use href="#${n(D,Ze)}" x="${(+Je[Ye]/re).toFixed(1)}"/>`).join("")}</g>`,me)}let[h,p,g,u,f,m,b,v]=a;return t(`<text x="${u}" y="${g}" font-size="${p}" font-family="${L(ve[o.f[h]]??ve.roman)}"${m?' fill-opacity="0"':b?` style="fill:${L(b)}"`:""}>${L(f)}</text>`,v)},l=[],c=[o.p??[],o.r??[],o.t??[]],d=(a,h)=>{let p=c[a][h];if(p===void 0)return;let g=a===0?i(p):a===1?s(p):r(p);g&&l.push(g)};if(o.o)for(let[a,h,p]of o.o)for(let g=h;g<h+p;g++)d(a,g);else for(let a of[0,1,2])for(let h=0;h<c[a].length;h++)d(a,h);return l}function nt(o,e){if(!e.g&&!e.I&&!e.C)return;let t=o.getRootNode(),i=t.getElementById?.("phx-glyphs")??null;if(!i){let r=document.createElementNS(V,"svg");r.setAttribute("style","position:absolute;width:0;height:0;overflow:hidden"),r.setAttribute("aria-hidden","true"),r.innerHTML='<defs id="phx-glyphs"></defs>',(t instanceof Document?t.body:t).appendChild(r),i=r.firstElementChild}let s=i.__ids??=new Set,n="";for(let[r,l]of Object.entries(e.I??{}))s.has("i"+r)||(s.add("i"+r),n+=`<image id="i${L(r)}" width="1" height="1" preserveAspectRatio="none" href="${L(l)}"/>`);for(let{id:r,markup:l}of e.C?ke(e).values():[])s.has(r)||(s.add(r),n+=l);for(let[r,l]of Object.entries(e.g??{})){let[c,d]=r.split(":"),a=`g${e.F?.[+c]??c}_${d}`;s.has(a)||(s.add(a),n+=`<path id="${a}" d="${l}"/>`)}n&&i.insertAdjacentHTML("beforeend",n)}function $e(o,e,t,i){tt();let s=o.querySelector(":scope > svg.page");(!s||s.dataset.v!=="2")&&(o.innerHTML=`<svg class="page" xmlns="${V}" data-v="2" preserveAspectRatio="none" xml:space="preserve"><rect class="paper"/><g class="c"></g></svg>`,s=o.firstElementChild),s.setAttribute("viewBox",`0 0 ${e.w} ${e.h}`),s.setAttribute("width",String(t)),s.setAttribute("height",String(i));let n=s.querySelector("rect.paper");n.setAttribute("width",String(e.w)),n.setAttribute("height",String(e.h)),nt(o,e);let r=s.querySelector("g.c"),l=st(e),c=new Map;for(let f of Array.from(r.children)){let m=f.__k??"",b=c.get(m);b?b.push(f):c.set(m,[f])}let d=[],a=l.map(f=>c.get(f)?.pop()??(d.push(f),d.length-1));if(!d.length&&a.length===r.children.length&&a.every((f,m)=>f===r.children[m]))return void(o.querySelector(":scope > img.ras")||xe(o,s));let h=[];if(d.length){let f=document.createElementNS(V,"g");f.innerHTML=d.join(""),h.push(...Array.from(f.children)),h.forEach((m,b)=>m.__k=d[b])}let p=a.map(f=>typeof f=="number"?h[f]:f),g=new Set(p);for(let f of Array.from(r.children))g.has(f)||f.remove();let u=r.firstChild;for(let f of p)u===f?u=u.nextSibling:r.insertBefore(f,u);Ee(o,s),xe(o,s)}var ot=250;function Ee(o,e){e.classList.remove("ras");let t=o.querySelector(":scope > img.ras");t&&(URL.revokeObjectURL(t.src),t.remove())}function xe(o,e){clearTimeout(o.__ras);let t=o.__gen=(o.__gen??0)+1;o.__ras=setTimeout(()=>{rt(o,e,t)},ot)}async function rt(o,e,t){if(!e.isConnected||o.__gen!==t)return;let s=o.getRootNode().getElementById?.("phx-glyphs"),n=e.querySelector("g.c");if(!n)return;let r=[],l=new Set,c=m=>{for(let b of m.matchAll(/(?:href="#|url\(#)([^")]+)/g))l.add(b[1])};for(let m of Array.from(n.children)){if(m.tagName==="text")continue;let b=m.outerHTML;r.push(b),c(b)}if(!r.length)return;let d=[],a=new Set;for(let m=[...l];m.length;){let b=m.pop();if(a.has(b))continue;a.add(b);let v=s?.querySelector(`#${CSS.escape(b)}`);if(!v)continue;let y=v.outerHTML;d.push(y);for(let E of y.matchAll(/url\(#([^)]+)\)/g))m.push(E[1])}let h=e.getAttribute("viewBox")??"",[,,p,g]=h.split(" "),u=`<svg xmlns="${V}" viewBox="${h}" width="${p}" height="${g}" preserveAspectRatio="none"><defs>${d.join("")}</defs>${r.join("")}</svg>`,f=new Image;f.className="ras",f.alt="",f.src=URL.createObjectURL(new Blob([u],{type:"image/svg+xml"}));try{await f.decode()}catch{URL.revokeObjectURL(f.src);return}if(!e.isConnected||o.__gen!==t)return void URL.revokeObjectURL(f.src);Ee(o,e),o.insertBefore(f,e),e.classList.add("ras")}var at={w:612,h:792},W=class{slots=[];size=at;visible=new Set;current=0;io;asked=new Set;root;scroller;host;constructor(e,t,i){this.root=e,this.scroller=t,this.host=i,this.io=new IntersectionObserver(c=>this.seen(c),{root:t,rootMargin:"100% 0px",threshold:[0,.25,.5,.75,1]});let s=0;t.addEventListener("scroll",()=>{s||(s=requestAnimationFrame(()=>{s=0,this.measure()}))},{passive:!0});let n="",r=()=>setTimeout(()=>{let d=e.getRootNode().getSelection?.()??document.getSelection();if(!d||d.isCollapsed||!d.rangeCount)return;let a=new Map;for(let g=0;g<d.rangeCount;g++)for(let u of d.getRangeAt(g).getClientRects())for(let f of this.slots){let m=f.el.getBoundingClientRect();if(u.bottom<m.top||u.top>m.bottom||u.right<m.left||u.left>m.right)continue;let b=Number(f.el.dataset.k),v=this.size.w/m.width,y=this.size.h/m.height,E=a.get(b)??[];E.push([(u.left-m.left)*v,(u.top-m.top)*y,u.width*v,u.height*y]),a.set(b,E)}if(!a.size)return;let h=[...a].map(([g,u])=>({k:g,rects:u})),p=JSON.stringify(h);p!==n&&(n=p,i.selected?.(h))},0);e.addEventListener("pointerup",r);let l=0;e.addEventListener("pointerdown",()=>n=""),e.addEventListener("pointermove",c=>{!(c.buttons&1)||l||(l=requestAnimationFrame(()=>{l=0,r()}))}),e.addEventListener("keyup",c=>c.shiftKey&&r()),e.addEventListener("dblclick",c=>{let d=c.target.closest(".slot");if(!d)return;let a=d.getBoundingClientRect(),h=Number(d.dataset.k);i.dbl?.(h,(c.clientX-a.left)/a.width*this.size.w,(c.clientY-a.top)/a.height*this.size.h)}),e.addEventListener("click",c=>{let d=this.linkAt(c);if(!d)return;c.preventDefault();let a=d[4];if(typeof a=="string"){if(!/^(https?:|mailto:)/i.test(a))return;i.link?i.link(a):window.open(a,"_blank","noopener");return}this.goToPlace(a,d[5]??null)}),e.addEventListener("mousemove",c=>{let d=c.target.closest(".slot");d&&(d.style.cursor=this.linkAt(c)?"pointer":"")})}linkAt(e){let t=e.target.closest(".slot");if(!t)return null;let i=this.slots[Number(t.dataset.k)]?.img;if(!i||!("draws"in i))return null;let s=i.draws;if(!s.L?.length)return null;let n=t.getBoundingClientRect(),r=(e.clientX-n.left)/n.width*s.w,l=(e.clientY-n.top)/n.height*s.h;return s.L.find(c=>r>=c[0]&&r<=c[2]&&l>=c[1]&&l<=c[3])??null}goToPlace(e,t){let i=this.slots[e];if(!i)return;let s=t==null?0:t/this.size.h*i.el.offsetHeight;this.scroller.scrollTo({top:i.el.offsetTop+s-12,behavior:"auto"})}marks(e){for(let l of this.root.querySelectorAll(".sel"))l.remove();let{w:t,h:i}=this.size,s,n=!1,r=this.scroller.getBoundingClientRect();for(let{k:l,boxes:c}of e){let d=this.slots[l];if(d){d.drawn!==d.hash&&!this.asked.has(`${l}:${d.hash}`)&&(this.asked.add(`${l}:${d.hash}`),this.host.need(l));for(let[a,h,p,g]of c){let u=document.createElement("div");u.className="mark sel",Object.assign(u.style,{left:`${a/t*100}%`,top:`${h/i*100}%`,width:`${p/t*100}%`,height:`${g/i*100}%`}),d.el.append(u),s??=u;let f=u.getBoundingClientRect();f.bottom>r.top&&f.top<r.bottom&&(n=!0)}}}s&&!n&&this.scroller.scrollTo({top:s.offsetTop+s.parentElement.offsetTop-this.scroller.clientHeight/3,behavior:"auto"})}mark(e,t,i=!0){let s=this.slots[e];if(!s||!t.length)return;for(let a of this.root.querySelectorAll(".mark:not(.sel)"))a.parentElement!==s.el&&a.remove();s.drawn!==s.hash&&!this.asked.has(`${e}:${s.hash}`)&&(this.asked.add(`${e}:${s.hash}`),this.host.need(e));let{w:n,h:r}=this.size,l=[...s.el.querySelectorAll(".mark:not(.sel)")];t.forEach(([a,h,p,g],u)=>{let f=l[u];f||(f=document.createElement("div"),f.className="mark",s.el.append(f)),f.classList.remove("fade"),Object.assign(f.style,{left:`${a/n*100}%`,top:`${h/r*100}%`,width:`${p/n*100}%`,height:`${g/r*100}%`})});for(let a of l.slice(t.length))a.remove();let c=s.el.offsetTop+t[0][1]/r*s.el.offsetHeight,d=this.scroller;i&&(c<d.scrollTop+20||c>d.scrollTop+d.clientHeight-40)&&d.scrollTo({top:c-d.clientHeight/2,behavior:"smooth"}),clearTimeout(this.fadeTimer),this.fadeTimer=setTimeout(()=>this.root.querySelectorAll(".mark:not(.sel)").forEach(a=>a.classList.add("fade")),1800)}fadeTimer;get pages(){return this.slots.length}get page(){return this.current}layout(e){for(;this.slots.length>e.length;){let t=this.slots.pop();this.io.unobserve(t.el),t.el.remove()}for(let t=0;t<e.length;t++)this.slotAt(t).hash=e[t];this.asked.clear(),this.wantVisible()}shipped(e,t){this.slotAt(e).hash=t,this.wantVisible()}slotAt(e){for(;this.slots.length<=e;){let t=this.slots.length,i=document.createElement("div");i.className="slot",i.dataset.k=String(t),i.setAttribute("aria-label",`Page ${t+1}`),this.root.append(i);let s={el:i,hash:"",drawn:null,img:null};this.slots.push(s),this.sizeSlot(s),this.io.observe(i)}return this.slots[e]}set(e,t,i){let s=this.slots[e];s&&(i&&this.asked.delete(`${e}:${i}`),"draws"in t?this.size={w:t.draws.w,h:t.draws.h}:"w"in t&&t.w&&t.h&&(this.size={w:t.w,h:t.h}),s.img=t,s.drawn=i??s.hash,this.toPaint.add(s),this.paintFrame||(this.paintFrame=requestAnimationFrame(()=>this.paintSome())))}toPaint=new Set;paintFrame=0;paintSome(){this.paintFrame=0;let e=performance.now(),t=[...this.toPaint].sort((i,s)=>Number(this.visible.has(Number(s.el.dataset.k)))-Number(this.visible.has(Number(i.el.dataset.k))));for(let i of t){if(performance.now()-e>8)break;this.toPaint.delete(i),this.paint(i)}this.toPaint.size&&(this.paintFrame=requestAnimationFrame(()=>this.paintSome()))}invalidate(){for(let e of this.slots)e.drawn=null;this.asked.clear(),this.wantVisible()}redraw(){let e=this.slots[this.current],t=this.scroller.getBoundingClientRect(),i=e?.el.getBoundingClientRect(),s=i?.height?(t.top-i.top)/i.height:0;for(let n of this.slots)this.sizeSlot(n),n.img&&!("draws"in n.img&&n.img.draws.v===2)&&this.paint(n);if(e){let n=e.el.getBoundingClientRect();this.scroller.scrollTop+=n.top+s*n.height-t.top}}goTo(e){let t=this.slots[Math.max(0,Math.min(e,this.slots.length-1))];if(!t)return;let i=t.el.getBoundingClientRect().top-this.scroller.getBoundingClientRect().top+this.scroller.scrollTop;this.scroller.scrollTo({top:i-12,behavior:"auto"})}sizeSlot(e){let[t,i]=this.host.box(this.size,this.size.w*1.3333333333333333*this.host.scale());e.el.style.width=`${t}px`,e.el.style.height=`${i}px`}paint(e){if(!e.img)return;let t=[...e.el.querySelectorAll(".mark")];this.draw(e);for(let i of t)i.isConnected||e.el.append(i)}draw(e){if(!e.img)return;let t=this.size.w*(96/72)*this.host.scale();if(this.sizeSlot(e),"draws"in e.img&&e.img.draws.v===2){let[r,l]=this.host.box(this.size,t);$e(e.el,e.img.draws,r,l);return}let i=this.host.svg(e.img,t);if(i!==null){e.el.innerHTML=i;return}if("canvas"in e.img){e.img.canvas.style.width="100%",e.img.canvas.style.height="100%",e.el.firstChild!==e.img.canvas&&e.el.replaceChildren(e.img.canvas);let r=e.img.canvas.querySelector(".textLayer");r&&(r.style.transform=`scale(${e.el.getBoundingClientRect().width/e.img.w||parseFloat(e.el.style.width)/e.img.w})`);return}if(!("png"in e.img))return;let s=URL.createObjectURL(new Blob([e.img.png],{type:"image/png"})),n=document.createElement("img");n.alt=`page ${Number(e.el.dataset.k)+1}`,n.onload=()=>URL.revokeObjectURL(s),n.src=s,e.el.replaceChildren(n)}turn(e){let t=this.scroller.getBoundingClientRect(),i=l=>this.slots[l].el.getBoundingClientRect().top-t.top+this.scroller.scrollTop,s=this.scroller.scrollTop+12,n=0,r=this.slots.length-1;if(!(r<0)){for(;n<r;){let l=n+r+1>>1;i(l)<=s+1?n=l:r=l-1}this.goTo(e<0&&i(n)<s-1?n+e+1:n+e)}}seen(e){for(let t of e){let i=Number(t.target.dataset.k);t.isIntersecting?this.visible.add(i):this.visible.delete(i)}this.measure(),this.wantVisible()}measure(){let e=this.scroller.getBoundingClientRect(),t=this.current,i=0;for(let s of this.visible){let n=this.slots[s]?.el.getBoundingClientRect();if(!n)continue;let r=Math.min(n.bottom,e.bottom)-Math.max(n.top,e.top);r>i&&(i=r,t=s)}t!==this.current&&(this.current=t,this.host.inView(t))}wantVisible(){for(let e of this.visible){let t=this.slots[e];if(!t||t.drawn===t.hash)continue;let i=`${e}:${t.hash}`;this.asked.has(i)||(this.asked.add(i),this.host.need(e))}}};var Se=`
+
+// viewer/src/engines.ts
+var ENGINES = {
+  pdflatex: { label: "pdfLaTeX", ready: true },
+  xelatex: { label: "XeLaTeX", ready: true },
+  lualatex: { label: "LuaLaTeX", ready: false }
+};
+function errorNeeds(message) {
+  if (/LuaTeX is required|requires LuaTeX/i.test(message)) return "lualatex";
+  if (/requires either XeTeX or|XeTeX or LuaTeX|(fontspec|unicode-math|polyglossia)\b.*(XeTeX|LuaTeX)/i.test(message)) return "xelatex";
+  return null;
+}
+
+// viewer/src/page2.ts
+var NS = "http://www.w3.org/2000/svg";
+var FAMILY = {
+  roman: "PhxLMRoman, PhxLMMath, serif",
+  bold: "PhxLMBold, PhxLMMath, serif",
+  italic: "PhxLMItalic, PhxLMMath, serif",
+  bolditalic: "PhxLMBoldItalic, PhxLMMath, serif",
+  mono: "PhxLMMono, monospace",
+  math: "PhxLMMath, PhxLMRoman, serif"
+};
+var FILES = [
+  ["PhxLMRoman", "lmroman10-regular.otf"],
+  ["PhxLMBold", "lmroman10-bold.otf"],
+  ["PhxLMItalic", "lmroman10-italic.otf"],
+  ["PhxLMBoldItalic", "lmroman10-bolditalic.otf"],
+  ["PhxLMMono", "lmmono10-regular.otf"],
+  ["PhxLMMath", "latinmodern-math.otf"]
+];
+var fonts;
+var fontBase = "fonts/";
+var loadFonts = () => fonts ??= Promise.all(
+  FILES.map(async ([family, file]) => {
+    const r = await fetch(fontBase + file);
+    const f = new FontFace(family, await r.arrayBuffer());
+    document.fonts.add(await f.load());
+  })
+).then(() => void 0);
+var esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+function fnv(s) {
+  let x = 2166136261;
+  for (let i = 0; i < s.length; i++) x = Math.imul(x ^ s.charCodeAt(i), 16777619);
+  return (x >>> 0).toString(16);
+}
+function clips(d) {
+  const out = /* @__PURE__ */ new Map();
+  const resolve = (cid, depth = 0) => {
+    const have = out.get(cid);
+    if (have) return have;
+    const c = d.C?.[cid];
+    if (!c || depth > 64) return void 0;
+    const [path, evenOdd, parent] = c;
+    const up = parent ? resolve(parent, depth + 1) : void 0;
+    const id = `k${fnv(`${path}|${evenOdd}|${up?.id ?? ""}`)}`;
+    const markup = `<clipPath id="${id}" clipPathUnits="userSpaceOnUse"${up ? ` clip-path="url(#${up.id})"` : ""}><path d="${esc(path)}"${evenOdd ? ' clip-rule="evenodd"' : ""}/></clipPath>`;
+    const r = { id, markup };
+    out.set(cid, r);
+    return r;
+  };
+  for (const cid of Object.keys(d.C ?? {})) resolve(cid);
+  return out;
+}
+function elements(d) {
+  const cl = d.C ? clips(d) : void 0;
+  const clip = (m, c) => {
+    const k = c != null ? cl?.get(c) : void 0;
+    return k ? `<g clip-path="url(#${k.id})">${m}</g>` : m;
+  };
+  const path = (e) => {
+    const [d_, fill, stroke, w, c] = e;
+    return clip(`<path d="${d_}" fill="${fill ?? "none"}" stroke="${stroke ?? "none"}" stroke-width="${w}"/>`, c);
+  };
+  const image2 = (e) => {
+    const [id, a, b, c_, d_, e_, f, c] = e;
+    return typeof id === "string" ? clip(`<use href="#i${esc(id)}" transform="matrix(${a} ${b} ${c_} ${d_} ${e_} ${f})"/>`, c) : "";
+  };
+  const gid = (fr, c) => `g${d.F?.[fr] ?? fr}_${c}`;
+  const text = (r) => {
+    if (r[0] === -1) {
+      const [, size2, y2, xs2, , fr, codes, colour2, m, c2] = r;
+      if (m) return clip(`<g transform="matrix(${m.join(" ")} ${xs2} ${y2})"${colour2 ? ` fill="${esc(colour2)}"` : ""}><use href="#${gid(fr, codes[0])}"/></g>`, c2);
+      const k = size2 / 1e3;
+      const x = xs2.split(" ");
+      return clip(`<g transform="translate(0 ${y2}) scale(${k} ${-k})"${colour2 ? ` fill="${esc(colour2)}"` : ""}>${codes.map((g, i) => `<use href="#${gid(fr, g)}" x="${(+x[i] / k).toFixed(1)}"/>`).join("")}</g>`, c2);
+    }
+    const [f, size, y, xs, txt, outlined, colour, c] = r;
+    return clip(`<text x="${xs}" y="${y}" font-size="${size}" font-family="${esc(FAMILY[d.f[f]] ?? FAMILY.roman)}"${outlined ? ' fill-opacity="0"' : colour ? ` style="fill:${esc(colour)}"` : ""}>${esc(txt)}</text>`, c);
+  };
+  const out = [];
+  const lists = [d.p ?? [], d.r ?? [], d.t ?? []];
+  const one = (l, i) => {
+    const e = lists[l][i];
+    if (e === void 0) return;
+    const m = l === 0 ? path(e) : l === 1 ? image2(e) : text(e);
+    if (m) out.push(m);
+  };
+  if (d.o) for (const [l, first, n] of d.o) for (let i = first; i < first + n; i++) one(l, i);
+  else for (const l of [0, 1, 2]) for (let i = 0; i < lists[l].length; i++) one(l, i);
+  return out;
+}
+function store(el, d) {
+  if (!d.g && !d.I && !d.C) return;
+  const root = el.getRootNode();
+  let defs = root.getElementById?.("phx-glyphs") ?? null;
+  if (!defs) {
+    const svg2 = document.createElementNS(NS, "svg");
+    svg2.setAttribute("style", "position:absolute;width:0;height:0;overflow:hidden");
+    svg2.setAttribute("aria-hidden", "true");
+    svg2.innerHTML = `<defs id="phx-glyphs"></defs>`;
+    (root instanceof Document ? root.body : root).appendChild(svg2);
+    defs = svg2.firstElementChild;
+  }
+  const have = defs.__ids ??= /* @__PURE__ */ new Set();
+  let fresh = "";
+  for (const [id, url] of Object.entries(d.I ?? {})) {
+    if (have.has("i" + id)) continue;
+    have.add("i" + id);
+    fresh += `<image id="i${esc(id)}" width="1" height="1" preserveAspectRatio="none" href="${esc(url)}"/>`;
+  }
+  for (const { id, markup } of d.C ? clips(d).values() : []) {
+    if (have.has(id)) continue;
+    have.add(id);
+    fresh += markup;
+  }
+  for (const [k, p] of Object.entries(d.g ?? {})) {
+    const [fr, c] = k.split(":");
+    const id = `g${d.F?.[+fr] ?? fr}_${c}`;
+    if (have.has(id)) continue;
+    have.add(id);
+    fresh += `<path id="${id}" d="${p}"/>`;
+  }
+  if (fresh) defs.insertAdjacentHTML("beforeend", fresh);
+}
+function patch(el, d, w, h) {
+  void loadFonts();
+  let svg2 = el.querySelector(":scope > svg.page");
+  if (!svg2 || svg2.dataset.v !== "2") {
+    el.innerHTML = `<svg class="page" xmlns="${NS}" data-v="2" preserveAspectRatio="none" xml:space="preserve"><rect class="paper"/><g class="c"></g></svg>`;
+    svg2 = el.firstElementChild;
+  }
+  svg2.setAttribute("viewBox", `0 0 ${d.w} ${d.h}`);
+  svg2.setAttribute("width", String(w));
+  svg2.setAttribute("height", String(h));
+  const paper = svg2.querySelector("rect.paper");
+  paper.setAttribute("width", String(d.w));
+  paper.setAttribute("height", String(d.h));
+  store(el, d);
+  const g = svg2.querySelector("g.c");
+  const keys = elements(d);
+  const old = /* @__PURE__ */ new Map();
+  for (const c of Array.from(g.children)) {
+    const k = c.__k ?? "";
+    const l = old.get(k);
+    if (l) l.push(c);
+    else old.set(k, [c]);
+  }
+  const fresh = [];
+  const slots = keys.map((k) => old.get(k)?.pop() ?? (fresh.push(k), fresh.length - 1));
+  if (!fresh.length && slots.length === g.children.length && slots.every((s, i) => s === g.children[i])) return void (el.querySelector(":scope > img.ras") || raster(el, svg2));
+  const made = [];
+  if (fresh.length) {
+    const tmp = document.createElementNS(NS, "g");
+    tmp.innerHTML = fresh.join("");
+    made.push(...Array.from(tmp.children));
+    made.forEach((m, i) => m.__k = fresh[i]);
+  }
+  const want = slots.map((s) => typeof s === "number" ? made[s] : s);
+  const keep = new Set(want);
+  for (const c of Array.from(g.children)) if (!keep.has(c)) c.remove();
+  let at = g.firstChild;
+  for (const n of want) {
+    if (at === n) at = at.nextSibling;
+    else g.insertBefore(n, at);
+  }
+  live(el, svg2);
+  raster(el, svg2);
+}
+var RASTER_MS = 250;
+function live(el, svg2) {
+  svg2.classList.remove("ras");
+  const img = el.querySelector(":scope > img.ras");
+  if (img) URL.revokeObjectURL(img.src), img.remove();
+}
+function raster(el, svg2) {
+  clearTimeout(el.__ras);
+  const gen = el.__gen = (el.__gen ?? 0) + 1;
+  el.__ras = setTimeout(() => void picture(el, svg2, gen), RASTER_MS);
+}
+async function picture(el, svg2, gen) {
+  if (!svg2.isConnected || el.__gen !== gen) return;
+  const root = el.getRootNode();
+  const defs = root.getElementById?.("phx-glyphs");
+  const g = svg2.querySelector("g.c");
+  if (!g) return;
+  const parts = [];
+  const refs = /* @__PURE__ */ new Set();
+  const ref = (m) => {
+    for (const r of m.matchAll(/(?:href="#|url\(#)([^")]+)/g)) refs.add(r[1]);
+  };
+  for (const c of Array.from(g.children)) {
+    if (c.tagName === "text") continue;
+    const m = c.outerHTML;
+    parts.push(m);
+    ref(m);
+  }
+  if (!parts.length) return;
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (let todo = [...refs]; todo.length; ) {
+    const id = todo.pop();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const e = defs?.querySelector(`#${CSS.escape(id)}`);
+    if (!e) continue;
+    const m = e.outerHTML;
+    out.push(m);
+    for (const r of m.matchAll(/url\(#([^)]+)\)/g)) todo.push(r[1]);
+  }
+  const vb = svg2.getAttribute("viewBox") ?? "";
+  const [, , vw, vh] = vb.split(" ");
+  const src = `<svg xmlns="${NS}" viewBox="${vb}" width="${vw}" height="${vh}" preserveAspectRatio="none"><defs>${out.join("")}</defs>${parts.join("")}</svg>`;
+  const img = new Image();
+  img.className = "ras";
+  img.alt = "";
+  img.src = URL.createObjectURL(new Blob([src], { type: "image/svg+xml" }));
+  try {
+    await img.decode();
+  } catch {
+    URL.revokeObjectURL(img.src);
+    return;
+  }
+  if (!svg2.isConnected || el.__gen !== gen) return void URL.revokeObjectURL(img.src);
+  live(el, svg2);
+  el.insertBefore(img, svg2);
+  svg2.classList.add("ras");
+}
+
+// viewer/src/viewer.ts
+var LETTER = { w: 612, h: 792 };
+var Viewer = class {
+  slots = [];
+  size = LETTER;
+  visible = /* @__PURE__ */ new Set();
+  current = 0;
+  io;
+  asked = /* @__PURE__ */ new Set();
+  root;
+  scroller;
+  host;
+  constructor(root, scroller, host2) {
+    this.root = root;
+    this.scroller = scroller;
+    this.host = host2;
+    this.io = new IntersectionObserver((es) => this.seen(es), { root: scroller, rootMargin: "100% 0px", threshold: [0, 0.25, 0.5, 0.75, 1] });
+    let frame = 0;
+    scroller.addEventListener("scroll", () => {
+      if (!frame)
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          this.measure();
+        });
+    }, { passive: true });
+    let told = "";
+    const pick2 = () => setTimeout(() => {
+      const rn = root.getRootNode();
+      const sel = rn.getSelection?.() ?? document.getSelection();
+      if (!sel || sel.isCollapsed || !sel.rangeCount) return;
+      const out = /* @__PURE__ */ new Map();
+      for (let i = 0; i < sel.rangeCount; i++) {
+        for (const r of sel.getRangeAt(i).getClientRects()) {
+          for (const s of this.slots) {
+            const b = s.el.getBoundingClientRect();
+            if (r.bottom < b.top || r.top > b.bottom || r.right < b.left || r.left > b.right) continue;
+            const k = Number(s.el.dataset.k), sx = this.size.w / b.width, sy = this.size.h / b.height;
+            const list = out.get(k) ?? [];
+            list.push([(r.left - b.left) * sx, (r.top - b.top) * sy, r.width * sx, r.height * sy]);
+            out.set(k, list);
+          }
+        }
+      }
+      if (!out.size) return;
+      const sel2 = [...out].map(([k, rects]) => ({ k, rects }));
+      const key = JSON.stringify(sel2);
+      if (key === told) return;
+      told = key;
+      host2.selected?.(sel2);
+    }, 0);
+    root.addEventListener("pointerup", pick2);
+    let dragFrame = 0;
+    root.addEventListener("pointerdown", () => told = "");
+    root.addEventListener("pointermove", (e) => {
+      if (!(e.buttons & 1) || dragFrame) return;
+      dragFrame = requestAnimationFrame(() => {
+        dragFrame = 0;
+        pick2();
+      });
+    });
+    root.addEventListener("keyup", (e) => e.shiftKey && pick2());
+    root.addEventListener("dblclick", (e) => {
+      const el = e.target.closest(".slot");
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const k = Number(el.dataset.k);
+      host2.dbl?.(k, (e.clientX - r.left) / r.width * this.size.w, (e.clientY - r.top) / r.height * this.size.h);
+    });
+    root.addEventListener("click", (e) => {
+      const hit = this.linkAt(e);
+      if (!hit) return;
+      e.preventDefault();
+      const to = hit[4];
+      if (typeof to === "string") {
+        if (!/^(https?:|mailto:)/i.test(to)) return;
+        if (host2.link) host2.link(to);
+        else window.open(to, "_blank", "noopener");
+        return;
+      }
+      this.goToPlace(to, hit[5] ?? null);
+    });
+    root.addEventListener("mousemove", (e) => {
+      const el = e.target.closest(".slot");
+      if (el) el.style.cursor = this.linkAt(e) ? "pointer" : "";
+    });
+  }
+  /** The link under a pointer event (its page's draw list's `L`), if any. */
+  linkAt(e) {
+    const el = e.target.closest(".slot");
+    if (!el) return null;
+    const img = this.slots[Number(el.dataset.k)]?.img;
+    if (!img || !("draws" in img)) return null;
+    const d = img.draws;
+    if (!d.L?.length) return null;
+    const r = el.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width * d.w;
+    const y = (e.clientY - r.top) / r.height * d.h;
+    return d.L.find((l) => x >= l[0] && x <= l[2] && y >= l[1] && y <= l[3]) ?? null;
+  }
+  /** Scroll to page `k`, `top` points from its top (null: its top). */
+  goToPlace(k, top) {
+    const s = this.slots[k];
+    if (!s) return;
+    const at = top == null ? 0 : top / this.size.h * s.el.offsetHeight;
+    this.scroller.scrollTo({ top: s.el.offsetTop + at - 12, behavior: "auto" });
+  }
+  /**
+   * The editor's selection on the pages: `marks` highlighted until the next
+   * call ([] clears), scrolled to only if none of them is on screen.
+   */
+  marks(marks) {
+    for (const m of this.root.querySelectorAll(".sel")) m.remove();
+    const { w, h } = this.size;
+    let first, seen = false;
+    const v = this.scroller.getBoundingClientRect();
+    for (const { k, boxes: boxes2 } of marks) {
+      const s = this.slots[k];
+      if (!s) continue;
+      if (s.drawn !== s.hash && !this.asked.has(`${k}:${s.hash}`)) {
+        this.asked.add(`${k}:${s.hash}`);
+        this.host.need(k);
+      }
+      for (const [x, y, bw, bh] of boxes2) {
+        const m = document.createElement("div");
+        m.className = "mark sel";
+        Object.assign(m.style, { left: `${x / w * 100}%`, top: `${y / h * 100}%`, width: `${bw / w * 100}%`, height: `${bh / h * 100}%` });
+        s.el.append(m);
+        first ??= m;
+        const r = m.getBoundingClientRect();
+        if (r.bottom > v.top && r.top < v.bottom) seen = true;
+      }
+    }
+    if (first && !seen) this.scroller.scrollTo({ top: first.offsetTop + first.parentElement.offsetTop - this.scroller.clientHeight / 3, behavior: "auto" });
+  }
+  /** Highlight `boxes` ([x, y top, w, h], PDF points) on page `k`, scrolled into view, for a moment. */
+  mark(k, boxes2, scroll = true) {
+    const s = this.slots[k];
+    if (!s || !boxes2.length) return;
+    for (const m of this.root.querySelectorAll(".mark:not(.sel)")) if (m.parentElement !== s.el) m.remove();
+    if (s.drawn !== s.hash && !this.asked.has(`${k}:${s.hash}`)) {
+      this.asked.add(`${k}:${s.hash}`);
+      this.host.need(k);
+    }
+    const { w, h } = this.size;
+    const have = [...s.el.querySelectorAll(".mark:not(.sel)")];
+    boxes2.forEach(([x, y, bw, bh], i) => {
+      let m = have[i];
+      if (!m) {
+        m = document.createElement("div");
+        m.className = "mark";
+        s.el.append(m);
+      }
+      m.classList.remove("fade");
+      Object.assign(m.style, { left: `${x / w * 100}%`, top: `${y / h * 100}%`, width: `${bw / w * 100}%`, height: `${bh / h * 100}%` });
+    });
+    for (const m of have.slice(boxes2.length)) m.remove();
+    const top = s.el.offsetTop + boxes2[0][1] / h * s.el.offsetHeight;
+    const v = this.scroller;
+    if (scroll && (top < v.scrollTop + 20 || top > v.scrollTop + v.clientHeight - 40)) v.scrollTo({ top: top - v.clientHeight / 2, behavior: "smooth" });
+    clearTimeout(this.fadeTimer);
+    this.fadeTimer = setTimeout(() => this.root.querySelectorAll(".mark:not(.sel)").forEach((m) => m.classList.add("fade")), 1800);
+  }
+  fadeTimer;
+  get pages() {
+    return this.slots.length;
+  }
+  get page() {
+    return this.current;
+  }
+  /** The pages there are now, by hash: slots added or removed, changed ones drawn again when seen. */
+  layout(hashes) {
+    while (this.slots.length > hashes.length) {
+      const s = this.slots.pop();
+      this.io.unobserve(s.el);
+      s.el.remove();
+    }
+    for (let k = 0; k < hashes.length; k++) this.slotAt(k).hash = hashes[k];
+    this.asked.clear();
+    this.wantVisible();
+  }
+  /**
+   * Page `k` is now at `hash`, the others as they are: a page shipped while
+   * the build runs, before its layout (slots added up to it, none removed),
+   * drawn when seen.
+   */
+  shipped(k, hash) {
+    this.slotAt(k).hash = hash;
+    this.wantVisible();
+  }
+  /** Page `k`'s slot, made (with those before it) if there is none yet. */
+  slotAt(k) {
+    while (this.slots.length <= k) {
+      const n = this.slots.length;
+      const el = document.createElement("div");
+      el.className = "slot";
+      el.dataset.k = String(n);
+      el.setAttribute("aria-label", `Page ${n + 1}`);
+      this.root.append(el);
+      const s = { el, hash: "", drawn: null, img: null };
+      this.slots.push(s);
+      this.sizeSlot(s);
+      this.io.observe(el);
+    }
+    return this.slots[k];
+  }
+  /** Page `k` drawn: `img` at `hash` (the painted page of an edit, or one the viewer asked for). */
+  set(k, img, hash) {
+    const s = this.slots[k];
+    if (!s) return;
+    if (hash) this.asked.delete(`${k}:${hash}`);
+    if ("draws" in img) this.size = { w: img.draws.w, h: img.draws.h };
+    else if ("w" in img && img.w && img.h) this.size = { w: img.w, h: img.h };
+    s.img = img;
+    s.drawn = hash ?? s.hash;
+    this.toPaint.add(s);
+    if (!this.paintFrame) this.paintFrame = requestAnimationFrame(() => this.paintSome());
+  }
+  toPaint = /* @__PURE__ */ new Set();
+  paintFrame = 0;
+  paintSome() {
+    this.paintFrame = 0;
+    const t0 = performance.now();
+    const order = [...this.toPaint].sort((a, b) => Number(this.visible.has(Number(b.el.dataset.k))) - Number(this.visible.has(Number(a.el.dataset.k))));
+    for (const s of order) {
+      if (performance.now() - t0 > 8) break;
+      this.toPaint.delete(s);
+      this.paint(s);
+    }
+    if (this.toPaint.size) this.paintFrame = requestAnimationFrame(() => this.paintSome());
+  }
+  /** The format changed: every page is to be drawn again (as it comes into view). */
+  invalidate() {
+    for (const s of this.slots) s.drawn = null;
+    this.asked.clear();
+    this.wantVisible();
+  }
+  /**
+   * The zoom changed: each page at its new size, the view kept on the same
+   * place of the page in view. A page drawn from a draw list scales as it
+   * is (its drawing and its picture fill the slot), so only pages of other
+   * kinds are drawn again: a zoom touches no page's drawing.
+   */
+  redraw() {
+    const at = this.slots[this.current];
+    const v = this.scroller.getBoundingClientRect();
+    const before = at?.el.getBoundingClientRect();
+    const frac = before?.height ? (v.top - before.top) / before.height : 0;
+    for (const s of this.slots) {
+      this.sizeSlot(s);
+      if (s.img && !("draws" in s.img && s.img.draws.v === 2)) this.paint(s);
+    }
+    if (at) {
+      const b = at.el.getBoundingClientRect();
+      this.scroller.scrollTop += b.top + frac * b.height - v.top;
+    }
+  }
+  /** Scroll page `k` into view, as Overleaf's page buttons do. */
+  goTo(k) {
+    const s = this.slots[Math.max(0, Math.min(k, this.slots.length - 1))];
+    if (!s) return;
+    const top = s.el.getBoundingClientRect().top - this.scroller.getBoundingClientRect().top + this.scroller.scrollTop;
+    this.scroller.scrollTo({ top: top - 12, behavior: "auto" });
+  }
+  sizeSlot(s) {
+    const [w, h] = this.host.box(this.size, this.size.w * (96 / 72) * this.host.scale());
+    s.el.style.width = `${w}px`;
+    s.el.style.height = `${h}px`;
+  }
+  paint(s) {
+    if (!s.img) return;
+    const marks = [...s.el.querySelectorAll(".mark")];
+    this.draw(s);
+    for (const m of marks) if (!m.isConnected) s.el.append(m);
+  }
+  draw(s) {
+    if (!s.img) return;
+    const w = this.size.w * (96 / 72) * this.host.scale();
+    this.sizeSlot(s);
+    if ("draws" in s.img && s.img.draws.v === 2) {
+      const [bw, bh] = this.host.box(this.size, w);
+      patch(s.el, s.img.draws, bw, bh);
+      return;
+    }
+    const markup = this.host.svg(s.img, w);
+    if (markup !== null) {
+      s.el.innerHTML = markup;
+      return;
+    }
+    if ("canvas" in s.img) {
+      s.img.canvas.style.width = "100%";
+      s.img.canvas.style.height = "100%";
+      if (s.el.firstChild !== s.img.canvas) s.el.replaceChildren(s.img.canvas);
+      const tl = s.img.canvas.querySelector(".textLayer");
+      if (tl) tl.style.transform = `scale(${s.el.getBoundingClientRect().width / s.img.w || parseFloat(s.el.style.width) / s.img.w})`;
+      return;
+    }
+    if (!("png" in s.img)) return;
+    const url = URL.createObjectURL(new Blob([s.img.png], { type: "image/png" }));
+    const im = document.createElement("img");
+    im.alt = `page ${Number(s.el.dataset.k) + 1}`;
+    im.onload = () => URL.revokeObjectURL(url);
+    im.src = url;
+    s.el.replaceChildren(im);
+  }
+  /** Turn `n` pages (back if negative) from the page at the view's top, as a PDF viewer's Page Down / Page Up: back from inside a page goes to its own top first. */
+  turn(n) {
+    const v = this.scroller.getBoundingClientRect();
+    const top = (k) => this.slots[k].el.getBoundingClientRect().top - v.top + this.scroller.scrollTop;
+    const at = this.scroller.scrollTop + 12;
+    let lo = 0, hi = this.slots.length - 1;
+    if (hi < 0) return;
+    while (lo < hi) {
+      const mid = lo + hi + 1 >> 1;
+      if (top(mid) <= at + 1) lo = mid;
+      else hi = mid - 1;
+    }
+    this.goTo(n < 0 && top(lo) < at - 1 ? lo + n + 1 : lo + n);
+  }
+  seen(es) {
+    for (const e of es) {
+      const k = Number(e.target.dataset.k);
+      if (e.isIntersecting) this.visible.add(k);
+      else this.visible.delete(k);
+    }
+    this.measure();
+    this.wantVisible();
+  }
+  /** The page most on screen, measured now (the observer only reports crossings of its thresholds, in a root grown by its margin). */
+  measure() {
+    const v = this.scroller.getBoundingClientRect();
+    let best = this.current, most = 0;
+    for (const k of this.visible) {
+      const b = this.slots[k]?.el.getBoundingClientRect();
+      if (!b) continue;
+      const on = Math.min(b.bottom, v.bottom) - Math.max(b.top, v.top);
+      if (on > most) {
+        most = on;
+        best = k;
+      }
+    }
+    if (best !== this.current) {
+      this.current = best;
+      this.host.inView(best);
+    }
+  }
+  /** Ask for each visible page not drawn at its hash (once per hash). */
+  wantVisible() {
+    for (const k of this.visible) {
+      const s = this.slots[k];
+      if (!s || s.drawn === s.hash) continue;
+      const key = `${k}:${s.hash}`;
+      if (this.asked.has(key)) continue;
+      this.asked.add(key);
+      this.host.need(k);
+    }
+  }
+};
+
+// viewer/src/css.ts
+var VIEWER_CSS = `
 .slot { position: relative; contain: layout paint; }
 /* (a page as a picture while it is unchanged, its live text over it; see page2.ts raster) */
 .slot > img.ras { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; user-select: none; }
@@ -9,7 +607,38 @@ var k={pdflatex:{label:"pdfLaTeX",ready:!0},xelatex:{label:"XeLaTeX",ready:!0},l
 .slot > svg.page.ras { background: transparent; }
 .slot svg.page, .slot img { display: block; width: 100%; height: 100%; margin: 0; }
 .slot svg.page text { white-space: pre; }
-`;var x=o=>o.replace(/[&<>"]/g,e=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[e]);function Te(o,e,t,i){return`<a href="#" class="phx-place" data-file="${x(o)}" data-line="${Number(e)||1}" data-col="${Number(t)||1}">${x(i??`${o}${e?`:${e}`:""}${t?`:${t}`:""}`)}</a>`}function Le(o){return lt(o)}function Pe(o){return{severity:o.severity==="fatal"||o.severity==="error"?"error":o.severity==="warning"?"warning":"info",code:o.code,message:o.message,file:o.file??void 0,line:o.line??void 0,problem:o}}function lt(o){let e=o.severity==="fatal"?"error":o.severity==="warning"||o.severity==="note"?o.severity:"error",t=o.file?Te(o.file,o.line,o.col):"",i="";if(o.excerpt){let c=[...o.excerpt.text],d=c.slice(0,o.excerpt.start).join(""),a=c.slice(o.excerpt.start,o.excerpt.start+o.excerpt.len).join(""),h=c.slice(o.excerpt.start+o.excerpt.len).join("");i=`<pre class="phx-excerpt">${o.line?`<span class="phx-ln">${Number(o.line)} \u2502 </span>`:""}${x(d)}<mark>${x(a)}</mark>${x(h)}</pre>`}let s=o.context.length?`<details class="phx-ctx"><summary>in ${o.context.map(c=>`<code>${x(c.name)}</code>`).join(" \u2190 ")}</summary>${o.context.map(c=>`<pre><b>${x(c.name)}</b> ${x(c.before)}<mark>\u2038</mark>${x(c.after)}</pre>`).join("")}</details>`:"",n=o.included.length?`<div class="phx-inc">included from ${o.included.map(c=>Te(c.file,c.line,1)).join(", ")}</div>`:"",r=o.box?`<pre class="phx-excerpt">${x(o.box.excerpt)}</pre>`:"",l=(c,d)=>d.length?`<ul class="${c}">${d.map(a=>`<li>${x(a)}</li>`).join("")}</ul>`:"";return`<li class="phx-${e}"><div class="phx-msg"><span class="phx-sev">${x(String(o.severity))}</span>${o.code?`<code class="phx-code">${x(o.code)}</code>`:""}<span>${x(o.message)}</span></div>${t?`<div class="phx-where">${t}</div>`:""}${i}${r}${l("phx-notes",o.notes)}${s}${n}${l("phx-help",[...o.help,...o.suggestions])}</li>`}var Me=`
+`;
+
+// viewer/src/problems.ts
+var esc2 = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+function place(file, line, col, text) {
+  return `<a href="#" class="phx-place" data-file="${esc2(file)}" data-line="${Number(line) || 1}" data-col="${Number(col) || 1}">${esc2(text ?? `${file}${line ? `:${line}` : ""}${col ? `:${col}` : ""}`)}</a>`;
+}
+function problemHtml(p) {
+  return item(p);
+}
+function asDiagnostic(p) {
+  const severity = p.severity === "fatal" || p.severity === "error" ? "error" : p.severity === "warning" ? "warning" : "info";
+  return { severity, code: p.code, message: p.message, file: p.file ?? void 0, line: p.line ?? void 0, problem: p };
+}
+function item(p) {
+  const sev = p.severity === "fatal" ? "error" : p.severity === "warning" || p.severity === "note" ? p.severity : "error";
+  const where = p.file ? place(p.file, p.line, p.col) : "";
+  let ex = "";
+  if (p.excerpt) {
+    const chars = [...p.excerpt.text];
+    const a = chars.slice(0, p.excerpt.start).join("");
+    const b = chars.slice(p.excerpt.start, p.excerpt.start + p.excerpt.len).join("");
+    const c = chars.slice(p.excerpt.start + p.excerpt.len).join("");
+    ex = `<pre class="phx-excerpt">${p.line ? `<span class="phx-ln">${Number(p.line)} \u2502 </span>` : ""}${esc2(a)}<mark>${esc2(b)}</mark>${esc2(c)}</pre>`;
+  }
+  const ctx = p.context.length ? `<details class="phx-ctx"><summary>in ${p.context.map((m) => `<code>${esc2(m.name)}</code>`).join(" \u2190 ")}</summary>${p.context.map((m) => `<pre><b>${esc2(m.name)}</b> ${esc2(m.before)}<mark>\u2038</mark>${esc2(m.after)}</pre>`).join("")}</details>` : "";
+  const inc = p.included.length ? `<div class="phx-inc">included from ${p.included.map((i) => place(i.file, i.line, 1)).join(", ")}</div>` : "";
+  const box = p.box ? `<pre class="phx-excerpt">${esc2(p.box.excerpt)}</pre>` : "";
+  const list = (cls, xs) => xs.length ? `<ul class="${cls}">${xs.map((x) => `<li>${esc2(x)}</li>`).join("")}</ul>` : "";
+  return `<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${esc2(String(p.severity))}</span>${p.code ? `<code class="phx-code">${esc2(p.code)}</code>` : ""}<span>${esc2(p.message)}</span></div>${where ? `<div class="phx-where">${where}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...p.help, ...p.suggestions])}</li>`;
+}
+var PROBLEMS_CSS = `
 .phx-problems { position: fixed; inset: 0; z-index: 10; background: rgba(0, 0, 0, 0.45); overflow: auto; padding: 48px 16px; }
 .phx-card { max-width: 960px; margin: 0 auto; background: #1b1c1f; color: #e6e6e6; border-radius: 10px; border-top: 6px solid #e5484d;
   box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5); font: 13px/1.5 system-ui, sans-serif; }
@@ -38,7 +667,84 @@ var k={pdflatex:{label:"pdfLaTeX",ready:!0},xelatex:{label:"XeLaTeX",ready:!0},l
 .phx-ctx code { color: #e6e6e6; }
 .phx-inc { margin-top: 6px; color: #9a9a9a; font-size: 12px; }
 .phx-card footer { padding: 10px 18px; color: #8a8a8a; font-size: 12px; }
-`;var ae=o=>o.replace(/[&<>"]/g,e=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[e]),G=class{el;flat=[];marked=null;folded=new Set;place;constructor(e,t){this.place=t,this.el=document.createElement("nav"),this.el.className="phx-outline",this.el.setAttribute("aria-label","Contents"),e.append(this.el),this.el.addEventListener("click",i=>{let s=i.target,n=s.closest("li");if(!n)return;if(i.preventDefault(),s.closest(".phx-fold")){let c=n.dataset.path;n.classList.toggle("folded")?this.folded.add(c):this.folded.delete(c);return}let r=Number(n.dataset.i),l=this.flat[r]?.e;l&&l.p!=null&&this.place.goToPlace(l.p,l.y)})}get element(){return this.el}set(e){if(this.flat=[],this.marked=null,!e.length){this.el.innerHTML='<p class="phx-none">No contents: the PDF has no outline (hyperref makes one from the sections).</p>';return}let t=(i,s,n)=>`<ul>${i.map(r=>{let l=this.flat.length;this.flat.push({e:r,row:null});let c=`${s}/${r.t}`,d=r.k.length?t(r.k,c,n+1):"",a=[r.k.length?"parent":"",this.folded.has(c)?"folded":""].filter(Boolean).join(" ");return`<li data-i="${l}" data-path="${ae(c)}" class="${a}"><div class="phx-row" style="--d:${n}">${r.k.length?'<span class="phx-fold" aria-hidden="true"></span>':'<span class="phx-dot"></span>'}<a href="#" class="phx-t" title="${ae(r.t)}">${ae(r.t)}</a>${r.p!=null?`<span class="phx-p">${Number(r.p)+1}</span>`:""}</div>${d}</li>`}).join("")}</ul>`;this.el.innerHTML=t(e,"",0);for(let i of this.el.querySelectorAll("li")){let s=this.flat[Number(i.dataset.i)];s&&(s.row=i.querySelector(":scope > .phx-row"))}}at(e){let t=null;for(let{e:i,row:s}of this.flat)if(i.p!=null){if(i.p>e)break;t=s}if(t!==this.marked&&(this.marked?.classList.remove("here"),t?.classList.add("here"),this.marked=t,t&&t.offsetParent)){let i=t.getBoundingClientRect(),s=this.el.getBoundingClientRect();(i.top<s.top||i.bottom>s.bottom)&&t.scrollIntoView({block:"nearest"})}}},Ce=`
+`;
+
+// viewer/src/outline.ts
+var esc3 = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+var Outline = class {
+  el;
+  /** The items in document order, flat, with their rows. */
+  flat = [];
+  marked = null;
+  /** Folded parts, by their titles' path: kept when a build changes the outline. */
+  folded = /* @__PURE__ */ new Set();
+  place;
+  constructor(root, place2) {
+    this.place = place2;
+    this.el = document.createElement("nav");
+    this.el.className = "phx-outline";
+    this.el.setAttribute("aria-label", "Contents");
+    root.append(this.el);
+    this.el.addEventListener("click", (ev) => {
+      const t = ev.target;
+      const li = t.closest("li");
+      if (!li) return;
+      ev.preventDefault();
+      if (t.closest(".phx-fold")) {
+        const key = li.dataset.path;
+        if (li.classList.toggle("folded")) this.folded.add(key);
+        else this.folded.delete(key);
+        return;
+      }
+      const i = Number(li.dataset.i);
+      const e = this.flat[i]?.e;
+      if (e && e.p != null) this.place.goToPlace(e.p, e.y);
+    });
+  }
+  get element() {
+    return this.el;
+  }
+  /** A build's outline. */
+  set(items) {
+    this.flat = [];
+    this.marked = null;
+    if (!items.length) {
+      this.el.innerHTML = `<p class="phx-none">No contents: the PDF has no outline (hyperref makes one from the sections).</p>`;
+      return;
+    }
+    const list = (es, path, depth) => `<ul>${es.map((e) => {
+      const i = this.flat.length;
+      this.flat.push({ e, row: null });
+      const p = `${path}/${e.t}`;
+      const kids = e.k.length ? list(e.k, p, depth + 1) : "";
+      const cls = [e.k.length ? "parent" : "", this.folded.has(p) ? "folded" : ""].filter(Boolean).join(" ");
+      return `<li data-i="${i}" data-path="${esc3(p)}" class="${cls}"><div class="phx-row" style="--d:${depth}">${e.k.length ? `<span class="phx-fold" aria-hidden="true"></span>` : `<span class="phx-dot"></span>`}<a href="#" class="phx-t" title="${esc3(e.t)}">${esc3(e.t)}</a>${e.p != null ? `<span class="phx-p">${Number(e.p) + 1}</span>` : ""}</div>${kids}</li>`;
+    }).join("")}</ul>`;
+    this.el.innerHTML = list(items, "", 0);
+    for (const li of this.el.querySelectorAll("li")) {
+      const f = this.flat[Number(li.dataset.i)];
+      if (f) f.row = li.querySelector(":scope > .phx-row");
+    }
+  }
+  /** The page in view: the last item that starts on it or before is the one being read. */
+  at(page) {
+    let best = null;
+    for (const { e, row } of this.flat) {
+      if (e.p == null) continue;
+      if (e.p > page) break;
+      best = row;
+    }
+    if (best === this.marked) return;
+    this.marked?.classList.remove("here");
+    best?.classList.add("here");
+    this.marked = best;
+    if (best && best.offsetParent) {
+      const r = best.getBoundingClientRect(), v = this.el.getBoundingClientRect();
+      if (r.top < v.top || r.bottom > v.bottom) best.scrollIntoView({ block: "nearest" });
+    }
+  }
+};
+var OUTLINE_CSS = `
 .phx-outline { overflow: auto; font: 13px/1.35 system-ui, sans-serif; color: var(--ink, #333); padding: 8px 0 24px; }
 .phx-outline ul { list-style: none; margin: 0; padding: 0; }
 .phx-outline li.folded > ul { display: none; }
@@ -54,14 +760,307 @@ li.parent > .phx-row > .phx-t { font-weight: 500; }
 li.folded > .phx-row .phx-fold::before { content: "\u25B8"; }
 .phx-dot { cursor: default; }
 .phx-none { color: var(--dim, #777); padding: 8px 16px; margin: 0; }
-`;var Re=[["j k  \u2193 \u2191","scroll down, up"],["h l","scroll left, right"],["Ctrl+d  Ctrl+u","half a screen down, up"],["Ctrl+f  Ctrl+b","a screen down, up"],["Space  Shift+Space","next, previous page"],["\u2192 \u2190  PgDn PgUp","next, previous page"],["gg  Home","first page"],["G  End","last page"],["12G  12gg","page 12"],["K J  + \u2212","zoom in, out"],["0  w","fit the page's width"],["f","fit the whole page"],["?","these keys"],["Esc","close; forget a count"]];function De(o,e){let t="",i=!1,s=!1,n=()=>Math.max(1,Number(t)||1),r=d=>e.turn(d),l=(d,a)=>e.scroller.scrollBy({left:d,top:a,behavior:"auto"}),c=d=>{let a=d,h=a.target;if(h&&(h.isContentEditable||/^(INPUT|TEXTAREA|SELECT)$/.test(h.tagName))||a.altKey||a.metaKey)return;let p=a.key;if(a.ctrlKey){let m=e.scroller.clientHeight,b=n(),v={d:()=>l(0,b*m/2),u:()=>l(0,-b*m/2),f:()=>l(0,b*m),b:()=>l(0,-b*m)};if(!v[p])return;a.preventDefault(),v[p](),t="";return}if(/^[0-9]$/.test(p)&&(t||p!=="0")){t+=p,a.preventDefault();return}let g=n(),u=m=>e.goTo(t?Math.min(e.pages,Number(t))-1:m?e.pages-1:0),f=!0;if(i)i=!1,p==="g"?u(!1):f=!1;else switch(p){case"j":case"ArrowDown":l(0,g*60);break;case"k":case"ArrowUp":l(0,-g*60);break;case"h":l(-g*60,0);break;case"l":l(g*60,0);break;case" ":r(a.shiftKey?-g:g);break;case"ArrowRight":case"PageDown":r(g);break;case"ArrowLeft":case"PageUp":r(-g);break;case"Home":e.goTo(0);break;case"End":e.goTo(e.pages-1);break;case"g":i=!0,a.preventDefault();return;case"G":u(!0);break;case"K":case"+":case"=":e.zoom(1.1**g);break;case"J":case"-":e.zoom(1.1**-g);break;case"0":case"w":e.fitWidth();break;case"f":e.fitPage();break;case"?":s=!s,e.help?.(s);break;case"Escape":s&&(s=!1,e.help?.(!1));break;default:f=!1}t="",f&&a.preventDefault()};return o.addEventListener("keydown",c),()=>o.removeEventListener("keydown",c)}var le="flinner@nand.sh";function dt(o){let e=[];o.forEach((n,r)=>{let l=n.match(/\.[A-Za-z0-9]+$/)?.[0]??"",c=`file${r+1}${l}`;e.push([n,c]);let d=n.replace(/^.*\//,"");d!==n&&e.push([d,c]);let a=d.replace(/\.[A-Za-z0-9]+$/,"");a.length>=4&&a!==d&&e.push([a,c.replace(/\.[A-Za-z0-9]+$/,"")])}),e.sort((n,r)=>r[0].length-n[0].length);let t=n=>n.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),i=e.length?new RegExp(e.map(([n])=>`(?<![A-Za-z0-9_])${t(n)}(?![A-Za-z0-9_])`).join("|"),"g"):null,s=new Map(e);return n=>(i?n.replace(i,r=>s.get(r)??r):n).replace(/`[^'\n]{1,80}'/g,"`\u2026'").replace(/\/home\/[^/\s]+\//g,"~/").replace(/\/Users\/[^/\s]+\//g,"~/")}var ct=new Set(["text","files","binaries","expect","detail","glyphs","g"]);function K(o,e,t=0){if(typeof o=="string")return e(o.length>400?o.slice(0,400)+"\u2026":o);if(typeof o!="object"||o===null||t>4)return o;if(Array.isArray(o))return o.slice(0,40).map(s=>K(s,e,t+1));let i={};for(let[s,n]of Object.entries(o))ct.has(s)?i[s]=typeof n=="string"?`(${n.length} chars, not included)`:"(not included)":i[s]=K(n,e,t+1);return i}function ze(o){let e=dt(o.paths),t=s=>`${String(s.t).padStart(8)} ms  ${s.k.padEnd(16)} ${s.d===void 0?"":JSON.stringify(K(s.d,e))}`,i=new Map;for(let s of o.paths){let n=s.match(/\.[A-Za-z0-9]+$/)?.[0]??"(none)";i.set(n,(i.get(n)??0)+1)}return["PhiTeX Instant debug report (anonymized: no document text, no file names, no project id)",`extension ${o.version} \xB7 engine ${o.engine}`,`browser ${o.userAgent}`,`project: ${o.paths.length} files (${[...i].map(([s,n])=>`${n} ${s}`).join(", ")})`,"","errors:",...o.errors.length?o.errors.map(s=>"  "+e(s)):["  (none)"],"","status:","  "+JSON.stringify(K(o.status??{},e)),"","diagnostics:",...o.diagnostics.length?o.diagnostics.slice(0,40).map(s=>`  ${s.severity} ${s.code??""}: ${e(s.message)}${s.file?` (${e(s.file)}${s.line?`:${s.line}`:""})`:""}`):["  (none)"],"","packages (TeX Live):",`  fetched: ${(o.packages?.done??[]).join(", ")||"(none)"}`,`  failed: ${(o.packages?.failed??[]).map(s=>`${s.name}${s.error?` (${e(s.error)})`:""}`).join(", ")||"(none)"}`,`  not in TeX Live: ${(o.packages?.unavailable??[]).length}`,"","trace (last 300 events):",...o.trace.slice(-300).map(t)].join(`
-`)}var ht=1e3,pt={badge:"Unofficial \xB7 experimental",badgeTitle:"An unofficial extension, not part of Overleaf. PhiTeX runs LaTeX (pdfTeX) in your browser; Overleaf's PDF is the real one.",byline:"Unofficial PhiTeX extension \xB7 experimental",about:`<b>\u26A1 Instant is not part of Overleaf.</b> It is added by the <b>unofficial PhiTeX</b> browser extension, not made,
+`;
+
+// viewer/src/keys.ts
+var KEYS = [
+  ["j k  \u2193 \u2191", "scroll down, up"],
+  ["h l", "scroll left, right"],
+  ["Ctrl+d  Ctrl+u", "half a screen down, up"],
+  ["Ctrl+f  Ctrl+b", "a screen down, up"],
+  ["Space  Shift+Space", "next, previous page"],
+  ["\u2192 \u2190  PgDn PgUp", "next, previous page"],
+  ["gg  Home", "first page"],
+  ["G  End", "last page"],
+  ["12G  12gg", "page 12"],
+  ["K J  + \u2212", "zoom in, out"],
+  ["0  w", "fit the page's width"],
+  ["f", "fit the whole page"],
+  ["?", "these keys"],
+  ["Esc", "close; forget a count"]
+];
+var LINE = 60;
+function bindKeys(on, t) {
+  let count = "";
+  let g = false;
+  let helping = false;
+  const times = () => Math.max(1, Number(count) || 1);
+  const page = (delta) => t.turn(delta);
+  const by = (dx, dy) => t.scroller.scrollBy({ left: dx, top: dy, behavior: "auto" });
+  const handler = (ev) => {
+    const e = ev;
+    const el = e.target;
+    if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return;
+    if (e.altKey || e.metaKey) return;
+    const k = e.key;
+    if (e.ctrlKey) {
+      const h = t.scroller.clientHeight;
+      const n2 = times();
+      const act = {
+        d: () => by(0, n2 * h / 2),
+        u: () => by(0, -n2 * h / 2),
+        f: () => by(0, n2 * h),
+        b: () => by(0, -n2 * h)
+      };
+      if (!act[k]) return;
+      e.preventDefault();
+      act[k]();
+      count = "";
+      return;
+    }
+    if (/^[0-9]$/.test(k) && (count || k !== "0")) {
+      count += k;
+      e.preventDefault();
+      return;
+    }
+    const n = times();
+    const goToCount = (last) => t.goTo(count ? Math.min(t.pages, Number(count)) - 1 : last ? t.pages - 1 : 0);
+    let done = true;
+    if (g) {
+      g = false;
+      if (k === "g") goToCount(false);
+      else done = false;
+    } else
+      switch (k) {
+        case "j":
+        case "ArrowDown":
+          by(0, n * LINE);
+          break;
+        case "k":
+        case "ArrowUp":
+          by(0, -n * LINE);
+          break;
+        case "h":
+          by(-n * LINE, 0);
+          break;
+        case "l":
+          by(n * LINE, 0);
+          break;
+        case " ":
+          page(e.shiftKey ? -n : n);
+          break;
+        case "ArrowRight":
+        case "PageDown":
+          page(n);
+          break;
+        case "ArrowLeft":
+        case "PageUp":
+          page(-n);
+          break;
+        case "Home":
+          t.goTo(0);
+          break;
+        case "End":
+          t.goTo(t.pages - 1);
+          break;
+        case "g":
+          g = true;
+          e.preventDefault();
+          return;
+        case "G":
+          goToCount(true);
+          break;
+        case "K":
+        case "+":
+        case "=":
+          t.zoom(1.1 ** n);
+          break;
+        case "J":
+        case "-":
+          t.zoom(1.1 ** -n);
+          break;
+        case "0":
+        case "w":
+          t.fitWidth();
+          break;
+        case "f":
+          t.fitPage();
+          break;
+        case "?":
+          helping = !helping;
+          t.help?.(helping);
+          break;
+        case "Escape":
+          if (helping) {
+            helping = false;
+            t.help?.(false);
+          }
+          break;
+        default:
+          done = false;
+      }
+    count = "";
+    if (done) e.preventDefault();
+  };
+  on.addEventListener("keydown", handler);
+  return () => on.removeEventListener("keydown", handler);
+}
+
+// viewer/src/report.ts
+var REPORT_TO = "flinner@nand.sh";
+function anonymizer(paths) {
+  const pairs = [];
+  paths.forEach((p, i) => {
+    const ext = p.match(/\.[A-Za-z0-9]+$/)?.[0] ?? "";
+    const alias = `file${i + 1}${ext}`;
+    pairs.push([p, alias]);
+    const base = p.replace(/^.*\//, "");
+    if (base !== p) pairs.push([base, alias]);
+    const stem = base.replace(/\.[A-Za-z0-9]+$/, "");
+    if (stem.length >= 4 && stem !== base) pairs.push([stem, alias.replace(/\.[A-Za-z0-9]+$/, "")]);
+  });
+  pairs.sort((a, b) => b[0].length - a[0].length);
+  const esc6 = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = pairs.length ? new RegExp(pairs.map(([p]) => `(?<![A-Za-z0-9_])${esc6(p)}(?![A-Za-z0-9_])`).join("|"), "g") : null;
+  const map = new Map(pairs);
+  return (s) => (re ? s.replace(re, (m) => map.get(m) ?? m) : s).replace(/`[^'\n]{1,80}'/g, "`\u2026'").replace(/\/home\/[^/\s]+\//g, "~/").replace(/\/Users\/[^/\s]+\//g, "~/");
+}
+var CONTENT = /* @__PURE__ */ new Set(["text", "files", "binaries", "expect", "detail", "glyphs", "g"]);
+function clean(v, anon, depth = 0) {
+  if (typeof v === "string") return anon(v.length > 400 ? v.slice(0, 400) + "\u2026" : v);
+  if (typeof v !== "object" || v === null || depth > 4) return v;
+  if (Array.isArray(v)) return v.slice(0, 40).map((x) => clean(x, anon, depth + 1));
+  const out = {};
+  for (const [k, x] of Object.entries(v)) {
+    if (CONTENT.has(k)) out[k] = typeof x === "string" ? `(${x.length} chars, not included)` : "(not included)";
+    else out[k] = clean(x, anon, depth + 1);
+  }
+  return out;
+}
+function report(r) {
+  const anon = anonymizer(r.paths);
+  const line = (e) => `${String(e.t).padStart(8)} ms  ${e.k.padEnd(16)} ${e.d === void 0 ? "" : JSON.stringify(clean(e.d, anon))}`;
+  const exts = /* @__PURE__ */ new Map();
+  for (const p of r.paths) {
+    const x = p.match(/\.[A-Za-z0-9]+$/)?.[0] ?? "(none)";
+    exts.set(x, (exts.get(x) ?? 0) + 1);
+  }
+  return [
+    "PhiTeX Instant debug report (anonymized: no document text, no file names, no project id)",
+    `extension ${r.version} \xB7 engine ${r.engine}`,
+    `browser ${r.userAgent}`,
+    `project: ${r.paths.length} files (${[...exts].map(([x, n]) => `${n} ${x}`).join(", ")})`,
+    "",
+    "errors:",
+    ...r.errors.length ? r.errors.map((e) => "  " + anon(e)) : ["  (none)"],
+    "",
+    "status:",
+    "  " + JSON.stringify(clean(r.status ?? {}, anon)),
+    "",
+    "diagnostics:",
+    ...r.diagnostics.length ? r.diagnostics.slice(0, 40).map((d) => `  ${d.severity} ${d.code ?? ""}: ${anon(d.message)}${d.file ? ` (${anon(d.file)}${d.line ? `:${d.line}` : ""})` : ""}`) : ["  (none)"],
+    "",
+    "packages (TeX Live):",
+    `  fetched: ${(r.packages?.done ?? []).join(", ") || "(none)"}`,
+    `  failed: ${(r.packages?.failed ?? []).map((f) => `${f.name}${f.error ? ` (${anon(f.error)})` : ""}`).join(", ") || "(none)"}`,
+    `  not in TeX Live: ${(r.packages?.unavailable ?? []).length}`,
+    "",
+    "trace (last 300 events):",
+    ...r.trace.slice(-300).map(line)
+  ].join("\n");
+}
+
+// viewer/src/panel.ts
+var STALE_GRACE_MS = 1e3;
+var OVERLEAF_WORDS = {
+  badge: "Unofficial \xB7 experimental",
+  badgeTitle: "An unofficial extension, not part of Overleaf. PhiTeX runs LaTeX (pdfTeX) in your browser; Overleaf's PDF is the real one.",
+  byline: "Unofficial PhiTeX extension \xB7 experimental",
+  about: `<b>\u26A1 Instant is not part of Overleaf.</b> It is added by the <b>unofficial PhiTeX</b> browser extension, not made,
       endorsed or supported by Overleaf: an experimental incremental TeX engine that runs entirely in your browser. Nothing is
       sent anywhere; Overleaf's own PDF is on the <b>PDF</b> tab.
       <div class="about-foot">LaTeX, with TeX Live's packages fetched as needed. Free software (AGPL-3.0-only,
       <a id="license" target="_blank" rel="noopener">full license</a>), provided as is, without any warranty.
-      To turn it off: <code>chrome://extensions</code>.</div>`,preparing:"Getting ready for instant edits\u2026 {s} s (pages still scroll)",license:"LICENSE.txt",realPdf:"Overleaf's PDF is the real one.",stopped:"Open \u24D8 diagnostics for the details. Overleaf's PDF is one click away (PDF).",notReady:"Use Overleaf's PDF for it",openFailed:"Overleaf's PDF is one click away. Reload the tab to try again.",reading:"Your project's files stay in this browser: read from Overleaf, typeset here.",keptIn:"this browser"};function je(o,e){return typeof o=="string"&&/^#[0-9a-fA-F]{6}$/.test(o)?o:e}var gt=o=>o==="pdfjs"?"pdfjs":"vector",U={x:null,y:null,w:440,h:620,zoom:"fit",format:"vector",collapsed:!1,details:!1};function ft(o,e){let t=/Bold/.test(o),i=/Italic|Oblique/.test(o),s=/^Times/.test(o)?'"Times New Roman", Times, "Liberation Serif", "Nimbus Roman", "Noto Serif", serif':/^Helvetica/.test(o)?'Helvetica, Arial, "Liberation Sans", "Nimbus Sans", "Noto Sans", sans-serif':/^Courier/.test(o)?'"Courier New", Courier, "Liberation Mono", "DM Mono", monospace':'"Noto Serif", serif';return`${i?"italic ":""}${t?"bold ":""}${e}px ${s}`}function ut(o){if(Math.floor(o)===o)return[o,1];let e=1/o,t=8;if(e>t)return[1,t];if(Math.floor(e)===e)return[1,e];let i=o>1?e:o,s=0,n=1,r=1,l=1;for(;;){let c=s+r,d=n+l;if(d>t)break;i<=c/d?(r=c,l=d):(s=c,n=d)}return i-s/n<r/l-i?i===o?[s,n]:[n,s]:i===o?[r,l]:[l,r]}function He(o,e,t=globalThis.devicePixelRatio||1){let i=ut(t)[1],s=e,n=o.h*e/o.w;return[s-s%i,n-n%i]}var Oe=o=>o.replace(/[&<>"]/g,e=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[e]);function mt(o,e){let t=new Map,i=[];for(let[l,c,d,a,h,p]of o.t){let g=`${c}|${d}|${a}`;t.has(g)||(t.set(g,[]),i.push(g)),t.get(g).push([l,h,p])}let s="";for(let l of i){let[c,d,a]=l.split("|"),h=t.get(l).sort((g,u)=>g[0]-u[0]),p=h.map(([g,u,f],m)=>{let b=f&&[...u].length>1?` textLength="${f}" lengthAdjust="spacingAndGlyphs"`:"",v=m<h.length-1?"<tspan> </tspan>":"";return`<tspan x="${g}"${b}>${Oe(u)}</tspan>${v}`}).join("");s+=`<text y="${c}" style="font:${Oe(ft(o.f[Number(a)],Number(d)))}">${p}</text>
-`}for(let[l,c,d,a]of o.r)s+=`<rect x="${l}" y="${c}" width="${Math.max(d,.4)}" height="${Math.max(a,.4)}"/>`;let[n,r]=He(o,e);return`<svg class="page" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${o.w} ${o.h}" width="${n}" height="${r}" preserveAspectRatio="none" xml:space="preserve"><rect class="paper" width="${o.w}" height="${o.h}"/>${s}</svg>`}var bt={preview:"M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z",chevron_left:"M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z",chevron_right:"M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z",bug_report:"M20 8h-2.81c-.45-.78-1.07-1.45-1.82-1.96L17 4.41 15.59 3l-2.17 2.17C12.96 5.06 12.49 5 12 5s-.96.06-1.41.17L8.41 3 7 4.41l1.62 1.63C7.88 6.55 7.26 7.22 6.81 8H4v2h2.09c-.05.33-.09.66-.09 1v1H4v2h2v1c0 .34.04.67.09 1H4v2h2.81c1.04 1.79 2.97 3 5.19 3s4.15-1.21 5.19-3H20v-2h-2.09c.05-.33.09-.66.09-1v-1h2v-2h-2v-1c0-.34-.04-.67-.09-1H20V8zm-6 8h-4v-2h4v2zm0-4h-4v-2h4v2z",close_fullscreen:"M19 13H5v-2h14v2z",open_in_full:"M21 11V3h-8l3.29 3.29-10 10L3 13v8h8l-3.29-3.29 10-10z",sync:"M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z",download:"M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z",error:"M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z",warning:"M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z",info:"M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"},M=(o,e=18)=>`<svg class="icon" viewBox="0 0 24 24" width="${e}" height="${e}" aria-hidden="true"><path fill="currentColor" d="${bt[o]}"/></svg>`,vt=`
+      To turn it off: <code>chrome://extensions</code>.</div>`,
+  preparing: "Getting ready for instant edits\u2026 {s} s (pages still scroll)",
+  license: "LICENSE.txt",
+  realPdf: "Overleaf's PDF is the real one.",
+  stopped: "Open \u24D8 diagnostics for the details. Overleaf's PDF is one click away (PDF).",
+  notReady: "Use Overleaf's PDF for it",
+  openFailed: "Overleaf's PDF is one click away. Reload the tab to try again.",
+  reading: "Your project's files stay in this browser: read from Overleaf, typeset here.",
+  keptIn: "this browser"
+};
+function safeColor(c, or) {
+  return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
+}
+var pageFormat = (f) => f === "pdfjs" ? "pdfjs" : "vector";
+var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", format: "vector", collapsed: false, details: false };
+function cssFont(name, px) {
+  const bold = /Bold/.test(name), italic = /Italic|Oblique/.test(name);
+  const family = /^Times/.test(name) ? '"Times New Roman", Times, "Liberation Serif", "Nimbus Roman", "Noto Serif", serif' : /^Helvetica/.test(name) ? 'Helvetica, Arial, "Liberation Sans", "Nimbus Sans", "Noto Sans", sans-serif' : /^Courier/.test(name) ? '"Courier New", Courier, "Liberation Mono", "DM Mono", monospace' : '"Noto Serif", serif';
+  return `${italic ? "italic " : ""}${bold ? "bold " : ""}${px}px ${family}`;
+}
+function approximateFraction(x) {
+  if (Math.floor(x) === x) return [x, 1];
+  const xinv = 1 / x;
+  const limit = 8;
+  if (xinv > limit) return [1, limit];
+  if (Math.floor(xinv) === xinv) return [1, xinv];
+  const x_ = x > 1 ? xinv : x;
+  let a = 0, b = 1, c = 1, d = 1;
+  for (; ; ) {
+    const p = a + c, q = b + d;
+    if (q > limit) break;
+    if (x_ <= p / q) {
+      c = p;
+      d = q;
+    } else {
+      a = p;
+      b = q;
+    }
+  }
+  if (x_ - a / b < c / d - x_) return x_ === x ? [a, b] : [b, a];
+  return x_ === x ? [c, d] : [d, c];
+}
+function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
+  const step = approximateFraction(dpr)[1];
+  const w = cssWidth, h = d.h * cssWidth / d.w;
+  return [w - w % step, h - h % step];
+}
+var esc4 = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+function svg(d, cssWidth) {
+  const lines = /* @__PURE__ */ new Map();
+  const order = [];
+  for (const [x, y, size, f, text, width] of d.t) {
+    const k = `${y}|${size}|${f}`;
+    if (!lines.has(k)) {
+      lines.set(k, []);
+      order.push(k);
+    }
+    lines.get(k).push([x, text, width]);
+  }
+  let body = "";
+  for (const k of order) {
+    const [y, size, f] = k.split("|");
+    const words = lines.get(k).sort((a, b) => a[0] - b[0]);
+    const spans = words.map(([x, t, width], i) => {
+      const fit = width && [...t].length > 1 ? ` textLength="${width}" lengthAdjust="spacingAndGlyphs"` : "";
+      const space = i < words.length - 1 ? `<tspan> </tspan>` : "";
+      return `<tspan x="${x}"${fit}>${esc4(t)}</tspan>${space}`;
+    }).join("");
+    body += `<text y="${y}" style="font:${esc4(cssFont(d.f[Number(f)], Number(size)))}">${spans}</text>
+`;
+  }
+  for (const [x, y, w2, h2] of d.r) body += `<rect x="${x}" y="${y}" width="${Math.max(w2, 0.4)}" height="${Math.max(h2, 0.4)}"/>`;
+  const [w, h] = pageBox(d, cssWidth);
+  return `<svg class="page" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${d.w} ${d.h}" width="${w}" height="${h}" preserveAspectRatio="none" xml:space="preserve"><rect class="paper" width="${d.w}" height="${d.h}"/>${body}</svg>`;
+}
+var PATHS = {
+  preview: "M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z",
+  chevron_left: "M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z",
+  chevron_right: "M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z",
+  bug_report: "M20 8h-2.81c-.45-.78-1.07-1.45-1.82-1.96L17 4.41 15.59 3l-2.17 2.17C12.96 5.06 12.49 5 12 5s-.96.06-1.41.17L8.41 3 7 4.41l1.62 1.63C7.88 6.55 7.26 7.22 6.81 8H4v2h2.09c-.05.33-.09.66-.09 1v1H4v2h2v1c0 .34.04.67.09 1H4v2h2.81c1.04 1.79 2.97 3 5.19 3s4.15-1.21 5.19-3H20v-2h-2.09c.05-.33.09-.66.09-1v-1h2v-2h-2v-1c0-.34-.04-.67-.09-1H20V8zm-6 8h-4v-2h4v2zm0-4h-4v-2h4v2z",
+  close_fullscreen: "M19 13H5v-2h14v2z",
+  open_in_full: "M21 11V3h-8l3.29 3.29-10 10L3 13v8h8l-3.29-3.29 10-10z",
+  sync: "M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z",
+  download: "M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z",
+  error: "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z",
+  warning: "M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z",
+  info: "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"
+};
+var icon = (name, size = 18) => `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
+var CSS2 = `
 :host { all: initial; }
 * { box-sizing: border-box; }
 .win {
@@ -340,12 +1339,38 @@ footer .msg.err { color: var(--danger); }
 .win.collapsed > :not(header) { display: none; }
 .win.collapsed header { border-radius: 9999px; padding-right: 4px; }
 .win.collapsed .hide-collapsed { display: none; }
-`,J=class{root;host;docked=null;win;prefs={...U};store;at=0;last=null;url=null;lastStatus=null;listeners=[];speed;debugOn=!1;ev;viewer;$=e=>this.root.querySelector(e);words;constructor(e,t,i={}){this.store=t,this.ev=e;let s=this.words={...pt,...i.words},n=document.createElement("phitex-preview");this.root=n.attachShadow({mode:"open"}),this.root.innerHTML=`<style>${Se}${Me}${Ce}${vt}</style>
+`;
+var Panel = class {
+  root;
+  host;
+  docked = null;
+  win;
+  prefs = { ...DEFAULTS };
+  store;
+  at = 0;
+  last = null;
+  url = null;
+  lastStatus = null;
+  listeners = [];
+  speed;
+  debugOn = false;
+  ev;
+  /** A page that came while text in the shown one was selected: shown once the selection ends. */
+  viewer;
+  $ = (sel) => this.root.querySelector(sel);
+  words;
+  constructor(ev, store2, opts = {}) {
+    this.store = store2;
+    this.ev = ev;
+    const w = this.words = { ...OVERLEAF_WORDS, ...opts.words };
+    const host2 = document.createElement("phitex-preview");
+    this.root = host2.attachShadow({ mode: "open" });
+    this.root.innerHTML = `<style>${VIEWER_CSS}${PROBLEMS_CSS}${OUTLINE_CSS}${CSS2}</style>
 <div class="win" role="dialog" aria-label="PhiTeX preview">
   <header>
     <span class="icon" aria-hidden="true">preview</span>
     <span class="title">PhiTeX</span>
-    <span class="badge hide-collapsed" title="${s.badgeTitle}">${s.badge}</span>
+    <span class="badge hide-collapsed" title="${w.badgeTitle}">${w.badge}</span>
     <span class="grow"></span>
     <span class="chip" id="chip" title="Status"><span class="dot"></span><span id="chiptext">starting\u2026</span></span>
     <span class="group hide-collapsed">
@@ -382,28 +1407,2438 @@ footer .msg.err { color: var(--danger); }
     <div class="diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="pkgs" id="pkgs" role="status" aria-live="polite"></div>
     <div class="warmup" id="warmup" role="status" aria-live="polite"></div>
-    <button class="byline" id="byline" title="About this preview">${s.byline}</button>
+    <button class="byline" id="byline" title="About this preview">${w.byline}</button>
     <div class="about" id="about" role="dialog" aria-label="About the PhiTeX preview">
-      ${s.about}
+      ${w.about}
     </div>
     <nav class="side" id="side" aria-label="Contents"></nav>
     <div class="keyhelp" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
     <div class="stage" id="stage"><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load"><div class="steps"><span class="now">Project read</span><i></i><span>Packages</span><i></i><span>Typesetting</span></div><h3>Reading the project\u2026</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
   </div>
   <footer><span class="lat" id="lat" title="Click for details">\u2013</span><span class="grow"></span><span class="msg" id="msg">all local</span></footer>
-</div>`.replace(/<span class="icon"(?: aria-hidden="true")?>(\w+)<\/span>/g,(d,a)=>M(a,a==="download"?16:18)),this.host=n,n.style.display="none",(document.body??document.documentElement).append(n),this.win=this.$(".win"),this.$("#prev").onclick=()=>this.prev(),this.$("#next").onclick=()=>this.next(),this.$("#pdf").onclick=()=>e.onPdf(),this.$("#reload").onclick=()=>e.onReload();let r=this.$("#dbg");r.onclick=()=>this.toggleDebug(),this.$("#dbg2").onchange=()=>this.toggleDebug();let l=this.$("#license");l&&(l.href=i.fileUrl?.(s.license)??s.license),e.onTour||(this.$("#tour").style.display="none"),e.onNews||(this.$("#news").style.display="none"),i.pdfjs===!1&&(this.$("#fmt").closest("label").style.display="none"),this.$("#byline").onclick=d=>{d.stopPropagation(),this.$("#about").classList.toggle("open")},this.$("#stage").addEventListener("pointerdown",()=>this.$("#about").classList.remove("open")),this.$("#news").onclick=()=>{this.sheet(!1),e.onNews?.()},this.$("#tour").onclick=()=>{this.sheet(!1),e.onTour?.()},this.$("#main").onchange=d=>e.onMain(d.target.value),this.$("#zoom").onchange=d=>this.zoomTo(d.target.value),this.$("#fmt").onchange=d=>{this.prefs.format=d.target.value,this.save(),this.viewer.invalidate(),e.onFormat(this.prefs.format)},this.$("#min").onclick=()=>this.collapse(!this.prefs.collapsed),this.$("#chip").onclick=()=>this.prefs.collapsed&&this.collapse(!1),this.$("#lat").onclick=()=>{this.prefs.details=!this.prefs.details,this.win.classList.toggle("details-open",this.prefs.details),this.save()},this.$("#diags").onclick=d=>{let a=d.target.closest(".phx-place[data-file]");if(a)return d.preventDefault(),e.onGoto(a.dataset.file,Number(a.dataset.line)||1);let h=d.target.closest(".diag[data-line]");h&&e.onGoto(h.dataset.file,Number(h.dataset.line))};let c=this.$("#sum");c.onclick=()=>this.diagnostics(),c.onkeydown=d=>(d.key==="Enter"||d.key===" ")&&(d.preventDefault(),c.click()),this.$("#stage").addEventListener("pointerdown",()=>{this.diagsOpen(!1),this.sheet(!1)}),this.root.addEventListener("keydown",d=>d.key==="Escape"&&this.diagsOpen(!1)),window.addEventListener("keydown",d=>{d.altKey&&d.shiftKey&&d.code==="KeyP"&&(d.preventDefault(),e.onShortcut?.()||this.collapse(!this.prefs.collapsed))}),this.drag(),this.viewer=new W(this.$("#viewer"),this.$("#stage"),{need:d=>e.onNeed?.(d),inView:d=>{this.at=d,this.contents?.at(d),this.nav(),e.onPage(d)},svg:(d,a)=>"draws"in d?mt(d.draws,a):null,scale:()=>this.scale(),box:(d,a)=>He(d,a),dbl:(d,a,h)=>e.onSyncSource?.(d,a,h),selected:d=>e.onSelectPage?.(d),link:e.onLink?d=>e.onLink(d):void 0}),this.extras(i),window.addEventListener("resize",()=>this.place()),new ResizeObserver(()=>{if(this.docked)return this.prefs.zoom==="fit"?this.redraw():void 0;if(this.prefs.collapsed)return;let d=this.win.getBoundingClientRect();d.width<100||d.height<100||Math.abs(d.width-this.prefs.w)+Math.abs(d.height-this.prefs.h)>2&&(this.prefs.w=Math.round(d.width),this.prefs.h=Math.round(d.height),this.save(),this.prefs.zoom==="fit"&&this.redraw())}).observe(this.win),this.place(),t?.load().then(d=>{this.prefs={...U,...d},this.prefs.format=gt(this.prefs.format),(this.prefs.w<300||this.prefs.h<180)&&Object.assign(this.prefs,{w:U.w,h:U.h}),this.place(),this.prefs.format!=="vector"&&e.onFormat(this.prefs.format)})}dock(e,t){let i=this.host.style;if(e){let s=t?Math.max(0,t.getBoundingClientRect().bottom-e.getBoundingClientRect().top):0,n=getComputedStyle(e);n.position==="static"&&(e.style.position="relative"),this.win.style.getPropertyValue("--pane")!==n.backgroundColor&&this.win.style.setProperty("--pane",n.backgroundColor),this.win.classList.toggle("pdf-dark",e.classList.contains("pdf-dark-mode")),this.win.classList.toggle("light",document.body.dataset.theme==="light"),(i.top!==`${s}px`||i.position!=="absolute")&&Object.assign(i,{position:"absolute",left:"0",right:"0",bottom:"0",top:`${s}px`,zIndex:"12",flexDirection:"column"})}e===this.docked&&this.host.isConnected||(this.docked=e,e?(e.append(this.host),this.win.classList.add("docked"),this.win.classList.remove("collapsed"),this.win.setAttribute("role","region")):((document.body??document.documentElement).append(this.host),Object.assign(i,{position:"",left:"",right:"",bottom:"",top:"",zIndex:""}),this.win.classList.remove("docked"),this.win.setAttribute("role","dialog"),this.place()),this.redraw())}shown(e){let t=e?this.docked?"flex":"":"none";if(this.host.style.display===t&&this.wasShown===e)return;let i=this.wasShown;this.wasShown=e,this.host.style.display=t,e&&!i&&this.redraw()}wasShown;save(){this.store?.save(this.prefs)}place(){if(this.docked)return;let e=this.prefs,t=this.win.style,i=e.x??window.innerWidth-e.w-16,s=e.y??window.innerHeight-e.h-16;t.left=`${Math.max(0,Math.min(i,window.innerWidth-120))}px`,t.top=`${Math.max(0,Math.min(s,window.innerHeight-40))}px`,this.$("#zoom").value=e.zoom,this.$("#fmt").value=e.format,this.win.classList.toggle("details-open",e.details),this.collapse(e.collapsed,!1)}collapse(e,t=!0){this.prefs.collapsed=e,this.win.classList.toggle("collapsed",e);let i=this.$("#min");i.title=e?"Expand (Alt+Shift+P)":"Collapse (Alt+Shift+P)",i.innerHTML=M(e?"open_in_full":"close_fullscreen"),this.win.style.width=e?"":`${this.prefs.w}px`,this.win.style.height=e?"":`${this.prefs.h}px`,e||this.redraw(),t&&this.save()}drag(){this.$("header").onpointerdown=e=>{if(e.target.closest("button, .chip"))return;let t=this.win.getBoundingClientRect(),i=s=>{this.prefs.x=Math.max(0,Math.min(t.left+s.clientX-e.clientX,window.innerWidth-120)),this.prefs.y=Math.max(0,Math.min(t.top+s.clientY-e.clientY,window.innerHeight-40)),this.win.style.left=`${this.prefs.x}px`,this.win.style.top=`${this.prefs.y}px`};window.addEventListener("pointermove",i),window.addEventListener("pointerup",()=>{window.removeEventListener("pointermove",i),this.save()},{once:!0})}}pkgNow;buildSince=0;actTick;prepSince=0;preparing(e){this.prepSince=e?this.prepSince||performance.now():0,this.activity()}streamed;streaming(e){this.streamed=e?e.pages:void 0,this.activity()}busy(e){this.$("#chip").classList.toggle("busy",e),this.buildSince=e?this.buildSince||performance.now():0,this.activity()}activity(){let e=this.$("#pkgs"),t=this.pkgNow,i=this.prepSince&&performance.now()-this.prepSince>400,s=this.buildSince&&performance.now()-this.buildSince>400||i,n=(!!this.last||this.viewer.pages>0)&&(!!t||!!s);if(e.classList.toggle("on",n),n||this.buildSince||this.prepSince?this.actTick??=setInterval(()=>this.activity(),250):(clearInterval(this.actTick),this.actTick=void 0),!!n)if(t){let r=t.names.slice(0,3).join(", ")+(t.names.length>3?` and ${t.names.length-3} more`:"");e.innerHTML=`${M("download",16)}<span></span><span class="mini"><i style="width:${t.pct}%"></i></span>`,e.querySelector("span").textContent=`Fetching ${r} from ${t.source} (${t.done} of ${t.total})\u2026`}else if(i){let r=(performance.now()-this.prepSince)/1e3;e.innerHTML=`${M("sync",16)}<span></span><span class="mini busy"><i></i></span>`,e.querySelector("span").textContent=this.words.preparing.replace("{s}",r<10?r.toFixed(1):String(Math.round(r)))}else{let r=(performance.now()-this.buildSince)/1e3;e.innerHTML=`${M("sync",16)}<span></span><span class="mini busy"><i></i></span>`;let l=this.streamed?` page ${this.streamed+1}`:"";e.querySelector("span").textContent=`Typesetting\u2026${l} ${r<10?r.toFixed(1):Math.round(r)} s`}}pkgBusy=!1;stopped(){if(this.engineNow&&!this.engineNow.ready)return this.engineCard(this.engineNow.engine,null);if(this.last||this.pkgBusy)return!1;let e=this.lastStatus?.diagnostics?.find(s=>s.severity==="error");if(!e)return!1;let t=be(e.message);if(t)return this.engineCard(t,e.message);let i=this.$("#empty");return i.innerHTML='<div class="load"><h3></h3><div class="count"></div><div class="note"></div></div>',i.querySelector("h3").textContent="The build stopped before a page could be shown",i.querySelector(".count").textContent=e.message+(e.file&&e.line?` (${e.file}:${e.line})`:""),i.querySelector(".note").textContent=this.words.stopped,this.reportLink(i.querySelector(".load")),i.style.display="",!0}reportLink(e){if(!this.ev.onReport)return;let t=document.createElement("button");t.className="reportbtn",t.textContent="Copy debug info\u2026",t.style.cssText="margin-top:10px;cursor:pointer;padding:3px 12px;border-radius:9999px;border:1px solid currentColor;background:none;color:inherit;font:inherit;font-weight:600",t.onclick=()=>{this.report()},e.append(t)}engineNow;approx=!1;engine(e){this.engineNow=e,this.approx=!!e.approx;let t=this.$("#approx");t.style.display=this.approx?"block":"none",t.textContent=`Approximate: needs ${k[e.engine].label}, shown with pdfLaTeX (fonts substituted, breaks may differ). ${this.words.realPdf}`,e.ready?this.$("#empty").querySelector(".engine")&&(this.$("#empty").style.display="none"):this.stopped()}engineCard(e,t){let i=this.$("#empty"),s=k[e].ready;i.innerHTML='<div class="load engine"><h3></h3><div class="count"></div><div class="note"></div><div class="btns"></div></div>',i.querySelector("h3").textContent=t?`This project needs ${e==="lualatex"?"LuaLaTeX":"XeLaTeX or LuaLaTeX"}`:`This project runs with ${k[e].label}`,i.querySelector(".count").textContent=t??"Its preamble loads a package that pdfLaTeX can't run (fontspec, unicode-math, polyglossia, \u2026), or the engine was chosen for it.",i.querySelector(".note").textContent=s?`Run it with ${k[e].label}?`:`\u26A1 Instant doesn't run ${k[e].label} yet: only pdfLaTeX. ${this.words.notReady}, or try pdfLaTeX if the project can do without those packages.`;let n=i.querySelector(".btns"),r=this.engineNow?.engine===e?["pdflatex"]:e==="xelatex"?["xelatex","lualatex"]:[e];for(let l of r){let c=document.createElement("button");c.className="btn",c.textContent=l==="pdflatex"?"Try pdfLaTeX anyway":`Use ${k[l].label}${k[l].ready?"":" (coming)"}`,c.title=l==="pdflatex"?"For this project: pdfLaTeX, whatever its preamble loads":"For this project from now on (Settings \u2192 Engine for every project)",c.onclick=()=>this.ev.onEngine?.(l),n.append(c)}return i.style.display="",!0}status(e){this.lastStatus=e,queueMicrotask(()=>this.stopped());let t=e.diagnostics??[],i=t[0]?.severity,s=this.$("#chip"),n=!!e.pending||e.pages===0;s.className=`chip ${i==="error"?"error":n||i==="warning"?"warning":"ok"}`,this.$("#chiptext").textContent=`${e.pages} page${e.pages===1?"":"s"}${e.pending?" \xB7 partial":""}`,s.title=(e.pending?`${e.pending} parts not read (out of fuel or unsupported). `:"")+(t.length?`${t.length} diagnostic${t.length===1?"":"s"}`:"No problems found")+(e.file?` \xB7 editing ${e.file}`:"");let r=this.$("#diags");r.innerHTML="";for(let a of t.slice(0,50)){if(a.problem){let p=document.createElement("ol");p.className="phx-card phx-inline",p.setAttribute("role","listitem"),p.innerHTML=Le(a.problem),r.append(p);continue}let h=document.createElement("div");if(h.className=`diag ${a.severity}`,h.setAttribute("role","listitem"),a.file&&a.line&&(h.dataset.file=a.file,h.dataset.line=String(a.line),h.title=`Go to ${a.file}:${a.line}`),h.innerHTML=`${M(a.severity,16)}<span class="text"></span><span class="where"></span>`,h.querySelector(".text").textContent=a.message,a.detail){let p=document.createElement("pre");p.className="detail",p.textContent=a.detail,h.querySelector(".text").append(p)}h.querySelector(".where").textContent=a.file?`${a.file}${a.line?`:${a.line}`:""}`:"",r.append(h)}if(t.length>50){let a=document.createElement("div");a.className="diag info",a.textContent=`\u2026 and ${t.length-50} more`,r.append(a)}if(this.ev.onReport){let a=document.createElement("button");a.className="reportbtn",a.textContent="Report a problem\u2026",a.onclick=h=>(h.stopPropagation(),void this.report()),r.append(a)}let l=this.$("#sum");l.style.display=t.length?"":"none",t.length||this.diagsOpen(!1);let c=a=>t.filter(h=>h.severity===a).length;l.innerHTML=["error","warning","info"].filter(a=>c(a)).map(a=>`<span class="n ${a}">${M(a,14)}${c(a)}</span>`).join("")+`<span class="first"></span>${M("chevron_right",16).replace('class="icon"','class="icon caret"')}`,t[0]&&(l.querySelector(".first").textContent=t[0].message);let d=JSON.stringify(t.filter(a=>a.problem&&a.severity==="error").map(a=>[a.message,a.file,a.line]));d!=="[]"&&d!==this.errsClosed&&this.diagsOpen(!0),d==="[]"&&(this.errsClosed=""),this.stale(e),queueMicrotask(()=>this.emit())}loadT0=0;loadLast=0;loadDone=-1;loadTick;loadPct=0;alive(){let e=this.$("#empty").querySelector(".alive");if(!e||this.last){clearInterval(this.loadTick),this.loadTick=void 0;return}let t=performance.now(),i=Math.round((t-this.loadT0)/1e3),s=(t-this.loadLast)/1e3,n=e.dataset.phase==="fetch";if(e.dataset.phase==="read"){e.textContent=`Reading \xB7 ${i} s`;return}e.textContent=n?s<4?`Still fetching \xB7 ${i} s \xB7 files arriving`:`Still fetching \xB7 ${i} s \xB7 a large package (TikZ, fonts) is on its way`:`Typesetting \xB7 ${i} s`,i>=20&&n&&(e.textContent+=" \xB7 only the first time: next visits reuse them")}readNow;readDrawn=0;readTimer;reading(e){if(this.last||this.pkgBusy||this.loadDone>=0)return;this.readNow=e,this.loadT0||=performance.now();let t=50-(performance.now()-this.readDrawn);if(t>0){this.readTimer??=setTimeout(()=>(this.readTimer=void 0,this.drawReading()),t);return}this.drawReading()}drawReading(){let e=this.readNow;if(!e||this.last||this.pkgBusy||this.loadDone>=0)return;this.readDrawn=performance.now();let t=this.$("#empty"),i=t.querySelector(".load.reading");i||(t.innerHTML=`<div class="load reading"><div class="steps"><span class="now">Project</span><i></i><span>Packages</span><i></i><span>Typesetting</span></div><h3></h3><div class="bar busy"><i></i></div><div class="alive" data-phase="read"></div><div class="count"></div><div class="names"></div><div class="note">${this.words.reading}</div></div>`,i=t.querySelector(".load.reading")),i.querySelector("h3").textContent=e.h;let s=e.pct??(e.total?Math.round(100*(e.done??0)/e.total):void 0),n=i.querySelector(".bar");n.classList.toggle("busy",s===void 0),n.querySelector("i").style.width=s===void 0?"":`${s}%`,i.querySelector(".count").textContent=e.total?`${e.done??0} of ${e.total}`:"";let r=i.querySelector(".names");if(r.innerHTML="",e.detail){let l=document.createElement("span");l.className="ing",l.textContent=e.detail,r.append(l)}this.alive(),this.loadTick??=setInterval(()=>this.alive(),1e3)}packages(e){let t=e.done?.length??0,i=t+e.loading.length,s=performance.now();this.loadT0||(this.loadT0=s),t!==this.loadDone&&(this.loadDone=t,this.loadLast=s);let n=this.loadPct=Math.max(this.loadPct,i?Math.round(100*t/i):100);if(!this.last){let r=this.$("#empty");if(!e.loading.length&&!e.building){this.pkgBusy=!1,this.stopped()||(r.innerHTML='<div class="load"><div class="steps"><span class="ok">Project read</span><i></i><span class="ok">Packages</span><i></i><span class="now">Typesetting</span></div><h3>Typesetting\u2026</h3><div class="bar busy"><i></i></div><div class="alive" data-phase="tex"></div></div>',this.loadT0||=performance.now(),this.alive(),this.loadTick??=setInterval(()=>this.alive(),1e3));return}let l=[...(e.done??[]).slice(-10).map(a=>[a,"ok"]),...e.loading.slice(0,8).map(a=>[a,"ing"])],c=e.loading.length>0;this.pkgBusy=!0,r.innerHTML=`<div class="load"><div class="steps"><span class="ok">Project read</span><i></i><span class="${c?"now":"ok"}">Packages</span><i></i><span class="${c?"":"now"}">Typesetting</span></div><h3></h3><div class="bar${c?"":" busy"}"><i style="width:${n}%"></i></div><div class="alive" data-phase="${c?"fetch":"tex"}"></div><div class="count"></div><div class="names"></div><div class="note"></div></div>`,this.alive(),this.loadTick??=setInterval(()=>this.alive(),1e3),r.querySelector("h3").textContent=e.loading.length?"Fetching LaTeX packages\u2026":"Typesetting\u2026",r.querySelector(".count").textContent=e.loading.length?`${t} of ${i} files${e.unavailable.length?` \xB7 ${e.unavailable.length} not found`:""}`:`with ${t} package file${t===1?"":"s"}; a build may ask for more`;let d=r.querySelector(".names");for(let[a,h]of l){let p=document.createElement("span");p.className=h,p.textContent=a,d.append(p)}r.querySelector(".note").textContent=`From ${e.source} (fetched once, then kept in ${this.words.keptIn}). Only package names leave it, never your project's files.`;return}this.pkgNow=e.loading.length?{names:e.loading,done:t,total:i,pct:n,source:e.source}:void 0,this.activity()}staleSince=0;staleTimer;stale(e){let t=this.$("#stage"),i=(e.pages===0||this.at>=e.pages)&&!!this.last;if(clearTimeout(this.staleTimer),!i){this.staleSince=0,t.classList.remove("stale");return}let s=performance.now();this.staleSince||=s;let n=ht-(s-this.staleSince);if(n>0){this.staleTimer=setTimeout(()=>this.lastStatus&&this.stale(this.lastStatus),n);return}t.classList.add("stale");let r=e.diagnostics?.find(l=>l.severity!=="info"&&l.code!=="no-pages");this.$("#banner").textContent=`Showing the last complete render: ${r?r.message+(r.line?` (${r.file}:${r.line})`:""):"this build shipped no page"}.`}onState(e){this.listeners.push(e),e(this.state())}state(){let e=this.$("#chip");return{page:this.at,pages:this.lastStatus?.pages??0,zoom:this.prefs.zoom,debug:this.debugOn,level:["error","warning","ok"].find(t=>e.classList.contains(t))??"ok",chip:this.$("#chiptext").textContent??"",chipTitle:e.title,speed:this.speed,sheet:this.win.classList.contains("sheet-open"),diagCount:this.lastStatus?.diagnostics?.filter(t=>t.severity!=="info").length??0,diagWorst:this.lastStatus?.diagnostics?.[0]?.severity??"",percent:Math.round(this.scale()*100)}}emit(){let e=this.state();for(let t of this.listeners)t(e)}scale(){if(this.prefs.zoom!=="fit")return Number(this.prefs.zoom);let t=((this.last&&"draws"in this.last?this.last.draws:null)?.w??612)*(96/72);return Math.max(this.$("#stage").clientWidth-(this.docked?40:24),200)/t}goPage(e){this.viewer.goTo(e)}zoomStep(e){let t=[.25,.5,.75,1,1.25,1.5,2,3,4],i=this.scale(),s=e>0?t.find(n=>n>i+.01):[...t].reverse().find(n=>n<i-.01);this.zoomTo(String(s??i))}contents;outline(e){this.contents?.set(e),this.contents?.at(this.at)}side(e=!this.win.classList.contains("side-on")){if(this.contents){this.win.classList.toggle("side-on",e);try{localStorage.setItem("phitex.side",e?"1":"0")}catch{}this.prefs.zoom==="fit"&&this.redraw()}}headerButton(e,t,i){let s=document.createElement("button");return s.className="ib",s.style.cssText="width:auto;padding:0 8px;font-size:12px",s.title=t,s.textContent=e,s.onclick=()=>i(s),this.$("header .grow").after(s),s}extras(e){if(e.header&&this.win.classList.add("own-header"),e.outline){this.win.classList.add("has-side"),this.contents=new G(this.$("#side"),{goToPlace:(d,a)=>this.viewer.goToPlace(d,a)});let l=document.createElement("button");l.className="ib",l.title="Contents (t)",l.setAttribute("aria-label","Contents"),l.textContent="\u2630",l.onclick=()=>this.side(),this.$("header .title").before(l);let c=!0;try{c=localStorage.getItem("phitex.side")!=="0"}catch{}this.win.classList.toggle("side-on",c)}if(!e.keys)return;let t=this.$("#keyhelp"),i=[["e","the build's errors and warnings"],...e.outline?[["t","the contents beside the pages"]]:[]];t.innerHTML=`<b>Keys</b><table>${[...Re,...i].map(([l,c])=>`<tr><td><kbd>${l}</kbd></td><td>${c}</td></tr>`).join("")}</table>`,addEventListener("keydown",l=>{if(l.ctrlKey||l.altKey||l.metaKey||l.target?.closest?.("input, textarea, select, [contenteditable=true]"))return;let c=this.win.classList.contains("diags-open");if(l.key==="Escape"&&c)this.diagnostics(!1);else if(l.key==="e")this.diagnostics();else if(l.key==="t"&&this.contents)this.side();else return;l.preventDefault(),l.stopImmediatePropagation()},{capture:!0});let s=this.$("#stage"),n=()=>((this.last&&"draws"in this.last?this.last.draws:null)?.h??792)*(96/72),r=this;De(window,{get pages(){return r.viewer.pages},get page(){return r.viewer.page},goTo:l=>this.viewer.goTo(l),turn:l=>this.viewer.turn(l),scroller:s,zoom:l=>this.zoomTo(String(Math.min(5,Math.max(.25,this.scale()*l)))),fitWidth:()=>this.zoomTo("fit"),fitPage:()=>this.zoomTo(String(Math.max(.2,Math.min((s.clientHeight-24)/n(),this.scale())))),help:l=>{t.hidden=!l}})}errsClosed="";diagnostics(e=!this.win.classList.contains("diags-open")){e||(this.errsClosed=JSON.stringify((this.lastStatus?.diagnostics??[]).filter(t=>t.problem&&t.severity==="error").map(t=>[t.message,t.file,t.line]))),this.diagsOpen(e),this.emit()}prev(){this.viewer.goTo(this.at-1)}next(){this.viewer.goTo(this.at+1)}clean(){this.ev.onClean()}pdf(){this.ev.onPdf()}zoomTo(e){this.prefs.zoom=e,this.$("#zoom").value=e,this.save(),this.redraw(),this.emit()}formatTo(e){this.prefs.format!==e&&(this.prefs.format=e,this.$("#fmt").value=e,this.viewer.invalidate(),this.ev.onFormat(e))}toggleDebug(){this.debugOn=!this.debugOn,this.$("#dbg").setAttribute("aria-pressed",String(this.debugOn)),this.$("#dbg2").checked=this.debugOn,this.ev.onDebug(this.debugOn),this.msg(this.debugOn?"debug check on":"debug check off"),this.emit()}sheet(e=!this.win.classList.contains("sheet-open")){this.win.classList.toggle("sheet-open",e&&!!this.docked),this.emit()}speedChip(e){this.win.classList.toggle("nospeed",!e)}painted(e){this.speed={ms:e,at:performance.now()};let t=this.$("#speedchip");t.textContent=`\u26A1 ${e<10?e.toFixed(1):Math.round(e)} ms`,t.classList.toggle("slow",e>100),t.classList.remove("flash"),t.offsetWidth,t.classList.add("flash"),this.emit()}diffBar(e,t){let i=this.$("#diffbar");if(!e){i.className="diffbar",i.innerHTML="";return}let s=r=>r.replace(/[&<>"]/g,l=>`&#${l.charCodeAt(0)};`),n=e.busy?`<span class="n busy">${s(e.busy)}</span>`:`<span class="n">${e.changes?`${e.at>0?`${e.at} / `:""}${e.changes} change${e.changes===1?"":"s"}`:"no changes"}</span>`;i.innerHTML=`<span class="what" title="${s(e.title)}">Diff vs ${s(e.title)} <small>${s(e.when)}</small></span><button data-a="prev" title="Previous change (Shift+N)" ${e.busy||!e.changes?"disabled":""}>\u2039</button>${n}<button data-a="next" title="Next change (N)" ${e.busy||!e.changes?"disabled":""}>\u203A</button><span class="sep"></span><button data-a="toggle" class="${e.showing==="current"?"cur":""}" title="Show the ${e.showing==="diff"?"current version":"diff"} (D)">${e.showing==="diff"?"Current":"Diff"}</button><button data-a="pdf" title="Download the diff PDF" ${e.busy?"disabled":""}>\u2B07 PDF</button><button data-a="tex" title="Download diff.tex" ${e.busy?"disabled":""}>\u2B07 .tex</button><button data-a="settings" title="Diff style: colors, markup" aria-label="Diff style">\u2699</button><button data-a="close" title="Stop comparing" aria-label="Stop comparing">\u2715</button>`,i.className="diffbar on",i.onclick=r=>{let l=r.target.closest("button[data-a]")?.dataset.a;l&&t?.[l]?.()}}diffSettings(e,t,i){let s=this.$("#diffset");if(!e){s.className="diffset";return}e={...e,add_color:je(e.add_color,"#0000ff"),del_color:je(e.del_color,"#ff0000")};let n=[["underline","Underline"],["ctraditional","Color + font"],["traditional","Font"],["cfont","Color + size"],["fontstrike","Strike"],["bold","Bold"],["changebar","Change bars"],["culinechbar","Underline + bars"],["invisible","Hide deletions"]],r=[["safe","Plain"],["color","Colored"],["marker","Margin marks"]],l=[["#0000ff","#ff0000","Blue / red"],["#15803d","#b91c1c","Green / red"],["#0072b2","#d55e00","Colorblind-safe"],["#7e22ce","#6b7280","Purple / gray"]],c=(h,p)=>`<div class="opts">${p.map(([g,u])=>`<button data-k="${h}" data-v="${g}" aria-pressed="${e[h]===g}">${u}</button>`).join("")}</div>`,d=h=>{let p=h?e.add_color:e.del_color;if(e.markup==="invisible"&&!h)return"display:none";let g=!h&&/^(underline|fontstrike|culinechbar)$/.test(e.markup),u=h&&/^(underline|culinechbar)$/.test(e.markup)?`text-decoration: underline wavy ${p}; text-underline-offset: 3px;`:"";return`color:${p};${g?`text-decoration: line-through ${p};`:""}${u}${e.markup==="bold"&&h?"font-weight:700;":""}`};s.innerHTML=`<h4>Style</h4>${c("markup",n)}<h4>Colors</h4><div class="opts">${l.map(([h,p,g])=>`<button class="pair" data-pair="${h},${p}" aria-pressed="${e.add_color===h&&e.del_color===p}"><i style="background:${h}"></i><i style="background:${p}"></i>${g}</button>`).join("")}</div><div class="row"><span>Added</span><input type="color" data-c="add_color" value="${e.add_color}"><span>Deleted</span><input type="color" data-c="del_color" value="${e.del_color}"></div><h4>Mode</h4>${c("subtype",r)}<div class="sample">The results are <span style="${d(!1)}">good</span> <span style="${d(!0)}">excellent</span>.</div><div class="foot"><small>As latexdiff's --type, --subtype</small><button data-reset="1">Reset</button></div>`,s.className="diffset on";let a=h=>{let p={...e,...h};t?.(p),this.diffSettings(p,t,i)};s.onclick=h=>{let p=h.target.closest("button");if(p){if(p.dataset.reset&&i)return a(i);if(p.dataset.pair){let[g,u]=p.dataset.pair.split(",");return a({add_color:g,del_color:u})}p.dataset.k&&a({[p.dataset.k]:p.dataset.v})}},s.onchange=h=>{let p=h.target;p.dataset.c&&a({[p.dataset.c]:p.value})}}warmTimer;warmup(e){let t=this.$("#warmup");if(clearInterval(this.warmTimer),e.state==="ready"){t.className="warmup on ready",t.innerHTML='<span class="dot"></span>\u26A1 Instant typing ready',this.warmTimer=setTimeout(()=>t.className="warmup",2500);return}let i=e.since??Date.now(),s=()=>{let n=Math.round((Date.now()-i)/1e3);t.innerHTML=`<span class="dot"></span><span>\u26A1 Preview ready \xB7 preparing instant typing\u2026 ${n} s${e.slow?' <span class="slow">\xB7 edits slower until ready</span>':""}</span>`};t.className="warmup on",s(),this.warmTimer=setInterval(s,1e3)}diagsOpen(e){this.win.classList.toggle("diags-open",e),this.$("#sum").setAttribute("aria-expanded",String(e))}latency(e,t){this.$("#lat").textContent=e,t&&(this.$("#details").textContent=t)}msg(e,t=!1){let i=this.$("#msg");i.textContent=e,i.className=`msg${t?" err":""}`,i.title=e,i.onclick=null,i.style.cursor=""}error(e){if(this.msg(e,!0),!this.last&&!this.pkgBusy){clearInterval(this.loadTick),this.loadTick=void 0;let t=this.$("#empty");if(t.innerHTML=`<div class="load"><h3>Couldn't open the project</h3><div class="count"></div><div class="note"></div></div>`,t.querySelector(".note").textContent=this.words.openFailed,t.querySelector(".count").textContent=e,this.ev.onReport){let i=document.createElement("button");i.className="reportbtn",i.textContent="Report a problem\u2026",i.onclick=()=>{this.report()},t.querySelector(".load").append(i)}}if(this.ev.onReport){let t=this.$("#msg");t.title=`${e} \u2014 click for a debug report to send`,t.style.cursor="pointer",t.onclick=()=>{this.report()}}}check(e){e.ok?this.msg(`\u2713 incremental = fresh build (${e.ms.toFixed(1)} ms)`):this.error(`\u2717 mismatch vs fresh build: ${e.mismatch}`)}files(e,t,i){this.msg(`${e.length} file${e.length===1?"":"s"} \xB7 ${i} \xB7 all local`)}mains(e,t){let i=this.$("#main");i.innerHTML="";for(let s of e)i.append(new Option(s,s,s===t,s===t))}redraw(){this.viewer?.redraw()}nav(){let e=this.viewer.pages,t=this.at;this.$("#pno").textContent=e?`${t+1} / ${e}`:"\u2013 / 0",this.$("#prev").disabled=t<=0,this.$("#next").disabled=t>=e-1,queueMicrotask(()=>this.emit())}layout(e){this.$("#empty").style.display="none",this.$("#stage").classList.remove("stale"),this.viewer.layout(e),this.at>=e.length&&(this.at=Math.max(0,e.length-1)),this.nav()}goto(e,t,i,s){this.ev.onGotoRange?.(e,t,i,s)}marks(e){this.viewer.marks(e)}async report(){let e=await this.ev.onReport?.()??"",t=this.$("#report");this.$("#reporttext").value=e,t.classList.add("on");let i=()=>navigator.clipboard.writeText(e).catch(()=>this.$("#reporttext").select());this.$("#reportcopy").onclick=()=>{i().then(()=>this.$("#reportcopy").textContent="Copied \u2713")};let s=this.$("#reportmail");s.style.display=le?"":"none",s.onclick=()=>{i().then(()=>{window.open(`mailto:${le}?subject=${encodeURIComponent("PhiTeX Instant debug report")}&body=${encodeURIComponent(`Please paste the debug report here (it is on your clipboard), and say what you were doing:
+</div>`.replace(/<span class="icon"(?: aria-hidden="true")?>(\w+)<\/span>/g, (_, n) => icon(n, n === "download" ? 16 : 18));
+    this.host = host2;
+    host2.style.display = "none";
+    (document.body ?? document.documentElement).append(host2);
+    this.win = this.$(".win");
+    this.$("#prev").onclick = () => this.prev();
+    this.$("#next").onclick = () => this.next();
+    this.$("#pdf").onclick = () => ev.onPdf();
+    this.$("#reload").onclick = () => ev.onReload();
+    const dbg = this.$("#dbg");
+    dbg.onclick = () => this.toggleDebug();
+    this.$("#dbg2").onchange = () => this.toggleDebug();
+    const license = this.$("#license");
+    if (license) license.href = opts.fileUrl?.(w.license) ?? w.license;
+    if (!ev.onTour) this.$("#tour").style.display = "none";
+    if (!ev.onNews) this.$("#news").style.display = "none";
+    if (opts.pdfjs === false) this.$("#fmt").closest("label").style.display = "none";
+    this.$("#byline").onclick = (e) => {
+      e.stopPropagation();
+      this.$("#about").classList.toggle("open");
+    };
+    this.$("#stage").addEventListener("pointerdown", () => this.$("#about").classList.remove("open"));
+    this.$("#news").onclick = () => {
+      this.sheet(false);
+      ev.onNews?.();
+    };
+    this.$("#tour").onclick = () => {
+      this.sheet(false);
+      ev.onTour?.();
+    };
+    this.$("#main").onchange = (e) => ev.onMain(e.target.value);
+    this.$("#zoom").onchange = (e) => this.zoomTo(e.target.value);
+    this.$("#fmt").onchange = (e) => {
+      this.prefs.format = e.target.value;
+      this.save();
+      this.viewer.invalidate();
+      ev.onFormat(this.prefs.format);
+    };
+    this.$("#min").onclick = () => this.collapse(!this.prefs.collapsed);
+    this.$("#chip").onclick = () => this.prefs.collapsed && this.collapse(false);
+    this.$("#lat").onclick = () => {
+      this.prefs.details = !this.prefs.details;
+      this.win.classList.toggle("details-open", this.prefs.details);
+      this.save();
+    };
+    this.$("#diags").onclick = (e) => {
+      const at = e.target.closest(".phx-place[data-file]");
+      if (at) {
+        e.preventDefault();
+        return ev.onGoto(at.dataset.file, Number(at.dataset.line) || 1);
+      }
+      const d = e.target.closest(".diag[data-line]");
+      if (d) ev.onGoto(d.dataset.file, Number(d.dataset.line));
+    };
+    const sum = this.$("#sum");
+    sum.onclick = () => this.diagnostics();
+    sum.onkeydown = (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), sum.click());
+    this.$("#stage").addEventListener("pointerdown", () => {
+      this.diagsOpen(false);
+      this.sheet(false);
+    });
+    this.root.addEventListener("keydown", (e) => e.key === "Escape" && this.diagsOpen(false));
+    window.addEventListener("keydown", (e) => {
+      if (e.altKey && e.shiftKey && e.code === "KeyP") {
+        e.preventDefault();
+        if (!ev.onShortcut?.()) this.collapse(!this.prefs.collapsed);
+      }
+    });
+    this.drag();
+    this.viewer = new Viewer(this.$("#viewer"), this.$("#stage"), {
+      need: (k) => ev.onNeed?.(k),
+      inView: (k) => {
+        this.at = k;
+        this.contents?.at(k);
+        this.nav();
+        ev.onPage(k);
+      },
+      svg: (img, w2) => "draws" in img ? svg(img.draws, w2) : null,
+      scale: () => this.scale(),
+      box: (d, w2) => pageBox(d, w2),
+      dbl: (k, x, y) => ev.onSyncSource?.(k, x, y),
+      selected: (sel) => ev.onSelectPage?.(sel),
+      link: ev.onLink ? (u) => ev.onLink(u) : void 0
+    });
+    this.extras(opts);
+    window.addEventListener("resize", () => this.place());
+    new ResizeObserver(() => {
+      if (this.docked) return this.prefs.zoom === "fit" ? this.redraw() : void 0;
+      if (this.prefs.collapsed) return;
+      const r = this.win.getBoundingClientRect();
+      if (r.width < 100 || r.height < 100) return;
+      if (Math.abs(r.width - this.prefs.w) + Math.abs(r.height - this.prefs.h) > 2) {
+        this.prefs.w = Math.round(r.width);
+        this.prefs.h = Math.round(r.height);
+        this.save();
+        if (this.prefs.zoom === "fit") this.redraw();
+      }
+    }).observe(this.win);
+    this.place();
+    store2?.load().then((p) => {
+      this.prefs = { ...DEFAULTS, ...p };
+      this.prefs.format = pageFormat(this.prefs.format);
+      if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
+      this.place();
+      if (this.prefs.format !== "vector") ev.onFormat(this.prefs.format);
+    });
+  }
+  /**
+   * Dock into `pane` (after `after`, filling the rest of it), or float
+   * (null): the fallback when the host's layout is not found.
+   */
+  dock(pane2, below) {
+    const h = this.host.style;
+    if (pane2) {
+      const top = below ? Math.max(0, below.getBoundingClientRect().bottom - pane2.getBoundingClientRect().top) : 0;
+      const cs = getComputedStyle(pane2);
+      if (cs.position === "static") pane2.style.position = "relative";
+      if (this.win.style.getPropertyValue("--pane") !== cs.backgroundColor) this.win.style.setProperty("--pane", cs.backgroundColor);
+      this.win.classList.toggle("pdf-dark", pane2.classList.contains("pdf-dark-mode"));
+      this.win.classList.toggle("light", document.body.dataset.theme === "light");
+      if (h.top !== `${top}px` || h.position !== "absolute") Object.assign(h, { position: "absolute", left: "0", right: "0", bottom: "0", top: `${top}px`, zIndex: "12", flexDirection: "column" });
+    }
+    if (pane2 === this.docked && this.host.isConnected) return;
+    this.docked = pane2;
+    if (pane2) {
+      pane2.append(this.host);
+      this.win.classList.add("docked");
+      this.win.classList.remove("collapsed");
+      this.win.setAttribute("role", "region");
+    } else {
+      (document.body ?? document.documentElement).append(this.host);
+      Object.assign(h, { position: "", left: "", right: "", bottom: "", top: "", zIndex: "" });
+      this.win.classList.remove("docked");
+      this.win.setAttribute("role", "dialog");
+      this.place();
+    }
+    this.redraw();
+  }
+  /** Shown or not (docked: the host's own PDF is showing instead). */
+  shown(on) {
+    const display = on ? this.docked ? "flex" : "" : "none";
+    if (this.host.style.display === display && this.wasShown === on) return;
+    const was = this.wasShown;
+    this.wasShown = on;
+    this.host.style.display = display;
+    if (on && !was) this.redraw();
+  }
+  wasShown;
+  save() {
+    this.store?.save(this.prefs);
+  }
+  place() {
+    if (this.docked) return;
+    const p = this.prefs, s = this.win.style;
+    const x = p.x ?? window.innerWidth - p.w - 16, y = p.y ?? window.innerHeight - p.h - 16;
+    s.left = `${Math.max(0, Math.min(x, window.innerWidth - 120))}px`;
+    s.top = `${Math.max(0, Math.min(y, window.innerHeight - 40))}px`;
+    this.$("#zoom").value = p.zoom;
+    this.$("#fmt").value = p.format;
+    this.win.classList.toggle("details-open", p.details);
+    this.collapse(p.collapsed, false);
+  }
+  collapse(on, save2 = true) {
+    this.prefs.collapsed = on;
+    this.win.classList.toggle("collapsed", on);
+    const b = this.$("#min");
+    b.title = on ? "Expand (Alt+Shift+P)" : "Collapse (Alt+Shift+P)";
+    b.innerHTML = icon(on ? "open_in_full" : "close_fullscreen");
+    this.win.style.width = on ? "" : `${this.prefs.w}px`;
+    this.win.style.height = on ? "" : `${this.prefs.h}px`;
+    if (!on) this.redraw();
+    if (save2) this.save();
+  }
+  drag() {
+    this.$("header").onpointerdown = (d) => {
+      if (d.target.closest("button, .chip")) return;
+      const r = this.win.getBoundingClientRect();
+      const move = (m) => {
+        this.prefs.x = Math.max(0, Math.min(r.left + m.clientX - d.clientX, window.innerWidth - 120));
+        this.prefs.y = Math.max(0, Math.min(r.top + m.clientY - d.clientY, window.innerHeight - 40));
+        this.win.style.left = `${this.prefs.x}px`;
+        this.win.style.top = `${this.prefs.y}px`;
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener(
+        "pointerup",
+        () => {
+          window.removeEventListener("pointermove", move);
+          this.save();
+        },
+        { once: true }
+      );
+    };
+  }
+  /** What the strip over the page says: packages on their way, or a build that is taking a while. */
+  pkgNow;
+  buildSince = 0;
+  actTick;
+  prepSince = 0;
+  /** The core readying its next rebuild: past 400 ms the strip says so, not "Typesetting". */
+  preparing(on) {
+    this.prepSince = on ? this.prepSince || performance.now() : 0;
+    this.activity();
+  }
+  /** A build started (`on`) or ended: past 400 ms the strip says so, with its time. */
+  /** A streamed open's pages so far (the strip: which page it is on). */
+  streamed;
+  streaming(s) {
+    this.streamed = s ? s.pages : void 0;
+    this.activity();
+  }
+  busy(on) {
+    this.$("#chip").classList.toggle("busy", on);
+    this.buildSince = on ? this.buildSince || performance.now() : 0;
+    this.activity();
+  }
+  /** The strip over the page: never silent while the writer waits. */
+  activity() {
+    const el = this.$("#pkgs");
+    const p = this.pkgNow;
+    const prep = this.prepSince && performance.now() - this.prepSince > 400;
+    const long = this.buildSince && performance.now() - this.buildSince > 400 || prep;
+    const on = (!!this.last || this.viewer.pages > 0) && (!!p || !!long);
+    el.classList.toggle("on", on);
+    if (on || this.buildSince || this.prepSince) this.actTick ??= setInterval(() => this.activity(), 250);
+    else clearInterval(this.actTick), this.actTick = void 0;
+    if (!on) return;
+    if (p) {
+      const names = p.names.slice(0, 3).join(", ") + (p.names.length > 3 ? ` and ${p.names.length - 3} more` : "");
+      el.innerHTML = `${icon("download", 16)}<span></span><span class="mini"><i style="width:${p.pct}%"></i></span>`;
+      el.querySelector("span").textContent = `Fetching ${names} from ${p.source} (${p.done} of ${p.total})\u2026`;
+    } else if (prep) {
+      const s = (performance.now() - this.prepSince) / 1e3;
+      el.innerHTML = `${icon("sync", 16)}<span></span><span class="mini busy"><i></i></span>`;
+      el.querySelector("span").textContent = this.words.preparing.replace("{s}", s < 10 ? s.toFixed(1) : String(Math.round(s)));
+    } else {
+      const s = (performance.now() - this.buildSince) / 1e3;
+      el.innerHTML = `${icon("sync", 16)}<span></span><span class="mini busy"><i></i></span>`;
+      const page = this.streamed ? ` page ${this.streamed + 1}` : "";
+      el.querySelector("span").textContent = `Typesetting\u2026${page} ${s < 10 ? s.toFixed(1) : Math.round(s)} s`;
+    }
+  }
+  /** Packages still on their way (the loading card's), so a stop reads as one only once they are in. */
+  pkgBusy = false;
+  /**
+   * Before any page: a build that stopped at an error says so, in place of
+   * "Typesetting…" (a stopped job's PDF is unfinished: no page to draw).
+   */
+  stopped() {
+    if (this.engineNow && !this.engineNow.ready) return this.engineCard(this.engineNow.engine, null);
+    if (this.last || this.pkgBusy) return false;
+    const e = this.lastStatus?.diagnostics?.find((d) => d.severity === "error");
+    if (!e) return false;
+    const needed = errorNeeds(e.message);
+    if (needed) return this.engineCard(needed, e.message);
+    const empty = this.$("#empty");
+    empty.innerHTML = `<div class="load"><h3></h3><div class="count"></div><div class="note"></div></div>`;
+    empty.querySelector("h3").textContent = "The build stopped before a page could be shown";
+    empty.querySelector(".count").textContent = e.message + (e.file && e.line ? ` (${e.file}:${e.line})` : "");
+    empty.querySelector(".note").textContent = this.words.stopped;
+    this.reportLink(empty.querySelector(".load"));
+    empty.style.display = "";
+    return true;
+  }
+  /** "Copy debug info" under a card, if reports are wired. */
+  reportLink(card) {
+    if (!this.ev.onReport) return;
+    const b = document.createElement("button");
+    b.className = "reportbtn";
+    b.textContent = "Copy debug info\u2026";
+    b.style.cssText = "margin-top:10px;cursor:pointer;padding:3px 12px;border-radius:9999px;border:1px solid currentColor;background:none;color:inherit;font:inherit;font-weight:600";
+    b.onclick = () => void this.report();
+    card.append(b);
+  }
+  /** The engine the session runs, as it last said. */
+  engineNow;
+  /** A XeLaTeX project shown approximated with pdfLaTeX (fonts substituted). */
+  approx = false;
+  engine(e) {
+    this.engineNow = e;
+    this.approx = !!e.approx;
+    const a = this.$("#approx");
+    a.style.display = this.approx ? "block" : "none";
+    a.textContent = `Approximate: needs ${ENGINES[e.engine].label}, shown with pdfLaTeX (fonts substituted, breaks may differ). ${this.words.realPdf}`;
+    if (!e.ready) this.stopped();
+    else if (this.$("#empty").querySelector(".engine")) this.$("#empty").style.display = "none";
+  }
+  /**
+   * The project needs `want` (its preamble, or `error`, a build that
+   * stopped, says so): which engine to run it with, as buttons.
+   */
+  engineCard(want, error) {
+    const empty = this.$("#empty");
+    const ready = ENGINES[want].ready;
+    empty.innerHTML = `<div class="load engine"><h3></h3><div class="count"></div><div class="note"></div><div class="btns"></div></div>`;
+    empty.querySelector("h3").textContent = error ? `This project needs ${want === "lualatex" ? "LuaLaTeX" : "XeLaTeX or LuaLaTeX"}` : `This project runs with ${ENGINES[want].label}`;
+    empty.querySelector(".count").textContent = error ?? "Its preamble loads a package that pdfLaTeX can't run (fontspec, unicode-math, polyglossia, \u2026), or the engine was chosen for it.";
+    empty.querySelector(".note").textContent = ready ? `Run it with ${ENGINES[want].label}?` : `\u26A1 Instant doesn't run ${ENGINES[want].label} yet: only pdfLaTeX. ${this.words.notReady}, or try pdfLaTeX if the project can do without those packages.`;
+    const btns = empty.querySelector(".btns");
+    const offer = this.engineNow?.engine === want ? ["pdflatex"] : want === "xelatex" ? ["xelatex", "lualatex"] : [want];
+    for (const e of offer) {
+      const b = document.createElement("button");
+      b.className = "btn";
+      b.textContent = e === "pdflatex" ? "Try pdfLaTeX anyway" : `Use ${ENGINES[e].label}${ENGINES[e].ready ? "" : " (coming)"}`;
+      b.title = e === "pdflatex" ? "For this project: pdfLaTeX, whatever its preamble loads" : `For this project from now on (Settings \u2192 Engine for every project)`;
+      b.onclick = () => this.ev.onEngine?.(e);
+      btns.append(b);
+    }
+    empty.style.display = "";
+    return true;
+  }
+  status(s) {
+    this.lastStatus = s;
+    queueMicrotask(() => this.stopped());
+    const diags = s.diagnostics ?? [];
+    const worst = diags[0]?.severity;
+    const chip = this.$("#chip");
+    const partial = !!s.pending || s.pages === 0;
+    chip.className = `chip ${worst === "error" ? "error" : partial || worst === "warning" ? "warning" : "ok"}`;
+    this.$("#chiptext").textContent = `${s.pages} page${s.pages === 1 ? "" : "s"}${s.pending ? " \xB7 partial" : ""}`;
+    chip.title = (s.pending ? `${s.pending} parts not read (out of fuel or unsupported). ` : "") + (diags.length ? `${diags.length} diagnostic${diags.length === 1 ? "" : "s"}` : "No problems found") + (s.file ? ` \xB7 editing ${s.file}` : "");
+    const list = this.$("#diags");
+    list.innerHTML = "";
+    for (const d of diags.slice(0, 50)) {
+      if (d.problem) {
+        const card = document.createElement("ol");
+        card.className = "phx-card phx-inline";
+        card.setAttribute("role", "listitem");
+        card.innerHTML = problemHtml(d.problem);
+        list.append(card);
+        continue;
+      }
+      const row = document.createElement("div");
+      row.className = `diag ${d.severity}`;
+      row.setAttribute("role", "listitem");
+      if (d.file && d.line) {
+        row.dataset.file = d.file;
+        row.dataset.line = String(d.line);
+        row.title = `Go to ${d.file}:${d.line}`;
+      }
+      row.innerHTML = `${icon(d.severity, 16)}<span class="text"></span><span class="where"></span>`;
+      row.querySelector(".text").textContent = d.message;
+      if (d.detail) {
+        const pre = document.createElement("pre");
+        pre.className = "detail";
+        pre.textContent = d.detail;
+        row.querySelector(".text").append(pre);
+      }
+      row.querySelector(".where").textContent = d.file ? `${d.file}${d.line ? `:${d.line}` : ""}` : "";
+      list.append(row);
+    }
+    if (diags.length > 50) {
+      const more = document.createElement("div");
+      more.className = "diag info";
+      more.textContent = `\u2026 and ${diags.length - 50} more`;
+      list.append(more);
+    }
+    if (this.ev.onReport) {
+      const b = document.createElement("button");
+      b.className = "reportbtn";
+      b.textContent = "Report a problem\u2026";
+      b.onclick = (e) => (e.stopPropagation(), void this.report());
+      list.append(b);
+    }
+    const sum = this.$("#sum");
+    sum.style.display = diags.length ? "" : "none";
+    if (!diags.length) this.diagsOpen(false);
+    const count = (sev) => diags.filter((d) => d.severity === sev).length;
+    sum.innerHTML = ["error", "warning", "info"].filter((k) => count(k)).map((k) => `<span class="n ${k}">${icon(k, 14)}${count(k)}</span>`).join("") + `<span class="first"></span>${icon("chevron_right", 16).replace('class="icon"', 'class="icon caret"')}`;
+    if (diags[0]) sum.querySelector(".first").textContent = diags[0].message;
+    const errs = JSON.stringify(diags.filter((d) => d.problem && d.severity === "error").map((d) => [d.message, d.file, d.line]));
+    if (errs !== "[]" && errs !== this.errsClosed) this.diagsOpen(true);
+    if (errs === "[]") this.errsClosed = "";
+    this.stale(s);
+    queueMicrotask(() => this.emit());
+  }
+  /**
+   * Packages downloading: said plainly, so a slow first build reads as the
+   * download's (TeX Live's files, not the project's, not Overleaf's).
+   */
+  /** The loading card's clock: when loading began, the last file that arrived, its ticker. */
+  loadT0 = 0;
+  loadLast = 0;
+  loadDone = -1;
+  loadTick;
+  loadPct = 0;
+  /** The card's live line: time so far and the last arrival, so a long fetch reads as working, not stuck. */
+  alive() {
+    const el = this.$("#empty").querySelector(".alive");
+    if (!el || this.last) {
+      clearInterval(this.loadTick);
+      this.loadTick = void 0;
+      return;
+    }
+    const now = performance.now(), s = Math.round((now - this.loadT0) / 1e3), quiet = (now - this.loadLast) / 1e3;
+    const fetching = el.dataset.phase === "fetch";
+    if (el.dataset.phase === "read") {
+      el.textContent = `Reading \xB7 ${s} s`;
+      return;
+    }
+    el.textContent = fetching ? quiet < 4 ? `Still fetching \xB7 ${s} s \xB7 files arriving` : `Still fetching \xB7 ${s} s \xB7 a large package (TikZ, fonts) is on its way` : `Typesetting \xB7 ${s} s`;
+    if (s >= 20 && fetching) el.textContent += " \xB7 only the first time: next visits reuse them";
+  }
+  /** The reading step's last state, and when its card last changed (redrawn at most every 50 ms). */
+  readNow;
+  readDrawn = 0;
+  readTimer;
+  /**
+   * Reading the project, before the packages: what is happening (the
+   * download from Overleaf, each file unpacked, each figure handed to the
+   * engine), the file in hand and how far, so the first seconds read as work.
+   */
+  reading(r) {
+    if (this.last || this.pkgBusy || this.loadDone >= 0) return;
+    this.readNow = r;
+    this.loadT0 ||= performance.now();
+    const wait = 50 - (performance.now() - this.readDrawn);
+    if (wait > 0) {
+      this.readTimer ??= setTimeout(() => (this.readTimer = void 0, this.drawReading()), wait);
+      return;
+    }
+    this.drawReading();
+  }
+  drawReading() {
+    const r = this.readNow;
+    if (!r || this.last || this.pkgBusy || this.loadDone >= 0) return;
+    this.readDrawn = performance.now();
+    const empty = this.$("#empty");
+    let card = empty.querySelector(".load.reading");
+    if (!card) {
+      empty.innerHTML = `<div class="load reading"><div class="steps"><span class="now">Project</span><i></i><span>Packages</span><i></i><span>Typesetting</span></div><h3></h3><div class="bar busy"><i></i></div><div class="alive" data-phase="read"></div><div class="count"></div><div class="names"></div><div class="note">${this.words.reading}</div></div>`;
+      card = empty.querySelector(".load.reading");
+    }
+    card.querySelector("h3").textContent = r.h;
+    const pct = r.pct ?? (r.total ? Math.round(100 * (r.done ?? 0) / r.total) : void 0);
+    const bar = card.querySelector(".bar");
+    bar.classList.toggle("busy", pct === void 0);
+    bar.querySelector("i").style.width = pct === void 0 ? "" : `${pct}%`;
+    card.querySelector(".count").textContent = r.total ? `${r.done ?? 0} of ${r.total}` : "";
+    const names = card.querySelector(".names");
+    names.innerHTML = "";
+    if (r.detail) {
+      const c = document.createElement("span");
+      c.className = "ing";
+      c.textContent = r.detail;
+      names.append(c);
+    }
+    this.alive();
+    this.loadTick ??= setInterval(() => this.alive(), 1e3);
+  }
+  packages(p) {
+    const done = p.done?.length ?? 0;
+    const total = done + p.loading.length;
+    const now = performance.now();
+    if (!this.loadT0) this.loadT0 = now;
+    if (done !== this.loadDone) {
+      this.loadDone = done;
+      this.loadLast = now;
+    }
+    const pct = this.loadPct = Math.max(this.loadPct, total ? Math.round(100 * done / total) : 100);
+    if (!this.last) {
+      const empty = this.$("#empty");
+      if (!p.loading.length && !p.building) {
+        this.pkgBusy = false;
+        if (!this.stopped()) {
+          empty.innerHTML = `<div class="load"><div class="steps"><span class="ok">Project read</span><i></i><span class="ok">Packages</span><i></i><span class="now">Typesetting</span></div><h3>Typesetting\u2026</h3><div class="bar busy"><i></i></div><div class="alive" data-phase="tex"></div></div>`;
+          this.loadT0 ||= performance.now();
+          this.alive();
+          this.loadTick ??= setInterval(() => this.alive(), 1e3);
+        }
+        return;
+      }
+      const recent = [...(p.done ?? []).slice(-10).map((n) => [n, "ok"]), ...p.loading.slice(0, 8).map((n) => [n, "ing"])];
+      const fetch2 = p.loading.length > 0;
+      this.pkgBusy = true;
+      empty.innerHTML = `<div class="load"><div class="steps"><span class="ok">Project read</span><i></i><span class="${fetch2 ? "now" : "ok"}">Packages</span><i></i><span class="${fetch2 ? "" : "now"}">Typesetting</span></div><h3></h3><div class="bar${fetch2 ? "" : " busy"}"><i style="width:${pct}%"></i></div><div class="alive" data-phase="${fetch2 ? "fetch" : "tex"}"></div><div class="count"></div><div class="names"></div><div class="note"></div></div>`;
+      this.alive();
+      this.loadTick ??= setInterval(() => this.alive(), 1e3);
+      empty.querySelector("h3").textContent = p.loading.length ? "Fetching LaTeX packages\u2026" : "Typesetting\u2026";
+      empty.querySelector(".count").textContent = p.loading.length ? `${done} of ${total} files${p.unavailable.length ? ` \xB7 ${p.unavailable.length} not found` : ""}` : `with ${done} package file${done === 1 ? "" : "s"}; a build may ask for more`;
+      const names = empty.querySelector(".names");
+      for (const [n, k] of recent) {
+        const c = document.createElement("span");
+        c.className = k;
+        c.textContent = n;
+        names.append(c);
+      }
+      empty.querySelector(".note").textContent = `From ${p.source} (fetched once, then kept in ${this.words.keptIn}). Only package names leave it, never your project's files.`;
+      return;
+    }
+    this.pkgNow = p.loading.length ? { names: p.loading, done, total, pct, source: p.source } : void 0;
+    this.activity();
+  }
+  /** Keep the last good page when a build ships nothing (or not this page): dimmed, with why. */
+  /** When the page first went missing (a build that shipped none); its dimming waits. */
+  staleSince = 0;
+  staleTimer;
+  /**
+   * Dim the last good page when a build ships none, but only once that has
+   * lasted STALE_GRACE_MS: typing `\section{B…` is an error at every
+   * keystroke until the `}`, and the page shouldn't flash grey for each.
+   */
+  stale(s) {
+    const stage = this.$("#stage");
+    const gone = (s.pages === 0 || this.at >= s.pages) && !!this.last;
+    clearTimeout(this.staleTimer);
+    if (!gone) {
+      this.staleSince = 0;
+      stage.classList.remove("stale");
+      return;
+    }
+    const now = performance.now();
+    this.staleSince ||= now;
+    const left = STALE_GRACE_MS - (now - this.staleSince);
+    if (left > 0) {
+      this.staleTimer = setTimeout(() => this.lastStatus && this.stale(this.lastStatus), left);
+      return;
+    }
+    stage.classList.add("stale");
+    const why = s.diagnostics?.find((d) => d.severity !== "info" && d.code !== "no-pages");
+    this.$("#banner").textContent = `Showing the last complete render: ${why ? why.message + (why.line ? ` (${why.file}:${why.line})` : "") : "this build shipped no page"}.`;
+  }
+  /** Follow what the panel shows (a host toolbar's controls). */
+  onState(cb) {
+    this.listeners.push(cb);
+    cb(this.state());
+  }
+  state() {
+    const chip = this.$("#chip");
+    return {
+      page: this.at,
+      pages: this.lastStatus?.pages ?? 0,
+      zoom: this.prefs.zoom,
+      debug: this.debugOn,
+      level: ["error", "warning", "ok"].find((c) => chip.classList.contains(c)) ?? "ok",
+      chip: this.$("#chiptext").textContent ?? "",
+      chipTitle: chip.title,
+      speed: this.speed,
+      sheet: this.win.classList.contains("sheet-open"),
+      // (the badge counts what needs a look: info is listed, not counted)
+      diagCount: this.lastStatus?.diagnostics?.filter((d) => d.severity !== "info").length ?? 0,
+      diagWorst: this.lastStatus?.diagnostics?.[0]?.severity ?? "",
+      percent: Math.round(this.scale() * 100)
+    };
+  }
+  emit() {
+    const s = this.state();
+    for (const f of this.listeners) f(s);
+  }
+  /**
+   * The zoom, 1 being 100% (a PDF point at 96/72 CSS pixels). Fit is
+   * pdf.js's "page-width", as Overleaf's viewer: (clientWidth − 40) / the
+   * page's width, 40 being its SCROLLBAR_PADDING.
+   */
+  scale() {
+    if (this.prefs.zoom !== "fit") return Number(this.prefs.zoom);
+    const d = this.last && "draws" in this.last ? this.last.draws : null;
+    const pageW = (d?.w ?? 612) * (96 / 72);
+    return Math.max(this.$("#stage").clientWidth - (this.docked ? 40 : 24), 200) / pageW;
+  }
+  goPage(k) {
+    this.viewer.goTo(k);
+  }
+  /** One zoom step in or out, from where it is (as Overleaf's − +). */
+  zoomStep(dir) {
+    const steps = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+    const now = this.scale();
+    const next = dir > 0 ? steps.find((z) => z > now + 0.01) : [...steps].reverse().find((z) => z < now - 0.01);
+    this.zoomTo(String(next ?? now));
+  }
+  /** The contents beside the pages (PanelOptions.outline). */
+  contents;
+  /** The document's outline (its PDF's bookmarks), from the host after each build. */
+  outline(items) {
+    this.contents?.set(items);
+    this.contents?.at(this.at);
+  }
+  /** The contents shown or hidden (remembered on this machine). */
+  side(on = !this.win.classList.contains("side-on")) {
+    if (!this.contents) return;
+    this.win.classList.toggle("side-on", on);
+    try {
+      localStorage.setItem("phitex.side", on ? "1" : "0");
+    } catch {
+    }
+    if (this.prefs.zoom === "fit") this.redraw();
+  }
+  /** A button of the host's in the header, before the page controls (the CLI's Compare). */
+  headerButton(label, title, onclick) {
+    const b = document.createElement("button");
+    b.className = "ib";
+    b.style.cssText = "width:auto;padding:0 8px;font-size:12px";
+    b.title = title;
+    b.textContent = label;
+    b.onclick = () => onclick(b);
+    this.$("header .grow").after(b);
+    return b;
+  }
+  /** The contents and the keys, as the host asked (PanelOptions). */
+  extras(opts) {
+    if (opts.header) this.win.classList.add("own-header");
+    if (opts.outline) {
+      this.win.classList.add("has-side");
+      this.contents = new Outline(this.$("#side"), { goToPlace: (k, top) => this.viewer.goToPlace(k, top) });
+      const b = document.createElement("button");
+      b.className = "ib";
+      b.title = "Contents (t)";
+      b.setAttribute("aria-label", "Contents");
+      b.textContent = "\u2630";
+      b.onclick = () => this.side();
+      this.$("header .title").before(b);
+      let on = true;
+      try {
+        on = localStorage.getItem("phitex.side") !== "0";
+      } catch {
+      }
+      this.win.classList.toggle("side-on", on);
+    }
+    if (!opts.keys) return;
+    const help = this.$("#keyhelp");
+    const extra = [["e", "the build's errors and warnings"], ...opts.outline ? [["t", "the contents beside the pages"]] : []];
+    help.innerHTML = `<b>Keys</b><table>${[...KEYS, ...extra].map(([k, w]) => `<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`).join("")}</table>`;
+    addEventListener(
+      "keydown",
+      (e) => {
+        if (e.ctrlKey || e.altKey || e.metaKey || e.target?.closest?.("input, textarea, select, [contenteditable=true]")) return;
+        const drawer = this.win.classList.contains("diags-open");
+        if (e.key === "Escape" && drawer) this.diagnostics(false);
+        else if (e.key === "e") this.diagnostics();
+        else if (e.key === "t" && this.contents) this.side();
+        else return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      },
+      { capture: true }
+    );
+    const stage = this.$("#stage");
+    const pageH = () => {
+      const d = this.last && "draws" in this.last ? this.last.draws : null;
+      return (d?.h ?? 792) * (96 / 72);
+    };
+    const panel2 = this;
+    bindKeys(window, {
+      get pages() {
+        return panel2.viewer.pages;
+      },
+      get page() {
+        return panel2.viewer.page;
+      },
+      goTo: (k) => this.viewer.goTo(k),
+      turn: (n) => this.viewer.turn(n),
+      scroller: stage,
+      zoom: (f) => this.zoomTo(String(Math.min(5, Math.max(0.25, this.scale() * f)))),
+      fitWidth: () => this.zoomTo("fit"),
+      fitPage: () => this.zoomTo(String(Math.max(0.2, Math.min((stage.clientHeight - 24) / pageH(), this.scale())))),
+      help: (show) => {
+        help.hidden = !show;
+      }
+    });
+  }
+  /** The errors last closed by hand (the drawer opens again when they change). */
+  errsClosed = "";
+  /** The diagnostics drawer. */
+  diagnostics(on = !this.win.classList.contains("diags-open")) {
+    if (!on) this.errsClosed = JSON.stringify((this.lastStatus?.diagnostics ?? []).filter((d) => d.problem && d.severity === "error").map((d) => [d.message, d.file, d.line]));
+    this.diagsOpen(on);
+    this.emit();
+  }
+  prev() {
+    this.viewer.goTo(this.at - 1);
+  }
+  next() {
+    this.viewer.goTo(this.at + 1);
+  }
+  clean() {
+    this.ev.onClean();
+  }
+  pdf() {
+    this.ev.onPdf();
+  }
+  zoomTo(z) {
+    this.prefs.zoom = z;
+    this.$("#zoom").value = z;
+    this.save();
+    this.redraw();
+    this.emit();
+  }
+  /** The page format, set from outside (the popup). */
+  formatTo(f) {
+    if (this.prefs.format === f) return;
+    this.prefs.format = f;
+    this.$("#fmt").value = f;
+    this.viewer.invalidate();
+    this.ev.onFormat(f);
+  }
+  toggleDebug() {
+    this.debugOn = !this.debugOn;
+    this.$("#dbg").setAttribute("aria-pressed", String(this.debugOn));
+    this.$("#dbg2").checked = this.debugOn;
+    this.ev.onDebug(this.debugOn);
+    this.msg(this.debugOn ? "debug check on" : "debug check off");
+    this.emit();
+  }
+  /** The settings sheet (docked: main file, view, reload, the latency details). */
+  sheet(on = !this.win.classList.contains("sheet-open")) {
+    this.win.classList.toggle("sheet-open", on && !!this.docked);
+    this.emit();
+  }
+  /** The ⚡ chip shown or not (the popup's setting). */
+  speedChip(on) {
+    this.win.classList.toggle("nospeed", !on);
+  }
+  /** A repaint reached the screen, `ms` after its keystroke: the ⚡ chip says how fast. */
+  painted(ms) {
+    this.speed = { ms, at: performance.now() };
+    const chip = this.$("#speedchip");
+    chip.textContent = `\u26A1 ${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
+    chip.classList.toggle("slow", ms > 100);
+    chip.classList.remove("flash");
+    void chip.offsetWidth;
+    chip.classList.add("flash");
+    this.emit();
+  }
+  /**
+   * The diff's bar over the page (null: none): against which version, the
+   * changes and the one at, and its controls. `showing` "diff" or "current":
+   * which of the two the page is (toggled with "d").
+   */
+  diffBar(d, on) {
+    const el = this.$("#diffbar");
+    if (!d) {
+      el.className = "diffbar";
+      el.innerHTML = "";
+      return;
+    }
+    const esc6 = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+    const n = d.busy ? `<span class="n busy">${esc6(d.busy)}</span>` : `<span class="n">${d.changes ? `${d.at > 0 ? `${d.at} / ` : ""}${d.changes} change${d.changes === 1 ? "" : "s"}` : "no changes"}</span>`;
+    el.innerHTML = `<span class="what" title="${esc6(d.title)}">Diff vs ${esc6(d.title)} <small>${esc6(d.when)}</small></span><button data-a="prev" title="Previous change (Shift+N)" ${d.busy || !d.changes ? "disabled" : ""}>\u2039</button>${n}<button data-a="next" title="Next change (N)" ${d.busy || !d.changes ? "disabled" : ""}>\u203A</button><span class="sep"></span><button data-a="toggle" class="${d.showing === "current" ? "cur" : ""}" title="Show the ${d.showing === "diff" ? "current version" : "diff"} (D)">${d.showing === "diff" ? "Current" : "Diff"}</button><button data-a="pdf" title="Download the diff PDF" ${d.busy ? "disabled" : ""}>\u2B07 PDF</button><button data-a="tex" title="Download diff.tex" ${d.busy ? "disabled" : ""}>\u2B07 .tex</button><button data-a="settings" title="Diff style: colors, markup" aria-label="Diff style">\u2699</button><button data-a="close" title="Stop comparing" aria-label="Stop comparing">\u2715</button>`;
+    el.className = "diffbar on";
+    el.onclick = (e) => {
+      const a = e.target.closest("button[data-a]")?.dataset.a;
+      if (a) on?.[a]?.();
+    };
+  }
+  /**
+   * The diff's style, a popover under the bar (null: shut): latexdiff's
+   * markup and subtype, and the two colors, `change` called on each pick.
+   */
+  diffSettings(look, change, defaults2) {
+    const el = this.$("#diffset");
+    if (!look) {
+      el.className = "diffset";
+      return;
+    }
+    look = { ...look, add_color: safeColor(look.add_color, "#0000ff"), del_color: safeColor(look.del_color, "#ff0000") };
+    const MARKUP = [
+      ["underline", "Underline"],
+      ["ctraditional", "Color + font"],
+      ["traditional", "Font"],
+      ["cfont", "Color + size"],
+      ["fontstrike", "Strike"],
+      ["bold", "Bold"],
+      ["changebar", "Change bars"],
+      ["culinechbar", "Underline + bars"],
+      ["invisible", "Hide deletions"]
+    ];
+    const SUB = [["safe", "Plain"], ["color", "Colored"], ["marker", "Margin marks"]];
+    const PAIRS = [
+      ["#0000ff", "#ff0000", "Blue / red"],
+      ["#15803d", "#b91c1c", "Green / red"],
+      ["#0072b2", "#d55e00", "Colorblind-safe"],
+      ["#7e22ce", "#6b7280", "Purple / gray"]
+    ];
+    const seg = (key, opts) => `<div class="opts">${opts.map(([v, t]) => `<button data-k="${key}" data-v="${v}" aria-pressed="${look[key] === v}">${t}</button>`).join("")}</div>`;
+    const deco = (add) => {
+      const c = add ? look.add_color : look.del_color;
+      if (look.markup === "invisible" && !add) return "display:none";
+      const strike = !add && /^(underline|fontstrike|culinechbar)$/.test(look.markup);
+      const line = add && /^(underline|culinechbar)$/.test(look.markup) ? `text-decoration: underline wavy ${c}; text-underline-offset: 3px;` : "";
+      return `color:${c};${strike ? `text-decoration: line-through ${c};` : ""}${line}${look.markup === "bold" && add ? "font-weight:700;" : ""}`;
+    };
+    el.innerHTML = `<h4>Style</h4>${seg("markup", MARKUP)}<h4>Colors</h4><div class="opts">${PAIRS.map(([a, d, t]) => `<button class="pair" data-pair="${a},${d}" aria-pressed="${look.add_color === a && look.del_color === d}"><i style="background:${a}"></i><i style="background:${d}"></i>${t}</button>`).join("")}</div><div class="row"><span>Added</span><input type="color" data-c="add_color" value="${look.add_color}"><span>Deleted</span><input type="color" data-c="del_color" value="${look.del_color}"></div><h4>Mode</h4>${seg("subtype", SUB)}<div class="sample">The results are <span style="${deco(false)}">good</span> <span style="${deco(true)}">excellent</span>.</div><div class="foot"><small>As latexdiff's --type, --subtype</small><button data-reset="1">Reset</button></div>`;
+    el.className = "diffset on";
+    const set = (l) => {
+      const next = { ...look, ...l };
+      change?.(next);
+      this.diffSettings(next, change, defaults2);
+    };
+    el.onclick = (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      if (b.dataset.reset && defaults2) return set(defaults2);
+      if (b.dataset.pair) {
+        const [a, d] = b.dataset.pair.split(",");
+        return set({ add_color: a, del_color: d });
+      }
+      if (b.dataset.k) set({ [b.dataset.k]: b.dataset.v });
+    };
+    el.onchange = (e) => {
+      const i = e.target;
+      if (i.dataset.c) set({ [i.dataset.c]: i.value });
+    };
+  }
+  warmTimer;
+  /** Startup: the first paint is in, instant typing still being prepared (a pill over the page, the time going); then "ready", briefly. */
+  warmup(w) {
+    const el = this.$("#warmup");
+    clearInterval(this.warmTimer);
+    if (w.state === "ready") {
+      el.className = "warmup on ready";
+      el.innerHTML = `<span class="dot"></span>\u26A1 Instant typing ready`;
+      this.warmTimer = setTimeout(() => el.className = "warmup", 2500);
+      return;
+    }
+    const since = w.since ?? Date.now();
+    const tick = () => {
+      const s = Math.round((Date.now() - since) / 1e3);
+      el.innerHTML = `<span class="dot"></span><span>\u26A1 Preview ready \xB7 preparing instant typing\u2026 ${s} s${w.slow ? ` <span class="slow">\xB7 edits slower until ready</span>` : ""}</span>`;
+    };
+    el.className = "warmup on";
+    tick();
+    this.warmTimer = setInterval(tick, 1e3);
+  }
+  /** The diagnostics list: a drawer over the page, so it never takes the page's room. */
+  diagsOpen(on) {
+    this.win.classList.toggle("diags-open", on);
+    this.$("#sum").setAttribute("aria-expanded", String(on));
+  }
+  latency(summary, details) {
+    this.$("#lat").textContent = summary;
+    if (details) this.$("#details").textContent = details;
+  }
+  msg(t, err = false) {
+    const m = this.$("#msg");
+    m.textContent = t;
+    m.className = `msg${err ? " err" : ""}`;
+    m.title = t;
+    m.onclick = null;
+    m.style.cursor = "";
+  }
+  error(t) {
+    this.msg(t, true);
+    if (!this.last && !this.pkgBusy) {
+      clearInterval(this.loadTick);
+      this.loadTick = void 0;
+      const empty = this.$("#empty");
+      empty.innerHTML = `<div class="load"><h3>Couldn't open the project</h3><div class="count"></div><div class="note"></div></div>`;
+      empty.querySelector(".note").textContent = this.words.openFailed;
+      empty.querySelector(".count").textContent = t;
+      if (this.ev.onReport) {
+        const b = document.createElement("button");
+        b.className = "reportbtn";
+        b.textContent = "Report a problem\u2026";
+        b.onclick = () => void this.report();
+        empty.querySelector(".load").append(b);
+      }
+    }
+    if (this.ev.onReport) {
+      const m = this.$("#msg");
+      m.title = `${t} \u2014 click for a debug report to send`;
+      m.style.cursor = "pointer";
+      m.onclick = () => void this.report();
+    }
+  }
+  check(r) {
+    if (r.ok) this.msg(`\u2713 incremental = fresh build (${r.ms.toFixed(1)} ms)`);
+    else this.error(`\u2717 mismatch vs fresh build: ${r.mismatch}`);
+  }
+  files(names, _skipped, took) {
+    this.msg(`${names.length} file${names.length === 1 ? "" : "s"} \xB7 ${took} \xB7 all local`);
+  }
+  mains(names, main) {
+    const s = this.$("#main");
+    s.innerHTML = "";
+    for (const n of names) s.append(new Option(n, n, n === main, n === main));
+  }
+  redraw() {
+    this.viewer?.redraw();
+  }
+  /** ⌃ ⌄ and the page number, for the page in view. */
+  nav() {
+    const n = this.viewer.pages;
+    const k = this.at;
+    this.$("#pno").textContent = n ? `${k + 1} / ${n}` : "\u2013 / 0";
+    this.$("#prev").disabled = k <= 0;
+    this.$("#next").disabled = k >= n - 1;
+    queueMicrotask(() => this.emit());
+  }
+  /** The pages there are, by hash (the viewer draws the changed ones it shows). */
+  layout(hashes) {
+    this.$("#empty").style.display = "none";
+    this.$("#stage").classList.remove("stale");
+    this.viewer.layout(hashes);
+    if (this.at >= hashes.length) this.at = Math.max(0, hashes.length - 1);
+    this.nav();
+  }
+  /** The editor to a page's source (a double-click on it). */
+  goto(file, from2, to, focus) {
+    this.ev.onGotoRange?.(file, from2, to, focus);
+  }
+  /** The editor's selection on the pages ([] clears). */
+  marks(marks) {
+    this.viewer.marks(marks);
+  }
+  /** The debug report, shown whole before it is copied or emailed. */
+  async report() {
+    const text = await this.ev.onReport?.() ?? "";
+    const box = this.$("#report");
+    this.$("#reporttext").value = text;
+    box.classList.add("on");
+    const copy = () => navigator.clipboard.writeText(text).catch(() => this.$("#reporttext").select());
+    this.$("#reportcopy").onclick = () => void copy().then(() => this.$("#reportcopy").textContent = "Copied \u2713");
+    const mail = this.$("#reportmail");
+    mail.style.display = REPORT_TO ? "" : "none";
+    mail.onclick = () => void copy().then(() => {
+      const body = "Please paste the debug report here (it is on your clipboard), and say what you were doing:\n\n";
+      window.open(`mailto:${REPORT_TO}?subject=${encodeURIComponent("PhiTeX Instant debug report")}&body=${encodeURIComponent(body)}`);
+    });
+    this.$("#reportclose").onclick = () => box.classList.remove("on");
+  }
+  /** Highlight `boxes` on page `k` (the source the editor is at). */
+  mark(k, boxes2, scroll = true) {
+    this.viewer.mark(k, boxes2, scroll);
+  }
+  page(img, k, n, hash) {
+    const empty = !img || "draws" in img && !img.draws.t.length && !img.draws.r.length;
+    if (empty) {
+      if (!this.last) {
+        this.$("#empty").textContent = n ? "This page is empty." : "No page shipped yet.";
+        this.$("#empty").style.display = "";
+      }
+      if (this.lastStatus) this.stale({ ...this.lastStatus, pages: n });
+      return;
+    }
+    this.last = img;
+    this.$("#empty").style.display = "none";
+    this.$("#stage").classList.remove("stale");
+    this.$("#stage").classList.toggle("fit", this.prefs.zoom === "fit");
+    if (this.viewer.pages <= k) this.viewer.layout(Array.from({ length: Math.max(n, k + 1) }, (_, i) => i === k && hash || `?${i}`));
+    this.viewer.set(k, img, hash ?? null);
+    this.nav();
+  }
+};
 
-`)}`)})},this.$("#reportclose").onclick=()=>t.classList.remove("on")}mark(e,t,i=!0){this.viewer.mark(e,t,i)}page(e,t,i,s){if(!e||"draws"in e&&!e.draws.t.length&&!e.draws.r.length){this.last||(this.$("#empty").textContent=i?"This page is empty.":"No page shipped yet.",this.$("#empty").style.display=""),this.lastStatus&&this.stale({...this.lastStatus,pages:i});return}this.last=e,this.$("#empty").style.display="none",this.$("#stage").classList.remove("stale"),this.$("#stage").classList.toggle("fit",this.prefs.zoom==="fit"),this.viewer.pages<=t&&this.viewer.layout(Array.from({length:Math.max(i,t+1)},(r,l)=>l===t&&s||`?${l}`)),this.viewer.set(t,e,s??null),this.nav()}};function Ae(o,e=0,t=o.length){let i=0;for(let s=e;s<t;s++){let n=o.charCodeAt(s);if(n<128)i+=1;else if(n<2048)i+=2;else if(n>=55296&&n<=56319&&s+1<t){let r=o.charCodeAt(s+1);r>=56320&&r<=57343?(i+=4,s++):i+=3}else i+=3}return i}function S(o,e){if(e>0&&e<o.length){let t=o.charCodeAt(e),i=o.charCodeAt(e-1);t>=56320&&t<=57343&&i>=55296&&i<=56319&&e--}return Ae(o,0,e)}function N(o,e){return o.slice(0,e.from)+e.text+o.slice(e.to)}function xt(o,e,t){let i=e.from+e.text.length;if(t.to<e.from||t.from>i)return null;let s=Math.min(e.from,t.from),n=Math.max(i,t.to),r=n<=i?e.to:n-(e.text.length-(e.to-e.from)),l=N(o.slice(s,r),{from:e.from-s,to:e.to-s,text:e.text}),c=N(l,{from:t.from-s,to:t.to-s,text:t.text});return{from:s,to:r,text:c}}var Z=class{edits=[];base;text;constructor(e){this.base=e,this.text=e}get size(){return this.edits.length}push(e){let t=this.edits.at(-1);if(t){let i=this.befores.at(-1),s=xt(i,t,e);if(s){this.edits[this.edits.length-1]=s,this.text=N(this.text,e);return}}this.befores.push(this.text),this.edits.push(e),this.text=N(this.text,e)}befores=[];take(){let e=[],t=this.base;for(let i of this.edits){let s=S(t,i.from);e.push({start:s,end:s+Ae(t,i.from,i.to),text:i.text}),t=N(t,i)}return this.edits=[],this.befores=[],this.base=this.text,e}};function z(o,e){let t=0;for(let i=0;i<o.length;i++){if(t>=e)return i;let s=o.charCodeAt(i);s<128?t+=1:s<2048?t+=2:s>=55296&&s<=56319&&i+1<o.length?(t+=4,i++):t+=3}return o.length}function Ne(o,e){let t=o.files.map(e);return o.g.map(([i,s,n,r,l,c])=>({x:i,y:s,file:n<0?null:t[n]??null,start:r,end:l,synth:c===1}))}function _e(o,e,t){let i=null,s=1/0;for(let n of o){if(!n.file)continue;let r=n.y-3-t,l=n.x+2.5-e,c=l*l+9*r*r+(n.synth?400:0);c<s&&(s=c,i=n)}return i}function j(o,e,t,i){return o.filter(s=>s.file===e&&!s.synth&&s.start<i&&s.end>t)}function _(o,e){let t=new Map;for(let s=0;s<e.length;s++){let n=e[s+1];t.set(e[s],n&&Math.abs(n.y-e[s].y)<.5&&n.x>e[s].x&&n.x-e[s].x<15?n.x-e[s].x:5)}let i=new Map;for(let s of o){let n=Math.round(s.y*2)/2,r=i.get(n),l=s.x+(t.get(s)??5);i.set(n,r?[Math.min(r[0],s.x),Math.max(r[1],l)]:[s.x,l])}return[...i].map(([s,[n,r]])=>[n-1,s-8,r-n+2,11])}function Y(o,e){let t=null;for(let i of o)(!t||Math.abs(i.start-e)<Math.abs(t.start-e))&&(t=i);return t?o.filter(i=>Math.abs(i.y-t.y)<.5):[]}function Fe(o,e){let t=n=>n>=128||n>=48&&n<=57||n>=65&&n<=90||n>=97&&n<=122||n===39||n===45,i=e,s=e;for(;i>0&&t(o[i-1]);)i--;for(;s<o.length&&t(o[s]);)s++;return i<s?[i,s]:null}function C(o,e){let t=1;for(let i=0;i<e;i++)o.charCodeAt(i)===10&&t++;return t}function wt(o){let e=[],t=[],i=[],s=[];for(let n=0;n<o.length;n++){let r=o[n];if(r==="\\"){n++;continue}if(r==="%"){for(;n<o.length&&o[n]!==`
-`;)n++;continue}r==="{"?e.push(n):r==="}"?e.length?e.pop():t.push(n):r==="$"?(o[n+1]==="$"&&n++,s.push(n)):r===`
-`&&/^[ \t]*\n/.test(o.slice(n+1,n+40))&&(s.length%2&&i.push(s.at(-1)),s=[])}return s.length%2&&i.push(s.at(-1)),{openBraces:e,strayBraces:t,openDollars:i}}var Be=/\\(documentclass|usepackage|begin\{[A-Za-z*]+\}|end\{[A-Za-z*]+\}|section|subsection|maketitle|cite|ref|label|emph|textbf|textit)\b/g;function qe(o,e,t){let i=[];for(let[n,r]of Object.entries(o)){if(!/\.(tex|sty|def)$/i.test(n))continue;let l=wt(r);if(l.openBraces.length){let g=l.openBraces[0];i.push({severity:"warning",code:"unclosed-brace",message:`{ never closed${l.openBraces.length>1?` (${l.openBraces.length} open)`:""}: the group runs to the end of the file`,file:n,line:C(r,g)})}for(let g of l.strayBraces.slice(0,3))i.push({severity:"warning",code:"stray-brace",message:"} with no { to close",file:n,line:C(r,g)});for(let g of l.openDollars.slice(0,3))i.push({severity:"warning",code:"unclosed-math",message:"$ never closed in this paragraph",file:n,line:C(r,g)});for(let g of r.matchAll(/(^|[^\\])\\[gex]?def\s*\\([A-Za-z@]+)([^{\n%]*)$/gm))i.push({severity:"warning",code:"def-no-body",message:`\\${g[2]} is defined with no { body } on its line`,file:n,line:C(r,g.index+g[1].length)});let c=[...r.matchAll(/\\if[a-z]*\b/g)],d=(r.match(/\\fi\b/g)??[]).length;c.length>d&&!/\\[gex]?def/.test(r)&&i.push({severity:"info",code:"unclosed-if",message:`${c.length-d} \\if\u2026 without \\fi`,file:n,line:C(r,c.at(-1).index)});for(let g of r.matchAll(/\\input\s*\{?([^\s}\\%]+)/g)){let u=g[1];!(u in o)&&!(`${u}.tex`in o)&&!/\.(aux|bbl|ind|toc)$/.test(u)&&!u.startsWith("\\")&&i.push({severity:"warning",code:"missing-file",message:`\\input ${u}: no such file in the project`,file:n,line:C(r,g.index)})}let a=t?.latex?[]:[...new Set(r.match(Be)??[])];if(a.length){let g=r.search(Be);i.push({severity:"error",code:"latex",message:`LaTeX is not supported yet (dropped): ${a.slice(0,5).join(" ")}${a.length>5?" \u2026":""}`,file:n,line:C(r,g)})}let h=0,p=-1;for(let g=0;g<r.length;g++)r.charCodeAt(g)>127&&(h++,p<0&&(p=g));h&&!t?.latex&&i.push({severity:"info",code:"non-ascii",message:`${h} non-ASCII characters: PhiTeX's fonts may not typeset them`,file:n,line:C(r,p)})}e&&o[e]!==void 0&&!/\\(bye|end|enddocument)\b/.test(o[e])&&i.push({severity:"info",code:"no-end",message:"no \\bye: the last page ships at the end of the file anyway",file:e});for(let n of t?.packageErrors??[])i.push({severity:"error",code:"package-download",message:`couldn't download ${n.name}: ${n.error}`});if(t?.texError){let n=t.texError,r=n.missing&&t.unavailable?.includes(n.missing),l=n.missing&&t.packageErrors?.some(c=>c.name===n.missing);i.push({severity:"error",code:n.missing?"tex-missing-file":"tex-error",message:n.missing?`${n.missing} not found${r?` in the project or ${t.packageSource??"the package source"}`:l?" (its download failed, above)":" (still downloading?)"}: the build stopped here`:n.message,file:n.file??void 0,line:n.line??void 0,detail:n.context})}if(t){t.pending&&i.push({severity:"warning",code:"pending",message:`${t.pending} part${t.pending===1?"":"s"} not read: out of fuel (a loop?) or unsupported`}),t.undefinedNames?.length&&i.push({severity:"warning",code:"undefined",message:`undefined: ${t.undefinedNames.join(" ")}`});let n=[...new Set(t.unavailable?.filter(r=>r!==t.texError?.missing).map(r=>r.replace(/(\.[a-z]+)\.tex$/,"$1")))];if(n.length){let r=n.slice(0,6).join(" ")+(n.length>6?" \u2026":"");i.push({severity:"info",code:"package-unavailable",message:t.packageSource?`looked for and not found in ${t.packageSource} (usually optional): ${r}`:`packages are not downloaded yet: ${r}`})}t.pages===0&&i.push({severity:"warning",code:"no-pages",message:"no page shipped yet"})}let s={error:0,warning:1,info:2};return i.sort((n,r)=>s[n.severity]-s[r.severity])}var F="\0delivered";var B={label:"none",resolve:async()=>null};function O(o){return/\.(sty|cls|clo|def|cfg|fd|ldf|ltx|tex|dfu|sto|lbx|bbx|cbx|dbx|mld|tikz|pgf|code\.tex|lua|ini|cmap|fontspec|tfm|vf|pfb|enc|map)$/i.test(o)&&!o.includes("/")}function Q(o){let e=new Set,t=o.replace(/(^|[^\\])%.*$/gm,"$1");for(let i of t.matchAll(/\\(documentclass|LoadClass(?:WithOptions)?|usepackage|RequirePackage(?:WithOptions)?)\s*(?:\[[^\]]*\]\s*)?\{([^}]*)\}/g)){let s=/class/i.test(i[1])?".cls":".sty";for(let n of i[2].split(",")){let r=n.trim();/^[A-Za-z0-9@_.-]+$/.test(r)&&e.add(r+s)}}if(/\\DeclareFontShape/.test(t))for(let i of t.matchAll(/<[^>]*>\s*(?:\\[A-Za-z@]+\s*|s\*\s*(?:\[[^\]]*\]\s*)?)*([A-Za-z][A-Za-z0-9-]*)(?![A-Za-z0-9-]*\/)/g))/^(s?sub|gen|genb|sgen|fixed|sfixed|error|serror|warning)$/.test(i[1])||e.add(i[1]+".tfm");for(let i of t.matchAll(/\\(?:input|InputIfFileExists|@input)\s*\{?([A-Za-z0-9@_-]+\.(?:sty|cls|clo|def|cfg|fd|ldf|tex|dfu))\}?/g))e.add(i[1]);return[...e]}var Ie=o=>{let e=o?.indexOf("\\begin{document}")??-1;return e<0?o??"":o.slice(0,e)},Xe=o=>/\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?\s*\{[^}]*\bminted\b/.test(o),yt=new Set(["page","progress","diagnostics","settled","superseded","sync"]);function kt(o){let e={};for(let[t,i]of Object.entries(o))t==="op"||t==="id"||(e[t]=typeof i=="string"&&i.length>40?`${i.length} chars`:i&&typeof i=="object"?`${Object.keys(i).length} keys`:i);return e}function $t(o){let e=o.json??{};return{ok:o.ok,...o.error?{error:o.error}:{},...typeof e.how=="string"?{how:e.how.split(`
-`)[0].slice(0,140)}:{},...e.pages!==void 0?{pages:Array.isArray(e.pages)?e.pages.length:e.pages}:{},...e.history!==void 0?{history:e.history}:{},...Array.isArray(e.missing)&&e.missing.length?{missing:e.missing.length}:{},...e.error?{texError:typeof e.error=="string"?e.error:e.error.message}:{},...e.build_ms!==void 0?{build_ms:Math.round(e.build_ms)}:{},...o.pdf?{pdf:o.pdf.length}:{},...e.draw_ms!==void 0?{drawer:!0,draw_ms:Math.round(e.draw_ms),kept:e.kept}:{}}}var Et={fuel:1e5,format:"vector",dpi:96,checkEveryMs:5e3},de=o=>o.draws?{draws:o.draws}:o.canvas&&o.size?{canvas:o.canvas,w:o.size[0],h:o.size[1]}:o.png?.length?{png:o.png,w:o.size?.[0],h:o.size?.[1]}:null;function St(o){let e=Object.keys(o).filter(i=>/\.tex$/i.test(i)),t=i=>{let s=o[i],n=0;return/(^|\n)[^%\n]*\\(bye|end\{document\})/.test(s)&&(n+=4),/(^|\n)\s*\\documentclass/.test(s)&&(n+=2),/^main\.tex$/i.test(i)&&(n+=1),i.includes("/")||(n+=1),n};return e.sort((i,s)=>t(s)-t(i))[0]??null}function Tt(o,e){if(o===e)return null;let t=0;for(;t<o.length&&t<e.length&&o[t]===e[t];)t++;let i=0;for(;i<o.length-t&&i<e.length-t&&o[o.length-1-i]===e[e.length-1-i];)i++;return t>0&&/[\udc00-\udfff]/.test(o[t]??"")&&t--,i>0&&/[\udc00-\udfff]/.test(o[o.length-i]??"")&&i--,{from:t,to:o.length-i,text:e.slice(t,e.length-i)}}var q=class{o;files={};batches=new Map;main=null;open=null;page=0;pages=0;opened=!1;debug=!1;since=new Map;scheduled=!1;chain=Promise.resolve();host;core;sink;trace=[];coreFetches=!1;inBuild=[];tellPackages(){this.sink.packages?.({...this.pkg,loading:[...this.pkg.loading],unavailable:[...this.pkg.unavailable],done:[...this.pkg.done??[]],failed:[...this.pkg.failed??[]]})}onFetching(e){if(e.failed){this.tr("package: core fetch failed",e),this.pkg.loading=this.pkg.loading.filter(i=>i!==e.pack),this.pkg.failed=[...this.pkg.failed??[],{name:e.pack,error:`Shelf: ${e.name} not fetched`}],this.tellPackages();return}this.tr("package: core fetches",e),this.pkg.source=this.source.label;let t=this.inBuild.at(-1);t&&(this.pkg.loading=this.pkg.loading.filter(i=>i!==t)),t&&(this.pkg.done=[...this.pkg.done??[],t]),this.inBuild.push(e.pack),this.pkg.loading=[...this.pkg.loading,e.pack],this.tellPackages()}inflight=0;building=0;t0=0;tr(e,t){this.t0||=this.now(),this.trace.push({t:Math.round(this.now()-this.t0),k:e,d:t}),this.trace.length>3e3&&this.trace.shift()}constructor(e,t,i,s={}){this.host=e,t.onEvent?.(n=>{if(this.o.remote&&"event"in n&&yt.has(n.event))return this.onWatch(n);if(n.event==="preparing")return this.sink.preparing?.(n.on);if(n.event==="switched"){this.tr("core: the SSA worker took over",{}),this.glyphCache.clear(),this.opened&&(this.chain=this.chain.then(()=>this.layout()).then(()=>this.statusSoon()));return}if(n.event==="settled"){this.opened&&!this.busy&&(this.chain=this.chain.then(()=>this.layout()).then(()=>this.statusSoon()));return}n.event==="fetching"&&this.onFetching(n),(n.event==="page"||n.event==="progress"||n.event==="done")&&this.onStream(n)}),this.core={request:async n=>{let r=this.now();this.tr(`\u2192 ${n.op}`,kt(n)),this.inflight++;let l=n.op==="edit"||n.op==="status"||n.op==="open";l&&this.building++===0&&this.sink.busy?.(!0),(n.op==="open"||n.op==="set_file")&&this.glyphCache.clear(),n.op==="edit"&&this.mapGlyphs(n.file,n.start,n.end,new TextEncoder().encode(n.text).length);let c=await t.request(n).finally(()=>{this.inflight--,l&&--this.building===0&&this.sink.busy?.(!1),l&&this.inBuild.length&&(this.pkg.done=[...this.pkg.done??[],...this.inBuild.filter(a=>this.pkg.loading.includes(a))],this.pkg.loading=this.pkg.loading.filter(a=>!this.inBuild.includes(a)),this.inBuild=[],this.tellPackages())});this.tr(`\u2190 ${n.op}`,{ms:Math.round(this.now()-r),...$t(c)}),c.error&&(this.errorsSeen=[...this.errorsSeen.slice(-19),`${n.op}: ${c.error}`]);let d=c.json?.error==="no such handle"||/^(core trapped|PDF driver failed)/.test(c.error??"");if(c.ok&&(n.op==="edit"||n.op==="status")&&(this.traps=0),d&&this.opened&&n.op!=="open"){this.opened=!1,this.traps++;let a=c.error??"the core restarted";this.traps<=1?(this.sink.error(`${a}; reopening`),this.chain=this.chain.then(()=>this.reopen())):this.sink.error(`${a}, again: the preview stops here (reload the page to retry)`)}return c},onLost:t.onLost?.bind(t)},this.sink=i,this.o={...Et,...s},e.onOpen((n,r)=>{let l=this.known(n);this.open=l,this.sync(l,r),this.status()}),e.onChanges((n,r)=>this.queue(this.known(n),r)),t.onLost?.(()=>{this.opened=!1,this.sink.error("core lost; reopening"),this.reopen()})}known(e){if(e in this.files)return e;let t=Object.keys(this.files).filter(i=>i.endsWith("/"+e));return t.length===1?(this.tr("file: named by its path",{from:e,to:t[0]}),t[0]):e}dpi(){return this.o.format==="pdfjs"?-1:0}setFormat(e){return this.o.format=e,this.sink.layout?(this.hashes=[],this.layout()):this.showPage()}now(){return(this.o.now??(()=>performance.now()))()}async start(){if(this.o.remote)return this.opened=!0,this.watchJoined();let e=await this.host.loadProject();for(let[t,i]of Object.entries(e))t in this.files||(this.files[t]=i);this.main=this.host.mainFile?.(this.files)??St(this.files),this.sink.mains?.(Object.keys(this.files).filter(t=>t.endsWith(".tex")),this.main),await this.reopen(),this.host.ready?.(),this.o.checkEveryMs>0&&(this.checkTimer=setInterval(()=>this.debug&&this.check(),this.o.checkEveryMs))}checkTimer;stop(){clearInterval(this.checkTimer),this.statusTimer&&clearTimeout(this.statusTimer),this.opened=!1,this.paused=!0}refresh(e){for(let[t,i]of Object.entries(e))t!==this.open&&this.sync(t,i)}setMain(e){return this.main=e,this.reopen()}async clean(e){for(let[t,i]of Object.entries(e))t!==this.open&&(this.files[t]=i);for(let t of[...this.pkg.unavailable,...(this.pkg.failed??[]).map(i=>i.name)])this.asked.delete(t);return this.pkg.unavailable=[],this.pkg.failed=[],this.texError=void 0,this.hashes=[],this.reopen()}minted=!1;async reopen(){if(!this.main)return this.sink.error("no main .tex file found");for(let[l,c]of this.batches)this.files[l]=c.text;this.batches.clear();let e=this.now(),t=this.o.engine?.(this.files[this.main])??"pdflatex",i=!k[t].ready&&t==="xelatex"?await this.o.shims?.(this.files[this.main]):null,s=i?"pdflatex":t;if(this.engine=s,this.wanted=t,this.preamble=Ie(this.files[this.main]),this.sink.engine?.({engine:t,ready:k[s].ready,approx:!!i}),!k[s].ready){this.opened=!1,this.tr("engine",{engine:s,ready:!1});return}await this.prefetch(["pdftex.map",...Object.values(this.files).flatMap(Q)]),this.minted=Object.values(this.files).some(Xe);let n=await this.core.request({op:"open",main:this.main,files:{...this.pkgFiles,...i,...this.files},fuel:this.o.fuel,engine:s,workers:this.o.workers});if(!n.ok)return this.sink.error((typeof n.json?.error=="string"?n.json.error:void 0)??n.error??"open failed");if(n.json.building){this.tr("open: streaming",{}),this.opened=!0,this.sink.busy?.(!0),this.sink.streaming?.({pages:0,phase:n.json.phase??"typesetting"});let l=await new Promise(c=>this.streamEnd=c);if(this.sink.busy?.(!1),this.sink.streaming?.(null),!l.ok||!l.json)return this.sink.error(l.error??"the build stopped");n.json=l.json}this.opened=!0;let r=n.json.engine==="phitex";r!==this.latex&&(this.lastWarned=0),this.latex=r,this.coreFetches=!!n.json.fetches,this.warming=typeof n.json.how=="string"&&n.json.how.startsWith("plain")?this.now():0,this.warmSlow=!1,this.warming&&this.sink.warmup?.({state:"preparing",since:Date.now()}),this.setPages(n.json.pages),this.noteError(n.json),this.status(n.json.pending,n.json.undefined_names),this.fetchPackages(n.json.missing),this.sink.latency(`opened in ${n.json.build_ms.toFixed(1)} ms (round trip ${(this.now()-e).toFixed(1)} ms)`),await(this.sink.layout?this.layout(Array.isArray(n.json.hashes)?n.json.hashes:void 0):this.showPage()),this.pkg.building=!1,this.tellPackages(),this.statusSoon()}streamEnd;streamFirst=!1;onStream(e){if(e.event==="done"){this.tr("open: streamed",{ok:e.ok}),this.streamFirst=!1,this.streamEnd?.(e),this.streamEnd=void 0;return}if(this.streamEnd){if(e.event==="progress")return this.sink.streaming?.({pages:e.pages,phase:e.phase});this.streamFirst||(this.streamFirst=!0,this.tr("open: first page",{pages:e.pages})),this.setPages(e.pages),this.sink.streaming?.({pages:e.pages,phase:"typesetting"}),this.sink.layout&&(this.chain=this.chain.then(()=>this.layout(e.hashes)))}}warming=0;warmSlow=!1;warmCheck(e){!this.warming||typeof e!="string"||e.startsWith("plain")||(this.tr("warmup: ready",{ms:Math.round(this.now()-this.warming)}),this.warming=0,this.sink.warmup?.({state:"ready"}))}lastWarned=0;traps=0;engine="pdflatex";wanted;preamble;latex=!0;diags=[];texError;noteError(e){e.history!==void 0&&(this.texError=e.error&&typeof e.error=="object"?e.error:void 0)}undefinedNames=[];pending;status(e,t){if(this.o.remote)return this.sink.status({pages:this.pages,main:this.main,file:null,diagnostics:this.watchDiags});if(this.pending=e,t&&(this.undefinedNames=t),this.now()-this.lastWarned>250||t){let i={};for(let s of Object.keys(this.files))i[s]=this.text(s);this.diags=qe(i,this.main,{pages:this.pages,pending:e,undefinedNames:this.undefinedNames,unavailable:this.pkg.unavailable,packageSource:this.source===B?void 0:this.source.label,latex:this.latex,texError:this.texError,packageErrors:this.pkg.failed}),this.lastWarned=this.now()}this.sink.status({pages:this.pages,pending:e,main:this.main,file:this.open,diagnostics:this.diags})}pkgFiles={};asked=new Set;pkg={loading:[],unavailable:[],source:"none",done:[],building:!1};get source(){return this.o.packages??B}fetchPackages(e,t=[]){if(this.coreFetches){let d=(e??[]).filter(a=>O(a)&&!this.pkg.unavailable.includes(a));d.length&&(this.pkg.unavailable.push(...d),this.tellPackages());return}let i=new Set(e??[]);e=[...i,...t];let s=[...new Set(e??[])].filter(d=>O(d)&&!(d in this.files)&&!this.asked.has(d));if(!s.length)return;for(let d of s)this.asked.add(d);let n=this.source;this.pkg.source=n.label;let r=()=>this.sink.packages?.({...this.pkg,loading:[...this.pkg.loading],unavailable:[...this.pkg.unavailable],done:[...this.pkg.done??[]],failed:[...this.pkg.failed??[]]});if(n===B)return this.pkg.unavailable.push(...s),r(),this.status(this.pending,this.undefinedNames);this.pkg.loading.push(...s),r();let l=[];this.tr("packages: want",s);let c=async d=>{let a=await n.resolve(d,this.engine).catch(p=>this.failed(d,p));this.tr(a===null?"package: none":"package: got",d),l.push([d,a]),this.pkg.loading=this.pkg.loading.filter(p=>p!==d),a!==null&&(this.pkg.done.push(d),this.pkg.failed=this.pkg.failed?.filter(p=>p.name!==d));let h=a===null||a===F?[]:Q(a).filter(p=>O(p)&&!(p in this.files)&&!this.asked.has(p));for(let p of h)this.asked.add(p);this.pkg.loading.push(...h),r(),await Promise.all(h.map(c))};Promise.all(s.map(c)).then(()=>{for(let[a,h]of l){if(h===null){i.has(a)&&!this.pkg.failed?.some(p=>p.name===a)&&this.pkg.unavailable.push(a);continue}h!==F&&(this.pkgFiles[a]=h,this.opened&&(this.chain=this.chain.then(()=>this.core.request({op:"set_file",file:a,text:h}).then(()=>{}))))}let d=l.some(([,a])=>a!==null);this.pkg.building=d,r(),this.status(this.pending,this.undefinedNames),d&&(this.chain=this.chain.then(()=>this.layout()).then(()=>{this.pkg.building=!1,r(),this.statusSoon()}))})}failed(e,t){this.asked.delete(e);let i=t instanceof Error?t.message:String(t);return this.pkg.failed=[...(this.pkg.failed??[]).filter(s=>s.name!==e),{name:e,error:i}],null}async prefetch(e){let t=this.source,i=[...new Set(e)].filter(l=>O(l)&&!(l in this.files)&&!this.asked.has(l));if(t===B||!i.length)return;this.pkg.source=t.label;let s=()=>this.sink.packages?.({...this.pkg,loading:[...this.pkg.loading],unavailable:[...this.pkg.unavailable],done:[...this.pkg.done??[]],failed:[...this.pkg.failed??[]]});for(let l of i)this.asked.add(l);this.pkg.loading.push(...i),s();let n=async l=>{let c=await t.resolve(l,this.engine).catch(a=>this.failed(l,a));this.pkg.loading=this.pkg.loading.filter(a=>a!==l),c!==null&&this.pkg.done.push(l),c!==null&&c!==F&&(this.pkgFiles[l]=c);let d=c===null||c===F?[]:Q(c).filter(a=>O(a)&&!(a in this.files)&&!this.asked.has(a));for(let a of d)this.asked.add(a);this.pkg.loading.push(...d),s(),await Promise.all(d.map(n))},r=this.now();this.tr("prefetch: start",i.length),await Promise.all(i.map(n)),this.tr("prefetch: done",{files:this.pkg.done?.length??0,ms:Math.round(this.now()-r)}),this.pkg.building=!0,s()}setPages(e){this.pages=e,e>0&&this.page>=e&&(this.page=e-1)}setPage(e){return this.page=Math.max(0,Math.min(e,Math.max(this.pages-1,0))),this.sink.layout?Promise.resolve():this.showPage()}hashes=[];async layout(e){if(this.sink.layout){if(e)this.hashes=e;else{let t=await this.core.request({op:"pages"});if(!t.ok||!t.json?.pages)return;this.hashes=t.json.pages}this.tr("layout",{pages:this.hashes.length}),this.setPages(this.hashes.length),this.hashes.length&&this.sink.layout(this.hashes),this.sink.goto&&!this.noOriginsPrefetch&&this.glyphsAll()}}async resync(){if(this.opened){if(this.o.remote)return this.watchJoined();this.sink.mains?.(Object.keys(this.files).filter(e=>e.endsWith(".tex")),this.main),this.status(this.pending),await(this.sink.layout?this.layout():this.showPage())}}async fetch(e){if(!this.opened)return;let t=await this.core.request({op:"png",page:e,dpi:this.dpi()}),i=de(t);i&&this.sink.page(i,e,this.pages,t.json?.hash??this.hashes[e]??null)}async showPage(){if(!this.opened)return;if(this.sink.layout)return this.layout();let e=await this.core.request({op:"png",page:this.page,dpi:this.dpi()});this.sink.page(de(e),this.page,this.pages)}noOriginsPrefetch=!1;errorsSeen=[];report(e){let t=this.trace.filter(i=>i.k==="\u2190 status").at(-1)?.d;return ze({...e,paths:Object.keys(this.files),trace:this.trace,diagnostics:this.diags??[],status:t,packages:this.pkg,errors:[...this.errorsSeen,...this.texError?[`TeX: ${this.texError.message}`]:[]]})}glyphCache=new Map;mapGlyphs(e,t,i,s){let n=r=>r<t?r:r>=i?r+s-(i-t):t+s;for(let[r,l]of this.glyphCache){if(i>t&&l.some(c=>c.file===e&&c.start<i&&c.end>t)){this.glyphCache.delete(r);continue}for(let c of l){if(c.file!==e)continue;let[d,a]=[n(c.start),n(c.end)];c.start=d,c.end=Math.max(d,a)}}}cached(e){return this.glyphCache.get(`${e}:${this.hashes[e]??""}`)}glyphsAll(){let e=++this.glyphGen,t=this.hashes.length,i=[this.page,...Array.from({length:t},(s,n)=>n).filter(s=>s!==this.page)];(async()=>{for(let s of i){if(e!==this.glyphGen)return;s>=0&&s<t&&!this.cached(s)&&await this.glyphsOf(s)}})()}glyphGen=0;async glyphsOf(e){let t=`${e}:${this.hashes[e]??""}`,i=this.glyphCache.get(t);if(i)return i;let s=await this.core.request({op:"origins",page:e});if(!s.ok||!s.json?.g)return[];let n=l=>(l=l.replace(/^\.\//,""),this.o.remote||l in this.files?l:l+".tex"in this.files?l+".tex":null),r=Ne(s.json,n);return this.glyphCache.size>4*Math.max(this.hashes.length,100)&&this.glyphCache.clear(),this.glyphCache.set(t,r),r}async toSource(e,t,i){if(!this.opened)return;let s=_e(this.cached(e)??await this.glyphsOf(e),t,i);if(this.tr("sync\u2192source",{k:e,x:t,y:i,g:s}),!s?.file)return;if(this.o.remote)return this.o.remote.source(s.file,s.start,s.end);let n=this.files[s.file];this.sink.goto?.(s.file,z(n,s.start),z(n,s.end))}async selectSource(e,t,i){if(!this.opened||!(e in this.files))return;if(t===i)return this.sink.marks?.([]);let s=this.files[e],[n,r]=[S(s,t),S(s,i)],l=[];for(let c=0;c<Math.max(this.hashes.length,this.pages);c++){let d=this.cached(c)??await this.glyphsOf(c),a=d.filter(h=>h.file===e&&!h.synth&&h.start<r&&h.end>n);a.length&&l.push({k:c,boxes:_(a,d)})}this.tr("select\u2192page",{file:e,from:t,to:i,pages:l.map(c=>c.k)}),this.sink.marks?.(l)}async selectPage(e){if(!this.opened||!e.length)return;let t=new Map;for(let{k:c,rects:d}of e)for(let a of this.cached(c)??await this.glyphsOf(c)){if(!a.file||a.synth)continue;let[h,p]=[a.x+1,a.y-2];if(!d.some(([u,f,m,b])=>h>=u&&h<=u+m&&p>=f&&p<=f+b))continue;let g=t.get(a.file)??{lo:1/0,hi:-1/0,n:0};t.set(a.file,{lo:Math.min(g.lo,a.start),hi:Math.max(g.hi,a.end),n:g.n+1})}let i=[...t].sort((c,d)=>d[1].n-c[1].n)[0];if(this.tr("select\u2192source",{pages:e.map(c=>c.k),file:i?.[0],glyphs:i?.[1].n??0}),!i)return;let[s,{lo:n,hi:r}]=i,l=this.files[s];l!==void 0&&this.sink.goto?.(s,z(l,n),z(l,r),!1)}follow(e,t){if(!this.opened||!(e in this.files)||!this.sink.mark)return;let i=this.files[e],s=new TextEncoder().encode(i),n=S(i,t),r=i.lastIndexOf(`
-`,t-1)+1,l=i.indexOf(`
-`,t),[c,d]=[S(i,r),S(i,l<0?i.length:l)],a=`${e}:${r}`,h=a!==this.followLine;this.followLine=a;let p=Fe(s,n),g=Math.max(this.hashes.length,this.pages,1),u=[this.page,...Array.from({length:g},(m,b)=>b).filter(m=>m!==this.page)];for(let m of u){let b=this.cached(m);if(!b)continue;let v=j(b,e,c,d);if(!v.length)continue;let y=p?j(v,e,p[0],p[1]):[],E=y.length?y:Y(v,n);this.followWant="",this.sink.mark(m,_(E,b),h);return}let f=`${e}:${t}`;this.followWant=f,(async()=>{for(let m of u){if(this.followWant!==f)return;if(m>=this.hashes.length||this.cached(m))continue;let b=await this.glyphsOf(m);if(j(b,e,c,d).length){this.followWant===f&&(this.followLine="",this.follow(e,t));return}}})()}followLine="";followWant="";async toPage(e,t){if(!this.opened||!(e in this.files))return;let i=this.files[e],s=i.lastIndexOf(`
-`,t-1)+1,n=i.indexOf(`
-`,t),[r,l]=[S(i,s),S(i,n<0?i.length:n)],c=Math.max(this.hashes.length,this.pages,1),d=[this.page,...Array.from({length:c},(a,h)=>h).filter(a=>a!==this.page)];for(let a of d){let h=this.cached(a)??await this.glyphsOf(a),p=Y(j(h,e,r,l),S(i,t));if(p.length){this.tr("sync\u2192page",{file:e,pos:t,k:a,glyphs:p.length}),this.sink.mark?.(a,_(p,h));return}}this.tr("sync\u2192page",{file:e,pos:t,k:-1})}async pdf(){this.flush(),await this.chain;let e=this.now(),t=await this.core.request({op:"pdf"});return this.sink.latency(`PDF made in ${(this.now()-e).toFixed(1)} ms`),t.pdf}sync(e,t){let i=this.batches.get(e)?.text??this.files[e];if(i===void 0){this.files[e]=t,this.opened&&(this.chain=this.chain.then(()=>this.core.request({op:"set_file",file:e,text:t}).then(()=>{})));return}let s=Tt(i,t);s&&this.queue(e,[s])}queue(e,t){if(!t.length)return;let i=this.batches.get(e);i||this.batches.set(e,i=new Z(this.files[e]??"")),e in this.files||(this.files[e]=""),i.size||this.since.set(e,this.now());for(let s of t)i.push(s);if(this.keystrokes+=t.length,!this.scheduled){this.scheduled=!0;let s=()=>this.flush();this.o.schedule?this.o.schedule(s):setTimeout(s,0)}}busy=!1;keystrokes=0;builds=0;paused=!1;pause(e){this.paused=e,e||this.flush()}flush(){return this.scheduled=!1,!this.opened||this.busy||this.paused?this.chain:(this.busy=!0,this.sink.busy?.(!0),this.chain=this.chain.then(async()=>{try{for(;;){let e=[...this.batches].filter(([,t])=>t.size);if(!e.length)break;for(let[t,i]of e)if(!await this.send(t,i))return}await this.layout(),this.statusSoon()}finally{this.busy=!1,this.sink.busy?.(!1),[...this.batches.values()].some(e=>e.size)&&setTimeout(()=>{this.flush()},0)}}),this.chain)}statusTimer=null;watchDiags=[];watchBuilding=!1;watchBusy(e){e!==this.watchBuilding&&(this.watchBuilding=e,this.sink.busy?.(e),e||this.sink.streaming?.(null))}async watchJoined(){await this.layout(),this.status(),this.watchOutline();let e=await this.core.request({op:"diagnostics"});e.ok&&this.onWatch({event:"diagnostics",items:e.json?.items??[]})}async watchOutline(){if(!this.sink.outline)return;let e=await this.core.request({op:"outline"});e.ok&&this.sink.outline(e.json?.items??[])}onWatch(e){switch(e.event){case"page":{this.watchBusy(!0);let t=[...this.hashes];for(;t.length<Math.max(e.k+1,e.pages??0);)t.push("");t[e.k]=e.hash,this.hashes=t,this.setPages(t.length),this.sink.layout?.(t);return}case"progress":this.watchBusy(!0),this.sink.streaming?.({pages:e.pages??0,phase:e.phase??"typesetting"});return;case"superseded":this.watchBusy(!0);return;case"diagnostics":this.watchDiags=e.items.map(Pe),this.status();return;case"settled":e.settling||(this.watchBusy(!1),this.sink.preparing?.(!1)),this.chain=this.chain.then(()=>this.layout()).then(()=>(this.status(),this.watchOutline()));return;case"sync":this.syncTo(e.file,e.lo,e.hi,e.at,e.page);return}}async syncTo(e,t,i,s,n){let r=this.hashes.length,l=n??this.page;for(let c of[l,...Array.from({length:r},(d,a)=>a).filter(d=>d!==l)]){let d=this.cached(c)??await this.glyphsOf(c),a=Y(j(d,e,t,i),s);if(a.length)return this.sink.mark?.(c,_(a,d),!0)}}statusSoon(){this.statusTimer||(this.statusTimer=setTimeout(async()=>{if(this.statusTimer=null,this.busy||!this.opened)return this.statusSoon();let e=await this.core.request({op:"status"});e.ok&&e.json&&(this.warmCheck(e.json.how),this.setPages(e.json.pages),this.noteError(e.json),this.status(e.json.pending,e.json.undefined_names),this.fetchPackages(e.json.missing))},300))}async send(e,t){this.warming&&!this.warmSlow&&(this.warmSlow=!0,this.sink.warmup?.({state:"preparing",since:Date.now()-(this.now()-this.warming),slow:!0}));let i=this.since.get(e)??this.now(),s=this.now(),n=t.take();if(this.files[e]=t.text,!this.minted&&Xe(t.text))return this.tr("minted: open again, with its runner",{}),await this.reopen(),!1;if(e===this.main&&this.o.engine){let r=Ie(t.text);if(r!==this.preamble){this.preamble=r;let l=this.o.engine(t.text);if(l!==this.wanted)return this.tr("engine: open again",{from:this.wanted,to:l}),await this.reopen(),!1}}for(let[r,l]of n.entries()){let c=r===n.length-1;this.builds++;let d=await this.core.request({op:"edit",file:e,...l,page:c?this.page:-1,dpi:this.dpi()});if(!d.ok)return this.sink.error((typeof d.json?.error=="string"?d.json.error:void 0)??d.error??"edit failed"),d.error?.includes("trapped")&&await this.reopen(),!1;if(!c)continue;let a=this.now(),h=d.json;this.setPages(h.pages),this.noteError(h),this.status(this.pending);let p=de(d);p?this.sink.page(p,this.page,this.pages,h.painted_hash??null):this.sink.layout||await this.showPage();let g=this.now()-i;this.sink.painted?.(g),this.sink.latency(`${g.toFixed(0)} ms keystroke\u2192page \xB7 core ${h.paint_ms.toFixed(1)} ms \xB7 ${this.keystrokes} edits \u2192 ${this.builds} builds`,[`first paint      ${h.paint_ms.toFixed(2)} ms (in the core: edit_view, the page painted)`,`fixed point      ${h.total_ms.toFixed(2)} ms (every page, the .aux/.bbl loops)${h.wrong?" \xB7 first paint was superseded":""}`,`keystroke\u2192page   ${g.toFixed(1)} ms = queued ${(s-i).toFixed(1)} + round trip ${(a-s).toFixed(1)} + paint ${(this.now()-a).toFixed(1)}`,`rebuilt          ${h.stats.rebuilt} of ${h.stats.rebuilt+h.stats.reused} chunks, ${h.stats.passes} pass${h.stats.passes===1?"":"es"}`,d.draws?`page             vector, ${d.draws.t.length} words`:h.png_bytes?`page             PNG ${(h.png_bytes/1024).toFixed(0)} KB (${h.png_compress_ms.toFixed(1)} ms to compress)`:"",`batching         ${this.keystrokes} edits \u2192 ${this.builds} builds (one in flight; the rest merged)`].filter(Boolean).join(`
-`))}return!0}async check(){if(!this.opened)return;await this.flush();let e=this.open??this.main,t=await this.core.request({op:"check",file:e,expect:this.files[e]});return this.sink.check?.(t.json),t.json}text(e){return this.batches.get(e)?.text??this.files[e]}texts(){let e={};for(let t of Object.keys(this.files))e[t]=this.text(t);return e}};var ce={markup:"underline",subtype:"safe",add_color:"#0000ff",del_color:"#ff0000"};var ee=class{state=null;panel;run;actions;lookOpen=!1;constructor(e,t){this.panel=e,this.run=t,this.actions={prev:()=>this.step(-1),next:()=>this.step(1),toggle:()=>{let i=this.state;!i||i.busy||(i.showing=i.showing==="diff"?"current":"diff",t.show(i.showing),this.bar())},pdf:()=>t.download("pdf"),tex:()=>t.download("tex"),settings:async()=>{if(this.lookOpen)return this.closeLook();this.lookOpen=!0,e.diffSettings(await t.look(),i=>t.restyle(i),ce)},close:()=>this.stop()}}closeLook(){this.lookOpen=!1,this.panel.diffSettings(null)}get active(){return!!this.state}bar(){this.panel.diffBar(this.state,this.actions)}step(e){let t=this.state;!t||t.busy||!t.changes||(t.at=(Math.max(t.at,e>0?0:1)-1+e+t.changes)%t.changes+1,t.showing==="current"&&this.actions.toggle(),this.run.goto(t.at),this.bar())}async start(e,t,i){this.state={title:t,when:i,changes:0,at:0,showing:"diff",busy:"Fetching that version\u2026"},this.bar();try{let s=await this.run.start(e,n=>{this.state&&(this.state.busy=n,this.bar())},n=>{let r=this.state;!r||r.busy||(r.changes=n,r.at=Math.min(r.at,n),this.bar())});if(!this.state)return;this.state.busy=void 0,this.state.changes=s.changes}catch(s){if(!this.state)return;this.state.busy=`Couldn't compare: ${s.message??s}`}this.bar()}stop(){this.closeLook(),this.state=null,this.run.stop(),this.bar()}key(e){if(!this.state||e.ctrlKey||e.metaKey||e.altKey||e.target?.closest?.("input, textarea, [contenteditable=true], .cm-editor"))return!1;if(e.key==="d"||e.key==="D")this.actions.toggle();else if(e.key==="n")this.step(1);else if(e.key==="N")this.step(-1);else if(e.key==="Escape")this.lookOpen?this.closeLook():this.stop();else return!1;return e.preventDefault(),!0}};function Lt(o){let e=[],t=[],i=[],s=1;for(let n of o){let r=e.indexOf(n.id);r<0&&(r=e.indexOf(null),r<0&&(r=e.push(null)-1)),t.length&&(t[t.length-1].down=i.map(([d,a])=>[d,e[a]===n.id?r:a]));for(let d=0;d<e.length;d++)e[d]===n.id&&(e[d]=null);let l=e.map(d=>d!==null),c=new Map;for(n.parents.forEach((d,a)=>{let h=e.indexOf(d);h<0&&(h=a===0&&e[r]===null?r:e.indexOf(null),h<0&&(h=e.push(null)-1),e[h]=d),c.set(h,r)});e.length&&e[e.length-1]===null;)e.pop();i=[],e.forEach((d,a)=>{if(d===null)return;l[a]&&i.push([a,a]);let h=c.get(a);h!==void 0&&!(l[a]&&h===a)&&i.push([h,a])}),s=Math.max(s,r+1,e.length),t.push({lane:r,down:[]})}return t.length&&(t[t.length-1].down=i),{rows:t,width:s}}function Pt(o,e=Date.now()/1e3){let t=Math.max(0,e-o),i=[[31536e3,"year"],[2592e3,"month"],[86400,"day"],[3600,"hour"],[60,"minute"]];for(let[s,n]of i)if(t>=s){let r=Math.floor(t/s);return`${r} ${n}${r===1?"":"s"} ago`}return"just now"}var H=o=>o.replace(/[&<>"]/g,e=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[e]),$=24,he=12,te=["#3e63dd","#e5484d","#30a46c","#f5a524","#8e4ec6","#12a594","#d6409f","#978365"],Ve=`
+// viewer/src/edits.ts
+function utf8Len(s, from2 = 0, to = s.length) {
+  let n = 0;
+  for (let i = from2; i < to; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 128) n += 1;
+    else if (c < 2048) n += 2;
+    else if (c >= 55296 && c <= 56319 && i + 1 < to) {
+      const d = s.charCodeAt(i + 1);
+      if (d >= 56320 && d <= 57343) {
+        n += 4;
+        i++;
+      } else n += 3;
+    } else n += 3;
+  }
+  return n;
+}
+function byteOffset(s, pos) {
+  if (pos > 0 && pos < s.length) {
+    const c = s.charCodeAt(pos);
+    const p = s.charCodeAt(pos - 1);
+    if (c >= 56320 && c <= 57343 && p >= 55296 && p <= 56319) pos--;
+  }
+  return utf8Len(s, 0, pos);
+}
+function apply(s, e) {
+  return s.slice(0, e.from) + e.text + s.slice(e.to);
+}
+function merge(before, a, b) {
+  const aEnd = a.from + a.text.length;
+  if (b.to < a.from || b.from > aEnd) return null;
+  const from2 = Math.min(a.from, b.from);
+  const endAfterA = Math.max(aEnd, b.to);
+  const to = endAfterA <= aEnd ? a.to : endAfterA - (a.text.length - (a.to - a.from));
+  const afterA = apply(before.slice(from2, to), { from: a.from - from2, to: a.to - from2, text: a.text });
+  const text = apply(afterA, { from: b.from - from2, to: b.to - from2, text: b.text });
+  return { from: from2, to, text };
+}
+var Batch = class {
+  edits = [];
+  /** The text before the first queued edit. */
+  base;
+  /** The text after all of them. */
+  text;
+  constructor(text) {
+    this.base = text;
+    this.text = text;
+  }
+  get size() {
+    return this.edits.length;
+  }
+  push(e) {
+    const last = this.edits.at(-1);
+    if (last) {
+      const before = this.befores.at(-1);
+      const m = merge(before, last, e);
+      if (m) {
+        this.edits[this.edits.length - 1] = m;
+        this.text = apply(this.text, e);
+        return;
+      }
+    }
+    this.befores.push(this.text);
+    this.edits.push(e);
+    this.text = apply(this.text, e);
+  }
+  befores = [];
+  /** The queued edits in bytes, in order, each against the text before it. */
+  take() {
+    const out = [];
+    let s = this.base;
+    for (const e of this.edits) {
+      const start = byteOffset(s, e.from);
+      out.push({ start, end: start + utf8Len(s, e.from, e.to), text: e.text });
+      s = apply(s, e);
+    }
+    this.edits = [];
+    this.befores = [];
+    this.base = this.text;
+    return out;
+  }
+};
+function charOffset(s, byte) {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (n >= byte) return i;
+    const c = s.charCodeAt(i);
+    if (c < 128) n += 1;
+    else if (c < 2048) n += 2;
+    else if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+      n += 4;
+      i++;
+    } else n += 3;
+  }
+  return s.length;
+}
+
+// viewer/src/sync.ts
+function glyphs(json, path) {
+  const files = json.files.map(path);
+  return json.g.map(([x, y, f, start, end, synth]) => ({ x, y, file: f < 0 ? null : files[f] ?? null, start, end, synth: synth === 1 }));
+}
+function nearest(gs, x, y) {
+  let best = null, d = Infinity;
+  for (const g of gs) {
+    if (!g.file) continue;
+    const dy = g.y - 3 - y, dx = g.x + 2.5 - x;
+    const e = dx * dx + 9 * dy * dy + (g.synth ? 400 : 0);
+    if (e < d) d = e, best = g;
+  }
+  return best;
+}
+function from(gs, file, lo, hi) {
+  return gs.filter((g) => g.file === file && !g.synth && g.start < hi && g.end > lo);
+}
+function boxes(gs, all) {
+  const next = /* @__PURE__ */ new Map();
+  for (let i = 0; i < all.length; i++) {
+    const n = all[i + 1];
+    next.set(all[i], n && Math.abs(n.y - all[i].y) < 0.5 && n.x > all[i].x && n.x - all[i].x < 15 ? n.x - all[i].x : 5);
+  }
+  const lines = /* @__PURE__ */ new Map();
+  for (const g of gs) {
+    const k = Math.round(g.y * 2) / 2;
+    const r = lines.get(k), e = g.x + (next.get(g) ?? 5);
+    lines.set(k, r ? [Math.min(r[0], g.x), Math.max(r[1], e)] : [g.x, e]);
+  }
+  return [...lines].map(([y, [a, b]]) => [a - 1, y - 8, b - a + 2, 11]);
+}
+function lineAt(hits, at) {
+  let best = null;
+  for (const g of hits) if (!best || Math.abs(g.start - at) < Math.abs(best.start - at)) best = g;
+  return best ? hits.filter((g) => Math.abs(g.y - best.y) < 0.5) : [];
+}
+function wordBytes(text, at) {
+  const w = (c) => c >= 128 || c >= 48 && c <= 57 || c >= 65 && c <= 90 || c >= 97 && c <= 122 || c === 39 || c === 45;
+  let lo = at, hi = at;
+  while (lo > 0 && w(text[lo - 1])) lo--;
+  while (hi < text.length && w(text[hi])) hi++;
+  return lo < hi ? [lo, hi] : null;
+}
+
+// viewer/src/diagnostics.ts
+function lineAt2(text, i) {
+  let n = 1;
+  for (let k = 0; k < i; k++) if (text.charCodeAt(k) === 10) n++;
+  return n;
+}
+function scan(text) {
+  const open = [];
+  const stray = [];
+  const dollars = [];
+  let paraDollars = [];
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\\") {
+      i++;
+      continue;
+    }
+    if (c === "%") {
+      while (i < text.length && text[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "{") open.push(i);
+    else if (c === "}") {
+      if (open.length) open.pop();
+      else stray.push(i);
+    } else if (c === "$") {
+      if (text[i + 1] === "$") i++;
+      paraDollars.push(i);
+    } else if (c === "\n" && /^[ \t]*\n/.test(text.slice(i + 1, i + 40))) {
+      if (paraDollars.length % 2) dollars.push(paraDollars.at(-1));
+      paraDollars = [];
+    }
+  }
+  if (paraDollars.length % 2) dollars.push(paraDollars.at(-1));
+  return { openBraces: open, strayBraces: stray, openDollars: dollars };
+}
+var LATEX = /\\(documentclass|usepackage|begin\{[A-Za-z*]+\}|end\{[A-Za-z*]+\}|section|subsection|maketitle|cite|ref|label|emph|textbf|textit)\b/g;
+function diagnose(files, main, build) {
+  const out = [];
+  for (const [file, text] of Object.entries(files)) {
+    if (!/\.(tex|sty|def)$/i.test(file)) continue;
+    const s = scan(text);
+    if (s.openBraces.length) {
+      const at = s.openBraces[0];
+      out.push({
+        severity: "warning",
+        code: "unclosed-brace",
+        message: `{ never closed${s.openBraces.length > 1 ? ` (${s.openBraces.length} open)` : ""}: the group runs to the end of the file`,
+        file,
+        line: lineAt2(text, at)
+      });
+    }
+    for (const at of s.strayBraces.slice(0, 3))
+      out.push({ severity: "warning", code: "stray-brace", message: "} with no { to close", file, line: lineAt2(text, at) });
+    for (const at of s.openDollars.slice(0, 3))
+      out.push({ severity: "warning", code: "unclosed-math", message: "$ never closed in this paragraph", file, line: lineAt2(text, at) });
+    for (const m of text.matchAll(/(^|[^\\])\\[gex]?def\s*\\([A-Za-z@]+)([^{\n%]*)$/gm))
+      out.push({ severity: "warning", code: "def-no-body", message: `\\${m[2]} is defined with no { body } on its line`, file, line: lineAt2(text, m.index + m[1].length) });
+    const ifs = [...text.matchAll(/\\if[a-z]*\b/g)];
+    const fis = (text.match(/\\fi\b/g) ?? []).length;
+    if (ifs.length > fis && !/\\[gex]?def/.test(text))
+      out.push({ severity: "info", code: "unclosed-if", message: `${ifs.length - fis} \\if\u2026 without \\fi`, file, line: lineAt2(text, ifs.at(-1).index) });
+    for (const m of text.matchAll(/\\input\s*\{?([^\s}\\%]+)/g)) {
+      const n = m[1];
+      if (!(n in files) && !(`${n}.tex` in files) && !/\.(aux|bbl|ind|toc)$/.test(n) && !n.startsWith("\\"))
+        out.push({ severity: "warning", code: "missing-file", message: `\\input ${n}: no such file in the project`, file, line: lineAt2(text, m.index) });
+    }
+    const latex = build?.latex ? [] : [...new Set(text.match(LATEX) ?? [])];
+    if (latex.length) {
+      const first = text.search(LATEX);
+      out.push({
+        severity: "error",
+        code: "latex",
+        message: `LaTeX is not supported yet (dropped): ${latex.slice(0, 5).join(" ")}${latex.length > 5 ? " \u2026" : ""}`,
+        file,
+        line: lineAt2(text, first)
+      });
+    }
+    let nonAscii = 0;
+    let firstNon = -1;
+    for (let i = 0; i < text.length; i++)
+      if (text.charCodeAt(i) > 127) {
+        nonAscii++;
+        if (firstNon < 0) firstNon = i;
+      }
+    if (nonAscii && !build?.latex)
+      out.push({ severity: "info", code: "non-ascii", message: `${nonAscii} non-ASCII characters: PhiTeX's fonts may not typeset them`, file, line: lineAt2(text, firstNon) });
+  }
+  if (main && files[main] !== void 0 && !/\\(bye|end|enddocument)\b/.test(files[main]))
+    out.push({ severity: "info", code: "no-end", message: "no \\bye: the last page ships at the end of the file anyway", file: main });
+  for (const f of build?.packageErrors ?? [])
+    out.push({ severity: "error", code: "package-download", message: `couldn't download ${f.name}: ${f.error}` });
+  if (build?.texError) {
+    const e = build.texError;
+    const stuck = e.missing && build.unavailable?.includes(e.missing);
+    const failed = e.missing && build.packageErrors?.some((f) => f.name === e.missing);
+    out.push({
+      severity: "error",
+      code: e.missing ? "tex-missing-file" : "tex-error",
+      message: e.missing ? `${e.missing} not found${stuck ? ` in the project or ${build.packageSource ?? "the package source"}` : failed ? " (its download failed, above)" : " (still downloading?)"}: the build stopped here` : e.message,
+      file: e.file ?? void 0,
+      line: e.line ?? void 0,
+      detail: e.context
+    });
+  }
+  if (build) {
+    if (build.pending)
+      out.push({ severity: "warning", code: "pending", message: `${build.pending} part${build.pending === 1 ? "" : "s"} not read: out of fuel (a loop?) or unsupported` });
+    if (build.undefinedNames?.length) out.push({ severity: "warning", code: "undefined", message: `undefined: ${build.undefinedNames.join(" ")}` });
+    const optional = [...new Set(build.unavailable?.filter((n) => n !== build.texError?.missing).map((n) => n.replace(/(\.[a-z]+)\.tex$/, "$1")))];
+    if (optional.length) {
+      const names = optional.slice(0, 6).join(" ") + (optional.length > 6 ? " \u2026" : "");
+      out.push({
+        severity: "info",
+        code: "package-unavailable",
+        message: build.packageSource ? `looked for and not found in ${build.packageSource} (usually optional): ${names}` : `packages are not downloaded yet: ${names}`
+      });
+    }
+    if (build.pages === 0) out.push({ severity: "warning", code: "no-pages", message: "no page shipped yet" });
+  }
+  const rank = { error: 0, warning: 1, info: 2 };
+  return out.sort((a, b) => rank[a.severity] - rank[b.severity]);
+}
+
+// viewer/src/packages.ts
+var DELIVERED = "\0delivered";
+var noPackages = { label: "none", resolve: async () => null };
+function isPackageFile(name) {
+  return /\.(sty|cls|clo|def|cfg|fd|ldf|ltx|tex|dfu|sto|lbx|bbx|cbx|dbx|mld|tikz|pgf|code\.tex|lua|ini|cmap|fontspec|tfm|vf|pfb|enc|map)$/i.test(name) && !name.includes("/");
+}
+function referenced(text) {
+  const out = /* @__PURE__ */ new Set();
+  const body = text.replace(/(^|[^\\])%.*$/gm, "$1");
+  for (const m of body.matchAll(/\\(documentclass|LoadClass(?:WithOptions)?|usepackage|RequirePackage(?:WithOptions)?)\s*(?:\[[^\]]*\]\s*)?\{([^}]*)\}/g)) {
+    const ext = /class/i.test(m[1]) ? ".cls" : ".sty";
+    for (const n of m[2].split(",")) {
+      const name = n.trim();
+      if (/^[A-Za-z0-9@_.-]+$/.test(name)) out.add(name + ext);
+    }
+  }
+  if (/\\DeclareFontShape/.test(body)) {
+    for (const m of body.matchAll(/<[^>]*>\s*(?:\\[A-Za-z@]+\s*|s\*\s*(?:\[[^\]]*\]\s*)?)*([A-Za-z][A-Za-z0-9-]*)(?![A-Za-z0-9-]*\/)/g))
+      if (!/^(s?sub|gen|genb|sgen|fixed|sfixed|error|serror|warning)$/.test(m[1])) out.add(m[1] + ".tfm");
+  }
+  for (const m of body.matchAll(/\\(?:input|InputIfFileExists|@input)\s*\{?([A-Za-z0-9@_-]+\.(?:sty|cls|clo|def|cfg|fd|ldf|tex|dfu))\}?/g)) out.add(m[1]);
+  return [...out];
+}
+
+// viewer/src/session.ts
+var preambleOf = (t) => {
+  const end = t?.indexOf("\\begin{document}") ?? -1;
+  return end < 0 ? t ?? "" : t.slice(0, end);
+};
+var usesMinted = (t) => /\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?\s*\{[^}]*\bminted\b/.test(t);
+var WATCH = /* @__PURE__ */ new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync"]);
+function traceReq(r) {
+  const o = {};
+  for (const [k, v] of Object.entries(r)) {
+    if (k === "op" || k === "id") continue;
+    o[k] = typeof v === "string" && v.length > 40 ? `${v.length} chars` : v && typeof v === "object" ? `${Object.keys(v).length} keys` : v;
+  }
+  return o;
+}
+function traceRes(r) {
+  const j = r.json ?? {};
+  return {
+    ok: r.ok,
+    ...r.error ? { error: r.error } : {},
+    ...typeof j.how === "string" ? { how: j.how.split("\n")[0].slice(0, 140) } : {},
+    ...j.pages !== void 0 ? { pages: Array.isArray(j.pages) ? j.pages.length : j.pages } : {},
+    ...j.history !== void 0 ? { history: j.history } : {},
+    ...Array.isArray(j.missing) && j.missing.length ? { missing: j.missing.length } : {},
+    ...j.error ? { texError: typeof j.error === "string" ? j.error : j.error.message } : {},
+    ...j.build_ms !== void 0 ? { build_ms: Math.round(j.build_ms) } : {},
+    ...r.pdf ? { pdf: r.pdf.length } : {},
+    // (a page from the draw worker: its draw time, and whether it was drawn ahead)
+    ...j.draw_ms !== void 0 ? { drawer: true, draw_ms: Math.round(j.draw_ms), kept: j.kept } : {}
+  };
+}
+var defaults = { fuel: 1e5, format: "vector", dpi: 96, checkEveryMs: 5e3 };
+var image = (r) => r.draws ? { draws: r.draws } : r.canvas && r.size ? { canvas: r.canvas, w: r.size[0], h: r.size[1] } : r.png?.length ? { png: r.png, w: r.size?.[0], h: r.size?.[1] } : null;
+function guessMain(files) {
+  const names = Object.keys(files).filter((n) => /\.tex$/i.test(n));
+  const score = (n) => {
+    const t = files[n];
+    let s = 0;
+    if (/(^|\n)[^%\n]*\\(bye|end\{document\})/.test(t)) s += 4;
+    if (/(^|\n)\s*\\documentclass/.test(t)) s += 2;
+    if (/^main\.tex$/i.test(n)) s += 1;
+    if (!n.includes("/")) s += 1;
+    return s;
+  };
+  return names.sort((a, b) => score(b) - score(a))[0] ?? null;
+}
+function diff(old, text) {
+  if (old === text) return null;
+  let a = 0;
+  while (a < old.length && a < text.length && old[a] === text[a]) a++;
+  let z = 0;
+  while (z < old.length - a && z < text.length - a && old[old.length - 1 - z] === text[text.length - 1 - z]) z++;
+  if (a > 0 && /[\udc00-\udfff]/.test(old[a] ?? "")) a--;
+  if (z > 0 && /[\udc00-\udfff]/.test(old[old.length - z] ?? "")) z--;
+  return { from: a, to: old.length - z, text: text.slice(a, text.length - z) };
+}
+var PreviewSession = class {
+  o;
+  /** Each file's text as sent to the core (queued edits: in `batches`). */
+  files = {};
+  batches = /* @__PURE__ */ new Map();
+  main = null;
+  open = null;
+  page = 0;
+  pages = 0;
+  opened = false;
+  debug = false;
+  /** When each file's queued edits began (the oldest keystroke not sent). */
+  since = /* @__PURE__ */ new Map();
+  scheduled = false;
+  /** Sends are chained: the core gets the edits in the order they were made. */
+  chain = Promise.resolve();
+  host;
+  core;
+  sink;
+  /**
+   * What happened, in order (dev: scripts/mock-run.mjs reads it): each core
+   * request and its reply, package fetches, layouts. A ring of the last 3000,
+   * times in ms since the session began; never document text, only sizes.
+   */
+  trace = [];
+  /** The core fetches what it lacks from Shelf itself (its open reply says so). */
+  coreFetches = false;
+  /** Shelf packs the core fetched in the build under way (shown as loading until it ends). */
+  inBuild = [];
+  tellPackages() {
+    this.sink.packages?.({ ...this.pkg, loading: [...this.pkg.loading], unavailable: [...this.pkg.unavailable], done: [...this.pkg.done ?? []], failed: [...this.pkg.failed ?? []] });
+  }
+  /** The core fetches a pack mid-build (the job goes on with it): the view says which. */
+  onFetching(e) {
+    if (e.failed) {
+      this.tr("package: core fetch failed", e);
+      this.pkg.loading = this.pkg.loading.filter((n) => n !== e.pack);
+      this.pkg.failed = [...this.pkg.failed ?? [], { name: e.pack, error: `Shelf: ${e.name} not fetched` }];
+      this.tellPackages();
+      return;
+    }
+    this.tr("package: core fetches", e);
+    this.pkg.source = this.source.label;
+    const prev = this.inBuild.at(-1);
+    if (prev) this.pkg.loading = this.pkg.loading.filter((n) => n !== prev);
+    if (prev) this.pkg.done = [...this.pkg.done ?? [], prev];
+    this.inBuild.push(e.pack);
+    this.pkg.loading = [...this.pkg.loading, e.pack];
+    this.tellPackages();
+  }
+  /** Core requests sent and not answered yet; of them, ones that may build. */
+  inflight = 0;
+  building = 0;
+  t0 = 0;
+  tr(k, d) {
+    this.t0 ||= this.now();
+    this.trace.push({ t: Math.round(this.now() - this.t0), k, d });
+    if (this.trace.length > 3e3) this.trace.shift();
+  }
+  constructor(host2, core, sink, opts = {}) {
+    this.host = host2;
+    core.onEvent?.((e) => {
+      if (this.o.remote && "event" in e && WATCH.has(e.event)) return this.onWatch(e);
+      if (e.event === "preparing") return this.sink.preparing?.(e.on);
+      if (e.event === "switched") {
+        this.tr("core: the SSA worker took over", {});
+        this.glyphCache.clear();
+        if (this.opened) this.chain = this.chain.then(() => this.layout()).then(() => this.statusSoon());
+        return;
+      }
+      if (e.event === "settled") {
+        if (this.opened && !this.busy) this.chain = this.chain.then(() => this.layout()).then(() => this.statusSoon());
+        return;
+      }
+      if (e.event === "fetching") this.onFetching(e);
+      if (e.event === "page" || e.event === "progress" || e.event === "done") this.onStream(e);
+    });
+    this.core = {
+      request: async (r) => {
+        const t0 = this.now();
+        this.tr(`\u2192 ${r.op}`, traceReq(r));
+        this.inflight++;
+        const builds = r.op === "edit" || r.op === "status" || r.op === "open";
+        if (builds && this.building++ === 0) this.sink.busy?.(true);
+        if (r.op === "open" || r.op === "set_file") this.glyphCache.clear();
+        if (r.op === "edit") this.mapGlyphs(r.file, r.start, r.end, new TextEncoder().encode(r.text).length);
+        const res = await core.request(r).finally(() => {
+          this.inflight--;
+          if (builds && --this.building === 0) this.sink.busy?.(false);
+          if (builds && this.inBuild.length) {
+            this.pkg.done = [...this.pkg.done ?? [], ...this.inBuild.filter((n) => this.pkg.loading.includes(n))];
+            this.pkg.loading = this.pkg.loading.filter((n) => !this.inBuild.includes(n));
+            this.inBuild = [];
+            this.tellPackages();
+          }
+        });
+        this.tr(`\u2190 ${r.op}`, { ms: Math.round(this.now() - t0), ...traceRes(res) });
+        if (res.error) this.errorsSeen = [...this.errorsSeen.slice(-19), `${r.op}: ${res.error}`];
+        const lost = res.json?.error === "no such handle" || /^(core trapped|PDF driver failed)/.test(res.error ?? "");
+        if (res.ok && (r.op === "edit" || r.op === "status")) this.traps = 0;
+        if (lost && this.opened && r.op !== "open") {
+          this.opened = false;
+          this.traps++;
+          const why = res.error ?? "the core restarted";
+          if (this.traps <= 1) {
+            this.sink.error(`${why}; reopening`);
+            this.chain = this.chain.then(() => this.reopen());
+          } else this.sink.error(`${why}, again: the preview stops here (reload the page to retry)`);
+        }
+        return res;
+      },
+      onLost: core.onLost?.bind(core)
+    };
+    this.sink = sink;
+    this.o = { ...defaults, ...opts };
+    host2.onOpen((f0, t) => {
+      const f = this.known(f0);
+      this.open = f;
+      this.sync(f, t);
+      this.status();
+    });
+    host2.onChanges((f, es) => this.queue(this.known(f), es));
+    core.onLost?.(() => {
+      this.opened = false;
+      this.sink.error("core lost; reopening");
+      this.reopen();
+    });
+  }
+  /**
+   * The project's file the editor's name is: itself, else the one file
+   * whose path ends with it (a name read from Overleaf's page without its
+   * folders: edits to a new, empty file the build never reads, the page
+   * never changing while the chip said they were built).
+   */
+  known(f) {
+    if (f in this.files) return f;
+    const like = Object.keys(this.files).filter((p) => p.endsWith("/" + f));
+    if (like.length === 1) {
+      this.tr("file: named by its path", { from: f, to: like[0] });
+      return like[0];
+    }
+    return f;
+  }
+  /** The pages' request: 0 their draw lists (vector), -1 the PDF, drawn in the tab by pdf.js. */
+  dpi() {
+    return this.o.format === "pdfjs" ? -1 : 0;
+  }
+  setFormat(f) {
+    this.o.format = f;
+    if (this.sink.layout) {
+      this.hashes = [];
+      return this.layout();
+    }
+    return this.showPage();
+  }
+  now() {
+    return (this.o.now ?? (() => performance.now()))();
+  }
+  async start() {
+    if (this.o.remote) {
+      this.opened = true;
+      return this.watchJoined();
+    }
+    const files = await this.host.loadProject();
+    for (const [f, t] of Object.entries(files)) if (!(f in this.files)) this.files[f] = t;
+    this.main = this.host.mainFile?.(this.files) ?? guessMain(this.files);
+    this.sink.mains?.(Object.keys(this.files).filter((f) => f.endsWith(".tex")), this.main);
+    await this.reopen();
+    this.host.ready?.();
+    if (this.o.checkEveryMs > 0) this.checkTimer = setInterval(() => this.debug && this.check(), this.o.checkEveryMs);
+  }
+  checkTimer;
+  /** The session ends (its view closed): its timers stop and it sends nothing more; the core's side is its transport's to close. */
+  stop() {
+    clearInterval(this.checkTimer);
+    if (this.statusTimer) clearTimeout(this.statusTimer);
+    this.opened = false;
+    this.paused = true;
+  }
+  /** Files changed outside the editor (e.g. a project reloaded): each diffed in. */
+  refresh(files) {
+    for (const [f, t] of Object.entries(files)) if (f !== this.open) this.sync(f, t);
+  }
+  setMain(m) {
+    this.main = m;
+    return this.reopen();
+  }
+  /**
+   * Clean recompile: the project's files as Overleaf has them now, packages
+   * that failed or were not found asked for again, and a fresh core session
+   * (discovery, first paint, then the incremental program), nothing kept from
+   * the last job but the packages already fetched.
+   */
+  async clean(files) {
+    for (const [f, t] of Object.entries(files)) if (f !== this.open) this.files[f] = t;
+    for (const n of [...this.pkg.unavailable, ...(this.pkg.failed ?? []).map((f) => f.name)]) this.asked.delete(n);
+    this.pkg.unavailable = [];
+    this.pkg.failed = [];
+    this.texError = void 0;
+    this.hashes = [];
+    return this.reopen();
+  }
+  /** Whether the open's sources used minted (the worker then has its runner). */
+  minted = false;
+  /** A fresh core session from the texts with every queued edit in. */
+  async reopen() {
+    if (!this.main) return this.sink.error("no main .tex file found");
+    for (const [f, b] of this.batches) this.files[f] = b.text;
+    this.batches.clear();
+    const t = this.now();
+    const want = this.o.engine?.(this.files[this.main]) ?? "pdflatex";
+    const shims = !ENGINES[want].ready && want === "xelatex" ? await this.o.shims?.(this.files[this.main]) : null;
+    const engine = shims ? "pdflatex" : want;
+    this.engine = engine;
+    this.wanted = want;
+    this.preamble = preambleOf(this.files[this.main]);
+    this.sink.engine?.({ engine: want, ready: ENGINES[engine].ready, approx: !!shims });
+    if (!ENGINES[engine].ready) {
+      this.opened = false;
+      this.tr("engine", { engine, ready: false });
+      return;
+    }
+    await this.prefetch(["pdftex.map", ...Object.values(this.files).flatMap(referenced)]);
+    this.minted = Object.values(this.files).some(usesMinted);
+    const r = await this.core.request({ op: "open", main: this.main, files: { ...this.pkgFiles, ...shims, ...this.files }, fuel: this.o.fuel, engine, workers: this.o.workers });
+    if (!r.ok) return this.sink.error((typeof r.json?.error === "string" ? r.json.error : void 0) ?? r.error ?? "open failed");
+    if (r.json.building) {
+      this.tr("open: streaming", {});
+      this.opened = true;
+      this.sink.busy?.(true);
+      this.sink.streaming?.({ pages: 0, phase: r.json.phase ?? "typesetting" });
+      const d = await new Promise((res) => this.streamEnd = res);
+      this.sink.busy?.(false);
+      this.sink.streaming?.(null);
+      if (!d.ok || !d.json) return this.sink.error(d.error ?? "the build stopped");
+      r.json = d.json;
+    }
+    this.opened = true;
+    const latex = r.json.engine === "phitex";
+    if (latex !== this.latex) this.lastWarned = 0;
+    this.latex = latex;
+    this.coreFetches = !!r.json.fetches;
+    this.warming = typeof r.json.how === "string" && r.json.how.startsWith("plain") ? this.now() : 0;
+    this.warmSlow = false;
+    if (this.warming) this.sink.warmup?.({ state: "preparing", since: Date.now() });
+    this.setPages(r.json.pages);
+    this.noteError(r.json);
+    this.status(r.json.pending, r.json.undefined_names);
+    this.fetchPackages(r.json.missing);
+    this.sink.latency(`opened in ${r.json.build_ms.toFixed(1)} ms (round trip ${(this.now() - t).toFixed(1)} ms)`);
+    await (this.sink.layout ? this.layout(Array.isArray(r.json.hashes) ? r.json.hashes : void 0) : this.showPage());
+    this.pkg.building = false;
+    this.tellPackages();
+    this.statusSoon();
+  }
+  /** A streamed open's end, awaited by `open`. */
+  streamEnd;
+  /** The streamed open's first page was traced. */
+  streamFirst = false;
+  onStream(e) {
+    if (e.event === "done") {
+      this.tr("open: streamed", { ok: e.ok });
+      this.streamFirst = false;
+      this.streamEnd?.(e);
+      this.streamEnd = void 0;
+      return;
+    }
+    if (!this.streamEnd) return;
+    if (e.event === "progress") return this.sink.streaming?.({ pages: e.pages, phase: e.phase });
+    if (!this.streamFirst) {
+      this.streamFirst = true;
+      this.tr("open: first page", { pages: e.pages });
+    }
+    this.setPages(e.pages);
+    this.sink.streaming?.({ pages: e.pages, phase: "typesetting" });
+    if (this.sink.layout) this.chain = this.chain.then(() => this.layout(e.hashes));
+  }
+  /** When the plain first paint came, while the SSA program is still to come (0: not warming). */
+  warming = 0;
+  warmSlow = false;
+  /** A status said how the last build was: past a plain one, the SSA program is there. */
+  warmCheck(how) {
+    if (!this.warming || typeof how !== "string" || how.startsWith("plain")) return;
+    this.tr("warmup: ready", { ms: Math.round(this.now() - this.warming) });
+    this.warming = 0;
+    this.sink.warmup?.({ state: "ready" });
+  }
+  lastWarned = 0;
+  /** When the core trapped, in the last minute. */
+  /** Traps since the last build that came back whole. */
+  traps = 0;
+  /** The engine the project runs with (its packages are resolved for it: which tree's file). */
+  engine = "pdflatex";
+  /** The engine the main file asked for at the last open (before the shims' choice), and its preamble then. */
+  wanted;
+  preamble;
+  /** The core runs LaTeX (the open reply's `engine`; until it says, as phitex's, the default build). */
+  latex = true;
+  diags = [];
+  /** The last build's first TeX error (the core's status), if it had one. */
+  texError;
+  noteError(j) {
+    if (j.history === void 0) return;
+    this.texError = j.error && typeof j.error === "object" ? j.error : void 0;
+  }
+  undefinedNames = [];
+  /** The last status scan's pending count (edits keep it until the next scan). */
+  pending;
+  status(pending, undefinedNames) {
+    if (this.o.remote) return this.sink.status({ pages: this.pages, main: this.main, file: null, diagnostics: this.watchDiags });
+    this.pending = pending;
+    if (undefinedNames) this.undefinedNames = undefinedNames;
+    if (this.now() - this.lastWarned > 250 || undefinedNames) {
+      const texts = {};
+      for (const f of Object.keys(this.files)) texts[f] = this.text(f);
+      this.diags = diagnose(texts, this.main, {
+        pages: this.pages,
+        pending,
+        undefinedNames: this.undefinedNames,
+        unavailable: this.pkg.unavailable,
+        packageSource: this.source === noPackages ? void 0 : this.source.label,
+        latex: this.latex,
+        texError: this.texError,
+        packageErrors: this.pkg.failed
+      });
+      this.lastWarned = this.now();
+    }
+    this.sink.status({ pages: this.pages, pending, main: this.main, file: this.open, diagnostics: this.diags });
+  }
+  /** Packages the core was given (kept apart from the project's files: never diagnosed, never a main). */
+  pkgFiles = {};
+  /** Every package name asked for once: not asked again. */
+  asked = /* @__PURE__ */ new Set();
+  pkg = { loading: [], unavailable: [], source: "none", done: [], building: false };
+  get source() {
+    return this.o.packages ?? noPackages;
+  }
+  /**
+   * The core read `missing` and found nothing: each package among them
+   * fetched (once), then set as a file (a rebuild each: the core never
+   * looks for a missing file again). What they read in turn shows up in
+   * the next status, and is fetched then.
+   */
+  fetchPackages(missing, guessed = []) {
+    if (this.coreFetches) {
+      const none = (missing ?? []).filter((n) => isPackageFile(n) && !this.pkg.unavailable.includes(n));
+      if (none.length) this.pkg.unavailable.push(...none), this.tellPackages();
+      return;
+    }
+    const wanted = new Set(missing ?? []);
+    missing = [...wanted, ...guessed];
+    const want = [...new Set(missing ?? [])].filter((n) => isPackageFile(n) && !(n in this.files) && !this.asked.has(n));
+    if (!want.length) return;
+    for (const n of want) this.asked.add(n);
+    const src = this.source;
+    this.pkg.source = src.label;
+    const tell = () => this.sink.packages?.({ ...this.pkg, loading: [...this.pkg.loading], unavailable: [...this.pkg.unavailable], done: [...this.pkg.done ?? []], failed: [...this.pkg.failed ?? []] });
+    if (src === noPackages) {
+      this.pkg.unavailable.push(...want);
+      tell();
+      return this.status(this.pending, this.undefinedNames);
+    }
+    this.pkg.loading.push(...want);
+    tell();
+    const got = [];
+    this.tr("packages: want", want);
+    const fetchOne = async (n) => {
+      const t = await src.resolve(n, this.engine).catch((e) => this.failed(n, e));
+      this.tr(t === null ? "package: none" : "package: got", n);
+      got.push([n, t]);
+      this.pkg.loading = this.pkg.loading.filter((m) => m !== n);
+      if (t !== null) {
+        this.pkg.done.push(n);
+        this.pkg.failed = this.pkg.failed?.filter((f) => f.name !== n);
+      }
+      const more = t === null || t === DELIVERED ? [] : referenced(t).filter((m) => isPackageFile(m) && !(m in this.files) && !this.asked.has(m));
+      for (const m of more) this.asked.add(m);
+      this.pkg.loading.push(...more);
+      tell();
+      await Promise.all(more.map(fetchOne));
+    };
+    void Promise.all(want.map(fetchOne)).then(() => {
+      for (const [n, t] of got) {
+        if (t === null) {
+          if (wanted.has(n) && !this.pkg.failed?.some((f) => f.name === n)) this.pkg.unavailable.push(n);
+          continue;
+        }
+        if (t === DELIVERED) continue;
+        this.pkgFiles[n] = t;
+        if (this.opened) this.chain = this.chain.then(() => this.core.request({ op: "set_file", file: n, text: t }).then(() => void 0));
+      }
+      const any = got.some(([, t]) => t !== null);
+      this.pkg.building = any;
+      tell();
+      this.status(this.pending, this.undefinedNames);
+      if (any)
+        this.chain = this.chain.then(() => this.layout()).then(() => {
+          this.pkg.building = false;
+          tell();
+          this.statusSoon();
+        });
+    });
+  }
+  /** After the core's discovery pass: what it asked for is here (or nowhere), so the first paint may build. Once per open. */
+  /** A fetch that failed: kept with why (shown), and askable again. */
+  failed(n, e) {
+    this.asked.delete(n);
+    const error = e instanceof Error ? e.message : String(e);
+    this.pkg.failed = [...(this.pkg.failed ?? []).filter((f) => f.name !== n), { name: n, error }];
+    return null;
+  }
+  /** Fetch `names` (and what they load, by the scan) into pkgFiles, before a session opens. */
+  async prefetch(names) {
+    const src = this.source;
+    const want = [...new Set(names)].filter((n) => isPackageFile(n) && !(n in this.files) && !this.asked.has(n));
+    if (src === noPackages || !want.length) return;
+    this.pkg.source = src.label;
+    const tell = () => this.sink.packages?.({ ...this.pkg, loading: [...this.pkg.loading], unavailable: [...this.pkg.unavailable], done: [...this.pkg.done ?? []], failed: [...this.pkg.failed ?? []] });
+    for (const n of want) this.asked.add(n);
+    this.pkg.loading.push(...want);
+    tell();
+    const one = async (n) => {
+      const t = await src.resolve(n, this.engine).catch((e) => this.failed(n, e));
+      this.pkg.loading = this.pkg.loading.filter((m) => m !== n);
+      if (t !== null) this.pkg.done.push(n);
+      if (t !== null && t !== DELIVERED) this.pkgFiles[n] = t;
+      const more = t === null || t === DELIVERED ? [] : referenced(t).filter((m) => isPackageFile(m) && !(m in this.files) && !this.asked.has(m));
+      for (const m of more) this.asked.add(m);
+      this.pkg.loading.push(...more);
+      tell();
+      await Promise.all(more.map(one));
+    };
+    const t0 = this.now();
+    this.tr("prefetch: start", want.length);
+    await Promise.all(want.map(one));
+    this.tr("prefetch: done", { files: this.pkg.done?.length ?? 0, ms: Math.round(this.now() - t0) });
+    this.pkg.building = true;
+    tell();
+  }
+  /** The page count of the last build; the page in view kept inside it
+   * (a build with no page, an error, keeps the page: it comes back). */
+  setPages(n) {
+    this.pages = n;
+    if (n > 0 && this.page >= n) this.page = n - 1;
+  }
+  /** The page in view (the one an edit paints first). */
+  setPage(p) {
+    this.page = Math.max(0, Math.min(p, Math.max(this.pages - 1, 0)));
+    return this.sink.layout ? Promise.resolve() : this.showPage();
+  }
+  /** The pages' hashes, as the core has them now. */
+  hashes = [];
+  /** Tell the view which pages there are (by hash). */
+  /** `given`: the hashes a reply carried (the open's), else asked for. */
+  async layout(given) {
+    if (!this.sink.layout) return;
+    if (given) this.hashes = given;
+    else {
+      const r = await this.core.request({ op: "pages" });
+      if (!r.ok || !r.json?.pages) return;
+      this.hashes = r.json.pages;
+    }
+    this.tr("layout", { pages: this.hashes.length });
+    this.setPages(this.hashes.length);
+    if (this.hashes.length) this.sink.layout(this.hashes);
+    if (this.sink.goto && !this.noOriginsPrefetch) this.glyphsAll();
+  }
+  /** Everything again, for a view that just joined (a detached PDF tab). */
+  async resync() {
+    if (!this.opened) return;
+    if (this.o.remote) return this.watchJoined();
+    this.sink.mains?.(Object.keys(this.files).filter((f) => f.endsWith(".tex")), this.main);
+    this.status(this.pending);
+    await (this.sink.layout ? this.layout() : this.showPage());
+  }
+  /** Page `k`, for a view that wants it. */
+  async fetch(k) {
+    if (!this.opened) return;
+    const r = await this.core.request({ op: "png", page: k, dpi: this.dpi() });
+    const img = image(r);
+    if (img) this.sink.page(img, k, this.pages, r.json?.hash ?? this.hashes[k] ?? null);
+  }
+  async showPage() {
+    if (!this.opened) return;
+    if (this.sink.layout) return this.layout();
+    const r = await this.core.request({ op: "png", page: this.page, dpi: this.dpi() });
+    this.sink.page(image(r), this.page, this.pages);
+  }
+  /** (debugging: no glyph-origin requests after layouts) */
+  noOriginsPrefetch = false;
+  /** The errors replies carried (traps, panics), the last 20. */
+  errorsSeen = [];
+  /** An anonymized debug report (report.ts) for the user to send. */
+  report(env) {
+    const st = this.trace.filter((e) => e.k === "\u2190 status").at(-1)?.d;
+    return report({
+      ...env,
+      paths: Object.keys(this.files),
+      trace: this.trace,
+      diagnostics: this.diags ?? [],
+      status: st,
+      packages: this.pkg,
+      // (TeX's error by its message only: its context is the document's lines)
+      errors: [...this.errorsSeen, ...this.texError ? [`TeX: ${this.texError.message}`] : []]
+    });
+  }
+  /** Page `k`'s glyphs with their sources, as the core has them now (kept by the page's hash). */
+  glyphCache = /* @__PURE__ */ new Map();
+  /**
+   * An edit replaced bytes [start, end) of `file` with `len` bytes: every
+   * cached glyph's source range moved with it. A page the edit changed has a
+   * new hash, so its glyphs are asked again (the cache is by page hash).
+   */
+  mapGlyphs(file, start, end, len) {
+    const map = (p) => p < start ? p : p >= end ? p + len - (end - start) : start + len;
+    for (const [key, gs] of this.glyphCache) {
+      if (end > start && gs.some((g) => g.file === file && g.start < end && g.end > start)) {
+        this.glyphCache.delete(key);
+        continue;
+      }
+      for (const g of gs) {
+        if (g.file !== file) continue;
+        const [a, b] = [map(g.start), map(g.end)];
+        g.start = a;
+        g.end = Math.max(a, b);
+      }
+    }
+  }
+  /** Page `k`'s glyphs if they are here, at once (no request, no waiting on a build). */
+  cached(k) {
+    return this.glyphCache.get(`${k}:${this.hashes[k] ?? ""}`);
+  }
+  /** Every page's glyphs asked for, the one read first, one at a time: after each build, so lookups are local. */
+  glyphsAll() {
+    const gen = ++this.glyphGen;
+    const n = this.hashes.length;
+    const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
+    void (async () => {
+      for (const k of order) {
+        if (gen !== this.glyphGen) return;
+        if (k >= 0 && k < n && !this.cached(k)) await this.glyphsOf(k);
+      }
+    })();
+  }
+  glyphGen = 0;
+  async glyphsOf(k) {
+    const key = `${k}:${this.hashes[k] ?? ""}`;
+    const have = this.glyphCache.get(key);
+    if (have) return have;
+    const r = await this.core.request({ op: "origins", page: k });
+    if (!r.ok || !r.json?.g) return [];
+    const path = (n) => {
+      n = n.replace(/^\.\//, "");
+      if (this.o.remote) return n;
+      return n in this.files ? n : n + ".tex" in this.files ? n + ".tex" : null;
+    };
+    const gs = glyphs(r.json, path);
+    if (this.glyphCache.size > 4 * Math.max(this.hashes.length, 100)) this.glyphCache.clear();
+    this.glyphCache.set(key, gs);
+    return gs;
+  }
+  /** A double-click at (x, y) on page `k` (PDF points from its top left): the editor to its source. */
+  async toSource(k, x, y) {
+    if (!this.opened) return;
+    const g = nearest(this.cached(k) ?? await this.glyphsOf(k), x, y);
+    this.tr("sync\u2192source", { k, x, y, g });
+    if (!g?.file) return;
+    if (this.o.remote) return this.o.remote.source(g.file, g.start, g.end);
+    const t = this.files[g.file];
+    this.sink.goto?.(g.file, charOffset(t, g.start), charOffset(t, g.end));
+  }
+  /**
+   * The editor selected [from, to) of `file` (UTF-16): the glyphs that came
+   * from it, on every page, highlighted (an empty selection clears them).
+   */
+  async selectSource(file, from2, to) {
+    if (!this.opened || !(file in this.files)) return;
+    if (from2 === to) return this.sink.marks?.([]);
+    const t = this.files[file];
+    const [a, b] = [byteOffset(t, from2), byteOffset(t, to)];
+    const out = [];
+    for (let k = 0; k < Math.max(this.hashes.length, this.pages); k++) {
+      const all = this.cached(k) ?? await this.glyphsOf(k);
+      const hit = all.filter((g) => g.file === file && !g.synth && g.start < b && g.end > a);
+      if (hit.length) out.push({ k, boxes: boxes(hit, all) });
+    }
+    this.tr("select\u2192page", { file, from: from2, to, pages: out.map((m) => m.k) });
+    this.sink.marks?.(out);
+  }
+  /**
+   * Text selected on the pages ([x, y top, w, h] boxes in PDF points, by
+   * page): the editor selects the source it came from (the file most of it
+   * came from, from its first glyph's start to its last's end).
+   */
+  async selectPage(sel) {
+    if (!this.opened || !sel.length) return;
+    const by = /* @__PURE__ */ new Map();
+    for (const { k, rects } of sel) {
+      for (const g of this.cached(k) ?? await this.glyphsOf(k)) {
+        if (!g.file || g.synth) continue;
+        const [gx, gy] = [g.x + 1, g.y - 2];
+        if (!rects.some(([x, y, w, h]) => gx >= x && gx <= x + w && gy >= y && gy <= y + h)) continue;
+        const r = by.get(g.file) ?? { lo: Infinity, hi: -Infinity, n: 0 };
+        by.set(g.file, { lo: Math.min(r.lo, g.start), hi: Math.max(r.hi, g.end), n: r.n + 1 });
+      }
+    }
+    const best = [...by].sort((x, y) => y[1].n - x[1].n)[0];
+    this.tr("select\u2192source", { pages: sel.map((s) => s.k), file: best?.[0], glyphs: best?.[1].n ?? 0 });
+    if (!best) return;
+    const [file, { lo, hi }] = best;
+    const t = this.files[file];
+    if (t === void 0) return;
+    this.sink.goto?.(file, charOffset(t, lo), charOffset(t, hi), false);
+  }
+  /**
+   * The editor's cursor at `pos` (UTF-16) in `file`, as it moves: the word it
+   * is in highlighted on the page, at once, from the glyphs already here
+   * (none asked for: a page not yet here is skipped); scrolled to only when
+   * the cursor changed line.
+   */
+  follow(file, pos) {
+    if (!this.opened || !(file in this.files) || !this.sink.mark) return;
+    const t = this.files[file];
+    const bytes = new TextEncoder().encode(t);
+    const at = byteOffset(t, pos);
+    const lo = t.lastIndexOf("\n", pos - 1) + 1, hiC = t.indexOf("\n", pos);
+    const [a, b] = [byteOffset(t, lo), byteOffset(t, hiC < 0 ? t.length : hiC)];
+    const line = `${file}:${lo}`;
+    const scroll = line !== this.followLine;
+    this.followLine = line;
+    const w = wordBytes(bytes, at);
+    const n = Math.max(this.hashes.length, this.pages, 1);
+    const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
+    for (const k of order) {
+      const all = this.cached(k);
+      if (!all) continue;
+      const onLine = from(all, file, a, b);
+      if (!onLine.length) continue;
+      const word = w ? from(onLine, file, w[0], w[1]) : [];
+      const hit = word.length ? word : lineAt(onLine, at);
+      this.followWant = "";
+      this.sink.mark(k, boxes(hit, all), scroll);
+      return;
+    }
+    const want = `${file}:${pos}`;
+    this.followWant = want;
+    void (async () => {
+      for (const k of order) {
+        if (this.followWant !== want) return;
+        if (k >= this.hashes.length || this.cached(k)) continue;
+        const all = await this.glyphsOf(k);
+        if (from(all, file, a, b).length) {
+          if (this.followWant === want) {
+            this.followLine = "";
+            this.follow(file, pos);
+          }
+          return;
+        }
+      }
+    })();
+  }
+  followLine = "";
+  followWant = "";
+  /** The place `pos` (UTF-16) in `file`: its line's glyphs highlighted on the page (the page in view first). */
+  async toPage(file, pos) {
+    if (!this.opened || !(file in this.files)) return;
+    const t = this.files[file];
+    const lo = t.lastIndexOf("\n", pos - 1) + 1, hiC = t.indexOf("\n", pos);
+    const [a, b] = [byteOffset(t, lo), byteOffset(t, hiC < 0 ? t.length : hiC)];
+    const n = Math.max(this.hashes.length, this.pages, 1);
+    const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
+    for (const k of order) {
+      const all = this.cached(k) ?? await this.glyphsOf(k);
+      const hit = lineAt(from(all, file, a, b), byteOffset(t, pos));
+      if (hit.length) {
+        this.tr("sync\u2192page", { file, pos, k, glyphs: hit.length });
+        this.sink.mark?.(k, boxes(hit, all));
+        return;
+      }
+    }
+    this.tr("sync\u2192page", { file, pos, k: -1 });
+  }
+  async pdf() {
+    this.flush();
+    await this.chain;
+    const t = this.now();
+    const r = await this.core.request({ op: "pdf" });
+    this.sink.latency(`PDF made in ${(this.now() - t).toFixed(1)} ms`);
+    return r.pdf;
+  }
+  /** `file` is now `text`: only the differing middle is sent. */
+  sync(file, text) {
+    const old = this.batches.get(file)?.text ?? this.files[file];
+    if (old === void 0) {
+      this.files[file] = text;
+      if (this.opened) this.chain = this.chain.then(() => this.core.request({ op: "set_file", file, text }).then(() => void 0));
+      return;
+    }
+    const e = diff(old, text);
+    if (e) this.queue(file, [e]);
+  }
+  queue(file, edits) {
+    if (!edits.length) return;
+    let b = this.batches.get(file);
+    if (!b) this.batches.set(file, b = new Batch(this.files[file] ?? ""));
+    if (!(file in this.files)) this.files[file] = "";
+    if (!b.size) this.since.set(file, this.now());
+    for (const e of edits) b.push(e);
+    this.keystrokes += edits.length;
+    if (!this.scheduled) {
+      this.scheduled = true;
+      const f = () => this.flush();
+      if (this.o.schedule) this.o.schedule(f);
+      else setTimeout(f, 0);
+    }
+  }
+  /** A send loop is running (it takes what is queued when each build ends). */
+  busy = false;
+  /** Edits the host gave, and builds they took (the batching's effect). */
+  keystrokes = 0;
+  builds = 0;
+  /**
+   * Send the queued edits, in order; the last of a round painted first
+   * (edit_view). Backpressure: at most one round in flight. What is typed
+   * meanwhile merges into the batches, and goes as one edit when the core
+   * is free: a fast core builds every keystroke, a slow one the last N
+   * together, never a state already stale.
+   */
+  /** Paused (the extension turned off): edits keep merging in their batches, sent on resume. */
+  paused = false;
+  pause(on) {
+    this.paused = on;
+    if (!on) void this.flush();
+  }
+  flush() {
+    this.scheduled = false;
+    if (!this.opened || this.busy || this.paused) return this.chain;
+    this.busy = true;
+    this.sink.busy?.(true);
+    this.chain = this.chain.then(async () => {
+      try {
+        for (; ; ) {
+          const round = [...this.batches].filter(([, b]) => b.size);
+          if (!round.length) break;
+          for (const [file, b] of round) if (!await this.send(file, b)) return;
+        }
+        await this.layout();
+        this.statusSoon();
+      } finally {
+        this.busy = false;
+        this.sink.busy?.(false);
+        if ([...this.batches.values()].some((b) => b.size)) setTimeout(() => void this.flush(), 0);
+      }
+    });
+    return this.chain;
+  }
+  statusTimer = null;
+  /**
+   * The pending/undefined scan flattens the whole program (3 ms at 180 KB,
+   * ten times an edit): once the edits have settled, at most every 300 ms.
+   */
+  /** `phitex watch`'s last build's problems (Options.remote), as diagnostics. */
+  watchDiags = [];
+  /** A build of the watch's under way (its progress told, not yet settled). */
+  watchBuilding = false;
+  watchBusy(on) {
+    if (on === this.watchBuilding) return;
+    this.watchBuilding = on;
+    this.sink.busy?.(on);
+    if (!on) this.sink.streaming?.(null);
+  }
+  /** The watch joined (or joined again): its pages, outline and last problems. */
+  async watchJoined() {
+    await this.layout();
+    this.status();
+    void this.watchOutline();
+    const r = await this.core.request({ op: "diagnostics" });
+    if (r.ok) this.onWatch({ event: "diagnostics", items: r.json?.items ?? [] });
+  }
+  async watchOutline() {
+    if (!this.sink.outline) return;
+    const r = await this.core.request({ op: "outline" });
+    if (r.ok) this.sink.outline(r.json?.items ?? []);
+  }
+  onWatch(e) {
+    switch (e.event) {
+      case "page": {
+        this.watchBusy(true);
+        const hs = [...this.hashes];
+        while (hs.length < Math.max(e.k + 1, e.pages ?? 0)) hs.push("");
+        hs[e.k] = e.hash;
+        this.hashes = hs;
+        this.setPages(hs.length);
+        this.sink.layout?.(hs);
+        return;
+      }
+      case "progress":
+        this.watchBusy(true);
+        this.sink.streaming?.({ pages: e.pages ?? 0, phase: e.phase ?? "typesetting" });
+        return;
+      case "superseded":
+        this.watchBusy(true);
+        return;
+      case "diagnostics":
+        this.watchDiags = e.items.map(asDiagnostic);
+        this.status();
+        return;
+      case "settled":
+        if (!e.settling) this.watchBusy(false), this.sink.preparing?.(false);
+        this.chain = this.chain.then(() => this.layout()).then(() => (this.status(), this.watchOutline()));
+        return;
+      case "sync":
+        void this.syncTo(e.file, e.lo, e.hi, e.at, e.page);
+        return;
+    }
+  }
+  /** Forward search: bytes [lo, hi) of `file` (a line), the glyphs from it nearest `at`'s highlighted, the page in view tried first. */
+  async syncTo(file, lo, hi, at, hint) {
+    const n = this.hashes.length;
+    const first = hint ?? this.page;
+    for (const k of [first, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== first)]) {
+      const all = this.cached(k) ?? await this.glyphsOf(k);
+      const hit = lineAt(from(all, file, lo, hi), at);
+      if (hit.length) return this.sink.mark?.(k, boxes(hit, all), true);
+    }
+  }
+  statusSoon() {
+    if (this.statusTimer) return;
+    this.statusTimer = setTimeout(async () => {
+      this.statusTimer = null;
+      if (this.busy || !this.opened) return this.statusSoon();
+      const r = await this.core.request({ op: "status" });
+      if (r.ok && r.json) {
+        this.warmCheck(r.json.how);
+        this.setPages(r.json.pages);
+        this.noteError(r.json);
+        this.status(r.json.pending, r.json.undefined_names);
+        this.fetchPackages(r.json.missing);
+      }
+    }, 300);
+  }
+  async send(file, b) {
+    if (this.warming && !this.warmSlow) {
+      this.warmSlow = true;
+      this.sink.warmup?.({ state: "preparing", since: Date.now() - (this.now() - this.warming), slow: true });
+    }
+    const t0 = this.since.get(file) ?? this.now();
+    const tSend = this.now();
+    const edits = b.take();
+    this.files[file] = b.text;
+    if (!this.minted && usesMinted(b.text)) {
+      this.tr("minted: open again, with its runner", {});
+      await this.reopen();
+      return false;
+    }
+    if (file === this.main && this.o.engine) {
+      const pre = preambleOf(b.text);
+      if (pre !== this.preamble) {
+        this.preamble = pre;
+        const want = this.o.engine(b.text);
+        if (want !== this.wanted) {
+          this.tr("engine: open again", { from: this.wanted, to: want });
+          await this.reopen();
+          return false;
+        }
+      }
+    }
+    for (const [i, e] of edits.entries()) {
+      const last = i === edits.length - 1;
+      this.builds++;
+      const r = await this.core.request({ op: "edit", file, ...e, page: last ? this.page : -1, dpi: this.dpi() });
+      if (!r.ok) {
+        this.sink.error((typeof r.json?.error === "string" ? r.json.error : void 0) ?? r.error ?? "edit failed");
+        if (r.error?.includes("trapped")) await this.reopen();
+        return false;
+      }
+      if (!last) continue;
+      const tBack = this.now();
+      const j = r.json;
+      this.setPages(j.pages);
+      this.noteError(j);
+      this.status(this.pending);
+      const img = image(r);
+      if (img) this.sink.page(img, this.page, this.pages, j.painted_hash ?? null);
+      else if (!this.sink.layout) await this.showPage();
+      const e2e = this.now() - t0;
+      this.sink.painted?.(e2e);
+      this.sink.latency(
+        `${e2e.toFixed(0)} ms keystroke\u2192page \xB7 core ${j.paint_ms.toFixed(1)} ms \xB7 ${this.keystrokes} edits \u2192 ${this.builds} builds`,
+        [
+          `first paint      ${j.paint_ms.toFixed(2)} ms (in the core: edit_view, the page painted)`,
+          `fixed point      ${j.total_ms.toFixed(2)} ms (every page, the .aux/.bbl loops)${j.wrong ? " \xB7 first paint was superseded" : ""}`,
+          `keystroke\u2192page   ${e2e.toFixed(1)} ms = queued ${(tSend - t0).toFixed(1)} + round trip ${(tBack - tSend).toFixed(1)} + paint ${(this.now() - tBack).toFixed(1)}`,
+          `rebuilt          ${j.stats.rebuilt} of ${j.stats.rebuilt + j.stats.reused} chunks, ${j.stats.passes} pass${j.stats.passes === 1 ? "" : "es"}`,
+          r.draws ? `page             vector, ${r.draws.t.length} words` : j.png_bytes ? `page             PNG ${(j.png_bytes / 1024).toFixed(0)} KB (${j.png_compress_ms.toFixed(1)} ms to compress)` : "",
+          `batching         ${this.keystrokes} edits \u2192 ${this.builds} builds (one in flight; the rest merged)`
+        ].filter(Boolean).join("\n")
+      );
+    }
+    return true;
+  }
+  /** PhiTeX's invariant: the incremental state = a fresh build of the same text. */
+  async check() {
+    if (!this.opened) return;
+    await this.flush();
+    const file = this.open ?? this.main;
+    const r = await this.core.request({ op: "check", file, expect: this.files[file] });
+    this.sink.check?.(r.json);
+    return r.json;
+  }
+  /** The texts the session has sent (tests). */
+  text(file) {
+    return this.batches.get(file)?.text ?? this.files[file];
+  }
+  /** Every project file's text as it is now (queued edits in): a compare's new side. */
+  texts() {
+    const out = {};
+    for (const f of Object.keys(this.files)) out[f] = this.text(f);
+    return out;
+  }
+};
+
+// viewer/src/mupdf.ts
+var MupdfDoc = class {
+  m;
+  doc;
+  /** `m`: the `mupdf` module, loaded by the host. */
+  constructor(m, pdf) {
+    this.m = m;
+    this.doc = m.Document.openDocument(pdf, "application/pdf");
+  }
+  get pages() {
+    return this.doc.countPages();
+  }
+  /** Page `k` (from 0) drawn at `scale` pixels a point; null: no such page. */
+  draw(k, scale) {
+    if (k < 0 || k >= this.pages) return null;
+    const page = this.doc.loadPage(k);
+    try {
+      const [x0, y0, x1, y1] = page.getBounds();
+      const pix = page.toPixmap(this.m.Matrix.scale(scale, scale), this.m.ColorSpace.DeviceRGB, false, true);
+      try {
+        const pw = pix.getWidth(), ph = pix.getHeight(), stride = pix.getStride();
+        const rgb = pix.getPixels();
+        const rgba = new Uint8ClampedArray(pw * ph * 4);
+        for (let y = 0; y < ph; y++) {
+          let i = y * stride, o = y * pw * 4;
+          for (let x = 0; x < pw; x++, i += 3, o += 4) {
+            rgba[o] = rgb[i];
+            rgba[o + 1] = rgb[i + 1];
+            rgba[o + 2] = rgb[i + 2];
+            rgba[o + 3] = 255;
+          }
+        }
+        return { rgba, pw, ph, w: x1 - x0, h: y1 - y0 };
+      } finally {
+        pix.destroy();
+      }
+    } finally {
+      page.destroy();
+    }
+  }
+  /** The PDF's outline (its bookmarks) as the panel's entries. */
+  outline() {
+    const conv = (items) => (items ?? []).map((i) => ({ t: i.title ?? "", p: i.page ?? null, y: null, k: conv(i.down) }));
+    return conv(this.doc.loadOutline());
+  }
+  destroy() {
+    this.doc.destroy();
+  }
+};
+function toCanvas(d) {
+  const c = document.createElement("canvas");
+  c.width = d.pw;
+  c.height = d.ph;
+  c.getContext("2d").putImageData(new ImageData(d.rgba, d.pw, d.ph), 0, 0);
+  return c;
+}
+
+// viewer/src/compare.ts
+var LATEXDIFF_LOOK = { markup: "underline", subtype: "safe", add_color: "#0000ff", del_color: "#ff0000" };
+var DiffControls = class {
+  state = null;
+  panel;
+  run;
+  actions;
+  lookOpen = false;
+  constructor(panel2, run) {
+    this.panel = panel2;
+    this.run = run;
+    this.actions = {
+      prev: () => this.step(-1),
+      next: () => this.step(1),
+      toggle: () => {
+        const st = this.state;
+        if (!st || st.busy) return;
+        st.showing = st.showing === "diff" ? "current" : "diff";
+        run.show(st.showing);
+        this.bar();
+      },
+      pdf: () => run.download("pdf"),
+      tex: () => run.download("tex"),
+      settings: async () => {
+        if (this.lookOpen) return this.closeLook();
+        this.lookOpen = true;
+        panel2.diffSettings(await run.look(), (l) => run.restyle(l), LATEXDIFF_LOOK);
+      },
+      close: () => this.stop()
+    };
+  }
+  closeLook() {
+    this.lookOpen = false;
+    this.panel.diffSettings(null);
+  }
+  /** A compare is on (its bar shown). */
+  get active() {
+    return !!this.state;
+  }
+  bar() {
+    this.panel.diffBar(this.state, this.actions);
+  }
+  step(d) {
+    const st = this.state;
+    if (!st || st.busy || !st.changes) return;
+    st.at = (Math.max(st.at, d > 0 ? 0 : 1) - 1 + d + st.changes) % st.changes + 1;
+    if (st.showing === "current") this.actions.toggle();
+    this.run.goto(st.at);
+    this.bar();
+  }
+  /** Compare with `v`, named `title`, `when` it was ("3 h ago · v42"). */
+  async start(v, title, when) {
+    this.state = { title, when, changes: 0, at: 0, showing: "diff", busy: "Fetching that version\u2026" };
+    this.bar();
+    try {
+      const r = await this.run.start(
+        v,
+        (busy) => {
+          if (this.state) this.state.busy = busy, this.bar();
+        },
+        (n) => {
+          const st = this.state;
+          if (!st || st.busy) return;
+          st.changes = n;
+          st.at = Math.min(st.at, n);
+          this.bar();
+        }
+      );
+      if (!this.state) return;
+      this.state.busy = void 0;
+      this.state.changes = r.changes;
+    } catch (err) {
+      if (!this.state) return;
+      this.state.busy = `Couldn't compare: ${err.message ?? err}`;
+    }
+    this.bar();
+  }
+  stop() {
+    this.closeLook();
+    this.state = null;
+    this.run.stop();
+    this.bar();
+  }
+  /** A key while comparing (not in an editor or a field): handled, or false. */
+  key(e) {
+    if (!this.state || e.ctrlKey || e.metaKey || e.altKey) return false;
+    const t = e.target;
+    if (t?.closest?.("input, textarea, [contenteditable=true], .cm-editor")) return false;
+    if (e.key === "d" || e.key === "D") this.actions.toggle();
+    else if (e.key === "n") this.step(1);
+    else if (e.key === "N") this.step(-1);
+    else if (e.key === "Escape") this.lookOpen ? this.closeLook() : this.stop();
+    else return false;
+    e.preventDefault();
+    return true;
+  }
+};
+
+// viewer/src/commits.ts
+function layout(cs) {
+  const active = [];
+  const rows = [];
+  let pending = [];
+  let width = 1;
+  for (const c of cs) {
+    let lane = active.indexOf(c.id);
+    if (lane < 0) {
+      lane = active.indexOf(null);
+      if (lane < 0) lane = active.push(null) - 1;
+    }
+    if (rows.length) rows[rows.length - 1].down = pending.map(([x, s]) => [x, active[s] === c.id ? lane : s]);
+    for (let s = 0; s < active.length; s++) if (active[s] === c.id) active[s] = null;
+    const by = active.map((id) => id !== null);
+    const from2 = /* @__PURE__ */ new Map();
+    c.parents.forEach((p, i) => {
+      let s = active.indexOf(p);
+      if (s < 0) {
+        s = i === 0 && active[lane] === null ? lane : active.indexOf(null);
+        if (s < 0) s = active.push(null) - 1;
+        active[s] = p;
+      }
+      from2.set(s, lane);
+    });
+    while (active.length && active[active.length - 1] === null) active.pop();
+    pending = [];
+    active.forEach((id, s) => {
+      if (id === null) return;
+      if (by[s]) pending.push([s, s]);
+      const f = from2.get(s);
+      if (f !== void 0 && !(by[s] && f === s)) pending.push([f, s]);
+    });
+    width = Math.max(width, lane + 1, active.length);
+    rows.push({ lane, down: [] });
+  }
+  if (rows.length) rows[rows.length - 1].down = pending;
+  return { rows, width };
+}
+function ago(t, now = Date.now() / 1e3) {
+  const s = Math.max(0, now - t);
+  const units = [[31536e3, "year"], [2592e3, "month"], [86400, "day"], [3600, "hour"], [60, "minute"]];
+  for (const [n, u] of units)
+    if (s >= n) {
+      const k = Math.floor(s / n);
+      return `${k} ${u}${k === 1 ? "" : "s"} ago`;
+    }
+  return "just now";
+}
+var esc5 = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+var ROW = 24;
+var LANE = 12;
+var COLORS = ["#3e63dd", "#e5484d", "#30a46c", "#f5a524", "#8e4ec6", "#12a594", "#d6409f", "#978365"];
+var COMMITS_CSS = `
 .phx-commits { font: 12px system-ui, sans-serif; overflow: auto; }
-.phx-commits .row { display: flex; align-items: center; height: ${$}px; cursor: pointer; white-space: nowrap; }
+.phx-commits .row { display: flex; align-items: center; height: ${ROW}px; cursor: pointer; white-space: nowrap; }
 .phx-commits .row:hover { background: rgba(127,127,127,.12); }
 .phx-commits .row.inrange { background: rgba(62,99,221,.10); }
 .phx-commits .row.from, .phx-commits .row.to { background: rgba(62,99,221,.22); }
@@ -420,14 +3855,381 @@ footer .msg.err { color: var(--danger); }
 .phx-commits .note { padding: 6px 10px; opacity: .7; }
 .phx-commits .note.err { color: #e5484d; opacity: 1; }
 .phx-commits button { font: inherit; border: 1px solid rgba(127,127,127,.4); background: none; color: inherit; border-radius: 5px; padding: 2px 8px; cursor: pointer; }
-`,Mt=new Set(["head","branch","remote","tag"]),ie=class{el;host;commits=[];more=!0;loading=!1;error="";from=null;to=null;page=200;constructor(e,t){this.host=t,this.el=document.createElement("div"),this.el.className="phx-commits",e.append(this.el),this.el.addEventListener("click",i=>this.click(i)),this.el.addEventListener("dblclick",i=>{let s=this.at(i.target);s&&s.parents.length&&this.choose(s.parents[0],s.id)}),this.render()}get element(){return this.el}mark(e,t){this.from=e,this.to=t,this.render()}async load(){if(this.loading||!this.more)return;this.loading=!0,this.render();let e=await this.host.load(this.commits.length,this.page);this.loading=!1,typeof e=="string"?(this.error=e,this.more=!1):(this.commits.push(...e),this.more=e.length===this.page),this.render()}reload(){return this.commits=[],this.more=!0,this.error="",this.load()}choose(e,t){this.from=e,this.to=t,this.render(),this.host.pick(e,t)}at(e){let t=e.closest(".row[data-i]");return t?this.commits[Number(t.dataset.i)]:void 0}find(e){return e?e==="HEAD"?this.commits.findIndex(t=>t.refs.some(i=>i.kind==="head")):this.commits.findIndex(t=>t.id.startsWith(e)||t.refs.some(i=>i.name===e)):-1}click(e){let t=e.target;if(t.closest("[data-more]"))return void this.load();if(!t.closest(".row")||e.detail>1)return;let s=this.at(t);if(e.shiftKey){if(!s)return this.choose(this.from??"HEAD",null);let l=this.find(this.from),c=this.commits.indexOf(s),d=l>c?this.commits[l].id:s.parents[0]??s.id;return this.choose(d,s.id)}if(!s)return;let n=this.find(this.to),r=this.commits.indexOf(s);this.choose(s.id,this.to&&n>=0&&n<r?this.commits[n].id:null)}render(){let e=this.el.scrollTop;this.el.innerHTML=this.html(),this.el.scrollTop=e}html(){if(this.error)return`<div class="note err">${H(this.error)}</div>`;if(!this.commits.length)return`<div class="note">${this.loading?"reading the history\u2026":"no commits"}</div>`;let{rows:e,width:t}=Lt(this.commits),i=(t+1)*he,s=h=>he/2+h*he+2,n=this.find(this.from),r=this.to?this.find(this.to):-1,l=this.from!==null&&!this.to,c=`<div class="row${l?" to":""}" title="Shift-click: diff the working tree"><svg width="${i}" height="${$}"><circle cx="${s(0)}" cy="${$/2}" r="4" fill="none" stroke="#888" stroke-dasharray="2 2"/><line x1="${s(0)}" y1="${$/2+4}" x2="${s(0)}" y2="${$*1.5}" stroke="#888" stroke-dasharray="2 2"/></svg><span class="txt">${l?'<span class="end">TO</span>':""}<i>the working tree</i></span></div>`,d=this.commits.map((h,p)=>{let g=e[p],u=te[g.lane%te.length],f=g.down.map(([T,D])=>`<path d="M${s(T)} ${$/2} C${s(T)} ${$} ${s(D)} ${$} ${s(D)} ${$*1.5}" stroke="${te[D%te.length]}" fill="none" stroke-width="1.6"/>`);f.push(h.parents.length>1?`<circle cx="${s(g.lane)}" cy="${$/2}" r="4.5" fill="Canvas" stroke="${u}" stroke-width="2"/>`:`<circle cx="${s(g.lane)}" cy="${$/2}" r="4" fill="${u}"/>`);let m=h.refs.map(T=>`<span class="pill ${Mt.has(T.kind)?T.kind:"branch"}">${H(T.name)}</span>`).join(""),b=this.to?r:-1,v=p===n?" from":p===r?" to":n>=0&&p>b&&p<n?" inrange":"",y=p===n?'<span class="end">FROM</span>':p===r?'<span class="end">TO</span>':"",E=`${h.subject}
-${h.author}, ${new Date(h.time*1e3).toLocaleString()}
-click: From \xB7 shift-click: To \xB7 double-click: against its first parent`;return`<div class="row${v}" data-i="${p}" title="${H(E)}"><svg width="${i}" height="${$}">${f.join("")}</svg><span class="txt">${y}<span class="sha">${H(h.short)}</span>${m}${h.parents.length>1?"<i>merge:</i> ":""}${H(h.subject)}<span class="who">${H(h.author)}, ${Pt(h.time)}</span></span></div>`}),a=this.more?`<div class="note"><button type="button" data-more>${this.loading?"reading\u2026":"more\u2026"}</button></div>`:"";return c+d.join("")+a}};ye(new URL("fonts/",location.href).href);var pe=class{ws;next=1;waiting=new Map;events=[];onOpen=()=>{};onClose=()=>{};connect(){let e=new URL("ws",location.href);e.protocol=e.protocol==="https:"?"wss:":"ws:",this.ws=new WebSocket(e),this.ws.onopen=()=>this.onOpen(),this.ws.onmessage=t=>{let i=JSON.parse(t.data);if(i.event)return this.events.forEach(s=>s(i));this.waiting.get(i.id)?.(i),this.waiting.delete(i.id)},this.ws.onclose=()=>{for(let t of this.waiting.values())t({ok:!1,error:"closed"});this.waiting.clear(),this.onClose(),setTimeout(()=>this.connect(),1e3)}}request(e){let t=this.next++;return new Promise(i=>{this.waiting.set(t,i),this.ws.readyState===WebSocket.OPEN?this.ws.send(JSON.stringify({id:t,...e})):(this.waiting.delete(t),i({ok:!1,error:"not connected"}))})}onEvent(e){this.events.push(e)}},P=new pe,Ct=(o,e,t=1)=>{P.request({op:"source",file:o,line:e,col:t})},R=new J({onPage:()=>{},onNeed:o=>{A.fetch(o)},onPdf:()=>{let o=document.createElement("a");o.href=new URL("doc.pdf",location.href).href,o.download="",o.click()},onDebug:()=>{},onMain:()=>{},onReload:()=>{A.resync()},onClean:()=>{A.resync()},onFormat:()=>{},onGoto:(o,e)=>Ct(o,e),onSyncSource:(o,e,t)=>{A.toSource(o,e,t)}},{load:async()=>{try{return JSON.parse(localStorage.getItem("phitex.panel")??"{}")}catch{return{}}},save:o=>{try{localStorage.setItem("phitex.panel",JSON.stringify(o))}catch{}}},{pdfjs:!1,outline:!0,keys:!0,header:!0,words:{badge:"watch",badgeTitle:"phitex watch: built from the files on disk, again at each save",byline:"\u26A1 phitex watch",about:`<b>\u26A1 phitex watch</b>: the document built from the files on disk, again at each save, its pages here as
+`;
+var KINDS = /* @__PURE__ */ new Set(["head", "branch", "remote", "tag"]);
+var Commits = class {
+  el;
+  host;
+  commits = [];
+  more = true;
+  loading = false;
+  error = "";
+  /** The pair chosen (ids; `to` null: the working tree). */
+  from = null;
+  to = null;
+  page = 200;
+  constructor(root, host2) {
+    this.host = host2;
+    this.el = document.createElement("div");
+    this.el.className = "phx-commits";
+    root.append(this.el);
+    this.el.addEventListener("click", (e) => this.click(e));
+    this.el.addEventListener("dblclick", (e) => {
+      const c = this.at(e.target);
+      if (c && c.parents.length) this.choose(c.parents[0], c.id);
+    });
+    this.render();
+  }
+  get element() {
+    return this.el;
+  }
+  /** Mark the pair shown (as the host has it: a revision, a commit id or its prefix; `to` null: the working tree). */
+  mark(from2, to) {
+    this.from = from2;
+    this.to = to;
+    this.render();
+  }
+  /** The commits: the first page now, more as asked. */
+  async load() {
+    if (this.loading || !this.more) return;
+    this.loading = true;
+    this.render();
+    const got = await this.host.load(this.commits.length, this.page);
+    this.loading = false;
+    if (typeof got === "string") {
+      this.error = got;
+      this.more = false;
+    } else {
+      this.commits.push(...got);
+      this.more = got.length === this.page;
+    }
+    this.render();
+  }
+  /** The history changed (a commit made, a branch moved): read again. */
+  reload() {
+    this.commits = [];
+    this.more = true;
+    this.error = "";
+    return this.load();
+  }
+  choose(from2, to) {
+    this.from = from2;
+    this.to = to;
+    this.render();
+    this.host.pick(from2, to);
+  }
+  at(t) {
+    const row = t.closest(".row[data-i]");
+    return row ? this.commits[Number(row.dataset.i)] : void 0;
+  }
+  /** The row of revision `rev` (a commit id or its prefix, a ref's name, HEAD), else -1. */
+  find(rev) {
+    if (!rev) return -1;
+    if (rev === "HEAD") return this.commits.findIndex((c) => c.refs.some((r) => r.kind === "head"));
+    return this.commits.findIndex((c) => c.id.startsWith(rev) || c.refs.some((r) => r.name === rev));
+  }
+  click(e) {
+    const t = e.target;
+    if (t.closest("[data-more]")) return void this.load();
+    const row = t.closest(".row");
+    if (!row || e.detail > 1) return;
+    const c = this.at(t);
+    if (e.shiftKey) {
+      if (!c) return this.choose(this.from ?? "HEAD", null);
+      const fi2 = this.find(this.from), ti2 = this.commits.indexOf(c);
+      const from2 = fi2 > ti2 ? this.commits[fi2].id : c.parents[0] ?? c.id;
+      return this.choose(from2, c.id);
+    }
+    if (!c) return;
+    const ti = this.find(this.to), fi = this.commits.indexOf(c);
+    this.choose(c.id, this.to && ti >= 0 && ti < fi ? this.commits[ti].id : null);
+  }
+  render() {
+    const scroll = this.el.scrollTop;
+    this.el.innerHTML = this.html();
+    this.el.scrollTop = scroll;
+  }
+  html() {
+    if (this.error) return `<div class="note err">${esc5(this.error)}</div>`;
+    if (!this.commits.length) return `<div class="note">${this.loading ? "reading the history\u2026" : "no commits"}</div>`;
+    const { rows, width } = layout(this.commits);
+    const W = (width + 1) * LANE;
+    const x = (l) => LANE / 2 + l * LANE + 2;
+    const fi = this.find(this.from);
+    const ti = this.to ? this.find(this.to) : -1;
+    const tree = this.from !== null && !this.to;
+    const top = `<div class="row${tree ? " to" : ""}" title="Shift-click: diff the working tree"><svg width="${W}" height="${ROW}"><circle cx="${x(0)}" cy="${ROW / 2}" r="4" fill="none" stroke="#888" stroke-dasharray="2 2"/><line x1="${x(0)}" y1="${ROW / 2 + 4}" x2="${x(0)}" y2="${ROW * 1.5}" stroke="#888" stroke-dasharray="2 2"/></svg><span class="txt">${tree ? '<span class="end">TO</span>' : ""}<i>the working tree</i></span></div>`;
+    const lines = this.commits.map((c, i) => {
+      const r = rows[i];
+      const col = COLORS[r.lane % COLORS.length];
+      const svg2 = r.down.map(([a, b]) => `<path d="M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}" stroke="${COLORS[b % COLORS.length]}" fill="none" stroke-width="1.6"/>`);
+      svg2.push(c.parents.length > 1 ? `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4.5" fill="Canvas" stroke="${col}" stroke-width="2"/>` : `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4" fill="${col}"/>`);
+      const pills = c.refs.map((f) => `<span class="pill ${KINDS.has(f.kind) ? f.kind : "branch"}">${esc5(f.name)}</span>`).join("");
+      const lo = this.to ? ti : -1;
+      const cls = i === fi ? " from" : i === ti ? " to" : fi >= 0 && i > lo && i < fi ? " inrange" : "";
+      const end = i === fi ? '<span class="end">FROM</span>' : i === ti ? '<span class="end">TO</span>' : "";
+      const title = `${c.subject}
+${c.author}, ${new Date(c.time * 1e3).toLocaleString()}
+click: From \xB7 shift-click: To \xB7 double-click: against its first parent`;
+      return `<div class="row${cls}" data-i="${i}" title="${esc5(title)}"><svg width="${W}" height="${ROW}">${svg2.join("")}</svg><span class="txt">${end}<span class="sha">${esc5(c.short)}</span>${pills}${c.parents.length > 1 ? "<i>merge:</i> " : ""}${esc5(c.subject)}<span class="who">${esc5(c.author)}, ${ago(c.time)}</span></span></div>`;
+    });
+    const more = this.more ? `<div class="note"><button type="button" data-more>${this.loading ? "reading\u2026" : "more\u2026"}</button></div>` : "";
+    return top + lines.join("") + more;
+  }
+};
+
+// crates/cli/viewer/cli.ts
+var Socket = class {
+  ws;
+  next = 1;
+  waiting = /* @__PURE__ */ new Map();
+  events = [];
+  onOpen = () => {
+  };
+  onClose = () => {
+  };
+  connect() {
+    const url = new URL("ws", location.href);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    this.ws = new WebSocket(url);
+    this.ws.onopen = () => this.onOpen();
+    this.ws.onmessage = (m) => {
+      const r = JSON.parse(m.data);
+      if (r.event) return this.events.forEach((f) => f(r));
+      this.waiting.get(r.id)?.(r);
+      this.waiting.delete(r.id);
+    };
+    this.ws.onclose = () => {
+      for (const f of this.waiting.values()) f({ ok: false, error: "closed" });
+      this.waiting.clear();
+      this.onClose();
+      setTimeout(() => this.connect(), 1e3);
+    };
+  }
+  request(op) {
+    const id = this.next++;
+    return new Promise((ok) => {
+      this.waiting.set(id, ok);
+      if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ id, ...op }));
+      else this.waiting.delete(id), ok({ ok: false, error: "not connected" });
+    });
+  }
+  onEvent(cb) {
+    this.events.push(cb);
+  }
+};
+var Pages = class {
+  sock;
+  mupdf = null;
+  doc = null;
+  /** The builds settled, and the one the open PDF is of. */
+  version = 0;
+  docVersion = -1;
+  loading = null;
+  constructor(sock2) {
+    this.sock = sock2;
+    sock2.onEvent((e) => {
+      if (e.event === "settled") this.version++;
+    });
+  }
+  async open() {
+    if (this.doc && this.docVersion === this.version) return this.doc;
+    if (this.loading) return this.loading;
+    const v = this.version;
+    this.loading = (async () => {
+      this.mupdf ??= import(new URL("mupdf/mupdf.js", location.href).href);
+      const m = await this.mupdf;
+      const r = await fetch(new URL("doc.pdf", location.href), { cache: "no-store" });
+      if (!r.ok) return null;
+      const pdf = new Uint8Array(await r.arrayBuffer());
+      this.doc?.destroy();
+      this.doc = new MupdfDoc(m, pdf);
+      this.docVersion = v;
+      return this.doc;
+    })().finally(() => this.loading = null);
+    return this.loading;
+  }
+  async request(op) {
+    const o = op;
+    if (o.op === "png") {
+      const d = await this.open().catch(() => null);
+      const drawn = d?.draw(o.page ?? 0, 96 / 72 * (window.devicePixelRatio || 1) * 1.25);
+      if (!drawn) return { ok: false, json: { error: "no such page" } };
+      return { ok: true, canvas: toCanvas(drawn), size: [drawn.w, drawn.h] };
+    }
+    if (o.op === "outline") {
+      const d = await this.open().catch(() => null);
+      return { ok: true, json: { items: d?.outline() ?? [] } };
+    }
+    return this.sock.request(op);
+  }
+  onEvent(cb) {
+    this.sock.onEvent(cb);
+  }
+};
+var sock = new Socket();
+var pages = new Pages(sock);
+var source = (file, line, col = 1) => void sock.request({ op: "source", file, line, col });
+var panel = new Panel(
+  {
+    onPage: () => {
+    },
+    onNeed: (k) => void session.fetch(k),
+    // (the build's PDF, as the watch wrote it)
+    onPdf: () => {
+      const a = document.createElement("a");
+      a.href = new URL("doc.pdf", location.href).href;
+      a.download = "";
+      a.click();
+    },
+    onDebug: () => {
+    },
+    onMain: () => {
+    },
+    onReload: () => void session.resync(),
+    onClean: () => void session.resync(),
+    onFormat: () => {
+    },
+    onGoto: (file, line) => source(file, line),
+    onSyncSource: (k, x, y) => void session.toSource(k, x, y)
+  },
+  // (the panel's settings: this browser's)
+  {
+    load: async () => {
+      try {
+        return JSON.parse(localStorage.getItem("phitex.panel") ?? "{}");
+      } catch {
+        return {};
+      }
+    },
+    save: (p) => {
+      try {
+        localStorage.setItem("phitex.panel", JSON.stringify(p));
+      } catch {
+      }
+    }
+  },
+  {
+    pdfjs: false,
+    outline: true,
+    keys: true,
+    header: true,
+    words: {
+      badge: "watch",
+      badgeTitle: "phitex watch: built from the files on disk, again at each save",
+      byline: "\u26A1 phitex watch",
+      about: `<b>\u26A1 phitex watch</b>: the document built from the files on disk, again at each save, its pages here as
         they are shipped. Nothing leaves this machine.
-        <div class="about-foot">Free software (AGPL-3.0-only), provided as is, without any warranty.</div>`,openFailed:"Restart phitex watch, then reload this page.",reading:"Reading the document from phitex watch.",keptIn:"this machine",preparing:"Readying the next rebuild\u2026 {s} s",stopped:"The build stopped: its problems are listed above (e).",notReady:"This engine does not run here yet.",realPdf:""}}),ge=document.createElement("div");ge.style.cssText="position:fixed;inset:0";document.body.append(ge);R.dock(ge);R.shown(!0);var Rt={loadProject:async()=>({}),onOpen(){},onChanges(){}},A=new q(Rt,P,R,{format:"vector",checkEveryMs:0,remote:{source:(o,e,t)=>{P.request({op:"source",file:o,start:e,end:t})}}}),se={},ne,Ke;P.onEvent(o=>{if(o.event!=="diff")return;se=o.diff??{};let e=se.changes?.length;e!==void 0&&(ne?(ne(se),ne=void 0):Ke?.(e))});var I=async o=>{let e=await P.request(o);if(!e.ok)throw new Error(e.error??"the watch refused")},Dt=o=>{let e=document.createElement("a");e.href=new URL(o,location.href).href,e.download=o,e.click()},zt={async start(o,e,t){Ke=t,e("Diffing\u2026");let i=new Promise(n=>ne=n);return await I({op:"diff_start",rev:o.from,...o.to?{to:o.to}:{}}),e("Typesetting the diff\u2026"),{changes:(await i).changes?.length??0}},show:o=>{I({op:"diff_show",which:o})},goto:o=>{I({op:"diff_goto",k:o})},download:o=>Dt(`diff.${o}`),look:async()=>({...ce,...se.look}),restyle:o=>{I({op:"diff_restyle",markup:o.markup,subtype:o.subtype,add_color:o.add_color,del_color:o.del_color})},stop:()=>{I({op:"diff_stop"})}},Ue=new ee(R,zt);addEventListener("keydown",o=>Ue.key(o));document.head.append(Object.assign(document.createElement("style"),{textContent:Ve+`
+        <div class="about-foot">Free software (AGPL-3.0-only), provided as is, without any warranty.</div>`,
+      openFailed: "Restart phitex watch, then reload this page.",
+      reading: "Reading the document from phitex watch.",
+      keptIn: "this machine",
+      preparing: "Readying the next rebuild\u2026 {s} s",
+      stopped: "The build stopped: its problems are listed above (e).",
+      notReady: "This engine does not run here yet.",
+      realPdf: ""
+    }
+  }
+);
+var pane = document.createElement("div");
+pane.style.cssText = "position:fixed;inset:0";
+document.body.append(pane);
+panel.dock(pane);
+panel.shown(true);
+var host = { loadProject: async () => ({}), onOpen() {
+}, onChanges() {
+} };
+var session = new PreviewSession(host, pages, panel, {
+  format: "vector",
+  checkEveryMs: 0,
+  remote: { source: (file, start, end) => void sock.request({ op: "source", file, start, end }) }
+});
+var diffState = {};
+var diffWait;
+var counted;
+sock.onEvent((e) => {
+  if (e.event !== "diff") return;
+  diffState = e.diff ?? {};
+  const n = diffState.changes?.length;
+  if (n === void 0) return;
+  if (diffWait) diffWait(diffState), diffWait = void 0;
+  else counted?.(n);
+});
+var ask = async (op) => {
+  const r = await sock.request(op);
+  if (!r.ok) throw new Error(r.error ?? "the watch refused");
+};
+var save = (name) => {
+  const a = document.createElement("a");
+  a.href = new URL(name, location.href).href;
+  a.download = name;
+  a.click();
+};
+var runner = {
+  async start(v, say, count) {
+    counted = count;
+    say("Diffing\u2026");
+    const got = new Promise((ok) => diffWait = ok);
+    await ask({ op: "diff_start", rev: v.from, ...v.to ? { to: v.to } : {} });
+    say("Typesetting the diff\u2026");
+    const d = await got;
+    return { changes: d.changes?.length ?? 0 };
+  },
+  show: (which) => void ask({ op: "diff_show", which }),
+  goto: (k) => void ask({ op: "diff_goto", k }),
+  download: (what) => save(`diff.${what}`),
+  look: async () => ({ ...LATEXDIFF_LOOK, ...diffState.look }),
+  restyle: (l) => void ask({ op: "diff_restyle", markup: l.markup, subtype: l.subtype, add_color: l.add_color, del_color: l.del_color }),
+  stop: () => void ask({ op: "diff_stop" })
+};
+var controls = new DiffControls(panel, runner);
+addEventListener("keydown", (e) => controls.key(e));
+document.head.append(Object.assign(document.createElement("style"), {
+  textContent: COMMITS_CSS + `
 #phx-pick { position: fixed; z-index: 20; top: 44px; right: 12px; width: min(560px, calc(100vw - 24px)); max-height: 70vh; overflow: auto;
   background: #fff; color: #1b222c; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.35); font: 13px system-ui, sans-serif; }
 #phx-pick header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid #e7e9ee; }
 #phx-pick header small { color: #6b7280; }
 #phx-pick header button { margin-left: auto; border: 0; background: #e7e9ee; border-radius: 6px; padding: 2px 10px; cursor: pointer; }
-@media (prefers-color-scheme: dark) { #phx-pick { background: #1b222c; color: #f4f5f6; } #phx-pick header { border-color: #2f3a4c; } #phx-pick header button { background: #2f3a4c; color: #f4f5f6; } }`}));var w,We,oe=()=>{w&&(w.hidden=!0)};R.headerButton("\u21C4 Compare","Compare with a past version: the commit graph (click From, shift-click To, double-click a commit against its parent)",()=>{if(w&&!w.hidden)return oe();w||(w=document.createElement("div"),w.id="phx-pick",w.innerHTML=`<header><b>Compare</b><small>click: from \xB7 shift-click: to (else the files as they are) \xB7 double-click: a commit's own changes</small><button type="button">Esc</button></header>`,w.querySelector("button").onclick=oe,document.body.append(w),We=new ie(w,{load:async(o,e)=>{let t=await P.request({op:"diff_log",skip:o,limit:e});return t.ok?t.json?.commits??[]:t.error??"no git repository here"},pick:(o,e)=>{oe();let t=i=>i.slice(0,7);Ue.start({from:o,to:e},t(o),e?`to ${t(e)}`:"working tree")}}),We.load()),w.hidden=!1});addEventListener("keydown",o=>{o.key==="Escape"&&w&&!w.hidden&&(oe(),o.stopImmediatePropagation())},{capture:!0});var Ge=!1;P.onOpen=()=>{if(R.msg("connected to phitex watch"),Ge)return void A.resync();Ge=!0,A.start()};P.onClose=()=>R.msg("not connected to phitex watch (retrying)",!0);P.connect();
+@media (prefers-color-scheme: dark) { #phx-pick { background: #1b222c; color: #f4f5f6; } #phx-pick header { border-color: #2f3a4c; } #phx-pick header button { background: #2f3a4c; color: #f4f5f6; } }`
+}));
+var pick;
+var graph;
+var closePick = () => {
+  if (pick) pick.hidden = true;
+};
+panel.headerButton("\u21C4 Compare", "Compare with a past version: the commit graph (click From, shift-click To, double-click a commit against its parent)", () => {
+  if (pick && !pick.hidden) return closePick();
+  if (!pick) {
+    pick = document.createElement("div");
+    pick.id = "phx-pick";
+    pick.innerHTML = `<header><b>Compare</b><small>click: from \xB7 shift-click: to (else the files as they are) \xB7 double-click: a commit's own changes</small><button type="button">Esc</button></header>`;
+    pick.querySelector("button").onclick = closePick;
+    document.body.append(pick);
+    graph = new Commits(pick, {
+      load: async (skip, limit) => {
+        const r = await sock.request({ op: "diff_log", skip, limit });
+        return r.ok ? r.json?.commits ?? [] : r.error ?? "no git repository here";
+      },
+      pick: (from2, to) => {
+        closePick();
+        const short = (id) => id.slice(0, 7);
+        void controls.start({ from: from2, to }, short(from2), to ? `to ${short(to)}` : "working tree");
+      }
+    });
+    void graph.load();
+  }
+  pick.hidden = false;
+});
+addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && pick && !pick.hidden) closePick(), e.stopImmediatePropagation();
+}, { capture: true });
+var started = false;
+sock.onOpen = () => {
+  panel.msg("connected to phitex watch");
+  if (started) return void session.resync();
+  started = true;
+  void session.start();
+};
+sock.onClose = () => panel.msg("not connected to phitex watch (retrying)", true);
+sock.connect();
