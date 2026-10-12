@@ -1,6 +1,6 @@
-//! The `phitex` binary, end to end. The tests that build on the native
-//! engine are ignored until it lands (`phitex-tex` on `phitex-defuse`);
-//! they are the gate it must pass, against the pdfTeX oracles under
+//! The `phitex` binary, end to end. The tests whose builds need what
+//! `phitex-tex` does not do yet (LaTeX's format, PDF output) are ignored
+//! with what they wait for; they are the gate it must pass, against the pdfTeX oracles under
 //! `oracle/fixtures`:
 //!
 //! - `latex -interaction=batchmode NAME.tex` (phitex run as `latex`) on
@@ -235,61 +235,61 @@ fn tex_doc(program: &str, name: &str) {
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's LaTeX slice (the latex.ltx prelude)"]
 fn latex_sections() {
     latex_doc("sections");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's LaTeX slice (the latex.ltx prelude)"]
 fn latex_math() {
     latex_doc("math");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's LaTeX slice (the latex.ltx prelude)"]
 fn latex_tables() {
     latex_doc("tables");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's LaTeX slice (the latex.ltx prelude)"]
 fn latex_figures() {
     latex_doc("figures");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's LaTeX slice (the latex.ltx prelude)"]
 fn latex_titlepage() {
     latex_doc("titlepage");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's LaTeX slice (the latex.ltx prelude)"]
 fn latex_packages() {
     latex_doc("packages");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's LaTeX slice (the latex.ltx prelude)"]
 fn latex_ams() {
     latex_doc("ams");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's LaTeX slice (the latex.ltx prelude)"]
 fn latex_gfx() {
     latex_doc("gfx");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's LaTeX slice (the latex.ltx prelude)"]
 fn latex_layout() {
     latex_doc("layout");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's LaTeX slice (the latex.ltx prelude)"]
 fn latex_rules() {
     latex_doc("rules");
 }
@@ -346,7 +346,7 @@ fn pdf_docs() -> Vec<(String, String, String)> {
 /// `pdftex -ini -etex -interaction=batchmode NAME.tex` through phitex:
 /// pdfTeX's PDF file, byte for byte.
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdftex_ini_documents() {
     let _one = one();
     let mut bad = Vec::new();
@@ -412,7 +412,7 @@ fn latex_fixpoint(name: &str, dir: &Path) -> Vec<u8> {
 /// `phitex build --output-format dvi` runs to the cross-run fixpoint: its
 /// DVI file is `latex`'s once `latex`'s `.aux` file settles.
 #[test]
-#[ignore = "waits on CORE.md's W2: phitex-red's update after set_file of the run's .aux does not end (A/B; B's Fixpoint)"]
+#[ignore = "waits for phitex-tex's LaTeX slice (the .aux loop-back)"]
 fn build_to_the_fixpoint() {
     if !have("latex") {
         eprintln!("build_to_the_fixpoint: no `latex` here to compare with: not checked");
@@ -469,24 +469,30 @@ fn big() -> String {
 }
 
 /// Reads `child`'s lines until one starts with `prefix`; the lines read.
-fn until(lines: &mut impl Iterator<Item = String>, prefix: &str, seen: &mut Vec<String>) -> String {
+/// The watch's next `--json` event with `key` equal to `value`.
+fn until(
+    lines: &mut impl Iterator<Item = String>,
+    key: &str,
+    value: &serde_json::Value,
+    seen: &mut Vec<String>,
+) -> serde_json::Value {
     for l in lines.by_ref() {
         seen.push(l.clone());
-        if l.starts_with(prefix) {
-            return l;
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&l)
+            && v[key] == *value
+        {
+            return v;
         }
     }
-    panic!("the watch ended before `{prefix}`:\n{}", seen.join("\n"));
+    panic!(
+        "the watch ended before {key} = {value}:\n{}",
+        seen.join("\n")
+    );
 }
 
-/// The update's milliseconds in a build line (`update X ms`).
-fn update_ms(line: &str) -> f64 {
-    let at = line.find("update ").expect("an update time") + "update ".len();
-    line[at..]
-        .split(' ')
-        .next()
-        .and_then(|n| n.parse().ok())
-        .expect("a number")
+/// A build event's milliseconds.
+fn update_ms(ev: &serde_json::Value) -> f64 {
+    ev["wall_ms"].as_f64().expect("wall_ms")
 }
 
 /// `phitex watch`, headless: a word edited in the file on disk is built as
@@ -495,7 +501,7 @@ fn update_ms(line: &str) -> f64 {
 /// budget (50 ms; phitex-red's budgets measure about 10 ms on this
 /// document) in a release build.
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn watch_word_edit() {
     let _one = one();
     let text = big();
@@ -504,6 +510,7 @@ fn watch_word_edit() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--json",
             "--no-view",
             "--ini",
             "--etex",
@@ -519,7 +526,7 @@ fn watch_word_edit() {
     let stdout = child.stdout.take().expect("its output");
     let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
     let mut seen = Vec::new();
-    let cold = until(&mut lines, "phitex: build 1 ", &mut seen);
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
     eprintln!("{cold}");
     // (a word of the body, as long as the one it replaces)
     let at = text.rfind("\\message{[part 2 story]}").expect("part 2");
@@ -527,7 +534,7 @@ fn watch_word_edit() {
     let edited = format!("{} thy {}", &text[..word], &text[word + 5..]);
     std::thread::sleep(Duration::from_millis(50));
     std::fs::write(dir.join("big.tex"), &edited).expect("the edit");
-    let line = until(&mut lines, "phitex: build 2 ", &mut seen);
+    let line = until(&mut lines, "build", &2.into(), &mut seen);
     eprintln!("{line}");
     let ms = update_ms(&line);
     let watched = std::fs::read(dir.join("big.pdf")).expect("the watch's PDF");
@@ -565,7 +572,7 @@ fn watch_word_edit() {
 /// cache: a format is cached under the build's identity (a hash of its
 /// sources, `tex::build_id`), not the executable's path, size or time.
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for the prelude export (Build::prelude_key, export_prelude)"]
 fn format_cache_shared_by_copies() {
     let _one = one();
     let base = scratch("copies");
@@ -665,11 +672,11 @@ fn ws_send(url: &str, request: &str) -> std::net::TcpStream {
     s
 }
 
-/// `phitex watch --view`, headless: an editor's unsaved buffer
+/// `phitex watch` with its viewer, headless: an editor's unsaved buffer
 /// (`set_file` over the viewer's WebSocket, the file on disk untouched)
 /// is built as an edit; the PDF is the cold build's of the buffer's text.
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn watch_editor_buffer() {
     let _one = one();
     let body = std::fs::read_to_string(fixtures().join("plain/story.tex")).expect("a body");
@@ -677,7 +684,7 @@ fn watch_editor_buffer() {
     let dir = scratch("watch-editor");
     std::fs::write(dir.join("story.tex"), &text).expect("the document");
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["watch", "--view", "--ini", "--etex", "-j", "8", "story.tex"])
+        .args(["watch", "--json", "--ini", "--etex", "-j", "8", "story.tex"])
         .env("XDG_RUNTIME_DIR", &dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -687,10 +694,11 @@ fn watch_editor_buffer() {
     let stdout = child.stdout.take().expect("its output");
     let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
     let mut seen = Vec::new();
-    let url = until(&mut lines, "phitex: the viewer is at ", &mut seen)
-        ["phitex: the viewer is at ".len()..]
+    let url = until(&mut lines, "event", &"viewer".into(), &mut seen)["url"]
+        .as_str()
+        .expect("the viewer's url")
         .to_owned();
-    until(&mut lines, "phitex: build 1 ", &mut seen);
+    until(&mut lines, "build", &1.into(), &mut seen);
     let at = body.find(" the ").expect("a word") + "\\pdfoutput=1\n".len() + plain().len();
     let edited = format!("{} thy {}", &text[..at], &text[at + 5..]);
     let req = format!(
@@ -698,10 +706,10 @@ fn watch_editor_buffer() {
         json_string(&edited)
     );
     let _socket = ws_send(&url, &req);
-    let line = until(&mut lines, "phitex: build 2 ", &mut seen);
+    let line = until(&mut lines, "build", &2.into(), &mut seen);
     eprintln!("{line}");
     assert!(
-        line.contains("(editor)"),
+        line["why"].as_str().is_some_and(|w| w.contains("(editor)")),
         "the second build is not the editor's: {line}"
     );
     let watched = std::fs::read(dir.join("story.pdf")).expect("the watch's PDF");
@@ -754,61 +762,61 @@ fn json_string(s: &str) -> String {
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_sections() {
     pdflatex_doc("sections");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_math() {
     pdflatex_doc("math");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_tables() {
     pdflatex_doc("tables");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_figures() {
     pdflatex_doc("figures");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_titlepage() {
     pdflatex_doc("titlepage");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_packages() {
     pdflatex_doc("packages");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_ams() {
     pdflatex_doc("ams");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_gfx() {
     pdflatex_doc("gfx");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_layout() {
     pdflatex_doc("layout");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_rules() {
     pdflatex_doc("rules");
 }
@@ -824,45 +832,233 @@ fn pdflatex_pdfdoc(name: &str) {
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_pdfdoc_hyper() {
     pdflatex_pdfdoc("hyper");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_pdfdoc_graphics() {
     pdflatex_pdfdoc("graphics");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_pdfdoc_color() {
     pdflatex_pdfdoc("color");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_pdfdoc_tikz() {
     pdflatex_pdfdoc("tikz");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_pdfdoc_zsavepos() {
     pdflatex_pdfdoc("zsavepos");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_pdfdoc_objs() {
     pdflatex_pdfdoc("objs");
 }
 
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
+#[ignore = "waits for phitex-tex's PDF output"]
 fn pdflatex_pdfdoc_vfont() {
     pdflatex_pdfdoc("vfont");
+}
+
+/// `tex NAME.tex` through phitex on the plain fixtures: the DVI file is
+/// TeX's (its preamble's date masked), the format plain.tex through
+/// `tex.ini` on the graph.
+#[test]
+fn tex_plain_documents() {
+    let _one = one();
+    let fx = fixtures().join("plain");
+    let mut bad = Vec::new();
+    for name in ["story", "pages", "display", "table", "hyphens"] {
+        let dir = scratch(&format!("tex-{name}"));
+        std::fs::copy(
+            fx.join(format!("{name}.tex")),
+            dir.join(format!("{name}.tex")),
+        )
+        .expect("the document");
+        let out = command(&as_program("tex"), &dir)
+            .args(["-interaction=batchmode", &format!("{name}.tex")])
+            .output()
+            .expect("phitex runs");
+        let want = std::fs::read(fx.join(format!("{name}.dvi"))).expect("the oracle");
+        let got = std::fs::read(dir.join(format!("{name}.dvi"))).unwrap_or_default();
+        if !out.status.success() || masked(&got) != masked(&want) {
+            bad.push(format!(
+                "{name}: status {:?}, {}; stderr: {}",
+                out.status.code(),
+                first_difference(&masked(&got), &masked(&want)),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "DVI files that are not TeX's:\n{}",
+        bad.join("\n")
+    );
+}
+
+/// `phitex build --json`: every line on standard output is a JSON event:
+/// the build's, with its pages and output, then the cache's; nothing else
+/// is printed.
+#[test]
+fn build_json_events() {
+    let _one = one();
+    let dir = scratch("json");
+    std::fs::copy(fixtures().join("plain/story.tex"), dir.join("story.tex")).expect("the document");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "build",
+            "--json",
+            "--no-synctex",
+            "--engine",
+            "tex",
+            "story.tex",
+        ])
+        .output()
+        .expect("phitex runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let events: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{l}: {e}")))
+        .collect();
+    let b = events
+        .iter()
+        .find(|e| e["event"] == "build")
+        .expect("a build event");
+    let c = events.last().expect("an event");
+    assert_eq!(c["event"], "cache", "{events:?}");
+    assert!(c["limit"].as_u64().is_some(), "{c}");
+    assert_eq!(b["ok"], true, "{b}");
+    assert!(b["pages"].as_u64().is_some_and(|n| n > 0), "{b}");
+    assert!(
+        b["output"]
+            .as_str()
+            .is_some_and(|o| o.ends_with("story.dvi")),
+        "{b}"
+    );
+    assert!(dir.join("story.dvi").is_file());
+}
+
+/// The exit statuses: 2 for a file that is not there or an unknown
+/// command, 1 for a document with errors.
+#[test]
+fn exit_statuses() {
+    let _one = one();
+    let dir = scratch("exits");
+    let bin = Path::new(env!("CARGO_BIN_EXE_phitex"));
+    let status = |args: &[&str]| {
+        command(bin, &dir)
+            .args(args)
+            .output()
+            .expect("phitex runs")
+            .status
+            .code()
+    };
+    assert_eq!(
+        status(&["build", "--engine", "tex", "nothere.tex"]),
+        Some(2)
+    );
+    assert_eq!(status(&["check", "x.tex"]), Some(2));
+    assert_eq!(status(&["x.tex"]), Some(2));
+    std::fs::write(dir.join("bad.tex"), "\\undefinedcs\n\\bye\n").expect("the document");
+    assert_eq!(status(&["build", "--engine", "tex", "bad.tex"]), Some(1));
+}
+
+/// `phitex watch --json` on a plain document (`tex`): a word edited on
+/// disk is build 2, an edit of the line it is on, fewer nodes run than
+/// cold, and its DVI file is a cold build's of the edited text; an edit
+/// that makes an error is build 3, not ok, the last good DVI file kept.
+#[test]
+fn watch_plain_edit() {
+    let _one = one();
+    let text = std::fs::read_to_string(fixtures().join("plain/story.tex")).expect("story.tex");
+    let dir = scratch("watch-plain");
+    std::fs::write(dir.join("story.tex"), &text).expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--json",
+            "--no-view",
+            "--engine",
+            "tex",
+            "story.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let at = text.find(" the ").expect("a word");
+    let line = text[..at].matches('\n').count() + 1;
+    let edited = format!("{} thy {}", &text[..at], &text[at + 5..]);
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(dir.join("story.tex"), &edited).expect("the edit");
+    let ev = until(&mut lines, "build", &2.into(), &mut seen);
+    assert_eq!(ev["ok"], true, "{ev}");
+    assert_eq!(ev["edit"], format!("story.tex:{line}"), "{ev}");
+    assert!(
+        ev["nodes_run"].as_u64() < cold["nodes_run"].as_u64(),
+        "the edit ran no fewer nodes than cold: {ev} {cold}"
+    );
+    let watched = std::fs::read(dir.join("story.dvi")).expect("the watch's DVI");
+    let broken = edited.replacen(" thy ", " \\undefinedcs ", 1);
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(dir.join("story.tex"), &broken).expect("the broken edit");
+    let ev = until(&mut lines, "build", &3.into(), &mut seen);
+    assert_eq!(ev["ok"], false, "{ev}");
+    assert_eq!(
+        std::fs::read(dir.join("story.dvi")).expect("the DVI"),
+        watched,
+        "the last good DVI file was not kept"
+    );
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    let cold_dir = scratch("watch-plain-cold");
+    std::fs::write(cold_dir.join("story.tex"), &edited).expect("the edited document");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &cold_dir)
+        .args(["build", "--no-synctex", "--engine", "tex", "story.tex"])
+        .output()
+        .expect("phitex build runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cold_dvi = std::fs::read(cold_dir.join("story.dvi")).expect("the cold DVI");
+    assert!(
+        masked(&watched) == masked(&cold_dvi),
+        "the watch's DVI after the edit is not the cold build's: {}",
+        first_difference(&watched, &cold_dvi)
+    );
 }
 
 /// XeLaTeX and LuaLaTeX are not supported, by any name, and nothing
@@ -896,7 +1092,6 @@ fn tiny() -> &'static str {
 /// file: `-o DIR` and `-j N` in the three positions, the output where
 /// `-o` says.
 #[test]
-#[ignore = "no native engine yet: phitex-tex on phitex-defuse is being written"]
 fn options_in_any_position() {
     let _one = one();
     let dir = scratch("options");
@@ -963,6 +1158,11 @@ fn help_is_sectioned() {
         "Examples:",
         "build",
         "watch",
+        "clean",
+        "--json",
+        "--no-view",
+        "--shell-escape",
+        "Exit status",
         "--output-dir",
         "--jobs",
     ] {
