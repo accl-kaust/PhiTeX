@@ -30,6 +30,15 @@
 //! the file and an offset) find it by name. Expansion tokens carry no
 //! text position and answer `Any`.
 //!
+//! The pass reads bodies from the text itself and from the format's
+//! definitions ([`Defs`]: the prelude's text and every file it read,
+//! harvested once per prelude by `api.rs`): a call of a format macro is
+//! bounded by its body like a call of the document's own, and a macro
+//! whose body ends a paragraph marks a paragraph region's end wherever
+//! it is called (OUTPUT.md §5). Without them every region boundary a
+//! macro hides was missed, and every paragraph of a document written
+//! as macro calls shared one cell (`par:0:…`) in one serial chain.
+//!
 //! `PHITEX_HINTS=1` prints each distinct node text's answer and cause;
 //! `PHITEX_HINTS_OFF=1` answers `Any` for every node (the comparison).
 
@@ -43,6 +52,16 @@ use phitex_source::pass::{self, Atom, AtomKind, Def, DefSet, Definitions, FileKi
 
 use crate::run::{R, Run};
 use crate::val::{Mean, Tok, int_of, list_of, str_of};
+
+/// The definitions the hints may bind calls to besides the text's own:
+/// the format's (shared by every text of a build).
+pub(crate) type Defs = Arc<pass::Definitions>;
+
+/// No definitions (INITEX, a text analysed on its own).
+pub(crate) fn no_defs() -> &'static Defs {
+    static D: OnceLock<Defs> = OnceLock::new();
+    D.get_or_init(|| Arc::new(pass::Definitions::new()))
+}
 
 /// What a node's text says it may define.
 #[derive(Clone, Debug, Default)]
@@ -617,6 +636,8 @@ struct Analysis<'t> {
     /// Atoms textually inside an alignment's braces (`\\halign{`…`}`).
     in_align: Vec<bool>,
     memo: std::cell::RefCell<HashMap<String, DefSet>>,
+    /// The format's definitions, behind the text's own.
+    prelude: Defs,
 }
 
 /// Names that start a paragraph in vertical mode (§1090): the text
@@ -647,14 +668,13 @@ fn starts_par(name: &str) -> bool {
 }
 
 impl Analysis<'_> {
-    fn new(text: &str, kind: FileKind) -> Analysis<'_> {
+    fn new(text: &str, kind: FileKind, prelude: Defs) -> Analysis<'_> {
         let mut defs = Definitions::new();
         defs.harvest(text, kind, 0);
-        let empty = Definitions::new();
         let scope = Scope {
             document: &defs,
             file: 0,
-            prelude: &empty,
+            prelude: &prelude,
         };
         let p = pass::analyze(text, kind, scope);
         let item_of = p
@@ -682,6 +702,7 @@ impl Analysis<'_> {
             claimed,
             in_align,
             memo: std::cell::RefCell::new(HashMap::new()),
+            prelude,
         }
     }
 
@@ -689,13 +710,23 @@ impl Analysis<'_> {
         &self.p.atoms
     }
 
-    /// What calling `name` (as the text defines it) may define.
+    /// Whether the text or the format defines `name`.
+    fn is_defined(&self, name: &str) -> bool {
+        self.defs.is_defined(name) || self.prelude.is_defined(name)
+    }
+
+    /// The shape the text gives `name`, else the format's.
+    fn shape(&self, name: &str) -> Option<pass::Shape> {
+        self.defs.shape(name).or_else(|| self.prelude.shape(name))
+    }
+
+    /// What calling `name` (as the text, then the format, defines it)
+    /// may define.
     fn defset(&self, name: &str) -> DefSet {
         if let Some(d) = self.memo.borrow().get(name) {
             return d.clone();
         }
-        let empty = Definitions::new();
-        let d = self.defs.call_defines(&empty, name);
+        let d = self.defs.call_defines(&self.prelude, name);
         self.memo.borrow_mut().insert(name.to_owned(), d.clone());
         d
     }
@@ -949,7 +980,7 @@ impl Analysis<'_> {
 
     fn cs_no_scope(&self, a: usize) -> bool {
         let name = self.atoms()[a].name(self.text);
-        if self.defs.is_defined(name) {
+        if self.is_defined(name) {
             return false;
         }
         let n = name
@@ -1015,7 +1046,10 @@ impl Analysis<'_> {
     }
 
     fn is_active(&self, c: char) -> bool {
-        c == '~' || (c.is_ascii() && self.defs.active_chars() >> (c as u32) & 1 == 1)
+        c == '~'
+            || (c.is_ascii()
+                && (self.defs.active_chars() | self.prelude.active_chars()) >> (c as u32) & 1
+                    == 1)
     }
 
     /// A macro called by name (`\par` for a blank line, an active
@@ -1041,7 +1075,7 @@ impl Analysis<'_> {
             if st.is_none() {
                 return;
             }
-            if self.defs.is_defined(c) {
+            if self.is_defined(c) {
                 // (a name the text defines: its body's calls are in the
                 // list already)
                 add_head(st, "lopen:");
@@ -1061,7 +1095,7 @@ impl Analysis<'_> {
     /// appended, or is a brace or tab the `\\let` copied (§1038, §1063,
     /// §1100, §789); an alias is its target's class.
     fn defined_state(&self, name: &str, may_start_par: bool, st: &mut Option<Vec<String>>) {
-        match self.defs.shape(name) {
+        match self.shape(name) {
             Some(pass::Shape::Quantity('f')) => add_head(st, "font"),
             Some(pass::Shape::Quantity('i' | 'd' | 'g' | 't')) => {
                 add_heads(st, class_state("count"));
@@ -1076,7 +1110,7 @@ impl Analysis<'_> {
                 if starts_par(&t) && may_start_par {
                     add_heads(st, Some(&["par:", "pg:"]));
                 }
-                if !self.defs.is_defined(&t) {
+                if !self.is_defined(&t) {
                     add_heads(st, class_state(&t));
                 }
             }
@@ -1199,7 +1233,7 @@ impl Analysis<'_> {
         }
         // (the state: the command's own class, the text's definition of
         // it, and what the bodies it relies on call)
-        if self.defs.is_defined(name) {
+        if self.is_defined(name) {
             // (a body may open a group of its own)
             add_head(&mut b.state, "lopen:");
             self.defined_state(name, self.may_start_par(a), &mut b.state);
@@ -1321,8 +1355,8 @@ fn add_defs(ds: &[Def], prefixes: bool, b: &mut Bound) {
     }
 }
 
-fn analyse(text: &str, kind: FileKind) -> TextHints {
-    let an = Analysis::new(text, kind);
+fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
+    let an = Analysis::new(text, kind, defs.clone());
     let slices = slices_of(text, &an.p);
     let mut starts = Vec::with_capacity(an.p.atoms.len());
     let mut hints: Vec<Arc<str>> = Vec::with_capacity(an.p.atoms.len());
@@ -1369,8 +1403,10 @@ fn hash_str(s: &str) -> u64 {
 
 type Cache<K> = Mutex<HashMap<K, Arc<TextHints>>>;
 
-fn texts() -> &'static Cache<(u64, u8)> {
-    static C: OnceLock<Cache<(u64, u8)>> = OnceLock::new();
+/// By the text, its kind and the definitions (one set per prelude, so
+/// its address identifies it).
+fn texts() -> &'static Cache<(u64, u8, usize)> {
+    static C: OnceLock<Cache<(u64, u8, usize)>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -1396,7 +1432,7 @@ fn looks_initex(text: &str) -> bool {
 
 /// The regime a text starts in: the kind its name says, unless the text
 /// itself sets up its braces.
-fn kind_of(text: &str, named: FileKind) -> FileKind {
+pub(crate) fn kind_of(text: &str, named: FileKind) -> FileKind {
     if looks_initex(text) {
         FileKind::Initex
     } else {
@@ -1404,10 +1440,11 @@ fn kind_of(text: &str, named: FileKind) -> FileKind {
     }
 }
 
-/// The analysis of a document's or prelude's text (cached by the text).
-pub(crate) fn text_hints(text: &str, kind: FileKind) -> Arc<TextHints> {
+/// The analysis of a document's or prelude's text under the format's
+/// definitions `defs` (cached by the text and the definitions).
+pub(crate) fn text_hints(text: &str, kind: FileKind, defs: &Defs) -> Arc<TextHints> {
     let kind = kind_of(text, kind);
-    let key = (hash_str(text), kind as u8);
+    let key = (hash_str(text), kind as u8, Arc::as_ptr(defs) as usize);
     if let Some(t) = texts()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1415,7 +1452,7 @@ pub(crate) fn text_hints(text: &str, kind: FileKind) -> Arc<TextHints> {
     {
         return t.clone();
     }
-    let t = Arc::new(analyse(text, kind));
+    let t = Arc::new(analyse(text, kind, defs));
     let mut c = texts().lock().unwrap_or_else(PoisonError::into_inner);
     if c.len() > 256 {
         c.clear();
@@ -1426,8 +1463,8 @@ pub(crate) fn text_hints(text: &str, kind: FileKind) -> Arc<TextHints> {
 
 /// The hint of the document slice beginning at byte `s` of `text`, as
 /// the node's extra argument.
-pub(crate) fn hint_arg(v: &Values, text: &str, s: usize) -> ValueId {
-    let t = text_hints(text, FileKind::Document);
+pub(crate) fn hint_arg(v: &Values, text: &str, s: usize, defs: &Defs) -> ValueId {
+    let t = text_hints(text, FileKind::Document, defs);
     match t.slice_hint(s) {
         Some(h) => v.str(h),
         None => v.str(&Hint::any("slice not found", "").encode()),
@@ -1453,7 +1490,10 @@ fn file_hints(v: &Values, id: ValueId, name: ValueId) -> Arc<TextHints> {
         None => {
             let text = str_of(v, id);
             let nm = str_of(v, name);
-            let t = text_hints(&text, FileKind::from_path(&nm));
+            // (a file read by `\input`: analysed without the format's
+            // definitions, which the frame does not name; a call it
+            // cannot bound answers `Any`, never a narrower set)
+            let t = text_hints(&text, FileKind::from_path(&nm), no_defs());
             by_id()
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -1547,7 +1587,7 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
             }
             // (the rest of a document slice: read on its own, its
             // catcodes verified when it runs)
-            let mut h = text_hints(&text, FileKind::Document).at(0);
+            let mut h = text_hints(&text, FileKind::Document, no_defs()).at(0);
             if let Some(b) = &mut h.bound {
                 fragment_context(b);
                 h.cause = format!("{} (text on its own)", h.cause);
@@ -1638,7 +1678,7 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
             }
             match kind {
                 Some(k) => {
-                    let mut h = text_hints(&text, k).at(0);
+                    let mut h = text_hints(&text, k, no_defs()).at(0);
                     if let Some(b) = &mut h.bound {
                         // (the tokens are read already)
                         b.cats.clear();
@@ -1936,7 +1976,7 @@ mod tests {
     use super::*;
 
     fn hint_of(text: &str, at: usize) -> Hint {
-        let t = analyse(text, FileKind::Document);
+        let t = analyse(text, FileKind::Document, no_defs());
         t.at(at)
     }
 
@@ -1989,7 +2029,7 @@ mod tests {
     #[test]
     fn paragraph_and_conditional_classes() {
         let t = "\\par\nText here \\ifnum1=1 \\fi\n\\afterassignment\\x\\def\\y{}\n";
-        let text = analyse(t, FileKind::Document);
+        let text = analyse(t, FileKind::Document, no_defs());
         let st = |off: usize| text.at(off).bound.expect("bounded").state;
         // (`\\par` is demoted for now)
         assert!(is_demoted(&text.at(0)));

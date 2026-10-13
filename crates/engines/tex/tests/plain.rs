@@ -49,8 +49,19 @@ fn gate(dir: &str, body: &str, default: bool, plain: bool) -> Result<String, Str
         let diags: Vec<String> = b
             .diagnostics()
             .iter()
-            .filter(|d| d.message.contains("hint") || d.message.contains("undeclared"))
-            .map(|d| format!("{}:{} {}", d.file, d.line, d.message))
+            .filter(|d| {
+                d.message.contains("hint")
+                    || d.message.contains("undeclared")
+                    || d.message.contains("UndeclaredDefinition")
+            })
+            .map(|d| {
+                format!(
+                    "{}:{} {}",
+                    d.file,
+                    d.line,
+                    d.message.chars().take(1200).collect::<String>()
+                )
+            })
             .collect();
         return Err(format!("{report}\n  FAIL hints: {}", diags.join("\n  ")));
     }

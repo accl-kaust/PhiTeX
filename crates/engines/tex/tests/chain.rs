@@ -5,7 +5,39 @@ mod common;
 
 use std::collections::BTreeMap;
 
-fn chain(dir: &std::path::Path, name: &str) {
+/// The target graph's forbidden links (docs/TARGET_GRAPH.md) and its
+/// height bound, for one build: the failures found.
+fn target_failures(name: &str, b: &phitex_tex::Build) -> Vec<String> {
+    let mut out = Vec::new();
+    // one paragraph on the path: its start's cell read by its text and
+    // its end (two links); a third paragraph link chains regions
+    let mut par_links = 0;
+    for (what, kind, field) in b.critical_chain() {
+        if field.starts_with("par:0:") {
+            out.push(format!(
+                "{name}: a link through {field}: a node outside every region ({kind}: {what})"
+            ));
+        } else if kind == "Changed" && field.starts_with("par:") {
+            par_links += 1;
+            if par_links == 3 {
+                out.push(format!(
+                    "{name}: paragraph cells chained across regions (third link {field}: {what})"
+                ));
+            }
+        } else if kind == "Changed" && field.starts_with("if:") {
+            out.push(format!("{name}: Changed {field} between commands ({what})"));
+        }
+    }
+    let pages = b.pages().len();
+    let bound = 4 + 3 * pages;
+    let height = b.stats.critical_path.unwrap_or(0);
+    if height > bound {
+        out.push(format!("{name}: height {height} > 4 + 3 * {pages} pages"));
+    }
+    out
+}
+
+fn chain(dir: &std::path::Path, name: &str) -> Vec<String> {
     let src = common::read(&dir.join(format!("{name}.tex")));
     let opts = common::options(&format!("./{name}.tex"), name, "", dir);
     let b = common::build(opts, Some(&common::plain()), &src);
@@ -57,15 +89,17 @@ fn chain(dir: &std::path::Path, name: &str) {
         }
     }
     // (an evaluation that stopped early measures nothing)
-    assert!(
-        b.stats.page_steps > 0,
-        "{name}: no page steps ({} nodes run): {:?}",
-        b.stats.nodes_run,
-        b.diagnostics()
+    if b.stats.page_steps == 0 {
+        let d: Vec<String> = b
+            .diagnostics()
             .iter()
-            .map(|d| d.message.chars().take(300).collect::<String>())
-            .collect::<Vec<_>>()
-    );
+            .map(|d| d.message.chars().take(600).collect())
+            .collect();
+        return vec![format!(
+            "{name}: no page steps ({} nodes run): {d:?}",
+            b.stats.nodes_run
+        )];
+    }
     let c = b.critical_chain();
     let mut by: BTreeMap<String, usize> = BTreeMap::new();
     for (what, kind, field) in &c {
@@ -105,19 +139,32 @@ fn chain(dir: &std::path::Path, name: &str) {
         b.stats.par_boundary_violations,
         b.stats.if_depth_violations
     );
+    let fails = target_failures(name, &b);
+    eprintln!(
+        "{name}: height {:?}, {} token-frame nodes, {} target-graph failures",
+        b.stats.critical_path,
+        b.stats.nodes_token_frames,
+        fails.len()
+    );
+    for f in &fails {
+        eprintln!("  {f}");
+    }
+    fails
 }
 
 #[test]
 #[ignore = "a measure: the critical chain by cause"]
 fn chains() {
     let fx = common::fixtures().join("plain");
+    let mut fails = Vec::new();
     for n in ["story", "pages", "hyphens", "display"] {
-        chain(&fx, n);
+        fails.extend(chain(&fx, n));
     }
     let kt = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/gate/kt");
     if kt.join("s.tex").exists() {
-        chain(&kt, "s");
+        fails.extend(chain(&kt, "s"));
     }
+    assert!(fails.is_empty(), "target graph: {} failures", fails.len());
 }
 
 /// Speculation off, on predicted nodes, on all candidates, at 1 and 4

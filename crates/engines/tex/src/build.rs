@@ -544,6 +544,7 @@ impl Run<'_, '_> {
                 self.line_break(md, &items, false)?;
             }
             self.set(&self.par_cell(md.vlid), ValueId::UNIT, true);
+            self.region_advance();
             self.normal_paragraph()?;
             let _ = v;
         }

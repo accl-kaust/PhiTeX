@@ -66,3 +66,36 @@ nodes' source positions; it fails on any forbidden link above, on any
 `par:0:` field, on `height > 4 + 3 * pages`, and on an evaluation with no
 page step. Bytes identical to pdfTeX remain necessary; they are not the
 acceptance.
+
+## Where the regions come from
+
+Region anchors are static: the pass marks a slice paragraph-ending when
+its item ends a paragraph (`\par`, a blank line, a vertical command, or
+a macro whose body ends in one), and the slices after it read the cells
+of a new region keyed by that node. For this the pass needs the
+definitions: the document's own (harvested from its text) and the
+format's (`api.rs prelude_defs`: the prelude's text and every TeX file
+it read, in load order, once per prelude key). Before 2026-10-16 the
+region pass ran with no definitions at all, so a `\par` inside a macro
+body never ended a region and `pages` was one region.
+
+At run time a node that ends its paragraph and is marked
+paragraph-ending moves itself to the new region (`Run::region_advance`:
+its anchor becomes its own id, as the siblings were keyed), so the rest
+of its run and the children it leaves write and read the same cells as
+the text after it. A paragraph end the pass did not predict leaves the
+region unchanged: the siblings share the cells, which is correct and
+serial, and shows in the chain as a third `Changed par:` link.
+
+## What this does not yet do
+
+- A bounded node (a call whose body the pass read) still leaves its
+  body's non-character commands as children, since its declared set
+  covers its first command. They are keyed by the right region now.
+- A balanced group inside one node is still a scope effect, so `{...}`
+  in a body is its own node pair. Running it inline needs a run-local
+  save stack (the group's local definitions undone at its `}`).
+- The hint for a token frame still answers `Any` unless it is characters
+  only; the declared set of a continued node is its first command's.
+- A violated declaration is an evaluation error, not a refutation that
+  re-runs the node as `Any`; that is the engine's to add.
