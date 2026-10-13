@@ -213,34 +213,26 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // registers, §1123)
         // (the assignments between it and its character, §1123, are
         // commands of the text or of the calling body: their own rows)
-        // (the only register material sets is `\\box255`, when the page
-        // builder runs inline and fires the routine, §1091, §1094, §1012;
-        // `\\unhbox`, `\\box` and `\\lastbox` void their own, §1110, §1079)
-        "accent" => &["box:255", "lvlfix"],
+        "accent" => &["box:", "lvlfix"],
         "char" | "discretionary" | "-" | "hskip" | "hfil" | "hfill" | "hss" | "hfilneg"
-        | "vrule" | "indent" | "noindent" | "unhcopy" | "copy" | "leaders" | "cleaders"
-        | "xleaders" => &["box:255", "lvlfix"],
-        "unhbox" | "box" => &["box:", "lvlfix"],
+        | "vrule" | "indent" | "noindent" | "unhbox" | "unhcopy" | "box" | "copy" | "leaders"
+        | "cleaders" | "xleaders" => &["box:", "lvlfix"],
         // vertical material and removals (§1056, §1105, §1080)
-        "vskip" | "vfil" | "vfill" | "vss" | "vfilneg" | "kern" | "hrule" | "unvcopy"
-        | "unskip" | "unpenalty" | "unkern" => &["box:255"],
-        "unvbox" | "lastbox" => &["box:"],
-        // math only (§1136-§1194): the incompleat noad is the run's own
+        "vskip" | "vfil" | "vfill" | "vss" | "vfilneg" | "kern" | "hrule" | "unvbox"
+        | "unvcopy" | "unskip" | "unpenalty" | "unkern" | "lastbox" => &["box:"],
+        // math only (§1136-§1194)
         "mathord" | "mathop" | "mathbin" | "mathrel" | "mathopen" | "mathclose" | "mathpunct"
         | "mathinner" | "underline" | "overline" | "mathaccent" | "radical" | "displaystyle"
         | "textstyle" | "scriptstyle" | "scriptscriptstyle" | "left" | "right" | "middle"
         | "mathchar" | "delimiter" | "displaylimits" | "limits" | "nolimits" | "nonscript"
         | "mathchoice" | "eqno" | "leqno" | "over" | "atop" | "above" | "overwithdelims"
-        | "atopwithdelims" | "abovewithdelims" => &[],
+        | "atopwithdelims" | "abovewithdelims" => &["inc"],
         // opening a group: a level of the run's own nest (§1063)
         "begingroup" | "bgroup" => &[],
         // closing a group: the box's badness, its level fix, inserts (§1100, §1079)
         // and the box a `\\setbox` or box context gets (§1077 box_end)
         // (an output routine's `}` resumes the page builder, §1100)
-        // (a box's `}` sets a register only in a `\\setbox`'s context,
-        // §1075, and that command's row names it; a `}` closing a box
-        // begun before the node is a fragment's, [`fragment_context`])
-        "endgroup" | "egroup" => &["badness", "lvlfix", "inspen"],
+        "endgroup" | "egroup" => &["badness", "lvlfix", "inspen", "box:"],
         // arguments expanded while read: a conditional may end (§366, §498)
         "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["cs:"],
         "mark" => &[],
@@ -249,9 +241,8 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "write" | "openout" | "closeout" => &["wopen:", "write:"],
         // (`\\immediate` of a pdfTeX object too, pdfTeX §1528)
         "immediate" => &["wopen:", "write:", "pdf:"],
-        // (§1099: `normal_paragraph` runs in the insert's own group, its
-        // resets undone at the group's end, §283, §1100)
-        "insert" | "vadjust" => &[],
+        // (§1099: `normal_paragraph` in the insert's own group; §1100)
+        "insert" | "vadjust" => NORMAL_PARAGRAPH,
         // (§638 `dead_cycles:=0`; §1374 the page's `\\write`, `\\openout`,
         // `\\closeout` whatsits, expanded, §1370; pdfTeX's at shipout)
         "shipout" => &["deadcycles", "write:", "wopen:", "pdf:"],
@@ -261,8 +252,9 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "aftergroup" => &[],
         // boxes (§1083 begin_box, §1077 \\setbox); a box whose braces close in
         // the same node is packaged there and sets \\\\badness, §1086, §649)
-        "hbox" | "vbox" | "vtop" | "vcenter" => &["lvlfix", "badness", "markclasses"],
-        "setbox" | "vsplit" => &["box:", "lvlfix", "badness", "markclasses"],
+        "hbox" | "vbox" | "vtop" | "vcenter" | "setbox" | "vsplit" => {
+            &["box:", "lvlfix", "badness", "markclasses"]
+        }
         // conditionals (§498-§510)
         "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode"
         | "ifinner" | "ifvoid" | "ifhbox" | "ifvbox" | "ifcat" | "ifcase" | "iftrue"
@@ -381,6 +373,7 @@ const NORMAL_PARAGRAPH: &[&str] = &[
 /// a display's sizes and the lines of the paragraph before it (§1145,
 /// §1146), and its end's resumption (§1200).
 const MATH_SHIFT: &[&str] = &[
+    "inc",
     "pg:",
     "param:fam",
     "param:predisplaysize",
@@ -2253,10 +2246,8 @@ impl Analysis<'_> {
                 };
                 add_heads(st, Some(&[fam, "aftertoken"]));
             }
-            // (a character, or a brace whose `}` sets only the register
-            // its `\\setbox` names, §1075, as the `egroup` row)
             Some(pass::Shape::Quantity(_)) => {
-                add_heads(st, Some(&["box:255", "lvlfix", "badness", "inspen"]));
+                add_heads(st, Some(&["box:", "lvlfix", "badness", "inspen"]));
                 if may_start_par {
                     add_heads(st, Some(&["pg:"]));
                 }
@@ -3202,8 +3193,6 @@ fn fragment_context(b: &mut Bound) {
     // (a `}` among them may end the output routine: the page's state
     // and the held-over contributions are restored, §1100)
     add_heads(&mut b.state, Some(&["deadcycles"]));
-    // (and a box a `\\setbox` before it began, §1075)
-    add_head(&mut b.state, "box:");
     add_heads(&mut b.state, Some(NORMAL_PARAGRAPH));
     add_head(&mut b.state, "pg:");
     add_head(&mut b.state, "aftertoken");

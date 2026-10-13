@@ -237,21 +237,6 @@ pub(crate) fn literal_int(text: &str, atoms: &[Atom], p: usize) -> Option<u32> {
                 _ => None,
             }
         }
-        // (the kernel's constants, [`CONSTANTS`]: plain.tex's and
-        // ltplain.dtx's `\chardef`s and `\z@`)
-        AtomKind::Cs => match a.name(text) {
-            "z@" => Some(0),
-            "@ne" => Some(1),
-            "tw@" => Some(2),
-            "thr@@" => Some(3),
-            "sixt@@n" => Some(16),
-            "@cclv" => Some(255),
-            "@cclvi" => Some(256),
-            "@m" => Some(1000),
-            "@M" => Some(10000),
-            "@MM" => Some(20000),
-            _ => None,
-        },
         AtomKind::Char(c) if c.is_ascii_digit() || c == '\'' || c == '"' => {
             let (radix, mut q) = match c {
                 '\'' => (8, p + 1),
@@ -407,30 +392,6 @@ const QUOTERS: &[&str] = &[
 /// Commands that read a quantity named after them without assigning it.
 const READERS: &[&str] = &[
     "the",
-    // (the primitives that scan a value, §1057–§1061, §1103, §1072:
-    // a quantity after them is read, not assigned)
-    "penalty",
-    "kern",
-    "mkern",
-    "hskip",
-    "vskip",
-    "mskip",
-    "raise",
-    "lower",
-    "moveleft",
-    "moveright",
-    "char",
-    "mathchar",
-    "delimiter",
-    "accent",
-    "mathaccent",
-    "radical",
-    // (the kernel's commands that pass a value on to `\penalty` and
-    // `\vskip`)
-    "addpenalty",
-    "addvspace",
-    // (the insertion's number, §1099)
-    "insert",
     "number",
     "romannumeral",
     "showthe",
@@ -592,20 +553,7 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
     };
     // (the groups the text opens so far: braces and named groups)
     let mut depth: i64 = 0;
-    let mut letted: Vec<&str> = Vec::new();
-    let mut bodies: Vec<(&str, usize, usize)> = Vec::new();
-    // (what the previous atom added, and whether it ran inside a group
-    // without `\global`: its local definitions are undone at the
-    // group's end, §283)
-    let mut mark = (0, 0, 0, false);
     while k < hi {
-        drop_local(&mut e, mark);
-        mark = (
-            e.names.len(),
-            e.prefixes.len(),
-            e.assigned.len(),
-            depth > 0 && !g,
-        );
         let a = atoms[k];
         match a.kind {
             AtomKind::Open => depth += 1,
@@ -666,32 +614,11 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
             n,
             "ifx" | "if_meaning:w" | "if" | "ifcat" | "if:w" | "if_charcode:w" | "if_catcode:w"
         ) {
-            // (an operand is a token, or `\\noexpand` and the one it
-            // quotes, §367)
-            let operand = |p: usize| -> usize {
-                let q = skip(atoms, p);
-                match atoms.get(q) {
-                    Some(x)
-                        if x.kind == AtomKind::Cs
-                            && matches!(x.name(text), "noexpand" | "exp_not:N") =>
-                    {
-                        skip(atoms, q + 1) + 1
-                    }
-                    _ => q + 1,
-                }
-            };
-            k = operand(operand(k));
+            let p = skip(atoms, k) + 1;
+            k = skip(atoms, p) + 1;
             continue;
         }
         if READERS.contains(&n) {
-            // (the reader is a command too, with its own state:
-            // `\\unhbox` voids the register it reads, §1110)
-            if !rd && !e.calls.iter().any(|c| c == n) {
-                e.calls.push(n.to_owned());
-                if depth <= 0 || gl {
-                    e.outer_calls.push(n.to_owned());
-                }
-            }
             reading = true;
             continue;
         }
@@ -806,32 +733,17 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
             }
         };
         let gg = gl || matches!(n, "gdef" | "xdef" | "protected@xdef");
-        // (a name this text defines runs as defined here: `\\def\\next`)
-        let local_name = atoms
-            .get(skip(atoms, k))
-            .filter(|x| x.kind == AtomKind::Cs)
-            .map(|x| x.name(text));
         match n {
             "def" | "gdef" => {
                 let p = target(&mut e, k, gg);
                 k = past_body(atoms, p);
-                if let Some(x) = local_name {
-                    bodies.push((x, p, k));
-                }
             }
             // (an expanded body runs as expansion here: `\csname` in it
             // defines; the loop reads it as code, an over-approximation)
             "edef" | "xdef" | "protected@edef" | "protected@xdef" => {
-                let p = target(&mut e, k, gg);
-                if let Some(x) = local_name {
-                    bodies.push((x, p, past_body(atoms, p)));
-                }
-                k = p;
+                k = target(&mut e, k, gg);
             }
             "let" | "futurelet" => {
-                if let Some(x) = atoms.get(skip(atoms, k)).filter(|x| x.kind == AtomKind::Cs) {
-                    letted.push(x.name(text));
-                }
                 let p = target(&mut e, k, gl);
                 let mut q = skip(atoms, p);
                 if atoms.get(q).map(|x| x.kind) == Some(AtomKind::Char('=')) {
@@ -1191,12 +1103,10 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                             field: format!("{fam}:{v}"),
                             global: gl,
                         }),
-                        None => {
-                            e.prefixes.push(Def {
-                                field: format!("{fam}:"),
-                                global: gl,
-                            });
-                        }
+                        None => e.prefixes.push(Def {
+                            field: format!("{fam}:"),
+                            global: gl,
+                        }),
                     }
                     continue;
                 }
@@ -1258,30 +1168,7 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                     }
                     continue;
                 }
-                // (a name this text `\let` runs as what it was let to,
-                // a call the `\let` recorded, not as its definitions
-                // elsewhere: `\let\next\f@@t ... \next`)
-                if rd || letted.contains(&n) {
-                    continue;
-                }
-                if let Some(&(_, b0, b1)) = bodies.iter().rev().find(|b| b.0 == n) {
-                    // (its body as this text defined it runs here)
-                    let x = effects(text, atoms, b0, b1, gl);
-                    e.names.extend(x.names);
-                    e.prefixes.extend(x.prefixes);
-                    e.assigned.extend(x.assigned);
-                    e.unbounded.extend(x.unbounded);
-                    for c in x.calls {
-                        if (depth <= 0 || gl)
-                            && x.outer_calls.contains(&c)
-                            && !e.outer_calls.contains(&c)
-                        {
-                            e.outer_calls.push(c.clone());
-                        }
-                        if !e.calls.contains(&c) {
-                            e.calls.push(c);
-                        }
-                    }
+                if rd {
                     continue;
                 }
                 e.calls.push(n.to_owned());
@@ -1291,26 +1178,7 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
             }
         }
     }
-    drop_local(&mut e, mark);
     e
-}
-
-/// Drops the local definitions and assignments added since `mark`
-/// when they ran inside a group the text opens (§283).
-fn drop_local(e: &mut Effects, (names, prefixes, assigned, inner): (usize, usize, usize, bool)) {
-    if !inner {
-        return;
-    }
-    let keep = |v: &mut Vec<Def>, from: usize| {
-        let mut i = 0;
-        v.retain(|d| {
-            i += 1;
-            i <= from || d.global
-        });
-    };
-    keep(&mut e.names, names);
-    keep(&mut e.prefixes, prefixes);
-    e.assigned.truncate(assigned);
 }
 
 /// The kernel's constants (plain.tex's `\chardef`s and `\dimen`s that

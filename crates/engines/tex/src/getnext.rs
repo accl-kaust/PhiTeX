@@ -144,17 +144,6 @@ impl Run<'_, '_> {
         Ok(())
     }
 
-    /// The token `get_r_token` reads (§1215): a control sequence's
-    /// meaning is not looked up unless an alignment of this run watches
-    /// for `&` and `\cr` (§342); `\outer` is not checked here (§336
-    /// at `normal`).
-    pub(crate) fn get_name_token(&mut self) -> R<()> {
-        self.bare = self.aopen <= 0;
-        let r = self.get_token();
-        self.bare = false;
-        r
-    }
-
     /// `get_token` (§365).
     #[inline]
     pub(crate) fn get_token(&mut self) -> R<()> {
