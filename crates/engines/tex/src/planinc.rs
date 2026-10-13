@@ -261,6 +261,11 @@ pub(crate) fn fold(v: &Values, all: ValueId, prev: Option<&ListMemo>) -> Arc<Lis
     let items = p.items[..out0].to_vec();
     let blocks = p.blocks[..bi].to_vec();
     let dn = delta(new_n, old_n);
+    if crate::exec::env_flag!("PHITEX_PLAN_TIME") {
+        eprintln!(
+            "plan fold: {old_n} -> {new_n} entries, common start {pre} end {suf}, from block {bi} at {at}"
+        );
+    }
     let r = refold(
         v,
         all,
@@ -313,6 +318,9 @@ fn refold(
                     d,
                 )
             }));
+            if crate::exec::env_flag!("PHITEX_PLAN_TIME") {
+                eprintln!("plan fold: converged at entry {at} (suffix from {suf})");
+            }
             return ListMemo {
                 root,
                 entries,
