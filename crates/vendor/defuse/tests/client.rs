@@ -2037,3 +2037,150 @@ fn a_range_reader_waiting_for_an_unfolding_range_runs_once_it_is_done() {
     assert!(rep.stops <= 2, "the reader re-ran per unfold: {rep:?}");
     assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
 }
+
+/// Phi's case. `["a", k]` (pending claim) reads its following siblings
+/// and claims every leading one whose operation tag is not `"e"`;
+/// `["b", k]` (pending claim) claims one sibling and continues with
+/// `["x"]`; `["c"]`, `["d"]`, `["x"]` are plain; `["e"]` is plain too,
+/// and must never be claimed.
+struct CountClaims;
+
+impl Operation for CountClaims {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn claim(&self, a: &[ValueId], v: &Values, _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>) -> Claim {
+        if matches!(tag(v, a).as_str(), "a" | "b") {
+            Claim::Pending
+        } else {
+            Claim::None
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match tag(v, &a).as_str() {
+            "a" => {
+                let mut n = 0;
+                while let Some((_, args)) = cx.following(n) {
+                    if tag(v, &args) == "e" {
+                        break;
+                    }
+                    n += 1;
+                }
+                cx.claim(n);
+                Ok(v.int(i64::try_from(n).unwrap_or(0)))
+            }
+            "b" => {
+                cx.claim(1);
+                cx.follow(cx.op(), vec![v.str("x")]);
+                Ok(ValueId::UNIT)
+            }
+            _ => Ok(v.int(1)),
+        }
+    }
+}
+
+#[test]
+fn a_count_claim_is_applied_to_the_siblings_the_run_saw() {
+    // Several argument values: the batch's results apply in id order, so
+    // either claimer's result may come first.
+    for k in 0..6 {
+        let mut eng = Engine::new();
+        let op = eng.register(Arc::new(CountClaims));
+        let u = eng.new_unit();
+        let mk = |eng: &mut Engine, t: &str| {
+            let v = eng.values();
+            let a = if t == "a" || t == "b" {
+                vec![v.str(t), v.int(k)]
+            } else {
+                vec![v.str(t)]
+            };
+            eng.push(u, op, a)
+        };
+        let a = mk(&mut eng, "a");
+        let b = mk(&mut eng, "b");
+        let c = mk(&mut eng, "c");
+        let d = mk(&mut eng, "d");
+        let e = mk(&mut eng, "e");
+        let rep = eng.evaluate_sequential().expect("evaluate");
+        assert!(eng.output(e).is_some(), "k {k}: e was claimed: {rep:?}");
+        assert!(eng.output(c).is_none(), "k {k}: c is claimed either way: {rep:?}");
+        // Either a's result came first (a claimed b, c, d; b never ran) or
+        // b's did (b claimed c and unfolded; a ran again on that view and
+        // claimed b and d; claiming b released c into a's view; a ran once
+        // more and claimed b and c, releasing d).
+        let (ca, cb) = (eng.claimed(a), eng.claimed(b));
+        assert!(cb.is_empty(), "k {k}: b is claimed, so claims nothing: {cb:?}");
+        assert!(
+            ca == vec![b, c, d] || ca == vec![b, c],
+            "k {k}: a claimed {ca:?}: {rep:?}"
+        );
+        assert_eq!(eng.output(d).is_some(), ca.len() == 2, "k {k}: {rep:?}");
+        assert!(eng.check_invariants().is_empty(), "k {k}: {:?}", eng.check_invariants());
+    }
+}
+
+/// `["pub"]` reads loop-back `n` and publishes `min(n + 1, 3)`; `["rd"]`
+/// reads `n` and outputs it; `["z", k]` outputs `k` and reads nothing.
+struct Converging;
+
+impl Operation for Converging {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match tag(v, &a).as_str() {
+            "pub" => {
+                let n = cx.use_field(v.field("n"))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+                cx.publish(v.field("n"), v.int((n + 1).min(3)));
+                Ok(ValueId::UNIT)
+            }
+            "rd" => Ok(cx.use_field(v.field("n"))?.unwrap_or(ValueId::UNIT)),
+            _ => Ok(a[1]),
+        }
+    }
+}
+
+#[test]
+fn a_loop_back_starts_an_edit_from_its_last_fixpoint_when_asked() {
+    let build = |start: Option<defuse::LoopStart>| {
+        let mut eng = Engine::new();
+        let op = eng.register(Arc::new(Converging));
+        let n = eng.values().field("n");
+        let zero = eng.values().int(0);
+        eng.declare_loopback(n, zero);
+        if let Some(s) = start {
+            eng.set_loop_start(s);
+        }
+        let u = eng.new_unit();
+        let (p, r, z) = {
+            let v = eng.values();
+            (vec![v.str("pub")], vec![v.str("rd")], vec![v.str("z"), v.int(1)])
+        };
+        eng.push(u, op, p);
+        let rd = eng.push(u, op, r);
+        let z = eng.push(u, op, z);
+        let rep = eng.evaluate_sequential().expect("cold");
+        assert_eq!(eng.values().as_int(eng.output(rd).expect("rd")), Some(3), "{rep:?}");
+        assert!(rep.rounds >= 3, "{rep:?}");
+        (eng, op, rd, z)
+    };
+    // Default: an edit restarts the loop from its initial value.
+    let (mut eng, op, rd, z) = build(None);
+    let a = vec![eng.values().str("z"), eng.values().int(2)];
+    eng.replace(z, op, a);
+    let rep = eng.evaluate_sequential().expect("edit, initial");
+    assert_eq!(eng.values().as_int(eng.output(rd).expect("rd")), Some(3), "{rep:?}");
+    assert!(rep.restarts >= 1 && rep.rounds >= 3 && rep.runs >= 3, "{rep:?}");
+    // Previous: the last fixpoint stands; only the edited node runs.
+    let (mut eng, op, rd, z) = build(Some(defuse::LoopStart::Previous));
+    let a = vec![eng.values().str("z"), eng.values().int(2)];
+    eng.replace(z, op, a);
+    let rep = eng.evaluate_sequential().expect("edit, previous");
+    assert_eq!(eng.values().as_int(eng.output(rd).expect("rd")), Some(3), "{rep:?}");
+    assert_eq!((rep.restarts, rep.rounds, rep.runs), (0, 1, 1), "{rep:?}");
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+}

@@ -50,6 +50,7 @@ pub struct Ctx<'a> {
     effect: Option<u8>,
     kind: Option<ValueId>,
     claim: Option<usize>,
+    claim_seen: Vec<Slot>,
     stream: Option<StreamRange>,
     touch_seq: usize,
     relabels: u64,
@@ -93,6 +94,7 @@ impl<'a> Ctx<'a> {
             effect: None,
             kind: None,
             claim: None,
+            claim_seen: Vec::new(),
             stream: None,
             touch_seq: eng.touch_log.len(),
             relabels: eng.relabels,
@@ -758,6 +760,7 @@ impl<'a> Ctx<'a> {
     /// Resolves this node's pending claim: it claims the next `n` siblings.
     pub fn claim(&mut self, n: usize) {
         self.claim = Some(n);
+        self.claim_seen = self.eng.following_slots(self.slot, n);
     }
 
     /// The text of the `i`-th following sibling.
@@ -908,19 +911,11 @@ impl<'a> Ctx<'a> {
         v
     }
 
-    pub(crate) fn finish(mut self, r: Result<ValueId, Stop>) -> RunResult {
-        let n = self.eng.n(self.slot);
-        let follows = self.follows.len();
-        let end = match (self.stopped, r) {
-            (Some(e), _) => e,
-            (None, Ok(_)) if self.raise > 0 => End::Raise(self.raise, self.raise_from),
-            (None, Ok(v)) => End::Output(v),
-            (None, Err(_)) => End::Unpredictable,
-        };
-        // A non-speculative stop at a read with a token: the state the
-        // next attempt may resume from. Not for runs whose reads the
-        // engine does not re-check one by one (claims, ranges, chains).
-        let resumable = !self.spec
+    /// A non-speculative stop at a read with a token: the state the next
+    /// attempt may resume from. Not for runs whose reads the engine does
+    /// not re-check one by one (claims, ranges, chains).
+    fn resumable(&self, end: &End) -> bool {
+        !self.spec
             && self.token.is_some()
             && self.watch.is_none()
             && self.stream.is_none()
@@ -938,8 +933,19 @@ impl<'a> Ctx<'a> {
                     | End::NeedChild(_)
                     | End::Gated(..)
                     | End::GateRaise(..)
-            );
-        let suspended = if resumable {
+            )
+    }
+
+    pub(crate) fn finish(mut self, r: Result<ValueId, Stop>) -> RunResult {
+        let n = self.eng.n(self.slot);
+        let follows = self.follows.len();
+        let end = match (self.stopped.take(), r) {
+            (Some(e), _) => e,
+            (None, Ok(_)) if self.raise > 0 => End::Raise(self.raise, self.raise_from),
+            (None, Ok(v)) => End::Output(v),
+            (None, Err(_)) => End::Unpredictable,
+        };
+        let suspended = if self.resumable(&end) {
             Some(Box::new(Suspended {
                 uses: self.uses.clone(),
                 cache: self.cache.clone(),
@@ -1002,6 +1008,7 @@ impl<'a> Ctx<'a> {
             effect: self.effect,
             kind: self.kind,
             claim: self.claim,
+            claim_seen: self.claim_seen,
             stream: self.stream,
             touch_seq: self.touch_seq,
             relabels: self.relabels,
