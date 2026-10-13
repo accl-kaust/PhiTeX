@@ -133,6 +133,8 @@ fn dvi_fixtures() {
         ("dvi", "disc", false, false),
         ("dvi", "accent", false, false),
         ("dvi", "pargroup", false, false),
+        ("dvi", "mathpar", false, false),
+        ("dvi", "errors100", false, false),
     ]);
 }
 
