@@ -926,6 +926,8 @@ impl<'c, 'a> Run<'c, 'a> {
         Mean::decode(self.v, x)
     }
 
+    // the per-token hot path: inlined on purpose
+    #[allow(clippy::inline_always)]
     #[inline(always)]
     pub(crate) fn set_cur(&mut self, tok: Tok) -> R<()> {
         if !tok.is_cs_or_active() {
@@ -1457,6 +1459,8 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// `get_next` with the meaning (§357–§358).
+    // the per-token hot path: inlined on purpose
+    #[allow(clippy::inline_always)]
     #[inline(always)]
     pub(crate) fn get_next(&mut self) -> R<bool> {
         // (the common case: a token of the list on top that is not an
