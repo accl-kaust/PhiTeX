@@ -2615,6 +2615,8 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         {
             add_head(&mut b.state, "param:everypar");
             add_head(&mut b.state, "param:clubpenalty");
+            // (LaTeX's own `\\everypar`, a `\\newtoks` register)
+            add_head(&mut b.state, "toks:");
             // (what the `\\everypar` of a list item or a heading sets
             // when the paragraph consumes it, latex.ltx `\\@item`,
             // `\\@afterheading`)
