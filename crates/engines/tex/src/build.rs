@@ -398,7 +398,7 @@ impl Run<'_, '_> {
         let ep = self.par(Par::everypar)?;
         let toks = crate::val::toks_of(v, ep);
         self.push_toks(toks);
-        Ok(())
+        self.build_page_par()
     }
 
     /// `\prevgraf` of the vertical list `md.vlid` (§1091, §1096): the
@@ -869,6 +869,9 @@ impl Run<'_, '_> {
             let b = with_shift(v, b, i32::try_from(ctx).unwrap_or(0));
             if md.m.abs() == 1 {
                 self.append_to_vlist(md, b)?;
+                if md.m > 0 {
+                    self.build_page_outer()?;
+                }
             } else {
                 let b = if md.m.abs() == 102 {
                     self.set_space_factor(md, 1000);
@@ -1274,7 +1277,7 @@ impl Run<'_, '_> {
                 };
                 let y = nodes::encode(v, &node, &side);
                 self.append(outer.lid, y);
-                Ok(())
+                self.build_page_outer()
             }
             group::DISC => self.build_discretionary(md),
             group::OUTPUT => crate::page::output_end(self, md),
@@ -2026,6 +2029,19 @@ impl Run<'_, '_> {
         };
         let g = nodes::glue_node(v, &fill, GlueKind::Normal);
         let p = nodes::penalty_node(v, -0o10000000000);
+        if self.pg.is_some() {
+            // a text paging inline: §1054 as tex.web has it
+            if self.all_over_inline()? {
+                self.claim_rest = true;
+                self.frames.clear();
+                return Ok(());
+            }
+            self.back_cur();
+            for x in [b, g, p] {
+                self.append(0, x);
+            }
+            return self.build_page();
+        }
         let m = v.list(vec![v.int(nodes::T_END), b, g, p]);
         self.append(0, m);
         // nothing after `\end` is read
@@ -2126,7 +2142,7 @@ pub(crate) fn fold_item(
         }
         // the page builder's markers (page parameters, a marks read): kept
         // in place for its fold, invisible to the list's readers
-        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT => out.push(n),
+        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT => out.push(n),
         T_BUILD_PAGE => {
             st.since_bp = 0;
         }
@@ -2165,7 +2181,10 @@ pub(crate) fn fold_item(
 /// Whether `x` is a marker for the page builder's fold
 /// (`T_PAGE_PARAMS`, `T_MARKS_AT`), not list material.
 fn is_marker(v: &Values, x: ValueId) -> bool {
-    matches!(nodes::tag(v, x), nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT)
+    matches!(
+        nodes::tag(v, x),
+        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT
+    )
 }
 
 /// A list's contents as its reader sees them ([`Run::list_fold`]).

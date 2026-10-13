@@ -18,6 +18,9 @@ const BOX_FLAG: i64 = 0o10000000000;
 pub(crate) const SHIP_OUT_FLAG: i64 = BOX_FLAG + 512;
 pub(crate) const LEADER_FLAG: i64 = BOX_FLAG + 513;
 
+/// `PHITEX_HEARTBEAT_FROM`: the command count the per-command trace starts at.
+static HEARTBEAT_FROM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
 impl Run<'_, '_> {
     /// The node's command: expand once, or do one command (§1030).
     pub(crate) fn command(&mut self) -> R<()> {
@@ -61,15 +64,11 @@ impl Run<'_, '_> {
             c.set(Some(t));
             t
         });
-        static FROM: OnceLock<u64> = OnceLock::new();
-        let from = *FROM.get_or_init(|| {
-            std::env::var("PHITEX_HEARTBEAT_FROM")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(u64::MAX)
+        let from = *HEARTBEAT_FROM.get_or_init(|| {
+            std::env::var("PHITEX_HEARTBEAT_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX)
         });
         let trace = n >= from && n < from.saturating_add(150_000);
-        if n % 100_000 != 0 && !trace {
+        if !n.is_multiple_of(100_000) && !trace {
             return;
         }
         let (file, line) = self
@@ -231,10 +230,15 @@ impl Run<'_, '_> {
                 }
             }
             cmd::PAR_END => {
+                // §1094
                 if v {
                     self.normal_paragraph()?;
+                    if md.m > 0 {
+                        self.build_page_outer()?;
+                    }
                 } else if h {
                     self.end_graf(&md)?;
+                    self.build_page_outer()?;
                 }
             }
             cmd::UN_HBOX => {
@@ -285,6 +289,9 @@ impl Run<'_, '_> {
                 let n = self.scan_int()?;
                 let node = crate::nodes::penalty_node(self.v, n);
                 self.append(md.lid, node);
+                if md.m == 1 {
+                    self.build_page_outer()?;
+                }
             }
             cmd::REMOVE_ITEM => self.delete_last(&md)?,
             cmd::ITAL_CORR => {
@@ -331,15 +338,10 @@ impl Run<'_, '_> {
                 // §1271
                 self.get_token()?;
                 let t = self.cur.tok.clone();
-                if self.in_local_group() {
-                    // the run's own group: its level keeps the tokens
-                    if let Some(l) = self.nest.iter_mut().rev().find(|l| l.group != 0) {
-                        l.ag.push(t);
-                    }
-                } else if md.depth > 0 {
-                    let mut toks = self.scope_list("ag", &md)?;
-                    toks.push(t.encode(self.v));
-                    self.set_scope_list("ag", &md, toks);
+                // the innermost group's level keeps the tokens; at the
+                // bottom level they are dropped (§1271 `cur_level>level_one`)
+                if let Some(l) = self.nest.iter_mut().rev().find(|l| l.group != 0) {
+                    l.ag.push(t);
                 }
             }
             cmd::IN_STREAM => self.open_or_close_in()?,
@@ -1129,12 +1131,14 @@ impl Run<'_, '_> {
             let st = self.get(&field)?;
             let open = st.filter(|&x| x != ValueId::UNIT);
             let Some(st) = open else {
-                // §484: from the terminal: a fatal error in batch mode
+                // §484: from the terminal: a fatal error in batch mode;
+                // a build has no terminal, so in every mode (TeX at the
+                // end of its terminal input stops the job too, §360)
                 self.log(
                     "error",
                     "*** (cannot \\read from terminal in nonstop modes)",
                 )?;
-                return Ok(out);
+                return Err(crate::run::Halt::Fatal);
             };
             let line = self.next_read_line(&field, st);
             let text = line.unwrap_or_default();
@@ -1269,7 +1273,7 @@ impl Run<'_, '_> {
                             let n = self.scan_four_bit_int()?;
                             self.scan_optional_equals()?;
                             let name = self.scan_file_name()?;
-                            self.open_out(i64::from(n), &name);
+                            self.open_out(i64::from(n), &name)?;
                         }
                         _ => {
                             let n = self.scan_four_bit_int()?;
@@ -1322,9 +1326,15 @@ impl Run<'_, '_> {
                 })
                 .collect();
             line.push('\n');
-            let e = v.list(vec![v.str(&name), v.str(&line)]);
-            let su = v.seq_unit(e);
-            self.contribute("streams", su);
+            // a file whose read-back only defines: the definitions this
+            // line's read-back makes go with it (`wdef:<field>`)
+            let e = if self.cx.is_loopback(v.field(&format!("wkeys:{name}"))) {
+                let made = self.interpret_line(&line)?;
+                v.list(vec![v.str(&name), v.str(&line), made])
+            } else {
+                v.list(vec![v.str(&name), v.str(&line)])
+            };
+            self.contribute_stream(e);
         } else {
             self.log("wlog", &s)?;
         }
@@ -1335,7 +1345,7 @@ impl Run<'_, '_> {
     /// has no extension), which starts empty: its text accumulates in
     /// the `streams` sequence, and `wopen:<name>` tells later readers
     /// of the file that this run wrote it.
-    pub(crate) fn open_out(&mut self, n: i64, name: &str) {
+    pub(crate) fn open_out(&mut self, n: i64, name: &str) -> R<()> {
         let v = self.v;
         let base = name.rsplit('/').next().unwrap_or(name);
         let name = if base.contains('.') {
@@ -1343,10 +1353,11 @@ impl Run<'_, '_> {
         } else {
             format!("{name}.tex")
         };
+        self.written_decl(&name)?;
         self.set(&format!("write:{n}"), v.list(vec![v.str(&name)]), true);
         self.set(&format!("wopen:{name}"), v.int(1), true);
-        let su = v.seq_unit(v.list(vec![v.str(&name)]));
-        self.contribute("streams", su);
+        self.contribute_stream(v.list(vec![v.str(&name)]));
+        Ok(())
     }
 
     /// The file `key` as TeX reads it here: if this run opened it for
@@ -1370,7 +1381,7 @@ impl Run<'_, '_> {
         );
         let mut text = String::new();
         for e in all {
-            let xs = list_of(v, e);
+            let xs = list_of(v, crate::api::stream_entry(v, e));
             if xs.first().map(|&n| str_of(v, n)).as_deref() != Some(key) {
                 continue;
             }

@@ -1,6 +1,7 @@
-//! The operations: `Exec` (one command of TeX's input), `Put`
-//! (definitions that land outside a group that just closed) and `Dvi`
-//! (the file).
+//! The operations: `Exec` (one node's text: a paragraph region, a
+//! loading command, a whole format), `Put` (definitions that land
+//! outside a group that just closed), `Dvi` (the file), `Mark` (the
+//! end of the prelude) and `Files` (the files read back next round).
 
 use std::sync::{Arc, OnceLock};
 
@@ -286,7 +287,8 @@ pub(crate) fn client_only(v: &Values, f: Field) -> bool {
 
 /// The files the job writes, read back by the next round: for each name
 /// in the client's `loopfiles`, the text its streams accumulated
-/// (`streams`) is published as the next round's `file:<name>`.
+/// (`streams`, in the order the page builder's `wplan` gives) is
+/// published as the next round's `wfile:<name>`.
 pub(crate) struct Files;
 
 impl Operation for Files {
@@ -305,10 +307,35 @@ impl Operation for Files {
         if names.is_empty() {
             return Ok(ValueId::UNIT);
         }
+        // (the `wdef:` loop-backs declared so far: a new one runs this
+        // again)
+        let _ = cx.use_env(v.field("wdefset"))?;
+        let plan = cx.acc_range(v.field("wplan"), None)?;
         let all = cx.acc_range(v.field("streams"), None)?;
-        let texts = crate::api::stream_texts(v, &v.seq_to_vec(all));
+        let texts = crate::api::written_texts(v, Some(plan), Some(all));
+        let defs = crate::api::written_defs(v, Some(plan), Some(all));
+        for name in &names {
+            let k = v.field(&format!("wkeys:{name}"));
+            if !cx.is_loopback(k) {
+                continue;
+            }
+            let ds = defs
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, d)| d.as_slice())
+                .unwrap_or_default();
+            let mut keys = Vec::new();
+            for (f, val) in ds {
+                let w = v.field(&format!("wdef:{f}"));
+                if cx.is_loopback(w) {
+                    cx.publish(w, *val);
+                    keys.push(v.str(f));
+                }
+            }
+            cx.publish(k, v.list(keys));
+        }
         for name in names {
-            let f = v.field(&format!("file:{name}"));
+            let f = v.field(&format!("wfile:{name}"));
             if !cx.is_loopback(f) {
                 continue;
             }

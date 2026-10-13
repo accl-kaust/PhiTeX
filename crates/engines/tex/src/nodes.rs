@@ -63,6 +63,12 @@ pub(crate) const T_PAGE_PARAMS: i64 = 92;
 /// builder's fold publishes the marks in force there as the node's
 /// `marks:before:<node>` loop-back.
 pub(crate) const T_MARKS_AT: i64 = 91;
+/// A document node's `\immediate\write` or `\immediate\openout` to a
+/// job-written file (§1370, §1374): `[tag, entry]`, the `streams` entry
+/// (`[name]` or `[name, text]`); the page builder's fold places it
+/// among the shipped pages, so the writer assembles the file in TeX's
+/// order.
+pub(crate) const T_WRITE_AT: i64 = 88;
 
 /// Marks and whatsits met while decoding, numbered.
 #[derive(Clone, Default, Debug)]

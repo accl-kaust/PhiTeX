@@ -691,8 +691,8 @@ impl Session {
             diagnostics: b.diagnostics(),
             unsettled: Vec::new(),
             notes: std::iter::once(format!(
-                "{} nodes run of {} live, {} runs, {} cutoffs",
-                s.nodes_run, s.live, s.runs, s.cutoffs
+                "{} nodes run of {} live, {} runs, {} cutoffs, {} loop rounds",
+                s.nodes_run, s.live, s.runs, s.cutoffs, s.loop_rounds
             ))
             .chain(
                 b.pdf_exact_reason()
