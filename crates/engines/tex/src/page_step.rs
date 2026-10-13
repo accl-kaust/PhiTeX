@@ -21,11 +21,12 @@ pub(crate) struct PageStep {
 }
 
 /// What a step with an output routine defines (§1012–§1025): the fold's
-/// state, the marks, the insertion boxes (`box:255` goes to the routine
+/// state, the marks (e-TeX's classes too), the insertion boxes (`box:255` goes to the routine
 /// as an argument), `\outputpenalty` and `\deadcycles`.
-const STEP_DEFINES: [&str; 5] = [
+const STEP_DEFINES: [&str; 6] = [
     "page:state",
     "mark:",
+    "marks:",
     "box:",
     "param:outputpenalty",
     "deadcycles",
