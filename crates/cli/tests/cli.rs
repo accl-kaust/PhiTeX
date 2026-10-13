@@ -1593,5 +1593,8 @@ fn nonstop_fatal_errors_end_the_job() {
         if name == "errread" {
             assert!(log.contains("! a first error."), "{name}: {log}");
         }
+        // (pdfTeX writes no PDF file after a fatal error)
+        assert!(log.contains("no output PDF file produced"), "{name}: {log}");
+        assert!(!dir.join(format!("{name}.pdf")).exists(), "{name}");
     }
 }
