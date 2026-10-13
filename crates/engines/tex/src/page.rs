@@ -276,13 +276,16 @@ impl Run<'_, '_> {
         let mut ended = false;
         let mut plan: Vec<ValueId> = Vec::new();
         let mut folds = 0usize;
+        let mut tfx = std::time::Duration::ZERO;
         let mut j = 0;
         while !ended && j < MAX_PAGES {
+            let tf = std::time::Instant::now();
             let fx = if j > 0 {
                 self.page_effects(j - 1)?
             } else {
                 Vec::new()
             };
+            tfx += tf.elapsed();
             // the old page at this start, when what it read is unchanged
             let old = reusable.and_then(|p| {
                 let pick = |idx: usize, ok: &dyn Fn(&crate::planinc::PageRec) -> bool| {
@@ -399,7 +402,7 @@ impl Run<'_, '_> {
         }
         if tm {
             eprintln!(
-                "plan: {} items, {} pages ({folds} folded): list fold {t1:?}, page folds {:?}, sets {:?}",
+                "plan: {} items, {} pages ({folds} folded, pre {pre} suf {suf}): list fold {t1:?}, page folds {:?} (fx {tfx:?}), sets {:?}",
                 items.len(),
                 starts.len(),
                 t2.saturating_sub(t1),
