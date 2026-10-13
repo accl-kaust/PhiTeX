@@ -447,7 +447,9 @@ fn loop_rounds_measure() {
         let mut b = common::build(opts, Some(&prelude), &src);
         let cold = (b.stats.loop_rounds, b.stats.nodes_run);
         let i = src.len() / 2;
-        let i = (i..src.len()).find(|&k| src.as_bytes()[k] == b'e').unwrap_or(i);
+        let i = (i..src.len())
+            .find(|&k| src.as_bytes()[k] == b'e')
+            .unwrap_or(i);
         let mut new = src.clone();
         new.replace_range(i..=i, "a");
         b.edit(&new);
@@ -486,7 +488,10 @@ fn oscillating_written_file() {
     };
     let b = common::build(opts, Some(&prelude), doc);
     let msgs: Vec<String> = b.diagnostics().into_iter().map(|d| d.message).collect();
-    eprintln!("oscillating: {} loop rounds, {msgs:#?}", b.stats.loop_rounds);
+    eprintln!(
+        "oscillating: {} loop rounds, {msgs:#?}",
+        b.stats.loop_rounds
+    );
     assert!(
         msgs.iter()
             .any(|m| m.contains("no fixpoint after 8 rounds") && m.contains("main.aux")),
