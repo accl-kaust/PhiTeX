@@ -31,6 +31,7 @@ use phitex_typeset::pack::{PackParams, Spec};
 use phitex_typeset::page::{InsertClass, Outcome, PageBuilder, PageParams};
 
 use crate::build::Mode;
+use crate::fields::Par;
 use crate::nodes::{self, Side};
 use crate::ops::{Shared, client_only, ops, run_node};
 use crate::run::{R, Run};
@@ -226,11 +227,11 @@ impl Run<'_, '_> {
                 crate::val::glue_value(v, &c.skip),
             ]));
         }
-        let output = self.get("param:output")?;
+        let output = self.par(Par::output)?;
         let any = toks_of(v, output).is_empty();
         let mut start = PageStart::FIRST;
         let mut marks = MarksState::default();
-        let mut published = std::collections::HashSet::new();
+        let mut published = phitex_defuse::FxHashSet::default();
         let mut starts = vec![start.value(v)];
         let mut ended = false;
         let mut plan: Vec<ValueId> = Vec::new();
@@ -341,7 +342,7 @@ impl Run<'_, '_> {
             return Ok(Vec::new());
         }
         let v = self.v;
-        let f = v.field(&format!("pagefx:{j}"));
+        let f = self.keyed(crate::fields::Fam::Pagefx, &j.to_string());
         if !self.cx.is_loopback(f) {
             return Ok(Vec::new());
         }
@@ -406,6 +407,7 @@ impl Run<'_, '_> {
                             &format!("count:{k}"),
                         );
                         self.over.insert(cf, c);
+                        self.slot_note(cf, None);
                     }
                 }
             }
@@ -483,7 +485,7 @@ impl Run<'_, '_> {
             self.set(&format!("box:{n}"), v.list(vec![v.int(0), b]), true);
         }
         self.set("param:outputpenalty", v.int(output_penalty), true);
-        let output = self.get("param:output")?;
+        let output = self.par(Par::output)?;
         let otoks = toks_of(v, output);
         if otoks.is_empty() {
             // §1023: the default output routine
@@ -542,7 +544,10 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
     if !left.is_empty() {
         let j = r.page_index();
         if j < MAX_PAGES {
-            r.cx.publish(v.field(&format!("pagefx:{j}")), v.list(left));
+            r.cx.publish(
+                r.keyed(crate::fields::Fam::Pagefx, &j.to_string()),
+                v.list(left),
+            );
         }
     }
     r.set("deadcycles", v.int(0), true);
@@ -554,10 +559,10 @@ impl Run<'_, '_> {
     /// (`T_PAGE_PARAMS`).
     pub(crate) fn page_params_marker(&mut self) -> R<ValueId> {
         let v = self.v;
-        let vsize = self.param("vsize")?;
-        let maxdepth = self.param("maxdepth")?;
-        let topskip = self.glue_param("topskip")?;
-        let holding = self.param("holdinginserts")?;
+        let vsize = self.ipar(Par::vsize)?;
+        let maxdepth = self.ipar(Par::maxdepth)?;
+        let topskip = self.gpar(Par::topskip)?;
+        let holding = self.ipar(Par::holdinginserts)?;
         Ok(v.list(vec![
             v.int(nodes::T_PAGE_PARAMS),
             v.int(i64::from(vsize)),
@@ -1003,7 +1008,7 @@ fn dvi_page(v: &Values, w: &mut phitex_dvi::DviWriter, page: ValueId) {
     {
         counts[k] = i32::try_from(int_of(v, *c)).unwrap_or(0);
     }
-    let mut defs = std::collections::HashMap::new();
+    let mut defs = phitex_defuse::FxHashMap::default();
     for fx in xs.get(2).map(|&l| list_of(v, l)).unwrap_or_default() {
         let ys = list_of(v, fx);
         let id = u32::try_from(ys.first().map_or(0, |&y| int_of(v, y))).unwrap_or(0);

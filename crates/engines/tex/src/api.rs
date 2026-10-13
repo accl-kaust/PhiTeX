@@ -7,7 +7,7 @@
 //! document, one for a whole format. Files a run reads come in place
 //! from the environment provider (`Graph::provide`).
 
-use std::collections::HashMap;
+use phitex_defuse::FxHashMap;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
@@ -212,7 +212,7 @@ fn declare_marks_before(eng: &mut Engine, n: NodeId) {
 }
 
 /// Edited texts of `\\input` files by name: the text and its bytes.
-type Overrides = Arc<Mutex<HashMap<String, (String, Vec<u8>)>>>;
+type Overrides = Arc<Mutex<FxHashMap<String, (String, Vec<u8>)>>>;
 
 /// Edits the document's nodes `nodes` to the text `text`: the slices
 /// both texts share at the start and the end stay, those between are
@@ -403,9 +403,9 @@ struct Cached {
 
 /// Prelude environments by the hash of the prelude's text; each is good
 /// while the files it read are unchanged.
-fn env_cache() -> &'static Mutex<HashMap<u64, Vec<Arc<Cached>>>> {
-    static C: OnceLock<Mutex<HashMap<u64, Vec<Arc<Cached>>>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+fn env_cache() -> &'static Mutex<FxHashMap<u64, Vec<Arc<Cached>>>> {
+    static C: OnceLock<Mutex<FxHashMap<u64, Vec<Arc<Cached>>>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// The hash of a file as the finder gives it.
@@ -1792,7 +1792,7 @@ fn harvest_inputs(
     finder: &Finder,
     defs: &mut pass::Definitions,
     order: &mut Vec<u32>,
-    seen: &mut std::collections::HashSet<String>,
+    seen: &mut phitex_defuse::FxHashSet<String>,
     next_id: &mut u32,
 ) {
     if depth >= 8 {
@@ -1817,8 +1817,8 @@ fn harvest_inputs(
 }
 
 fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
-    static C: OnceLock<Mutex<HashMap<[u8; 32], Defs>>> = OnceLock::new();
-    let cache = C.get_or_init(|| Mutex::new(HashMap::new()));
+    static C: OnceLock<Mutex<FxHashMap<[u8; 32], Defs>>> = OnceLock::new();
+    let cache = C.get_or_init(|| Mutex::new(FxHashMap::default()));
     if let Some(d) = cache
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1834,7 +1834,7 @@ fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
         order.push(0);
         // (the files the prelude reads, transitively: `\\input tex.ini`
         // reads plain.tex; depth 8, each file once)
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = phitex_defuse::FxHashSet::default();
         let mut next_id = 1_000_000u32;
         harvest_inputs(p, 0, finder, &mut defs, &mut order, &mut seen, &mut next_id);
     }
@@ -1955,7 +1955,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         }
         let v = g.eng.values();
         let defs_f = v.field("defs");
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = phitex_defuse::FxHashSet::default();
         if let Some(d) = g.eng.acc_value(unit, defs_f) {
             for l in v.seq_to_vec(d) {
                 for n in list_of(v, l) {
@@ -2208,7 +2208,7 @@ impl Build {
 
     fn settle(&mut self) {
         // the text nodes' offsets in the document, for the progress
-        let mut offsets = std::collections::HashMap::new();
+        let mut offsets = FxHashMap::default();
         let mut off = 0u64;
         for (k, n) in &self.nodes {
             offsets.insert(n.raw(), off);
@@ -2587,7 +2587,7 @@ impl Build {
             doc.push_str(piece);
         }
         // every node under a node of the text, to that node
-        let mut top: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+        let mut top: phitex_defuse::FxHashMap<u64, usize> = phitex_defuse::FxHashMap::default();
         for (i, (_, n)) in self.nodes.iter().enumerate() {
             let mut stack = vec![*n];
             while let Some(x) = stack.pop() {

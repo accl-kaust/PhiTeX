@@ -591,8 +591,8 @@ pub(crate) fn end_match() -> Tok {
 }
 pub(crate) const OUT_PARAM_CAT: u8 = 5;
 
-fn prim_index() -> &'static std::collections::HashMap<&'static str, (u8, i32)> {
-    static M: OnceLock<std::collections::HashMap<&'static str, (u8, i32)>> = OnceLock::new();
+fn prim_index() -> &'static phitex_defuse::FxHashMap<&'static str, (u8, i32)> {
+    static M: OnceLock<phitex_defuse::FxHashMap<&'static str, (u8, i32)>> = OnceLock::new();
     M.get_or_init(|| {
         crate::etex::all_prims()
             .map(|&(n, c, h)| (n, (c, h)))
@@ -600,8 +600,8 @@ fn prim_index() -> &'static std::collections::HashMap<&'static str, (u8, i32)> {
     })
 }
 
-fn prim_names() -> &'static std::collections::HashMap<(u8, i32), &'static str> {
-    static M: OnceLock<std::collections::HashMap<(u8, i32), &'static str>> = OnceLock::new();
+fn prim_names() -> &'static phitex_defuse::FxHashMap<(u8, i32), &'static str> {
+    static M: OnceLock<phitex_defuse::FxHashMap<(u8, i32), &'static str>> = OnceLock::new();
     M.get_or_init(|| {
         crate::etex::all_prims()
             .map(|&(n, c, h)| ((c, h), n))

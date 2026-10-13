@@ -1,0 +1,60 @@
+--------------------------------------------------------------------------------
+Profile data file '/tmp/mohaam0e-8656/results/cg.out' (creator: callgrind-3.25.1)
+--------------------------------------------------------------------------------
+I1 cache: 
+D1 cache: 
+LL cache: 
+Timerange: Basic block 0 - 32228237178
+Trigger: Program termination
+Profiled target:  target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22 latex_hello --ignored --nocapture --test-threads=1 (PID 356, part 1)
+Events recorded:  Ir
+Events shown:     Ir
+Event sort order: Ir
+Thresholds:       99
+Include dirs:     
+User annotated:   
+Auto-annotation:  on
+
+--------------------------------------------------------------------------------
+Ir                       
+--------------------------------------------------------------------------------
+134,015,292,216 (100.0%)  PROGRAM TOTALS
+
+--------------------------------------------------------------------------------
+Ir                        file:function
+--------------------------------------------------------------------------------
+134,014,289,995 (100.0%)  ???:0x0000000000097d00 [/usr/lib/libc.so.6]
+134,014,289,306 (100.0%)  /rustc/1a98b1e135b254f209c67d447b6d8bcd56a859e0/library/std/src/sys/thread/unix.rs:<std::sys::thread::unix::Thread>::new::thread_start [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,014,286,467 (100.0%)  /rustc/1a98b1e135b254f209c67d447b6d8bcd56a859e0/library/alloc/src/boxed.rs:<std::sys::thread::unix::Thread>::new::thread_start
+134,014,286,465 (100.0%)  /rustc/1a98b1e135b254f209c67d447b6d8bcd56a859e0/library/core/src/ops/function.rs:<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,014,286,452 (100.0%)  /rustc/1a98b1e135b254f209c67d447b6d8bcd56a859e0/library/std/src/thread/lifecycle.rs:<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+134,014,286,130 (100.0%)  /rustc/1a98b1e135b254f209c67d447b6d8bcd56a859e0/library/std/src/sys/backtrace.rs:std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,014,286,044 (100.0%)  /rustc/1a98b1e135b254f209c67d447b6d8bcd56a859e0/library/test/src/lib.rs:std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()>
+134,014,286,043 (100.0%)  /rustc/1a98b1e135b254f209c67d447b6d8bcd56a859e0/library/test/src/lib.rs:test::run_test::{closure#0} [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,014,285,784 (100.0%)  /rustc/1a98b1e135b254f209c67d447b6d8bcd56a859e0/library/test/src/types.rs:test::run_test::{closure#0}
+134,014,285,778 (100.0%)  /rustc/1a98b1e135b254f209c67d447b6d8bcd56a859e0/library/test/src/lib.rs:test::__rust_begin_short_backtrace::<core::result::Result<(), alloc::string::String>, fn() -> core::result::Result<(), alloc::string::String>> [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,014,285,773 (100.0%)  /rustc/1a98b1e135b254f209c67d447b6d8bcd56a859e0/library/core/src/ops/function.rs:test::__rust_begin_short_backtrace::<core::result::Result<(), alloc::string::String>, fn() -> core::result::Result<(), alloc::string::String>>
+134,014,285,772 (100.0%)  /rustc/1a98b1e135b254f209c67d447b6d8bcd56a859e0/library/core/src/ops/function.rs:<latex::latex_hello::{closure#0} as core::ops::function::FnOnce<()>>::call_once [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,014,285,766 (100.0%)  crates/engines/tex/tests/latex.rs:<latex::latex_hello::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+134,014,285,763 (100.0%)  crates/engines/tex/tests/latex.rs:latex::hello [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,014,274,506 (100.0%)  crates/engines/tex/tests/common/mod.rs:latex::hello
+134,014,274,503 (100.0%)  /tmp/mohaam0e-8656/phitex/crates/engines/tex/src/api.rs:<phitex_tex::api::Build>::with
+134,014,274,471 (100.0%)  crates/engines/tex/src/api.rs:<phitex_tex::api::Build>::with [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,014,274,452 (100.0%)  crates/engines/tex/src/api.rs:phitex_tex::api::prelude_env [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,000,774,157 (99.99%)  crates/engines/tex/src/api.rs:<phitex_tex::api::Graph>::settle [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,000,772,795 (99.99%)  /tmp/mohaam0e-8656/phitex/crates/vendor/defuse/src/engine.rs:<defuse::engine::Engine>::evaluate_absorbing
+134,000,772,748 (99.99%)  crates/vendor/defuse/src/engine.rs:<defuse::engine::Engine>::evaluate_absorbing [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,000,772,654 (99.99%)  crates/vendor/defuse/src/engine.rs:<defuse::engine::Engine>::rounds [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,000,769,739 (99.99%)  /tmp/mohaam0e-8656/phitex/crates/engines/tex/src/exec.rs:<phitex_tex::exec::Threads as defuse::sched::Executor>::execute
+134,000,767,779 (99.99%)  crates/engines/tex/src/exec.rs:<phitex_tex::exec::Threads as defuse::sched::Executor>::execute [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,000,767,555 (99.99%)  crates/engines/tex/src/exec.rs:<phitex_tex::exec::Threads>::job::<defuse::engine::RunResult, <phitex_tex::exec::Threads as defuse::sched::Executor>::execute::{closure#0}::{closure#0}> [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,000,767,128 (99.99%)  /tmp/mohaam0e-8656/phitex/crates/vendor/defuse/src/engine.rs:<defuse::engine::Engine>::drain::{closure#2}
+134,000,766,906 (99.99%)  crates/vendor/defuse/src/engine.rs:<defuse::engine::Engine>::drain::{closure#2} [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,000,766,417 (99.99%)  /tmp/mohaam0e-8656/phitex/crates/engines/tex/src/ops.rs:<phitex_tex::ops::Exec as defuse::engine::Operation>::run
+134,000,760,450 (99.99%)  crates/engines/tex/src/ops.rs:<phitex_tex::ops::Exec as defuse::engine::Operation>::run [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+134,000,759,758 (99.99%)  /tmp/mohaam0e-8656/phitex/crates/engines/tex/src/run.rs:<phitex_tex::run::Run>::run_all
+133,609,284,786 (99.70%)  crates/engines/tex/src/control.rs:<phitex_tex::run::Run>::run_all
+105,560,637,975 (78.77%)  /tmp/mohaam0e-8656/phitex/crates/engines/tex/src/expand.rs:<phitex_tex::run::Run>::expand
+ 83,926,255,415 (62.62%)  /tmp/mohaam0e-8656/phitex/crates/engines/tex/src/expand.rs:<phitex_tex::run::Run>::expand'2
+ 73,072,872,621 (54.53%)  crates/engines/tex/src/run.rs:<phitex_tex::run::Run>::get_next [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]
+ 62,761,597,028 (46.83%)  crates/engines/tex/src/expand.rs:<phitex_tex::run::Run>::expand [/tmp/mohaam0e-8656/phitex/target/profiling/build/phitex-tex/b27fdd20d496ef22/out/latex-b27fdd20d496ef22]

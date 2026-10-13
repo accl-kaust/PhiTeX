@@ -20,6 +20,7 @@ use phitex_typeset::glue::{Glue, Order};
 
 use crate::build::Mode;
 use crate::expand::str_toks;
+use crate::fields::Par;
 use crate::nodes;
 use crate::run::{Frame, Halt, R, Run, Src};
 use crate::scan::IVal;
@@ -837,7 +838,7 @@ fn pseudo_start(r: &mut Run<'_, '_>) -> R<()> {
     let (_, body) = r.scan_toks(false, false)?;
     let mut s = String::new();
     r.show_toks_into(&mut s, &body)?;
-    let nl = r.int("param:newlinechar")?;
+    let nl = i64::from(r.ipar(Par::newlinechar)?);
     let mut lines: Vec<Vec<u32>> = Vec::new();
     let mut cur: Vec<u32> = Vec::new();
     let mut ended = true;
@@ -881,7 +882,7 @@ pub(crate) fn end_of_file(r: &mut Run<'_, '_>, marker: &str) -> R<()> {
     let base = marker.trim_end_matches(['S', 'F']);
     let pseudo = base == EOF_PSEUDO;
     if marker == base {
-        let ev = r.get("param:everyeof")?;
+        let ev = r.par(Par::everyeof)?;
         let toks = toks_of(r.v, ev);
         if !toks.is_empty() {
             r.frames
@@ -924,24 +925,14 @@ fn read_line(r: &mut Run<'_, '_>, global: bool) -> R<()> {
         r.log("error", "Missing `to' inserted")?;
     }
     let p = get_r_token(r)?;
-    let v = r.v;
     let m = if (0..=15).contains(&n) { n } else { 16 };
     let field = format!("read:{m}");
     let st = r.get(&field)?.filter(|&x| x != ValueId::UNIT);
     let mut body = Vec::new();
     if let Some(st) = st {
-        let xs = list_of(v, st);
-        let lines = xs.get(1).map(|&l| list_of(v, l)).unwrap_or_default();
         // §486: at the file's end, an empty line, and the stream closes
-        let text = if let Some((&l, rest)) = lines.split_first() {
-            let next = v.list(vec![v.int(2), v.list(rest.to_vec())]);
-            r.set(&field, next, true);
-            crate::val::str_of(v, l)
-        } else {
-            r.set(&field, ValueId::UNIT, true);
-            String::new()
-        };
-        let e = r.int("param:endlinechar")?;
+        let text = r.next_read_line(&field, st).unwrap_or_default();
+        let e = i64::from(r.ipar(Par::endlinechar)?);
         if let Frame::Src(s) = crate::run::src_frame(&text, e) {
             for c in s.buf {
                 body.push(if c == 32 {
@@ -1195,7 +1186,7 @@ pub(crate) fn mark_read(r: &mut Run<'_, '_>, kind: &str, n: i32) -> R<Option<Val
         // display): it asks the client to declare its loop-back
         // (`marksdecl:<node>`, answered by `api::Graph::settle`) and
         // waits; never seen inside a run already declared
-        r.cx.use_env(v.field(&format!("marksdecl:{node}")))?;
+        r.cx.use_env(r.keyed(crate::fields::Fam::Marksdecl, &node.to_string()))?;
         if !r.cx.is_loopback(f) {
             return r.get(&mark_field(kind, n));
         }
@@ -1361,7 +1352,7 @@ impl Run<'_, '_> {
 /// `\showgroups`, `\showtokens`, `\showifs` (pdfTeX §1293, §1702–§1708):
 /// shown in the log.
 pub(crate) fn show(r: &mut Run<'_, '_>) -> R<()> {
-    let esc = r.int("param:escapechar")?;
+    let esc = i64::from(r.ipar(Par::escapechar)?);
     let mut s = String::new();
     match r.cur.chr {
         5 => {
