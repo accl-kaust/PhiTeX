@@ -727,6 +727,10 @@ pub(crate) fn slices(text: &str, defs: &Defs) -> Vec<(usize, usize)> {
 /// What the evaluations of one build or edit did.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
+    /// Page-step runs that reached their finish in this evaluation, by
+    /// page index (the attempts that stopped or were cut off are not
+    /// counted).
+    pub page_steps_completed: Vec<u64>,
     /// The engine's counters, summed over the evaluations.
     pub nodes_run: u64,
     pub runs: u64,
@@ -1002,6 +1006,20 @@ struct Graph {
     provided: Arc<std::sync::Mutex<Vec<Provided>>>,
 }
 
+impl Graph {
+    /// The page-step runs that reached their finish since the last call,
+    /// by page index ([`Stats::page_steps_completed`]).
+    fn take_steps_done(&self) -> Vec<u64> {
+        std::mem::take(
+            &mut *self
+                .ops
+                .steps_done
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
+}
+
 /// A file the environment provider answered: name, field, the value
 /// (`None`: absent), and the finder's hash.
 type Provided = (String, Field, Option<ValueId>, u64);
@@ -1051,6 +1069,7 @@ impl Graph {
             brk,
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
+            steps_done: Arc::new(Mutex::new(Vec::new())),
         };
         let _ = shared.set(ops.clone());
         for f in [
@@ -2088,6 +2107,7 @@ impl Build {
         }
         self.g.watch.offsets = Arc::new(offsets);
         let mut stats = Stats::default();
+        self.g.take_steps_done();
         self.g.queries.clear();
         let mut absorb = Absorb {
             edits: &self.edits,
@@ -2109,6 +2129,7 @@ impl Build {
             &mut absorb,
         );
         stats.live = self.g.eng.live_nodes();
+        stats.page_steps_completed = self.g.take_steps_done();
         self.stats = stats;
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             let (nodes, units, values) = self.sizes();
@@ -2892,7 +2913,11 @@ fn page_guesses(g: &mut Graph, env: &Env) {
     for j in 0..crate::page::MAX_PAGES {
         let d = i64::try_from(j).unwrap_or(0) + 1;
         let mut cs: Vec<ValueId> = base.iter().map(|&c| v.int(c)).collect();
-        cs[0] = v.int(if base[0] >= 0 { base[0] + d } else { base[0] - d });
+        cs[0] = v.int(if base[0] >= 0 {
+            base[0] + d
+        } else {
+            base[0] - d
+        });
         decl.push((v.field(&format!("pgdef:{j}")), v.list(cs)));
     }
     for (f, x) in decl {

@@ -51,6 +51,9 @@ pub(crate) struct Ops {
     /// (set by `api::Build::with`; none while a format is built): a
     /// document file `\input` is sliced with them ([`Run::leftover`]).
     pub defs: std::sync::Arc<std::sync::Mutex<crate::hints::Defs>>,
+    /// Page-step runs that reached their finish, by page index (not
+    /// the attempts that stopped or were cut off): [`crate::Stats`].
+    pub steps_done: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
 }
 
 /// A level of the input stack.

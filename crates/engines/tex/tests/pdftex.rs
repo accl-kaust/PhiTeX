@@ -250,21 +250,36 @@ fn pdf_state_cutoff() {
     };
     let run = |to: &str| {
         let mut b = common::build(opts(), Some(&prelude), &src);
+        let before = b.output().0;
         let text = src.replacen("A\\a\\par", to, 1);
         assert_ne!(text, src);
         b.edit(&text);
         let cold = common::build(opts(), Some(&prelude), &text);
+        let after = b.output().0;
         assert_eq!(
-            common::first_difference(&b.output().0, &cold.output().0),
+            common::first_difference(&after, &cold.output().0),
             None,
             "{to}: edit differs from cold"
         );
-        (b.stats.nodes_run, b.stats.cutoffs)
+        let page2 = b.stats.page_steps_completed.get(1).copied().unwrap_or(0);
+        (after == before, page2)
     };
-    let (same, same_cut) = run("A\\kern0pt\\a\\par");
-    let (changed, _) = run("Z\\a\\par");
-    eprintln!("same state: {same} nodes run, {same_cut} cutoffs; changed: {changed} nodes run");
-    assert!(same < changed, "no cutoff: {same} >= {changed}");
+    // the same PDF state after page 1: page 2's step is cut off (it may
+    // start on its prediction, but never runs to its finish)
+    let (same_pdf, same_page2) = run("A\\kern0pt\\a\\par");
+    // a different page 1: page 2's step runs again
+    let (changed_pdf, changed_page2) = run("Z\\a\\par");
+    eprintln!("same state: page 2 completed {same_page2}; changed: {changed_page2}");
+    assert!(same_pdf, "\\kern0pt changed the PDF");
+    assert_eq!(
+        same_page2, 0,
+        "page 2 ran to its finish though page 1 left the same state"
+    );
+    assert!(!changed_pdf, "Z left the PDF unchanged");
+    assert!(
+        changed_page2 >= 1,
+        "page 2 did not run again after page 1 changed"
+    );
 }
 
 /// The executor's counters on plain documents (story.tex, pages.tex)
