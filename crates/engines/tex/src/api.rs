@@ -1144,6 +1144,7 @@ impl Graph {
 type Provided = (String, Field, Option<ValueId>, u64);
 
 impl Graph {
+    #[allow(clippy::too_many_lines)]
     fn new(time: Option<std::time::Duration>, threads: Option<usize>) -> Graph {
         let mut eng = Engine::new();
         eng.set_limits(phitex_defuse::Limits {

@@ -88,18 +88,14 @@ fn tab_glue(g: Glue) -> Node {
 impl Run<'_, '_> {
     // ---------------------------------------------------- align_state
 
-    fn align_open(&mut self) -> R<bool> {
-        Ok(self.aopen > 0)
+    fn align_open(&self) -> bool {
+        self.aopen > 0
     }
 
-    fn astate(&mut self) -> R<i64> {
-        if let Some(s) = self.astate {
-            return Ok(s);
-        }
-        // (run-local: a node begins outside every alignment, §324)
-        let s = 1_000_000;
-        self.astate = Some(s);
-        Ok(s)
+    /// `align_state` (§309): run-local, a node begins outside every
+    /// alignment (§324).
+    fn astate(&self) -> i64 {
+        self.astate.unwrap_or(1_000_000)
     }
 
     pub(crate) fn set_astate(&mut self, s: i64) {
@@ -108,7 +104,7 @@ impl Run<'_, '_> {
 
     /// The end of a u template (§324): `align_state` becomes 0.
     pub(crate) fn align_u_end(&mut self) -> R<()> {
-        if self.align_open()? && self.astate()? > 500_000 {
+        if self.align_open() && self.astate() > 500_000 {
             self.set_astate(0);
         }
         Ok(())
@@ -122,10 +118,10 @@ impl Run<'_, '_> {
         let brace =
             !self.cur.tok.is_cs_or_active() && (c == cmd::LEFT_BRACE || c == cmd::RIGHT_BRACE);
         let tab = c == cmd::TAB_MARK || c == cmd::CAR_RET;
-        if !(brace || tab) || !self.align_open()? {
+        if !(brace || tab) || !self.align_open() {
             return Ok(false);
         }
-        let s = self.astate()?;
+        let s = self.astate();
         if brace {
             self.set_astate(if c == cmd::LEFT_BRACE { s + 1 } else { s - 1 });
             return Ok(false);
@@ -181,8 +177,8 @@ impl Run<'_, '_> {
     /// `init_align` (§774–§784) in vertical mode.
     pub(crate) fn init_align(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
-        let saved = if self.align_open()? {
-            self.astate()?
+        let saved = if self.align_open() {
+            self.astate()
         } else {
             1_000_000
         };
@@ -225,7 +221,7 @@ impl Run<'_, '_> {
                 if c == cmd::MAC_PARAM {
                     break;
                 }
-                if (c == cmd::TAB_MARK || c == cmd::CAR_RET) && self.astate()? == -1_000_000 {
+                if (c == cmd::TAB_MARK || c == cmd::CAR_RET) && self.astate() == -1_000_000 {
                     if u.is_empty() && pre.looping < 0 && c == cmd::TAB_MARK {
                         pre.looping = i64::try_from(pre.cols.len()).unwrap_or(0);
                     } else {
@@ -242,7 +238,7 @@ impl Run<'_, '_> {
             loop {
                 self.get_preamble_token(&mut tab)?;
                 let c = self.cur.cmd;
-                if (c == cmd::TAB_MARK || c == cmd::CAR_RET) && self.astate()? == -1_000_000 {
+                if (c == cmd::TAB_MARK || c == cmd::CAR_RET) && self.astate() == -1_000_000 {
                     break;
                 }
                 if c == cmd::MAC_PARAM {

@@ -1858,10 +1858,11 @@ impl Analysis<'_> {
         }
         // (a font selected inside a brace group, not `\\global`ly, is
         // the group's: no `font` definition reaches the engine)
-        if self.inner.get(a).copied().unwrap_or(false) && !self.after_global(a) {
-            if let Some(st) = &mut b.state {
-                st.retain(|h| h != "font");
-            }
+        if self.inner.get(a).copied().unwrap_or(false)
+            && !self.after_global(a)
+            && let Some(st) = &mut b.state
+        {
+            st.retain(|h| h != "curfont");
         }
         b.no_scope = ok && self.no_scope(a);
         if ok {
@@ -2056,7 +2057,7 @@ impl Analysis<'_> {
     /// §1100, §789); an alias is its target's class.
     fn defined_state(&self, name: &str, may_start_par: bool, st: &mut Option<Vec<String>>) {
         match self.shape(name) {
-            Some(pass::Shape::Quantity('f')) => add_head(st, "font"),
+            Some(pass::Shape::Quantity('f')) => add_head(st, "curfont"),
             // (a register's name assigns that register, §1224: its own
             // family; the value is scanned with expansion, §498, and
             // `\\afterassignment`'s token runs, §1269; never a parameter)
