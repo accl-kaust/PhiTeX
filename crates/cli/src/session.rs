@@ -619,6 +619,16 @@ impl Session {
             self.absorbed_at = Some(came);
             self.text.clone_from(&text);
         }
+        // (a long session: what the old texts' runs memoized and nothing
+        // reaches any more goes, so the tables stay bounded)
+        let mut gc = (Duration::ZERO, 0);
+        if std::env::var_os("PHITEX_NO_GC").is_none()
+            && let Some(b) = &mut self.build
+        {
+            let t = Instant::now();
+            gc.1 = b.collect_garbage();
+            gc.0 = t.elapsed();
+        }
         self.status.set("output");
         let b = self.build.as_ref().expect("built above");
         let (bytes, log) = b.output();
@@ -697,6 +707,23 @@ impl Session {
                 "{} nodes run of {} live, {} runs, {} cutoffs, {} loop rounds",
                 s.nodes_run, s.live, s.runs, s.cutoffs, s.loop_rounds
             ))
+            .chain(std::iter::once({
+                let (nodes, units, values) = b.sizes();
+                // (the process's resident set, Linux only: VmRSS in kB)
+                let rss = std::fs::read_to_string("/proc/self/status")
+                    .ok()
+                    .and_then(|t| {
+                        t.lines()
+                            .find_map(|l| l.strip_prefix("VmRSS:"))
+                            .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+                    })
+                    .unwrap_or(0);
+                format!(
+                    "engine tables: {nodes} nodes, {units} units, {values} values, {rss} kB resident, {} us collecting ({} nodes freed)",
+                    gc.0.as_micros(),
+                    gc.1
+                )
+            }))
             .chain(
                 b.pdf_exact_reason()
                     .map(|r| format!("PDF objects numbered as pdfTeX's: {r}")),
