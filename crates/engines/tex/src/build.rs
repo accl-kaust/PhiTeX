@@ -235,14 +235,38 @@ impl Run<'_, '_> {
     }
 
     /// The contents of list `lid` so far, and how many of them are
-    /// still contributions (after the last `build_page`).
-    // REDUCE-GAP: acc_range anchors only at a node id the run holds;
-    // a list's opener is known as a value, so its readers fold from the
-    // unit's start and keep their list's items.
+    /// still contributions (after the last `build_page`): the items its
+    /// opener appended, then the contributions after the opener (the main
+    /// list, opened by no node: from the unit's start).
     pub(crate) fn list_items(&mut self, lid: i64) -> R<(Vec<ValueId>, usize)> {
         let v = self.v;
         let f = v.field("items");
-        let all = self.cx.acc_range(f, None)?;
+        let opener = if lid == 0 {
+            None
+        } else if self.minted.borrow().contains(&lid) {
+            // this run opened it: its own contributions hold the list
+            Some(None)
+        } else {
+            self.get(&format!("lopen:{lid}"))?.map(|o| {
+                let xs = list_of(v, o);
+                let raw = u64::from_ne_bytes(crate::val::int_at(v, o, 0).to_ne_bytes());
+                Some((raw, xs.get(1).copied().unwrap_or(ValueId::UNIT)))
+            })
+        };
+        let all = match opener {
+            Some(None) => ValueId::NIL,
+            Some(Some((raw, first))) => {
+                let after = self
+                    .cx
+                    .acc_range(f, Some(phitex_defuse::NodeId::from_raw(raw)))?;
+                let mut head = ValueId::NIL;
+                for e in list_of(v, first) {
+                    head = v.seq_concat(head, v.seq_unit(e));
+                }
+                v.seq_concat(head, after)
+            }
+            None => self.cx.acc_range(f, None)?,
+        };
         let mut out: Vec<ValueId> = Vec::new();
         let mut since_bp = 0usize;
         let own: Vec<ValueId> = self
