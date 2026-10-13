@@ -120,6 +120,8 @@ export function problemHtml(p: Problem): string {
 
 /** A problem as diagnostics.ts's Diagnostic, the whole problem kept for the drawer to show. */
 export function asDiagnostic(p: Problem): { severity: "error" | "warning" | "info"; code: string; message: string; file?: string; line?: number; problem: Problem } {
+  // (from the wire: what a sender left out, empty, so one short item never stops the view)
+  p = Object.assign({ notes: [], help: [], suggestions: [], file: null, line: null, col: null, excerpt: null, context: [], included: [], box: null }, p);
   const severity = p.severity === "fatal" || p.severity === "error" ? "error" : p.severity === "warning" ? "warning" : "info";
   return { severity, code: p.code, message: p.message, file: p.file ?? undefined, line: p.line ?? undefined, problem: p };
 }
