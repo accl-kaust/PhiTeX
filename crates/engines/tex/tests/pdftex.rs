@@ -231,10 +231,9 @@ fn pdf_edits() {
     assert!(failed.is_empty(), "edits differing from cold: {failed:?}");
 }
 
-/// The fold's key is the state: an edit whose page writes the same
-/// state (a zero kern on page 1) leaves `pdf:state` equal, so the steps
-/// after it (page 2's `\pdfpageref`s and shipout) are cut off; an edit
-/// that changes the page runs them.
+/// Page steps read nothing another page step made: an edit on page 1,
+/// whether it leaves page 1's PDF the same (a zero kern) or not, never
+/// runs page 2's step again, and the PDF equals a cold build.
 #[test]
 fn pdf_state_cutoff() {
     let dir = common::fixtures().join("pdf");
@@ -267,7 +266,8 @@ fn pdf_state_cutoff() {
     // the same PDF state after page 1: page 2's step is cut off (it may
     // start on its prediction, but never runs to its finish)
     let (same_pdf, same_page2) = run("A\\kern0pt\\a\\par");
-    // a different page 1: page 2's step runs again
+    // a different page 1: page 2's step does not run again either (it
+    // reads nothing page 1's step made; the finish places the pages)
     let (changed_pdf, changed_page2) = run("Z\\a\\par");
     eprintln!("same state: page 2 completed {same_page2}; changed: {changed_page2}");
     assert!(same_pdf, "\\kern0pt changed the PDF");
@@ -276,9 +276,9 @@ fn pdf_state_cutoff() {
         "page 2 ran to its finish though page 1 left the same state"
     );
     assert!(!changed_pdf, "Z left the PDF unchanged");
-    assert!(
-        changed_page2 >= 1,
-        "page 2 did not run again after page 1 changed"
+    assert_eq!(
+        changed_page2, 0,
+        "page 2 ran again though only page 1 changed"
     );
 }
 

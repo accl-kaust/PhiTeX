@@ -502,8 +502,7 @@ fn oscillating_written_file() {
 /// A one-word edit on a generated plain document of 40 paragraphs:
 /// the edited region, its page's `brk`, the page step and the writer
 /// re-run (the plan too: it folds the list), no loop round, and the PDF
-/// equals a cold build of the edited text. (On the last page: the
-/// pages after an edit re-run while `pdf:state` chains them.)
+/// equals a cold build of the edited text.
 #[test]
 fn one_word_edit_reruns_little() {
     let fx = common::fixtures().join("dvi");
@@ -532,4 +531,88 @@ fn one_word_edit_reruns_little() {
     assert!(d.is_none(), "edit differs from cold: {d:?}");
     assert!(rounds <= 1, "{rounds} loop rounds");
     assert!(runs <= 5, "{runs} nodes run");
+}
+
+/// An edit on page 1 of 400 plain paragraphs in PDF mode re-runs that
+/// page's step only: no page step reads another's writer state, so the
+/// later pages' steps are not run again; the PDF equals a cold build.
+#[test]
+fn pdf_edit_reruns_one_page_step() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from("\\pdfoutput=1 \\hsize=6in \\vsize=8.5in \\parindent=20pt\n");
+    for k in 0..400 {
+        let _ = writeln!(
+            src,
+            "Paragraph {k} has some words in it, enough to fill a few lines of text set \
+             with plain's macros, so that the paragraph builder has work to do and the \
+             pages fill up one after another.\n"
+        );
+    }
+    src.push_str("\\bye\n");
+    let prelude = common::plain();
+    let opts = || common::options("./p400.tex", "p400", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    assert!(b.is_pdf());
+    let text = src.replacen(
+        "Paragraph 3 has some words",
+        "Paragraph 3 has some wordz",
+        1,
+    );
+    b.edit(&text);
+    let steps: u64 = b.stats.page_steps_completed.iter().sum();
+    eprintln!(
+        "p400 edit: {steps} page steps, {} nodes run, {} loop rounds, {} pages",
+        b.stats.nodes_run,
+        b.stats.loop_rounds,
+        b.pages().len()
+    );
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "edit differs from cold: {d:?}");
+    assert!(steps <= 1, "{steps} page steps re-run");
+}
+
+/// A measure: 400 and 4000 plain paragraphs with `\pdfoutput=1`, cold
+/// and after a one-word edit on page 1 (page steps re-run, wall).
+#[test]
+#[ignore = "a measure: exact PDF edits on long documents"]
+fn pdf_para_edit_measure() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    for n in [400, 4000] {
+        let mut src = String::from("\\pdfoutput=1 \\hsize=6in \\vsize=8.5in \\parindent=20pt\n");
+        for k in 0..n {
+            let _ = writeln!(
+                src,
+                "Paragraph {k} has some words in it, enough to fill a few lines of text set \
+                 with plain's macros, so that the paragraph builder has work to do and the \
+                 pages fill up one after another.\n"
+            );
+        }
+        src.push_str("\\bye\n");
+        let prelude = common::plain();
+        let opts = || phitex_tex::Options {
+            threads: Some(1),
+            ..common::options("./pm.tex", "pm", "", &fx)
+        };
+        let t = std::time::Instant::now();
+        let mut b = common::build(opts(), Some(&prelude), &src);
+        let cold = t.elapsed();
+        let text = src.replacen(
+            "Paragraph 3 has some words",
+            "Paragraph 3 has some wordz",
+            1,
+        );
+        let t = std::time::Instant::now();
+        b.edit(&text);
+        let edit = t.elapsed();
+        let steps: u64 = b.stats.page_steps_completed.iter().sum();
+        eprintln!(
+            "pdf para{n}: {} pages, cold {cold:?} (critical path {:?}), edit {edit:?}: {steps} page steps, {} nodes run",
+            b.pages().len(),
+            b.stats.critical_path,
+            b.stats.nodes_run
+        );
+    }
 }

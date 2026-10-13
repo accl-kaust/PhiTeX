@@ -165,7 +165,10 @@ pub(crate) struct Src {
     pub loc: usize,
     /// 0 `mid_line`, 1 `skip_blanks`, 2 `new_line` (§303).
     pub state: u8,
-    /// -2 until the segment is reached (`\endlinechar` not yet applied).
+    /// -2 until the segment is reached; then `\endlinechar` as read when
+    /// it was reached (§360), appended to `buf` when it is a character
+    /// (-3: reached without its line's end, which a pulled sibling
+    /// brings, [`Run::pull`]).
     pub endch: i64,
     /// Whether the segment begins a line (it is counted), and whether it
     /// ends one (`\endlinechar` goes after it).
@@ -295,7 +298,7 @@ pub(crate) struct Run<'c, 'a> {
     /// `end_graf`, §1096): at 100 the job stops (§82).
     pub error_count: u32,
     /// Whether the job stopped at 100 errors.
-    pub too_many_errors: bool,
+    pub fatal_logged: bool,
     /// The input as the command in progress began ([`Run::rewind`]).
     mark: Mark,
     /// A halt raised on the token path ([`Run::raise`]), returned by the
@@ -357,7 +360,7 @@ impl<'c, 'a> Run<'c, 'a> {
             resumed: false,
             irreversible: 0,
             error_count: 0,
-            too_many_errors: false,
+            fatal_logged: false,
             mark: Mark::default(),
             halt: None,
         }
@@ -902,10 +905,20 @@ impl<'c, 'a> Run<'c, 'a> {
             ]);
             let s = self.v.seq_unit(e);
             self.contribute("log", s);
-            self.too_many_errors = true;
+            self.fatal_logged = true;
             return Err(Halt::Fatal);
         }
         Ok(())
+    }
+
+    /// `fatal_error` (§93): `s` logged, and the job ends there (§1335).
+    /// A build has no terminal: it runs as `nonstop_mode` does, so every
+    /// read from the terminal and every file error ends the job (§71,
+    /// §484, §530).
+    pub(crate) fn fatal<T>(&mut self, s: &str) -> R<T> {
+        self.log("error", s)?;
+        self.fatal_logged = true;
+        Err(Halt::Fatal)
     }
 
     /// A diagnostic for [`crate::Build::diagnostics`]: where the input is
@@ -1131,7 +1144,18 @@ impl<'c, 'a> Run<'c, 'a> {
             Some((op, args)) if op == self.ops.exec => {
                 self.pulled += 1;
                 let frames = decode_frames(self.v, &args);
-                self.push_back_frames(frames);
+                let joined = self.push_back_frames(frames);
+                // (the rest of a line already reached is read now, §360:
+                // `\endlinechar` as it is now goes after it)
+                if let Some(k) = joined {
+                    let e = i64::from(self.ipar(Par::endlinechar)?);
+                    if let Some(Frame::Src(s)) = self.frames.get_mut(k) {
+                        if (0..256).contains(&e) {
+                            s.buf.push(u32::try_from(e).unwrap_or(13));
+                        }
+                        s.endch = e;
+                    }
+                }
                 Ok(true)
             }
             _ => {
@@ -1146,8 +1170,11 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// Appends frames; a segment continuing the line of the last one joins
-    /// it (a control sequence's name may run across nodes).
-    pub(crate) fn push_back_frames(&mut self, frames: Vec<Frame>) {
+    /// it (a control sequence's name may run across nodes). The index of
+    /// a joined segment reached before that now ends its line, whose
+    /// `\endlinechar` is due ([`Run::pull`]).
+    pub(crate) fn push_back_frames(&mut self, frames: Vec<Frame>) -> Option<usize> {
+        let mut due = None;
         for f in frames {
             if let (Some(Frame::Src(last)), Frame::Src(next)) = (self.frames.back_mut(), &f)
                 && !last.ends
@@ -1155,10 +1182,17 @@ impl<'c, 'a> Run<'c, 'a> {
             {
                 last.buf.extend_from_slice(&next.buf);
                 last.ends = next.ends;
+                if last.endch != -2 {
+                    last.endch = -3;
+                    if last.ends {
+                        due = Some(self.frames.len() - 1);
+                    }
+                }
                 continue;
             }
             self.frames.push_back(f);
         }
+        due
     }
 
     /// Whether the first character of the next sibling's text, if it
@@ -1300,21 +1334,32 @@ impl<'c, 'a> Run<'c, 'a> {
         if let Some(Frame::Src(s)) = self.frames.front()
             && s.endch == -2
         {
+            let (starts, ends) = (s.starts, s.ends);
+            // §360: `\endlinechar` as it is when the line is read goes
+            // after its last character (an assignment on the line itself
+            // reaches the next line only: `\endlinechar=-1` on a line
+            // still ends that line)
+            let e = if ends {
+                i64::from(self.ipar(Par::endlinechar)?)
+            } else {
+                -1
+            };
             // §362: a line is counted as it begins
-            let starts = s.starts;
             if starts {
                 self.lines_entered += 1;
                 let line = self.v.int(1);
                 self.contribute("lines", line);
             }
             if let Some(Frame::Src(s)) = self.frames.front_mut() {
-                s.endch = -3;
+                if (0..256).contains(&e) {
+                    s.buf.push(u32::try_from(e).unwrap_or(13));
+                }
+                s.endch = e;
                 if starts {
                     s.state = NEW_LINE;
                 }
             }
         }
-        self.end_line_char()?;
         loop {
             let (c, state) = {
                 let Some(Frame::Src(s)) = self.frames.front_mut() else {
@@ -1378,28 +1423,11 @@ impl<'c, 'a> Run<'c, 'a> {
                 }
             }
             // goto switch
-            self.end_line_char()?;
             let done = matches!(self.frames.front(), Some(Frame::Src(s)) if s.loc >= s.buf.len());
             if done {
                 return Ok(None);
             }
         }
-    }
-
-    /// At the end of a segment that ends its line: `\endlinechar` goes
-    /// after it (§360; read here, where the line's end is reached).
-    fn end_line_char(&mut self) -> R<()> {
-        let due = matches!(self.frames.front(), Some(Frame::Src(s)) if s.ends && s.endch == -3 && s.loc >= s.buf.len());
-        if due {
-            let e = i64::from(self.ipar(Par::endlinechar)?);
-            if let Some(Frame::Src(s)) = self.frames.front_mut() {
-                if (0..256).contains(&e) {
-                    s.buf.push(u32::try_from(e).unwrap_or(13));
-                }
-                s.endch = e;
-            }
-        }
-        Ok(())
     }
 
     fn set_state(&mut self, st: u8) {
