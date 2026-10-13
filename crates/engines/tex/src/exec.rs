@@ -377,6 +377,12 @@ impl Executor for Threads {
     fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync)) {
         self.parallel_each(n, &|i| self.job(|| f(i)));
     }
+
+    /// The workers the engine's own passes (its apply) may split over:
+    /// the pool's size where threads exist, else 1.
+    fn parallelism(&self) -> usize {
+        if threads_possible() { self.n.max(1) } else { 1 }
+    }
 }
 
 impl Threads {
