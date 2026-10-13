@@ -27,6 +27,19 @@ pub(crate) fn run_node(
     o: Ops,
     body: impl FnOnce(&mut Run<'_, '_>) -> R<()>,
 ) -> Result<ValueId, Stop> {
+    run_node_parking(cx, o, false, body)
+}
+
+/// [`run_node`]; with `parks`, a run that stops inside a command parks
+/// its state there ([`Run::park`], [`Ctx::park`]) and the next attempt,
+/// if the engine resumes it, continues at that command (`Run::resumed`:
+/// the body skips what it did before its commands).
+pub(crate) fn run_node_parking(
+    cx: &mut Ctx<'_>,
+    o: Ops,
+    parks: bool,
+    body: impl FnOnce(&mut Run<'_, '_>) -> R<()>,
+) -> Result<ValueId, Stop> {
     let trace = crate::exec::env_flag!("PHITEX_TEX_TRACE");
     if trace {
         let a = cx
@@ -40,7 +53,22 @@ pub(crate) fn run_node(
             a.chars().take(70).collect::<String>()
         );
     }
-    let mut r = Run::new(cx, o);
+    let parks = parks && !crate::exec::env_flag!("PHITEX_NO_PARK");
+    let parked = if parks { cx.parked() } else { None };
+    let mut r = match parked.map(<Box<dyn std::any::Any + Send>>::downcast::<crate::run::Parked>) {
+        Some(Ok(p)) => match Run::from_parked(cx, o.clone(), *p) {
+            Ok(r) => r,
+            Err(cx) => {
+                cx.restart();
+                Run::new(cx, o)
+            }
+        },
+        Some(Err(_)) => {
+            cx.restart();
+            Run::new(cx, o)
+        }
+        None => Run::new(cx, o),
+    };
     let res = body(&mut r);
     if trace {
         eprintln!(
@@ -58,7 +86,15 @@ pub(crate) fn run_node(
             r.end_open();
             Ok(r.finish())
         }
-        Err(Halt::Stop(s)) => Err(s),
+        Err(Halt::Stop(s)) => {
+            if parks
+                && !r.cx.is_speculative()
+                && let Some(p) = r.park()
+            {
+                r.cx.park(Box::new(p));
+            }
+            Err(s)
+        }
         Err(Halt::Starve) => {
             let u = ValueId::UNIT;
             Ok(r.stall("starve", u))
@@ -150,16 +186,19 @@ impl Operation for Exec {
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let args = cx.args();
         let hint = crate::hints::hint_of_args(cx.values(), &args);
-        run_node(cx, ops(&self.0), |r| {
-            r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
-            let fs = decode_frames(r.v, &args);
-            let tokens = matches!(fs.first(), Some(crate::run::Frame::Toks(..)));
-            crate::hints::count(r, if tokens { 5 } else { 6 });
-            r.frames.extend(fs);
-            // the hint's assumptions, against what is in force here
-            if let Some(m) = crate::hints::verify(r, &hint)? {
-                r.log("error", &format!("hint regime violated: {m}"))?;
-                crate::hints::count(r, 2);
+        run_node_parking(cx, ops(&self.0), true, |r| {
+            // (a resumed run has done this, and continues its commands)
+            if !r.resumed {
+                r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
+                let fs = decode_frames(r.v, &args);
+                let tokens = matches!(fs.first(), Some(crate::run::Frame::Toks(..)));
+                crate::hints::count(r, if tokens { 5 } else { 6 });
+                r.frames.extend(fs);
+                // the hint's assumptions, against what is in force here
+                if let Some(m) = crate::hints::verify(r, &hint)? {
+                    r.log("error", &format!("hint regime violated: {m}"))?;
+                    crate::hints::count(r, 2);
+                }
             }
             // the whole slice runs here: a paragraph region to its end,
             // a format command with its operands, the tokens every

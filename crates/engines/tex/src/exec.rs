@@ -34,11 +34,11 @@ use phitex_defuse::{Executor, RunResult};
 
 /// Whether the environment variable `$name` is set, read once per
 /// process (a `getenv` takes the environment's lock and scans it; the
-/// debug switches are tested on every run).
+/// debug switches are tested on every run). Unset, empty or "0" is off.
 macro_rules! env_flag {
     ($name:literal) => {{
         static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *F.get_or_init(|| std::env::var_os($name).is_some())
+        *F.get_or_init(|| std::env::var_os($name).is_some_and(|v| !v.is_empty() && v != "0"))
     }};
 }
 pub(crate) use env_flag;
@@ -522,7 +522,11 @@ pub(crate) mod widths {
                 if c == 0 {
                     continue;
                 }
-                let (lo, hi) = if i == 0 { (0, 0) } else { (1u64 << (i - 1), (1u64 << i) - 1) };
+                let (lo, hi) = if i == 0 {
+                    (0, 0)
+                } else {
+                    (1u64 << (i - 1), (1u64 << i) - 1)
+                };
                 let pct = 100.0 * c as f64 / self.n as f64;
                 eprintln!("widths:   {lo:>8}..{hi:<8} {c:>9} {pct:5.1}%");
             }
@@ -551,7 +555,9 @@ pub(crate) mod widths {
     }
 
     fn with<T>(f: impl FnOnce(&mut Stats) -> T) -> T {
-        let mut g = STATS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut g = STATS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         f(g.get_or_insert_with(Stats::default))
     }
 
@@ -644,7 +650,11 @@ pub(crate) mod widths {
         if !on() {
             return;
         }
-        let Some(s) = STATS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() else {
+        let Some(s) = STATS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        else {
             return;
         };
         if s.ready.n == 0 {
@@ -655,9 +665,17 @@ pub(crate) mod widths {
         s.step_defs.print("distinct fields defined per step");
         s.run_reads.print("engine reads per run");
         s.run_defs.print("definitions per run");
-        s.step_lookups_per_run.print("value lookups per run (step mean)");
+        s.step_lookups_per_run
+            .print("value lookups per run (step mean)");
         s.step_miss_pct.print("lookup cache miss % per step");
-        let pct = if s.lookups == 0 { 0.0 } else { 100.0 * s.misses as f64 / s.lookups as f64 };
-        eprintln!("widths: lookups {} misses {} ({pct:.1}%)", s.lookups, s.misses);
+        let pct = if s.lookups == 0 {
+            0.0
+        } else {
+            100.0 * s.misses as f64 / s.lookups as f64
+        };
+        eprintln!(
+            "widths: lookups {} misses {} ({pct:.1}%)",
+            s.lookups, s.misses
+        );
     }
 }
