@@ -223,10 +223,15 @@ impl Run<'_, '_> {
                 }
             }
             cmd::PAR_END => {
+                // §1094
                 if v {
                     self.normal_paragraph()?;
+                    if md.m > 0 {
+                        self.build_page_outer()?;
+                    }
                 } else if h {
                     self.end_graf(&md)?;
+                    self.build_page_outer()?;
                 }
             }
             cmd::UN_HBOX => {
@@ -277,6 +282,9 @@ impl Run<'_, '_> {
                 let n = self.scan_int()?;
                 let node = crate::nodes::penalty_node(self.v, n);
                 self.append(md.lid, node);
+                if md.m == 1 {
+                    self.build_page_outer()?;
+                }
             }
             cmd::REMOVE_ITEM => self.delete_last(&md)?,
             cmd::ITAL_CORR => {
