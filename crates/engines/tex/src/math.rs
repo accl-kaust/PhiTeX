@@ -705,8 +705,7 @@ impl Run<'_, '_> {
     fn math_fraction(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
         let c = self.cur.chr;
-        let name = format!("inc:{}", md.lid);
-        let have = self.get(&name)?.is_some_and(|x| x != ValueId::UNIT);
+        let have = self.incs.iter().any(|x| x.0 == md.lid);
         let (mut l, mut r) = (0, 0);
         if c >= 3 {
             l = self.scan_delimiter(false)?;
@@ -723,7 +722,7 @@ impl Run<'_, '_> {
         let (items, _) = self.list_items(md.lid)?;
         let n = i64::try_from(items.len()).unwrap_or(0);
         let inc = v.list(vec![v.int(thick), v.int(l), v.int(r), v.int(n)]);
-        self.set(&name, inc, true);
+        self.incs.push((md.lid, inc));
         Ok(())
     }
 
@@ -732,17 +731,17 @@ impl Run<'_, '_> {
     pub(crate) fn fin_mlist(&mut self, lid: i64, p: Option<ValueId>) -> R<Vec<ValueId>> {
         let v = self.v;
         let (items, _) = self.list_items(lid)?;
+        // (the incompleat noad is consumed, §1185)
         let inc = self
-            .get(&format!("inc:{lid}"))?
-            .filter(|&x| x != ValueId::UNIT);
+            .incs
+            .iter()
+            .position(|x| x.0 == lid)
+            .map(|i| self.incs.swap_remove(i).1);
         let Some(inc) = inc else {
             let mut out = items;
             out.extend(p);
             return Ok(out);
         };
-        // the incompleat noad is consumed: a later list with the same
-        // id (local ids restart in every run) must not find it (§1185)
-        self.set(&format!("inc:{lid}"), ValueId::UNIT, true);
         let g = |i: usize| crate::val::int_at(v, inc, i);
         let n = usize::try_from(g(3)).unwrap_or(0).min(items.len());
         let (mut num, den) = (items[..n].to_vec(), items[n..].to_vec());
