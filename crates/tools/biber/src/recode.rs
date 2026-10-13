@@ -247,11 +247,7 @@ impl Recode {
         unicode::nfd(&s)
     }
 
-    fn diacritics(
-        t0: &[char],
-        map: &BTreeMap<Vec<char>, String>,
-        keys: &[Vec<char>],
-    ) -> Vec<char> {
+    fn diacritics(t0: &[char], map: &BTreeMap<Vec<char>, String>, keys: &[Vec<char>]) -> Vec<char> {
         let lit =
             |t: &[char], p: usize, k: &[char]| t.len() >= p + k.len() && &t[p..p + k.len()] == k;
         // 1: {X} not after \<diacritic>  ->  \x0f X \x0e
@@ -268,10 +264,7 @@ impl Recode {
             }
             // preceded by \ + some key
             for k in keys {
-                if p > k.len()
-                    && &t[p - k.len()..p] == k.as_slice()
-                    && t[p - k.len() - 1] == '\\'
-                {
+                if p > k.len() && &t[p - k.len()..p] == k.as_slice() && t[p - k.len() - 1] == '\\' {
                     return None;
                 }
             }

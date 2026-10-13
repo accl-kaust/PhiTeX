@@ -242,7 +242,10 @@ impl<'f> Biber<'f> {
                 break;
             }
             if !ds.encoding.is_empty() && !matches!(lc(&ds.encoding).as_str(), "utf8" | "utf-8") {
-                return Err(self.unsupported(&alloc::format!("data source encoding '{}' (only UTF-8)", ds.encoding)));
+                return Err(self.unsupported(&alloc::format!(
+                    "data source encoding '{}' (only UTF-8)",
+                    ds.encoding
+                )));
             }
             if ds.datatype != "bibtex" {
                 return Err(

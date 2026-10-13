@@ -1221,7 +1221,7 @@ impl Biber<'_> {
             if it.is_some() && self.add_xdata_ref(be, f_c, XdVal::S(&name), Some(i)) {
                 let n = Name {
                     id: self.new_id(),
-                    
+
                     ..Name::default()
                 };
                 names.add(shared(n));
