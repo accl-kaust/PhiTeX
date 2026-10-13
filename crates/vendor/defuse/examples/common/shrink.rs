@@ -90,6 +90,9 @@ pub enum Sched {
     /// speculative): the seeds count on from this base at the start of a
     /// replay, so a replay runs the schedules the original run did.
     Random(u64),
+    /// Greedy without speculation on this many threads (wide batches
+    /// apply in parallel slices).
+    Par(usize),
 }
 
 impl Sched {
@@ -98,6 +101,7 @@ impl Sched {
             "seq" => Some(Sched::Seq),
             "spec" => Some(Sched::Spec(3)),
             "random" => Some(Sched::Random(0)),
+            "par" => Some(Sched::Par(4)),
             s if s.starts_with("random:") => s[7..].parse().ok().map(Sched::Random),
             s => s.strip_prefix("spec:").and_then(|t| t.parse().ok()).map(Sched::Spec),
         }
@@ -126,6 +130,7 @@ pub fn evaluate(eng: &mut Engine, sched: Sched) -> bool {
     });
     match sched {
         Sched::Seq => eng.evaluate_sequential().is_ok(),
+        Sched::Par(t) => eng.evaluate(&mut Greedy::default(), &mut Threads(t)).is_ok(),
         Sched::Spec(t) => eng
             .evaluate(&mut Greedy::speculative(Speculation::All, 512), &mut Threads(t))
             .is_ok(),

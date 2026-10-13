@@ -62,10 +62,16 @@ pub enum Counter {
     ValueIntern,
     /// Value table sweeps.
     Sweep,
+    /// Writes to another slice's nodes deferred to the end of a batch.
+    Tail,
+    /// Use records a run left (registered by `set_uses`).
+    UseRecord,
+    /// Slices of a wide batch that aborted (applied whole instead).
+    SliceAbort,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 23] = [
+    pub const ALL: [Counter; 26] = [
         Counter::Walk,
         Counter::WalkLevel,
         Counter::Step,
@@ -89,6 +95,9 @@ impl Counter {
         Counter::ValueGetMiss,
         Counter::ValueIntern,
         Counter::Sweep,
+        Counter::Tail,
+        Counter::UseRecord,
+        Counter::SliceAbort,
     ];
 
     #[must_use]
@@ -117,6 +126,9 @@ impl Counter {
             Counter::ValueGetMiss => "value_get_miss",
             Counter::ValueIntern => "value_intern",
             Counter::Sweep => "sweep",
+            Counter::Tail => "tail",
+            Counter::UseRecord => "use_record",
+            Counter::SliceAbort => "slice_abort",
         }
     }
 }
@@ -167,10 +179,16 @@ pub enum Span {
     OrderInsert,
     /// Binding the created children (inside `Children`, after `Create`).
     Bind,
+    /// Replaying a sliced batch's deferred writes (inside `ApplyBatch`).
+    Tail,
+    /// Applying a wide batch's slices through overlays (inside `ApplyBatch`).
+    Slices,
+    /// Merging the slices' overlays into the engine (inside `ApplyBatch`).
+    Merge,
 }
 
 impl Span {
-    pub const ALL: [Span; 21] = [
+    pub const ALL: [Span; 24] = [
         Span::Evaluate,
         Span::RunBatch,
         Span::ApplyBatch,
@@ -192,6 +210,9 @@ impl Span {
         Span::Create,
         Span::OrderInsert,
         Span::Bind,
+        Span::Tail,
+        Span::Slices,
+        Span::Merge,
     ];
 
     #[must_use]
@@ -218,6 +239,9 @@ impl Span {
             Span::Create => "create",
             Span::OrderInsert => "order_insert",
             Span::Bind => "bind",
+            Span::Tail => "tail",
+            Span::Slices => "slices",
+            Span::Merge => "merge",
         }
     }
 }

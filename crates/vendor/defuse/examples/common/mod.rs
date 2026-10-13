@@ -2106,10 +2106,10 @@ impl Pool {
         }
     }
 
-    /// Runs `f(i)` for `i < n` on up to `threads` threads (this one included).
-    fn run(&self, threads: usize, n: usize, f: &(dyn Fn(usize) + Sync)) {
+    /// Runs `f(i)` for `i < n` on up to `threads` threads (this one
+    /// included), `grain` indices at a time.
+    fn run(&self, threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
         let _gate = self.gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let grain = (n / (threads * 8)).clamp(4, 64);
         // SAFETY: the pointer outlives its uses: this call returns only once
         // every index has run, and no worker touches it after that.
         let f: &'static (dyn Fn(usize) + Sync) = unsafe { std::mem::transmute(f) };
@@ -2137,24 +2137,31 @@ impl Pool {
 }
 
 impl Executor for Threads {
+    fn parallelism(&self) -> usize {
+        self.0.max(1)
+    }
+
     fn execute(&mut self, n: usize, run: &(dyn Fn(usize) -> RunResult + Sync), out: &mut Vec<RunResult>) {
         if self.0 <= 1 || n < 64 {
             out.extend((0..n).map(run));
             return;
         }
         let slots: Vec<OnceLock<RunResult>> = (0..n).map(|_| OnceLock::new()).collect();
-        self.for_each(n, &|i| {
+        let grain = (n / (self.0 * 8)).clamp(4, 64);
+        pool().run(self.0, n, grain, &|i| {
             let _ = slots[i].set(run(i));
         });
         out.extend(slots.into_iter().map(|s| s.into_inner().expect("every job ran")));
     }
 
+    /// The engine's parallel passes hand out few, large items (the slices
+    /// of a wide batch): one at a time.
     fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync)) {
-        if self.0 <= 1 || n < 64 {
+        if self.0 <= 1 || n < 2 {
             (0..n).for_each(f);
             return;
         }
-        pool().run(self.0, n, f);
+        pool().run(self.0, n, 1, f);
     }
 }
 
