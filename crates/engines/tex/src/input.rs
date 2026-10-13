@@ -81,11 +81,6 @@ impl Arena {
     }
 
     #[inline]
-    pub(crate) fn push(&mut self, t: Tok) {
-        self.toks.push(t);
-    }
-
-    #[inline]
     pub(crate) fn extend(&mut self, xs: &[Tok]) {
         self.toks.extend_from_slice(xs);
     }

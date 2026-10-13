@@ -495,12 +495,12 @@ impl Run<'_, '_> {
                 let e = ch >= 2;
                 let p = self.get_r_token()?;
                 let (params, body) = self.scan_toks(true, e)?;
-                let m = Mean::Macro(Rc::new(Macro {
-                    flags: u8::try_from(a % 4).unwrap_or(0)
+                let m = Mean::Macro(Rc::new(Macro::new(
+                    u8::try_from(a % 4).unwrap_or(0)
                         | if protected { crate::etex::PROTECTED } else { 0 },
                     params,
-                    body: body.into(),
-                }));
+                    body.into(),
+                )));
                 self.define_cs(&p, &m, global);
             }
             cmd::LET => {
@@ -559,11 +559,7 @@ impl Run<'_, '_> {
                 let _ = self.scan_keyword("to")?;
                 let p = self.get_r_token()?;
                 let body = self.read_toks(n)?;
-                let m = Mean::Macro(Rc::new(Macro {
-                    flags: 0,
-                    params: Vec::new(),
-                    body: body.into(),
-                }));
+                let m = Mean::Macro(Rc::new(Macro::new(0, Vec::new(), body.into())));
                 self.define_cs(&p, &m, global);
             }
             cmd::TOKS_REGISTER | cmd::ASSIGN_TOKS => {

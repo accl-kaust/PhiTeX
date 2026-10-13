@@ -1002,6 +1002,19 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
+    /// The current token's macro when its slot is loaded with one (the
+    /// common case of `macro_call`: no decoding, no `Mean` built); `None`
+    /// sends the caller through [`Self::cur_mean`].
+    #[inline]
+    pub(crate) fn cur_macro(&mut self) -> Option<Rc<crate::val::Macro>> {
+        let t = self.cur.tok;
+        if !t.is_cs_or_active() || self.cur.cmd == cmd::RELAX {
+            return None;
+        }
+        let l = Loc::try_from(crate::fields::mean_loc(t)?).ok()?;
+        self.st.macro_at(l)
+    }
+
     /// The current token's meaning, read from its slot now (§389, §508):
     /// a character's own, `\noexpand`'s marker, a `v` template's end.
     pub(crate) fn cur_mean(&mut self) -> R<Mean> {
