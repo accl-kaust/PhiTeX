@@ -90,6 +90,12 @@ pub struct Options {
     /// ([`guess_wkeys`]). A right guess saves the loop-back's second
     /// round; a wrong one costs nothing more than no guess.
     pub wkeys: Vec<(String, Vec<String>)>,
+    /// The round-one values of the page builder's loop-backs
+    /// (`pagefx:<j>`, what page `j`'s output routine leaves for the
+    /// next), as [`Build::export_pagefx`] gave them in an earlier
+    /// session of the same document; empty: none left (the declared
+    /// value).
+    pub pagefx: Vec<u8>,
 }
 
 /// When the engine speculates ([`Options::speculation`]).
@@ -306,6 +312,7 @@ impl Default for Options {
             epoch: None,
             fixpoint: false,
             wkeys: Vec::new(),
+            pagefx: Vec::new(),
             prelude_jobname: "texput".to_owned(),
             prelude_bytes: None,
             time_limit: Some(std::time::Duration::from_secs(600)),
@@ -1064,6 +1071,7 @@ impl Graph {
             "streams",
             "wplan",
             "fread",
+            "pagefxs",
             crate::pdfrelaxed::PIECES,
         ] {
             let fld = eng.values().field(f);
@@ -2021,6 +2029,18 @@ impl Build {
         for (n, _) in cached.reads.clone() {
             g.supply(&opts.finder, &n);
         }
+        // the last session's page-builder loop-backs, round one's guess
+        {
+            let mut rd = Rd(&opts.pagefx);
+            while let (Some(j), Some(t)) = (rd.u64(), rd.tree()) {
+                if usize::try_from(j).is_ok_and(|j| j < crate::page::MAX_PAGES) {
+                    let v = g.eng.values();
+                    let f = v.field(&format!("pagefx:{j}"));
+                    let x = import(v, &t);
+                    g.eng.declare_loopback(f, x);
+                }
+            }
+        }
         let aux = format!("{}.aux", opts.jobname);
         g.wkeys_guess = opts.wkeys.clone();
         if !g.wkeys_guess.iter().any(|(n, _)| *n == aux) {
@@ -2369,6 +2389,32 @@ impl Build {
             .filter(|(n, _)| defines_only(n))
             .map(|(n, ds)| (n, ds.into_iter().map(|(f, _)| f).collect()))
             .collect()
+    }
+
+    /// What each page's output routine left for the next as the last
+    /// build published it (`pagefx:<j>`), serialised: [`Options::pagefx`]
+    /// for a later session of the same document.
+    #[must_use]
+    pub fn export_pagefx(&self) -> Vec<u8> {
+        let v = self.g.eng.values();
+        let mut last: Vec<(u64, ValueId)> = Vec::new();
+        if let Some(s) = self.g.eng.acc_value(self.unit, v.field("pagefxs")) {
+            for e in v.seq_to_vec(s) {
+                let xs = list_of(v, e);
+                let (Some(&j), Some(&x)) = (xs.first(), xs.get(1)) else { continue };
+                let j = u64::try_from(crate::val::int_of(v, j)).unwrap_or(0);
+                match last.iter_mut().find(|(k, _)| *k == j) {
+                    Some(slot) => slot.1 = x,
+                    None => last.push((j, x)),
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (j, x) in last {
+            out.extend_from_slice(&j.to_le_bytes());
+            put_tree(&mut out, &export(v, x));
+        }
+        out
     }
 
     /// Whether the output is a PDF file (`\pdfoutput` at the first
