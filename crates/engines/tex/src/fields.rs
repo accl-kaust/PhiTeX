@@ -252,7 +252,9 @@ const fn static_index(n: &str) -> usize {
 /// The locations of state cells a command reads on its path.
 #[allow(clippy::cast_possible_truncation, dead_code)]
 pub(crate) mod cell {
-    use super::{STATIC0, static_index};
+    use super::{BOX0, STATIC0, static_index};
+    /// Box register 255.
+    pub(crate) const BOX255: u32 = (BOX0 + 255) as u32;
     pub(crate) const AFTERTOKEN: u32 = (STATIC0 + static_index("aftertoken")) as u32;
     pub(crate) const ALIGN_OPEN: u32 = (STATIC0 + static_index("align:open")) as u32;
     pub(crate) const ALIGN_STATE: u32 = (STATIC0 + static_index("align:state")) as u32;
