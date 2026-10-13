@@ -673,6 +673,9 @@ impl<'c, 'a> Run<'c, 'a> {
         self.frames = frames;
         self.own = own;
         self.defs = defs;
+        // (`def_ix` indexed the longer `defs`: rebuilt, or a later
+        // redefinition in place indexes past the end)
+        self.reindex_defs();
         self.contribs.truncate(nc);
         self.kids.truncate(nk);
         self.nest.truncate(nest_len);
