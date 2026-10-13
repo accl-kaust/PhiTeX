@@ -239,6 +239,8 @@ pub struct PageRecord {
     dests: Vec<usize>,
     marks: Vec<(usize, crate::marks::Mark)>,
     dest_data: Vec<(usize, crate::marks::Dest)>,
+    obj_list: Vec<usize>,
+    ximage_list: Vec<usize>,
 }
 
 impl PageRecord {
@@ -265,6 +267,9 @@ pub(crate) struct Recording {
     /// Whether the page made anything but text, rules, annotations,
     /// links and destinations.
     pub other: bool,
+    /// The objects and images the page refers to (TeX's numbers).
+    pub obj_list: Vec<usize>,
+    pub ximage_list: Vec<usize>,
     /// The marks and destinations as the walk left them.
     pub marks: Vec<(usize, crate::marks::Mark)>,
     pub dest_data: Vec<(usize, crate::marks::Dest)>,
@@ -348,6 +353,8 @@ impl PdfState {
             pr.links.clone_from(&self.link_list);
             pr.dests.clone_from(&self.dest_list);
             // (the marks were written and taken out: the walk's copies)
+            pr.obj_list = rec.obj_list;
+            pr.ximage_list = rec.ximage_list;
             pr.marks = rec.marks;
             pr.dest_data = rec.dest_data;
         }
@@ -542,6 +549,22 @@ impl PdfState {
         self.dest_list = rec.dests.iter().map(|&k| at(k)).collect();
         self.page_shown.clone_from(&rec.shown);
         self.write_page_object(last_stream, last_resources);
+        // "Write out resource lists": what no page before wrote
+        self.obj_list = rec.obj_list.iter().map(|&k| at(k)).collect();
+        self.ximage_list = rec.ximage_list.iter().map(|&k| at(k)).collect();
+        for k in self.obj_list.clone() {
+            if !self.is_written(k) {
+                self.pdf_write_obj(k);
+            }
+        }
+        for k in self.ximage_list.clone() {
+            if !self.is_written(k)
+                && let Err(e) = self.pdf_write_image(k, fonts)
+            {
+                // (the step's write logged it)
+                let _ = e;
+            }
+        }
         self.font_list.clone_from(&rec.font_list);
         self.write_page_marks();
         self.write_resources(last_resources, true);
