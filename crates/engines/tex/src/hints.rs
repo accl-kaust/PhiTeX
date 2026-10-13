@@ -1558,6 +1558,11 @@ const DEMOTED: &[&str] = &[
     "advance",
     "multiply",
     "divide",
+    // (a `\\csname` in an argument expanded after `\\expandafter`, §372)
+    "message",
+    "errmessage",
+    // (a catcode read after a `\\scantokens` changed the escape, §1235)
+    "catcode",
 ];
 
 fn demoted(class: &str, excerpt: &str) -> Hint {
