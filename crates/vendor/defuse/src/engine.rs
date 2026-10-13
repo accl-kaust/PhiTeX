@@ -375,6 +375,17 @@ pub struct Report {
     pub rounds: u64,
     /// Loop-back restarts from initial values.
     pub restarts: u64,
+    /// The client's version of the text the result is for: the one the
+    /// last absorbed batch gave ([`EditSource::absorb`]), else the one set
+    /// with [`Engine::set_version`] (0 until then).
+    pub version: u64,
+    /// The edits made so far (`replace`, insertions, `push`, `remove`,
+    /// environment changes), those absorbed during the evaluation
+    /// included.
+    pub edits: u64,
+    /// Per batch of edits absorbed during the evaluation: its version and
+    /// the step it was absorbed before.
+    pub edits_applied: Vec<(u64, u64)>,
     /// `nodes_run` by operation name.
     pub runs_by_op: Vec<(&'static str, u64)>,
 
@@ -1140,6 +1151,28 @@ fn site_key(unit: u32, site: Slot) -> u64 {
     }
 }
 
+/// A source of edits an evaluation absorbs between its steps (see
+/// [`Engine::evaluate_absorbing`]).
+pub trait EditSource {
+    /// Applies the edits that have arrived, through the engine's edit
+    /// methods (`replace`, `insert_after`, `insert_before`, `push`,
+    /// `remove`, `set_environment`, `refresh_where`): the version the
+    /// text has then (the client's own numbering, see
+    /// [`Report::version`]), or `None` when nothing was applied. Called
+    /// between steps (never while a batch runs) and once more when the
+    /// evaluation runs out of work. Must not evaluate.
+    fn absorb(&mut self, eng: &mut Engine) -> Option<u64>;
+}
+
+/// No edits during the evaluation.
+pub struct NoEdits;
+
+impl EditSource for NoEdits {
+    fn absorb(&mut self, _: &mut Engine) -> Option<u64> {
+        None
+    }
+}
+
 /// The evaluator.
 pub struct Engine {
     pub(crate) values: Values,
@@ -1269,6 +1302,12 @@ pub struct Engine {
     origins: FxHashMap<Slot, Origin>,
     /// Waits on each node this evaluation (for [`Report::top_waited`]).
     wait_counts: FxHashMap<Slot, u64>,
+    /// Edits made so far (see [`Report::edits`]).
+    edit_version: u64,
+    /// The client's version of the text (see [`Report::version`]).
+    version: u64,
+    /// Batches of edits absorbed since the loop-back round started.
+    absorbed_in_round: u32,
     pins: FxHashMap<ValueId, u32>,
     values_at_sweep: usize,
     open_op: OpId,
@@ -1433,6 +1472,9 @@ impl Engine {
             spec_done: FxHashSet::default(),
             origins: FxHashMap::default(),
             wait_counts: FxHashMap::default(),
+            edit_version: 0,
+            version: 0,
+            absorbed_in_round: 0,
             pins: FxHashMap::default(),
             values_at_sweep: 0,
             open_op: OpId(0),
@@ -2166,6 +2208,7 @@ impl Engine {
     }
 
     fn client_insert(&mut self, unit: UnitId, after: Option<Slot>, op: OpId, args: Vec<ValueId>) -> NodeId {
+        self.edit_version += 1;
         let id = self.client_id(unit);
         let args = self.values.list(args);
         let s = self.create_node(unit.0, after, op, args, NIL, id, false);
@@ -2180,6 +2223,7 @@ impl Engine {
     /// If `node` was not created by the client.
     pub fn remove(&mut self, node: NodeId) {
         span!(Edit);
+        self.edit_version += 1;
         let s = self.slot_of(node);
         assert!(
             self.n(s).parent == NIL && !self.n(s).has(F_APP),
@@ -2213,6 +2257,7 @@ impl Engine {
         if self.n(s).op == op && self.n(s).args == args {
             return;
         }
+        self.edit_version += 1;
         self.reset_text(s, op, args);
     }
 
@@ -2335,7 +2380,15 @@ impl Engine {
     /// evaluation starts; a field that changed from the previous environment
     /// re-runs only its readers. Bodies of lexical applications do not see
     /// it (their results are memoized by their arguments).
+    /// The client's version of the text, for edits made between
+    /// evaluations (an absorbed batch brings its own): reported back as
+    /// [`Report::version`].
+    pub fn set_version(&mut self, version: u64) {
+        self.version = version;
+    }
+
     pub fn set_environment(&mut self, env: impl IntoIterator<Item = (Field, ValueId)>) {
+        self.edit_version += 1;
         self.env_next = Some(env.into_iter().collect());
     }
 
@@ -6653,6 +6706,28 @@ impl Engine {
     /// Cycles, non-convergence, conflicting publications and definitions that
     /// contradict a static declaration.
     pub fn evaluate(&mut self, sched: &mut dyn Scheduler, exec: &mut dyn Executor) -> Result<Report, EvalError> {
+        self.evaluate_absorbing(sched, exec, &mut NoEdits)
+    }
+
+    /// [`Self::evaluate`], absorbing the edits `edits` makes between
+    /// steps: the nodes an edit touches run again, untouched results stay,
+    /// and the evaluation goes on to the fixpoint of the latest text. A
+    /// batch running when an edit arrives finishes first; its results for
+    /// nodes the edit touched are dropped. An edit during a loop-back
+    /// round restarts the unit's rounds from the initial values (no
+    /// partial-round result survives), so the result is the one a fresh
+    /// evaluation of the final text reaches. `Report::version` and
+    /// `Report::edits_applied` say what was absorbed when.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::evaluate`].
+    pub fn evaluate_absorbing(
+        &mut self,
+        sched: &mut dyn Scheduler,
+        exec: &mut dyn Executor,
+        edits: &mut dyn EditSource,
+    ) -> Result<Report, EvalError> {
         span!(Evaluate);
         if self.feedback {
             // Loop-back fields feed back into their own publishers: a warm
@@ -6675,15 +6750,17 @@ impl Engine {
         self.apply_environment();
         self.touch_log.clear();
         let restarted = self.feedback;
-        let mut result = self.evaluate_inner(sched, exec);
+        let mut result = self.evaluate_inner(sched, exec, edits);
         self.feedback = self.has_feedback();
         if result.is_ok() && self.feedback && !restarted && self.restart_loops() {
             // Feedback appeared with this edit: the warm start may have
             // reached another fixpoint than the cold path. Follow the cold
             // path.
-            result = self.evaluate_inner(sched, exec);
+            result = self.evaluate_inner(sched, exec, edits);
             self.feedback = self.has_feedback();
         }
+        self.report.version = self.version;
+        self.report.edits = self.edit_version;
         if result.is_ok() {
             self.collect_apps(false);
         }
@@ -6806,9 +6883,14 @@ impl Engine {
         }
     }
 
-    fn evaluate_inner(&mut self, sched: &mut dyn Scheduler, exec: &mut dyn Executor) -> Result<(), EvalError> {
+    fn evaluate_inner(
+        &mut self,
+        sched: &mut dyn Scheduler,
+        exec: &mut dyn Executor,
+        edits: &mut dyn EditSource,
+    ) -> Result<(), EvalError> {
         self.in_eval = true;
-        let r = self.rounds(sched, exec);
+        let r = self.rounds(sched, exec, edits);
         self.in_eval = false;
         self.touch_log.clear();
         r
@@ -6850,10 +6932,22 @@ impl Engine {
         stalled
     }
 
-    fn rounds(&mut self, sched: &mut dyn Scheduler, exec: &mut dyn Executor) -> Result<(), EvalError> {
+    fn rounds(
+        &mut self,
+        sched: &mut dyn Scheduler,
+        exec: &mut dyn Executor,
+        edits: &mut dyn EditSource,
+    ) -> Result<(), EvalError> {
         loop {
             self.report.rounds += 1;
-            self.drain(sched, exec)?;
+            self.absorbed_in_round = 0;
+            self.drain(sched, exec, edits)?;
+            if self.absorbed_in_round > 0 && self.feedback && self.restart_loops() {
+                // An edit landed during the round: the fixpoint is the
+                // latest text's, from the initial values.
+                self.report.restarts += 1;
+                continue;
+            }
             if !self.parked.is_empty() {
                 let parked: Vec<Slot> = self.parked.iter().map(|&(_, s)| s).collect();
                 if self.collect_apps(true) {
@@ -6888,9 +6982,11 @@ impl Engine {
             fields.sort_unstable();
             let mut changed = Vec::new();
             for f in fields {
-                let Some(pubs) = self.loop_pubs.get(&f) else { continue };
-                let mut vals = pubs.values().copied();
-                let Some(first) = vals.next() else { continue };
+                // No publisher left (one went away or became inert): the
+                // initial value, as a cold evaluation of the text has.
+                let initial = self.loop_init.get(&f).copied();
+                let mut vals = self.loop_pubs.get(&f).into_iter().flat_map(|m| m.values().copied());
+                let Some(first) = vals.next().or(initial) else { continue };
                 if vals.any(|v| v != first) {
                     return Err(EvalError::ConflictingPublication { field: f });
                 }
@@ -6989,12 +7085,93 @@ impl Engine {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn drain(&mut self, sched: &mut dyn Scheduler, exec: &mut dyn Executor) -> Result<(), EvalError> {
+    /// Absorbs the edits `edits` has, between steps.
+    fn absorb(&mut self, edits: &mut dyn EditSource) -> bool {
+        let before = self.edit_version;
+        let tag = edits.absorb(self);
+        if tag.is_none() && self.edit_version == before {
+            return false;
+        }
+        if let Some(v) = tag {
+            self.version = v;
+        }
+        self.report.edits_applied.push((self.version, self.report.steps));
+        self.absorbed_in_round += 1;
+        // An environment change counts as an edit too.
+        self.apply_environment();
+        // A new text: the per-evaluation limits start over.
+        self.runs_in_eval.clear();
+        self.created_in_eval.clear();
+        self.stream_runs.clear();
+        self.idle_rounds = 0;
+        true
+    }
+
+    /// The speculation candidates for a step at `level`: dirty nodes above
+    /// it and parked nodes, up to the scheduler's budget and room. The scan
+    /// is bounded: a queue of nodes that are not candidates (re-bound, or
+    /// marked not to speculate) would otherwise be walked whole at every
+    /// step.
+    fn spec_candidates(&self, sched: &dyn Scheduler, level: u32, cands: &mut Vec<Candidate>) {
+        let budget = sched.speculation_budget();
+        let room = sched.max_outstanding().saturating_sub(self.spec_live as usize);
+        if budget == 0 || room == 0 {
+            return;
+        }
+        let lim = budget.min(room);
+        let mut scan = lim.saturating_mul(SPEC_SCAN_PER_CANDIDATE);
+        let mut seen = FxHashSet::default();
+        'levels: for h in (level as usize + 1)..self.queue.len() {
+            for &(id, s) in &self.queue[h] {
+                if cands.len() >= lim || scan == 0 {
+                    break 'levels;
+                }
+                scan -= 1;
+                if !self.queue_live(h, id, s) || !seen.insert(s) {
+                    continue;
+                }
+                let n = self.n(s);
+                // Re-bound nodes are revalidated at their level instead
+                // (cheaper than any run).
+                if n.state == State::Dirty && !n.has(F_NOSPEC) && !n.has(F_REBIND) {
+                    cands.push(Candidate {
+                        node: n.id,
+                        slot: s,
+                        has_prediction: n.has(F_RAN) || n.has(F_PREDICT),
+                        waiting: false,
+                    });
+                }
+            }
+        }
+        for &(_, s) in &self.parked {
+            if cands.len() >= 2 * lim || scan == 0 {
+                break;
+            }
+            scan -= 1;
+            let n = self.n(s);
+            if !n.has(F_NOSPEC) && n.on != NIL {
+                cands.push(Candidate {
+                    node: n.id,
+                    slot: s,
+                    has_prediction: n.has(F_RAN) || n.has(F_PREDICT),
+                    waiting: true,
+                });
+            }
+        }
+    }
+
+    fn drain(
+        &mut self,
+        sched: &mut dyn Scheduler,
+        exec: &mut dyn Executor,
+        edits: &mut dyn EditSource,
+    ) -> Result<(), EvalError> {
         let mut ready = Vec::new();
         let mut cands = Vec::new();
         let mut batch = Vec::new();
         let mut results = Vec::new();
         loop {
+            self.absorb(edits);
             self.flush_claims();
             if let Some(e) = self.errors.first().cloned() {
                 self.errors.clear();
@@ -7003,6 +7180,9 @@ impl Engine {
             self.settle_deferred();
             self.flush_order();
             let Some((level, at_level)) = self.queue_first() else {
+                if self.absorb(edits) {
+                    continue;
+                }
                 return Ok(());
             };
             if self.past_deadline() {
@@ -7031,53 +7211,7 @@ impl Engine {
             #[cfg(feature = "profile")]
             let select_span = crate::obs::enter_impl(crate::obs::Span::Select);
             cands.clear();
-            let budget = sched.speculation_budget();
-            let room = sched.max_outstanding().saturating_sub(self.spec_live as usize);
-            if budget > 0 && room > 0 {
-                let lim = budget.min(room);
-                // The scan is bounded: a queue of nodes that are not
-                // candidates (re-bound, or marked not to speculate) would
-                // otherwise be walked whole at every step.
-                let mut scan = lim.saturating_mul(SPEC_SCAN_PER_CANDIDATE);
-                let mut seen = FxHashSet::default();
-                'levels: for h in (level as usize + 1)..self.queue.len() {
-                    for &(id, s) in &self.queue[h] {
-                        if cands.len() >= lim || scan == 0 {
-                            break 'levels;
-                        }
-                        scan -= 1;
-                        if !self.queue_live(h, id, s) || !seen.insert(s) {
-                            continue;
-                        }
-                        let n = self.n(s);
-                        // Re-bound nodes are revalidated at their level instead
-                        // (cheaper than any run).
-                        if n.state == State::Dirty && !n.has(F_NOSPEC) && !n.has(F_REBIND) {
-                            cands.push(Candidate {
-                                node: n.id,
-                                slot: s,
-                                has_prediction: n.has(F_RAN) || n.has(F_PREDICT),
-                                waiting: false,
-                            });
-                        }
-                    }
-                }
-                for &(_, s) in &self.parked {
-                    if cands.len() >= 2 * lim || scan == 0 {
-                        break;
-                    }
-                    scan -= 1;
-                    let n = self.n(s);
-                    if !n.has(F_NOSPEC) && n.on != NIL {
-                        cands.push(Candidate {
-                            node: n.id,
-                            slot: s,
-                            has_prediction: n.has(F_RAN) || n.has(F_PREDICT),
-                            waiting: true,
-                        });
-                    }
-                }
-            }
+            self.spec_candidates(sched, level, &mut cands);
             let mut ready_ids: Vec<(NodeId, Slot)> = ready.iter().map(|&s| (self.n(s).id, s)).collect();
             ready_ids.sort_unstable();
             let just_ids: Vec<NodeId> = ready_ids.iter().map(|r| r.0).collect();
