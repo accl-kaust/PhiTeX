@@ -20,6 +20,7 @@ jemalloc = ["dep:tikv-jemallocator"]
 annotate-snippets = "=0.11.5"
 clap = { version = "=4.6.7", features = ["derive", "wrap_help"] }
 phitex-bibtex = { path = "../tools/bibtex" }
+phitex-biber = { path = "../tools/biber" }
 phitex-kpse = { path = "../tools/kpse" }
 phitex-makeindex = { path = "../tools/makeindex" }
 phitex-tex = { path = "../engines/tex" }

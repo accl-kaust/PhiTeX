@@ -36,6 +36,8 @@ pub struct Ctx<'a> {
     /// `following`'s position: the index the next call likely asks for and
     /// the label of the sibling before it.
     following_cursor: std::cell::Cell<(usize, u64)>,
+    /// The following siblings consulted (index, node, text), for a resume.
+    following_seen: std::cell::RefCell<Vec<(usize, Slot, OpId, ValueId)>>,
     uses: Vec<Use>,
     defs: Vec<(Field, ValueId, bool)>,
     children: Vec<(OpId, ValueId)>,
@@ -82,6 +84,7 @@ impl<'a> Ctx<'a> {
             cache: FxHashMap::default(),
             walks: Vec::new(),
             following_cursor: std::cell::Cell::new((0, 0)),
+            following_seen: std::cell::RefCell::new(Vec::new()),
             uses: Vec::new(),
             defs: Vec::new(),
             children: Vec::new(),
@@ -127,6 +130,7 @@ impl<'a> Ctx<'a> {
         cx.kind = s.kind;
         cx.diagnostics = s.diagnostics;
         cx.sig = s.sig;
+        cx.following_seen = std::cell::RefCell::new(s.following);
         cx.token = Some(s.token.into_inner().unwrap_or_else(PoisonError::into_inner));
         cx.resumed = true;
         cx
@@ -781,8 +785,14 @@ impl<'a> Ctx<'a> {
             i
         };
         let r = it.nth(skip);
-        if r.is_some() {
+        if let Some((op, _)) = &r {
             self.following_cursor.set((i + 1, it.label));
+            if let Some(&slot) = it.slots.last() {
+                let mut seen = self.following_seen.borrow_mut();
+                if !seen.iter().any(|f| f.0 == i) {
+                    seen.push((i, slot, *op, self.eng.n(slot).args));
+                }
+            }
         }
         r
     }
@@ -964,6 +974,7 @@ impl<'a> Ctx<'a> {
                 diagnostics: self.diagnostics.clone(),
                 sig: self.sig,
                 steps: self.steps,
+                following: self.following_seen.borrow().clone(),
                 token: std::sync::Mutex::new(self.token.take().expect("a token")),
             }))
         } else {
