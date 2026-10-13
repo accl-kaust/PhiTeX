@@ -217,6 +217,59 @@ fn tree(st: Style, s: &Status, tick: char, load: Option<(f64, u64)>, w: usize) -
         }
         out.push(l);
     }
+    // (under the engine: the jobs done of those known, and what each worker
+    // runs now, alike ones counted together)
+    if let Some(live) = s.live() {
+        let p = &live.progress;
+        let (done, total) = (p.done(), p.total());
+        let mut rows: Vec<(String, usize)> = Vec::new();
+        let mut idle = 0;
+        for slot in p.running() {
+            let Some((op, at)) = slot else {
+                idle += 1;
+                continue;
+            };
+            let what = match op {
+                1 => "text",
+                2 => "box",
+                3 => "page",
+                _ => "other",
+            };
+            let place = if at == phitex_tex::Progress::INSIDE {
+                "inside a macro".to_owned()
+            } else {
+                let line = live.lines.partition_point(|&b| b as u64 <= at);
+                format!("{}:{line}", live.file)
+            };
+            let row = format!("{} {place}", pad(what, 6, false));
+            match rows.iter_mut().find(|r| r.0 == row) {
+                Some(r) => r.1 += 1,
+                None => rows.push((row, 1)),
+            }
+        }
+        out.push(format!(
+            "       {}",
+            st.dim(&format!(
+                "[{done}/{total}] jobs · {} running · {idle} idle",
+                rows.iter().map(|r| r.1).sum::<usize>()
+            ))
+        ));
+        let shown = rows.len().min(6);
+        for (k, (row, n)) in rows.iter().take(shown).enumerate() {
+            let branch = if k + 1 == shown { "└─" } else { "├─" };
+            let times = if *n > 1 {
+                format!(" ×{n}")
+            } else {
+                String::new()
+            };
+            out.push(format!(
+                "  {}    {} {row}{}",
+                st.dim("│"),
+                st.dim(branch),
+                st.dim(&times)
+            ));
+        }
+    }
     // (cut to the terminal: a wrapped line would break the redraw)
     out.into_iter()
         .map(|l| {
