@@ -269,7 +269,7 @@ pub(crate) fn expand(r: &mut Run<'_, '_>) -> R<bool> {
             // pdfTeX §386 (e-TeX)
             let n = r.scan_register_num()?;
             let kind = MARK_KINDS[usize::try_from(chr - MARKS_CODE).unwrap_or(0).min(4)];
-            let m = r.get(&mark_field(kind, n))?;
+            let m = mark_read(r, kind, n)?;
             let toks = toks_of(r.v, m.filter(|&x| x != ValueId::UNIT));
             r.push_toks(toks);
         }
@@ -1166,8 +1166,62 @@ fn mark_field(kind: &str, n: i32) -> String {
     }
 }
 
+/// The loop-back field holding the marks a document node sees
+/// (`marks:before:<node>`): the marks in force after the last page the
+/// page builder fired before the node's read, as `[[class, top, first,
+/// bot], ...]`, or UNIT while no page fired.
+pub(crate) fn marks_before_field(node: u64) -> String {
+    format!("marks:before:{node}")
+}
+
+/// `\topmark` and its kin as read by a run (§386): in a page step (the
+/// output routine) and for the split marks, the sequential value; in a
+/// document node, its `marks:before:<node>` loop-back, which the
+/// `Breaks` fold publishes at the point marked by a `T_MARKS_AT` item
+/// this read contributes to the main vertical list.
+pub(crate) fn mark_read(r: &mut Run<'_, '_>, kind: &str, n: i32) -> R<Option<ValueId>> {
+    let v = r.v;
+    let op = r.cx.op();
+    let split = kind.starts_with("split");
+    if split || op == r.ops.pagestep || op == r.ops.pagestep_any {
+        return r.get(&mark_field(kind, n));
+    }
+    let node = r.cx.node().raw();
+    let f = v.field(&marks_before_field(node));
+    if !r.cx.is_loopback(f) {
+        return r.get(&mark_field(kind, n));
+    }
+    let at = v.list(vec![
+        v.int(nodes::T_MARKS_AT),
+        v.int(i64::from_ne_bytes(node.to_ne_bytes())),
+    ]);
+    let item = v.list(vec![v.int(0), at]);
+    let items = v.field("items");
+    let seen = r
+        .contribs
+        .iter()
+        .any(|&(g, s)| g == items && v.seq_to_vec(s).contains(&item));
+    if !seen {
+        r.contribute("items", v.seq_unit(item));
+    }
+    let Some(state) = r.cx.use_field(f)?.filter(|&x| x != ValueId::UNIT) else {
+        return Ok(None);
+    };
+    let k = match kind {
+        "top" => 1,
+        "first" => 2,
+        _ => 3,
+    };
+    Ok(list_of(v, state)
+        .into_iter()
+        .map(|e| list_of(v, e))
+        .find(|e| e.first().is_some_and(|&c| int_of(v, c) == i64::from(n)))
+        .and_then(|e| e.get(k).copied())
+        .filter(|&x| x != ValueId::UNIT))
+}
+
 /// A mark's class and text (a class mark is `[-1, class, text]`).
-fn mark_class(v: &phitex_defuse::Values, m: ValueId) -> (i32, ValueId) {
+pub(crate) fn mark_class(v: &phitex_defuse::Values, m: ValueId) -> (i32, ValueId) {
     let xs = list_of(v, m);
     if xs.len() == 3
         && int_of(v, xs[0]) == -1

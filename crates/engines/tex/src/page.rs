@@ -210,6 +210,10 @@ impl Run<'_, '_> {
         // §1054: `\end` appends its material until the page is empty
         let mut ending: Option<ValueId> = None;
         let mut deadcycles = 0u32;
+        // the marks in force after each fired page (§1012–§1014), by
+        // class: what a document node reading them at a later point sees
+        let mut marks = MarksState::default();
+        let mut published = std::collections::HashSet::new();
         loop {
             let Some(x) = queue.pop_front() else {
                 if let Some(e) = ending
@@ -249,6 +253,17 @@ impl Run<'_, '_> {
                     params.max_depth = n(2);
                     params.top_skip = crate::val::glue_of(v, xs.get(3).copied());
                     params.holding_inserts = n(4);
+                    continue;
+                }
+                nodes::T_MARKS_AT => {
+                    let node = crate::val::int_at(v, x, 1);
+                    if published.insert(node) {
+                        let n = u64::from_ne_bytes(node.to_ne_bytes());
+                        let f = v.field(&crate::etex::marks_before_field(n));
+                        if self.cx.is_loopback(f) {
+                            self.cx.publish(f, marks.value(v, !pages.is_empty()));
+                        }
+                    }
                     continue;
                 }
                 _ => {}
@@ -296,6 +311,7 @@ impl Run<'_, '_> {
                     for y in rest.into_iter().rev() {
                         queue.push_front(y);
                     }
+                    marks.fire(v, &f.marks, &side);
                     let data = self.page_data(&f, &side)?;
                     pages.push(data);
                     pb = PageBuilder::new();
@@ -492,6 +508,57 @@ impl Run<'_, '_> {
             .and_then(|&x| self.v.as_int(x))
             .and_then(|x| usize::try_from(x).ok())
             .unwrap_or(MAX_PAGES)
+    }
+}
+
+/// The marks of every class after the pages fired so far: `class ->
+/// (top, first, bot)` (§1012–§1014, pdfTeX §1493 ff.).
+#[derive(Default)]
+struct MarksState(std::collections::BTreeMap<i32, [Option<ValueId>; 3]>);
+
+impl MarksState {
+    /// A page fires with marks `ks` (numbers into `side.marks`).
+    fn fire(&mut self, v: &Values, ks: &[u32], side: &Side) {
+        let page: Vec<(i32, ValueId)> = ks
+            .iter()
+            .filter_map(|&k| side.marks.get(k as usize).copied())
+            .map(|m| crate::etex::mark_class(v, m))
+            .collect();
+        for &(c, _) in &page {
+            self.0.entry(c).or_default();
+        }
+        for (&c, st) in &mut self.0 {
+            let [top, first, bot] = st;
+            if bot.is_some() {
+                *top = *bot;
+                *first = None;
+            }
+            for &(mc, text) in &page {
+                if mc == c {
+                    if first.is_none() {
+                        *first = Some(text);
+                    }
+                    *bot = Some(text);
+                }
+            }
+            if top.is_some() && first.is_none() {
+                *first = *top;
+            }
+        }
+    }
+
+    /// The `marks:before:<node>` value: UNIT before the first page.
+    fn value(&self, v: &Values, fired: bool) -> ValueId {
+        if !fired {
+            return ValueId::UNIT;
+        }
+        let u = |m: Option<ValueId>| m.unwrap_or(ValueId::UNIT);
+        v.list(
+            self.0
+                .iter()
+                .map(|(&c, [t, f, b])| v.list(vec![v.int(i64::from(c)), u(*t), u(*f), u(*b)]))
+                .collect(),
+        )
     }
 }
 
