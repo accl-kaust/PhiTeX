@@ -637,9 +637,15 @@ impl Run<'_, '_> {
             pack: self.pack_params(true)?,
         };
         let patterns = self.patterns()?;
+        // \lccode of the characters the hyphenator can meet: those of the
+        // list (a character not in it is never asked for)
         let mut lc = [0u16; 256];
+        let mut seen = [false; 256];
+        chars_of(&list, &mut seen);
         for (c, x) in lc.iter_mut().enumerate() {
-            *x = u16::try_from(self.int(&format!("lc:{c}"))?).unwrap_or(0);
+            if seen[c] {
+                *x = u16::try_from(self.int(&format!("lc:{c}"))?).unwrap_or(0);
+            }
         }
         let uc_hyph = self.ipar(Par::uchyph)?;
         let hyphen = view.hyphen.clone();
@@ -1240,9 +1246,14 @@ impl Run<'_, '_> {
                 let depth_limit = self.ipar(Par::boxmaxdepth)?;
                 let (items, _) = self.list_items(md.lid)?;
                 let mut side = Side::default();
+                let mut kept = Vec::with_capacity(items.len());
                 let list: List = items
                     .iter()
-                    .filter_map(|&y| nodes::decode(v, y, &mut side))
+                    .filter_map(|&y| {
+                        let n = nodes::decode(v, y, &mut side)?;
+                        kept.push(y);
+                        Some(n)
+                    })
                     .collect();
                 let adjusted = md.group == group::ADJUSTED_HBOX;
                 let packed = if md.group == group::HBOX || adjusted {
@@ -1268,7 +1279,13 @@ impl Run<'_, '_> {
                 self.set("badness", v.int(i64::from(packed.badness)), true);
                 let h = md.group == group::HBOX || adjusted;
                 self.box_report(h, packed.report, false);
-                let b = nodes::encode_box(v, &packed.node, &side);
+                // packaging without adjustments keeps the list as it was:
+                // its value is the items' (encoded once, when appended)
+                let b = if !adjusted && packed.node.list.len() == kept.len() {
+                    nodes::encode_box_with(v, &packed.node, v.list(kept))
+                } else {
+                    nodes::encode_box(v, &packed.node, &side)
+                };
                 let outer = self.close_group(md)?;
                 if (BOX_FLAG..SHIP_OUT_FLAG).contains(&ctx)
                     && ctx < BOX_FLAG + 256
@@ -2153,6 +2170,42 @@ fn merge_sides(a: Side, b: Side) -> Side {
 pub(crate) fn _unused(_: ValueId) -> Option<Glue> {
     let _ = glue_of;
     None
+}
+
+/// Marks in `seen` the character codes below 256 of `list`, its
+/// ligatures' originals and its nested lists included.
+fn chars_of(list: &[Node], seen: &mut [bool; 256]) {
+    fn mark(seen: &mut [bool; 256], c: u16) {
+        if let Some(s) = seen.get_mut(usize::from(c)) {
+            *s = true;
+        }
+    }
+    for n in list {
+        match n {
+            Node::Char { ch, .. } => mark(seen, *ch),
+            Node::Lig(l) => {
+                mark(seen, l.ch);
+                for &c in &l.original {
+                    mark(seen, c);
+                }
+            }
+            Node::Disc(d) => {
+                chars_of(&d.pre, seen);
+                chars_of(&d.post, seen);
+                chars_of(&d.replace, seen);
+            }
+            Node::Box(b) => chars_of(&b.list, seen),
+            Node::Ins(i) => chars_of(&i.list, seen),
+            Node::Adjust(l) => chars_of(l, seen),
+            Node::Unset(u) => chars_of(&u.list, seen),
+            Node::Glue(g) => {
+                if let Some(l) = &g.leader {
+                    chars_of(std::slice::from_ref(&**l), seen);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The space factor not read yet in a run of characters.
