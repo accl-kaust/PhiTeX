@@ -1316,3 +1316,408 @@ fn a_stopped_run_resumes_at_its_read_while_its_earlier_reads_hold() {
     assert_eq!(SUM_STARTS.load(std::sync::atomic::Ordering::Relaxed), 3);
     assert_eq!(eng.output(n), Some(eng.values().int(16)));
 }
+
+/// Phi's case. `["d", s]` defines `s`; `["n", x]` reads `s`, contributes
+/// `x` to `acc`, opens a scope before itself (with a kind) and unfolds a
+/// continuation `["ch", y]` that contributes `y`; `["r2"]` reads `acc`
+/// anchored at the nearest `n` before it; `["e"]` closes; `["r1"]` reads
+/// `acc` from the unit start; `["r0"]` reads anchored at the `d`.
+struct ContribOpener;
+
+impl Operation for ContribOpener {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(if tag(v, a) == "d" {
+            vec![(v.field("s"), Locality::Local)]
+        } else {
+            Vec::new()
+        })
+    }
+    fn effect(&self, a: &[ValueId], v: &Values) -> defuse::Effect {
+        use defuse::{Brackets, Effect};
+        match tag(v, a).as_str() {
+            "n" => Effect::Scope(Brackets {
+                closes: 0,
+                opens: 1,
+                before: true,
+                kind: Some(v.str("k")),
+                kind_pending: false,
+            }),
+            "e" => Effect::Close,
+            _ => Effect::None,
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let acc = v.field("acc");
+        match tag(v, &a).as_str() {
+            "d" => {
+                cx.define(v.field("s"), a[1]);
+                Ok(ValueId::UNIT)
+            }
+            "n" => {
+                let s = cx.use_field(v.field("s"))?;
+                cx.contribute(acc, v.seq_unit(a[1]));
+                cx.follow(cx.op(), vec![v.str("ch"), v.int(20)]);
+                Ok(s.unwrap_or(ValueId::UNIT))
+            }
+            "ch" => {
+                cx.contribute(acc, v.seq_unit(a[1]));
+                Ok(ValueId::UNIT)
+            }
+            "r2" => {
+                let n = cx.prev_sibling_where(&|_, a| tag(v, a) == "n");
+                cx.acc_range(acc, n)
+            }
+            "r0" => {
+                let d = cx.prev_sibling_where(&|_, a| tag(v, a) == "d");
+                cx.acc_range(acc, d)
+            }
+            "r1" => cx.acc_range(acc, None),
+            _ => Ok(ValueId::UNIT),
+        }
+    }
+}
+
+#[test]
+fn a_contributing_opener_re_run_keeps_one_contribution_and_an_anchor_excludes_itself() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(ContribOpener));
+    let acc = eng.values().field("acc");
+    eng.declare_accumulator(acc, Arc::new(defuse::SeqMonoid));
+    let u = eng.new_unit();
+    let args = |eng: &mut Engine, t: &str, k: i64| {
+        let v = eng.values();
+        if t == "d" || t == "n" {
+            vec![v.str(t), v.int(k)]
+        } else {
+            vec![v.str(t)]
+        }
+    };
+    let a = args(&mut eng, "d", 1);
+    let d = eng.push(u, op, a);
+    let a = args(&mut eng, "n", 10);
+    let _n = eng.push(u, op, a);
+    let a = args(&mut eng, "r2", 0);
+    let r2 = eng.push(u, op, a);
+    let a = args(&mut eng, "r0", 0);
+    let r0 = eng.push(u, op, a);
+    let a = args(&mut eng, "e", 0);
+    let _e = eng.push(u, op, a);
+    let a = args(&mut eng, "r1", 0);
+    let r1 = eng.push(u, op, a);
+    let items = |eng: &Engine, n: NodeId| -> Vec<i64> {
+        let v = eng.values();
+        v.seq_to_vec(eng.output(n).expect("output"))
+            .into_iter()
+            .filter_map(|x| v.as_int(x))
+            .collect()
+    };
+    let check = |eng: &Engine, when: &str| {
+        assert_eq!(
+            items(eng, r2),
+            vec![20],
+            "{when}: anchored at n, n's own contribution is excluded"
+        );
+        assert_eq!(
+            items(eng, r0),
+            vec![10, 20],
+            "{when}: anchored at d, n's contribution is included once"
+        );
+        assert_eq!(
+            items(eng, r1),
+            vec![10, 20],
+            "{when}: from the start, each contribution once"
+        );
+        assert!(
+            eng.check_invariants().is_empty(),
+            "{when}: {:?}",
+            eng.check_invariants()
+        );
+    };
+    let r = eng.evaluate_sequential().expect("cold");
+    check(&eng, "cold");
+    assert_eq!(r.nodes_run, 7, "{r:?}");
+    // The definer changes: n re-runs with the same contributions, effect
+    // and continuation.
+    let a = args(&mut eng, "d", 2);
+    eng.replace(d, op, a);
+    let r = eng.evaluate_sequential().expect("after the edit");
+    check(&eng, "after n's re-run");
+    assert_eq!(r.nodes_run, 2, "d and n re-run; the readers of acc do not: {r:?}");
+    // Twice more, through the speculative and random schedulers.
+    for seed in [3u64, 4] {
+        let a = args(&mut eng, "d", i64::try_from(seed).unwrap());
+        eng.replace(d, op, a);
+        eng.evaluate(&mut defuse::RandomScheduler::new(seed, true), &mut defuse::Sequential)
+            .expect("random");
+        check(&eng, "after a random re-run");
+    }
+}
+
+/// Phi's refinement. `["d", s]` defines `s`; `["n"]` (pending claim and
+/// effect) reads `s`, which stops its first attempt while `d` is in work,
+/// then contributes the operand of its first following sibling, claims
+/// two siblings and opens a scope before itself; `["s", x]` contributes
+/// `x` (and runs before `n` claims it); `["e"]` closes; `["r1"]` folds
+/// `acc` from the unit start.
+struct ClaimOpener;
+
+impl Operation for ClaimOpener {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(if tag(v, a) == "d" {
+            vec![(v.field("s"), Locality::Local)]
+        } else {
+            Vec::new()
+        })
+    }
+    fn claim(&self, a: &[ValueId], v: &Values, _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>) -> Claim {
+        if tag(v, a) == "n" { Claim::Pending } else { Claim::None }
+    }
+    fn effect(&self, a: &[ValueId], v: &Values) -> defuse::Effect {
+        match tag(v, a).as_str() {
+            "n" => defuse::Effect::Pending,
+            "e" => defuse::Effect::Close,
+            _ => defuse::Effect::None,
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        use defuse::{Brackets, Effect};
+        let v = cx.values();
+        let a = cx.args();
+        let acc = v.field("acc");
+        match tag(v, &a).as_str() {
+            "d" => {
+                cx.define(v.field("s"), a[1]);
+                Ok(ValueId::UNIT)
+            }
+            "n" => {
+                let s = cx.use_field(v.field("s"))?;
+                let x = cx
+                    .following(0)
+                    .and_then(|(_, a)| a.get(1).copied())
+                    .unwrap_or(ValueId::UNIT);
+                cx.contribute(acc, v.seq_unit(x));
+                cx.claim(2);
+                cx.set_effect(Effect::Scope(Brackets {
+                    closes: 0,
+                    opens: 1,
+                    before: true,
+                    kind: Some(v.str("k")),
+                    kind_pending: false,
+                }));
+                Ok(s.unwrap_or(ValueId::UNIT))
+            }
+            "s" => {
+                cx.contribute(acc, v.seq_unit(a[1]));
+                Ok(ValueId::UNIT)
+            }
+            "r1" => cx.acc_range(acc, None),
+            _ => Ok(ValueId::UNIT),
+        }
+    }
+}
+
+#[test]
+fn a_claim_landing_on_a_finished_sibling_retracts_its_contribution() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(ClaimOpener));
+    let acc = eng.values().field("acc");
+    eng.declare_accumulator(acc, Arc::new(defuse::SeqMonoid));
+    let u = eng.new_unit();
+    let args = |eng: &mut Engine, t: &str, k: i64| {
+        let v = eng.values();
+        if t == "d" || t == "s" {
+            vec![v.str(t), v.int(k)]
+        } else {
+            vec![v.str(t)]
+        }
+    };
+    let a = args(&mut eng, "d", 1);
+    let d = eng.push(u, op, a);
+    let a = args(&mut eng, "n", 0);
+    let n = eng.push(u, op, a);
+    let a = args(&mut eng, "s", 7);
+    let s1 = eng.push(u, op, a);
+    let a = args(&mut eng, "s", 8);
+    let s2 = eng.push(u, op, a);
+    let a = args(&mut eng, "e", 0);
+    let _e = eng.push(u, op, a);
+    let a = args(&mut eng, "r1", 0);
+    let r1 = eng.push(u, op, a);
+    let items = |eng: &Engine, x: NodeId| -> Vec<i64> {
+        let v = eng.values();
+        v.seq_to_vec(eng.output(x).expect("output"))
+            .into_iter()
+            .filter_map(|x| v.as_int(x))
+            .collect()
+    };
+    let check = |eng: &Engine, when: &str| {
+        assert_eq!(
+            items(eng, r1),
+            vec![7],
+            "{when}: n's contribution once, s1's retracted by the claim"
+        );
+        assert_eq!(eng.claimed(n), vec![s1, s2], "{when}");
+        assert!(
+            eng.check_invariants().is_empty(),
+            "{when}: {:?}",
+            eng.check_invariants()
+        );
+    };
+    let r = eng.evaluate_sequential().expect("cold");
+    assert!(r.stops >= 1, "n's first attempt stops on d: {r:?}");
+    // A pending claim holds the siblings it may cover: they never ran.
+    assert_eq!(
+        r.nodes_run, 4,
+        "d, n, e, r1; s1 and s2 held by the pending claim: {r:?}"
+    );
+    check(&eng, "cold");
+    // The siblings did run, in an earlier evaluation, when `n` was a plain
+    // node: the claim then lands on finished siblings.
+    let a = args(&mut eng, "p", 0);
+    eng.replace(n, op, a);
+    let r = eng.evaluate_sequential().expect("plain");
+    assert_eq!(items(&eng, r1), vec![7, 8], "{r:?}");
+    assert_eq!(eng.claimed(n), Vec::<NodeId>::new());
+    let a = args(&mut eng, "n", 0);
+    eng.replace(n, op, a);
+    let r = eng.evaluate_sequential().expect("claim on finished siblings");
+    assert_eq!(
+        r.nodes_run, 2,
+        "n and r1; the claimed siblings go inert without running: {r:?}"
+    );
+    check(&eng, "claim on finished siblings");
+    for seed in [2u64, 3, 4] {
+        let a = args(&mut eng, "d", i64::try_from(seed).unwrap());
+        eng.replace(d, op, a);
+        eng.evaluate(&mut defuse::RandomScheduler::new(seed, true), &mut defuse::Sequential)
+            .expect("random");
+        check(&eng, "after a re-run of n");
+    }
+}
+
+/// Phi's second finding. `["o"]` opens a scope before itself; `["a", x]`
+/// defines `f = x` locally; `["e"]` closes; `["b"]` reads `f` with a read
+/// hint, `["bn"]` reads `f` without one; `["g", x]` defines `f` globally
+/// before the scope.
+struct HintedScope;
+
+impl Operation for HintedScope {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(match tag(v, a).as_str() {
+            "a" => vec![(v.field("f"), Locality::Local)],
+            "g" => vec![(v.field("f"), Locality::Global)],
+            _ => Vec::new(),
+        })
+    }
+    fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        (tag(v, a) == "b").then(|| vec![v.field("f")])
+    }
+    fn effect(&self, a: &[ValueId], v: &Values) -> defuse::Effect {
+        use defuse::{Brackets, Effect};
+        match tag(v, a).as_str() {
+            "o" => Effect::Scope(Brackets {
+                closes: 0,
+                opens: 1,
+                before: true,
+                kind: None,
+                kind_pending: false,
+            }),
+            "e" => Effect::Close,
+            "ep" => Effect::Pending,
+            _ => Effect::None,
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match tag(v, &a).as_str() {
+            "a" => {
+                cx.define(v.field("f"), a[1]);
+                Ok(ValueId::UNIT)
+            }
+            "ep" => {
+                cx.set_effect(defuse::Effect::Close);
+                Ok(ValueId::UNIT)
+            }
+            "g" => {
+                cx.define_with(v.field("f"), a[1], Locality::Global);
+                Ok(ValueId::UNIT)
+            }
+            "b" | "bn" => Ok(cx.use_field(v.field("f"))?.unwrap_or(ValueId::UNIT)),
+            _ => Ok(ValueId::UNIT),
+        }
+    }
+}
+
+#[test]
+fn a_hinted_read_after_a_scope_does_not_see_the_scopes_local_definition() {
+    for (with_global, pending_close, random) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, true, true),
+        (true, true, true),
+        (true, false, true),
+    ] {
+        let mut eng = Engine::new();
+        let op = eng.register(Arc::new(HintedScope));
+        let u = eng.new_unit();
+        let args = |eng: &mut Engine, t: &str, k: i64| {
+            let v = eng.values();
+            if t == "a" || t == "g" {
+                vec![v.str(t), v.int(k)]
+            } else {
+                vec![v.str(t)]
+            }
+        };
+        if with_global {
+            let a = args(&mut eng, "g", 1);
+            eng.push(u, op, a);
+        }
+        let a = args(&mut eng, "o", 0);
+        eng.push(u, op, a);
+        let a = args(&mut eng, "a", 12);
+        eng.push(u, op, a);
+        let a = args(&mut eng, if pending_close { "ep" } else { "e" }, 0);
+        eng.push(u, op, a);
+        let a = args(&mut eng, "b", 0);
+        let b = eng.push(u, op, a);
+        let a = args(&mut eng, "bn", 0);
+        let bn = eng.push(u, op, a);
+        if random {
+            eng.evaluate(&mut defuse::RandomScheduler::new(11, true), &mut defuse::Sequential)
+                .expect("random");
+        } else {
+            eng.evaluate_sequential().expect("cold");
+        }
+        let v = eng.values();
+        let want = if with_global { Some(1) } else { None };
+        let got = |x: NodeId| v.as_int(eng.output(x).expect("output"));
+        let case = format!("global {with_global}, pending close {pending_close}, random {random}");
+        assert_eq!(got(bn), want, "without a hint: {case}");
+        assert_eq!(got(b), want, "with a hint: {case}");
+        assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+    }
+    // The close arrives after the readers were bound: an unclosed scope
+    // reaches them (12), the inserted close takes it away again.
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(HintedScope));
+    let u = eng.new_unit();
+    let v = eng.values();
+    let (o, a, e, b, bn) = (v.str("o"), v.str("a"), v.str("e"), v.str("b"), v.str("bn"));
+    let twelve = v.int(12);
+    eng.push(u, op, vec![o]);
+    eng.push(u, op, vec![a, twelve]);
+    let b = eng.push(u, op, vec![b]);
+    let bn = eng.push(u, op, vec![bn]);
+    eng.evaluate_sequential().expect("unclosed");
+    let got = |eng: &Engine, x: NodeId| eng.values().as_int(eng.output(x).expect("output"));
+    assert_eq!((got(&eng, b), got(&eng, bn)), (Some(12), Some(12)), "unclosed scope");
+    eng.insert_before(b, op, vec![e]);
+    eng.evaluate_sequential().expect("closed by an edit");
+    assert_eq!((got(&eng, b), got(&eng, bn)), (None, None), "closed by an edit");
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+}
