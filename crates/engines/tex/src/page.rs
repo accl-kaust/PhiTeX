@@ -244,6 +244,7 @@ impl Run<'_, '_> {
         let mut before: Vec<ValueId> = Vec::new();
         let mut ended = false;
         let mut plan: Vec<ValueId> = Vec::new();
+        let mut flushplan: Vec<ValueId> = Vec::new();
         let mut reaches: Vec<usize> = Vec::new();
         let mut j = 0;
         while !ended && j < MAX_PAGES {
@@ -257,6 +258,16 @@ impl Run<'_, '_> {
             // the job-written files' order: an immediate write's entry
             // where its marker is, page `j` where it fires (`wplan`)
             plan.extend(out.writes.iter().copied());
+            // the flush points on this page: the state after it (after
+            // the page before, if this one does not fire)
+            for &(n, k) in &out.flushes {
+                let after = if out.fired.is_some() {
+                    i64::try_from(j).unwrap_or(0)
+                } else {
+                    i64::try_from(j).unwrap_or(0) - 1
+                };
+                flushplan.push(v.list(vec![v.int(n), v.int(k), v.int(after)]));
+            }
             for &node in &out.passed {
                 if published.insert(node) {
                     let n = u64::from_ne_bytes(node.to_ne_bytes());
@@ -294,6 +305,9 @@ impl Run<'_, '_> {
         starts.pop();
         let wp = v.seq_unit(v.list(plan));
         self.contribute("wplan", wp);
+        if !flushplan.is_empty() {
+            self.contribute("flushplan", v.seq_unit(v.list(flushplan)));
+        }
         // each page's own material (`pp:items:<j>`, its start rebased to
         // it): a `brk` reads only its page, so an edit elsewhere on the
         // list wakes no other page's `brk`
@@ -683,6 +697,56 @@ impl Run<'_, '_> {
     }
 
     /// Which page this step is (its first argument), or `MAX_PAGES`.
+    /// A document node forced the page out (§1005, a penalty of -10000
+    /// or less on the main vertical list: `\clearpage`): TeX's output
+    /// routine runs here, so what the text reads next of the state the
+    /// routines change (`\count0`, LaTeX's shipout counter at
+    /// `\enddocument`) is the state after the page that breaks here.
+    /// The node marks the point on the list (`T_FLUSH_AT`) and reads its
+    /// loop-back `pgst:at:<node>:<k>` (the writer publishes it from the
+    /// chain: `[counts, pairs]`), its fields read in place of the
+    /// engine's from here on; UNIT (the first round) leaves the state as
+    /// it is.
+    pub(crate) fn flush_point(&mut self) -> R<()> {
+        let v = self.v;
+        let op = self.cx.op();
+        if op == self.ops.pagestep || op == self.ops.pagestep_any || self.pg.is_some() {
+            return Ok(());
+        }
+        let node = self.cx.node().raw();
+        let k = self.flushes;
+        self.flushes += 1;
+        let f = v.field(&format!("pgst:at:{node}:{k}"));
+        if !self.cx.is_loopback(f) {
+            // the client declares it (`flushdecl:<node>:<k>`, answered by
+            // `api::Graph::settle`) and the node runs again
+            self.cx.use_env(v.field(&format!("flushdecl:{node}:{k}")))?;
+            if !self.cx.is_loopback(f) {
+                return Ok(());
+            }
+        }
+        let at = v.list(vec![
+            v.int(nodes::T_FLUSH_AT),
+            v.int(i64::from_ne_bytes(node.to_ne_bytes())),
+            v.int(i64::try_from(k).unwrap_or(0)),
+        ]);
+        self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+        let Some(x) = self.cx.use_field(f)?.filter(|&x| x != ValueId::UNIT) else {
+            return Ok(());
+        };
+        let xs = list_of(v, x);
+        if let Some(&cs) = xs.first() {
+            self.preload_counts(cs);
+        }
+        if let Some(&pairs) = xs.get(1) {
+            for (g, y) in pgst_pairs(v, Some(pairs)) {
+                let l = self.loc_of(g);
+                self.st.preload(l, Some(y));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn page_index(&self) -> usize {
         self.cx
             .args()
@@ -813,6 +877,8 @@ fn set_params(v: &Values, p: &mut PageParams, x: ValueId) {
 struct PageFold {
     fired: Option<(Box<phitex_typeset::page::Fired>, Side, PageStart)>,
     passed: Vec<i64>,
+    /// The flush points met (`T_FLUSH_AT`): `[node, k]`.
+    flushes: Vec<(i64, i64)>,
     /// The immediate writes' entries met (`T_WRITE_AT`), in order.
     writes: Vec<ValueId>,
     stuck: bool,
@@ -854,6 +920,7 @@ fn fold_page(
     let mut deadcycles = start.deadcycles;
     let mut passed = Vec::new();
     let mut writes = Vec::new();
+    let mut flushes = Vec::new();
     let mut class = |n: u16| -> InsertClass {
         for &c in classes {
             let xs = list_of(v, c);
@@ -916,6 +983,7 @@ fn fold_page(
                     fired: None,
                     passed,
                     writes,
+                    flushes,
                     stuck: false,
                     reach,
                 };
@@ -927,6 +995,10 @@ fn fold_page(
             }
             nodes::T_MARKS_AT => {
                 passed.push(crate::val::int_at(v, x, 1));
+                continue;
+            }
+            nodes::T_FLUSH_AT => {
+                flushes.push((crate::val::int_at(v, x, 1), crate::val::int_at(v, x, 2)));
                 continue;
             }
             nodes::T_WRITE_AT => {
@@ -978,6 +1050,7 @@ fn fold_page(
                 fired: Some((f, side, end)),
                 passed,
                 writes,
+                flushes,
                 stuck: false,
                 reach,
             };
@@ -987,6 +1060,7 @@ fn fold_page(
         fired: None,
         passed,
         writes,
+        flushes,
         stuck: ending.is_some() && !pb.page.is_empty(),
         reach,
     }
@@ -1321,6 +1395,8 @@ impl FinalState {
         let mut state: std::collections::BTreeMap<String, (Field, ValueId)> =
             std::collections::BTreeMap::new();
         let mut cur = ValueId::UNIT;
+        // the state after each page, for the flush points' loop-backs
+        let mut after: Vec<(ValueId, ValueId)> = Vec::new();
         // `\\count0..9` before the chain, then as folded
         let mut counts = Self::counts(cx)?;
         let ints =
@@ -1406,8 +1482,26 @@ impl FinalState {
             log_pub(o, "pgdef", j, count_entries(v, Some(cs)));
             cx.publish(v.field(&format!("pgdef:{j}")), cs);
             cx.contribute(v.field("pgsts"), v.seq_unit(v.list(vec![v.int(1), jj, cs])));
+            after.resize(j + 1, (ValueId::UNIT, ValueId::UNIT));
+            after[j] = (cs, cur);
         }
         Self::log_refuted(o, refuted);
+        // the flush points (`flushplan`: `[node, k, page]`): the state
+        // after that page, UNIT before the first
+        let fp = cx.acc_range(v.field("flushplan"), None)?;
+        for e in v.seq_to_vec(fp).iter().flat_map(|&e| list_of(v, e)) {
+            let xs = list_of(v, e);
+            let [n, k, p] = xs.as_slice() else { continue };
+            let f = v.field(&format!("pgst:at:{}:{}", int_of(v, *n), int_of(v, *k)));
+            if !cx.is_loopback(f) {
+                continue;
+            }
+            let x = usize::try_from(int_of(v, *p))
+                .ok()
+                .and_then(|p| after.get(p))
+                .map_or(ValueId::UNIT, |&(cs, st)| v.list(vec![cs, st]));
+            cx.publish(f, x);
+        }
         Ok(FinalState {
             map: state.into_values().collect(),
         })

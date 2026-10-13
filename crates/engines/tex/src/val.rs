@@ -761,12 +761,12 @@ pub(crate) fn field_name(v: &Values, f: Field) -> String {
 /// its body, anything else as its tree, cut at 200 characters.
 pub(crate) fn show_def(v: &Values, x: ValueId) -> String {
     let mut s = String::new();
-    match Mean::decode(v, Some(x)) {
-        Mean::Macro(m) => {
-            s.push_str("macro:");
-            crate::print::show_toks(&mut s, &m.body, 92, &mut |_| 11);
-        }
-        _ => s.push_str(&format!("{:?}", v.get(x))),
+    if let Mean::Macro(m) = Mean::decode(v, Some(x)) {
+        s.push_str("macro:");
+        crate::print::show_toks(&mut s, &m.body, 92, &mut |_| 11);
+    } else {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{:?}", v.get(x));
     }
     if s.len() > 200 {
         let mut k = 200;
