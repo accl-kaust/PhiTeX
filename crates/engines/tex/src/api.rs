@@ -389,6 +389,10 @@ pub struct Stats {
     /// The longest chain of dependent waits among the live nodes after
     /// the last evaluation (the engine's `critical_path`), in nodes.
     pub critical_path: Option<usize>,
+    /// The light page steps run (OUTPUT.md §4.2a), and those of them
+    /// with no output routine, which may define anything.
+    pub page_steps: u64,
+    pub page_steps_any: u64,
 }
 
 /// A round's counters (`PHITEX_TEX_TIME`).
@@ -435,6 +439,9 @@ impl Stats {
         self.loop_rounds += r.rounds;
         self.pending_waits += r.pending_waits;
         self.stops += r.stops;
+        self.page_steps +=
+            Report::by_op(&r.runs_by_op, "pagestep") + Report::by_op(&r.runs_by_op, "pagestep_any");
+        self.page_steps_any += Report::by_op(&r.runs_by_op, "pagestep_any");
     }
 }
 
@@ -482,7 +489,12 @@ impl Graph {
         let exec = eng.register(Arc::new(Exec(shared.clone())));
         let put = eng.register(Arc::new(Put(shared.clone())));
         let outpage = eng.register(Arc::new(OutPage(shared.clone())));
-        let pagestep = eng.register(Arc::new(crate::page_step::PageStep(shared.clone())));
+        let [pagestep, pagestep_any] = [false, true].map(|any| {
+            eng.register(Arc::new(crate::page_step::PageStep {
+                shared: shared.clone(),
+                any,
+            }))
+        });
         let dvi = eng.register(Arc::new(Dvi));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
@@ -491,6 +503,7 @@ impl Graph {
             put,
             outpage,
             pagestep,
+            pagestep_any,
         };
         let _ = shared.set(ops);
         for f in [

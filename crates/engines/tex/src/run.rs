@@ -42,6 +42,7 @@ pub(crate) struct Ops {
     pub put: OpId,
     pub outpage: OpId,
     pub pagestep: OpId,
+    pub pagestep_any: OpId,
 }
 
 /// A level of the input stack.
@@ -170,7 +171,7 @@ pub(crate) struct Run<'c, 'a> {
     pub no_pull: bool,
     /// A `build_page` call not yet folded (OUTPUT.md §4.2a): the
     /// children and main-list items the run had made at the call.
-    pub page_due: Option<(usize, usize)>,
+    pub page_due: Option<(usize, usize, bool)>,
     own: FxHashMap<Field, Option<ValueId>>,
     pub defs: Vec<(Field, ValueId, Locality)>,
     pub contribs: Vec<(Field, ValueId)>,
@@ -1261,8 +1262,13 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // a deferred page step comes first, then the input left, what
         // follows the command: its continuation, at its own depth
-        if self.page_due.is_some() {
-            self.cx.follow(self.ops.pagestep, Vec::new());
+        if let Some((_, _, any)) = self.page_due {
+            let op = if any {
+                self.ops.pagestep_any
+            } else {
+                self.ops.pagestep
+            };
+            self.cx.follow(op, Vec::new());
         }
         for args in self.leftover() {
             self.cx.follow(self.ops.exec, args);
@@ -1307,7 +1313,7 @@ struct Snapshot {
     eof: bool,
     claim_rest: bool,
     astate: Option<i64>,
-    page_due: Option<(usize, usize)>,
+    page_due: Option<(usize, usize, bool)>,
 }
 
 fn is_hex(c: u32) -> bool {
