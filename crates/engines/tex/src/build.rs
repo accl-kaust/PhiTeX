@@ -189,6 +189,45 @@ impl Run<'_, '_> {
         }
     }
 
+    /// Leaves the run's one open group (sharing the list it is in) to
+    /// the engine as a scope (`new_save_level`, §274): its kind is
+    /// `[group, sid, list, mode, depth, parent kind, extra…]`, the
+    /// following siblings' level 0 ([`Run::base_mode`]). Its local
+    /// definitions are the run's, made inside the scope (`before`); its
+    /// `\aftergroup` tokens the scope's `ag` list.
+    pub(crate) fn leave_scope(&mut self) -> R<()> {
+        let v = self.v;
+        let base = self.base_mode()?;
+        let parent = self.scope_kind()?.unwrap_or(ValueId::UNIT);
+        let Some(l) = self.nest.pop() else {
+            return Ok(());
+        };
+        let sid = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+        let mut xs = vec![
+            v.int(l.group),
+            v.int(sid),
+            v.int(base.lid),
+            v.int(i64::from(l.mode)),
+            v.int(base.depth + 1),
+            parent,
+        ];
+        xs.extend(l.extra.iter().copied());
+        let kind = v.list(xs);
+        if !l.ag.is_empty() {
+            let mut xs = vec![v.int(sid)];
+            xs.extend(l.ag.iter().map(|t| t.encode(v)));
+            self.set("ag", v.list(xs), false);
+        }
+        self.effect = Effect::Scope(phitex_defuse::Brackets {
+            closes: 0,
+            opens: 1,
+            before: true,
+            kind: Some(kind),
+            kind_pending: false,
+        });
+        Ok(())
+    }
+
     /// What `unsave` does besides restoring: the `\aftergroup` tokens
     /// (§282), and box registers changed "at the same level" (§1079,
     /// §1247), defined again outside.
