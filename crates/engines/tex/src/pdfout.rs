@@ -1241,7 +1241,14 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
             return Ok(v.str(""));
         };
         set_page_params(v, &mut st, &pc.params, pc.margins);
-        if st.replay_page(&pc.rec, &pc.fonts, &pc.base) {
+        let placed = st.replay_page(&pc.rec, &pc.fonts, &pc.base);
+        if let Err(why) = &placed
+            && shipped == 0
+            && crate::exec::env_flag!("PHITEX_TEX_TIME")
+        {
+            eprintln!("pdf pages: page {} shipped again: {why}", replayed + 1);
+        }
+        if placed.is_ok() {
             replayed += 1;
         } else {
             shipped += 1;

@@ -120,6 +120,10 @@ impl PdfState {
     fn pre_key(&self) -> String {
         let mut thread = self.thread.clone();
         thread.last = None;
+        // (`pdfshipoutbegin` and `colorstackused` as the page starts)
+        let mut stacks = self.stacks.clone();
+        stacks.ship_begin(true);
+        stacks.used();
         format!(
             "{:?}",
             (
@@ -138,7 +142,7 @@ impl PdfState {
                 &self.link_stack,
                 &thread,
                 self.dummy_font,
-                &self.stacks,
+                &stacks,
                 (self.vf_cur_s, self.cur_s, self.cur_form),
             )
         )
@@ -309,18 +313,35 @@ impl PdfState {
     /// would ship it here: false (the state untouched but for
     /// `init_output`) where the replay would not give the walk's bytes.
     /// `base` is the fonts used on the state the page was recorded on.
+    ///
+    /// # Errors
+    /// Why the page cannot be placed (the caller ships it).
+    #[allow(clippy::too_many_lines)]
     pub fn replay_page(
         &mut self,
         rec: &PageRecord,
         fonts: &dyn FontSource,
         base: &BTreeSet<FontId>,
-    ) -> bool {
+    ) -> Result<(), String> {
         let Some(post) = rec.post.as_deref().filter(|_| rec.simple) else {
-            return false;
+            return Err("not only text and rules".to_owned());
         };
         self.init_output();
-        if self.pre_key() != rec.pre {
-            return false;
+        let pre = self.pre_key();
+        if pre != rec.pre {
+            let at = pre
+                .bytes()
+                .zip(rec.pre.bytes())
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
+            let from = at.saturating_sub(60);
+            return Err(format!(
+                "the variables differ: here {:?}, recorded {:?}",
+                pre.get(from..(at + 60).min(pre.len())).unwrap_or(""),
+                rec.pre
+                    .get(from..(at + 60).min(rec.pre.len()))
+                    .unwrap_or("")
+            ));
         }
         // the fonts are shared as where the page was recorded: a font
         // used here keeps its `ff`, and one the page initializes finds
@@ -328,7 +349,7 @@ impl PdfState {
         // pages before made
         for &(f, k) in &rec.ffs {
             if self.fonts.get(&f).is_some_and(|s| s.used) && self.ff(f) != k {
-                return false;
+                return Err(format!("font {f} shares another font here"));
             }
         }
         let owned: BTreeSet<(Vec<u8>, String)> = self
@@ -344,13 +365,13 @@ impl PdfState {
                     Some(s) if s.used => {}
                     Some(s) => {
                         if share_key(s).is_some_and(|k| owned.contains(&k)) {
-                            return false;
+                            return Err(format!("font {f} would share a page's font"));
                         }
                     }
                     None => {
                         let name = fonts.name(*f);
                         if owned.iter().any(|(n, _)| n == name) {
-                            return false;
+                            return Err(format!("font {f} would share a page's font"));
                         }
                     }
                 }
@@ -415,6 +436,6 @@ impl PdfState {
         self.write_resources(last_resources, true);
         self.restore_resource_lists(saved);
         self.set_scratch(post);
-        true
+        Ok(())
     }
 }
