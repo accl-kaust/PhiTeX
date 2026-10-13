@@ -1210,7 +1210,6 @@ impl Graph {
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             steps_done: Arc::new(Mutex::new(Vec::new())),
             lblog: Arc::new(Mutex::new(crate::page::LbLog::default())),
-            eval: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
@@ -2579,11 +2578,6 @@ impl Build {
         let mut stats = Stats::default();
         self.g.take_steps_done();
         self.g.take_refuted();
-        // the serial fallback is per evaluation (`pgref` is keyed by it)
-        self.g
-            .ops
-            .eval
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.g.queries.clear();
         // (the files sliced into the document's regions were read)
         let sliced: Vec<(String, bool)> = self
@@ -3300,6 +3294,41 @@ impl Build {
         out
     }
 
+    /// The critical chain's links whose reader and writer are both page
+    /// steps (the target graph forbids any): reader, writer, the cause.
+    #[must_use]
+    pub fn page_step_links(&self) -> Vec<String> {
+        use phitex_defuse::Cause;
+        let eng = &self.g.eng;
+        let v = eng.values();
+        let step = |n: phitex_defuse::NodeId| {
+            eng.node_info(n)
+                .is_some_and(|i| i.op.starts_with("pagestep"))
+        };
+        let mut out = Vec::new();
+        for (n, c) in eng.critical_chain() {
+            let (w, f) = match c {
+                Cause::Changed { field, site } => (site, Some(field)),
+                Cause::Rebind { field, to, .. } => (to, Some(field)),
+                Cause::Woken { by, field, .. } => (Some(by), field),
+                Cause::Output { of } => (Some(of), None),
+                _ => (None, None),
+            };
+            if let Some(w) = w
+                && step(n)
+                && step(w)
+            {
+                out.push(format!(
+                    "[{}] <- [{}] {}",
+                    describe(eng, n),
+                    describe(eng, w),
+                    f.map_or_else(String::new, |f| field_name(v, f))
+                ));
+            }
+        }
+        out
+    }
+
     /// The engine's critical chain, from the highest finished node back:
     /// for each link the node's operation and first argument (shortened),
     /// the cause's kind, and its field if any ([`Engine::critical_chain`]).
@@ -3523,9 +3552,6 @@ fn declare_fields(eng: &mut Engine) {
         let f = eng.values().field(&format!("pgst:{j}"));
         eng.declare_loopback(f, ValueId::UNIT);
     }
-    // refuted rounds of the page chain (two: it runs serially)
-    let f = eng.values().field("pgref");
-    eng.declare_loopback(f, ValueId::UNIT);
     for f in crate::hints::COUNTERS {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SumMonoid));
