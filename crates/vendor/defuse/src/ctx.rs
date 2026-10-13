@@ -539,6 +539,13 @@ impl<'a> Ctx<'a> {
         self.kind = eff_kind(e);
     }
 
+    /// Sets the kind of the scope this node opens, for a static opener
+    /// declared with `Brackets { kind_pending: true, .. }`: readers of
+    /// [`Self::scope_kind`] inside it wait for this run, nothing else does.
+    pub fn set_kind(&mut self, kind: ValueId) {
+        self.kind = Some(kind);
+    }
+
     /// Whether this node's scope effect is pending (decided by its run).
     #[must_use]
     pub fn effect_pending(&self) -> bool {

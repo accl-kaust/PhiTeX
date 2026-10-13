@@ -855,6 +855,7 @@ impl Operation for TraceOp {
                 opens: *opens,
                 before: *before,
                 kind,
+                kind_pending: false,
             }),
         }
     }
