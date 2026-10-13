@@ -275,6 +275,7 @@ struct Decoded {
     toks: FxHashMap<ValueId, Vec<Tok>>,
     means: FxHashMap<ValueId, Mean>,
     glues: FxHashMap<ValueId, Glue>,
+    frames: FxHashMap<ValueId, Option<crate::run::Frame>>,
 }
 
 /// Entries kept per map before it is emptied (a bound, not a policy).
@@ -282,6 +283,16 @@ const DECODED_MAX: usize = 1 << 15;
 
 thread_local! {
     static DECODED: std::cell::RefCell<Decoded> = std::cell::RefCell::default();
+}
+
+/// The input frame `id` (`make()` decodes it), through this thread's
+/// cache.
+pub(crate) fn frame_of(
+    v: &Values,
+    id: ValueId,
+    make: impl FnOnce() -> Option<crate::run::Frame>,
+) -> Option<crate::run::Frame> {
+    decoded(v, id, |d| &mut d.frames, make)
 }
 
 /// `make()`, the decoding of `id`, through this thread's cache.
