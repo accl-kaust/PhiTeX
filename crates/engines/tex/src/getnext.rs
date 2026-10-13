@@ -868,45 +868,41 @@ impl Run<'_, '_> {
     // ------------------------------------------------- mark and rewind
 
     /// What a stopped command must not have changed to be undone by
-    /// rewinding its input: O(1), the clocks and the sizes.
-    fn state_sig(&self) -> u64 {
+    /// rewinding its input: the clocks and the sizes, copied (no hash).
+    #[inline]
+    fn state_sig(&self) -> Sig {
         let (a, b, c, d) = self.st.sig();
         let top = self.nest.last();
-        let mut h: u64 = 0x9e37_79b9_7f4a_7c15;
-        for x in [
-            a as u64,
-            b as u64,
-            c as u64,
-            d,
-            self.contribs.len() as u64,
-            self.kids.len() as u64,
-            self.nest.len() as u64,
-            self.conds.len() as u64,
-            self.if_codes.len() as u64,
-            self.next_lid.cast_unsigned(),
-            self.irreversible,
-            self.fread.len() as u64,
-            self.pulled as u64,
-            u64::from(self.eof),
-            self.last_par.0.cast_unsigned() ^ self.last_par.1.cast_unsigned().rotate_left(32),
-            u64::from(self.claim_rest),
-            self.pdf_occ as u64,
-            self.lines_entered.cast_unsigned(),
-            top.map_or(0, |l| l.list.len() as u64),
-            top.and_then(|l| l.list.last().map(|x| x.raw()))
+        Sig {
+            st: (a, b, c, d),
+            contribs: self.contribs.len(),
+            kids: self.kids.len(),
+            nest: self.nest.len(),
+            conds: self.conds.len(),
+            if_codes: self.if_codes.len(),
+            next_lid: self.next_lid,
+            irreversible: self.irreversible,
+            fread: self.fread.len(),
+            pulled: self.pulled,
+            eof: self.eof,
+            last_par: self.last_par,
+            claim_rest: self.claim_rest,
+            pdf_occ: self.pdf_occ,
+            lines_entered: self.lines_entered,
+            top_list: top.map_or(0, |l| l.list.len()),
+            top_last: top
+                .and_then(|l| l.list.last().map(|x| x.raw()))
                 .unwrap_or(0),
-            top.map_or(0, |l| l.ag.len() as u64),
-            top.map_or(0, |l| l.extra.len() as u64),
-            top.map_or(0, |l| l.prev_graf.cast_unsigned()),
-            self.nest
+            top_ag: top.map_or(0, |l| l.ag.len()),
+            top_extra: top.map_or(0, |l| l.extra.len()),
+            top_prev_graf: top.map_or(0, |l| l.prev_graf),
+            below_list: self
+                .nest
                 .len()
                 .checked_sub(2)
                 .and_then(|i| self.nest.get(i))
-                .map_or(0, |l| l.list.len() as u64),
-        ] {
-            h = (h ^ x).wrapping_mul(0x100_0000_01b3).rotate_left(23);
+                .map_or(0, |l| l.list.len()),
         }
-        h
     }
 
     /// A command begins: marks the input and the state it starts from.
@@ -953,13 +949,39 @@ impl Run<'_, '_> {
     }
 }
 
+/// The run's state as a command began ([`Run::state_sig`]).
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Sig {
+    st: (usize, usize, usize, u64),
+    contribs: usize,
+    kids: usize,
+    nest: usize,
+    conds: usize,
+    if_codes: usize,
+    next_lid: i64,
+    irreversible: u64,
+    fread: usize,
+    pulled: usize,
+    eof: bool,
+    last_par: (i64, i64),
+    claim_rest: bool,
+    pdf_occ: usize,
+    lines_entered: i64,
+    top_list: usize,
+    top_last: u64,
+    top_ag: usize,
+    top_extra: usize,
+    top_prev_graf: i64,
+    below_list: usize,
+}
+
 /// The command in progress (`Run::begin_command`): the input levels as
 /// it found them and a fingerprint of the rest of the run's state.
 #[derive(Default)]
 pub(crate) struct Mark {
     pub active: bool,
     pub snap: input::Snapshot,
-    pub sig: u64,
+    pub sig: Sig,
     pub effect: Option<phitex_defuse::Effect>,
     pub astate: Option<i64>,
     pub aopen: i64,
