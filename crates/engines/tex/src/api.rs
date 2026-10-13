@@ -58,6 +58,16 @@ pub struct Options {
     /// `PHITEX_THREADS`, else the available parallelism; `Some(1)` runs
     /// them in order. The output is the same at any count.
     pub threads: Option<usize>,
+    /// Whether the PDF file's objects are numbered as pdfTeX numbers
+    /// them (the `pdf:state` fold, byte-identical), or each page and
+    /// each object TeX makes is written on its own and numbered at the
+    /// end (`crates/output/pdf/RELAXED.md`: the same file up to object
+    /// numbers and resource names). A document the relaxed mode does
+    /// not cover is built in exact mode, with a warning in the log.
+    pub exact_objects: bool,
+    /// Where the build reports what it runs ([`Build::progress`]), for
+    /// a reader that polls it during the cold build; `None` makes one.
+    pub progress: Option<Arc<crate::exec::Progress>>,
 }
 
 impl Default for Options {
@@ -73,6 +83,8 @@ impl Default for Options {
             prelude_bytes: None,
             time_limit: Some(std::time::Duration::from_secs(600)),
             threads: None,
+            exact_objects: true,
+            progress: None,
         }
     }
 }
@@ -446,6 +458,10 @@ struct Graph {
     written: Vec<String>,
     /// The executor's threads ([`Options::threads`]).
     threads: usize,
+    /// Why the relaxed PDF mode gave way to exact mode, once it has.
+    pdf_exact: Option<String>,
+    /// What the executor runs now, for readers on other threads.
+    watch: crate::exec::Watch,
 }
 
 impl Graph {
@@ -471,8 +487,17 @@ impl Graph {
         let ops = Ops { exec, put, outpage };
         let _ = shared.set(ops);
         for f in [
-            "items", "log", "diags", "needs", "defs", "pages", "pagehash", "writes", "tails",
+            "items",
+            "log",
+            "diags",
+            "needs",
+            "defs",
+            "pages",
+            "pagehash",
+            "writes",
+            "tails",
             "streams",
+            crate::pdfrelaxed::PIECES,
         ] {
             let fld = eng.values().field(f);
             eng.declare_accumulator(fld, Arc::new(SeqMonoid));
@@ -491,6 +516,8 @@ impl Graph {
             absent: Vec::new(),
             written: Vec::new(),
             threads: crate::exec::threads(threads),
+            pdf_exact: None,
+            watch: crate::exec::Watch::new(crate::exec::threads(threads), None),
             eval_errors: Vec::new(),
         }
     }
@@ -572,6 +599,9 @@ impl Graph {
     fn environment(&self, fixpoint: bool) -> Vec<(Field, ValueId)> {
         let v = self.eng.values();
         let mut env = self.files.clone();
+        if self.pdf_exact.is_some() {
+            env.push((v.field("pdf:exact"), v.int(1)));
+        }
         if fixpoint {
             let names = self.written.iter().map(|n| v.str(n)).collect();
             env.push((v.field("loopfiles"), v.list(names)));
@@ -586,7 +616,7 @@ impl Graph {
         let needs_f = self.eng.values().field("needs");
         loop {
             let t0 = std::time::Instant::now();
-            let mut ex = crate::exec::Threads::new(self.threads);
+            let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();
             let r = match self
                 .eng
@@ -645,9 +675,15 @@ impl Graph {
                     )
                 })
                 .collect();
-            for (kind, _) in &needs {
+            for (kind, why) in &needs {
                 if kind == "starve" {
                     stats.starved += 1;
+                }
+                // the relaxed PDF mode cannot write this document: the
+                // build again, in exact mode
+                if kind == "pdf:exact" && self.pdf_exact.is_none() {
+                    self.pdf_exact = Some(why.clone());
+                    asked = true;
                 }
             }
             for name in asked_names {
@@ -895,6 +931,9 @@ impl Build {
         let env = cached.env.clone();
         let t1 = t0.elapsed();
         let mut g = Graph::new(opts.time_limit, opts.threads);
+        if let Some(p) = &opts.progress {
+            g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
+        }
         let unit = g.eng.new_unit();
         {
             let v = g.eng.values();
@@ -904,6 +943,10 @@ impl Build {
             }
             sets.push((v.field("jobname"), v.str(&opts.jobname)));
             sets.push((v.field("dvicomment"), v.str(&opts.comment)));
+            sets.push((
+                v.field("pdf:relaxed"),
+                v.int(i64::from(!opts.exact_objects)),
+            ));
             sets.push((
                 v.field("pdfdate"),
                 v.str(&phitex_pdf::pdf_date(opts.epoch.unwrap_or(0))),
@@ -959,12 +1002,35 @@ impl Build {
     }
 
     fn settle(&mut self) {
+        // the text nodes' offsets in the document, for the progress
+        let mut offsets = std::collections::HashMap::new();
+        let mut off = 0u64;
+        for (k, n) in &self.nodes {
+            offsets.insert(n.raw(), off);
+            off += u64::try_from(k.len().saturating_sub(1)).unwrap_or(0);
+        }
+        self.g.watch.offsets = Arc::new(offsets);
         let mut stats = Stats::default();
         self.g.queries.clear();
         self.g
             .settle(self.unit, &self.opts.finder, &mut stats, self.opts.fixpoint);
         stats.live = self.g.eng.live_nodes();
         self.stats = stats;
+    }
+
+    /// What the build runs now, readable from another thread while
+    /// [`Build::with`] or [`Build::edit`] runs (the CLI polls it).
+    #[must_use]
+    pub fn progress(&self) -> Arc<crate::exec::Progress> {
+        self.g.watch.progress.clone()
+    }
+
+    /// Why the PDF file was written in exact mode though
+    /// [`Options::exact_objects`] was off (the relaxed mode does not
+    /// cover the document), if it was.
+    #[must_use]
+    pub fn pdf_exact_reason(&self) -> Option<&str> {
+        self.g.pdf_exact.as_deref()
     }
 
     /// The document changed to `text`: the nodes whose slices differ are

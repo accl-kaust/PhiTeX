@@ -103,6 +103,26 @@ is the one cross-page dependency, and it is TeX-level (literals), not
 writer state: documents that use xcolor or hyperref pay exactly this
 and nothing else.
 
+## Fallbacks
+
+A document the relaxed mode does not cover is built in exact mode
+(`Build::pdf_exact_reason` says why). The triggers:
+
+| trigger | why relaxed cannot do it | in LaTeX documents | status |
+|---|---|---|---|
+| a form with `\pdfcolorstack` | the stacks a form changes depend on the page that ships it | rare (xcolor inside `\pdfxform` boxes) | permanent |
+| threads and beads (`\pdfthread`, `\pdfstartthread`) | a thread's beads chain across pages | rare | permanent |
+| thread actions in links | the action names a thread object made by the pages | rare | permanent |
+| `\pdfpageref` | its number is text: a handle typeset differs from pdfTeX's page object number | rare (hyperref does not use it) | permanent |
+| a form without `\immediate` when `\pdfpageheight` is 0 | pdfTeX writes it under the height of the first page that references it (its origin); the page is not known when the form is made | rare (LaTeX sets `\pdfpageheight`) | permanent |
+| `\pdfobj useobjnum` with a literal number | the number was not given by the mode, so it is not a handle | rare | permanent |
+| fonts of included PDF files replaced (`\pdfinclusioncopyfonts` 0) | the replacements are the document's fonts, merged across pieces | uncommon | permanent for now |
+| PNG transparency groups | the group is one document-level object shared by the images | common (graphicx with alpha PNGs) | to be brought in: one group object written once at the finish, like the fonts |
+| `\pdffontattr`, `\pdfincludechars`, `\pdfnobuiltintounicode`, `\pdffontobjnum`, `\pdffontname` | they act on the document's font objects, which the finish writes | common (cmap, hyperref drivers, font packages) | to be brought in: replayed into the finish from the fields TeX keeps, like the catalog texts |
+
+Not detected, documented: a handle printed as text (`\the\pdflastobj`
+typeset) differs from pdfTeX's number.
+
 ## Options
 
 `Options::exact_objects` defaults to true until the LaTeX exact gates
