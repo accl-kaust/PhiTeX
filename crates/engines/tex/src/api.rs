@@ -174,14 +174,25 @@ struct Absorb<'a> {
     defs: Defs,
     /// Whether the text is a document's ([`is_doc`]).
     doc: bool,
+    /// The finder `\\input` files are sliced with, and the text applied.
+    finder: Finder,
+    text: &'a mut String,
 }
 
 impl phitex_defuse::EditSource for Absorb<'_> {
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
         let (text, version) = self.edits.take()?;
         apply_text(
-            eng, self.exec, self.dvi, self.nodes, &text, &self.defs, self.doc,
+            eng,
+            self.exec,
+            self.dvi,
+            self.nodes,
+            &text,
+            &self.defs,
+            self.doc,
+            Some(&self.finder),
         );
+        *self.text = text;
         Some(version)
     }
 }
@@ -207,6 +218,7 @@ fn apply_text(
     text: &str,
     defs: &Defs,
     doc: bool,
+    finder: Option<&Finder>,
 ) {
     let text = as_file(text);
     let sl = if doc {
@@ -228,7 +240,23 @@ fn apply_text(
     if doc {
         crate::hints::register_text(eng.values().str(DOC_NAME), &hints);
     }
+    // (a document's nodes: its regions, an `\\input` file's in place of
+    // the command, `crate::inputs`)
+    let pieces = if doc {
+        let mut read = Vec::new();
+        crate::inputs::pieces(eng.values(), &text, &hints, defs, finder, &mut read)
+    } else {
+        Vec::new()
+    };
+    let new: Vec<(String, (usize, usize))> = if doc {
+        pieces.iter().map(|p| (p.key.clone(), (0, 0))).collect()
+    } else {
+        new
+    };
     let args_of = |eng: &Engine, k: usize| {
+        if doc {
+            return pieces[k].args(eng.values(), DOC_NAME);
+        }
         let (s, e) = new[k].1;
         let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
         let v = eng.values();
@@ -991,6 +1019,11 @@ struct Graph {
     /// (name, field, value, hash), merged into `files`/`absent`/`reads`
     /// before the environment is set again (`Graph::provide`).
     provided: Arc<std::sync::Mutex<Vec<Provided>>>,
+    /// The document files sliced into the document's regions
+    /// (`crate::inputs`), and their texts as edited (`Build::edit_file`)
+    /// over the finder's.
+    inputs_read: Vec<String>,
+    overrides: Arc<Mutex<HashMap<String, (String, Vec<u8>)>>>,
 }
 
 /// A file the environment provider answered: name, field, the value
@@ -1092,6 +1125,8 @@ impl Graph {
             sched: phitex_defuse::Greedy::default(),
             eval_errors: Vec::new(),
             provided: Arc::default(),
+            inputs_read: Vec::new(),
+            overrides: Arc::default(),
         }
     }
 
@@ -1230,6 +1265,21 @@ impl Graph {
                 None => self.absent.push(f),
             }
         }
+    }
+
+    /// The finder the document's `\\input` files are sliced with: the
+    /// edited texts first ([`Build::edit_file`]).
+    fn input_finder(&self, base: &Finder) -> Finder {
+        let base = Arc::clone(base);
+        let over = Arc::clone(&self.overrides);
+        Arc::new(move |n: &str| {
+            let o = over
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(n)
+                .cloned();
+            o.or_else(|| base(n))
+        })
     }
 
     /// The names of the files the job opened for writing.
@@ -1497,6 +1547,7 @@ impl Graph {
         text: &str,
         defs: &Defs,
         doc: bool,
+        finder: Option<&Finder>,
     ) -> Vec<(String, NodeId)> {
         let mut out = Vec::new();
         let t0 = std::time::Instant::now();
@@ -1514,6 +1565,25 @@ impl Graph {
         let t1 = t0.elapsed();
         if doc {
             crate::hints::register_text(self.eng.values().str(DOC_NAME), &hints);
+            // (the document's regions, an `\\input` file's in place of
+            // the command, `crate::inputs`)
+            let mut read = Vec::new();
+            let pieces = crate::inputs::pieces(
+                self.eng.values(),
+                text,
+                &hints,
+                defs,
+                finder,
+                &mut read,
+            );
+            for p in pieces {
+                let args = p.args(self.eng.values(), DOC_NAME);
+                let n = self.eng.push(unit, self.ops.exec, args);
+                declare_marks_before(&mut self.eng, n);
+                out.push((p.key, n));
+            }
+            self.inputs_read = read;
+            return out;
         }
         for (s, e) in sl {
             let piece = &text[s..e];
@@ -1820,7 +1890,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             g.eng.set_env(unit, f, x);
         }
         // (the prelude's own slices: INITEX knows no definitions yet)
-        g.push_text(unit, &as_file(p), crate::hints::no_defs(), false);
+        g.push_text(unit, &as_file(p), crate::hints::no_defs(), false, None);
         // the point the prelude's final bindings are read at
         let end = g.eng.push(unit, g.mark, Vec::new());
         let mut stats = Stats::default();
@@ -1924,6 +1994,9 @@ pub struct Build {
     settled: Vec<u64>,
     /// Whether the job's text is a document's ([`is_doc`]).
     doc: bool,
+    /// The document's text last applied (`edit_file` applies it again
+    /// when a file sliced into it changed).
+    text: String,
 }
 
 impl Build {
@@ -2012,7 +2085,12 @@ impl Build {
         }
         *g.ops.defs.lock().unwrap_or_else(PoisonError::into_inner) = defs.clone();
         let doc = is_doc(prelude, document);
-        let nodes = g.push_text(unit, &as_file(document), &defs, doc);
+        let inputs = g.input_finder(&opts.finder);
+        let nodes = g.push_text(unit, &as_file(document), &defs, doc, Some(&inputs));
+        // (the files sliced in are read: listed, and watched)
+        for n in g.inputs_read.clone() {
+            g.supply(&opts.finder, &n);
+        }
         // the page builder's fold, after the text: one node choosing every
         // page break, its children the pages
         let breaks = g.ops.breaks;
@@ -2035,6 +2113,7 @@ impl Build {
             edits,
             settled: Vec::new(),
             doc,
+            text: document.to_owned(),
         };
         b.settle();
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
@@ -2064,6 +2143,8 @@ impl Build {
             dvi: self.dvi,
             defs: self.defs.clone(),
             doc: self.doc,
+            finder: self.g.input_finder(&self.opts.finder),
+            text: &mut self.text,
         };
         // a text sent before the evaluation starts is the one it is for
         if let Some(v) = phitex_defuse::EditSource::absorb(&mut absorb, &mut self.g.eng) {
@@ -2219,6 +2300,25 @@ impl Build {
         }
         if let Some(r) = self.g.reads.iter_mut().find(|(n, _)| n == name) {
             r.1 = file_hash(found.as_ref());
+        }
+        // a file sliced into the document's regions (`crate::inputs`):
+        // the document is applied again with the new text, so only the
+        // regions whose slices changed are replaced
+        let sliced = self.g.inputs_read.iter().any(|n| n == name);
+        {
+            let mut o = self.g.overrides.lock().unwrap_or_else(PoisonError::into_inner);
+            match (&found, text) {
+                (Some(x), Some(_)) => {
+                    o.insert(name.to_owned(), x.clone());
+                }
+                _ => {
+                    o.remove(name);
+                }
+            }
+        }
+        if sliced {
+            let t = self.text.clone();
+            self.edits.send(&t);
         }
         self.g.absorb_provided();
         let env = self.g.environment(self.opts.fixpoint);
