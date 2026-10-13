@@ -40,7 +40,6 @@ pub(crate) type R<T> = Result<T, Halt>;
 pub(crate) struct Ops {
     pub exec: OpId,
     pub put: OpId,
-    pub outpage: OpId,
     pub pagestep: OpId,
     pub pagestep_any: OpId,
     pub breaks: OpId,
@@ -225,8 +224,6 @@ impl<'c, 'a> Run<'c, 'a> {
             1
         } else if op == ops.put {
             2
-        } else if op == ops.outpage {
-            3
         } else {
             0
         };
@@ -1123,6 +1120,30 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Ends the run: definitions, contributions, children (what the
     /// command made, then the input left), the claim and the scope effect.
     pub(crate) fn finish(mut self) -> ValueId {
+        // a page parameter this run set reaches the page fold as a
+        // marker in the main list (page.rs `breaks`)
+        if self.defs.iter().any(|&(f, _, _)| {
+            matches!(
+                crate::val::field_name(self.v, f).as_str(),
+                "param:vsize" | "param:maxdepth" | "param:topskip" | "param:holdinginserts"
+            )
+        }) {
+            let v = self.v;
+            let vsize = self.param("vsize").unwrap_or(0);
+            let maxdepth = self.param("maxdepth").unwrap_or(0);
+            let topskip = self.glue_param("topskip").unwrap_or_default();
+            let holding = self.param("holdinginserts").unwrap_or(0);
+            let marker = v.list(vec![
+                v.int(crate::nodes::T_PAGE_PARAMS),
+                v.int(i64::from(vsize)),
+                v.int(i64::from(maxdepth)),
+                crate::val::glue_value(v, &topskip),
+                v.int(i64::from(holding)),
+            ]);
+            let item = v.list(vec![v.int(0), marker]);
+            let s = v.seq_unit(item);
+            self.contribute("items", s);
+        }
         // the opener of each list this run made: this node, and what it
         // appended to the list itself (a later reader's range starts after
         // this node)
@@ -1157,7 +1178,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 .get_at(self.v, self.cx.values_epoch(), "defs");
             self.contribs.push((defs, s));
         }
-        if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
             let v = self.v;
             let items = v.field("items");
             for (f, x) in &self.contribs {
@@ -1191,7 +1212,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.cx.child(op, args);
         }
         for args in self.leftover() {
-            if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+            if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
                 let v = self.v;
                 eprintln!(
                     "  follow {}",
@@ -1241,11 +1262,6 @@ fn hex(c: u32) -> u32 {
 }
 
 /// The frames of an `Exec` node's arguments.
-/// The condition-stack depth an output routine's tokens start at: its
-/// conditionals are above any the page builder interrupted, in levels of
-/// their own (OUTPUT.md §6).
-pub(crate) const OUTPUT_IF_BASE: i64 = 1 << 40;
-
 pub(crate) fn decode_frames(v: &Values, args: &[ValueId]) -> Vec<Frame> {
     decode_frames_upto(v, args, usize::MAX)
 }

@@ -94,7 +94,7 @@ impl Run<'_, '_> {
                 }
                 _ => {
                     // §370: "Undefined control sequence" (dropped)
-                    if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+                    if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
                         eprintln!("undefined {:?}", self.cur.tok);
                     }
                     self.log("error", "Undefined control sequence")?;

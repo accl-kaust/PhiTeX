@@ -1911,7 +1911,7 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
                     excerpt: String::new(),
                 };
             }
-            if std::env::var_os("PHITEX_HINTS_FRAGMENTS").is_none() {
+            if !crate::exec::env_flag!("PHITEX_HINTS_FRAGMENTS") {
                 return demoted("expansion tokens", "");
             }
             // (tokens already read: faithful as text when every
@@ -2044,7 +2044,7 @@ pub fn set_hints_enabled(on: bool) {
 
 /// Whether the node's text says its command opens and closes no scope.
 pub(crate) fn effect_none(v: &Values, args: &[ValueId]) -> bool {
-    if OFF.load(Ordering::Relaxed) || std::env::var_os("PHITEX_HINTS_OFF").is_some() {
+    if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return false;
     }
     hint_of_args(v, args)
@@ -2062,7 +2062,7 @@ pub(crate) fn is_region(v: &Values, args: &[ValueId]) -> bool {
 
 /// Whether the node's text bounds what its command defines.
 pub(crate) fn bounded(v: &Values, args: &[ValueId]) -> bool {
-    if OFF.load(Ordering::Relaxed) || std::env::var_os("PHITEX_HINTS_OFF").is_some() {
+    if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return false;
     }
     hint_of_args(v, args).bound.is_some()
@@ -2072,7 +2072,7 @@ pub(crate) fn bounded(v: &Values, args: &[ValueId]) -> bool {
 /// meanings of the names its text calls (`cs:name`, `act:code`) and the
 /// catcodes its bytes were read with (`cat:c`).
 pub(crate) fn reads(v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
-    if OFF.load(Ordering::Relaxed) || std::env::var_os("PHITEX_HINTS_OFF").is_some() {
+    if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return None;
     }
     let h = hint_of_args(v, args);
@@ -2084,11 +2084,11 @@ pub(crate) fn reads(v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
 
 /// The engine's question, answered from the text.
 pub(crate) fn may_define(v: &Values, args: &[ValueId]) -> MayDefine {
-    if OFF.load(Ordering::Relaxed) || std::env::var_os("PHITEX_HINTS_OFF").is_some() {
+    if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return MayDefine::Any;
     }
     let h = hint_of_args(v, args);
-    if std::env::var_os("PHITEX_HINTS").is_some() {
+    if crate::exec::env_flag!("PHITEX_HINTS") {
         let answer = match &h.bound {
             None => "Any".to_owned(),
             Some(b) => format!(
@@ -2342,9 +2342,7 @@ mod tests {
             panic!("prefixes")
         };
         for f in [
-            "par:3",
             "pg:1",
-            "if:",
             "aftertoken",
             "cat:64",
             "count:10",
