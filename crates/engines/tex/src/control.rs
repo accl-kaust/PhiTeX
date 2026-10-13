@@ -80,7 +80,11 @@ impl Run<'_, '_> {
             .unwrap_or_default();
         let mut last = String::new();
         crate::print::print_cs(&mut last, &self.cur.tok, i64::from(b'\\'), &mut |c| {
-            if char::from_u32(c).is_some_and(char::is_alphabetic) { 11 } else { 12 }
+            if char::from_u32(c).is_some_and(char::is_alphabetic) {
+                11
+            } else {
+                12
+            }
         });
         eprintln!(
             "hb{} {:.1}s cmds {n} {file}:{line} last {last} cmd {} mode {} defs {} own {} nest {} frames {}",
@@ -440,7 +444,7 @@ impl Run<'_, '_> {
                     flags: u8::try_from(a % 4).unwrap_or(0)
                         | if protected { crate::etex::PROTECTED } else { 0 },
                     params,
-                    body,
+                    body: body.into(),
                 }));
                 self.define_cs(&p, &m, global);
             }
@@ -503,7 +507,7 @@ impl Run<'_, '_> {
                 let m = Mean::Macro(Rc::new(Macro {
                     flags: 0,
                     params: Vec::new(),
-                    body,
+                    body: body.into(),
                 }));
                 self.define_cs(&p, &m, global);
             }
