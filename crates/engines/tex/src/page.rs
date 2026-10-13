@@ -929,7 +929,23 @@ impl Operation for PageStep {
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let args = cx.args();
-        run_node(cx, ops(&self.shared), |r| r.page_step(&args))
+        let o = ops(&self.shared);
+        let done = o.steps_done.clone();
+        let j = args
+            .first()
+            .and_then(|&x| cx.values().as_int(x))
+            .and_then(|x| usize::try_from(x).ok());
+        let out = run_node(cx, o, |r| r.page_step(&args))?;
+        if let Some(j) = j {
+            let mut d = done
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if d.len() <= j {
+                d.resize(j + 1, 0);
+            }
+            d[j] += 1;
+        }
+        Ok(out)
     }
 }
 
