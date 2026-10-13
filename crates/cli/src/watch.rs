@@ -931,7 +931,6 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             "pages": r.pages(),
             "pages_changed": changed,
             "nodes_run": nodes,
-            "absorbed": r.runs.last().map(|x| x.absorbed),
             "parallel": r.runs.last().map(|x| json!({
                 "threads": x.threads,
                 "busy_ms": x.busy.as_secs_f64() * 1e3,
@@ -1014,24 +1013,8 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     // (what came while a build ran and it could not take: done after it)
     let mut held: VecDeque<(Instant, Event)> = VecDeque::new();
     let mut held_asks: Vec<Ask> = Vec::new();
-    // (while the cold build runs: the main file changed on disk is sent
-    // to it, everything held for after it)
-    let cold_absorb = s.absorb();
-    let mut cold_meanwhile = || {
-        let Ok((at, e)) = rx.recv_timeout(Duration::from_millis(5)) else {
-            return;
-        };
-        if let Event::Files(ps) = &e
-            && ps
-                .iter()
-                .all(|p| p.strip_prefix(&root).unwrap_or(p) == Path::new(&main_rel))
-            && let Ok(b) = std::fs::read(&main_file)
-        {
-            cold_absorb.send(&tex::chars(&b), at);
-        }
-        held.push_back((at, e));
-    };
-    rebuild(&mut s, "cold", None, &mut cold_meanwhile);
+    let mut idle = || std::thread::sleep(Duration::from_millis(5));
+    rebuild(&mut s, "cold", None, &mut idle);
     let set = |s: &mut Session, buffers: &HashMap<String, String>, file: &str| {
         let text = buffers.get(file).map(|b| tex_text(b));
         if file == main_rel {
@@ -1267,6 +1250,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                     return;
                 };
                 let send_main = |buffers: &HashMap<String, String>, file: &str| -> bool {
+                    let Some(a) = &absorb else { return false };
                     if file != main_rel {
                         return false;
                     }
@@ -1278,7 +1262,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                         },
                         |b| tex_text(b),
                     );
-                    absorb.send(&t, at);
+                    a.send(&t, at);
                     true
                 };
                 match e {
