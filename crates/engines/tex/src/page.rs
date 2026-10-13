@@ -260,6 +260,14 @@ impl Run<'_, '_> {
             plan.extend(out.writes.iter().copied());
             // the flush points on this page: the state after it (after
             // the page before, if this one does not fire)
+            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                eprintln!(
+                    "aux-trace: plan page {j}: fired {} flushes {:?} stuck {}",
+                    out.fired.is_some(),
+                    out.flushes,
+                    out.stuck
+                );
+            }
             for &(n, k) in &out.flushes {
                 let after = if out.fired.is_some() {
                     i64::try_from(j).unwrap_or(0)
@@ -731,7 +739,14 @@ impl Run<'_, '_> {
             v.int(i64::try_from(k).unwrap_or(0)),
         ]);
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
-        let Some(x) = self.cx.use_field(f)?.filter(|&x| x != ValueId::UNIT) else {
+        let read = self.cx.use_field(f)?;
+        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+            eprintln!(
+                "aux-trace: flush point {node}:{k} reads {}",
+                read.map_or("none".to_owned(), |x| v.render(x))
+            );
+        }
+        let Some(x) = read.filter(|&x| x != ValueId::UNIT) else {
             return Ok(());
         };
         let xs = list_of(v, x);
@@ -1442,6 +1457,14 @@ impl FinalState {
                     counts[k] += out_counts[k] - read_counts[k];
                 }
             }
+            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                eprintln!(
+                    "aux-trace: fold step {j}: read count0 {:?} out {:?} -> {}",
+                    read_counts.first(),
+                    out_counts.first(),
+                    counts[0]
+                );
+            }
             for (f, x) in pgst_pairs(v, Some(g(1))) {
                 let name = crate::val::field_name(v, f);
                 let pre = cx.use_field(f)?;
@@ -1502,6 +1525,14 @@ impl FinalState {
                 .ok()
                 .and_then(|p| after.get(p))
                 .map_or(ValueId::UNIT, |&(cs, st)| v.list(vec![cs, st]));
+            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                eprintln!(
+                    "aux-trace: flush point {node}:{} after page {}: {} (before the chain {counts:?})",
+                    int_of(v, *k),
+                    int_of(v, *p),
+                    v.render(x)
+                );
+            }
             cx.publish(f, x);
         }
         Ok(FinalState {

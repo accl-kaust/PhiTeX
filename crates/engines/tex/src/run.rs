@@ -296,6 +296,10 @@ pub(crate) struct Run<'c, 'a> {
     /// they had before this round's read-back (`wpre:<field>`), and
     /// what each location's pre-value is (memoized for the run).
     pub interp: Option<phitex_defuse::FxHashSet<Loc>>,
+    /// The state's stamp as the line's interpretation began: a field the
+    /// line defined since is not reverted (`\@writefile` sets
+    /// `\@temptokena` and writes `\the\@temptokena`).
+    pub interp_base: u64,
     /// The streams a document node closed with `\immediate\closeout`:
     /// closed for this run's later writes, and for the writer from the
     /// close's position (a stream entry), never for the page steps: the
@@ -372,6 +376,7 @@ impl<'c, 'a> Run<'c, 'a> {
             resumed: false,
             irreversible: 0,
             interp: None,
+            interp_base: 0,
             closed: Vec::new(),
             flushes: 0,
             pre_memo: phitex_defuse::FxHashMap::default(),
@@ -436,6 +441,9 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(());
         };
         if !done.insert(loc) {
+            return Ok(());
+        }
+        if self.st.defined_after(loc, self.interp_base) {
             return Ok(());
         }
         let pre = if let Some(&p) = self.pre_memo.get(&loc) {
@@ -804,8 +812,9 @@ impl<'c, 'a> Run<'c, 'a> {
         self.eof = true;
         self.no_pull = true;
         self.set("cat:64", v.int(11), false);
-        self.interp = Some(phitex_defuse::FxHashSet::default());
         let base = self.st.stamp();
+        self.interp = Some(phitex_defuse::FxHashSet::default());
+        self.interp_base = base;
         for l in line.split('\n') {
             let mut buf: Vec<u32> = l.chars().map(u32::from).collect();
             while buf.last() == Some(&32) {
