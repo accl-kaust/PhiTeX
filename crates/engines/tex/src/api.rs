@@ -2178,6 +2178,9 @@ impl Build {
                 .iter()
                 .filter_map(|(k, _)| k.strip_prefix("cs:").map(str::to_owned))
                 .collect();
+            // TeX82's primitives live in the primitive table, not the
+            // environment (INITEX's §226 `primitive` calls)
+            names.extend(crate::prims::PRIMS.iter().map(|p| p.0.to_owned()));
             let f = v.field("defs");
             if let Some(d) = self.g.eng.acc_value(self.unit, f) {
                 for l in v.seq_to_vec(d) {
@@ -2248,7 +2251,14 @@ impl Build {
             let seg = xs.get(5).map(|&x| str_of(v, x)).unwrap_or_default();
             let loc = usize::try_from(int(6)).unwrap_or(0);
             let before: String = seg.chars().take(loc).collect();
-            let (file, text, at) = if int(3) >= 0
+            let in_doc = xs.get(2).is_some_and(|&n| str_of(v, n) == DOC_NAME);
+            let (file, text, at) = if int(3) >= 0 && in_doc {
+                // a line of the document's own text: the position the
+                // node's frame carries is the byte in the document
+                let at = usize::try_from(int(3)).unwrap_or(0)
+                    + seg.chars().take(loc).map(char::len_utf8).sum::<usize>();
+                (docname.clone(), doc.clone(), at)
+            } else if int(3) >= 0
                 && let Some(&n) = xs.get(2)
                 && n != ValueId::UNIT
             {
