@@ -1086,6 +1086,10 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
 /// other.
 fn balanced(an: &Analysis<'_>, text: &str, s: usize, e: usize) -> bool {
     let (mut brace, mut bg, mut sg) = (0i64, 0i64, 0i64);
+    // (the union of the closures of the slice's calls: a pair may be
+    // split between two macros, `\\fo@t`'s `\\bgroup` and the
+    // `\\egroup` of the `\\@foot` it hands to `\\aftergroup`)
+    let mut calls: Vec<String> = Vec::new();
     for a in an.p.atoms.iter().filter(|a| a.start >= s && a.start < e) {
         match a.kind {
             AtomKind::Open => brace += 1,
@@ -1099,10 +1103,10 @@ fn balanced(an: &Analysis<'_>, text: &str, s: usize, e: usize) -> bool {
                     "egroup" => bg -= 1,
                     _ if crate::prims::PRIMS.iter().any(|q| q.0 == n) => {}
                     _ => {
-                        let set = an.defset(n);
-                        let has = |x: &str| set.calls.iter().any(|c| c == x);
-                        if has("begingroup") != has("endgroup") || has("bgroup") != has("egroup") {
-                            return false;
+                        for c in an.defset(n).calls {
+                            if !calls.contains(&c) {
+                                calls.push(c);
+                            }
                         }
                     }
                 }
@@ -1113,12 +1117,19 @@ fn balanced(an: &Analysis<'_>, text: &str, s: usize, e: usize) -> bool {
             return false;
         }
     }
-    brace == 0 && bg == 0 && sg == 0
+    let has = |x: &str| calls.iter().any(|c| c == x);
+    brace == 0
+        && bg == 0
+        && sg == 0
+        && has("begingroup") == has("endgroup")
+        && has("bgroup") == has("egroup")
 }
 
 /// The commands that scan on past their text for a keyword or a unit
 /// (`plus`, `minus`, `width`, `true`), expanding what follows.
-const SCANS_ON: &[&str] = &["vskip", "hskip", "mskip", "hrule", "vrule", "kern", "mkern"];
+const SCANS_ON: &[&str] = &[
+    "font", "vskip", "hskip", "mskip", "hrule", "vrule", "kern", "mkern",
+];
 
 /// The name of the last item starting in the slice.
 fn last_item(p: &Pass, text: &str, (s, e): (usize, usize)) -> Option<String> {
@@ -2166,6 +2177,11 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
                     break;
                 }
                 let Some(first) = first_cs(&an.p, text, (ns, ne)) else {
+                    // (blanks between: the scan reads past them)
+                    if text[ns..ne].trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
                     break;
                 };
                 let next = t.at_until(ns, ne);
