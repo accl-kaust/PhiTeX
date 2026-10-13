@@ -2055,18 +2055,20 @@ impl Pool {
                 (st.f, st.n, st.grain, st.generation)
             };
             seen = generation;
-            self.chunks(f, n, grain);
+            self.chunks(f, n, grain, generation);
             let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             st.active -= 1;
         }
     }
 
-    /// Runs chunks of the current job until its indexes run out.
-    fn chunks(&self, f: *const (dyn Fn(usize) + Sync), n: usize, grain: usize) {
+    /// Runs chunks of job `generation` until its indexes run out (or the
+    /// job is over: a worker woken for it may arrive after the caller
+    /// returned and the next job began, and must not touch that one).
+    fn chunks(&self, f: *const (dyn Fn(usize) + Sync), n: usize, grain: usize, generation: u64) {
         loop {
             let start = {
                 let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                if st.next >= n {
+                if st.generation != generation || st.next >= n {
                     return;
                 }
                 let s = st.next;
@@ -2094,7 +2096,7 @@ impl Pool {
         // SAFETY: the pointer outlives its uses: this call returns only once
         // every index has run, and no worker touches it after that.
         let f: &'static (dyn Fn(usize) + Sync) = unsafe { std::mem::transmute(f) };
-        {
+        let generation = {
             let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             st.f = std::ptr::from_ref(f);
             st.n = n;
@@ -2103,9 +2105,10 @@ impl Pool {
             st.workers = threads - 1;
             st.remaining = n;
             st.generation += 1;
-        }
+            st.generation
+        };
         self.wake.notify_all();
-        self.chunks(std::ptr::from_ref(f), n, grain);
+        self.chunks(std::ptr::from_ref(f), n, grain, generation);
         let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         while st.remaining > 0 {
             st = self.done.wait(st).unwrap_or_else(std::sync::PoisonError::into_inner);

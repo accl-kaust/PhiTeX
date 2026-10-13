@@ -1211,7 +1211,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             }
         }
         // (a change the last build took while it ran: built already)
-        if again && s.up_to_date() {
+        // (r, or Rebuild in the viewer: built again whatever)
+        let asked = why.iter().any(|w| w.starts_with("asked"));
+        if again && !asked && s.up_to_date() {
             again = false;
         }
         if again {
