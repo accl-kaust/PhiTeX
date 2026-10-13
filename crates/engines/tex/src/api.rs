@@ -222,13 +222,14 @@ fn apply_text(
     let (old_flags, old_depths) = slice_info(&old_text, defs);
     let old_regions =
         (old_flags.len() == old.len()).then(|| regions(&old_flags, |i| raw_of(old[i].1)));
+    let hints = crate::hints::text_hints(&text, pass::FileKind::Document, defs);
     let args_of = |eng: &Engine, k: usize, anchor: i64| {
         let (s, e) = new[k].1;
         let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
         let boundary = new_flags.get(k).is_some_and(|f| f & 1 != 0);
         let depth = new_depths.get(k).copied().unwrap_or(0);
         let mut args = slice_args(eng.values(), &text[s..e], starts, anchor, boundary, depth);
-        args.push(crate::hints::hint_arg(eng.values(), &text, s, defs));
+        args.push(crate::hints::hint_arg(eng.values(), &hints, s));
         args
     };
     for k in common..old_mid {
@@ -1113,11 +1114,15 @@ impl Graph {
                         .iter()
                         .map(|&a| v.render(a).chars().take(200).collect())
                         .collect();
+                    // (and the node's hint: what its text was taken to be)
+                    let h = crate::hints::hint_of_args(v, &i.args);
                     format!(
-                        "{} {:?}, parent {:?}, args {}",
+                        "{} {:?}, parent {:?}, hint {:?} ({}), args {}",
                         i.op,
                         i.state,
                         i.parent,
+                        h.excerpt,
+                        h.cause,
                         args.join(" ")
                     )
                 },
@@ -1323,6 +1328,7 @@ impl Graph {
         let (flags, depths) = slice_info(text, defs);
         let t1 = t0.elapsed();
         let (mut anchor, mut last) = (0, None);
+        let hints = crate::hints::text_hints(text, pass::FileKind::Document, defs);
         for (i, (s, e)) in sl.into_iter().enumerate() {
             let piece = &text[s..e];
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
@@ -1337,7 +1343,7 @@ impl Graph {
             }
             let depth = depths.get(i).copied().unwrap_or(0);
             let mut args = slice_args(self.eng.values(), piece, starts, anchor, f & 1 != 0, depth);
-            args.push(crate::hints::hint_arg(self.eng.values(), text, s, defs));
+            args.push(crate::hints::hint_arg(self.eng.values(), &hints, s));
             let n = self.eng.push(unit, self.ops.exec, args);
             if f & 1 != 0 {
                 last = Some(raw_of(n));

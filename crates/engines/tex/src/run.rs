@@ -1424,6 +1424,9 @@ impl<'c, 'a> Run<'c, 'a> {
             astate: self.astate,
             page_due: self.page_due,
             anchor: self.anchor,
+            // (lists a trial's commands open are the trial's: without this
+            // the run defined `lopen:` for ids no node owns)
+            minted: self.minted.borrow().clone(),
         }
     }
 
@@ -1444,6 +1447,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.astate = s.astate;
         self.page_due = s.page_due;
         self.anchor = s.anchor;
+        *self.minted.borrow_mut() = s.minted;
     }
 
     /// Ends the run: definitions, contributions, children (what the
@@ -1545,6 +1549,7 @@ struct Snapshot {
     astate: Option<i64>,
     page_due: Option<(usize, usize, bool)>,
     anchor: i64,
+    minted: Vec<i64>,
 }
 
 fn is_hex(c: u32) -> bool {
