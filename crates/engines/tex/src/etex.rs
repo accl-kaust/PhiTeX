@@ -902,11 +902,11 @@ pub(crate) fn force_eof(r: &mut Run<'_, '_>) {
     for f in &mut r.frames {
         if let Frame::Toks(t, p) = f
             && let Some(k) = t[*p..].iter().position(
-                |x| matches!(x, Tok::S(n) if n.starts_with("\u{10FFFE}eof") && !n.ends_with(['S', 'F'])),
+                |x| matches!(x.as_cs(), Some(n) if n.starts_with("\u{10FFFE}eof") && !n.ends_with(['S', 'F'])),
             )
         {
             let mut v: Vec<Tok> = t.to_vec();
-            if let Tok::S(n) = &v[*p + k] {
+            if let Some(n) = v[*p + k].as_cs() {
                 v[*p + k] = Tok::cs(&format!("{n}F"));
             }
             *t = Rc::from(v);
