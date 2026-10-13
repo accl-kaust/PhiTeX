@@ -657,14 +657,16 @@ impl Graph {
         let dvi = eng.register(Arc::new(Dvi));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
+        let fields = Arc::new(crate::fields::Fields::new(eng.values()));
         let ops = Ops {
             exec,
             put,
             outpage,
             pagestep,
             pagestep_any,
+            fields,
         };
-        let _ = shared.set(ops);
+        let _ = shared.set(ops.clone());
         for f in [
             "items",
             "log",

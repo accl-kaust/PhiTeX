@@ -304,6 +304,17 @@ fn threads_possible() -> bool {
     }
 }
 
+/// After an evaluation, with `PHITEX_OBS` set and the `profile` feature
+/// on: the engine's probes (spans and counters) printed, then reset.
+impl Drop for Threads {
+    fn drop(&mut self) {
+        if phitex_defuse::obs::enabled() && std::env::var_os("PHITEX_OBS").is_some() {
+            eprint!("probes (evaluation):\n{}", phitex_defuse::obs::snapshot());
+            phitex_defuse::obs::reset();
+        }
+    }
+}
+
 impl Executor for Threads {
     fn execute(
         &mut self,
