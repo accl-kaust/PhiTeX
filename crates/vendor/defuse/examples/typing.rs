@@ -181,13 +181,15 @@ fn bench(n: usize, o: &Opts) {
         (load + t).as_secs_f64() / interp.as_secs_f64()
     );
     println!(
-        "load {load:.3?}  cold {t:.3?}  runs {}  stops {}  gated {}  pending waits {}  live {}  critical path {}  rss {:.0} MB",
+        "load {load:.3?}  cold {t:.3?}  runs {}  stops {}  gated {}  pending waits {}  live {}  units {}  critical path {}  widths {:?}  rss {:.0} MB",
         r.runs,
         r.stops,
         r.gated,
         r.pending_waits,
         eng.live_nodes(),
+        eng.live_units(),
         eng.critical_path(),
+        r.applied_widths,
         rss_mb()
     );
     println!(

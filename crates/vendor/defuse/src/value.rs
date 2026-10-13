@@ -110,7 +110,7 @@ const SHARDS: usize = 64;
 type ReadSlot = (u64, ValueId, Option<Arc<Value>>);
 
 /// Slots in a thread's read cache (direct-mapped by id).
-const READ_SLOTS: usize = 1 << 12;
+const READ_SLOTS: usize = 1 << 14;
 
 thread_local! {
     /// Each thread's own copies of the values it reads repeatedly: hot
@@ -210,6 +210,34 @@ impl Values {
         let private = seen.is_some().then(|| Arc::new(Value::clone(&shared)));
         READS.with(|c| c.borrow_mut()[slot] = (self.instance, id, private));
         shared
+    }
+
+    /// Runs `f` on the value behind `id` without cloning it: a hit in the
+    /// thread's read cache, else under the shard's read lock (so `f` must
+    /// not intern). For the engine's own reads on hot paths.
+    ///
+    /// # Panics
+    ///
+    /// If `id` is unknown (never interned, or freed).
+    pub(crate) fn with<R>(&self, id: ValueId, f: impl FnOnce(&Value) -> R) -> R {
+        crate::obs::count!(ValueGet);
+        #[allow(clippy::cast_possible_truncation)]
+        let slot = (id.0 as usize ^ self.instance as usize) % READ_SLOTS;
+        let hit = READS.with(|c| {
+            let c = c.borrow();
+            let e = &c[slot];
+            if e.0 == self.instance && e.1 == id {
+                e.2.clone()
+            } else {
+                None
+            }
+        });
+        if let Some(v) = hit {
+            return f(&v);
+        }
+        crate::obs::count!(ValueGetMiss);
+        let t = self.shard(id).read().unwrap_or_else(PoisonError::into_inner);
+        f(t.get(&id).expect("unknown or freed value"))
     }
 
     /// Number of values in the table.

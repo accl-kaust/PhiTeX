@@ -539,7 +539,8 @@ impl Session {
                 self.status.set("format");
                 let (prelude, cached) = self.prelude()?;
                 // (a format not cached is built first, in this build: slow
-                // until the kernel is fast, so no time limit for it)
+                // until the kernel is fast, so a longer time limit for it;
+                // none would leave a stuck evaluation running for ever)
                 let first = prelude.is_some() && cached.is_none();
                 self.status.set(if first {
                     format!("building the {} format (first time)", self.job.engine.name)
@@ -576,7 +577,11 @@ impl Session {
                 };
                 let opts = Options {
                     edits: Some(self.absorb.tx.clone()),
-                    time_limit: if first { None } else { opts.time_limit },
+                    time_limit: if first {
+                        Some(Duration::from_mins(30))
+                    } else {
+                        opts.time_limit
+                    },
                     ..opts
                 };
                 let b = Build::with(opts, prelude.as_deref(), &text);

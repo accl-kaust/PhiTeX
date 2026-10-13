@@ -422,6 +422,11 @@ pub struct Report {
     /// The sum of the batch sizes over the steps: `ready_total / steps`
     /// is the mean number of nodes run per step.
     pub ready_total: u64,
+    /// Steps by the number of runs applied in them (the batch width),
+    /// in powers of two: `applied_widths[k]` counts the steps that
+    /// applied from `2^k` to `2^(k+1) - 1` runs (`[0]`: one run); steps
+    /// that applied nothing are not counted.
+    pub applied_widths: Vec<u64>,
     /// Nodes left waiting for an environment field not yet supplied (nor
     /// declared absent), and the nodes waiting on them, when the
     /// evaluation ended.
@@ -2125,10 +2130,10 @@ impl Engine {
     }
 
     pub(crate) fn args_vec(&self, args: ValueId) -> Vec<ValueId> {
-        match &*self.values.get(args) {
+        self.values.with(args, |v| match v {
             Value::List(xs) => xs.to_vec(),
             _ => Vec::new(),
-        }
+        })
     }
 
     fn slot_of(&self, id: NodeId) -> Slot {
@@ -2262,6 +2267,12 @@ impl Engine {
     #[must_use]
     pub fn live_nodes(&self) -> usize {
         self.ids.len()
+    }
+
+    /// Live units: the client's plus one per memoized application body.
+    #[must_use]
+    pub fn live_units(&self) -> usize {
+        self.units.iter().filter(|u| u.live).count()
     }
 
     /// The fold of an accumulator over a whole unit.
@@ -2916,7 +2927,7 @@ impl Engine {
         id: NodeId,
         provisional: bool,
     ) -> Slot {
-        let s = self.create_raw(unit, after, None, op, args, parent, id, provisional);
+        let s = self.create_raw(unit, after, None, op, args, parent, id, provisional, true);
         self.set_created_effect(s, true);
         self.bind_created(s, None, NIL);
         s
@@ -2935,6 +2946,7 @@ impl Engine {
         parent: Slot,
         id: NodeId,
         provisional: bool,
+        in_order: bool,
     ) -> Slot {
         count!(Create);
         let st = self.statics(op, args);
@@ -3026,8 +3038,11 @@ impl Engine {
         self.stream_touch(unit, label);
         let item = self.oitem(s);
         self.nm(s).bound = item.eff;
-        let root = self.units[unit as usize].root;
-        self.units[unit as usize].root = self.order.insert(&OAug, root, label, item);
+        if in_order {
+            let root = self.units[unit as usize].root;
+            span!(OrderInsert);
+            self.units[unit as usize].root = self.order.insert(&OAug, root, label, item);
+        }
         s
     }
 
@@ -5949,6 +5964,7 @@ impl Engine {
         &mut self,
         x: Slot,
         specs: &[(OpId, ValueId)],
+        ids: &[NodeId],
         follows: usize,
         heights: &[(u32, HeightFrom)],
         provisional: bool,
@@ -5960,7 +5976,11 @@ impl Engine {
         // Continuations are the last `follows` specs: siblings of `x` in the
         // tree (its own depth), owned by its run like children.
         let follows_at = specs.len().saturating_sub(follows);
-        let ids = self.child_ids(x, specs);
+        let ids = if ids.len() == specs.len() {
+            ids.to_vec()
+        } else {
+            self.child_ids(x, specs)
+        };
         let old_ids: Vec<NodeId> = old.iter().map(|&c| self.n(c).id).collect();
         let body = self.aux_of(x).and_then(|a| a.body);
         let unit = body.unwrap_or(self.n(x).unit);
@@ -6059,6 +6079,8 @@ impl Engine {
                 });
             }
         }
+        #[cfg(feature = "profile")]
+        let create_span = crate::obs::enter_impl(crate::obs::Span::Create);
         for i in pre..ids.len() - suf {
             let (op, args) = specs[i];
             let follow = i >= follows_at;
@@ -6071,6 +6093,7 @@ impl Engine {
                 if follow { self.n(x).parent } else { parent },
                 ids[i],
                 provisional,
+                false,
             );
             if body.is_some() && !follow {
                 // Body nodes belong to the application.
@@ -6078,6 +6101,18 @@ impl Engine {
             }
             created.push(c);
         }
+        if !created.is_empty() {
+            // The run's records go into the order at once (their labels
+            // are consecutive and fresh).
+            span!(OrderInsert);
+            let items: Vec<(u64, OItem)> = created.iter().map(|&c| (self.n(c).label, self.oitem(c))).collect();
+            let root = self.units[unit as usize].root;
+            self.units[unit as usize].root = self.order.insert_run(&OAug, root, items);
+        }
+        #[cfg(feature = "profile")]
+        drop(create_span);
+        #[cfg(feature = "profile")]
+        let _bind_span = crate::obs::enter_impl(crate::obs::Span::Bind);
         if let (Some(&first), Some(&last)) = (created.first(), created.last()) {
             for &c in &created {
                 self.set_created_effect(c, false);
@@ -6355,7 +6390,10 @@ impl Engine {
     }
 
     fn update_taint(&mut self, x: Slot) {
-        self.flush_order();
+        if self.aux_of(x).is_some_and(|a| a.watch.is_some()) {
+            // A range reader's taint folds over its range.
+            self.flush_order();
+        }
         let mut stack = vec![x];
         while let Some(y) = stack.pop() {
             if !self.live(y) {
@@ -6389,6 +6427,12 @@ impl Engine {
     }
 
     fn touch(&mut self, x: Slot) {
+        self.touch_with(x, None);
+    }
+
+    /// `touch` with the site list already computed (by the run, in
+    /// parallel) when `sites` is given.
+    fn touch_with(&mut self, x: Slot, sites: Option<Vec<(u64, u64)>>) {
         let n = self.n(x);
         if self.touched.contains_key(&n.id) {
             return;
@@ -6398,7 +6442,7 @@ impl Engine {
             sig: n.sig,
             args: n.args,
             out: self.out_hash(x),
-            sites: self.site_list(x),
+            sites: sites.unwrap_or_else(|| self.site_list(x)),
         };
         let id = n.id;
         self.touched.insert(id, snap);
@@ -6606,7 +6650,8 @@ impl Engine {
                 return;
             }
         };
-        self.touch(x);
+        let mut r = r;
+        self.touch_with(x, r.old_sites.take());
         let provisional = r.speculative && !r.assumptions.is_empty();
         if r.speculative && self.shape_changes(x, &r) {
             // A guess that changes the structure (claim, unfolding, scope
@@ -6651,7 +6696,7 @@ impl Engine {
         }
         {
             span!(Children);
-            self.set_children(x, &r.children, r.follows, &r.child_heights, provisional);
+            self.set_children(x, &r.children, &r.child_ids, r.follows, &r.child_heights, provisional);
         }
         // A stream claim may have read its own previous unfolding, which
         // the line above just replaced: those reads are gone.
@@ -6863,7 +6908,7 @@ impl Engine {
             specs = old_specs;
             follows = old.iter().filter(|&&c| self.n(c).parent != x).count();
         }
-        self.set_children(x, &specs, follows, &[], false);
+        self.set_children(x, &specs, &[], follows, &[], false);
         if let Some(body) = self.aux_of(x).and_then(|a| a.body) {
             for &(f, v) in &r.env {
                 self.set_env_slot(body, f, v);
@@ -7885,6 +7930,14 @@ impl Engine {
                 self.apply(r);
             }
             self.settle_deferred();
+            let applied = self.report.runs - runs_before;
+            if applied > 0 {
+                let k = (u64::BITS - 1 - applied.leading_zeros()) as usize;
+                if self.report.applied_widths.len() <= k {
+                    self.report.applied_widths.resize(k + 1, 0);
+                }
+                self.report.applied_widths[k] += 1;
+            }
             if self.report.runs == runs_before {
                 self.idle_rounds += 1;
                 if self.idle_rounds > self.limits.idle_rounds {
@@ -8013,6 +8066,11 @@ pub struct RunResult {
     /// The starting height of each child (see [`Engine::child_heights`]),
     /// or empty when not computed.
     pub(crate) child_heights: Vec<(u32, HeightFrom)>,
+    /// The ids of `children`, computed by the run (empty: compute at apply).
+    pub(crate) child_ids: Vec<NodeId>,
+    /// The sites the node's previous uses were bound to, for the touch
+    /// snapshot (computed by the run; `None`: compute at apply).
+    pub(crate) old_sites: Option<Vec<(u64, u64)>>,
     pub(crate) env: Vec<(Field, ValueId)>,
     pub(crate) publishes: Vec<(Field, ValueId)>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
@@ -8055,6 +8113,10 @@ impl Node {
 impl Engine {
     pub(crate) fn child_ids_pub(&self, x: Slot, specs: &[(OpId, ValueId)]) -> Vec<NodeId> {
         self.child_ids(x, specs)
+    }
+
+    pub(crate) fn site_list_pub(&self, x: Slot) -> Vec<(u64, u64)> {
+        self.site_list(x)
     }
 
     pub(crate) fn slot_by_id(&self, id: NodeId) -> Option<Slot> {
