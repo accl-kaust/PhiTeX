@@ -1679,16 +1679,20 @@ impl Run<'_, '_> {
                     };
                 }
                 L::Move2 => {
+                    // §1036 `main_loop_move+2`: the character appended is
+                    // the input's (the lig stack's top, `cur_chr`), which
+                    // after a `=:` ligature (§1040) is not `cur_l`
                     let cl = cur_l.unwrap_or(0);
+                    let input = lig_stack.last().map_or(cl, |t| t.ch);
                     if !view.exists(f, cl) {
                         // char_warning (§581)
                         lig_stack.pop();
-                        self.char_warning(f, cl)?;
+                        self.char_warning(f, input)?;
                         return Ok(false);
                     }
                     out.push(Node::Char {
                         font: f,
-                        ch: u16::try_from(cl).unwrap_or(0),
+                        ch: u16::try_from(input).unwrap_or(0),
                     });
                     lig_stack.pop();
                     at = L::Lookahead;
