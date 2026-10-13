@@ -400,10 +400,9 @@ pub(crate) enum Fam {
     Wdefdecl,
     Pagefx,
     Marksdecl,
-    Read,
 }
 
-const FAMS: usize = 9;
+const FAMS: usize = 8;
 
 impl Fam {
     fn prefix(self) -> &'static str {
@@ -416,7 +415,6 @@ impl Fam {
             Fam::Wdefdecl => "wdefdecl",
             Fam::Pagefx => "pagefx",
             Fam::Marksdecl => "marksdecl",
-            Fam::Read => "read",
         }
     }
 }
