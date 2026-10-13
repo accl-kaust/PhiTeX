@@ -622,6 +622,8 @@ pub struct Stats {
     /// Nodes that waited on a value not known yet, and stops.
     pub pending_waits: u64,
     pub stops: u64,
+    /// Environment reads the engine's provider answered in place.
+    pub env_provided: u64,
     /// The executor's threads.
     pub threads: usize,
     /// The evaluate calls' wall time, summed (zero without a clock).
@@ -785,6 +787,7 @@ impl Stats {
         self.loop_rounds += r.rounds;
         self.pending_waits += r.pending_waits;
         self.stops += r.stops;
+        self.env_provided += r.env_provided;
         self.version = r.version;
         self.steps += r.steps;
         self.ready_total += r.ready_total;
