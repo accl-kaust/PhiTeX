@@ -586,6 +586,11 @@ fn decode_bound<'s>(mut it: impl Iterator<Item = &'s str>) -> Bound {
 }
 
 fn short(s: &str) -> String {
+    // (an excerpt is only for the traces that print it: none is made on
+    // the analysis's hot path otherwise)
+    if !excerpts() {
+        return String::new();
+    }
     let t: String = s.chars().take(40).collect();
     t.replace('\n', "\\n")
 }
@@ -595,6 +600,13 @@ fn short(s: &str) -> String {
 fn excerpt_at(text: &str, s: usize) -> &str {
     let s = s.min(text.len());
     &text[s..text.floor_char_boundary(s + 40)]
+}
+
+/// Whether a trace that prints hints' excerpts is on.
+fn excerpts() -> bool {
+    crate::exec::env_flag!("PHITEX_HINTS")
+        || crate::exec::env_flag!("PHITEX_SLICES_TRACE")
+        || crate::exec::env_flag!("PHITEX_TEX_TRACE")
 }
 
 // ---------------------------------------------------------------------

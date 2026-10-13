@@ -233,6 +233,7 @@ impl Run<'_, '_> {
                 crate::val::glue_value(v, &c.skip),
             ]));
         }
+        let table_v = v.list(table.clone());
         let output = self.par(Par::output)?;
         let any = toks_of(v, output).is_empty();
         let mut start = PageStart::FIRST;
@@ -252,7 +253,7 @@ impl Run<'_, '_> {
             } else {
                 Vec::new()
             };
-            let out = fold_page(v, &items, &table, marker, &start, fx);
+            let out = plan_fold(v, &items, table_v, marker, &start, fx);
             reaches.push(out.reach);
             // the job-written files' order: an immediate write's entry
             // where its marker is, page `j` where it fires (`wplan`)
@@ -266,13 +267,8 @@ impl Run<'_, '_> {
                     }
                 }
             }
-            if let Some((f, side, end)) = out.fired {
+            if let Some((ms, end)) = out.fired {
                 plan.push(v.int(i64::try_from(j).unwrap_or(0)));
-                let ms: Vec<ValueId> = f
-                    .marks
-                    .iter()
-                    .filter_map(|&k| side.marks.get(k as usize).copied())
-                    .collect();
                 let [t, _, b] = marks.0.get(&0).copied().unwrap_or([None; 3]);
                 let u = |m: Option<ValueId>| m.unwrap_or(ValueId::UNIT);
                 before.push(v.list(vec![u(t), u(b)]));
@@ -310,7 +306,7 @@ impl Run<'_, '_> {
             p.idx = 0;
             *s = p.value(v);
         }
-        self.set("pp:classes", v.list(table), true);
+        self.set("pp:classes", table_v, true);
         self.set("pp:any", v.int(i64::from(any)), true);
         self.set("pp:marker", marker, true);
         for (j, &s) in starts.iter().enumerate() {
@@ -819,6 +815,150 @@ struct PageFold {
     /// The end of the list's items the fold read (its cursor, or one
     /// past it where a kern looked at what follows).
     reach: usize,
+}
+
+/// A page as the plan folds it: the end of the items it read, the marks
+/// it fired with and where the next page starts (`None`: no fire), the
+/// marks classes passed, the immediate writes met, whether `\\end` was
+/// stuck.
+struct PlanPage {
+    reach: usize,
+    fired: Option<(Vec<ValueId>, PageStart)>,
+    passed: Vec<i64>,
+    writes: Vec<ValueId>,
+    stuck: bool,
+}
+
+/// A memo entry: the items the fold read (from the start's index), and
+/// the page with the next start's index relative to it, its carried
+/// material kept outside the value table (a sweep may free it).
+struct PlanMemo {
+    items: Vec<ValueId>,
+    /// Whether the fold read to the list's end (then a hit needs the
+    /// list to end there too).
+    to_end: bool,
+    fired: Option<(Vec<ValueId>, usize, Vec<crate::api::Tree>, PageStart)>,
+    passed: Vec<i64>,
+    writes: Vec<ValueId>,
+    stuck: bool,
+}
+
+type PlanCache = std::sync::Mutex<phitex_defuse::FxHashMap<u64, std::sync::Arc<PlanMemo>>>;
+
+/// Plan folds by their inputs: the table, the start (its index aside),
+/// what the routine before left, the marker, the first item.
+fn plan_cache() -> &'static PlanCache {
+    static C: std::sync::OnceLock<PlanCache> = std::sync::OnceLock::new();
+    C.get_or_init(PlanCache::default)
+}
+
+/// [`fold_page`] for the plan, memoized: an edit folds again only the
+/// pages whose material, start or routine effects changed. The fold is
+/// a function of its inputs, the items it read compared by value, so a
+/// hit is the fold's result. Everything a hit returns is one of the
+/// inputs' values (the items, their parts, the start's) except the
+/// carried material, which is interned again.
+fn plan_fold(
+    v: &Values,
+    items: &[ValueId],
+    table: ValueId,
+    marker0: ValueId,
+    start: &PageStart,
+    fx: Vec<ValueId>,
+) -> PlanPage {
+    let rebased = PageStart {
+        idx: 0,
+        ..start.clone()
+    }
+    .value(v);
+    let mut words = vec![
+        v.instance(),
+        rebased.raw(),
+        table.raw(),
+        marker0.raw(),
+        fx.len() as u64,
+    ];
+    // (the first items too: pages often begin alike, with glue, and
+    // a line's box makes the key the page's)
+    let from = start.idx.min(items.len());
+    words.extend(
+        items[from..(from + 8).min(items.len())]
+            .iter()
+            .map(|x| x.raw()),
+    );
+    words.extend(fx.iter().map(|x| x.raw()));
+    let key = phitex_defuse::hash_words(11, &words);
+    let hit = plan_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+        .cloned();
+    if let Some(m) = hit
+        && items[from..].starts_with(&m.items)
+        && (!m.to_end || items.len() == from + m.items.len())
+    {
+        return PlanPage {
+            reach: from + m.items.len(),
+            fired: m.fired.as_ref().map(|(ms, idx, carried, end)| {
+                let mut end = end.clone();
+                end.idx = from + idx;
+                end.carried = carried.iter().map(|t| crate::api::import(v, t)).collect();
+                (ms.clone(), end)
+            }),
+            passed: m.passed.clone(),
+            writes: m.writes.clone(),
+            stuck: m.stuck,
+        };
+    }
+    let classes = list_of(v, table);
+    let out = fold_page(v, items, &classes, marker0, start, fx);
+    let fired = out.fired.map(|(f, side, end)| {
+        let ms: Vec<ValueId> = f
+            .marks
+            .iter()
+            .filter_map(|&k| side.marks.get(k as usize).copied())
+            .collect();
+        (ms, end)
+    });
+    let memo = PlanMemo {
+        items: items[from..out.reach.max(from)].to_vec(),
+        to_end: out.reach >= items.len(),
+        fired: fired.as_ref().map(|(ms, end)| {
+            (
+                ms.clone(),
+                end.idx - from,
+                end.carried
+                    .iter()
+                    .map(|&x| crate::api::export(v, x))
+                    .collect(),
+                PageStart {
+                    idx: 0,
+                    carried: Vec::new(),
+                    ..end.clone()
+                },
+            )
+        }),
+        passed: out.passed.clone(),
+        writes: out.writes.clone(),
+        stuck: out.stuck,
+    };
+    {
+        let mut c = plan_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // (bounded: a long session starts it again)
+        if c.len() > 1 << 16 {
+            c.clear();
+        }
+        c.insert(key, std::sync::Arc::new(memo));
+    }
+    PlanPage {
+        reach: out.reach,
+        fired,
+        passed: out.passed,
+        writes: out.writes,
+        stuck: out.stuck,
+    }
 }
 
 /// §994–§1017 from `start` to the first fire (§1005): what routine j-1

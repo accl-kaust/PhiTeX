@@ -420,13 +420,13 @@ impl Default for Options {
 
 /// A value outside any table, to carry an environment between engines.
 #[derive(Clone, Debug)]
-enum Tree {
+pub(crate) enum Tree {
     Leaf(Value),
     List(Vec<Tree>),
     Seq(Vec<Tree>),
 }
 
-fn export(v: &Values, x: ValueId) -> Tree {
+pub(crate) fn export(v: &Values, x: ValueId) -> Tree {
     match &*v.get(x) {
         Value::List(xs) => Tree::List(xs.iter().map(|&y| export(v, y)).collect()),
         Value::Seq(_) => Tree::Seq(v.seq_to_vec(x).into_iter().map(|y| export(v, y)).collect()),
@@ -434,7 +434,7 @@ fn export(v: &Values, x: ValueId) -> Tree {
     }
 }
 
-fn import(v: &Values, t: &Tree) -> ValueId {
+pub(crate) fn import(v: &Values, t: &Tree) -> ValueId {
     match t {
         Tree::Leaf(x) => v.intern(x.clone()),
         Tree::List(xs) => {
