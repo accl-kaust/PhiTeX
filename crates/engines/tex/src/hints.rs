@@ -378,6 +378,9 @@ fn add_heads(st: &mut Option<Vec<String>>, heads: Option<&[&str]>) {
     match (st.as_mut(), heads) {
         (Some(v), Some(hs)) => {
             for h in hs {
+                if std::env::var("PHITEX_HEAD_TRACE").is_ok_and(|w| *h == w) {
+                    eprintln!("HEADTRACE {h}\n{}", std::backtrace::Backtrace::force_capture());
+                }
                 if !v.iter().any(|x| x == h) {
                     v.push((*h).to_owned());
                 }
