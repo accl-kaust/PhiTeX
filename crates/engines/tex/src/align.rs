@@ -103,6 +103,7 @@ impl Run<'_, '_> {
     }
 
     /// The end of a u template (§324): `align_state` becomes 0.
+    #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn align_u_end(&mut self) -> R<()> {
         if self.align_open() && self.astate() > 500_000 {
             self.set_astate(0);
