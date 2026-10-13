@@ -418,6 +418,9 @@ impl Run<'_, '_> {
     pub(crate) fn page_step(&mut self, args: &[ValueId]) -> R<()> {
         let v = self.v;
         let j = self.page_index();
+        let mut readst = ValueId::UNIT;
+        let mut readdef = ValueId::UNIT;
+        let mut inherited: Vec<(Field, ValueId)> = Vec::new();
         if j > 0 && j < MAX_PAGES {
             // `\count0..9` as the step before this one left them
             // (`pgdef:<j-1>`, a loop-back: the build's guess in round one)
