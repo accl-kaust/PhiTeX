@@ -600,7 +600,11 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         self.own.insert(f, Some(val));
         self.cats = [0; 256];
-        let loc = if global { Locality::Global } else { Locality::Local };
+        let loc = if global {
+            Locality::Global
+        } else {
+            Locality::Local
+        };
         // the definitions since the innermost group opened are the
         // group's (`nest.rs` pop_level truncates to its opening): one
         // per field there; outside every group, one per field at all. A
@@ -754,14 +758,15 @@ impl<'c, 'a> Run<'c, 'a> {
             }
         }
         self.drop_spent_lists();
-        self.frames.push_front(Frame::Toks(Rc::from(vec![t]), 0));
+        self.frames.push_front(Frame::Toks(Rc::from([t]), 0));
     }
 
     /// `begin_token_list` (§323): `toks` are read next.
-    pub(crate) fn push_toks(&mut self, toks: Vec<Tok>) {
+    pub(crate) fn push_toks(&mut self, toks: impl Into<Rc<[Tok]>>) {
+        let toks: Rc<[Tok]> = toks.into();
         if !toks.is_empty() {
             self.drop_spent_lists();
-            self.frames.push_front(Frame::Toks(Rc::from(toks), 0));
+            self.frames.push_front(Frame::Toks(toks, 0));
         }
     }
 
