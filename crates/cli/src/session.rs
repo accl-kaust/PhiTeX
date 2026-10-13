@@ -577,6 +577,7 @@ impl Session {
                         Some("predicted") => phitex_tex::Speculation::Predicted,
                         _ => Options::default().speculation,
                     },
+                    wkeys: self.load_wkeys(),
                     ..Options::default()
                 };
                 let opts = Options {
@@ -616,6 +617,9 @@ impl Session {
             text = t;
             self.absorbed_at = Some(came);
             self.text.clone_from(&text);
+        }
+        if let Some(b) = &self.build {
+            self.store_wkeys(b);
         }
         self.status.set("output");
         let b = self.build.as_ref().expect("built above");
@@ -759,6 +763,46 @@ impl Session {
 
     /// The prelude's evaluated state stored, unless the cache has it
     /// under the same key.
+    /// The cache's file of the document's read-back key sets
+    /// ([`Build::wkeys`]): the next session's round-one guesses.
+    fn wkeys_path(&self) -> Option<PathBuf> {
+        Some(self.cache.as_ref()?.doc_dir(&self.job.path).join("wkeys"))
+    }
+
+    /// The key sets the last session stored: one file per line, its name
+    /// then its keys, separated by NUL.
+    fn load_wkeys(&self) -> Vec<(String, Vec<String>)> {
+        let (Some(c), Some(p)) = (&self.cache, self.wkeys_path()) else {
+            return Vec::new();
+        };
+        let Some(b) = c.get(&p) else { return Vec::new() };
+        String::from_utf8_lossy(&b)
+            .lines()
+            .filter_map(|l| {
+                let mut xs = l.split('\0').map(str::to_owned);
+                Some((xs.next()?, xs.collect()))
+            })
+            .collect()
+    }
+
+    fn store_wkeys(&self, b: &Build) {
+        let (Some(c), Some(p)) = (&self.cache, self.wkeys_path()) else {
+            return;
+        };
+        let mut out = String::new();
+        for (n, ks) in b.wkeys() {
+            out.push_str(&n);
+            for k in ks {
+                out.push('\0');
+                out.push_str(&k);
+            }
+            out.push('\n');
+        }
+        if c.get(&p).as_deref() != Some(out.as_bytes()) {
+            let _ = c.put(&p, out.as_bytes(), &[]);
+        }
+    }
+
     fn store_prelude(&self, b: &Build, prelude: Option<&str>, had: Option<[u8; 32]>) {
         let (Some(c), Some(text)) = (&self.cache, prelude) else {
             return;
