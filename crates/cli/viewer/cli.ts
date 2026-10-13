@@ -284,6 +284,23 @@ const save = (name: string) => {
   a.click();
 };
 
+/** A change's first words as the page shows them: its source without commands, braces and math marks. */
+const words = (src: string) =>
+  src.replace(/\\[a-zA-Z@]+\*?/g, " ").replace(/[{}$\\%&~^_#\[\]]/g, " ").split(/\s+/).filter(Boolean).slice(0, 5).join(" ");
+let lastAt = { k: -1, page: 0 };
+const gotoChange = async (k: number) => {
+  const c = (diffState.changes ?? [])[k - 1] as { new_text?: string; old_text?: string; page?: number } | undefined;
+  if (!c) return;
+  const q = words(c.new_text || "") || words(c.old_text || "");
+  if (!q) return;
+  const hits = await pages.find(q);
+  if (!hits.length) return void panel.msg(`change ${k}: not found on the pages`);
+  const from = k > lastAt.k ? lastAt.page : 0;
+  const at = Math.max(0, hits.findIndex((h) => h.k >= from));
+  lastAt = { k, page: hits[at].k };
+  panel.reveal(hits.slice(at, at + 1));
+};
+
 const runner: DiffRunner<Pair> = {
   async start(v, say, count) {
     counted = count;
@@ -295,7 +312,9 @@ const runner: DiffRunner<Pair> = {
     return { changes: d.changes?.length ?? 0 };
   },
   show: (which) => void ask({ op: "diff_show", which }),
-  goto: (k) => void ask({ op: "diff_goto", k }),
+  // (change k found in the diff's pages by its words, MuPDF's text: no
+  // SyncTeX here; the match after the last one gone to, else the first)
+  goto: (k) => void gotoChange(k),
   download: (what) => save(`diff.${what}`),
   look: async () => ({ ...LATEXDIFF_LOOK, ...diffState.look }),
   restyle: (l) => void ask({ op: "diff_restyle", markup: l.markup, subtype: l.subtype, add_color: l.add_color, del_color: l.del_color }),

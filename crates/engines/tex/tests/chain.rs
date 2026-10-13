@@ -68,3 +68,75 @@ fn chains() {
         chain(&kt, "s");
     }
 }
+
+/// Speculation off, on predicted nodes, on all candidates, at 1 and 4
+/// threads: the output the same, and what the engine did.
+#[test]
+#[ignore = "a measure: speculation A/B"]
+fn speculation_ab() {
+    use phitex_tex::Speculation as S;
+    let fx = common::fixtures().join("plain");
+    let kt = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/gate/kt");
+    let mut docs: Vec<(std::path::PathBuf, &str)> = ["story", "hyphens", "pages"]
+        .iter()
+        .map(|&n| (fx.clone(), n))
+        .collect();
+    if kt.join("s.tex").exists() {
+        docs.push((kt, "s"));
+    }
+    let only = std::env::var("PHITEX_AB").ok();
+    for (dir, name) in docs {
+        if only.as_deref().is_some_and(|o| o != name) {
+            continue;
+        }
+        let src = common::read(&dir.join(format!("{name}.tex")));
+        let mut base: Option<Vec<u8>> = None;
+        for t in [1, 4] {
+            for (label, sp) in [
+                ("off", S::Off),
+                ("predicted", S::Predicted),
+                ("all", S::All),
+            ] {
+                let opts = phitex_tex::Options {
+                    threads: Some(t),
+                    speculation: sp,
+                    ..common::options(&format!("./{name}.tex"), name, "", &dir)
+                };
+                let b = common::build(opts, Some(&common::plain()), &src);
+                let out = b.output().0;
+                let same = match &base {
+                    None => {
+                        base = Some(out);
+                        true
+                    }
+                    Some(w) => common::first_difference(&out, w).is_none(),
+                };
+                let s = &b.stats;
+                eprintln!(
+                    "{name} t{t} {label:9} same {same} cp {:?} nodes {} runs {} stops {} raises {} spec {}/{}/{} busy/wall {:.2} wall {:?}",
+                    s.critical_path,
+                    s.nodes_run,
+                    s.runs,
+                    s.stops,
+                    s.raises,
+                    s.speculations,
+                    s.confirmations,
+                    s.mispredictions,
+                    s.busy.as_secs_f64() / s.wall.as_secs_f64().max(1e-9),
+                    s.wall
+                );
+                if !same {
+                    for d in b.diagnostics() {
+                        eprintln!(
+                            "  {:?} {}: {}",
+                            d.severity,
+                            d.line,
+                            d.message.chars().take(600).collect::<String>()
+                        );
+                    }
+                }
+                assert!(same, "{name} t{t} {label}: the output differs");
+            }
+        }
+    }
+}
