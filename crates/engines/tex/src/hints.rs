@@ -712,8 +712,22 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
     }
     // atoms an earlier item claims (operands: never a slice's start)
     let mut claimed = vec![false; n];
-    for it in &p.items {
-        for c in claimed.iter_mut().take(it.end.min(n)).skip(it.atom + 1) {
+    for (i, it) in p.items.iter().enumerate() {
+        // (a value whose last token is a command the pass cannot read
+        // through, `\count1=\input inc-num`: the text up to the next
+        // command is the value's too, §440)
+        let end = match &it.hints.claim {
+            pass::Claim::Pending { cause, .. }
+                if matches!(*cause, "command in value position" | "value is a macro") =>
+            {
+                p.items
+                    .get(i + 1)
+                    .map_or(it.end, |x| x.atom)
+                    .max(it.end)
+            }
+            _ => it.end,
+        };
+        for c in claimed.iter_mut().take(end.min(n)).skip(it.atom + 1) {
             *c = true;
         }
     }
@@ -2520,3 +2534,4 @@ mod tests {
         }
     }
 }
+
