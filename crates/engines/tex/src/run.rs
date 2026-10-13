@@ -426,9 +426,9 @@ impl<'c, 'a> Run<'c, 'a> {
             let wd = v.field(&format!("wdef:{name}"));
             if !self.cx.is_loopback(wd) {
                 self.cx.use_env(v.field(&format!("wdefdecl:{name}")))?;
-                if !self.cx.is_loopback(wd) {
-                    continue;
-                }
+            }
+            if !self.cx.is_loopback(wd) {
+                continue;
             }
             let Some(x) = self.cx.use_field(wd)? else {
                 continue;
@@ -459,7 +459,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let codes = self.if_codes.clone();
         let cur = self.cur.clone();
         let (eof, no_pull, claim) = (self.eof, self.no_pull, self.claim_rest);
-        let effect = self.effect.clone();
+        let effect = self.effect;
         self.eof = true;
         self.no_pull = true;
         self.set("cat:64", v.int(11), false);

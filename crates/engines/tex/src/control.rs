@@ -17,6 +17,9 @@ const BOX_FLAG: i64 = 0o10000000000;
 pub(crate) const SHIP_OUT_FLAG: i64 = BOX_FLAG + 512;
 pub(crate) const LEADER_FLAG: i64 = BOX_FLAG + 513;
 
+/// `PHITEX_HEARTBEAT_FROM`: the command count the per-command trace starts at.
+static HEARTBEAT_FROM: OnceLock<u64> = OnceLock::new();
+
 impl Run<'_, '_> {
     /// The node's command: expand once, or do one command (§1030).
     pub(crate) fn command(&mut self) -> R<()> {
@@ -60,12 +63,11 @@ impl Run<'_, '_> {
             c.set(Some(t));
             t
         });
-        static FROM: OnceLock<u64> = OnceLock::new();
-        let from = *FROM.get_or_init(|| {
+        let from = *HEARTBEAT_FROM.get_or_init(|| {
             std::env::var("PHITEX_HEARTBEAT_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX)
         });
         let trace = n >= from && n < from.saturating_add(150_000);
-        if n % 100_000 != 0 && !trace {
+        if !n.is_multiple_of(100_000) && !trace {
             return;
         }
         let (file, line) = self
