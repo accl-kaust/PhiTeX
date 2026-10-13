@@ -1990,14 +1990,15 @@ impl<'c, 'a> Run<'c, 'a> {
                 crate::val::group::SIMPLE | crate::val::group::SEMI_SIMPLE
             )
             && !crate::hints::effect_none(self.v, &self.cx.args())
-            && self.text_opens_env()
+            && self.text_opens_group()
     }
 
-    /// Whether the node's own text begins more environments than it
-    /// ends: the group its run leaves open is an environment's of the
-    /// text (`\\begin{...}`), not one a command left open while it
-    /// still reads on (a loading command's, a macro's).
-    fn text_opens_env(&self) -> bool {
+    /// Whether the node's own text opens a group it does not close (an
+    /// unmatched `\\begin{...}`, `\\begingroup`, `\\bgroup` or `{`):
+    /// the group its run leaves open is the text's, not one a command
+    /// left open while it still reads on (a loading command's, a
+    /// macro's).
+    fn text_opens_group(&self) -> bool {
         let text: String = decode_frames(self.v, &self.cx.args())
             .iter()
             .filter_map(|f| match f {
@@ -2010,7 +2011,13 @@ impl<'c, 'a> Run<'c, 'a> {
                 _ => None,
             })
             .collect();
-        text.matches("\\begin{").count() > text.matches("\\end{").count()
+        let n = |p: &str| i64::try_from(text.matches(p).count()).unwrap_or(0);
+        let braces = n("{") - n("\\{") - (n("}") - n("\\}"));
+        (n("\\begin{") - n("\\end{"))
+            + (n("\\begingroup") - n("\\endgroup"))
+            + (n("\\bgroup") - n("\\egroup"))
+            + braces
+            > 0
     }
 
     /// Whether the text the run reads next begins (after blanks) with a
