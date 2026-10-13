@@ -757,6 +757,20 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             *c = true;
         }
     }
+    // (that extension runs in the command's own run: `\\vskip 1in
+    // \\centerline{…}` expands the macro while it looks for `plus`,
+    // §1094, and runs what it leaves; one slice)
+    let mut extended = vec![false; n];
+    for (i, it) in p.items.iter().enumerate() {
+        if let pass::Claim::Pending { cause, .. } = &it.hints.claim
+            && matches!(*cause, "command in value position" | "value is a macro")
+        {
+            let end = p.items.get(i + 1).map_or(it.end, |x| x.atom).max(it.end);
+            for c in extended.iter_mut().take(end.min(n)).skip(it.end.max(it.atom + 1)) {
+                *c = true;
+            }
+        }
+    }
     // the operands of a primitive (`\sfcode`\)=0`): never a slice's
     // start, so a command and what it reads are one node (a macro's
     // operands are the pass's guess and do not count)
@@ -767,6 +781,9 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
                 *c = true;
             }
         }
+    }
+    for (o, &x) in operand.iter_mut().zip(&extended) {
+        *o |= x;
     }
     // the conditional nesting before each atom, by the text's items
     // (`\if…` +1, `\fi` -1; an item an earlier one consumes not counted)
