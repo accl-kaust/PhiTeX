@@ -49,6 +49,7 @@ impl Run<'_, '_> {
         use std::sync::OnceLock;
         use std::time::Instant;
         static ON: OnceLock<bool> = OnceLock::new();
+        static EXIT: OnceLock<u64> = OnceLock::new();
         thread_local! {
             static N: Cell<u64> = const { Cell::new(0) };
             static T0: Cell<Option<Instant>> = const { Cell::new(None) };
@@ -77,7 +78,6 @@ impl Run<'_, '_> {
         }
         // `PHITEX_HEARTBEAT_EXIT`: the process ends at this many commands
         // (a profile of a run's first commands)
-        static EXIT: OnceLock<u64> = OnceLock::new();
         let exit = *EXIT.get_or_init(|| {
             std::env::var("PHITEX_HEARTBEAT_EXIT")
                 .ok()

@@ -547,7 +547,7 @@ impl Run<'_, '_> {
         let dead = self.cint(crate::fields::cell::DEADCYCLES)? + 1;
         self.set_cell(crate::fields::cell::DEADCYCLES, v.int(dead), true);
         self.set_cell(
-            crate::fields::BOX0 as crate::runstate::Loc + 255,
+            crate::fields::cell::BOX255,
             v.list(vec![v.int(0), b255]),
             true,
         );
