@@ -245,7 +245,7 @@ impl PdfState {
     }
 
     /// `pdf_use_font`.
-    fn use_font(&mut self, f: FontId, num: i64) {
+    pub(crate) fn use_font(&mut self, f: FontId, num: i64) {
         let st = self.font_mut(f);
         st.size = divide_scaled(st.metrics.size, ONE_HUNDRED_BP, 6).1;
         st.used = true;

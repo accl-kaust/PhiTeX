@@ -32,6 +32,19 @@ pub(crate) struct Dest {
     named: bool,
 }
 
+impl Dest {
+    /// A destination another writer wrote (the finish's `fix_dests`
+    /// leaves it).
+    pub(crate) fn placeholder() -> Dest {
+        Dest {
+            rect: Rect::default(),
+            kind: DestKind::Fit,
+            struct_num: None,
+            named: false,
+        }
+    }
+}
+
 /// An outline entry (`pdfmem_outline_size`).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Outline {
@@ -67,7 +80,27 @@ pub(crate) struct LinkLevel {
     attr: Option<Vec<u8>>,
     action: Action,
     /// `ref_link_node`: the link object whose rectangle `end_link` ends.
-    objnum: usize,
+    pub objnum: usize,
+}
+
+impl LinkLevel {
+    /// A link open at `level` (its object given later).
+    pub(crate) fn new(
+        level: i32,
+        whd: [Scaled; 3],
+        attr: Option<Vec<u8>>,
+        action: Action,
+    ) -> LinkLevel {
+        LinkLevel {
+            level,
+            width: whd[0],
+            height: whd[1],
+            depth: whd[2],
+            attr,
+            action,
+            objnum: 0,
+        }
+    }
 }
 
 /// The thread being output (`last_thread`, `pdf_thread_wd`, ...).

@@ -59,3 +59,53 @@ fn long_hyphenation_list() {
     let opts = common::options("./core.tex", "texput", "", &dir);
     let _ = common::build(opts, None, &doc);
 }
+
+/// The executor's progress, read from another thread while a build
+/// runs: `done` reaches the final count, and no slot outlives its job
+/// (once `done` is final, every slot is idle).
+#[test]
+fn progress_reader() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let fx = common::fixtures().join("plain");
+    let src = common::read(&fx.join("story.tex"));
+    let prelude = common::plain();
+    for threads in [1, 4] {
+        let p = Arc::new(phitex_tex::Progress::new(threads));
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let (p, stop) = (p.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut busy = false;
+                while !stop.load(Ordering::Relaxed) {
+                    // a slot is set only while its job is not done
+                    let (d, t) = (p.done(), p.total());
+                    assert!(d <= t || t == 0 || d == 0, "{d} done of {t}");
+                    busy |= p.running().iter().any(Option::is_some);
+                    std::thread::yield_now();
+                }
+                busy
+            })
+        };
+        let opts = phitex_tex::Options {
+            threads: Some(threads),
+            progress: Some(p.clone()),
+            ..common::options("./story.tex", "story", "", &fx)
+        };
+        let b = common::build(opts, Some(&prelude), &src);
+        stop.store(true, Ordering::Relaxed);
+        let _ = reader.join().expect("the reader");
+        assert!(Arc::ptr_eq(&b.progress(), &p));
+        assert!(
+            p.done() > 0 && p.done() == p.total(),
+            "{} of {}",
+            p.done(),
+            p.total()
+        );
+        assert!(
+            p.running().iter().all(Option::is_none),
+            "a slot outlived its job"
+        );
+        eprintln!("{threads} threads: {} jobs", p.done());
+    }
+}

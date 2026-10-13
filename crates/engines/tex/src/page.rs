@@ -493,6 +493,9 @@ pub(crate) fn dvi(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
             .is_some_and(|&x| crate::val::int_at(v, x, 0) != 0)
     });
     if pdf {
+        if crate::pdfrelaxed::finishing(cx)? {
+            return crate::pdfrelaxed::finish(cx);
+        }
         return crate::pdfout::finish(cx);
     }
     let comment = cx
