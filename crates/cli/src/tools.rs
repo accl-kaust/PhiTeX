@@ -120,13 +120,17 @@ impl phitex_biber::Files for ToolFiles<'_> {
     /// job's directory), else kpathsea's `bib` lookup.
     fn datasource(&mut self, name: &str) -> Option<(String, Vec<u8>)> {
         let d = self.get(name.as_bytes());
-        self.read.push(Lookup::Read(name.as_bytes().to_vec(), d.clone()));
+        self.read
+            .push(Lookup::Read(name.as_bytes().to_vec(), d.clone()));
         if let Some(d) = d {
             return Some((name.to_string(), d));
         }
         let f = self.find(name.as_bytes(), Format::Bib);
-        self.read
-            .push(Lookup::Find(name.as_bytes().to_vec(), Format::Bib, f.clone()));
+        self.read.push(Lookup::Find(
+            name.as_bytes().to_vec(),
+            Format::Bib,
+            f.clone(),
+        ));
         let (path, data) = f?;
         Some((String::from_utf8_lossy(&path).into_owned(), data?))
     }
@@ -357,7 +361,12 @@ impl Tools {
                     served: &served,
                     read: alloc_read(name, &bcf),
                 };
-                if known(&bbl) && self.biber_last.get(name).is_some_and(|r| files.unchanged(r)) {
+                if known(&bbl)
+                    && self
+                        .biber_last
+                        .get(name)
+                        .is_some_and(|r| files.unchanged(r))
+                {
                     continue;
                 }
                 let t = std::time::Instant::now();

@@ -29,7 +29,22 @@
     clippy::type_complexity,
     clippy::fn_params_excessive_bools,
     clippy::needless_pass_by_value,
-    clippy::float_cmp
+    clippy::float_cmp,
+    // The port keeps biber's Perl structure (its branch-per-case
+    // conditionals, its names, its string building), so it reads
+    // against the Perl modules:
+    clippy::match_same_arms,
+    clippy::if_same_then_else,
+    clippy::collapsible_if,
+    clippy::collapsible_else_if,
+    clippy::many_single_char_names,
+    clippy::doc_markdown,
+    clippy::format_push_string,
+    clippy::unnecessary_wraps,
+    clippy::items_after_statements,
+    clippy::unreadable_literal,
+    clippy::single_match_else,
+    clippy::bool_to_int_with_if
 )]
 
 extern crate alloc;
