@@ -21,6 +21,8 @@ rayon = { version = "=1.10.0", optional = true }
 default = ["rayon"]
 # the engine's batches on a persistent pool (else threads per batch)
 rayon = ["dep:rayon"]
+# the engine's probes, printed after each evaluation with PHITEX_OBS=1
+profile = ["phitex-defuse/profile"]
 
 [dev-dependencies]
 phitex-kpse = { path = "../../tools/kpse" }
