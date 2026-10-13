@@ -642,21 +642,122 @@ impl TextHints {
     }
 }
 
-/// The slices of a text: nodes start at atoms (characters run together),
-/// each with the blanks before the next.
-fn slices_of(text: &str, p: &Pass) -> Vec<(usize, usize)> {
+/// The slices of a text, each with the blanks before the next.
+///
+/// A document's slices are its paragraph regions (docs/TARGET_GRAPH.md):
+/// a region runs from its start to the end of the next item the pass
+/// marks paragraph-ending (`Implicit::EndsParagraph`: a blank line,
+/// `\par`, a vertical command, a macro whose body ends in one) that is
+/// at brace depth 0, consumed by no earlier item, and outside every
+/// conditional. So a region is balanced: its run opens and closes its
+/// own groups and conditionals and leaves nothing to another node. A
+/// format's (`Initex`, `Package`) slices are one command each (its
+/// definitions, one per node), extended through a conditional opened at
+/// depth 0 to its `\fi`.
+pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> Vec<(usize, usize)> {
     let mut starts: Vec<usize> = Vec::new();
-    let mut prev_char = false;
-    for a in &p.atoms {
-        let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
-        if !(ch && prev_char) {
-            starts.push(a.start);
+    // brace depth before each atom
+    let mut depth = Vec::with_capacity(p.atoms.len());
+    let mut d: usize = 0;
+    for at in &p.atoms {
+        if at.kind == AtomKind::Close {
+            d = d.saturating_sub(1);
         }
-        prev_char = ch;
+        depth.push(d);
+        if at.kind == AtomKind::Open {
+            d += 1;
+        }
+    }
+    // the conditional nesting before each atom, by the text's items
+    // (`\if…` +1, `\fi` -1; an item an earlier one consumes not counted)
+    let mut ifd = vec![0i64; p.atoms.len() + 1];
+    {
+        let mut consumed = 0;
+        let mut cur = 0i64;
+        let mut k = 0;
+        let mut deltas: Vec<(usize, i64)> = Vec::new();
+        for it in &p.items {
+            if it.atom >= consumed {
+                if CONDITIONALS.contains(&it.name.as_str()) {
+                    deltas.push((it.atom, 1));
+                } else if it.name == "fi" {
+                    deltas.push((it.atom, -1));
+                }
+            }
+            if it.consumes {
+                consumed = consumed.max(it.end);
+            }
+        }
+        for (a, x) in ifd.iter_mut().enumerate() {
+            while k < deltas.len() && deltas[k].0 < a {
+                cur = (cur + deltas[k].1).max(0);
+                k += 1;
+            }
+            *x = cur;
+        }
+    }
+    if kind == FileKind::Document {
+        // the atom after each paragraph-ending item
+        let mut consumed = 0;
+        let mut ends: Vec<usize> = Vec::new();
+        for it in &p.items {
+            if it.atom >= consumed
+                && depth.get(it.atom) == Some(&0)
+                && it.hints.implicit == pass::Implicit::EndsParagraph
+                && ifd.get(it.atom) == Some(&0)
+                // these read keywords or a number past their text, and
+                // put back what follows (§1094): the region goes on
+                && !matches!(
+                    it.name.as_str(),
+                    "vskip" | "hrule" | "unvbox" | "unvcopy" | "halign"
+                )
+            {
+                ends.push(it.end.max(it.atom + 1));
+            }
+            if it.consumes {
+                consumed = consumed.max(it.end);
+            }
+        }
+        for m in &p.marks {
+            if depth.get(m.atom) == Some(&0)
+                && m.hints.implicit == pass::Implicit::EndsParagraph
+                && ifd.get(m.atom) == Some(&0)
+            {
+                ends.push(m.atom + 1);
+            }
+        }
+        ends.sort_unstable();
+        ends.dedup();
+        starts.push(0);
+        for a in ends {
+            // (the region after an end: at the next atom at depth 0 and
+            // outside every conditional)
+            let mut k = a;
+            while k < p.atoms.len() && (depth[k] != 0 || ifd[k] != 0) {
+                k += 1;
+            }
+            if let Some(at) = p.atoms.get(k) {
+                starts.push(at.start);
+            }
+        }
+    } else {
+        let mut prev_char = false;
+        for (k, a) in p.atoms.iter().enumerate() {
+            let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
+            // (inside a conditional opened at depth 0 the slice goes on
+            // to its `\fi`: a conditional is never split between nodes)
+            let inside_if = ifd.get(k).is_some_and(|&x| x > 0)
+                && !(a.kind == AtomKind::Cs && CONDITIONALS.contains(&a.name(text)));
+            if !(ch && prev_char) && !inside_if {
+                starts.push(a.start);
+            }
+            prev_char = ch;
+        }
     }
     if starts.first() != Some(&0) {
         starts.insert(0, 0);
     }
+    starts.sort_unstable();
     starts.dedup();
     let mut out = Vec::with_capacity(starts.len());
     for (i, &s) in starts.iter().enumerate() {
@@ -666,6 +767,70 @@ fn slices_of(text: &str, p: &Pass) -> Vec<(usize, usize)> {
         }
     }
     out
+}
+
+/// The primitive conditionals (§487) and e-TeX's and pdfTeX's.
+const CONDITIONALS: &[&str] = &[
+    "if",
+    "ifcat",
+    "ifnum",
+    "ifdim",
+    "ifodd",
+    "ifvmode",
+    "ifhmode",
+    "ifmmode",
+    "ifinner",
+    "ifvoid",
+    "ifhbox",
+    "ifvbox",
+    "ifx",
+    "ifeof",
+    "iftrue",
+    "iffalse",
+    "ifcase",
+    "ifdefined",
+    "ifcsname",
+    "iffontchar",
+    "ifincsname",
+    "ifpdfabsnum",
+    "ifpdfabsdim",
+    "ifpdfprimitive",
+];
+
+/// The union of bounds: what a slice of several commands may define.
+/// `None` state in either is `None` (every head).
+fn union(a: &mut Bound, b: &Bound) {
+    for n in &b.names {
+        if !a.names.contains(n) {
+            a.names.push(n.clone());
+        }
+    }
+    for p in &b.prefixes {
+        if !a.prefixes.contains(p) {
+            a.prefixes.push(p.clone());
+        }
+    }
+    for c in &b.cats {
+        if !a.cats.contains(c) {
+            a.cats.push(*c);
+        }
+    }
+    for m in &b.means {
+        if !a.means.iter().any(|x| x.0 == m.0) {
+            a.means.push(m.clone());
+        }
+    }
+    match (&mut a.state, &b.state) {
+        (Some(sa), Some(sb)) => {
+            for h in sb {
+                if !sa.contains(h) {
+                    sa.push(h.clone());
+                }
+            }
+        }
+        (st, None) => *st = None,
+    }
+    a.no_scope = a.no_scope && b.no_scope;
 }
 
 /// The analysis of one text under `kind`'s regime.
@@ -1431,7 +1596,7 @@ fn add_defs(ds: &[Def], prefixes: bool, b: &mut Bound) {
 
 fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     let an = Analysis::new(text, kind, defs.clone());
-    let slices = slices_of(text, &an.p);
+    let slices = slices_of(text, &an.p, kind);
     let mut starts = Vec::with_capacity(an.p.atoms.len());
     let mut hints: Vec<Arc<str>> = Vec::with_capacity(an.p.atoms.len());
     let mut memo: HashMap<String, Arc<str>> = HashMap::new();
@@ -1447,12 +1612,57 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         hints.push(intern(&h));
     }
     let mut slice_hints = Vec::with_capacity(slices.len());
-    for &(s, _) in &slices {
+    let region = kind == FileKind::Document;
+    for &(s, e) in &slices {
         let k = starts.partition_point(|&x| x < s);
         let h = match hints.get(k) {
-            Some(h) if starts[k] == s => h.clone(),
+            Some(h) if !region => h.clone(),
+            Some(_) => {
+                // a region: the union of its commands' bounds (a run of
+                // characters inside counts once, as the command it is)
+                let mut acc: Option<Bound> = None;
+                let mut why = String::new();
+                let mut any = false;
+                let mut a = k;
+                let mut prev_char = false;
+                while let Some(at) = an.p.atoms.get(a)
+                    && at.start < e
+                {
+                    let ch = matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb);
+                    let skip = (ch && prev_char) || an.claimed[a] || at.kind == AtomKind::Space;
+                    prev_char = ch;
+                    a += 1;
+                    if skip {
+                        continue;
+                    }
+                    let h = an.hint(a - 1);
+                    match (&h.bound, &mut acc) {
+                        (None, _) => {
+                            any = true;
+                            why = h.cause.clone();
+                            break;
+                        }
+                        (Some(b), Some(acc)) => union(acc, b),
+                        (Some(b), None) => acc = Some(b.clone()),
+                    }
+                }
+                let excerpt = short(&text[s..text.len().min(s + 40)]);
+                let h = if any {
+                    Hint::any(format!("region: {why}"), &excerpt)
+                } else {
+                    let mut b = acc.unwrap_or_default();
+                    // (a region's paragraph and its groups are the run's
+                    // own: it defines `\prevgraf` of the list it is in)
+                    add_head(&mut b.state, "pg:");
+                    Hint {
+                        bound: Some(b),
+                        cause: "region".to_owned(),
+                        excerpt,
+                    }
+                };
+                intern(&h)
+            }
             // (a slice before the first atom: blanks, a comment)
-            Some(h) => h.clone(),
             None => intern(&Hint::any("end of text", "")),
         };
         slice_hints.push(h);
@@ -1841,6 +2051,13 @@ pub(crate) fn effect_none(v: &Values, args: &[ValueId]) -> bool {
         .bound
         .as_ref()
         .is_some_and(|b| b.no_scope)
+}
+
+/// Whether the node is a document region (its hint was computed for a
+/// region: a paragraph that must end in the vertical list it began in).
+pub(crate) fn is_region(v: &Values, args: &[ValueId]) -> bool {
+    let h = hint_of_args(v, args);
+    h.cause == "region" || h.cause.starts_with("region: ")
 }
 
 /// Whether the node's text bounds what its command defines.
