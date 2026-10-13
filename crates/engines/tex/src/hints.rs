@@ -2633,6 +2633,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         }
     }
     let mut prev_char = false;
+    let blank = Arc::new(Hint::default());
     #[allow(clippy::needless_range_loop)]
     for a in 0..an.p.atoms.len() {
         let at = &an.p.atoms[a];
@@ -2640,9 +2641,13 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         let ch = matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb);
         // (an atom inside a run of characters, or a space, is skipped
         // whatever its hint: no span reads it, so none is made)
-        let h = if (ch && prev_char) || at.kind == AtomKind::Space {
-            Hint::default()
-        } else if an.claimed[a] && at.kind == AtomKind::Cs && !prim_operand[a] {
+        if (ch && prev_char) || at.kind == AtomKind::Space {
+            hints.push(blank.clone());
+            skip.push(true);
+            prev_char = ch;
+            continue;
+        }
+        let h = if an.claimed[a] && at.kind == AtomKind::Cs && !prim_operand[a] {
             an.hint_run(a)
         } else {
             an.hint(a)
@@ -2654,10 +2659,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         // (a command a macro is only guessed to read still runs in the
         // slice: its rows count in the union)
         skip.push(
-            (ch && prev_char)
-                || (an.claimed[a]
-                    && (at.kind != AtomKind::Cs || prim_operand[a] || unbounded_operand))
-                || at.kind == AtomKind::Space,
+            an.claimed[a] && (at.kind != AtomKind::Cs || prim_operand[a] || unbounded_operand),
         );
         prev_char = ch;
     }
