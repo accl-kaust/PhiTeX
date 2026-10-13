@@ -468,7 +468,13 @@ fn build_biblatex_with_native_biber() {
         std::fs::copy(src.join(&f), ours.join(&f)).expect("a copy");
     }
     let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &ours)
-        .args(["build", "-v", "--output-format", "dvi", &format!("{name}.tex")])
+        .args([
+            "build",
+            "-v",
+            "--output-format",
+            "dvi",
+            &format!("{name}.tex"),
+        ])
         .output()
         .expect("phitex runs");
     let errs = String::from_utf8_lossy(&out.stderr);
@@ -477,7 +483,10 @@ fn build_biblatex_with_native_biber() {
     assert!(errs.contains("biber"), "{name}: biber did not run:\n{errs}");
     let got = std::fs::read(ours.join(format!("{name}.bbl"))).unwrap_or_default();
     let want = std::fs::read(src.join(format!("{name}.bbl"))).expect("the .bbl oracle");
-    assert!(got == want, "{name}: the native biber's .bbl is not biber's");
+    assert!(
+        got == want,
+        "{name}: the native biber's .bbl is not biber's"
+    );
     let got = std::fs::read(ours.join(format!("{name}.dvi"))).unwrap_or_default();
     let want = std::fs::read(src.join(format!("fixpoint/{name}.dvi"))).expect("the DVI oracle");
     assert!(
@@ -1225,7 +1234,14 @@ fn watch_tables_bounded() {
     std::fs::write(dir.join("big.tex"), &text).expect("the document");
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
-            "watch", "--json", "--no-view", "--ini", "--etex", "-j", "8", "big.tex",
+            "watch",
+            "--json",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "-j",
+            "8",
+            "big.tex",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1270,6 +1286,9 @@ fn watch_tables_bounded() {
     }
     if std::env::var_os("PHITEX_NO_GC").is_none() {
         let (a, b) = (&sizes[1], &sizes[sizes.len() - 1]);
-        assert!(b[0] <= a[0] * 11 / 10 && b[2] <= a[2] * 11 / 10, "grew: {a:?} -> {b:?}");
+        assert!(
+            b[0] <= a[0] * 11 / 10 && b[2] <= a[2] * 11 / 10,
+            "grew: {a:?} -> {b:?}"
+        );
     }
 }
