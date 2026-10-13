@@ -622,6 +622,9 @@ pub(crate) struct TextHints {
     /// beginning there.
     starts: Vec<usize>,
     hints: Vec<Arc<str>>,
+    /// Per atom: an operand an earlier command reads (never run on its
+    /// own), or a character after the first of its run.
+    skip: Vec<bool>,
     /// Per slice.
     slice_hints: Vec<Arc<str>>,
 }
@@ -629,10 +632,41 @@ pub(crate) struct TextHints {
 impl TextHints {
     /// The hint of the command at or after byte `off`.
     fn at(&self, off: usize) -> Hint {
+        self.at_until(off, usize::MAX)
+    }
+
+    /// The hint of the text from byte `off` to byte `end`: the union of
+    /// the bounds of the commands in it (a run executes all of them: a
+    /// line of a file read by `\input`, a region).
+    fn at_until(&self, off: usize, end: usize) -> Hint {
         let k = self.starts.partition_point(|&s| s < off);
-        match self.hints.get(k) {
-            Some(h) => Hint::decode(h),
-            None => Hint::any("end of text", ""),
+        let mut acc: Option<Bound> = None;
+        let mut first: Option<Hint> = None;
+        let mut a = k;
+        while let Some(&s) = self.starts.get(a)
+            && s < end
+        {
+            a += 1;
+            if self.skip[a - 1] {
+                continue;
+            }
+            let h = Hint::decode(&self.hints[a - 1]);
+            if first.is_none() {
+                first = Some(h.clone());
+            }
+            match (&h.bound, &mut acc) {
+                (None, _) => return h,
+                (Some(b), Some(acc)) => union(acc, b),
+                (Some(b), None) => acc = Some(b.clone()),
+            }
+        }
+        match (first, acc) {
+            (Some(mut h), Some(b)) => {
+                h.bound = Some(b);
+                h
+            }
+            (Some(h), None) => h,
+            (None, _) => Hint::any("end of text", ""),
         }
     }
 
@@ -741,14 +775,37 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> Vec<(usize, usi
             }
         }
     } else {
+        // (inside a brace group, a `\begingroup` pair or a conditional
+        // opened at depth 0 the slice goes on to its end: a group or a
+        // conditional is never split between nodes)
+        let mut inside = vec![false; p.atoms.len()];
+        for (k, a) in p.atoms.iter().enumerate() {
+            // (a brace knows its mate's atom index; `p.braces` indexes tokens)
+            if a.kind == AtomKind::Open
+                && a.mate != usize::MAX
+                && a.mate > k
+                && depth.get(k) == Some(&0)
+            {
+                for x in inside.iter_mut().take(a.mate + 1).skip(k + 1) {
+                    *x = true;
+                }
+            }
+        }
+        for g in &p.groups {
+            if let (Some(o), Some(c)) = (g.open, g.close)
+                && depth.get(o) == Some(&0)
+            {
+                for x in inside.iter_mut().take(c + 1).skip(o + 1) {
+                    *x = true;
+                }
+            }
+        }
         let mut prev_char = false;
         for (k, a) in p.atoms.iter().enumerate() {
             let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
-            // (inside a conditional opened at depth 0 the slice goes on
-            // to its `\fi`: a conditional is never split between nodes)
             let inside_if = ifd.get(k).is_some_and(|&x| x > 0)
                 && !(a.kind == AtomKind::Cs && CONDITIONALS.contains(&a.name(text)));
-            if !(ch && prev_char) && !inside_if {
+            if !(ch && prev_char) && !inside_if && !inside[k] {
                 starts.push(a.start);
             }
             prev_char = ch;
@@ -796,6 +853,85 @@ const CONDITIONALS: &[&str] = &[
     "ifpdfabsdim",
     "ifpdfprimitive",
 ];
+
+/// The end of the span a file-rest node runs from byte `off`: its line,
+/// and the lines after it while a brace group or a conditional opened
+/// in the span is still open (the run reads on until it is closed,
+/// `Run::run_all`).
+fn line_span_end(text: &str, off: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut i = off.min(bytes.len());
+    let (mut depth, mut ifs) = (0i64, 0i64);
+    loop {
+        let line_end = bytes[i..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(bytes.len(), |k| i + k);
+        let line = &text[i..line_end];
+        let mut cs = false;
+        let mut name = String::new();
+        let mut rest = line.chars().peekable();
+        while let Some(c) = rest.next() {
+            if c == '%' && !cs {
+                break;
+            }
+            if cs {
+                if c.is_ascii_alphabetic() {
+                    name.push(c);
+                    continue;
+                }
+                cs = false;
+                match name.as_str() {
+                    n if CONDITIONALS.contains(&n) => ifs += 1,
+                    "fi" => ifs = (ifs - 1).max(0),
+                    "begingroup" => depth += 1,
+                    "endgroup" => depth = (depth - 1).max(0),
+                    _ => {}
+                }
+                name.clear();
+                if c == '\\' {
+                    // (`\\` then a symbol: the symbol is the name)
+                    cs = true;
+                    if let Some(&d) = rest.peek()
+                        && !d.is_ascii_alphabetic()
+                    {
+                        rest.next();
+                        cs = false;
+                    }
+                    continue;
+                }
+            }
+            match c {
+                '\\' => {
+                    cs = true;
+                    if let Some(&d) = rest.peek()
+                        && !d.is_ascii_alphabetic()
+                    {
+                        // a control symbol (`\{`, `\}`, `\%`)
+                        rest.next();
+                        cs = false;
+                    }
+                }
+                '{' => depth += 1,
+                '}' => depth = (depth - 1).max(0),
+                _ => {}
+            }
+        }
+        if cs {
+            match name.as_str() {
+                n if CONDITIONALS.contains(&n) => ifs += 1,
+                "fi" => ifs = (ifs - 1).max(0),
+                "begingroup" => depth += 1,
+                "endgroup" => depth = (depth - 1).max(0),
+                _ => {}
+            }
+        }
+        if (depth == 0 && ifs == 0) || line_end >= bytes.len() {
+            return line_end;
+        }
+        i = line_end + 1;
+    }
+}
 
 /// The union of bounds: what a slice of several commands may define.
 /// `None` state in either is `None` (every head).
@@ -1607,73 +1743,46 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
             .or_insert_with(|| Arc::from(s))
             .clone()
     };
+    let mut skip = Vec::with_capacity(an.p.atoms.len());
+    let mut prev_char = false;
     for a in 0..an.p.atoms.len() {
-        starts.push(an.p.atoms[a].start);
+        let at = &an.p.atoms[a];
+        starts.push(at.start);
         let h = an.hint(a);
         hints.push(intern(&h));
+        let ch = matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb);
+        skip.push((ch && prev_char) || an.claimed[a] || at.kind == AtomKind::Space);
+        prev_char = ch;
     }
-    let mut slice_hints = Vec::with_capacity(slices.len());
-    let region = kind == FileKind::Document;
-    for &(s, e) in &slices {
-        let k = starts.partition_point(|&x| x < s);
-        let h = match hints.get(k) {
-            Some(h) if !region => h.clone(),
-            Some(_) => {
-                // a region: the union of its commands' bounds (a run of
-                // characters inside counts once, as the command it is)
-                let mut acc: Option<Bound> = None;
-                let mut why = String::new();
-                let mut any = false;
-                let mut a = k;
-                let mut prev_char = false;
-                while let Some(at) = an.p.atoms.get(a)
-                    && at.start < e
-                {
-                    let ch = matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb);
-                    let skip = (ch && prev_char) || an.claimed[a] || at.kind == AtomKind::Space;
-                    prev_char = ch;
-                    a += 1;
-                    if skip {
-                        continue;
-                    }
-                    let h = an.hint(a - 1);
-                    match (&h.bound, &mut acc) {
-                        (None, _) => {
-                            any = true;
-                            why = h.cause.clone();
-                            break;
-                        }
-                        (Some(b), Some(acc)) => union(acc, b),
-                        (Some(b), None) => acc = Some(b.clone()),
-                    }
-                }
-                let excerpt = short(&text[s..text.len().min(s + 40)]);
-                let h = if any {
-                    Hint::any(format!("region: {why}"), &excerpt)
-                } else {
-                    let mut b = acc.unwrap_or_default();
-                    // (a region's paragraph and its groups are the run's
-                    // own: it defines `\prevgraf` of the list it is in)
-                    add_head(&mut b.state, "pg:");
-                    Hint {
-                        bound: Some(b),
-                        cause: "region".to_owned(),
-                        excerpt,
-                    }
-                };
-                intern(&h)
-            }
-            // (a slice before the first atom: blanks, a comment)
-            None => intern(&Hint::any("end of text", "")),
-        };
-        slice_hints.push(h);
-    }
-    TextHints {
+    let mut t = TextHints {
         slices,
         starts,
         hints,
-        slice_hints,
+        skip,
+        slice_hints: Vec::new(),
+    };
+    // each slice's hint: the union of its commands' bounds (a run
+    // executes the whole slice); a document region also defines
+    // `\prevgraf` of the list it is in
+    let region = kind == FileKind::Document;
+    let mut slice_hints = Vec::with_capacity(t.slices.len());
+    for &(s, e) in &t.slices {
+        let mut h = t.at_until(s, e);
+        let excerpt = short(&text[s..text.len().min(s + 40)]);
+        if region {
+            match &mut h.bound {
+                Some(b) => {
+                    add_head(&mut b.state, "pg:");
+                    h.cause = "region".to_owned();
+                }
+                None => h.cause = format!("region: {}", h.cause),
+            }
+            h.excerpt = excerpt;
+        }
+        slice_hints.push(intern(&h));
     }
+    t.slice_hints = slice_hints;
+    t
 }
 
 // ---------------------------------------------------------------------
@@ -1844,9 +1953,15 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
     match tag.as_str() {
         "f" => {
             if let (Some(&id), Some(&o), Some(&name)) = (xs.get(1), xs.get(2), xs.get(3)) {
+                // (the rest of the file: its next line runs whole here,
+                // and so do the lines after it while a group or a
+                // conditional stays open; the union of the line's
+                // commands, extended to the end of such a span)
                 let off = usize::try_from(int_of(v, o)).unwrap_or(0);
                 let t = file_hints(v, id, name);
-                return t.at(off);
+                let text = str_of(v, id);
+                let end = line_span_end(&text, off);
+                return t.at_until(off, end);
             }
             Hint::any("file frame without a position", "")
         }
@@ -1866,7 +1981,7 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
                     .get(&name.raw())
                     .cloned();
                 return match t {
-                    Some(t) => t.at(at),
+                    Some(t) => t.at_until(at, at + text.len()),
                     None => Hint::any("file not analysed yet", &text),
                 };
             }
@@ -2357,3 +2472,4 @@ mod tests {
         }
     }
 }
+

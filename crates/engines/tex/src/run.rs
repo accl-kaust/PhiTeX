@@ -182,6 +182,12 @@ pub(crate) struct Run<'c, 'a> {
     /// The `(language, packed hyphen minima)` of the paragraph being
     /// broken (`end_graf` pops its level before `line_break`, §1096).
     pub last_par: (i64, i64),
+    /// How many of `frames` (from the front) are the node's own: the
+    /// rest were pulled from siblings as operands (`Run::pull`) and run
+    /// here only while a span is open.
+    pub own_frames: usize,
+    /// Whether the node is a document region (all its text runs here).
+    pub region: bool,
     /// While looking for the command's first token: a node's command
     /// begins in its own text (the next sibling's begins in its own).
     pub no_pull: bool,
@@ -241,6 +247,8 @@ impl<'c, 'a> Run<'c, 'a> {
             nest: Vec::new(),
             next_lid: 0,
             last_par: (0, 0),
+            own_frames: 0,
+            region: false,
             no_pull: false,
             own: FxHashMap::default(),
             cats: [0; 256],
@@ -642,12 +650,14 @@ impl<'c, 'a> Run<'c, 'a> {
                         return Ok(Some(tok));
                     }
                     self.frames.pop_front();
+                    self.own_frames = self.own_frames.saturating_sub(1);
                 }
                 Frame::Src(_) => {
                     if let Some(t) = self.src_next()? {
                         return Ok(Some(t));
                     }
                     self.frames.pop_front();
+                    self.own_frames = self.own_frames.saturating_sub(1);
                 }
                 Frame::File(f) => {
                     if f.has_lines() {
@@ -1062,25 +1072,86 @@ impl<'c, 'a> Run<'c, 'a> {
     /// token (a run of characters is one node), and the text not yet read
     /// as one node per segment.
     pub(crate) fn leftover(&self) -> Vec<Vec<ValueId>> {
-        // a run reads everything it is given (expansion tokens run inline,
-        // the slice's text is the node's command): only the rest of a
-        // file `\input` opened is a node of its own, the file-rest child
+        // a run reads everything of its own (expansion tokens run inline,
+        // the slice's text is the node's command): what is left is the
+        // rest of a sibling's text pulled for an operand (its own command,
+        // §1030: a child), and the rest of a file `\input` opened (the
+        // file-rest child)
         let v = self.v;
         let epoch = self.cx.values_epoch();
-        let tag_f = self.ops.fields.get_at(v, epoch, "f").0;
+        let tag = |n: &str| self.ops.fields.get_at(v, epoch, n).0;
+        let (tag_s, tag_f) = (tag("s"), tag("f"));
         let mut out: Vec<Vec<ValueId>> = Vec::new();
+        let tag_t = tag("t");
+        let mut run: Vec<ValueId> = Vec::new();
+        let node = |toks: Vec<ValueId>| -> Vec<ValueId> {
+            let l = v.list(toks);
+            vec![v.list(vec![v.list(vec![tag_t, l])]), v.int(0)]
+        };
         for f in &self.frames {
-            if let Frame::File(f) = f
-                && f.has_lines()
-            {
-                let fr = v.list(vec![
-                    tag_f,
-                    f.id,
-                    v.int(i64::try_from(f.off).unwrap_or(0)),
-                    f.name,
-                ]);
-                out.push(vec![v.list(vec![fr]), v.int(0)]);
+            match f {
+                Frame::Toks(t, p) => {
+                    for tok in &t[*p..] {
+                        let ch = matches!(tok.cat(), Some(10..=12));
+                        if ch {
+                            run.push(crate::val::tok_id(v, epoch, tok));
+                            continue;
+                        }
+                        if !run.is_empty() {
+                            out.push(node(std::mem::take(&mut run)));
+                        }
+                        out.push(node(vec![crate::val::tok_id(v, epoch, tok)]));
+                    }
+                }
+                Frame::Src(s) => {
+                    if !run.is_empty() {
+                        out.push(node(std::mem::take(&mut run)));
+                    }
+                    let end_due = s.ends && s.endch < -1;
+                    if s.loc >= s.buf.len() && !end_due {
+                        continue;
+                    }
+                    let text: String = s.buf[s.loc.min(s.buf.len())..]
+                        .iter()
+                        .map(|&c| char::from_u32(c).unwrap_or('?'))
+                        .collect();
+                    let starts = s.starts && s.endch == -2;
+                    let mut xs = vec![
+                        tag_s,
+                        v.str(&text),
+                        v.int(i64::from(s.state)),
+                        v.int(-2),
+                        v.int(
+                            i64::from(starts)
+                                | (i64::from(end_due) << 1)
+                                | (i64::from(s.rescanned) << 2),
+                        ),
+                    ];
+                    if let Some((name, at)) = s.origin {
+                        let at = at + s.loc.min(s.buf.len());
+                        xs.push(name);
+                        xs.push(v.int(i64::try_from(at).unwrap_or(0)));
+                    }
+                    out.push(vec![v.list(vec![v.list(xs)]), v.int(0)]);
+                }
+                Frame::File(f) => {
+                    if !run.is_empty() {
+                        out.push(node(std::mem::take(&mut run)));
+                    }
+                    if f.has_lines() {
+                        let fr = v.list(vec![
+                            tag_f,
+                            f.id,
+                            v.int(i64::try_from(f.off).unwrap_or(0)),
+                            f.name,
+                        ]);
+                        out.push(vec![v.list(vec![fr]), v.int(0)]);
+                    }
+                }
             }
+        }
+        if !run.is_empty() {
+            out.push(node(run));
         }
         out
     }
@@ -1100,21 +1171,65 @@ impl<'c, 'a> Run<'c, 'a> {
     /// ([`Run::leave_open`]).
     pub(crate) fn run_all(&mut self) -> R<()> {
         let args = self.cx.args();
-        let region = crate::hints::is_region(self.v, &args);
+        self.region = crate::hints::is_region(self.v, &args);
+        self.own_frames = self.frames.len();
         loop {
-            while self.has_input() {
+            while self.input_now() {
                 self.command()?;
                 if self.claim_rest {
                     return Ok(());
                 }
             }
-            // a region ends in the vertical list it began in: a paragraph
-            // or group still open reads on
-            if region && !self.nest.is_empty() && !self.eof && self.pull()? {
-                continue;
+            // a paragraph, a group or a conditional still open reads on:
+            // the next line of the file (`Frame::File`), or the next
+            // sibling, claimed
+            if self.open_span() && !self.eof {
+                if self.has_input() {
+                    // (a file frame with lines left)
+                    self.command()?;
+                    continue;
+                }
+                if self.pull()? {
+                    continue;
+                }
             }
             return Ok(());
         }
+    }
+
+    /// Whether the run has something open that must close in this run:
+    /// a level of the nest or a conditional.
+    fn open_span(&self) -> bool {
+        !self.nest.is_empty() || !self.conds.is_empty()
+    }
+
+    /// Whether there is input before the next file frame: the slice's
+    /// text and expansion tokens run here; a file's next line is the
+    /// file-rest child's unless a span is open ([`Run::leftover`]).
+    fn input_now(&self) -> bool {
+        let span = self.open_span();
+        if self.region || span {
+            return self.has_input();
+        }
+        // a format node: its own text, and the tokens its expansions
+        // leave while it has pulled no sibling (once it has, a token put
+        // back may be the sibling's command: a child, §1030)
+        for (i, f) in self.frames.iter().enumerate() {
+            match f {
+                Frame::Toks(t, p) => {
+                    if *p < t.len() && self.pulled == 0 {
+                        return true;
+                    }
+                }
+                Frame::Src(s) => {
+                    if i < self.own_frames && (s.loc < s.buf.len() || (s.ends && s.endch < -1)) {
+                        return true;
+                    }
+                }
+                Frame::File(_) => return false,
+            }
+        }
+        false
     }
 
     /// Ends the run: definitions, contributions, children (what the
