@@ -1896,6 +1896,7 @@ impl Cx<'_> {
             cause: it.cause.as_ref().map(|c| c.kind),
             relied: set.relied.clone(),
             calls: set.calls.clone(),
+            outer_calls: set.outer_calls.clone(),
         }
     }
 }

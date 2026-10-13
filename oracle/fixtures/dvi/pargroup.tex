@@ -1,0 +1,9 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6
+\font\tenrm=cmr10 \tenrm
+\hsize=200pt \vsize=300pt \parindent=15pt \baselineskip=12pt \topskip=10pt
+\tolerance=1000 \linepenalty=10 \maxdepth=2pt \parfillskip=0pt plus 1fil
+A paragraph {that ends in a group\par} and goes on after it.\par
+Another \begingroup ends inside\par\endgroup and goes on.\par
+One more {with a skip \vskip 3pt inside} the group.\par
+\def\x{\par}Text {in a group \x} then text.\par
+\end
