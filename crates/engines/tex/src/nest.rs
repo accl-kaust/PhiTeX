@@ -13,11 +13,10 @@
 //! list is a `Vec` here. Nothing of the nest is passed to another node.
 //!
 //! Level 0 is the engine's scope the node runs in: its mode and list come
-//! from the scope kind (a format definition inside `\begingroup`, a box
-//! opened on an earlier line of the format). Groups a one-command node of
-//! the format leaves open at its end are still engine scopes
-//! (`Run::open_group` on an empty nest); a document region is balanced
-//! by the pass, so a region never leaves one.
+//! from the scope kind the engine gives it. A format node runs its whole file and closes
+//! every group it opens: a group open at a format node's end is an
+//! error. A document region is balanced by the pass, so a region never
+//! leaves one either.
 
 use phitex_defuse::{Field, Locality, ValueId};
 
@@ -54,6 +53,7 @@ pub(crate) struct Level {
     /// run's own view held before (`None`: nothing, the engine's value),
     /// and whether a global definition since made the entry inert
     /// (§283: a global definition is retained).
+    #[allow(clippy::option_option)]
     pub saved: Vec<(Field, Option<Option<ValueId>>, bool)>,
     /// The run's `defs` length when the group opened: definitions after
     /// it are the group's, undone at its close unless global.
@@ -74,7 +74,6 @@ impl Level {
                 sf: 1000,
                 pd: IGNORE_DEPTH,
                 since_bp: 0,
-                bp_at: 0,
             },
             par: None,
             prev_graf: 0,

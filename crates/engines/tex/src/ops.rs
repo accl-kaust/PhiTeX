@@ -53,11 +53,10 @@ pub(crate) fn run_node(
         );
     }
     match res {
-        Ok(()) => match r.leave_open() {
-            Ok(()) => Ok(r.finish()),
-            Err(Halt::Stop(s)) => Err(s),
-            Err(_) => Ok(r.stall("fatal", ValueId::UNIT)),
-        },
+        Ok(()) => {
+            r.end_open();
+            Ok(r.finish())
+        }
         Err(Halt::Stop(s)) => Err(s),
         Err(Halt::Starve) => {
             let u = ValueId::UNIT;
