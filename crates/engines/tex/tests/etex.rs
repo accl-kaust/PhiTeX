@@ -88,3 +88,10 @@ fn diagnostics() {
 fn catcode_restore() {
     run(&["catrestore"]);
 }
+
+/// `\expandafter` over `\else`/`\fi` with e-TeX's conditionals
+/// (`\unless`, `\ifcsname`, `\ifdefined`, `\detokenize` emptiness).
+#[test]
+fn expandafter_conditionals() {
+    run(&["xcondx"]);
+}
