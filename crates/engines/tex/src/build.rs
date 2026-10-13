@@ -222,13 +222,6 @@ impl Run<'_, '_> {
         })
     }
 
-    pub(crate) fn set_scope_list(&mut self, name: &str, md: &Mode, items: Vec<ValueId>) {
-        let v = self.v;
-        let mut xs = vec![v.int(md.sid)];
-        xs.extend(items);
-        self.set(name, v.list(xs), false);
-    }
-
     // ------------------------------------------------------------ lists
 
     /// `tail_append` to list `lid`: a list of this run's grows here, its

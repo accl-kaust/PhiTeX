@@ -334,3 +334,34 @@ fn chain_bar() {
         assert!(ratio[1] > ratio[0], "busy/wall {ratio:?}");
     }
 }
+
+/// A measure: 400 plain paragraphs (the chain of a long document).
+#[test]
+#[ignore = "a measure: the chain of 400 paragraphs"]
+fn para400() {
+    use std::fmt::Write as _;
+    for n in [400, 1000] {
+        let name = format!("para{n}");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/gate/p400");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut src = String::from("\\vsize=6in\n");
+        for k in 0..n {
+            let _ = writeln!(
+                src,
+                "Paragraph {k} has some words in it, enough to fill a few lines of text set \
+                 with plain's macros, so that the paragraph builder has work to do and the \
+                 pages fill up one after another.\n"
+            );
+        }
+        src.push_str("\\bye\n");
+        std::fs::write(dir.join(format!("{name}.tex")), &src).expect("write");
+        let t = std::time::Instant::now();
+        let fails = chain(&dir, &name);
+        eprintln!(
+            "{name}: {} target-graph failures (a measure), {:?}",
+            fails.len(),
+            t.elapsed()
+        );
+    }
+}
