@@ -33,6 +33,12 @@ struct Node {
     follow: bool,
 }
 
+/// Runs of command nodes and of rest nodes.
+static RUNS: [std::sync::atomic::AtomicU64; 2] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
 /// A pseudo-random earlier node for the `k`th read of node `i`.
 fn earlier(i: usize, k: u64) -> usize {
     let h = (i as u64)
@@ -60,6 +66,7 @@ impl Operation for Node {
             _ => 0,
         };
         let (i, n) = (int(0), int(1));
+        RUNS[usize::from(a.len() > 2)].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // The rest node: nothing until the command before it runs.
         if a.len() > 2 {
             if self.follow {
@@ -187,6 +194,11 @@ fn main() {
                 continue;
             }
             let (mut eng, _) = build(n, spread, follow);
+            if let Some(k) = std::env::var("PENDING_LIMIT").ok().and_then(|s| s.parse().ok()) {
+                let mut l = eng.limits().clone();
+                l.runs_per_node = k;
+                eng.set_limits(l);
+            }
             let t0 = Instant::now();
             let r = eval(&mut eng);
             let t = t0.elapsed();
@@ -199,6 +211,13 @@ fn main() {
                 r.critical_path,
                 r.stops as f64 / r.runs.max(1) as f64
             );
+            if follow {
+                println!(
+                    "         command runs {}  rest runs {}",
+                    RUNS[0].swap(0, std::sync::atomic::Ordering::Relaxed),
+                    RUNS[1].swap(0, std::sync::atomic::Ordering::Relaxed)
+                );
+            }
             if r.stops > 0 {
                 println!(
                     "         waits by kind {:?}  top waited {:?}  raises {}",
