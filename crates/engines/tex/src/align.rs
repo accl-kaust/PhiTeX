@@ -163,9 +163,9 @@ impl Run<'_, '_> {
         while let Some(kind) = k.filter(|&x| x != ValueId::UNIT) {
             let xs = list_of(v, kind);
             if xs.first().map(|&g| int_of(v, g)) == Some(group::ALIGN)
-                && xs.get(6).map(|&t| str_of(v, t)).as_deref() == Some("cell")
+                && xs.get(7).map(|&t| str_of(v, t)).as_deref() == Some("cell")
             {
-                return Ok(Some(xs[6..].to_vec()));
+                return Ok(Some(xs[7..].to_vec()));
             }
             k = xs.get(5).copied();
         }
@@ -421,6 +421,7 @@ impl Run<'_, '_> {
                 opens: 1,
                 before: false,
                 kind: Some(k),
+                kind_pending: false,
             });
             Ok(())
         };

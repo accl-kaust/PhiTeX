@@ -67,7 +67,7 @@ impl Run<'_, '_> {
                     n(2),
                     i32::try_from(n(3)).unwrap_or(1),
                     n(4),
-                    xs.get(6..).map(<[ValueId]>::to_vec).unwrap_or_default(),
+                    xs.get(7..).map(<[ValueId]>::to_vec).unwrap_or_default(),
                 )
             }
             None => (0, 0, 0, 1, 0, Vec::new()),
@@ -85,7 +85,7 @@ impl Run<'_, '_> {
             vm: km,
         };
         if km.abs() == 1
-            && let Some(p) = self.get(&format!("par:{lid}"))?
+            && let Some(p) = self.get(&self.par_cell(lid))?
             && p != ValueId::UNIT
         {
             let xs = list_of(v, p);
@@ -98,8 +98,16 @@ impl Run<'_, '_> {
         Ok(md)
     }
 
+    /// The cell of the paragraph open in vertical list `vlid` in this
+    /// node's paragraph region (OUTPUT.md §5): `par:<anchor>:<vlid>`,
+    /// `[list, lang, packed hyphen minima]` or unit (§211's mode).
+    pub(crate) fn par_cell(&self, vlid: i64) -> String {
+        format!("par:{}:{vlid}", self.anchor)
+    }
+
     /// A scope kind: `[group, sid, list, mode, depth, parent kind,
-    /// extra…]`; the parent is the kind the group's end returns to.
+    /// opener's paragraph anchor, extra…]`; the parent is the kind the
+    /// group's end returns to.
     pub(crate) fn kind_value(
         &mut self,
         md: &Mode,
@@ -132,6 +140,7 @@ impl Run<'_, '_> {
             v.int(i64::from(m)),
             v.int(md.depth + 1),
             parent,
+            v.int(self.anchor),
         ];
         xs.extend(extra);
         v.list(xs)
@@ -145,6 +154,7 @@ impl Run<'_, '_> {
             opens: 1,
             before: true,
             kind: Some(k),
+            kind_pending: false,
         });
     }
 
@@ -479,7 +489,7 @@ impl Run<'_, '_> {
         let rhm = Self::norm_min(self.param("righthyphenmin")?);
         let packed = (lhm * 64 + rhm) * 65536 + lang;
         let rec = v.list(vec![v.int(id), v.int(lang), v.int(packed)]);
-        self.set(&format!("par:{}", md.vlid), rec, true);
+        self.set(&self.par_cell(md.vlid), rec, true);
         if indented {
             let w = self.param("parindent")?;
             let b = null_box(v, w);
@@ -533,7 +543,7 @@ impl Run<'_, '_> {
             if !items.is_empty() {
                 self.line_break(md, &items, false)?;
             }
-            self.set(&format!("par:{}", md.vlid), ValueId::UNIT, true);
+            self.set(&self.par_cell(md.vlid), ValueId::UNIT, true);
             self.normal_paragraph()?;
             let _ = v;
         }
@@ -653,7 +663,7 @@ impl Run<'_, '_> {
         let packed = md.para.map_or(0, |_| 0);
         let _ = packed;
         let rec = self
-            .get(&format!("par:{}", md.vlid))?
+            .get(&self.par_cell(md.vlid))?
             .map(|x| list_of(v, x))
             .unwrap_or_default();
         let pg_packed = rec.get(2).map_or(0, |&x| int_of(v, x));
@@ -1391,12 +1401,26 @@ impl Run<'_, '_> {
         // The enclosing scope's kind is the one the opener read; it is
         // kept in the group's own kind as the parent list.
         let v = self.v;
-        let parent = md.extra.last().copied();
-        let _ = parent;
         let saved = self.kind_outer(md)?;
         let mut o = saved;
-        if o.km.abs() == 1
-            && let Some(p) = self.get(&format!("par:{}", o.lid))?
+        // the outer paragraph is in the opener's region; a group that
+        // ends in a later region carries it there (OUTPUT.md §5)
+        let opened = self
+            .scope_kind()?
+            .and_then(|k| list_of(v, k).get(6).copied())
+            .map_or(0, |x| int_of(v, x));
+        let rec = if o.km.abs() == 1 {
+            self.get(&format!("par:{opened}:{}", o.lid))?
+        } else {
+            None
+        };
+        if let Some(p) = rec
+            && opened != self.anchor
+            && p != ValueId::UNIT
+        {
+            self.set(&self.par_cell(o.lid), p, true);
+        }
+        if let Some(p) = rec
             && p != ValueId::UNIT
         {
             let xs = list_of(v, p);
@@ -1438,7 +1462,7 @@ impl Run<'_, '_> {
             group: n(0),
             sid: n(1),
             depth: n(4),
-            extra: xs.get(6..).map(<[ValueId]>::to_vec).unwrap_or_default(),
+            extra: xs.get(7..).map(<[ValueId]>::to_vec).unwrap_or_default(),
             para: None,
             vm: km,
         })
@@ -1486,6 +1510,7 @@ impl Run<'_, '_> {
                 opens: 1,
                 before: false,
                 kind: Some(kind),
+                kind_pending: false,
             });
             return Ok(());
         }

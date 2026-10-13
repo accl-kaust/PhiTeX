@@ -1368,6 +1368,7 @@ impl Run<'_, '_> {
             opens: 1,
             before: false,
             kind: Some(kind),
+            kind_pending: false,
         });
         for x in list {
             self.append(sid, x);

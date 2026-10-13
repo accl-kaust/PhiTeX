@@ -211,33 +211,86 @@ fn apply_text(
     }
     let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
     let common = old_mid.min(new_mid);
-    let mut nodes = old[..a].to_vec();
-    let args_of = |eng: &Engine, k: usize| {
+    // the paragraph regions before and after (OUTPUT.md §5): a kept node
+    // whose anchor or boundary flag changed is replaced
+    let new_flags = slice_flags(&text);
+    let old_text: String = old.iter().map(|(k, _)| k.get(1..).unwrap_or("")).collect();
+    let old_flags = slice_flags(&old_text);
+    let old_regions =
+        (old_flags.len() == old.len()).then(|| regions(&old_flags, |i| raw_of(old[i].1)));
+    let args_of = |eng: &Engine, k: usize, anchor: i64| {
         let (s, e) = new[k].1;
         let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-        slice_args(eng.values(), &text[s..e], starts)
+        let boundary = new_flags.get(k).is_some_and(|f| f & 1 != 0);
+        slice_args(eng.values(), &text[s..e], starts, anchor, boundary)
     };
-    for k in 0..common {
-        let n = old[a + k].1;
-        let args = args_of(eng, a + k);
-        eng.replace(n, exec, args);
-        nodes.push((new[a + k].0.clone(), n));
-    }
     for k in common..old_mid {
         eng.remove(old[a + k].1);
     }
-    for k in common..new_mid {
-        let args = args_of(eng, a + k);
-        let n = if let Some(&(_, p)) = nodes.last() {
-            eng.insert_after(p, exec, args)
+    let mut nodes: Vec<(String, NodeId)> = Vec::with_capacity(new.len());
+    let (mut anchor, mut last) = (0, None);
+    for i in 0..new.len() {
+        let f = new_flags.get(i).copied().unwrap_or(0);
+        if f & 2 != 0
+            && let Some(l) = last
+        {
+            anchor = l;
+        }
+        let n = if i < a || i >= a + new_mid {
+            let oi = if i < a { i } else { i - new_mid + old_mid };
+            let n = old[oi].1;
+            let same = old_regions
+                .as_ref()
+                .is_some_and(|r| r[oi] == (anchor, f & 1 != 0));
+            if !same {
+                let args = args_of(eng, i, anchor);
+                eng.replace(n, exec, args);
+            }
+            n
+        } else if i - a < common {
+            let n = old[i].1;
+            let args = args_of(eng, i, anchor);
+            eng.replace(n, exec, args);
+            n
         } else {
-            let first = old.get(a + old_mid).map_or(dvi, |x| x.1);
-            eng.insert_before(first, exec, args)
+            let args = args_of(eng, i, anchor);
+            if let Some(&(_, p)) = nodes.last() {
+                eng.insert_after(p, exec, args)
+            } else {
+                let first = old.get(a + old_mid).map_or(dvi, |x| x.1);
+                eng.insert_before(first, exec, args)
+            }
         };
-        nodes.push((new[a + k].0.clone(), n));
+        if f & 1 != 0 {
+            last = Some(raw_of(n));
+        }
+        nodes.push((new[i].0.clone(), n));
     }
-    nodes.extend_from_slice(&old[a + old_mid..]);
     *nodes_now = nodes;
+}
+
+/// A node's raw id as the anchor of the region after it.
+fn raw_of(n: NodeId) -> i64 {
+    i64::from_ne_bytes(n.raw().to_ne_bytes())
+}
+
+/// Each slice's `(anchor, boundary)` from its flags ([`slice_flags`]),
+/// `id` giving the raw id of slice `i`'s node.
+fn regions(flags: &[u8], id: impl Fn(usize) -> i64) -> Vec<(i64, bool)> {
+    let (mut anchor, mut last) = (0, None);
+    let mut out = Vec::with_capacity(flags.len());
+    for (i, &f) in flags.iter().enumerate() {
+        if f & 2 != 0
+            && let Some(l) = last
+        {
+            anchor = l;
+        }
+        out.push((anchor, f & 1 != 0));
+        if f & 1 != 0 {
+            last = Some(id(i));
+        }
+    }
+    out
 }
 
 impl Default for Options {
@@ -425,9 +478,46 @@ impl Rd<'_> {
     }
 }
 
-/// The key of a prelude: its text and jobname, and what it read.
+/// The layout of an exported prelude and of what it binds. Bump when
+/// the serialised environment's layout, the node args, the `Fields` set,
+/// the hint args or the state fields' names change: a prelude exported
+/// under another layout is refused (rebuilt), never loaded.
+pub const PRELUDE_LAYOUT: u32 = 2;
+
+/// The exported prelude's magic, before the layout and the engine's
+/// identity.
+const PRELUDE_MAGIC: &[u8; 8] = b"PHITEXPR";
+
+/// The vendored engine's identity: a hash of its sources, so vendoring
+/// another engine invalidates every exported prelude.
+fn engine_identity() -> u64 {
+    static ID: OnceLock<u64> = OnceLock::new();
+    *ID.get_or_init(|| {
+        let srcs: [&[u8]; 9] = [
+            include_bytes!("../../../vendor/defuse/Cargo.toml"),
+            include_bytes!("../../../vendor/defuse/src/lib.rs"),
+            include_bytes!("../../../vendor/defuse/src/engine.rs"),
+            include_bytes!("../../../vendor/defuse/src/value.rs"),
+            include_bytes!("../../../vendor/defuse/src/ctx.rs"),
+            include_bytes!("../../../vendor/defuse/src/sched.rs"),
+            include_bytes!("../../../vendor/defuse/src/tree.rs"),
+            include_bytes!("../../../vendor/defuse/src/hash.rs"),
+            include_bytes!("../../../vendor/defuse/src/obs.rs"),
+        ];
+        let mut h = 0u64;
+        for s in srcs {
+            h = phitex_defuse::hash_bytes(h ^ 0x9e37_79b9, s);
+        }
+        h
+    })
+}
+
+/// The key of a prelude: the layout and the engine, its text and
+/// jobname, and what it read.
 fn prelude_key_of(text_key: u64, reads: &[(String, u64)]) -> [u8; 32] {
-    let mut b = text_key.to_le_bytes().to_vec();
+    let mut b = PRELUDE_LAYOUT.to_le_bytes().to_vec();
+    b.extend_from_slice(&engine_identity().to_le_bytes());
+    b.extend_from_slice(&text_key.to_le_bytes());
     for (n, h) in reads {
         b.extend_from_slice(n.as_bytes());
         b.push(0);
@@ -441,9 +531,17 @@ fn prelude_key_of(text_key: u64, reads: &[(String, u64)]) -> [u8; 32] {
     out
 }
 
-/// `[key][reads][env]`, as [`Build::export_prelude`] writes it.
+/// `[magic][layout][engine][key][reads][env]`, as
+/// [`Build::export_prelude`] writes it.
 fn serialise(c: &Cached) -> Vec<u8> {
-    let mut out = c.key.to_vec();
+    serialise_as(c, PRELUDE_LAYOUT, engine_identity())
+}
+
+fn serialise_as(c: &Cached, layout: u32, engine: u64) -> Vec<u8> {
+    let mut out = PRELUDE_MAGIC.to_vec();
+    out.extend_from_slice(&layout.to_le_bytes());
+    out.extend_from_slice(&engine.to_le_bytes());
+    out.extend_from_slice(&c.key);
     out.extend_from_slice(&c.text_key.to_le_bytes());
     out.extend_from_slice(&(c.reads.len() as u64).to_le_bytes());
     for (n, h) in &c.reads {
@@ -458,8 +556,24 @@ fn serialise(c: &Cached) -> Vec<u8> {
     out
 }
 
+/// A prelude exported under this layout and engine; `None` (rebuild)
+/// for any other.
 fn deserialise(b: &[u8]) -> Option<Cached> {
+    let c = deserialise_as(b, PRELUDE_LAYOUT, engine_identity());
+    if c.is_none() && !b.is_empty() {
+        eprintln!("format cache rebuilt (layout changed)");
+    }
+    c
+}
+
+fn deserialise_as(b: &[u8], layout: u32, engine: u64) -> Option<Cached> {
     let mut r = Rd(b);
+    if r.take(8)? != PRELUDE_MAGIC
+        || u32::from_le_bytes(r.take(4)?.try_into().ok()?) != layout
+        || r.u64()? != engine
+    {
+        return None;
+    }
     let key: [u8; 32] = r.take(32)?.try_into().ok()?;
     let text_key = r.u64()?;
     let n = usize::try_from(r.u64()?).ok()?;
@@ -529,6 +643,75 @@ pub(crate) fn slices(text: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// The paragraph regions of a text's slices ([`slices`], OUTPUT.md §5):
+/// bit 0, the slice holds an item the pass marks paragraph-ending
+/// (`Implicit::EndsParagraph`: a blank line, `\par`, a vertical command
+/// that reads nothing after it, a macro whose body ends in one) at brace
+/// depth 0 and not consumed by an earlier item; bit 1, a region starts at the slice (the first after
+/// what that item consumes).
+pub(crate) fn slice_flags(text: &str) -> Vec<u8> {
+    let defs = pass::Definitions::default();
+    let scope = pass::Scope {
+        document: &defs,
+        file: 0,
+        prelude: &defs,
+    };
+    let p = pass::analyze(text, pass::FileKind::Document, scope);
+    let sl = slices(text);
+    let mut flags = vec![0u8; sl.len()];
+    // brace depth before each atom
+    let mut depth = Vec::with_capacity(p.atoms.len());
+    let mut d: usize = 0;
+    for at in &p.atoms {
+        if at.kind == AtomKind::Close {
+            d = d.saturating_sub(1);
+        }
+        depth.push(d);
+        if at.kind == AtomKind::Open {
+            d += 1;
+        }
+    }
+    let mut ends: Vec<(usize, usize)> = Vec::new();
+    let mut consumed = 0;
+    for it in &p.items {
+        if it.atom >= consumed
+            && depth.get(it.atom) == Some(&0)
+            && it.hints.implicit == pass::Implicit::EndsParagraph
+            // these read keywords or a number past their text, and put
+            // back what follows: it would run in the old region
+            && !matches!(
+                it.name.as_str(),
+                "vskip" | "hrule" | "unvbox" | "unvcopy" | "halign"
+            )
+        {
+            ends.push((it.atom, it.end.max(it.atom + 1)));
+        }
+        if it.consumes {
+            consumed = consumed.max(it.end);
+        }
+    }
+    for m in &p.marks {
+        if depth.get(m.atom) == Some(&0) && m.hints.implicit == pass::Implicit::EndsParagraph {
+            ends.push((m.atom, m.atom + 1));
+        }
+    }
+    let at_byte = |a: usize| p.atoms.get(a).map_or(text.len(), |x| x.start);
+    let slice_of = |byte: usize| sl.partition_point(|&(_, e)| e <= byte);
+    for (atom, next) in ends {
+        let i = slice_of(at_byte(atom));
+        if let Some(f) = flags.get_mut(i) {
+            *f |= 1;
+        }
+        // the first slice starting at or after the item's end
+        let b = at_byte(next);
+        let j = sl.partition_point(|&(s, _)| s < b);
+        if let Some(f) = flags.get_mut(j) {
+            *f |= 2;
+        }
+    }
+    flags
+}
+
 /// What the evaluations of one build or edit did.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
@@ -545,6 +728,9 @@ pub struct Stats {
     /// Expansions whose tokens read on into the text after them, and how
     /// many siblings they claimed for it.
     pub tails: u64,
+    /// Paragraph-ending items after which the list was not vertical
+    /// (OUTPUT.md §5): the nodes after them read a wrong mode.
+    pub par_boundary_violations: u64,
     pub tail_siblings: u64,
     /// Children that ran out of text (a claim measured short: a bug).
     pub starved: u64,
@@ -736,6 +922,11 @@ impl Graph {
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
+        // (handles held outside the graph: pinned, or a value sweep
+        // frees them while a run still defines through them)
+        for f in fields.handles() {
+            eng.pin(f.0);
+        }
         let ops = Ops {
             exec,
             put,
@@ -755,6 +946,7 @@ impl Graph {
             "pagehash",
             "writes",
             "tails",
+            "parviol",
             "streams",
             crate::pdfrelaxed::PIECES,
         ] {
@@ -799,6 +991,9 @@ impl Graph {
         }
         let mut out = format!("evaluation: {e}\n{e:?}");
         let v = self.eng.values();
+        if let E::UndeclaredDefinition { field, .. } = e {
+            out.push_str(&format!("\n  field {}", field_name(v, *field)));
+        }
         for id in ids {
             let what = self.eng.node_info(id).map_or_else(
                 || "gone".to_owned(),
@@ -890,6 +1085,9 @@ impl Graph {
                 Err(e) => {
                     // the build ends here; the error is a diagnostic
                     let m = self.diagnose(&e);
+                    if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+                        eprintln!("{m}");
+                    }
                     self.eval_errors.push(m);
                     return;
                 }
@@ -988,6 +1186,9 @@ impl Graph {
             self.eng.set_environment_absent(self.absent.clone());
         }
         let v = self.eng.values();
+        if let Some(t) = self.eng.acc_value(unit, v.field("parviol")) {
+            stats.par_boundary_violations += u64::try_from(v.seq_to_vec(t).len()).unwrap_or(0);
+        }
         let tails_f = v.field("tails");
         if let Some(t) = self.eng.acc_value(unit, tails_f) {
             for x in v.seq_to_vec(t) {
@@ -1002,15 +1203,26 @@ impl Graph {
         let mut out = Vec::new();
         let t0 = std::time::Instant::now();
         let sl = slices(text);
+        let flags = slice_flags(text);
         let t1 = t0.elapsed();
-        for (s, e) in sl {
+        let (mut anchor, mut last) = (0, None);
+        for (i, (s, e)) in sl.into_iter().enumerate() {
             let piece = &text[s..e];
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
             if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
                 eprintln!("node {piece:?}");
             }
-            let args = slice_args(self.eng.values(), piece, starts);
+            let f = flags.get(i).copied().unwrap_or(0);
+            if f & 2 != 0
+                && let Some(l) = last
+            {
+                anchor = l;
+            }
+            let args = slice_args(self.eng.values(), piece, starts, anchor, f & 1 != 0);
             let n = self.eng.push(unit, self.ops.exec, args);
+            if f & 1 != 0 {
+                last = Some(raw_of(n));
+            }
             out.push((key(piece, starts), n));
         }
         if std::env::var_os("PHITEX_TEX_TIME").is_some() {
@@ -1863,4 +2075,28 @@ fn describe(eng: &Engine, n: phitex_defuse::NodeId) -> String {
         let a: String = a.unwrap_or_default().chars().take(80).collect();
         format!("{} {a}", i.op)
     })
+}
+
+#[cfg(test)]
+mod prelude_tests {
+    use super::*;
+
+    #[test]
+    fn another_layout_or_engine_is_refused() {
+        let c = Cached {
+            key: [3; 32],
+            text_key: 5,
+            reads: vec![("a.tex".to_owned(), 9)],
+            env: Arc::new(vec![("x".to_owned(), Tree::Leaf(Value::Int(1)))]),
+            errors: Vec::new(),
+        };
+        let b = serialise(&c);
+        assert!(deserialise_as(&b, PRELUDE_LAYOUT, engine_identity()).is_some());
+        let other = serialise_as(&c, PRELUDE_LAYOUT + 1, engine_identity());
+        assert!(deserialise(&other).is_none());
+        let other = serialise_as(&c, PRELUDE_LAYOUT, engine_identity() ^ 1);
+        assert!(deserialise(&other).is_none());
+        // the old layout, with no header
+        assert!(deserialise(&b[20..]).is_none());
+    }
 }

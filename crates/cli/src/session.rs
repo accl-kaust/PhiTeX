@@ -538,7 +538,14 @@ impl Session {
             } else {
                 self.status.set("format");
                 let (prelude, cached) = self.prelude()?;
-                self.status.set("engine");
+                // (a format not cached is built first, in this build: slow
+                // until the kernel is fast, so no time limit for it)
+                let first = prelude.is_some() && cached.is_none();
+                self.status.set(if first {
+                    format!("building the {} format (first time)", self.job.engine.name)
+                } else {
+                    "engine".to_owned()
+                });
                 let workers = self
                     .job
                     .threads
@@ -569,6 +576,7 @@ impl Session {
                 };
                 let opts = Options {
                     edits: Some(self.absorb.tx.clone()),
+                    time_limit: if first { None } else { opts.time_limit },
                     ..opts
                 };
                 let b = Build::with(opts, prelude.as_deref(), &text);
@@ -721,11 +729,13 @@ impl Session {
         Ok((Some(text), cached))
     }
 
-    /// The format's name in the cache: its engine, and its text's hash.
+    /// The format's name in the cache: its engine, this binary's sources'
+    /// hash (another build's format is never read), its text's hash.
     fn format_name(&self, text: &str) -> String {
         format!(
-            "{}-{:016x}",
+            "{}-{}-{:016x}",
             self.job.engine.name,
+            env!("PHITEX_BUILD_ID"),
             tex::Fnv::new().add(text.as_bytes()).0
         )
     }
@@ -736,8 +746,18 @@ impl Session {
         let (Some(c), Some(text)) = (&self.cache, prelude) else {
             return;
         };
+        // (a format whose evaluation did not end well is not kept: its
+        // errors would come back at every run)
+        // (an error in the document itself says nothing of the format)
+        let doc = plain_name(&self.job.path.to_string_lossy());
+        let failed = b.diagnostics().iter().any(|d| {
+            d.severity == phitex_tex::Severity::Error
+                && (d.message.contains("deadline")
+                    || plain_name(&d.file) != doc
+                        && plain_name(&d.file) != plain_name(&self.job.file))
+        }) || b.output().1.contains("deadline");
         let key = b.prelude_key();
-        if had != Some(key) {
+        if had != Some(key) && !failed {
             let _ = c.put_format(&self.format_name(text), &key, &b.export_prelude());
         }
     }
