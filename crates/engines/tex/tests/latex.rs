@@ -433,3 +433,62 @@ fn pdflatex_hello() {
     assert_eq!(b.pages().len(), 1);
     assert!(b.is_pdf());
 }
+
+/// `pdflatex` on hello + 30 paragraphs (`pdfdocs/paras30.tex`): the
+/// document environment's body is sliced into its paragraphs, one node
+/// each (`\begin{document}` leaves its group to the engine as the scope
+/// they run in); the PDF equals pdfTeX's cold and after a one-word edit,
+/// which reruns a few document nodes.
+#[test]
+#[ignore = "heavy: the LaTeX format"]
+fn latex_paragraph_nodes() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join("paras30.tex"));
+    let want =
+        std::fs::read(common::fixtures().join("latex/pdf/paras30.pdf")).expect("the oracle");
+    let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/cache/pdflatex.fmt");
+    let opts = || Options {
+        prelude_bytes: std::fs::read(&cache).ok(),
+        time_limit: None,
+        ..options("paras30", &dir, "", false, true)
+    };
+    let cached = cache.exists();
+    let mut b = common::build(opts(), Some(&prelude(true)), &src);
+    if !cached {
+        let _ = std::fs::create_dir_all(cache.parent().expect("dir"));
+        if let Some(bytes) = b.export_prelude() {
+            let _ = std::fs::write(&cache, bytes);
+        }
+    }
+    let regions = b.stats.nodes_text_frames;
+    eprintln!("cold: {regions} document nodes; {}", report("paras30", &b));
+    for d in b.diagnostics() {
+        eprintln!("{d:?}");
+    }
+    if let Some(d) = common::first_difference(&b.output().0, &want) {
+        panic!("paras30.pdf cold: {d}");
+    }
+    assert!(regions >= 30, "{regions} document nodes for 30 paragraphs");
+    let at = src.find("Paragraph 17 of the text: the quick").expect("p17") + 35;
+    let new = format!("{}quack{}", &src[..at], &src[at + 5..]);
+    let t0 = std::time::Instant::now();
+    b.edit(&new);
+    let pages = b.pages().len() as u64;
+    let s = &b.stats;
+    eprintln!(
+        "edit {:?}: {} nodes run, {} runs, {} pages; {}",
+        t0.elapsed(),
+        s.nodes_run,
+        s.runs,
+        pages,
+        report("paras30", &b)
+    );
+    let cold = common::build(opts(), Some(&prelude(true)), &new);
+    assert_eq!(b.output().0, cold.output().0, "edit differs from cold");
+    assert!(
+        b.stats.nodes_run <= 3 + pages + 2,
+        "edit reran {} nodes ({} pages)",
+        b.stats.nodes_run,
+        pages
+    );
+}

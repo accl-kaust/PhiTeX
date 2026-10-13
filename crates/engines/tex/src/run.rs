@@ -1484,6 +1484,19 @@ impl<'c, 'a> Run<'c, 'a> {
                     return Ok(());
                 }
             }
+            // `\begin{document}`'s slice ends inside the environment's
+            // group: that group becomes the engine scope the body's
+            // regions run in (`hints::opens_scope`)
+            if self.doc
+                && self.conds.is_empty()
+                && self.nest.len() == 1
+                && self.nest[0].group != 0
+                && !self.nest[0].owns
+                && crate::hints::opens_scope(self.v, &self.cx.args())
+            {
+                self.leave_scope()?;
+                return Ok(());
+            }
             // a paragraph, a group or a conditional still open reads on
             // into the next sibling, claimed
             if self.open_span() && !self.eof && self.pull()? {
