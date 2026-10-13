@@ -905,6 +905,7 @@ impl Graph {
             pagestep_any,
             breaks,
             fields,
+            defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
         };
         let _ = shared.set(ops.clone());
         for f in [
@@ -1653,6 +1654,10 @@ impl Build {
                 g.eng.push(unit, exec, args);
             }
         }
+        *g.ops
+            .defs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = defs.clone();
         let doc = is_doc(prelude, document);
         let nodes = g.push_text(unit, &as_file(document), &defs, doc);
         // the page builder's fold, after the text: one node choosing every

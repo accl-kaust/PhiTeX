@@ -267,22 +267,7 @@ impl Run<'_, '_> {
         let f = v.field("items");
         // a list is this run's or the engine's (lid 0): no list is opened
         // by one node and read by another
-        let opener: Option<Option<(u64, ValueId)>> =
-            if lid != 0 && self.minted.borrow().contains(&lid) { Some(None) } else { None };
-        let all = match opener {
-            Some(None) => ValueId::NIL,
-            Some(Some((raw, first))) => {
-                let after = self
-                    .cx
-                    .acc_range(f, Some(phitex_defuse::NodeId::from_raw(raw)))?;
-                let mut head = ValueId::NIL;
-                for e in list_of(v, first) {
-                    head = v.seq_concat(head, v.seq_unit(e));
-                }
-                v.seq_concat(head, after)
-            }
-            None => self.cx.acc_range(f, None)?,
-        };
+        let all = self.cx.acc_range(f, None)?;
         let mut out: Vec<ValueId> = Vec::new();
         let mut st = FoldState {
             sf: 1000,
