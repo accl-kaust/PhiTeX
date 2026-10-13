@@ -36,7 +36,7 @@ fn scratch(name: &str) -> PathBuf {
 
 fn phitex(dir: &Path) -> Command {
     let mut c = Command::new("timeout");
-    c.arg("900").arg(env!("CARGO_BIN_EXE_phitex"));
+    c.arg(std::env::var("PHITEX_LADDER_TIMEOUT").unwrap_or_else(|_| "900".into())).arg(env!("CARGO_BIN_EXE_phitex"));
     c.current_dir(dir)
         .env("PHITEX_CACHE_DIR", cache())
         .env("SOURCE_DATE_EPOCH", "0")
