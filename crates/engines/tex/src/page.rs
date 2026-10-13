@@ -65,6 +65,14 @@ impl Run<'_, '_> {
             }
         }
         self.log("ship", &s)?;
+        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+            eprintln!(
+                "aux-trace: ship {s} in page step {} node {} op {:?}",
+                self.page_index(),
+                self.cx.node().raw(),
+                self.cx.op()
+            );
+        }
         let mut side = Side::default();
         let Some(Node::Box(bx)) = nodes::decode(v, b, &mut side) else {
             return Ok(());
@@ -547,6 +555,13 @@ impl Run<'_, '_> {
         let (b255, inserts, marks, held) =
             (a(0), list_of(v, a(1)), list_of(v, a(2)), list_of(v, a(3)));
         let output_penalty = data.get(4).map_or(0, |&x| int_of(v, x));
+        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+            eprintln!(
+                "aux-trace: fire page step {} outputpenalty {output_penalty} count0 {:?}",
+                self.page_index(),
+                self.reg_int(0, 0).ok()
+            );
+        }
         // §1012: marks
         // (the marks before the page, from the plan: `pp:mk:<j>`)
         let (mut top, bot) = match mk.map(|x| list_of(v, x)) {
@@ -746,7 +761,9 @@ impl Run<'_, '_> {
             return Ok(());
         };
         let xs = list_of(v, x);
-        if let Some(&cs) = xs.first() {
+        if let Some(&cs) = xs.first()
+            && !crate::exec::env_flag!("PHITEX_FLUSH_NOCOUNTS")
+        {
             self.preload_counts(cs);
         }
         if let Some(&pairs) = xs.get(1) {
