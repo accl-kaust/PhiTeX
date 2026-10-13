@@ -154,6 +154,7 @@ impl Run<'_, '_> {
             opens: 1,
             before: true,
             kind: Some(k),
+            kind_pending: false,
         });
     }
 
@@ -1509,6 +1510,7 @@ impl Run<'_, '_> {
                 opens: 1,
                 before: false,
                 kind: Some(kind),
+                kind_pending: false,
             });
             return Ok(());
         }
