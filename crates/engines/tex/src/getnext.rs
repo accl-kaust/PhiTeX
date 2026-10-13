@@ -258,6 +258,22 @@ impl Run<'_, '_> {
         }
     }
 
+    /// The arena range of a macro body (§390: read in place): copied in
+    /// on its first call in this run, found by its shared list after.
+    /// Short bodies are copied every time (cheaper than the lookup).
+    pub(crate) fn body_range(&mut self, body: &std::rc::Rc<[Tok]>) -> Range {
+        if body.len() <= 8 {
+            return self.input.arena.alloc(body);
+        }
+        let key = std::rc::Rc::as_ptr(body).cast::<Tok>() as usize;
+        if let Some((_, r)) = self.body_cache.get(&key) {
+            return *r;
+        }
+        let r = self.input.arena.alloc(body);
+        self.body_cache.insert(key, (body.clone(), r));
+        r
+    }
+
     /// `back_input` (§325).
     #[inline]
     pub(crate) fn back_input(&mut self, t: Tok) {

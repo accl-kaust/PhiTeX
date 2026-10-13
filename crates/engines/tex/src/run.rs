@@ -196,6 +196,10 @@ pub(crate) struct Run<'c, 'a> {
     /// Lines begun by this run (the `lines` accumulator, contributed
     /// once at the end).
     pub lines_read: u64,
+    /// Macro bodies copied into the arena, by their shared list's address
+    /// (the list is kept so the address is never reused):
+    /// [`Run::body_range`].
+    pub body_cache: phitex_defuse::FxHashMap<usize, (Rc<[Tok]>, crate::input::Range)>,
     pub pulled: usize,
     /// Whether the node is the document's text (no parent): the end of
     /// its following siblings is the end of the file.
@@ -301,6 +305,7 @@ impl<'c, 'a> Run<'c, 'a> {
             input: crate::input::Input::new(),
             cs_cache: vec![(0, Tok::c(0)); CS_CACHE].into_boxed_slice(),
             lines_read: 0,
+            body_cache: phitex_defuse::FxHashMap::default(),
             pulled: 0,
             top: false,
             claim_rest: false,
