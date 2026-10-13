@@ -1572,10 +1572,20 @@ impl Graph {
         edits: &mut dyn phitex_defuse::EditSource,
     ) {
         let needs_f = self.eng.values().field("needs");
+        let tm = crate::exec::env_flag!("PHITEX_TEX_TIME");
+        let (mut t_prov, mut t_eval, mut t_after) = (
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+        );
+        let mut t_mark = std::time::Instant::now();
         loop {
+            t_after += t_mark.elapsed();
+            let tp = std::time::Instant::now();
             if !crate::exec::env_flag!("PHITEX_NO_PROVIDER") {
                 self.provide(finder);
             }
+            t_prov += tp.elapsed();
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();
@@ -1592,6 +1602,8 @@ impl Graph {
                     return;
                 }
             };
+            t_eval += t0.elapsed();
+            t_mark = std::time::Instant::now();
             if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
                 eprintln!("  waits by kind {:?}", r.waits_by_kind);
@@ -1740,6 +1752,7 @@ impl Graph {
             // whether or not this round asked for more
             self.absorb_provided();
             if !asked {
+                t_after += t_mark.elapsed();
                 break;
             }
             let env = self.environment(fixpoint);
@@ -1749,6 +1762,11 @@ impl Graph {
         let v = self.eng.values();
         if let Some(t) = self.eng.acc_value(unit, v.field("ifviol")) {
             stats.if_depth_violations += u64::try_from(v.seq_to_vec(t).len()).unwrap_or(0);
+        }
+        if tm {
+            eprintln!(
+                "settle phases: provider {t_prov:?}, evaluate (rounds, the writer's nodes among them) {t_eval:?}, after the rounds (files, loop-backs, stats) {t_after:?}"
+            );
         }
     }
 
@@ -2671,6 +2689,7 @@ impl Build {
     }
 
     fn settle(&mut self) {
+        let t_all = std::time::Instant::now();
         // the text nodes' offsets in the document, for the progress
         let mut offsets = FxHashMap::default();
         let mut off = 0u64;
@@ -2701,10 +2720,12 @@ impl Build {
             finder: self.g.input_finder(&self.opts.finder),
             text: &mut self.text,
         };
+        let t_before = t_all.elapsed();
         // a text sent before the evaluation starts is the one it is for
         if let Some(v) = phitex_defuse::EditSource::absorb(&mut absorb, &mut self.g.eng) {
             self.g.eng.set_version(v);
         }
+        let t_apply = t_all.elapsed();
         self.g.settle(
             self.unit,
             &self.opts.finder,
@@ -2713,6 +2734,7 @@ impl Build {
             &mut absorb,
         );
         // (a text taken last that changed nothing: the result is for it)
+        let t_settle = t_all.elapsed();
         if let Some(v) = absorb.unchanged {
             stats.version = stats.version.max(v);
         }
@@ -2725,6 +2747,12 @@ impl Build {
         chain_guesses(&mut self.g, &kept);
         self.stats = stats;
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "edit phases: before the apply (offsets, inputs) {t_before:?}, apply (intake, hint pass, slice-key diff, engine replace/insert/remove: `edit apply`) {:?}, settle (`settle phases`) {:?}, after (stats, guesses kept) {:?}",
+                t_apply.saturating_sub(t_before),
+                t_settle.saturating_sub(t_apply),
+                t_all.elapsed().saturating_sub(t_settle)
+            );
             let (nodes, units, values) = self.sizes();
             let (node, use_) = Engine::record_sizes();
             let rss = std::fs::read_to_string("/proc/self/status")
