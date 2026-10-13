@@ -422,11 +422,8 @@ impl Run<'_, '_> {
         // refuted in two rounds, a routine whose delta depends on its own
         // previous one): then each step reads the step before it
         // (`pgstd:<j-1>`, a definition), all pages right in one round
-        let serial = j < MAX_PAGES
-            && self
-                .cx
-                .use_field(v.field("pgref"))?
-                .is_some_and(|x| int_of(v, x) >= 2);
+        let serial =
+            j < MAX_PAGES && pgref_now(v, &self.ops, self.cx.use_field(v.field("pgref"))?) >= 2;
         let mut readst = ValueId::UNIT;
         let mut readdef = ValueId::UNIT;
         let mut inherited: Vec<(Field, ValueId)> = Vec::new();
@@ -1214,6 +1211,17 @@ fn dvi_shown(v: &Values, page: ValueId) -> u64 {
     phitex_defuse::hash_bytes(phitex_defuse::hash_bytes(0, &b[..41]), &b[45..])
 }
 
+/// The refuted rounds `pgref` counts in this evaluation (`[eval,
+/// count]`; another evaluation's: 0).
+fn pgref_now(v: &Values, o: &crate::run::Ops, x: Option<ValueId>) -> i64 {
+    let xs = x.map(|x| list_of(v, x)).unwrap_or_default();
+    let e = i64::try_from(o.eval.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(0);
+    match xs[..] {
+        [id, n] if int_of(v, id) == e => int_of(v, n),
+        _ => 0,
+    }
+}
+
 /// A loop-back's value as named entries, for the refutation report
 /// ([`LbLog`]): `pgdef:<j>`'s `\count0..9`.
 fn count_entries(v: &Values, x: Option<ValueId>) -> Vec<(String, ValueId)> {
@@ -1304,6 +1312,7 @@ pub(crate) struct FinalState {
 }
 
 impl FinalState {
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn load(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<FinalState, Stop> {
         let v = cx.values();
         let all = cx.acc_range(v.field("pgdeltas"), None)?;
@@ -1314,7 +1323,8 @@ impl FinalState {
         // each step's entry: [j, own pairs, pgst read, counts, pgdef
         // read, serial] (`Run::page_step`)
         let entries = Self::entries(v, all);
-        let old = cx.use_field(v.field("pgref"))?.map_or(0, |x| int_of(v, x));
+        let stored = cx.use_field(v.field("pgref"))?;
+        let old = pgref_now(v, o, stored);
         let mut refuted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut state: std::collections::BTreeMap<String, (Field, ValueId)> =
             std::collections::BTreeMap::new();
@@ -1405,7 +1415,13 @@ impl FinalState {
         };
         Self::log_refuted(o, old, refuted);
         if new > 0 {
-            cx.publish(v.field("pgref"), v.int(new));
+            let e = o.eval.load(std::sync::atomic::Ordering::Relaxed);
+            let x = v.list(vec![v.int(i64::try_from(e).unwrap_or(0)), v.int(new)]);
+            cx.publish(v.field("pgref"), x);
+        } else if let Some(x) = stored.filter(|&x| x != ValueId::UNIT) {
+            // (an earlier evaluation's count, kept as it is: unchanged,
+            // so no step re-runs for it)
+            cx.publish(v.field("pgref"), x);
         }
         Ok(FinalState {
             map: state.into_values().collect(),
