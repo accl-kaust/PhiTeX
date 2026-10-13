@@ -1,6 +1,7 @@
-//! The operations: `Exec` (one command of TeX's input), `Put`
-//! (definitions that land outside a group that just closed) and `Dvi`
-//! (the file).
+//! The operations: `Exec` (one node's text: a paragraph region, a
+//! loading command, a whole format), `Put` (definitions that land
+//! outside a group that just closed), `Dvi` (the file), `Mark` (the
+//! end of the prelude) and `Files` (the files read back next round).
 
 use std::sync::{Arc, OnceLock};
 
