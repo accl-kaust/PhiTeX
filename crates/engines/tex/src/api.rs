@@ -1892,12 +1892,11 @@ fn doc_nodes(
     let mut out = Vec::new();
     for c in &inc.chunks {
         let end = c.start + c.th.slices.last().map_or(0, |x| x.1);
-        let slices = c
-            .th
-            .slices
-            .iter()
-            .zip(c.keys.iter())
-            .map(|(&(s, e), &k)| (c.start + s, c.start + e, k));
+        let slices =
+            c.th.slices
+                .iter()
+                .zip(c.keys.iter())
+                .map(|(&(s, e), &k)| (c.start + s, c.start + e, k));
         // (the chunk's keys, made when it was analysed; a slice at its
         // start not beginning a line keyed again)
         let doc_slice = |(s, e, k): (usize, usize, u64)| {
