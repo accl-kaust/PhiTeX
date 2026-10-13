@@ -924,6 +924,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             "event": "build",
             "build": builds,
             "why": why,
+            "notes": r.notes,
             "edit": r.edit_line.map(|l| format!("{main_rel}:{l}")),
             "ok": !failed,
             "output": written.as_ref().map(|p| p.display().to_string()),
