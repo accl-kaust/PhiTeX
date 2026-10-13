@@ -1555,12 +1555,36 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
         "t" => {
             // (expansion tokens: a `}` ending an output routine, a
             // `\\par` inserted: demoted until their rows are proven)
+            let toks = crate::val::toks_of(v, xs.get(1).copied());
+            // (characters only, letters, others and spaces, already read:
+            // they append to the paragraph's list, may begin one (§1091,
+            // `\\prevgraf` 0) and open and close no scope; no meaning
+            // or catcode is read again, §1030-§1044)
+            if !toks.is_empty()
+                && toks
+                    .iter()
+                    .all(|t| matches!(t, Tok::C(_)) && matches!(t.cat(), Some(10..=12)))
+            {
+                let mut b = Bound {
+                    state: Some(Vec::new()),
+                    no_scope: true,
+                    ..Bound::default()
+                };
+                add_heads(
+                    &mut b.state,
+                    Some(&["par:", "pg:", "lopen:", "box:", "lvlfix"]),
+                );
+                return Hint {
+                    bound: Some(b),
+                    cause: "characters (expansion tokens)".to_owned(),
+                    excerpt: String::new(),
+                };
+            }
             if std::env::var_os("PHITEX_HINTS_FRAGMENTS").is_none() {
                 return demoted("expansion tokens", "");
             }
             // (tokens already read: faithful as text when every
             // character has the catcode the regime gives it)
-            let toks = crate::val::toks_of(v, xs.get(1).copied());
             let mut text = String::new();
             let mut kind = None;
             for regime in [FileKind::Document, FileKind::Package] {
