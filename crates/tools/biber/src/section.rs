@@ -5,7 +5,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::config::{SortTemplate, BV};
+use crate::config::{BV, SortTemplate};
 use crate::model::EntryRef;
 
 #[derive(Clone, Debug)]
@@ -57,7 +57,10 @@ pub struct Section {
 
 impl Section {
     pub fn new(n: &str) -> Section {
-        Section { number: n.into(), ..Section::default() }
+        Section {
+            number: n.into(),
+            ..Section::default()
+        }
     }
     pub fn citecount(&self, k: &str) -> String {
         match self.citecount.get(k) {
@@ -88,11 +91,7 @@ impl Section {
     }
     pub fn badcasekey(&self, k: &str) -> Option<String> {
         let c = self.everykey_lc.get(&crate::unicode::lc(k))?;
-        if c == k {
-            None
-        } else {
-            Some(c.clone())
-        }
+        if c == k { None } else { Some(c.clone()) }
     }
     pub fn is_specific(&self, k: &str) -> bool {
         self.cite.contains(k) || self.nocite.contains(k)
@@ -114,7 +113,11 @@ impl Section {
         self.citekeys_h.contains(k)
     }
     pub fn has_citekey(&self, k: &str) -> bool {
-        let k2 = self.alias.get(k).filter(|s| crate::model::truthy(s)).map_or(k, String::as_str);
+        let k2 = self
+            .alias
+            .get(k)
+            .filter(|s| crate::model::truthy(s))
+            .map_or(k, String::as_str);
         self.citekeys_h.contains(k2)
     }
     pub fn del_citekey(&mut self, k: &str) {
@@ -141,7 +144,11 @@ impl Section {
         }
     }
     pub fn dynamic_set(&self, k: &str) -> Vec<String> {
-        self.dkeys.iter().find(|(x, _)| x == k).map(|(_, m)| m.clone()).unwrap_or_default()
+        self.dkeys
+            .iter()
+            .find(|(x, _)| x == k)
+            .map(|(_, m)| m.clone())
+            .unwrap_or_default()
     }
     pub fn set_dynamic_set(&mut self, k: &str, m: Vec<String>) {
         if let Some(e) = self.dkeys.iter_mut().find(|(x, _)| x == k) {
@@ -155,7 +162,11 @@ impl Section {
     }
     pub fn static_citekeys(&self) -> Vec<String> {
         let d = self.dynamic_set_keys();
-        self.citekeys.iter().filter(|k| !d.contains(k)).cloned().collect()
+        self.citekeys
+            .iter()
+            .filter(|k| !d.contains(k))
+            .cloned()
+            .collect()
     }
 }
 
@@ -272,7 +283,10 @@ impl DataList {
         self.ld(nlid).names.entry(nid.into()).or_default()
     }
     pub fn get_nd(&self, nlid: &str, nid: &str) -> Option<&NameData> {
-        self.state.namelistdata.get(nlid).and_then(|l| l.names.get(nid))
+        self.state
+            .namelistdata
+            .get(nlid)
+            .and_then(|l| l.names.get(nid))
     }
     pub fn uniquelist(&self, nlid: &str) -> Option<usize> {
         self.state.namelistdata.get(nlid).and_then(|l| l.ul)
@@ -291,7 +305,11 @@ impl DataList {
         self.entryfield(key, f).map(|v| v.s())
     }
     pub fn set_entryfield(&mut self, key: &str, f: &str, v: FieldV) {
-        self.state.fields.entry(key.into()).or_default().insert(f.into(), v);
+        self.state
+            .fields
+            .entry(key.into())
+            .or_default()
+            .insert(f.into(), v);
     }
     pub fn set_uniquename(&mut self, nlid: &str, nid: &str, s: DisStep) {
         let nd = self.nd(nlid, nid);
@@ -302,4 +320,3 @@ impl DataList {
         }
     }
 }
-

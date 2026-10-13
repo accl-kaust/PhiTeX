@@ -30,7 +30,11 @@ fn fixtures_byte_identical() {
         match &out.bbl {
             Some(got) if *got == want => println!("IDENTICAL {n}"),
             Some(got) => {
-                let line = got.lines().zip(want.lines()).position(|(a, b)| a != b).unwrap_or(0);
+                let line = got
+                    .lines()
+                    .zip(want.lines())
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(0);
                 println!("DIFFERS   {n} (first differing line {})", line + 1);
                 println!("  got:  {:?}", got.lines().nth(line));
                 println!("  want: {:?}", want.lines().nth(line));
@@ -40,7 +44,10 @@ fn fixtures_byte_identical() {
                 bad.push(n.clone());
             }
             None => {
-                println!("FAILED    {n}: {:?} unsupported {:?}", out.errors, out.unsupported);
+                println!(
+                    "FAILED    {n}: {:?} unsupported {:?}",
+                    out.errors, out.unsupported
+                );
                 bad.push(n.clone());
             }
         }

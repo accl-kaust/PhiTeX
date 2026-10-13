@@ -7,13 +7,13 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use crate::Files;
 use crate::bib::BibCache;
 use crate::btparse::Macros;
-use crate::config::{BackendIn, Config, DataModel, BV};
-use crate::model::{shared, truthy, Entry, EntryRef, LabelDate, Val};
+use crate::config::{BV, BackendIn, Config, DataModel};
+use crate::model::{Entry, EntryRef, LabelDate, Val, shared, truthy};
 use crate::section::{DataList, Section};
 use crate::unicode::{fc, lc};
-use crate::Files;
 
 /// A fatal error (biber_error): the message.
 #[derive(Debug)]
@@ -44,7 +44,11 @@ pub struct Biber<'f> {
 /// Section numbers in numeric order.
 pub fn numeric_order(keys: &[String]) -> Vec<String> {
     let mut v = keys.to_vec();
-    v.sort_by(|a, b| crate::model::numify(a).partial_cmp(&crate::model::numify(b)).unwrap_or(core::cmp::Ordering::Equal));
+    v.sort_by(|a, b| {
+        crate::model::numify(a)
+            .partial_cmp(&crate::model::numify(b))
+            .unwrap_or(core::cmp::Ordering::Equal)
+    });
     v
 }
 
@@ -87,7 +91,9 @@ impl<'f> Biber<'f> {
     }
     pub fn sec(&mut self) -> &mut Section {
         let c = self.cur.clone();
-        self.sections.entry(c.clone()).or_insert_with(|| Section::new(&c))
+        self.sections
+            .entry(c.clone())
+            .or_insert_with(|| Section::new(&c))
     }
     pub fn secr(&self) -> &Section {
         &self.sections[&self.cur]
@@ -121,7 +127,14 @@ impl<'f> Biber<'f> {
                     let subval = self.cfg.map_boolean(k, sv, true).unwrap_or_default();
                     if !v.as_deref().is_some_and(truthy) {
                         if self.cfg.opttype.get(k).map(String::as_str) == Some("boolean") {
-                            out.push((k.clone(), if truthy(&subval) { "0".into() } else { "1".into() }));
+                            out.push((
+                                k.clone(),
+                                if truthy(&subval) {
+                                    "0".into()
+                                } else {
+                                    "1".into()
+                                },
+                            ));
                         }
                     } else {
                         out.push((k.clone(), subval));
@@ -140,7 +153,14 @@ impl<'f> Biber<'f> {
                 re.replace(o, true, &mut |_, _| "=".into())
             };
             let (name, val) = match o.find('=') {
-                Some(i) => (o[..i].to_string(), if o.len() > i + 1 { o[i + 1..].to_string() } else { "1".into() }),
+                Some(i) => (
+                    o[..i].to_string(),
+                    if o.len() > i + 1 {
+                        o[i + 1..].to_string()
+                    } else {
+                        "1".into()
+                    },
+                ),
                 None => (o.clone(), "1".into()),
             };
             if name.is_empty() {
@@ -186,7 +206,11 @@ impl<'f> Biber<'f> {
             self.process_interentry()?;
             self.postprocess_sets();
             self.process_entries_static();
-            self.log.push(alloc::format!("section {secnum}: {} citekeys, allkeys {}", self.secr().citekeys.len(), self.secr().allkeys));
+            self.log.push(alloc::format!(
+                "section {secnum}: {} citekeys, allkeys {}",
+                self.secr().citekeys.len(),
+                self.secr().allkeys
+            ));
             self.process_lists()?;
             self.create_output_section()?;
         }
@@ -220,20 +244,32 @@ impl<'f> Biber<'f> {
                 break;
             }
             if ds.datatype != "bibtex" {
-                return Err(self.unsupported(&alloc::format!("data source datatype '{}'", ds.datatype)));
+                return Err(
+                    self.unsupported(&alloc::format!("data source datatype '{}'", ds.datatype))
+                );
             }
-            if ds.name.starts_with("http://") || ds.name.starts_with("https://") || ds.name.starts_with("ftp://") || ds.name.starts_with("ftps://") {
+            if ds.name.starts_with("http://")
+                || ds.name.starts_with("https://")
+                || ds.name.starts_with("ftp://")
+                || ds.name.starts_with("ftps://")
+            {
                 return Err(self.unsupported("remote data sources"));
             }
             let Some((path, bytes)) = self.files.datasource(&ds.name) else {
                 return Err(self.fatal(alloc::format!("Cannot find '{}'!", ds.name)));
             };
-            self.log.push(alloc::format!("Looking for bibtex file '{}' for section {}", ds.name, self.cur));
+            self.log.push(alloc::format!(
+                "Looking for bibtex file '{}' for section {}",
+                ds.name,
+                self.cur
+            ));
             remaining = self.extract_entries(&path, &bytes, &remaining)?;
         }
         let secnum = self.cur.clone();
         for k in remaining {
-            self.warnings.push(alloc::format!("I didn't find a database entry for '{k}' (section {secnum})"));
+            self.warnings.push(alloc::format!(
+                "I didn't find a database entry for '{k}' (section {secnum})"
+            ));
             self.sec().del_citekey(&k);
             self.sec().undef_citekeys.push(k);
         }
@@ -243,7 +279,11 @@ impl<'f> Biber<'f> {
         Ok(())
     }
 
-    fn get_dependents(&mut self, keys: &[String], keyswithdeps: &mut Vec<String>) -> Result<(), Fatal> {
+    fn get_dependents(
+        &mut self,
+        keys: &[String],
+        keyswithdeps: &mut Vec<String>,
+    ) -> Result<(), Fatal> {
         let mut new_deps: Vec<String> = Vec::new();
         let mut missing: Vec<String> = Vec::new();
         let push_u = |v: &mut Vec<String>, k: &str| {
@@ -362,7 +402,9 @@ impl<'f> Biber<'f> {
         let mut b = be.borrow_mut();
         for f in ["xref", "crossref"] {
             if b.has(f) && b.gs(f) == mk {
-                let w = alloc::format!("I didn't find a database entry for {f} '{mk}' in entry '{ck}' - ignoring (section {secnum})");
+                let w = alloc::format!(
+                    "I didn't find a database entry for {f} '{mk}' in entry '{ck}' - ignoring (section {secnum})"
+                );
                 b.add_warning(w.clone());
                 self.warnings.push(w);
                 b.del_field(f);
@@ -371,18 +413,28 @@ impl<'f> Biber<'f> {
         if let Some(x) = b.get("xdata").and_then(|v| v.as_list()) {
             let l = x.borrow().clone();
             if l.iter().any(|k| k == mk) {
-                let w = alloc::format!("I didn't find a database entry for xdata entry '{mk}' in entry '{ck}' - ignoring (section {secnum})");
+                let w = alloc::format!(
+                    "I didn't find a database entry for xdata entry '{mk}' in entry '{ck}' - ignoring (section {secnum})"
+                );
                 b.add_warning(w.clone());
                 self.warnings.push(w);
             }
-            b.set_data("xdata", Val::list(l.into_iter().filter(|k| k != mk).collect()));
+            b.set_data(
+                "xdata",
+                Val::list(l.into_iter().filter(|k| k != mk).collect()),
+            );
         }
         if b.etype() == "set" {
             if let Some(x) = b.get("entryset").and_then(|v| v.as_list()) {
                 let l = x.borrow().clone();
                 if l.iter().any(|k| k == mk) {
-                    b.set_data("entryset", Val::list(l.into_iter().filter(|k| k != mk).collect()));
-                    let w = alloc::format!("I didn't find a database entry for static set member '{mk}' in entry '{ck}' - ignoring (section {secnum})");
+                    b.set_data(
+                        "entryset",
+                        Val::list(l.into_iter().filter(|k| k != mk).collect()),
+                    );
+                    let w = alloc::format!(
+                        "I didn't find a database entry for static set member '{mk}' in entry '{ck}' - ignoring (section {secnum})"
+                    );
                     b.add_warning(w.clone());
                     self.warnings.push(w);
                 }
@@ -398,7 +450,9 @@ impl<'f> Biber<'f> {
                     b.del_field("relatedtype");
                     b.del_field("relatedstring");
                 }
-                let w = alloc::format!("I didn't find a database entry for related entry '{mk}' in entry '{ck}' - ignoring (section {secnum})");
+                let w = alloc::format!(
+                    "I didn't find a database entry for related entry '{mk}' in entry '{ck}' - ignoring (section {secnum})"
+                );
                 b.add_warning(w.clone());
                 self.warnings.push(w);
             }
@@ -416,7 +470,10 @@ impl<'f> Biber<'f> {
     fn instantiate_dynamic(&mut self) {
         let secnum = self.cur.clone();
         for (dset, members) in self.secr().dkeys.clone() {
-            let members: Vec<String> = members.iter().map(|m| self.secr().alias_of(m).unwrap_or_else(|| m.clone())).collect();
+            let members: Vec<String> = members
+                .iter()
+                .map(|m| self.secr().alias_of(m).unwrap_or_else(|| m.clone()))
+                .collect();
             self.sec().set_dynamic_set(&dset, members.clone());
             let mut be = Entry::default();
             be.set_field("entrytype", Val::s("set"));
@@ -434,7 +491,11 @@ impl<'f> Biber<'f> {
                     self.relclone(&e);
                 }
                 if let Some(mo) = minorder.filter(|&x| x != 0.0) {
-                    self.cfg.keyorder.entry(secnum.clone()).or_default().insert(dset.clone(), crate::model::num_str(mo));
+                    self.cfg
+                        .keyorder
+                        .entry(secnum.clone())
+                        .or_default()
+                        .insert(dset.clone(), crate::model::num_str(mo));
                 }
             }
         }
@@ -457,28 +518,56 @@ impl<'f> Biber<'f> {
             if let Some(ck) = self.secr().keytorelclone.get(&relkey).cloned() {
                 clonekeys.push(ck);
             } else {
-                let Some(relentry) = self.entry(&relkey) else { continue };
+                let Some(relentry) = self.entry(&relkey) else {
+                    continue;
+                };
                 let clonekey = crate::internals::md5_hex(relkey.as_bytes());
                 clonekeys.push(clonekey.clone());
                 let relclone = self.clone_entry(&relentry.borrow(), Some(&clonekey));
-                let relopts = be.borrow().get("relatedoptions").and_then(|v| v.as_list()).map(|l| l.borrow().clone());
+                let relopts = be
+                    .borrow()
+                    .get("relatedoptions")
+                    .and_then(|v| v.as_list())
+                    .map(|l| l.borrow().clone());
                 let opts = if let Some(ro) = relopts {
                     if self.secr().has_citekey(&relkey) {
-                        merge_entry_options(Some(ro), Some(alloc::vec!["skipbib".into(), "skipbiblist".into()]))
+                        merge_entry_options(
+                            Some(ro),
+                            Some(alloc::vec!["skipbib".into(), "skipbiblist".into()]),
+                        )
                     } else {
                         ro
                     }
                 } else {
-                    let eo = relentry.borrow().get("options").and_then(|v| v.as_list()).map(|l| l.borrow().clone());
+                    let eo = relentry
+                        .borrow()
+                        .get("options")
+                        .and_then(|v| v.as_list())
+                        .map(|l| l.borrow().clone());
                     merge_entry_options(
-                        Some(["skipbib", "skiplab", "skipbiblist", "uniquename=false", "uniquelist=false"].iter().map(|s| (*s).to_string()).collect()),
+                        Some(
+                            [
+                                "skipbib",
+                                "skiplab",
+                                "skipbiblist",
+                                "uniquename=false",
+                                "uniquelist=false",
+                            ]
+                            .iter()
+                            .map(|s| (*s).to_string())
+                            .collect(),
+                        ),
                         eo,
                     )
                 };
                 self.process_entry_options(&clonekey, &opts, &secnum);
                 relclone.borrow_mut().set_data("options", Val::list(opts));
-                self.sec().entries.insert(clonekey.clone(), relclone.clone());
-                self.sec().keytorelclone.insert(relkey.clone(), clonekey.clone());
+                self.sec()
+                    .entries
+                    .insert(clonekey.clone(), relclone.clone());
+                self.sec()
+                    .keytorelclone
+                    .insert(relkey.clone(), clonekey.clone());
                 self.relclone(&relclone);
             }
         }
@@ -488,10 +577,26 @@ impl<'f> Biber<'f> {
 
     /// Biber::Entry `clone`.
     pub fn clone_entry(&self, e: &Entry, newkey: Option<&str>) -> EntryRef {
-        let mut n = Entry { data: e.data.clone(), xrefs: e.xrefs.clone(), ..Entry::default() };
+        let mut n = Entry {
+            data: e.data.clone(),
+            xrefs: e.xrefs.clone(),
+            ..Entry::default()
+        };
         for df in &self.dm.helpers.datefields {
             let d = df.strip_suffix("date").unwrap_or(df);
-            for dsf in ["dateunspecified", "datesplit", "datejulian", "enddatejulian", "dateapproximate", "enddateapproximate", "dateuncertain", "enddateuncertain", "yeardivision", "era", "endera"] {
+            for dsf in [
+                "dateunspecified",
+                "datesplit",
+                "datejulian",
+                "enddatejulian",
+                "dateapproximate",
+                "enddateapproximate",
+                "dateuncertain",
+                "enddateuncertain",
+                "yeardivision",
+                "era",
+                "endera",
+            ] {
                 let k = alloc::format!("{d}{dsf}");
                 if let Some(v) = e.derived.get(&k).filter(|v| v.truthy()) {
                     n.derived.insert(k, v.clone());
@@ -525,7 +630,11 @@ impl<'f> Biber<'f> {
                 for xd in x.iter_mut() {
                     let sec = &self.sections[&self.cur];
                     if xd.field.is_none() {
-                        xd.entries = xd.entries.iter().map(|k| sec.alias_of(k).unwrap_or_else(|| k.clone())).collect();
+                        xd.entries = xd
+                            .entries
+                            .iter()
+                            .map(|k| sec.alias_of(k).unwrap_or_else(|| k.clone()))
+                            .collect();
                     } else if let Some(k) = xd.entries.first().cloned() {
                         xd.entries = alloc::vec![sec.alias_of(&k).unwrap_or(k)];
                     }
@@ -557,14 +666,18 @@ impl<'f> Biber<'f> {
         for (xi, xd) in xrefs.iter().enumerate() {
             for xdref in &xd.entries {
                 let Some(xe) = self.entry(xdref) else {
-                    let w = alloc::format!("{bee} entry '{key}' references XDATA entry '{xdref}' which does not exist, not resolving (section {secnum})");
+                    let w = alloc::format!(
+                        "{bee} entry '{key}' references XDATA entry '{xdref}' which does not exist, not resolving (section {secnum})"
+                    );
                     be.borrow_mut().add_warning(w.clone());
                     self.warnings.push(w);
                     newx[xi].resolved = Some(false);
                     continue;
                 };
                 if xe.borrow().etype() != "xdata" {
-                    let w = alloc::format!("{bee} entry '{key}' references XDATA entry '{xdref}' which is not an XDATA entry, not resolving (section {secnum})");
+                    let w = alloc::format!(
+                        "{bee} entry '{key}' references XDATA entry '{xdref}' which is not an XDATA entry, not resolving (section {secnum})"
+                    );
                     be.borrow_mut().add_warning(w.clone());
                     self.warnings.push(w);
                     newx[xi].resolved = Some(false);
@@ -572,7 +685,9 @@ impl<'f> Biber<'f> {
                 }
                 self.cfg.inherit_xdata.push((xdref.clone(), key.clone()));
                 if Config::is_inheritance_path(&self.cfg.inherit_xdata, &key, xdref) {
-                    return Err(self.fatal(alloc::format!("Circular XDATA inheritance between '{xdref}'<->'{key}'")));
+                    return Err(self.fatal(alloc::format!(
+                        "Circular XDATA inheritance between '{xdref}'<->'{key}'"
+                    )));
                 }
                 if xe.borrow().xrefs.is_some() {
                     self.entry_resolve_xdata(&xe)?;
@@ -595,7 +710,9 @@ impl<'f> Biber<'f> {
                         let (rft, rdt) = (self.dm.fieldtype(rf), self.dm.datatype(rf));
                         let (xft, xdt) = (self.dm.fieldtype(xf), self.dm.datatype(xf));
                         if !(rft == xft && rdt == xdt) {
-                            let w = alloc::format!("Field '{rf}' in {bee} entry '{key}' which xdata references field '{xf}' in entry '{xdref}' are not the same types, not resolving (section {secnum})");
+                            let w = alloc::format!(
+                                "Field '{rf}' in {bee} entry '{key}' which xdata references field '{xf}' in entry '{xdref}' are not the same types, not resolving (section {secnum})"
+                            );
                             be.borrow_mut().add_warning(w.clone());
                             self.warnings.push(w);
                             newx[xi].resolved = Some(false);
@@ -603,7 +720,9 @@ impl<'f> Biber<'f> {
                         }
                         let xv = xe.borrow().get(xf);
                         let Some(xv) = xv.filter(|v| v.truthy()) else {
-                            let w = alloc::format!("Field '{rf}' in {bee} entry '{key}' references XDATA field '{xf}' in entry '{xdref}' and this field does not exist, not resolving (section {secnum})");
+                            let w = alloc::format!(
+                                "Field '{rf}' in {bee} entry '{key}' references XDATA field '{xf}' in entry '{xdref}' and this field does not exist, not resolving (section {secnum})"
+                            );
                             be.borrow_mut().add_warning(w.clone());
                             self.warnings.push(w);
                             newx[xi].resolved = Some(false);
@@ -623,8 +742,12 @@ impl<'f> Biber<'f> {
                                 t.splice(i..end, src);
                             } else {
                                 let p: usize = xd.position.parse().unwrap_or(0);
-                                let Some(v) = src.get(p.wrapping_sub(1)).filter(|s| truthy(s)).cloned() else {
-                                    let w = alloc::format!("Field '{rf}' in {bee} entry '{key}' references field '{xf}' position {p} in entry '{xdref}' and this position does not exist, not resolving (section {secnum})");
+                                let Some(v) =
+                                    src.get(p.wrapping_sub(1)).filter(|s| truthy(s)).cloned()
+                                else {
+                                    let w = alloc::format!(
+                                        "Field '{rf}' in {bee} entry '{key}' references field '{xf}' position {p} in entry '{xdref}' and this position does not exist, not resolving (section {secnum})"
+                                    );
                                     be.borrow_mut().add_warning(w.clone());
                                     self.warnings.push(w);
                                     newx[xi].resolved = Some(false);
@@ -653,13 +776,19 @@ impl<'f> Biber<'f> {
             if be.borrow().etype() != "set" {
                 continue;
             }
-            let Some(l) = be.borrow().get("entryset").and_then(|v| v.as_list()) else { continue };
+            let Some(l) = be.borrow().get("entryset").and_then(|v| v.as_list()) else {
+                continue;
+            };
             let keys = l.borrow().clone();
             if keys.is_empty() {
                 continue;
             }
-            let real: Vec<String> = keys.iter().map(|m| self.secr().alias_of(m).unwrap_or_else(|| m.clone())).collect();
-            be.borrow_mut().set_data("entryset", Val::list(real.clone()));
+            let real: Vec<String> = keys
+                .iter()
+                .map(|m| self.secr().alias_of(m).unwrap_or_else(|| m.clone()))
+                .collect();
+            be.borrow_mut()
+                .set_data("entryset", Val::list(real.clone()));
             for k in &real {
                 self.sec().add_citekeys(&[k.clone()]);
             }
@@ -667,7 +796,9 @@ impl<'f> Biber<'f> {
                 set_inherit_from(&mut be.borrow_mut(), &first.borrow(), &self.dm);
             }
             if be.borrow().has("crossref") {
-                let w = alloc::format!("Field 'crossref' is no longer needed in set entries in Biber - ignoring in entry '{ck}'");
+                let w = alloc::format!(
+                    "Field 'crossref' is no longer needed in set entries in Biber - ignoring in entry '{ck}'"
+                );
                 be.borrow_mut().add_warning(w.clone());
                 self.warnings.push(w);
                 be.borrow_mut().del_field("crossref");
@@ -681,7 +812,11 @@ impl<'f> Biber<'f> {
             if be.borrow().etype() != "set" {
                 continue;
             }
-            let es = be.borrow().get("entryset").filter(|v| v.truthy()).and_then(|v| v.as_list());
+            let es = be
+                .borrow()
+                .get("entryset")
+                .filter(|v| v.truthy())
+                .and_then(|v| v.as_list());
             let Some(es) = es else {
                 let w = alloc::format!("Set entry '{ck}' has no entryset field, ignoring");
                 be.borrow_mut().add_warning(w.clone());
@@ -745,12 +880,18 @@ impl<'f> Biber<'f> {
             }
             let cr = be.borrow().gs("crossref");
             let k = be.borrow().key();
-            if self.cfg.inherit_crossref.iter().any(|(s, t)| *s == cr && *t == k) {
+            if self
+                .cfg
+                .inherit_crossref
+                .iter()
+                .any(|(s, t)| *s == cr && *t == k)
+            {
                 continue;
             }
             match self.entry(&cr) {
                 None => {
-                    let w = alloc::format!("Cannot inherit from crossref key '{cr}' - does it exist?");
+                    let w =
+                        alloc::format!("Cannot inherit from crossref key '{cr}' - does it exist?");
                     be.borrow_mut().add_warning(w.clone());
                     self.warnings.push(w);
                 }
@@ -767,7 +908,9 @@ impl<'f> Biber<'f> {
         let sk = parent.borrow().key();
         self.cfg.inherit_crossref.push((sk.clone(), tk.clone()));
         if Config::is_inheritance_path(&self.cfg.inherit_crossref, &tk, &sk) {
-            return Err(self.fatal(alloc::format!("Circular inheritance between '{sk}'<->'{tk}'")));
+            return Err(self.fatal(alloc::format!(
+                "Circular inheritance between '{sk}'<->'{tk}'"
+            )));
         }
         if parent.borrow().has("crossref") {
             let pp = parent.borrow().gs("crossref");
@@ -797,7 +940,11 @@ impl<'f> Biber<'f> {
                 }
             }
         }
-        let noinherit = self.cfg.blx(Some(&secnum), "noinherit", None, Some(&tk)).filter(|v| v.truthy()).map(|v| v.s());
+        let noinherit = self
+            .cfg
+            .blx(Some(&secnum), "noinherit", None, Some(&tk))
+            .filter(|v| v.truthy())
+            .map(|v| v.s());
         let mut processed: Vec<String> = Vec::new();
         for inherit in inh.kids("inherit") {
             for tp in inherit.kids("type_pair") {
@@ -810,7 +957,12 @@ impl<'f> Biber<'f> {
                     let fsrc = field.attr("source").unwrap_or("").to_string();
                     let ftgt = field.attr("target").map(String::from);
                     if let (Some(ni), Some(tg)) = (&noinherit, &ftgt) {
-                        if self.cfg.datafield_sets.get(ni).is_some_and(|set| set.contains(tg)) {
+                        if self
+                            .cfg
+                            .datafield_sets
+                            .get(ni)
+                            .is_some_and(|set| set.contains(tg))
+                        {
                             continue;
                         }
                     }
@@ -830,7 +982,11 @@ impl<'f> Biber<'f> {
                         } else {
                             child.borrow_mut().data.remove(&tg);
                         }
-                        let ign = inherit.attr("ignore").filter(|s| truthy(s)).map(String::from).or_else(|| dignore.clone());
+                        let ign = inherit
+                            .attr("ignore")
+                            .filter(|s| truthy(s))
+                            .map(String::from)
+                            .or_else(|| dignore.clone());
                         self.cfg.add_uniq_ignore(&tk, &tg, ign.as_deref());
                     }
                 }
@@ -841,7 +997,11 @@ impl<'f> Biber<'f> {
             let mut filtered = Vec::new();
             let mut removed = Vec::new();
             for f in fields {
-                if self.dm.helpers.dateparts.contains(&f) && parent.borrow().has("datesplit") && child.borrow().has("datesplit") && child.borrow().date_fields_exist(&f) {
+                if self.dm.helpers.dateparts.contains(&f)
+                    && parent.borrow().has("datesplit")
+                    && child.borrow().has("datesplit")
+                    && child.borrow().date_fields_exist(&f)
+                {
                     if override_target == "true" {
                         child.borrow_mut().delete_date_fields(&f);
                     } else {
@@ -856,9 +1016,27 @@ impl<'f> Biber<'f> {
                     continue;
                 }
                 let d = df.strip_suffix("date").unwrap_or(df);
-                for dsf in ["dateunspecified", "datesplit", "datejulian", "enddatejulian", "dateapproximate", "enddateapproximate", "dateuncertain", "enddateuncertain", "yeardivision", "endyeardivision", "era", "endera"] {
+                for dsf in [
+                    "dateunspecified",
+                    "datesplit",
+                    "datejulian",
+                    "enddatejulian",
+                    "dateapproximate",
+                    "enddateapproximate",
+                    "dateuncertain",
+                    "enddateuncertain",
+                    "yeardivision",
+                    "endyeardivision",
+                    "era",
+                    "endera",
+                ] {
                     let k = alloc::format!("{d}{dsf}");
-                    let v = parent.borrow().derived.get(&k).filter(|v| v.truthy()).cloned();
+                    let v = parent
+                        .borrow()
+                        .derived
+                        .get(&k)
+                        .filter(|v| v.truthy())
+                        .cloned();
                     if let Some(v) = v {
                         child.borrow_mut().derived.insert(k, v);
                     }
@@ -866,7 +1044,12 @@ impl<'f> Biber<'f> {
             }
             for f in filtered {
                 if let Some(ni) = &noinherit {
-                    if self.cfg.datafield_sets.get(ni).is_some_and(|set| set.contains(&f)) {
+                    if self
+                        .cfg
+                        .datafield_sets
+                        .get(ni)
+                        .is_some_and(|set| set.contains(&f))
+                    {
                         continue;
                     }
                 }
@@ -895,7 +1078,16 @@ impl<'f> Biber<'f> {
 
     fn postprocess_sets(&mut self) {
         let secnum = self.cur.clone();
-        let opts: Vec<String> = ["skipbib", "skiplab", "skipbiblist", "uniquename=false", "uniquelist=false"].iter().map(|s| (*s).to_string()).collect();
+        let opts: Vec<String> = [
+            "skipbib",
+            "skiplab",
+            "skipbiblist",
+            "uniquename=false",
+            "uniquelist=false",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
         for ck in self.sec().citekeys.clone() {
             let children = self.secr().set_pc.get(&ck).cloned().unwrap_or_default();
             if !children.is_empty() {
@@ -903,12 +1095,15 @@ impl<'f> Biber<'f> {
                     self.process_entry_options(&m, &opts, &secnum);
                     if let Some(me) = self.entry(&m) {
                         if me.borrow().data.get("entryset").is_some_and(Val::truthy) {
-                            let w = alloc::format!("Field 'entryset' is no longer needed in set member entries in Biber - ignoring in entry '{m}'");
+                            let w = alloc::format!(
+                                "Field 'entryset' is no longer needed in set member entries in Biber - ignoring in entry '{m}'"
+                            );
                             me.borrow_mut().add_warning(w.clone());
                             self.warnings.push(w);
                             me.borrow_mut().del_field("entryset");
                         }
-                        me.borrow_mut().set_field("entryset", Val::list(alloc::vec![ck.clone()]));
+                        me.borrow_mut()
+                            .set_field("entryset", Val::list(alloc::vec![ck.clone()]));
                     }
                 }
             } else if self.secr().set_cp.get(&ck).is_some_and(|v| !v.is_empty()) {
@@ -930,16 +1125,27 @@ impl<'f> Biber<'f> {
             }
             let bee = be.borrow().etype();
             // labelname
-            let spec = self.cfg.blx(None, "labelnamespec", Some(&bee), None).map(|v| v.items()).unwrap_or_default();
+            let spec = self
+                .cfg
+                .blx(None, "labelnamespec", Some(&bee), None)
+                .map(|v| v.items())
+                .unwrap_or_default();
             for h in &spec {
                 let ln = h.text.clone();
-                let lnameopt = ln.strip_prefix("short").filter(|x| !x.is_empty()).map_or(ln.clone(), String::from);
+                let lnameopt = ln
+                    .strip_prefix("short")
+                    .filter(|x| !x.is_empty())
+                    .map_or(ln.clone(), String::from);
                 if !self.dm.helpers.namelistsall.contains(&ln) {
-                    self.warnings.push(alloc::format!("Labelname candidate '{ln}' is not a name field - skipping"));
+                    self.warnings.push(alloc::format!(
+                        "Labelname candidate '{ln}' is not a name field - skipping"
+                    ));
                     continue;
                 }
                 let uo = alloc::format!("use{lnameopt}");
-                if self.cfg.optscope.contains_key(&uo) && !self.cfg.blx_b(Some(&secnum), &uo, Some(&bee), Some(&ck)) {
+                if self.cfg.optscope.contains_key(&uo)
+                    && !self.cfg.blx_b(Some(&secnum), &uo, Some(&bee), Some(&ck))
+                {
                     continue;
                 }
                 if be.borrow().has(&ln) {
@@ -956,7 +1162,9 @@ impl<'f> Biber<'f> {
                     continue;
                 }
                 let uo = alloc::format!("use{ln}");
-                if self.cfg.optscope.contains_key(&uo) && !self.cfg.blx_b(Some(&secnum), &uo, Some(&bee), Some(&ck)) {
+                if self.cfg.optscope.contains_key(&uo)
+                    && !self.cfg.blx_b(Some(&secnum), &uo, Some(&bee), Some(&ck))
+                {
                     continue;
                 }
                 if be.borrow().has(&ln) {
@@ -966,7 +1174,11 @@ impl<'f> Biber<'f> {
             }
             self.process_labeldate(&be, &bee, &ck);
             // labeltitle
-            let lts = self.cfg.blx(None, "labeltitlespec", Some(&bee), None).map(|v| v.items()).unwrap_or_default();
+            let lts = self
+                .cfg
+                .blx(None, "labeltitlespec", Some(&bee), None)
+                .map(|v| v.items())
+                .unwrap_or_default();
             for h in &lts {
                 let lt = be.borrow().get(&h.text).filter(|v| v.truthy());
                 if let Some(v) = lt {
@@ -979,7 +1191,8 @@ impl<'f> Biber<'f> {
             // presort
             if be.borrow().has("presort") {
                 let ps = be.borrow().gs("presort");
-                self.cfg.set_blx(&secnum, "presort", BV::S(ps), Some(("ENTRY", &ck)));
+                self.cfg
+                    .set_blx(&secnum, "presort", BV::S(ps), Some(("ENTRY", &ck)));
             }
         }
     }
@@ -988,7 +1201,11 @@ impl<'f> Biber<'f> {
         if !self.cfg.blx_b(None, "labeldateparts", Some(bee), Some(ck)) {
             return;
         }
-        let spec = self.cfg.blx(None, "labeldatespec", Some(bee), None).map(|v| v.items()).unwrap_or_default();
+        let spec = self
+            .cfg
+            .blx(None, "labeldatespec", Some(bee), None)
+            .map(|v| v.items())
+            .unwrap_or_default();
         for lds in &spec {
             let ld = lds.text.clone();
             match lds.attr("type") {
@@ -1009,7 +1226,8 @@ impl<'f> Biber<'f> {
                         datetype = String::new();
                     }
                     let b = be.borrow();
-                    if b.get(&ldy).is_some() || ldey.as_deref().is_some_and(|k| b.get(k).is_some()) {
+                    if b.get(&ldy).is_some() || ldey.as_deref().is_some_and(|k| b.get(k).is_some())
+                    {
                         drop(b);
                         let f = |s: &str| rest.as_ref().map(|d| alloc::format!("{d}{s}"));
                         be.borrow_mut().labeldate = Some(LabelDate::Field {
@@ -1035,7 +1253,17 @@ impl<'f> Biber<'f> {
         }
         let ldi = be.borrow().labeldate.clone();
         match ldi {
-            Some(LabelDate::Field { year, month, day, hour, minute, second, timezone, pseudodate, source }) => {
+            Some(LabelDate::Field {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                timezone,
+                pseudodate,
+                source,
+            }) => {
                 let mut b = be.borrow_mut();
                 let gv = |b: &Entry, k: &str| b.get(k);
                 let yv = gv(&b, &year);
@@ -1045,7 +1273,14 @@ impl<'f> Biber<'f> {
                         b.derived.remove("labelyear");
                     }
                 }
-                for (lab, src) in [("labelmonth", &month), ("labelday", &day), ("labelhour", &hour), ("labelminute", &minute), ("labelsecond", &second), ("labeltimezone", &timezone)] {
+                for (lab, src) in [
+                    ("labelmonth", &month),
+                    ("labelday", &day),
+                    ("labelhour", &hour),
+                    ("labelminute", &minute),
+                    ("labelsecond", &second),
+                    ("labeltimezone", &timezone),
+                ] {
                     if let Some(s) = src {
                         match gv(&b, s) {
                             Some(v) => b.set_field(lab, v),
@@ -1063,9 +1298,17 @@ impl<'f> Biber<'f> {
                     b.set_field("labelyear", Val::s(v));
                 }
                 if !pseudodate {
-                    for (part, lab, src) in [("month", "labelmonth", &month), ("day", "labelday", &day), ("hour", "labelhour", &hour), ("minute", "labelminute", &minute), ("second", "labelsecond", &second)] {
+                    for (part, lab, src) in [
+                        ("month", "labelmonth", &month),
+                        ("day", "labelday", &day),
+                        ("hour", "labelhour", &hour),
+                        ("minute", "labelminute", &minute),
+                        ("second", "labelsecond", &second),
+                    ] {
                         let ek = alloc::format!("{ytype}end{part}");
-                        if b.has(&ek) && src.as_deref().map(|s| b.gs(s)).unwrap_or_default() != b.gs(&ek) {
+                        if b.has(&ek)
+                            && src.as_deref().map(|s| b.gs(s)).unwrap_or_default() != b.gs(&ek)
+                        {
                             let v = alloc::format!("{}\\bibdatedash {}", b.gs(lab), b.gs(&ek));
                             b.set_field(lab, Val::s(v));
                         }
@@ -1103,7 +1346,9 @@ pub fn set_inherit_from(e: &mut Entry, parent: &Entry, dm: &DataModel) {
 
 /// Utils `merge_entry_options`.
 pub fn merge_entry_options(opts: Option<Vec<String>>, over: Option<Vec<String>>) -> Vec<String> {
-    let Some(over) = over else { return opts.unwrap_or_default() };
+    let Some(over) = over else {
+        return opts.unwrap_or_default();
+    };
     let Some(opts) = opts else { return over };
     let split = |s: &str| -> (String, String, String) {
         match s.find('=') {

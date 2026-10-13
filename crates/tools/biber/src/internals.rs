@@ -7,8 +7,8 @@ use alloc::vec::Vec;
 
 use crate::biber::Biber;
 use crate::config::{Config, SnkPart, SortAttrs};
-use crate::model::{looks_like_number, numify, truthy, Name, Names, Shared, Val};
-use crate::regex::{cap, Regex};
+use crate::model::{Name, Names, Shared, Val, looks_like_number, numify, truthy};
+use crate::regex::{Regex, cap};
 use crate::section::{DataList, LabelCacheV};
 use crate::unicode::{fc, gc_len, gc_substr, lc, nfc, nfd, nfkd, uc};
 use crate::xml::Element;
@@ -31,7 +31,9 @@ pub fn normalise_string_hash(s: &str) -> String {
     if !truthy(s) {
         return String::new();
     }
-    let s = re(r"\\(\p{L}+)\s*").replace(s, true, &mut |t, m| alloc::format!("{}:", cap(t, m, 1).unwrap_or_default()));
+    let s = re(r"\\(\p{L}+)\s*").replace(s, true, &mut |t, m| {
+        alloc::format!("{}:", cap(t, m, 1).unwrap_or_default())
+    });
     let s = re(r"\\([^\p{L}])\s*").replace(&s, true, &mut |t, m| {
         let c = cap(t, m, 1).unwrap_or_default();
         alloc::format!("{}:", c.chars().next().map_or(0, |c| c as u32))
@@ -50,7 +52,9 @@ fn trim_collapse(s: &str) -> String {
 }
 
 fn tie_to_space(s: &str) -> String {
-    re(r"([^\\])~").replace(s, true, &mut |t, m| alloc::format!("{} ", cap(t, m, 1).unwrap_or_default()))
+    re(r"([^\\])~").replace(s, true, &mut |t, m| {
+        alloc::format!("{} ", cap(t, m, 1).unwrap_or_default())
+    })
 }
 
 /// Utils `normalise_string_common`.
@@ -81,7 +85,11 @@ pub fn normalise_string_label(cfg: &Config, s: &str) -> String {
     trim_collapse(&s)
 }
 
-fn field_res<'a>(cfg: &'a Config, list: &'a [crate::config::FieldRe], field: &str) -> Vec<&'a Regex> {
+fn field_res<'a>(
+    cfg: &'a Config,
+    list: &'a [crate::config::FieldRe],
+    field: &str,
+) -> Vec<&'a Regex> {
     let mut v = Vec::new();
     for o in list {
         if fc(&o.name) == fc(field) {
@@ -136,8 +144,12 @@ pub fn escape_label(s: &str) -> String {
     if !truthy(s) {
         return String::new();
     }
-    let s = re(r"([_\^\$\#\%\&])").replace(s, true, &mut |t, m| alloc::format!("\\{}", cap(t, m, 1).unwrap_or_default()));
-    s.replace('~', "{\\textasciitilde}").replace('>', "{\\textgreater}").replace('<', "{\\textless}")
+    let s = re(r"([_\^\$\#\%\&])").replace(s, true, &mut |t, m| {
+        alloc::format!("\\{}", cap(t, m, 1).unwrap_or_default())
+    });
+    s.replace('~', "{\\textasciitilde}")
+        .replace('>', "{\\textgreater}")
+        .replace('<', "{\\textless}")
 }
 
 /// Utils `unescape_label`.
@@ -145,8 +157,11 @@ pub fn unescape_label(s: &str) -> String {
     if !truthy(s) {
         return String::new();
     }
-    let s = re(r"\\([_\^\$\~\#\%\&])").replace(s, true, &mut |t, m| cap(t, m, 1).unwrap_or_default());
-    s.replace("{\\textasciitilde}", "~").replace("{\\textgreater}", ">").replace("{\\textless}", "<")
+    let s =
+        re(r"\\([_\^\$\~\#\%\&])").replace(s, true, &mut |t, m| cap(t, m, 1).unwrap_or_default());
+    s.replace("{\\textasciitilde}", "~")
+        .replace("{\\textgreater}", ">")
+        .replace("{\\textless}", "<")
 }
 
 /// Utils `join_name`.
@@ -160,7 +175,9 @@ pub fn join_name(s: &str) -> String {
 pub fn parse_range(s: &str) -> (Option<String>, Option<String>) {
     let r = Regex::new(r"\A\s*(\P{Pd}+)?\s*(\p{Pd})*\s*(\P{Pd}+)?\s*\z", "ms").expect("static");
     let t: Vec<char> = s.chars().collect();
-    let Some(m) = r.find_at(&t, 0) else { return (Some("1".into()), None) };
+    let Some(m) = r.find_at(&t, 0) else {
+        return (Some("1".into()), None);
+    };
     let (a, d, b) = (cap(&t, &m, 1), cap(&t, &m, 2), cap(&t, &m, 3));
     if d.as_deref().is_some_and(truthy) {
         (Some(a.unwrap_or_else(|| "1".into())), b)
@@ -183,7 +200,13 @@ pub fn parse_range_alt(s: &str) -> Option<(Option<String>, Option<String>)> {
 
 /// Text::Roman `isroman`.
 pub fn isroman(s: &str) -> bool {
-    !s.is_empty() && Regex::new(r"\A(?:M{0,3})(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})\z", "i").expect("static").is_match(s)
+    !s.is_empty()
+        && Regex::new(
+            r"\A(?:M{0,3})(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})\z",
+            "i",
+        )
+        .expect("static")
+        .is_match(s)
 }
 
 /// Text::Roman `roman2int`.
@@ -282,21 +305,35 @@ fn attr<'a>(e: &'a Element, n: &str) -> Option<&'a str> {
 }
 
 impl Biber<'_> {
-
     /// Biber `process_namedis`.
-    pub fn process_namedis(&mut self, key: &str, dl: &DataList) -> Result<Vec<NameDis>, crate::biber::Fatal> {
+    pub fn process_namedis(
+        &mut self,
+        key: &str,
+        dl: &DataList,
+    ) -> Result<Vec<NameDis>, crate::biber::Fatal> {
         let secnum = self.cur.clone();
         let be = self.be(key);
         let bee = be.borrow().etype();
         let mut untname = dl.uniquenametemplatename.clone();
-        let mut un = self.cfg.blx(Some(&secnum), "uniquename", Some(&bee), Some(key)).map(|v| v.s());
-        let mut ul = self.cfg.blx(Some(&secnum), "uniquelist", Some(&bee), Some(key)).map(|v| v.s());
-        if let Some(v) = self.cfg.blx(Some(&secnum), "uniquenametemplatename", None, Some(key)) {
+        let mut un = self
+            .cfg
+            .blx(Some(&secnum), "uniquename", Some(&bee), Some(key))
+            .map(|v| v.s());
+        let mut ul = self
+            .cfg
+            .blx(Some(&secnum), "uniquelist", Some(&bee), Some(key))
+            .map(|v| v.s());
+        if let Some(v) = self
+            .cfg
+            .blx(Some(&secnum), "uniquenametemplatename", None, Some(key))
+        {
             untname = v.s();
         }
         let mut out = Vec::new();
         for pn in self.dm.helpers.namelistsall.clone() {
-            let Some(nl) = be.borrow().get(&pn).and_then(|v| v.as_names()) else { continue };
+            let Some(nl) = be.borrow().get(&pn).and_then(|v| v.as_names()) else {
+                continue;
+            };
             let nl = nl.borrow();
             if let Some(x) = nl.opt("uniquenametemplatename") {
                 untname = x;
@@ -313,7 +350,9 @@ impl Biber<'_> {
                     untname = x;
                 }
                 let Some(tmpl) = self.cfg.uniquenametemplate.get(&untname).cloned() else {
-                    return Err(self.fatal(alloc::format!("No uniquenametemplate called '{untname}' found, cannot continue.")));
+                    return Err(self.fatal(alloc::format!(
+                        "No uniquenametemplate called '{untname}' found, cannot continue."
+                    )));
                 };
                 if let Some(x) = n.opt("uniquename") {
                     un = Some(x);
@@ -342,7 +381,9 @@ impl Biber<'_> {
                             continue;
                         }
                         base.push_str(&p);
-                        baseparts.get_or_insert_with(Vec::new).push(np.namepart.clone());
+                        baseparts
+                            .get_or_insert_with(Vec::new)
+                            .push(np.namepart.clone());
                     }
                 }
                 namestring.push_str(&base);
@@ -390,7 +431,10 @@ impl Biber<'_> {
                     nameun,
                     namelistul: ul.clone(),
                     namestring: strip_nonamestring(&self.cfg, &namestring, &nl.typ),
-                    namestrings: namestrings.iter().map(|s| strip_nonamestring(&self.cfg, s, &nl.typ)).collect(),
+                    namestrings: namestrings
+                        .iter()
+                        .map(|s| strip_nonamestring(&self.cfg, s, &nl.typ))
+                        .collect(),
                     schema,
                 });
             }
@@ -418,7 +462,9 @@ impl Biber<'_> {
 
     fn nho(&self, key: &str, names: &Names) -> bool {
         let bee = self.be(key).borrow().etype();
-        let mut v = self.cfg.blx_b(Some(&self.cur), "nohashothers", Some(&bee), Some(key));
+        let mut v = self
+            .cfg
+            .blx_b(Some(&self.cur), "nohashothers", Some(&bee), Some(key));
         if let Some(x) = names.opt("nohashothers") {
             v = truthy(&x);
         }
@@ -426,7 +472,13 @@ impl Biber<'_> {
     }
 
     /// Internals `_getnamehash`.
-    pub fn getnamehash(&mut self, key: &str, names: &Names, dl: &DataList, bib: bool) -> Result<String, crate::biber::Fatal> {
+    pub fn getnamehash(
+        &mut self,
+        key: &str,
+        names: &Names,
+        dl: &DataList,
+        bib: bool,
+    ) -> Result<String, crate::biber::Fatal> {
         let (vc, vb, _, _) = dl.vis(&names.id);
         let visible = if bib { vb } else { vc };
         let nps = self.dm.nameparts();
@@ -453,7 +505,12 @@ impl Biber<'_> {
     }
 
     /// Internals `_getfullhash`.
-    pub fn getfullhash(&mut self, key: &str, names: &Names, dl: &DataList) -> Result<String, crate::biber::Fatal> {
+    pub fn getfullhash(
+        &mut self,
+        key: &str,
+        names: &Names,
+        dl: &DataList,
+    ) -> Result<String, crate::biber::Fatal> {
         let nps = self.dm.nameparts();
         let mut nhtname = self.nht_name(key, names, dl);
         let mut hk = String::new();
@@ -468,7 +525,11 @@ impl Biber<'_> {
             }
             let nht = self.nht(&nhtname)?;
             for nt in &nps {
-                hk.push_str(&strip_nonamestring(&self.cfg, &n.hash_namepart(nt, &nht), &names.typ));
+                hk.push_str(&strip_nonamestring(
+                    &self.cfg,
+                    &n.hash_namepart(nt, &nht),
+                    &names.typ,
+                ));
             }
         }
         if names.morenames {
@@ -497,7 +558,12 @@ impl Biber<'_> {
     }
 
     /// Internals `_getnamehash_u`.
-    pub fn getnamehash_u(&mut self, key: &str, names: &Names, dl: &DataList) -> Result<String, crate::biber::Fatal> {
+    pub fn getnamehash_u(
+        &mut self,
+        key: &str,
+        names: &Names,
+        dl: &DataList,
+    ) -> Result<String, crate::biber::Fatal> {
         let (visible, _, _, _) = dl.vis(&names.id);
         let mut untname = self
             .cfg
@@ -512,7 +578,12 @@ impl Biber<'_> {
             if let Some(x) = n.opt("uniquenametemplatename") {
                 untname = x;
             }
-            let tmpl = self.cfg.uniquenametemplate.get(&untname).cloned().unwrap_or_default();
+            let tmpl = self
+                .cfg
+                .uniquenametemplate
+                .get(&untname)
+                .cloned()
+                .unwrap_or_default();
             for nps in &tmpl {
                 if nps.disambiguation.as_deref() == Some("none") {
                     continue;
@@ -542,7 +613,13 @@ impl Biber<'_> {
     }
 
     /// Internals `_genpnhash`.
-    pub fn genpnhash(&mut self, key: &str, names: &Names, n: &Name, dl: &DataList) -> Result<String, crate::biber::Fatal> {
+    pub fn genpnhash(
+        &mut self,
+        key: &str,
+        names: &Names,
+        n: &Name,
+        dl: &DataList,
+    ) -> Result<String, crate::biber::Fatal> {
         if let Some(h) = n.hashid.as_ref().filter(|s| truthy(s)) {
             return Ok(hash_str(h));
         }
@@ -588,12 +665,22 @@ impl Biber<'_> {
         (label, slabel)
     }
 
-    fn labelpart(&mut self, parts: &[Element], key: &str, dl: &DataList, fin: &mut bool) -> (String, String) {
+    fn labelpart(
+        &mut self,
+        parts: &[Element],
+        key: &str,
+        dl: &DataList,
+        fin: &mut bool,
+    ) -> (String, String) {
         let be = self.be(key);
         let bee = be.borrow().etype();
         let secnum = self.cur.clone();
-        let maxan = self.cfg.blx_n(Some(&secnum), "maxalphanames", Some(&bee), Some(key));
-        let minan = self.cfg.blx_n(Some(&secnum), "minalphanames", Some(&bee), Some(key));
+        let maxan = self
+            .cfg
+            .blx_n(Some(&secnum), "maxalphanames", Some(&bee), Some(key));
+        let minan = self
+            .cfg
+            .blx_n(Some(&secnum), "minalphanames", Some(&bee), Some(key));
         let mut lp = String::new();
         let mut slp = String::new();
         for part in parts {
@@ -603,7 +690,9 @@ impl Biber<'_> {
                     f = be.borrow().labelname.clone().unwrap_or_default();
                 }
                 if self.dm.fields_of_type("list", &["name"]).contains(&f) {
-                    let Some(nm) = be.borrow().get(&f).and_then(|v| v.as_names()) else { continue };
+                    let Some(nm) = be.borrow().get(&f).and_then(|v| v.as_names()) else {
+                        continue;
+                    };
                     let total = nm.borrow().count() as i64;
                     let vis = if total > maxan { minan } else { total };
                     if re(r"^\d+$").is_match(inc) {
@@ -656,7 +745,11 @@ impl Biber<'_> {
         let basic = |me: &mut Self, f: &str, nostrip: bool| -> (String, String) {
             let be = me.be(key);
             let v = be.borrow().get(f).map(|v| v.str()).unwrap_or_default();
-            let f2 = if nostrip { v } else { normalise_string_label(&me.cfg, &v) };
+            let f2 = if nostrip {
+                v
+            } else {
+                normalise_string_label(&me.cfg, &v)
+            };
             if truthy(&f2) {
                 let b = me.process_label_attributes(key, dl, &[(f2, None)], part, Some(f), None, 0);
                 let u = unescape_label(&b);
@@ -668,7 +761,15 @@ impl Biber<'_> {
         match c {
             "label" | "shorthand" | "sortkey" => basic(self, c, true),
             "citekey" | "entrykey" => {
-                let k = self.process_label_attributes(key, dl, &[(key.to_string(), None)], part, None, None, 0);
+                let k = self.process_label_attributes(
+                    key,
+                    dl,
+                    &[(key.to_string(), None)],
+                    part,
+                    None,
+                    None,
+                    0,
+                );
                 let u = unescape_label(&k);
                 (k, u)
             }
@@ -687,22 +788,58 @@ impl Biber<'_> {
         }
     }
 
-    fn label_name(&mut self, key: &str, namename: &str, attrs: &Element, dl: &DataList) -> (String, String) {
+    fn label_name(
+        &mut self,
+        key: &str,
+        namename: &str,
+        attrs: &Element,
+        dl: &DataList,
+    ) -> (String, String) {
         let secnum = self.cur.clone();
         let be = self.be(key);
         let bee = be.borrow().etype();
-        let mut useprefix = self.cfg.blx_s(Some(&secnum), "useprefix", Some(&bee), Some(key));
-        let alphaothers = self.cfg.blx(None, "alphaothers", Some(&bee), None).map(|v| v.s()).unwrap_or_default();
-        let sortalphaothers = self.cfg.blx(None, "sortalphaothers", Some(&bee), None).map(|v| v.s()).unwrap_or_default();
+        let mut useprefix = self
+            .cfg
+            .blx_s(Some(&secnum), "useprefix", Some(&bee), Some(key));
+        let alphaothers = self
+            .cfg
+            .blx(None, "alphaothers", Some(&bee), None)
+            .map(|v| v.s())
+            .unwrap_or_default();
+        let sortalphaothers = self
+            .cfg
+            .blx(None, "sortalphaothers", Some(&bee), None)
+            .map(|v| v.s())
+            .unwrap_or_default();
         let mut lantname = dl.labelalphanametemplatename.clone();
-        if let Some(v) = self.cfg.blx(Some(&secnum), "labelalphanametemplatename", None, Some(key)) {
+        if let Some(v) = self
+            .cfg
+            .blx(Some(&secnum), "labelalphanametemplatename", None, Some(key))
+        {
             lantname = v.s();
         }
-        let Some(lni) = be.borrow().labelname.clone() else { return (String::new(), String::new()) };
-        let realname = if namename == "labelname" { lni } else { namename.to_string() };
+        let Some(lni) = be.borrow().labelname.clone() else {
+            return (String::new(), String::new());
+        };
+        let realname = if namename == "labelname" {
+            lni
+        } else {
+            namename.to_string()
+        };
         let names = be.borrow().get(&realname).and_then(|v| v.as_names());
-        let lnameopt = realname.strip_prefix("short").filter(|s| !s.is_empty()).unwrap_or(&realname).to_string();
-        let Some(names) = names.filter(|_| self.cfg.blx_b(Some(&secnum), &alloc::format!("use{lnameopt}"), Some(&bee), Some(key))) else {
+        let lnameopt = realname
+            .strip_prefix("short")
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&realname)
+            .to_string();
+        let Some(names) = names.filter(|_| {
+            self.cfg.blx_b(
+                Some(&secnum),
+                &alloc::format!("use{lnameopt}"),
+                Some(&bee),
+                Some(key),
+            )
+        }) else {
             return (String::new(), String::new());
         };
         let names = names.borrow();
@@ -722,11 +859,7 @@ impl Biber<'_> {
                 None => numnames,
                 Some(x) => {
                     let v = numify(x) as usize;
-                    if v > numnames {
-                        numnames
-                    } else {
-                        v
-                    }
+                    if v > numnames { numnames } else { v }
                 }
             };
             (s, e)
@@ -745,7 +878,12 @@ impl Biber<'_> {
             if let Some(x) = name.opt("useprefix") {
                 useprefix = x;
             }
-            let lnat = self.cfg.labelalphanametemplate.get(&lantname).cloned().unwrap_or_default();
+            let lnat = self
+                .cfg
+                .labelalphanametemplate
+                .get(&lantname)
+                .cloned()
+                .unwrap_or_default();
             let (mut pa, mut ma, mut mp) = (Vec::new(), Vec::new(), Vec::new());
             for lnp in &lnat {
                 let np = name.namepart(&lnp.namepart);
@@ -755,7 +893,11 @@ impl Biber<'_> {
                 if lnp.use_ && !(lnp.namepart == "prefix" && truthy(&useprefix)) {
                     continue;
                 }
-                let o = Some((lnp.substring_width.clone(), lnp.substring_side.clone(), lnp.substring_compound));
+                let o = Some((
+                    lnp.substring_width.clone(),
+                    lnp.substring_side.clone(),
+                    lnp.substring_compound,
+                ));
                 if lnp.pre {
                     pa.push((normalise_string_label(&self.cfg, &np), o));
                 } else {
@@ -785,7 +927,15 @@ impl Biber<'_> {
             }
             let fs = main.get(i).cloned().unwrap_or_default();
             let pn = mpns.get(i).cloned();
-            acc.push_str(&self.process_label_attributes(key, dl, &fs, attrs, Some(&realname), pn.as_deref(), i));
+            acc.push_str(&self.process_label_attributes(
+                key,
+                dl,
+                &fs,
+                attrs,
+                Some(&realname),
+                pn.as_deref(),
+                i,
+            ));
             if let Some(ns) = attr(attrs, "namessep").filter(|s| truthy(s)) {
                 if i + 1 != nr_end {
                     acc.push_str(ns);
@@ -794,7 +944,9 @@ impl Biber<'_> {
             i += 1;
         }
         let mut sortacc = acc.clone();
-        if !attr(attrs, "noalphaothers").is_some_and(truthy) && (numnames > nr_end || names.morenames) {
+        if !attr(attrs, "noalphaothers").is_some_and(truthy)
+            && (numnames > nr_end || names.morenames)
+        {
             acc.push_str(&alphaothers);
             sortacc.push_str(&sortalphaothers);
         }
@@ -826,8 +978,15 @@ impl Biber<'_> {
                         self.sec().labelcache_v.insert(field.into(), c);
                     }
                     let c = &self.secr().labelcache_v[field];
-                    let idx = c.globalindices.get(&fs).copied().filter(|&x| x != 0).or_else(|| c.index.get(&fs).copied());
-                    fs = idx.and_then(|i| c.data.get(&fs).and_then(|d| d.get(i)).cloned()).unwrap_or_default();
+                    let idx = c
+                        .globalindices
+                        .get(&fs)
+                        .copied()
+                        .filter(|&x| x != 0)
+                        .or_else(|| c.index.get(&fs).copied());
+                    fs = idx
+                        .and_then(|i| c.data.get(&fs).and_then(|d| d.get(i)).cloned())
+                        .unwrap_or_default();
                 } else if sw.contains('l') && field.is_some() {
                     let field = field.unwrap_or_default();
                     if !self.secr().labelcache_l.contains_key(field) {
@@ -840,7 +999,14 @@ impl Biber<'_> {
                                         (Some(nps), Some(nl)) => {
                                             let nl = nl.borrow();
                                             let (_, _, _, va) = dl.vis(&nl.id);
-                                            nl.first_n(va).iter().map(|n| nps.iter().map(|p| n.borrow().namepart(p)).collect::<String>()).collect()
+                                            nl.first_n(va)
+                                                .iter()
+                                                .map(|n| {
+                                                    nps.iter()
+                                                        .map(|p| n.borrow().namepart(p))
+                                                        .collect::<String>()
+                                                })
+                                                .collect()
                                         }
                                         _ => alloc::vec![v.str()],
                                     },
@@ -852,11 +1018,19 @@ impl Biber<'_> {
                         self.sec().labelcache_l.insert(field.into(), c);
                     }
                     fs = nindex
-                        .and_then(|n| self.secr().labelcache_l[field].get(n).and_then(|r| r.get(index)).cloned())
+                        .and_then(|n| {
+                            self.secr().labelcache_l[field]
+                                .get(n)
+                                .and_then(|r| r.get(index))
+                                .cloned()
+                        })
                         .unwrap_or_default();
                 } else {
                     let padchar = attr(la, "pad_char").map(String::from);
-                    let mut side = attr(la, "substring_side").filter(|s| truthy(s)).unwrap_or("left").to_string();
+                    let mut side = attr(la, "substring_side")
+                        .filter(|s| truthy(s))
+                        .unwrap_or("left")
+                        .to_string();
                     let mut width: i64 = if truthy(sw) { numify(sw) as i64 } else { 1 };
                     if nameparts.is_some() {
                         if let Some((w, s, _)) = npo {
@@ -887,7 +1061,9 @@ impl Biber<'_> {
                     }
                     if let Some(pc) = padchar.filter(|s| truthy(s)) {
                         let pc = unescape_label(&pc);
-                        let ps = attr(la, "pad_side").filter(|s| truthy(s)).unwrap_or("right");
+                        let ps = attr(la, "pad_side")
+                            .filter(|s| truthy(s))
+                            .unwrap_or("right");
                         let diff = width - gc_len(&fs) as i64;
                         if diff > 0 {
                             let pad = pc.repeat(diff as usize);
@@ -900,7 +1076,10 @@ impl Biber<'_> {
                         fs = escape_label(&fs);
                     }
                     if let Some(ix) = nlwcis {
-                        let mut g: Vec<String> = crate::unicode::graphemes(&fs).into_iter().map(String::from).collect();
+                        let mut g: Vec<String> = crate::unicode::graphemes(&fs)
+                            .into_iter()
+                            .map(String::from)
+                            .collect();
                         for (s, pos) in ix {
                             if pos < g.len() {
                                 g.insert(pos, s);
@@ -923,10 +1102,24 @@ impl Biber<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn build_labelcache_v(&self, citekeys: &[String], field: &str, nameparts: Option<&[String]>, dl: &DataList, la: &Element, sw: &str) -> LabelCacheV {
+    fn build_labelcache_v(
+        &self,
+        citekeys: &[String],
+        field: &str,
+        nameparts: Option<&[String]>,
+        dl: &DataList,
+        la: &Element,
+        sw: &str,
+    ) -> LabelCacheV {
         let mut indices: BTreeMap<String, usize> = BTreeMap::new();
         for k in citekeys {
-            let Some(f) = self.entry(k).and_then(|e| e.borrow().get(field)).filter(Val::truthy) else { continue };
+            let Some(f) = self
+                .entry(k)
+                .and_then(|e| e.borrow().get(field))
+                .filter(Val::truthy)
+            else {
+                continue;
+            };
             if let Some(nps) = nameparts {
                 if let Some(nl) = f.as_names() {
                     let nl = nl.borrow();
@@ -944,7 +1137,10 @@ impl Biber<'_> {
         let strings: Vec<String> = indices.keys().cloned().collect();
         let maxlen = attr(la, "substring_width_max")
             .filter(|s| truthy(s))
-            .map_or_else(|| strings.iter().map(|s| gc_len(s)).max().unwrap_or(0), |s| numify(s) as usize);
+            .map_or_else(
+                || strings.iter().map(|s| gc_len(s)).max().unwrap_or(0),
+                |s| numify(s) as usize,
+            );
         let mut c = LabelCacheV::default();
         let mut subs: BTreeMap<String, usize> = BTreeMap::new();
         for i in 1..=maxlen {
@@ -1014,7 +1210,11 @@ impl Biber<'_> {
                 s = "0".into();
             }
             if truthy(&sort_final) {
-                sortobj.push(if suppress_final { String::new() } else { sort_final.clone() });
+                sortobj.push(if suppress_final {
+                    String::new()
+                } else {
+                    sort_final.clone()
+                });
                 suppress_final = false;
             } else {
                 sortobj.push(s);
@@ -1024,7 +1224,9 @@ impl Biber<'_> {
         dl.sortdata.insert(key.into(), (ss.clone(), sortobj));
         if truthy(&ss) || szero {
             let bee = be.borrow().etype();
-            let pre = self.cfg.blx_s(Some(&self.cur), "presort", Some(&bee), Some(key));
+            let pre = self
+                .cfg
+                .blx_s(Some(&self.cur), "presort", Some(&bee), Some(key));
             let ss2 = match Regex::new(&alloc::format!(r"\A{pre},+"), "") {
                 Ok(r) => r.replace(&ss, false, &mut |_, _| String::new()),
                 Err(_) => ss.clone(),
@@ -1037,10 +1239,20 @@ impl Biber<'_> {
     fn dispatch_sorting(&mut self, f: &str, key: &str, dl: &DataList, attrs: &SortAttrs) -> String {
         let be = self.be(key);
         let bee = be.borrow().etype();
-        if self.cfg.sortexclusion.get(&bee).is_some_and(|s| s.contains(f)) {
+        if self
+            .cfg
+            .sortexclusion
+            .get(&bee)
+            .is_some_and(|s| s.contains(f))
+        {
             return String::new();
         }
-        if self.cfg.sortexclusion.get("*").is_some_and(|s| s.contains(f)) {
+        if self
+            .cfg
+            .sortexclusion
+            .get("*")
+            .is_some_and(|s| s.contains(f))
+        {
             match self.cfg.sortinclusion.get(&bee) {
                 Some(si) => {
                     if !si.contains(f) {
@@ -1057,7 +1269,10 @@ impl Biber<'_> {
         let get = |f: &str| be.borrow().get(f).filter(Val::truthy);
         match f {
             "editoratype" | "editorbtype" | "editorctype" => {
-                if self.cfg.blx_b(Some(&secnum), "useeditor", Some(&bee), Some(key)) {
+                if self
+                    .cfg
+                    .blx_b(Some(&secnum), "useeditor", Some(&bee), Some(key))
+                {
                     if let Some(v) = get(f) {
                         return process_sort_attributes(&v.str(), attrs);
                     }
@@ -1067,8 +1282,17 @@ impl Biber<'_> {
             "citeorder" => {
                 let ko = self.cfg.keyorder(&secnum, key);
                 if self.secr().allkeys {
-                    let max = self.cfg.keyorder.get(&secnum).map_or(0.0, |m| m.values().map(|v| numify(v)).fold(0.0, f64::max));
-                    let pos = self.secr().orig_order.iter().position(|k| k == key).map_or(-1, |p| p as i64);
+                    let max = self
+                        .cfg
+                        .keyorder
+                        .get(&secnum)
+                        .map_or(0.0, |m| m.values().map(|v| numify(v)).fold(0.0, f64::max));
+                    let pos = self
+                        .secr()
+                        .orig_order
+                        .iter()
+                        .position(|k| k == key)
+                        .map_or(-1, |p| p as i64);
                     let biborder = crate::model::num_str(max + (pos + 1) as f64);
                     let ako = self.cfg.keyorder(&secnum, "*");
                     if let (Some(k), Some(a)) = (&ko, &ako) {
@@ -1082,8 +1306,17 @@ impl Biber<'_> {
                 }
             }
             "citecount" => self.secr().citecount(key),
-            "intciteorder" => self.cfg.internal_keyorder.get(&secnum).and_then(|m| m.get(key)).cloned().unwrap_or_default(),
-            "labelalpha" => process_sort_attributes(&dl.entryfield_s(key, "sortlabelalpha").unwrap_or_default(), attrs),
+            "intciteorder" => self
+                .cfg
+                .internal_keyorder
+                .get(&secnum)
+                .and_then(|m| m.get(key))
+                .cloned()
+                .unwrap_or_default(),
+            "labelalpha" => process_sort_attributes(
+                &dl.entryfield_s(key, "sortlabelalpha").unwrap_or_default(),
+                attrs,
+            ),
             "labelname" => match be.borrow().labelname.clone() {
                 Some(l) => self.dispatch_sorting(&l, key, dl, attrs),
                 None => String::new(),
@@ -1094,7 +1327,10 @@ impl Biber<'_> {
             },
             "labelyear" | "labelmonth" | "labelday" => {
                 let ldi = be.borrow().labeldate.clone();
-                if let Some(crate::model::LabelDate::Field { year, month, day, .. }) = ldi {
+                if let Some(crate::model::LabelDate::Field {
+                    year, month, day, ..
+                }) = ldi
+                {
                     let c = match f {
                         "labelyear" => Some(year),
                         "labelmonth" => month,
@@ -1106,9 +1342,21 @@ impl Biber<'_> {
                 }
                 String::new()
             }
-            "presort" => process_sort_attributes(&self.cfg.blx_s(Some(&secnum), "presort", Some(&bee), Some(key)), attrs),
+            "presort" => process_sort_attributes(
+                &self
+                    .cfg
+                    .blx_s(Some(&secnum), "presort", Some(&bee), Some(key)),
+                attrs,
+            ),
             "sortname" => {
-                let any = self.dm.fields_of_type("list", &["name"]).iter().any(|n| self.cfg.blx_b(Some(&secnum), &alloc::format!("use{n}"), Some(&bee), Some(key)));
+                let any = self.dm.fields_of_type("list", &["name"]).iter().any(|n| {
+                    self.cfg.blx_b(
+                        Some(&secnum),
+                        &alloc::format!("use{n}"),
+                        Some(&bee),
+                        Some(key),
+                    )
+                });
                 if get("sortname").is_some() && any {
                     let s = self.namestring(key, "sortname", dl);
                     process_sort_attributes(&s, attrs)
@@ -1120,14 +1368,20 @@ impl Biber<'_> {
             "entrykey" => process_sort_attributes(key, attrs),
             _ => {
                 if !self.dm.is_field(f) {
-                    self.warnings.push(alloc::format!("Field '{f}' in sorting template is not a sortable field"));
+                    self.warnings.push(alloc::format!(
+                        "Field '{f}' in sorting template is not a sortable field"
+                    ));
                     return String::new();
                 }
                 let (ft, dt) = (self.dm.fieldtype(f), self.dm.datatype(f));
-                let Some(v) = get(f) else { return String::new() };
+                let Some(v) = get(f) else {
+                    return String::new();
+                };
                 if ft == "list" && dt == "name" {
                     let uo = alloc::format!("use{f}");
-                    if self.cfg.optscope.contains_key(&uo) && !self.cfg.blx_b(Some(&secnum), &uo, Some(&bee), Some(key)) {
+                    if self.cfg.optscope.contains_key(&uo)
+                        && !self.cfg.blx_b(Some(&secnum), &uo, Some(&bee), Some(key))
+                    {
                         return String::new();
                     }
                     let s = self.namestring(key, f, dl);
@@ -1136,13 +1390,20 @@ impl Biber<'_> {
                     if ft == "list" {
                         process_sort_attributes(&self.liststring(key, f, true), attrs)
                     } else {
-                        process_sort_attributes(&normalise_string_sort(&self.cfg, &v.str(), f), attrs)
+                        process_sort_attributes(
+                            &normalise_string_sort(&self.cfg, &v.str(), f),
+                            attrs,
+                        )
                     }
                 } else if ft == "field" && (dt == "literal" || dt == "key") {
                     process_sort_attributes(&normalise_string_sort(&self.cfg, &v.str(), f), attrs)
                 } else if ft == "field" && (dt == "integer" || dt == "datepart") {
                     let mut s = v.str();
-                    if isroman(&nfkd(&s)) && !self.cfg.blx_b(Some(&secnum), "noroman", Some(&bee), Some(key)) {
+                    if isroman(&nfkd(&s))
+                        && !self
+                            .cfg
+                            .blx_b(Some(&secnum), "noroman", Some(&bee), Some(key))
+                    {
                         s = roman2int(&nfkd(&s)).to_string();
                     }
                     if let Some(n) = crate::unicode::num(&s) {
@@ -1163,11 +1424,18 @@ impl Biber<'_> {
         let secnum = self.cur.clone();
         let be = self.be(key);
         let bee = be.borrow().etype();
-        let Some(names) = be.borrow().get(field).and_then(|v| v.as_names()) else { return String::new() };
+        let Some(names) = be.borrow().get(field).and_then(|v| v.as_names()) else {
+            return String::new();
+        };
         let names = names.borrow();
-        let mut useprefix = self.cfg.blx_s(Some(&secnum), "useprefix", Some(&bee), Some(key));
+        let mut useprefix = self
+            .cfg
+            .blx_s(Some(&secnum), "useprefix", Some(&bee), Some(key));
         let mut snk = dl.sortingnamekeytemplatename.clone();
-        if let Some(v) = self.cfg.blx(Some(&secnum), "sortingnamekeytemplatename", None, Some(key)) {
+        if let Some(v) = self
+            .cfg
+            .blx(Some(&secnum), "sortingnamekeytemplatename", None, Some(key))
+        {
             snk = v.s();
         }
         if let Some(v) = names.opt("sortingnamekeytemplatename") {
@@ -1175,7 +1443,12 @@ impl Biber<'_> {
         }
         let (vc, _, vs, _) = dl.vis(&names.id);
         let mut visible = vs;
-        if self.cfg.sortingnamekeytemplate.get(&snk).is_some_and(|t| t.visibility == "cite") {
+        if self
+            .cfg
+            .sortingnamekeytemplate
+            .get(&snk)
+            .is_some_and(|t| t.visibility == "cite")
+        {
             visible = vc;
         }
         if let Some(v) = names.opt("useprefix") {
@@ -1190,24 +1463,39 @@ impl Biber<'_> {
             if let Some(v) = n.opt("sortingnamekeytemplatename") {
                 snk = v;
             }
-            let Some(t) = self.cfg.sortingnamekeytemplate.get(&snk).cloned() else { continue };
+            let Some(t) = self.cfg.sortingnamekeytemplate.get(&snk).cloned() else {
+                continue;
+            };
             for kp in &t.template {
                 let mut kps = String::new();
                 for np in kp {
                     match np {
                         SnkPart::NamePart { value, use_, inits } => {
                             let useopt = use_.as_ref().map(|_| alloc::format!("use{value}"));
-                            let mut useval = useopt.as_ref().map_or(0.0, |o| numify(&self.cfg.blx_s(Some(&secnum), o, Some(&bee), Some(key))));
+                            let mut useval = useopt.as_ref().map_or(0.0, |o| {
+                                numify(&self.cfg.blx_s(Some(&secnum), o, Some(&bee), Some(key)))
+                            });
                             if useopt.as_deref() == Some("useprefix") {
-                                useval = numify(&self.cfg.map_boolean("useprefix", &useprefix, true).unwrap_or_default());
+                                useval = numify(
+                                    &self
+                                        .cfg
+                                        .map_boolean("useprefix", &useprefix, true)
+                                        .unwrap_or_default(),
+                                );
                             }
                             let nps = n.namepart(value);
                             if !truthy(&nps) {
                                 continue;
                             }
-                            if useopt.is_none() || use_.as_deref().is_some_and(|u| numify(u) == useval) {
+                            if useopt.is_none()
+                                || use_.as_deref().is_some_and(|u| numify(u) == useval)
+                            {
                                 let x = if *inits {
-                                    let i = normalise_string_sort(&self.cfg, &n.initial(value).concat(), field);
+                                    let i = normalise_string_sort(
+                                        &self.cfg,
+                                        &n.initial(value).concat(),
+                                        field,
+                                    );
                                     pad(&i, self.secr().np_length(&alloc::format!("{value}-i")))
                                 } else {
                                     let i = normalise_string_sort(&self.cfg, &nps, field);
@@ -1222,7 +1510,9 @@ impl Biber<'_> {
                 s.push_str(&kps);
             }
         }
-        let mut nso = self.cfg.blx_b(Some(&secnum), "nosortothers", Some(&bee), Some(key));
+        let mut nso = self
+            .cfg
+            .blx_b(Some(&secnum), "nosortothers", Some(&bee), Some(key));
         if let Some(v) = names.opt("nosortothers") {
             nso = truthy(&v);
         }
@@ -1236,18 +1526,31 @@ impl Biber<'_> {
     fn liststring(&self, key: &str, field: &str, verbatim: bool) -> String {
         let be = self.be(key);
         let bee = be.borrow().etype();
-        let Some(l) = be.borrow().get(field).and_then(|v| v.as_list()) else { return String::new() };
+        let Some(l) = be.borrow().get(field).and_then(|v| v.as_list()) else {
+            return String::new();
+        };
         let mut items = l.borrow().clone();
         let mut trunc = false;
-        let maxi = self.cfg.blx_n(Some(&self.cur), "maxitems", Some(&bee), Some(key));
+        let maxi = self
+            .cfg
+            .blx_n(Some(&self.cur), "maxitems", Some(&bee), Some(key));
         if items.len() as i64 > maxi {
             trunc = true;
-            let mini = self.cfg.blx_n(Some(&self.cur), "minitems", Some(&bee), Some(key)).max(0) as usize;
+            let mini = self
+                .cfg
+                .blx_n(Some(&self.cur), "minitems", Some(&bee), Some(key))
+                .max(0) as usize;
             items.truncate(mini);
         }
         let mut s = items
             .iter()
-            .map(|i| if verbatim { strip_nosort(&self.cfg, i, field) } else { normalise_string_sort(&self.cfg, i, field) })
+            .map(|i| {
+                if verbatim {
+                    strip_nosort(&self.cfg, i, field)
+                } else {
+                    normalise_string_sort(&self.cfg, i, field)
+                }
+            })
             .collect::<Vec<_>>()
             .join("!");
         s = re(r"\s+\z").delete_all(&s);
@@ -1327,7 +1630,10 @@ fn match_indices(res: &[Regex], s: &str) -> Option<Vec<(String, usize)>> {
 /// Internals `_label_listdisambiguation`: per row, the disambiguated
 /// prefixes.
 fn label_listdisambiguation(strings: &[Vec<String>]) -> Vec<Vec<String>> {
-    let mut substr_map: Vec<Vec<i64>> = strings.iter().map(|r| r.iter().map(|_| 1).collect()).collect();
+    let mut substr_map: Vec<Vec<i64>> = strings
+        .iter()
+        .map(|r| r.iter().map(|_| 1).collect())
+        .collect();
     let mut data: Vec<Option<Vec<String>>> = strings.iter().map(|_| None).collect();
     let mut name_map: BTreeMap<usize, usize> = BTreeMap::new();
     type Keys = BTreeMap<String, (Vec<usize>, Vec<String>)>;
@@ -1337,7 +1643,11 @@ fn label_listdisambiguation(strings: &[Vec<String>]) -> Vec<Vec<String>> {
             if data[i].is_some() {
                 continue;
             }
-            let s: Vec<String> = row.iter().enumerate().map(|(j, x)| gc_substr(x, 0, Some(sm[i][j]))).collect();
+            let s: Vec<String> = row
+                .iter()
+                .enumerate()
+                .map(|(j, x)| gc_substr(x, 0, Some(sm[i][j])))
+                .collect();
             let e = keys.entry(s.concat()).or_default();
             e.0.push(i);
             e.1 = s;
@@ -1362,10 +1672,18 @@ fn label_listdisambiguation(strings: &[Vec<String>]) -> Vec<Vec<String>> {
                 data[ai[0]] = Some(ast[0].iter().map(|x| gc_substr(x, 0, Some(1))).collect());
             } else {
                 for i in 0..ast.len() {
-                    let check: Vec<&Vec<String>> = ast.iter().enumerate().filter(|(j, x)| *j != i && **x != ast[i]).map(|(_, x)| x).collect();
+                    let check: Vec<&Vec<String>> = ast
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, x)| *j != i && **x != ast[i])
+                        .map(|(_, x)| x)
+                        .collect();
                     for j in 0..ast[0].len() {
                         let v = ast[i].get(j).cloned().unwrap_or_default();
-                        if !check.iter().any(|c| c.get(j).cloned().unwrap_or_default() == v) {
+                        if !check
+                            .iter()
+                            .any(|c| c.get(j).cloned().unwrap_or_default() == v)
+                        {
                             name_map.insert(ai[i], j);
                             break;
                         }
@@ -1382,4 +1700,3 @@ fn label_listdisambiguation(strings: &[Vec<String>]) -> Vec<Vec<String>> {
     }
     data.into_iter().map(Option::unwrap_or_default).collect()
 }
-

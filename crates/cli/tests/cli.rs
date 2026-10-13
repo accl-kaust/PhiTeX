@@ -459,7 +459,9 @@ fn build_to_the_fixpoint() {
 #[test]
 fn build_biblatex_with_native_biber() {
     if !have("latex") || !have("biber") {
-        eprintln!("build_biblatex_with_native_biber: no latex/biber here to compare with: not checked");
+        eprintln!(
+            "build_biblatex_with_native_biber: no latex/biber here to compare with: not checked"
+        );
         return;
     }
     let _one = one();
@@ -473,7 +475,13 @@ fn build_biblatex_with_native_biber() {
         }
     }
     let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &ours)
-        .args(["build", "-v", "--output-format", "dvi", &format!("{name}.tex")])
+        .args([
+            "build",
+            "-v",
+            "--output-format",
+            "dvi",
+            &format!("{name}.tex"),
+        ])
         .output()
         .expect("phitex runs");
     let errs = String::from_utf8_lossy(&out.stderr);
@@ -488,7 +496,10 @@ fn build_biblatex_with_native_biber() {
             .output();
     };
     latex(&theirs);
-    let _ = Command::new("biber").args(["--quiet", name]).current_dir(&theirs).output();
+    let _ = Command::new("biber")
+        .args(["--quiet", name])
+        .current_dir(&theirs)
+        .output();
     latex(&theirs);
     latex(&theirs);
     let a = std::fs::read(ours.join(format!("{name}.bbl"))).ok();

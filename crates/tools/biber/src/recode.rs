@@ -31,7 +31,8 @@ pub struct Recode {
 impl Recode {
     pub fn new(set: &str) -> Recode {
         let doc = crate::xml::parse(DATA).expect("recode data");
-        let mut maps: BTreeMap<&'static str, (BTreeMap<Vec<char>, String>, Vec<Vec<char>>)> = BTreeMap::new();
+        let mut maps: BTreeMap<&'static str, (BTreeMap<Vec<char>, String>, Vec<Vec<char>>)> =
+            BTreeMap::new();
         let excl: Vec<String> = doc
             .kid("decode_exclude")
             .map(|d| d.kids("char").map(|c| unicode::nfd(&c.text)).collect())
@@ -46,8 +47,13 @@ impl Recode {
                 }
                 present = true;
                 for map in maps_el.kids("map") {
-                    let (Some(f), Some(to)) = (map.kid("from"), map.kid("to")) else { continue };
-                    m.insert(unicode::nfd(&f.text).chars().collect(), unicode::nfd(&to.text));
+                    let (Some(f), Some(to)) = (map.kid("from"), map.kid("to")) else {
+                        continue;
+                    };
+                    m.insert(
+                        unicode::nfd(&f.text).chars().collect(),
+                        unicode::nfd(&to.text),
+                    );
                 }
             }
             for e in &excl {
@@ -97,7 +103,12 @@ impl Recode {
         });
         // ([^{]\\\w)([;,.:%]) -> $1{}$2
         t = subst(&t, |t, p| {
-            if p + 3 < t.len() + 0 && t[p] != '{' && t[p + 1] == '\\' && is_word(t[p + 2]) && matches!(t[p + 3], ';' | ',' | '.' | ':' | '%') {
+            if p + 3 < t.len() + 0
+                && t[p] != '{'
+                && t[p + 1] == '\\'
+                && is_word(t[p + 2])
+                && matches!(t[p + 3], ';' | ',' | '.' | ':' | '%')
+            {
                 let mut o: String = t[p..p + 3].iter().collect();
                 o.push_str("{}");
                 o.push(t[p + 3]);
@@ -106,8 +117,12 @@ impl Recode {
             None
         });
         for ty in TYPES {
-            let Some((map, keys)) = self.maps.get(ty) else { continue };
-            let lit = |t: &[char], p: usize, k: &[char]| t.len() >= p + k.len() && &t[p..p + k.len()] == k;
+            let Some((map, keys)) = self.maps.get(ty) else {
+                continue;
+            };
+            let lit = |t: &[char], p: usize, k: &[char]| {
+                t.len() >= p + k.len() && &t[p..p + k.len()] == k
+            };
             match ty {
                 "negatedsymbols" => {
                     t = subst(&t, |t, p| {
@@ -116,11 +131,19 @@ impl Recode {
                             return None;
                         }
                         let q = p + pre.len();
-                        keys.iter().find(|k| lit(t, q, k)).map(|k| (q + k.len(), map[k].clone()))
+                        keys.iter()
+                            .find(|k| lit(t, q, k))
+                            .map(|k| (q + k.len(), map[k].clone()))
                     });
                 }
                 "superscripts" | "cmdsuperscripts" => {
-                    let pre: Vec<char> = if ty == "superscripts" { "\\textsuperscript{" } else { "\\textsuperscript{\\" }.chars().collect();
+                    let pre: Vec<char> = if ty == "superscripts" {
+                        "\\textsuperscript{"
+                    } else {
+                        "\\textsuperscript{\\"
+                    }
+                    .chars()
+                    .collect();
                     t = subst(&t, |t, p| {
                         if !lit(t, p, &pre) {
                             return None;
@@ -142,7 +165,9 @@ impl Recode {
                         }
                         let q = p + pre.len();
                         let (a, b) = (*t.get(q)?, *t.get(q + 1)?);
-                        if !(matches!(a, '2'..='9' | 'A' | 'F') && (b.is_ascii_digit() || ('A'..='F').contains(&b))) {
+                        if !(matches!(a, '2'..='9' | 'A' | 'F')
+                            && (b.is_ascii_digit() || ('A'..='F').contains(&b)))
+                        {
                             return None;
                         }
                         if t.get(q + 2) != Some(&'}') {
@@ -165,7 +190,11 @@ impl Recode {
                             }
                             let e = q + k.len();
                             // (?:\{\}|\s+|\b)  or  (?: \{\}|\s+|\b)
-                            let br: &[char] = if space_brace { &[' ', '{', '}'] } else { &['{', '}'] };
+                            let br: &[char] = if space_brace {
+                                &[' ', '{', '}']
+                            } else {
+                                &['{', '}']
+                            };
                             if lit(t, e, br) {
                                 return Some((e + br.len(), map[k].clone()));
                             }
@@ -209,13 +238,23 @@ impl Recode {
             Some((p + 2 + n, g0.into()))
         });
         let mut s: String = t.iter().collect();
-        s = s.replace('\x1f', "{").replace('\x1e', "}").replace('\x0f', "{").replace('\x0e', "}");
+        s = s
+            .replace('\x1f', "{")
+            .replace('\x1e', "}")
+            .replace('\x0f', "{")
+            .replace('\x0e', "}");
         s = s.replace("ı\u{301}", "i\u{301}");
         unicode::nfd(&s)
     }
 
-    fn diacritics(&self, t0: &[char], map: &BTreeMap<Vec<char>, String>, keys: &[Vec<char>]) -> Vec<char> {
-        let lit = |t: &[char], p: usize, k: &[char]| t.len() >= p + k.len() && &t[p..p + k.len()] == k;
+    fn diacritics(
+        &self,
+        t0: &[char],
+        map: &BTreeMap<Vec<char>, String>,
+        keys: &[Vec<char>],
+    ) -> Vec<char> {
+        let lit =
+            |t: &[char], p: usize, k: &[char]| t.len() >= p + k.len() && &t[p..p + k.len()] == k;
         // 1: {X} not after \<diacritic>  ->  \x0f X \x0e
         let t = subst(t0, |t, p| {
             if t[p] != '{' {
@@ -230,7 +269,10 @@ impl Recode {
             }
             // preceded by \ + some key
             for k in keys {
-                if p >= k.len() + 1 && &t[p - k.len()..p] == k.as_slice() && t[p - k.len() - 1] == '\\' {
+                if p >= k.len() + 1
+                    && &t[p - k.len()..p] == k.as_slice()
+                    && t[p - k.len() - 1] == '\\'
+                {
                     return None;
                 }
             }
@@ -331,7 +373,11 @@ impl Recode {
                 loop {
                     let spaced = s > e;
                     if let Some(&c) = t.get(s) {
-                        let ok = if !ends_letter || spaced { is_l(c) } else { !c.is_ascii_alphabetic() };
+                        let ok = if !ends_letter || spaced {
+                            is_l(c)
+                        } else {
+                            !c.is_ascii_alphabetic()
+                        };
                         if ok {
                             let mut m = s + 1;
                             while m < t.len() && is_m(t[m]) {

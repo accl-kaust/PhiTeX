@@ -84,11 +84,7 @@ pub struct Outcome {
 impl Outcome {
     /// biber's exit status: 2 on a fatal error, else 0.
     pub fn status(&self) -> i32 {
-        if self.bbl.is_none() {
-            2
-        } else {
-            0
-        }
+        if self.bbl.is_none() { 2 } else { 0 }
     }
 }
 
@@ -114,5 +110,11 @@ pub fn run(bcf: &[u8], files: &mut dyn Files) -> Outcome {
     }
     let mut warnings = b.warnings.clone();
     warnings.extend(b.bt_warnings.iter().cloned());
-    Outcome { bbl, blg, warnings, errors: b.errors.clone(), unsupported: b.unsupported.clone() }
+    Outcome {
+        bbl,
+        blg,
+        warnings,
+        errors: b.errors.clone(),
+        unsupported: b.unsupported.clone(),
+    }
 }
