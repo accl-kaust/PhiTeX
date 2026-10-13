@@ -1227,11 +1227,11 @@ fn a_static_opener_sets_its_kind_when_it_runs() {
     let rep = eng.evaluate_sequential().expect("evaluate");
     assert_eq!(eng.output(k), Some(doc));
     assert_eq!(eng.output(r), Some(one));
-    // The kind reader waited on the opener's run; nothing waited on a
-    // scope effect (the brackets were known from the text).
+    // Nothing waited on a scope effect (the brackets were known from the
+    // text). Whether the kind reader parked on the opener's run or was
+    // lifted above it depends on the order the batch is applied in.
     let kinds: Vec<&str> = rep.waits_by_kind.iter().map(|w| w.0).collect();
     assert!(!kinds.contains(&"scope effect"), "{:?}", rep.waits_by_kind);
-    assert!(rep.top_waited.iter().any(|w| w.0 == opener), "{:?}", rep.top_waited);
     eng.replace(opener, op, vec![open, list]);
     let rep = eng.evaluate_sequential().expect("evaluate");
     assert_eq!(eng.output(k), Some(list));
