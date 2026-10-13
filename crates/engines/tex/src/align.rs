@@ -1,8 +1,9 @@
 //! Alignment (§768–§812): `\halign` as groups. The whole alignment is a
 //! group whose list holds the rows; each entry is a group of its own
 //! whose kind carries the row so far. The preamble is the field
-//! `align:<id>`; `align_state` is the field `align:state`, kept only
-//! while an alignment is open (`align:open`).
+//! `align:<id>`; `align_state` (§309) and the alignments open are the
+//! run's own (`Run::astate`, `Run::aopen`): an alignment never crosses
+//! a node.
 //!
 //! The kinds' extras: the alignment `["align", spec code, size, saved
 //! align_state]`; an entry `["cell", column, first column of its span,
@@ -88,24 +89,21 @@ impl Run<'_, '_> {
     // ---------------------------------------------------- align_state
 
     fn align_open(&mut self) -> R<bool> {
-        Ok(self.int("align:open")? > 0)
+        Ok(self.aopen > 0)
     }
 
     fn astate(&mut self) -> R<i64> {
         if let Some(s) = self.astate {
             return Ok(s);
         }
-        let s = self
-            .get("align:state")?
-            .map_or(1_000_000, |x| int_of(self.v, x));
+        // (run-local: a node begins outside every alignment, §324)
+        let s = 1_000_000;
         self.astate = Some(s);
         Ok(s)
     }
 
     pub(crate) fn set_astate(&mut self, s: i64) {
         self.astate = Some(s);
-        let x = self.v.int(s);
-        self.set("align:state", x, true);
     }
 
     /// The end of a u template (§324): `align_state` becomes 0.
@@ -188,8 +186,7 @@ impl Run<'_, '_> {
         } else {
             1_000_000
         };
-        let open = self.int("align:open")?;
-        self.set("align:open", v.int(open + 1), true);
+        self.aopen += 1;
         self.set_astate(-1_000_000);
         let spec = if self.scan_keyword("to")? {
             (0, self.scan_normal_dimen()?)
@@ -553,8 +550,7 @@ impl Run<'_, '_> {
         let out = set_alignment(list, &proto, true, 0, &view);
         let pd = self.prev_depth(md)?;
         let outer = self.close_group(md)?;
-        let open = self.int("align:open")?;
-        self.set("align:open", v.int((open - 1).max(0)), true);
+        self.aopen = (self.aopen - 1).max(0);
         self.set_astate(saved);
         for n in &out {
             let y = nodes::encode(v, n, &side);
