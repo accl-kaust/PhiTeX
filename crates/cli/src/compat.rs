@@ -223,6 +223,7 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         // job, as TeX's does when its standard input is at its end)
         threads,
         exact_pdf: false,
+        spec: None,
         synctex,
         recorder,
         shell_escape,
