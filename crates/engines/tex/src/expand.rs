@@ -8,7 +8,7 @@ use phitex_defuse::Value;
 
 use crate::print;
 use crate::run::{R, Run};
-use crate::val::{MATCH_CAT, Macro, Mean, OUT_PARAM_CAT, Tok, cmd, int_of, str_of};
+use crate::val::{MATCH_CAT, Macro, Mean, Tok, cmd, int_of, str_of};
 
 // §489
 pub(crate) const IF_CODE: u8 = 1;
@@ -193,8 +193,13 @@ impl Run<'_, '_> {
     /// its arguments substituted is built in another, then pushed as one
     /// shared list (one allocation a call).
     pub(crate) fn macro_call(&mut self) -> R<()> {
-        let Mean::Macro(m) = self.cur_mean()? else {
-            return Ok(());
+        let m = if let Some(m) = self.cur_macro() {
+            m
+        } else {
+            let Mean::Macro(m) = self.cur_mean()? else {
+                return Ok(());
+            };
+            m
         };
         if m.params.is_empty() {
             // no arguments: the body is read in place (§390); a body
@@ -211,16 +216,14 @@ impl Run<'_, '_> {
             let MacroBufs { args, bounds, .. } = &mut bufs;
             self.input.pop_spent();
             let start = self.input.arena.begin();
-            for t in m.body.iter() {
-                if let Some(x) = t.as_char()
-                    && x >> 21 == u32::from(OUT_PARAM_CAT)
+            for s in &*m.segs {
+                self.input
+                    .arena
+                    .extend(&m.body[s.lo as usize..s.hi as usize]);
+                if s.param != 0
+                    && let Some(&(lo, hi)) = bounds.get(usize::from(s.param) - 1)
                 {
-                    let k = usize::try_from(x & 0x1F_FFFF).unwrap_or(1);
-                    if let Some(&(lo, hi)) = bounds.get(k.wrapping_sub(1)) {
-                        self.input.arena.extend(&args[lo..hi]);
-                    }
-                } else {
-                    self.input.arena.push(*t);
+                    self.input.arena.extend(&args[lo..hi]);
                 }
             }
             let range = self.input.arena.finish(start);

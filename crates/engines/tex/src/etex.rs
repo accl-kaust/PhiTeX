@@ -934,11 +934,7 @@ fn read_line(r: &mut Run<'_, '_>, global: bool) -> R<()> {
         // §484, as `\read` (a build has no terminal: [`Run::fatal`])
         return r.fatal("*** (cannot \\read from terminal in nonstop modes)");
     }
-    let m = Mean::Macro(Rc::new(Macro {
-        flags: 0,
-        params: Vec::new(),
-        body: body.into(),
-    }));
+    let m = Mean::Macro(Rc::new(Macro::new(0, Vec::new(), body.into())));
     r.define_cs(&p, &m, global);
     Ok(())
 }
