@@ -392,6 +392,28 @@ const QUOTERS: &[&str] = &[
 /// Commands that read a quantity named after them without assigning it.
 const READERS: &[&str] = &[
     "the",
+    // (the primitives that scan a value, §1057–§1061, §1103, §1072:
+    // a quantity after them is read, not assigned)
+    "penalty",
+    "kern",
+    "mkern",
+    "hskip",
+    "vskip",
+    "mskip",
+    "raise",
+    "lower",
+    "moveleft",
+    "moveright",
+    "char",
+    "mathchar",
+    "delimiter",
+    "accent",
+    "mathaccent",
+    "radical",
+    // (the kernel's commands that pass a value on to `\penalty` and
+    // `\vskip`)
+    "addpenalty",
+    "addvspace",
     "number",
     "romannumeral",
     "showthe",
