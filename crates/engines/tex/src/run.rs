@@ -372,6 +372,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.load_slow(loc)
     }
 
+    #[inline(never)]
     fn load_slow(&mut self, loc: Loc) -> R<()> {
         let f = self.loc_field(loc);
         let r = self.cx.use_field(f);
@@ -881,7 +882,9 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn mean_of(&mut self, t: Tok) -> R<Mean> {
         match self.mean_loc(t) {
             Some(l) => {
-                self.load(l)?;
+                if !self.st.is_loaded(l) {
+                    self.load_slow(l)?;
+                }
                 Ok(self.st.mean_of(l, self.v))
             }
             None => Ok(Mean::Char(t.cat().unwrap_or(0), t.chr())),
@@ -1083,7 +1086,20 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// `get_next` (§341): the next token, its meaning not yet looked up.
     /// `None` at the end of all input.
+    #[inline]
     pub(crate) fn next_tok(&mut self) -> R<Option<Tok>> {
+        // (the common case: the next token of the list on top)
+        if let Some(Frame::Toks(t, p)) = self.frames.front_mut()
+            && let Some(&tok) = t.get(*p)
+        {
+            *p += 1;
+            return Ok(Some(tok));
+        }
+        self.next_tok_slow()
+    }
+
+    #[inline(never)]
+    fn next_tok_slow(&mut self) -> R<Option<Tok>> {
         loop {
             let Some(front) = self.frames.front_mut() else {
                 if self.pull()? {
@@ -1416,7 +1432,32 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// `get_next` with the meaning (§357–§358).
+    #[inline]
     pub(crate) fn get_next(&mut self) -> R<bool> {
+        // (the common case: a token of the list on top that is not an
+        // internal marker, and no alignment entry to watch for)
+        if let Some(Frame::Toks(t, p)) = self.frames.front()
+            && let Some(&tok) = t.get(*p)
+            && tok.as_cs().is_none_or(|n| !n.frozen())
+        {
+            if let Some(Frame::Toks(_, p)) = self.frames.front_mut() {
+                *p += 1;
+            }
+            self.set_cur(tok)?;
+            if matches!(
+                self.cur.cmd,
+                cmd::LEFT_BRACE | cmd::RIGHT_BRACE | cmd::TAB_MARK | cmd::CAR_RET
+            ) && self.align_token()?
+            {
+                return self.get_next_slow();
+            }
+            return Ok(true);
+        }
+        self.get_next_slow()
+    }
+
+    #[inline(never)]
+    fn get_next_slow(&mut self) -> R<bool> {
         loop {
             let t = loop {
                 let Some(t) = self.next_tok()? else {
@@ -1455,7 +1496,11 @@ impl<'c, 'a> Run<'c, 'a> {
             if !self.get_next_rest(t)? {
                 return Ok(false);
             }
-            if self.align_token()? {
+            if matches!(
+                self.cur.cmd,
+                cmd::LEFT_BRACE | cmd::RIGHT_BRACE | cmd::TAB_MARK | cmd::CAR_RET
+            ) && self.align_token()?
+            {
                 continue;
             }
             return Ok(true);
