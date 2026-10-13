@@ -237,12 +237,14 @@ impl Census {
 
 /// The census table, one row a document, and its causes.
 pub fn census_table(rows: &[Census]) -> String {
+    use std::fmt::Write as _;
     let mut t = String::from(
         "doc | cp cold | cp edit | step links | runs/node cold | runs/node edit | rounds cold | rounds edit | undeclared | violations | edit nodes | edit page steps\n",
     );
     for r in rows {
-        t.push_str(&format!(
-            "{} | {} | {} | {} | {:.2} | {:.2} | {} | {} | {} | {} | {} | {}\n",
+        let _ = writeln!(
+            t,
+            "{} | {} | {} | {} | {:.2} | {:.2} | {} | {} | {} | {} | {} | {}",
             r.name,
             r.cold_cp,
             r.edit_cp,
@@ -255,10 +257,10 @@ pub fn census_table(rows: &[Census]) -> String {
             r.violations,
             r.edit_nodes,
             r.edit_page_steps
-        ));
+        );
     }
     for r in rows {
-        t.push_str(&format!("{}: {}\n", r.name, r.causes));
+        let _ = writeln!(t, "{}: {}", r.name, r.causes);
     }
     t
 }
