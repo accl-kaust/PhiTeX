@@ -44,13 +44,8 @@ impl Piece {
     pub(crate) fn args(&self, v: &Values, doc_name: &str) -> Vec<ValueId> {
         let starts = self.s == 0 || self.text.as_bytes()[self.s - 1] == b'\n';
         let name = v.str(self.file.as_deref().unwrap_or(doc_name));
-        let mut a = crate::run::slice_args_in_file(
-            v,
-            &self.text[self.s..self.e],
-            starts,
-            name,
-            self.s,
-        );
+        let mut a =
+            crate::run::slice_args_in_file(v, &self.text[self.s..self.e], starts, name, self.s);
         a[1] = v.int(3);
         a.push(crate::hints::hint_arg(v, &self.hints, self.s));
         a
@@ -86,9 +81,15 @@ fn target(piece: &str) -> Option<String> {
 /// Whether a text may have its `\input`s sliced: it does not redefine
 /// `\input` itself.
 fn plain_input(text: &str) -> bool {
-    !["\\def\\input", "\\let\\input", "\\edef\\input", "\\gdef\\input", "\\xdef\\input"]
-        .iter()
-        .any(|d| text.contains(d))
+    ![
+        "\\def\\input",
+        "\\let\\input",
+        "\\edef\\input",
+        "\\gdef\\input",
+        "\\xdef\\input",
+    ]
+    .iter()
+    .any(|d| text.contains(d))
 }
 
 /// Whether a found file is a document's, sliceable into regions.
@@ -114,7 +115,18 @@ pub(crate) fn pieces(
     let finder = finder.filter(|_| !defs.is_defined("input") && plain_input(text));
     let mut out = Vec::new();
     let mut seen = Vec::new();
-    add(v, Arc::from(text), None, hints, defs, finder, 0, &mut seen, read, &mut out);
+    add(
+        v,
+        Arc::from(text),
+        None,
+        hints,
+        defs,
+        finder,
+        0,
+        &mut seen,
+        read,
+        &mut out,
+    );
     out
 }
 
