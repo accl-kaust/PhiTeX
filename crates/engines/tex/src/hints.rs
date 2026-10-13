@@ -672,6 +672,17 @@ impl TextHints {
                 h
             }
             (Some(h), None) => h,
+            // (a slice of blanks only: a space in vertical mode does
+            // nothing, §1045)
+            (None, _) if end != usize::MAX && off < end => Hint {
+                bound: Some(Bound {
+                    state: Some(Vec::new()),
+                    no_scope: true,
+                    ..Bound::default()
+                }),
+                cause: "blanks".to_owned(),
+                excerpt: String::new(),
+            },
             (None, _) => Hint::any("end of text", ""),
         }
     }
@@ -904,7 +915,26 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             let a = &p.atoms[k];
             let horizontal = match a.kind {
                 AtomKind::Char(_) | AtomKind::Verb => true,
-                AtomKind::Cs => starts_par(a.name(text)),
+                AtomKind::Cs => {
+                    let name = a.name(text);
+                    // (a macro, or a name undefined here, right before a
+                    // horizontal atom: its run may start the paragraph,
+                    // `\hello\ world.`, so the paragraph starts at it)
+                    starts_par(name)
+                        || (!crate::prims::PRIMS.iter().any(|q| q.0 == name)
+                            && !loaders.contains(&k)
+                            && {
+                                let mut j = k + 1;
+                                while p.atoms.get(j).is_some_and(|x| x.kind == AtomKind::Space) {
+                                    j += 1;
+                                }
+                                p.atoms.get(j).is_some_and(|x| match x.kind {
+                                    AtomKind::Char(_) | AtomKind::Verb => true,
+                                    AtomKind::Cs => starts_par(x.name(text)),
+                                    _ => false,
+                                })
+                            })
+                }
                 _ => false,
             };
             // (an operand a macro is guessed to read still starts one: the
