@@ -538,6 +538,10 @@ pub struct Stats {
     pub gated: u64,
     /// The version of the text the result is for ([`Build::version`]).
     pub version: u64,
+    /// Scheduler steps, and the nodes run in them summed: `ready_mean`
+    /// is the mean batch.
+    pub steps: u64,
+    pub ready_total: u64,
 }
 
 /// A round's counters (`PHITEX_TEX_TIME`).
@@ -564,6 +568,14 @@ fn print_round(t: std::time::Duration, r: &Report) {
 }
 
 impl Stats {
+    /// The mean number of nodes run per scheduler step.
+    #[must_use]
+    pub fn ready_mean(&self) -> f64 {
+        #[allow(clippy::cast_precision_loss)]
+        let m = self.ready_total as f64 / self.steps.max(1) as f64;
+        m
+    }
+
     /// The executor's counters of one evaluation begun at `c0`.
     fn add_exec(&mut self, ex: &crate::exec::Threads, c0: Option<u64>, eng: &Engine) {
         if let (Some(a), Some(b)) = (c0, crate::exec::clock().now()) {
@@ -590,6 +602,8 @@ impl Stats {
         self.pending_waits += r.pending_waits;
         self.stops += r.stops;
         self.version = r.version;
+        self.steps += r.steps;
+        self.ready_total += r.ready_total;
         self.page_steps +=
             Report::by_op(&r.runs_by_op, "pagestep") + Report::by_op(&r.runs_by_op, "pagestep_any");
         self.page_steps_any += Report::by_op(&r.runs_by_op, "pagestep_any");
@@ -1617,7 +1631,8 @@ impl Build {
         out
     }
 
-    /// The critical chain in full, one line per link, last node first:
+    /// The critical chain in full, one line per link, last node first,
+    /// with each node's height:
     /// the link's cause with what it names (the site that defined the
     /// field read, the node waited on, the creator, the height a raise
     /// went to) and the node, each as its operation and text.
@@ -1629,10 +1644,10 @@ impl Build {
         let d = |n: Option<phitex_defuse::NodeId>| {
             n.map_or_else(|| "(unit start)".to_owned(), |n| describe(eng, n))
         };
-        eng.critical_chain()
+        eng.critical_chain_heights()
             .into_iter()
             .enumerate()
-            .map(|(i, (n, c))| {
+            .map(|(i, (n, h, c))| {
                 let why = match c {
                     Cause::Rebind { field, to, .. } => {
                         format!("Rebind {} to [{}]", field_name(v, field), d(to))
@@ -1661,7 +1676,7 @@ impl Build {
                     ),
                     Cause::Raised { to } => format!("Raised to height {to}"),
                 };
-                format!("{i:4} {why}\n       node [{}]", describe(eng, n))
+                format!("{i:4} h{h:<5} {why}\n       node [{}]", describe(eng, n))
             })
             .collect()
     }
