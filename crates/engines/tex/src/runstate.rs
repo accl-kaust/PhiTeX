@@ -297,7 +297,17 @@ impl State {
         self.slot(loc).field = Some(f);
     }
 
+    /// The command code and modifier of `loc` when it is loaded and
+    /// decoded (one slot access, one flag test); `None` otherwise.
     #[inline]
+    pub(crate) fn cmd_chr_fast(&self, loc: Loc) -> Option<(u8, i32)> {
+        if loc & SPILL != 0 {
+            return None;
+        }
+        let s = self.eq.get(loc as usize)?;
+        (s.e.flags & (LOADED | CC) == (LOADED | CC)).then_some((s.e.cmd, s.e.chr))
+    }
+
     pub(crate) fn is_loaded(&self, loc: Loc) -> bool {
         self.slot_ref(loc).is_some_and(|s| s.e.flags & LOADED != 0)
     }
@@ -385,6 +395,19 @@ impl State {
                 let x = self.id_of(loc, v);
                 crate::val::glue_of(v, x)
             }
+        }
+    }
+
+    /// The macro in loaded `loc`, when it holds one already decoded.
+    #[inline]
+    pub(crate) fn macro_at(&self, loc: Loc) -> Option<Rc<crate::val::Macro>> {
+        let s = self.slot_ref(loc)?;
+        if s.e.flags & LOADED == 0 {
+            return None;
+        }
+        match &s.e.val {
+            Native::Mean(Mean::Macro(m)) => Some(m.clone()),
+            _ => None,
         }
     }
 

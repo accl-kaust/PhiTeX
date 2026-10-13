@@ -825,7 +825,13 @@ impl Run<'_, '_> {
                 }
                 self.x_token()?;
             } else {
-                self.get_token()?;
+                // (§473: no meaning is needed here except a control
+                // sequence's in a `\def`, for §479's `#`; braces count
+                // by token alone)
+                let tok = self.get_token_tok()?;
+                if macro_def && tok.is_cs_or_active() {
+                    self.set_cur_flag(tok);
+                }
             }
             let tok = self.cur.tok;
             if !tok.is_cs_or_active() && matches!(tok.cat(), Some(1 | 2)) {
@@ -837,7 +843,13 @@ impl Run<'_, '_> {
                         break;
                     }
                 }
-            } else if self.cur.cmd == cmd::MAC_PARAM && macro_def {
+            } else if macro_def
+                && if tok.is_cs_or_active() {
+                    self.cur.cmd == cmd::MAC_PARAM
+                } else {
+                    tok.cat() == Some(6)
+                }
+            {
                 // §479
                 let s = tok;
                 if xpand {

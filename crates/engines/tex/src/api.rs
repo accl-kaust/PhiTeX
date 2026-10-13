@@ -691,11 +691,13 @@ pub const PRELUDE_LAYOUT: u32 = 3;
 /// identity.
 const PRELUDE_MAGIC: &[u8; 8] = b"PHITEXPR";
 
-/// The vendored engine's identity: a hash of its sources, so vendoring
-/// another engine invalidates every exported prelude.
+/// The vendored engine's identity: a hash of its sources and of this
+/// crate's (`build.rs`), so vendoring another engine or changing how
+/// this crate encodes its state invalidates every exported prelude.
 fn engine_identity() -> u64 {
     static ID: OnceLock<u64> = OnceLock::new();
     *ID.get_or_init(|| {
+        let own = u64::from_str_radix(env!("PHITEX_TEX_SRC_HASH"), 16).unwrap_or(0);
         let srcs: [&[u8]; 9] = [
             include_bytes!("../../../vendor/defuse/Cargo.toml"),
             include_bytes!("../../../vendor/defuse/src/lib.rs"),
@@ -707,7 +709,7 @@ fn engine_identity() -> u64 {
             include_bytes!("../../../vendor/defuse/src/hash.rs"),
             include_bytes!("../../../vendor/defuse/src/obs.rs"),
         ];
-        let mut h = 0u64;
+        let mut h = own;
         for s in srcs {
             h = phitex_defuse::hash_bytes(h ^ 0x9e37_79b9, s);
         }
