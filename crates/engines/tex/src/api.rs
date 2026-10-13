@@ -965,6 +965,32 @@ impl Graph {
         out
     }
 
+    /// Supplies file `name` to the environment now, through the finder,
+    /// unless it is supplied, absent or written already: a read of it
+    /// then hits on the run's first attempt instead of stopping the run
+    /// and costing a round (every file a previous build of this prelude
+    /// or document read is supplied up front, [`Build::with`]).
+    fn supply(&mut self, finder: &Finder, name: &str) {
+        let f = self.eng.values().field(&format!("file:{name}"));
+        if self.files.iter().any(|(g, _)| *g == f)
+            || self.absent.contains(&f)
+            || self.written.iter().any(|w| w == name)
+        {
+            return;
+        }
+        let found = finder(name);
+        self.queries.push((name.to_owned(), found.is_some()));
+        let v = self.eng.values();
+        self.reads.push((name.to_owned(), file_hash(found.as_ref())));
+        if let Some((path, bytes)) = found {
+            let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+            let val = v.list(vec![v.str(&path), v.str(&text)]);
+            self.files.push((f, val));
+        } else {
+            self.absent.push(f);
+        }
+    }
+
     /// The names of the files the job opened for writing.
     fn opened(&self, unit: UnitId) -> Vec<String> {
         let v = self.eng.values();
@@ -1116,17 +1142,7 @@ impl Graph {
                     asked = true;
                     continue;
                 }
-                let found = finder(&name);
-                self.queries.push((name.clone(), found.is_some()));
-                let v = self.eng.values();
-                self.reads.push((name.clone(), file_hash(found.as_ref())));
-                if let Some((path, bytes)) = found {
-                    let text: String = bytes.iter().map(|&b| char::from(b)).collect();
-                    let val = v.list(vec![v.str(&path), v.str(&text)]);
-                    self.files.push((f, val));
-                } else {
-                    self.absent.push(f);
-                }
+                self.supply(finder, &name);
                 asked = true;
             }
             if !asked {
@@ -1279,6 +1295,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         .and_then(deserialise)
         .filter(|c| c.text_key == key)
         .map(Arc::new);
+    let mut known: Vec<String> = Vec::new();
     for c in given.into_iter().chain(candidates) {
         if c.reads
             .iter()
@@ -1286,10 +1303,26 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         {
             return c;
         }
+        // (a stale cache entry still names the files the prelude reads)
+        for (n, _) in &c.reads {
+            if !known.contains(n) {
+                known.push(n.clone());
+            }
+        }
     }
     let mut g = Graph::new(opts.time_limit, opts.threads);
     g.sched = opts.speculation.scheduler(opts.speculation_budget);
     let unit = g.eng.new_unit();
+    // the files a previous build of this prelude read, supplied before
+    // the first evaluation: no run stops on them, no round per file
+    for n in &known {
+        g.supply(finder, n);
+    }
+    if !known.is_empty() {
+        let env = g.environment(false);
+        g.eng.set_environment(env);
+        g.eng.set_environment_absent(g.absent.clone());
+    }
     let mut env: Vec<(String, ValueId)> = crate::val::initex(g.eng.values());
     for (name, x) in &env {
         let f = g.eng.values().field(name);
@@ -1432,6 +1465,16 @@ impl Build {
             g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
         }
         let unit = g.eng.new_unit();
+        // the files the format read (fonts, data) are supplied before the
+        // document's first evaluation: a run reading one never stops
+        for (n, _) in cached.reads.clone() {
+            g.supply(&opts.finder, &n);
+        }
+        if !cached.reads.is_empty() {
+            let env = g.environment(opts.fixpoint);
+            g.eng.set_environment(env);
+            g.eng.set_environment_absent(g.absent.clone());
+        }
         {
             let v = g.eng.values();
             let mut sets: Vec<(Field, ValueId)> = Vec::new();
