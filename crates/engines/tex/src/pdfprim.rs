@@ -2648,6 +2648,7 @@ fn xform_step(
     let Some(Node::Box(mut bx)) = nodes::decode(v, b, &mut side) else {
         return Ok(None);
     };
+    crate::pdfout::vf_for(r, &bx)?;
     let mut data = Vec::new();
     for w in side.whats.clone() {
         data.push(crate::pdfout::writer_whatsit(r, w)?);
