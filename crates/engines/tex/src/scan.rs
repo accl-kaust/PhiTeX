@@ -465,7 +465,7 @@ impl Run<'_, '_> {
 
     /// The `em` and `ex` of the current font (§558).
     fn font_param_cur(&mut self, k: i32) -> R<i32> {
-        let f = self.int("font")?;
+        let f = self.int("curfont")?;
         self.font_dimen(f, k)
     }
 
@@ -535,7 +535,7 @@ impl Run<'_, '_> {
     pub(crate) fn scan_font_ident(&mut self) -> R<i64> {
         self.skip_blanks_x()?;
         Ok(match self.cur.cmd {
-            cmd::DEF_FONT => self.int("font")?,
+            cmd::DEF_FONT => self.int("curfont")?,
             cmd::SET_FONT => i64::from(self.cur.chr),
             cmd::DEF_FAMILY => {
                 let m = self.cur.chr;

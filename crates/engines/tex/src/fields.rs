@@ -37,7 +37,7 @@ const STATIC: &[&str] = &[
     "deadcycles",
     "diags",
     "dvicomment",
-    "font",
+    "curfont",
     "fontcount",
     "ifstack",
     "inspen",

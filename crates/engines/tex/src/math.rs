@@ -309,7 +309,7 @@ impl Run<'_, '_> {
     /// shrank before it.
     fn pre_display_size(&mut self, last: Option<&BoxNode>) -> R<i32> {
         let Some(b) = last else { return Ok(-MAX_DIMEN) };
-        let f = self.int("font")?;
+        let f = self.int("curfont")?;
         let quad = self.font_dimen(f, 6)?;
         let view = self.font_view(&b.list)?;
         let mut v = b.shift + 2 * quad;
@@ -596,7 +596,7 @@ impl Run<'_, '_> {
             cmd::SPACER | cmd::NO_BOUNDARY => {}
             cmd::EX_SPACE => {
                 // §1041 `app_space` with space factor 1000
-                let f = u32::try_from(self.int("font")?).unwrap_or(0);
+                let f = u32::try_from(self.int("curfont")?).unwrap_or(0);
                 let g = self.space_glue(f, 1000, true)?;
                 let x = nodes::encode(v, &g, &Side::default());
                 self.append(md.lid, x);

@@ -432,7 +432,7 @@ impl Run<'_, '_> {
             cmd::SET_FONT => {
                 // §1217
                 let f = v.int(i64::from(self.cur.chr));
-                self.set("font", f, global);
+                self.set("curfont", f, global);
             }
             cmd::DEF => {
                 // §1218
