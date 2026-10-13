@@ -2098,8 +2098,16 @@ impl Build {
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             let (nodes, units, values) = self.sizes();
             let (node, use_) = Engine::record_sizes();
+            let rss = std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|t| {
+                    t.lines()
+                        .find_map(|l| l.strip_prefix("VmRSS:"))
+                        .map(|v| v.trim().to_owned())
+                })
+                .unwrap_or_default();
             eprintln!(
-                "sizes: {nodes} live nodes ({node} B), {units} live units, {values} values (use {use_} B)"
+                "sizes: {nodes} live nodes ({node} B), {units} live units, {values} values (use {use_} B), rss {rss}"
             );
         }
         // `PHITEX_CLAIMS=<text>`: the nodes whose slice holds the text,
