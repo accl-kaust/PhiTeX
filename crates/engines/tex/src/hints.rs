@@ -833,13 +833,21 @@ impl Analysis<'_> {
     /// Whether horizontal material at `a` may start a paragraph: it is
     /// in one only after a character or a command that started it.
     fn may_start_par(&self, a: usize) -> bool {
-        match self.prev(a) {
-            None => true,
-            Some(k) => match self.atoms()[k].kind {
-                AtomKind::Char(_) | AtomKind::Verb | AtomKind::Param(_) => false,
-                AtomKind::Cs => !starts_par(self.atoms()[k].name(self.text)),
-                _ => true,
-            },
+        let Some(mut k) = self.prev(a) else {
+            return true;
+        };
+        // (an operand an earlier command read, `\vsize=2.5in`, is not
+        // text: the command before it decides)
+        while self.claimed[k] {
+            match self.prev(k) {
+                Some(p) => k = p,
+                None => return true,
+            }
+        }
+        match self.atoms()[k].kind {
+            AtomKind::Char(_) | AtomKind::Verb | AtomKind::Param(_) => false,
+            AtomKind::Cs => !starts_par(self.atoms()[k].name(self.text)),
+            _ => true,
         }
     }
 
@@ -1100,9 +1108,23 @@ impl Analysis<'_> {
                 && (self.defs.active_chars() | self.prelude.active_chars()) >> (c as u32) & 1 == 1)
     }
 
+    /// Whether `name` is a format macro the text itself does not define:
+    /// its body is read for paragraph regions (`slice_info`) but not
+    /// trusted to bound what a call defines, since a definition outside
+    /// a bound ends the evaluation (the pass's closure over a kernel body
+    /// misses computed names, `\csname` and `\let` behind
+    /// `\@ifundefined`); such a call answers `Any` as before.
+    fn format_only(&self, name: &str) -> bool {
+        !self.defs.is_defined(name) && self.prelude.is_defined(name)
+    }
+
     /// A macro called by name (`\par` for a blank line, an active
     /// character).
     fn call_hint(&self, name: &str, b: &mut Bound, cause: &mut String) -> bool {
+        if self.format_only(name) {
+            *cause = format!("\\{name}: a format macro (its body is not a bound)");
+            return false;
+        }
         let set = self.defset(name);
         let field = match name.chars().next() {
             Some(c) if name.chars().count() == 1 && !c.is_alphabetic() && name != "par" => {
@@ -1231,6 +1253,10 @@ impl Analysis<'_> {
         }
         if LOOKTHROUGH.contains(&name) {
             *cause = format!("\\{name}: the command run here is computed");
+            return false;
+        }
+        if self.format_only(name) {
+            *cause = format!("\\{name}: a format macro (its body is not a bound)");
             return false;
         }
         let Some(&i) = self.item_of.get(&a) else {
@@ -1509,10 +1535,10 @@ pub(crate) fn text_hints(text: &str, kind: FileKind, defs: &Defs) -> Arc<TextHin
     t
 }
 
-/// The hint of the document slice beginning at byte `s` of `text`, as
+/// The hint of the document slice beginning at byte `s` of the text `t`
+/// analyses (looked up once per text by the caller), as
 /// the node's extra argument.
-pub(crate) fn hint_arg(v: &Values, text: &str, s: usize, defs: &Defs) -> ValueId {
-    let t = text_hints(text, FileKind::Document, defs);
+pub(crate) fn hint_arg(v: &Values, t: &TextHints, s: usize) -> ValueId {
     match t.slice_hint(s) {
         Some(h) => v.str(h),
         None => v.str(&Hint::any("slice not found", "").encode()),
@@ -1660,11 +1686,13 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
                     no_scope: true,
                     ..Bound::default()
                 };
-                // (a run that reaches a cell's end in an alignment, §789)
+                // (a run that reaches a cell's end in an alignment, §789:
+                // the template's v part runs there, and may hold a
+                // conditional, `if:`)
                 add_heads(
                     &mut b.state,
                     Some(&[
-                        "par:", "pg:", "lopen:", "box:", "lvlfix", "align", "badness",
+                        "par:", "pg:", "lopen:", "box:", "lvlfix", "align", "badness", "if:",
                     ]),
                 );
                 return Hint {
@@ -1846,7 +1874,14 @@ pub(crate) fn may_define(v: &Values, args: &[ValueId]) -> MayDefine {
     if std::env::var_os("PHITEX_HINTS").is_some() {
         let answer = match &h.bound {
             None => "Any".to_owned(),
-            Some(b) => format!("Prefixes(state + {:?} + {:?})", b.names, b.prefixes),
+            Some(b) => format!(
+                "Prefixes({} + {:?} + {:?})",
+                b.state
+                    .as_ref()
+                    .map_or_else(|| "every head".to_owned(), |st| st.join(" ")),
+                b.names,
+                b.prefixes
+            ),
         };
         eprintln!("hint {:?}: {answer} ({})", h.excerpt, h.cause);
     }
