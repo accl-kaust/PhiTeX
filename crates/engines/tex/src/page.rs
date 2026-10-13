@@ -51,7 +51,7 @@ impl Run<'_, '_> {
         let v = self.v;
         let mut counts = [0i32; 10];
         for (k, c) in counts.iter_mut().enumerate() {
-            *c = self.int32(&format!("count:{k}"))?;
+            *c = self.reg_int(0, k)?;
         }
         let mut j = 9;
         while j > 0 && counts[j] == 0 {
@@ -179,9 +179,9 @@ impl Run<'_, '_> {
         Ok(InsertClass {
             box_height_plus_depth: b.map(|b| nodes::box_dim(v, b, 3) + nodes::box_dim(v, b, 2)),
             box_is_hbox: b.is_some_and(|b| nodes::box_is_h(v, b)),
-            count: self.int32(&format!("count:{n}"))?,
-            dimen: self.int32(&format!("dimen:{n}"))?,
-            skip: crate::val::glue_of(v, self.get(&format!("skip:{n}"))?),
+            count: self.reg_int(0, n)?,
+            dimen: self.reg_int(1, n)?,
+            skip: crate::val::glue_of(v, self.reg(2, i32::from(n))?),
         })
     }
 
@@ -482,7 +482,7 @@ impl Run<'_, '_> {
         if j < MAX_PAGES {
             let mut cs = Vec::new();
             for k in 0..10 {
-                cs.push(v.int(self.int(&format!("count:{k}"))?));
+                cs.push(v.int(i64::from(self.reg_int(0, k)?)));
             }
             let counts = v.list(cs);
             if !self.pagefx_pub {
@@ -545,11 +545,7 @@ impl Run<'_, '_> {
             return;
         }
         for (k, &c) in xs.iter().enumerate() {
-            let cf = self
-                .ops
-                .fields
-                .get_at(v, self.cx.values_epoch(), &format!("count:{k}"));
-            let l = self.loc_of(cf);
+            let l = self.reg_loc(0, i32::try_from(k).unwrap_or(0));
             self.st.preload(l, Some(c));
         }
     }

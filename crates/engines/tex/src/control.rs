@@ -1037,7 +1037,7 @@ impl Run<'_, '_> {
                         let code = if c == u32::from(b'.') {
                             c
                         } else {
-                            u32::try_from(self.int(&format!("lc:{c}"))?).unwrap_or(0)
+                            u32::try_from(i64::from(self.code(0, c)?)).unwrap_or(0)
                         };
                         word.push(char::from_u32(code).unwrap_or('\0'));
                         digit_sensed = false;
@@ -1082,7 +1082,7 @@ impl Run<'_, '_> {
                         word.push('-');
                     } else {
                         let c = u32::try_from(self.cur.chr).unwrap_or(0);
-                        let lc = self.int(&format!("lc:{c}"))?;
+                        let lc = i64::from(self.code(0, c)?);
                         if lc != 0 {
                             word.push(
                                 char::from_u32(u32::try_from(lc).unwrap_or(0)).unwrap_or('?'),
@@ -1092,7 +1092,7 @@ impl Run<'_, '_> {
                 }
                 cmd::CHAR_NUM => {
                     let c = self.scan_char_num()?;
-                    let lc = self.int(&format!("lc:{c}"))?;
+                    let lc = i64::from(self.code(0, c)?);
                     if lc != 0 {
                         word.push(char::from_u32(u32::try_from(lc).unwrap_or(0)).unwrap_or('?'));
                     }

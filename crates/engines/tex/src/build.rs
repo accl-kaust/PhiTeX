@@ -727,7 +727,7 @@ impl Run<'_, '_> {
         chars_of(&list, &mut seen);
         for (c, x) in lc.iter_mut().enumerate() {
             if seen[c] {
-                *x = u16::try_from(self.int(&format!("lc:{c}"))?).unwrap_or(0);
+                *x = u16::try_from(i64::from(self.code(0, c)?)).unwrap_or(0);
             }
         }
         let uc_hyph = self.ipar(Par::uchyph)?;
@@ -1717,7 +1717,7 @@ impl Run<'_, '_> {
     /// only through "below 1000?", so with the old factor unknown it is
     /// kept as the update itself (`-s`), never read.
     fn adjust_sf(&mut self, _md: &Mode, ch: u32, sf: &mut i32) -> R<()> {
-        let s = self.int32(&format!("sf:{ch}"))?;
+        let s = self.code(2, ch)?;
         if s == 1000 {
             *sf = 1000;
         } else if s < 1000 {
