@@ -2218,6 +2218,19 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
             .filter(|h| !Hint::decode(h).bound.is_some_and(|b| b.no_scope))
             .count();
         eprintln!("slices: no_scope false: {open} of {}", slice_hints.len());
+        for (k, h) in slice_hints.iter().enumerate() {
+            let d = Hint::decode(h);
+            if !d.bound.as_ref().is_some_and(|b| b.no_scope) {
+                let (s, e) = t.slices[k];
+                eprintln!(
+                    "slices: scope {:?}: {} ({}, balanced {})",
+                    short(&text[s..e]),
+                    d.cause,
+                    if d.bound.is_some() { "bounded" } else { "any" },
+                    balanced(&an, text, s, e)
+                );
+            }
+        }
     }
     t.slice_hints = slice_hints;
     t
