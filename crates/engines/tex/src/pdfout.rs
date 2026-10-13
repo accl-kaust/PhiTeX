@@ -83,6 +83,48 @@ fn fold_back(r: &mut Run<'_, '_>, why: &str) {
     r.contribute("needs", v.seq_unit(e));
 }
 
+/// A document-level command (`\pdfinfo`, `\pdfcatalog`, `\pdfnames`,
+/// `\pdftrailer`, `\pdftrailerid`) an output routine runs: kept in the
+/// pages' accumulator ([`XPAGES`]) where it was run, and applied by the
+/// finish there, so that the step reads no writer state. True when it
+/// was kept (the caller does nothing more).
+pub(crate) fn doc_op(r: &mut Run<'_, '_>, kind: &str, args: &[ValueId]) -> R<bool> {
+    if r.param("pdfoutput")? <= 0 || crate::pdfrelaxed::on(r)? || !in_page_step(r) || folding(r)? {
+        return Ok(false);
+    }
+    let v = r.v;
+    let mut xs = vec![v.str(kind)];
+    xs.extend_from_slice(args);
+    r.contribute(XPAGES, v.seq_unit(v.list(xs)));
+    Ok(true)
+}
+
+/// A document-level command kept by [`doc_op`], applied to `st`.
+fn apply_doc_op(v: &Values, st: &mut PdfState, e: ValueId) {
+    let xs = list_of(v, e);
+    let text = |k: usize| {
+        xs.get(k)
+            .map(|&t| bytes_of(&str_of(v, t)))
+            .unwrap_or_default()
+    };
+    match xs.first().map(|&k| str_of(v, k)).as_deref() {
+        Some("info") => st.info(&text(1)),
+        Some("names") => st.names(&text(1)),
+        Some("trailer") => st.trailer(&text(1)),
+        Some("trailerid") => st.trailer_id(&text(1)),
+        Some("catalog") => {
+            let a = xs
+                .get(2)
+                .copied()
+                .filter(|&x| x != ValueId::UNIT)
+                .and_then(|x| action(v, x));
+            // (the step's run logged nothing: the error is the fold's)
+            let _ = st.catalog(&text(1), a.as_ref());
+        }
+        _ => {}
+    }
+}
+
 /// `pdftex_banner` of the oracle's pdfTeX.
 pub(crate) const BANNER: &str = "This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) kpathsea version 6.4.2";
 
@@ -1225,11 +1267,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
         .unwrap_or_else(PoisonError::into_inner)
         .get(&k)
         .cloned();
-    let xpages: Vec<u64> = v
-        .seq_to_vec(cx.acc_range(v.field(XPAGES), None)?)
-        .into_iter()
-        .map(|x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()))
-        .collect();
+    let xpages: Vec<ValueId> = v.seq_to_vec(cx.acc_range(v.field(XPAGES), None)?);
     let a = match start {
         Some(a) => a,
         None if xpages.is_empty() => return Ok(v.str("")),
@@ -1254,7 +1292,12 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
     let mut st = a.st.clone();
     let mut bytes = a.bytes.clone();
     let (mut replayed, mut shipped) = (0usize, 0usize);
-    for pk in xpages {
+    for x in xpages {
+        if v.as_int(x).is_none() {
+            apply_doc_op(v, &mut st, x);
+            continue;
+        }
+        let pk = u64::from_ne_bytes(int_of(v, x).to_ne_bytes());
         let Some(pc) = pieces()
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

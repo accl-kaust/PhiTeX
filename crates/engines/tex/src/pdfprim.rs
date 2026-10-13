@@ -2238,6 +2238,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 return Ok(());
             }
             let tb = bytes(&str_of(v, t));
+            if crate::pdfout::doc_op(r, "info", &[t])? {
+                return Ok(());
+            }
             let input = v.list(vec![s("info"), t]);
             crate::pdfout::command(r, input, &[], |st, _| st.info(&tb))?;
         }
@@ -2256,6 +2259,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             if crate::pdfrelaxed::on(r)? {
                 return Ok(());
             }
+            if crate::pdfout::doc_op(r, "catalog", &[t, oa])? {
+                return Ok(());
+            }
             let input = v.list(vec![s("catalog"), t, oa]);
             let err =
                 crate::pdfout::command(r, input, &[], |st, _| st.catalog(&tb, a.as_ref()).err())?;
@@ -2270,6 +2276,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 return Ok(());
             }
             let tb = bytes(&str_of(v, t));
+            if crate::pdfout::doc_op(r, "names", &[t])? {
+                return Ok(());
+            }
             let input = v.list(vec![s("names"), t]);
             crate::pdfout::command(r, input, &[], |st, _| st.names(&tb))?;
         }
@@ -2280,6 +2289,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 return Ok(());
             }
             let tb = bytes(&str_of(v, t));
+            if crate::pdfout::doc_op(r, "trailer", &[t])? {
+                return Ok(());
+            }
             let input = v.list(vec![s("trailer"), t]);
             crate::pdfout::command(r, input, &[], |st, _| st.trailer(&tb))?;
         }
@@ -2290,6 +2302,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 return Ok(());
             }
             let tb = bytes(&str_of(v, t));
+            if crate::pdfout::doc_op(r, "trailerid", &[t])? {
+                return Ok(());
+            }
             let input = v.list(vec![s("trailerid"), t]);
             crate::pdfout::command(r, input, &[], |st, _| st.trailer_id(&tb))?;
         }
