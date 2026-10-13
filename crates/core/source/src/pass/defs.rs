@@ -325,6 +325,12 @@ impl Definitions {
         self.active
     }
 
+    /// Whether the text defines `name` anywhere.
+    #[must_use]
+    pub fn is_defined(&self, name: &str) -> bool {
+        self.defines(name)
+    }
+
     /// Whether the definition of `name` bound at `at` changes catcodes
     /// (0 no, 1 for the arguments it reads, 2 for good).
     pub(crate) fn changes_catcodes(&self, name: &str, at: Option<(u32, usize)>) -> (u8, u128) {

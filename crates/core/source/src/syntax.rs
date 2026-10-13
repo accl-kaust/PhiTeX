@@ -564,7 +564,16 @@ pub(crate) struct Catcodes {
     /// Other characters of catcode 0 (escape).
     escape: u128,
     pub ignore_spaces: bool,
+    /// Of `$ & ^ _ ~` and tab: those of catcode 12 (INITEX's, until a
+    /// `\catcode` gives them plain TeX's).
+    specials12: u128,
+    /// Bytes a literal `\catcode` set to a value this regime does not
+    /// model: their catcode is not known here.
+    unknown: u128,
 }
+
+/// `$ & ^ _ ~` and tab: catcode 12 under INITEX, their own under plain.
+const SPECIALS: u128 = 1 << b'$' | 1 << b'&' | 1 << b'^' | 1 << b'_' | 1 << b'~' | 1 << b'\t';
 
 impl Catcodes {
     /// Plain TeX's and a LaTeX document's: the letters are `a`–`z`, `A`–`Z`.
@@ -575,7 +584,72 @@ impl Catcodes {
         close: 0,
         escape: 0,
         ignore_spaces: false,
+        specials12: 0,
+        unknown: 0,
     };
+
+    /// INITEX's (tex.web §232): letters, `\\`, `%`, space; everything
+    /// else other, until the text's own `\catcode` lines.
+    #[must_use]
+    pub const fn initex() -> Catcodes {
+        let mut r = Catcodes::PLAIN
+            .with_other(b'{', true)
+            .with_other(b'}', true)
+            .with_other(b'#', true);
+        r.specials12 = SPECIALS;
+        r
+    }
+
+    /// This regime with `c` (one of `$ & ^ _ ~` or tab) of catcode `v`:
+    /// plain TeX's for it, 12, or one not modelled here.
+    #[must_use]
+    pub const fn with_special(self, c: u8, v: u32) -> Catcodes {
+        let mut r = self;
+        if c < 128 && SPECIALS >> c & 1 == 1 {
+            let plain = match c {
+                b'$' => 3,
+                b'&' => 4,
+                b'^' => 7,
+                b'_' => 8,
+                b'~' => 13,
+                _ => 10,
+            };
+            r.specials12 &= !(1 << c);
+            r.unknown &= !(1 << c);
+            if v == 12 {
+                r.specials12 |= 1 << c;
+            } else if v != plain {
+                r.unknown |= 1 << c;
+            }
+        }
+        r
+    }
+
+    /// This regime with `c`'s catcode not known (`on`), or known again.
+    #[must_use]
+    pub const fn with_unknown(self, c: u8, on: bool) -> Catcodes {
+        let mut r = self;
+        if c < 128 {
+            if on {
+                r.unknown |= 1 << c;
+            } else {
+                r.unknown &= !(1 << c);
+            }
+        }
+        r
+    }
+
+    /// Whether `c` (one of `$ & ^ _ ~` or tab) is an other character.
+    #[must_use]
+    pub const fn is_special12(&self, c: u8) -> bool {
+        c < 128 && self.specials12 >> c & 1 == 1
+    }
+
+    /// Whether `c`'s catcode is not known to this regime.
+    #[must_use]
+    pub const fn is_unknown(&self, c: u8) -> bool {
+        c < 128 && self.unknown >> c & 1 == 1
+    }
 
     /// LaTeX's internal regime (`\makeatletter`, `.sty` and `.cls` files):
     /// `@` is a letter.
@@ -595,6 +669,8 @@ impl Catcodes {
             close: self.close,
             escape: self.escape,
             ignore_spaces: true,
+            specials12: self.specials12 & !(1 << b'_'),
+            unknown: self.unknown & !(1 << b'_'),
         }
     }
 

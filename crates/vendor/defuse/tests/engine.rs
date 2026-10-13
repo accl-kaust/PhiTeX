@@ -2028,7 +2028,7 @@ fn the_critical_chain_names_each_wait_and_its_cause() {
         chain[1]
     );
     assert!(
-        matches!(chain[2].1, defuse::Cause::Created { by: None }),
+        matches!(chain[2].1, defuse::Cause::Created { by: None, .. }),
         "{:?}",
         chain[2]
     );
@@ -2082,4 +2082,159 @@ fn a_chain_read_waits_for_a_top_level_opener_that_may_stop_opening() {
             assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
         }
     }
+}
+
+/// Releases queued line edits to an evaluation between its steps, one
+/// per `release` steps on average (applied through the program, so the
+/// program's own bookkeeping runs in the callback).
+struct Absorber<'a> {
+    prog: &'a mut Program,
+    edits: std::collections::VecDeque<common::shrink::Ed>,
+    rng: Rng,
+    applied: usize,
+    /// One edit per this many steps, on average (and at the latest after
+    /// twice as many calls).
+    release: usize,
+    held: usize,
+}
+
+impl defuse::EditSource for Absorber<'_> {
+    fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
+        if self.edits.is_empty() {
+            return None;
+        }
+        self.held += 1;
+        if self.rng.below(self.release) != 0 && self.held < 2 * self.release {
+            return None;
+        }
+        self.held = 0;
+        let e = self.edits.pop_front().expect("an edit");
+        common::shrink::apply(eng, self.prog, &e);
+        self.applied += 1;
+        // The client's version: the edits applied so far.
+        Some(self.applied as u64)
+    }
+}
+
+/// Edits absorbed between the steps of an evaluation leave the result a
+/// fresh evaluation of the final text gives, under every scheduler, and
+/// the report says which version each step saw.
+#[test]
+fn edits_absorbed_between_steps_give_the_final_texts_result() {
+    let pool: Vec<String> = std::fs::read_to_string("examples/fuzz_pool.txt")
+        .expect("pool")
+        .lines()
+        .map(String::from)
+        .collect();
+    let seeds = std::env::var("DEFUSE_SEEDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12);
+    for seed in 0..seeds {
+        let mut rng = Rng::new(seed * 7919 + 3);
+        // Odd seeds: a generated 300-line program (loops included), whose
+        // evaluations have many steps for the edits to land in.
+        let src: Vec<String> = if seed % 2 == 0 {
+            (0..30).map(|_| pool[rng.below(pool.len())].clone()).collect()
+        } else {
+            generate(seed, 300)
+        };
+        let release = if seed % 2 == 0 { 4 } else { 16 };
+        for (name, kind) in [("seq", 0), ("spec", 1), ("random", 2)] {
+            let (mut eng, mut prog) = Program::load(src.clone());
+            let eval = |e: &mut Engine, a: &mut dyn defuse::EditSource, k: u64| match kind {
+                0 => e.evaluate_absorbing(&mut Greedy::default(), &mut Sequential, a),
+                1 => e.evaluate_absorbing(&mut Greedy::speculative(Speculation::All, 512), &mut Threads(3), a),
+                _ => e.evaluate_absorbing(
+                    &mut RandomScheduler::new(seed * 31 + k, k.is_multiple_of(2)),
+                    &mut Sequential,
+                    a,
+                ),
+            };
+            let r0 =
+                eval(&mut eng, &mut defuse::NoEdits, 0).unwrap_or_else(|e| panic!("{name} seed {seed} cold: {e:?}"));
+            assert_eq!(prog.result(&eng), reference(&prog.lines), "{name} seed {seed} cold");
+            assert_eq!(r0.edits_applied, Vec::new());
+            assert_eq!(r0.version, 0);
+            // Thirty edits, released between steps. The example language
+            // declares its loop-back fields when the program loads, so
+            // `loop` lines stay.
+            let mut edits = std::collections::VecDeque::new();
+            {
+                let mut lines = prog.lines.clone();
+                while edits.len() < 30 {
+                    let i = rng.below(lines.len() + 1);
+                    let e = match rng.below(3) {
+                        0 if i < lines.len() => common::shrink::Ed::Rm(i),
+                        1 if i < lines.len() => common::shrink::Ed::Set(i, pool[rng.below(pool.len())].clone()),
+                        _ => common::shrink::Ed::Ins(i.min(lines.len()), pool[rng.below(pool.len())].clone()),
+                    };
+                    if !matches!(e, common::shrink::Ed::Ins(..)) && lines[i].starts_with("loop ") {
+                        continue;
+                    }
+                    match &e {
+                        common::shrink::Ed::Rm(i) => {
+                            lines.remove(*i);
+                        }
+                        common::shrink::Ed::Set(i, l) => lines[*i] = l.clone(),
+                        common::shrink::Ed::Ins(i, l) => lines.insert(*i, l.clone()),
+                    }
+                    edits.push_back(e);
+                }
+            }
+            let mut a = Absorber {
+                prog: &mut prog,
+                edits,
+                rng: Rng::new(seed + 1000),
+                applied: 0,
+                release,
+                held: 0,
+            };
+            let mut k = 1;
+            let mut versions = Vec::new();
+            while !a.edits.is_empty() || k == 1 {
+                let r = eval(&mut eng, &mut a, k).unwrap_or_else(|e| panic!("{name} seed {seed}: {e:?}"));
+                versions.push((r.version, r.edits_applied.clone()));
+                k += 1;
+                assert!(k <= 5000, "{name} seed {seed}: edits never released");
+            }
+            assert_eq!(a.applied, 30);
+            let last = versions.last().expect("a report");
+            assert_eq!(last.0, 30, "{name} seed {seed}: version {versions:?}");
+            let absorbed: usize = versions.iter().map(|v| v.1.len()).sum();
+            assert_eq!(absorbed, 30, "{name} seed {seed}: {versions:?}");
+            // Each batch carries the client's tag; tags never decrease.
+            let tags: Vec<u64> = versions.iter().flat_map(|v| v.1.iter().map(|b| b.0)).collect();
+            assert!(tags.windows(2).all(|w| w[0] < w[1]), "{name} seed {seed}: {tags:?}");
+            let got = prog.result(&eng);
+            assert_eq!(
+                got,
+                reference(&prog.lines),
+                "{name} seed {seed}: result after absorbing"
+            );
+            assert!(
+                eng.check_invariants().is_empty(),
+                "{name} seed {seed}: {:?}",
+                eng.check_invariants()
+            );
+            let (mut cold, p) = Program::load(prog.lines.clone());
+            cold.evaluate_sequential().expect("cold");
+            assert_eq!(got, p.result(&cold), "{name} seed {seed}: against a cold evaluation");
+        }
+    }
+}
+
+/// A loop-back field whose only publisher goes away (here: claimed by a
+/// list that lost its end) takes its initial value again, as a cold
+/// evaluation of the new text gives.
+#[test]
+fn a_loop_back_field_without_publishers_returns_to_its_initial_value() {
+    let (mut eng, mut prog, _) = load(&["loop fwd = 0", "early = fwd + 1", "listto x", "endlist", "fwd = 3"]);
+    assert_eq!(out(&eng, &prog, 1), "4");
+    prog.remove_line(&mut eng, 3);
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 1), "1");
+    prog.insert_line(&mut eng, 3, "endlist".to_string());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 1), "4");
 }

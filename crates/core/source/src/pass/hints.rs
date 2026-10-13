@@ -138,6 +138,8 @@ pub struct Hints {
     /// The macros whose bodies (as the text defines them) `may_define`
     /// relies on: right while each still has that meaning.
     pub relied: Vec<String>,
+    /// The commands the item and the bodies it relies on call.
+    pub calls: Vec<String>,
 }
 
 impl Hints {
@@ -152,6 +154,7 @@ impl Hints {
             reads: Vec::new(),
             cause: None,
             relied: Vec::new(),
+            calls: Vec::new(),
         }
     }
 }
@@ -528,6 +531,9 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
     let mut e = Effects::default();
     let mut g = global;
     let mut reading = false;
+    // (after `\expandafter`: the next token is expanded first, so a
+    // quoter after it does not quote)
+    let mut xa_next = false;
     let mut k = lo;
     let hi = hi.min(atoms.len());
     let name_at = |p: usize| -> Option<&str> {
@@ -558,7 +564,12 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
             .unwrap_or(n);
         let gl = std::mem::replace(&mut g, false);
         let rd = std::mem::replace(&mut reading, false);
+        let xa = std::mem::replace(&mut xa_next, false);
         k += 1;
+        if matches!(n, "expandafter" | "exp_after:wN") {
+            xa_next = true;
+            continue;
+        }
         if matches!(
             n,
             "global" | "long" | "outer" | "protected" | "tex_global:D"
@@ -566,7 +577,7 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
             g = gl || matches!(n, "global" | "tex_global:D");
             continue;
         }
-        if QUOTERS.contains(&n) {
+        if QUOTERS.contains(&n) && !xa {
             k = skip(atoms, k) + 1;
             continue;
         }
@@ -630,12 +641,33 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                     }
                 }
                 Some(x) if matches!(x.kind, AtomKind::Char(_)) => {
-                    // (an active character)
+                    // (an active character; `^^X` the character X xor 64,
+                    // §352)
                     if let AtomKind::Char(c) = x.kind {
-                        e.names.push(Def {
-                            field: format!("cs:{c}"),
-                            global: g,
-                        });
+                        let caret = c == '^'
+                            && atoms.get(p + 1).map(|y| y.kind) == Some(AtomKind::Char('^'));
+                        let coded = caret
+                            .then(|| atoms.get(p + 2))
+                            .flatten()
+                            .and_then(|y| match y.kind {
+                                AtomKind::Char(d) if d.is_ascii() => {
+                                    char::from_u32(u32::from(d) ^ 64)
+                                }
+                                _ => None,
+                            });
+                        match coded {
+                            Some(d) => {
+                                e.names.push(Def {
+                                    field: format!("cs:{d}"),
+                                    global: g,
+                                });
+                                return p + 3;
+                            }
+                            None => e.names.push(Def {
+                                field: format!("cs:{c}"),
+                                global: g,
+                            }),
+                        }
                     }
                     p + 1
                 }
@@ -1145,6 +1177,9 @@ pub struct DefSet {
     /// The macros whose bodies (as the text defines them) the set
     /// relies on: right while each still has that meaning.
     pub relied: Vec<String>,
+    /// Every command the text and the bodies it relies on call (the
+    /// engine's state each may touch is the client's to say).
+    pub calls: Vec<String>,
 }
 
 impl DefSet {
@@ -1152,6 +1187,11 @@ impl DefSet {
         for r in &o.relied {
             if !self.relied.contains(r) {
                 self.relied.push(r.clone());
+            }
+        }
+        for c in &o.calls {
+            if !self.calls.contains(c) {
+                self.calls.push(c.clone());
             }
         }
         for (k, v) in &o.names {
@@ -1229,6 +1269,9 @@ impl<'a> Closure<'a> {
             s.add(&x);
         }
         for c in &e.calls {
+            if !s.calls.contains(c) {
+                s.calls.push(c.clone());
+            }
             let x = self.call(c);
             s.add(&x);
         }

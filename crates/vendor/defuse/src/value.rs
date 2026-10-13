@@ -79,7 +79,11 @@ fn content_id(v: &Value) -> ValueId {
         }
         Value::Seq(n) => hash_words(5, &[n.left.0, n.elem.0, n.right.0, n.prio]),
     };
-    // Keep the reserved ids free.
+    unreserved(h)
+}
+
+/// `h` as an id, keeping the reserved ids free.
+fn unreserved(h: u64) -> ValueId {
     if h == ValueId::NONE.0 || h == ValueId::UNIT.0 || h == ValueId::NIL.0 {
         ValueId(h ^ 0x8000_0000_0000_0000)
     } else {
@@ -234,7 +238,25 @@ impl Values {
 
     #[must_use]
     pub fn str(&self, s: &str) -> ValueId {
+        // The hit path allocates nothing: the id is the content hash, and
+        // an interned value is checked against the text in place.
+        let id = unreserved(hash_bytes(3, s.as_bytes()));
+        {
+            let t = self.shard(id).read().unwrap_or_else(PoisonError::into_inner);
+            if let Some(old) = t.get(&id)
+                && matches!(&**old, Value::Str(o) if &**o == s)
+            {
+                return id;
+            }
+        }
         self.intern(Value::Str(s.into()))
+    }
+
+    /// Distinguishes this table from others (a client cache of fields or
+    /// ids can check it belongs to the same table).
+    #[must_use]
+    pub fn instance(&self) -> u64 {
+        self.instance
     }
 
     #[must_use]

@@ -5,7 +5,9 @@
 
 use std::sync::Arc;
 
-use defuse::{Claim, Ctx, Engine, Field, Locality, NodeId, OpId, Operation, Stop, Value, ValueId, Values};
+use defuse::{
+    Claim, Ctx, Engine, EvalError, Field, Locality, MayDefine, NodeId, OpId, Operation, Stop, Value, ValueId, Values,
+};
 
 /// `["p"]` unfolds a child `["c"]`; `["c"]` outputs the text of its
 /// first following sibling (or "none") and claims it; `["s", x]` outputs x.
@@ -858,4 +860,261 @@ fn a_recorded_node_id_anchors_a_later_range_read() {
     let r = eng.evaluate_sequential().expect("after replacing b");
     assert!(r.nodes_run >= 2, "{r:?}");
     assert_eq!(items(&eng), vec![30, 4]);
+}
+
+/// `["c", i, n]`: node `i` of a chain reads `x<i-1>`, defines `x<i>` and
+/// leaves node `i + 1` as its continuation; definitions pending until the
+/// node runs.
+struct Chain;
+
+static CHAIN: std::sync::OnceLock<OpId> = std::sync::OnceLock::new();
+
+impl Operation for Chain {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        None
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let int = |k: usize| match a.get(k).map(|&x| v.get(x)).as_deref() {
+            Some(Value::Int(n)) => *n,
+            _ => 0,
+        };
+        let (i, n) = (int(1), int(2));
+        let prev = if i > 0 {
+            cx.use_field(v.field(&format!("x{}", i - 1)))?
+                .and_then(|y| v.as_int(y))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        cx.define(v.field(&format!("x{i}")), v.int(prev + 1));
+        if i + 1 < n {
+            let op = CHAIN.get().copied().unwrap();
+            cx.follow(op, vec![v.str("c"), v.int(i + 1), v.int(n)]);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A continuation starts above the run that made it, so a chain of
+/// continuations each reading its predecessor runs each node once (no
+/// raise), and the critical chain walks the whole chain back to the first
+/// node: one link per node, the last one its creation by nothing.
+#[test]
+fn the_critical_chain_follows_continuations_to_the_first_node() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Chain));
+    let _ = CHAIN.set(op);
+    let u = eng.new_unit();
+    let v = eng.values();
+    let first = eng.push(u, op, vec![v.str("c"), v.int(0), v.int(100)]);
+    let r = eng.evaluate_sequential().expect("chain");
+    assert_eq!(r.runs, 100, "{r:?}");
+    assert_eq!(r.raises, 0, "{r:?}");
+    assert_eq!(r.critical_path, 99, "{r:?}");
+    let chain = eng.critical_chain();
+    assert_eq!(chain.len(), 100, "{chain:?}");
+    let mut nodes: Vec<NodeId> = chain.iter().map(|c| c.0).collect();
+    nodes.dedup();
+    assert_eq!(nodes.len(), 100, "{chain:?}");
+    assert!(
+        chain[..99].iter().all(|c| matches!(c.1, defuse::Cause::Changed { .. })),
+        "{chain:?}"
+    );
+    assert_eq!(chain[99].0, first);
+    assert!(
+        matches!(
+            chain[99].1,
+            defuse::Cause::Created {
+                by: None,
+                from_hint: None
+            }
+        ),
+        "{:?}",
+        chain[99]
+    );
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+}
+
+/// `["m", name]`: a node whose definitions are known only when it runs,
+/// bounded by `may_define` to the name `a`; it defines `name`.
+struct Bounded;
+
+impl Operation for Bounded {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        None
+    }
+    fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
+        MayDefine::Names(vec![v.field("a")])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let name = match a.get(1).map(|&x| v.get(x)).as_deref() {
+            Some(Value::Str(s)) => s.to_string(),
+            _ => String::new(),
+        };
+        cx.define(v.field(&name), v.int(1));
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A dynamic definition outside the node's `may_define` answer is an
+/// error (readers may have been bound past the node while it was pending),
+/// as an undeclared static definition is.
+#[test]
+fn a_dynamic_definition_outside_may_define_is_an_error() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Bounded));
+    let u = eng.new_unit();
+    let v = eng.values();
+    eng.push(u, op, vec![v.str("m"), v.str("a")]);
+    eng.evaluate_sequential().expect("within the bound");
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Bounded));
+    let u = eng.new_unit();
+    let v = eng.values();
+    let n = eng.push(u, op, vec![v.str("m"), v.str("b")]);
+    let b = eng.values().field("b");
+    match eng.evaluate_sequential() {
+        Err(EvalError::UndeclaredDefinition { node, field }) => {
+            assert_eq!(node, n);
+            assert_eq!(field, b);
+        }
+        other => panic!("expected UndeclaredDefinition, got {other:?}"),
+    }
+}
+
+/// `["n", k]`: outputs `k`.
+struct Num;
+
+impl Operation for Num {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let a = cx.args();
+        Ok(a.get(1).copied().unwrap_or(ValueId::UNIT))
+    }
+}
+
+/// Edits queued from another thread are absorbed by the evaluation, which
+/// reports their version; the ids of the nodes they inserted come back
+/// by version.
+#[test]
+fn an_edit_queue_feeds_an_evaluation_from_another_thread() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Num));
+    let u = eng.new_unit();
+    let v = eng.values();
+    let first = eng.push(u, op, vec![v.str("n"), v.int(1)]);
+    let queue = defuse::EditQueue::new();
+    let q = queue.clone();
+    let (two, three) = (eng.values().int(2), eng.values().int(3));
+    let n = eng.values().str("n");
+    std::thread::spawn(move || {
+        q.push(
+            defuse::Edit::Push {
+                unit: u,
+                op,
+                args: vec![n, two],
+            },
+            1,
+        );
+        q.push(
+            defuse::Edit::Push {
+                unit: u,
+                op,
+                args: vec![n, three],
+            },
+            2,
+        );
+        q.push(
+            defuse::Edit::Replace {
+                node: first,
+                op,
+                args: vec![n, three],
+            },
+            3,
+        );
+    })
+    .join()
+    .expect("the queuing thread");
+    assert_eq!(queue.pending(), 3);
+    let mut queue = queue;
+    let r = eng
+        .evaluate_absorbing(&mut defuse::Greedy::default(), &mut defuse::Sequential, &mut queue)
+        .expect("absorbing");
+    assert_eq!(r.version, 3, "{r:?}");
+    assert_eq!(r.edits_applied, vec![(3, 0)], "{r:?}");
+    assert_eq!(queue.applied(), 3);
+    assert_eq!(queue.pending(), 0);
+    let made = queue.take_made();
+    assert_eq!(made.len(), 2, "{made:?}");
+    assert_eq!(made[0].0, 1);
+    assert_eq!(made[1].0, 2);
+    assert_eq!(eng.output(made[0].1), Some(two));
+    assert_eq!(eng.output(made[1].1), Some(three));
+    assert_eq!(eng.output(first), Some(three));
+    assert_eq!(queue.take_made(), Vec::new());
+}
+
+/// `["t", k]`: claims `k` following siblings, decided when it runs.
+struct Taker;
+
+static TAKER_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl Operation for Taker {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn claim(&self, a: &[ValueId], v: &Values, _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>) -> Claim {
+        if tag(v, a) == "t" { Claim::Pending } else { Claim::None }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        if tag(v, &a) == "t" {
+            TAKER_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let k = match a.get(1).map(|&x| v.get(x)).as_deref() {
+                Some(Value::Int(n)) => usize::try_from(*n).unwrap_or(0),
+                _ => 0,
+            };
+            let mut got = 0;
+            while got < k && cx.following(got).is_some() {
+                got += 1;
+            }
+            cx.claim(got);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A claim a node's own run makes does not make the node run again: the
+/// run made it from the text it saw.
+#[test]
+fn a_claim_made_by_the_run_itself_does_not_rerun_the_claimer() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Taker));
+    let u = eng.new_unit();
+    let v = eng.values();
+    let taker = eng.push(u, op, vec![v.str("t"), v.int(2)]);
+    for i in 0..3 {
+        let v = eng.values();
+        let a = vec![v.str("w"), v.int(i)];
+        eng.push(u, op, a);
+    }
+    TAKER_RUNS.store(0, std::sync::atomic::Ordering::Relaxed);
+    eng.evaluate_sequential().expect("cold");
+    assert_eq!(TAKER_RUNS.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(eng.children(taker).len(), 0);
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+    // A changed claim count (an edit) runs it again, once.
+    let v = eng.values();
+    let a = vec![v.str("t"), v.int(1)];
+    eng.replace(taker, op, a);
+    eng.evaluate_sequential().expect("after the edit");
+    assert_eq!(TAKER_RUNS.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
 }

@@ -210,7 +210,8 @@ impl Run<'_, '_> {
         let kind = self.kind_value(md, group::ALIGN, asid, asid, -1, extra)?;
         self.open_scope_here(kind);
         let pd = self.prev_depth(md)?;
-        self.set(&format!("pd:{asid}"), v.int(i64::from(pd)), true);
+        let m = v.list(vec![v.int(crate::nodes::T_PD), v.int(i64::from(pd))]);
+        self.append(asid, m);
         // §777
         let mut tab = self.glue_param("tabskip")?;
         let mut pre = Preamble {
@@ -579,7 +580,7 @@ impl Run<'_, '_> {
         }
         self.set_prev_depth(&outer, pd);
         if outer.m == 1 {
-            self.build_page(&outer)?;
+            self.build_page_mark(&outer)?;
         }
         Ok(())
     }

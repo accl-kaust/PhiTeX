@@ -35,6 +35,24 @@ pub(crate) const T_UNSET: i64 = 14;
 pub(crate) const T_DELETE: i64 = 99;
 /// A point where tex.web calls `build_page` (§994).
 pub(crate) const T_BUILD_PAGE: i64 = 98;
+/// A space factor transition in a horizontal list (§1034, §1043): `[t,
+/// kind, n]`, kind 0 sets the factor to `n`, kind 1 is §1034's update by
+/// an `sf_code` `n` above 1000 (1000 if the factor was below 1000, else
+/// `n`). Not a node: the list's reader folds the transitions
+/// ([`crate::run::Run::list_items`]).
+pub(crate) const T_SF: i64 = 97;
+/// An interword space whose glue waits for the space factor (§1041–§1044):
+/// `[t, spaceskip, xspaceskip, fontdimen 2, 3, 4, 7]`, the values in force
+/// where the space was; the list's reader makes the glue.
+pub(crate) const T_SPACE: i64 = 96;
+/// A box appended to a vertical list (§679): `[t, box, baselineskip,
+/// lineskip, lineskiplimit]`, the parameters in force where it was; the
+/// list's reader puts the interline glue before it from the previous
+/// depth.
+pub(crate) const T_VBOX: i64 = 95;
+/// A previous depth transition (`\\prevdepth`, a rule, an alignment's
+/// end): `[t, depth]`.
+pub(crate) const T_PD: i64 = 94;
 
 /// Marks and whatsits met while decoding, numbered.
 #[derive(Clone, Default, Debug)]

@@ -68,6 +68,138 @@ pub struct Options {
     /// Where the build reports what it runs ([`Build::progress`]), for
     /// a reader that polls it during the cold build; `None` makes one.
     pub progress: Option<Arc<crate::exec::Progress>>,
+    /// Where texts for the build come from while it runs
+    /// ([`EditSender`]): the engine takes the latest between its steps,
+    /// and the build ends with the result for it. `None` makes one
+    /// ([`Build::edit_sender`]).
+    pub edits: Option<EditSender>,
+    /// Called after each build or edit for every page whose hash
+    /// ([`Build::pages`]) is new or changed: the page's index (0 the
+    /// first), its hash, and the version of the text it is for.
+    pub on_page_settled: Option<PageSettled>,
+}
+
+/// The callback of [`Options::on_page_settled`].
+pub type PageSettled = Arc<dyn Fn(usize, u64, u64) + Send + Sync>;
+
+/// A handle to send a build the document's new texts from any thread.
+/// Each text gets the next version number; a text sent while the build
+/// runs is taken between the engine's steps (only the latest counts:
+/// each is the whole document), and [`Build::version`] says which text
+/// a result is for.
+#[derive(Clone, Default)]
+pub struct EditSender(Arc<Mutex<Pending>>);
+
+#[derive(Default)]
+struct Pending {
+    text: Option<String>,
+    version: u64,
+}
+
+impl EditSender {
+    /// Sends the document's text: its version.
+    pub fn send(&self, text: &str) -> u64 {
+        let mut p = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        p.version += 1;
+        p.text = Some(text.to_owned());
+        p.version
+    }
+
+    /// Whether a text waits that no build has taken.
+    #[must_use]
+    pub fn pending(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .text
+            .is_some()
+    }
+
+    fn take(&self) -> Option<(String, u64)> {
+        let mut p = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let v = p.version;
+        p.text.take().map(|t| (t, v))
+    }
+}
+
+/// The engine's source of edits during an evaluation: the latest text
+/// sent, applied to the document's nodes.
+struct Absorb<'a> {
+    edits: &'a EditSender,
+    nodes: &'a mut Vec<(String, NodeId)>,
+    exec: OpId,
+    dvi: NodeId,
+}
+
+impl phitex_defuse::EditSource for Absorb<'_> {
+    fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
+        let (text, version) = self.edits.take()?;
+        apply_text(eng, self.exec, self.dvi, self.nodes, &text);
+        Some(version)
+    }
+}
+
+/// Edits the document's nodes `nodes` to the text `text`: the slices
+/// both texts share at the start and the end stay, those between are
+/// replaced, removed or inserted.
+fn apply_text(
+    eng: &mut Engine,
+    exec: OpId,
+    dvi: NodeId,
+    nodes_now: &mut Vec<(String, NodeId)>,
+    text: &str,
+) {
+    let text = as_file(text);
+    let new: Vec<(String, (usize, usize))> = slices(&text)
+        .into_iter()
+        .map(|(s, e)| {
+            let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
+            (key(&text[s..e], starts), (s, e))
+        })
+        .collect();
+    let old = &*nodes_now;
+    let mut a = 0;
+    while a < old.len() && a < new.len() && old[a].0 == new[a].0 {
+        a += 1;
+    }
+    let mut b = 0;
+    while b < old.len() - a
+        && b < new.len() - a
+        && old[old.len() - 1 - b].0 == new[new.len() - 1 - b].0
+    {
+        b += 1;
+    }
+    let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
+    let common = old_mid.min(new_mid);
+    let mut nodes = old[..a].to_vec();
+    let args_of = |eng: &Engine, k: usize| {
+        let (s, e) = new[k].1;
+        let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
+        let mut args = slice_args(eng.values(), &text[s..e], starts);
+        args.push(crate::hints::hint_arg(eng.values(), &text, s));
+        args
+    };
+    for k in 0..common {
+        let n = old[a + k].1;
+        let args = args_of(eng, a + k);
+        eng.replace(n, exec, args);
+        nodes.push((new[a + k].0.clone(), n));
+    }
+    for k in common..old_mid {
+        eng.remove(old[a + k].1);
+    }
+    for k in common..new_mid {
+        let args = args_of(eng, a + k);
+        let n = if let Some(&(_, p)) = nodes.last() {
+            eng.insert_after(p, exec, args)
+        } else {
+            let first = old.get(a + old_mid).map_or(dvi, |x| x.1);
+            eng.insert_before(first, exec, args)
+        };
+        nodes.push((new[a + k].0.clone(), n));
+    }
+    nodes.extend_from_slice(&old[a + old_mid..]);
+    *nodes_now = nodes;
 }
 
 impl Default for Options {
@@ -85,6 +217,8 @@ impl Default for Options {
             threads: None,
             exact_objects: true,
             progress: None,
+            edits: None,
+            on_page_settled: None,
         }
     }
 }
@@ -370,6 +504,22 @@ pub struct Stats {
     pub batches_inline: u64,
     pub jobs_max_batch: usize,
     pub critical_path: Option<usize>,
+    /// The light page steps run (OUTPUT.md §4.2a), and those of them
+    /// with no output routine, which may define anything.
+    pub page_steps: u64,
+    pub page_steps_any: u64,
+    /// The engine's pending waits by kind, summed over the evaluations.
+    pub waits_by_kind: Vec<(&'static str, u64)>,
+    /// The nodes most waited on in the last evaluation (raw ids, waits).
+    pub top_waited: Vec<(u64, u64)>,
+    /// Starts the engine held back until a node's inputs were known.
+    pub gated: u64,
+    /// The version of the text the result is for ([`Build::version`]).
+    pub version: u64,
+    /// Scheduler steps, and the nodes run in them summed: `ready_mean`
+    /// is the mean batch.
+    pub steps: u64,
+    pub ready_total: u64,
     /// Nodes whose text bounded what they may define ([`crate::hints`]),
     /// and those that may define anything, among the live nodes that
     /// ran.
@@ -385,14 +535,16 @@ pub struct Stats {
 /// A round's counters (`PHITEX_TEX_TIME`).
 fn print_round(t: std::time::Duration, r: &Report) {
     eprintln!(
-        "round: {t:?}, {} nodes run, {} runs, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} pending, {} created, {} freed, spec {}/{}/{}, by op {:?}",
+        "round: {t:?}, {} nodes run, {} runs, {} gated, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} raises, {} pending, {} created, {} freed, spec {}/{}/{}, by op {:?}",
         r.nodes_run,
         r.runs,
+        r.gated,
         r.cutoffs,
         r.rebinds,
         r.restarts,
         r.rounds,
         r.stops,
+        r.raises,
         r.pending_waits,
         r.created,
         r.freed,
@@ -404,6 +556,14 @@ fn print_round(t: std::time::Duration, r: &Report) {
 }
 
 impl Stats {
+    /// The mean number of nodes run per scheduler step.
+    #[must_use]
+    pub fn ready_mean(&self) -> f64 {
+        #[allow(clippy::cast_precision_loss)]
+        let m = self.ready_total as f64 / self.steps.max(1) as f64;
+        m
+    }
+
     /// The executor's counters of one evaluation begun at `c0`.
     fn add_exec(&mut self, ex: &crate::exec::Threads, c0: Option<u64>, eng: &Engine) {
         if let (Some(a), Some(b)) = (c0, crate::exec::clock().now()) {
@@ -453,6 +613,20 @@ impl Stats {
         self.loop_rounds += r.rounds;
         self.pending_waits += r.pending_waits;
         self.stops += r.stops;
+        self.version = r.version;
+        self.steps += r.steps;
+        self.ready_total += r.ready_total;
+        self.page_steps +=
+            Report::by_op(&r.runs_by_op, "pagestep") + Report::by_op(&r.runs_by_op, "pagestep_any");
+        self.page_steps_any += Report::by_op(&r.runs_by_op, "pagestep_any");
+        self.gated += r.gated;
+        self.top_waited = r.top_waited.iter().map(|&(n, w)| (n.raw(), w)).collect();
+        for &(k, n) in &r.waits_by_kind {
+            match self.waits_by_kind.iter_mut().find(|x| x.0 == k) {
+                Some(x) => x.1 += n,
+                None => self.waits_by_kind.push((k, n)),
+            }
+        }
     }
 }
 
@@ -500,11 +674,25 @@ impl Graph {
         let exec = eng.register(Arc::new(Exec(shared.clone())));
         let put = eng.register(Arc::new(Put(shared.clone())));
         let outpage = eng.register(Arc::new(OutPage(shared.clone())));
+        let [pagestep, pagestep_any] = [false, true].map(|any| {
+            eng.register(Arc::new(crate::page_step::PageStep {
+                shared: shared.clone(),
+                any,
+            }))
+        });
         let dvi = eng.register(Arc::new(Dvi));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
-        let ops = Ops { exec, put, outpage };
-        let _ = shared.set(ops);
+        let fields = Arc::new(crate::fields::Fields::new(eng.values()));
+        let ops = Ops {
+            exec,
+            put,
+            outpage,
+            pagestep,
+            pagestep_any,
+            fields,
+        };
+        let _ = shared.set(ops.clone());
         for f in [
             "items",
             "log",
@@ -635,16 +823,24 @@ impl Graph {
     /// Evaluates; when the graph asks for files, supplies them and
     /// evaluates again.
     #[allow(clippy::too_many_lines)]
-    fn settle(&mut self, unit: UnitId, finder: &Finder, stats: &mut Stats, fixpoint: bool) {
+    fn settle(
+        &mut self,
+        unit: UnitId,
+        finder: &Finder,
+        stats: &mut Stats,
+        fixpoint: bool,
+        edits: &mut dyn phitex_defuse::EditSource,
+    ) {
         let needs_f = self.eng.values().field("needs");
         loop {
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();
-            let r = match self
-                .eng
-                .evaluate(&mut phitex_defuse::Greedy::default(), &mut ex)
-            {
+            let r = match self.eng.evaluate_absorbing(
+                &mut phitex_defuse::Greedy::default(),
+                &mut ex,
+                edits,
+            ) {
                 Ok(r) => r,
                 Err(e) => {
                     // the build ends here; the error is a diagnostic
@@ -656,6 +852,10 @@ impl Graph {
             };
             if std::env::var_os("PHITEX_TEX_TIME").is_some() {
                 print_round(t0.elapsed(), &r);
+                eprintln!("  waits by kind {:?}", r.waits_by_kind);
+                for &(n, w) in &r.top_waited {
+                    eprintln!("  waited on {w}x: {}", describe(&self.eng, n));
+                }
             }
             stats.add(&r);
             stats.add_exec(&ex, c0, &self.eng);
@@ -845,7 +1045,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         let end = g.eng.push(unit, g.mark, Vec::new());
         let mut stats = Stats::default();
         let t0 = std::time::Instant::now();
-        g.settle(unit, finder, &mut stats, false);
+        g.settle(unit, finder, &mut stats, false, &mut phitex_defuse::NoEdits);
         if std::env::var_os("PHITEX_TEX_TIME").is_some() {
             eprintln!("prelude settle {:?}", t0.elapsed());
         }
@@ -936,6 +1136,10 @@ pub struct Build {
     prelude: Arc<Cached>,
     /// What the last build or edit ran.
     pub stats: Stats,
+    /// Where new texts come from ([`Options::edits`]).
+    edits: EditSender,
+    /// The pages' hashes the callback last saw.
+    settled: Vec<u64>,
 }
 
 impl Build {
@@ -1008,6 +1212,7 @@ impl Build {
         let files_op = g.files_op;
         let files = g.eng.push(unit, files_op, Vec::new());
         g.eng.add_root(files);
+        let edits = opts.edits.clone().unwrap_or_default();
         let mut b = Build {
             g,
             unit,
@@ -1016,6 +1221,8 @@ impl Build {
             dvi,
             prelude: cached,
             stats: Stats::default(),
+            edits,
+            settled: Vec::new(),
         };
         b.settle();
         if std::env::var_os("PHITEX_TEX_TIME").is_some() {
@@ -1038,10 +1245,59 @@ impl Build {
         self.g.watch.offsets = Arc::new(offsets);
         let mut stats = Stats::default();
         self.g.queries.clear();
-        self.g
-            .settle(self.unit, &self.opts.finder, &mut stats, self.opts.fixpoint);
+        let mut absorb = Absorb {
+            edits: &self.edits,
+            nodes: &mut self.nodes,
+            exec: self.g.ops.exec,
+            dvi: self.dvi,
+        };
+        // a text sent before the evaluation starts is the one it is for
+        if let Some(v) = phitex_defuse::EditSource::absorb(&mut absorb, &mut self.g.eng) {
+            self.g.eng.set_version(v);
+        }
+        self.g.settle(
+            self.unit,
+            &self.opts.finder,
+            &mut stats,
+            self.opts.fixpoint,
+            &mut absorb,
+        );
         stats.live = self.g.eng.live_nodes();
         self.stats = stats;
+        if let Some(cb) = self.opts.on_page_settled.clone() {
+            let pages = self.pages();
+            for (k, &h) in pages.iter().enumerate() {
+                if self.settled.get(k) != Some(&h) {
+                    cb(k, h, self.stats.version);
+                }
+            }
+            self.settled = pages;
+        }
+    }
+
+    /// A handle to send this build new texts from another thread
+    /// ([`EditSender`]); a text it sends while an edit or the cold
+    /// build runs is taken by that evaluation.
+    #[must_use]
+    pub fn edit_sender(&self) -> EditSender {
+        self.edits.clone()
+    }
+
+    /// The version of the text the last result is for ([`EditSender`];
+    /// 0: the text the build began with).
+    #[must_use]
+    pub fn version(&self) -> u64 {
+        self.stats.version
+    }
+
+    /// Builds the latest text sent, if one waits that no evaluation took:
+    /// whether there was one.
+    pub fn absorb_pending(&mut self) -> bool {
+        if !self.edits.pending() {
+            return false;
+        }
+        self.settle();
+        true
     }
 
     /// What the build runs now, readable from another thread while
@@ -1062,58 +1318,7 @@ impl Build {
     /// The document changed to `text`: the nodes whose slices differ are
     /// replaced, inserted or removed, and the graph re-evaluated.
     pub fn edit(&mut self, text: &str) {
-        let text = as_file(text);
-        let new: Vec<(String, (usize, usize))> = slices(&text)
-            .into_iter()
-            .map(|(s, e)| {
-                let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-                (key(&text[s..e], starts), (s, e))
-            })
-            .collect();
-        let old = &self.nodes;
-        let mut a = 0;
-        while a < old.len() && a < new.len() && old[a].0 == new[a].0 {
-            a += 1;
-        }
-        let mut b = 0;
-        while b < old.len() - a
-            && b < new.len() - a
-            && old[old.len() - 1 - b].0 == new[new.len() - 1 - b].0
-        {
-            b += 1;
-        }
-        let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
-        let common = old_mid.min(new_mid);
-        let exec = self.g.ops.exec;
-        let mut nodes = self.nodes[..a].to_vec();
-        let args_of = |g: &Graph, k: usize| {
-            let (s, e) = new[k].1;
-            let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-            let mut args = slice_args(g.eng.values(), &text[s..e], starts);
-            args.push(crate::hints::hint_arg(g.eng.values(), &text, s));
-            args
-        };
-        for k in 0..common {
-            let n = self.nodes[a + k].1;
-            let args = args_of(&self.g, a + k);
-            self.g.eng.replace(n, exec, args);
-            nodes.push((new[a + k].0.clone(), n));
-        }
-        for k in common..old_mid {
-            self.g.eng.remove(self.nodes[a + k].1);
-        }
-        for k in common..new_mid {
-            let args = args_of(&self.g, a + k);
-            let n = if let Some(&(_, p)) = nodes.last() {
-                self.g.eng.insert_after(p, exec, args)
-            } else {
-                let first = self.nodes.get(a + old_mid).map_or(self.dvi, |x| x.1);
-                self.g.eng.insert_before(first, exec, args)
-            };
-            nodes.push((new[a + k].0.clone(), n));
-        }
-        nodes.extend_from_slice(&self.nodes[a + old_mid..]);
-        self.nodes = nodes;
+        self.edits.send(text);
         self.settle();
     }
 
@@ -1248,6 +1453,53 @@ impl Build {
         (dvi, log)
     }
 
+    /// A node by its raw id ([`Stats::top_waited`]): its operation and
+    /// the start of its first argument.
+    #[must_use]
+    pub fn describe_node(&self, raw: u64) -> String {
+        describe(&self.g.eng, phitex_defuse::NodeId::from_raw(raw))
+    }
+
+    /// Up to three defined control sequences within two edits of `name`,
+    /// nearest first, for an undefined one's help.
+    fn near_names(&self, name: &str, known: &mut Option<Vec<String>>) -> Vec<String> {
+        if name.is_empty() {
+            return Vec::new();
+        }
+        let known = known.get_or_insert_with(|| {
+            let v = self.g.eng.values();
+            let mut names: Vec<String> = self
+                .prelude
+                .env
+                .iter()
+                .filter_map(|(k, _)| k.strip_prefix("cs:").map(str::to_owned))
+                .collect();
+            let f = v.field("defs");
+            if let Some(d) = self.g.eng.acc_value(self.unit, f) {
+                for l in v.seq_to_vec(d) {
+                    for n in list_of(v, l) {
+                        if let Some(c) = field_name(v, Field(n)).strip_prefix("cs:") {
+                            names.push(c.to_owned());
+                        }
+                    }
+                }
+            }
+            names.sort_unstable();
+            names.dedup();
+            names
+        });
+        let mut near: Vec<(usize, &String)> = known
+            .iter()
+            .filter(|k| k.as_str() != name)
+            .filter_map(|k| {
+                let d = edit_distance(name, k);
+                (d <= 2).then_some((d, k))
+            })
+            .collect();
+        near.sort();
+        near.into_iter().take(3).map(|(_, k)| k.clone()).collect()
+    }
+
     #[allow(clippy::too_many_lines)]
     /// The diagnostics of the last build or edit: TeX's errors and
     /// warnings (box reports, missing characters) where the input was,
@@ -1275,6 +1527,8 @@ impl Build {
         }
         let docname = self.opts.name.clone();
         let mut out = Vec::new();
+        // the control sequences defined, gathered at the first undefined one
+        let mut known: Option<Vec<String>> = None;
         let f = v.field("diags");
         let entries = self
             .g
@@ -1350,12 +1604,22 @@ impl Build {
                 " ".repeat(lead.len() + before.chars().count())
             );
             let help = undefined.then(|| {
-                "The control sequence at the end of the top line\n\
+                let mut h = "The control sequence at the end of the top line\n\
                  of your error message was never \\def'ed. If you have\n\
                  misspelled it (e.g., `\\hobx'), type `I' and the correct\n\
                  spelling (e.g., `I\\hbox'). Otherwise just continue,\n\
                  and I'll forget about whatever was undefined."
-                    .to_owned()
+                    .to_owned();
+                let name = before.rfind('\\').map_or("", |k| &before[k + 1..]);
+                let near = self.near_names(name, &mut known);
+                if !near.is_empty() {
+                    let l: Vec<String> = near.iter().map(|n| format!("\\{n}")).collect();
+                    let _ = std::fmt::Write::write_fmt(
+                        &mut h,
+                        format_args!("\nDid you mean {}?", l.join(", ")),
+                    );
+                }
+                h
             });
             out.push(Diagnostic {
                 file,
@@ -1384,6 +1648,56 @@ impl Build {
         }
         out.sort_by(|a, b| (&a.file, a.range.0).cmp(&(&b.file, b.range.0)));
         out
+    }
+
+    /// The critical chain in full, one line per link, last node first,
+    /// with each node's height:
+    /// the link's cause with what it names (the site that defined the
+    /// field read, the node waited on, the creator, the height a raise
+    /// went to) and the node, each as its operation and text.
+    #[must_use]
+    pub fn critical_chain_lines(&self) -> Vec<String> {
+        use phitex_defuse::Cause;
+        let eng = &self.g.eng;
+        let v = eng.values();
+        let d = |n: Option<phitex_defuse::NodeId>| {
+            n.map_or_else(|| "(unit start)".to_owned(), |n| describe(eng, n))
+        };
+        eng.critical_chain_heights()
+            .into_iter()
+            .enumerate()
+            .map(|(i, (n, h, c))| {
+                let why = match c {
+                    Cause::Rebind { field, to, .. } => {
+                        format!("Rebind {} to [{}]", field_name(v, field), d(to))
+                    }
+                    Cause::Changed { field, site } => {
+                        format!("Changed {} at [{}]", field_name(v, field), d(site))
+                    }
+                    Cause::Output { of } => format!("Output of [{}]", d(Some(of))),
+                    Cause::Woken { by } => format!("Woken by [{}]", d(Some(by))),
+                    Cause::Loop { field } => format!("Loop {}", field_name(v, field)),
+                    Cause::Environment { field } => {
+                        format!("Environment {}", field_name(v, field))
+                    }
+                    Cause::Structure => "Structure".to_owned(),
+                    Cause::Range { field, from } => {
+                        format!("Range {} from [{}]", field_name(v, field), d(from))
+                    }
+                    Cause::Created { by, from_hint } => format!(
+                        "Created by [{}]{}",
+                        d(by),
+                        from_hint.map_or_else(String::new, |(f, t)| format!(
+                            ", hint {} at [{}]",
+                            field_name(v, f),
+                            d(Some(t))
+                        ))
+                    ),
+                    Cause::Raised { to } => format!("Raised to height {to}"),
+                };
+                format!("{i:4} h{h:<5} {why}\n       node [{}]", describe(eng, n))
+            })
+            .collect()
     }
 
     /// The engine's critical chain, from the highest finished node back:
@@ -1418,7 +1732,12 @@ impl Build {
                     Cause::Environment { field } => ("Environment", field_name(v, field)),
                     Cause::Structure => ("Structure", String::new()),
                     Cause::Range { field, .. } => ("Range", field_name(v, field)),
-                    Cause::Created { .. } => ("Created", String::new()),
+                    Cause::Created { from_hint, .. } => (
+                        "Created",
+                        from_hint.map_or_else(String::new, |(f, _)| field_name(v, f)),
+                    ),
+                    // the height it was raised to is in the dump, not the key
+                    Cause::Raised { .. } => ("Raised", String::new()),
                 };
                 (what, kind.to_owned(), field)
             })
@@ -1474,4 +1793,29 @@ impl Build {
     pub fn live_nodes(&self) -> usize {
         self.g.eng.live_nodes()
     }
+}
+
+/// The Levenshtein distance between `a` and `b`, by characters.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != cb)).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
+/// A node: its operation and the start of its first argument.
+fn describe(eng: &Engine, n: phitex_defuse::NodeId) -> String {
+    eng.node_info(n).map_or_else(String::new, |i| {
+        let a = i.args.first().map(|&x| eng.values().render(x));
+        let a: String = a.unwrap_or_default().chars().take(80).collect();
+        format!("{} {a}", i.op)
+    })
 }

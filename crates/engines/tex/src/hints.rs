@@ -72,23 +72,161 @@ pub(crate) struct Bound {
     pub state: Option<Vec<String>>,
 }
 
-/// The state fields a command of this name sets, when they are known
-/// to be few (observed on the engine: `PHITEX_HINTS=2` prints each
-/// node's definitions); `None`: every state head.
-fn state_of(name: &str) -> Option<Vec<String>> {
-    let few: &[&str] = match name {
-        // (a body read verbatim, a token taken as it is: nothing expands)
-        "def" | "gdef" | "let" | "futurelet" | "tex_def:D" | "tex_gdef:D" | "tex_let:D"
-        | "tex_futurelet:D" => &["aftertoken"],
-        // (expansion while reading: conditionals may end)
-        "edef" | "xdef" | "csname" | "cs:w" | "tex_edef:D" | "tex_xdef:D" | "tex_csname:D" => {
-            &["aftertoken", "ifstack"]
+/// The state fields (heads: a family's prefix with its colon, or a
+/// cell's name) a command of this name may set besides control
+/// sequences, from tex.web; `None`: a command whose state is not
+/// listed here (every head). The alignment state (`align:`), the
+/// paragraph (`par:`) and `aftertoken` come from the context, not from
+/// the command ([`Analysis::cs_hint`]).
+#[allow(clippy::too_many_lines)]
+fn class_state(name: &str) -> Option<&'static [&'static str]> {
+    let n = name
+        .strip_prefix("tex_")
+        .and_then(|x| x.strip_suffix(":D"))
+        .unwrap_or(name);
+    Some(match n {
+        // definitions: the control sequence only (§1218, §1221, §1224)
+        "def" | "gdef" | "let" | "futurelet" | "chardef" | "mathchardef" | "countdef"
+        | "dimendef" | "skipdef" | "muskipdef" | "toksdef" | "relax" | "begingroup" | "bgroup"
+        | "global" | "long" | "outer" | "protected" | "the" | "number" | "romannumeral"
+        | "string" | "meaning" | "noexpand" | "show" | "showbox" | "showthe" | "showlists"
+        | "showgroups" | "showtokens" | "showifs" | "dump" | "endinput" | "jobname"
+        | "fontname" | "detokenize" | "unexpanded" | "ignorespaces" | "endcsname"
+        | "prevdepth" | "spacefactor" | "nullfont" | "pagediscards" | "splitdiscards"
+        | "noboundary" | "lastpenalty" | "lastskip" | "lastkern" | "lastnodetype" | "inputlineno"
+        | "badness" | "eTeXversion" | "eTeXrevision" | "currentgrouplevel" | "currentgrouptype"
+        | "currentiflevel" | "currentiftype" | "currentifbranch" | "numexpr" | "dimexpr"
+        | "glueexpr" | "muexpr" | "gluestretch" | "glueshrink" | "gluestretchorder"
+        | "glueshrinkorder" | "mutoglue" | "gluetomu" | "fontcharwd" | "fontcharht"
+        | "fontchardp" | "fontcharic" | "parshapelength" | "parshapeindent" | "parshapedimen"
+        | "fontdimen" | "hyphenchar" | "skewchar" | "topmark" | "firstmark" | "botmark"
+        | "splitfirstmark" | "splitbotmark" | "topmarks" | "firstmarks" | "botmarks"
+        | "splitfirstmarks" | "splitbotmarks" | "wd" | "ht" | "dp" | "char" | "accent"
+        | "discretionary" | "-" | "/" | " " | "hskip" | "hfil" | "hfill" | "hss" | "hfilneg"
+        | "vskip" | "vfil" | "vfill" | "vss" | "vfilneg" | "kern" | "hrule" | "vrule"
+        | "leaders" | "cleaders" | "xleaders" | "mskip" | "mkern" | "unskip" | "unpenalty"
+        | "unkern" | "penalty" | "end" | "indent" | "noindent" | "par" | "beginL" | "endL"
+        | "beginR" | "endR" | "mathord" | "mathop" | "mathbin" | "mathrel" | "mathopen"
+        | "mathclose" | "mathpunct" | "mathinner" | "underline" | "overline" | "mathaccent"
+        | "radical" | "displaystyle" | "textstyle" | "scriptstyle" | "scriptscriptstyle"
+        | "left" | "right" | "middle" | "mathchar" | "delimiter" | "displaylimits" | "limits"
+        | "nolimits" | "nonscript" | "mathchoice" | "eqno" | "leqno" | "vadjust" | "insert"
+        | "mark" | "marks" | "shipout" | "special" | "openin" | "closein" | "ifeof" => {
+            &[]
         }
-        "relax" | "tex_relax:D" => &[],
-        _ => return None,
-    };
-    Some(few.iter().map(|s| (*s).to_owned()).collect())
+        // closing a group: the box's badness, its level fix, inserts (§1100, §1079)
+        "endgroup" | "egroup" => &["badness", "lvlfix", "inspen"],
+        // arguments expanded while read: a conditional may end (§366, §498)
+        "edef" | "xdef" | "csname" | "message" | "errmessage" | "uppercase" | "lowercase"
+        | "scantokens" => &["ifstack"],
+        "write" | "immediate" | "openout" | "closeout" => &["ifstack", "wopen:", "write:"],
+        "afterassignment" => &["aftertoken"],
+        "aftergroup" => &["ag"],
+        // boxes (§1083 begin_box, §1077 \setbox)
+        "hbox" | "vbox" | "vtop" | "vcenter" | "setbox" | "box" | "copy" | "unhbox" | "unhcopy"
+        | "unvbox" | "unvcopy" | "lastbox" | "vsplit" => &["box:", "param:", "lvlfix"],
+        // conditionals (§498-§510)
+        "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode" | "ifinner"
+        | "ifvoid" | "ifhbox" | "ifvbox" | "ifcat" | "ifcase" | "iftrue" | "iffalse"
+        | "ifdefined" | "ifcsname" | "iffontchar" | "unless" | "else" | "fi" | "or"
+        | "ifpdfprimitive" | "ifpdfabsnum" | "ifpdfabsdim" | "ifincsname" => &["ifstack"],
+        // fonts (§1257 new_font, §1234)
+        "font" => &["fd:", "fdn:", "fontcount", "fontid:", "fontinfo:", "hc:", "sc:", "ifstack"],
+        "textfont" | "scriptfont" | "scriptscriptfont" => &["fam:"],
+        // codes (§1232)
+        "catcode" => &["cat:"],
+        "lccode" => &["lc:"],
+        "uccode" => &["uc:"],
+        "sfcode" => &["sf:"],
+        "mathcode" => &["mc:"],
+        "delcode" => &["dc:"],
+        // registers and parameters (§1224-§1248)
+        "count" | "dimen" | "skip" | "muskip" | "toks" | "advance" | "multiply" | "divide" => {
+            &["count:", "dimen:", "skip:", "muskip:", "toks:", "param:"]
+        }
+        "parshape" | "interlinepenalties" | "clubpenalties" | "widowpenalties"
+        | "displaywidowpenalties" => &["parshape", "param:"],
+        "prevgraf" => &["pg:"],
+        "deadcycles" => &["deadcycles"],
+        "insertpenalties" => &["inspen"],
+        "pagegoal" | "pagetotal" | "pagestretch" | "pagefilstretch" | "pagefillstretch"
+        | "pagefilllstretch" | "pageshrink" | "pagedepth" => &["page:"],
+        "batchmode" | "nonstopmode" | "scrollmode" | "errorstopmode" | "interactionmode" => {
+            &["interaction"]
+        }
+        "hyphenation" | "patterns" => &["patterns"],
+        // alignments (§774-§800); `align:` is on every node
+        "halign" | "valign" | "cr" | "crcr" | "noalign" | "omit" | "span" => &["badness"],
+        "read" | "readline" => &["read:"],
+        // fractions (§1181)
+        "over" | "atop" | "above" | "overwithdelims" | "atopwithdelims" | "abovewithdelims" => {
+            &["inc"]
+        }
+        "output" => &["param:"],
+        _ => {
+            if crate::prims::PRIMS.iter().any(|p| p.0 == n) || table_param(n) {
+                // (a parameter by name, or a primitive not listed: its
+                // own parameter, or any head)
+                if table_param(n) {
+                    return Some(&["param:"]);
+                }
+                return None;
+            }
+            return None;
+        }
+    })
 }
+
+/// Whether `name` is an integer, dimen, glue or token parameter.
+fn table_param(name: &str) -> bool {
+    crate::prims::PRIMS
+        .iter()
+        .any(|p| p.0 == name && matches!(p.1, 72..=76))
+}
+
+/// The engine's state head of a field the pass names (`count:12`,
+/// `param:\tolerance`, `catcode:124`, `misc:pdflastobj`).
+fn head_of_pass_field(f: &str) -> Option<&'static str> {
+    let fam = f.split(':').next().unwrap_or("");
+    Some(match fam {
+        "count" => "count:",
+        "dimen" => "dimen:",
+        "skip" => "skip:",
+        "muskip" => "muskip:",
+        "toks" => "toks:",
+        "box" => "box:",
+        "catcode" => "cat:",
+        "lccode" => "lc:",
+        "uccode" => "uc:",
+        "sfcode" => "sf:",
+        "mathcode" => "mc:",
+        "delcode" => "dc:",
+        "textfont" | "scriptfont" | "scriptscriptfont" => "fam:",
+        "param" => "param:",
+        "misc" => "pdf:",
+        _ => return None,
+    })
+}
+
+/// Adds heads to a state set (`None`: every head already).
+fn add_heads(st: &mut Option<Vec<String>>, heads: Option<&[&str]>) {
+    match (st.as_mut(), heads) {
+        (Some(v), Some(hs)) => {
+            for h in hs {
+                if !v.iter().any(|x| x == h) {
+                    v.push((*h).to_owned());
+                }
+            }
+        }
+        (Some(_), None) => *st = None,
+        (None, _) => {}
+    }
+}
+
+fn add_head(st: &mut Option<Vec<String>>, h: &str) {
+    add_heads(st, Some(&[h]));
+}
+
 
 /// The heads of every field a run may set besides the control sequences:
 /// each lowercase letter but `c` and `a`, and those two followed by any
@@ -104,7 +242,7 @@ fn state_prefixes() -> &'static [String] {
         }
         for c in (b'A'..=b'Z')
             .chain(b'0'..=b'9')
-            .chain([b'_', b'@', b'.', b'-', b'/', b':'])
+            .chain(*b"_@.-/:")
         {
             v.push((c as char).to_string());
         }
@@ -368,6 +506,20 @@ struct Analysis<'t> {
     defs: Definitions,
     /// Item index by atom.
     item_of: HashMap<usize, usize>,
+    /// Atoms an earlier item claims (operands: never run on their own).
+    claimed: Vec<bool>,
+    memo: std::cell::RefCell<HashMap<String, DefSet>>,
+}
+
+/// Names that start a paragraph in vertical mode (§1090): the text
+/// after them is in one.
+fn starts_par(name: &str) -> bool {
+    matches!(
+        name,
+        "indent" | "noindent" | "char" | "unhbox" | "unhcopy" | "vrule" | "accent"
+            | "discretionary" | "-" | "hskip" | "hfil" | "hfill" | "hss" | "hfilneg" | "valign"
+            | " " | "noboundary" | "tex_indent:D" | "tex_noindent:D"
+    )
 }
 
 impl Analysis<'_> {
@@ -381,17 +533,20 @@ impl Analysis<'_> {
             prelude: &empty,
         };
         let p = pass::analyze(text, kind, scope);
-        let item_of = p
-            .items
-            .iter()
-            .enumerate()
-            .map(|(i, it)| (it.atom, i))
-            .collect();
+        let item_of = p.items.iter().enumerate().map(|(i, it)| (it.atom, i)).collect();
+        let mut claimed = vec![false; p.atoms.len()];
+        for it in &p.items {
+            for c in claimed.iter_mut().take(it.end.min(p.atoms.len())).skip(it.atom + 1) {
+                *c = true;
+            }
+        }
         Analysis {
             text,
             p,
             defs,
             item_of,
+            claimed,
+            memo: std::cell::RefCell::new(HashMap::new()),
         }
     }
 
@@ -399,29 +554,86 @@ impl Analysis<'_> {
         &self.p.atoms
     }
 
-    /// The bytes an atom is read from, with the catcodes of its regime.
-    fn cats_of(&self, a: usize, out: &mut Vec<(u8, u8)>) {
-        let Some(at) = self.atoms().get(a) else {
-            return;
-        };
+    /// What calling `name` (as the text defines it) may define.
+    fn defset(&self, name: &str) -> DefSet {
+        if let Some(d) = self.memo.borrow().get(name) {
+            return d.clone();
+        }
+        let empty = Definitions::new();
+        let d = self.defs.call_defines(&empty, name);
+        self.memo.borrow_mut().insert(name.to_owned(), d.clone());
+        d
+    }
+
+    /// The bytes an atom is read from, with the catcodes of its regime:
+    /// a control word's escape and letters (a control symbol's character
+    /// has any catcode but a letter's), a character, a brace, a space.
+    /// Nothing of an atom read under another regime than the command's
+    /// first (a change the command itself makes, as the pass predicted).
+    fn cats_of(&self, first: usize, a: usize, out: &mut Vec<(u8, u8)>) {
+        let Some(at) = self.atoms().get(a) else { return };
         let r = self.p.regime_at(at.tok);
+        if self.atoms().get(first).is_some_and(|f| self.p.regime_at(f.tok) != r) {
+            return;
+        }
         let bytes: Vec<u8> = match at.kind {
-            AtomKind::Cs
-            | AtomKind::Char(_)
-            | AtomKind::Open
-            | AtomKind::Close
-            | AtomKind::Param(_) => self.text.as_bytes()[at.start..at.end].to_vec(),
+            AtomKind::Cs => {
+                let name = at.name(self.text);
+                if name.bytes().all(|b| r.catcode(b) == Some(11)) {
+                    self.text.as_bytes()[at.start..at.end].to_vec()
+                } else {
+                    vec![self.text.as_bytes()[at.start]]
+                }
+            }
+            AtomKind::Char(_) | AtomKind::Open | AtomKind::Close | AtomKind::Param(_) => {
+                self.text.as_bytes()[at.start..at.end].to_vec()
+            }
             AtomKind::Space => vec![b' '],
             AtomKind::Par | AtomKind::Verb => Vec::new(),
         };
         for b in bytes {
-            if b < 128 && (b == 9 || (32..127).contains(&b)) {
-                let c = r.catcode(b);
-                if !out.contains(&(b, c)) {
-                    out.push((b, c));
-                }
+            if b < 128
+                && (b == 9 || (32..127).contains(&b))
+                && let Some(c) = r.catcode(b)
+                && !out.contains(&(b, c))
+            {
+                out.push((b, c));
             }
         }
+    }
+
+    /// The atom before `a` that is not a space.
+    fn prev(&self, a: usize) -> Option<usize> {
+        let mut k = a;
+        while k > 0 {
+            k -= 1;
+            if self.atoms()[k].kind != AtomKind::Space {
+                return Some(k);
+            }
+        }
+        None
+    }
+
+    /// Whether horizontal material at `a` may start a paragraph: it is
+    /// in one only after a character or a command that started it.
+    fn may_start_par(&self, a: usize) -> bool {
+        match self.prev(a) {
+            None => true,
+            Some(k) => match self.atoms()[k].kind {
+                AtomKind::Char(_) | AtomKind::Verb | AtomKind::Param(_) => false,
+                AtomKind::Cs => !starts_par(self.atoms()[k].name(self.text)),
+                _ => true,
+            },
+        }
+    }
+
+    /// Whether `\afterassignment` stands just before the command at `a`
+    /// (with its token): the assignment consumes `aftertoken` (§1269).
+    fn after_afterassignment(&self, a: usize) -> bool {
+        let Some(t) = self.prev(a) else { return false };
+        let Some(c) = self.prev(t) else { return false };
+        let at = self.atoms()[c];
+        at.kind == AtomKind::Cs && matches!(at.name(self.text), "afterassignment" | "tex_afterassignment:D")
     }
 
     /// The hint of the command whose first atom is `a`.
@@ -431,43 +643,58 @@ impl Analysis<'_> {
             return Hint::any("end of text", "");
         };
         let excerpt = &self.text[at.start..self.text.len().min(at.start + 40)];
-        let mut b = Bound::default();
+        if self.claimed[a] {
+            return Hint::any("operand of an earlier command (claimed, never run)", excerpt);
+        }
+        let mut b = Bound {
+            state: Some(vec!["align:".to_owned()]),
+            ..Bound::default()
+        };
         let mut cause = String::new();
         let ok = match at.kind {
-            AtomKind::Cs => self.cs_hint(a, &mut b, &mut cause),
+            AtomKind::Cs => self.cs_hint(a, a, &mut b, &mut cause),
             AtomKind::Char(_) | AtomKind::Verb => {
                 // (a run of characters: the active ones expand here, and
                 // the token after the run is looked at, §1038)
+                if self.may_start_par(a) {
+                    add_head(&mut b.state, "par:");
+                }
                 let mut k = a;
                 let mut ok = true;
                 while let Some(x) = atoms.get(k)
                     && matches!(x.kind, AtomKind::Char(_) | AtomKind::Verb)
                 {
-                    self.cats_of(k, &mut b.cats);
+                    self.cats_of(a, k, &mut b.cats);
                     if let AtomKind::Char(c) = x.kind
-                        && self.is_active(c, k)
+                        && self.is_active(c)
                     {
                         ok = ok && self.call_hint(&c.to_string(), &mut b, &mut cause);
                     }
                     k += 1;
                 }
                 if ok && atoms.get(k).is_some_and(|x| x.kind == AtomKind::Cs) {
-                    ok = self.cs_hint(k, &mut b, &mut cause);
+                    ok = self.cs_hint(a, k, &mut b, &mut cause);
                 }
                 ok
             }
             AtomKind::Par => {
-                self.cats_of(a, &mut b.cats);
+                self.cats_of(a, a, &mut b.cats);
+                add_head(&mut b.state, "par:");
                 self.call_hint("par", &mut b, &mut cause)
             }
-            AtomKind::Open | AtomKind::Close | AtomKind::Space | AtomKind::Param(_) => {
-                self.cats_of(a, &mut b.cats);
+            AtomKind::Close => {
+                self.cats_of(a, a, &mut b.cats);
+                add_heads(&mut b.state, class_state("egroup"));
+                true
+            }
+            AtomKind::Open | AtomKind::Space | AtomKind::Param(_) => {
+                self.cats_of(a, a, &mut b.cats);
                 true
             }
         };
         if ok {
             if cause.is_empty() {
-                cause = "bounded".to_owned();
+                "bounded".clone_into(&mut cause);
             }
             Hint {
                 bound: Some(b),
@@ -479,15 +706,14 @@ impl Analysis<'_> {
         }
     }
 
-    fn is_active(&self, c: char, _k: usize) -> bool {
+    fn is_active(&self, c: char) -> bool {
         c == '~' || (c.is_ascii() && self.defs.active_chars() >> (c as u32) & 1 == 1)
     }
 
     /// A macro called by name (`\par` for a blank line, an active
     /// character).
     fn call_hint(&self, name: &str, b: &mut Bound, cause: &mut String) -> bool {
-        let empty = Definitions::new();
-        let set = self.defs.call_defines(&empty, name);
+        let set = self.defset(name);
         let field = match name.chars().next() {
             Some(c) if name.chars().count() == 1 && !c.is_alphabetic() && name != "par" => {
                 Tok::ch(13, u32::from(c)).field_name()
@@ -497,14 +723,74 @@ impl Analysis<'_> {
         if let Some(f) = field {
             b.means.push((f, 1));
         }
-        add_set(&set, b, cause)
+        self.add_set(&set, b, cause)
     }
 
-    /// The hint of the control sequence at `a`.
-    fn cs_hint(&self, a: usize, b: &mut Bound, cause: &mut String) -> bool {
+    /// The state the commands `calls` (of a body the text defines) may
+    /// set.
+    fn calls_state(&self, calls: &[String], st: &mut Option<Vec<String>>) {
+        for c in calls {
+            if st.is_none() {
+                return;
+            }
+            if self.defs.is_defined(c) {
+                // (a name the text defines: its body's calls are in the
+                // list already; a quantity made by \let, \font,
+                // \chardef selects a font or appends)
+                let d = self.defset(c);
+                if d.calls.is_empty() && d.names.is_empty() && d.prefixes.is_empty() {
+                    add_head(st, "font");
+                }
+                continue;
+            }
+            if starts_par(c) {
+                add_head(st, "par:");
+            }
+            add_heads(st, class_state(c));
+        }
+    }
+
+    /// The set's fields and relied macros into the bound.
+    fn add_set(&self, set: &DefSet, b: &mut Bound, cause: &mut String) -> bool {
+        if let Some(u) = set.unbounded.first() {
+            cause.clone_from(u);
+            return false;
+        }
+        for r in &set.relied {
+            if let Some(f) = Tok::cs(r).field_name()
+                && !b.means.iter().any(|m| m.0 == f)
+            {
+                b.means.push((f, 1));
+            }
+        }
+        for f in set.names.keys() {
+            if let Some(f) = engine_field(f) {
+                if !b.names.contains(&f) {
+                    b.names.push(f);
+                }
+            } else if let Some(h) = head_of_pass_field(f) {
+                add_head(&mut b.state, h);
+            }
+        }
+        for f in set.prefixes.keys() {
+            if let Some(p) = engine_prefix(f) {
+                if !b.prefixes.contains(&p) {
+                    b.prefixes.push(p);
+                }
+            } else if let Some(h) = head_of_pass_field(f) {
+                add_head(&mut b.state, h);
+            }
+        }
+        self.calls_state(&set.calls, &mut b.state);
+        true
+    }
+
+    /// The hint of the control sequence at `a`, of a command beginning
+    /// at `first`.
+    fn cs_hint(&self, first: usize, a: usize, b: &mut Bound, cause: &mut String) -> bool {
         let atoms = self.atoms();
         let name = atoms[a].name(self.text);
-        self.cats_of(a, &mut b.cats);
+        self.cats_of(first, a, &mut b.cats);
         if is_prefix(name) {
             // (the prefixed command runs here)
             let mut k = a + 1;
@@ -512,14 +798,16 @@ impl Analysis<'_> {
                 match x.kind {
                     AtomKind::Space => {}
                     AtomKind::Cs if is_prefix(x.name(self.text)) => {}
-                    AtomKind::Cs => return self.cs_hint(k, b, cause),
+                    AtomKind::Cs => return self.cs_hint(first, k, b, cause),
                     _ => break,
                 }
-                self.cats_of(k, &mut b.cats);
+                self.cats_of(first, k, &mut b.cats);
                 k += 1;
             }
-            // (`\global` then an active character or nothing)
-            return true;
+            // (`\global` then an active character, or the command in
+            // text this one does not see)
+            *cause = format!("\\{name}: a prefix whose command follows elsewhere");
+            return false;
         }
         if LOOKTHROUGH.contains(&name) {
             *cause = format!("\\{name}: the command run here is computed");
@@ -533,11 +821,10 @@ impl Analysis<'_> {
         let it = &self.p.items[i];
         let end = it.end.max(a + 1).min(atoms.len());
         for k in a + 1..end {
-            self.cats_of(k, &mut b.cats);
+            self.cats_of(first, k, &mut b.cats);
         }
-        let class = u8::from(!crate::prims::PRIMS.iter().any(|p| p.0 == name));
         if let Some(f) = Tok::cs(name).field_name() {
-            b.means.push((f, class));
+            b.means.push((f, 1));
         }
         for r in &it.hints.relied {
             if let Some(f) = Tok::cs(r).field_name()
@@ -546,7 +833,30 @@ impl Analysis<'_> {
                 b.means.push((f, 1));
             }
         }
-        b.state = state_of(name);
+        // (the state: the command's own class, the text's definition of
+        // it, and what the bodies it relies on call)
+        if self.defs.is_defined(name) {
+            let d = self.defset(name);
+            if d.calls.is_empty() && d.names.is_empty() && d.prefixes.is_empty() {
+                add_head(&mut b.state, "font");
+            }
+        } else {
+            add_heads(&mut b.state, class_state(name));
+        }
+        if name == "font" {
+            // (§1257: the font identifier's frozen twin)
+            b.prefixes.push("cs:\u{10FFFE}F".to_owned());
+        }
+        if starts_par(name) && self.may_start_par(a) {
+            add_head(&mut b.state, "par:");
+        }
+        if matches!(name, "par" | "tex_par:D") || it.hints.implicit == pass::Implicit::EndsParagraph {
+            add_head(&mut b.state, "par:");
+        }
+        if self.after_afterassignment(first) {
+            add_head(&mut b.state, "aftertoken");
+        }
+        self.calls_state(&it.hints.calls, &mut b.state);
         match &it.hints.may_define {
             pass::MayDefine::Nothing => true,
             pass::MayDefine::Names(ds) => {
@@ -564,10 +874,9 @@ impl Analysis<'_> {
                 );
                 if *cause == format!("\\{name}: unbounded") {
                     // (the reason the pass gives: the closure's)
-                    let empty = Definitions::new();
-                    let set = self.defs.call_defines(&empty, name);
+                    let set = self.defset(name);
                     if let Some(u) = set.unbounded.first() {
-                        *cause = u.clone();
+                        cause.clone_from(u);
                     }
                 }
                 false
@@ -578,7 +887,9 @@ impl Analysis<'_> {
 
 fn add_defs(ds: &[Def], prefixes: bool, b: &mut Bound) {
     for d in ds {
-        if prefixes {
+        if let Some(h) = head_of_pass_field(&d.field) {
+            add_head(&mut b.state, h);
+        } else if prefixes {
             if let Some(p) = engine_prefix(&d.field)
                 && !b.prefixes.contains(&p)
             {
@@ -590,35 +901,6 @@ fn add_defs(ds: &[Def], prefixes: bool, b: &mut Bound) {
             b.names.push(f);
         }
     }
-}
-
-fn add_set(set: &DefSet, b: &mut Bound, cause: &mut String) -> bool {
-    if let Some(u) = set.unbounded.first() {
-        *cause = u.clone();
-        return false;
-    }
-    for r in &set.relied {
-        if let Some(f) = Tok::cs(r).field_name()
-            && !b.means.iter().any(|m| m.0 == f)
-        {
-            b.means.push((f, 1));
-        }
-    }
-    for f in set.names.keys() {
-        if let Some(f) = engine_field(f)
-            && !b.names.contains(&f)
-        {
-            b.names.push(f);
-        }
-    }
-    for f in set.prefixes.keys() {
-        if let Some(p) = engine_prefix(f)
-            && !b.prefixes.contains(&p)
-        {
-            b.prefixes.push(p);
-        }
-    }
-    true
 }
 
 fn analyse(text: &str, kind: FileKind) -> TextHints {
@@ -669,8 +951,8 @@ fn hash_str(s: &str) -> u64 {
 
 type Cache<K> = Mutex<HashMap<K, Arc<TextHints>>>;
 
-fn texts() -> &'static Cache<(u64, bool)> {
-    static C: OnceLock<Cache<(u64, bool)>> = OnceLock::new();
+fn texts() -> &'static Cache<(u64, u8)> {
+    static C: OnceLock<Cache<(u64, u8)>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -679,9 +961,33 @@ fn by_name() -> &'static Cache<u64> {
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Whether a text is written for INITEX's catcodes: its first `{` comes
+/// after its own `\catcode` of `{` (plain.tex, latex.ltx, a document
+/// run without a format).
+fn looks_initex(text: &str) -> bool {
+    let brace = text.find('{');
+    let line = text.find("\\catcode`\\{").or_else(|| text.find("\\catcode123"));
+    match (line, brace) {
+        (Some(l), Some(b)) => l < b,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+/// The regime a text starts in: the kind its name says, unless the text
+/// itself sets up its braces.
+fn kind_of(text: &str, named: FileKind) -> FileKind {
+    if looks_initex(text) {
+        FileKind::Initex
+    } else {
+        named
+    }
+}
+
 /// The analysis of a document's or prelude's text (cached by the text).
 pub(crate) fn text_hints(text: &str, kind: FileKind) -> Arc<TextHints> {
-    let key = (hash_str(text), kind == FileKind::Package);
+    let kind = kind_of(text, kind);
+    let key = (hash_str(text), kind as u8);
     if let Some(t) = texts()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -708,16 +1014,36 @@ pub(crate) fn hint_arg(v: &Values, text: &str, s: usize) -> ValueId {
     }
 }
 
+fn by_id() -> &'static Cache<u64> {
+    static C: OnceLock<Cache<u64>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// The analysis of a file read by `\input`: its text value `id`, named
 /// `name`.
 fn file_hints(v: &Values, id: ValueId, name: ValueId) -> Arc<TextHints> {
-    let text = str_of(v, id);
-    let nm = str_of(v, name);
-    let t = text_hints(&text, FileKind::from_path(&nm));
-    by_name()
+    let known = by_id()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .insert(name.raw(), t.clone());
+        .get(&id.raw())
+        .cloned();
+    let t = match known {
+        Some(t) => t,
+        None => {
+            let text = str_of(v, id);
+            let nm = str_of(v, name);
+            let t = text_hints(&text, FileKind::from_path(&nm));
+            by_id()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(id.raw(), t.clone());
+            t
+        }
+    };
+    let mut bn = by_name().lock().unwrap_or_else(PoisonError::into_inner);
+    if !bn.get(&name.raw()).is_some_and(|x| Arc::ptr_eq(x, &t)) {
+        bn.insert(name.raw(), t.clone());
+    }
     t
 }
 
@@ -749,6 +1075,7 @@ pub(crate) fn hint_of_args(v: &Values, args: &[ValueId]) -> Arc<Hint> {
     h
 }
 
+#[allow(clippy::too_many_lines)]
 fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
     if let Some(&h) = args.get(2) {
         return Hint::decode(&str_of(v, h));
@@ -788,7 +1115,8 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
             // (the rest of a document slice: read on its own, its
             // catcodes verified when it runs)
             let mut h = text_hints(&text, FileKind::Document).at(0);
-            if h.bound.is_some() {
+            if let Some(b) = &mut h.bound {
+                fragment_context(b);
                 h.cause = format!("{} (text on its own)", h.cause);
             }
             h
@@ -826,7 +1154,7 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
                         Tok::C(_) => {
                             let c = t.chr();
                             let cat = t.cat().unwrap_or(12);
-                            let Some(ch) = char::from_u32(c).filter(|c| c.is_ascii()) else {
+                            let Some(ch) = char::from_u32(c).filter(char::is_ascii) else {
                                 ok = false;
                                 break;
                             };
@@ -849,6 +1177,7 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
                     if let Some(b) = &mut h.bound {
                         // (the tokens are read already)
                         b.cats.clear();
+                        fragment_context(b);
                         h.cause = format!("{} (expansion tokens)", h.cause);
                     }
                     h
@@ -858,6 +1187,14 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
         }
         _ => Hint::any("unknown frame", ""),
     }
+}
+
+/// A fragment's context is not in its text: it may start a paragraph,
+/// follow an `\afterassignment`, and the state of what it calls is
+/// known only by name.
+fn fragment_context(b: &mut Bound) {
+    add_head(&mut b.state, "par:");
+    add_head(&mut b.state, "aftertoken");
 }
 
 /// Plain TeX's catcode of an ASCII byte (`@` a letter when `at`).
@@ -1028,7 +1365,7 @@ pub(crate) fn debug_defs(r: &Run<'_, '_>, h: &Hint) {
         fs.dedup();
         let first = h
             .excerpt
-            .split(|c: char| c == ' ' || c == '{' || c == '#' || c == '=')
+            .split([' ', '{', '#', '='])
             .next()
             .unwrap_or("")
             .to_owned();
@@ -1059,12 +1396,13 @@ mod tests {
         assert_eq!(b.names, vec!["cs:foo".to_owned()]);
         assert!(b.cats.contains(&(b'\\', 0)));
         assert!(b.cats.contains(&(b'{', 1)));
-        assert!(b.means.contains(&("def".to_owned(), 0)));
+        assert!(b.means.contains(&("cs:def".to_owned(), 1)));
+        assert_eq!(b.state.as_deref(), Some(&["align:".to_owned()][..]));
         // the call: its body defines nothing
         let h = hint_of("\\def\\foo#1{x#1y}\n\\foo{a}\n", 17);
         let b = h.bound.expect("bounded");
-        assert!(b.names.is_empty());
-        assert!(b.means.contains(&("foo".to_owned(), 1)));
+        assert!(b.names.is_empty(), "{b:?}");
+        assert!(b.means.contains(&("cs:foo".to_owned(), 1)));
     }
 
     #[test]
@@ -1095,6 +1433,22 @@ mod tests {
         let b = h.bound.expect("bounded: `~` defines nothing in the text");
         assert!(b.means.contains(&("act:126".to_owned(), 1)), "{b:?}");
         assert!(b.cats.contains(&(b'~', 13)));
+    }
+
+    #[test]
+    fn paragraph_and_conditional_classes() {
+        let t = "\\par\nText here \\ifnum1=1 \\fi\n\\afterassignment\\x\\def\\y{}\n";
+        let text = analyse(t, FileKind::Document);
+        let st = |off: usize| text.at(off).bound.expect("bounded").state;
+        assert_eq!(st(0).as_deref(), Some(&["align:".to_owned(), "par:".to_owned()][..]));
+        // a run of text after \par may start a paragraph
+        assert!(st(5).expect("some").contains(&"par:".to_owned()));
+        // and the run after it is in one
+        assert!(!st(10).expect("some").contains(&"par:".to_owned()));
+        assert!(st(15).expect("some").contains(&"ifstack".to_owned()));
+        let d = text.at(t.find("\\def").unwrap()).bound.expect("bounded");
+        assert!(d.state.expect("some").contains(&"aftertoken".to_owned()));
+        assert_eq!(d.names, vec!["cs:y".to_owned()]);
     }
 
     #[test]
