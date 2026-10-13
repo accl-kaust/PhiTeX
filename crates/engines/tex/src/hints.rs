@@ -1729,6 +1729,28 @@ impl Analysis<'_> {
         self.hint_run(a)
     }
 
+    /// Whether the atom at `k`, outside every brace group of the text
+    /// (or after `\\global`), is a command whose own state (its class,
+    /// or its body's calls, not its arguments') includes `head`.
+    fn selects_outside(&self, k: usize, head: &str) -> bool {
+        let atoms = self.atoms();
+        let Some(at) = atoms.get(k) else { return false };
+        if at.kind != AtomKind::Cs || (self.inner[k] && !self.after_global(k)) {
+            return false;
+        }
+        let name = at.name(self.text);
+        let mut st = Some(Vec::new());
+        if self.is_defined(name) {
+            self.defined_state(name, false, &mut st);
+        } else {
+            add_heads(&mut st, class_state(name));
+            if class_state(name).is_none() && (is_prim(name) || table_param(name)) {
+                return true;
+            }
+        }
+        st.is_none_or(|st| st.iter().any(|x| x == head))
+    }
+
     /// Whether the atom at `a` follows `\\global` (spaces between).
     fn after_global(&self, a: usize) -> bool {
         let atoms = self.atoms();
@@ -2545,6 +2567,22 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
             continue;
         }
         let excerpt = short(&text[s..text.len().min(s + 40)]);
+        // (a font selection, `\\bf`, that only an argument or a group
+        // inside the slice makes is local to that group: the slice
+        // declares it only when a command outside every brace group of
+        // the slice selects one, §1217)
+        for head in GROUP_LOCAL {
+            let k0 = t.starts.partition_point(|&x| x < s);
+            let k1 = t.starts.partition_point(|&x| x < e);
+            let outside = (k0..k1).any(|k| an.selects_outside(k, head));
+            if !outside {
+                for b in [h.bound.as_mut(), h.guess.as_mut()].into_iter().flatten() {
+                    if let Some(st) = &mut b.state {
+                        st.retain(|x| x != head);
+                    }
+                }
+            }
+        }
         if t.pars[i] {
             if let Some(b) = &mut h.bound {
                 add_heads(&mut b.state, Some(&["pg:"]));
@@ -2957,6 +2995,11 @@ fn fragment_context(b: &mut Bound) {
     add_head(&mut b.state, "pg:");
     add_head(&mut b.state, "aftertoken");
 }
+
+/// The heads a font switch sets (§1217, §1228 `\\fam`): local to the
+/// group it runs in, so a slice declares them only for a switch outside
+/// every brace group ([`Analysis::selects_outside`]).
+const GROUP_LOCAL: [&str; 2] = ["curfont", "param:fam"];
 
 /// Plain TeX's catcode of an ASCII byte (`@` a letter when `at`).
 fn plain_catcode(b: u8, at: bool) -> u8 {
