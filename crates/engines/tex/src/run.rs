@@ -252,6 +252,14 @@ pub(crate) struct Run<'c, 'a> {
     /// The objects this run made at read time in relaxed PDF mode (their
     /// owner keys: the node and the occurrence).
     pub pdf_occ: usize,
+    /// Whether this run continues a parked attempt ([`Run::from_parked`]).
+    pub resumed: bool,
+    /// Changes to the run's state a stopped command cannot undo (own
+    /// definitions, a buffer reduced in place): a stop after one does
+    /// not park ([`Run::rewind`]).
+    pub irreversible: u64,
+    /// The input as the command in progress began ([`Run::rewind`]).
+    mark: Mark,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -308,6 +316,9 @@ impl<'c, 'a> Run<'c, 'a> {
             radix: 0,
             cur_order: phitex_typeset::glue::Order::Normal,
             pdf_occ: 0,
+            resumed: false,
+            irreversible: 0,
+            mark: Mark::default(),
         }
     }
 
@@ -599,6 +610,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.save_local(f);
         }
         self.own.insert(f, Some(val));
+        self.irreversible += 1;
         self.cats = [0; 256];
         let loc = if global { Locality::Global } else { Locality::Local };
         // the definitions since the innermost group opened are the
@@ -774,7 +786,7 @@ impl<'c, 'a> Run<'c, 'a> {
             if *p < t.len() {
                 break;
             }
-            self.frames.pop_front();
+            self.pop_front_marked();
         }
     }
 
@@ -902,13 +914,13 @@ impl<'c, 'a> Run<'c, 'a> {
                         *p += 1;
                         return Ok(Some(tok));
                     }
-                    self.frames.pop_front();
+                    self.pop_front_marked();
                 }
                 Frame::Src(_) => {
                     if let Some(t) = self.src_next()? {
                         return Ok(Some(t));
                     }
-                    self.frames.pop_front();
+                    self.pop_front_marked();
                 }
                 Frame::File(_) => {
                     // (a document file's lines are paragraph-region
@@ -931,7 +943,7 @@ impl<'c, 'a> Run<'c, 'a> {
                             self.frames.push_front(fr);
                         }
                     } else {
-                        self.frames.pop_front();
+                        self.pop_front_marked();
                     }
                 }
             }
@@ -1218,6 +1230,7 @@ impl<'c, 'a> Run<'c, 'a> {
             c - 0o100
         };
         s.buf.drain(k..k + d);
+        self.irreversible += 1;
         true
     }
 
@@ -1479,7 +1492,9 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         loop {
             while self.has_input() {
+                self.begin_command();
                 self.command()?;
+                self.mark.active = false;
                 if self.claim_rest {
                     return Ok(());
                 }
@@ -1842,4 +1857,409 @@ pub(crate) fn slice_args(v: &Values, text: &str, starts_line: bool) -> Vec<Value
         rest = next;
     }
     vec![v.list(frames), v.int(1)]
+}
+
+// ------------------------------------------------------------- parking
+
+/// A token without `Rc`: a parked run crosses threads.
+enum PTok {
+    C(u32),
+    S(Box<str>),
+}
+
+fn ptok(t: &Tok) -> PTok {
+    match t {
+        Tok::C(c) => PTok::C(*c),
+        Tok::S(s) => PTok::S(Box::from(&**s)),
+    }
+}
+
+fn utok(t: PTok) -> Tok {
+    match t {
+        PTok::C(c) => Tok::C(c),
+        PTok::S(s) => Tok::S(Rc::from(s)),
+    }
+}
+
+enum PFrame {
+    Toks(Vec<PTok>),
+    Src(Src),
+    File(FileRest),
+}
+
+/// A [`crate::nest::Level`] without `Rc`.
+struct PLevel {
+    mode: i32,
+    group: i64,
+    lid: i64,
+    owns: bool,
+    list: Vec<ValueId>,
+    fold: crate::build::FoldState,
+    par: Option<(i64, i64)>,
+    prev_graf: i64,
+    extra: Vec<ValueId>,
+    #[allow(clippy::option_option)]
+    saved: Vec<(Field, Option<Option<ValueId>>, u64)>,
+    saved_ix: FxHashMap<Field, usize>,
+    defs_len: usize,
+    ag: Vec<PTok>,
+}
+
+/// A run stopped at a read, at the start of the command the read
+/// abandoned ([`Run::rewind`]): every owned field of [`Run`] but the
+/// caches, which the resumed run rebuilds ([`phitex_defuse::Ctx::park`]).
+pub(crate) struct Parked {
+    /// The values' epoch the ids below belong to.
+    epoch: u64,
+    frames: Vec<PFrame>,
+    pulled: usize,
+    top: bool,
+    claim_rest: bool,
+    nest: Vec<PLevel>,
+    next_lid: i64,
+    last_par: (i64, i64),
+    doc: bool,
+    fread: Vec<(String, u64)>,
+    no_pull: bool,
+    own: FxHashMap<Field, Option<ValueId>>,
+    defs: Vec<(Field, ValueId, Locality)>,
+    ginert: FxHashMap<Field, u64>,
+    stamp: u64,
+    contribs: Vec<(Field, ValueId)>,
+    kids: Vec<(OpId, Vec<ValueId>)>,
+    effect: Effect,
+    conds: Vec<u8>,
+    if_codes: Vec<i32>,
+    astate: Option<i64>,
+    lines_entered: i64,
+    eof: bool,
+    radix: i32,
+    cur_order: phitex_typeset::glue::Order,
+    pdf_occ: usize,
+    irreversible: u64,
+}
+
+/// Where an input frame stood when the command began.
+enum Snap {
+    Toks(Rc<[Tok]>, usize),
+    Src { loc: usize, state: u8, endch: i64, len: usize },
+    File(usize, usize),
+    None,
+}
+
+/// The command in progress (`Run::begin_command`): the input frames as it
+/// found them, the ones it used up, and a fingerprint of the rest of the
+/// run's state.
+#[derive(Default)]
+struct Mark {
+    active: bool,
+    /// `frames.len()` at the start.
+    len: usize,
+    /// The frames of the start still in `frames` (its tail).
+    orig_left: usize,
+    /// The start's frames, front first, as each was when it was reached.
+    snaps: Vec<Snap>,
+    /// The start's frames the command used up, front first.
+    popped: Vec<Frame>,
+    sig: u64,
+    effect: Option<Effect>,
+    astate: Option<i64>,
+    radix: i32,
+    cur_order: Option<phitex_typeset::glue::Order>,
+    no_pull: bool,
+}
+
+impl Run<'_, '_> {
+    fn snap_front(&self) -> Snap {
+        match self.frames.front() {
+            Some(Frame::Toks(t, p)) => Snap::Toks(t.clone(), *p),
+            Some(Frame::Src(s)) => Snap::Src {
+                loc: s.loc,
+                state: s.state,
+                endch: s.endch,
+                len: s.buf.len(),
+            },
+            Some(Frame::File(f)) => Snap::File(f.off, f.pos),
+            None => Snap::None,
+        }
+    }
+
+    /// What a stopped command must not have changed to be undone by
+    /// rewinding its input.
+    fn state_sig(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (
+            self.defs.len(),
+            self.contribs.len(),
+            self.kids.len(),
+            self.nest.len(),
+            self.conds.len(),
+            self.if_codes.len(),
+            self.next_lid,
+            self.own.len(),
+            self.irreversible,
+            self.stamp,
+            self.ginert.len(),
+            self.fread.len(),
+        )
+            .hash(&mut h);
+        (
+            self.pulled,
+            self.eof,
+            self.last_par,
+            self.claim_rest,
+            self.pdf_occ,
+            self.lines_entered,
+            self.top,
+        )
+            .hash(&mut h);
+        for l in &self.nest {
+            (
+                l.list.len(),
+                l.list.last(),
+                l.ag.len(),
+                l.saved.len(),
+                l.prev_graf,
+                l.fold.sf,
+                l.fold.pd,
+                l.fold.since_bp,
+                l.par,
+                l.extra.len(),
+            )
+                .hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// A command begins: marks the input and the state it starts from.
+    pub(crate) fn begin_command(&mut self) {
+        let snap = self.snap_front();
+        let sig = self.state_sig();
+        let m = &mut self.mark;
+        m.active = true;
+        m.len = self.frames.len();
+        m.orig_left = m.len;
+        m.snaps.clear();
+        m.snaps.push(snap);
+        m.popped.clear();
+        m.sig = sig;
+        m.effect = Some(self.effect);
+        m.astate = self.astate;
+        m.radix = self.radix;
+        m.cur_order = Some(self.cur_order);
+        m.no_pull = self.no_pull;
+    }
+
+    /// `frames.pop_front()`, keeping a frame the command in progress found
+    /// (and the state of the one it reaches next) for [`Run::rewind`].
+    fn pop_front_marked(&mut self) {
+        let f = self.frames.pop_front();
+        if self.mark.active && self.frames.len() < self.mark.orig_left {
+            self.mark.orig_left -= 1;
+            if let Some(f) = f {
+                self.mark.popped.push(f);
+            }
+            let s = self.snap_front();
+            self.mark.snaps.push(s);
+        }
+    }
+
+    /// After a stop inside a command: puts the input back as the command
+    /// found it, so a resumed run executes the command from its start.
+    /// False (the run must not park) if the command changed anything
+    /// else, or the input in a way not recorded.
+    fn rewind(&mut self) -> bool {
+        if !self.mark.active
+            || self.pg.is_some()
+            || self.state_sig() != self.mark.sig
+            || Some(self.effect) != self.mark.effect
+            || self.frames.len() < self.mark.orig_left
+        {
+            return false;
+        }
+        let m = std::mem::take(&mut self.mark);
+        for _ in m.orig_left..self.frames.len() {
+            self.frames.pop_front();
+        }
+        for f in m.popped.into_iter().rev() {
+            self.frames.push_front(f);
+        }
+        if self.frames.len() != m.len {
+            return false;
+        }
+        for (i, s) in m.snaps.into_iter().enumerate() {
+            match (s, self.frames.get_mut(i)) {
+                (Snap::Toks(t, p), Some(Frame::Toks(ft, fp))) => {
+                    *ft = t;
+                    *fp = p;
+                }
+                (
+                    Snap::Src {
+                        loc,
+                        state,
+                        endch,
+                        len,
+                    },
+                    Some(Frame::Src(x)),
+                ) => {
+                    if x.buf.len() < len {
+                        return false;
+                    }
+                    x.buf.truncate(len);
+                    x.loc = loc;
+                    x.state = state;
+                    x.endch = endch;
+                }
+                (Snap::File(off, pos), Some(Frame::File(x))) => {
+                    x.off = off;
+                    x.pos = pos;
+                }
+                (Snap::None, None) => {}
+                _ => return false,
+            }
+        }
+        self.astate = m.astate;
+        self.radix = m.radix;
+        self.no_pull = m.no_pull;
+        if let Some(o) = m.cur_order {
+            self.cur_order = o;
+        }
+        true
+    }
+
+    /// The run's state for [`phitex_defuse::Ctx::park`] after a stop:
+    /// `None` if the stopped command cannot be rewound.
+    pub(crate) fn park(&mut self) -> Option<Parked> {
+        if !self.rewind() {
+            return None;
+        }
+        let frames = std::mem::take(&mut self.frames)
+            .into_iter()
+            .map(|f| match f {
+                Frame::Toks(t, p) => PFrame::Toks(t[p.min(t.len())..].iter().map(ptok).collect()),
+                Frame::Src(s) => PFrame::Src(s),
+                Frame::File(f) => PFrame::File(f),
+            })
+            .collect();
+        let nest = std::mem::take(&mut self.nest)
+            .into_iter()
+            .map(|l| PLevel {
+                mode: l.mode,
+                group: l.group,
+                lid: l.lid,
+                owns: l.owns,
+                list: l.list,
+                fold: l.fold,
+                par: l.par,
+                prev_graf: l.prev_graf,
+                extra: l.extra,
+                saved: l.saved,
+                saved_ix: l.saved_ix,
+                defs_len: l.defs_len,
+                ag: l.ag.iter().map(ptok).collect(),
+            })
+            .collect();
+        Some(Parked {
+            epoch: self.cx.values_epoch(),
+            frames,
+            pulled: self.pulled,
+            top: self.top,
+            claim_rest: self.claim_rest,
+            nest,
+            next_lid: self.next_lid,
+            last_par: self.last_par,
+            doc: self.doc,
+            fread: std::mem::take(&mut self.fread),
+            no_pull: self.no_pull,
+            own: std::mem::take(&mut self.own),
+            defs: std::mem::take(&mut self.defs),
+            ginert: std::mem::take(&mut self.ginert),
+            stamp: self.stamp,
+            contribs: std::mem::take(&mut self.contribs),
+            kids: std::mem::take(&mut self.kids),
+            effect: self.effect,
+            conds: std::mem::take(&mut self.conds),
+            if_codes: std::mem::take(&mut self.if_codes),
+            astate: self.astate,
+            lines_entered: self.lines_entered,
+            eof: self.eof,
+            radix: self.radix,
+            cur_order: self.cur_order,
+            pdf_occ: self.pdf_occ,
+            irreversible: self.irreversible,
+        })
+    }
+}
+
+impl<'c, 'a> Run<'c, 'a> {
+    /// A run continuing a parked attempt at the command it stopped in;
+    /// `Err(cx)` if the token is of another values epoch (its ids may be
+    /// swept): the run then starts from the top.
+    pub(crate) fn from_parked(
+        cx: &'c mut Ctx<'a>,
+        ops: Ops,
+        p: Parked,
+    ) -> Result<Self, &'c mut Ctx<'a>> {
+        if p.epoch != cx.values_epoch() {
+            return Err(cx);
+        }
+        let mut r = Run::new(cx, ops);
+        r.frames = p
+            .frames
+            .into_iter()
+            .map(|f| match f {
+                PFrame::Toks(t) => {
+                    Frame::Toks(t.into_iter().map(utok).collect::<Vec<_>>().into(), 0)
+                }
+                PFrame::Src(s) => Frame::Src(s),
+                PFrame::File(f) => Frame::File(f),
+            })
+            .collect();
+        r.nest = p
+            .nest
+            .into_iter()
+            .map(|l| {
+                let mut x = crate::nest::Level::new(l.mode, l.group, l.lid, l.owns, l.extra);
+                x.list = l.list;
+                x.fold = l.fold;
+                x.par = l.par;
+                x.prev_graf = l.prev_graf;
+                x.saved = l.saved;
+                x.saved_ix = l.saved_ix;
+                x.defs_len = l.defs_len;
+                x.ag = l.ag.into_iter().map(utok).collect();
+                x
+            })
+            .collect();
+        r.pulled = p.pulled;
+        r.top = p.top;
+        r.claim_rest = p.claim_rest;
+        r.next_lid = p.next_lid;
+        r.last_par = p.last_par;
+        r.doc = p.doc;
+        r.fread = p.fread;
+        r.no_pull = p.no_pull;
+        r.own = p.own;
+        r.defs = p.defs;
+        for (i, d) in r.defs.iter().enumerate() {
+            r.def_ix.entry(d.0).or_default().push(i);
+        }
+        r.ginert = p.ginert;
+        r.stamp = p.stamp;
+        r.contribs = p.contribs;
+        r.kids = p.kids;
+        r.effect = p.effect;
+        r.conds = p.conds;
+        r.if_codes = p.if_codes;
+        r.astate = p.astate;
+        r.lines_entered = p.lines_entered;
+        r.eof = p.eof;
+        r.radix = p.radix;
+        r.cur_order = p.cur_order;
+        r.pdf_occ = p.pdf_occ;
+        r.irreversible = p.irreversible;
+        r.resumed = true;
+        Ok(r)
+    }
 }
