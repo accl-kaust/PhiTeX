@@ -116,7 +116,11 @@ fn editpath_doc() {
     };
     let path = std::path::PathBuf::from(path);
     let dir = path.parent().expect("a directory").to_path_buf();
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("doc").to_owned();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("doc")
+        .to_owned();
     let src = format!("\\pdfoutput=1 {}", common::read(&path));
     let opts = || common::options(&format!("./{stem}.tex"), &stem, "", &dir);
     let prelude = common::plain();
@@ -163,7 +167,15 @@ fn editpath_hello() {
     let cached = fmt.exists();
     let t0 = std::time::Instant::now();
     let mut b = common::build(opts(), Some("\\input pdflatex.ini\n"), &src);
-    edit_line(if cached { "cold start, cached format" } else { "cold start, format built" }, t0.elapsed(), &b);
+    edit_line(
+        if cached {
+            "cold start, cached format"
+        } else {
+            "cold start, format built"
+        },
+        t0.elapsed(),
+        &b,
+    );
     if !cached {
         match b.export_prelude() {
             Some(bytes) => {
@@ -175,7 +187,9 @@ fn editpath_hello() {
         }
     }
     let i = src.find("\\begin{document}").expect("a body") + 16;
-    let w = i + src[i..].find(|c: char| c.is_ascii_lowercase()).expect("a word");
+    let w = i + src[i..]
+        .find(|c: char| c.is_ascii_lowercase())
+        .expect("a word");
     let e1 = format!("{}Q{}", &src[..w], &src[w + 1..]);
     let t0 = std::time::Instant::now();
     b.edit(&e1);
