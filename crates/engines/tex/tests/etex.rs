@@ -95,3 +95,19 @@ fn io() {
 fn diagnostics() {
     run(&["show", "expr_errors", "ignoreerr", "pdfmatch", "micro"]);
 }
+
+/// Catcodes set locally inside groups that read files line by line
+/// (`\read`, `\readline`), use `\scantokens`/`\everyeof`, recurse, or
+/// mix `\global` and local assignments come back to the run's own
+/// values at the group's end (§282, §283).
+#[test]
+fn catcode_restore() {
+    run(&["catrestore"]);
+}
+
+/// `\expandafter` over `\else`/`\fi` with e-TeX's conditionals
+/// (`\unless`, `\ifcsname`, `\ifdefined`, `\detokenize` emptiness).
+#[test]
+fn expandafter_conditionals() {
+    run(&["xcondx"]);
+}
