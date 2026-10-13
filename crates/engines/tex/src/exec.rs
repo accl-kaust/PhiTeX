@@ -38,8 +38,17 @@ const GRAIN: usize = 64;
 
 /// Below this many jobs a batch of runs goes inline: most runs are one
 /// command (microseconds), so a hand-off to the pool per one- or
-/// two-node step costs more than the step.
-const JOB_GRAIN: usize = 64;
+/// two-node step costs more than the step. `PHITEX_GRAIN` overrides it
+/// (for measurements; the schedule never changes the output).
+fn job_grain() -> usize {
+    static G: OnceLock<usize> = OnceLock::new();
+    *G.get_or_init(|| {
+        std::env::var("PHITEX_GRAIN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(64)
+    })
+}
 
 /// How the host starts a worker thread: it runs the closure on a new
 /// worker (on wasm32: a web worker sharing the module's memory).
@@ -330,7 +339,7 @@ impl Executor for Threads {
         }
         self.batches.fetch_add(1, Ordering::Relaxed);
         self.jobs_max_batch.fetch_max(n, Ordering::Relaxed);
-        if self.n <= 1 || n < JOB_GRAIN || !threads_possible() {
+        if self.n <= 1 || n < job_grain() || !threads_possible() {
             self.batches_inline.fetch_add(1, Ordering::Relaxed);
             out.extend((0..n).map(|i| self.node_job(|| run(i))));
             return;
