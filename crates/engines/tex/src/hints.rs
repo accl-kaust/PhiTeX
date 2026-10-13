@@ -1136,12 +1136,11 @@ fn last_item(p: &Pass, text: &str, (s, e): (usize, usize)) -> Option<String> {
     let _ = text;
     p.items
         .iter()
-        .filter(|it| {
+        .rfind(|it| {
             p.atoms
                 .get(it.atom)
                 .is_some_and(|a| a.start >= s && a.start < e)
         })
-        .next_back()
         .map(|it| it.name.clone())
 }
 
@@ -2097,6 +2096,9 @@ fn add_defs(ds: &[Def], prefixes: bool, b: &mut Bound) {
     }
 }
 
+// (one pass over the atoms, then one over the slices; splitting it
+// would only pass its tables around)
+#[allow(clippy::too_many_lines)]
 fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     let an = Analysis::new(text, kind, defs.clone());
     let (slices, pars) = slices_of(text, &an.p, kind);
@@ -2169,9 +2171,10 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         // run in this node when it starts with a macro, or with another
         // such scanning command, transitively)
         {
-            let mut j = i;
+            // (`lastk`: the last slice taken in that is not blanks only)
+            let (mut j, mut lastk) = (i, i);
             while let (Some(last), Some(&(ns, ne))) =
-                (last_item(&an.p, text, t.slices[j]), t.slices.get(j + 1))
+                (last_item(&an.p, text, t.slices[lastk]), t.slices.get(j + 1))
             {
                 if !SCANS_ON.contains(&last.as_str()) {
                     break;
@@ -2199,6 +2202,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
                     break;
                 }
                 j += 1;
+                lastk = j;
             }
         }
         // (a document slice is balanced by construction: its groups,
