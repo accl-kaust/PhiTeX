@@ -243,13 +243,6 @@ pub(crate) struct Run<'c, 'a> {
     mcache: FxHashMap<ValueId, Mean>,
     /// The meaning fields of the tokens this run looked up.
     tfields: FxHashMap<Tok, Field>,
-    /// The meaning fields of control sequences by the address of their
-    /// shared name (the name held, so the address stays its own): a
-    /// pointer hash instead of hashing and comparing the name. Bounded.
-    sfields: FxHashMap<usize, (Rc<str>, Field)>,
-    /// The names of the control sequences the run tokenized, one shared
-    /// allocation per name (so [`Self::sfields`] hits).
-    syms: phitex_defuse::FxHashSet<Rc<str>>,
     /// The scope kind last decoded (`Run::mode`, once a command): its
     /// value and its fields `(group, sid, lid, mode, depth, extra)`.
     pub kind_memo: Option<(ValueId, KindFields)>,
@@ -314,8 +307,6 @@ impl<'c, 'a> Run<'c, 'a> {
             if_codes: Vec::new(),
             mcache: FxHashMap::default(),
             tfields: FxHashMap::default(),
-            sfields: FxHashMap::default(),
-            syms: phitex_defuse::FxHashSet::default(),
             kind_memo: None,
             astate: None,
             lines_entered: 0,
@@ -804,17 +795,6 @@ impl<'c, 'a> Run<'c, 'a> {
 
     pub(crate) fn mean_of(&mut self, t: &Tok) -> R<Mean> {
         // a token's meaning field, interned once a run
-        let key = match t {
-            Tok::S(n) => {
-                let k = n.as_ptr() as usize;
-                if let Some((_, f)) = self.sfields.get(&k) {
-                    let x = self.get_f(*f)?;
-                    return Ok(self.decode_mean(x));
-                }
-                Some((k, n.clone()))
-            }
-            Tok::C(_) => None,
-        };
         let f = if let Some(&f) = self.tfields.get(t) {
             Some(f)
         } else {
@@ -827,7 +807,6 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             f
         };
-        self.note_sfield(key, f);
         match f {
             Some(f) => {
                 let x = self.get_f(f)?;
@@ -835,29 +814,6 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             None => Ok(Mean::Char(t.cat().unwrap_or(0), t.chr())),
         }
-    }
-
-    /// Remembers the meaning field of a name's shared allocation.
-    fn note_sfield(&mut self, key: Option<(usize, Rc<str>)>, f: Option<Field>) {
-        if let (Some((k, n)), Some(f)) = (key, f) {
-            if self.sfields.len() >= 1 << 16 {
-                self.sfields.clear();
-            }
-            self.sfields.insert(k, (n, f));
-        }
-    }
-
-    /// The control sequence `name`, its name shared with every other
-    /// token of it the run tokenized.
-    pub(crate) fn sym(&mut self, name: &str) -> Tok {
-        if let Some(n) = self.syms.get(name) {
-            return Tok::S(n.clone());
-        }
-        let n: Rc<str> = Rc::from(name);
-        if self.syms.len() < 1 << 16 {
-            self.syms.insert(n.clone());
-        }
-        Tok::S(n)
     }
 
     pub(crate) fn decode_mean(&mut self, x: Option<ValueId>) -> Mean {
@@ -1316,7 +1272,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     if let Some(Frame::Src(s)) = self.frames.front_mut() {
                         s.loc = k;
                     }
-                    return Ok(self.sym(&name));
+                    return Ok(Tok::S(Rc::from(name)));
                 }
             } else if self.reduce_expanded(k, cat) {
                 continue;
@@ -1325,8 +1281,9 @@ impl<'c, 'a> Run<'c, 'a> {
             if let Some(Frame::Src(s)) = self.frames.front_mut() {
                 s.loc = loc + 1;
             }
-            let mut b = [0u8; 4];
-            return Ok(self.sym(char::from_u32(c).unwrap_or('?').encode_utf8(&mut b)));
+            return Ok(Tok::S(Rc::from(
+                char::from_u32(c).unwrap_or('?').to_string(),
+            )));
         }
     }
 
