@@ -17,6 +17,7 @@ use phitex_defuse::{
 use phitex_source::pass;
 
 use crate::hints::Defs;
+use crate::incr::Incr;
 use crate::ops::{Dvi, Exec, Files, Mark, Put, Shared};
 use crate::run::{Ops, slice_args, slice_args_in_file};
 use crate::val::{field_name, int_of, list_of, str_of};
@@ -186,10 +187,9 @@ struct Absorb<'a> {
     nodes: &'a mut Vec<(String, NodeId)>,
     exec: OpId,
     dvi: NodeId,
-    /// The format's definitions, for the new slices' hints and regions.
-    defs: Defs,
-    /// Whether the text is a document's ([`is_doc`]).
-    doc: bool,
+    /// The document's units and their analyses (`None`: a format's
+    /// text, one node).
+    incr: Option<&'a mut Incr>,
     /// The finder `\\input` files are sliced with, and the text applied.
     finder: Finder,
     text: &'a mut String,
@@ -204,8 +204,7 @@ impl phitex_defuse::EditSource for Absorb<'_> {
             self.dvi,
             self.nodes,
             &text,
-            &self.defs,
-            self.doc,
+            self.incr.as_deref_mut(),
             Some(&self.finder),
         );
         *self.text = text;
@@ -235,7 +234,7 @@ fn edit_apply_note(t_all: std::time::Instant, t: [std::time::Duration; 3], n: [u
     }
     let [t_slices, t_hints, t_diff] = t;
     eprintln!(
-        "edit apply: {:?} total; hint pass (slices: whole-text analyse) {t_slices:?}, text_hints again {:?}, slice-key diff {:?}, engine replace/insert/remove {:?}; {} old / {} new slices, {} kept, {} replaced, {} removed, {} inserted, text {} bytes",
+        "edit apply: {:?} total; hint pass (the chunks analysed again) {t_slices:?}, slices and keys {:?}, slice-key diff {:?}, engine replace/insert/remove {:?}; {} old / {} new slices, {} kept, {} replaced, {} removed, {} inserted, text {} bytes",
         t_all.elapsed(),
         t_hints.checked_sub(t_slices).unwrap_or_default(),
         t_diff.checked_sub(t_hints).unwrap_or_default(),
@@ -267,21 +266,23 @@ fn common_ends<T, U>(old: &[(String, T)], new: &[(String, U)]) -> (usize, usize)
     (a, b)
 }
 
-/// The text's slices (a document's, or the whole text as one) and their keys.
-fn slice_keys(text: &str, defs: &Defs, doc: bool) -> Vec<(String, (usize, usize))> {
-    let sl = if doc {
-        slices(text, defs)
-    } else if text.is_empty() {
-        Vec::new()
-    } else {
-        vec![(0, text.len())]
-    };
-    sl.into_iter()
-        .map(|(s, e)| {
-            let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-            (key(&text[s..e], starts), (s, e))
-        })
-        .collect()
+/// The text's nodes and their keys: a document's (`incr`) per chunk of
+/// its units ([`doc_nodes`]), a format's the whole text as one.
+fn slice_keys(
+    v: &Values,
+    text: &str,
+    incr: Option<&Incr>,
+    finder: Option<&Finder>,
+    read: &mut Vec<String>,
+) -> Vec<(String, DocNode)> {
+    match incr {
+        Some(inc) => {
+            register_doc(v, inc);
+            doc_nodes(v, text, inc, finder, read)
+        }
+        None if text.is_empty() => Vec::new(),
+        None => vec![(key(text, true), DocNode::Doc(0, text.len()))],
+    }
 }
 
 /// Edits the document's nodes `nodes` to the text `text`: the slices
@@ -295,55 +296,23 @@ fn apply_text(
     dvi: NodeId,
     nodes_now: &mut Vec<(String, NodeId)>,
     text: &str,
-    defs: &Defs,
-    doc: bool,
+    mut incr: Option<&mut Incr>,
     finder: Option<&Finder>,
 ) {
     let t_all = std::time::Instant::now();
     let text = as_file(text);
-    let new = slice_keys(&text, defs, doc);
-    let t_slices = t_all.elapsed();
-    let old = &*nodes_now;
-    let hints = crate::hints::text_hints(&text, pass::FileKind::Document, defs);
-    let t_hints = t_all.elapsed();
-    if doc {
-        crate::hints::register_text(eng.values().str(DOC_NAME), &hints);
+    // (the units spliced, the chunks whose text or incoming definitions
+    // changed analysed again)
+    if let Some(inc) = incr.as_deref_mut() {
+        inc.set_text(&text);
     }
-    // (a document's nodes: its regions, an `\\input` file's in place of
-    // the command, `crate::inputs`)
-    let pieces = if doc {
-        let mut read = Vec::new();
-        crate::inputs::pieces(eng.values(), &text, &hints, defs, finder, &mut read)
-    } else {
-        Vec::new()
-    };
-    let new: Vec<(String, (usize, usize))> = if doc {
-        pieces.iter().map(|p| (p.key.clone(), (0, 0))).collect()
-    } else {
-        new
-    };
-    let args_of = |eng: &Engine, k: usize| {
-        if doc {
-            return pieces[k].args(eng.values(), DOC_NAME);
-        }
-        let (s, e) = new[k].1;
-        let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-        let v = eng.values();
-        let mut args = if doc {
-            let mut a = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s);
-            // (a document node is a top-level node)
-            a[1] = v.int(3);
-            a
-        } else {
-            slice_args(v, &text[s..e], starts)
-        };
-        args.push(if doc {
-            crate::hints::hint_arg(v, &hints, s)
-        } else {
-            v.str(FORMAT_HINT)
-        });
-        args
-    };
+    let incr = incr.as_deref();
+    let t_slices = t_all.elapsed();
+    let mut read = Vec::new();
+    let new = slice_keys(eng.values(), &text, incr, finder, &mut read);
+    let t_hints = t_all.elapsed();
+    let old = &*nodes_now;
+    let args_of = |eng: &Engine, k: usize| node_args(eng.values(), &text, incr, &new[k].1);
     let (a, b) = common_ends(old, &new);
     let old_len = old.len();
     let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
@@ -814,14 +783,6 @@ fn date_params(t: i64) -> [(&'static str, i64); 4] {
         ("param:month", n(6, 8)),
         ("param:year", n(2, 6)),
     ]
-}
-
-/// The nodes of a document's text: its paragraph regions ([`crate::hints::slices_of`]); the
-/// pass over the whole text also gives each slice's hint.
-pub(crate) fn slices(text: &str, defs: &Defs) -> Vec<(usize, usize)> {
-    crate::hints::text_hints(text, pass::FileKind::Document, defs)
-        .slices
-        .clone()
 }
 
 /// What the evaluations of one build or edit did.
@@ -1719,69 +1680,60 @@ impl Graph {
         }
     }
 
-    /// The text's nodes pushed onto `unit`.
-    /// `doc`: whether it is a document's text (paragraph regions), not a
-    /// format's (one node).
+    /// The document's nodes pushed onto `unit`, with its units kept for
+    /// its edits.
+    fn push_document(
+        &mut self,
+        unit: UnitId,
+        text: &str,
+        defs: Defs,
+        doc: bool,
+        finder: Option<&Finder>,
+    ) -> (Vec<(String, NodeId)>, Incr) {
+        let mut incr = Incr::new(defs);
+        let nodes = self.push_text(unit, &as_file(text), doc.then_some(&mut incr), finder);
+        (nodes, incr)
+    }
+
+    /// The text's nodes pushed onto `unit`: a document's (`incr`) its
+    /// paragraph regions, an `\\input` file's in place of the command
+    /// (`crate::inputs`); a format's one node.
     fn push_text(
         &mut self,
         unit: UnitId,
         text: &str,
-        defs: &Defs,
-        doc: bool,
+        mut incr: Option<&mut Incr>,
         finder: Option<&Finder>,
     ) -> Vec<(String, NodeId)> {
-        let mut out = Vec::new();
         let t0 = std::time::Instant::now();
-        let hints = crate::hints::text_hints(text, pass::FileKind::Document, defs);
+        if let Some(inc) = incr.as_deref_mut() {
+            inc.set_text(text);
+        }
+        let incr = incr.as_deref();
         // a format's text is one node: a sequential run over the whole
         // file, its `\input`s inline; what it may define is unknowable
         // from its parts, so anything (it runs once, serially, cached)
-        let sl = if doc {
-            hints.slices.clone()
-        } else if text.is_empty() {
-            Vec::new()
-        } else {
-            vec![(0, text.len())]
+        let nodes: Vec<(String, DocNode)> = match incr {
+            Some(inc) => {
+                register_doc(self.eng.values(), inc);
+                let mut read = Vec::new();
+                let n = doc_nodes(self.eng.values(), text, inc, finder, &mut read);
+                self.inputs_read = read;
+                n
+            }
+            None if text.is_empty() => Vec::new(),
+            None => vec![(key(text, true), DocNode::Doc(0, text.len()))],
         };
         let t1 = t0.elapsed();
-        if doc {
-            crate::hints::register_text(self.eng.values().str(DOC_NAME), &hints);
-            // (the document's regions, an `\\input` file's in place of
-            // the command, `crate::inputs`)
-            let mut read = Vec::new();
-            let pieces =
-                crate::inputs::pieces(self.eng.values(), text, &hints, defs, finder, &mut read);
-            for p in pieces {
-                let args = p.args(self.eng.values(), DOC_NAME);
-                let n = self.eng.push(unit, self.ops.exec, args);
-                declare_marks_before(&mut self.eng, n);
-                out.push((p.key, n));
-            }
-            self.inputs_read = read;
-            return out;
-        }
-        for (s, e) in sl {
-            let piece = &text[s..e];
-            let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
+        let mut out = Vec::with_capacity(nodes.len());
+        for (k, n) in &nodes {
             if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
-                eprintln!("node {piece:?}");
+                eprintln!("node {k:?}");
             }
-            let v = self.eng.values();
-            let mut args = if doc {
-                let mut a = slice_args_in_file(v, piece, starts, v.str(DOC_NAME), s);
-                a[1] = v.int(3);
-                a
-            } else {
-                slice_args(v, piece, starts)
-            };
-            args.push(if doc {
-                crate::hints::hint_arg(v, &hints, s)
-            } else {
-                v.str(FORMAT_HINT)
-            });
-            let n = self.eng.push(unit, self.ops.exec, args);
-            declare_marks_before(&mut self.eng, n);
-            out.push((key(piece, starts), n));
+            let args = node_args(self.eng.values(), text, incr, n);
+            let id = self.eng.push(unit, self.ops.exec, args);
+            declare_marks_before(&mut self.eng, id);
+            out.push((k.clone(), id));
         }
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
@@ -1867,6 +1819,99 @@ fn is_doc(prelude: Option<&str>, text: &str) -> bool {
 /// The name a document's own text is registered under for the hints
 /// of nodes made from parts of it (`hints::register_text`).
 const DOC_NAME: &str = "\u{10FFFE}document";
+
+/// Registers the document's analysis for the hints of nodes made from
+/// parts of its slices (`hints::register_text`, by the document's
+/// offsets): when one chunk is the whole document. A document of several
+/// chunks has no whole analysis; such a node's hint answers `Any`.
+fn register_doc(v: &Values, inc: &Incr) {
+    if let [c] = inc.chunks.as_slice() {
+        crate::hints::register_text(v.str(DOC_NAME), &c.th);
+    }
+}
+
+/// A document node's text: a slice of the document (its bytes), or one
+/// of an `\\input` file sliced in its place (`crate::inputs`).
+enum DocNode {
+    Doc(usize, usize),
+    File(crate::inputs::Piece),
+}
+
+/// The document's nodes, keyed: per chunk of its units, its slices; an
+/// `\\input` slice replaced by its file's ([`crate::inputs::pieces`],
+/// for the chunks that have one). `read` gets the files sliced in.
+fn doc_nodes(
+    v: &Values,
+    text: &str,
+    inc: &Incr,
+    finder: Option<&Finder>,
+    read: &mut Vec<String>,
+) -> Vec<(String, DocNode)> {
+    // (a text redefining `\\input` reads its files in its runs)
+    let finder = finder.filter(|_| {
+        ![
+            "\\def\\input",
+            "\\let\\input",
+            "\\edef\\input",
+            "\\gdef\\input",
+            "\\xdef\\input",
+        ]
+        .iter()
+        .any(|d| text.contains(d))
+    });
+    let mut out = Vec::new();
+    for c in &inc.chunks {
+        let end = c.start + c.th.slices.last().map_or(0, |x| x.1);
+        let slices = c.th.slices.iter().map(|&(s, e)| (c.start + s, c.start + e));
+        let doc_slice = |(s, e): (usize, usize)| {
+            let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
+            (key(&text[s..e], starts), DocNode::Doc(s, e))
+        };
+        let chunk = &text[c.start..end];
+        let Some(f) = finder.filter(|_| chunk.contains("\\input")) else {
+            out.extend(slices.map(doc_slice));
+            continue;
+        };
+        let mut slices = slices;
+        for p in crate::inputs::pieces(v, chunk, &c.th, inc.defs(), Some(f), read) {
+            if p.key.starts_with('\u{1}') {
+                out.push((p.key.clone(), DocNode::File(p)));
+                continue;
+            }
+            // (the document's own slice it is: the next whose key it has)
+            for sl in slices.by_ref() {
+                let (k, n) = doc_slice(sl);
+                if k == p.key {
+                    out.push((k, n));
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A document node's arguments: its text with its origin, and its hint;
+/// a format's (`incr` `None`): its text, and the format's hint.
+fn node_args(v: &Values, text: &str, incr: Option<&Incr>, n: &DocNode) -> Vec<ValueId> {
+    match (n, incr) {
+        (DocNode::File(p), _) => p.args(v, DOC_NAME),
+        (&DocNode::Doc(s, e), Some(inc)) => {
+            let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
+            let mut a = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s);
+            // (a document node is a top-level node)
+            a[1] = v.int(3);
+            let (c, at) = inc.chunk_at(s);
+            a.push(crate::hints::hint_arg(v, &c.th, at));
+            a
+        }
+        (&DocNode::Doc(s, e), None) => {
+            let mut a = slice_args(v, &text[s..e], true);
+            a.push(v.str(FORMAT_HINT));
+            a
+        }
+    }
+}
 
 /// A node's identity for edits: its text and whether it begins a line.
 fn key(piece: &str, starts: bool) -> String {
@@ -2137,7 +2182,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             g.eng.set_env(unit, f, x);
         }
         // (the prelude's own slices: INITEX knows no definitions yet)
-        g.push_text(unit, &as_file(p), crate::hints::no_defs(), false, None);
+        g.push_text(unit, &as_file(p), None, None);
         // the point the prelude's final bindings are read at
         let end = g.eng.push(unit, g.mark, Vec::new());
         let mut stats = Stats::default();
@@ -2231,8 +2276,6 @@ pub struct Build {
     nodes: Vec<(String, NodeId)>,
     dvi: NodeId,
     prelude: Arc<Cached>,
-    /// The format's definitions ([`prelude_defs`]).
-    defs: Defs,
     /// What the last build or edit ran.
     pub stats: Stats,
     /// Where new texts come from ([`Options::edits`]).
@@ -2244,6 +2287,8 @@ pub struct Build {
     /// The document's text last applied (`edit_file` applies it again
     /// when a file sliced into it changed).
     text: String,
+    /// The document's units and their analyses ([`Incr`]).
+    incr: Incr,
 }
 
 impl Build {
@@ -2328,7 +2373,7 @@ impl Build {
         *g.ops.defs.lock().unwrap_or_else(PoisonError::into_inner) = defs.clone();
         let doc = is_doc(prelude, document);
         let inputs = g.input_finder(&opts.finder);
-        let nodes = g.push_text(unit, &as_file(document), &defs, doc, Some(&inputs));
+        let (nodes, incr) = g.push_document(unit, document, defs, doc, Some(&inputs));
         // (the files sliced in are read: listed, and watched)
         for n in g.inputs_read.clone() {
             g.supply(&opts.finder, &n);
@@ -2350,7 +2395,7 @@ impl Build {
             nodes,
             dvi,
             prelude: cached,
-            defs,
+            incr,
             stats: Stats::default(),
             edits,
             settled: Vec::new(),
@@ -2440,8 +2485,7 @@ impl Build {
             nodes: &mut self.nodes,
             exec: self.g.ops.exec,
             dvi: self.dvi,
-            defs: self.defs.clone(),
-            doc: self.doc,
+            incr: self.doc.then_some(&mut self.incr),
             finder: self.g.input_finder(&self.opts.finder),
             text: &mut self.text,
         };

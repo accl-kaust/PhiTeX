@@ -34,6 +34,7 @@ mod expand;
 mod fields;
 mod fonts;
 mod hints;
+mod incr;
 mod inputs;
 mod log;
 mod math;
