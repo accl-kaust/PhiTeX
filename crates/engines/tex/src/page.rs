@@ -254,6 +254,7 @@ impl Run<'_, '_> {
         let mut ended = false;
         let mut plan: Vec<ValueId> = Vec::new();
         let mut flushplan: Vec<ValueId> = Vec::new();
+        let mut flushed = phitex_defuse::FxHashSet::default();
         let mut reaches: Vec<usize> = Vec::new();
         let mut j = 0;
         while !ended && j < MAX_PAGES {
@@ -279,7 +280,12 @@ impl Run<'_, '_> {
                     out.stuck
                 );
             }
+            // (once each: a fold that read past the penalty may hand the
+            // marker to the next page's fold too)
             for &(n, k) in &out.flushes {
+                if !flushed.insert((n, k)) {
+                    continue;
+                }
                 let after = i64::try_from(j).unwrap_or(0) - 1;
                 flushplan.push(v.list(vec![v.int(n), v.int(k), v.int(after)]));
             }
