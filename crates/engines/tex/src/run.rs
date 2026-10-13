@@ -267,13 +267,6 @@ pub(crate) struct Run<'c, 'a> {
     /// The alignments open in this run (`align_state`'s companion,
     /// §324): run-local, an alignment never crosses a node.
     pub aopen: i64,
-    /// Fetching a name to define (`get_r_token`, §1215): its meaning is
-    /// not looked up (§357 needs it only for an alignment's watch).
-    pub bare: bool,
-    /// The incompleat noads of this run's math lists (§1181:
-    /// `incompleat_noad`, a field of the list's nest entry; run-local,
-    /// as a math list never crosses a node), by list id.
-    pub incs: Vec<(i64, ValueId)>,
     /// Lines entered by this run (for `\inputlineno`).
     pub lines_entered: i64,
     /// Whether the input is exhausted for good (the file ended).
@@ -353,8 +346,6 @@ impl<'c, 'a> Run<'c, 'a> {
             kind_memo: None,
             astate: None,
             aopen: 0,
-            bare: false,
-            incs: Vec::new(),
             lines_entered: 0,
             eof: false,
             radix: 0,
@@ -1075,16 +1066,6 @@ impl<'c, 'a> Run<'c, 'a> {
     /// [`Self::set_cur`] for a control sequence or active character.
     #[inline]
     fn set_cur_cs(&mut self, tok: Tok) -> R<()> {
-        if self.bare {
-            // (a name about to be defined: its present meaning is never
-            // used, so it is not read)
-            self.cur = Cur {
-                tok,
-                cmd: cmd::RELAX,
-                chr: 256,
-            };
-            return Ok(());
-        }
         // (the common case: a control sequence whose meaning this run
         // has read and decoded: one slot access)
         if let Some(i) = tok.cs_index()

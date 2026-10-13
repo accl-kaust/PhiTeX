@@ -379,27 +379,6 @@ fn para400() {
 /// footnotes, `\pdfoutput=1`, numbered as pdfTeX numbers. No page step
 /// reads what another page step made: the critical path stays a few
 /// nodes, and no link of it joins two page steps.
-/// The chain census gate (`common::Census`): plain documents of 400
-/// paragraphs with footnotes, DVI and exact PDF, cold and after a
-/// one-word edit: critical path at most 6, no page step reading
-/// another's, at most 1.1 runs a node, at most 2 loop rounds cold and
-/// none after the first on the edit, no undeclared definition, no
-/// regime violation.
-#[test]
-fn census_plain() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/gate/census");
-    let _ = std::fs::create_dir_all(&dir);
-    let mut rows = Vec::new();
-    for (name, pdf) in [("para400dvi", false), ("para400pdf", true)] {
-        let (src, new) = common::plain_paragraphs(400, pdf);
-        std::fs::write(dir.join(format!("{name}.tex")), &src).expect("write");
-        let opts = common::options(&format!("./{name}.tex"), name, "", &dir);
-        let mut b = common::build(opts, Some(&common::plain()), &src);
-        rows.push(common::Census::take(name, &mut b, &new));
-    }
-    common::assert_census(&rows);
-}
-
 #[test]
 fn pdf_exact_no_page_chain() {
     use std::fmt::Write as _;

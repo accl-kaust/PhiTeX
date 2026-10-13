@@ -798,7 +798,7 @@ impl Run<'_, '_> {
     /// `get_r_token` (§1215).
     fn get_r_token(&mut self) -> R<Tok> {
         loop {
-            self.get_name_token()?;
+            self.get_token()?;
             if self.cur.tok != crate::val::space_tok() {
                 break;
             }
