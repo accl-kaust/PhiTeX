@@ -30,6 +30,53 @@ use crate::nodes::Side;
 use crate::run::{R, Run};
 use crate::val::{int_of, list_of, str_of};
 
+/// The accumulator of the exact writer's pages, in document order: each
+/// entry the key of a [`PagePiece`] ([`pieces`]).
+pub(crate) const XPAGES: &str = "pdf:xpages";
+
+/// One page as the exact writer ships it, made by the page's own step
+/// with nothing read from another page's: the box, the parameters
+/// `\shipout` read, the whatsits' data, the fonts. The `Dvi` node ships
+/// the pages in order on the state the read-time commands left
+/// ([`finish`]); each step has already written its page once, apart, so
+/// that the finish finds its content stream compressed.
+pub(crate) struct PagePiece {
+    bx: BoxNode,
+    params: Vec<ValueId>,
+    margins: [i32; 3],
+    whats: BTreeMap<u32, Whatsit>,
+    fonts: Fonts,
+}
+
+type PieceMemo = Mutex<FxHashMap<u64, Arc<PagePiece>>>;
+
+/// The pages by key: a pure function's memo.
+fn pieces() -> &'static PieceMemo {
+    static P: OnceLock<PieceMemo> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(FxHashMap::default()))
+}
+
+/// Whether the exact writer folds the pages (`pdf:fold`): a document
+/// whose output routine runs a PDF command.
+fn folding(r: &mut Run<'_, '_>) -> R<bool> {
+    Ok(r.cint(crate::fields::cell::PDF_FOLD)? != 0)
+}
+
+/// Whether this run is a page step.
+fn in_page_step(r: &Run<'_, '_>) -> bool {
+    let op = r.cx.op();
+    op == r.ops.pagestep || op == r.ops.pagestep_any
+}
+
+/// Asks for the fold (`pdf:fold`): the build is evaluated again with the
+/// pages in the writer's `pdf:state` fold.
+fn fold_back(r: &mut Run<'_, '_>, why: &str) {
+    let v = r.v;
+    let id = v.int(i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes()));
+    let e = v.list(vec![v.str("pdf:fold"), id, v.str(why)]);
+    r.contribute("needs", v.seq_unit(e));
+}
+
 /// `pdftex_banner` of the oracle's pdfTeX.
 pub(crate) const BANNER: &str = "This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) kpathsea version 6.4.2";
 
@@ -101,7 +148,7 @@ pub(crate) struct Fonts {
     space: Option<FontId>,
     pub(crate) ps: Option<Arc<PsMap>>,
     /// The files asked for and not given (a dry run's findings).
-    pub(crate) missed: std::cell::RefCell<BTreeSet<Vec<u8>>>,
+    pub(crate) missed: Mutex<BTreeSet<Vec<u8>>>,
     /// The virtual fonts `do_vf` read, by font.
     vfs: FxHashMap<FontId, VirtualFont>,
 }
@@ -201,7 +248,10 @@ impl FontSource for Fonts {
     fn file(&self, name: &[u8]) -> Option<Vec<u8>> {
         let f = self.files.get(name).map(|b| b.to_vec());
         if f.is_none() {
-            self.missed.borrow_mut().insert(name.to_vec());
+            self.missed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(name.to_vec());
         }
         f
     }
@@ -530,34 +580,20 @@ pub(crate) fn step_forms<T>(
     let (mut st, mut bytes, mut forms, bytes_hash) = if let Some(a) = before {
         (a.st.clone(), a.bytes.clone(), a.forms.clone(), a.bytes_hash)
     } else {
-        {
-            let date = r
-                .get_loc(crate::fields::cell::PDFDATE)?
-                .map_or_else(|| phitex_pdf::pdf_date(0), |x| str_of(v, x));
-            let jobname = r
-                .get_loc(crate::fields::cell::JOBNAME)?
-                .map(|x| str_of(v, x))
-                .unwrap_or_default();
-            let p = PdfParams {
-                date,
-                banner: BANNER.to_owned(),
-                output_file_name: format!("{jobname}.pdf"),
-                ..PdfParams::default()
-            };
-            let mut st = PdfState::new(p);
-            // the `\pdfglyphtounicode` table a format carries
-            // (`dumptounicode`, pdfTeX §1502; `undumptounicode`, §1503):
-            // a fresh writer state, a format loaded, starts from it
-            if let Some(t) = r.get("pdf:glyphtounicode")? {
-                for e in list_of(v, t) {
-                    let ab = list_of(v, e);
-                    if let [a, b] = ab[..] {
-                        st.glyph_to_unicode(&bytes_of(&str_of(v, a)), &bytes_of(&str_of(v, b)));
-                    }
-                }
-            }
-            (st, PdfBytes::new(), Forms::default(), 0)
-        }
+        let date = r
+            .get_loc(crate::fields::cell::PDFDATE)?
+            .map_or_else(|| phitex_pdf::pdf_date(0), |x| str_of(v, x));
+        let jobname = r
+            .get_loc(crate::fields::cell::JOBNAME)?
+            .map(|x| str_of(v, x))
+            .unwrap_or_default();
+        let g2u = r.get("pdf:glyphtounicode")?;
+        (
+            fresh(v, date, &jobname, g2u),
+            PdfBytes::new(),
+            Forms::default(),
+            0,
+        )
     };
     // the parameters a write reads (the version, compression: fixed
     // at the first write, pdfTeX §792), as they are at this step
@@ -611,6 +647,29 @@ pub(crate) fn step_forms<T>(
     Ok(out)
 }
 
+/// A fresh writer state: nothing written yet.
+fn fresh(v: &Values, date: String, jobname: &str, g2u: Option<ValueId>) -> PdfState {
+    let p = PdfParams {
+        date,
+        banner: BANNER.to_owned(),
+        output_file_name: format!("{jobname}.pdf"),
+        ..PdfParams::default()
+    };
+    let mut st = PdfState::new(p);
+    // the `\pdfglyphtounicode` table a format carries (`dumptounicode`,
+    // pdfTeX §1502; `undumptounicode`, §1503): a fresh writer state, a
+    // format loaded, starts from it
+    if let Some(t) = g2u {
+        for e in list_of(v, t) {
+            let ab = list_of(v, e);
+            if let [a, b] = ab[..] {
+                st.glyph_to_unicode(&bytes_of(&str_of(v, a)), &bytes_of(&str_of(v, b)));
+            }
+        }
+    }
+    st
+}
+
 /// A read-time command on the writer (`pdf:state` fold step) in PDF
 /// mode, with the fonts it names.
 pub(crate) fn command<T: Default>(
@@ -624,6 +683,11 @@ pub(crate) fn command<T: Default>(
     }
     if crate::pdfrelaxed::on(r)? {
         crate::pdfrelaxed::fall_back(r, "a command the relaxed mode does not cover");
+        return Ok(T::default());
+    }
+    if in_page_step(r) && !folding(r)? {
+        // its state would be the pages' before it: stage B's loop-back
+        fold_back(r, "a PDF command in an output routine");
         return Ok(T::default());
     }
     let fs = fonts_for(r, fonts, false)?;
@@ -642,6 +706,11 @@ pub(crate) fn command_forms<T: Default>(
     }
     if crate::pdfrelaxed::on(r)? {
         crate::pdfrelaxed::fall_back(r, "a command the relaxed mode does not cover");
+        return Ok(T::default());
+    }
+    if in_page_step(r) && !folding(r)? {
+        // its state would be the pages' before it: stage B's loop-back
+        fold_back(r, "a PDF command in an output routine");
         return Ok(T::default());
     }
     let fs = fonts_for(r, fonts, false)?;
@@ -931,7 +1000,7 @@ pub(crate) fn ship(
             };
             let _ = st.ship_out_with(bx, &fonts, &mut wh);
         }
-        for n in std::mem::take(&mut *fonts.missed.borrow_mut()) {
+        for n in std::mem::take(&mut *fonts.missed.lock().unwrap_or_else(PoisonError::into_inner)) {
             if let Some(b) = file_bytes(r, &String::from_utf8_lossy(&n))? {
                 fonts.files.insert(n, b);
             }
@@ -942,6 +1011,9 @@ pub(crate) fn ship(
         r.param("pdfdestmargin")?,
         r.param("pdfthreadmargin")?,
     ];
+    if in_page_step(r) && !folding(r)? {
+        return ship_apart(r, &p, bx, &side.whats, &resolved, fonts, margins);
+    }
     let (err, shown) = step_forms(r, page, &fonts, |st, forms, fonts| {
         page_params(v, st.params_mut(), &p);
         let pm = st.params_mut();
@@ -987,20 +1059,208 @@ pub(crate) fn ship(
     Ok(shown)
 }
 
-/// The PDF file: the state that reaches the end, finished.
+/// The page's whatsits as the writer asks for them: a form's from the
+/// forms' table, the page's from its data.
+fn page_whatsit(forms: &Forms, whats: &BTreeMap<u32, Whatsit>, h: u32) -> Option<Whatsit> {
+    if h >= FORM_HANDLES {
+        return forms.whats.get(&h).cloned();
+    }
+    whats.get(&h).cloned()
+}
+
+/// `pdf_ship_out` of one page on `st` (pdfTeX §750–§771): the page's
+/// parameters set, the page written; the writer's error, if any.
+fn ship_piece(
+    v: &Values,
+    st: &mut PdfState,
+    forms: &Forms,
+    pc: &PagePiece,
+) -> Option<phitex_pdf::PdfError> {
+    // the parameters a write reads, as the fold's step sets them
+    page_params(v, st.params_mut(), &pc.params);
+    let pm = st.params_mut();
+    pm.link_margin = pc.margins[0];
+    pm.dest_margin = pc.margins[1];
+    pm.thread_margin = pc.margins[2];
+    let mut wh = |h: u32, _leaders: bool| page_whatsit(forms, &pc.whats, h);
+    st.ship_out_with(&pc.bx, &pc.fonts, &mut wh).err()
+}
+
+/// The page written on its own (no other page's state read): kept as a
+/// [`PagePiece`] for the `Dvi` node, which ships the pages in order;
+/// written once here, on the state the read-time commands left, so that
+/// its content stream is compressed in parallel with the other pages'
+/// and the hash of what it shows is known.
+fn ship_apart(
+    r: &mut Run<'_, '_>,
+    p: &[ValueId],
+    bx: &BoxNode,
+    side_whats: &[ValueId],
+    resolved: &FxHashMap<u32, ValueId>,
+    fonts: Fonts,
+    margins: [i32; 3],
+) -> R<u64> {
+    let v = r.v;
+    let mut whats: BTreeMap<u32, Whatsit> = BTreeMap::new();
+    for (&h, &d) in resolved {
+        if let Some(w) = whatsit(v, d) {
+            whats.insert(h, w);
+        }
+    }
+    for (h, &w) in side_whats.iter().enumerate() {
+        let Ok(h) = u32::try_from(h) else { break };
+        if whats.contains_key(&h) || resolved.contains_key(&h) {
+            continue;
+        }
+        let ys = list_of(v, w);
+        if ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special") {
+            whats.insert(
+                h,
+                Whatsit::Special(bytes_of(
+                    &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
+                )),
+            );
+        }
+    }
+    let pc = PagePiece {
+        bx: bx.clone(),
+        params: p.to_vec(),
+        margins,
+        whats,
+        fonts,
+    };
+    let key = phitex_defuse::hash_bytes(
+        phitex_defuse::hash_words(pc.fonts.digest(), &[0x7067_7069_6563_6531]),
+        format!(
+            "{:?}|{:?}|{:?}|{:?}",
+            pc.params
+                .iter()
+                .map(|&x| format!("{:?}", *v.get(x)))
+                .collect::<Vec<_>>(),
+            pc.margins,
+            pc.bx,
+            pc.whats
+        )
+        .as_bytes(),
+    )
+    .max(1);
+    // the page written once, apart, on the read-time commands' state
+    let (_, a) = before(r)?;
+    let (mut st, forms) = if let Some(a) = a {
+        (a.st.clone(), a.forms.clone())
+    } else {
+        let date = r
+            .get_loc(crate::fields::cell::PDFDATE)?
+            .map_or_else(|| phitex_pdf::pdf_date(0), |x| str_of(v, x));
+        let jobname = r
+            .get_loc(crate::fields::cell::JOBNAME)?
+            .map(|x| str_of(v, x))
+            .unwrap_or_default();
+        let g2u = r.get("pdf:glyphtounicode")?;
+        (fresh(v, date, &jobname, g2u), Forms::default())
+    };
+    let err = ship_piece(v, &mut st, &forms, &pc);
+    let (content, w, h) = st.last_page_shown();
+    let words = [
+        u64::from_ne_bytes(i64::from(w).to_ne_bytes()),
+        u64::from_ne_bytes(i64::from(h).to_ne_bytes()),
+    ];
+    let shown = phitex_defuse::hash_words(phitex_defuse::hash_bytes(0, content), &words);
+    let attr = p.get(15).map(|&a| str_of(v, a)).unwrap_or_default();
+    let shown = phitex_defuse::hash_bytes(shown, attr.as_bytes());
+    if let Some(e) = err {
+        // PDF-BACKEND-GAP: the writer's errors are pdfTeX's fatal errors;
+        // they go to the log, the job going on
+        r.log("error", &format!("pdfTeX error: {e}"))?;
+    }
+    pieces()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(key)
+        .or_insert_with(|| Arc::new(pc));
+    let k = v.int(i64::from_ne_bytes(key.to_ne_bytes()));
+    r.contribute(XPAGES, v.seq_unit(k));
+    Ok(shown)
+}
+
+/// The PDF file: the state the read-time commands left (with the pages
+/// folded, when the writer folds them), the pages written apart shipped
+/// on it in order, finished. A page shipped on an equal state gives an
+/// equal state (memo by the two keys), so an edit ships again only from
+/// its first changed page on, compressing nothing already compressed.
 pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<ValueId, Stop> {
     let v = cx.values();
     let k = fin
         .get(cx, v.field("pdf:state"))?
         .map_or(0, |x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()));
-    let Some(a) = states()
+    let start = states()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get(&k)
-        .cloned()
-    else {
-        return Ok(v.str(""));
+        .cloned();
+    let xpages: Vec<u64> = v
+        .seq_to_vec(cx.acc_range(v.field(XPAGES), None)?)
+        .into_iter()
+        .map(|x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()))
+        .collect();
+    let mut a = match start {
+        Some(a) => a,
+        None if xpages.is_empty() => return Ok(v.str("")),
+        None => {
+            let date = fin
+                .get(cx, v.field("pdfdate"))?
+                .map_or_else(|| phitex_pdf::pdf_date(0), |x| str_of(v, x));
+            let jobname = fin
+                .get(cx, v.field("jobname"))?
+                .map(|x| str_of(v, x))
+                .unwrap_or_default();
+            let g2u = fin.get(cx, v.field("pdf:glyphtounicode"))?;
+            Arc::new(Fold {
+                st: fresh(v, date, &jobname, g2u),
+                bytes: PdfBytes::new(),
+                forms: Forms::default(),
+                bytes_hash: 0,
+            })
+        }
     };
+    let mut key = k;
+    for pk in xpages {
+        let next = phitex_defuse::hash_words(key, &[pk, 0x7870_6167_6573]).max(1);
+        let got = states()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&next)
+            .cloned();
+        a = if let Some(b) = got {
+            b
+        } else {
+            let Some(pc) = pieces()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&pk)
+                .cloned()
+            else {
+                return Ok(v.str(""));
+            };
+            let mut st = a.st.clone();
+            let mut bytes = a.bytes.clone();
+            // (the step logged the writer's error when it wrote the page)
+            let _ = ship_piece(v, &mut st, &a.forms, &pc);
+            st.flush(&mut bytes);
+            let b = Arc::new(Fold {
+                st,
+                bytes,
+                forms: a.forms.clone(),
+                bytes_hash: a.bytes_hash,
+            });
+            states()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(next, b.clone());
+            b
+        };
+        key = next;
+    }
     let mut st = a.st.clone();
     let int = |cx: &mut Ctx<'_>, f: &str| -> Result<i32, Stop> {
         Ok(fin

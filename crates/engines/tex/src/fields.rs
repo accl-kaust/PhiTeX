@@ -59,6 +59,7 @@ const STATIC: &[&str] = &[
     "pdf:colorstacks",
     "pdf:exact",
     "pdf:fixed",
+    "pdf:fold",
     "pdf:fontcount",
     "pdf:lastannot",
     "pdf:lastlink",
@@ -82,6 +83,7 @@ const STATIC: &[&str] = &[
     "pdf:state",
     "pdf:trailerid",
     "pdf:xformcount",
+    "pdf:xpages",
     "pdfdate",
     "streams",
     "writes",
@@ -284,6 +286,7 @@ pub(crate) mod cell {
     pub(crate) const PDF_COLORSTACKS: u32 = (STATIC0 + static_index("pdf:colorstacks")) as u32;
     pub(crate) const PDF_EXACT: u32 = (STATIC0 + static_index("pdf:exact")) as u32;
     pub(crate) const PDF_FIXED: u32 = (STATIC0 + static_index("pdf:fixed")) as u32;
+    pub(crate) const PDF_FOLD: u32 = (STATIC0 + static_index("pdf:fold")) as u32;
     pub(crate) const PDF_FONTCOUNT: u32 = (STATIC0 + static_index("pdf:fontcount")) as u32;
     pub(crate) const PDF_LASTANNOT: u32 = (STATIC0 + static_index("pdf:lastannot")) as u32;
     pub(crate) const PDF_LASTLINK: u32 = (STATIC0 + static_index("pdf:lastlink")) as u32;
