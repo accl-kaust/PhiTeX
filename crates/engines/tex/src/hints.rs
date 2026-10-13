@@ -2116,6 +2116,9 @@ impl Analysis<'_> {
                 add_heads(st, Some(&[fam, "aftertoken"]));
             }
             Some(pass::Shape::Quantity(_)) => {
+                if std::env::var_os("PHITEX_HEAD_TRACE").is_some() {
+                    eprintln!("QTRACE {name}");
+                }
                 add_heads(st, Some(&["box:", "lvlfix", "badness", "inspen"]));
                 if may_start_par {
                     add_heads(st, Some(&["pg:"]));
@@ -2214,6 +2217,9 @@ impl Analysis<'_> {
             } else if let Some(h) = head_of_pass_field(f) {
                 if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
                     eprintln!("slices: head {h} from name {f}");
+                }
+                if std::env::var_os("PHITEX_HEAD_TRACE").is_some() {
+                    eprintln!("NTRACE {f} {:?}", set.relied);
                 }
                 add_head(&mut b.state, h);
             }
