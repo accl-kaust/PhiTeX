@@ -9,7 +9,7 @@ fn chain(dir: &std::path::Path, name: &str) {
     let src = common::read(&dir.join(format!("{name}.tex")));
     let opts = common::options(&format!("./{name}.tex"), name, "", dir);
     let b = common::build(opts, Some(&common::plain()), &src);
-    if matches!(name, "story" | "hyphens") {
+    {
         let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(format!("../../../target/gate/chain_{name}.txt"));
         let _ = std::fs::write(out, b.critical_chain_lines().join("\n") + "\n");
@@ -44,10 +44,12 @@ fn chain(dir: &std::path::Path, name: &str) {
         }
     }
     eprintln!(
-        "{name}: {} nodes run, critical path {:?}, peak running {}, page steps {} ({} any), chain {} links: {by:?}",
+        "{name}: {} nodes run, {} runs, critical path {:?}, peak running {}, ready mean {:.2}, page steps {} ({} any), chain {} links: {by:?}",
         b.stats.nodes_run,
+        b.stats.runs,
         b.stats.critical_path,
         b.stats.peak_running,
+        b.stats.ready_mean(),
         b.stats.page_steps,
         b.stats.page_steps_any,
         c.len()

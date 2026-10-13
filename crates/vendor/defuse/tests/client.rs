@@ -985,3 +985,136 @@ fn a_dynamic_definition_outside_may_define_is_an_error() {
         other => panic!("expected UndeclaredDefinition, got {other:?}"),
     }
 }
+
+/// `["n", k]`: outputs `k`.
+struct Num;
+
+impl Operation for Num {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let a = cx.args();
+        Ok(a.get(1).copied().unwrap_or(ValueId::UNIT))
+    }
+}
+
+/// Edits queued from another thread are absorbed by the evaluation, which
+/// reports their version; the ids of the nodes they inserted come back
+/// by version.
+#[test]
+fn an_edit_queue_feeds_an_evaluation_from_another_thread() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Num));
+    let u = eng.new_unit();
+    let v = eng.values();
+    let first = eng.push(u, op, vec![v.str("n"), v.int(1)]);
+    let queue = defuse::EditQueue::new();
+    let q = queue.clone();
+    let (two, three) = (eng.values().int(2), eng.values().int(3));
+    let n = eng.values().str("n");
+    std::thread::spawn(move || {
+        q.push(
+            defuse::Edit::Push {
+                unit: u,
+                op,
+                args: vec![n, two],
+            },
+            1,
+        );
+        q.push(
+            defuse::Edit::Push {
+                unit: u,
+                op,
+                args: vec![n, three],
+            },
+            2,
+        );
+        q.push(
+            defuse::Edit::Replace {
+                node: first,
+                op,
+                args: vec![n, three],
+            },
+            3,
+        );
+    })
+    .join()
+    .expect("the queuing thread");
+    assert_eq!(queue.pending(), 3);
+    let mut queue = queue;
+    let r = eng
+        .evaluate_absorbing(&mut defuse::Greedy::default(), &mut defuse::Sequential, &mut queue)
+        .expect("absorbing");
+    assert_eq!(r.version, 3, "{r:?}");
+    assert_eq!(r.edits_applied, vec![(3, 0)], "{r:?}");
+    assert_eq!(queue.applied(), 3);
+    assert_eq!(queue.pending(), 0);
+    let made = queue.take_made();
+    assert_eq!(made.len(), 2, "{made:?}");
+    assert_eq!(made[0].0, 1);
+    assert_eq!(made[1].0, 2);
+    assert_eq!(eng.output(made[0].1), Some(two));
+    assert_eq!(eng.output(made[1].1), Some(three));
+    assert_eq!(eng.output(first), Some(three));
+    assert_eq!(queue.take_made(), Vec::new());
+}
+
+/// `["t", k]`: claims `k` following siblings, decided when it runs.
+struct Taker;
+
+static TAKER_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl Operation for Taker {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn claim(&self, a: &[ValueId], v: &Values, _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>) -> Claim {
+        if tag(v, a) == "t" { Claim::Pending } else { Claim::None }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        if tag(v, &a) == "t" {
+            TAKER_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let k = match a.get(1).map(|&x| v.get(x)).as_deref() {
+                Some(Value::Int(n)) => usize::try_from(*n).unwrap_or(0),
+                _ => 0,
+            };
+            let mut got = 0;
+            while got < k && cx.following(got).is_some() {
+                got += 1;
+            }
+            cx.claim(got);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A claim a node's own run makes does not make the node run again: the
+/// run made it from the text it saw.
+#[test]
+fn a_claim_made_by_the_run_itself_does_not_rerun_the_claimer() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Taker));
+    let u = eng.new_unit();
+    let v = eng.values();
+    let taker = eng.push(u, op, vec![v.str("t"), v.int(2)]);
+    for i in 0..3 {
+        let v = eng.values();
+        let a = vec![v.str("w"), v.int(i)];
+        eng.push(u, op, a);
+    }
+    TAKER_RUNS.store(0, std::sync::atomic::Ordering::Relaxed);
+    eng.evaluate_sequential().expect("cold");
+    assert_eq!(TAKER_RUNS.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(eng.children(taker).len(), 0);
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+    // A changed claim count (an edit) runs it again, once.
+    let v = eng.values();
+    let a = vec![v.str("t"), v.int(1)];
+    eng.replace(taker, op, a);
+    eng.evaluate_sequential().expect("after the edit");
+    assert_eq!(TAKER_RUNS.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+}

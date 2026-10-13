@@ -172,15 +172,16 @@ impl Run<'_, '_> {
         Ok(State::decode(self.v, x))
     }
 
-    /// The fold over the main list's contributions, all but the last
-    /// `excess` (appended after the call it stands for).
-    pub(crate) fn page_fold(&mut self, excess: usize) -> R<()> {
+    /// The fold over the main list's contributions up to the last
+    /// `build_page` call's marker (what the same run appended after it
+    /// waits for the next).
+    pub(crate) fn page_fold(&mut self) -> R<()> {
         let mut st = self.page_state()?;
-        let (items, _) = self.list_items(0)?;
-        let end = items.len() - excess;
+        let l = self.list_fold(0)?;
+        let end = l.bp_at;
         let mut queue: VecDeque<ValueId> = st.pending.drain(..).collect();
-        queue.extend(items[..end].iter().skip(st.consumed).copied());
-        st.consumed = end;
+        queue.extend(l.items[..end].iter().skip(st.consumed).copied());
+        st.consumed = end.max(st.consumed);
         self.page_steps(st, queue)
     }
 
