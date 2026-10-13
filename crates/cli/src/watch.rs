@@ -842,6 +842,22 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                         ),
                     ));
                 }
+                let waits: Vec<String> = x
+                    .waits_by_kind
+                    .iter()
+                    .filter(|(_, n)| *n > 0)
+                    .map(|(k, n)| format!("{n} {k}"))
+                    .collect();
+                if !waits.is_empty() || x.gated > 0 {
+                    let mut w = waits.join(" · ");
+                    if x.gated > 0 {
+                        w.push_str(&format!(" · {} gated", x.gated));
+                    }
+                    if let Some((id, n)) = x.top_waited.first() {
+                        w.push_str(&format!(" · most on node {id} ×{n}"));
+                    }
+                    rows.push(("waits".to_owned(), w.trim_start_matches(" · ").to_owned()));
+                }
             }
             let head = format!(
                 "{}  {}  {}",
@@ -870,6 +886,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 "batches": x.batches,
                 "batches_inline": x.batches_inline,
                 "max_batch": x.max_batch,
+                "waits_by_kind": x.waits_by_kind.iter().map(|(k, n)| json!({"kind": k, "waits": n})).collect::<Vec<_>>(),
+                "top_waited": x.top_waited.iter().map(|(id, n)| json!({"node": id, "waits": n})).collect::<Vec<_>>(),
+                "gated": x.gated,
             })),
             "wall_ms": r.wall.as_secs_f64() * 1e3,
             "errors": r.out.errors,

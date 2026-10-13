@@ -155,6 +155,11 @@ pub struct RunInfo {
     pub batches: u64,
     pub batches_inline: u64,
     pub max_batch: usize,
+    /// The engine's waits by kind, the most-waited nodes (id, waits), and
+    /// the steps held back at a gate.
+    pub waits_by_kind: Vec<(&'static str, u64)>,
+    pub top_waited: Vec<(u64, u64)>,
+    pub gated: u64,
 }
 
 impl RunInfo {
@@ -552,6 +557,9 @@ impl Session {
                 batches: s.batches,
                 batches_inline: s.batches_inline,
                 max_batch: s.jobs_max_batch,
+                waits_by_kind: s.waits_by_kind.clone(),
+                top_waited: s.top_waited.clone(),
+                gated: s.gated,
             }],
             internal: None,
             diagnostics: b.diagnostics(),
