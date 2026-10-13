@@ -142,13 +142,18 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // registers, §1123)
         // (the assignments between it and its character, §1123, are
         // commands of the text or of the calling body: their own rows)
-        "accent" => &["box:", "lvlfix"],
+        // (the only register material sets is `\\box255`, when the page
+        // builder runs inline and fires the routine, §1091, §1094, §1012;
+        // `\\unhbox`, `\\box` and `\\lastbox` void their own, §1110, §1079)
+        "accent" => &["box:255", "lvlfix"],
         "char" | "discretionary" | "-" | "hskip" | "hfil" | "hfill" | "hss" | "hfilneg"
-        | "vrule" | "indent" | "noindent" | "unhbox" | "unhcopy" | "box" | "copy" | "leaders"
-        | "cleaders" | "xleaders" => &["box:", "lvlfix"],
+        | "vrule" | "indent" | "noindent" | "unhcopy" | "copy" | "leaders" | "cleaders"
+        | "xleaders" => &["box:255", "lvlfix"],
+        "unhbox" | "box" => &["box:", "lvlfix"],
         // vertical material and removals (§1056, §1105, §1080)
-        "vskip" | "vfil" | "vfill" | "vss" | "vfilneg" | "kern" | "hrule" | "unvbox"
-        | "unvcopy" | "unskip" | "unpenalty" | "unkern" | "lastbox" => &["box:"],
+        "vskip" | "vfil" | "vfill" | "vss" | "vfilneg" | "kern" | "hrule" | "unvcopy"
+        | "unskip" | "unpenalty" | "unkern" => &["box:255"],
+        "unvbox" | "lastbox" => &["box:"],
         // math only (§1136-§1194): the incompleat noad is the run's own
         "mathord" | "mathop" | "mathbin" | "mathrel" | "mathopen" | "mathclose" | "mathpunct"
         | "mathinner" | "underline" | "overline" | "mathaccent" | "radical" | "displaystyle"
