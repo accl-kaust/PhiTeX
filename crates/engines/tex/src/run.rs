@@ -162,6 +162,9 @@ pub(crate) struct Run<'c, 'a> {
     pub top: bool,
     /// Whether `\end` takes every following sibling.
     pub claim_rest: bool,
+    /// The last command was an expansion step (`Run::command`): the
+    /// node goes on with the tokens it left.
+    pub expanded: bool,
     /// In a trial (`measure_tail`): the scope kind its own commands
     /// opened and closed so far, in place of the node's.
     #[allow(clippy::option_option)]
@@ -269,6 +272,7 @@ impl<'c, 'a> Run<'c, 'a> {
             contribs: Vec::new(),
             kids: Vec::new(),
             effect: Effect::None,
+            expanded: false,
             cur: Cur {
                 tok: Tok::C(0),
                 cmd: 0,

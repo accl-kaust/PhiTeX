@@ -26,6 +26,7 @@ impl Run<'_, '_> {
         if !got? {
             return Ok(());
         }
+        self.expanded = self.cur.cmd > cmd::MAX_COMMAND;
         if self.cur.cmd > cmd::MAX_COMMAND {
             // an expandable item is not checked (OUTPUT.md §5)
             self.boundary = false;

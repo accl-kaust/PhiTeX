@@ -56,6 +56,16 @@ fn chain(dir: &std::path::Path, name: &str) {
             eprintln!("  {name} wait {k}: {l}");
         }
     }
+    // (an evaluation that stopped early measures nothing)
+    assert!(
+        b.stats.page_steps > 0,
+        "{name}: no page steps ({} nodes run): {:?}",
+        b.stats.nodes_run,
+        b.diagnostics()
+            .iter()
+            .map(|d| d.message.chars().take(300).collect::<String>())
+            .collect::<Vec<_>>()
+    );
     let c = b.critical_chain();
     let mut by: BTreeMap<String, usize> = BTreeMap::new();
     for (what, kind, field) in &c {
@@ -214,6 +224,7 @@ fn chain_cells(dir: &std::path::Path, name: &str) -> (Vec<String>, f64) {
     let src = common::read(&dir.join(format!("{name}.tex")));
     let opts = common::options(&format!("./{name}.tex"), name, "", dir);
     let b = common::build(opts, Some(&common::plain()), &src);
+    assert!(b.stats.page_steps > 0, "{name}: no page steps");
     let bad: Vec<String> = b
         .critical_chain()
         .into_iter()
