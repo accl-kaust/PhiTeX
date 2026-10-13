@@ -1097,7 +1097,9 @@ impl Graph {
             }
             _ => {}
         }
-        let mut out = format!("evaluation: {e}\n{e:?}");
+        // (the field and the nodes' texts first: a harness shows the
+        // head of the message; the error's full form last)
+        let mut out = format!("evaluation: {e}");
         let v = self.eng.values();
         if let E::UndeclaredDefinition { field, .. } = e {
             let _ = write!(out, "\n  field {}", field_name(v, *field));
@@ -1122,6 +1124,7 @@ impl Graph {
             );
             let _ = write!(out, "\n  {id:?}: {what}");
         }
+        let _ = write!(out, "\n  {e:?}");
         out
     }
 
