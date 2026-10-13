@@ -94,8 +94,11 @@ mod image;
 mod macnames;
 pub mod map;
 mod marks;
+#[doc(hidden)]
+pub mod norm;
 pub mod num;
 mod objects;
+pub mod relaxed;
 mod ship;
 pub mod t1;
 mod tounicode;

@@ -67,6 +67,9 @@ args=(
   --setenv TEXMFVAR /tmp/texmf-var
   --setenv PHITEX_SANDBOX 1
 )
+# phitex's format cache in the repo ($HOME is an empty tmpfs: a cache
+# there is gone with the sandbox, and every run builds the format again).
+[ -n "${PHITEX_CACHE_DIR:-}" ] || args+=(--setenv PHITEX_CACHE_DIR "$repo/target/cache")
 # phitex's own switches (PHITEX_PERSIST_CHECK, PHITEX_SSA_WORKERS, ...) pass
 # through.
 while IFS='=' read -r name value; do

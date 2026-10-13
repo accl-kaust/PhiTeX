@@ -17,7 +17,7 @@ use phitex_defuse::{Ctx, Stop, Value, ValueId, Values};
 use phitex_pdf::map::{MapEntry, parse_line, parse_map, parse_map_ps};
 use phitex_pdf::{
     Action, ColorStackCmd, DestKind, FontSource, Ident, LiteralMode, PdfBytes, PdfParams, PdfState,
-    Whatsit,
+    VirtualFont, Whatsit,
 };
 use phitex_tfm::ScaledFont;
 use phitex_typeset::fonts::FontId;
@@ -95,11 +95,42 @@ struct Font {
 #[derive(Default)]
 pub(crate) struct Fonts {
     by_id: HashMap<FontId, Font>,
-    files: HashMap<Vec<u8>, Arc<[u8]>>,
+    pub(crate) files: HashMap<Vec<u8>, Arc<[u8]>>,
     space: Option<FontId>,
-    ps: Option<Arc<PsMap>>,
+    pub(crate) ps: Option<Arc<PsMap>>,
     /// The files asked for and not given (a dry run's findings).
-    missed: std::cell::RefCell<BTreeSet<Vec<u8>>>,
+    pub(crate) missed: std::cell::RefCell<BTreeSet<Vec<u8>>>,
+    /// The virtual fonts `do_vf` read, by font.
+    vfs: HashMap<FontId, VirtualFont>,
+}
+
+impl Fonts {
+    /// A digest of the fonts as the writer sees them (a memo key):
+    /// names, sizes, map entries, the files' bytes.
+    pub(crate) fn digest(&self) -> u64 {
+        let mut ids: Vec<&FontId> = self.by_id.keys().collect();
+        ids.sort_unstable();
+        let mut h = 0;
+        for f in ids {
+            let x = &self.by_id[f];
+            let words = [
+                u64::from(*f),
+                u64::from_ne_bytes(i64::from(x.metrics.size).to_ne_bytes()),
+            ];
+            h = phitex_defuse::hash_words(h, &words);
+            h = phitex_defuse::hash_bytes(h, &x.name);
+            h = phitex_defuse::hash_bytes(h, format!("{:?}", x.entry).as_bytes());
+            for b in [&x.ff, &x.enc] {
+                h = phitex_defuse::hash_bytes(h, b.as_deref().unwrap_or_default());
+            }
+        }
+        let mut files: Vec<_> = self.files.iter().collect();
+        files.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        for (n, b) in files {
+            h = phitex_defuse::hash_bytes(phitex_defuse::hash_bytes(h, n), b);
+        }
+        phitex_defuse::hash_words(h, &[u64::from(self.space.unwrap_or(0))])
+    }
 }
 
 /// `pdftex.map`'s `ps_tree`.
@@ -113,7 +144,7 @@ fn ps_maps() -> &'static PsCache {
 }
 
 /// `pdftex.map` by PostScript name: a pure function's memo.
-fn default_ps_map(r: &mut Run<'_, '_>) -> R<Option<Arc<PsMap>>> {
+pub(crate) fn default_ps_map(r: &mut Run<'_, '_>) -> R<Option<Arc<PsMap>>> {
     let v = r.v;
     let Some(x) = r.file("pdftex.map")? else {
         return Ok(None);
@@ -181,10 +212,123 @@ impl FontSource for Fonts {
     fn space_font(&self) -> Option<FontId> {
         self.space
     }
+    fn virtual_font(&self, f: FontId) -> Option<VirtualFont> {
+        self.vfs.get(&f).cloned()
+    }
+}
+
+/// `store_scaled` of `vf_def_font` (pdfTeX's vfpacket code, as §575
+/// reads a TFM's sizes): a `fix_word` `sq` times the size `z`.
+fn store_scaled_f(sq: i32, z: i32) -> i32 {
+    let mut z = z;
+    let mut alpha = 16;
+    while z >= 0o40000000 {
+        z /= 2;
+        alpha += alpha;
+    }
+    let beta = 256 / alpha;
+    let alpha = alpha * z;
+    let u = if sq >= 0 {
+        sq.cast_unsigned()
+    } else {
+        (sq + 0x4000_0000 + 0x4000_0000).cast_unsigned()
+    };
+    let [a, b, c, d] = u.to_be_bytes();
+    let a = if sq >= 0 { a } else { a.wrapping_add(128) };
+    let (b, c, d) = (i32::from(b), i32::from(c), i32::from(d));
+    let sw = (((((d * z) / 0o400) + (c * z)) / 0o400) + (b * z)) / beta;
+    if a == 0 { sw } else { sw - alpha }
+}
+
+/// `do_vf`: font `f`'s virtual font read once, when the writer first
+/// outputs one of its characters; its local fonts are the TeX fonts of
+/// that name and size (`tfm_lookup`), else new ones (`read_font_info`:
+/// the next font numbers, as pdfTeX's are). `pdf:vf:<f>` holds the
+/// local fonts (`[k, font]`), empty for a font that is not virtual.
+pub(crate) fn do_vf(r: &mut Run<'_, '_>, f: u32) -> R<()> {
+    let v = r.v;
+    let key = format!("pdf:vf:{f}");
+    if r.get(&key)?.is_some() {
+        return Ok(());
+    }
+    let info = crate::fonts::info(v, r.get(&format!("fontinfo:{f}"))?);
+    let Some(i) = info.filter(|i| i.file.is_some()) else {
+        r.set(&key, v.list(Vec::new()), true);
+        return Ok(());
+    };
+    let Some(bytes) = file_bytes(r, &format!("{}.vf", i.name))? else {
+        r.set(&key, v.list(Vec::new()), true);
+        return Ok(());
+    };
+    let Ok(vf) = phitex_tfm::parse_vf(&bytes) else {
+        r.set(&key, v.list(Vec::new()), true);
+        return Ok(());
+    };
+    let mut locals = Vec::new();
+    for lf in &vf.fonts {
+        let fs = store_scaled_f(lf.scaled, i.size);
+        let name = String::from_utf8_lossy(&lf.name).into_owned();
+        let count = r.int("fontcount")?;
+        let mut found = None;
+        for g in 1..=count {
+            if let Some(j) = crate::fonts::info(v, r.get(&format!("fontinfo:{g}"))?)
+                && j.name == name
+                && j.size == fs
+            {
+                found = Some(g);
+                break;
+            }
+        }
+        let g = match found {
+            Some(g) => g,
+            None => r.read_font_info(&name, fs)?,
+        };
+        locals.push(v.list(vec![v.int(i64::from(lf.number)), v.int(g)]));
+    }
+    r.set(&key, v.list(locals.clone()), true);
+    for l in locals {
+        let g = crate::val::int_at(v, l, 1);
+        if let Ok(g) = u32::try_from(g)
+            && g > 0
+        {
+            do_vf(r, g)?;
+        }
+    }
+    Ok(())
+}
+
+/// `do_vf` for the fonts of `b`, in the order the writer outputs them.
+pub(crate) fn vf_for(r: &mut Run<'_, '_>, b: &BoxNode) -> R<()> {
+    fn walk(list: &[phitex_typeset::node::Node], out: &mut Vec<FontId>) {
+        use phitex_typeset::node::Node;
+        for n in list {
+            match n {
+                Node::Char { font, .. } => out.push(*font),
+                Node::Lig(l) => out.push(l.font),
+                Node::Box(b) => walk(&b.list, out),
+                Node::Glue(g) => {
+                    if let Some(l) = &g.leader {
+                        walk(std::slice::from_ref(&**l), out);
+                    }
+                }
+                Node::Disc(d) => walk(&d.replace, out),
+                _ => {}
+            }
+        }
+    }
+    let mut fonts = Vec::new();
+    walk(&b.list, &mut fonts);
+    let mut seen = BTreeSet::new();
+    for f in fonts {
+        if seen.insert(f) {
+            do_vf(r, f)?;
+        }
+    }
+    Ok(())
 }
 
 /// A file's bytes, `None` if absent.
-fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Arc<[u8]>>> {
+pub(crate) fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Arc<[u8]>>> {
     let v = r.v;
     Ok(r.file(name)?.and_then(|x| {
         list_of(v, x)
@@ -220,11 +364,48 @@ fn default_map(r: &mut Run<'_, '_>) -> R<Option<Arc<Map>>> {
 
 /// The fonts `ids` as the writer asks for them, with the files of the
 /// map lines read so far; `space`: with `pdftexspace` too.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Fonts> {
     let v = r.v;
     let map = default_map(r)?;
     let mut out = Fonts::default();
     let mut wanted: Vec<(u32, String, ValueId, i32)> = Vec::new();
+    // the virtual fonts' local fonts too
+    let mut all: Vec<u32> = ids.to_vec();
+    let mut k = 0;
+    while k < all.len() {
+        let f = all[k];
+        k += 1;
+        let Some(x) = r.get(&format!("pdf:vf:{f}"))? else {
+            continue;
+        };
+        let locals = list_of(v, x);
+        if locals.is_empty() {
+            continue;
+        }
+        let mut fonts = Vec::new();
+        for l in locals {
+            let n = u32::try_from(crate::val::int_at(v, l, 0)).unwrap_or(0);
+            let g = u32::try_from(crate::val::int_at(v, l, 1)).unwrap_or(0);
+            fonts.push((n, g));
+            if !all.contains(&g) {
+                all.push(g);
+            }
+        }
+        let name = crate::fonts::info(v, r.get(&format!("fontinfo:{f}"))?).map(|i| i.name);
+        if let Some(name) = name
+            && let Some(b) = file_bytes(r, &format!("{name}.vf"))?
+            && let Ok(vf) = phitex_tfm::parse_vf(&b)
+        {
+            let packets = vf
+                .chars
+                .iter()
+                .filter_map(|c| Some((u8::try_from(c.code).ok()?, c.dvi.to_vec())))
+                .collect();
+            out.vfs.insert(f, VirtualFont { fonts, packets });
+        }
+    }
+    let ids = &all[..];
     for &f in ids {
         if let Some(i) = crate::fonts::info(v, r.get(&format!("fontinfo:{f}"))?)
             && let Some(file) = i.file
@@ -424,6 +605,10 @@ pub(crate) fn command<T: Default>(
     if r.param("pdfoutput")? <= 0 {
         return Ok(T::default());
     }
+    if crate::pdfrelaxed::on(r)? {
+        crate::pdfrelaxed::fall_back(r, "a command the relaxed mode does not cover");
+        return Ok(T::default());
+    }
     let fs = fonts_for(r, fonts, false)?;
     step(r, input, &fs, f)
 }
@@ -438,6 +623,10 @@ pub(crate) fn command_forms<T: Default>(
     if r.param("pdfoutput")? <= 0 {
         return Ok(T::default());
     }
+    if crate::pdfrelaxed::on(r)? {
+        crate::pdfrelaxed::fall_back(r, "a command the relaxed mode does not cover");
+        return Ok(T::default());
+    }
     let fs = fonts_for(r, fonts, false)?;
     step_forms(r, input, &fs, f)
 }
@@ -448,7 +637,7 @@ fn param(v: &Values, xs: &[ValueId], k: usize) -> i32 {
 }
 
 /// The page's parameters as `\shipout` read them.
-fn page_params(v: &Values, p: &mut PdfParams, xs: &[ValueId]) {
+pub(crate) fn page_params(v: &Values, p: &mut PdfParams, xs: &[ValueId]) {
     p.h_origin = param(v, xs, 1);
     p.v_origin = param(v, xs, 2);
     p.page_width = param(v, xs, 3);
@@ -474,7 +663,7 @@ fn page_params(v: &Values, p: &mut PdfParams, xs: &[ValueId]) {
 
 /// The writer's data for a whatsit `\shipout` resolved
 /// ([`crate::pdfprim::writer_data`]).
-fn whatsit(v: &Values, d: ValueId) -> Option<Whatsit> {
+pub(crate) fn whatsit(v: &Values, d: ValueId) -> Option<Whatsit> {
     let ys = list_of(v, d);
     let kind = ys.first().map(|&k| str_of(v, k)).unwrap_or_default();
     let text = |k: usize| {
@@ -652,6 +841,7 @@ pub(crate) fn action_of(v: &Values, x: ValueId) -> Option<Action> {
 
 /// `pdf_ship_out` as a step: `page` is the `pages` entry (box, counts,
 /// fonts, parameters, whatsit data).
+#[allow(clippy::too_many_lines)]
 pub(crate) fn ship(
     r: &mut Run<'_, '_>,
     page: ValueId,
@@ -669,12 +859,32 @@ pub(crate) fn ship(
             resolved.insert(u32::try_from(int_of(v, h)).unwrap_or(0), d);
         }
     }
+    vf_for(r, bx)?;
     let space = resolved.values().any(|&d| {
         matches!(
             list_of(v, d).first().map(|&k| str_of(v, k)).as_deref(),
             Some("iwon" | "fake")
         )
     });
+    if crate::pdfrelaxed::on(r)? {
+        let fonts = fonts_for(r, ids, space)?;
+        let whats = side.whats.clone();
+        let mut wh = |h: u32| -> Option<Whatsit> {
+            if let Some(&d) = resolved.get(&h) {
+                return whatsit(v, d);
+            }
+            let w = *whats.get(h as usize)?;
+            let ys = list_of(v, w);
+            (ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special")).then(|| {
+                Whatsit::Special(bytes_of(
+                    &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
+                ))
+            })
+        };
+        let shown = crate::pdfrelaxed::ship(r, &p, bx, &fonts, &mut wh)?;
+        let attr = p.get(15).map(|&a| str_of(v, a)).unwrap_or_default();
+        return Ok(phitex_defuse::hash_bytes(shown, attr.as_bytes()));
+    }
     // the fonts of the forms the page may ship too
     let mut all: BTreeSet<u32> = ids.iter().copied().collect();
     all.extend(forms_here(r)?.fonts);

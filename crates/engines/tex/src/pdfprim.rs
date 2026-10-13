@@ -458,7 +458,14 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             // `get_obj(obj_type_page, n, false)`: the writer's object for
             // page n, made by the step if no page or reference made it
             let input = v.list(vec![v.str("pageref"), v.int(i64::from(n))]);
-            let got = crate::pdfout::command(r, input, &[], |st, _| Some(st.page_ref(n)))?;
+            let got = if crate::pdfrelaxed::on(r)? {
+                // the number is text: a handle typeset differs from
+                // pdfTeX's page object number
+                crate::pdfrelaxed::fall_back(r, "\\pdfpageref (its number is text)");
+                None
+            } else {
+                crate::pdfout::command(r, input, &[], |st, _| Some(st.page_ref(n)))?
+            };
             if let Some(o) = got {
                 o.to_string()
             } else {
@@ -628,9 +635,14 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
                 v.str(&s),
             ]);
             let init = bytes(&s);
-            let got = crate::pdfout::command(r, input, &[], |st, _| {
-                st.colorstack_init(page, mode == 2, &init).ok()
-            })?;
+            // relaxed: the stack's number is TeX's, the pages carry the stacks
+            let got = if crate::pdfrelaxed::on(r)? {
+                None
+            } else {
+                crate::pdfout::command(r, input, &[], |st, _| {
+                    st.colorstack_init(page, mode == 2, &init).ok()
+                })?
+            };
             let n = got.unwrap_or(stacks.len() + 1);
             stacks.push(v.list(vec![v.int(i64::from(page)), v.int(mode), v.str(&s)]));
             r.set("pdf:colorstacks", v.list(stacks), true);
@@ -1892,9 +1904,14 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             // pdfTeX §1355: not a node; the object is made now
             let (use_n, reserved) = obj_num_option(r)?;
             if reserved {
-                let input = v.list(vec![s("objreserve")]);
-                let got = crate::pdfout::command(r, input, &[], |st, _| Some(st.obj_reserve()))?;
-                let n = or_alloc(r, got)?;
+                let n = if crate::pdfrelaxed::on(r)? {
+                    crate::pdfrelaxed::new_handle(r)
+                } else {
+                    let input = v.list(vec![s("objreserve")]);
+                    let got =
+                        crate::pdfout::command(r, input, &[], |st, _| Some(st.obj_reserve()))?;
+                    or_alloc(r, got)?
+                };
                 r.set("pdf:lastobj", v.int(n), true);
                 return Ok(());
             }
@@ -1912,6 +1929,11 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 (phitex_pdf::ObjBody::Text(bytes(&text)), ValueId::UNIT)
             };
             let attr_b = Some(bytes(&str_of(v, at))).filter(|a| !a.is_empty());
+            if crate::pdfrelaxed::on(r)? {
+                let n = crate::pdfrelaxed::obj(r, use_n, stream, attr_b, body)?;
+                r.set("pdf:lastobj", v.int(n), true);
+                return Ok(());
+            }
             let input = v.list(vec![
                 s("obj"),
                 v.int(use_n.unwrap_or(0)),
@@ -2040,10 +2062,14 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             // `pdf_new_objnum` unless `useobjnum` gave it
             let n = if let Some(n) = use_n {
                 n
+            } else if crate::pdfrelaxed::on(r)? {
+                crate::pdfrelaxed::new_handle(r)
             } else {
-                let input = v.list(vec![s("newobjnum"), s("annot")]);
-                let got = crate::pdfout::command(r, input, &[], |st, _| Some(st.new_objnum()))?;
-                or_alloc(r, got)?
+                {
+                    let input = v.list(vec![s("newobjnum"), s("annot")]);
+                    let got = crate::pdfout::command(r, input, &[], |st, _| Some(st.new_objnum()))?;
+                    or_alloc(r, got)?
+                }
             };
             if !reserved {
                 let (w, h, d) = alt_rule(r)?;
@@ -2073,9 +2099,13 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             let (w, h, d) = alt_rule(r)?;
             let at = attr(r)?;
             let act = action(r)?;
-            let input = v.list(vec![s("newobjnum"), s("link")]);
-            let got = crate::pdfout::command(r, input, &[], |st, _| Some(st.new_objnum()))?;
-            let n = or_alloc(r, got)?;
+            let n = if crate::pdfrelaxed::on(r)? {
+                crate::pdfrelaxed::new_handle(r)
+            } else {
+                let input = v.list(vec![s("newobjnum"), s("link")]);
+                let got = crate::pdfout::command(r, input, &[], |st, _| Some(st.new_objnum()))?;
+                or_alloc(r, got)?
+            };
             whatsit(
                 r,
                 md,
@@ -2111,6 +2141,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             let title = ext_value(r)?;
             let e = v.list(vec![at, act, v.int(i64::from(count)), title]);
             append_text(r, "pdf:outlines", e)?;
+            if crate::pdfrelaxed::on(r)? {
+                return Ok(());
+            }
             // pdfTeX §1560: the entry's objects are written now
             let input = v.list(vec![s("outline"), e]);
             let a = crate::pdfout::action_of(v, act);
@@ -2194,6 +2227,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
         ex::INFO => {
             let t = ext_value(r)?;
             append_text(r, "pdf:info", t)?;
+            if crate::pdfrelaxed::on(r)? {
+                return Ok(());
+            }
             let tb = bytes(&str_of(v, t));
             let input = v.list(vec![s("info"), t]);
             crate::pdfout::command(r, input, &[], |st, _| st.info(&tb))?;
@@ -2210,6 +2246,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 .then(|| crate::pdfout::action_of(v, oa))
                 .flatten();
             let tb = bytes(&str_of(v, t));
+            if crate::pdfrelaxed::on(r)? {
+                return Ok(());
+            }
             let input = v.list(vec![s("catalog"), t, oa]);
             let err =
                 crate::pdfout::command(r, input, &[], |st, _| st.catalog(&tb, a.as_ref()).err())?;
@@ -2220,6 +2259,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
         ex::NAMES => {
             let t = ext_value(r)?;
             append_text(r, "pdf:names", t)?;
+            if crate::pdfrelaxed::on(r)? {
+                return Ok(());
+            }
             let tb = bytes(&str_of(v, t));
             let input = v.list(vec![s("names"), t]);
             crate::pdfout::command(r, input, &[], |st, _| st.names(&tb))?;
@@ -2227,6 +2269,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
         ex::TRAILER => {
             let t = ext_value(r)?;
             append_text(r, "pdf:trailer", t)?;
+            if crate::pdfrelaxed::on(r)? {
+                return Ok(());
+            }
             let tb = bytes(&str_of(v, t));
             let input = v.list(vec![s("trailer"), t]);
             crate::pdfout::command(r, input, &[], |st, _| st.trailer(&tb))?;
@@ -2234,6 +2279,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
         ex::TRAILER_ID => {
             let t = ext_value(r)?;
             r.set("pdf:trailerid", t, true);
+            if crate::pdfrelaxed::on(r)? {
+                return Ok(());
+            }
             let tb = bytes(&str_of(v, t));
             let input = v.list(vec![s("trailerid"), t]);
             crate::pdfout::command(r, input, &[], |st, _| st.trailer_id(&tb))?;
@@ -2268,6 +2316,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             };
             let e = v.list(vec![s(k), t]);
             append_text(r, "pdf:maps", e)?;
+            if crate::pdfrelaxed::on(r)? {
+                return Ok(());
+            }
             let input = v.list(vec![s("map"), s(k), t]);
             let tb = bytes(&str_of(v, t));
             let file = k == "file";
@@ -2304,6 +2355,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             let a = ext_value(r)?;
             let b = ext_value(r)?;
             append_text(r, "pdf:glyphtounicode", v.list(vec![a, b]))?;
+            if crate::pdfrelaxed::on(r)? {
+                return Ok(());
+            }
             let (ab, bb) = (bytes(&str_of(v, a)), bytes(&str_of(v, b)));
             let input = v.list(vec![v.str("glyphtounicode"), a, b]);
             crate::pdfout::command(r, input, &[], |st, _| st.glyph_to_unicode(&ab, &bb))?;
@@ -2546,6 +2600,9 @@ fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<Option<(usize, phitex_pd
         image_resolution: ps[0],
         inclusion_errorlevel: ps[1],
     };
+    if crate::pdfrelaxed::on(r)? {
+        return crate::pdfrelaxed::ximage(r, spec, &ps);
+    }
     let immediate = x.immediate;
     let got = crate::pdfout::command(r, input, &[], |st, fs| {
         let pm = st.params_mut();
@@ -2591,12 +2648,24 @@ fn xform_step(
     let Some(Node::Box(mut bx)) = nodes::decode(v, b, &mut side) else {
         return Ok(None);
     };
+    // PDF-BACKEND-GAP: pdfTeX reads a form's virtual fonts when it
+    // writes the form (`\immediate`: now; else after the first page that
+    // references it); here at `\pdfxform`, so a new local font of a
+    // later-written form may take a number a page's font takes in pdfTeX
+    // (`vfgap` in tests/pdftex.rs)
+    crate::pdfout::vf_for(r, &bx)?;
     let mut data = Vec::new();
     for w in side.whats.clone() {
         data.push(crate::pdfout::writer_whatsit(r, w)?);
     }
     let view = r.font_view(std::slice::from_ref(&Node::Box(bx.clone())))?;
     let ids: Vec<u32> = view.fonts.keys().copied().collect();
+    if crate::pdfrelaxed::on(r)? {
+        let fs = crate::pdfout::fonts_for(r, &ids, false)?;
+        let at_b = Some(bytes(&str_of(v, at))).filter(|a| !a.is_empty());
+        let res_b = Some(bytes(&str_of(v, res))).filter(|a| !a.is_empty());
+        return crate::pdfrelaxed::xform(r, &bx, &data, &fs, at_b, res_b, immediate);
+    }
     let mut all: std::collections::BTreeSet<u32> = ids.iter().copied().collect();
     all.extend(crate::pdfout::forms_here(r)?.fonts);
     let all: Vec<u32> = all.into_iter().collect();

@@ -25,6 +25,10 @@ pub struct Ctx<'a> {
     fuel: u64,
     steps: u64,
     stopped: Option<End>,
+    /// The level this run has to be re-done at: above the highest finished
+    /// node it read that is not settled yet (0: none). The run goes on with
+    /// the current values and is re-done once, not once per such read.
+    raise: u32,
     cache: FxHashMap<(u8, u64), Option<ValueId>>,
     /// Walks the gate did for this run (same node, same batch state).
     pub(crate) walks: Vec<(Field, WalkResult)>,
@@ -62,6 +66,7 @@ impl<'a> Ctx<'a> {
             fuel,
             steps: 0,
             stopped: None,
+            raise: 0,
             cache: FxHashMap::default(),
             walks: Vec::new(),
             following_cursor: std::cell::Cell::new((0, 0)),
@@ -174,8 +179,8 @@ impl<'a> Ctx<'a> {
         if tn.in_work() {
             self.stop(End::Wait(t))
         } else {
-            let h = tn.height + 1;
-            self.stop(End::Raise(h))
+            self.raise = self.raise.max(tn.height + 1);
+            Ok(val)
         }
     }
 
@@ -750,7 +755,7 @@ impl<'a> Ctx<'a> {
             return self.stop(End::WaitRange(f, anchor));
         }
         if s.1 >= e.level && !self.spec {
-            return self.stop(End::Raise(s.1 + 1));
+            self.raise = self.raise.max(s.1 + 1);
         }
         let v = e.acc_fold(n.unit, f, lo, n.label);
         self.watch = Some((f, anchor, v));
@@ -789,6 +794,7 @@ impl<'a> Ctx<'a> {
         self.children.append(&mut self.follows);
         let end = match (self.stopped, r) {
             (Some(e), _) => e,
+            (None, Ok(_)) if self.raise > 0 => End::Raise(self.raise),
             (None, Ok(v)) => End::Output(v),
             (None, Err(_)) => End::Unpredictable,
         };
@@ -804,6 +810,7 @@ impl<'a> Ctx<'a> {
             epoch: n.epoch,
             speculative: self.spec,
             end,
+            raise: self.raise,
             uses: self.uses,
             defs: self.defs,
             children: self.children,
