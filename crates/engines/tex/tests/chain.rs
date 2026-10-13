@@ -22,6 +22,17 @@ fn target_failures(name: &str, b: &phitex_tex::Build) -> Vec<String> {
     if height > bound {
         out.push(format!("{name}: height {height} > 6 + {pages} pages"));
     }
+    // a region runs as one node: at most a few nodes per region (the
+    // region, its breaks, its loop-back) plus one step per page
+    let regions = b.stats.nodes_text_frames;
+    let pages = pages as u64;
+    let run = b.stats.nodes_run;
+    eprintln!("{name}: {run} nodes run, {regions} regions (text nodes), {pages} pages");
+    if run > 3 * regions + pages + 8 {
+        out.push(format!(
+            "{name}: {run} nodes run > 3 * {regions} regions + {pages} pages + 8"
+        ));
+    }
     out
 }
 
@@ -243,12 +254,11 @@ fn structural(kind: &str, field: &str) -> bool {
     kind != "Changed"
         || field.is_empty()
         || [
-            "page:state",
+            "pagefx:",
             "font",
             "items",
             "pages",
             "lopen:",
-            "if:",
             "scope",
             "kind",
         ]
