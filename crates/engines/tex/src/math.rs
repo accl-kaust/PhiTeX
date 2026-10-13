@@ -225,6 +225,33 @@ impl Run<'_, '_> {
         self.log("error", "Missing $ inserted")
     }
 
+    /// `off_save` (§1064–§1066): a token that closes a group other than
+    /// the innermost one. At the bottom level it is an extra one, an
+    /// error, and ignored; else it is put back, and what closes the
+    /// innermost group is inserted before it, with an error.
+    pub(crate) fn off_save(&mut self, md: &Mode) -> R<()> {
+        if md.group == group::BOTTOM {
+            let what = match self.cur.cmd {
+                cmd::MATH_SHIFT => "math shift character $",
+                cmd::END_GROUP => "\\endgroup",
+                _ => "\\right",
+            };
+            return self.log("error", &format!("Extra {what}"));
+        }
+        self.back_cur();
+        let (toks, what) = match md.group {
+            group::SEMI_SIMPLE => (vec![Tok::cs("\u{10FFFE}endgroup")], "\\endgroup"),
+            group::MATH_SHIFT => (vec![Tok::ch(3, u32::from(b'$'))], "$"),
+            group::MATH_LEFT => (
+                vec![Tok::cs("\u{10FFFE}right"), Tok::ch(12, u32::from(b'.'))],
+                "\\right. ",
+            ),
+            _ => (vec![Tok::ch(2, u32::from(b'}'))], "}"),
+        };
+        self.push_toks(toks);
+        self.log("error", &format!("Missing {what} inserted"))
+    }
+
     /// `init_math` (§1138–§1139, §1145).
     pub(crate) fn init_math(&mut self, md: &Mode) -> R<()> {
         self.get_token()?;
@@ -367,7 +394,7 @@ impl Run<'_, '_> {
     }
 
     fn mathcode(&mut self, c: i32) -> R<i32> {
-        self.int32(&format!("mc:{c}"))
+        self.code(3, c)
     }
 
     fn fam_in_range(&mut self) -> R<Option<i32>> {
@@ -461,7 +488,7 @@ impl Run<'_, '_> {
         } else {
             self.skip_blanks_relax_x()?;
             match self.cur.cmd {
-                cmd::LETTER | cmd::OTHER_CHAR => self.int32(&format!("dc:{}", self.cur.chr))?,
+                cmd::LETTER | cmd::OTHER_CHAR => self.code(4, self.cur.chr)?,
                 cmd::DELIM_NUM => self.scan_twenty_seven_bit_int()?,
                 _ => -1,
             }
@@ -580,8 +607,7 @@ impl Run<'_, '_> {
                 if md.group == group::MATH_SHIFT {
                     self.after_math(md)?;
                 } else {
-                    // off_save (§1064)
-                    self.log("error", "Extra $, or forgotten }")?;
+                    self.off_save(md)?;
                 }
             }
             cmd::EQ_NO => {
@@ -745,8 +771,7 @@ impl Run<'_, '_> {
                 self.scan_delimiter(false)?;
                 return self.log("error", "Extra \\right");
             }
-            // off_save (§1064)
-            return self.log("error", "Extra \\right");
+            return self.off_save(md);
         }
         let d = self.scan_delimiter(false)?;
         if t == LEFT_NOAD {

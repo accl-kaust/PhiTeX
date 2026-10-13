@@ -2024,6 +2024,30 @@ impl Analysis<'_> {
 
     /// The state the commands `calls` (of a body the text defines) may
     /// set.
+    fn calls_state_split(&self, calls: &[String], outer: &[String], st: &mut Option<Vec<String>>) {
+        let (out, inner): (Vec<String>, Vec<String>) =
+            calls.iter().cloned().partition(|c| outer.contains(c));
+        self.calls_state(&out, st);
+        if inner.is_empty() || st.is_none() {
+            return;
+        }
+        // (calls inside a group a body opens: what they set locally is
+        // undone at its end, §283; the rest of their state counts)
+        let mut sub = Some(Vec::new());
+        self.calls_state(&inner, &mut sub);
+        match sub {
+            None => *st = None,
+            Some(hs) => {
+                let keep: Vec<&str> = hs
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|h| !group_local_head(h))
+                    .collect();
+                add_heads(st, Some(&keep));
+            }
+        }
+    }
+
     fn calls_state(&self, calls: &[String], st: &mut Option<Vec<String>>) {
         for c in calls {
             if st.is_none() {
@@ -2200,7 +2224,7 @@ impl Analysis<'_> {
                 add_head(&mut b.state, h);
             }
         }
-        self.calls_state(&set.calls, &mut b.state);
+        self.calls_state_split(&set.calls, &set.outer_calls, &mut b.state);
     }
 
     /// The hint of the control sequence at `a`, of a command beginning
@@ -2300,12 +2324,12 @@ impl Analysis<'_> {
         if self.after_afterassignment(first) {
             add_head(&mut b.state, "aftertoken");
         }
-        self.calls_state(&it.hints.calls, &mut b.state);
+        self.calls_state_split(&it.hints.calls, &it.hints.outer_calls, &mut b.state);
         // (a macro's run expands its body inline: the state of every
         // command its body calls, transitively, the closure's calls)
         if !is_prim(name) {
             let set = self.defset(name);
-            self.calls_state(&set.calls, &mut b.state);
+            self.calls_state_split(&set.calls, &set.outer_calls, &mut b.state);
         }
         match &it.hints.may_define {
             pass::MayDefine::Nothing => true,
@@ -2989,6 +3013,19 @@ fn fragment_context(b: &mut Bound) {
 /// group it runs in, so a slice declares them only for a switch outside
 /// every brace group ([`Analysis::selects_outside`]).
 const GROUP_LOCAL: [&str; 2] = ["font", "param:fam"];
+
+/// A head whose fields a local assignment sets and a group's end
+/// restores (§283): the parameters, the registers, the current font,
+/// `\\parshape`.
+fn group_local_head(h: &str) -> bool {
+    h == "font"
+        || h == "parshape"
+        || [
+            "param:", "count:", "dimen:", "skip:", "muskip:", "toks:", "box:",
+        ]
+        .iter()
+        .any(|p| h.starts_with(p))
+}
 
 /// Plain TeX's catcode of an ASCII byte (`@` a letter when `at`).
 fn plain_catcode(b: u8, at: bool) -> u8 {
