@@ -1365,6 +1365,93 @@ fn is_tex_text(name: &str) -> bool {
 /// load order: the format's macros, which the hints bound a document's
 /// calls with ([`crate::hints`]). Harvested once per prelude key (a text pass, no
 /// evaluation), for a prelude evaluated here or imported from bytes.
+/// The names a text loads (`\\input name`, `\\input{name}`,
+/// `\\RequirePackage{a,b}`, `\\LoadClass{c}`, `\\documentclass{c}`),
+/// each with the extensions to try.
+fn loaded_names(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (cmd, ext) in [
+        ("\\input", ""),
+        ("\\RequirePackage", ".sty"),
+        ("\\usepackage", ".sty"),
+        ("\\LoadClass", ".cls"),
+        ("\\documentclass", ".cls"),
+    ] {
+        let mut from = 0;
+        while let Some(k) = text[from..].find(cmd) {
+            let at = from + k + cmd.len();
+            from = at;
+            let rest = &text[at..];
+            // (a longer name, `\\inputlineno`)
+            if rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                continue;
+            }
+            // (the line is not a comment)
+            let line = &text[text[..at].rfind('\n').map_or(0, |x| x + 1)..at];
+            if line.contains('%') {
+                continue;
+            }
+            let mut r = rest.trim_start();
+            if r.starts_with('[') {
+                r = r[r.find(']').map_or(r.len(), |x| x + 1)..].trim_start();
+            }
+            let names: Vec<&str> = if let Some(b) = r.strip_prefix('{') {
+                b[..b.find('}').unwrap_or(0)].split(',').collect()
+            } else {
+                vec![
+                    r.split(|c: char| c.is_whitespace() || c == '\\' || c == '}')
+                        .next()
+                        .unwrap_or(""),
+                ]
+            };
+            for n in names {
+                let n = n.trim();
+                if n.is_empty() || n.contains('#') {
+                    continue;
+                }
+                out.push(if n.contains('.') {
+                    n.to_owned()
+                } else {
+                    format!("{n}{}", if ext.is_empty() { ".tex" } else { ext })
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Harvests the files `text` loads that the finder resolves, then
+/// theirs, to depth 8, each file once.
+fn harvest_inputs(
+    text: &str,
+    depth: u32,
+    finder: &Finder,
+    defs: &mut pass::Definitions,
+    order: &mut Vec<u32>,
+    seen: &mut std::collections::HashSet<String>,
+    next_id: &mut u32,
+) {
+    if depth >= 8 {
+        return;
+    }
+    for name in loaded_names(text) {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some((_, bytes)) = finder(&name) else {
+            continue;
+        };
+        let t: String = bytes.iter().map(|&b| char::from(b)).collect();
+        let id = *next_id;
+        *next_id += 1;
+        let kind = crate::hints::kind_of(&t, pass::FileKind::from_path(&name));
+        // (what it loads comes first: its definitions precede the rest)
+        harvest_inputs(&t, depth + 1, finder, defs, order, seen, next_id);
+        defs.harvest(&t, kind, id);
+        order.push(id);
+    }
+}
+
 fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
     static C: OnceLock<Mutex<HashMap<[u8; 32], Defs>>> = OnceLock::new();
     let cache = C.get_or_init(|| Mutex::new(HashMap::new()));
@@ -1381,6 +1468,11 @@ fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
     if let Some(p) = prelude {
         defs.harvest(p, crate::hints::kind_of(p, pass::FileKind::Package), 0);
         order.push(0);
+        // (the files the prelude reads, transitively: `\\input tex.ini`
+        // reads plain.tex; depth 8, each file once)
+        let mut seen = std::collections::HashSet::new();
+        let mut next_id = 1_000_000u32;
+        harvest_inputs(p, 0, finder, &mut defs, &mut order, &mut seen, &mut next_id);
     }
     for (k, (name, h)) in c.reads.iter().enumerate() {
         if *h == 0 || !is_tex_text(name) {
