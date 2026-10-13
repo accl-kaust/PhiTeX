@@ -9,7 +9,7 @@ use phitex_defuse::{
     Claim, Ctx, Effect, Field, Locality, MayDefine, OpId, Operation, Stop, ValueId, Values,
 };
 
-use crate::run::{Halt, Ops, R, Run, decode_frames};
+use crate::run::{Halt, Ops, R, Run};
 use crate::val::{int_of, list_of, str_of};
 
 /// The operations' ids, known once all are registered.
@@ -222,10 +222,10 @@ impl Operation for Exec {
             // (a resumed run has done this, and continues its commands)
             if !r.resumed {
                 r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
-                let fs = decode_frames(r.v, &args);
-                let tokens = matches!(fs.first(), Some(crate::run::Frame::Toks(..)));
+                let fs = crate::run::decode_segs(r.v, &args);
+                let tokens = matches!(fs.first(), Some(crate::input::Seg::Toks(..)));
                 crate::hints::count(r, if tokens { 5 } else { 6 });
-                r.frames.extend(fs);
+                r.input.append_text(fs);
                 if let Some((c, k)) = crate::run::carried_conds(r.v, &args) {
                     r.conds = c;
                     r.if_codes = k;

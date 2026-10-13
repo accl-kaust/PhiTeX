@@ -7,7 +7,7 @@ use std::rc::Rc;
 use phitex_defuse::Value;
 
 use crate::print;
-use crate::run::{Frame, R, Run};
+use crate::run::{R, Run};
 use crate::val::{MATCH_CAT, Macro, Mean, OUT_PARAM_CAT, Tok, cmd, int_of, str_of};
 
 // §489
@@ -205,22 +205,25 @@ impl Run<'_, '_> {
         let mut bufs = ARGS.with(std::cell::Cell::take);
         let r = self.macro_args(&m, &mut bufs);
         if matches!(r, Ok(true)) {
-            let MacroBufs { args, bounds, out } = &mut bufs;
-            out.clear();
+            // §400: the body with its arguments substituted, written
+            // straight into the arena as the macro's level
+            let MacroBufs { args, bounds, .. } = &mut bufs;
+            self.input.pop_spent();
+            let start = self.input.arena.begin();
             for t in m.body.iter() {
                 if let Some(x) = t.as_char()
                     && x >> 21 == u32::from(OUT_PARAM_CAT)
                 {
                     let k = usize::try_from(x & 0x1F_FFFF).unwrap_or(1);
                     if let Some(&(lo, hi)) = bounds.get(k.wrapping_sub(1)) {
-                        out.extend_from_slice(&args[lo..hi]);
+                        self.input.arena.extend(&args[lo..hi]);
                     }
                 } else {
-                    out.push(*t);
+                    self.input.arena.push(*t);
                 }
             }
-            let toks: Rc<[Tok]> = crate::run::pooled_toks(out);
-            self.push_toks(toks);
+            let range = self.input.arena.finish(start);
+            self.push_range(range, crate::input::ty::MACRO);
         }
         bufs.args.clear();
         bufs.bounds.clear();
@@ -799,37 +802,7 @@ impl Run<'_, '_> {
     /// in until the file's end marker is reached.
     fn end_input(&mut self) -> R<()> {
         loop {
-            let mut seen_line = false;
-            let mut drop = Vec::new();
-            let mut found = false;
-            for (i, f) in self.frames.iter().enumerate() {
-                match f {
-                    Frame::Src(_) => {
-                        if seen_line {
-                            drop.push(i);
-                        }
-                        seen_line = true;
-                    }
-                    Frame::File(_) => {
-                        if seen_line {
-                            drop.push(i);
-                        }
-                    }
-                    Frame::Toks(t, p) => {
-                        if t[*p..]
-                            .iter()
-                            .any(|x| matches!(x.as_cs(), Some(n) if n.starts_with("\u{10FFFE}eof")))
-                        {
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            for i in drop.into_iter().rev() {
-                self.frames.remove(i);
-            }
-            if found || !self.pull()? {
+            if self.end_input_prune() || !self.pull()? {
                 break;
             }
         }
@@ -870,12 +843,9 @@ impl Run<'_, '_> {
         }
         let path = str_of(self.v, xs[0]);
         self.log("open", &path)?;
-        self.frames
-            .push_front(Frame::Toks(Rc::from(vec![Tok::cs("\u{10FFFE}eof")]), 0));
-        self.frames
-            .push_front(Frame::File(crate::run::FileRest::new(
-                self.v, xs[1], 0, xs[0],
-            )));
+        self.push_toks([Tok::cs("\u{10FFFE}eof")]);
+        self.input
+            .push_file(crate::run::FileRest::new(self.v, xs[1], 0, xs[0]));
         Ok(())
     }
 
