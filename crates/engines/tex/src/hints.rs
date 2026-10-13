@@ -169,7 +169,13 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "write" | "openout" | "closeout" => &["if:", "wopen:", "write:"],
         // (`\\immediate` of a pdfTeX object too, pdfTeX §1528)
         "immediate" => &["if:", "wopen:", "write:", "pdf:"],
-        "shipout" | "insert" | "vadjust" | "output" => &["param:"],
+        // (§1099: `normal_paragraph` in the insert's own group; §1100)
+        "insert" | "vadjust" => NORMAL_PARAGRAPH,
+        // (§638 `dead_cycles:=0`; §1374 the page's `\\write`, `\\openout`,
+        // `\\closeout` whatsits, expanded, §1370; pdfTeX's at shipout)
+        "shipout" => &["deadcycles", "write:", "wopen:", "pdf:", "if:"],
+        // (the token parameter, §1226)
+        "output" => &["param:output"],
         "afterassignment" => &["aftertoken"],
         "aftergroup" => &["ag"],
         // boxes (§1083 begin_box, §1077 \\setbox); a box whose braces close in
@@ -327,6 +333,15 @@ fn table_param(name: &str) -> bool {
     crate::prims::PRIMS
         .iter()
         .any(|p| p.0 == name && matches!(p.1, 72..=76))
+}
+
+/// A parameter field the pass names (`param:\\tolerance`) as the
+/// engine's own field (`param:tolerance`): a parameter assigned by name
+/// defines that one parameter (§1228), not every one.
+fn exact_param(f: &str) -> Option<String> {
+    let n = f.strip_prefix("param:")?;
+    let n = n.strip_prefix('\\').unwrap_or(n);
+    table_param(n).then(|| format!("param:{n}"))
 }
 
 /// The engine's state head of a field the pass names (`count:12`,
@@ -602,6 +617,17 @@ const LOOKTHROUGH: &[&str] = &[
     "uppercase",
     "scantokens",
 ];
+
+/// Whether a command with hint `h` may set the field `name`.
+fn may_set(h: &Hint, name: &str) -> bool {
+    match &h.bound {
+        None => true,
+        Some(b) => match &b.state {
+            None => true,
+            Some(st) => st.iter().any(|x| name.starts_with(x.as_str())),
+        },
+    }
+}
 
 /// Prefixes of a command (§1211): the command after them runs here.
 fn is_prefix(name: &str) -> bool {
@@ -1353,6 +1379,22 @@ fn starts_par(name: &str) -> bool {
 }
 
 impl Analysis<'_> {
+    /// Whether the atom at `a` ends a paragraph (a blank line, `\\par`,
+    /// a command the pass marks paragraph-ending).
+    fn ends_par_at(&self, a: usize) -> bool {
+        let at = &self.p.atoms[a];
+        match at.kind {
+            AtomKind::Par => true,
+            AtomKind::Cs => {
+                matches!(at.name(self.text), "par" | "tex_par:D")
+                    || self.item_of.get(&a).is_some_and(|&i| {
+                        self.p.items[i].hints.implicit == pass::Implicit::EndsParagraph
+                    })
+            }
+            _ => false,
+        }
+    }
+
     fn new(text: &str, kind: FileKind, prelude: Defs) -> Analysis<'_> {
         let mut defs = Definitions::new();
         defs.harvest(text, kind, 0);
@@ -1882,6 +1924,8 @@ impl Analysis<'_> {
                 if !b.names.contains(&f) {
                     b.names.push(f);
                 }
+            } else if let Some(p) = exact_param(f) {
+                add_head(&mut b.state, &p);
             } else if let Some(h) = head_of_pass_field(f) {
                 add_head(&mut b.state, h);
             }
@@ -2105,7 +2149,9 @@ fn align_atoms(text: &str, atoms: &[Atom]) -> Vec<bool> {
 
 fn add_defs(ds: &[Def], prefixes: bool, b: &mut Bound) {
     for d in ds {
-        if let Some(h) = head_of_pass_field(&d.field) {
+        if let Some(p) = exact_param(&d.field) {
+            add_head(&mut b.state, &p);
+        } else if let Some(h) = head_of_pass_field(&d.field) {
             add_head(&mut b.state, h);
         } else if prefixes {
             if let Some(p) = engine_prefix(&d.field)
@@ -2188,6 +2234,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     // executes the whole slice); a paragraph's region also defines
     // `\prevgraf` of the list it is in
     let mut slice_hints = Vec::with_capacity(t.slices.len());
+    let mut pending: Vec<&'static str> = Vec::new();
     for (i, &(s, e)) in t.slices.iter().enumerate() {
         let mut h = t.at_until(s, e);
         // (a slice ending in a command that scans on for a keyword or a
@@ -2255,6 +2302,39 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
             }
             h.excerpt = excerpt;
         }
+        // (a reset by `normal_paragraph`, §1070, defines its parameter
+        // only when a command set it since the last paragraph end: a
+        // slice that may set one and ends no paragraph after it leaves
+        // the reset pending, and the next slice ending a paragraph
+        // declares it)
+        let mut out = pending.clone();
+        let mut ends = false;
+        let k0 = t.starts.partition_point(|&x| x < s);
+        for a in k0..t.starts.len() {
+            if t.starts[a] >= e {
+                break;
+            }
+            if an.ends_par_at(a) {
+                ends = true;
+                out.clear();
+            }
+            if t.skip[a] {
+                continue;
+            }
+            let ah = Hint::decode(&t.hints[a]);
+            for &n in NORMAL_PARAGRAPH {
+                if may_set(&ah, n) && !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+        }
+        if ends
+            && !pending.is_empty()
+            && let Some(b) = &mut h.bound
+        {
+            add_heads(&mut b.state, Some(&pending));
+        }
+        pending = out;
         slice_hints.push(intern(&h));
     }
     if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
@@ -2937,6 +3017,29 @@ mod tests {
             .position(|x| x.0 <= h && h < x.1)
             .expect("a slice");
         assert!(pars[k], "{sl:?} {pars:?}");
+    }
+
+    #[test]
+    fn reset_pending_across_slices() {
+        // (`\\parshape` set in one slice, the paragraph ended in the
+        // next: that one's `normal_paragraph` resets it, §1070; the one
+        // after finds it reset already)
+        let t = "\\parshape 1 0pt 100pt text\n\\input x\nmore text\\par\nthird\\par\n";
+        let text = analyse(t, FileKind::Document, no_defs());
+        let state = |needle: &str| -> Vec<String> {
+            let k = text
+                .slices
+                .iter()
+                .position(|&(s, e)| t[s..e].contains(needle))
+                .expect("a slice");
+            eprintln!("{needle}: {:?}", &t[text.slices[k].0..text.slices[k].1]);
+            Hint::decode(&text.slice_hints[k])
+                .bound
+                .and_then(|b| b.state)
+                .expect("a state row")
+        };
+        assert!(state("more").iter().any(|h| h == "parshape"));
+        assert!(!state("third").iter().any(|h| h == "parshape"));
     }
 
     #[test]
