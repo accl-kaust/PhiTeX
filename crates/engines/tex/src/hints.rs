@@ -43,6 +43,7 @@
 //! `PHITEX_HINTS_OFF=1` answers `Any` for every node (the comparison).
 
 use phitex_defuse::FxHashMap;
+use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -636,11 +637,20 @@ fn encode_bound(b: &Bound, o: &mut String) {
     o.push('\x1e');
     o.push_str(&b.prefixes.join("\x1f"));
     o.push('\x1e');
-    let cats: Vec<String> = b.cats.iter().map(|(c, k)| format!("{c}\x1d{k}")).collect();
-    o.push_str(&cats.join("\x1f"));
+    // (written in place: no string per pair)
+    for (i, (c, k)) in b.cats.iter().enumerate() {
+        if i > 0 {
+            o.push('\x1f');
+        }
+        let _ = write!(o, "{c}\x1d{k}");
+    }
     o.push('\x1e');
-    let means: Vec<String> = b.means.iter().map(|(n, k)| format!("{n}\x1d{k}")).collect();
-    o.push_str(&means.join("\x1f"));
+    for (i, (n, k)) in b.means.iter().enumerate() {
+        if i > 0 {
+            o.push('\x1f');
+        }
+        let _ = write!(o, "{n}\x1d{k}");
+    }
     o.push('\x1e');
     match &b.state {
         None => o.push('*'),
