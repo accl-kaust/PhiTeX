@@ -882,6 +882,16 @@ impl<'c, 'a> Run<'c, 'a> {
         let v = self.v;
         let mut out = Vec::new();
         for (loc, x, l) in self.st.published(v) {
+            if crate::exec::env_flag!("PHITEX_GUESS_TRACE")
+                && crate::hints::regime_guess_empty(&str_of(v, self.loc_field(loc).0))
+            {
+                let r = |x: ValueId| v.render(x).chars().take(120).collect::<String>();
+                eprintln!(
+                    "guess: {l:?} value {:?} loaded {:?}",
+                    r(x),
+                    self.st.loaded(loc).map(|e| e.map(r))
+                );
+            }
             if l == Locality::Local
                 && crate::hints::regime_guess_empty(&str_of(v, self.loc_field(loc).0))
                 && crate::val::toks_rc(v, Some(x)).is_empty()
