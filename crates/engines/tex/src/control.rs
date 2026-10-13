@@ -75,6 +75,18 @@ impl Run<'_, '_> {
         if !n.is_multiple_of(100_000) && !trace {
             return;
         }
+        // `PHITEX_HEARTBEAT_EXIT`: the process ends at this many commands
+        // (a profile of a run's first commands)
+        static EXIT: OnceLock<u64> = OnceLock::new();
+        let exit = *EXIT.get_or_init(|| {
+            std::env::var("PHITEX_HEARTBEAT_EXIT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(u64::MAX)
+        });
+        if n >= exit {
+            std::process::exit(0);
+        }
         let (file, line) = self
             .frames
             .iter()
