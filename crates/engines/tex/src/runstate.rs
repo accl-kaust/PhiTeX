@@ -398,6 +398,19 @@ impl State {
         }
     }
 
+    /// The macro in loaded `loc`, when it holds one already decoded.
+    #[inline]
+    pub(crate) fn macro_at(&self, loc: Loc) -> Option<Rc<crate::val::Macro>> {
+        let s = self.slot_ref(loc)?;
+        if s.e.flags & LOADED == 0 {
+            return None;
+        }
+        match &s.e.val {
+            Native::Mean(Mean::Macro(m)) => Some(m.clone()),
+            _ => None,
+        }
+    }
+
     /// Loaded `loc` as a meaning (decoded once).
     #[inline]
     pub(crate) fn mean_of(&mut self, loc: Loc, v: &Values) -> Mean {

@@ -96,3 +96,32 @@ fn inline_equivalent() {
         panic!("inline differs from tex: {d}");
     }
 }
+
+/// `\endinput` in a file read by a file read by the document (§362):
+/// only that file ends; the file that read it and the document go on.
+/// (The LaTeX format read `omlenc.def`, the first nested file ending in
+/// `\endinput`, and then nothing: a 20-file format in place of 79.)
+#[test]
+fn endinput_ends_only_the_nested_file() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("endinput-nested");
+    let _ = std::fs::create_dir_all(&dir);
+    // (the file is read from a macro, LaTeX's `\InputIfFileExists`:
+    // its body's rest lies above the reading file's line)
+    std::fs::write(
+        dir.join("outer.tex"),
+        "\\def\\inp#1{\\begingroup\\input #1 \\endgroup}A\\inp{inner}\\relax C\\par\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("inner.tex"), "B\n\\endinput\nNEVER\n").unwrap();
+    let opts = || common::options("./endinput.tex", "endinput", "", &dir);
+    let b = common::build(opts(), Some(&common::plain()), "\\input outer D\\bye\n");
+    let want = common::build(opts(), Some(&common::plain()), "AB \\relax C\\par D\\bye\n");
+    if let Some(d) = common::first_difference(&b.output().0, &want.output().0) {
+        panic!("differs from the inline text: {d}\n{}", b.output().1);
+    }
+    assert!(
+        !b.output().1.contains("NEVER"),
+        "the text after \\endinput was read:\n{}",
+        b.output().1
+    );
+}

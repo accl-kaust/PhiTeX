@@ -166,7 +166,11 @@ impl Run<'_, '_> {
     /// internal markers still go through the slow path.
     #[inline]
     pub(crate) fn get_token_tok(&mut self) -> R<Tok> {
-        if let Some(t) = self.input.next_plain_of_top() {
+        // (an alignment of this run counts every brace, §342: the slow
+        // path then)
+        if self.aopen == 0
+            && let Some(t) = self.input.next_plain_of_top()
+        {
             self.cur.tok = t;
             return Ok(t);
         }
@@ -801,6 +805,12 @@ impl Run<'_, '_> {
         let mut keep: Vec<Level> = Vec::with_capacity(self.input.levels.len());
         let mut found = false;
         for &l in self.input.levels.iter().rev() {
+            if found {
+                // (below the file's end marker: the files that \input
+                // it go on, §362)
+                keep.push(l);
+                continue;
+            }
             match l.kind {
                 kind::LINE => {
                     if seen_line {
@@ -816,7 +826,7 @@ impl Run<'_, '_> {
                     keep.push(l);
                 }
                 _ => {
-                    if !found && self.input.arena.get(l.rest()).iter().any(|&t| is_eof(t)) {
+                    if self.input.arena.get(l.rest()).iter().any(|&t| is_eof(t)) {
                         found = true;
                     }
                     keep.push(l);
