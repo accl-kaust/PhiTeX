@@ -359,7 +359,7 @@ impl Biber<'_> {
             match p.attr("type") {
                 None => cfg.set_blx("", "presort", BV::S(p.text.clone()), None),
                 Some(t) => {
-                    cfg.set_blx("", "presort", BV::S(p.text.clone()), Some(("ENTRYTYPE", t)))
+                    cfg.set_blx("", "presort", BV::S(p.text.clone()), Some(("ENTRYTYPE", t)));
                 }
             }
         }
@@ -416,7 +416,7 @@ impl Biber<'_> {
                 } else {
                     match (ft, dt) {
                         (Some(ft), Some(dt)) => {
-                            fs.extend(self.dm.fields_of_type(&ft, &[dt.as_str()]))
+                            fs.extend(self.dm.fields_of_type(&ft, &[dt.as_str()]));
                         }
                         (Some(ft), None) => {
                             let mut v = self.dm.fields_of_fieldtype(&ft);
@@ -515,7 +515,7 @@ impl Biber<'_> {
                     }
                     key_flag = true;
                     *s.seenkeys.entry(key).or_insert(0) += 1;
-                } else if !s.seenkeys.get(&key).is_some_and(|&c| c > 0) {
+                } else if s.seenkeys.get(&key).is_none_or(|&c| c == 0) {
                     if kc.attr("type") == Some("set") {
                         let mem = split_comma(kc.attr("members").unwrap_or(""))
                             .into_iter()

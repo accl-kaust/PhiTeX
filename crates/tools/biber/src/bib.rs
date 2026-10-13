@@ -336,7 +336,7 @@ impl Biber<'_> {
                                 ));
                             }
                             if self.sec().has_cited(wanted) {
-                                self.sec().add_citekeys(&[rk.clone()]);
+                                self.sec().add_citekeys(core::slice::from_ref(&rk));
                             }
                         }
                     }
@@ -550,7 +550,7 @@ impl Biber<'_> {
                 let mut maploop: Vec<String> = alloc::vec![String::new()];
                 if let Some(fe) = map.attr("map_foreach") {
                     if let Some(ds) = self.cfg.datafield_sets.get(&fc(fe)) {
-                        maploop = ds.clone();
+                        maploop.clone_from(ds);
                     } else if let Some(fl) = entry.get(&fc(fe)).filter(|s| truthy(s)) {
                         maploop = split_comma(fl);
                     } else {
@@ -607,10 +607,10 @@ impl Biber<'_> {
                             rkeys.retain(|k| *k != nk);
                             if a("map_entry_nocite").is_some_and(truthy) {
                                 self.sec().nocite.insert(nk.clone());
-                                self.sec().add_citekeys(&[nk.clone()]);
+                                self.sec().add_citekeys(core::slice::from_ref(&nk));
                             }
                             if self.sec().allkeys {
-                                self.sec().add_citekeys(&[nk.clone()]);
+                                self.sec().add_citekeys(core::slice::from_ref(&nk));
                             }
                             let ne = BtEntry {
                                 meta: Meta::Regular,
@@ -619,7 +619,6 @@ impl Biber<'_> {
                                 fieldlist: Vec::new(),
                                 values: BTreeMap::new(),
                                 value: String::new(),
-                                line: 0,
                             };
                             newentries.retain(|(k, _)| *k != nk);
                             newentries.push((nk, ne));
@@ -629,10 +628,10 @@ impl Biber<'_> {
                             rkeys.retain(|k| *k != ck);
                             if a("map_entry_nocite").is_some_and(truthy) {
                                 self.sec().nocite.insert(ck.clone());
-                                self.sec().add_citekeys(&[ck.clone()]);
+                                self.sec().add_citekeys(core::slice::from_ref(&ck));
                             }
                             if self.sec().allkeys {
-                                self.sec().add_citekeys(&[ck.clone()]);
+                                self.sec().add_citekeys(core::slice::from_ref(&ck));
                             }
                             let c = entry.clone();
                             newentries.retain(|(k, _)| *k != ck);
@@ -677,7 +676,7 @@ impl Biber<'_> {
                                 }
                                 continue;
                             }
-                            last_type = et!().typ.clone();
+                            last_type.clone_from(&et!().typ);
                             let t = fc(&mr(a("map_type_target")).unwrap_or_default());
                             et!().typ = nfd(&t);
                         }
@@ -750,7 +749,7 @@ impl Biber<'_> {
                         }
                         if fieldcontinue {
                             let fsrc = fieldsource.clone().unwrap_or_default();
-                            last_field = fieldsource.clone();
+                            last_field.clone_from(&fieldsource);
                             last_fieldval = if fsrc == "entrykey" {
                                 et!().key.clone()
                             } else {
@@ -1222,7 +1221,7 @@ impl Biber<'_> {
             if it.is_some() && self.add_xdata_ref(be, f_c, XdVal::S(&name), Some(i)) {
                 let n = Name {
                     id: self.new_id(),
-                    xdata: Some(name.clone()),
+                    
                     ..Name::default()
                 };
                 names.add(shared(n));

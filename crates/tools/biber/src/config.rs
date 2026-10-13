@@ -475,7 +475,7 @@ impl Config {
                 Some(v) => BV::S(v),
                 None => return self.unset_blx(secnum, opt, scope),
             },
-            m => m,
+            m @ BV::M(_) => m,
         };
         match scope {
             None => {

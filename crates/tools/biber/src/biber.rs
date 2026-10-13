@@ -125,19 +125,17 @@ impl<'f> Biber<'f> {
             Some(BackendIn::Map(m)) => {
                 for (k, sv) in m {
                     let subval = self.cfg.map_boolean(k, sv, true).unwrap_or_default();
-                    if !v.as_deref().is_some_and(truthy) {
-                        if self.cfg.opttype.get(k).map(String::as_str) == Some("boolean") {
-                            out.push((
-                                k.clone(),
-                                if truthy(&subval) {
-                                    "0".into()
-                                } else {
-                                    "1".into()
-                                },
-                            ));
-                        }
-                    } else {
+                    if v.as_deref().is_some_and(truthy) {
                         out.push((k.clone(), subval));
+                    } else if self.cfg.opttype.get(k).map(String::as_str) == Some("boolean") {
+                        out.push((
+                            k.clone(),
+                            if truthy(&subval) {
+                                "0".into()
+                            } else {
+                                "1".into()
+                            },
+                        ));
                     }
                 }
             }
@@ -184,7 +182,7 @@ impl<'f> Biber<'f> {
                 }
             }
             self.log.push(alloc::format!("Processing section {secnum}"));
-            self.cur = secnum.clone();
+            self.cur.clone_from(&secnum);
             {
                 let s = self.sec();
                 s.labelcache_l.clear();
@@ -242,6 +240,9 @@ impl<'f> Biber<'f> {
         for ds in &ds2 {
             if remaining.is_empty() && !self.secr().allkeys {
                 break;
+            }
+            if !ds.encoding.is_empty() && !matches!(lc(&ds.encoding).as_str(), "utf8" | "utf-8") {
+                return Err(self.unsupported(&alloc::format!("data source encoding '{}' (only UTF-8)", ds.encoding)));
             }
             if ds.datatype != "bibtex" {
                 return Err(
@@ -719,7 +720,7 @@ impl<'f> Biber<'f> {
                             continue;
                         }
                         let xv = xe.borrow().get(xf);
-                        let Some(xv) = xv.filter(|v| v.truthy()) else {
+                        let Some(xv) = xv.filter(Val::truthy) else {
                             let w = alloc::format!(
                                 "Field '{rf}' in {bee} entry '{key}' references XDATA field '{xf}' in entry '{xdref}' and this field does not exist, not resolving (section {secnum})"
                             );
@@ -790,7 +791,7 @@ impl<'f> Biber<'f> {
             be.borrow_mut()
                 .set_data("entryset", Val::list(real.clone()));
             for k in &real {
-                self.sec().add_citekeys(&[k.clone()]);
+                self.sec().add_citekeys(core::slice::from_ref(k));
             }
             if let Some(first) = self.entry(&real[0]) {
                 set_inherit_from(&mut be.borrow_mut(), &first.borrow(), &self.dm);
@@ -815,7 +816,7 @@ impl<'f> Biber<'f> {
             let es = be
                 .borrow()
                 .get("entryset")
-                .filter(|v| v.truthy())
+                .filter(Val::truthy)
                 .and_then(|v| v.as_list());
             let Some(es) = es else {
                 let w = alloc::format!("Set entry '{ck}' has no entryset field, ignoring");
@@ -943,7 +944,7 @@ impl<'f> Biber<'f> {
         let noinherit = self
             .cfg
             .blx(Some(&secnum), "noinherit", None, Some(&tk))
-            .filter(|v| v.truthy())
+            .filter(BV::truthy)
             .map(|v| v.s());
         let mut processed: Vec<String> = Vec::new();
         for inherit in inh.kids("inherit") {
@@ -1068,7 +1069,7 @@ impl<'f> Biber<'f> {
         for df in &self.dm.helpers.datefields {
             let d = df.strip_suffix("date").unwrap_or(df);
             let k = alloc::format!("{d}datesplit");
-            let v = parent.borrow().get(&k).filter(|v| v.truthy());
+            let v = parent.borrow().get(&k).filter(Val::truthy);
             if let Some(v) = v {
                 child.borrow_mut().set_field(&k, v);
             }
@@ -1180,7 +1181,7 @@ impl<'f> Biber<'f> {
                 .map(|v| v.items())
                 .unwrap_or_default();
             for h in &lts {
-                let lt = be.borrow().get(&h.text).filter(|v| v.truthy());
+                let lt = be.borrow().get(&h.text).filter(Val::truthy);
                 if let Some(v) = lt {
                     let mut b = be.borrow_mut();
                     b.labeltitle = Some(h.text.clone());
@@ -1315,12 +1316,10 @@ impl<'f> Biber<'f> {
                     }
                 }
             }
-            Some(LabelDate::Str(s)) => {
-                if truthy(&s) {
-                    be.borrow_mut().set_field("labeldatesource", Val::s(s));
-                }
+            Some(LabelDate::Str(s)) if truthy(&s) => {
+                be.borrow_mut().set_field("labeldatesource", Val::s(s));
             }
-            None => {}
+            Some(LabelDate::Str(_)) | None => {}
         }
     }
 }
@@ -1338,7 +1337,7 @@ pub fn set_inherit_from(e: &mut Entry, parent: &Entry, dm: &DataModel) {
     for df in &dm.helpers.datefields {
         let d = df.strip_suffix("date").unwrap_or(df);
         let k = alloc::format!("{d}datesplit");
-        if let Some(v) = parent.get(&k).filter(|v| v.truthy()) {
+        if let Some(v) = parent.get(&k).filter(Val::truthy) {
             e.set_field(&k, v);
         }
     }

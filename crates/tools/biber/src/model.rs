@@ -186,9 +186,7 @@ pub struct Name {
     /// Per-name options (`NAME` scope), in declaration order.
     pub opts: Vec<(String, String)>,
     pub hashid: Option<String>,
-    pub xdata: Option<String>,
     pub hash: Option<String>,
-    pub gender: Option<String>,
 }
 
 impl Name {

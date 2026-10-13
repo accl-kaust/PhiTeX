@@ -29,7 +29,6 @@ pub struct BtEntry {
     pub values: BTreeMap<String, String>,
     /// Value of a preamble or comment.
     pub value: String,
-    pub line: usize,
 }
 
 impl BtEntry {
@@ -346,7 +345,6 @@ pub fn parse(
                         fieldlist: Vec::new(),
                         values: BTreeMap::new(),
                         value: v,
-                        line,
                     });
                     continue;
                 }
@@ -376,7 +374,6 @@ pub fn parse(
             fieldlist: Vec::new(),
             values: BTreeMap::new(),
             value: String::new(),
-            line,
         };
         lx.skip_ws();
         match meta {
@@ -497,11 +494,7 @@ pub fn split_list(s: &str, delim: &str) -> Vec<Option<String>> {
         } else {
             match b[i] {
                 '{' => depth += 1,
-                '}' => {
-                    if depth > 0 {
-                        depth -= 1;
-                    }
-                }
+                '}' if depth > 0 => depth -= 1,
                 _ => {}
             }
             inword = b[i] != ' ';
@@ -547,11 +540,7 @@ pub fn split_name(name: &str) -> SplitName {
         let mut c = c0;
         match c {
             '{' => depth += 1,
-            '}' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
-            }
+            '}' if depth > 0 => depth -= 1,
             _ => {}
         }
         if depth == 0 && c == ',' {
@@ -609,11 +598,7 @@ pub fn split_name(name: &str) -> SplitName {
         }
         match c {
             '{' => depth += 1,
-            '}' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
-            }
+            '}' if depth > 0 => depth -= 1,
             _ => {}
         }
     }
@@ -647,7 +632,7 @@ pub fn split_name(name: &str) -> SplitName {
     }
     let end = tokens.len() as i64 - 1;
     let range = |a: i64, b: i64| -> Vec<Option<String>> {
-        if b - a + 1 <= 0 {
+        if b < a {
             Vec::new()
         } else {
             tokens[a as usize..=b as usize].to_vec()

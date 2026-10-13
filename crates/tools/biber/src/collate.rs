@@ -27,7 +27,7 @@ pub struct Table {
     maxlen: BTreeMap<u32, usize>,
     /// Prefixes of contractions longer than two (for discontiguous
     /// matching).
-    contraction: BTreeMap<Vec<u32>, ()>,
+    contraction: alloc::collections::BTreeSet<Vec<u32>>,
 }
 
 fn rd_u32(b: &[u8], i: &mut usize) -> u32 {
@@ -50,7 +50,7 @@ impl Table {
         let n = rd_u32(b, &mut i);
         let mut map = BTreeMap::new();
         let mut maxlen = BTreeMap::new();
-        let mut contraction = BTreeMap::new();
+        let mut contraction = alloc::collections::BTreeSet::new();
         for _ in 0..n {
             let ncp = b[i] as usize;
             i += 1;
@@ -84,7 +84,7 @@ impl Table {
                 let mut u = cps.clone();
                 while u.len() > 2 {
                     u.pop();
-                    contraction.insert(u.clone(), ());
+                    contraction.insert(u.clone());
                 }
             }
             map.insert(cps, ces);
@@ -171,7 +171,7 @@ fn derived(u: u32) -> [Ce; 2] {
 }
 
 impl Collator {
-    fn split(&self, t: &Table, src: &mut Vec<Option<u32>>) -> Vec<Vec<u32>> {
+    fn split(self, t: &Table, src: &mut [Option<u32>]) -> Vec<Vec<u32>> {
         let mut buf = Vec::new();
         let mut i = 0;
         while i < src.len() {
@@ -189,7 +189,7 @@ impl Collator {
                         temp.push(cp);
                         len += 1;
                         if t.map.contains_key(&temp) {
-                            jcps = temp.clone();
+                            jcps.clone_from(&temp);
                             i = p;
                         }
                     }
@@ -287,7 +287,7 @@ impl Collator {
 
     /// The sort key as Unicode::Collate builds it: the four levels of
     /// 16-bit weights, each level ended by a zero separator.
-    pub fn sort_key(&self, t: &Table, s: &str) -> Vec<u16> {
+    pub fn sort_key(self, t: &Table, s: &str) -> Vec<u16> {
         let s = if self.normalize {
             unicode::nfd(s)
         } else {
@@ -359,7 +359,7 @@ impl Collator {
     }
 
     /// `viewSortKey`.
-    pub fn view_sort_key(&self, t: &Table, s: &str) -> String {
+    pub fn view_sort_key(self, t: &Table, s: &str) -> String {
         let key = self.sort_key(t, s);
         let mut o = String::from("[");
         let mut sep = 0;
