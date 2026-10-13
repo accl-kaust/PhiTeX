@@ -42,7 +42,7 @@
 //! `PHITEX_HINTS=1` prints each distinct node text's answer and cause;
 //! `PHITEX_HINTS_OFF=1` answers `Any` for every node (the comparison).
 
-use std::collections::HashMap;
+use phitex_defuse::FxHashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -313,7 +313,7 @@ const MATH_SHIFT: &[&str] = &[
 /// A parameter's own field (`param:<name>`), for a parameter assigned
 /// by name (§1228).
 fn param_row(name: &str) -> Option<&'static [&'static str]> {
-    static ROWS: OnceLock<HashMap<&'static str, [&'static str; 1]>> = OnceLock::new();
+    static ROWS: OnceLock<FxHashMap<&'static str, [&'static str; 1]>> = OnceLock::new();
     ROWS.get_or_init(|| {
         crate::prims::PRIMS
             .iter()
@@ -330,7 +330,7 @@ fn param_row(name: &str) -> Option<&'static [&'static str]> {
 
 /// Whether `name` is a primitive (a set built once).
 fn is_prim(name: &str) -> bool {
-    static S: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
+    static S: OnceLock<phitex_defuse::FxHashSet<&'static str>> = OnceLock::new();
     S.get_or_init(|| crate::prims::PRIMS.iter().map(|p| p.0).collect())
         .contains(name)
 }
@@ -1394,14 +1394,14 @@ struct Analysis<'t> {
     p: Pass,
     defs: Definitions,
     /// Item index by atom.
-    item_of: HashMap<usize, usize>,
+    item_of: FxHashMap<usize, usize>,
     /// Atoms an earlier item claims (operands: never run on their own).
     claimed: Vec<bool>,
     /// Per atom: the index of its regime in the pass's regimes.
     reg: Vec<usize>,
     /// Atoms textually inside an alignment's braces (`\\halign{`…`}`).
     in_align: Vec<bool>,
-    memo: std::cell::RefCell<HashMap<String, DefSet>>,
+    memo: std::cell::RefCell<FxHashMap<String, DefSet>>,
     /// The names whose state [`Analysis::defined_state`] is reading.
     visiting: std::cell::RefCell<Vec<String>>,
     /// The format's definitions, behind the text's own.
@@ -1546,7 +1546,7 @@ impl Analysis<'_> {
             claimed,
             reg,
             in_align,
-            memo: std::cell::RefCell::new(HashMap::new()),
+            memo: std::cell::RefCell::new(FxHashMap::default()),
             visiting: std::cell::RefCell::new(Vec::new()),
             prelude,
         }
@@ -2366,7 +2366,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     let (slices, pars) = slices_of(text, &an.p, kind);
     let mut starts = Vec::with_capacity(an.p.atoms.len());
     let mut hints: Vec<Arc<Hint>> = Vec::with_capacity(an.p.atoms.len());
-    let mut memo: HashMap<String, Arc<str>> = HashMap::new();
+    let mut memo: FxHashMap<String, Arc<str>> = FxHashMap::default();
     let mut intern = |h: &Hint| -> Arc<str> {
         let s = h.encode();
         memo.entry(s.clone())
@@ -2580,13 +2580,13 @@ fn hash_str(s: &str) -> u64 {
     h.finish()
 }
 
-type Cache<K> = Mutex<HashMap<K, Arc<TextHints>>>;
+type Cache<K> = Mutex<FxHashMap<K, Arc<TextHints>>>;
 
 /// By the text, its kind and the definitions (one set per prelude, so
 /// its address identifies it).
 fn texts() -> &'static Cache<(u64, u8, usize)> {
     static C: OnceLock<Cache<(u64, u8, usize)>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+    C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// Registers a text's analysis under `name` (a string value): a node
@@ -2603,7 +2603,7 @@ pub(crate) fn register_text(name: ValueId, t: &Arc<TextHints>) {
 
 fn by_name() -> &'static Cache<u64> {
     static C: OnceLock<Cache<u64>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+    C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// Whether a text is written for INITEX's catcodes: its first `{` comes
@@ -2664,7 +2664,7 @@ pub(crate) fn hint_arg(v: &Values, t: &TextHints, s: usize) -> ValueId {
 
 fn by_id() -> &'static Cache<u64> {
     static C: OnceLock<Cache<u64>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+    C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// The regime of a file read by `\input`: its text value `id`, named
@@ -2708,8 +2708,8 @@ pub(crate) fn file_hints(v: &Values, id: ValueId, name: ValueId) -> Arc<TextHint
 /// The hint of a node from its arguments: the extra argument when the
 /// slice carries one, else its first text frame.
 pub(crate) fn hint_of_args(v: &Values, args: &[ValueId]) -> Arc<Hint> {
-    static C: OnceLock<Mutex<HashMap<u64, Arc<Hint>>>> = OnceLock::new();
-    let cache = C.get_or_init(|| Mutex::new(HashMap::new()));
+    static C: OnceLock<Mutex<FxHashMap<u64, Arc<Hint>>>> = OnceLock::new();
+    let cache = C.get_or_init(|| Mutex::new(FxHashMap::default()));
     let key = {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for a in args {

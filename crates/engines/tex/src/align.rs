@@ -18,6 +18,7 @@ use phitex_typeset::node::{GlueKind, GlueNode, List, Node};
 use phitex_typeset::pack::Spec;
 
 use crate::build::Mode;
+use crate::fields::Par;
 use crate::nodes::{self, Side};
 use crate::run::{R, Run};
 use crate::val::{
@@ -213,7 +214,7 @@ impl Run<'_, '_> {
         let m = v.list(vec![v.int(crate::nodes::T_PD), v.int(i64::from(pd))]);
         self.append(asid, m);
         // §777
-        let mut tab = self.glue_param("tabskip")?;
+        let mut tab = self.gpar(Par::tabskip)?;
         let mut pre = Preamble {
             tab0: tab,
             cols: Vec::new(),
@@ -269,7 +270,7 @@ impl Run<'_, '_> {
 
     /// `\everycr` (§799), then `align_peek` reads what follows it.
     fn every_cr_then_peek(&mut self) -> R<()> {
-        let e = self.get("param:everycr")?;
+        let e = self.par(Par::everycr)?;
         let toks = toks_of(self.v, e);
         self.push_toks(toks);
         self.push_toks(vec![Tok::cs("\u{10FFFE}alignpeek")]);
@@ -290,9 +291,9 @@ impl Run<'_, '_> {
             if self.cur.cmd == cmd::ASSIGN_GLUE && self.cur.chr == TABSKIP_LOC {
                 self.scan_optional_equals()?;
                 let g = self.scan_glue(2)?;
-                let global = self.param("globaldefs")? > 0;
+                let global = self.ipar(Par::globaldefs)? > 0;
                 let gv = glue_value(self.v, &g);
-                self.set("param:tabskip", gv, global);
+                self.set_par(Par::tabskip, gv, global);
                 *tab = g;
                 continue;
             }
