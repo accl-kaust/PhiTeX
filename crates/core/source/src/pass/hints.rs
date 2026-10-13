@@ -237,6 +237,21 @@ pub(crate) fn literal_int(text: &str, atoms: &[Atom], p: usize) -> Option<u32> {
                 _ => None,
             }
         }
+        // (the kernel's constants, [`CONSTANTS`]: plain.tex's and
+        // ltplain.dtx's `\chardef`s and `\z@`)
+        AtomKind::Cs => match a.name(text) {
+            "z@" => Some(0),
+            "@ne" => Some(1),
+            "tw@" => Some(2),
+            "thr@@" => Some(3),
+            "sixt@@n" => Some(16),
+            "@cclv" => Some(255),
+            "@cclvi" => Some(256),
+            "@m" => Some(1000),
+            "@M" => Some(10000),
+            "@MM" => Some(20000),
+            _ => None,
+        },
         AtomKind::Char(c) if c.is_ascii_digit() || c == '\'' || c == '"' => {
             let (radix, mut q) = match c {
                 '\'' => (8, p + 1),
@@ -1137,11 +1152,6 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                             global: gl,
                         }),
                         None => {
-                            if std::env::var_os("PHITEX_FAM_TRACE").is_some() {
-                                let a0 = atoms[k.saturating_sub(4)].start;
-                                let a1 = atoms.get(k + 3).map_or(text.len(), |x| x.start);
-                                eprintln!("FAMTRACE {fam} {:?}", &text[a0..a1]);
-                            }
                             e.prefixes.push(Def {
                                 field: format!("{fam}:"),
                                 global: gl,
