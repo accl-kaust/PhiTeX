@@ -1016,7 +1016,16 @@ pub(crate) fn ship(
         r.param("pdfthreadmargin")?,
     ];
     if in_page_step(r) && !folding(r)? {
-        return ship_apart(r, &p, bx, &side.whats, &resolved, fonts, margins);
+        return ship_apart(
+            r,
+            page.raw(),
+            &p,
+            bx,
+            &side.whats,
+            &resolved,
+            fonts,
+            margins,
+        );
     }
     let (err, shown) = step_forms(r, page, &fonts, |st, forms, fonts| {
         page_params(v, st.params_mut(), &p);
@@ -1086,8 +1095,10 @@ fn set_page_params(v: &Values, st: &mut PdfState, params: &[ValueId], margins: [
 /// written once here, on the state the read-time commands left, so that
 /// its content stream is compressed in parallel with the other pages'
 /// and the hash of what it shows is known.
+#[allow(clippy::too_many_arguments)]
 fn ship_apart(
     r: &mut Run<'_, '_>,
+    page_id: u64,
     p: &[ValueId],
     bx: &BoxNode,
     side_whats: &[ValueId],
@@ -1126,21 +1137,22 @@ fn ship_apart(
         rec: phitex_pdf::PageRecord::default(),
         base: BTreeSet::new(),
     };
-    let key = phitex_defuse::hash_bytes(
-        phitex_defuse::hash_words(pc.fonts.digest(), &[0x7067_7069_6563_6531]),
-        format!(
-            "{:?}|{:?}|{:?}|{:?}",
-            pc.params
-                .iter()
-                .map(|&x| format!("{:?}", *v.get(x)))
-                .collect::<Vec<_>>(),
-            pc.margins,
-            pc.bx,
-            pc.whats
-        )
-        .as_bytes(),
-    )
-    .max(1);
+    // the key: what the piece is made of, by the values' identities
+    // (interned: equal values, equal ids), not by their bytes
+    let (k0, _) = before(r)?;
+    let maps = r
+        .get_loc(crate::fields::cell::PDF_MAPS)?
+        .map_or(0, ValueId::raw);
+    let pdfmap = r.file("pdftex.map")?.map_or(0, ValueId::raw);
+    let mut words = vec![
+        page_id,
+        k0,
+        maps,
+        pdfmap,
+        u64::from(pc.fonts.space.is_some()),
+    ];
+    words.extend(pc.margins.iter().map(|&m| u64::from(m.cast_unsigned())));
+    let key = phitex_defuse::hash_words(0x7067_7069_6563_6531, &words).max(1);
     // the page written once, apart, on the read-time commands' state
     let (_, a) = before(r)?;
     let (mut st, forms) = if let Some(a) = a {

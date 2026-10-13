@@ -27,7 +27,14 @@ pub(crate) fn run_node(
     o: Ops,
     body: impl FnOnce(&mut Run<'_, '_>) -> R<()>,
 ) -> Result<ValueId, Stop> {
-    run_node_parking(cx, o, false, body)
+    let t0 = std::time::Instant::now();
+    let op = cx.op();
+    let r = run_node_parking(cx, o, false, body);
+    // (a slow node named, for the edit path's phases)
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() >= 20 {
+        eprintln!("slow node: op {op:?} {:?}", t0.elapsed());
+    }
+    r
 }
 
 /// [`run_node`]; with `parks`, a run that stops inside a command parks
