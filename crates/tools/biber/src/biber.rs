@@ -186,6 +186,7 @@ impl<'f> Biber<'f> {
             self.process_interentry()?;
             self.postprocess_sets();
             self.process_entries_static();
+            self.log.push(alloc::format!("section {secnum}: {} citekeys, allkeys {}", self.secr().citekeys.len(), self.secr().allkeys));
             self.process_lists()?;
             self.create_output_section()?;
         }

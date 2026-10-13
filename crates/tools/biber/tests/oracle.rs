@@ -36,6 +36,7 @@ fn fixtures_byte_identical() {
                 println!("  want: {:?}", want.lines().nth(line));
                 let _ = std::fs::create_dir_all("target/biber-oracle");
                 let _ = std::fs::write(format!("target/biber-oracle/{n}.bbl"), got);
+                println!("{}", out.blg);
                 bad.push(n.clone());
             }
             None => {
