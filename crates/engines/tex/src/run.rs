@@ -455,12 +455,10 @@ impl<'c, 'a> Run<'c, 'a> {
             p
         };
         if let Some(p) = pre {
-            let val = if p == ValueId::UNIT {
-                Native::Absent
-            } else {
-                Native::Raw(p)
-            };
-            self.set_loc(loc, val, false);
+            // (read in place of the value, not a definition of the line:
+            // only what the line defines on it is published)
+            self.st
+                .preload(loc, if p == ValueId::UNIT { None } else { Some(p) });
         }
         Ok(())
     }

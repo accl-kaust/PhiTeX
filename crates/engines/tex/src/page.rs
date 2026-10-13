@@ -1492,7 +1492,9 @@ impl FinalState {
         for e in v.seq_to_vec(fp).iter().flat_map(|&e| list_of(v, e)) {
             let xs = list_of(v, e);
             let [n, k, p] = xs.as_slice() else { continue };
-            let f = v.field(&format!("pgst:at:{}:{}", int_of(v, *n), int_of(v, *k)));
+            // (the node id as the marker carries it: a signed value)
+            let node = u64::from_ne_bytes(int_of(v, *n).to_ne_bytes());
+            let f = v.field(&format!("pgst:at:{node}:{}", int_of(v, *k)));
             if !cx.is_loopback(f) {
                 continue;
             }
