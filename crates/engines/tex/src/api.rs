@@ -1188,6 +1188,9 @@ impl Graph {
             // guess in round one, `page_guesses`)
             let f = eng.values().field(&format!("pgdef:{j}"));
             eng.declare_loopback(f, ValueId::UNIT);
+            // what `\\deadcycles` is after page j's step (guess: UNIT, 0)
+            let f = eng.values().field(&format!("pagedc:{j}"));
+            eng.declare_loopback(f, ValueId::UNIT);
         }
         for f in crate::hints::COUNTERS {
             let fld = eng.values().field(f);

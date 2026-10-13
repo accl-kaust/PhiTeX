@@ -233,6 +233,9 @@ impl Run<'_, '_> {
         let mut marks = MarksState::default();
         let mut published = phitex_defuse::FxHashSet::default();
         let mut starts = vec![start.value(v)];
+        // (each page's `\\topmark` and `\\botmark` before it fires,
+        // §1012: from the plan, so a step never reads its predecessor's)
+        let mut before: Vec<ValueId> = Vec::new();
         let mut ended = false;
         let mut plan: Vec<ValueId> = Vec::new();
         let mut j = 0;
@@ -262,6 +265,9 @@ impl Run<'_, '_> {
                     .iter()
                     .filter_map(|&k| side.marks.get(k as usize).copied())
                     .collect();
+                let [t, _, b] = marks.0.get(&0).copied().unwrap_or([None; 3]);
+                let u = |m: Option<ValueId>| m.unwrap_or(ValueId::UNIT);
+                before.push(v.list(vec![u(t), u(b)]));
                 marks.fire_values(v, &ms);
                 starts.push(end.value(v));
                 start = end;
@@ -286,6 +292,9 @@ impl Run<'_, '_> {
         self.set("pp:marker", marker, true);
         for (j, &s) in starts.iter().enumerate() {
             self.set(&format!("pp:start:{j}"), s, true);
+        }
+        for (j, &m) in before.iter().enumerate() {
+            self.set(&format!("pp:mk:{j}"), m, true);
         }
         for j in 0..starts.len() {
             self.kid(self.ops.brk, vec![v.int(i64::try_from(j).unwrap_or(0))]);
@@ -331,7 +340,8 @@ impl Run<'_, '_> {
         drop(guard);
         if let Some((f, side, _)) = out.fired {
             let data = self.page_data(&f, &side)?;
-            self.kid(op, vec![v.int(i64::try_from(j).unwrap_or(0)), data]);
+            let mk = self.get(&format!("pp:mk:{j}"))?.unwrap_or(ValueId::UNIT);
+            self.kid(op, vec![v.int(i64::try_from(j).unwrap_or(0)), data, mk]);
         }
         Ok(())
     }
@@ -412,11 +422,31 @@ impl Run<'_, '_> {
                 }
             }
         }
+        // `\\deadcycles` as the step before left it (`pagedc:<j-1>`, a
+        // loop-back; round one's guess 0: a routine that ships resets
+        // it, §638): a wrong guess is refuted by the next round
+        if j > 0 && j < MAX_PAGES {
+            let f = v.field(&format!("pagedc:{}", j - 1));
+            let dc = self
+                .cx
+                .use_field(f)?
+                .filter(|&x| x != ValueId::UNIT)
+                .unwrap_or_else(|| v.int(0));
+            let df = self
+                .ops
+                .fields
+                .get_at(v, self.cx.values_epoch(), "deadcycles");
+            self.over.insert(df, dc);
+        }
         let d = args.get(1).copied().unwrap_or(ValueId::UNIT);
-        if self.fire_page(d)? {
+        if self.fire_page(d, args.get(2).copied())? {
             self.run_all()?;
         }
         if j < MAX_PAGES {
+            let dc = self.int("deadcycles")?;
+            // (0, the usual value, as the declared start: no change)
+            let x = if dc == 0 { ValueId::UNIT } else { v.int(dc) };
+            self.cx.publish(v.field(&format!("pagedc:{j}")), x);
             let mut cs = Vec::new();
             for k in 0..10 {
                 cs.push(v.int(self.int(&format!("count:{k}"))?));
@@ -430,7 +460,7 @@ impl Run<'_, '_> {
     /// the page shipped by the default routine (false), or the output
     /// routine's group opened and its tokens pushed (true): the caller
     /// runs them.
-    pub(crate) fn fire_page(&mut self, d: ValueId) -> R<bool> {
+    pub(crate) fn fire_page(&mut self, d: ValueId, mk: Option<ValueId>) -> R<bool> {
         let v = self.v;
         let data = list_of(v, d);
         let a = |i: usize| data.get(i).copied().unwrap_or(ValueId::UNIT);
@@ -438,8 +468,17 @@ impl Run<'_, '_> {
             (a(0), list_of(v, a(1)), list_of(v, a(2)), list_of(v, a(3)));
         let output_penalty = data.get(4).map_or(0, |&x| int_of(v, x));
         // §1012: marks
-        let bot = self.get("mark:bot")?.filter(|&x| x != ValueId::UNIT);
-        let mut top = self.get("mark:top")?.filter(|&x| x != ValueId::UNIT);
+        // (the marks before the page, from the plan: `pp:mk:<j>`)
+        let (mut top, bot) = match mk.map(|x| list_of(v, x)) {
+            Some(xs) if xs.len() == 2 => {
+                let m = |x: ValueId| Some(x).filter(|&x| x != ValueId::UNIT);
+                (m(xs[0]), m(xs[1]))
+            }
+            _ => (
+                self.get("mark:top")?.filter(|&x| x != ValueId::UNIT),
+                self.get("mark:bot")?.filter(|&x| x != ValueId::UNIT),
+            ),
+        };
         let mut first = None;
         let mut new_bot = bot;
         if bot.is_some() {
@@ -924,8 +963,15 @@ impl Operation for PageStep {
     fn name(&self) -> &'static str {
         if self.any { "pagestep_any" } else { "pagestep" }
     }
+    /// The page's own fields and what the output routine's commands
+    /// define ([`crate::hints::page_step_may_define`]).
     fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
-        MayDefine::Any
+        let defs = ops(&self.shared)
+            .defs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        crate::hints::page_step_may_define(&defs)
     }
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         None

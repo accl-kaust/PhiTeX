@@ -3005,6 +3005,76 @@ pub(crate) fn may_define(v: &Values, args: &[ValueId]) -> MayDefine {
     h.may_define()
 }
 
+/// What a page step may define besides what its output routine's
+/// commands define: the marks (§1012), `\\box255` and the insertion
+/// boxes (§1018, §1021), `\\outputpenalty` (§1013), `\\deadcycles`
+/// (§1012, §638), `\\insertpenalties` (§1018), the page's whatsits at
+/// shipout (§1374, pdfTeX's), the output group's `normal_paragraph`
+/// (§1025, §1070).
+const PAGE_STEP: &[&str] = &[
+    "mark:",
+    "marks:",
+    "markclasses",
+    "box:",
+    "lvlfix",
+    "badness",
+    "param:outputpenalty",
+    "deadcycles",
+    "inspen",
+    "write:",
+    "wopen:",
+    "pdf:",
+    "param:looseness",
+    "param:hangindent",
+    "param:hangafter",
+    "param:interlinepenalties",
+    "parshape",
+];
+
+/// A page step's answer: [`PAGE_STEP`] and what the format's output
+/// routine (its last `\\output{…}`, the macros it calls, through the
+/// definitions) defines; anything when the pass cannot bound the
+/// routine. (A routine the document sets differently defines outside
+/// it: the engine reports the definition, never a wrong output.)
+pub(crate) fn page_step_may_define(defs: &Defs) -> MayDefine {
+    static C: OnceLock<Mutex<HashMap<usize, MayDefine>>> = OnceLock::new();
+    if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
+        return MayDefine::Any;
+    }
+    let key = Arc::as_ptr(defs) as usize;
+    let c = C.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(m) = c.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
+        return m.clone();
+    }
+    let an = Analysis::new("", FileKind::Document, defs.clone());
+    let mut b = Bound {
+        state: Some(Vec::new()),
+        ..Bound::default()
+    };
+    add_heads(&mut b.state, Some(PAGE_STEP));
+    let mut cause = String::new();
+    let ok = match defs.output_defines(defs) {
+        Some(set) => an.add_set(&set, &mut b, &mut cause),
+        None => true,
+    };
+    let m = if ok {
+        Hint {
+            bound: Some(b),
+            ..Hint::default()
+        }
+        .may_define()
+    } else {
+        MayDefine::Any
+    };
+    if crate::exec::env_flag!("PHITEX_HINTS") {
+        eprintln!("page step hint: {m:?} ({cause})");
+    }
+    c.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, m.clone());
+    m
+}
+
 /// The accumulators the nodes count into.
 pub(crate) const COUNTERS: [&str; 7] = [
     "hints:bounded",
