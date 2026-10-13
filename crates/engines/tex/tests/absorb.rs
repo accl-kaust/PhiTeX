@@ -176,15 +176,21 @@ fn texts_cut_short_while_the_cold_build_evaluates() {
     let (p2, tx2, new2) = (progress.clone(), tx.clone(), new.clone());
     let t = std::thread::spawn(move || {
         loop {
-            let deep = p2.running().iter().flatten().any(|&(op, off)| {
-                op == 1 && off > 2000 && off != phitex_tex::Progress::INSIDE
-            });
+            let deep = p2
+                .running()
+                .iter()
+                .flatten()
+                .any(|&(op, off)| op == 1 && off > 2000 && off != phitex_tex::Progress::INSIDE);
             if deep {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        for x in [String::new(), new2[..new2.len() / 3].to_owned(), new2.clone()] {
+        for x in [
+            String::new(),
+            new2[..new2.len() / 3].to_owned(),
+            new2.clone(),
+        ] {
             tx2.send(&x);
             std::thread::sleep(std::time::Duration::from_millis(30));
         }
@@ -207,5 +213,24 @@ fn texts_cut_short_while_the_cold_build_evaluates() {
     assert!(
         common::first_difference(&b.output().0, &cold.output().0).is_none(),
         "the result is not the last text's cold build"
+    );
+}
+
+/// An empty document edited to a whole one: the result is the whole
+/// one's cold build (the cut-short texts' case without the timing).
+#[test]
+fn an_empty_document_edited_to_a_whole_one() {
+    let fx = common::fixtures().join("plain");
+    let comment = " TeX output 2026.01.01:0000".to_owned();
+    let opts = || common::options("./slow.tex", "slow", &comment, &fx);
+    let src = slow(30);
+    let mut b = common::build(opts(), Some(&common::plain()), "");
+    b.edit(&src[..src.len() / 3]);
+    b.edit(&src);
+    let cold = common::build(opts(), Some(&common::plain()), &src);
+    assert!(!b.pages().is_empty(), "no pages");
+    assert!(
+        common::first_difference(&b.output().0, &cold.output().0).is_none(),
+        "the result is not the whole text's cold build"
     );
 }

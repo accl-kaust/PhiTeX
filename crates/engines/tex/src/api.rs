@@ -185,7 +185,8 @@ struct Absorb<'a> {
     edits: &'a EditSender,
     nodes: &'a mut Vec<(String, NodeId)>,
     exec: OpId,
-    dvi: NodeId,
+    /// The first node after the text's ([`Build::end`]).
+    end: NodeId,
     /// The format's definitions, for the new slices' hints and regions.
     defs: Defs,
     /// Whether the text is a document's ([`is_doc`]).
@@ -205,7 +206,7 @@ impl phitex_defuse::EditSource for Absorb<'_> {
         let changed = apply_text(
             eng,
             self.exec,
-            self.dvi,
+            self.end,
             self.nodes,
             &text,
             &self.defs,
@@ -303,7 +304,7 @@ fn slice_keys(text: &str, defs: &Defs, doc: bool) -> Vec<(String, (usize, usize)
 fn apply_text(
     eng: &mut Engine,
     exec: OpId,
-    dvi: NodeId,
+    end: NodeId,
     nodes_now: &mut Vec<(String, NodeId)>,
     text: &str,
     defs: &Defs,
@@ -382,7 +383,7 @@ fn apply_text(
             let n = if let Some(&(_, p)) = nodes.last() {
                 eng.insert_after(p, exec, args)
             } else {
-                let first = old.get(a + old_mid).map_or(dvi, |x| x.1);
+                let first = old.get(a + old_mid).map_or(end, |x| x.1);
                 eng.insert_before(first, exec, args)
             };
             declare_marks_before(eng, n);
@@ -2249,6 +2250,10 @@ pub struct Build {
     /// The nodes of the text, with their keys.
     nodes: Vec<(String, NodeId)>,
     dvi: NodeId,
+    /// The first node after the text's (the page plan, which folds the
+    /// list the text's nodes make): new text nodes go before it, also
+    /// when the text has none left.
+    end: NodeId,
     prelude: Arc<Cached>,
     /// The format's definitions ([`prelude_defs`]).
     defs: Defs,
@@ -2354,7 +2359,7 @@ impl Build {
         }
         // the page builder's fold, after the text: one node choosing every
         // page break, its children the pages
-        let _ = g.eng.push(unit, g.ops.pageplan, Vec::new());
+        let end = g.eng.push(unit, g.ops.pageplan, Vec::new());
         page_guesses(&mut g, &env);
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
@@ -2368,6 +2373,7 @@ impl Build {
             opts,
             nodes,
             dvi,
+            end,
             prelude: cached,
             defs,
             stats: Stats::default(),
@@ -2458,7 +2464,7 @@ impl Build {
             edits: &self.edits,
             nodes: &mut self.nodes,
             exec: self.g.ops.exec,
-            dvi: self.dvi,
+            end: self.end,
             defs: self.defs.clone(),
             doc: self.doc,
             unchanged: None,
