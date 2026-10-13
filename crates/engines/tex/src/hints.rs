@@ -371,6 +371,11 @@ fn add_heads(st: &mut Option<Vec<String>>, heads: Option<&[&str]>) {
     match (st.as_mut(), heads) {
         (Some(v), Some(hs)) => {
             for h in hs {
+                if let Ok(w) = std::env::var("PHITEX_HEAD_TRACE")
+                    && h.contains(w.as_str())
+                {
+                    eprintln!("HEADTRACE {h}\n{}", std::backtrace::Backtrace::force_capture());
+                }
                 if !v.iter().any(|x| x == h) {
                     v.push((*h).to_owned());
                 }
@@ -2193,6 +2198,11 @@ impl Analysis<'_> {
             }
         }
         for f in set.names.keys() {
+            if let Ok(w) = std::env::var("PHITEX_HEAD_TRACE")
+                && f.contains(w.as_str())
+            {
+                eprintln!("NAMETRACE {f} relied {:?} calls {:?}", set.relied, set.calls);
+            }
             if let Some(f) = engine_field(f) {
                 if !b.names.contains(&f) {
                     b.names.push(f);
