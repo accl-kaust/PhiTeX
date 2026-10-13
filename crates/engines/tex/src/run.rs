@@ -329,6 +329,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(x);
         }
         let r = self.cx.use_field(f);
+        crate::exec::widths::read(f);
         if crate::exec::env_flag!("PHITEX_READS") {
             self.trace_read(f, r.is_err());
         }
@@ -437,7 +438,11 @@ impl<'c, 'a> Run<'c, 'a> {
         if !self.cx.is_loopback(wk) {
             return Ok(false);
         }
-        let keys = self.cx.use_field(wk)?.map(|x| list_of(v, x)).unwrap_or_default();
+        let keys = self
+            .cx
+            .use_field(wk)?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default();
         for k in keys {
             let name = str_of(v, k);
             let wd = v.field(&format!("wdef:{name}"));
@@ -617,7 +622,12 @@ impl<'c, 'a> Run<'c, 'a> {
         // local after a global is kept apart, in a group (its close drops
         // the local, the global stays, §283) and at level 0 (the engine's
         // scope sees the global, then the local)
-        let floor = self.nest.iter().rev().find(|l| l.group != 0).map_or(0, |l| l.defs_len);
+        let floor = self
+            .nest
+            .iter()
+            .rev()
+            .find(|l| l.group != 0)
+            .map_or(0, |l| l.defs_len);
         let ix = self.def_ix.entry(f).or_default();
         if let Some(&i) = ix.last()
             && i >= floor
@@ -1573,6 +1583,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.contribute("items", s);
         }
         for (f, x, l) in std::mem::take(&mut self.defs) {
+            crate::exec::widths::def(f);
             self.cx.define_with(f, x, l);
         }
         if !self.own.is_empty() {
