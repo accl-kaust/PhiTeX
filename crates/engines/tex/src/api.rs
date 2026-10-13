@@ -1593,14 +1593,8 @@ impl Graph {
             // (the document's regions, an `\\input` file's in place of
             // the command, `crate::inputs`)
             let mut read = Vec::new();
-            let pieces = crate::inputs::pieces(
-                self.eng.values(),
-                text,
-                &hints,
-                defs,
-                finder,
-                &mut read,
-            );
+            let pieces =
+                crate::inputs::pieces(self.eng.values(), text, &hints, defs, finder, &mut read);
             for p in pieces {
                 let args = p.args(self.eng.values(), DOC_NAME);
                 let n = self.eng.push(unit, self.ops.exec, args);
@@ -2169,7 +2163,12 @@ impl Build {
         let mut stats = Stats::default();
         self.g.queries.clear();
         // (the files sliced into the document's regions were read)
-        let sliced: Vec<(String, bool)> = self.g.inputs_read.iter().map(|n| (n.clone(), true)).collect();
+        let sliced: Vec<(String, bool)> = self
+            .g
+            .inputs_read
+            .iter()
+            .map(|n| (n.clone(), true))
+            .collect();
         self.g.queries.extend(sliced);
         let mut absorb = Absorb {
             edits: &self.edits,
@@ -2373,7 +2372,11 @@ impl Build {
         // regions whose slices changed are replaced
         let sliced = self.g.inputs_read.iter().any(|n| n == name);
         {
-            let mut o = self.g.overrides.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut o = self
+                .g
+                .overrides
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             match (&found, text) {
                 (Some(x), Some(_)) => {
                     o.insert(name.to_owned(), x.clone());
@@ -2995,7 +2998,11 @@ fn page_guesses(g: &mut Graph, env: &Env) {
     for j in 0..crate::page::MAX_PAGES {
         let d = i64::try_from(j).unwrap_or(0) + 1;
         let mut cs: Vec<ValueId> = base.iter().map(|&c| v.int(c)).collect();
-        cs[0] = v.int(if base[0] >= 0 { base[0] + d } else { base[0] - d });
+        cs[0] = v.int(if base[0] >= 0 {
+            base[0] + d
+        } else {
+            base[0] - d
+        });
         decl.push((v.field(&format!("pgdef:{j}")), v.list(cs)));
     }
     for (f, x) in decl {
