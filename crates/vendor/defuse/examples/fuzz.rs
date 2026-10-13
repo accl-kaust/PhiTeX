@@ -10,6 +10,7 @@ fn sched() -> Sched {
     match std::env::var("SCHED").as_deref() {
         Ok("random") => Sched::Random(BASE.with(std::cell::Cell::get)),
         Ok("spec") => Sched::Spec(3),
+        Ok("par") => Sched::Par(4),
         _ => Sched::Seq,
     }
 }
