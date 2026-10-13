@@ -173,6 +173,38 @@ var Viewer = class {
     this.fadeTimer = setTimeout(() => this.root.querySelectorAll(".mark:not(.sel)").forEach((m) => m.classList.add("fade")), 1800);
   }
   fadeTimer;
+  /**
+   * A search's matches marked on their pages until the next call ([]
+   * clears), match `cur` outlined and brought to the middle of the view
+   * unless it is in view.
+   */
+  found(hits, cur) {
+    for (const m of this.root.querySelectorAll(".fnd")) m.remove();
+    const { w, h } = this.size;
+    hits.forEach(({ k, boxes: boxes2 }, i) => {
+      const s2 = this.slots[k];
+      if (!s2) return;
+      for (const [x2, y2, bw, bh] of boxes2) {
+        const m = document.createElement("div");
+        m.className = i === cur ? "mark fnd cur" : "mark fnd";
+        Object.assign(m.style, { left: `${x2 / w * 100}%`, top: `${y2 / h * 100}%`, width: `${bw / w * 100}%`, height: `${bh / h * 100}%` });
+        s2.el.append(m);
+      }
+    });
+    const hit = hits[cur];
+    const s = hit && this.slots[hit.k];
+    if (!s) return;
+    if (s.drawn !== s.hash && !this.asked.has(`${hit.k}:${s.hash}`)) {
+      this.asked.add(`${hit.k}:${s.hash}`);
+      this.host.need(hit.k);
+    }
+    const [x, y] = hit.boxes[0];
+    const top = s.el.offsetTop + y / h * s.el.offsetHeight;
+    const left = s.el.offsetLeft + x / w * s.el.offsetWidth;
+    const v = this.scroller;
+    if (top < v.scrollTop + 20 || top > v.scrollTop + v.clientHeight - 40) v.scrollTo({ top: top - v.clientHeight / 2 });
+    if (left < v.scrollLeft || left > v.scrollLeft + v.clientWidth - 40) v.scrollTo({ left: left - v.clientWidth / 3 });
+  }
   get pages() {
     return this.slots.length;
   }
@@ -257,7 +289,16 @@ var Viewer = class {
    * The zoom changed: each page at its new size, the view kept on the same
    * place of the page in view (a page's canvas fills its slot: it scales).
    */
-  redraw() {
+  /**
+   * The zoom changed: the pages' boxes at it (their bitmaps stretched),
+   * then, unless `sizesOnly` (a pinch still going on), those drawn too
+   * coarse drawn again.
+   */
+  redraw(sizesOnly = false) {
+    if (sizesOnly) {
+      for (const s of this.slots) this.sizeSlot(s);
+      return;
+    }
     const at = this.slots[this.current];
     const v = this.scroller.getBoundingClientRect();
     const before = at?.el.getBoundingClientRect();
@@ -423,6 +464,15 @@ header button.ib:hover, .bar button.ib:hover, .win.docked header button.ib:hover
 button.ib[aria-pressed=true], .win.docked header button.ib[aria-pressed=true] { background: none; color: var(--mark); }
 button.ib.txt { width: auto; padding: 0 8px; font: 10px var(--sans); letter-spacing: .1em; text-transform: uppercase; }
 .win.no-footer > footer, .win.docked.own-header.no-footer > footer { display: none; }
+.find { display: inline-flex; align-items: center; gap: 6px; margin-right: 8px; }
+.find[hidden] { display: none; }
+.find input { width: 180px; height: 20px; padding: 0 6px; font: 11px var(--mono); color: var(--ink); background: var(--sheet); border: 1px solid var(--ink);
+  border-radius: 0; outline: none; }
+.find input::placeholder { color: var(--ink-3); font-family: var(--sans); letter-spacing: .04em; }
+#findn { font: 11px var(--mono); color: var(--ink-2); min-width: 52px; }
+#findn.none { color: var(--mark); }
+.slot .mark.fnd { background: rgb(255 214 0 / 40%); outline: 0; transition: none; }
+.slot .mark.fnd.cur { background: rgb(255 170 0 / 55%); outline: 1px solid #141414; }
 .speedchip:empty { display: none !important; }
 .pno { font: 11px var(--mono); color: var(--ink-2); min-width: 48px; }
 .bar { background: var(--paper); color: var(--ink-2); border-bottom: 1px solid var(--rule); padding: 4px 10px; }
@@ -689,13 +739,17 @@ var KEYS = [
   ["j k  \u2193 \u2191", "scroll down, up"],
   ["h l", "scroll left, right"],
   ["Ctrl+d  Ctrl+u", "half a screen down, up"],
-  ["Ctrl+f  Ctrl+b", "a screen down, up"],
+  ["Ctrl+b", "a screen up"],
+  ["Ctrl+f  /", "find in the pages"],
+  ["Enter  n / Shift+Enter  N", "next, previous match"],
   ["Space  Shift+Space", "next, previous page"],
   ["\u2192 \u2190  PgDn PgUp", "next, previous page"],
   ["gg  Home", "first page"],
   ["G  End", "last page"],
   ["12G  12gg", "page 12"],
   ["K J  + \u2212", "zoom in, out"],
+  ["Ctrl+wheel  pinch", "zoom at the pointer"],
+  ["Ctrl+ +  Ctrl+ \u2212  Ctrl+0", "zoom in, out, fit"],
   ["0  w", "fit the page's width"],
   ["f", "fit the whole page"],
   ["?", "these keys"],
@@ -721,7 +775,6 @@ function bindKeys(on, t) {
       const act = {
         d: () => by(0, n2 * h / 2),
         u: () => by(0, -n2 * h / 2),
-        f: () => by(0, n2 * h),
         b: () => by(0, -n2 * h)
       };
       if (!act[k]) return;
@@ -1232,6 +1285,7 @@ var Panel = class {
     <span class="title">PhiTeX</span>
     <span class="badge hide-collapsed" title="${w.badgeTitle}">${w.badge}</span>
     <span class="grow"></span>
+    <span class="find" id="find" hidden><input id="findq" type="search" placeholder="Find" spellcheck="false" aria-label="Find in the pages"><span id="findn"></span></span>
     <span class="chip" id="chip" title="Status"><span class="dot"></span><span id="chiptext">starting\u2026</span></span>
     <span class="group hide-collapsed">
       <button class="ib" id="prev" title="Previous page" aria-label="Previous page"><span class="icon">chevron_left</span></button>
@@ -1843,7 +1897,7 @@ var Panel = class {
   }
   /** One zoom step in or out, from where it is (as Overleaf's − +). */
   zoomStep(dir) {
-    const steps = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+    const steps = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8];
     const now = this.scale();
     const next = dir > 0 ? steps.find((z) => z > now + 0.01) : [...steps].reverse().find((z) => z < now - 0.01);
     this.zoomTo(String(next ?? now));
@@ -1902,6 +1956,7 @@ var Panel = class {
   extras(opts) {
     if (opts.header) this.win.classList.add("own-header");
     if (opts.footer === false) this.win.classList.add("no-footer");
+    this.findAndZoom(!!opts.keys);
     if (opts.outline) {
       this.win.classList.add("has-side");
       this.contents = new Outline(this.$("#side"), { goToPlace: (k, top) => this.viewer.goToPlace(k, top) });
@@ -1982,10 +2037,152 @@ var Panel = class {
   }
   zoomTo(z) {
     this.prefs.zoom = z;
-    this.$("#zoom").value = z;
+    this.zoomShown();
     this.save();
     this.redraw();
     this.emit();
+  }
+  /** The zoom menu at the zoom now: a zoom not on it (a pinch's) as its own entry. */
+  zoomShown() {
+    const sel = this.$("#zoom");
+    const z = this.prefs.zoom;
+    let own = sel.querySelector("option.own");
+    if ([...sel.options].some((o) => o.value === z && !o.classList.contains("own"))) own?.remove();
+    else {
+      own ??= sel.appendChild(Object.assign(document.createElement("option"), { className: "own" }));
+      own.value = z;
+      own.textContent = `${Math.round(Number(z) * 100)}%`;
+    }
+    sel.value = z;
+  }
+  pinchEnd;
+  /**
+   * Zoom by `f` keeping the point (`px`, `py`, from the stage's top left)
+   * where it is: the boxes at once, the pages drawn sharp again once the
+   * gesture rests.
+   */
+  zoomAt(f, px, py) {
+    const stage = this.$("#stage");
+    const old = this.scale();
+    const next = Math.min(8, Math.max(0.25, old * f));
+    if (Math.abs(next - old) < 1e-4) return;
+    const cx = stage.scrollLeft + px, cy = stage.scrollTop + py;
+    this.prefs.zoom = String(Number(next.toFixed(4)));
+    this.$("#stage").classList.remove("fit");
+    this.viewer.redraw(true);
+    stage.scrollLeft = cx * next / old - px;
+    stage.scrollTop = cy * next / old - py;
+    this.zoomShown();
+    clearTimeout(this.pinchEnd);
+    this.pinchEnd = setTimeout(() => {
+      this.save();
+      this.viewer.redraw();
+      this.emit();
+    }, 150);
+  }
+  /** The find field's matches, the one shown, and the search asked last. */
+  hits = [];
+  hit = 0;
+  findSeq = 0;
+  findTimer;
+  /** The pointer over the panel (in a host's page, its keys only then). */
+  hover = false;
+  /** The find field opened (its text selected) or closed (the marks gone). */
+  find(on) {
+    const box = this.$("#find");
+    const q = this.$("#findq");
+    box.hidden = !on;
+    if (on) {
+      q.focus();
+      q.select();
+      if (q.value) this.search(q.value);
+      return;
+    }
+    this.findSeq++;
+    this.hits = [];
+    this.viewer.found([], 0);
+    q.blur();
+  }
+  search(q) {
+    const seq = ++this.findSeq;
+    const n = this.$("#findn");
+    if (!q.trim()) {
+      this.hits = [];
+      this.viewer.found([], 0);
+      n.textContent = "";
+      return;
+    }
+    void this.ev.onFind?.(q).then((hits) => {
+      if (seq !== this.findSeq) return;
+      this.hits = hits;
+      const at = hits.findIndex((h) => h.k >= this.viewer.page);
+      this.hit = at < 0 ? 0 : at;
+      this.showHit();
+    });
+  }
+  showHit() {
+    const n = this.$("#findn");
+    n.textContent = this.hits.length ? `${this.hit + 1} / ${this.hits.length}` : "0 / 0";
+    n.classList.toggle("none", !this.hits.length);
+    this.viewer.found(this.hits, this.hit);
+  }
+  /** The next match (`dir` 1) or the one before (−1), round the ends. */
+  findNext(dir) {
+    if (!this.hits.length) return;
+    this.hit = (this.hit + dir + this.hits.length) % this.hits.length;
+    this.showHit();
+  }
+  /** Find, and zoom by the wheel and its keys: in every host (`all`: the page's keys are the panel's). */
+  findAndZoom(all) {
+    const stage = this.$("#stage");
+    this.win.addEventListener("pointerenter", () => this.hover = true);
+    this.win.addEventListener("pointerleave", () => this.hover = false);
+    stage.addEventListener(
+      "wheel",
+      (e) => {
+        if (!e.ctrlKey) return;
+        e.preventDefault();
+        const r = stage.getBoundingClientRect();
+        const d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+        this.zoomAt(Math.exp(-Math.max(-60, Math.min(60, d)) * 4e-3), e.clientX - r.left, e.clientY - r.top);
+      },
+      { passive: false }
+    );
+    const q = this.$("#findq");
+    q.addEventListener("input", () => {
+      clearTimeout(this.findTimer);
+      this.findTimer = setTimeout(() => this.search(q.value), 120);
+    });
+    q.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") this.findNext(e.shiftKey ? -1 : 1);
+      else if (e.key === "Escape") this.find(false);
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    addEventListener(
+      "keydown",
+      (e) => {
+        const ours = all || this.hover || this.root.activeElement != null;
+        if (!ours || e.altKey || e.metaKey) return;
+        const typing = e.target?.closest?.("input, textarea, select, [contenteditable=true]") && e.composedPath()[0] !== q;
+        if (e.ctrlKey) {
+          const k = e.key;
+          if (k === "f" && this.ev.onFind) this.find(true);
+          else if (k === "=" || k === "+") this.zoomStep(1);
+          else if (k === "-") this.zoomStep(-1);
+          else if (k === "0") this.zoomTo("fit");
+          else return;
+        } else if (typing || e.composedPath()[0] === q) return;
+        else if (e.key === "/" && this.ev.onFind) this.find(true);
+        else if ((e.key === "n" || e.key === "N") && !this.$("#find").hidden && this.hits.length) this.findNext(e.key === "n" ? 1 : -1);
+        else if (e.key === "Escape" && !this.$("#find").hidden) this.find(false);
+        else return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      },
+      { capture: true }
+    );
   }
   toggleDebug() {
     this.debugOn = !this.debugOn;
@@ -3506,6 +3703,10 @@ var PreviewSession = class {
 };
 
 // viewer/src/mupdf.ts
+function fold(c) {
+  const f = c.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+  return f.length === 1 ? f : c.toLowerCase().length === 1 ? c.toLowerCase() : c;
+}
 var COMBINING = {
   "\xA8": "\u0308",
   "\xB4": "\u0301",
@@ -3615,11 +3816,67 @@ var MupdfDoc = class {
           const text = cs.map((c) => c.c).join("");
           if (!text.trim()) return;
           const xs = cs.flatMap((c) => Array.from({ length: c.c.length }, () => c.x));
-          out.push({ ...line, text, xs, w: Math.max(right - line.x, 0) });
+          const rs = cs.flatMap((c) => Array.from({ length: c.c.length }, () => c.r));
+          out.push({ ...line, text, xs, rs, w: Math.max(right - line.x, 0) });
         }
       });
     } finally {
       st.destroy();
+    }
+    return out;
+  }
+  /** Each page's text, kept for searching (this PDF's: it never changes). */
+  texts = /* @__PURE__ */ new Map();
+  textOf(k) {
+    let t = this.texts.get(k);
+    if (!t) {
+      const page = this.doc.loadPage(k);
+      try {
+        const [x0, y0] = page.getBounds();
+        t = this.text(page, x0, y0);
+      } finally {
+        page.destroy();
+      }
+      this.texts.set(k, t);
+    }
+    return t;
+  }
+  /**
+   * Where `q` is on the pages, in page order: accents and case ignored, a
+   * match running across a line break (the lines joined by a space) boxed
+   * on each line; at most `max` matches.
+   */
+  search(q, max = 1e3) {
+    const needle = Array.from(q.replace(/\s+/g, " ").trim(), fold).join("");
+    if (!needle) return [];
+    const out = [];
+    for (let k = 0; k < this.pages && out.length < max; k++) {
+      const lines = this.textOf(k);
+      let hay = "";
+      const at = [];
+      const col = [];
+      lines.forEach((l, i) => {
+        if (i) hay += " ", at.push(-1), col.push(-1);
+        for (let j = 0; j < l.text.length; j++) hay += fold(l.text[j]), at.push(i), col.push(j);
+      });
+      for (let from2 = hay.indexOf(needle); from2 >= 0 && out.length < max; from2 = hay.indexOf(needle, from2 + needle.length)) {
+        const boxes2 = [];
+        let cur = -1, x = 0, r = 0;
+        const flush = () => {
+          if (cur < 0) return;
+          const l = lines[cur];
+          boxes2.push([x, l.y - l.size * 0.78, r - x, l.size * 1.02]);
+        };
+        for (let u = from2; u < from2 + needle.length; u++) {
+          const i = at[u];
+          if (i < 0) continue;
+          const l = lines[i], xl = l.xs?.[col[u]] ?? l.x, xr = l.rs?.[col[u]] ?? l.x + l.w;
+          if (i !== cur) flush(), cur = i, x = xl, r = xr;
+          else x = Math.min(x, xl), r = Math.max(r, xr);
+        }
+        flush();
+        if (boxes2.length) out.push({ k, boxes: boxes2 });
+      }
     }
     return out;
   }
@@ -4077,6 +4334,11 @@ var Pages = class {
     }
     return this.sock.request(op);
   }
+  /** Where `q` is in the build's PDF (MuPDF's text, every page). */
+  async find(q) {
+    const d = await this.open().catch(() => null);
+    return d?.search(q) ?? [];
+  }
   onEvent(cb) {
     this.sock.onEvent(cb);
   }
@@ -4103,7 +4365,8 @@ var panel = new Panel(
     onReload: () => void session.resync(),
     onClean: () => void session.resync(),
     onGoto: (file, line) => source(file, line),
-    onSyncSource: (k, x, y) => void session.toSource(k, x, y)
+    onSyncSource: (k, x, y) => void session.toSource(k, x, y),
+    onFind: (q) => pages.find(q)
   },
   // (the panel's settings: this browser's)
   {

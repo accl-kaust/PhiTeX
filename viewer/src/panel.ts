@@ -95,6 +95,8 @@ export interface PanelEvents {
   onNews?(): void;
   /** A link to a web address on a page (absent: opened in a new tab). */
   onLink?(uri: string): void;
+  /** Where `q` is on the pages (the host's MuPDF searches them all): absent, no find field. */
+  onFind?(q: string): Promise<{ k: number; boxes: [number, number, number, number][] }[]>;
 }
 
 /**
@@ -523,6 +525,7 @@ export class Panel {
     <span class="title">PhiTeX</span>
     <span class="badge hide-collapsed" title="${w.badgeTitle}">${w.badge}</span>
     <span class="grow"></span>
+    <span class="find" id="find" hidden><input id="findq" type="search" placeholder="Find" spellcheck="false" aria-label="Find in the pages"><span id="findn"></span></span>
     <span class="chip" id="chip" title="Status"><span class="dot"></span><span id="chiptext">starting…</span></span>
     <span class="group hide-collapsed">
       <button class="ib" id="prev" title="Previous page" aria-label="Previous page"><span class="icon">chevron_left</span></button>
@@ -1223,7 +1226,7 @@ export class Panel {
 
   /** One zoom step in or out, from where it is (as Overleaf's − +). */
   zoomStep(dir: 1 | -1): void {
-    const steps = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+    const steps = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8];
     const now = this.scale();
     const next = dir > 0 ? steps.find((z) => z > now + 0.01) : [...steps].reverse().find((z) => z < now - 0.01);
     this.zoomTo(String(next ?? now));
@@ -1290,6 +1293,7 @@ export class Panel {
   private extras(opts: PanelOptions): void {
     if (opts.header) this.win.classList.add("own-header");
     if (opts.footer === false) this.win.classList.add("no-footer");
+    this.findAndZoom(!!opts.keys);
     if (opts.outline) {
       this.win.classList.add("has-side");
       this.contents = new Outline(this.$("#side"), { goToPlace: (k, top) => this.viewer.goToPlace(k, top) });
@@ -1377,10 +1381,163 @@ export class Panel {
 
   zoomTo(z: string): void {
     this.prefs.zoom = z;
-    this.$<HTMLSelectElement>("#zoom").value = z;
+    this.zoomShown();
     this.save();
     this.redraw();
     this.emit();
+  }
+
+  /** The zoom menu at the zoom now: a zoom not on it (a pinch's) as its own entry. */
+  private zoomShown(): void {
+    const sel = this.$<HTMLSelectElement>("#zoom");
+    const z = this.prefs.zoom;
+    let own = sel.querySelector<HTMLOptionElement>("option.own");
+    if ([...sel.options].some((o) => o.value === z && !o.classList.contains("own"))) own?.remove();
+    else {
+      own ??= sel.appendChild(Object.assign(document.createElement("option"), { className: "own" }));
+      own.value = z;
+      own.textContent = `${Math.round(Number(z) * 100)}%`;
+    }
+    sel.value = z;
+  }
+
+  private pinchEnd: ReturnType<typeof setTimeout> | undefined;
+
+  /**
+   * Zoom by `f` keeping the point (`px`, `py`, from the stage's top left)
+   * where it is: the boxes at once, the pages drawn sharp again once the
+   * gesture rests.
+   */
+  private zoomAt(f: number, px: number, py: number): void {
+    const stage = this.$("#stage");
+    const old = this.scale();
+    const next = Math.min(8, Math.max(0.25, old * f));
+    if (Math.abs(next - old) < 1e-4) return;
+    const cx = stage.scrollLeft + px, cy = stage.scrollTop + py;
+    this.prefs.zoom = String(Number(next.toFixed(4)));
+    this.$("#stage").classList.remove("fit");
+    this.viewer.redraw(true);
+    stage.scrollLeft = (cx * next) / old - px;
+    stage.scrollTop = (cy * next) / old - py;
+    this.zoomShown();
+    clearTimeout(this.pinchEnd);
+    this.pinchEnd = setTimeout(() => {
+      this.save();
+      this.viewer.redraw();
+      this.emit();
+    }, 150);
+  }
+
+  /** The find field's matches, the one shown, and the search asked last. */
+  private hits: { k: number; boxes: [number, number, number, number][] }[] = [];
+  private hit = 0;
+  private findSeq = 0;
+  private findTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The pointer over the panel (in a host's page, its keys only then). */
+  private hover = false;
+
+  /** The find field opened (its text selected) or closed (the marks gone). */
+  find(on: boolean): void {
+    const box = this.$("#find");
+    const q = this.$<HTMLInputElement>("#findq");
+    box.hidden = !on;
+    if (on) {
+      q.focus();
+      q.select();
+      if (q.value) this.search(q.value);
+      return;
+    }
+    this.findSeq++;
+    this.hits = [];
+    this.viewer.found([], 0);
+    q.blur();
+  }
+
+  private search(q: string): void {
+    const seq = ++this.findSeq;
+    const n = this.$("#findn");
+    if (!q.trim()) {
+      this.hits = [];
+      this.viewer.found([], 0);
+      n.textContent = "";
+      return;
+    }
+    void this.ev.onFind?.(q).then((hits) => {
+      if (seq !== this.findSeq) return;
+      this.hits = hits;
+      // (the first match at or after the page in view)
+      const at = hits.findIndex((h) => h.k >= this.viewer.page);
+      this.hit = at < 0 ? 0 : at;
+      this.showHit();
+    });
+  }
+
+  private showHit(): void {
+    const n = this.$("#findn");
+    n.textContent = this.hits.length ? `${this.hit + 1} / ${this.hits.length}` : "0 / 0";
+    n.classList.toggle("none", !this.hits.length);
+    this.viewer.found(this.hits, this.hit);
+  }
+
+  /** The next match (`dir` 1) or the one before (−1), round the ends. */
+  findNext(dir: 1 | -1): void {
+    if (!this.hits.length) return;
+    this.hit = (this.hit + dir + this.hits.length) % this.hits.length;
+    this.showHit();
+  }
+
+  /** Find, and zoom by the wheel and its keys: in every host (`all`: the page's keys are the panel's). */
+  private findAndZoom(all: boolean): void {
+    const stage = this.$("#stage");
+    this.win.addEventListener("pointerenter", () => (this.hover = true));
+    this.win.addEventListener("pointerleave", () => (this.hover = false));
+    // (Ctrl+wheel, a trackpad's pinch too: the pages zoom at the pointer, not the browser's page)
+    stage.addEventListener(
+      "wheel",
+      (e) => {
+        if (!e.ctrlKey) return;
+        e.preventDefault();
+        const r = stage.getBoundingClientRect();
+        const d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+        this.zoomAt(Math.exp(-Math.max(-60, Math.min(60, d)) * 0.004), e.clientX - r.left, e.clientY - r.top);
+      },
+      { passive: false },
+    );
+    const q = this.$<HTMLInputElement>("#findq");
+    q.addEventListener("input", () => {
+      clearTimeout(this.findTimer);
+      this.findTimer = setTimeout(() => this.search(q.value), 120);
+    });
+    q.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") this.findNext(e.shiftKey ? -1 : 1);
+      else if (e.key === "Escape") this.find(false);
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    addEventListener(
+      "keydown",
+      (e) => {
+        const ours = all || this.hover || this.root.activeElement != null;
+        if (!ours || e.altKey || e.metaKey) return;
+        const typing = (e.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable=true]") && e.composedPath()[0] !== q;
+        if (e.ctrlKey) {
+          const k = e.key;
+          if (k === "f" && this.ev.onFind) this.find(true);
+          else if (k === "=" || k === "+") this.zoomStep(1);
+          else if (k === "-") this.zoomStep(-1);
+          else if (k === "0") this.zoomTo("fit");
+          else return;
+        } else if (typing || e.composedPath()[0] === q) return;
+        else if (e.key === "/" && this.ev.onFind) this.find(true);
+        else if ((e.key === "n" || e.key === "N") && !this.$("#find").hidden && this.hits.length) this.findNext(e.key === "n" ? 1 : -1);
+        else if (e.key === "Escape" && !this.$("#find").hidden) this.find(false);
+        else return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      },
+      { capture: true },
+    );
   }
 
   toggleDebug(): void {
