@@ -1353,11 +1353,14 @@ const MAX_DIMEN: i32 = 0o7777777777;
 /// read at the end.
 pub(crate) fn dvi(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let t0 = std::time::Instant::now();
-    let r = FinalState::load(cx, o).and_then(|fin| dvi_file(cx, &fin));
+    let fin = FinalState::load(cx, o);
+    let t1 = t0.elapsed();
+    let r = fin.and_then(|fin| dvi_file(cx, &fin));
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
-            "output file (dvi root run): {:?}{}",
+            "output file (dvi root run): {:?} (final state {t1:?}, file {:?}){}",
             t0.elapsed(),
+            t0.elapsed().saturating_sub(t1),
             if r.is_ok() { "" } else { " (stopped)" }
         );
     }
