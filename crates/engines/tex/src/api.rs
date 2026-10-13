@@ -621,6 +621,9 @@ pub struct Stats {
     /// Nodes that waited on a value not known yet, and stops.
     pub pending_waits: u64,
     pub stops: u64,
+    /// Stopped runs restarted instead of resumed, by the first read that
+    /// refused the resume.
+    pub restarted_by: Vec<(&'static str, u64)>,
     /// Environment reads the engine's provider answered in place.
     pub env_provided: u64,
     /// The executor's threads.
@@ -786,6 +789,12 @@ impl Stats {
         self.loop_rounds += r.rounds;
         self.pending_waits += r.pending_waits;
         self.stops += r.stops;
+        for &(k, n) in &r.restarted_by {
+            match self.restarted_by.iter_mut().find(|x| x.0 == k) {
+                Some(x) => x.1 += n,
+                None => self.restarted_by.push((k, n)),
+            }
+        }
         self.env_provided += r.env_provided;
         self.version = r.version;
         self.steps += r.steps;
@@ -837,7 +846,15 @@ struct Graph {
     watch: crate::exec::Watch,
     /// The engine's scheduler ([`Options::speculation`]).
     sched: phitex_defuse::Greedy,
+    /// The files the environment provider found or missed during runs
+    /// (name, field, value, hash), merged into `files`/`absent`/`reads`
+    /// before the environment is set again ([`Graph::provide`]).
+    provided: Arc<std::sync::Mutex<Vec<Provided>>>,
 }
+
+/// A file the environment provider answered: name, field, the value
+/// (`None`: absent), and the finder's hash.
+type Provided = (String, Field, Option<ValueId>, u64);
 
 impl Graph {
     fn new(time: Option<std::time::Duration>, threads: Option<usize>) -> Graph {
@@ -926,6 +943,7 @@ impl Graph {
             watch: crate::exec::Watch::new(crate::exec::threads(threads), None),
             sched: phitex_defuse::Greedy::default(),
             eval_errors: Vec::new(),
+            provided: Arc::default(),
         }
     }
 
@@ -1005,6 +1023,57 @@ impl Graph {
         }
     }
 
+    /// Installs the environment provider: a run reading a file the
+    /// environment does not hold gets it from the finder in place, as
+    /// [`Graph::supply`] would have supplied it, instead of stopping;
+    /// a file the job writes is not answered (it is read back).
+    fn provide(&mut self, finder: &Finder) {
+        let finder = Arc::clone(finder);
+        let log = Arc::clone(&self.provided);
+        let written = self.written.clone();
+        self.eng.set_env_provider(Box::new(move |v, f| {
+            let name = v.as_str(f.0)?;
+            let name = name.strip_prefix("file:")?;
+            if written.iter().any(|w| w == name) {
+                return None;
+            }
+            let found = finder(name);
+            let hash = file_hash(found.as_ref());
+            let val = found.map(|(path, bytes)| {
+                let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+                v.list(vec![v.str(&path), v.str(&text)])
+            });
+            if let Ok(mut l) = log.lock() {
+                l.push((name.to_owned(), f, val, hash));
+            }
+            Some(val)
+        }));
+    }
+
+    /// Merges what the provider answered into the supplied files, so the
+    /// next environment set is the whole environment.
+    fn absorb_provided(&mut self) {
+        let got = self
+            .provided
+            .lock()
+            .map(|mut l| std::mem::take(&mut *l))
+            .unwrap_or_default();
+        for (name, f, val, hash) in got {
+            if self.files.iter().any(|(g, _)| *g == f)
+                || self.absent.contains(&f)
+                || self.written.contains(&name)
+            {
+                continue;
+            }
+            self.queries.push((name.clone(), val.is_some()));
+            self.reads.push((name, hash));
+            match val {
+                Some(x) => self.files.push((f, x)),
+                None => self.absent.push(f),
+            }
+        }
+    }
+
     /// The names of the files the job opened for writing.
     fn opened(&self, unit: UnitId) -> Vec<String> {
         let v = self.eng.values();
@@ -1065,6 +1134,7 @@ impl Graph {
     ) {
         let needs_f = self.eng.values().field("needs");
         loop {
+            self.provide(finder);
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();
@@ -1162,6 +1232,7 @@ impl Graph {
             if !asked {
                 break;
             }
+            self.absorb_provided();
             let env = self.environment(fixpoint);
             self.eng.set_environment(env);
             self.eng.set_environment_absent(self.absent.clone());
@@ -1357,6 +1428,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         g.supply(finder, n);
     }
     if !known.is_empty() {
+        g.absorb_provided();
         let env = g.environment(false);
         g.eng.set_environment(env);
         g.eng.set_environment_absent(g.absent.clone());
@@ -1509,6 +1581,7 @@ impl Build {
             g.supply(&opts.finder, &n);
         }
         if !cached.reads.is_empty() {
+            g.absorb_provided();
             let env = g.environment(opts.fixpoint);
             g.eng.set_environment(env);
             g.eng.set_environment_absent(g.absent.clone());
@@ -1760,6 +1833,7 @@ impl Build {
         if let Some(r) = self.g.reads.iter_mut().find(|(n, _)| n == name) {
             r.1 = file_hash(found.as_ref());
         }
+        self.g.absorb_provided();
         let env = self.g.environment(self.opts.fixpoint);
         self.g.eng.set_environment(env);
         let absent = self.g.absent.clone();
