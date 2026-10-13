@@ -59,9 +59,12 @@ fn rung_dir(nn: &str) -> (PathBuf, String) {
 /// A fresh directory with the rung's assets and `text` as NAME.tex.
 fn setup(rung: &Path, name: &str, tag: &str, text: &str) -> PathBuf {
     let dir = scratch(tag);
+    if let Some(u) = upstream_doc(rung) {
+        copy_tree(&u, &dir);
+    }
     for e in std::fs::read_dir(rung).expect("the rung").flatten() {
         let p = e.path();
-        if p.is_file() && p.extension().is_none_or(|x| x != "tex") {
+        if p.is_file() && p.extension().is_none_or(|x| x != "tex") && e.file_name() != "upstream" {
             std::fs::copy(&p, dir.join(e.file_name())).expect("an asset");
         }
     }
@@ -70,6 +73,11 @@ fn setup(rung: &Path, name: &str, tag: &str, text: &str) -> PathBuf {
 }
 
 fn text(rung: &Path, variant: &str, name: &str) -> String {
+    if variant == "."
+        && let Some(u) = upstream_doc(rung)
+    {
+        return std::fs::read_to_string(u.join(format!("{name}.tex"))).expect("a text");
+    }
     std::fs::read_to_string(rung.join(variant).join(format!("{name}.tex"))).expect("a text")
 }
 
@@ -111,6 +119,14 @@ fn compare(dir: &Path, odir: &Path, name: &str) -> Vec<String> {
         if f == "stats" {
             continue;
         }
+        if f == "sha256" {
+            let want = std::fs::read_to_string(e.path()).unwrap_or_default();
+            let got = sha256(&dir.join(format!("{name}.pdf")));
+            if got != want.trim() {
+                out.push(format!("{name}.pdf: sha256 {got} is not the oracle's"));
+            }
+            continue;
+        }
         let want = std::fs::read(e.path()).expect("an oracle file");
         let got = std::fs::read(dir.join(&f)).unwrap_or_default();
         if let Some(d) = diff(&got, &want) {
@@ -136,12 +152,75 @@ struct Cold {
     nodes: String,
     errors: String,
     diffs: Vec<String>,
+    phases: String,
+}
+
+/// The `PHITEX_TEX_TIME` phase lines of a build's standard error, each
+/// cut short.
+fn phases(err: &str) -> String {
+    err.lines()
+        .filter(|l| {
+            [
+                "time:",
+                "format deserialise",
+                "prelude",
+                "push_text",
+                "round:",
+                "pdf finish",
+                "edit apply",
+            ]
+            .iter()
+            .any(|p| l.starts_with(p))
+        })
+        .map(|l| l.split(", ").take(4).collect::<Vec<_>>().join(", "))
+        .collect::<Vec<_>>()
+        .join(" ; ")
+}
+
+/// A big upstream document (rung 13, the TikZ manual): its files copied
+/// beside the job, its oracle a hash (`oracle/sha256`; the PDF itself is
+/// too big to commit).
+fn upstream_doc(rung: &Path) -> Option<PathBuf> {
+    let f = std::fs::read_to_string(rung.join("upstream")).ok()?;
+    Some(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(f.trim()),
+    )
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    for e in std::fs::read_dir(from).expect("a directory").flatten() {
+        let t = to.join(e.file_name());
+        if e.path().is_dir() {
+            let _ = std::fs::create_dir_all(&t);
+            copy_tree(&e.path(), &t);
+        } else {
+            std::fs::copy(e.path(), &t).expect("a copy");
+        }
+    }
+}
+
+fn sha256(path: &Path) -> String {
+    let out = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .expect("sha256sum");
+    String::from_utf8_lossy(&out.stdout)
+        .split(' ')
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 fn cold(rung: &Path, name: &str, variant: &str, threads: usize, tag: &str) -> (Cold, PathBuf) {
     let dir = setup(rung, name, tag, &text(rung, variant, name));
     let t = Instant::now();
-    let out = phitex(&dir)
+    let mut c = phitex(&dir);
+    if threads == 1 {
+        c.env("PHITEX_TEX_TIME", "1");
+    }
+    let out = c
         .args([
             "build",
             "--json",
@@ -178,6 +257,11 @@ fn cold(rung: &Path, name: &str, variant: &str, threads: usize, tag: &str) -> (C
             nodes: ev["nodes_run"].to_string(),
             errors: ev["errors"].to_string(),
             diffs,
+            phases: if threads == 1 {
+                phases(&String::from_utf8_lossy(&out.stderr))
+            } else {
+                String::new()
+            },
         },
         dir,
     )
@@ -233,8 +317,17 @@ fn run(nn: &str) -> Vec<String> {
         .lines()
         .map_while(Result::ok);
     let first = until(&mut lines, 1);
+    let par = &first["parallel"];
+    let busy_share = par["busy_ms"].as_f64().unwrap_or(f64::NAN)
+        / (par["engine_ms"].as_f64().unwrap_or(f64::NAN)
+            * par["threads"].as_f64().unwrap_or(f64::NAN));
     let mut edit_cells = Vec::new();
-    for (k, v) in ["edit-word", "edit-para"].into_iter().enumerate() {
+    let variants: &[&str] = if rung.join("edit-word").exists() {
+        &["edit-word", "edit-para"]
+    } else {
+        &[]
+    };
+    for (k, &v) in variants.iter().enumerate() {
         std::thread::sleep(Duration::from_millis(1100));
         std::fs::write(wdir.join(format!("{name}.tex")), text(&rung, v, &name)).expect("the edit");
         let ev = until(&mut lines, k as u64 + 2);
@@ -269,7 +362,7 @@ fn run(nn: &str) -> Vec<String> {
     let _ = child.kill();
     let _ = child.wait();
     eprintln!(
-        "ROW {nn}-{name} scope={} pages={}/{} pdflatex_s={} rounds_oracle={} cold1_s={:.2} cold8_s={:.2} nodes={} identical1={} identical8={} first_diff={} watch_first_ok={} | {} | errors={}",
+        "ROW {nn}-{name} scope={} pages={}/{} pdflatex_s={} rounds_oracle={} cold1_s={:.2} cold8_s={:.2} nodes={} identical1={} identical8={} first_diff={} watch_first_ok={} watch_cold_ms={:.0} critical_path={} busy_share8={:.3} | {} | errors={} | phases1: {}",
         if scope.is_empty() { "off" } else { "on" },
         c8.pages,
         stat(&o, "pages"),
@@ -285,8 +378,12 @@ fn run(nn: &str) -> Vec<String> {
             .or(c1.diffs.first())
             .map_or("-", String::as_str),
         first["ok"],
+        first["wall_ms"].as_f64().unwrap_or(f64::NAN),
+        par["critical_path"],
+        busy_share,
         edit_cells.join(" | "),
         c8.errors,
+        c1.phases,
     );
     for r in &reds {
         eprintln!("RED {r}");
@@ -314,7 +411,7 @@ macro_rules! rungs {
 
 rungs!(r01_plain "01", r02_article "02", r03_structure "03", r04_math "04",
     r05_floats "05", r06_bibtex "06", r07_index "07", r08_hyperref "08",
-    r09_babel "09", r10_tikz "10", r11_biblatex "11", r12_book "12");
+    r09_babel "09", r10_tikz "10", r11_biblatex "11", r12_book "12", r13_pgfmanual "13");
 
 /// Every rung, one after another; reds of all of them at the end.
 #[test]

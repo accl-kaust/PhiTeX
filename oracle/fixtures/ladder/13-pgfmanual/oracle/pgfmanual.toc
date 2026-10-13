@@ -1,0 +1,1087 @@
+\contentsline {section}{\numberline {1}Introduction}{25}{section.1}%
+\contentsline {subsection}{\numberline {1.1}The Layers Below Ti\emph {k}Z}{25}{subsection.1.1}%
+\contentsline {subsection}{\numberline {1.2}Comparison with Other Graphics Packages}{26}{subsection.1.2}%
+\contentsline {subsection}{\numberline {1.3}Utility Packages}{26}{subsection.1.3}%
+\contentsline {subsection}{\numberline {1.4}How to Read This Manual}{27}{subsection.1.4}%
+\contentsline {subsection}{\numberline {1.5}Authors and Acknowledgements}{27}{subsection.1.5}%
+\contentsline {subsection}{\numberline {1.6}Getting Help}{27}{subsection.1.6}%
+\contentsline {part}{I\hspace {1em}Tutorials and Guidelines}{28}{part.1}%
+\contentsline {section}{\numberline {2}Tutorial: A Picture for Karl's Students}{29}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Problem Statement}{29}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Setting up the Environment}{29}{subsection.2.2}%
+\contentsline {subsubsection}{\numberline {2.2.1}Setting up the Environment in \LaTeX }{29}{subsubsection.2.2.1}%
+\contentsline {subsubsection}{\numberline {2.2.2}Setting up the Environment in Plain \TeX }{30}{subsubsection.2.2.2}%
+\contentsline {subsubsection}{\numberline {2.2.3}Setting up the Environment in Con\TeX t}{30}{subsubsection.2.2.3}%
+\contentsline {subsection}{\numberline {2.3}Straight Path Construction}{31}{subsection.2.3}%
+\contentsline {subsection}{\numberline {2.4}Curved Path Construction}{31}{subsection.2.4}%
+\contentsline {subsection}{\numberline {2.5}Circle Path Construction}{32}{subsection.2.5}%
+\contentsline {subsection}{\numberline {2.6}Rectangle Path Construction}{32}{subsection.2.6}%
+\contentsline {subsection}{\numberline {2.7}Grid Path Construction}{33}{subsection.2.7}%
+\contentsline {subsection}{\numberline {2.8}Adding a Touch of Style}{33}{subsection.2.8}%
+\contentsline {subsection}{\numberline {2.9}Drawing Options}{34}{subsection.2.9}%
+\contentsline {subsection}{\numberline {2.10}Arc Path Construction}{34}{subsection.2.10}%
+\contentsline {subsection}{\numberline {2.11}Clipping a Path}{35}{subsection.2.11}%
+\contentsline {subsection}{\numberline {2.12}Parabola and Sine Path Construction}{36}{subsection.2.12}%
+\contentsline {subsection}{\numberline {2.13}Filling and Drawing}{36}{subsection.2.13}%
+\contentsline {subsection}{\numberline {2.14}Shading}{37}{subsection.2.14}%
+\contentsline {subsection}{\numberline {2.15}Specifying Coordinates}{38}{subsection.2.15}%
+\contentsline {subsection}{\numberline {2.16}Intersecting Paths}{39}{subsection.2.16}%
+\contentsline {subsection}{\numberline {2.17}Adding Arrow Tips}{39}{subsection.2.17}%
+\contentsline {subsection}{\numberline {2.18}Scoping}{40}{subsection.2.18}%
+\contentsline {subsection}{\numberline {2.19}Transformations}{41}{subsection.2.19}%
+\contentsline {subsection}{\numberline {2.20}Repeating Things: For-Loops}{41}{subsection.2.20}%
+\contentsline {subsection}{\numberline {2.21}Adding Text}{43}{subsection.2.21}%
+\contentsline {subsection}{\numberline {2.22}Pics: The Angle Revisited}{46}{subsection.2.22}%
+\contentsline {section}{\numberline {3}Tutorial: A Petri-Net for Hagen}{48}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Problem Statement}{48}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Setting up the Environment}{48}{subsection.3.2}%
+\contentsline {subsubsection}{\numberline {3.2.1}Setting up the Environment in \LaTeX }{48}{subsubsection.3.2.1}%
+\contentsline {subsubsection}{\numberline {3.2.2}Setting up the Environment in Plain \TeX }{48}{subsubsection.3.2.2}%
+\contentsline {subsubsection}{\numberline {3.2.3}Setting up the Environment in Con\TeX t}{49}{subsubsection.3.2.3}%
+\contentsline {subsection}{\numberline {3.3}Introduction to Nodes}{49}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}Placing Nodes Using the At Syntax}{50}{subsection.3.4}%
+\contentsline {subsection}{\numberline {3.5}Using Styles}{50}{subsection.3.5}%
+\contentsline {subsection}{\numberline {3.6}Node Size}{51}{subsection.3.6}%
+\contentsline {subsection}{\numberline {3.7}Naming Nodes}{51}{subsection.3.7}%
+\contentsline {subsection}{\numberline {3.8}Placing Nodes Using Relative Placement}{52}{subsection.3.8}%
+\contentsline {subsection}{\numberline {3.9}Adding Labels Next to Nodes}{52}{subsection.3.9}%
+\contentsline {subsection}{\numberline {3.10}Connecting Nodes}{54}{subsection.3.10}%
+\contentsline {subsection}{\numberline {3.11}Adding Labels Next to Lines}{56}{subsection.3.11}%
+\contentsline {subsection}{\numberline {3.12}Adding the Snaked Line and Multi-Line Text}{56}{subsection.3.12}%
+\contentsline {subsection}{\numberline {3.13}Using Layers: The Background Rectangles}{57}{subsection.3.13}%
+\contentsline {subsection}{\numberline {3.14}The Complete Code}{58}{subsection.3.14}%
+\contentsline {section}{\numberline {4}Tutorial: Euclid's Amber Version of the \emph {Elements}}{60}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Book I, Proposition I}{60}{subsection.4.1}%
+\contentsline {subsubsection}{\numberline {4.1.1}Setting up the Environment}{60}{subsubsection.4.1.1}%
+\contentsline {subsubsection}{\numberline {4.1.2}The Line \emph {AB}}{61}{subsubsection.4.1.2}%
+\contentsline {subsubsection}{\numberline {4.1.3}The Circle Around \emph {A}}{61}{subsubsection.4.1.3}%
+\contentsline {subsubsection}{\numberline {4.1.4}The Intersection of the Circles}{63}{subsubsection.4.1.4}%
+\contentsline {subsubsection}{\numberline {4.1.5}The Complete Code}{64}{subsubsection.4.1.5}%
+\contentsline {subsection}{\numberline {4.2}Book I, Proposition II}{65}{subsection.4.2}%
+\contentsline {subsubsection}{\numberline {4.2.1}Using Partway Calculations for the Construction of \emph {D}}{65}{subsubsection.4.2.1}%
+\contentsline {subsubsection}{\numberline {4.2.2}Intersecting a Line and a Circle}{66}{subsubsection.4.2.2}%
+\contentsline {subsubsection}{\numberline {4.2.3}The Complete Code}{67}{subsubsection.4.2.3}%
+\contentsline {section}{\numberline {5}Tutorial: Diagrams as Simple Graphs}{68}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Styling the Nodes}{68}{subsection.5.1}%
+\contentsline {subsection}{\numberline {5.2}Aligning the Nodes Using Positioning Options}{70}{subsection.5.2}%
+\contentsline {subsection}{\numberline {5.3}Aligning the Nodes Using Matrices}{72}{subsection.5.3}%
+\contentsline {subsection}{\numberline {5.4}The Diagram as a Graph}{73}{subsection.5.4}%
+\contentsline {subsubsection}{\numberline {5.4.1}Connecting Already Positioned Nodes}{73}{subsubsection.5.4.1}%
+\contentsline {subsubsection}{\numberline {5.4.2}Creating Nodes Using the Graph Command}{74}{subsubsection.5.4.2}%
+\contentsline {section}{\numberline {6}Tutorial: A Lecture Map for Johannes}{78}{section.6}%
+\contentsline {subsection}{\numberline {6.1}Problem Statement}{78}{subsection.6.1}%
+\contentsline {subsection}{\numberline {6.2}Introduction to Trees}{78}{subsection.6.2}%
+\contentsline {subsection}{\numberline {6.3}Creating the Lecture Map}{81}{subsection.6.3}%
+\contentsline {subsection}{\numberline {6.4}Adding the Lecture Annotations}{85}{subsection.6.4}%
+\contentsline {subsection}{\numberline {6.5}Adding the Background}{86}{subsection.6.5}%
+\contentsline {subsection}{\numberline {6.6}Adding the Calendar}{87}{subsection.6.6}%
+\contentsline {subsection}{\numberline {6.7}The Complete Code}{89}{subsection.6.7}%
+\contentsline {section}{\numberline {7}Guidelines on Graphics}{93}{section.7}%
+\contentsline {subsection}{\numberline {7.1}Planning the Time Needed for the Creation of Graphics}{93}{subsection.7.1}%
+\contentsline {subsection}{\numberline {7.2}Workflow for Creating a Graphic}{93}{subsection.7.2}%
+\contentsline {subsection}{\numberline {7.3}Linking Graphics With the Main Text}{94}{subsection.7.3}%
+\contentsline {subsection}{\numberline {7.4}Consistency Between Graphics and Text}{94}{subsection.7.4}%
+\contentsline {subsection}{\numberline {7.5}Labels in Graphics}{95}{subsection.7.5}%
+\contentsline {subsection}{\numberline {7.6}Plots and Charts}{95}{subsection.7.6}%
+\contentsline {subsection}{\numberline {7.7}Attention and Distraction}{98}{subsection.7.7}%
+\contentsline {part}{II\hspace {1em}Installation and Configuration}{100}{part.2}%
+\contentsline {section}{\numberline {8}Installation}{101}{section.8}%
+\contentsline {subsection}{\numberline {8.1}Package and Driver Versions}{101}{subsection.8.1}%
+\contentsline {subsection}{\numberline {8.2}Installing Prebundled Packages}{101}{subsection.8.2}%
+\contentsline {subsubsection}{\numberline {8.2.1}Debian}{101}{subsubsection.8.2.1}%
+\contentsline {subsubsection}{\numberline {8.2.2}MiKTeX}{102}{subsubsection.8.2.2}%
+\contentsline {subsection}{\numberline {8.3}Installation in a texmf Tree}{102}{subsection.8.3}%
+\contentsline {subsubsection}{\numberline {8.3.1}Installation that Keeps Everything Together}{102}{subsubsection.8.3.1}%
+\contentsline {subsubsection}{\numberline {8.3.2}Installation that is TDS-Compliant}{102}{subsubsection.8.3.2}%
+\contentsline {subsection}{\numberline {8.4}Updating the Installation}{102}{subsection.8.4}%
+\contentsline {section}{\numberline {9}Licenses and Copyright}{103}{section.9}%
+\contentsline {subsection}{\numberline {9.1}Which License Applies?}{103}{subsection.9.1}%
+\contentsline {subsection}{\numberline {9.2}The GNU Public License, Version 2}{103}{subsection.9.2}%
+\contentsline {subsubsection}{\numberline {9.2.1}Preamble}{103}{subsubsection.9.2.1}%
+\contentsline {subsubsection}{\numberline {9.2.2}Terms and Conditions For Copying, Distribution and Modification}{104}{subsubsection.9.2.2}%
+\contentsline {subsubsection}{\numberline {9.2.3}No Warranty}{106}{subsubsection.9.2.3}%
+\contentsline {subsection}{\numberline {9.3}The \LaTeX \ Project Public License, Version 1.3c 2006-05-20}{106}{subsection.9.3}%
+\contentsline {subsubsection}{\numberline {9.3.1}Preamble}{106}{subsubsection.9.3.1}%
+\contentsline {subsubsection}{\numberline {9.3.2}Definitions}{106}{subsubsection.9.3.2}%
+\contentsline {subsubsection}{\numberline {9.3.3}Conditions on Distribution and Modification}{107}{subsubsection.9.3.3}%
+\contentsline {subsubsection}{\numberline {9.3.4}No Warranty}{108}{subsubsection.9.3.4}%
+\contentsline {subsubsection}{\numberline {9.3.5}Maintenance of The Work}{109}{subsubsection.9.3.5}%
+\contentsline {subsubsection}{\numberline {9.3.6}Whether and How to Distribute Works under This License}{109}{subsubsection.9.3.6}%
+\contentsline {subsubsection}{\numberline {9.3.7}Choosing This License or Another License}{109}{subsubsection.9.3.7}%
+\contentsline {subsubsection}{\numberline {9.3.8}A Recommendation on Modification Without Distribution}{110}{subsubsection.9.3.8}%
+\contentsline {subsubsection}{\numberline {9.3.9}How to Use This License}{110}{subsubsection.9.3.9}%
+\contentsline {subsubsection}{\numberline {9.3.10}Derived Works That Are Not Replacements}{110}{subsubsection.9.3.10}%
+\contentsline {subsubsection}{\numberline {9.3.11}Important Recommendations}{110}{subsubsection.9.3.11}%
+\contentsline {paragraph}{Defining What Constitutes the Work}{110}{section*.2}%
+\contentsline {subsection}{\numberline {9.4}GNU Free Documentation License, Version 1.2, November 2002}{111}{subsection.9.4}%
+\contentsline {subsubsection}{\numberline {9.4.1}Preamble}{111}{subsubsection.9.4.1}%
+\contentsline {subsubsection}{\numberline {9.4.2}Applicability and definitions}{111}{subsubsection.9.4.2}%
+\contentsline {subsubsection}{\numberline {9.4.3}Verbatim Copying}{112}{subsubsection.9.4.3}%
+\contentsline {subsubsection}{\numberline {9.4.4}Copying in Quantity}{112}{subsubsection.9.4.4}%
+\contentsline {subsubsection}{\numberline {9.4.5}Modifications}{112}{subsubsection.9.4.5}%
+\contentsline {subsubsection}{\numberline {9.4.6}Combining Documents}{114}{subsubsection.9.4.6}%
+\contentsline {subsubsection}{\numberline {9.4.7}Collection of Documents}{114}{subsubsection.9.4.7}%
+\contentsline {subsubsection}{\numberline {9.4.8}Aggregating with independent Works}{114}{subsubsection.9.4.8}%
+\contentsline {subsubsection}{\numberline {9.4.9}Translation}{114}{subsubsection.9.4.9}%
+\contentsline {subsubsection}{\numberline {9.4.10}Termination}{114}{subsubsection.9.4.10}%
+\contentsline {subsubsection}{\numberline {9.4.11}Future Revisions of this License}{115}{subsubsection.9.4.11}%
+\contentsline {subsubsection}{\numberline {9.4.12}Addendum: How to use this License for your documents}{115}{subsubsection.9.4.12}%
+\contentsline {section}{\numberline {10}Supported Formats}{116}{section.10}%
+\contentsline {subsection}{\numberline {10.1}Supported Input Formats: \LaTeX , Plain \TeX , Con\TeX t}{116}{subsection.10.1}%
+\contentsline {subsubsection}{\numberline {10.1.1}Using the \LaTeX \ Format}{116}{subsubsection.10.1.1}%
+\contentsline {subsubsection}{\numberline {10.1.2}Using the Plain \TeX \ Format}{116}{subsubsection.10.1.2}%
+\contentsline {subsubsection}{\numberline {10.1.3}Using the Con\TeX t Format}{116}{subsubsection.10.1.3}%
+\contentsline {subsection}{\numberline {10.2}Supported Output Formats}{117}{subsection.10.2}%
+\contentsline {subsubsection}{\numberline {10.2.1}Selecting the Backend Driver}{117}{subsubsection.10.2.1}%
+\contentsline {subsubsection}{\numberline {10.2.2}Producing PDF Output}{117}{subsubsection.10.2.2}%
+\contentsline {subsubsection}{\numberline {10.2.3}Producing PostScript Output}{118}{subsubsection.10.2.3}%
+\contentsline {subsubsection}{\numberline {10.2.4}Producing SVG Output}{119}{subsubsection.10.2.4}%
+\contentsline {subsubsection}{\numberline {10.2.5}Producing Perfectly Portable DVI Output}{120}{subsubsection.10.2.5}%
+\contentsline {part}{III\hspace {1em}Ti\emph {k}Z ist \emph {kein} Zeichenprogramm}{121}{part.3}%
+\contentsline {section}{\numberline {11}Design Principles}{122}{section.11}%
+\contentsline {subsection}{\numberline {11.1}Special Syntax For Specifying Points}{122}{subsection.11.1}%
+\contentsline {subsection}{\numberline {11.2}Special Syntax For Path Specifications}{122}{subsection.11.2}%
+\contentsline {subsection}{\numberline {11.3}Actions on Paths}{123}{subsection.11.3}%
+\contentsline {subsection}{\numberline {11.4}Key--Value Syntax for Graphic Parameters}{123}{subsection.11.4}%
+\contentsline {subsection}{\numberline {11.5}Special Syntax for Specifying Nodes}{123}{subsection.11.5}%
+\contentsline {subsection}{\numberline {11.6}Special Syntax for Specifying Trees}{123}{subsection.11.6}%
+\contentsline {subsection}{\numberline {11.7}Special Syntax for Graphs}{124}{subsection.11.7}%
+\contentsline {subsection}{\numberline {11.8}Grouping of Graphic Parameters}{124}{subsection.11.8}%
+\contentsline {subsection}{\numberline {11.9}Coordinate Transformation System}{125}{subsection.11.9}%
+\contentsline {section}{\numberline {12}Hierarchical Structures: Package, Environments, Scopes, and Styles}{126}{section.12}%
+\contentsline {subsection}{\numberline {12.1}Loading the Package and the Libraries}{126}{subsection.12.1}%
+\contentsline {subsection}{\numberline {12.2}Creating a Picture}{126}{subsection.12.2}%
+\contentsline {subsubsection}{\numberline {12.2.1}Creating a Picture Using an Environment}{126}{subsubsection.12.2.1}%
+\contentsline {subsubsection}{\numberline {12.2.2}Creating a Picture Using a Command}{128}{subsubsection.12.2.2}%
+\contentsline {subsubsection}{\numberline {12.2.3}Handling Catcodes and the Babel Package}{128}{subsubsection.12.2.3}%
+\contentsline {subsubsection}{\numberline {12.2.4}Adding a Background}{129}{subsubsection.12.2.4}%
+\contentsline {subsection}{\numberline {12.3}Using Scopes to Structure a Picture}{129}{subsection.12.3}%
+\contentsline {subsubsection}{\numberline {12.3.1}The Scope Environment}{129}{subsubsection.12.3.1}%
+\contentsline {subsubsection}{\numberline {12.3.2}Shorthand for Scope Environments}{130}{subsubsection.12.3.2}%
+\contentsline {subsubsection}{\numberline {12.3.3}Single Command Scopes}{130}{subsubsection.12.3.3}%
+\contentsline {subsubsection}{\numberline {12.3.4}Using Scopes Inside Paths}{131}{subsubsection.12.3.4}%
+\contentsline {subsection}{\numberline {12.4}Using Graphic Options}{131}{subsection.12.4}%
+\contentsline {subsubsection}{\numberline {12.4.1}How Graphic Options Are Processed}{131}{subsubsection.12.4.1}%
+\contentsline {subsubsection}{\numberline {12.4.2}Using Styles to Manage How Pictures Look}{131}{subsubsection.12.4.2}%
+\contentsline {section}{\numberline {13}Specifying Coordinates}{133}{section.13}%
+\contentsline {subsection}{\numberline {13.1}Overview}{133}{subsection.13.1}%
+\contentsline {subsection}{\numberline {13.2}Coordinate Systems}{133}{subsection.13.2}%
+\contentsline {subsubsection}{\numberline {13.2.1}Canvas, XYZ, and Polar Coordinate Systems}{133}{subsubsection.13.2.1}%
+\contentsline {subsubsection}{\numberline {13.2.2}Barycentric Systems}{136}{subsubsection.13.2.2}%
+\contentsline {subsubsection}{\numberline {13.2.3}Node Coordinate System}{137}{subsubsection.13.2.3}%
+\contentsline {subsubsection}{\numberline {13.2.4}Tangent Coordinate Systems}{139}{subsubsection.13.2.4}%
+\contentsline {subsubsection}{\numberline {13.2.5}Defining New Coordinate Systems}{140}{subsubsection.13.2.5}%
+\contentsline {subsection}{\numberline {13.3}Coordinates at Intersections}{140}{subsection.13.3}%
+\contentsline {subsubsection}{\numberline {13.3.1}Intersections of Perpendicular Lines}{141}{subsubsection.13.3.1}%
+\contentsline {subsubsection}{\numberline {13.3.2}Intersections of Arbitrary Paths}{141}{subsubsection.13.3.2}%
+\contentsline {subsection}{\numberline {13.4}Relative and Incremental Coordinates}{143}{subsection.13.4}%
+\contentsline {subsubsection}{\numberline {13.4.1}Specifying Relative Coordinates}{143}{subsubsection.13.4.1}%
+\contentsline {subsubsection}{\numberline {13.4.2}Rotational Relative Coordinates}{144}{subsubsection.13.4.2}%
+\contentsline {subsubsection}{\numberline {13.4.3}Relative Coordinates and Scopes}{145}{subsubsection.13.4.3}%
+\contentsline {subsection}{\numberline {13.5}Coordinate Calculations}{145}{subsection.13.5}%
+\contentsline {subsubsection}{\numberline {13.5.1}The General Syntax}{146}{subsubsection.13.5.1}%
+\contentsline {subsubsection}{\numberline {13.5.2}The Syntax of Factors}{146}{subsubsection.13.5.2}%
+\contentsline {subsubsection}{\numberline {13.5.3}The Syntax of Partway Modifiers}{147}{subsubsection.13.5.3}%
+\contentsline {subsubsection}{\numberline {13.5.4}The Syntax of Distance Modifiers}{148}{subsubsection.13.5.4}%
+\contentsline {subsubsection}{\numberline {13.5.5}The Syntax of Projection Modifiers}{148}{subsubsection.13.5.5}%
+\contentsline {section}{\numberline {14}Syntax for Path Specifications}{150}{section.14}%
+\contentsline {subsection}{\numberline {14.1}The Move-To Operation}{152}{subsection.14.1}%
+\contentsline {subsection}{\numberline {14.2}The Line-To Operation}{152}{subsection.14.2}%
+\contentsline {subsubsection}{\numberline {14.2.1}Straight Lines}{152}{subsubsection.14.2.1}%
+\contentsline {subsubsection}{\numberline {14.2.2}Horizontal and Vertical Lines}{153}{subsubsection.14.2.2}%
+\contentsline {subsection}{\numberline {14.3}The Curve-To Operation}{153}{subsection.14.3}%
+\contentsline {subsection}{\numberline {14.4}The Rectangle Operation}{154}{subsection.14.4}%
+\contentsline {subsection}{\numberline {14.5}Rounding Corners}{154}{subsection.14.5}%
+\contentsline {subsection}{\numberline {14.6}The Circle and Ellipse Operations}{155}{subsection.14.6}%
+\contentsline {subsection}{\numberline {14.7}The Arc Operation}{156}{subsection.14.7}%
+\contentsline {subsection}{\numberline {14.8}The Grid Operation}{157}{subsection.14.8}%
+\contentsline {subsection}{\numberline {14.9}The Parabola Operation}{159}{subsection.14.9}%
+\contentsline {subsection}{\numberline {14.10}The Sine and Cosine Operation}{160}{subsection.14.10}%
+\contentsline {subsection}{\numberline {14.11}The SVG Operation}{161}{subsection.14.11}%
+\contentsline {subsection}{\numberline {14.12}The Plot Operation}{161}{subsection.14.12}%
+\contentsline {subsection}{\numberline {14.13}The To Path Operation}{161}{subsection.14.13}%
+\contentsline {subsection}{\numberline {14.14}The Foreach Operation}{164}{subsection.14.14}%
+\contentsline {subsection}{\numberline {14.15}The Let Operation}{165}{subsection.14.15}%
+\contentsline {subsection}{\numberline {14.16}The Scoping Operation}{166}{subsection.14.16}%
+\contentsline {subsection}{\numberline {14.17}The Node and Edge Operations}{166}{subsection.14.17}%
+\contentsline {subsection}{\numberline {14.18}The Graph Operation}{167}{subsection.14.18}%
+\contentsline {subsection}{\numberline {14.19}The Pic Operation}{167}{subsection.14.19}%
+\contentsline {subsection}{\numberline {14.20}The Attribute Animation Operation}{167}{subsection.14.20}%
+\contentsline {subsection}{\numberline {14.21}The PGF-Extra Operation}{167}{subsection.14.21}%
+\contentsline {subsection}{\numberline {14.22}Interacting with the Soft Path subsystem}{168}{subsection.14.22}%
+\contentsline {section}{\numberline {15}Actions on Paths}{169}{section.15}%
+\contentsline {subsection}{\numberline {15.1}Overview}{169}{subsection.15.1}%
+\contentsline {subsection}{\numberline {15.2}Specifying a Color}{170}{subsection.15.2}%
+\contentsline {subsection}{\numberline {15.3}Drawing a Path}{170}{subsection.15.3}%
+\contentsline {subsubsection}{\numberline {15.3.1}Graphic Parameters: Line Width, Line Cap, and Line Join}{171}{subsubsection.15.3.1}%
+\contentsline {subsubsection}{\numberline {15.3.2}Graphic Parameters: Dash Pattern}{172}{subsubsection.15.3.2}%
+\contentsline {subsubsection}{\numberline {15.3.3}Graphic Parameters: Draw Opacity}{174}{subsubsection.15.3.3}%
+\contentsline {subsubsection}{\numberline {15.3.4}Graphic Parameters: Double Lines and Bordered Lines}{175}{subsubsection.15.3.4}%
+\contentsline {subsection}{\numberline {15.4}Adding Arrow Tips to a Path}{176}{subsection.15.4}%
+\contentsline {subsection}{\numberline {15.5}Filling a Path}{176}{subsection.15.5}%
+\contentsline {subsubsection}{\numberline {15.5.1}Graphic Parameters: Fill Pattern}{177}{subsubsection.15.5.1}%
+\contentsline {subsubsection}{\numberline {15.5.2}Graphic Parameters: Interior Rules}{178}{subsubsection.15.5.2}%
+\contentsline {subsubsection}{\numberline {15.5.3}Graphic Parameters: Fill Opacity}{178}{subsubsection.15.5.3}%
+\contentsline {subsection}{\numberline {15.6}Generalized Filling: Using Arbitrary Pictures to Fill a Path}{178}{subsection.15.6}%
+\contentsline {subsection}{\numberline {15.7}Shading a Path}{180}{subsection.15.7}%
+\contentsline {subsection}{\numberline {15.8}Establishing a Bounding Box}{181}{subsection.15.8}%
+\contentsline {subsection}{\numberline {15.9}Clipping and Fading (Soft Clipping)}{183}{subsection.15.9}%
+\contentsline {subsection}{\numberline {15.10}Doing Multiple Actions on a Path}{184}{subsection.15.10}%
+\contentsline {subsection}{\numberline {15.11}Decorating and Morphing a Path}{186}{subsection.15.11}%
+\contentsline {section}{\numberline {16}Arrows}{187}{section.16}%
+\contentsline {subsection}{\numberline {16.1}Overview}{187}{subsection.16.1}%
+\contentsline {subsection}{\numberline {16.2}Where and When Arrow Tips Are Placed}{187}{subsection.16.2}%
+\contentsline {subsection}{\numberline {16.3}Arrow Keys: Configuring the Appearance of a Single Arrow Tip}{189}{subsection.16.3}%
+\contentsline {subsubsection}{\numberline {16.3.1}Size}{190}{subsubsection.16.3.1}%
+\contentsline {subsubsection}{\numberline {16.3.2}Scaling}{193}{subsubsection.16.3.2}%
+\contentsline {subsubsection}{\numberline {16.3.3}Arc Angles}{193}{subsubsection.16.3.3}%
+\contentsline {subsubsection}{\numberline {16.3.4}Slanting}{194}{subsubsection.16.3.4}%
+\contentsline {subsubsection}{\numberline {16.3.5}Reversing, Halving, Swapping}{194}{subsubsection.16.3.5}%
+\contentsline {subsubsection}{\numberline {16.3.6}Coloring}{195}{subsubsection.16.3.6}%
+\contentsline {subsubsection}{\numberline {16.3.7}Line Styling}{197}{subsubsection.16.3.7}%
+\contentsline {subsubsection}{\numberline {16.3.8}Bending and Flexing}{198}{subsubsection.16.3.8}%
+\contentsline {subsection}{\numberline {16.4}Arrow Tip Specifications}{203}{subsection.16.4}%
+\contentsline {subsubsection}{\numberline {16.4.1}Syntax}{203}{subsubsection.16.4.1}%
+\contentsline {subsubsection}{\numberline {16.4.2}Specifying Paddings}{204}{subsubsection.16.4.2}%
+\contentsline {subsubsection}{\numberline {16.4.3}Specifying the Line End}{205}{subsubsection.16.4.3}%
+\contentsline {subsubsection}{\numberline {16.4.4}Defining Shorthands}{205}{subsubsection.16.4.4}%
+\contentsline {subsubsection}{\numberline {16.4.5}Scoping of Arrow Keys}{207}{subsubsection.16.4.5}%
+\contentsline {subsection}{\numberline {16.5}Reference: Arrow Tips}{208}{subsection.16.5}%
+\contentsline {subsubsection}{\numberline {16.5.1}Barbed Arrow Tips}{210}{subsubsection.16.5.1}%
+\contentsline {subsubsection}{\numberline {16.5.2}Mathematical Barbed Arrow Tips}{212}{subsubsection.16.5.2}%
+\contentsline {subsubsection}{\numberline {16.5.3}Geometric Arrow Tips}{214}{subsubsection.16.5.3}%
+\contentsline {subsubsection}{\numberline {16.5.4}Caps}{217}{subsubsection.16.5.4}%
+\contentsline {subsubsection}{\numberline {16.5.5}Special Arrow Tips}{219}{subsubsection.16.5.5}%
+\contentsline {section}{\numberline {17}Nodes and Edges}{220}{section.17}%
+\contentsline {subsection}{\numberline {17.1}Overview}{220}{subsection.17.1}%
+\contentsline {subsection}{\numberline {17.2}Nodes and Their Shapes}{220}{subsection.17.2}%
+\contentsline {subsubsection}{\numberline {17.2.1}Syntax of the Node Command}{220}{subsubsection.17.2.1}%
+\contentsline {subsubsection}{\numberline {17.2.2}Predefined Shapes}{225}{subsubsection.17.2.2}%
+\contentsline {subsubsection}{\numberline {17.2.3}Common Options: Separations, Margins, Padding and Border Rotation}{225}{subsubsection.17.2.3}%
+\contentsline {subsection}{\numberline {17.3}Multi-Part Nodes}{228}{subsection.17.3}%
+\contentsline {subsection}{\numberline {17.4}The Node Text}{229}{subsection.17.4}%
+\contentsline {subsubsection}{\numberline {17.4.1}Text Parameters: Color and Opacity}{229}{subsubsection.17.4.1}%
+\contentsline {subsubsection}{\numberline {17.4.2}Text Parameters: Font}{229}{subsubsection.17.4.2}%
+\contentsline {subsubsection}{\numberline {17.4.3}Text Parameters: Alignment and Width for Multi-Line Text}{230}{subsubsection.17.4.3}%
+\contentsline {subsubsection}{\numberline {17.4.4}Text Parameters: Height and Depth of Text}{234}{subsubsection.17.4.4}%
+\contentsline {subsection}{\numberline {17.5}Positioning Nodes}{234}{subsection.17.5}%
+\contentsline {subsubsection}{\numberline {17.5.1}Positioning Nodes Using Anchors}{234}{subsubsection.17.5.1}%
+\contentsline {subsubsection}{\numberline {17.5.2}Basic Placement Options}{235}{subsubsection.17.5.2}%
+\contentsline {subsubsection}{\numberline {17.5.3}Advanced Placement Options}{236}{subsubsection.17.5.3}%
+\contentsline {subsubsection}{\numberline {17.5.4}Advanced Arrangements of Nodes}{240}{subsubsection.17.5.4}%
+\contentsline {subsection}{\numberline {17.6}Fitting Nodes to a Set of Coordinates}{241}{subsection.17.6}%
+\contentsline {subsection}{\numberline {17.7}Transformations}{241}{subsection.17.7}%
+\contentsline {subsection}{\numberline {17.8}Placing Nodes on a Line or Curve Explicitly}{242}{subsection.17.8}%
+\contentsline {subsection}{\numberline {17.9}Placing Nodes on a Line or Curve Implicitly}{246}{subsection.17.9}%
+\contentsline {subsection}{\numberline {17.10}The Label and Pin Options}{246}{subsection.17.10}%
+\contentsline {subsubsection}{\numberline {17.10.1}Overview}{246}{subsubsection.17.10.1}%
+\contentsline {subsubsection}{\numberline {17.10.2}The Label Option}{247}{subsubsection.17.10.2}%
+\contentsline {subsubsection}{\numberline {17.10.3}The Pin Option}{249}{subsubsection.17.10.3}%
+\contentsline {subsubsection}{\numberline {17.10.4}The Quotes Syntax}{250}{subsubsection.17.10.4}%
+\contentsline {subsection}{\numberline {17.11}Connecting Nodes: Using Nodes as Coordinates}{253}{subsection.17.11}%
+\contentsline {subsection}{\numberline {17.12}Connecting Nodes: Using the Edge Operation}{254}{subsection.17.12}%
+\contentsline {subsubsection}{\numberline {17.12.1}Basic Syntax of the Edge Operation}{254}{subsubsection.17.12.1}%
+\contentsline {subsubsection}{\numberline {17.12.2}Nodes on Edges: Quotes Syntax}{255}{subsubsection.17.12.2}%
+\contentsline {subsection}{\numberline {17.13}Referencing Nodes Outside the Current Picture}{256}{subsection.17.13}%
+\contentsline {subsubsection}{\numberline {17.13.1}Referencing a Node in a Different Picture}{256}{subsubsection.17.13.1}%
+\contentsline {subsubsection}{\numberline {17.13.2}Referencing the Current Page Node -- Absolute Positioning}{257}{subsubsection.17.13.2}%
+\contentsline {subsection}{\numberline {17.14}Late Code and Late Options}{257}{subsection.17.14}%
+\contentsline {section}{\numberline {18}Pics: Small Pictures on Paths}{259}{section.18}%
+\contentsline {subsection}{\numberline {18.1}Overview}{259}{subsection.18.1}%
+\contentsline {subsection}{\numberline {18.2}The Pic Syntax}{259}{subsection.18.2}%
+\contentsline {subsubsection}{\numberline {18.2.1}The Quotes Syntax}{263}{subsubsection.18.2.1}%
+\contentsline {subsection}{\numberline {18.3}Defining New Pic Types}{264}{subsection.18.3}%
+\contentsline {section}{\numberline {19}Specifying Graphs}{265}{section.19}%
+\contentsline {subsection}{\numberline {19.1}Overview}{265}{subsection.19.1}%
+\contentsline {subsection}{\numberline {19.2}Concepts}{266}{subsection.19.2}%
+\contentsline {subsubsection}{\numberline {19.2.1}Concept: Node Chains}{266}{subsubsection.19.2.1}%
+\contentsline {subsubsection}{\numberline {19.2.2}Concept: Chain Groups}{267}{subsubsection.19.2.2}%
+\contentsline {subsubsection}{\numberline {19.2.3}Concept: Edge Labels and Styles}{267}{subsubsection.19.2.3}%
+\contentsline {subsubsection}{\numberline {19.2.4}Concept: Node Sets}{268}{subsubsection.19.2.4}%
+\contentsline {subsubsection}{\numberline {19.2.5}Concept: Graph Macros}{269}{subsubsection.19.2.5}%
+\contentsline {subsubsection}{\numberline {19.2.6}Concept: Graph Expressions and Color Classes}{269}{subsubsection.19.2.6}%
+\contentsline {subsection}{\numberline {19.3}Syntax of the Graph Path Command}{270}{subsection.19.3}%
+\contentsline {subsubsection}{\numberline {19.3.1}The Graph Command}{270}{subsubsection.19.3.1}%
+\contentsline {subsubsection}{\numberline {19.3.2}Syntax of Group Specifications}{271}{subsubsection.19.3.2}%
+\contentsline {subsubsection}{\numberline {19.3.3}Syntax of Chain Specifications}{273}{subsubsection.19.3.3}%
+\contentsline {subsubsection}{\numberline {19.3.4}Syntax of Node Specifications}{275}{subsubsection.19.3.4}%
+\contentsline {subsubsection}{\numberline {19.3.5}Specifying Tries}{281}{subsubsection.19.3.5}%
+\contentsline {subsection}{\numberline {19.4}Quick Graphs}{281}{subsection.19.4}%
+\contentsline {subsection}{\numberline {19.5}Simple Versus Multi-Graphs}{283}{subsection.19.5}%
+\contentsline {subsection}{\numberline {19.6}Graph Edges: Labeling and Styling}{284}{subsection.19.6}%
+\contentsline {subsubsection}{\numberline {19.6.1}Options For All Edges Between Two Groups}{284}{subsubsection.19.6.1}%
+\contentsline {subsubsection}{\numberline {19.6.2}Changing Options For Certain Edges}{285}{subsubsection.19.6.2}%
+\contentsline {subsubsection}{\numberline {19.6.3}Options For Incoming and Outgoing Edges}{286}{subsubsection.19.6.3}%
+\contentsline {subsubsection}{\numberline {19.6.4}Special Syntax for Options For Incoming and Outgoing Edges}{287}{subsubsection.19.6.4}%
+\contentsline {subsubsection}{\numberline {19.6.5}Placing Node Texts on Incoming Edges}{288}{subsubsection.19.6.5}%
+\contentsline {subsection}{\numberline {19.7}Graph Operators, Color Classes, and Graph Expressions}{289}{subsection.19.7}%
+\contentsline {subsubsection}{\numberline {19.7.1}Color Classes}{289}{subsubsection.19.7.1}%
+\contentsline {subsubsection}{\numberline {19.7.2}Graph Operators on Groups of Nodes}{290}{subsubsection.19.7.2}%
+\contentsline {subsubsection}{\numberline {19.7.3}Graph Operators for Joining Groups}{293}{subsubsection.19.7.3}%
+\contentsline {subsection}{\numberline {19.8}Graph Macros}{295}{subsection.19.8}%
+\contentsline {subsection}{\numberline {19.9}Online Placement Strategies}{296}{subsection.19.9}%
+\contentsline {subsubsection}{\numberline {19.9.1}Manual Placement}{297}{subsubsection.19.9.1}%
+\contentsline {subsubsection}{\numberline {19.9.2}Placement on a Grid}{297}{subsubsection.19.9.2}%
+\contentsline {subsubsection}{\numberline {19.9.3}Placement Taking Node Sizes Into Account}{300}{subsubsection.19.9.3}%
+\contentsline {subsubsection}{\numberline {19.9.4}Placement On a Circle}{302}{subsubsection.19.9.4}%
+\contentsline {subsubsection}{\numberline {19.9.5}Levels and Level Styles}{304}{subsubsection.19.9.5}%
+\contentsline {subsubsection}{\numberline {19.9.6}Defining New Online Placement Strategies}{305}{subsubsection.19.9.6}%
+\contentsline {subsection}{\numberline {19.10}Reference: Predefined Elements}{308}{subsection.19.10}%
+\contentsline {subsubsection}{\numberline {19.10.1}Graph Macros}{308}{subsubsection.19.10.1}%
+\contentsline {subsubsection}{\numberline {19.10.2}Group Operators}{311}{subsubsection.19.10.2}%
+\contentsline {subsubsection}{\numberline {19.10.3}Joining Operators}{312}{subsubsection.19.10.3}%
+\contentsline {section}{\numberline {20}Matrices and Alignment}{315}{section.20}%
+\contentsline {subsection}{\numberline {20.1}Overview}{315}{subsection.20.1}%
+\contentsline {subsection}{\numberline {20.2}Matrices are Nodes}{315}{subsection.20.2}%
+\contentsline {subsection}{\numberline {20.3}Cell Pictures}{316}{subsection.20.3}%
+\contentsline {subsubsection}{\numberline {20.3.1}Alignment of Cell Pictures}{316}{subsubsection.20.3.1}%
+\contentsline {subsubsection}{\numberline {20.3.2}Setting and Adjusting Column and Row Spacing}{317}{subsubsection.20.3.2}%
+\contentsline {subsubsection}{\numberline {20.3.3}Cell Styles and Options}{319}{subsubsection.20.3.3}%
+\contentsline {subsection}{\numberline {20.4}Anchoring a Matrix}{323}{subsection.20.4}%
+\contentsline {subsection}{\numberline {20.5}Considerations Concerning Active Characters}{323}{subsection.20.5}%
+\contentsline {subsection}{\numberline {20.6}Examples}{324}{subsection.20.6}%
+\contentsline {section}{\numberline {21}Making Trees Grow}{328}{section.21}%
+\contentsline {subsection}{\numberline {21.1}Introduction to the Child Operation}{328}{subsection.21.1}%
+\contentsline {subsection}{\numberline {21.2}Child Paths and Child Nodes}{329}{subsection.21.2}%
+\contentsline {subsection}{\numberline {21.3}Naming Child Nodes}{330}{subsection.21.3}%
+\contentsline {subsection}{\numberline {21.4}Specifying Options for Trees and Children}{330}{subsection.21.4}%
+\contentsline {subsection}{\numberline {21.5}Placing Child Nodes}{332}{subsection.21.5}%
+\contentsline {subsubsection}{\numberline {21.5.1}Basic Idea}{332}{subsubsection.21.5.1}%
+\contentsline {subsubsection}{\numberline {21.5.2}Default Growth Function}{332}{subsubsection.21.5.2}%
+\contentsline {subsubsection}{\numberline {21.5.3}Missing Children}{335}{subsubsection.21.5.3}%
+\contentsline {subsubsection}{\numberline {21.5.4}Custom Growth Functions}{335}{subsubsection.21.5.4}%
+\contentsline {subsection}{\numberline {21.6}Edges From the Parent Node}{336}{subsection.21.6}%
+\contentsline {section}{\numberline {22}Plots of Functions}{339}{section.22}%
+\contentsline {subsection}{\numberline {22.1}Overview}{339}{subsection.22.1}%
+\contentsline {subsection}{\numberline {22.2}The Plot Path Operation}{339}{subsection.22.2}%
+\contentsline {subsection}{\numberline {22.3}Plotting Points Given Inline}{340}{subsection.22.3}%
+\contentsline {subsection}{\numberline {22.4}Plotting Points Read From an External File}{340}{subsection.22.4}%
+\contentsline {subsection}{\numberline {22.5}Plotting a Function}{341}{subsection.22.5}%
+\contentsline {subsection}{\numberline {22.6}Plotting a Function Using Gnuplot}{342}{subsection.22.6}%
+\contentsline {subsection}{\numberline {22.7}Placing Marks on the Plot}{344}{subsection.22.7}%
+\contentsline {subsection}{\numberline {22.8}Smooth Plots, Sharp Plots, Jump Plots, Comb Plots and Bar Plots}{346}{subsection.22.8}%
+\contentsline {section}{\numberline {23}Transparency}{351}{section.23}%
+\contentsline {subsection}{\numberline {23.1}Overview}{351}{subsection.23.1}%
+\contentsline {subsection}{\numberline {23.2}Specifying a Uniform Opacity}{351}{subsection.23.2}%
+\contentsline {subsection}{\numberline {23.3}Blend Modes}{353}{subsection.23.3}%
+\contentsline {subsection}{\numberline {23.4}Fadings}{356}{subsection.23.4}%
+\contentsline {subsubsection}{\numberline {23.4.1}Creating Fadings}{356}{subsubsection.23.4.1}%
+\contentsline {subsubsection}{\numberline {23.4.2}Fading a Path}{358}{subsubsection.23.4.2}%
+\contentsline {subsubsection}{\numberline {23.4.3}Fading a Scope}{360}{subsubsection.23.4.3}%
+\contentsline {subsection}{\numberline {23.5}Transparency Groups}{361}{subsection.23.5}%
+\contentsline {section}{\numberline {24}Decorated Paths}{363}{section.24}%
+\contentsline {subsection}{\numberline {24.1}Overview}{363}{subsection.24.1}%
+\contentsline {subsection}{\numberline {24.2}Decorating a Subpath Using the Decorate Path Command}{365}{subsection.24.2}%
+\contentsline {subsection}{\numberline {24.3}Decorating a Complete Path}{367}{subsection.24.3}%
+\contentsline {subsection}{\numberline {24.4}Adjusting Decorations}{368}{subsection.24.4}%
+\contentsline {subsubsection}{\numberline {24.4.1}Positioning Decorations Relative to the To-Be-Decorate Path}{368}{subsubsection.24.4.1}%
+\contentsline {subsubsection}{\numberline {24.4.2}Starting and Ending Decorations Early or Late}{369}{subsubsection.24.4.2}%
+\contentsline {section}{\numberline {25}Transformations}{371}{section.25}%
+\contentsline {subsection}{\numberline {25.1}The Different Coordinate Systems}{371}{subsection.25.1}%
+\contentsline {subsection}{\numberline {25.2}The XY- and XYZ-Coordinate Systems}{371}{subsection.25.2}%
+\contentsline {subsection}{\numberline {25.3}Coordinate Transformations}{372}{subsection.25.3}%
+\contentsline {subsection}{\numberline {25.4}Canvas Transformations}{376}{subsection.25.4}%
+\contentsline {section}{\numberline {26}Animations}{378}{section.26}%
+\contentsline {subsection}{\numberline {26.1}Introduction}{378}{subsection.26.1}%
+\contentsline {subsubsection}{\numberline {26.1.1}Animations Change Attributes}{379}{subsubsection.26.1.1}%
+\contentsline {subsubsection}{\numberline {26.1.2}Limitations of the Animation System}{379}{subsubsection.26.1.2}%
+\contentsline {subsubsection}{\numberline {26.1.3}Concepts: (Graphic) Objects}{379}{subsubsection.26.1.3}%
+\contentsline {subsubsection}{\numberline {26.1.4}Concepts: Attributes}{380}{subsubsection.26.1.4}%
+\contentsline {subsubsection}{\numberline {26.1.5}Concepts: Timelines}{380}{subsubsection.26.1.5}%
+\contentsline {subsection}{\numberline {26.2}Creating an Animation}{380}{subsection.26.2}%
+\contentsline {subsubsection}{\numberline {26.2.1}The Animate Key}{380}{subsubsection.26.2.1}%
+\contentsline {subsubsection}{\numberline {26.2.2}Timeline Entries}{381}{subsubsection.26.2.2}%
+\contentsline {subsubsection}{\numberline {26.2.3}Specifying Objects}{382}{subsubsection.26.2.3}%
+\contentsline {subsubsection}{\numberline {26.2.4}Specifying Attributes}{383}{subsubsection.26.2.4}%
+\contentsline {subsubsection}{\numberline {26.2.5}Specifying IDs}{383}{subsubsection.26.2.5}%
+\contentsline {subsubsection}{\numberline {26.2.6}Specifying Times}{384}{subsubsection.26.2.6}%
+\contentsline {subsubsection}{\numberline {26.2.7}Values}{386}{subsubsection.26.2.7}%
+\contentsline {subsubsection}{\numberline {26.2.8}Scopes}{386}{subsubsection.26.2.8}%
+\contentsline {subsection}{\numberline {26.3}Syntactic Simplifications}{387}{subsection.26.3}%
+\contentsline {subsubsection}{\numberline {26.3.1}The Colon Syntax I: Specifying Objects and Attributes}{387}{subsubsection.26.3.1}%
+\contentsline {subsubsection}{\numberline {26.3.2}The Colon Syntax II: Animating Myself}{388}{subsubsection.26.3.2}%
+\contentsline {subsubsection}{\numberline {26.3.3}The Time Syntax: Specifying Times}{389}{subsubsection.26.3.3}%
+\contentsline {subsubsection}{\numberline {26.3.4}The Quote Syntax: Specifying Values}{390}{subsubsection.26.3.4}%
+\contentsline {subsubsection}{\numberline {26.3.5}Timesheets}{390}{subsubsection.26.3.5}%
+\contentsline {subsection}{\numberline {26.4}The Attributes That Can Be Animated}{391}{subsection.26.4}%
+\contentsline {subsubsection}{\numberline {26.4.1}Animating Color, Opacity, and Visibility}{392}{subsubsection.26.4.1}%
+\contentsline {subsubsection}{\numberline {26.4.2}Animating Paths and their Rendering}{394}{subsubsection.26.4.2}%
+\contentsline {subsubsection}{\numberline {26.4.3}Animating Transformations: Relative Transformations}{396}{subsubsection.26.4.3}%
+\contentsline {subsubsection}{\numberline {26.4.4}Animating Transformations: Positioning}{400}{subsubsection.26.4.4}%
+\contentsline {subsubsection}{\numberline {26.4.5}Animating Transformations: Views}{401}{subsubsection.26.4.5}%
+\contentsline {subsection}{\numberline {26.5}Controlling the Timeline}{402}{subsection.26.5}%
+\contentsline {subsubsection}{\numberline {26.5.1}Before and After the Timeline: Value Filling}{402}{subsubsection.26.5.1}%
+\contentsline {subsubsection}{\numberline {26.5.2}Beginning and Ending Timelines}{403}{subsubsection.26.5.2}%
+\contentsline {subsubsection}{\numberline {26.5.3}Repeating Timelines and Accumulation}{407}{subsubsection.26.5.3}%
+\contentsline {subsubsection}{\numberline {26.5.4}Smoothing and Jumping Timelines}{408}{subsubsection.26.5.4}%
+\contentsline {subsection}{\numberline {26.6}Snapshots}{410}{subsection.26.6}%
+\contentsline {part}{IV\hspace {1em}Graph Drawing}{413}{part.4}%
+\contentsline {section}{\numberline {27}Introduction to Algorithmic Graph Drawing}{414}{section.27}%
+\contentsline {section}{\numberline {28}Using Graph Drawing in Ti\emph {k}Z}{415}{section.28}%
+\contentsline {section}{\numberline {29}Using Graph Drawing in PGF}{416}{section.29}%
+\contentsline {section}{\numberline {30}Graph Drawing Layouts: Trees}{417}{section.30}%
+\contentsline {section}{\numberline {31}Graph Drawing Algorithms: Layered Layouts}{418}{section.31}%
+\contentsline {section}{\numberline {32}Graph Drawing Algorithms: Force-Based Methods}{419}{section.32}%
+\contentsline {section}{\numberline {33}Graph Drawing Algorithms: Circular Layouts}{420}{section.33}%
+\contentsline {section}{\numberline {34}Graph Drawing Layouts: Phylogenetic Trees}{421}{section.34}%
+\contentsline {section}{\numberline {35}Graph Drawing Algorithms: Edge Routing}{422}{section.35}%
+\contentsline {section}{\numberline {36}The Algorithm Layer}{423}{section.36}%
+\contentsline {section}{\numberline {37}Writing Graph Drawing Algorithms in C}{424}{section.37}%
+\contentsline {section}{\numberline {38}The Display Layer}{425}{section.38}%
+\contentsline {section}{\numberline {39}The Binding Layer}{426}{section.39}%
+\contentsline {part}{V\hspace {1em}Libraries}{427}{part.5}%
+\contentsline {section}{\numberline {40}Three Dimensional Drawing Library}{428}{section.40}%
+\contentsline {subsection}{\numberline {40.1}Coordinate Systems}{428}{subsection.40.1}%
+\contentsline {subsection}{\numberline {40.2}Coordinate Planes}{428}{subsection.40.2}%
+\contentsline {subsubsection}{\numberline {40.2.1}Switching to an arbitrary plane}{429}{subsubsection.40.2.1}%
+\contentsline {subsubsection}{\numberline {40.2.2}Predefined planes}{429}{subsubsection.40.2.2}%
+\contentsline {subsection}{\numberline {40.3}Examples}{430}{subsection.40.3}%
+\contentsline {section}{\numberline {41}Angle Library}{432}{section.41}%
+\contentsline {section}{\numberline {42}Arrow Tip Library}{434}{section.42}%
+\contentsline {section}{\numberline {43}Automata Drawing Library}{435}{section.43}%
+\contentsline {subsection}{\numberline {43.1}Drawing Automata}{435}{subsection.43.1}%
+\contentsline {subsection}{\numberline {43.2}States With and Without Output}{436}{subsection.43.2}%
+\contentsline {subsection}{\numberline {43.3}Initial and Accepting States}{436}{subsection.43.3}%
+\contentsline {subsection}{\numberline {43.4}Examples}{438}{subsection.43.4}%
+\contentsline {section}{\numberline {44}Babel Library}{440}{section.44}%
+\contentsline {section}{\numberline {45}Background Library}{441}{section.45}%
+\contentsline {section}{\numberline {46}Calc Library}{445}{section.46}%
+\contentsline {section}{\numberline {47}Calendar Library}{446}{section.47}%
+\contentsline {subsection}{\numberline {47.1}Calendar Command}{446}{subsection.47.1}%
+\contentsline {subsubsection}{\numberline {47.1.1}Creating a Simple List of Days}{453}{subsubsection.47.1.1}%
+\contentsline {subsubsection}{\numberline {47.1.2}Adding a Month Label}{453}{subsubsection.47.1.2}%
+\contentsline {subsubsection}{\numberline {47.1.3}Creating a Week List Arrangement}{453}{subsubsection.47.1.3}%
+\contentsline {subsubsection}{\numberline {47.1.4}Creating a Month List Arrangement}{454}{subsubsection.47.1.4}%
+\contentsline {subsection}{\numberline {47.2}Arrangements}{454}{subsection.47.2}%
+\contentsline {subsection}{\numberline {47.3}Month Labels}{457}{subsection.47.3}%
+\contentsline {subsection}{\numberline {47.4}Examples}{459}{subsection.47.4}%
+\contentsline {section}{\numberline {48}Chains}{464}{section.48}%
+\contentsline {subsection}{\numberline {48.1}Overview}{464}{subsection.48.1}%
+\contentsline {subsection}{\numberline {48.2}Starting and Continuing a Chain}{464}{subsection.48.2}%
+\contentsline {subsection}{\numberline {48.3}Nodes on a Chain}{466}{subsection.48.3}%
+\contentsline {subsection}{\numberline {48.4}Joining Nodes on a Chain}{468}{subsection.48.4}%
+\contentsline {subsection}{\numberline {48.5}Branches}{469}{subsection.48.5}%
+\contentsline {section}{\numberline {49}Circuit Libraries}{471}{section.49}%
+\contentsline {subsection}{\numberline {49.1}Introduction}{471}{subsection.49.1}%
+\contentsline {subsubsection}{\numberline {49.1.1}A First Example}{471}{subsubsection.49.1.1}%
+\contentsline {subsubsection}{\numberline {49.1.2}Symbols}{472}{subsubsection.49.1.2}%
+\contentsline {subsubsection}{\numberline {49.1.3}Symbol Graphics}{472}{subsubsection.49.1.3}%
+\contentsline {subsubsection}{\numberline {49.1.4}Annotations}{473}{subsubsection.49.1.4}%
+\contentsline {subsection}{\numberline {49.2}The Base Circuit Library}{473}{subsection.49.2}%
+\contentsline {subsubsection}{\numberline {49.2.1}Symbol Size}{474}{subsubsection.49.2.1}%
+\contentsline {subsubsection}{\numberline {49.2.2}Declaring New Symbols}{474}{subsubsection.49.2.2}%
+\contentsline {subsubsection}{\numberline {49.2.3}Pointing Symbols in the Right Direction}{476}{subsubsection.49.2.3}%
+\contentsline {subsubsection}{\numberline {49.2.4}Info Labels}{477}{subsubsection.49.2.4}%
+\contentsline {subsubsection}{\numberline {49.2.5}Declaring and Using Annotations}{478}{subsubsection.49.2.5}%
+\contentsline {subsubsection}{\numberline {49.2.6}Theming Symbols}{479}{subsubsection.49.2.6}%
+\contentsline {subsection}{\numberline {49.3}Logical Circuits}{481}{subsection.49.3}%
+\contentsline {subsubsection}{\numberline {49.3.1}Overview}{481}{subsubsection.49.3.1}%
+\contentsline {subsubsection}{\numberline {49.3.2}Symbols: The Gates}{484}{subsubsection.49.3.2}%
+\contentsline {subsubsection}{\numberline {49.3.3}Implementation: The Logic Gates Shape Library}{484}{subsubsection.49.3.3}%
+\contentsline {subsubsection}{\numberline {49.3.4}Implementation: The US-Style Logic Gates Shape Library}{486}{subsubsection.49.3.4}%
+\contentsline {subsubsection}{\numberline {49.3.5}Implementation: The IEC-Style Logic Gates Shape Library}{487}{subsubsection.49.3.5}%
+\contentsline {subsection}{\numberline {49.4}Electrical Engineering Circuits}{489}{subsection.49.4}%
+\contentsline {subsubsection}{\numberline {49.4.1}Overview}{489}{subsubsection.49.4.1}%
+\contentsline {subsubsection}{\numberline {49.4.2}Symbols: Indicating Current Directions}{493}{subsubsection.49.4.2}%
+\contentsline {subsubsection}{\numberline {49.4.3}Symbols: Basic Elements}{493}{subsubsection.49.4.3}%
+\contentsline {subsubsection}{\numberline {49.4.4}Symbols: Diodes}{493}{subsubsection.49.4.4}%
+\contentsline {subsubsection}{\numberline {49.4.5}Symbols: Contacts}{493}{subsubsection.49.4.5}%
+\contentsline {subsubsection}{\numberline {49.4.6}Symbols: Measurement devices}{493}{subsubsection.49.4.6}%
+\contentsline {subsubsection}{\numberline {49.4.7}Units}{494}{subsubsection.49.4.7}%
+\contentsline {subsubsection}{\numberline {49.4.8}Annotations}{494}{subsubsection.49.4.8}%
+\contentsline {subsubsection}{\numberline {49.4.9}Implementation: The EE-Symbols Shape Library}{494}{subsubsection.49.4.9}%
+\contentsline {subsubsection}{\numberline {49.4.10}Implementation: The IEC-Style EE-Symbols Shape Library}{496}{subsubsection.49.4.10}%
+\contentsline {section}{\numberline {50}Decoration Library}{501}{section.50}%
+\contentsline {subsection}{\numberline {50.1}Overview and Common Options}{501}{subsection.50.1}%
+\contentsline {subsection}{\numberline {50.2}Handling ``Dimension too large'' errors}{502}{subsection.50.2}%
+\contentsline {subsection}{\numberline {50.3}Path Morphing Decorations}{502}{subsection.50.3}%
+\contentsline {subsubsection}{\numberline {50.3.1}Decorations Producing Straight Line Paths}{502}{subsubsection.50.3.1}%
+\contentsline {subsubsection}{\numberline {50.3.2}Decorations Producing Curved Line Paths}{504}{subsubsection.50.3.2}%
+\contentsline {subsection}{\numberline {50.4}Path Replacing Decorations}{505}{subsection.50.4}%
+\contentsline {subsection}{\numberline {50.5}Marking Decorations}{508}{subsection.50.5}%
+\contentsline {subsubsection}{\numberline {50.5.1}Overview}{508}{subsubsection.50.5.1}%
+\contentsline {subsection}{\numberline {50.6}Arbitrary Markings}{508}{subsection.50.6}%
+\contentsline {subsubsection}{\numberline {50.6.1}Arrow Tip Markings}{513}{subsubsection.50.6.1}%
+\contentsline {subsubsection}{\numberline {50.6.2}Footprint Markings}{513}{subsubsection.50.6.2}%
+\contentsline {subsubsection}{\numberline {50.6.3}Shape Background Markings}{514}{subsubsection.50.6.3}%
+\contentsline {subsection}{\numberline {50.7}Text Decorations}{518}{subsection.50.7}%
+\contentsline {subsection}{\numberline {50.8}Fractal Decorations}{528}{subsection.50.8}%
+\contentsline {section}{\numberline {51}Entity-Relationship Diagram Drawing Library}{531}{section.51}%
+\contentsline {subsection}{\numberline {51.1}Entities}{531}{subsection.51.1}%
+\contentsline {subsection}{\numberline {51.2}Relationships}{531}{subsection.51.2}%
+\contentsline {subsection}{\numberline {51.3}Attributes}{532}{subsection.51.3}%
+\contentsline {section}{\numberline {52}Externalization Library}{533}{section.52}%
+\contentsline {subsection}{\numberline {52.1}Overview}{533}{subsection.52.1}%
+\contentsline {subsection}{\numberline {52.2}Requirements}{533}{subsection.52.2}%
+\contentsline {subsection}{\numberline {52.3}A Word About Con\TeX t And Plain \TeX }{533}{subsection.52.3}%
+\contentsline {subsection}{\numberline {52.4}Externalizing Graphics}{533}{subsection.52.4}%
+\contentsline {subsubsection}{\numberline {52.4.1}Support for Labels and References In External Files}{535}{subsubsection.52.4.1}%
+\contentsline {paragraph}{NOTE:}{535}{section*.3}%
+\contentsline {subsubsection}{\numberline {52.4.2}Customizing the Generated File Names}{536}{subsubsection.52.4.2}%
+\contentsline {subsubsection}{\numberline {52.4.3}Remaking Figures or Skipping Figures}{537}{subsubsection.52.4.3}%
+\contentsline {paragraph}{Limitations:}{538}{section*.4}%
+\contentsline {paragraph}{Attention:}{539}{section*.5}%
+\contentsline {subsubsection}{\numberline {52.4.4}Customizing the Externalization}{540}{subsubsection.52.4.4}%
+\contentsline {subsubsection}{\numberline {52.4.5}Details About The Process}{543}{subsubsection.52.4.5}%
+\contentsline {subsection}{\numberline {52.5}Using External Graphics Without \textmd {\textsc {pgf}}\ Installed}{544}{subsection.52.5}%
+\contentsline {paragraph}{Attention:}{544}{section*.6}%
+\contentsline {paragraph}{Remark:}{544}{section*.7}%
+\contentsline {subsection}{\numberline {52.6}{\def \textunderscore {\char `\_}\def \textbraceleft {\char `\{}\def \textbraceright {\char `\}}\texttt {eps}} Graphics Export}{544}{subsection.52.6}%
+\contentsline {subsection}{\numberline {52.7}Bitmap Graphics Export}{545}{subsection.52.7}%
+\contentsline {subsection}{\numberline {52.8}Compatibility Issues}{545}{subsection.52.8}%
+\contentsline {subsubsection}{\numberline {52.8.1}References In External Pictures}{545}{subsubsection.52.8.1}%
+\contentsline {subsubsection}{\numberline {52.8.2}Compatibility With Other Libraries or Packages}{546}{subsubsection.52.8.2}%
+\contentsline {subsubsection}{\numberline {52.8.3}Compatibility With Bounding Box Restrictions}{546}{subsubsection.52.8.3}%
+\contentsline {subsubsection}{\numberline {52.8.4}Interoperability With The Basic Layer Externalization}{546}{subsubsection.52.8.4}%
+\contentsline {section}{\numberline {53}Fading Library}{547}{section.53}%
+\contentsline {section}{\numberline {54}Fitting Library}{548}{section.54}%
+\contentsline {section}{\numberline {55}Fixed Point Arithmetic Library}{551}{section.55}%
+\contentsline {subsection}{\numberline {55.1}Overview}{551}{subsection.55.1}%
+\contentsline {subsection}{\numberline {55.2}Using Fixed Point Arithmetic in PGF and Ti\emph {k}Z}{551}{subsection.55.2}%
+\contentsline {section}{\numberline {56}Floating Point Unit Library}{553}{section.56}%
+\contentsline {subsection}{\numberline {56.1}Overview}{553}{subsection.56.1}%
+\contentsline {subsection}{\numberline {56.2}Usage}{553}{subsection.56.2}%
+\contentsline {subsection}{\numberline {56.3}Comparison to the fixed point arithmetic library}{554}{subsection.56.3}%
+\contentsline {subsection}{\numberline {56.4}Command Reference and Programmer's Manual}{555}{subsection.56.4}%
+\contentsline {subsubsection}{\numberline {56.4.1}Creating and Converting Floats}{555}{subsubsection.56.4.1}%
+\contentsline {subsubsection}{\numberline {56.4.2}Symbolic Rounding Operations}{558}{subsubsection.56.4.2}%
+\contentsline {subsubsection}{\numberline {56.4.3}Math Operations Commands}{559}{subsubsection.56.4.3}%
+\contentsline {subsubsection}{\numberline {56.4.4}Accessing the Original Math Routines for Programmers}{561}{subsubsection.56.4.4}%
+\contentsline {section}{\numberline {57}Lindenmayer System Drawing Library}{562}{section.57}%
+\contentsline {subsection}{\numberline {57.1}Overview}{562}{subsection.57.1}%
+\contentsline {subsubsection}{\numberline {57.1.1}Declaring L-systems}{562}{subsubsection.57.1.1}%
+\contentsline {subsection}{\numberline {57.2}Using Lindenmayer Systems}{564}{subsection.57.2}%
+\contentsline {subsubsection}{\numberline {57.2.1}Using L-Systems in PGF}{564}{subsubsection.57.2.1}%
+\contentsline {subsubsection}{\numberline {57.2.2}Using L-Systems in Ti\emph {k}Z}{565}{subsubsection.57.2.2}%
+\contentsline {section}{\numberline {58}Math Library}{567}{section.58}%
+\contentsline {subsection}{\numberline {58.1}Overview}{567}{subsection.58.1}%
+\contentsline {subsection}{\numberline {58.2}Assignment}{568}{subsection.58.2}%
+\contentsline {subsection}{\numberline {58.3}Integers, ``Real'' Numbers, and Coordinates}{569}{subsection.58.3}%
+\contentsline {subsection}{\numberline {58.4}Repeating Things}{570}{subsection.58.4}%
+\contentsline {subsection}{\numberline {58.5}Branching Statements}{571}{subsection.58.5}%
+\contentsline {subsection}{\numberline {58.6}Declaring Functions}{571}{subsection.58.6}%
+\contentsline {subsection}{\numberline {58.7}Executing Code Outside the Parser}{572}{subsection.58.7}%
+\contentsline {section}{\numberline {59}Matrix Library}{573}{section.59}%
+\contentsline {subsection}{\numberline {59.1}Matrices of Nodes}{573}{subsection.59.1}%
+\contentsline {subsection}{\numberline {59.2}End-of-Lines and End-of-Row Characters in Matrices of Nodes}{574}{subsection.59.2}%
+\contentsline {subsection}{\numberline {59.3}Delimiters}{575}{subsection.59.3}%
+\contentsline {section}{\numberline {60}Mindmap Drawing Library}{577}{section.60}%
+\contentsline {subsection}{\numberline {60.1}Overview}{577}{subsection.60.1}%
+\contentsline {subsection}{\numberline {60.2}The Mindmap Style}{577}{subsection.60.2}%
+\contentsline {paragraph}{Remark:}{578}{section*.8}%
+\contentsline {subsection}{\numberline {60.3}Concepts Nodes}{578}{subsection.60.3}%
+\contentsline {subsubsection}{\numberline {60.3.1}Isolated Concepts}{578}{subsubsection.60.3.1}%
+\contentsline {subsubsection}{\numberline {60.3.2}Concepts in Trees}{579}{subsubsection.60.3.2}%
+\contentsline {subsection}{\numberline {60.4}Connecting Concepts}{581}{subsection.60.4}%
+\contentsline {subsubsection}{\numberline {60.4.1}Simple Connections}{581}{subsubsection.60.4.1}%
+\contentsline {subsubsection}{\numberline {60.4.2}The Circle Connection Bar Decoration}{582}{subsubsection.60.4.2}%
+\contentsline {subsubsection}{\numberline {60.4.3}The Circle Connection Bar To-Path}{583}{subsubsection.60.4.3}%
+\contentsline {subsubsection}{\numberline {60.4.4}Tree Edges}{584}{subsubsection.60.4.4}%
+\contentsline {subsection}{\numberline {60.5}Adding Annotations}{585}{subsection.60.5}%
+\contentsline {section}{\numberline {61}Paper-Folding Diagrams Library}{587}{section.61}%
+\contentsline {section}{\numberline {62}Pattern Library}{594}{section.62}%
+\contentsline {subsection}{\numberline {62.1}Form-Only Patterns}{594}{subsection.62.1}%
+\contentsline {subsection}{\numberline {62.2}Inherently Colored Patterns}{594}{subsection.62.2}%
+\contentsline {subsection}{\numberline {62.3}User-Defined Patterns}{595}{subsection.62.3}%
+\contentsline {section}{\numberline {63}Three Point Perspective Drawing Library}{602}{section.63}%
+\contentsline {subsection}{\numberline {63.1}Coordinate Systems}{602}{subsection.63.1}%
+\contentsline {subsection}{\numberline {63.2}Setting the view}{602}{subsection.63.2}%
+\contentsline {subsection}{\numberline {63.3}Defining the perspective}{603}{subsection.63.3}%
+\contentsline {subsection}{\numberline {63.4}Shortcomings}{605}{subsection.63.4}%
+\contentsline {subsection}{\numberline {63.5}Examples}{605}{subsection.63.5}%
+\contentsline {section}{\numberline {64}Petri-Net Drawing Library}{608}{section.64}%
+\contentsline {subsection}{\numberline {64.1}Places}{608}{subsection.64.1}%
+\contentsline {subsection}{\numberline {64.2}Transitions}{608}{subsection.64.2}%
+\contentsline {subsection}{\numberline {64.3}Tokens}{609}{subsection.64.3}%
+\contentsline {subsection}{\numberline {64.4}Examples}{611}{subsection.64.4}%
+\contentsline {section}{\numberline {65}Plot Handler Library}{613}{section.65}%
+\contentsline {subsection}{\numberline {65.1}Curve Plot Handlers}{613}{subsection.65.1}%
+\contentsline {subsection}{\numberline {65.2}Constant Plot Handlers}{614}{subsection.65.2}%
+\contentsline {subsection}{\numberline {65.3}Comb Plot Handlers}{615}{subsection.65.3}%
+\contentsline {subsection}{\numberline {65.4}Bar Plot Handlers}{616}{subsection.65.4}%
+\contentsline {subsection}{\numberline {65.5}Gapped Plot Handlers}{619}{subsection.65.5}%
+\contentsline {subsection}{\numberline {65.6}Mark Plot Handler}{619}{subsection.65.6}%
+\contentsline {section}{\numberline {66}Plot Mark Library}{622}{section.66}%
+\contentsline {section}{\numberline {67}Profiler Library}{624}{section.67}%
+\contentsline {subsection}{\numberline {67.1}Overview}{624}{subsection.67.1}%
+\contentsline {subsection}{\numberline {67.2}Requirements}{624}{subsection.67.2}%
+\contentsline {subsection}{\numberline {67.3}Defining Profiler Entries}{624}{subsection.67.3}%
+\contentsline {section}{\numberline {68}Resource Description Framework Library}{627}{section.68}%
+\contentsline {subsection}{\numberline {68.1}Starting the RDF Engine}{627}{subsection.68.1}%
+\contentsline {subsection}{\numberline {68.2}Creating Statements}{628}{subsection.68.2}%
+\contentsline {subsection}{\numberline {68.3}Creating Resources}{630}{subsection.68.3}%
+\contentsline {subsection}{\numberline {68.4}Creating Containers}{631}{subsection.68.4}%
+\contentsline {subsection}{\numberline {68.5}Creating Semantic Information Inside Styles and Libraries}{633}{subsection.68.5}%
+\contentsline {subsubsection}{\numberline {68.5.1}An Example Library for Drawing Finite Automata}{633}{subsubsection.68.5.1}%
+\contentsline {subsubsection}{\numberline {68.5.2}Adding Semantic Information About the Automata as a Whole}{633}{subsubsection.68.5.2}%
+\contentsline {subsubsection}{\numberline {68.5.3}Adding Semantic Information About the States}{634}{subsubsection.68.5.3}%
+\contentsline {subsubsection}{\numberline {68.5.4}Adding Semantic Information About the Transitions}{635}{subsubsection.68.5.4}%
+\contentsline {subsubsection}{\numberline {68.5.5}Using Containers}{635}{subsubsection.68.5.5}%
+\contentsline {subsubsection}{\numberline {68.5.6}The Resulting RDF Graph}{636}{subsubsection.68.5.6}%
+\contentsline {section}{\numberline {69}Shadings Library}{640}{section.69}%
+\contentsline {section}{\numberline {70}Shadows Library}{644}{section.70}%
+\contentsline {subsection}{\numberline {70.1}Overview}{644}{subsection.70.1}%
+\contentsline {subsection}{\numberline {70.2}The General Shadow Option}{644}{subsection.70.2}%
+\contentsline {subsection}{\numberline {70.3}Shadows for Arbitrary Paths and Shapes}{645}{subsection.70.3}%
+\contentsline {subsubsection}{\numberline {70.3.1}Drop Shadows}{645}{subsubsection.70.3.1}%
+\contentsline {subsubsection}{\numberline {70.3.2}Copy Shadows}{645}{subsubsection.70.3.2}%
+\contentsline {subsection}{\numberline {70.4}Shadows for Special Paths and Nodes}{646}{subsection.70.4}%
+\contentsline {section}{\numberline {71}Shape Library}{649}{section.71}%
+\contentsline {subsection}{\numberline {71.1}Overview}{649}{subsection.71.1}%
+\contentsline {subsection}{\numberline {71.2}Predefined Shapes}{649}{subsection.71.2}%
+\contentsline {subsection}{\numberline {71.3}Geometric Shapes}{650}{subsection.71.3}%
+\contentsline {subsection}{\numberline {71.4}Symbol Shapes}{665}{subsection.71.4}%
+\contentsline {subsection}{\numberline {71.5}Arrow Shapes}{673}{subsection.71.5}%
+\contentsline {subsection}{\numberline {71.6}Shapes with Multiple Text Parts}{680}{subsection.71.6}%
+\contentsline {subsection}{\numberline {71.7}Callout Shapes}{687}{subsection.71.7}%
+\contentsline {subsection}{\numberline {71.8}Miscellaneous Shapes}{691}{subsection.71.8}%
+\contentsline {section}{\numberline {72}Spy Library: Magnifying Parts of Pictures}{696}{section.72}%
+\contentsline {subsection}{\numberline {72.1}Magnifying a Part of a Picture}{696}{subsection.72.1}%
+\contentsline {subsection}{\numberline {72.2}Spy Scopes}{697}{subsection.72.2}%
+\contentsline {subsection}{\numberline {72.3}The Spy Command}{697}{subsection.72.3}%
+\contentsline {subsection}{\numberline {72.4}Predefined Spy Styles}{699}{subsection.72.4}%
+\contentsline {subsection}{\numberline {72.5}Examples}{700}{subsection.72.5}%
+\contentsline {section}{\numberline {73}SVG-Path Library}{702}{section.73}%
+\contentsline {section}{\numberline {74}To Path Library}{703}{section.74}%
+\contentsline {subsection}{\numberline {74.1}Straight Lines}{703}{subsection.74.1}%
+\contentsline {subsection}{\numberline {74.2}Move-Tos}{703}{subsection.74.2}%
+\contentsline {subsection}{\numberline {74.3}Curves}{703}{subsection.74.3}%
+\contentsline {subsection}{\numberline {74.4}Loops}{706}{subsection.74.4}%
+\contentsline {section}{\numberline {75}Through Library}{708}{section.75}%
+\contentsline {section}{\numberline {76}Tree Library}{709}{section.76}%
+\contentsline {subsection}{\numberline {76.1}Growth Functions}{709}{subsection.76.1}%
+\contentsline {subsection}{\numberline {76.2}Edges From Parent}{711}{subsection.76.2}%
+\contentsline {section}{\numberline {77}Turtle Graphics Library}{712}{section.77}%
+\contentsline {section}{\numberline {78}Views Library}{714}{section.78}%
+\contentsline {part}{VI\hspace {1em}Data Visualization}{716}{part.6}%
+\contentsline {section}{\numberline {79}Introduction to Data Visualization}{717}{section.79}%
+\contentsline {subsection}{\numberline {79.1}Concept: Data Points}{717}{subsection.79.1}%
+\contentsline {subsection}{\numberline {79.2}Concept: Visualization Pipeline}{717}{subsection.79.2}%
+\contentsline {section}{\numberline {80}Creating Data Visualizations}{719}{section.80}%
+\contentsline {subsection}{\numberline {80.1}Overview}{719}{subsection.80.1}%
+\contentsline {subsection}{\numberline {80.2}Concept: Data Points and Data Formats}{719}{subsection.80.2}%
+\contentsline {subsection}{\numberline {80.3}Concept: Axes, Ticks, and Grids}{720}{subsection.80.3}%
+\contentsline {subsection}{\numberline {80.4}Concept: Visualizers}{721}{subsection.80.4}%
+\contentsline {subsection}{\numberline {80.5}Concept: Style Sheets and Legends}{721}{subsection.80.5}%
+\contentsline {subsection}{\numberline {80.6}Usage}{722}{subsection.80.6}%
+\contentsline {subsection}{\numberline {80.7}Advanced: Executing User Code During a Data Visualization}{727}{subsection.80.7}%
+\contentsline {subsection}{\numberline {80.8}Advanced: Creating New Objects}{727}{subsection.80.8}%
+\contentsline {section}{\numberline {81}Providing Data for a Data Visualization}{729}{section.81}%
+\contentsline {subsection}{\numberline {81.1}Overview}{729}{subsection.81.1}%
+\contentsline {subsection}{\numberline {81.2}Concepts}{729}{subsection.81.2}%
+\contentsline {subsection}{\numberline {81.3}Reference: Built-In Formats}{729}{subsection.81.3}%
+\contentsline {subsection}{\numberline {81.4}Reference: Advanced Formats}{731}{subsection.81.4}%
+\contentsline {subsection}{\numberline {81.5}Advanced: The Data Parsing Process}{733}{subsection.81.5}%
+\contentsline {subsection}{\numberline {81.6}Advanced: Defining New Formats}{735}{subsection.81.6}%
+\contentsline {section}{\numberline {82}Axes}{737}{section.82}%
+\contentsline {subsection}{\numberline {82.1}Overview}{737}{subsection.82.1}%
+\contentsline {subsection}{\numberline {82.2}Basic Configuration of Axes}{737}{subsection.82.2}%
+\contentsline {subsubsection}{\numberline {82.2.1}Usage}{737}{subsubsection.82.2.1}%
+\contentsline {subsubsection}{\numberline {82.2.2}The Axis Attribute}{738}{subsubsection.82.2.2}%
+\contentsline {subsubsection}{\numberline {82.2.3}The Axis Attribute Range Interval}{739}{subsubsection.82.2.3}%
+\contentsline {subsubsection}{\numberline {82.2.4}Scaling: The General Mechanism}{740}{subsubsection.82.2.4}%
+\contentsline {subsubsection}{\numberline {82.2.5}Scaling: Logarithmic Axes}{742}{subsubsection.82.2.5}%
+\contentsline {subsubsection}{\numberline {82.2.6}Scaling: Setting the Length or Unit Length}{743}{subsubsection.82.2.6}%
+\contentsline {subsubsection}{\numberline {82.2.7}Axis Label}{744}{subsubsection.82.2.7}%
+\contentsline {subsubsection}{\numberline {82.2.8}Reference: Axis Types}{745}{subsubsection.82.2.8}%
+\contentsline {subsection}{\numberline {82.3}Axis Systems}{745}{subsection.82.3}%
+\contentsline {subsubsection}{\numberline {82.3.1}Usage}{745}{subsubsection.82.3.1}%
+\contentsline {subsubsection}{\numberline {82.3.2}Reference: Scientific Axis Systems}{746}{subsubsection.82.3.2}%
+\contentsline {subsubsection}{\numberline {82.3.3}Reference: School Book Axis Systems}{749}{subsubsection.82.3.3}%
+\contentsline {subsubsection}{\numberline {82.3.4}Advanced Reference: Underlying Cartesian Axis Systems}{751}{subsubsection.82.3.4}%
+\contentsline {subsection}{\numberline {82.4}Ticks and Grids}{752}{subsection.82.4}%
+\contentsline {subsubsection}{\numberline {82.4.1}Concepts}{752}{subsubsection.82.4.1}%
+\contentsline {subsubsection}{\numberline {82.4.2}The Main Options: Tick and Grid}{752}{subsubsection.82.4.2}%
+\contentsline {subsubsection}{\numberline {82.4.3}Semi-Automatic Computation of Tick and Grid Line Positions}{753}{subsubsection.82.4.3}%
+\contentsline {subsubsection}{\numberline {82.4.4}Automatic Computation of Tick and Grid Line Positions}{755}{subsubsection.82.4.4}%
+\contentsline {subsubsection}{\numberline {82.4.5}Manual Specification of Tick and Grid Line Positions}{758}{subsubsection.82.4.5}%
+\contentsline {subsubsection}{\numberline {82.4.6}Styling Ticks and Grid Lines: Introduction}{760}{subsubsection.82.4.6}%
+\contentsline {subsubsection}{\numberline {82.4.7}Styling Ticks and Grid Lines: The Style and Node Style Keys}{760}{subsubsection.82.4.7}%
+\contentsline {subsubsection}{\numberline {82.4.8}Styling Ticks and Grid Lines: Styling Grid Lines}{761}{subsubsection.82.4.8}%
+\contentsline {subsubsection}{\numberline {82.4.9}Styling Ticks and Grid Lines: Styling Ticks and Tick Labels}{762}{subsubsection.82.4.9}%
+\contentsline {subsubsection}{\numberline {82.4.10}Styling Ticks and Grid Lines: Exceptional Ticks}{764}{subsubsection.82.4.10}%
+\contentsline {subsubsection}{\numberline {82.4.11}Styling Ticks and Grid Lines: Styling and Typesetting a Value}{764}{subsubsection.82.4.11}%
+\contentsline {subsubsection}{\numberline {82.4.12}Stacked Ticks}{766}{subsubsection.82.4.12}%
+\contentsline {subsubsection}{\numberline {82.4.13}Reference: Basic Strategies}{769}{subsubsection.82.4.13}%
+\contentsline {subsubsection}{\numberline {82.4.14}Advanced: Defining New Placement Strategies}{770}{subsubsection.82.4.14}%
+\contentsline {subsection}{\numberline {82.5}Advanced: Creating New Axis Systems}{770}{subsection.82.5}%
+\contentsline {subsubsection}{\numberline {82.5.1}Creating the Axes}{771}{subsubsection.82.5.1}%
+\contentsline {subsubsection}{\numberline {82.5.2}Visualizing the Axes}{772}{subsubsection.82.5.2}%
+\contentsline {subsubsection}{\numberline {82.5.3}Visualizing Grid Lines}{775}{subsubsection.82.5.3}%
+\contentsline {subsubsection}{\numberline {82.5.4}Visualizing the Ticks and Tick Labels}{777}{subsubsection.82.5.4}%
+\contentsline {subsubsection}{\numberline {82.5.5}Visualizing the Axis Labels}{780}{subsubsection.82.5.5}%
+\contentsline {subsubsection}{\numberline {82.5.6}The Complete Axis System}{781}{subsubsection.82.5.6}%
+\contentsline {subsubsection}{\numberline {82.5.7}Using the New Axis System Key}{783}{subsubsection.82.5.7}%
+\contentsline {section}{\numberline {83}Visualizers}{784}{section.83}%
+\contentsline {subsection}{\numberline {83.1}Overview}{784}{subsection.83.1}%
+\contentsline {subsection}{\numberline {83.2}Usage}{784}{subsection.83.2}%
+\contentsline {subsubsection}{\numberline {83.2.1}Using a Single Visualizer}{784}{subsubsection.83.2.1}%
+\contentsline {subsubsection}{\numberline {83.2.2}Using Multiple Visualizers}{785}{subsubsection.83.2.2}%
+\contentsline {subsubsection}{\numberline {83.2.3}Styling a Visualizer}{786}{subsubsection.83.2.3}%
+\contentsline {subsection}{\numberline {83.3}Reference: Basic Visualizers}{788}{subsection.83.3}%
+\contentsline {subsubsection}{\numberline {83.3.1}Visualizing Data Points Using Lines}{788}{subsubsection.83.3.1}%
+\contentsline {subsubsection}{\numberline {83.3.2}Visualizing Data Points Using Marks}{791}{subsubsection.83.3.2}%
+\contentsline {subsection}{\numberline {83.4}Advanced: Creating New Visualizers}{791}{subsection.83.4}%
+\contentsline {section}{\numberline {84}Style Sheets and Legends}{794}{section.84}%
+\contentsline {subsection}{\numberline {84.1}Overview}{794}{subsection.84.1}%
+\contentsline {subsection}{\numberline {84.2}Concepts: Style Sheets}{794}{subsection.84.2}%
+\contentsline {subsection}{\numberline {84.3}Concepts: Legends}{795}{subsection.84.3}%
+\contentsline {subsection}{\numberline {84.4}Usage: Style Sheets}{796}{subsection.84.4}%
+\contentsline {subsubsection}{\numberline {84.4.1}Picking a Style Sheet}{796}{subsubsection.84.4.1}%
+\contentsline {subsubsection}{\numberline {84.4.2}Creating a New Style Sheet}{797}{subsubsection.84.4.2}%
+\contentsline {subsubsection}{\numberline {84.4.3}Creating a New Color Style Sheet}{799}{subsubsection.84.4.3}%
+\contentsline {subsection}{\numberline {84.5}Reference: Style Sheets for Lines}{799}{subsection.84.5}%
+\contentsline {subsection}{\numberline {84.6}Reference: Style Sheets for Scatter Plots}{801}{subsection.84.6}%
+\contentsline {subsection}{\numberline {84.7}Reference: Color Style Sheets}{802}{subsection.84.7}%
+\contentsline {subsection}{\numberline {84.8}Usage: Labeling Data Sets Inside the Visualization}{804}{subsection.84.8}%
+\contentsline {subsubsection}{\numberline {84.8.1}Placing a Label Next to a Data Set}{804}{subsubsection.84.8.1}%
+\contentsline {subsubsection}{\numberline {84.8.2}Connecting a Label to a Data Set via a Pin}{806}{subsubsection.84.8.2}%
+\contentsline {subsection}{\numberline {84.9}Usage: Labeling Data Sets Inside a Legend}{807}{subsection.84.9}%
+\contentsline {subsubsection}{\numberline {84.9.1}Creating Legends and Legend Entries}{808}{subsubsection.84.9.1}%
+\contentsline {subsubsection}{\numberline {84.9.2}Rows and Columns of Legend Entries}{810}{subsubsection.84.9.2}%
+\contentsline {subsubsection}{\numberline {84.9.3}Legend Placement: The General Mechanism}{814}{subsubsection.84.9.3}%
+\contentsline {subsubsection}{\numberline {84.9.4}Legend Placement: Outside to the Data Visualization}{814}{subsubsection.84.9.4}%
+\contentsline {subsubsection}{\numberline {84.9.5}Legend Placement: Inside to the Data Visualization}{816}{subsubsection.84.9.5}%
+\contentsline {subsubsection}{\numberline {84.9.6}Legend Entries: General Styling}{818}{subsubsection.84.9.6}%
+\contentsline {subsubsection}{\numberline {84.9.7}Legend Entries: Styling the Text Node}{819}{subsubsection.84.9.7}%
+\contentsline {subsubsection}{\numberline {84.9.8}Legend Entries: Text Placement}{820}{subsubsection.84.9.8}%
+\contentsline {subsubsection}{\numberline {84.9.9}Advanced: Labels in Legends and Their Visualizers}{820}{subsubsection.84.9.9}%
+\contentsline {subsubsection}{\numberline {84.9.10}Reference: Label in Legend Visualizers for Lines and Scatter Plots}{822}{subsubsection.84.9.10}%
+\contentsline {section}{\numberline {85}Polar Axes}{827}{section.85}%
+\contentsline {subsection}{\numberline {85.1}Overview}{827}{subsection.85.1}%
+\contentsline {subsection}{\numberline {85.2}Scientific Polar Axis System}{828}{subsection.85.2}%
+\contentsline {subsubsection}{\numberline {85.2.1}Tick Placements}{829}{subsubsection.85.2.1}%
+\contentsline {subsubsection}{\numberline {85.2.2}Angle Ranges}{830}{subsubsection.85.2.2}%
+\contentsline {subsection}{\numberline {85.3}Advanced: Creating a New Polar Axis System}{834}{subsection.85.3}%
+\contentsline {section}{\numberline {86}The Data Visualization Backend}{836}{section.86}%
+\contentsline {subsection}{\numberline {86.1}Overview}{836}{subsection.86.1}%
+\contentsline {subsection}{\numberline {86.2}The Rendering Pipeline}{836}{subsection.86.2}%
+\contentsline {subsection}{\numberline {86.3}Usage}{836}{subsection.86.3}%
+\contentsline {subsection}{\numberline {86.4}The Mathematical Micro-Kernel}{836}{subsection.86.4}%
+\contentsline {part}{VII\hspace {1em}Utilities}{837}{part.7}%
+\contentsline {section}{\numberline {87}Key Management}{838}{section.87}%
+\contentsline {subsection}{\numberline {87.1}Introduction}{838}{subsection.87.1}%
+\contentsline {subsubsection}{\numberline {87.1.1}Comparison to Other Packages}{838}{subsubsection.87.1.1}%
+\contentsline {subsubsection}{\numberline {87.1.2}Quick Guide to Using the Key Mechanism}{838}{subsubsection.87.1.2}%
+\contentsline {subsection}{\numberline {87.2}The Key Tree}{839}{subsection.87.2}%
+\contentsline {subsection}{\numberline {87.3}Setting Keys}{841}{subsection.87.3}%
+\contentsline {subsubsection}{\numberline {87.3.1}First Char Syntax Detection}{841}{subsubsection.87.3.1}%
+\contentsline {subsubsection}{\numberline {87.3.2}Default Arguments}{843}{subsubsection.87.3.2}%
+\contentsline {subsubsection}{\numberline {87.3.3}Keys That Execute Commands}{844}{subsubsection.87.3.3}%
+\contentsline {subsubsection}{\numberline {87.3.4}Keys That Store Values}{845}{subsubsection.87.3.4}%
+\contentsline {subsubsection}{\numberline {87.3.5}Keys That Are Handled}{845}{subsubsection.87.3.5}%
+\contentsline {subsubsection}{\numberline {87.3.6}Keys That Are Unknown}{847}{subsubsection.87.3.6}%
+\contentsline {subsubsection}{\numberline {87.3.7}Search Paths And Handled Keys}{847}{subsubsection.87.3.7}%
+\contentsline {subsection}{\numberline {87.4}Key Handlers}{848}{subsection.87.4}%
+\contentsline {subsubsection}{\numberline {87.4.1}Handlers for Path Management}{848}{subsubsection.87.4.1}%
+\contentsline {subsubsection}{\numberline {87.4.2}Setting Defaults}{848}{subsubsection.87.4.2}%
+\contentsline {subsubsection}{\numberline {87.4.3}Defining Key Codes}{849}{subsubsection.87.4.3}%
+\contentsline {subsubsection}{\numberline {87.4.4}Defining Styles}{850}{subsubsection.87.4.4}%
+\contentsline {subsubsection}{\numberline {87.4.5}Defining Value-, Macro-, If- and Choice-Keys}{851}{subsubsection.87.4.5}%
+\contentsline {subsubsection}{\numberline {87.4.6}Expanded and Multiple Values}{853}{subsubsection.87.4.6}%
+\contentsline {subsubsection}{\numberline {87.4.7}Handlers for Forwarding}{854}{subsubsection.87.4.7}%
+\contentsline {subsubsection}{\numberline {87.4.8}Handlers for Testing Keys}{856}{subsubsection.87.4.8}%
+\contentsline {subsubsection}{\numberline {87.4.9}Handlers for Key Inspection}{857}{subsubsection.87.4.9}%
+\contentsline {subsection}{\numberline {87.5}Error Keys}{857}{subsection.87.5}%
+\contentsline {subsection}{\numberline {87.6}Key Filtering}{858}{subsection.87.6}%
+\contentsline {subsubsection}{\numberline {87.6.1}Starting With An Example}{858}{subsubsection.87.6.1}%
+\contentsline {subsubsection}{\numberline {87.6.2}Setting Filters}{859}{subsubsection.87.6.2}%
+\contentsline {subsubsection}{\numberline {87.6.3}Handlers For Unprocessed Keys}{860}{subsubsection.87.6.3}%
+\contentsline {subsubsection}{\numberline {87.6.4}Family Support}{860}{subsubsection.87.6.4}%
+\contentsline {subsubsection}{\numberline {87.6.5}Other Key Filters}{862}{subsubsection.87.6.5}%
+\contentsline {subsubsection}{\numberline {87.6.6}Programmer Interface}{863}{subsubsection.87.6.6}%
+\contentsline {subsubsection}{\numberline {87.6.7}Defining Own Filters Or Filter Handlers}{864}{subsubsection.87.6.7}%
+\contentsline {section}{\numberline {88}Repeating Things: The Foreach Statement}{865}{section.88}%
+\contentsline {section}{\numberline {89}Date and Calendar Utility Macros}{871}{section.89}%
+\contentsline {subsection}{\numberline {89.1}Handling Dates}{871}{subsection.89.1}%
+\contentsline {subsubsection}{\numberline {89.1.1}Conversions Between Date Types}{871}{subsubsection.89.1.1}%
+\contentsline {subsubsection}{\numberline {89.1.2}Checking Dates}{872}{subsubsection.89.1.2}%
+\contentsline {subsubsection}{\numberline {89.1.3}Typesetting Dates}{873}{subsubsection.89.1.3}%
+\contentsline {subsubsection}{\numberline {89.1.4}Localization}{874}{subsubsection.89.1.4}%
+\contentsline {subsection}{\numberline {89.2}Typesetting Calendars}{874}{subsection.89.2}%
+\contentsline {section}{\numberline {90}Page Management}{878}{section.90}%
+\contentsline {subsection}{\numberline {90.1}Basic Usage}{878}{subsection.90.1}%
+\contentsline {subsection}{\numberline {90.2}The Predefined Layouts}{879}{subsection.90.2}%
+\contentsline {subsection}{\numberline {90.3}Defining a Layout}{881}{subsection.90.3}%
+\contentsline {subsection}{\numberline {90.4}Creating Logical Pages}{884}{subsection.90.4}%
+\contentsline {section}{\numberline {91}Extended Color Support}{885}{section.91}%
+\contentsline {section}{\numberline {92}Parser Module}{886}{section.92}%
+\contentsline {subsection}{\numberline {92.1}Keys of the Parser Module}{888}{subsection.92.1}%
+\contentsline {subsection}{\numberline {92.2}Examples}{888}{subsection.92.2}%
+\contentsline {part}{VIII\hspace {1em}Mathematical and Object-Oriented Engines}{890}{part.8}%
+\contentsline {section}{\numberline {93}Design Principles}{891}{section.93}%
+\contentsline {subsection}{\numberline {93.1}Loading the Mathematical Engine}{891}{subsection.93.1}%
+\contentsline {subsection}{\numberline {93.2}Layers of the Mathematical Engine}{891}{subsection.93.2}%
+\contentsline {subsection}{\numberline {93.3}Efficiency and Accuracy of the Mathematical Engine}{891}{subsection.93.3}%
+\contentsline {section}{\numberline {94}Mathematical Expressions}{892}{section.94}%
+\contentsline {subsection}{\numberline {94.1}Parsing Expressions}{892}{subsection.94.1}%
+\contentsline {subsubsection}{\numberline {94.1.1}Commands}{892}{subsubsection.94.1.1}%
+\contentsline {subsubsection}{\numberline {94.1.2}Considerations Concerning Units}{894}{subsubsection.94.1.2}%
+\contentsline {subsection}{\numberline {94.2}Syntax for Mathematical Expressions: Operators}{895}{subsection.94.2}%
+\contentsline {subsection}{\numberline {94.3}Syntax for Mathematical Expressions: Functions}{897}{subsection.94.3}%
+\contentsline {subsubsection}{\numberline {94.3.1}Basic arithmetic functions}{897}{subsubsection.94.3.1}%
+\contentsline {subsubsection}{\numberline {94.3.2}Rounding functions}{900}{subsubsection.94.3.2}%
+\contentsline {subsubsection}{\numberline {94.3.3}Integer arithmetic functions}{901}{subsubsection.94.3.3}%
+\contentsline {subsubsection}{\numberline {94.3.4}Trigonometric functions}{901}{subsubsection.94.3.4}%
+\contentsline {paragraph}{Warning:}{904}{section*.9}%
+\contentsline {subsubsection}{\numberline {94.3.5}Comparison and logical functions}{904}{subsubsection.94.3.5}%
+\contentsline {subsubsection}{\numberline {94.3.6}Pseudo-random functions}{905}{subsubsection.94.3.6}%
+\contentsline {subsubsection}{\numberline {94.3.7}Base conversion functions}{906}{subsubsection.94.3.7}%
+\contentsline {subsubsection}{\numberline {94.3.8}Miscellaneous functions}{907}{subsubsection.94.3.8}%
+\contentsline {section}{\numberline {95}Additional Mathematical Commands}{909}{section.95}%
+\contentsline {subsection}{\numberline {95.1}Basic arithmetic functions}{909}{subsection.95.1}%
+\contentsline {subsection}{\numberline {95.2}Comparison and logical functions}{909}{subsection.95.2}%
+\contentsline {subsection}{\numberline {95.3}Pseudo-Random Numbers}{909}{subsection.95.3}%
+\contentsline {subsection}{\numberline {95.4}Base Conversion}{910}{subsection.95.4}%
+\contentsline {subsection}{\numberline {95.5}Angle Computations}{911}{subsection.95.5}%
+\contentsline {section}{\numberline {96}Customizing the Mathematical Engine}{912}{section.96}%
+\contentsline {section}{\numberline {97}Number Printing}{915}{section.97}%
+\contentsline {paragraph}{First use-case:}{916}{section*.10}%
+\contentsline {paragraph}{Second use-case:}{917}{section*.11}%
+\contentsline {subsection}{\numberline {97.1}Changing display styles}{920}{subsection.97.1}%
+\contentsline {section}{\numberline {98}Object-Oriented Programming}{926}{section.98}%
+\contentsline {subsection}{\numberline {98.1}Overview}{926}{subsection.98.1}%
+\contentsline {subsection}{\numberline {98.2}A Running Example: The Stamp Class}{926}{subsection.98.2}%
+\contentsline {subsection}{\numberline {98.3}Classes}{926}{subsection.98.3}%
+\contentsline {subsection}{\numberline {98.4}Objects}{927}{subsection.98.4}%
+\contentsline {subsection}{\numberline {98.5}Methods}{928}{subsection.98.5}%
+\contentsline {subsection}{\numberline {98.6}Attributes}{929}{subsection.98.6}%
+\contentsline {subsection}{\numberline {98.7}Identities}{931}{subsection.98.7}%
+\contentsline {subsection}{\numberline {98.8}The Object Class}{932}{subsection.98.8}%
+\contentsline {subsection}{\numberline {98.9}The Signal Class}{932}{subsection.98.9}%
+\contentsline {subsection}{\numberline {98.10}Implementation Notes}{933}{subsection.98.10}%
+\contentsline {part}{IX\hspace {1em}The Basic Layer}{934}{part.9}%
+\contentsline {section}{\numberline {99}Design Principles}{935}{section.99}%
+\contentsline {subsection}{\numberline {99.1}Core and Modules}{935}{subsection.99.1}%
+\contentsline {subsection}{\numberline {99.2}Communicating with the Basic Layer via Macros}{935}{subsection.99.2}%
+\contentsline {subsection}{\numberline {99.3}Path-Centered Approach}{936}{subsection.99.3}%
+\contentsline {subsection}{\numberline {99.4}Coordinate Versus Canvas Transformations}{936}{subsection.99.4}%
+\contentsline {section}{\numberline {100}Hierarchical Structures: Package, Environments, Scopes, and Text}{937}{section.100}%
+\contentsline {subsection}{\numberline {100.1}Overview}{937}{subsection.100.1}%
+\contentsline {subsubsection}{\numberline {100.1.1}The Hierarchical Structure of the Package}{937}{subsubsection.100.1.1}%
+\contentsline {subsubsection}{\numberline {100.1.2}The Hierarchical Structure of Graphics}{937}{subsubsection.100.1.2}%
+\contentsline {subsection}{\numberline {100.2}The Hierarchical Structure of the Package}{938}{subsection.100.2}%
+\contentsline {subsubsection}{\numberline {100.2.1}The Core Package}{938}{subsubsection.100.2.1}%
+\contentsline {subsubsection}{\numberline {100.2.2}The Modules}{939}{subsubsection.100.2.2}%
+\contentsline {subsubsection}{\numberline {100.2.3}The Library Packages}{939}{subsubsection.100.2.3}%
+\contentsline {subsection}{\numberline {100.3}The Hierarchical Structure of the Graphics}{939}{subsection.100.3}%
+\contentsline {subsubsection}{\numberline {100.3.1}The Main Environment}{939}{subsubsection.100.3.1}%
+\contentsline {subsubsection}{\numberline {100.3.2}Graphic Scope Environments}{941}{subsubsection.100.3.2}%
+\contentsline {subsubsection}{\numberline {100.3.3}Inserting Text and Images}{944}{subsubsection.100.3.3}%
+\contentsline {subsection}{\numberline {100.4}Object Identifiers}{946}{subsection.100.4}%
+\contentsline {subsubsection}{\numberline {100.4.1}Commands for Creating Graphic Objects}{946}{subsubsection.100.4.1}%
+\contentsline {subsubsection}{\numberline {100.4.2}Settings and Querying Identifiers}{947}{subsubsection.100.4.2}%
+\contentsline {subsection}{\numberline {100.5}Resource Description Framework Annotations (RDFa)}{948}{subsection.100.5}%
+\contentsline {subsection}{\numberline {100.6}Error Messages and Warnings}{949}{subsection.100.6}%
+\contentsline {section}{\numberline {101}Specifying Coordinates}{950}{section.101}%
+\contentsline {subsection}{\numberline {101.1}Overview}{950}{subsection.101.1}%
+\contentsline {subsection}{\numberline {101.2}Basic Coordinate Commands}{950}{subsection.101.2}%
+\contentsline {subsection}{\numberline {101.3}Coordinates in the XY-Coordinate System}{950}{subsection.101.3}%
+\contentsline {subsection}{\numberline {101.4}Three Dimensional Coordinates}{951}{subsection.101.4}%
+\contentsline {subsection}{\numberline {101.5}Building Coordinates From Other Coordinates}{952}{subsection.101.5}%
+\contentsline {subsubsection}{\numberline {101.5.1}Basic Manipulations of Coordinates}{952}{subsubsection.101.5.1}%
+\contentsline {subsubsection}{\numberline {101.5.2}Points Traveling along Lines and Curves}{953}{subsubsection.101.5.2}%
+\contentsline {subsubsection}{\numberline {101.5.3}Points on Borders of Objects}{955}{subsubsection.101.5.3}%
+\contentsline {subsubsection}{\numberline {101.5.4}Points on the Intersection of Lines}{955}{subsubsection.101.5.4}%
+\contentsline {subsubsection}{\numberline {101.5.5}Points on the Intersection of Two Circles}{956}{subsubsection.101.5.5}%
+\contentsline {subsubsection}{\numberline {101.5.6}Points on the Intersection of Two Paths}{956}{subsubsection.101.5.6}%
+\contentsline {subsection}{\numberline {101.6}Extracting Coordinates}{957}{subsection.101.6}%
+\contentsline {subsection}{\numberline {101.7}Internals of How Point Commands Work}{957}{subsection.101.7}%
+\contentsline {section}{\numberline {102}Constructing Paths}{959}{section.102}%
+\contentsline {subsection}{\numberline {102.1}Overview}{959}{subsection.102.1}%
+\contentsline {subsection}{\numberline {102.2}The Move-To Path Operation}{959}{subsection.102.2}%
+\contentsline {subsection}{\numberline {102.3}The Line-To Path Operation}{960}{subsection.102.3}%
+\contentsline {subsection}{\numberline {102.4}The Curve-To Path Operations}{960}{subsection.102.4}%
+\contentsline {subsection}{\numberline {102.5}The Close Path Operation}{961}{subsection.102.5}%
+\contentsline {subsection}{\numberline {102.6}Arc, Ellipse and Circle Path Operations}{962}{subsection.102.6}%
+\contentsline {subsection}{\numberline {102.7}Rectangle Path Operations}{965}{subsection.102.7}%
+\contentsline {subsection}{\numberline {102.8}The Grid Path Operation}{965}{subsection.102.8}%
+\contentsline {subsection}{\numberline {102.9}The Parabola Path Operation}{966}{subsection.102.9}%
+\contentsline {subsection}{\numberline {102.10}Sine and Cosine Path Operations}{966}{subsection.102.10}%
+\contentsline {subsection}{\numberline {102.11}Plot Path Operations}{967}{subsection.102.11}%
+\contentsline {subsection}{\numberline {102.12}Rounded Corners}{967}{subsection.102.12}%
+\contentsline {subsection}{\numberline {102.13}Internal Tracking of Bounding Boxes for Paths and Pictures}{968}{subsection.102.13}%
+\contentsline {section}{\numberline {103}Decorations}{970}{section.103}%
+\contentsline {subsection}{\numberline {103.1}Overview}{970}{subsection.103.1}%
+\contentsline {subsection}{\numberline {103.2}Decoration Automata}{970}{subsection.103.2}%
+\contentsline {subsubsection}{\numberline {103.2.1}The Different Paths}{970}{subsubsection.103.2.1}%
+\contentsline {subsubsection}{\numberline {103.2.2}Segments and States}{971}{subsubsection.103.2.2}%
+\contentsline {subsection}{\numberline {103.3}Declaring Decorations}{972}{subsection.103.3}%
+\contentsline {subsubsection}{\numberline {103.3.1}Predefined Decorations}{976}{subsubsection.103.3.1}%
+\contentsline {subsection}{\numberline {103.4}Using Decorations}{976}{subsection.103.4}%
+\contentsline {subsection}{\numberline {103.5}Meta-Decorations}{979}{subsection.103.5}%
+\contentsline {subsubsection}{\numberline {103.5.1}Declaring Meta-Decorations}{980}{subsubsection.103.5.1}%
+\contentsline {subsubsection}{\numberline {103.5.2}Predefined Meta-decorations}{981}{subsubsection.103.5.2}%
+\contentsline {subsubsection}{\numberline {103.5.3}Using Meta-Decorations}{981}{subsubsection.103.5.3}%
+\contentsline {section}{\numberline {104}Using Paths}{983}{section.104}%
+\contentsline {subsection}{\numberline {104.1}Overview}{983}{subsection.104.1}%
+\contentsline {subsection}{\numberline {104.2}Stroking a Path}{984}{subsection.104.2}%
+\contentsline {subsubsection}{\numberline {104.2.1}Graphic Parameter: Line Width}{984}{subsubsection.104.2.1}%
+\contentsline {subsubsection}{\numberline {104.2.2}Graphic Parameter: Caps and Joins}{984}{subsubsection.104.2.2}%
+\contentsline {subsubsection}{\numberline {104.2.3}Graphic Parameter: Dashing}{984}{subsubsection.104.2.3}%
+\contentsline {subsubsection}{\numberline {104.2.4}Graphic Parameter: Stroke Color}{985}{subsubsection.104.2.4}%
+\contentsline {subsubsection}{\numberline {104.2.5}Graphic Parameter: Stroke Opacity}{985}{subsubsection.104.2.5}%
+\contentsline {subsubsection}{\numberline {104.2.6}Inner Lines}{985}{subsubsection.104.2.6}%
+\contentsline {subsection}{\numberline {104.3}Arrow Tips on a Path}{986}{subsection.104.3}%
+\contentsline {subsection}{\numberline {104.4}Filling a Path}{987}{subsection.104.4}%
+\contentsline {subsubsection}{\numberline {104.4.1}Graphic Parameter: Interior Rule}{987}{subsubsection.104.4.1}%
+\contentsline {subsubsection}{\numberline {104.4.2}Graphic Parameter: Filling Color}{988}{subsubsection.104.4.2}%
+\contentsline {subsubsection}{\numberline {104.4.3}Graphic Parameter: Fill Opacity}{988}{subsubsection.104.4.3}%
+\contentsline {subsection}{\numberline {104.5}Clipping a Path}{988}{subsection.104.5}%
+\contentsline {subsection}{\numberline {104.6}Using a Path as a Bounding Box}{988}{subsection.104.6}%
+\contentsline {section}{\numberline {105}Defining New Arrow Tip Kinds}{989}{section.105}%
+\contentsline {subsection}{\numberline {105.1}Overview}{989}{subsection.105.1}%
+\contentsline {subsection}{\numberline {105.2}Terminology}{989}{subsection.105.2}%
+\contentsline {subsection}{\numberline {105.3}Caching and Rendering of Arrows}{990}{subsection.105.3}%
+\contentsline {subsection}{\numberline {105.4}Declaring an Arrow Tip Kind}{991}{subsection.105.4}%
+\contentsline {subsection}{\numberline {105.5}Handling Arrow Options}{995}{subsection.105.5}%
+\contentsline {subsubsection}{\numberline {105.5.1}Dimension Options}{995}{subsubsection.105.5.1}%
+\contentsline {subsubsection}{\numberline {105.5.2}True--False Options}{996}{subsubsection.105.5.2}%
+\contentsline {subsubsection}{\numberline {105.5.3}Inaccessible Options}{996}{subsubsection.105.5.3}%
+\contentsline {subsubsection}{\numberline {105.5.4}Defining New Arrow Keys}{997}{subsubsection.105.5.4}%
+\contentsline {section}{\numberline {106}Nodes and Shapes}{999}{section.106}%
+\contentsline {subsection}{\numberline {106.1}Overview}{999}{subsection.106.1}%
+\contentsline {subsubsection}{\numberline {106.1.1}Creating and Referencing Nodes}{999}{subsubsection.106.1.1}%
+\contentsline {subsubsection}{\numberline {106.1.2}Anchors}{999}{subsubsection.106.1.2}%
+\contentsline {subsubsection}{\numberline {106.1.3}Layers of a Shape}{999}{subsubsection.106.1.3}%
+\contentsline {subsubsection}{\numberline {106.1.4}Node Parts}{1000}{subsubsection.106.1.4}%
+\contentsline {subsection}{\numberline {106.2}Creating Nodes}{1000}{subsection.106.2}%
+\contentsline {subsubsection}{\numberline {106.2.1}Creating Simple Nodes}{1000}{subsubsection.106.2.1}%
+\contentsline {subsubsection}{\numberline {106.2.2}Creating Multi-Part Nodes}{1001}{subsubsection.106.2.2}%
+\contentsline {subsubsection}{\numberline {106.2.3}Deferred Node Positioning}{1003}{subsubsection.106.2.3}%
+\contentsline {subsection}{\numberline {106.3}Using Anchors}{1004}{subsection.106.3}%
+\contentsline {subsubsection}{\numberline {106.3.1}Referencing Anchors of Nodes in the Same Picture}{1005}{subsubsection.106.3.1}%
+\contentsline {subsubsection}{\numberline {106.3.2}Referencing Anchors of Nodes in Different Pictures}{1006}{subsubsection.106.3.2}%
+\contentsline {subsection}{\numberline {106.4}Special Nodes}{1006}{subsection.106.4}%
+\contentsline {subsection}{\numberline {106.5}Declaring New Shapes}{1007}{subsection.106.5}%
+\contentsline {subsubsection}{\numberline {106.5.1}What Must Be Defined For a Shape?}{1007}{subsubsection.106.5.1}%
+\contentsline {subsubsection}{\numberline {106.5.2}Normal Anchors Versus Saved Anchors}{1008}{subsubsection.106.5.2}%
+\contentsline {subsubsection}{\numberline {106.5.3}Command for Declaring New Shapes}{1008}{subsubsection.106.5.3}%
+\contentsline {section}{\numberline {107}Matrices}{1014}{section.107}%
+\contentsline {subsection}{\numberline {107.1}Overview}{1014}{subsection.107.1}%
+\contentsline {subsection}{\numberline {107.2}Cell Pictures and Their Alignment}{1014}{subsection.107.2}%
+\contentsline {subsection}{\numberline {107.3}The Matrix Command}{1014}{subsection.107.3}%
+\contentsline {subsection}{\numberline {107.4}Row and Column Spacing}{1016}{subsection.107.4}%
+\contentsline {subsection}{\numberline {107.5}Callbacks}{1017}{subsection.107.5}%
+\contentsline {section}{\numberline {108}Coordinate, Canvas, and Nonlinear Transformations}{1019}{section.108}%
+\contentsline {subsection}{\numberline {108.1}Overview}{1019}{subsection.108.1}%
+\contentsline {subsection}{\numberline {108.2}Coordinate Transformations}{1019}{subsection.108.2}%
+\contentsline {subsubsection}{\numberline {108.2.1}How PGF Keeps Track of the Coordinate Transformation Matrix}{1019}{subsubsection.108.2.1}%
+\contentsline {subsubsection}{\numberline {108.2.2}Commands for Relative Coordinate Transformations}{1020}{subsubsection.108.2.2}%
+\contentsline {subsubsection}{\numberline {108.2.3}Commands for Absolute Coordinate Transformations}{1023}{subsubsection.108.2.3}%
+\contentsline {subsubsection}{\numberline {108.2.4}Saving and Restoring the Coordinate Transformation Matrix}{1024}{subsubsection.108.2.4}%
+\contentsline {subsubsection}{\numberline {108.2.5}Applying Coordinate Transformation to Points}{1025}{subsubsection.108.2.5}%
+\contentsline {subsubsection}{\numberline {108.2.6}Computing Adjustments for Coordinate Transformations}{1025}{subsubsection.108.2.6}%
+\contentsline {subsection}{\numberline {108.3}Canvas Transformations}{1026}{subsection.108.3}%
+\contentsline {subsubsection}{\numberline {108.3.1}Applying General Canvas Transformations}{1026}{subsubsection.108.3.1}%
+\contentsline {subsubsection}{\numberline {108.3.2}Establishing View Boxes}{1027}{subsubsection.108.3.2}%
+\contentsline {subsection}{\numberline {108.4}Nonlinear Transformations}{1028}{subsection.108.4}%
+\contentsline {subsubsection}{\numberline {108.4.1}Introduction}{1028}{subsubsection.108.4.1}%
+\contentsline {subsubsection}{\numberline {108.4.2}Installing Nonlinear Transformation}{1028}{subsubsection.108.4.2}%
+\contentsline {subsubsection}{\numberline {108.4.3}Applying Nonlinear Transformations to Points}{1029}{subsubsection.108.4.3}%
+\contentsline {subsubsection}{\numberline {108.4.4}Applying Nonlinear Transformations to Paths}{1029}{subsubsection.108.4.4}%
+\contentsline {subsubsection}{\numberline {108.4.5}Applying Nonlinear Transformations to Text}{1030}{subsubsection.108.4.5}%
+\contentsline {subsubsection}{\numberline {108.4.6}Approximating Nonlinear Transformations Using Linear Transformations}{1031}{subsubsection.108.4.6}%
+\contentsline {subsubsection}{\numberline {108.4.7}Nonlinear Transformation Libraries}{1031}{subsubsection.108.4.7}%
+\contentsline {section}{\numberline {109}Patterns}{1034}{section.109}%
+\contentsline {subsection}{\numberline {109.1}Overview}{1034}{subsection.109.1}%
+\contentsline {subsection}{\numberline {109.2}Declaring a Pattern}{1034}{subsection.109.2}%
+\contentsline {subsection}{\numberline {109.3}Setting a Pattern}{1036}{subsection.109.3}%
+\contentsline {section}{\numberline {110}Declaring and Using Images}{1037}{section.110}%
+\contentsline {subsection}{\numberline {110.1}Overview}{1037}{subsection.110.1}%
+\contentsline {subsection}{\numberline {110.2}Declaring an Image}{1037}{subsection.110.2}%
+\contentsline {subsection}{\numberline {110.3}Using an Image}{1038}{subsection.110.3}%
+\contentsline {subsection}{\numberline {110.4}Masking an Image}{1039}{subsection.110.4}%
+\contentsline {section}{\numberline {111}Externalizing Graphics}{1041}{section.111}%
+\contentsline {subsection}{\numberline {111.1}Overview}{1041}{subsection.111.1}%
+\contentsline {subsection}{\numberline {111.2}Workflow Step 1: Naming Graphics}{1041}{subsection.111.2}%
+\contentsline {subsection}{\numberline {111.3}Workflow Step 2: Generating the External Graphics}{1042}{subsection.111.3}%
+\contentsline {subsection}{\numberline {111.4}Workflow Step 3: Including the External Graphics}{1043}{subsection.111.4}%
+\contentsline {subsection}{\numberline {111.5}A Complete Example}{1044}{subsection.111.5}%
+\contentsline {section}{\numberline {112}Creating Plots}{1048}{section.112}%
+\contentsline {subsection}{\numberline {112.1}Overview}{1048}{subsection.112.1}%
+\contentsline {subsection}{\numberline {112.2}Generating Plot Streams}{1048}{subsection.112.2}%
+\contentsline {subsubsection}{\numberline {112.2.1}Basic Building Blocks of Plot Streams}{1048}{subsubsection.112.2.1}%
+\contentsline {subsubsection}{\numberline {112.2.2}Commands That Generate Plot Streams}{1050}{subsubsection.112.2.2}%
+\contentsline {subsection}{\numberline {112.3}Plot Handlers}{1052}{subsection.112.3}%
+\contentsline {subsection}{\numberline {112.4}Defining New Plot Handlers}{1053}{subsection.112.4}%
+\contentsline {section}{\numberline {113}Layered Graphics}{1055}{section.113}%
+\contentsline {subsection}{\numberline {113.1}Overview}{1055}{subsection.113.1}%
+\contentsline {subsection}{\numberline {113.2}Declaring Layers}{1055}{subsection.113.2}%
+\contentsline {subsection}{\numberline {113.3}Using Layers}{1055}{subsection.113.3}%
+\contentsline {section}{\numberline {114}Shadings}{1057}{section.114}%
+\contentsline {subsection}{\numberline {114.1}Overview}{1057}{subsection.114.1}%
+\contentsline {subsubsection}{\numberline {114.1.1}Color models}{1057}{subsubsection.114.1.1}%
+\contentsline {subsection}{\numberline {114.2}Declaring Shadings}{1058}{subsection.114.2}%
+\contentsline {subsubsection}{\numberline {114.2.1}Horizontal and Vertical Shadings}{1058}{subsubsection.114.2.1}%
+\contentsline {subsubsection}{\numberline {114.2.2}Radial Shadings}{1058}{subsubsection.114.2.2}%
+\contentsline {subsubsection}{\numberline {114.2.3}General (Functional) Shadings}{1059}{subsubsection.114.2.3}%
+\contentsline {paragraph}{Color model independent functional shadings.}{1061}{section*.12}%
+\contentsline {subsection}{\numberline {114.3}Using Shadings}{1063}{subsection.114.3}%
+\contentsline {section}{\numberline {115}Transparency}{1066}{section.115}%
+\contentsline {subsection}{\numberline {115.1}Specifying a Uniform Opacity}{1066}{subsection.115.1}%
+\contentsline {subsection}{\numberline {115.2}Specifying a Blend Mode}{1066}{subsection.115.2}%
+\contentsline {subsection}{\numberline {115.3}Specifying a Fading}{1067}{subsection.115.3}%
+\contentsline {subsection}{\numberline {115.4}Transparency Groups}{1069}{subsection.115.4}%
+\contentsline {section}{\numberline {116}Animations}{1071}{section.116}%
+\contentsline {subsection}{\numberline {116.1}Overview}{1071}{subsection.116.1}%
+\contentsline {subsection}{\numberline {116.2}Animating an Attribute}{1071}{subsection.116.2}%
+\contentsline {subsubsection}{\numberline {116.2.1}The Main Command}{1071}{subsubsection.116.2.1}%
+\contentsline {subsubsection}{\numberline {116.2.2}Specifying the Timeline}{1073}{subsubsection.116.2.2}%
+\contentsline {subsubsection}{\numberline {116.2.3}``Anti-Animations'': Snapshots}{1076}{subsubsection.116.2.3}%
+\contentsline {subsection}{\numberline {116.3}Animating Color, Opacity, Visibility, and Staging}{1077}{subsection.116.3}%
+\contentsline {subsection}{\numberline {116.4}Animating Paths and their Rendering}{1080}{subsection.116.4}%
+\contentsline {subsection}{\numberline {116.5}Animating Transformations and Views}{1083}{subsection.116.5}%
+\contentsline {subsection}{\numberline {116.6}Commands for Specifying Timing: Beginnings and Endings}{1086}{subsection.116.6}%
+\contentsline {subsection}{\numberline {116.7}Commands for Specifying Timing: Repeats}{1088}{subsection.116.7}%
+\contentsline {section}{\numberline {117}Adding libraries to \textsc {pgf}: temporary registers}{1090}{section.117}%
+\contentsline {paragraph}{Attention:}{1090}{section*.13}%
+\contentsline {section}{\numberline {118}Quick Commands}{1092}{section.118}%
+\contentsline {subsection}{\numberline {118.1}Quick Coordinate Commands}{1092}{subsection.118.1}%
+\contentsline {subsection}{\numberline {118.2}Quick Path Construction Commands}{1092}{subsection.118.2}%
+\contentsline {subsection}{\numberline {118.3}Quick Path Usage Commands}{1093}{subsection.118.3}%
+\contentsline {subsection}{\numberline {118.4}Quick Text Box Commands}{1093}{subsection.118.4}%
+\contentsline {part}{X\hspace {1em}The System Layer}{1095}{part.10}%
+\contentsline {section}{\numberline {119}Design of the System Layer}{1096}{section.119}%
+\contentsline {subsection}{\numberline {119.1}Driver Files}{1096}{subsection.119.1}%
+\contentsline {subsection}{\numberline {119.2}Common Definition Files}{1096}{subsection.119.2}%
+\contentsline {section}{\numberline {120}Commands of the System Layer}{1097}{section.120}%
+\contentsline {subsection}{\numberline {120.1}Beginning and Ending a Stream of System Commands}{1097}{subsection.120.1}%
+\contentsline {subsection}{\numberline {120.2}Scoping System Commands}{1098}{subsection.120.2}%
+\contentsline {subsection}{\numberline {120.3}Path Construction System Commands}{1098}{subsection.120.3}%
+\contentsline {subsection}{\numberline {120.4}Canvas Transformation System Commands}{1099}{subsection.120.4}%
+\contentsline {subsection}{\numberline {120.5}Stroking, Filling, and Clipping System Commands}{1100}{subsection.120.5}%
+\contentsline {subsection}{\numberline {120.6}Graphic State Option System Commands}{1101}{subsection.120.6}%
+\contentsline {subsection}{\numberline {120.7}Color System Commands}{1102}{subsection.120.7}%
+\contentsline {subsection}{\numberline {120.8}Pattern System Commands}{1104}{subsection.120.8}%
+\contentsline {subsection}{\numberline {120.9}Image System Commands}{1104}{subsection.120.9}%
+\contentsline {subsection}{\numberline {120.10}Shading System Commands}{1105}{subsection.120.10}%
+\contentsline {subsection}{\numberline {120.11}Transparency System Commands}{1106}{subsection.120.11}%
+\contentsline {subsection}{\numberline {120.12}Animation Commands}{1107}{subsection.120.12}%
+\contentsline {subsection}{\numberline {120.13}Object Identification System Commands}{1107}{subsection.120.13}%
+\contentsline {subsection}{\numberline {120.14}Resource Description Framework Annotations (RDFa)}{1108}{subsection.120.14}%
+\contentsline {subsection}{\numberline {120.15}Reusable Objects System Commands}{1109}{subsection.120.15}%
+\contentsline {subsection}{\numberline {120.16}Invisibility System Commands}{1110}{subsection.120.16}%
+\contentsline {subsection}{\numberline {120.17}Page Size Commands}{1110}{subsection.120.17}%
+\contentsline {subsection}{\numberline {120.18}Position Tracking Commands}{1111}{subsection.120.18}%
+\contentsline {subsection}{\numberline {120.19}Internal Conversion Commands}{1111}{subsection.120.19}%
+\contentsline {section}{\numberline {121}The Soft Path Subsystem}{1113}{section.121}%
+\contentsline {subsection}{\numberline {121.1}Path Creation Process}{1113}{subsection.121.1}%
+\contentsline {subsection}{\numberline {121.2}Starting and Ending a Soft Path}{1113}{subsection.121.2}%
+\contentsline {subsection}{\numberline {121.3}Soft Path Creation Commands}{1114}{subsection.121.3}%
+\contentsline {subsection}{\numberline {121.4}The Soft Path Data Structure}{1114}{subsection.121.4}%
+\contentsline {section}{\numberline {122}The Protocol Subsystem}{1116}{section.122}%
+\contentsline {section}{\numberline {123}Animation System Layer}{1117}{section.123}%
+\contentsline {subsection}{\numberline {123.1}Animations and Snapshots}{1117}{subsection.123.1}%
+\contentsline {subsection}{\numberline {123.2}Commands for Animating an Attribute: Color, Opacity, Visibility, Staging}{1119}{subsection.123.2}%
+\contentsline {subsection}{\numberline {123.3}Commands for Animating an Attribute: Paths and Their Rendering}{1120}{subsection.123.3}%
+\contentsline {subsection}{\numberline {123.4}Commands for Animating an Attribute: Transformations and Views}{1123}{subsection.123.4}%
+\contentsline {subsection}{\numberline {123.5}Commands for Specifying the Target Object}{1127}{subsection.123.5}%
+\contentsline {subsection}{\numberline {123.6}Commands for Specifying Timelines: Specifying Times}{1127}{subsection.123.6}%
+\contentsline {subsection}{\numberline {123.7}Commands for Specifying Timelines: Specifying Values}{1128}{subsection.123.7}%
+\contentsline {subsection}{\numberline {123.8}Commands for Specifying Timing: Repeats}{1130}{subsection.123.8}%
+\contentsline {subsection}{\numberline {123.9}Commands for Specifying Timing: Beginning and Ending}{1130}{subsection.123.9}%
+\contentsline {subsection}{\numberline {123.10}Commands for Specifying Timing: Restart Behaviour}{1132}{subsection.123.10}%
+\contentsline {subsection}{\numberline {123.11}Commands for Specifying Accumulation}{1134}{subsection.123.11}%
+\contentsline {part}{XI\hspace {1em}References and Index}{1135}{part.11}%
+\contentsline {section}{Index}{1136}{section*.14}%
