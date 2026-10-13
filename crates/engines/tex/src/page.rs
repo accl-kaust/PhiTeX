@@ -280,13 +280,16 @@ impl Run<'_, '_> {
         let mut ended = false;
         let mut plan: Vec<ValueId> = Vec::new();
         let mut folds = 0usize;
+        let (mut tfx, mut tfold) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
         let mut j = 0;
         while !ended && j < MAX_PAGES {
+            let tf = std::time::Instant::now();
             let fx = if j > 0 {
                 self.page_effects(j - 1)?
             } else {
                 Vec::new()
             };
+            tfx += tf.elapsed();
             // the old page at this start, when what it read is unchanged
             let old = reusable.and_then(|p| {
                 let pick = |idx: usize, ok: &dyn Fn(&PageRec) -> bool| {
@@ -316,7 +319,9 @@ impl Run<'_, '_> {
                 r
             } else {
                 folds += 1;
+                let tq = std::time::Instant::now();
                 let out = plan_fold(v, items, table_v, marker, &start, fx.clone());
+                tfold += tq.elapsed();
                 let (a, b) = (start.idx.min(items.len()), out.reach.min(items.len()));
                 Arc::new(PageRec {
                     start: start.clone(),
@@ -404,7 +409,7 @@ impl Run<'_, '_> {
         }
         if tm {
             eprintln!(
-                "plan: {} items, {pages} pages ({folds} folded, pre {pre} suf {suf}): list fold {t1:?} (acc {t_acc:?}), pages {:?}, sets {:?}",
+                "plan: {} items, {pages} pages ({folds} folded, pre {pre} suf {suf}): list fold {t1:?} (acc {t_acc:?}), pages {:?} (fx {tfx:?}, folds {tfold:?}), sets {:?}",
                 items.len(),
                 t2.saturating_sub(t1),
                 t0.elapsed().saturating_sub(t2)

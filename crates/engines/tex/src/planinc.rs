@@ -245,6 +245,7 @@ pub(crate) struct Change {
 
 /// The main list's entries `all` folded, `prev`'s fold changed in place
 /// where the edit changed it; `None` when nothing of it was kept.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn fold(v: &Values, all: ValueId, prev: Option<ListMemo>) -> (ListMemo, Option<Change>) {
     let full = |entries: Vec<ValueId>| {
         let mut items = Vec::new();
