@@ -275,12 +275,6 @@ pub(crate) struct Recording {
     pub dest_data: Vec<(usize, crate::marks::Dest)>,
 }
 
-/// The sharing key of a scalable font (`init_font`'s test).
-fn share_key(s: &crate::FontState) -> Option<(Vec<u8>, String)> {
-    s.scalable()
-        .then(|| (s.name.clone(), format!("{:?}", s.map)))
-}
-
 impl PdfState {
     /// Records a font event of the walk, when recording.
     pub(crate) fn rec_font(&mut self, e: FontEv) {
@@ -406,40 +400,6 @@ impl PdfState {
                     .unwrap_or("")
             ));
         }
-        // the fonts are shared as where the page was recorded: a font
-        // used here keeps its `ff`, and one the page initializes finds
-        // no font of its key with an object of its own that only the
-        // pages before made
-        for &(f, k) in &rec.ffs {
-            if self.fonts.get(&f).is_some_and(|s| s.used) && self.ff(f) != k {
-                return Err(format!("font {f} shares another font here"));
-            }
-        }
-        let owned: BTreeSet<(Vec<u8>, String)> = self
-            .fonts
-            .iter()
-            .filter(|(f, s)| s.used && s.num > 0 && !base.contains(f))
-            .filter_map(|(_, s)| share_key(s))
-            .collect();
-        if !owned.is_empty() {
-            for e in &rec.events {
-                let FontEv::Init(f) = e else { continue };
-                match self.fonts.get(f) {
-                    Some(s) if s.used => {}
-                    Some(s) => {
-                        if share_key(s).is_some_and(|k| owned.contains(&k)) {
-                            return Err(format!("font {f} would share a page's font"));
-                        }
-                    }
-                    None => {
-                        let name = fonts.name(*f);
-                        if owned.iter().any(|(n, _)| n == name) {
-                            return Err(format!("font {f} would share a page's font"));
-                        }
-                    }
-                }
-            }
-        }
         // the objects TeX numbered are as they were where recorded, and
         // no destination the page defines was defined by a page before
         for e in &rec.events {
@@ -516,6 +476,7 @@ impl PdfState {
             }
         }
         let at = |n: usize| map.get(&n).copied().unwrap_or(n);
+        let _ = base;
         for (k, m) in &rec.marks {
             self.aux.marks.insert(at(*k), m.clone());
         }
@@ -532,13 +493,38 @@ impl PdfState {
                 }
             }
         }
-        debug_assert!(
-            rec.ffs
-                .iter()
-                .all(|&(f, k)| !self.fonts.contains_key(&f) || self.ff(f) == k)
-        );
-        // the contents
-        self.print(&rec.blob);
+        // the contents: as recorded, but where a font is shared here with
+        // another font than where it was recorded (`ff`), its tags
+        // (`/F<k> <size> Tf`) as here, the stream compressed again
+        let retag: std::collections::HashMap<FontId, FontId> = rec
+            .ffs
+            .iter()
+            .filter(|(f, _)| self.fonts.get(f).is_some_and(|s| s.used))
+            .filter_map(|&(f, k)| {
+                let here = self.ff(f);
+                (here != k).then_some((k, here))
+            })
+            .collect();
+        if retag.is_empty() {
+            self.print(&rec.blob);
+        } else {
+            let data = retag_fonts(&rec.shown.0, &retag);
+            let (body, filter) = if self.p.compress_level > 0 {
+                (crate::compress_memo(&data, self.p.compress_level), true)
+            } else {
+                (data, false)
+            };
+            let len = body.len().to_string();
+            let mut head = b"/Length           \n".to_vec();
+            head[8..8 + len.len()].copy_from_slice(len.as_bytes());
+            self.print(&head);
+            if filter {
+                self.print(b"/Filter /FlateDecode\n");
+            }
+            self.print(b">>\nstream\n");
+            self.print(&body);
+            self.print(b"\nendstream\nendobj\n");
+        }
         self.total_pages += 1;
         self.set_scratch(post);
         for l in &mut self.link_stack {
@@ -574,4 +560,44 @@ impl PdfState {
         self.link_stack = links;
         Ok(())
     }
+}
+
+/// `content` with every font tag `/F<k> <size> Tf` whose `k` `map`
+/// gives renamed.
+fn retag_fonts(content: &[u8], map: &std::collections::HashMap<FontId, FontId>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(content.len() + 16);
+    let mut i = 0;
+    while i < content.len() {
+        if content[i] == b'/'
+            && content.get(i + 1) == Some(&b'F')
+            && (i == 0 || matches!(content[i - 1], b'\n' | b' '))
+        {
+            let mut e = i + 2;
+            while e < content.len() && content[e].is_ascii_digit() {
+                e += 1;
+            }
+            // `<digits> <real> Tf`
+            let mut t = e;
+            if e > i + 2 && content.get(t) == Some(&b' ') {
+                t += 1;
+                while t < content.len() && (content[t].is_ascii_digit() || content[t] == b'.') {
+                    t += 1;
+                }
+            }
+            let k = std::str::from_utf8(&content[i + 2..e])
+                .ok()
+                .and_then(|x| x.parse::<FontId>().ok());
+            if let Some(k) = k
+                && content[t..].starts_with(b" Tf")
+                && let Some(n) = map.get(&k)
+            {
+                out.extend_from_slice(format!("/F{n}").as_bytes());
+                i = e;
+                continue;
+            }
+        }
+        out.push(content[i]);
+        i += 1;
+    }
+    out
 }

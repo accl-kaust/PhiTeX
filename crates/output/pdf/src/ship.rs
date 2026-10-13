@@ -1295,8 +1295,9 @@ impl PdfState {
             }
             r.walk = false;
             r.font_list.clone_from(&self.font_list);
-            r.other =
-                !self.xform_list.is_empty() || !self.bead_list.is_empty() || self.page_group_val != 0;
+            r.other = !self.xform_list.is_empty()
+                || !self.bead_list.is_empty()
+                || self.page_group_val != 0;
             r.obj_list.clone_from(&self.obj_list);
             r.ximage_list.clone_from(&self.ximage_list);
             r.marks = self
