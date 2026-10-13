@@ -208,6 +208,7 @@ impl Biber<'_> {
             self.generatesortinfo(&k, dl);
         }
         self.sort_list(dl)?;
+        self.log.push(alloc::format!("list {} of section {}: {} keys {:?}", dl.name, dl.section, dl.keys.len(), dl.keys.iter().take(5).collect::<Vec<_>>()));
         self.contextdata(dl);
         Ok(())
     }

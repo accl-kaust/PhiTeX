@@ -415,7 +415,7 @@ impl Biber<'_> {
     }
 
     fn instantiate_entry(&self, dl: &DataList, entry: &str, key: &str) -> String {
-        let Some(be) = self.entry(key) else { return String::new() };
+        let Some(be) = self.sections.get(&dl.section).and_then(|sec| sec.entry(key)) else { return String::new() };
         let b = be.borrow();
         let mut s = entry.to_string();
         let sub = |s: &mut String, ph: &str, v: &str| {
