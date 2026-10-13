@@ -433,3 +433,39 @@ fn pdflatex_hello() {
     assert_eq!(b.pages().len(), 1);
     assert!(b.is_pdf());
 }
+
+/// Loop-back rounds of `hello.tex` and of a document with a `\label`,
+/// cold and after a one-word edit, without and with the fixpoint
+/// (measurement; prints only).
+#[test]
+#[ignore = "heavy: the LaTeX format"]
+fn latex_loop_rounds() {
+    let dir = common::fixtures().join("latex/hello");
+    let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/cache/latex.fmt");
+    let hello = common::read(&dir.join("hello.tex"));
+    let label = "\\documentclass{article}\\begin{document}\\section{One}\\label{one}See section~\\ref{one} on page~\\pageref{one}.\\end{document}\n";
+    for (name, src) in [("hello", hello.as_str()), ("label", label)] {
+        for fixpoint in [false, true] {
+            let opts = Options {
+                prelude_bytes: std::fs::read(&cache).ok(),
+                time_limit: None,
+                ..options("hello", &dir, "", fixpoint, false)
+            };
+            let mut b = common::build(opts, Some(&prelude(false)), src);
+            if !cache.exists()
+                && let Some(bytes) = b.export_prelude()
+            {
+                let _ = std::fs::create_dir_all(cache.parent().expect("dir"));
+                let _ = std::fs::write(&cache, bytes);
+            }
+            let cold = (b.stats.loop_rounds, b.stats.rounds, b.stats.nodes_run);
+            let keys = b.wkeys();
+            b.edit(&src.replacen("\\begin{document}", "\\begin{document}Hi ", 1));
+            eprintln!(
+                "rounds {name} fixpoint={fixpoint}: cold {} loop rounds / {} evaluations / {} nodes run, edit {} / {} / {}; wkeys {keys:?}; guess {:?}",
+                cold.0, cold.1, cold.2, b.stats.loop_rounds, b.stats.rounds, b.stats.nodes_run,
+                phitex_tex::guess_wkeys(src)
+            );
+        }
+    }
+}
