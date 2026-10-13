@@ -170,8 +170,9 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "write" | "openout" | "closeout" => &["wopen:", "write:"],
         // (`\\immediate` of a pdfTeX object too, pdfTeX §1528)
         "immediate" => &["wopen:", "write:", "pdf:"],
-        // (§1099: `normal_paragraph` in the insert's own group; §1100)
-        "insert" | "vadjust" => NORMAL_PARAGRAPH,
+        // (§1099: `normal_paragraph` runs in the insert's own group, its
+        // resets undone at the group's end, §283, §1100)
+        "insert" | "vadjust" => &[],
         // (§638 `dead_cycles:=0`; §1374 the page's `\\write`, `\\openout`,
         // `\\closeout` whatsits, expanded, §1370; pdfTeX's at shipout)
         "shipout" => &["deadcycles", "write:", "wopen:", "pdf:"],
