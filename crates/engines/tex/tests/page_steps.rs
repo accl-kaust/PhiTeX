@@ -250,6 +250,17 @@ fn generated_edit_wall() {
         b.stats.nodes_run,
         b.stats.page_steps
     );
+    let at2 = at + 40 + word[at + 40..].find(" the ").expect("a word") + 1;
+    let word2 = format!("{}eht{}", &word[..at2], &word[at2 + 3..]);
+    let t = std::time::Instant::now();
+    b.edit(&word2);
+    eprintln!(
+        "EDITWALL {name} word2 wall_ms={:.1} nodes={} page_steps={}",
+        t.elapsed().as_secs_f64() * 1000.0,
+        b.stats.nodes_run,
+        b.stats.page_steps
+    );
+    let word = word2;
     let par = mid + word[mid..].find("\n\n").expect("a paragraph end") + 2;
     let ins = format!(
         "{}{}\n\n{}",
