@@ -18,7 +18,7 @@
 //! error. A document region is balanced by the pass, so a region never
 //! leaves one either.
 
-use phitex_defuse::{Field, Locality, ValueId};
+use phitex_defuse::ValueId;
 
 use crate::build::{FoldState, IGNORE_DEPTH};
 use crate::run::Run;
@@ -49,18 +49,13 @@ pub(crate) struct Level {
     /// What the opener recorded for the closer (a box's context and
     /// spec, an insert's number, …): as the scope kind's extra.
     pub extra: Vec<ValueId>,
-    /// Bindings to restore when the group closes: the field, what the
-    /// run's own view held before (`None`: nothing, the engine's value),
-    /// and the stamp of the save (`Run::stamp`): a global definition of
-    /// the field stamped later makes the entry inert (§283: a global
-    /// definition is retained).
-    #[allow(clippy::option_option)]
-    pub saved: Vec<(Field, Option<Option<ValueId>>, u64)>,
-    /// The latest entry of `saved` per field (O(1) `eq_save` check).
-    pub saved_ix: crate::FxHashMap<Field, usize>,
-    /// The run's `defs` length when the group opened: definitions after
-    /// it are the group's, undone at its close unless global.
-    pub defs_len: usize,
+    /// The group's number in the run's state table
+    /// ([`crate::runstate::State::open`]), where its saves and its local
+    /// definitions begin there, and the table's clock when it opened.
+    pub gid: u32,
+    pub save_base: usize,
+    pub def_base: usize,
+    pub open_stamp: u64,
     /// `\aftergroup` tokens (§282).
     pub ag: Vec<Tok>,
 }
@@ -81,9 +76,10 @@ impl Level {
             par: None,
             prev_graf: 0,
             extra,
-            saved: Vec::new(),
-            saved_ix: crate::FxHashMap::default(),
-            defs_len: 0,
+            gid: 0,
+            save_base: 0,
+            def_base: 0,
+            open_stamp: 0,
             ag: Vec::new(),
         }
     }
@@ -120,7 +116,7 @@ impl Run<'_, '_> {
     pub(crate) fn push_list(&mut self, mode: i32, group: i64, extra: Vec<ValueId>) -> i64 {
         let lid = self.new_lid();
         let mut l = Level::new(mode, group, lid, true, extra);
-        l.defs_len = self.defs.len();
+        self.open_level(&mut l);
         self.nest.push(l);
         lid
     }
@@ -129,8 +125,22 @@ impl Run<'_, '_> {
     /// (§1063), at the mode and list of the innermost level.
     pub(crate) fn push_group(&mut self, mode: i32, lid: i64, group: i64, extra: Vec<ValueId>) {
         let mut l = Level::new(mode, group, lid, false, extra);
-        l.defs_len = self.defs.len();
+        self.open_level(&mut l);
         self.nest.push(l);
+    }
+
+    fn open_level(&mut self, l: &mut Level) {
+        let (gid, sb, db, st) = self.st.open();
+        l.gid = gid;
+        l.save_base = sb;
+        l.def_base = db;
+        l.open_stamp = st;
+    }
+
+    /// The innermost group of this run open now (a paragraph is not one).
+    #[inline]
+    pub(crate) fn innermost_group(&self) -> Option<u32> {
+        self.nest.iter().rev().find(|l| l.group != 0).map(|l| l.gid)
     }
 
     /// Closes the innermost level: its local definitions undone (the
@@ -138,89 +148,38 @@ impl Run<'_, '_> {
     /// back (§282); the level is returned with its list.
     pub(crate) fn pop_level(&mut self) -> Option<Level> {
         let l = self.nest.pop()?;
-        // the group's definitions: the globals stay, the locals go (a
-        // paragraph is no group: its definitions are the level's below)
+        // (a paragraph is no group: its definitions are the level's below)
         if l.group != 0 {
-            let tail: Vec<(Field, ValueId, Locality)> =
-                self.defs.split_off(l.defs_len.min(self.defs.len()));
-            for d in &tail {
-                if let Some(ix) = self.def_ix.get_mut(&d.0) {
-                    ix.pop();
-                }
-            }
-            for d in tail {
-                if d.2 == Locality::Global {
-                    self.def_ix.entry(d.0).or_default().push(self.defs.len());
-                    self.defs.push(d);
-                }
-            }
-        }
-        for &(f, prev, at) in l.saved.iter().rev() {
-            if self.inert(f, at) {
-                continue;
-            }
-            if let Some(x) = prev {
-                self.own.insert(f, x);
-            } else {
-                self.own.remove(&f);
-            }
-            self.slot_note(f, prev);
+            self.st.close(l.save_base, l.def_base);
         }
         let toks: Vec<Tok> = l.ag.clone();
         self.push_toks(toks);
         Some(l)
     }
 
-    /// Before a local definition of `f`: the innermost open group saves
-    /// what the run's view held, to restore at its close. Nothing is
-    /// saved outside every group of this run (the definition is the
-    /// run's, for the engine's scope). A group saves once per field
-    /// while its value is its own; after a global definition (its saved
-    /// entries inert) the next local one saves again, as `eq_save` does
-    /// when `eq_level` is `level_one` (§277, §283): that save restores
-    /// the global value at the close.
-    pub(crate) fn save_local(&mut self, f: Field) {
-        let prev = self.own.get(&f).copied();
-        let Some(k) = self.nest.iter().rposition(|l| l.group != 0) else {
-            return;
-        };
-        if let Some(&i) = self.nest[k].saved_ix.get(&f)
-            && !self.inert(f, self.nest[k].saved[i].2)
-        {
-            return;
-        }
-        self.stamp += 1;
-        let at = self.stamp;
-        let l = &mut self.nest[k];
-        l.saved_ix.insert(f, l.saved.len());
-        l.saved.push((f, prev, at));
-    }
-
-    /// Whether a saved entry of `f` stamped `at` was made inert by a
-    /// global definition since.
-    fn inert(&self, f: Field, at: u64) -> bool {
-        self.ginert.get(&f).is_some_and(|&g| g > at)
-    }
-
-    /// Rebuilds `def_ix` after `defs` moved (an in-place change below
-    /// the innermost group, `modify_at`).
-    pub(crate) fn reindex_defs(&mut self) {
-        self.def_ix.clear();
-        for (i, d) in self.defs.iter().enumerate() {
-            self.def_ix.entry(d.0).or_default().push(i);
+    /// Levels taken off the nest without closing them (a group left to
+    /// the engine as a scope, the groups open at the end of the run):
+    /// the local definitions made in their groups are the run's own.
+    pub(crate) fn abandon_levels(&mut self, ls: &[Level]) {
+        if let Some(l) = ls.iter().find(|l| l.group != 0) {
+            self.st.abandon(l.save_base, l.def_base, l.open_stamp);
         }
     }
 
-    /// A binding of `f` made at group depth `lvl` changed in place
-    /// (§1079, §1247: a box register "at the same level"): the value in
-    /// force is replaced without saving it, since the group that made the
-    /// binding saved what it hid, and the definition is filed with that
-    /// group's definitions, below every group opened since, so their
-    /// closes keep it. `base` is the depth of level 0.
-    pub(crate) fn modify_at(&mut self, f: Field, val: ValueId, lvl: i64, base: i64) {
-        self.own.insert(f, Some(val));
+    /// A binding of location `loc` made at group depth `lvl` changed in
+    /// place (§1079, §1247: a box register "at the same level"): the
+    /// value in force is replaced without saving it, since the group
+    /// that made the binding saved what it hid, and the definition is
+    /// that group's, so the closes of the groups opened since keep it.
+    /// `base` is the depth of level 0.
+    pub(crate) fn modify_at(
+        &mut self,
+        loc: crate::runstate::Loc,
+        val: ValueId,
+        lvl: i64,
+        base: i64,
+    ) {
         self.irreversible += 1;
-        self.slot_note(f, Some(Some(val)));
         // the first open group deeper than the binding's level
         let mut depth = base;
         let mut at = None;
@@ -233,39 +192,11 @@ impl Run<'_, '_> {
                 }
             }
         }
-        let d = (f, val, Locality::Local);
-        match at {
-            // the binding is the innermost group's own (or the run's,
-            // outside every group): a definition at this level
-            None => {
-                if self.in_local_group() {
-                    self.def_ix.entry(f).or_default().push(self.defs.len());
-                    self.defs.push(d);
-                } else {
-                    self.defs.retain(|x| x.0 != f);
-                    self.defs.push(d);
-                    self.reindex_defs();
-                }
-            }
-            Some(i) => {
-                let pos = self.nest[i].defs_len.min(self.defs.len());
-                self.defs.insert(pos, d);
-                for l in &mut self.nest[i..] {
-                    l.defs_len += 1;
-                }
-                self.reindex_defs();
-            }
-        }
-    }
-
-    /// A global definition of `f`: every saved entry for it is inert
-    /// (the entries stamped before it, `inert`).
-    pub(crate) fn make_inert(&mut self, f: Field) {
-        if self.nest.is_empty() {
-            return;
-        }
-        self.stamp += 1;
-        self.ginert.insert(f, self.stamp);
+        // the binding is the run's, outside every group: its definition
+        // at the base level; else a group's of this run
+        let at_base = at.is_none() && !self.in_local_group();
+        self.st
+            .modify(loc, crate::runstate::Native::Raw(val), at_base);
     }
 
     /// Whether a local definition made now would belong to a group of

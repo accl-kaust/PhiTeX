@@ -2825,11 +2825,7 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
             // they append to the paragraph's list, may begin one (§1091,
             // `\\prevgraf` 0) and open and close no scope; no meaning
             // or catcode is read again, §1030-§1044)
-            if !toks.is_empty()
-                && toks
-                    .iter()
-                    .all(|t| matches!(t, Tok::C(_)) && matches!(t.cat(), Some(10..=12)))
-            {
+            if !toks.is_empty() && toks.iter().all(|t| matches!(t.cat(), Some(10..=12))) {
                 let mut b = Bound {
                     state: Some(Vec::new()),
                     no_scope: true,
@@ -2860,38 +2856,35 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
                 text.clear();
                 let mut ok = true;
                 for t in &toks {
-                    match t {
-                        Tok::S(n) => {
-                            // (a name the pass reads back as one token:
-                            // letters of the regime, or one other character)
-                            let word = !n.is_empty()
-                                && n.chars()
-                                    .all(|c| c.is_ascii_alphabetic() || (at && c == '@'));
-                            let symbol = n.chars().count() == 1
-                                && n.chars().all(|c| c.is_ascii() && !c.is_ascii_alphabetic());
-                            if !(word || symbol) {
-                                ok = false;
-                                break;
-                            }
-                            text.push('\\');
-                            text.push_str(n);
-                            if word {
-                                text.push(' ');
-                            }
+                    if let Some(n) = t.as_cs() {
+                        // (a name the pass reads back as one token:
+                        // letters of the regime, or one other character)
+                        let word = !n.is_empty()
+                            && n.chars()
+                                .all(|c| c.is_ascii_alphabetic() || (at && c == '@'));
+                        let symbol = n.chars().count() == 1
+                            && n.chars().all(|c| c.is_ascii() && !c.is_ascii_alphabetic());
+                        if !(word || symbol) {
+                            ok = false;
+                            break;
                         }
-                        Tok::C(_) => {
-                            let c = t.chr();
-                            let cat = t.cat().unwrap_or(12);
-                            let Some(ch) = char::from_u32(c).filter(char::is_ascii) else {
-                                ok = false;
-                                break;
-                            };
-                            if plain_catcode(ch as u8, at) != cat {
-                                ok = false;
-                                break;
-                            }
-                            text.push(ch);
+                        text.push('\\');
+                        text.push_str(&n);
+                        if word {
+                            text.push(' ');
                         }
+                    } else {
+                        let c = t.chr();
+                        let cat = t.cat().unwrap_or(12);
+                        let Some(ch) = char::from_u32(c).filter(char::is_ascii) else {
+                            ok = false;
+                            break;
+                        };
+                        if plain_catcode(ch as u8, at) != cat {
+                            ok = false;
+                            break;
+                        }
+                        text.push(ch);
                     }
                 }
                 if ok {
@@ -3128,9 +3121,9 @@ fn mean_kind(m: &Mean) -> &'static str {
 }
 
 /// The definitions a run made outside its bound: the violation, if any.
-pub(crate) fn check_defs(r: &Run<'_, '_>, h: &Hint) -> Option<String> {
+pub(crate) fn check_defs(r: &mut Run<'_, '_>, h: &Hint) -> Option<String> {
     let b = h.bound.as_ref()?;
-    for (f, _, _) in &r.defs {
+    for f in r.def_fields() {
         let name = match &*r.v.get(f.0) {
             Value::Str(s) => s.to_string(),
             _ => continue,
@@ -3159,12 +3152,12 @@ pub(crate) fn check_defs(r: &Run<'_, '_>, h: &Hint) -> Option<String> {
 
 /// `PHITEX_HINTS=2`: the node's definitions, for learning the state
 /// each command sets.
-pub(crate) fn debug_defs(r: &Run<'_, '_>, h: &Hint) {
+pub(crate) fn debug_defs(r: &mut Run<'_, '_>, h: &Hint) {
     if std::env::var("PHITEX_HINTS").is_ok_and(|x| x == "2") {
         let mut fs: Vec<String> = r
-            .defs
-            .iter()
-            .filter_map(|(f, _, _)| match &*r.v.get(f.0) {
+            .def_fields()
+            .into_iter()
+            .filter_map(|f| match &*r.v.get(f.0) {
                 Value::Str(s) if !is_cs_field(s) => {
                     Some(s.split(':').next().unwrap_or(s).to_owned())
                 }
