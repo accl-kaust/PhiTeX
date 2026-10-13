@@ -420,13 +420,13 @@ impl Default for Options {
 
 /// A value outside any table, to carry an environment between engines.
 #[derive(Clone, Debug)]
-enum Tree {
+pub(crate) enum Tree {
     Leaf(Value),
     List(Vec<Tree>),
     Seq(Vec<Tree>),
 }
 
-fn export(v: &Values, x: ValueId) -> Tree {
+pub(crate) fn export(v: &Values, x: ValueId) -> Tree {
     match &*v.get(x) {
         Value::List(xs) => Tree::List(xs.iter().map(|&y| export(v, y)).collect()),
         Value::Seq(_) => Tree::Seq(v.seq_to_vec(x).into_iter().map(|y| export(v, y)).collect()),
@@ -434,7 +434,7 @@ fn export(v: &Values, x: ValueId) -> Tree {
     }
 }
 
-fn import(v: &Values, t: &Tree) -> ValueId {
+pub(crate) fn import(v: &Values, t: &Tree) -> ValueId {
     match t {
         Tree::Leaf(x) => v.intern(x.clone()),
         Tree::List(xs) => {
@@ -1371,11 +1371,22 @@ impl Graph {
         let t0 = std::time::Instant::now();
         let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let spent = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // a file asked for again in the evaluation (by every page step,
+        // say) is answered from here, not read and converted again
+        let answered: std::sync::Mutex<FxHashMap<String, Option<ValueId>>> =
+            std::sync::Mutex::new(FxHashMap::default());
         self.eng.set_env_provider(Box::new(move |v, f| {
             let name = v.as_str(f.0)?;
             let name = name.strip_prefix("file:")?;
             if written.iter().any(|w| w == name) {
                 return None;
+            }
+            if let Some(&val) = answered
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(name)
+            {
+                return Some(val);
             }
             let n = count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             let t1 = std::time::Instant::now();
@@ -1385,6 +1396,10 @@ impl Graph {
                 let text: String = bytes.iter().map(|&b| char::from(b)).collect();
                 v.list(vec![v.str(&path), v.str(&text)])
             });
+            answered
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(name.to_owned(), val);
             if let Ok(mut l) = log.lock() {
                 l.push((name.to_owned(), f, val, hash));
             }

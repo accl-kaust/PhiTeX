@@ -1558,6 +1558,18 @@ fn document_named_plain() {
 #[test]
 fn nonstop_fatal_errors_end_the_job() {
     let _one = one();
+    // the LaTeX format, built once before the timed cases (a cold
+    // format build is not what the 60 s bound measures)
+    let seed = scratch("nonstop-seed");
+    std::fs::write(
+        seed.join("seed.tex"),
+        "\\documentclass{article}\\begin{document}x\\end{document}\n",
+    )
+    .expect("the seed");
+    let _ = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &seed)
+        .args(["build", "seed.tex"])
+        .output()
+        .expect("phitex runs");
     for (name, fatal) in [
         (
             "errread",

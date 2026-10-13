@@ -9,7 +9,7 @@ use phitex_defuse::{
     Claim, Ctx, Effect, Field, Locality, MayDefine, OpId, Operation, Stop, ValueId, Values,
 };
 
-use crate::run::{Halt, Ops, R, Run, decode_frames};
+use crate::run::{Halt, Ops, R, Run};
 use crate::val::{int_of, list_of, str_of};
 
 /// The operations' ids, known once all are registered.
@@ -27,7 +27,14 @@ pub(crate) fn run_node(
     o: Ops,
     body: impl FnOnce(&mut Run<'_, '_>) -> R<()>,
 ) -> Result<ValueId, Stop> {
-    run_node_parking(cx, o, false, body)
+    let t0 = std::time::Instant::now();
+    let op = cx.op();
+    let r = run_node_parking(cx, o, false, body);
+    // (a slow node named, for the edit path's phases)
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() >= 20 {
+        eprintln!("slow node: op {op:?} {:?}", t0.elapsed());
+    }
+    r
 }
 
 /// [`run_node`]; with `parks`, a run that stops inside a command parks
@@ -135,7 +142,7 @@ pub(crate) fn run_node_parking(
             // nothing after the error is read: the rest of the input is
             // claimed, and the main list ends here for the page builder
             // (the page it holds is not shipped)
-            r.frames.clear();
+            r.input = crate::input::Input::new();
             r.claim_rest = true;
             // (for the output: pdfTeX writes no PDF file after one)
             let _ = r.log("fatal", "");
@@ -233,10 +240,10 @@ impl Operation for Exec {
             // (a resumed run has done this, and continues its commands)
             if !r.resumed {
                 r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
-                let fs = decode_frames(r.v, &args);
-                let tokens = matches!(fs.first(), Some(crate::run::Frame::Toks(..)));
+                let fs = crate::run::decode_segs(r.v, &args);
+                let tokens = matches!(fs.first(), Some(crate::input::Seg::Toks(..)));
                 crate::hints::count(r, if tokens { 5 } else { 6 });
-                r.frames.extend(fs);
+                r.input.append_text(fs);
                 if let Some((c, k)) = crate::run::carried_conds(r.v, &args) {
                     r.conds = c;
                     r.if_codes = k;
