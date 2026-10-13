@@ -801,6 +801,12 @@ impl Run<'_, '_> {
         let mut keep: Vec<Level> = Vec::with_capacity(self.input.levels.len());
         let mut found = false;
         for &l in self.input.levels.iter().rev() {
+            if found {
+                // (below the file's end marker: the files that \input
+                // it go on, §362)
+                keep.push(l);
+                continue;
+            }
             match l.kind {
                 kind::LINE => {
                     if seen_line {
@@ -816,7 +822,7 @@ impl Run<'_, '_> {
                     keep.push(l);
                 }
                 _ => {
-                    if !found && self.input.arena.get(l.rest()).iter().any(|&t| is_eof(t)) {
+                    if self.input.arena.get(l.rest()).iter().any(|&t| is_eof(t)) {
                         found = true;
                     }
                     keep.push(l);
