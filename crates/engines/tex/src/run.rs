@@ -590,11 +590,10 @@ impl<'c, 'a> Run<'c, 'a> {
             self.cx.use_env(f)?
         };
         let x = x.filter(|&x| !crate::val::list_of(v, x).is_empty());
+        // (the text's hash: its value's id, a content hash, so a font's
+        // or map's bytes are not copied and hashed again at every read)
         if let Some(t) = x.and_then(|x| crate::val::list_of(v, x).get(1).copied()) {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            std::hash::Hash::hash(&str_of(v, t), &mut h);
-            self.fread
-                .push((key.to_owned(), std::hash::Hasher::finish(&h)));
+            self.fread.push((key.to_owned(), t.raw()));
         }
         Ok(x)
     }
