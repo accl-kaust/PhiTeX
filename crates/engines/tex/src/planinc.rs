@@ -18,7 +18,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use phitex_defuse::{FxHashMap, Value, ValueId, Values};
+use phitex_defuse::{Field, FxHashMap, Value, ValueId, Values};
 
 use crate::build::{FoldState, IGNORE_DEPTH_STATE, fold_entries};
 use crate::page::PageStart;
@@ -31,6 +31,17 @@ pub(crate) struct ListMemo {
     pub entries: Vec<ValueId>,
     pub blocks: Vec<(usize, usize, FoldState, bool)>,
     pub items: Vec<ValueId>,
+}
+
+impl Default for ListMemo {
+    fn default() -> ListMemo {
+        ListMemo {
+            root: ValueId::UNIT,
+            entries: Vec::new(),
+            blocks: Vec::new(),
+            items: Vec::new(),
+        }
+    }
 }
 
 /// A page as a run of the plan found it, at its own indices.
@@ -64,12 +75,14 @@ impl PageRec {
 
 /// What a run of the plan leaves for the next.
 pub(crate) struct Plan {
-    pub items: Arc<ListMemo>,
+    pub items: ListMemo,
     /// The insertions on the list by class.
     pub ins: std::collections::BTreeMap<u16, isize>,
     pub table: ValueId,
     pub marker: ValueId,
-    pub pages: Vec<PageRec>,
+    pub pages: Vec<Arc<PageRec>>,
+    /// `pp:items:<j>`, `pp:start:<j>`, `pp:mk:<j>`.
+    pub fields: Vec<[Field; 3]>,
     pub by_idx: FxHashMap<usize, Vec<usize>>,
     pub epoch: u64,
     pub spec: bool,
@@ -82,14 +95,14 @@ fn cache() -> &'static Cache {
     C.get_or_init(Cache::default)
 }
 
-/// The previous run's plan for the value table `v`, when its values
-/// are still valid at `epoch`.
-pub(crate) fn previous(v: &Values, epoch: u64) -> Option<Arc<Plan>> {
-    let c = cache()
+/// The previous run's plan for the value table `v`, taken, when its
+/// values are still valid at `epoch`.
+pub(crate) fn take(v: &Values, epoch: u64) -> Option<Plan> {
+    let mut c = cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let p = c.get(&v.instance())?;
-    (!p.spec || p.epoch == epoch).then(|| p.clone())
+    let p = Arc::try_unwrap(c.remove(&v.instance())?).ok()?;
+    (!p.spec || p.epoch == epoch).then_some(p)
 }
 
 /// Keeps `p` for the next run.
@@ -220,65 +233,163 @@ fn deletes(v: &Values, block: &[ValueId]) -> bool {
     })
 }
 
-/// The main list's entries `all` folded, from `prev`'s fold where the
-/// edit left it alone.
-pub(crate) fn fold(v: &Values, all: ValueId, prev: Option<&ListMemo>) -> Arc<ListMemo> {
-    let full = || {
-        let entries = v.seq_to_vec(all);
-        refold(
-            v,
-            all,
+/// Where the fold changed: the items before `pre` and the last `suf`
+/// are the old ones (moved), `removed` the old items between, and the
+/// old fold had `old_len` items.
+pub(crate) struct Change {
+    pub pre: usize,
+    pub suf: usize,
+    pub removed: Vec<ValueId>,
+    pub old_len: usize,
+}
+
+/// The main list's entries `all` folded, `prev`'s fold changed in place
+/// where the edit changed it; `None` when nothing of it was kept.
+pub(crate) fn fold(v: &Values, all: ValueId, prev: Option<ListMemo>) -> (ListMemo, Option<Change>) {
+    let full = |entries: Vec<ValueId>| {
+        let mut items = Vec::new();
+        let mut blocks = Vec::new();
+        let mut st = IGNORE_DEPTH_STATE;
+        let mut at = 0;
+        while at < entries.len() {
+            let end = block_end(&entries, at);
+            let del = deletes(v, &entries[at..end]);
+            blocks.push((at, items.len(), st, del));
+            fold_entries(v, 0, &entries[at..end], &mut st, &mut items);
+            at = end;
+        }
+        ListMemo {
+            root: all,
             entries,
-            Vec::new(),
-            Vec::new(),
-            0,
-            IGNORE_DEPTH_STATE,
-            None,
-        )
+            blocks,
+            items,
+        }
     };
-    let Some(p) = prev else {
-        return Arc::new(full());
+    let Some(mut p) = prev else {
+        return (full(v.seq_to_vec(all)), None);
     };
+    let old_len = p.items.len();
+    if p.root == all {
+        return (
+            p,
+            Some(Change {
+                pre: old_len,
+                suf: 0,
+                removed: Vec::new(),
+                old_len,
+            }),
+        );
+    }
     let (old_n, new_n) = (p.entries.len() as u64, v.seq_len(all));
     let pre = common(v, p.root, all, false).min(old_n.min(new_n));
     let suf = common(v, p.root, all, true).min(old_n.min(new_n) - pre);
+    let mut mid = Vec::new();
+    range(v, all, pre, new_n - suf, &mut mid);
     let (pre, suf) = (to_usize(pre), to_usize(suf));
     let (old_n, new_n) = (to_usize(old_n), to_usize(new_n));
-    let mut entries = Vec::with_capacity(new_n);
-    entries.extend_from_slice(&p.entries[..pre]);
-    range(v, all, pre as u64, (new_n - suf) as u64, &mut entries);
-    entries.extend_from_slice(&p.entries[old_n - suf..]);
-    if entries.len() != new_n {
-        return Arc::new(full());
+    if pre + mid.len() + suf != new_n {
+        return (full(v.seq_to_vec(all)), None);
     }
+    p.entries.splice(pre..old_n - suf, mid);
     // the last block starting at or before the change, and none that
     // deletes after it (a deletion reaches into the items before it)
     let mut bi = p.blocks.partition_point(|b| b.0 <= pre).saturating_sub(1);
     while bi > 0 && p.blocks[bi].3 {
         bi -= 1;
     }
-    let Some(&(at, out0, st, _)) = p.blocks.get(bi) else {
-        return Arc::new(full());
+    let Some(&(mut at, out0, mut st, _)) = p.blocks.get(bi) else {
+        return (full(p.entries), None);
     };
-    let items = p.items[..out0].to_vec();
-    let blocks = p.blocks[..bi].to_vec();
     let dn = delta(new_n, old_n);
-    if crate::exec::env_flag!("PHITEX_PLAN_TIME") {
-        eprintln!(
-            "plan fold: {old_n} -> {new_n} entries, common start {pre} end {suf}, from block {bi} at {at}"
-        );
+    let mut fresh: Vec<ValueId> = Vec::new();
+    let mut fblocks = Vec::new();
+    while at < p.entries.len() {
+        if at >= new_n - suf
+            && let Some(o) = at.checked_add_signed(-dn)
+            && let Ok(k) = p.blocks.binary_search_by_key(&o, |b| b.0)
+            && converges(st, &p, k)
+        {
+            let made = fresh.len();
+            let removed = splice(&mut p, bi, k, out0, fresh, fblocks, st, dn);
+            p.root = all;
+            let suf = p.items.len() - out0 - made;
+            return (
+                p,
+                Some(Change {
+                    pre: out0,
+                    suf,
+                    removed,
+                    old_len,
+                }),
+            );
+        }
+        let end = block_end(&p.entries, at);
+        if deletes(v, &p.entries[at..end]) {
+            // (a deletion may reach into the items before the change)
+            return (full(p.entries), None);
+        }
+        fblocks.push((at, out0 + fresh.len(), st, false));
+        fold_entries(v, 0, &p.entries[at..end], &mut st, &mut fresh);
+        at = end;
     }
-    let r = refold(
-        v,
-        all,
-        entries,
-        blocks,
-        items,
-        at,
-        st,
-        Some((p, new_n - suf, dn)),
-    );
-    Arc::new(r)
+    let removed: Vec<ValueId> = p.items.drain(out0..).collect();
+    p.items.extend(fresh);
+    p.blocks.truncate(bi);
+    p.blocks.extend(fblocks);
+    p.root = all;
+    (
+        p,
+        Some(Change {
+            pre: out0,
+            suf: 0,
+            removed,
+            old_len,
+        }),
+    )
+}
+
+/// The old fold from its block `k` on after the new items `fresh` and
+/// their blocks (the old ones from `bi` replaced): the same entries in
+/// the same state (the items since the last `build_page` aside, which
+/// only a deletion reads). The old items replaced.
+#[allow(clippy::too_many_arguments)]
+fn splice(
+    p: &mut ListMemo,
+    bi: usize,
+    k: usize,
+    out0: usize,
+    fresh: Vec<ValueId>,
+    fblocks: Vec<(usize, usize, FoldState, bool)>,
+    st: FoldState,
+    dn: isize,
+) -> Vec<ValueId> {
+    let k_out = p.blocks[k].1;
+    let dout = delta(out0 + fresh.len(), k_out);
+    let dbp = delta(st.since_bp, p.blocks[k].2.since_bp);
+    let removed: Vec<ValueId> = p.items.splice(out0..k_out, fresh).collect();
+    let mut prev_bp = 0;
+    let mut shifting = true;
+    let tail: Vec<_> = p.blocks[k..]
+        .iter()
+        .map(|&(e, o2, mut s, d)| {
+            // (until a `build_page` sets the count again)
+            shifting &= s.since_bp >= prev_bp;
+            prev_bp = s.since_bp;
+            if shifting {
+                s.since_bp = s.since_bp.saturating_add_signed(dbp);
+            }
+            (
+                e.saturating_add_signed(dn),
+                o2.saturating_add_signed(dout),
+                s,
+                d,
+            )
+        })
+        .collect();
+    p.blocks.truncate(bi);
+    p.blocks.extend(fblocks);
+    p.blocks.extend(tail);
+    removed
 }
 
 /// Whether the fold in state `st` reaches the same items as the old
@@ -300,68 +411,4 @@ pub(crate) fn delta(a: usize, b: usize) -> isize {
 
 fn to_usize(x: u64) -> usize {
     usize::try_from(x).unwrap_or(usize::MAX)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn refold(
-    v: &Values,
-    root: ValueId,
-    entries: Vec<ValueId>,
-    mut blocks: Vec<(usize, usize, FoldState, bool)>,
-    mut items: Vec<ValueId>,
-    mut at: usize,
-    mut st: FoldState,
-    old: Option<(&ListMemo, usize, isize)>,
-) -> ListMemo {
-    while at < entries.len() {
-        if let Some((p, suf, dn)) = old
-            && at >= suf
-            && let Some(o) = at.checked_add_signed(-dn)
-            && let Ok(k) = p.blocks.binary_search_by_key(&o, |b| b.0)
-            && converges(st, p, k)
-        {
-            // the old fold from here on: the same entries in the same
-            // state (the items since the last `build_page` aside, which
-            // only a deletion reads)
-            let dout = delta(items.len(), p.blocks[k].1);
-            let dbp = delta(st.since_bp, p.blocks[k].2.since_bp);
-            items.extend_from_slice(&p.items[p.blocks[k].1..]);
-            let mut prev_bp = 0;
-            let mut shifting = true;
-            blocks.extend(p.blocks[k..].iter().map(|&(e, o2, mut s, d)| {
-                // (until a `build_page` sets the count again)
-                shifting &= s.since_bp >= prev_bp;
-                prev_bp = s.since_bp;
-                if shifting {
-                    s.since_bp = s.since_bp.saturating_add_signed(dbp);
-                }
-                (
-                    e.saturating_add_signed(dn),
-                    o2.saturating_add_signed(dout),
-                    s,
-                    d,
-                )
-            }));
-            if crate::exec::env_flag!("PHITEX_PLAN_TIME") {
-                eprintln!("plan fold: converged at entry {at} (suffix from {suf})");
-            }
-            return ListMemo {
-                root,
-                entries,
-                blocks,
-                items,
-            };
-        }
-        let end = block_end(&entries, at);
-        let del = deletes(v, &entries[at..end]);
-        blocks.push((at, items.len(), st, del));
-        fold_entries(v, 0, &entries[at..end], &mut st, &mut items);
-        at = end;
-    }
-    ListMemo {
-        root,
-        entries,
-        blocks,
-        items,
-    }
 }
