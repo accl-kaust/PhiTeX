@@ -112,6 +112,8 @@ impl Default for Slot {
 struct Meta {
     loc: Loc,
     /// The engine's value when first defined, if the run had read it.
+    // (None: not read; Some(None): read, undefined in the engine)
+    #[allow(clippy::option_option)]
     eng: Option<Option<ValueId>>,
     /// The definition in force at the run's base level, if any.
     publ: Option<(Native, Locality)>,
@@ -733,6 +735,8 @@ struct PEntry {
 }
 
 struct PMeta {
+    // None: not read; Some(None): read, undefined in the engine
+    #[allow(clippy::option_option)]
     eng: Option<Option<ValueId>>,
     publ: Option<(Option<ValueId>, Locality)>,
     ldef_stamp: u64,
