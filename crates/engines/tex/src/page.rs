@@ -431,6 +431,7 @@ impl Run<'_, '_> {
             let x = self.cx.use_field(v.field(&format!("pgstd:{}", j - 1)))?;
             let xs = x.map(|x| list_of(v, x)).unwrap_or_default();
             if let Some(&cs) = xs.first() {
+                readdef = cs;
                 self.preload_counts(cs);
             }
             inherited = pgst_pairs(v, xs.get(1).copied());
@@ -467,8 +468,6 @@ impl Run<'_, '_> {
                 cs.push(v.int(self.int(&format!("count:{k}"))?));
             }
             let counts = v.list(cs);
-            log_pub(&self.ops, "pgdef", j, count_entries(v, Some(counts)));
-            self.cx.publish(v.field(&format!("pgdef:{j}")), counts);
             if !self.pagefx_pub {
                 log_pub(&self.ops, "pagefx", j, Vec::new());
             }
@@ -1317,29 +1316,50 @@ impl FinalState {
         let mut state: std::collections::BTreeMap<String, (Field, ValueId)> =
             std::collections::BTreeMap::new();
         let mut cur = ValueId::UNIT;
-        let mut counts = ValueId::UNIT;
+        // `\\count0..9` before the chain, then as folded
+        let mut counts: Vec<i64> = Vec::with_capacity(10);
+        for k in 0..10 {
+            counts.push(cx.use_field(v.field(&format!("count:{k}")))?.map_or(0, |x| int_of(v, x)));
+        }
+        let ints = |x: ValueId| -> Vec<i64> { list_of(v, x).iter().map(|&y| int_of(v, y)).collect() };
         for j in 0..steps {
             let Some(xs) = entries.get(&j) else { continue };
             let g = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
+            let serial = int_of(v, g(5)) != 0;
             // what step j read against what the steps before it left
-            if j > 0 && int_of(v, g(5)) == 0 {
+            // (step 0 reads the state before the chain itself)
+            let read_counts = if j == 0 { counts.clone() } else { ints(g(4)) };
+            let read_pairs = pgst_pairs(v, Some(g(2)));
+            if j > 0 && !serial {
                 if g(2) != cur {
-                    let read = named(v, &pgst_pairs(v, Some(g(2))));
+                    let read = named(v, &read_pairs);
                     let want: Vec<(String, ValueId)> =
                         state.iter().map(|(n, &(_, x))| (n.clone(), x)).collect();
                     for n in differing(&read, &want) {
+                        if crate::exec::env_flag!("PHITEX_PGST") {
+                            let r = |e: &[(String, ValueId)]| {
+                                e.iter().find(|p| p.0 == n).map(|p| v.render(p.1))
+                            };
+                            eprintln!("pgst refuted at {j}: {n} read {:?} want {:?}", r(&read), r(&want));
+                        }
                         refuted.insert(n);
                     }
                 }
-                if g(4) != counts && counts != ValueId::UNIT {
-                    let read = count_entries(v, Some(g(4)));
-                    let want = count_entries(v, Some(counts));
-                    for n in differing(&read, &want) {
-                        refuted.insert(n);
+                for (k, (a, b)) in read_counts.iter().zip(&counts).enumerate() {
+                    if a != b {
+                        refuted.insert(format!("count:{k}"));
                     }
                 }
             }
-            counts = g(3);
+            // `\\count0..9` by the step's change, not its result: the page
+            // number the routine advances (`\\advancepageno`, or not on a
+            // dead cycle) lands right on every page from one round's runs
+            let out_counts = ints(g(3));
+            if out_counts.len() == 10 && read_counts.len() == 10 {
+                for k in 0..10 {
+                    counts[k] += out_counts[k] - read_counts[k];
+                }
+            }
             for (f, x) in pgst_pairs(v, Some(g(1))) {
                 let name = crate::val::field_name(v, f);
                 let pre = cx.use_field(f)?;
@@ -1357,22 +1377,16 @@ impl FinalState {
             let e: Vec<(String, ValueId)> =
                 state.iter().map(|(n, &(_, x))| (n.clone(), x)).collect();
             log_pub(o, "pgst", j, e);
+            let jj = v.int(i64::try_from(j).unwrap_or(0));
             if cur != ValueId::UNIT {
                 cx.publish(v.field(&format!("pgst:{j}")), cur);
                 // (kept for the client: the next session's guess)
-                let jj = v.int(i64::try_from(j).unwrap_or(0));
-                cx.contribute(
-                    v.field("pgsts"),
-                    v.seq_unit(v.list(vec![v.int(0), jj, cur])),
-                );
+                cx.contribute(v.field("pgsts"), v.seq_unit(v.list(vec![v.int(0), jj, cur])));
             }
-            if counts != ValueId::UNIT {
-                let jj = v.int(i64::try_from(j).unwrap_or(0));
-                cx.contribute(
-                    v.field("pgsts"),
-                    v.seq_unit(v.list(vec![v.int(1), jj, counts])),
-                );
-            }
+            let cs = v.list(counts.iter().map(|&c| v.int(c)).collect());
+            log_pub(o, "pgdef", j, count_entries(v, Some(cs)));
+            cx.publish(v.field(&format!("pgdef:{j}")), cs);
+            cx.contribute(v.field("pgsts"), v.seq_unit(v.list(vec![v.int(1), jj, cs])));
         }
         // a refuted round counts towards the serial chain (two make it
         // serial: `Run::page_step`)

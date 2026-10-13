@@ -71,7 +71,9 @@ fn generated_documents() {
         let Ok(src) = std::fs::read_to_string(dir.join(format!("{name}.tex"))) else {
             continue;
         };
-        let opts = || common::options(&format!("./{name}.tex"), name, "", &dir);
+        let want = std::fs::read(dir.join(format!("{name}.dvi"))).ok();
+        let comment = want.as_deref().map(common::dvi_comment).unwrap_or_default();
+        let opts = || common::options(&format!("./{name}.tex"), name, &comment, &dir);
         for t in [1, 4, 8] {
             let o = phitex_tex::Options {
                 threads: Some(t),
@@ -84,6 +86,12 @@ fn generated_documents() {
             );
         }
         let mut b = common::build(opts(), Some(&common::plain()), &src);
+        if let Some(want) = &want {
+            eprintln!(
+                "{name} vs tex: {:?}",
+                common::first_difference(&b.output().0, want)
+            );
+        }
         let s = &b.stats;
         eprintln!(
             "{name} cold: pages {}, loop rounds {}, critical path {:?}, runs {}, nodes run {}, page steps {}",
