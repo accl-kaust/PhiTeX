@@ -618,7 +618,12 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
 fn pdf_opts(name: &str, dir: &Path) -> Options {
     Options {
         prelude_bytes: std::fs::read(pdf_cache()).ok(),
-        time_limit: Some(std::time::Duration::from_secs(120)),
+        time_limit: Some(std::time::Duration::from_secs(
+            std::env::var("PHITEX_TEST_LIMIT")
+                .ok()
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(120),
+        )),
         ..options(name, dir, "", false, true)
     }
 }
