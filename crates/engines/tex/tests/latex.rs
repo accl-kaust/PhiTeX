@@ -348,12 +348,53 @@ fn hello(pdf: bool) -> Build {
     } else {
         common::dvi_comment(&want)
     };
-    let opts = options("hello", &dir, &comment, false, pdf);
+    // the format, kept between runs (the sandbox's $HOME is empty)
+    let cache = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../target/cache")
+        .join(if pdf { "pdflatex.fmt" } else { "latex.fmt" });
+    let opts = || Options {
+        prelude_bytes: std::fs::read(&cache).ok(),
+        // the format takes longer than the default limit in a debug build
+        time_limit: None,
+        ..options("hello", &dir, &comment, false, pdf)
+    };
+    let cached = cache.exists();
     let t0 = std::time::Instant::now();
-    let b = common::build(opts, Some(&prelude(pdf)), &src);
-    eprintln!("{:?}: {}", t0.elapsed(), report("hello", &b));
+    let b = common::build(opts(), Some(&prelude(pdf)), &src);
+    eprintln!(
+        "{} {:?}: {}",
+        if cached { "cached format" } else { "cold" },
+        t0.elapsed(),
+        report("hello", &b)
+    );
+    if !cached
+        && b.diagnostics()
+            .iter()
+            .all(|d| !d.message.starts_with("evaluation"))
+    {
+        let _ = std::fs::create_dir_all(cache.parent().expect("dir"));
+        let _ = std::fs::write(&cache, b.export_prelude());
+    }
     let (out, log) = b.output();
-    eprintln!("{} bytes\n{log}", out.len());
+    eprintln!("{} bytes, {} pages\n{log}", out.len(), b.pages().len());
+    for d in b.diagnostics() {
+        eprintln!("{d:?}");
+    }
+    let o = std::env::var("PHITEX_GATE_OUT").ok();
+    if let Some(o) = o {
+        let _ = std::fs::write(
+            format!("{o}/hello.{}", if pdf { "pdf" } else { "dvi" }),
+            &out,
+        );
+    }
+    if !pdf {
+        eprintln!(
+            "first difference: {:?}",
+            common::first_difference(&masked(&out), &masked(&want))
+        );
+    } else if let Ok(w) = std::fs::read(dir.join("hello.pdf")) {
+        eprintln!("first difference: {:?}", common::first_difference(&out, &w));
+    }
     b
 }
 
