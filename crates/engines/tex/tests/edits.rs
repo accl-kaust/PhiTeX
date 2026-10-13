@@ -416,7 +416,10 @@ fn edit_written_file() {
         b.stats.loop_rounds,
         b.output().1
     );
-    let aux = files.iter().find(|(n, _)| n == "main.aux").map(|(_, t)| t.clone());
+    let aux = files
+        .iter()
+        .find(|(n, _)| n == "main.aux")
+        .map(|(_, t)| t.clone());
     assert_eq!(aux.as_deref(), Some("\\relax \n\\def\\ref{1}\n"));
     let text = doc.replacen("Some", "Other", 1);
     b.edit(&text);

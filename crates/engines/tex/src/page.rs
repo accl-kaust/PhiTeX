@@ -531,7 +531,10 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
     if !left.is_empty() {
         let j = r.page_index();
         if j < MAX_PAGES {
-            r.cx.publish(r.keyed(crate::fields::Fam::Pagefx, &j.to_string()), v.list(left));
+            r.cx.publish(
+                r.keyed(crate::fields::Fam::Pagefx, &j.to_string()),
+                v.list(left),
+            );
         }
     }
     r.set("deadcycles", v.int(0), true);
