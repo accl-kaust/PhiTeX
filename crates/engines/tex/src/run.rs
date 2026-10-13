@@ -180,6 +180,11 @@ pub(crate) struct Src {
     pub rescanned: bool,
 }
 
+/// The commands an alignment entry watches for (§342, §347, §357):
+/// braces, `&` and `\cr`, as a bit mask by command code.
+const ALIGN_CMDS: u128 =
+    1 << cmd::LEFT_BRACE | 1 << cmd::RIGHT_BRACE | 1 << cmd::TAB_MARK | 1 << cmd::CAR_RET;
+
 pub(crate) const MID_LINE: u8 = 0;
 pub(crate) const SKIP_BLANKS: u8 = 1;
 pub(crate) const NEW_LINE: u8 = 2;
@@ -914,7 +919,7 @@ impl<'c, 'a> Run<'c, 'a> {
         Mean::decode(self.v, x)
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn set_cur(&mut self, tok: Tok) -> R<()> {
         if !tok.is_cs_or_active() {
             // (a character's meaning is its own: no meaning stored)
@@ -923,6 +928,12 @@ impl<'c, 'a> Run<'c, 'a> {
             self.cur.chr = i32::try_from(tok.chr()).unwrap_or(0);
             return Ok(());
         }
+        self.set_cur_cs(tok)
+    }
+
+    /// [`Self::set_cur`] for a control sequence or active character.
+    #[inline(never)]
+    fn set_cur_cs(&mut self, tok: Tok) -> R<()> {
         let mean = self.mean_of(tok)?;
         let (c, h) = mean.cmd_chr();
         self.cur = Cur {
@@ -1439,7 +1450,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// `get_next` with the meaning (§357–§358).
-    #[inline]
+    #[inline(always)]
     pub(crate) fn get_next(&mut self) -> R<bool> {
         // (the common case: a token of the list on top that is not an
         // internal marker, and no alignment entry to watch for)
@@ -1455,10 +1466,8 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         if let Some(tok) = next {
             self.set_cur(tok)?;
-            if matches!(
-                self.cur.cmd,
-                cmd::LEFT_BRACE | cmd::RIGHT_BRACE | cmd::TAB_MARK | cmd::CAR_RET
-            ) && self.align_token()?
+            if ALIGN_CMDS.checked_shr(u32::from(self.cur.cmd)).unwrap_or(0) & 1 != 0
+                && self.align_token()?
             {
                 return self.get_next_slow();
             }
