@@ -171,7 +171,21 @@ impl Census {
         let cold_causes = causes(b);
         let (u0, v0) = (b.stats.undeclared_definitions, b.stats.regime_violations);
         let p0 = b.stats.page_steps;
+        let mut notes: Vec<String> = b
+            .diagnostics()
+            .iter()
+            .filter(|d| d.message.contains("undeclared"))
+            .take(6)
+            .map(|d| d.message.chars().take(300).collect())
+            .collect();
         b.edit(new);
+        notes.extend(
+            b.diagnostics()
+                .iter()
+                .filter(|d| d.message.contains("undeclared"))
+                .take(3)
+                .map(|d| format!("edit: {}", d.message.chars().take(300).collect::<String>())),
+        );
         let s = &b.stats;
         Census {
             name: name.to_owned(),
@@ -190,7 +204,7 @@ impl Census {
             } else {
                 s.page_steps
             },
-            causes: format!("cold {cold_causes}; edit {}", causes(b)),
+            causes: format!("cold {cold_causes}; edit {}; {notes:#?}", causes(b)),
         }
     }
 
