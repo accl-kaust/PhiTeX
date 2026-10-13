@@ -81,7 +81,7 @@ impl Run<'_, '_> {
                 "open" => {
                     let n = xs.get(1).map_or(0, |&y| int_of(v, y));
                     let name = xs.get(2).map(|&y| str_of(v, y)).unwrap_or_default();
-                    self.open_out(n, &name);
+                    self.open_out(n, &name)?;
                 }
                 "close" => {
                     let n = xs.get(1).map_or(0, |&y| int_of(v, y));
@@ -214,6 +214,9 @@ impl Run<'_, '_> {
         // class: what a document node reading them at a later point sees
         let mut marks = MarksState::default();
         let mut published = std::collections::HashSet::new();
+        // the job-written files' order: an immediate write's entry where
+        // its marker is, page `j` where it fires (`wplan`)
+        let mut plan: Vec<ValueId> = Vec::new();
         loop {
             let Some(x) = queue.pop_front() else {
                 if let Some(e) = ending
@@ -253,6 +256,12 @@ impl Run<'_, '_> {
                     params.max_depth = n(2);
                     params.top_skip = crate::val::glue_of(v, xs.get(3).copied());
                     params.holding_inserts = n(4);
+                    continue;
+                }
+                nodes::T_WRITE_AT => {
+                    if let Some(&e) = list_of(v, x).get(1) {
+                        plan.push(e);
+                    }
                     continue;
                 }
                 nodes::T_MARKS_AT => {
@@ -303,6 +312,7 @@ impl Run<'_, '_> {
                 }
                 Outcome::Fire(f) => {
                     let j = pages.len();
+                    plan.push(v.int(i64::try_from(j).unwrap_or(0)));
                     // the material the fold could not place goes on
                     // (§1017); what the routine leaves is next round's
                     let fx = self.page_effects(j)?;
@@ -325,6 +335,8 @@ impl Run<'_, '_> {
                 "\\end could not empty the page (an output routine that never ships?)",
             );
         }
+        let wp = v.seq_unit(v.list(plan));
+        self.contribute("wplan", wp);
         let output = self.get("param:output")?;
         let any = toks_of(v, output).is_empty();
         let op = if any {
@@ -527,7 +539,7 @@ impl Run<'_, '_> {
     }
 
     /// Which page this step is (its first argument), or `MAX_PAGES`.
-    fn page_index(&self) -> usize {
+    pub(crate) fn page_index(&self) -> usize {
         self.cx
             .args()
             .first()
