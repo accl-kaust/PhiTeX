@@ -84,6 +84,10 @@ pub struct Options {
     /// candidates per step. The output is the same either way.
     pub speculation: Speculation,
     pub speculation_budget: usize,
+    /// The loop-back rounds an evaluation may take before it ends with
+    /// a no-fixpoint error naming the loop-back fields (a document whose
+    /// written files oscillate), instead of running on.
+    pub max_rounds: u64,
 }
 
 /// When the engine speculates ([`Options::speculation`]).
@@ -312,6 +316,7 @@ impl Default for Options {
             // commands answer `Any`
             speculation: Speculation::Predicted,
             speculation_budget: 256,
+            max_rounds: 64,
         }
     }
 }
@@ -385,7 +390,7 @@ fn file_hash(f: Option<&(String, Vec<u8>)>) -> u64 {
 pub(crate) fn stream_texts(v: &Values, entries: &[ValueId]) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for &e in entries {
-        let xs = list_of(v, e);
+        let xs = list_of(v, stream_entry(v, e));
         let name = xs.first().map(|&n| str_of(v, n)).unwrap_or_default();
         let k = if let Some(k) = out.iter().position(|(n, _)| *n == name) {
             k
@@ -396,6 +401,110 @@ pub(crate) fn stream_texts(v: &Values, entries: &[ValueId]) -> Vec<(String, Stri
         match xs.get(1) {
             Some(&t) => out[k].1.push_str(&str_of(v, t)),
             None => out[k].1.clear(),
+        }
+    }
+    out
+}
+
+/// A `streams` entry without its page tag (`[j, entry]` from page
+/// step `j`, [`crate::run::Run::contribute_stream`]).
+pub(crate) fn stream_entry(v: &Values, e: ValueId) -> ValueId {
+    let xs = list_of(v, e);
+    match xs.as_slice() {
+        [j, x] if v.as_int(*j).is_some() => *x,
+        _ => e,
+    }
+}
+
+/// The `streams` entries in the order TeX writes them: the page
+/// builder's plan (`wplan`: an immediate write's entry where its marker
+/// stood, page `j` where it fired) with each page's entries in place.
+/// Without a plan entry for them, the document nodes' entries go first.
+pub(crate) fn ordered_entries(v: &Values, plan: &[ValueId], streams: &[ValueId]) -> Vec<ValueId> {
+    let mut by_page: std::collections::BTreeMap<i64, Vec<ValueId>> =
+        std::collections::BTreeMap::default();
+    let mut imm = Vec::new();
+    for &e in streams {
+        let xs = list_of(v, e);
+        match xs.as_slice() {
+            [j, x] if v.as_int(*j).is_some() => {
+                by_page
+                    .entry(v.as_int(*j).unwrap_or(0))
+                    .or_default()
+                    .push(*x);
+            }
+            _ => imm.push(e),
+        }
+    }
+    let mut out = Vec::new();
+    if !plan.iter().any(|&p| v.as_int(p).is_none()) {
+        out.extend(imm);
+    }
+    for &p in plan {
+        match v.as_int(p) {
+            Some(j) => out.extend(by_page.remove(&j).unwrap_or_default()),
+            None => out.push(p),
+        }
+    }
+    for (_, es) in by_page {
+        out.extend(es);
+    }
+    out
+}
+
+/// The texts of the files the job wrote, from the accumulated `wplan`
+/// and `streams` sequences, in the order first opened.
+pub(crate) fn written_texts(
+    v: &Values,
+    wplan: Option<ValueId>,
+    streams: Option<ValueId>,
+) -> Vec<(String, String)> {
+    let plan: Vec<ValueId> = wplan
+        .map(|p| v.seq_to_vec(p))
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|p| list_of(v, p))
+        .collect();
+    let streams = streams.map(|s| v.seq_to_vec(s)).unwrap_or_default();
+    stream_texts(v, &ordered_entries(v, &plan, &streams))
+}
+
+/// The definitions the read-back of each job-written file would make
+/// (the third element of its `streams` entries, [`Run::interpret_line`]),
+/// in TeX's order: per file, `(field, [value, global])`, each field once,
+/// where it was first defined, with its last value.
+pub(crate) fn written_defs(
+    v: &Values,
+    wplan: Option<ValueId>,
+    streams: Option<ValueId>,
+) -> Vec<(String, Vec<(String, ValueId)>)> {
+    let plan: Vec<ValueId> = wplan
+        .map(|p| v.seq_to_vec(p))
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|p| list_of(v, p))
+        .collect();
+    let streams = streams.map(|s| v.seq_to_vec(s)).unwrap_or_default();
+    let mut out: Vec<(String, Vec<(String, ValueId)>)> = Vec::new();
+    for e in ordered_entries(v, &plan, &streams) {
+        let xs = list_of(v, stream_entry(v, e));
+        let Some(&made) = xs.get(2) else { continue };
+        let name = str_of(v, xs[0]);
+        let k = if let Some(k) = out.iter().position(|(n, _)| *n == name) {
+            k
+        } else {
+            out.push((name, Vec::new()));
+            out.len() - 1
+        };
+        for d in list_of(v, made) {
+            let ds = list_of(v, d);
+            let [f, x, g] = ds.as_slice() else { continue };
+            let f = str_of(v, *f);
+            let val = v.list(vec![*x, *g]);
+            match out[k].1.iter_mut().find(|(n, _)| *n == f) {
+                Some(slot) => slot.1 = val,
+                None => out[k].1.push((f, val)),
+            }
         }
     }
     out
@@ -880,6 +989,9 @@ struct Graph {
     /// made (they asked through `marksdecl:<node>`), as the
     /// environment's answers.
     marks_decl: Vec<(Field, ValueId)>,
+    /// The `wdef:<field>` loop-backs declared: the fields the read-back
+    /// of a job-written file defines.
+    wdefs: Vec<String>,
     /// What the executor runs now, for readers on other threads.
     watch: crate::exec::Watch,
     /// The engine's scheduler ([`Options::speculation`]).
@@ -952,6 +1064,7 @@ impl Graph {
             "writes",
             "ifviol",
             "streams",
+            "wplan",
             "fread",
             crate::pdfrelaxed::PIECES,
         ] {
@@ -989,6 +1102,7 @@ impl Graph {
             threads: crate::exec::threads(threads),
             pdf_exact: None,
             marks_decl: Vec::new(),
+            wdefs: Vec::new(),
             watch: crate::exec::Watch::new(crate::exec::threads(threads), None),
             sched: phitex_defuse::Greedy::default(),
             eval_errors: Vec::new(),
@@ -1017,6 +1131,16 @@ impl Graph {
         let v = self.eng.values();
         if let E::UndeclaredDefinition { field, .. } = e {
             let _ = write!(out, "\n  field {}", field_name(v, *field));
+        }
+        // (the engine does not say which loop-backs kept changing: the
+        // job's read-back fields are the candidates)
+        if let E::NonConvergence { .. } = e {
+            for name in &self.written {
+                let _ = write!(out, "\n  written file {name}");
+            }
+            for f in &self.wdefs {
+                let _ = write!(out, "\n  read-back field {f}");
+            }
         }
         for id in ids {
             let what = self.eng.node_info(id).map_or_else(
@@ -1151,17 +1275,31 @@ impl Graph {
     /// A file the job writes is read back: from the previous round
     /// (`fixpoint`: a loop-back field, absent in round one, as LaTeX's
     /// `\@input` finds no `.aux` on a first run), or absent.
-    fn written_file(&mut self, name: &str, fixpoint: bool) {
-        let v = self.eng.values();
-        let f = v.field(&format!("file:{name}"));
+    ///
+    /// With `fixpoint` the file is an in-memory value, `wfile:<name>`: a
+    /// loop-back the writer (`Files`) publishes, its first value the
+    /// file on disk if there is one (the last build's fixpoint), else
+    /// absent; `file:<name>` is absent, so a run that read it from the
+    /// finder before this runs again and reads the loop-back.
+    fn written_file(&mut self, name: &str, fixpoint: bool, _finder: &Finder) {
+        if self.written.iter().any(|w| w == name) {
+            return;
+        }
+        let f = self.eng.values().field(&format!("file:{name}"));
         self.files.retain(|(g, _)| *g != f);
         self.absent.retain(|g| *g != f);
         self.reads.retain(|(n, _)| n != name);
+        self.absent.push(f);
         if fixpoint {
-            let absent = v.list(Vec::new());
-            self.eng.declare_loopback(f, absent);
-        } else {
-            self.absent.push(f);
+            // nothing reads the bytes on disk: a read-back that only
+            // defines (`.aux`) is its key set `wkeys:<name>` and one
+            // `wdef:<field>` per field; another file is its text in
+            // memory, `wfile:<name>`; both start empty (absent)
+            let v = self.eng.values();
+            let none = v.list(Vec::new());
+            let k = if defines_only(name) { "wkeys" } else { "wfile" };
+            let w = v.field(&format!("{k}:{name}"));
+            self.eng.declare_loopback(w, none);
         }
         self.written.push(name.to_owned());
     }
@@ -1171,6 +1309,14 @@ impl Graph {
         let v = self.eng.values();
         let mut env = self.files.clone();
         env.extend(self.marks_decl.iter().copied());
+        for n in &self.written {
+            env.push((v.field(&format!("wfiledecl:{n}")), ValueId::UNIT));
+        }
+        for f in &self.wdefs {
+            env.push((v.field(&format!("wdefdecl:{f}")), ValueId::UNIT));
+        }
+        let set = self.wdefs.iter().map(|f| v.str(f)).collect();
+        env.push((v.field("wdefset"), v.list(set)));
         if self.pdf_exact.is_some() {
             env.push((v.field("pdf:exact"), v.int(1)));
         }
@@ -1234,7 +1380,7 @@ impl Graph {
                 }
                 let f = self.eng.values().field(&format!("file:{name}"));
                 if self.files.iter().any(|(g, _)| *g == f) || self.absent.contains(&f) {
-                    self.written_file(name, fixpoint);
+                    self.written_file(name, fixpoint, finder);
                     asked = true;
                 }
             }
@@ -1255,6 +1401,47 @@ impl Graph {
                 declare_marks_before(&mut self.eng, n);
                 self.marks_decl.push((f, ValueId::UNIT));
                 asked = true;
+            }
+            // files a run opened for writing: their `wfile:` loop-backs
+            // declared (`wfiledecl:<name>`)
+            let wdecl: Vec<String> = {
+                let v = self.eng.values();
+                r.env_waits
+                    .iter()
+                    .filter_map(|&(_, f)| {
+                        field_name(v, f)
+                            .strip_prefix("wfiledecl:")
+                            .map(str::to_owned)
+                    })
+                    .collect()
+            };
+            for name in wdecl {
+                if !self.written.contains(&name) {
+                    self.written_file(&name, fixpoint, finder);
+                }
+                asked = true;
+            }
+            // the fields a job-written file's read-back defines: their
+            // `wdef:<field>` loop-backs declared
+            if fixpoint {
+                let v = self.eng.values();
+                let acc = |n: &str| self.eng.acc_value(unit, v.field(n));
+                let defs = written_defs(v, acc("wplan"), acc("streams"));
+                let mut new = Vec::new();
+                for (_, ds) in defs {
+                    for (f, _) in ds {
+                        if !self.wdefs.contains(&f) && !new.contains(&f) {
+                            new.push(f);
+                        }
+                    }
+                }
+                for f in new {
+                    let none = self.eng.values().list(Vec::new());
+                    let w = self.eng.values().field(&format!("wdef:{f}"));
+                    self.eng.declare_loopback(w, none);
+                    self.wdefs.push(f);
+                    asked = true;
+                }
             }
             let asked_names: Vec<String> = {
                 let v = self.eng.values();
@@ -1302,7 +1489,7 @@ impl Graph {
                     continue;
                 }
                 if opened.contains(&name) {
-                    self.written_file(&name, fixpoint);
+                    self.written_file(&name, fixpoint, finder);
                     asked = true;
                     continue;
                 }
@@ -1386,6 +1573,18 @@ impl Graph {
         out
     }
 }
+
+/// Whether a job-written file's read-back only defines (its lines are
+/// read as definitions per field, never as text): `.aux`.
+fn defines_only(name: &str) -> bool {
+    std::path::Path::new(name)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("aux"))
+}
+
+/// The extensions of the files a job is taken to write and read back
+/// (`\jobname.<ext>`), declared before its first evaluation.
+const WRITTEN_EXTS: [&str; 8] = ["aux", "toc", "lof", "lot", "out", "idx", "nav", "snm"];
 
 /// The hint of a format's node (`hints::Hint` encoded): unbounded.
 const FORMAT_HINT: &str = "A\x1eformat: the whole text, run once\x1e";
@@ -1621,6 +1820,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     };
     let finder = &opts.finder;
     let mut g = Graph::new(opts.time_limit, opts.threads);
+    g.eng.set_max_rounds(opts.max_rounds);
     g.sched = opts.speculation.scheduler(opts.speculation_budget);
     let unit = g.eng.new_unit();
     // the files a previous build of this prelude read, supplied before
@@ -1772,6 +1972,7 @@ impl Build {
         let defs = prelude_defs(&cached, prelude, &opts.finder);
         let t1 = t0.elapsed();
         let mut g = Graph::new(opts.time_limit, opts.threads);
+        g.eng.set_max_rounds(opts.max_rounds);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
         if let Some(p) = &opts.progress {
@@ -1783,7 +1984,17 @@ impl Build {
         for (n, _) in cached.reads.clone() {
             g.supply(&opts.finder, &n);
         }
-        if !cached.reads.is_empty() {
+        // the files a LaTeX job writes and reads back: in-memory values
+        // from the start (`.bbl` and `.ind` stay files until their
+        // BibTeX and makeindex nodes publish them)
+        for ext in WRITTEN_EXTS {
+            g.written_file(
+                &format!("{}.{ext}", opts.jobname),
+                opts.fixpoint,
+                &opts.finder,
+            );
+        }
+        {
             g.absorb_provided();
             let env = g.environment(opts.fixpoint);
             g.eng.set_environment(env);
@@ -1899,6 +2110,13 @@ impl Build {
         );
         stats.live = self.g.eng.live_nodes();
         self.stats = stats;
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            let (nodes, units, values) = self.sizes();
+            let (node, use_) = Engine::record_sizes();
+            eprintln!(
+                "sizes: {nodes} live nodes ({node} B), {units} live units, {values} values (use {use_} B)"
+            );
+        }
         // `PHITEX_CLAIMS=<text>`: the nodes whose slice holds the text,
         // their claims and their descendants' (a debugging dump)
         if let Ok(want) = std::env::var("PHITEX_CLAIMS") {
@@ -1992,6 +2210,23 @@ impl Build {
     #[must_use]
     pub fn pdf_exact_reason(&self) -> Option<&str> {
         self.g.pdf_exact.as_deref()
+    }
+
+    /// Frees the engine's memoized applications nothing reaches any
+    /// more (a long session calls it between edits); returns the nodes
+    /// freed.
+    pub fn collect_garbage(&mut self) -> usize {
+        self.g.eng.collect_garbage()
+    }
+
+    /// The engine's live nodes, live units and values in its table.
+    #[must_use]
+    pub fn sizes(&self) -> (usize, usize, usize) {
+        (
+            self.g.eng.live_nodes(),
+            self.g.eng.live_units(),
+            self.g.eng.values().len(),
+        )
     }
 
     /// The document changed to `text`: the nodes whose slices differ are
@@ -2105,14 +2340,8 @@ impl Build {
     #[must_use]
     pub fn files(&self) -> Vec<(String, String)> {
         let v = self.g.eng.values();
-        let f = v.field("streams");
-        let entries = self
-            .g
-            .eng
-            .acc_value(self.unit, f)
-            .map(|s| v.seq_to_vec(s))
-            .unwrap_or_default();
-        stream_texts(v, &entries)
+        let acc = |n: &str| self.g.eng.acc_value(self.unit, v.field(n));
+        written_texts(v, acc("wplan"), acc("streams"))
     }
 
     /// Whether the output is a PDF file (`\pdfoutput` at the first

@@ -1,0 +1,47 @@
+\catcode`\:=11 \catcode`\_=11 \catcode`\@=11
+\def\show:{\message{[\the\catcode`\:,\the\catcode`\_,\the\catcode`\ ,\the\endlinechar]}}
+\show:
+% 1
+\begingroup \catcode`\:=12 \catcode`\_=8 \endgroup \show:
+% 2
+\def\r_loop:{\ifeof5 \else \readline5 to\l_line \message{<\l_line>}\expandafter\r_loop:\fi}\let\go\r_loop:
+\begingroup \endlinechar=-1 \catcode`\:=12 \catcode`\_=12 \openin5=catrestore.dat \go
+\closein5 \endgroup \show:
+\ifnum\catcode`\:=11 \message{ok2}\else\message{BAD2}\fi
+% 3
+\def\r_loop:{\ifeof5 \else \read5 to\l_line \global\expandafter\let\csname g_\number\count255 :\endcsname\l_line
+ \global\let\g_last:\l_line\advance\count255 1 \expandafter\r_loop:\fi}\let\go\r_loop:
+\begingroup \catcode`\:=12 \catcode`\ =10 \openin5=catrestore.dat \count255=0 \go
+\closein5 \endgroup \show: \message{\meaning\g_last:}
+% 4
+\begingroup \catcode`\:=12 \lccode`\A=`\: \lowercase{\def\x{A}}\catcode`\:=11 \uppercase{\message{\x}}\endgroup \show:
+% 5
+\count255=0 \def\rec_loop:{\begingroup\catcode`\:=12 \catcode`\_=12 \global\advance\count255 1 \endgroup
+ \ifnum\count255<20 \expandafter\rec_loop:\fi}\rec_loop: \show:
+\def\loop#1\repeat{\def\body{#1}\iterate}\def\iterate{\body \let\next\iterate \else\let\next\relax\fi \next}\let\repeat=\fi
+\begingroup \count255=0 \loop \begingroup\catcode`\:=12 \endgroup \advance\count255 1 \ifnum\count255<5 \repeat\endgroup \show:
+% 6
+\begingroup \catcode`\:=12 \scantokens{\message{in:scan}\catcode`\_=12 }\endgroup \show:
+\begingroup \newlinechar=`\| \endlinechar=-1 \scantokens{\catcode`\:=12 |\catcode`\_=12 }\endgroup \show:
+% 7
+\begingroup \everyeof{\catcode`\:=12 \message{eof}}\scantokens{\relax}\endgroup \everyeof{} \show:
+% 8
+\def\mac_in:{\begingroup\catcode`\:=12 \catcode`\_=12 \endgroup\catcode`\:=12 }
+\begingroup \mac_in: \catcode`\_=8 \endgroup \show:
+% 9
+\begingroup \global\catcode`\:=11 \catcode`\:=12 \catcode`\_=12 \global\catcode`\_=11 \endgroup \show:
+\begingroup \global\catcode`\:=11 \begingroup \catcode`\:=12 \endgroup \catcode`\:=12 \endgroup \show:
+% 10
+\catcode`\:=12 \catcode`\:=11 \begingroup \catcode`\:=12 \endgroup \show:
+\catcode`\~=11 \begingroup \catcode`\~=13 \endgroup \message{\the\catcode`\~}
+% ior map with space catcode changes, then group end
+\def\r_loop:{\ifeof5 \else\read5 to\l_line \global\let\g_last:\l_line \expandafter\r_loop:\fi}\let\go\r_loop:
+\begingroup \catcode`\ =10 \endlinechar=-1 \openin5=catrestore.dat
+\catcode`\:=12 \catcode`\_=12 \catcode`\ =9 \go
+\catcode`\ =10 \closein5 \endgroup \show:
+\begingroup\catcode`\:=12 \endgroup\begingroup\catcode`\:=12 \endgroup \show:
+\message{\meaning\g_last:}
+% 9b: a local after a global after a local in one group (§283)
+\begingroup \catcode`\:=12 \global\catcode`\:=11 \catcode`\:=12 \endgroup \show:
+\begingroup \catcode`\_=12 \begingroup \global\catcode`\_=11 \endgroup \catcode`\_=12 \endgroup \show:
+\begingroup \catcode58=12 \global\catcode58=11 \catcode58=12 \global\catcode58=12 \endgroup \message{\the\catcode58}\catcode58=11

@@ -155,6 +155,20 @@ impl Run<'_, '_> {
             self.pop_level();
             return self.mode();
         }
+        // a group of this run below a paragraph begun inside it
+        // (`{\a text} more`): groups and the nest are apart in tex.web
+        // (`unsave` leaves `nest` alone, §1063), so the group closes and
+        // the paragraph goes on, the group's definitions undone
+        if let Some(k) = self.nest.iter().rposition(|l| l.group != 0) {
+            let above = self.nest.split_off(k + 1);
+            self.pop_level();
+            let floor = self.defs.len();
+            for mut l in above {
+                l.defs_len = l.defs_len.min(floor);
+                self.nest.push(l);
+            }
+            return self.mode();
+        }
         self.effect = Effect::Close;
         self.unsave_extras(md)?;
         self.kind_outer(md)
@@ -222,13 +236,6 @@ impl Run<'_, '_> {
         })
     }
 
-    pub(crate) fn set_scope_list(&mut self, name: &str, md: &Mode, items: Vec<ValueId>) {
-        let v = self.v;
-        let mut xs = vec![v.int(md.sid)];
-        xs.extend(items);
-        self.set(name, v.list(xs), false);
-    }
-
     // ------------------------------------------------------------ lists
 
     /// `tail_append` to list `lid`: a list of this run's grows here, its
@@ -258,6 +265,16 @@ impl Run<'_, '_> {
         let v = self.v;
         let items = f.items.into_iter().filter(|&x| !is_marker(v, x)).collect();
         Ok((items, f.since_bp))
+    }
+
+    /// The last item of list `lid` and the count [`Self::list_items`]
+    /// gives, without copying a local list.
+    pub(crate) fn list_last(&mut self, lid: i64) -> R<(Option<ValueId>, usize)> {
+        if let Some(l) = self.level_of(lid) {
+            return Ok((l.list.last().copied(), l.list.len()));
+        }
+        let (items, since) = self.list_items(lid)?;
+        Ok((items.last().copied(), since))
     }
 
     /// [`Self::list_items`] with the space factor at the list's end: the
@@ -373,7 +390,7 @@ impl Run<'_, '_> {
         let nonempty = if md.km == 1 {
             true
         } else {
-            !self.list_items(md.vlid)?.0.is_empty()
+            self.list_last(md.vlid)?.0.is_some()
         };
         if nonempty {
             let g = self.glue_param("parskip")?;
@@ -397,7 +414,7 @@ impl Run<'_, '_> {
         let ep = self.get("param:everypar")?;
         let toks = crate::val::toks_of(v, ep);
         self.push_toks(toks);
-        Ok(())
+        self.build_page_par()
     }
 
     /// `\prevgraf` of the vertical list `md.vlid` (§1091, §1096): the
@@ -707,9 +724,38 @@ impl Run<'_, '_> {
 
     // ------------------------------------------------------------ boxes
 
+    /// The field of box register `n`, `box:<n>`, interned once per values
+    /// epoch (a register access builds no name).
+    pub(crate) fn box_field(&self, n: i64) -> phitex_defuse::Field {
+        thread_local! {
+            static BOXES: std::cell::RefCell<(u64, u64, Vec<Option<phitex_defuse::Field>>)> =
+                const { std::cell::RefCell::new((u64::MAX, u64::MAX, Vec::new())) };
+        }
+        let v = self.v;
+        let epoch = self.cx.values_epoch();
+        let slot = usize::try_from(n).ok().filter(|&i| i < 32768);
+        let make = || self.ops.fields.get_at(v, epoch, &format!("box:{n}"));
+        let Some(i) = slot else { return make() };
+        BOXES.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.0 != v.instance() || c.1 != epoch {
+                *c = (v.instance(), epoch, Vec::new());
+            }
+            if let Some(Some(f)) = c.2.get(i) {
+                return *f;
+            }
+            let f = make();
+            if c.2.len() <= i {
+                c.2.resize(i + 1, None);
+            }
+            c.2[i] = Some(f);
+            f
+        })
+    }
+
     /// The box in register `n` (`None`: void).
     pub(crate) fn box_reg(&mut self, n: i32) -> R<Option<ValueId>> {
-        let x = self.get(&format!("box:{n}"))?;
+        let x = { let f = self.box_field(i64::from(n)); self.get_f(f)? };
         let v = self.v;
         Ok(x.and_then(|x| match &*v.get(x) {
             Value::List(xs) => xs.get(1).copied().filter(|&b| b != ValueId::UNIT),
@@ -722,7 +768,8 @@ impl Run<'_, '_> {
         let v = self.v;
         let lvl = if global { 0 } else { md.depth };
         let val = v.list(vec![v.int(lvl), b.unwrap_or(ValueId::UNIT)]);
-        self.set(&format!("box:{n}"), val, global);
+        let f = self.box_field(n);
+        self.set_f(f, val, global);
     }
 
     /// A box register changed "at the same level" (§1079 `box(n):=null`,
@@ -731,12 +778,11 @@ impl Run<'_, '_> {
     /// keep the change at their close ([`Run::modify_at`]).
     pub(crate) fn modify_box_reg(&mut self, n: i32, b: Option<ValueId>) -> R<()> {
         let v = self.v;
-        let name = format!("box:{n}");
-        let x = self.get(&name)?;
+        let f = self.box_field(i64::from(n));
+        let x = self.get_f(f)?;
         let lvl = x.map_or(0, |x| crate::val::int_at(v, x, 0));
         let val = v.list(vec![v.int(lvl), b.unwrap_or(ValueId::UNIT)]);
         let base = self.base_mode()?.depth;
-        let f = self.ops.fields.get_at(v, self.cx.values_epoch(), &name);
         self.modify_at(f, val, lvl, base);
         Ok(())
     }
@@ -868,6 +914,9 @@ impl Run<'_, '_> {
             let b = with_shift(v, b, i32::try_from(ctx).unwrap_or(0));
             if md.m.abs() == 1 {
                 self.append_to_vlist(md, b)?;
+                if md.m > 0 {
+                    self.build_page_outer()?;
+                }
             } else {
                 let b = if md.m.abs() == 102 {
                     self.set_space_factor(md, 1000);
@@ -961,12 +1010,12 @@ impl Run<'_, '_> {
             11 => nodes::T_KERN,
             _ => nodes::T_PENALTY,
         };
-        let (items, since) = self.list_items(md.lid)?;
+        let (last, since) = self.list_last(md.lid)?;
         if md.m == 1 && since == 0 {
             // §1106: nothing can be taken from the current page
             return Ok(());
         }
-        if items.last().is_some_and(|&x| nodes::tag(self.v, x) == want) {
+        if last.is_some_and(|x| nodes::tag(self.v, x) == want) {
             let m = nodes::marker(self.v, T_DELETE);
             self.append(md.lid, m);
         }
@@ -998,8 +1047,7 @@ impl Run<'_, '_> {
 
     /// `append_italic_correction` (§1113).
     pub(crate) fn append_italic_correction(&mut self, md: &Mode) -> R<()> {
-        let (items, _) = self.list_items(md.lid)?;
-        let Some(&last) = items.last() else {
+        let Some(last) = self.list_last(md.lid)?.0 else {
             return Ok(());
         };
         let v = self.v;
@@ -1273,7 +1321,7 @@ impl Run<'_, '_> {
                 };
                 let y = nodes::encode(v, &node, &side);
                 self.append(outer.lid, y);
-                Ok(())
+                self.build_page_outer()
             }
             group::DISC => self.build_discretionary(md),
             group::OUTPUT => crate::page::output_end(self, md),
@@ -2025,6 +2073,19 @@ impl Run<'_, '_> {
         };
         let g = nodes::glue_node(v, &fill, GlueKind::Normal);
         let p = nodes::penalty_node(v, -0o10000000000);
+        if self.pg.is_some() {
+            // a text paging inline: §1054 as tex.web has it
+            if self.all_over_inline()? {
+                self.claim_rest = true;
+                self.frames.clear();
+                return Ok(());
+            }
+            self.back_cur();
+            for x in [b, g, p] {
+                self.append(0, x);
+            }
+            return self.build_page();
+        }
         let m = v.list(vec![v.int(nodes::T_END), b, g, p]);
         self.append(0, m);
         // nothing after `\end` is read
@@ -2125,7 +2186,7 @@ pub(crate) fn fold_item(
         }
         // the page builder's markers (page parameters, a marks read): kept
         // in place for its fold, invisible to the list's readers
-        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT => out.push(n),
+        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT => out.push(n),
         T_BUILD_PAGE => {
             st.since_bp = 0;
         }
@@ -2164,7 +2225,10 @@ pub(crate) fn fold_item(
 /// Whether `x` is a marker for the page builder's fold
 /// (`T_PAGE_PARAMS`, `T_MARKS_AT`), not list material.
 fn is_marker(v: &Values, x: ValueId) -> bool {
-    matches!(nodes::tag(v, x), nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT)
+    matches!(
+        nodes::tag(v, x),
+        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT
+    )
 }
 
 /// A list's contents as its reader sees them ([`Run::list_fold`]).
