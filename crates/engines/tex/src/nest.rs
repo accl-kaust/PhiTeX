@@ -180,28 +180,17 @@ impl Run<'_, '_> {
         base: i64,
     ) {
         self.irreversible += 1;
-        // the first open group deeper than the binding's level
-        let mut depth = base;
-        let mut at = None;
-        for (i, l) in self.nest.iter().enumerate() {
-            if l.group != 0 {
-                depth += 1;
-                if depth > lvl {
-                    at = Some(i);
-                    break;
-                }
-            }
-        }
-        // the binding is the run's, outside every group: its definition
-        // at the base level; else a group's of this run
-        let at_base = at.is_none() && !self.in_local_group();
-        self.st
-            .modify(loc, crate::runstate::Native::Raw(val), at_base);
-    }
-
-    /// Whether a local definition made now would belong to a group of
-    /// this run (and so never reach the engine).
-    pub(crate) fn in_local_group(&self) -> bool {
-        self.nest.iter().any(|l| l.group != 0)
+        // a binding made at or below the run's base level (outside every
+        // group of the run) changes there: the run's definition at its
+        // base level, which the closes of the run's groups keep (§1079);
+        // at level one it is retained as a global one is (§283); else
+        // the binding is a group's of this run
+        let at_base = lvl <= base;
+        self.st.modify(
+            loc,
+            crate::runstate::Native::Raw(val),
+            at_base,
+            lvl == 0,
+        );
     }
 }
