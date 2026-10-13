@@ -48,7 +48,11 @@ fn equal_content_publishes_nothing_the_second_time() {
         .filter(|m| m.contains("fixpoint") || m.contains("rounds"))
         .collect();
     assert!(errors.is_empty(), "{errors:?}");
-    assert!(b.stats.loop_rounds <= 5, "{} loop rounds", b.stats.loop_rounds);
+    assert!(
+        b.stats.loop_rounds <= 5,
+        "{} loop rounds",
+        b.stats.loop_rounds
+    );
     let files = b.files();
     let aux = files
         .iter()
@@ -61,7 +65,13 @@ fn equal_content_publishes_nothing_the_second_time() {
     let (dvi, _) = b.output();
     let shown: String = dvi
         .iter()
-        .map(|&c| if c.is_ascii_graphic() { char::from(c) } else { ' ' })
+        .map(|&c| {
+            if c.is_ascii_graphic() {
+                char::from(c)
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .filter(|w| w.len() > 1)

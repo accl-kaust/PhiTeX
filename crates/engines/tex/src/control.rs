@@ -25,9 +25,7 @@ static HEARTBEAT_FROM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 impl Run<'_, '_> {
     /// The node's command: expand once, or do one command (§1030).
     pub(crate) fn command(&mut self) -> R<()> {
-        if self.heartbeat_on {
-            self.heartbeat();
-        }
+        self.heartbeat();
         self.no_pull = true;
         let got = self.get_next();
         self.no_pull = false;
@@ -112,25 +110,24 @@ impl Run<'_, '_> {
                     l.extra.len()
                 );
             }
-            for l in self.input.levels.iter().rev() {
-                let d = match l.kind {
-                    crate::input::kind::FILE => {
-                        let (file, line) = self.input.file(*l).where_(self.v);
+            for f in &self.frames {
+                let d = match f {
+                    crate::run::Frame::File(f) => {
+                        let (file, line) = f.where_(self.v);
                         format!("file {file}:{line}")
                     }
-                    crate::input::kind::LINE => "text".to_owned(),
-                    _ => format!("tokens {}/{}", l.a - l.c, l.b - l.c),
+                    crate::run::Frame::Src(_) => "text".to_owned(),
+                    crate::run::Frame::Toks(t, p) => format!("tokens {p}/{}", t.len()),
                 };
                 eprintln!("hbloop frame: {d}");
             }
         }
         let (file, line) = self
-            .input
-            .levels
+            .frames
             .iter()
-            .rev()
-            .find_map(|l| {
-                (l.kind == crate::input::kind::FILE).then(|| self.input.file(*l).where_(self.v))
+            .find_map(|f| match f {
+                crate::run::Frame::File(f) => Some(f.where_(self.v)),
+                _ => None,
             })
             .unwrap_or_default();
         let mut last = String::new();
@@ -149,7 +146,7 @@ impl Run<'_, '_> {
             self.nest.last().map_or(0, |l| l.mode),
             self.st.sig(),
             self.nest.len(),
-            self.input.depth()
+            self.frames.len()
         );
     }
 
@@ -1202,11 +1199,11 @@ impl Run<'_, '_> {
             let line = self.next_read_line(&field, st);
             let text = line.unwrap_or_default();
             let e = i64::from(self.ipar(Par::endlinechar)?);
-            let line = crate::input::Line::of_str(&text, e, true);
-            let saved = std::mem::replace(&mut self.input, crate::input::Input::new());
+            let frames = vec![crate::run::src_frame(&text, e)];
+            let saved = std::mem::take(&mut self.frames);
             let saved_eof = self.eof;
             self.eof = true;
-            self.input.push_line(line);
+            self.frames.extend(frames);
             let mut res = Ok(());
             loop {
                 match self.next_tok() {
@@ -1233,7 +1230,7 @@ impl Run<'_, '_> {
                     }
                 }
             }
-            self.input = saved;
+            self.frames = saved;
             self.eof = saved_eof;
             res?;
             if align == 0 {
