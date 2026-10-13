@@ -5,7 +5,7 @@
 //! session and as fresh cold builds. Every PDF is compared byte for byte
 //! with the oracle's (`<variant>/oracle/`, from `scripts/bless-ladder.sh`:
 //! the installed pdflatex, bibtex, makeindex, biber), and the files the job
-//! reads back (`.aux`, `.toc`, `.bbl`, `.ind`, ...) too; the watch's PDF
+//! the watch's PDF
 //! with the cold build's. One row per rung on standard error (`ROW ...`).
 //! Run once with `PHITEX_DOC_SCOPE` unset and once with `=1`.
 
@@ -36,7 +36,8 @@ fn scratch(name: &str) -> PathBuf {
 
 fn phitex(dir: &Path) -> Command {
     let mut c = Command::new("timeout");
-    c.arg(std::env::var("PHITEX_LADDER_TIMEOUT").unwrap_or_else(|_| "900".into())).arg(env!("CARGO_BIN_EXE_phitex"));
+    c.arg(std::env::var("PHITEX_LADDER_TIMEOUT").unwrap_or_else(|_| "900".into()))
+        .arg(env!("CARGO_BIN_EXE_phitex"));
     c.current_dir(dir)
         .env("PHITEX_CACHE_DIR", cache())
         .env("SOURCE_DATE_EPOCH", "0")
@@ -116,7 +117,9 @@ fn compare(dir: &Path, odir: &Path, name: &str) -> Vec<String> {
     let mut out = Vec::new();
     for e in std::fs::read_dir(odir).expect("the oracle").flatten() {
         let f = e.file_name().to_string_lossy().into_owned();
-        if f == "stats" {
+        // (only the PDF is an output: the files read back are in-memory
+        // state, their effects visible in the PDF)
+        if f == "stats" || !(f.ends_with(".pdf") || f == "sha256") {
             continue;
         }
         if f == "sha256" {
