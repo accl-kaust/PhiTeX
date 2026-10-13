@@ -164,8 +164,15 @@ fn editpath_hello() {
     let t0 = std::time::Instant::now();
     let mut b = common::build(opts(), Some("\\input pdflatex.ini\n"), &src);
     edit_line(if cached { "cold start, cached format" } else { "cold start, format built" }, t0.elapsed(), &b);
-    if !cached && let Some(bytes) = b.export_prelude() {
-        let _ = std::fs::write(&fmt, bytes);
+    if !cached {
+        match b.export_prelude() {
+            Some(bytes) => {
+                let _ = std::fs::create_dir_all(fmt.parent().expect("a directory"));
+                let r = std::fs::write(&fmt, &bytes);
+                eprintln!("format written: {} bytes, {r:?}", bytes.len());
+            }
+            None => eprintln!("format not complete: not cached"),
+        }
     }
     let i = src.find("\\begin{document}").expect("a body") + 16;
     let w = i + src[i..].find(|c: char| c.is_ascii_lowercase()).expect("a word");
