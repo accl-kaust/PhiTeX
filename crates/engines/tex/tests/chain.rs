@@ -373,3 +373,62 @@ fn para400() {
         );
     }
 }
+
+/// The zero page chain in exact PDF mode (`docs/TARGET_GRAPH.md`): a
+/// generated plain document of 400 paragraphs with headings and
+/// footnotes, `\pdfoutput=1`, numbered as pdfTeX numbers. No page step
+/// reads what another page step made: the critical path stays a few
+/// nodes, and no link of it joins two page steps.
+#[test]
+fn pdf_exact_no_page_chain() {
+    use std::fmt::Write as _;
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/gate/pdfchain");
+    let _ = std::fs::create_dir_all(&dir);
+    let mut src = String::from("\\pdfoutput=1\n\\hsize=6in \\vsize=8.5in \\parindent=20pt\n");
+    for k in 0..400 {
+        if k % 10 == 0 {
+            let _ = writeln!(
+                src,
+                "\\bigskip\\centerline{{\\bf Section {}}}\\medskip",
+                k / 10 + 1
+            );
+        }
+        let _ = write!(
+            src,
+            "Paragraph {k} has some words in it, enough to fill a few lines of text set \
+             with plain's macros, so that the paragraph builder has work to do and the \
+             pages fill up one after another"
+        );
+        if k % 20 == 19 {
+            let _ = write!(
+                src,
+                "\\footnote{{$^{{{}}}$}}{{A note on paragraph {k}.}}",
+                k / 20 + 1
+            );
+        }
+        src.push_str(".\n\n");
+    }
+    src.push_str("\\bye\n");
+    std::fs::write(dir.join("pdfchain.tex"), &src).expect("write");
+    let opts = common::options("./pdfchain.tex", "pdfchain", "", &dir);
+    let b = common::build(opts, Some(&common::plain()), &src);
+    assert!(b.is_pdf(), "not a PDF");
+    let links = b.page_step_links();
+    let mut by = BTreeMap::<String, usize>::new();
+    for (_, kind, field) in b.critical_chain() {
+        *by.entry(format!("{kind} {field}")).or_default() += 1;
+    }
+    eprintln!(
+        "pdfchain: {} pages, critical path {:?}, loop rounds {}, census {by:?}",
+        b.pages().len(),
+        b.stats.critical_path,
+        b.stats.loop_rounds
+    );
+    for l in &links {
+        eprintln!("  page step <- page step: {l}");
+    }
+    assert!(links.is_empty(), "{} links between page steps", links.len());
+    let cp = b.stats.critical_path.unwrap_or(usize::MAX);
+    assert!(cp <= 6, "critical path {cp} > 6");
+}
