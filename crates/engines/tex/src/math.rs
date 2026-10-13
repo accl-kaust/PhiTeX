@@ -238,7 +238,7 @@ impl Run<'_, '_> {
     /// 2 `\eqno`, 3 `\leqno`), kept in the group's kind.
     fn go_into_math(&mut self, md: &Mode, code: i64) -> R<()> {
         let v = self.v;
-        self.push_math(md, group::MATH_SHIFT, -203, vec![v.int(code)])?;
+        self.push_math(md, group::MATH_SHIFT, -203, vec![v.int(code)]);
         self.set("param:fam", v.int(-1), false);
         let e = self.get("param:everymath")?;
         let toks = crate::val::toks_of(v, e);
@@ -360,10 +360,9 @@ impl Run<'_, '_> {
     }
 
     /// `push_math` (§1136): a math group whose list is this node's.
-    fn push_math(&mut self, md: &Mode, grp: i64, m: i32, extra: Vec<ValueId>) -> R<i64> {
+    fn push_math(&mut self, md: &Mode, grp: i64, m: i32, extra: Vec<ValueId>) -> i64 {
         let _ = md;
-        let lid = self.push_list(m, grp, extra);
-        Ok(lid)
+        self.push_list(m, grp, extra)
     }
 
     fn mathcode(&mut self, c: i32) -> R<i32> {
@@ -429,7 +428,7 @@ impl Run<'_, '_> {
                     self.back_cur();
                     self.scan_left_brace()?;
                     let v = self.v;
-                    self.push_math(md, group::MATH, -203, vec![v.int(code), v.int(md.lid)])?;
+                    self.push_math(md, group::MATH, -203, vec![v.int(code), v.int(md.lid)]);
                     return Ok(None);
                 }
             };
@@ -571,7 +570,7 @@ impl Run<'_, '_> {
                     group::MATH_CHOICE,
                     -203,
                     vec![v.int(0), v.int(md.lid), u, u, u],
-                )?;
+                );
             }
             cmd::SUB_MARK | cmd::SUP_MARK => self.sub_sup(md)?,
             cmd::ABOVE => self.math_fraction(md)?,
@@ -750,7 +749,7 @@ impl Run<'_, '_> {
         }
         let d = self.scan_delimiter(false)?;
         if t == LEFT_NOAD {
-            let sid = self.push_math(md, group::MATH_LEFT, -203, vec![v.int(md.lid)])?;
+            let sid = self.push_math(md, group::MATH_LEFT, -203, vec![v.int(md.lid)]);
             self.append(sid, v.list(vec![v.int(T_LEFT), v.int(d)]));
         } else {
             let right = v.list(vec![v.int(T_RIGHT), v.int(d)]);
