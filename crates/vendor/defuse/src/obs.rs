@@ -152,10 +152,16 @@ pub enum Span {
     Children,
     /// Applying a run's definitions (re-binding readers of changed ones).
     Defs,
+    /// Creating the children's records (inside `Children`).
+    Create,
+    /// Inserting a record into the unit's order (inside `Create`).
+    OrderInsert,
+    /// Binding the created children (inside `Children`, after `Create`).
+    Bind,
 }
 
 impl Span {
-    pub const ALL: [Span; 18] = [
+    pub const ALL: [Span; 21] = [
         Span::Evaluate,
         Span::RunBatch,
         Span::ApplyBatch,
@@ -174,6 +180,9 @@ impl Span {
         Span::Finish,
         Span::Children,
         Span::Defs,
+        Span::Create,
+        Span::OrderInsert,
+        Span::Bind,
     ];
 
     #[must_use]
@@ -197,6 +206,9 @@ impl Span {
             Span::Finish => "finish",
             Span::Children => "children",
             Span::Defs => "defs",
+            Span::Create => "create",
+            Span::OrderInsert => "order_insert",
+            Span::Bind => "bind",
         }
     }
 }
