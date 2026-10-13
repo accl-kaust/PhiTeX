@@ -1452,6 +1452,12 @@ impl Analysis<'_> {
     /// misses computed names, `\csname` and `\let` behind
     /// `\@ifundefined`); such a call answers `Any` as before.
     fn format_only(&self, name: &str) -> bool {
+        // (`PHITEX_TRUST_FORMAT=1`: the closure over a format body is a
+        // bound like the text's own, for the engine that refutes a
+        // declaration instead of failing on it)
+        if crate::exec::env_flag!("PHITEX_TRUST_FORMAT") {
+            return false;
+        }
         !self.defs.is_defined(name) && self.prelude.is_defined(name)
     }
 
