@@ -225,8 +225,6 @@ impl Run<'_, '_> {
                 crate::val::glue_value(v, &c.skip),
             ]));
         }
-        let wp = v.seq_unit(v.list(plan));
-        self.contribute("wplan", wp);
         let output = self.get("param:output")?;
         let any = toks_of(v, output).is_empty();
         let mut start = PageStart::FIRST;
