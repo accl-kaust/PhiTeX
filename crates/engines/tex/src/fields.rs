@@ -93,7 +93,7 @@ const STATIC: &[&str] = &[
 macro_rules! params {
     ($($n:ident),* $(,)?) => {
         const PARAMS: &[&str] = &[$(stringify!($n)),*];
-        /// A parameter's index in the run's table (eqtb's shape).
+        /// A parameter's field slot.
         #[allow(non_camel_case_types, dead_code)]
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub(crate) enum Par {
@@ -210,7 +210,7 @@ params!(
     xspaceskip,
 );
 
-/// The run's table of TeX's quantities by index (tex.web's eqtb shape):
+/// The field slots of a run (a run-local cache of field values by slot):
 /// the parameters known by name ([`Par`]), the category codes of
 /// characters 0–255, and registers 0–255 of each kind (count, dimen,
 /// skip, muskip, toks). A slot's field is fixed for the build.
@@ -223,7 +223,7 @@ pub(crate) const NSLOT: usize = REG0 + 5 * 256;
 pub(crate) struct Fields {
     names: FxHashMap<&'static str, Field>,
     params: FxHashMap<&'static str, Field>,
-    /// The field of each slot of the run's table.
+    /// The field of each slot of the run's field slots.
     slot_field: Vec<Field>,
     /// The slot of a field that has one.
     field_slot: FxHashMap<Field, u32>,
@@ -291,7 +291,7 @@ impl Fields {
         self.par_slot.get(name).map(|&s| s as usize)
     }
 
-    /// The slot of the eqtb quantity at `(c, chr)` for the assignment
+    /// The slot of the field of the primitive quantity at `(c, chr)` for the assignment
     /// commands (§1224, §1228), as [`crate::val::quantity_field`] names
     /// it: a parameter known by name, or a register 0–255.
     pub(crate) fn quantity_slot(&self, c: u8, chr: i32) -> Option<usize> {

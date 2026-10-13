@@ -212,12 +212,12 @@ pub(crate) struct Run<'c, 'a> {
     pub no_pull: bool,
     /// The category codes this run read (§232), by character below
     /// 256, plus one (0: not read yet); emptied whenever `own` changes.
-    /// The run's table of quantities by slot ([`crate::fields`]):
+    /// The run's field slots ([`crate::fields`]), a cache of field values:
     /// `None` until read, then the run's view of the slot's field (as
     /// [`Run::get_f`] reads it), kept in step with every definition and
     /// restore. Empty until the first read.
     #[allow(clippy::option_option)]
-    eq: Vec<Option<Option<ValueId>>>,
+    slots: Vec<Option<Option<ValueId>>>,
     pub own: FxHashMap<Field, Option<ValueId>>,
     pub defs: Vec<(Field, ValueId, Locality)>,
     /// Where each field's definitions are in `defs`, latest last: a
@@ -295,7 +295,7 @@ impl<'c, 'a> Run<'c, 'a> {
             fread: Vec::new(),
             no_pull: false,
             own: FxHashMap::default(),
-            eq: Vec::new(),
+            slots: Vec::new(),
             defs: Vec::new(),
             def_ix: FxHashMap::default(),
             ginert: FxHashMap::default(),
@@ -329,57 +329,57 @@ impl<'c, 'a> Run<'c, 'a> {
     /// A binding of `f` in the run's view changed to `x` (`None`: the
     /// engine's value again): its slot follows.
     #[allow(clippy::option_option)]
-    pub(crate) fn eq_note(&mut self, f: Field, x: Option<Option<ValueId>>) {
-        if self.eq.is_empty() {
+    pub(crate) fn slot_note(&mut self, f: Field, x: Option<Option<ValueId>>) {
+        if self.slots.is_empty() {
             return;
         }
         if let Some(s) = self.ops.fields.field_slot(f) {
-            self.eq[s] = x;
+            self.slots[s] = x;
         }
     }
 
-    /// Slot `s` of the run's table: its field read once a run.
+    /// Field slot `s`: its field read once a run.
     #[inline]
-    pub(crate) fn eq_get(&mut self, s: usize) -> R<Option<ValueId>> {
-        if let Some(Some(x)) = self.eq.get(s) {
+    pub(crate) fn slot_get(&mut self, s: usize) -> R<Option<ValueId>> {
+        if let Some(Some(x)) = self.slots.get(s) {
             return Ok(*x);
         }
         let x = self.get_f(self.ops.fields.slot_field(s))?;
-        if self.eq.is_empty() {
-            self.eq = vec![None; crate::fields::NSLOT];
+        if self.slots.is_empty() {
+            self.slots = vec![None; crate::fields::NSLOT];
         }
-        self.eq[s] = Some(x);
+        self.slots[s] = Some(x);
         Ok(x)
     }
 
     /// Defines slot `s` (as [`Self::set`]).
-    pub(crate) fn eq_set(&mut self, s: usize, val: ValueId, global: bool) {
+    pub(crate) fn slot_set(&mut self, s: usize, val: ValueId, global: bool) {
         self.set_f(self.ops.fields.slot_field(s), val, global);
     }
 
     /// The parameter `p`.
     pub(crate) fn par(&mut self, p: Par) -> R<Option<ValueId>> {
-        self.eq_get(p as usize)
+        self.slot_get(p as usize)
     }
 
     /// The integer or dimension parameter `p`.
     pub(crate) fn ipar(&mut self, p: Par) -> R<i32> {
-        let x = self.eq_get(p as usize)?;
+        let x = self.slot_get(p as usize)?;
         Ok(crate::val::i32_of(self.v, x))
     }
 
     /// The glue parameter `p`.
     pub(crate) fn gpar(&mut self, p: Par) -> R<phitex_typeset::glue::Glue> {
-        let x = self.eq_get(p as usize)?;
+        let x = self.slot_get(p as usize)?;
         Ok(crate::val::glue_of(self.v, x))
     }
 
     /// Defines the parameter `p`.
     pub(crate) fn set_par(&mut self, p: Par, val: ValueId, global: bool) {
-        self.eq_set(p as usize, val, global);
+        self.slot_set(p as usize, val, global);
     }
 
-    /// The field of the eqtb quantity at `(c, chr)` (§1224, §1228).
+    /// The field of the primitive quantity at `(c, chr)` (§1224, §1228).
     pub(crate) fn quantity(&self, c: u8, chr: i32) -> Field {
         match self.ops.fields.quantity_slot(c, chr) {
             Some(s) => self.ops.fields.slot_field(s),
@@ -387,10 +387,10 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
-    /// The value of the eqtb quantity at `(c, chr)`.
+    /// The value of the field of the primitive quantity at `(c, chr)`.
     pub(crate) fn qget(&mut self, c: u8, chr: i32) -> R<Option<ValueId>> {
         match self.ops.fields.quantity_slot(c, chr) {
-            Some(s) => self.eq_get(s),
+            Some(s) => self.slot_get(s),
             None => self.get(&crate::val::quantity_field(c, chr)),
         }
     }
@@ -409,7 +409,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Field `f` in the run's view, through its slot if it has one.
     pub(crate) fn read_f(&mut self, f: Field) -> R<Option<ValueId>> {
         match self.ops.fields.field_slot(f) {
-            Some(s) => self.eq_get(s),
+            Some(s) => self.slot_get(s),
             None => self.get_f(f),
         }
     }
@@ -417,7 +417,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Register `n` of kind `r` (0 count, 1 dimen, 2 skip, 3 muskip, 4 toks).
     pub(crate) fn reg(&mut self, r: usize, n: i32) -> R<Option<ValueId>> {
         match crate::fields::reg_slot(r, n) {
-            Some(s) => self.eq_get(s),
+            Some(s) => self.slot_get(s),
             None => self.get(&format!(
                 "{}:{n}",
                 ["count", "dimen", "skip", "muskip", "toks"][r]
@@ -634,7 +634,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.no_pull = no_pull;
         self.claim_rest = claim;
         self.effect = effect;
-        self.eq.clear();
+        self.slots.clear();
         self.kind_memo = None;
         res?;
         Ok(v.list(made))
@@ -668,7 +668,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// ones read [`Self::ipar`]).
     pub(crate) fn param(&mut self, name: &str) -> R<i32> {
         let x = match self.ops.fields.par_slot(name) {
-            Some(s) => self.eq_get(s)?,
+            Some(s) => self.slot_get(s)?,
             None => self.get_f(self.ops.fields.param(self.v, name))?,
         };
         Ok(crate::val::i32_of(self.v, x))
@@ -676,7 +676,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     pub(crate) fn glue_param(&mut self, name: &str) -> R<phitex_typeset::glue::Glue> {
         let x = match self.ops.fields.par_slot(name) {
-            Some(s) => self.eq_get(s)?,
+            Some(s) => self.slot_get(s)?,
             None => self.get_f(self.ops.fields.param(self.v, name))?,
         };
         Ok(crate::val::glue_of(self.v, x))
@@ -684,7 +684,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     pub(crate) fn cat(&mut self, c: u32) -> R<u8> {
         let x = match usize::try_from(c).ok().filter(|&i| i < 256) {
-            Some(i) => self.eq_get(crate::fields::CAT0 + i)?,
+            Some(i) => self.slot_get(crate::fields::CAT0 + i)?,
             None => self.get_f(self.ops.fields.cat(self.v, c))?,
         };
         Ok(u8::try_from(x.map_or(0, |x| int_of(self.v, x))).unwrap_or(12))
@@ -705,7 +705,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.save_local(f);
         }
         self.own.insert(f, Some(val));
-        self.eq_note(f, Some(Some(val)));
+        self.slot_note(f, Some(Some(val)));
         let loc = if global {
             Locality::Global
         } else {
