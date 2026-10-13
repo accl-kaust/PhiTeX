@@ -160,12 +160,12 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // closing a group: the box's badness, its level fix, inserts (§1100, §1079)
         // and the box a `\\setbox` or box context gets (§1077 box_end)
         // (an output routine's `}` resumes the page builder, §1100)
-        "endgroup" | "egroup" => &["badness", "lvlfix", "inspen", "box:", "deadcycles"],
+        "endgroup" | "egroup" => &["badness", "lvlfix", "inspen", "box:"],
         // arguments expanded while read: a conditional may end (§366, §498)
         "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["if:", "cs:"],
-        "mark" => &["if:", "param:"],
+        "mark" => &[],
         // (e-TeX's mark classes, §1494 ff.)
-        "marks" => &["if:", "param:", "markclasses"],
+        "marks" => &["markclasses"],
         "write" | "openout" | "closeout" => &["if:", "wopen:", "write:"],
         // (`\\immediate` of a pdfTeX object too, pdfTeX §1528)
         "immediate" => &["if:", "wopen:", "write:", "pdf:"],
@@ -174,14 +174,9 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "aftergroup" => &["ag"],
         // boxes (§1083 begin_box, §1077 \\setbox); a box whose braces close in
         // the same node is packaged there and sets \\\\badness, §1086, §649)
-        "hbox" | "vbox" | "vtop" | "vcenter" | "setbox" | "vsplit" => &[
-            "box:",
-            "align",
-            "param:",
-            "lvlfix",
-            "badness",
-            "markclasses",
-        ],
+        "hbox" | "vbox" | "vtop" | "vcenter" | "setbox" | "vsplit" => {
+            &["box:", "lvlfix", "badness", "markclasses"]
+        }
         // conditionals (§498-§510)
         "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode"
         | "ifinner" | "ifvoid" | "ifhbox" | "ifvbox" | "ifcat" | "ifcase" | "iftrue"
@@ -248,9 +243,7 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // expansion only (§367, §369)
         "noexpand" => &[],
         // boxes in a box context (§1073 begin_box via §1084)
-        "moveleft" | "moveright" | "raise" | "lower" => {
-            &["box:", "align", "param:", "lvlfix", "badness"]
-        }
+        "moveleft" | "moveright" | "raise" | "lower" => &["box:", "lvlfix", "badness"],
         // a language whatsit (§1377) in horizontal material, which may
         // start a paragraph (`par:`, `lopen:`, `pg:`, §1091)
         "setlanguage" => &["box:", "lvlfix", "par:", "lopen:", "pg:"],
@@ -282,19 +275,7 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
 /// `\\interlinepenalties`).
 /// What a paragraph's end may set (`\\par`, a blank line): see
 /// [`class_state`]'s `par` row (§1070, §1094-§1096, §1199).
-const PAR_END: &[&str] = &[
-    "par:",
-    "pg:",
-    "lopen:",
-    "inspen",
-    "box:",
-    "lvlfix",
-    "param:",
-    "parshape",
-    "page:",
-    "deadcycles",
-    "if:",
-];
+const PAR_END: &[&str] = &["pg:", "parshape"];
 
 const NORMAL_PARAGRAPH: &[&str] = &[
     "param:looseness",
@@ -371,6 +352,12 @@ fn add_heads(st: &mut Option<Vec<String>>, heads: Option<&[&str]>) {
     match (st.as_mut(), heads) {
         (Some(v), Some(hs)) => {
             for h in hs {
+                // (dead heads: the paragraph, conditionals and groups are
+                // run-local, the page builder's state lives in its own
+                // node)
+                if DEAD_HEADS.contains(h) {
+                    continue;
+                }
                 if !v.iter().any(|x| x == h) {
                     v.push((*h).to_owned());
                 }
@@ -380,6 +367,9 @@ fn add_heads(st: &mut Option<Vec<String>>, heads: Option<&[&str]>) {
         (None, _) => {}
     }
 }
+
+/// The state heads no node defines any more.
+const DEAD_HEADS: &[&str] = &["par:", "if:", "lopen:", "page:"];
 
 fn add_head(st: &mut Option<Vec<String>>, h: &str) {
     add_heads(st, Some(&[h]));
