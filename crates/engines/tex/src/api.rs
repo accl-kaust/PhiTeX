@@ -1335,6 +1335,7 @@ impl Graph {
         let written = self.written.clone();
         let t0 = std::time::Instant::now();
         let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let spent = Arc::new(std::sync::atomic::AtomicU64::new(0));
         self.eng.set_env_provider(Box::new(move |v, f| {
             let name = v.as_str(f.0)?;
             let name = name.strip_prefix("file:")?;
@@ -1342,12 +1343,7 @@ impl Graph {
                 return None;
             }
             let n = count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            if crate::exec::env_flag!("PHITEX_TEX_TIME") && (n == 1 || n.is_multiple_of(100)) {
-                eprintln!(
-                    "provider: {:.1} s, {n} answers, last {name}",
-                    t0.elapsed().as_secs_f64()
-                );
-            }
+            let t1 = std::time::Instant::now();
             let found = finder(name);
             let hash = file_hash(found.as_ref());
             let val = found.map(|(path, bytes)| {
@@ -1356,6 +1352,16 @@ impl Graph {
             });
             if let Ok(mut l) = log.lock() {
                 l.push((name.to_owned(), f, val, hash));
+            }
+            let ns = u64::try_from(t1.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            let all = spent.fetch_add(ns, std::sync::atomic::Ordering::Relaxed) + ns;
+            if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+                #[allow(clippy::cast_precision_loss)]
+                let all = all as f64 / 1e9;
+                eprintln!(
+                    "provider: at {:.1} s, {n} answers, {all:.3} s in the provider, last {name}",
+                    t0.elapsed().as_secs_f64()
+                );
             }
             Some(val)
         }));
@@ -2174,10 +2180,21 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         b.extend_from_slice(opts.prelude_jobname.as_bytes());
         phitex_defuse::hash_bytes(7, &b)
     });
+    let t_start = std::time::Instant::now();
+    let time = crate::exec::env_flag!("PHITEX_TEX_TIME");
     let known = match cached_prelude(key, opts) {
-        Ok(c) => return c,
+        Ok(c) => {
+            if time {
+                eprintln!(
+                    "prelude: cached ({:?} to find and check it)",
+                    t_start.elapsed()
+                );
+            }
+            return c;
+        }
         Err(known) => known,
     };
+    let t_check = t_start.elapsed();
     let finder = &opts.finder;
     let mut g = Graph::new(opts.time_limit, opts.threads);
     g.eng.set_max_rounds(opts.max_rounds);
@@ -2194,6 +2211,8 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         g.eng.set_environment(env);
         g.eng.set_environment_absent(g.absent.clone());
     }
+    let t_supply = t_start.elapsed();
+    let mut t_settle = t_supply;
     let mut env: Vec<(String, ValueId)> = crate::val::initex(g.eng.values());
     for (name, x) in &env {
         let f = g.eng.values().field(name);
@@ -2212,43 +2231,29 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         let mut stats = Stats::default();
         let t0 = std::time::Instant::now();
         g.settle(unit, finder, &mut stats, false, &mut phitex_defuse::NoEdits);
-        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        if time {
             eprintln!("prelude settle {:?}", t0.elapsed());
         }
-        let v = g.eng.values();
-        let defs_f = v.field("defs");
-        let mut seen = phitex_defuse::FxHashSet::default();
-        if let Some(d) = g.eng.acc_value(unit, defs_f) {
-            for l in v.seq_to_vec(d) {
-                for n in list_of(v, l) {
-                    if !seen.insert(n) {
-                        continue;
-                    }
-                    let f = Field(n);
-                    let name = field_name(v, f);
-                    // open files are not dumped
-                    // nor is the PDF writer's state (pdfTeX dumps no objects)
-                    if ["wopen:", "write:", "file:", "read:", "pdf:state"]
-                        .iter()
-                        .any(|p| name.starts_with(p))
-                    {
-                        continue;
-                    }
-                    let x = g
-                        .eng
-                        .reaching_def(end, f)
-                        .and_then(|d| g.eng.def_value(d, f));
-                    if let Some(x) = x {
-                        env.retain(|(k, _)| *k != name);
-                        env.push((name, x));
-                    }
-                }
-            }
-        }
+        t_settle = t_start.elapsed();
+        env = final_bindings(&g, unit, end, env);
     }
+    let t_bindings = t_start.elapsed();
     let v = g.eng.values();
     let out: Vec<(String, Tree)> = env.into_iter().map(|(k, x)| (k, export(v, x))).collect();
     let e = Arc::new(out);
+    if time {
+        eprintln!(
+            "prelude: freshness check {t_check:?}, supply known files {:?}, run (settle) {:?}, final bindings {:?}, export {:?}; {} bindings",
+            t_supply.checked_sub(t_check).unwrap_or_default(),
+            t_settle.checked_sub(t_supply).unwrap_or_default(),
+            t_bindings.checked_sub(t_settle).unwrap_or_default(),
+            t_start
+                .elapsed()
+                .checked_sub(t_bindings)
+                .unwrap_or_default(),
+            e.len()
+        );
+    }
     let c = Arc::new(Cached {
         key: prelude_key_of(key, &g.reads),
         text_key: key,
@@ -2265,6 +2270,77 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             .push(c.clone());
     }
     c
+}
+
+/// The prelude's bindings at its end (`end`, the mark after its text):
+/// the INITEX ones `env`, each field it defines bound to its final
+/// value instead (open files and the PDF writer's state are not
+/// dumped).
+fn final_bindings(
+    g: &Graph,
+    unit: UnitId,
+    end: NodeId,
+    mut env: Vec<(String, ValueId)>,
+) -> Vec<(String, ValueId)> {
+    let v = g.eng.values();
+    let defs_f = v.field("defs");
+    let mut seen = phitex_defuse::FxHashSet::default();
+    // (each name's last binding replaces its earlier one, which keeps
+    // its place empty: the order is the one remove-then-push gives)
+    let mut at: phitex_defuse::FxHashMap<String, usize> = env
+        .iter()
+        .enumerate()
+        .map(|(k, (n, _))| (n.clone(), k))
+        .collect();
+    let mut slots: Vec<Option<(String, ValueId)>> = env.drain(..).map(Some).collect();
+    let t0 = std::time::Instant::now();
+    let z = std::time::Duration::ZERO;
+    let (mut t_name, mut t_reach, mut t_value) = (z, z, z);
+    let mut raw = 0usize;
+    let acc = g.eng.acc_value(unit, defs_f).map(|d| v.seq_to_vec(d));
+    let t_acc = t0.elapsed();
+    if let Some(ls) = acc {
+        for l in ls {
+            for n in list_of(v, l) {
+                raw += 1;
+                if !seen.insert(n) {
+                    continue;
+                }
+                let f = Field(n);
+                let t = std::time::Instant::now();
+                let name = field_name(v, f);
+                t_name += t.elapsed();
+                // open files are not dumped
+                // nor is the PDF writer's state (pdfTeX dumps no objects)
+                if ["wopen:", "write:", "file:", "read:", "pdf:state"]
+                    .iter()
+                    .any(|p| name.starts_with(p))
+                {
+                    continue;
+                }
+                let t = std::time::Instant::now();
+                let d = g.eng.reaching_def(end, f);
+                t_reach += t.elapsed();
+                let t = std::time::Instant::now();
+                let x = d.and_then(|d| g.eng.def_value(d, f));
+                t_value += t.elapsed();
+                if let Some(x) = x {
+                    if let Some(k) = at.insert(name.clone(), slots.len()) {
+                        slots[k] = None;
+                    }
+                    slots.push(Some((name, x)));
+                }
+            }
+        }
+    }
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        eprintln!(
+            "final bindings: defs fold {t_acc:?}, {raw} entries, {} fields; names {t_name:?}, reaching_def {t_reach:?}, def_value {t_value:?}, total {:?}",
+            seen.len(),
+            t0.elapsed()
+        );
+    }
+    slots.into_iter().flatten().collect()
 }
 
 /// How bad a [`Diagnostic`] is.

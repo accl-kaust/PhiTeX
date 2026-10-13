@@ -1860,6 +1860,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // the page chain's delta (`page::step_defs`), so no step reads
         // another
         let op = self.cx.op();
+        let t_pub = std::time::Instant::now();
         let published: Vec<(Field, ValueId, Locality)> = self
             .st
             .published(self.v)
@@ -1869,9 +1870,16 @@ impl<'c, 'a> Run<'c, 'a> {
         if op == self.ops.pagestep || op == self.ops.pagestep_any {
             crate::page::step_defs(&mut self, published);
         } else {
+            let (n, t_list) = (published.len(), t_pub.elapsed());
             for (f, x, l) in published {
                 crate::exec::widths::def(f);
                 self.cx.define_with(f, x, l);
+            }
+            if n >= 10_000 && crate::exec::env_flag!("PHITEX_TEX_TIME") {
+                eprintln!(
+                    "run finish: {n} definitions published: listed {t_list:?}, define_with {:?}",
+                    t_pub.elapsed().checked_sub(t_list).unwrap_or_default()
+                );
             }
         }
         let locs: Vec<Loc> = self.st.defined_locs().collect();

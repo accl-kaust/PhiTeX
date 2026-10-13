@@ -69,7 +69,14 @@ pub(crate) fn run_node_parking(
         }
         None => Run::new(cx, o),
     };
+    let t_body = std::time::Instant::now();
     let res = body(&mut r);
+    let t_body = t_body.elapsed();
+    // (a long run, the format's: its commands' time, then its finish)
+    let timed = t_body.as_secs() >= 1 && crate::exec::env_flag!("PHITEX_TEX_TIME");
+    if timed {
+        eprintln!("run: commands {t_body:?}");
+    }
     if trace {
         eprintln!(
             "  -> {}",
@@ -84,7 +91,12 @@ pub(crate) fn run_node_parking(
     match res {
         Ok(()) => {
             r.end_open();
-            Ok(r.finish())
+            let t = std::time::Instant::now();
+            let x = r.finish();
+            if timed {
+                eprintln!("run: finish {:?}", t.elapsed());
+            }
+            Ok(x)
         }
         Err(Halt::Stop(s)) => {
             if parks
