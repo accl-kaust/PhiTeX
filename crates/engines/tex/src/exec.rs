@@ -346,6 +346,7 @@ impl Executor for Threads {
         run: &(dyn Fn(usize) -> RunResult + Sync),
         out: &mut Vec<RunResult>,
     ) {
+        let _st = StepTrace::enter(n);
         if let Some(w) = &self.watch {
             w.progress
                 .total
@@ -677,5 +678,41 @@ pub(crate) mod widths {
             "widths: lookups {} misses {} ({pct:.1}%)",
             s.lookups, s.misses
         );
+    }
+}
+
+/// (measurement) `PHITEX_STEP_TRACE`: per batch, its width, its run time,
+/// and the time since the previous batch ended (the engine's apply of it).
+struct StepTrace(Option<(std::time::Instant, usize)>);
+
+static STEP_LAST: std::sync::Mutex<Option<(std::time::Instant, usize)>> =
+    std::sync::Mutex::new(None);
+
+impl StepTrace {
+    fn enter(n: usize) -> StepTrace {
+        if std::env::var_os("PHITEX_STEP_TRACE").is_none() {
+            return StepTrace(None);
+        }
+        let now = std::time::Instant::now();
+        if let Some((t, pn)) = *STEP_LAST.lock().unwrap() {
+            eprintln!(
+                "stepgap: prev_n {pn} gap_us {}",
+                now.duration_since(t).as_micros()
+            );
+        }
+        StepTrace(Some((now, n)))
+    }
+}
+
+impl Drop for StepTrace {
+    fn drop(&mut self) {
+        if let Some((t, n)) = self.0 {
+            let now = std::time::Instant::now();
+            eprintln!(
+                "steprun: n {n} run_us {}",
+                now.duration_since(t).as_micros()
+            );
+            *STEP_LAST.lock().unwrap() = Some((now, n));
+        }
     }
 }
