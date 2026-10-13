@@ -3074,6 +3074,15 @@ pub fn set_hints_enabled(on: bool) {
     OFF.store(!on, Ordering::Relaxed);
 }
 
+/// Whether a field has a regime guess of the empty token list: the
+/// common state between paragraphs (`\\everypar`, which LaTeX's
+/// paragraph hook resets every paragraph). A region's base-level local
+/// definition equal to it is no definition (`Run::at_guess`); one that
+/// differs is declared by the slice ([`sets_everypar`]).
+pub(crate) fn regime_guess_empty(field: &str) -> bool {
+    field == "param:everypar"
+}
+
 /// Whether a slice calls a command that leaves `\\everypar` other
 /// than LaTeX's paragraph hooks leave it: a heading (`\\@afterheading`),
 /// a list item, an environment's begin or end (`\\@doendpe`), a title.

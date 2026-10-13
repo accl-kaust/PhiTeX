@@ -865,8 +865,31 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// The fields the run defines at its base level.
     pub(crate) fn def_fields(&mut self) -> Vec<Field> {
-        let locs: Vec<Loc> = self.st.defined_locs().collect();
+        let guessed = self.at_guess();
+        let locs: Vec<Loc> = self
+            .st
+            .defined_locs()
+            .filter(|l| !guessed.contains(l))
+            .collect();
         locs.into_iter().map(|l| self.loc_field(l)).collect()
+    }
+
+    /// The base-level local definitions equal to their field's regime
+    /// guess ([`crate::hints::regime_guess_empty`]): no definition, the
+    /// readers see the guess (LaTeX's paragraph hook resetting
+    /// `\everypar` to empty at every paragraph).
+    pub(crate) fn at_guess(&mut self) -> Vec<Loc> {
+        let v = self.v;
+        let mut out = Vec::new();
+        for (loc, x, l) in self.st.published(v) {
+            if l == Locality::Local
+                && crate::hints::regime_guess_empty(&str_of(v, self.loc_field(loc).0))
+                && crate::val::toks_rc(v, Some(x)).is_empty()
+            {
+                out.push(loc);
+            }
+        }
+        out
     }
 
     pub(crate) fn contribute(&mut self, name: &str, val: ValueId) {
@@ -2009,10 +2032,12 @@ impl<'c, 'a> Run<'c, 'a> {
         // another
         let op = self.cx.op();
         let t_pub = std::time::Instant::now();
+        let guessed = self.at_guess();
         let published: Vec<(Field, ValueId, Locality)> = self
             .st
             .published(self.v)
             .into_iter()
+            .filter(|(loc, _, _)| !guessed.contains(loc))
             .map(|(loc, x, l)| (self.loc_field(loc), x, l))
             .collect();
         if op == self.ops.pagestep || op == self.ops.pagestep_any {
@@ -2030,7 +2055,11 @@ impl<'c, 'a> Run<'c, 'a> {
                 );
             }
         }
-        let locs: Vec<Loc> = self.st.defined_locs().collect();
+        let locs: Vec<Loc> = self
+            .st
+            .defined_locs()
+            .filter(|l| !guessed.contains(l))
+            .collect();
         if !locs.is_empty() {
             let names: Vec<ValueId> = locs.into_iter().map(|l| self.loc_field(l).0).collect();
             let l = self.v.list(names);

@@ -602,6 +602,16 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
     if let Some(d) = common::first_difference(&b.output().0, &want) {
         panic!("{name}.pdf cold: {d}");
     }
+    let writes = common::read(&common::fixtures().join(format!("latex/pdf/{name}.writes")));
+    let files = b.files();
+    for (n, w) in parse_writes(&writes) {
+        let got = files.iter().find(|(m, _)| *m == n).map(|(_, t)| t.clone());
+        assert_eq!(got.as_deref(), Some(w.as_str()), "{name}: {n} differs");
+    }
+    assert_eq!(
+        b.stats.undeclared_definitions, 0,
+        "{name}: undeclared definitions"
+    );
     (b, regions)
 }
 
@@ -772,4 +782,19 @@ fn latex_input_include() {
     let cold = common::build(pdf_opts("inputs", &dir), Some(&prelude(true)), &src);
     let _ = std::fs::write(dir.join("chap1.tex"), &chap1);
     edit_check("inputs", &b, &cold, 4);
+}
+
+/// An article with one paragraph between blank lines (the ladder's
+/// red-02): LaTeX's paragraph hook resets `\everypar` to its regime
+/// guess, no definition; byte-identical, the `.aux` too, no undeclared
+/// definition, and an edit equals a cold build.
+#[test]
+fn latex_one_paragraph() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join("red02.tex"));
+    let (mut b, _) = cold_nodes("red02", &dir, &src);
+    let new = src.replace("Hello", "Hallo");
+    b.edit(&new);
+    let cold = common::build(pdf_opts("red02", &dir), Some(&prelude(true)), &new);
+    edit_check("red02", &b, &cold, 3);
 }
