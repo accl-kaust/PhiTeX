@@ -1994,7 +1994,8 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// Whether the node's own text opens a group it does not close (an
-    /// unmatched `\\begin{...}`, `\\begingroup`, `\\bgroup` or `{`):
+    /// unmatched `\\begin{...}`, `\\begingroup` or `\\bgroup`; a brace
+    /// of the text is never split between slices, `hints::slices_of`):
     /// the group its run leaves open is the text's, not one a command
     /// left open while it still reads on (a loading command's, a
     /// macro's).
@@ -2012,11 +2013,9 @@ impl<'c, 'a> Run<'c, 'a> {
             })
             .collect();
         let n = |p: &str| i64::try_from(text.matches(p).count()).unwrap_or(0);
-        let braces = n("{") - n("\\{") - (n("}") - n("\\}"));
         (n("\\begin{") - n("\\end{"))
             + (n("\\begingroup") - n("\\endgroup"))
             + (n("\\bgroup") - n("\\egroup"))
-            + braces
             > 0
     }
 
