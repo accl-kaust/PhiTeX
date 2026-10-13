@@ -602,7 +602,7 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
     let reads: Vec<_> = b
         .reads()
         .into_iter()
-        .filter(|(n, _)| !n.ends_with(".tfm"))
+        .filter(|(n, _)| !n.to_ascii_lowercase().ends_with(".tfm"))
         .collect();
     eprintln!("reads {name}: {reads:?}");
     if let Some(d) = common::first_difference(&b.output().0, &want) {
