@@ -117,8 +117,12 @@ A document the relaxed mode does not cover is built in exact mode
 | a form without `\immediate` when `\pdfpageheight` is 0 | pdfTeX writes it under the height of the first page that references it (its origin); the page is not known when the form is made | rare (LaTeX sets `\pdfpageheight`) | permanent |
 | `\pdfobj useobjnum` with a literal number | the number was not given by the mode, so it is not a handle | rare | permanent |
 | fonts of included PDF files replaced (`\pdfinclusioncopyfonts` 0) | the replacements are the document's fonts, merged across pieces | uncommon | permanent for now |
-| PNG transparency groups | the group is one document-level object shared by the images | common (graphicx with alpha PNGs) | to be brought in: one group object written once at the finish, like the fonts |
+| a transparency group of an included PDF page | the group is numbered by the page that first shows the image | uncommon | permanent for now |
 | `\pdffontattr`, `\pdfincludechars`, `\pdfnobuiltintounicode`, `\pdffontobjnum`, `\pdffontname` | they act on the document's font objects, which the finish writes | common (cmap, hyperref drivers, font packages) | to be brought in: replayed into the finish from the fields TeX keeps, like the catalog texts |
+
+Brought in: PNG transparency groups (the document's one group object
+has its own handle; the finish writes it once when a piece refers to
+it).
 
 Not detected, documented: a handle printed as text (`\the\pdflastobj`
 typeset) differs from pdfTeX's number.
