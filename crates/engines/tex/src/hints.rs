@@ -217,7 +217,6 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
             "muskip:",
             "toks:",
             "param:",
-            "parshape",
             "if:",
             "aftertoken",
         ],
@@ -275,7 +274,14 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
 /// `\\interlinepenalties`).
 /// What a paragraph's end may set (`\\par`, a blank line): see
 /// [`class_state`]'s `par` row (§1070, §1094-§1096, §1199).
-const PAR_END: &[&str] = &["pg:", "parshape"];
+/// `normal_paragraph`'s resets (§1070) are not here: a reset that
+/// writes the value already in force is no definition, and a value
+/// differs from its reset only after a command set it since the last
+/// paragraph end, a command whose own row declares it (`\\parshape`,
+/// `\\hangindent`, ...), as `\\looseness` and `\\hangindent` were
+/// already. Declaring `parshape` here parked every following
+/// paragraph's `line_break` on its predecessor.
+const PAR_END: &[&str] = &["pg:"];
 
 const NORMAL_PARAGRAPH: &[&str] = &[
     "param:looseness",
@@ -2946,9 +2952,10 @@ mod tests {
             );
         }
         let st = |off: usize| text.at(off).bound.expect("bounded").state;
-        // (`\\par` is bounded: a paragraph's end, §1094-§1096, §1070)
+        // (`\\par` is bounded: a paragraph's end, §1094-§1096; its
+        // `normal_paragraph` resets only what a command since set, §1070)
         let par = st(0).expect("a state row");
-        assert!(par.iter().any(|h| h == "pg:") && par.iter().any(|h| h == "parshape"));
+        assert!(par.iter().any(|h| h == "pg:") && !par.iter().any(|h| h == "parshape"));
         // the run after it: `\\prevgraf` if a command after it in its
         // text ends the paragraph, and `\\afterassignment`'s row (the
         // region runs on to its end); no dead head (`par:`, `if:`,
