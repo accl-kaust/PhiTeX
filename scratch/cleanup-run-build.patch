@@ -28,10 +28,25 @@ index b041401d..685b90dd 100644
              pagestep_any,
              breaks,
 diff --git a/crates/engines/tex/src/build.rs b/crates/engines/tex/src/build.rs
-index 057735ca..f82b63a3 100644
+index 057735ca..573f3461 100644
 --- a/crates/engines/tex/src/build.rs
 +++ b/crates/engines/tex/src/build.rs
-@@ -91,40 +91,20 @@ impl Run<'_, '_> {
+@@ -38,7 +38,6 @@ pub(crate) struct Mode {
+     pub lid: i64,
+     pub vlid: i64,
+     pub group: i64,
+-    pub sid: i64,
+     pub depth: i64,
+     pub extra: Vec<ValueId>,
+     pub vm: i32,
+@@ -84,47 +83,25 @@ impl Run<'_, '_> {
+             lid: t.lid,
+             vlid,
+             group,
+-            sid: t.lid,
+             depth: base.depth + groups,
+             extra: t.extra.clone(),
+             vm,
          })
      }
  
@@ -60,7 +75,7 @@ index 057735ca..f82b63a3 100644
 -            None => (0, 0, 0, 1, 0, Vec::new()),
 -        };
 +    /// Level 0: the main vertical list at the bottom level; no node
-+    /// runs inside an engine scope (docs/TARGET_GRAPH.md).
++    /// runs inside an engine scope (`docs/TARGET_GRAPH.md`).
 +    #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
 +    pub(crate) fn base_mode(&self) -> R<Mode> {
          Ok(Mode {
@@ -78,14 +93,13 @@ index 057735ca..f82b63a3 100644
 +            lid: 0,
 +            vlid: 0,
 +            group: 0,
-+            sid: 0,
 +            depth: 0,
 +            extra: Vec::new(),
 +            vm: 1,
          })
      }
  
-@@ -150,14 +130,15 @@ impl Run<'_, '_> {
+@@ -150,14 +127,15 @@ impl Run<'_, '_> {
      /// engine's, the `\aftergroup` tokens and the definitions that must
      /// reach out of the group are this node's). Returns the mode outside
      /// it.
@@ -104,7 +118,7 @@ index 057735ca..f82b63a3 100644
      }
  
      /// The groups still open when the run ends. Only `\end` inside
-@@ -174,61 +155,6 @@ impl Run<'_, '_> {
+@@ -174,61 +152,6 @@ impl Run<'_, '_> {
          }
      }
  
@@ -166,7 +180,7 @@ index 057735ca..f82b63a3 100644
      // ------------------------------------------------------------ lists
  
      /// `tail_append` to list `lid`: a list of this run's grows here, its
-@@ -1218,24 +1144,7 @@ impl Run<'_, '_> {
+@@ -1218,24 +1141,7 @@ impl Run<'_, '_> {
                  self.box_report(h, packed.report, false);
                  let b = nodes::encode_box(v, &packed.node, &side);
                  let outer = self.close_group(md)?;
@@ -192,7 +206,7 @@ index 057735ca..f82b63a3 100644
                  if adjusted {
                      for a in &packed.adjustments {
                          let y = nodes::encode(v, a, &side);
-@@ -1290,46 +1199,13 @@ impl Run<'_, '_> {
+@@ -1290,46 +1196,13 @@ impl Run<'_, '_> {
  
      /// The mode outside the innermost group (what `pop_nest` returns to)
      /// without closing it: the level below, or the engine scope's parent.
@@ -368,7 +382,7 @@ index 83d2f85b..7c66722e 100644
  pub(crate) struct Dvi;
  
 diff --git a/crates/engines/tex/src/run.rs b/crates/engines/tex/src/run.rs
-index 4c7c33a6..4268239e 100644
+index 4c7c33a6..30e0e7ed 100644
 --- a/crates/engines/tex/src/run.rs
 +++ b/crates/engines/tex/src/run.rs
 @@ -40,7 +40,6 @@ pub(crate) type R<T> = Result<T, Halt>;
@@ -399,16 +413,22 @@ index 4c7c33a6..4268239e 100644
      /// `align_state` as this run has it (§309), once read.
      pub astate: Option<i64>,
      /// Lines entered by this run (for `\inputlineno`).
-@@ -252,8 +245,6 @@ impl<'c, 'a> Run<'c, 'a> {
+@@ -250,13 +243,7 @@ impl<'c, 'a> Run<'c, 'a> {
+     pub(crate) fn new(cx: &'c mut Ctx<'a>, ops: Ops) -> Self {
+         let v = cx.values();
          let op = cx.op();
-         let code = if op == ops.exec {
-             1
+-        let code = if op == ops.exec {
+-            1
 -        } else if op == ops.put {
 -            2
-         } else {
-             0
-         };
-@@ -290,7 +281,6 @@ impl<'c, 'a> Run<'c, 'a> {
+-        } else {
+-            0
+-        };
++        let code = u16::from(op == ops.exec);
+         crate::exec::note(code, cx.node().raw());
+         Run {
+             _scope: crate::val::EpochScope::enter(v, cx.values_epoch()),
+@@ -290,7 +277,6 @@ impl<'c, 'a> Run<'c, 'a> {
              if_codes: Vec::new(),
              mcache: FxHashMap::default(),
              tfields: FxHashMap::default(),
@@ -416,7 +436,7 @@ index 4c7c33a6..4268239e 100644
              astate: None,
              lines_entered: 0,
              eof: false,
-@@ -323,11 +313,10 @@ impl<'c, 'a> Run<'c, 'a> {
+@@ -323,11 +309,10 @@ impl<'c, 'a> Run<'c, 'a> {
      /// parked, with the node and its operation.
      #[cold]
      fn trace_read(&mut self, f: Field, parked: bool) {
@@ -429,7 +449,7 @@ index 4c7c33a6..4268239e 100644
              "badness",
              "markclasses",
          ];
-@@ -1275,10 +1264,6 @@ impl<'c, 'a> Run<'c, 'a> {
+@@ -1275,10 +1260,6 @@ impl<'c, 'a> Run<'c, 'a> {
          out
      }
  
