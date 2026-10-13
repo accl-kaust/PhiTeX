@@ -219,6 +219,9 @@ pub(crate) struct Run<'c, 'a> {
     /// growing `defs` (and no linear search finds the earlier one).
     pub def_ix: FxHashMap<Field, Vec<usize>>,
     pub contribs: Vec<(Field, ValueId)>,
+    /// The page builder of a text run as one node, paging inline
+    /// (`pageinline.rs`).
+    pub pg: Option<Box<crate::pageinline::Inline>>,
     pub kids: Vec<(OpId, Vec<ValueId>)>,
     pub effect: Effect,
     pub cur: Cur,
@@ -278,6 +281,7 @@ impl<'c, 'a> Run<'c, 'a> {
             defs: Vec::new(),
             def_ix: FxHashMap::default(),
             contribs: Vec::new(),
+            pg: None,
             kids: Vec::new(),
             effect: Effect::None,
             cur: Cur {
@@ -1286,6 +1290,11 @@ impl<'c, 'a> Run<'c, 'a> {
         let k = args.get(1).map_or(0, |&t| int_of(self.v, t));
         self.top = k & 1 != 0;
         self.doc = k & 2 != 0;
+        // a job's text run as one node (no format: INITEX's regime) pages
+        // inline, in TeX's order (`pageinline.rs`)
+        if self.top && !self.doc && self.pg.is_none() {
+            self.pg = Some(Box::new(crate::pageinline::Inline::new()));
+        }
         loop {
             while self.has_input() {
                 self.command()?;
@@ -1325,6 +1334,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// command made, then the input left), the claim and the scope effect.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn finish(mut self) -> ValueId {
+        crate::pageinline::finish(&mut self);
         // a page parameter this run set reaches the page fold as a
         // marker in the main list (page.rs `breaks`)
         if self.defs.iter().any(|&(f, _, _)| {
