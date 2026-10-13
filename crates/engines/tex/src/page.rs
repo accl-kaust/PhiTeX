@@ -1255,10 +1255,7 @@ impl FinalState {
                 continue;
             };
             let j = usize::try_from(int_of(v, j)).unwrap_or(0);
-            deltas
-                .entry(j)
-                .or_default()
-                .extend(pgst_pairs(v, Some(ps)));
+            deltas.entry(j).or_default().extend(pgst_pairs(v, Some(ps)));
         }
         let mut state: std::collections::BTreeMap<String, (Field, ValueId)> =
             std::collections::BTreeMap::new();
@@ -1277,15 +1274,11 @@ impl FinalState {
                 cur = if state.is_empty() {
                     ValueId::UNIT
                 } else {
-                    v.list(
-                        state
-                            .values()
-                            .map(|&(f, x)| v.list(vec![f.0, x]))
-                            .collect(),
-                    )
+                    v.list(state.values().map(|&(f, x)| v.list(vec![f.0, x])).collect())
                 };
             }
-            let e: Vec<(String, ValueId)> = state.iter().map(|(n, &(_, x))| (n.clone(), x)).collect();
+            let e: Vec<(String, ValueId)> =
+                state.iter().map(|(n, &(_, x))| (n.clone(), x)).collect();
             log_pub(o, "pgst", j, e);
             if cur != ValueId::UNIT {
                 cx.publish(v.field(&format!("pgst:{j}")), cur);
@@ -1310,12 +1303,20 @@ impl FinalState {
 /// ([`crate::Stats::refuted_guesses`]).
 #[derive(Default)]
 pub(crate) struct LbLog {
-    reads: std::collections::BTreeMap<(&'static str, usize), Vec<Vec<(String, ValueId)>>>,
-    pubs: std::collections::BTreeMap<(&'static str, usize), Vec<(String, ValueId)>>,
+    reads: std::collections::BTreeMap<LbKey, Vec<Entries>>,
+    pubs: std::collections::BTreeMap<LbKey, Entries>,
 }
 
+/// A loop-back of the page chain: its kind and page.
+type LbKey = (&'static str, usize);
+/// A loop-back's value as named entries.
+type Entries = Vec<(String, ValueId)>;
+
 fn log_read(o: &crate::run::Ops, kind: &'static str, j: usize, e: Vec<(String, ValueId)>) {
-    let mut l = o.lblog.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut l = o
+        .lblog
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rs = l.reads.entry((kind, j)).or_default();
     if !rs.contains(&e) {
         rs.push(e);
@@ -1323,7 +1324,10 @@ fn log_read(o: &crate::run::Ops, kind: &'static str, j: usize, e: Vec<(String, V
 }
 
 fn log_pub(o: &crate::run::Ops, kind: &'static str, j: usize, e: Vec<(String, ValueId)>) {
-    let mut l = o.lblog.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut l = o
+        .lblog
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     l.pubs.insert((kind, j), e);
 }
 
