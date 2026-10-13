@@ -960,6 +960,19 @@ const MAX_DIMEN: i32 = 0o7777777777;
 /// `Dvi`: the pages, written (§583–§645). The comment and `\mag` are
 /// read at the end.
 pub(crate) fn dvi(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+    let t0 = std::time::Instant::now();
+    let r = dvi_file(cx);
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        eprintln!(
+            "output file (dvi root run): {:?}{}",
+            t0.elapsed(),
+            if r.is_ok() { "" } else { " (stopped)" }
+        );
+    }
+    r
+}
+
+fn dvi_file(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     let v = cx.values();
     let pages = cx.acc_range(v.field("pages"), None)?;
     let all = v.seq_to_vec(pages);

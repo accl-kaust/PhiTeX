@@ -241,6 +241,7 @@ fn apply_text(
     doc: bool,
     finder: Option<&Finder>,
 ) {
+    let t_all = std::time::Instant::now();
     let text = as_file(text);
     let sl = if doc {
         slices(&text, defs)
@@ -256,8 +257,10 @@ fn apply_text(
             (key(&text[s..e], starts), (s, e))
         })
         .collect();
+    let t_slices = t_all.elapsed();
     let old = &*nodes_now;
     let hints = crate::hints::text_hints(&text, pass::FileKind::Document, defs);
+    let t_hints = t_all.elapsed();
     if doc {
         crate::hints::register_text(eng.values().str(DOC_NAME), &hints);
     }
@@ -307,8 +310,10 @@ fn apply_text(
     {
         b += 1;
     }
+    let old_len = old.len();
     let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
     let common = old_mid.min(new_mid);
+    let t_diff = t_all.elapsed();
     for k in common..old_mid {
         eng.remove(old[a + k].1);
     }
@@ -337,6 +342,22 @@ fn apply_text(
         nodes.push((new[i].0.clone(), n));
     }
     *nodes_now = nodes;
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        eprintln!(
+            "edit apply: {:?} total; hint pass (slices: whole-text analyse) {t_slices:?}, text_hints again {:?}, slice-key diff {:?}, engine replace/insert/remove {:?}; {} old / {} new slices, {} kept, {} replaced, {} removed, {} inserted, text {} bytes",
+            t_all.elapsed(),
+            t_hints.checked_sub(t_slices).unwrap_or_default(),
+            t_diff.checked_sub(t_hints).unwrap_or_default(),
+            t_all.elapsed().checked_sub(t_diff).unwrap_or_default(),
+            old_len,
+            new.len(),
+            a + b,
+            common,
+            old_mid - common,
+            new_mid - common,
+            text.len()
+        );
+    }
 }
 
 impl Default for Options {
@@ -1992,18 +2013,41 @@ fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> 
         .get(&key)
         .cloned()
         .unwrap_or_default();
+    let t0 = std::time::Instant::now();
     let given = opts
         .prelude_bytes
         .as_deref()
         .and_then(deserialise)
         .filter(|c| c.text_key == key)
         .map(Arc::new);
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") && opts.prelude_bytes.is_some() {
+        eprintln!(
+            "format deserialise: {:?} ({} bytes, {})",
+            t0.elapsed(),
+            opts.prelude_bytes.as_ref().map_or(0, Vec::len),
+            if given.is_some() {
+                "accepted"
+            } else {
+                "rejected"
+            }
+        );
+    }
     let mut known: Vec<String> = Vec::new();
     for c in given.into_iter().chain(candidates) {
-        if c.reads
+        let t1 = std::time::Instant::now();
+        let fresh = c
+            .reads
             .iter()
-            .all(|(n, h)| file_hash(finder(n).as_ref()) == *h)
-        {
+            .all(|(n, h)| file_hash(finder(n).as_ref()) == *h);
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "format check: {} files found and hashed in {:?} ({})",
+                c.reads.len(),
+                t1.elapsed(),
+                if fresh { "fresh" } else { "stale" }
+            );
+        }
+        if fresh {
             return Ok(c);
         }
         // (a stale cache entry still names the files the prelude reads)
@@ -2183,9 +2227,16 @@ impl Build {
     pub fn with(opts: Options, prelude: Option<&str>, document: &str) -> Build {
         let t0 = std::time::Instant::now();
         let cached = prelude_env(prelude, &opts);
+        let t_env = t0.elapsed();
         let env = cached.env.clone();
         let defs = prelude_defs(&cached, prelude, &opts.finder);
         let t1 = t0.elapsed();
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "time: prelude env (format load or build) {t_env:?}, prelude definitions {:?}",
+                t1.checked_sub(t_env).unwrap_or_default()
+            );
+        }
         let mut g = Graph::new(opts.time_limit, opts.threads);
         g.eng.set_max_rounds(opts.max_rounds);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
@@ -2195,10 +2246,18 @@ impl Build {
         let unit = g.eng.new_unit();
         // the files the format read (fonts, data) are supplied before the
         // document's first evaluation: a run reading one never stops
+        let t_sup = std::time::Instant::now();
         for (n, _) in cached.reads.clone() {
             g.supply(&opts.finder, &n);
         }
         g.guesses(&opts, document);
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "time: supply the format's {} files (fonts, data) {:?}",
+                cached.reads.len(),
+                t_sup.elapsed()
+            );
+        }
         // the files a LaTeX job writes and reads back: in-memory values
         // from the start (`.bbl` and `.ind` stay files until their
         // BibTeX and makeindex nodes publish them)
@@ -2452,8 +2511,12 @@ impl Build {
     /// The document changed to `text`: the nodes whose slices differ are
     /// replaced, inserted or removed, and the graph re-evaluated.
     pub fn edit(&mut self, text: &str) {
+        let t0 = std::time::Instant::now();
         self.edits.send(text);
         self.settle();
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            eprintln!("time: edit {:?}", t0.elapsed());
+        }
     }
 
     /// A file other than the document changed (`None`: as the finder

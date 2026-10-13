@@ -1006,6 +1006,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     };
     st.params_mut().info_omit_date = int(cx, "param:pdfinfoomitdate")?;
     st.params_mut().suppress_ptex_info = int(cx, "param:pdfsuppressptexinfo")?;
+    let t0 = std::time::Instant::now();
     let bytes = phitex_pdf::finish(st, &a.bytes).unwrap_or_else(|e| {
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!("pdf: {e}");
@@ -1013,5 +1014,9 @@ pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         Vec::new()
     });
     let s: String = bytes.iter().map(|&b| char::from(b)).collect();
-    Ok(v.intern(Value::Str(s.into_boxed_str())))
+    let out = v.intern(Value::Str(s.into_boxed_str()));
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        eprintln!("pdf finish: {:?}, {} bytes", t0.elapsed(), bytes.len());
+    }
+    Ok(out)
 }
