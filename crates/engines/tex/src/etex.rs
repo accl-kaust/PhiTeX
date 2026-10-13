@@ -22,7 +22,7 @@ use crate::build::Mode;
 use crate::expand::str_toks;
 use crate::fields::Par;
 use crate::nodes;
-use crate::run::{Halt, R, Run};
+use crate::run::{Frame, Halt, R, Run, Src};
 use crate::scan::IVal;
 use crate::val::{Macro, Mean, Tok, cmd, int_of, list_of, toks_of, toks_value};
 
@@ -857,22 +857,23 @@ fn pseudo_start(r: &mut Run<'_, '_>) -> R<()> {
     if !ended {
         lines.push(cur);
     }
-    r.push_toks([Tok::cs(EOF_PSEUDO)]);
+    r.frames
+        .push_front(Frame::Toks(Rc::from(vec![Tok::cs(EOF_PSEUDO)]), 0));
     for mut buf in lines.into_iter().rev() {
         // `pseudo_input`: trailing spaces go
         while buf.last() == Some(&32) {
             buf.pop();
         }
-        r.input.push_line(crate::input::Line {
+        r.frames.push_front(Frame::Src(Src {
             buf,
             loc: 0,
-            state: crate::input::NEW_LINE,
+            state: crate::run::NEW_LINE,
             endch: -2,
             starts: false,
             ends: true,
             origin: None,
             rescanned: true,
-        });
+        }));
     }
     Ok(())
 }
@@ -886,8 +887,9 @@ pub(crate) fn end_of_file(r: &mut Run<'_, '_>, marker: &str) -> R<()> {
         let ev = r.par(Par::everyeof)?;
         let toks = toks_of(r.v, ev);
         if !toks.is_empty() {
-            r.push_toks([Tok::cs(&format!("{base}S"))]);
-            r.push_toks(&toks);
+            r.frames
+                .push_front(Frame::Toks(Rc::from(vec![Tok::cs(&format!("{base}S"))]), 0));
+            r.push_toks(toks);
             return Ok(());
         }
     }
@@ -899,7 +901,20 @@ pub(crate) fn end_of_file(r: &mut Run<'_, '_>, marker: &str) -> R<()> {
 
 /// `\endinput` sets `force_eof`: the file's end inserts no `\everyeof`.
 pub(crate) fn force_eof(r: &mut Run<'_, '_>) {
-    r.force_eof_marker();
+    for f in &mut r.frames {
+        if let Frame::Toks(t, p) = f
+            && let Some(k) = t[*p..].iter().position(
+                |x| matches!(x.as_cs(), Some(n) if n.starts_with("\u{10FFFE}eof") && !n.ends_with(['S', 'F'])),
+            )
+        {
+            let mut v: Vec<Tok> = t.to_vec();
+            if let Some(n) = v[*p + k].as_cs() {
+                v[*p + k] = Tok::cs(&format!("{n}F"));
+            }
+            *t = Rc::from(v);
+            return;
+        }
+    }
 }
 
 // ------------------------------------------------------- `\readline`
@@ -920,8 +935,7 @@ fn read_line(r: &mut Run<'_, '_>, global: bool) -> R<()> {
         // §486: at the file's end, an empty line, and the stream closes
         let text = r.next_read_line(&field, st).unwrap_or_default();
         let e = i64::from(r.ipar(Par::endlinechar)?);
-        {
-            let s = crate::input::Line::of_str(&text, e, true);
+        if let Frame::Src(s) = crate::run::src_frame(&text, e) {
             for c in s.buf {
                 body.push(if c == 32 {
                     crate::val::space_tok()
@@ -946,7 +960,7 @@ fn read_line(r: &mut Run<'_, '_>, global: bool) -> R<()> {
 /// `get_r_token` (§1215).
 fn get_r_token(r: &mut Run<'_, '_>) -> R<Tok> {
     loop {
-        r.get_token()?;
+        r.get_name_token()?;
         if r.cur.tok != crate::val::space_tok() {
             break;
         }
