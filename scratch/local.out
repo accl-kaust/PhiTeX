@@ -1,0 +1,14 @@
+test result: ok. 1 passed; 0 failed; 2 ignored; 0 measured; 11 filtered out; finished in 0.01s
+== edits
+test result: ok. 10 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 24.77s
+== hints
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.80s
+== plain
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.18s
+== page_steps
+test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 33.12s
+== diagnostics
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 51.11s
+== core
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 74.54s
+== cli

@@ -1,0 +1,6 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /home/lambda/code/tmp/phitex-incremental/crates/vendor/defuse/Cargo.toml
+workspace: /home/lambda/code/tmp/phitex-incremental/Cargo.toml
+   Compiling defuse v0.1.0 (/home/lambda/code/tmp/phitex-incremental/crates/vendor/defuse)
+   Compiling phitex-defuse v0.0.0 (/home/lambda/code/tmp/phitex-incremental/crates/core/defuse)
+   Compiling phitex-tex v0.0.0 (/home/lambda/code/tmp/phitex-incremental/crates/engines/tex)
