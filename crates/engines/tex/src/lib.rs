@@ -37,6 +37,7 @@ mod math;
 mod nodes;
 mod ops;
 mod page;
+mod page_step;
 mod pdfout;
 mod pdfprim;
 mod pdfrelaxed;

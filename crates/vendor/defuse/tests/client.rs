@@ -5,7 +5,9 @@
 
 use std::sync::Arc;
 
-use defuse::{Claim, Ctx, Engine, Field, Locality, NodeId, OpId, Operation, Stop, Value, ValueId, Values};
+use defuse::{
+    Claim, Ctx, Engine, EvalError, Field, Locality, MayDefine, NodeId, OpId, Operation, Stop, Value, ValueId, Values,
+};
 
 /// `["p"]` unfolds a child `["c"]`; `["c"]` outputs the text of its
 /// first following sibling (or "none") and claims it; `["s", x]` outputs x.
@@ -858,4 +860,128 @@ fn a_recorded_node_id_anchors_a_later_range_read() {
     let r = eng.evaluate_sequential().expect("after replacing b");
     assert!(r.nodes_run >= 2, "{r:?}");
     assert_eq!(items(&eng), vec![30, 4]);
+}
+
+/// `["c", i, n]`: node `i` of a chain reads `x<i-1>`, defines `x<i>` and
+/// leaves node `i + 1` as its continuation; definitions pending until the
+/// node runs.
+struct Chain;
+
+static CHAIN: std::sync::OnceLock<OpId> = std::sync::OnceLock::new();
+
+impl Operation for Chain {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        None
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let int = |k: usize| match a.get(k).map(|&x| v.get(x)).as_deref() {
+            Some(Value::Int(n)) => *n,
+            _ => 0,
+        };
+        let (i, n) = (int(1), int(2));
+        let prev = if i > 0 {
+            cx.use_field(v.field(&format!("x{}", i - 1)))?
+                .and_then(|y| v.as_int(y))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        cx.define(v.field(&format!("x{i}")), v.int(prev + 1));
+        if i + 1 < n {
+            let op = CHAIN.get().copied().unwrap();
+            cx.follow(op, vec![v.str("c"), v.int(i + 1), v.int(n)]);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A continuation starts above the run that made it, so a chain of
+/// continuations each reading its predecessor runs each node once (no
+/// raise), and the critical chain walks the whole chain back to the first
+/// node: one link per node, the last one its creation by nothing.
+#[test]
+fn the_critical_chain_follows_continuations_to_the_first_node() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Chain));
+    let _ = CHAIN.set(op);
+    let u = eng.new_unit();
+    let v = eng.values();
+    let first = eng.push(u, op, vec![v.str("c"), v.int(0), v.int(100)]);
+    let r = eng.evaluate_sequential().expect("chain");
+    assert_eq!(r.runs, 100, "{r:?}");
+    assert_eq!(r.raises, 0, "{r:?}");
+    assert_eq!(r.critical_path, 99, "{r:?}");
+    let chain = eng.critical_chain();
+    assert_eq!(chain.len(), 100, "{chain:?}");
+    let mut nodes: Vec<NodeId> = chain.iter().map(|c| c.0).collect();
+    nodes.dedup();
+    assert_eq!(nodes.len(), 100, "{chain:?}");
+    assert!(
+        chain[..99].iter().all(|c| matches!(c.1, defuse::Cause::Changed { .. })),
+        "{chain:?}"
+    );
+    assert_eq!(chain[99].0, first);
+    assert!(
+        matches!(
+            chain[99].1,
+            defuse::Cause::Created {
+                by: None,
+                from_hint: None
+            }
+        ),
+        "{:?}",
+        chain[99]
+    );
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+}
+
+/// `["m", name]`: a node whose definitions are known only when it runs,
+/// bounded by `may_define` to the name `a`; it defines `name`.
+struct Bounded;
+
+impl Operation for Bounded {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        None
+    }
+    fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
+        MayDefine::Names(vec![v.field("a")])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let name = match a.get(1).map(|&x| v.get(x)).as_deref() {
+            Some(Value::Str(s)) => s.to_string(),
+            _ => String::new(),
+        };
+        cx.define(v.field(&name), v.int(1));
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A dynamic definition outside the node's `may_define` answer is an
+/// error (readers may have been bound past the node while it was pending),
+/// as an undeclared static definition is.
+#[test]
+fn a_dynamic_definition_outside_may_define_is_an_error() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Bounded));
+    let u = eng.new_unit();
+    let v = eng.values();
+    eng.push(u, op, vec![v.str("m"), v.str("a")]);
+    eng.evaluate_sequential().expect("within the bound");
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Bounded));
+    let u = eng.new_unit();
+    let v = eng.values();
+    let n = eng.push(u, op, vec![v.str("m"), v.str("b")]);
+    let b = eng.values().field("b");
+    match eng.evaluate_sequential() {
+        Err(EvalError::UndeclaredDefinition { node, field }) => {
+            assert_eq!(node, n);
+            assert_eq!(field, b);
+        }
+        other => panic!("expected UndeclaredDefinition, got {other:?}"),
+    }
 }
