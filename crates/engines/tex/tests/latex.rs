@@ -772,3 +772,23 @@ fn census_latex() {
     }
     common::assert_census(&rows);
 }
+
+/// `pdflatex` on UTF-8 text (`pdfdocs/utf8.tex`: `inputenc`, T1,
+/// multi-byte words at paragraph ends and in the edited word): the
+/// text's bytes are its characters, every cut and excerpt of it on a
+/// character boundary; the PDF equals pdfTeX's cold and after an edit
+/// of a multi-byte word.
+#[test]
+fn latex_utf8_edit() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join("utf8.tex"));
+    let (mut b, regions) = cold_nodes("utf8", &dir, &src);
+    assert!(regions >= 8, "{regions} document nodes for 8 paragraphs");
+    // (the text's characters are its bytes: a UTF-8 word as `read` gives it)
+    let bytes = |w: &str| -> String { w.bytes().map(char::from).collect() };
+    let new = src.replacen(&bytes("crème"), &bytes("crêpe"), 1);
+    assert_ne!(new, src, "the edited word is in the text");
+    b.edit(&new);
+    let cold = common::build(pdf_opts("utf8", &dir), Some(&prelude(true)), &new);
+    edit_check("utf8", &b, &cold, 3);
+}

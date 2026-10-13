@@ -945,10 +945,8 @@ fn read_line(r: &mut Run<'_, '_>, global: bool) -> R<()> {
             }
         }
     } else {
-        r.log(
-            "error",
-            "*** (cannot \\read from terminal in nonstop modes)",
-        )?;
+        // §484, as `\read` (a build has no terminal: [`Run::fatal`])
+        return r.fatal("*** (cannot \\read from terminal in nonstop modes)");
     }
     let m = Mean::Macro(Rc::new(Macro {
         flags: 0,
