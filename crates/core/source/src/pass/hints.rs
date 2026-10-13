@@ -553,7 +553,18 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
     };
     // (the groups the text opens so far: braces and named groups)
     let mut depth: i64 = 0;
+    // (what the previous atom added, and whether it ran inside a group
+    // without `\global`: its local definitions are undone at the
+    // group's end, §283)
+    let mut mark = (0, 0, 0, false);
     while k < hi {
+        drop_local(&mut e, mark);
+        mark = (
+            e.names.len(),
+            e.prefixes.len(),
+            e.assigned.len(),
+            depth > 0 && !g,
+        );
         let a = atoms[k];
         match a.kind {
             AtomKind::Open => depth += 1,
@@ -1178,7 +1189,26 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
             }
         }
     }
+    drop_local(&mut e, mark);
     e
+}
+
+/// Drops the local definitions and assignments added since `mark`
+/// when they ran inside a group the text opens (§283).
+fn drop_local(e: &mut Effects, (names, prefixes, assigned, inner): (usize, usize, usize, bool)) {
+    if !inner {
+        return;
+    }
+    let keep = |v: &mut Vec<Def>, from: usize| {
+        let mut i = 0;
+        v.retain(|d| {
+            i += 1;
+            i <= from || d.global
+        });
+    };
+    keep(&mut e.names, names);
+    keep(&mut e.prefixes, prefixes);
+    e.assigned.truncate(assigned);
 }
 
 /// The kernel's constants (plain.tex's `\chardef`s and `\dimen`s that
