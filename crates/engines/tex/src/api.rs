@@ -211,35 +211,88 @@ fn apply_text(
     }
     let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
     let common = old_mid.min(new_mid);
-    let mut nodes = old[..a].to_vec();
-    let args_of = |eng: &Engine, k: usize| {
+    // the paragraph regions before and after (OUTPUT.md §5): a kept node
+    // whose anchor or boundary flag changed is replaced
+    let new_flags = slice_flags(&text);
+    let old_text: String = old.iter().map(|(k, _)| k.get(1..).unwrap_or("")).collect();
+    let old_flags = slice_flags(&old_text);
+    let old_regions =
+        (old_flags.len() == old.len()).then(|| regions(&old_flags, |i| raw_of(old[i].1)));
+    let args_of = |eng: &Engine, k: usize, anchor: i64| {
         let (s, e) = new[k].1;
         let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-        let mut args = slice_args(eng.values(), &text[s..e], starts);
+        let boundary = new_flags.get(k).is_some_and(|f| f & 1 != 0);
+        let mut args = slice_args(eng.values(), &text[s..e], starts, anchor, boundary);
         args.push(crate::hints::hint_arg(eng.values(), &text, s));
         args
     };
-    for k in 0..common {
-        let n = old[a + k].1;
-        let args = args_of(eng, a + k);
-        eng.replace(n, exec, args);
-        nodes.push((new[a + k].0.clone(), n));
-    }
     for k in common..old_mid {
         eng.remove(old[a + k].1);
     }
-    for k in common..new_mid {
-        let args = args_of(eng, a + k);
-        let n = if let Some(&(_, p)) = nodes.last() {
-            eng.insert_after(p, exec, args)
+    let mut nodes: Vec<(String, NodeId)> = Vec::with_capacity(new.len());
+    let (mut anchor, mut last) = (0, None);
+    for i in 0..new.len() {
+        let f = new_flags.get(i).copied().unwrap_or(0);
+        if f & 2 != 0
+            && let Some(l) = last
+        {
+            anchor = l;
+        }
+        let n = if i < a || i >= a + new_mid {
+            let oi = if i < a { i } else { i - new_mid + old_mid };
+            let n = old[oi].1;
+            let same = old_regions
+                .as_ref()
+                .is_some_and(|r| r[oi] == (anchor, f & 1 != 0));
+            if !same {
+                let args = args_of(eng, i, anchor);
+                eng.replace(n, exec, args);
+            }
+            n
+        } else if i - a < common {
+            let n = old[i].1;
+            let args = args_of(eng, i, anchor);
+            eng.replace(n, exec, args);
+            n
         } else {
-            let first = old.get(a + old_mid).map_or(dvi, |x| x.1);
-            eng.insert_before(first, exec, args)
+            let args = args_of(eng, i, anchor);
+            if let Some(&(_, p)) = nodes.last() {
+                eng.insert_after(p, exec, args)
+            } else {
+                let first = old.get(a + old_mid).map_or(dvi, |x| x.1);
+                eng.insert_before(first, exec, args)
+            }
         };
-        nodes.push((new[a + k].0.clone(), n));
+        if f & 1 != 0 {
+            last = Some(raw_of(n));
+        }
+        nodes.push((new[i].0.clone(), n));
     }
-    nodes.extend_from_slice(&old[a + old_mid..]);
     *nodes_now = nodes;
+}
+
+/// A node's raw id as the anchor of the region after it.
+fn raw_of(n: NodeId) -> i64 {
+    i64::from_ne_bytes(n.raw().to_ne_bytes())
+}
+
+/// Each slice's `(anchor, boundary)` from its flags ([`slice_flags`]),
+/// `id` giving the raw id of slice `i`'s node.
+fn regions(flags: &[u8], id: impl Fn(usize) -> i64) -> Vec<(i64, bool)> {
+    let (mut anchor, mut last) = (0, None);
+    let mut out = Vec::with_capacity(flags.len());
+    for (i, &f) in flags.iter().enumerate() {
+        if f & 2 != 0
+            && let Some(l) = last
+        {
+            anchor = l;
+        }
+        out.push((anchor, f & 1 != 0));
+        if f & 1 != 0 {
+            last = Some(id(i));
+        }
+    }
+    out
 }
 
 impl Default for Options {
@@ -507,6 +560,75 @@ pub(crate) fn slices(text: &str) -> Vec<(usize, usize)> {
         .clone()
 }
 
+/// The paragraph regions of a text's slices ([`slices`], OUTPUT.md §5):
+/// bit 0, the slice holds an item the pass marks paragraph-ending
+/// (`Implicit::EndsParagraph`: a blank line, `\par`, a vertical command
+/// that reads nothing after it, a macro whose body ends in one) at brace
+/// depth 0 and not consumed by an earlier item; bit 1, a region starts at the slice (the first after
+/// what that item consumes).
+pub(crate) fn slice_flags(text: &str) -> Vec<u8> {
+    let defs = pass::Definitions::default();
+    let scope = pass::Scope {
+        document: &defs,
+        file: 0,
+        prelude: &defs,
+    };
+    let p = pass::analyze(text, pass::FileKind::Document, scope);
+    let sl = slices(text);
+    let mut flags = vec![0u8; sl.len()];
+    // brace depth before each atom
+    let mut depth = Vec::with_capacity(p.atoms.len());
+    let mut d: usize = 0;
+    for at in &p.atoms {
+        if at.kind == AtomKind::Close {
+            d = d.saturating_sub(1);
+        }
+        depth.push(d);
+        if at.kind == AtomKind::Open {
+            d += 1;
+        }
+    }
+    let mut ends: Vec<(usize, usize)> = Vec::new();
+    let mut consumed = 0;
+    for it in &p.items {
+        if it.atom >= consumed
+            && depth.get(it.atom) == Some(&0)
+            && it.hints.implicit == pass::Implicit::EndsParagraph
+            // these read keywords or a number past their text, and put
+            // back what follows: it would run in the old region
+            && !matches!(
+                it.name.as_str(),
+                "vskip" | "hrule" | "unvbox" | "unvcopy" | "halign"
+            )
+        {
+            ends.push((it.atom, it.end.max(it.atom + 1)));
+        }
+        if it.consumes {
+            consumed = consumed.max(it.end);
+        }
+    }
+    for m in &p.marks {
+        if depth.get(m.atom) == Some(&0) && m.hints.implicit == pass::Implicit::EndsParagraph {
+            ends.push((m.atom, m.atom + 1));
+        }
+    }
+    let at_byte = |a: usize| p.atoms.get(a).map_or(text.len(), |x| x.start);
+    let slice_of = |byte: usize| sl.partition_point(|&(_, e)| e <= byte);
+    for (atom, next) in ends {
+        let i = slice_of(at_byte(atom));
+        if let Some(f) = flags.get_mut(i) {
+            *f |= 1;
+        }
+        // the first slice starting at or after the item's end
+        let b = at_byte(next);
+        let j = sl.partition_point(|&(s, _)| s < b);
+        if let Some(f) = flags.get_mut(j) {
+            *f |= 2;
+        }
+    }
+    flags
+}
+
 /// What the evaluations of one build or edit did.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
@@ -523,6 +645,9 @@ pub struct Stats {
     /// Expansions whose tokens read on into the text after them, and how
     /// many siblings they claimed for it.
     pub tails: u64,
+    /// Paragraph-ending items after which the list was not vertical
+    /// (OUTPUT.md §5): the nodes after them read a wrong mode.
+    pub par_boundary_violations: u64,
     pub tail_siblings: u64,
     /// Children that ran out of text (a claim measured short: a bug).
     pub starved: u64,
@@ -776,6 +901,7 @@ impl Graph {
             "pagehash",
             "writes",
             "tails",
+            "parviol",
             "streams",
             crate::pdfrelaxed::PIECES,
         ] {
@@ -1021,6 +1147,9 @@ impl Graph {
             self.eng.set_environment_absent(self.absent.clone());
         }
         let v = self.eng.values();
+        if let Some(t) = self.eng.acc_value(unit, v.field("parviol")) {
+            stats.par_boundary_violations += u64::try_from(v.seq_to_vec(t).len()).unwrap_or(0);
+        }
         let tails_f = v.field("tails");
         if let Some(t) = self.eng.acc_value(unit, tails_f) {
             for x in v.seq_to_vec(t) {
@@ -1035,16 +1164,27 @@ impl Graph {
         let mut out = Vec::new();
         let t0 = std::time::Instant::now();
         let sl = slices(text);
+        let flags = slice_flags(text);
         let t1 = t0.elapsed();
-        for (s, e) in sl {
+        let (mut anchor, mut last) = (0, None);
+        for (i, (s, e)) in sl.into_iter().enumerate() {
             let piece = &text[s..e];
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
             if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
                 eprintln!("node {piece:?}");
             }
-            let mut args = slice_args(self.eng.values(), piece, starts);
+            let f = flags.get(i).copied().unwrap_or(0);
+            if f & 2 != 0
+                && let Some(l) = last
+            {
+                anchor = l;
+            }
+            let mut args = slice_args(self.eng.values(), piece, starts, anchor, f & 1 != 0);
             args.push(crate::hints::hint_arg(self.eng.values(), text, s));
             let n = self.eng.push(unit, self.ops.exec, args);
+            if f & 1 != 0 {
+                last = Some(raw_of(n));
+            }
             out.push((key(piece, starts), n));
         }
         if std::env::var_os("PHITEX_TEX_TIME").is_some() {

@@ -171,6 +171,14 @@ pub(crate) struct Run<'c, 'a> {
     /// While looking for the command's first token: a node's command
     /// begins in its own text (the next sibling's begins in its own).
     pub no_pull: bool,
+    /// The paragraph region the node is in (OUTPUT.md §5): the raw id
+    /// of the document node whose paragraph-ending item precedes it, or
+    /// 0; a node's args are `[frames, top, anchor, boundary]`, children
+    /// inherit the anchor.
+    pub anchor: i64,
+    /// Whether the node is a document node holding such an item: its
+    /// first command is checked (`par_boundary_violations`).
+    pub boundary: bool,
     /// A `build_page` call not yet folded (OUTPUT.md §4.2a): the
     /// children and main-list items the run had made at the call.
     pub page_due: Option<(usize, usize, bool)>,
@@ -213,6 +221,15 @@ impl<'c, 'a> Run<'c, 'a> {
             0
         };
         crate::exec::note(code, cx.node().raw());
+        let (anchor, boundary) = if code == 1 {
+            let args = cx.args();
+            (
+                args.get(2).map_or(0, |&x| int_of(v, x)),
+                args.get(3).is_some_and(|&x| int_of(v, x) != 0),
+            )
+        } else {
+            (0, false)
+        };
         Run {
             cx,
             v,
@@ -225,6 +242,8 @@ impl<'c, 'a> Run<'c, 'a> {
             trial_ids: None,
             minted: std::cell::RefCell::new(Vec::new()),
             no_pull: false,
+            anchor,
+            boundary,
             own: FxHashMap::default(),
             defs: Vec::new(),
             contribs: Vec::new(),
@@ -1014,11 +1033,12 @@ impl<'c, 'a> Run<'c, 'a> {
     /// as one node per segment.
     pub(crate) fn leftover(&self) -> Vec<Vec<ValueId>> {
         let v = self.v;
+        let anchor = v.int(self.anchor);
         let mut out: Vec<Vec<ValueId>> = Vec::new();
         let mut run: Vec<ValueId> = Vec::new();
         let node = |toks: Vec<ValueId>| -> Vec<ValueId> {
             let l = v.list(toks);
-            vec![v.list(vec![v.list(vec![v.str("t"), l])]), v.int(0)]
+            vec![v.list(vec![v.list(vec![v.str("t"), l])]), v.int(0), anchor]
         };
         for f in &self.frames {
             match f {
@@ -1069,7 +1089,7 @@ impl<'c, 'a> Run<'c, 'a> {
                         frs.push(v.list(vec![v.str("t"), v.list(head)]));
                     }
                     frs.push(fr);
-                    out.push(vec![v.list(frs), v.int(0)]);
+                    out.push(vec![v.list(frs), v.int(0), anchor]);
                 }
                 Frame::File(f) => {
                     if !run.is_empty() {
@@ -1082,7 +1102,7 @@ impl<'c, 'a> Run<'c, 'a> {
                             v.int(i64::try_from(f.off).unwrap_or(0)),
                             f.name,
                         ]);
-                        out.push(vec![v.list(vec![fr]), v.int(0)]);
+                        out.push(vec![v.list(vec![fr]), v.int(0), anchor]);
                     }
                 }
             }
@@ -1454,8 +1474,16 @@ pub(crate) fn line_args(v: &Values, line: &str) -> Vec<ValueId> {
 }
 
 /// The text of a node from the document: a slice of its lines, as
-/// segments (each the part of one line the slice holds).
-pub(crate) fn slice_args(v: &Values, text: &str, starts_line: bool) -> Vec<ValueId> {
+/// segments (each the part of one line the slice holds), then its
+/// paragraph region's anchor and whether it holds a paragraph-ending item
+/// (OUTPUT.md §5).
+pub(crate) fn slice_args(
+    v: &Values,
+    text: &str,
+    starts_line: bool,
+    anchor: i64,
+    boundary: bool,
+) -> Vec<ValueId> {
     let mut frames = Vec::new();
     let mut starts = starts_line;
     let mut rest = text;
@@ -1481,5 +1509,10 @@ pub(crate) fn slice_args(v: &Values, text: &str, starts_line: bool) -> Vec<Value
         starts = ends;
         rest = next;
     }
-    vec![v.list(frames), v.int(1)]
+    vec![
+        v.list(frames),
+        v.int(1),
+        v.int(anchor),
+        v.int(i64::from(boundary)),
+    ]
 }

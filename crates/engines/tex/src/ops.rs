@@ -91,12 +91,15 @@ impl Operation for Exec {
     }
     /// A paragraph cell (`par:<anchor>:<list>`) only of the node's own
     /// paragraph region: its anchor argument (index 2, an integer, when
-    /// the node carries one).
+    /// the node carries one), unless it is a boundary (index 3).
     fn may_define_field(&self, args: &[ValueId], v: &Values, f: Field) -> bool {
         if !client_only(v, f) {
             return false;
         }
-        if let Some(&x) = args.get(2)
+        // (a boundary node may begin the next region, keyed by its own id)
+        let boundary = args.get(3).and_then(|&b| v.as_int(b)).is_some_and(|b| b != 0);
+        if !boundary
+            && let Some(&x) = args.get(2)
             && let Some(mine) = v.as_int(x)
             && let phitex_defuse::Value::Str(s) = &*v.get(f.0)
             && let Some((a, _)) = s.strip_prefix("par:").and_then(|r| r.split_once(':'))
