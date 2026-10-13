@@ -279,6 +279,18 @@ pub(crate) fn fold(v: &Values, all: ValueId, prev: Option<&ListMemo>) -> Arc<Lis
     Arc::new(r)
 }
 
+/// Whether the fold in state `st` reaches the same items as the old
+/// fold from its block `k` on: the same state, or the same but for the
+/// count of items since the last `build_page`, which only a deletion
+/// reads (`build::fold_item`), when no block from there on deletes.
+fn converges(st: FoldState, p: &ListMemo, k: usize) -> bool {
+    let o = p.blocks[k].2;
+    if p.blocks[k].3 {
+        return false;
+    }
+    st == o || (st.sf == o.sf && st.pd == o.pd && !p.blocks[k..].iter().any(|b| b.3))
+}
+
 /// `a - b`, signed.
 pub(crate) fn delta(a: usize, b: usize) -> isize {
     isize::try_from(a).unwrap_or(isize::MAX) - isize::try_from(b).unwrap_or(isize::MAX)
@@ -304,13 +316,23 @@ fn refold(
             && at >= suf
             && let Some(o) = at.checked_add_signed(-dn)
             && let Ok(k) = p.blocks.binary_search_by_key(&o, |b| b.0)
-            && p.blocks[k].2 == st
-            && !p.blocks[k].3
+            && converges(st, p, k)
         {
-            // the old fold from here on: the same entries in the same state
+            // the old fold from here on: the same entries in the same
+            // state (the items since the last `build_page` aside, which
+            // only a deletion reads)
             let dout = delta(items.len(), p.blocks[k].1);
+            let dbp = delta(st.since_bp, p.blocks[k].2.since_bp);
             items.extend_from_slice(&p.items[p.blocks[k].1..]);
-            blocks.extend(p.blocks[k..].iter().map(|&(e, o2, s, d)| {
+            let mut prev_bp = 0;
+            let mut shifting = true;
+            blocks.extend(p.blocks[k..].iter().map(|&(e, o2, mut s, d)| {
+                // (until a `build_page` sets the count again)
+                shifting &= s.since_bp >= prev_bp;
+                prev_bp = s.since_bp;
+                if shifting {
+                    s.since_bp = s.since_bp.saturating_add_signed(dbp);
+                }
                 (
                     e.saturating_add_signed(dn),
                     o2.saturating_add_signed(dout),
@@ -327,14 +349,6 @@ fn refold(
                 blocks,
                 items,
             };
-        }
-        if let Some((p, suf, dn)) = old
-            && at >= suf
-            && crate::exec::env_flag!("PHITEX_PLAN_TIME")
-            && let Some(o) = at.checked_add_signed(-dn)
-            && let Ok(k) = p.blocks.binary_search_by_key(&o, |b| b.0)
-        {
-            eprintln!("plan fold: at {at} state {st:?} old {:?}", p.blocks[k]);
         }
         let end = block_end(&entries, at);
         let del = deletes(v, &entries[at..end]);
