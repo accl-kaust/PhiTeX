@@ -554,7 +554,7 @@ fn pdf_cache() -> PathBuf {
 
 /// A `pdfdocs` document built cold from `dir` (the format cached):
 /// byte-identical to its oracle, its document nodes counted.
-fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
+fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64, Vec<String>) {
     let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
         .expect("the oracle");
     let cache = pdf_cache();
@@ -610,15 +610,19 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
     }
     let writes = common::read(&common::fixtures().join(format!("latex/pdf/{name}.writes")));
     let files = b.files();
+    let mut writes_diff = Vec::new();
     for (n, w) in parse_writes(&writes) {
         let got = files.iter().find(|(m, _)| *m == n).map(|(_, t)| t.clone());
-        assert_eq!(got.as_deref(), Some(w.as_str()), "{name}: {n} differs");
+        if got.as_deref() != Some(w.as_str()) {
+            eprintln!("{name}: written {n} differs: {got:?}");
+            writes_diff.push(n);
+        }
     }
     assert_eq!(
         b.stats.undeclared_definitions, 0,
         "{name}: undeclared definitions"
     );
-    (b, regions)
+    (b, regions, writes_diff)
 }
 
 fn pdf_opts(name: &str, dir: &Path) -> Options {
@@ -738,12 +742,16 @@ fn quack(src: &str, marker: &str) -> String {
 fn latex_paragraph_nodes() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("paras30.tex"));
-    let (mut b, regions) = cold_nodes("paras30", &dir, &src);
+    let (mut b, regions, writes) = cold_nodes("paras30", &dir, &src);
     assert!(regions >= 30, "{regions} document nodes for 30 paragraphs");
     let new = quack(&src, "Paragraph 17 of the text: the quick ");
     b.edit(&new);
     let cold = common::build(pdf_opts("paras30", &dir), Some(&prelude(true)), &new);
     edit_check("paras30", &b, &cold, 3);
+    assert!(
+        writes.is_empty(),
+        "paras30: written files differ: {writes:?}"
+    );
 }
 
 /// `pdflatex` on an article with an abstract, two sections, itemize,
@@ -756,7 +764,7 @@ fn latex_paragraph_nodes() {
 fn latex_environments() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("envs.tex"));
-    let (mut b, regions) = cold_nodes("envs", &dir, &src);
+    let (mut b, regions, writes) = cold_nodes("envs", &dir, &src);
     let pars = paragraphs(&src);
     eprintln!("envs: {regions} document nodes for {pars} paragraphs");
     assert!(
@@ -767,6 +775,7 @@ fn latex_environments() {
     b.edit(&new);
     let cold = common::build(pdf_opts("envs", &dir), Some(&prelude(true)), &new);
     edit_check("envs", &b, &cold, 4);
+    assert!(writes.is_empty(), "envs: written files differ: {writes:?}");
 }
 
 /// `pdflatex` on a main file that `\input`s one chapter and
@@ -783,7 +792,7 @@ fn latex_input_include() {
         std::fs::copy(src_dir.join(f), dir.join(f)).expect("copy");
     }
     let src = common::read(&dir.join("inputs.tex"));
-    let (mut b, regions) = cold_nodes("inputs", &dir, &src);
+    let (mut b, regions, writes) = cold_nodes("inputs", &dir, &src);
     eprintln!("inputs: {regions} document nodes for 20 chapter paragraphs");
     assert!(regions >= 10, "{regions} document nodes: chap1 not sliced");
     let chap1 = common::read(&dir.join("chap1.tex"));
@@ -793,6 +802,10 @@ fn latex_input_include() {
     let cold = common::build(pdf_opts("inputs", &dir), Some(&prelude(true)), &src);
     let _ = std::fs::write(dir.join("chap1.tex"), &chap1);
     edit_check("inputs", &b, &cold, 4);
+    assert!(
+        writes.is_empty(),
+        "inputs: written files differ: {writes:?}"
+    );
 }
 
 /// An article with one paragraph between blank lines (the ladder's
@@ -803,11 +816,12 @@ fn latex_input_include() {
 fn latex_one_paragraph() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("red02.tex"));
-    let (mut b, _) = cold_nodes("red02", &dir, &src);
+    let (mut b, _, writes) = cold_nodes("red02", &dir, &src);
     let new = src.replace("Hello", "Hallo");
     b.edit(&new);
     let cold = common::build(pdf_opts("red02", &dir), Some(&prelude(true)), &new);
     edit_check("red02", &b, &cold, 3);
+    assert!(writes.is_empty(), "red02: written files differ: {writes:?}");
 }
 
 /// A heading and three paragraphs (`pdfdocs/secpars.tex`): the first
@@ -818,9 +832,13 @@ fn latex_one_paragraph() {
 fn latex_heading_paragraphs() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("secpars.tex"));
-    let (mut b, _) = cold_nodes("secpars", &dir, &src);
+    let (mut b, _, writes) = cold_nodes("secpars", &dir, &src);
     let new = quack(&src, "The first paragraph after the heading: the ");
     b.edit(&new);
     let cold = common::build(pdf_opts("secpars", &dir), Some(&prelude(true)), &new);
     edit_check("secpars", &b, &cold, 3);
+    assert!(
+        writes.is_empty(),
+        "secpars: written files differ: {writes:?}"
+    );
 }
