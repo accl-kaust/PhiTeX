@@ -135,6 +135,7 @@ fn kern_code(k: KernKind) -> i64 {
 }
 
 pub(crate) fn encode_list(v: &Values, list: &[Node], side: &Side) -> ValueId {
+    crate::prof::prof!(ENCODE_WORDS, list.len());
     v.list(list.iter().map(|n| encode(v, n, side)).collect())
 }
 
@@ -198,6 +199,7 @@ fn encode_fixed(v: &Values, n: &Node) -> Option<ValueId> {
 }
 
 pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
+    crate::prof::prof!(ENCODE, 1);
     if let Some(x) = encode_fixed(v, n) {
         return x;
     }
@@ -289,6 +291,7 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
 }
 
 pub(crate) fn decode_list(v: &Values, x: ValueId, side: &mut Side) -> List {
+    crate::prof::prof!(DECODE_LISTS, 1);
     list_of(v, x)
         .into_iter()
         .filter_map(|n| decode(v, n, side))
@@ -321,6 +324,7 @@ pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode
 }
 
 pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
+    crate::prof::prof!(DECODE, 1);
     if let Some(n) = crate::val::leaf_of(v, x) {
         return Some(n);
     }

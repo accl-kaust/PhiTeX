@@ -1261,6 +1261,7 @@ impl<'c, 'a> Run<'c, 'a> {
             if self.align_token()? {
                 continue;
             }
+            crate::prof::prof!(TOKENS, 1);
             return Ok(true);
         }
     }

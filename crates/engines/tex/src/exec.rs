@@ -331,7 +331,11 @@ fn threads_possible() -> bool {
 impl Drop for Threads {
     fn drop(&mut self) {
         if phitex_defuse::obs::enabled() && env_flag!("PHITEX_OBS") {
-            eprint!("probes (evaluation):\n{}", phitex_defuse::obs::snapshot());
+            eprint!(
+                "probes (evaluation):\n{}{}",
+                phitex_defuse::obs::snapshot(),
+                crate::prof::take()
+            );
             phitex_defuse::obs::reset();
         }
     }

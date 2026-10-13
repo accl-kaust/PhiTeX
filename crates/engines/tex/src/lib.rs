@@ -46,6 +46,7 @@ mod pdfprim;
 mod pdfrelaxed;
 mod prims;
 mod print;
+mod prof;
 mod run;
 mod scan;
 mod val;
