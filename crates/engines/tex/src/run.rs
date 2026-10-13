@@ -1990,6 +1990,27 @@ impl<'c, 'a> Run<'c, 'a> {
                 crate::val::group::SIMPLE | crate::val::group::SEMI_SIMPLE
             )
             && !crate::hints::effect_none(self.v, &self.cx.args())
+            && self.text_opens_env()
+    }
+
+    /// Whether the node's own text begins more environments than it
+    /// ends: the group its run leaves open is an environment's of the
+    /// text (`\\begin{...}`), not one a command left open while it
+    /// still reads on (a loading command's, a macro's).
+    fn text_opens_env(&self) -> bool {
+        let text: String = decode_frames(self.v, &self.cx.args())
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Src(s) => Some(
+                    s.buf
+                        .iter()
+                        .map(|&c| char::from_u32(c).unwrap_or('?'))
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect();
+        text.matches("\\begin{").count() > text.matches("\\end{").count()
     }
 
     /// Whether the text the run reads next begins (after blanks) with a
