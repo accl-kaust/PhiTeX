@@ -189,27 +189,18 @@ pub(crate) const MID_LINE: u8 = 0;
 pub(crate) const SKIP_BLANKS: u8 = 1;
 pub(crate) const NEW_LINE: u8 = 2;
 
-/// The current token (`cur_tok`, `cur_cmd`, `cur_chr`, `cur_cs`).
-#[derive(Clone, Debug)]
+/// The current token (`cur_tok`, `cur_cmd`, `cur_chr`, `cur_cs`, §297).
+/// Its meaning is read from its slot when a command needs it
+/// ([`Run::cur_mean`]), as TeX reads `equiv(cur_cs)` (§389: a macro's
+/// body at expansion time).
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Cur {
     pub tok: Tok,
     pub cmd: u8,
     pub chr: i32,
-    /// The meaning of a control sequence or active character (a
-    /// character token's is [`Cur::mean`]'s, never stored here).
-    pub cs_mean: Mean,
 }
 
 impl Cur {
-    /// The meaning of the current token.
-    pub(crate) fn mean(&self) -> Mean {
-        if self.tok.is_cs_or_active() {
-            self.cs_mean.clone()
-        } else {
-            Mean::Char(self.tok.cat().unwrap_or(0), self.tok.chr())
-        }
-    }
-
     pub(crate) fn is_cs(&self) -> bool {
         self.tok.is_cs_or_active()
     }
@@ -255,6 +246,11 @@ pub(crate) struct Run<'c, 'a> {
     /// The run's state table ([`crate::runstate`]): every field it read
     /// or defined, native.
     pub st: crate::runstate::State,
+    /// The category codes of characters 0–255 as last read (`u8::MAX`:
+    /// not read), valid while the table's catcode generation is
+    /// `cat_gen`.
+    cat_cache: [u8; 256],
+    cat_gen: u64,
     pub contribs: Vec<(Field, ValueId)>,
     /// The page builder of a text run as one node, paging inline
     /// (`pageinline.rs`).
@@ -324,6 +320,8 @@ impl<'c, 'a> Run<'c, 'a> {
             fread: Vec::new(),
             no_pull: false,
             st: crate::runstate::State::new(),
+            cat_cache: [u8::MAX; 256],
+            cat_gen: u64::MAX,
             contribs: Vec::new(),
             pg: None,
             pagefx_pub: false,
@@ -333,7 +331,6 @@ impl<'c, 'a> Run<'c, 'a> {
                 tok: Tok::c(0),
                 cmd: 0,
                 chr: 0,
-                cs_mean: Mean::Undefined,
             },
             conds: Vec::new(),
             if_codes: Vec::new(),
@@ -785,8 +782,32 @@ impl<'c, 'a> Run<'c, 'a> {
         self.glue_loc(l)
     }
 
+    /// The category code of character `c` (§232), through the run's
+    /// copy of the catcode table (refreshed when any category code
+    /// changes, [`crate::runstate::State::cat_gen`]).
     #[inline]
     pub(crate) fn cat(&mut self, c: u32) -> R<u8> {
+        if let Ok(i) = usize::try_from(c)
+            && i < 256
+        {
+            let g = self.st.cat_gen();
+            if self.cat_gen != g {
+                self.cat_cache = [u8::MAX; 256];
+                self.cat_gen = g;
+            }
+            let x = self.cat_cache[i];
+            if x != u8::MAX {
+                return Ok(x);
+            }
+            let x = self.cat_slow(c)?;
+            self.cat_cache[i] = x;
+            return Ok(x);
+        }
+        self.cat_slow(c)
+    }
+
+    #[inline(never)]
+    fn cat_slow(&mut self, c: u32) -> R<u8> {
         let x = if c < 256 {
             self.int_loc(Loc::try_from(crate::fields::CAT0).unwrap_or(0) + c)?
         } else {
@@ -907,6 +928,25 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
+    /// The current token's meaning, read from its slot now (§389, §508):
+    /// a character's own, `\noexpand`'s marker, a `v` template's end.
+    pub(crate) fn cur_mean(&mut self) -> R<Mean> {
+        let t = self.cur.tok;
+        if !t.is_cs_or_active() {
+            return Ok(Mean::Char(t.cat().unwrap_or(0), t.chr()));
+        }
+        if self.cur.cmd == cmd::RELAX && self.cur.chr == crate::val::NO_EXPAND_FLAG {
+            return Ok(Mean::NotExpanded);
+        }
+        if self.cur.cmd == cmd::IGNORE
+            && t.as_cs()
+                .is_some_and(|n| n.frozen() && n.starts_with("\u{10FFFE}endv"))
+        {
+            return Ok(Mean::Prim("\u{10FFFE}endv", cmd::IGNORE, self.cur.chr));
+        }
+        self.mean_of(t)
+    }
+
     /// Defines token `t`'s meaning (`\def`, `\let`, …): kept native,
     /// encoded only if the run publishes it.
     pub(crate) fn set_mean(&mut self, t: Tok, m: Mean, global: bool) {
@@ -934,13 +974,22 @@ impl<'c, 'a> Run<'c, 'a> {
     /// [`Self::set_cur`] for a control sequence or active character.
     #[inline(never)]
     fn set_cur_cs(&mut self, tok: Tok) -> R<()> {
-        let mean = self.mean_of(tok)?;
-        let (c, h) = mean.cmd_chr();
+        let (c, h) = match self.mean_loc(tok) {
+            Some(l) => {
+                if !self.st.is_loaded(l) {
+                    self.load_slow(l)?;
+                }
+                self.st.cmd_chr_of(l, self.v)
+            }
+            None => (
+                tok.cat().unwrap_or(0),
+                i32::try_from(tok.chr()).unwrap_or(0),
+            ),
+        };
         self.cur = Cur {
             tok,
             cmd: c,
             chr: h,
-            cs_mean: mean,
         };
         Ok(())
     }
@@ -1509,7 +1558,6 @@ impl<'c, 'a> Run<'c, 'a> {
                     tok: t,
                     cmd: cmd::IGNORE,
                     chr,
-                    cs_mean: Mean::Prim("\u{10FFFE}endv", cmd::IGNORE, chr),
                 };
                 return Ok(true);
             }
@@ -1537,7 +1585,6 @@ impl<'c, 'a> Run<'c, 'a> {
             if self.cur.cmd > cmd::MAX_COMMAND {
                 self.cur.cmd = cmd::RELAX;
                 self.cur.chr = crate::val::NO_EXPAND_FLAG;
-                self.cur.cs_mean = Mean::NotExpanded;
             }
             return Ok(true);
         }
@@ -1556,7 +1603,6 @@ impl<'c, 'a> Run<'c, 'a> {
                 tok: Tok::cs("\u{10FFFE}relax"),
                 cmd: cmd::RELAX,
                 chr: 256,
-                cs_mean: Mean::Prim("relax", cmd::RELAX, 256),
             };
         }
         Ok(())
