@@ -175,13 +175,17 @@ impl Run<'_, '_> {
     /// Before a local definition of `f`: the innermost open group saves
     /// what the run's view held, to restore at its close. Nothing is
     /// saved outside every group of this run (the definition is the
-    /// run's, for the engine's scope).
+    /// run's, for the engine's scope). A group saves once per field
+    /// while its value is its own; after a global definition (its saved
+    /// entries inert) the next local one saves again, as `eq_save` does
+    /// when `eq_level` is `level_one` (§277, §283): that save restores
+    /// the global value at the close.
     pub(crate) fn save_local(&mut self, f: Field) {
         let prev = self.own.get(&f).copied();
         let Some(l) = self.nest.iter_mut().rev().find(|l| l.group != 0) else {
             return;
         };
-        if l.saved.iter().any(|s| s.0 == f) {
+        if l.saved.iter().any(|s| s.0 == f && !s.2) {
             return;
         }
         l.saved.push((f, prev, false));
