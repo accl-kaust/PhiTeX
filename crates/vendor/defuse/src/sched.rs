@@ -67,6 +67,12 @@ pub trait Executor {
     fn for_each(&mut self, n: usize, f: &(dyn Fn(usize) + Sync)) {
         (0..n).for_each(f);
     }
+
+    /// How many threads `for_each` may use at once. At 1 the engine keeps
+    /// the passes it would split for `for_each` in one thread's form.
+    fn parallelism(&self) -> usize {
+        1
+    }
 }
 
 /// Runs jobs one after another on the calling thread.

@@ -140,6 +140,9 @@ pub struct Hints {
     pub relied: Vec<String>,
     /// The commands the item and the bodies it relies on call.
     pub calls: Vec<String>,
+    /// Those of them reached outside every group the bodies open
+    /// ([`DefSet::outer_calls`]).
+    pub outer_calls: Vec<String>,
 }
 
 impl Hints {
@@ -155,6 +158,7 @@ impl Hints {
             cause: None,
             relied: Vec::new(),
             calls: Vec::new(),
+            outer_calls: Vec::new(),
         }
     }
 }
@@ -271,6 +275,10 @@ pub struct Effects {
     pub calls: Vec<String>,
     /// Names whose meaning is assigned as a register (`\advance\x`).
     pub assigned: Vec<String>,
+    /// The calls made outside every group the text opens (or after
+    /// `\global`): a call inside one has its local definitions undone
+    /// at the group's end (tex.web §283), so only its global ones count.
+    pub outer_calls: Vec<String>,
 }
 
 const DEFINERS: &[&str] = &[
@@ -543,8 +551,15 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
             .filter(|a| a.kind == AtomKind::Cs)
             .map(|a| a.name(text))
     };
+    // (the groups the text opens so far: braces and named groups)
+    let mut depth: i64 = 0;
     while k < hi {
         let a = atoms[k];
+        match a.kind {
+            AtomKind::Open => depth += 1,
+            AtomKind::Close => depth -= 1,
+            _ => {}
+        }
         if a.kind != AtomKind::Cs {
             // (after `=` a quantity is a value, not assigned)
             if matches!(a.kind, AtomKind::Char('=' | '-' | '+')) {
@@ -562,6 +577,11 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
             .and_then(|x| x.strip_suffix(":D"))
             .filter(|x| t.primitive(x))
             .unwrap_or(n);
+        match n {
+            "bgroup" | "begingroup" | "group_begin:" => depth += 1,
+            "egroup" | "endgroup" | "group_end:" => depth -= 1,
+            _ => {}
+        }
         let gl = std::mem::replace(&mut g, false);
         let rd = std::mem::replace(&mut reading, false);
         let xa = std::mem::replace(&mut xa_next, false);
@@ -573,6 +593,7 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
             && !e.calls.iter().any(|c| c == x)
         {
             e.calls.push(x.to_owned());
+            e.outer_calls.push(x.to_owned());
         }
         if matches!(n, "expandafter" | "exp_after:wN") {
             xa_next = true;
@@ -735,6 +756,7 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                     && !e.calls.iter().any(|c| c == x.name(text))
                 {
                     e.calls.push(x.name(text).to_owned());
+                    e.outer_calls.push(x.name(text).to_owned());
                 }
                 k = q + 1;
             }
@@ -1150,6 +1172,9 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                     continue;
                 }
                 e.calls.push(n.to_owned());
+                if depth <= 0 || gl {
+                    e.outer_calls.push(n.to_owned());
+                }
             }
         }
     }
@@ -1196,6 +1221,10 @@ pub struct DefSet {
     /// Every command the text and the bodies it relies on call (the
     /// engine's state each may touch is the client's to say).
     pub calls: Vec<String>,
+    /// The calls reached outside every group the texts open (or after
+    /// `\global`); the others run inside one, their local definitions
+    /// undone at its end.
+    pub outer_calls: Vec<String>,
 }
 
 impl DefSet {
@@ -1208,6 +1237,11 @@ impl DefSet {
         for c in &o.calls {
             if !self.calls.contains(c) {
                 self.calls.push(c.clone());
+            }
+        }
+        for c in &o.outer_calls {
+            if !self.outer_calls.contains(c) {
+                self.outer_calls.push(c.clone());
             }
         }
         for (k, v) in &o.names {
@@ -1289,7 +1323,20 @@ impl<'a> Closure<'a> {
                 s.calls.push(c.clone());
             }
             let x = self.call(c);
-            s.add(&x);
+            if e.outer_calls.contains(c) {
+                if !s.outer_calls.contains(c) {
+                    s.outer_calls.push(c.clone());
+                }
+                s.add(&x);
+            } else {
+                // (inside a group: what it calls runs there too, and its
+                // local definitions are undone at the group's end)
+                let mut inner = x.clone();
+                inner.outer_calls.clear();
+                inner.names.retain(|_, g| *g);
+                inner.prefixes.retain(|_, g| *g);
+                s.add(&inner);
+            }
         }
         s
     }

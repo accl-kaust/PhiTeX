@@ -87,6 +87,41 @@ impl Run<'_, '_> {
         if n >= exit {
             std::process::exit(0);
         }
+        // (a run whose state stays the same for 10 M commands loops: its
+        // nest, once, to find the construct)
+        thread_local! {
+            static SAME: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
+        }
+        let sig = self.st.sig().3;
+        let (last_sig, same, dumped) = SAME.with(Cell::get);
+        let same = if sig == last_sig { same + 1 } else { 0 };
+        SAME.with(|c| c.set((sig, same, dumped)));
+        if same >= 100 && dumped == 0 {
+            SAME.with(|c| c.set((sig, same, 1)));
+            for (k, l) in self.nest.iter().enumerate() {
+                eprintln!(
+                    "hbloop level {k}: mode {} group {} lid {} owns {} par {:?} list {} extra {}",
+                    l.mode,
+                    l.group,
+                    l.lid,
+                    l.owns,
+                    l.par,
+                    l.list.len(),
+                    l.extra.len()
+                );
+            }
+            for f in &self.frames {
+                let d = match f {
+                    crate::run::Frame::File(f) => {
+                        let (file, line) = f.where_(self.v);
+                        format!("file {file}:{line}")
+                    }
+                    crate::run::Frame::Src(_) => "text".to_owned(),
+                    crate::run::Frame::Toks(t, p) => format!("tokens {p}/{}", t.len()),
+                };
+                eprintln!("hbloop frame: {d}");
+            }
+        }
         let (file, line) = self
             .frames
             .iter()
@@ -214,8 +249,9 @@ impl Run<'_, '_> {
             cmd::END_GROUP => {
                 if md.group == crate::val::group::SEMI_SIMPLE {
                     self.close_simple(&md)?;
+                } else {
+                    self.off_save(&md)?;
                 }
-                // otherwise `off_save` (§1064): an error
             }
             cmd::RIGHT_BRACE => self.handle_right_brace(&md)?,
             cmd::HMOVE | cmd::VMOVE => {
@@ -1002,7 +1038,7 @@ impl Run<'_, '_> {
                         let code = if c == u32::from(b'.') {
                             c
                         } else {
-                            u32::try_from(self.int(&format!("lc:{c}"))?).unwrap_or(0)
+                            u32::try_from(i64::from(self.code(0, c)?)).unwrap_or(0)
                         };
                         word.push(char::from_u32(code).unwrap_or('\0'));
                         digit_sensed = false;
@@ -1047,7 +1083,7 @@ impl Run<'_, '_> {
                         word.push('-');
                     } else {
                         let c = u32::try_from(self.cur.chr).unwrap_or(0);
-                        let lc = self.int(&format!("lc:{c}"))?;
+                        let lc = i64::from(self.code(0, c)?);
                         if lc != 0 {
                             word.push(
                                 char::from_u32(u32::try_from(lc).unwrap_or(0)).unwrap_or('?'),
@@ -1057,7 +1093,7 @@ impl Run<'_, '_> {
                 }
                 cmd::CHAR_NUM => {
                     let c = self.scan_char_num()?;
-                    let lc = self.int(&format!("lc:{c}"))?;
+                    let lc = i64::from(self.code(0, c)?);
                     if lc != 0 {
                         word.push(char::from_u32(u32::try_from(lc).unwrap_or(0)).unwrap_or('?'));
                     }

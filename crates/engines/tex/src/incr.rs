@@ -27,6 +27,10 @@ struct Entry {
     units: Vec<UnitId>,
     key: u64,
     th: Arc<TextHints>,
+    /// Its slices' keys ([`Chunk::keys`]).
+    keys: Arc<[u64]>,
+    /// [`Chunk::input`].
+    input: Input,
     /// The definitions after it (its key and set): the incoming ones
     /// when it defines nothing.
     out: (u64, Defs),
@@ -37,6 +41,37 @@ struct Entry {
 pub(crate) struct Chunk {
     pub start: usize,
     pub th: Arc<TextHints>,
+    /// Its slices' keys (`api::key`), a slice at the chunk's start
+    /// taken as beginning a line: made when the chunk is analysed.
+    pub keys: Arc<[u64]>,
+    /// Whether its text names `\\input`, and whether it defines it.
+    pub input: Input,
+}
+
+/// What a chunk's text does with `\\input`.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Input {
+    pub names: bool,
+    pub defines: bool,
+}
+
+impl Input {
+    fn of(text: &str) -> Input {
+        let names = text.contains("\\input");
+        Input {
+            names,
+            defines: names
+                && [
+                    "\\def\\input",
+                    "\\let\\input",
+                    "\\edef\\input",
+                    "\\gdef\\input",
+                    "\\xdef\\input",
+                ]
+                .iter()
+                .any(|d| text.contains(d)),
+        }
+    }
 }
 
 /// The document's units and their chunks' analyses.
@@ -173,10 +208,20 @@ impl Incr {
                 } else {
                     (key, defs.clone())
                 };
+                let keys = th
+                    .slices
+                    .iter()
+                    .map(|&(s, e)| {
+                        let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
+                        crate::api::key(&text[s..e], starts)
+                    })
+                    .collect();
                 Entry {
                     units: ids[i..j].to_vec(),
                     key,
                     th,
+                    keys,
+                    input: Input::of(&text),
                     out,
                 }
             };
@@ -184,6 +229,8 @@ impl Incr {
             chunks.push(Chunk {
                 start: off,
                 th: e.th.clone(),
+                keys: e.keys.clone(),
+                input: e.input,
             });
             (key, defs) = (e.out.0, e.out.1.clone());
             off += len;
