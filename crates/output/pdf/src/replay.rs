@@ -379,7 +379,7 @@ impl PdfState {
         rec: &PageRecord,
         fonts: &dyn FontSource,
         base: &BTreeSet<FontId>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<String>, String> {
         let Some(post) = rec.post.as_deref().filter(|_| rec.simple) else {
             return Err("not only text and rules".to_owned());
         };
@@ -505,6 +505,22 @@ impl PdfState {
                 (here != k).then_some((k, here))
             })
             .collect();
+        let report = (!retag.is_empty()).then(|| {
+            let fonts: Vec<String> = rec
+                .ffs
+                .iter()
+                .map(|&(f, k)| {
+                    let s = self.fonts.get(&f);
+                    format!(
+                        "{f}: ff {k} recorded, {} here (num {:?}, name {:?})",
+                        self.ff(f),
+                        s.map(|s| s.num),
+                        s.map(|s| String::from_utf8_lossy(&s.name).into_owned())
+                    )
+                })
+                .collect();
+            format!("fonts renamed {retag:?}: {}", fonts.join("; "))
+        });
         if retag.is_empty() {
             self.print(&rec.blob);
         } else {
@@ -558,7 +574,7 @@ impl PdfState {
         let links = std::mem::take(&mut self.link_stack);
         self.set_scratch(post);
         self.link_stack = links;
-        Ok(())
+        Ok(report)
     }
 }
 
