@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use phitex_defuse::{
     Engine, Field, NodeId, OpId, Report, SeqMonoid, SumMonoid, UnitId, Value, ValueId, Values,
 };
-use phitex_source::pass::{self, AtomKind};
+use phitex_source::pass;
 
 use crate::ops::{Dvi, Exec, Files, Mark, OutPage, Put, Shared};
 use crate::run::{Ops, slice_args};
@@ -320,36 +320,12 @@ fn date_params(t: i64) -> [(&'static str, i64); 4] {
 }
 
 /// The nodes of a text: slices starting at the pass's atoms (characters
-/// run together), each with the blanks before the next.
+/// run together), each with the blanks before the next; the pass over
+/// the whole text also gives each slice's hint ([`crate::hints`]).
 pub(crate) fn slices(text: &str) -> Vec<(usize, usize)> {
-    let defs = pass::Definitions::default();
-    let scope = pass::Scope {
-        document: &defs,
-        file: 0,
-        prelude: &defs,
-    };
-    let p = pass::analyze(text, pass::FileKind::Document, scope);
-    let mut starts: Vec<usize> = Vec::new();
-    let mut prev_char = false;
-    for a in &p.atoms {
-        let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
-        if !(ch && prev_char) {
-            starts.push(a.start);
-        }
-        prev_char = ch;
-    }
-    if starts.first() != Some(&0) {
-        starts.insert(0, 0);
-    }
-    starts.dedup();
-    let mut out = Vec::with_capacity(starts.len());
-    for (i, &s) in starts.iter().enumerate() {
-        let e = starts.get(i + 1).copied().unwrap_or(text.len());
-        if e > s {
-            out.push((s, e));
-        }
-    }
-    out
+    crate::hints::text_hints(text, pass::FileKind::Document)
+        .slices
+        .clone()
 }
 
 /// What the evaluations of one build or edit did.
@@ -394,6 +370,16 @@ pub struct Stats {
     pub batches_inline: u64,
     pub jobs_max_batch: usize,
     pub critical_path: Option<usize>,
+    /// Nodes whose text bounded what they may define ([`crate::hints`]),
+    /// and those that may define anything, among the live nodes that
+    /// ran.
+    pub nodes_bounded: u64,
+    pub nodes_any: u64,
+    /// Nodes whose hint's assumptions (catcodes, meanings) did not hold
+    /// when they ran, and nodes that defined outside their bound: both
+    /// diagnostics, never a silent fallback.
+    pub regime_violations: u64,
+    pub undeclared_definitions: u64,
 }
 
 /// A round's counters (`PHITEX_TEX_TIME`).
@@ -431,6 +417,30 @@ impl Stats {
         self.batches_inline += bi;
         self.jobs_max_batch = self.jobs_max_batch.max(m);
         self.critical_path = usize::try_from(eng.critical_path()).ok();
+    }
+
+    /// The hint counters of `unit` (the live nodes' accumulators), and
+    /// the engine's undeclared-definition errors so far.
+    fn add_hints(&mut self, eng: &Engine, unit: UnitId, errors: &[String]) {
+        let v = eng.values();
+        let get = |name: &str| -> u64 {
+            eng.acc_value(unit, v.field(name))
+                .and_then(|x| v.as_int(x))
+                .and_then(|x| u64::try_from(x).ok())
+                .unwrap_or(0)
+        };
+        let c = crate::hints::COUNTERS;
+        self.nodes_bounded = get(c[0]);
+        self.nodes_any = get(c[1]);
+        self.regime_violations = get(c[2]);
+        self.undeclared_definitions = get(c[3])
+            + u64::try_from(
+                errors
+                    .iter()
+                    .filter(|e| e.contains("UndeclaredDefinition"))
+                    .count(),
+            )
+            .unwrap_or(u64::MAX);
     }
 
     fn add(&mut self, r: &Report) {
@@ -513,6 +523,10 @@ impl Graph {
         }
         let lines = eng.values().field("lines");
         eng.declare_accumulator(lines, Arc::new(SumMonoid));
+        for f in crate::hints::COUNTERS {
+            let fld = eng.values().field(f);
+            eng.declare_accumulator(fld, Arc::new(SumMonoid));
+        }
         Graph {
             eng,
             ops,
@@ -636,6 +650,7 @@ impl Graph {
                     // the build ends here; the error is a diagnostic
                     let m = self.diagnose(&e);
                     self.eval_errors.push(m);
+                    stats.add_hints(&self.eng, unit, &self.eval_errors);
                     return;
                 }
             };
@@ -644,6 +659,7 @@ impl Graph {
             }
             stats.add(&r);
             stats.add_exec(&ex, c0, &self.eng);
+            stats.add_hints(&self.eng, unit, &self.eval_errors);
             let opened = self.opened(unit);
             let mut asked = false;
             // a file supplied from the finder that the job turns out to
@@ -750,7 +766,8 @@ impl Graph {
             if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
                 eprintln!("node {piece:?}");
             }
-            let args = slice_args(self.eng.values(), piece, starts);
+            let mut args = slice_args(self.eng.values(), piece, starts);
+            args.push(crate::hints::hint_arg(self.eng.values(), text, s));
             let n = self.eng.push(unit, self.ops.exec, args);
             out.push((key(piece, starts), n));
         }
@@ -1072,7 +1089,9 @@ impl Build {
         let args_of = |g: &Graph, k: usize| {
             let (s, e) = new[k].1;
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-            slice_args(g.eng.values(), &text[s..e], starts)
+            let mut args = slice_args(g.eng.values(), &text[s..e], starts);
+            args.push(crate::hints::hint_arg(g.eng.values(), &text, s));
+            args
         };
         for k in 0..common {
             let n = self.nodes[a + k].1;
