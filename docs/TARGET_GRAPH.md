@@ -84,13 +84,19 @@ Writing `A <- B` for "A reads what B defined".
 | `dvi` | `pages` | every `pagestep` |
 | `breaks` (round 2) | `pagefx:<j>` | what routine j left (loop-back, previous round): held inserts, the leftover list; planned (branch para-vsize): page parameters the routine set |
 | region R (planned, branch para-marks) | `marks:before:<N>` | the marks in force before node N (a per-node loop-back from the page chain) |
+| region R | `pgst:at:<N>:<k>` | the state the page chain leaves after the page that breaks at R's k-th flush point (a penalty of -10000 or less on the main list: `\clearpage`): `\count0..9` and the fields the routines changed, read from there on (LaTeX's `\ifodd\c@page` after `\cleardoublepage`, the shipout count `\enddocument` writes to the `.aux`); a per-node loop-back the writer publishes, UNIT in round one |
+| region R (`\begin{document}`) | `wkeys:<file>`, `wdef:<field>` | the files the job writes and reads back, per field: the previous round's publication by the writer (`files`); a written line is interpreted in the reading state (the field's value before this round's read-back, `wpre:<field>`), and what it writes to another file (`\@writefile{toc}`) goes to that file's text (`wfile:<file>`) |
 
 Forbidden, and asserted by the test:
 
 - any link through a `par:` or `if:` field (there are none);
 - a region waiting on another region for anything but a regime cell it
   changed;
-- an `items` read by anything but `breaks` or a box end.
+- an `items` read by anything but `breaks` or a box end;
+- a page step reading a stream's close (`\immediate\closeout` in the text
+  is an event at its position, applied by the writer in the pages'
+  order: TeX's deferred writes fire before a close that follows their
+  page).
 
 ## Heights
 
