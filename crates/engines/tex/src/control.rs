@@ -1324,7 +1324,7 @@ impl Run<'_, '_> {
             line.push('\n');
             // a file whose read-back only defines: the definitions this
             // line's read-back makes go with it (`wdef:<field>`)
-            let e = if self.cx.is_loopback(v.field(&format!("wkeys:{name}"))) {
+            let e = if self.cx.is_loopback(self.keyed(crate::fields::Fam::Wkeys, name)) {
                 let made = self.interpret_line(&line)?;
                 v.list(vec![v.str(&name), v.str(&line), made])
             } else {

@@ -345,6 +345,22 @@ impl Fields {
         })
     }
 
+    /// The field `<fam>:<key>`, kept per thread as [`Self::get_at`]
+    /// keeps names (formatted and interned once an epoch).
+    #[allow(clippy::unused_self)]
+    pub(crate) fn keyed(&self, v: &Values, epoch: u64, fam: Fam, key: &str) -> Field {
+        let i = fam as usize;
+        if let Some(f) = with_names(v, epoch, |c| c.keyed[i].get(key).copied()) {
+            return f;
+        }
+        let f = v.field(&format!("{}:{key}", fam.prefix()));
+        with_names(v, epoch, |c| {
+            bounded(&mut c.keyed[i]);
+            c.keyed[i].insert(key.into(), f);
+        });
+        f
+    }
+
     /// The field of token `t`'s meaning (`cs:<name>`, `act:<c>`), if it
     /// has one, kept per thread as [`Self::get_at`] keeps names.
     #[allow(clippy::unused_self)]
@@ -368,6 +384,41 @@ struct Named {
     epoch: u64,
     names: FxHashMap<Box<str>, Field>,
     toks: FxHashMap<Tok, Field>,
+    /// The fields of the keyed families ([`Fam`]), by family and key.
+    keyed: [FxHashMap<Box<str>, Field>; FAMS],
+}
+
+/// The field families keyed by a name (`<family>:<key>`): files, the
+/// write-and-read-back fields, declarations, a page's effects.
+#[derive(Clone, Copy)]
+pub(crate) enum Fam {
+    File,
+    Wfile,
+    Wkeys,
+    Wdef,
+    Wfiledecl,
+    Wdefdecl,
+    Pagefx,
+    Marksdecl,
+    Read,
+}
+
+const FAMS: usize = 9;
+
+impl Fam {
+    fn prefix(self) -> &'static str {
+        match self {
+            Fam::File => "file",
+            Fam::Wfile => "wfile",
+            Fam::Wkeys => "wkeys",
+            Fam::Wdef => "wdef",
+            Fam::Wfiledecl => "wfiledecl",
+            Fam::Wdefdecl => "wdefdecl",
+            Fam::Pagefx => "pagefx",
+            Fam::Marksdecl => "marksdecl",
+            Fam::Read => "read",
+        }
+    }
 }
 
 thread_local! {
