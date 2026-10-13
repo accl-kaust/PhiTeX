@@ -722,3 +722,25 @@ impl Drop for StepTrace {
         }
     }
 }
+
+/// (measure) `PHITEX_TEX_TIME`: each node run's operation, node and
+/// wall time, printed when the run ends.
+pub(crate) struct NodeTimer(Option<(std::time::Instant, &'static str, u64)>);
+
+impl NodeTimer {
+    pub(crate) fn new(op: &'static str, node: u64) -> NodeTimer {
+        if env_flag!("PHITEX_TEX_TIME") {
+            NodeTimer(Some((std::time::Instant::now(), op, node)))
+        } else {
+            NodeTimer(None)
+        }
+    }
+}
+
+impl Drop for NodeTimer {
+    fn drop(&mut self) {
+        if let Some((t, op, node)) = self.0 {
+            eprintln!("nodetime: {op} {node} {:.3}", t.elapsed().as_secs_f64() * 1e3);
+        }
+    }
+}
