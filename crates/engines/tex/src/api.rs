@@ -1292,7 +1292,7 @@ impl Graph {
         // head of the message; the error's full form last)
         let mut out = format!("evaluation: {e}");
         let v = self.eng.values();
-        if let E::UndeclaredDefinition { field, .. } = e {
+        if let E::UndeclaredDefinition { field, .. } | E::ConflictingPublication { field } = e {
             let _ = write!(out, "\n  field {}", field_name(v, *field));
         }
         // (the engine does not say which loop-backs kept changing: the
