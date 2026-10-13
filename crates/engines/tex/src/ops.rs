@@ -173,12 +173,15 @@ impl Operation for Exec {
             }
             r.command()?;
             // the token list an expansion left goes on in this run, not as
-            // a child per token: expansion steps are not nodes. Only while
+            // a child per token: expansion steps are not nodes (the run
+            // goes on after an expansion only, so the command it reaches
+            // is still this node's one command). Only while
             // nothing bounds the node (a bound covers its first command),
             // no scope opened or closed, no child, claim or page step made
             // (`PHITEX_LEFTOVER=children`: the children, for an A/B)
             if hint.bound.is_none() && !leftover_children() {
-                while r.effect == Effect::None
+                while r.expanded
+                    && r.effect == Effect::None
                     && r.kids.is_empty()
                     && r.page_due.is_none()
                     && !r.claim_rest
