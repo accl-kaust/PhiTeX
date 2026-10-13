@@ -873,10 +873,20 @@ impl Session {
         let key = b.prelude_key();
         // (none: the format's evaluation did not finish cleanly, and is not
         // kept: its errors would come back at every run)
-        if had != Some(key)
-            && let Some(bytes) = b.export_prelude()
-        {
+        if had != Some(key) {
+            let t = Instant::now();
+            let Some(bytes) = b.export_prelude() else {
+                return;
+            };
+            let exported = t.elapsed();
             let _ = c.put_format(&self.format_name(text), &key, &bytes);
+            if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+                eprintln!(
+                    "time: format stored: export {exported:?}, write {:?} ({} bytes)",
+                    t.elapsed().saturating_sub(exported),
+                    bytes.len()
+                );
+            }
         }
         // the page chain's values of the first document built with this
         // format: a later document's round-one guesses

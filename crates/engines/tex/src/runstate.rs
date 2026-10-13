@@ -61,6 +61,9 @@ impl Native {
 const LOADED: u8 = 1;
 const HAS_ID: u8 = 2;
 const PRELOADED: u8 = 4;
+/// `cmd` and `chr` hold the meaning's command code and modifier
+/// (`eq_type`, `equiv`, §221).
+const CC: u8 = 8;
 
 /// A slot's value and what is known of it.
 #[derive(Clone, Debug)]
@@ -69,12 +72,16 @@ pub(crate) struct Entry {
     /// The engine value of `val`, once known (`HAS_ID`).
     id: Option<ValueId>,
     flags: u8,
+    cmd: u8,
+    chr: i32,
 }
 
 const UNLOADED: Entry = Entry {
     val: Native::Absent,
     id: None,
     flags: 0,
+    cmd: 0,
+    chr: 0,
 };
 
 #[derive(Clone)]
@@ -146,6 +153,28 @@ pub(crate) struct State {
     defined: Vec<Loc>,
     stamp: u64,
     next_gid: u32,
+    /// Bumped whenever a category code below 256 may have changed
+    /// ([`State::cat_gen`]); unique across tables of a thread, so a
+    /// table put in place of another is never mistaken for it.
+    cat_gen: u64,
+}
+
+thread_local! {
+    static CAT_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// A new catcode generation, never given out before on this thread.
+fn new_cat_gen() -> u64 {
+    CAT_GEN.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    })
+}
+
+/// Whether `loc` is a category code below 256.
+#[inline]
+fn is_cat(loc: Loc) -> bool {
+    (loc as usize).wrapping_sub(crate::fields::CAT0) < 256
 }
 
 thread_local! {
@@ -169,6 +198,7 @@ impl Clone for State {
             defined: self.defined.clone(),
             stamp: self.stamp,
             next_gid: self.next_gid,
+            cat_gen: new_cat_gen(),
         }
     }
 }
@@ -204,7 +234,15 @@ impl State {
             defined: Vec::new(),
             stamp: 0,
             next_gid: 0,
+            cat_gen: new_cat_gen(),
         }
+    }
+
+    /// The catcode generation: equal while no category code below 256
+    /// changed.
+    #[inline]
+    pub(crate) fn cat_gen(&self) -> u64 {
+        self.cat_gen
     }
 
     #[inline]
@@ -270,6 +308,8 @@ impl State {
             val: x.map_or(Native::Absent, Native::Raw),
             id: x,
             flags: LOADED | HAS_ID,
+            cmd: 0,
+            chr: 0,
         };
     }
 
@@ -277,10 +317,15 @@ impl State {
     /// as the step before left them): loaded, and never compared with
     /// the engine's at the end.
     pub(crate) fn preload(&mut self, loc: Loc, x: Option<ValueId>) {
+        if is_cat(loc) {
+            self.cat_gen = new_cat_gen();
+        }
         self.slot(loc).e = Entry {
             val: x.map_or(Native::Absent, Native::Raw),
             id: x,
             flags: LOADED | HAS_ID | PRELOADED,
+            cmd: 0,
+            chr: 0,
         };
     }
 
@@ -362,6 +407,26 @@ impl State {
         }
     }
 
+    /// The command code and modifier of loaded meaning `loc` (decoded
+    /// once; nothing cloned).
+    #[inline]
+    pub(crate) fn cmd_chr_of(&mut self, loc: Loc, v: &Values) -> (u8, i32) {
+        let e = self.entry_mut(loc);
+        if e.flags & CC != 0 {
+            return (e.cmd, e.chr);
+        }
+        let (c, h) = match &e.val {
+            Native::Mean(m) => m.cmd_chr(),
+            Native::Absent => Mean::Undefined.cmd_chr(),
+            _ => self.mean_of(loc, v).cmd_chr(),
+        };
+        let e = self.entry_mut(loc);
+        e.cmd = c;
+        e.chr = h;
+        e.flags |= CC;
+        (c, h)
+    }
+
     /// Loaded `loc` as a token list (decoded once).
     #[allow(dead_code)]
     pub(crate) fn toks_of(&mut self, loc: Loc, v: &Values) -> Rc<[Tok]> {
@@ -422,6 +487,9 @@ impl State {
     /// before it inert. A definition outside every group of the run, or
     /// a global one, is the run's for its base level.
     pub(crate) fn set(&mut self, loc: Loc, val: Native, global: bool, grp: Option<u32>) {
+        if is_cat(loc) {
+            self.cat_gen = new_cat_gen();
+        }
         let mi = self.meta(loc);
         self.stamp += 1;
         let st = self.stamp;
@@ -451,6 +519,8 @@ impl State {
             val: val.clone(),
             id,
             flags: LOADED | if id.is_some() { HAS_ID } else { 0 },
+            cmd: 0,
+            chr: 0,
         };
         if !global && grp.is_some() {
             self.defined.push(loc);
@@ -481,6 +551,8 @@ impl State {
             val: val.clone(),
             id,
             flags: LOADED | if id.is_some() { HAS_ID } else { 0 },
+            cmd: 0,
+            chr: 0,
         };
         if !base {
             self.defined.push(loc);
@@ -508,6 +580,10 @@ impl State {
             if slot.ginert > s.at {
                 continue;
             }
+            if is_cat(s.loc) {
+                self.cat_gen = new_cat_gen();
+            }
+            let slot = self.slot(s.loc);
             slot.e = s.prev;
             slot.save_gid = s.gid;
             slot.save_stamp = s.stamp;
@@ -625,7 +701,7 @@ impl State {
             };
             PEntry {
                 id,
-                flags: e.flags | HAS_ID,
+                flags: (e.flags | HAS_ID) & !CC,
             }
         };
         let mut slots = Vec::new();
@@ -686,6 +762,8 @@ impl State {
             val: e.id.map_or(Native::Absent, Native::Raw),
             id: e.id,
             flags: e.flags,
+            cmd: 0,
+            chr: 0,
         };
         for s in p.slots {
             let l = loc(&mut st, s.loc);
@@ -724,6 +802,7 @@ impl State {
         }
         st.stamp = p.stamp;
         st.next_gid = p.next_gid;
+        st.cat_gen = new_cat_gen();
         st
     }
 }

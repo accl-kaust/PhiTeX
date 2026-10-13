@@ -43,6 +43,9 @@ pub struct Ctx<'a> {
     following_seen: std::cell::RefCell<Vec<(usize, Slot, OpId, ValueId)>>,
     uses: Vec<Use>,
     defs: Vec<(Field, ValueId, bool)>,
+    /// Field -> index in `defs`, built once the list is long (a run
+    /// defining many fields would otherwise scan it per definition).
+    def_ix: Option<FxHashMap<Field, usize>>,
     children: Vec<(OpId, ValueId)>,
     /// Continuations: nodes to go after this one at its own depth.
     follows: Vec<(OpId, ValueId)>,
@@ -91,6 +94,7 @@ impl<'a> Ctx<'a> {
             following_seen: std::cell::RefCell::new(Vec::new()),
             uses: Vec::new(),
             defs: Vec::new(),
+            def_ix: None,
             children: Vec::new(),
             follows: Vec::new(),
             env: Vec::new(),
@@ -125,6 +129,7 @@ impl<'a> Ctx<'a> {
         cx.cache = s.cache;
         cx.uses = s.uses;
         cx.defs = s.defs;
+        cx.def_ix = None;
         cx.children = s.children;
         cx.follows = s.follows;
         cx.env = s.env;
@@ -176,6 +181,7 @@ impl<'a> Ctx<'a> {
         self.children.clear();
         self.follows.clear();
         self.defs.clear();
+        self.def_ix = None;
         self.env.clear();
         self.publishes.clear();
         self.contribs.clear();
@@ -405,6 +411,26 @@ impl<'a> Ctx<'a> {
         Ok(v)
     }
 
+    /// Records a definition, replacing an earlier one of the same field.
+    fn put_def(&mut self, f: Field, v: ValueId, global: bool) {
+        const INDEX_FROM: usize = 32;
+        if self.def_ix.is_none() && self.defs.len() >= INDEX_FROM {
+            self.def_ix = Some(self.defs.iter().enumerate().map(|(i, d)| (d.0, i)).collect());
+        }
+        let at = match &self.def_ix {
+            Some(ix) => ix.get(&f).copied(),
+            None => self.defs.iter().position(|d| d.0 == f),
+        };
+        if let Some(i) = at {
+            self.defs[i] = (f, v, global);
+        } else {
+            if let Some(ix) = &mut self.def_ix {
+                ix.insert(f, self.defs.len());
+            }
+            self.defs.push((f, v, global));
+        }
+    }
+
     /// Defines `f` (with its declared locality; local if the definition set
     /// is dynamic).
     pub fn define(&mut self, f: Field, v: ValueId) {
@@ -418,14 +444,12 @@ impl<'a> Ctx<'a> {
             };
             d.global
         };
-        self.defs.retain(|d| d.0 != f);
-        self.defs.push((f, v, global));
+        self.put_def(f, v, global);
     }
 
     /// Defines `f` with an explicit locality (dynamic definition sets).
     pub fn define_with(&mut self, f: Field, v: ValueId, loc: Locality) {
-        self.defs.retain(|d| d.0 != f);
-        self.defs.push((f, v, loc == Locality::Global));
+        self.put_def(f, v, loc == Locality::Global);
     }
 
     // ------------------------------------------------------ contributions
@@ -473,8 +497,7 @@ impl<'a> Ctx<'a> {
     pub fn push_contribution(&mut self, seq: Field, elem: ValueId) {
         let h = self.seq_hidden(seq);
         let v = self.values().list(vec![self.values().str("c"), elem]);
-        self.defs.retain(|d| d.0 != h);
-        self.defs.push((h, v, false));
+        self.put_def(h, v, false);
     }
 
     /// The contribution immediately before this node in its scope (`None`
@@ -507,7 +530,7 @@ impl<'a> Ctx<'a> {
         let mut val = self.use_field(h)?;
         let e = self.eng;
         let n = e.n(self.slot);
-        let mut site = e.walk(n.unit, n.label, h).site;
+        let mut site = e.walk_site(n.unit, n.label, h).0;
         let vals = e.values();
         let mut rev = Vec::new();
         let mut skip = 0u64;
@@ -586,8 +609,7 @@ impl<'a> Ctx<'a> {
             vals.bool(replacement.is_some()),
             visible,
         ]);
-        self.defs.retain(|d| d.0 != h);
-        self.defs.push((h, v, false));
+        self.put_def(h, v, false);
         Ok(taken)
     }
 
@@ -961,7 +983,11 @@ impl<'a> Ctx<'a> {
         let follows = self.follows.len();
         let end = match (self.stopped.take(), r) {
             (Some(e), _) => e,
-            (None, Ok(_)) if self.raise > 0 => End::Raise(self.raise, self.raise_from),
+            // A run that completed after reading a finished node not yet
+            // settled keeps its result: apply lifts it above that node
+            // (RunResult::raise), and a change there dirties it through
+            // its uses, as for any applied result. Re-running it from the
+            // start bought nothing.
             (None, Ok(v)) => End::Output(v),
             (None, Err(_)) => End::Unpredictable,
         };

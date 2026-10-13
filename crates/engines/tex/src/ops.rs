@@ -75,7 +75,18 @@ pub(crate) fn run_node_parking(
     // (a long run, the format's: its commands' time, then its finish)
     let timed = t_body.as_secs() >= 1 && crate::exec::env_flag!("PHITEX_TEX_TIME");
     if timed {
-        eprintln!("run: commands {t_body:?}");
+        eprintln!(
+            "run: commands {t_body:?} ({}, speculative {}, resumed {}), memory MB resident/peak {:?}",
+            match &res {
+                Ok(()) => "ok",
+                Err(Halt::Stop(_)) => "stop",
+                Err(Halt::Starve) => "starve",
+                Err(Halt::Fatal) => "fatal",
+            },
+            r.cx.is_speculative(),
+            r.resumed,
+            crate::api::mem_mb()
+        );
     }
     if trace {
         eprintln!(
@@ -94,7 +105,11 @@ pub(crate) fn run_node_parking(
             let t = std::time::Instant::now();
             let x = r.finish();
             if timed {
-                eprintln!("run: finish {:?}", t.elapsed());
+                eprintln!(
+                    "run: finish {:?}, memory MB resident/peak {:?}",
+                    t.elapsed(),
+                    crate::api::mem_mb()
+                );
             }
             Ok(x)
         }
@@ -114,7 +129,9 @@ pub(crate) fn run_node_parking(
         // (§1335: the job ends there, its log written up to the error,
         // as pdfTeX's close_files_and_terminate leaves it)
         Err(Halt::Fatal) => {
-            let _ = r.log("error", "*** (job aborted, no legal \\end found)");
+            if !r.too_many_errors {
+                let _ = r.log("error", "*** (job aborted, no legal \\end found)");
+            }
             r.end_open();
             Ok(r.finish())
         }

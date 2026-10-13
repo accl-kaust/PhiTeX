@@ -1227,11 +1227,11 @@ fn a_static_opener_sets_its_kind_when_it_runs() {
     let rep = eng.evaluate_sequential().expect("evaluate");
     assert_eq!(eng.output(k), Some(doc));
     assert_eq!(eng.output(r), Some(one));
-    // The kind reader waited on the opener's run; nothing waited on a
-    // scope effect (the brackets were known from the text).
+    // Nothing waited on a scope effect (the brackets were known from the
+    // text). Whether the kind reader parked on the opener's run or was
+    // lifted above it depends on the order the batch is applied in.
     let kinds: Vec<&str> = rep.waits_by_kind.iter().map(|w| w.0).collect();
     assert!(!kinds.contains(&"scope effect"), "{:?}", rep.waits_by_kind);
-    assert!(rep.top_waited.iter().any(|w| w.0 == opener), "{:?}", rep.top_waited);
     eng.replace(opener, op, vec![open, list]);
     let rep = eng.evaluate_sequential().expect("evaluate");
     assert_eq!(eng.output(k), Some(list));
@@ -1905,7 +1905,12 @@ fn a_definition_outside_the_declared_set_refutes_the_declaration() {
     let rep = eng.evaluate_sequential().expect("after e's edit");
     assert_eq!((int(&eng, r), int(&eng, r2)), (Some(5), Some(5)), "{rep:?}");
     assert_eq!(rep.declarations_refuted, 0, "{rep:?}");
-    assert!(rep.pending_sets > 0 && rep.stops > 0, "r2 waited on q's set: {rep:?}");
+    // (A raise counts as a wait: r2 read q finished above the level and
+    // was lifted over it with its result kept.)
+    assert!(
+        rep.pending_sets > 0 && rep.stops + rep.raises > 0,
+        "r2 waited on q's set: {rep:?}"
+    );
     assert_eq!(rep.runs, 4, "e, q, r, r2 once each: {rep:?}");
     // A new text for q has a new declaration, checked afresh.
     let a = args(&mut eng, "q", 6);

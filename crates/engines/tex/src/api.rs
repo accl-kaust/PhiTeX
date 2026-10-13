@@ -189,7 +189,7 @@ impl EditSender {
 /// sent, applied to the document's nodes.
 struct Absorb<'a> {
     edits: &'a EditSender,
-    nodes: &'a mut Vec<(String, NodeId)>,
+    nodes: &'a mut Vec<(u64, NodeId, Src)>,
     exec: OpId,
     /// The first node after the text's ([`Build::end`]).
     end: NodeId,
@@ -250,7 +250,7 @@ fn edit_apply_note(t_all: std::time::Instant, t: [std::time::Duration; 3], n: [u
     }
     let [t_slices, t_hints, t_diff] = t;
     eprintln!(
-        "edit apply: {:?} total; hint pass (the chunks analysed again) {t_slices:?}, slices and keys {:?}, slice-key diff {:?}, engine replace/insert/remove {:?}; {} old / {} new slices, {} kept, {} replaced, {} removed, {} inserted, text {} bytes",
+        "edit apply: {:?} total; hint pass (units spliced, the chunks analysed again) {t_slices:?}, nodes and keys {:?}, slice-key diff {:?}, engine replace/insert/remove {:?}; {} old / {} new slices, {} kept, {} replaced, {} removed, {} inserted, text {} bytes",
         t_all.elapsed(),
         t_hints.checked_sub(t_slices).unwrap_or_default(),
         t_diff.checked_sub(t_hints).unwrap_or_default(),
@@ -267,7 +267,7 @@ fn edit_apply_note(t_all: std::time::Instant, t: [std::time::Duration; 3], n: [u
 
 /// The lengths of the key prefix and suffix `old` and `new` share
 /// (not overlapping).
-fn common_ends<T, U>(old: &[(String, T)], new: &[(String, U)]) -> (usize, usize) {
+fn common_ends(old: &[(u64, NodeId, Src)], new: &[(u64, DocNode)]) -> (usize, usize) {
     let mut a = 0;
     while a < old.len() && a < new.len() && old[a].0 == new[a].0 {
         a += 1;
@@ -290,7 +290,7 @@ fn slice_keys(
     incr: Option<&Incr>,
     finder: Option<&Finder>,
     read: &mut Vec<String>,
-) -> Vec<(String, DocNode)> {
+) -> Vec<(u64, DocNode)> {
     match incr {
         Some(inc) => {
             register_doc(v, inc);
@@ -311,7 +311,7 @@ fn apply_text(
     eng: &mut Engine,
     exec: OpId,
     end: NodeId,
-    nodes_now: &mut Vec<(String, NodeId)>,
+    nodes_now: &mut Vec<(u64, NodeId, Src)>,
     text: &str,
     mut incr: Option<&mut Incr>,
     finder: Option<&Finder>,
@@ -341,7 +341,7 @@ fn apply_text(
     for k in common..old_mid {
         eng.remove(old[a + k].1);
     }
-    let mut nodes: Vec<(String, NodeId)> = Vec::with_capacity(new.len());
+    let mut nodes: Vec<(u64, NodeId, Src)> = Vec::with_capacity(new.len());
     for i in 0..new.len() {
         let n = if i < a || i >= a + new_mid {
             let oi = if i < a { i } else { i - new_mid + old_mid };
@@ -354,7 +354,7 @@ fn apply_text(
             n
         } else {
             let args = args_of(eng, i);
-            let n = if let Some(&(_, p)) = nodes.last() {
+            let n = if let Some(&(_, p, _)) = nodes.last() {
                 eng.insert_after(p, exec, args)
             } else {
                 let first = old.get(a + old_mid).map_or(end, |x| x.1);
@@ -363,7 +363,7 @@ fn apply_text(
             declare_marks_before(eng, n);
             n
         };
-        nodes.push((new[i].0.clone(), n));
+        nodes.push((new[i].0, n, Src::of(&new[i].1)));
     }
     *nodes_now = nodes;
     edit_apply_note(
@@ -933,6 +933,12 @@ pub struct Stats {
     /// last reset, with the `profile` feature only (0 without it).
     pub dead_result: u64,
     pub state_result: u64,
+    /// The engine's parallel-apply probe counters (`profile` feature,
+    /// totals since their last reset): tail passes, use records, and
+    /// slices aborted.
+    pub tail: u64,
+    pub use_record: u64,
+    pub slice_abort: u64,
     pub raises: u64,
     /// The most nodes ready at one step, and the speculative runs that
     /// ran out of fuel.
@@ -993,6 +999,9 @@ impl Stats {
                 match name {
                     "dead_result" => self.dead_result = n,
                     "state_result" => self.state_result = n,
+                    "tail" => self.tail = n,
+                    "use_record" => self.use_record = n,
+                    "slice_abort" => self.slice_abort = n,
                     _ => {}
                 }
             }
@@ -1719,7 +1728,7 @@ impl Graph {
         defs: Defs,
         doc: bool,
         finder: Option<&Finder>,
-    ) -> (Vec<(String, NodeId)>, Incr) {
+    ) -> (Vec<(u64, NodeId, Src)>, Incr) {
         let mut incr = Incr::new(defs);
         let nodes = self.push_text(unit, &as_file(text), doc.then_some(&mut incr), finder);
         (nodes, incr)
@@ -1734,7 +1743,7 @@ impl Graph {
         text: &str,
         mut incr: Option<&mut Incr>,
         finder: Option<&Finder>,
-    ) -> Vec<(String, NodeId)> {
+    ) -> Vec<(u64, NodeId, Src)> {
         let t0 = std::time::Instant::now();
         if let Some(inc) = incr.as_deref_mut() {
             inc.set_text(text);
@@ -1743,7 +1752,7 @@ impl Graph {
         // a format's text is one node: a sequential run over the whole
         // file, its `\input`s inline; what it may define is unknowable
         // from its parts, so anything (it runs once, serially, cached)
-        let nodes: Vec<(String, DocNode)> = match incr {
+        let nodes: Vec<(u64, DocNode)> = match incr {
             Some(inc) => {
                 register_doc(self.eng.values(), inc);
                 let mut read = Vec::new();
@@ -1763,7 +1772,7 @@ impl Graph {
             let args = node_args(self.eng.values(), text, incr, n);
             let id = self.eng.push(unit, self.ops.exec, args);
             declare_marks_before(&mut self.eng, id);
-            out.push((k.clone(), id));
+            out.push((*k, id, Src::of(n)));
         }
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
@@ -1876,36 +1885,36 @@ fn doc_nodes(
     inc: &Incr,
     finder: Option<&Finder>,
     read: &mut Vec<String>,
-) -> Vec<(String, DocNode)> {
+) -> Vec<(u64, DocNode)> {
     // (a text redefining `\\input` reads its files in its runs)
-    let finder = finder.filter(|_| {
-        ![
-            "\\def\\input",
-            "\\let\\input",
-            "\\edef\\input",
-            "\\gdef\\input",
-            "\\xdef\\input",
-        ]
-        .iter()
-        .any(|d| text.contains(d))
-    });
+    let finder = finder.filter(|_| !inc.chunks.iter().any(|c| c.input.defines));
     let mut out = Vec::new();
     for c in &inc.chunks {
         let end = c.start + c.th.slices.last().map_or(0, |x| x.1);
-        let slices = c.th.slices.iter().map(|&(s, e)| (c.start + s, c.start + e));
-        let doc_slice = |(s, e): (usize, usize)| {
-            let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-            (key(&text[s..e], starts), DocNode::Doc(s, e))
+        let slices =
+            c.th.slices
+                .iter()
+                .zip(c.keys.iter())
+                .map(|(&(s, e), &k)| (c.start + s, c.start + e, k));
+        // (the chunk's keys, made when it was analysed; a slice at its
+        // start not beginning a line keyed again)
+        let doc_slice = |(s, e, k): (usize, usize, u64)| {
+            let k = if s == c.start && s > 0 && text.as_bytes()[s - 1] != b'\n' {
+                key(&text[s..e], false)
+            } else {
+                k
+            };
+            (k, DocNode::Doc(s, e))
         };
-        let chunk = &text[c.start..end];
-        let Some(f) = finder.filter(|_| chunk.contains("\\input")) else {
+        let Some(f) = finder.filter(|_| c.input.names) else {
             out.extend(slices.map(doc_slice));
             continue;
         };
         let mut slices = slices;
+        let chunk = &text[c.start..end];
         for p in crate::inputs::pieces(v, chunk, &c.th, inc.defs(), Some(f), read) {
-            if p.key.starts_with('\u{1}') {
-                out.push((p.key.clone(), DocNode::File(p)));
+            if p.is_file() {
+                out.push((p.key, DocNode::File(p)));
                 continue;
             }
             // (the document's own slice it is: the next whose key it has)
@@ -1943,9 +1952,38 @@ fn node_args(v: &Values, text: &str, incr: Option<&Incr>, n: &DocNode) -> Vec<Va
     }
 }
 
-/// A node's identity for edits: its text and whether it begins a line.
-fn key(piece: &str, starts: bool) -> String {
-    format!("{}{piece}", u8::from(starts))
+/// Where a text node's text is: the document's bytes, or a file's
+/// (a slice of a file the document inputs).
+#[derive(Clone)]
+enum Src {
+    Doc(usize, usize),
+    File(Arc<str>, usize, usize),
+}
+
+impl Src {
+    fn of(n: &DocNode) -> Src {
+        match n {
+            &DocNode::Doc(s, e) => Src::Doc(s, e),
+            DocNode::File(p) => {
+                let (t, s, e) = p.span();
+                Src::File(t, s, e)
+            }
+        }
+    }
+
+    /// Its text, the document's being `doc`.
+    fn text<'a>(&'a self, doc: &'a str) -> &'a str {
+        match self {
+            &Src::Doc(s, e) => doc.get(s..e.min(doc.len())).unwrap_or(""),
+            Src::File(t, s, e) => t.get(*s..*e).unwrap_or(""),
+        }
+    }
+}
+
+/// A node's identity for edits: the hash of its text and whether it
+/// begins a line.
+pub(crate) fn key(piece: &str, starts: bool) -> u64 {
+    phitex_defuse::hash_bytes(1 + u64::from(starts), piece.as_bytes())
 }
 
 /// A text as TeX reads a file: every line ends (§31).
@@ -2173,6 +2211,8 @@ fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> 
 /// INITEX's state, and the prelude's on top of it: a format, `\dump`
 /// ending it (or its text's end). Cached by the prelude's text, and good
 /// while every file it read is what the finder gives now.
+// (its phases timed and measured inline, PHITEX_TEX_TIME)
+#[allow(clippy::too_many_lines)]
 fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     let key = prelude.map_or(0, |p| {
         let mut b = p.as_bytes().to_vec();
@@ -2195,6 +2235,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         Err(known) => known,
     };
     let t_check = t_start.elapsed();
+    let m_check = mem_mb();
     let finder = &opts.finder;
     let mut g = Graph::new(opts.time_limit, opts.threads);
     g.eng.set_max_rounds(opts.max_rounds);
@@ -2212,6 +2253,8 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         g.eng.set_environment_absent(g.absent.clone());
     }
     let t_supply = t_start.elapsed();
+    let m_supply = mem_mb();
+    let mut m_settle = m_supply;
     let mut t_settle = t_supply;
     let mut env: Vec<(String, ValueId)> = crate::val::initex(g.eng.values());
     for (name, x) in &env {
@@ -2235,9 +2278,11 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             eprintln!("prelude settle {:?}", t0.elapsed());
         }
         t_settle = t_start.elapsed();
+        m_settle = mem_mb();
         env = final_bindings(&g, unit, end, env);
     }
     let t_bindings = t_start.elapsed();
+    let m_bindings = mem_mb();
     let v = g.eng.values();
     let out: Vec<(String, Tree)> = env.into_iter().map(|(k, x)| (k, export(v, x))).collect();
     let e = Arc::new(out);
@@ -2252,6 +2297,10 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
                 .checked_sub(t_bindings)
                 .unwrap_or_default(),
             e.len()
+        );
+        let m_export = mem_mb();
+        eprintln!(
+            "prelude memory (MB resident/peak): before {m_check:?}, after supply {m_supply:?}, after the run {m_settle:?}, after final bindings {m_bindings:?}, after export {m_export:?}"
         );
     }
     let c = Arc::new(Cached {
@@ -2343,6 +2392,21 @@ fn final_bindings(
     slots.into_iter().flatten().collect()
 }
 
+/// The process's resident and peak resident memory now, in MB
+/// (`PHITEX_TEX_TIME`'s phase lines), from `/proc/self/status` (zeros
+/// elsewhere).
+pub(crate) fn mem_mb() -> (u64, u64) {
+    let t = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let kb = |k: &str| {
+        t.lines()
+            .find_map(|l| l.strip_prefix(k))
+            .and_then(|v| v.split_whitespace().next()?.parse::<u64>().ok())
+            .unwrap_or(0)
+            / 1024
+    };
+    (kb("VmRSS:"), kb("VmHWM:"))
+}
+
 /// How bad a [`Diagnostic`] is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -2373,7 +2437,7 @@ pub struct Build {
     unit: UnitId,
     opts: Options,
     /// The nodes of the text, with their keys.
-    nodes: Vec<(String, NodeId)>,
+    nodes: Vec<(u64, NodeId, Src)>,
     dvi: NodeId,
     /// The first node after the text's (the page plan, which folds the
     /// list the text's nodes make): new text nodes go before it, also
@@ -2558,8 +2622,8 @@ impl Build {
             }
             let v = self.g.eng.values();
             let eng = &self.g.eng;
-            for (k, n) in &self.nodes {
-                if k.contains(&want) {
+            for (_, n, src) in &self.nodes {
+                if src.text(&self.text).contains(&want) {
                     dump(eng, v, *n, 0);
                 }
             }
@@ -2570,9 +2634,9 @@ impl Build {
         // the text nodes' offsets in the document, for the progress
         let mut offsets = FxHashMap::default();
         let mut off = 0u64;
-        for (k, n) in &self.nodes {
+        for (_, n, src) in &self.nodes {
             offsets.insert(n.raw(), off);
-            off += u64::try_from(k.len().saturating_sub(1)).unwrap_or(0);
+            off += u64::try_from(src.text(&self.text).len()).unwrap_or(0);
         }
         self.g.watch.offsets = Arc::new(offsets);
         let mut stats = Stats::default();
@@ -3027,14 +3091,14 @@ impl Build {
         // the document's text and its nodes' spans
         let mut doc = String::new();
         let mut spans = Vec::new();
-        for (k, _) in &self.nodes {
-            let piece = k.get(1..).unwrap_or("");
+        for (_, _, src) in &self.nodes {
+            let piece = src.text(&self.text);
             spans.push(doc.len());
             doc.push_str(piece);
         }
         // every node under a node of the text, to that node
         let mut top: phitex_defuse::FxHashMap<u64, usize> = phitex_defuse::FxHashMap::default();
-        for (i, (_, n)) in self.nodes.iter().enumerate() {
+        for (i, (_, n, _)) in self.nodes.iter().enumerate() {
             let mut stack = vec![*n];
             while let Some(x) = stack.pop() {
                 if top.insert(x.raw(), i).is_none() {
