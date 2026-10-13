@@ -666,8 +666,21 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
             n,
             "ifx" | "if_meaning:w" | "if" | "ifcat" | "if:w" | "if_charcode:w" | "if_catcode:w"
         ) {
-            let p = skip(atoms, k) + 1;
-            k = skip(atoms, p) + 1;
+            // (an operand is a token, or `\\noexpand` and the one it
+            // quotes, §367)
+            let operand = |p: usize| -> usize {
+                let q = skip(atoms, p);
+                match atoms.get(q) {
+                    Some(x)
+                        if x.kind == AtomKind::Cs
+                            && matches!(x.name(text), "noexpand" | "exp_not:N") =>
+                    {
+                        skip(atoms, q + 1) + 1
+                    }
+                    _ => q + 1,
+                }
+            };
+            k = operand(operand(k));
             continue;
         }
         if READERS.contains(&n) {

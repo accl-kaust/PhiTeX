@@ -378,12 +378,6 @@ fn add_heads(st: &mut Option<Vec<String>>, heads: Option<&[&str]>) {
     match (st.as_mut(), heads) {
         (Some(v), Some(hs)) => {
             for h in hs {
-                if std::env::var("PHITEX_HEAD_TRACE").is_ok_and(|w| *h == w) {
-                    eprintln!(
-                        "HEADTRACE {h}\n{}",
-                        std::backtrace::Backtrace::force_capture()
-                    );
-                }
                 if !v.iter().any(|x| x == h) {
                     v.push((*h).to_owned());
                 }
@@ -2038,9 +2032,6 @@ impl Analysis<'_> {
     /// The state the commands `calls` (of a body the text defines) may
     /// set.
     fn calls_state_split(&self, calls: &[String], outer: &[String], st: &mut Option<Vec<String>>) {
-        if std::env::var_os("PHITEX_HEAD_TRACE").is_some() && calls.iter().any(|c| c == "next") {
-            eprintln!("NEXTCALL {calls:?}");
-        }
         let (out, inner): (Vec<String>, Vec<String>) =
             calls.iter().cloned().partition(|c| outer.contains(c));
         self.calls_state(&out, st);
@@ -2221,10 +2212,7 @@ impl Analysis<'_> {
                 }
             } else if let Some(h) = head_of_pass_field(f) {
                 if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
-                    eprintln!(
-                        "slices: head {h} from name {f} relied {:?} calls {:?}",
-                        set.relied, set.calls
-                    );
+                    eprintln!("slices: head {h} from name {f}");
                 }
                 add_head(&mut b.state, h);
             }
