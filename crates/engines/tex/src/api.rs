@@ -17,6 +17,7 @@ use phitex_defuse::{
 use phitex_source::pass;
 
 use crate::hints::Defs;
+use crate::incr::Incr;
 use crate::ops::{Dvi, Exec, Files, Mark, Put, Shared};
 use crate::run::{Ops, slice_args, slice_args_in_file};
 use crate::val::{field_name, int_of, list_of, str_of};
@@ -170,17 +171,21 @@ struct Absorb<'a> {
     nodes: &'a mut Vec<(String, NodeId)>,
     exec: OpId,
     dvi: NodeId,
-    /// The format's definitions, for the new slices' hints and regions.
-    defs: Defs,
-    /// Whether the text is a document's ([`is_doc`]).
-    doc: bool,
+    /// The document's units and their analyses (`None`: a format's
+    /// text, one node).
+    incr: Option<&'a mut Incr>,
 }
 
 impl phitex_defuse::EditSource for Absorb<'_> {
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
         let (text, version) = self.edits.take()?;
         apply_text(
-            eng, self.exec, self.dvi, self.nodes, &text, &self.defs, self.doc,
+            eng,
+            self.exec,
+            self.dvi,
+            self.nodes,
+            &text,
+            self.incr.as_deref_mut(),
         );
         Some(version)
     }
@@ -205,12 +210,20 @@ fn apply_text(
     dvi: NodeId,
     nodes_now: &mut Vec<(String, NodeId)>,
     text: &str,
-    defs: &Defs,
-    doc: bool,
+    mut incr: Option<&mut Incr>,
 ) {
     let text = as_file(text);
-    let sl = if doc {
-        slices(&text, defs)
+    let t0 = std::time::Instant::now();
+    if let Some(inc) = incr.as_deref_mut() {
+        inc.set_text(&text);
+    }
+    let incr = incr.as_deref();
+    let doc = incr.is_some();
+    if let Some(inc) = incr {
+        register_doc(eng.values(), inc);
+    }
+    let sl = if let Some(inc) = incr {
+        inc.slices()
     } else if text.is_empty() {
         Vec::new()
     } else {
@@ -224,10 +237,7 @@ fn apply_text(
         })
         .collect();
     let old = &*nodes_now;
-    let hints = crate::hints::text_hints(&text, pass::FileKind::Document, defs);
-    if doc {
-        crate::hints::register_text(eng.values().str(DOC_NAME), &hints);
-    }
+    let t1 = t0.elapsed();
     let args_of = |eng: &Engine, k: usize| {
         let (s, e) = new[k].1;
         let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
@@ -240,10 +250,12 @@ fn apply_text(
         } else {
             slice_args(v, &text[s..e], starts)
         };
-        args.push(if doc {
-            crate::hints::hint_arg(v, &hints, s)
-        } else {
-            v.str(FORMAT_HINT)
+        args.push(match incr {
+            Some(inc) => {
+                let (c, at) = inc.chunk_at(s);
+                crate::hints::hint_arg(v, &c.th, at)
+            }
+            None => v.str(FORMAT_HINT),
         });
         args
     };
@@ -286,6 +298,17 @@ fn apply_text(
             n
         };
         nodes.push((new[i].0.clone(), n));
+    }
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        eprintln!(
+            "apply_text: analysis {t1:?} ({} of {} chunks), total {:?}, {} nodes, {} kept, {} new or replaced",
+            incr.map_or(0, |i| i.analysed),
+            incr.map_or(0, |i| i.chunks.len()),
+            t0.elapsed(),
+            nodes.len(),
+            a + b,
+            new_mid
+        );
     }
     *nodes_now = nodes;
 }
@@ -416,13 +439,17 @@ pub(crate) fn stream_entry(v: &Values, e: ValueId) -> ValueId {
 /// stood, page `j` where it fired) with each page's entries in place.
 /// Without a plan entry for them, the document nodes' entries go first.
 pub(crate) fn ordered_entries(v: &Values, plan: &[ValueId], streams: &[ValueId]) -> Vec<ValueId> {
-    let mut by_page: std::collections::BTreeMap<i64, Vec<ValueId>> = std::collections::BTreeMap::default();
+    let mut by_page: std::collections::BTreeMap<i64, Vec<ValueId>> =
+        std::collections::BTreeMap::default();
     let mut imm = Vec::new();
     for &e in streams {
         let xs = list_of(v, e);
         match xs.as_slice() {
             [j, x] if v.as_int(*j).is_some() => {
-                by_page.entry(v.as_int(*j).unwrap_or(0)).or_default().push(*x);
+                by_page
+                    .entry(v.as_int(*j).unwrap_or(0))
+                    .or_default()
+                    .push(*x);
             }
             _ => imm.push(e),
         }
@@ -705,14 +732,6 @@ fn date_params(t: i64) -> [(&'static str, i64); 4] {
         ("param:month", n(6, 8)),
         ("param:year", n(2, 6)),
     ]
-}
-
-/// The nodes of a document's text: its paragraph regions ([`crate::hints::slices_of`]); the
-/// pass over the whole text also gives each slice's hint.
-pub(crate) fn slices(text: &str, defs: &Defs) -> Vec<(usize, usize)> {
-    crate::hints::text_hints(text, pass::FileKind::Document, defs)
-        .slices
-        .clone()
 }
 
 /// What the evaluations of one build or edit did.
@@ -1495,26 +1514,29 @@ impl Graph {
         &mut self,
         unit: UnitId,
         text: &str,
-        defs: &Defs,
-        doc: bool,
+        mut incr: Option<&mut Incr>,
     ) -> Vec<(String, NodeId)> {
         let mut out = Vec::new();
         let t0 = std::time::Instant::now();
-        let hints = crate::hints::text_hints(text, pass::FileKind::Document, defs);
+        if let Some(inc) = incr.as_deref_mut() {
+            inc.set_text(text);
+        }
+        let incr = incr.as_deref();
+        let doc = incr.is_some();
+        if let Some(inc) = incr {
+            register_doc(self.eng.values(), inc);
+        }
         // a format's text is one node: a sequential run over the whole
         // file, its `\input`s inline; what it may define is unknowable
         // from its parts, so anything (it runs once, serially, cached)
-        let sl = if doc {
-            hints.slices.clone()
+        let sl = if let Some(inc) = incr {
+            inc.slices()
         } else if text.is_empty() {
             Vec::new()
         } else {
             vec![(0, text.len())]
         };
         let t1 = t0.elapsed();
-        if doc {
-            crate::hints::register_text(self.eng.values().str(DOC_NAME), &hints);
-        }
         for (s, e) in sl {
             let piece = &text[s..e];
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
@@ -1529,10 +1551,12 @@ impl Graph {
             } else {
                 slice_args(v, piece, starts)
             };
-            args.push(if doc {
-                crate::hints::hint_arg(v, &hints, s)
-            } else {
-                v.str(FORMAT_HINT)
+            args.push(match incr {
+                Some(inc) => {
+                    let (c, at) = inc.chunk_at(s);
+                    crate::hints::hint_arg(v, &c.th, at)
+                }
+                None => v.str(FORMAT_HINT),
             });
             let n = self.eng.push(unit, self.ops.exec, args);
             declare_marks_before(&mut self.eng, n);
@@ -1574,6 +1598,16 @@ fn is_doc(prelude: Option<&str>, text: &str) -> bool {
 /// The name a document's own text is registered under for the hints
 /// of nodes made from parts of it (`hints::register_text`).
 const DOC_NAME: &str = "\u{10FFFE}document";
+
+/// Registers the document's analysis for the hints of nodes made from
+/// parts of its slices (`hints::register_text`, by the document's
+/// offsets): when one chunk is the whole document. A document of several
+/// chunks has no whole analysis; such a node's hint answers `Any`.
+fn register_doc(v: &Values, inc: &Incr) {
+    if let [c] = inc.chunks.as_slice() {
+        crate::hints::register_text(v.str(DOC_NAME), &c.th);
+    }
+}
 
 /// A node's identity for edits: its text and whether it begins a line.
 fn key(piece: &str, starts: bool) -> String {
@@ -1820,7 +1854,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             g.eng.set_env(unit, f, x);
         }
         // (the prelude's own slices: INITEX knows no definitions yet)
-        g.push_text(unit, &as_file(p), crate::hints::no_defs(), false);
+        g.push_text(unit, &as_file(p), None);
         // the point the prelude's final bindings are read at
         let end = g.eng.push(unit, g.mark, Vec::new());
         let mut stats = Stats::default();
@@ -1924,6 +1958,8 @@ pub struct Build {
     settled: Vec<u64>,
     /// Whether the job's text is a document's ([`is_doc`]).
     doc: bool,
+    /// The document's units and their analyses ([`Incr`]).
+    incr: Incr,
 }
 
 impl Build {
@@ -1961,7 +1997,11 @@ impl Build {
         // from the start (`.bbl` and `.ind` stay files until their
         // BibTeX and makeindex nodes publish them)
         for ext in WRITTEN_EXTS {
-            g.written_file(&format!("{}.{ext}", opts.jobname), opts.fixpoint, &opts.finder);
+            g.written_file(
+                &format!("{}.{ext}", opts.jobname),
+                opts.fixpoint,
+                &opts.finder,
+            );
         }
         {
             g.absorb_provided();
@@ -2012,7 +2052,8 @@ impl Build {
         }
         *g.ops.defs.lock().unwrap_or_else(PoisonError::into_inner) = defs.clone();
         let doc = is_doc(prelude, document);
-        let nodes = g.push_text(unit, &as_file(document), &defs, doc);
+        let mut incr = Incr::new(defs.clone());
+        let nodes = g.push_text(unit, &as_file(document), doc.then_some(&mut incr));
         // the page builder's fold, after the text: one node choosing every
         // page break, its children the pages
         let breaks = g.ops.breaks;
@@ -2035,6 +2076,7 @@ impl Build {
             edits,
             settled: Vec::new(),
             doc,
+            incr,
         };
         b.settle();
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
@@ -2062,8 +2104,7 @@ impl Build {
             nodes: &mut self.nodes,
             exec: self.g.ops.exec,
             dvi: self.dvi,
-            defs: self.defs.clone(),
-            doc: self.doc,
+            incr: self.doc.then_some(&mut self.incr),
         };
         // a text sent before the evaluation starts is the one it is for
         if let Some(v) = phitex_defuse::EditSource::absorb(&mut absorb, &mut self.g.eng) {
