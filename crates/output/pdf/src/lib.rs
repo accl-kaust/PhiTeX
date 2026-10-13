@@ -99,6 +99,8 @@ pub mod norm;
 pub mod num;
 mod objects;
 pub mod relaxed;
+mod replay;
+pub use replay::PageRecord;
 mod ship;
 pub mod t1;
 mod tounicode;
@@ -732,6 +734,8 @@ pub struct PdfState {
     vf_cur_s: i32,
     /// `pdf_last_byte`, which `pdf_newline` reads.
     last_byte: u8,
+    /// A page's walk being recorded ([`PdfState::ship_recorded`]).
+    rec: Option<Box<replay::Recording>>,
 }
 
 impl PdfState {
@@ -839,6 +843,7 @@ impl PdfState {
             no_default_map: false,
             vf_cur_s: 0,
             last_byte: 0,
+            rec: None,
         }
     }
 

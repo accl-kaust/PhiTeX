@@ -210,6 +210,7 @@ impl PdfState {
                     .or_else(|| src.encoding_file(f))
             }
         });
+        self.rec_font(crate::replay::FontEv::Load(f));
         let file: Option<std::sync::Arc<[u8]>> = file.map(Into::into);
         let enc: Option<std::sync::Arc<[u8]>> = enc.map(Into::into);
         self.fonts.insert(
@@ -272,6 +273,7 @@ impl PdfState {
 
     /// `pdf_init_font`.
     pub(crate) fn init_font(&mut self, f: FontId, src: &dyn FontSource) {
+        self.rec_font(crate::replay::FontEv::Init(f));
         let x = self.font(f).expand.filter(|x| x.auto && x.base != 0);
         if let Some(x) = x {
             self.load_font(x.base, src);
@@ -1146,7 +1148,7 @@ impl PdfState {
     }
 
     /// "Initialize variables for PDF output" (pdfTeX §792).
-    fn init_output(&mut self) {
+    pub(crate) fn init_output(&mut self) {
         if !self.initialized {
             self.check_pdfversion();
             self.dd = self.p.decimal_digits.clamp(0, 4);
@@ -1202,6 +1204,9 @@ impl PdfState {
             );
             self.aux.pages_made.insert(self.last_page);
             last_stream = self.new_dict(OBJ_TYPE_OTHERS, 0, 0);
+            if let Some(r) = &mut self.rec {
+                r.blob = Some((self.out.len(), 0));
+            }
             self.cur_h = cur_h_offset;
             self.cur_v = p.height + cur_v_offset;
             self.origin_h = 0;
@@ -1276,6 +1281,21 @@ impl PdfState {
             self.page_shown = (data, self.cur_page_width, self.cur_page_height);
         }
         self.end_stream();
+        if shipping_page && let Some(r) = &mut self.rec {
+            if let Some(b) = &mut r.blob {
+                b.1 = self.out.len();
+            }
+            r.font_list.clone_from(&self.font_list);
+            r.other = !self.obj_list.is_empty()
+                || !self.xform_list.is_empty()
+                || !self.ximage_list.is_empty()
+                || !self.annot_list.is_empty()
+                || !self.link_list.is_empty()
+                || !self.dest_list.is_empty()
+                || !self.bead_list.is_empty()
+                || self.page_group_val != 0
+                || self.image_procset != 0;
+        }
         if shipping_page {
             self.write_page_object(last_stream, last_resources);
         }
@@ -1311,7 +1331,7 @@ impl PdfState {
     /// "Reset resource lists", returning the old ones (pdfTeX saves them
     /// only around forms; a page starts with them empty either way).
     #[allow(clippy::type_complexity)]
-    fn reset_resource_lists(
+    pub(crate) fn reset_resource_lists(
         &mut self,
     ) -> (Vec<FontId>, Vec<usize>, Vec<usize>, Vec<usize>, bool, i32) {
         (
@@ -1325,7 +1345,7 @@ impl PdfState {
     }
 
     #[allow(clippy::type_complexity)]
-    fn restore_resource_lists(
+    pub(crate) fn restore_resource_lists(
         &mut self,
         l: (Vec<FontId>, Vec<usize>, Vec<usize>, Vec<usize>, bool, i32),
     ) {
@@ -1375,7 +1395,7 @@ impl PdfState {
     }
 
     /// "Write out page object" (pdfTeX §769).
-    fn write_page_object(&mut self, last_stream: usize, last_resources: usize) {
+    pub(crate) fn write_page_object(&mut self, last_stream: usize, last_resources: usize) {
         let page = self.last_page;
         self.begin_dict(page, 1);
         self.print_ln(b"/Type /Page");
@@ -1431,7 +1451,7 @@ impl PdfState {
     }
 
     /// "Write out resources dictionary" (pdfTeX §762–§768).
-    fn write_resources(&mut self, last_resources: usize, shipping_page: bool) {
+    pub(crate) fn write_resources(&mut self, last_resources: usize, shipping_page: bool) {
         self.begin_dict(last_resources, 1);
         if shipping_page {
             if let Some(r) = self.p.page_resources.clone() {

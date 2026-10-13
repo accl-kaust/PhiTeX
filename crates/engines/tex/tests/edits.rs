@@ -554,7 +554,11 @@ fn pdf_edit_reruns_one_page_step() {
     let opts = || common::options("./p400.tex", "p400", "", &fx);
     let mut b = common::build(opts(), Some(&prelude), &src);
     assert!(b.is_pdf());
-    let text = src.replacen("Paragraph 3 has some words", "Paragraph 3 has some wordz", 1);
+    let text = src.replacen(
+        "Paragraph 3 has some words",
+        "Paragraph 3 has some wordz",
+        1,
+    );
     b.edit(&text);
     let steps: u64 = b.stats.page_steps_completed.iter().sum();
     eprintln!(
@@ -567,4 +571,48 @@ fn pdf_edit_reruns_one_page_step() {
     let d = common::first_difference(&b.output().0, &cold.output().0);
     assert!(d.is_none(), "edit differs from cold: {d:?}");
     assert!(steps <= 1, "{steps} page steps re-run");
+}
+
+/// A measure: 400 and 4000 plain paragraphs with `\pdfoutput=1`, cold
+/// and after a one-word edit on page 1 (page steps re-run, wall).
+#[test]
+#[ignore = "a measure: exact PDF edits on long documents"]
+fn pdf_para_edit_measure() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    for n in [400, 4000] {
+        let mut src = String::from("\\pdfoutput=1 \\hsize=6in \\vsize=8.5in \\parindent=20pt\n");
+        for k in 0..n {
+            let _ = writeln!(
+                src,
+                "Paragraph {k} has some words in it, enough to fill a few lines of text set \
+                 with plain's macros, so that the paragraph builder has work to do and the \
+                 pages fill up one after another.\n"
+            );
+        }
+        src.push_str("\\bye\n");
+        let prelude = common::plain();
+        let opts = || phitex_tex::Options {
+            threads: Some(1),
+            ..common::options("./pm.tex", "pm", "", &fx)
+        };
+        let t = std::time::Instant::now();
+        let mut b = common::build(opts(), Some(&prelude), &src);
+        let cold = t.elapsed();
+        let text = src.replacen(
+            "Paragraph 3 has some words",
+            "Paragraph 3 has some wordz",
+            1,
+        );
+        let t = std::time::Instant::now();
+        b.edit(&text);
+        let edit = t.elapsed();
+        let steps: u64 = b.stats.page_steps_completed.iter().sum();
+        eprintln!(
+            "pdf para{n}: {} pages, cold {cold:?} (critical path {:?}), edit {edit:?}: {steps} page steps, {} nodes run",
+            b.pages().len(),
+            b.stats.critical_path,
+            b.stats.nodes_run
+        );
+    }
 }
