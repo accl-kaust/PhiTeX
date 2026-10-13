@@ -575,6 +575,9 @@ pub struct Stats {
     /// diagnostics, never a silent fallback.
     pub regime_violations: u64,
     pub undeclared_definitions: u64,
+    /// Nodes answering `Any` because their class is demoted
+    /// (`crate::hints`; `PHITEX_HINTS=1` names the class).
+    pub hints_demoted: u64,
     /// The engine's speculative runs: kept with outstanding
     /// assumptions, confirmed, and whose assumptions failed; and nodes
     /// re-done higher after running below a finished input (raises).
@@ -649,6 +652,7 @@ impl Stats {
         self.nodes_bounded = get(c[0]);
         self.nodes_any = get(c[1]);
         self.regime_violations = get(c[2]);
+        self.hints_demoted = get(c[4]);
         self.undeclared_definitions = get(c[3])
             + u64::try_from(
                 errors

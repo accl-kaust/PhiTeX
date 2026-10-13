@@ -89,8 +89,22 @@ impl Operation for Exec {
     fn may_define(&self, args: &[ValueId], v: &Values) -> MayDefine {
         crate::hints::may_define(v, args)
     }
-    fn may_define_field(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
-        client_only(v, f)
+    /// A paragraph cell (`par:<anchor>:<list>`) only of the node's own
+    /// paragraph region: its anchor argument (index 2, an integer, when
+    /// the node carries one).
+    fn may_define_field(&self, args: &[ValueId], v: &Values, f: Field) -> bool {
+        if !client_only(v, f) {
+            return false;
+        }
+        if let Some(&x) = args.get(2)
+            && let Some(mine) = v.as_int(x)
+            && let phitex_defuse::Value::Str(s) = &*v.get(f.0)
+            && let Some((a, _)) = s.strip_prefix("par:").and_then(|r| r.split_once(':'))
+            && let Ok(a) = a.parse::<i64>()
+        {
+            return a == mine;
+        }
+        true
     }
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::Pending
@@ -126,6 +140,9 @@ impl Operation for Exec {
                 crate::hints::count(r, 0);
             } else {
                 crate::hints::count(r, 1);
+                if crate::hints::is_demoted(&hint) {
+                    crate::hints::count(r, 4);
+                }
             }
             Ok(())
         })

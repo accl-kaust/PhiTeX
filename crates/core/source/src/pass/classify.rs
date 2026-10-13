@@ -1862,7 +1862,14 @@ impl Cx<'_> {
                 None => ScopeHint::None,
             },
         };
-        let implicit = hints::implicit_of(name, next_open.is_some());
+        let mut implicit = hints::implicit_of(name, next_open.is_some());
+        if implicit == hints::Implicit::None
+            && (self.scope.document.ends_paragraph(name, 8)
+                || self.scope.prelude.ends_paragraph(name, 8))
+        {
+            // (a macro whose body ends with a paragraph's end)
+            implicit = hints::Implicit::EndsParagraph;
+        }
         let mut reads = vec![hints::cs(name)];
         for (_, d) in noted {
             let f = hints::cs(d);

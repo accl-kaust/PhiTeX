@@ -85,12 +85,12 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         .and_then(|x| x.strip_suffix(":D"))
         .unwrap_or(name);
     Some(match n {
-        // definitions: the control sequence only (§1218, §1221, §1224)
+        // definitions and contributions: the control sequence only, or
+        // the list accumulators (§1218, §1221, §1224, §1103)
         "def" | "gdef" | "let" | "futurelet" | "chardef" | "mathchardef" | "countdef"
-        | "dimendef" | "skipdef" | "muskipdef" | "toksdef" | "relax" | "begingroup" | "bgroup"
-        | "global" | "long" | "outer" | "protected" | "the" | "number" | "romannumeral"
-        | "string" | "meaning" | "noexpand" | "show" | "showbox" | "showthe" | "showlists"
-        | "showgroups" | "showtokens" | "showifs" | "dump" | "endinput" | "jobname"
+        | "dimendef" | "skipdef" | "muskipdef" | "toksdef" | "relax" | "global" | "long" | "outer" | "protected" | "the" | "number" | "romannumeral"
+        | "string" | "meaning" | "show" | "showbox" | "showthe" | "showlists"
+        | "showgroups" | "showtokens" | "showifs" | "dump" | "jobname"
         | "fontname" | "detokenize" | "unexpanded" | "ignorespaces" | "endcsname"
         | "prevdepth" | "spacefactor" | "nullfont" | "pagediscards" | "splitdiscards"
         | "noboundary" | "lastpenalty" | "lastskip" | "lastkern" | "lastnodetype" | "inputlineno"
@@ -99,40 +99,64 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         | "glueexpr" | "muexpr" | "gluestretch" | "glueshrink" | "gluestretchorder"
         | "glueshrinkorder" | "mutoglue" | "gluetomu" | "fontcharwd" | "fontcharht"
         | "fontchardp" | "fontcharic" | "parshapelength" | "parshapeindent" | "parshapedimen"
-        | "fontdimen" | "hyphenchar" | "skewchar" | "topmark" | "firstmark" | "botmark"
+        | "topmark" | "firstmark" | "botmark"
         | "splitfirstmark" | "splitbotmark" | "topmarks" | "firstmarks" | "botmarks"
-        | "splitfirstmarks" | "splitbotmarks" | "wd" | "ht" | "dp" | "char" | "accent"
-        | "discretionary" | "-" | "/" | " " | "hskip" | "hfil" | "hfill" | "hss" | "hfilneg"
-        | "vskip" | "vfil" | "vfill" | "vss" | "vfilneg" | "kern" | "hrule" | "vrule"
-        | "leaders" | "cleaders" | "xleaders" | "mskip" | "mkern" | "unskip" | "unpenalty"
-        | "unkern" | "penalty" | "end" | "indent" | "noindent" | "par" | "beginL" | "endL"
-        | "beginR" | "endR" | "mathord" | "mathop" | "mathbin" | "mathrel" | "mathopen"
-        | "mathclose" | "mathpunct" | "mathinner" | "underline" | "overline" | "mathaccent"
-        | "radical" | "displaystyle" | "textstyle" | "scriptstyle" | "scriptscriptstyle"
-        | "left" | "right" | "middle" | "mathchar" | "delimiter" | "displaylimits" | "limits"
-        | "nolimits" | "nonscript" | "mathchoice" | "eqno" | "leqno" | "vadjust" | "insert"
-        | "mark" | "marks" | "shipout" | "special" | "openin" | "closein" | "ifeof" => {
-            &[]
-        }
+        | "splitfirstmarks" | "splitbotmarks" | "/" | " " | "mskip"
+        | "mkern" | "penalty" | "end" | "par" | "beginL" | "endL" | "beginR" | "endR"
+        => &[],
+        // a box's dimension (§1247)
+        "wd" | "ht" | "dp" => &["box:", "lvlfix"],
+        // horizontal material: may start a paragraph ([`starts_par`] adds
+        // `par:`), the box level fix (§1090, §1091)
+        "char" | "accent" | "discretionary" | "-" | "hskip" | "hfil" | "hfill" | "hss"
+        | "hfilneg" | "vrule" | "indent" | "noindent" | "unhbox" | "unhcopy" | "box" | "copy"
+        | "leaders" | "cleaders" | "xleaders" => &["box:", "lvlfix"],
+        // vertical material and removals (§1056, §1105, §1080)
+        "vskip" | "vfil" | "vfill" | "vss" | "vfilneg" | "kern" | "hrule" | "unvbox"
+        | "unvcopy" | "unskip" | "unpenalty" | "unkern" | "lastbox" => &["box:"],
+        // math only (§1136-§1194)
+        "mathord" | "mathop" | "mathbin" | "mathrel" | "mathopen" | "mathclose"
+        | "mathpunct" | "mathinner" | "underline" | "overline" | "mathaccent" | "radical"
+        | "displaystyle" | "textstyle" | "scriptstyle" | "scriptscriptstyle" | "left"
+        | "right" | "middle" | "mathchar" | "delimiter" | "displaylimits" | "limits"
+        | "nolimits" | "nonscript" | "mathchoice" | "eqno" | "leqno" | "over" | "atop"
+        | "above" | "overwithdelims" | "atopwithdelims" | "abovewithdelims" => &["inc"],
+        // opening a group: the scope's opener record (`lopen:`, run.rs
+        // `finish`; §1063)
+        "begingroup" | "bgroup" => &["lopen:"],
         // closing a group: the box's badness, its level fix, inserts (§1100, §1079)
-        "endgroup" | "egroup" => &["badness", "lvlfix", "inspen"],
+        // and the box a `\\setbox` or box context gets (§1077 box_end)
+        // (an output routine's `}` resumes the page builder, §1100)
+        "endgroup" | "egroup" => &["badness", "lvlfix", "inspen", "box:", "deadcycles"],
         // arguments expanded while read: a conditional may end (§366, §498)
-        "edef" | "xdef" | "csname" | "message" | "errmessage" | "uppercase" | "lowercase"
-        | "scantokens" => &["ifstack"],
-        "write" | "immediate" | "openout" | "closeout" => &["ifstack", "wopen:", "write:"],
+        "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["ifstack"],
+        "mark" => &["ifstack", "param:"],
+        // (e-TeX's mark classes, §1494 ff.)
+        "marks" => &["ifstack", "param:", "markclasses"],
+        "write" | "openout" | "closeout" => &["ifstack", "wopen:", "write:"],
+        // (`\\immediate` of a pdfTeX object too, pdfTeX §1528)
+        "immediate" => &["ifstack", "wopen:", "write:", "pdf:"],
+        "shipout" | "insert" | "vadjust" | "output" => &["param:"],
         "afterassignment" => &["aftertoken"],
         "aftergroup" => &["ag"],
         // boxes (§1083 begin_box, §1077 \setbox)
-        "hbox" | "vbox" | "vtop" | "vcenter" | "setbox" | "box" | "copy" | "unhbox" | "unhcopy"
-        | "unvbox" | "unvcopy" | "lastbox" | "vsplit" => &["box:", "param:", "lvlfix"],
+        "hbox" | "vbox" | "vtop" | "vcenter" | "setbox" | "vsplit" => {
+            &["box:", "align", "param:", "lvlfix"]
+        }
         // conditionals (§498-§510)
         "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode" | "ifinner"
         | "ifvoid" | "ifhbox" | "ifvbox" | "ifcat" | "ifcase" | "iftrue" | "iffalse"
         | "ifdefined" | "ifcsname" | "iffontchar" | "unless" | "else" | "fi" | "or"
-        | "ifpdfprimitive" | "ifpdfabsnum" | "ifpdfabsdim" | "ifincsname" => &["ifstack"],
+        | "ifpdfprimitive" | "ifpdfabsnum" | "ifpdfabsdim" | "ifincsname" | "ifeof" => {
+            &["ifstack"]
+        }
         // fonts (§1257 new_font, §1234)
         "font" => &["fd:", "fdn:", "fontcount", "fontid:", "fontinfo:", "hc:", "sc:", "ifstack"],
         "textfont" | "scriptfont" | "scriptscriptfont" => &["fam:"],
+        // a font's parameters (§1253)
+        "fontdimen" => &["fd:", "fdn:"],
+        "hyphenchar" => &["hc:"],
+        "skewchar" => &["sc:"],
         // codes (§1232)
         "catcode" => &["cat:"],
         "lccode" => &["lc:"],
@@ -141,11 +165,11 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "mathcode" => &["mc:"],
         "delcode" => &["dc:"],
         // registers and parameters (§1224-§1248)
-        "count" | "dimen" | "skip" | "muskip" | "toks" | "advance" | "multiply" | "divide" => {
-            &["count:", "dimen:", "skip:", "muskip:", "toks:", "param:"]
-        }
-        "parshape" | "interlinepenalties" | "clubpenalties" | "widowpenalties"
-        | "displaywidowpenalties" => &["parshape", "param:"],
+        "count" | "dimen" | "skip" | "muskip" | "toks" | "advance" | "multiply" | "divide"
+        | "parshape" | "interlinepenalties" | "clubpenalties" | "widowpenalties"
+        | "displaywidowpenalties" => &[
+            "count:", "dimen:", "skip:", "muskip:", "toks:", "param:", "parshape",
+        ],
         "prevgraf" => &["pg:"],
         "deadcycles" => &["deadcycles"],
         "insertpenalties" => &["inspen"],
@@ -155,14 +179,13 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
             &["interaction"]
         }
         "hyphenation" | "patterns" => &["patterns"],
-        // alignments (§774-§800); `align:` is on every node
-        "halign" | "valign" | "cr" | "crcr" | "noalign" | "omit" | "span" => &["badness"],
-        "read" | "readline" => &["read:"],
-        // fractions (§1181)
-        "over" | "atop" | "above" | "overwithdelims" | "atopwithdelims" | "abovewithdelims" => {
-            &["inc"]
+        // alignments (§774-§800)
+        "halign" | "valign" | "cr" | "crcr" | "noalign" | "omit" | "span" => &["align", "badness"],
+        "read" | "readline" | "openin" | "closein" => &["read:"],
+        // pdfTeX's objects, streams, random numbers, colour stacks
+        _ if n.starts_with("pdf") && crate::prims::PRIMS.iter().any(|p| p.0 == n) => {
+            &["pdf:", "ifstack"]
         }
-        "output" => &["param:"],
         _ => {
             if crate::prims::PRIMS.iter().any(|p| p.0 == n) || table_param(n) {
                 // (a parameter by name, or a primitive not listed: its
@@ -398,13 +421,31 @@ fn short(s: &str) -> String {
 fn engine_field(f: &str) -> Option<String> {
     let rest = f.strip_prefix("cs:")?;
     if let Some(name) = rest.strip_prefix('\\') {
-        return Tok::cs(name).field_name();
+        return Tok::cs(&caret_name(name)).field_name();
     }
     let mut cs = rest.chars();
     match (cs.next(), cs.next()) {
         (Some(c), None) => Tok::ch(13, u32::from(c)).field_name(),
         _ => Tok::cs(rest).field_name(),
     }
+}
+
+/// A control symbol's name written with `^^` (§355): `^^M` is the
+/// character 13, `^^7f` the character 127.
+fn caret_name(name: &str) -> String {
+    let b = name.as_bytes();
+    if b.len() >= 3 && b.starts_with(b"^^") {
+        let hex = |c: u8| c.is_ascii_digit() || (b'a'..=b'f').contains(&c);
+        if b.len() == 4 && hex(b[2]) && hex(b[3]) {
+            if let Ok(c) = u8::from_str_radix(&name[2..4], 16) {
+                return char::from(c).to_string();
+            }
+        } else if b.len() == 3 && b[2] < 128 {
+            let c = if b[2] < 64 { b[2] + 64 } else { b[2] - 64 };
+            return char::from(c).to_string();
+        }
+    }
+    name.to_owned()
 }
 
 /// A prefix of the pass's as the engine's (`cs:\pre` → `cs:pre`).
@@ -422,10 +463,11 @@ const LOOKTHROUGH: &[&str] = &[
     "noexpand",
     "exp_not:N",
     "exp_not:n",
-    "afterassignment",
-    "aftergroup",
-    "futurelet",
     "lowercase",
+    "input",
+    "endinput",
+    "tex_input:D",
+    "tex_endinput:D",
     "uppercase",
     "scantokens",
 ];
@@ -508,6 +550,8 @@ struct Analysis<'t> {
     item_of: HashMap<usize, usize>,
     /// Atoms an earlier item claims (operands: never run on their own).
     claimed: Vec<bool>,
+    /// Atoms textually inside an alignment's braces (`\\halign{`…`}`).
+    in_align: Vec<bool>,
     memo: std::cell::RefCell<HashMap<String, DefSet>>,
 }
 
@@ -540,12 +584,14 @@ impl Analysis<'_> {
                 *c = true;
             }
         }
+        let in_align = align_atoms(text, &p.atoms);
         Analysis {
             text,
             p,
             defs,
             item_of,
             claimed,
+            in_align,
             memo: std::cell::RefCell::new(HashMap::new()),
         }
     }
@@ -646,10 +692,28 @@ impl Analysis<'_> {
         if self.claimed[a] {
             return Hint::any("operand of an earlier command (claimed, never run)", excerpt);
         }
+        if at.kind == AtomKind::Par {
+            return demoted("par", excerpt);
+        }
+        if at.kind == AtomKind::Cs && DEMOTED.contains(&at.name(self.text)) {
+            return demoted(at.name(self.text), excerpt);
+        }
+        if at.kind != AtomKind::Cs
+            && let Some(p) = self.prev(a)
+            && self.atoms()[p].kind == AtomKind::Cs
+            && self.hint(p).bound.is_none()
+        {
+            // (what follows a command the pass cannot bound may be its
+            // operand, read by it)
+            return Hint::any("may be the operand of an unbounded command", excerpt);
+        }
         let mut b = Bound {
-            state: Some(vec!["align:".to_owned()]),
+            state: Some(Vec::new()),
             ..Bound::default()
         };
+        if self.in_align[a] {
+            add_head(&mut b.state, "align");
+        }
         let mut cause = String::new();
         let ok = match at.kind {
             AtomKind::Cs => self.cs_hint(a, a, &mut b, &mut cause),
@@ -659,12 +723,25 @@ impl Analysis<'_> {
                 if self.may_start_par(a) {
                     add_head(&mut b.state, "par:");
                 }
+                // (the token after the run is read with it, and may end
+                // the paragraph: `\\prevgraf`, §1096)
+                add_head(&mut b.state, "pg:");
                 let mut k = a;
                 let mut ok = true;
                 while let Some(x) = atoms.get(k)
                     && matches!(x.kind, AtomKind::Char(_) | AtomKind::Verb)
                 {
                     self.cats_of(a, k, &mut b.cats);
+                    if x.kind == AtomKind::Char('$') {
+                        // (math begins: its list's opener and `\\fam`
+                        // set to -1, §1138, §1139)
+                        add_heads(&mut b.state, Some(&["lopen:", "param:", "inc"]));
+                    }
+                    if x.kind == AtomKind::Char('&') && self.p.regime_at(x.tok).catcode(b'&') == Some(4) {
+                        // (a cell's end, §789)
+                        add_head(&mut b.state, "align");
+                        add_head(&mut b.state, "badness");
+                    }
                     if let AtomKind::Char(c) = x.kind
                         && self.is_active(c)
                     {
@@ -692,7 +769,18 @@ impl Analysis<'_> {
                 true
             }
         };
+        if let Some(f) = b.names.iter().find(|f| {
+            f.strip_prefix("act:")
+                .and_then(|c| c.parse::<u32>().ok())
+                .and_then(char::from_u32)
+                .is_some_and(|c| !self.is_active(c))
+        }) {
+            // (a character this text never makes active is defined as
+            // one: the regime here is not the one the pass read)
+            return Hint::any(format!("{f}: an active character the text does not make"), excerpt);
+        }
         if ok {
+            opener(&mut b.state, at.kind == AtomKind::Open);
             if cause.is_empty() {
                 "bounded".clone_into(&mut cause);
             }
@@ -718,7 +806,7 @@ impl Analysis<'_> {
             Some(c) if name.chars().count() == 1 && !c.is_alphabetic() && name != "par" => {
                 Tok::ch(13, u32::from(c)).field_name()
             }
-            _ => Tok::cs(name).field_name(),
+            _ => Tok::cs(&caret_name(name)).field_name(),
         };
         if let Some(f) = field {
             b.means.push((f, 1));
@@ -735,18 +823,45 @@ impl Analysis<'_> {
             }
             if self.defs.is_defined(c) {
                 // (a name the text defines: its body's calls are in the
-                // list already; a quantity made by \let, \font,
-                // \chardef selects a font or appends)
-                let d = self.defset(c);
-                if d.calls.is_empty() && d.names.is_empty() && d.prefixes.is_empty() {
-                    add_head(st, "font");
-                }
+                // list already)
+                add_head(st, "lopen:");
+                self.defined_state(c, true, st);
                 continue;
             }
             if starts_par(c) {
                 add_head(st, "par:");
             }
             add_heads(st, class_state(c));
+        }
+    }
+
+    /// The state a name the text defines sets when it runs, besides its
+    /// body's calls: a font identifier selects its font (§1217); a
+    /// register is assigned (§1224); a character or a `\\chardef` is
+    /// appended, or is a brace or tab the `\\let` copied (§1038, §1063,
+    /// §1100, §789); an alias is its target's class.
+    fn defined_state(&self, name: &str, may_start_par: bool, st: &mut Option<Vec<String>>) {
+        match self.defs.shape(name) {
+            Some(pass::Shape::Quantity('f')) => add_head(st, "font"),
+            Some(pass::Shape::Quantity('i' | 'd' | 'g' | 't')) => add_heads(st, class_state("count")),
+            Some(pass::Shape::Quantity(_)) => {
+                add_heads(st, Some(&["box:", "lvlfix", "badness", "inspen", "align"]));
+                if may_start_par {
+                    add_head(st, "par:");
+                }
+            }
+            Some(pass::Shape::Alias(t)) => {
+                if starts_par(&t) && may_start_par {
+                    add_head(st, "par:");
+                }
+                if !self.defs.is_defined(&t) {
+                    add_heads(st, class_state(&t));
+                }
+            }
+            Some(pass::Shape::Cond) => add_head(st, "ifstack"),
+            Some(pass::Shape::Macro(_)) => {}
+            // (definitions that disagree, or one the pass cannot read)
+            Some(pass::Shape::Opaque(_)) | None => *st = None,
         }
     }
 
@@ -757,7 +872,7 @@ impl Analysis<'_> {
             return false;
         }
         for r in &set.relied {
-            if let Some(f) = Tok::cs(r).field_name()
+            if let Some(f) = Tok::cs(&caret_name(r)).field_name()
                 && !b.means.iter().any(|m| m.0 == f)
             {
                 b.means.push((f, 1));
@@ -822,12 +937,25 @@ impl Analysis<'_> {
         let end = it.end.max(a + 1).min(atoms.len());
         for k in a + 1..end {
             self.cats_of(first, k, &mut b.cats);
+            // (an operand expanded while read: a pdfTeX primitive's state,
+            // a `\\csname` that makes its name `\\relax`, §372)
+            if atoms[k].kind == AtomKind::Cs {
+                let o = atoms[k].name(self.text);
+                if o.starts_with("pdf") && crate::prims::PRIMS.iter().any(|p| p.0 == o) {
+                    add_head(&mut b.state, "pdf:");
+                } else if class_state(o) == Some(&["ifstack"][..]) {
+                    // (a conditional expanded in an operand, §498)
+                    add_head(&mut b.state, "ifstack");
+                } else if matches!(o, "csname" | "tex_csname:D") && !b.prefixes.iter().any(|p| p == "cs:") {
+                    b.prefixes.push("cs:".to_owned());
+                }
+            }
         }
-        if let Some(f) = Tok::cs(name).field_name() {
+        if let Some(f) = Tok::cs(&caret_name(name)).field_name() {
             b.means.push((f, 1));
         }
         for r in &it.hints.relied {
-            if let Some(f) = Tok::cs(r).field_name()
+            if let Some(f) = Tok::cs(&caret_name(r)).field_name()
                 && !b.means.iter().any(|m| m.0 == f)
             {
                 b.means.push((f, 1));
@@ -836,10 +964,9 @@ impl Analysis<'_> {
         // (the state: the command's own class, the text's definition of
         // it, and what the bodies it relies on call)
         if self.defs.is_defined(name) {
-            let d = self.defset(name);
-            if d.calls.is_empty() && d.names.is_empty() && d.prefixes.is_empty() {
-                add_head(&mut b.state, "font");
-            }
+            // (a body may open a group of its own)
+            add_head(&mut b.state, "lopen:");
+            self.defined_state(name, self.may_start_par(a), &mut b.state);
         } else {
             add_heads(&mut b.state, class_state(name));
         }
@@ -883,6 +1010,64 @@ impl Analysis<'_> {
             }
         }
     }
+}
+
+/// A command that opens a list or a scope (a group, a paragraph, a box,
+/// math, an alignment, an insert) records its opener when it ends
+/// (`lopen:<id>`, run.rs `finish`): every class that may open one.
+fn opener(st: &mut Option<Vec<String>>, open: bool) {
+    let opens = st.as_ref().is_some_and(|v| {
+        v.iter()
+            .any(|h| matches!(h.as_str(), "par:" | "box:" | "inc" | "align" | "param:" | "lvlfix"))
+    });
+    if open || opens {
+        add_head(st, "lopen:");
+    }
+    // (a paragraph begun sets `\\prevgraf` to 0, one ended to its lines:
+    // §1091, §1096)
+    if st.as_ref().is_some_and(|v| v.iter().any(|h| h == "par:")) {
+        add_head(st, "pg:");
+        // (and `normal_paragraph` resets `\\looseness`, `\\hangindent`,
+        // `\\hangafter`, `\\parshape`, `\\interlinepenalties`, §1070)
+        add_heads(st, Some(&["param:", "parshape"]));
+    }
+}
+
+/// Which atoms are inside an alignment's braces: from the `{` after
+/// `\\halign` or `\\valign` (spec and keywords between) to its `}`.
+fn align_atoms(text: &str, atoms: &[Atom]) -> Vec<bool> {
+    let mut out = vec![false; atoms.len()];
+    let mut depth = 0usize;
+    let mut open: Vec<usize> = Vec::new();
+    let mut pending = false;
+    for (k, a) in atoms.iter().enumerate() {
+        match a.kind {
+            AtomKind::Cs
+                if matches!(
+                    a.name(text),
+                    "halign" | "valign" | "tex_halign:D" | "tex_valign:D"
+                ) =>
+            {
+                pending = true;
+            }
+            AtomKind::Open => {
+                depth += 1;
+                if pending {
+                    open.push(depth);
+                    pending = false;
+                }
+            }
+            AtomKind::Close => {
+                if open.last() == Some(&depth) {
+                    open.pop();
+                }
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+        out[k] = !open.is_empty();
+    }
+    out
 }
 
 fn add_defs(ds: &[Def], prefixes: bool, b: &mut Bound) {
@@ -1077,8 +1262,14 @@ pub(crate) fn hint_of_args(v: &Values, args: &[ValueId]) -> Arc<Hint> {
 
 #[allow(clippy::too_many_lines)]
 fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
-    if let Some(&h) = args.get(2) {
-        return Hint::decode(&str_of(v, h));
+    // (the hint argument: the string tagged `A` or `B`, wherever the
+    // node's other extra arguments put it)
+    for &h in args.iter().skip(2) {
+        if let Value::Str(t) = &*v.get(h)
+            && (t.starts_with("A\x1e") || t.starts_with("B\x1e"))
+        {
+            return Hint::decode(t);
+        }
     }
     let Some(&fr) = args.first() else {
         return Hint::any("no arguments", "");
@@ -1122,6 +1313,11 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
             h
         }
         "t" => {
+            // (expansion tokens: a `}` ending an output routine, a
+            // `\\par` inserted: demoted until their rows are proven)
+            if std::env::var_os("PHITEX_HINTS_FRAGMENTS").is_none() {
+                return demoted("expansion tokens", "");
+            }
             // (tokens already read: faithful as text when every
             // character has the catcode the regime gives it)
             let toks = crate::val::toks_of(v, xs.get(1).copied());
@@ -1193,8 +1389,15 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
 /// follow an `\afterassignment`, and the state of what it calls is
 /// known only by name.
 fn fragment_context(b: &mut Bound) {
+    // (a `}` among them may end the output routine: the page's state
+    // and the held-over contributions are restored, §1100)
+    add_heads(&mut b.state, Some(&["page:", "deadcycles"]));
     add_head(&mut b.state, "par:");
+    add_heads(&mut b.state, Some(&["param:", "parshape"]));
+    add_head(&mut b.state, "pg:");
+    add_head(&mut b.state, "lopen:");
     add_head(&mut b.state, "aftertoken");
+    add_head(&mut b.state, "align");
 }
 
 /// Plain TeX's catcode of an ASCII byte (`@` a letter when `at`).
@@ -1225,7 +1428,8 @@ fn plain_catcode(b: u8, at: bool) -> u8 {
 
 /// Counts since the process began (the fallback when the build's own
 /// counters are not read): bounded, any, violations, undeclared.
-pub(crate) static COUNTS: [AtomicU64; 4] = [
+pub(crate) static COUNTS: [AtomicU64; 5] = [
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -1258,12 +1462,44 @@ pub(crate) fn may_define(v: &Values, args: &[ValueId]) -> MayDefine {
 }
 
 /// The accumulators the nodes count into.
-pub(crate) const COUNTERS: [&str; 4] = [
+pub(crate) const COUNTERS: [&str; 5] = [
     "hints:bounded",
     "hints:any",
     "hints:violations",
     "hints:undeclared",
+    "hints:demoted",
 ];
+
+/// Classes whose state row still let a run define outside it in the
+/// suite: they answer `Any` until each is fixed (with its section) and
+/// promoted again.
+const DEMOTED: &[&str] = &[
+    // (`\\par`, a blank line: `normal_paragraph`'s parameters, §1070)
+    "par",
+    "tex_par:D",
+    // (a box dimension's assignment, §1247)
+    "wd",
+    "ht",
+    "dp",
+    // (registers whose value is a conditional's expansion, §498)
+    "count",
+    "dimen",
+    "skip",
+    "muskip",
+    "toks",
+    "advance",
+    "multiply",
+    "divide",
+];
+
+fn demoted(class: &str, excerpt: &str) -> Hint {
+    Hint::any(format!("demoted: {class}"), excerpt)
+}
+
+/// Whether the hint answers `Any` because its class is demoted.
+pub(crate) fn is_demoted(h: &Hint) -> bool {
+    h.bound.is_none() && h.cause.starts_with("demoted: ")
+}
 
 /// Checks the hint's assumptions against the meanings and catcodes in
 /// force where the node runs: the violation, if any.
@@ -1397,7 +1633,7 @@ mod tests {
         assert!(b.cats.contains(&(b'\\', 0)));
         assert!(b.cats.contains(&(b'{', 1)));
         assert!(b.means.contains(&("cs:def".to_owned(), 1)));
-        assert_eq!(b.state.as_deref(), Some(&["align:".to_owned()][..]));
+        assert_eq!(b.state.as_deref(), Some(&[][..]));
         // the call: its body defines nothing
         let h = hint_of("\\def\\foo#1{x#1y}\n\\foo{a}\n", 17);
         let b = h.bound.expect("bounded");
@@ -1440,7 +1676,11 @@ mod tests {
         let t = "\\par\nText here \\ifnum1=1 \\fi\n\\afterassignment\\x\\def\\y{}\n";
         let text = analyse(t, FileKind::Document);
         let st = |off: usize| text.at(off).bound.expect("bounded").state;
-        assert_eq!(st(0).as_deref(), Some(&["align:".to_owned(), "par:".to_owned()][..]));
+        // (`\\par` is demoted for now)
+        assert!(is_demoted(&text.at(0)));
+        // the run after it is in one: the list, and `\\prevgraf` if the
+        // token it reads after it ends the paragraph
+        assert_eq!(st(10).as_deref(), Some(&["pg:".to_owned()][..]));
         // a run of text after \par may start a paragraph
         assert!(st(5).expect("some").contains(&"par:".to_owned()));
         // and the run after it is in one
