@@ -1358,6 +1358,45 @@ impl Build {
         out
     }
 
+    /// The engine's critical chain, from the highest finished node back:
+    /// for each link the node's operation and first argument (shortened),
+    /// the cause's kind, and its field if any ([`Engine::critical_chain`]).
+    #[must_use]
+    pub fn critical_chain(&self) -> Vec<(String, String, String)> {
+        use phitex_defuse::Cause;
+        let v = self.g.eng.values();
+        self.g
+            .eng
+            .critical_chain()
+            .into_iter()
+            .map(|(n, c)| {
+                let what = self.g.eng.node_info(n).map_or_else(String::new, |i| {
+                    let a: String = i
+                        .args
+                        .first()
+                        .map(|&x| v.render(x))
+                        .unwrap_or_default()
+                        .chars()
+                        .take(60)
+                        .collect();
+                    format!("{} {a}", i.op)
+                });
+                let (kind, field) = match c {
+                    Cause::Rebind { field, .. } => ("Rebind", field_name(v, field)),
+                    Cause::Changed { field, .. } => ("Changed", field_name(v, field)),
+                    Cause::Output { .. } => ("Output", String::new()),
+                    Cause::Woken { .. } => ("Woken", String::new()),
+                    Cause::Loop { field } => ("Loop", field_name(v, field)),
+                    Cause::Environment { field } => ("Environment", field_name(v, field)),
+                    Cause::Structure => ("Structure", String::new()),
+                    Cause::Range { field, .. } => ("Range", field_name(v, field)),
+                    Cause::Created { .. } => ("Created", String::new()),
+                };
+                (what, kind.to_owned(), field)
+            })
+            .collect()
+    }
+
     /// The pages shipped, first first: a hash of what each shows (a PDF
     /// page's content stream, uncompressed, with its size and
     /// `\pdfpageattr`; a DVI page's `bop`..`eop` bytes, the back pointer
