@@ -860,7 +860,7 @@ fn census_envs() {
 fn census_of(name: &str, marker: &str) {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join(format!("{name}.tex")));
-    let (mut b, _) = cold_nodes(name, &dir, &src);
+    let (mut b, _, _) = cold_nodes(name, &dir, &src);
     let new = quack(&src, marker);
     common::assert_census(&[common::Census::take(name, &mut b, &new)]);
 }
