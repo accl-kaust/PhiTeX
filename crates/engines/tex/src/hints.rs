@@ -1847,10 +1847,11 @@ impl Analysis<'_> {
         }
         // (a font selected inside a brace group, not `\\global`ly, is
         // the group's: no `font` definition reaches the engine)
-        if self.inner.get(a).copied().unwrap_or(false) && !self.after_global(a) {
-            if let Some(st) = &mut b.state {
-                st.retain(|h| h != "font");
-            }
+        if self.inner.get(a).copied().unwrap_or(false)
+            && !self.after_global(a)
+            && let Some(st) = &mut b.state
+        {
+            st.retain(|h| h != "font");
         }
         b.no_scope = ok && self.no_scope(a);
         if ok {
