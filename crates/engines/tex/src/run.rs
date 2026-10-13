@@ -1908,6 +1908,7 @@ struct PLevel {
 /// A run stopped at a read, at the start of the command the read
 /// abandoned ([`Run::rewind`]): every owned field of [`Run`] but the
 /// caches, which the resumed run rebuilds ([`phitex_defuse::Ctx::park`]).
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Parked {
     /// The values' epoch the ids below belong to.
     epoch: u64,
