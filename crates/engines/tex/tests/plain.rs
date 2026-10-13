@@ -31,7 +31,7 @@ fn gate(dir: &str, body: &str, default: bool, plain: bool) -> Result<String, Str
     }
     let s = &b.stats;
     let report = format!(
-        "{name}: {} nodes run, {} runs, {} live, {} rounds, tails {}/{}, starved {}, critical path {}, hints {} bounded / {} any, {} regime violations, {} undeclared",
+        "{name}: {} nodes run, {} runs, {} live, {} rounds, tails {}/{}, starved {}, critical path {}, hints {} bounded / {} any, {} regime violations, {} undeclared, stops {} resumed {} restarted {}",
         s.nodes_run,
         s.runs,
         s.live,
@@ -43,7 +43,10 @@ fn gate(dir: &str, body: &str, default: bool, plain: bool) -> Result<String, Str
         s.nodes_bounded,
         s.nodes_any,
         s.regime_violations,
-        s.undeclared_definitions
+        s.undeclared_definitions,
+        s.stops,
+        s.resumed,
+        s.restarted
     );
     if s.regime_violations != 0 || s.undeclared_definitions != 0 {
         let diags: Vec<String> = b
