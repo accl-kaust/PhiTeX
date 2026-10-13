@@ -1975,12 +1975,15 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         starts.push(at.start);
         let h = an.hint(a);
         hints.push(intern(&h));
+        // (a guessed operand that is unbounded on its own is a value
+        // read, not run: `\\headline={\\tenrm…}`)
+        let unbounded_operand = an.claimed[a] && h.bound.is_none();
         let ch = matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb);
         // (a command a macro is only guessed to read still runs in the
         // slice: its rows count in the union)
         skip.push(
             (ch && prev_char)
-                || (an.claimed[a] && (at.kind != AtomKind::Cs || prim_operand[a]))
+                || (an.claimed[a] && (at.kind != AtomKind::Cs || prim_operand[a] || unbounded_operand))
                 || at.kind == AtomKind::Space,
         );
         prev_char = ch;
@@ -2679,10 +2682,12 @@ mod tests {
         let par = st(0).expect("a state row");
         assert!(par.iter().any(|h| h == "pg:") && par.iter().any(|h| h == "parshape"));
         // the run after it is in one: the list, and `\\prevgraf` if a
-        // command after it in its text ends the paragraph
+        // command after it in its text ends the paragraph; the region
+        // runs on to its end, so the conditional's and
+        // `\\afterassignment`'s rows are its too
         assert_eq!(
             st(10).as_deref(),
-            Some(&["par:".to_owned(), "pg:".to_owned()][..])
+            Some(&["par:".to_owned(), "pg:".to_owned(), "if:".to_owned(), "aftertoken".to_owned()][..])
         );
         // a run of text after \par may start a paragraph
         assert!(st(5).expect("some").contains(&"par:".to_owned()));
