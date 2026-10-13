@@ -1081,7 +1081,7 @@ impl<'c, 'a> Run<'c, 'a> {
             match f {
                 Frame::Toks(t, p) => {
                     for tok in &t[*p..] {
-                        let ch = matches!(tok.cat(), Some(11 | 12));
+                        let ch = matches!(tok.cat(), Some(10..=12));
                         if ch {
                             run.push(tok.encode(v));
                             continue;
@@ -1180,7 +1180,7 @@ impl<'c, 'a> Run<'c, 'a> {
             match f {
                 Frame::Toks(t, p) => {
                     for tok in &t[*p..] {
-                        if matches!(tok.cat(), Some(11 | 12)) {
+                        if matches!(tok.cat(), Some(10..=12)) {
                             run = true;
                             continue;
                         }

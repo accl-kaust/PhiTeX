@@ -819,6 +819,10 @@ pub struct Stats {
     /// Nodes answering `Any` because their class is demoted
     /// (`crate::hints`; `PHITEX_HINTS=1` names the class).
     pub hints_demoted: u64,
+    /// Nodes whose text is a token list (`["t", ...]`), and nodes
+    /// reading source text (a document slice, a line, a file).
+    pub nodes_token_frames: u64,
+    pub nodes_text_frames: u64,
     /// The engine's speculative runs: kept with outstanding
     /// assumptions, confirmed, and whose assumptions failed; and nodes
     /// re-done higher after running below a finished input (raises).
@@ -894,6 +898,8 @@ impl Stats {
         self.nodes_any = get(c[1]);
         self.regime_violations = get(c[2]);
         self.hints_demoted = get(c[4]);
+        self.nodes_token_frames = get(c[5]);
+        self.nodes_text_frames = get(c[6]);
         self.undeclared_definitions = get(c[3])
             + u64::try_from(
                 errors

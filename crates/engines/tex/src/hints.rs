@@ -1692,7 +1692,9 @@ fn plain_catcode(b: u8, at: bool) -> u8 {
 
 /// Counts since the process began (the fallback when the build's own
 /// counters are not read): bounded, any, violations, undeclared.
-pub(crate) static COUNTS: [AtomicU64; 5] = [
+pub(crate) static COUNTS: [AtomicU64; 7] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -1759,12 +1761,15 @@ pub(crate) fn may_define(v: &Values, args: &[ValueId]) -> MayDefine {
 }
 
 /// The accumulators the nodes count into.
-pub(crate) const COUNTERS: [&str; 5] = [
+pub(crate) const COUNTERS: [&str; 7] = [
     "hints:bounded",
     "hints:any",
     "hints:violations",
     "hints:undeclared",
     "hints:demoted",
+    // (nodes whose text is a token list, and those reading source text)
+    "frames:tokens",
+    "frames:text",
 ];
 
 /// Classes whose state row still let a run define outside it in the
