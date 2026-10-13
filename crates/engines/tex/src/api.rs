@@ -414,13 +414,13 @@ impl Default for Options {
 
 /// A value outside any table, to carry an environment between engines.
 #[derive(Clone, Debug)]
-enum Tree {
+pub(crate) enum Tree {
     Leaf(Value),
     List(Vec<Tree>),
     Seq(Vec<Tree>),
 }
 
-fn export(v: &Values, x: ValueId) -> Tree {
+pub(crate) fn export(v: &Values, x: ValueId) -> Tree {
     match &*v.get(x) {
         Value::List(xs) => Tree::List(xs.iter().map(|&y| export(v, y)).collect()),
         Value::Seq(_) => Tree::Seq(v.seq_to_vec(x).into_iter().map(|y| export(v, y)).collect()),
@@ -428,7 +428,7 @@ fn export(v: &Values, x: ValueId) -> Tree {
     }
 }
 
-fn import(v: &Values, t: &Tree) -> ValueId {
+pub(crate) fn import(v: &Values, t: &Tree) -> ValueId {
     match t {
         Tree::Leaf(x) => v.intern(x.clone()),
         Tree::List(xs) => {
@@ -1883,12 +1883,11 @@ fn doc_nodes(
     let mut out = Vec::new();
     for c in &inc.chunks {
         let end = c.start + c.th.slices.last().map_or(0, |x| x.1);
-        let slices = c
-            .th
-            .slices
-            .iter()
-            .zip(c.keys.iter())
-            .map(|(&(s, e), &k)| (c.start + s, c.start + e, k));
+        let slices =
+            c.th.slices
+                .iter()
+                .zip(c.keys.iter())
+                .map(|(&(s, e), &k)| (c.start + s, c.start + e, k));
         // (the chunk's keys, made when it was analysed; a slice at its
         // start not beginning a line keyed again)
         let doc_slice = |(s, e, k): (usize, usize, u64)| {
