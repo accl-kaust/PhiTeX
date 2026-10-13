@@ -168,3 +168,29 @@ fn input_file_is_bounded() {
     assert!(s.nodes_bounded > 50, "bounded {}", s.nodes_bounded);
     assert_eq!(b.pages().len(), 1);
 }
+
+/// A cold build, then edits whose nodes define fields through the
+/// build's interned handles (catcodes, parameters) in later
+/// evaluations: the handles outlive the value sweeps between them, and
+/// each edit's output equals a cold build of its text.
+#[test]
+fn handles_survive_evaluations() {
+    let _g = lock();
+    let doc = |k: usize| {
+        format!(
+            "\\catcode`\\|={k} \\parindent={k}pt \\count1={k}\n{}\\par\n\\bye\n",
+            far_use().replace("\\bye\n", "")
+        )
+    };
+    let mut a = build(&doc(12), false);
+    for k in [11, 12, 13] {
+        let text = doc(k).replace("\\catcode`\\|=13", "\\catcode`\\|=12");
+        a.edit(&text);
+        let cold = build(&text, false);
+        assert!(
+            common::first_difference(&a.output().0, &cold.output().0).is_none(),
+            "edit {k}"
+        );
+        assert_eq!(a.stats.undeclared_definitions, 0);
+    }
+}
