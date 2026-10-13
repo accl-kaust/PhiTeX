@@ -240,7 +240,10 @@ impl Run<'_, '_> {
         self.flush_page()?;
         let m = nodes::marker(self.v, nodes::T_BUILD_PAGE);
         self.append(0, m);
-        self.page_due = Some((self.kids.len(), self.own_main_items()));
+        // with no output routine the step ships pages itself (§1023)
+        let output = self.get("param:output")?;
+        let any = crate::val::toks_of(self.v, output).is_empty();
+        self.page_due = Some((self.kids.len(), self.own_main_items(), any));
         Ok(())
     }
 
@@ -260,7 +263,7 @@ impl Run<'_, '_> {
     /// list as it was at the call, and the children it makes go before
     /// those the run made after the call.
     pub(crate) fn flush_page(&mut self) -> R<()> {
-        let Some((k, n)) = self.page_due.take() else {
+        let Some((k, n, _)) = self.page_due.take() else {
             return Ok(());
         };
         let excess = self.own_main_items() - n;
@@ -273,7 +276,7 @@ impl Run<'_, '_> {
     /// At the run's end: a due step stays deferred only when nothing in
     /// the run followed the call; otherwise it folds in place.
     pub(crate) fn settle_page(&mut self) -> R<()> {
-        if let Some((k, n)) = self.page_due
+        if let Some((k, n, _)) = self.page_due
             && (self.kids.len() > k || self.own_main_items() > n)
         {
             self.flush_page()?;
