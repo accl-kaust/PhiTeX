@@ -283,6 +283,47 @@ const DECODED_MAX: usize = 1 << 15;
 
 thread_local! {
     static DECODED: std::cell::RefCell<Decoded> = std::cell::RefCell::default();
+    static ENCODED: std::cell::RefCell<Encoded> = std::cell::RefCell::default();
+}
+
+/// Each thread's encoded values at one values epoch of one table: an id
+/// made at an epoch is valid while it lasts
+/// ([`phitex_defuse::Ctx::values_epoch`]), so a token written again by
+/// a later run on the same worker is interned once an epoch, not once a
+/// write (the leftover of every run encodes its tokens).
+#[derive(Default)]
+struct Encoded {
+    instance: u64,
+    epoch: u64,
+    toks: FxHashMap<Tok, ValueId>,
+}
+
+/// The value of token `t` ([`Tok::encode`]) in a run at `epoch`, through
+/// this thread's cache.
+pub(crate) fn tok_id(v: &Values, epoch: u64, t: &Tok) -> ValueId {
+    let hit = ENCODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.instance != v.instance() || c.epoch != epoch {
+            *c = Encoded {
+                instance: v.instance(),
+                epoch,
+                ..Encoded::default()
+            };
+        }
+        c.toks.get(t).copied()
+    });
+    if let Some(x) = hit {
+        return x;
+    }
+    let x = t.encode(v);
+    ENCODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.toks.len() >= DECODED_MAX {
+            c.toks.clear();
+        }
+        c.toks.insert(t.clone(), x);
+    });
+    x
 }
 
 /// The input frame `id` (`make()` decodes it), through this thread's

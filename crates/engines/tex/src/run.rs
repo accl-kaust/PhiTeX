@@ -212,6 +212,9 @@ pub(crate) struct Run<'c, 'a> {
     mcache: FxHashMap<ValueId, Mean>,
     /// The meaning fields of the tokens this run looked up.
     tfields: FxHashMap<Tok, Field>,
+    /// The scope kind last decoded (`Run::mode`, once a command): its
+    /// value and its fields `(group, sid, lid, mode, depth, extra)`.
+    pub kind_memo: Option<(ValueId, (i64, i64, i64, i32, i64, Vec<ValueId>))>,
     /// `align_state` as this run has it (§309), once read.
     pub astate: Option<i64>,
     /// Lines entered by this run (for `\inputlineno`).
@@ -283,6 +286,7 @@ impl<'c, 'a> Run<'c, 'a> {
             conds: Vec::new(),
             mcache: FxHashMap::default(),
             tfields: FxHashMap::default(),
+            kind_memo: None,
             astate: None,
             page_due: None,
             lines_entered: 0,
@@ -349,7 +353,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     pub(crate) fn get(&mut self, name: &str) -> R<Option<ValueId>> {
-        let f = self.ops.fields.get(self.v, name);
+        let f = self.ops.fields.get_at(self.v, self.cx.values_epoch(), name);
         self.get_f(f)
     }
 
@@ -380,7 +384,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Defines `name` (§277–§279: `eq_define` / `geq_define`).
     pub(crate) fn set(&mut self, name: &str, val: ValueId, global: bool) {
-        let f = self.ops.fields.get(self.v, name);
+        let f = self.ops.fields.get_at(self.v, self.cx.values_epoch(), name);
         self.set_f(f, val, global);
     }
 
@@ -470,7 +474,10 @@ impl<'c, 'a> Run<'c, 'a> {
         let f = if let Some(&f) = self.tfields.get(t) {
             Some(f)
         } else {
-            let f = t.field_name().map(|n| self.v.field(&n));
+            let f = self
+                .ops
+                .fields
+                .meaning_at(self.v, self.cx.values_epoch(), t);
             if let Some(f) = f {
                 self.tfields.insert(t.clone(), f);
             }
@@ -1072,6 +1079,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let tag = |n: &str| self.ops.fields.get(self.v, n).0;
         let (tag_t, tag_s, tag_f) = (tag("t"), tag("s"), tag("f"));
         let v = self.v;
+        let epoch = self.cx.values_epoch();
         let anchor = v.int(self.anchor);
         let base = self.ifbase + i64::try_from(self.conds.len()).unwrap_or(0);
         let depths = self.kid_ifdepths.as_deref().unwrap_or(&[]);
@@ -1100,13 +1108,13 @@ impl<'c, 'a> Run<'c, 'a> {
                     for tok in &t[*p..] {
                         let ch = matches!(tok.cat(), Some(10..=12));
                         if ch {
-                            run.push(tok.encode(v));
+                            run.push(crate::val::tok_id(v, epoch, tok));
                             continue;
                         }
                         if !run.is_empty() {
                             out.push(node(std::mem::take(&mut run)));
                         }
-                        out.push(node(vec![tok.encode(v)]));
+                        out.push(node(vec![crate::val::tok_id(v, epoch, tok)]));
                     }
                 }
                 Frame::Src(s) => {
@@ -1574,10 +1582,10 @@ fn decode_frames_upto(v: &Values, args: &[ValueId], limit: usize) -> Vec<Frame> 
 /// its decoding is kept by id, [`crate::val::frame_of`]).
 fn decode_frame(v: &Values, f: ValueId) -> Option<Frame> {
     let mut out = None;
-    let Value::List(xs) = &*v.get(f) else {
-        return None;
-    };
     {
+        let Value::List(xs) = &*v.get(f) else {
+            return None;
+        };
         match xs.first().map(|&t| str_of(v, t)).as_deref() {
             Some("t") => {
                 let toks = crate::val::toks_of(v, xs.get(1).copied());
