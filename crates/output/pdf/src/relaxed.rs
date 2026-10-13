@@ -679,8 +679,13 @@ fn piece(
         if !s.used {
             continue;
         }
-        if s.vf.is_some() || s.expand.is_some() {
-            fallback.get_or_insert_with(|| "virtual or expanded fonts".to_owned());
+        if s.vf.is_some() {
+            // a virtual font has no objects: its packets set its local
+            // fonts, which are the piece's own fonts
+            continue;
+        }
+        if s.expand.is_some() {
+            fallback.get_or_insert_with(|| "expanded fonts".to_owned());
         }
         let rep = st.ff(f);
         let key = font_key(rep, st.font(rep));

@@ -870,7 +870,7 @@ impl Run<'_, '_> {
 
     /// `read_font_info` (§560): a new font, or the null font if the TFM
     /// can't be had.
-    fn read_font_info(&mut self, name: &str, s: i32) -> R<i64> {
+    pub(crate) fn read_font_info(&mut self, name: &str, s: i32) -> R<i64> {
         let key = format!("{name}.tfm");
         let Some(file) = self.file(&key)? else {
             self.log("error", "Font not loadable")?;
