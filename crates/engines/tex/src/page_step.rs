@@ -53,6 +53,7 @@ impl Operation for PageStep {
         Effect::Pending
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        run_node(cx, ops(&self.shared), |r| r.page_fold(0))
+        #[allow(clippy::redundant_closure_for_method_calls)]
+        run_node(cx, ops(&self.shared), |r| r.page_fold())
     }
 }
