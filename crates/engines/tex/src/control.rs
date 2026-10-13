@@ -64,7 +64,10 @@ impl Run<'_, '_> {
             t
         });
         let from = *HEARTBEAT_FROM.get_or_init(|| {
-            std::env::var("PHITEX_HEARTBEAT_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX)
+            std::env::var("PHITEX_HEARTBEAT_FROM")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(u64::MAX)
         });
         let trace = n >= from && n < from.saturating_add(150_000);
         if !n.is_multiple_of(100_000) && !trace {
@@ -80,7 +83,11 @@ impl Run<'_, '_> {
             .unwrap_or_default();
         let mut last = String::new();
         crate::print::print_cs(&mut last, &self.cur.tok, i64::from(b'\\'), &mut |c| {
-            if char::from_u32(c).is_some_and(char::is_alphabetic) { 11 } else { 12 }
+            if char::from_u32(c).is_some_and(char::is_alphabetic) {
+                11
+            } else {
+                12
+            }
         });
         eprintln!(
             "hb{} {:.1}s cmds {n} {file}:{line} last {last} cmd {} mode {} defs {} own {} nest {} frames {}",
