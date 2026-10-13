@@ -979,17 +979,24 @@ previous page's would sit in the wrong place, so the fold stays at the
   step), and fires the output routine there when the page breaks; the
   routine's `OutPage` and `Exec` nodes unfold as the step's children, in
   place.
-- A step may define only the page builder's fields (`page:state`,
-  `box:255`, the marks, `\outputpenalty`, `\deadcycles`, the insertion
-  boxes) and what the current output routine defines: for a recognised
-  routine its set (§1.2 plain, §2.14 LaTeX); `Any` otherwise (counted,
-  `page_steps_any`). Text after a step waits on it only for those
-  fields; the engine's `UndeclaredDefinition` names a routine that
-  defines outside its promised set.
-- A command that unfolds children after its `build_page` call, or calls
-  `build_page` twice, or reads the page state (`\pagegoal`, `\pagetotal`,
-  `\showlists`, the empty-page test of §1054) folds in place as today:
-  the step is deferred only when nothing in the run follows the call.
+- A step defines only the page builder's fields: `page:state`, the
+  marks, the insertion boxes, `\outputpenalty` and `\deadcycles`
+  (`MayDefine::Prefixes`). The output routine itself is not the step's:
+  it runs in the step's children (`OutPage` and the routine's text),
+  which answer for their own definitions, so the step's answer does not
+  depend on recognising the routine. With no routine (§1023) the step
+  ships the page itself and a shipout may define anything: such a step
+  is a separate operation, `pagestep_any`, answering `Any` (counted,
+  `Stats::page_steps_any`). Recognising plain's and LaTeX's routines
+  (§1.3, §2.14) narrows the children's answers, not the step's.
+- A command that unfolds children or appends to the main list after its
+  `build_page` call, or calls `build_page` twice, or reads the page state
+  (`\pagegoal`, `\pagetotal`, `\showlists`, the empty-page test of
+  §1054) folds the due step in place at that point (`flush_page`): the
+  fold takes the main list as it was at the call, and its children go
+  before those the command made after the call. Otherwise the step is
+  deferred: the command's last continuation is the step (`Ctx::follow`),
+  then the rest of its input.
 
 The chain is then one light step per `build_page` call, each a few
 microseconds, beside the paragraphs, which build in parallel; the fast
