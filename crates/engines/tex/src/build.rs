@@ -1302,7 +1302,6 @@ impl Run<'_, '_> {
             group::SIMPLE => self.close_simple(md),
             group::HBOX | group::ADJUSTED_HBOX | group::VBOX | group::VTOP => {
                 // §1086 `package`
-                self.effect = Effect::Close;
                 let x = |i: usize| md.extra.get(i).map_or(0, |&y| int_of(v, y));
                 let (ctx, spec_code, amount) = (x(0), x(1), i32::try_from(x(2)).unwrap_or(0));
                 let spec = if spec_code == 0 {
@@ -1371,7 +1370,6 @@ impl Run<'_, '_> {
             }
             group::INSERT => {
                 // §1100
-                self.effect = Effect::Close;
                 let n = md.extra.first().map_or(0, |&y| int_of(v, y));
                 let q = self.glue_param("splittopskip")?;
                 let d = self.param("splitmaxdepth")?;
