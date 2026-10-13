@@ -771,7 +771,15 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
         if let pass::Claim::Pending { cause, .. } = &it.hints.claim
             && matches!(*cause, "command in value position" | "value is a macro")
         {
-            let end = p.items.get(i + 1).map_or(it.end, |x| x.atom).max(it.end);
+            // (to the next command; a loader the scan expands, `\\font\\x
+            // =cmr12 \\input part`, to the end of its file name: the
+            // text after it is a slice of its own)
+            let end = match p.items.get(i + 1) {
+                Some(x) if matches!(x.name.as_str(), "input" | "include") => x.end,
+                Some(x) => x.atom,
+                None => it.end,
+            }
+            .max(it.end);
             for c in extended
                 .iter_mut()
                 .take(end.min(n))
