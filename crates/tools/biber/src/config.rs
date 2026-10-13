@@ -235,9 +235,6 @@ impl DataModel {
         }
         self.fields.contains_key(f)
     }
-    pub fn is_entrytype(&self, t: &str) -> bool {
-        self.entrytypes.contains_key(t)
-    }
     pub fn entrytype_skipout(&self, t: &str) -> bool {
         self.entrytypes.get(t).copied().unwrap_or(false)
     }

@@ -3,7 +3,7 @@
 
 use alloc::collections::BTreeSet;
 use alloc::rc::Rc;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::biber::{Biber, Fatal};
@@ -192,7 +192,7 @@ impl Biber<'_> {
             let mut v = Vec::new();
             for x in n.kids("noinit") {
                 let p = x.kid("value").map(|v| v.text.clone()).unwrap_or_default();
-                v.push(rx(&p).map_err(|e| alloc::format!("unsupported noinit pattern: {e}"))?);
+                v.push(rx(&p).map_err(|e| Fatal(alloc::format!("unsupported noinit pattern: {e}")))?);
             }
             if !v.is_empty() {
                 cfg.noinit = v;
@@ -202,7 +202,7 @@ impl Biber<'_> {
             let mut v = Vec::new();
             for x in n.kids("nolabel") {
                 let p = x.kid("value").map(|v| v.text.clone()).unwrap_or_default();
-                v.push(rx(&p).map_err(|e| alloc::format!("unsupported nolabel pattern: {e}"))?);
+                v.push(rx(&p).map_err(|e| Fatal(alloc::format!("unsupported nolabel pattern: {e}")))?);
             }
             if !v.is_empty() {
                 cfg.nolabel = v;
@@ -212,7 +212,7 @@ impl Biber<'_> {
             let mut v = Vec::new();
             for x in n.kids("nolabelwidthcount") {
                 let p = x.kid("value").map(|v| v.text.clone()).unwrap_or_default();
-                v.push(rx(&p).map_err(|e| alloc::format!("unsupported nolabelwidthcount pattern: {e}"))?);
+                v.push(rx(&p).map_err(|e| Fatal(alloc::format!("unsupported nolabelwidthcount pattern: {e}")))?);
             }
             if !v.is_empty() {
                 cfg.nolabelwidthcount = v;
@@ -224,7 +224,7 @@ impl Biber<'_> {
                 for x in n.kids(inner) {
                     let f = x.kid("field").map(|v| v.text.clone()).unwrap_or_default();
                     let p = x.kid("value").map(|v| v.text.clone()).unwrap_or_default();
-                    v.push(FieldRe { name: f, re: rx(&p).map_err(|e| alloc::format!("unsupported {inner} pattern: {e}"))? });
+                    v.push(FieldRe { name: f, re: rx(&p).map_err(|e| Fatal(alloc::format!("unsupported {inner} pattern: {e}")))? });
                 }
                 if !v.is_empty() {
                     if slot == 0 {

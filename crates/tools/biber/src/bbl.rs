@@ -43,7 +43,7 @@ const HEAD: &str = "% $ biblatex auxiliary file $
 ";
 
 fn re(p: &str) -> Regex {
-    Regex::new(p, "").expect("static pattern")
+    Regex::new(p, "").unwrap_or_else(|e| panic!("pattern {p:?}: {e}"))
 }
 
 fn rs(s: &str, pat: &str, with: &str) -> String {

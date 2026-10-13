@@ -14,7 +14,7 @@ use crate::unicode::{fc, gc_len, gc_substr, lc, nfc, nfd, nfkd, uc};
 use crate::xml::Element;
 
 fn re(p: &str) -> Regex {
-    Regex::new(p, "").expect("static pattern")
+    Regex::new(p, "").unwrap_or_else(|e| panic!("pattern {p:?}: {e}"))
 }
 
 pub fn md5_hex(b: &[u8]) -> String {
@@ -183,7 +183,7 @@ pub fn parse_range_alt(s: &str) -> Option<(Option<String>, Option<String>)> {
 
 /// Text::Roman `isroman`.
 pub fn isroman(s: &str) -> bool {
-    !s.is_empty() && re(r"(?i)\A(?:M{0,3})(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})\z").is_match(s)
+    !s.is_empty() && Regex::new(r"\A(?:M{0,3})(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})\z", "i").expect("static").is_match(s)
 }
 
 /// Text::Roman `roman2int`.
@@ -282,9 +282,6 @@ fn attr<'a>(e: &'a Element, n: &str) -> Option<&'a str> {
 }
 
 impl Biber<'_> {
-    fn names_of(&self, key: &str, f: &str) -> Option<Shared<Names>> {
-        self.entry(key).and_then(|e| e.borrow().get(f)).and_then(|v| v.as_names())
-    }
 
     /// Biber `process_namedis`.
     pub fn process_namedis(&mut self, key: &str, dl: &DataList) -> Result<Vec<NameDis>, crate::biber::Fatal> {
@@ -1386,5 +1383,3 @@ fn label_listdisambiguation(strings: &[Vec<String>]) -> Vec<Vec<String>> {
     data.into_iter().map(Option::unwrap_or_default).collect()
 }
 
-#[allow(dead_code)]
-fn unused(_: BTreeSet<String>) {}
