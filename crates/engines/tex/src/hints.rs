@@ -864,8 +864,9 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
     for (k, a) in p.atoms.iter().enumerate() {
         let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
         let inside_if = ifd[k] > 0 && (a.kind != AtomKind::Cs || !CONDITIONALS.contains(&a.name(text)));
-        // (an operand an earlier command claims never starts a slice)
-        if !(ch && prev_char) && !inside_if && !inside[k] && !operand[k] && !claimed[k] {
+        // (an operand a primitive reads never starts a slice; a macro's
+        // operand range is the pass's guess and does not cut)
+        if !(ch && prev_char) && !inside_if && !inside[k] && !operand[k] {
             starts.push(a.start);
         }
         prev_char = ch;
