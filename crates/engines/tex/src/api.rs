@@ -1240,10 +1240,13 @@ impl Graph {
                 self.supply(finder, &name);
                 asked = true;
             }
+            // what the provider answered in place joins the supplied
+            // files (an edit of one replaces it, [`Build::edit_file`]),
+            // whether or not this round asked for more
+            self.absorb_provided();
             if !asked {
                 break;
             }
-            self.absorb_provided();
             let env = self.environment(fixpoint);
             self.eng.set_environment(env);
             self.eng.set_environment_absent(self.absent.clone());
@@ -1406,17 +1409,10 @@ fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
     d
 }
 
-/// INITEX's state, and the prelude's on top of it: a format, `\dump`
-/// ending it (or its text's end). Cached by the prelude's text, and good
-/// while every file it read is what the finder gives now.
-fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
+/// The cached prelude of text key `key` still good under the finder, or
+/// the files stale entries read (to supply up front).
+fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> {
     let finder = &opts.finder;
-    let key = prelude.map_or(0, |p| {
-        let mut b = p.as_bytes().to_vec();
-        b.push(0);
-        b.extend_from_slice(opts.prelude_jobname.as_bytes());
-        phitex_defuse::hash_bytes(7, &b)
-    });
     let candidates: Vec<Arc<Cached>> = env_cache()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1435,7 +1431,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             .iter()
             .all(|(n, h)| file_hash(finder(n).as_ref()) == *h)
         {
-            return c;
+            return Ok(c);
         }
         // (a stale cache entry still names the files the prelude reads)
         for (n, _) in &c.reads {
@@ -1444,6 +1440,24 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             }
         }
     }
+    Err(known)
+}
+
+/// INITEX's state, and the prelude's on top of it: a format, `\dump`
+/// ending it (or its text's end). Cached by the prelude's text, and good
+/// while every file it read is what the finder gives now.
+fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
+    let key = prelude.map_or(0, |p| {
+        let mut b = p.as_bytes().to_vec();
+        b.push(0);
+        b.extend_from_slice(opts.prelude_jobname.as_bytes());
+        phitex_defuse::hash_bytes(7, &b)
+    });
+    let known = match cached_prelude(key, opts) {
+        Ok(c) => return c,
+        Err(known) => known,
+    };
+    let finder = &opts.finder;
     let mut g = Graph::new(opts.time_limit, opts.threads);
     g.sched = opts.speculation.scheduler(opts.speculation_budget);
     let unit = g.eng.new_unit();
