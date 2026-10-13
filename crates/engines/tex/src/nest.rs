@@ -164,7 +164,7 @@ impl Run<'_, '_> {
             } else {
                 self.own.remove(&f);
             }
-            self.eq_note(f, prev);
+            self.slot_note(f, prev);
         }
         let toks: Vec<Tok> = l.ag.clone();
         self.push_toks(toks);
@@ -219,7 +219,7 @@ impl Run<'_, '_> {
     /// closes keep it. `base` is the depth of level 0.
     pub(crate) fn modify_at(&mut self, f: Field, val: ValueId, lvl: i64, base: i64) {
         self.own.insert(f, Some(val));
-        self.eq_note(f, Some(Some(val)));
+        self.slot_note(f, Some(Some(val)));
         // the first open group deeper than the binding's level
         let mut depth = base;
         let mut at = None;
