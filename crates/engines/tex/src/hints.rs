@@ -2508,10 +2508,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         let excerpt = short(&text[s..text.len().min(s + 40)]);
         if t.pars[i] {
             if let Some(b) = &mut h.bound {
-                // (its paragraph begins by running `\\everypar`, §1091,
-                // which may set `\\everypar` again: LaTeX's paragraph
-                // hooks do at every paragraph)
-                add_heads(&mut b.state, Some(&["pg:", "param:everypar"]));
+                add_heads(&mut b.state, Some(&["pg:"]));
                 "region".clone_into(&mut h.cause);
             } else {
                 h.cause = format!("region: {}", h.cause);
