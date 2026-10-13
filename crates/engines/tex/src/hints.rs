@@ -1055,6 +1055,26 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
     (out, pars)
 }
 
+/// The commands that scan on past their text for a keyword or a unit
+/// (`plus`, `minus`, `width`, `true`), expanding what follows.
+const SCANS_ON: &[&str] = &["vskip", "hskip", "mskip", "hrule", "vrule", "kern", "mkern"];
+
+/// The name of the last item starting in the slice.
+fn last_item(p: &Pass, text: &str, (s, e): (usize, usize)) -> Option<String> {
+    let _ = text;
+    p.items
+        .iter()
+        .filter(|it| p.atoms.get(it.atom).is_some_and(|a| a.start >= s && a.start < e))
+        .last()
+        .map(|it| it.name.clone())
+}
+
+/// The first control sequence atom of the slice, if it starts with one.
+fn first_cs(p: &Pass, text: &str, (s, e): (usize, usize)) -> Option<String> {
+    let a = p.atoms.iter().find(|a| a.start >= s && a.start < e && a.kind != AtomKind::Space)?;
+    (a.kind == AtomKind::Cs).then(|| a.name(text).to_owned())
+}
+
 /// The primitive conditionals (§487) and e-TeX's and pdfTeX's.
 const CONDITIONALS: &[&str] = &[
     "if",
@@ -2057,6 +2077,33 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     let mut slice_hints = Vec::with_capacity(t.slices.len());
     for (i, &(s, e)) in t.slices.iter().enumerate() {
         let mut h = t.at_until(s, e);
+        // (a slice ending in a command that scans on for a keyword or a
+        // unit, `\\vskip 1in`, expands what follows while it looks, and
+        // runs what that leaves, §1094, §407: the next slice's commands
+        // run in this node when it starts with a macro, or with another
+        // such scanning command, transitively)
+        {
+            let mut j = i;
+            while let (Some(last), Some(&(ns, ne))) = (last_item(&an.p, text, t.slices[j]), t.slices.get(j + 1)) {
+                if !SCANS_ON.contains(&last.as_str()) {
+                    break;
+                }
+                let Some(first) = first_cs(&an.p, text, (ns, ne)) else { break };
+                let next = t.at_until(ns, ne);
+                match (&mut h.bound, &next.bound) {
+                    (Some(a), Some(b)) => union(a, b),
+                    (Some(_), None) => h = next.clone(),
+                    (None, _) => {}
+                }
+                if crate::prims::PRIMS.iter().any(|q| q.0 == first) && !SCANS_ON.contains(&first.as_str()) {
+                    break;
+                }
+                if !crate::prims::PRIMS.iter().any(|q| q.0 == first) {
+                    break;
+                }
+                j += 1;
+            }
+        }
         let excerpt = short(&text[s..text.len().min(s + 40)]);
         if t.pars[i] {
             match &mut h.bound {
