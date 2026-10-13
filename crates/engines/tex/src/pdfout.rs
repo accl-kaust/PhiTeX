@@ -1292,9 +1292,13 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
     let mut st = a.st.clone();
     let mut bytes = a.bytes.clone();
     let (mut replayed, mut shipped) = (0usize, 0usize);
+    // the variables' key after the page placed last (none after a page
+    // shipped again or an operation on the state)
+    let mut known: Option<String> = None;
     for x in xpages {
         if v.as_int(x).is_none() {
             apply_doc_op(v, &mut st, x);
+            known = None;
             continue;
         }
         let pk = u64::from_ne_bytes(int_of(v, x).to_ne_bytes());
@@ -1307,7 +1311,12 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
             return Ok(v.str(""));
         };
         set_page_params(v, &mut st, &pc.params, pc.margins);
-        let placed = st.replay_page(&pc.rec, &pc.fonts, &pc.base);
+        let placed = st.replay_page(&pc.rec, &pc.fonts, &pc.base, known.as_deref());
+        known = placed
+            .as_ref()
+            .ok()
+            .and_then(|_| pc.rec.post_key())
+            .map(str::to_owned);
         if let Err(why) = &placed
             && shipped == 0
             && crate::exec::env_flag!("PHITEX_TEX_TIME")
