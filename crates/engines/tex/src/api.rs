@@ -2118,8 +2118,7 @@ impl Build {
         }
         // the page builder's fold, after the text: one node choosing every
         // page break, its children the pages
-        let pageplan = g.ops.pageplan;
-        let _ = g.eng.push(unit, pageplan, Vec::new());
+        let _ = g.eng.push(unit, g.ops.pageplan, Vec::new());
         page_guesses(&mut g, &env);
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
@@ -2957,30 +2956,6 @@ fn describe(eng: &Engine, n: phitex_defuse::NodeId) -> String {
     })
 }
 
-#[cfg(test)]
-mod prelude_tests {
-    use super::*;
-
-    #[test]
-    fn another_layout_or_engine_is_refused() {
-        let c = Cached {
-            key: [3; 32],
-            text_key: 5,
-            reads: vec![("a.tex".to_owned(), 9)],
-            env: Arc::new(vec![("x".to_owned(), Tree::Leaf(Value::Int(1)))]),
-            errors: Vec::new(),
-        };
-        let b = serialise(&c);
-        assert!(deserialise_as(&b, PRELUDE_LAYOUT, engine_identity()).is_some());
-        let other = serialise_as(&c, PRELUDE_LAYOUT + 1, engine_identity());
-        assert!(deserialise(&other).is_none());
-        let other = serialise_as(&c, PRELUDE_LAYOUT, engine_identity() ^ 1);
-        assert!(deserialise(&other).is_none());
-        // the old layout, with no header
-        assert!(deserialise(&b[20..]).is_none());
-    }
-}
-
 /// The cold guess of the page steps' loop-back `pgdef:<j>` (`\count0..9`
 /// after page j's step), declared as its round-one value before the
 /// first evaluation: `\count0` advanced by one per page (plain's and
@@ -3007,5 +2982,29 @@ fn page_guesses(g: &mut Graph, env: &Env) {
     }
     for (f, x) in decl {
         g.eng.declare_loopback(f, x);
+    }
+}
+
+#[cfg(test)]
+mod prelude_tests {
+    use super::*;
+
+    #[test]
+    fn another_layout_or_engine_is_refused() {
+        let c = Cached {
+            key: [3; 32],
+            text_key: 5,
+            reads: vec![("a.tex".to_owned(), 9)],
+            env: Arc::new(vec![("x".to_owned(), Tree::Leaf(Value::Int(1)))]),
+            errors: Vec::new(),
+        };
+        let b = serialise(&c);
+        assert!(deserialise_as(&b, PRELUDE_LAYOUT, engine_identity()).is_some());
+        let other = serialise_as(&c, PRELUDE_LAYOUT + 1, engine_identity());
+        assert!(deserialise(&other).is_none());
+        let other = serialise_as(&c, PRELUDE_LAYOUT, engine_identity() ^ 1);
+        assert!(deserialise(&other).is_none());
+        // the old layout, with no header
+        assert!(deserialise(&b[20..]).is_none());
     }
 }
