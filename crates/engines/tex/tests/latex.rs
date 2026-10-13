@@ -852,7 +852,7 @@ fn latex_heading_paragraphs() {
 fn latex_utf8_edit() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("utf8.tex"));
-    let (mut b, regions) = cold_nodes("utf8", &dir, &src);
+    let (mut b, regions, writes) = cold_nodes("utf8", &dir, &src);
     assert!(regions >= 8, "{regions} document nodes for 8 paragraphs");
     // (the text's characters are its bytes: a UTF-8 word as `read` gives it)
     let bytes = |w: &str| -> String { w.bytes().map(char::from).collect() };
@@ -861,4 +861,5 @@ fn latex_utf8_edit() {
     b.edit(&new);
     let cold = common::build(pdf_opts("utf8", &dir), Some(&prelude(true)), &new);
     edit_check("utf8", &b, &cold, 3);
+    assert!(writes.is_empty(), "utf8: written files differ: {writes:?}");
 }
