@@ -393,3 +393,35 @@ fn edit_gate() {
         edit_fractions(&kt, "s");
     }
 }
+
+/// A file the job writes and reads back (`\jobname.aux`) is an
+/// in-memory loop-back: the cold build converges in one evaluation
+/// (the reference resolved, the file as the second pdfTeX run leaves
+/// it), and an edit elsewhere equals a cold build with no loop round.
+#[test]
+fn edit_written_file() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("edit-written");
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::remove_file(dir.join("main.aux"));
+    let prelude = common::plain();
+    let doc = "\\newread\\r \\openin\\r=\\jobname.aux \\ifeof\\r \\def\\ref{??}\\else\\closein\\r \\input \\jobname.aux \\fi\n\\newwrite\\w \\immediate\\openout\\w=\\jobname.aux \\immediate\\write\\w{\\relax}\n\nRef: \\ref.\\par\n\\write\\w{\\string\\def\\string\\ref{\\the\\count0}}\n\nSome text.\\par\n\\end\n";
+    let opts = || phitex_tex::Options {
+        fixpoint: true,
+        ..common::options("./main.tex", "main", "", &dir)
+    };
+    let mut b = common::build(opts(), Some(&prelude), doc);
+    let files = b.files();
+    eprintln!(
+        "written cold: {} loop rounds, files {files:?}\nlog: {}",
+        b.stats.loop_rounds,
+        b.output().1
+    );
+    let aux = files.iter().find(|(n, _)| n == "main.aux").map(|(_, t)| t.clone());
+    assert_eq!(aux.as_deref(), Some("\\relax \n\\def\\ref{1}\n"));
+    let text = doc.replacen("Some", "Other", 1);
+    b.edit(&text);
+    eprintln!("written edit: {} loop rounds", b.stats.loop_rounds);
+    let cold = common::build(opts(), Some(&prelude), &text);
+    assert_eq!(b.output().0, cold.output().0, "edit differs from cold");
+    assert_eq!(b.files(), cold.files());
+}

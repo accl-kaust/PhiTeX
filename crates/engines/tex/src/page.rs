@@ -82,7 +82,7 @@ impl Run<'_, '_> {
                 "open" => {
                     let n = xs.get(1).map_or(0, |&y| int_of(v, y));
                     let name = xs.get(2).map(|&y| str_of(v, y)).unwrap_or_default();
-                    self.open_out(n, &name);
+                    self.open_out(n, &name)?;
                 }
                 "close" => {
                     let n = xs.get(1).map_or(0, |&y| int_of(v, y));
@@ -167,7 +167,7 @@ impl Run<'_, '_> {
         Ok(v.list(xs))
     }
 
-    fn insert_class(&mut self, n: u16) -> R<InsertClass> {
+    pub(crate) fn insert_class(&mut self, n: u16) -> R<InsertClass> {
         let b = self.box_reg(i32::from(n))?;
         let v = self.v;
         Ok(InsertClass {
@@ -215,6 +215,9 @@ impl Run<'_, '_> {
         // class: what a document node reading them at a later point sees
         let mut marks = MarksState::default();
         let mut published = std::collections::HashSet::new();
+        // the job-written files' order: an immediate write's entry where
+        // its marker is, page `j` where it fires (`wplan`)
+        let mut plan: Vec<ValueId> = Vec::new();
         loop {
             let Some(x) = queue.pop_front() else {
                 if let Some(e) = ending
@@ -254,6 +257,12 @@ impl Run<'_, '_> {
                     params.max_depth = n(2);
                     params.top_skip = crate::val::glue_of(v, xs.get(3).copied());
                     params.holding_inserts = n(4);
+                    continue;
+                }
+                nodes::T_WRITE_AT => {
+                    if let Some(&e) = list_of(v, x).get(1) {
+                        plan.push(e);
+                    }
                     continue;
                 }
                 nodes::T_MARKS_AT => {
@@ -304,6 +313,7 @@ impl Run<'_, '_> {
                 }
                 Outcome::Fire(f) => {
                     let j = pages.len();
+                    plan.push(v.int(i64::try_from(j).unwrap_or(0)));
                     // the material the fold could not place goes on
                     // (§1017); what the routine leaves is next round's
                     let fx = self.page_effects(j)?;
@@ -326,6 +336,8 @@ impl Run<'_, '_> {
                 "\\end could not empty the page (an output routine that never ships?)",
             );
         }
+        let wp = v.seq_unit(v.list(plan));
+        self.contribute("wplan", wp);
         let output = self.par(Par::output)?;
         let any = toks_of(v, output).is_empty();
         let op = if any {
@@ -360,7 +372,7 @@ impl Run<'_, '_> {
     /// A fired page as the step's argument: `[box255, inserts, marks,
     /// held, output_penalty]`, the marks as values (§1012–§1021).
     #[allow(clippy::unnecessary_wraps)]
-    fn page_data(&mut self, f: &phitex_typeset::page::Fired, side: &Side) -> R<ValueId> {
+    pub(crate) fn page_data(&mut self, f: &phitex_typeset::page::Fired, side: &Side) -> R<ValueId> {
         let v = self.v;
         let b255 = nodes::encode_box(v, &f.box255.node, side);
         let inserts: Vec<ValueId> = f
@@ -394,8 +406,20 @@ impl Run<'_, '_> {
     /// insertion boxes defined, then the output routine run inline on
     /// this run's nest, or the page shipped (§1023).
     pub(crate) fn page_step(&mut self, args: &[ValueId]) -> R<()> {
+        let d = args.get(1).copied().unwrap_or(ValueId::UNIT);
+        if self.fire_page(d)? {
+            self.run_all()?;
+        }
+        Ok(())
+    }
+
+    /// `fire_up` (§1012–§1025) for the fired page `d` ([`Self::page_data`]):
+    /// the page shipped by the default routine (false), or the output
+    /// routine's group opened and its tokens pushed (true): the caller
+    /// runs them.
+    pub(crate) fn fire_page(&mut self, d: ValueId) -> R<bool> {
         let v = self.v;
-        let data = args.get(1).map(|&d| list_of(v, d)).unwrap_or_default();
+        let data = list_of(v, d);
         let a = |i: usize| data.get(i).copied().unwrap_or(ValueId::UNIT);
         let (b255, inserts, marks, held) =
             (a(0), list_of(v, a(1)), list_of(v, a(2)), list_of(v, a(3)));
@@ -459,7 +483,7 @@ impl Run<'_, '_> {
                     "held-over insertions without an output routine (next round)",
                 );
             }
-            return Ok(());
+            return Ok(false);
         }
         // §1025
         let dead = self.int("deadcycles")? + 1;
@@ -475,7 +499,7 @@ impl Run<'_, '_> {
             toks.remove(0);
         }
         self.push_toks(toks);
-        self.run_all()
+        Ok(true)
     }
 }
 
@@ -499,6 +523,11 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
     }
     r.set("inspen", v.int(0), true);
     left.extend(items);
+    if r.pg.is_some() {
+        // a text paging inline (`pageinline.rs`): §1026's contributions
+        // go back before the rest, and the page builder goes on
+        return crate::pageinline::output_done(r, left);
+    }
     if !left.is_empty() {
         let j = r.page_index();
         if j < MAX_PAGES {
@@ -528,7 +557,7 @@ impl Run<'_, '_> {
     }
 
     /// Which page this step is (its first argument), or `MAX_PAGES`.
-    fn page_index(&self) -> usize {
+    pub(crate) fn page_index(&self) -> usize {
         self.cx
             .args()
             .first()

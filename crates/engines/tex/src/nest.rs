@@ -51,10 +51,13 @@ pub(crate) struct Level {
     pub extra: Vec<ValueId>,
     /// Bindings to restore when the group closes: the field, what the
     /// run's own view held before (`None`: nothing, the engine's value),
-    /// and whether a global definition since made the entry inert
-    /// (§283: a global definition is retained).
+    /// and the stamp of the save (`Run::stamp`): a global definition of
+    /// the field stamped later makes the entry inert (§283: a global
+    /// definition is retained).
     #[allow(clippy::option_option)]
-    pub saved: Vec<(Field, Option<Option<ValueId>>, bool)>,
+    pub saved: Vec<(Field, Option<Option<ValueId>>, u64)>,
+    /// The latest entry of `saved` per field (O(1) `eq_save` check).
+    pub saved_ix: crate::FxHashMap<Field, usize>,
     /// The run's `defs` length when the group opened: definitions after
     /// it are the group's, undone at its close unless global.
     pub defs_len: usize,
@@ -79,6 +82,7 @@ impl Level {
             prev_graf: 0,
             extra,
             saved: Vec::new(),
+            saved_ix: crate::FxHashMap::default(),
             defs_len: 0,
             ag: Vec::new(),
         }
@@ -151,8 +155,8 @@ impl Run<'_, '_> {
                 }
             }
         }
-        for &(f, prev, inert) in l.saved.iter().rev() {
-            if inert {
+        for &(f, prev, at) in l.saved.iter().rev() {
+            if self.inert(f, at) {
                 continue;
             }
             if let Some(x) = prev {
@@ -177,13 +181,34 @@ impl Run<'_, '_> {
     /// the global value at the close.
     pub(crate) fn save_local(&mut self, f: Field) {
         let prev = self.own.get(&f).copied();
-        let Some(l) = self.nest.iter_mut().rev().find(|l| l.group != 0) else {
+        let Some(k) = self.nest.iter().rposition(|l| l.group != 0) else {
             return;
         };
-        if l.saved.iter().any(|s| s.0 == f && !s.2) {
+        if let Some(&i) = self.nest[k].saved_ix.get(&f)
+            && !self.inert(f, self.nest[k].saved[i].2)
+        {
             return;
         }
-        l.saved.push((f, prev, false));
+        self.stamp += 1;
+        let at = self.stamp;
+        let l = &mut self.nest[k];
+        l.saved_ix.insert(f, l.saved.len());
+        l.saved.push((f, prev, at));
+    }
+
+    /// Whether a saved entry of `f` stamped `at` was made inert by a
+    /// global definition since.
+    fn inert(&self, f: Field, at: u64) -> bool {
+        self.ginert.get(&f).is_some_and(|&g| g > at)
+    }
+
+    /// Rebuilds `def_ix` after `defs` moved (an in-place change below
+    /// the innermost group, `modify_at`).
+    fn reindex_defs(&mut self) {
+        self.def_ix.clear();
+        for (i, d) in self.defs.iter().enumerate() {
+            self.def_ix.entry(d.0).or_default().push(i);
+        }
     }
 
     /// A binding of `f` made at group depth `lvl` changed in place
@@ -212,10 +237,14 @@ impl Run<'_, '_> {
             // the binding is the innermost group's own (or the run's,
             // outside every group): a definition at this level
             None => {
-                if !self.in_local_group() {
+                if self.in_local_group() {
+                    self.def_ix.entry(f).or_default().push(self.defs.len());
+                    self.defs.push(d);
+                } else {
                     self.defs.retain(|x| x.0 != f);
+                    self.defs.push(d);
+                    self.reindex_defs();
                 }
-                self.defs.push(d);
             }
             Some(i) => {
                 let pos = self.nest[i].defs_len.min(self.defs.len());
@@ -223,19 +252,19 @@ impl Run<'_, '_> {
                 for l in &mut self.nest[i..] {
                     l.defs_len += 1;
                 }
+                self.reindex_defs();
             }
         }
     }
 
-    /// A global definition of `f`: every saved entry for it is inert.
+    /// A global definition of `f`: every saved entry for it is inert
+    /// (the entries stamped before it, `inert`).
     pub(crate) fn make_inert(&mut self, f: Field) {
-        for l in &mut self.nest {
-            for s in &mut l.saved {
-                if s.0 == f {
-                    s.2 = true;
-                }
-            }
+        if self.nest.is_empty() {
+            return;
         }
+        self.stamp += 1;
+        self.ginert.insert(f, self.stamp);
     }
 
     /// Whether a local definition made now would belong to a group of

@@ -1175,7 +1175,9 @@ pub(crate) fn mark_read(r: &mut Run<'_, '_>, kind: &str, n: i32) -> R<Option<Val
     let v = r.v;
     let op = r.cx.op();
     let split = kind.starts_with("split");
-    if split || op == r.ops.pagestep || op == r.ops.pagestep_any {
+    // (a text paging inline, `pageinline.rs`, has its marks in force
+    // sequentially, as a page step does)
+    if split || op == r.ops.pagestep || op == r.ops.pagestep_any || r.pg.is_some() {
         return r.get(&mark_field(kind, n));
     }
     let node = r.cx.node().raw();
@@ -1364,8 +1366,6 @@ pub(crate) fn show(r: &mut Run<'_, '_>) -> R<()> {
         4 => {
             // \showgroups
             let md = r.mode()?;
-            let v = r.v;
-            let mut k = r.scope_kind()?;
             let mut lines = Vec::new();
             // the run's own groups first, innermost out (pdfTeX §1293)
             let mut d = md.depth;
@@ -1373,17 +1373,6 @@ pub(crate) fn show(r: &mut Run<'_, '_>) -> R<()> {
                 lines.push(format!("### {} group (level {d})", group_name(l.group)));
                 d -= 1;
             }
-            while let Some(kind) = k {
-                let xs = list_of(v, kind);
-                let g = xs.first().map_or(0, |&x| int_of(v, x));
-                let d = xs.get(4).map_or(0, |&x| int_of(v, x));
-                if d == 0 {
-                    break;
-                }
-                lines.push(format!("### {} group (level {d})", group_name(g)));
-                k = xs.get(5).copied().filter(|&p| p != ValueId::UNIT);
-            }
-            let _ = md;
             lines.push("### bottom level".to_owned());
             s = lines.join("\n");
         }

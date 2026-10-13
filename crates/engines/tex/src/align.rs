@@ -139,7 +139,7 @@ impl Run<'_, '_> {
         if s != 0 {
             return Ok(false);
         }
-        let Some(cell) = self.cur_cell()? else {
+        let Some(cell) = self.cur_cell() else {
             return Ok(false);
         };
         let v = self.v;
@@ -158,10 +158,10 @@ impl Run<'_, '_> {
     }
 
     /// The innermost entry's kind extra (`cur_align`).
-    fn cur_cell(&mut self) -> R<Option<Vec<ValueId>>> {
+    fn cur_cell(&self) -> Option<Vec<ValueId>> {
         let v = self.v;
-        // the run's own levels first (innermost out), then the engine's
-        // scopes below them
+        // the run's own levels, innermost out (an alignment is never
+        // split across nodes)
         let is_cell = |xs: &[ValueId]| xs.first().map(|&t| str_of(v, t)).as_deref() == Some("cell");
         if let Some(l) = self
             .nest
@@ -169,19 +169,9 @@ impl Run<'_, '_> {
             .rev()
             .find(|l| l.group == group::ALIGN && is_cell(&l.extra))
         {
-            return Ok(Some(l.extra.clone()));
+            return Some(l.extra.clone());
         }
-        let mut k = self.scope_kind()?;
-        while let Some(kind) = k.filter(|&x| x != ValueId::UNIT) {
-            let xs = list_of(v, kind);
-            if xs.first().map(|&g| int_of(v, g)) == Some(group::ALIGN)
-                && xs.get(7).map(|&t| str_of(v, t)).as_deref() == Some("cell")
-            {
-                return Ok(Some(xs[7..].to_vec()));
-            }
-            k = xs.get(5).copied();
-        }
-        Ok(None)
+        None
     }
 
     fn preamble(&mut self, asid: i64) -> R<Preamble> {
@@ -572,6 +562,10 @@ impl Run<'_, '_> {
             self.append(outer.lid, y);
         }
         self.set_prev_depth(&outer, pd);
+        // §812: `if mode=vmode then build_page`
+        if outer.m == 1 {
+            self.build_page_outer()?;
+        }
         Ok(())
     }
 }

@@ -1,0 +1,10 @@
+% A local definition after a \global one of the same field is undone at
+% its group's close, back to the global value (§283: the saved entry
+% made after the global is restored; the older one is retained).
+\count1=0 {\count1=1 {\global\count1=2 }\count1=3 }\message{\the\count1}
+\count2=0 {\global\count2=5 \count2=6 }\message{\the\count2}
+{\catcode`\:=12 {\global\catcode`\:=11 }\catcode`\:=12 }\message{\the\catcode`\:}
+{\begingroup\global\catcode`\_=11 \catcode`\_=8 \endgroup\message{\the\catcode`\_}}\message{\the\catcode`\_}
+\def\a{0}{\def\a{1}{\gdef\a{2}}\def\a{3}{\def\a{4}}\message{\a}}\message{\a}
+\begingroup\global\count3=7 \count3=8 \endgroup\message{\the\count3}
+\global\count4=1 \count4=2 {\global\count4=3 }\message{\the\count4}
