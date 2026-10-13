@@ -36,9 +36,10 @@ use phitex_defuse::{Executor, RunResult};
 /// (its items cost microseconds).
 const GRAIN: usize = 64;
 
-/// Below this many jobs a batch of runs goes inline: a run costs
-/// milliseconds, so two already pay for the pool.
-const JOB_GRAIN: usize = 2;
+/// Below this many jobs a batch of runs goes inline: most runs are one
+/// command (microseconds), so a hand-off to the pool per one- or
+/// two-node step costs more than the step.
+const JOB_GRAIN: usize = 64;
 
 /// How the host starts a worker thread: it runs the closure on a new
 /// worker (on wasm32: a web worker sharing the module's memory).

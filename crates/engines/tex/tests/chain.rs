@@ -39,7 +39,9 @@ fn chain(dir: &std::path::Path, name: &str) {
     {
         let s = &b.stats;
         eprintln!(
-            "{name}: waits_by_kind {:?}, hints {} bounded / {} any / {} demoted / {} violations / {} undeclared, speculations {}, raises {}, stops {}",
+            "{name}: {} token-frame nodes, {} text nodes; waits_by_kind {:?}, hints {} bounded / {} any / {} demoted / {} violations / {} undeclared, speculations {}, raises {}, stops {}",
+            s.nodes_token_frames,
+            s.nodes_text_frames,
             s.waits_by_kind,
             s.nodes_bounded,
             s.nodes_any,

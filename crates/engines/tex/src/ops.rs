@@ -156,6 +156,8 @@ impl Operation for Exec {
         run_node(cx, ops(&self.0), |r| {
             r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
             let fs = decode_frames(r.v, &args);
+            let tokens = matches!(fs.first(), Some(crate::run::Frame::Toks(..)));
+            crate::hints::count(r, if tokens { 5 } else { 6 });
             r.frames.extend(fs);
             // the hint's assumptions, against what is in force here
             if let Some(m) = crate::hints::verify(r, &hint)? {
