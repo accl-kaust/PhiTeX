@@ -959,6 +959,42 @@ neither `page:state` nor `prev_depth`:
 Parameters read at the contribution are ordinary definitions (the
 node's own reads), not a chain: they bind to their last definer.
 
+### 4.2a The split: heavy contribution, light step (approved; replaces 4.3's `OutPage` per page)
+
+The output routine must run where tex.web runs it: at the `build_page`
+call that finds the break, so its definitions bind for the text after
+that point and for nothing before it. A page node chained after the
+previous page's would sit in the wrong place, so the fold stays at the
+`build_page` points, split in two:
+
+- The **heavy** node (the command: a paragraph's `\par` with its line
+  breaking, a box, glue, a penalty in vertical mode) appends to list 0
+  and reads neither `page:state` nor the fold. Where tex.web calls
+  `build_page`, it only notes that a step is due.
+- When it ends, it leaves a **light step** (`PageStep`, its own operation)
+  as its continuation (`Ctx::follow`), before the rest of its input. The
+  step reads `page:state` and the contributions since the last step,
+  runs §980–§1008 with the parameters in force at its position (the same
+  as at tex.web's call: nothing runs between the command's end and the
+  step), and fires the output routine there when the page breaks; the
+  routine's `OutPage` and `Exec` nodes unfold as the step's children, in
+  place.
+- A step may define only the page builder's fields (`page:state`,
+  `box:255`, the marks, `\outputpenalty`, `\deadcycles`, the insertion
+  boxes) and what the current output routine defines: for a recognised
+  routine its set (§1.2 plain, §2.14 LaTeX); `Any` otherwise (counted,
+  `page_steps_any`). Text after a step waits on it only for those
+  fields; the engine's `UndeclaredDefinition` names a routine that
+  defines outside its promised set.
+- A command that unfolds children after its `build_page` call, or calls
+  `build_page` twice, or reads the page state (`\pagegoal`, `\pagetotal`,
+  `\showlists`, the empty-page test of §1054) folds in place as today:
+  the step is deferred only when nothing in the run follows the call.
+
+The chain is then one light step per `build_page` call, each a few
+microseconds, beside the paragraphs, which build in parallel; the fast
+path of 4.3 makes most steps add a whole segment.
+
 ### 4.3 The page fold
 
 The fold runs in `OutPage` nodes, one per page, not in the contributing
