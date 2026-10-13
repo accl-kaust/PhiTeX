@@ -412,16 +412,56 @@ fn edit_written_file() {
     let mut b = common::build(opts(), Some(&prelude), doc);
     let files = b.files();
     eprintln!(
-        "written cold: {} loop rounds, files {files:?}\nlog: {}",
+        "written cold: {} loop rounds, {} evaluations, {} nodes run, files {files:?}\nlog: {}",
         b.stats.loop_rounds,
+        b.stats.rounds,
+        b.stats.nodes_run,
         b.output().1
     );
     let aux = files.iter().find(|(n, _)| n == "main.aux").map(|(_, t)| t.clone());
     assert_eq!(aux.as_deref(), Some("\\relax \n\\def\\ref{1}\n"));
     let text = doc.replacen("Some", "Other", 1);
     b.edit(&text);
-    eprintln!("written edit: {} loop rounds", b.stats.loop_rounds);
+    eprintln!(
+        "written edit: {} loop rounds, {} evaluations, {} nodes run",
+        b.stats.loop_rounds, b.stats.rounds, b.stats.nodes_run
+    );
     let cold = common::build(opts(), Some(&prelude), &text);
     assert_eq!(b.output().0, cold.output().0, "edit differs from cold");
     assert_eq!(b.files(), cold.files());
+}
+
+/// Loop-back rounds, cold and after a one-word edit, on story, pages,
+/// hyphens and e-TeX's marks fixture (measurement; prints only).
+#[test]
+#[ignore = "measurement"]
+fn loop_rounds_measure() {
+    let prelude = common::plain();
+    let fx = common::fixtures().join("plain");
+    for n in ["story", "pages", "hyphens"] {
+        let src = common::read(&fx.join(format!("{n}.tex")));
+        let opts = common::options(&format!("./{n}.tex"), n, "", &fx);
+        let mut b = common::build(opts, Some(&prelude), &src);
+        let cold = (b.stats.loop_rounds, b.stats.nodes_run);
+        let i = src.len() / 2;
+        let i = (i..src.len()).find(|&k| src.as_bytes()[k] == b'e').unwrap_or(i);
+        let mut new = src.clone();
+        new.replace_range(i..=i, "a");
+        b.edit(&new);
+        eprintln!(
+            "rounds {n}: cold {} loop rounds ({} nodes run), edit {} loop rounds ({} nodes run)",
+            cold.0, cold.1, b.stats.loop_rounds, b.stats.nodes_run
+        );
+    }
+    let dir = common::fixtures().join("etex");
+    let pre = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\$=3 \\catcode`\\&=4 \\catcode`\\#=6 \\catcode`\\^=7 \\catcode`\\~=13 \\hsize=468pt \\vsize=643pt \\parindent=20pt \\maxdepth=4pt \\baselineskip=12pt \\topskip=10pt \\tolerance=200 \\linepenalty=10 %\n";
+    let src = format!("{pre}{}\\end\n", common::read(&dir.join("marks.tex")));
+    let opts = common::options("./core.tex", "texput", "", &dir);
+    let mut b = common::build(opts, None, &src);
+    let cold = (b.stats.loop_rounds, b.stats.nodes_run);
+    b.edit(&src.replacen("\\end\n", "\\relax\\end\n", 1));
+    eprintln!(
+        "rounds marks: cold {} loop rounds ({} nodes run), edit {} loop rounds ({} nodes run)",
+        cold.0, cold.1, b.stats.loop_rounds, b.stats.nodes_run
+    );
 }
