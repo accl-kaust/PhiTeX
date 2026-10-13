@@ -155,6 +155,9 @@ pub(crate) type KindFields = (i64, i64, i64, i32, i64, Vec<ValueId>);
 
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Run<'c, 'a> {
+    /// Encodings through the worker's cache at this run's values epoch
+    /// while the run lives ([`crate::val::EpochScope`]).
+    _scope: crate::val::EpochScope,
     pub cx: &'c mut Ctx<'a>,
     pub v: &'a Values,
     pub ops: Ops,
@@ -257,6 +260,7 @@ impl<'c, 'a> Run<'c, 'a> {
             (0, false, 0)
         };
         Run {
+            _scope: crate::val::EpochScope::enter(v, cx.values_epoch()),
             cx,
             v,
             ops,
@@ -1451,8 +1455,9 @@ impl<'c, 'a> Run<'c, 'a> {
         let minted = std::mem::take(&mut *self.minted.borrow_mut());
         if !minted.is_empty() {
             let v = self.v;
-            let me = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
-            let items = v.field("items");
+            let epoch = self.cx.values_epoch();
+            let me = crate::val::int_id(v, i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
+            let items = self.ops.fields.get_at(v, epoch, "items");
             for id in minted {
                 let mine: Vec<ValueId> = self
                     .contribs
@@ -1472,7 +1477,11 @@ impl<'c, 'a> Run<'c, 'a> {
             let names: Vec<ValueId> = self.own.keys().map(|f| f.0).collect();
             let l = self.v.list(names);
             let s = self.v.seq_unit(l);
-            self.contribs.push((self.v.field("defs"), s));
+            let defs = self
+                .ops
+                .fields
+                .get_at(self.v, self.cx.values_epoch(), "defs");
+            self.contribs.push((defs, s));
         }
         for (f, x) in std::mem::take(&mut self.contribs) {
             self.cx.contribute(f, x);
