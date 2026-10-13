@@ -2161,6 +2161,9 @@ impl Build {
         self.g.watch.offsets = Arc::new(offsets);
         let mut stats = Stats::default();
         self.g.queries.clear();
+        // (the files sliced into the document's regions were read)
+        let sliced: Vec<(String, bool)> = self.g.inputs_read.iter().map(|n| (n.clone(), true)).collect();
+        self.g.queries.extend(sliced);
         let mut absorb = Absorb {
             edits: &self.edits,
             nodes: &mut self.nodes,
