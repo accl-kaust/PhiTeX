@@ -126,12 +126,13 @@ fn speculation_ab() {
                     s.wall
                 );
                 if !same {
-                    for d in b
-                        .diagnostics()
-                        .iter()
-                        .filter(|d| d.message.starts_with("evaluation"))
-                    {
-                        eprintln!("  {}", d.message.chars().take(600).collect::<String>());
+                    for d in b.diagnostics() {
+                        eprintln!(
+                            "  {:?} {}: {}",
+                            d.severity,
+                            d.line,
+                            d.message.chars().take(600).collect::<String>()
+                        );
                     }
                 }
                 assert!(same, "{name} t{t} {label}: the output differs");
