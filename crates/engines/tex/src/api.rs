@@ -582,8 +582,7 @@ fn date_params(t: i64) -> [(&'static str, i64); 4] {
     ]
 }
 
-/// The nodes of a text: its paragraph regions for a document, one
-/// command per slice for a format ([`crate::hints::slices_of`]); the
+/// The nodes of a document's text: its paragraph regions ([`crate::hints::slices_of`]); the
 /// pass over the whole text also gives each slice's hint.
 pub(crate) fn slices(text: &str, defs: &Defs) -> Vec<(usize, usize)> {
     crate::hints::text_hints(text, pass::FileKind::Document, defs)
@@ -892,6 +891,7 @@ impl Graph {
             "writes",
             "ifviol",
             "streams",
+            "fread",
             crate::pdfrelaxed::PIECES,
         ] {
             let fld = eng.values().field(f);
@@ -1176,10 +1176,19 @@ impl Graph {
     fn push_text(&mut self, unit: UnitId, text: &str, defs: &Defs) -> Vec<(String, NodeId)> {
         let mut out = Vec::new();
         let t0 = std::time::Instant::now();
-        let sl = slices(text, defs);
-        let t1 = t0.elapsed();
         let hints = crate::hints::text_hints(text, pass::FileKind::Document, defs);
         let doc = crate::hints::kind_of(text, pass::FileKind::Document) == pass::FileKind::Document;
+        // a format's text is one node: a sequential run over the whole
+        // file, its `\input`s inline; what it may define is unknowable
+        // from its parts, so anything (it runs once, serially, cached)
+        let sl = if doc {
+            hints.slices.clone()
+        } else if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![(0, text.len())]
+        };
+        let t1 = t0.elapsed();
         if doc {
             crate::hints::register_text(self.eng.values().str(DOC_NAME), &hints);
         }
@@ -1197,7 +1206,11 @@ impl Graph {
             } else {
                 slice_args(v, piece, starts)
             };
-            args.push(crate::hints::hint_arg(v, &hints, s));
+            args.push(if doc {
+                crate::hints::hint_arg(v, &hints, s)
+            } else {
+                v.str(FORMAT_HINT)
+            });
             let n = self.eng.push(unit, self.ops.exec, args);
             out.push((key(piece, starts), n));
         }
@@ -1211,6 +1224,9 @@ impl Graph {
         out
     }
 }
+
+/// The hint of a format's node (`hints::Hint` encoded): unbounded.
+const FORMAT_HINT: &str = "A\x1eformat: the whole text, run once\x1e";
 
 /// The name a document's own text is registered under for the hints
 /// of nodes made from parts of it (`hints::register_text`).
@@ -1779,6 +1795,27 @@ impl Build {
     #[must_use]
     pub fn export_prelude(&self) -> Option<Vec<u8>> {
         self.prelude_complete().then(|| serialise(&self.prelude))
+    }
+
+    /// The files the document's runs opened for reading, with a hash of
+    /// the text each read, in the order read (the format's are in its
+    /// key, [`Self::prelude_key`]).
+    #[must_use]
+    pub fn files_read(&self) -> Vec<(String, u64)> {
+        let v = self.g.eng.values();
+        self.g
+            .eng
+            .acc_value(self.unit, v.field("fread"))
+            .map(|s| v.seq_to_vec(s))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| {
+                (
+                    str_of(v, crate::val::list_of(v, e)[0]),
+                    crate::val::int_at(v, e, 1).cast_unsigned(),
+                )
+            })
+            .collect()
     }
 
     /// The files the job wrote (`\openout`, `\write`), with their text,

@@ -182,12 +182,14 @@ pub(crate) struct Run<'c, 'a> {
     /// The `(language, packed hyphen minima)` of the paragraph being
     /// broken (`end_graf` pops its level before `line_break`, §1096).
     pub last_par: (i64, i64),
-    /// How many of `frames` (from the front) are the node's own: the
-    /// rest were pulled from siblings as operands (`Run::pull`) and run
-    /// here only while a span is open.
-    pub own_frames: usize,
-    /// Whether the node is a document region (all its text runs here).
-    pub region: bool,
+    /// Whether the node is a piece of a document's text (its segments
+    /// carry their origin): a document file `\input` there is sliced
+    /// into regions ([`Run::leftover`]); a format's or a package's node
+    /// reads every file inline.
+    pub doc: bool,
+    /// The files this run opened: name and a hash of the text read
+    /// (flushed to the `fread` accumulator by [`Run::finish`]).
+    pub fread: Vec<(String, u64)>,
     /// While looking for the command's first token: a node's command
     /// begins in its own text (the next sibling's begins in its own).
     pub no_pull: bool,
@@ -249,8 +251,8 @@ impl<'c, 'a> Run<'c, 'a> {
             nest: Vec::new(),
             next_lid: 0,
             last_par: (0, 0),
-            own_frames: 0,
-            region: false,
+            doc: false,
+            fread: Vec::new(),
             no_pull: false,
             own: FxHashMap::default(),
             cats: [0; 256],
@@ -322,7 +324,13 @@ impl<'c, 'a> Run<'c, 'a> {
         } else {
             self.cx.use_env(f)?
         };
-        Ok(x.filter(|&x| !crate::val::list_of(v, x).is_empty()))
+        let x = x.filter(|&x| !crate::val::list_of(v, x).is_empty());
+        if let Some(t) = x.and_then(|x| crate::val::list_of(v, x).get(1).copied()) {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&str_of(v, t), &mut h);
+            self.fread.push((key.to_owned(), std::hash::Hasher::finish(&h)));
+        }
+        Ok(x)
     }
 
     pub(crate) fn get(&mut self, name: &str) -> R<Option<ValueId>> {
@@ -631,7 +639,9 @@ impl<'c, 'a> Run<'c, 'a> {
         self.frames.iter().any(|f| match f {
             Frame::Toks(t, p) => *p < t.len(),
             Frame::Src(s) => s.loc < s.buf.len() || (s.ends && s.endch < -1),
-            Frame::File(f) => f.has_lines() && (self.open_span() || !self.doc_file(f)),
+            Frame::File(f) => {
+                f.has_lines() && (!self.doc || self.open_span() || !self.doc_file(f))
+            }
         })
     }
 
@@ -653,14 +663,12 @@ impl<'c, 'a> Run<'c, 'a> {
                         return Ok(Some(tok));
                     }
                     self.frames.pop_front();
-                    self.own_frames = self.own_frames.saturating_sub(1);
                 }
                 Frame::Src(_) => {
                     if let Some(t) = self.src_next()? {
                         return Ok(Some(t));
                     }
                     self.frames.pop_front();
-                    self.own_frames = self.own_frames.saturating_sub(1);
                 }
                 Frame::File(_) => {
                     // (a document file's lines are paragraph-region
@@ -1155,7 +1163,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     if !run.is_empty() {
                         out.push(node(std::mem::take(&mut run)));
                     }
-                    if f.has_lines() && self.doc_file(f) {
+                    if f.has_lines() && self.doc && self.doc_file(f) {
                         let text = str_of(v, f.id);
                         let t = crate::hints::file_hints(v, f.id, f.name);
                         for &(s, e) in &t.slices {
@@ -1190,35 +1198,37 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// Runs the node's input to its end (§1030's loop): every command of
-    /// the slice and of the tokens the expansions leave. A paragraph or
-    /// a group the slice did not close (the pass predicted its end
-    /// wrong) reads on into the following siblings, claimed, until it is
-    /// closed or the text ends: correct, and serial for exactly that
-    /// span. A format command's slice ends with its command (it claims
-    /// only its operands); what it leaves open becomes an engine scope
-    /// ([`Run::leave_open`]).
+    /// its text, of the files it reads inline and of the tokens the
+    /// expansions leave. A format's or a package's node is its whole
+    /// text. A document region's paragraph or group the slice did not
+    /// close (the pass predicted its end wrong) reads on into the
+    /// following siblings, claimed, until it is closed or the text ends:
+    /// correct, and serial for exactly that span.
     pub(crate) fn run_all(&mut self) -> R<()> {
-        let args = self.cx.args();
-        self.region = crate::hints::is_region(self.v, &args);
-        self.own_frames = self.frames.len();
+        self.doc = matches!(self.frames.front(), Some(Frame::Src(s)) if s.origin.is_some());
         loop {
-            while self.input_now() {
+            while self.has_input() {
                 self.command()?;
                 if self.claim_rest {
                     return Ok(());
                 }
             }
-            // a paragraph, a group or a conditional still open reads on:
-            // the next line of the file (`Frame::File`), or the next
-            // sibling, claimed
-            if self.open_span() && !self.eof {
-                if self.has_input() {
-                    // (a file frame with lines left)
-                    self.command()?;
-                    continue;
-                }
-                if self.pull()? {
-                    continue;
+            // a paragraph, a group or a conditional still open reads on
+            // into the next sibling, claimed
+            if self.open_span() && !self.eof && self.pull()? {
+                continue;
+            }
+            if !self.doc && !self.nest.is_empty() {
+                // a format or package text ended inside a group: the
+                // groups end with it (nothing after reads them), the
+                // node reports the error
+                self.diag(true, "a group is still open at the end of the file");
+                for l in std::mem::take(&mut self.nest) {
+                    if l.owns {
+                        for x in l.list {
+                            self.append(0, x);
+                        }
+                    }
                 }
             }
             return Ok(());
@@ -1229,35 +1239,6 @@ impl<'c, 'a> Run<'c, 'a> {
     /// a level of the nest or a conditional.
     fn open_span(&self) -> bool {
         !self.nest.is_empty() || !self.conds.is_empty()
-    }
-
-    /// Whether there is input before the next file frame: the slice's
-    /// text and expansion tokens run here; a file's next line is the
-    /// file-rest child's unless a span is open ([`Run::leftover`]).
-    fn input_now(&self) -> bool {
-        let span = self.open_span();
-        if self.region || span {
-            return self.has_input();
-        }
-        // a format node: its own text, and the tokens its expansions
-        // leave while it has pulled no sibling (once it has, a token put
-        // back may be the sibling's command: a child, §1030)
-        for (i, f) in self.frames.iter().enumerate() {
-            match f {
-                Frame::Toks(t, p) => {
-                    if *p < t.len() && self.pulled == 0 {
-                        return true;
-                    }
-                }
-                Frame::Src(s) => {
-                    if i < self.own_frames && (s.loc < s.buf.len() || (s.ends && s.endch < -1)) {
-                        return true;
-                    }
-                }
-                Frame::File(_) => return false,
-            }
-        }
-        false
     }
 
     /// Ends the run: definitions, contributions, children (what the
@@ -1353,6 +1334,16 @@ impl<'c, 'a> Run<'c, 'a> {
                 );
             }
             eprintln!("  effect {:?}", self.effect);
+        }
+        if !self.fread.is_empty() {
+            let v = self.v;
+            let es: Vec<ValueId> = std::mem::take(&mut self.fread)
+                .into_iter()
+                .map(|(n, h)| v.list(vec![v.str(&n), crate::val::int_id(v, h.cast_signed())]))
+                .collect();
+            for e in es {
+                self.contribute("fread", v.seq_unit(e));
+            }
         }
         for (f, x) in std::mem::take(&mut self.contribs) {
             self.cx.contribute(f, x);

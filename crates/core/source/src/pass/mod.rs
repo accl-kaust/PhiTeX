@@ -86,6 +86,12 @@ impl FileKind {
     #[must_use]
     pub fn from_path(path: &str) -> FileKind {
         let p = path.to_ascii_lowercase();
+        if std::path::Path::new(&p)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("ini"))
+        {
+            return FileKind::Initex;
+        }
         if [
             ".sty",
             ".cls",
