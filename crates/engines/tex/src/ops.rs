@@ -70,6 +70,13 @@ pub(crate) fn run_node(
     }
 }
 
+/// `PHITEX_LEFTOVER=children`: an expansion's tokens become a child per
+/// command, as before the inline continuation.
+fn leftover_children() -> bool {
+    static C: OnceLock<bool> = OnceLock::new();
+    *C.get_or_init(|| std::env::var("PHITEX_LEFTOVER").is_ok_and(|x| x == "children"))
+}
+
 /// One command (§1030) of the node's text: the first token decides; the
 /// command reads on into the siblings it claims; what it produced
 /// (expansion, tokens put back) and the text it did not read are its
@@ -165,6 +172,24 @@ impl Operation for Exec {
                 crate::hints::count(r, 2);
             }
             r.command()?;
+            // the token list an expansion left goes on in this run, not as
+            // a child per token: expansion steps are not nodes. Only while
+            // nothing bounds the node (a bound covers its first command),
+            // no scope opened or closed, no child, claim or page step made
+            // (`PHITEX_LEFTOVER=children`: the children, for an A/B)
+            if hint.bound.is_none() && !leftover_children() {
+                while r.effect == Effect::None
+                    && r.kids.is_empty()
+                    && r.page_due.is_none()
+                    && !r.claim_rest
+                    && matches!(
+                        r.frames.front(),
+                        Some(crate::run::Frame::Toks(t, p)) if *p < t.len()
+                    )
+                {
+                    r.command()?;
+                }
+            }
             r.measure_tail()?;
             crate::hints::debug_defs(r, &hint);
             if hint.bound.is_some() {

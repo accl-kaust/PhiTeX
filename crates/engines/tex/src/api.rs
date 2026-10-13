@@ -823,6 +823,9 @@ pub struct Stats {
     /// reading source text (a document slice, a line, a file).
     pub nodes_token_frames: u64,
     pub nodes_text_frames: u64,
+    /// The fields whose speculative reads were refuted, with counts,
+    /// most first.
+    pub refuted_by_field: Vec<(String, u64)>,
     /// The engine's speculative runs: kept with outstanding
     /// assumptions, confirmed, and whose assumptions failed; and nodes
     /// re-done higher after running below a finished input (raises).
@@ -908,6 +911,19 @@ impl Stats {
                     .count(),
             )
             .unwrap_or(u64::MAX);
+    }
+
+    fn add_refuted(&mut self, eng: &Engine, r: &Report) {
+        let v = eng.values();
+        for &(f, n) in &r.refuted_by_field {
+            let name = field_name(v, f);
+            match self.refuted_by_field.iter_mut().find(|e| e.0 == name) {
+                Some(e) => e.1 += n,
+                None => self.refuted_by_field.push((name, n)),
+            }
+        }
+        self.refuted_by_field
+            .sort_by_key(|e| std::cmp::Reverse(e.1));
     }
 
     fn add(&mut self, r: &Report) {
@@ -1183,6 +1199,7 @@ impl Graph {
                 }
             }
             stats.add(&r);
+            stats.add_refuted(&self.eng, &r);
             stats.add_exec(&ex, c0, &self.eng);
             stats.add_hints(&self.eng, unit, &self.eval_errors);
             let opened = self.opened(unit);
@@ -2056,10 +2073,6 @@ impl Build {
             .collect()
     }
 
-    /// The engine's critical chain, from the highest finished node back:
-    /// for each link the node's operation and first argument (shortened),
-    /// the cause's kind, and its field if any ([`Engine::critical_chain`]).
-    #[must_use]
     /// The critical chain's waits in detail (a measure): for each
     /// `Woken` link, the waiter and the node it waited on (text, the
     /// hint's class and cause, `may_define`, effect, the hinted reads);
@@ -2120,6 +2133,10 @@ impl Build {
         out
     }
 
+    /// The engine's critical chain, from the highest finished node back:
+    /// for each link the node's operation and first argument (shortened),
+    /// the cause's kind, and its field if any ([`Engine::critical_chain`]).
+    #[must_use]
     pub fn critical_chain(&self) -> Vec<(String, String, String)> {
         use phitex_defuse::Cause;
         let v = self.g.eng.values();

@@ -334,7 +334,7 @@ fn edit_fractions(dir: &std::path::Path, name: &str) {
     let mut failed = Vec::new();
     for k in 0..20 {
         let (s, e) = ws[(k * 7) % ws.len()];
-        let mut r: Vec<u8> = text[s..e].as_bytes().to_vec();
+        let mut r: Vec<u8> = text.as_bytes()[s..e].to_vec();
         r.rotate_left(1);
         text = format!(
             "{}{}{}",
