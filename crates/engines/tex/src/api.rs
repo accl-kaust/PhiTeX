@@ -388,6 +388,11 @@ pub struct Stats {
     pub peak_running: usize,
     /// The longest chain of dependent waits among the live nodes after
     /// the last evaluation (the engine's `critical_path`), in nodes.
+    /// The batches of runs the executor was given, those it ran on
+    /// the calling thread (one job, or one thread), and the largest.
+    pub batches: u64,
+    pub batches_inline: u64,
+    pub jobs_max_batch: usize,
     pub critical_path: Option<usize>,
 }
 
@@ -422,6 +427,10 @@ impl Stats {
         self.threads = ex.n;
         self.busy += ex.busy();
         self.peak_running = self.peak_running.max(ex.peak());
+        let (b, bi, m) = ex.batches();
+        self.batches += b;
+        self.batches_inline += bi;
+        self.jobs_max_batch = self.jobs_max_batch.max(m);
         self.critical_path = usize::try_from(eng.critical_path()).ok();
     }
 
@@ -1391,7 +1400,12 @@ impl Build {
                     Cause::Environment { field } => ("Environment", field_name(v, field)),
                     Cause::Structure => ("Structure", String::new()),
                     Cause::Range { field, .. } => ("Range", field_name(v, field)),
-                    Cause::Created { .. } => ("Created", String::new()),
+                    Cause::Created { from_hint, .. } => (
+                        "Created",
+                        from_hint.map_or_else(String::new, |(f, _)| field_name(v, f)),
+                    ),
+                    // the height it was raised to is in the dump, not the key
+                    Cause::Raised { .. } => ("Raised", String::new()),
                 };
                 (what, kind.to_owned(), field)
             })

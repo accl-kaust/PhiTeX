@@ -554,9 +554,41 @@ pub enum Cause {
     /// (for [`Engine::critical_chain`]).
     Range { field: Field, from: Option<NodeId> },
     /// Its creation: unfolded by `by` (a parent, or the node whose run
-    /// made it a continuation), with its starting height (for
-    /// [`Engine::critical_chain`]).
-    Created { by: Option<NodeId> },
+    /// made it a continuation; `None` for a pushed node), starting above
+    /// `by` and above the site of the hinted read `from_hint` (the one
+    /// that stood highest), for [`Engine::critical_chain`].
+    Created {
+        by: Option<NodeId>,
+        from_hint: Option<(Field, NodeId)>,
+    },
+    /// It ran below a finished node it read and was re-done at `to`
+    /// (for [`Engine::critical_chain`], before the link naming the read).
+    Raised { to: u32 },
+}
+
+/// What gave a node its starting height (for [`Engine::critical_chain`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum HeightFrom {
+    /// Nothing: height 0.
+    Start,
+    /// The node whose run made it.
+    Creator,
+    /// A hinted read of the field, its site (a definition, or the pending
+    /// node that may define it).
+    Hint(Field, Slot),
+}
+
+/// How a node came to its height when nothing it read explains it.
+#[derive(Clone, Copy, Debug)]
+struct Origin {
+    /// The run that made it (`NIL` for a pushed node).
+    creator: Slot,
+    /// The hinted read that set its starting height.
+    hint: Option<(Field, Slot)>,
+    /// The node it last waited on when its floor rose (`NIL`: none).
+    waited: Slot,
+    /// The level it was last re-done at after reading above its level.
+    raised: u32,
 }
 
 /// What a node is waiting for when an evaluation stops without finishing.
@@ -1187,6 +1219,8 @@ pub struct Engine {
     /// Nodes committed from a speculative run this evaluation (a later
     /// re-dirtying is a misprediction).
     spec_done: FxHashSet<Slot>,
+    /// Per node, what set its height besides what it read (see [`Origin`]).
+    origins: FxHashMap<Slot, Origin>,
     pins: FxHashMap<ValueId, u32>,
     values_at_sweep: usize,
     open_op: OpId,
@@ -1349,6 +1383,7 @@ impl Engine {
             feedback: false,
             spec_live: 0,
             spec_done: FxHashSet::default(),
+            origins: FxHashMap::default(),
             pins: FxHashMap::default(),
             values_at_sweep: 0,
             open_op: OpId(0),
@@ -1873,6 +1908,7 @@ impl Engine {
     /// contributor, or its creation with a starting height). Empty when
     /// nothing has finished.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn critical_chain(&self) -> Vec<(NodeId, Cause)> {
         let mut chain = Vec::new();
         let Some(mut x) = self
@@ -1888,9 +1924,17 @@ impl Engine {
         else {
             return chain;
         };
+        let mut seen = FxHashSet::default();
         loop {
+            if !seen.insert(x) {
+                return chain;
+            }
             let n = self.n(x);
             let h = n.height;
+            let origin = self.origins.get(&x).copied();
+            if let Some(o) = origin.filter(|o| o.raised > 0) {
+                chain.push((n.id, Cause::Raised { to: o.raised }));
+            }
             // The read whose site stands highest; ties: the first recorded.
             let mut best: Option<(u32, Slot, Cause)> = None;
             let mut offer = |cand: (u32, Slot, Cause)| {
@@ -1947,10 +1991,46 @@ impl Engine {
                 }
                 _ => {
                     // Nothing it read explains its height: it started
-                    // there (hints at its creation, or a wait that resolved).
-                    let by = (n.parent != NIL && self.live(n.parent)).then(|| self.n(n.parent).id);
-                    chain.push((n.id, Cause::Created { by }));
-                    return chain;
+                    // there (above what made it and its hinted reads), or
+                    // a wait raised its floor. The walk goes on from there.
+                    let live = |t: Slot| (t != NIL && self.live(t)).then_some(t);
+                    let next = match origin {
+                        Some(o) if live(o.waited).is_some() => {
+                            chain.push((
+                                n.id,
+                                Cause::Woken {
+                                    by: self.n(o.waited).id,
+                                },
+                            ));
+                            Some(o.waited)
+                        }
+                        Some(o) => {
+                            let by = live(o.creator);
+                            let hint = o.hint.filter(|&(_, t)| live(t).is_some());
+                            chain.push((
+                                n.id,
+                                Cause::Created {
+                                    by: by.map(|t| self.n(t).id),
+                                    from_hint: hint.map(|(f, t)| (f, self.n(t).id)),
+                                },
+                            ));
+                            hint.map(|(_, t)| t).or(by)
+                        }
+                        None => {
+                            chain.push((
+                                n.id,
+                                Cause::Created {
+                                    by: None,
+                                    from_hint: None,
+                                },
+                            ));
+                            None
+                        }
+                    };
+                    match next {
+                        Some(t) if h > 0 => x = t,
+                        _ => return chain,
+                    }
                 }
             }
         }
@@ -2349,7 +2429,7 @@ impl Engine {
     ) -> Slot {
         let s = self.create_raw(unit, after, None, op, args, parent, id, provisional);
         self.set_created_effect(s, true);
-        self.bind_created(s, None);
+        self.bind_created(s, None, NIL);
         s
     }
 
@@ -2488,24 +2568,26 @@ impl Engine {
     /// Binds a run of freshly created siblings, with the heights the
     /// parallel phase computed for them (if any; one per node, in order).
     /// In-text siblings' definitions raise those heights.
-    fn bind_fresh(&mut self, created: &[Slot], heights: &[u32]) {
-        let mut in_text: FxHashMap<Field, u32> = FxHashMap::default();
+    fn bind_fresh(&mut self, creator: Slot, created: &[Slot], heights: &[(u32, HeightFrom)]) {
+        let mut in_text: FxHashMap<Field, (u32, Slot)> = FxHashMap::default();
         for (k, &c) in created.iter().enumerate() {
             let st = self.statics(self.n(c).op, self.n(c).args);
             let pre_h = heights.get(k).map(|&h| {
                 let mut h = h;
-                for f in st.reads.iter().flatten() {
-                    if let Some(&d) = in_text.get(f) {
-                        h = h.max(d + 1);
+                for &f in st.reads.iter().flatten() {
+                    if let Some(&(d, sib)) = in_text.get(&f)
+                        && d + 1 > h.0
+                    {
+                        h = (d + 1, HeightFrom::Hint(f, sib));
                     }
                 }
                 h
             });
-            self.bind_created(c, pre_h);
+            self.bind_created(c, pre_h, creator);
             if let Some(d) = &st.decl {
                 let h = self.n(c).height;
                 for &(f, _) in d {
-                    in_text.insert(self.canon(f), h);
+                    in_text.insert(self.canon(f), (h, c));
                 }
             }
         }
@@ -2542,7 +2624,7 @@ impl Engine {
     }
 
     /// Phase 3: definitions, pending structure, initial height, claims.
-    fn bind_created(&mut self, s: Slot, height: Option<u32>) {
+    fn bind_created(&mut self, s: Slot, height: Option<(u32, HeightFrom)>, creator: Slot) {
         let (unit, label) = (self.n(s).unit, self.n(s).label);
         let st = self.statics(self.n(s).op, self.n(s).args);
         let hints = st.reads.clone();
@@ -2553,23 +2635,45 @@ impl Engine {
             }
         }
         self.sync_pending(s);
-        if let Some(h) = height {
+        let (h, from) = if let Some(h) = height {
             // Precomputed in the parallel phase.
-            self.set_height(s, h);
-        } else if let Some(h) = hints {
+            h
+        } else {
             // Order derived from the static structure: start above the
-            // hinted inputs, so most nodes find their inputs ready.
-            let mut height = 0;
-            for f in h {
+            // hinted inputs, so most nodes find their inputs ready, and
+            // above the run that made it.
+            let mut height = if creator == NIL || !self.live(creator) {
+                (0, HeightFrom::Start)
+            } else {
+                (self.n(creator).height + 1, HeightFrom::Creator)
+            };
+            for f in hints.into_iter().flatten() {
                 let w = self.walk(unit, label, f);
-                if w.site != NIL {
-                    height = height.max(self.n(w.site).height + 1);
-                }
-                if w.pending != NIL {
-                    height = height.max(self.n(w.pending).height + 1);
+                for t in [w.site, w.pending] {
+                    if t != NIL && self.n(t).height + 1 > height.0 {
+                        height = (self.n(t).height + 1, HeightFrom::Hint(f, t));
+                    }
                 }
             }
-            self.set_height(s, height);
+            height
+        };
+        if h > 0 {
+            self.set_height(s, h);
+        }
+        if creator != NIL || !matches!(from, HeightFrom::Start) {
+            let hint = match from {
+                HeightFrom::Hint(f, t) => Some((f, t)),
+                HeightFrom::Start | HeightFrom::Creator => None,
+            };
+            self.origins.insert(
+                s,
+                Origin {
+                    creator,
+                    hint,
+                    waited: NIL,
+                    raised: 0,
+                },
+            );
         }
         if self.n(s).has(F_CLAIMER) {
             self.claim_dirty.insert(s);
@@ -4557,6 +4661,10 @@ impl Engine {
         count!(Dirty);
         self.nm(x).state = State::Dirty;
         self.nm(x).floor = 0;
+        if let Some(o) = self.origins.get_mut(&x) {
+            o.raised = 0;
+            o.waited = NIL;
+        }
         // New information: a stopped speculation may be tried again.
         self.set_flag(x, F_NOSPEC, false);
         self.sync_pending(x);
@@ -4607,8 +4715,18 @@ impl Engine {
                 self.report.pending_waits += 1;
             }
             let h = self.n(on).height + 1;
-            let floor = self.n(x).floor.max(h);
-            self.nm(x).floor = floor;
+            if h > self.n(x).floor {
+                self.nm(x).floor = h;
+                self.origins
+                    .entry(x)
+                    .or_insert(Origin {
+                        creator: NIL,
+                        hint: None,
+                        waited: NIL,
+                        raised: 0,
+                    })
+                    .waited = on;
+            }
             self.raise(x, h, on);
         }
         self.sync_order_lazy(x);
@@ -4921,6 +5039,7 @@ impl Engine {
         }
         let id = self.n(x).id;
         self.ids.remove(&id);
+        self.origins.remove(&x);
         let a = self.n(x).aux;
         if a != NO_AUX {
             self.aux[a as usize] = Aux::default();
@@ -5243,7 +5362,14 @@ impl Engine {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn set_children(&mut self, x: Slot, specs: &[(OpId, ValueId)], follows: usize, heights: &[u32], provisional: bool) {
+    fn set_children(
+        &mut self,
+        x: Slot,
+        specs: &[(OpId, ValueId)],
+        follows: usize,
+        heights: &[(u32, HeightFrom)],
+        provisional: bool,
+    ) {
         let old = self.aux_of(x).map_or_else(Default::default, |a| a.children.clone());
         if old.is_empty() && specs.is_empty() {
             return;
@@ -5411,7 +5537,7 @@ impl Engine {
                 self.set_created_kind(c);
             }
             self.fresh_scope = false;
-            self.bind_fresh(&created, &heights[pre.min(heights.len())..]);
+            self.bind_fresh(x, &created, &heights[pre.min(heights.len())..]);
             self.run_depths.clear();
         }
         kids.extend_from_slice(&created);
@@ -5786,6 +5912,15 @@ impl Engine {
                 self.report.raises += 1;
                 let h = h.max(self.n(x).height + 1);
                 self.set_height(x, h);
+                self.origins
+                    .entry(x)
+                    .or_insert(Origin {
+                        creator: NIL,
+                        hint: None,
+                        waited: NIL,
+                        raised: 0,
+                    })
+                    .raised = h;
                 return;
             }
             End::Wait(t) => {
@@ -6391,7 +6526,11 @@ impl Engine {
                         | Cause::Range { field, .. } => {
                             live.insert(field.0);
                         }
-                        Cause::Output { .. } | Cause::Woken { .. } | Cause::Structure | Cause::Created { .. } => {}
+                        Cause::Output { .. }
+                        | Cause::Woken { .. }
+                        | Cause::Structure
+                        | Cause::Created { .. }
+                        | Cause::Raised { .. } => {}
                     }
                 }
             }
@@ -6669,29 +6808,34 @@ impl Engine {
     /// parallel phase from the batch's state: above the hinted inputs as
     /// bound at `x`'s position (in-text siblings are added at commit).
     /// An estimate: it decides when a node is tried, never a result.
-    pub(crate) fn child_heights(&self, x: Slot, specs: &[(OpId, ValueId)]) -> Vec<u32> {
+    pub(crate) fn child_heights(&self, x: Slot, specs: &[(OpId, ValueId)]) -> Vec<(u32, HeightFrom)> {
         let n = self.n(x);
-        let own = n.height + 1;
+        // Made by this run, they come after it.
+        let own = (n.height + 1, HeightFrom::Creator);
         specs
             .iter()
             .map(|&(op, args)| {
                 let st = self.statics(op, args);
-                let Some(h) = &st.reads else { return 0 };
-                let mut height = 0;
-                for &f in h {
-                    if self.loop_vals.contains_key(&f) {
-                        continue;
+                let Some(h) = &st.reads else { return own };
+                let mut height = own;
+                let mut offer = |c: (u32, HeightFrom)| {
+                    if c.0 > height.0 {
+                        height = c;
                     }
-                    if n.def_value(f).is_some() || n.defs.iter().any(|d| d.field == f) {
-                        height = height.max(own);
+                };
+                for &f in h {
+                    if self.loop_vals.contains_key(&f)
+                        || n.def_value(f).is_some()
+                        || n.defs.iter().any(|d| d.field == f)
+                    {
                         continue;
                     }
                     let w = self.walk(n.unit, n.label, f);
                     if w.site != NIL {
-                        height = height.max(self.n(w.site).height + 1);
+                        offer((self.n(w.site).height + 1, HeightFrom::Hint(f, w.site)));
                     }
                     if w.pending != NIL {
-                        height = height.max(self.n(w.pending).height + 1);
+                        offer((self.n(w.pending).height + 1, HeightFrom::Hint(f, w.pending)));
                     }
                 }
                 height
@@ -6977,7 +7121,7 @@ pub struct RunResult {
     pub(crate) follows: usize,
     /// The starting height of each child (see [`Engine::child_heights`]),
     /// or empty when not computed.
-    pub(crate) child_heights: Vec<u32>,
+    pub(crate) child_heights: Vec<(u32, HeightFrom)>,
     pub(crate) env: Vec<(Field, ValueId)>,
     pub(crate) publishes: Vec<(Field, ValueId)>,
     pub(crate) contribs: Vec<(Field, ValueId)>,

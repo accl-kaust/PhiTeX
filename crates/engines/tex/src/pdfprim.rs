@@ -432,14 +432,18 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             let f = r.scan_font_ident()?;
             let (name, obj) = font_num(r, f)?;
             let fid = u32::try_from(f).unwrap_or(0);
-            let input = pdf_input(r, "fontobjnum", f, ValueId::UNIT)?;
-            let got = crate::pdfout::command(r, input, &[fid], |st, fs| {
-                let n = st.font_name(fid, fs).ok()?;
-                let o = st.font_objnum(fid, fs).ok()?;
-                Some((n, o))
-            })?;
-            let (name, obj) = got.unwrap_or((name, obj));
-            (if c == cv::FONT_NAME { name } else { obj }).to_string()
+            if c == cv::FONT_OBJNUM && crate::pdfrelaxed::on(r)? {
+                crate::pdfrelaxed::font_objnum(r, fid)?.to_string()
+            } else {
+                let input = pdf_input(r, "fontobjnum", f, ValueId::UNIT)?;
+                let got = crate::pdfout::command(r, input, &[fid], |st, fs| {
+                    let n = st.font_name(fid, fs).ok()?;
+                    let o = st.font_objnum(fid, fs).ok()?;
+                    Some((n, o))
+                })?;
+                let (name, obj) = got.unwrap_or((name, obj));
+                (if c == cv::FONT_NAME { name } else { obj }).to_string()
+            }
         }
         cv::FONT_SIZE => {
             let f = r.scan_font_ident()?;
@@ -2297,6 +2301,13 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             };
             r.set(&name, t, true);
             let fid = u32::try_from(f).unwrap_or(0);
+            if crate::pdfrelaxed::on(r)? {
+                // the finish replays them (\pdfincludechars adds up)
+                if !attr {
+                    append_text(r, "pdf:includecharslist", v.list(vec![v.int(f), t]))?;
+                }
+                return Ok(());
+            }
             let tb = bytes(&str_of(v, t));
             let input = pdf_input(r, if attr { "fontattr" } else { "includechars" }, f, t)?;
             crate::pdfout::command(r, input, &[fid], |st, fs| {
@@ -2365,6 +2376,10 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
         ex::NOBUILTIN_TOUNICODE => {
             let f = r.scan_font_ident()?;
             r.set(&format!("pdf:nobuiltintounicode:{f}"), v.int(1), true);
+            if crate::pdfrelaxed::on(r)? {
+                append_text(r, "pdf:nobuiltinlist", v.int(f))?;
+                return Ok(());
+            }
             let fid = u32::try_from(f).unwrap_or(0);
             let input = pdf_input(r, "nobuiltintounicode", f, ValueId::UNIT)?;
             crate::pdfout::command(r, input, &[fid], |st, fs| st.no_builtin_tounicode(fid, fs))?;
