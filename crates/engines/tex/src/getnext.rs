@@ -166,7 +166,11 @@ impl Run<'_, '_> {
     /// internal markers still go through the slow path.
     #[inline]
     pub(crate) fn get_token_tok(&mut self) -> R<Tok> {
-        if let Some(t) = self.input.next_plain_of_top() {
+        // (an alignment of this run counts every brace, §342: the slow
+        // path then)
+        if self.aopen == 0
+            && let Some(t) = self.input.next_plain_of_top()
+        {
             self.cur.tok = t;
             return Ok(t);
         }
