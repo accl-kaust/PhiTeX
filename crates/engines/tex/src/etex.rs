@@ -223,7 +223,7 @@ pub(crate) fn take_protected(a: &mut i32) -> bool {
 /// list is built with expansion; true if `cur` was one (it is now
 /// `\relax`-like, `no_expand_flag`).
 pub(crate) fn protect(cur: &mut crate::run::Cur) -> bool {
-    if matches!(&cur.mean, Mean::Macro(x) if x.flags & PROTECTED != 0) {
+    if matches!(&cur.mean(), Mean::Macro(x) if x.flags & PROTECTED != 0) {
         cur.cmd = cmd::RELAX;
         cur.chr = crate::val::NO_EXPAND_FLAG;
         return true;
