@@ -37,7 +37,7 @@ impl Run<'_, '_> {
                     let name = ["top", "first", "bot", "splitfirst", "splitbot"]
                         [usize::try_from(self.cur.chr).unwrap_or(0).min(4)];
                     let m = crate::etex::mark_read(self, name, 0)?;
-                    let toks = crate::val::toks_of(self.v, m);
+                    let toks = crate::val::toks_rc(self.v, m);
                     self.push_toks(toks);
                 }
                 cmd::EXPAND_AFTER => {
@@ -305,8 +305,13 @@ impl Run<'_, '_> {
         }
         let _ = name;
         // §390
+        if pstack.is_empty() {
+            // no arguments: the body is read in place, never copied
+            self.push_toks(m.body.clone());
+            return Ok(());
+        }
         let mut body = Vec::with_capacity(m.body.len());
-        for t in &m.body {
+        for t in m.body.iter() {
             if t.cat() == Some(OUT_PARAM_CAT) && !t.is_cs_or_active() {
                 let k = usize::try_from(t.chr()).unwrap_or(1);
                 if let Some(a) = pstack.get(k.wrapping_sub(1)) {

@@ -960,7 +960,7 @@ fn read_line(r: &mut Run<'_, '_>, global: bool) -> R<()> {
     let m = Mean::Macro(Rc::new(Macro {
         flags: 0,
         params: Vec::new(),
-        body,
+        body: body.into(),
     }));
     r.define_cs(&p, &m, global);
     Ok(())

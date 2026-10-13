@@ -260,6 +260,11 @@ fn tok_value(v: &Values, t: &Tok) -> ValueId {
 }
 
 pub(crate) fn toks_of(v: &Values, id: Option<ValueId>) -> Vec<Tok> {
+    toks_rc(v, id).to_vec()
+}
+
+/// The token list `id`, shared with this thread's cache (no copy).
+pub(crate) fn toks_rc(v: &Values, id: Option<ValueId>) -> Rc<[Tok]> {
     match id {
         Some(id) => decoded(
             v,
@@ -267,10 +272,10 @@ pub(crate) fn toks_of(v: &Values, id: Option<ValueId>) -> Vec<Tok> {
             |d| &mut d.toks,
             || match &*v.get(id) {
                 Value::List(xs) => xs.iter().map(|&x| Tok::decode(v, x)).collect(),
-                _ => Vec::new(),
+                _ => Rc::from([]),
             },
         ),
-        None => Vec::new(),
+        None => Rc::from([]),
     }
 }
 
@@ -281,7 +286,7 @@ pub(crate) fn toks_of(v: &Values, id: Option<ValueId>) -> Vec<Tok> {
 #[derive(Default)]
 struct Decoded {
     instance: u64,
-    toks: FxHashMap<ValueId, Vec<Tok>>,
+    toks: FxHashMap<ValueId, Rc<[Tok]>>,
     means: FxHashMap<ValueId, Mean>,
     glues: FxHashMap<ValueId, Glue>,
     frames: FxHashMap<ValueId, Option<crate::run::Frame>>,
@@ -310,6 +315,9 @@ struct Encoded {
     strs: FxHashMap<Box<str>, ValueId>,
     glues: FxHashMap<Glue, ValueId>,
     means: FxHashMap<MeanKey, ValueId>,
+    /// Macros by address (the `Rc` kept, so an address is never reused
+    /// while it is a key): a `\\let` of a macro encodes nothing.
+    macros: FxHashMap<usize, (Rc<Macro>, ValueId)>,
     nodes: FxHashMap<NodeKey, ValueId>,
 }
 
@@ -580,7 +588,8 @@ pub(crate) enum Mean {
 pub(crate) struct Macro {
     pub flags: u8,
     pub params: Vec<Tok>,
-    pub body: Vec<Tok>,
+    /// Shared: a call without arguments reads it in place.
+    pub body: Rc<[Tok]>,
 }
 
 pub(crate) const MATCH_CAT: u8 = 14;
@@ -650,7 +659,7 @@ impl Mean {
 
     pub(crate) fn encode(&self, v: &Values) -> ValueId {
         let key = match self {
-            Mean::Macro(_) => return self.encode_new(v),
+            Mean::Macro(m) => return macro_id(v, m),
             Mean::Prim(n, _, _) => MeanKey::Prim(n),
             Mean::Char(c, h) => MeanKey::Char(*c, *h),
             Mean::Undefined => MeanKey::Undefined,
@@ -689,7 +698,18 @@ impl Mean {
 
     pub(crate) fn decode(v: &Values, id: Option<ValueId>) -> Mean {
         let Some(id) = id else { return Mean::Undefined };
-        decoded(v, id, |d| &mut d.means, || Mean::decode_new(v, id))
+        decoded(
+            v,
+            id,
+            |d| &mut d.means,
+            || {
+                let m = Mean::decode_new(v, id);
+                if let Mean::Macro(x) = &m {
+                    remember_macro(v, x, id);
+                }
+                m
+            },
+        )
     }
 
     fn decode_new(v: &Values, id: ValueId) -> Mean {
@@ -710,7 +730,7 @@ impl Mean {
             "macro" => Mean::Macro(Rc::new(Macro {
                 flags: u8::try_from(n(1)).unwrap_or(0),
                 params: toks_of(v, xs.get(2).copied()),
-                body: toks_of(v, xs.get(3).copied()),
+                body: toks_rc(v, xs.get(3).copied()),
             })),
             "char" => Mean::Char(
                 u8::try_from(n(1)).unwrap_or(0),
@@ -743,6 +763,64 @@ impl Mean {
             _ => Mean::Undefined,
         }
     }
+}
+
+/// The value of macro `m`, encoded once an epoch per macro (cached by
+/// address), and its decoding kept so reading it back decodes nothing.
+fn macro_id(v: &Values, m: &Rc<Macro>) -> ValueId {
+    let Some(epoch) = scope_epoch(v) else {
+        return Mean::Macro(m.clone()).encode_new(v);
+    };
+    let key = Rc::as_ptr(m) as usize;
+    let hit = ENCODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.instance != v.instance() || c.epoch != epoch {
+            *c = Encoded {
+                instance: v.instance(),
+                epoch,
+                ..Encoded::default()
+            };
+        }
+        c.macros.get(&key).map(|e| e.1)
+    });
+    if let Some(x) = hit {
+        return x;
+    }
+    let x = Mean::Macro(m.clone()).encode_new(v);
+    remember_macro(v, m, x);
+    DECODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.instance != v.instance() {
+            *c = Decoded {
+                instance: v.instance(),
+                ..Decoded::default()
+            };
+        }
+        if c.means.len() >= DECODED_MAX {
+            c.means.clear();
+        }
+        c.means.entry(x).or_insert_with(|| Mean::Macro(m.clone()));
+    });
+    x
+}
+
+/// Records `id` as the value of macro `m` at the run's epoch.
+fn remember_macro(v: &Values, m: &Rc<Macro>, id: ValueId) {
+    let Some(epoch) = scope_epoch(v) else { return };
+    ENCODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.instance != v.instance() || c.epoch != epoch {
+            *c = Encoded {
+                instance: v.instance(),
+                epoch,
+                ..Encoded::default()
+            };
+        }
+        if c.macros.len() >= DECODED_MAX {
+            c.macros.clear();
+        }
+        c.macros.insert(Rc::as_ptr(m) as usize, (m.clone(), id));
+    });
 }
 
 fn reg_tag(c: u8) -> (&'static str, i32) {
