@@ -59,6 +59,9 @@ pub(crate) struct Ops {
     /// The page chain's loop-backs as read and published in the current
     /// evaluation: the refuted guesses ([`crate::Stats`]).
     pub lblog: std::sync::Arc<std::sync::Mutex<crate::page::LbLog>>,
+    /// The evaluation counter: `pgref` counts refuted rounds of one
+    /// evaluation only.
+    pub eval: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// A level of the input stack.
@@ -260,6 +263,9 @@ pub(crate) struct Run<'c, 'a> {
     pub kind_memo: Option<(ValueId, KindFields)>,
     /// `align_state` as this run has it (§309), once read.
     pub astate: Option<i64>,
+    /// The alignments open in this run (`align_state`'s companion,
+    /// §324): run-local, an alignment never crosses a node.
+    pub aopen: i64,
     /// Lines entered by this run (for `\inputlineno`).
     pub lines_entered: i64,
     /// Whether the input is exhausted for good (the file ended).
@@ -324,6 +330,7 @@ impl<'c, 'a> Run<'c, 'a> {
             name_buf: String::new(),
             kind_memo: None,
             astate: None,
+            aopen: 0,
             lines_entered: 0,
             eof: false,
             radix: 0,
@@ -2090,6 +2097,7 @@ pub(crate) struct Parked {
     conds: Vec<u8>,
     if_codes: Vec<i32>,
     astate: Option<i64>,
+    aopen: i64,
     lines_entered: i64,
     eof: bool,
     radix: i32,
@@ -2128,6 +2136,7 @@ struct Mark {
     sig: u64,
     effect: Option<Effect>,
     astate: Option<i64>,
+    aopen: i64,
     radix: i32,
     cur_order: Option<phitex_typeset::glue::Order>,
     no_pull: bool,
@@ -2207,6 +2216,7 @@ impl Run<'_, '_> {
         m.sig = sig;
         m.effect = Some(self.effect);
         m.astate = self.astate;
+        m.aopen = self.aopen;
         m.radix = self.radix;
         m.cur_order = Some(self.cur_order);
         m.no_pull = self.no_pull;
@@ -2281,6 +2291,7 @@ impl Run<'_, '_> {
             }
         }
         self.astate = m.astate;
+        self.aopen = m.aopen;
         self.radix = m.radix;
         self.no_pull = m.no_pull;
         if let Some(o) = m.cur_order {
@@ -2341,6 +2352,7 @@ impl Run<'_, '_> {
             conds: std::mem::take(&mut self.conds),
             if_codes: std::mem::take(&mut self.if_codes),
             astate: self.astate,
+            aopen: self.aopen,
             lines_entered: self.lines_entered,
             eof: self.eof,
             radix: self.radix,
@@ -2405,6 +2417,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.conds = p.conds;
         r.if_codes = p.if_codes;
         r.astate = p.astate;
+        r.aopen = p.aopen;
         r.lines_entered = p.lines_entered;
         r.eof = p.eof;
         r.radix = p.radix;

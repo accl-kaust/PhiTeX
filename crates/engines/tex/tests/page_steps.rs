@@ -208,9 +208,7 @@ fn self_dependent_routine() {
     b.edit(&new);
     eprintln!(
         "selfdep edit: loop rounds {}, page steps re-run {}, refuted {:?}",
-        b.stats.loop_rounds,
-        b.stats.page_steps,
-        b.stats.refuted_guesses
+        b.stats.loop_rounds, b.stats.page_steps, b.stats.refuted_guesses
     );
     let cold = common::build(opts, Some(&common::plain()), &new);
     assert!(

@@ -1190,6 +1190,7 @@ impl Graph {
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             steps_done: Arc::new(Mutex::new(Vec::new())),
             lblog: Arc::new(Mutex::new(crate::page::LbLog::default())),
+            eval: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let _ = shared.set(ops.clone());
         for f in [
@@ -2527,10 +2528,11 @@ impl Build {
         let mut stats = Stats::default();
         self.g.take_steps_done();
         self.g.take_refuted();
-        // the serial fallback is per evaluation: an edit starts with the
-        // page chain parallel again (its guesses the last values)
-        let f = self.g.eng.values().field("pgref");
-        self.g.eng.declare_loopback(f, ValueId::UNIT);
+        // the serial fallback is per evaluation (`pgref` is keyed by it)
+        self.g
+            .ops
+            .eval
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.g.queries.clear();
         // (the files sliced into the document's regions were read)
         let sliced: Vec<(String, bool)> = self
@@ -2568,6 +2570,10 @@ impl Build {
         stats.live = self.g.eng.live_nodes();
         stats.page_steps_completed = self.g.take_steps_done();
         stats.refuted_guesses = self.g.take_refuted();
+        // the chain's last values become its round-one guesses: an edit
+        // whose rounds restart begins from them, not from the cold guess
+        let kept = self.export_pgst();
+        chain_guesses(&mut self.g, &kept);
         self.stats = stats;
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             let (nodes, units, values) = self.sizes();
