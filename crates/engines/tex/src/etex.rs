@@ -1183,7 +1183,9 @@ pub(crate) fn mark_read(r: &mut Run<'_, '_>, kind: &str, n: i32) -> R<Option<Val
     let v = r.v;
     let op = r.cx.op();
     let split = kind.starts_with("split");
-    if split || op == r.ops.pagestep || op == r.ops.pagestep_any {
+    // (a text paging inline, `pageinline.rs`, has its marks in force
+    // sequentially, as a page step does)
+    if split || op == r.ops.pagestep || op == r.ops.pagestep_any || r.pg.is_some() {
         return r.get(&mark_field(kind, n));
     }
     let node = r.cx.node().raw();

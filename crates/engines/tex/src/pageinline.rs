@@ -73,7 +73,14 @@ fn drain(r: &mut Run<'_, '_>, pg: &mut Inline) {
         fold_item(v, 0, n, &mut pg.fold, &mut out);
     }
     pg.fold.since_bp = 0;
-    pg.queue.extend(out);
+    // (the `Breaks` fold's markers place nothing here: the page
+    // parameters are read live, the marks and writes are in order)
+    pg.queue.extend(out.into_iter().filter(|&x| {
+        !matches!(
+            nodes::tag(v, x),
+            nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT | nodes::T_WRITE_AT
+        )
+    }));
     let pd = v.list(vec![v.int(nodes::T_PD), v.int(i64::from(pg.fold.pd))]);
     let e = v.list(vec![v.int(0), pd]);
     r.contribs.push((f, v.seq_unit(e)));
