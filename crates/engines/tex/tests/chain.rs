@@ -394,12 +394,14 @@ fn pdf_exact_no_page_chain() {
                 k / 10 + 1
             );
         }
-        let _ = write!(
-            src,
-            "Paragraph {k} has some words in it, enough to fill a few lines of text set \
-             with plain's macros, so that the paragraph builder has work to do and the \
-             pages fill up one after another"
-        );
+        for _ in 0..4 {
+            let _ = write!(
+                src,
+                "Paragraph {k} has some words in it, enough to fill a few lines of text set \
+                 with plain's macros, so that the paragraph builder has work to do and the \
+                 pages fill up one after another. "
+            );
+        }
         if k % 20 == 19 {
             let _ = write!(
                 src,
