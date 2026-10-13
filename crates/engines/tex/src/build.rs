@@ -1156,15 +1156,13 @@ impl Run<'_, '_> {
             self.append(md.lid, x);
         } else {
             self.scan_left_brace()?;
-            let sid = self.node_raw();
             let extra = vec![
                 v.int(0),
                 v.int(md.lid),
                 v.list(Vec::new()),
                 v.list(Vec::new()),
             ];
-            let kind = self.kind_value(md, group::DISC, sid, sid, -102, extra)?;
-            self.open_scope_here(kind);
+            self.push_list(-102, group::DISC, extra);
         }
         Ok(())
     }
@@ -1461,8 +1459,7 @@ impl Run<'_, '_> {
     fn build_discretionary(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
         let part = md.extra.first().map_or(0, |&y| int_of(v, y));
-        let outer_lid = md.extra.get(1).map_or(0, |&y| int_of(v, y));
-        let (items, _) = self.list_items(md.sid)?;
+        let (items, _) = self.list_items(md.lid)?;
         let mut side = Side::default();
         let mut list: List = Vec::new();
         for &y in &items {
@@ -1478,7 +1475,6 @@ impl Run<'_, '_> {
             }
         }
         let enc = nodes::encode_list(v, &list, &side);
-        self.unsave_extras(md)?;
         if part < 2 {
             let mut extra = md.extra.clone();
             extra[0] = v.int(part + 1);
@@ -1487,23 +1483,13 @@ impl Run<'_, '_> {
             } else {
                 extra[3] = enc;
             }
+            // §1119: unsave, then the next part's group
+            self.pop_level();
             self.scan_left_brace()?;
-            let sid = self.node_raw();
-            let mut outer = md.clone();
-            outer.depth -= 1;
-            let cur = self.scope_kind()?.unwrap_or(ValueId::UNIT);
-            let parent = list_of(v, cur).get(5).copied().unwrap_or(ValueId::UNIT);
-            let kind = self.kind_with_parent(&outer, group::DISC, sid, sid, -102, extra, parent);
-            self.effect = Effect::Scope(Brackets {
-                closes: 1,
-                opens: 1,
-                before: false,
-                kind: Some(kind),
-                kind_pending: false,
-            });
+            self.push_list(-102, group::DISC, extra);
             return Ok(());
         }
-        self.effect = Effect::Close;
+        let outer = self.close_group(md)?;
         let mut s2 = Side::default();
         let pre = md
             .extra
@@ -1521,7 +1507,7 @@ impl Run<'_, '_> {
         // the replacement list follows the disc node in tex.web's list;
         // here it is inside it
         let y = nodes::encode(v, &d, &merge_sides(s2, side));
-        self.append(outer_lid, y);
+        self.append(outer.lid, y);
         Ok(())
     }
 
