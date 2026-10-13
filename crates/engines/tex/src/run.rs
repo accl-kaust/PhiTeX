@@ -388,7 +388,9 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// The field `<fam>:<key>` ([`crate::fields::Fam`]).
     pub(crate) fn keyed(&self, fam: crate::fields::Fam, key: &str) -> Field {
-        self.ops.fields.keyed(self.v, self.cx.values_epoch(), fam, key)
+        self.ops
+            .fields
+            .keyed(self.v, self.cx.values_epoch(), fam, key)
     }
 
     /// The field of register `n` of kind `r` (as [`Self::reg`]).
@@ -520,9 +522,11 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Whether file `name` is one the job writes and reads back, with its
     /// loop-backs declared.
     pub(crate) fn written_known(&self, name: &str) -> bool {
-        let v = self.v;
-        self.cx.is_loopback(self.keyed(crate::fields::Fam::Wfile, name))
-            || self.cx.is_loopback(self.keyed(crate::fields::Fam::Wkeys, name))
+        self.cx
+            .is_loopback(self.keyed(crate::fields::Fam::Wfile, name))
+            || self
+                .cx
+                .is_loopback(self.keyed(crate::fields::Fam::Wkeys, name))
     }
 
     /// `\input` of a file whose read-back only defines (`.aux`): the
@@ -536,12 +540,17 @@ impl<'c, 'a> Run<'c, 'a> {
         if !self.cx.is_loopback(wk) {
             return Ok(false);
         }
-        let keys = self.cx.use_field(wk)?.map(|x| list_of(v, x)).unwrap_or_default();
+        let keys = self
+            .cx
+            .use_field(wk)?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default();
         for k in keys {
             let name = str_of(v, k);
-            let wd = self.keyed(crate::fields::Fam::Wdef, name);
+            let wd = self.keyed(crate::fields::Fam::Wdef, &name);
             if !self.cx.is_loopback(wd) {
-                self.cx.use_env(self.keyed(crate::fields::Fam::Wdefdecl, name))?;
+                self.cx
+                    .use_env(self.keyed(crate::fields::Fam::Wdefdecl, &name))?;
             }
             if !self.cx.is_loopback(wd) {
                 continue;
@@ -640,9 +649,9 @@ impl<'c, 'a> Run<'c, 'a> {
     /// loop-back is declared, the run asks the client to declare it
     /// (`wfiledecl:<name>`, answered by `api::Graph::settle`).
     pub(crate) fn written_decl(&mut self, name: &str) -> R<()> {
-        let v = self.v;
         if !self.written_known(name) {
-            self.cx.use_env(self.keyed(crate::fields::Fam::Wfiledecl, name))?;
+            self.cx
+                .use_env(self.keyed(crate::fields::Fam::Wfiledecl, name))?;
         }
         Ok(())
     }
@@ -713,7 +722,12 @@ impl<'c, 'a> Run<'c, 'a> {
         // local after a global is kept apart, in a group (its close drops
         // the local, the global stays, §283) and at level 0 (the engine's
         // scope sees the global, then the local)
-        let floor = self.nest.iter().rev().find(|l| l.group != 0).map_or(0, |l| l.defs_len);
+        let floor = self
+            .nest
+            .iter()
+            .rev()
+            .find(|l| l.group != 0)
+            .map_or(0, |l| l.defs_len);
         let ix = self.def_ix.entry(f).or_default();
         if let Some(&i) = ix.last()
             && i >= floor

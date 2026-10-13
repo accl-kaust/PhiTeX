@@ -254,9 +254,7 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "halign" | "valign" | "cr" | "crcr" | "noalign" | "omit" | "span" => &["align", "badness"],
         "read" | "readline" | "openin" | "closein" => &["read:"],
         // pdfTeX's objects, streams, random numbers, colour stacks
-        _ if n.starts_with("pdf") && crate::prims::PRIMS.iter().any(|p| p.0 == n) => {
-            &["pdf:"]
-        }
+        _ if n.starts_with("pdf") && crate::prims::PRIMS.iter().any(|p| p.0 == n) => &["pdf:"],
         _ => {
             if crate::prims::PRIMS.iter().any(|p| p.0 == n) || table_param(n) {
                 // (a parameter by name, or a primitive not listed: its
@@ -2636,9 +2634,7 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
                 // the template's v part runs there)
                 add_heads(
                     &mut b.state,
-                    Some(&[
-                        "pg:", "box:", "lvlfix", "align", "badness",
-                    ]),
+                    Some(&["pg:", "box:", "lvlfix", "align", "badness"]),
                 );
                 return Hint {
                     bound: Some(b),
@@ -3093,7 +3089,8 @@ mod tests {
         for off in [0, 5, 10] {
             let v = st(off).expect("some");
             assert!(
-                !v.iter().any(|h| ["par:", "if:", "lopen:", "page:"].contains(&h.as_str())),
+                !v.iter()
+                    .any(|h| ["par:", "if:", "lopen:", "page:"].contains(&h.as_str())),
                 "{off}: {v:?}"
             );
         }

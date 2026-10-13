@@ -25,8 +25,8 @@
 //! rule: no `unsafe`; borrowed closures reach the workers through
 //! rayon's scoped API or `std::thread::scope`.
 
-use std::cell::RefCell;
 use phitex_defuse::FxHashMap;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 

@@ -65,7 +65,10 @@ impl Run<'_, '_> {
             t
         });
         let from = *HEARTBEAT_FROM.get_or_init(|| {
-            std::env::var("PHITEX_HEARTBEAT_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX)
+            std::env::var("PHITEX_HEARTBEAT_FROM")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(u64::MAX)
         });
         let trace = n >= from && n < from.saturating_add(150_000);
         if !n.is_multiple_of(100_000) && !trace {
@@ -1324,7 +1327,10 @@ impl Run<'_, '_> {
             line.push('\n');
             // a file whose read-back only defines: the definitions this
             // line's read-back makes go with it (`wdef:<field>`)
-            let e = if self.cx.is_loopback(self.keyed(crate::fields::Fam::Wkeys, name)) {
+            let e = if self
+                .cx
+                .is_loopback(self.keyed(crate::fields::Fam::Wkeys, &name))
+            {
                 let made = self.interpret_line(&line)?;
                 v.list(vec![v.str(&name), v.str(&line), made])
             } else {

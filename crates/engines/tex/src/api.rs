@@ -416,13 +416,17 @@ pub(crate) fn stream_entry(v: &Values, e: ValueId) -> ValueId {
 /// stood, page `j` where it fired) with each page's entries in place.
 /// Without a plan entry for them, the document nodes' entries go first.
 pub(crate) fn ordered_entries(v: &Values, plan: &[ValueId], streams: &[ValueId]) -> Vec<ValueId> {
-    let mut by_page: std::collections::BTreeMap<i64, Vec<ValueId>> = std::collections::BTreeMap::default();
+    let mut by_page: std::collections::BTreeMap<i64, Vec<ValueId>> =
+        std::collections::BTreeMap::default();
     let mut imm = Vec::new();
     for &e in streams {
         let xs = list_of(v, e);
         match xs.as_slice() {
             [j, x] if v.as_int(*j).is_some() => {
-                by_page.entry(v.as_int(*j).unwrap_or(0)).or_default().push(*x);
+                by_page
+                    .entry(v.as_int(*j).unwrap_or(0))
+                    .or_default()
+                    .push(*x);
             }
             _ => imm.push(e),
         }
@@ -1961,7 +1965,11 @@ impl Build {
         // from the start (`.bbl` and `.ind` stay files until their
         // BibTeX and makeindex nodes publish them)
         for ext in WRITTEN_EXTS {
-            g.written_file(&format!("{}.{ext}", opts.jobname), opts.fixpoint, &opts.finder);
+            g.written_file(
+                &format!("{}.{ext}", opts.jobname),
+                opts.fixpoint,
+                &opts.finder,
+            );
         }
         {
             g.absorb_provided();
