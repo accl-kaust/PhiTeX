@@ -224,7 +224,13 @@ var Viewer = class {
     if (img.w && img.h) this.size = { w: img.w, h: img.h };
     s.img = img;
     if (resized) queueMicrotask(() => this.redraw());
+    const was = s.drawn;
     s.drawn = hash ?? s.hash;
+    if (was && s.drawn && was !== s.drawn) {
+      s.el.classList.remove("changed");
+      void s.el.offsetWidth;
+      s.el.classList.add("changed");
+    }
     this.toPaint.add(s);
     if (!this.paintFrame) this.paintFrame = requestAnimationFrame(() => this.paintSome());
   }
@@ -352,11 +358,176 @@ var Viewer = class {
   }
 };
 
+// viewer/src/print.ts
+var TOKENS = `
+  --paper: #f1f1ef; --paper-2: #e6e6e3; --sheet: #ffffff;
+  --ink: #141414; --ink-2: #4a4a48; --ink-3: #8a8a86;
+  --rule: #c9c9c5; --rule-2: #dededa;
+  --mark: #d71920; --caution: #8a5a00;
+  --sans: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --serif: "Latin Modern Roman", "CMU Serif", "Computer Modern", Georgia, serif;
+`;
+var TOKENS_DARK = `
+  --paper: #121212; --paper-2: #1c1c1c; --sheet: #ffffff;
+  --ink: #e8e8e4; --ink-2: #a9a9a4; --ink-3: #6e6e6a;
+  --rule: #3a3a38; --rule-2: #2a2a28;
+  --mark: #ff4a3d; --caution: #d9a441;
+`;
+var CROP = `
+.slot::after { content: ""; position: absolute; inset: -14px; pointer-events: none;
+  --c: var(--ink-3, #8a8a86);
+  background:
+    linear-gradient(var(--c), var(--c)) left 14px top 0 / 1px 10px,
+    linear-gradient(var(--c), var(--c)) left 0 top 14px / 10px 1px,
+    linear-gradient(var(--c), var(--c)) right 14px top 0 / 1px 10px,
+    linear-gradient(var(--c), var(--c)) right 0 top 14px / 10px 1px,
+    linear-gradient(var(--c), var(--c)) left 14px bottom 0 / 1px 10px,
+    linear-gradient(var(--c), var(--c)) left 0 bottom 14px / 10px 1px,
+    linear-gradient(var(--c), var(--c)) right 14px bottom 0 / 1px 10px,
+    linear-gradient(var(--c), var(--c)) right 0 bottom 14px / 10px 1px;
+  background-repeat: no-repeat; }
+/* a page an edit changed: a change bar in the left margin, fading */
+.slot::before { content: ""; position: absolute; left: -9px; top: 0; bottom: 0; width: 2px; background: var(--mark, #d71920);
+  opacity: 0; pointer-events: none; }
+.slot.changed::before { animation: phx-revised 1.6s linear; }
+@keyframes phx-revised { 0%, 40% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .slot.changed::before { animation: none; } }
+`;
+var PAGE_CSS = CROP;
+var PRINT_CSS = `
+.win { ${TOKENS} }
+@media (prefers-color-scheme: dark) { .win:not(.light) { ${TOKENS_DARK} color-scheme: dark; } }
+.win.dark { ${TOKENS_DARK} color-scheme: dark; }
+.pkgs .icon { color: var(--ink-2); }
+
+.win, .win.docked { background: var(--paper); color: var(--ink); border: 1px solid var(--rule); border-radius: 0; box-shadow: none;
+  font: 12px/1.45 var(--sans); font-variant-numeric: tabular-nums; }
+.win.docked { border: 0; }
+.win *:focus-visible { outline: 1px solid var(--mark); outline-offset: 1px; }
+
+/* header: one thin bar, ink on paper, a hairline under it */
+header, .win.docked header { height: 30px; padding: 0 6px 0 10px; gap: 6px; background: var(--paper); color: var(--ink);
+  border-bottom: 1px solid var(--rule); }
+.title { font: 600 11px var(--sans); letter-spacing: .08em; text-transform: uppercase; margin: 0 8px 0 0; }
+.badge, .win.docked .badge { background: none; color: var(--ink-3); border-radius: 0; padding: 0; font: 400 11px var(--sans); font-variant: small-caps; letter-spacing: .04em; }
+header > .icon:first-child { display: none; }
+.chip, .win.docked .chip { background: none; border-radius: 0; padding: 0 6px; height: 30px; gap: 6px; font: 11px var(--mono); color: var(--ink-2);
+  border-left: 1px solid var(--rule-2); border-right: 1px solid var(--rule-2); }
+.dot { width: 6px; height: 6px; border-radius: 0; background: var(--ink-3); }
+.chip.ok .dot { background: var(--ink); } .chip.warning .dot { background: var(--caution); } .chip.error .dot { background: var(--mark); }
+.chip.busy .dot { animation: phx-blink .8s steps(2) infinite; }
+@keyframes phx-blink { 50% { opacity: 0; } }
+button.ib { border-radius: 0; width: 26px; height: 26px; color: var(--ink-2); }
+header button.ib:hover, .bar button.ib:hover, .win.docked header button.ib:hover { background: var(--paper-2); color: var(--ink); }
+button.ib[aria-pressed=true], .win.docked header button.ib[aria-pressed=true] { background: none; color: var(--mark); }
+button.ib.txt { width: auto; padding: 0 8px; font: 10px var(--sans); letter-spacing: .1em; text-transform: uppercase; }
+.win.no-footer > footer, .win.docked.own-header.no-footer > footer { display: none; }
+.speedchip:empty { display: none !important; }
+.pno { font: 11px var(--mono); color: var(--ink-2); min-width: 48px; }
+.bar { background: var(--paper); color: var(--ink-2); border-bottom: 1px solid var(--rule); padding: 4px 10px; }
+.bar label { font: 11px var(--sans); font-variant: small-caps; letter-spacing: .04em; }
+select { font: 11px var(--mono); color: var(--ink); background: var(--paper); border: 1px solid var(--rule); border-radius: 0; padding: 1px 4px; }
+button.btn { color: var(--ink); background: none; border: 1px solid var(--ink); border-radius: 0; padding: 2px 10px 2px 6px; font: 600 11px var(--sans);
+  letter-spacing: .04em; text-transform: uppercase; }
+button.btn:hover { background: var(--ink); color: var(--paper); }
+
+/* the problems' line and list: rules, not cards */
+.sum, .win.docked .sum, .win.docked.light .sum { background: var(--paper); color: var(--ink-2); border-bottom: 1px solid var(--rule); height: 24px; font: 11px var(--sans); }
+.sum:hover, .win.docked .sum:hover, .win.docked.light .sum:hover { background: var(--paper-2); }
+.sum .first, .win.docked .sum .first, .win.docked.light .sum .first { color: var(--ink); }
+.sum .n.error, .win.docked .sum .n.error, .win.docked.light .sum .n.error { color: var(--mark); }
+.sum .n.warning, .win.docked .sum .n.warning, .win.docked.light .sum .n.warning { color: var(--caution); }
+.sum .n.info, .win.docked .sum .n.info, .win.docked.light .sum .n.info { color: var(--ink-2); }
+.diags { background: var(--paper); border-bottom: 1px solid var(--ink); box-shadow: none; }
+.diag { border-top: 1px solid var(--rule-2); font: 12px var(--sans); }
+.diag[data-line]:hover { background: var(--paper-2); }
+.diag.error .icon { color: var(--mark); } .diag.warning .icon { color: var(--caution); } .diag.info .icon { color: var(--ink-3); }
+.diag .where { font: 11px var(--mono); color: var(--ink-3); }
+.diag .detail, .folded .detail { font: 11px/1.4 var(--mono); background: none; border-left: 1px solid var(--rule); border-radius: 0; padding: 2px 8px; }
+
+/* the stage: pages on paper, crop marks for a frame, no shadows */
+.stage, .win.docked .stage { background: var(--paper-2); padding: 24px; }
+.slot, .stage .slot, .win.docked .slot, .win.docked .stage .slot { margin: 28px auto; background: var(--sheet); box-shadow: none; border-radius: 0; }
+.win.docked.pdf-dark .slot { box-shadow: none; }
+.stage.stale .slot { opacity: .5; filter: grayscale(1); }
+.banner, .approx { background: var(--paper); color: var(--caution); border-bottom: 1px solid var(--rule); font: 11px var(--sans); }
+.slot .mark { border-radius: 0; background: rgb(255 214 0 / 45%); box-shadow: none; outline: 1px solid rgb(180 140 0 / 70%); animation: none; }
+
+/* the loading card: a blank proof with crop marks, its steps in small caps, a rule filling */
+.empty, .win.docked .empty, .win.docked.light .empty { color: var(--ink-2); padding: 48px 12px; font: 12px var(--sans); }
+.load, .win.docked .load, .win.docked.light .load, .win:not(.docked) .load { max-width: 340px; color: var(--ink-2); position: relative; padding: 22px 24px;
+  background: var(--sheet); color: #4a4a48; }
+.load::after { content: ""; position: absolute; inset: -14px; pointer-events: none; --c: var(--ink-3);
+  background:
+    linear-gradient(var(--c), var(--c)) left 14px top 0 / 1px 10px, linear-gradient(var(--c), var(--c)) left 0 top 14px / 10px 1px,
+    linear-gradient(var(--c), var(--c)) right 14px top 0 / 1px 10px, linear-gradient(var(--c), var(--c)) right 0 top 14px / 10px 1px,
+    linear-gradient(var(--c), var(--c)) left 14px bottom 0 / 1px 10px, linear-gradient(var(--c), var(--c)) left 0 bottom 14px / 10px 1px,
+    linear-gradient(var(--c), var(--c)) right 14px bottom 0 / 1px 10px, linear-gradient(var(--c), var(--c)) right 0 bottom 14px / 10px 1px;
+  background-repeat: no-repeat; }
+.load h3 { font: 400 17px/1.3 var(--serif); color: #141414; margin: 0 0 14px; }
+.load .steps { gap: 0; margin: 0 0 16px; font: 10px var(--sans); letter-spacing: .1em; text-transform: uppercase; color: #8a8a86; }
+.load .steps span { opacity: 1; gap: 0; }
+.load .steps span::before { display: none; }
+.load .steps span.ok { color: #4a4a48; }
+.load .steps span.now { color: #d71920; font-weight: 600; }
+.load .steps i { flex: 1; min-width: 12px; margin: 0 8px; height: 1px; background: #c9c9c5; opacity: 1; }
+.load .bar, .load .bar.busy { height: 1px; border-radius: 0; background: #dededa; }
+.load .bar i { background: #141414; border-radius: 0; transition: width .15s linear; }
+.load .bar:not(.busy) i { background-image: none; animation: none; }
+.load .bar.busy i { width: 20% !important; animation: phx-carriage 1.4s linear infinite; }
+@keyframes phx-carriage { from { transform: translateX(-100%); } to { transform: translateX(500%); } }
+.load .alive { font: 11px var(--mono); color: #4a4a48; margin-top: 10px; }
+.load .alive::before { display: none; }
+.load .count { font: 11px var(--mono); }
+.load .names span { border-radius: 0; background: none; border: 1px solid #dededa; font: 10px var(--mono); color: #4a4a48; }
+.load .names span.ok { color: #141414; }
+.load .names span.ing { animation: none; border-color: #d71920; }
+.load .note { font: 11px var(--sans); color: #8a8a86; }
+.load .btns .btn, .report .btn, .diags .reportbtn { border-radius: 0; border: 1px solid currentColor; font: 600 11px var(--sans); text-transform: uppercase; letter-spacing: .04em; }
+
+/* overlays: flat sheets with a rule, no blur, no shadow */
+.pkgs, .warmup, .diffbar, .diffset, .keyhelp, .about, .report, .win.docked.sheet-open > .bar {
+  border-radius: 0 !important; box-shadow: none !important; backdrop-filter: none !important;
+  background: var(--paper) !important; color: var(--ink) !important; border: 1px solid var(--ink) !important; font-family: var(--sans); }
+.pkgs { border-left: 2px solid var(--mark) !important; }
+.pkgs .mini, .pkgs .mini i { border-radius: 0; height: 1px; } .pkgs .mini i { background: var(--ink); }
+.warmup .dot, .diffbar .busy::before { border-radius: 0; width: 6px; height: 6px; background: var(--mark); animation: phx-blink .8s steps(2) infinite; }
+.warmup.ready { background: var(--paper) !important; color: var(--ink) !important; }
+.warmup .slow { color: var(--caution); }
+.diffbar button, .diffset button { border-radius: 0; color: var(--ink); }
+.diffbar button:hover:not(:disabled), .diffset button:hover { background: var(--paper-2); }
+.diffbar button.cur, .diffset button[aria-pressed=true] { background: var(--ink); color: var(--paper); }
+.diffbar .sep { background: var(--rule); }
+.diffset h4 { color: var(--ink-3); }
+.diffset .sample { border-radius: 0; font-family: var(--serif); }
+.diffset .pair i { border-radius: 0; }
+.keyhelp kbd { font: 11px var(--mono); background: none; border: 1px solid var(--rule); border-radius: 0; }
+.about a { color: var(--mark); }
+.about .about-foot { color: var(--ink-3); }
+
+/* the time to the screen and who made this: set like a folio, not pills */
+.speedchip, .win.docked .speedchip { height: auto; padding: 2px 6px; border-radius: 0; background: var(--paper); color: var(--ink);
+  border: 1px solid var(--rule); box-shadow: none; font: 11px var(--mono); }
+.speedchip.slow { color: var(--caution); background: var(--paper); }
+.speedchip.flash { animation: phx-tick .4s linear; }
+@keyframes phx-tick { from { border-color: var(--mark); } }
+.win.docked .byline, .win.docked.light .byline { border-radius: 0; background: var(--paper); color: var(--ink-3); backdrop-filter: none;
+  font: 10px/20px var(--sans); height: 20px; letter-spacing: .1em; text-transform: uppercase; border: 1px solid var(--rule-2); }
+.win.docked .byline:hover { color: var(--ink); background: var(--paper); }
+
+footer { background: var(--paper); color: var(--ink-3); border-top: 1px solid var(--rule); font: 11px var(--mono); height: 22px; }
+footer .msg.err { color: var(--mark); }
+.details { font: 11px var(--mono); color: var(--ink-2); border-top: 1px solid var(--rule); }
+.side { background: var(--paper); color: var(--ink); border-right: 1px solid var(--rule); }
+.win.collapsed, .win.collapsed header { border-radius: 0; }
+`;
+
 // viewer/src/css.ts
 var VIEWER_CSS = `
-.slot { position: relative; contain: layout paint; background: #fff; }
+.slot { position: relative; contain: layout; background: #fff; }
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
-`;
+${PAGE_CSS}`;
 
 // viewer/src/problems.ts
 var esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -388,34 +559,36 @@ function item(p) {
   return `<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${esc(String(p.severity))}</span>${p.code ? `<code class="phx-code">${esc(p.code)}</code>` : ""}<span>${esc(p.message)}</span></div>${where ? `<div class="phx-where">${where}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...p.help, ...p.suggestions])}</li>`;
 }
 var PROBLEMS_CSS = `
-.phx-problems { position: fixed; inset: 0; z-index: 10; background: rgba(0, 0, 0, 0.45); overflow: auto; padding: 48px 16px; }
-.phx-card { max-width: 960px; margin: 0 auto; background: #1b1c1f; color: #e6e6e6; border-radius: 10px; border-top: 6px solid #e5484d;
-  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5); font: 13px/1.5 system-ui, sans-serif; }
-.phx-card header { display: flex; align-items: center; gap: 8px; padding: 14px 18px; border-bottom: 1px solid #2c2e33; font-size: 15px; }
-.phx-card header b { color: #ff6369; }
-.phx-close { margin-left: auto; background: #2c2e33; color: #bbb; border: 0; border-radius: 6px; padding: 3px 10px; font: 12px ui-monospace, monospace; cursor: pointer; }
+.phx-problems { position: fixed; inset: 0; z-index: 10; background: rgb(18 18 18 / 55%); overflow: auto; padding: 48px 16px; }
+.phx-card { max-width: 900px; margin: 0 auto; background: #fff; color: #141414; border-radius: 0; border-left: 2px solid #d71920;
+  box-shadow: none; font: 13px/1.5 "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+.phx-card header { display: flex; align-items: baseline; gap: 10px; padding: 14px 20px 10px; border-bottom: 1px solid #141414; font-size: 13px; }
+.phx-card header b { color: #141414; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; font-size: 11px; }
+.phx-close { margin-left: auto; background: none; color: #4a4a48; border: 1px solid #c9c9c5; border-radius: 0; padding: 1px 8px;
+  font: 11px "IBM Plex Mono", ui-monospace, monospace; cursor: pointer; }
+.phx-close:hover { border-color: #141414; color: #141414; }
 .phx-card ol { list-style: none; margin: 0; padding: 0; }
-.phx-card li { padding: 14px 18px; border-bottom: 1px solid #2c2e33; }
-.phx-msg { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; font-size: 14px; }
-.phx-sev { text-transform: uppercase; font-size: 11px; letter-spacing: 0.06em; font-weight: 700; padding: 1px 6px; border-radius: 4px; }
-.phx-error .phx-sev { background: #e5484d; color: #fff; }
-.phx-warning .phx-sev { background: #f5a524; color: #1b1c1f; }
-.phx-note .phx-sev { background: #3e63dd; color: #fff; }
-.phx-code { color: #9a9a9a; font: 12px ui-monospace, monospace; }
-.phx-where { margin-top: 4px; font: 12px ui-monospace, monospace; }
-.phx-place { color: #70b8ff; text-decoration: none; }
-.phx-place:hover { text-decoration: underline; }
-.phx-excerpt, .phx-ctx pre { margin: 8px 0 0; padding: 8px 10px; background: #111214; border-radius: 6px; overflow-x: auto;
-  font: 12px/1.45 ui-monospace, monospace; white-space: pre; color: #cfcfcf; }
-.phx-excerpt mark, .phx-ctx mark { background: none; color: #ff6369; text-decoration: underline wavy #ff6369; text-underline-offset: 3px; }
-.phx-ln { color: #666; }
-.phx-notes, .phx-help { margin: 8px 0 0; padding-left: 18px; color: #b5b5b5; }
-.phx-help li::marker { content: "\u2192 "; color: #70b8ff; }
-.phx-ctx { margin-top: 8px; color: #b5b5b5; }
+.phx-card li { padding: 14px 20px; border-bottom: 1px solid #dededa; }
+.phx-msg { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; font-size: 14px; }
+.phx-sev { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; font-weight: 600; padding: 0; border-radius: 0; background: none; }
+.phx-error .phx-sev { color: #d71920; }
+.phx-warning .phx-sev { color: #8a5a00; }
+.phx-note .phx-sev { color: #8a8a86; }
+.phx-code { color: #8a8a86; font: 11px "IBM Plex Mono", ui-monospace, monospace; }
+.phx-where { margin-top: 2px; font: 11px "IBM Plex Mono", ui-monospace, monospace; color: #4a4a48; }
+.phx-place { color: #141414; text-decoration: underline; text-decoration-color: #c9c9c5; text-underline-offset: 2px; }
+.phx-place:hover { text-decoration-color: #d71920; }
+.phx-excerpt, .phx-ctx pre { margin: 10px 0 0; padding: 6px 0 6px 12px; background: none; border-left: 1px solid #c9c9c5; border-radius: 0; overflow-x: auto;
+  font: 12px/1.5 "IBM Plex Mono", ui-monospace, monospace; white-space: pre; color: #141414; }
+.phx-excerpt mark, .phx-ctx mark { background: none; color: #d71920; text-decoration: underline 1.5px #d71920; text-underline-offset: 3px; }
+.phx-ln { color: #8a8a86; }
+.phx-notes, .phx-help { margin: 8px 0 0; padding-left: 16px; color: #4a4a48; }
+.phx-help li::marker { content: "\u2192 "; color: #d71920; }
+.phx-ctx { margin-top: 8px; color: #4a4a48; }
 .phx-ctx summary { cursor: pointer; }
-.phx-ctx code { color: #e6e6e6; }
-.phx-inc { margin-top: 6px; color: #9a9a9a; font-size: 12px; }
-.phx-card footer { padding: 10px 18px; color: #8a8a8a; font-size: 12px; }
+.phx-ctx code { color: #141414; }
+.phx-inc { margin-top: 6px; color: #8a8a86; font-size: 12px; }
+.phx-card footer { padding: 10px 20px; color: #8a8a86; font-size: 11px; }
 `;
 
 // viewer/src/outline.ts
@@ -728,7 +901,8 @@ var OVERLEAF_WORDS = {
   notReady: "Use Overleaf's PDF for it",
   openFailed: "Overleaf's PDF is one click away. Reload the tab to try again.",
   reading: "Your project's files stay in this browser: read from Overleaf, typeset here.",
-  keptIn: "this browser"
+  keptIn: "this browser",
+  steps: ["Project", "Packages", "Typesetting"]
 };
 function safeColor(c, or) {
   return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
@@ -752,6 +926,7 @@ var PATHS = {
   info: "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"
 };
 var icon = (name, size = 18) => `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
+var stepsHtml = (names, state) => `<div class="steps">${names.map((n, k) => `<span class="${state[k]}">${n}</span>`).join("<i></i>")}</div>`;
 var CSS = `
 :host { all: initial; }
 * { box-sizing: border-box; }
@@ -1050,7 +1225,7 @@ var Panel = class {
     const w = this.words = { ...OVERLEAF_WORDS, ...opts.words };
     const host2 = document.createElement("phitex-preview");
     this.root = host2.attachShadow({ mode: "open" });
-    this.root.innerHTML = `<style>${VIEWER_CSS}${PROBLEMS_CSS}${OUTLINE_CSS}${CSS}</style>
+    this.root.innerHTML = `<style>${VIEWER_CSS}${PROBLEMS_CSS}${OUTLINE_CSS}${CSS}${PRINT_CSS}</style>
 <div class="win" role="dialog" aria-label="PhiTeX preview">
   <header>
     <span class="icon" aria-hidden="true">preview</span>
@@ -1087,7 +1262,7 @@ var Panel = class {
       <textarea id="reporttext" readonly spellcheck="false"></textarea>
       <div class="btns"><button class="btn" id="reportcopy">Copy</button><button class="btn" id="reportmail">Email</button><button class="btn" id="reportclose">Close</button></div>
     </div>
-    <div class="speedchip" id="speedchip" aria-live="off">\u26A1 \u2013 ms</div>
+    <div class="speedchip" id="speedchip" aria-live="off" title="From the keystroke to the page on screen"></div>
     <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
     <div class="diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="pkgs" id="pkgs" role="status" aria-live="polite"></div>
@@ -1098,7 +1273,7 @@ var Panel = class {
     </div>
     <nav class="side" id="side" aria-label="Contents"></nav>
     <div class="keyhelp" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
-    <div class="stage" id="stage"><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load"><div class="steps"><span class="now">Project read</span><i></i><span>Packages</span><i></i><span>Typesetting</span></div><h3>Reading the project\u2026</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
+    <div class="stage" id="stage"><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load">${stepsHtml(w.steps, ["now", "", ""])}<h3>${w.steps[0]}\u2026</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
   </div>
   <footer><span class="lat" id="lat" title="Click for details">\u2013</span><span class="grow"></span><span class="msg" id="msg">all local</span></footer>
 </div>`.replace(/<span class="icon"(?: aria-hidden="true")?>(\w+)<\/span>/g, (_, n) => icon(n, n === "download" ? 16 : 18));
@@ -1500,7 +1675,7 @@ var Panel = class {
       el.textContent = `Reading \xB7 ${s} s`;
       return;
     }
-    el.textContent = fetching ? quiet < 4 ? `Still fetching \xB7 ${s} s \xB7 files arriving` : `Still fetching \xB7 ${s} s \xB7 a large package (TikZ, fonts) is on its way` : `Typesetting \xB7 ${s} s`;
+    el.textContent = fetching ? quiet < 4 ? `Still fetching \xB7 ${s} s \xB7 files arriving` : `Still fetching \xB7 ${s} s \xB7 a large package (TikZ, fonts) is on its way` : `${this.words.steps[2]} \xB7 ${s} s`;
     if (s >= 20 && fetching) el.textContent += " \xB7 only the first time: next visits reuse them";
   }
   /** The reading step's last state, and when its card last changed (redrawn at most every 50 ms). */
@@ -1530,7 +1705,7 @@ var Panel = class {
     const empty = this.$("#empty");
     let card = empty.querySelector(".load.reading");
     if (!card) {
-      empty.innerHTML = `<div class="load reading"><div class="steps"><span class="now">Project</span><i></i><span>Packages</span><i></i><span>Typesetting</span></div><h3></h3><div class="bar busy"><i></i></div><div class="alive" data-phase="read"></div><div class="count"></div><div class="names"></div><div class="note">${this.words.reading}</div></div>`;
+      empty.innerHTML = `<div class="load reading">${stepsHtml(this.words.steps, ["now", "", ""])}<h3></h3><div class="bar busy"><i></i></div><div class="alive" data-phase="read"></div><div class="count"></div><div class="names"></div><div class="note">${this.words.reading}</div></div>`;
       card = empty.querySelector(".load.reading");
     }
     card.querySelector("h3").textContent = r.h;
@@ -1565,7 +1740,7 @@ var Panel = class {
       if (!p.loading.length && !p.building) {
         this.pkgBusy = false;
         if (!this.stopped()) {
-          empty.innerHTML = `<div class="load"><div class="steps"><span class="ok">Project read</span><i></i><span class="ok">Packages</span><i></i><span class="now">Typesetting</span></div><h3>Typesetting\u2026</h3><div class="bar busy"><i></i></div><div class="alive" data-phase="tex"></div></div>`;
+          empty.innerHTML = `<div class="load">${stepsHtml(this.words.steps, ["ok", "ok", "now"])}<h3>${this.words.steps[2]}\u2026</h3><div class="bar busy"><i></i></div><div class="alive" data-phase="tex"></div></div>`;
           this.loadT0 ||= performance.now();
           this.alive();
           this.loadTick ??= setInterval(() => this.alive(), 1e3);
@@ -1575,7 +1750,7 @@ var Panel = class {
       const recent = [...(p.done ?? []).slice(-10).map((n) => [n, "ok"]), ...p.loading.slice(0, 8).map((n) => [n, "ing"])];
       const fetch2 = p.loading.length > 0;
       this.pkgBusy = true;
-      empty.innerHTML = `<div class="load"><div class="steps"><span class="ok">Project read</span><i></i><span class="${fetch2 ? "now" : "ok"}">Packages</span><i></i><span class="${fetch2 ? "" : "now"}">Typesetting</span></div><h3></h3><div class="bar${fetch2 ? "" : " busy"}"><i style="width:${pct}%"></i></div><div class="alive" data-phase="${fetch2 ? "fetch" : "tex"}"></div><div class="count"></div><div class="names"></div><div class="note"></div></div>`;
+      empty.innerHTML = `<div class="load">${stepsHtml(this.words.steps, ["ok", fetch2 ? "now" : "ok", fetch2 ? "" : "now"])}<h3></h3><div class="bar${fetch2 ? "" : " busy"}"><i style="width:${pct}%"></i></div><div class="alive" data-phase="${fetch2 ? "fetch" : "tex"}"></div><div class="count"></div><div class="names"></div><div class="note"></div></div>`;
       this.alive();
       this.loadTick ??= setInterval(() => this.alive(), 1e3);
       empty.querySelector("h3").textContent = p.loading.length ? "Fetching LaTeX packages\u2026" : "Typesetting\u2026";
@@ -1661,7 +1836,7 @@ var Panel = class {
   scale() {
     if (this.prefs.zoom !== "fit") return Number(this.prefs.zoom);
     const pageW = (this.last?.w ?? 612) * (96 / 72);
-    return Math.max(this.$("#stage").clientWidth - (this.docked ? 40 : 24), 200) / pageW;
+    return Math.max(this.$("#stage").clientWidth - 80, 200) / pageW;
   }
   goPage(k) {
     this.viewer.goTo(k);
@@ -1691,10 +1866,32 @@ var Panel = class {
     if (this.prefs.zoom === "fit") this.redraw();
   }
   /** A button of the host's in the header, before the page controls (the CLI's Compare). */
+  /**
+   * The loading card at step `k` (0, 1, 2 of the words' steps), saying
+   * `text` (the host's own phases: the CLI's build); nothing once a page
+   * is shown.
+   */
+  loadStep(k, text) {
+    if (this.last) return;
+    clearInterval(this.loadTick);
+    this.loadTick = void 0;
+    const empty = this.$("#empty");
+    let card = empty.querySelector(".load");
+    if (!card || card.querySelector(".engine")) {
+      empty.innerHTML = `<div class="load">${stepsHtml(this.words.steps, ["", "", ""])}<h3></h3><div class="bar busy"><i></i></div><div class="alive"></div></div>`;
+      empty.style.display = "";
+      card = empty.querySelector(".load");
+    }
+    card.querySelectorAll(".steps span").forEach((s, i) => s.className = i < k ? "ok" : i === k ? "now" : "");
+    card.querySelector("h3").textContent = `${this.words.steps[k]}\u2026`;
+    let alive = card.querySelector(".alive");
+    if (!alive) card.append(alive = Object.assign(document.createElement("div"), { className: "alive" }));
+    alive.textContent = text;
+    delete alive.dataset.phase;
+  }
   headerButton(label, title, onclick) {
     const b = document.createElement("button");
-    b.className = "ib";
-    b.style.cssText = "width:auto;padding:0 8px;font-size:12px";
+    b.className = "ib txt";
     b.title = title;
     b.textContent = label;
     b.onclick = () => onclick(b);
@@ -1704,6 +1901,7 @@ var Panel = class {
   /** The contents and the keys, as the host asked (PanelOptions). */
   extras(opts) {
     if (opts.header) this.win.classList.add("own-header");
+    if (opts.footer === false) this.win.classList.add("no-footer");
     if (opts.outline) {
       this.win.classList.add("has-side");
       this.contents = new Outline(this.$("#side"), { goToPlace: (k, top) => this.viewer.goToPlace(k, top) });
@@ -1810,7 +2008,7 @@ var Panel = class {
   painted(ms) {
     this.speed = { ms, at: performance.now() };
     const chip = this.$("#speedchip");
-    chip.textContent = `\u26A1 ${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
+    chip.textContent = `${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
     chip.classList.toggle("slow", ms > 100);
     chip.classList.remove("flash");
     void chip.offsetWidth;
@@ -1904,14 +2102,14 @@ var Panel = class {
     clearInterval(this.warmTimer);
     if (w.state === "ready") {
       el.className = "warmup on ready";
-      el.innerHTML = `<span class="dot"></span>\u26A1 Instant typing ready`;
+      el.innerHTML = `<span class="dot"></span>Instant typing ready`;
       this.warmTimer = setTimeout(() => el.className = "warmup", 2500);
       return;
     }
     const since = w.since ?? Date.now();
     const tick = () => {
       const s = Math.round((Date.now() - since) / 1e3);
-      el.innerHTML = `<span class="dot"></span><span>\u26A1 Preview ready \xB7 preparing instant typing\u2026 ${s} s${w.slow ? ` <span class="slow">\xB7 edits slower until ready</span>` : ""}</span>`;
+      el.innerHTML = `<span class="dot"></span><span>Preview ready \xB7 preparing instant typing\u2026 ${s} s${w.slow ? ` <span class="slow">\xB7 edits slower until ready</span>` : ""}</span>`;
     };
     el.className = "warmup on";
     tick();
@@ -3927,11 +4125,12 @@ var panel = new Panel(
     outline: true,
     keys: true,
     header: true,
+    footer: false,
     words: {
       badge: "watch",
       badgeTitle: "phitex watch: built from the files on disk, again at each save",
-      byline: "\u26A1 phitex watch",
-      about: `<b>\u26A1 phitex watch</b>: the document built from the files on disk, again at each save, its pages here as
+      byline: "phitex watch",
+      about: `<b>phitex watch</b>: the document built from the files on disk, again at each save, its pages here as
         they are shipped. Nothing leaves this machine.
         <div class="about-foot">Free software (AGPL-3.0-only), provided as is, without any warranty.</div>`,
       openFailed: "Restart phitex watch, then reload this page.",
@@ -3940,6 +4139,7 @@ var panel = new Panel(
       preparing: "Building\u2026 {s} s",
       stopped: "The build stopped: its problems are listed above (e).",
       notReady: "This engine does not run here yet.",
+      steps: ["Connected", "Format", "Building"],
       realPdf: ""
     }
   }
@@ -3998,19 +4198,20 @@ var controls = new DiffControls(panel, runner);
 addEventListener("keydown", (e) => controls.key(e));
 document.head.append(Object.assign(document.createElement("style"), {
   textContent: COMMITS_CSS + `
-#phx-pick { position: fixed; z-index: 20; top: 44px; right: 12px; width: min(560px, calc(100vw - 24px)); max-height: 70vh; overflow: auto;
-  background: #fff; color: #1b222c; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.35); font: 13px system-ui, sans-serif; }
-#phx-pick header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid #e7e9ee; }
-#phx-pick header small { color: #6b7280; }
-#phx-pick header button { margin-left: auto; border: 0; background: #e7e9ee; border-radius: 6px; padding: 2px 10px; cursor: pointer; }
-@media (prefers-color-scheme: dark) { #phx-pick { background: #1b222c; color: #f4f5f6; } #phx-pick header { border-color: #2f3a4c; } #phx-pick header button { background: #2f3a4c; color: #f4f5f6; } }`
+#phx-pick { position: fixed; z-index: 20; top: 36px; right: 12px; width: min(560px, calc(100vw - 24px)); max-height: 70vh; overflow: auto;
+  background: #f1f1ef; color: #141414; border: 1px solid #141414; border-radius: 0; box-shadow: none; font: 12px "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+#phx-pick header { display: flex; align-items: baseline; gap: 10px; padding: 8px 12px; border-bottom: 1px solid #c9c9c5; }
+#phx-pick header b { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+#phx-pick header small { color: #8a8a86; }
+#phx-pick header button { margin-left: auto; border: 1px solid #c9c9c5; background: none; border-radius: 0; padding: 0 8px; cursor: pointer; font: 11px ui-monospace, monospace; }
+@media (prefers-color-scheme: dark) { #phx-pick { background: #121212; color: #e8e8e4; border-color: #e8e8e4; } #phx-pick header { border-color: #3a3a38; } #phx-pick header button { border-color: #3a3a38; color: #e8e8e4; } }`
 }));
 var pick;
 var graph;
 var closePick = () => {
   if (pick) pick.hidden = true;
 };
-panel.headerButton("\u21C4 Compare", "Compare with a past version: the commit graph (click From, shift-click To, double-click a commit against its parent)", () => {
+panel.headerButton("Compare", "Compare with a past version: the commit graph (click From, shift-click To, double-click a commit against its parent)", () => {
   if (pick && !pick.hidden) return closePick();
   if (!pick) {
     pick = document.createElement("div");
@@ -4057,38 +4258,42 @@ setTimeout(() => void unreached(), 3e3);
 void sock.connect();
 document.head.append(Object.assign(document.createElement("style"), {
   textContent: `
-#phx-bar { position: fixed; left: 0; right: 0; bottom: 0; height: 24px; z-index: 15; display: flex; align-items: center; gap: 8px;
-  padding: 0 10px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; background: #f4f5f6; color: #3c4655; border-top: 1px solid #e0e3e8;
+#phx-bar, #phx-con { --paper: #f1f1ef; --paper-2: #e6e6e3; --ink: #141414; --ink-2: #4a4a48; --ink-3: #8a8a86; --rule: #c9c9c5; --mark: #d71920; --caution: #8a5a00;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace; --sans: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+#phx-bar { position: fixed; left: 0; right: 0; bottom: 0; height: 24px; z-index: 15; display: flex; align-items: center; gap: 10px;
+  padding: 0 10px; font: 11px var(--mono); font-variant-numeric: tabular-nums; background: var(--paper); color: var(--ink-2); border-top: 1px solid var(--rule);
   cursor: pointer; user-select: none; white-space: nowrap; overflow: hidden; }
-#phx-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: #9aa3b0; flex: none; }
-#phx-bar .dot.ok { background: #2e9e4f; } #phx-bar .dot.bad { background: #d23f3f; }
-#phx-bar .dot.busy { background: #2f7de1; animation: phx-pulse 1s infinite alternate; }
-@keyframes phx-pulse { to { opacity: .3; } }
+#phx-bar .dot { width: 6px; height: 6px; background: var(--ink-3); flex: none; }
+#phx-bar .dot.ok { background: var(--ink); } #phx-bar .dot.bad { background: var(--mark); }
+#phx-bar .dot.busy { background: var(--mark); animation: phx-blink .8s steps(2) infinite; }
+@keyframes phx-blink { 50% { opacity: 0; } }
 #phx-bar .text { overflow: hidden; text-overflow: ellipsis; flex: 1; }
-#phx-bar .new { flex: none; border-radius: 8px; padding: 0 7px; background: #d23f3f; color: #fff; }
-#phx-bar .new.warn { background: #c98a00; }
-#phx-bar .hint { flex: none; opacity: .6; }
+#phx-bar .new { flex: none; padding: 0; color: var(--mark); }
+#phx-bar .new.warn { color: var(--caution); }
+#phx-bar .hint { flex: none; color: var(--ink-3); font-family: var(--sans); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+#phx-bar:hover .hint { color: var(--ink); }
 #phx-con { position: fixed; left: 0; right: 0; bottom: 24px; height: 38vh; z-index: 15; display: flex; flex-direction: column;
-  background: #fbfbfc; color: #1b222c; border-top: 1px solid #d6dae1; box-shadow: 0 -6px 20px rgba(0,0,0,.12); }
+  background: var(--paper); color: var(--ink); border-top: 1px solid var(--ink); }
 #phx-con[hidden] { display: none; }
-#phx-con header { display: flex; align-items: center; gap: 8px; padding: 4px 10px; font: 12px system-ui, sans-serif; border-bottom: 1px solid #e7e9ee; }
-#phx-con header button { border: 0; background: #e7e9ee; color: inherit; border-radius: 6px; padding: 1px 9px; cursor: pointer; font: inherit; }
+#phx-con header { display: flex; align-items: baseline; gap: 10px; padding: 5px 10px; font: 11px var(--sans); border-bottom: 1px solid var(--rule); }
+#phx-con header b { font-weight: 600; letter-spacing: .1em; text-transform: uppercase; font-size: 10px; }
+#phx-con header small { color: var(--ink-3); }
+#phx-con header button { border: 1px solid var(--rule); background: none; color: var(--ink-2); border-radius: 0; padding: 0 8px; cursor: pointer;
+  font: 10px var(--sans); letter-spacing: .08em; text-transform: uppercase; }
+#phx-con header button:hover { border-color: var(--ink); color: var(--ink); }
 #phx-con header button:first-of-type { margin-left: auto; }
-#phx-con .log { flex: 1; overflow: auto; margin: 0; padding: 6px 10px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
-#phx-con .error { color: #c62828; } #phx-con .warning { color: #9a6700; } #phx-con .note, #phx-con .dim { color: #6b7280; }
-#phx-con .ok { color: #1f7a3a; } #phx-con .busy { color: #2f7de1; }
+#phx-con .log { flex: 1; overflow: auto; margin: 0; padding: 8px 10px; font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word; }
+#phx-con .error { color: var(--mark); } #phx-con .warning { color: var(--caution); } #phx-con .note, #phx-con .dim { color: var(--ink-3); }
+#phx-con .ok { color: var(--ink); } #phx-con .busy { color: var(--ink-2); }
 @media (prefers-color-scheme: dark) {
-  #phx-bar { background: #161b22; color: #c9d1d9; border-color: #2f3a4c; }
-  #phx-con { background: #0f141a; color: #e6edf3; border-color: #2f3a4c; }
-  #phx-con header { border-color: #2f3a4c; } #phx-con header button { background: #2f3a4c; }
-  #phx-con .error { color: #ff7b72; } #phx-con .warning { color: #e3b341; } #phx-con .ok { color: #56d364; }
+  #phx-bar, #phx-con { --paper: #121212; --paper-2: #1c1c1c; --ink: #e8e8e4; --ink-2: #a9a9a4; --ink-3: #6e6e6a; --rule: #3a3a38; --mark: #ff4a3d; --caution: #d9a441; }
 }`
 }));
 pane.style.bottom = "24px";
 var bar = document.createElement("div");
 bar.id = "phx-bar";
 bar.title = "phitex watch's status: click (or `) for everything it printed";
-bar.innerHTML = `<span class="dot"></span><span class="text">phitex watch</span><span class="new" hidden></span><span class="hint">\` terminal</span>`;
+bar.innerHTML = `<span class="dot"></span><span class="text">phitex watch</span><span class="new" hidden></span><span class="hint">\` Terminal</span>`;
 var con = document.createElement("div");
 con.id = "phx-con";
 con.hidden = true;
@@ -4120,7 +4325,15 @@ var look = (s) => {
 };
 var said = (s, live) => {
   if (s.kind === "status") return void (status = s, showBar());
-  if (s.kind === "busy") return void (busy = s.text ?? "", showBar());
+  if (s.kind === "busy") {
+    busy = s.text ?? "";
+    const parts = busy.split(" \xB7 ");
+    if (parts.length >= 3) {
+      const phase = parts[1];
+      panel.loadStep(phase === "format" ? 1 : 2, `${phase} \xB7 ${parts.slice(2).join(" \xB7 ")}`);
+    }
+    return void showBar();
+  }
   if (s.kind === "event") return;
   const at = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
   const line = document.createElement("div");
