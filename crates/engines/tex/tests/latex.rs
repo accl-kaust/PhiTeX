@@ -541,8 +541,8 @@ fn pdf_cache() -> PathBuf {
 /// A `pdfdocs` document built cold from `dir` (the format cached):
 /// byte-identical to its oracle, its document nodes counted.
 fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
-    let want =
-        std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf"))).expect("the oracle");
+    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
+        .expect("the oracle");
     let cache = pdf_cache();
     let cached = cache.exists();
     let b = common::build(pdf_opts(name, dir), Some(&prelude(true)), src);
@@ -605,7 +605,10 @@ fn edit_check(name: &str, b: &Build, cold: &Build, k: u64) {
 fn paragraphs(src: &str) -> u64 {
     let a = src.find("\\begin{document}").map_or(0, |a| a + 16);
     let e = src.find("\\end{document}").unwrap_or(src.len());
-    src[a..e].split("\n\n").filter(|p| !p.trim().is_empty()).count() as u64
+    src[a..e]
+        .split("\n\n")
+        .filter(|p| !p.trim().is_empty())
+        .count() as u64
 }
 
 /// The text with the five bytes after `marker` replaced by `quack`.
@@ -644,7 +647,10 @@ fn latex_environments() {
     let (mut b, regions) = cold_nodes("envs", &dir, &src);
     let pars = paragraphs(&src);
     eprintln!("envs: {regions} document nodes for {pars} paragraphs");
-    assert!(regions >= pars, "{regions} document nodes for {pars} paragraphs");
+    assert!(
+        regions >= pars,
+        "{regions} document nodes for {pars} paragraphs"
+    );
     let new = quack(&src, "Item 3 of the list: the quick ");
     b.edit(&new);
     let cold = common::build(pdf_opts("envs", &dir), Some(&prelude(true)), &new);

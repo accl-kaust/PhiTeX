@@ -1933,7 +1933,10 @@ pub(crate) fn carried_conds(v: &Values, args: &[ValueId]) -> Option<(Vec<u8>, Ve
     }
     let ns: Vec<i64> = xs[1..].iter().map(|&x| int_of(v, x)).collect();
     let k = ns.iter().position(|&x| x < 0)?;
-    let conds = ns[..k].iter().map(|&c| u8::try_from(c).unwrap_or(0)).collect();
+    let conds = ns[..k]
+        .iter()
+        .map(|&c| u8::try_from(c).unwrap_or(0))
+        .collect();
     let codes = ns[k + 1..]
         .iter()
         .map(|&c| i32::try_from(c).unwrap_or(0))
