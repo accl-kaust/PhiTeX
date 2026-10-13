@@ -173,9 +173,9 @@ impl Run<'_, '_> {
         if self.is_other(b'`') {
             // §442
             self.get_token()?;
-            let t = self.cur.tok.clone();
-            val = match &t {
-                Tok::S(n) => {
+            let t = self.cur.tok;
+            val = match t.as_cs() {
+                Some(n) => {
                     let mut cs = n.chars();
                     match (cs.next(), cs.next()) {
                         (Some(c), None) if !n.starts_with('\u{10FFFE}') => {
@@ -184,7 +184,7 @@ impl Run<'_, '_> {
                         _ => 256,
                     }
                 }
-                Tok::C(_) => i32::try_from(t.chr()).unwrap_or(0),
+                None => i32::try_from(t.chr()).unwrap_or(0),
             };
             if val > 255 {
                 // "Improper alphabetic constant"

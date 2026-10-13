@@ -33,9 +33,9 @@ pub(crate) fn shown_name(name: &str) -> &str {
 /// `print_cs` (§262): `cat` gives the category code of a one-character
 /// name's character.
 pub(crate) fn print_cs(out: &mut String, t: &Tok, escape: i64, cat: &mut dyn FnMut(u32) -> i64) {
-    match t {
-        Tok::S(name) => {
-            let n = shown_name(name);
+    match t.as_cs() {
+        Some(name) => {
+            let n = shown_name(name.name());
             let mut chars = n.chars();
             match (chars.next(), chars.next()) {
                 (None, _) => {
@@ -55,15 +55,15 @@ pub(crate) fn print_cs(out: &mut String, t: &Tok, escape: i64, cat: &mut dyn FnM
                 }
             }
         }
-        Tok::C(_) => push_code(out, t.chr()),
+        None => push_code(out, t.chr()),
     }
 }
 
 /// `sprint_cs` (§263).
 pub(crate) fn sprint_cs(out: &mut String, t: &Tok, escape: i64) {
-    match t {
-        Tok::S(name) => {
-            let n = shown_name(name);
+    match t.as_cs() {
+        Some(name) => {
+            let n = shown_name(name.name());
             if n.is_empty() {
                 print_esc(out, "csname", escape);
                 print_esc(out, "endcsname", escape);
@@ -71,7 +71,7 @@ pub(crate) fn sprint_cs(out: &mut String, t: &Tok, escape: i64) {
                 print_esc(out, n, escape);
             }
         }
-        Tok::C(_) => push_code(out, t.chr()),
+        None => push_code(out, t.chr()),
     }
 }
 

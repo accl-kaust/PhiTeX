@@ -345,7 +345,7 @@ pub(crate) fn initex(v: &phitex_defuse::Values) -> Vec<(String, ValueId)> {
 /// primitive meaning, whatever it means now.
 pub(crate) fn pdf_primitive(r: &mut Run<'_, '_>) -> R<()> {
     r.get_token()?;
-    let Tok::S(name) = r.cur.tok.clone() else {
+    let Some(name) = r.cur.tok.as_cs() else {
         r.log("error", "Missing primitive name")?;
         r.back_cur();
         return Ok(());
@@ -369,9 +369,11 @@ pub(crate) fn pdf_primitive(r: &mut Run<'_, '_>) -> R<()> {
 /// `\ifpdfprimitive` (pdfTeX §1684).
 pub(crate) fn if_pdf_primitive(r: &mut Run<'_, '_>) -> R<bool> {
     r.get_token()?;
-    let t = r.cur.tok.clone();
-    let Tok::S(name) = &t else { return Ok(false) };
-    let Some((n, _, _)) = crate::val::prim(name) else {
+    let t = r.cur.tok;
+    let Some(name) = t.as_cs() else {
+        return Ok(false);
+    };
+    let Some((n, _, _)) = crate::val::prim(&name) else {
         return Ok(false);
     };
     Ok(matches!(&r.cur.mean, Mean::Prim(m, _, _) if *m == n))
@@ -1578,9 +1580,9 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
     if c == cmd::SET_INTERACTION && (chr == 11 || chr == 12) {
         // \letterspacefont, \pdfcopyfont (pdfTeX §1257 ff.)
         let u = r.get_r_tok()?;
-        let t: String = match &u {
-            Tok::S(n) => n.to_string(),
-            Tok::C(_) => format!("FONT{}", char::from_u32(u.chr()).unwrap_or('?')),
+        let t: String = match u.as_cs() {
+            Some(n) => n.to_string(),
+            None => format!("FONT{}", char::from_u32(u.chr()).unwrap_or('?')),
         };
         r.define_cs(&u, &Mean::Font(0), global);
         r.scan_optional_equals()?;

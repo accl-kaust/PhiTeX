@@ -210,32 +210,64 @@ params!(
     xspaceskip,
 );
 
-/// The field slots of a run (a run-local cache of field values by slot):
+/// The fixed locations of a run's state table ([`crate::runstate`]):
 /// the parameters known by name ([`Par`]), the category codes of
-/// characters 0–255, and registers 0–255 of each kind (count, dimen,
-/// skip, muskip, toks). A slot's field is fixed for the build.
+/// characters 0–255, registers 0–255 of each kind (count, dimen, skip,
+/// muskip, toks), the code tables `lc`, `uc`, `sf`, `mc`, `dc` of
+/// characters 0–255, box registers 0–255, and the state cells with fixed
+/// names. A location's field is fixed for the build. After them, the
+/// meanings: active characters 0–255 ([`MEAN_ACTIVE`]), then one per
+/// interned control sequence ([`MEAN_BASE`] + [`crate::val::CsId::index`]).
 pub(crate) const CAT0: usize = PARAMS.len();
 pub(crate) const REG0: usize = CAT0 + 256;
-/// The number of slots.
-pub(crate) const NSLOT: usize = REG0 + 5 * 256;
+/// The code tables (`lc`, `uc`, `sf`, `mc`, `dc`), 256 each.
+pub(crate) const CODE0: usize = REG0 + 5 * 256;
+const CODES: [&str; 5] = ["lc", "uc", "sf", "mc", "dc"];
+/// Box registers 0–255.
+pub(crate) const BOX0: usize = CODE0 + 5 * 256;
+/// The state cells with fixed names ([`STATIC`]).
+pub(crate) const STATIC0: usize = BOX0 + 256;
+/// The number of fixed locations (the old name: slots).
+pub(crate) const NSLOT: usize = STATIC0 + STATIC.len();
+/// The meanings of active characters 0–255.
+pub(crate) const MEAN_ACTIVE: usize = NSLOT;
+/// The meanings of control sequences, by number.
+pub(crate) const MEAN_BASE: usize = MEAN_ACTIVE + 256;
+
+/// The location of the meaning of token `t`, if it has one below the
+/// spill (a control sequence, an active character below 256).
+#[inline]
+pub(crate) fn mean_loc(t: Tok) -> Option<usize> {
+    if let Some(i) = t.cs_index() {
+        return Some(MEAN_BASE + i);
+    }
+    (t.cat() == Some(13) && t.chr() < 256).then(|| MEAN_ACTIVE + t.chr() as usize)
+}
+
+/// The location of character `c`'s entry in code table `table` (0 `lc`,
+/// 1 `uc`, 2 `sf`, 3 `mc`, 4 `dc`), if `c` is below 256.
+pub(crate) fn code_slot(table: usize, c: u32) -> Option<usize> {
+    (c < 256).then(|| CODE0 + table * 256 + c as usize)
+}
 
 /// The handles of one build's fields.
 pub(crate) struct Fields {
     names: FxHashMap<&'static str, Field>,
     params: FxHashMap<&'static str, Field>,
-    /// The field of each slot of the run's field slots.
+    /// The field of each fixed location.
     slot_field: Vec<Field>,
-    /// The slot of a field that has one.
+    /// The location of a field that has a fixed one.
     field_slot: FxHashMap<Field, u32>,
-    /// The slot of a parameter by its name.
+    /// The location of a parameter by its name.
     par_slot: FxHashMap<&'static str, u32>,
-    /// The slot of a parameter by its assignment command and code.
+    /// The location of a parameter by its assignment command and code.
     qpar: FxHashMap<(u8, i32), u32>,
 }
 
 impl Fields {
     pub(crate) fn new(v: &Values) -> Fields {
-        let names = STATIC.iter().map(|&n| (n, v.field(n))).collect();
+        let names: FxHashMap<&'static str, Field> =
+            STATIC.iter().map(|&n| (n, v.field(n))).collect();
         let params: FxHashMap<&'static str, Field> = PARAMS
             .iter()
             .map(|&n| (n, v.field(&format!("param:{n}"))))
@@ -245,6 +277,11 @@ impl Fields {
         for reg in REGS {
             slot_field.extend((0..256).map(|n| v.field(&format!("{reg}:{n}"))));
         }
+        for t in CODES {
+            slot_field.extend((0..256).map(|n| v.field(&format!("{t}:{n}"))));
+        }
+        slot_field.extend((0..256).map(|n| v.field(&format!("box:{n}"))));
+        slot_field.extend(STATIC.iter().map(|n| names[n]));
         debug_assert_eq!(slot_field.len(), NSLOT);
         let field_slot = slot_field
             .iter()
@@ -270,20 +307,64 @@ impl Fields {
         }
     }
 
+    /// The location of field `f` below the spill: a fixed one, or a
+    /// meaning's (kept per thread at `epoch`; a name is looked at once an
+    /// epoch). `None`: the field is in no fixed range.
+    pub(crate) fn loc_of(&self, v: &Values, epoch: u64, f: Field) -> Option<usize> {
+        if let Some(&s) = self.field_slot.get(&f) {
+            return Some(s as usize);
+        }
+        if let Some(l) = with_names(v, epoch, |c| c.locs.get(&f).copied()) {
+            return l.map(|l| l as usize);
+        }
+        let name = crate::val::field_name(v, f);
+        let l = if let Some(n) = name.strip_prefix("cs:") {
+            Some(MEAN_BASE + crate::val::CsId::intern(n).index())
+        } else if let Some(c) = name.strip_prefix("act:") {
+            c.parse::<u32>()
+                .ok()
+                .filter(|&c| c < 256)
+                .map(|c| MEAN_ACTIVE + c as usize)
+        } else {
+            None
+        };
+        let l32 = l.and_then(|l| u32::try_from(l).ok());
+        with_names(v, epoch, |c| {
+            bounded(&mut c.locs);
+            c.locs.insert(f, l32);
+        });
+        l
+    }
+
+    /// The field of location `loc` below the spill ([`Self::loc_of`]).
+    pub(crate) fn field_of(&self, v: &Values, epoch: u64, loc: usize) -> Field {
+        if loc < NSLOT {
+            return self.slot_field[loc];
+        }
+        let t = if loc >= MEAN_BASE {
+            Tok::of_cs(crate::val::CsId::from_index(loc - MEAN_BASE))
+        } else {
+            Tok::ch(13, u32::try_from(loc - MEAN_ACTIVE).unwrap_or(0))
+        };
+        let f = self
+            .meaning_at(v, epoch, &t)
+            .unwrap_or_else(|| v.field("cs:"));
+        with_names(v, epoch, |c| {
+            bounded(&mut c.locs);
+            c.locs.insert(f, u32::try_from(loc).ok());
+        });
+        f
+    }
+
     /// Every handle held here: the engine must keep them alive across
     /// its value sweeps (they are held outside the graph).
     pub(crate) fn handles(&self) -> impl Iterator<Item = Field> + '_ {
-        self.names.values().chain(self.slot_field.iter()).copied()
+        self.slot_field.iter().copied()
     }
 
     /// The field of slot `s`.
     pub(crate) fn slot_field(&self, s: usize) -> Field {
         self.slot_field[s]
-    }
-
-    /// The slot of field `f`, if it has one.
-    pub(crate) fn field_slot(&self, f: Field) -> Option<usize> {
-        self.field_slot.get(&f).map(|&s| s as usize)
     }
 
     /// The slot of the parameter `name`, if it has one.
@@ -371,7 +452,7 @@ impl Fields {
         let f = v.field(&t.field_name()?);
         with_names(v, epoch, |c| {
             bounded(&mut c.toks);
-            c.toks.insert(t.clone(), f);
+            c.toks.insert(*t, f);
         });
         Some(f)
     }
@@ -384,6 +465,9 @@ struct Named {
     epoch: u64,
     names: FxHashMap<Box<str>, Field>,
     toks: FxHashMap<Tok, Field>,
+    /// The locations of fields that have one below the spill (`None`:
+    /// the field has none), [`Fields::loc_of`].
+    locs: FxHashMap<Field, Option<u32>>,
     /// The fields of the keyed families ([`Fam`]), by family and key.
     keyed: [FxHashMap<Box<str>, Field>; FAMS],
 }

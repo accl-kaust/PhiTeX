@@ -121,9 +121,8 @@ impl Run<'_, '_> {
     /// `cur` was taken.
     pub(crate) fn align_token(&mut self) -> R<bool> {
         let c = self.cur.cmd;
-        let brace = matches!(self.cur.tok, Tok::C(_))
-            && !self.cur.tok.is_cs_or_active()
-            && (c == cmd::LEFT_BRACE || c == cmd::RIGHT_BRACE);
+        let brace =
+            !self.cur.tok.is_cs_or_active() && (c == cmd::LEFT_BRACE || c == cmd::RIGHT_BRACE);
         let tab = c == cmd::TAB_MARK || c == cmd::CAR_RET;
         if !(brace || tab) || !self.align_open()? {
             return Ok(false);
