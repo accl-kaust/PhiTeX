@@ -1720,8 +1720,6 @@ impl Build {
         // `PHITEX_CLAIMS=<text>`: the nodes whose slice holds the text,
         // their claims and their descendants' (a debugging dump)
         if let Ok(want) = std::env::var("PHITEX_CLAIMS") {
-            let v = self.g.eng.values();
-            let eng = &self.g.eng;
             fn dump(eng: &Engine, v: &Values, n: NodeId, depth: usize) {
                 let Some(i) = eng.node_info(n) else { return };
                 let a = i
@@ -1735,8 +1733,10 @@ impl Build {
                     .map(|&c| {
                         eng.node_info(c)
                             .and_then(|ci| ci.args.first().map(|&x| v.render(x)))
-                            .map(|t| t.chars().take(30).collect::<String>())
-                            .unwrap_or_else(|| "?".to_owned())
+                            .map_or_else(
+                                || "?".to_owned(),
+                                |t| t.chars().take(30).collect::<String>(),
+                            )
                     })
                     .collect();
                 eprintln!(
@@ -1753,6 +1753,8 @@ impl Build {
                     }
                 }
             }
+            let v = self.g.eng.values();
+            let eng = &self.g.eng;
             for (k, n) in &self.nodes {
                 if k.contains(&want) {
                     dump(eng, v, *n, 0);

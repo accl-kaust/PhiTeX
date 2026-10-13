@@ -328,24 +328,20 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     fn node_raw_of(&self, id: i64) -> i64 {
-        match &self.trial_ids {
-            Some(c) => {
-                c.set(c.get() + 1);
-                id ^ c
-                    .get()
-                    .wrapping_mul(0x9E37_79B9_7F4A_7C15_u64.cast_signed())
-            }
-            // A continued run may mint several lists for one node (a paragraph,
-            // then an \llap box); each needs its own id or list_fold mistakes
-            // the second for the first.
-            None => {
-                let k = i64::try_from(self.minted.borrow().len()).unwrap_or(0);
-                if k == 0 {
-                    id
-                } else {
-                    id ^ k.wrapping_mul(0x6A09_E667_F3BC_C909_u64.cast_signed())
-                }
-            }
+        if let Some(c) = &self.trial_ids {
+            c.set(c.get() + 1);
+            return id
+                ^ c.get()
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15_u64.cast_signed());
+        }
+        // A continued run may mint several lists for one node (a paragraph,
+        // then an \llap box); each needs its own id or list_fold mistakes
+        // the second for the first.
+        let k = i64::try_from(self.minted.borrow().len()).unwrap_or(0);
+        if k == 0 {
+            id
+        } else {
+            id ^ k.wrapping_mul(0x6A09_E667_F3BC_C909_u64.cast_signed())
         }
     }
 
@@ -1524,10 +1520,15 @@ impl<'c, 'a> Run<'c, 'a> {
                         eprintln!(
                             "  item lid {} {}",
                             crate::val::int_at(v, e, 0),
-                            v.render(crate::val::list_of(v, e).get(1).copied().unwrap_or(ValueId::UNIT))
-                                .chars()
-                                .take(60)
-                                .collect::<String>()
+                            v.render(
+                                crate::val::list_of(v, e)
+                                    .get(1)
+                                    .copied()
+                                    .unwrap_or(ValueId::UNIT)
+                            )
+                            .chars()
+                            .take(60)
+                            .collect::<String>()
                         );
                     }
                 }
