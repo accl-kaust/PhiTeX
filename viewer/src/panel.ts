@@ -1484,6 +1484,11 @@ export class Panel {
     this.viewer.found(this.hits, this.hit);
   }
 
+  /** Matches found by the host (a diff's change): marked, `cur` brought into view; [] clears. */
+  reveal(hits: { k: number; boxes: [number, number, number, number][] }[], cur = 0): void {
+    this.viewer.found(hits, cur);
+  }
+
   /** The next match (`dir` 1) or the one before (−1), round the ends. */
   findNext(dir: 1 | -1): void {
     if (!this.hits.length) return;

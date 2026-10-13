@@ -54,9 +54,9 @@ pub fn from_diagnostic(
         ..Problem::default()
     };
     // (TeX's help for an undefined name speaks to its prompt, `type I`:
-    // the underline says it instead)
+    // the underline says it instead; the names it may have meant stay)
     if d.message.starts_with("Undefined control sequence") && !verbose {
-        p.help.clear();
+        p.help.retain(|h| h.starts_with("Did you mean"));
         p.label = Some("not defined".to_owned());
     }
     if let Some(src) = source.filter(|s| d.range.0 <= s.len()) {

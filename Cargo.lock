@@ -1564,6 +1564,8 @@ dependencies = [
  "notify",
  "phitex-bibtex",
  "phitex-codecs",
+ "phitex-diff",
+ "phitex-git",
  "phitex-kpse",
  "phitex-makeindex",
  "phitex-tex",
