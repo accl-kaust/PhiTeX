@@ -136,6 +136,9 @@ pub(crate) mod cmd {
     pub const LONG_OUTER_CALL: u8 = 114;
     pub const END_TEMPLATE: u8 = 115;
     pub const DONT_EXPAND: u8 = 116;
+    /// The command of the halt sentinel ([`crate::run::Run::raise`]): no
+    /// handler matches it; a stored one is a bug.
+    pub const HALT: u8 = 255;
 }
 
 // eqtb regions (§222–§236), as tex.web numbers them.
