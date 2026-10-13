@@ -1195,7 +1195,7 @@ impl Run<'_, '_> {
                             let n = self.scan_four_bit_int()?;
                             self.scan_optional_equals()?;
                             let name = self.scan_file_name()?;
-                            self.open_out(i64::from(n), &name);
+                            self.open_out(i64::from(n), &name)?;
                         }
                         _ => {
                             let n = self.scan_four_bit_int()?;
@@ -1248,9 +1248,15 @@ impl Run<'_, '_> {
                 })
                 .collect();
             line.push('\n');
-            let e = v.list(vec![v.str(&name), v.str(&line)]);
-            let su = v.seq_unit(e);
-            self.contribute("streams", su);
+            // a file whose read-back only defines: the definitions this
+            // line's read-back makes go with it (`wdef:<field>`)
+            let e = if self.cx.is_loopback(v.field(&format!("wkeys:{name}"))) {
+                let made = self.interpret_line(&line)?;
+                v.list(vec![v.str(&name), v.str(&line), made])
+            } else {
+                v.list(vec![v.str(&name), v.str(&line)])
+            };
+            self.contribute_stream(e);
         } else {
             self.log("wlog", &s)?;
         }
@@ -1261,7 +1267,7 @@ impl Run<'_, '_> {
     /// has no extension), which starts empty: its text accumulates in
     /// the `streams` sequence, and `wopen:<name>` tells later readers
     /// of the file that this run wrote it.
-    pub(crate) fn open_out(&mut self, n: i64, name: &str) {
+    pub(crate) fn open_out(&mut self, n: i64, name: &str) -> R<()> {
         let v = self.v;
         let base = name.rsplit('/').next().unwrap_or(name);
         let name = if base.contains('.') {
@@ -1269,10 +1275,11 @@ impl Run<'_, '_> {
         } else {
             format!("{name}.tex")
         };
+        self.written_decl(&name)?;
         self.set(&format!("write:{n}"), v.list(vec![v.str(&name)]), true);
         self.set(&format!("wopen:{name}"), v.int(1), true);
-        let su = v.seq_unit(v.list(vec![v.str(&name)]));
-        self.contribute("streams", su);
+        self.contribute_stream(v.list(vec![v.str(&name)]));
+        Ok(())
     }
 
     /// The file `key` as TeX reads it here: if this run opened it for
@@ -1296,7 +1303,7 @@ impl Run<'_, '_> {
         );
         let mut text = String::new();
         for e in all {
-            let xs = list_of(v, e);
+            let xs = list_of(v, crate::api::stream_entry(v, e));
             if xs.first().map(|&n| str_of(v, n)).as_deref() != Some(key) {
                 continue;
             }

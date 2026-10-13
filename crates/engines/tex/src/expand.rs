@@ -797,6 +797,8 @@ impl Run<'_, '_> {
             self.log("error", "I can't find file")?;
             return Ok(());
         };
+        // (a job-written file whose read-back only defines)
+        self.read_back(&key)?;
         let xs = crate::val::list_of(self.v, x);
         if xs.len() < 2 {
             self.log("error", "I can't find file")?;
