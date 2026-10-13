@@ -31,7 +31,7 @@ fn gate(dir: &str, body: &str, default: bool, plain: bool) -> Result<String, Str
     }
     let s = &b.stats;
     let report = format!(
-        "{name}: {} nodes run, {} runs, {} live, {} rounds, tails {}/{}, starved {}, critical path {}, hints {} bounded / {} any, {} regime violations, {} undeclared, stops {}, env_provided {}, restarted_by {:?}",
+        "{name}: {} nodes run, {} runs, {} live, {} rounds, tails {}/{}, starved {}, critical path {}, hints {} bounded / {} any, {} regime violations, {} undeclared, stops {} resumed {} restarted {}, env_provided {}, restarted_by {:?}",
         s.nodes_run,
         s.runs,
         s.live,
@@ -45,6 +45,8 @@ fn gate(dir: &str, body: &str, default: bool, plain: bool) -> Result<String, Str
         s.regime_violations,
         s.undeclared_definitions,
         s.stops,
+        s.resumed,
+        s.restarted,
         s.env_provided,
         s.restarted_by
     );
