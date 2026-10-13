@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 
 use phitex_defuse::ValueId;
 use phitex_typeset::glue::Glue;
+use phitex_typeset::node::Node;
 use phitex_typeset::page::{InsertClass, Outcome, PageBuilder, PageParams};
 
 use crate::build::{FoldState, fold_item};
@@ -150,10 +151,14 @@ impl Run<'_, '_> {
             let Some(p) = nodes::decode(v, x, &mut pg.side) else {
                 continue;
             };
-            let next = pg
-                .queue
-                .front()
-                .and_then(|&y| nodes::decode(v, y, &mut Side::default()));
+            // §1000: only a kern looks at what follows it
+            let next = if matches!(p, Node::Kern(..)) {
+                pg.queue
+                    .front()
+                    .and_then(|&y| nodes::decode(v, y, &mut Side::default()))
+            } else {
+                None
+            };
             let mut halt = None;
             let out = {
                 let mut class = |n: u16| match self.insert_class(n) {

@@ -817,11 +817,16 @@ fn fold_page(
         let Some(p) = nodes::decode(v, x, &mut side) else {
             continue;
         };
-        let next = queue
-            .front()
-            .copied()
-            .or_else(|| items.get(cursor).copied())
-            .and_then(|y| nodes::decode(v, y, &mut Side::default()));
+        // §1000: only a kern looks at what follows it
+        let next = if matches!(p, Node::Kern(..)) {
+            queue
+                .front()
+                .copied()
+                .or_else(|| items.get(cursor).copied())
+                .and_then(|y| nodes::decode(v, y, &mut Side::default()))
+        } else {
+            None
+        };
         if let Outcome::Fire(f) = pb.contribute(p, next.as_ref(), &params, &mut class) {
             let mut carried: Vec<ValueId> = f
                 .contributions
