@@ -1964,8 +1964,6 @@ pub struct Build {
     nodes: Vec<(String, NodeId)>,
     dvi: NodeId,
     prelude: Arc<Cached>,
-    /// The format's definitions ([`prelude_defs`]).
-    defs: Defs,
     /// What the last build or edit ran.
     pub stats: Stats,
     /// Where new texts come from ([`Options::edits`]).
@@ -2069,7 +2067,7 @@ impl Build {
         }
         *g.ops.defs.lock().unwrap_or_else(PoisonError::into_inner) = defs.clone();
         let doc = is_doc(prelude, document);
-        let mut incr = Incr::new(defs.clone());
+        let mut incr = Incr::new(defs);
         let nodes = g.push_text(unit, &as_file(document), doc.then_some(&mut incr));
         // the page builder's fold, after the text: one node choosing every
         // page break, its children the pages
@@ -2088,7 +2086,6 @@ impl Build {
             nodes,
             dvi,
             prelude: cached,
-            defs,
             stats: Stats::default(),
             edits,
             settled: Vec::new(),
