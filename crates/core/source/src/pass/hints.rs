@@ -684,6 +684,14 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
             continue;
         }
         if READERS.contains(&n) {
+            // (the reader is a command too, with its own state:
+            // `\\unhbox` voids the register it reads, §1110)
+            if !rd && !e.calls.iter().any(|c| c == n) {
+                e.calls.push(n.to_owned());
+                if depth <= 0 || gl {
+                    e.outer_calls.push(n.to_owned());
+                }
+            }
             reading = true;
             continue;
         }
