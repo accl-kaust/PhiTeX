@@ -158,3 +158,54 @@ fn a_text_sent_while_the_cold_build_evaluates() {
         "the result is not the edited text's cold build"
     );
 }
+
+/// Texts sent while the cold build evaluates that differ from each other
+/// (a watcher reading a file half written: empty, cut short, whole):
+/// the result is the last text's cold build.
+#[test]
+fn texts_cut_short_while_the_cold_build_evaluates() {
+    let fx = common::fixtures().join("plain");
+    let comment = " TeX output 2026.01.01:0000".to_owned();
+    let opts = || common::options("./slow.tex", "slow", &comment, &fx);
+    let src = slow(600);
+    let new = src.replacen("Paragraph 599: the", "Paragraph 599: eht", 1);
+    let progress = Arc::new(phitex_tex::Progress::new(
+        std::thread::available_parallelism().map_or(1, usize::from),
+    ));
+    let tx = phitex_tex::EditSender::default();
+    let (p2, tx2, new2) = (progress.clone(), tx.clone(), new.clone());
+    let t = std::thread::spawn(move || {
+        loop {
+            let deep = p2.running().iter().flatten().any(|&(op, off)| {
+                op == 1 && off > 2000 && off != phitex_tex::Progress::INSIDE
+            });
+            if deep {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        for x in [String::new(), new2[..new2.len() / 3].to_owned(), new2.clone()] {
+            tx2.send(&x);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+    });
+    let mut b = common::build(
+        phitex_tex::Options {
+            progress: Some(progress),
+            edits: Some(tx.clone()),
+            ..opts()
+        },
+        Some(&common::plain()),
+        &src,
+    );
+    t.join().unwrap();
+    eprintln!("absorbed (version, step): {:?}", b.stats.absorbed);
+    b.absorb_pending();
+    assert_eq!(b.version(), 3);
+    let cold = common::build(opts(), Some(&common::plain()), &new);
+    assert!(!b.pages().is_empty(), "no pages");
+    assert!(
+        common::first_difference(&b.output().0, &cold.output().0).is_none(),
+        "the result is not the last text's cold build"
+    );
+}

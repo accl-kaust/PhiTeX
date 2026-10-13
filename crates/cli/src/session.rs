@@ -137,7 +137,7 @@ pub struct Job {
 #[derive(Clone, Debug, Default)]
 pub struct RunInfo {
     pub wall: Duration,
-    /// The texts of the main file the engine took while it evaluated.
+    /// The texts of the main file the build took while it ran.
     pub absorbed: usize,
     /// Why it ran: `cold` or `edit`.
     pub why: String,
@@ -669,7 +669,12 @@ impl Session {
             edit_line,
             runs: vec![RunInfo {
                 wall,
-                absorbed: s.absorbed.len(),
+                // (a text taken before the engine's first step, while the
+                // format loaded, is not among the engine's)
+                absorbed: s
+                    .absorbed
+                    .len()
+                    .max(usize::from(self.absorbed_at.is_some())),
                 why: why.to_owned(),
                 commands_run: s.nodes_run,
                 live: s.live,

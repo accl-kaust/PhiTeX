@@ -1399,7 +1399,11 @@ fn watch_absorbs_an_edit_during_the_cold_build() {
         std::thread::spawn(move || {
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(300));
-                std::fs::write(&path, &edited).expect("the edit");
+                // (written whole, then renamed: a watcher never reads it
+                // half written)
+                let tmp = path.with_extension("tmp");
+                std::fs::write(&tmp, &edited).expect("the edit");
+                std::fs::rename(&tmp, &path).expect("the edit in place");
             }
         })
     };
