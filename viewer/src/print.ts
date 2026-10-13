@@ -1,6 +1,6 @@
 // The viewer's look, the same in every host (phitex watch, Overleaf,
 // VS Code): a proof sheet's, not an app's. Paper and ink, one red for the
-// proofreader's marks (errors, changes, the cursor), hairline rules, square
+// proofreader's marks (errors, the cursor), hairline rules, square
 // corners, crop marks at the pages' corners, numbers in tabular figures.
 // The rules are in viewer/STYLE.md; this sheet comes last, over the
 // panel's older one, and only these tokens give colours.
@@ -36,15 +36,9 @@ const CROP = `
     linear-gradient(var(--c), var(--c)) right 14px bottom 0 / 1px 10px,
     linear-gradient(var(--c), var(--c)) right 0 bottom 14px / 10px 1px;
   background-repeat: no-repeat; }
-/* a page an edit changed: a change bar in the left margin, fading */
-.slot::before { content: ""; position: absolute; left: -9px; top: 0; bottom: 0; width: 2px; background: var(--mark, #d71920);
-  opacity: 0; pointer-events: none; }
-.slot.changed::before { animation: phx-revised 1.6s linear; }
-@keyframes phx-revised { 0%, 40% { opacity: 1; } 100% { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .slot.changed::before { animation: none; } }
 `;
 
-/** The renderer's part (the pages), for any host: crop marks and change bars. */
+/** The renderer's part (the pages), for any host: crop marks. */
 export const PAGE_CSS = CROP;
 
 export const PRINT_CSS = `
