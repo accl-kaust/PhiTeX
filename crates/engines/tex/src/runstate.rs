@@ -297,17 +297,7 @@ impl State {
         self.slot(loc).field = Some(f);
     }
 
-    /// The command code and modifier of `loc` when it is loaded and
-    /// decoded (one slot access, one flag test); `None` otherwise.
     #[inline]
-    pub(crate) fn cmd_chr_fast(&self, loc: Loc) -> Option<(u8, i32)> {
-        if loc & SPILL != 0 {
-            return None;
-        }
-        let s = self.eq.get(loc as usize)?;
-        (s.e.flags & (LOADED | CC) == (LOADED | CC)).then_some((s.e.cmd, s.e.chr))
-    }
-
     pub(crate) fn is_loaded(&self, loc: Loc) -> bool {
         self.slot_ref(loc).is_some_and(|s| s.e.flags & LOADED != 0)
     }

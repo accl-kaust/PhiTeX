@@ -315,10 +315,6 @@ impl std::fmt::Display for CsId {
 
 /// The bit of a control sequence token.
 const CS_BIT: u32 = 1 << 31;
-/// The bit of a frozen or internal control sequence token (its name
-/// starts with `\u{10FFFE}`): tested without touching the entry.
-const FROZEN_BIT: u32 = 1 << 30;
-const CS_MASK: u32 = CS_BIT | FROZEN_BIT;
 
 /// A token (§289) in one word: a character, `cat << 21 | char` (category
 /// 13 is an active character), or, with bit 31 set, a control sequence
@@ -352,8 +348,7 @@ impl Tok {
     }
 
     pub(crate) fn of_cs(c: CsId) -> Tok {
-        let f = if c.frozen() { FROZEN_BIT } else { 0 };
-        Tok(CS_BIT | f | u32::try_from(c.index()).unwrap_or(0))
+        Tok(CS_BIT | u32::try_from(c.index()).unwrap_or(0))
     }
 
     /// The word: `cat << 21 | char` for a character (so `raw() >> 21` is
@@ -372,25 +367,18 @@ impl Tok {
     /// The control sequence of a control sequence token.
     #[inline]
     pub(crate) fn as_cs(self) -> Option<CsId> {
-        (self.0 & CS_BIT != 0).then(|| CsId::from_index((self.0 & !CS_MASK) as usize))
+        (self.0 & CS_BIT != 0).then(|| CsId::from_index((self.0 & !CS_BIT) as usize))
     }
 
     /// The number of a control sequence token ([`CsId::index`]).
     #[inline]
     pub(crate) fn cs_index(self) -> Option<usize> {
-        (self.0 & CS_BIT != 0).then_some((self.0 & !CS_MASK) as usize)
+        (self.0 & CS_BIT != 0).then_some((self.0 & !CS_BIT) as usize)
     }
 
     #[inline]
     pub(crate) fn is_cs(self) -> bool {
         self.0 & CS_BIT != 0
-    }
-
-    /// Whether this is a frozen or internal control sequence (one bit,
-    /// no entry lookup).
-    #[inline]
-    pub(crate) fn is_frozen_cs(self) -> bool {
-        self.0 & CS_MASK == CS_MASK
     }
 
     /// The category of a character token.
@@ -493,7 +481,7 @@ struct Decoded {
     toks: FxHashMap<ValueId, Rc<[Tok]>>,
     means: FxHashMap<ValueId, Mean>,
     glues: FxHashMap<ValueId, Glue>,
-    frames: FxHashMap<ValueId, Option<crate::input::Seg>>,
+    frames: FxHashMap<ValueId, Option<crate::run::Frame>>,
     leaves: FxHashMap<ValueId, phitex_typeset::node::Node>,
 }
 
@@ -673,8 +661,8 @@ pub(crate) fn tok_id(v: &Values, epoch: u64, t: Tok) -> ValueId {
 pub(crate) fn frame_of(
     v: &Values,
     id: ValueId,
-    make: impl FnOnce() -> Option<crate::input::Seg>,
-) -> Option<crate::input::Seg> {
+    make: impl FnOnce() -> Option<crate::run::Frame>,
+) -> Option<crate::run::Frame> {
     decoded(v, id, |d| &mut d.frames, make)
 }
 
