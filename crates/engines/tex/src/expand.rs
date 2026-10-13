@@ -819,6 +819,7 @@ impl Run<'_, '_> {
     pub(crate) fn scan_file_name(&mut self) -> R<String> {
         self.skip_blanks_x()?;
         let mut name = String::new();
+        let mut quoted = false;
         loop {
             if self.cur.cmd > cmd::OTHER_CHAR
                 || self.cur.chr > 255
@@ -828,10 +829,16 @@ impl Run<'_, '_> {
                 self.back_input(t);
                 break;
             }
-            if self.cur.chr == 32 {
+            // web2c's more_name (tex.ch, §516): a `"` toggles quoting
+            // and is not part of the name; a space ends it unquoted
+            if self.cur.chr == 32 && !quoted {
                 break;
             }
-            print::push_code(&mut name, u32::try_from(self.cur.chr).unwrap_or(0));
+            if self.cur.chr == 34 {
+                quoted = !quoted;
+            } else {
+                print::push_code(&mut name, u32::try_from(self.cur.chr).unwrap_or(0));
+            }
             self.get_x_token()?;
         }
         Ok(name)
