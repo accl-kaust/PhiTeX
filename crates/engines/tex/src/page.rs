@@ -502,8 +502,9 @@ impl Operation for Breaks {
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }
+    #[allow(clippy::redundant_closure_for_method_calls)]
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        run_node(cx, ops(&self.0), Run::breaks)
+        run_node(cx, ops(&self.0), |r| r.breaks())
     }
 }
 
