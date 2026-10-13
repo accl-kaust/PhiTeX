@@ -425,3 +425,28 @@ fn edit_written_file() {
     assert_eq!(b.output().0, cold.output().0, "edit differs from cold");
     assert_eq!(b.files(), cold.files());
 }
+
+/// A read-back that never settles (the written value flips what the next
+/// round reads): the build ends with the no-fixpoint error after
+/// `max_rounds`, naming the written file, instead of running on.
+#[test]
+fn oscillating_written_file() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("oscillating-written");
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::remove_file(dir.join("main.aux"));
+    let prelude = common::plain();
+    let doc = "\\newread\\r \\openin\\r=\\jobname.aux \\ifeof\\r \\def\\ref{??}\\else\\closein\\r \\input \\jobname.aux \\fi\n\\newwrite\\w \\immediate\\openout\\w=\\jobname.aux \\immediate\\write\\w{\\relax}\n\nRef: \\ref.\\par\n\\write\\w{\\string\\def\\string\\ref{\\if1\\ref 2\\else 1\\fi}}\n\n\\end\n";
+    let opts = phitex_tex::Options {
+        fixpoint: true,
+        max_rounds: 8,
+        ..common::options("./main.tex", "main", "", &dir)
+    };
+    let b = common::build(opts, Some(&prelude), doc);
+    let msgs: Vec<String> = b.diagnostics().into_iter().map(|d| d.message).collect();
+    eprintln!("oscillating: {} loop rounds, {msgs:#?}", b.stats.loop_rounds);
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("no fixpoint after 8 rounds") && m.contains("main.aux")),
+        "{msgs:#?}"
+    );
+}
