@@ -184,7 +184,12 @@ impl FilesRef {
         self.0.borrow_mut().read(path)
     }
     /// [`Files::apply_filter`].
-    pub fn apply_filter(&mut self, template: &[u8], input: &[u8], version: i32) -> Option<alloc::sync::Arc<[u8]>> {
+    pub fn apply_filter(
+        &mut self,
+        template: &[u8],
+        input: &[u8],
+        version: i32,
+    ) -> Option<alloc::sync::Arc<[u8]>> {
         self.0.borrow_mut().apply_filter(template, input, version)
     }
 }

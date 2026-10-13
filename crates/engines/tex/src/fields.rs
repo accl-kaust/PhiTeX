@@ -10,6 +10,11 @@ use phitex_defuse::{Field, Values};
 
 /// The state cells with fixed names.
 const STATIC: &[&str] = &[
+    // (the tags of a node's input frames, interned once: token list,
+    // source line, file rest)
+    "t",
+    "s",
+    "f",
     "aftertoken",
     "align:open",
     "align:state",

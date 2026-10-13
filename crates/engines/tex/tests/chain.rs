@@ -154,3 +154,97 @@ fn speculation_ab() {
         }
     }
 }
+
+/// A chain link's cause is structural: a scope's kind where the nesting
+/// changes, a condition level, a list's opener, the page builder's state
+/// (one per page), the font, a range of items or pages, a node created.
+/// A per-command state cell (read by every command, written by the one
+/// before) is the sequential shape this engine exists to avoid.
+fn structural(kind: &str, field: &str) -> bool {
+    kind != "Changed"
+        || field.is_empty()
+        || [
+            "page:state",
+            "font",
+            "items",
+            "pages",
+            "lopen:",
+            "if:",
+            "scope",
+            "kind",
+        ]
+        .iter()
+        .any(|p| field.starts_with(p))
+}
+
+fn chain_cells(dir: &std::path::Path, name: &str) -> (Vec<String>, f64) {
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let opts = common::options(&format!("./{name}.tex"), name, "", dir);
+    let b = common::build(opts, Some(&common::plain()), &src);
+    let bad: Vec<String> = b
+        .critical_chain()
+        .into_iter()
+        .filter(|(_, k, f)| !structural(k, f))
+        .map(|(w, k, f)| format!("{k} {f}: {w}"))
+        .collect();
+    #[allow(clippy::cast_precision_loss)]
+    let frac = b
+        .stats
+        .critical_path
+        .map_or(1.0, |p| p as f64 / b.stats.nodes_run.max(1) as f64);
+    eprintln!(
+        "{name}: oracle_fraction {frac:.4}, {} per-command links",
+        bad.len()
+    );
+    (bad, frac)
+}
+
+/// The gate: no chain link of the plain fixtures is caused by a
+/// per-command state cell.
+#[test]
+#[ignore = "accl bar until the paragraph cells (par:<a>:<l>), count:0 and \\global's scope kind leave the chain"]
+fn chain_links_are_structural() {
+    let fx = common::fixtures().join("plain");
+    let mut fails = Vec::new();
+    for n in ["story", "pages", "hyphens", "display"] {
+        let (bad, _) = chain_cells(&fx, n);
+        for l in bad.iter().take(10) {
+            eprintln!("  {n}: {l}");
+        }
+        if !bad.is_empty() {
+            fails.push((n, bad.len()));
+        }
+    }
+    assert!(fails.is_empty(), "per-command chain links: {fails:?}");
+}
+
+/// The bar on accl: the critical path under 5% of the nodes on every
+/// fixture, and four threads busier than one on `s.tex`.
+#[test]
+#[ignore = "a measure for accl: oracle fraction and scaling"]
+fn chain_bar() {
+    let fx = common::fixtures().join("plain");
+    for n in ["story", "pages", "hyphens", "display"] {
+        let (_, frac) = chain_cells(&fx, n);
+        assert!(frac < 0.05, "{n}: oracle_fraction {frac:.4}");
+    }
+    let kt = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/gate/kt");
+    if kt.join("s.tex").exists() {
+        let src = common::read(&kt.join("s.tex"));
+        let mut ratio = Vec::new();
+        for t in [1, 4] {
+            let opts = phitex_tex::Options {
+                threads: Some(t),
+                ..common::options("./s.tex", "s", "", &kt)
+            };
+            let b = common::build(opts, Some(&common::plain()), &src);
+            let r = b.stats.busy.as_secs_f64() / b.stats.wall.as_secs_f64().max(1e-9);
+            eprintln!(
+                "s at {t} threads: busy/wall {r:.2}, wall {:?}",
+                b.stats.wall
+            );
+            ratio.push(r);
+        }
+        assert!(ratio[1] > ratio[0], "busy/wall {ratio:?}");
+    }
+}

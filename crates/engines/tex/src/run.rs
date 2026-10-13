@@ -125,6 +125,10 @@ pub(crate) struct Src {
     /// Where `buf[0]` is in a file: the file's name and byte position
     /// (lines of `\input` files; for diagnostics only).
     pub origin: Option<(ValueId, usize)>,
+    /// Text read under the catcodes in force when it is read, which no
+    /// analysis of a file saw: a pseudo file's lines (pdfTeX §1766) and
+    /// a `\read` line (§483).
+    pub rescanned: bool,
 }
 
 pub(crate) const MID_LINE: u8 = 0;
@@ -1048,6 +1052,8 @@ impl<'c, 'a> Run<'c, 'a> {
     /// token (a run of characters is one node), and the text not yet read
     /// as one node per segment.
     pub(crate) fn leftover(&self) -> Vec<Vec<ValueId>> {
+        let tag = |n: &str| self.ops.fields.get(self.v, n).0;
+        let (tag_t, tag_s, tag_f) = (tag("t"), tag("s"), tag("f"));
         let v = self.v;
         let anchor = v.int(self.anchor);
         let base = self.ifbase + i64::try_from(self.conds.len()).unwrap_or(0);
@@ -1069,7 +1075,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let mut run: Vec<ValueId> = Vec::new();
         let node = |toks: Vec<ValueId>| -> Vec<ValueId> {
             let l = v.list(toks);
-            with(v.list(vec![v.list(vec![v.str("t"), l])]))
+            with(v.list(vec![v.list(vec![tag_t, l])]))
         };
         for f in &self.frames {
             match f {
@@ -1103,11 +1109,15 @@ impl<'c, 'a> Run<'c, 'a> {
                         .collect();
                     let starts = s.starts && s.endch == -2;
                     let mut xs = vec![
-                        v.str("s"),
+                        tag_s,
                         v.str(&text),
                         v.int(i64::from(s.state)),
                         v.int(-2),
-                        v.int(i64::from(starts) | (i64::from(end_due) << 1)),
+                        v.int(
+                            i64::from(starts)
+                                | (i64::from(end_due) << 1)
+                                | (i64::from(s.rescanned) << 2),
+                        ),
                     ];
                     if let Some((name, at)) = s.origin {
                         let at = at + s.loc.min(s.buf.len());
@@ -1117,7 +1127,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     let fr = v.list(xs);
                     let mut frs = Vec::new();
                     if !head.is_empty() {
-                        frs.push(v.list(vec![v.str("t"), v.list(head)]));
+                        frs.push(v.list(vec![tag_t, v.list(head)]));
                     }
                     frs.push(fr);
                     out.push(with(v.list(frs)));
@@ -1128,7 +1138,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     }
                     if f.has_lines() {
                         let fr = v.list(vec![
-                            v.str("f"),
+                            tag_f,
                             f.id,
                             v.int(i64::try_from(f.off).unwrap_or(0)),
                             f.name,
@@ -1535,30 +1545,41 @@ fn decode_frames_upto(v: &Values, args: &[ValueId], limit: usize) -> Vec<Frame> 
         if out.len() >= limit {
             break;
         }
-        let Value::List(xs) = &*v.get(f) else {
-            continue;
-        };
+        out.extend(crate::val::frame_of(v, f, || decode_frame(v, f)));
+    }
+    out
+}
+
+/// One frame of a node's arguments (a frame is an immutable value, so
+/// its decoding is kept by id, [`crate::val::frame_of`]).
+fn decode_frame(v: &Values, f: ValueId) -> Option<Frame> {
+    let mut out = None;
+    let Value::List(xs) = &*v.get(f) else {
+        return None;
+    };
+    {
         match xs.first().map(|&t| str_of(v, t)).as_deref() {
             Some("t") => {
                 let toks = crate::val::toks_of(v, xs.get(1).copied());
-                out.push(Frame::Toks(Rc::from(toks), 0));
+                out = Some(Frame::Toks(Rc::from(toks), 0));
             }
             Some("f") => {
                 if let (Some(&id), Some(&o)) = (xs.get(1), xs.get(2)) {
                     let off = usize::try_from(int_of(v, o)).unwrap_or(0);
                     let name = xs.get(3).copied().unwrap_or(ValueId::UNIT);
-                    out.push(Frame::File(FileRest::new(v, id, off, name)));
+                    out = Some(Frame::File(FileRest::new(v, id, off, name)));
                 }
             }
             Some("s") => {
                 let text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
-                out.push(Frame::Src(Src {
+                out = Some(Frame::Src(Src {
                     buf: text.chars().map(u32::from).collect(),
                     loc: 0,
                     state: u8::try_from(xs.get(2).map_or(2, |&x| int_of(v, x))).unwrap_or(2),
                     endch: xs.get(3).map_or(-2, |&x| int_of(v, x)),
                     starts: xs.get(4).is_none_or(|&x| int_of(v, x) & 1 != 0),
                     ends: xs.get(4).is_none_or(|&x| int_of(v, x) & 2 != 0),
+                    rescanned: xs.get(4).is_some_and(|&x| int_of(v, x) & 4 != 0),
                     origin: match (xs.get(5), xs.get(6)) {
                         (Some(&n), Some(&o)) => {
                             Some((n, usize::try_from(int_of(v, o)).unwrap_or(0)))
@@ -1595,6 +1616,7 @@ pub(crate) fn src_frame(line: &str, endlinechar: i64) -> Frame {
         starts: true,
         ends: true,
         origin: None,
+        rescanned: true,
     })
 }
 

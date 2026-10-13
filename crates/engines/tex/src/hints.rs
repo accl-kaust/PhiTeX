@@ -38,7 +38,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use phitex_defuse::{MayDefine, Value, ValueId, Values};
+use phitex_defuse::{Field, MayDefine, Value, ValueId, Values};
 use phitex_source::pass::{self, Atom, AtomKind, Def, DefSet, Definitions, FileKind, Pass, Scope};
 
 use crate::run::{R, Run};
@@ -80,7 +80,7 @@ pub(crate) struct Bound {
 /// listed here (every head). The alignment state (`align:`), the
 /// paragraph (`par:`) and `aftertoken` come from the context, not from
 /// the command ([`Analysis::cs_hint`]).
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn class_state(name: &str) -> Option<&'static [&'static str]> {
     let n = name
         .strip_prefix("tex_")
@@ -114,9 +114,9 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "accent" => &[
             "box:", "lvlfix", "font", "count:", "dimen:", "skip:", "muskip:", "toks:", "param:",
         ],
-        "char" | "discretionary" | "-" | "hskip" | "hfil" | "hfill" | "hss"
-        | "hfilneg" | "vrule" | "indent" | "noindent" | "unhbox" | "unhcopy" | "box" | "copy"
-        | "leaders" | "cleaders" | "xleaders" => &["box:", "lvlfix"],
+        "char" | "discretionary" | "-" | "hskip" | "hfil" | "hfill" | "hss" | "hfilneg"
+        | "vrule" | "indent" | "noindent" | "unhbox" | "unhcopy" | "box" | "copy" | "leaders"
+        | "cleaders" | "xleaders" => &["box:", "lvlfix"],
         // vertical material and removals (§1056, §1105, §1080)
         "vskip" | "vfil" | "vfill" | "vss" | "vfilneg" | "kern" | "hrule" | "unvbox"
         | "unvcopy" | "unskip" | "unpenalty" | "unkern" | "lastbox" => &["box:"],
@@ -135,13 +135,13 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // (an output routine's `}` resumes the page builder, §1100)
         "endgroup" | "egroup" => &["badness", "lvlfix", "inspen", "box:", "deadcycles"],
         // arguments expanded while read: a conditional may end (§366, §498)
-        "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["ifstack"],
-        "mark" => &["ifstack", "param:"],
+        "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["if:"],
+        "mark" => &["if:", "param:"],
         // (e-TeX's mark classes, §1494 ff.)
-        "marks" => &["ifstack", "param:", "markclasses"],
-        "write" | "openout" | "closeout" => &["ifstack", "wopen:", "write:"],
+        "marks" => &["if:", "param:", "markclasses"],
+        "write" | "openout" | "closeout" => &["if:", "wopen:", "write:"],
         // (`\\immediate` of a pdfTeX object too, pdfTeX §1528)
-        "immediate" => &["ifstack", "wopen:", "write:", "pdf:"],
+        "immediate" => &["if:", "wopen:", "write:", "pdf:"],
         "shipout" | "insert" | "vadjust" | "output" => &["param:"],
         "afterassignment" => &["aftertoken"],
         "aftergroup" => &["ag"],
@@ -153,7 +153,7 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode"
         | "ifinner" | "ifvoid" | "ifhbox" | "ifvbox" | "ifcat" | "ifcase" | "iftrue"
         | "iffalse" | "ifdefined" | "ifcsname" | "iffontchar" | "unless" | "else" | "fi" | "or"
-        | "ifpdfprimitive" | "ifpdfabsnum" | "ifpdfabsdim" | "ifincsname" | "ifeof" => &["ifstack"],
+        | "ifpdfprimitive" | "ifpdfabsnum" | "ifpdfabsdim" | "ifincsname" | "ifeof" => &["if:"],
         // fonts (§1257 new_font, §1234)
         "font" => &[
             "fd:",
@@ -163,7 +163,7 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
             "fontinfo:",
             "hc:",
             "sc:",
-            "ifstack",
+            "if:",
         ],
         "textfont" | "scriptfont" | "scriptscriptfont" => &["fam:"],
         // a font's parameters (§1253)
@@ -207,20 +207,61 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "read" | "readline" | "openin" | "closein" => &["read:"],
         // pdfTeX's objects, streams, random numbers, colour stacks
         _ if n.starts_with("pdf") && crate::prims::PRIMS.iter().any(|p| p.0 == n) => {
-            &["pdf:", "ifstack"]
+            &["pdf:", "if:"]
         }
         _ => {
             if crate::prims::PRIMS.iter().any(|p| p.0 == n) || table_param(n) {
                 // (a parameter by name, or a primitive not listed: its
                 // own parameter, or any head)
                 if table_param(n) {
-                    return Some(&["param:"]);
+                    return param_row(n);
                 }
                 return None;
             }
             return None;
         }
     })
+}
+
+/// What `normal_paragraph` resets (§1070, e-TeX's
+/// `\\interlinepenalties`).
+const NORMAL_PARAGRAPH: &[&str] = &[
+    "param:looseness",
+    "param:hangindent",
+    "param:hangafter",
+    "parshape",
+    "param:interlinepenalties",
+];
+
+/// What a math shift may set: math's list and `\\fam` (§1138, §1139),
+/// a display's sizes and the lines of the paragraph before it (§1145,
+/// §1146), and its end's resumption (§1200).
+const MATH_SHIFT: &[&str] = &[
+    "lopen:",
+    "inc",
+    "pg:",
+    "param:fam",
+    "param:predisplaysize",
+    "param:displaywidth",
+    "param:displayindent",
+];
+
+/// A parameter's own field (`param:<name>`), for a parameter assigned
+/// by name (§1228).
+fn param_row(name: &str) -> Option<&'static [&'static str]> {
+    static ROWS: OnceLock<HashMap<&'static str, [&'static str; 1]>> = OnceLock::new();
+    ROWS.get_or_init(|| {
+        crate::prims::PRIMS
+            .iter()
+            .filter(|p| matches!(p.1, 72..=76))
+            .map(|p| {
+                let f: &'static str = Box::leak(format!("param:{}", p.0).into_boxed_str());
+                (p.0, [f])
+            })
+            .collect()
+    })
+    .get(name)
+    .map(|r| &r[..])
 }
 
 /// Whether `name` is an integer, dimen, glue or token parameter.
@@ -741,6 +782,7 @@ impl Analysis<'_> {
     }
 
     /// The hint of the command whose first atom is `a`.
+    #[allow(clippy::too_many_lines)]
     fn hint(&self, a: usize) -> Hint {
         let atoms = self.atoms();
         let Some(at) = atoms.get(a) else {
@@ -789,11 +831,13 @@ impl Analysis<'_> {
                 // narrowing keeps the anchor its own)
                 add_head(&mut b.state, "par:");
                 if self.may_start_par(a) {
-                    // (a paragraph begun: its list's opener, §1091)
+                    // (a paragraph begun: its list's opener and
+                    // `\\prevgraf` set to 0, §1091)
                     add_head(&mut b.state, "lopen:");
                 }
-                // (the token after the run is read with it, and may end
-                // the paragraph: `\\prevgraf`, §1096)
+                // (the run goes on through the commands after it in its
+                // own text, and a line's end may end the paragraph there:
+                // `\\prevgraf`, §1096)
                 add_head(&mut b.state, "pg:");
                 let mut k = a;
                 let mut ok = true;
@@ -803,8 +847,10 @@ impl Analysis<'_> {
                     self.cats_of(a, k, &mut b.cats);
                     if x.kind == AtomKind::Char('$') {
                         // (math begins: its list's opener and `\\fam`
-                        // set to -1, §1138, §1139)
-                        add_heads(&mut b.state, Some(&["lopen:", "param:", "inc"]));
+                        // set to -1, §1138, §1139; a display ends the
+                        // paragraph before it and sets its sizes, §1145,
+                        // §1146)
+                        add_heads(&mut b.state, Some(MATH_SHIFT));
                     }
                     if x.kind == AtomKind::Char('&')
                         && self.p.regime_at(x.tok).catcode(b'&') == Some(4)
@@ -827,7 +873,8 @@ impl Analysis<'_> {
             }
             AtomKind::Par => {
                 self.cats_of(a, a, &mut b.cats);
-                add_heads(&mut b.state, Some(&["par:", "param:", "parshape"]));
+                add_heads(&mut b.state, Some(&["par:", "pg:"]));
+                add_heads(&mut b.state, Some(NORMAL_PARAGRAPH));
                 self.call_hint("par", &mut b, &mut cause)
             }
             AtomKind::Close => {
@@ -1002,7 +1049,7 @@ impl Analysis<'_> {
                 continue;
             }
             if starts_par(c) {
-                add_heads(st, Some(&["par:", "lopen:"]));
+                add_heads(st, Some(&["par:", "lopen:", "pg:"]));
             }
             add_heads(st, class_state(c));
         }
@@ -1017,23 +1064,23 @@ impl Analysis<'_> {
         match self.defs.shape(name) {
             Some(pass::Shape::Quantity('f')) => add_head(st, "font"),
             Some(pass::Shape::Quantity('i' | 'd' | 'g' | 't')) => {
-                add_heads(st, class_state("count"))
+                add_heads(st, class_state("count"));
             }
             Some(pass::Shape::Quantity(_)) => {
                 add_heads(st, Some(&["box:", "lvlfix", "badness", "inspen", "align"]));
                 if may_start_par {
-                    add_head(st, "par:");
+                    add_heads(st, Some(&["par:", "pg:"]));
                 }
             }
             Some(pass::Shape::Alias(t)) => {
                 if starts_par(&t) && may_start_par {
-                    add_head(st, "par:");
+                    add_heads(st, Some(&["par:", "pg:"]));
                 }
                 if !self.defs.is_defined(&t) {
                     add_heads(st, class_state(&t));
                 }
             }
-            Some(pass::Shape::Cond) => add_head(st, "ifstack"),
+            Some(pass::Shape::Cond) => add_head(st, "if:"),
             Some(pass::Shape::Macro(_)) => {}
             // (definitions that disagree, or one the pass cannot read)
             Some(pass::Shape::Opaque(_)) | None => *st = None,
@@ -1077,6 +1124,7 @@ impl Analysis<'_> {
 
     /// The hint of the control sequence at `a`, of a command beginning
     /// at `first`.
+    #[allow(clippy::too_many_lines)]
     fn cs_hint(&self, first: usize, a: usize, b: &mut Bound, cause: &mut String) -> bool {
         let atoms = self.atoms();
         let name = atoms[a].name(self.text);
@@ -1118,9 +1166,9 @@ impl Analysis<'_> {
                 let o = atoms[k].name(self.text);
                 if o.starts_with("pdf") && crate::prims::PRIMS.iter().any(|p| p.0 == o) {
                     add_head(&mut b.state, "pdf:");
-                } else if class_state(o) == Some(&["ifstack"][..]) {
+                } else if class_state(o) == Some(&["if:"][..]) {
                     // (a conditional expanded in an operand, §498)
-                    add_head(&mut b.state, "ifstack");
+                    add_head(&mut b.state, "if:");
                 } else if matches!(o, "csname" | "tex_csname:D")
                     && !b.prefixes.iter().any(|p| p == "cs:")
                 {
@@ -1162,15 +1210,15 @@ impl Analysis<'_> {
             b.prefixes.push("cs:\u{10FFFE}F".to_owned());
         }
         if starts_par(name) && self.may_start_par(a) {
-            add_heads(&mut b.state, Some(&["par:", "lopen:"]));
+            add_heads(&mut b.state, Some(&["par:", "lopen:", "pg:"]));
         }
         if matches!(name, "par" | "tex_par:D") || it.hints.implicit == pass::Implicit::EndsParagraph
         {
-            add_head(&mut b.state, "par:");
-            // (a paragraph's end: `normal_paragraph` resets `\\looseness`,
-            // `\\hangindent`, `\\hangafter`, `\\parshape`,
-            // `\\interlinepenalties`, §1070, §1096)
-            add_heads(&mut b.state, Some(&["param:", "parshape"]));
+            // (a paragraph's end: its lines, `\\prevgraf`, §1096;
+            // `normal_paragraph` resets `\\looseness`, `\\hangindent`,
+            // `\\hangafter`, `\\parshape`, `\\interlinepenalties`, §1070)
+            add_heads(&mut b.state, Some(&["par:", "pg:"]));
+            add_heads(&mut b.state, Some(NORMAL_PARAGRAPH));
         }
         if self.after_afterassignment(first) {
             add_head(&mut b.state, "aftertoken");
@@ -1214,11 +1262,6 @@ fn opener(st: &mut Option<Vec<String>>, open: bool) {
     });
     if open || opens {
         add_head(st, "lopen:");
-    }
-    // (a paragraph begun sets `\\prevgraf` to 0, one ended to its lines:
-    // §1091, §1096)
-    if st.as_ref().is_some_and(|v| v.iter().any(|h| h == "par:")) {
-        add_head(st, "pg:");
     }
 }
 
@@ -1482,6 +1525,12 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
         }
         "s" => {
             let text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
+            if xs.get(4).is_some_and(|&x| int_of(v, x) & 4 != 0) {
+                // (a pseudo file's or a `\read` line: its catcodes are
+                // the ones in force when it is read, which its own
+                // commands may change, pdfTeX §1766, §483)
+                return Hint::any("text read under the catcodes in force", &text);
+            }
             if let (Some(&name), Some(&o)) = (xs.get(5), xs.get(6)) {
                 let at = usize::try_from(int_of(v, o)).unwrap_or(0);
                 let t = by_name()
@@ -1584,7 +1633,7 @@ fn fragment_context(b: &mut Bound) {
     // and the held-over contributions are restored, §1100)
     add_heads(&mut b.state, Some(&["page:", "deadcycles"]));
     add_head(&mut b.state, "par:");
-    add_heads(&mut b.state, Some(&["param:", "parshape"]));
+    add_heads(&mut b.state, Some(NORMAL_PARAGRAPH));
     add_head(&mut b.state, "pg:");
     add_head(&mut b.state, "lopen:");
     add_head(&mut b.state, "aftertoken");
@@ -1645,6 +1694,28 @@ pub(crate) fn effect_none(v: &Values, args: &[ValueId]) -> bool {
         .bound
         .as_ref()
         .is_some_and(|b| b.no_scope)
+}
+
+/// Whether the node's text bounds what its command defines.
+pub(crate) fn bounded(v: &Values, args: &[ValueId]) -> bool {
+    if OFF.load(Ordering::Relaxed) || std::env::var_os("PHITEX_HINTS_OFF").is_some() {
+        return false;
+    }
+    hint_of_args(v, args).bound.is_some()
+}
+
+/// The fields the hint rests on, which the node reads first: the
+/// meanings of the names its text calls (`cs:name`, `act:code`) and the
+/// catcodes its bytes were read with (`cat:c`).
+pub(crate) fn reads(v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
+    if OFF.load(Ordering::Relaxed) || std::env::var_os("PHITEX_HINTS_OFF").is_some() {
+        return None;
+    }
+    let h = hint_of_args(v, args);
+    let b = h.bound.as_ref()?;
+    let mut out: Vec<Field> = b.means.iter().map(|(n, _)| v.field(n)).collect();
+    out.extend(b.cats.iter().map(|(c, _)| v.field(&format!("cat:{c}"))));
+    (!out.is_empty()).then_some(out)
 }
 
 /// The engine's question, answered from the text.
@@ -1888,8 +1959,8 @@ mod tests {
         let st = |off: usize| text.at(off).bound.expect("bounded").state;
         // (`\\par` is demoted for now)
         assert!(is_demoted(&text.at(0)));
-        // the run after it is in one: the list, and `\\prevgraf` if the
-        // token it reads after it ends the paragraph
+        // the run after it is in one: the list, and `\\prevgraf` if a
+        // command after it in its text ends the paragraph
         assert_eq!(
             st(10).as_deref(),
             Some(&["par:".to_owned(), "pg:".to_owned()][..])
@@ -1901,7 +1972,7 @@ mod tests {
         assert!(!st(10).expect("some").contains(&"lopen:".to_owned()));
         // (a conditional, when bounded, may change the if stack)
         if let Some(b) = text.at(15).bound {
-            assert!(b.state.expect("some").contains(&"ifstack".to_owned()));
+            assert!(b.state.expect("some").contains(&"if:".to_owned()));
         }
         let d = text.at(t.find("\\def").unwrap()).bound.expect("bounded");
         assert!(d.state.expect("some").contains(&"aftertoken".to_owned()));
@@ -1921,7 +1992,7 @@ mod tests {
         for f in [
             "par:3",
             "pg:1",
-            "ifstack",
+            "if:",
             "aftertoken",
             "cat:64",
             "count:10",

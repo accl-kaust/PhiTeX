@@ -739,8 +739,10 @@ impl Session {
             return;
         };
         let key = b.prelude_key();
-        if had != Some(key) {
-            let _ = c.put_format(&self.format_name(text), &key, &b.export_prelude());
+        if had != Some(key)
+            && let Some(bytes) = b.export_prelude()
+        {
+            let _ = c.put_format(&self.format_name(text), &key, &bytes);
         }
     }
 
