@@ -19,7 +19,9 @@
 
 use std::collections::VecDeque;
 
-use phitex_defuse::{Ctx, Effect, Field, Locality, MayDefine, Operation, Stop, Value, ValueId, Values};
+use phitex_defuse::{
+    Ctx, Effect, Field, Locality, MayDefine, Operation, Stop, Value, ValueId, Values,
+};
 use phitex_typeset::glue::Glue;
 use phitex_typeset::node::{List, Node};
 use phitex_typeset::pack::{PackParams, Spec};
@@ -173,12 +175,15 @@ impl Run<'_, '_> {
         })
     }
 
-
     /// `\pagegoal` and the other page quantities (§421) read by the
     /// text: the fold has not run where a text node is, so the empty
     /// page's values (§987): `max_dimen` for the goal, 0 otherwise.
+    #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn page_dimen(&mut self, m: i32) -> R<i32> {
-        self.diag(false, "\\pagegoal and its kin read from the text: the empty page's values");
+        self.diag(
+            false,
+            "\\pagegoal and its kin read from the text: the empty page's values",
+        );
         Ok(if m == 0 { MAX_DIMEN } else { 0 })
     }
 
@@ -228,7 +233,9 @@ impl Run<'_, '_> {
                 }
                 nodes::T_PAGE_PARAMS => {
                     let xs = list_of(v, x);
-                    let n = |i: usize| i32::try_from(xs.get(i).map_or(0, |&y| int_of(v, y))).unwrap_or(0);
+                    let n = |i: usize| {
+                        i32::try_from(xs.get(i).map_or(0, |&y| int_of(v, y))).unwrap_or(0)
+                    };
                     params.vsize = n(1);
                     params.max_depth = n(2);
                     params.top_skip = crate::val::glue_of(v, xs.get(3).copied());
@@ -288,11 +295,18 @@ impl Run<'_, '_> {
             }
         }
         if ending.is_some() && !pb.page.is_empty() {
-            self.diag(true, "\\end could not empty the page (an output routine that never ships?)");
+            self.diag(
+                true,
+                "\\end could not empty the page (an output routine that never ships?)",
+            );
         }
         let output = self.get("param:output")?;
         let any = toks_of(v, output).is_empty();
-        let op = if any { self.ops.pagestep_any } else { self.ops.pagestep };
+        let op = if any {
+            self.ops.pagestep_any
+        } else {
+            self.ops.pagestep
+        };
         for (j, d) in pages.into_iter().enumerate() {
             self.kid(op, vec![v.int(i64::try_from(j).unwrap_or(0)), d]);
         }
@@ -310,11 +324,16 @@ impl Run<'_, '_> {
         if !self.cx.is_loopback(f) {
             return Ok(Vec::new());
         }
-        Ok(self.cx.use_field(f)?.map(|x| list_of(v, x)).unwrap_or_default())
+        Ok(self
+            .cx
+            .use_field(f)?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default())
     }
 
     /// A fired page as the step's argument: `[box255, inserts, marks,
     /// held, output_penalty]`, the marks as values (§1012–§1021).
+    #[allow(clippy::unnecessary_wraps)]
     fn page_data(&mut self, f: &phitex_typeset::page::Fired, side: &Side) -> R<ValueId> {
         let v = self.v;
         let b255 = nodes::encode_box(v, &f.box255.node, side);
@@ -331,7 +350,11 @@ impl Run<'_, '_> {
             .iter()
             .map(|&k| side.marks.get(k as usize).copied().unwrap_or(ValueId::UNIT))
             .collect();
-        let held: Vec<ValueId> = f.held_inserts.iter().map(|n| nodes::encode(v, n, side)).collect();
+        let held: Vec<ValueId> = f
+            .held_inserts
+            .iter()
+            .map(|n| nodes::encode(v, n, side))
+            .collect();
         Ok(v.list(vec![
             b255,
             v.list(inserts),
@@ -348,7 +371,8 @@ impl Run<'_, '_> {
         let v = self.v;
         let data = args.get(1).map(|&d| list_of(v, d)).unwrap_or_default();
         let a = |i: usize| data.get(i).copied().unwrap_or(ValueId::UNIT);
-        let (b255, inserts, marks, held) = (a(0), list_of(v, a(1)), list_of(v, a(2)), list_of(v, a(3)));
+        let (b255, inserts, marks, held) =
+            (a(0), list_of(v, a(1)), list_of(v, a(2)), list_of(v, a(3)));
         let output_penalty = data.get(4).map_or(0, |&x| int_of(v, x));
         // §1012: marks
         let bot = self.get("mark:bot")?.filter(|&x| x != ValueId::UNIT);
@@ -371,7 +395,11 @@ impl Run<'_, '_> {
         if top.is_some() && first.is_none() {
             first = top;
         }
-        for (name, m) in [("mark:top", top), ("mark:first", first), ("mark:bot", new_bot)] {
+        for (name, m) in [
+            ("mark:top", top),
+            ("mark:first", first),
+            ("mark:bot", new_bot),
+        ] {
             self.set(name, m.unwrap_or(ValueId::UNIT), true);
         }
         // §1018–§1021: insertion boxes
@@ -400,7 +428,10 @@ impl Run<'_, '_> {
             // §1023: the default output routine
             self.ship_out(b255)?;
             if !held.is_empty() {
-                self.diag(false, "held-over insertions without an output routine (next round)");
+                self.diag(
+                    false,
+                    "held-over insertions without an output routine (next round)",
+                );
             }
             return Ok(());
         }
@@ -471,6 +502,7 @@ impl Operation for Breaks {
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }
+    #[allow(clippy::redundant_closure_for_method_calls)]
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         run_node(cx, ops(&self.0), |r| r.breaks())
     }

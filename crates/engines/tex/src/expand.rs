@@ -83,6 +83,7 @@ impl Run<'_, '_> {
                             self.pass_text()?;
                         }
                         self.conds.pop();
+                        self.if_codes.truncate(self.conds.len());
                     }
                 }
                 cmd::INPUT => {
@@ -479,6 +480,7 @@ impl Run<'_, '_> {
                         }
                     } else if self.cur.chr == FI_CODE {
                         self.conds.pop();
+                        self.if_codes.truncate(self.conds.len());
                     }
                 }
                 self.change_if_limit(OR_CODE, save);
@@ -503,6 +505,7 @@ impl Run<'_, '_> {
                 // "Extra \or": ignored
             } else if self.cur.chr == FI_CODE {
                 self.conds.pop();
+                self.if_codes.truncate(self.conds.len());
             }
         }
         self.common_ending(save);
@@ -527,6 +530,7 @@ impl Run<'_, '_> {
     fn common_ending(&mut self, save: usize) {
         if self.cur.chr == FI_CODE {
             self.conds.truncate(save - 1);
+            self.if_codes.truncate(self.conds.len());
         } else {
             self.change_if_limit(FI_CODE, save);
         }

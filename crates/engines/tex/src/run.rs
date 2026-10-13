@@ -202,6 +202,8 @@ pub(crate) struct Run<'c, 'a> {
     pub cur: Cur,
     /// Conditionals begun in this run: their `if_limit` (§489).
     pub conds: Vec<u8>,
+    /// The codes (`cur_if`) of `conds`, parallel to it.
+    pub if_codes: Vec<i32>,
     mcache: FxHashMap<ValueId, Mean>,
     /// The meaning fields of the tokens this run looked up.
     tfields: FxHashMap<Tok, Field>,
@@ -263,6 +265,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 mean: Mean::Undefined,
             },
             conds: Vec::new(),
+            if_codes: Vec::new(),
             mcache: FxHashMap::default(),
             tfields: FxHashMap::default(),
             kind_memo: None,
@@ -1263,6 +1266,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Ends the run: definitions, contributions, children (what the
     /// command made, then the input left), the claim and the scope effect.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn finish(mut self) -> ValueId {
         // a page parameter this run set reaches the page fold as a
         // marker in the main list (page.rs `breaks`)
@@ -1331,10 +1335,15 @@ impl<'c, 'a> Run<'c, 'a> {
                         eprintln!(
                             "  item lid {} {}",
                             crate::val::int_at(v, e, 0),
-                            v.render(crate::val::list_of(v, e).get(1).copied().unwrap_or(ValueId::UNIT))
-                                .chars()
-                                .take(60)
-                                .collect::<String>()
+                            v.render(
+                                crate::val::list_of(v, e)
+                                    .get(1)
+                                    .copied()
+                                    .unwrap_or(ValueId::UNIT)
+                            )
+                            .chars()
+                            .take(60)
+                            .collect::<String>()
                         );
                     }
                 }
