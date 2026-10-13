@@ -2648,6 +2648,11 @@ fn xform_step(
     let Some(Node::Box(mut bx)) = nodes::decode(v, b, &mut side) else {
         return Ok(None);
     };
+    // PDF-BACKEND-GAP: pdfTeX reads a form's virtual fonts when it
+    // writes the form (`\immediate`: now; else after the first page that
+    // references it); here at `\pdfxform`, so a new local font of a
+    // later-written form may take a number a page's font takes in pdfTeX
+    // (`vfgap` in tests/pdftex.rs)
     crate::pdfout::vf_for(r, &bx)?;
     let mut data = Vec::new();
     for w in side.whats.clone() {
