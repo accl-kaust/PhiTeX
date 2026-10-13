@@ -84,6 +84,10 @@ pub struct Options {
     /// candidates per step. The output is the same either way.
     pub speculation: Speculation,
     pub speculation_budget: usize,
+    /// The loop-back rounds an evaluation may take before it ends with
+    /// a no-fixpoint error naming the loop-back fields (a document whose
+    /// written files oscillate), instead of running on.
+    pub max_rounds: u64,
 }
 
 /// When the engine speculates ([`Options::speculation`]).
@@ -312,6 +316,7 @@ impl Default for Options {
             // commands answer `Any`
             speculation: Speculation::Predicted,
             speculation_budget: 256,
+            max_rounds: 64,
         }
     }
 }
@@ -416,13 +421,17 @@ pub(crate) fn stream_entry(v: &Values, e: ValueId) -> ValueId {
 /// stood, page `j` where it fired) with each page's entries in place.
 /// Without a plan entry for them, the document nodes' entries go first.
 pub(crate) fn ordered_entries(v: &Values, plan: &[ValueId], streams: &[ValueId]) -> Vec<ValueId> {
-    let mut by_page: std::collections::BTreeMap<i64, Vec<ValueId>> = std::collections::BTreeMap::default();
+    let mut by_page: std::collections::BTreeMap<i64, Vec<ValueId>> =
+        std::collections::BTreeMap::default();
     let mut imm = Vec::new();
     for &e in streams {
         let xs = list_of(v, e);
         match xs.as_slice() {
             [j, x] if v.as_int(*j).is_some() => {
-                by_page.entry(v.as_int(*j).unwrap_or(0)).or_default().push(*x);
+                by_page
+                    .entry(v.as_int(*j).unwrap_or(0))
+                    .or_default()
+                    .push(*x);
             }
             _ => imm.push(e),
         }
@@ -1117,6 +1126,16 @@ impl Graph {
         if let E::UndeclaredDefinition { field, .. } = e {
             let _ = write!(out, "\n  field {}", field_name(v, *field));
         }
+        // (the engine does not say which loop-backs kept changing: the
+        // job's read-back fields are the candidates)
+        if let E::NonConvergence { .. } = e {
+            for name in &self.written {
+                let _ = write!(out, "\n  written file {name}");
+            }
+            for f in &self.wdefs {
+                let _ = write!(out, "\n  read-back field {f}");
+            }
+        }
         for id in ids {
             let what = self.eng.node_info(id).map_or_else(
                 || "gone".to_owned(),
@@ -1795,6 +1814,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     };
     let finder = &opts.finder;
     let mut g = Graph::new(opts.time_limit, opts.threads);
+    g.eng.set_max_rounds(opts.max_rounds);
     g.sched = opts.speculation.scheduler(opts.speculation_budget);
     let unit = g.eng.new_unit();
     // the files a previous build of this prelude read, supplied before
@@ -1946,6 +1966,7 @@ impl Build {
         let defs = prelude_defs(&cached, prelude, &opts.finder);
         let t1 = t0.elapsed();
         let mut g = Graph::new(opts.time_limit, opts.threads);
+        g.eng.set_max_rounds(opts.max_rounds);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
         if let Some(p) = &opts.progress {
@@ -1961,7 +1982,11 @@ impl Build {
         // from the start (`.bbl` and `.ind` stay files until their
         // BibTeX and makeindex nodes publish them)
         for ext in WRITTEN_EXTS {
-            g.written_file(&format!("{}.{ext}", opts.jobname), opts.fixpoint, &opts.finder);
+            g.written_file(
+                &format!("{}.{ext}", opts.jobname),
+                opts.fixpoint,
+                &opts.finder,
+            );
         }
         {
             g.absorb_provided();
@@ -2078,6 +2103,13 @@ impl Build {
         );
         stats.live = self.g.eng.live_nodes();
         self.stats = stats;
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            let (nodes, units, values) = self.sizes();
+            let (node, use_) = Engine::record_sizes();
+            eprintln!(
+                "sizes: {nodes} live nodes ({node} B), {units} live units, {values} values (use {use_} B)"
+            );
+        }
         // `PHITEX_CLAIMS=<text>`: the nodes whose slice holds the text,
         // their claims and their descendants' (a debugging dump)
         if let Ok(want) = std::env::var("PHITEX_CLAIMS") {
@@ -2171,6 +2203,23 @@ impl Build {
     #[must_use]
     pub fn pdf_exact_reason(&self) -> Option<&str> {
         self.g.pdf_exact.as_deref()
+    }
+
+    /// Frees the engine's memoized applications nothing reaches any
+    /// more (a long session calls it between edits); returns the nodes
+    /// freed.
+    pub fn collect_garbage(&mut self) -> usize {
+        self.g.eng.collect_garbage()
+    }
+
+    /// The engine's live nodes, live units and values in its table.
+    #[must_use]
+    pub fn sizes(&self) -> (usize, usize, usize) {
+        (
+            self.g.eng.live_nodes(),
+            self.g.eng.live_units(),
+            self.g.eng.values().len(),
+        )
     }
 
     /// The document changed to `text`: the nodes whose slices differ are
