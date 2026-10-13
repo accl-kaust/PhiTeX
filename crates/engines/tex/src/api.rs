@@ -416,7 +416,7 @@ pub(crate) fn stream_entry(v: &Values, e: ValueId) -> ValueId {
 /// stood, page `j` where it fired) with each page's entries in place.
 /// Without a plan entry for them, the document nodes' entries go first.
 pub(crate) fn ordered_entries(v: &Values, plan: &[ValueId], streams: &[ValueId]) -> Vec<ValueId> {
-    let mut by_page: std::collections::BTreeMap<i64, Vec<ValueId>> = Default::default();
+    let mut by_page: std::collections::BTreeMap<i64, Vec<ValueId>> = std::collections::BTreeMap::default();
     let mut imm = Vec::new();
     for &e in streams {
         let xs = list_of(v, e);
@@ -1552,7 +1552,9 @@ impl Graph {
 /// Whether a job-written file's read-back only defines (its lines are
 /// read as definitions per field, never as text): `.aux`.
 fn defines_only(name: &str) -> bool {
-    name.ends_with(".aux")
+    std::path::Path::new(name)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("aux"))
 }
 
 /// The extensions of the files a job is taken to write and read back
