@@ -22,11 +22,36 @@ fn chain(dir: &std::path::Path, name: &str) {
             };
             let b = common::build(opts, Some(&common::plain()), &src);
             eprintln!(
-                "{name} at {t} threads: wall {:?}, busy {:?}, busy/wall {:.2}",
+                "{name} at {t} threads: wall {:?}, busy {:?}, busy/wall {:.2}, runs {}, stops {}, raises {}, speculations {}/{}/{}, waits_by_kind {:?}",
                 b.stats.wall,
                 b.stats.busy,
-                b.stats.busy.as_secs_f64() / b.stats.wall.as_secs_f64().max(1e-9)
+                b.stats.busy.as_secs_f64() / b.stats.wall.as_secs_f64().max(1e-9),
+                b.stats.runs,
+                b.stats.stops,
+                b.stats.raises,
+                b.stats.speculations,
+                b.stats.confirmations,
+                b.stats.mispredictions,
+                b.stats.waits_by_kind
             );
+        }
+    }
+    {
+        let s = &b.stats;
+        eprintln!(
+            "{name}: waits_by_kind {:?}, hints {} bounded / {} any / {} demoted / {} violations / {} undeclared, speculations {}, raises {}, stops {}",
+            s.waits_by_kind,
+            s.nodes_bounded,
+            s.nodes_any,
+            s.hints_demoted,
+            s.regime_violations,
+            s.undeclared_definitions,
+            s.speculations,
+            s.raises,
+            s.stops
+        );
+        for (k, l) in b.chain_waits().iter().enumerate() {
+            eprintln!("  {name} wait {k}: {l}");
         }
     }
     let c = b.critical_chain();

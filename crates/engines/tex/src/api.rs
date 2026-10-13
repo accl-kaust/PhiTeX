@@ -2054,6 +2054,66 @@ impl Build {
     /// for each link the node's operation and first argument (shortened),
     /// the cause's kind, and its field if any ([`Engine::critical_chain`]).
     #[must_use]
+    /// The critical chain's waits in detail (a measure): for each
+    /// `Woken` link, the waiter and the node it waited on (text, the
+    /// hint's class and cause, `may_define`, effect, the hinted reads);
+    /// for each `Raised` link, the node and its hinted reads.
+    #[must_use]
+    pub fn chain_waits(&self) -> Vec<String> {
+        use phitex_defuse::Cause;
+        let v = self.g.eng.values();
+        let describe = |n: phitex_defuse::NodeId| -> String {
+            let Some(i) = self.g.eng.node_info(n) else {
+                return "gone".to_owned();
+            };
+            let text: String = i
+                .args
+                .first()
+                .map(|&x| v.render(x))
+                .unwrap_or_default()
+                .chars()
+                .take(40)
+                .collect();
+            if i.op != "exec" {
+                return format!("{} {text}", i.op);
+            }
+            let h = crate::hints::hint_of_args(v, &i.args);
+            let md = match crate::hints::may_define(v, &i.args) {
+                phitex_defuse::MayDefine::Any => "Any".to_owned(),
+                other => format!("{other:?}").chars().take(160).collect(),
+            };
+            let eff = if crate::hints::effect_none(v, &i.args) {
+                "None"
+            } else {
+                "Pending"
+            };
+            let reads: Vec<String> = crate::hints::reads(v, &i.args)
+                .unwrap_or_default()
+                .iter()
+                .map(|f| field_name(v, *f))
+                .collect();
+            format!(
+                "{text:?} [{}] may_define {md} effect {eff} reads {reads:?}",
+                h.cause
+            )
+        };
+        let mut out = Vec::new();
+        for (n, c) in self.g.eng.critical_chain() {
+            match c {
+                Cause::Woken { by } => out.push(format!(
+                    "Woken\n    waiter: {}\n    waited: {}",
+                    describe(n),
+                    describe(by)
+                )),
+                Cause::Raised { to } => {
+                    out.push(format!("Raised to {to}\n    node: {}", describe(n)));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
     pub fn critical_chain(&self) -> Vec<(String, String, String)> {
         use phitex_defuse::Cause;
         let v = self.g.eng.values();
