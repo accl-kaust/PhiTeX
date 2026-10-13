@@ -279,9 +279,9 @@ impl Run<'_, '_> {
                     out.stuck
                 );
             }
-            for &(n, k) in &out.flushes {
+            for &(n, k, cs) in &out.flushes {
                 let after = i64::try_from(j).unwrap_or(0) - 1;
-                flushplan.push(v.list(vec![v.int(n), v.int(k), v.int(after)]));
+                flushplan.push(v.list(vec![v.int(n), v.int(k), v.int(after), cs]));
             }
             for &node in &out.passed {
                 if published.insert(node) {
@@ -742,10 +742,19 @@ impl Run<'_, '_> {
                 return Ok(());
             }
         }
+        // the text's `\count0..9` as they stand here: what the page the
+        // flush opens starts from (the writer's fold replaces its
+        // running counts with them: the text's arithmetic since the
+        // last flush, on the value fed back there)
+        let mut before = Vec::with_capacity(10);
+        for c in 0..10 {
+            before.push(v.int(i64::from(self.reg_int(0, c)?)));
+        }
         let at = v.list(vec![
             v.int(nodes::T_FLUSH_AT),
             v.int(i64::from_ne_bytes(node.to_ne_bytes())),
             v.int(i64::try_from(k).unwrap_or(0)),
+            v.list(before),
         ]);
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
         let read = self.cx.use_field(f)?;
@@ -759,13 +768,7 @@ impl Run<'_, '_> {
             return Ok(());
         };
         let xs = list_of(v, x);
-        // (`\count0..9` after the page: not yet; read through, the
-        // chain's page number fed back here grows by one a round on
-        // LaTeX's `\enddocument` (its `\clearpage` + `\end` pages);
-        // `PHITEX_FLUSH_COUNTS=1` tries it)
-        if let Some(&cs) = xs.first()
-            && crate::exec::env_flag!("PHITEX_FLUSH_COUNTS")
-        {
+        if let Some(&cs) = xs.first() {
             self.preload_counts(cs);
         }
         if let Some(&pairs) = xs.get(1) {
@@ -908,7 +911,7 @@ struct PageFold {
     fired: Option<(Box<phitex_typeset::page::Fired>, Side, PageStart)>,
     passed: Vec<i64>,
     /// The flush points met (`T_FLUSH_AT`): `[node, k]`.
-    flushes: Vec<(i64, i64)>,
+    flushes: Vec<(i64, i64, ValueId)>,
     /// The immediate writes' entries met (`T_WRITE_AT`), in order.
     writes: Vec<ValueId>,
     stuck: bool,
@@ -927,7 +930,7 @@ struct PlanPage {
     passed: Vec<i64>,
     writes: Vec<ValueId>,
     /// The flush points met (`T_FLUSH_AT`): `[node, k]`.
-    flushes: Vec<(i64, i64)>,
+    flushes: Vec<(i64, i64, ValueId)>,
     stuck: bool,
 }
 
@@ -942,7 +945,7 @@ struct PlanMemo {
     fired: Option<(Vec<ValueId>, usize, Vec<crate::api::Tree>, PageStart)>,
     passed: Vec<i64>,
     writes: Vec<ValueId>,
-    flushes: Vec<(i64, i64)>,
+    flushes: Vec<(i64, i64, ValueId)>,
     stuck: bool,
 }
 
@@ -1178,7 +1181,11 @@ fn fold_page(
                 continue;
             }
             nodes::T_FLUSH_AT => {
-                flushes.push((crate::val::int_at(v, x, 1), crate::val::int_at(v, x, 2)));
+                flushes.push((
+                    crate::val::int_at(v, x, 1),
+                    crate::val::int_at(v, x, 2),
+                    list_of(v, x).get(3).copied().unwrap_or(ValueId::UNIT),
+                ));
                 continue;
             }
             nodes::T_WRITE_AT => {
@@ -1577,11 +1584,44 @@ impl FinalState {
         let mut cur = ValueId::UNIT;
         // the state after each page, for the flush points' loop-backs
         let mut after: Vec<(ValueId, ValueId)> = Vec::new();
-        // `\\count0..9` before the chain, then as folded
-        let mut counts = Self::counts(cx)?;
+        // the flush points (`flushplan`: `[node, k, page, counts]`): the
+        // text's `\\count0..9` as it stood at each, what the page after
+        // `page` starts from (the text's arithmetic since the flush
+        // before, on the value fed back there); the first, before any
+        // page, is the chain's start
+        let fp = cx.acc_range(v.field("flushplan"), None)?;
+        let flushes: Vec<(i64, i64, i64, ValueId)> = v
+            .seq_to_vec(fp)
+            .iter()
+            .flat_map(|&e| list_of(v, e))
+            .filter_map(|e| {
+                let xs = list_of(v, e);
+                let [n, k, p, cs] = xs.as_slice() else {
+                    return None;
+                };
+                Some((int_of(v, *n), int_of(v, *k), int_of(v, *p), *cs))
+            })
+            .collect();
         let ints =
             |x: ValueId| -> Vec<i64> { list_of(v, x).iter().map(|&y| int_of(v, y)).collect() };
+        let starts_at = |page: i64| -> Option<Vec<i64>> {
+            flushes
+                .iter()
+                .filter(|f| f.2 + 1 == page)
+                .map(|f| ints(f.3))
+                .find(|c| c.len() == 10)
+        };
+        // `\\count0..9` before the chain, then as folded
+        let mut counts = match starts_at(0) {
+            Some(c) => c,
+            None => Self::counts(cx)?,
+        };
         for j in 0..steps {
+            if j > 0
+                && let Some(c) = starts_at(i64::try_from(j).unwrap_or(0))
+            {
+                counts = c;
+            }
             let Some(xs) = entries.get(&j) else { continue };
             let g = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
             // what step j read against what the steps before it left
@@ -1674,27 +1714,22 @@ impl FinalState {
             after[j] = (cs, cur);
         }
         Self::log_refuted(o, refuted);
-        // the flush points (`flushplan`: `[node, k, page]`): the state
-        // after that page, UNIT before the first
-        let fp = cx.acc_range(v.field("flushplan"), None)?;
-        for e in v.seq_to_vec(fp).iter().flat_map(|&e| list_of(v, e)) {
-            let xs = list_of(v, e);
-            let [n, k, p] = xs.as_slice() else { continue };
+        // the flush points' loop-backs: the state after their page,
+        // UNIT before the first
+        for &(n, k, p, _) in &flushes {
             // (the node id as the marker carries it: a signed value)
-            let node = u64::from_ne_bytes(int_of(v, *n).to_ne_bytes());
-            let f = v.field(&format!("pgst:at:{node}:{}", int_of(v, *k)));
+            let node = u64::from_ne_bytes(n.to_ne_bytes());
+            let f = v.field(&format!("pgst:at:{node}:{k}"));
             if !cx.is_loopback(f) {
                 continue;
             }
-            let x = usize::try_from(int_of(v, *p))
+            let x = usize::try_from(p)
                 .ok()
                 .and_then(|p| after.get(p))
                 .map_or(ValueId::UNIT, |&(cs, st)| v.list(vec![cs, st]));
             if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
                 eprintln!(
-                    "aux-trace: flush point {node}:{} after page {}: {} (before the chain {counts:?})",
-                    int_of(v, *k),
-                    int_of(v, *p),
+                    "aux-trace: flush point {node}:{k} after page {p}: {} (chain end {counts:?})",
                     v.render(x)
                 );
             }

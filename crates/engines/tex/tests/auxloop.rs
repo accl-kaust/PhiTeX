@@ -124,5 +124,9 @@ fn a_flush_point_reads_the_page_number_after_its_page() {
     assert!(has(b"even") && !has(b"odd"), "the branch after the flush");
     // (one round declares the flush loop-back, one reads it: 2 beyond
     // the first)
-    assert!(b.stats.loop_rounds <= 4, "{} loop rounds", b.stats.loop_rounds);
+    assert!(
+        b.stats.loop_rounds <= 4,
+        "{} loop rounds",
+        b.stats.loop_rounds
+    );
 }

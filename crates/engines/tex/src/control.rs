@@ -1360,6 +1360,12 @@ impl Run<'_, '_> {
             && self
                 .get(&format!("write:{k}"))?
                 .is_some_and(|x| x != ValueId::UNIT);
+        if crate::exec::env_flag!("PHITEX_AUX_TRACE") && s.is_empty() && self.interp.is_some() {
+            let mut shown = String::new();
+            self.show_toks_into(&mut shown, body)?;
+            let t = self.get("toks:11")?.map(|x| self.v.render(x));
+            eprintln!("aux-trace: empty write: body {shown:?}, toks:11 = {t:?}");
+        }
         if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
             let w = self
                 .get(&format!("write:{k}"))?
