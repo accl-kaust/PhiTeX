@@ -47,17 +47,18 @@ pub(crate) use env_flag;
 /// (its items cost microseconds).
 const GRAIN: usize = 64;
 
-/// Below this many jobs a batch of runs goes inline: most runs are one
-/// command (microseconds), so a hand-off to the pool per one- or
-/// two-node step costs more than the step. `PHITEX_GRAIN` overrides it
-/// (for measurements; the schedule never changes the output).
+/// Below this many jobs a batch of runs goes inline. A run is a
+/// paragraph region, a page step or a format (hundreds of microseconds
+/// to seconds), so any batch of two or more is worth a hand-off to the
+/// pool. `PHITEX_GRAIN` overrides it (for measurements; the schedule
+/// never changes the output).
 fn job_grain() -> usize {
     static G: OnceLock<usize> = OnceLock::new();
     *G.get_or_init(|| {
         std::env::var("PHITEX_GRAIN")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(64)
+            .unwrap_or(2)
     })
 }
 
