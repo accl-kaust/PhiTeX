@@ -1042,13 +1042,14 @@ its base level. A region the pass closed too early reads on into the
 following text (claimed) until it is balanced: still correct, and serial
 only for that span.
 
-Input files are read by file-rest children of the `\input` node: for a
-format file (`Initex`, `Package` kinds) one child per line, a line that
-opens a brace group or a conditional reading on until it is closed
-(`hints::line_span_end`); for a document file, one child per paragraph
-region, as for the main file (design; lands with branch para-input).
-Format text keeps one command per node; a group a format line leaves
-open is an engine scope (`Run::leave_open`), the only case of one.
+A format (`plain.tex`, `latex.ini` and every file it `\input`s) is one
+node, run sequentially, files read in place through the environment
+provider (`api.rs` `Graph::provide`); its hint is `Any`, and a group
+open at its end is an error. In a document, `\documentclass`,
+`\usepackage`, `\RequirePackage`, `\input` and `\include` are one slice
+each; package-kind files run inline, a document-kind `\input` file is
+sliced into paragraph regions with hints (`Run::doc_file_regions`).
+No node leaves an engine scope open.
 There are no token-frame children: a macro body, a conditional, `\the`
 and `\csname` expand inline in the node that reads the token. See `docs/TARGET_GRAPH.md` for the node and edge
 set the tests assert.
@@ -1057,8 +1058,7 @@ set the tests assert.
 
 Conditionals are run-local: the condition stack lives on the run and a
 conditional is never split across nodes. The syntactic pass keeps a
-conditional in one region, and format text runs a conditional opened at
-depth 0 on to its `\fi` in the same node. There are no condition-level cells,
+conditional in one region, and a format is one node. There are no condition-level cells,
 no node `ifdepth` argument and no depth checks; `\currentiflevel`,
 `\currentiftype`, `\currentifbranch` and `\showifs` read the run's
 own stack. The output routine runs inline in its page step with its own

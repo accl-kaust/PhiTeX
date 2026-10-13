@@ -15,7 +15,10 @@
 //!
 //! What a routine leaves for the next page (material `\unvbox`ed back,
 //! `\vsize` changed) is a loop-back the fold reads from the previous
-//! round (`pagefx:<j>`); round one assumes none.
+//! round (`pagefx:<j>`: held inserts and the leftover list; page
+//! parameters the routine sets are planned, branch para-vsize); round
+//! one assumes none. Marks read by document nodes are planned to go
+//! through a per-node loop-back `marks:before:<N>` (branch para-marks).
 
 use std::collections::VecDeque;
 
