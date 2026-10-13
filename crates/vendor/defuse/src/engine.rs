@@ -709,6 +709,20 @@ pub enum WaitOn {
     Queued,
 }
 
+/// The round-one value of loop-back fields after an edit
+/// ([`Engine::set_loop_start`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoopStart {
+    /// Their declared initial values: the cold path, so the fixpoint is
+    /// the one a cold evaluation of the text reaches (the default).
+    Initial,
+    /// Their last fixpoint values: publishers the edit re-runs publish
+    /// again and only readers of a changed publication run; a field
+    /// whose publishers are gone returns to its initial value. With more
+    /// than one fixpoint the one reached may differ from the cold path's.
+    Previous,
+}
+
 /// Bounds on one evaluation; exceeding one ends it with an error naming
 /// the nodes involved ([`Engine::set_limits`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1597,6 +1611,8 @@ pub struct Engine {
     max_rounds: u64,
     client_serial: u64,
     feedback: bool,
+    /// The round-one value of loop-back fields after an edit.
+    loop_start: LoopStart,
     spec_live: u32,
     /// Nodes committed from a speculative run this evaluation (a later
     /// re-dirtying is a misprediction).
@@ -1796,6 +1812,7 @@ impl Engine {
             max_rounds: DEFAULT_MAX_ROUNDS,
             client_serial: 0,
             feedback: false,
+            loop_start: LoopStart::Initial,
             spec_live: 0,
             spec_done: FxHashSet::default(),
             origins: FxHashMap::default(),
@@ -2092,6 +2109,15 @@ impl Engine {
     pub fn check_invariants(&self) -> Vec<String> {
         let mut bad = Vec::new();
         self.stuck_waiters(&mut bad);
+        if self.queue.iter().all(Vec::is_empty) {
+            for n in self
+                .nodes
+                .iter()
+                .filter(|n| matches!(n.state, State::Dirty | State::Spec))
+            {
+                bad.push(format!("{:?} {:?} with nothing queued", n.id, n.state));
+            }
+        }
         let done = self.nodes.iter().filter(|n| n.state == State::Done).count();
         let counted: u32 = self.done_heights.iter().sum();
         if counted as usize != done {
@@ -3079,6 +3105,12 @@ impl Engine {
         if let Some(&s) = self.ids.get(&node) {
             self.roots.remove(&s);
         }
+    }
+
+    /// Sets the round-one value loop-back fields take after an edit (see
+    /// [`LoopStart`]; the default is [`LoopStart::Initial`]).
+    pub fn set_loop_start(&mut self, start: LoopStart) {
+        self.loop_start = start;
     }
 
     /// Declares `field` loop-back with its round-one value.
@@ -5088,14 +5120,19 @@ impl Engine {
     /// Claims the first `k` following siblings of `c` (a run's decision).
     /// Claims the `k` following siblings of `c`; `own_run`: the claim is
     /// the one `c`'s run just made (so `c` need not run again for it).
-    fn claim_count(&mut self, c: Slot, k: usize, own_run: bool) {
+    /// The first `k` following siblings of `c` (fewer at the end).
+    pub(crate) fn following_slots(&self, c: Slot, k: usize) -> Vec<Slot> {
         let mut it = self.following(c);
         for _ in 0..k {
             if it.next().is_none() {
                 break;
             }
         }
-        let slots = it.slots;
+        it.slots
+    }
+
+    fn claim_count(&mut self, c: Slot, k: usize, own_run: bool) {
+        let slots = self.following_slots(c, k);
         self.set_claim(c, &slots, own_run);
     }
 
@@ -5157,6 +5194,9 @@ impl Engine {
             return;
         }
         self.touch(s);
+        // Its own claims go: a claim is an effect of a run, and an inert
+        // node has none. What it claimed becomes free siblings, which its
+        // claimer sees (and may claim) on its next run.
         let mine = self.aux_of(s).map_or_else(Default::default, |a| a.claimed.clone());
         if !mine.is_empty() {
             self.ax(s).claimed.clear();
@@ -6873,6 +6913,19 @@ impl Engine {
                 return;
             }
         }
+        // A count claim names the siblings the run saw: if another result
+        // of this batch changed what follows (a sibling claimed, text
+        // unfolded), the count would land on other nodes. Run again.
+        if let Some(k) = r.claim
+            && self.n(x).has(F_CLAIM_DYN)
+            && self.following_slots(x, k) != r.claim_seen
+        {
+            count!(StaleSite);
+            if r.speculative {
+                self.set_flag(x, F_NOSPEC, true);
+            }
+            return;
+        }
         // The structure a stream claim scanned changed while it ran (or
         // the labels it compares against were renumbered meanwhile).
         if let Some(sr) = r.stream {
@@ -7196,6 +7249,16 @@ impl Engine {
         } else {
             let h = self.target_height_mut(x);
             self.finish(x, h);
+            // Its count claim took a node whose own claims were released
+            // into its view: the count applies to the view it sees, so it
+            // runs again on that view (and converges: each run claims a
+            // prefix of a view that only grows).
+            if let Some(k) = r.claim
+                && self.n(x).has(F_CLAIM_DYN)
+                && self.following_slots(x, k) != self.aux_of(x).map_or_else(Vec::new, |a| a.claimed.clone())
+            {
+                self.make_dirty(x);
+            }
         }
     }
 
@@ -7729,6 +7792,11 @@ impl Engine {
     /// Resets loop-back values to their initial values. Returns whether any
     /// changed.
     fn restart_loops(&mut self) -> bool {
+        if self.loop_start == LoopStart::Previous {
+            // The last fixpoint stands as the round-one value; the round
+            // check re-runs the readers of a publication that changed.
+            return false;
+        }
         let mut fields: Vec<Field> = self.loop_init.keys().copied().collect();
         fields.sort_unstable();
         let mut any = false;
@@ -8515,6 +8583,9 @@ pub struct RunResult {
     /// The kind of the scope the run's effect opens.
     pub(crate) kind: Option<ValueId>,
     pub(crate) claim: Option<usize>,
+    /// The siblings a count claim covered when the run made it: the claim
+    /// is applied only if they are still the next ones.
+    pub(crate) claim_seen: Vec<Slot>,
     pub(crate) stream: Option<StreamRange>,
     /// The length of `touch_log` when the run started.
     pub(crate) touch_seq: usize,

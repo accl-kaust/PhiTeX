@@ -899,6 +899,9 @@ impl Graph {
             time,
             ..phitex_defuse::Limits::default()
         });
+        // our loop-backs (pagefx, marks:before) have a unique fixpoint, so an
+        // edit starts from the last values
+        eng.set_loop_start(phitex_defuse::LoopStart::Previous);
         let shared: Shared = Arc::new(OnceLock::new());
         let exec = eng.register(Arc::new(Exec(shared.clone())));
         let put = eng.register(Arc::new(Put(shared.clone())));
