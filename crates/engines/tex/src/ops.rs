@@ -129,7 +129,9 @@ pub(crate) fn run_node_parking(
         // (§1335: the job ends there, its log written up to the error,
         // as pdfTeX's close_files_and_terminate leaves it)
         Err(Halt::Fatal) => {
-            let _ = r.log("error", "*** (job aborted, no legal \\end found)");
+            if !r.too_many_errors {
+                let _ = r.log("error", "*** (job aborted, no legal \\end found)");
+            }
             r.end_open();
             Ok(r.finish())
         }
