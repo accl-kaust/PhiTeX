@@ -1915,3 +1915,379 @@ fn a_definition_outside_the_declared_set_refutes_the_declaration() {
     assert_eq!(rep.declarations_refuted, 1, "{rep:?}");
     assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
 }
+
+/// `["f", name]` reads environment field `name` twice and outputs it (or
+/// unit when absent).
+struct EnvReader;
+
+impl Operation for EnvReader {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let name = match &*v.get(a[1]) {
+            Value::Str(s) => s.to_string(),
+            _ => String::new(),
+        };
+        let first = cx.use_env(v.field(&name))?;
+        let again = cx.use_env(v.field(&name))?;
+        assert_eq!(first, again, "one answer per run");
+        Ok(first.unwrap_or(ValueId::UNIT))
+    }
+}
+
+#[test]
+fn an_environment_provider_answers_reads_in_place_of_a_wait() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(EnvReader));
+    let u = eng.new_unit();
+    let v = eng.values();
+    let (fast, absent, slow) = (v.field("fast"), v.field("absent"), v.field("slow"));
+    let seven = v.int(7);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let c = Arc::clone(&calls);
+    eng.set_env_provider(Box::new(move |vals: &Values, f: Field| {
+        c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(&*vals.get(f.0), Value::Str(_)), "a field's name is its value");
+        if f == fast {
+            Some(Some(seven))
+        } else if f == absent {
+            Some(None)
+        } else {
+            None
+        }
+    }));
+    let mut ids = Vec::new();
+    for name in ["fast", "absent", "slow"] {
+        let a = vec![eng.values().str("f"), eng.values().str(name)];
+        ids.push(eng.push(u, op, a));
+    }
+    let r = eng.evaluate_sequential().expect("the slow read waits, the others run");
+    assert_eq!(eng.output(ids[0]), Some(seven), "{r:?}");
+    assert_eq!(eng.output(ids[1]), Some(ValueId::UNIT), "{r:?}");
+    assert_eq!(eng.output(ids[2]), None, "waiting for the slow field: {r:?}");
+    assert_eq!(r.env_provided, 2, "{r:?}");
+    assert_eq!(r.env_waits.len(), 1, "{r:?}");
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::Relaxed),
+        3,
+        "one call per unknown field"
+    );
+    assert!(
+        eng.environment().any(|(f, x)| f == fast && x == seven),
+        "the answer stays with the environment"
+    );
+    // The slow source arrives through the ordinary path.
+    eng.set_environment(vec![(fast, seven), (slow, seven)]);
+    let r = eng.evaluate_sequential().expect("supplied");
+    assert_eq!(eng.output(ids[2]), Some(seven), "{r:?}");
+    assert_eq!(r.nodes_run, 1, "only the waiter runs: {r:?}");
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+}
+
+/// `["g", n]` contributes 1 to `acc` and, for `n > 0`, unfolds a child
+/// `["g", n - 1]` (one level per batch); `["r"]` folds `acc` from the
+/// unit start.
+struct Unfolding;
+
+impl Operation for Unfolding {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let acc = v.field("acc");
+        match tag(v, &a).as_str() {
+            "g" => {
+                cx.contribute(acc, v.seq_unit(v.int(1)));
+                let n = v.as_int(a[1]).unwrap_or(0);
+                if n > 0 {
+                    cx.child(cx.op(), vec![v.str("g"), v.int(n - 1)]);
+                }
+                Ok(ValueId::UNIT)
+            }
+            "r" => cx.acc_range(acc, None),
+            _ => Ok(ValueId::UNIT),
+        }
+    }
+}
+
+#[test]
+fn a_range_reader_waiting_for_an_unfolding_range_runs_once_it_is_done() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Unfolding));
+    let acc = eng.values().field("acc");
+    eng.declare_accumulator(acc, Arc::new(defuse::SeqMonoid));
+    let u = eng.new_unit();
+    let (g, r) = {
+        let v = eng.values();
+        (vec![v.str("g"), v.int(20)], vec![v.str("r")])
+    };
+    eng.push(u, op, g);
+    let r = eng.push(u, op, r);
+    let rep = eng.evaluate_sequential().expect("evaluate");
+    let items = eng.values().seq_to_vec(eng.output(r).expect("output")).len();
+    assert_eq!(items, 21, "{rep:?}");
+    assert_eq!(rep.nodes_run, 22, "{rep:?}");
+    // The reader stops once on its range and runs once when the range is
+    // done: not once per unfolded level.
+    assert!(rep.stops <= 2, "the reader re-ran per unfold: {rep:?}");
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+}
+
+/// Phi's case. `["a", k]` (pending claim) reads its following siblings
+/// and claims every leading one whose operation tag is not `"e"`;
+/// `["b", k]` (pending claim) claims one sibling and continues with
+/// `["x"]`; `["c"]`, `["d"]`, `["x"]` are plain; `["e"]` is plain too,
+/// and must never be claimed.
+struct CountClaims;
+
+impl Operation for CountClaims {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn claim(&self, a: &[ValueId], v: &Values, _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>) -> Claim {
+        if matches!(tag(v, a).as_str(), "a" | "b") {
+            Claim::Pending
+        } else {
+            Claim::None
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match tag(v, &a).as_str() {
+            "a" => {
+                let mut n = 0;
+                while let Some((_, args)) = cx.following(n) {
+                    if tag(v, &args) == "e" {
+                        break;
+                    }
+                    n += 1;
+                }
+                cx.claim(n);
+                Ok(v.int(i64::try_from(n).unwrap_or(0)))
+            }
+            "b" => {
+                cx.claim(1);
+                cx.follow(cx.op(), vec![v.str("x")]);
+                Ok(ValueId::UNIT)
+            }
+            _ => Ok(v.int(1)),
+        }
+    }
+}
+
+#[test]
+fn a_count_claim_is_applied_to_the_siblings_the_run_saw() {
+    // Several argument values: the batch's results apply in id order, so
+    // either claimer's result may come first.
+    for k in 0..6 {
+        let mut eng = Engine::new();
+        let op = eng.register(Arc::new(CountClaims));
+        let u = eng.new_unit();
+        let mk = |eng: &mut Engine, t: &str| {
+            let v = eng.values();
+            let a = if t == "a" || t == "b" {
+                vec![v.str(t), v.int(k)]
+            } else {
+                vec![v.str(t)]
+            };
+            eng.push(u, op, a)
+        };
+        let a = mk(&mut eng, "a");
+        let b = mk(&mut eng, "b");
+        let c = mk(&mut eng, "c");
+        let d = mk(&mut eng, "d");
+        let e = mk(&mut eng, "e");
+        let rep = eng.evaluate_sequential().expect("evaluate");
+        assert!(eng.output(e).is_some(), "k {k}: e was claimed: {rep:?}");
+        assert!(eng.output(c).is_none(), "k {k}: c is claimed either way: {rep:?}");
+        // Either a's result came first (a claimed b, c, d; b never ran) or
+        // b's did (b claimed c and unfolded; a ran again on that view and
+        // claimed b and d; claiming b released c into a's view; a ran once
+        // more and claimed b and c, releasing d).
+        let (ca, cb) = (eng.claimed(a), eng.claimed(b));
+        assert!(cb.is_empty(), "k {k}: b is claimed, so claims nothing: {cb:?}");
+        assert!(
+            ca == vec![b, c, d] || ca == vec![b, c],
+            "k {k}: a claimed {ca:?}: {rep:?}"
+        );
+        assert_eq!(eng.output(d).is_some(), ca.len() == 2, "k {k}: {rep:?}");
+        assert!(eng.check_invariants().is_empty(), "k {k}: {:?}", eng.check_invariants());
+    }
+}
+
+/// `["pub"]` reads loop-back `n` and publishes `min(n + 1, 3)`; `["rd"]`
+/// reads `n` and outputs it; `["z", k]` outputs `k` and reads nothing.
+struct Converging;
+
+impl Operation for Converging {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match tag(v, &a).as_str() {
+            "pub" => {
+                let n = cx.use_field(v.field("n"))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+                cx.publish(v.field("n"), v.int((n + 1).min(3)));
+                Ok(ValueId::UNIT)
+            }
+            "rd" => Ok(cx.use_field(v.field("n"))?.unwrap_or(ValueId::UNIT)),
+            _ => Ok(a[1]),
+        }
+    }
+}
+
+#[test]
+fn a_loop_back_starts_an_edit_from_its_last_fixpoint_when_asked() {
+    let build = |start: Option<defuse::LoopStart>| {
+        let mut eng = Engine::new();
+        let op = eng.register(Arc::new(Converging));
+        let n = eng.values().field("n");
+        let zero = eng.values().int(0);
+        eng.declare_loopback(n, zero);
+        if let Some(s) = start {
+            eng.set_loop_start(s);
+        }
+        let u = eng.new_unit();
+        let (p, r, z) = {
+            let v = eng.values();
+            (vec![v.str("pub")], vec![v.str("rd")], vec![v.str("z"), v.int(1)])
+        };
+        eng.push(u, op, p);
+        let rd = eng.push(u, op, r);
+        let z = eng.push(u, op, z);
+        let rep = eng.evaluate_sequential().expect("cold");
+        assert_eq!(eng.values().as_int(eng.output(rd).expect("rd")), Some(3), "{rep:?}");
+        assert!(rep.rounds >= 3, "{rep:?}");
+        (eng, op, rd, z)
+    };
+    // Default: an edit restarts the loop from its initial value.
+    let (mut eng, op, rd, z) = build(None);
+    let a = vec![eng.values().str("z"), eng.values().int(2)];
+    eng.replace(z, op, a);
+    let rep = eng.evaluate_sequential().expect("edit, initial");
+    assert_eq!(eng.values().as_int(eng.output(rd).expect("rd")), Some(3), "{rep:?}");
+    assert!(rep.restarts >= 1 && rep.rounds >= 3 && rep.runs >= 3, "{rep:?}");
+    // Previous: the last fixpoint stands; only the edited node runs.
+    let (mut eng, op, rd, z) = build(Some(defuse::LoopStart::Previous));
+    let a = vec![eng.values().str("z"), eng.values().int(2)];
+    eng.replace(z, op, a);
+    let rep = eng.evaluate_sequential().expect("edit, previous");
+    assert_eq!(eng.values().as_int(eng.output(rd).expect("rd")), Some(3), "{rep:?}");
+    assert_eq!((rep.restarts, rep.rounds, rep.runs), (0, 1, 1), "{rep:?}");
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+}
+
+/// `["w", k]` declares it may define `f…` and defines `f = k` (reading
+/// nothing); `["wr", k]` is the same but first reads `g`, which no node
+/// defines; `["wf", k]` first reads `fz` (inside its own prefix); `["d"]`
+/// reads `f`.
+struct Writers;
+
+impl Operation for Writers {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        if tag(v, a) == "d" { Some(Vec::new()) } else { None }
+    }
+    fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
+        MayDefine::Prefixes(vec!["f".into()])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match tag(v, &a).as_str() {
+            "d" => Ok(cx.use_field(v.field("f"))?.unwrap_or(ValueId::UNIT)),
+            t => {
+                if t == "wr" {
+                    let _ = cx.use_field(v.field("g"))?;
+                } else if t == "wf" {
+                    let _ = cx.use_field(v.field("fz"))?;
+                }
+                cx.define(v.field("f"), a[1]);
+                Ok(ValueId::UNIT)
+            }
+        }
+    }
+}
+
+/// Definers of one field are not ordered among themselves: only a read
+/// waits, and only on a pending set that may cover what it reads.
+#[test]
+fn writers_of_one_field_run_in_one_step_unless_they_read_inside_a_pending_set() {
+    let run = |t: &str| {
+        let mut eng = Engine::new();
+        let op = eng.register(Arc::new(Writers));
+        let u = eng.new_unit();
+        for k in 1..=3 {
+            let a = vec![eng.values().str(t), eng.values().int(k)];
+            eng.push(u, op, a);
+        }
+        let a = vec![eng.values().str("d")];
+        let d = eng.push(u, op, a);
+        let rep = eng.evaluate_sequential().expect("evaluate");
+        assert_eq!(eng.values().as_int(eng.output(d).expect("d")), Some(3), "{t}: {rep:?}");
+        (rep.critical_path, rep.pending_sets)
+    };
+    // Writers that read nothing: one step for the three, one for the
+    // reader (which waits on each pending set in turn).
+    assert_eq!(run("w").0, 1);
+    // Writers that read a field outside every pending set: the same.
+    assert_eq!(run("wr").0, 1);
+    // Writers that read a field inside their predecessors' declared
+    // prefix: each waits for the one before (the declaration, not what
+    // it ends up defining, orders them).
+    let (height, waits) = run("wf");
+    assert!(height >= 3 && waits >= 3, "height {height}, waits {waits}");
+}
+
+/// `["p"]` declares it may define `f…` and defines `fq = 1`; `["r"]`
+/// reads `fz`, which p's set may cover but p does not define.
+struct PrefixWait;
+
+impl Operation for PrefixWait {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        if tag(v, a) == "p" { None } else { Some(Vec::new()) }
+    }
+    fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
+        MayDefine::Prefixes(vec!["f".into()])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        if tag(v, &a) == "p" {
+            cx.define(v.field("fq"), v.int(1));
+            Ok(ValueId::UNIT)
+        } else {
+            Ok(cx.use_field(v.field("fz"))?.unwrap_or(ValueId::UNIT))
+        }
+    }
+}
+
+#[test]
+fn a_woken_link_names_the_field_waited_for_and_the_prefix_it_matched() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(PrefixWait));
+    let u = eng.new_unit();
+    let (p, r) = {
+        let v = eng.values();
+        (vec![v.str("p")], vec![v.str("r")])
+    };
+    let p = eng.push(u, op, p);
+    let r = eng.push(u, op, r);
+    eng.evaluate_sequential().expect("evaluate");
+    let fz = eng.values().field("fz");
+    let chain = eng.critical_chain();
+    let link = chain.iter().find(|c| c.0 == r).expect("r is in the chain");
+    assert!(
+        matches!(&link.1, defuse::Cause::Woken { by, field, prefix }
+            if *by == p && *field == Some(fz) && prefix.as_deref() == Some("f")),
+        "{chain:?}"
+    );
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+}

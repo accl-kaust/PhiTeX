@@ -566,6 +566,14 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
         let rd = std::mem::replace(&mut reading, false);
         let xa = std::mem::replace(&mut xa_next, false);
         k += 1;
+        // (the token `\\aftergroup` saves runs at the group's end, the
+        // one `\\afterassignment` saves after the next assignment: a call)
+        if matches!(n, "aftergroup" | "afterassignment")
+            && let Some(x) = name_at(k)
+            && !e.calls.iter().any(|c| c == x)
+        {
+            e.calls.push(x.to_owned());
+        }
         if matches!(n, "expandafter" | "exp_after:wN") {
             xa_next = true;
             continue;
@@ -719,6 +727,14 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                 let mut q = skip(atoms, p);
                 if atoms.get(q).map(|x| x.kind) == Some(AtomKind::Char('=')) {
                     q = skip(atoms, q + 1);
+                }
+                // (`\futurelet\a\b`: `\b` runs next; `\let\a\b`: `\a`
+                // may run as `\b`, `\let\next\f@@t ... \next`)
+                if let Some(x) = atoms.get(q)
+                    && x.kind == AtomKind::Cs
+                    && !e.calls.iter().any(|c| c == x.name(text))
+                {
+                    e.calls.push(x.name(text).to_owned());
                 }
                 k = q + 1;
             }

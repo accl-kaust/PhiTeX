@@ -972,7 +972,15 @@ impl PdfState {
                 self.stacks.restore();
                 self.literal(b"Q", LiteralMode::SetOrigin);
             }
-            Whatsit::RefObj(n) => self.obj_list.push(*n),
+            Whatsit::RefObj(n) => {
+                // pdfTeX §1383 (`scan_refobj`): a number that is not an
+                // object of this file, as for a form or an image
+                if *n == 0 || *n > self.sys_obj_ptr() {
+                    self.fail(pdf_error("ext1", "cannot find referenced object"));
+                    return;
+                }
+                self.obj_list.push(*n);
+            }
             Whatsit::RefXForm(n) => {
                 let Some((_, h, _)) = self.xform_size(*n) else {
                     self.fail(pdf_error("ext1", "cannot find referenced object"));

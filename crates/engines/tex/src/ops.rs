@@ -1,6 +1,7 @@
-//! The operations: `Exec` (one command of TeX's input), `Put`
-//! (definitions that land outside a group that just closed), `OutPage`
-//! (an output routine begins, [`crate::page`]) and `Dvi` (the file).
+//! The operations: `Exec` (one node's text: a paragraph region, a
+//! loading command, a whole format), `Put` (definitions that land
+//! outside a group that just closed), `Dvi` (the file), `Mark` (the
+//! end of the prelude) and `Files` (the files read back next round).
 
 use std::sync::{Arc, OnceLock};
 
@@ -26,7 +27,7 @@ pub(crate) fn run_node(
     o: Ops,
     body: impl FnOnce(&mut Run<'_, '_>) -> R<()>,
 ) -> Result<ValueId, Stop> {
-    let trace = std::env::var_os("PHITEX_TEX_TRACE").is_some();
+    let trace = crate::exec::env_flag!("PHITEX_TEX_TRACE");
     if trace {
         let a = cx
             .args()
@@ -53,11 +54,10 @@ pub(crate) fn run_node(
         );
     }
     match res {
-        Ok(()) => match r.settle_page() {
-            Ok(()) => Ok(r.finish()),
-            Err(Halt::Stop(s)) => Err(s),
-            Err(_) => Ok(r.stall("fatal", ValueId::UNIT)),
-        },
+        Ok(()) => {
+            r.end_open();
+            Ok(r.finish())
+        }
         Err(Halt::Stop(s)) => Err(s),
         Err(Halt::Starve) => {
             let u = ValueId::UNIT;
@@ -68,13 +68,6 @@ pub(crate) fn run_node(
             Ok(r.stall("fatal", u))
         }
     }
-}
-
-/// `PHITEX_LEFTOVER=children`: an expansion's tokens become a child per
-/// command, as before the inline continuation.
-fn leftover_children() -> bool {
-    static C: OnceLock<bool> = OnceLock::new();
-    *C.get_or_init(|| std::env::var("PHITEX_LEFTOVER").is_ok_and(|x| x == "children"))
 }
 
 /// One command (§1030) of the node's text: the first token decides; the
@@ -96,42 +89,12 @@ impl Operation for Exec {
     fn may_define(&self, args: &[ValueId], v: &Values) -> MayDefine {
         crate::hints::may_define(v, args)
     }
-    /// A paragraph cell (`par:<anchor>:<list>`) only of the node's own
-    /// paragraph region: its anchor argument (index 2, an integer, when
-    /// the node carries one), unless it is a boundary (index 3); a
-    /// condition level (`if:<d>`) only from the node's depth (index 4) up.
+    /// For an unbounded region: the fields its hint's guess names (its
+    /// commands' rows, its calls' bodies); a wrong `false` is refuted
+    /// by the engine, never wrong output.
     fn may_define_field(&self, args: &[ValueId], v: &Values, f: Field) -> bool {
-        if !client_only(v, f) {
-            return false;
-        }
-        // a condition level below the node's own depth (index 4) was
-        // opened before it and is closed by a node at that depth: only
-        // an expand-only scan (§510's `\fi` while expanding an `\edef`
-        // or a test) reaches past it, which a bounded hint excludes
-        if let Some(&x) = args.get(4)
-            && let Some(depth) = v.as_int(x)
-            && let phitex_defuse::Value::Str(s) = &*v.get(f.0)
-            && let Some(d) = s.strip_prefix("if:").and_then(|d| d.parse::<i64>().ok())
-            && d < depth
-            && crate::hints::bounded(v, args)
-        {
-            return false;
-        }
-        // (a boundary node may begin the next region, keyed by its own id)
-        let boundary = args
-            .get(3)
-            .and_then(|&b| v.as_int(b))
-            .is_some_and(|b| b != 0);
-        if !boundary
-            && let Some(&x) = args.get(2)
-            && let Some(mine) = v.as_int(x)
-            && let phitex_defuse::Value::Str(s) = &*v.get(f.0)
-            && let Some((a, _)) = s.strip_prefix("par:").and_then(|r| r.split_once(':'))
-            && let Ok(a) = a.parse::<i64>()
-        {
-            return a == mine;
-        }
-        true
+        client_only(v, f)
+            && crate::hints::hint_of_args(v, args).may_define_field(&crate::val::field_name(v, f))
     }
     /// The meanings and catcodes the text's hint rests on
     /// ([`crate::hints::reads`]): the node waits for them instead of
@@ -149,13 +112,40 @@ impl Operation for Exec {
             Effect::Pending
         }
     }
+    /// The siblings the slice takes when its text says so exactly
+    /// (a balanced region whose items all end inside it: none).
     fn claim(
         &self,
-        _: &[ValueId],
-        _: &Values,
+        args: &[ValueId],
+        v: &Values,
         _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
     ) -> Claim {
-        Claim::Pending
+        if crate::exec::env_flag!("PHITEX_NO_CLAIMS") {
+            return Claim::Pending;
+        }
+        match crate::hints::hint_of_args(v, args)
+            .bound
+            .as_ref()
+            .and_then(|b| b.claim)
+        {
+            Some(0) => Claim::None,
+            Some(n) => Claim::Count(n),
+            None => Claim::Pending,
+        }
+    }
+    fn claim_limit(
+        &self,
+        args: &[ValueId],
+        v: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Option<usize> {
+        if crate::exec::env_flag!("PHITEX_NO_CLAIMS") {
+            return None;
+        }
+        crate::hints::hint_of_args(v, args)
+            .bound
+            .as_ref()
+            .and_then(|b| b.claim)
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let args = cx.args();
@@ -171,31 +161,12 @@ impl Operation for Exec {
                 r.log("error", &format!("hint regime violated: {m}"))?;
                 crate::hints::count(r, 2);
             }
-            r.command()?;
-            // the token list an expansion left goes on in this run, not as
-            // a child per token: expansion steps are not nodes (the run
-            // goes on through the whole token frame: the commands of a
-            // macro body run inline, docs/TARGET_GRAPH.md), and a
-            // paragraph it ends moves it to the next region
-            // (`Run::region_advance`). Only while nothing bounds the node
-            // (a bound covers its first command; a bounded call leaves
-            // its body's commands as children, keyed by its region), no
-            // scope opened or closed, no child, claim or page step made
-            // (`PHITEX_LEFTOVER=children`: the children, for an A/B)
-            if hint.bound.is_none() && !leftover_children() {
-                while r.effect == Effect::None
-                    && r.kids.is_empty()
-                    && r.page_due.is_none()
-                    && !r.claim_rest
-                    && matches!(
-                        r.frames.front(),
-                        Some(crate::run::Frame::Toks(t, p)) if *p < t.len()
-                    )
-                {
-                    r.command()?;
-                }
-            }
-            r.measure_tail()?;
+            // the whole slice runs here: a paragraph region to its end,
+            // a format command with its operands, the tokens every
+            // expansion leaves (docs/TARGET_GRAPH.md); a paragraph the
+            // text did not close, or a group, reads on into the siblings
+            // until it is closed (`Run::run_all`)
+            r.run_all()?;
             crate::hints::debug_defs(r, &hint);
             if hint.bound.is_some() {
                 if let Some(m) = crate::hints::check_defs(r, &hint) {
@@ -292,6 +263,7 @@ impl Operation for Put {
             let val = xs.get(1).copied().unwrap_or(ValueId::UNIT);
             let f = v.field(&name);
             names.push(f.0);
+            crate::exec::widths::def(f);
             cx.define_with(f, val, if g { Locality::Global } else { Locality::Local });
         }
         // the fields defined, for the prelude's export (as `Run::finish`)
@@ -303,28 +275,6 @@ impl Operation for Put {
             cx.define_with(v.field("lvlfix"), v.list(fix), Locality::Local);
         }
         Ok(ValueId::UNIT)
-    }
-}
-
-/// An output routine begins (§1025).
-pub(crate) struct OutPage(pub Shared);
-
-impl Operation for OutPage {
-    fn name(&self) -> &'static str {
-        "outpage"
-    }
-    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
-        None
-    }
-    fn may_define_field(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
-        client_only(v, f)
-    }
-    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
-        Effect::Pending
-    }
-    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        let args = cx.args();
-        run_node(cx, ops(&self.0), |r| crate::page::out_page(r, &args))
     }
 }
 
@@ -369,7 +319,8 @@ pub(crate) fn client_only(v: &Values, f: Field) -> bool {
 
 /// The files the job writes, read back by the next round: for each name
 /// in the client's `loopfiles`, the text its streams accumulated
-/// (`streams`) is published as the next round's `file:<name>`.
+/// (`streams`, in the order the page builder's `wplan` gives) is
+/// published as the next round's `wfile:<name>`.
 pub(crate) struct Files;
 
 impl Operation for Files {
@@ -388,10 +339,35 @@ impl Operation for Files {
         if names.is_empty() {
             return Ok(ValueId::UNIT);
         }
+        // (the `wdef:` loop-backs declared so far: a new one runs this
+        // again)
+        let _ = cx.use_env(v.field("wdefset"))?;
+        let plan = cx.acc_range(v.field("wplan"), None)?;
         let all = cx.acc_range(v.field("streams"), None)?;
-        let texts = crate::api::stream_texts(v, &v.seq_to_vec(all));
+        let texts = crate::api::written_texts(v, Some(plan), Some(all));
+        let defs = crate::api::written_defs(v, Some(plan), Some(all));
+        for name in &names {
+            let k = v.field(&format!("wkeys:{name}"));
+            if !cx.is_loopback(k) {
+                continue;
+            }
+            let ds = defs
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, d)| d.as_slice())
+                .unwrap_or_default();
+            let mut keys = Vec::new();
+            for (f, val) in ds {
+                let w = v.field(&format!("wdef:{f}"));
+                if cx.is_loopback(w) {
+                    cx.publish(w, *val);
+                    keys.push(v.str(f));
+                }
+            }
+            cx.publish(k, v.list(keys));
+        }
         for name in names {
-            let f = v.field(&format!("file:{name}"));
+            let f = v.field(&format!("wfile:{name}"));
             if !cx.is_loopback(f) {
                 continue;
             }

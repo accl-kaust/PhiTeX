@@ -39,7 +39,6 @@ const STATIC: &[&str] = &[
     "mark:top",
     "markclasses",
     "needs",
-    "page:state",
     "pagehash",
     "pages",
     "parshape",
@@ -74,7 +73,6 @@ const STATIC: &[&str] = &[
     "pdf:xformcount",
     "pdfdate",
     "streams",
-    "tails",
     "writes",
 ];
 

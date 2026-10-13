@@ -617,6 +617,13 @@ impl Session {
             self.absorbed_at = Some(came);
             self.text.clone_from(&text);
         }
+        // (a long session: what the old texts' runs memoized and nothing
+        // reaches any more goes, so the tables stay bounded)
+        if std::env::var_os("PHITEX_NO_GC").is_none()
+            && let Some(b) = &mut self.build
+        {
+            b.collect_garbage();
+        }
         self.status.set("output");
         let b = self.build.as_ref().expect("built above");
         let (bytes, log) = b.output();
@@ -691,9 +698,13 @@ impl Session {
             diagnostics: b.diagnostics(),
             unsettled: Vec::new(),
             notes: std::iter::once(format!(
-                "{} nodes run of {} live, {} runs, {} cutoffs",
-                s.nodes_run, s.live, s.runs, s.cutoffs
+                "{} nodes run of {} live, {} runs, {} cutoffs, {} loop rounds",
+                s.nodes_run, s.live, s.runs, s.cutoffs, s.loop_rounds
             ))
+            .chain(std::iter::once({
+                let (nodes, units, values) = b.sizes();
+                format!("engine tables: {nodes} nodes, {units} units, {values} values")
+            }))
             .chain(
                 b.pdf_exact_reason()
                     .map(|r| format!("PDF objects numbered as pdfTeX's: {r}")),
