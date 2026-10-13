@@ -198,8 +198,10 @@ impl Run<'_, '_> {
             return Ok(());
         };
         if m.params.is_empty() {
-            // no arguments: the body is read in place, never copied
-            self.push_toks(m.body.clone());
+            // no arguments: the body is read in place (§390); a body
+            // already in the arena is pushed by its range
+            let r = self.body_range(&m.body);
+            self.push_range(r, crate::input::ty::MACRO);
             return Ok(());
         }
         let mut bufs = ARGS.with(std::cell::Cell::take);
