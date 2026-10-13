@@ -304,8 +304,29 @@ pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode
     }
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
+    if let Some(n) = crate::val::leaf_of(v, x) {
+        return Some(n);
+    }
+    let n = decode_new(v, x, side)?;
+    let leaf = match &n {
+        Node::Char { .. }
+        | Node::Rule(_)
+        | Node::Kern(..)
+        | Node::Penalty(_)
+        | Node::Math(..)
+        | Node::Language { .. } => true,
+        Node::Glue(g) => g.leader.is_none(),
+        _ => false,
+    };
+    if leaf {
+        crate::val::keep_leaf(v, x, &n);
+    }
+    Some(n)
+}
+
+#[allow(clippy::too_many_lines)]
+fn decode_new(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
     let xs = match &*v.get(x) {
         Value::List(xs) => xs.clone(),
         _ => return None,
