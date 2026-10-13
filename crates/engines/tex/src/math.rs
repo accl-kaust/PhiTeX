@@ -258,7 +258,7 @@ impl Run<'_, '_> {
             let last = self.line_break(md, &items, true)?;
             self.pre_display_size(last.as_ref())?
         };
-        self.set(&format!("par:{}", md.vlid), ValueId::UNIT, true);
+        self.set(&self.par_cell(md.vlid), ValueId::UNIT, true);
         // §1149
         let pg = self.int32(&format!("pg:{}", md.vlid))?;
         let shape: Vec<i32> = self
@@ -1084,7 +1084,7 @@ impl Run<'_, '_> {
         let rhm = Self::norm_min(self.param("righthyphenmin")?);
         let packed = (lhm * 64 + rhm) * 65536 + lang;
         let rec = v.list(vec![v.int(id), v.int(lang), v.int(packed)]);
-        self.set(&format!("par:{vlid}"), rec, true);
+        self.set(&self.par_cell(vlid), rec, true);
         // §443: an optional space
         self.get_x_token()?;
         if self.cur.cmd != cmd::SPACER {
