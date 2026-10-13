@@ -401,6 +401,10 @@ impl<'c, 'a> Run<'c, 'a> {
         if op == self.ops.pagestep || op == self.ops.pagestep_any {
             let j = i64::try_from(self.page_index()).unwrap_or(0);
             self.contribute("streams", v.seq_unit(v.list(vec![v.int(j), e])));
+        } else if self.pg.is_some() {
+            // a text paging inline (`pageinline.rs`): its entries are in
+            // TeX's order as they are made
+            self.contribute("streams", v.seq_unit(e));
         } else {
             self.contribute("streams", v.seq_unit(e));
             let at = v.list(vec![v.int(crate::nodes::T_WRITE_AT), e]);
