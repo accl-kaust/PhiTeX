@@ -985,7 +985,9 @@ fn output_routine_definition_set() {
     let mut d = Definitions::new();
     d.harvest(t, FileKind::Package, 0);
     let s = d.output_defines(&Definitions::new()).unwrap();
-    assert_eq!(s.names.get("cs:\\z"), Some(&false));
+    // (`\x` runs inside the `\vbox` group: its local `\def\z` is
+    // undone at the group's end, §283)
+    assert_eq!(s.names.get("cs:\\z"), None);
     assert_eq!(s.names.get("count:0"), Some(&true));
     assert_eq!(s.prefixes.get("cs:\\q"), Some(&false));
     assert!(s.unbounded.is_empty(), "{:?}", s.unbounded);
