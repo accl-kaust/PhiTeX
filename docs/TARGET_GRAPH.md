@@ -1,31 +1,54 @@
 # The target graph
 
-What the def-use graph of a document must look like, fixture by fixture,
-and the test that asserts it. Acceptance for every scheduling change is
-this edge set, not a chain fraction.
+What the def-use graph of a document must look like, and the test that
+asserts it. Acceptance for every scheduling change is this edge set, not
+a chain fraction.
 
 ## Nodes
 
-One node per source command with a text position. Expansion runs inline
-in the node that reads the token: a macro body, a conditional, `\the`,
-`\csname` never become nodes. A run continues through the whole token
-frame it is expanding and ends only at a boundary:
+A document node is a **paragraph region**: the text from the end of one
+paragraph-ending item to the end of the next (a blank line, `\par`, a
+vertical command, a macro whose body ends a paragraph), at brace depth 0
+and outside every conditional, as the syntactic pass marks them
+(`hints::slices_of`). A region is balanced: its run opens and closes its
+own groups, boxes, math and conditionals on its own semantic nest
+(`nest.rs`) and leaves nothing to another node. A region begins in the
+vertical list of the scope it runs in and ends there; one the pass
+closed too early reads on into the following siblings (claimed) until it
+is closed: correct, and serial for exactly that span.
 
-- the end of its source slice;
-- a paragraph end (`\par`, empty line, display start/end): the run goes
-  on in the same node, but from there its region anchor is its own node id
-  (the boundary rule, `ops.rs may_define_field`);
-- `\input` / `\endinput` (a file-rest child `["f", …]`);
-- a page-step marker (a light `PageStep` child) and the output routine
-  (one node, however many conditionals it contains).
+Format text (`Initex`, `Package` kinds) keeps one command per node, a
+conditional opened at depth 0 running on to its `\fi` in the same node.
+A group a format line leaves open (`\begingroup` on its own line,
+`\setbox0\vbox{` closed on a later line) is an engine scope
+(`Run::leave_open`), the only case of one.
 
-Children are created only for those boundaries. There are no `["t", …]`
-children: a token frame left over at the end of a run is a bug in the
-run, not a node. A node's args carry `[frames, top, anchor, boundary,
-ifdepth]`; `anchor` is never 0: a child inherits its parent's anchor, a
-node after a paragraph end uses its own id. (At 2d820888 every
-positionless child had anchor 0, so all paragraphs of `pages` shared one
-cell `par:0:0` and chained through it: 24 of its 59 chain links.)
+Besides the text: one `breaks` node after it (the page builder's fold),
+its children the `pagestep`s (one per page, the output routine run
+inline), the `dvi`/PDF writer, and file-rest children for `\input`.
+
+Nothing else is a node. Expansion runs inline in the node that reads the
+token; a macro body, a conditional, `\the`, `\csname` never become
+nodes. There are no token-frame children, no trials, no page-state
+cells, no paragraph cells, no condition-level cells.
+
+## What a region's run leaves
+
+- Contributions to the accumulator `items`, tagged with the id of the
+  vertical list it began in (0 for the main list): its paragraph's
+  lines, interline material and the vertical material around them, in
+  document order. The main vertical list is the fold of all regions'
+  contributions in document order.
+- `\prevgraf` of that list (`pg:<list>`), a definition.
+- The definitions it makes outside every group of its own (global ones,
+  and locals at its base level), bounded by its hint: the union of the
+  bounds of the commands in the region.
+- A `T_PAGE_PARAMS` item when it changed `\vsize`, `\maxdepth`,
+  `\topskip` or `\holdinginserts`, so the fold uses them from there.
+
+A group opened and closed inside the region restores its locals at its
+close (`nest.rs`: saved bindings, globals retained, §283) and nothing of
+it reaches the engine.
 
 ## Edges allowed
 
@@ -33,69 +56,52 @@ Writing `A <- B` for "A reads what B defined".
 
 | reader | may read | from |
 |---|---|---|
-| text node T in paragraph k | `par:<A_k>:<vl>` | the node S_k that started the paragraph (new_graf) |
-| text node T | regime cells (`cat:`, `cs:`, `font`, `param:`, `count:`) | the last node before T that changed them: a fan-out, not a chain |
-| paragraph end E_k | `items` of region A_k | the T's of paragraph k (one fan-in) |
-| page step P_j | `items` since P_{j-1} | the E_k's and vertical material (one fan-in) |
-| output routine O_j | `pg:`, `page:state`, the page box | P_j and O_{j-1} |
-| `\end` | pages | the last O |
+| region R | regime cells (`cat:`, `cs:`, `font`, `param:`, `count:`, …) | the last node before R that changed them: a fan-out from the format and the preamble, not a chain |
+| `breaks` | `items` (the whole main list), the page parameters, the insert classes | every region (one fan-in) |
+| `pagestep` j | its page's material (its argument), `\count0..9`, the insert boxes, the marks, `\output` | `breaks`; the previous steps for what their routines defined globally (page numbers) |
+| `dvi` | `pages` | every `pagestep` |
+| `breaks` (round 2) | `pagefx:<j>` | what routine j left (loop-back, previous round) |
 
 Forbidden, and asserted by the test:
 
-- a text node of paragraph k reading anything paragraph k-1 defined,
-  other than a regime cell it changed (`Changed par:` between regions);
-- any node reading `par:0:…`;
-- a node woken by a node that answered `Any` when the text of the
-  waiter is plain letters, spaces and other characters;
-- a `Changed if:` link between two different source commands (the
-  conditional is inline);
-- an `items` read by anything other than a paragraph end, a page step,
-  a box end or an alignment end.
+- any link through a `par:` or `if:` field (there are none);
+- a region waiting on another region for anything but a regime cell it
+  changed;
+- an `items` read by anything but `breaks` or a box end.
 
 ## Heights
 
-With those edges the critical path is: paragraph (3) + page step (1) +
-output routine chain (2 per page) + `\end`. For `pages` (10 pages): about
-25 of 456 nodes, fraction < 0.06. For `story`: < 15. For `hyphens`: < 15.
-The test asserts `height <= 4 + 3 * pages`, per fixture.
+Critical path: the format's definition chain (cached) + one region (1)
++ `breaks` (1) + the page steps chained through `\count0` (one per
+page) + `dvi` (1). The test asserts `height <= 6 + pages` per fixture.
+
+## Why this shape
+
+- Regions are independent of each other: the only thing one region can
+  change for a later one is a global definition, which the hint bounds
+  and the engine fans out. Width is the number of paragraphs.
+- The page builder is arithmetic over the main list; it runs once over
+  all of it. The page steps are independent given their material; what
+  the routines define globally (page numbers) is a chain of small nodes
+  the engine speculates through (`Speculation::Predicted`).
+- An edit re-runs one region; `breaks` re-runs on any change of the main
+  list (cheap); page steps re-run only where their material changed.
+- Per-run working set is the region's own lists, not a scan of every
+  contribution since the list opened (the former `list_fold` scan was
+  quadratic in document length).
 
 ## The test
 
 `chains` prints, per fixture, every link with its cause and the two
 nodes' source positions; it fails on any forbidden link above, on any
-`par:0:` field, on `height > 4 + 3 * pages`, and on an evaluation with no
-page step. Bytes identical to pdfTeX remain necessary; they are not the
-acceptance.
+`par:` or `if:` field, on `height > 6 + pages`, and on an evaluation
+with no page step. Bytes identical to pdfTeX remain necessary; they are
+not the acceptance.
 
-## Where the regions come from
+## Not yet
 
-Region anchors are static: the pass marks a slice paragraph-ending when
-its item ends a paragraph (`\par`, a blank line, a vertical command, or
-a macro whose body ends in one), and the slices after it read the cells
-of a new region keyed by that node. For this the pass needs the
-definitions: the document's own (harvested from its text) and the
-format's (`api.rs prelude_defs`: the prelude's text and every TeX file
-it read, in load order, once per prelude key). Before 2026-10-16 the
-region pass ran with no definitions at all, so a `\par` inside a macro
-body never ended a region and `pages` was one region.
-
-At run time a node that ends its paragraph and is marked
-paragraph-ending moves itself to the new region (`Run::region_advance`:
-its anchor becomes its own id, as the siblings were keyed), so the rest
-of its run and the children it leaves write and read the same cells as
-the text after it. A paragraph end the pass did not predict leaves the
-region unchanged: the siblings share the cells, which is correct and
-serial, and shows in the chain as a third `Changed par:` link.
-
-## What this does not yet do
-
-- A bounded node (a call whose body the pass read) still leaves its
-  body's non-character commands as children, since its declared set
-  covers its first command. They are keyed by the right region now.
-- A balanced group inside one node is still a scope effect, so `{...}`
-  in a body is its own node pair. Running it inline needs a run-local
-  save stack (the group's local definitions undone at its `}`).
-- The hint for a token frame still answers `Any` unless it is characters
-  only; the declared set of a continued node is its first command's.
-- A violated declaration is an evaluation error, not a refutation that
-  re-runs the node as `Any`; that is the engine's to add.
+- An output routine that leaves material or changes `\vsize` costs a
+  second round (loop-back `pagefx:<j>`); a cold prediction for the page
+  starts (the engine's prediction source for a field) would let page
+  steps start before `breaks` finishes.
+- `\pagegoal` read from the text answers the empty page's values.

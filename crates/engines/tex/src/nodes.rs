@@ -53,6 +53,12 @@ pub(crate) const T_VBOX: i64 = 95;
 /// A previous depth transition (`\\prevdepth`, a rule, an alignment's
 /// end): `[t, depth]`.
 pub(crate) const T_PD: i64 = 94;
+/// `\end` (§1054): `[tag, null box, fill glue, penalty]`, the material
+/// the page builder appends each time round until the page is empty.
+pub(crate) const T_END: i64 = 93;
+/// The page parameters a run changed, for the page builder's fold:
+/// `[tag, vsize, maxdepth, topskip, holdinginserts]` (§980).
+pub(crate) const T_PAGE_PARAMS: i64 = 92;
 
 /// Marks and whatsits met while decoding, numbered.
 #[derive(Clone, Default, Debug)]

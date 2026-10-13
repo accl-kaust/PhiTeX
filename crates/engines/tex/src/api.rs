@@ -202,6 +202,14 @@ fn apply_text(
         })
         .collect();
     let old = &*nodes_now;
+    let hints = crate::hints::text_hints(&text, pass::FileKind::Document, defs);
+    let args_of = |eng: &Engine, k: usize| {
+        let (s, e) = new[k].1;
+        let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
+        let mut args = slice_args(eng.values(), &text[s..e], starts);
+        args.push(crate::hints::hint_arg(eng.values(), &hints, s));
+        args
+    };
     let mut a = 0;
     while a < old.len() && a < new.len() && old[a].0 == new[a].0 {
         a += 1;
@@ -215,54 +223,21 @@ fn apply_text(
     }
     let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
     let common = old_mid.min(new_mid);
-    // the paragraph regions before and after (OUTPUT.md §5): a kept node
-    // whose anchor or boundary flag changed is replaced
-    let (new_flags, new_depths) = slice_info(&text, defs);
-    let old_text: String = old.iter().map(|(k, _)| k.get(1..).unwrap_or("")).collect();
-    let (old_flags, old_depths) = slice_info(&old_text, defs);
-    let old_regions =
-        (old_flags.len() == old.len()).then(|| regions(&old_flags, |i| raw_of(old[i].1)));
-    let hints = crate::hints::text_hints(&text, pass::FileKind::Document, defs);
-    let args_of = |eng: &Engine, k: usize, anchor: i64| {
-        let (s, e) = new[k].1;
-        let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-        let boundary = new_flags.get(k).is_some_and(|f| f & 1 != 0);
-        let depth = new_depths.get(k).copied().unwrap_or(0);
-        let mut args = slice_args(eng.values(), &text[s..e], starts, anchor, boundary, depth);
-        args.push(crate::hints::hint_arg(eng.values(), &hints, s));
-        args
-    };
     for k in common..old_mid {
         eng.remove(old[a + k].1);
     }
     let mut nodes: Vec<(String, NodeId)> = Vec::with_capacity(new.len());
-    let (mut anchor, mut last) = (0, None);
     for i in 0..new.len() {
-        let f = new_flags.get(i).copied().unwrap_or(0);
-        if f & 2 != 0
-            && let Some(l) = last
-        {
-            anchor = l;
-        }
         let n = if i < a || i >= a + new_mid {
             let oi = if i < a { i } else { i - new_mid + old_mid };
-            let n = old[oi].1;
-            let same = old_regions
-                .as_ref()
-                .is_some_and(|r| r[oi] == (anchor, f & 1 != 0))
-                && old_depths.get(oi) == new_depths.get(i);
-            if !same {
-                let args = args_of(eng, i, anchor);
-                eng.replace(n, exec, args);
-            }
-            n
+            old[oi].1
         } else if i - a < common {
             let n = old[i].1;
-            let args = args_of(eng, i, anchor);
+            let args = args_of(eng, i);
             eng.replace(n, exec, args);
             n
         } else {
-            let args = args_of(eng, i, anchor);
+            let args = args_of(eng, i);
             if let Some(&(_, p)) = nodes.last() {
                 eng.insert_after(p, exec, args)
             } else {
@@ -270,36 +245,9 @@ fn apply_text(
                 eng.insert_before(first, exec, args)
             }
         };
-        if f & 1 != 0 {
-            last = Some(raw_of(n));
-        }
         nodes.push((new[i].0.clone(), n));
     }
     *nodes_now = nodes;
-}
-
-/// A node's raw id as the anchor of the region after it.
-fn raw_of(n: NodeId) -> i64 {
-    i64::from_ne_bytes(n.raw().to_ne_bytes())
-}
-
-/// Each slice's `(anchor, boundary)` from its flags ([`slice_info`]),
-/// `id` giving the raw id of slice `i`'s node.
-fn regions(flags: &[u8], id: impl Fn(usize) -> i64) -> Vec<(i64, bool)> {
-    let (mut anchor, mut last) = (0, None);
-    let mut out = Vec::with_capacity(flags.len());
-    for (i, &f) in flags.iter().enumerate() {
-        if f & 2 != 0
-            && let Some(l) = last
-        {
-            anchor = l;
-        }
-        out.push((anchor, f & 1 != 0));
-        if f & 1 != 0 {
-            last = Some(id(i));
-        }
-    }
-    out
 }
 
 impl Default for Options {
@@ -619,138 +567,13 @@ fn date_params(t: i64) -> [(&'static str, i64); 4] {
     ]
 }
 
-/// The nodes of a text: slices starting at the pass's atoms (characters
-/// run together), each with the blanks before the next; the pass over
-/// the whole text also gives each slice's hint ([`crate::hints`]).
+/// The nodes of a text: its paragraph regions for a document, one
+/// command per slice for a format ([`crate::hints::slices_of`]); the
+/// pass over the whole text also gives each slice's hint.
 pub(crate) fn slices(text: &str, defs: &Defs) -> Vec<(usize, usize)> {
     crate::hints::text_hints(text, pass::FileKind::Document, defs)
         .slices
         .clone()
-}
-
-/// The primitive conditionals (§487) and e-TeX's and pdfTeX's.
-const CONDITIONALS: &[&str] = &[
-    "if",
-    "ifcat",
-    "ifnum",
-    "ifdim",
-    "ifodd",
-    "ifvmode",
-    "ifhmode",
-    "ifmmode",
-    "ifinner",
-    "ifvoid",
-    "ifhbox",
-    "ifvbox",
-    "ifx",
-    "ifeof",
-    "iftrue",
-    "iffalse",
-    "ifcase",
-    "ifdefined",
-    "ifcsname",
-    "iffontchar",
-    "ifincsname",
-    "ifpdfabsnum",
-    "ifpdfabsdim",
-    "ifpdfprimitive",
-];
-
-/// The paragraph regions of a text's slices ([`slices`], OUTPUT.md §5):
-/// bit 0, the slice holds an item the pass marks paragraph-ending
-/// (`Implicit::EndsParagraph`: a blank line, `\par`, a vertical command
-/// that reads nothing after it, a macro whose body ends in one) at brace
-/// depth 0 and not consumed by an earlier item; bit 1, a region starts
-/// at the slice (the first after what that item consumes). And each slice's condition-stack depth by the text
-/// (OUTPUT.md §6): the primitive conditionals before it less the `\fi`s,
-/// items consumed by an earlier one (a `\let`'s, a definition's body)
-/// not counted.
-///
-/// A macro ends a paragraph when its body does (`Definitions::ends_paragraph`),
-/// so the text's own definitions are harvested first and the format's
-/// (`defs`) stand behind them: a document written as calls of a
-/// paragraph macro has one region per call, not one for the file.
-pub(crate) fn slice_info(text: &str, defs: &Defs) -> (Vec<u8>, Vec<i64>) {
-    let mut doc = pass::Definitions::new();
-    doc.harvest(text, pass::FileKind::Document, 0);
-    let scope = pass::Scope {
-        document: &doc,
-        file: 0,
-        prelude: defs,
-    };
-    let p = pass::analyze(text, pass::FileKind::Document, scope);
-    let sl = slices(text, defs);
-    let mut flags = vec![0u8; sl.len()];
-    // brace depth before each atom
-    let mut depth = Vec::with_capacity(p.atoms.len());
-    let mut d: usize = 0;
-    for at in &p.atoms {
-        if at.kind == pass::AtomKind::Close {
-            d = d.saturating_sub(1);
-        }
-        depth.push(d);
-        if at.kind == pass::AtomKind::Open {
-            d += 1;
-        }
-    }
-    let mut ends: Vec<(usize, usize)> = Vec::new();
-    let mut ifs: Vec<(usize, i64)> = Vec::new();
-    let mut consumed = 0;
-    for it in &p.items {
-        if it.atom >= consumed {
-            if CONDITIONALS.contains(&it.name.as_str()) {
-                ifs.push((it.atom, 1));
-            } else if it.name == "fi" {
-                ifs.push((it.atom, -1));
-            }
-        }
-        if it.atom >= consumed
-            && depth.get(it.atom) == Some(&0)
-            && it.hints.implicit == pass::Implicit::EndsParagraph
-            // these read keywords or a number past their text, and put
-            // back what follows: it would run in the old region
-            && !matches!(
-                it.name.as_str(),
-                "vskip" | "hrule" | "unvbox" | "unvcopy" | "halign"
-            )
-        {
-            ends.push((it.atom, it.end.max(it.atom + 1)));
-        }
-        if it.consumes {
-            consumed = consumed.max(it.end);
-        }
-    }
-    for m in &p.marks {
-        if depth.get(m.atom) == Some(&0) && m.hints.implicit == pass::Implicit::EndsParagraph {
-            ends.push((m.atom, m.atom + 1));
-        }
-    }
-    let at_byte = |a: usize| p.atoms.get(a).map_or(text.len(), |x| x.start);
-    let slice_of = |byte: usize| sl.partition_point(|&(_, e)| e <= byte);
-    for (atom, next) in ends {
-        let i = slice_of(at_byte(atom));
-        if let Some(f) = flags.get_mut(i) {
-            *f |= 1;
-        }
-        // the first slice starting at or after the item's end
-        let b = at_byte(next);
-        let j = sl.partition_point(|&(s, _)| s < b);
-        if let Some(f) = flags.get_mut(j) {
-            *f |= 2;
-        }
-    }
-    // the depth before each slice: the items in earlier slices
-    let mut depths = vec![0i64; sl.len()];
-    let mut k = 0;
-    let mut d = 0i64;
-    for (i, &(s, _)) in sl.iter().enumerate() {
-        while k < ifs.len() && at_byte(ifs[k].0) < s {
-            d = (d + ifs[k].1).max(0);
-            k += 1;
-        }
-        depths[i] = d;
-    }
-    (flags, depths)
 }
 
 /// What the evaluations of one build or edit did.
@@ -1017,11 +840,12 @@ impl Graph {
         let put = eng.register(Arc::new(Put(shared.clone())));
         let outpage = eng.register(Arc::new(OutPage(shared.clone())));
         let [pagestep, pagestep_any] = [false, true].map(|any| {
-            eng.register(Arc::new(crate::page_step::PageStep {
+            eng.register(Arc::new(crate::page::PageStep {
                 shared: shared.clone(),
                 any,
             }))
         });
+        let breaks = eng.register(Arc::new(crate::page::Breaks(shared.clone())));
         let dvi = eng.register(Arc::new(Dvi));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
@@ -1037,6 +861,7 @@ impl Graph {
             outpage,
             pagestep,
             pagestep_any,
+            breaks,
             fields,
         };
         let _ = shared.set(ops.clone());
@@ -1060,6 +885,13 @@ impl Graph {
         }
         let lines = eng.values().field("lines");
         eng.declare_accumulator(lines, Arc::new(SumMonoid));
+        // what each page's output routine leaves for the next: a
+        // loop-back the page builder's fold reads from the previous round
+        for j in 0..crate::page::MAX_PAGES {
+            let f = eng.values().field(&format!("pagefx:{j}"));
+            let none = eng.values().list(Vec::new());
+            eng.declare_loopback(f, none);
+        }
         for f in crate::hints::COUNTERS {
             let fld = eng.values().field(f);
             eng.declare_accumulator(fld, Arc::new(SumMonoid));
@@ -1325,29 +1157,17 @@ impl Graph {
         let mut out = Vec::new();
         let t0 = std::time::Instant::now();
         let sl = slices(text, defs);
-        let (flags, depths) = slice_info(text, defs);
         let t1 = t0.elapsed();
-        let (mut anchor, mut last) = (0, None);
         let hints = crate::hints::text_hints(text, pass::FileKind::Document, defs);
-        for (i, (s, e)) in sl.into_iter().enumerate() {
+        for (s, e) in sl {
             let piece = &text[s..e];
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
             if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
                 eprintln!("node {piece:?}");
             }
-            let f = flags.get(i).copied().unwrap_or(0);
-            if f & 2 != 0
-                && let Some(l) = last
-            {
-                anchor = l;
-            }
-            let depth = depths.get(i).copied().unwrap_or(0);
-            let mut args = slice_args(self.eng.values(), piece, starts, anchor, f & 1 != 0, depth);
+            let mut args = slice_args(self.eng.values(), piece, starts);
             args.push(crate::hints::hint_arg(self.eng.values(), &hints, s));
             let n = self.eng.push(unit, self.ops.exec, args);
-            if f & 1 != 0 {
-                last = Some(raw_of(n));
-            }
             out.push((key(piece, starts), n));
         }
         if std::env::var_os("PHITEX_TEX_TIME").is_some() {
@@ -1658,6 +1478,10 @@ impl Build {
             }
         }
         let nodes = g.push_text(unit, &as_file(document), &defs);
+        // the page builder's fold, after the text: one node choosing every
+        // page break, its children the pages
+        let breaks = g.ops.breaks;
+        let _ = g.eng.push(unit, breaks, Vec::new());
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
         let files_op = g.files_op;

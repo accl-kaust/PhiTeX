@@ -1294,6 +1294,15 @@ pub(crate) fn is_class_mark(v: &phitex_defuse::Values, m: Option<ValueId>) -> bo
 /// `fire_up`'s marks of the classes other than 0 (pdfTeX §1012–§1014:
 /// `do_marks(fire_up_init)`, the page's marks, `do_marks(fire_up_done)`).
 pub(crate) fn fire_marks(r: &mut Run<'_, '_>, page_marks: &[u32], side: &nodes::Side) -> R<()> {
+    let marks: Vec<ValueId> = page_marks
+        .iter()
+        .filter_map(|&k| side.marks.get(k as usize).copied())
+        .collect();
+    fire_marks_values(r, &marks)
+}
+
+/// [`fire_marks`] with the page's marks as values.
+pub(crate) fn fire_marks_values(r: &mut Run<'_, '_>, page_marks: &[ValueId]) -> R<()> {
     let v = r.v;
     let classes: Vec<i32> = r
         .get("markclasses")?
@@ -1317,10 +1326,7 @@ pub(crate) fn fire_marks(r: &mut Run<'_, '_>, page_marks: &[u32], side: &nodes::
             first = None;
         }
         let mut new_bot = bot;
-        for &k in page_marks {
-            let Some(&m) = side.marks.get(k as usize) else {
-                continue;
-            };
+        for &m in page_marks {
             let (mc, text) = mark_class(v, m);
             if mc != c {
                 continue;
