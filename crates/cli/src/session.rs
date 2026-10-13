@@ -22,6 +22,16 @@ use crate::tex::{self, Engine};
 #[derive(Default)]
 pub struct Status {
     now: Mutex<Phases>,
+    live: Mutex<Option<Live>>,
+}
+
+/// The engine at work: its progress (what each worker runs, the jobs done
+/// of those known) and the main file's line starts, for the places.
+#[derive(Clone)]
+pub struct Live {
+    pub progress: Arc<phitex_tex::Progress>,
+    pub file: String,
+    pub lines: Arc<Vec<usize>>,
 }
 
 #[derive(Default)]
@@ -64,6 +74,18 @@ impl Status {
         )
     }
 
+    /// The engine's progress from now on (none: the engine is not running).
+    pub fn set_live(&self, l: Option<Live>) {
+        *self.live.lock().unwrap_or_else(PoisonError::into_inner) = l;
+    }
+
+    pub fn live(&self) -> Option<Live> {
+        self.live
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// The phases ended so far, forgotten.
     pub fn take(&self) -> Vec<(String, Duration)> {
         std::mem::take(&mut self.now.lock().unwrap_or_else(PoisonError::into_inner).done)
@@ -90,6 +112,9 @@ pub struct Job {
     pub out_dir: PathBuf,
     /// The engine's threads (none: `PHITEX_THREADS`, else all the cores).
     pub threads: Option<usize>,
+    /// `--exact-pdf`: the PDF's objects numbered as pdfTeX numbers them
+    /// (false: the engine's default).
+    pub exact_pdf: bool,
     /// `-synctex`.
     pub synctex: bool,
     /// `-recorder`: `JOB.fls`.
@@ -409,8 +434,21 @@ impl Session {
             .unwrap_or_default();
         // (an evaluation error panics, naming the nodes: the build is
         // reported failed and dropped, the next one cold)
+        // (the main file's line starts: a worker's place as file:line)
+        let lines: Arc<Vec<usize>> = Arc::new(
+            std::iter::once(0)
+                .chain(text.char_indices().filter(|c| c.1 == '\n').map(|c| c.0 + 1))
+                .collect(),
+        );
+        let file = plain_name(&self.job.path.to_string_lossy());
+        let live = |progress| Live {
+            progress,
+            file: file.clone(),
+            lines: lines.clone(),
+        };
         let ran = crate::ui::catch(|| -> Result<(), String> {
             if let Some(b) = &mut self.build {
+                self.status.set_live(Some(live(b.progress())));
                 self.status.set("engine");
                 for name in &reread {
                     b.edit_file(name, None);
@@ -420,6 +458,13 @@ impl Session {
                 self.status.set("format");
                 let (prelude, cached) = self.prelude()?;
                 self.status.set("engine");
+                let workers = self
+                    .job
+                    .threads
+                    .or_else(|| std::env::var("PHITEX_THREADS").ok()?.parse().ok())
+                    .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
+                let progress = Arc::new(phitex_tex::Progress::new(workers));
+                self.status.set_live(Some(live(progress.clone())));
                 let opts = Options {
                     name: self.printed_name(),
                     jobname: self.job.jobname.clone(),
@@ -430,6 +475,9 @@ impl Session {
                     prelude_jobname: self.job.engine.name.to_owned(),
                     prelude_bytes: cached.as_ref().map(|(_, b)| b.clone()),
                     threads: self.job.threads,
+                    progress: Some(progress),
+                    // (--exact-pdf: pdfTeX's numbering asked for; else the engine's default)
+                    exact_objects: self.job.exact_pdf || Options::default().exact_objects,
                     ..Options::default()
                 };
                 let b = Build::with(opts, prelude.as_deref(), &text);
@@ -438,6 +486,7 @@ impl Session {
             }
             Ok(())
         });
+        self.status.set_live(None);
         match ran {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return fail(e, None),
@@ -499,10 +548,15 @@ impl Session {
             internal: None,
             diagnostics: b.diagnostics(),
             unsettled: Vec::new(),
-            notes: vec![format!(
+            notes: std::iter::once(format!(
                 "{} nodes run of {} live, {} runs, {} cutoffs",
                 s.nodes_run, s.live, s.runs, s.cutoffs
-            )],
+            ))
+            .chain(
+                b.pdf_exact_reason()
+                    .map(|r| format!("PDF objects numbered as pdfTeX's: {r}")),
+            )
+            .collect(),
             wall,
         }
     }

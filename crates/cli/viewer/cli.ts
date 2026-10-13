@@ -17,7 +17,7 @@
 
 import { Panel } from "../../../viewer/src/panel.ts";
 import { PreviewSession, type CoreEvent, type CoreRes, type CoreTransport, type EditorHost } from "../../../viewer/src/session.ts";
-import { MupdfDoc, toCanvas } from "../../../viewer/src/mupdf.ts";
+import { MupdfDoc, toCanvas, type Hit } from "../../../viewer/src/mupdf.ts";
 import { DiffControls, LATEXDIFF_LOOK, type DiffRunner } from "../../../viewer/src/compare.ts";
 import type { DiffLook } from "../../../viewer/src/panel.ts";
 import { COMMITS_CSS, Commits, type Commit } from "../../../viewer/src/commits.ts";
@@ -166,6 +166,12 @@ class Pages implements CoreTransport {
     return this.sock.request(op);
   }
 
+  /** Where `q` is in the build's PDF (MuPDF's text, every page). */
+  async find(q: string): Promise<Hit[]> {
+    const d = await this.open().catch(() => null);
+    return d?.search(q) ?? [];
+  }
+
   onEvent(cb: (e: CoreEvent) => void): void {
     this.sock.onEvent(cb);
   }
@@ -187,12 +193,12 @@ const panel = new Panel(
       a.download = "";
       a.click();
     },
-    onDebug: () => {},
     onMain: () => {},
     onReload: () => void session.resync(),
     onClean: () => void session.resync(),
     onGoto: (file, line) => source(file, line),
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
+    onFind: (q) => pages.find(q),
   },
   // (the panel's settings: this browser's)
   {
@@ -215,19 +221,21 @@ const panel = new Panel(
     outline: true,
     keys: true,
     header: true,
+    footer: false,
     words: {
       badge: "watch",
       badgeTitle: "phitex watch: built from the files on disk, again at each save",
-      byline: "⚡ phitex watch",
-      about: `<b>⚡ phitex watch</b>: the document built from the files on disk, again at each save, its pages here as
+      byline: "phitex watch",
+      about: `<b>phitex watch</b>: the document built from the files on disk, again at each save, its pages here as
         they are shipped. Nothing leaves this machine.
         <div class="about-foot">Free software (AGPL-3.0-only), provided as is, without any warranty.</div>`,
       openFailed: "Restart phitex watch, then reload this page.",
       reading: "Reading the document from phitex watch.",
       keptIn: "this machine",
-      preparing: "Building… {s} s",
+      preparing: "",
       stopped: "The build stopped: its problems are listed above (e).",
       notReady: "This engine does not run here yet.",
+      steps: ["Connected", "Format", "Building"],
       realPdf: "",
     },
   },
@@ -299,19 +307,20 @@ addEventListener("keydown", (e) => controls.key(e));
 // (the versions to compare: a commit graph in a popover under the header's Compare)
 document.head.append(Object.assign(document.createElement("style"), {
   textContent: COMMITS_CSS + `
-#phx-pick { position: fixed; z-index: 20; top: 44px; right: 12px; width: min(560px, calc(100vw - 24px)); max-height: 70vh; overflow: auto;
-  background: #fff; color: #1b222c; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.35); font: 13px system-ui, sans-serif; }
-#phx-pick header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid #e7e9ee; }
-#phx-pick header small { color: #6b7280; }
-#phx-pick header button { margin-left: auto; border: 0; background: #e7e9ee; border-radius: 6px; padding: 2px 10px; cursor: pointer; }
-@media (prefers-color-scheme: dark) { #phx-pick { background: #1b222c; color: #f4f5f6; } #phx-pick header { border-color: #2f3a4c; } #phx-pick header button { background: #2f3a4c; color: #f4f5f6; } }`,
+#phx-pick { position: fixed; z-index: 20; top: 36px; right: 12px; width: min(560px, calc(100vw - 24px)); max-height: 70vh; overflow: auto;
+  background: #f1f1ef; color: #141414; border: 1px solid #141414; border-radius: 0; box-shadow: none; font: 12px "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+#phx-pick header { display: flex; align-items: baseline; gap: 10px; padding: 8px 12px; border-bottom: 1px solid #c9c9c5; }
+#phx-pick header b { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+#phx-pick header small { color: #8a8a86; }
+#phx-pick header button { margin-left: auto; border: 1px solid #c9c9c5; background: none; border-radius: 0; padding: 0 8px; cursor: pointer; font: 11px ui-monospace, monospace; }
+@media (prefers-color-scheme: dark) { #phx-pick { background: #121212; color: #e8e8e4; border-color: #e8e8e4; } #phx-pick header { border-color: #3a3a38; } #phx-pick header button { border-color: #3a3a38; color: #e8e8e4; } }`,
 }));
 let pick: HTMLElement | undefined;
 let graph: Commits | undefined;
 const closePick = () => {
   if (pick) pick.hidden = true;
 };
-panel.headerButton("⇄ Compare", "Compare with a past version: the commit graph (click From, shift-click To, double-click a commit against its parent)", () => {
+panel.headerButton("Compare", "Compare with a past version: the commit graph (click From, shift-click To, double-click a commit against its parent)", () => {
   if (pick && !pick.hidden) return closePick();
   if (!pick) {
     pick = document.createElement("div");
@@ -372,31 +381,35 @@ type Said = { kind: string; text?: string; ok?: boolean | null; event?: unknown 
 
 document.head.append(Object.assign(document.createElement("style"), {
   textContent: `
-#phx-bar { position: fixed; left: 0; right: 0; bottom: 0; height: 24px; z-index: 15; display: flex; align-items: center; gap: 8px;
-  padding: 0 10px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; background: #f4f5f6; color: #3c4655; border-top: 1px solid #e0e3e8;
+#phx-bar, #phx-con { --paper: #f1f1ef; --paper-2: #e6e6e3; --ink: #141414; --ink-2: #4a4a48; --ink-3: #8a8a86; --rule: #c9c9c5; --mark: #d71920; --caution: #8a5a00;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace; --sans: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+#phx-bar { position: fixed; left: 0; right: 0; bottom: 0; height: 24px; z-index: 15; display: flex; align-items: center; gap: 10px;
+  padding: 0 10px; font: 11px var(--mono); font-variant-numeric: tabular-nums; background: var(--paper); color: var(--ink-2); border-top: 1px solid var(--rule);
   cursor: pointer; user-select: none; white-space: nowrap; overflow: hidden; }
-#phx-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: #9aa3b0; flex: none; }
-#phx-bar .dot.ok { background: #2e9e4f; } #phx-bar .dot.bad { background: #d23f3f; }
-#phx-bar .dot.busy { background: #2f7de1; animation: phx-pulse 1s infinite alternate; }
-@keyframes phx-pulse { to { opacity: .3; } }
+#phx-bar .dot { width: 6px; height: 6px; background: var(--ink-3); flex: none; }
+#phx-bar .dot.ok { background: var(--ink); } #phx-bar .dot.bad { background: var(--mark); }
+#phx-bar .dot.busy { background: var(--mark); animation: phx-blink .8s steps(2) infinite; }
+@keyframes phx-blink { 50% { opacity: 0; } }
 #phx-bar .text { overflow: hidden; text-overflow: ellipsis; flex: 1; }
-#phx-bar .new { flex: none; border-radius: 8px; padding: 0 7px; background: #d23f3f; color: #fff; }
-#phx-bar .new.warn { background: #c98a00; }
-#phx-bar .hint { flex: none; opacity: .6; }
+#phx-bar .new { flex: none; padding: 0; color: var(--mark); }
+#phx-bar .new.warn { color: var(--caution); }
+#phx-bar .hint { flex: none; color: var(--ink-3); font-family: var(--sans); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+#phx-bar:hover .hint { color: var(--ink); }
 #phx-con { position: fixed; left: 0; right: 0; bottom: 24px; height: 38vh; z-index: 15; display: flex; flex-direction: column;
-  background: #fbfbfc; color: #1b222c; border-top: 1px solid #d6dae1; box-shadow: 0 -6px 20px rgba(0,0,0,.12); }
+  background: var(--paper); color: var(--ink); border-top: 1px solid var(--ink); }
 #phx-con[hidden] { display: none; }
-#phx-con header { display: flex; align-items: center; gap: 8px; padding: 4px 10px; font: 12px system-ui, sans-serif; border-bottom: 1px solid #e7e9ee; }
-#phx-con header button { border: 0; background: #e7e9ee; color: inherit; border-radius: 6px; padding: 1px 9px; cursor: pointer; font: inherit; }
+#phx-con header { display: flex; align-items: baseline; gap: 10px; padding: 5px 10px; font: 11px var(--sans); border-bottom: 1px solid var(--rule); }
+#phx-con header b { font-weight: 600; letter-spacing: .1em; text-transform: uppercase; font-size: 10px; }
+#phx-con header small { color: var(--ink-3); }
+#phx-con header button { border: 1px solid var(--rule); background: none; color: var(--ink-2); border-radius: 0; padding: 0 8px; cursor: pointer;
+  font: 10px var(--sans); letter-spacing: .08em; text-transform: uppercase; }
+#phx-con header button:hover { border-color: var(--ink); color: var(--ink); }
 #phx-con header button:first-of-type { margin-left: auto; }
-#phx-con .log { flex: 1; overflow: auto; margin: 0; padding: 6px 10px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
-#phx-con .error { color: #c62828; } #phx-con .warning { color: #9a6700; } #phx-con .note, #phx-con .dim { color: #6b7280; }
-#phx-con .ok { color: #1f7a3a; } #phx-con .busy { color: #2f7de1; }
+#phx-con .log { flex: 1; overflow: auto; margin: 0; padding: 8px 10px; font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word; }
+#phx-con .error { color: var(--mark); } #phx-con .warning { color: var(--caution); } #phx-con .note, #phx-con .dim { color: var(--ink-3); }
+#phx-con .ok { color: var(--ink); } #phx-con .busy { color: var(--ink-2); }
 @media (prefers-color-scheme: dark) {
-  #phx-bar { background: #161b22; color: #c9d1d9; border-color: #2f3a4c; }
-  #phx-con { background: #0f141a; color: #e6edf3; border-color: #2f3a4c; }
-  #phx-con header { border-color: #2f3a4c; } #phx-con header button { background: #2f3a4c; }
-  #phx-con .error { color: #ff7b72; } #phx-con .warning { color: #e3b341; } #phx-con .ok { color: #56d364; }
+  #phx-bar, #phx-con { --paper: #121212; --paper-2: #1c1c1c; --ink: #e8e8e4; --ink-2: #a9a9a4; --ink-3: #6e6e6a; --rule: #3a3a38; --mark: #ff4a3d; --caution: #d9a441; }
 }`,
 }));
 // (the pages above the bar)
@@ -404,7 +417,7 @@ pane.style.bottom = "24px";
 const bar = document.createElement("div");
 bar.id = "phx-bar";
 bar.title = "phitex watch's status: click (or `) for everything it printed";
-bar.innerHTML = `<span class="dot"></span><span class="text">phitex watch</span><span class="new" hidden></span><span class="hint">\` terminal</span>`;
+bar.innerHTML = `<span class="dot"></span><span class="text">phitex watch</span><span class="new" hidden></span><span class="hint">\` Terminal</span>`;
 const con = document.createElement("div");
 con.id = "phx-con";
 con.hidden = true;
@@ -438,7 +451,17 @@ const look = (s: Said): string => {
 };
 const said = (s: Said, live: boolean) => {
   if (s.kind === "status") return void ((status = s), showBar());
-  if (s.kind === "busy") return void ((busy = s.text ?? ""), showBar());
+  if (s.kind === "busy") {
+    busy = s.text ?? "";
+    // (before the first page: the card's steps follow the build's phases,
+    // `pdftex d.tex: build 1 (cold) · engine · 4.7 s · …`)
+    const parts = busy.split(" · ");
+    if (parts.length >= 3) {
+      const phase = parts[1];
+      panel.loadStep(phase === "format" ? 1 : 2, `${phase} · ${parts.slice(2).join(" · ")}`);
+    }
+    return void showBar();
+  }
   if (s.kind === "event") return;
   const at = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
   const line = document.createElement("div");

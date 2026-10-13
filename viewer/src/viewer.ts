@@ -214,6 +214,39 @@ export class Viewer {
 
   private fadeTimer: ReturnType<typeof setTimeout> | undefined;
 
+  /**
+   * A search's matches marked on their pages until the next call ([]
+   * clears), match `cur` outlined and brought to the middle of the view
+   * unless it is in view.
+   */
+  found(hits: { k: number; boxes: [number, number, number, number][] }[], cur: number): void {
+    for (const m of this.root.querySelectorAll(".fnd")) m.remove();
+    const { w, h } = this.size;
+    hits.forEach(({ k, boxes }, i) => {
+      const s = this.slots[k];
+      if (!s) return;
+      for (const [x, y, bw, bh] of boxes) {
+        const m = document.createElement("div");
+        m.className = i === cur ? "mark fnd cur" : "mark fnd";
+        Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, width: `${(bw / w) * 100}%`, height: `${(bh / h) * 100}%` });
+        s.el.append(m);
+      }
+    });
+    const hit = hits[cur];
+    const s = hit && this.slots[hit.k];
+    if (!s) return;
+    if (s.drawn !== s.hash && !this.asked.has(`${hit.k}:${s.hash}`)) {
+      this.asked.add(`${hit.k}:${s.hash}`);
+      this.host.need(hit.k);
+    }
+    const [x, y] = hit.boxes[0];
+    const top = s.el.offsetTop + (y / h) * s.el.offsetHeight;
+    const left = s.el.offsetLeft + (x / w) * s.el.offsetWidth;
+    const v = this.scroller;
+    if (top < v.scrollTop + 20 || top > v.scrollTop + v.clientHeight - 40) v.scrollTo({ top: top - v.clientHeight / 2 });
+    if (left < v.scrollLeft || left > v.scrollLeft + v.clientWidth - 40) v.scrollTo({ left: left - v.clientWidth / 3 });
+  }
+
   get pages(): number {
     return this.slots.length;
   }
@@ -305,7 +338,16 @@ export class Viewer {
    * The zoom changed: each page at its new size, the view kept on the same
    * place of the page in view (a page's canvas fills its slot: it scales).
    */
-  redraw(): void {
+  /**
+   * The zoom changed: the pages' boxes at it (their bitmaps stretched),
+   * then, unless `sizesOnly` (a pinch still going on), those drawn too
+   * coarse drawn again.
+   */
+  redraw(sizesOnly = false): void {
+    if (sizesOnly) {
+      for (const s of this.slots) this.sizeSlot(s);
+      return;
+    }
     const at = this.slots[this.current];
     const v = this.scroller.getBoundingClientRect();
     const before = at?.el.getBoundingClientRect();
