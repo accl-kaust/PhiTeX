@@ -2620,9 +2620,9 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         // and resets `\\everypar`: it declares it too)
         // (`\\@afterheading` is consumed over two paragraphs: the first
         // keeps `\\everypar` and sets `\\clubpenalty`, the second resets
-        // both)
+        // both; a heading's own slice may end before the first)
         after_sets = if sets {
-            2
+            3
         } else if text[s..e].trim().is_empty() {
             after_sets
         } else {
