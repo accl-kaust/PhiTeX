@@ -7,7 +7,7 @@
 use std::rc::Rc;
 use std::sync::OnceLock;
 
-use phitex_defuse::{Field, Value, ValueId, Values};
+use phitex_defuse::{Field, FxHashMap, Value, ValueId, Values};
 use phitex_typeset::glue::{Glue, Order};
 
 // Command codes (§207–§210), the table whole.
@@ -252,12 +252,68 @@ pub(crate) fn toks_value(v: &Values, toks: &[Tok]) -> ValueId {
 
 pub(crate) fn toks_of(v: &Values, id: Option<ValueId>) -> Vec<Tok> {
     match id {
-        Some(id) => match &*v.get(id) {
-            Value::List(xs) => xs.iter().map(|&x| Tok::decode(v, x)).collect(),
-            _ => Vec::new(),
-        },
+        Some(id) => decoded(
+            v,
+            id,
+            |d| &mut d.toks,
+            || match &*v.get(id) {
+                Value::List(xs) => xs.iter().map(|&x| Tok::decode(v, x)).collect(),
+                _ => Vec::new(),
+            },
+        ),
         None => Vec::new(),
     }
+}
+
+/// Each thread's decoded values, by id: an id is a content hash, so a
+/// decoding never goes stale, and a value being decoded is live (a
+/// swept id is never asked for again). Saves the value reads of a token
+/// list or meaning read again by later runs on the same worker.
+#[derive(Default)]
+struct Decoded {
+    instance: u64,
+    toks: FxHashMap<ValueId, Vec<Tok>>,
+    means: FxHashMap<ValueId, Mean>,
+    glues: FxHashMap<ValueId, Glue>,
+}
+
+/// Entries kept per map before it is emptied (a bound, not a policy).
+const DECODED_MAX: usize = 1 << 15;
+
+thread_local! {
+    static DECODED: std::cell::RefCell<Decoded> = std::cell::RefCell::default();
+}
+
+/// `make()`, the decoding of `id`, through this thread's cache.
+fn decoded<T: Clone>(
+    v: &Values,
+    id: ValueId,
+    map: fn(&mut Decoded) -> &mut FxHashMap<ValueId, T>,
+    make: impl FnOnce() -> T,
+) -> T {
+    let hit = DECODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.instance != v.instance() {
+            *c = Decoded {
+                instance: v.instance(),
+                ..Decoded::default()
+            };
+        }
+        map(&mut c).get(&id).cloned()
+    });
+    if let Some(x) = hit {
+        return x;
+    }
+    let x = make();
+    DECODED.with(|c| {
+        let mut c = c.borrow_mut();
+        let m = map(&mut c);
+        if m.len() >= DECODED_MAX {
+            m.clear();
+        }
+        m.insert(id, x.clone());
+    });
+    x
 }
 
 pub(crate) fn list_of(v: &Values, id: ValueId) -> Vec<ValueId> {
@@ -407,6 +463,10 @@ impl Mean {
 
     pub(crate) fn decode(v: &Values, id: Option<ValueId>) -> Mean {
         let Some(id) = id else { return Mean::Undefined };
+        decoded(v, id, |d| &mut d.means, || Mean::decode_new(v, id))
+    }
+
+    fn decode_new(v: &Values, id: ValueId) -> Mean {
         let xs = match &*v.get(id) {
             Value::List(xs) => xs.clone(),
             _ => return Mean::Undefined,
@@ -508,6 +568,10 @@ pub(crate) fn order(i: i64) -> Order {
 
 pub(crate) fn glue_of(v: &Values, id: Option<ValueId>) -> Glue {
     let Some(id) = id else { return Glue::ZERO };
+    decoded(v, id, |d| &mut d.glues, || glue_new(v, id))
+}
+
+fn glue_new(v: &Values, id: ValueId) -> Glue {
     match &*v.get(id) {
         Value::List(xs) if xs.len() == 5 => {
             let n = |k: usize| i32::try_from(int_of(v, xs[k])).unwrap_or(0);
