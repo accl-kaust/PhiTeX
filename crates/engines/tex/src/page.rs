@@ -208,8 +208,11 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn page_plan(&mut self) -> R<()> {
         let v = self.v;
+        let tm = crate::exec::env_flag!("PHITEX_PLAN_TIME");
+        let t0 = std::time::Instant::now();
         let l = self.list_fold(0)?;
         let items = l.items;
+        let t1 = t0.elapsed();
         let marker = self.page_params_marker()?;
         // the insertion classes on the list, read here (before any page
         // step): a `brk` reads nothing a page step may define
@@ -286,6 +289,7 @@ impl Run<'_, '_> {
             }
             j += 1;
         }
+        let t2 = t0.elapsed();
         // (the start after the last page folds to the end: no `brk`)
         starts.pop();
         let wp = v.seq_unit(v.list(plan));
@@ -324,6 +328,15 @@ impl Run<'_, '_> {
         );
         for j in 0..starts.len() {
             self.kid(self.ops.brk, vec![v.int(i64::try_from(j).unwrap_or(0))]);
+        }
+        if tm {
+            eprintln!(
+                "plan: {} items, {} pages: list fold {t1:?}, page folds {:?}, sets {:?}",
+                items.len(),
+                starts.len(),
+                t2 - t1,
+                t0.elapsed() - t2
+            );
         }
         Ok(())
     }

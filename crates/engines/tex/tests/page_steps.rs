@@ -221,3 +221,48 @@ fn self_dependent_routine() {
         "selfdep edit != cold"
     );
 }
+
+/// `PHITEX_GEN_DOC` in `PHITEX_GEN`, cold and after a one-word edit and
+/// a paragraph inserted near the middle: the edits' walls (a measure;
+/// `PHITEX_PLAN_TIME=1` prints the page plan's phases).
+#[test]
+#[ignore = "needs PHITEX_GEN"]
+fn generated_edit_wall() {
+    let (Ok(dir), Ok(name)) = (std::env::var("PHITEX_GEN"), std::env::var("PHITEX_GEN_DOC")) else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let src = std::fs::read_to_string(dir.join(format!("{name}.tex"))).expect("the document");
+    let o = common::options(&format!("./{name}.tex"), &name, "", &dir);
+    let mut b = common::build(o, Some(&common::plain()), &src);
+    eprintln!(
+        "EDITWALL {name} cold wall_ms={:.1}",
+        b.stats.wall.as_secs_f64() * 1000.0
+    );
+    let mid = src.len() / 2;
+    let at = mid + src[mid..].find(" the ").expect("a word") + 1;
+    let word = format!("{}eht{}", &src[..at], &src[at + 3..]);
+    let t = std::time::Instant::now();
+    b.edit(&word);
+    eprintln!(
+        "EDITWALL {name} word wall_ms={:.1} nodes={} page_steps={}",
+        t.elapsed().as_secs_f64() * 1000.0,
+        b.stats.nodes_run,
+        b.stats.page_steps
+    );
+    let par = mid + word[mid..].find("\n\n").expect("a paragraph end") + 2;
+    let ins = format!(
+        "{}{}\n\n{}",
+        &word[..par],
+        "An inserted paragraph of a few words, long enough for two lines of text, so that every later page moves by those lines.",
+        &word[par..]
+    );
+    let t = std::time::Instant::now();
+    b.edit(&ins);
+    eprintln!(
+        "EDITWALL {name} insert wall_ms={:.1} nodes={} page_steps={}",
+        t.elapsed().as_secs_f64() * 1000.0,
+        b.stats.nodes_run,
+        b.stats.page_steps
+    );
+}
