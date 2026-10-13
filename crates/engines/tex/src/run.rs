@@ -864,46 +864,22 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// The fields the run defines at its base level.
+    /// The fields the run defines: those whose value at its end differs
+    /// from the one it loaded, or that it never loaded (a local
+    /// assignment that ends where it began defines nothing, as LaTeX's
+    /// paragraph hooks setting `\\everypar` and back).
     pub(crate) fn def_fields(&mut self) -> Vec<Field> {
-        let guessed = self.at_guess();
-        let locs: Vec<Loc> = self
-            .st
-            .defined_locs()
-            .filter(|l| !guessed.contains(l))
-            .collect();
+        let locs = self.defined_now();
         locs.into_iter().map(|l| self.loc_field(l)).collect()
     }
 
-    /// The base-level local definitions equal to their field's regime
-    /// guess ([`crate::hints::regime_guess_empty`]): no definition, the
-    /// readers see the guess (LaTeX's paragraph hook resetting
-    /// `\everypar` to empty at every paragraph).
-    pub(crate) fn at_guess(&mut self) -> Vec<Loc> {
-        let v = self.v;
-        let mut out = Vec::new();
-        for (loc, x, l) in self.st.published(v) {
-            if crate::exec::env_flag!("PHITEX_GUESS_TRACE")
-                && crate::hints::regime_guess_empty(&str_of(v, self.loc_field(loc).0))
-            {
-                let r = |x: ValueId| v.render(x).chars().take(120).collect::<String>();
-                eprintln!(
-                    "guess: {l:?} value {:?} loaded {:?}",
-                    r(x),
-                    self.st.loaded(loc).map(|e| e.map(r))
-                );
-            }
-            if l == Locality::Local
-                && crate::hints::regime_guess_empty(&str_of(v, self.loc_field(loc).0))
-                && crate::val::toks_rc(v, Some(x)).is_empty()
-                && self
-                    .st
-                    .loaded(loc)
-                    .is_none_or(|e| e.is_none_or(|e| crate::val::toks_rc(v, Some(e)).is_empty()))
-            {
-                out.push(loc);
-            }
-        }
-        out
+    /// [`Run::def_fields`]' locations, as the state table publishes them.
+    fn defined_now(&self) -> Vec<Loc> {
+        self.st
+            .published(self.v)
+            .into_iter()
+            .map(|(l, _, _)| l)
+            .collect()
     }
 
     pub(crate) fn contribute(&mut self, name: &str, val: ValueId) {
@@ -2088,12 +2064,10 @@ impl<'c, 'a> Run<'c, 'a> {
         // another
         let op = self.cx.op();
         let t_pub = std::time::Instant::now();
-        let guessed = self.at_guess();
         let published: Vec<(Field, ValueId, Locality)> = self
             .st
             .published(self.v)
             .into_iter()
-            .filter(|(loc, _, _)| !guessed.contains(loc))
             .map(|(loc, x, l)| (self.loc_field(loc), x, l))
             .collect();
         if op == self.ops.pagestep || op == self.ops.pagestep_any {
@@ -2111,11 +2085,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 );
             }
         }
-        let locs: Vec<Loc> = self
-            .st
-            .defined_locs()
-            .filter(|l| !guessed.contains(l))
-            .collect();
+        let locs: Vec<Loc> = self.defined_now();
         if !locs.is_empty() {
             let names: Vec<ValueId> = locs.into_iter().map(|l| self.loc_field(l).0).collect();
             let l = self.v.list(names);
