@@ -1323,6 +1323,8 @@ struct Analysis<'t> {
     /// Atoms textually inside an alignment's braces (`\\halign{`…`}`).
     in_align: Vec<bool>,
     memo: std::cell::RefCell<HashMap<String, DefSet>>,
+    /// The names whose state [`Analysis::defined_state`] is reading.
+    visiting: std::cell::RefCell<Vec<String>>,
     /// The format's definitions, behind the text's own.
     prelude: Defs,
 }
@@ -1414,6 +1416,7 @@ impl Analysis<'_> {
             claimed,
             in_align,
             memo: std::cell::RefCell::new(HashMap::new()),
+            visiting: std::cell::RefCell::new(Vec::new()),
             prelude,
         }
     }
@@ -1909,16 +1912,26 @@ impl Analysis<'_> {
                 // `\\edef` of it: what its bodies run, when the pass
                 // bounds that and it defines no name of its own)
                 let set = self.defset(name);
+                // (a name whose bodies run it again, directly or
+                // through others: its state is unbounded here, never a
+                // recursion without end)
+                let cyclic = self.visiting.borrow().iter().any(|v| v == name);
+                if cyclic {
+                    *st = None;
+                    return;
+                }
                 if set.unbounded.is_empty() && st.is_some() {
+                    self.visiting.borrow_mut().push(name.to_owned());
                     let mut b = Bound {
                         state: st.clone(),
                         ..Bound::default()
                     };
                     let mut c = String::new();
-                    if self.add_set(&set, &mut b, &mut c)
+                    let ok = self.add_set(&set, &mut b, &mut c)
                         && b.names.is_empty()
-                        && b.prefixes.is_empty()
-                    {
+                        && b.prefixes.is_empty();
+                    self.visiting.borrow_mut().pop();
+                    if ok {
                         *st = b.state;
                         return;
                     }
