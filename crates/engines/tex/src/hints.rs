@@ -2626,6 +2626,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
                 "cs:if@inlabel",
                 "cs:if@nobreak",
                 "cs:if@noskipsec",
+                "cs:if@endpe",
             ] {
                 if !b.names.iter().any(|x| x == n) {
                     b.names.push(n.to_owned());
