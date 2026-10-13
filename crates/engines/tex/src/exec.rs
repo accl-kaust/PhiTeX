@@ -34,11 +34,11 @@ use phitex_defuse::{Executor, RunResult};
 
 /// Whether the environment variable `$name` is set, read once per
 /// process (a `getenv` takes the environment's lock and scans it; the
-/// debug switches are tested on every run).
+/// debug switches are tested on every run). Unset, empty or "0" is off.
 macro_rules! env_flag {
     ($name:literal) => {{
         static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *F.get_or_init(|| std::env::var_os($name).is_some())
+        *F.get_or_init(|| std::env::var_os($name).is_some_and(|v| !v.is_empty() && v != "0"))
     }};
 }
 pub(crate) use env_flag;

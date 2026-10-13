@@ -117,7 +117,7 @@ pub(crate) fn pieces(
     let mut seen = Vec::new();
     add(
         v,
-        Arc::from(text),
+        &Arc::from(text),
         None,
         hints,
         defs,
@@ -133,8 +133,8 @@ pub(crate) fn pieces(
 #[allow(clippy::too_many_arguments)]
 fn add(
     v: &Values,
-    text: Arc<str>,
-    file: Option<Arc<str>>,
+    text: &Arc<str>,
+    file: Option<&Arc<str>>,
     hints: &Arc<TextHints>,
     defs: &Defs,
     finder: Option<&Finder>,
@@ -164,8 +164,8 @@ fn add(
                 seen.push(name);
                 add(
                     v,
-                    Arc::from(t.as_str()),
-                    Some(Arc::from(path.as_str())),
+                    &Arc::from(t.as_str()),
+                    Some(&Arc::from(path.as_str())),
                     &h,
                     defs,
                     Some(f),
@@ -179,7 +179,7 @@ fn add(
             }
         }
         let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-        let key = match &file {
+        let key = match file {
             None => format!("{}{piece}", u8::from(starts)),
             Some(p) => format!("\u{1}{p}\u{1}{}{piece}", u8::from(starts)),
         };
@@ -188,7 +188,7 @@ fn add(
             text: text.clone(),
             s,
             e,
-            file: file.clone(),
+            file: file.cloned(),
             hints: hints.clone(),
         });
     }
