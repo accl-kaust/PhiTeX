@@ -1,6 +1,6 @@
 //! The operations: `Exec` (one command of TeX's input), `Put`
-//! (definitions that land outside a group that just closed), `OutPage`
-//! (an output routine begins, [`crate::page`]) and `Dvi` (the file).
+//! (definitions that land outside a group that just closed) and `Dvi`
+//! (the file).
 
 use std::sync::{Arc, OnceLock};
 
@@ -26,7 +26,7 @@ pub(crate) fn run_node(
     o: Ops,
     body: impl FnOnce(&mut Run<'_, '_>) -> R<()>,
 ) -> Result<ValueId, Stop> {
-    let trace = std::env::var_os("PHITEX_TEX_TRACE").is_some();
+    let trace = crate::exec::env_flag!("PHITEX_TEX_TRACE");
     if trace {
         let a = cx
             .args()
@@ -53,11 +53,10 @@ pub(crate) fn run_node(
         );
     }
     match res {
-        Ok(()) => match r.settle_page() {
-            Ok(()) => Ok(r.finish()),
-            Err(Halt::Stop(s)) => Err(s),
-            Err(_) => Ok(r.stall("fatal", ValueId::UNIT)),
-        },
+        Ok(()) => {
+            r.end_open();
+            Ok(r.finish())
+        }
         Err(Halt::Stop(s)) => Err(s),
         Err(Halt::Starve) => {
             let u = ValueId::UNIT;
@@ -68,13 +67,6 @@ pub(crate) fn run_node(
             Ok(r.stall("fatal", u))
         }
     }
-}
-
-/// `PHITEX_LEFTOVER=children`: an expansion's tokens become a child per
-/// command, as before the inline continuation.
-fn leftover_children() -> bool {
-    static C: OnceLock<bool> = OnceLock::new();
-    *C.get_or_init(|| std::env::var("PHITEX_LEFTOVER").is_ok_and(|x| x == "children"))
 }
 
 /// One command (§1030) of the node's text: the first token decides; the
@@ -96,42 +88,8 @@ impl Operation for Exec {
     fn may_define(&self, args: &[ValueId], v: &Values) -> MayDefine {
         crate::hints::may_define(v, args)
     }
-    /// A paragraph cell (`par:<anchor>:<list>`) only of the node's own
-    /// paragraph region: its anchor argument (index 2, an integer, when
-    /// the node carries one), unless it is a boundary (index 3); a
-    /// condition level (`if:<d>`) only from the node's depth (index 4) up.
-    fn may_define_field(&self, args: &[ValueId], v: &Values, f: Field) -> bool {
-        if !client_only(v, f) {
-            return false;
-        }
-        // a condition level below the node's own depth (index 4) was
-        // opened before it and is closed by a node at that depth: only
-        // an expand-only scan (§510's `\fi` while expanding an `\edef`
-        // or a test) reaches past it, which a bounded hint excludes
-        if let Some(&x) = args.get(4)
-            && let Some(depth) = v.as_int(x)
-            && let phitex_defuse::Value::Str(s) = &*v.get(f.0)
-            && let Some(d) = s.strip_prefix("if:").and_then(|d| d.parse::<i64>().ok())
-            && d < depth
-            && crate::hints::bounded(v, args)
-        {
-            return false;
-        }
-        // (a boundary node may begin the next region, keyed by its own id)
-        let boundary = args
-            .get(3)
-            .and_then(|&b| v.as_int(b))
-            .is_some_and(|b| b != 0);
-        if !boundary
-            && let Some(&x) = args.get(2)
-            && let Some(mine) = v.as_int(x)
-            && let phitex_defuse::Value::Str(s) = &*v.get(f.0)
-            && let Some((a, _)) = s.strip_prefix("par:").and_then(|r| r.split_once(':'))
-            && let Ok(a) = a.parse::<i64>()
-        {
-            return a == mine;
-        }
-        true
+    fn may_define_field(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
+        client_only(v, f)
     }
     /// The meanings and catcodes the text's hint rests on
     /// ([`crate::hints::reads`]): the node waits for them instead of
@@ -171,31 +129,12 @@ impl Operation for Exec {
                 r.log("error", &format!("hint regime violated: {m}"))?;
                 crate::hints::count(r, 2);
             }
-            r.command()?;
-            // the token list an expansion left goes on in this run, not as
-            // a child per token: expansion steps are not nodes (the run
-            // goes on through the whole token frame: the commands of a
-            // macro body run inline, docs/TARGET_GRAPH.md), and a
-            // paragraph it ends moves it to the next region
-            // (`Run::region_advance`). Only while nothing bounds the node
-            // (a bound covers its first command; a bounded call leaves
-            // its body's commands as children, keyed by its region), no
-            // scope opened or closed, no child, claim or page step made
-            // (`PHITEX_LEFTOVER=children`: the children, for an A/B)
-            if hint.bound.is_none() && !leftover_children() {
-                while r.effect == Effect::None
-                    && r.kids.is_empty()
-                    && r.page_due.is_none()
-                    && !r.claim_rest
-                    && matches!(
-                        r.frames.front(),
-                        Some(crate::run::Frame::Toks(t, p)) if *p < t.len()
-                    )
-                {
-                    r.command()?;
-                }
-            }
-            r.measure_tail()?;
+            // the whole slice runs here: a paragraph region to its end,
+            // a format command with its operands, the tokens every
+            // expansion leaves (docs/TARGET_GRAPH.md); a paragraph the
+            // text did not close, or a group, reads on into the siblings
+            // until it is closed (`Run::run_all`)
+            r.run_all()?;
             crate::hints::debug_defs(r, &hint);
             if hint.bound.is_some() {
                 if let Some(m) = crate::hints::check_defs(r, &hint) {
@@ -303,28 +242,6 @@ impl Operation for Put {
             cx.define_with(v.field("lvlfix"), v.list(fix), Locality::Local);
         }
         Ok(ValueId::UNIT)
-    }
-}
-
-/// An output routine begins (§1025).
-pub(crate) struct OutPage(pub Shared);
-
-impl Operation for OutPage {
-    fn name(&self) -> &'static str {
-        "outpage"
-    }
-    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
-        None
-    }
-    fn may_define_field(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
-        client_only(v, f)
-    }
-    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
-        Effect::Pending
-    }
-    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        let args = cx.args();
-        run_node(cx, ops(&self.0), |r| crate::page::out_page(r, &args))
     }
 }
 

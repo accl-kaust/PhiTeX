@@ -1,7 +1,8 @@
-//! One run of one command node: its input (the node's own text, then the
-//! siblings it claims), `get_next` (§341–§365) over it, and the
-//! definitions, contributions and children it makes, buffered until the
-//! command is done.
+//! One run of one node (a paragraph region, a loading command, a whole
+//! format): its input (the node's own text, the files it reads inline,
+//! the siblings it claims while a span is open), `get_next` (§341–§365)
+//! over it, and the definitions, contributions and children it makes,
+//! buffered until the run is done.
 //!
 //! Everything here is local to one run: a small sequential scanner over
 //! the node's own text. What TeX keeps between commands is read through
@@ -40,11 +41,15 @@ pub(crate) type R<T> = Result<T, Halt>;
 pub(crate) struct Ops {
     pub exec: OpId,
     pub put: OpId,
-    pub outpage: OpId,
     pub pagestep: OpId,
     pub pagestep_any: OpId,
+    pub breaks: OpId,
     /// The build's field handles (`crate::fields`).
     pub fields: std::sync::Arc<crate::fields::Fields>,
+    /// The format's definitions the build analyses document texts with
+    /// (set by `api::Build::with`; none while a format is built): a
+    /// document file `\input` is sliced with them ([`Run::leftover`]).
+    pub defs: std::sync::Arc<std::sync::Mutex<crate::hints::Defs>>,
 }
 
 /// A level of the input stack.
@@ -168,49 +173,29 @@ pub(crate) struct Run<'c, 'a> {
     pub top: bool,
     /// Whether `\end` takes every following sibling.
     pub claim_rest: bool,
-    /// In a trial (`measure_tail`): the scope kind its own commands
-    /// opened and closed so far, in place of the node's.
-    #[allow(clippy::option_option)]
-    pub trial_kind: Option<Option<ValueId>>,
-    /// In a trial, the groups it opens get list ids of their own.
-    pub trial_ids: Option<std::cell::Cell<i64>>,
-    /// The list and scope ids this run made (`node_raw`): each gets its
-    /// opener (`lopen:<id>`) when the run ends, so a reader of the list
-    /// reads the contributions after this node, not the unit's.
-    pub minted: std::cell::RefCell<Vec<i64>>,
+    /// The semantic nest (§211): the lists and groups this run has open
+    /// ([`crate::nest`]), level 0 being the engine's scope.
+    pub nest: Vec<crate::nest::Level>,
+    /// The last local list id given out (negative: never a node's).
+    pub next_lid: i64,
+    /// The `(language, packed hyphen minima)` of the paragraph being
+    /// broken (`end_graf` pops its level before `line_break`, §1096).
+    pub last_par: (i64, i64),
+    /// Whether the node is a piece of a document's text (its segments
+    /// carry their origin): a document file `\input` there is sliced
+    /// into regions ([`Run::leftover`]); a format's or a package's node
+    /// reads every file inline.
+    pub doc: bool,
+    /// The files this run opened: name and a hash of the text read
+    /// (flushed to the `fread` accumulator by [`Run::finish`]).
+    pub fread: Vec<(String, u64)>,
     /// While looking for the command's first token: a node's command
     /// begins in its own text (the next sibling's begins in its own).
     pub no_pull: bool,
-    /// The paragraph region the node is in (OUTPUT.md §5): the raw id
-    /// of the document node whose paragraph-ending item precedes it, or
-    /// 0; a node's args are `[frames, top, anchor, boundary, ifdepth]`,
-    /// children inherit the anchor.
-    pub anchor: i64,
-    /// Whether the node is a document node holding such an item: its
-    /// first command is checked (`par_boundary_violations`).
-    pub boundary: bool,
-    /// The same, kept for the run's length: when its paragraph ends, the
-    /// run and its children go on in the region after it, keyed by this
-    /// node's id as the pass keyed the siblings ([`Run::region_advance`]).
-    pub region_end: bool,
-    /// The condition-stack depth below this node's own conditionals
-    /// (OUTPUT.md §6): node arg 4, from the text's nesting; a `\fi` of an
-    /// outer conditional lowers it.
-    pub ifbase: i64,
-    /// The codes of `conds`' conditionals (`cur_if`).
-    pub if_codes: Vec<i32>,
-    /// The highest level this run wrote.
-    pub if_top_written: i64,
-    /// The condition-stack depth of each child [`Run::leftover`] makes,
-    /// planned where reads can wait ([`Run::measure_tail`]).
-    kid_ifdepths: Option<Vec<i64>>,
-    /// A `build_page` call not yet folded (OUTPUT.md §4.2a): the
-    /// children and main-list items the run had made at the call.
-    pub page_due: Option<(usize, usize, bool)>,
     /// The category codes this run read (§232), by character below
     /// 256, plus one (0: not read yet); emptied whenever `own` changes.
     cats: [u8; 256],
-    own: FxHashMap<Field, Option<ValueId>>,
+    pub own: FxHashMap<Field, Option<ValueId>>,
     pub defs: Vec<(Field, ValueId, Locality)>,
     pub contribs: Vec<(Field, ValueId)>,
     pub kids: Vec<(OpId, Vec<ValueId>)>,
@@ -218,6 +203,8 @@ pub(crate) struct Run<'c, 'a> {
     pub cur: Cur,
     /// Conditionals begun in this run: their `if_limit` (§489).
     pub conds: Vec<u8>,
+    /// The codes (`cur_if`) of `conds`, parallel to it.
+    pub if_codes: Vec<i32>,
     mcache: FxHashMap<ValueId, Mean>,
     /// The meaning fields of the tokens this run looked up.
     tfields: FxHashMap<Tok, Field>,
@@ -246,22 +233,10 @@ impl<'c, 'a> Run<'c, 'a> {
             1
         } else if op == ops.put {
             2
-        } else if op == ops.outpage {
-            3
         } else {
             0
         };
         crate::exec::note(code, cx.node().raw());
-        let (anchor, boundary, ifbase) = if code == 1 {
-            let args = cx.args();
-            (
-                args.get(2).map_or(0, |&x| int_of(v, x)),
-                args.get(3).is_some_and(|&x| int_of(v, x) != 0),
-                args.get(4).map_or(0, |&x| int_of(v, x)),
-            )
-        } else {
-            (0, false, 0)
-        };
         Run {
             _scope: crate::val::EpochScope::enter(v, cx.values_epoch()),
             cx,
@@ -271,17 +246,12 @@ impl<'c, 'a> Run<'c, 'a> {
             pulled: 0,
             top: false,
             claim_rest: false,
-            trial_kind: None,
-            trial_ids: None,
-            minted: std::cell::RefCell::new(Vec::new()),
+            nest: Vec::new(),
+            next_lid: 0,
+            last_par: (0, 0),
+            doc: false,
+            fread: Vec::new(),
             no_pull: false,
-            anchor,
-            boundary,
-            region_end: boundary,
-            ifbase,
-            if_codes: Vec::new(),
-            if_top_written: ifbase,
-            kid_ifdepths: None,
             own: FxHashMap::default(),
             cats: [0; 256],
             defs: Vec::new(),
@@ -295,11 +265,11 @@ impl<'c, 'a> Run<'c, 'a> {
                 mean: Mean::Undefined,
             },
             conds: Vec::new(),
+            if_codes: Vec::new(),
             mcache: FxHashMap::default(),
             tfields: FxHashMap::default(),
             kind_memo: None,
             astate: None,
-            page_due: None,
             lines_entered: 0,
             eof: false,
             radix: 0,
@@ -308,41 +278,9 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
-    pub(crate) fn node_raw(&self) -> i64 {
-        let id = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
-        let x = self.node_raw_of(id);
-        self.minted.borrow_mut().push(x);
-        x
-    }
-
-    /// A paragraph ended in this run (`end_graf`, a display's start): if
-    /// the pass marked this node paragraph-ending, the text after it is
-    /// in a new region whose anchor is this node (api.rs `regions`), so
-    /// the rest of this run and the children it leaves use that anchor
-    /// too (OUTPUT.md §5). Otherwise the region goes on (the pass did not
-    /// see the end: the siblings read the same cells; correct, serial).
-    pub(crate) fn region_advance(&mut self) {
-        if self.region_end {
-            self.anchor = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
-        }
-    }
-
-    fn node_raw_of(&self, id: i64) -> i64 {
-        if let Some(c) = &self.trial_ids {
-            c.set(c.get() + 1);
-            return id
-                ^ c.get()
-                    .wrapping_mul(0x9E37_79B9_7F4A_7C15_u64.cast_signed());
-        }
-        // A continued run may mint several lists for one node (a paragraph,
-        // then an \llap box); each needs its own id or list_fold mistakes
-        // the second for the first.
-        let k = i64::try_from(self.minted.borrow().len()).unwrap_or(0);
-        if k == 0 {
-            id
-        } else {
-            id ^ k.wrapping_mul(0x6A09_E667_F3BC_C909_u64.cast_signed())
-        }
+    /// Forgets the category codes read: a definition may have changed one.
+    pub(crate) fn forget_cats(&mut self) {
+        self.cats = [0; 256];
     }
 
     // ------------------------------------------------------------ fields
@@ -366,7 +304,14 @@ impl<'c, 'a> Run<'c, 'a> {
         } else {
             self.cx.use_env(f)?
         };
-        Ok(x.filter(|&x| !crate::val::list_of(v, x).is_empty()))
+        let x = x.filter(|&x| !crate::val::list_of(v, x).is_empty());
+        if let Some(t) = x.and_then(|x| crate::val::list_of(v, x).get(1).copied()) {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&str_of(v, t), &mut h);
+            self.fread
+                .push((key.to_owned(), std::hash::Hasher::finish(&h)));
+        }
+        Ok(x)
     }
 
     pub(crate) fn get(&mut self, name: &str) -> R<Option<ValueId>> {
@@ -418,9 +363,20 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     pub(crate) fn set_f(&mut self, f: Field, val: ValueId, global: bool) {
+        // a local definition inside a group of this run is undone at the
+        // group's close (`nest.rs`); a global one is retained through it
+        if global {
+            self.make_inert(f);
+        } else {
+            self.save_local(f);
+        }
         self.own.insert(f, Some(val));
         self.cats = [0; 256];
-        self.defs.retain(|d| d.0 != f);
+        // (inside a group of this run the earlier definition stays on the
+        // list: the group's close truncates to its opening)
+        if !self.in_local_group() {
+            self.defs.retain(|d| d.0 != f);
+        }
         self.defs.push((
             f,
             val,
@@ -661,11 +617,28 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Whether there is input left without claiming more siblings.
     pub(crate) fn has_input(&self) -> bool {
-        self.frames.iter().any(|f| match f {
-            Frame::Toks(t, p) => *p < t.len(),
-            Frame::Src(s) => s.loc < s.buf.len() || (s.ends && s.endch < -1),
-            Frame::File(f) => f.has_lines(),
-        })
+        // (a document file's lines left for the region children stop
+        // the run: what follows the file, its end marker included, is
+        // read after them, [`Run::leftover`])
+        for f in &self.frames {
+            let more = match f {
+                Frame::Toks(t, p) => *p < t.len(),
+                Frame::Src(s) => s.loc < s.buf.len() || (s.ends && s.endch < -1),
+                Frame::File(f) => {
+                    if !f.has_lines() {
+                        continue;
+                    }
+                    if self.doc && !self.open_span() && self.doc_file(f) {
+                        return false;
+                    }
+                    true
+                }
+            };
+            if more {
+                return true;
+            }
+        }
+        false
     }
 
     /// `get_next` (§341): the next token, its meaning not yet looked up.
@@ -693,7 +666,15 @@ impl<'c, 'a> Run<'c, 'a> {
                     }
                     self.frames.pop_front();
                 }
-                Frame::File(f) => {
+                Frame::File(_) => {
+                    // (a document file's lines are paragraph-region
+                    // children, [`Run::leftover`], at a command's start:
+                    // [`Run::has_input`] stops the run there; a command
+                    // still scanning, `\count1=\input n`, reads on into
+                    // the file, §362)
+                    let Some(Frame::File(f)) = self.frames.front_mut() else {
+                        unreachable!()
+                    };
                     if f.has_lines() {
                         let at = f.byte_pos();
                         let name = f.name;
@@ -711,6 +692,12 @@ impl<'c, 'a> Run<'c, 'a> {
                 }
             }
         }
+    }
+
+    /// Whether a file `\input` opened is a document's (its rest becomes
+    /// paragraph regions), not a format's (run line by line).
+    fn doc_file(&self, f: &FileRest) -> bool {
+        crate::hints::file_kind_of(self.v, f.id, f.name) == phitex_source::pass::FileKind::Document
     }
 
     /// `get_next` on the current line (§343–§356); `None` when the line
@@ -1106,31 +1093,23 @@ impl<'c, 'a> Run<'c, 'a> {
     /// token (a run of characters is one node), and the text not yet read
     /// as one node per segment.
     pub(crate) fn leftover(&self) -> Vec<Vec<ValueId>> {
+        // a run reads everything of its own (expansion tokens run inline,
+        // the slice's text is the node's command): what is left is the
+        // rest of a sibling's text pulled for an operand (its own command,
+        // §1030: a child), and the rest of a file `\input` opened (the
+        // file-rest child)
         let v = self.v;
         let epoch = self.cx.values_epoch();
         let tag = |n: &str| self.ops.fields.get_at(v, epoch, n).0;
-        let (tag_t, tag_s, tag_f) = (tag("t"), tag("s"), tag("f"));
-        let anchor = v.int(self.anchor);
-        let base = self.ifbase + i64::try_from(self.conds.len()).unwrap_or(0);
-        let depths = self.kid_ifdepths.as_deref().unwrap_or(&[]);
-        let depth = std::cell::Cell::new(0usize);
-        // [frames, top, anchor, boundary, ifdepth]
-        let tail = || -> [ValueId; 4] {
-            let k = depth.get();
-            depth.set(k + 1);
-            let d = depths.get(k).copied().unwrap_or(base);
-            [v.int(0), anchor, v.int(0), v.int(d)]
-        };
-        let with = |frames: ValueId| -> Vec<ValueId> {
-            let mut a = vec![frames];
-            a.extend(tail());
-            a
-        };
+        let (tag_s, tag_f) = (tag("s"), tag("f"));
         let mut out: Vec<Vec<ValueId>> = Vec::new();
+        let tag_t = tag("t");
+        // (a document's leftovers stay a document's, [`Run::run_all`])
+        let kind = if self.doc { 2 } else { 0 };
         let mut run: Vec<ValueId> = Vec::new();
         let node = |toks: Vec<ValueId>| -> Vec<ValueId> {
             let l = v.list(toks);
-            with(v.list(vec![v.list(vec![tag_t, l])]))
+            vec![v.list(vec![v.list(vec![tag_t, l])]), v.int(kind)]
         };
         for f in &self.frames {
             match f {
@@ -1148,14 +1127,11 @@ impl<'c, 'a> Run<'c, 'a> {
                     }
                 }
                 Frame::Src(s) => {
-                    // a run of characters stays with the text after it,
-                    // so ligatures and kerns join them (§1034)
-                    let head = std::mem::take(&mut run);
+                    if !run.is_empty() {
+                        out.push(node(std::mem::take(&mut run)));
+                    }
                     let end_due = s.ends && s.endch < -1;
                     if s.loc >= s.buf.len() && !end_due {
-                        if !head.is_empty() {
-                            out.push(node(head));
-                        }
                         continue;
                     }
                     let text: String = s.buf[s.loc.min(s.buf.len())..]
@@ -1179,26 +1155,22 @@ impl<'c, 'a> Run<'c, 'a> {
                         xs.push(name);
                         xs.push(v.int(i64::try_from(at).unwrap_or(0)));
                     }
-                    let fr = v.list(xs);
-                    let mut frs = Vec::new();
-                    if !head.is_empty() {
-                        frs.push(v.list(vec![tag_t, v.list(head)]));
-                    }
-                    frs.push(fr);
-                    out.push(with(v.list(frs)));
+                    out.push(vec![v.list(vec![v.list(xs)]), v.int(kind)]);
                 }
                 Frame::File(f) => {
                     if !run.is_empty() {
                         out.push(node(std::mem::take(&mut run)));
                     }
-                    if f.has_lines() {
+                    if f.has_lines() && self.doc && self.doc_file(f) {
+                        out.extend(self.doc_file_regions(f));
+                    } else if f.has_lines() {
                         let fr = v.list(vec![
                             tag_f,
                             f.id,
                             v.int(i64::try_from(f.off).unwrap_or(0)),
                             f.name,
                         ]);
-                        out.push(with(v.list(vec![fr])));
+                        out.push(vec![v.list(vec![fr]), v.int(0)]);
                     }
                 }
             }
@@ -1209,294 +1181,115 @@ impl<'c, 'a> Run<'c, 'a> {
         out
     }
 
-    /// The tokens of an expansion may end in a command that reads on into
-    /// the text after them (`\newcount\foo`: `\alloc@`'s fifth argument):
-    /// their extent is decided here, at the call, by reading them in a
-    /// trial run whose effects are dropped; the siblings the trial reads
-    /// are claimed, so the expansion's children find them in their own
-    /// text (a child never reads past its parent).
-    pub(crate) fn measure_tail(&mut self) -> R<()> {
-        self.measure_tail_inner()?;
-        let d = self.plan_ifdepths()?;
-        self.kid_ifdepths = Some(d);
-        Ok(())
-    }
-
-    /// The condition-stack depth of each child [`Run::leftover`] will
-    /// make, in its order: the depth after this run's command, then each
-    /// child's text's nesting (`\if…` +1, `\fi` -1, by meaning, §489) for
-    /// the children after it (OUTPUT.md §6).
-    fn plan_ifdepths(&mut self) -> R<Vec<i64>> {
-        let mut d = self.ifbase + i64::try_from(self.conds.len()).unwrap_or(0);
+    /// The region children of the rest of a document file `\input` by a
+    /// document node: the file analysed as the document's own text (once,
+    /// with the format's definitions, registered under the file's name
+    /// for its fragments' hints), each slice with its hint.
+    fn doc_file_regions(&self, f: &FileRest) -> Vec<Vec<ValueId>> {
+        let v = self.v;
+        let text = str_of(v, f.id);
+        let defs = self
+            .ops
+            .defs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let t = crate::hints::text_hints(&text, phitex_source::pass::FileKind::Document, &defs);
+        crate::hints::register_text(f.name, &t);
         let mut out = Vec::new();
-        let mut run = false;
-        let frames: Vec<Frame> = self.frames.iter().cloned().collect();
-        for f in &frames {
-            match f {
-                Frame::Toks(t, p) => {
-                    for tok in &t[*p..] {
-                        if matches!(tok.cat(), Some(10..=12)) {
-                            run = true;
-                            continue;
-                        }
-                        if std::mem::take(&mut run) {
-                            out.push(d);
-                        }
-                        out.push(d);
-                        d = (d + self.if_delta(tok)?).max(0);
-                    }
-                }
-                Frame::Src(s) => {
-                    let head = std::mem::take(&mut run);
-                    let end_due = s.ends && s.endch < -1;
-                    if s.loc >= s.buf.len() && !end_due {
-                        if head {
-                            out.push(d);
-                        }
-                        continue;
-                    }
-                    out.push(d);
-                    d = (d + self.src_if_delta(&s.buf[s.loc.min(s.buf.len())..])?).max(0);
-                }
-                Frame::File(fr) => {
-                    if std::mem::take(&mut run) {
-                        out.push(d);
-                    }
-                    if fr.has_lines() {
-                        out.push(d);
-                    }
-                }
-            }
-        }
-        if run {
-            out.push(d);
-        }
-        Ok(out)
-    }
-
-    /// A token's effect on the condition stack's depth: only control
-    /// sequences named `if…` or `fi…` are looked up (their meaning
-    /// decides; a conditional under another name is a violation the
-    /// outer `\fi` reports).
-    fn if_delta(&mut self, tok: &Tok) -> R<i64> {
-        let Tok::S(name) = tok else { return Ok(0) };
-        if !(name.starts_with("if") || name.starts_with("fi")) {
-            return Ok(0);
-        }
-        let (c, h) = self.mean_of(tok)?.cmd_chr();
-        Ok(match c {
-            cmd::IF_TEST => 1,
-            cmd::FI_OR_ELSE if h == 2 => -1,
-            _ => 0,
-        })
-    }
-
-    /// The nesting of a line's unread text: its control words (escape
-    /// and letters by the current category codes, §354–§356) to the end
-    /// or a comment character.
-    fn src_if_delta(&mut self, text: &[u32]) -> R<i64> {
-        let mut d = 0;
-        let mut i = 0;
-        while i < text.len() {
-            let c = self.cat(text[i])?;
-            if c == 14 {
-                break;
-            }
-            i += 1;
-            if c != 0 {
+        for &(s, e) in &t.slices {
+            if e <= f.off {
                 continue;
             }
-            let s = i;
-            while i < text.len() && self.cat(text[i])? == 11 {
-                i += 1;
-            }
-            if i == s {
-                i += 1;
-                continue;
-            }
-            let name: String = text[s..i]
-                .iter()
-                .map(|&c| char::from_u32(c).unwrap_or('?'))
-                .collect();
-            d += self.if_delta(&Tok::cs(&name))?;
+            let a = s.max(f.off);
+            let starts = a == 0 || text.as_bytes()[a - 1] == b'\n';
+            let mut args = slice_args_in_file(v, &text[a..e], starts, f.name, a);
+            args.push(crate::hints::hint_arg(v, &t, s));
+            out.push(args);
         }
-        Ok(d)
+        out
     }
 
-    fn measure_tail_inner(&mut self) -> R<()> {
-        if !self
-            .frames
-            .iter()
-            .any(|f| matches!(f, Frame::Toks(t, p) if *p < t.len()))
-        {
+    /// The scope kind the node runs in: the engine's.
+    pub(crate) fn scope_kind(&mut self) -> R<Option<ValueId>> {
+        Ok(self.cx.scope_kind()?)
+    }
+
+    /// Runs the node's input to its end (§1030's loop): every command of
+    /// its text, of the files it reads inline and of the tokens the
+    /// expansions leave. A format's or a package's node is its whole
+    /// text. A document region's paragraph or group the slice did not
+    /// close (the pass predicted its end wrong) reads on into the
+    /// following siblings, claimed, until it is closed or the text ends:
+    /// correct, and serial for exactly that span.
+    pub(crate) fn run_all(&mut self) -> R<()> {
+        let args = self.cx.args();
+        // the node's text kind (`args[1]`: 1 the job's text, 2 a document's)
+        let k = args.get(1).map_or(0, |&t| int_of(self.v, t));
+        self.top = k & 1 != 0;
+        self.doc = k & 2 != 0;
+        loop {
+            while self.has_input() {
+                self.command()?;
+                if self.claim_rest {
+                    return Ok(());
+                }
+            }
+            // a paragraph, a group or a conditional still open reads on
+            // into the next sibling, claimed
+            if self.open_span() && !self.eof && self.pull()? {
+                continue;
+            }
+            if !self.doc && !self.nest.is_empty() {
+                // a format or package text ended inside a group: the
+                // groups end with it (nothing after reads them), the
+                // node reports the error
+                self.diag(true, "format: group left open at end");
+                for l in std::mem::take(&mut self.nest) {
+                    if l.owns {
+                        for x in l.list {
+                            self.append(0, x);
+                        }
+                    }
+                }
+            }
             return Ok(());
         }
-        let snap = self.snapshot();
-        let before = self.pulled;
-        let mut steps = 0u32;
-        self.trial_ids = Some(std::cell::Cell::new(0));
-        let res: R<()> = (|| {
-            // the tokens' extent: the trial ends when they are read (the
-            // text after them is the siblings' own); `\end` ends it too,
-            // since its repetitions wait on the page builder
-            let toks_left = |r: &Self| {
-                r.frames
-                    .iter()
-                    .any(|f| matches!(f, Frame::Toks(t, p) if *p < t.len()))
-            };
-            while toks_left(self) && steps < 100_000 {
-                steps += 1;
-                self.effect = phitex_defuse::Effect::None;
-                self.command()?;
-                if steps < 30 && std::env::var_os("PHITEX_TEX_TRACE").is_some() {
-                    let md = self.mode()?;
-                    eprintln!(
-                        "    trial {:?} mode {} group {} lid {}",
-                        self.cur.tok, md.m, md.group, md.lid
-                    );
-                }
-                self.trial_scope()?;
-                if self.cur.cmd == crate::val::cmd::STOP {
-                    break;
-                }
-            }
-            Ok(())
-        })();
-        self.trial_kind = None;
-        self.trial_ids = None;
-        let after = self.pulled;
-        if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
-            let r = match &res {
-                Ok(()) => "ok".to_owned(),
-                Err(Halt::Stop(_)) => "stop".to_owned(),
-                Err(Halt::Starve) => "starve".to_owned(),
-                Err(Halt::Fatal) => "fatal".to_owned(),
-            };
-            eprintln!(
-                "  tail: {steps} steps, pulled {}, {r}, top {}",
-                after - before,
-                self.top
-            );
-        }
-        self.restore(snap);
-        if let Err(Halt::Stop(s)) = res {
-            return Err(Halt::Stop(s));
-        }
-        for _ in before..after {
-            if !self.pull()? {
-                break;
-            }
-        }
-        if after > before {
-            let n = self.v.int(i64::try_from(after - before).unwrap_or(0));
-            self.contribute("tails", self.v.seq_unit(n));
-        }
-        Ok(())
     }
 
-    /// The scope kind the node is in: in a trial, the one its own
-    /// commands made.
-    pub(crate) fn scope_kind(&mut self) -> R<Option<ValueId>> {
-        match self.trial_kind {
-            Some(k) => Ok(k),
-            None => Ok(self.cx.scope_kind()?),
-        }
-    }
-
-    /// A trial follows the scopes its commands open and close, so the
-    /// commands after them see the mode and group they would (a kind
-    /// keeps its parent at index 5).
-    fn trial_scope(&mut self) -> R<()> {
-        let v = self.v;
-        let parent = |k: Option<ValueId>| {
-            k.and_then(|k| crate::val::list_of(v, k).get(5).copied())
-                .filter(|&p| p != ValueId::UNIT)
-        };
-        let mut cur = self.scope_kind()?;
-        match self.effect {
-            phitex_defuse::Effect::Close => cur = parent(cur),
-            phitex_defuse::Effect::Scope(b) => {
-                for _ in 0..b.closes {
-                    cur = parent(cur);
-                }
-                if b.opens > 0 {
-                    cur = b.kind;
-                }
-            }
-            _ => return Ok(()),
-        }
-        self.trial_kind = Some(cur);
-        Ok(())
-    }
-
-    fn snapshot(&self) -> Snapshot {
-        Snapshot {
-            frames: self.frames.clone(),
-            pulled: self.pulled,
-            own: self.own.clone(),
-            defs: self.defs.clone(),
-            contribs: self.contribs.clone(),
-            kids: self.kids.clone(),
-            effect: self.effect,
-            cur: self.cur.clone(),
-            conds: self.conds.clone(),
-            ifs: (self.ifbase, self.if_codes.clone(), self.if_top_written),
-            lines_entered: self.lines_entered,
-            eof: self.eof,
-            claim_rest: self.claim_rest,
-            astate: self.astate,
-            page_due: self.page_due,
-            anchor: self.anchor,
-            // (lists a trial's commands open are the trial's: without this
-            // the run defined `lopen:` for ids no node owns)
-            minted: self.minted.borrow().clone(),
-        }
-    }
-
-    fn restore(&mut self, s: Snapshot) {
-        self.frames = s.frames;
-        self.pulled = s.pulled;
-        self.own = s.own;
-        self.cats = [0; 256];
-        self.defs = s.defs;
-        self.contribs = s.contribs;
-        self.kids = s.kids;
-        self.effect = s.effect;
-        self.cur = s.cur;
-        self.conds = s.conds;
-        (self.ifbase, self.if_codes, self.if_top_written) = s.ifs;
-        self.lines_entered = s.lines_entered;
-        self.eof = s.eof;
-        self.claim_rest = s.claim_rest;
-        self.astate = s.astate;
-        self.page_due = s.page_due;
-        self.anchor = s.anchor;
-        *self.minted.borrow_mut() = s.minted;
+    /// Whether the run has something open that must close in this run:
+    /// a level of the nest or a conditional.
+    fn open_span(&self) -> bool {
+        !self.nest.is_empty() || !self.conds.is_empty()
     }
 
     /// Ends the run: definitions, contributions, children (what the
     /// command made, then the input left), the claim and the scope effect.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn finish(mut self) -> ValueId {
-        // the opener of each list this run made: this node, and what it
-        // appended to the list itself (a later reader's range starts after
-        // this node)
-        let minted = std::mem::take(&mut *self.minted.borrow_mut());
-        if !minted.is_empty() {
+        // a page parameter this run set reaches the page fold as a
+        // marker in the main list (page.rs `breaks`)
+        if self.defs.iter().any(|&(f, _, _)| {
+            matches!(
+                crate::val::field_name(self.v, f).as_str(),
+                "param:vsize" | "param:maxdepth" | "param:topskip" | "param:holdinginserts"
+            )
+        }) {
             let v = self.v;
-            let epoch = self.cx.values_epoch();
-            let me = crate::val::int_id(v, i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
-            let items = self.ops.fields.get_at(v, epoch, "items");
-            for id in minted {
-                let mine: Vec<ValueId> = self
-                    .contribs
-                    .iter()
-                    .filter(|(g, _)| *g == items)
-                    .flat_map(|(_, x)| v.seq_to_vec(*x))
-                    .filter(|&e| crate::val::int_at(v, e, 0) == id)
-                    .collect();
-                let val = v.list(vec![me, v.list(mine)]);
-                self.set(&format!("lopen:{id}"), val, true);
-            }
+            let vsize = self.param("vsize").unwrap_or(0);
+            let maxdepth = self.param("maxdepth").unwrap_or(0);
+            let topskip = self.glue_param("topskip").unwrap_or_default();
+            let holding = self.param("holdinginserts").unwrap_or(0);
+            let marker = v.list(vec![
+                v.int(crate::nodes::T_PAGE_PARAMS),
+                v.int(i64::from(vsize)),
+                v.int(i64::from(maxdepth)),
+                crate::val::glue_value(v, &topskip),
+                v.int(i64::from(holding)),
+            ]);
+            let item = v.list(vec![v.int(0), marker]);
+            let s = v.seq_unit(item);
+            self.contribute("items", s);
         }
         for (f, x, l) in std::mem::take(&mut self.defs) {
             self.cx.define_with(f, x, l);
@@ -1511,7 +1304,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 .get_at(self.v, self.cx.values_epoch(), "defs");
             self.contribs.push((defs, s));
         }
-        if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
             let v = self.v;
             let items = v.field("items");
             for (f, x) in &self.contribs {
@@ -1541,7 +1334,17 @@ impl<'c, 'a> Run<'c, 'a> {
                         .unwrap_or_default()
                 );
             }
-            eprintln!("  effect {:?} anchor {}", self.effect, self.anchor);
+            eprintln!("  effect {:?}", self.effect);
+        }
+        if !self.fread.is_empty() {
+            let v = self.v;
+            let es: Vec<ValueId> = std::mem::take(&mut self.fread)
+                .into_iter()
+                .map(|(n, h)| v.list(vec![v.str(&n), crate::val::int_id(v, h.cast_signed())]))
+                .collect();
+            for e in es {
+                self.contribute("fread", v.seq_unit(e));
+            }
         }
         for (f, x) in std::mem::take(&mut self.contribs) {
             self.cx.contribute(f, x);
@@ -1549,18 +1352,8 @@ impl<'c, 'a> Run<'c, 'a> {
         for (op, args) in std::mem::take(&mut self.kids) {
             self.cx.child(op, args);
         }
-        // a deferred page step comes first, then the input left, what
-        // follows the command: its continuation, at its own depth
-        if let Some((_, _, any)) = self.page_due {
-            let op = if any {
-                self.ops.pagestep_any
-            } else {
-                self.ops.pagestep
-            };
-            self.cx.follow(op, Vec::new());
-        }
         for args in self.leftover() {
-            if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+            if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
                 let v = self.v;
                 eprintln!(
                     "  follow {}",
@@ -1596,27 +1389,6 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 }
 
-/// A run's state, to undo a trial.
-struct Snapshot {
-    frames: VecDeque<Frame>,
-    pulled: usize,
-    own: FxHashMap<Field, Option<ValueId>>,
-    defs: Vec<(Field, ValueId, Locality)>,
-    contribs: Vec<(Field, ValueId)>,
-    kids: Vec<(OpId, Vec<ValueId>)>,
-    effect: Effect,
-    cur: Cur,
-    conds: Vec<u8>,
-    ifs: (i64, Vec<i32>, i64),
-    lines_entered: i64,
-    eof: bool,
-    claim_rest: bool,
-    astate: Option<i64>,
-    page_due: Option<(usize, usize, bool)>,
-    anchor: i64,
-    minted: Vec<i64>,
-}
-
 fn is_hex(c: u32) -> bool {
     (u32::from(b'0')..=u32::from(b'9')).contains(&c)
         || (u32::from(b'a')..=u32::from(b'f')).contains(&c)
@@ -1631,11 +1403,6 @@ fn hex(c: u32) -> u32 {
 }
 
 /// The frames of an `Exec` node's arguments.
-/// The condition-stack depth an output routine's tokens start at: its
-/// conditionals are above any the page builder interrupted, in levels of
-/// their own (OUTPUT.md §6).
-pub(crate) const OUTPUT_IF_BASE: i64 = 1 << 40;
-
 pub(crate) fn decode_frames(v: &Values, args: &[ValueId]) -> Vec<Frame> {
     decode_frames_upto(v, args, usize::MAX)
 }
@@ -1752,18 +1519,53 @@ pub(crate) fn line_args(v: &Values, line: &str) -> Vec<ValueId> {
     vec![v.list(vec![frame]), v.int(1)]
 }
 
-/// The text of a node from the document: a slice of its lines, as
-/// segments (each the part of one line the slice holds), then its
-/// paragraph region's anchor and whether it holds a paragraph-ending item
-/// (OUTPUT.md §5).
-pub(crate) fn slice_args(
+/// [`slice_args`] for a piece of a file `\input` read, beginning at
+/// byte `at` of the file named `name`: every segment carries its origin
+/// `(name, offset)`; the kind is 2 (a document's piece, not the top).
+pub(crate) fn slice_args_in_file(
     v: &Values,
     text: &str,
     starts_line: bool,
-    anchor: i64,
-    boundary: bool,
-    ifdepth: i64,
+    name: ValueId,
+    at: usize,
 ) -> Vec<ValueId> {
+    let mut frames = Vec::new();
+    let mut starts = starts_line;
+    let mut rest = text;
+    let mut pos = at;
+    while !rest.is_empty() {
+        let (seg, ends, next) = match rest.find('\n') {
+            Some(k) => (&rest[..k], true, &rest[k + 1..]),
+            None => (rest, false, ""),
+        };
+        let used = rest.len() - next.len();
+        let seg: String = if ends {
+            seg.trim_end_matches([' ', '\t', '\r']).to_owned()
+        } else {
+            seg.to_owned()
+        };
+        let state = if starts { NEW_LINE } else { MID_LINE };
+        let flags = i64::from(starts) | (i64::from(ends) << 1);
+        frames.push(v.list(vec![
+            v.str("s"),
+            v.str(&seg),
+            v.int(i64::from(state)),
+            v.int(-2),
+            v.int(flags),
+            name,
+            v.int(i64::try_from(pos).unwrap_or(0)),
+        ]));
+        starts = ends;
+        rest = next;
+        pos += used;
+    }
+    vec![v.list(frames), v.int(2)]
+}
+
+/// The text of a node from the document: a slice of its lines, as
+/// segments (each the part of one line the slice holds); the node's args
+/// are `[frames, top, hint]`.
+pub(crate) fn slice_args(v: &Values, text: &str, starts_line: bool) -> Vec<ValueId> {
     let mut frames = Vec::new();
     let mut starts = starts_line;
     let mut rest = text;
@@ -1789,11 +1591,5 @@ pub(crate) fn slice_args(
         starts = ends;
         rest = next;
     }
-    vec![
-        v.list(frames),
-        v.int(1),
-        v.int(anchor),
-        v.int(i64::from(boundary)),
-        v.int(ifdepth),
-    ]
+    vec![v.list(frames), v.int(1)]
 }

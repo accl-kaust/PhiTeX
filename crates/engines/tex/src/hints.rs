@@ -2,9 +2,10 @@
 //! (`phitex-source`): the engine then makes readers of other fields wait
 //! on nothing of it.
 //!
-//! A node's text is one command (its first atom: a control sequence, a
-//! run of characters, a brace, a blank line). The pass bounds the
-//! control sequences a command may define (`cs:` and `act:` fields: its
+//! A node's text is a slice (`slices_of`): a document's paragraph
+//! region or loading command, or a whole format or package text, whose
+//! hint is `Any`. The pass bounds the control sequences a slice may
+//! define (`cs:` and `act:` fields: its
 //! own statement and the bodies of the macros it calls, when those are
 //! visible in the same text); every other field the run may set (the
 //! lists, the page, fonts, conditionals: the engine's state) is covered
@@ -24,20 +25,19 @@
 //! Where the text comes from: a document's or prelude's slices are
 //! analysed whole in [`text_hints`] (the regime tracked across the text:
 //! `\makeatletter`, `\ExplSyntaxOn`, literal `\catcode`s) and each slice's
-//! hint goes into its node's arguments ([`hint_arg`]); a file read by
-//! `\input` is analysed once by its text ([`file_hints`]) when its first
-//! node asks, and the rest of its lines (nodes whose text frame names
-//! the file and an offset) find it by name. Expansion tokens carry no
-//! text position and answer `Any`.
+//! hint goes into its node's arguments ([`hint_arg`]); a document file
+//! read by `\input` is sliced and analysed the same way
+//! (`Run::doc_file_regions`), its regions finding the analysis by name.
+//! A slice that opens and closes no scope (`no_scope`) declares no
+//! scope effect. Expansion tokens carry no text position and answer
+//! `Any`.
 //!
 //! The pass reads bodies from the text itself and from the format's
 //! definitions ([`Defs`]: the prelude's text and every file it read,
 //! harvested once per prelude by `api.rs`): a call of a format macro is
 //! bounded by its body like a call of the document's own, and a macro
 //! whose body ends a paragraph marks a paragraph region's end wherever
-//! it is called (OUTPUT.md §5). Without them every region boundary a
-//! macro hides was missed, and every paragraph of a document written
-//! as macro calls shared one cell (`par:0:…`) in one serial chain.
+//! it is called (OUTPUT.md §5).
 //!
 //! `PHITEX_HINTS=1` prints each distinct node text's answer and cause;
 //! `PHITEX_HINTS_OFF=1` answers `Any` for every node (the comparison).
@@ -160,21 +160,22 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // closing a group: the box's badness, its level fix, inserts (§1100, §1079)
         // and the box a `\\setbox` or box context gets (§1077 box_end)
         // (an output routine's `}` resumes the page builder, §1100)
-        "endgroup" | "egroup" => &["badness", "lvlfix", "inspen", "box:", "deadcycles"],
+        "endgroup" | "egroup" => &["badness", "lvlfix", "inspen", "box:"],
         // arguments expanded while read: a conditional may end (§366, §498)
-        "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["if:"],
-        "mark" => &["if:", "param:"],
+        "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["if:", "cs:"],
+        "mark" => &[],
         // (e-TeX's mark classes, §1494 ff.)
-        "marks" => &["if:", "param:", "markclasses"],
+        "marks" => &["markclasses"],
         "write" | "openout" | "closeout" => &["if:", "wopen:", "write:"],
         // (`\\immediate` of a pdfTeX object too, pdfTeX §1528)
         "immediate" => &["if:", "wopen:", "write:", "pdf:"],
         "shipout" | "insert" | "vadjust" | "output" => &["param:"],
         "afterassignment" => &["aftertoken"],
         "aftergroup" => &["ag"],
-        // boxes (§1083 begin_box, §1077 \setbox)
+        // boxes (§1083 begin_box, §1077 \\setbox); a box whose braces close in
+        // the same node is packaged there and sets \\\\badness, §1086, §649)
         "hbox" | "vbox" | "vtop" | "vcenter" | "setbox" | "vsplit" => {
-            &["box:", "align", "param:", "lvlfix"]
+            &["box:", "lvlfix", "badness", "markclasses"]
         }
         // conditionals (§498-§510)
         "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode"
@@ -242,7 +243,7 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // expansion only (§367, §369)
         "noexpand" => &[],
         // boxes in a box context (§1073 begin_box via §1084)
-        "moveleft" | "moveright" | "raise" | "lower" => &["box:", "align", "param:", "lvlfix"],
+        "moveleft" | "moveright" | "raise" | "lower" => &["box:", "lvlfix", "badness"],
         // a language whatsit (§1377) in horizontal material, which may
         // start a paragraph (`par:`, `lopen:`, `pg:`, §1091)
         "setlanguage" => &["box:", "lvlfix", "par:", "lopen:", "pg:"],
@@ -274,19 +275,7 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
 /// `\\interlinepenalties`).
 /// What a paragraph's end may set (`\\par`, a blank line): see
 /// [`class_state`]'s `par` row (§1070, §1094-§1096, §1199).
-const PAR_END: &[&str] = &[
-    "par:",
-    "pg:",
-    "lopen:",
-    "inspen",
-    "box:",
-    "lvlfix",
-    "param:",
-    "parshape",
-    "page:",
-    "deadcycles",
-    "if:",
-];
+const PAR_END: &[&str] = &["pg:", "parshape"];
 
 const NORMAL_PARAGRAPH: &[&str] = &[
     "param:looseness",
@@ -363,6 +352,12 @@ fn add_heads(st: &mut Option<Vec<String>>, heads: Option<&[&str]>) {
     match (st.as_mut(), heads) {
         (Some(v), Some(hs)) => {
             for h in hs {
+                // (dead heads: the paragraph, conditionals and groups are
+                // run-local, the page builder's state lives in its own
+                // node)
+                if DEAD_HEADS.contains(h) {
+                    continue;
+                }
                 if !v.iter().any(|x| x == h) {
                     v.push((*h).to_owned());
                 }
@@ -372,6 +367,9 @@ fn add_heads(st: &mut Option<Vec<String>>, heads: Option<&[&str]>) {
         (None, _) => {}
     }
 }
+
+/// The state heads no node defines any more.
+const DEAD_HEADS: &[&str] = &["par:", "if:", "lopen:", "page:"];
 
 fn add_head(st: &mut Option<Vec<String>>, h: &str) {
     add_heads(st, Some(&[h]));
@@ -622,42 +620,71 @@ pub(crate) struct TextHints {
     /// beginning there.
     starts: Vec<usize>,
     hints: Vec<Arc<str>>,
-    /// Per atom: the byte start of the first command after it that may
-    /// open or close a scope (`usize::MAX`: none). A node's run unfolds
-    /// the rest of its text as continuations, which the engine counts as
-    /// the node's own effect: a node opens and closes no scope only if
-    /// none of them does ([`Self::at_until`]).
-    scope_next: Vec<usize>,
+    /// Per atom: an operand an earlier command reads (never run on its
+    /// own), or a character after the first of its run.
+    skip: Vec<bool>,
+    /// Per slice: whether a paragraph starts in it (a region: its run
+    /// begins and ends in the vertical list).
+    pars: Vec<bool>,
     /// Per slice.
     slice_hints: Vec<Arc<str>>,
 }
 
 impl TextHints {
-    /// The hint of a node whose text is the rest of this one from byte
-    /// `off`.
+    /// The hint of the command at or after byte `off`.
     fn at(&self, off: usize) -> Hint {
-        self.at_until(off, usize::MAX)
+        // (to the end of the slice holding `off`: the node's own text)
+        let end = self
+            .slices
+            .iter()
+            .find(|&&(s, e)| s <= off && off < e)
+            .map_or(usize::MAX, |x| x.1);
+        self.at_until(off, end)
     }
 
-    /// The hint of a node whose text is bytes `off..end`: the command at
-    /// or after `off`, its run unfolding the rest up to `end` as
-    /// continuations (the engine orders a reader after the node against
-    /// them only through the node's own effect: a static "no scope" lets
-    /// a reader of a scope-local field run before a continuation that
-    /// closes the scope exists).
+    /// The hint of the text from byte `off` to byte `end`: the union of
+    /// the bounds of the commands in it (a run executes all of them: a
+    /// line of a file read by `\input`, a region).
     fn at_until(&self, off: usize, end: usize) -> Hint {
         let k = self.starts.partition_point(|&s| s < off);
-        match self.hints.get(k) {
-            Some(h) => {
-                let mut h = Hint::decode(h);
-                if let Some(b) = &mut h.bound
-                    && self.scope_next[k] < end
-                {
-                    b.no_scope = false;
-                }
+        let mut acc: Option<Bound> = None;
+        let mut first: Option<Hint> = None;
+        let mut a = k;
+        while let Some(&s) = self.starts.get(a)
+            && s < end
+        {
+            a += 1;
+            if self.skip[a - 1] {
+                continue;
+            }
+            let h = Hint::decode(&self.hints[a - 1]);
+            if first.is_none() {
+                first = Some(h.clone());
+            }
+            match (&h.bound, &mut acc) {
+                (None, _) => return h,
+                (Some(b), Some(acc)) => union(acc, b),
+                (Some(b), None) => acc = Some(b.clone()),
+            }
+        }
+        match (first, acc) {
+            (Some(mut h), Some(b)) => {
+                h.bound = Some(b);
                 h
             }
-            None => Hint::any("end of text", ""),
+            (Some(h), None) => h,
+            // (a slice of blanks only: a space in vertical mode does
+            // nothing, §1045)
+            (None, _) if end != usize::MAX && off < end => Hint {
+                bound: Some(Bound {
+                    state: Some(Vec::new()),
+                    no_scope: true,
+                    ..Bound::default()
+                }),
+                cause: "blanks".to_owned(),
+                excerpt: String::new(),
+            },
+            (None, _) => Hint::any("end of text", ""),
         }
     }
 
@@ -667,30 +694,613 @@ impl TextHints {
     }
 }
 
-/// The slices of a text: nodes start at atoms (characters run together),
-/// each with the blanks before the next.
-fn slices_of(text: &str, p: &Pass) -> Vec<(usize, usize)> {
-    let mut starts: Vec<usize> = Vec::new();
+/// The slices of a text, each with the blanks before the next.
+///
+/// A format's or a package's text (`Initex`, `Package`) is one slice,
+/// the whole file: one node, a sequential run of it (nested inputs
+/// inline), its output the definitions in force at its end.
+///
+/// A document's slices are its paragraph regions (`docs/TARGET_GRAPH.md`):
+/// a region runs from its start to the end of the next item the pass
+/// marks paragraph-ending (`Implicit::EndsParagraph`: a blank line,
+/// `\par`, a vertical command, a macro whose body ends in one) that is
+/// at brace depth 0, consumed by no earlier item, and outside every
+/// conditional. So a region is balanced: its run opens and closes its
+/// own groups and conditionals and leaves nothing to another node.
+/// A loading command (`\documentclass`, `\usepackage`, `\RequirePackage`,
+/// `\LoadClass`, `\input`, `\include`) with its `[...]` and `{...}`
+/// arguments is one slice of its own (vertical: a paragraph before it
+/// ends there). Any other control sequence at depth 0 takes the
+/// `[...]`/`{...}` groups right after it into its slice
+/// (`\centerline{...}`).
+#[allow(clippy::too_many_lines)]
+pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, usize)>, Vec<bool>) {
+    if kind != FileKind::Document {
+        return if text.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            (vec![(0, text.len())], vec![true])
+        };
+    }
+    let n = p.atoms.len();
+    // brace depth before each atom
+    let mut depth = Vec::with_capacity(n);
+    let mut d: usize = 0;
+    for at in &p.atoms {
+        if at.kind == AtomKind::Close {
+            d = d.saturating_sub(1);
+        }
+        depth.push(d);
+        if at.kind == AtomKind::Open {
+            d += 1;
+        }
+    }
+    // atoms an earlier item claims (operands: never a slice's start)
+    let mut claimed = vec![false; n];
+    for (i, it) in p.items.iter().enumerate() {
+        // (a value whose last token is a command the pass cannot read
+        // through, `\count1=\input inc-num`: the text up to the next
+        // command is the value's too, §440)
+        let end = match &it.hints.claim {
+            pass::Claim::Pending { cause, .. }
+                if matches!(*cause, "command in value position" | "value is a macro") =>
+            {
+                p.items.get(i + 1).map_or(it.end, |x| x.atom).max(it.end)
+            }
+            _ => it.end,
+        };
+        for c in claimed.iter_mut().take(end.min(n)).skip(it.atom + 1) {
+            *c = true;
+        }
+    }
+    // (that extension runs in the command's own run: `\\vskip 1in
+    // \\centerline{…}` expands the macro while it looks for `plus`,
+    // §1094, and runs what it leaves; one slice)
+    let mut extended = vec![false; n];
+    for (i, it) in p.items.iter().enumerate() {
+        if let pass::Claim::Pending { cause, .. } = &it.hints.claim
+            && matches!(*cause, "command in value position" | "value is a macro")
+        {
+            // (to the next command; a loader the scan expands, `\\font\\x
+            // =cmr12 \\input part`, to the end of its file name: the
+            // text after it is a slice of its own)
+            let end = match p.items.get(i + 1) {
+                Some(x) if matches!(x.name.as_str(), "input" | "include") => x.end,
+                Some(x) => x.atom,
+                None => it.end,
+            }
+            .max(it.end);
+            for c in extended
+                .iter_mut()
+                .take(end.min(n))
+                .skip(it.end.max(it.atom + 1))
+            {
+                *c = true;
+            }
+        }
+    }
+    // the operands of a primitive (`\sfcode`\)=0`): never a slice's
+    // start, so a command and what it reads are one node (a macro's
+    // operands are the pass's guess and do not count)
+    let mut operand = vec![false; n];
+    for it in &p.items {
+        if crate::prims::PRIMS.iter().any(|q| q.0 == it.name) {
+            for c in operand.iter_mut().take(it.end.min(n)).skip(it.atom + 1) {
+                *c = true;
+            }
+        }
+    }
+    for (o, &x) in operand.iter_mut().zip(&extended) {
+        *o |= x;
+    }
+    // the conditional nesting before each atom, by the text's items
+    // (`\if…` +1, `\fi` -1; an item an earlier one consumes not counted)
+    let mut ifd = vec![0i64; n + 1];
+    {
+        let mut consumed = 0;
+        let mut cur = 0i64;
+        let mut k = 0;
+        let mut deltas: Vec<(usize, i64)> = Vec::new();
+        for it in &p.items {
+            if it.atom >= consumed {
+                if CONDITIONALS.contains(&it.name.as_str()) {
+                    deltas.push((it.atom, 1));
+                } else if it.name == "fi" {
+                    deltas.push((it.atom, -1));
+                }
+            }
+            if it.consumes {
+                consumed = consumed.max(it.end);
+            }
+        }
+        for (a, x) in ifd.iter_mut().enumerate() {
+            while k < deltas.len() && deltas[k].0 < a {
+                cur = (cur + deltas[k].1).max(0);
+                k += 1;
+            }
+            *x = cur;
+        }
+    }
+    // inside a brace group or a `\begingroup` pair opened at depth 0:
+    // the slice goes on to its end (a group is never split between nodes)
+    let mut inside = vec![false; n];
+    for (k, a) in p.atoms.iter().enumerate() {
+        // (a brace knows its mate's atom index; `p.braces` indexes tokens)
+        if a.kind == AtomKind::Open && a.mate != usize::MAX && a.mate > k && depth[k] == 0 {
+            for x in inside.iter_mut().take(a.mate + 1).skip(k + 1) {
+                *x = true;
+            }
+        }
+    }
+    for g in &p.groups {
+        if let (Some(o), Some(c)) = (g.open, g.close)
+            && depth.get(o) == Some(&0)
+        {
+            for x in inside.iter_mut().take(c + 1).skip(o + 1) {
+                *x = true;
+            }
+        }
+    }
+    // a control sequence at depth 0 and its `[...]`/`{...}` arguments
+    // (with the spaces between): one slice; a loading command's are
+    // never cut and end a paragraph before it
+    let mut loaders: Vec<usize> = Vec::new();
+    for k in 0..n {
+        let a = &p.atoms[k];
+        if a.kind != AtomKind::Cs || depth[k] != 0 || ifd[k] != 0 || inside[k] || claimed[k] {
+            continue;
+        }
+        let name = a.name(text);
+        let loader = matches!(
+            name,
+            "documentclass" | "usepackage" | "RequirePackage" | "LoadClass" | "input" | "include"
+        );
+        let mut last = k;
+        let mut j = k + 1;
+        loop {
+            while j < n && p.atoms[j].kind == AtomKind::Space {
+                j += 1;
+            }
+            let Some(b) = p.atoms.get(j) else { break };
+            if b.kind == AtomKind::Open && b.mate != usize::MAX && b.mate > j {
+                last = b.mate;
+                j = b.mate + 1;
+            } else if b.kind == AtomKind::Char('[') {
+                let mut q = j + 1;
+                while q < n && !(p.atoms[q].kind == AtomKind::Char(']') && depth[q] == depth[j]) {
+                    if p.atoms[q].kind == AtomKind::Par {
+                        q = n;
+                        break;
+                    }
+                    q += 1;
+                }
+                if q >= n {
+                    break;
+                }
+                last = q;
+                j = q + 1;
+            } else if b.kind == AtomKind::Char('=')
+                && last == k
+                && claimed[j]
+                && p.atoms
+                    .get(j + 1)
+                    .is_some_and(|x| x.kind == AtomKind::Open && x.mate != usize::MAX)
+            {
+                // (`\headline={...}`: a register the format defines, its
+                // `=` and value read by it, one slice)
+                last = p.atoms[j + 1].mate;
+                j = last + 1;
+            } else if loader && last == k && matches!(name, "input" | "include") {
+                // `\input file`: the name runs to a space or a command
+                let mut q = j;
+                while q < n && matches!(p.atoms[q].kind, AtomKind::Char(_)) {
+                    q += 1;
+                }
+                if q > j {
+                    last = q - 1;
+                }
+                break;
+            } else {
+                break;
+            }
+        }
+        if loader {
+            loaders.push(k);
+        }
+        for x in inside.iter_mut().take(last + 1).skip(k + 1) {
+            *x = true;
+        }
+    }
+    // a paragraph: from its first horizontal atom at depth 0 (a
+    // character, a command of §1090) to the end of the next item the
+    // pass marks paragraph-ending (a blank line, `\par`, a vertical
+    // command, a macro whose body ends in one); one slice, so its run
+    // begins and ends in the vertical list
+    let mut ends: Vec<usize> = Vec::new();
+    {
+        let mut consumed = 0;
+        for it in &p.items {
+            if it.atom >= consumed
+                && depth.get(it.atom) == Some(&0)
+                && it.hints.implicit == pass::Implicit::EndsParagraph
+                && ifd[it.atom] == 0
+                // these read keywords or a number past their text, and
+                // put back what follows (§1094): the paragraph goes on
+                && !matches!(
+                    it.name.as_str(),
+                    "vskip" | "hrule" | "unvbox" | "unvcopy" | "halign"
+                )
+            {
+                ends.push(it.end.max(it.atom + 1));
+            }
+            if it.consumes {
+                consumed = consumed.max(it.end);
+            }
+        }
+        for m in &p.marks {
+            if depth.get(m.atom) == Some(&0)
+                && m.hints.implicit == pass::Implicit::EndsParagraph
+                && ifd[m.atom] == 0
+            {
+                ends.push(m.atom + 1);
+            }
+        }
+        // (a loading command is vertical: the paragraph ends before it)
+        ends.extend(loaders.iter().copied());
+        ends.sort_unstable();
+        ends.dedup();
+    }
+    let mut par_at = vec![false; n];
+    {
+        let mut k = 0;
+        while k < n {
+            let a = &p.atoms[k];
+            let horizontal = match a.kind {
+                AtomKind::Char(_) | AtomKind::Verb => true,
+                AtomKind::Cs => {
+                    let name = a.name(text);
+                    // (a macro, or a name undefined here, right before a
+                    // horizontal atom: its run may start the paragraph,
+                    // `\hello\ world.`, so the paragraph starts at it)
+                    starts_par(name)
+                        || (!crate::prims::PRIMS.iter().any(|q| q.0 == name)
+                            && !loaders.contains(&k)
+                            && {
+                                let mut j = k + 1;
+                                while p.atoms.get(j).is_some_and(|x| x.kind == AtomKind::Space) {
+                                    j += 1;
+                                }
+                                !claimed.get(j).copied().unwrap_or(true)
+                                    && !inside.get(j).copied().unwrap_or(true)
+                                    && p.atoms.get(j).is_some_and(|x| match x.kind {
+                                        AtomKind::Char(_) | AtomKind::Verb => true,
+                                        AtomKind::Cs => starts_par(x.name(text)),
+                                        _ => false,
+                                    })
+                            })
+                }
+                _ => false,
+            };
+            // (an operand a macro is guessed to read still starts one: the
+            // guess is not the run, `\hello\ world.`)
+            if horizontal && depth[k] == 0 && ifd[k] == 0 && !inside[k] && !operand[k] {
+                // the first atom after the paragraph's end, at depth 0
+                // and outside every conditional
+                let mut e = ends.partition_point(|&x| x <= k);
+                let mut end = ends.get(e).copied().unwrap_or(n);
+                while end < n && (depth[end] != 0 || ifd[end] != 0) {
+                    end += 1;
+                    e += 1;
+                    if let Some(&x) = ends.get(e) {
+                        end = end.max(x);
+                    }
+                }
+                par_at[k] = true;
+                for x in inside.iter_mut().take(end.min(n)).skip(k + 1) {
+                    *x = true;
+                }
+                k = end.max(k + 1);
+                continue;
+            }
+            k += 1;
+        }
+    }
+    if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+        for (k, a) in p.atoms.iter().enumerate() {
+            eprintln!(
+                "slices: {k} {:?} {:?} depth {} ifd {} inside {} claimed {} operand {} par {}",
+                a.kind,
+                &text[a.start..a.end],
+                depth[k],
+                ifd[k],
+                inside[k],
+                claimed[k],
+                operand[k],
+                par_at[k]
+            );
+        }
+        for it in &p.items {
+            eprintln!(
+                "slices: item {:?} {}..{} {:?}",
+                it.name, it.atom, it.end, it.hints.implicit
+            );
+        }
+    }
+    let mut starts: Vec<usize> = vec![0];
     let mut prev_char = false;
-    for a in &p.atoms {
+    for (k, a) in p.atoms.iter().enumerate() {
         let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
-        if !(ch && prev_char) {
+        let inside_if =
+            ifd[k] > 0 && (a.kind != AtomKind::Cs || !CONDITIONALS.contains(&a.name(text)));
+        // (an operand a primitive reads never starts a slice; a macro's
+        // operand range is the pass's guess and does not cut)
+        if !(inside_if || inside[k] || operand[k] || (ch && prev_char)) {
             starts.push(a.start);
         }
         prev_char = ch;
     }
-    if starts.first() != Some(&0) {
-        starts.insert(0, 0);
-    }
+    starts.sort_unstable();
     starts.dedup();
     let mut out = Vec::with_capacity(starts.len());
+    let mut pars = Vec::with_capacity(starts.len());
     for (i, &s) in starts.iter().enumerate() {
         let e = starts.get(i + 1).copied().unwrap_or(text.len());
         if e > s {
+            // (the slice holds a paragraph if one starts in it)
+            // (or a horizontal atom at depth 0 outside conditionals that
+            // only a macro's guessed operands cover: `\hello\ world.`)
+            let has_par = p.atoms.iter().enumerate().any(|(k, a)| {
+                a.start >= s
+                    && a.start < e
+                    && (par_at[k]
+                        || (depth[k] == 0
+                            && ifd[k] == 0
+                            && !operand[k]
+                            && match a.kind {
+                                AtomKind::Char(_) | AtomKind::Verb => true,
+                                AtomKind::Cs => starts_par(a.name(text)),
+                                _ => false,
+                            }))
+            });
             out.push((s, e));
+            pars.push(has_par);
         }
     }
-    out
+    (out, pars)
+}
+
+/// Whether the atoms of `text[s..e]` open and close their groups
+/// themselves: braces pair up and never close an outer one, so do
+/// `\\begingroup`/`\\endgroup` and `\\bgroup`/`\\egroup`, and no macro
+/// called (its closure, transitively) uses one of a pair without the
+/// other.
+fn balanced(an: &Analysis<'_>, text: &str, s: usize, e: usize) -> bool {
+    let (mut brace, mut bg, mut sg) = (0i64, 0i64, 0i64);
+    // (the union of the closures of the slice's calls: a pair may be
+    // split between two macros, `\\fo@t`'s `\\bgroup` and the
+    // `\\egroup` of the `\\@foot` it hands to `\\aftergroup`)
+    let mut calls: Vec<String> = Vec::new();
+    for a in an.p.atoms.iter().filter(|a| a.start >= s && a.start < e) {
+        match a.kind {
+            AtomKind::Open => brace += 1,
+            AtomKind::Close => brace -= 1,
+            AtomKind::Cs => {
+                let n = a.name(text);
+                match n {
+                    "begingroup" => sg += 1,
+                    "endgroup" => sg -= 1,
+                    "bgroup" => bg += 1,
+                    "egroup" => bg -= 1,
+                    _ if crate::prims::PRIMS.iter().any(|q| q.0 == n) => {}
+                    _ => {
+                        if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                            let set = an.defset(n);
+                            let g: Vec<&str> = ["begingroup", "endgroup", "bgroup", "egroup"]
+                                .into_iter()
+                                .filter(|x| set.calls.iter().any(|c| c == x))
+                                .collect();
+                            if !g.is_empty() || !set.unbounded.is_empty() {
+                                eprintln!(
+                                    "slices: balance \\{n}: {g:?} unbounded {:?} calls {}",
+                                    set.unbounded.first(),
+                                    set.calls.len()
+                                );
+                            }
+                        }
+                        for c in an.defset(n).calls {
+                            if !calls.contains(&c) {
+                                calls.push(c);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if brace < 0 || bg < 0 || sg < 0 {
+            return false;
+        }
+    }
+    let has = |x: &str| calls.iter().any(|c| c == x);
+    brace == 0
+        && bg == 0
+        && sg == 0
+        && has("begingroup") == has("endgroup")
+        && has("bgroup") == has("egroup")
+}
+
+/// The commands that scan on past their text for a keyword or a unit
+/// (`plus`, `minus`, `width`, `true`), expanding what follows.
+const SCANS_ON: &[&str] = &[
+    "font", "vskip", "hskip", "mskip", "hrule", "vrule", "kern", "mkern",
+];
+
+/// The name of the last item starting in the slice.
+fn last_item(p: &Pass, text: &str, (s, e): (usize, usize)) -> Option<String> {
+    let _ = text;
+    p.items
+        .iter()
+        .rfind(|it| {
+            p.atoms
+                .get(it.atom)
+                .is_some_and(|a| a.start >= s && a.start < e)
+        })
+        .map(|it| it.name.clone())
+}
+
+/// The first control sequence atom of the slice, if it starts with one.
+fn first_cs(p: &Pass, text: &str, (s, e): (usize, usize)) -> Option<String> {
+    let a = p
+        .atoms
+        .iter()
+        .find(|a| a.start >= s && a.start < e && a.kind != AtomKind::Space)?;
+    (a.kind == AtomKind::Cs).then(|| a.name(text).to_owned())
+}
+
+/// The primitive conditionals (§487) and e-TeX's and pdfTeX's.
+const CONDITIONALS: &[&str] = &[
+    "if",
+    "ifcat",
+    "ifnum",
+    "ifdim",
+    "ifodd",
+    "ifvmode",
+    "ifhmode",
+    "ifmmode",
+    "ifinner",
+    "ifvoid",
+    "ifhbox",
+    "ifvbox",
+    "ifx",
+    "ifeof",
+    "iftrue",
+    "iffalse",
+    "ifcase",
+    "ifdefined",
+    "ifcsname",
+    "iffontchar",
+    "ifincsname",
+    "ifpdfabsnum",
+    "ifpdfabsdim",
+    "ifpdfprimitive",
+];
+
+/// The end of the span a file-rest node runs from byte `off`: its line,
+/// and the lines after it while a brace group or a conditional opened
+/// in the span is still open (the run reads on until it is closed,
+/// `Run::run_all`).
+fn line_span_end(text: &str, off: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut i = off.min(bytes.len());
+    let (mut depth, mut ifs) = (0i64, 0i64);
+    loop {
+        let line_end = bytes[i..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(bytes.len(), |k| i + k);
+        let line = &text[i..line_end];
+        let mut cs = false;
+        let mut name = String::new();
+        let mut rest = line.chars().peekable();
+        while let Some(c) = rest.next() {
+            if c == '%' && !cs {
+                break;
+            }
+            if cs {
+                if c.is_ascii_alphabetic() {
+                    name.push(c);
+                    continue;
+                }
+                cs = false;
+                match name.as_str() {
+                    n if CONDITIONALS.contains(&n) => ifs += 1,
+                    "fi" => ifs = (ifs - 1).max(0),
+                    "begingroup" => depth += 1,
+                    "endgroup" => depth = (depth - 1).max(0),
+                    _ => {}
+                }
+                name.clear();
+                if c == '\\' {
+                    // (`\\` then a symbol: the symbol is the name)
+                    cs = true;
+                    if let Some(&d) = rest.peek()
+                        && !d.is_ascii_alphabetic()
+                    {
+                        rest.next();
+                        cs = false;
+                    }
+                    continue;
+                }
+            }
+            match c {
+                '\\' => {
+                    cs = true;
+                    if let Some(&d) = rest.peek()
+                        && !d.is_ascii_alphabetic()
+                    {
+                        // a control symbol (`\{`, `\}`, `\%`)
+                        rest.next();
+                        cs = false;
+                    }
+                }
+                '{' => depth += 1,
+                '}' => depth = (depth - 1).max(0),
+                _ => {}
+            }
+        }
+        if cs {
+            match name.as_str() {
+                n if CONDITIONALS.contains(&n) => ifs += 1,
+                "fi" => ifs = (ifs - 1).max(0),
+                "begingroup" => depth += 1,
+                "endgroup" => depth = (depth - 1).max(0),
+                _ => {}
+            }
+        }
+        if (depth == 0 && ifs == 0) || line_end >= bytes.len() {
+            return line_end;
+        }
+        i = line_end + 1;
+    }
+}
+
+/// The union of bounds: what a slice of several commands may define.
+/// `None` state in either is `None` (every head).
+fn union(a: &mut Bound, b: &Bound) {
+    for p in &b.prefixes {
+        if !a.prefixes.contains(p) {
+            a.prefixes.push(p.clone());
+        }
+    }
+    for c in &b.cats {
+        if !a.cats.contains(c) {
+            a.cats.push(*c);
+        }
+    }
+    for m in &b.means {
+        // (a meaning an earlier command of the span defines is the
+        // run's own, not assumed of the state before it)
+        if !a.means.iter().any(|x| x.0 == m.0) && !a.names.contains(&m.0) {
+            a.means.push(m.clone());
+        }
+    }
+    for n in &b.names {
+        if !a.names.contains(n) {
+            a.names.push(n.clone());
+        }
+    }
+    match (&mut a.state, &b.state) {
+        (Some(sa), Some(sb)) => {
+            for h in sb {
+                if !sa.contains(h) {
+                    sa.push(h.clone());
+                }
+            }
+        }
+        (st, None) => *st = None,
+        (None, Some(_)) => {}
+    }
+    a.no_scope = a.no_scope && b.no_scope;
 }
 
 /// The analysis of one text under `kind`'s regime.
@@ -754,9 +1364,18 @@ impl Analysis<'_> {
             .collect();
         let mut claimed = vec![false; p.atoms.len()];
         for it in &p.items {
+            // (a scope opener, `\\hbox to 3pt{`, claims its operands up
+            // to its brace; the list inside runs, §1083, §1086)
+            let end = match (&it.hints.scope, &it.hints.claim) {
+                (pass::ScopeHint::Open(_), pass::Claim::Known(b)) => {
+                    let to = p.atoms.get(it.atom).map_or(0, |a| a.end) + b;
+                    p.atoms.partition_point(|a| a.start < to).min(it.end)
+                }
+                _ => it.end,
+            };
             for c in claimed
                 .iter_mut()
-                .take(it.end.min(p.atoms.len()))
+                .take(end.min(p.atoms.len()))
                 .skip(it.atom + 1)
             {
                 *c = true;
@@ -903,12 +1522,27 @@ impl Analysis<'_> {
                 excerpt,
             );
         }
+        self.hint_run(a)
+    }
+
+    /// The hint of the atom at `a` as if it ran (a command a macro is
+    /// only guessed to read does run, when the guess is wrong).
+    #[allow(clippy::too_many_lines)]
+    fn hint_run(&self, a: usize) -> Hint {
+        let atoms = self.atoms();
+        let Some(at) = atoms.get(a) else {
+            return Hint::any("end of text", "");
+        };
+        let excerpt = &self.text[at.start..self.text.len().min(at.start + 40)];
         if at.kind == AtomKind::Cs && DEMOTED.contains(&at.name(self.text)) {
             return demoted(at.name(self.text), excerpt);
         }
         if at.kind != AtomKind::Cs
             && let Some(p) = self.prev(a)
             && self.atoms()[p].kind == AtomKind::Cs
+            // (a command that is itself an operand, `\\footnote\\dag{…}`,
+            // reads nothing: its reader does)
+            && !self.claimed[p]
             && {
                 let h = self.hint(p);
                 h.bound.is_none() && !is_demoted(&h)
@@ -979,7 +1613,6 @@ impl Analysis<'_> {
             AtomKind::Par => {
                 self.cats_of(a, a, &mut b.cats);
                 add_heads(&mut b.state, Some(PAR_END));
-                add_heads(&mut b.state, Some(NORMAL_PARAGRAPH));
                 self.call_hint("par", &mut b, &mut cause)
             }
             AtomKind::Close => {
@@ -1139,17 +1772,9 @@ impl Analysis<'_> {
     /// a bound ends the evaluation (the pass's closure over a kernel body
     /// misses computed names, `\csname` and `\let` behind
     /// `\@ifundefined`); such a call answers `Any` as before.
-    fn format_only(&self, name: &str) -> bool {
-        !self.defs.is_defined(name) && self.prelude.is_defined(name)
-    }
-
     /// A macro called by name (`\par` for a blank line, an active
     /// character).
     fn call_hint(&self, name: &str, b: &mut Bound, cause: &mut String) -> bool {
-        if self.format_only(name) {
-            *cause = format!("\\{name}: a format macro (its body is not a bound)");
-            return false;
-        }
         let set = self.defset(name);
         let field = match name.chars().next() {
             Some(c) if name.chars().count() == 1 && !c.is_alphabetic() && name != "par" => {
@@ -1180,7 +1805,24 @@ impl Analysis<'_> {
             if starts_par(c) {
                 add_heads(st, Some(&["par:", "lopen:", "pg:"]));
             }
-            add_heads(st, class_state(c));
+            let row = class_state(c);
+            if row.is_none()
+                && !crate::prims::PRIMS.iter().any(|q| q.0 == c.as_str())
+                && !table_param(c)
+            {
+                // (a name neither a primitive nor defined: a `\\let`'s
+                // value that may be undefined, `\\let\\next\\undefined`;
+                // a call of it is unbounded in the may-define set, not
+                // in the state)
+                if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                    eprintln!("slices: state skips undefined \\{c}");
+                }
+                continue;
+            }
+            if row.is_none() && crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                eprintln!("slices: state every head from \\{c}");
+            }
+            add_heads(st, row);
         }
     }
 
@@ -1280,10 +1922,6 @@ impl Analysis<'_> {
             *cause = format!("\\{name}: the command run here is computed");
             return false;
         }
-        if self.format_only(name) {
-            *cause = format!("\\{name}: a format macro (its body is not a bound)");
-            return false;
-        }
         let Some(&i) = self.item_of.get(&a) else {
             // (an operand of an earlier command: claimed, never run)
             *cause = format!("\\{name}: operand of an earlier command");
@@ -1352,12 +1990,17 @@ impl Analysis<'_> {
             // `normal_paragraph` resets `\\looseness`, `\\hangindent`,
             // `\\hangafter`, `\\parshape`, `\\interlinepenalties`, §1070)
             add_heads(&mut b.state, Some(PAR_END));
-            add_heads(&mut b.state, Some(NORMAL_PARAGRAPH));
         }
         if self.after_afterassignment(first) {
             add_head(&mut b.state, "aftertoken");
         }
         self.calls_state(&it.hints.calls, &mut b.state);
+        // (a macro's run expands its body inline: the state of every
+        // command its body calls, transitively, the closure's calls)
+        if !crate::prims::PRIMS.iter().any(|q| q.0 == name) {
+            let set = self.defset(name);
+            self.calls_state(&set.calls, &mut b.state);
+        }
         match &it.hints.may_define {
             pass::MayDefine::Nothing => true,
             pass::MayDefine::Names(ds) => {
@@ -1368,11 +2011,29 @@ impl Analysis<'_> {
                 add_defs(ds, true, b);
                 true
             }
+            pass::MayDefine::Any
+                if !self.defs.is_defined(name) && self.prelude.is_defined(name) && {
+                    // (the format's definition is final: its body's
+                    // closure bounds the call)
+                    let set = self.defset(name);
+                    set.unbounded.is_empty() && self.add_set(&set, b, cause)
+                } =>
+            {
+                true
+            }
             pass::MayDefine::Any => {
                 *cause = it.hints.cause.map_or_else(
                     || format!("\\{name}: unbounded"),
                     |c| format!("\\{name}: {c}"),
                 );
+                if self.prelude.is_defined(name) {
+                    // (why the format's body did not bound it)
+                    let set = self.defset(name);
+                    *cause = format!(
+                        "{cause} (format closure: {})",
+                        set.unbounded.first().map_or("bounded", String::as_str)
+                    );
+                }
                 if *cause == format!("\\{name}: unbounded") {
                     // (the reason the pass gives: the closure's)
                     let set = self.defset(name);
@@ -1454,9 +2115,12 @@ fn add_defs(ds: &[Def], prefixes: bool, b: &mut Bound) {
     }
 }
 
+// (one pass over the atoms, then one over the slices; splitting it
+// would only pass its tables around)
+#[allow(clippy::too_many_lines)]
 fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     let an = Analysis::new(text, kind, defs.clone());
-    let slices = slices_of(text, &an.p);
+    let (slices, pars) = slices_of(text, &an.p, kind);
     let mut starts = Vec::with_capacity(an.p.atoms.len());
     let mut hints: Vec<Arc<str>> = Vec::with_capacity(an.p.atoms.len());
     let mut memo: HashMap<String, Arc<str>> = HashMap::new();
@@ -1466,37 +2130,149 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
             .or_insert_with(|| Arc::from(s))
             .clone()
     };
-    let mut scoped = Vec::with_capacity(an.p.atoms.len());
+    let mut skip = Vec::with_capacity(an.p.atoms.len());
+    // (the atoms a primitive reads: never run on their own; a command
+    // a macro is only guessed to read runs in the slice, so it counts)
+    let mut prim_operand = vec![false; an.p.atoms.len()];
+    for it in &an.p.items {
+        if crate::prims::PRIMS.iter().any(|q| q.0 == it.name) {
+            for c in prim_operand
+                .iter_mut()
+                .take(it.end.min(an.p.atoms.len()))
+                .skip(it.atom + 1)
+            {
+                *c = true;
+            }
+        }
+    }
+    let mut prev_char = false;
+    #[allow(clippy::needless_range_loop)]
     for a in 0..an.p.atoms.len() {
-        starts.push(an.p.atoms[a].start);
-        let h = an.hint(a);
-        // (a command, not an operand another one reads, that may open or
-        // close a scope)
-        scoped.push(!an.claimed[a] && !h.bound.as_ref().is_some_and(|b| b.no_scope));
-        hints.push(intern(&h));
-    }
-    let mut scope_next = vec![usize::MAX; starts.len()];
-    for a in (0..starts.len().saturating_sub(1)).rev() {
-        scope_next[a] = if scoped[a + 1] {
-            starts[a + 1]
+        let at = &an.p.atoms[a];
+        starts.push(at.start);
+        let h = if an.claimed[a] && at.kind == AtomKind::Cs && !prim_operand[a] {
+            an.hint_run(a)
         } else {
-            scope_next[a + 1]
+            an.hint(a)
         };
+        hints.push(intern(&h));
+        // (a guessed operand that is unbounded on its own is a value
+        // read, not run: `\\headline={\\tenrm…}`)
+        let unbounded_operand = an.claimed[a] && h.bound.is_none();
+        let ch = matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb);
+        // (a command a macro is only guessed to read still runs in the
+        // slice: its rows count in the union)
+        skip.push(
+            (ch && prev_char)
+                || (an.claimed[a]
+                    && (at.kind != AtomKind::Cs || prim_operand[a] || unbounded_operand))
+                || at.kind == AtomKind::Space,
+        );
+        prev_char = ch;
     }
-    let t = TextHints {
+    let mut t = TextHints {
         slices,
         starts,
         hints,
-        scope_next,
+        skip,
+        pars,
         slice_hints: Vec::new(),
     };
+    // each slice's hint: the union of its commands' bounds (a run
+    // executes the whole slice); a paragraph's region also defines
+    // `\prevgraf` of the list it is in
     let mut slice_hints = Vec::with_capacity(t.slices.len());
-    for &(s, e) in &t.slices {
-        // (a slice before the first atom, blanks or a comment, takes the
-        // next atom's hint)
-        slice_hints.push(intern(&t.at_until(s, e)));
+    for (i, &(s, e)) in t.slices.iter().enumerate() {
+        let mut h = t.at_until(s, e);
+        // (a slice ending in a command that scans on for a keyword or a
+        // unit, `\\vskip 1in`, expands what follows while it looks, and
+        // runs what that leaves, §1094, §407: the next slice's commands
+        // run in this node when it starts with a macro, or with another
+        // such scanning command, transitively)
+        {
+            // (`lastk`: the last slice taken in that is not blanks only)
+            let (mut j, mut lastk) = (i, i);
+            while let (Some(last), Some(&(ns, ne))) =
+                (last_item(&an.p, text, t.slices[lastk]), t.slices.get(j + 1))
+            {
+                if !SCANS_ON.contains(&last.as_str()) {
+                    break;
+                }
+                let Some(first) = first_cs(&an.p, text, (ns, ne)) else {
+                    // (blanks between: the scan reads past them)
+                    if text[ns..ne].trim().is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    break;
+                };
+                let next = t.at_until(ns, ne);
+                match (&mut h.bound, &next.bound) {
+                    (Some(a), Some(b)) => union(a, b),
+                    (Some(_), None) => h = next.clone(),
+                    (None, _) => {}
+                }
+                if crate::prims::PRIMS.iter().any(|q| q.0 == first)
+                    && !SCANS_ON.contains(&first.as_str())
+                {
+                    break;
+                }
+                if !crate::prims::PRIMS.iter().any(|q| q.0 == first) {
+                    break;
+                }
+                j += 1;
+                lastk = j;
+            }
+        }
+        // (a document slice is balanced by construction: its groups,
+        // paragraphs and conditionals are whole inside it; when its
+        // braces and named group commands pair up and no macro it calls
+        // opens or closes a group its body does not, its run opens and
+        // closes no scope of the engine's)
+        if kind == FileKind::Document
+            && let Some(b) = &mut h.bound
+            && balanced(&an, text, s, e)
+        {
+            b.no_scope = true;
+            if let Some(st) = &mut b.state {
+                st.retain(|x| x != "lopen:");
+            }
+        }
+        let excerpt = short(&text[s..text.len().min(s + 40)]);
+        if t.pars[i] {
+            match &mut h.bound {
+                Some(b) => {
+                    add_head(&mut b.state, "pg:");
+                    "region".clone_into(&mut h.cause);
+                }
+                None => h.cause = format!("region: {}", h.cause),
+            }
+            h.excerpt = excerpt;
+        }
+        slice_hints.push(intern(&h));
     }
-    TextHints { slice_hints, ..t }
+    if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+        let open = slice_hints
+            .iter()
+            .filter(|h| !Hint::decode(h).bound.is_some_and(|b| b.no_scope))
+            .count();
+        eprintln!("slices: no_scope false: {open} of {}", slice_hints.len());
+        for (k, h) in slice_hints.iter().enumerate() {
+            let d = Hint::decode(h);
+            if !d.bound.as_ref().is_some_and(|b| b.no_scope) {
+                let (s, e) = t.slices[k];
+                eprintln!(
+                    "slices: scope {:?}: {} ({}, balanced {})",
+                    short(&text[s..e]),
+                    d.cause,
+                    if d.bound.is_some() { "bounded" } else { "any" },
+                    balanced(&an, text, s, e)
+                );
+            }
+        }
+    }
+    t.slice_hints = slice_hints;
+    t
 }
 
 // ---------------------------------------------------------------------
@@ -1516,6 +2292,18 @@ type Cache<K> = Mutex<HashMap<K, Arc<TextHints>>>;
 fn texts() -> &'static Cache<(u64, u8, usize)> {
     static C: OnceLock<Cache<(u64, u8, usize)>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Registers a text's analysis under `name` (a string value): a node
+/// made from part of that text later (the rest of a slice another
+/// command's read-ahead claimed, `Run::leftover`) names it and its
+/// offset, and gets the union hint of its text from the whole analysis
+/// instead of one computed on its own without the definitions.
+pub(crate) fn register_text(name: ValueId, t: &Arc<TextHints>) {
+    let mut bn = by_name().lock().unwrap_or_else(PoisonError::into_inner);
+    if !bn.get(&name.raw()).is_some_and(|x| Arc::ptr_eq(x, t)) {
+        bn.insert(name.raw(), t.clone());
+    }
 }
 
 fn by_name() -> &'static Cache<u64> {
@@ -1584,9 +2372,15 @@ fn by_id() -> &'static Cache<u64> {
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// The regime of a file read by `\input`: its text value `id`, named
+/// `name`.
+pub(crate) fn file_kind_of(v: &Values, id: ValueId, name: ValueId) -> FileKind {
+    kind_of(&str_of(v, id), FileKind::from_path(&str_of(v, name)))
+}
+
 /// The analysis of a file read by `\input`: its text value `id`, named
 /// `name`.
-fn file_hints(v: &Values, id: ValueId, name: ValueId) -> Arc<TextHints> {
+pub(crate) fn file_hints(v: &Values, id: ValueId, name: ValueId) -> Arc<TextHints> {
     let known = by_id()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1667,9 +2461,15 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
     match tag.as_str() {
         "f" => {
             if let (Some(&id), Some(&o), Some(&name)) = (xs.get(1), xs.get(2), xs.get(3)) {
+                // (the rest of the file: its next line runs whole here,
+                // and so do the lines after it while a group or a
+                // conditional stays open; the union of the line's
+                // commands, extended to the end of such a span)
                 let off = usize::try_from(int_of(v, o)).unwrap_or(0);
                 let t = file_hints(v, id, name);
-                return t.at(off);
+                let text = str_of(v, id);
+                let end = line_span_end(&text, off);
+                return t.at_until(off, end);
             }
             Hint::any("file frame without a position", "")
         }
@@ -1688,9 +2488,8 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
                     .unwrap_or_else(PoisonError::into_inner)
                     .get(&name.raw())
                     .cloned();
-                // (the node's text: the rest of its line, from `at`)
                 return match t {
-                    Some(t) => t.at_until(at, at.saturating_add(text.len())),
+                    Some(t) => t.at_until(at, at + text.len()),
                     None => Hint::any("file not analysed yet", &text),
                 };
             }
@@ -1736,7 +2535,7 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
                     excerpt: String::new(),
                 };
             }
-            if std::env::var_os("PHITEX_HINTS_FRAGMENTS").is_none() {
+            if !crate::exec::env_flag!("PHITEX_HINTS_FRAGMENTS") {
                 return demoted("expansion tokens", "");
             }
             // (tokens already read: faithful as text when every
@@ -1869,7 +2668,7 @@ pub fn set_hints_enabled(on: bool) {
 
 /// Whether the node's text says its command opens and closes no scope.
 pub(crate) fn effect_none(v: &Values, args: &[ValueId]) -> bool {
-    if OFF.load(Ordering::Relaxed) || std::env::var_os("PHITEX_HINTS_OFF").is_some() {
+    if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return false;
     }
     hint_of_args(v, args)
@@ -1878,19 +2677,11 @@ pub(crate) fn effect_none(v: &Values, args: &[ValueId]) -> bool {
         .is_some_and(|b| b.no_scope)
 }
 
-/// Whether the node's text bounds what its command defines.
-pub(crate) fn bounded(v: &Values, args: &[ValueId]) -> bool {
-    if OFF.load(Ordering::Relaxed) || std::env::var_os("PHITEX_HINTS_OFF").is_some() {
-        return false;
-    }
-    hint_of_args(v, args).bound.is_some()
-}
-
 /// The fields the hint rests on, which the node reads first: the
 /// meanings of the names its text calls (`cs:name`, `act:code`) and the
 /// catcodes its bytes were read with (`cat:c`).
 pub(crate) fn reads(v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
-    if OFF.load(Ordering::Relaxed) || std::env::var_os("PHITEX_HINTS_OFF").is_some() {
+    if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return None;
     }
     let h = hint_of_args(v, args);
@@ -1902,11 +2693,11 @@ pub(crate) fn reads(v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
 
 /// The engine's question, answered from the text.
 pub(crate) fn may_define(v: &Values, args: &[ValueId]) -> MayDefine {
-    if OFF.load(Ordering::Relaxed) || std::env::var_os("PHITEX_HINTS_OFF").is_some() {
+    if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return MayDefine::Any;
     }
     let h = hint_of_args(v, args);
-    if std::env::var_os("PHITEX_HINTS").is_some() {
+    if crate::exec::env_flag!("PHITEX_HINTS") {
         let answer = match &h.bound {
             None => "Any".to_owned(),
             Some(b) => format!(
@@ -2122,27 +2913,56 @@ mod tests {
     }
 
     #[test]
+    fn control_space_after_a_macro_is_a_region() {
+        let t = "\\def\\hello{Hello}\n\\hello\\ world.\n\\bye\n";
+        // (under the plain prelude's definitions, as a build reads it)
+        let fx = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../oracle/fixtures/dvi/plaintext.tex");
+        let plain = std::fs::read_to_string(fx).expect("plaintext.tex");
+        let mut d = pass::Definitions::new();
+        d.harvest(&plain, kind_of(&plain, FileKind::Package), 0);
+        let defs: Defs = Arc::new(d);
+        let an = Analysis::new(t, FileKind::Document, defs);
+        let (sl, pars) = slices_of(t, &an.p, FileKind::Document);
+        eprintln!("{sl:?} {pars:?}");
+        let h = t.find("world").expect("world");
+        let k = sl
+            .iter()
+            .position(|x| x.0 <= h && h < x.1)
+            .expect("a slice");
+        assert!(pars[k], "{sl:?} {pars:?}");
+    }
+
+    #[test]
     fn paragraph_and_conditional_classes() {
-        let t = "\\par\nText here \\ifnum1=1 \\fi\n\\afterassignment\\x\\def\\y{}\n";
+        let t = "\\par\nText here \\ifnum1=1 \\fi\n\\afterassignment\\relax\\def\\y{}\n";
         let text = analyse(t, FileKind::Document, no_defs());
+        for off in [0, 5, 10, 15] {
+            let h = text.at(off);
+            eprintln!(
+                "{off}: {} {:?}",
+                h.cause,
+                h.bound.as_ref().map(|b| &b.state)
+            );
+        }
         let st = |off: usize| text.at(off).bound.expect("bounded").state;
         // (`\\par` is bounded: a paragraph's end, §1094-§1096, §1070)
         let par = st(0).expect("a state row");
         assert!(par.iter().any(|h| h == "pg:") && par.iter().any(|h| h == "parshape"));
-        // the run after it is in one: the list, and `\\prevgraf` if a
-        // command after it in its text ends the paragraph
+        // the run after it: `\\prevgraf` if a command after it in its
+        // text ends the paragraph, and `\\afterassignment`'s row (the
+        // region runs on to its end); no dead head (`par:`, `if:`,
+        // `lopen:`, `page:`) is ever declared
         assert_eq!(
             st(10).as_deref(),
-            Some(&["par:".to_owned(), "pg:".to_owned()][..])
+            Some(&["pg:".to_owned(), "aftertoken".to_owned()][..])
         );
-        // a run of text after \par may start a paragraph
-        assert!(st(5).expect("some").contains(&"par:".to_owned()));
-        // and the run after it is in one: no list opened
-        assert!(st(5).expect("some").contains(&"lopen:".to_owned()));
-        assert!(!st(10).expect("some").contains(&"lopen:".to_owned()));
-        // (a conditional, when bounded, may change the if stack)
-        if let Some(b) = text.at(15).bound {
-            assert!(b.state.expect("some").contains(&"if:".to_owned()));
+        for off in [0, 5, 10] {
+            let v = st(off).expect("some");
+            assert!(
+                !v.iter().any(|h| DEAD_HEADS.contains(&h.as_str())),
+                "{off}: {v:?}"
+            );
         }
         let d = text.at(t.find("\\def").unwrap()).bound.expect("bounded");
         assert!(d.state.expect("some").contains(&"aftertoken".to_owned()));
@@ -2160,9 +2980,7 @@ mod tests {
             panic!("prefixes")
         };
         for f in [
-            "par:3",
             "pg:1",
-            "if:",
             "aftertoken",
             "cat:64",
             "count:10",

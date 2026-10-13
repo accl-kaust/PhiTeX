@@ -42,15 +42,19 @@ pub struct Ctx<'a> {
     /// Continuations: nodes to go after this one at its own depth.
     follows: Vec<(OpId, ValueId)>,
     env: Vec<(Field, ValueId)>,
+    /// Environment reads the provider answered ([`Engine::set_env_provider`]).
+    env_found: Vec<(Field, Option<ValueId>)>,
     publishes: Vec<(Field, ValueId)>,
     contribs: Vec<(Field, ValueId)>,
     watch: Option<(Field, Slot, ValueId)>,
     effect: Option<u8>,
     kind: Option<ValueId>,
     claim: Option<usize>,
+    claim_seen: Vec<Slot>,
     stream: Option<StreamRange>,
     touch_seq: usize,
     relabels: u64,
+    binding_epoch: u64,
     assumptions: Vec<(Slot, AssumeKind, ValueId)>,
     sig: u64,
     error: Option<EvalError>,
@@ -59,7 +63,7 @@ pub struct Ctx<'a> {
     /// resumed attempt until [`Self::parked`] takes it.
     token: Option<Box<dyn std::any::Any + Send>>,
     resumed: bool,
-    pub(crate) restarted: bool,
+    pub(crate) restarted: Option<&'static str>,
     /// Text memo hits, misses; application memo hits, misses.
     memo: [std::cell::Cell<u32>; 4],
 }
@@ -83,15 +87,18 @@ impl<'a> Ctx<'a> {
             children: Vec::new(),
             follows: Vec::new(),
             env: Vec::new(),
+            env_found: Vec::new(),
             publishes: Vec::new(),
             contribs: Vec::new(),
             watch: None,
             effect: None,
             kind: None,
             claim: None,
+            claim_seen: Vec::new(),
             stream: None,
             touch_seq: eng.touch_log.len(),
             relabels: eng.relabels,
+            binding_epoch: eng.binding_epoch,
             assumptions: Vec::new(),
             memo: Default::default(),
             sig: 0,
@@ -99,7 +106,7 @@ impl<'a> Ctx<'a> {
             diagnostics: Vec::new(),
             token: None,
             resumed: false,
-            restarted: false,
+            restarted: None,
         }
     }
 
@@ -363,8 +370,16 @@ impl<'a> Ctx<'a> {
             return Ok(v);
         }
         let n = e.n(self.slot);
-        let Ok(v) = e.env_value(n.unit, f) else {
-            return self.stop(End::WaitEnv(f));
+        let v = if let Ok(v) = e.env_value(n.unit, f) {
+            v
+        } else {
+            // Not held (a root unit): the provider may answer now, on this
+            // thread.
+            let Some(v) = e.env_provider.as_ref().and_then(|p| p(&e.values, f)) else {
+                return self.stop(End::WaitEnv(f));
+            };
+            self.env_found.push((f, v));
+            v
         };
         self.cache.insert((K_ENV, key), v);
         self.uses.push(Use {
@@ -745,6 +760,7 @@ impl<'a> Ctx<'a> {
     /// Resolves this node's pending claim: it claims the next `n` siblings.
     pub fn claim(&mut self, n: usize) {
         self.claim = Some(n);
+        self.claim_seen = self.eng.following_slots(self.slot, n);
     }
 
     /// The text of the `i`-th following sibling.
@@ -895,19 +911,11 @@ impl<'a> Ctx<'a> {
         v
     }
 
-    pub(crate) fn finish(mut self, r: Result<ValueId, Stop>) -> RunResult {
-        let n = self.eng.n(self.slot);
-        let follows = self.follows.len();
-        let end = match (self.stopped, r) {
-            (Some(e), _) => e,
-            (None, Ok(_)) if self.raise > 0 => End::Raise(self.raise, self.raise_from),
-            (None, Ok(v)) => End::Output(v),
-            (None, Err(_)) => End::Unpredictable,
-        };
-        // A non-speculative stop at a read with a token: the state the
-        // next attempt may resume from. Not for runs whose reads the
-        // engine does not re-check one by one (claims, ranges, chains).
-        let resumable = !self.spec
+    /// A non-speculative stop at a read with a token: the state the next
+    /// attempt may resume from. Not for runs whose reads the engine does
+    /// not re-check one by one (claims, ranges, chains).
+    fn resumable(&self, end: &End) -> bool {
+        !self.spec
             && self.token.is_some()
             && self.watch.is_none()
             && self.stream.is_none()
@@ -925,8 +933,19 @@ impl<'a> Ctx<'a> {
                     | End::NeedChild(_)
                     | End::Gated(..)
                     | End::GateRaise(..)
-            );
-        let suspended = if resumable {
+            )
+    }
+
+    pub(crate) fn finish(mut self, r: Result<ValueId, Stop>) -> RunResult {
+        let n = self.eng.n(self.slot);
+        let follows = self.follows.len();
+        let end = match (self.stopped.take(), r) {
+            (Some(e), _) => e,
+            (None, Ok(_)) if self.raise > 0 => End::Raise(self.raise, self.raise_from),
+            (None, Ok(v)) => End::Output(v),
+            (None, Err(_)) => End::Unpredictable,
+        };
+        let suspended = if self.resumable(&end) {
             Some(Box::new(Suspended {
                 uses: self.uses.clone(),
                 cache: self.cache.clone(),
@@ -982,15 +1001,18 @@ impl<'a> Ctx<'a> {
             children: self.children,
             follows,
             env: self.env,
+            env_found: self.env_found,
             publishes: self.publishes,
             contribs: self.contribs,
             watch: self.watch,
             effect: self.effect,
             kind: self.kind,
             claim: self.claim,
+            claim_seen: self.claim_seen,
             stream: self.stream,
             touch_seq: self.touch_seq,
             relabels: self.relabels,
+            binding_epoch: self.binding_epoch,
             assumptions: self.assumptions,
             sig: self.sig,
             error: self.error,

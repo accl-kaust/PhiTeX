@@ -9,7 +9,7 @@
 //! a box, or `[4, items]` a formula. A sub- or superscript changes the
 //! list's last noad: the list gets a delete marker and the new noad.
 
-use phitex_defuse::{Effect, ValueId, Values};
+use phitex_defuse::{ValueId, Values};
 use phitex_typeset::arith::{MAX_DIMEN, half};
 use phitex_typeset::glue::Glue;
 use phitex_typeset::glue::GlueSign;
@@ -238,7 +238,7 @@ impl Run<'_, '_> {
     /// 2 `\eqno`, 3 `\leqno`), kept in the group's kind.
     fn go_into_math(&mut self, md: &Mode, code: i64) -> R<()> {
         let v = self.v;
-        self.push_math(md, group::MATH_SHIFT, -203, vec![v.int(code)])?;
+        self.push_math(md, group::MATH_SHIFT, -203, vec![v.int(code)]);
         self.set("param:fam", v.int(-1), false);
         let e = self.get("param:everymath")?;
         let toks = crate::val::toks_of(v, e);
@@ -252,16 +252,23 @@ impl Run<'_, '_> {
     fn init_display(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
         let (items, _) = self.list_items(md.lid)?;
+        // the paragraph's level is popped before line_break (as end_graf)
+        if let Some(l) = self.top()
+            && l.group == 0
+            && l.mode == 102
+        {
+            let l = self.pop_level().expect("the paragraph's level");
+            self.last_par = l.par.unwrap_or((0, 0));
+        }
         let w = if items.is_empty() {
             -MAX_DIMEN
         } else {
             let last = self.line_break(md, &items, true)?;
             self.pre_display_size(last.as_ref())?
         };
-        self.set(&self.par_cell(md.vlid), ValueId::UNIT, true);
-        self.region_advance();
         // §1149
-        let pg = self.int32(&format!("pg:{}", md.vlid))?;
+        let vmd = self.mode()?;
+        let pg = self.prev_graf(&vmd)?;
         let shape: Vec<i32> = self
             .get("parshape")?
             .map(|x| list_of(v, x))
@@ -285,7 +292,7 @@ impl Run<'_, '_> {
         };
         let vm = md.vm;
         let extra = vec![v.int(1), v.int(md.vlid), v.int(i64::from(vm))];
-        self.push_math(md, group::MATH_SHIFT, 203, extra)?;
+        self.push_list(203, group::MATH_SHIFT, extra);
         self.set("param:fam", v.int(-1), false);
         self.set("param:predisplaysize", v.int(i64::from(w)), false);
         self.set("param:displaywidth", v.int(i64::from(l)), false);
@@ -293,11 +300,7 @@ impl Run<'_, '_> {
         let e = self.get("param:everydisplay")?;
         let toks = crate::val::toks_of(v, e);
         self.push_toks(toks);
-        let mut outer = md.clone();
-        outer.m = vm;
-        outer.km = vm;
-        outer.lid = md.vlid;
-        self.build_page_mark(&outer)
+        Ok(())
     }
 
     /// §1146: the width of the paragraph's last line up to its last
@@ -357,11 +360,9 @@ impl Run<'_, '_> {
     }
 
     /// `push_math` (§1136): a math group whose list is this node's.
-    fn push_math(&mut self, md: &Mode, grp: i64, m: i32, extra: Vec<ValueId>) -> R<i64> {
-        let sid = self.node_raw();
-        let kind = self.kind_value(md, grp, sid, sid, m, extra)?;
-        self.open_scope_here(kind);
-        Ok(sid)
+    fn push_math(&mut self, md: &Mode, grp: i64, m: i32, extra: Vec<ValueId>) -> i64 {
+        let _ = md;
+        self.push_list(m, grp, extra)
     }
 
     fn mathcode(&mut self, c: i32) -> R<i32> {
@@ -427,7 +428,7 @@ impl Run<'_, '_> {
                     self.back_cur();
                     self.scan_left_brace()?;
                     let v = self.v;
-                    self.push_math(md, group::MATH, -203, vec![v.int(code), v.int(md.lid)])?;
+                    self.push_math(md, group::MATH, -203, vec![v.int(code), v.int(md.lid)]);
                     return Ok(None);
                 }
             };
@@ -545,10 +546,8 @@ impl Run<'_, '_> {
                     (1, 0)
                 };
                 self.scan_left_brace()?;
-                let sid = self.node_raw();
                 let extra = vec![v.int(spec.0), v.int(i64::from(spec.1)), v.int(md.lid)];
-                let kind = self.kind_value(md, group::VCENTER, sid, sid, -1, extra)?;
-                self.open_scope_here(kind);
+                self.push_list(-1, group::VCENTER, extra);
                 self.normal_paragraph()?;
                 let e = self.get("param:everyvbox")?;
                 let toks = crate::val::toks_of(v, e);
@@ -571,7 +570,7 @@ impl Run<'_, '_> {
                     group::MATH_CHOICE,
                     -203,
                     vec![v.int(0), v.int(md.lid), u, u, u],
-                )?;
+                );
             }
             cmd::SUB_MARK | cmd::SUP_MARK => self.sub_sup(md)?,
             cmd::ABOVE => self.math_fraction(md)?,
@@ -714,6 +713,9 @@ impl Run<'_, '_> {
             out.extend(p);
             return Ok(out);
         };
+        // the incompleat noad is consumed: a later list with the same
+        // id (local ids restart in every run) must not find it (§1185)
+        self.set(&format!("inc:{lid}"), ValueId::UNIT, true);
         let g = |i: usize| crate::val::int_at(v, inc, i);
         let n = usize::try_from(g(3)).unwrap_or(0).min(items.len());
         let (mut num, den) = (items[..n].to_vec(), items[n..].to_vec());
@@ -747,14 +749,12 @@ impl Run<'_, '_> {
         }
         let d = self.scan_delimiter(false)?;
         if t == LEFT_NOAD {
-            let sid = self.push_math(md, group::MATH_LEFT, -203, vec![v.int(md.lid)])?;
+            let sid = self.push_math(md, group::MATH_LEFT, -203, vec![v.int(md.lid)]);
             self.append(sid, v.list(vec![v.int(T_LEFT), v.int(d)]));
         } else {
             let right = v.list(vec![v.int(T_RIGHT), v.int(d)]);
             let list = self.fin_mlist(md.lid, Some(right))?;
-            self.effect = Effect::Close;
-            self.unsave_extras(md)?;
-            let outer = self.outer_mode(md)?;
+            let outer = self.close_group(md)?;
             let e = empty(v);
             let n = noad(v, INNER, 0, 0, sub_mlist(v, list), e, e);
             self.append(outer.lid, n);
@@ -768,8 +768,7 @@ impl Run<'_, '_> {
         let code = md.extra.first().map_or(1, |&y| int_of(v, y));
         let outer_lid = md.extra.get(1).map_or(0, |&y| int_of(v, y));
         let list = self.fin_mlist(md.lid, None)?;
-        self.effect = Effect::Close;
-        self.unsave_extras(md)?;
+        self.close_group(md)?;
         let (outer_items, _) = self.list_items(outer_lid)?;
         let Some(&tail) = outer_items.last() else {
             return Ok(());
@@ -807,7 +806,7 @@ impl Run<'_, '_> {
         } else {
             Spec::Additional(i32::try_from(x(1)).unwrap_or(0))
         };
-        let (items, _) = self.list_items(md.sid)?;
+        let (items, _) = self.list_items(md.lid)?;
         let mut side = Side::default();
         let list: Vec<Node> = items
             .iter()
@@ -815,8 +814,7 @@ impl Run<'_, '_> {
             .collect();
         let pp = self.pack_params(false)?;
         let p = phitex_typeset::pack::vpack(list, spec, &pp);
-        self.effect = Effect::Close;
-        self.unsave_extras(md)?;
+        self.close_group(md)?;
         let b = nodes::encode_box(v, &p.node, &side);
         let e = empty(v);
         let n = noad(v, VCENTER, 0, 0, sub_box(v, b), e, e);
@@ -831,29 +829,17 @@ impl Run<'_, '_> {
         let outer_lid = md.extra.get(1).map_or(0, |&y| int_of(v, y));
         let list = self.fin_mlist(md.lid, None)?;
         let enc = v.list(list);
-        self.unsave_extras(md)?;
         if part < 3 {
             let mut extra = md.extra.clone();
             extra[usize::try_from(part).unwrap_or(0) + 2] = enc;
             extra[0] = v.int(part + 1);
+            // §1174: unsave, then the next part's group
+            self.pop_level();
             self.scan_left_brace()?;
-            let sid = self.node_raw();
-            let mut outer = md.clone();
-            outer.depth -= 1;
-            let cur = self.scope_kind()?.unwrap_or(ValueId::UNIT);
-            let parent = list_of(v, cur).get(5).copied().unwrap_or(ValueId::UNIT);
-            let kind =
-                self.kind_with_parent(&outer, group::MATH_CHOICE, sid, sid, -203, extra, parent);
-            self.effect = Effect::Scope(phitex_defuse::Brackets {
-                closes: 1,
-                opens: 1,
-                before: false,
-                kind: Some(kind),
-                kind_pending: false,
-            });
+            self.push_list(-203, group::MATH_CHOICE, extra);
             return Ok(());
         }
-        self.effect = Effect::Close;
+        self.close_group(md)?;
         let mut xs = vec![v.int(T_CHOICE)];
         xs.extend(md.extra[2..5].iter().copied());
         xs.push(enc);
@@ -867,7 +853,7 @@ impl Run<'_, '_> {
         match code {
             1 => {
                 self.check_dollar()?;
-                self.finish_display(md, None, false, 1)
+                self.finish_display(md, None, false)
             }
             2 | 3 => {
                 // the end of an equation number: then of the display
@@ -882,9 +868,8 @@ impl Run<'_, '_> {
                     false,
                 )
                 .node;
-                self.unsave_extras(md)?;
-                let dmd = self.outer_mode(md)?;
-                self.finish_display(&dmd, Some(a), code == 3, 2)
+                let dmd = self.close_group(md)?;
+                self.finish_display(&dmd, Some(a), code == 3)
             }
             _ => self.finish_text_math(md),
         }
@@ -919,8 +904,7 @@ impl Run<'_, '_> {
         let surround = self.param("mathsurround")?;
         let outer = self.outer_mode(md)?;
         let hl = self.formula_hlist(md, Style::TEXT, outer.m > 0)?;
-        self.effect = Effect::Close;
-        self.unsave_extras(md)?;
+        let outer = self.close_group(md)?;
         let side = Side::default();
         let mut out = vec![Node::Math(MathKind::Before, surround)];
         out.extend(hl);
@@ -936,7 +920,7 @@ impl Run<'_, '_> {
     /// §1199–§1205: the display `dmd` (with the equation number `a`, at
     /// the left if `left`) goes to the vertical list; then §1200.
     #[allow(clippy::too_many_lines)]
-    fn finish_display(&mut self, dmd: &Mode, a: Option<BoxNode>, left: bool, closes: u8) -> R<()> {
+    fn finish_display(&mut self, dmd: &Mode, a: Option<BoxNode>, left: bool) -> R<()> {
         let v = self.v;
         let x = |i: usize| dmd.extra.get(i).map_or(0, |&y| int_of(v, y));
         let vlid = x(1);
@@ -1067,33 +1051,24 @@ impl Run<'_, '_> {
             skip(self, g2)?;
         }
         // §1200 resume_after_display
-        self.effect = if closes == 1 {
-            Effect::Close
-        } else {
-            Effect::Scope(phitex_defuse::Brackets {
-                closes,
-                opens: 0,
-                before: false,
-                kind: None,
-                kind_pending: false,
-            })
-        };
-        self.unsave_extras(dmd)?;
-        let pg = self.int(&format!("pg:{vlid}"))?;
-        self.set(&format!("pg:{vlid}"), v.int(pg + 3), true);
-        let id = self.node_raw();
+        self.close_group(dmd)?;
+        let pg = self.prev_graf(&vm)?;
+        self.set_prev_graf(&vm, pg + 3);
         let lang = i64::from(phitex_typeset::hyph::cur_lang(self.param("language")?));
         let lhm = Self::norm_min(self.param("lefthyphenmin")?);
         let rhm = Self::norm_min(self.param("righthyphenmin")?);
         let packed = (lhm * 64 + rhm) * 65536 + lang;
-        let rec = v.list(vec![v.int(id), v.int(lang), v.int(packed)]);
-        self.set(&self.par_cell(vlid), rec, true);
+        // §1200: a new paragraph (push_nest, mode hmode)
+        self.push_list(102, 0, Vec::new());
+        if let Some(l) = self.top_mut() {
+            l.par = Some((lang, packed));
+        }
         // §443: an optional space
         self.get_x_token()?;
         if self.cur.cmd != cmd::SPACER {
             self.back_cur();
         }
-        self.build_page_mark(&vm)
+        Ok(())
     }
 
     /// §1195: whether families 2 and 3 lack their parameters.

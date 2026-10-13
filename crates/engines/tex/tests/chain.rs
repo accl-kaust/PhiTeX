@@ -9,30 +9,29 @@ use std::collections::BTreeMap;
 /// height bound, for one build: the failures found.
 fn target_failures(name: &str, b: &phitex_tex::Build) -> Vec<String> {
     let mut out = Vec::new();
-    // one paragraph on the path: its start's cell read by its text and
-    // its end (two links); a third paragraph link chains regions
-    let mut par_links = 0;
+    // no paragraph cell, no condition-level cell: a region's paragraph
+    // and conditionals are its run's own (docs/TARGET_GRAPH.md)
     for (what, kind, field) in b.critical_chain() {
-        if field.starts_with("par:0:") {
-            out.push(format!(
-                "{name}: a link through {field}: a node outside every region ({kind}: {what})"
-            ));
-        } else if kind == "Changed" && field.starts_with("par:") {
-            par_links += 1;
-            if par_links == 3 {
-                out.push(format!(
-                    "{name}: paragraph cells chained across regions (third link {field}: {what})"
-                ));
-            }
-        } else if kind == "Changed" && field.starts_with("if:") {
-            out.push(format!("{name}: Changed {field} between commands ({what})"));
+        if field.starts_with("par:") || field.starts_with("if:") {
+            out.push(format!("{name}: a link through {field} ({kind}: {what})"));
         }
     }
     let pages = b.pages().len();
-    let bound = 4 + 3 * pages;
+    let bound = 6 + pages;
     let height = b.stats.critical_path.unwrap_or(0);
     if height > bound {
-        out.push(format!("{name}: height {height} > 4 + 3 * {pages} pages"));
+        out.push(format!("{name}: height {height} > 6 + {pages} pages"));
+    }
+    // a region runs as one node: at most a few nodes per region (the
+    // region, its breaks, its loop-back) plus one step per page
+    let regions = b.stats.nodes_text_frames;
+    let pages = pages as u64;
+    let run = b.stats.nodes_run;
+    eprintln!("{name}: {run} nodes run, {regions} regions (text nodes), {pages} pages");
+    if run > 3 * regions + pages + 8 {
+        out.push(format!(
+            "{name}: {run} nodes run > 3 * {regions} regions + {pages} pages + 8"
+        ));
     }
     out
 }
@@ -255,14 +254,7 @@ fn structural(kind: &str, field: &str) -> bool {
     kind != "Changed"
         || field.is_empty()
         || [
-            "page:state",
-            "font",
-            "items",
-            "pages",
-            "lopen:",
-            "if:",
-            "scope",
-            "kind",
+            "pagefx:", "font", "items", "pages", "lopen:", "scope", "kind",
         ]
         .iter()
         .any(|p| field.starts_with(p))
