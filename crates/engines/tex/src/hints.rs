@@ -2507,7 +2507,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     // `\prevgraf` of the list it is in
     let mut slice_hints = Vec::with_capacity(t.slices.len());
     let mut pending: Vec<&'static str> = Vec::new();
-    let mut after_sets = false;
+    let mut after_sets = 0u8;
     for (i, &(s, e)) in t.slices.iter().enumerate() {
         let mut h = t.at_until(s, e);
         // (whether the run reads on into the next slice: a scan for a
@@ -2610,14 +2610,24 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         // end (`\\@doendpe`) set another, which the next paragraph
         // consumes, §1091: a slice calling one declares it)
         let sets = sets_everypar(&text[s..e]);
-        if (sets || after_sets)
+        if (sets || after_sets > 0)
             && let Some(b) = h.bound.as_mut().or(h.guess.as_mut())
         {
             add_head(&mut b.state, "param:everypar");
+            add_head(&mut b.state, "param:clubpenalty");
         }
         // (the next slice's first paragraph consumes what this one set
         // and resets `\\everypar`: it declares it too)
-        after_sets = sets || (after_sets && text[s..e].trim().is_empty());
+        // (`\\@afterheading` is consumed over two paragraphs: the first
+        // keeps `\\everypar` and sets `\\clubpenalty`, the second resets
+        // both)
+        after_sets = if sets {
+            2
+        } else if text[s..e].trim().is_empty() {
+            after_sets
+        } else {
+            after_sets.saturating_sub(1)
+        };
         let mut out = pending.clone();
         let mut ends = false;
         let k0 = t.starts.partition_point(|&x| x < s);

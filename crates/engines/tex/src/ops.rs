@@ -234,6 +234,7 @@ impl Operation for Exec {
                 if let Some(m) = crate::hints::verify(r, &hint)? {
                     r.log("error", &format!("hint regime violated: {m}"))?;
                     crate::hints::count(r, 2);
+                    r.hint_void = true;
                 }
             }
             // the whole slice runs here: a paragraph region to its end,
@@ -243,7 +244,9 @@ impl Operation for Exec {
             // until it is closed (`Run::run_all`)
             r.run_all()?;
             crate::hints::debug_defs(r, &hint);
-            if hint.bound.is_some() {
+            // (a hint whose regime the run found violated bounds nothing:
+            // its definitions are not checked against it)
+            if hint.bound.is_some() && !r.hint_void {
                 if let Some(m) = crate::hints::check_defs(r, &hint) {
                     r.log("error", &m)?;
                     crate::hints::count(r, 3);
