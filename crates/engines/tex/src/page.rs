@@ -235,7 +235,11 @@ impl Run<'_, '_> {
         let mut plan: Vec<ValueId> = Vec::new();
         let mut j = 0;
         while !ended && j < MAX_PAGES {
-            let fx = if j > 0 { self.page_effects(j - 1)? } else { Vec::new() };
+            let fx = if j > 0 {
+                self.page_effects(j - 1)?
+            } else {
+                Vec::new()
+            };
             let out = fold_page(v, &items, &table, marker, &start, fx);
             // the job-written files' order: an immediate write's entry
             // where its marker is, page `j` where it fires (`wplan`)
@@ -314,7 +318,11 @@ impl Run<'_, '_> {
             self.ops.pagestep
         };
         let marker0 = self.get("pp:marker")?.unwrap_or(ValueId::UNIT);
-        let fx = if j > 0 { self.page_effects(j - 1)? } else { Vec::new() };
+        let fx = if j > 0 {
+            self.page_effects(j - 1)?
+        } else {
+            Vec::new()
+        };
         let guard = v.get(items_v);
         let items: &[ValueId] = match &*guard {
             Value::List(xs) => xs,
@@ -394,7 +402,11 @@ impl Run<'_, '_> {
                 let xs = list_of(v, x);
                 if xs.len() == 10 {
                     for (k, &c) in xs.iter().enumerate() {
-                        let cf = self.ops.fields.get_at(v, self.cx.values_epoch(), &format!("count:{k}"));
+                        let cf = self.ops.fields.get_at(
+                            v,
+                            self.cx.values_epoch(),
+                            &format!("count:{k}"),
+                        );
                         self.over.insert(cf, c);
                     }
                 }
@@ -801,14 +813,22 @@ fn fold_page(
         let Some(p) = nodes::decode(v, x, &mut side) else {
             continue;
         };
-        let next = queue
-            .front()
-            .copied()
-            .or_else(|| items.get(cursor).copied())
-            .and_then(|y| nodes::decode(v, y, &mut Side::default()));
+        // §1000: only a kern looks at what follows it
+        let next = if matches!(p, Node::Kern(..)) {
+            queue
+                .front()
+                .copied()
+                .or_else(|| items.get(cursor).copied())
+                .and_then(|y| nodes::decode(v, y, &mut Side::default()))
+        } else {
+            None
+        };
         if let Outcome::Fire(f) = pb.contribute(p, next.as_ref(), &params, &mut class) {
-            let mut carried: Vec<ValueId> =
-                f.contributions.iter().map(|n| nodes::encode(v, n, &side)).collect();
+            let mut carried: Vec<ValueId> = f
+                .contributions
+                .iter()
+                .map(|n| nodes::encode(v, n, &side))
+                .collect();
             carried.extend(queue.drain(..));
             // the canonical end: the material carried over is the
             // list's own items before the cursor whenever it can be

@@ -466,9 +466,9 @@ pub(crate) fn frame_of(
     decoded(v, id, |d| &mut d.frames, make)
 }
 
-/// The node `id` decoded before on this thread, if it is a leaf (a node
-/// holding no list, mark or whatsit: its decoding is a function of its
-/// value alone).
+/// The node `id` decoded before on this thread, if its decoding met no
+/// mark or whatsit (then it is a function of its value alone: a box and
+/// its list included).
 pub(crate) fn leaf_of(v: &Values, id: ValueId) -> Option<phitex_typeset::node::Node> {
     DECODED.with(|c| {
         let c = c.borrow();
