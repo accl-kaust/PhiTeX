@@ -914,6 +914,15 @@ pub struct Stats {
     /// Speculative runs dropped at a stop (their guess is then blocked
     /// until its node leaves work).
     pub spec_stops: u64,
+    /// Speculative runs dropped at apply because they changed the
+    /// node's shape (`Report::spec_shape_changes`).
+    pub spec_shape_changes: u64,
+    /// Results dropped at apply because the node went away or was
+    /// re-bound (`dead_result`), or no longer takes a result
+    /// (`state_result`): the engine's probe counters, totals since their
+    /// last reset, with the `profile` feature only (0 without it).
+    pub dead_result: u64,
+    pub state_result: u64,
     pub raises: u64,
     /// The most nodes ready at one step, and the speculative runs that
     /// ran out of fuel.
@@ -969,6 +978,15 @@ impl Stats {
         self.batches_inline += bi;
         self.jobs_max_batch = self.jobs_max_batch.max(m);
         self.critical_path = usize::try_from(eng.critical_path()).ok();
+        if phitex_defuse::obs::enabled() {
+            for &(name, n) in &phitex_defuse::obs::snapshot().counters {
+                match name {
+                    "dead_result" => self.dead_result = n,
+                    "state_result" => self.state_result = n,
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// The hint counters of `unit` (the live nodes' accumulators), and
@@ -1040,6 +1058,7 @@ impl Stats {
         self.confirmations += r.confirmations;
         self.mispredictions += r.mispredictions;
         self.spec_stops += r.spec_stops;
+        self.spec_shape_changes += r.spec_shape_changes;
         self.raises += r.raises;
         self.max_ready = self.max_ready.max(r.max_ready);
         self.fuel_outs += r.fuel_outs;

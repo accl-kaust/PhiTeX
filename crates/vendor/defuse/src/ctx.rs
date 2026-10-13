@@ -29,6 +29,9 @@ pub struct Ctx<'a> {
     /// node it read that is not settled yet (0: none). The run goes on with
     /// the current values and is re-done once, not once per such read.
     raise: u32,
+    /// A speculative read of a finished node not yet settled (its value
+    /// may still change).
+    read_unsettled: bool,
     raise_from: Slot,
     cache: FxHashMap<(u8, u64), Option<ValueId>>,
     /// Walks the gate did for this run (same node, same batch state).
@@ -80,6 +83,7 @@ impl<'a> Ctx<'a> {
             steps: 0,
             stopped: None,
             raise: 0,
+            read_unsettled: false,
             raise_from: NIL,
             cache: FxHashMap::default(),
             walks: Vec::new(),
@@ -280,6 +284,8 @@ impl<'a> Ctx<'a> {
         if self.spec && tn.has_ran() {
             if tn.in_work() {
                 self.assumptions.push((t, kind, val.unwrap_or(ValueId::NONE)));
+            } else {
+                self.read_unsettled = true;
             }
             return Ok(val);
         }
@@ -1010,6 +1016,7 @@ impl<'a> Ctx<'a> {
             speculative: self.spec,
             end,
             raise: self.raise,
+            read_unsettled: self.read_unsettled,
             raise_from: self.raise_from,
             uses: self.uses,
             defs: self.defs,
