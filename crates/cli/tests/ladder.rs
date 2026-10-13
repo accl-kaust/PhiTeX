@@ -346,12 +346,13 @@ fn run(nn: &str) -> Vec<String> {
             reds.push(format!("{nn} {v} watch vs cold: {d}"));
         }
         edit_cells.push(format!(
-            "{v}: watch={} cold={} same={} nodes_rerun={} ms={:.1} errors={}",
+            "{v}: edit_ms={:.1} nodes_rerun={} pages_changed={} watch={} cold={} same={} errors={}",
+            ev["wall_ms"].as_f64().unwrap_or(f64::NAN),
+            ev["nodes_run"],
+            ev["pages_changed"],
             if wd.is_empty() { "yes" } else { "no" },
             if ce.ok { "yes" } else { "no" },
             if vs_cold.is_none() { "yes" } else { "no" },
-            ev["nodes_run"],
-            ev["wall_ms"].as_f64().unwrap_or(f64::NAN),
             ev["errors"],
         ));
     }
