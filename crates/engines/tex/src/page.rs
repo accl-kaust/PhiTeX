@@ -1391,20 +1391,145 @@ fn dvi_file(cx: &mut Ctx<'_>, fin: &FinalState) -> Result<ValueId, Stop> {
         .get(cx, v.field("param:mag"))?
         .map_or(1000, |x| int_of(v, x));
     let mut w = phitex_dvi::DviWriter::new(i32::try_from(mag).unwrap_or(1000), &comment);
-    for page in v.seq_to_vec(pages) {
-        dvi_page(v, &mut w, page);
+    // each page's bytes as the previous run wrote them, shipped again
+    // when they are what this place would get (`DviWriter::ship_kept`)
+    let epoch = cx.values_epoch();
+    let old = dvi_memo_take(v, epoch);
+    let mut kept = phitex_defuse::FxHashMap::default();
+    let t0 = std::time::Instant::now();
+    let mut again = 0usize;
+    // the file as characters 0–255 (a string value): each page's but
+    // the pointer to the previous `bop` kept with its bytes
+    let mut s = latin1(w.bytes());
+    let nokeep = crate::exec::env_flag!("PHITEX_DVI_NOKEEP");
+    for page in all {
+        let at = w.location();
+        if let Some(p) = old.as_ref().and_then(|m| m.pages.get(&page))
+            && w.ship_kept(&p.bytes)
+        {
+            push_page(&mut s, &w.bytes()[at..], p);
+            kept.insert(page, std::sync::Arc::clone(p));
+            again += 1;
+            continue;
+        }
+        match dvi_page(v, &mut w, page, !nokeep) {
+            Some(p) if p.bytes().len() >= 45 => {
+                let b = p.bytes();
+                let k = std::sync::Arc::new(KeptPage {
+                    head: latin1(&b[..41]),
+                    tail: latin1(&b[45..]),
+                    bytes: p,
+                });
+                push_page(&mut s, &w.bytes()[at..], &k);
+                kept.insert(page, k);
+            }
+            _ => s.push_str(&latin1(&w.bytes()[at..])),
+        }
     }
+    let n = kept.len();
+    dvi_memo_keep(
+        v,
+        DviMemo {
+            pages: kept,
+            epoch,
+            spec: cx.is_speculative(),
+        },
+    );
+    let t1 = t0.elapsed();
+    let at = w.location();
     let bytes = w.finish();
-    let s: String = bytes.iter().map(|&b| char::from(b)).collect();
-    Ok(v.intern(Value::Str(s.into_boxed_str())))
+    let t2 = t0.elapsed();
+    s.push_str(&latin1(&bytes[at..]));
+    let t3 = t0.elapsed();
+    let r = v.intern(Value::Str(s.into_boxed_str()));
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        eprintln!(
+            "dvi file: {n} pages, {again} kept, pages {t1:?}, postamble {:?}, string {:?}, value {:?}",
+            t2.saturating_sub(t1),
+            t3.saturating_sub(t2),
+            t0.elapsed().saturating_sub(t3)
+        );
+    }
+    Ok(r)
 }
 
-/// One page of the `pages` contribution into `w` (§640).
-fn dvi_page(v: &Values, w: &mut phitex_dvi::DviWriter, page: ValueId) {
+/// The DVI writer's memory between its runs: each page's bytes by the
+/// page's value. The values are the previous run's: valid while that
+/// run's definitions (or the evaluation it ran in) keep them, as the
+/// plan's (`planinc`).
+struct DviMemo {
+    pages: phitex_defuse::FxHashMap<ValueId, std::sync::Arc<KeptPage>>,
+    epoch: u64,
+    spec: bool,
+}
+
+/// A page's bytes and, as characters, all of them but the pointer to the
+/// previous `bop` (bytes 41–44).
+struct KeptPage {
+    bytes: phitex_dvi::PageBytes,
+    head: String,
+    tail: String,
+}
+
+/// A kept page's characters onto `s`, the pointer from `b` (the page as
+/// written).
+fn push_page(s: &mut String, b: &[u8], k: &KeptPage) {
+    s.push_str(&k.head);
+    s.extend(b[41..45].iter().map(|&c| char::from(c)));
+    s.push_str(&k.tail);
+}
+
+type DviCache = std::sync::Mutex<phitex_defuse::FxHashMap<u64, DviMemo>>;
+
+fn dvi_cache() -> &'static DviCache {
+    static C: std::sync::OnceLock<DviCache> = std::sync::OnceLock::new();
+    C.get_or_init(DviCache::default)
+}
+
+fn dvi_memo_take(v: &Values, epoch: u64) -> Option<DviMemo> {
+    let mut c = dvi_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let m = c.remove(&v.instance())?;
+    (!m.spec || m.epoch == epoch).then_some(m)
+}
+
+fn dvi_memo_keep(v: &Values, m: DviMemo) {
+    let mut c = dvi_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // (bounded: one entry a build; a long test run starts again)
+    if c.len() > 64 {
+        c.clear();
+    }
+    c.insert(v.instance(), m);
+}
+
+/// `bytes` as characters 0–255.
+fn latin1(bytes: &[u8]) -> String {
+    let mut u = Vec::with_capacity(bytes.len() + bytes.len() / 2);
+    for &b in bytes {
+        if b < 0x80 {
+            u.push(b);
+        } else {
+            u.extend_from_slice(&[0xc0 | (b >> 6), 0x80 | (b & 0x3f)]);
+        }
+    }
+    String::from_utf8(u).unwrap_or_default()
+}
+
+/// One page of the `pages` contribution into `w` (§640), its bytes kept
+/// when `keep`.
+fn dvi_page(
+    v: &Values,
+    w: &mut phitex_dvi::DviWriter,
+    page: ValueId,
+    keep: bool,
+) -> Option<phitex_dvi::PageBytes> {
     let xs = list_of(v, page);
     let mut side = Side::default();
     let Some(Node::Box(bx)) = xs.first().and_then(|&b| nodes::decode(v, b, &mut side)) else {
-        return;
+        return None;
     };
     let mut counts = [0i32; 10];
     for (k, c) in xs
@@ -1451,7 +1576,11 @@ fn dvi_page(v: &Values, w: &mut phitex_dvi::DviWriter, page: ValueId) {
             None
         }
     };
+    if keep {
+        return w.ship_out_kept(&bx, counts, &fonts, &mut wh).ok();
+    }
     let _ = w.ship_out(&bx, counts, &fonts, &mut wh);
+    None
 }
 
 /// What a DVI page shows: the hash of its `bop`..`eop` bytes written
@@ -1460,7 +1589,7 @@ fn dvi_page(v: &Values, w: &mut phitex_dvi::DviWriter, page: ValueId) {
 fn dvi_shown(v: &Values, page: ValueId) -> u64 {
     let mut w = phitex_dvi::DviWriter::new(1000, "");
     let at = w.location();
-    dvi_page(v, &mut w, page);
+    dvi_page(v, &mut w, page, false);
     let b = &w.bytes()[at..];
     if b.len() < 45 {
         return phitex_defuse::hash_bytes(0, b);
