@@ -346,7 +346,17 @@ impl Run<'_, '_> {
             .filter(|(g, _)| *g == f)
             .map(|(_, x)| *x)
             .collect();
-        fold_entries(v, lid, &v.seq_to_vec(all), &mut st, &mut out);
+        let t0 = std::time::Instant::now();
+        let es = v.seq_to_vec(all);
+        let t1 = t0.elapsed();
+        fold_entries(v, lid, &es, &mut st, &mut out);
+        if lid == 0 && crate::exec::env_flag!("PHITEX_PLAN_TIME") {
+            eprintln!(
+                "list fold: {} entries, seq walk {t1:?}, fold {:?}",
+                es.len(),
+                t0.elapsed() - t1
+            );
+        }
         let mut push = |x: ValueId, out: &mut Vec<ValueId>| {
             let Value::List(xs) = &*v.get(x) else { return };
             if xs.len() != 2 || int_of(v, xs[0]) != lid {
