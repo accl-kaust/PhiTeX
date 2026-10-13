@@ -41,12 +41,6 @@ impl Val {
             _ => true,
         }
     }
-    pub fn as_str(&self) -> Option<&str> {
-        match self {
-            Val::S(s) => Some(s),
-            _ => None,
-        }
-    }
     pub fn str(&self) -> String {
         match self {
             Val::S(s) => s.clone(),
@@ -167,7 +161,7 @@ pub fn numify(s: &str) -> f64 {
 
 /// Perl's stringification of a number.
 pub fn num_str(v: f64) -> String {
-    if v.fract() == 0.0 && v.abs() < 1e15 {
+    if v.abs() < 1e15 && v == (v as i64) as f64 {
         alloc::format!("{}", v as i64)
     } else {
         alloc::format!("{v}")
@@ -207,9 +201,6 @@ impl Name {
     }
     pub fn initial(&self, np: &str) -> Vec<String> {
         self.nameparts.get(np).and_then(|p| p.initial.clone()).unwrap_or_default()
-    }
-    pub fn has_initial(&self, np: &str) -> bool {
-        self.nameparts.get(np).is_some_and(|p| p.initial.is_some())
     }
     pub fn was_stripped(&self, np: &str) -> bool {
         self.strip.get(np).copied().unwrap_or(false)

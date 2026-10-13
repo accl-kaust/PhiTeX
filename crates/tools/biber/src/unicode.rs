@@ -99,14 +99,8 @@ pub fn has_property(c: char, name: &str) -> Option<bool> {
 pub fn is_l(c: char) -> bool {
     gc(c).starts_with('L')
 }
-pub fn is_ll(c: char) -> bool {
-    gc(c) == "Ll"
-}
 pub fn is_m(c: char) -> bool {
     gc(c).starts_with('M')
-}
-pub fn is_pd(c: char) -> bool {
-    gc(c) == "Pd"
 }
 pub fn is_dash(c: char) -> bool {
     in_ranges(unidata::DASH, c)
@@ -129,11 +123,6 @@ pub fn is_hspace(c: char) -> bool {
 /// Perl's `\d`.
 pub fn is_digit(c: char) -> bool {
     gc(c) == "Nd"
-}
-/// `[\p{P}\p{S}\p{C}]`.
-pub fn is_psc(c: char) -> bool {
-    let g = gc(c);
-    g.starts_with('P') || g.starts_with('S') || g.starts_with('C')
 }
 
 /// btparse's `isulower()`: is the first UTF-8 character of a token one of
@@ -250,7 +239,7 @@ pub fn grapheme_ends(s: &str) -> Vec<usize> {
         return ends;
     }
     let mut ri_count = 0usize; // regional indicators in the current run
-    let mut ext_pict_zwj = false; // ExtPict Extend* ZWJ just seen
+    let mut ext_pict_zwj; // ExtPict Extend* ZWJ just seen
     let mut in_pict = false; // ExtPict Extend* run
     let mut incb_cons = false; // InCB Consonant [Extend|Linker]* seen
     let mut incb_link = false; // ... with a Linker

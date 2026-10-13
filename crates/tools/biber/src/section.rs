@@ -143,9 +143,6 @@ impl Section {
     pub fn dynamic_set(&self, k: &str) -> Vec<String> {
         self.dkeys.iter().find(|(x, _)| x == k).map(|(_, m)| m.clone()).unwrap_or_default()
     }
-    pub fn is_dynamic_set(&self, k: &str) -> bool {
-        self.dkeys.iter().any(|(x, _)| x == k)
-    }
     pub fn set_dynamic_set(&mut self, k: &str, m: Vec<String>) {
         if let Some(e) = self.dkeys.iter_mut().find(|(x, _)| x == k) {
             e.1 = m;
@@ -306,7 +303,3 @@ impl DataList {
     }
 }
 
-/// A list's attributes from the `.bcf` (used to find duplicates).
-pub fn blx_list_name(v: Option<BV>) -> String {
-    v.map(|x| x.s()).unwrap_or_default()
-}

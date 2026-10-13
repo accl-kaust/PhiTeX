@@ -1085,5 +1085,3 @@ fn check_list_filter(t: &str, fs: &str, be: &crate::model::Entry) -> bool {
     }
 }
 
-#[allow(dead_code)]
-fn _ld(_: LabelDate) {}
