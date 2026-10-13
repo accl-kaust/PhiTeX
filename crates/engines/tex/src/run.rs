@@ -157,6 +157,12 @@ impl FileRest {
     }
 }
 
+/// Whether `PHITEX_HEARTBEAT=1` (read once a process).
+fn heartbeat_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PHITEX_HEARTBEAT").is_ok_and(|v| v == "1"))
+}
+
 /// The size of a run's control-sequence name cache ([`Run::cs_cache`]).
 pub(crate) const CS_CACHE: usize = 1024;
 
@@ -196,6 +202,8 @@ pub(crate) struct Run<'c, 'a> {
     /// Lines begun by this run (the `lines` accumulator, contributed
     /// once at the end).
     pub lines_read: u64,
+    /// `PHITEX_HEARTBEAT=1` (read once a process).
+    pub heartbeat_on: bool,
     /// Macro bodies copied into the arena, by their shared list's address
     /// (the list is kept so the address is never reused):
     /// [`Run::body_range`].
@@ -305,6 +313,7 @@ impl<'c, 'a> Run<'c, 'a> {
             input: crate::input::Input::new(),
             cs_cache: vec![(0, Tok::c(0)); CS_CACHE].into_boxed_slice(),
             lines_read: 0,
+            heartbeat_on: heartbeat_enabled(),
             body_cache: phitex_defuse::FxHashMap::default(),
             pulled: 0,
             top: false,
@@ -1042,8 +1051,26 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// [`Self::set_cur`] for a control sequence or active character.
-    #[inline(never)]
+    #[inline]
     fn set_cur_cs(&mut self, tok: Tok) -> R<()> {
+        // (the common case: a control sequence whose meaning this run
+        // has read and decoded: one slot access)
+        if let Some(i) = tok.cs_index()
+            && let Ok(l) = Loc::try_from(crate::fields::MEAN_BASE + i)
+            && let Some((c, h)) = self.st.cmd_chr_fast(l)
+        {
+            self.cur = Cur {
+                tok,
+                cmd: c,
+                chr: h,
+            };
+            return Ok(());
+        }
+        self.set_cur_cs_slow(tok)
+    }
+
+    #[inline(never)]
+    fn set_cur_cs_slow(&mut self, tok: Tok) -> R<()> {
         let (c, h) = match self.mean_loc(tok) {
             Some(l) => {
                 if !self.st.is_loaded(l) {

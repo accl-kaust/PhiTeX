@@ -25,7 +25,9 @@ static HEARTBEAT_FROM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 impl Run<'_, '_> {
     /// The node's command: expand once, or do one command (§1030).
     pub(crate) fn command(&mut self) -> R<()> {
-        self.heartbeat();
+        if self.heartbeat_on {
+            self.heartbeat();
+        }
         self.no_pull = true;
         let got = self.get_next();
         self.no_pull = false;
