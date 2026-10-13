@@ -295,10 +295,8 @@ impl Run<'_, '_> {
         else {
             return Ok(());
         };
-        let items = self
-            .get("pp:items")?
-            .map(|x| list_of(v, x))
-            .unwrap_or_default();
+        // (the list borrowed, not copied: every page's `brk` reads it)
+        let items_v = self.get("pp:items")?.unwrap_or(ValueId::UNIT);
         let classes = self
             .get("pp:classes")?
             .map(|x| list_of(v, x))
@@ -310,7 +308,13 @@ impl Run<'_, '_> {
         };
         let marker0 = self.get("pp:marker")?.unwrap_or(ValueId::UNIT);
         let fx = if j > 0 { self.page_effects(j - 1)? } else { Vec::new() };
-        let out = fold_page(v, &items, &classes, marker0, &start, fx);
+        let guard = v.get(items_v);
+        let items: &[ValueId] = match &*guard {
+            Value::List(xs) => xs,
+            _ => &[],
+        };
+        let out = fold_page(v, items, &classes, marker0, &start, fx);
+        drop(guard);
         if let Some((f, side, _)) = out.fired {
             let data = self.page_data(&f, &side)?;
             self.kid(op, vec![v.int(j as i64), data]);
@@ -595,8 +599,8 @@ impl MarksState {
 /// Where a page starts in the main list (`pp:start:<j>`): the index of
 /// the first item not yet contributed, the material carried over before
 /// it (§1017: none when it is the list's own items, which the index then
-/// covers), the page parameters when a routine set them (`None`: the
-/// list's own marker before the index), `\end`'s item once met, and the
+/// covers), the page parameters in force there (`None`: the first
+/// page's), `\end`'s item once met, and the
 /// dead cycles `\end` spent (§1054). `"end"`: the list ended before.
 #[derive(Clone)]
 pub(crate) struct PageStart {
@@ -680,18 +684,9 @@ fn fold_page(
     start: &PageStart,
     fx: Vec<ValueId>,
 ) -> PageFold {
-    // the page parameters in force where the page starts: the last
-    // marker on the list before it, unless the start carries one (a
-    // routine set them)
-    let listed = |idx: usize| {
-        items[..idx.min(items.len())]
-            .iter()
-            .rev()
-            .copied()
-            .find(|&x| nodes::tag(v, x) == nodes::T_PAGE_PARAMS)
-            .unwrap_or(marker0)
-    };
-    let mut marker = start.marker.unwrap_or_else(|| listed(start.idx));
+    // the page parameters in force where the page starts (the start
+    // carries them: the list's own marker before it, or a routine's)
+    let mut marker = start.marker.unwrap_or(marker0);
     let mut params = PageParams {
         vsize: 0,
         max_depth: 0,
@@ -797,7 +792,7 @@ fn fold_page(
             let end = PageStart {
                 idx,
                 carried,
-                marker: (marker != listed(idx)).then_some(marker),
+                marker: Some(marker),
                 ending,
                 deadcycles,
             };
