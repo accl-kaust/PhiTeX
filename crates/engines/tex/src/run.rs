@@ -36,11 +36,13 @@ impl From<Stop> for Halt {
 pub(crate) type R<T> = Result<T, Halt>;
 
 /// The operations, as registered.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub(crate) struct Ops {
     pub exec: OpId,
     pub put: OpId,
     pub outpage: OpId,
+    /// The build's field handles (`crate::fields`).
+    pub fields: std::sync::Arc<crate::fields::Fields>,
 }
 
 /// A level of the input stack.
@@ -176,6 +178,8 @@ pub(crate) struct Run<'c, 'a> {
     /// Conditionals begun in this run: their `if_limit` (§489).
     pub conds: Vec<u8>,
     mcache: FxHashMap<ValueId, Mean>,
+    /// The meaning fields of the tokens this run looked up.
+    tfields: FxHashMap<Tok, Field>,
     /// `align_state` as this run has it (§309), once read.
     pub astate: Option<i64>,
     /// Lines entered by this run (for `\inputlineno`).
@@ -229,6 +233,7 @@ impl<'c, 'a> Run<'c, 'a> {
             },
             conds: Vec::new(),
             mcache: FxHashMap::default(),
+            tfields: FxHashMap::default(),
             astate: None,
             lines_entered: 0,
             eof: false,
@@ -282,7 +287,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     pub(crate) fn get(&mut self, name: &str) -> R<Option<ValueId>> {
-        let f = self.v.field(name);
+        let f = self.ops.fields.get(self.v, name);
         self.get_f(f)
     }
 
@@ -295,21 +300,25 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     pub(crate) fn param(&mut self, name: &str) -> R<i32> {
-        self.int32(&format!("param:{name}"))
+        let f = self.ops.fields.param(self.v, name);
+        Ok(crate::val::i32_of(self.v, self.get_f(f)?))
     }
 
     pub(crate) fn glue_param(&mut self, name: &str) -> R<phitex_typeset::glue::Glue> {
-        let x = self.get(&format!("param:{name}"))?;
+        let f = self.ops.fields.param(self.v, name);
+        let x = self.get_f(f)?;
         Ok(crate::val::glue_of(self.v, x))
     }
 
     pub(crate) fn cat(&mut self, c: u32) -> R<u8> {
-        Ok(u8::try_from(self.int(&format!("cat:{c}"))?).unwrap_or(12))
+        let f = self.ops.fields.cat(self.v, c);
+        let x = self.get_f(f)?;
+        Ok(u8::try_from(x.map_or(0, |x| int_of(self.v, x))).unwrap_or(12))
     }
 
     /// Defines `name` (§277–§279: `eq_define` / `geq_define`).
     pub(crate) fn set(&mut self, name: &str, val: ValueId, global: bool) {
-        let f = self.v.field(name);
+        let f = self.ops.fields.get(self.v, name);
         self.set_f(f, val, global);
     }
 
@@ -395,9 +404,19 @@ impl<'c, 'a> Run<'c, 'a> {
     // ----------------------------------------------------------- meanings
 
     pub(crate) fn mean_of(&mut self, t: &Tok) -> R<Mean> {
-        match t.field_name() {
-            Some(name) => {
-                let x = self.get(&name)?;
+        // a token's meaning field, interned once a run
+        let f = if let Some(&f) = self.tfields.get(t) {
+            Some(f)
+        } else {
+            let f = t.field_name().map(|n| self.v.field(&n));
+            if let Some(f) = f {
+                self.tfields.insert(t.clone(), f);
+            }
+            f
+        };
+        match f {
+            Some(f) => {
+                let x = self.get_f(f)?;
                 Ok(self.decode_mean(x))
             }
             None => Ok(Mean::Char(t.cat().unwrap_or(0), t.chr())),
@@ -516,7 +535,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if op != self.ops.exec {
             return Ok(false);
         }
-        match decode_frames(self.v, &args).first() {
+        match first_frame(self.v, &args).as_ref() {
             Some(Frame::Src(s)) if !s.starts => match s.buf.first() {
                 Some(&c) => Ok(matches!(self.cat(c)?, 7 | 11)),
                 None => Ok(false),
@@ -535,7 +554,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         match self.cx.following(self.pulled) {
             Some((op, args)) if op == self.ops.exec => {
-                matches!(decode_frames(self.v, &args).first(), Some(Frame::Src(s)) if !s.starts)
+                matches!(first_frame(self.v, &args), Some(Frame::Src(s)) if !s.starts)
             }
             _ => false,
         }
@@ -1314,12 +1333,24 @@ fn hex(c: u32) -> u32 {
 
 /// The frames of an `Exec` node's arguments.
 pub(crate) fn decode_frames(v: &Values, args: &[ValueId]) -> Vec<Frame> {
+    decode_frames_upto(v, args, usize::MAX)
+}
+
+/// The first of a node's frames, the rest not decoded.
+pub(crate) fn first_frame(v: &Values, args: &[ValueId]) -> Option<Frame> {
+    decode_frames_upto(v, args, 1).into_iter().next()
+}
+
+fn decode_frames_upto(v: &Values, args: &[ValueId], limit: usize) -> Vec<Frame> {
     let mut out = Vec::new();
     let Some(&l) = args.first() else { return out };
     let Value::List(fs) = &*v.get(l) else {
         return out;
     };
     for &f in fs {
+        if out.len() >= limit {
+            break;
+        }
         let Value::List(xs) = &*v.get(f) else {
             continue;
         };

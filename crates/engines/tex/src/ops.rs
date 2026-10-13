@@ -15,7 +15,7 @@ use crate::val::{int_of, list_of, str_of};
 pub(crate) type Shared = Arc<OnceLock<Ops>>;
 
 fn ops(s: &Shared) -> Ops {
-    *s.get().expect("operations registered")
+    s.get().expect("operations registered").clone()
 }
 
 /// Runs `body` as one node: its definitions, contributions and
