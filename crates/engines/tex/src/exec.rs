@@ -348,7 +348,10 @@ impl Executor for Threads {
                 .total
                 .fetch_add(u64::try_from(n).unwrap_or(0), Ordering::Relaxed);
         }
-        self.batches.fetch_add(1, Ordering::Relaxed);
+        let b = self.batches.fetch_add(1, Ordering::Relaxed);
+        if b % 10_000 == 0 && env_flag!("PHITEX_HEARTBEAT") {
+            eprintln!("hb batch {b} width {n}");
+        }
         self.jobs_max_batch.fetch_max(n, Ordering::Relaxed);
         if self.n <= 1 || n < job_grain() || !threads_possible() {
             self.batches_inline.fetch_add(1, Ordering::Relaxed);

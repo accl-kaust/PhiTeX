@@ -95,6 +95,7 @@ impl FileKind {
             ".def",
             ".clo",
             ".fd",
+            ".ini",
         ]
         .iter()
         .any(|e| p.ends_with(e))

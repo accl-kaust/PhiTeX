@@ -27,6 +27,14 @@ pub(crate) fn run_node(
     body: impl FnOnce(&mut Run<'_, '_>) -> R<()>,
 ) -> Result<ValueId, Stop> {
     let trace = crate::exec::env_flag!("PHITEX_TEX_TRACE");
+    if crate::exec::env_flag!("PHITEX_HEARTBEAT") {
+        static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let k = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if k % 10_000 == 0 {
+            let a = cx.args().first().map(|&x| cx.values().render(x)).unwrap_or_default();
+            eprintln!("hb run {k} node {} {}", cx.node().raw(), a.chars().take(60).collect::<String>());
+        }
+    }
     if trace {
         let a = cx
             .args()

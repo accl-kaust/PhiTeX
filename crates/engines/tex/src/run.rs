@@ -186,6 +186,8 @@ pub(crate) struct Run<'c, 'a> {
     /// rest were pulled from siblings as operands (`Run::pull`) and run
     /// here only while a span is open.
     pub own_frames: usize,
+    /// The node is a file-rest node: its own file frame gives it one line.
+    file_rest: bool,
     /// Whether the node is a document region (all its text runs here).
     pub region: bool,
     /// While looking for the command's first token: a node's command
@@ -250,6 +252,7 @@ impl<'c, 'a> Run<'c, 'a> {
             next_lid: 0,
             last_par: (0, 0),
             own_frames: 0,
+            file_rest: false,
             region: false,
             no_pull: false,
             own: FxHashMap::default(),
@@ -672,11 +675,19 @@ impl<'c, 'a> Run<'c, 'a> {
                         unreachable!()
                     };
                     if f.has_lines() {
+                        // a file-rest node's own file: its line is the
+                        // node's own text, the rest of the file is not
+                        let own = self.own_frames > 0 && self.file_rest;
                         let at = f.byte_pos();
                         let name = f.name;
                         let line = f.take_line();
                         let args = line_args(self.v, &line);
-                        for mut fr in decode_frames(self.v, &args).into_iter().rev() {
+                        let frs = decode_frames(self.v, &args);
+                        if own {
+                            self.own_frames = self.own_frames - 1 + frs.len();
+                            self.file_rest = false;
+                        }
+                        for mut fr in frs.into_iter().rev() {
                             if let Frame::Src(s) = &mut fr {
                                 s.origin = Some((name, at));
                             }
@@ -1201,6 +1212,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let args = self.cx.args();
         self.region = crate::hints::is_region(self.v, &args);
         self.own_frames = self.frames.len();
+        self.file_rest = matches!(self.frames.front(), Some(Frame::File(_)));
         loop {
             while self.input_now() {
                 self.command()?;
@@ -1254,7 +1266,10 @@ impl<'c, 'a> Run<'c, 'a> {
                         return true;
                     }
                 }
-                Frame::File(_) => return false,
+                Frame::File(f) => {
+                    // §362: a file-rest node reads its one line
+                    return i < self.own_frames && self.file_rest && self.pulled == 0 && f.has_lines();
+                }
             }
         }
         false
