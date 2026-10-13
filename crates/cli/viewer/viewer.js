@@ -256,13 +256,7 @@ var Viewer = class {
     if (img.w && img.h) this.size = { w: img.w, h: img.h };
     s.img = img;
     if (resized) queueMicrotask(() => this.redraw());
-    const was = s.drawn;
     s.drawn = hash ?? s.hash;
-    if (was && s.drawn && was !== s.drawn) {
-      s.el.classList.remove("changed");
-      void s.el.offsetWidth;
-      s.el.classList.add("changed");
-    }
     this.toPaint.add(s);
     if (!this.paintFrame) this.paintFrame = requestAnimationFrame(() => this.paintSome());
   }
@@ -428,12 +422,6 @@ var CROP = `
     linear-gradient(var(--c), var(--c)) right 14px bottom 0 / 1px 10px,
     linear-gradient(var(--c), var(--c)) right 0 bottom 14px / 10px 1px;
   background-repeat: no-repeat; }
-/* a page an edit changed: a change bar in the left margin, fading */
-.slot::before { content: ""; position: absolute; left: -9px; top: 0; bottom: 0; width: 2px; background: var(--mark, #d71920);
-  opacity: 0; pointer-events: none; }
-.slot.changed::before { animation: phx-revised 1.6s linear; }
-@keyframes phx-revised { 0%, 40% { opacity: 1; } 100% { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .slot.changed::before { animation: none; } }
 `;
 var PAGE_CSS = CROP;
 var PRINT_CSS = `
@@ -1345,6 +1333,7 @@ var Panel = class {
     const license = this.$("#license");
     if (license) license.href = opts.fileUrl?.(w.license) ?? w.license;
     if (!ev.onTour) this.$("#tour").style.display = "none";
+    if (!ev.onDebug) for (const id of ["#dbg", "#dbg2"]) (this.$(id).closest("label") ?? this.$(id)).style.display = "none";
     if (!ev.onNews) this.$("#news").style.display = "none";
     this.$("#byline").onclick = (e) => {
       e.stopPropagation();
@@ -1520,6 +1509,7 @@ var Panel = class {
   prepSince = 0;
   /** The core readying its next rebuild: past 400 ms the strip says so, not "Typesetting". */
   preparing(on) {
+    if (!this.words.preparing) return;
     this.prepSince = on ? this.prepSince || performance.now() : 0;
     this.activity();
   }
@@ -1540,7 +1530,7 @@ var Panel = class {
     const el = this.$("#pkgs");
     const p = this.pkgNow;
     const prep = this.prepSince && performance.now() - this.prepSince > 400;
-    const long = this.buildSince && performance.now() - this.buildSince > 400 || prep;
+    const long = !!this.words.preparing && (this.buildSince && performance.now() - this.buildSince > 400 || prep);
     const on = (!!this.last || this.viewer.pages > 0) && (!!p || !!long);
     el.classList.toggle("on", on);
     if (on || this.buildSince || this.prepSince) this.actTick ??= setInterval(() => this.activity(), 250);
@@ -2188,7 +2178,7 @@ var Panel = class {
     this.debugOn = !this.debugOn;
     this.$("#dbg").setAttribute("aria-pressed", String(this.debugOn));
     this.$("#dbg2").checked = this.debugOn;
-    this.ev.onDebug(this.debugOn);
+    this.ev.onDebug?.(this.debugOn);
     this.msg(this.debugOn ? "debug check on" : "debug check off");
     this.emit();
   }
@@ -4358,8 +4348,6 @@ var panel = new Panel(
       a.download = "";
       a.click();
     },
-    onDebug: () => {
-    },
     onMain: () => {
     },
     onReload: () => void session.resync(),
@@ -4399,7 +4387,7 @@ var panel = new Panel(
       openFailed: "Restart phitex watch, then reload this page.",
       reading: "Reading the document from phitex watch.",
       keptIn: "this machine",
-      preparing: "Building\u2026 {s} s",
+      preparing: "",
       stopped: "The build stopped: its problems are listed above (e).",
       notReady: "This engine does not run here yet.",
       steps: ["Connected", "Format", "Building"],

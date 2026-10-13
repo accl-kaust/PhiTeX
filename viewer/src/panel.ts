@@ -71,7 +71,8 @@ export interface PanelEvents {
   /** Page `k` is wanted: in view, not drawn at its current hash. */
   onNeed?(k: number): void;
   onPdf(): void;
-  onDebug(on: boolean): void;
+  /** The debug check (a fresh build compared every 5 s): absent, no debug button. */
+  onDebug?(on: boolean): void;
   onMain(m: string): void;
   onReload(): void;
   /** Clean recompile: the project read again, typeset from the start. */
@@ -111,7 +112,7 @@ export interface PanelWords {
   /** The line under the page, and what it opens. */
   byline: string;
   about: string;
-  /** The strip while the core readies its next rebuild (`{s}`: the seconds so far). */
+  /** The strip while the core readies its next rebuild (`{s}`: the seconds so far); empty: no strip for builds at all (the host shows them). */
   preparing: string;
   /** Where the full license is. */
   license: string;
@@ -587,6 +588,7 @@ export class Panel {
     if (license) license.href = opts.fileUrl?.(w.license) ?? w.license;
     // (what the host doesn't handle, not offered)
     if (!ev.onTour) this.$("#tour").style.display = "none";
+    if (!ev.onDebug) for (const id of ["#dbg", "#dbg2"]) (this.$(id).closest("label") ?? this.$(id)).style.display = "none";
     if (!ev.onNews) this.$("#news").style.display = "none";
     this.$("#byline").onclick = (e) => {
       e.stopPropagation();
@@ -782,6 +784,8 @@ export class Panel {
   private prepSince = 0;
   /** The core readying its next rebuild: past 400 ms the strip says so, not "Typesetting". */
   preparing(on: boolean): void {
+    // (a host that shows its builds itself, the CLI's status bar: no strip)
+    if (!this.words.preparing) return;
     this.prepSince = on ? this.prepSince || performance.now() : 0;
     this.activity();
   }
@@ -805,7 +809,8 @@ export class Panel {
     const el = this.$("#pkgs");
     const p = this.pkgNow;
     const prep = this.prepSince && performance.now() - this.prepSince > 400;
-    const long = (this.buildSince && performance.now() - this.buildSince > 400) || prep;
+    // (a host that shows its builds itself, the CLI's status bar: only fetches here)
+    const long = !!this.words.preparing && ((this.buildSince && performance.now() - this.buildSince > 400) || prep);
     // (over a page on screen; before any page, the loading card says it all)
     const on = (!!this.last || this.viewer.pages > 0) && (!!p || !!long);
     el.classList.toggle("on", on);
@@ -1544,7 +1549,7 @@ export class Panel {
     this.debugOn = !this.debugOn;
     this.$("#dbg").setAttribute("aria-pressed", String(this.debugOn));
     this.$<HTMLInputElement>("#dbg2").checked = this.debugOn;
-    this.ev.onDebug(this.debugOn);
+    this.ev.onDebug?.(this.debugOn);
     this.msg(this.debugOn ? "debug check on" : "debug check off");
     this.emit();
   }

@@ -193,7 +193,6 @@ const panel = new Panel(
       a.download = "";
       a.click();
     },
-    onDebug: () => {},
     onMain: () => {},
     onReload: () => void session.resync(),
     onClean: () => void session.resync(),
@@ -233,7 +232,7 @@ const panel = new Panel(
       openFailed: "Restart phitex watch, then reload this page.",
       reading: "Reading the document from phitex watch.",
       keptIn: "this machine",
-      preparing: "Building… {s} s",
+      preparing: "",
       stopped: "The build stopped: its problems are listed above (e).",
       notReady: "This engine does not run here yet.",
       steps: ["Connected", "Format", "Building"],
