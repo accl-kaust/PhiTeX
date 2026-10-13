@@ -1031,7 +1031,8 @@ impl Graph {
                 any,
             }))
         });
-        let breaks = eng.register(Arc::new(crate::page::Breaks(shared.clone())));
+        let pageplan = eng.register(Arc::new(crate::page::PagePlan(shared.clone())));
+        let brk = eng.register(Arc::new(crate::page::Brk(shared.clone())));
         let dvi = eng.register(Arc::new(Dvi));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
@@ -1046,7 +1047,8 @@ impl Graph {
             put,
             pagestep,
             pagestep_any,
-            breaks,
+            pageplan,
+            brk,
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
         };
@@ -1077,6 +1079,10 @@ impl Graph {
             let f = eng.values().field(&format!("pagefx:{j}"));
             let none = eng.values().list(Vec::new());
             eng.declare_loopback(f, none);
+            // what `\count0..9` are after page j's step (the build's
+            // guess in round one, `page_guesses`)
+            let f = eng.values().field(&format!("pgdef:{j}"));
+            eng.declare_loopback(f, ValueId::UNIT);
         }
         for f in crate::hints::COUNTERS {
             let fld = eng.values().field(f);
@@ -2040,8 +2046,9 @@ impl Build {
         let nodes = g.push_text(unit, &as_file(document), &defs, doc);
         // the page builder's fold, after the text: one node choosing every
         // page break, its children the pages
-        let breaks = g.ops.breaks;
-        let _ = g.eng.push(unit, breaks, Vec::new());
+        let pageplan = g.ops.pageplan;
+        let _ = g.eng.push(unit, pageplan, Vec::new());
+        page_guesses(&mut g, &env);
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
         let files_op = g.files_op;
@@ -2865,5 +2872,30 @@ mod prelude_tests {
         assert!(deserialise(&other).is_none());
         // the old layout, with no header
         assert!(deserialise(&b[20..]).is_none());
+    }
+}
+
+/// The cold guess of the page steps' loop-back `pgdef:<j>` (`\count0..9`
+/// after page j's step), declared as its round-one value before the
+/// first evaluation: `\count0` advanced by one per page (plain's and
+/// LaTeX's routines), the others as the format left them. A right guess
+/// costs nothing; a wrong one re-runs the steps after it.
+fn page_guesses(g: &mut Graph, env: &Env) {
+    let v = g.eng.values();
+    let int = |k: &str| {
+        env.iter()
+            .find(|(n, _)| n == k)
+            .map_or(0, |(_, t)| crate::val::int_of(v, import(v, t)))
+    };
+    let base: Vec<i64> = (0..10).map(|k| int(&format!("count:{k}"))).collect();
+    let mut decl = Vec::new();
+    for j in 0..crate::page::MAX_PAGES {
+        let d = i64::try_from(j).unwrap_or(0) + 1;
+        let mut cs: Vec<ValueId> = base.iter().map(|&c| v.int(c)).collect();
+        cs[0] = v.int(if base[0] >= 0 { base[0] + d } else { base[0] - d });
+        decl.push((v.field(&format!("pgdef:{j}")), v.list(cs)));
+    }
+    for (f, x) in decl {
+        g.eng.declare_loopback(f, x);
     }
 }
