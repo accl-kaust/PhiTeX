@@ -714,6 +714,17 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             *c = true;
         }
     }
+    // the operands of a primitive (`\sfcode`\)=0`): never a slice's
+    // start, so a command and what it reads are one node (a macro's
+    // operands are the pass's guess and do not count)
+    let mut operand = vec![false; n];
+    for it in &p.items {
+        if crate::prims::PRIMS.iter().any(|q| q.0 == it.name) {
+            for c in operand.iter_mut().take(it.end.min(n)).skip(it.atom + 1) {
+                *c = true;
+            }
+        }
+    }
     // the conditional nesting before each atom, by the text's items
     // (`\if…` +1, `\fi` -1; an item an earlier one consumes not counted)
     let mut ifd = vec![0i64; n + 1];
@@ -836,7 +847,7 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
     for (k, a) in p.atoms.iter().enumerate() {
         let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
         let inside_if = ifd[k] > 0 && (a.kind != AtomKind::Cs || !CONDITIONALS.contains(&a.name(text)));
-        if !(ch && prev_char) && !inside_if && !inside[k] {
+        if !(ch && prev_char) && !inside_if && !inside[k] && !operand[k] {
             starts.push(a.start);
         }
         prev_char = ch;
