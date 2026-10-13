@@ -73,22 +73,38 @@ pub(crate) struct FileRest {
     pub off: usize,
     /// The file's name, for positions (a string value).
     pub name: ValueId,
+    /// The characters before `off` (kept as lines are taken: counting
+    /// them from the start at every line made reading a file quadratic).
+    pos: usize,
 }
 
 impl FileRest {
     pub(crate) fn new(v: &Values, id: ValueId, off: usize, name: ValueId) -> FileRest {
+        let text = v.get(id);
+        let pos = match &*text {
+            phitex_defuse::Value::Str(s) => s.get(..off).map_or(0, |p| p.chars().count()),
+            _ => 0,
+        };
         FileRest {
             id,
-            text: v.get(id),
+            text,
             off,
             name,
+            pos,
         }
     }
 
     /// The position of the next line in the file (its characters are the
     /// file's bytes).
     fn byte_pos(&self) -> usize {
-        self.str()[..self.off].chars().count()
+        self.pos
+    }
+
+    /// The file's name and the line number of the next line, for
+    /// diagnostics ([`Run::heartbeat`]).
+    pub(crate) fn where_(&self, v: &Values) -> (String, usize) {
+        let line = self.str()[..self.off].matches('\n').count() + 1;
+        (crate::val::str_of(v, self.name), line)
     }
 
     fn str(&self) -> &str {
@@ -109,6 +125,7 @@ impl FileRest {
         let rest = &s[self.off..];
         let n = rest.find('\n').map_or(rest.len(), |k| k + 1);
         let line = rest[..n].to_owned();
+        self.pos += line.chars().count();
         self.off += n;
         line
     }
