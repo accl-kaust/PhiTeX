@@ -1103,6 +1103,20 @@ fn balanced(an: &Analysis<'_>, text: &str, s: usize, e: usize) -> bool {
                     "egroup" => bg -= 1,
                     _ if crate::prims::PRIMS.iter().any(|q| q.0 == n) => {}
                     _ => {
+                        if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                            let set = an.defset(n);
+                            let g: Vec<&str> = ["begingroup", "endgroup", "bgroup", "egroup"]
+                                .into_iter()
+                                .filter(|x| set.calls.iter().any(|c| c == x))
+                                .collect();
+                            if !g.is_empty() || !set.unbounded.is_empty() {
+                                eprintln!(
+                                    "slices: balance \\{n}: {g:?} unbounded {:?} calls {}",
+                                    set.unbounded.first(),
+                                    set.calls.len()
+                                );
+                            }
+                        }
                         for c in an.defset(n).calls {
                             if !calls.contains(&c) {
                                 calls.push(c);
