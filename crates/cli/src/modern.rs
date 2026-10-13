@@ -150,6 +150,11 @@ struct Opts {
     /// faster mode, pages written apart, may number them differently)
     #[arg(long = "exact-pdf", global = true)]
     exact_pdf: bool,
+    /// Whether the engine runs steps ahead of their inputs: on those an
+    /// earlier run predicts (the default), never, or on any (not usable
+    /// yet). The output is the same either way.
+    #[arg(long = "spec", value_name = "WHEN", value_parser = ["off", "predicted", "all"], global = true)]
+    spec: Option<String>,
     /// Each run, each warning's first lines, an engine failure's whole
     /// message (-vv: more)
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
@@ -211,6 +216,7 @@ pub struct Options {
     pub output_dir: Option<String>,
     pub threads: Option<usize>,
     pub exact_pdf: bool,
+    pub spec: Option<String>,
     pub verbose: u8,
     pub quiet: bool,
     pub json: bool,
@@ -246,6 +252,7 @@ impl Cli {
             output_dir: o.output_dir,
             threads: o.jobs,
             exact_pdf: o.exact_pdf,
+            spec: o.spec,
             verbose: o.verbose,
             quiet: o.quiet,
             json: o.json,
@@ -408,6 +415,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
         // (batch mode, as the oracles run: the CLI shows the errors itself)
         threads: o.threads,
         exact_pdf: o.exact_pdf,
+        spec: o.spec.clone(),
         synctex: t.synctex,
         recorder: false,
         shell_escape: t.shell_escape,
