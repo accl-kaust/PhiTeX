@@ -9,7 +9,7 @@
 //! Whatever the mode does not cover asks for exact mode (a `pdf:exact`
 //! need): the build is then evaluated again with the fold.
 
-use std::collections::HashMap;
+use phitex_defuse::FxHashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use phitex_defuse::{Ctx, Stop, Value, ValueId, Values};
@@ -26,24 +26,24 @@ use crate::val::{int_of, list_of, str_of};
 /// object made at read time, in document order.
 pub(crate) const PIECES: &str = "pdf:pieces";
 
-type Memo<T> = Mutex<HashMap<u64, Arc<T>>>;
+type Memo<T> = Mutex<FxHashMap<u64, Arc<T>>>;
 
 /// The pieces by digest: a pure function's memo.
 fn pieces() -> &'static Memo<Piece> {
     static P: OnceLock<Memo<Piece>> = OnceLock::new();
-    P.get_or_init(|| Mutex::new(HashMap::new()))
+    P.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// The carry and the pages shipped before it, by digest.
 fn carries() -> &'static Memo<(Carry, usize)> {
     static C: OnceLock<Memo<(Carry, usize)>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+    C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// The pages written, by the digest of their inputs.
 fn written() -> &'static Memo<Piece> {
     static W: OnceLock<Memo<Piece>> = OnceLock::new();
-    W.get_or_init(|| Mutex::new(HashMap::new()))
+    W.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// The pages the relaxed writer wrote, all builds together (gate 3's
@@ -182,9 +182,9 @@ fn maps(r: &mut Run<'_, '_>) -> R<Vec<(bool, Vec<u8>)>> {
 fn referenced(
     r: &mut Run<'_, '_>,
     ws: impl Iterator<Item = Whatsit>,
-) -> R<HashMap<usize, Arc<Piece>>> {
+) -> R<FxHashMap<usize, Arc<Piece>>> {
     let v = r.v;
-    let mut out = HashMap::new();
+    let mut out = FxHashMap::default();
     for w in ws {
         let (Whatsit::RefXForm(h) | Whatsit::RefXImage(h)) = w else {
             continue;
@@ -275,7 +275,7 @@ pub(crate) fn ship(
     let pm = fix(r, &pm)?;
     let (carry, n) = carry_here(r)?;
     // the whatsits once, for the objects they refer to
-    let mut seen: HashMap<u32, Option<Whatsit>> = HashMap::new();
+    let mut seen: FxHashMap<u32, Option<Whatsit>> = FxHashMap::default();
     let mut look = |h: u32| -> Option<Whatsit> { seen.entry(h).or_insert_with(|| wh(h)).clone() };
     let mut all = Vec::new();
     collect_whats(bx, &mut |h| all.push(look(h)));

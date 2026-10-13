@@ -2,7 +2,7 @@
 //! parsed once per (file, size) for the process, and answered to
 //! `phitex-typeset` through its `Fonts` trait.
 
-use std::collections::HashMap;
+use phitex_defuse::FxHashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use phitex_defuse::{ValueId, Values};
@@ -17,13 +17,13 @@ pub(crate) struct Loaded {
     pub at: ScaledFont,
 }
 
-type Cache = Mutex<HashMap<(u64, i32), Option<Arc<Loaded>>>>;
+type Cache = Mutex<FxHashMap<(u64, i32), Option<Arc<Loaded>>>>;
 
 /// The process's parsed fonts: a pure function's memo, by the file's
 /// value and the size.
 fn cache() -> &'static Cache {
     static C: OnceLock<Cache> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+    C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 pub(crate) fn bytes_of(text: &str) -> Vec<u8> {
@@ -62,9 +62,9 @@ pub(crate) fn load(v: &Values, file: ValueId, s: i32) -> Option<Arc<Loaded>> {
 /// `\hyphenchar`s.
 #[derive(Default)]
 pub(crate) struct View {
-    pub fonts: HashMap<FontId, (Arc<Loaded>, Vec<i32>)>,
-    pub hyphen: HashMap<FontId, i32>,
-    pub names: HashMap<FontId, (String, i32)>,
+    pub fonts: FxHashMap<FontId, (Arc<Loaded>, Vec<i32>)>,
+    pub hyphen: FxHashMap<FontId, i32>,
+    pub names: FxHashMap<FontId, (String, i32)>,
 }
 
 /// A `fontinfo:<f>` value: name, size, design size, file value, `s`.

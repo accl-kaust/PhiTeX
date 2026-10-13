@@ -31,6 +31,7 @@ use phitex_typeset::pack::{PackParams, Spec};
 use phitex_typeset::page::{InsertClass, Outcome, PageBuilder, PageParams};
 
 use crate::build::Mode;
+use crate::fields::Par;
 use crate::nodes::{self, Side};
 use crate::ops::{Shared, client_only, ops, run_node};
 use crate::run::{R, Run};
@@ -226,12 +227,15 @@ impl Run<'_, '_> {
                 crate::val::glue_value(v, &c.skip),
             ]));
         }
-        let output = self.get("param:output")?;
+        let output = self.par(Par::output)?;
         let any = toks_of(v, output).is_empty();
         let mut start = PageStart::FIRST;
         let mut marks = MarksState::default();
-        let mut published = std::collections::HashSet::new();
+        let mut published = phitex_defuse::FxHashSet::default();
         let mut starts = vec![start.value(v)];
+        // (each page's `\\topmark` and `\\botmark` before it fires,
+        // §1012: from the plan, so a step never reads its predecessor's)
+        let mut before: Vec<ValueId> = Vec::new();
         let mut ended = false;
         let mut plan: Vec<ValueId> = Vec::new();
         let mut j = 0;
@@ -261,6 +265,9 @@ impl Run<'_, '_> {
                     .iter()
                     .filter_map(|&k| side.marks.get(k as usize).copied())
                     .collect();
+                let [t, _, b] = marks.0.get(&0).copied().unwrap_or([None; 3]);
+                let u = |m: Option<ValueId>| m.unwrap_or(ValueId::UNIT);
+                before.push(v.list(vec![u(t), u(b)]));
                 marks.fire_values(v, &ms);
                 starts.push(end.value(v));
                 start = end;
@@ -285,6 +292,9 @@ impl Run<'_, '_> {
         self.set("pp:marker", marker, true);
         for (j, &s) in starts.iter().enumerate() {
             self.set(&format!("pp:start:{j}"), s, true);
+        }
+        for (j, &m) in before.iter().enumerate() {
+            self.set(&format!("pp:mk:{j}"), m, true);
         }
         for j in 0..starts.len() {
             self.kid(self.ops.brk, vec![v.int(i64::try_from(j).unwrap_or(0))]);
@@ -330,7 +340,8 @@ impl Run<'_, '_> {
         drop(guard);
         if let Some((f, side, _)) = out.fired {
             let data = self.page_data(&f, &side)?;
-            self.kid(op, vec![v.int(i64::try_from(j).unwrap_or(0)), data]);
+            let mk = self.get(&format!("pp:mk:{j}"))?.unwrap_or(ValueId::UNIT);
+            self.kid(op, vec![v.int(i64::try_from(j).unwrap_or(0)), data, mk]);
         }
         Ok(())
     }
@@ -341,7 +352,7 @@ impl Run<'_, '_> {
             return Ok(Vec::new());
         }
         let v = self.v;
-        let f = v.field(&format!("pagefx:{j}"));
+        let f = self.keyed(crate::fields::Fam::Pagefx, &j.to_string());
         if !self.cx.is_loopback(f) {
             return Ok(Vec::new());
         }
@@ -406,15 +417,36 @@ impl Run<'_, '_> {
                             &format!("count:{k}"),
                         );
                         self.over.insert(cf, c);
+                        self.slot_note(cf, None);
                     }
                 }
             }
         }
+        // `\\deadcycles` as the step before left it (`pagedc:<j-1>`, a
+        // loop-back; round one's guess 0: a routine that ships resets
+        // it, §638): a wrong guess is refuted by the next round
+        if j > 0 && j < MAX_PAGES {
+            let f = v.field(&format!("pagedc:{}", j - 1));
+            let dc = self
+                .cx
+                .use_field(f)?
+                .filter(|&x| x != ValueId::UNIT)
+                .unwrap_or_else(|| v.int(0));
+            let df = self
+                .ops
+                .fields
+                .get_at(v, self.cx.values_epoch(), "deadcycles");
+            self.over.insert(df, dc);
+        }
         let d = args.get(1).copied().unwrap_or(ValueId::UNIT);
-        if self.fire_page(d)? {
+        if self.fire_page(d, args.get(2).copied())? {
             self.run_all()?;
         }
         if j < MAX_PAGES {
+            let dc = self.int("deadcycles")?;
+            // (0, the usual value, as the declared start: no change)
+            let x = if dc == 0 { ValueId::UNIT } else { v.int(dc) };
+            self.cx.publish(v.field(&format!("pagedc:{j}")), x);
             let mut cs = Vec::new();
             for k in 0..10 {
                 cs.push(v.int(self.int(&format!("count:{k}"))?));
@@ -428,7 +460,7 @@ impl Run<'_, '_> {
     /// the page shipped by the default routine (false), or the output
     /// routine's group opened and its tokens pushed (true): the caller
     /// runs them.
-    pub(crate) fn fire_page(&mut self, d: ValueId) -> R<bool> {
+    pub(crate) fn fire_page(&mut self, d: ValueId, mk: Option<ValueId>) -> R<bool> {
         let v = self.v;
         let data = list_of(v, d);
         let a = |i: usize| data.get(i).copied().unwrap_or(ValueId::UNIT);
@@ -436,8 +468,17 @@ impl Run<'_, '_> {
             (a(0), list_of(v, a(1)), list_of(v, a(2)), list_of(v, a(3)));
         let output_penalty = data.get(4).map_or(0, |&x| int_of(v, x));
         // §1012: marks
-        let bot = self.get("mark:bot")?.filter(|&x| x != ValueId::UNIT);
-        let mut top = self.get("mark:top")?.filter(|&x| x != ValueId::UNIT);
+        // (the marks before the page, from the plan: `pp:mk:<j>`)
+        let (mut top, bot) = match mk.map(|x| list_of(v, x)) {
+            Some(xs) if xs.len() == 2 => {
+                let m = |x: ValueId| Some(x).filter(|&x| x != ValueId::UNIT);
+                (m(xs[0]), m(xs[1]))
+            }
+            _ => (
+                self.get("mark:top")?.filter(|&x| x != ValueId::UNIT),
+                self.get("mark:bot")?.filter(|&x| x != ValueId::UNIT),
+            ),
+        };
         let mut first = None;
         let mut new_bot = bot;
         if bot.is_some() {
@@ -483,7 +524,7 @@ impl Run<'_, '_> {
             self.set(&format!("box:{n}"), v.list(vec![v.int(0), b]), true);
         }
         self.set("param:outputpenalty", v.int(output_penalty), true);
-        let output = self.get("param:output")?;
+        let output = self.par(Par::output)?;
         let otoks = toks_of(v, output);
         if otoks.is_empty() {
             // §1023: the default output routine
@@ -542,7 +583,11 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
     if !left.is_empty() {
         let j = r.page_index();
         if j < MAX_PAGES {
-            r.cx.publish(v.field(&format!("pagefx:{j}")), v.list(left));
+            let x = v.list(left);
+            r.cx.publish(r.keyed(crate::fields::Fam::Pagefx, &j.to_string()), x);
+            // (kept for the client: the next session's round-one guess)
+            let jj = i64::try_from(j).unwrap_or(0);
+            r.contribute("pagefxs", v.seq_unit(v.list(vec![v.int(jj), x])));
         }
     }
     r.set("deadcycles", v.int(0), true);
@@ -554,10 +599,10 @@ impl Run<'_, '_> {
     /// (`T_PAGE_PARAMS`).
     pub(crate) fn page_params_marker(&mut self) -> R<ValueId> {
         let v = self.v;
-        let vsize = self.param("vsize")?;
-        let maxdepth = self.param("maxdepth")?;
-        let topskip = self.glue_param("topskip")?;
-        let holding = self.param("holdinginserts")?;
+        let vsize = self.ipar(Par::vsize)?;
+        let maxdepth = self.ipar(Par::maxdepth)?;
+        let topskip = self.gpar(Par::topskip)?;
+        let holding = self.ipar(Par::holdinginserts)?;
         Ok(v.list(vec![
             v.int(nodes::T_PAGE_PARAMS),
             v.int(i64::from(vsize)),
@@ -811,11 +856,16 @@ fn fold_page(
         let Some(p) = nodes::decode(v, x, &mut side) else {
             continue;
         };
-        let next = queue
-            .front()
-            .copied()
-            .or_else(|| items.get(cursor).copied())
-            .and_then(|y| nodes::decode(v, y, &mut Side::default()));
+        // §1000: only a kern looks at what follows it
+        let next = if matches!(p, Node::Kern(..)) {
+            queue
+                .front()
+                .copied()
+                .or_else(|| items.get(cursor).copied())
+                .and_then(|y| nodes::decode(v, y, &mut Side::default()))
+        } else {
+            None
+        };
         if let Outcome::Fire(f) = pb.contribute(p, next.as_ref(), &params, &mut class) {
             let mut carried: Vec<ValueId> = f
                 .contributions
@@ -913,8 +963,15 @@ impl Operation for PageStep {
     fn name(&self) -> &'static str {
         if self.any { "pagestep_any" } else { "pagestep" }
     }
+    /// The page's own fields and what the output routine's commands
+    /// define ([`crate::hints::page_step_may_define`]).
     fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
-        MayDefine::Any
+        let defs = ops(&self.shared)
+            .defs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        crate::hints::page_step_may_define(&defs)
     }
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         None
@@ -929,7 +986,23 @@ impl Operation for PageStep {
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let args = cx.args();
-        run_node(cx, ops(&self.shared), |r| r.page_step(&args))
+        let o = ops(&self.shared);
+        let done = o.steps_done.clone();
+        let j = args
+            .first()
+            .and_then(|&x| cx.values().as_int(x))
+            .and_then(|x| usize::try_from(x).ok());
+        let out = run_node(cx, o, |r| r.page_step(&args))?;
+        if let Some(j) = j {
+            let mut d = done
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if d.len() <= j {
+                d.resize(j + 1, 0);
+            }
+            d[j] += 1;
+        }
+        Ok(out)
     }
 }
 
@@ -938,6 +1011,19 @@ const MAX_DIMEN: i32 = 0o7777777777;
 /// `Dvi`: the pages, written (§583–§645). The comment and `\mag` are
 /// read at the end.
 pub(crate) fn dvi(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+    let t0 = std::time::Instant::now();
+    let r = dvi_file(cx);
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        eprintln!(
+            "output file (dvi root run): {:?}{}",
+            t0.elapsed(),
+            if r.is_ok() { "" } else { " (stopped)" }
+        );
+    }
+    r
+}
+
+fn dvi_file(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     let v = cx.values();
     let pages = cx.acc_range(v.field("pages"), None)?;
     let all = v.seq_to_vec(pages);
@@ -987,7 +1073,7 @@ fn dvi_page(v: &Values, w: &mut phitex_dvi::DviWriter, page: ValueId) {
     {
         counts[k] = i32::try_from(int_of(v, *c)).unwrap_or(0);
     }
-    let mut defs = std::collections::HashMap::new();
+    let mut defs = phitex_defuse::FxHashMap::default();
     for fx in xs.get(2).map(|&l| list_of(v, l)).unwrap_or_default() {
         let ys = list_of(v, fx);
         let id = u32::try_from(ys.first().map_or(0, |&y| int_of(v, y))).unwrap_or(0);

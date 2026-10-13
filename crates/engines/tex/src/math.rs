@@ -22,6 +22,7 @@ use phitex_typeset::pack::PackParams;
 use phitex_typeset::pack::Spec;
 
 use crate::build::Mode;
+use crate::fields::Par;
 use crate::nodes::{self, Side, T_DELETE};
 use crate::run::{R, Run};
 use crate::val::{Tok, cmd, group, int_of, list_of};
@@ -239,8 +240,8 @@ impl Run<'_, '_> {
     fn go_into_math(&mut self, md: &Mode, code: i64) -> R<()> {
         let v = self.v;
         self.push_math(md, group::MATH_SHIFT, -203, vec![v.int(code)]);
-        self.set("param:fam", v.int(-1), false);
-        let e = self.get("param:everymath")?;
+        self.set_par(Par::fam, v.int(-1), false);
+        let e = self.par(Par::everymath)?;
         let toks = crate::val::toks_of(v, e);
         self.push_toks(toks);
         Ok(())
@@ -277,9 +278,9 @@ impl Run<'_, '_> {
             .map(|&x| i32::try_from(int_of(v, x)).unwrap_or(0))
             .collect();
         let (l, s) = if shape.len() < 2 {
-            let hi = self.param("hangindent")?;
-            let ha = self.param("hangafter")?;
-            let hsize = self.param("hsize")?;
+            let hi = self.ipar(Par::hangindent)?;
+            let ha = self.ipar(Par::hangafter)?;
+            let hsize = self.ipar(Par::hsize)?;
             if hi != 0 && ((ha >= 0 && pg + 2 > ha) || (pg + 1 < -ha)) {
                 (hsize - hi.abs(), hi.max(0))
             } else {
@@ -293,11 +294,11 @@ impl Run<'_, '_> {
         let vm = md.vm;
         let extra = vec![v.int(1), v.int(md.vlid), v.int(i64::from(vm))];
         self.push_list(203, group::MATH_SHIFT, extra);
-        self.set("param:fam", v.int(-1), false);
-        self.set("param:predisplaysize", v.int(i64::from(w)), false);
-        self.set("param:displaywidth", v.int(i64::from(l)), false);
-        self.set("param:displayindent", v.int(i64::from(s)), false);
-        let e = self.get("param:everydisplay")?;
+        self.set_par(Par::fam, v.int(-1), false);
+        self.set_par(Par::predisplaysize, v.int(i64::from(w)), false);
+        self.set_par(Par::displaywidth, v.int(i64::from(l)), false);
+        self.set_par(Par::displayindent, v.int(i64::from(s)), false);
+        let e = self.par(Par::everydisplay)?;
         let toks = crate::val::toks_of(v, e);
         self.push_toks(toks);
         Ok(())
@@ -370,7 +371,7 @@ impl Run<'_, '_> {
     }
 
     fn fam_in_range(&mut self) -> R<Option<i32>> {
-        let f = self.param("fam")?;
+        let f = self.ipar(Par::fam)?;
         Ok((0..16).contains(&f).then_some(f))
     }
 
@@ -549,7 +550,7 @@ impl Run<'_, '_> {
                 let extra = vec![v.int(spec.0), v.int(i64::from(spec.1)), v.int(md.lid)];
                 self.push_list(-1, group::VCENTER, extra);
                 self.normal_paragraph()?;
-                let e = self.get("param:everyvbox")?;
+                let e = self.par(Par::everyvbox)?;
                 let toks = crate::val::toks_of(v, e);
                 self.push_toks(toks);
             }
@@ -606,7 +607,7 @@ impl Run<'_, '_> {
             cmd::START_PAR => {
                 // §1093
                 if self.cur.chr > 0 {
-                    let w = self.int32("param:parindent")?;
+                    let w = self.ipar(Par::parindent)?;
                     let b = crate::build::null_box(v, w);
                     self.append(md.lid, box_noad(v, b));
                 }
@@ -901,7 +902,7 @@ impl Run<'_, '_> {
     /// §1196: the formula in text.
     fn finish_text_math(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
-        let surround = self.param("mathsurround")?;
+        let surround = self.ipar(Par::mathsurround)?;
         let outer = self.outer_mode(md)?;
         let hl = self.formula_hlist(md, Style::TEXT, outer.m > 0)?;
         let outer = self.close_group(md)?;
@@ -933,8 +934,8 @@ impl Run<'_, '_> {
         let t = natural.adjustments.clone();
         let mut b = natural.node;
         let mut w = b.width;
-        let z = self.param("displaywidth")?;
-        let s = self.param("displayindent")?;
+        let z = self.ipar(Par::displaywidth)?;
+        let s = self.ipar(Par::displayindent)?;
         let (mut e, q) = match &a {
             Some(a) if !danger => {
                 let f2 = self.int("fam:0:2")?;
@@ -986,9 +987,9 @@ impl Run<'_, '_> {
             let y = nodes::penalty_node(r.v, n);
             r.append(vlid, y);
         };
-        let pre = self.param("predisplaypenalty")?;
+        let pre = self.ipar(Par::predisplaypenalty)?;
         pen(self, pre);
-        let presize = self.param("predisplaysize")?;
+        let presize = self.ipar(Par::predisplaysize)?;
         let (g1, mut g2) = if d + s <= presize || left {
             (3u8, 4u8)
         } else {
@@ -1045,7 +1046,7 @@ impl Run<'_, '_> {
             let y = nodes::encode(v, n, &side);
             self.append(vlid, y);
         }
-        let post = self.param("postdisplaypenalty")?;
+        let post = self.ipar(Par::postdisplaypenalty)?;
         pen(self, post);
         if g2 > 0 {
             skip(self, g2)?;
@@ -1054,9 +1055,9 @@ impl Run<'_, '_> {
         self.close_group(dmd)?;
         let pg = self.prev_graf(&vm)?;
         self.set_prev_graf(&vm, pg + 3);
-        let lang = i64::from(phitex_typeset::hyph::cur_lang(self.param("language")?));
-        let lhm = Self::norm_min(self.param("lefthyphenmin")?);
-        let rhm = Self::norm_min(self.param("righthyphenmin")?);
+        let lang = i64::from(phitex_typeset::hyph::cur_lang(self.ipar(Par::language)?));
+        let lhm = Self::norm_min(self.ipar(Par::lefthyphenmin)?);
+        let rhm = Self::norm_min(self.ipar(Par::righthyphenmin)?);
         let packed = (lhm * 64 + rhm) * 65536 + lang;
         // §1200: a new paragraph (push_nest, mode hmode)
         self.push_list(102, 0, Vec::new());
@@ -1108,15 +1109,15 @@ impl Run<'_, '_> {
         let sk = move |f: u32| skew.get(&f).copied().unwrap_or(-1);
         let params = MathParams {
             fam_fnt,
-            thin_mu_skip: self.glue_param("thinmuskip")?,
-            med_mu_skip: self.glue_param("medmuskip")?,
-            thick_mu_skip: self.glue_param("thickmuskip")?,
-            script_space: self.param("scriptspace")?,
-            null_delimiter_space: self.param("nulldelimiterspace")?,
-            delimiter_factor: self.param("delimiterfactor")?,
-            delimiter_shortfall: self.param("delimitershortfall")?,
-            bin_op_penalty: self.param("binoppenalty")?,
-            rel_penalty: self.param("relpenalty")?,
+            thin_mu_skip: self.gpar(Par::thinmuskip)?,
+            med_mu_skip: self.gpar(Par::medmuskip)?,
+            thick_mu_skip: self.gpar(Par::thickmuskip)?,
+            script_space: self.ipar(Par::scriptspace)?,
+            null_delimiter_space: self.ipar(Par::nulldelimiterspace)?,
+            delimiter_factor: self.ipar(Par::delimiterfactor)?,
+            delimiter_shortfall: self.ipar(Par::delimitershortfall)?,
+            bin_op_penalty: self.ipar(Par::binoppenalty)?,
+            rel_penalty: self.ipar(Par::relpenalty)?,
             skew_char: &sk,
         };
         let (h, _diags) =

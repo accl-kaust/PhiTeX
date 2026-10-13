@@ -42,7 +42,7 @@
 //! `PHITEX_HINTS=1` prints each distinct node text's answer and cause;
 //! `PHITEX_HINTS_OFF=1` answers `Any` for every node (the comparison).
 
-use std::collections::HashMap;
+use phitex_defuse::FxHashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -313,7 +313,7 @@ const MATH_SHIFT: &[&str] = &[
 /// A parameter's own field (`param:<name>`), for a parameter assigned
 /// by name (§1228).
 fn param_row(name: &str) -> Option<&'static [&'static str]> {
-    static ROWS: OnceLock<HashMap<&'static str, [&'static str; 1]>> = OnceLock::new();
+    static ROWS: OnceLock<FxHashMap<&'static str, [&'static str; 1]>> = OnceLock::new();
     ROWS.get_or_init(|| {
         crate::prims::PRIMS
             .iter()
@@ -330,7 +330,7 @@ fn param_row(name: &str) -> Option<&'static [&'static str]> {
 
 /// Whether `name` is a primitive (a set built once).
 fn is_prim(name: &str) -> bool {
-    static S: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
+    static S: OnceLock<phitex_defuse::FxHashSet<&'static str>> = OnceLock::new();
     S.get_or_init(|| crate::prims::PRIMS.iter().map(|p| p.0).collect())
         .contains(name)
 }
@@ -915,6 +915,13 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
         }
     }
     for g in &p.groups {
+        // (the document environment: its `\\begin` opens the scope the
+        // body's regions run in, an engine scope, so its body is sliced
+        // like top-level text; `\\begin{document}` and `\\end{document}`
+        // are slices of their own)
+        if doc_scope() && matches!(&g.kind, pass::GroupKind::Env(e) if e == "document") {
+            continue;
+        }
         if let (Some(o), Some(c)) = (g.open, g.close)
             && depth.get(o) == Some(&0)
         {
@@ -1394,14 +1401,16 @@ struct Analysis<'t> {
     p: Pass,
     defs: Definitions,
     /// Item index by atom.
-    item_of: HashMap<usize, usize>,
+    item_of: FxHashMap<usize, usize>,
     /// Atoms an earlier item claims (operands: never run on their own).
     claimed: Vec<bool>,
     /// Per atom: the index of its regime in the pass's regimes.
     reg: Vec<usize>,
     /// Atoms textually inside an alignment's braces (`\\halign{`…`}`).
     in_align: Vec<bool>,
-    memo: std::cell::RefCell<HashMap<String, DefSet>>,
+    memo: std::cell::RefCell<FxHashMap<String, DefSet>>,
+    /// The names whose state [`Analysis::defined_state`] is reading.
+    visiting: std::cell::RefCell<Vec<String>>,
     /// The format's definitions, behind the text's own.
     prelude: Defs,
 }
@@ -1544,7 +1553,8 @@ impl Analysis<'_> {
             claimed,
             reg,
             in_align,
-            memo: std::cell::RefCell::new(HashMap::new()),
+            memo: std::cell::RefCell::new(FxHashMap::default()),
+            visiting: std::cell::RefCell::new(Vec::new()),
             prelude,
         }
     }
@@ -2042,16 +2052,26 @@ impl Analysis<'_> {
                 // `\\edef` of it: what its bodies run, when the pass
                 // bounds that and it defines no name of its own)
                 let set = self.defset(name);
+                // (a name whose bodies run it again, directly or
+                // through others: its state is unbounded here, never a
+                // recursion without end)
+                let cyclic = self.visiting.borrow().iter().any(|v| v == name);
+                if cyclic {
+                    *st = None;
+                    return;
+                }
                 if set.unbounded.is_empty() && st.is_some() {
+                    self.visiting.borrow_mut().push(name.to_owned());
                     let mut b = Bound {
                         state: st.clone(),
                         ..Bound::default()
                     };
                     let mut c = String::new();
-                    if self.add_set(&set, &mut b, &mut c)
+                    let ok = self.add_set(&set, &mut b, &mut c)
                         && b.names.is_empty()
-                        && b.prefixes.is_empty()
-                    {
+                        && b.prefixes.is_empty();
+                    self.visiting.borrow_mut().pop();
+                    if ok {
                         *st = b.state;
                         return;
                     }
@@ -2353,7 +2373,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     let (slices, pars) = slices_of(text, &an.p, kind);
     let mut starts = Vec::with_capacity(an.p.atoms.len());
     let mut hints: Vec<Arc<Hint>> = Vec::with_capacity(an.p.atoms.len());
-    let mut memo: HashMap<String, Arc<str>> = HashMap::new();
+    let mut memo: FxHashMap<String, Arc<str>> = FxHashMap::default();
     let mut intern = |h: &Hint| -> Arc<str> {
         let s = h.encode();
         memo.entry(s.clone())
@@ -2475,10 +2495,23 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         {
             b.no_scope = true;
         }
+        // (`\\begin{document}`: its run leaves the environment's group
+        // open as the engine scope the body runs in, `Run::leave_scope`;
+        // what it defines is the document class's business: unbounded)
+        if kind == FileKind::Document && opens_document(&text[s..e]) {
+            let mut x = Hint::any("opens the document scope", &text[s..e]).encode();
+            x.push_str(OPENS_SCOPE);
+            slice_hints.push(Arc::from(x));
+            pending.clear();
+            continue;
+        }
         let excerpt = short(&text[s..text.len().min(s + 40)]);
         if t.pars[i] {
             if let Some(b) = &mut h.bound {
-                add_head(&mut b.state, "pg:");
+                // (its paragraph begins by running `\\everypar`, §1091,
+                // which may set `\\everypar` again: LaTeX's paragraph
+                // hooks do at every paragraph)
+                add_heads(&mut b.state, Some(&["pg:", "param:everypar"]));
                 "region".clone_into(&mut h.cause);
             } else {
                 h.cause = format!("region: {}", h.cause);
@@ -2567,13 +2600,13 @@ fn hash_str(s: &str) -> u64 {
     h.finish()
 }
 
-type Cache<K> = Mutex<HashMap<K, Arc<TextHints>>>;
+type Cache<K> = Mutex<FxHashMap<K, Arc<TextHints>>>;
 
 /// By the text, its kind and the definitions (one set per prelude, so
 /// its address identifies it).
 fn texts() -> &'static Cache<(u64, u8, usize)> {
     static C: OnceLock<Cache<(u64, u8, usize)>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+    C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// Registers a text's analysis under `name` (a string value): a node
@@ -2590,7 +2623,7 @@ pub(crate) fn register_text(name: ValueId, t: &Arc<TextHints>) {
 
 fn by_name() -> &'static Cache<u64> {
     static C: OnceLock<Cache<u64>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+    C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// Whether a text is written for INITEX's catcodes: its first `{` comes
@@ -2651,7 +2684,7 @@ pub(crate) fn hint_arg(v: &Values, t: &TextHints, s: usize) -> ValueId {
 
 fn by_id() -> &'static Cache<u64> {
     static C: OnceLock<Cache<u64>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+    C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// The regime of a file read by `\input`: its text value `id`, named
@@ -2695,8 +2728,8 @@ pub(crate) fn file_hints(v: &Values, id: ValueId, name: ValueId) -> Arc<TextHint
 /// The hint of a node from its arguments: the extra argument when the
 /// slice carries one, else its first text frame.
 pub(crate) fn hint_of_args(v: &Values, args: &[ValueId]) -> Arc<Hint> {
-    static C: OnceLock<Mutex<HashMap<u64, Arc<Hint>>>> = OnceLock::new();
-    let cache = C.get_or_init(|| Mutex::new(HashMap::new()));
+    static C: OnceLock<Mutex<FxHashMap<u64, Arc<Hint>>>> = OnceLock::new();
+    let cache = C.get_or_init(|| Mutex::new(FxHashMap::default()));
     let key = {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for a in args {
@@ -2944,6 +2977,29 @@ pub fn set_hints_enabled(on: bool) {
     OFF.store(!on, Ordering::Relaxed);
 }
 
+/// The mark a slice hint ends with when the slice opens the scope the
+/// rest of the document runs in (`\\begin{document}`).
+const OPENS_SCOPE: &str = "\x1eO";
+
+/// Whether the document environment's body is sliced into regions
+/// under the scope `\\begin{document}` leaves open (`PHITEX_DOC_SCOPE=1`;
+/// off until its PDF is byte-identical, test `latex_paragraph_nodes`).
+fn doc_scope() -> bool {
+    crate::exec::env_flag!("PHITEX_DOC_SCOPE")
+}
+
+fn opens_document(slice: &str) -> bool {
+    doc_scope() && slice.trim_start().starts_with("\\begin{document}")
+}
+
+/// Whether the node's slice opens the document's scope: its run leaves
+/// the one group it ends in open to the engine (`Run::leave_scope`).
+pub(crate) fn opens_scope(v: &Values, args: &[ValueId]) -> bool {
+    args.iter().skip(2).any(|&h| {
+        matches!(&*v.get(h), Value::Str(t) if t.starts_with("A\x1e") && t.ends_with(OPENS_SCOPE))
+    })
+}
+
 /// Whether the node's text says its command opens and closes no scope.
 pub(crate) fn effect_none(v: &Values, args: &[ValueId]) -> bool {
     if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
@@ -2990,6 +3046,76 @@ pub(crate) fn may_define(v: &Values, args: &[ValueId]) -> MayDefine {
         eprintln!("hint {:?}: {answer} ({})", h.excerpt, h.cause);
     }
     h.may_define()
+}
+
+/// What a page step may define besides what its output routine's
+/// commands define: the marks (§1012), `\\box255` and the insertion
+/// boxes (§1018, §1021), `\\outputpenalty` (§1013), `\\deadcycles`
+/// (§1012, §638), `\\insertpenalties` (§1018), the page's whatsits at
+/// shipout (§1374, pdfTeX's), the output group's `normal_paragraph`
+/// (§1025, §1070).
+const PAGE_STEP: &[&str] = &[
+    "mark:",
+    "marks:",
+    "markclasses",
+    "box:",
+    "lvlfix",
+    "badness",
+    "param:outputpenalty",
+    "deadcycles",
+    "inspen",
+    "write:",
+    "wopen:",
+    "pdf:",
+    "param:looseness",
+    "param:hangindent",
+    "param:hangafter",
+    "param:interlinepenalties",
+    "parshape",
+];
+
+/// A page step's answer: [`PAGE_STEP`] and what the format's output
+/// routine (its last `\\output{…}`, the macros it calls, through the
+/// definitions) defines; anything when the pass cannot bound the
+/// routine. (A routine the document sets differently defines outside
+/// it: the engine reports the definition, never a wrong output.)
+pub(crate) fn page_step_may_define(defs: &Defs) -> MayDefine {
+    static C: OnceLock<Mutex<FxHashMap<usize, MayDefine>>> = OnceLock::new();
+    if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
+        return MayDefine::Any;
+    }
+    let key = Arc::as_ptr(defs) as usize;
+    let c = C.get_or_init(|| Mutex::new(FxHashMap::default()));
+    if let Some(m) = c.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
+        return m.clone();
+    }
+    let an = Analysis::new("", FileKind::Document, defs.clone());
+    let mut b = Bound {
+        state: Some(Vec::new()),
+        ..Bound::default()
+    };
+    add_heads(&mut b.state, Some(PAGE_STEP));
+    let mut cause = String::new();
+    let ok = match defs.output_defines(defs) {
+        Some(set) => an.add_set(&set, &mut b, &mut cause),
+        None => true,
+    };
+    let m = if ok {
+        Hint {
+            bound: Some(b),
+            ..Hint::default()
+        }
+        .may_define()
+    } else {
+        MayDefine::Any
+    };
+    if crate::exec::env_flag!("PHITEX_HINTS") {
+        eprintln!("page step hint: {m:?} ({cause})");
+    }
+    c.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, m.clone());
+    m
 }
 
 /// The accumulators the nodes count into.
