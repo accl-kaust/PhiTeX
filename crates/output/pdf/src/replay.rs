@@ -584,10 +584,7 @@ fn retag_fonts(content: &[u8], map: &std::collections::HashMap<FontId, FontId>) 
     let mut out = Vec::with_capacity(content.len() + 16);
     let mut i = 0;
     while i < content.len() {
-        if content[i] == b'/'
-            && content.get(i + 1) == Some(&b'F')
-            && (i == 0 || matches!(content[i - 1], b'\n' | b' '))
-        {
+        if content[i] == b'/' && content.get(i + 1) == Some(&b'F') {
             let mut e = i + 2;
             while e < content.len() && content[e].is_ascii_digit() {
                 e += 1;
@@ -616,4 +613,17 @@ fn retag_fonts(content: &[u8], map: &std::collections::HashMap<FontId, FontId>) 
         i += 1;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn retags_font_tags_only() {
+        let map = std::collections::HashMap::from([(46, 42)]);
+        let got = super::retag_fonts(b"BT\n/F46 11.9552 Tf [(x)]TJ/F46 9 Tf (/F46 1)Tj ET", &map);
+        assert_eq!(
+            got,
+            b"BT\n/F42 11.9552 Tf [(x)]TJ/F42 9 Tf (/F46 1)Tj ET".to_vec()
+        );
+    }
 }
