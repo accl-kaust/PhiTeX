@@ -975,11 +975,6 @@ fn line_span_end(text: &str, off: usize) -> usize {
 /// The union of bounds: what a slice of several commands may define.
 /// `None` state in either is `None` (every head).
 fn union(a: &mut Bound, b: &Bound) {
-    for n in &b.names {
-        if !a.names.contains(n) {
-            a.names.push(n.clone());
-        }
-    }
     for p in &b.prefixes {
         if !a.prefixes.contains(p) {
             a.prefixes.push(p.clone());
@@ -991,8 +986,15 @@ fn union(a: &mut Bound, b: &Bound) {
         }
     }
     for m in &b.means {
-        if !a.means.iter().any(|x| x.0 == m.0) {
+        // (a meaning an earlier command of the span defines is the
+        // run's own, not assumed of the state before it)
+        if !a.means.iter().any(|x| x.0 == m.0) && !a.names.contains(&m.0) {
             a.means.push(m.clone());
+        }
+    }
+    for n in &b.names {
+        if !a.names.contains(n) {
+            a.names.push(n.clone());
         }
     }
     match (&mut a.state, &b.state) {
