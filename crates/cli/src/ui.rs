@@ -262,12 +262,7 @@ fn tree(st: Style, s: &Status, tick: char, load: Option<(f64, u64)>, w: usize) -
             } else {
                 String::new()
             };
-            out.push(format!(
-                "  {}    {} {row}{}",
-                st.dim("│"),
-                st.dim(branch),
-                st.dim(&times)
-            ));
+            out.push(format!("       {} {row}{}", st.dim(branch), st.dim(&times)));
         }
     }
     // (cut to the terminal: a wrapped line would break the redraw)
