@@ -843,6 +843,9 @@ pub(crate) struct Suspended {
     pub(crate) diagnostics: Vec<ValueId>,
     pub(crate) sig: u64,
     pub(crate) steps: u64,
+    /// The following siblings the attempt consulted (index, node, text):
+    /// a claimer resumes only while they are still the same.
+    pub(crate) following: Vec<(usize, Slot, OpId, ValueId)>,
     /// Behind a mutex only so a result holding it is `Sync` for client
     /// executors (never contended).
     pub(crate) token: Mutex<Box<dyn std::any::Any + Send>>,
@@ -5483,11 +5486,27 @@ impl Engine {
     /// the first read that does not hold ([`Report::restarted_by`]).
     fn reads_hold(&self, x: Slot, s: &Suspended) -> Result<(), &'static str> {
         let n = self.n(x);
-        if n.has(F_CLAIMER) {
-            return Err("claimer");
-        }
         if n.has(F_APP) {
             return Err("application");
+        }
+        // A claimer that stopped before claiming: the sibling texts it
+        // consulted must still be the same, in the same places.
+        if n.has(F_CLAIMER) {
+            let last = s.following.iter().map(|f| f.0 + 1).max().unwrap_or(0);
+            let mut it = self.following(x);
+            let mut now: Vec<(Slot, OpId, ValueId)> = Vec::with_capacity(last);
+            for _ in 0..last {
+                let Some((op, _)) = it.next() else { break };
+                let slot = *it.slots.last().expect("a sibling");
+                now.push((slot, op, self.n(slot).args));
+            }
+            for &(i, slot, op, args) in &s.following {
+                match now.get(i) {
+                    Some(&(ns, nop, nargs)) if ns == slot && nop == op && nargs == args => {}
+                    Some(_) => return Err("following: changed"),
+                    None => return Err("following: gone"),
+                }
+            }
         }
         for u in &s.uses {
             let seen = s.cache.get(&(u.kind, u.key)).copied();
