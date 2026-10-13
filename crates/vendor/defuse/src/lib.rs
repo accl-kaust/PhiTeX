@@ -22,12 +22,13 @@
 //! Node ids and value ids are content hashes, so results, ids and the
 //! canonical report counters are the same under every schedule.
 //!
-//! No dependencies, no `unsafe`, no threads: builds for
-//! `wasm32-unknown-unknown`.
+//! No dependencies and no threads of its own: builds for
+//! `wasm32-unknown-unknown`. `unsafe` lives in one module (`par`), for the
+//! overlays a wide batch's slices are applied through in parallel.
 //!
 //! Profiling builds (`--features profile`) add counters, timed spans and a
 //! Chrome trace ([`obs`]); without the feature they compile to nothing.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 // Treap and graph code reads best with the conventional short names
 // (t, l, r, x, s, ...).
 #![allow(clippy::many_single_char_names)]
@@ -35,7 +36,11 @@
 mod ctx;
 mod engine;
 mod hash;
+mod ix;
 pub mod obs;
+mod ov;
+#[allow(unsafe_code)]
+mod par;
 mod sched;
 mod tree;
 mod value;

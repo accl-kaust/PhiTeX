@@ -933,6 +933,12 @@ pub struct Stats {
     /// last reset, with the `profile` feature only (0 without it).
     pub dead_result: u64,
     pub state_result: u64,
+    /// The engine's parallel-apply probe counters (`profile` feature,
+    /// totals since their last reset): tail passes, use records, and
+    /// slices aborted.
+    pub tail: u64,
+    pub use_record: u64,
+    pub slice_abort: u64,
     pub raises: u64,
     /// The most nodes ready at one step, and the speculative runs that
     /// ran out of fuel.
@@ -993,6 +999,9 @@ impl Stats {
                 match name {
                     "dead_result" => self.dead_result = n,
                     "state_result" => self.state_result = n,
+                    "tail" => self.tail = n,
+                    "use_record" => self.use_record = n,
+                    "slice_abort" => self.slice_abort = n,
                     _ => {}
                 }
             }
