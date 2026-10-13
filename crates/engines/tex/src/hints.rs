@@ -638,7 +638,13 @@ pub(crate) struct TextHints {
 impl TextHints {
     /// The hint of the command at or after byte `off`.
     fn at(&self, off: usize) -> Hint {
-        self.at_until(off, usize::MAX)
+        // (to the end of the slice holding `off`: the node's own text)
+        let end = self
+            .slices
+            .iter()
+            .find(|&&(s, e)| s <= off && off < e)
+            .map_or(usize::MAX, |x| x.1);
+        self.at_until(off, end)
     }
 
     /// The hint of the text from byte `off` to byte `end`: the union of
@@ -848,6 +854,15 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
                 }
                 last = q;
                 j = q + 1;
+            } else if b.kind == AtomKind::Char('=')
+                && last == k
+                && claimed[j]
+                && p.atoms.get(j + 1).is_some_and(|x| x.kind == AtomKind::Open && x.mate != usize::MAX)
+            {
+                // (`\headline={...}`: a register the format defines, its
+                // `=` and value read by it, one slice)
+                last = p.atoms[j + 1].mate;
+                j = last + 1;
             } else if loader && last == k && matches!(name, "input" | "include") {
                 // `\input file`: the name runs to a space or a command
                 let mut q = j;
@@ -1622,23 +1637,9 @@ impl Analysis<'_> {
     /// a bound ends the evaluation (the pass's closure over a kernel body
     /// misses computed names, `\csname` and `\let` behind
     /// `\@ifundefined`); such a call answers `Any` as before.
-    fn format_only(&self, name: &str) -> bool {
-        // (`PHITEX_TRUST_FORMAT=1`: the closure over a format body is a
-        // bound like the text's own, for the engine that refutes a
-        // declaration instead of failing on it)
-        if crate::exec::env_flag!("PHITEX_TRUST_FORMAT") {
-            return false;
-        }
-        !self.defs.is_defined(name) && self.prelude.is_defined(name)
-    }
-
     /// A macro called by name (`\par` for a blank line, an active
     /// character).
     fn call_hint(&self, name: &str, b: &mut Bound, cause: &mut String) -> bool {
-        if self.format_only(name) {
-            *cause = format!("\\{name}: a format macro (its body is not a bound)");
-            return false;
-        }
         let set = self.defset(name);
         let field = match name.chars().next() {
             Some(c) if name.chars().count() == 1 && !c.is_alphabetic() && name != "par" => {
@@ -1767,10 +1768,6 @@ impl Analysis<'_> {
         }
         if LOOKTHROUGH.contains(&name) {
             *cause = format!("\\{name}: the command run here is computed");
-            return false;
-        }
-        if self.format_only(name) {
-            *cause = format!("\\{name}: a format macro (its body is not a bound)");
             return false;
         }
         let Some(&i) = self.item_of.get(&a) else {
@@ -1978,12 +1975,15 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         starts.push(at.start);
         let h = an.hint(a);
         hints.push(intern(&h));
+        // (a guessed operand that is unbounded on its own is a value
+        // read, not run: `\\headline={\\tenrm…}`)
+        let unbounded_operand = an.claimed[a] && h.bound.is_none();
         let ch = matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb);
         // (a command a macro is only guessed to read still runs in the
         // slice: its rows count in the union)
         skip.push(
             (ch && prev_char)
-                || (an.claimed[a] && (at.kind != AtomKind::Cs || prim_operand[a]))
+                || (an.claimed[a] && (at.kind != AtomKind::Cs || prim_operand[a] || unbounded_operand))
                 || at.kind == AtomKind::Space,
         );
         prev_char = ch;
@@ -2682,10 +2682,12 @@ mod tests {
         let par = st(0).expect("a state row");
         assert!(par.iter().any(|h| h == "pg:") && par.iter().any(|h| h == "parshape"));
         // the run after it is in one: the list, and `\\prevgraf` if a
-        // command after it in its text ends the paragraph
+        // command after it in its text ends the paragraph; the region
+        // runs on to its end, so the conditional's and
+        // `\\afterassignment`'s rows are its too
         assert_eq!(
             st(10).as_deref(),
-            Some(&["par:".to_owned(), "pg:".to_owned()][..])
+            Some(&["par:".to_owned(), "pg:".to_owned(), "if:".to_owned(), "aftertoken".to_owned()][..])
         );
         // a run of text after \par may start a paragraph
         assert!(st(5).expect("some").contains(&"par:".to_owned()));
