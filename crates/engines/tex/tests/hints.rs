@@ -159,8 +159,14 @@ fn input_file_is_bounded() {
     let s = &b.stats;
     eprintln!(
         "input: {} bounded, {} any, {} violations, {} undeclared, {} rounds, {} stops, {} env_provided, {} runs",
-        s.nodes_bounded, s.nodes_any, s.regime_violations, s.undeclared_definitions,
-        s.rounds, s.stops, s.env_provided, s.runs
+        s.nodes_bounded,
+        s.nodes_any,
+        s.regime_violations,
+        s.undeclared_definitions,
+        s.rounds,
+        s.stops,
+        s.env_provided,
+        s.runs
     );
     let _ = std::fs::remove_dir_all(&dir);
     hint_diags(&b);
