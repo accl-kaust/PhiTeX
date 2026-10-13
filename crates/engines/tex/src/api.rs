@@ -37,6 +37,11 @@ pub struct Options {
     pub comment: String,
     /// Where `\input`, `\openin` and fonts come from.
     pub finder: Finder,
+    /// Where the prelude (a format) finds its files, if not `finder`: a
+    /// format is built away from the document's directory (fmtutil runs
+    /// it in a scratch directory), so a document named `plain.tex` is not
+    /// what `\input plain` reads while the format is made.
+    pub prelude_finder: Option<Finder>,
     /// The job's start (`SOURCE_DATE_EPOCH` with `FORCE_SOURCE_DATE`):
     /// `\time`, `\day`, `\month`, `\year` (§241) and the PDF file's
     /// date; `None` keeps the prelude's.
@@ -389,6 +394,7 @@ impl Default for Options {
             jobname: "texput".to_owned(),
             comment: String::new(),
             finder: Arc::new(|_| None),
+            prelude_finder: None,
             epoch: None,
             fixpoint: false,
             wkeys: Vec::new(),
@@ -2154,8 +2160,15 @@ fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
 
 /// The cached prelude of text key `key` still good under the finder, or
 /// the files stale entries read (to supply up front).
+impl Options {
+    /// The finder the prelude reads its files with.
+    fn prelude_finder(&self) -> &Finder {
+        self.prelude_finder.as_ref().unwrap_or(&self.finder)
+    }
+}
+
 fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> {
-    let finder = &opts.finder;
+    let finder = opts.prelude_finder();
     let candidates: Vec<Arc<Cached>> = env_cache()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -2237,7 +2250,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     };
     let t_check = t_start.elapsed();
     let m_check = mem_mb();
-    let finder = &opts.finder;
+    let finder = opts.prelude_finder();
     let mut g = Graph::new(opts.time_limit, opts.threads);
     g.eng.set_max_rounds(opts.max_rounds);
     g.sched = opts.speculation.scheduler(opts.speculation_budget);
@@ -2478,7 +2491,7 @@ impl Build {
         let cached = prelude_env(prelude, &opts);
         let t_env = t0.elapsed();
         let env = cached.env.clone();
-        let defs = prelude_defs(&cached, prelude, &opts.finder);
+        let defs = prelude_defs(&cached, prelude, opts.prelude_finder());
         let t1 = t0.elapsed();
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(

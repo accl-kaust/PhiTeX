@@ -943,6 +943,15 @@ fn fold_page(
                 }
                 continue;
             }
+            nodes::T_ABORT => {
+                return PageFold {
+                    fired: None,
+                    passed,
+                    writes,
+                    stuck: false,
+                    reach,
+                };
+            }
             nodes::T_PAGE_PARAMS => {
                 set_params(v, &mut params, x);
                 marker = x;

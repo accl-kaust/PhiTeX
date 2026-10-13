@@ -858,15 +858,17 @@ impl Run<'_, '_> {
             }
         };
         let Some(x) = x else {
+            // §530: in the nonstop modes (a build's, [`Run::fatal`]) the
+            // job ends
             self.log("error", "I can't find file")?;
-            return Ok(());
+            return self.fatal("*** (job aborted, file error in nonstop mode)");
         };
         // (a job-written file whose read-back only defines)
         self.read_back(&key)?;
         let xs = crate::val::list_of(self.v, x);
         if xs.len() < 2 {
             self.log("error", "I can't find file")?;
-            return Ok(());
+            return self.fatal("*** (job aborted, file error in nonstop mode)");
         }
         let path = str_of(self.v, xs[0]);
         self.log("open", &path)?;
