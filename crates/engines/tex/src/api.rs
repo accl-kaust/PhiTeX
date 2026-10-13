@@ -240,6 +240,64 @@ type Overrides = Arc<Mutex<FxHashMap<String, (String, Vec<u8>)>>>;
 /// both texts share at the start and the end stay, those between are
 /// replaced, removed or inserted. Whether anything changed (a text
 /// whose slices are the nodes' already changes nothing).
+/// `PHITEX_TEX_TIME`: an edit's apply, its phases (`t`: slices, hints,
+/// diff, as elapsed since `t_all`) and slice counts (`n`: old, new, kept,
+/// replaced, removed, inserted, text bytes).
+fn edit_apply_note(t_all: std::time::Instant, t: [std::time::Duration; 3], n: [usize; 7]) {
+    if !crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        return;
+    }
+    let [t_slices, t_hints, t_diff] = t;
+    eprintln!(
+        "edit apply: {:?} total; hint pass (slices: whole-text analyse) {t_slices:?}, text_hints again {:?}, slice-key diff {:?}, engine replace/insert/remove {:?}; {} old / {} new slices, {} kept, {} replaced, {} removed, {} inserted, text {} bytes",
+        t_all.elapsed(),
+        t_hints.checked_sub(t_slices).unwrap_or_default(),
+        t_diff.checked_sub(t_hints).unwrap_or_default(),
+        t_all.elapsed().checked_sub(t_diff).unwrap_or_default(),
+        n[0],
+        n[1],
+        n[2],
+        n[3],
+        n[4],
+        n[5],
+        n[6]
+    );
+}
+
+/// The lengths of the key prefix and suffix `old` and `new` share
+/// (not overlapping).
+fn common_ends<T, U>(old: &[(String, T)], new: &[(String, U)]) -> (usize, usize) {
+    let mut a = 0;
+    while a < old.len() && a < new.len() && old[a].0 == new[a].0 {
+        a += 1;
+    }
+    let mut b = 0;
+    while b < old.len() - a
+        && b < new.len() - a
+        && old[old.len() - 1 - b].0 == new[new.len() - 1 - b].0
+    {
+        b += 1;
+    }
+    (a, b)
+}
+
+/// The text's slices (a document's, or the whole text as one) and their keys.
+fn slice_keys(text: &str, defs: &Defs, doc: bool) -> Vec<(String, (usize, usize))> {
+    let sl = if doc {
+        slices(text, defs)
+    } else if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![(0, text.len())]
+    };
+    sl.into_iter()
+        .map(|(s, e)| {
+            let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
+            (key(&text[s..e], starts), (s, e))
+        })
+        .collect()
+}
+
 // one call site (Absorb::absorb), which passes its fields apart
 #[allow(clippy::too_many_arguments)]
 fn apply_text(
@@ -254,20 +312,7 @@ fn apply_text(
 ) -> bool {
     let t_all = std::time::Instant::now();
     let text = as_file(text);
-    let sl = if doc {
-        slices(&text, defs)
-    } else if text.is_empty() {
-        Vec::new()
-    } else {
-        vec![(0, text.len())]
-    };
-    let new: Vec<(String, (usize, usize))> = sl
-        .into_iter()
-        .map(|(s, e)| {
-            let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-            (key(&text[s..e], starts), (s, e))
-        })
-        .collect();
+    let new = slice_keys(&text, defs, doc);
     let t_slices = t_all.elapsed();
     let old = &*nodes_now;
     if old.len() == new.len() && old.iter().zip(&new).all(|(o, n)| o.0 == n.0) {
@@ -313,17 +358,7 @@ fn apply_text(
         });
         args
     };
-    let mut a = 0;
-    while a < old.len() && a < new.len() && old[a].0 == new[a].0 {
-        a += 1;
-    }
-    let mut b = 0;
-    while b < old.len() - a
-        && b < new.len() - a
-        && old[old.len() - 1 - b].0 == new[new.len() - 1 - b].0
-    {
-        b += 1;
-    }
+    let (a, b) = common_ends(old, &new);
     let old_len = old.len();
     let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
     let common = old_mid.min(new_mid);
@@ -356,22 +391,19 @@ fn apply_text(
         nodes.push((new[i].0.clone(), n));
     }
     *nodes_now = nodes;
-    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
-        eprintln!(
-            "edit apply: {:?} total; hint pass (slices: whole-text analyse) {t_slices:?}, text_hints again {:?}, slice-key diff {:?}, engine replace/insert/remove {:?}; {} old / {} new slices, {} kept, {} replaced, {} removed, {} inserted, text {} bytes",
-            t_all.elapsed(),
-            t_hints.checked_sub(t_slices).unwrap_or_default(),
-            t_diff.checked_sub(t_hints).unwrap_or_default(),
-            t_all.elapsed().checked_sub(t_diff).unwrap_or_default(),
+    edit_apply_note(
+        t_all,
+        [t_slices, t_hints, t_diff],
+        [
             old_len,
             new.len(),
             a + b,
             common,
             old_mid - common,
             new_mid - common,
-            text.len()
-        );
-    }
+            text.len(),
+        ],
+    );
     true
 }
 

@@ -3080,12 +3080,12 @@ const PAGE_STEP: &[&str] = &[
 /// routine. (A routine the document sets differently defines outside
 /// it: the engine reports the definition, never a wrong output.)
 pub(crate) fn page_step_may_define(defs: &Defs) -> MayDefine {
-    static C: OnceLock<Mutex<HashMap<usize, MayDefine>>> = OnceLock::new();
+    static C: OnceLock<Mutex<FxHashMap<usize, MayDefine>>> = OnceLock::new();
     if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
         return MayDefine::Any;
     }
     let key = Arc::as_ptr(defs) as usize;
-    let c = C.get_or_init(|| Mutex::new(HashMap::new()));
+    let c = C.get_or_init(|| Mutex::new(FxHashMap::default()));
     if let Some(m) = c.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
         return m.clone();
     }
