@@ -338,7 +338,9 @@ fn run(nn: &str) -> Vec<String> {
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(
+            std::fs::File::create(wdir.join("watch.err")).expect("the watch's log"),
+        ))
         .spawn()
         .expect("phitex watch runs");
     let mut lines = BufReader::new(child.stdout.take().expect("its output"))
