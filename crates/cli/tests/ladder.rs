@@ -226,7 +226,12 @@ fn run(nn: &str) -> Vec<String> {
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        // (`PHITEX_LADDER_STDERR`: the watch's own report, for timings)
+        .stderr(if std::env::var_os("PHITEX_LADDER_STDERR").is_some() {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        })
         .spawn()
         .expect("phitex watch runs");
     let mut lines = BufReader::new(child.stdout.take().expect("its output"))

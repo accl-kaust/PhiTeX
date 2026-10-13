@@ -945,10 +945,8 @@ fn read_line(r: &mut Run<'_, '_>, global: bool) -> R<()> {
             }
         }
     } else {
-        r.log(
-            "error",
-            "*** (cannot \\read from terminal in nonstop modes)",
-        )?;
+        // §484, as `\read` (a build has no terminal: [`Run::fatal`])
+        return r.fatal("*** (cannot \\read from terminal in nonstop modes)");
     }
     let m = Mean::Macro(Rc::new(Macro {
         flags: 0,
@@ -962,7 +960,7 @@ fn read_line(r: &mut Run<'_, '_>, global: bool) -> R<()> {
 /// `get_r_token` (§1215).
 fn get_r_token(r: &mut Run<'_, '_>) -> R<Tok> {
     loop {
-        r.get_token()?;
+        r.get_name_token()?;
         if r.cur.tok != crate::val::space_tok() {
             break;
         }

@@ -205,6 +205,20 @@ impl Tree {
         }
     }
 
+    /// The tree a format of engine `e` is built with: its search paths
+    /// without the current directory, as fmtutil runs the build in a
+    /// scratch directory (a document named `plain.tex` is not the
+    /// format's `plain.tex`).
+    pub fn open_format(e: &Engine) -> Tree {
+        let mut k = kpse(e.name, e.kpse_engine);
+        for f in FORMATS {
+            k.drop_cwd(f);
+        }
+        Tree {
+            kpse: Mutex::new(k),
+        }
+    }
+
     /// Where file `name` is, by kpathsea in the format its extension
     /// names (pdfTeX's choices: a TFM, a VF, a map, a Type 1 font, an
     /// encoding, else an input).
@@ -228,6 +242,18 @@ impl Tree {
             .map(|b| os(&b).to_path_buf())
     }
 }
+
+/// The formats [`Tree::input`] looks files up in.
+const FORMATS: [Format; 8] = [
+    Format::Tfm,
+    Format::Vf,
+    Format::FontMap,
+    Format::Type1,
+    Format::Enc,
+    Format::OpenType,
+    Format::TrueType,
+    Format::Tex,
+];
 
 fn os(b: &[u8]) -> &Path {
     Path::new(OsStr::from_bytes(b))

@@ -795,7 +795,7 @@ impl Run<'_, '_> {
     /// `get_r_token` (§1215).
     fn get_r_token(&mut self) -> R<Tok> {
         loop {
-            self.get_token()?;
+            self.get_name_token()?;
             if self.cur.tok != crate::val::space_tok() {
                 break;
             }
@@ -1189,14 +1189,9 @@ impl Run<'_, '_> {
             let st = self.get(&field)?;
             let open = st.filter(|&x| x != ValueId::UNIT);
             let Some(st) = open else {
-                // §484: from the terminal: a fatal error in batch mode;
-                // a build has no terminal, so in every mode (TeX at the
-                // end of its terminal input stops the job too, §360)
-                self.log(
-                    "error",
-                    "*** (cannot \\read from terminal in nonstop modes)",
-                )?;
-                return Err(crate::run::Halt::Fatal);
+                // §484: from the terminal: a fatal error in the nonstop
+                // modes; a build has no terminal ([`Run::fatal`])
+                return self.fatal("*** (cannot \\read from terminal in nonstop modes)");
             };
             let line = self.next_read_line(&field, st);
             let text = line.unwrap_or_default();

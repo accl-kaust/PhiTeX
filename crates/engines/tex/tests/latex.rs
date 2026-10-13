@@ -753,3 +753,45 @@ fn latex_input_include() {
     let _ = std::fs::write(dir.join("chap1.tex"), &chap1);
     edit_check("inputs", &b, &cold, 4);
 }
+
+/// The chain census gate (`common::Census`) on a `pdflatex` document:
+/// hello + 30 paragraphs, cold and after a one-word edit.
+#[test]
+fn census_latex() {
+    census_of("paras30", "Paragraph 17 of the text: the quick ");
+}
+
+/// The chain census gate on the environments article (its cold build
+/// is `latex_environments`'s).
+#[test]
+fn census_envs() {
+    census_of("envs", "Item 3 of the list: the quick ");
+}
+
+fn census_of(name: &str, marker: &str) {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let (mut b, _) = cold_nodes(name, &dir, &src);
+    let new = quack(&src, marker);
+    common::assert_census(&[common::Census::take(name, &mut b, &new)]);
+}
+
+/// `pdflatex` on UTF-8 text (`pdfdocs/utf8.tex`: `inputenc`, T1,
+/// multi-byte words at paragraph ends and in the edited word): the
+/// text's bytes are its characters, every cut and excerpt of it on a
+/// character boundary; the PDF equals pdfTeX's cold and after an edit
+/// of a multi-byte word.
+#[test]
+fn latex_utf8_edit() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join("utf8.tex"));
+    let (mut b, regions) = cold_nodes("utf8", &dir, &src);
+    assert!(regions >= 8, "{regions} document nodes for 8 paragraphs");
+    // (the text's characters are its bytes: a UTF-8 word as `read` gives it)
+    let bytes = |w: &str| -> String { w.bytes().map(char::from).collect() };
+    let new = src.replacen(&bytes("crème"), &bytes("crêpe"), 1);
+    assert_ne!(new, src, "the edited word is in the text");
+    b.edit(&new);
+    let cold = common::build(pdf_opts("utf8", &dir), Some(&prelude(true)), &new);
+    edit_check("utf8", &b, &cold, 3);
+}

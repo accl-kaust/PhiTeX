@@ -37,6 +37,11 @@ pub struct Options {
     pub comment: String,
     /// Where `\input`, `\openin` and fonts come from.
     pub finder: Finder,
+    /// Where the prelude (a format) finds its files, if not `finder`: a
+    /// format is built away from the document's directory (fmtutil runs
+    /// it in a scratch directory), so a document named `plain.tex` is not
+    /// what `\input plain` reads while the format is made.
+    pub prelude_finder: Option<Finder>,
     /// The job's start (`SOURCE_DATE_EPOCH` with `FORCE_SOURCE_DATE`):
     /// `\time`, `\day`, `\month`, `\year` (§241) and the PDF file's
     /// date; `None` keeps the prelude's.
@@ -389,6 +394,7 @@ impl Default for Options {
             jobname: "texput".to_owned(),
             comment: String::new(),
             finder: Arc::new(|_| None),
+            prelude_finder: None,
             epoch: None,
             fixpoint: false,
             wkeys: Vec::new(),
@@ -414,13 +420,13 @@ impl Default for Options {
 
 /// A value outside any table, to carry an environment between engines.
 #[derive(Clone, Debug)]
-enum Tree {
+pub(crate) enum Tree {
     Leaf(Value),
     List(Vec<Tree>),
     Seq(Vec<Tree>),
 }
 
-fn export(v: &Values, x: ValueId) -> Tree {
+pub(crate) fn export(v: &Values, x: ValueId) -> Tree {
     match &*v.get(x) {
         Value::List(xs) => Tree::List(xs.iter().map(|&y| export(v, y)).collect()),
         Value::Seq(_) => Tree::Seq(v.seq_to_vec(x).into_iter().map(|y| export(v, y)).collect()),
@@ -428,7 +434,7 @@ fn export(v: &Values, x: ValueId) -> Tree {
     }
 }
 
-fn import(v: &Values, t: &Tree) -> ValueId {
+pub(crate) fn import(v: &Values, t: &Tree) -> ValueId {
     match t {
         Tree::Leaf(x) => v.intern(x.clone()),
         Tree::List(xs) => {
@@ -2183,8 +2189,15 @@ fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
 
 /// The cached prelude of text key `key` still good under the finder, or
 /// the files stale entries read (to supply up front).
+impl Options {
+    /// The finder the prelude reads its files with.
+    fn prelude_finder(&self) -> &Finder {
+        self.prelude_finder.as_ref().unwrap_or(&self.finder)
+    }
+}
+
 fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> {
-    let finder = &opts.finder;
+    let finder = opts.prelude_finder();
     let candidates: Vec<Arc<Cached>> = env_cache()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -2266,7 +2279,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     };
     let t_check = t_start.elapsed();
     let m_check = mem_mb();
-    let finder = &opts.finder;
+    let finder = opts.prelude_finder();
     let mut g = Graph::new(opts.time_limit, opts.threads);
     g.eng.set_max_rounds(opts.max_rounds);
     g.sched = opts.speculation.scheduler(opts.speculation_budget);
@@ -2507,7 +2520,7 @@ impl Build {
         let cached = prelude_env(prelude, &opts);
         let t_env = t0.elapsed();
         let env = cached.env.clone();
-        let defs = prelude_defs(&cached, prelude, &opts.finder);
+        let defs = prelude_defs(&cached, prelude, opts.prelude_finder());
         let t1 = t0.elapsed();
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
@@ -3027,11 +3040,28 @@ impl Build {
         self.output().0.starts_with(b"%PDF")
     }
 
+    /// Whether the job ended on a fatal error (§93, `history =
+    /// fatal_error_stop`).
+    #[must_use]
+    pub fn fatal(&self) -> bool {
+        let v = self.g.eng.values();
+        self.g
+            .eng
+            .acc_value(self.unit, v.field("log"))
+            .is_some_and(|e| {
+                v.seq_to_vec(e).into_iter().any(|x| {
+                    list_of(v, x)
+                        .first()
+                        .is_some_and(|&k| str_of(v, k) == "fatal")
+                })
+            })
+    }
+
     /// The output file (DVI or PDF) and the log.
     #[must_use]
     pub fn output(&self) -> (Vec<u8>, String) {
         let v = self.g.eng.values();
-        let dvi: Vec<u8> = self
+        let mut dvi: Vec<u8> = self
             .g
             .eng
             .output(self.dvi)
@@ -3043,7 +3073,11 @@ impl Build {
             })
             .unwrap_or_default();
         let n = self.pages().len();
-        let end = if n == 0 {
+        // (pdfTeX §794: after a fatal error the PDF file is removed)
+        let end = if dvi.starts_with(b"%PDF") && self.fatal() {
+            dvi.clear();
+            "!  ==> Fatal error occurred, no output PDF file produced!".to_owned()
+        } else if n == 0 {
             "No pages of output.".to_owned()
         } else {
             // §642 (pdfTeX §794): the file's name, its pages and bytes
