@@ -129,7 +129,10 @@ fn generated_wall() {
     let (Ok(dir), Ok(name)) = (std::env::var("PHITEX_GEN"), std::env::var("PHITEX_GEN_DOC")) else {
         return;
     };
-    let t: usize = std::env::var("PHITEX_GEN_THREADS").ok().and_then(|x| x.parse().ok()).unwrap_or(1);
+    let t: usize = std::env::var("PHITEX_GEN_THREADS")
+        .ok()
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(1);
     let dir = std::path::PathBuf::from(dir);
     let src = std::fs::read_to_string(dir.join(format!("{name}.tex"))).expect("the document");
     let o = phitex_tex::Options {
