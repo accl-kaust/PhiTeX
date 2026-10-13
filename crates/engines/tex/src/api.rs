@@ -186,6 +186,16 @@ impl phitex_defuse::EditSource for Absorb<'_> {
     }
 }
 
+/// Declares node `n`'s `marks:before:<n>` loop-back: the marks its
+/// `\topmark` and its kin read, which the page builder's fold
+/// publishes; UNIT (no page fired yet) until it does.
+fn declare_marks_before(eng: &mut Engine, n: NodeId) {
+    let f = eng
+        .values()
+        .field(&crate::etex::marks_before_field(n.raw()));
+    eng.declare_loopback(f, ValueId::UNIT);
+}
+
 /// Edits the document's nodes `nodes` to the text `text`: the slices
 /// both texts share at the start and the end stay, those between are
 /// replaced, removed or inserted.
@@ -262,15 +272,18 @@ fn apply_text(
             let n = old[i].1;
             let args = args_of(eng, i);
             eng.replace(n, exec, args);
+            declare_marks_before(eng, n);
             n
         } else {
             let args = args_of(eng, i);
-            if let Some(&(_, p)) = nodes.last() {
+            let n = if let Some(&(_, p)) = nodes.last() {
                 eng.insert_after(p, exec, args)
             } else {
                 let first = old.get(a + old_mid).map_or(dvi, |x| x.1);
                 eng.insert_before(first, exec, args)
-            }
+            };
+            declare_marks_before(eng, n);
+            n
         };
         nodes.push((new[i].0.clone(), n));
     }
@@ -1308,6 +1321,7 @@ impl Graph {
                 v.str(FORMAT_HINT)
             });
             let n = self.eng.push(unit, self.ops.exec, args);
+            declare_marks_before(&mut self.eng, n);
             out.push((key(piece, starts), n));
         }
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {

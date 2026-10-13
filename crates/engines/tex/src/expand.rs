@@ -36,7 +36,7 @@ impl Run<'_, '_> {
                     // §386
                     let name = ["top", "first", "bot", "splitfirst", "splitbot"]
                         [usize::try_from(self.cur.chr).unwrap_or(0).min(4)];
-                    let m = self.get(&format!("mark:{name}"))?;
+                    let m = crate::etex::mark_read(self, name, 0)?;
                     let toks = crate::val::toks_of(self.v, m);
                     self.push_toks(toks);
                 }
@@ -693,7 +693,7 @@ impl Run<'_, '_> {
                     s.push(':');
                     let name = ["top", "first", "bot", "splitfirst", "splitbot"]
                         [usize::try_from(h).unwrap_or(0).min(4)];
-                    let mk = self.get(&format!("mark:{name}"))?;
+                    let mk = crate::etex::mark_read(self, name, 0)?;
                     let toks = crate::val::toks_of(self.v, mk);
                     self.show_toks_into(s, &toks)?;
                 }
