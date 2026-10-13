@@ -174,15 +174,24 @@ struct Absorb<'a> {
     defs: Defs,
     /// Whether the text is a document's ([`is_doc`]).
     doc: bool,
+    /// The latest version taken whose text was the one the nodes have
+    /// already: nothing applied, so not reported to the engine (its
+    /// contract: `None` when nothing was applied); the result is for it.
+    unchanged: Option<u64>,
 }
 
 impl phitex_defuse::EditSource for Absorb<'_> {
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
         let (text, version) = self.edits.take()?;
-        apply_text(
+        if apply_text(
             eng, self.exec, self.dvi, self.nodes, &text, &self.defs, self.doc,
-        );
-        Some(version)
+        ) {
+            self.unchanged = None;
+            Some(version)
+        } else {
+            self.unchanged = Some(version);
+            None
+        }
     }
 }
 
@@ -198,7 +207,8 @@ fn declare_marks_before(eng: &mut Engine, n: NodeId) {
 
 /// Edits the document's nodes `nodes` to the text `text`: the slices
 /// both texts share at the start and the end stay, those between are
-/// replaced, removed or inserted.
+/// replaced, removed or inserted. Whether anything changed (a text
+/// whose slices are the nodes' already changes nothing).
 fn apply_text(
     eng: &mut Engine,
     exec: OpId,
@@ -207,7 +217,7 @@ fn apply_text(
     text: &str,
     defs: &Defs,
     doc: bool,
-) {
+) -> bool {
     let text = as_file(text);
     let sl = if doc {
         slices(&text, defs)
@@ -224,6 +234,9 @@ fn apply_text(
         })
         .collect();
     let old = &*nodes_now;
+    if old.len() == new.len() && old.iter().zip(&new).all(|(o, n)| o.0 == n.0) {
+        return false;
+    }
     let hints = crate::hints::text_hints(&text, pass::FileKind::Document, defs);
     if doc {
         crate::hints::register_text(eng.values().str(DOC_NAME), &hints);
@@ -288,6 +301,7 @@ fn apply_text(
         nodes.push((new[i].0.clone(), n));
     }
     *nodes_now = nodes;
+    true
 }
 
 impl Default for Options {
@@ -784,6 +798,9 @@ pub struct Stats {
     pub gated: u64,
     /// The version of the text the result is for ([`Build::version`]).
     pub version: u64,
+    /// The texts taken while the engine evaluated (the engine's
+    /// `edits_applied`): each one's version and the step it came before.
+    pub absorbed: Vec<(u64, u64)>,
     /// Scheduler steps, and the nodes run in them summed: `ready_mean`
     /// is the mean batch.
     pub steps: u64,
@@ -931,6 +948,7 @@ impl Stats {
         }
         self.env_provided += r.env_provided;
         self.version = r.version;
+        self.absorbed.extend_from_slice(&r.edits_applied);
         self.steps += r.steps;
         self.ready_total += r.ready_total;
         self.speculations += r.speculations;
@@ -2064,6 +2082,7 @@ impl Build {
             dvi: self.dvi,
             defs: self.defs.clone(),
             doc: self.doc,
+            unchanged: None,
         };
         // a text sent before the evaluation starts is the one it is for
         if let Some(v) = phitex_defuse::EditSource::absorb(&mut absorb, &mut self.g.eng) {
@@ -2076,6 +2095,10 @@ impl Build {
             self.opts.fixpoint,
             &mut absorb,
         );
+        // (a text taken last that changed nothing: the result is for it)
+        if let Some(v) = absorb.unchanged {
+            stats.version = stats.version.max(v);
+        }
         stats.live = self.g.eng.live_nodes();
         self.stats = stats;
         // `PHITEX_CLAIMS=<text>`: the nodes whose slice holds the text,
