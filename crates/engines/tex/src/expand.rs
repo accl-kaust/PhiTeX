@@ -36,7 +36,7 @@ impl Run<'_, '_> {
                     // §386
                     let name = ["top", "first", "bot", "splitfirst", "splitbot"]
                         [usize::try_from(self.cur.chr).unwrap_or(0).min(4)];
-                    let m = self.get(&format!("mark:{name}"))?;
+                    let m = crate::etex::mark_read(self, name, 0)?;
                     let toks = crate::val::toks_of(self.v, m);
                     self.push_toks(toks);
                 }
@@ -83,6 +83,7 @@ impl Run<'_, '_> {
                             self.pass_text()?;
                         }
                         self.conds.pop();
+                        self.if_codes.truncate(self.conds.len());
                     }
                 }
                 cmd::INPUT => {
@@ -94,7 +95,7 @@ impl Run<'_, '_> {
                 }
                 _ => {
                     // §370: "Undefined control sequence" (dropped)
-                    if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+                    if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
                         eprintln!("undefined {:?}", self.cur.tok);
                     }
                     self.log("error", "Undefined control sequence")?;
@@ -479,6 +480,7 @@ impl Run<'_, '_> {
                         }
                     } else if self.cur.chr == FI_CODE {
                         self.conds.pop();
+                        self.if_codes.truncate(self.conds.len());
                     }
                 }
                 self.change_if_limit(OR_CODE, save);
@@ -503,6 +505,7 @@ impl Run<'_, '_> {
                 // "Extra \or": ignored
             } else if self.cur.chr == FI_CODE {
                 self.conds.pop();
+                self.if_codes.truncate(self.conds.len());
             }
         }
         self.common_ending(save);
@@ -527,6 +530,7 @@ impl Run<'_, '_> {
     fn common_ending(&mut self, save: usize) {
         if self.cur.chr == FI_CODE {
             self.conds.truncate(save - 1);
+            self.if_codes.truncate(self.conds.len());
         } else {
             self.change_if_limit(FI_CODE, save);
         }
@@ -689,7 +693,7 @@ impl Run<'_, '_> {
                     s.push(':');
                     let name = ["top", "first", "bot", "splitfirst", "splitbot"]
                         [usize::try_from(h).unwrap_or(0).min(4)];
-                    let mk = self.get(&format!("mark:{name}"))?;
+                    let mk = crate::etex::mark_read(self, name, 0)?;
                     let toks = crate::val::toks_of(self.v, mk);
                     self.show_toks_into(s, &toks)?;
                 }

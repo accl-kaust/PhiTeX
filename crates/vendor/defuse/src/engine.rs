@@ -336,6 +336,11 @@ pub trait Monoid: Send + Sync {
     fn combine(&self, values: &Values, a: ValueId, b: ValueId) -> ValueId;
 }
 
+/// Answers an environment read the engine does not hold
+/// ([`Engine::set_env_provider`]), with the value table to name the field
+/// (`values.get(field.0)` is its name) and to intern the answer.
+pub type EnvProvider = dyn Fn(&Values, Field) -> Option<Option<ValueId>> + Send + Sync;
+
 /// Sequence concatenation (structurally shared, see [`Values::seq_concat`]).
 pub struct SeqMonoid;
 
@@ -434,6 +439,9 @@ pub struct Report {
     /// The nodes waiting for an environment field, with the field each
     /// one waits for (what the client has to supply or declare absent).
     pub env_waits: Vec<(NodeId, Field)>,
+    /// Environment reads the provider ([`Engine::set_env_provider`])
+    /// answered in place of a wait.
+    pub env_provided: u64,
     /// Nodes held back before running because a hinted input was missing.
     pub gated: u64,
     /// Speculative runs kept (with outstanding assumptions).
@@ -447,6 +455,10 @@ pub struct Report {
     /// state's reads no longer held.
     pub resumed: u64,
     pub restarted: u64,
+    /// Why kept states were not resumed: the first read that no longer
+    /// held, by kind ("field: another site reaches", "environment:
+    /// changed or gone", ...), or the node kind ("claimer").
+    pub restarted_by: Vec<(&'static str, u64)>,
     /// Of those refuted by a pending node defining what the run read (or
     /// its definer changing), by field, most refuted first.
     pub refuted_by_field: Vec<(Field, u64)>,
@@ -454,6 +466,13 @@ pub struct Report {
     /// node had.
     pub refuted_nodes: u64,
     pub refutations_max: u32,
+    /// Runs that defined a field outside their node's declared set
+    /// ([`Operation::may_define`]): the definitions stand and re-bind their
+    /// readers, and the node's set is unbounded until its text changes
+    /// (readers after it wait on its later runs; a new text has a new
+    /// declaration, checked afresh). A static definition list that a run
+    /// contradicts is an error instead.
+    pub declarations_refuted: u64,
     /// Speculative runs that ran out of fuel.
     pub fuel_outs: u64,
     /// Scheduler steps.
@@ -688,6 +707,20 @@ pub enum WaitOn {
     Environment(Field),
     /// Not parked: dirty and queued, waiting for its turn.
     Queued,
+}
+
+/// The round-one value of loop-back fields after an edit
+/// ([`Engine::set_loop_start`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoopStart {
+    /// Their declared initial values: the cold path, so the fixpoint is
+    /// the one a cold evaluation of the text reaches (the default).
+    Initial,
+    /// Their last fixpoint values: publishers the edit re-runs publish
+    /// again and only readers of a changed publication run; a field
+    /// whose publishers are gone returns to its initial value. With more
+    /// than one fixpoint the one reached may differ from the cold path's.
+    Previous,
 }
 
 /// Bounds on one evaluation; exceeding one ends it with an error naming
@@ -961,6 +994,9 @@ pub(crate) struct Aux {
     diagnostics: Vec<ValueId>,
     /// A static opener whose kind the run sets (`Brackets::kind_pending`).
     kind_pending: bool,
+    /// A run defined outside the declared set: the set is unbounded until
+    /// the text changes.
+    decl_refuted: bool,
     /// The last stopped attempt's state, for a resume (taken by the next
     /// attempt on its thread; behind a mutex only for that hand-off).
     suspended: Mutex<Option<Box<Suspended>>>,
@@ -1472,6 +1508,11 @@ pub struct Engine {
     /// Label renumberings so far: a stream claim's run that spans one has
     /// read labels that no longer mean the same.
     pub(crate) relabels: u64,
+    /// Changes that can move a reaching definition without the reader's
+    /// run having seen them coming: a scope boundary arriving, moving or
+    /// going, a definition outside a declared set. A result computed
+    /// before one re-checks the sites of its uses at apply.
+    pub(crate) binding_epoch: u64,
     /// Set while a balanced, newly created text gets its scope kinds: a
     /// local definition there has no readers yet.
     fresh_scope: bool,
@@ -1486,6 +1527,9 @@ pub struct Engine {
     env_absent_next: Option<FxHashSet<Field>>,
     /// Nodes parked on an environment field neither supplied nor absent.
     env_waiters: FxHashMap<Field, Vec<Slot>>,
+    /// Answers an environment read the engine does not hold, from the
+    /// run's thread ([`Self::set_env_provider`]).
+    pub(crate) env_provider: Option<Box<EnvProvider>>,
     limits: Limits,
     /// Per evaluation: applied runs per node, the causes of the last runs
     /// of nodes past half their budget (`tracing` says any exist),
@@ -1556,12 +1600,19 @@ pub struct Engine {
     apps_at_collect: usize,
     claim_dirty: FxHashSet<Slot>,
     errors: Vec<EvalError>,
+    /// Errors of a node's current result (an undeclared definition, a
+    /// conflicting publication): withdrawn when the node runs again, so a
+    /// run on a binding that a later structure change undoes does not end
+    /// the evaluation; reported when it ends with them standing.
+    node_errors: FxHashMap<Slot, EvalError>,
     pub(crate) level: u32,
     report: Report,
     touched: FxHashMap<NodeId, Snap>,
     max_rounds: u64,
     client_serial: u64,
     feedback: bool,
+    /// The round-one value of loop-back fields after an edit.
+    loop_start: LoopStart,
     spec_live: u32,
     /// Nodes committed from a speculative run this evaluation (a later
     /// re-dirtying is a misprediction).
@@ -1681,6 +1732,8 @@ impl Iterator for Following<'_> {
 }
 
 impl Engine {
+    // One initialiser per field: the count is the engine's state.
+    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn new() -> Self {
         let values = Values::new();
@@ -1705,12 +1758,14 @@ impl Engine {
             touch_log: Vec::new(),
             in_eval: false,
             relabels: 0,
+            binding_epoch: 0,
             fresh_scope: false,
             environment: FxHashMap::default(),
             env_next: None,
             env_absent: FxHashSet::default(),
             env_absent_next: None,
             env_waiters: FxHashMap::default(),
+            env_provider: None,
             limits: Limits::default(),
             runs_in_eval: FxHashMap::default(),
             causes: FxHashMap::default(),
@@ -1750,12 +1805,14 @@ impl Engine {
             apps_at_collect: 0,
             claim_dirty: FxHashSet::default(),
             errors: Vec::new(),
+            node_errors: FxHashMap::default(),
             level: 0,
             report: Report::default(),
             touched: FxHashMap::default(),
             max_rounds: DEFAULT_MAX_ROUNDS,
             client_serial: 0,
             feedback: false,
+            loop_start: LoopStart::Initial,
             spec_live: 0,
             spec_done: FxHashSet::default(),
             origins: FxHashMap::default(),
@@ -2025,9 +2082,42 @@ impl Engine {
     /// use bound where a fresh walk binds it and indexed among its site's
     /// users, every decided pending effect reflected in the order.
     #[doc(hidden)]
+    /// Nothing queued: a parked node then waits for the client's
+    /// environment, or for a wake that will never come.
+    fn stuck_waiters(&self, bad: &mut Vec<String>) {
+        if !self.queue.iter().all(Vec::is_empty) {
+            return;
+        }
+        for w in self.waiters() {
+            if matches!(w.on, WaitOn::Environment(_) | WaitOn::Queued) {
+                continue;
+            }
+            let target = match w.on {
+                WaitOn::Node(id) => self
+                    .slot_by_id(id)
+                    .map_or_else(|| "gone".to_string(), |t| format!("{:?}", self.n(t).state)),
+                _ => String::new(),
+            };
+            bad.push(format!(
+                "{:?} still parked on {:?} {target} with nothing queued",
+                w.node, w.on
+            ));
+        }
+    }
+
     #[must_use]
     pub fn check_invariants(&self) -> Vec<String> {
         let mut bad = Vec::new();
+        self.stuck_waiters(&mut bad);
+        if self.queue.iter().all(Vec::is_empty) {
+            for n in self
+                .nodes
+                .iter()
+                .filter(|n| matches!(n.state, State::Dirty | State::Spec))
+            {
+                bad.push(format!("{:?} {:?} with nothing queued", n.id, n.state));
+            }
+        }
         let done = self.nodes.iter().filter(|n| n.state == State::Done).count();
         let counted: u32 = self.done_heights.iter().sum();
         if counted as usize != done {
@@ -2750,6 +2840,9 @@ impl Engine {
         let inert = self.n(s).state == State::Inert;
         let maybe = decl.is_none() && st.may_define != MayDefine::Any;
         self.set_flag(s, F_MAYBE, maybe);
+        if let Some(a) = self.aux_mut_opt(s) {
+            a.decl_refuted = false;
+        }
         self.set_flag(s, F_HINT, hint);
         let predict = st.predict;
         self.set_flag(s, F_PREDICT, predict);
@@ -2864,6 +2957,62 @@ impl Engine {
         self.env_absent_next = Some(fields.into_iter().collect());
     }
 
+    /// Installs the environment provider: when a run reads an environment
+    /// field the engine holds neither a value nor an absence for, the
+    /// provider is asked, on the run's thread. `Some(Some(v))` stores `v`
+    /// as the field's value and the run reads it; `Some(None)` stores the
+    /// field absent and the run reads `None`; `None` (the client cannot
+    /// answer now) leaves the run waiting as without a provider. A read
+    /// the provider answered is recorded as any environment read, and
+    /// the value stays with the environment ([`Self::environment`]) until
+    /// [`Self::set_environment`] replaces it.
+    pub fn set_env_provider(&mut self, provider: Box<EnvProvider>) {
+        self.env_provider = Some(provider);
+    }
+
+    /// Removes the environment provider.
+    pub fn clear_env_provider(&mut self) {
+        self.env_provider = None;
+    }
+
+    /// Stores what the provider answered for `f` during a run (nothing
+    /// when the environment already says so).
+    fn provide_env(&mut self, f: Field, answer: Option<ValueId>) {
+        let known = if let Some(v) = answer {
+            self.environment.get(&f) == Some(&v)
+        } else {
+            self.env_absent.contains(&f) && !self.environment.contains_key(&f)
+        };
+        if known {
+            return;
+        }
+        let was_unknown = !self.environment.contains_key(&f) && !self.env_absent.contains(&f);
+        if let Some(v) = answer {
+            self.environment.insert(f, v);
+            self.env_absent.remove(&f);
+        } else {
+            self.environment.remove(&f);
+            self.env_absent.insert(f);
+        }
+        self.report.env_provided += 1;
+        // Runs that waited for it (the provider could not answer them).
+        for x in self.env_waiters.remove(&f).unwrap_or_default() {
+            if self.live(x) && self.n(x).state == State::Parked && self.n(x).on == NIL {
+                self.make_dirty(x);
+            }
+        }
+        if was_unknown {
+            // Nothing finished reading it.
+            return;
+        }
+        for unit in 0..u32::try_from(self.units.len()).expect("unit count") {
+            let u = &self.units[unit as usize];
+            if u.live && u.owner == NIL && !u.env.contains_key(&f) {
+                self.dirty_field_users(site_key(unit, NIL), f, &Cause::Environment { field: f });
+            }
+        }
+    }
+
     /// The environment of the last evaluation (or of the next, once
     /// supplied).
     pub fn environment(&self) -> impl Iterator<Item = (Field, ValueId)> + '_ {
@@ -2956,6 +3105,12 @@ impl Engine {
         if let Some(&s) = self.ids.get(&node) {
             self.roots.remove(&s);
         }
+    }
+
+    /// Sets the round-one value loop-back fields take after an edit (see
+    /// [`LoopStart`]; the default is [`LoopStart::Initial`]).
+    pub fn set_loop_start(&mut self, start: LoopStart) {
+        self.loop_start = start;
     }
 
     /// Declares `field` loop-back with its round-one value.
@@ -3192,13 +3347,27 @@ impl Engine {
         }
         let u = &self.units[unit as usize];
         let from = lo.saturating_sub(u.max_span);
-        let readers: Vec<Slot> = u
+        let readers: Vec<(Slot, Watch)> = u
             .watches
             .range((from, Slot { ix: 0, gen_: 0 })..=(hi, NIL))
-            .map(|((_, r), _)| *r)
-            .filter(|&r| lo < self.n(r).label)
+            .map(|((_, r), w)| (*r, *w))
+            .filter(|&(r, _)| lo < self.n(r).label)
             .collect();
-        for r in readers {
+        let mut flushed = false;
+        for (r, w) in readers {
+            // Parked until its range has no node in work: the new nodes
+            // are in work, and stab_settle wakes it once they finish
+            // (unless none is, as when they are all claimed at once).
+            if w.waiting && self.n(r).state == State::Parked {
+                if !flushed {
+                    self.flush_order();
+                    flushed = true;
+                }
+                let lo = self.watch_key(r, w.anchor).0;
+                if self.ord_fold(unit, lo, self.n(r).label).work != 0 {
+                    continue;
+                }
+            }
             self.make_dirty(r);
         }
     }
@@ -4015,7 +4184,8 @@ impl Engine {
     /// indexed: only the swallow check in `walk` can make a use wait on it.
     fn pend_ix(&self, s: Slot) -> PendIx {
         let n = self.n(s);
-        let bounded = n.has(F_DYN) && n.has(F_MAYBE);
+        let refuted = self.aux_of(s).is_some_and(|a| a.decl_refuted);
+        let bounded = n.has(F_DYN) && n.has(F_MAYBE) && !refuted;
         let bound = if bounded {
             self.statics(n.op, n.args).may_define.clone()
         } else {
@@ -4459,6 +4629,7 @@ impl Engine {
         if (co, oo) == (cn, on) {
             return;
         }
+        self.binding_epoch += 1;
         self.flush_order();
         let root = self.units[unit as usize].root;
         let before = self.order.fold(&OAug, root, 0, label);
@@ -4949,14 +5120,19 @@ impl Engine {
     /// Claims the first `k` following siblings of `c` (a run's decision).
     /// Claims the `k` following siblings of `c`; `own_run`: the claim is
     /// the one `c`'s run just made (so `c` need not run again for it).
-    fn claim_count(&mut self, c: Slot, k: usize, own_run: bool) {
+    /// The first `k` following siblings of `c` (fewer at the end).
+    pub(crate) fn following_slots(&self, c: Slot, k: usize) -> Vec<Slot> {
         let mut it = self.following(c);
         for _ in 0..k {
             if it.next().is_none() {
                 break;
             }
         }
-        let slots = it.slots;
+        it.slots
+    }
+
+    fn claim_count(&mut self, c: Slot, k: usize, own_run: bool) {
+        let slots = self.following_slots(c, k);
         self.set_claim(c, &slots, own_run);
     }
 
@@ -5018,6 +5194,9 @@ impl Engine {
             return;
         }
         self.touch(s);
+        // Its own claims go: a claim is an effect of a run, and an inert
+        // node has none. What it claimed becomes free siblings, which its
+        // claimer sees (and may claim) on its next run.
         let mine = self.aux_of(s).map_or_else(Default::default, |a| a.claimed.clone());
         if !mine.is_empty() {
             self.ax(s).claimed.clear();
@@ -5285,46 +5464,62 @@ impl Engine {
     }
 
     /// Whether every read a stopped attempt made still resolves to the same
-    /// settled site and value: its state may then be resumed.
-    fn reads_hold(&self, x: Slot, s: &Suspended) -> bool {
+    /// settled site and value: its state may then be resumed. `Err` names
+    /// the first read that does not hold ([`Report::restarted_by`]).
+    fn reads_hold(&self, x: Slot, s: &Suspended) -> Result<(), &'static str> {
         let n = self.n(x);
-        if n.has(F_CLAIMER) || n.has(F_APP) {
-            return false;
+        if n.has(F_CLAIMER) {
+            return Err("claimer");
+        }
+        if n.has(F_APP) {
+            return Err("application");
         }
         for u in &s.uses {
             let seen = s.cache.get(&(u.kind, u.key)).copied();
-            let now = match u.kind {
+            let (now, changed) = match u.kind {
                 K_FIELD => {
                     let f = Field(ValueId(u.key));
                     let w = self.walk(n.unit, n.label, f);
-                    if w.pending != NIL || w.site != u.site {
-                        return false;
+                    if w.pending != NIL {
+                        return Err("field: pending node in between");
+                    }
+                    if w.site != u.site {
+                        return Err("field: another site reaches");
                     }
                     if w.site == NIL {
-                        Some(self.start_value(n.unit, f))
+                        (Some(self.start_value(n.unit, f)), "field: start value changed")
                     } else if self.settled(w.site) {
-                        Some(self.n(w.site).def_value(f))
+                        (Some(self.n(w.site).def_value(f)), "field: value changed")
                     } else {
-                        return false;
+                        return Err("field: site not settled");
                     }
                 }
                 K_OUTPUT => {
                     let t = Slot::unpack(u.key);
-                    if !self.live(t) || !self.settled(t) {
-                        return false;
+                    if !self.live(t) {
+                        return Err("output: node gone");
+                    }
+                    if !self.settled(t) {
+                        return Err("output: node not settled");
                     }
                     let tn = self.n(t);
-                    Some(tn.has_ran().then_some(tn.output))
+                    (Some(tn.has_ran().then_some(tn.output)), "output: changed")
                 }
-                K_ENV => self.env_value(n.unit, Field(ValueId(u.key))).ok(),
-                K_LOOP => Some(self.loop_vals.get(&Field(ValueId(u.key))).copied()),
-                _ => return false,
+                K_ENV => (
+                    self.env_value(n.unit, Field(ValueId(u.key))).ok(),
+                    "environment: changed or gone",
+                ),
+                K_LOOP => (
+                    Some(self.loop_vals.get(&Field(ValueId(u.key))).copied()),
+                    "loop-back: changed",
+                ),
+                _ => return Err("read kind not re-checked"),
             };
             if now != seen {
-                return false;
+                return Err(changed);
             }
         }
-        true
+        Ok(())
     }
 
     /// Marks `x` as needing a re-run.
@@ -5335,11 +5530,32 @@ impl Engine {
         self.make_dirty_quiet(x);
     }
 
+    /// Records an error of `x`'s current result (the first one stands
+    /// until the node runs again).
+    fn node_error(&mut self, x: Slot, e: EvalError) {
+        self.node_errors.entry(x).or_insert(e);
+    }
+
+    /// Ends an evaluation that has nothing left to run: the standing node
+    /// error of the lowest node id, if any (all of them are then dropped,
+    /// as a returned error is).
+    fn standing_errors(&mut self) -> Result<(), EvalError> {
+        let first = self
+            .node_errors
+            .iter()
+            .filter(|(x, _)| self.live(**x))
+            .min_by_key(|(x, _)| self.n(**x).id)
+            .map(|(_, e)| e.clone());
+        self.node_errors.clear();
+        first.map_or(Ok(()), Err)
+    }
+
     /// `make_dirty` with the cause already noted.
     fn make_dirty_quiet(&mut self, x: Slot) {
         if !self.live(x) || self.n(x).state == State::Inert {
             return;
         }
+        self.node_errors.remove(&x);
         self.set_flag(x, F_REBIND, false);
         self.touch(x);
         let n = self.nm(x);
@@ -5664,6 +5880,7 @@ impl Engine {
 
     fn free_node(&mut self, x: Slot) {
         count!(Free);
+        self.node_errors.remove(&x);
         self.touch(x);
         let kids = self.aux_of(x).map_or_else(Default::default, |a| a.children.clone());
         if !kids.is_empty() {
@@ -5928,8 +6145,24 @@ impl Engine {
         }
     }
 
+    /// The structure at `label` changed (a node came, went or was
+    /// re-made): the range readers over it run again, except those parked
+    /// until their range has no node in work, which `stab_settle` wakes once
+    /// the new nodes finish; a change that leaves such a range without
+    /// work wakes its reader here (nothing would finish for it).
     fn stab_structure(&mut self, unit: u32, label: u64) {
-        for (r, _) in self.stab(unit, label) {
+        let mut flushed = false;
+        for (r, w) in self.stab(unit, label) {
+            if w.waiting && self.n(r).state == State::Parked {
+                if !flushed {
+                    self.flush_order();
+                    flushed = true;
+                }
+                let lo = self.watch_key(r, w.anchor).0;
+                if self.ord_fold(unit, lo, self.n(r).label).work != 0 {
+                    continue;
+                }
+            }
             self.make_dirty(r);
         }
     }
@@ -6304,7 +6537,11 @@ impl Engine {
             let st = self.statics(op, args);
             let av = self.args_vec(args);
             let mut undeclared = Vec::new();
+            let refuted = self.aux_of(x).is_some_and(|a| a.decl_refuted);
             for &(f, _, _) in defs {
+                if refuted {
+                    break;
+                }
                 let f = self.canon(f);
                 if !self.is_client_def(x, f) {
                     continue;
@@ -6323,7 +6560,16 @@ impl Engine {
                     undeclared.push(EvalError::UndeclaredDefinition { node: id, field: name });
                 }
             }
-            self.errors.extend(undeclared);
+            if !undeclared.is_empty() {
+                // The declaration was too small: refuted, like a wrong
+                // prediction. The definitions below re-bind their readers;
+                // from now on the node may define anything, so readers
+                // after it wait for its runs.
+                self.report.declarations_refuted += 1;
+                self.ax(x).decl_refuted = true;
+                // Results of this batch bound past the node re-check.
+                self.binding_epoch += 1;
+            }
             let set: Vec<(Field, bool)> = defs.iter().map(|d| (d.0, d.2)).collect();
             self.set_defset(x, &set);
         } else {
@@ -6338,14 +6584,14 @@ impl Engine {
                 if !declared.contains(&f) && self.is_client_def(x, f) {
                     let id = self.n(x).id;
                     let field = self.client_name(f);
-                    self.errors.push(EvalError::UndeclaredDefinition { node: id, field });
+                    self.node_error(x, EvalError::UndeclaredDefinition { node: id, field });
                 }
             }
             for &f in &declared {
                 if !defs.iter().any(|d| d.0 == f) {
                     let id = self.n(x).id;
                     let field = self.client_name(f);
-                    self.errors.push(EvalError::UndeclaredDefinition { node: id, field });
+                    self.node_error(x, EvalError::UndeclaredDefinition { node: id, field });
                 }
             }
         }
@@ -6591,6 +6837,11 @@ impl Engine {
 
     #[allow(clippy::too_many_lines)]
     fn apply(&mut self, r: RunResult) {
+        // What the provider told the run about the environment holds
+        // whatever becomes of the result.
+        for &(f, v) in &r.env_found {
+            self.provide_env(f, v);
+        }
         let x = r.slot;
         if !self.live(x) || self.n(x).id != r.node || self.n(x).epoch != r.epoch {
             return;
@@ -6602,8 +6853,9 @@ impl Engine {
         if r.resumed {
             self.report.resumed += 1;
         }
-        if r.restarted {
+        if let Some(why) = r.restarted {
             self.report.restarted += 1;
+            bump(&mut self.report.restarted_by, why);
         }
         let mut r = r;
         if !r.speculative {
@@ -6637,6 +6889,39 @@ impl Engine {
                 // A guess that read a definition not produced yet (or gone):
                 // dropped, and the node keeps its state. Dirtying a parked
                 // node here would undo its wait every round.
+                self.set_flag(x, F_NOSPEC, true);
+            }
+            return;
+        }
+        // A scope boundary arrived, moved or went, or a definition outside
+        // a declared set was made, while it ran (by another result of this
+        // batch): a use bound on the old structure may reach another site
+        // now. Run again.
+        if r.binding_epoch != self.binding_epoch {
+            let (unit, label) = (self.n(x).unit, self.n(x).label);
+            let moved = r.uses.iter().any(|u| {
+                u.kind == K_FIELD && {
+                    let w = self.walk(unit, label, Field(ValueId(u.key)));
+                    w.pending != NIL || w.site != u.site
+                }
+            });
+            if moved {
+                count!(StaleSite);
+                if r.speculative {
+                    self.set_flag(x, F_NOSPEC, true);
+                }
+                return;
+            }
+        }
+        // A count claim names the siblings the run saw: if another result
+        // of this batch changed what follows (a sibling claimed, text
+        // unfolded), the count would land on other nodes. Run again.
+        if let Some(k) = r.claim
+            && self.n(x).has(F_CLAIM_DYN)
+            && self.following_slots(x, k) != r.claim_seen
+        {
+            count!(StaleSite);
+            if r.speculative {
                 self.set_flag(x, F_NOSPEC, true);
             }
             return;
@@ -6689,8 +6974,10 @@ impl Engine {
                 return;
             }
         }
+        // A new result replaces the last one's errors.
+        self.node_errors.remove(&x);
         if let Some(e) = r.error.clone() {
-            self.errors.push(e);
+            self.node_error(x, e);
         }
         if r.raise > 0 && !matches!(r.end, End::Raise(..)) {
             // A read of a finished node not settled below this level, then
@@ -6962,6 +7249,16 @@ impl Engine {
         } else {
             let h = self.target_height_mut(x);
             self.finish(x, h);
+            // Its count claim took a node whose own claims were released
+            // into its view: the count applies to the view it sees, so it
+            // runs again on that view (and converges: each run claims a
+            // prefix of a view that only grows).
+            if let Some(k) = r.claim
+                && self.n(x).has(F_CLAIM_DYN)
+                && self.following_slots(x, k) != self.aux_of(x).map_or_else(Vec::new, |a| a.claimed.clone())
+            {
+                self.make_dirty(x);
+            }
         }
     }
 
@@ -7235,6 +7532,24 @@ impl Engine {
         !dead.is_empty()
     }
 
+    /// The values a kept stopped state holds: what it read and what it
+    /// made so far (the client's token is the client's).
+    fn suspended_live(s: &Suspended, live: &mut FxHashSet<ValueId>) {
+        live.extend(s.uses.iter().filter(|u| u.kind != K_OUTPUT).map(|u| ValueId(u.key)));
+        live.extend(s.cache.values().flatten().copied());
+        for &(f, v, _) in &s.defs {
+            live.insert(f.0);
+            live.insert(v);
+        }
+        live.extend(s.children.iter().chain(&s.follows).map(|&(_, a)| a));
+        for &(f, v) in s.env.iter().chain(&s.publishes).chain(&s.contribs) {
+            live.insert(f.0);
+            live.insert(v);
+        }
+        live.extend(s.kind);
+        live.extend(s.diagnostics.iter().copied());
+    }
+
     /// Frees the values nothing holds any more. What the report and the
     /// error name (environment waits, waiters, causes) stays until the next
     /// evaluation, so the client can render it.
@@ -7278,6 +7593,10 @@ impl Engine {
                 live.insert(x.value);
             }
             live.extend(a.diagnostics.iter().copied());
+            // A kept stopped state resumes with what it read and made.
+            if let Some(s) = a.suspended.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+                Self::suspended_live(s, &mut live);
+            }
         }
         for (f, v) in self.environment.iter().chain(self.env_next.iter().flatten()) {
             live.insert(f.0);
@@ -7473,6 +7792,11 @@ impl Engine {
     /// Resets loop-back values to their initial values. Returns whether any
     /// changed.
     fn restart_loops(&mut self) -> bool {
+        if self.loop_start == LoopStart::Previous {
+            // The last fixpoint stands as the round-one value; the round
+            // check re-runs the readers of a publication that changed.
+            return false;
+        }
         let mut fields: Vec<Field> = self.loop_init.keys().copied().collect();
         fields.sort_unstable();
         let mut any = false;
@@ -8029,7 +8353,7 @@ impl Engine {
                 if self.absorb(edits) {
                     continue;
                 }
-                return Ok(());
+                return self.standing_errors();
             };
             if self.past_deadline() {
                 return Err(EvalError::Deadline {
@@ -8159,12 +8483,14 @@ impl Engine {
                 .and_then(|a| a.suspended.lock().unwrap_or_else(PoisonError::into_inner).take())
         };
         let mut cx = match saved {
-            Some(s) if self.reads_hold(job.slot, &s) => Ctx::resume(self, job.slot, fuel, *s),
-            Some(_) => {
-                let mut cx = Ctx::new(self, job.slot, job.speculative, fuel);
-                cx.restarted = true;
-                cx
-            }
+            Some(s) => match self.reads_hold(job.slot, &s) {
+                Ok(()) => Ctx::resume(self, job.slot, fuel, *s),
+                Err(why) => {
+                    let mut cx = Ctx::new(self, job.slot, job.speculative, fuel);
+                    cx.restarted = Some(why);
+                    cx
+                }
+            },
             None => Ctx::new(self, job.slot, job.speculative, fuel),
         };
         if !job.speculative {
@@ -8248,6 +8574,8 @@ pub struct RunResult {
     /// snapshot (computed by the run; `None`: compute at apply).
     pub(crate) old_sites: Option<Vec<(u64, u64)>>,
     pub(crate) env: Vec<(Field, ValueId)>,
+    /// Environment reads the provider answered during the run.
+    pub(crate) env_found: Vec<(Field, Option<ValueId>)>,
     pub(crate) publishes: Vec<(Field, ValueId)>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
     pub(crate) watch: Option<(Field, Slot, ValueId)>,
@@ -8255,11 +8583,16 @@ pub struct RunResult {
     /// The kind of the scope the run's effect opens.
     pub(crate) kind: Option<ValueId>,
     pub(crate) claim: Option<usize>,
+    /// The siblings a count claim covered when the run made it: the claim
+    /// is applied only if they are still the next ones.
+    pub(crate) claim_seen: Vec<Slot>,
     pub(crate) stream: Option<StreamRange>,
     /// The length of `touch_log` when the run started.
     pub(crate) touch_seq: usize,
     /// `Engine::relabels` when the run started.
     pub(crate) relabels: u64,
+    /// `Engine::binding_epoch` when the run started.
+    pub(crate) binding_epoch: u64,
     pub(crate) assumptions: Vec<(Slot, AssumeKind, ValueId)>,
     pub(crate) sig: u64,
     pub(crate) error: Option<EvalError>,
@@ -8269,7 +8602,8 @@ pub struct RunResult {
     /// Whether this attempt resumed a saved state / started over after
     /// dropping one.
     pub(crate) resumed: bool,
-    pub(crate) restarted: bool,
+    /// Why a kept state was not resumed ([`Report::restarted_by`]).
+    pub(crate) restarted: Option<&'static str>,
     /// Unfolded-text and lexical-application memo hits and misses.
     pub(crate) memo: [u32; 4],
 }

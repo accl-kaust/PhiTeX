@@ -269,30 +269,22 @@ pub(crate) fn expand(r: &mut Run<'_, '_>) -> R<bool> {
             // pdfTeX §386 (e-TeX)
             let n = r.scan_register_num()?;
             let kind = MARK_KINDS[usize::try_from(chr - MARKS_CODE).unwrap_or(0).min(4)];
-            let m = r.get(&mark_field(kind, n))?;
+            let m = mark_read(r, kind, n)?;
             let toks = toks_of(r.v, m.filter(|&x| x != ValueId::UNIT));
             r.push_toks(toks);
         }
         cmd::CONVERT if chr == 100 => r.push_toks(str_toks(".6")),
         cmd::CONVERT if chr > 100 => crate::pdfprim::convert(r, chr)?,
-        cmd::FI_OR_ELSE if r.conds.is_empty() => {
-            // the conditional began in another node: its record goes
-            // (§510), unless this is an extra `\else` or `\or`
-            close_outer(r, chr)?;
-            return Ok(false);
-        }
         _ => return Ok(false),
     }
     Ok(true)
 }
 
-/// After `expand` did a conditional or `\fi`: the condition stack's
-/// records for this run's conditionals follow `conds`.
-pub(crate) fn after_expand(r: &mut Run<'_, '_>, c: u8) {
-    if c == cmd::IF_TEST || c == cmd::FI_OR_ELSE {
-        sync_ifs(r, None);
-    }
-}
+/// After `expand` did a conditional or `\fi`: nothing. A conditional
+/// is never split across nodes (it runs to its `\fi` in one run), so
+/// the condition stack is the run's own `conds` (§489) and no record
+/// leaves the run.
+pub(crate) fn after_expand(_r: &mut Run<'_, '_>, _c: u8) {}
 
 /// `\unless` (pdfTeX §1758).
 fn unless(r: &mut Run<'_, '_>) -> R<()> {
@@ -300,7 +292,6 @@ fn unless(r: &mut Run<'_, '_>) -> R<()> {
     if r.cur.cmd == cmd::IF_TEST && r.cur.chr != 16 {
         r.cur.chr += UNLESS_CODE;
         r.conditional()?;
-        sync_ifs(r, None);
         return Ok(());
     }
     r.log("error", "You can't use `\\unless' before this")?;
@@ -310,132 +301,32 @@ fn unless(r: &mut Run<'_, '_>) -> R<()> {
 
 // --------------------------------------------------- the condition stack
 
-/// A record of the condition stack (`cond_ptr`, F6): the conditional's
-/// code (`cur_if`, with `unless_code`), its `if_limit`, and the node that
-/// began it.
+/// A record of the condition stack (`cond_ptr`, §489): the
+/// conditional's code (`cur_if`, with `unless_code`) and its `if_limit`.
 #[derive(Clone, Debug)]
 struct IfRec {
     code: i32,
     limit: i32,
-    owner: i64,
 }
 
-/// The cell of condition-stack level `d` (1 the outermost): one per
-/// level, not one stack, so a conditional reads only the level it closes
-/// (OUTPUT.md §6).
-fn if_cell(d: i64) -> String {
-    format!("if:{d}")
-}
-
-fn read_level(r: &mut Run<'_, '_>, d: i64) -> R<Option<IfRec>> {
-    let v = r.v;
-    Ok(r.get(&if_cell(d))?
-        .filter(|&x| x != ValueId::UNIT)
-        .map(|e| IfRec {
-            code: i32::try_from(crate::val::int_at(v, e, 0)).unwrap_or(0),
-            limit: i32::try_from(crate::val::int_at(v, e, 1)).unwrap_or(0),
-            owner: crate::val::int_at(v, e, 2),
-        }))
-}
-
-fn write_level(r: &mut Run<'_, '_>, d: i64, e: Option<&IfRec>) {
-    let v = r.v;
-    let x = e.map_or(ValueId::UNIT, |e| {
-        v.list(vec![
-            v.int(i64::from(e.code)),
-            v.int(i64::from(e.limit)),
-            v.int(e.owner),
-        ])
-    });
-    r.set(&if_cell(d), x, true);
-}
-
-/// The whole stack (`\showifs`, `\currentif…`): the levels below the
-/// node's, then its own conditionals. An output routine's levels start
-/// at [`crate::run::OUTPUT_IF_BASE`] and it sees only its own.
-fn if_stack(r: &mut Run<'_, '_>) -> R<Vec<IfRec>> {
-    let floor = if r.ifbase >= crate::run::OUTPUT_IF_BASE {
-        crate::run::OUTPUT_IF_BASE + 1
-    } else {
-        1
-    };
-    let mut st = Vec::new();
-    for d in floor..=r.ifbase {
-        if let Some(e) = read_level(r, d)? {
-            st.push(e);
-        }
-    }
-    let me = owner(r);
-    for (i, &l) in r.conds.iter().enumerate() {
-        st.push(IfRec {
-            code: r.if_codes.get(i).copied().unwrap_or(0),
+/// The whole stack (`\showifs`, `\currentif…`): the run's own
+/// conditionals, since a conditional never spans nodes.
+fn if_stack(r: &Run<'_, '_>) -> Vec<IfRec> {
+    r.conds
+        .iter()
+        .zip(&r.if_codes)
+        .map(|(&l, &code)| IfRec {
+            code,
             limit: i32::from(l),
-            owner: me,
-        });
-    }
-    Ok(st)
+        })
+        .collect()
 }
 
-/// A `\fi`, `\else` or `\or` of a conditional begun in another node: the
-/// level below the node's (§510). A missing record where the text's
-/// nesting put one is a violation of the depth the node was given.
-fn close_outer(r: &mut Run<'_, '_>, chr: i32) -> R<()> {
-    if r.ifbase <= 0 || r.ifbase == crate::run::OUTPUT_IF_BASE {
-        return Ok(());
-    }
-    if let Some(top) = read_level(r, r.ifbase)? {
-        if chr <= top.limit {
-            write_level(r, r.ifbase, None);
-            r.ifbase -= 1;
-        }
-    } else {
-        r.diag(
-            false,
-            "conditional depth regime violated: no conditional open at this node's depth",
-        );
-        let one = r.v.seq_unit(r.v.int(1));
-        r.contribute("ifviol", one);
-    }
-    Ok(())
-}
-
-fn owner(r: &Run<'_, '_>) -> i64 {
-    i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes())
-}
-
-/// The levels of this run's conditionals made to match `conds` (the
-/// limits); with `push`, the code of the conditional just begun. Levels
-/// this run wrote above its open ones are emptied.
-fn sync_ifs(r: &mut Run<'_, '_>, push: Option<i32>) {
-    let me = owner(r);
-    let n = r.conds.len();
-    if let Some(code) = push {
-        r.if_codes.truncate(n.saturating_sub(1));
-        r.if_codes.push(code);
-    } else {
-        r.if_codes.truncate(n);
-    }
-    let base = r.ifbase;
-    for i in 0..n {
-        let e = IfRec {
-            code: r.if_codes.get(i).copied().unwrap_or(0),
-            limit: i32::from(r.conds[i]),
-            owner: me,
-        };
-        let d = base + 1 + i64::try_from(i).unwrap_or(0);
-        write_level(r, d, Some(&e));
-    }
-    let top = base + i64::try_from(n).unwrap_or(0);
-    for d in top + 1..=r.if_top_written {
-        write_level(r, d, None);
-    }
-    r.if_top_written = top;
-}
-
-/// The conditional `code` (with `unless_code`) begins: its record
-/// (`push_cond`, §495).
+/// The conditional `code` (with `unless_code`) begins (`push_cond`,
+/// §495): its limit is on `conds`, kept by `conditional`, its code on
+/// `if_codes`.
 pub(crate) fn if_begin(r: &mut Run<'_, '_>, code: i32) {
-    sync_ifs(r, Some(code));
+    r.if_codes.push(code);
 }
 
 /// The tests e-TeX and pdfTeX add to `conditional` (§501).
@@ -527,14 +418,16 @@ pub(crate) fn last_item(r: &mut Run<'_, '_>, m: i32) -> R<IVal> {
             IVal::Int(i32::try_from(md.group).unwrap_or(0))
         }
         li::CURRENT_IF_LEVEL | li::CURRENT_IF_TYPE | li::CURRENT_IF_BRANCH => {
-            let st = if_stack(r)?;
+            let st = if_stack(r);
             let Some(top) = st.last() else {
                 return Ok(IVal::Int(0));
             };
             IVal::Int(match m {
                 li::CURRENT_IF_LEVEL => i32::try_from(st.len()).unwrap_or(0),
                 li::CURRENT_IF_TYPE => {
-                    if top.code < UNLESS_CODE {
+                    if top.code < 0 {
+                        0
+                    } else if top.code < UNLESS_CODE {
                         top.code + 1
                     } else {
                         -(top.code - UNLESS_CODE + 1)
@@ -1273,8 +1166,69 @@ fn mark_field(kind: &str, n: i32) -> String {
     }
 }
 
+/// The loop-back field holding the marks a document node sees
+/// (`marks:before:<node>`): the marks in force after the last page the
+/// page builder fired before the node's read, as `[[class, top, first,
+/// bot], ...]`, or UNIT while no page fired.
+pub(crate) fn marks_before_field(node: u64) -> String {
+    format!("marks:before:{node}")
+}
+
+/// `\topmark` and its kin as read by a run (§386): in a page step (the
+/// output routine) and for the split marks, the sequential value; in a
+/// document node, its `marks:before:<node>` loop-back, which the
+/// `Breaks` fold publishes at the point marked by a `T_MARKS_AT` item
+/// this read contributes to the main vertical list.
+pub(crate) fn mark_read(r: &mut Run<'_, '_>, kind: &str, n: i32) -> R<Option<ValueId>> {
+    let v = r.v;
+    let op = r.cx.op();
+    let split = kind.starts_with("split");
+    if split || op == r.ops.pagestep || op == r.ops.pagestep_any {
+        return r.get(&mark_field(kind, n));
+    }
+    let node = r.cx.node().raw();
+    let f = v.field(&marks_before_field(node));
+    if !r.cx.is_loopback(f) {
+        // a node the client did not make (a document file's region, a
+        // display): it asks the client to declare its loop-back
+        // (`marksdecl:<node>`, answered by `api::Graph::settle`) and
+        // waits; never seen inside a run already declared
+        r.cx.use_env(v.field(&format!("marksdecl:{node}")))?;
+        if !r.cx.is_loopback(f) {
+            return r.get(&mark_field(kind, n));
+        }
+    }
+    let at = v.list(vec![
+        v.int(nodes::T_MARKS_AT),
+        v.int(i64::from_ne_bytes(node.to_ne_bytes())),
+    ]);
+    let item = v.list(vec![v.int(0), at]);
+    let items = v.field("items");
+    let seen = r
+        .contribs
+        .iter()
+        .any(|&(g, s)| g == items && v.seq_to_vec(s).contains(&item));
+    if !seen {
+        r.contribute("items", v.seq_unit(item));
+    }
+    let Some(state) = r.cx.use_field(f)?.filter(|&x| x != ValueId::UNIT) else {
+        return Ok(None);
+    };
+    let k = match kind {
+        "top" => 1,
+        "first" => 2,
+        _ => 3,
+    };
+    Ok(list_of(v, state)
+        .into_iter()
+        .map(|e| list_of(v, e))
+        .find(|e| e.first().is_some_and(|&c| int_of(v, c) == i64::from(n)))
+        .and_then(|e| e.get(k).copied())
+        .filter(|&x| x != ValueId::UNIT))
+}
+
 /// A mark's class and text (a class mark is `[-1, class, text]`).
-fn mark_class(v: &phitex_defuse::Values, m: ValueId) -> (i32, ValueId) {
+pub(crate) fn mark_class(v: &phitex_defuse::Values, m: ValueId) -> (i32, ValueId) {
     let xs = list_of(v, m);
     if xs.len() == 3
         && int_of(v, xs[0]) == -1
@@ -1291,9 +1245,8 @@ pub(crate) fn is_class_mark(v: &phitex_defuse::Values, m: Option<ValueId>) -> bo
     m.is_some_and(|m| mark_class(v, m).0 != 0)
 }
 
-/// `fire_up`'s marks of the classes other than 0 (pdfTeX §1012–§1014:
-/// `do_marks(fire_up_init)`, the page's marks, `do_marks(fire_up_done)`).
-pub(crate) fn fire_marks(r: &mut Run<'_, '_>, page_marks: &[u32], side: &nodes::Side) -> R<()> {
+/// `fire_up`'s marks of the classes other than 0 (pdfTeX §1012–§1014), the page's marks given as values.
+pub(crate) fn fire_marks_values(r: &mut Run<'_, '_>, page_marks: &[ValueId]) -> R<()> {
     let v = r.v;
     let classes: Vec<i32> = r
         .get("markclasses")?
@@ -1317,10 +1270,7 @@ pub(crate) fn fire_marks(r: &mut Run<'_, '_>, page_marks: &[u32], side: &nodes::
             first = None;
         }
         let mut new_bot = bot;
-        for &k in page_marks {
-            let Some(&m) = side.marks.get(k as usize) else {
-                continue;
-            };
+        for &m in page_marks {
             let (mc, text) = mark_class(v, m);
             if mc != c {
                 continue;
@@ -1394,23 +1344,9 @@ impl Run<'_, '_> {
         let d = self.scan_delimiter(false)?;
         let mid = v.list(vec![v.int(crate::math::T_RIGHT), v.int(d), v.int(1)]);
         let list = self.fin_mlist(md.lid, Some(mid))?;
-        self.unsave_extras(md)?;
-        let sid = self.node_raw();
-        let parent = self
-            .scope_kind()?
-            .and_then(|k| list_of(v, k).get(5).copied())
-            .unwrap_or(ValueId::UNIT);
-        let mut outer = md.clone();
-        outer.depth -= 1;
-        let kind =
-            self.kind_with_parent(&outer, md.group, sid, sid, -203, md.extra.clone(), parent);
-        self.effect = phitex_defuse::Effect::Scope(phitex_defuse::Brackets {
-            closes: 1,
-            opens: 1,
-            before: false,
-            kind: Some(kind),
-            kind_pending: false,
-        });
+        // the \left group closes and a new one opens (pdfTeX §1191)
+        self.pop_level();
+        let sid = self.push_list(-203, md.group, md.extra.clone());
         for x in list {
             self.append(sid, x);
         }
@@ -1439,6 +1375,12 @@ pub(crate) fn show(r: &mut Run<'_, '_>) -> R<()> {
             let v = r.v;
             let mut k = r.scope_kind()?;
             let mut lines = Vec::new();
+            // the run's own groups first, innermost out (pdfTeX §1293)
+            let mut d = md.depth;
+            for l in r.nest.iter().rev().filter(|l| l.group != 0) {
+                lines.push(format!("### {} group (level {d})", group_name(l.group)));
+                d -= 1;
+            }
             while let Some(kind) = k {
                 let xs = list_of(v, kind);
                 let g = xs.first().map_or(0, |&x| int_of(v, x));
@@ -1455,7 +1397,7 @@ pub(crate) fn show(r: &mut Run<'_, '_>) -> R<()> {
         }
         _ => {
             // \showifs
-            let st = if_stack(r)?;
+            let st = if_stack(r);
             if st.is_empty() {
                 s.push_str("### no active conditionals");
             } else {
@@ -1463,7 +1405,7 @@ pub(crate) fn show(r: &mut Run<'_, '_>) -> R<()> {
                 let mut lines = Vec::new();
                 for (i, e) in st.iter().enumerate().rev() {
                     let mut line = format!("### level {}: ", i + 1);
-                    let code = e.code % UNLESS_CODE;
+                    let code = e.code.max(0) % UNLESS_CODE;
                     if e.code >= UNLESS_CODE {
                         crate::print::print_esc(&mut line, "unless", esc);
                     }

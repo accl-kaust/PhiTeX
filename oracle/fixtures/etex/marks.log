@@ -1,2 +1,2 @@
-(./core.tex [|x1|x2||y1|y1|||] [x2|x2|x2|y1|y1|y1|||] [x2|x2|x2|y1|y2|y2||z|zz]
-[x2|y2|] )
+(./core.tex [|x1|x2||y1|y1|||] [0] [x2|x2|x2|y1|y1|y1|||] [0] [x2|x2|x2|y1|y2|y
+2||z|zz] [0] [x2|x2|x2|y2|y2|y2|zz|zz|zz] [0] )
