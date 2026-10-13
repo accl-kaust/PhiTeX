@@ -2935,7 +2935,7 @@ mod tests {
 
     #[test]
     fn paragraph_and_conditional_classes() {
-        let t = "\\par\nText here \\ifnum1=1 \\fi\n\\afterassignment\\x\\def\\y{}\n";
+        let t = "\\par\nText here \\ifnum1=1 \\fi\n\\afterassignment\\relax\\def\\y{}\n";
         let text = analyse(t, FileKind::Document, no_defs());
         for off in [0, 5, 10, 15] {
             let h = text.at(off);
