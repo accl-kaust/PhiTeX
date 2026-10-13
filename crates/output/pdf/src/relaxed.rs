@@ -88,6 +88,35 @@ fn leaf_handle(j: usize) -> usize {
 }
 
 /// A font's handle: fonts sharing one PDF font share it.
+/// The handle of the transparent PNGs' group object.
+fn png_group_handle() -> usize {
+    read_handle(key_of("png group", b""), 0)
+}
+
+/// The group object of transparent PNGs, as pdfTeX writes it
+/// (`write_additional_png_objects`), under its handle.
+fn png_group_piece(params: &PdfParams) -> Result<Piece, PdfError> {
+    let mut st = node_state(params);
+    let g = st.new_objnum_();
+    st.begin_obj(g, 2);
+    if st.p.compress_level == 0 {
+        st.print(b"%PTEX Group needed for transparent pngs\n");
+    }
+    st.print(b"<</Type/Group /S/Transparency /CS/DeviceRGB /I true>>\n");
+    st.end_obj();
+    let fixed = HashMap::from([(g, png_group_handle())]);
+    let mut other = |k: usize| -> Result<usize, PdfError> { Ok(k) };
+    piece(
+        &st,
+        "the transparent PNGs' group".to_owned(),
+        &Imports::default(),
+        &fixed,
+        &mut other,
+        None,
+        None,
+    )
+}
+
 fn font_handle(key: u64) -> usize {
     read_handle(key, 0)
 }
@@ -160,6 +189,16 @@ impl Piece {
             .as_bytes(),
         );
         key_of("piece", &b)
+    }
+
+    /// Whether the piece's bytes refer to handle `h`.
+    fn refs_handle(&self, h: usize) -> bool {
+        let mut found = false;
+        let _ = rewrite(&self.bytes, |n| {
+            found |= n == h;
+            None
+        });
+        found
     }
 
     /// A page's `cur_page_height`.
@@ -376,6 +415,19 @@ impl PdfState {
         k
     }
 
+    /// The group object of transparent PNGs (pdfTeX writes one for the
+    /// document, with the first such image): a local object for its
+    /// handle, never written by a piece; the finish writes it.
+    fn png_group_here(&mut self, im: &mut Imports) -> usize {
+        if self.png_group == 0 {
+            let g = self.new_objnum_();
+            self.png_group = g;
+            self.png_group_written = true;
+            im.bind(g, png_group_handle());
+        }
+        self.png_group
+    }
+
     /// An object made elsewhere (`\pdfrefobj`).
     fn import_obj(&mut self, h: usize, im: &mut Imports) -> usize {
         if let Some(&k) = im.by_handle.get(&h) {
@@ -480,17 +532,22 @@ fn translate(
                 _ => Whatsit::RefXForm(0),
             }
         }
-        Whatsit::RefXImage(h) if h >= HANDLE_BASE => match piece(h, fallback)
-            .and_then(|p| p.made.clone())
-        {
-            Some((_, Made::Image(x))) => {
-                if x.group_ref != 0 {
-                    fallback.get_or_insert_with(|| "an image with a transparency group".to_owned());
+        Whatsit::RefXImage(h) if h >= HANDLE_BASE => {
+            match piece(h, fallback).and_then(|p| p.made.clone()) {
+                Some((_, Made::Image(mut x))) => {
+                    if x.group_ref < 0 {
+                        fallback.get_or_insert_with(|| {
+                            "an included PDF page with a transparency group".to_owned()
+                        });
+                    } else if x.group_ref > 0 {
+                        // a PNG's: the document's one group object
+                        x.group_ref = i32::try_from(st.png_group_here(im)).unwrap_or(0);
+                    }
+                    Whatsit::RefXImage(st.import_image(h, &x, im))
                 }
-                Whatsit::RefXImage(st.import_image(h, &x, im))
+                _ => Whatsit::RefXImage(0),
             }
-            _ => Whatsit::RefXImage(0),
-        },
+        }
         Whatsit::RefObj(h) if h >= HANDLE_BASE => Whatsit::RefObj(st.import_obj(h, im)),
         Whatsit::Annot {
             objnum,
@@ -949,13 +1006,15 @@ pub fn ximage(
     fonts: &dyn FontSource,
 ) -> Result<Piece, PdfError> {
     let mut st = node_state(params);
+    let mut im = Imports::default();
+    st.png_group_here(&mut im);
     let k = st.ximage(spec)?;
     st.objs[k].info = form_name(read_handle(key, 0));
     let made = st.aux.ximages.get(&k).cloned();
     st.write_ximage(k, fonts)?;
     let mut fallback = None;
-    if made.as_ref().is_some_and(|x| x.group_ref != 0) {
-        fallback = Some("an image with a transparency group".to_owned());
+    if made.as_ref().is_some_and(|x| x.group_ref < 0) {
+        fallback = Some("an included PDF page with a transparency group".to_owned());
     }
     let made = made.map(|x| (k, Made::Image(x)));
     let mut next = 1;
@@ -968,7 +1027,7 @@ pub fn ximage(
     piece(
         &st,
         format!("image {} (owner key {key:016x})", read_handle(key, 0)),
-        &Imports::default(),
+        &im,
         &fixed,
         &mut other,
         made,
@@ -1011,7 +1070,16 @@ pub fn finish_relaxed(
     objs: &[Arc<Piece>],
     cmds: &[DocCmd],
 ) -> Result<Vec<u8>, String> {
-    let all: Vec<&Arc<Piece>> = pages.iter().chain(objs).collect();
+    // the transparent PNGs' group, once, if a piece refers to it
+    let g = png_group_handle();
+    let group = if pages.iter().chain(objs).any(|p| p.refs_handle(g)) {
+        Some(Arc::new(
+            png_group_piece(params).map_err(|e| e.to_string())?,
+        ))
+    } else {
+        None
+    };
+    let all: Vec<&Arc<Piece>> = pages.iter().chain(objs).chain(group.iter()).collect();
     for p in &all {
         if let Some(f) = &p.fallback {
             return Err(format!("{}: {f}", p.owner));
