@@ -721,11 +721,13 @@ impl Session {
         Ok((Some(text), cached))
     }
 
-    /// The format's name in the cache: its engine, and its text's hash.
+    /// The format's name in the cache: its engine, this binary's sources'
+    /// hash (another build's format is never read), its text's hash.
     fn format_name(&self, text: &str) -> String {
         format!(
-            "{}-{:016x}",
+            "{}-{}-{:016x}",
             self.job.engine.name,
+            env!("PHITEX_BUILD_ID"),
             tex::Fnv::new().add(text.as_bytes()).0
         )
     }
