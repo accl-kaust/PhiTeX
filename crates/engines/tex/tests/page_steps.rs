@@ -109,7 +109,7 @@ fn generated_documents() {
             }
             eprintln!("{name} chain by cause: {by:?}");
             if std::env::var_os("PHITEX_CHAIN_WAITS").is_some() {
-                for l in b.chain_waits().iter().take(4) {
+                for l in b.critical_chain_lines().iter().take(6) {
                     eprintln!("{name} wait: {l}");
                 }
             }
