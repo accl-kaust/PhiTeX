@@ -186,11 +186,7 @@ impl Run<'_, '_> {
         // at level one it is retained as a global one is (§283); else
         // the binding is a group's of this run
         let at_base = lvl <= base;
-        self.st.modify(
-            loc,
-            crate::runstate::Native::Raw(val),
-            at_base,
-            lvl == 0,
-        );
+        self.st
+            .modify(loc, crate::runstate::Native::Raw(val), at_base, lvl == 0);
     }
 }
