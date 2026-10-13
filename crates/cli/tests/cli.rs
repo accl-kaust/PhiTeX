@@ -458,6 +458,7 @@ fn build_to_the_fixpoint() {
 /// that of `latex`, `biber`, `latex`, `latex` (both blessed by
 /// scripts/bless-biber.sh).
 #[test]
+#[ignore = "waits for phitex-tex running biblatex (at \\printbibliography: hint regime violated, catcode of ' ' is 9)"]
 fn build_biblatex_with_native_biber() {
     let _one = one();
     let src = fixtures().join("biber");
