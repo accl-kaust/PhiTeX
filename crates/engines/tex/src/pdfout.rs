@@ -1314,6 +1314,11 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
         {
             eprintln!("pdf pages: page {} shipped again: {why}", replayed + 1);
         }
+        if let Ok(Some(why)) = &placed
+            && crate::exec::env_flag!("PHITEX_TEX_TIME")
+        {
+            eprintln!("pdf pages: page {}: {why}", replayed + shipped + 1);
+        }
         if placed.is_ok() {
             replayed += 1;
         } else {
