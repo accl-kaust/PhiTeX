@@ -959,48 +959,23 @@ neither `page:state` nor `prev_depth`:
 Parameters read at the contribution are ordinary definitions (the
 node's own reads), not a chain: they bind to their last definer.
 
-### 4.2a The split: heavy contribution, light step (approved; replaces 4.3's `OutPage` per page)
+### 4.2a Page steps (superseded: one fold, one step per page)
 
-The output routine must run where tex.web runs it: at the `build_page`
-call that finds the break, so its definitions bind for the text after
-that point and for nothing before it. A page node chained after the
-previous page's would sit in the wrong place, so the fold stays at the
-`build_page` points, split in two:
+The per-`build_page` light steps are gone (see `docs/TARGET_GRAPH.md`).
+A region's run only contributes its lines and vertical material to the
+main list (`items`, tagged with list 0) and, when it changes `\vsize`,
+`\maxdepth`, `\topskip` or `\holdinginserts`, a `T_PAGE_PARAMS` item
+so the fold uses them from that point. Nothing in a region reads or
+writes page-builder state.
 
-- The **heavy** node (the command: a paragraph's `\par` with its line
-  breaking, a box, glue, a penalty in vertical mode) appends to list 0
-  and reads neither `page:state` nor the fold. Where tex.web calls
-  `build_page`, it only notes that a step is due.
-- When it ends, it leaves a **light step** (`PageStep`, its own operation)
-  as its continuation (`Ctx::follow`), before the rest of its input. The
-  step reads `page:state` and the contributions since the last step,
-  runs §980–§1008 with the parameters in force at its position (the same
-  as at tex.web's call: nothing runs between the command's end and the
-  step), and fires the output routine there when the page breaks; the
-  routine's `OutPage` and `Exec` nodes unfold as the step's children, in
-  place.
-- A step defines only the page builder's fields: `page:state`, the
-  marks, the insertion boxes, `\outputpenalty` and `\deadcycles`
-  (`MayDefine::Prefixes`). The output routine itself is not the step's:
-  it runs in the step's children (`OutPage` and the routine's text),
-  which answer for their own definitions, so the step's answer does not
-  depend on recognising the routine. With no routine (§1023) the step
-  ships the page itself and a shipout may define anything: such a step
-  is a separate operation, `pagestep_any`, answering `Any` (counted,
-  `Stats::page_steps_any`). Recognising plain's and LaTeX's routines
-  (§1.3, §2.14) narrows the children's answers, not the step's.
-- A command that unfolds children or appends to the main list after its
-  `build_page` call, or calls `build_page` twice, or reads the page state
-  (`\pagegoal`, `\pagetotal`, `\showlists`, the empty-page test of
-  §1054) folds the due step in place at that point (`flush_page`): the
-  fold takes the main list as it was at the call, and its children go
-  before those the command made after the call. Otherwise the step is
-  deferred: the command's last continuation is the step (`Ctx::follow`),
-  then the rest of its input.
-
-The chain is then one light step per `build_page` call, each a few
-microseconds, beside the paragraphs, which build in parallel; the fast
-path of 4.3 makes most steps add a whole segment.
+One `breaks` node after the text folds the whole main list into pages:
+§980–§1008's arithmetic once over the list, with the parameters each
+point's `T_PAGE_PARAMS` item gives. Each page is a `pagestep` child
+(counted in `Stats::page_steps`, those with no output routine in
+`Stats::page_steps_any`) that runs the output routine inline on its
+page's material. What a routine leaves for the main list or changes in
+the page parameters is a loop-back, `pagefx:<j>`: the next round of
+`breaks` reads it and refolds from that page on, to a fixpoint.
 
 ### 4.3 The page fold
 
@@ -1079,60 +1054,29 @@ the list fix, then this.
 
 ## 5. Paragraph regions
 
-The cell of the paragraph open in a vertical list (§211's mode: a
-paragraph's `[list, lang, packed hyphen minima]`, or unit) is one per
-*region*, `par:<anchor>:<vlid>`, not one per list. Otherwise the start
-of every paragraph reads the end of the one before, a chain over the
-document.
+A document node is a paragraph region: the text between two
+paragraph-ending items at brace depth 0 and outside every conditional,
+as the syntactic pass marks them (`hints::slices_of`). There are no
+anchors, no `par:` cells and no boundary checks any more: the region's
+run opens its paragraph (and any group, box, math list, insert or
+alignment) as a level on its own semantic nest (`nest.rs`,
+`Run::push_list`/`push_group`/`pop_level`) and closes it before it
+ends, so nothing of a paragraph crosses to another node.
 
-- **Region.** It is the text after an item the syntactic pass marks
-  `Implicit::EndsParagraph`, at brace depth 0 and not consumed by an
-  earlier item. Such items are a blank line, `\par`, a vertical command
-  that reads nothing after it, and a macro whose body ends in one.
-  `\vskip`, `\hrule`, `\unvbox`, `\unvcopy` and `\halign` are excluded:
-  their keyword or number scan puts back the token after them, and that
-  token would run in the old region. `anchor` is the raw id of the node
-  holding the item (0 before the first).
-- **Node args.** Exec nodes take `[frames, top, anchor, boundary,
-  ifdepth]`. Children inherit the anchor; `boundary` is set only on
-  document nodes.
-- **Scope kinds.** A scope kind is `[group, sid, list, mode, depth,
-  parent, opener's anchor, extra…]`. A box, insert, math or alignment
-  end reads the outer paragraph in the opener's region. When its own
-  region differs, it carries that paragraph into its own region, so a
-  blank line inside a minipage does not end the outer paragraph.
-- **Check.** A boundary node whose first command is not §1094/§1095's
-  paragraph end, in vertical mode or in a paragraph of a vertical list,
-  gives the warning "paragraph boundary regime violated" and counts in
-  `Stats::par_boundary_violations`. An expandable first command is not
-  checked.
-- **Not detected:** a blank line taken as an unbraced `\long` argument
-  (the claimer ends the paragraph in its own region), and a macro marked
-  paragraph-ending whose expansion does not end it.
+What a region leaves is its contributions to the list it began in, the
+`\prevgraf` of that list (`pg:<list>`) and the definitions it makes at
+its base level. A region the pass closed too early reads on into the
+following text (claimed) until it is balanced: still correct, and serial
+only for that span. See `docs/TARGET_GRAPH.md` for the node and edge
+set the tests assert.
 
-## 6. Condition-stack levels
+## 6. Conditionals
 
-The condition stack (`cond_ptr`, §489) is one cell per level, `if:<d>`
-(1 the outermost), holding `[code, limit, owner node]`. It is not one
-cell for the whole stack, so a conditional no longer reads the previous
-conditional's stack.
-
-- **Depth.** A node's depth below its own conditionals is node arg 4,
-  `ifdepth`, taken from the text:
-  - a document node: the primitive conditionals before it, less the
-    `\fi`s (api.rs `slice_info`);
-  - a child: its parent's depth after the parent's command, plus the
-    nesting of the children before it.
-  For that nesting, control sequences named `if…`/`fi…` count by
-  meaning, and so do the control words of a line's unread text.
-- **Conditionals.** A conditional writes only its own level. A `\fi`,
-  `\else` or `\or` of a conditional begun in another node reads only
-  level `ifdepth` (§510). `\currentiflevel`, `\currentiftype`,
-  `\currentifbranch` and `\showifs` read levels 1…`ifdepth`.
-- **Output routine.** Its tokens start at `OUTPUT_IF_BASE` (2^40), in
-  levels of their own. They see only their own levels.
-- **Check.** An outer `\fi` that finds no record at its depth gives the
-  warning "conditional depth regime violated" and counts in
-  `Stats::if_depth_violations`.
-- **Not detected:** a conditional named neither `if…` nor `fi…` (a
-  `\let` alias) whose `\fi` is in the same node.
+Conditionals are run-local: the condition stack lives on the run and a
+conditional is never split across nodes. The syntactic pass keeps a
+conditional in one region, and format text runs a conditional opened at
+depth 0 on to its `\fi` in the same node. There are no `if:<d>` cells,
+no node `ifdepth` argument and no depth checks; `\currentiflevel`,
+`\currentiftype`, `\currentifbranch` and `\showifs` read the run's
+own stack. The output routine runs inline in its page step with its own
+stack. See `docs/TARGET_GRAPH.md`.
