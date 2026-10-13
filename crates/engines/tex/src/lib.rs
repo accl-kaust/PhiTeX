@@ -31,6 +31,7 @@ mod control;
 mod etex;
 mod exec;
 mod expand;
+mod fields;
 mod fonts;
 mod log;
 mod math;
