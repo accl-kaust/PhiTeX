@@ -37,7 +37,7 @@ impl Run<'_, '_> {
                     let name = ["top", "first", "bot", "splitfirst", "splitbot"]
                         [usize::try_from(self.cur.chr).unwrap_or(0).min(4)];
                     let m = crate::etex::mark_read(self, name, 0)?;
-                    let toks = crate::val::toks_of(self.v, m);
+                    let toks = crate::val::toks_rc(self.v, m);
                     self.push_toks(toks);
                 }
                 cmd::EXPAND_AFTER => {
@@ -130,7 +130,7 @@ impl Run<'_, '_> {
             let t = self.cur.tok.clone();
             self.back_input(t);
         }
-        let t = Tok::S(Rc::from(name));
+        let t = Tok::cs(&name);
         if self.mean_of(&t)? == Mean::Undefined {
             let relax = Mean::Prim("relax", cmd::RELAX, 256).encode(self.v);
             let f = t.field_name().unwrap_or_default();
@@ -305,8 +305,13 @@ impl Run<'_, '_> {
         }
         let _ = name;
         // §390
+        if pstack.is_empty() {
+            // no arguments: the body is read in place, never copied
+            self.push_toks(m.body.clone());
+            return Ok(());
+        }
         let mut body = Vec::with_capacity(m.body.len());
-        for t in &m.body {
+        for t in m.body.iter() {
             if t.cat() == Some(OUT_PARAM_CAT) && !t.is_cs_or_active() {
                 let k = usize::try_from(t.chr()).unwrap_or(1);
                 if let Some(a) = pstack.get(k.wrapping_sub(1)) {
@@ -564,7 +569,7 @@ impl Run<'_, '_> {
     pub(crate) fn font_id_tok(&mut self, f: i64) -> R<Tok> {
         let x = self.get(&format!("fontid:{f}"))?;
         let name = x.map_or_else(|| "nullfont".to_owned(), |x| str_of(self.v, x));
-        Ok(Tok::S(Rc::from(format!("\u{10FFFE}F{f}\u{2}{name}"))))
+        Ok(Tok::cs(&format!("\u{10FFFE}F{f}\u{2}{name}")))
     }
 
     /// `conv_toks` (§470–§472).
