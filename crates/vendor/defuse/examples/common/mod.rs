@@ -2095,6 +2095,9 @@ impl Pool {
             for i in start..end {
                 f(i);
             }
+            // This thread's probe counts and spans join the totals (profile
+            // builds): the snapshot after the batch covers every worker.
+            defuse::obs::flush();
             let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             st.remaining -= end - start;
             if st.remaining == 0 {
