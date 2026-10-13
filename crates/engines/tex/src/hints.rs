@@ -109,7 +109,12 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "wd" | "ht" | "dp" => &["box:", "lvlfix"],
         // horizontal material: may start a paragraph ([`starts_par`] adds
         // `par:`), the box level fix (§1090, §1091)
-        "char" | "accent" | "discretionary" | "-" | "hskip" | "hfil" | "hfill" | "hss"
+        // (`\\accent` does the assignments before its character: a font,
+        // registers, §1123)
+        "accent" => &[
+            "box:", "lvlfix", "font", "count:", "dimen:", "skip:", "muskip:", "toks:", "param:",
+        ],
+        "char" | "discretionary" | "-" | "hskip" | "hfil" | "hfill" | "hss"
         | "hfilneg" | "vrule" | "indent" | "noindent" | "unhbox" | "unhcopy" | "box" | "copy"
         | "leaders" | "cleaders" | "xleaders" => &["box:", "lvlfix"],
         // vertical material and removals (§1056, §1105, §1080)
