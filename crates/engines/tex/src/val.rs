@@ -481,7 +481,7 @@ struct Decoded {
     toks: FxHashMap<ValueId, Rc<[Tok]>>,
     means: FxHashMap<ValueId, Mean>,
     glues: FxHashMap<ValueId, Glue>,
-    frames: FxHashMap<ValueId, Option<crate::run::Frame>>,
+    frames: FxHashMap<ValueId, Option<crate::input::Seg>>,
     leaves: FxHashMap<ValueId, phitex_typeset::node::Node>,
 }
 
@@ -661,8 +661,8 @@ pub(crate) fn tok_id(v: &Values, epoch: u64, t: Tok) -> ValueId {
 pub(crate) fn frame_of(
     v: &Values,
     id: ValueId,
-    make: impl FnOnce() -> Option<crate::run::Frame>,
-) -> Option<crate::run::Frame> {
+    make: impl FnOnce() -> Option<crate::input::Seg>,
+) -> Option<crate::input::Seg> {
     decoded(v, id, |d| &mut d.frames, make)
 }
 
