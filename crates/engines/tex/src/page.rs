@@ -464,7 +464,10 @@ impl Run<'_, '_> {
         let dead = self.int("deadcycles")? + 1;
         self.set("deadcycles", v.int(dead), true);
         self.set("box:255", v.list(vec![v.int(0), b255]), true);
-        self.push_list(-1, group::OUTPUT, vec![v.list(held)]);
+        // the page parameters the routine starts with: one it changes
+        // globally reaches the fold for the next page (`output_end`)
+        let before = self.page_params_marker()?;
+        self.push_list(-1, group::OUTPUT, vec![v.list(held), before]);
         self.normal_paragraph()?;
         let mut toks = otoks;
         if !toks.is_empty() {
@@ -481,13 +484,19 @@ impl Run<'_, '_> {
 pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
     let v = r.v;
     let (items, _) = r.list_items(md.lid)?;
-    let held = md.extra.first().map(|&x| list_of(v, x)).unwrap_or_default();
+    let mut left = md.extra.first().map(|&x| list_of(v, x)).unwrap_or_default();
     r.close_group(md)?;
+    // §1026: the routine's global \vsize (\maxdepth, \topskip,
+    // \holdinginserts) governs the next page's breaks
+    let before = md.extra.get(1).copied();
+    let after = r.page_params_marker()?;
+    if before.is_some_and(|b| b != after) {
+        left.insert(0, after);
+    }
     if r.box_reg(255)?.is_some() {
         r.log("error", "Output routine didn't use all of \\box255")?;
     }
     r.set("inspen", v.int(0), true);
-    let mut left = held;
     left.extend(items);
     if !left.is_empty() {
         let j = r.page_index();
@@ -500,6 +509,23 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
 }
 
 impl Run<'_, '_> {
+    /// The page parameters in force, as the fold's marker
+    /// (`T_PAGE_PARAMS`).
+    pub(crate) fn page_params_marker(&mut self) -> R<ValueId> {
+        let v = self.v;
+        let vsize = self.param("vsize")?;
+        let maxdepth = self.param("maxdepth")?;
+        let topskip = self.glue_param("topskip")?;
+        let holding = self.param("holdinginserts")?;
+        Ok(v.list(vec![
+            v.int(nodes::T_PAGE_PARAMS),
+            v.int(i64::from(vsize)),
+            v.int(i64::from(maxdepth)),
+            crate::val::glue_value(v, &topskip),
+            v.int(i64::from(holding)),
+        ]))
+    }
+
     /// Which page this step is (its first argument), or `MAX_PAGES`.
     fn page_index(&self) -> usize {
         self.cx
