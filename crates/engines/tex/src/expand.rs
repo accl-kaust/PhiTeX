@@ -130,7 +130,7 @@ impl Run<'_, '_> {
             let t = self.cur.tok.clone();
             self.back_input(t);
         }
-        let t = self.sym(&name);
+        let t = Tok::S(Rc::from(name));
         if self.mean_of(&t)? == Mean::Undefined {
             let relax = Mean::Prim("relax", cmd::RELAX, 256).encode(self.v);
             let f = t.field_name().unwrap_or_default();
