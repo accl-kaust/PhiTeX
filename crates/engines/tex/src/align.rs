@@ -571,6 +571,10 @@ impl Run<'_, '_> {
             self.append(outer.lid, y);
         }
         self.set_prev_depth(&outer, pd);
+        // §812: `if mode=vmode then build_page`
+        if outer.m == 1 {
+            self.build_page_outer()?;
+        }
         Ok(())
     }
 }

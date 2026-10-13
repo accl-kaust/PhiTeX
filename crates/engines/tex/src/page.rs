@@ -166,7 +166,7 @@ impl Run<'_, '_> {
         Ok(v.list(xs))
     }
 
-    fn insert_class(&mut self, n: u16) -> R<InsertClass> {
+    pub(crate) fn insert_class(&mut self, n: u16) -> R<InsertClass> {
         let b = self.box_reg(i32::from(n))?;
         let v = self.v;
         Ok(InsertClass {
@@ -371,7 +371,7 @@ impl Run<'_, '_> {
     /// A fired page as the step's argument: `[box255, inserts, marks,
     /// held, output_penalty]`, the marks as values (§1012–§1021).
     #[allow(clippy::unnecessary_wraps)]
-    fn page_data(&mut self, f: &phitex_typeset::page::Fired, side: &Side) -> R<ValueId> {
+    pub(crate) fn page_data(&mut self, f: &phitex_typeset::page::Fired, side: &Side) -> R<ValueId> {
         let v = self.v;
         let b255 = nodes::encode_box(v, &f.box255.node, side);
         let inserts: Vec<ValueId> = f
@@ -405,8 +405,20 @@ impl Run<'_, '_> {
     /// insertion boxes defined, then the output routine run inline on
     /// this run's nest, or the page shipped (§1023).
     pub(crate) fn page_step(&mut self, args: &[ValueId]) -> R<()> {
+        let d = args.get(1).copied().unwrap_or(ValueId::UNIT);
+        if self.fire_page(d)? {
+            self.run_all()?;
+        }
+        Ok(())
+    }
+
+    /// `fire_up` (§1012–§1025) for the fired page `d` ([`Self::page_data`]):
+    /// the page shipped by the default routine (false), or the output
+    /// routine's group opened and its tokens pushed (true): the caller
+    /// runs them.
+    pub(crate) fn fire_page(&mut self, d: ValueId) -> R<bool> {
         let v = self.v;
-        let data = args.get(1).map(|&d| list_of(v, d)).unwrap_or_default();
+        let data = list_of(v, d);
         let a = |i: usize| data.get(i).copied().unwrap_or(ValueId::UNIT);
         let (b255, inserts, marks, held) =
             (a(0), list_of(v, a(1)), list_of(v, a(2)), list_of(v, a(3)));
@@ -470,7 +482,7 @@ impl Run<'_, '_> {
                     "held-over insertions without an output routine (next round)",
                 );
             }
-            return Ok(());
+            return Ok(false);
         }
         // §1025
         let dead = self.int("deadcycles")? + 1;
@@ -486,7 +498,7 @@ impl Run<'_, '_> {
             toks.remove(0);
         }
         self.push_toks(toks);
-        self.run_all()
+        Ok(true)
     }
 }
 
@@ -510,6 +522,11 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
     }
     r.set("inspen", v.int(0), true);
     left.extend(items);
+    if r.pg.is_some() {
+        // a text paging inline (`pageinline.rs`): §1026's contributions
+        // go back before the rest, and the page builder goes on
+        return crate::pageinline::output_done(r, left);
+    }
     if !left.is_empty() {
         let j = r.page_index();
         if j < MAX_PAGES {
