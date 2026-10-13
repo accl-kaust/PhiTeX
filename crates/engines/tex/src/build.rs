@@ -71,15 +71,21 @@ impl Run<'_, '_> {
             .rev()
             .find(|l| l.mode.abs() == 1 && l.owns)
             .map_or((base.vlid, base.vm), |l| (l.lid, l.mode));
-        let top = self.nest.last().expect("a level");
-        let _ = top;
+        // a paragraph level (group 0) is inside the group of the nearest
+        // level below it that is a group, or of level 0
+        let group = self
+            .nest
+            .iter()
+            .rev()
+            .find(|l| l.group != 0)
+            .map_or(base.group, |l| l.group);
         let t = self.nest.last().expect("a level");
         Ok(Mode {
             m: t.mode,
             km: if t.group == 0 { vm } else { t.mode },
             lid: t.lid,
             vlid,
-            group: if t.group == 0 { base.group } else { t.group },
+            group,
             sid: t.lid,
             depth: base.depth + groups,
             extra: t.extra.clone(),
