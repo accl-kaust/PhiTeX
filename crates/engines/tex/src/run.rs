@@ -537,6 +537,20 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Defines location `loc` (§277–§279: `eq_define` / `geq_define`).
     pub(crate) fn set_loc(&mut self, loc: Loc, val: Native, global: bool) {
+        if crate::exec::env_flag!("PHITEX_AUX_TRACE")
+            && self.interp.is_none()
+            && loc == self.reg_loc(0, 0)
+        {
+            let x = match &val {
+                Native::Raw(x) => self.v.render(*x),
+                _ => "?".to_owned(),
+            };
+            eprintln!(
+                "aux-trace: count0 := {x} global={global} by node {} op {:?}",
+                self.cx.node().raw(),
+                self.cx.op()
+            );
+        }
         let grp = self.innermost_group();
         self.st.set(loc, val, global, grp);
         self.irreversible += 1;
