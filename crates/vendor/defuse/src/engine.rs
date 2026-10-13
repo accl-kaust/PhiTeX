@@ -3384,20 +3384,14 @@ impl Engine {
             .map(|((_, r), w)| (*r, *w))
             .filter(|&(r, _)| lo < self.n(r).label)
             .collect();
-        let mut flushed = false;
         for (r, w) in readers {
             // Parked until its range has no node in work: the new nodes
             // are in work, and stab_settle wakes it once they finish
-            // (unless none is, as when they are all claimed at once).
+            // (unless none is, as when they are all claimed at once:
+            // settle_deferred checks at the end of the step).
             if w.waiting && self.n(r).state == State::Parked {
-                if !flushed {
-                    self.flush_order();
-                    flushed = true;
-                }
-                let lo = self.watch_key(r, w.anchor).0;
-                if self.ord_fold(unit, lo, self.n(r).label).work != 0 {
-                    continue;
-                }
+                self.settle_pending.push((unit, self.n(r).label - 1));
+                continue;
             }
             self.make_dirty(r);
         }
@@ -6226,17 +6220,13 @@ impl Engine {
     /// the new nodes finish; a change that leaves such a range without
     /// work wakes its reader here (nothing would finish for it).
     fn stab_structure(&mut self, unit: u32, label: u64) {
-        let mut flushed = false;
         for (r, w) in self.stab(unit, label) {
             if w.waiting && self.n(r).state == State::Parked {
-                if !flushed {
-                    self.flush_order();
-                    flushed = true;
-                }
-                let lo = self.watch_key(r, w.anchor).0;
-                if self.ord_fold(unit, lo, self.n(r).label).work != 0 {
-                    continue;
-                }
+                // Parked until its range has no node in work: checked once
+                // at the end of the step (settle_deferred), not here, which
+                // would flush the lazy order per inserted node.
+                self.settle_pending.push((unit, self.n(r).label - 1));
+                continue;
             }
             self.make_dirty(r);
         }
@@ -6919,10 +6909,12 @@ impl Engine {
         }
         let x = r.slot;
         if !self.live(x) || self.n(x).id != r.node || self.n(x).epoch != r.epoch {
+            count!(DeadResult);
             return;
         }
         let st = self.n(x).state;
         if !matches!(st, State::Dirty | State::Parked) || (st == State::Parked && !r.speculative) {
+            count!(StateResult);
             return;
         }
         if r.resumed {
@@ -7162,13 +7154,20 @@ impl Engine {
         };
         self.touch_with(x, r.old_sites.take());
         let provisional = r.speculative && !r.assumptions.is_empty();
-        if r.speculative && self.shape_changes(x, &r) {
+        if r.speculative && (provisional || r.read_unsettled) && self.shape_changes(x, &r) {
             // A guess that changes the structure (claim, unfolding, scope
             // effect or definition set) is not applied: it would re-bind
             // and dirty its surroundings on a value that may still change,
             // and the next guess would undo it (a chain of pending claims
-            // storms this way). The node runs at its level.
+            // storms this way). The node runs at its level. A speculative
+            // run that read only settled facts is no guess: its structure
+            // is applied like any result (a cold build's defining nodes
+            // above the level would otherwise each run once for nothing).
+            // Not guessed again this evaluation: the shape is what the
+            // node does, and F_NOSPEC alone is cleared by the next change
+            // to any input (a whole run per step, dropped, uncounted).
             self.report.spec_shape_changes += 1;
+            self.mispredicted.insert(x, MISPREDICTIONS_PER_NODE);
             self.set_flag(x, F_NOSPEC, true);
             return;
         }
@@ -8643,6 +8642,8 @@ pub struct RunResult {
     /// The level the run has to be re-done at (0: none), see [`Ctx`], and
     /// the finished node read there that set it (`NIL`: a range).
     pub(crate) raise: u32,
+    /// A speculative run read a finished node not yet settled.
+    pub(crate) read_unsettled: bool,
     pub(crate) raise_from: Slot,
     pub(crate) uses: Vec<Use>,
     pub(crate) defs: Vec<(Field, ValueId, bool)>,

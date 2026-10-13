@@ -186,13 +186,14 @@ fn bench(n: usize, o: &Opts) {
         (load + t).as_secs_f64() / interp.as_secs_f64()
     );
     println!(
-        "load {load:.3?}  cold {t:.3?}  runs {}  stops {}  spec {}/{}/{}/{}  gated {}  pending waits {}  live {}  units {}  critical path {}  widths {:?}  rss {:.0} MB",
+        "load {load:.3?}  cold {t:.3?}  runs {}  stops {}  spec {}/{}/{}/{}/{}  gated {}  pending waits {}  live {}  units {}  critical path {}  widths {:?}  rss {:.0} MB",
         r.runs,
         r.stops,
         r.speculations,
         r.confirmations,
         r.mispredictions,
         r.spec_stops,
+        r.spec_shape_changes,
         r.gated,
         r.pending_waits,
         eng.live_nodes(),
