@@ -172,9 +172,10 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "shipout" | "insert" | "vadjust" | "output" => &["param:"],
         "afterassignment" => &["aftertoken"],
         "aftergroup" => &["ag"],
-        // boxes (§1083 begin_box, §1077 \setbox)
+        // boxes (§1083 begin_box, §1077 \\setbox); a box whose braces close in
+        // the same node is packaged there and sets \\\\badness, §1086, §649)
         "hbox" | "vbox" | "vtop" | "vcenter" | "setbox" | "vsplit" => {
-            &["box:", "align", "param:", "lvlfix"]
+            &["box:", "align", "param:", "lvlfix", "badness"]
         }
         // conditionals (§498-§510)
         "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode"
@@ -242,7 +243,9 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // expansion only (§367, §369)
         "noexpand" => &[],
         // boxes in a box context (§1073 begin_box via §1084)
-        "moveleft" | "moveright" | "raise" | "lower" => &["box:", "align", "param:", "lvlfix"],
+        "moveleft" | "moveright" | "raise" | "lower" => {
+            &["box:", "align", "param:", "lvlfix", "badness"]
+        }
         // a language whatsit (§1377) in horizontal material, which may
         // start a paragraph (`par:`, `lopen:`, `pg:`, §1091)
         "setlanguage" => &["box:", "lvlfix", "par:", "lopen:", "pg:"],
