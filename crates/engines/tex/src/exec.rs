@@ -32,8 +32,13 @@ use std::sync::{Arc, OnceLock};
 
 use phitex_defuse::{Executor, RunResult};
 
-/// Below this many jobs a batch runs on the calling thread.
+/// Below this many items an engine pass runs on the calling thread
+/// (its items cost microseconds).
 const GRAIN: usize = 64;
+
+/// Below this many jobs a batch of runs goes inline: a run costs
+/// milliseconds, so two already pay for the pool.
+const JOB_GRAIN: usize = 2;
 
 /// How the host starts a worker thread: it runs the closure on a new
 /// worker (on wasm32: a web worker sharing the module's memory).
@@ -200,6 +205,9 @@ pub(crate) struct Threads {
     busy: AtomicU64,
     running: AtomicUsize,
     peak: AtomicUsize,
+    batches: AtomicU64,
+    batches_inline: AtomicU64,
+    jobs_max_batch: AtomicUsize,
 }
 
 impl Threads {
@@ -210,6 +218,9 @@ impl Threads {
             busy: AtomicU64::new(0),
             running: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
+            batches: AtomicU64::new(0),
+            batches_inline: AtomicU64::new(0),
+            jobs_max_batch: AtomicUsize::new(0),
         }
     }
 
@@ -239,6 +250,15 @@ impl Threads {
     /// The jobs' summed run time (zero without a clock).
     pub(crate) fn busy(&self) -> std::time::Duration {
         std::time::Duration::from_nanos(self.busy.load(Ordering::Relaxed))
+    }
+
+    /// The batches of runs, those run inline, and the largest batch.
+    pub(crate) fn batches(&self) -> (u64, u64, usize) {
+        (
+            self.batches.load(Ordering::Relaxed),
+            self.batches_inline.load(Ordering::Relaxed),
+            self.jobs_max_batch.load(Ordering::Relaxed),
+        )
     }
 
     /// The most jobs that ran at once.
@@ -296,12 +316,17 @@ impl Executor for Threads {
                 .total
                 .fetch_add(u64::try_from(n).unwrap_or(0), Ordering::Relaxed);
         }
-        if self.n <= 1 || n < GRAIN {
+        self.batches.fetch_add(1, Ordering::Relaxed);
+        self.jobs_max_batch.fetch_max(n, Ordering::Relaxed);
+        if self.n <= 1 || n < JOB_GRAIN || !threads_possible() {
+            self.batches_inline.fetch_add(1, Ordering::Relaxed);
             out.extend((0..n).map(|i| self.node_job(|| run(i))));
             return;
         }
         let slots: Vec<OnceLock<RunResult>> = (0..n).map(|_| OnceLock::new()).collect();
-        self.parallel_each(n, &|i| {
+        trace(n, self.n);
+        // one job a task: each costs a run
+        parallel(self.n, n, 1, &|i| {
             let _ = slots[i].set(self.node_job(|| run(i)));
         });
         out.extend(
