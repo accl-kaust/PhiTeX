@@ -21,7 +21,7 @@ const OUTSIDE_LIMIT: u8 = 4;
 
 /// `macro_call`'s buffers, kept by each thread between calls.
 #[derive(Default)]
-struct MacroBufs {
+pub(crate) struct MacroBufs {
     /// The arguments' tokens, one after another.
     args: Vec<Tok>,
     /// Argument `#k` is `args[bounds[k-1].0..bounds[k-1].1]`.
@@ -31,7 +31,6 @@ struct MacroBufs {
 }
 
 thread_local! {
-    static ARGS: std::cell::Cell<MacroBufs> = std::cell::Cell::default();
     static NAME: std::cell::Cell<String> = std::cell::Cell::default();
 }
 
@@ -204,7 +203,7 @@ impl Run<'_, '_> {
             self.push_range(r, crate::input::ty::MACRO);
             return Ok(());
         }
-        let mut bufs = ARGS.with(std::cell::Cell::take);
+        let mut bufs = std::mem::take(&mut self.mbufs);
         let r = self.macro_args(&m, &mut bufs);
         if matches!(r, Ok(true)) {
             // §400: the body with its arguments substituted, written
@@ -230,7 +229,7 @@ impl Run<'_, '_> {
         bufs.args.clear();
         bufs.bounds.clear();
         bufs.out.clear();
-        ARGS.with(|c| c.set(bufs));
+        self.mbufs = bufs;
         r.map(|_| ())
     }
 
@@ -261,8 +260,7 @@ impl Run<'_, '_> {
             let mut m_count = 0usize;
             let mut rbrace: Option<usize> = None;
             'cont: loop {
-                self.get_token()?;
-                let tok = self.cur.tok;
+                let tok = self.get_token_tok()?;
                 if r < len && !is_match(&p[r]) && tok == p[r] {
                     // §394
                     r += 1;
@@ -322,8 +320,7 @@ impl Run<'_, '_> {
                         let mut unbalance = 1;
                         args.push(tok);
                         loop {
-                            self.get_token()?;
-                            let t2 = self.cur.tok;
+                            let t2 = self.get_token_tok()?;
                             if t2 == par && !long_state {
                                 self.runaway(name)?;
                                 self.back_input(t2);

@@ -202,6 +202,8 @@ pub(crate) struct Run<'c, 'a> {
     /// Lines begun by this run (the `lines` accumulator, contributed
     /// once at the end).
     pub lines_read: u64,
+    /// `macro_call`'s buffers, kept between calls.
+    pub mbufs: crate::expand::MacroBufs,
     /// `PHITEX_HEARTBEAT=1` (read once a process).
     pub heartbeat_on: bool,
     /// Macro bodies copied into the arena, by their shared list's address
@@ -313,6 +315,7 @@ impl<'c, 'a> Run<'c, 'a> {
             input: crate::input::Input::new(),
             cs_cache: vec![(0, Tok::c(0)); CS_CACHE].into_boxed_slice(),
             lines_read: 0,
+            mbufs: crate::expand::MacroBufs::default(),
             heartbeat_on: heartbeat_enabled(),
             body_cache: phitex_defuse::FxHashMap::default(),
             pulled: 0,
