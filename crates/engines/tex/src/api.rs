@@ -645,6 +645,10 @@ pub struct Stats {
     pub loop_rounds: u64,
     /// Nodes that waited on a value not known yet, and stops.
     pub pending_waits: u64,
+    /// Waits on a node whose declared set was pending, and how many of
+    /// those sets then defined the field (the necessary ones).
+    pub pending_sets: u64,
+    pub pending_sets_defining: u64,
     pub stops: u64,
     /// Stopped runs restarted instead of resumed, by the first read that
     /// refused the resume.
@@ -720,7 +724,7 @@ pub struct Stats {
 /// A round's counters (`PHITEX_TEX_TIME`).
 fn print_round(t: std::time::Duration, r: &Report) {
     eprintln!(
-        "round: {t:?}, {} nodes run, {} runs, {} gated, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} env_provided, {} raises, {} pending, {} created, {} freed, spec {}/{}/{}, by op {:?}",
+        "round: {t:?}, {} nodes run, {} runs, {} gated, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} env_provided, {} raises, {} pending, {} pending sets ({} defining), {} created, {} freed, spec {}/{}/{}, by op {:?}",
         r.nodes_run,
         r.runs,
         r.gated,
@@ -732,6 +736,8 @@ fn print_round(t: std::time::Duration, r: &Report) {
         r.env_provided,
         r.raises,
         r.pending_waits,
+        r.pending_sets,
+        r.pending_sets_defining,
         r.created,
         r.freed,
         r.speculations,
@@ -814,6 +820,8 @@ impl Stats {
         self.rounds += 1;
         self.loop_rounds += r.rounds;
         self.pending_waits += r.pending_waits;
+        self.pending_sets += r.pending_sets;
+        self.pending_sets_defining += r.pending_sets_defining;
         self.stops += r.stops;
         for &(k, n) in &r.restarted_by {
             match self.restarted_by.iter_mut().find(|x| x.0 == k) {
@@ -2371,7 +2379,12 @@ impl Build {
                         format!("Changed {} at [{}]", field_name(v, field), d(site))
                     }
                     Cause::Output { of } => format!("Output of [{}]", d(Some(of))),
-                    Cause::Woken { by } => format!("Woken by [{}]", d(Some(by))),
+                    Cause::Woken { by, field, prefix } => format!(
+                        "Woken by [{}] for {} (prefix {})",
+                        d(Some(by)),
+                        field.map_or_else(|| "?".to_owned(), |f| field_name(v, f)),
+                        prefix.as_deref().unwrap_or("-")
+                    ),
                     Cause::Loop { field } => format!("Loop {}", field_name(v, field)),
                     Cause::Environment { field } => {
                         format!("Environment {}", field_name(v, field))
@@ -2445,8 +2458,10 @@ impl Build {
         let mut out = Vec::new();
         for (n, c) in self.g.eng.critical_chain() {
             match c {
-                Cause::Woken { by } => out.push(format!(
-                    "Woken\n    waiter: {}\n    waited: {}",
+                Cause::Woken { by, field, prefix } => out.push(format!(
+                    "Woken for {} (prefix {})\n    waiter: {}\n    waited: {}",
+                    field.map_or_else(|| "?".to_owned(), |f| field_name(v, f)),
+                    prefix.as_deref().unwrap_or("-"),
                     describe(n),
                     describe(by)
                 )),
@@ -2486,7 +2501,10 @@ impl Build {
                     Cause::Rebind { field, .. } => ("Rebind", field_name(v, field)),
                     Cause::Changed { field, .. } => ("Changed", field_name(v, field)),
                     Cause::Output { .. } => ("Output", String::new()),
-                    Cause::Woken { .. } => ("Woken", String::new()),
+                    Cause::Woken { field, .. } => (
+                        "Woken",
+                        field.map_or_else(String::new, |f| field_name(v, f)),
+                    ),
                     Cause::Loop { field } => ("Loop", field_name(v, field)),
                     Cause::Environment { field } => ("Environment", field_name(v, field)),
                     Cause::Structure => ("Structure", String::new()),

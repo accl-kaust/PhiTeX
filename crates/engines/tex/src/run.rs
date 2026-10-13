@@ -289,7 +289,28 @@ impl<'c, 'a> Run<'c, 'a> {
         if let Some(&x) = self.own.get(&f) {
             return Ok(x);
         }
-        Ok(self.cx.use_field(f)?)
+        let r = self.cx.use_field(f);
+        if crate::exec::env_flag!("PHITEX_READS") {
+            self.trace_read(f, r.is_err());
+        }
+        Ok(r?)
+    }
+
+    /// `PHITEX_READS`: a read under a head a paragraph region declares
+    /// (where a following region's walk may park), or any read that
+    /// parked, with the node and its operation.
+    #[cold]
+    fn trace_read(&mut self, f: Field, parked: bool) {
+        const HEADS: [&str; 6] = ["pg:", "parshape", "box:", "lvlfix", "badness", "markclasses"];
+        let name = crate::val::field_name(self.v, f);
+        if parked || HEADS.iter().any(|h| name.starts_with(h)) {
+            eprintln!(
+                "reads: node {} op {:?} {name}{}",
+                self.cx.node().raw(),
+                self.cx.op(),
+                if parked { " PARKED" } else { "" }
+            );
+        }
     }
 
     /// The file `key` from the client (`file:<key>`): `None` if it is
