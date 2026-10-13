@@ -786,6 +786,15 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                     p.push_str(&format!(" · at most {} at once", x.peak_running));
                 }
                 rows.push(("parallel".to_owned(), p));
+                if x.batches > 0 {
+                    rows.push((
+                        "batches".to_owned(),
+                        format!(
+                            "{} · {} of one job · largest {}",
+                            x.batches, x.batches_inline, x.max_batch
+                        ),
+                    ));
+                }
             }
             let head = format!(
                 "{}  {}  {}",
@@ -811,6 +820,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 "engine_ms": x.engine_wall.as_secs_f64() * 1e3,
                 "critical_path": x.critical_path,
                 "peak_running": x.peak_running,
+                "batches": x.batches,
+                "batches_inline": x.batches_inline,
+                "max_batch": x.max_batch,
             })),
             "wall_ms": r.wall.as_secs_f64() * 1e3,
             "errors": r.out.errors,
