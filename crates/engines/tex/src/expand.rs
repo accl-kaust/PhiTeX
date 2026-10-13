@@ -19,6 +19,35 @@ pub(crate) const OR_CODE: i32 = 4;
 /// A conditional begun before this run is in its taken branch (§510).
 const OUTSIDE_LIMIT: u8 = 4;
 
+/// `macro_call`'s buffers, kept by each thread between calls.
+#[derive(Default)]
+struct MacroBufs {
+    /// The arguments' tokens, one after another.
+    args: Vec<Tok>,
+    /// Argument `#k` is `args[bounds[k-1].0..bounds[k-1].1]`.
+    bounds: Vec<(usize, usize)>,
+    /// The body with its arguments substituted.
+    out: Vec<Tok>,
+}
+
+thread_local! {
+    static ARGS: std::cell::Cell<MacroBufs> = std::cell::Cell::default();
+    static NAME: std::cell::Cell<String> = std::cell::Cell::default();
+}
+
+/// A control sequence interned once a process.
+macro_rules! cs_once {
+    ($name:ident, $s:expr) => {
+        pub(crate) fn $name() -> Tok {
+            static C: std::sync::OnceLock<crate::val::CsId> = std::sync::OnceLock::new();
+            Tok::S(*C.get_or_init(|| crate::val::CsId::intern($s)))
+        }
+    };
+}
+cs_once!(par_tok, "par");
+cs_once!(relax_tok, "\u{10FFFE}relax");
+cs_once!(notexpanded_tok, "\u{10FFFE}notexpanded");
+
 impl Run<'_, '_> {
     /// `expand` (§366): `cur` is expandable.
     pub(crate) fn expand(&mut self) -> R<()> {
@@ -60,7 +89,7 @@ impl Run<'_, '_> {
                     let cs = t.is_cs_or_active();
                     self.back_input(t);
                     if cs {
-                        self.back_input(Tok::cs("\u{10FFFE}notexpanded"));
+                        self.back_input(notexpanded_tok());
                     }
                 }
                 cmd::CS_NAME => self.cs_name()?,
@@ -111,26 +140,23 @@ impl Run<'_, '_> {
     pub(crate) fn insert_relax(&mut self) {
         let t = self.cur.tok.clone();
         self.back_input(t);
-        self.back_input(Tok::cs("\u{10FFFE}relax"));
+        self.back_input(relax_tok());
     }
 
     /// §372–§374.
     fn cs_name(&mut self) -> R<()> {
         let _in_csname = crate::etex::InCsname::enter();
-        let mut name = String::new();
-        loop {
-            self.get_x_token()?;
-            if self.cur.is_cs() {
-                break;
-            }
-            print::push_code(&mut name, self.cur.tok.chr() & 0xFF);
-        }
+        let mut name = NAME.with(std::cell::Cell::take);
+        name.clear();
+        let r = self.cs_name_chars(&mut name);
+        let t = Tok::cs(&name);
+        NAME.with(|c| c.set(name));
+        r?;
         if self.cur.cmd != cmd::END_CS_NAME {
             // §373: back_error
             let t = self.cur.tok.clone();
             self.back_input(t);
         }
-        let t = Tok::cs(&name);
         if self.mean_of(&t)? == Mean::Undefined {
             let relax = Mean::Prim("relax", cmd::RELAX, 256).encode(self.v);
             let f = t.field_name().unwrap_or_default();
@@ -141,7 +167,6 @@ impl Run<'_, '_> {
     }
 
     /// `macro_call` (§389–§400).
-    #[allow(clippy::too_many_lines)]
     /// §396: "Paragraph ended before \\x was complete".
     fn runaway(&mut self, name: &Tok) -> R<()> {
         let mut s = String::from("Paragraph ended before ");
@@ -152,177 +177,210 @@ impl Run<'_, '_> {
         self.log("error", &s)
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// §372: the characters of a `\\csname` into `name`.
+    fn cs_name_chars(&mut self, name: &mut String) -> R<()> {
+        loop {
+            self.get_x_token()?;
+            if self.cur.is_cs() {
+                return Ok(());
+            }
+            print::push_code(name, self.cur.tok.chr() & 0xFF);
+        }
+    }
+
+    /// `macro_call` (§389–§400): the arguments are scanned into one
+    /// per-thread buffer (ranges, no list per argument) and the body with
+    /// its arguments substituted is built in another, then pushed as one
+    /// shared list (one allocation a call).
     pub(crate) fn macro_call(&mut self) -> R<()> {
         let Mean::Macro(m) = self.cur.mean.clone() else {
             return Ok(());
         };
-        let name = self.cur.tok.clone();
-        let p: &[Tok] = &m.params;
-        let len = p.len();
-        let is_match = |t: &Tok| t.cat() == Some(MATCH_CAT);
-        let long = m.flags & 1 != 0;
-        let mut long_state = long;
-        let mut pstack: Vec<Vec<Tok>> = Vec::new();
-        let mut r = 0usize;
-        let par = Tok::cs("par");
-        if len > 0 {
-            loop {
-                // §391
-                let s: Option<usize> = if is_match(&p[r]) {
-                    r += 1;
-                    Some(r)
-                } else {
-                    None
-                };
-                let mut param: Vec<Tok> = Vec::new();
-                let mut m_count = 0usize;
-                let mut rbrace: Option<usize> = None;
-                'cont: loop {
-                    self.get_token()?;
-                    let tok = self.cur.tok.clone();
-                    if r < len && !is_match(&p[r]) && tok == p[r] {
-                        // §394
-                        r += 1;
-                        if r >= len || is_match(&p[r]) {
-                            break 'cont;
-                        }
-                        continue 'cont;
-                    }
-                    // §397
-                    if s != Some(r) {
-                        let Some(s0) = s else {
-                            // §398: "Use of \x doesn't match its definition"
-                            self.log("error", "doesn't match its definition")?;
-                            return Ok(());
-                        };
-                        let mut t = s0;
-                        loop {
-                            param.push(p[t].clone());
-                            m_count += 1;
-                            let mut u = t + 1;
-                            let mut v = s0;
-                            let mut resumed = false;
-                            loop {
-                                if u == r {
-                                    if tok != p[v] {
-                                        break;
-                                    }
-                                    r = v + 1;
-                                    resumed = true;
-                                    break;
-                                }
-                                if p[u] != p[v] {
-                                    break;
-                                }
-                                u += 1;
-                                v += 1;
-                            }
-                            if resumed {
-                                continue 'cont;
-                            }
-                            t += 1;
-                            if t == r {
-                                break;
-                            }
-                        }
-                        r = s0;
-                    }
-                    if tok == par && !long_state {
-                        // §396: a runaway argument; the \par is read again
-                        self.runaway(&name)?;
-                        self.back_input(tok);
-                        return Ok(());
-                    }
-                    match tok.cat() {
-                        Some(1) if !tok.is_cs_or_active() => {
-                            // §399
-                            let mut unbalance = 1;
-                            param.push(tok);
-                            loop {
-                                self.get_token()?;
-                                let t2 = self.cur.tok.clone();
-                                if t2 == par && !long_state {
-                                    self.runaway(&name)?;
-                                    self.back_input(t2);
-                                    return Ok(());
-                                }
-                                if !t2.is_cs_or_active() {
-                                    match t2.cat() {
-                                        Some(1) => unbalance += 1,
-                                        Some(2) => {
-                                            unbalance -= 1;
-                                            if unbalance == 0 {
-                                                rbrace = Some(param.len());
-                                                param.push(t2);
-                                                break;
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                param.push(t2);
-                            }
-                        }
-                        Some(2) if !tok.is_cs_or_active() => {
-                            // §395: an extra }, and a \par inserted
-                            self.back_input(tok);
-                            self.back_input(par.clone());
-                            long_state = false;
-                            continue 'cont;
-                        }
-                        _ => {
-                            // §393
-                            if tok == crate::val::space_tok() && (r >= len || is_match(&p[r])) {
-                                continue 'cont;
-                            }
-                            param.push(tok);
-                        }
-                    }
-                    m_count += 1;
-                    if r < len && !is_match(&p[r]) {
-                        continue 'cont;
-                    }
-                    break 'cont;
-                }
-                // found: §400
-                if s.is_some() {
-                    if m_count == 1
-                        && let (Some(rb), Some(last)) = (rbrace, param.last())
-                        && last.cat() == Some(2)
-                        && !last.is_cs_or_active()
-                        && rb == param.len() - 1
-                    {
-                        param.pop();
-                        param.remove(0);
-                    }
-                    pstack.push(param);
-                }
-                if r >= len {
-                    break;
-                }
-            }
-        }
-        let _ = name;
-        // §390
-        if pstack.is_empty() {
+        if m.params.is_empty() {
             // no arguments: the body is read in place, never copied
             self.push_toks(m.body.clone());
             return Ok(());
         }
-        let mut body = Vec::with_capacity(m.body.len());
-        for t in m.body.iter() {
-            if t.cat() == Some(OUT_PARAM_CAT) && !t.is_cs_or_active() {
-                let k = usize::try_from(t.chr()).unwrap_or(1);
-                if let Some(a) = pstack.get(k.wrapping_sub(1)) {
-                    body.extend(a.iter().cloned());
+        let mut bufs = ARGS.with(std::cell::Cell::take);
+        let r = self.macro_args(&m, &mut bufs);
+        if matches!(r, Ok(true)) {
+            let MacroBufs { args, bounds, out } = &mut bufs;
+            out.clear();
+            for t in m.body.iter() {
+                if let Tok::C(x) = t
+                    && x >> 21 == u32::from(OUT_PARAM_CAT)
+                {
+                    let k = usize::try_from(x & 0x1F_FFFF).unwrap_or(1);
+                    if let Some(&(lo, hi)) = bounds.get(k.wrapping_sub(1)) {
+                        out.extend_from_slice(&args[lo..hi]);
+                    }
+                } else {
+                    out.push(t.clone());
                 }
+            }
+            let toks: Rc<[Tok]> = Rc::from(&out[..]);
+            self.push_toks(toks);
+        }
+        bufs.args.clear();
+        bufs.bounds.clear();
+        bufs.out.clear();
+        ARGS.with(|c| c.set(bufs));
+        r.map(|_| ())
+    }
+
+    /// §391–§400: the arguments of `m` into `bufs` (`args` with their
+    /// `bounds`); false when the call was abandoned.
+    #[allow(clippy::too_many_lines)]
+    fn macro_args(&mut self, m: &Macro, bufs: &mut MacroBufs) -> R<bool> {
+        let name = self.cur.tok.clone();
+        let MacroBufs { args, bounds, .. } = bufs;
+        args.clear();
+        bounds.clear();
+        let p: &[Tok] = &m.params;
+        let len = p.len();
+        let is_match = |t: &Tok| matches!(*t, Tok::C(x) if x >> 21 == u32::from(MATCH_CAT));
+        let mut long_state = m.flags & 1 != 0;
+        let mut r = 0usize;
+        let par = par_tok();
+        let space = crate::val::space_tok();
+        loop {
+            // §391
+            let s: Option<usize> = if is_match(&p[r]) {
+                r += 1;
+                Some(r)
             } else {
-                body.push(t.clone());
+                None
+            };
+            let start = args.len();
+            let mut m_count = 0usize;
+            let mut rbrace: Option<usize> = None;
+            'cont: loop {
+                self.get_token()?;
+                let tok = self.cur.tok.clone();
+                if r < len && !is_match(&p[r]) && tok == p[r] {
+                    // §394
+                    r += 1;
+                    if r >= len || is_match(&p[r]) {
+                        break 'cont;
+                    }
+                    continue 'cont;
+                }
+                // §397
+                if s != Some(r) {
+                    let Some(s0) = s else {
+                        // §398: "Use of \x doesn't match its definition"
+                        self.log("error", "doesn't match its definition")?;
+                        return Ok(false);
+                    };
+                    let mut t = s0;
+                    loop {
+                        args.push(p[t].clone());
+                        m_count += 1;
+                        let mut u = t + 1;
+                        let mut v = s0;
+                        let mut resumed = false;
+                        loop {
+                            if u == r {
+                                if tok != p[v] {
+                                    break;
+                                }
+                                r = v + 1;
+                                resumed = true;
+                                break;
+                            }
+                            if p[u] != p[v] {
+                                break;
+                            }
+                            u += 1;
+                            v += 1;
+                        }
+                        if resumed {
+                            continue 'cont;
+                        }
+                        t += 1;
+                        if t == r {
+                            break;
+                        }
+                    }
+                    r = s0;
+                }
+                if tok == par && !long_state {
+                    // §396: a runaway argument; the \par is read again
+                    self.runaway(&name)?;
+                    self.back_input(tok);
+                    return Ok(false);
+                }
+                match tok {
+                    Tok::C(x) if x >> 21 == 1 => {
+                        // §399
+                        let mut unbalance = 1;
+                        args.push(tok);
+                        loop {
+                            self.get_token()?;
+                            let t2 = self.cur.tok.clone();
+                            if t2 == par && !long_state {
+                                self.runaway(&name)?;
+                                self.back_input(t2);
+                                return Ok(false);
+                            }
+                            if let Tok::C(y) = t2 {
+                                match y >> 21 {
+                                    1 => unbalance += 1,
+                                    2 => {
+                                        unbalance -= 1;
+                                        if unbalance == 0 {
+                                            rbrace = Some(args.len() - start);
+                                            args.push(t2);
+                                            break;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            args.push(t2);
+                        }
+                    }
+                    Tok::C(x) if x >> 21 == 2 => {
+                        // §395: an extra }, and a \par inserted
+                        self.back_input(tok);
+                        self.back_input(par.clone());
+                        long_state = false;
+                        continue 'cont;
+                    }
+                    _ => {
+                        // §393
+                        if tok == space && (r >= len || is_match(&p[r])) {
+                            continue 'cont;
+                        }
+                        args.push(tok);
+                    }
+                }
+                m_count += 1;
+                if r < len && !is_match(&p[r]) {
+                    continue 'cont;
+                }
+                break 'cont;
+            }
+            // found: §400
+            if s.is_some() {
+                let mut lo = start;
+                let mut hi = args.len();
+                if m_count == 1
+                    && let Some(rb) = rbrace
+                    && hi > lo
+                    && matches!(args[hi - 1], Tok::C(x) if x >> 21 == 2)
+                    && rb == hi - lo - 1
+                {
+                    lo += 1;
+                    hi -= 1;
+                }
+                bounds.push((lo, hi));
+            }
+            if r >= len {
+                break;
             }
         }
-        self.push_toks(body);
-        Ok(())
+        Ok(true)
     }
 
     /// `pass_text` (§494): to the `\or`, `\else` or `\fi` at this level.
@@ -610,7 +668,8 @@ impl Run<'_, '_> {
                 s.push_str(&j.map_or_else(|| "texput".to_owned(), |x| str_of(self.v, x)));
             }
         }
-        self.push_toks(str_toks(&s));
+        let toks: Rc<[Tok]> = s.chars().map(char_tok).collect();
+        self.push_toks(toks);
         Ok(())
     }
 
@@ -861,13 +920,15 @@ pub(crate) fn split_lines(text: &str) -> Vec<String> {
 
 /// `str_toks` (§464).
 pub(crate) fn str_toks(s: &str) -> Vec<Tok> {
-    s.chars()
-        .map(|c| {
-            if c == ' ' {
-                crate::val::space_tok()
-            } else {
-                Tok::ch(12, u32::from(c))
-            }
-        })
-        .collect()
+    let mut v = Vec::with_capacity(s.len());
+    v.extend(s.chars().map(char_tok));
+    v
+}
+
+fn char_tok(c: char) -> Tok {
+    if c == ' ' {
+        crate::val::space_tok()
+    } else {
+        Tok::ch(12, u32::from(c))
+    }
 }

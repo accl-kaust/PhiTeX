@@ -1218,7 +1218,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 s.loc = loc + 1;
             }
             let mut b = [0; 4];
-            return Ok(Tok::cs(char::from_u32(c).unwrap_or('?').encode_utf8(&mut b)));
+            return Ok(Tok::cs(
+                char::from_u32(c).unwrap_or('?').encode_utf8(&mut b),
+            ));
         }
     }
 
