@@ -2,9 +2,13 @@ mod common;
 use common::Program;
 use common::shrink::{self, Ed, Sched, apply, replay_bad};
 
+thread_local! { static BASE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+
+/// The scheduler, with the random one's seeds counting on from the base
+/// recorded when the current case was loaded.
 fn sched() -> Sched {
     match std::env::var("SCHED").as_deref() {
-        Ok("random") => Sched::Random,
+        Ok("random") => Sched::Random(BASE.with(std::cell::Cell::get)),
         Ok("spec") => Sched::Spec(3),
         _ => Sched::Seq,
     }
@@ -16,17 +20,23 @@ fn ok(eng: &mut defuse::Engine, p: &Program) -> bool {
 /// the fewest edits and lines.
 fn shrink_history(hist: &[(Vec<String>, Ed)]) {
     let k = hist.len();
+    // A replay from step `j` takes the seeds the run took from there: its
+    // load takes edit `j - 1`'s seed, so edit `j` takes the seed it took.
+    let from = |j: usize| match sched() {
+        Sched::Random(base) => Sched::Random(base + j as u64),
+        s => s,
+    };
     let j = (0..k)
         .rev()
         .find(|&j| {
             let eds: Vec<Ed> = hist[j..].iter().map(|h| h.1.clone()).collect();
-            replay_bad(&hist[j].0, &eds, sched())
+            replay_bad(&hist[j].0, &eds, from(j))
         })
         .expect("reproduces");
     let start = hist[j].0.clone();
     let eds: Vec<Ed> = hist[j..].iter().map(|h| h.1.clone()).collect();
-    let (start, eds) = shrink::minimize(start, eds, sched(), &|_, _| {});
-    shrink::report(&start, &eds, sched());
+    let (start, eds) = shrink::minimize(start, eds, from(j), &|_, _| {});
+    shrink::report(&start, &eds, from(j));
 }
 fn main() {
     let pool: Vec<String> = std::env::args()
@@ -44,6 +54,7 @@ fn main() {
             usize::try_from(s % m as u64).unwrap()
         };
         let src: Vec<String> = (0..30).map(|_| pool[next(pool.len())].clone()).collect();
+        BASE.with(|b| b.set(shrink::counter()));
         let (mut eng, mut prog) = Program::load(src.clone());
         if !ok(&mut eng, &prog) {
             println!("COLD seed {seed}\n{src:?}");

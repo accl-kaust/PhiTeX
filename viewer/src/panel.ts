@@ -13,6 +13,7 @@ import type { PackageState } from "./packages.ts";
 import { ENGINES, errorNeeds, type Engine } from "./engines.ts";
 import { Viewer } from "./viewer.ts";
 import { VIEWER_CSS } from "./css.ts";
+import { PRINT_CSS } from "./print.ts";
 import { PROBLEMS_CSS, problemHtml } from "./problems.ts";
 import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
 import { KEYS, bindKeys } from "./keys.ts";
@@ -70,7 +71,8 @@ export interface PanelEvents {
   /** Page `k` is wanted: in view, not drawn at its current hash. */
   onNeed?(k: number): void;
   onPdf(): void;
-  onDebug(on: boolean): void;
+  /** The debug check (a fresh build compared every 5 s): absent, no debug button. */
+  onDebug?(on: boolean): void;
   onMain(m: string): void;
   onReload(): void;
   /** Clean recompile: the project read again, typeset from the start. */
@@ -94,6 +96,8 @@ export interface PanelEvents {
   onNews?(): void;
   /** A link to a web address on a page (absent: opened in a new tab). */
   onLink?(uri: string): void;
+  /** Where `q` is on the pages (the host's MuPDF searches them all): absent, no find field. */
+  onFind?(q: string): Promise<{ k: number; boxes: [number, number, number, number][] }[]>;
 }
 
 /**
@@ -108,7 +112,7 @@ export interface PanelWords {
   /** The line under the page, and what it opens. */
   byline: string;
   about: string;
-  /** The strip while the core readies its next rebuild (`{s}`: the seconds so far). */
+  /** The strip while the core readies its next rebuild (`{s}`: the seconds so far); empty: no strip for builds at all (the host shows them). */
   preparing: string;
   /** Where the full license is. */
   license: string;
@@ -120,6 +124,8 @@ export interface PanelWords {
   /** The reading card's note, and where packages are kept. */
   reading: string;
   keptIn: string;
+  /** The loading card's three steps (reading, getting what it needs, building). */
+  steps: [string, string, string];
 }
 
 const OVERLEAF_WORDS: PanelWords = {
@@ -140,6 +146,7 @@ const OVERLEAF_WORDS: PanelWords = {
   openFailed: "Overleaf's PDF is one click away. Reload the tab to try again.",
   reading: "Your project's files stay in this browser: read from Overleaf, typeset here.",
   keptIn: "this browser",
+  steps: ["Project", "Packages", "Typesetting"],
 };
 
 /** `c` if it is a #rrggbb color (what goes into a style or value attribute), else `or`. */
@@ -158,6 +165,8 @@ export interface PanelOptions {
   keys?: boolean;
   /** Docked where the host has no toolbar of its own (the CLI's page, VS Code's webview): the panel's header and footer shown. */
   header?: boolean;
+  /** The panel's footer (false: the host has its own status bar, the CLI's). */
+  footer?: boolean;
 }
 
 /** Where the panel keeps its preferences (chrome.storage.local in the extension). */
@@ -203,6 +212,10 @@ const PATHS: Record<string, string> = {
 };
 const icon = (name: string, size = 18) =>
   `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
+
+/** The loading card's steps: `state` each "ok", "now" or "" (to come). */
+const stepsHtml = (names: string[], state: string[]) =>
+  `<div class="steps">${names.map((n, k) => `<span class="${state[k]}">${n}</span>`).join("<i></i>")}</div>`;
 
 const CSS = `
 :host { all: initial; }
@@ -506,13 +519,14 @@ export class Panel {
     const w = (this.words = { ...OVERLEAF_WORDS, ...opts.words });
     const host = document.createElement("phitex-preview");
     this.root = host.attachShadow({ mode: "open" });
-    this.root.innerHTML = (`<style>${VIEWER_CSS}${PROBLEMS_CSS}${OUTLINE_CSS}${CSS}</style>
+    this.root.innerHTML = (`<style>${VIEWER_CSS}${PROBLEMS_CSS}${OUTLINE_CSS}${CSS}${PRINT_CSS}</style>
 <div class="win" role="dialog" aria-label="PhiTeX preview">
   <header>
     <span class="icon" aria-hidden="true">preview</span>
     <span class="title">PhiTeX</span>
     <span class="badge hide-collapsed" title="${w.badgeTitle}">${w.badge}</span>
     <span class="grow"></span>
+    <span class="find" id="find" hidden><input id="findq" type="search" placeholder="Find" spellcheck="false" aria-label="Find in the pages"><span id="findn"></span></span>
     <span class="chip" id="chip" title="Status"><span class="dot"></span><span id="chiptext">starting…</span></span>
     <span class="group hide-collapsed">
       <button class="ib" id="prev" title="Previous page" aria-label="Previous page"><span class="icon">chevron_left</span></button>
@@ -543,7 +557,7 @@ export class Panel {
       <textarea id="reporttext" readonly spellcheck="false"></textarea>
       <div class="btns"><button class="btn" id="reportcopy">Copy</button><button class="btn" id="reportmail">Email</button><button class="btn" id="reportclose">Close</button></div>
     </div>
-    <div class="speedchip" id="speedchip" aria-live="off">⚡ – ms</div>
+    <div class="speedchip" id="speedchip" aria-live="off" title="From the keystroke to the page on screen"></div>
     <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
     <div class="diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="pkgs" id="pkgs" role="status" aria-live="polite"></div>
@@ -554,7 +568,7 @@ export class Panel {
     </div>
     <nav class="side" id="side" aria-label="Contents"></nav>
     <div class="keyhelp" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
-    <div class="stage" id="stage"><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load"><div class="steps"><span class="now">Project read</span><i></i><span>Packages</span><i></i><span>Typesetting</span></div><h3>Reading the project…</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
+    <div class="stage" id="stage"><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load">${stepsHtml(w.steps, ["now", "", ""])}<h3>${w.steps[0]}…</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
   </div>
   <footer><span class="lat" id="lat" title="Click for details">–</span><span class="grow"></span><span class="msg" id="msg">all local</span></footer>
 </div>`).replace(/<span class="icon"(?: aria-hidden="true")?>(\w+)<\/span>/g, (_, n) => icon(n, n === "download" ? 16 : 18));
@@ -574,6 +588,7 @@ export class Panel {
     if (license) license.href = opts.fileUrl?.(w.license) ?? w.license;
     // (what the host doesn't handle, not offered)
     if (!ev.onTour) this.$("#tour").style.display = "none";
+    if (!ev.onDebug) for (const id of ["#dbg", "#dbg2"]) (this.$(id).closest("label") ?? this.$(id)).style.display = "none";
     if (!ev.onNews) this.$("#news").style.display = "none";
     this.$("#byline").onclick = (e) => {
       e.stopPropagation();
@@ -769,6 +784,8 @@ export class Panel {
   private prepSince = 0;
   /** The core readying its next rebuild: past 400 ms the strip says so, not "Typesetting". */
   preparing(on: boolean): void {
+    // (a host that shows its builds itself, the CLI's status bar: no strip)
+    if (!this.words.preparing) return;
     this.prepSince = on ? this.prepSince || performance.now() : 0;
     this.activity();
   }
@@ -792,7 +809,8 @@ export class Panel {
     const el = this.$("#pkgs");
     const p = this.pkgNow;
     const prep = this.prepSince && performance.now() - this.prepSince > 400;
-    const long = (this.buildSince && performance.now() - this.buildSince > 400) || prep;
+    // (a host that shows its builds itself, the CLI's status bar: only fetches here)
+    const long = !!this.words.preparing && ((this.buildSince && performance.now() - this.buildSince > 400) || prep);
     // (over a page on screen; before any page, the loading card says it all)
     const on = (!!this.last || this.viewer.pages > 0) && (!!p || !!long);
     el.classList.toggle("on", on);
@@ -1013,7 +1031,7 @@ export class Panel {
       ? quiet < 4
         ? `Still fetching · ${s} s · files arriving`
         : `Still fetching · ${s} s · a large package (TikZ, fonts) is on its way`
-      : `Typesetting · ${s} s`;
+      : `${this.words.steps[2]} · ${s} s`;
     if (s >= 20 && fetching) el.textContent += " · only the first time: next visits reuse them";
   }
 
@@ -1047,7 +1065,7 @@ export class Panel {
     let card = empty.querySelector<HTMLElement>(".load.reading");
     if (!card) {
       empty.innerHTML =
-        `<div class="load reading"><div class="steps"><span class="now">Project</span><i></i><span>Packages</span><i></i><span>Typesetting</span></div>` +
+        `<div class="load reading">${stepsHtml(this.words.steps, ["now", "", ""])}` +
         `<h3></h3><div class="bar busy"><i></i></div><div class="alive" data-phase="read"></div><div class="count"></div><div class="names"></div>` +
         `<div class="note">${this.words.reading}</div></div>`;
       card = empty.querySelector<HTMLElement>(".load.reading")!;
@@ -1092,8 +1110,8 @@ export class Panel {
         // (the same card as while fetching, at its last step: one screen until the page)
         if (!this.stopped()) {
           empty.innerHTML =
-            `<div class="load"><div class="steps"><span class="ok">Project read</span><i></i><span class="ok">Packages</span><i></i><span class="now">Typesetting</span></div>` +
-            `<h3>Typesetting…</h3><div class="bar busy"><i></i></div><div class="alive" data-phase="tex"></div></div>`;
+            `<div class="load">${stepsHtml(this.words.steps, ["ok", "ok", "now"])}` +
+            `<h3>${this.words.steps[2]}…</h3><div class="bar busy"><i></i></div><div class="alive" data-phase="tex"></div></div>`;
           this.loadT0 ||= performance.now();
           this.alive();
           this.loadTick ??= setInterval(() => this.alive(), 1000);
@@ -1104,7 +1122,7 @@ export class Panel {
       const fetch = p.loading.length > 0;
       this.pkgBusy = true;
       empty.innerHTML =
-        `<div class="load"><div class="steps"><span class="ok">Project read</span><i></i><span class="${fetch ? "now" : "ok"}">Packages</span><i></i><span class="${fetch ? "" : "now"}">Typesetting</span></div>` +
+        `<div class="load">${stepsHtml(this.words.steps, ["ok", fetch ? "now" : "ok", fetch ? "" : "now"])}` +
         `<h3></h3><div class="bar${fetch ? "" : " busy"}"><i style="width:${pct}%"></i></div>` +
         `<div class="alive" data-phase="${fetch ? "fetch" : "tex"}"></div>` +
         `<div class="count"></div><div class="names"></div><div class="note"></div></div>`;
@@ -1203,7 +1221,8 @@ export class Panel {
   private scale(): number {
     if (this.prefs.zoom !== "fit") return Number(this.prefs.zoom);
     const pageW = (this.last?.w ?? 612) * (96 / 72);
-    return Math.max(this.$("#stage").clientWidth - (this.docked ? 40 : 24), 200) / pageW;
+    // (the stage's padding and the crop marks' room on both sides)
+    return Math.max(this.$("#stage").clientWidth - 80, 200) / pageW;
   }
 
   goPage(k: number): void {
@@ -1212,7 +1231,7 @@ export class Panel {
 
   /** One zoom step in or out, from where it is (as Overleaf's − +). */
   zoomStep(dir: 1 | -1): void {
-    const steps = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+    const steps = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8];
     const now = this.scale();
     const next = dir > 0 ? steps.find((z) => z > now + 0.01) : [...steps].reverse().find((z) => z < now - 0.01);
     this.zoomTo(String(next ?? now));
@@ -1240,10 +1259,34 @@ export class Panel {
   }
 
   /** A button of the host's in the header, before the page controls (the CLI's Compare). */
+  /**
+   * The loading card at step `k` (0, 1, 2 of the words' steps), saying
+   * `text` (the host's own phases: the CLI's build); nothing once a page
+   * is shown.
+   */
+  loadStep(k: number, text: string): void {
+    if (this.last) return;
+    // (the host's clock now, not the card's own)
+    clearInterval(this.loadTick);
+    this.loadTick = undefined;
+    const empty = this.$("#empty");
+    let card = empty.querySelector<HTMLElement>(".load");
+    if (!card || card.querySelector(".engine")) {
+      empty.innerHTML = `<div class="load">${stepsHtml(this.words.steps, ["", "", ""])}<h3></h3><div class="bar busy"><i></i></div><div class="alive"></div></div>`;
+      empty.style.display = "";
+      card = empty.querySelector<HTMLElement>(".load")!;
+    }
+    card.querySelectorAll(".steps span").forEach((s, i) => (s.className = i < k ? "ok" : i === k ? "now" : ""));
+    card.querySelector("h3")!.textContent = `${this.words.steps[k]}…`;
+    let alive = card.querySelector<HTMLElement>(".alive");
+    if (!alive) card.append((alive = Object.assign(document.createElement("div"), { className: "alive" })));
+    alive.textContent = text;
+    delete alive.dataset.phase;
+  }
+
   headerButton(label: string, title: string, onclick: (b: HTMLButtonElement) => void): HTMLButtonElement {
     const b = document.createElement("button");
-    b.className = "ib";
-    b.style.cssText = "width:auto;padding:0 8px;font-size:12px";
+    b.className = "ib txt";
     b.title = title;
     b.textContent = label;
     b.onclick = () => onclick(b);
@@ -1254,6 +1297,8 @@ export class Panel {
   /** The contents and the keys, as the host asked (PanelOptions). */
   private extras(opts: PanelOptions): void {
     if (opts.header) this.win.classList.add("own-header");
+    if (opts.footer === false) this.win.classList.add("no-footer");
+    this.findAndZoom(!!opts.keys);
     if (opts.outline) {
       this.win.classList.add("has-side");
       this.contents = new Outline(this.$("#side"), { goToPlace: (k, top) => this.viewer.goToPlace(k, top) });
@@ -1341,17 +1386,170 @@ export class Panel {
 
   zoomTo(z: string): void {
     this.prefs.zoom = z;
-    this.$<HTMLSelectElement>("#zoom").value = z;
+    this.zoomShown();
     this.save();
     this.redraw();
     this.emit();
+  }
+
+  /** The zoom menu at the zoom now: a zoom not on it (a pinch's) as its own entry. */
+  private zoomShown(): void {
+    const sel = this.$<HTMLSelectElement>("#zoom");
+    const z = this.prefs.zoom;
+    let own = sel.querySelector<HTMLOptionElement>("option.own");
+    if ([...sel.options].some((o) => o.value === z && !o.classList.contains("own"))) own?.remove();
+    else {
+      own ??= sel.appendChild(Object.assign(document.createElement("option"), { className: "own" }));
+      own.value = z;
+      own.textContent = `${Math.round(Number(z) * 100)}%`;
+    }
+    sel.value = z;
+  }
+
+  private pinchEnd: ReturnType<typeof setTimeout> | undefined;
+
+  /**
+   * Zoom by `f` keeping the point (`px`, `py`, from the stage's top left)
+   * where it is: the boxes at once, the pages drawn sharp again once the
+   * gesture rests.
+   */
+  private zoomAt(f: number, px: number, py: number): void {
+    const stage = this.$("#stage");
+    const old = this.scale();
+    const next = Math.min(8, Math.max(0.25, old * f));
+    if (Math.abs(next - old) < 1e-4) return;
+    const cx = stage.scrollLeft + px, cy = stage.scrollTop + py;
+    this.prefs.zoom = String(Number(next.toFixed(4)));
+    this.$("#stage").classList.remove("fit");
+    this.viewer.redraw(true);
+    stage.scrollLeft = (cx * next) / old - px;
+    stage.scrollTop = (cy * next) / old - py;
+    this.zoomShown();
+    clearTimeout(this.pinchEnd);
+    this.pinchEnd = setTimeout(() => {
+      this.save();
+      this.viewer.redraw();
+      this.emit();
+    }, 150);
+  }
+
+  /** The find field's matches, the one shown, and the search asked last. */
+  private hits: { k: number; boxes: [number, number, number, number][] }[] = [];
+  private hit = 0;
+  private findSeq = 0;
+  private findTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The pointer over the panel (in a host's page, its keys only then). */
+  private hover = false;
+
+  /** The find field opened (its text selected) or closed (the marks gone). */
+  find(on: boolean): void {
+    const box = this.$("#find");
+    const q = this.$<HTMLInputElement>("#findq");
+    box.hidden = !on;
+    if (on) {
+      q.focus();
+      q.select();
+      if (q.value) this.search(q.value);
+      return;
+    }
+    this.findSeq++;
+    this.hits = [];
+    this.viewer.found([], 0);
+    q.blur();
+  }
+
+  private search(q: string): void {
+    const seq = ++this.findSeq;
+    const n = this.$("#findn");
+    if (!q.trim()) {
+      this.hits = [];
+      this.viewer.found([], 0);
+      n.textContent = "";
+      return;
+    }
+    void this.ev.onFind?.(q).then((hits) => {
+      if (seq !== this.findSeq) return;
+      this.hits = hits;
+      // (the first match at or after the page in view)
+      const at = hits.findIndex((h) => h.k >= this.viewer.page);
+      this.hit = at < 0 ? 0 : at;
+      this.showHit();
+    });
+  }
+
+  private showHit(): void {
+    const n = this.$("#findn");
+    n.textContent = this.hits.length ? `${this.hit + 1} / ${this.hits.length}` : "0 / 0";
+    n.classList.toggle("none", !this.hits.length);
+    this.viewer.found(this.hits, this.hit);
+  }
+
+  /** The next match (`dir` 1) or the one before (−1), round the ends. */
+  findNext(dir: 1 | -1): void {
+    if (!this.hits.length) return;
+    this.hit = (this.hit + dir + this.hits.length) % this.hits.length;
+    this.showHit();
+  }
+
+  /** Find, and zoom by the wheel and its keys: in every host (`all`: the page's keys are the panel's). */
+  private findAndZoom(all: boolean): void {
+    const stage = this.$("#stage");
+    this.win.addEventListener("pointerenter", () => (this.hover = true));
+    this.win.addEventListener("pointerleave", () => (this.hover = false));
+    // (Ctrl+wheel, a trackpad's pinch too: the pages zoom at the pointer, not the browser's page)
+    stage.addEventListener(
+      "wheel",
+      (e) => {
+        if (!e.ctrlKey) return;
+        e.preventDefault();
+        const r = stage.getBoundingClientRect();
+        const d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+        this.zoomAt(Math.exp(-Math.max(-60, Math.min(60, d)) * 0.004), e.clientX - r.left, e.clientY - r.top);
+      },
+      { passive: false },
+    );
+    const q = this.$<HTMLInputElement>("#findq");
+    q.addEventListener("input", () => {
+      clearTimeout(this.findTimer);
+      this.findTimer = setTimeout(() => this.search(q.value), 120);
+    });
+    q.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") this.findNext(e.shiftKey ? -1 : 1);
+      else if (e.key === "Escape") this.find(false);
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    addEventListener(
+      "keydown",
+      (e) => {
+        const ours = all || this.hover || this.root.activeElement != null;
+        if (!ours || e.altKey || e.metaKey) return;
+        const typing = (e.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable=true]") && e.composedPath()[0] !== q;
+        if (e.ctrlKey) {
+          const k = e.key;
+          if (k === "f" && this.ev.onFind) this.find(true);
+          else if (k === "=" || k === "+") this.zoomStep(1);
+          else if (k === "-") this.zoomStep(-1);
+          else if (k === "0") this.zoomTo("fit");
+          else return;
+        } else if (typing || e.composedPath()[0] === q) return;
+        else if (e.key === "/" && this.ev.onFind) this.find(true);
+        else if ((e.key === "n" || e.key === "N") && !this.$("#find").hidden && this.hits.length) this.findNext(e.key === "n" ? 1 : -1);
+        else if (e.key === "Escape" && !this.$("#find").hidden) this.find(false);
+        else return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      },
+      { capture: true },
+    );
   }
 
   toggleDebug(): void {
     this.debugOn = !this.debugOn;
     this.$("#dbg").setAttribute("aria-pressed", String(this.debugOn));
     this.$<HTMLInputElement>("#dbg2").checked = this.debugOn;
-    this.ev.onDebug(this.debugOn);
+    this.ev.onDebug?.(this.debugOn);
     this.msg(this.debugOn ? "debug check on" : "debug check off");
     this.emit();
   }
@@ -1371,7 +1569,7 @@ export class Panel {
   painted(ms: number): void {
     this.speed = { ms, at: performance.now() };
     const chip = this.$("#speedchip");
-    chip.textContent = `⚡ ${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
+    chip.textContent = `${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
     chip.classList.toggle("slow", ms > 100);
     chip.classList.remove("flash");
     void chip.offsetWidth;
@@ -1473,14 +1671,14 @@ export class Panel {
     clearInterval(this.warmTimer);
     if (w.state === "ready") {
       el.className = "warmup on ready";
-      el.innerHTML = `<span class="dot"></span>⚡ Instant typing ready`;
+      el.innerHTML = `<span class="dot"></span>Instant typing ready`;
       this.warmTimer = setTimeout(() => (el.className = "warmup"), 2500) as unknown as ReturnType<typeof setInterval>;
       return;
     }
     const since = w.since ?? Date.now();
     const tick = () => {
       const s = Math.round((Date.now() - since) / 1000);
-      el.innerHTML = `<span class="dot"></span><span>⚡ Preview ready · preparing instant typing… ${s} s${w.slow ? ` <span class="slow">· edits slower until ready</span>` : ""}</span>`;
+      el.innerHTML = `<span class="dot"></span><span>Preview ready · preparing instant typing… ${s} s${w.slow ? ` <span class="slow">· edits slower until ready</span>` : ""}</span>`;
     };
     el.className = "warmup on";
     tick();

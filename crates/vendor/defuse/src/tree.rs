@@ -317,6 +317,50 @@ impl<I, S: Copy> Arena<I, S> {
         self.fwd_all(a, n.right, acc, pred)
     }
 
+    /// Visits the items with keys in `[lo, hi)` in key order, each with the
+    /// summary of everything before it (from the start of the tree), leaving
+    /// out the subtrees `skip(before, sum)` rejects (their summaries still
+    /// count as passed).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn visit<A: Aug<I, S>>(
+        &self,
+        a: &A,
+        t: u32,
+        lo: u64,
+        hi: u64,
+        before: &mut S,
+        skip: &dyn Fn(S, S) -> bool,
+        f: &mut dyn FnMut(u64, &I, S),
+    ) {
+        if t == NIL {
+            return;
+        }
+        let n = self.n(t);
+        if n.key < lo {
+            *before = a.combine(a.combine(*before, self.sum(a, n.left)), a.leaf(&n.item));
+            self.visit(a, n.right, lo, hi, before, skip, f);
+            return;
+        }
+        if n.key >= hi {
+            self.visit(a, n.left, lo, hi, before, skip, f);
+            return;
+        }
+        let ls = self.sum(a, n.left);
+        if skip(*before, ls) {
+            *before = a.combine(*before, ls);
+        } else {
+            self.visit(a, n.left, lo, hi, before, skip, f);
+        }
+        f(n.key, &n.item, *before);
+        *before = a.combine(*before, a.leaf(&n.item));
+        let rs = self.sum(a, n.right);
+        if skip(*before, rs) {
+            *before = a.combine(*before, rs);
+        } else {
+            self.visit(a, n.right, lo, hi, before, skip, f);
+        }
+    }
+
     /// The first key `> key`.
     pub(crate) fn next(&self, mut t: u32, key: u64) -> Option<(u64, &I)> {
         let mut best = None;
