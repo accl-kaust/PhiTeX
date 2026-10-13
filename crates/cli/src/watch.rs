@@ -887,6 +887,21 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                         ),
                     ));
                 }
+                let [bounded, any, viol, undecl, stops, waits] = x.hints;
+                if bounded + any > 0 {
+                    let red = |n: u64, what: &str| {
+                        let t = format!("{n} {what}");
+                        if n > 0 { st.red(&t) } else { t }
+                    };
+                    rows.push((
+                        "hints".to_owned(),
+                        format!(
+                            "{bounded} bounded · {any} any · {} · {} → {stops} stops · {waits} pending waits",
+                            red(viol, "violations"),
+                            red(undecl, "undeclared")
+                        ),
+                    ));
+                }
                 if x.speculations > 0 {
                     rows.push((
                         "ahead".to_owned(),
@@ -927,6 +942,14 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 "waits_by_kind": x.waits_by_kind.iter().map(|(k, n)| json!({"kind": k, "waits": n})).collect::<Vec<_>>(),
                 "top_waited": x.top_waited.iter().map(|(id, n)| json!({"node": id, "waits": n})).collect::<Vec<_>>(),
                 "gated": x.gated,
+                "hints": {
+                    "bounded": x.hints[0],
+                    "any": x.hints[1],
+                    "violations": x.hints[2],
+                    "undeclared": x.hints[3],
+                    "stops": x.hints[4],
+                    "pending_waits": x.hints[5],
+                },
                 "ready_mean": x.ready_mean,
                 "max_ready": x.max_ready,
                 "speculation": {
