@@ -210,14 +210,20 @@ impl Run<'_, '_> {
         let v = self.v;
         let tm = crate::exec::env_flag!("PHITEX_PLAN_TIME");
         let t0 = std::time::Instant::now();
-        let l = self.list_fold(0)?;
-        let items = l.items;
+        let epoch = self.cx.values_epoch();
+        let all = self.cx.acc_range(v.field("items"), None)?;
+        let prev = crate::planinc::previous(v, epoch);
+        let folded = match &prev {
+            Some(p) if p.items.root == all => p.items.clone(),
+            p => crate::planinc::fold(v, all, p.as_ref().map(|p| &*p.items)),
+        };
+        let items: &[ValueId] = &folded.items;
         let t1 = t0.elapsed();
         let marker = self.page_params_marker()?;
         // the insertion classes on the list, read here (before any page
         // step): a `brk` reads nothing a page step may define
         let mut classes = std::collections::BTreeSet::new();
-        for &x in &items {
+        for &x in items {
             if nodes::tag(v, x) == nodes::T_INS
                 && let Some(Node::Ins(i)) = nodes::decode(v, x, &mut Side::default())
             {
@@ -239,16 +245,37 @@ impl Run<'_, '_> {
         let table_v = v.list(table.clone());
         let output = self.par(Par::output)?;
         let any = toks_of(v, output).is_empty();
+        // the previous run's pages, where they still hold: the items
+        // both lists share at their start and their end
+        let reusable = prev
+            .as_ref()
+            .filter(|p| p.table == table_v && p.marker == marker);
+        let (pre, suf, d) = reusable.map_or((0, 0, 0), |p| {
+            let old = &p.items.items;
+            let pre = old.iter().zip(items).take_while(|(a, b)| a == b).count();
+            let m = old.len().min(items.len()) - pre;
+            let suf = old
+                .iter()
+                .rev()
+                .zip(items.iter().rev())
+                .take(m)
+                .take_while(|(a, b)| a == b)
+                .count();
+            (pre, suf, crate::planinc::delta(items.len(), old.len()))
+        });
+        let old_len = reusable.map_or(0, |p| p.items.items.len());
+        let mut recs: Vec<crate::planinc::PageRec> = Vec::new();
+        let mut reused: Vec<bool> = Vec::new();
         let mut start = PageStart::FIRST;
         let mut marks = MarksState::default();
         let mut published = phitex_defuse::FxHashSet::default();
-        let mut starts = vec![start.value(v)];
+        let mut starts = vec![start.clone()];
         // (each page's `\\topmark` and `\\botmark` before it fires,
         // §1012: from the plan, so a step never reads its predecessor's)
         let mut before: Vec<ValueId> = Vec::new();
         let mut ended = false;
         let mut plan: Vec<ValueId> = Vec::new();
-        let mut reaches: Vec<usize> = Vec::new();
+        let mut folds = 0usize;
         let mut j = 0;
         while !ended && j < MAX_PAGES {
             let fx = if j > 0 {
@@ -256,12 +283,48 @@ impl Run<'_, '_> {
             } else {
                 Vec::new()
             };
-            let out = plan_fold(v, &items, table_v, marker, &start, fx);
-            reaches.push(out.reach);
+            // the old page at this start, when what it read is unchanged
+            let old = reusable.and_then(|p| {
+                let pick = |idx: usize, ok: &dyn Fn(&crate::planinc::PageRec) -> bool| {
+                    p.by_idx.get(&idx).and_then(|ks| {
+                        ks.iter().map(|&k| &p.pages[k]).find(|r| {
+                            ok(r) && r.fx == fx && crate::planinc::same_start(&r.start, &start)
+                        })
+                    })
+                };
+                pick(start.idx, &|r: &crate::planinc::PageRec| r.reach <= pre)
+                    .map(|r| r.shifted(0))
+                    .or_else(|| {
+                        let o = start.idx.checked_add_signed(-d)?;
+                        (o >= old_len - suf)
+                            .then(|| pick(o, &|_: &crate::planinc::PageRec| true))
+                            .flatten()
+                            .map(|r| r.shifted(d))
+                    })
+            });
+            let rec = if let Some(r) = old {
+                reused.push(true);
+                r
+            } else {
+                folds += 1;
+                reused.push(false);
+                let out = plan_fold(v, items, table_v, marker, &start, fx.clone());
+                crate::planinc::PageRec {
+                    start: start.clone(),
+                    fx,
+                    reach: out.reach,
+                    fired: out.fired,
+                    passed: out.passed,
+                    writes: out.writes,
+                    stuck: out.stuck,
+                    items_v: ValueId::UNIT,
+                    start_v: ValueId::UNIT,
+                }
+            };
             // the job-written files' order: an immediate write's entry
             // where its marker is, page `j` where it fires (`wplan`)
-            plan.extend(out.writes.iter().copied());
-            for &node in &out.passed {
+            plan.extend(rec.writes.iter().copied());
+            for &node in &rec.passed {
                 if published.insert(node) {
                     let n = u64::from_ne_bytes(node.to_ne_bytes());
                     let f = v.field(&crate::etex::marks_before_field(n));
@@ -270,16 +333,16 @@ impl Run<'_, '_> {
                     }
                 }
             }
-            if let Some((ms, end)) = out.fired {
+            if let Some((ms, end)) = &rec.fired {
                 plan.push(v.int(i64::try_from(j).unwrap_or(0)));
                 let [t, _, b] = marks.0.get(&0).copied().unwrap_or([None; 3]);
                 let u = |m: Option<ValueId>| m.unwrap_or(ValueId::UNIT);
                 before.push(v.list(vec![u(t), u(b)]));
-                marks.fire_values(v, &ms);
-                starts.push(end.value(v));
-                start = end;
+                marks.fire_values(v, ms);
+                starts.push(end.clone());
+                start = end.clone();
             } else {
-                if out.stuck {
+                if rec.stuck {
                     self.diag(
                         true,
                         "\\end could not empty the page (an output routine that never ships?)",
@@ -287,6 +350,7 @@ impl Run<'_, '_> {
                 }
                 ended = true;
             }
+            recs.push(rec);
             j += 1;
         }
         let t2 = t0.elapsed();
@@ -297,24 +361,28 @@ impl Run<'_, '_> {
         // each page's own material (`pp:items:<j>`, its start rebased to
         // it): a `brk` reads only its page, so an edit elsewhere on the
         // list wakes no other page's `brk`
-        for (j, s) in starts.iter_mut().enumerate() {
-            let Some(mut p) = PageStart::of(v, *s) else {
-                continue;
-            };
-            let (a, b) = (p.idx.min(items.len()), reaches[j].min(items.len()));
-            self.set(
-                &format!("pp:items:{j}"),
-                v.list(items[a..b.max(a)].to_vec()),
-                true,
-            );
-            p.idx = 0;
-            *s = p.value(v);
+        for (j, s) in starts.iter().enumerate() {
+            let rec = &mut recs[j];
+            if !reused[j] || rec.items_v == ValueId::UNIT {
+                let (a, b) = (s.idx.min(items.len()), rec.reach.min(items.len()));
+                rec.items_v = v.list(items[a..b.max(a)].to_vec());
+                rec.start_v = PageStart {
+                    idx: 0,
+                    ..s.clone()
+                }
+                .value(v);
+            }
+            self.set(&format!("pp:items:{j}"), rec.items_v, true);
         }
+        // (the items after the last page's start: kept, as the next run
+        // takes them from here)
+        let last = starts.last().map_or(0, |s| s.idx).min(items.len());
+        self.set("pp:tail", v.list(items[last..].to_vec()), true);
         self.set("pp:classes", table_v, true);
         self.set("pp:any", v.int(i64::from(any)), true);
         self.set("pp:marker", marker, true);
-        for (j, &s) in starts.iter().enumerate() {
-            self.set(&format!("pp:start:{j}"), s, true);
+        for (j, rec) in recs.iter().enumerate().take(starts.len()) {
+            self.set(&format!("pp:start:{j}"), rec.start_v, true);
         }
         for (j, &m) in before.iter().enumerate() {
             self.set(&format!("pp:mk:{j}"), m, true);
@@ -331,13 +399,30 @@ impl Run<'_, '_> {
         }
         if tm {
             eprintln!(
-                "plan: {} items, {} pages: list fold {t1:?}, page folds {:?}, sets {:?}",
+                "plan: {} items, {} pages ({folds} folded): list fold {t1:?}, page folds {:?}, sets {:?}",
                 items.len(),
                 starts.len(),
-                t2 - t1,
-                t0.elapsed() - t2
+                t2.saturating_sub(t1),
+                t0.elapsed().saturating_sub(t2)
             );
         }
+        let mut by_idx: phitex_defuse::FxHashMap<usize, Vec<usize>> =
+            phitex_defuse::FxHashMap::default();
+        for (k, r) in recs.iter().enumerate() {
+            by_idx.entry(r.start.idx).or_default().push(k);
+        }
+        crate::planinc::keep(
+            v,
+            crate::planinc::Plan {
+                items: folded.clone(),
+                table: table_v,
+                marker,
+                pages: recs,
+                by_idx,
+                epoch,
+                spec: self.cx.is_speculative(),
+            },
+        );
         Ok(())
     }
 

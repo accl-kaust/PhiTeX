@@ -265,4 +265,10 @@ fn generated_edit_wall() {
         b.stats.nodes_run,
         b.stats.page_steps
     );
+    let o = common::options(&format!("./{name}.tex"), &name, "", &dir);
+    let cold = common::build(o, Some(&common::plain()), &ins);
+    if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+        panic!("{name}: the edits differ from a cold build: {d}");
+    }
+    eprintln!("EDITWALL {name} edits equal cold");
 }

@@ -346,17 +346,7 @@ impl Run<'_, '_> {
             .filter(|(g, _)| *g == f)
             .map(|(_, x)| *x)
             .collect();
-        let t0 = std::time::Instant::now();
-        let es = v.seq_to_vec(all);
-        let t1 = t0.elapsed();
-        fold_entries(v, lid, &es, &mut st, &mut out);
-        if lid == 0 && crate::exec::env_flag!("PHITEX_PLAN_TIME") {
-            eprintln!(
-                "list fold: {} entries, seq walk {t1:?}, fold {:?}",
-                es.len(),
-                t0.elapsed() - t1
-            );
-        }
+        fold_entries(v, lid, &v.seq_to_vec(all), &mut st, &mut out);
         let mut push = |x: ValueId, out: &mut Vec<ValueId>| {
             let Value::List(xs) = &*v.get(x) else { return };
             if xs.len() != 2 || int_of(v, xs[0]) != lid {
@@ -2311,7 +2301,14 @@ const SF_UNREAD: i32 = i32::MIN;
 
 /// The state of a list's fold: the space factor (§1034), the previous
 /// depth (§679), and the items since the last `build_page` marker.
-#[derive(Clone, Copy, Debug)]
+/// A list's fold state at its start (§215: the depth ignored).
+pub(crate) const IGNORE_DEPTH_STATE: FoldState = FoldState {
+    sf: 1000,
+    pd: IGNORE_DEPTH,
+    since_bp: 0,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FoldState {
     pub sf: i32,
     pub pd: i32,
