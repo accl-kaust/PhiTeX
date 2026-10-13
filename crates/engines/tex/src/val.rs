@@ -436,12 +436,12 @@ pub(crate) fn space_tok() -> Tok {
 }
 
 pub(crate) fn toks_value(v: &Values, toks: &[Tok]) -> ValueId {
-    v.list(toks.iter().map(|t| tok_value(v, t)).collect())
+    v.list(toks.iter().map(|t| tok_value(v, *t)).collect())
 }
 
 /// The value of token `t`: in a run, through the worker's cache
 /// ([`tok_id`] at the run's epoch, [`EpochScope`]).
-fn tok_value(v: &Values, t: &Tok) -> ValueId {
+fn tok_value(v: &Values, t: Tok) -> ValueId {
     match scope_epoch(v) {
         Some(e) => tok_id(v, e, t),
         None => t.encode(v),
@@ -627,7 +627,7 @@ pub(crate) fn node_id(v: &Values, key: NodeKey, make: impl FnOnce() -> ValueId) 
 
 /// The value of token `t` ([`Tok::encode`]) in a run at `epoch`, through
 /// this thread's cache.
-pub(crate) fn tok_id(v: &Values, epoch: u64, t: &Tok) -> ValueId {
+pub(crate) fn tok_id(v: &Values, epoch: u64, t: Tok) -> ValueId {
     let hit = ENCODED.with(|c| {
         let mut c = c.borrow_mut();
         if c.instance != v.instance() || c.epoch != epoch {
@@ -637,7 +637,7 @@ pub(crate) fn tok_id(v: &Values, epoch: u64, t: &Tok) -> ValueId {
                 ..Encoded::default()
             };
         }
-        c.toks.get(t).copied()
+        c.toks.get(&t).copied()
     });
     if let Some(x) = hit {
         return x;
