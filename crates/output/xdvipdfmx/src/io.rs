@@ -99,7 +99,16 @@ mod filter_tests {
 
     #[test]
     fn filter_template() {
-        let c = filter_command(b"rungs -dCompatibilityLevel=%v -sOutputFile='%o' '%i' %b 100%% %q", b"/d/a.eps", b"/t/o.pdf", 15);
-        assert_eq!(c, b"rungs -dCompatibilityLevel=1.5 -sOutputFile='/t/o.pdf' '/d/a.eps' /d/a 100% ".to_vec());
+        let c = filter_command(
+            b"rungs -dCompatibilityLevel=%v -sOutputFile='%o' '%i' %b 100%% %q",
+            b"/d/a.eps",
+            b"/t/o.pdf",
+            15,
+        );
+        assert_eq!(
+            c,
+            b"rungs -dCompatibilityLevel=1.5 -sOutputFile='/t/o.pdf' '/d/a.eps' /d/a 100% "
+                .to_vec()
+        );
     }
 }

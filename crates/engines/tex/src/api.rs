@@ -1300,8 +1300,7 @@ impl Graph {
                 anchor = l;
             }
             let depth = depths.get(i).copied().unwrap_or(0);
-            let mut args =
-                slice_args(self.eng.values(), piece, starts, anchor, f & 1 != 0, depth);
+            let mut args = slice_args(self.eng.values(), piece, starts, anchor, f & 1 != 0, depth);
             args.push(crate::hints::hint_arg(self.eng.values(), text, s));
             let n = self.eng.push(unit, self.ops.exec, args);
             if f & 1 != 0 {
@@ -1723,11 +1722,21 @@ impl Build {
         self.prelude.key
     }
 
-    /// The prelude's environment, serialised, for
-    /// [`Options::prelude_bytes`].
+    /// Whether the prelude's evaluation finished: no deadline, no
+    /// evaluation error (a node left waiting ends the evaluation with
+    /// one).
     #[must_use]
-    pub fn export_prelude(&self) -> Vec<u8> {
-        serialise(&self.prelude)
+    pub fn prelude_complete(&self) -> bool {
+        self.prelude.errors.is_empty()
+    }
+
+    /// The prelude's environment, serialised, for
+    /// [`Options::prelude_bytes`]; `None` when its evaluation did not
+    /// finish ([`Self::prelude_complete`]): a part of a format is never
+    /// stored.
+    #[must_use]
+    pub fn export_prelude(&self) -> Option<Vec<u8>> {
+        self.prelude_complete().then(|| serialise(&self.prelude))
     }
 
     /// The files the job wrote (`\openout`, `\write`), with their text,

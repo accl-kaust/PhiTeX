@@ -313,7 +313,15 @@ impl Dpx {
             if error != 0 {
                 return Ok(error);
             }
-            pdf_setmatrix(&mut matrix, values[0], values[1], values[2], values[3], values[4], values[5]);
+            pdf_setmatrix(
+                &mut matrix,
+                values[0],
+                values[1],
+                values[2],
+                values[3],
+                values[4],
+                values[5],
+            );
             tmp = self.mpost.stack.pop();
             has_matrix = true;
         }
@@ -381,7 +389,11 @@ impl Dpx {
                 // (round toward zero)
                 error = self.pop_get_numbers(&mut values, 1)?;
                 if error == 0 {
-                    let v = if values[0] > 0.0 { libm::floor(values[0]) } else { libm::ceil(values[0]) };
+                    let v = if values[0] > 0.0 {
+                        libm::floor(values[0])
+                    } else {
+                        libm::ceil(values[0])
+                    };
                     error = self.mps_push_number(v);
                 }
             }
@@ -419,13 +431,17 @@ impl Dpx {
             Op::Curveto => {
                 error = self.pop_get_numbers(&mut values, 6)?;
                 if error == 0 {
-                    error = self.pdf_dev_curveto(values[0], values[1], values[2], values[3], values[4], values[5]);
+                    error = self.pdf_dev_curveto(
+                        values[0], values[1], values[2], values[3], values[4], values[5],
+                    );
                 }
             }
             Op::Rcurveto => {
                 error = self.pop_get_numbers(&mut values, 6)?;
                 if error == 0 {
-                    error = self.pdf_dev_rcurveto(values[0], values[1], values[2], values[3], values[4], values[5]);
+                    error = self.pdf_dev_rcurveto(
+                        values[0], values[1], values[2], values[3], values[4], values[5],
+                    );
                 }
             }
             Op::Closepath => error = self.pdf_dev_closepath(),
@@ -460,7 +476,15 @@ impl Dpx {
                 if error != 0 {
                     warn!("Missing array before \"concat\".");
                 } else {
-                    pdf_setmatrix(&mut matrix, values[0], values[1], values[2], values[3], values[4], values[5]);
+                    pdf_setmatrix(
+                        &mut matrix,
+                        values[0],
+                        values[1],
+                        values[2],
+                        values[3],
+                        values[4],
+                        values[5],
+                    );
                     error = self.pdf_dev_concat(&matrix)?;
                 }
             }
@@ -603,11 +627,26 @@ impl Dpx {
             | Op::Fshow
             | Op::Stexfig
             | Op::Etexfig => {
-                warn!("Unsupported PostScript operator \"{}\"", String::from_utf8_lossy(token));
+                warn!(
+                    "Unsupported PostScript operator \"{}\"",
+                    String::from_utf8_lossy(token)
+                );
                 error = 1;
             }
-            Op::Hlw => error = self.do_mpost_bind_def(b"0 dtransform exch truncate exch idtransform pop setlinewidth", x_user, y_user)?,
-            Op::Vlw => error = self.do_mpost_bind_def(b"0 exch dtransform truncate idtransform setlinewidth pop", x_user, y_user)?,
+            Op::Hlw => {
+                error = self.do_mpost_bind_def(
+                    b"0 dtransform exch truncate exch idtransform pop setlinewidth",
+                    x_user,
+                    y_user,
+                )?
+            }
+            Op::Vlw => {
+                error = self.do_mpost_bind_def(
+                    b"0 exch dtransform truncate idtransform setlinewidth pop",
+                    x_user,
+                    y_user,
+                )?
+            }
             Op::Rd => error = self.do_mpost_bind_def(b"[] 0 setdash", x_user, y_user)?,
             Op::B => error = self.do_mpost_bind_def(b"gsave fill grestore", x_user, y_user)?,
             Op::Def => {
@@ -620,7 +659,13 @@ impl Dpx {
     }
 
     /// `mp_parse_body`: the PostScript in `s` from `*p`; the error.
-    pub fn mp_parse_body(&mut self, s: &[u8], p: &mut usize, x_user: f64, y_user: f64) -> Result<i32> {
+    pub fn mp_parse_body(
+        &mut self,
+        s: &[u8],
+        p: &mut usize,
+        x_user: f64,
+        y_user: f64,
+    ) -> Result<i32> {
         let end = s.len();
         let mut error = 0;
         skip_white(s, p);
@@ -636,41 +681,51 @@ impl Dpx {
                     error = self.mps_push_number(value);
                     *p = next;
                 }
-            } else if c == b'[' && let Some(obj) = {
-                let mut q = *p;
-                let o = self.o.parse_pdf_array(s, &mut q, None)?;
-                if o.is_some() {
-                    *p = q;
+            } else if c == b'['
+                && let Some(obj) = {
+                    let mut q = *p;
+                    let o = self.o.parse_pdf_array(s, &mut q, None)?;
+                    if o.is_some() {
+                        *p = q;
+                    }
+                    o
                 }
-                o
-            } {
+            {
                 error = i32::from(!self.mps_push(obj));
-            } else if *p < end - 1 && c == b'<' && s[*p + 1] == b'<' && let Some(obj) = {
-                let mut q = *p;
-                let o = self.o.parse_pdf_dict(s, &mut q, None)?;
-                if o.is_some() {
-                    *p = q;
+            } else if *p < end - 1
+                && c == b'<'
+                && s[*p + 1] == b'<'
+                && let Some(obj) = {
+                    let mut q = *p;
+                    let o = self.o.parse_pdf_dict(s, &mut q, None)?;
+                    if o.is_some() {
+                        *p = q;
+                    }
+                    o
                 }
-                o
-            } {
+            {
                 error = i32::from(!self.mps_push(obj));
-            } else if (c == b'(' || c == b'<') && let Some(obj) = {
-                let mut q = *p;
-                let o = self.o.parse_pdf_string(s, &mut q);
-                if o.is_some() {
-                    *p = q;
+            } else if (c == b'(' || c == b'<')
+                && let Some(obj) = {
+                    let mut q = *p;
+                    let o = self.o.parse_pdf_string(s, &mut q);
+                    if o.is_some() {
+                        *p = q;
+                    }
+                    o
                 }
-                o
-            } {
+            {
                 error = i32::from(!self.mps_push(obj));
-            } else if c == b'/' && let Some(obj) = {
-                let mut q = *p;
-                let o = self.o.parse_pdf_name(s, &mut q);
-                if o.is_some() {
-                    *p = q;
+            } else if c == b'/'
+                && let Some(obj) = {
+                    let mut q = *p;
+                    let o = self.o.parse_pdf_name(s, &mut q);
+                    if o.is_some() {
+                        *p = q;
+                    }
+                    o
                 }
-                o
-            } {
+            {
                 error = i32::from(!self.mps_push(obj));
             } else {
                 match parse_ident(s, p) {
@@ -697,10 +752,20 @@ impl Dpx {
 
     /// `mps_exec_inline`: the PostScript in `s` from `*p`, at the user's
     /// point; the error.
-    pub fn mps_exec_inline(&mut self, s: &[u8], p: &mut usize, x_user: f64, y_user: f64) -> Result<i32> {
+    pub fn mps_exec_inline(
+        &mut self,
+        s: &[u8],
+        p: &mut usize,
+        x_user: f64,
+        y_user: f64,
+    ) -> Result<i32> {
         // (compatibility for dvipsk)
         let dirmode = self.pdf_dev_get_dirmode();
-        self.mpost.cmode = if dirmode != 0 { MP_CMODE_PTEXVERT } else { MP_CMODE_DVIPSK };
+        self.mpost.cmode = if dirmode != 0 {
+            MP_CMODE_PTEXVERT
+        } else {
+            MP_CMODE_DVIPSK
+        };
         let autorotate = self.pdf_dev_get_param(PDF_DEV_PARAM_AUTOROTATE);
         self.pdf_dev_set_param(PDF_DEV_PARAM_AUTOROTATE, 0);
         // (dvipdfm: x_user and y_user are off by 0.02 %)

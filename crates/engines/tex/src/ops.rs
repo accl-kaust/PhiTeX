@@ -91,9 +91,23 @@ impl Operation for Exec {
     }
     /// A paragraph cell (`par:<anchor>:<list>`) only of the node's own
     /// paragraph region: its anchor argument (index 2, an integer, when
-    /// the node carries one), unless it is a boundary (index 3).
+    /// the node carries one), unless it is a boundary (index 3); a
+    /// condition level (`if:<d>`) only from the node's depth (index 4) up.
     fn may_define_field(&self, args: &[ValueId], v: &Values, f: Field) -> bool {
         if !client_only(v, f) {
+            return false;
+        }
+        // a condition level below the node's own depth (index 4) was
+        // opened before it and is closed by a node at that depth: only
+        // an expand-only scan (§510's `\fi` while expanding an `\edef`
+        // or a test) reaches past it, which a bounded hint excludes
+        if let Some(&x) = args.get(4)
+            && let Some(depth) = v.as_int(x)
+            && let phitex_defuse::Value::Str(s) = &*v.get(f.0)
+            && let Some(d) = s.strip_prefix("if:").and_then(|d| d.parse::<i64>().ok())
+            && d < depth
+            && crate::hints::bounded(v, args)
+        {
             return false;
         }
         // (a boundary node may begin the next region, keyed by its own id)
@@ -111,6 +125,12 @@ impl Operation for Exec {
             return a == mine;
         }
         true
+    }
+    /// The meanings and catcodes the text's hint rests on
+    /// ([`crate::hints::reads`]): the node waits for them instead of
+    /// starting and stopping.
+    fn reads(&self, args: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        crate::hints::reads(v, args)
     }
     /// No scope effect where the text says the command opens and closes
     /// nothing ([`crate::hints`]); otherwise known when it runs (the

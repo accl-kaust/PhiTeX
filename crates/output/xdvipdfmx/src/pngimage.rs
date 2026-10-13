@@ -1136,8 +1136,10 @@ mod tests {
         assert!((0..=3).contains(&srgb.srgb_intent));
         let a = rows(&mut srgb);
         assert_eq!(srgb.rowbytes, 37 * 3);
-        let mut plain =
-            png_read_info(&mut file(include_bytes!("../../../../tests/e2e/png-rgb8.png"))).unwrap();
+        let mut plain = png_read_info(&mut file(include_bytes!(
+            "../../../../tests/e2e/png-rgb8.png"
+        )))
+        .unwrap();
         assert!(!plain.valid(png::INFO_SRGB));
         assert_eq!(rows(&mut plain), a);
 
