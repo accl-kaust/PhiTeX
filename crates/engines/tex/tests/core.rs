@@ -32,6 +32,11 @@ fn core() {
             None => eprintln!("core/{n}: ok ({} nodes run)", b.stats.nodes_run),
             Some(d) => {
                 eprintln!("core/{n}: FAIL {d}");
+                for d in b.diagnostics() {
+                    if d.message.contains("hint") || d.message.contains("undeclared") {
+                        eprintln!("  {}:{} {}", d.file, d.line, d.message);
+                    }
+                }
                 failed.push(n.clone());
             }
         }

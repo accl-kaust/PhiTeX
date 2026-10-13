@@ -111,6 +111,8 @@ pub struct Definitions {
     /// The order the files load in (file → rank), when known: a later
     /// definition in another file then wins after it (load order).
     order: Option<HashMap<u32, u32>>,
+    /// Names some `\\font` defines (their [`Shape::Quantity`] is `'c'`).
+    fonts: HashSet<String>,
 }
 
 /// What a definition's body does to catcodes.
@@ -230,6 +232,30 @@ impl Definitions {
         find(self.bodies.get(name), at, self.order.as_ref())
     }
 
+    /// Whether calling `name` ends a paragraph: its body's last command
+    /// at brace depth 0 does (`\\par`, a blank line, a vertical command,
+    /// or a macro that does, to `depth` levels).
+    pub(crate) fn ends_paragraph(&self, name: &str, depth: u8) -> bool {
+        if depth == 0 {
+            return false;
+        }
+        let Found::One(body) = self.find_body(name, None) else {
+            return false;
+        };
+        // (only a command that reads nothing after it: `\\par`, `\\end`,
+        // or `\\vskip` of a register; a keyword or number scan would put
+        // the next token back to run before the paragraph's end)
+        match last_command(&body.text) {
+            Some(Last::Blank) => true,
+            Some(Last::Cs(n, prev)) => {
+                matches!(n.as_str(), "par" | "end" | "tex_par:D")
+                    || (prev.as_deref() == Some("vskip") && self.defines(&n))
+                    || self.ends_paragraph(&n, depth - 1)
+            }
+            None => false,
+        }
+    }
+
     /// Every shape `name` is given.
     pub(crate) fn shapes(&self, name: &str) -> Option<Vec<&Shape>> {
         self.macros
@@ -316,6 +342,34 @@ impl Definitions {
     /// The characters the document makes active somewhere.
     pub(crate) fn maybe_active(&self) -> u128 {
         self.active
+    }
+
+    /// The ASCII characters some `\catcode` line of the document makes
+    /// active (bit `c` set), besides `~`.
+    #[must_use]
+    pub fn active_chars(&self) -> u128 {
+        self.active
+    }
+
+    /// The one shape the text gives `name` (all its definitions agree),
+    /// with `'f'` for a quantity some `\\font` makes.
+    #[must_use]
+    pub fn shape(&self, name: &str) -> Option<Shape> {
+        let v = self.macros.get(name)?;
+        let first = &v.first()?.what;
+        if v.iter().any(|d| d.what != *first) {
+            return None;
+        }
+        Some(match first {
+            Shape::Quantity('c') if self.fonts.contains(name) => Shape::Quantity('f'),
+            s => s.clone(),
+        })
+    }
+
+    /// Whether the text defines `name` anywhere.
+    #[must_use]
+    pub fn is_defined(&self, name: &str) -> bool {
+        self.defines(name)
     }
 
     /// Whether the definition of `name` bound at `at` changes catcodes
@@ -644,6 +698,9 @@ impl Definitions {
                     "newtoks" | "toksdef" => 't',
                     _ => 'c',
                 };
+                if name == "font" {
+                    self.fonts.insert(atoms[n].name(text).to_owned());
+                }
                 self.add(atoms[n].name(text), file, pos, Shape::Quantity(ty));
             }
             "newcounter" => {
@@ -1065,4 +1122,65 @@ fn xparse(spec: &str) -> Result<Vec<Arg>, &'static str> {
         }
     }
     Ok(out)
+}
+
+/// The last command of a body at brace depth 0.
+#[derive(Debug, PartialEq, Eq)]
+enum Last {
+    /// The command, and the control sequence before it.
+    Cs(String, Option<String>),
+    Blank,
+}
+
+fn last_command(text: &str) -> Option<Last> {
+    let b = text.as_bytes();
+    let (mut i, mut depth, mut last) = (0usize, 0i32, None);
+    while i < b.len() {
+        match b[i] {
+            b'\\' => {
+                let s = i + 1;
+                let mut e = s;
+                while e < b.len() && (b[e].is_ascii_alphabetic() || b[e] == b'@') {
+                    e += 1;
+                }
+                if e == s {
+                    e = (s + 1).min(b.len());
+                }
+                if depth == 0 {
+                    let prev = match last.take() {
+                        Some(Last::Cs(p, _)) => Some(p),
+                        _ => None,
+                    };
+                    last = Some(Last::Cs(text[s..e].to_owned(), prev));
+                }
+                i = e;
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    last = None;
+                }
+            }
+            b'%' => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'\n'
+                if depth == 0
+                    && text[i + 1..]
+                        .trim_start_matches([' ', '\t'])
+                        .starts_with('\n') =>
+            {
+                last = Some(Last::Blank);
+            }
+            b' ' | b'\t' | b'\n' => {}
+            _ if depth == 0 => last = None,
+            _ => {}
+        }
+        i += 1;
+    }
+    last
 }

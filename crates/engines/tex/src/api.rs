@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use phitex_defuse::{
     Engine, Field, NodeId, OpId, Report, SeqMonoid, SumMonoid, UnitId, Value, ValueId, Values,
 };
-use phitex_source::pass::{self, AtomKind};
+use phitex_source::pass;
 
 use crate::ops::{Dvi, Exec, Files, Mark, OutPage, Put, Shared};
 use crate::run::{Ops, slice_args};
@@ -223,7 +223,9 @@ fn apply_text(
         let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
         let boundary = new_flags.get(k).is_some_and(|f| f & 1 != 0);
         let depth = new_depths.get(k).copied().unwrap_or(0);
-        slice_args(eng.values(), &text[s..e], starts, anchor, boundary, depth)
+        let mut args = slice_args(eng.values(), &text[s..e], starts, anchor, boundary, depth);
+        args.push(crate::hints::hint_arg(eng.values(), &text, s));
+        args
     };
     for k in common..old_mid {
         eng.remove(old[a + k].1);
@@ -613,36 +615,12 @@ fn date_params(t: i64) -> [(&'static str, i64); 4] {
 }
 
 /// The nodes of a text: slices starting at the pass's atoms (characters
-/// run together), each with the blanks before the next.
+/// run together), each with the blanks before the next; the pass over
+/// the whole text also gives each slice's hint ([`crate::hints`]).
 pub(crate) fn slices(text: &str) -> Vec<(usize, usize)> {
-    let defs = pass::Definitions::default();
-    let scope = pass::Scope {
-        document: &defs,
-        file: 0,
-        prelude: &defs,
-    };
-    let p = pass::analyze(text, pass::FileKind::Document, scope);
-    let mut starts: Vec<usize> = Vec::new();
-    let mut prev_char = false;
-    for a in &p.atoms {
-        let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
-        if !(ch && prev_char) {
-            starts.push(a.start);
-        }
-        prev_char = ch;
-    }
-    if starts.first() != Some(&0) {
-        starts.insert(0, 0);
-    }
-    starts.dedup();
-    let mut out = Vec::with_capacity(starts.len());
-    for (i, &s) in starts.iter().enumerate() {
-        let e = starts.get(i + 1).copied().unwrap_or(text.len());
-        if e > s {
-            out.push((s, e));
-        }
-    }
-    out
+    crate::hints::text_hints(text, pass::FileKind::Document)
+        .slices
+        .clone()
 }
 
 /// The primitive conditionals (§487) and e-TeX's and pdfTeX's.
@@ -696,11 +674,11 @@ pub(crate) fn slice_info(text: &str) -> (Vec<u8>, Vec<i64>) {
     let mut depth = Vec::with_capacity(p.atoms.len());
     let mut d: usize = 0;
     for at in &p.atoms {
-        if at.kind == AtomKind::Close {
+        if at.kind == pass::AtomKind::Close {
             d = d.saturating_sub(1);
         }
         depth.push(d);
-        if at.kind == AtomKind::Open {
+        if at.kind == pass::AtomKind::Open {
             d += 1;
         }
     }
@@ -828,6 +806,19 @@ pub struct Stats {
     /// is the mean batch.
     pub steps: u64,
     pub ready_total: u64,
+    /// Nodes whose text bounded what they may define ([`crate::hints`]),
+    /// and those that may define anything, among the live nodes that
+    /// ran.
+    pub nodes_bounded: u64,
+    pub nodes_any: u64,
+    /// Nodes whose hint's assumptions (catcodes, meanings) did not hold
+    /// when they ran, and nodes that defined outside their bound: both
+    /// diagnostics, never a silent fallback.
+    pub regime_violations: u64,
+    pub undeclared_definitions: u64,
+    /// Nodes answering `Any` because their class is demoted
+    /// (`crate::hints`; `PHITEX_HINTS=1` names the class).
+    pub hints_demoted: u64,
     /// The engine's speculative runs: kept with outstanding
     /// assumptions, confirmed, and whose assumptions failed; and nodes
     /// re-done higher after running below a finished input (raises).
@@ -886,6 +877,31 @@ impl Stats {
         self.batches_inline += bi;
         self.jobs_max_batch = self.jobs_max_batch.max(m);
         self.critical_path = usize::try_from(eng.critical_path()).ok();
+    }
+
+    /// The hint counters of `unit` (the live nodes' accumulators), and
+    /// the engine's undeclared-definition errors so far.
+    fn add_hints(&mut self, eng: &Engine, unit: UnitId, errors: &[String]) {
+        let v = eng.values();
+        let get = |name: &str| -> u64 {
+            eng.acc_value(unit, v.field(name))
+                .and_then(|x| v.as_int(x))
+                .and_then(|x| u64::try_from(x).ok())
+                .unwrap_or(0)
+        };
+        let c = crate::hints::COUNTERS;
+        self.nodes_bounded = get(c[0]);
+        self.nodes_any = get(c[1]);
+        self.regime_violations = get(c[2]);
+        self.hints_demoted = get(c[4]);
+        self.undeclared_definitions = get(c[3])
+            + u64::try_from(
+                errors
+                    .iter()
+                    .filter(|e| e.contains("UndeclaredDefinition"))
+                    .count(),
+            )
+            .unwrap_or(u64::MAX);
     }
 
     fn add(&mut self, r: &Report) {
@@ -1011,6 +1027,10 @@ impl Graph {
         }
         let lines = eng.values().field("lines");
         eng.declare_accumulator(lines, Arc::new(SumMonoid));
+        for f in crate::hints::COUNTERS {
+            let fld = eng.values().field(f);
+            eng.declare_accumulator(fld, Arc::new(SumMonoid));
+        }
         Graph {
             eng,
             ops,
@@ -1048,7 +1068,7 @@ impl Graph {
         let mut out = format!("evaluation: {e}\n{e:?}");
         let v = self.eng.values();
         if let E::UndeclaredDefinition { field, .. } = e {
-            out.push_str(&format!("\n  field {}", field_name(v, *field)));
+            let _ = write!(out, "\n  field {}", field_name(v, *field));
         }
         for id in ids {
             let what = self.eng.node_info(id).map_or_else(
@@ -1145,6 +1165,7 @@ impl Graph {
                         eprintln!("{m}");
                     }
                     self.eval_errors.push(m);
+                    stats.add_hints(&self.eng, unit, &self.eval_errors);
                     return;
                 }
             };
@@ -1157,6 +1178,7 @@ impl Graph {
             }
             stats.add(&r);
             stats.add_exec(&ex, c0, &self.eng);
+            stats.add_hints(&self.eng, unit, &self.eval_errors);
             let opened = self.opened(unit);
             let mut asked = false;
             // a file supplied from the finder that the job turns out to
@@ -1278,7 +1300,9 @@ impl Graph {
                 anchor = l;
             }
             let depth = depths.get(i).copied().unwrap_or(0);
-            let args = slice_args(self.eng.values(), piece, starts, anchor, f & 1 != 0, depth);
+            let mut args =
+                slice_args(self.eng.values(), piece, starts, anchor, f & 1 != 0, depth);
+            args.push(crate::hints::hint_arg(self.eng.values(), text, s));
             let n = self.eng.push(unit, self.ops.exec, args);
             if f & 1 != 0 {
                 last = Some(raw_of(n));
