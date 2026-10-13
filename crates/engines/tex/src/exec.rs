@@ -506,6 +506,8 @@ pub(crate) mod widths {
             self.sum += x;
             self.max = self.max.max(x);
         }
+        // PHITEX_WIDTHS statistics only: f64 precision is irrelevant here
+        #[allow(clippy::cast_precision_loss)]
         fn print(&self, name: &str) {
             if self.n == 0 {
                 return;
@@ -600,8 +602,8 @@ pub(crate) mod widths {
                 s.step_reads.add(s.reads.len() as u64);
                 s.step_defs.add(s.defs.len() as u64);
                 s.step_lookups_per_run.add(g / n.max(1));
-                if g > 0 {
-                    s.step_miss_pct.add(m * 100 / g);
+                if let Some(p) = (m * 100).checked_div(g) {
+                    s.step_miss_pct.add(p);
                 }
                 s.lookups += g;
                 s.misses += m;
@@ -636,6 +638,8 @@ pub(crate) mod widths {
     }
 
     /// The histograms so far, then cleared.
+    // PHITEX_WIDTHS statistics only: f64 precision is irrelevant here
+    #[allow(clippy::cast_precision_loss)]
     pub(crate) fn print() {
         if !on() {
             return;
