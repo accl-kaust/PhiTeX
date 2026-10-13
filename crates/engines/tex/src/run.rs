@@ -59,6 +59,9 @@ pub(crate) struct Ops {
     /// The page chain's loop-backs as read and published in the current
     /// evaluation: the refuted guesses ([`crate::Stats`]).
     pub lblog: std::sync::Arc<std::sync::Mutex<crate::page::LbLog>>,
+    /// The evaluation counter: `pgref` counts refuted rounds of one
+    /// evaluation only.
+    pub eval: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// A level of the input stack.
@@ -272,6 +275,9 @@ pub(crate) struct Run<'c, 'a> {
     pub kind_memo: Option<(ValueId, KindFields)>,
     /// `align_state` as this run has it (§309), once read.
     pub astate: Option<i64>,
+    /// The alignments open in this run (`align_state`'s companion,
+    /// §324): run-local, an alignment never crosses a node.
+    pub aopen: i64,
     /// Lines entered by this run (for `\inputlineno`).
     pub lines_entered: i64,
     /// Whether the input is exhausted for good (the file ended).
@@ -340,6 +346,7 @@ impl<'c, 'a> Run<'c, 'a> {
             name_buf: String::new(),
             kind_memo: None,
             astate: None,
+            aopen: 0,
             lines_entered: 0,
             eof: false,
             radix: 0,
@@ -987,7 +994,8 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// [`Self::set_cur`] without a `Result`: a halt is raised.
-    #[inline]
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn set_cur_flag(&mut self, tok: Tok) {
         if !tok.is_cs_or_active() {
             // (a character's meaning is its own: no meaning stored)
@@ -1529,7 +1537,9 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// `get_next` with the meaning (§357–§358).
-    #[inline]
+    // the per-token hot path: inlined on purpose
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub(crate) fn get_next(&mut self) -> R<bool> {
         let b = self.fetch();
         match self.halt.take() {
@@ -1540,7 +1550,8 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// `get_next` without a `Result` (§341–§357): false at the end of all
     /// input; a halt is raised ([`Self::raise`]).
-    #[inline]
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     fn fetch(&mut self) -> bool {
         // (the common case: a token of the list on top that is not an
         // internal marker, and no alignment entry to watch for)
@@ -1596,7 +1607,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     }
                     if n.name() == "\u{10FFFE}uend" {
                         // §324: the end of a u template
-                        self.align_u_end()?;
+                        self.align_u_end();
                         continue;
                     }
                 }
@@ -1958,6 +1969,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // the page chain's delta (`page::step_defs`), so no step reads
         // another
         let op = self.cx.op();
+        let t_pub = std::time::Instant::now();
         let published: Vec<(Field, ValueId, Locality)> = self
             .st
             .published(self.v)
@@ -1967,9 +1979,16 @@ impl<'c, 'a> Run<'c, 'a> {
         if op == self.ops.pagestep || op == self.ops.pagestep_any {
             crate::page::step_defs(&mut self, published);
         } else {
+            let (n, t_list) = (published.len(), t_pub.elapsed());
             for (f, x, l) in published {
                 crate::exec::widths::def(f);
                 self.cx.define_with(f, x, l);
+            }
+            if n >= 10_000 && crate::exec::env_flag!("PHITEX_TEX_TIME") {
+                eprintln!(
+                    "run finish: {n} definitions published: listed {t_list:?}, define_with {:?}",
+                    t_pub.elapsed().checked_sub(t_list).unwrap_or_default()
+                );
             }
         }
         let locs: Vec<Loc> = self.st.defined_locs().collect();
@@ -2364,6 +2383,7 @@ pub(crate) struct Parked {
     conds: Vec<u8>,
     if_codes: Vec<i32>,
     astate: Option<i64>,
+    aopen: i64,
     lines_entered: i64,
     eof: bool,
     radix: i32,
@@ -2402,6 +2422,7 @@ struct Mark {
     sig: u64,
     effect: Option<Effect>,
     astate: Option<i64>,
+    aopen: i64,
     radix: i32,
     cur_order: Option<phitex_typeset::glue::Order>,
     no_pull: bool,
@@ -2481,6 +2502,7 @@ impl Run<'_, '_> {
         m.sig = sig;
         m.effect = Some(self.effect);
         m.astate = self.astate;
+        m.aopen = self.aopen;
         m.radix = self.radix;
         m.cur_order = Some(self.cur_order);
         m.no_pull = self.no_pull;
@@ -2557,6 +2579,7 @@ impl Run<'_, '_> {
             }
         }
         self.astate = m.astate;
+        self.aopen = m.aopen;
         self.radix = m.radix;
         self.no_pull = m.no_pull;
         if let Some(o) = m.cur_order {
@@ -2617,6 +2640,7 @@ impl Run<'_, '_> {
             conds: std::mem::take(&mut self.conds),
             if_codes: std::mem::take(&mut self.if_codes),
             astate: self.astate,
+            aopen: self.aopen,
             lines_entered: self.lines_entered,
             eof: self.eof,
             radix: self.radix,
@@ -2681,6 +2705,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.conds = p.conds;
         r.if_codes = p.if_codes;
         r.astate = p.astate;
+        r.aopen = p.aopen;
         r.lines_entered = p.lines_entered;
         r.eof = p.eof;
         r.radix = p.radix;

@@ -99,6 +99,13 @@ fn report(name: &str, b: &Build) -> String {
             s.critical_path, s.page_steps, s.refuted_guesses
         ),
     );
+    {
+        let mut by = std::collections::BTreeMap::<String, usize>::new();
+        for (_, kind, field) in b.critical_chain() {
+            *by.entry(format!("{kind} {field}")).or_default() += 1;
+        }
+        let _ = std::fmt::Write::write_fmt(&mut out, format_args!("\n  chain by cause {by:?}"));
+    }
     for &(n, w) in &s.top_waited {
         let _ = std::fmt::Write::write_fmt(
             &mut out,
