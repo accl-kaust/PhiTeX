@@ -416,8 +416,8 @@ impl Run<'_, '_> {
                             self.cx.values_epoch(),
                             &format!("count:{k}"),
                         );
-                        self.over.insert(cf, c);
-                        self.slot_note(cf, None);
+                        let l = self.loc_of(cf);
+                        self.st.preload(l, Some(c));
                     }
                 }
             }
@@ -436,7 +436,8 @@ impl Run<'_, '_> {
                 .ops
                 .fields
                 .get_at(v, self.cx.values_epoch(), "deadcycles");
-            self.over.insert(df, dc);
+            let l = self.loc_of(df);
+            self.st.preload(l, Some(dc));
         }
         let d = args.get(1).copied().unwrap_or(ValueId::UNIT);
         if self.fire_page(d, args.get(2).copied())? {

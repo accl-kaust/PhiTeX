@@ -180,15 +180,24 @@ pub(crate) mod group {
 /// An interned control sequence name (`id_lookup`, §259): a number,
 /// dense from 0 in order of first sight, and the name. Equal names have
 /// one entry for the life of the process, so comparing and hashing a
-/// control sequence touch the number only, and a run indexes the
-/// meanings it looked up by it ([`CsId::index`]). The table holds names
-/// only: ids never reach a value (tokens encode as their names), so
-/// cached formats and the value table do not depend on the order names
-/// were seen in.
+/// control sequence touch the number only, a token is the number
+/// ([`Tok`]), and a run indexes the meanings it looks up by it
+/// ([`CsId::index`]). The table holds names only: ids never reach a
+/// value (tokens encode as their names), so cached formats and the
+/// value table do not depend on the order names were seen in.
 pub(crate) struct CsEntry {
     id: u32,
+    /// Whether the name is a frozen or internal one (`\u{10FFFE}…`).
+    frozen: bool,
     name: Box<str>,
 }
+
+/// The entries by number, in chunks made once (read without a lock).
+const CS_CHUNK_BITS: usize = 12;
+const CS_CHUNK: usize = 1 << CS_CHUNK_BITS;
+const CS_CHUNKS: usize = 1 << 12;
+type CsChunk = [std::sync::OnceLock<&'static CsEntry>];
+static CS_BY_ID: [OnceLock<&'static CsChunk>; CS_CHUNKS] = [const { OnceLock::new() }; CS_CHUNKS];
 
 /// A control sequence: its interned entry ([`CsEntry`]).
 #[derive(Clone, Copy)]
@@ -213,10 +222,21 @@ impl CsId {
             if let Some(&c) = t.get(name) {
                 c
             } else {
+                let id = t.len();
                 let e: &'static CsEntry = Box::leak(Box::new(CsEntry {
-                    id: u32::try_from(t.len()).unwrap_or(u32::MAX),
+                    id: u32::try_from(id).unwrap_or(u32::MAX),
+                    frozen: name.starts_with('\u{10FFFE}'),
                     name: Box::from(name),
                 }));
+                let chunk = CS_BY_ID[(id >> CS_CHUNK_BITS) % CS_CHUNKS].get_or_init(|| {
+                    Box::leak(
+                        (0..CS_CHUNK)
+                            .map(|_| OnceLock::new())
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    )
+                });
+                let _ = chunk[id & (CS_CHUNK - 1)].set(e);
                 let c = CsId(e);
                 t.insert(&e.name, c);
                 c
@@ -226,9 +246,30 @@ impl CsId {
         c
     }
 
+    /// The control sequence numbered `i` ([`CsId::index`]).
+    #[inline]
+    pub(crate) fn from_index(i: usize) -> CsId {
+        let e = CS_BY_ID[(i >> CS_CHUNK_BITS) % CS_CHUNKS]
+            .get()
+            .and_then(|c| c[i & (CS_CHUNK - 1)].get())
+            .copied();
+        match e {
+            Some(e) => CsId(e),
+            // (never: a number is made with its entry)
+            None => CsId::intern(""),
+        }
+    }
+
     /// The dense number of this name.
+    #[inline]
     pub(crate) fn index(self) -> usize {
         self.0.id as usize
+    }
+
+    /// Whether the name is a frozen or internal one (`\u{10FFFE}…`).
+    #[inline]
+    pub(crate) fn frozen(self) -> bool {
+        self.0.frozen
     }
 
     pub(crate) fn name(self) -> &'static str {
@@ -269,66 +310,122 @@ impl std::fmt::Display for CsId {
     }
 }
 
-/// A token (§289): a character with its category, or a control sequence.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub(crate) enum Tok {
-    /// `cat << 21 | char`; category 13 is an active character.
-    C(u32),
-    /// A control sequence (frozen ones' names start with `\u{10FFFE}`).
-    S(CsId),
+/// The bit of a control sequence token.
+const CS_BIT: u32 = 1 << 31;
+
+/// A token (§289) in one word: a character, `cat << 21 | char` (category
+/// 13 is an active character), or, with bit 31 set, a control sequence
+/// by its number ([`CsId::index`]; frozen ones' names start with
+/// `\u{10FFFE}`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub(crate) struct Tok(u32);
+
+impl std::fmt::Debug for Tok {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.as_cs() {
+            Some(n) => write!(f, "S({n:?})"),
+            None => write!(f, "C({:#x})", self.0),
+        }
+    }
 }
 
 impl Tok {
     pub(crate) fn ch(cat: u8, c: u32) -> Tok {
-        Tok::C(u32::from(cat) << 21 | c)
+        Tok((u32::from(cat) << 21 | c) & !CS_BIT)
+    }
+
+    /// The character token `x` (`cat << 21 | char`).
+    pub(crate) fn c(x: u32) -> Tok {
+        Tok(x & !CS_BIT)
     }
 
     pub(crate) fn cs(name: &str) -> Tok {
-        Tok::S(CsId::intern(name))
+        Tok::of_cs(CsId::intern(name))
+    }
+
+    pub(crate) fn of_cs(c: CsId) -> Tok {
+        Tok(CS_BIT | u32::try_from(c.index()).unwrap_or(0))
+    }
+
+    /// The word: `cat << 21 | char` for a character (so `raw() >> 21` is
+    /// the category, and at least 1024 for a control sequence).
+    #[inline]
+    pub(crate) fn raw(self) -> u32 {
+        self.0
+    }
+
+    /// `cat << 21 | char` of a character token.
+    #[inline]
+    pub(crate) fn as_char(self) -> Option<u32> {
+        (self.0 & CS_BIT == 0).then_some(self.0)
+    }
+
+    /// The control sequence of a control sequence token.
+    #[inline]
+    pub(crate) fn as_cs(self) -> Option<CsId> {
+        (self.0 & CS_BIT != 0).then(|| CsId::from_index((self.0 & !CS_BIT) as usize))
+    }
+
+    /// The number of a control sequence token ([`CsId::index`]).
+    #[inline]
+    pub(crate) fn cs_index(self) -> Option<usize> {
+        (self.0 & CS_BIT != 0).then_some((self.0 & !CS_BIT) as usize)
+    }
+
+    #[inline]
+    pub(crate) fn is_cs(self) -> bool {
+        self.0 & CS_BIT != 0
     }
 
     /// The category of a character token.
+    #[inline]
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     pub(crate) fn cat(&self) -> Option<u8> {
-        match self {
-            Tok::C(x) => Some(u8::try_from(x >> 21).unwrap_or(0)),
-            Tok::S(_) => None,
-        }
+        (self.0 & CS_BIT == 0).then(|| u8::try_from(self.0 >> 21).unwrap_or(0))
     }
 
     /// The character code of a character token.
+    #[inline]
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     pub(crate) fn chr(&self) -> u32 {
-        match self {
-            Tok::C(x) => x & 0x1F_FFFF,
-            Tok::S(_) => 0,
+        if self.0 & CS_BIT == 0 {
+            self.0 & 0x1F_FFFF
+        } else {
+            0
         }
     }
 
+    #[inline]
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     pub(crate) fn is_cs_or_active(&self) -> bool {
-        matches!(self, Tok::S(_)) || self.cat() == Some(13)
+        self.0 & CS_BIT != 0 || self.0 >> 21 == 13
     }
 
     /// The field holding this token's meaning, for control sequences and
     /// active characters.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     pub(crate) fn field_name(&self) -> Option<String> {
-        match self {
-            Tok::S(n) => Some(format!("cs:{n}")),
-            Tok::C(_) if self.cat() == Some(13) => Some(format!("act:{}", self.chr())),
-            Tok::C(_) => None,
+        match self.as_cs() {
+            Some(n) => Some(format!("cs:{n}")),
+            None if self.cat() == Some(13) => Some(format!("act:{}", self.chr())),
+            None => None,
         }
     }
 
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     pub(crate) fn encode(&self, v: &Values) -> ValueId {
-        match self {
-            Tok::C(x) => v.int(i64::from(*x)),
-            Tok::S(n) => v.str(&format!("\\{n}")),
+        match self.as_cs() {
+            None => v.int(i64::from(self.0)),
+            Some(n) => v.str(&format!("\\{n}")),
         }
     }
 
     pub(crate) fn decode(v: &Values, id: ValueId) -> Tok {
         match &*v.get(id) {
-            Value::Int(i) => Tok::C(u32::try_from(*i).unwrap_or(0)),
+            Value::Int(i) => Tok::c(u32::try_from(*i).unwrap_or(0)),
             Value::Str(s) => Tok::cs(s.strip_prefix('\\').unwrap_or(s)),
-            _ => Tok::C(0),
+            _ => Tok::c(0),
         }
     }
 }
@@ -339,12 +436,12 @@ pub(crate) fn space_tok() -> Tok {
 }
 
 pub(crate) fn toks_value(v: &Values, toks: &[Tok]) -> ValueId {
-    v.list(toks.iter().map(|t| tok_value(v, t)).collect())
+    v.list(toks.iter().map(|t| tok_value(v, *t)).collect())
 }
 
 /// The value of token `t`: in a run, through the worker's cache
 /// ([`tok_id`] at the run's epoch, [`EpochScope`]).
-fn tok_value(v: &Values, t: &Tok) -> ValueId {
+fn tok_value(v: &Values, t: Tok) -> ValueId {
     match scope_epoch(v) {
         Some(e) => tok_id(v, e, t),
         None => t.encode(v),
@@ -530,7 +627,7 @@ pub(crate) fn node_id(v: &Values, key: NodeKey, make: impl FnOnce() -> ValueId) 
 
 /// The value of token `t` ([`Tok::encode`]) in a run at `epoch`, through
 /// this thread's cache.
-pub(crate) fn tok_id(v: &Values, epoch: u64, t: &Tok) -> ValueId {
+pub(crate) fn tok_id(v: &Values, epoch: u64, t: Tok) -> ValueId {
     let hit = ENCODED.with(|c| {
         let mut c = c.borrow_mut();
         if c.instance != v.instance() || c.epoch != epoch {
@@ -540,7 +637,7 @@ pub(crate) fn tok_id(v: &Values, epoch: u64, t: &Tok) -> ValueId {
                 ..Encoded::default()
             };
         }
-        c.toks.get(t).copied()
+        c.toks.get(&t).copied()
     });
     if let Some(x) = hit {
         return x;
@@ -551,7 +648,7 @@ pub(crate) fn tok_id(v: &Values, epoch: u64, t: &Tok) -> ValueId {
         if c.toks.len() >= DECODED_MAX {
             c.toks.clear();
         }
-        c.toks.insert(t.clone(), x);
+        c.toks.insert(t, x);
     });
     x
 }
@@ -674,8 +771,8 @@ pub(crate) enum Mean {
 }
 
 /// A macro (§210, §473): flags (1 `\long`, 2 `\outer`), its parameter
-/// text (match tokens are `Tok::C(14 << 21 | char)`), its body
-/// (parameters are `Tok::C(5 << 21 | n)`).
+/// text (match tokens are `Tok::ch(14, char)`), its body
+/// (parameters are `Tok::ch(5, n)`).
 #[derive(Debug, PartialEq)]
 pub(crate) struct Macro {
     pub flags: u8,
@@ -688,7 +785,7 @@ pub(crate) const MATCH_CAT: u8 = 14;
 
 /// `end_match` (§289), only where a macro is shown.
 pub(crate) fn end_match() -> Tok {
-    Tok::C(15 << 21)
+    Tok::c(15 << 21)
 }
 pub(crate) const OUT_PARAM_CAT: u8 = 5;
 
