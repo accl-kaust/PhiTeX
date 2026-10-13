@@ -544,10 +544,11 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
     if !left.is_empty() {
         let j = r.page_index();
         if j < MAX_PAGES {
-            r.cx.publish(
-                r.keyed(crate::fields::Fam::Pagefx, &j.to_string()),
-                v.list(left),
-            );
+            let x = v.list(left);
+            r.cx.publish(r.keyed(crate::fields::Fam::Pagefx, &j.to_string()), x);
+            // (kept for the client: the next session's round-one guess)
+            let jj = i64::try_from(j).unwrap_or(0);
+            r.contribute("pagefxs", v.seq_unit(v.list(vec![v.int(jj), x])));
         }
     }
     r.set("deadcycles", v.int(0), true);

@@ -84,6 +84,18 @@ pub struct Options {
     /// candidates per step. The output is the same either way.
     pub speculation: Speculation,
     pub speculation_budget: usize,
+    /// The round-one key sets of the read-back files that only define
+    /// (`.aux`: `wkeys:<name>`), as [`Build::wkeys`] gave them in an
+    /// earlier session; a file not listed is guessed from the text
+    /// ([`guess_wkeys`]). A right guess saves the loop-back's second
+    /// round; a wrong one costs nothing more than no guess.
+    pub wkeys: Vec<(String, Vec<String>)>,
+    /// The round-one values of the page builder's loop-backs
+    /// (`pagefx:<j>`, what page `j`'s output routine leaves for the
+    /// next), as [`Build::export_pagefx`] gave them in an earlier
+    /// session of the same document; empty: none left (the declared
+    /// value).
+    pub pagefx: Vec<u8>,
     /// The loop-back rounds an evaluation may take before it ends with
     /// a no-fixpoint error naming the loop-back fields (a document whose
     /// written files oscillate), instead of running on.
@@ -336,6 +348,8 @@ impl Default for Options {
             finder: Arc::new(|_| None),
             epoch: None,
             fixpoint: false,
+            wkeys: Vec::new(),
+            pagefx: Vec::new(),
             prelude_jobname: "texput".to_owned(),
             prelude_bytes: None,
             time_limit: Some(std::time::Duration::from_secs(600)),
@@ -1039,6 +1053,8 @@ struct Graph {
     /// The `wdef:<field>` loop-backs declared: the fields the read-back
     /// of a job-written file defines.
     wdefs: Vec<String>,
+    /// The round-one guesses of the `wkeys:<name>` loop-backs.
+    wkeys_guess: Vec<(String, Vec<String>)>,
     /// What the executor runs now, for readers on other threads.
     watch: crate::exec::Watch,
     /// The engine's scheduler ([`Options::speculation`]).
@@ -1133,6 +1149,7 @@ impl Graph {
             "streams",
             "wplan",
             "fread",
+            "pagefxs",
             crate::pdfrelaxed::PIECES,
         ] {
             let fld = eng.values().field(f);
@@ -1170,6 +1187,7 @@ impl Graph {
             pdf_exact: None,
             marks_decl: Vec::new(),
             wdefs: Vec::new(),
+            wkeys_guess: Vec::new(),
             watch: crate::exec::Watch::new(crate::exec::threads(threads), None),
             sched: phitex_defuse::Greedy::default(),
             eval_errors: Vec::new(),
@@ -1356,6 +1374,28 @@ impl Graph {
             .collect()
     }
 
+    /// Round one's guesses for the loop-backs: the last session's
+    /// (`opts`), else from the text `document`.
+    fn guesses(&mut self, opts: &Options, document: &str) {
+        // the last session's page-builder loop-backs, round one's guess
+        {
+            let mut rd = Rd(&opts.pagefx);
+            while let (Some(j), Some(t)) = (rd.u64(), rd.tree()) {
+                if usize::try_from(j).is_ok_and(|j| j < crate::page::MAX_PAGES) {
+                    let v = self.eng.values();
+                    let f = v.field(&format!("pagefx:{j}"));
+                    let x = import(v, &t);
+                    self.eng.declare_loopback(f, x);
+                }
+            }
+        }
+        let aux = format!("{}.aux", opts.jobname);
+        self.wkeys_guess.clone_from(&opts.wkeys);
+        if !self.wkeys_guess.iter().any(|(n, _)| *n == aux) {
+            self.wkeys_guess.push((aux, guess_wkeys(document)));
+        }
+    }
+
     /// A file the job writes is read back: from the previous round
     /// (`fixpoint`: a loop-back field, absent in round one, as LaTeX's
     /// `\@input` finds no `.aux` on a first run), or absent.
@@ -1383,7 +1423,33 @@ impl Graph {
             let none = v.list(Vec::new());
             let k = if defines_only(name) { "wkeys" } else { "wfile" };
             let w = v.field(&format!("{k}:{name}"));
-            self.eng.declare_loopback(w, none);
+            // a key set guessed (the last session's, or from the text):
+            // the read-back runs once when the guess is right
+            let guess = self
+                .wkeys_guess
+                .iter()
+                .find(|(n, _)| n == name && defines_only(name))
+                .map_or(none, |(_, ks)| {
+                    v.list(ks.iter().map(|k| v.str(k)).collect())
+                });
+            self.eng.declare_loopback(w, guess);
+            // the guessed keys' `wdef:<field>` loop-backs declared with
+            // it: a read-back of a guessed key never waits for them
+            let keys: Vec<String> = self
+                .wkeys_guess
+                .iter()
+                .filter(|(n, _)| n == name && defines_only(name))
+                .flat_map(|(_, ks)| ks.iter().cloned())
+                .collect();
+            for k in keys {
+                if !self.wdefs.contains(&k) {
+                    let v = self.eng.values();
+                    let none = v.list(Vec::new());
+                    let wd = v.field(&format!("wdef:{k}"));
+                    self.eng.declare_loopback(wd, none);
+                    self.wdefs.push(k);
+                }
+            }
         }
         self.written.push(name.to_owned());
     }
@@ -1674,6 +1740,54 @@ impl Graph {
 
 /// Whether a job-written file's read-back only defines (its lines are
 /// read as definitions per field, never as text): `.aux`.
+/// The fields a LaTeX job's `.aux` read-back defines, guessed from the
+/// text, in the order the file's lines define them: `\r@<x>` for each
+/// `\label{x}` and `\b@<k>` for each `\bibitem{k}` (their `\newlabel`
+/// and `\bibcite` lines, in text order), then the kernel's
+/// `\@abspage@last` (the line `\enddocument` writes). Nothing without
+/// `\documentclass`: another job's `.aux` is its own.
+#[must_use]
+pub fn guess_wkeys(text: &str) -> Vec<String> {
+    if !text.contains("\\documentclass") {
+        return Vec::new();
+    }
+    let mut keys: Vec<String> = Vec::new();
+    let mut add = |k: String| {
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    };
+    let mut rest = text;
+    while let Some(i) = rest.find('\\') {
+        rest = &rest[i + 1..];
+        let (prefix, after) = if let Some(a) = rest.strip_prefix("label{") {
+            ("r@", a)
+        } else if let Some(a) = rest.strip_prefix("bibitem") {
+            // `\bibitem[label]{key}`
+            let a = a.trim_start();
+            let a = if a.starts_with('[') {
+                a.find(']').map_or(a, |j| &a[j + 1..])
+            } else {
+                a
+            };
+            match a.trim_start().strip_prefix('{') {
+                Some(a) => ("b@", a),
+                None => continue,
+            }
+        } else {
+            continue;
+        };
+        if let Some(j) = after.find('}') {
+            let key = &after[..j];
+            if !key.is_empty() && !key.contains(['\\', '{', '#', '%']) {
+                add(format!("cs:{prefix}{key}"));
+            }
+        }
+    }
+    add("cs:@abspage@last".to_owned());
+    keys
+}
+
 fn defines_only(name: &str) -> bool {
     std::path::Path::new(name)
         .extension()
@@ -2084,6 +2198,7 @@ impl Build {
         for (n, _) in cached.reads.clone() {
             g.supply(&opts.finder, &n);
         }
+        g.guesses(&opts, document);
         // the files a LaTeX job writes and reads back: in-memory values
         // from the start (`.bbl` and `.ind` stay files until their
         // BibTeX and makeindex nodes publish them)
@@ -2470,6 +2585,48 @@ impl Build {
         let v = self.g.eng.values();
         let acc = |n: &str| self.g.eng.acc_value(self.unit, v.field(n));
         written_texts(v, acc("wplan"), acc("streams"))
+    }
+
+    /// The key sets of the read-back files that only define (`.aux`),
+    /// as the last build published them: [`Options::wkeys`] for a later
+    /// session of the same document.
+    #[must_use]
+    pub fn wkeys(&self) -> Vec<(String, Vec<String>)> {
+        let v = self.g.eng.values();
+        let acc = |n: &str| self.g.eng.acc_value(self.unit, v.field(n));
+        written_defs(v, acc("wplan"), acc("streams"))
+            .into_iter()
+            .filter(|(n, _)| defines_only(n))
+            .map(|(n, ds)| (n, ds.into_iter().map(|(f, _)| f).collect()))
+            .collect()
+    }
+
+    /// What each page's output routine left for the next as the last
+    /// build published it (`pagefx:<j>`), serialised: [`Options::pagefx`]
+    /// for a later session of the same document.
+    #[must_use]
+    pub fn export_pagefx(&self) -> Vec<u8> {
+        let v = self.g.eng.values();
+        let mut last: Vec<(u64, ValueId)> = Vec::new();
+        if let Some(s) = self.g.eng.acc_value(self.unit, v.field("pagefxs")) {
+            for e in v.seq_to_vec(s) {
+                let xs = list_of(v, e);
+                let (Some(&j), Some(&x)) = (xs.first(), xs.get(1)) else {
+                    continue;
+                };
+                let j = u64::try_from(crate::val::int_of(v, j)).unwrap_or(0);
+                match last.iter_mut().find(|(k, _)| *k == j) {
+                    Some(slot) => slot.1 = x,
+                    None => last.push((j, x)),
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (j, x) in last {
+            out.extend_from_slice(&j.to_le_bytes());
+            put_tree(&mut out, &export(v, x));
+        }
+        out
     }
 
     /// Whether the output is a PDF file (`\pdfoutput` at the first
