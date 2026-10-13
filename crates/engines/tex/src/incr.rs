@@ -147,18 +147,12 @@ impl Incr {
             return;
         }
         let (a, b) = (old.as_bytes(), text.as_bytes());
-        let mut p = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+        let mut p = common_prefix(a, b);
         while !old.is_char_boundary(p) || !text.is_char_boundary(p) {
             p -= 1;
         }
         let max = a.len().min(b.len()) - p;
-        let mut s = a
-            .iter()
-            .rev()
-            .zip(b.iter().rev())
-            .take(max)
-            .take_while(|(x, y)| x == y)
-            .count();
+        let mut s = common_suffix(&a[a.len() - max..], &b[b.len() - max..]);
         while !old.is_char_boundary(a.len() - s) || !text.is_char_boundary(b.len() - s) {
             s -= 1;
         }
@@ -240,6 +234,40 @@ impl Incr {
         self.chunks = chunks;
         self.analysed = analysed;
     }
+}
+
+/// The length of the prefix `a` and `b` share: block by block (a
+/// memcmp each), then byte by byte in the first block that differs.
+fn common_prefix(a: &[u8], b: &[u8]) -> usize {
+    const B: usize = 4096;
+    let n = a.len().min(b.len());
+    let mut i = 0;
+    while i + B <= n && a[i..i + B] == b[i..i + B] {
+        i += B;
+    }
+    i + a[i..n]
+        .iter()
+        .zip(&b[i..n])
+        .take_while(|(x, y)| x == y)
+        .count()
+}
+
+/// The length of the suffix `a` and `b` share ([`common_prefix`] from
+/// the end).
+fn common_suffix(a: &[u8], b: &[u8]) -> usize {
+    const B: usize = 4096;
+    let n = a.len().min(b.len());
+    let (a, b) = (&a[a.len() - n..], &b[b.len() - n..]);
+    let mut i = 0;
+    while i + B <= n && a[n - i - B..n - i] == b[n - i - B..n - i] {
+        i += B;
+    }
+    i + a[..n - i]
+        .iter()
+        .rev()
+        .zip(b[..n - i].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count()
 }
 
 /// Whether a text defines anything the pass harvests (a macro, an

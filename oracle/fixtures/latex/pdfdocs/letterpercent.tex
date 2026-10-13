@@ -1,0 +1,8 @@
+\documentclass{article}
+\makeatletter
+\chardef\@@other 12
+\bgroup \catcode`\%=\@@other \xdef\letterpercent{\string%} \egroup
+\makeatother
+\begin{document}
+\letterpercent
+\end{document}
