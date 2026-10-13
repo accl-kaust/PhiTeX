@@ -196,6 +196,16 @@ impl Fields {
         Fields { names, params, cat }
     }
 
+    /// Every handle held here: the engine must keep them alive across
+    /// its value sweeps (they are held outside the graph).
+    pub(crate) fn handles(&self) -> impl Iterator<Item = Field> + '_ {
+        self.names
+            .values()
+            .chain(self.params.values())
+            .chain(self.cat.iter())
+            .copied()
+    }
+
     /// The field `name`.
     pub(crate) fn get(&self, v: &Values, name: &str) -> Field {
         match self.names.get(name) {
