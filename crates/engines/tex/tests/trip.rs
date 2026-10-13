@@ -13,7 +13,15 @@ use phitex_tex::Options;
 
 fn trip(name: &str, prelude_jobname: &str) {
     let dir = common::fixtures().join("trip");
-    let src = common::read(&dir.join(format!("{name}.tex")));
+    let mut src = common::read(&dir.join(format!("{name}.tex")));
+    // (`PHITEX_TRIP_CUT=N`: the document's first N lines and `\end`,
+    // for cutting a divergence down)
+    if let Some(n) = std::env::var("PHITEX_TRIP_CUT")
+        .ok()
+        .and_then(|n| n.parse().ok())
+    {
+        src = src.lines().take(n).collect::<Vec<_>>().join("\n") + "\n\\end\n";
+    }
     let want = std::fs::read(dir.join(format!("{name}.dvi"))).expect("the oracle");
     let opts = Options {
         prelude_jobname: prelude_jobname.to_owned(),
@@ -40,6 +48,17 @@ fn trip(name: &str, prelude_jobname: &str) {
     let out = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
     let _ = std::fs::write(out.join(format!("{name}.dvi")), &got);
     let _ = std::fs::write(out.join(format!("{name}.log")), &log);
+    eprintln!("{name}.log, the last lines:");
+    for l in log
+        .lines()
+        .rev()
+        .take(25)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        eprintln!("  {l}");
+    }
     if let Some(d) = common::first_difference(&got, &want) {
         panic!("{name}.dvi: {d}");
     }
@@ -55,4 +74,23 @@ fn trip_test() {
 #[ignore = "heavy: the etrip test"]
 fn etrip_test() {
     trip("etrip", "etrip");
+}
+
+/// A scratch document (`PHITEX_TRIP_DOC`, a path) through the same
+/// harness, for cutting a divergence down.
+#[test]
+#[ignore = "scratch"]
+fn trip_scratch() {
+    let Ok(p) = std::env::var("PHITEX_TRIP_DOC") else {
+        return;
+    };
+    let dir = common::fixtures().join("trip");
+    let src = common::read(std::path::Path::new(&p));
+    let b = common::build(
+        common::options("./scratch.tex", "scratch", "", &dir),
+        None,
+        &src,
+    );
+    let (dvi, log) = b.output();
+    eprintln!("{} DVI bytes\n{log}", dvi.len());
 }
