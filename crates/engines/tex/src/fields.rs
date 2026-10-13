@@ -284,7 +284,7 @@ thread_local! {
 const NAMED_MAX: usize = 1 << 16;
 
 fn bounded<K, V>(m: &mut FxHashMap<K, V>) {
-    if m.len() >= NAMED_MAX {
+    if m.len() >= crate::val::cache_cap(NAMED_MAX) {
         m.clear();
     }
 }

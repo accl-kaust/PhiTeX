@@ -289,7 +289,19 @@ struct Decoded {
 }
 
 /// Entries kept per map before it is emptied (a bound, not a policy).
-const DECODED_MAX: usize = 1 << 15;
+const DECODED_MAX_DEFAULT: usize = 1 << 15;
+
+/// The bound on each per-worker cache map: `PHITEX_CACHE_CAP` overrides
+/// it (for measurements; a cache never changes results).
+pub(crate) fn cache_cap(default: usize) -> usize {
+    static C: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        std::env::var("PHITEX_CACHE_CAP")
+            .ok()
+            .and_then(|s| s.parse().ok())
+    })
+    .unwrap_or(default)
+}
 
 thread_local! {
     static DECODED: std::cell::RefCell<Decoded> = std::cell::RefCell::default();
@@ -393,7 +405,7 @@ fn encoded<K: std::hash::Hash + Eq>(
     ENCODED.with(|c| {
         let mut c = c.borrow_mut();
         let m = map(&mut c);
-        if m.len() >= DECODED_MAX {
+        if m.len() >= cache_cap(DECODED_MAX_DEFAULT) {
             m.clear();
         }
         m.insert(key, x);
@@ -448,7 +460,7 @@ pub(crate) fn tok_id(v: &Values, epoch: u64, t: &Tok) -> ValueId {
     let x = t.encode(v);
     ENCODED.with(|c| {
         let mut c = c.borrow_mut();
-        if c.toks.len() >= DECODED_MAX {
+        if c.toks.len() >= cache_cap(DECODED_MAX_DEFAULT) {
             c.toks.clear();
         }
         c.toks.insert(t.clone(), x);
@@ -488,7 +500,7 @@ pub(crate) fn keep_leaf(v: &Values, id: ValueId, n: &phitex_typeset::node::Node)
                 ..Decoded::default()
             };
         }
-        if c.leaves.len() >= DECODED_MAX {
+        if c.leaves.len() >= cache_cap(DECODED_MAX_DEFAULT) {
             c.leaves.clear();
         }
         c.leaves.insert(id, n.clone());
@@ -519,7 +531,7 @@ fn decoded<T: Clone>(
     DECODED.with(|c| {
         let mut c = c.borrow_mut();
         let m = map(&mut c);
-        if m.len() >= DECODED_MAX {
+        if m.len() >= cache_cap(DECODED_MAX_DEFAULT) {
             m.clear();
         }
         m.insert(id, x.clone());

@@ -1352,7 +1352,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 steps += 1;
                 self.effect = phitex_defuse::Effect::None;
                 self.command()?;
-                if steps < 30 && std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+                if steps < 30 && crate::exec::env_flag!("PHITEX_TEX_TRACE") {
                     let md = self.mode()?;
                     eprintln!(
                         "    trial {:?} mode {} group {} lid {}",
@@ -1369,7 +1369,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.trial_kind = None;
         self.trial_ids = None;
         let after = self.pulled;
-        if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
             let r = match &res {
                 Ok(()) => "ok".to_owned(),
                 Err(Halt::Stop(_)) => "stop".to_owned(),
@@ -1515,7 +1515,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 .get_at(self.v, self.cx.values_epoch(), "defs");
             self.contribs.push((defs, s));
         }
-        if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+        if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
             let v = self.v;
             let items = v.field("items");
             for (f, x) in &self.contribs {
@@ -1524,10 +1524,15 @@ impl<'c, 'a> Run<'c, 'a> {
                         eprintln!(
                             "  item lid {} {}",
                             crate::val::int_at(v, e, 0),
-                            v.render(crate::val::list_of(v, e).get(1).copied().unwrap_or(ValueId::UNIT))
-                                .chars()
-                                .take(60)
-                                .collect::<String>()
+                            v.render(
+                                crate::val::list_of(v, e)
+                                    .get(1)
+                                    .copied()
+                                    .unwrap_or(ValueId::UNIT)
+                            )
+                            .chars()
+                            .take(60)
+                            .collect::<String>()
                         );
                     }
                 }
@@ -1559,7 +1564,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.cx.follow(op, Vec::new());
         }
         for args in self.leftover() {
-            if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+            if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
                 let v = self.v;
                 eprintln!(
                     "  follow {}",

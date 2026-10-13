@@ -32,6 +32,17 @@ use std::sync::{Arc, OnceLock};
 
 use phitex_defuse::{Executor, RunResult};
 
+/// Whether the environment variable `$name` is set, read once per
+/// process (a `getenv` takes the environment's lock and scans it; the
+/// debug switches are tested on every run).
+macro_rules! env_flag {
+    ($name:literal) => {{
+        static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *F.get_or_init(|| std::env::var_os($name).is_some())
+    }};
+}
+pub(crate) use env_flag;
+
 /// Below this many items an engine pass runs on the calling thread
 /// (its items cost microseconds).
 const GRAIN: usize = 64;
@@ -318,7 +329,7 @@ fn threads_possible() -> bool {
 /// on: the engine's probes (spans and counters) printed, then reset.
 impl Drop for Threads {
     fn drop(&mut self) {
-        if phitex_defuse::obs::enabled() && std::env::var_os("PHITEX_OBS").is_some() {
+        if phitex_defuse::obs::enabled() && env_flag!("PHITEX_OBS") {
             eprint!("probes (evaluation):\n{}", phitex_defuse::obs::snapshot());
             phitex_defuse::obs::reset();
         }
@@ -338,7 +349,7 @@ impl Executor for Threads {
                 .fetch_add(u64::try_from(n).unwrap_or(0), Ordering::Relaxed);
         }
         self.batches.fetch_add(1, Ordering::Relaxed);
-        if std::env::var_os("PHITEX_BATCH_TRACE").is_some() {
+        if env_flag!("PHITEX_BATCH_TRACE") {
             eprintln!("batch: {n}");
         }
         self.jobs_max_batch.fetch_max(n, Ordering::Relaxed);
@@ -380,7 +391,7 @@ impl Threads {
 }
 
 fn trace(n: usize, threads: usize) {
-    if std::env::var_os("PHITEX_EXEC_TRACE").is_some() {
+    if env_flag!("PHITEX_EXEC_TRACE") {
         eprintln!("exec: {n} jobs on {threads} threads");
     }
 }
