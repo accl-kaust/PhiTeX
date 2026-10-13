@@ -1360,3 +1360,19 @@ fn pdftex_parameters_are_assignments() {
     }
     assert_eq!(after(&p, t, "pdfpageattr").trim_start(), "X");
 }
+
+#[test]
+fn a_macro_ending_with_par_ends_the_paragraph() {
+    let mut t = String::from("\\def\\para#1{\\noindent #1\\par}\n");
+    for k in 0..14 {
+        t.push_str(&format!("\\para{{x{k}}}"));
+    }
+    t.push('\n');
+    let (p, _) = pass(&t, FileKind::Document);
+    let n = p
+        .items
+        .iter()
+        .filter(|i| i.name == "para" && i.hints.implicit == Implicit::EndsParagraph)
+        .count();
+    assert_eq!(n, 14);
+}

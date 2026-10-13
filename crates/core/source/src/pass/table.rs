@@ -855,6 +855,17 @@ const ENVIRONMENTS: &[(&str, &str)] = &[
 pub(crate) struct Table {
     pub commands: HashMap<&'static str, Entry>,
     pub envs: HashMap<&'static str, Vec<Arg>>,
+    /// The names that are TeX's, e-TeX's or pdfTeX's primitives (the
+    /// rest of `commands` are the formats' macros, whose bodies the
+    /// table does not give).
+    pub primitives: std::collections::HashSet<&'static str>,
+}
+
+impl Table {
+    /// Whether `name` is a primitive of TeX, e-TeX or pdfTeX.
+    pub(crate) fn primitive(&self, name: &str) -> bool {
+        self.primitives.contains(name)
+    }
 }
 
 /// The table, built once.
@@ -894,13 +905,28 @@ pub(crate) fn table() -> &'static Table {
         ] {
             commands.insert(n, Entry::Quantity(ty, Some(ix)));
         }
+        // (the quantities above are primitives; the rows of `COMMANDS`
+        // are, up to plain TeX's first)
+        let mut primitives: std::collections::HashSet<&'static str> =
+            commands.keys().copied().collect();
+        for &(n, spec) in COMMANDS {
+            if n == "newcount" {
+                break;
+            }
+            primitives.insert(n);
+            let _ = spec;
+        }
         for &(n, spec) in COMMANDS {
             if !commands.contains_key(n) {
                 commands.insert(n, Entry::Command(compile(spec)));
             }
         }
         let envs = ENVIRONMENTS.iter().map(|&(n, s)| (n, compile(s))).collect();
-        Table { commands, envs }
+        Table {
+            commands,
+            envs,
+            primitives,
+        }
     })
 }
 
