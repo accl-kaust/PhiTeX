@@ -478,6 +478,22 @@ pub(crate) fn ximage(
     }
 }
 
+/// `\pdffontobjnum f` in relaxed mode: the handle of the font's PDF
+/// font.
+pub(crate) fn font_objnum(r: &mut Run<'_, '_>, f: u32) -> R<i64> {
+    let p = params(r)?;
+    let p = fix(r, &p)?;
+    let maps = maps(r)?;
+    let fonts = crate::pdfout::fonts_for(r, &[f], false)?;
+    match relaxed::font_objnum(&p, &maps, f, &fonts) {
+        Ok(h) => Ok(i64::try_from(h).unwrap_or(0)),
+        Err(e) => {
+            r.log("error", &format!("pdfTeX error: {e}"))?;
+            Ok(0)
+        }
+    }
+}
+
 /// Whether the `Dvi` node finishes in relaxed mode.
 pub(crate) fn finishing(cx: &mut Ctx<'_>) -> Result<bool, Stop> {
     let v = cx.values();
@@ -597,6 +613,30 @@ fn doc_cmds(cx: &mut Ctx<'_>) -> Result<Vec<DocCmd>, Stop> {
     }
     if let Some(t) = cx.use_field(v.field("pdf:trailerid"))? {
         out.push(DocCmd::TrailerId(b(t)));
+    }
+    // the font commands: the last attributes of each font, the
+    // characters included, the fonts without built-in ToUnicode
+    let count = cx
+        .use_field(v.field("fontcount"))?
+        .map_or(0, |x| int_of(v, x));
+    for f in 1..=count {
+        if let Some(t) = cx.use_field(v.field(&format!("pdf:fontattr:{f}")))? {
+            out.push(DocCmd::FontAttr(u32::try_from(f).unwrap_or(0), b(t)));
+        }
+    }
+    for t in texts(cx, "pdf:includecharslist")? {
+        let xs = list_of(v, t);
+        if let (Some(&f), Some(&c)) = (xs.first(), xs.get(1)) {
+            out.push(DocCmd::IncludeChars(
+                u32::try_from(int_of(v, f)).unwrap_or(0),
+                b(c),
+            ));
+        }
+    }
+    for t in texts(cx, "pdf:nobuiltinlist")? {
+        out.push(DocCmd::NoBuiltinToUnicode(
+            u32::try_from(int_of(v, t)).unwrap_or(0),
+        ));
     }
     for t in texts(cx, "pdf:glyphtounicode")? {
         let xs = list_of(v, t);

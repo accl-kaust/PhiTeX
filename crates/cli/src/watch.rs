@@ -67,7 +67,7 @@ type Ours = Arc<Mutex<HashMap<PathBuf, u64>>>;
 fn watcher(
     root: &Path,
     ours: Ours,
-    tx: mpsc::Sender<Event>,
+    tx: mpsc::Sender<(Instant, Event)>,
 ) -> notify::Result<notify::RecommendedWatcher> {
     let r = root.to_path_buf();
     let mut w = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
@@ -92,7 +92,7 @@ fn watcher(
             });
         }
         if !changed.is_empty() {
-            let _ = tx.send(Event::Files(changed));
+            let _ = tx.send((Instant::now(), Event::Files(changed)));
         }
     })?;
     w.watch(root, RecursiveMode::Recursive)?;
@@ -198,6 +198,8 @@ struct Here {
     /// on the output: the watch's own loop opens that).
     url: Option<String>,
     building: Arc<AtomicBool>,
+    /// The wait for the build said already (this build).
+    told: Arc<AtomicBool>,
     /// For the cache's line on the way out.
     target: Target,
 }
@@ -234,10 +236,13 @@ impl Here {
                 std::process::exit(0);
             }
             Key::Rebuild | Key::Problems | Key::Warnings | Key::Summary if busy => {
-                ui.line(
-                    &ui.st
-                        .dim("phitex watch: a build is running; this comes after it"),
-                );
+                // (said once a build: a held key says nothing more)
+                if !self.told.swap(true, Ordering::Relaxed) {
+                    ui.line(
+                        &ui.st
+                            .dim("phitex watch: a build is running; this comes after it"),
+                    );
+                }
                 return false;
             }
             _ => return false,
@@ -249,7 +254,7 @@ impl Here {
 /// Standard input's keys (a terminal's, one at a time; escape sequences,
 /// the arrows', dropped) or lines, to `tx` (those not answered `here`);
 /// its end quits.
-fn read_keys(tx: &mpsc::Sender<Event>, raw: bool, here: &Here) {
+fn read_keys(tx: &mpsc::Sender<(Instant, Event)>, raw: bool, here: &Here) {
     if raw {
         let mut bytes = std::io::stdin().lock().bytes();
         let mut text = Vec::new();
@@ -279,7 +284,7 @@ fn read_keys(tx: &mpsc::Sender<Event>, raw: bool, here: &Here) {
             text.clear();
             if let Some(k) = k
                 && !here.answer(k)
-                && tx.send(Event::Key(k)).is_err()
+                && tx.send((Instant::now(), Event::Key(k))).is_err()
             {
                 return;
             }
@@ -288,12 +293,12 @@ fn read_keys(tx: &mpsc::Sender<Event>, raw: bool, here: &Here) {
         for l in std::io::stdin().lock().lines() {
             let Ok(l) = l else { break };
             let k = line_key(&l);
-            if !here.answer(k) && tx.send(Event::Key(k)).is_err() {
+            if !here.answer(k) && tx.send((Instant::now(), Event::Key(k))).is_err() {
                 return;
             }
         }
     }
-    let _ = tx.send(Event::Key(Key::Quit));
+    let _ = tx.send((Instant::now(), Event::Key(Key::Quit)));
 }
 
 /// What the watch knows of its last build, for its keys and status line.
@@ -419,7 +424,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         .to_string_lossy()
         .trim_start_matches("./")
         .to_owned();
-    let (tx, rx) = mpsc::channel::<Event>();
+    let (tx, rx) = mpsc::channel::<(Instant, Event)>();
     // (a terminal editor, or an unknown one: the viewer shows the place
     // instead of opening it)
     let editor = crate::editor::Editor::configured(t.editor.as_deref()).unwrap_or_else(|e| {
@@ -438,14 +443,14 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                     let _ = wake
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .send(Event::Asked);
+                        .send((Instant::now(), Event::Asked));
                 }));
                 let wake = Mutex::new(tx.clone());
                 v.on_clients(Box::new(move |n| {
                     let _ = wake
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .send(Event::Clients(n));
+                        .send((Instant::now(), Event::Clients(n)));
                 }));
                 ui.line(&format!(
                     "{}  {}  {}",
@@ -475,6 +480,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
     });
     let raw = !ui.json && keys::raw();
     let building = Arc::new(AtomicBool::new(false));
+    let told = Arc::new(AtomicBool::new(false));
     {
         let tx = tx.clone();
         let here = Here {
@@ -484,6 +490,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 .filter(|_| t.viewer.is_none())
                 .map(|v| v.url().to_owned()),
             building: building.clone(),
+            told: told.clone(),
             target: t.clone(),
         };
         std::thread::Builder::new()
@@ -539,6 +546,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         last.borrow_mut().builds = builds;
         status.take();
         building.store(true, Ordering::Relaxed);
+        told.store(false, Ordering::Relaxed);
         if let Some(v) = &view {
             v.building(true);
         }
@@ -786,6 +794,15 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                     p.push_str(&format!(" · at most {} at once", x.peak_running));
                 }
                 rows.push(("parallel".to_owned(), p));
+                if x.batches > 0 {
+                    rows.push((
+                        "batches".to_owned(),
+                        format!(
+                            "{} · {} of one job · largest {}",
+                            x.batches, x.batches_inline, x.max_batch
+                        ),
+                    ));
+                }
             }
             let head = format!(
                 "{}  {}  {}",
@@ -811,6 +828,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 "engine_ms": x.engine_wall.as_secs_f64() * 1e3,
                 "critical_path": x.critical_path,
                 "peak_running": x.peak_running,
+                "batches": x.batches,
+                "batches_inline": x.batches_inline,
+                "max_batch": x.max_batch,
             })),
             "wall_ms": r.wall.as_secs_f64() * 1e3,
             "errors": r.out.errors,
@@ -876,12 +896,19 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         }
     };
     while let Ok(first) = rx.recv() {
-        let came = Instant::now();
-        // (what came meanwhile is one edit)
+        // (what came meanwhile, a build's time of keystrokes among it, is
+        // one edit, timed from the last of them: the wait a writer feels)
         let mut events = vec![first];
         while let Ok(e) = rx.recv_timeout(Duration::from_millis(2)) {
             events.push(e);
         }
+        let came = events
+            .iter()
+            .filter(|e| matches!(e.1, Event::Files(_) | Event::Asked))
+            .map(|e| e.0)
+            .max()
+            .unwrap_or_else(Instant::now);
+        let events = events.into_iter().map(|e| e.1);
         let mut why = Vec::new();
         let mut again = false;
         for e in events {
