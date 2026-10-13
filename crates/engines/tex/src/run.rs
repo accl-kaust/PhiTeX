@@ -395,6 +395,11 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
+    /// The field `<fam>:<key>` ([`crate::fields::Fam`]).
+    pub(crate) fn keyed(&self, fam: crate::fields::Fam, key: &str) -> Field {
+        self.ops.fields.keyed(self.v, self.cx.values_epoch(), fam, key)
+    }
+
     /// The field of register `n` of kind `r` (as [`Self::reg`]).
     pub(crate) fn reg_field(&self, r: usize, n: i32) -> Field {
         match crate::fields::reg_slot(r, n) {
@@ -470,9 +475,9 @@ impl<'c, 'a> Run<'c, 'a> {
         let v = self.v;
         // a file the job writes: its in-memory value (`wfile:<key>`, a
         // loop-back the writer publishes), never the client's file
-        let w = v.field(&format!("wfile:{key}"));
-        let f = v.field(&format!("file:{key}"));
-        let k = v.field(&format!("wkeys:{key}"));
+        let w = self.keyed(crate::fields::Fam::Wfile, key);
+        let f = self.keyed(crate::fields::Fam::File, key);
+        let k = self.keyed(crate::fields::Fam::Wkeys, key);
         let x = if self.cx.is_loopback(k) {
             // a file whose read-back only defines: it exists (empty) once
             // a line of it defines something ([`Run::read_back`])
@@ -525,8 +530,8 @@ impl<'c, 'a> Run<'c, 'a> {
     /// loop-backs declared.
     pub(crate) fn written_known(&self, name: &str) -> bool {
         let v = self.v;
-        self.cx.is_loopback(v.field(&format!("wfile:{name}")))
-            || self.cx.is_loopback(v.field(&format!("wkeys:{name}")))
+        self.cx.is_loopback(self.keyed(crate::fields::Fam::Wfile, name))
+            || self.cx.is_loopback(self.keyed(crate::fields::Fam::Wkeys, name))
     }
 
     /// `\input` of a file whose read-back only defines (`.aux`): the
@@ -536,16 +541,16 @@ impl<'c, 'a> Run<'c, 'a> {
     /// is such a file.
     pub(crate) fn read_back(&mut self, key: &str) -> R<bool> {
         let v = self.v;
-        let wk = v.field(&format!("wkeys:{key}"));
+        let wk = self.keyed(crate::fields::Fam::Wkeys, key);
         if !self.cx.is_loopback(wk) {
             return Ok(false);
         }
         let keys = self.cx.use_field(wk)?.map(|x| list_of(v, x)).unwrap_or_default();
         for k in keys {
             let name = str_of(v, k);
-            let wd = v.field(&format!("wdef:{name}"));
+            let wd = self.keyed(crate::fields::Fam::Wdef, name);
             if !self.cx.is_loopback(wd) {
-                self.cx.use_env(v.field(&format!("wdefdecl:{name}")))?;
+                self.cx.use_env(self.keyed(crate::fields::Fam::Wdefdecl, name))?;
             }
             if !self.cx.is_loopback(wd) {
                 continue;
@@ -646,7 +651,7 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn written_decl(&mut self, name: &str) -> R<()> {
         let v = self.v;
         if !self.written_known(name) {
-            self.cx.use_env(v.field(&format!("wfiledecl:{name}")))?;
+            self.cx.use_env(self.keyed(crate::fields::Fam::Wfiledecl, name))?;
         }
         Ok(())
     }

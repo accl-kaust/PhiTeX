@@ -1186,7 +1186,7 @@ pub(crate) fn mark_read(r: &mut Run<'_, '_>, kind: &str, n: i32) -> R<Option<Val
         // display): it asks the client to declare its loop-back
         // (`marksdecl:<node>`, answered by `api::Graph::settle`) and
         // waits; never seen inside a run already declared
-        r.cx.use_env(v.field(&format!("marksdecl:{node}")))?;
+        r.cx.use_env(r.keyed(crate::fields::Fam::Marksdecl, &node.to_string()))?;
         if !r.cx.is_loopback(f) {
             return r.get(&mark_field(kind, n));
         }

@@ -358,7 +358,7 @@ impl Run<'_, '_> {
             return Ok(Vec::new());
         }
         let v = self.v;
-        let f = v.field(&format!("pagefx:{j}"));
+        let f = self.keyed(crate::fields::Fam::Pagefx, &j.to_string());
         if !self.cx.is_loopback(f) {
             return Ok(Vec::new());
         }
@@ -531,7 +531,7 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
     if !left.is_empty() {
         let j = r.page_index();
         if j < MAX_PAGES {
-            r.cx.publish(v.field(&format!("pagefx:{j}")), v.list(left));
+            r.cx.publish(r.keyed(crate::fields::Fam::Pagefx, &j.to_string()), v.list(left));
         }
     }
     r.set("deadcycles", v.int(0), true);
