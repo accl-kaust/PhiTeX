@@ -59,9 +59,6 @@ pub(crate) struct Ops {
     /// The page chain's loop-backs as read and published in the current
     /// evaluation: the refuted guesses ([`crate::Stats`]).
     pub lblog: std::sync::Arc<std::sync::Mutex<crate::page::LbLog>>,
-    /// The evaluation counter: `pgref` counts refuted rounds of one
-    /// evaluation only.
-    pub eval: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// A level of the input stack.
