@@ -17,7 +17,7 @@ are chosen.
 | `--ink-2` | `#4a4a48` | `#a9a9a4` | secondary text |
 | `--ink-3` | `#8a8a86` | `#6e6e6a` | captions, crop marks |
 | `--rule` | `#c9c9c5` | `#3a3a38` | hairlines |
-| `--mark` | `#d71920` | `#ff4a3d` | the proofreader's marks: errors, changes, the step running, focus |
+| `--mark` | `#d71920` | `#ff4a3d` | the proofreader's marks: errors, the step running, focus |
 | `--caution` | `#8a5a00` | `#d9a441` | warnings |
 
 Neutral greys, never warm cream or blue-grey. `--mark` is the only accent,
@@ -37,8 +37,6 @@ and it marks; it never decorates.
 - Square corners (0, at most 2 px); hairline rules (1 px) instead of
   shadows; overlays are flat sheets with a 1 px ink rule.
 - Pages sit on `--paper-2` with crop marks at their corners, no shadow.
-- A page an edit changed gets a change bar in its left margin (2 px,
-  `--mark`), fading in 1.6 s: a revised manual's revision bar.
 - Errors: a red rule, a straight red underline under the culprit, the
   severity in spaced capitals. No pills, no icons in circles.
 - Progress: a 1 px rule; the carriage runs while the length is unknown.
@@ -47,8 +45,7 @@ and it marks; it never decorates.
 
 ## Motion
 
-Only where it means something: the change bar, the progress rule, a
-number counting. Linear, 150 ms to 1.6 s; no springs, bounces, glows,
+Only where it means something: the progress rule, a number counting. Linear, 150 ms to 1.6 s; no springs, bounces, glows,
 scale or blur. `prefers-reduced-motion` stops all of it.
 
 ## Words
