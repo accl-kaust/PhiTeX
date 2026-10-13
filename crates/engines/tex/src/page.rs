@@ -267,8 +267,10 @@ impl Run<'_, '_> {
             // the job-written files' order: an immediate write's entry
             // where its marker is, page `j` where it fires (`wplan`)
             plan.extend(out.writes.iter().copied());
-            // the flush points on this page: the state after it (after
-            // the page before, if this one does not fire)
+            // the flush points met folding this page: each follows the
+            // penalty the page before broke at (§1005 fires there, so
+            // the marker after it opens this page): the state after
+            // page j-1 (none before the first page: UNIT)
             if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
                 eprintln!(
                     "aux-trace: plan page {j}: fired {} flushes {:?} stuck {}",
@@ -278,11 +280,7 @@ impl Run<'_, '_> {
                 );
             }
             for &(n, k) in &out.flushes {
-                let after = if out.fired.is_some() {
-                    i64::try_from(j).unwrap_or(0)
-                } else {
-                    i64::try_from(j).unwrap_or(0) - 1
-                };
+                let after = i64::try_from(j).unwrap_or(0) - 1;
                 flushplan.push(v.list(vec![v.int(n), v.int(k), v.int(after)]));
             }
             for &node in &out.passed {
