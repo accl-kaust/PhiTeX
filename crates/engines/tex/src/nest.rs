@@ -139,8 +139,14 @@ impl Run<'_, '_> {
         if l.group != 0 {
             let tail: Vec<(Field, ValueId, Locality)> =
                 self.defs.split_off(l.defs_len.min(self.defs.len()));
+            for d in &tail {
+                if let Some(ix) = self.def_ix.get_mut(&d.0) {
+                    ix.pop();
+                }
+            }
             for d in tail {
                 if d.2 == Locality::Global {
+                    self.def_ix.entry(d.0).or_default().push(self.defs.len());
                     self.defs.push(d);
                 }
             }
