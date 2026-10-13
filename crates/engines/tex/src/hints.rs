@@ -1870,9 +1870,15 @@ fn by_id() -> &'static Cache<u64> {
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// The regime of a file read by `\input`: its text value `id`, named
+/// `name`.
+pub(crate) fn file_kind_of(v: &Values, id: ValueId, name: ValueId) -> FileKind {
+    kind_of(&str_of(v, id), FileKind::from_path(&str_of(v, name)))
+}
+
 /// The analysis of a file read by `\input`: its text value `id`, named
 /// `name`.
-fn file_hints(v: &Values, id: ValueId, name: ValueId) -> Arc<TextHints> {
+pub(crate) fn file_hints(v: &Values, id: ValueId, name: ValueId) -> Arc<TextHints> {
     let known = by_id()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)

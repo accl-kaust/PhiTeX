@@ -628,7 +628,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.frames.iter().any(|f| match f {
             Frame::Toks(t, p) => *p < t.len(),
             Frame::Src(s) => s.loc < s.buf.len() || (s.ends && s.endch < -1),
-            Frame::File(f) => f.has_lines(),
+            Frame::File(f) => f.has_lines() && (self.open_span() || !self.doc_file(f)),
         })
     }
 
@@ -659,7 +659,19 @@ impl<'c, 'a> Run<'c, 'a> {
                     self.frames.pop_front();
                     self.own_frames = self.own_frames.saturating_sub(1);
                 }
-                Frame::File(f) => {
+                Frame::File(_) => {
+                    // a document file's lines are paragraph-region
+                    // children ([`Run::leftover`]) unless a span is open
+                    if let Some(Frame::File(f)) = self.frames.front()
+                        && f.has_lines()
+                        && !self.open_span()
+                        && self.doc_file(f)
+                    {
+                        return Ok(None);
+                    }
+                    let Some(Frame::File(f)) = self.frames.front_mut() else {
+                        unreachable!()
+                    };
                     if f.has_lines() {
                         let at = f.byte_pos();
                         let name = f.name;
@@ -677,6 +689,12 @@ impl<'c, 'a> Run<'c, 'a> {
                 }
             }
         }
+    }
+
+    /// Whether a file `\input` opened is a document's (its rest becomes
+    /// paragraph regions), not a format's (run line by line).
+    fn doc_file(&self, f: &FileRest) -> bool {
+        crate::hints::file_kind_of(self.v, f.id, f.name) == phitex_source::pass::FileKind::Document
     }
 
     /// `get_next` on the current line (§343–§356); `None` when the line
@@ -1138,7 +1156,18 @@ impl<'c, 'a> Run<'c, 'a> {
                     if !run.is_empty() {
                         out.push(node(std::mem::take(&mut run)));
                     }
-                    if f.has_lines() {
+                    if f.has_lines() && self.doc_file(f) {
+                        let text = str_of(v, f.id);
+                        let t = crate::hints::file_hints(v, f.id, f.name);
+                        for &(s, e) in &t.slices {
+                            if e <= f.off {
+                                continue;
+                            }
+                            let a = s.max(f.off);
+                            let starts = a == 0 || text.as_bytes()[a - 1] == b'\n';
+                            out.push(slice_args_in_file(v, &text[a..e], starts, f.name, a));
+                        }
+                    } else if f.has_lines() {
                         let fr = v.list(vec![
                             tag_f,
                             f.id,
@@ -1491,6 +1520,49 @@ pub(crate) fn line_args(v: &Values, line: &str) -> Vec<ValueId> {
         v.int(3),
     ]);
     vec![v.list(vec![frame]), v.int(1)]
+}
+
+/// [`slice_args`] for a piece of a file `\input` read, beginning at
+/// byte `at` of the file named `name`: every segment carries its origin
+/// `(name, offset)`; the top is 0.
+pub(crate) fn slice_args_in_file(
+    v: &Values,
+    text: &str,
+    starts_line: bool,
+    name: ValueId,
+    at: usize,
+) -> Vec<ValueId> {
+    let mut frames = Vec::new();
+    let mut starts = starts_line;
+    let mut rest = text;
+    let mut pos = at;
+    while !rest.is_empty() {
+        let (seg, ends, next) = match rest.find('\n') {
+            Some(k) => (&rest[..k], true, &rest[k + 1..]),
+            None => (rest, false, ""),
+        };
+        let used = rest.len() - next.len();
+        let seg: String = if ends {
+            seg.trim_end_matches([' ', '\t', '\r']).to_owned()
+        } else {
+            seg.to_owned()
+        };
+        let state = if starts { NEW_LINE } else { MID_LINE };
+        let flags = i64::from(starts) | (i64::from(ends) << 1);
+        frames.push(v.list(vec![
+            v.str("s"),
+            v.str(&seg),
+            v.int(i64::from(state)),
+            v.int(-2),
+            v.int(flags),
+            name,
+            v.int(i64::try_from(pos).unwrap_or(0)),
+        ]));
+        starts = ends;
+        rest = next;
+        pos += used;
+    }
+    vec![v.list(frames), v.int(0)]
 }
 
 /// The text of a node from the document: a slice of its lines, as
