@@ -197,6 +197,10 @@ impl Operation for Exec {
                 let tokens = matches!(fs.first(), Some(crate::run::Frame::Toks(..)));
                 crate::hints::count(r, if tokens { 5 } else { 6 });
                 r.frames.extend(fs);
+                if let Some((c, k)) = crate::run::carried_conds(r.v, &args) {
+                    r.conds = c;
+                    r.if_codes = k;
+                }
                 // the hint's assumptions, against what is in force here
                 if let Some(m) = crate::hints::verify(r, &hint)? {
                     r.log("error", &format!("hint regime violated: {m}"))?;
