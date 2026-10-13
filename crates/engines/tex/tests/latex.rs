@@ -75,11 +75,12 @@ fn options(name: &str, dir: &Path, comment: &str, fixpoint: bool, pdf: bool) -> 
 fn report(name: &str, b: &Build) -> String {
     let s = &b.stats;
     let mut out = format!(
-        "{name}: {} nodes run, {} runs, {} stops, {} gated, {} live, {} rounds, {} loop rounds, {} waits, starved {}, wall {:?}\n  waits by kind {:?}",
+        "{name}: {} nodes run, {} runs, {} stops, {} gated, ready mean {:.2}, {} live, {} rounds, {} loop rounds, {} waits, starved {}, wall {:?}\n  waits by kind {:?}",
         s.nodes_run,
         s.runs,
         s.stops,
         s.gated,
+        s.ready_mean(),
         s.live,
         s.rounds,
         s.loop_rounds,
