@@ -37,7 +37,7 @@ const STATIC: &[&str] = &[
     "deadcycles",
     "diags",
     "dvicomment",
-    "curfont",
+    "font",
     "fontcount",
     "ifstack",
     "inspen",
@@ -229,6 +229,91 @@ pub(crate) const BOX0: usize = CODE0 + 5 * 256;
 pub(crate) const STATIC0: usize = BOX0 + 256;
 /// The number of fixed locations (the old name: slots).
 pub(crate) const NSLOT: usize = STATIC0 + STATIC.len();
+/// The index of `n` in [`STATIC`] (at compile time).
+const fn static_index(n: &str) -> usize {
+    let n = n.as_bytes();
+    let mut i = 0;
+    while i < STATIC.len() {
+        let s = STATIC[i].as_bytes();
+        if s.len() == n.len() {
+            let mut k = 0;
+            while k < n.len() && s[k] == n[k] {
+                k += 1;
+            }
+            if k == n.len() {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    panic!("not a state cell")
+}
+
+/// The locations of state cells a command reads on its path.
+#[allow(clippy::cast_possible_truncation, dead_code)]
+pub(crate) mod cell {
+    use super::{BOX0, STATIC0, static_index};
+    /// Box register 255.
+    pub(crate) const BOX255: u32 = (BOX0 + 255) as u32;
+    pub(crate) const AFTERTOKEN: u32 = (STATIC0 + static_index("aftertoken")) as u32;
+    pub(crate) const ALIGN_OPEN: u32 = (STATIC0 + static_index("align:open")) as u32;
+    pub(crate) const ALIGN_STATE: u32 = (STATIC0 + static_index("align:state")) as u32;
+    pub(crate) const BADNESS: u32 = (STATIC0 + static_index("badness")) as u32;
+    pub(crate) const DEADCYCLES: u32 = (STATIC0 + static_index("deadcycles")) as u32;
+    pub(crate) const DIAGS: u32 = (STATIC0 + static_index("diags")) as u32;
+    pub(crate) const DVICOMMENT: u32 = (STATIC0 + static_index("dvicomment")) as u32;
+    pub(crate) const FONT: u32 = (STATIC0 + static_index("font")) as u32;
+    pub(crate) const FONTCOUNT: u32 = (STATIC0 + static_index("fontcount")) as u32;
+    pub(crate) const IFSTACK: u32 = (STATIC0 + static_index("ifstack")) as u32;
+    pub(crate) const INSPEN: u32 = (STATIC0 + static_index("inspen")) as u32;
+    pub(crate) const INTERACTION: u32 = (STATIC0 + static_index("interaction")) as u32;
+    pub(crate) const ITEMS: u32 = (STATIC0 + static_index("items")) as u32;
+    pub(crate) const JOBNAME: u32 = (STATIC0 + static_index("jobname")) as u32;
+    pub(crate) const LINES: u32 = (STATIC0 + static_index("lines")) as u32;
+    pub(crate) const LOG: u32 = (STATIC0 + static_index("log")) as u32;
+    pub(crate) const MARK_BOT: u32 = (STATIC0 + static_index("mark:bot")) as u32;
+    pub(crate) const MARK_TOP: u32 = (STATIC0 + static_index("mark:top")) as u32;
+    pub(crate) const MARKCLASSES: u32 = (STATIC0 + static_index("markclasses")) as u32;
+    pub(crate) const NEEDS: u32 = (STATIC0 + static_index("needs")) as u32;
+    pub(crate) const PAGEHASH: u32 = (STATIC0 + static_index("pagehash")) as u32;
+    pub(crate) const PAGES: u32 = (STATIC0 + static_index("pages")) as u32;
+    pub(crate) const PARSHAPE: u32 = (STATIC0 + static_index("parshape")) as u32;
+    pub(crate) const PARTOKEN: u32 = (STATIC0 + static_index("partoken")) as u32;
+    pub(crate) const PATTERNS: u32 = (STATIC0 + static_index("patterns")) as u32;
+    pub(crate) const PDF_CARRY: u32 = (STATIC0 + static_index("pdf:carry")) as u32;
+    pub(crate) const PDF_COLORSTACKS: u32 = (STATIC0 + static_index("pdf:colorstacks")) as u32;
+    pub(crate) const PDF_EXACT: u32 = (STATIC0 + static_index("pdf:exact")) as u32;
+    pub(crate) const PDF_FIXED: u32 = (STATIC0 + static_index("pdf:fixed")) as u32;
+    pub(crate) const PDF_FONTCOUNT: u32 = (STATIC0 + static_index("pdf:fontcount")) as u32;
+    pub(crate) const PDF_LASTANNOT: u32 = (STATIC0 + static_index("pdf:lastannot")) as u32;
+    pub(crate) const PDF_LASTLINK: u32 = (STATIC0 + static_index("pdf:lastlink")) as u32;
+    pub(crate) const PDF_LASTOBJ: u32 = (STATIC0 + static_index("pdf:lastobj")) as u32;
+    pub(crate) const PDF_LASTPH: u32 = (STATIC0 + static_index("pdf:lastph")) as u32;
+    pub(crate) const PDF_LASTXFORM: u32 = (STATIC0 + static_index("pdf:lastxform")) as u32;
+    pub(crate) const PDF_LASTXIMAGE: u32 = (STATIC0 + static_index("pdf:lastximage")) as u32;
+    pub(crate) const PDF_LASTXIMAGECOLORDEPTH: u32 =
+        (STATIC0 + static_index("pdf:lastximagecolordepth")) as u32;
+    pub(crate) const PDF_LASTXIMAGEPAGES: u32 =
+        (STATIC0 + static_index("pdf:lastximagepages")) as u32;
+    pub(crate) const PDF_LASTXPOS: u32 = (STATIC0 + static_index("pdf:lastxpos")) as u32;
+    pub(crate) const PDF_LASTYPOS: u32 = (STATIC0 + static_index("pdf:lastypos")) as u32;
+    pub(crate) const PDF_MAPS: u32 = (STATIC0 + static_index("pdf:maps")) as u32;
+    pub(crate) const PDF_MATCH: u32 = (STATIC0 + static_index("pdf:match")) as u32;
+    pub(crate) const PDF_OBJNUM: u32 = (STATIC0 + static_index("pdf:objnum")) as u32;
+    pub(crate) const PDF_OPENACTION: u32 = (STATIC0 + static_index("pdf:openaction")) as u32;
+    pub(crate) const PDF_PIECES: u32 = (STATIC0 + static_index("pdf:pieces")) as u32;
+    pub(crate) const PDF_RANDOM: u32 = (STATIC0 + static_index("pdf:random")) as u32;
+    pub(crate) const PDF_RELAXED: u32 = (STATIC0 + static_index("pdf:relaxed")) as u32;
+    pub(crate) const PDF_RETVAL: u32 = (STATIC0 + static_index("pdf:retval")) as u32;
+    pub(crate) const PDF_SPACEFONT: u32 = (STATIC0 + static_index("pdf:spacefont")) as u32;
+    pub(crate) const PDF_STATE: u32 = (STATIC0 + static_index("pdf:state")) as u32;
+    pub(crate) const PDF_TRAILERID: u32 = (STATIC0 + static_index("pdf:trailerid")) as u32;
+    pub(crate) const PDF_XFORMCOUNT: u32 = (STATIC0 + static_index("pdf:xformcount")) as u32;
+    pub(crate) const PDFDATE: u32 = (STATIC0 + static_index("pdfdate")) as u32;
+    pub(crate) const STREAMS: u32 = (STATIC0 + static_index("streams")) as u32;
+    pub(crate) const WRITES: u32 = (STATIC0 + static_index("writes")) as u32;
+}
+
 /// The meanings of active characters 0–255.
 pub(crate) const MEAN_ACTIVE: usize = NSLOT;
 /// The meanings of control sequences, by number.

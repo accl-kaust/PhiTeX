@@ -465,7 +465,7 @@ impl Run<'_, '_> {
 
     /// The `em` and `ex` of the current font (§558).
     fn font_param_cur(&mut self, k: i32) -> R<i32> {
-        let f = self.int("curfont")?;
+        let f = self.cint(crate::fields::cell::FONT)?;
         self.font_dimen(f, k)
     }
 
@@ -535,7 +535,7 @@ impl Run<'_, '_> {
     pub(crate) fn scan_font_ident(&mut self) -> R<i64> {
         self.skip_blanks_x()?;
         Ok(match self.cur.cmd {
-            cmd::DEF_FONT => self.int("curfont")?,
+            cmd::DEF_FONT => self.cint(crate::fields::cell::FONT)?,
             cmd::SET_FONT => i64::from(self.cur.chr),
             cmd::DEF_FAMILY => {
                 let m = self.cur.chr;
@@ -565,7 +565,7 @@ impl Run<'_, '_> {
         }
         let count = self.int32(&format!("fdn:{f}"))?;
         if n > count {
-            let last = self.int("fontcount")?;
+            let last = self.cint(crate::fields::cell::FONTCOUNT)?;
             if f < last || f == 0 {
                 return Ok(None);
             }
@@ -657,9 +657,9 @@ impl Run<'_, '_> {
             cmd::SET_PAGE_INT => {
                 // §419
                 IVal::Int(if m == 0 {
-                    self.int32("deadcycles")?
+                    self.int_loc(crate::fields::cell::DEADCYCLES)?
                 } else {
-                    self.int32("inspen")?
+                    self.int_loc(crate::fields::cell::INSPEN)?
                 })
             }
             cmd::SET_PAGE_DIMEN => {
@@ -668,7 +668,7 @@ impl Run<'_, '_> {
             }
             cmd::SET_SHAPE => {
                 // §423
-                let x = self.get("parshape")?;
+                let x = self.get_loc(crate::fields::cell::PARSHAPE)?;
                 IVal::Int(x.map_or(0, |x| {
                     i32::try_from(crate::val::list_of(self.v, x).len() / 2).unwrap_or(0)
                 }))

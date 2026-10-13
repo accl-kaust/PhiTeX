@@ -547,25 +547,19 @@ fn pdflatex_hello_tounicode() {
     }
 }
 
-/// `pdflatex` on hello + 30 paragraphs (`pdfdocs/paras30.tex`): the
-/// document environment's body is sliced into its paragraphs, one node
-/// each (`\begin{document}` leaves its group to the engine as the scope
-/// they run in); the PDF equals pdfTeX's cold and after a one-word edit,
-/// which reruns a few document nodes. Run with `PHITEX_DOC_SCOPE=1`.
-#[test]
-#[ignore = "heavy: the LaTeX format"]
-fn latex_paragraph_nodes() {
-    let dir = common::fixtures().join("latex/pdfdocs");
-    let src = common::read(&dir.join("paras30.tex"));
-    let want = std::fs::read(common::fixtures().join("latex/pdf/paras30.pdf")).expect("the oracle");
-    let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/cache/pdflatex.fmt");
-    let opts = || Options {
-        prelude_bytes: std::fs::read(&cache).ok(),
-        time_limit: None,
-        ..options("paras30", &dir, "", false, true)
-    };
+/// The `pdflatex` format, cached under `target/cache` across tests.
+fn pdf_cache() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/cache/pdflatex.fmt")
+}
+
+/// A `pdfdocs` document built cold from `dir` (the format cached):
+/// byte-identical to its oracle, its document nodes counted.
+fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
+    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
+        .expect("the oracle");
+    let cache = pdf_cache();
     let cached = cache.exists();
-    let mut b = common::build(opts(), Some(&prelude(true)), &src);
+    let b = common::build(pdf_opts(name, dir), Some(&prelude(true)), src);
     if !cached {
         let _ = std::fs::create_dir_all(cache.parent().expect("dir"));
         if let Some(bytes) = b.export_prelude() {
@@ -574,45 +568,49 @@ fn latex_paragraph_nodes() {
     }
     let regions = b.stats.nodes_text_frames;
     eprintln!(
-        "cold: {regions} document nodes, {} pages; {}",
+        "cold {name}: {regions} document nodes, {} pages; {}",
         b.pages().len(),
-        report("paras30", &b)
+        report(name, &b)
     );
     if let Ok(d) = std::env::var("PHITEX_GATE_OUT") {
-        let _ = std::fs::write(format!("{d}/paras30.pdf"), b.output().0);
-        let _ = std::fs::write(format!("{d}/paras30.log"), b.output().1);
+        let _ = std::fs::write(format!("{d}/{name}.pdf"), b.output().0);
+        let _ = std::fs::write(format!("{d}/{name}.log"), b.output().1);
     }
     for d in b.diagnostics() {
         eprintln!("{d:?}");
     }
     if let Some(d) = common::first_difference(&b.output().0, &want) {
-        panic!("paras30.pdf cold: {d}");
+        panic!("{name}.pdf cold: {d}");
     }
-    assert!(regions >= 30, "{regions} document nodes for 30 paragraphs");
-    let at = src
-        .find("Paragraph 17 of the text: the quick")
-        .expect("p17")
-        + 35;
-    let new = format!("{}quack{}", &src[..at], &src[at + 5..]);
-    let t0 = std::time::Instant::now();
-    b.edit(&new);
+    (b, regions)
+}
+
+fn pdf_opts(name: &str, dir: &Path) -> Options {
+    Options {
+        prelude_bytes: std::fs::read(pdf_cache()).ok(),
+        time_limit: None,
+        ..options(name, dir, "", false, true)
+    }
+}
+
+/// After an edit: the build equals a cold one of the new text, and it
+/// ran at most `k` document nodes besides the page fold, the page
+/// steps and the writer.
+fn edit_check(name: &str, b: &Build, cold: &Build, k: u64) {
     let pages = b.pages().len() as u64;
-    let s = &b.stats;
     eprintln!(
-        "edit {:?}: {} nodes run, {} runs, {} pages; {}",
-        t0.elapsed(),
-        s.nodes_run,
-        s.runs,
-        pages,
-        report("paras30", &b)
-    );
-    let cold = common::build(opts(), Some(&prelude(true)), &new);
-    assert_eq!(b.output().0, cold.output().0, "edit differs from cold");
-    assert!(
-        b.stats.nodes_run <= 3 + pages + 2,
-        "edit reran {} nodes ({} pages)",
+        "edit {name}: {} nodes run, {} runs, {pages} pages; {}",
         b.stats.nodes_run,
-        pages
+        b.stats.runs,
+        report(name, b)
+    );
+    if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+        panic!("{name}: edit differs from cold: {d}");
+    }
+    assert!(
+        b.stats.nodes_run <= k + pages + 2,
+        "{name}: edit reran {} nodes ({pages} pages)",
+        b.stats.nodes_run
     );
 }
 
@@ -652,4 +650,87 @@ fn latex_hello_warm() {
         common::first_difference(&w.output().0, &want).is_none(),
         "differs from latex"
     );
+}
+
+/// The paragraphs of a LaTeX body: its blank-line-separated chunks
+/// between `\begin{document}` and `\end{document}`.
+fn paragraphs(src: &str) -> u64 {
+    let a = src.find("\\begin{document}").map_or(0, |a| a + 16);
+    let e = src.find("\\end{document}").unwrap_or(src.len());
+    src[a..e]
+        .split("\n\n")
+        .filter(|p| !p.trim().is_empty())
+        .count() as u64
+}
+
+/// The text with the five bytes after `marker` replaced by `quack`.
+fn quack(src: &str, marker: &str) -> String {
+    let at = src.find(marker).expect("the marker") + marker.len();
+    format!("{}quack{}", &src[..at], &src[at + 5..])
+}
+
+/// `pdflatex` on hello + 30 paragraphs (`pdfdocs/paras30.tex`): the
+/// document environment's body is sliced into its paragraphs, one node
+/// each (`\begin{document}`'s region leaves its group to the engine as
+/// the scope they run in); the PDF equals pdfTeX's cold and after a
+/// one-word edit, which reruns a few document nodes.
+#[test]
+fn latex_paragraph_nodes() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join("paras30.tex"));
+    let (mut b, regions) = cold_nodes("paras30", &dir, &src);
+    assert!(regions >= 30, "{regions} document nodes for 30 paragraphs");
+    let new = quack(&src, "Paragraph 17 of the text: the quick ");
+    b.edit(&new);
+    let cold = common::build(pdf_opts("paras30", &dir), Some(&prelude(true)), &new);
+    edit_check("paras30", &b, &cold, 3);
+}
+
+/// `pdflatex` on an article with an abstract, two sections, itemize,
+/// enumerate, a theorem and a proof (amsthm), a figure with a caption
+/// and a quotation (`pdfdocs/envs.tex`, 4 pages): every paragraph end
+/// is a cut, inside environments too (an environment's `\begin` leaves
+/// its group to the engine as a scope, its `\end` closes it); the PDF
+/// equals pdfTeX's cold and after an edit inside the itemize.
+#[test]
+fn latex_environments() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join("envs.tex"));
+    let (mut b, regions) = cold_nodes("envs", &dir, &src);
+    let pars = paragraphs(&src);
+    eprintln!("envs: {regions} document nodes for {pars} paragraphs");
+    assert!(
+        regions >= pars,
+        "{regions} document nodes for {pars} paragraphs"
+    );
+    let new = quack(&src, "Item 3 of the list: the quick ");
+    b.edit(&new);
+    let cold = common::build(pdf_opts("envs", &dir), Some(&prelude(true)), &new);
+    edit_check("envs", &b, &cold, 4);
+}
+
+/// `pdflatex` on a main file that `\input`s one chapter and
+/// `\include`s another (`pdfdocs/inputs.tex`, `chap1.tex`,
+/// `chap2.tex`; `\include` goes through `\@input` and its own `.aux`):
+/// the chapters' paragraphs are regions; the PDF equals pdfTeX's cold
+/// and after an edit in `chap1.tex`.
+#[test]
+fn latex_input_include() {
+    let src_dir = common::fixtures().join("latex/pdfdocs");
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-input-include");
+    let _ = std::fs::create_dir_all(&dir);
+    for f in ["inputs.tex", "chap1.tex", "chap2.tex"] {
+        std::fs::copy(src_dir.join(f), dir.join(f)).expect("copy");
+    }
+    let src = common::read(&dir.join("inputs.tex"));
+    let (mut b, regions) = cold_nodes("inputs", &dir, &src);
+    eprintln!("inputs: {regions} document nodes for 20 chapter paragraphs");
+    assert!(regions >= 10, "{regions} document nodes: chap1 not sliced");
+    let chap1 = common::read(&dir.join("chap1.tex"));
+    let new = quack(&chap1, "Paragraph 5 of chapter one: the quick ");
+    b.edit_file("chap1.tex", Some(new.as_bytes()));
+    std::fs::write(dir.join("chap1.tex"), &new).expect("write");
+    let cold = common::build(pdf_opts("inputs", &dir), Some(&prelude(true)), &src);
+    let _ = std::fs::write(dir.join("chap1.tex"), &chap1);
+    edit_check("inputs", &b, &cold, 4);
 }

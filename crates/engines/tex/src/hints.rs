@@ -903,8 +903,8 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             *x = cur;
         }
     }
-    // inside a brace group or a `\begingroup` pair opened at depth 0:
-    // the slice goes on to its end (a group is never split between nodes)
+    // inside a brace group of the text opened at depth 0: the slice goes
+    // on to its end (a brace group of the text is never split)
     let mut inside = vec![false; n];
     for (k, a) in p.atoms.iter().enumerate() {
         // (a brace knows its mate's atom index; `p.braces` indexes tokens)
@@ -914,22 +914,11 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             }
         }
     }
-    for g in &p.groups {
-        // (the document environment: its `\\begin` opens the scope the
-        // body's regions run in, an engine scope, so its body is sliced
-        // like top-level text; `\\begin{document}` and `\\end{document}`
-        // are slices of their own)
-        if doc_scope() && matches!(&g.kind, pass::GroupKind::Env(e) if e == "document") {
-            continue;
-        }
-        if let (Some(o), Some(c)) = (g.open, g.close)
-            && depth.get(o) == Some(&0)
-        {
-            for x in inside.iter_mut().take(c + 1).skip(o + 1) {
-                *x = true;
-            }
-        }
-    }
+    // (a `\\begingroup`...`\\endgroup` pair or an environment is no
+    // bar to a cut: a paragraph end inside it at brace depth 0 of the
+    // text is one, the region that leaves the group open leaves it to the
+    // engine as a scope and the one that closes it closes that scope,
+    // `Run::run_all`, `Run::close_group`)
     // a control sequence at depth 0 and its `[...]`/`{...}` arguments
     // (with the spaces between): one slice; a loading command's are
     // never cut and end a paragraph before it
@@ -1884,7 +1873,7 @@ impl Analysis<'_> {
             && !self.after_global(a)
             && let Some(st) = &mut b.state
         {
-            st.retain(|h| h != "curfont");
+            st.retain(|h| h != "font");
         }
         b.no_scope = ok && self.no_scope(a);
         if ok {
@@ -2079,7 +2068,7 @@ impl Analysis<'_> {
     /// §1100, §789); an alias is its target's class.
     fn defined_state(&self, name: &str, may_start_par: bool, st: &mut Option<Vec<String>>) {
         match self.shape(name) {
-            Some(pass::Shape::Quantity('f')) => add_head(st, "curfont"),
+            Some(pass::Shape::Quantity('f')) => add_head(st, "font"),
             // (a register's name assigns that register, §1224: its own
             // family; the value is scanned with expansion, §498, and
             // `\\afterassignment`'s token runs, §1269; never a parameter)
@@ -2556,16 +2545,6 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         {
             b.no_scope = true;
         }
-        // (`\\begin{document}`: its run leaves the environment's group
-        // open as the engine scope the body runs in, `Run::leave_scope`;
-        // what it defines is the document class's business: unbounded)
-        if kind == FileKind::Document && opens_document(&text[s..e]) {
-            let mut x = Hint::any("opens the document scope", &text[s..e]).encode();
-            x.push_str(OPENS_SCOPE);
-            slice_hints.push(Arc::from(x));
-            pending.clear();
-            continue;
-        }
         let excerpt = short(&text[s..text.len().min(s + 40)]);
         // (a font selection, `\\bf`, that only an argument or a group
         // inside the slice makes is local to that group: the slice
@@ -2600,6 +2579,16 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         // slice that may set one and ends no paragraph after it leaves
         // the reset pending, and the next slice ending a paragraph
         // declares it)
+        // (LaTeX's paragraph hooks assign `\\everypar` at every
+        // paragraph, the value it has: no definition. A heading's
+        // `\\@afterheading`, a list's `\\item` and an environment's
+        // end (`\\@doendpe`) set another, which the next paragraph
+        // consumes, §1091: a slice calling one declares it)
+        if sets_everypar(&text[s..e])
+            && let Some(b) = h.bound.as_mut().or(h.guess.as_mut())
+        {
+            add_head(&mut b.state, "param:everypar");
+        }
         let mut out = pending.clone();
         let mut ends = false;
         let k0 = t.starts.partition_point(|&x| x < s);
@@ -2999,7 +2988,7 @@ fn fragment_context(b: &mut Bound) {
 /// The heads a font switch sets (§1217, §1228 `\\fam`): local to the
 /// group it runs in, so a slice declares them only for a switch outside
 /// every brace group ([`Analysis::selects_outside`]).
-const GROUP_LOCAL: [&str; 2] = ["curfont", "param:fam"];
+const GROUP_LOCAL: [&str; 2] = ["font", "param:fam"];
 
 /// Plain TeX's catcode of an ASCII byte (`@` a letter when `at`).
 fn plain_catcode(b: u8, at: bool) -> u8 {
@@ -3048,27 +3037,26 @@ pub fn set_hints_enabled(on: bool) {
     OFF.store(!on, Ordering::Relaxed);
 }
 
-/// The mark a slice hint ends with when the slice opens the scope the
-/// rest of the document runs in (`\\begin{document}`).
-const OPENS_SCOPE: &str = "\x1eO";
-
-/// Whether the document environment's body is sliced into regions
-/// under the scope `\\begin{document}` leaves open (`PHITEX_DOC_SCOPE=1`;
-/// off until its PDF is byte-identical, test `latex_paragraph_nodes`).
-fn doc_scope() -> bool {
-    crate::exec::env_flag!("PHITEX_DOC_SCOPE")
-}
-
-fn opens_document(slice: &str) -> bool {
-    doc_scope() && slice.trim_start().starts_with("\\begin{document}")
-}
-
-/// Whether the node's slice opens the document's scope: its run leaves
-/// the one group it ends in open to the engine (`Run::leave_scope`).
-pub(crate) fn opens_scope(v: &Values, args: &[ValueId]) -> bool {
-    args.iter().skip(2).any(|&h| {
-        matches!(&*v.get(h), Value::Str(t) if t.starts_with("A\x1e") && t.ends_with(OPENS_SCOPE))
-    })
+/// Whether a slice calls a command that leaves `\\everypar` other
+/// than LaTeX's paragraph hooks leave it: a heading (`\\@afterheading`),
+/// a list item, an environment's begin or end (`\\@doendpe`), a title.
+fn sets_everypar(slice: &str) -> bool {
+    const SETS: &[&str] = &[
+        "\\section",
+        "\\subsection",
+        "\\subsubsection",
+        "\\paragraph",
+        "\\subparagraph",
+        "\\chapter",
+        "\\part",
+        "\\@afterheading",
+        "\\@startsection",
+        "\\item",
+        "\\begin",
+        "\\end",
+        "\\maketitle",
+    ];
+    SETS.iter().any(|c| slice.contains(c))
 }
 
 /// Whether the node's text says its command opens and closes no scope.

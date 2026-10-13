@@ -92,10 +92,14 @@ impl Run<'_, '_> {
         self.aopen > 0
     }
 
-    /// `align_state` (§309): run-local, a node begins outside every
-    /// alignment (§324).
-    fn astate(&self) -> i64 {
-        self.astate.unwrap_or(1_000_000)
+    fn astate(&mut self) -> i64 {
+        if let Some(s) = self.astate {
+            return s;
+        }
+        // (run-local: a node begins outside every alignment, §324)
+        let s = 1_000_000;
+        self.astate = Some(s);
+        s
     }
 
     pub(crate) fn set_astate(&mut self, s: i64) {
@@ -103,12 +107,10 @@ impl Run<'_, '_> {
     }
 
     /// The end of a u template (§324): `align_state` becomes 0.
-    #[allow(clippy::unnecessary_wraps)]
-    pub(crate) fn align_u_end(&mut self) -> R<()> {
+    pub(crate) fn align_u_end(&mut self) {
         if self.align_open() && self.astate() > 500_000 {
             self.set_astate(0);
         }
-        Ok(())
     }
 
     /// §342, §347, §357 for `cur`: braces count in `align_state`; a tab

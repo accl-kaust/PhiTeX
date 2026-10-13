@@ -183,6 +183,11 @@ pub(crate) struct Src {
     pub rescanned: bool,
 }
 
+/// The commands an alignment entry watches for (§342, §347, §357):
+/// braces, `&` and `\cr`, as a bit mask by command code.
+const ALIGN_CMDS: u128 =
+    1 << cmd::LEFT_BRACE | 1 << cmd::RIGHT_BRACE | 1 << cmd::TAB_MARK | 1 << cmd::CAR_RET;
+
 pub(crate) const MID_LINE: u8 = 0;
 pub(crate) const SKIP_BLANKS: u8 = 1;
 pub(crate) const NEW_LINE: u8 = 2;
@@ -193,10 +198,21 @@ pub(crate) struct Cur {
     pub tok: Tok,
     pub cmd: u8,
     pub chr: i32,
-    pub mean: Mean,
+    /// The meaning of a control sequence or active character (a
+    /// character token's is [`Cur::mean`]'s, never stored here).
+    pub cs_mean: Mean,
 }
 
 impl Cur {
+    /// The meaning of the current token.
+    pub(crate) fn mean(&self) -> Mean {
+        if self.tok.is_cs_or_active() {
+            self.cs_mean.clone()
+        } else {
+            Mean::Char(self.tok.cat().unwrap_or(0), self.tok.chr())
+        }
+    }
+
     pub(crate) fn is_cs(&self) -> bool {
         self.tok.is_cs_or_active()
     }
@@ -323,7 +339,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 tok: Tok::c(0),
                 cmd: 0,
                 chr: 0,
-                mean: Mean::Undefined,
+                cs_mean: Mean::Undefined,
             },
             conds: Vec::new(),
             if_codes: Vec::new(),
@@ -379,6 +395,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.load_slow(loc)
     }
 
+    #[inline(never)]
     fn load_slow(&mut self, loc: Loc) -> R<()> {
         let f = self.loc_field(loc);
         let r = self.cx.use_field(f);
@@ -401,6 +418,16 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn int_loc(&mut self, loc: Loc) -> R<i32> {
         self.load(loc)?;
         Ok(self.st.int_of(loc, self.v))
+    }
+
+    /// Location `loc` as an integer, widened.
+    pub(crate) fn cint(&mut self, loc: Loc) -> R<i64> {
+        Ok(self.get_loc(loc)?.map_or(0, |x| int_of(self.v, x)))
+    }
+
+    /// Defines the state cell at `loc` ([`crate::fields::cell`]).
+    pub(crate) fn set_cell(&mut self, loc: Loc, val: ValueId, global: bool) {
+        self.set_loc(loc, Native::Raw(val), global);
     }
 
     /// Location `loc` as glue.
@@ -878,7 +905,9 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn mean_of(&mut self, t: Tok) -> R<Mean> {
         match self.mean_loc(t) {
             Some(l) => {
-                self.load(l)?;
+                if !self.st.is_loaded(l) {
+                    self.load_slow(l)?;
+                }
                 Ok(self.st.mean_of(l, self.v))
             }
             None => Ok(Mean::Char(t.cat().unwrap_or(0), t.chr())),
@@ -897,26 +926,30 @@ impl<'c, 'a> Run<'c, 'a> {
         Mean::decode(self.v, x)
     }
 
-    #[inline]
+    // the per-token hot path: inlined on purpose
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub(crate) fn set_cur(&mut self, tok: Tok) -> R<()> {
         if !tok.is_cs_or_active() {
-            let c = tok.cat().unwrap_or(0);
-            let h = tok.chr();
-            self.cur = Cur {
-                tok,
-                cmd: c,
-                chr: i32::try_from(h).unwrap_or(0),
-                mean: Mean::Char(c, h),
-            };
+            // (a character's meaning is its own: no meaning stored)
+            self.cur.tok = tok;
+            self.cur.cmd = tok.cat().unwrap_or(0);
+            self.cur.chr = i32::try_from(tok.chr()).unwrap_or(0);
             return Ok(());
         }
+        self.set_cur_cs(tok)
+    }
+
+    /// [`Self::set_cur`] for a control sequence or active character.
+    #[inline(never)]
+    fn set_cur_cs(&mut self, tok: Tok) -> R<()> {
         let mean = self.mean_of(tok)?;
         let (c, h) = mean.cmd_chr();
         self.cur = Cur {
             tok,
             cmd: c,
             chr: h,
-            mean,
+            cs_mean: mean,
         };
         Ok(())
     }
@@ -1080,7 +1113,20 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// `get_next` (§341): the next token, its meaning not yet looked up.
     /// `None` at the end of all input.
+    #[inline]
     pub(crate) fn next_tok(&mut self) -> R<Option<Tok>> {
+        // (the common case: the next token of the list on top)
+        if let Some(Frame::Toks(t, p)) = self.frames.front_mut()
+            && let Some(&tok) = t.get(*p)
+        {
+            *p += 1;
+            return Ok(Some(tok));
+        }
+        self.next_tok_slow()
+    }
+
+    #[inline(never)]
+    fn next_tok_slow(&mut self) -> R<Option<Tok>> {
         loop {
             let Some(front) = self.frames.front_mut() else {
                 if self.pull()? {
@@ -1413,7 +1459,36 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// `get_next` with the meaning (§357–§358).
+    // the per-token hot path: inlined on purpose
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub(crate) fn get_next(&mut self) -> R<bool> {
+        // (the common case: a token of the list on top that is not an
+        // internal marker, and no alignment entry to watch for)
+        let next = match self.frames.front_mut() {
+            Some(Frame::Toks(t, p)) => match t.get(*p) {
+                Some(&tok) if tok.as_cs().is_none_or(|n| !n.frozen()) => {
+                    *p += 1;
+                    Some(tok)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(tok) = next {
+            self.set_cur(tok)?;
+            if ALIGN_CMDS.checked_shr(u32::from(self.cur.cmd)).unwrap_or(0) & 1 != 0
+                && self.align_token()?
+            {
+                return self.get_next_slow();
+            }
+            return Ok(true);
+        }
+        self.get_next_slow()
+    }
+
+    #[inline(never)]
+    fn get_next_slow(&mut self) -> R<bool> {
         loop {
             let t = loop {
                 let Some(t) = self.next_tok()? else {
@@ -1429,7 +1504,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     }
                     if n.name() == "\u{10FFFE}uend" {
                         // §324: the end of a u template
-                        self.align_u_end()?;
+                        self.align_u_end();
                         continue;
                     }
                 }
@@ -1445,14 +1520,18 @@ impl<'c, 'a> Run<'c, 'a> {
                     tok: t,
                     cmd: cmd::IGNORE,
                     chr,
-                    mean: Mean::Prim("\u{10FFFE}endv", cmd::IGNORE, chr),
+                    cs_mean: Mean::Prim("\u{10FFFE}endv", cmd::IGNORE, chr),
                 };
                 return Ok(true);
             }
             if !self.get_next_rest(t)? {
                 return Ok(false);
             }
-            if self.align_token()? {
+            if matches!(
+                self.cur.cmd,
+                cmd::LEFT_BRACE | cmd::RIGHT_BRACE | cmd::TAB_MARK | cmd::CAR_RET
+            ) && self.align_token()?
+            {
                 continue;
             }
             return Ok(true);
@@ -1469,7 +1548,7 @@ impl<'c, 'a> Run<'c, 'a> {
             if self.cur.cmd > cmd::MAX_COMMAND {
                 self.cur.cmd = cmd::RELAX;
                 self.cur.chr = crate::val::NO_EXPAND_FLAG;
-                self.cur.mean = Mean::NotExpanded;
+                self.cur.cs_mean = Mean::NotExpanded;
             }
             return Ok(true);
         }
@@ -1488,7 +1567,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 tok: Tok::cs("\u{10FFFE}relax"),
                 cmd: cmd::RELAX,
                 chr: 256,
-                mean: Mean::Prim("relax", cmd::RELAX, 256),
+                cs_mean: Mean::Prim("relax", cmd::RELAX, 256),
             };
         }
         Ok(())
@@ -1614,6 +1693,21 @@ impl<'c, 'a> Run<'c, 'a> {
         if !run.is_empty() {
             out.push(node(run));
         }
+        // (conditionals open when the run closed its scope go on in the
+        // first of them, `carried_conds`)
+        if self.closed_scope()
+            && !self.conds.is_empty()
+            && let Some(first) = out.first_mut()
+            && let Some(fs) = first.first_mut()
+        {
+            let mut xs = vec![tag("c")];
+            xs.extend(self.conds.iter().map(|&c| v.int(i64::from(c))));
+            xs.push(v.int(-1));
+            xs.extend(self.if_codes.iter().map(|&c| v.int(i64::from(c))));
+            let mut frames = vec![v.list(xs)];
+            frames.extend(list_of(v, *fs));
+            *fs = v.list(frames);
+        }
         out
     }
 
@@ -1674,19 +1768,26 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.begin_command();
                 self.command()?;
                 self.mark.active = false;
-                if self.claim_rest {
+                if self.claim_rest || self.closed_scope() {
                     return Ok(());
                 }
             }
-            // `\begin{document}`'s slice ends inside the environment's
-            // group: that group becomes the engine scope the body's
-            // regions run in (`hints::opens_scope`)
+            // a region that ends with one group of its own still open
+            // (an environment's `\begin`, a macro's `\begingroup` or
+            // `\bgroup`), outside every paragraph, box and conditional,
+            // leaves it to the engine as the scope the following regions
+            // run in (`Run::leave_scope`); more than one, or a text that
+            // said it opens no scope, reads on
             if self.doc
                 && self.conds.is_empty()
+                && self.effect == Effect::None
                 && self.nest.len() == 1
-                && self.nest[0].group != 0
                 && !self.nest[0].owns
-                && crate::hints::opens_scope(self.v, &self.cx.args())
+                && matches!(
+                    self.nest[0].group,
+                    crate::val::group::SIMPLE | crate::val::group::SEMI_SIMPLE
+                )
+                && !crate::hints::effect_none(self.v, &self.cx.args())
             {
                 self.leave_scope()?;
                 return Ok(());
@@ -1713,6 +1814,15 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             return Ok(());
         }
+    }
+
+    /// Whether a document run closed the engine scope it ran in, with
+    /// nothing of its own open but conditionals: it ends after that
+    /// command (`Effect::Close`, its reads and definitions inside the
+    /// scope), and what it has left of its input runs outside it as the
+    /// following nodes, the conditionals carried ([`Run::leftover`]).
+    fn closed_scope(&self) -> bool {
+        self.doc && self.effect == Effect::Close && self.nest.is_empty()
     }
 
     /// Whether the run has something open that must close in this run:
@@ -1754,6 +1864,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // the page chain's delta (`page::step_defs`), so no step reads
         // another
         let op = self.cx.op();
+        let t_pub = std::time::Instant::now();
         let published: Vec<(Field, ValueId, Locality)> = self
             .st
             .published(self.v)
@@ -1763,9 +1874,16 @@ impl<'c, 'a> Run<'c, 'a> {
         if op == self.ops.pagestep || op == self.ops.pagestep_any {
             crate::page::step_defs(&mut self, published);
         } else {
+            let (n, t_list) = (published.len(), t_pub.elapsed());
             for (f, x, l) in published {
                 crate::exec::widths::def(f);
                 self.cx.define_with(f, x, l);
+            }
+            if n >= 10_000 && crate::exec::env_flag!("PHITEX_TEX_TIME") {
+                eprintln!(
+                    "run finish: {n} definitions published: listed {t_list:?}, define_with {:?}",
+                    t_pub.elapsed().checked_sub(t_list).unwrap_or_default()
+                );
             }
         }
         let locs: Vec<Loc> = self.st.defined_locs().collect();
@@ -1900,6 +2018,34 @@ fn decode_frames_upto(v: &Values, args: &[ValueId], limit: usize) -> Vec<Frame> 
         out.extend(crate::val::frame_of(v, f, || decode_frame(v, f)));
     }
     out
+}
+
+/// The conditionals a node's text begins inside: those its run's
+/// predecessor left open when it closed its scope ([`Run::leftover`]),
+/// `(if_limit, cur_if)` each.
+pub(crate) fn carried_conds(v: &Values, args: &[ValueId]) -> Option<(Vec<u8>, Vec<i32>)> {
+    let &l = args.first()?;
+    let Value::List(fs) = &*v.get(l) else {
+        return None;
+    };
+    let &f = fs.first()?;
+    let Value::List(xs) = &*v.get(f) else {
+        return None;
+    };
+    if xs.first().map(|&t| str_of(v, t)).as_deref() != Some("c") {
+        return None;
+    }
+    let ns: Vec<i64> = xs[1..].iter().map(|&x| int_of(v, x)).collect();
+    let k = ns.iter().position(|&x| x < 0)?;
+    let conds = ns[..k]
+        .iter()
+        .map(|&c| u8::try_from(c).unwrap_or(0))
+        .collect();
+    let codes = ns[k + 1..]
+        .iter()
+        .map(|&c| i32::try_from(c).unwrap_or(0))
+        .collect();
+    Some((conds, codes))
 }
 
 /// One frame of a node's arguments (a frame is an immutable value, so
@@ -2161,7 +2307,7 @@ impl Run<'_, '_> {
     /// rewinding its input.
     fn state_sig(&self) -> u64 {
         use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut h = phitex_defuse::FxHasher::default();
         (
             self.st.sig(),
             self.contribs.len(),
