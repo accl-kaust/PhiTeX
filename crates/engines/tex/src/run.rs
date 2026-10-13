@@ -440,12 +440,11 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// The location of the primitive quantity at `(c, chr)`.
     pub(crate) fn quantity_loc(&mut self, c: u8, chr: i32) -> Loc {
-        match self.ops.fields.quantity_slot(c, chr) {
-            Some(s) => Loc::try_from(s).unwrap_or(0),
-            None => {
-                let f = self.v.field(&crate::val::quantity_field(c, chr));
-                self.loc_of(f)
-            }
+        if let Some(s) = self.ops.fields.quantity_slot(c, chr) {
+            Loc::try_from(s).unwrap_or(0)
+        } else {
+            let f = self.v.field(&crate::val::quantity_field(c, chr));
+            self.loc_of(f)
         }
     }
 
@@ -475,12 +474,11 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// The location of register `n` of kind `r`.
     pub(crate) fn reg_loc(&mut self, r: usize, n: i32) -> Loc {
-        match crate::fields::reg_slot(r, n) {
-            Some(s) => Loc::try_from(s).unwrap_or(0),
-            None => {
-                let f = self.reg_field(r, n);
-                self.loc_of(f)
-            }
+        if let Some(s) = crate::fields::reg_slot(r, n) {
+            Loc::try_from(s).unwrap_or(0)
+        } else {
+            let f = self.reg_field(r, n);
+            self.loc_of(f)
         }
     }
 
@@ -734,23 +732,21 @@ impl<'c, 'a> Run<'c, 'a> {
     /// The parameter `name` (a name known only at run time; the fixed
     /// ones read [`Self::ipar`]).
     pub(crate) fn param(&mut self, name: &str) -> R<i32> {
-        let l = match self.ops.fields.par_slot(name) {
-            Some(s) => Loc::try_from(s).unwrap_or(0),
-            None => {
-                let f = self.ops.fields.param(self.v, name);
-                self.loc_of(f)
-            }
+        let l = if let Some(s) = self.ops.fields.par_slot(name) {
+            Loc::try_from(s).unwrap_or(0)
+        } else {
+            let f = self.ops.fields.param(self.v, name);
+            self.loc_of(f)
         };
         self.int_loc(l)
     }
 
     pub(crate) fn glue_param(&mut self, name: &str) -> R<phitex_typeset::glue::Glue> {
-        let l = match self.ops.fields.par_slot(name) {
-            Some(s) => Loc::try_from(s).unwrap_or(0),
-            None => {
-                let f = self.ops.fields.param(self.v, name);
-                self.loc_of(f)
-            }
+        let l = if let Some(s) = self.ops.fields.par_slot(name) {
+            Loc::try_from(s).unwrap_or(0)
+        } else {
+            let f = self.ops.fields.param(self.v, name);
+            self.loc_of(f)
         };
         self.glue_loc(l)
     }
@@ -758,7 +754,7 @@ impl<'c, 'a> Run<'c, 'a> {
     #[inline]
     pub(crate) fn cat(&mut self, c: u32) -> R<u8> {
         let x = if c < 256 {
-            self.int_loc(crate::fields::CAT0 as Loc + c)?
+            self.int_loc(Loc::try_from(crate::fields::CAT0).unwrap_or(0) + c)?
         } else {
             let f = self.ops.fields.cat(self.v, c);
             let l = self.loc_of(f);
@@ -860,13 +856,13 @@ impl<'c, 'a> Run<'c, 'a> {
         let f = self
             .ops
             .fields
-            .meaning_at(self.v, self.cx.values_epoch(), &t)?;
+            .meaning_at(self.v, self.cx.values_epoch(), t)?;
         Some(self.loc_of(f))
     }
 
     #[inline]
-    pub(crate) fn mean_of(&mut self, t: &Tok) -> R<Mean> {
-        match self.mean_loc(*t) {
+    pub(crate) fn mean_of(&mut self, t: Tok) -> R<Mean> {
+        match self.mean_loc(t) {
             Some(l) => {
                 self.load(l)?;
                 Ok(self.st.mean_of(l, self.v))
@@ -900,7 +896,7 @@ impl<'c, 'a> Run<'c, 'a> {
             };
             return Ok(());
         }
-        let mean = self.mean_of(&tok)?;
+        let mean = self.mean_of(tok)?;
         let (c, h) = mean.cmd_chr();
         self.cur = Cur {
             tok,

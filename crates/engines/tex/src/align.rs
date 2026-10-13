@@ -237,7 +237,7 @@ impl Run<'_, '_> {
                         break;
                     }
                 } else if c != cmd::SPACER || !u.is_empty() {
-                    u.push(self.cur.tok.clone());
+                    u.push(self.cur.tok);
                 }
             }
             // §783: the v part
@@ -252,7 +252,7 @@ impl Run<'_, '_> {
                     self.log("error", "Only one # is allowed per tab")?;
                     continue;
                 }
-                w.push(self.cur.tok.clone());
+                w.push(self.cur.tok);
             }
             pre.cols.push((u, w, tab));
             if self.cur.cmd == cmd::CAR_RET {

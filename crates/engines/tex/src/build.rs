@@ -1271,7 +1271,7 @@ impl Run<'_, '_> {
                     | group::NO_ALIGN
             )
         {
-            let t = self.cur.tok.clone();
+            let t = self.cur.tok;
             self.back_input(t);
             self.back_input(Tok::cs("\u{10FFFE}endgraf"));
             return Ok(());

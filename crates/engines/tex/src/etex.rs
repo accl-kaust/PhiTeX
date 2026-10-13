@@ -357,7 +357,7 @@ pub(crate) fn if_test(r: &mut Run<'_, '_>, this_if: i32) -> R<bool> {
                 r.back_cur();
             }
             let t = Tok::cs(&name);
-            r.mean_of(&t)? != Mean::Undefined
+            r.mean_of(t)? != Mean::Undefined
         }
         IF_FONT_CHAR => {
             // pdfTeX §1762
@@ -969,7 +969,7 @@ fn get_r_token(r: &mut Run<'_, '_>) -> R<Tok> {
         r.back_cur();
         return Ok(Tok::cs("inaccessible"));
     }
-    Ok(r.cur.tok.clone())
+    Ok(r.cur.tok)
 }
 
 // --------------------------------------------------------- assignments
