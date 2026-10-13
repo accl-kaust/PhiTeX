@@ -17,7 +17,7 @@ use phitex_defuse::{
 use phitex_source::pass;
 
 use crate::hints::Defs;
-use crate::ops::{Dvi, Exec, Files, Mark, OutPage, Put, Shared};
+use crate::ops::{Dvi, Exec, Files, Mark, Put, Shared};
 use crate::run::{Ops, slice_args};
 use crate::val::{field_name, int_of, list_of, str_of};
 
@@ -589,15 +589,15 @@ pub struct Stats {
     pub rounds: u64,
     /// Live nodes after.
     pub live: usize,
-    /// Expansions whose tokens read on into the text after them, and how
-    /// many siblings they claimed for it.
+    /// Always 0: no expansion reads on into another node any more.
     pub tails: u64,
     /// Paragraph-ending items after which the list was not vertical
-    /// (OUTPUT.md §5): the nodes after them read a wrong mode.
+    /// (OUTPUT.md §5). Always 0: a region runs on its own nest.
     pub par_boundary_violations: u64,
     /// Outer `\fi`s that found no conditional at the depth the text's
     /// nesting gave their node (OUTPUT.md §6).
     pub if_depth_violations: u64,
+    /// Always 0 (see `tails`).
     pub tail_siblings: u64,
     /// Children that ran out of text (a claim measured short: a bug).
     pub starved: u64,
@@ -838,7 +838,6 @@ impl Graph {
         let shared: Shared = Arc::new(OnceLock::new());
         let exec = eng.register(Arc::new(Exec(shared.clone())));
         let put = eng.register(Arc::new(Put(shared.clone())));
-        let outpage = eng.register(Arc::new(OutPage(shared.clone())));
         let [pagestep, pagestep_any] = [false, true].map(|any| {
             eng.register(Arc::new(crate::page::PageStep {
                 shared: shared.clone(),
@@ -858,7 +857,6 @@ impl Graph {
         let ops = Ops {
             exec,
             put,
-            outpage,
             pagestep,
             pagestep_any,
             breaks,
@@ -874,8 +872,6 @@ impl Graph {
             "pages",
             "pagehash",
             "writes",
-            "tails",
-            "parviol",
             "ifviol",
             "streams",
             crate::pdfrelaxed::PIECES,
@@ -1033,7 +1029,7 @@ impl Graph {
                 Err(e) => {
                     // the build ends here; the error is a diagnostic
                     let m = self.diagnose(&e);
-                    if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+                    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                         eprintln!("{m}");
                     }
                     self.eval_errors.push(m);
@@ -1041,7 +1037,7 @@ impl Graph {
                     return;
                 }
             };
-            if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+            if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                 print_round(t0.elapsed(), &r);
                 eprintln!("  waits by kind {:?}", r.waits_by_kind);
                 for &(n, w) in &r.top_waited {
@@ -1073,7 +1069,7 @@ impl Graph {
                     .filter_map(|&(_, f)| field_name(v, f).strip_prefix("file:").map(str::to_owned))
                     .collect()
             };
-            if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+            if crate::exec::env_flag!("PHITEX_TEX_TIME") {
                 eprintln!("  waits: {} {:?}", r.env_stalled, asked_names);
             }
             let v = self.eng.values();
@@ -1137,18 +1133,8 @@ impl Graph {
             self.eng.set_environment_absent(self.absent.clone());
         }
         let v = self.eng.values();
-        if let Some(t) = self.eng.acc_value(unit, v.field("parviol")) {
-            stats.par_boundary_violations += u64::try_from(v.seq_to_vec(t).len()).unwrap_or(0);
-        }
         if let Some(t) = self.eng.acc_value(unit, v.field("ifviol")) {
             stats.if_depth_violations += u64::try_from(v.seq_to_vec(t).len()).unwrap_or(0);
-        }
-        let tails_f = v.field("tails");
-        if let Some(t) = self.eng.acc_value(unit, tails_f) {
-            for x in v.seq_to_vec(t) {
-                stats.tails += 1;
-                stats.tail_siblings += u64::try_from(int_of(v, x)).unwrap_or(0);
-            }
         }
     }
 
@@ -1162,7 +1148,7 @@ impl Graph {
         for (s, e) in sl {
             let piece = &text[s..e];
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-            if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+            if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
                 eprintln!("node {piece:?}");
             }
             let mut args = slice_args(self.eng.values(), piece, starts);
@@ -1170,7 +1156,7 @@ impl Graph {
             let n = self.eng.push(unit, self.ops.exec, args);
             out.push((key(piece, starts), n));
         }
-        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "push_text: slices {t1:?}, push {:?}, {} nodes",
                 t0.elapsed().checked_sub(t1).unwrap(),
@@ -1210,8 +1196,7 @@ fn is_tex_text(name: &str) -> bool {
 
 /// The definitions the prelude's text and the files it read make, in
 /// load order: the format's macros, which the hints bound a document's
-/// calls with ([`crate::hints`]) and whose bodies mark paragraph regions
-/// ([`slice_info`]). Harvested once per prelude key (a text pass, no
+/// calls with ([`crate::hints`]). Harvested once per prelude key (a text pass, no
 /// evaluation), for a prelude evaluated here or imported from bytes.
 fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
     static C: OnceLock<Mutex<HashMap<[u8; 32], Defs>>> = OnceLock::new();
@@ -1244,7 +1229,7 @@ fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
         order.push(file);
     }
     defs.set_load_order(&order);
-    if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
             "prelude definitions: {} names from {} files in {:?}",
             defs.len(),
@@ -1312,7 +1297,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         let mut stats = Stats::default();
         let t0 = std::time::Instant::now();
         g.settle(unit, finder, &mut stats, false, &mut phitex_defuse::NoEdits);
-        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!("prelude settle {:?}", t0.elapsed());
         }
         let v = g.eng.values();
@@ -1501,7 +1486,7 @@ impl Build {
             settled: Vec::new(),
         };
         b.settle();
-        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
                 "time: prelude {t1:?}, document {:?}",
                 t0.elapsed().checked_sub(t1).unwrap()
