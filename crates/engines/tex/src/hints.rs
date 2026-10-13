@@ -943,8 +943,8 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
                                 while p.atoms.get(j).is_some_and(|x| x.kind == AtomKind::Space) {
                                     j += 1;
                                 }
-                                !claimed[j]
-                                    && !inside[j]
+                                !claimed.get(j).copied().unwrap_or(true)
+                                    && !inside.get(j).copied().unwrap_or(true)
                                     && p.atoms.get(j).is_some_and(|x| match x.kind {
                                     AtomKind::Char(_) | AtomKind::Verb => true,
                                     AtomKind::Cs => starts_par(x.name(text)),
@@ -1403,6 +1403,17 @@ impl Analysis<'_> {
                 excerpt,
             );
         }
+        self.hint_run(a)
+    }
+
+    /// The hint of the atom at `a` as if it ran (a command a macro is
+    /// only guessed to read does run, when the guess is wrong).
+    fn hint_run(&self, a: usize) -> Hint {
+        let atoms = self.atoms();
+        let Some(at) = atoms.get(a) else {
+            return Hint::any("end of text", "");
+        };
+        let excerpt = &self.text[at.start..self.text.len().min(at.start + 40)];
         if at.kind == AtomKind::Cs && DEMOTED.contains(&at.name(self.text)) {
             return demoted(at.name(self.text), excerpt);
         }
@@ -1880,6 +1891,14 @@ impl Analysis<'_> {
                     || format!("\\{name}: unbounded"),
                     |c| format!("\\{name}: {c}"),
                 );
+                if self.prelude.is_defined(name) {
+                    // (why the format's body did not bound it)
+                    let set = self.defset(name);
+                    *cause = format!(
+                        "{cause} (format closure: {})",
+                        set.unbounded.first().map_or("bounded", String::as_str)
+                    );
+                }
                 if *cause == format!("\\{name}: unbounded") {
                     // (the reason the pass gives: the closure's)
                     let set = self.defset(name);
@@ -1988,7 +2007,11 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     for a in 0..an.p.atoms.len() {
         let at = &an.p.atoms[a];
         starts.push(at.start);
-        let h = an.hint(a);
+        let h = if an.claimed[a] && at.kind == AtomKind::Cs && !prim_operand[a] {
+            an.hint_run(a)
+        } else {
+            an.hint(a)
+        };
         hints.push(intern(&h));
         // (a guessed operand that is unbounded on its own is a value
         // read, not run: `\\headline={\\tenrm…}`)
