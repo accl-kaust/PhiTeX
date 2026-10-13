@@ -746,7 +746,7 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn scan_toks(&mut self, macro_def: bool, xpand: bool) -> R<(Vec<Tok>, Vec<Tok>)> {
         let mut params: Vec<Tok> = Vec::new();
-        let mut body: Vec<Tok> = Vec::new();
+        let mut body: Vec<Tok> = Vec::with_capacity(32);
         let mut hash_brace: Option<Tok> = None;
         let mut t: u32 = 0; // parameters so far
         if macro_def {
