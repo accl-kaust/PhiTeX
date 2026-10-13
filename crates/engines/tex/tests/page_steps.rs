@@ -100,6 +100,7 @@ fn generated_documents() {
                 *by.entry(format!("{kind} {field}")).or_default() += 1;
             }
             eprintln!("{name} chain by cause: {by:?}");
+            eprintln!("{name} refuted guesses: {:?}", s.refuted_guesses);
         }
         let (r0, l0, p0) = (s.runs, s.loop_rounds, s.page_steps);
         let mid = src.len() / 2;

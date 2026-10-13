@@ -495,17 +495,17 @@ pub(crate) fn font_objnum(r: &mut Run<'_, '_>, f: u32) -> R<i64> {
 }
 
 /// Whether the `Dvi` node finishes in relaxed mode.
-pub(crate) fn finishing(cx: &mut Ctx<'_>) -> Result<bool, Stop> {
+pub(crate) fn finishing(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<bool, Stop> {
     let v = cx.values();
     let int = |cx: &mut Ctx<'_>, f: &str| -> Result<i64, Stop> {
-        Ok(cx.use_field(v.field(f))?.map_or(0, |x| int_of(v, x)))
+        Ok(fin.get(cx, v.field(f))?.map_or(0, |x| int_of(v, x)))
     };
     Ok(int(cx, "pdf:relaxed")? == 1 && int(cx, "pdf:exact")? == 0)
 }
 
 /// The PDF file from the pieces (`Dvi` in relaxed mode). A document
 /// the mode cannot write asks for exact mode, with a warning naming why.
-pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<ValueId, Stop> {
     let v = cx.values();
     let all = cx.acc_range(v.field(PIECES), None)?;
     let (mut pages, mut objs) = (Vec::new(), Vec::new());
@@ -526,10 +526,10 @@ pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
             }
         }
     }
-    let field = |cx: &mut Ctx<'_>, f: &str| cx.use_field(v.field(f));
+    let field = |cx: &mut Ctx<'_>, f: &str| fin.get(cx, v.field(f));
     let int = |cx: &mut Ctx<'_>, f: &str| -> Result<i32, Stop> {
-        Ok(cx
-            .use_field(v.field(f))?
+        Ok(fin
+            .get(cx, v.field(f))?
             .map_or(0, |x| i32::try_from(int_of(v, x)).unwrap_or(0)))
     };
     // the parameters: the last page's, the fixed ones the first write's
@@ -554,7 +554,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     }
     p.info_omit_date = int(cx, "param:pdfinfoomitdate")?;
     p.suppress_ptex_info = int(cx, "param:pdfsuppressptexinfo")?;
-    let cmds = doc_cmds(cx)?;
+    let cmds = doc_cmds(cx, fin)?;
     match relaxed::finish_relaxed(&p, &pages, &objs, &cmds) {
         Ok(bytes) => {
             let s: String = bytes.iter().map(|&b| char::from(b)).collect();
@@ -570,12 +570,12 @@ pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
 }
 
 /// The document-level commands, from what TeX kept of them.
-fn doc_cmds(cx: &mut Ctx<'_>) -> Result<Vec<DocCmd>, Stop> {
+fn doc_cmds(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<Vec<DocCmd>, Stop> {
     let v = cx.values();
     let mut out = Vec::new();
     let texts = |cx: &mut Ctx<'_>, f: &str| -> Result<Vec<ValueId>, Stop> {
-        Ok(cx
-            .use_field(v.field(f))?
+        Ok(fin
+            .get(cx, v.field(f))?
             .map(|x| list_of(v, x))
             .unwrap_or_default())
     };
@@ -599,8 +599,8 @@ fn doc_cmds(cx: &mut Ctx<'_>) -> Result<Vec<DocCmd>, Stop> {
     for t in texts(cx, "pdf:catalog")? {
         out.push(DocCmd::Catalog(b(t), None));
     }
-    if let Some(a) = cx
-        .use_field(v.field("pdf:openaction"))?
+    if let Some(a) = fin
+        .get(cx, v.field("pdf:openaction"))?
         .and_then(|x| crate::pdfout::action_of(v, x))
     {
         out.push(DocCmd::Catalog(Vec::new(), Some(a)));
@@ -611,16 +611,16 @@ fn doc_cmds(cx: &mut Ctx<'_>) -> Result<Vec<DocCmd>, Stop> {
     for t in texts(cx, "pdf:trailer")? {
         out.push(DocCmd::Trailer(b(t)));
     }
-    if let Some(t) = cx.use_field(v.field("pdf:trailerid"))? {
+    if let Some(t) = fin.get(cx, v.field("pdf:trailerid"))? {
         out.push(DocCmd::TrailerId(b(t)));
     }
     // the font commands: the last attributes of each font, the
     // characters included, the fonts without built-in ToUnicode
-    let count = cx
-        .use_field(v.field("fontcount"))?
+    let count = fin
+        .get(cx, v.field("fontcount"))?
         .map_or(0, |x| int_of(v, x));
     for f in 1..=count {
-        if let Some(t) = cx.use_field(v.field(&format!("pdf:fontattr:{f}")))? {
+        if let Some(t) = fin.get(cx, v.field(&format!("pdf:fontattr:{f}")))? {
             out.push(DocCmd::FontAttr(u32::try_from(f).unwrap_or(0), b(t)));
         }
     }

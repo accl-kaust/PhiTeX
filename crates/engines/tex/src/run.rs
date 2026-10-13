@@ -55,6 +55,9 @@ pub(crate) struct Ops {
     /// Page-step runs that reached their finish, by page index (not
     /// the attempts that stopped or were cut off): [`crate::Stats`].
     pub steps_done: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    /// The page chain's loop-backs as read and published in the current
+    /// evaluation: the refuted guesses ([`crate::Stats`]).
+    pub lblog: std::sync::Arc<std::sync::Mutex<crate::page::LbLog>>,
 }
 
 /// A level of the input stack.
@@ -258,6 +261,9 @@ pub(crate) struct Run<'c, 'a> {
     /// The page builder of a text run as one node, paging inline
     /// (`pageinline.rs`).
     pub pg: Option<Box<crate::pageinline::Inline>>,
+    /// A page step whose output routine published leftovers
+    /// (`pagefx:<j>`).
+    pub pagefx_pub: bool,
     pub kids: Vec<(OpId, Vec<ValueId>)>,
     pub effect: Effect,
     pub cur: Cur,
@@ -333,6 +339,7 @@ impl<'c, 'a> Run<'c, 'a> {
             stamp: 0,
             contribs: Vec::new(),
             pg: None,
+            pagefx_pub: false,
             kids: Vec::new(),
             effect: Effect::None,
             cur: Cur {
@@ -1750,9 +1757,19 @@ impl<'c, 'a> Run<'c, 'a> {
             let s = v.seq_unit(item);
             self.contribute("items", s);
         }
-        for (f, x, l) in std::mem::take(&mut self.defs) {
-            crate::exec::widths::def(f);
-            self.cx.define_with(f, x, l);
+        // a page step defines nothing to the engine: its definitions are
+        // the page chain's delta (`page::step_defs`), so no step reads
+        // another
+        let op = self.cx.op();
+        let defs = std::mem::take(&mut self.defs);
+        if op == self.ops.pagestep || op == self.ops.pagestep_any {
+            let j = self.page_index();
+            crate::page::step_defs(&mut self, j, defs);
+        } else {
+            for (f, x, l) in defs {
+                crate::exec::widths::def(f);
+                self.cx.define_with(f, x, l);
+            }
         }
         if !self.own.is_empty() {
             let names: Vec<ValueId> = self.own.keys().map(|f| f.0).collect();
