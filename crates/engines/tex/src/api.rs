@@ -580,11 +580,11 @@ pub(crate) fn slice_flags(text: &str) -> Vec<u8> {
     let mut depth = Vec::with_capacity(p.atoms.len());
     let mut d: usize = 0;
     for at in &p.atoms {
-        if at.kind == AtomKind::Close {
+        if at.kind == pass::AtomKind::Close {
             d = d.saturating_sub(1);
         }
         depth.push(d);
-        if at.kind == AtomKind::Open {
+        if at.kind == pass::AtomKind::Open {
             d += 1;
         }
     }
