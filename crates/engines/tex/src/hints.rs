@@ -123,9 +123,17 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         | "parshapelength" | "parshapeindent" | "parshapedimen" | "topmark" | "firstmark"
         | "botmark" | "splitfirstmark" | "splitbotmark" | "topmarks" | "firstmarks"
         | "botmarks" | "splitfirstmarks" | "splitbotmarks" | "/" | " " | "mskip" | "mkern"
-        | "penalty" | "end" | "par" | "beginL" | "endL" | "beginR" | "endR" => &[],
-        // a box's dimension (§1247)
-        "wd" | "ht" | "dp" => &["box:", "lvlfix"],
+        | "penalty" | "end" | "beginL" | "endL" | "beginR" | "endR" => &[],
+        // a paragraph's end (§1094-§1096): `line_break` sets its lines'
+        // cells (`par:`), `\\prevgraf` (`pg:`, §1096), the vertical
+        // list's opener (`lopen:`); the lines' inserts and `\\vadjust`
+        // material (`inspen`, `box:`, `param:`, §1199); the page builder
+        // after it (`page:`, `deadcycles`, §1094 build_page); and
+        // `normal_paragraph` (§1070)
+        "par" => PAR_END,
+        // a box's dimension (§1247): the box and its level fix; the
+        // dimension's value is scanned with expansion (`if:`, §498)
+        "wd" | "ht" | "dp" => &["box:", "lvlfix", "if:"],
         // horizontal material: may start a paragraph ([`starts_par`] adds
         // `par:`), the box level fix (§1090, §1091)
         // (`\\accent` does the assignments before its character: a font,
@@ -190,22 +198,29 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "hyphenchar" => &["hc:"],
         "skewchar" => &["sc:"],
         // codes (§1232)
-        "catcode" => &["cat:"],
+        // (the code's value is scanned with expansion: a conditional
+        // may end, §1232, §498)
+        "catcode" => &["cat:", "if:"],
         "lccode" => &["lc:"],
         "uccode" => &["uc:"],
         "sfcode" => &["sf:"],
         "mathcode" => &["mc:"],
         "delcode" => &["dc:"],
-        // registers and parameters (§1224-§1248)
-        "count"
-        | "dimen"
-        | "skip"
-        | "muskip"
-        | "toks"
-        | "advance"
-        | "multiply"
-        | "divide"
-        | "parshape"
+        // registers (§1224-§1238): the register families, the
+        // parameters (`\\advance\\tolerance`), a conditional expanded
+        // in the value (§498), `\\afterassignment`'s token (§1269)
+        "count" | "dimen" | "skip" | "muskip" | "toks" | "advance" | "multiply" | "divide" => &[
+            "count:",
+            "dimen:",
+            "skip:",
+            "muskip:",
+            "toks:",
+            "param:",
+            "parshape",
+            "if:",
+            "aftertoken",
+        ],
+        "parshape"
         | "interlinepenalties"
         | "clubpenalties"
         | "widowpenalties"
@@ -220,7 +235,20 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "batchmode" | "nonstopmode" | "scrollmode" | "errorstopmode" | "interactionmode" => {
             &["interaction"]
         }
-        "hyphenation" | "patterns" => &["patterns"],
+        // (§960, §934: the pattern trie and exceptions; the list opener
+        // the engine records for the braced list, `lopen:`; a
+        // conditional in the list's expansion, §961)
+        "hyphenation" | "patterns" => &["patterns", "lopen:", "if:"],
+        // expansion only (§367, §369)
+        "noexpand" => &[],
+        // boxes in a box context (§1073 begin_box via §1084)
+        "moveleft" | "moveright" | "raise" | "lower" => &["box:", "align", "param:", "lvlfix"],
+        // a language whatsit (§1377) in horizontal material, which may
+        // start a paragraph (`par:`, `lopen:`, `pg:`, §1091)
+        "setlanguage" => &["box:", "lvlfix", "par:", "lopen:", "pg:"],
+        // (they may read or expand anything: every head, §366 \\expandafter,
+        // §362 \\input/\\endinput, §1285 \\lowercase/\\uppercase)
+        "expandafter" | "input" | "endinput" | "lowercase" | "uppercase" => return None,
         // alignments (§774-§800)
         "halign" | "valign" | "cr" | "crcr" | "noalign" | "omit" | "span" => &["align", "badness"],
         "read" | "readline" | "openin" | "closein" => &["read:"],
@@ -244,6 +272,22 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
 
 /// What `normal_paragraph` resets (§1070, e-TeX's
 /// `\\interlinepenalties`).
+/// What a paragraph's end may set (`\\par`, a blank line): see
+/// [`class_state`]'s `par` row (§1070, §1094-§1096, §1199).
+const PAR_END: &[&str] = &[
+    "par:",
+    "pg:",
+    "lopen:",
+    "inspen",
+    "box:",
+    "lvlfix",
+    "param:",
+    "parshape",
+    "page:",
+    "deadcycles",
+    "if:",
+];
+
 const NORMAL_PARAGRAPH: &[&str] = &[
     "param:looseness",
     "param:hangindent",
@@ -826,9 +870,6 @@ impl Analysis<'_> {
                 excerpt,
             );
         }
-        if at.kind == AtomKind::Par {
-            return demoted("par", excerpt);
-        }
         if at.kind == AtomKind::Cs && DEMOTED.contains(&at.name(self.text)) {
             return demoted(at.name(self.text), excerpt);
         }
@@ -904,7 +945,7 @@ impl Analysis<'_> {
             }
             AtomKind::Par => {
                 self.cats_of(a, a, &mut b.cats);
-                add_heads(&mut b.state, Some(&["par:", "pg:"]));
+                add_heads(&mut b.state, Some(PAR_END));
                 add_heads(&mut b.state, Some(NORMAL_PARAGRAPH));
                 self.call_hint("par", &mut b, &mut cause)
             }
@@ -918,6 +959,14 @@ impl Analysis<'_> {
                 true
             }
         };
+        // (a relied name the set itself defines is not an assumption:
+        // plain's `\\footnote` does `\\let\\@sf\\empty`, so `cs:@sf`
+        // need not be defined at the call)
+        {
+            let (names, prefixes) = (&b.names, &b.prefixes);
+            b.means
+                .retain(|m| !names.contains(&m.0) && !prefixes.iter().any(|p| m.0.starts_with(p)));
+        }
         if let Some(f) = b.names.iter().find(|f| {
             f.strip_prefix("act:")
                 .and_then(|c| c.parse::<u32>().ok())
@@ -1251,7 +1300,7 @@ impl Analysis<'_> {
             // (a paragraph's end: its lines, `\\prevgraf`, §1096;
             // `normal_paragraph` resets `\\looseness`, `\\hangindent`,
             // `\\hangafter`, `\\parshape`, `\\interlinepenalties`, §1070)
-            add_heads(&mut b.state, Some(&["par:", "pg:"]));
+            add_heads(&mut b.state, Some(PAR_END));
             add_heads(&mut b.state, Some(NORMAL_PARAGRAPH));
         }
         if self.after_afterassignment(first) {
@@ -1820,30 +1869,7 @@ pub(crate) const COUNTERS: [&str; 7] = [
 /// suite: they answer `Any` until each is fixed (with its section) and
 /// promoted again.
 const DEMOTED: &[&str] = &[
-    // (`\\par`, a blank line: `normal_paragraph`'s parameters, §1070)
-    "par",
-    "tex_par:D",
-    // (a box dimension's assignment, §1247)
-    "wd",
-    "ht",
-    "dp",
-    // (registers whose value is a conditional's expansion, §498)
-    "count",
-    "dimen",
-    "skip",
-    "muskip",
-    "toks",
-    "advance",
-    "multiply",
-    "divide",
-    // (a `\\csname` in an argument expanded after `\\expandafter`, §372)
-    "message",
-    "errmessage",
-    // (a catcode read after a `\\scantokens` changed the escape, §1235)
-    "catcode",
-    // (`\\patterns` in hyphen.tex records a list opener, `lopen:`)
-    "patterns",
-    "hyphenation",
+    // (none: each class above was completed from tex.web and promoted)
 ];
 
 fn demoted(class: &str, excerpt: &str) -> Hint {
@@ -2030,8 +2056,9 @@ mod tests {
         let t = "\\par\nText here \\ifnum1=1 \\fi\n\\afterassignment\\x\\def\\y{}\n";
         let text = analyse(t, FileKind::Document, no_defs());
         let st = |off: usize| text.at(off).bound.expect("bounded").state;
-        // (`\\par` is demoted for now)
-        assert!(is_demoted(&text.at(0)));
+        // (`\\par` is bounded: a paragraph's end, §1094-§1096, §1070)
+        let par = st(0).expect("a state row");
+        assert!(par.iter().any(|h| h == "pg:") && par.iter().any(|h| h == "parshape"));
         // the run after it is in one: the list, and `\\prevgraf` if a
         // command after it in its text ends the paragraph
         assert_eq!(
