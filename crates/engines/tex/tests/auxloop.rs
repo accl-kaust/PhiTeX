@@ -33,11 +33,21 @@ fn build() -> phitex_tex::Build {
 /// Round one reads no `.aux` and publishes both fields; round two reads
 /// them back and, interpreting the lines it writes as the next read
 /// will (before its own read-back took effect), publishes the same
-/// content: nothing changes, the evaluation settles in two rounds.
+/// content: nothing changes and the evaluation settles (the rounds
+/// beyond two declare the fields' loop-backs and the flush point's
+/// once each; without the reverted read the state-dependent line
+/// toggles until the engine gives up after 64).
 #[test]
 fn equal_content_publishes_nothing_the_second_time() {
     let b = build();
-    assert_eq!(b.stats.loop_rounds, 2, "{:?}", b.diagnostics());
+    let errors: Vec<String> = b
+        .diagnostics()
+        .iter()
+        .filter(|d| d.severity == phitex_tex::Severity::Error)
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(b.stats.loop_rounds <= 5, "{} loop rounds", b.stats.loop_rounds);
     let files = b.files();
     let aux = files
         .iter()
