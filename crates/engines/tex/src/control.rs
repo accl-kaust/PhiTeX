@@ -64,7 +64,10 @@ impl Run<'_, '_> {
             t
         });
         let from = *HEARTBEAT_FROM.get_or_init(|| {
-            std::env::var("PHITEX_HEARTBEAT_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX)
+            std::env::var("PHITEX_HEARTBEAT_FROM")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(u64::MAX)
         });
         let trace = n >= from && n < from.saturating_add(150_000);
         if !n.is_multiple_of(100_000) && !trace {
