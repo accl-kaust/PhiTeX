@@ -33,7 +33,7 @@ use phitex_typeset::page::{InsertClass, Outcome, PageBuilder, PageParams};
 use crate::build::Mode;
 use crate::nodes::{self, Side};
 use crate::ops::{Shared, client_only, ops, run_node};
-use crate::run::{Halt, R, Run};
+use crate::run::{R, Run};
 use crate::val::{group, int_of, list_of, str_of, toks_of};
 
 /// The most pages a build may hold loop-back effects for.
@@ -190,32 +190,231 @@ impl Run<'_, '_> {
         Ok(if m == 0 { MAX_DIMEN } else { 0 })
     }
 
-    /// The page builder's fold (`Breaks`): every page's material, as the
-    /// children that run the output routine.
-    #[allow(clippy::too_many_lines)]
-    pub(crate) fn breaks(&mut self) -> R<()> {
+    /// `pageplan`: the main vertical list folded once (`pp:items`), the
+    /// insertion classes it uses (`pp:classes`), the output routine's
+    /// operation (`pp:any`), the page parameters before the first page
+    /// (`pp:marker`), whether a document node reads marks (`pp:marks`);
+    /// then one `brk` node per page the loop-backs `pstart:<j>` know of
+    /// (the build's guesses in round one, `api.rs` `page_guesses`).
+    /// It publishes the `marks:before:<N>` values the `brk` runs found
+    /// (`pmarks:<j>`) when a node reads marks.
+    pub(crate) fn page_plan(&mut self) -> R<()> {
         let v = self.v;
         let l = self.list_fold(0)?;
+        let items = l.items;
+        let marker = self.page_params_marker()?;
+        // the insertion classes on the list, read here (before any page
+        // step): a `brk` reads nothing a page step may define
+        let mut classes = std::collections::BTreeSet::new();
+        let mut marks_read = false;
+        for &x in &items {
+            match nodes::tag(v, x) {
+                nodes::T_INS => {
+                    if let Some(Node::Ins(i)) = nodes::decode(v, x, &mut Side::default()) {
+                        classes.insert(i.number);
+                    }
+                }
+                nodes::T_MARKS_AT => marks_read = true,
+                _ => {}
+            }
+        }
+        let mut table = Vec::new();
+        for n in classes {
+            let c = self.insert_class(n)?;
+            table.push(v.list(vec![
+                v.int(i64::from(n)),
+                v.int(c.box_height_plus_depth.map_or(-1, i64::from)),
+                v.int(i64::from(c.box_is_hbox)),
+                v.int(i64::from(c.count)),
+                v.int(i64::from(c.dimen)),
+                crate::val::glue_value(v, &c.skip),
+            ]));
+        }
+        let output = self.get("param:output")?;
+        let any = toks_of(v, output).is_empty();
+        let mut base = Vec::new();
+        for k in 0..10 {
+            base.push(v.int(self.int(&format!("count:{k}"))?));
+        }
+        self.set("pp:items", v.list(items), true);
+        self.set("pp:classes", v.list(table), true);
+        self.set("pp:any", v.int(i64::from(any)), true);
+        self.set("pp:marker", marker, true);
+        self.set("pp:base", v.list(base), true);
+        self.set("pp:marks", v.int(i64::from(marks_read)), true);
+        // the pages the loop-backs know of: up to the first end
+        let mut n = 1;
+        while n < MAX_PAGES {
+            let f = v.field(&format!("pstart:{n}"));
+            match self.cx.use_field(f)? {
+                Some(x) if x != ValueId::UNIT && PageStart::of(v, x).is_some() => n += 1,
+                _ => break,
+            }
+        }
+        if marks_read {
+            self.publish_marks()?;
+        }
+        for j in 0..n {
+            self.kid(self.ops.brk, vec![v.int(j as i64)]);
+        }
+        Ok(())
+    }
+
+    /// The `marks:before:<N>` values from the previous round's `brk`
+    /// runs (`pmarks:<j>`: the start each folded from, the nodes it
+    /// passed, the marks of its page), from those that started where the
+    /// page before them ended (so no two disagree): the marks in force
+    /// are the pages' marks folded in page order (§1012–§1014).
+    fn publish_marks(&mut self) -> R<()> {
+        let v = self.v;
+        let mut seen = std::collections::HashSet::new();
+        let mut state = MarksState::default();
+        for j in 0..MAX_PAGES {
+            let pm = v.field(&format!("pmarks:{j}"));
+            let Some(x) = self.cx.use_field(pm)? else { break };
+            if x == ValueId::UNIT {
+                break;
+            }
+            let xs = list_of(v, x);
+            if j > 0 {
+                let ps = v.field(&format!("pstart:{j}"));
+                if self.cx.use_field(ps)? != xs.first().copied() {
+                    break;
+                }
+            }
+            let now = state.value(v, j > 0);
+            for &node in &xs.get(1).map(|&l| list_of(v, l)).unwrap_or_default() {
+                let node = int_of(v, node);
+                if !seen.insert(node) {
+                    continue;
+                }
+                let n = u64::from_ne_bytes(node.to_ne_bytes());
+                let f = v.field(&crate::etex::marks_before_field(n));
+                if self.cx.is_loopback(f) {
+                    self.cx.publish(f, now);
+                }
+            }
+            match xs.get(2) {
+                Some(&ms) => state.fire_values(v, &list_of(v, ms)),
+                None => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// Where page `j` starts: what the `brk` before it published
+    /// (`pstart:<j>`: the build's guess in round one), or the start the
+    /// `brk` that fired this one handed over (`args[1]`).
+    fn brk_start(&mut self, j: usize, args: &[ValueId]) -> R<Option<PageStart>> {
+        let v = self.v;
+        if j == 0 {
+            return Ok(Some(PageStart::FIRST));
+        }
+        let f = v.field(&format!("pstart:{j}"));
+        let x = match self.cx.use_field(f)? {
+            Some(x) if x != ValueId::UNIT => x,
+            _ => args.get(1).copied().unwrap_or(ValueId::UNIT),
+        };
+        Ok(PageStart::of(v, x))
+    }
+
+    /// `brk:<j>`: §994–§1017's fold from page `j`'s start to its first
+    /// fire (§1005), the page fired as a child `PageStep`, and the end
+    /// state published as `pstart:<j+1>`. A `brk` after which no page is
+    /// known fires the next `brk` itself.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn brk(&mut self, args: &[ValueId]) -> R<()> {
+        let v = self.v;
+        let j = usize::try_from(args.first().map_or(0, |&x| int_of(v, x))).unwrap_or(0);
+        let start = self.brk_start(j, args)?;
+        let start_v = start.as_ref().map_or_else(|| v.str("end"), |s| s.value(v));
+        let next_f = (j + 1 < MAX_PAGES).then(|| v.field(&format!("pstart:{}", j + 1)));
+        let end = v.str("end");
+        let marks_read = self.int("pp:marks")? != 0;
+        let Some(start) = start else {
+            if let Some(f) = next_f {
+                self.cx.publish(f, end);
+            }
+            return Ok(());
+        };
+        let items = self
+            .get("pp:items")?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default();
+        let classes = self
+            .get("pp:classes")?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default();
+        let op = if self.int("pp:any")? != 0 {
+            self.ops.pagestep_any
+        } else {
+            self.ops.pagestep
+        };
+        let marker0 = self.get("pp:marker")?.unwrap_or(ValueId::UNIT);
+        // the page parameters in force where the page starts: the last
+        // marker on the list before it, unless the start carries one (a
+        // routine set them)
+        let listed = |idx: usize| {
+            items[..idx.min(items.len())]
+                .iter()
+                .rev()
+                .copied()
+                .find(|&x| nodes::tag(v, x) == nodes::T_PAGE_PARAMS)
+                .unwrap_or(marker0)
+        };
+        let mut marker = start.marker.unwrap_or_else(|| listed(start.idx));
         let mut params = PageParams {
-            vsize: self.param("vsize")?,
-            max_depth: self.param("maxdepth")?,
-            top_skip: self.glue_param("topskip")?,
-            holding_inserts: self.param("holdinginserts")?,
+            vsize: 0,
+            max_depth: 0,
+            top_skip: Glue::ZERO,
+            holding_inserts: 0,
             saving_vdiscards: false,
         };
-        let mut queue: VecDeque<ValueId> = l.items.into_iter().collect();
+        set_params(v, &mut params, marker);
+        // what routine j-1 left goes first (§1026), then the material the
+        // fold carried over, then the list from where the page starts
+        let mut queue: VecDeque<ValueId> = if j > 0 {
+            self.page_effects(j - 1)?.into()
+        } else {
+            VecDeque::new()
+        };
+        queue.extend(start.carried.iter().copied());
+        let mut cursor = start.idx;
         let mut pb = PageBuilder::new();
         let mut side = Side::default();
-        let mut pages: Vec<ValueId> = Vec::new();
-        // §1054: `\end` appends its material until the page is empty
-        let mut ending: Option<ValueId> = None;
-        let mut deadcycles = 0u32;
-        // the marks in force after each fired page (§1012–§1014), by
-        // class: what a document node reading them at a later point sees
-        let mut marks = MarksState::default();
-        let mut published = std::collections::HashSet::new();
+        let mut ending = start.ending;
+        let mut deadcycles = start.deadcycles;
+        let mut passed: Vec<ValueId> = Vec::new();
+        let mut class = |n: u16| -> InsertClass {
+            for &c in &classes {
+                let xs = list_of(v, c);
+                let g = |i: usize| xs.get(i).map_or(0, |&y| int_of(v, y));
+                if g(0) == i64::from(n) {
+                    let h = g(1);
+                    return InsertClass {
+                        box_height_plus_depth: (h >= 0).then(|| i32::try_from(h).unwrap_or(0)),
+                        box_is_hbox: g(2) != 0,
+                        count: i32::try_from(g(3)).unwrap_or(0),
+                        dimen: i32::try_from(g(4)).unwrap_or(0),
+                        skip: crate::val::glue_of(v, xs.get(5).copied()),
+                    };
+                }
+            }
+            InsertClass {
+                box_height_plus_depth: None,
+                box_is_hbox: false,
+                count: 0,
+                dimen: 0,
+                skip: Glue::ZERO,
+            }
+        };
         loop {
-            let Some(x) = queue.pop_front() else {
+            let x = if let Some(x) = queue.pop_front() {
+                x
+            } else if let Some(&x) = items.get(cursor) {
+                cursor += 1;
+                x
+            } else {
                 if let Some(e) = ending
                     && !pb.page.is_empty()
                     && deadcycles < 25
@@ -232,9 +431,7 @@ impl Run<'_, '_> {
             match nodes::tag(v, x) {
                 nodes::T_END => {
                     ending = Some(x);
-                    // §1054: an empty page (and empty contributions: the
-                    // queue holds nothing before `\end`) ends the job
-                    // without another cycle
+                    // §1054: an empty page ends the job without a cycle
                     if pb.page.is_empty() {
                         continue;
                     }
@@ -245,25 +442,12 @@ impl Run<'_, '_> {
                     continue;
                 }
                 nodes::T_PAGE_PARAMS => {
-                    let xs = list_of(v, x);
-                    let n = |i: usize| {
-                        i32::try_from(xs.get(i).map_or(0, |&y| int_of(v, y))).unwrap_or(0)
-                    };
-                    params.vsize = n(1);
-                    params.max_depth = n(2);
-                    params.top_skip = crate::val::glue_of(v, xs.get(3).copied());
-                    params.holding_inserts = n(4);
+                    set_params(v, &mut params, x);
+                    marker = x;
                     continue;
                 }
                 nodes::T_MARKS_AT => {
-                    let node = crate::val::int_at(v, x, 1);
-                    if published.insert(node) {
-                        let n = u64::from_ne_bytes(node.to_ne_bytes());
-                        let f = v.field(&crate::etex::marks_before_field(n));
-                        if self.cx.is_loopback(f) {
-                            self.cx.publish(f, marks.value(v, !pages.is_empty()));
-                        }
-                    }
+                    passed.push(v.int(crate::val::int_at(v, x, 1)));
                     continue;
                 }
                 _ => {}
@@ -273,49 +457,56 @@ impl Run<'_, '_> {
             };
             let next = queue
                 .front()
-                .and_then(|&y| nodes::decode(v, y, &mut Side::default()));
-            let mut halt: Option<Halt> = None;
-            let out = {
-                let mut class = |n: u16| match self.insert_class(n) {
-                    Ok(c) => c,
-                    Err(h) => {
-                        halt.get_or_insert(h);
-                        InsertClass {
-                            box_height_plus_depth: None,
-                            box_is_hbox: false,
-                            count: 0,
-                            dimen: 0,
-                            skip: Glue::ZERO,
-                        }
-                    }
-                };
-                pb.contribute(p, next.as_ref(), &params, &mut class)
-            };
-            if let Some(h) = halt {
-                return Err(h);
-            }
-            match out {
-                Outcome::Done => {}
-                Outcome::Wait(k) => {
-                    // a kern waits for what follows it (§1000): nothing
-                    // does, the list is whole
-                    let _ = k;
-                }
+                .copied()
+                .or_else(|| items.get(cursor).copied())
+                .and_then(|y| nodes::decode(v, y, &mut Side::default()));
+            match pb.contribute(p, next.as_ref(), &params, &mut class) {
+                Outcome::Done | Outcome::Wait(_) => {}
                 Outcome::Fire(f) => {
-                    let j = pages.len();
-                    // the material the fold could not place goes on
-                    // (§1017); what the routine leaves is next round's
-                    let fx = self.page_effects(j)?;
-                    let mut rest: Vec<ValueId> = fx;
-                    rest.extend(f.contributions.iter().map(|n| nodes::encode(v, n, &side)));
-                    for y in rest.into_iter().rev() {
-                        queue.push_front(y);
+                    let mut carried: Vec<ValueId> =
+                        f.contributions.iter().map(|n| nodes::encode(v, n, &side)).collect();
+                    carried.extend(queue.drain(..));
+                    // the canonical end: the material carried over is
+                    // the list's own items before the cursor whenever it
+                    // can be (so a guess of the index alone matches)
+                    let mut idx = cursor;
+                    if carried.len() <= cursor && items[cursor - carried.len()..cursor] == carried[..] {
+                        idx = cursor - carried.len();
+                        carried.clear();
                     }
-                    marks.fire(v, &f.marks, &side);
+                    let end_state = PageStart {
+                        idx,
+                        carried,
+                        marker: (marker != listed(idx)).then_some(marker),
+                        ending,
+                        deadcycles,
+                    };
+                    let end_v = end_state.value(v);
+                    let marks: Vec<ValueId> = f
+                        .marks
+                        .iter()
+                        .filter_map(|&k| side.marks.get(k as usize).copied())
+                        .collect();
                     let data = self.page_data(&f, &side)?;
-                    pages.push(data);
-                    pb = PageBuilder::new();
-                    side = Side::default();
+                    let known = match next_f {
+                        Some(nf) => {
+                            self.cx.publish(nf, end_v);
+                            self.cx
+                                .use_field(nf)?
+                                .is_some_and(|x| x != ValueId::UNIT && PageStart::of(v, x).is_some())
+                        }
+                        None => true,
+                    };
+                    if marks_read {
+                        self.publish_pmarks(j, start_v, passed, Some(marks));
+                    }
+                    self.kid(op, vec![v.int(j as i64), data]);
+                    if !known {
+                        // no page after this one is known yet: its `brk`,
+                        // from this end (the plan has it next round)
+                        self.kid(self.ops.brk, vec![v.int(j as i64 + 1), end_v]);
+                    }
+                    return Ok(());
                 }
             }
         }
@@ -325,17 +516,27 @@ impl Run<'_, '_> {
                 "\\end could not empty the page (an output routine that never ships?)",
             );
         }
-        let output = self.get("param:output")?;
-        let any = toks_of(v, output).is_empty();
-        let op = if any {
-            self.ops.pagestep_any
-        } else {
-            self.ops.pagestep
-        };
-        for (j, d) in pages.into_iter().enumerate() {
-            self.kid(op, vec![v.int(i64::try_from(j).unwrap_or(0)), d]);
+        if let Some(nf) = next_f {
+            self.cx.publish(nf, end);
+        }
+        if marks_read {
+            self.publish_pmarks(j, start_v, passed, None);
         }
         Ok(())
+    }
+
+    /// `pmarks:<j>`: the start this `brk` folded from, the nodes reading
+    /// marks it passed, and its page's marks (none: the list ended).
+    fn publish_pmarks(&mut self, j: usize, start: ValueId, passed: Vec<ValueId>, marks: Option<Vec<ValueId>>) {
+        let v = self.v;
+        let f = v.field(&format!("pmarks:{j}"));
+        if self.cx.is_loopback(f) {
+            let mut xs = vec![start, v.list(passed)];
+            if let Some(m) = marks {
+                xs.push(v.list(m));
+            }
+            self.cx.publish(f, v.list(xs));
+        }
     }
 
     /// What routine `j` left for the fold in the previous round
@@ -393,6 +594,35 @@ impl Run<'_, '_> {
     /// insertion boxes defined, then the output routine run inline on
     /// this run's nest, or the page shipped (§1023).
     pub(crate) fn page_step(&mut self, args: &[ValueId]) -> R<()> {
+        let v = self.v;
+        let j = self.page_index();
+        // `\count0..9` as the step before this one left them (`pgdef:<j-1>`,
+        // a loop-back: the build's guess in round one): read from there,
+        // not through the step before, so the steps do not chain
+        if j > 0 && j < MAX_PAGES {
+            let f = v.field(&format!("pgdef:{}", j - 1));
+            if let Some(x) = self.cx.use_field(f)? {
+                let xs = list_of(v, x);
+                if xs.len() == 10 {
+                    for (k, &c) in xs.iter().enumerate() {
+                        let cf = self.ops.fields.get_at(v, self.cx.values_epoch(), &format!("count:{k}"));
+                        self.over.insert(cf, c);
+                    }
+                }
+            }
+        }
+        self.page_step_run(args)?;
+        if j < MAX_PAGES {
+            let mut cs = Vec::new();
+            for k in 0..10 {
+                cs.push(v.int(self.int(&format!("count:{k}"))?));
+            }
+            self.cx.publish(v.field(&format!("pgdef:{j}")), v.list(cs));
+        }
+        Ok(())
+    }
+
+    fn page_step_run(&mut self, args: &[ValueId]) -> R<()> {
         let v = self.v;
         let data = args.get(1).map(|&d| list_of(v, d)).unwrap_or_default();
         let a = |i: usize| data.get(i).copied().unwrap_or(ValueId::UNIT);
@@ -543,13 +773,9 @@ impl Run<'_, '_> {
 struct MarksState(std::collections::BTreeMap<i32, [Option<ValueId>; 3]>);
 
 impl MarksState {
-    /// A page fires with marks `ks` (numbers into `side.marks`).
-    fn fire(&mut self, v: &Values, ks: &[u32], side: &Side) {
-        let page: Vec<(i32, ValueId)> = ks
-            .iter()
-            .filter_map(|&k| side.marks.get(k as usize).copied())
-            .map(|m| crate::etex::mark_class(v, m))
-            .collect();
+    /// A page fires with the marks `ms` (their values, in order).
+    fn fire_values(&mut self, v: &Values, ms: &[ValueId]) {
+        let page: Vec<(i32, ValueId)> = ms.iter().map(|&m| crate::etex::mark_class(v, m)).collect();
         for &(c, _) in &page {
             self.0.entry(c).or_default();
         }
@@ -588,12 +814,103 @@ impl MarksState {
     }
 }
 
-/// `Breaks`: the page builder's fold over the main vertical list.
-pub(crate) struct Breaks(pub Shared);
+/// Where a page starts in the main list (`pstart:<j>`): the index of
+/// the first item not yet contributed, the material carried over before
+/// it (§1017: none when it is the list's own items, which the index then
+/// covers), the page parameters when a routine set them (`None`: the
+/// list's own marker before the index), `\end`'s item once met, and the
+/// dead cycles `\end` spent (§1054). `"end"`: the list ended before.
+#[derive(Clone)]
+pub(crate) struct PageStart {
+    pub idx: usize,
+    pub carried: Vec<ValueId>,
+    pub marker: Option<ValueId>,
+    pub ending: Option<ValueId>,
+    pub deadcycles: u32,
+}
 
-impl Operation for Breaks {
+impl PageStart {
+    pub(crate) const FIRST: PageStart = PageStart {
+        idx: 0,
+        carried: Vec::new(),
+        marker: None,
+        ending: None,
+        deadcycles: 0,
+    };
+
+    pub(crate) fn value(&self, v: &Values) -> ValueId {
+        let o = |x: Option<ValueId>| x.unwrap_or(ValueId::UNIT);
+        v.list(vec![
+            v.int(i64::try_from(self.idx).unwrap_or(0)),
+            v.list(self.carried.clone()),
+            o(self.marker),
+            o(self.ending),
+            v.int(i64::from(self.deadcycles)),
+        ])
+    }
+
+    /// The start a value names; `None` for the end (or no value).
+    pub(crate) fn of(v: &Values, x: ValueId) -> Option<PageStart> {
+        let Value::List(xs) = &*v.get(x) else {
+            return None;
+        };
+        if xs.len() != 5 {
+            return None;
+        }
+        let some = |y: ValueId| (y != ValueId::UNIT).then_some(y);
+        Some(PageStart {
+            idx: usize::try_from(int_of(v, xs[0])).unwrap_or(0),
+            carried: list_of(v, xs[1]),
+            marker: some(xs[2]),
+            ending: some(xs[3]),
+            deadcycles: u32::try_from(int_of(v, xs[4])).unwrap_or(0),
+        })
+    }
+}
+
+/// The page parameters a `T_PAGE_PARAMS` marker carries.
+fn set_params(v: &Values, p: &mut PageParams, x: ValueId) {
+    let xs = list_of(v, x);
+    if xs.len() < 5 {
+        return;
+    }
+    let n = |i: usize| i32::try_from(xs.get(i).map_or(0, |&y| int_of(v, y))).unwrap_or(0);
+    p.vsize = n(1);
+    p.max_depth = n(2);
+    p.top_skip = crate::val::glue_of(v, xs.get(3).copied());
+    p.holding_inserts = n(4);
+}
+
+/// `pageplan`: the main list folded once, the pages' `brk` nodes.
+pub(crate) struct PagePlan(pub Shared);
+
+impl Operation for PagePlan {
     fn name(&self) -> &'static str {
-        "breaks"
+        "pageplan"
+    }
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        None
+    }
+    fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
+        MayDefine::Prefixes(vec!["pp:".to_owned()])
+    }
+    fn may_define_field(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
+        client_only(v, f)
+    }
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::None
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        run_node(cx, ops(&self.0), |r| r.page_plan())
+    }
+}
+
+/// `brk:<j>`: one page's breaks (§994–§1017), the page's step its child.
+pub(crate) struct Brk(pub Shared);
+
+impl Operation for Brk {
+    fn name(&self) -> &'static str {
+        "brk"
     }
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         Some(Vec::new())
@@ -604,9 +921,9 @@ impl Operation for Breaks {
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }
-    #[allow(clippy::redundant_closure_for_method_calls)]
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        run_node(cx, ops(&self.0), |r| r.breaks())
+        let args = cx.args();
+        run_node(cx, ops(&self.0), |r| r.brk(&args))
     }
 }
 
@@ -629,8 +946,10 @@ impl Operation for PageStep {
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         None
     }
+    /// Never the plan's fields (`pp:`), which the `brk` nodes after a
+    /// step read: their walk does not wait on the step for them.
     fn may_define_field(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
-        client_only(v, f)
+        client_only(v, f) && !matches!(&*v.get(f.0), Value::Str(s) if s.starts_with("pp:"))
     }
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
