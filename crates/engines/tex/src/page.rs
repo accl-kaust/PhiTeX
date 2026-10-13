@@ -31,6 +31,7 @@ use phitex_typeset::pack::{PackParams, Spec};
 use phitex_typeset::page::{InsertClass, Outcome, PageBuilder, PageParams};
 
 use crate::build::Mode;
+use crate::fields::Par;
 use crate::nodes::{self, Side};
 use crate::ops::{Shared, client_only, ops, run_node};
 use crate::run::{Halt, R, Run};
@@ -197,10 +198,10 @@ impl Run<'_, '_> {
         let v = self.v;
         let l = self.list_fold(0)?;
         let mut params = PageParams {
-            vsize: self.param("vsize")?,
-            max_depth: self.param("maxdepth")?,
-            top_skip: self.glue_param("topskip")?,
-            holding_inserts: self.param("holdinginserts")?,
+            vsize: self.ipar(Par::vsize)?,
+            max_depth: self.ipar(Par::maxdepth)?,
+            top_skip: self.gpar(Par::topskip)?,
+            holding_inserts: self.ipar(Par::holdinginserts)?,
             saving_vdiscards: false,
         };
         let mut queue: VecDeque<ValueId> = l.items.into_iter().collect();
@@ -325,7 +326,7 @@ impl Run<'_, '_> {
                 "\\end could not empty the page (an output routine that never ships?)",
             );
         }
-        let output = self.get("param:output")?;
+        let output = self.par(Par::output)?;
         let any = toks_of(v, output).is_empty();
         let op = if any {
             self.ops.pagestep_any
@@ -447,7 +448,7 @@ impl Run<'_, '_> {
             self.set(&format!("box:{n}"), v.list(vec![v.int(0), b]), true);
         }
         self.set("param:outputpenalty", v.int(output_penalty), true);
-        let output = self.get("param:output")?;
+        let output = self.par(Par::output)?;
         let otoks = toks_of(v, output);
         if otoks.is_empty() {
             // §1023: the default output routine
@@ -513,10 +514,10 @@ impl Run<'_, '_> {
     /// (`T_PAGE_PARAMS`).
     pub(crate) fn page_params_marker(&mut self) -> R<ValueId> {
         let v = self.v;
-        let vsize = self.param("vsize")?;
-        let maxdepth = self.param("maxdepth")?;
-        let topskip = self.glue_param("topskip")?;
-        let holding = self.param("holdinginserts")?;
+        let vsize = self.ipar(Par::vsize)?;
+        let maxdepth = self.ipar(Par::maxdepth)?;
+        let topskip = self.gpar(Par::topskip)?;
+        let holding = self.ipar(Par::holdinginserts)?;
         Ok(v.list(vec![
             v.int(nodes::T_PAGE_PARAMS),
             v.int(i64::from(vsize)),

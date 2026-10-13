@@ -7,10 +7,11 @@ use std::rc::Rc;
 use phitex_defuse::ValueId;
 use phitex_typeset::glue::Glue;
 
+use crate::fields::Par;
 use crate::run::{R, Run};
 use crate::val::{
     CAT_CODE_BASE, DEL_CODE_BASE, MATH_CODE_BASE, Macro, Mean, OUTPUT_ROUTINE_LOC, SF_CODE_BASE,
-    TOKS_BASE, Tok, cmd, glue_of, glue_value, int_of, list_of, quantity_field, str_of, toks_value,
+    TOKS_BASE, Tok, cmd, glue_of, glue_value, int_of, list_of, str_of, toks_value,
 };
 
 const BOX_FLAG: i64 = 0o10000000000;
@@ -62,7 +63,10 @@ impl Run<'_, '_> {
         });
         static FROM: OnceLock<u64> = OnceLock::new();
         let from = *FROM.get_or_init(|| {
-            std::env::var("PHITEX_HEARTBEAT_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX)
+            std::env::var("PHITEX_HEARTBEAT_FROM")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(u64::MAX)
         });
         let trace = n >= from && n < from.saturating_add(150_000);
         if n % 100_000 != 0 && !trace {
@@ -78,7 +82,11 @@ impl Run<'_, '_> {
             .unwrap_or_default();
         let mut last = String::new();
         crate::print::print_cs(&mut last, &self.cur.tok, i64::from(b'\\'), &mut |c| {
-            if char::from_u32(c).is_some_and(char::is_alphabetic) { 11 } else { 12 }
+            if char::from_u32(c).is_some_and(char::is_alphabetic) {
+                11
+            } else {
+                12
+            }
         });
         eprintln!(
             "hb{} {:.1}s cmds {n} {file}:{line} last {last} cmd {} mode {} defs {} own {} nest {} frames {}",
@@ -214,7 +222,7 @@ impl Run<'_, '_> {
                     self.new_graf(&md, ind)?;
                 } else if self.cur.chr > 0 {
                     // §1093
-                    let w = self.int32("param:parindent")?;
+                    let w = self.ipar(Par::parindent)?;
                     let b = crate::build::null_box(self.v, w);
                     self.append(md.lid, b);
                     if h {
@@ -400,7 +408,7 @@ impl Run<'_, '_> {
         }
         let protected = crate::etex::take_protected(&mut a);
         // §1214
-        let gd = self.param("globaldefs")?;
+        let gd = self.ipar(Par::globaldefs)?;
         if gd != 0 {
             if gd < 0 {
                 if a >= 4 {
@@ -509,7 +517,7 @@ impl Run<'_, '_> {
                 } else {
                     self.cur.chr
                 };
-                let field = quantity_field(cmd::ASSIGN_TOKS, loc);
+                let field = self.quantity(cmd::ASSIGN_TOKS, loc);
                 self.scan_optional_equals()?;
                 self.skip_blanks_relax_x()?;
                 if self.cur.cmd != cmd::LEFT_BRACE {
@@ -522,9 +530,9 @@ impl Run<'_, '_> {
                         src = Some(self.cur.chr);
                     }
                     if let Some(s) = src {
-                        let x = self.get(&quantity_field(cmd::ASSIGN_TOKS, s))?;
+                        let x = self.qget(cmd::ASSIGN_TOKS, s)?;
                         let val = x.unwrap_or_else(|| v.list(Vec::new()));
-                        self.set(&field, val, global);
+                        self.set_f(field, val, global);
                         return self.after_assignment();
                     }
                 }
@@ -535,26 +543,26 @@ impl Run<'_, '_> {
                     body.push(Tok::ch(2, u32::from(b'}')));
                 }
                 let val = toks_value(v, &body);
-                self.set(&field, val, global);
+                self.set_f(field, val, global);
             }
             cmd::ASSIGN_INT => {
-                let f = quantity_field(cmd::ASSIGN_INT, self.cur.chr);
+                let f = self.quantity(cmd::ASSIGN_INT, self.cur.chr);
                 self.scan_optional_equals()?;
                 let n = self.scan_int()?;
-                self.set(&f, v.int(i64::from(n)), global);
+                self.set_f(f, v.int(i64::from(n)), global);
             }
             cmd::ASSIGN_DIMEN => {
-                let f = quantity_field(cmd::ASSIGN_DIMEN, self.cur.chr);
+                let f = self.quantity(cmd::ASSIGN_DIMEN, self.cur.chr);
                 self.scan_optional_equals()?;
                 let n = self.scan_normal_dimen()?;
-                self.set(&f, v.int(i64::from(n)), global);
+                self.set_f(f, v.int(i64::from(n)), global);
             }
             cmd::ASSIGN_GLUE | cmd::ASSIGN_MU_GLUE => {
                 let n = self.cur.cmd;
-                let f = quantity_field(n, self.cur.chr);
+                let f = self.quantity(n, self.cur.chr);
                 self.scan_optional_equals()?;
                 let g = self.scan_glue(if n == cmd::ASSIGN_MU_GLUE { 3 } else { 2 })?;
-                self.set(&f, glue_value(v, &g), global);
+                self.set_f(f, glue_value(v, &g), global);
             }
             cmd::DEF_CODE => {
                 // §1232
@@ -749,33 +757,21 @@ impl Run<'_, '_> {
         let q = self.cur.cmd;
         let v = self.v;
         // §1237
-        let (field, p): (String, u8) = if q == cmd::REGISTER {
+        let (field, p): (phitex_defuse::Field, u8) = if q == cmd::REGISTER {
             let p = u8::try_from(self.cur.chr).unwrap_or(0);
             let n = self.scan_eight_bit_int()?;
-            (
-                format!(
-                    "{}:{n}",
-                    ["count", "dimen", "skip", "muskip"][usize::from(p.min(3))]
-                ),
-                p,
-            )
+            (self.reg_field(usize::from(p.min(3)), n), p)
         } else {
             self.get_x_token()?;
             if self.cur.cmd >= cmd::ASSIGN_INT && self.cur.cmd <= cmd::ASSIGN_MU_GLUE {
                 (
-                    quantity_field(self.cur.cmd, self.cur.chr),
+                    self.quantity(self.cur.cmd, self.cur.chr),
                     self.cur.cmd - cmd::ASSIGN_INT,
                 )
             } else if self.cur.cmd == cmd::REGISTER {
                 let p = u8::try_from(self.cur.chr).unwrap_or(0);
                 let n = self.scan_eight_bit_int()?;
-                (
-                    format!(
-                        "{}:{n}",
-                        ["count", "dimen", "skip", "muskip"][usize::from(p.min(3))]
-                    ),
-                    p,
-                )
+                (self.reg_field(usize::from(p.min(3)), n), p)
             } else {
                 // "You can't use x after \advance"
                 return Ok(());
@@ -786,7 +782,7 @@ impl Run<'_, '_> {
         } else {
             let _ = self.scan_keyword("by")?;
         }
-        let old = self.get(&field)?;
+        let old = self.read_f(field)?;
         if p < 2 {
             let cur = i64::from(crate::val::i32_of(v, old));
             let r: Option<i32> = if q < cmd::MULTIPLY {
@@ -823,7 +819,7 @@ impl Run<'_, '_> {
                 // "Arithmetic overflow"
                 return Ok(());
             };
-            self.set(&field, v.int(i64::from(r)), global);
+            self.set_f(field, v.int(i64::from(r)), global);
         } else {
             let s = glue_of(v, old);
             let r: Option<Glue> = if q < cmd::MULTIPLY {
@@ -858,7 +854,7 @@ impl Run<'_, '_> {
                 }
             };
             let Some(r) = r else { return Ok(()) };
-            self.set(&field, glue_value(v, &r), global);
+            self.set_f(field, glue_value(v, &r), global);
         }
         Ok(())
     }
@@ -952,8 +948,8 @@ impl Run<'_, '_> {
             v.int(i64::try_from(params.len()).unwrap_or(0)),
             true,
         );
-        let hc = self.int("param:defaulthyphenchar")?;
-        let sc = self.int("param:defaultskewchar")?;
+        let hc = i64::from(self.ipar(Par::defaulthyphenchar)?);
+        let sc = i64::from(self.ipar(Par::defaultskewchar)?);
         self.set(&format!("hc:{f}"), v.int(hc), true);
         self.set(&format!("sc:{f}"), v.int(sc), true);
         Ok(f)
@@ -964,7 +960,7 @@ impl Run<'_, '_> {
     /// needs them.
     fn new_patterns(&mut self) -> R<()> {
         self.scan_left_brace()?;
-        let lang = phitex_typeset::hyph::cur_lang(self.param("language")?);
+        let lang = phitex_typeset::hyph::cur_lang(self.ipar(Par::language)?);
         let mut words: Vec<ValueId> = Vec::new();
         let mut word = String::new();
         let mut digit_sensed = false;
@@ -1011,7 +1007,7 @@ impl Run<'_, '_> {
     /// `\hyphenation` (§934–§939).
     fn new_hyph_exceptions(&mut self) -> R<()> {
         self.scan_left_brace()?;
-        let lang = phitex_typeset::hyph::cur_lang(self.param("language")?);
+        let lang = phitex_typeset::hyph::cur_lang(self.ipar(Par::language)?);
         let v = self.v;
         let mut words: Vec<ValueId> = Vec::new();
         let mut word = String::new();
@@ -1122,7 +1118,7 @@ impl Run<'_, '_> {
                 self.set(&field, ValueId::UNIT, true);
             }
             let text = line.unwrap_or_default();
-            let e = self.int("param:endlinechar")?;
+            let e = i64::from(self.ipar(Par::endlinechar)?);
             let frames = vec![crate::run::src_frame(&text, e)];
             let saved = std::mem::take(&mut self.frames);
             let saved_eof = self.eof;
@@ -1175,7 +1171,7 @@ impl Run<'_, '_> {
         match self.cur.chr {
             0 => {
                 self.get_token()?;
-                let esc = self.int("param:escapechar")?;
+                let esc = i64::from(self.ipar(Par::escapechar)?);
                 if self.cur.is_cs() {
                     crate::print::sprint_cs(&mut s, &self.cur.tok, esc);
                     s.push('=');
@@ -1294,7 +1290,7 @@ impl Run<'_, '_> {
                 .get(&format!("write:{k}"))?
                 .and_then(|x| list_of(v, x).first().map(|&n| str_of(v, n)))
                 .unwrap_or_default();
-            let nl = self.int("param:newlinechar")?;
+            let nl = i64::from(self.ipar(Par::newlinechar)?);
             let mut line: String = s
                 .chars()
                 .map(|c| {
