@@ -1717,6 +1717,48 @@ impl Build {
         );
         stats.live = self.g.eng.live_nodes();
         self.stats = stats;
+        // `PHITEX_CLAIMS=<text>`: the nodes whose slice holds the text,
+        // their claims and their descendants' (a debugging dump)
+        if let Ok(want) = std::env::var("PHITEX_CLAIMS") {
+            let v = self.g.eng.values();
+            let eng = &self.g.eng;
+            fn dump(eng: &Engine, v: &Values, n: NodeId, depth: usize) {
+                let Some(i) = eng.node_info(n) else { return };
+                let a = i
+                    .args
+                    .first()
+                    .map(|&x| v.render(x).chars().take(60).collect::<String>())
+                    .unwrap_or_default();
+                let claimed: Vec<String> = eng
+                    .claimed(n)
+                    .iter()
+                    .map(|&c| {
+                        eng.node_info(c)
+                            .and_then(|ci| ci.args.first().map(|&x| v.render(x)))
+                            .map(|t| t.chars().take(30).collect::<String>())
+                            .unwrap_or_else(|| "?".to_owned())
+                    })
+                    .collect();
+                eprintln!(
+                    "{}{} {:?} {} claims {:?}",
+                    "  ".repeat(depth),
+                    n.raw() % 100_000,
+                    i.state,
+                    a,
+                    claimed
+                );
+                if depth < 4 {
+                    for c in eng.children(n) {
+                        dump(eng, v, c, depth + 1);
+                    }
+                }
+            }
+            for (k, n) in &self.nodes {
+                if k.contains(&want) {
+                    dump(eng, v, *n, 0);
+                }
+            }
+        }
         if let Some(cb) = self.opts.on_page_settled.clone() {
             let pages = self.pages();
             for (k, &h) in pages.iter().enumerate() {
@@ -2217,7 +2259,7 @@ impl Build {
                     describe(n),
                     describe(by)
                 )),
-                Cause::Raised { to } => {
+                Cause::Raised { to, .. } => {
                     out.push(format!("Raised to {to}\n    node: {}", describe(n)));
                 }
                 _ => {}
