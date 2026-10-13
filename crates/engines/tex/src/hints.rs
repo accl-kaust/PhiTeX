@@ -1799,6 +1799,12 @@ impl Analysis<'_> {
             add_head(&mut b.state, "aftertoken");
         }
         self.calls_state(&it.hints.calls, &mut b.state);
+        // (a macro's run expands its body inline: the state of every
+        // command its body calls, transitively, the closure's calls)
+        if !crate::prims::PRIMS.iter().any(|q| q.0 == name) {
+            let set = self.defset(name);
+            self.calls_state(&set.calls, &mut b.state);
+        }
         match &it.hints.may_define {
             pass::MayDefine::Nothing => true,
             pass::MayDefine::Names(ds) => {
@@ -1908,6 +1914,16 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
             .clone()
     };
     let mut skip = Vec::with_capacity(an.p.atoms.len());
+    // (the atoms a primitive reads: never run on their own; a command
+    // a macro is only guessed to read runs in the slice, so it counts)
+    let mut prim_operand = vec![false; an.p.atoms.len()];
+    for it in &an.p.items {
+        if crate::prims::PRIMS.iter().any(|q| q.0 == it.name) {
+            for c in prim_operand.iter_mut().take(it.end.min(an.p.atoms.len())).skip(it.atom + 1) {
+                *c = true;
+            }
+        }
+    }
     let mut prev_char = false;
     for a in 0..an.p.atoms.len() {
         let at = &an.p.atoms[a];
@@ -1919,7 +1935,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         // slice: its rows count in the union)
         skip.push(
             (ch && prev_char)
-                || (an.claimed[a] && at.kind != AtomKind::Cs)
+                || (an.claimed[a] && (at.kind != AtomKind::Cs || prim_operand[a]))
                 || at.kind == AtomKind::Space,
         );
         prev_char = ch;
@@ -2357,13 +2373,6 @@ pub(crate) fn effect_none(v: &Values, args: &[ValueId]) -> bool {
         .is_some_and(|b| b.no_scope)
 }
 
-/// Whether the node is a document region (its hint was computed for a
-/// region: a paragraph that must end in the vertical list it began in).
-pub(crate) fn is_region(v: &Values, args: &[ValueId]) -> bool {
-    let h = hint_of_args(v, args);
-    h.cause == "region" || h.cause.starts_with("region: ")
-}
-
 /// The fields the hint rests on, which the node reads first: the
 /// meanings of the names its text calls (`cs:name`, `act:code`) and the
 /// catcodes its bytes were read with (`cat:c`).
@@ -2597,6 +2606,23 @@ mod tests {
         let b = h.bound.expect("bounded: `~` defines nothing in the text");
         assert!(b.means.contains(&("act:126".to_owned(), 1)), "{b:?}");
         assert!(b.cats.contains(&(b'~', 13)));
+    }
+
+    #[test]
+    fn control_space_after_a_macro_is_a_region() {
+        let t = "\\def\\hello{Hello}\n\\hello\\ world.\n\\bye\n";
+        let an = Analysis::new(t, FileKind::Document, no_defs().clone());
+        for (k, a) in an.p.atoms.iter().enumerate() {
+            eprintln!("{k} {:?} {:?} claimed {}", a.kind, &t[a.start..a.end], an.claimed[k]);
+        }
+        for it in &an.p.items {
+            eprintln!("item {} {}..{} {:?}", it.name, it.atom, it.end, it.hints.implicit);
+        }
+        let (sl, pars) = slices_of(t, &an.p, FileKind::Document);
+        eprintln!("{sl:?} {pars:?}");
+        let h = t.find("\\hello\\").expect("call");
+        let k = sl.iter().position(|x| x.0 <= h && h < x.1).expect("a slice");
+        assert!(pars[k], "{sl:?} {pars:?}");
     }
 
     #[test]
