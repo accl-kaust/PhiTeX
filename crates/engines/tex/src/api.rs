@@ -97,6 +97,11 @@ pub struct Options {
     /// session of the same document; empty: none left (the declared
     /// value).
     pub pagefx: Vec<u8>,
+    /// The round-one values of the page chain's loop-backs (`pgst:<j>`
+    /// and `pgdef:<j>`, the state each page's routine leaves for the
+    /// next), as [`Build::export_pgst`] gave them in an earlier session
+    /// of the same document; empty: the cold guesses.
+    pub pgst: Vec<u8>,
     /// The loop-back rounds an evaluation may take before it ends with
     /// a no-fixpoint error naming the loop-back fields (a document whose
     /// written files oscillate), instead of running on.
@@ -388,6 +393,7 @@ impl Default for Options {
             fixpoint: false,
             wkeys: Vec::new(),
             pagefx: Vec::new(),
+            pgst: Vec::new(),
             prelude_jobname: "texput".to_owned(),
             prelude_bytes: None,
             time_limit: Some(std::time::Duration::from_secs(600)),
@@ -905,6 +911,10 @@ pub struct Stats {
     /// The fields whose speculative reads were refuted, with counts,
     /// most first.
     pub refuted_by_field: Vec<(String, u64)>,
+    /// The page chain's loop-back guesses the evaluation refuted, with
+    /// the fields that refuted them (`refuted: <fields> at page <n>
+    /// (<loop-back>)`).
+    pub refuted_guesses: Vec<String>,
     /// The engine's speculative runs: kept with outstanding
     /// assumptions, confirmed, and whose assumptions failed; and nodes
     /// re-done higher after running below a finished input (raises).
@@ -1126,6 +1136,17 @@ struct Graph {
 impl Graph {
     /// The page-step runs that reached their finish since the last call,
     /// by page index ([`Stats::page_steps_completed`]).
+    fn take_refuted(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .ops
+                .lblog
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+        .refuted()
+    }
+
     fn take_steps_done(&self) -> Vec<u64> {
         std::mem::take(
             &mut *self
@@ -1168,7 +1189,7 @@ impl Graph {
         });
         let pageplan = eng.register(Arc::new(crate::page::PagePlan(shared.clone())));
         let brk = eng.register(Arc::new(crate::page::Brk(shared.clone())));
-        let dvi = eng.register(Arc::new(Dvi));
+        let dvi = eng.register(Arc::new(Dvi(shared.clone())));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
@@ -1187,6 +1208,7 @@ impl Graph {
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             steps_done: Arc::new(Mutex::new(Vec::new())),
+            lblog: Arc::new(Mutex::new(crate::page::LbLog::default())),
         };
         let _ = shared.set(ops.clone());
         for f in [
@@ -1203,6 +1225,8 @@ impl Graph {
             "wplan",
             "fread",
             "pagefxs",
+            "pgdeltas",
+            "pgsts",
             crate::pdfrelaxed::PIECES,
         ] {
             let fld = eng.values().field(f);
@@ -1220,10 +1244,15 @@ impl Graph {
             // guess in round one, `page_guesses`)
             let f = eng.values().field(&format!("pgdef:{j}"));
             eng.declare_loopback(f, ValueId::UNIT);
-            // what `\\deadcycles` is after page j's step (guess: UNIT, 0)
-            let f = eng.values().field(&format!("pagedc:{j}"));
+            // what the routines up to page j left changed, besides
+            // `\count0..9` (the chain's cumulative delta, folded by the
+            // writer; guess: none)
+            let f = eng.values().field(&format!("pgst:{j}"));
             eng.declare_loopback(f, ValueId::UNIT);
         }
+        // refuted rounds of the page chain (two: it runs serially)
+        let f = eng.values().field("pgref");
+        eng.declare_loopback(f, ValueId::UNIT);
         for f in crate::hints::COUNTERS {
             let fld = eng.values().field(f);
             eng.declare_accumulator(fld, Arc::new(SumMonoid));
@@ -2425,6 +2454,7 @@ impl Build {
         // page break, its children the pages
         let end = g.eng.push(unit, g.ops.pageplan, Vec::new());
         page_guesses(&mut g, &env);
+        chain_guesses(&mut g, &opts.pgst);
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
         let files_op = g.files_op;
@@ -2515,6 +2545,11 @@ impl Build {
         self.g.watch.offsets = Arc::new(offsets);
         let mut stats = Stats::default();
         self.g.take_steps_done();
+        self.g.take_refuted();
+        // the serial fallback is per evaluation: an edit starts with the
+        // page chain parallel again (its guesses the last values)
+        let f = self.g.eng.values().field("pgref");
+        self.g.eng.declare_loopback(f, ValueId::UNIT);
         self.g.queries.clear();
         // (the files sliced into the document's regions were read)
         let sliced: Vec<(String, bool)> = self
@@ -2551,6 +2586,7 @@ impl Build {
         }
         stats.live = self.g.eng.live_nodes();
         stats.page_steps_completed = self.g.take_steps_done();
+        stats.refuted_guesses = self.g.take_refuted();
         self.stats = stats;
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             let (nodes, units, values) = self.sizes();
@@ -2814,6 +2850,36 @@ impl Build {
         }
         let mut out = Vec::new();
         for (j, x) in last {
+            out.extend_from_slice(&j.to_le_bytes());
+            put_tree(&mut out, &export(v, x));
+        }
+        out
+    }
+
+    /// The page chain's loop-backs as the last build's writer folded
+    /// them (`pgst:<j>`, `pgdef:<j>`), serialised: [`Options::pgst`] for
+    /// a later session of the same document.
+    #[must_use]
+    pub fn export_pgst(&self) -> Vec<u8> {
+        let v = self.g.eng.values();
+        let mut last: Vec<((u64, u64), ValueId)> = Vec::new();
+        if let Some(s) = self.g.eng.acc_value(self.unit, v.field("pgsts")) {
+            for e in v.seq_to_vec(s) {
+                let xs = list_of(v, e);
+                let (Some(&k), Some(&j), Some(&x)) = (xs.first(), xs.get(1), xs.get(2)) else {
+                    continue;
+                };
+                let n = |y| u64::try_from(crate::val::int_of(v, y)).unwrap_or(0);
+                let key = (n(k), n(j));
+                match last.iter_mut().find(|(q, _)| *q == key) {
+                    Some(slot) => slot.1 = x,
+                    None => last.push((key, x)),
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for ((k, j), x) in last {
+            out.extend_from_slice(&k.to_le_bytes());
             out.extend_from_slice(&j.to_le_bytes());
             put_tree(&mut out, &export(v, x));
         }
@@ -3345,6 +3411,22 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
     }
     for (f, x) in sets {
         g.eng.set_env(unit, f, x);
+    }
+}
+
+/// The last session's page-chain loop-backs ([`Build::export_pgst`]):
+/// `[kind, j, value]`, kind 0 `pgst:<j>`, 1 `pgdef:<j>`; declared after
+/// the cold guesses, which they replace.
+fn chain_guesses(g: &mut Graph, bytes: &[u8]) {
+    let mut rd = Rd(bytes);
+    while let (Some(k), Some(j), Some(t)) = (rd.u64(), rd.u64(), rd.tree()) {
+        if usize::try_from(j).is_ok_and(|j| j < crate::page::MAX_PAGES) {
+            let v = g.eng.values();
+            let name = if k == 0 { "pgst" } else { "pgdef" };
+            let f = v.field(&format!("{name}:{j}"));
+            let x = import(v, &t);
+            g.eng.declare_loopback(f, x);
+        }
     }
 }
 
