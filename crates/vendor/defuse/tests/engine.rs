@@ -2028,7 +2028,7 @@ fn the_critical_chain_names_each_wait_and_its_cause() {
         chain[1]
     );
     assert!(
-        matches!(chain[2].1, defuse::Cause::Created { by: None }),
+        matches!(chain[2].1, defuse::Cause::Created { by: None, .. }),
         "{:?}",
         chain[2]
     );

@@ -262,34 +262,50 @@ fn pdf_state_cutoff() {
     assert!(same < changed, "no cutoff: {same} >= {changed}");
 }
 
-/// The executor's counters on a plain document (story.tex) at 4 threads
-/// and at 1.
+/// The executor's counters on plain documents (story.tex, pages.tex)
+/// at 1, 4 and 16 threads, with the same output at each.
 #[test]
 fn parallel_counters() {
     let fx = common::fixtures().join("plain");
-    let src = common::read(&fx.join("story.tex"));
     let prelude = common::plain();
-    let run = |t: usize| {
-        let opts = phitex_tex::Options {
-            threads: Some(t),
-            ..common::options("./story.tex", "story", "", &fx)
+    for name in ["story", "pages"] {
+        let src = common::read(&fx.join(format!("{name}.tex")));
+        let run = |t: usize| {
+            let opts = phitex_tex::Options {
+                threads: Some(t),
+                ..common::options(&format!("./{name}.tex"), name, "", &fx)
+            };
+            let b = common::build(opts, Some(&prelude), &src);
+            let s = b.stats.clone();
+            eprintln!(
+                "{name} {t} threads: wall {:?} busy {:?} peak {} critical path {:?} nodes run {}, \
+                 batches {} ({} inline), largest {}",
+                s.wall,
+                s.busy,
+                s.peak_running,
+                s.critical_path,
+                s.nodes_run,
+                s.batches,
+                s.batches_inline,
+                s.jobs_max_batch
+            );
+            (s, b.output().0)
         };
-        let b = common::build(opts, Some(&prelude), &src);
-        let s = b.stats.clone();
-        eprintln!(
-            "{t} threads: threads {} wall {:?} busy {:?} peak {} critical path {:?} nodes run {}",
-            s.threads, s.wall, s.busy, s.peak_running, s.critical_path, s.nodes_run
+        let (four, out4) = run(4);
+        assert_eq!(four.threads, 4);
+        assert!(four.peak_running <= 4 && four.peak_running >= 1);
+        assert!(four.critical_path.is_some());
+        let (one, out1) = run(1);
+        assert_eq!(one.threads, 1);
+        assert_eq!(one.peak_running, 1);
+        assert_eq!(one.batches, one.batches_inline);
+        assert!(one.busy <= one.wall);
+        let (_, out16) = run(16);
+        assert!(
+            out1 == out4 && out1 == out16,
+            "{name}: output differs across threads"
         );
-        s
-    };
-    let four = run(4);
-    assert_eq!(four.threads, 4);
-    assert!(four.peak_running <= 4 && four.peak_running >= 1);
-    assert!(four.critical_path.is_some());
-    let one = run(1);
-    assert_eq!(one.threads, 1);
-    assert_eq!(one.peak_running, 1);
-    assert!(one.busy <= one.wall);
+    }
 }
 
 /// Gate 2 of the relaxed PDF mode (`crates/output/pdf/RELAXED.md`): on
