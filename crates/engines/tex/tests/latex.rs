@@ -645,6 +645,25 @@ fn latex_hello_warm() {
         "hello warm: loop rounds {}, critical path {:?}, nodes run {}, refuted {:?}",
         w.stats.loop_rounds, w.stats.critical_path, w.stats.nodes_run, w.stats.refuted_guesses
     );
+    // another document with the same format, given what the first
+    // learned (the CLI's format-scope guesses): page 1's delta is the
+    // format's
+    let other = "\\documentclass{article}\\begin{document}\\section{One}\\label{one}See section~\\ref{one} on page~\\pageref{one}.\\end{document}\n";
+    let o2 = Options {
+        pgst: b.export_pgst(),
+        ..opts()
+    };
+    let d = common::build(o2, Some(&prelude(false)), other);
+    let cold2 = common::build(opts(), Some(&prelude(false)), other);
+    eprintln!(
+        "second document learned: loop rounds {}, refuted {:?}; unlearned: loop rounds {}",
+        d.stats.loop_rounds, d.stats.refuted_guesses, cold2.stats.loop_rounds
+    );
+    assert_eq!(
+        d.output().0,
+        cold2.output().0,
+        "learned guess changed the output"
+    );
     assert_eq!(w.output().0, b.output().0, "warm output differs");
     assert!(
         common::first_difference(&w.output().0, &want).is_none(),

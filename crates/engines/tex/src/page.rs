@@ -435,24 +435,10 @@ impl Run<'_, '_> {
     pub(crate) fn page_step(&mut self, args: &[ValueId]) -> R<()> {
         let v = self.v;
         let j = self.page_index();
-        // whether the chain runs serially (`pgref` >= 2: guesses were
-        // refuted in two rounds, a routine whose delta depends on its own
-        // previous one): then each step reads the step before it
-        // (`pgstd:<j-1>`, a definition), all pages right in one round
-        let serial =
-            j < MAX_PAGES && pgref_now(v, &self.ops, self.cx.use_field(v.field("pgref"))?) >= 2;
         let mut readst = ValueId::UNIT;
         let mut readdef = ValueId::UNIT;
         let mut inherited: Vec<(Field, ValueId)> = Vec::new();
-        if serial && j > 0 {
-            let x = self.cx.use_field(v.field(&format!("pgstd:{}", j - 1)))?;
-            let xs = x.map(|x| list_of(v, x)).unwrap_or_default();
-            if let Some(&cs) = xs.first() {
-                readdef = cs;
-                self.preload_counts(cs);
-            }
-            inherited = pgst_pairs(v, xs.get(1).copied());
-        } else if j > 0 && j < MAX_PAGES {
+        if j > 0 && j < MAX_PAGES {
             // `\count0..9` as the step before this one left them
             // (`pgdef:<j-1>`, a loop-back: the build's guess in round one)
             let f = v.field(&format!("pgdef:{}", j - 1));
@@ -506,32 +492,8 @@ impl Run<'_, '_> {
                 readst,
                 counts,
                 readdef,
-                v.int(i64::from(serial)),
             ]);
             self.contribute("pgdeltas", v.seq_unit(e));
-            if serial {
-                // the cumulative state after this step, for the next
-                let mut state: std::collections::BTreeMap<String, (Field, ValueId)> = inherited
-                    .iter()
-                    .map(|&(f, x)| (crate::val::field_name(v, f), (f, x)))
-                    .collect();
-                for (name, (f, x)) in own {
-                    let pre = self.cx.use_field(f)?;
-                    if same_as_before(v, &name, pre, x) {
-                        state.remove(&name);
-                    } else {
-                        state.insert(name, (f, x));
-                    }
-                }
-                let st = if state.is_empty() {
-                    ValueId::UNIT
-                } else {
-                    v.list(state.values().map(|&(f, x)| v.list(vec![f.0, x])).collect())
-                };
-                let f = v.field(&format!("pgstd:{j}"));
-                self.cx
-                    .define_with(f, v.list(vec![counts, st]), Locality::Global);
-            }
         }
         Ok(())
     }
@@ -1077,11 +1039,10 @@ impl Operation for PageStep {
     fn name(&self) -> &'static str {
         if self.any { "pagestep_any" } else { "pagestep" }
     }
-    /// Only the exact PDF fold's state ([`Run::finish`]) and, when the
-    /// chain runs serially, the state for the next step (`pgstd:<j>`).
+    /// Only the exact PDF fold's state ([`Run::finish`]).
     fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
         let _ = v;
-        MayDefine::Prefixes(vec!["pdf:state".to_owned(), "pgstd:".to_owned()])
+        MayDefine::Prefixes(vec!["pdf:state".to_owned()])
     }
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         None
@@ -1234,17 +1195,6 @@ fn dvi_shown(v: &Values, page: ValueId) -> u64 {
     phitex_defuse::hash_bytes(phitex_defuse::hash_bytes(0, &b[..41]), &b[45..])
 }
 
-/// The refuted rounds `pgref` counts in this evaluation (`[eval,
-/// count]`; another evaluation's: 0).
-fn pgref_now(v: &Values, o: &crate::run::Ops, x: Option<ValueId>) -> i64 {
-    let xs = x.map(|x| list_of(v, x)).unwrap_or_default();
-    let e = i64::try_from(o.eval.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(0);
-    match xs[..] {
-        [id, n] if int_of(v, id) == e => int_of(v, n),
-        _ => 0,
-    }
-}
-
 /// A loop-back's value as named entries, for the refutation report
 /// ([`LbLog`]): `pgdef:<j>`'s `\count0..9`.
 fn count_entries(v: &Values, x: Option<ValueId>) -> Vec<(String, ValueId)> {
@@ -1344,10 +1294,8 @@ impl FinalState {
             .map_or(0, |x| usize::try_from(int_of(v, x)).unwrap_or(0))
             .min(MAX_PAGES);
         // each step's entry: [j, own pairs, pgst read, counts, pgdef
-        // read, serial] (`Run::page_step`)
+        // read] (`Run::page_step`)
         let entries = Self::entries(v, all);
-        let stored = cx.use_field(v.field("pgref"))?;
-        let old = pgref_now(v, o, stored);
         let mut refuted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut state: std::collections::BTreeMap<String, (Field, ValueId)> =
             std::collections::BTreeMap::new();
@@ -1359,12 +1307,11 @@ impl FinalState {
         for j in 0..steps {
             let Some(xs) = entries.get(&j) else { continue };
             let g = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
-            let serial = int_of(v, g(5)) != 0;
             // what step j read against what the steps before it left
             // (step 0 reads the state before the chain itself)
             let read_counts = if j == 0 { counts.clone() } else { ints(g(4)) };
             let read_pairs = pgst_pairs(v, Some(g(2)));
-            if j > 0 && !serial {
+            if j > 0 {
                 if g(2) != cur {
                     let read = named(v, &read_pairs);
                     let want: Vec<(String, ValueId)> =
@@ -1403,7 +1350,7 @@ impl FinalState {
                 let pre = cx.use_field(f)?;
                 // a count register by the step's change, as `\\count0..9`
                 // (a routine's counter of pages or shipouts it advances)
-                let x = if name.starts_with("count:") && !serial {
+                let x = if name.starts_with("count:") {
                     let as_int = |y: Option<ValueId>| y.map_or(0, |y| int_of(v, y));
                     let had = as_int(read_pairs.iter().find(|p| p.0 == f).map(|p| p.1).or(pre));
                     let now = as_int(state.get(&name).map(|p| p.1).or(pre));
@@ -1439,23 +1386,7 @@ impl FinalState {
             cx.publish(v.field(&format!("pgdef:{j}")), cs);
             cx.contribute(v.field("pgsts"), v.seq_unit(v.list(vec![v.int(1), jj, cs])));
         }
-        // a refuted round counts towards the serial chain (two make it
-        // serial: `Run::page_step`)
-        let new = if refuted.is_empty() {
-            old
-        } else {
-            (old + 1).min(2)
-        };
-        Self::log_refuted(o, old, refuted);
-        if new > 0 {
-            let e = o.eval.load(std::sync::atomic::Ordering::Relaxed);
-            let x = v.list(vec![v.int(i64::try_from(e).unwrap_or(0)), v.int(new)]);
-            cx.publish(v.field("pgref"), x);
-        } else if let Some(x) = stored.filter(|&x| x != ValueId::UNIT) {
-            // (an earlier evaluation's count, kept as it is: unchanged,
-            // so no step re-runs for it)
-            cx.publish(v.field("pgref"), x);
-        }
+        Self::log_refuted(o, refuted);
         Ok(FinalState {
             map: state.into_values().collect(),
         })
@@ -1486,14 +1417,14 @@ impl FinalState {
     }
 
     /// The loop-back log's line for a refuted round.
-    fn log_refuted(o: &crate::run::Ops, old: i64, refuted: std::collections::BTreeSet<String>) {
+    fn log_refuted(o: &crate::run::Ops, refuted: std::collections::BTreeSet<String>) {
         if !refuted.is_empty() {
             let names: Vec<String> = refuted.into_iter().collect();
             o.lblog
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .rounds
-                .insert(format!("refuted round {}: {}", old + 1, names.join(" ")));
+                .insert(format!("refuted round: {}", names.join(" ")));
         }
     }
 
