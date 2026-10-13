@@ -728,6 +728,14 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                 if atoms.get(q).map(|x| x.kind) == Some(AtomKind::Char('=')) {
                     q = skip(atoms, q + 1);
                 }
+                // (`\futurelet\a\b`: `\b` runs next; `\let\a\b`: `\a`
+                // may run as `\b`, `\let\next\f@@t ... \next`)
+                if let Some(x) = atoms.get(q)
+                    && x.kind == AtomKind::Cs
+                    && !e.calls.iter().any(|c| c == x.name(text))
+                {
+                    e.calls.push(x.name(text).to_owned());
+                }
                 k = q + 1;
             }
             _ if DEFINERS.contains(&n) => {
@@ -746,20 +754,6 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                     k = target(&mut e, q, gl);
                 } else {
                     k = target(&mut e, k, gl);
-                    // (`\\futurelet\\a\\b`: `\\b` runs next; `\\let\\a\\b`:
-                    // `\\a` may run as `\\b`, `\\let\\next\\f@@t \\next`)
-                    if matches!(n, "let" | "futurelet") {
-                        let mut q = skip(atoms, k);
-                        if n == "let" && atoms.get(q).map(|x| x.kind) == Some(AtomKind::Char('=')) {
-                            q = skip(atoms, q + 1);
-                        }
-                        if let Some(x) = atoms.get(q)
-                            && x.kind == AtomKind::Cs
-                            && !e.calls.iter().any(|c| c == x.name(text))
-                        {
-                            e.calls.push(x.name(text).to_owned());
-                        }
-                    }
                 }
             }
             _ if LATEX_DEFINERS.contains(&n) => {
