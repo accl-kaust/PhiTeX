@@ -385,7 +385,7 @@ mod imp {
         TRACING.store(on, Ordering::Relaxed);
     }
 
-    fn flush_here() {
+    pub fn flush_here() {
         LOCAL.with(|l| l.borrow_mut().flush());
     }
 
@@ -467,6 +467,15 @@ pub fn snapshot() -> Snapshot {
     {
         Snapshot::default()
     }
+}
+
+/// Adds this thread's counts and span totals to the totals. A thread's
+/// counts are buffered locally and added when it exits or calls this, so
+/// an executor's worker threads call it at the end of each batch for
+/// [`snapshot`] to cover their jobs.
+pub fn flush() {
+    #[cfg(feature = "profile")]
+    imp::flush_here();
 }
 
 /// Zeroes all counters and span totals (recorded trace events are kept).

@@ -5,12 +5,14 @@
 
 mod common;
 
+use std::fmt::Write as _;
+
 use phitex_tex::{Build, Options};
 
 fn doc(k: usize) -> String {
     let mut s = format!("\\catcode`\\|={k} \\parindent={k}pt \\count1={k}\n");
     for n in 0..40 {
-        s.push_str(&format!("Line {n} of text with \\the\\count1.\\par\n"));
+        let _ = writeln!(s, "Line {n} of text with \\the\\count1.\\par");
     }
     s.push_str("\\bye\n");
     s
