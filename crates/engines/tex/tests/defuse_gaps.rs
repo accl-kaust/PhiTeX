@@ -1177,3 +1177,112 @@ fn continuations_of_a_claim_that_changes() {
         );
     }
 }
+
+/// `["o"]` (bound `s`, effect pending) opens a scope before itself;
+/// `["a", x]` (bound `f`, effect statically None) defines `f = x` locally;
+/// `["x"]` (bound `g`, effect pending, resolved None) reads `f`, then
+/// defines `g` and unfolds the continuation `["c"]`; `["c"]` (bound `s`, effect
+/// pending) closes the scope; `["b"]` (bound `h`, effect pending, read
+/// hint `f`) reads `f` and defines `h` where `f` is undefined, `q`
+/// (outside its bound) where it reads the scope-local value.
+struct SameBatch;
+
+static SB_OP: std::sync::OnceLock<OpId> = std::sync::OnceLock::new();
+
+impl Operation for SameBatch {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        None
+    }
+    fn may_define(&self, a: &[ValueId], v: &Values) -> phitex_defuse::MayDefine {
+        let p = match tag(v, a).as_str() {
+            "a" => "f",
+            "x" => "g",
+            "b" => "h",
+            _ => "s",
+        };
+        phitex_defuse::MayDefine::Prefixes(vec![p.to_owned()])
+    }
+    fn reads(&self, a: &[ValueId], v: &Values) -> Option<Vec<Field>> {
+        matches!(tag(v, a).as_str(), "b" | "x").then(|| vec![v.field("f")])
+    }
+    fn claim(
+        &self,
+        _: &[ValueId],
+        _: &Values,
+        _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>,
+    ) -> Claim {
+        Claim::Pending
+    }
+    fn effect(&self, a: &[ValueId], v: &Values) -> phitex_defuse::Effect {
+        match tag(v, a).as_str() {
+            "a" => phitex_defuse::Effect::None,
+            _ => phitex_defuse::Effect::Pending,
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        use phitex_defuse::{Brackets, Effect};
+        let v = cx.values();
+        let a = cx.args();
+        cx.claim(0);
+        match tag(v, &a).as_str() {
+            "o" => cx.set_effect(Effect::Scope(Brackets {
+                closes: 0,
+                opens: 1,
+                before: true,
+                kind: None,
+                kind_pending: false,
+            })),
+            "a" => cx.define_with(v.field("f"), a[1], Locality::Local),
+            "x" => {
+                let _ = cx.use_field(v.field("f"))?;
+                cx.define_with(v.field("g"), v.int(1), Locality::Global);
+                cx.follow(SB_OP.get().copied().unwrap(), vec![v.str("c")]);
+                cx.set_effect(Effect::None);
+            }
+            "c" => cx.set_effect(Effect::Close),
+            "b" => {
+                cx.set_effect(Effect::None);
+                let f = cx.use_field(v.field("f"))?;
+                let d = if f.is_some() { "q" } else { "h" };
+                cx.define_with(v.field(d), v.int(1), Locality::Local);
+                return Ok(f.unwrap_or_else(|| v.str("none")));
+            }
+            _ => {}
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// Two nodes ready at once (both waited on the same definition): `x`
+/// unfolds a continuation that closes the scope the definition is local
+/// to; `b`, after `x`, reads the field. The continuation does not exist
+/// until `x` runs, so only `x`'s own effect can order `b` after it: with
+/// it pending, `b` waits and reads past the close. Declared statically
+/// None instead (true of `x`'s own command), `b` may run in `x`'s batch
+/// against the state before the continuation exists, read the
+/// scope-local value and define outside its bound (an undeclared
+/// definition). The TeX client's hints declare "no scope" only for a
+/// node whose whole text, continuations included, opens and closes none.
+#[test]
+fn a_reader_after_a_node_whose_continuation_closes_its_scope_waits() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(SameBatch));
+    let _ = SB_OP.set(op);
+    let u = eng.new_unit();
+    let v = eng.values();
+    let (o, a, x, b, twelve) = (v.str("o"), v.str("a"), v.str("x"), v.str("b"), v.int(12));
+    eng.push(u, op, vec![o]);
+    eng.push(u, op, vec![a, twelve]);
+    eng.push(u, op, vec![x]);
+    let b = eng.push(u, op, vec![b]);
+    eng.add_root(b);
+    let r = eng.evaluate_sequential();
+    let got = eng.output(b).map(|x| eng.values().render(x));
+    r.expect("evaluate");
+    assert_eq!(got.as_deref(), Some("\"none\""));
+    assert!(
+        eng.check_invariants().is_empty(),
+        "{:?}",
+        eng.check_invariants()
+    );
+}

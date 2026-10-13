@@ -622,16 +622,41 @@ pub(crate) struct TextHints {
     /// beginning there.
     starts: Vec<usize>,
     hints: Vec<Arc<str>>,
+    /// Per atom: the byte start of the first command after it that may
+    /// open or close a scope (`usize::MAX`: none). A node's run unfolds
+    /// the rest of its text as continuations, which the engine counts as
+    /// the node's own effect: a node opens and closes no scope only if
+    /// none of them does ([`Self::at_until`]).
+    scope_next: Vec<usize>,
     /// Per slice.
     slice_hints: Vec<Arc<str>>,
 }
 
 impl TextHints {
-    /// The hint of the command at or after byte `off`.
+    /// The hint of a node whose text is the rest of this one from byte
+    /// `off`.
     fn at(&self, off: usize) -> Hint {
+        self.at_until(off, usize::MAX)
+    }
+
+    /// The hint of a node whose text is bytes `off..end`: the command at
+    /// or after `off`, its run unfolding the rest up to `end` as
+    /// continuations (the engine orders a reader after the node against
+    /// them only through the node's own effect: a static "no scope" lets
+    /// a reader of a scope-local field run before a continuation that
+    /// closes the scope exists).
+    fn at_until(&self, off: usize, end: usize) -> Hint {
         let k = self.starts.partition_point(|&s| s < off);
         match self.hints.get(k) {
-            Some(h) => Hint::decode(h),
+            Some(h) => {
+                let mut h = Hint::decode(h);
+                if let Some(b) = &mut h.bound
+                    && self.scope_next[k] < end
+                {
+                    b.no_scope = false;
+                }
+                h
+            }
             None => Hint::any("end of text", ""),
         }
     }
@@ -1441,28 +1466,37 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
             .or_insert_with(|| Arc::from(s))
             .clone()
     };
+    let mut scoped = Vec::with_capacity(an.p.atoms.len());
     for a in 0..an.p.atoms.len() {
         starts.push(an.p.atoms[a].start);
         let h = an.hint(a);
+        // (a command, not an operand another one reads, that may open or
+        // close a scope)
+        scoped.push(!an.claimed[a] && !h.bound.as_ref().is_some_and(|b| b.no_scope));
         hints.push(intern(&h));
     }
-    let mut slice_hints = Vec::with_capacity(slices.len());
-    for &(s, _) in &slices {
-        let k = starts.partition_point(|&x| x < s);
-        let h = match hints.get(k) {
-            Some(h) if starts[k] == s => h.clone(),
-            // (a slice before the first atom: blanks, a comment)
-            Some(h) => h.clone(),
-            None => intern(&Hint::any("end of text", "")),
+    let mut scope_next = vec![usize::MAX; starts.len()];
+    for a in (0..starts.len().saturating_sub(1)).rev() {
+        scope_next[a] = if scoped[a + 1] {
+            starts[a + 1]
+        } else {
+            scope_next[a + 1]
         };
-        slice_hints.push(h);
     }
-    TextHints {
+    let t = TextHints {
         slices,
         starts,
         hints,
-        slice_hints,
+        scope_next,
+        slice_hints: Vec::new(),
+    };
+    let mut slice_hints = Vec::with_capacity(t.slices.len());
+    for &(s, e) in &t.slices {
+        // (a slice before the first atom, blanks or a comment, takes the
+        // next atom's hint)
+        slice_hints.push(intern(&t.at_until(s, e)));
     }
+    TextHints { slice_hints, ..t }
 }
 
 // ---------------------------------------------------------------------
@@ -1654,8 +1688,9 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
                     .unwrap_or_else(PoisonError::into_inner)
                     .get(&name.raw())
                     .cloned();
+                // (the node's text: the rest of its line, from `at`)
                 return match t {
-                    Some(t) => t.at(at),
+                    Some(t) => t.at_until(at, at.saturating_add(text.len())),
                     None => Hint::any("file not analysed yet", &text),
                 };
             }
