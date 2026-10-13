@@ -1445,9 +1445,9 @@ impl<'a> Closure<'a> {
     /// Whether the document defines any of `names` (a set the prelude's
     /// cache holds is then not this document's).
     fn document_defines(&self, names: &[String]) -> bool {
-        names.iter().any(|n| {
-            self.document.effects(n).is_some() || self.document.shapes(n).is_some()
-        })
+        names
+            .iter()
+            .any(|n| self.document.effects(n).is_some() || self.document.shapes(n).is_some())
     }
 
     /// What running `e` may define.
@@ -1546,8 +1546,7 @@ impl<'a> Closure<'a> {
             && !self.document_defines(&names)
         {
             self.frame.0.extend(names.iter().cloned());
-            self.memo
-                .insert(name.to_owned(), (s.clone(), names, false));
+            self.memo.insert(name.to_owned(), (s.clone(), names, false));
             return s;
         }
         self.busy.insert(name.to_owned());
@@ -2088,7 +2087,10 @@ pub(crate) fn marks(
                 h.implicit = implicit_of_char(c);
                 emit = emit && !in_run && h.implicit != Implicit::None;
                 in_run = true;
-                h.reads.push(format!("catcode:{}", u32::from(c)));
+                // (what a mark reads: made only for a mark kept)
+                if emit {
+                    h.reads.push(format!("catcode:{}", u32::from(c)));
+                }
             }
             AtomKind::Space => emit = false,
             AtomKind::Cs | AtomKind::Param(_) | AtomKind::Verb => {
