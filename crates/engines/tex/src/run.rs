@@ -296,6 +296,9 @@ pub(crate) struct Run<'c, 'a> {
     pub irreversible: u64,
     /// The input as the command in progress began ([`Run::rewind`]).
     mark: Mark,
+    /// A halt raised on the token path ([`Run::raise`]), returned by the
+    /// next `get_next` of the command in progress.
+    halt: Option<Halt>,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -352,6 +355,7 @@ impl<'c, 'a> Run<'c, 'a> {
             resumed: false,
             irreversible: 0,
             mark: Mark::default(),
+            halt: None,
         }
     }
 
@@ -966,18 +970,43 @@ impl<'c, 'a> Run<'c, 'a> {
         Mean::decode(self.v, x)
     }
 
-    // the per-token hot path: inlined on purpose
+    pub(crate) fn set_cur(&mut self, tok: Tok) -> R<()> {
+        self.set_cur_flag(tok);
+        match self.halt.take() {
+            Some(h) => Err(h),
+            None => Ok(()),
+        }
+    }
+
+    /// The token path's halt (an engine read that must wait, the text
+    /// ended): kept until the command's next `get_next` returns it; the
+    /// current token is the sentinel meanwhile (`cmd::HALT`).
+    #[cold]
+    pub(crate) fn raise(&mut self, h: Halt) {
+        if self.halt.is_none() {
+            self.halt = Some(h);
+        }
+        self.cur = Cur {
+            tok: crate::expand::halt_tok(),
+            cmd: cmd::HALT,
+            chr: 0,
+        };
+    }
+
+    /// [`Self::set_cur`] without a `Result`: a halt is raised.
     #[allow(clippy::inline_always)]
     #[inline(always)]
-    pub(crate) fn set_cur(&mut self, tok: Tok) -> R<()> {
+    fn set_cur_flag(&mut self, tok: Tok) {
         if !tok.is_cs_or_active() {
             // (a character's meaning is its own: no meaning stored)
             self.cur.tok = tok;
             self.cur.cmd = tok.cat().unwrap_or(0);
             self.cur.chr = i32::try_from(tok.chr()).unwrap_or(0);
-            return Ok(());
+            return;
         }
-        self.set_cur_cs(tok)
+        if let Err(h) = self.set_cur_cs(tok) {
+            self.raise(h);
+        }
     }
 
     /// [`Self::set_cur`] for a control sequence or active character.
@@ -1512,6 +1541,18 @@ impl<'c, 'a> Run<'c, 'a> {
     #[allow(clippy::inline_always)]
     #[inline(always)]
     pub(crate) fn get_next(&mut self) -> R<bool> {
+        let b = self.fetch();
+        match self.halt.take() {
+            Some(h) => Err(h),
+            None => Ok(b),
+        }
+    }
+
+    /// `get_next` without a `Result` (§341–§357): false at the end of all
+    /// input; a halt is raised ([`Self::raise`]).
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn fetch(&mut self) -> bool {
         // (the common case: a token of the list on top that is not an
         // internal marker, and no alignment entry to watch for)
         let next = match self.frames.front_mut() {
@@ -1525,15 +1566,28 @@ impl<'c, 'a> Run<'c, 'a> {
             _ => None,
         };
         if let Some(tok) = next {
-            self.set_cur(tok)?;
-            if ALIGN_CMDS.checked_shr(u32::from(self.cur.cmd)).unwrap_or(0) & 1 != 0
-                && self.align_token()?
-            {
-                return self.get_next_slow();
+            self.set_cur_flag(tok);
+            if ALIGN_CMDS.checked_shr(u32::from(self.cur.cmd)).unwrap_or(0) & 1 != 0 {
+                match self.align_token() {
+                    Ok(true) => return self.fetch_slow(),
+                    Ok(false) => {}
+                    Err(h) => self.raise(h),
+                }
             }
-            return Ok(true);
+            return true;
         }
-        self.get_next_slow()
+        self.fetch_slow()
+    }
+
+    #[inline(never)]
+    fn fetch_slow(&mut self) -> bool {
+        match self.get_next_slow() {
+            Ok(b) => b,
+            Err(h) => {
+                self.raise(h);
+                true
+            }
+        }
     }
 
     #[inline(never)]
@@ -1630,6 +1684,11 @@ impl<'c, 'a> Run<'c, 'a> {
             self.get_next_or_end()?;
             if self.cur.cmd <= cmd::MAX_COMMAND {
                 return Ok(());
+            }
+            // (a macro: its body goes on top here, no expansion level)
+            if (cmd::CALL..cmd::END_TEMPLATE).contains(&self.cur.cmd) {
+                self.macro_call()?;
+                continue;
             }
             if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
                 return Ok(());
@@ -2025,6 +2084,41 @@ impl<'c, 'a> Run<'c, 'a> {
         self.cx.claim(0);
         self.cx.set_effect(Effect::None);
         ValueId::UNIT
+    }
+}
+
+/// Spent token lists by length, for the next macro body of that length
+/// (a body is written into one, not allocated, [`pooled_toks`]).
+const POOL_LEN: usize = 64;
+
+thread_local! {
+    static TOK_POOL: std::cell::RefCell<Vec<Vec<Rc<[Tok]>>>> =
+        std::cell::RefCell::new(vec![Vec::new(); POOL_LEN]);
+}
+
+/// A shared list holding `xs`: a spent one of its length reused if any.
+pub(crate) fn pooled_toks(xs: &[Tok]) -> Rc<[Tok]> {
+    if xs.len() < POOL_LEN
+        && let Some(mut r) = TOK_POOL.with(|p| p.borrow_mut()[xs.len()].pop())
+        && let Some(m) = Rc::get_mut(&mut r)
+    {
+        m.copy_from_slice(xs);
+        return r;
+    }
+    Rc::from(xs)
+}
+
+/// A token list read to its end: kept for [`pooled_toks`] if nothing
+/// else holds it.
+fn recycle_toks(t: Rc<[Tok]>) {
+    if !t.is_empty() && t.len() < POOL_LEN && Rc::strong_count(&t) == 1 && Rc::weak_count(&t) == 0 {
+        TOK_POOL.with(|p| {
+            let mut p = p.borrow_mut();
+            let v = &mut p[t.len()];
+            if v.len() < 32 {
+                v.push(t);
+            }
+        });
     }
 }
 
@@ -2425,6 +2519,8 @@ impl Run<'_, '_> {
             }
             let s = self.snap_front();
             self.mark.snaps.push(s);
+        } else if let Some(Frame::Toks(t, _)) = f {
+            recycle_toks(t);
         }
     }
 
