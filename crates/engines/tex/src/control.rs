@@ -761,6 +761,7 @@ impl Run<'_, '_> {
         Ok(self.cur.tok.clone())
     }
 
+    #[allow(clippy::trivially_copy_pass_by_ref)]
     pub(crate) fn define_cs(&mut self, t: &Tok, m: &Mean, global: bool) {
         self.set_mean(*t, m.clone(), global);
     }
@@ -1410,7 +1411,7 @@ impl Run<'_, '_> {
     /// `\shipout` (also `\pdfliteral shipout`), shown as a string.
     pub(crate) fn expand_late(&mut self, body: &[Tok]) -> R<String> {
         let mut toks = vec![Tok::ch(1, u32::from(b'{'))];
-        toks.extend(body.iter().cloned());
+        toks.extend(body.iter().copied());
         toks.push(Tok::ch(2, u32::from(b'}')));
         toks.push(Tok::cs("\u{10FFFE}endwrite"));
         self.push_toks(toks);
