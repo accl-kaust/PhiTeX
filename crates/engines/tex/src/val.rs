@@ -177,13 +177,105 @@ pub(crate) mod group {
     pub const MATH_LEFT: i64 = 16;
 }
 
+/// An interned control sequence name (`id_lookup`, §259): a number,
+/// dense from 0 in order of first sight, and the name. Equal names have
+/// one entry for the life of the process, so comparing and hashing a
+/// control sequence touch the number only, and a run indexes the
+/// meanings it looked up by it ([`CsId::index`]). The table holds names
+/// only: ids never reach a value (tokens encode as their names), so
+/// cached formats and the value table do not depend on the order names
+/// were seen in.
+pub(crate) struct CsEntry {
+    id: u32,
+    name: Box<str>,
+}
+
+/// A control sequence: its interned entry ([`CsEntry`]).
+#[derive(Clone, Copy)]
+pub(crate) struct CsId(&'static CsEntry);
+
+impl CsId {
+    /// The entry of `name`, made on its first sight.
+    pub(crate) fn intern(name: &str) -> CsId {
+        thread_local! {
+            static LOCAL: std::cell::RefCell<FxHashMap<Box<str>, CsId>> =
+                std::cell::RefCell::default();
+        }
+        if let Some(c) = LOCAL.with(|l| l.borrow().get(name).copied()) {
+            return c;
+        }
+        static TABLE: OnceLock<std::sync::Mutex<FxHashMap<&'static str, CsId>>> = OnceLock::new();
+        let c = {
+            let mut t = TABLE
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(&c) = t.get(name) {
+                c
+            } else {
+                let e: &'static CsEntry = Box::leak(Box::new(CsEntry {
+                    id: u32::try_from(t.len()).unwrap_or(u32::MAX),
+                    name: Box::from(name),
+                }));
+                let c = CsId(e);
+                t.insert(&e.name, c);
+                c
+            }
+        };
+        LOCAL.with(|l| l.borrow_mut().insert(Box::from(name), c));
+        c
+    }
+
+    /// The dense number of this name.
+    pub(crate) fn index(self) -> usize {
+        self.0.id as usize
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        &self.0.name
+    }
+}
+
+impl PartialEq for CsId {
+    fn eq(&self, o: &CsId) -> bool {
+        self.0.id == o.0.id
+    }
+}
+
+impl Eq for CsId {}
+
+impl std::hash::Hash for CsId {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.0.id.hash(h);
+    }
+}
+
+impl std::ops::Deref for CsId {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0.name
+    }
+}
+
+impl std::fmt::Debug for CsId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.name(), f)
+    }
+}
+
+impl std::fmt::Display for CsId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// A token (§289): a character with its category, or a control sequence.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Tok {
     /// `cat << 21 | char`; category 13 is an active character.
     C(u32),
-    /// A control sequence's name (frozen ones start with `\u{10FFFE}`).
-    S(Rc<str>),
+    /// A control sequence (frozen ones' names start with `\u{10FFFE}`).
+    S(CsId),
 }
 
 impl Tok {
@@ -192,7 +284,7 @@ impl Tok {
     }
 
     pub(crate) fn cs(name: &str) -> Tok {
-        Tok::S(Rc::from(name))
+        Tok::S(CsId::intern(name))
     }
 
     /// The category of a character token.
@@ -235,7 +327,7 @@ impl Tok {
     pub(crate) fn decode(v: &Values, id: ValueId) -> Tok {
         match &*v.get(id) {
             Value::Int(i) => Tok::C(u32::try_from(*i).unwrap_or(0)),
-            Value::Str(s) => Tok::S(Rc::from(s.strip_prefix('\\').unwrap_or(s))),
+            Value::Str(s) => Tok::cs(s.strip_prefix('\\').unwrap_or(s)),
             _ => Tok::C(0),
         }
     }
