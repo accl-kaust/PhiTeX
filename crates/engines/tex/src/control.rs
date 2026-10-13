@@ -1102,12 +1102,14 @@ impl Run<'_, '_> {
             let st = self.get(&field)?;
             let open = st.filter(|&x| x != ValueId::UNIT);
             let Some(st) = open else {
-                // §484: from the terminal: a fatal error in batch mode
+                // §484: from the terminal: a fatal error in batch mode;
+                // a build has no terminal, so in every mode (TeX at the
+                // end of its terminal input stops the job too, §360)
                 self.log(
                     "error",
                     "*** (cannot \\read from terminal in nonstop modes)",
                 )?;
-                return Ok(out);
+                return Err(crate::run::Halt::Fatal);
             };
             let xs = list_of(v, st);
             let lines = xs.get(1).map(|&l| list_of(v, l)).unwrap_or_default();

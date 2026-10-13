@@ -1,0 +1,2 @@
+(./core.tex (./ifsub.dat [sub]) [yes] [yes] [no] [yes]
+macro:->\message {[sub]}  )
