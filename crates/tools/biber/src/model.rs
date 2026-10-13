@@ -200,13 +200,19 @@ impl Name {
             .unwrap_or_default()
     }
     pub fn initial(&self, np: &str) -> Vec<String> {
-        self.nameparts.get(np).and_then(|p| p.initial.clone()).unwrap_or_default()
+        self.nameparts
+            .get(np)
+            .and_then(|p| p.initial.clone())
+            .unwrap_or_default()
     }
     pub fn was_stripped(&self, np: &str) -> bool {
         self.strip.get(np).copied().unwrap_or(false)
     }
     pub fn opt(&self, o: &str) -> Option<String> {
-        self.opts.iter().find(|(k, _)| k == o).map(|(_, v)| v.clone())
+        self.opts
+            .iter()
+            .find(|(k, _)| k == o)
+            .map(|(_, v)| v.clone())
     }
     /// The parts present (Perl's `keys` of the name parts hash; the order
     /// only matters where every part is treated alike).
@@ -218,7 +224,12 @@ impl Name {
             if crate::unicode::fc(n) == crate::unicode::fc(np) {
                 let sc = crate::unicode::fc(scope);
                 if sc == "init" {
-                    return self.nameparts.get(np).and_then(|p| p.initial.clone()).map(|i| i.concat()).unwrap_or_default();
+                    return self
+                        .nameparts
+                        .get(np)
+                        .and_then(|p| p.initial.clone())
+                        .map(|i| i.concat())
+                        .unwrap_or_default();
                 } else if sc == "full" {
                     return self.namepart(np);
                 }
@@ -260,7 +271,10 @@ impl Names {
         self.names[..end].to_vec()
     }
     pub fn opt(&self, o: &str) -> Option<String> {
-        self.opts.iter().find(|(k, _)| k == o).map(|(_, v)| v.clone())
+        self.opts
+            .iter()
+            .find(|(k, _)| k == o)
+            .map(|(_, v)| v.clone())
     }
     pub fn set_opt(&mut self, o: &str, v: String) {
         if let Some(e) = self.opts.iter_mut().find(|(k, _)| k == o) {
@@ -355,7 +369,8 @@ impl Entry {
         match self.derived.get("warnings") {
             Some(Val::L(l)) => l.borrow_mut().push(w),
             _ => {
-                self.derived.insert("warnings".into(), Val::list(alloc::vec![w]));
+                self.derived
+                    .insert("warnings".into(), Val::list(alloc::vec![w]));
             }
         }
     }
@@ -368,7 +383,8 @@ impl Entry {
     pub fn date_fields_exist(&self, field: &str) -> bool {
         let t = strip_datepart(field);
         DATEPARTS.iter().any(|dp| {
-            self.data.contains_key(&alloc::format!("{t}{dp}")) || self.data.contains_key(&alloc::format!("{t}end{dp}"))
+            self.data.contains_key(&alloc::format!("{t}{dp}"))
+                || self.data.contains_key(&alloc::format!("{t}end{dp}"))
         })
     }
     pub fn delete_date_fields(&mut self, field: &str) {
@@ -380,7 +396,16 @@ impl Entry {
     }
 }
 
-const DATEPARTS: [&str; 8] = ["year", "month", "day", "hour", "minute", "second", "yeardivision", "timezone"];
+const DATEPARTS: [&str; 8] = [
+    "year",
+    "month",
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "yeardivision",
+    "timezone",
+];
 
 fn strip_datepart(field: &str) -> String {
     for dp in DATEPARTS {

@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use crate::biber::Biber;
 use crate::collate::Collator;
 use crate::internals::{join_name, md5_hex, rangelen};
-use crate::model::{looks_like_number, numify, truthy, Entry, Val};
+use crate::model::{Entry, Val, looks_like_number, numify, truthy};
 use crate::regex::Regex;
 use crate::section::{DataList, FieldV};
 use crate::unicode::{lc, nfc};
@@ -47,7 +47,9 @@ fn re(p: &str) -> Regex {
 }
 
 fn rs(s: &str, pat: &str, with: &str) -> String {
-    Regex::new(pat, "ms").expect("bbl pattern").replace(s, true, &mut |_, _| with.into())
+    Regex::new(pat, "ms")
+        .expect("bbl pattern")
+        .replace(s, true, &mut |_, _| with.into())
 }
 
 fn esc(s: &str) -> String {
@@ -67,17 +69,26 @@ impl Biber<'_> {
         if s.is_empty() && !self.dm.nullok(field) {
             return String::new();
         }
-        let ft = if lc(field) == "crossref" || lc(field) == "xref" { "strng" } else { "field" };
+        let ft = if lc(field) == "crossref" || lc(field) == "xref" {
+            "strng"
+        } else {
+            "field"
+        };
         let mut s = s.to_string();
         if let Some(p) = field.strip_suffix("year") {
             // m/^(.*)(?!end)year$/ always matches a field ending in "year"
-            let y = be.get(&alloc::format!("{p}year")).map(|v| v.str()).unwrap_or_default();
+            let y = be
+                .get(&alloc::format!("{p}year"))
+                .map(|v| v.str())
+                .unwrap_or_default();
             if truthy(&y) && looks_like_number(&y) {
                 s = crate::model::num_str(numify(&y).abs());
             }
         }
         if ft != "strng" && be.gs("datatype") != "bibtex" {
-            s = re(r"(?<!\\)(\#|\&|\%)").replace(&s, true, &mut |t, m| alloc::format!("\\{}", crate::regex::cap(t, m, 1).unwrap_or_default()));
+            s = re(r"(?<!\\)(\#|\&|\%)").replace(&s, true, &mut |t, m| {
+                alloc::format!("\\{}", crate::regex::cap(t, m, 1).unwrap_or_default())
+            });
         }
         alloc::format!("      \\{ft}{{{out}}}{{{s}}}\n")
     }
@@ -89,9 +100,15 @@ impl Biber<'_> {
         for np in self.dm.nameparts() {
             let p = n.namepart(&np);
             if truthy(&p) {
-                let npc = if n.was_stripped(&np) { alloc::format!("{{{p}}}") } else { join_name(&p) };
-                let mut npci = n.initial(&np).join("\\bibinitperiod\\bibinitdelim ") + "\\bibinitperiod";
-                npci = re(r"\p{Pd}").replace(&npci, true, &mut |_, _| "\\bibinithyphendelim ".into());
+                let npc = if n.was_stripped(&np) {
+                    alloc::format!("{{{p}}}")
+                } else {
+                    join_name(&p)
+                };
+                let mut npci =
+                    n.initial(&np).join("\\bibinitperiod\\bibinitdelim ") + "\\bibinitperiod";
+                npci =
+                    re(r"\p{Pd}").replace(&npci, true, &mut |_, _| "\\bibinithyphendelim ".into());
                 nss.push(alloc::format!("           {np}={{{npc}}}"));
                 nss.push(alloc::format!("           {np}i={{{npci}}}"));
                 if un != "false" {
@@ -104,21 +121,48 @@ impl Biber<'_> {
             pno.push(alloc::format!("<BDS>UNP-{nid}</BDS>"));
         }
         for (o, v) in &n.opts {
-            if self.cfg.optout.get(&("NAME".into(), o.clone())).copied().unwrap_or(false) {
-                pno.push(alloc::format!("{o}={}", self.cfg.map_boolean(o, v, false).unwrap_or_default()));
+            if self
+                .cfg
+                .optout
+                .get(&("NAME".into(), o.clone()))
+                .copied()
+                .unwrap_or(false)
+            {
+                pno.push(alloc::format!(
+                    "{o}={}",
+                    self.cfg.map_boolean(o, v, false).unwrap_or_default()
+                ));
             }
         }
         pno.push(alloc::format!("<BDS>{nid}-PERNAMEHASH</BDS>"));
-        alloc::format!("        {{{{{}}}{{%\n{}}}}}%\n", pno.join(","), nss.join(",\n"))
+        alloc::format!(
+            "        {{{{{}}}{{%\n{}}}}}%\n",
+            pno.join(","),
+            nss.join(",\n")
+        )
     }
 
     fn filter_entry_options(&self, key: &str) -> Vec<String> {
         let mut out = Vec::new();
         for opt in self.cfg.entry_options(&self.cur, key) {
-            let v = self.cfg.blx(Some(&self.cur), &opt, None, Some(key)).map(|v| v.s()).unwrap_or_default();
+            let v = self
+                .cfg
+                .blx(Some(&self.cur), &opt, None, Some(key))
+                .map(|v| v.s())
+                .unwrap_or_default();
             let v = self.cfg.map_boolean(&opt, &v, false).unwrap_or_default();
-            if self.cfg.optout.get(&("ENTRY".into(), opt.clone())).copied().unwrap_or(false) {
-                out.push(if truthy(&v) { alloc::format!("{opt}={v}") } else { opt.clone() });
+            if self
+                .cfg
+                .optout
+                .get(&("ENTRY".into(), opt.clone()))
+                .copied()
+                .unwrap_or(false)
+            {
+                out.push(if truthy(&v) {
+                    alloc::format!("{opt}={v}")
+                } else {
+                    opt.clone()
+                });
             }
         }
         out
@@ -134,10 +178,17 @@ impl Biber<'_> {
             return;
         }
         let outtype = self.dm.outcase(&bee).unwrap_or_else(|| bee.clone());
-        let mut un = self.cfg.blx_s(Some(&secnum), "uniquename", Some(&bee), Some(key));
-        let mut ul = self.cfg.blx_s(Some(&secnum), "uniquelist", Some(&bee), Some(key));
+        let mut un = self
+            .cfg
+            .blx_s(Some(&secnum), "uniquename", Some(&bee), Some(key));
+        let mut ul = self
+            .cfg
+            .blx_s(Some(&secnum), "uniquelist", Some(&bee), Some(key));
         let lni = b.labelname.clone();
-        let lnl = lni.as_deref().and_then(|l| b.get(l)).and_then(|v| v.as_names());
+        let lnl = lni
+            .as_deref()
+            .and_then(|l| b.get(l))
+            .and_then(|v| v.as_names());
         if let Some(nl) = &lnl {
             if let Some(x) = nl.borrow().opt("uniquelist").filter(|s| truthy(s)) {
                 ul = x;
@@ -151,7 +202,11 @@ impl Biber<'_> {
         let mut a = alloc::format!(
             "    \\entry{{{key}}}{{{outtype}}}{{{}}}{{{}}}\n",
             self.filter_entry_options(key).join(","),
-            if numify(&kc) == -1.0 { String::new() } else { kc }
+            if numify(&kc) == -1.0 {
+                String::new()
+            } else {
+                kc
+            }
         );
         let helpers = self.dm.helpers.clone();
         'body: {
@@ -167,15 +222,23 @@ impl Biber<'_> {
                     }
                 }
                 if let Some(k) = b.get("keywords").and_then(|v| v.as_list()) {
-                    a.push_str(&alloc::format!("      \\keyw{{{}}}\n", k.borrow().join(",")));
+                    a.push_str(&alloc::format!(
+                        "      \\keyw{{{}}}\n",
+                        k.borrow().join(",")
+                    ));
                 }
                 break 'body;
             }
             if let Some(es) = b.get("entryset").and_then(|v| v.as_list()) {
-                a.push_str(&alloc::format!("      \\inset{{{}}}\n", es.borrow().join(",")));
+                a.push_str(&alloc::format!(
+                    "      \\inset{{{}}}\n",
+                    es.borrow().join(",")
+                ));
             }
             for nf in &helpers.namelists {
-                let Some(nl) = b.get(nf).and_then(|v| v.as_names()) else { continue };
+                let Some(nl) = b.get(nf).and_then(|v| v.as_names()) else {
+                    continue;
+                };
                 let nl = nl.borrow();
                 let is_ln = lni.as_deref() == Some(nf.as_str());
                 if nl.morenames {
@@ -196,13 +259,25 @@ impl Biber<'_> {
                         plo.push(alloc::format!("<BDS>UL-{}</BDS>", nl.id));
                     }
                     for (o, v) in &nl.opts {
-                        if self.cfg.optout.get(&("NAMELIST".into(), o.clone())).copied().unwrap_or(false) {
-                            plo.push(alloc::format!("{o}={}", self.cfg.map_boolean(o, v, false).unwrap_or_default()));
+                        if self
+                            .cfg
+                            .optout
+                            .get(&("NAMELIST".into(), o.clone()))
+                            .copied()
+                            .unwrap_or(false)
+                        {
+                            plo.push(alloc::format!(
+                                "{o}={}",
+                                self.cfg.map_boolean(o, v, false).unwrap_or_default()
+                            ));
                         }
                     }
                     nfv = plo.join(",");
                 }
-                a.push_str(&alloc::format!("      \\name{{{nf}}}{{{}}}{{{nfv}}}{{%\n", nl.count()));
+                a.push_str(&alloc::format!(
+                    "      \\name{{{nf}}}{{{}}}{{{nfv}}}{{%\n",
+                    nl.count()
+                ));
                 for n in &nl.names {
                     a.push_str(&self.name_to_bbl(&n.borrow(), &un));
                 }
@@ -210,7 +285,9 @@ impl Biber<'_> {
             }
             let others = self.cfg.opt("others_string");
             for lf in &helpers.lists {
-                let Some(l) = b.get(lf).and_then(|v| v.as_list()) else { continue };
+                let Some(l) = b.get(lf).and_then(|v| v.as_list()) else {
+                    continue;
+                };
                 let mut l = l.borrow_mut();
                 if l.last().is_some_and(|x| lc(x) == others) {
                     a.push_str(&alloc::format!("      \\true{{more{lf}}}\n"));
@@ -241,10 +318,16 @@ impl Biber<'_> {
             if blx("labeldateparts") {
                 a.push_str("      <BDS>EXTRADATE</BDS>\n");
                 if let Some(s) = b.get("extradatescope").filter(Val::truthy) {
-                    a.push_str(&alloc::format!("      \\field{{extradatescope}}{{{}}}\n", s.str()));
+                    a.push_str(&alloc::format!(
+                        "      \\field{{extradatescope}}{{{}}}\n",
+                        s.str()
+                    ));
                 }
                 if b.exists("labeldatesource") {
-                    a.push_str(&alloc::format!("      \\field{{labeldatesource}}{{{}}}\n", b.gs("labeldatesource")));
+                    a.push_str(&alloc::format!(
+                        "      \\field{{labeldatesource}}{{{}}}\n",
+                        b.gs("labeldatesource")
+                    ));
                 }
             }
             if !b.get("shorthand").is_some_and(|v| v.truthy()) {
@@ -270,14 +353,20 @@ impl Biber<'_> {
                 a.push_str(&alloc::format!("      \\field{{labelnamesource}}{{{l}}}\n"));
             }
             if let Some(l) = &b.labeltitle {
-                a.push_str(&alloc::format!("      \\field{{labeltitlesource}}{{{l}}}\n"));
+                a.push_str(&alloc::format!(
+                    "      \\field{{labeltitlesource}}{{{l}}}\n"
+                ));
             }
             if let Some(c) = b.get("clonesourcekey").filter(Val::truthy) {
-                a.push_str(&alloc::format!("      \\field{{clonesourcekey}}{{{}}}\n", c.str()));
+                a.push_str(&alloc::format!(
+                    "      \\field{{clonesourcekey}}{{{}}}\n",
+                    c.str()
+                ));
             }
             for f in &helpers.fields {
                 let v = b.get(f).map(|v| v.str());
-                let present = v.as_deref().is_some_and(|s| !s.is_empty()) || (self.dm.nullok(f) && b.exists(f));
+                let present = v.as_deref().is_some_and(|s| !s.is_empty())
+                    || (self.dm.nullok(f) && b.exists(f));
                 if !present {
                     continue;
                 }
@@ -290,7 +379,10 @@ impl Biber<'_> {
                 let d = df.strip_suffix("date").unwrap_or(df);
                 let g = |s: &str| b.get(&alloc::format!("{d}{s}")).filter(Val::truthy);
                 if let Some(u) = g("dateunspecified") {
-                    a.push_str(&alloc::format!("      \\field{{{d}dateunspecified}}{{{}}}\n", u.str()));
+                    a.push_str(&alloc::format!(
+                        "      \\field{{{d}dateunspecified}}{{{}}}\n",
+                        u.str()
+                    ));
                 }
                 for (src, out) in [
                     ("datejulian", "datejulian"),
@@ -308,7 +400,10 @@ impl Biber<'_> {
                 }
                 if b.exists(&alloc::format!("{d}endyear")) {
                     if let Some(e) = g("endera") {
-                        a.push_str(&alloc::format!("      \\field{{{d}enddateera}}{{{}}}\n", e.str()));
+                        a.push_str(&alloc::format!(
+                            "      \\field{{{d}enddateera}}{{{}}}\n",
+                            e.str()
+                        ));
                     }
                 }
                 if b.exists(&alloc::format!("{d}year")) {
@@ -316,7 +411,10 @@ impl Biber<'_> {
                         continue;
                     }
                     if let Some(e) = g("era") {
-                        a.push_str(&alloc::format!("      \\field{{{d}dateera}}{{{}}}\n", e.str()));
+                        a.push_str(&alloc::format!(
+                            "      \\field{{{d}dateera}}{{{}}}\n",
+                            e.str()
+                        ));
                     }
                 }
             }
@@ -333,29 +431,52 @@ impl Biber<'_> {
                 a.push_str("      \\true{nocite}\n");
             }
             for rf in &helpers.ranges {
-                let Some(r) = b.get(rf).and_then(|v| v.as_range()) else { continue };
+                let Some(r) = b.get(rf).and_then(|v| v.as_range()) else {
+                    continue;
+                };
                 let r = r.borrow();
                 let pr: Vec<String> = r
                     .iter()
                     .map(|(s, e)| match e {
-                        Some(e) => alloc::format!("{s}\\bibrangedash{}", if truthy(e) { alloc::format!(" {e}") } else { String::new() }),
+                        Some(e) => alloc::format!(
+                            "{s}\\bibrangedash{}",
+                            if truthy(e) {
+                                alloc::format!(" {e}")
+                            } else {
+                                String::new()
+                            }
+                        ),
                         None => s.clone(),
                     })
                     .collect();
-                a.push_str(&alloc::format!("      \\field{{{rf}}}{{{}}}\n", pr.join("\\bibrangessep ")));
-                a.push_str(&alloc::format!("      \\range{{{rf}}}{{{}}}\n", rangelen(&r)));
+                a.push_str(&alloc::format!(
+                    "      \\field{{{rf}}}{{{}}}\n",
+                    pr.join("\\bibrangessep ")
+                ));
+                a.push_str(&alloc::format!(
+                    "      \\range{{{rf}}}{{{}}}\n",
+                    rangelen(&r)
+                ));
             }
             for vf in &helpers.vfields {
-                let Some(v) = b.get(vf).filter(Val::truthy) else { continue };
+                let Some(v) = b.get(vf).filter(Val::truthy) else {
+                    continue;
+                };
                 let mut v = v.str();
                 if self.dm.datatype(vf) == "uri" {
-                    a.push_str(&alloc::format!("      \\verb{{{vf}raw}}\n      \\verb {v}\n      \\endverb\n"));
+                    a.push_str(&alloc::format!(
+                        "      \\verb{{{vf}raw}}\n      \\verb {v}\n      \\endverb\n"
+                    ));
                     v = uri_as_string(&nfc(&v));
                 }
-                a.push_str(&alloc::format!("      \\verb{{{vf}}}\n      \\verb {v}\n      \\endverb\n"));
+                a.push_str(&alloc::format!(
+                    "      \\verb{{{vf}}}\n      \\verb {v}\n      \\endverb\n"
+                ));
             }
             for vl in &helpers.vlists {
-                let Some(l) = b.get(vl).and_then(|v| v.as_list()) else { continue };
+                let Some(l) = b.get(vl).and_then(|v| v.as_list()) else {
+                    continue;
+                };
                 let mut l = l.borrow_mut();
                 if l.last().is_some_and(|x| lc(x) == others) {
                     a.push_str(&alloc::format!("      \\true{{more{vl}}}\n"));
@@ -379,7 +500,10 @@ impl Biber<'_> {
                 a.push_str("      \\endlverb\n");
             }
             if let Some(k) = b.get("keywords").and_then(|v| v.as_list()) {
-                a.push_str(&alloc::format!("      \\keyw{{{}}}\n", k.borrow().join(",")));
+                a.push_str(&alloc::format!(
+                    "      \\keyw{{{}}}\n",
+                    k.borrow().join(",")
+                ));
             }
             if let Some(w) = b.get("warnings").and_then(|v| v.as_list()) {
                 for x in w.borrow().iter() {
@@ -388,7 +512,11 @@ impl Biber<'_> {
             }
         }
         a.push_str("    \\endentry\n");
-        self.bbl.entries.entry(secnum).or_default().insert(key.into(), a);
+        self.bbl
+            .entries
+            .entry(secnum)
+            .or_default()
+            .insert(key.into(), a);
     }
 
     /// Output::base `create_output_section`.
@@ -396,15 +524,25 @@ impl Biber<'_> {
         let secnum = self.cur.clone();
         for k in self.secr().citekeys.clone() {
             if self.entry(&k).is_none() {
-                return Err(self.fatal(alloc::format!("Cannot find entry with key '{k}' to output")));
+                return Err(
+                    self.fatal(alloc::format!("Cannot find entry with key '{k}' to output"))
+                );
             }
             self.set_output_entry(&k);
         }
         for k in self.secr().undef_citekeys.clone() {
-            self.bbl.missing.entry(secnum.clone()).or_default().insert(k.clone(), alloc::format!("  \\missing{{{k}}}\n"));
+            self.bbl
+                .missing
+                .entry(secnum.clone())
+                .or_default()
+                .insert(k.clone(), alloc::format!("  \\missing{{{k}}}\n"));
         }
         for (a, r) in self.secr().alias.clone() {
-            self.bbl.alias.entry(secnum.clone()).or_default().insert(a.clone(), alloc::format!("  \\keyalias{{{a}}}{{{r}}}\n"));
+            self.bbl
+                .alias
+                .entry(secnum.clone())
+                .or_default()
+                .insert(a.clone(), alloc::format!("  \\keyalias{{{a}}}{{{r}}}\n"));
         }
         Ok(())
     }
@@ -415,7 +553,13 @@ impl Biber<'_> {
     }
 
     fn instantiate_entry(&self, dl: &DataList, entry: &str, key: &str) -> String {
-        let Some(be) = self.sections.get(&dl.section).and_then(|sec| sec.entry(key)) else { return String::new() };
+        let Some(be) = self
+            .sections
+            .get(&dl.section)
+            .and_then(|sec| sec.entry(key))
+        else {
+            return String::new();
+        };
         let b = be.borrow();
         let mut s = entry.to_string();
         let sub = |s: &mut String, ph: &str, v: &str| {
@@ -424,97 +568,208 @@ impl Biber<'_> {
         let ef = |f: &str| dl.entryfield(key, f);
         let eft = |f: &str| ef(f).is_some_and(|v| truthy(&v.s()));
         if let Some(FieldV::L(es)) = ef("entryset") {
-            sub(&mut s, "ENTRYSET", &alloc::format!("\\set{{{}}}", es.join(",")));
+            sub(
+                &mut s,
+                "ENTRYSET",
+                &alloc::format!("\\set{{{}}}", es.join(",")),
+            );
         }
-        for t in ["uniqueprimaryauthor", "uniquework", "uniquebaretitle", "uniquetitle"] {
+        for t in [
+            "uniqueprimaryauthor",
+            "uniquework",
+            "uniquebaretitle",
+            "uniquetitle",
+        ] {
             if eft(t) {
                 sub(&mut s, &t.to_uppercase(), &alloc::format!("\\true{{{t}}}"));
             }
         }
         if let Some(e) = dl.state.extraalphadata.get(key).filter(|&&v| v != 0) {
-            sub(&mut s, "EXTRAALPHA", &alloc::format!("\\field{{extraalpha}}{{{e}}}"));
+            sub(
+                &mut s,
+                "EXTRAALPHA",
+                &alloc::format!("\\field{{extraalpha}}{{{e}}}"),
+            );
         }
         if let Some(e) = dl.state.labelalphadata.get(key).filter(|v| truthy(v)) {
-            sub(&mut s, "LABELALPHA", &alloc::format!("\\field{{labelalpha}}{{{e}}}"));
+            sub(
+                &mut s,
+                "LABELALPHA",
+                &alloc::format!("\\field{{labelalpha}}{{{e}}}"),
+            );
         }
         let nls = self.dm.helpers.namelists.clone();
         for nf in &nls {
-            let Some(nl) = b.get(nf).and_then(|v| v.as_names()) else { continue };
+            let Some(nl) = b.get(nf).and_then(|v| v.as_names()) else {
+                continue;
+            };
             let nlid = nl.borrow().id.clone();
             match dl.uniquelist(&nlid) {
-                Some(u) => sub(&mut s, &alloc::format!("UL-{nlid}"), &alloc::format!("ul={u}")),
+                Some(u) => sub(
+                    &mut s,
+                    &alloc::format!("UL-{nlid}"),
+                    &alloc::format!("ul={u}"),
+                ),
                 None => s = rs(&s, &alloc::format!("<BDS>UL-{}</BDS>,?", esc(&nlid)), ""),
             }
         }
         for nf in &nls {
-            let Some(nl) = b.get(nf).and_then(|v| v.as_names()) else { continue };
+            let Some(nl) = b.get(nf).and_then(|v| v.as_names()) else {
+                continue;
+            };
             let nl = nl.borrow();
             for n in &nl.names {
                 let n = n.borrow();
                 let nid = n.id.clone();
                 if let Some((sum, part)) = crate::lists::get_unsummary(dl, &nl.id, &nid) {
-                    sub(&mut s, &alloc::format!("UNS-{nid}"), &alloc::format!("un={sum}"));
-                    sub(&mut s, &alloc::format!("UNP-{nid}"), &alloc::format!("uniquepart={part}"));
+                    sub(
+                        &mut s,
+                        &alloc::format!("UNS-{nid}"),
+                        &alloc::format!("un={sum}"),
+                    );
+                    sub(
+                        &mut s,
+                        &alloc::format!("UNP-{nid}"),
+                        &alloc::format!("uniquepart={part}"),
+                    );
                     let d = dl.get_nd(&nl.id, &nid).cloned().unwrap_or_default();
                     for np in n.parts() {
                         if d.basenamestringparts.contains(&np) {
-                            s = rs(&s, &alloc::format!(r"\s+<BDS>UNP-{}-{}</BDS>,?", esc(&np), esc(&nid)), "");
+                            s = rs(
+                                &s,
+                                &alloc::format!(r"\s+<BDS>UNP-{}-{}</BDS>,?", esc(&np), esc(&nid)),
+                                "",
+                            );
                         } else {
                             let v = d.unparts.get(&np).cloned().unwrap_or_default();
-                            sub(&mut s, &alloc::format!("UNP-{np}-{nid}"), &alloc::format!("{np}un={v}"));
+                            sub(
+                                &mut s,
+                                &alloc::format!("UNP-{np}-{nid}"),
+                                &alloc::format!("{np}un={v}"),
+                            );
                         }
                     }
                 } else {
                     s = rs(&s, &alloc::format!("<BDS>UN[SP]-{}</BDS>,?", esc(&nid)), "");
                     for np in n.parts() {
-                        s = rs(&s, &alloc::format!(r"\s+<BDS>UNP-{}-{}</BDS>,?", esc(&np), esc(&nid)), "");
+                        s = rs(
+                            &s,
+                            &alloc::format!(r"\s+<BDS>UNP-{}-{}</BDS>,?", esc(&np), esc(&nid)),
+                            "",
+                        );
                     }
                 }
             }
         }
         if let Some(e) = dl.state.extratitleyeardata.get(key).filter(|&&v| v != 0) {
-            sub(&mut s, "EXTRATITLEYEAR", &alloc::format!("\\field{{extratitleyear}}{{{e}}}"));
+            sub(
+                &mut s,
+                "EXTRATITLEYEAR",
+                &alloc::format!("\\field{{extratitleyear}}{{{e}}}"),
+            );
         }
         if let Some(e) = dl.state.extratitledata.get(key).filter(|&&v| v != 0) {
-            sub(&mut s, "EXTRATITLE", &alloc::format!("\\field{{extratitle}}{{{e}}}"));
+            sub(
+                &mut s,
+                "EXTRATITLE",
+                &alloc::format!("\\field{{extratitle}}{{{e}}}"),
+            );
         }
         for nf in &nls {
-            for (suf, ph) in [("bibnamehash", "BIBNAMEHASH"), ("namehash", "NAMEHASH"), ("fullhash", "FULLHASH"), ("fullhashraw", "FULLHASHRAW")] {
-                if let Some(e) = ef(&alloc::format!("{nf}{suf}")).map(|v| v.s()).filter(|v| truthy(v)) {
-                    sub(&mut s, &alloc::format!("{nf}{ph}"), &alloc::format!("\\strng{{{nf}{suf}}}{{{e}}}"));
+            for (suf, ph) in [
+                ("bibnamehash", "BIBNAMEHASH"),
+                ("namehash", "NAMEHASH"),
+                ("fullhash", "FULLHASH"),
+                ("fullhashraw", "FULLHASHRAW"),
+            ] {
+                if let Some(e) = ef(&alloc::format!("{nf}{suf}"))
+                    .map(|v| v.s())
+                    .filter(|v| truthy(v))
+                {
+                    sub(
+                        &mut s,
+                        &alloc::format!("{nf}{ph}"),
+                        &alloc::format!("\\strng{{{nf}{suf}}}{{{e}}}"),
+                    );
                 }
             }
         }
-        for (f, ph) in [("fullhash", "FULLHASH"), ("fullhashraw", "FULLHASHRAW"), ("bibnamehash", "BIBNAMEHASH"), ("namehash", "NAMEHASH")] {
+        for (f, ph) in [
+            ("fullhash", "FULLHASH"),
+            ("fullhashraw", "FULLHASHRAW"),
+            ("bibnamehash", "BIBNAMEHASH"),
+            ("namehash", "NAMEHASH"),
+        ] {
             if let Some(e) = ef(f).map(|v| v.s()).filter(|v| truthy(v)) {
                 sub(&mut s, ph, &alloc::format!("\\strng{{{f}}}{{{e}}}"));
             }
         }
         for pn in self.dm.helpers.namelistsall.clone() {
-            let Some(nl) = b.get(&pn).and_then(|v| v.as_names()) else { continue };
+            let Some(nl) = b.get(&pn).and_then(|v| v.as_names()) else {
+                continue;
+            };
             let nl = nl.borrow();
             for n in &nl.names {
                 let nid = n.borrow().id.clone();
-                match dl.get_nd(&nl.id, &nid).and_then(|d| d.hash.clone()).filter(|h| truthy(h)) {
-                    Some(h) => sub(&mut s, &alloc::format!("{nid}-PERNAMEHASH"), &alloc::format!("hash={h}")),
-                    None => s = rs(&s, &alloc::format!("<BDS>{}-PERNAMEHASH</BDS>,?", esc(&nid)), ""),
+                match dl
+                    .get_nd(&nl.id, &nid)
+                    .and_then(|d| d.hash.clone())
+                    .filter(|h| truthy(h))
+                {
+                    Some(h) => sub(
+                        &mut s,
+                        &alloc::format!("{nid}-PERNAMEHASH"),
+                        &alloc::format!("hash={h}"),
+                    ),
+                    None => {
+                        s = rs(
+                            &s,
+                            &alloc::format!("<BDS>{}-PERNAMEHASH</BDS>,?", esc(&nid)),
+                            "",
+                        )
+                    }
                 }
             }
         }
         if let Some(e) = dl.state.extranamedata.get(key).filter(|&&v| v != 0) {
-            sub(&mut s, "EXTRANAME", &alloc::format!("\\field{{extraname}}{{{e}}}"));
+            sub(
+                &mut s,
+                "EXTRANAME",
+                &alloc::format!("\\field{{extraname}}{{{e}}}"),
+            );
         }
         if let Some(e) = dl.state.extradatedata.get(key).filter(|&&v| v != 0) {
-            sub(&mut s, "EXTRADATE", &alloc::format!("\\field{{extradate}}{{{e}}}"));
+            sub(
+                &mut s,
+                "EXTRADATE",
+                &alloc::format!("\\field{{extradate}}{{{e}}}"),
+            );
         }
         if let Some(si) = dl.sortinit.get(key) {
-            sub(&mut s, "SORTINIT", &alloc::format!("\\field{{sortinit}}{{{si}}}"));
-            let c = Collator { level: 1, upper_before_lower: false, shifted: true, normalize: true };
+            sub(
+                &mut s,
+                "SORTINIT",
+                &alloc::format!("\\field{{sortinit}}{{{si}}}"),
+            );
+            let c = Collator {
+                level: 1,
+                upper_before_lower: false,
+                shifted: true,
+                normalize: true,
+            };
             let h = md5_hex(c.view_sort_key(&self.table, si).as_bytes());
-            sub(&mut s, "SORTINITHASH", &alloc::format!("\\field{{sortinithash}}{{{h}}}"));
+            sub(
+                &mut s,
+                "SORTINITHASH",
+                &alloc::format!("\\field{{sortinithash}}{{{h}}}"),
+            );
         }
         if truthy(&dl.labelprefix) {
-            sub(&mut s, "LABELPREFIX", &alloc::format!("\\field{{labelprefix}}{{{}}}", dl.labelprefix));
+            sub(
+                &mut s,
+                "LABELPREFIX",
+                &alloc::format!("\\field{{labelprefix}}{{{}}}", dl.labelprefix),
+            );
         }
         if eft("singletitle") {
             sub(&mut s, "SINGLETITLE", "\\true{singletitle}");
@@ -528,15 +783,25 @@ impl Biber<'_> {
     pub fn bbl_text(&self) -> String {
         let mut o = String::from(HEAD);
         if !self.preamble.is_empty() {
-            o.push_str(&alloc::format!("\\preamble{{%\n{}%\n}}\n\n", self.preamble.join("%\n")));
+            o.push_str(&alloc::format!(
+                "\\preamble{{%\n{}%\n}}\n\n",
+                self.preamble.join("%\n")
+            ));
         }
         let gss = self.cfg.blx_s(None, "sortingtemplatename", None, None);
         for (secnum, ents) in &self.bbl.entries {
             o.push_str(&alloc::format!("\n\\refsection{{{secnum}}}\n"));
-            let mut lists: Vec<&DataList> = self.lists.iter().filter(|l| l.section == *secnum).collect();
+            let mut lists: Vec<&DataList> =
+                self.lists.iter().filter(|l| l.section == *secnum).collect();
             lists.sort_by(|a, b| a.sortingtemplatename.cmp(&b.sortingtemplatename));
-            let mut ordered: Vec<&DataList> = lists.iter().copied().filter(|l| !(l.sortingtemplatename == gss && l.typ == "entry")).collect();
-            ordered.extend(self.lists.iter().filter(|l| l.section == *secnum && l.typ == "entry" && l.sortingtemplatename == gss));
+            let mut ordered: Vec<&DataList> = lists
+                .iter()
+                .copied()
+                .filter(|l| !(l.sortingtemplatename == gss && l.typ == "entry"))
+                .collect();
+            ordered.extend(self.lists.iter().filter(|l| {
+                l.section == *secnum && l.typ == "entry" && l.sortingtemplatename == gss
+            }));
             for l in ordered {
                 if l.keys.is_empty() {
                     continue;
@@ -551,10 +816,22 @@ impl Biber<'_> {
                 }
                 o.push_str("  \\enddatalist\n");
             }
-            for v in self.bbl.alias.get(secnum).into_iter().flat_map(|m| m.values()) {
+            for v in self
+                .bbl
+                .alias
+                .get(secnum)
+                .into_iter()
+                .flat_map(|m| m.values())
+            {
                 o.push_str(v);
             }
-            for v in self.bbl.missing.get(secnum).into_iter().flat_map(|m| m.values()) {
+            for v in self
+                .bbl
+                .missing
+                .get(secnum)
+                .into_iter()
+                .flat_map(|m| m.values())
+            {
                 o.push_str(v);
             }
             o.push_str("\\endrefsection\n");

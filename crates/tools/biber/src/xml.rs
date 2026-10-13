@@ -17,7 +17,10 @@ pub struct Element {
 
 impl Element {
     pub fn attr(&self, n: &str) -> Option<&str> {
-        self.attrs.iter().find(|(k, _)| k == n).map(|(_, v)| v.as_str())
+        self.attrs
+            .iter()
+            .find(|(k, _)| k == n)
+            .map(|(_, v)| v.as_str())
     }
     pub fn kids<'a>(&'a self, n: &'a str) -> impl Iterator<Item = &'a Element> + 'a {
         self.children.iter().filter(move |c| c.name == n)
@@ -27,7 +30,9 @@ impl Element {
     }
     /// `order` attribute as a number (0 if absent).
     pub fn order(&self) -> i64 {
-        self.attr("order").and_then(|o| o.trim().parse().ok()).unwrap_or(0)
+        self.attr("order")
+            .and_then(|o| o.trim().parse().ok())
+            .unwrap_or(0)
     }
 }
 
@@ -128,7 +133,10 @@ pub fn parse(s: &str) -> Result<Element, String> {
             while j < b.len() && !b[j].is_ascii_whitespace() && b[j] != b'>' && b[j] != b'/' {
                 j += 1;
             }
-            let mut el = Element { name: strip_ns(&s[i + 1..j]), ..Element::default() };
+            let mut el = Element {
+                name: strip_ns(&s[i + 1..j]),
+                ..Element::default()
+            };
             loop {
                 while j < b.len() && b[j].is_ascii_whitespace() {
                     j += 1;

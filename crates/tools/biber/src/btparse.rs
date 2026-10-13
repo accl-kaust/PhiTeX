@@ -71,7 +71,10 @@ fn is_name_char(c: char) -> bool {
     if u < 0x20 || u == 0x7f {
         return false;
     }
-    !matches!(c, ' ' | '"' | '#' | '%' | '\'' | '(' | ')' | ',' | '=' | '\\' | '{' | '}')
+    !matches!(
+        c,
+        ' ' | '"' | '#' | '%' | '\'' | '(' | ')' | ',' | '=' | '\\' | '{' | '}'
+    )
 }
 
 struct Lexer<'a> {
@@ -149,7 +152,10 @@ impl Lexer<'_> {
                         return Ok(o);
                     }
                     if depth < 0 {
-                        return Err(alloc::format!("line {}: unbalanced braces: too many }}'s", self.line));
+                        return Err(alloc::format!(
+                            "line {}: unbalanced braces: too many }}'s",
+                            self.line
+                        ));
                     }
                     o.push(c);
                 }
@@ -193,7 +199,12 @@ impl Lexer<'_> {
                         v.push(Simple::Macro(n));
                     }
                 }
-                _ => return Err(alloc::format!("line {}: syntax error: expected a value", self.line)),
+                _ => {
+                    return Err(alloc::format!(
+                        "line {}: syntax error: expected a value",
+                        self.line
+                    ));
+                }
             }
             self.skip_ws();
             if self.peek() == Some('#') {
@@ -230,14 +241,22 @@ pub fn collapse(s: &str) -> String {
 }
 
 impl Macros {
-    fn expand(&self, v: &[Simple], collapse_ws: bool, warns: &mut Vec<String>, line: usize) -> String {
+    fn expand(
+        &self,
+        v: &[Simple],
+        collapse_ws: bool,
+        warns: &mut Vec<String>,
+        line: usize,
+    ) -> String {
         let mut o = String::new();
         for s in v {
             match s {
                 Simple::Str(x) | Simple::Num(x) => o.push_str(x),
                 Simple::Macro(m) => match self.0.get(m) {
                     Some(t) => o.push_str(t),
-                    None => warns.push(alloc::format!("line {line}, warning: undefined macro \"{m}\"")),
+                    None => warns.push(alloc::format!(
+                        "line {line}, warning: undefined macro \"{m}\""
+                    )),
                 },
             }
         }
@@ -251,9 +270,17 @@ impl Macros {
 
 /// Parse a whole `.bib` text into entries (each value fully processed),
 /// defining `@string` macros as they come.
-pub fn parse(text: &str, macros: &mut Macros, warns: &mut Vec<String>) -> Result<Vec<BtEntry>, Error> {
+pub fn parse(
+    text: &str,
+    macros: &mut Macros,
+    warns: &mut Vec<String>,
+) -> Result<Vec<BtEntry>, Error> {
     let t: Vec<char> = text.chars().collect();
-    let mut lx = Lexer { t: &t, i: 0, line: 1 };
+    let mut lx = Lexer {
+        t: &t,
+        i: 0,
+        line: 1,
+    };
     let mut out = Vec::new();
     loop {
         // toplevel
@@ -279,7 +306,10 @@ pub fn parse(text: &str, macros: &mut Macros, warns: &mut Vec<String>) -> Result
                     }
                 }
                 Some(_) => {
-                    while lx.peek().is_some_and(|c| !matches!(c, '@' | '\n' | ' ' | '\r' | '\t')) {
+                    while lx
+                        .peek()
+                        .is_some_and(|c| !matches!(c, '@' | '\n' | ' ' | '\r' | '\t'))
+                    {
                         lx.i += 1;
                     }
                 }
@@ -289,14 +319,19 @@ pub fn parse(text: &str, macros: &mut Macros, warns: &mut Vec<String>) -> Result
         let line = lx.line;
         lx.skip_ws();
         let Some(typ) = lx.name() else {
-            return Err(alloc::format!("line {}: syntax error: expected an entry type", lx.line));
+            return Err(alloc::format!(
+                "line {}: syntax error: expected an entry type",
+                lx.line
+            ));
         };
         let ltyp = typ.to_ascii_lowercase();
         let meta = match ltyp.as_str() {
             "comment" => Meta::Comment,
             "preamble" => Meta::Preamble,
             "string" => Meta::MacroDef,
-            "alias" | "modify" => return Err(alloc::format!("line {line}: unsupported entry type @{typ}")),
+            "alias" | "modify" => {
+                return Err(alloc::format!("line {line}: unsupported entry type @{typ}"));
+            }
             _ => Meta::Regular,
         };
         lx.skip_ws();
@@ -315,13 +350,23 @@ pub fn parse(text: &str, macros: &mut Macros, warns: &mut Vec<String>) -> Result
                     });
                     continue;
                 }
-                _ => return Err(alloc::format!("line {}: comment entries must be delimited by either braces or parentheses", lx.line)),
+                _ => {
+                    return Err(alloc::format!(
+                        "line {}: comment entries must be delimited by either braces or parentheses",
+                        lx.line
+                    ));
+                }
             }
         }
         let close = match lx.peek() {
             Some('{') => '}',
             Some('(') => ')',
-            _ => return Err(alloc::format!("line {}: syntax error: expected entry opener", lx.line)),
+            _ => {
+                return Err(alloc::format!(
+                    "line {}: syntax error: expected entry opener",
+                    lx.line
+                ));
+            }
         };
         lx.i += 1;
         let mut e = BtEntry {
@@ -337,14 +382,20 @@ pub fn parse(text: &str, macros: &mut Macros, warns: &mut Vec<String>) -> Result
         match meta {
             Meta::Regular => {
                 let Some(k) = lx.name() else {
-                    return Err(alloc::format!("line {}: syntax error: expected entry key", lx.line));
+                    return Err(alloc::format!(
+                        "line {}: syntax error: expected entry key",
+                        lx.line
+                    ));
                 };
                 e.key = Some(k);
                 lx.skip_ws();
                 if lx.peek() == Some(',') {
                     lx.i += 1;
                 } else if lx.peek() != Some(close) {
-                    return Err(alloc::format!("line {}: syntax error: expected \",\"", lx.line));
+                    return Err(alloc::format!(
+                        "line {}: syntax error: expected \",\"",
+                        lx.line
+                    ));
                 }
                 fields(&mut lx, &mut e, macros, warns, true)?;
             }
@@ -366,13 +417,24 @@ pub fn parse(text: &str, macros: &mut Macros, warns: &mut Vec<String>) -> Result
         lx.skip_ws();
         match lx.peek() {
             Some(c) if c == close || c == '}' || c == ')' => lx.i += 1,
-            _ => return Err(alloc::format!("line {}: syntax error: expected entry closer", lx.line)),
+            _ => {
+                return Err(alloc::format!(
+                    "line {}: syntax error: expected entry closer",
+                    lx.line
+                ));
+            }
         }
         out.push(e);
     }
 }
 
-fn fields(lx: &mut Lexer<'_>, e: &mut BtEntry, macros: &mut Macros, warns: &mut Vec<String>, full: bool) -> Result<(), Error> {
+fn fields(
+    lx: &mut Lexer<'_>,
+    e: &mut BtEntry,
+    macros: &mut Macros,
+    warns: &mut Vec<String>,
+    full: bool,
+) -> Result<(), Error> {
     loop {
         lx.skip_ws();
         match lx.peek() {
@@ -380,12 +442,18 @@ fn fields(lx: &mut Lexer<'_>, e: &mut BtEntry, macros: &mut Macros, warns: &mut 
             _ => {}
         }
         let Some(f) = lx.name() else {
-            return Err(alloc::format!("line {}: syntax error: expected a field name", lx.line));
+            return Err(alloc::format!(
+                "line {}: syntax error: expected a field name",
+                lx.line
+            ));
         };
         let f = f.to_ascii_lowercase();
         lx.skip_ws();
         if lx.peek() != Some('=') {
-            return Err(alloc::format!("line {}: syntax error: expected \"=\"", lx.line));
+            return Err(alloc::format!(
+                "line {}: syntax error: expected \"=\"",
+                lx.line
+            ));
         }
         lx.i += 1;
         let line = lx.line;
@@ -559,11 +627,17 @@ pub fn split_name(name: &str) -> SplitName {
     let (mut first_lc, mut last_lc) = (-1i64, -1i64);
     let mut i = 0usize;
     while i < tokens.len() {
-        let lower = tokens[i].as_deref().is_some_and(|t| unicode::bt_isulower(&unicode::nfc(t)));
+        let lower = tokens[i]
+            .as_deref()
+            .is_some_and(|t| unicode::bt_isulower(&unicode::nfc(t)));
         if first_lc == -1 && lower {
             first_lc = i as i64;
             i += 1;
-            while i < tokens.len() && tokens[i].as_deref().is_some_and(|t| unicode::bt_isulower(&unicode::nfc(t))) {
+            while i < tokens.len()
+                && tokens[i]
+                    .as_deref()
+                    .is_some_and(|t| unicode::bt_isulower(&unicode::nfc(t)))
+            {
                 i += 1;
             }
             last_lc = i as i64 - 1;

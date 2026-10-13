@@ -68,7 +68,11 @@ pub struct UntPart {
 
 #[derive(Clone, Debug)]
 pub enum SnkPart {
-    NamePart { value: String, use_: Option<String>, inits: bool },
+    NamePart {
+        value: String,
+        use_: Option<String>,
+        inits: bool,
+    },
     Literal(String),
 }
 
@@ -167,7 +171,11 @@ impl DataModel {
                 let def = FieldDef {
                     fieldtype: f.attr("fieldtype").unwrap_or("").into(),
                     datatype: f.attr("datatype").unwrap_or("").into(),
-                    format: f.attr("format").filter(|s| truthy(s)).unwrap_or("default").into(),
+                    format: f
+                        .attr("format")
+                        .filter(|s| truthy(s))
+                        .unwrap_or("default")
+                        .into(),
                     nullok: f.attr("nullok").is_some_and(truthy),
                     skipout: f.attr("skip_output").is_some_and(truthy),
                 };
@@ -196,7 +204,8 @@ impl DataModel {
             }),
             fields: sel(&|d| {
                 d.fieldtype == "field"
-                    && ["entrykey", "key", "integer", "datepart", "literal", "code"].contains(&d.datatype.as_str())
+                    && ["entrykey", "key", "integer", "datepart", "literal", "code"]
+                        .contains(&d.datatype.as_str())
                     && !d.skipout
                     && d.format != "xsv"
             }),
@@ -205,8 +214,16 @@ impl DataModel {
             xsv: sel(&|d| d.format == "xsv" && !d.skipout),
             ranges: sel(&|d| d.datatype == "range" && !d.skipout),
             verbs: sel(&|d| (d.datatype == "verbatim" || d.datatype == "uri") && !d.skipout),
-            vfields: sel(&|d| d.fieldtype == "field" && (d.datatype == "verbatim" || d.datatype == "uri") && !d.skipout),
-            vlists: sel(&|d| d.fieldtype == "list" && (d.datatype == "verbatim" || d.datatype == "uri") && !d.skipout),
+            vfields: sel(&|d| {
+                d.fieldtype == "field"
+                    && (d.datatype == "verbatim" || d.datatype == "uri")
+                    && !d.skipout
+            }),
+            vlists: sel(&|d| {
+                d.fieldtype == "list"
+                    && (d.datatype == "verbatim" || d.datatype == "uri")
+                    && !d.skipout
+            }),
             integers: sel(&|d| d.datatype == "datepart" || d.datatype == "integer"),
         };
         m.helpers = h;
@@ -239,16 +256,27 @@ impl DataModel {
         self.entrytypes.get(t).copied().unwrap_or(false)
     }
     pub fn fieldtype(&self, f: &str) -> String {
-        self.fields.get(f).map(|d| d.fieldtype.clone()).unwrap_or_default()
+        self.fields
+            .get(f)
+            .map(|d| d.fieldtype.clone())
+            .unwrap_or_default()
     }
     pub fn datatype(&self, f: &str) -> String {
-        self.fields.get(f).map(|d| d.datatype.clone()).unwrap_or_default()
+        self.fields
+            .get(f)
+            .map(|d| d.datatype.clone())
+            .unwrap_or_default()
     }
     pub fn format(&self, f: &str) -> String {
-        self.fields.get(f).map(|d| d.format.clone()).unwrap_or_default()
+        self.fields
+            .get(f)
+            .map(|d| d.format.clone())
+            .unwrap_or_default()
     }
     pub fn is_type(&self, ft: &str, dt: &str, f: &str) -> bool {
-        self.fields.get(f).is_some_and(|d| d.fieldtype == ft && d.datatype == dt)
+        self.fields
+            .get(f)
+            .is_some_and(|d| d.fieldtype == ft && d.datatype == dt)
     }
     pub fn nullok(&self, f: &str) -> bool {
         self.fields.get(f).is_some_and(|d| d.nullok)
@@ -264,14 +292,23 @@ impl DataModel {
         v
     }
     pub fn fields_of_fieldtype(&self, ft: &str) -> Vec<String> {
-        self.fields.iter().filter(|(_, d)| d.fieldtype == ft).map(|(n, _)| n.clone()).collect()
+        self.fields
+            .iter()
+            .filter(|(_, d)| d.fieldtype == ft)
+            .map(|(n, _)| n.clone())
+            .collect()
     }
     pub fn fields_of_datatype(&self, dt: &str) -> Vec<String> {
-        self.fields.iter().filter(|(_, d)| d.datatype == dt).map(|(n, _)| n.clone()).collect()
+        self.fields
+            .iter()
+            .filter(|(_, d)| d.datatype == dt)
+            .map(|(n, _)| n.clone())
+            .collect()
     }
     /// `sortdataschema`: integer sort fields compare as numbers.
     pub fn sort_is_int(&self, f: &str) -> bool {
-        ["intciteorder", "citeorder", "citecount"].contains(&f) || self.helpers.integers.iter().any(|x| x == f)
+        ["intciteorder", "citeorder", "citecount"].contains(&f)
+            || self.helpers.integers.iter().any(|x| x == f)
     }
 }
 
@@ -380,10 +417,15 @@ impl Config {
             .iter()
             .map(|p| Regex::new(p, "").expect("noinit default"))
             .collect();
-        c.nolabel = alloc::vec![Regex::new(r"[\p{Pc}\p{Ps}\p{Pe}\p{Pi}\p{Pf}\p{Po}\p{S}\p{C}]+", "").expect("nolabel")];
+        c.nolabel = alloc::vec![
+            Regex::new(r"[\p{Pc}\p{Ps}\p{Pe}\p{Pi}\p{Pf}\p{Po}\p{S}\p{C}]+", "").expect("nolabel")
+        ];
         c.nosort = [r"\A\p{L}{2}\p{Pd}(?=\S)", r"[\x{2bf}\x{2018}]"]
             .iter()
-            .map(|p| FieldRe { name: "setnames".into(), re: Regex::new(p, "").expect("nosort default") })
+            .map(|p| FieldRe {
+                name: "setnames".into(),
+                re: Regex::new(p, "").expect("nosort default"),
+            })
             .collect();
         c
     }
@@ -443,12 +485,18 @@ impl Config {
             }
             Some(("ENTRY", key)) => {
                 if self.in_scope(opt, "ENTRY") {
-                    self.blx_entry.entry((key.into(), secnum.into())).or_default().insert(opt.into(), val);
+                    self.blx_entry
+                        .entry((key.into(), secnum.into()))
+                        .or_default()
+                        .insert(opt.into(), val);
                 }
             }
             Some((sc, t)) => {
                 if self.in_scope(opt, sc) {
-                    self.blx_type.entry(t.into()).or_default().insert(opt.into(), val);
+                    self.blx_type
+                        .entry(t.into())
+                        .or_default()
+                        .insert(opt.into(), val);
                 }
             }
         }
@@ -479,17 +527,31 @@ impl Config {
     }
 
     /// `getblxoption`.
-    pub fn blx(&self, secnum: Option<&str>, opt: &str, etype: Option<&str>, key: Option<&str>) -> Option<BV> {
+    pub fn blx(
+        &self,
+        secnum: Option<&str>,
+        opt: &str,
+        etype: Option<&str>,
+        key: Option<&str>,
+    ) -> Option<BV> {
         let secnum = secnum.unwrap_or(NOKEY);
         let etype = etype.unwrap_or(NOKEY);
         let key = key.unwrap_or(NOKEY);
         if self.in_scope(opt, "ENTRY") {
-            if let Some(v) = self.blx_entry.get(&(key.into(), secnum.into())).and_then(|m| m.get(opt)) {
+            if let Some(v) = self
+                .blx_entry
+                .get(&(key.into(), secnum.into()))
+                .and_then(|m| m.get(opt))
+            {
                 return Some(v.clone());
             }
         }
         if self.in_scope(opt, "ENTRYTYPE") {
-            if let Some(v) = self.blx_type.get(&crate::unicode::lc(etype)).and_then(|m| m.get(opt)) {
+            if let Some(v) = self
+                .blx_type
+                .get(&crate::unicode::lc(etype))
+                .and_then(|m| m.get(opt))
+            {
                 return Some(v.clone());
             }
         }
@@ -498,18 +560,42 @@ impl Config {
         }
         None
     }
-    pub fn blx_s(&self, secnum: Option<&str>, opt: &str, etype: Option<&str>, key: Option<&str>) -> String {
-        self.blx(secnum, opt, etype, key).map(|v| v.s()).unwrap_or_default()
+    pub fn blx_s(
+        &self,
+        secnum: Option<&str>,
+        opt: &str,
+        etype: Option<&str>,
+        key: Option<&str>,
+    ) -> String {
+        self.blx(secnum, opt, etype, key)
+            .map(|v| v.s())
+            .unwrap_or_default()
     }
-    pub fn blx_b(&self, secnum: Option<&str>, opt: &str, etype: Option<&str>, key: Option<&str>) -> bool {
-        self.blx(secnum, opt, etype, key).is_some_and(|v| v.truthy())
+    pub fn blx_b(
+        &self,
+        secnum: Option<&str>,
+        opt: &str,
+        etype: Option<&str>,
+        key: Option<&str>,
+    ) -> bool {
+        self.blx(secnum, opt, etype, key)
+            .is_some_and(|v| v.truthy())
     }
-    pub fn blx_n(&self, secnum: Option<&str>, opt: &str, etype: Option<&str>, key: Option<&str>) -> i64 {
+    pub fn blx_n(
+        &self,
+        secnum: Option<&str>,
+        opt: &str,
+        etype: Option<&str>,
+        key: Option<&str>,
+    ) -> i64 {
         crate::model::numify(&self.blx_s(secnum, opt, etype, key)) as i64
     }
     /// The entry-scope options set for a key (sorted).
     pub fn entry_options(&self, secnum: &str, key: &str) -> Vec<String> {
-        self.blx_entry.get(&(key.into(), secnum.into())).map(|m| m.keys().cloned().collect()).unwrap_or_default()
+        self.blx_entry
+            .get(&(key.into(), secnum.into()))
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn incr_crossrefkey(&mut self, k: &str) {
@@ -531,9 +617,16 @@ impl Config {
         false
     }
     pub fn add_uniq_ignore(&mut self, key: &str, field: &str, uniqs: Option<&str>) {
-        let Some(u) = uniqs.filter(|s| truthy(s)) else { return };
+        let Some(u) = uniqs.filter(|s| truthy(s)) else {
+            return;
+        };
         for x in split_comma(u) {
-            self.uniqignore.entry(key.into()).or_default().entry(x).or_default().push(field.into());
+            self.uniqignore
+                .entry(key.into())
+                .or_default()
+                .entry(x)
+                .or_default()
+                .push(field.into());
         }
     }
     pub fn keyorder(&self, sec: &str, key: &str) -> Option<String> {

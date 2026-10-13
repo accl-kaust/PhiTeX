@@ -33,11 +33,7 @@ impl Date {
         self.atos.get(&s).cloned().unwrap_or(s)
     }
     pub fn era(&self) -> &'static str {
-        if self.year <= 0 {
-            "bce"
-        } else {
-            "ce"
-        }
+        if self.year <= 0 { "bce" } else { "ce" }
     }
 }
 
@@ -116,9 +112,16 @@ pub fn parse_date(s: Option<&str>) -> Side {
                     i += 1;
                 }
                 let num: String = cs[st..i].iter().collect();
-                let ascii: String = cs[st..i].iter().map(|&c| char::from_digit(unicode::digit_value(c).unwrap_or(0), 10).unwrap_or('0')).collect();
+                let ascii: String = cs[st..i]
+                    .iter()
+                    .map(|&c| {
+                        char::from_digit(unicode::digit_value(c).unwrap_or(0), 10).unwrap_or('0')
+                    })
+                    .collect();
                 if num != ascii {
-                    let r = unicode::num(&num).map(|v| alloc::format!("{v}")).unwrap_or_default();
+                    let r = unicode::num(&num)
+                        .map(|v| alloc::format!("{v}"))
+                        .unwrap_or_default();
                     d.atos.insert(ascii.clone(), num.clone());
                     d.atos.insert(r, num.clone());
                 }
@@ -158,7 +161,13 @@ pub fn parse_date(s: Option<&str>) -> Side {
     } else if input.len() >= 6 {
         let tail = &input[input.len() - 6..];
         let b = tail.as_bytes();
-        if (b[0] == b'+' || b[0] == b'-') && b[1].is_ascii_digit() && b[2].is_ascii_digit() && b[3] == b':' && b[4].is_ascii_digit() && b[5].is_ascii_digit() {
+        if (b[0] == b'+' || b[0] == b'-')
+            && b[1].is_ascii_digit()
+            && b[2].is_ascii_digit()
+            && b[3] == b':'
+            && b[4].is_ascii_digit()
+            && b[5].is_ascii_digit()
+        {
             d.tz = Some(alloc::format!("{}{}", &tail[..3], &tail[4..]));
             input.truncate(input.len() - 6);
         }
@@ -221,7 +230,12 @@ pub fn parse_date(s: Option<&str>) -> Side {
         if let Some((y, o)) = ystr(&input) {
             let r = &input[o..];
             let b = r.as_bytes();
-            if b.len() == 6 && b[0] == b'-' && digits(&r[1..3], 2) && b[3] == b'-' && digits(&r[4..6], 2) {
+            if b.len() == 6
+                && b[0] == b'-'
+                && digits(&r[1..3], 2)
+                && b[3] == b'-'
+                && digits(&r[4..6], 2)
+            {
                 d.year = y;
                 d.month = r[1..3].parse().unwrap_or(0);
                 d.day = r[4..6].parse().unwrap_or(0);
@@ -277,7 +291,13 @@ pub fn parse_date(s: Option<&str>) -> Side {
         return None;
     }
     // DateTime->new validation
-    if !(1..=12).contains(&d.month) || d.day < 1 || d.day > month_days(d.year, d.month) || d.hour > 23 || d.minute > 59 || d.second > 59 {
+    if !(1..=12).contains(&d.month)
+        || d.day < 1
+        || d.day > month_days(d.year, d.month)
+        || d.hour > 23
+        || d.minute > 59
+        || d.second > 59
+    {
         return None;
     }
     Some(Some(d))
@@ -288,15 +308,33 @@ fn unspecified(d: &str) -> Option<(String, String, &'static str)> {
     let b = d.as_bytes();
     let dash = |i: usize| b.get(i) == Some(&b'-');
     if b.len() == 4 && digits(&d[..3], 3) && b[3] == b'X' {
-        return Some((alloc::format!("{}0", &d[..3]), alloc::format!("{}9", &d[..3]), "yearindecade"));
+        return Some((
+            alloc::format!("{}0", &d[..3]),
+            alloc::format!("{}9", &d[..3]),
+            "yearindecade",
+        ));
     }
     if b.len() == 4 && digits(&d[..2], 2) && &d[2..] == "XX" {
-        return Some((alloc::format!("{}00", &d[..2]), alloc::format!("{}99", &d[..2]), "yearincentury"));
+        return Some((
+            alloc::format!("{}00", &d[..2]),
+            alloc::format!("{}99", &d[..2]),
+            "yearincentury",
+        ));
     }
     if b.len() == 7 && digits(&d[..4], 4) && dash(4) && &d[5..] == "XX" {
-        return Some((alloc::format!("{}-01", &d[..4]), alloc::format!("{}-12", &d[..4]), "monthinyear"));
+        return Some((
+            alloc::format!("{}-01", &d[..4]),
+            alloc::format!("{}-12", &d[..4]),
+            "monthinyear",
+        ));
     }
-    if b.len() == 10 && digits(&d[..4], 4) && dash(4) && digits(&d[5..7], 2) && dash(7) && &d[8..] == "XX" {
+    if b.len() == 10
+        && digits(&d[..4], 4)
+        && dash(4)
+        && digits(&d[5..7], 2)
+        && dash(7)
+        && &d[8..] == "XX"
+    {
         let y: i64 = d[..4].parse().ok()?;
         let m: u32 = d[5..7].parse().ok()?;
         let md = match &d[5..7] {
@@ -311,10 +349,24 @@ fn unspecified(d: &str) -> Option<(String, String, &'static str)> {
             _ => 31,
         };
         let _ = m;
-        return Some((alloc::format!("{}-01", &d[..7]), alloc::format!("{}-{md}", &d[..7]), "dayinmonth"));
+        return Some((
+            alloc::format!("{}-01", &d[..7]),
+            alloc::format!("{}-{md}", &d[..7]),
+            "dayinmonth",
+        ));
     }
-    if b.len() == 10 && digits(&d[..4], 4) && dash(4) && &d[5..7] == "XX" && dash(7) && &d[8..] == "XX" {
-        return Some((alloc::format!("{}-01-01", &d[..4]), alloc::format!("{}-12-31", &d[..4]), "dayinyear"));
+    if b.len() == 10
+        && digits(&d[..4], 4)
+        && dash(4)
+        && &d[5..7] == "XX"
+        && dash(7)
+        && &d[8..] == "XX"
+    {
+        return Some((
+            alloc::format!("{}-01-01", &d[..4]),
+            alloc::format!("{}-12-31", &d[..4]),
+            "dayinyear",
+        ));
     }
     None
 }
@@ -332,7 +384,15 @@ pub struct Range {
 }
 
 pub fn parse_date_range(s: &str) -> Range {
-    let mut r = Range { start: None, end: None, sep: false, unspec: None, dateunknown: false, enddateunknown: false, nothing: false };
+    let mut r = Range {
+        start: None,
+        end: None,
+        sep: false,
+        unspec: None,
+        dateunknown: false,
+        enddateunknown: false,
+        nothing: false,
+    };
     let slashes = s.matches('/').count();
     if slashes > 1 {
         r.nothing = true;
@@ -341,7 +401,10 @@ pub fn parse_date_range(s: &str) -> Range {
     let (mut sd, mut ed): (Option<String>, Option<String>) = match s.find('/') {
         Some(i) => {
             r.sep = true;
-            (Some(&s[..i]).filter(|x| !x.is_empty()).map(Into::into), Some(&s[i + 1..]).filter(|x| !x.is_empty()).map(Into::into))
+            (
+                Some(&s[..i]).filter(|x| !x.is_empty()).map(Into::into),
+                Some(&s[i + 1..]).filter(|x| !x.is_empty()).map(Into::into),
+            )
         }
         None => (Some(s).filter(|x| !x.is_empty()).map(Into::into), None),
     };
@@ -379,13 +442,29 @@ pub fn parse_date_range(s: &str) -> Range {
 /// Utils `tzformat`.
 pub fn tzformat(tz: &str) -> String {
     let b = tz.as_bytes();
-    if b.len() >= 3 && (b[0] == b'+' || b[0] == b'-') && b[1].is_ascii_digit() && b[2].is_ascii_digit() {
+    if b.len() >= 3
+        && (b[0] == b'+' || b[0] == b'-')
+        && b[1].is_ascii_digit()
+        && b[2].is_ascii_digit()
+    {
         let mut rest = &tz[3..];
         if let Some(x) = rest.strip_prefix(':') {
             rest = x;
         }
-        let mm = if rest.len() >= 2 && digits(&rest[..2], 2) { &rest[..2] } else { "" };
-        return alloc::format!("{}{}", &tz[..3], if crate::model::truthy(mm) { alloc::format!("\\bibtzminsep {mm}") } else { String::new() });
+        let mm = if rest.len() >= 2 && digits(&rest[..2], 2) {
+            &rest[..2]
+        } else {
+            ""
+        };
+        return alloc::format!(
+            "{}{}",
+            &tz[..3],
+            if crate::model::truthy(mm) {
+                alloc::format!("\\bibtzminsep {mm}")
+            } else {
+                String::new()
+            }
+        );
     }
     if tz == "UTC" {
         return "Z".into();

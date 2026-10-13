@@ -80,9 +80,7 @@ pub fn has_property(c: char, name: &str) -> Option<bool> {
         "Digit" | "XPosixDigit" => g == "Nd",
         "ASCII" => (c as u32) < 0x80,
         "ASCII_Hex_Digit" | "AHex" => c.is_ascii_hexdigit(),
-        "Alpha" | "Alphabetic" | "XPosixAlpha" => {
-            in_ranges(unidata::ALNUM, c) && g != "Nd"
-        }
+        "Alpha" | "Alphabetic" | "XPosixAlpha" => in_ranges(unidata::ALNUM, c) && g != "Nd",
         "Lower" | "Lowercase" | "XPosixLower" => c.is_lowercase(),
         "Upper" | "Uppercase" | "XPosixUpper" => c.is_uppercase(),
         "Any" => true,
@@ -128,7 +126,10 @@ pub fn is_digit(c: char) -> bool {
 /// btparse's `isulower()`: is the first UTF-8 character of a token one of
 /// Unicode 6.2's lowercase letters.
 pub fn bt_isulower(token: &str) -> bool {
-    token.chars().next().is_some_and(|c| in_ranges(unidata::ISULOWER, c))
+    token
+        .chars()
+        .next()
+        .is_some_and(|c| in_ranges(unidata::ISULOWER, c))
 }
 
 /// The decimal digit value of a `\d` character.

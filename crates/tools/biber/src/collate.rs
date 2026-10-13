@@ -89,7 +89,11 @@ impl Table {
             }
             map.insert(cps, ces);
         }
-        Table { map, maxlen, contraction }
+        Table {
+            map,
+            maxlen,
+            contraction,
+        }
     }
 }
 
@@ -118,7 +122,18 @@ fn is_uideo(u: u32) -> bool {
         || (0x30000..=0x3134A).contains(&u)
         || matches!(
             u,
-            0xFA0E | 0xFA0F | 0xFA11 | 0xFA13 | 0xFA14 | 0xFA1F | 0xFA21 | 0xFA23 | 0xFA24 | 0xFA27 | 0xFA28 | 0xFA29
+            0xFA0E
+                | 0xFA0F
+                | 0xFA11
+                | 0xFA13
+                | 0xFA14
+                | 0xFA1F
+                | 0xFA21
+                | 0xFA23
+                | 0xFA24
+                | 0xFA27
+                | 0xFA28
+                | 0xFA29
         )
 }
 
@@ -144,8 +159,14 @@ fn derived(u: u32) -> [Ce; 2] {
         (base + (u >> 15), (u & 0x7FFF) | 0x8000)
     };
     [
-        Ce { var: false, w: [aaaa as u16, 0x20, 0x02] },
-        Ce { var: false, w: [bbbb as u16, 0, 0] },
+        Ce {
+            var: false,
+            w: [aaaa as u16, 0x20, 0x02],
+        },
+        Ce {
+            var: false,
+            w: [bbbb as u16, 0, 0],
+        },
     ]
 }
 
@@ -267,7 +288,11 @@ impl Collator {
     /// The sort key as Unicode::Collate builds it: the four levels of
     /// 16-bit weights, each level ended by a zero separator.
     pub fn sort_key(&self, t: &Table, s: &str) -> Vec<u16> {
-        let s = if self.normalize { unicode::nfd(s) } else { s.into() };
+        let s = if self.normalize {
+            unicode::nfd(s)
+        } else {
+            s.into()
+        };
         let mut src: Vec<Option<u32>> = s.chars().map(|c| Some(c as u32)).collect();
         let ents = self.split(t, &mut src);
         let mut levels: [Vec<u16>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
@@ -280,7 +305,10 @@ impl Collator {
                         (true, [0u16, 0, 0, ce.w[0]])
                     } else {
                         let any = ce.w[0] != 0 || ce.w[1] != 0 || ce.w[2] != 0;
-                        (false, [ce.w[0], ce.w[1], ce.w[2], if any { 0xFFFF } else { 0 }])
+                        (
+                            false,
+                            [ce.w[0], ce.w[1], ce.w[2], if any { 0xFFFF } else { 0 }],
+                        )
                     }
                 } else {
                     (ce.var, [ce.w[0], ce.w[1], ce.w[2], 0])

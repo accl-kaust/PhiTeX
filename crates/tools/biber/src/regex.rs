@@ -36,7 +36,7 @@ enum Node {
     StrEndNl,
     WordB(bool),
     Group(Box<Node>, Option<usize>),
-    Look(Box<Node>, bool, bool), // node, ahead, negate
+    Look(Box<Node>, bool, bool),           // node, ahead, negate
     Repeat(Box<Node>, usize, usize, bool), // min, max, greedy
     Alt(Vec<Node>),
     Seq(Vec<Node>),
@@ -96,7 +96,11 @@ impl Parser<'_> {
             self.i += 1;
             alts.push(self.seq()?);
         }
-        Ok(if alts.len() == 1 { alts.pop().unwrap() } else { Node::Alt(alts) })
+        Ok(if alts.len() == 1 {
+            alts.pop().unwrap()
+        } else {
+            Node::Alt(alts)
+        })
     }
     fn seq(&mut self) -> Result<Node, String> {
         let mut items = Vec::new();
@@ -185,7 +189,11 @@ impl Parser<'_> {
                 self.i += 1;
             }
             let h: String = self.p[s..self.i].iter().collect();
-            let v = if h.is_empty() { 0 } else { u32::from_str_radix(&h, 16).unwrap_or(0) };
+            let v = if h.is_empty() {
+                0
+            } else {
+                u32::from_str_radix(&h, 16).unwrap_or(0)
+            };
             char::from_u32(v).ok_or_else(|| "bad char".into())
         }
     }
@@ -422,8 +430,7 @@ fn class_matches(items: &[ClassItem], neg: bool, c: char, icase: bool) -> bool {
 }
 
 fn ceq(a: char, b: char, icase: bool) -> bool {
-    a == b
-        || (icase && a.to_lowercase().next() == b.to_lowercase().next())
+    a == b || (icase && a.to_lowercase().next() == b.to_lowercase().next())
 }
 
 struct Ctx<'a> {
@@ -439,17 +446,29 @@ impl Ctx<'_> {
         i < self.t.len() && unicode::is_word(self.t[i])
     }
     /// Match `n` at `pos`, then the continuation.
-    fn m(&mut self, n: &Node, pos: usize, caps: &mut Caps, k: &mut dyn FnMut(&mut Self, usize, &mut Caps) -> bool) -> bool {
+    fn m(
+        &mut self,
+        n: &Node,
+        pos: usize,
+        caps: &mut Caps,
+        k: &mut dyn FnMut(&mut Self, usize, &mut Caps) -> bool,
+    ) -> bool {
         self.steps += 1;
         if self.steps > 5_000_000 {
             return false;
         }
         let t = self.t;
         match n {
-            Node::Char(c) => pos < t.len() && ceq(t[pos], *c, self.re.icase) && k(self, pos + 1, caps),
-            Node::Any => pos < t.len() && (self.re.dotall || t[pos] != '\n') && k(self, pos + 1, caps),
+            Node::Char(c) => {
+                pos < t.len() && ceq(t[pos], *c, self.re.icase) && k(self, pos + 1, caps)
+            }
+            Node::Any => {
+                pos < t.len() && (self.re.dotall || t[pos] != '\n') && k(self, pos + 1, caps)
+            }
             Node::Class(items, neg) => {
-                pos < t.len() && class_matches(items, *neg, t[pos], self.re.icase) && k(self, pos + 1, caps)
+                pos < t.len()
+                    && class_matches(items, *neg, t[pos], self.re.icase)
+                    && k(self, pos + 1, caps)
             }
             Node::Start => {
                 (pos == 0 || (self.re.multiline && t[pos - 1] == '\n')) && k(self, pos, caps)
@@ -545,19 +564,41 @@ impl Ctx<'_> {
                 false
             }
             Node::Seq(items) => self.seq(items, 0, pos, caps, k),
-            Node::Repeat(inner, min, max, greedy) => self.rep(inner, *min, *max, *greedy, 0, pos, usize::MAX, caps, k),
+            Node::Repeat(inner, min, max, greedy) => {
+                self.rep(inner, *min, *max, *greedy, 0, pos, usize::MAX, caps, k)
+            }
         }
     }
-    fn seq(&mut self, items: &[Node], i: usize, pos: usize, caps: &mut Caps, k: &mut dyn FnMut(&mut Self, usize, &mut Caps) -> bool) -> bool {
+    fn seq(
+        &mut self,
+        items: &[Node],
+        i: usize,
+        pos: usize,
+        caps: &mut Caps,
+        k: &mut dyn FnMut(&mut Self, usize, &mut Caps) -> bool,
+    ) -> bool {
         if i == items.len() {
             return k(self, pos, caps);
         }
         let (first, _) = items.split_at(i + 1);
         let node = &first[i];
-        self.m(node, pos, caps, &mut |s: &mut Self, p, c: &mut Caps| s.seq(items, i + 1, p, c, k))
+        self.m(node, pos, caps, &mut |s: &mut Self, p, c: &mut Caps| {
+            s.seq(items, i + 1, p, c, k)
+        })
     }
     #[allow(clippy::too_many_arguments)]
-    fn rep(&mut self, inner: &Node, min: usize, max: usize, greedy: bool, count: usize, pos: usize, last: usize, caps: &mut Caps, k: &mut dyn FnMut(&mut Self, usize, &mut Caps) -> bool) -> bool {
+    fn rep(
+        &mut self,
+        inner: &Node,
+        min: usize,
+        max: usize,
+        greedy: bool,
+        count: usize,
+        pos: usize,
+        last: usize,
+        caps: &mut Caps,
+        k: &mut dyn FnMut(&mut Self, usize, &mut Caps) -> bool,
+    ) -> bool {
         let can_more = count < max && !(count >= min && last == pos);
         if count >= min && !greedy && k(self, pos, caps) {
             return true;
@@ -580,7 +621,12 @@ impl Regex {
     /// Compile a Perl pattern with flags (any of `imsx`).
     pub fn new(pat: &str, flags: &str) -> Result<Regex, String> {
         let chars: Vec<char> = pat.chars().collect();
-        let mut p = Parser { p: &chars, i: 0, ncaps: 0, extended: flags.contains('x') };
+        let mut p = Parser {
+            p: &chars,
+            i: 0,
+            ncaps: 0,
+            extended: flags.contains('x'),
+        };
         let node = p.alt()?;
         if p.i != chars.len() {
             return Err(alloc::format!("cannot parse pattern '{pat}'"));
@@ -596,7 +642,11 @@ impl Regex {
 
     /// The first match starting at or after char index `from`.
     pub fn find_at(&self, t: &[char], from: usize) -> Option<Match> {
-        let mut ctx = Ctx { t, re: self, steps: 0 };
+        let mut ctx = Ctx {
+            t,
+            re: self,
+            steps: 0,
+        };
         for start in from..=t.len() {
             let mut caps: Caps = vec![None; self.ncaps + 1];
             let mut end = None;
@@ -607,7 +657,11 @@ impl Regex {
                 let (e, c) = end.unwrap();
                 let mut c = c;
                 c[0] = Some((start, e));
-                return Some(Match { start, end: e, caps: c });
+                return Some(Match {
+                    start,
+                    end: e,
+                    caps: c,
+                });
             }
         }
         None
@@ -624,7 +678,9 @@ impl Regex {
         let mut from = 0;
         let mut last_empty_at = None;
         while from <= t.len() {
-            let Some(m) = self.find_at(t, from) else { break };
+            let Some(m) = self.find_at(t, from) else {
+                break;
+            };
             if m.start == m.end && last_empty_at == Some(m.start) {
                 // Perl does not allow an empty match where the last match ended
                 if m.start >= t.len() {
@@ -645,7 +701,12 @@ impl Regex {
     }
 
     /// `s/re/f(match)/g` (or the first only, `global` false).
-    pub fn replace(&self, s: &str, global: bool, f: &mut dyn FnMut(&[char], &Match) -> String) -> String {
+    pub fn replace(
+        &self,
+        s: &str,
+        global: bool,
+        f: &mut dyn FnMut(&[char], &Match) -> String,
+    ) -> String {
         let t: Vec<char> = s.chars().collect();
         let ms = if global {
             self.find_all(&t)
@@ -671,5 +732,9 @@ impl Regex {
 
 /// The text of a capture.
 pub fn cap(t: &[char], m: &Match, i: usize) -> Option<String> {
-    m.caps.get(i).copied().flatten().map(|(s, e)| t[s..e].iter().collect())
+    m.caps
+        .get(i)
+        .copied()
+        .flatten()
+        .map(|(s, e)| t[s..e].iter().collect())
 }

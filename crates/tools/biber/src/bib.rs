@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use crate::biber::{Biber, Fatal};
 use crate::btparse::{self, BtEntry, Meta};
 use crate::config::split_comma;
-use crate::model::{shared, truthy, Entry, Name, NamePart, Names, Val, XRef};
+use crate::model::{Entry, Name, NamePart, Names, Val, XRef, shared, truthy};
 use crate::regex::{self, Regex};
 use crate::unicode::{self, fc, lc, nfc, nfd};
 use crate::xml::Element;
@@ -111,7 +111,8 @@ pub fn gen_initials(strings: &[String]) -> Vec<String> {
     for s in strings {
         let braced = s.len() >= 3 && s.starts_with('{') && s.ends_with('}');
         let c: Vec<char> = s.chars().collect();
-        let dash_inside = (1..c.len().saturating_sub(1)).any(|i| unicode::is_dash(c[i]) && c[i - 1] != '{' && c[i + 1] != '}');
+        let dash_inside = (1..c.len().saturating_sub(1))
+            .any(|i| unicode::is_dash(c[i]) && c[i - 1] != '{' && c[i + 1] != '}');
         if !braced && dash_inside {
             let parts: Vec<String> = s.split(unicode::is_dash).map(Into::into).collect();
             out.push(gen_initials(&parts).join("-"));
@@ -136,7 +137,11 @@ fn join_name_parts(parts: &[String]) -> String {
         2 => alloc::format!("{}~{}", parts[0], parts[1]),
         n => {
             let mut s = parts[0].clone();
-            s.push(if unicode::gc_len(&parts[0]) < 3 { '~' } else { ' ' });
+            s.push(if unicode::gc_len(&parts[0]) < 3 {
+                '~'
+            } else {
+                ' '
+            });
             s.push_str(&parts[1..n - 1].join(" "));
             s.push('~');
             s.push_str(&parts[n - 1]);
@@ -208,17 +213,28 @@ impl Biber<'_> {
     }
 
     /// `extract_entries`: returns the keys still not found.
-    pub fn extract_entries(&mut self, filename: &str, bytes: &[u8], keys: &[String]) -> Result<Vec<String>, Fatal> {
+    pub fn extract_entries(
+        &mut self,
+        filename: &str,
+        bytes: &[u8],
+        keys: &[String],
+    ) -> Result<Vec<String>, Fatal> {
         let mut rkeys: Vec<String> = keys.to_vec();
         if bytes.is_empty() {
-            self.warnings.push(alloc::format!("Data source '{filename}' is empty, ignoring"));
+            self.warnings.push(alloc::format!(
+                "Data source '{filename}' is empty, ignoring"
+            ));
             return Ok(rkeys);
         }
         let Ok(text) = core::str::from_utf8(bytes) else {
-            return Err(self.fatal(alloc::format!("Data file '{filename}' cannot be read in encoding 'UTF-8'")));
+            return Err(self.fatal(alloc::format!(
+                "Data file '{filename}' cannot be read in encoding 'UTF-8'"
+            )));
         };
         if !text.contains('@') {
-            self.warnings.push(alloc::format!("Data source '{filename}' contains no BibTeX entries/macros, ignoring"));
+            self.warnings.push(alloc::format!(
+                "Data source '{filename}' contains no BibTeX entries/macros, ignoring"
+            ));
             return Ok(rkeys);
         }
         let mut smaps: Vec<Element> = Vec::new();
@@ -229,7 +245,12 @@ impl Biber<'_> {
                 }
             }
         }
-        if let Some(m) = self.cfg.sourcemap.iter().find(|m| m.attr("datatype") == Some("bibtex") && m.attr("level") == Some("driver")) {
+        if let Some(m) = self
+            .cfg
+            .sourcemap
+            .iter()
+            .find(|m| m.attr("datatype") == Some("bibtex") && m.attr("level") == Some("driver"))
+        {
             smaps.push(m.clone());
         }
         *self.bibcache.counts.entry(filename.into()).or_insert(0) += 1;
@@ -238,21 +259,38 @@ impl Biber<'_> {
         }
         let secnum = self.cur.clone();
         if self.sec().allkeys {
-            let order = self.bibcache.orig_key_order.get(filename).cloned().unwrap_or_default();
+            let order = self
+                .bibcache
+                .orig_key_order
+                .get(filename)
+                .cloned()
+                .unwrap_or_default();
             for key in &order {
                 self.sec().keytods.insert(key.clone(), filename.into());
                 let e = self.bibcache.data[filename][key].clone();
-                if let Created::NotCreated = self.create_entry(key, e, filename, &smaps, &mut rkeys)? {
+                if let Created::NotCreated =
+                    self.create_entry(key, e, filename, &smaps, &mut rkeys)?
+                {
                     if let Some(o) = self.bibcache.orig_key_order.get_mut(filename) {
                         o.retain(|k| k != key);
                     }
                 }
             }
-            let aliases: Vec<(String, String)> = self.bibcache.aliases.iter().map(|(a, b)| (a.clone(), b.clone())).collect();
+            let aliases: Vec<(String, String)> = self
+                .bibcache
+                .aliases
+                .iter()
+                .map(|(a, b)| (a.clone(), b.clone()))
+                .collect();
             for (a, k) in aliases {
                 self.sec().alias.insert(a, k);
             }
-            let order = self.bibcache.orig_key_order.get(filename).cloned().unwrap_or_default();
+            let order = self
+                .bibcache
+                .orig_key_order
+                .get(filename)
+                .cloned()
+                .unwrap_or_default();
             self.sec().add_citekeys(&order);
             if !self.sec().dkeys.is_empty() {
                 let d = self.sec().dynamic_set_keys();
@@ -261,9 +299,17 @@ impl Biber<'_> {
         } else {
             for wanted in keys {
                 self.sec().keytods.insert(wanted.clone(), filename.into());
-                if let Some(e) = self.bibcache.data.get(filename).and_then(|m| m.get(wanted)).cloned() {
+                if let Some(e) = self
+                    .bibcache
+                    .data
+                    .get(filename)
+                    .and_then(|m| m.get(wanted))
+                    .cloned()
+                {
                     if !self.sec().entries.contains_key(wanted) {
-                        if let Created::NotCreated = self.create_entry(wanted, e, filename, &smaps, &mut rkeys)? {
+                        if let Created::NotCreated =
+                            self.create_entry(wanted, e, filename, &smaps, &mut rkeys)?
+                        {
                             self.sec().del_citekey(wanted);
                             if let Some(o) = self.bibcache.orig_key_order.get_mut(filename) {
                                 o.retain(|k| k != wanted);
@@ -278,7 +324,9 @@ impl Biber<'_> {
                     self.sec().alias.insert(wanted.clone(), rk.clone());
                     if !self.sec().entries.contains_key(&rk) {
                         if let Some(e) = self.bibcache.globalds.get(&rk).cloned() {
-                            if let Created::NotCreated = self.create_entry(&rk, e, filename, &smaps, &mut rkeys)? {
+                            if let Created::NotCreated =
+                                self.create_entry(&rk, e, filename, &smaps, &mut rkeys)?
+                            {
                                 self.sec().del_citekey(wanted);
                                 if let Some(o) = self.bibcache.orig_key_order.get_mut(filename) {
                                     o.retain(|k| *k != rk);
@@ -301,7 +349,8 @@ impl Biber<'_> {
             }
         }
         for w in core::mem::take(&mut self.bt_warnings) {
-            self.warnings.push(alloc::format!("BibTeX subsystem: {filename}, {w}"));
+            self.warnings
+                .push(alloc::format!("BibTeX subsystem: {filename}, {w}"));
         }
         if self.bibcache.counts[filename] < 2 {
             if let Some(p) = self.bibcache.preamble.get(filename) {
@@ -317,10 +366,14 @@ impl Biber<'_> {
         if let Some(b) = buf.strip_prefix('\u{feff}') {
             buf = b.into();
         }
-        buf = buf.replace("\r\n", "\n").replace(['\r', '\u{0b}', '\u{0c}', '\u{85}', '\u{2028}', '\u{2029}'], "\n");
+        buf = buf.replace("\r\n", "\n").replace(
+            ['\r', '\u{0b}', '\u{0c}', '\u{85}', '\u{2028}', '\u{2029}'],
+            "\n",
+        );
         // first pass: parse and LaTeX-decode
         let mut warns = Vec::new();
-        let first = btparse::parse(&buf, &mut self.macros, &mut warns).map_err(|e| self.fatal(alloc::format!("BibTeX subsystem: {filename}, {e}")))?;
+        let first = btparse::parse(&buf, &mut self.macros, &mut warns)
+            .map_err(|e| self.fatal(alloc::format!("BibTeX subsystem: {filename}, {e}")))?;
         self.bt_warnings.extend(warns);
         let mut lbuf = String::new();
         for e in &first {
@@ -364,7 +417,8 @@ impl Biber<'_> {
         }
         let lbuf = nfd(&nfc(&lbuf));
         let mut warns = Vec::new();
-        let entries = btparse::parse(&lbuf, &mut self.macros, &mut warns).map_err(|e| self.fatal(alloc::format!("BibTeX subsystem: {filename}, {e}")))?;
+        let entries = btparse::parse(&lbuf, &mut self.macros, &mut warns)
+            .map_err(|e| self.fatal(alloc::format!("BibTeX subsystem: {filename}, {e}")))?;
         let _ = warns;
         let mut data: BTreeMap<String, BtEntry> = BTreeMap::new();
         let mut order: Vec<String> = Vec::new();
@@ -372,18 +426,26 @@ impl Biber<'_> {
         for e in entries {
             match e.meta {
                 Meta::Preamble => {
-                    self.bibcache.preamble.get_mut(filename).expect("inserted").push(e.value.clone());
+                    self.bibcache
+                        .preamble
+                        .get_mut(filename)
+                        .expect("inserted")
+                        .push(e.value.clone());
                     continue;
                 }
                 Meta::Comment | Meta::MacroDef => continue,
                 Meta::Regular => {}
             }
             let Some(key) = e.key.clone().filter(|k| !k.is_empty()) else {
-                self.warnings.push(alloc::format!("Invalid or undefined BibTeX entry key in file '{filename}', skipping ..."));
+                self.warnings.push(alloc::format!(
+                    "Invalid or undefined BibTeX entry key in file '{filename}', skipping ..."
+                ));
                 continue;
             };
             if self.bibcache.aliases.contains_key(&key) {
-                self.warnings.push(alloc::format!("Citekey alias '{key}' is also a real entry key, skipping ..."));
+                self.warnings.push(alloc::format!(
+                    "Citekey alias '{key}' is also a real entry key, skipping ..."
+                ));
                 self.bibcache.aliases.remove(&key);
             }
             if let Some(ids) = e.get("ids").filter(|s| truthy(s)) {
@@ -393,13 +455,17 @@ impl Biber<'_> {
                         continue;
                     }
                     if self.sec().everykey.contains(&id) {
-                        self.warnings.push(alloc::format!("Entry alias '{id}' is also a real entry key, skipping ..."));
+                        self.warnings.push(alloc::format!(
+                            "Entry alias '{id}' is also a real entry key, skipping ..."
+                        ));
                         continue;
                     }
                     if let Some(other) = self.bibcache.aliases.get(&id) {
                         if *other != key {
                             let o = other.clone();
-                            self.warnings.push(alloc::format!("Entry alias '{id}' already has an alias '{o}', skipping ..."));
+                            self.warnings.push(alloc::format!(
+                                "Entry alias '{id}' already has an alias '{o}', skipping ..."
+                            ));
                         }
                     } else {
                         self.bibcache.aliases.insert(id, key.clone());
@@ -410,7 +476,9 @@ impl Biber<'_> {
                 self.warnings.push(alloc::format!("Possible typo (case mismatch) between datasource keys: '{key}' and '{okey}' in file '{filename}'"));
             }
             if self.sec().everykey.contains(&key) && !self.cfg.opt_true("noskipduplicates") {
-                self.warnings.push(alloc::format!("Duplicate entry key: '{key}' in file '{filename}', skipping ..."));
+                self.warnings.push(alloc::format!(
+                    "Duplicate entry key: '{key}' in file '{filename}', skipping ..."
+                ));
                 continue;
             }
             self.sec().add_everykey(&key);
@@ -433,7 +501,14 @@ impl Biber<'_> {
     }
 
     /// `create_entry` with source mapping.
-    fn create_entry(&mut self, key: &str, entry0: BtEntry, datasource: &str, smaps: &[Element], rkeys: &mut Vec<String>) -> Result<Created, Fatal> {
+    fn create_entry(
+        &mut self,
+        key: &str,
+        entry0: BtEntry,
+        datasource: &str,
+        smaps: &[Element],
+        rkeys: &mut Vec<String>,
+    ) -> Result<Created, Fatal> {
         let mut entry = entry0;
         let mut newentries: Vec<(String, BtEntry)> = Vec::new();
         let secnum = self.cur.clone();
@@ -450,15 +525,24 @@ impl Biber<'_> {
                 if !pt.is_empty() && !pt.iter().any(|t| fc(&t.text) == fc(&entry.typ)) {
                     continue;
                 }
-                if map.kids("per_nottype").any(|t| fc(&t.text) == fc(&entry.typ)) {
+                if map
+                    .kids("per_nottype")
+                    .any(|t| fc(&t.text) == fc(&entry.typ))
+                {
                     continue;
                 }
-                let test_path = if datasource.starts_with('/') { datasource.rsplit('/').next().unwrap_or("") } else { datasource };
+                let test_path = if datasource.starts_with('/') {
+                    datasource.rsplit('/').next().unwrap_or("")
+                } else {
+                    datasource
+                };
                 let pd: Vec<&Element> = map.kids("per_datasource").collect();
                 if !pd.is_empty() && !pd.iter().any(|t| t.text == test_path) {
                     continue;
                 }
-                let over = map.attr("map_overwrite").map_or_else(|| smap_over.clone(), Into::into);
+                let over = map
+                    .attr("map_overwrite")
+                    .map_or_else(|| smap_over.clone(), Into::into);
                 let mut last_type = entry.typ.clone();
                 let mut last_field: Option<String> = None;
                 let mut last_fieldval: Option<String> = None;
@@ -490,7 +574,17 @@ impl Biber<'_> {
                         if a("map_entry_null").is_some_and(truthy) {
                             return Ok(Created::NotCreated);
                         }
-                        for n in ["map_entry_new", "map_entry_clone", "map_entrytarget", "map_type_source", "map_field_source", "map_field_set", "map_field_value", "map_match", "map_replace"] {
+                        for n in [
+                            "map_entry_new",
+                            "map_entry_clone",
+                            "map_entrytarget",
+                            "map_type_source",
+                            "map_field_source",
+                            "map_field_set",
+                            "map_field_value",
+                            "map_match",
+                            "map_replace",
+                        ] {
                             if a(n).is_some_and(|s| s.contains("$MAPUNIQ")) {
                                 return Err(self.unsupported("$MAPUNIQ in source maps"));
                             }
@@ -498,7 +592,9 @@ impl Biber<'_> {
                         let subst_imatch = |s: &str, im: &[String]| -> String {
                             let re = Regex::new(r"(?<!\\)\$(\d)", "").expect("static");
                             re.replace(s, true, &mut |t, m| {
-                                let n: usize = regex::cap(t, m, 1).and_then(|x| x.parse().ok()).unwrap_or(0);
+                                let n: usize = regex::cap(t, m, 1)
+                                    .and_then(|x| x.parse().ok())
+                                    .unwrap_or(0);
                                 im.get(n.wrapping_sub(1)).cloned().unwrap_or_default()
                             })
                         };
@@ -543,7 +639,9 @@ impl Biber<'_> {
                             newentries.push((ck, c));
                         }
                         // target entry
-                        let target_new: Option<String> = match mr(a("map_entrytarget")).filter(|s| truthy(s)) {
+                        let target_new: Option<String> = match mr(a("map_entrytarget"))
+                            .filter(|s| truthy(s))
+                        {
                             Some(t) => {
                                 let t = subst_imatch(&t, &imatches);
                                 if !newentries.iter().any(|(k, _)| *k == t) {
@@ -559,7 +657,13 @@ impl Biber<'_> {
                         macro_rules! et {
                             () => {
                                 match &target_new {
-                                    Some(t) => &mut newentries.iter_mut().find(|(k, _)| k == t).expect("exists").1,
+                                    Some(t) => {
+                                        &mut newentries
+                                            .iter_mut()
+                                            .find(|(k, _)| k == t)
+                                            .expect("exists")
+                                            .1
+                                    }
                                     None => &mut entry,
                                 }
                             };
@@ -587,13 +691,17 @@ impl Biber<'_> {
                             }
                             fieldcontinue = true;
                         }
-                        if a("map_entrykey_citedornocited").is_some_and(truthy) && !self.sec().is_specific(key) {
+                        if a("map_entrykey_citedornocited").is_some_and(truthy)
+                            && !self.sec().is_specific(key)
+                        {
                             if skip == 2 {
                                 continue 'map;
                             }
                             continue;
                         }
-                        if a("map_entrykey_cited").is_some_and(truthy) && !self.sec().cite.contains(key) {
+                        if a("map_entrykey_cited").is_some_and(truthy)
+                            && !self.sec().cite.contains(key)
+                        {
                             if skip == 2 {
                                 continue 'map;
                             }
@@ -601,14 +709,18 @@ impl Biber<'_> {
                         }
                         if a("map_entrykey_nocited").is_some_and(truthy) {
                             let s = self.sec();
-                            if s.cite.contains(key) || (!s.nocite.contains(key) && !s.allkeys_nocite) {
+                            if s.cite.contains(key)
+                                || (!s.nocite.contains(key) && !s.allkeys_nocite)
+                            {
                                 if skip == 2 {
                                     continue 'map;
                                 }
                                 continue;
                             }
                         }
-                        if a("map_entrykey_allnocited").is_some_and(truthy) && !self.sec().allkeys_nocite {
+                        if a("map_entrykey_allnocited").is_some_and(truthy)
+                            && !self.sec().allkeys_nocite
+                        {
                             if skip == 2 {
                                 continue 'map;
                             }
@@ -616,7 +728,8 @@ impl Biber<'_> {
                         }
                         if a("map_entrykey_starnocited").is_some_and(truthy) {
                             let s = self.sec();
-                            if s.allkeys_nocite && (s.cite.contains(key) || s.nocite.contains(key)) {
+                            if s.allkeys_nocite && (s.cite.contains(key) || s.nocite.contains(key))
+                            {
                                 if skip == 2 {
                                     continue 'map;
                                 }
@@ -638,16 +751,26 @@ impl Biber<'_> {
                         if fieldcontinue {
                             let fsrc = fieldsource.clone().unwrap_or_default();
                             last_field = fieldsource.clone();
-                            last_fieldval = if fsrc == "entrykey" { et!().key.clone() } else { et!().get(&fsrc).map(Into::into) };
+                            last_fieldval = if fsrc == "entrykey" {
+                                et!().key.clone()
+                            } else {
+                                et!().get(&fsrc).map(Into::into)
+                            };
                             let lfv = last_fieldval.clone().unwrap_or_default();
                             let mut negmatch = false;
                             let mut ci = false;
                             let mut m_pat = a("map_match").map(String::from);
-                            if let Some(nm) = a("map_notmatch").or_else(|| a("map_notmatchi")).filter(|s| truthy(s)) {
+                            if let Some(nm) = a("map_notmatch")
+                                .or_else(|| a("map_notmatchi"))
+                                .filter(|s| truthy(s))
+                            {
                                 m_pat = Some(nm.into());
                                 negmatch = true;
                             }
-                            if let Some(mi) = a("map_matchi").or_else(|| a("map_notmatchi")).filter(|s| truthy(s)) {
+                            if let Some(mi) = a("map_matchi")
+                                .or_else(|| a("map_notmatchi"))
+                                .filter(|s| truthy(s))
+                            {
                                 m_pat = Some(mi.into());
                                 ci = true;
                             }
@@ -670,18 +793,33 @@ impl Biber<'_> {
                                     }
                                 }
                             }
-                            if let Some(m) = m_pat.as_deref().and_then(|x| mr(Some(x))).filter(|s| truthy(s)) {
+                            if let Some(m) = m_pat
+                                .as_deref()
+                                .and_then(|x| mr(Some(x)))
+                                .filter(|s| truthy(s))
+                            {
                                 if let Some(r) = a("map_replace") {
                                     if fsrc == "entrykey" {
                                         continue;
                                     }
                                     let r = mr(Some(r)).unwrap_or_default();
-                                    let re = Regex::new(&m, if ci { "i" } else { "" }).map_err(|e| self.unsupported(&alloc::format!("source map pattern ({e})")))?;
-                                    let v = re.replace(&lfv, true, &mut |t, mm| interpolate(&r, t, mm));
+                                    let re =
+                                        Regex::new(&m, if ci { "i" } else { "" }).map_err(|e| {
+                                            self.unsupported(&alloc::format!(
+                                                "source map pattern ({e})"
+                                            ))
+                                        })?;
+                                    let v =
+                                        re.replace(&lfv, true, &mut |t, mm| interpolate(&r, t, mm));
                                     et!().set(&fsrc, &nfd(&nfc(&v)));
                                 } else {
                                     let m = subst_imatch(&m, &imatches);
-                                    let re = Regex::new(&m, if ci { "i" } else { "" }).map_err(|e| self.unsupported(&alloc::format!("source map pattern ({e})")))?;
+                                    let re =
+                                        Regex::new(&m, if ci { "i" } else { "" }).map_err(|e| {
+                                            self.unsupported(&alloc::format!(
+                                                "source map pattern ({e})"
+                                            ))
+                                        })?;
                                     let t: Vec<char> = lfv.chars().collect();
                                     let ms = re.find_all(&t);
                                     let res: Vec<String> = if negmatch {
@@ -695,7 +833,9 @@ impl Biber<'_> {
                                         for mm in &ms {
                                             if mm.caps.len() > 1 {
                                                 for i in 1..mm.caps.len() {
-                                                    v.push(regex::cap(&t, mm, i).unwrap_or_default());
+                                                    v.push(
+                                                        regex::cap(&t, mm, i).unwrap_or_default(),
+                                                    );
                                                 }
                                             } else {
                                                 v.push(t[mm.start..mm.end].iter().collect());
@@ -736,8 +876,17 @@ impl Biber<'_> {
                                     }
                                     continue;
                                 }
-                                let append = a("map_append").is_some_and(truthy) || a("map_appendstrict").is_some_and(truthy);
-                                let orig = if append { et!().get(&field).filter(|s| truthy(s)).unwrap_or("").to_string() } else { String::new() };
+                                let append = a("map_append").is_some_and(truthy)
+                                    || a("map_appendstrict").is_some_and(truthy);
+                                let orig = if append {
+                                    et!()
+                                        .get(&field)
+                                        .filter(|s| truthy(s))
+                                        .unwrap_or("")
+                                        .to_string()
+                                } else {
+                                    String::new()
+                                };
                                 let strict = a("map_appendstrict").is_some_and(truthy);
                                 let app = |o: &str, v: &str| -> String {
                                     if strict {
@@ -757,11 +906,16 @@ impl Biber<'_> {
                                     let v = app(&orig, &last_type);
                                     et!().set(&field, &nfd(&v));
                                 } else if a("map_origfieldval").is_some_and(truthy) {
-                                    let Some(lv) = last_fieldval.clone().filter(|s| truthy(s)) else { continue };
+                                    let Some(lv) = last_fieldval.clone().filter(|s| truthy(s))
+                                    else {
+                                        continue;
+                                    };
                                     let v = app(&orig, &lv);
                                     et!().set(&field, &nfd(&v));
                                 } else if a("map_origfield").is_some_and(truthy) {
-                                    let Some(lf) = last_field.clone().filter(|s| truthy(s)) else { continue };
+                                    let Some(lf) = last_field.clone().filter(|s| truthy(s)) else {
+                                        continue;
+                                    };
                                     let v = app(&orig, &lf);
                                     et!().set(&field, &nfd(&v));
                                 } else {
@@ -813,7 +967,13 @@ impl Biber<'_> {
     }
 
     /// Add an XDATA reference if the value is one.
-    fn add_xdata_ref(&mut self, be: &mut Entry, reffield: &str, value: XdVal<'_>, pos: Option<usize>) -> bool {
+    fn add_xdata_ref(
+        &mut self,
+        be: &mut Entry,
+        reffield: &str,
+        value: XdVal<'_>,
+        pos: Option<usize>,
+    ) -> bool {
         if reffield == "xdata" {
             let XdVal::L(v) = value else { return false };
             be.xrefs.get_or_insert_with(Vec::new).push(XRef {
@@ -827,7 +987,11 @@ impl Biber<'_> {
             return true;
         }
         let XdVal::S(v) = value else { return false };
-        let marker = alloc::format!("{}{}", self.cfg.opt("xdatamarker"), self.cfg.opt("xnamesep"));
+        let marker = alloc::format!(
+            "{}{}",
+            self.cfg.opt("xdatamarker"),
+            self.cfg.opt("xnamesep")
+        );
         let lv = lc(v);
         if !lv.starts_with(&lc(&marker)) {
             return false;
@@ -863,7 +1027,15 @@ impl Biber<'_> {
         true
     }
 
-    fn handle_field(&mut self, be: &mut Entry, e: &BtEntry, f: &str, f_c: &str, key: &str, value: &str) -> Result<Handled, Fatal> {
+    fn handle_field(
+        &mut self,
+        be: &mut Entry,
+        e: &BtEntry,
+        f: &str,
+        f_c: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<Handled, Fatal> {
         if f_c.contains("+an") && self.dm.is_field(f_c) && !self.dm.fields.contains_key(f_c) {
             return Err(self.unsupported("data annotations (+an fields)"));
         }
@@ -872,14 +1044,22 @@ impl Biber<'_> {
         let dt = self.dm.datatype(f_c);
         let kind = match (ft.as_str(), fmt.as_str(), dt.as_str()) {
             ("field", "xsv", "entrykey" | "literal" | "keyword" | "option") => "xsv",
-            ("field", _, "code" | "datepart" | "entrykey" | "integer" | "key" | "literal") if fmt != "xsv" => "literal",
+            ("field", _, "code" | "datepart" | "entrykey" | "integer" | "key" | "literal")
+                if fmt != "xsv" =>
+            {
+                "literal"
+            }
             ("field", _, "date") if fmt != "xsv" => "date",
             ("field", _, "range") if fmt != "xsv" => "range",
             ("field", _, "verbatim" | "uri") if fmt != "xsv" => "verbatim",
             ("list", _, "key" | "literal" | "verbatim") if fmt != "xsv" => "list",
             ("list", _, "name") if fmt != "xsv" => "name",
             ("list", _, "uri") if fmt != "xsv" => "urilist",
-            _ => return Err(self.unsupported(&alloc::format!("field '{f_c}' of type {ft}/{fmt}/{dt}"))),
+            _ => {
+                return Err(
+                    self.unsupported(&alloc::format!("field '{f_c}' of type {ft}/{fmt}/{dt}"))
+                );
+            }
         };
         let _ = f;
         Ok(match kind {
@@ -936,7 +1116,11 @@ impl Biber<'_> {
                 let mut out = Vec::new();
                 for (i, it) in items.into_iter().enumerate() {
                     let it = nfd(&it.unwrap_or_default());
-                    let it = if kind == "list" { remove_outer(&it).1 } else { it };
+                    let it = if kind == "list" {
+                        remove_outer(&it).1
+                    } else {
+                        it
+                    };
                     self.add_xdata_ref(be, f_c, XdVal::S(&it), Some(i));
                     out.push(it);
                 }
@@ -951,13 +1135,23 @@ impl Biber<'_> {
         })
     }
 
-    fn parse_range_field(&mut self, be: &mut Entry, field: &str, key: &str, value: &str) -> Vec<(String, Option<String>)> {
+    fn parse_range_field(
+        &mut self,
+        be: &mut Entry,
+        field: &str,
+        key: &str,
+        value: &str,
+    ) -> Vec<(String, Option<String>)> {
         let mut out = Vec::new();
         let sep = Regex::new(r"\s*[;,]\s*", "").expect("static");
         for v0 in re_split(&sep, value) {
             let v = v0.replace('~', " ");
             let r1 = Regex::new(r"\A\s*(\P{Pd}+)\s*\z", "s").expect("static");
-            let r2 = Regex::new(r"\A\s*(\{[^\}]+\}|[^\p{Pd} ]+)\s*(\p{Pd}+)\s*(\{[^\}]+\}|\P{Pd}*)\s*\z", "s").expect("static");
+            let r2 = Regex::new(
+                r"\A\s*(\{[^\}]+\}|[^\p{Pd} ]+)\s*(\p{Pd}+)\s*(\{[^\}]+\}|\P{Pd}*)\s*\z",
+                "s",
+            )
+            .expect("static");
             let r3 = Regex::new(r"\A\s*(.+)(\p{Pd}{2,})(.+)\s*\z", "s").expect("static");
             let r4 = Regex::new(r"\A\s*(.+)(\p{Pd}+)(.+)\s*\z", "s").expect("static");
             let t: Vec<char> = v.chars().collect();
@@ -972,13 +1166,21 @@ impl Biber<'_> {
                 Some(m) => {
                     let s = regex::cap(&t, m, 1).unwrap_or_default();
                     let dash = regex::cap(&t, m, 2).filter(|x| truthy(x));
-                    let e = if dash.is_some() { regex::cap(&t, m, 3) } else { None };
+                    let e = if dash.is_some() {
+                        regex::cap(&t, m, 3)
+                    } else {
+                        None
+                    };
                     (s, e)
                 }
                 None => (String::new(), None),
             };
             let unbrace = |s: &str| -> String {
-                if s.len() >= 2 && s.starts_with('{') && s.ends_with('}') && !s[1..s.len() - 1].contains('}') {
+                if s.len() >= 2
+                    && s.starts_with('{')
+                    && s.ends_with('}')
+                    && !s[1..s.len() - 1].contains('}')
+                {
                     s[1..s.len() - 1].into()
                 } else {
                     s.into()
@@ -989,7 +1191,9 @@ impl Biber<'_> {
             if truthy(&start) {
                 out.push((start, end));
             } else {
-                let w = alloc::format!("Range field '{field}' in entry '{key}' is malformed, falling back to literal");
+                let w = alloc::format!(
+                    "Range field '{field}' in entry '{key}' is malformed, falling back to literal"
+                );
                 be.add_warning(w.clone());
                 self.warnings.push(w);
                 out.push((v0.clone(), None));
@@ -998,15 +1202,29 @@ impl Biber<'_> {
         out
     }
 
-    fn handle_name(&mut self, be: &mut Entry, f_c: &str, key: &str, value: &str) -> Result<Handled, Fatal> {
-        let mut names = Names { typ: f_c.into(), id: self.new_id(), ..Names::default() };
+    fn handle_name(
+        &mut self,
+        be: &mut Entry,
+        f_c: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<Handled, Fatal> {
+        let mut names = Names {
+            typ: f_c.into(),
+            id: self.new_id(),
+            ..Names::default()
+        };
         let items = btparse::split_list(&nfc(value), &self.cfg.opt("namesep"));
         let xns = self.cfg.opt("xnamesep");
         let nps = self.dm.nameparts();
         for (i, it) in items.into_iter().enumerate() {
             let name = nfd(&it.clone().unwrap_or_default());
             if it.is_some() && self.add_xdata_ref(be, f_c, XdVal::S(&name), Some(i)) {
-                let n = Name { id: self.new_id(), xdata: Some(name.clone()), ..Name::default() };
+                let n = Name {
+                    id: self.new_id(),
+                    xdata: Some(name.clone()),
+                    ..Name::default()
+                };
                 names.add(shared(n));
                 continue;
             }
@@ -1014,9 +1232,17 @@ impl Biber<'_> {
             if let Some(eq) = name.find(xns.as_str()) {
                 let o = name[..eq].trim_end();
                 let v = name[eq + xns.len()..].trim_start();
-                if !o.is_empty() && !o.chars().any(char::is_whitespace) && !v.chars().any(char::is_whitespace) {
+                if !o.is_empty()
+                    && !o.chars().any(char::is_whitespace)
+                    && !v.chars().any(char::is_whitespace)
+                {
                     let nlo = lc(o);
-                    if self.cfg.scope_opts.get("NAMELIST").is_some_and(|s| s.contains(&nlo)) {
+                    if self
+                        .cfg
+                        .scope_opts
+                        .get("NAMELIST")
+                        .is_some_and(|s| s.contains(&nlo))
+                    {
                         let val = if v.is_empty() { "1" } else { v };
                         for (k, vv) in self.expand_option_input("NAMELIST", &nlo, val) {
                             names.set_opt(&k, vv);
@@ -1026,7 +1252,9 @@ impl Biber<'_> {
                 }
             }
             if !truthy(&name) {
-                let w = alloc::format!("Name in key '{key}' is empty (probably consecutive 'and'): skipping entry '{key}'");
+                let w = alloc::format!(
+                    "Name in key '{key}' is empty (probably consecutive 'and'): skipping entry '{key}'"
+                );
                 be.add_warning(w.clone());
                 self.warnings.push(w);
                 self.sec().del_citekey(key);
@@ -1050,7 +1278,9 @@ impl Biber<'_> {
                 if !fully_braced {
                     let commas = name.matches(',').count();
                     if commas > 2 {
-                        self.errors.push(alloc::format!("Name \"{name}\" has too many commas, skipping entry '{key}'"));
+                        self.errors.push(alloc::format!(
+                            "Name \"{name}\" has too many commas, skipping entry '{key}'"
+                        ));
                         self.sec().del_citekey(key);
                         return Ok(Handled::Skip);
                     }
@@ -1063,14 +1293,22 @@ impl Biber<'_> {
                 self.parsename(&name)
             };
             let Some(no) = no else { continue };
-            let raw: String = no.nameparts.values().filter_map(|p| p.string.clone()).collect();
+            let raw: String = no
+                .nameparts
+                .values()
+                .filter_map(|p| p.string.clone())
+                .collect();
             if lc(&raw) == self.cfg.opt("others_string") {
                 names.morenames = true;
             } else {
                 names.add(shared(no));
             }
         }
-        Ok(if names.count() > 0 { Handled::Val(Val::N(shared(names))) } else { Handled::None })
+        Ok(if names.count() > 0 {
+            Handled::Val(Val::N(shared(names)))
+        } else {
+            Handled::None
+        })
     }
 
     pub fn new_id(&mut self) -> String {
@@ -1088,7 +1326,9 @@ impl Biber<'_> {
             s = re.delete_all(&s);
         }
         let mac = Regex::new(r"\\[A-Za-z]+\s*(\{([^\}]*)?\})?", "").expect("static");
-        s = mac.replace(&s, true, &mut |t, m| regex::cap(t, m, 2).unwrap_or_default());
+        s = mac.replace(&s, true, &mut |t, m| {
+            regex::cap(t, m, 2).unwrap_or_default()
+        });
         if s == "{}" {
             s.clear();
         }
@@ -1102,14 +1342,19 @@ impl Biber<'_> {
         s = ws.replace(&s, true, &mut |_, _| " ".into());
         // ^\{\{+([^\{\}]+)\}+\}$ -> {$1}
         let env = Regex::new(r"\A\{\{+([^\{\}]+)\}+\}\z", "s").expect("static");
-        s = env.replace(&s, false, &mut |t, m| alloc::format!("{{{}}}", regex::cap(t, m, 1).unwrap_or_default()));
+        s = env.replace(&s, false, &mut |t, m| {
+            alloc::format!("{{{}}}", regex::cap(t, m, 1).unwrap_or_default())
+        });
         let sn = btparse::split_name(&nfc(&s));
         let mut namec: BTreeMap<&str, String> = BTreeMap::new();
         namec.insert("family", nfd(&btparse::format_part(&sn.last)));
         namec.insert("given", nfd(&btparse::format_part(&sn.first)));
         namec.insert("prefix", nfd(&btparse::format_part(&sn.von)));
         namec.insert("suffix", nfd(&btparse::format_part(&sn.jr)));
-        let mut name = Name { id: self.new_id(), ..Name::default() };
+        let mut name = Name {
+            id: self.new_id(),
+            ..Name::default()
+        };
         for np in ["prefix", "family", "given", "suffix"] {
             let v = namec[np].clone();
             if truthy(&v) {
@@ -1124,11 +1369,24 @@ impl Biber<'_> {
                 let toks = re_split(&sp, &part);
                 let inits = gen_initials(&toks);
                 self.sec().set_np_length(np, stripped.chars().count());
-                self.sec().set_np_length(&alloc::format!("{np}-i"), inits.concat().chars().count());
-                name.nameparts.insert(np.into(), NamePart { string: Some(stripped), initial: Some(inits) });
+                self.sec()
+                    .set_np_length(&alloc::format!("{np}-i"), inits.concat().chars().count());
+                name.nameparts.insert(
+                    np.into(),
+                    NamePart {
+                        string: Some(stripped),
+                        initial: Some(inits),
+                    },
+                );
                 name.strip.insert(np.into(), flag);
             } else {
-                name.nameparts.insert(np.into(), NamePart { string: None, initial: None });
+                name.nameparts.insert(
+                    np.into(),
+                    NamePart {
+                        string: None,
+                        initial: None,
+                    },
+                );
                 name.strip.insert(np.into(), false);
             }
         }
@@ -1143,10 +1401,17 @@ impl Biber<'_> {
         let mut hashid = None;
         let mut opts: Vec<(String, String)> = Vec::new();
         for np in split_xsv(namestr) {
-            let Some(i) = np.find(xns.as_str()) else { continue };
+            let Some(i) = np.find(xns.as_str()) else {
+                continue;
+            };
             let npn = lc(np[..i].trim());
             let npv = np[i + xns.len()..].trim().to_string();
-            if self.cfg.scope_opts.get("NAME").is_some_and(|s| s.contains(&npn)) {
+            if self
+                .cfg
+                .scope_opts
+                .get("NAME")
+                .is_some_and(|s| s.contains(&npn))
+            {
                 for (k, v) in self.expand_option_input("NAME", &npn, &npv) {
                     opts.push((k, v));
                 }
@@ -1170,7 +1435,12 @@ impl Biber<'_> {
                 namec.insert(npn, join_name_parts(&parts));
             }
         }
-        let mut name = Name { id: self.new_id(), hashid, opts, ..Name::default() };
+        let mut name = Name {
+            id: self.new_id(),
+            hashid,
+            opts,
+            ..Name::default()
+        };
         for np in &nps {
             if let Some(v) = namec.get(np).cloned() {
                 let (s, stripped) = remove_outer(&v);
@@ -1187,17 +1457,37 @@ impl Biber<'_> {
                 if truthy(&stripped) {
                     self.sec().set_np_length(np, stripped.chars().count());
                 }
-                self.sec().set_np_length(&alloc::format!("{np}-i"), ini.concat().chars().count());
-                name.nameparts.insert(np.clone(), NamePart { string: Some(stripped), initial: Some(ini) });
+                self.sec()
+                    .set_np_length(&alloc::format!("{np}-i"), ini.concat().chars().count());
+                name.nameparts.insert(
+                    np.clone(),
+                    NamePart {
+                        string: Some(stripped),
+                        initial: Some(ini),
+                    },
+                );
                 name.strip.insert(np.clone(), false);
             } else {
-                name.nameparts.insert(np.clone(), NamePart { string: None, initial: None });
+                name.nameparts.insert(
+                    np.clone(),
+                    NamePart {
+                        string: None,
+                        initial: None,
+                    },
+                );
             }
         }
         Some(name)
     }
 
-    fn handle_date(&mut self, be: &mut Entry, e: &BtEntry, field: &str, key: &str, date: &str) -> Result<(), Fatal> {
+    fn handle_date(
+        &mut self,
+        be: &mut Entry,
+        e: &BtEntry,
+        field: &str,
+        key: &str,
+        date: &str,
+    ) -> Result<(), Fatal> {
         let dt = field.strip_suffix("date").unwrap_or(field).to_string();
         let ds = self.sec().keytods.get(key).cloned().unwrap_or_default();
         let bee = be.etype();
@@ -1209,7 +1499,9 @@ impl Biber<'_> {
             be.set_field(&alloc::format!("{dt}enddateunknown"), Val::s("1"));
         }
         if r.nothing {
-            let w = alloc::format!("{bee} entry '{key}' ({ds}): Invalid format '{date}' of date field '{field}' - ignoring");
+            let w = alloc::format!(
+                "{bee} entry '{key}' ({ds}): Invalid format '{date}' of date field '{field}' - ignoring"
+            );
             be.add_warning(w.clone());
             self.warnings.push(w);
             return Ok(());
@@ -1228,7 +1520,9 @@ impl Biber<'_> {
                     if dt.is_empty() {
                         if let Some(y) = e.get("year").filter(|s| truthy(s)) {
                             if sd.year != 0 && crate::model::numify(y) != sd.year as f64 {
-                                let w = alloc::format!("Overwriting field 'year' with year value from field 'date' for entry '{key}'");
+                                let w = alloc::format!(
+                                    "Overwriting field 'year' with year value from field 'date' for entry '{key}'"
+                                );
                                 be.add_warning(w.clone());
                                 self.warnings.push(w);
                             }
@@ -1236,7 +1530,9 @@ impl Biber<'_> {
                         if !sd.missing_month {
                             if let Some(m) = e.get("month").filter(|s| truthy(s)) {
                                 if crate::model::numify(m) != f64::from(sd.month) {
-                                    let w = alloc::format!("Overwriting field 'month' with month value from field 'date' for entry '{key}'");
+                                    let w = alloc::format!(
+                                        "Overwriting field 'month' with month value from field 'date' for entry '{key}'"
+                                    );
                                     be.add_warning(w.clone());
                                     self.warnings.push(w);
                                 }
@@ -1265,17 +1561,35 @@ impl Biber<'_> {
                     be.set_data(&alloc::format!("{dt}year"), Val::s(sd.resolve(sd.year)));
                     be.set_field(&alloc::format!("{dt}era"), Val::s(sd.era()));
                     if !sd.missing_month {
-                        be.set_data(&alloc::format!("{dt}month"), Val::s(sd.resolve(i64::from(sd.month))));
+                        be.set_data(
+                            &alloc::format!("{dt}month"),
+                            Val::s(sd.resolve(i64::from(sd.month))),
+                        );
                     }
                     if !sd.missing_day {
-                        be.set_data(&alloc::format!("{dt}day"), Val::s(sd.resolve(i64::from(sd.day))));
+                        be.set_data(
+                            &alloc::format!("{dt}day"),
+                            Val::s(sd.resolve(i64::from(sd.day))),
+                        );
                     }
                     if !sd.missing_time {
-                        be.set_data(&alloc::format!("{dt}hour"), Val::s(sd.resolve(i64::from(sd.hour))));
-                        be.set_data(&alloc::format!("{dt}minute"), Val::s(sd.resolve(i64::from(sd.minute))));
-                        be.set_data(&alloc::format!("{dt}second"), Val::s(sd.resolve(i64::from(sd.second))));
+                        be.set_data(
+                            &alloc::format!("{dt}hour"),
+                            Val::s(sd.resolve(i64::from(sd.hour))),
+                        );
+                        be.set_data(
+                            &alloc::format!("{dt}minute"),
+                            Val::s(sd.resolve(i64::from(sd.minute))),
+                        );
+                        be.set_data(
+                            &alloc::format!("{dt}second"),
+                            Val::s(sd.resolve(i64::from(sd.second))),
+                        );
                         if let Some(tz) = &sd.tz {
-                            be.set_data(&alloc::format!("{dt}timezone"), Val::s(crate::date::tzformat(tz)));
+                            be.set_data(
+                                &alloc::format!("{dt}timezone"),
+                                Val::s(crate::date::tzformat(tz)),
+                            );
                         }
                     }
                 } else {
@@ -1288,24 +1602,45 @@ impl Biber<'_> {
                                 return Err(self.unsupported("julian dates (option julian)"));
                             }
                             be.set_field(&alloc::format!("{dt}datesplit"), Val::s("1"));
-                            be.set_data(&alloc::format!("{dt}endyear"), Val::s(ed.resolve(ed.year)));
+                            be.set_data(
+                                &alloc::format!("{dt}endyear"),
+                                Val::s(ed.resolve(ed.year)),
+                            );
                             be.set_field(&alloc::format!("{dt}endera"), Val::s(ed.era()));
                             if !ed.missing_month {
-                                be.set_data(&alloc::format!("{dt}endmonth"), Val::s(ed.resolve(i64::from(ed.month))));
+                                be.set_data(
+                                    &alloc::format!("{dt}endmonth"),
+                                    Val::s(ed.resolve(i64::from(ed.month))),
+                                );
                             }
                             if !ed.missing_day {
-                                be.set_data(&alloc::format!("{dt}endday"), Val::s(ed.resolve(i64::from(ed.day))));
+                                be.set_data(
+                                    &alloc::format!("{dt}endday"),
+                                    Val::s(ed.resolve(i64::from(ed.day))),
+                                );
                             }
                             if let Some(yd) = ed.yeardivision {
                                 be.set_field(&alloc::format!("{dt}endyeardivision"), Val::s(yd));
                                 be.set_field(&alloc::format!("{dt}endseaason"), Val::s(yd));
                             }
                             if !ed.missing_time {
-                                be.set_data(&alloc::format!("{dt}endhour"), Val::s(ed.resolve(i64::from(ed.hour))));
-                                be.set_data(&alloc::format!("{dt}endminute"), Val::s(ed.resolve(i64::from(ed.minute))));
-                                be.set_data(&alloc::format!("{dt}endsecond"), Val::s(ed.resolve(i64::from(ed.second))));
+                                be.set_data(
+                                    &alloc::format!("{dt}endhour"),
+                                    Val::s(ed.resolve(i64::from(ed.hour))),
+                                );
+                                be.set_data(
+                                    &alloc::format!("{dt}endminute"),
+                                    Val::s(ed.resolve(i64::from(ed.minute))),
+                                );
+                                be.set_data(
+                                    &alloc::format!("{dt}endsecond"),
+                                    Val::s(ed.resolve(i64::from(ed.second))),
+                                );
                                 if let Some(tz) = &ed.tz {
-                                    be.set_data(&alloc::format!("{dt}endtimezone"), Val::s(crate::date::tzformat(tz)));
+                                    be.set_data(
+                                        &alloc::format!("{dt}endtimezone"),
+                                        Val::s(crate::date::tzformat(tz)),
+                                    );
                                 }
                             }
                         }
@@ -1313,7 +1648,9 @@ impl Biber<'_> {
                             be.set_data(&alloc::format!("{dt}endyear"), Val::s(""));
                         }
                         None => {
-                            let w = alloc::format!("{bee} entry '{key}' ({ds}): Invalid format '{date}' of end date field '{field}' - ignoring");
+                            let w = alloc::format!(
+                                "{bee} entry '{key}' ({ds}): Invalid format '{date}' of end date field '{field}' - ignoring"
+                            );
                             be.add_warning(w.clone());
                             self.warnings.push(w);
                         }
@@ -1321,7 +1658,9 @@ impl Biber<'_> {
                 }
             }
             None => {
-                let w = alloc::format!("{bee} entry '{key}' ({ds}): Invalid format '{date}' of date field '{field}' - ignoring");
+                let w = alloc::format!(
+                    "{bee} entry '{key}' ({ds}): Invalid format '{date}' of date field '{field}' - ignoring"
+                );
                 be.add_warning(w.clone());
                 self.warnings.push(w);
             }
