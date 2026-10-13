@@ -4,8 +4,7 @@
 //! (`edit-word/`, `edit-para/`) built as edits in one `phitex watch`
 //! session and as fresh cold builds. Every PDF is compared byte for byte
 //! with the oracle's (`<variant>/oracle/`, from `scripts/bless-ladder.sh`:
-//! the installed pdflatex, bibtex, makeindex, biber), and the files the job
-//! the watch's PDF
+//! the installed pdflatex, bibtex, makeindex, biber), and the watch's PDF
 //! with the cold build's. One row per rung on standard error (`ROW ...`).
 //! Run once with `PHITEX_DOC_SCOPE` unset and once with `=1`.
 
