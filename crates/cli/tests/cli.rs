@@ -452,6 +452,57 @@ fn build_to_the_fixpoint() {
     }
 }
 
+/// A biblatex document (`oracle/fixtures/biber/numeric.tex` and its
+/// `refs.bib`) built to the fixpoint by `phitex build`, biber run in
+/// process between the runs: its `.bbl` and DVI file are those of
+/// `latex`, `biber`, `latex`, `latex`.
+#[test]
+fn build_biblatex_with_native_biber() {
+    if !have("latex") || !have("biber") {
+        eprintln!("build_biblatex_with_native_biber: no latex/biber here to compare with: not checked");
+        return;
+    }
+    let _one = one();
+    let src = fixtures().join("biber");
+    let name = "numeric";
+    let ours = scratch("biber-numeric");
+    let theirs = scratch("biber-numeric-latex");
+    for d in [&ours, &theirs] {
+        for f in [format!("{name}.tex"), "refs.bib".to_string()] {
+            std::fs::copy(src.join(&f), d.join(&f)).expect("a copy");
+        }
+    }
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &ours)
+        .args(["build", "-v", "--output-format", "dvi", &format!("{name}.tex")])
+        .output()
+        .expect("phitex runs");
+    let errs = String::from_utf8_lossy(&out.stderr);
+    eprintln!("{name}: phitex build:\n{errs}");
+    assert!(out.status.success(), "{name}: phitex build failed:\n{errs}");
+    let latex = |dir: &Path| {
+        let _ = Command::new("latex")
+            .args(["-interaction=batchmode", &format!("{name}.tex")])
+            .current_dir(dir)
+            .env("SOURCE_DATE_EPOCH", "0")
+            .env("FORCE_SOURCE_DATE", "1")
+            .output();
+    };
+    latex(&theirs);
+    let _ = Command::new("biber").args(["--quiet", name]).current_dir(&theirs).output();
+    latex(&theirs);
+    latex(&theirs);
+    let a = std::fs::read(ours.join(format!("{name}.bbl"))).ok();
+    let b = std::fs::read(theirs.join(format!("{name}.bbl"))).ok();
+    assert_eq!(a, b, "{name}: the native biber's .bbl is not biber's");
+    let got = std::fs::read(ours.join(format!("{name}.dvi"))).unwrap_or_default();
+    let want = std::fs::read(theirs.join(format!("{name}.dvi"))).unwrap_or_default();
+    assert!(
+        masked(&got) == masked(&want),
+        "{name}: the fixpoint's DVI is not latex+biber's: {}",
+        first_difference(&got, &want)
+    );
+}
+
 /// The 48-page plain document of phitex-red's budgets ("big"), in PDF
 /// mode, as one `-ini` file.
 fn big() -> String {
