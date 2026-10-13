@@ -5,7 +5,9 @@
 
 use std::sync::Arc;
 
-use defuse::{Claim, Ctx, Engine, Field, Locality, NodeId, OpId, Operation, Stop, Value, ValueId, Values};
+use defuse::{
+    Claim, Ctx, Engine, EvalError, Field, Locality, MayDefine, NodeId, OpId, Operation, Stop, Value, ValueId, Values,
+};
 
 /// `["p"]` unfolds a child `["c"]`; `["c"]` outputs the text of its
 /// first following sibling (or "none") and claims it; `["s", x]` outputs x.
@@ -933,4 +935,53 @@ fn the_critical_chain_follows_continuations_to_the_first_node() {
         chain[99]
     );
     assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+}
+
+/// `["m", name]`: a node whose definitions are known only when it runs,
+/// bounded by `may_define` to the name `a`; it defines `name`.
+struct Bounded;
+
+impl Operation for Bounded {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        None
+    }
+    fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
+        MayDefine::Names(vec![v.field("a")])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        let name = match a.get(1).map(|&x| v.get(x)).as_deref() {
+            Some(Value::Str(s)) => s.to_string(),
+            _ => String::new(),
+        };
+        cx.define(v.field(&name), v.int(1));
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A dynamic definition outside the node's `may_define` answer is an
+/// error (readers may have been bound past the node while it was pending),
+/// as an undeclared static definition is.
+#[test]
+fn a_dynamic_definition_outside_may_define_is_an_error() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Bounded));
+    let u = eng.new_unit();
+    let v = eng.values();
+    eng.push(u, op, vec![v.str("m"), v.str("a")]);
+    eng.evaluate_sequential().expect("within the bound");
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Bounded));
+    let u = eng.new_unit();
+    let v = eng.values();
+    let n = eng.push(u, op, vec![v.str("m"), v.str("b")]);
+    let b = eng.values().field("b");
+    match eng.evaluate_sequential() {
+        Err(EvalError::UndeclaredDefinition { node, field }) => {
+            assert_eq!(node, n);
+            assert_eq!(field, b);
+        }
+        other => panic!("expected UndeclaredDefinition, got {other:?}"),
+    }
 }
