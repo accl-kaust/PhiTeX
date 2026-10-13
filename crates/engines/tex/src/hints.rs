@@ -216,7 +216,13 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // registers (§1224-§1238): the register families, the
         // parameters (`\\advance\\tolerance`), a conditional expanded
         // in the value (§498), `\\afterassignment`'s token (§1269)
-        "count" | "dimen" | "skip" | "muskip" | "toks" | "advance" | "multiply" | "divide" => &[
+        // (a register by number assigns that family's register, §1224)
+        "count" => &["count:", "if:", "aftertoken"],
+        "dimen" => &["dimen:", "if:", "aftertoken"],
+        "skip" => &["skip:", "if:", "aftertoken"],
+        "muskip" => &["muskip:", "if:", "aftertoken"],
+        "toks" => &["toks:", "if:", "aftertoken"],
+        "advance" | "multiply" | "divide" => &[
             "count:",
             "dimen:",
             "skip:",
@@ -333,15 +339,6 @@ fn table_param(name: &str) -> bool {
     crate::prims::PRIMS
         .iter()
         .any(|p| p.0 == name && matches!(p.1, 72..=76))
-}
-
-/// A parameter field the pass names (`param:\\tolerance`) as the
-/// engine's own field (`param:tolerance`): a parameter assigned by name
-/// defines that one parameter (§1228), not every one.
-fn exact_param(f: &str) -> Option<String> {
-    let n = f.strip_prefix("param:")?;
-    let n = n.strip_prefix('\\').unwrap_or(n);
-    table_param(n).then(|| format!("param:{n}"))
 }
 
 /// The engine's state head of a field the pass names (`count:12`,
@@ -1452,6 +1449,30 @@ impl Analysis<'_> {
     }
 
     /// The shape the text gives `name`, else the format's.
+    /// The engine's field for a `param:\\name` the pass names: the
+    /// parameter's own (§1228); none for `\\spacefactor` and
+    /// `\\prevdepth`, which go on the list (§1243); a register's family
+    /// for a name the format allocated (`\\smallskipamount`, §1224);
+    /// `None` when the name is none of these.
+    #[allow(clippy::option_option)]
+    fn param_field(&self, f: &str) -> Option<Option<String>> {
+        let n = f.strip_prefix("param:")?;
+        let n = n.strip_prefix('\\').unwrap_or(n);
+        if table_param(n) {
+            return Some(Some(format!("param:{n}")));
+        }
+        if matches!(n, "spacefactor" | "prevdepth") {
+            return Some(None);
+        }
+        match self.shape(n) {
+            Some(pass::Shape::Quantity('i')) => Some(Some("count:".to_owned())),
+            Some(pass::Shape::Quantity('d')) => Some(Some("dimen:".to_owned())),
+            Some(pass::Shape::Quantity('g')) => Some(Some("skip:".to_owned())),
+            Some(pass::Shape::Quantity('t')) => Some(Some("toks:".to_owned())),
+            _ => None,
+        }
+    }
+
     fn shape(&self, name: &str) -> Option<pass::Shape> {
         self.defs.shape(name).or_else(|| self.prelude.shape(name))
     }
@@ -1870,6 +1891,11 @@ impl Analysis<'_> {
             if row.is_none() && crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
                 eprintln!("slices: state every head from \\{c}");
             }
+            if row.is_some_and(|r| r.contains(&"param:"))
+                && crate::exec::env_flag!("PHITEX_SLICES_TRACE")
+            {
+                eprintln!("slices: param: from the row of \\{c}");
+            }
             add_heads(st, row);
         }
     }
@@ -1882,8 +1908,17 @@ impl Analysis<'_> {
     fn defined_state(&self, name: &str, may_start_par: bool, st: &mut Option<Vec<String>>) {
         match self.shape(name) {
             Some(pass::Shape::Quantity('f')) => add_head(st, "font"),
-            Some(pass::Shape::Quantity('i' | 'd' | 'g' | 't')) => {
-                add_heads(st, class_state("count"));
+            // (a register's name assigns that register, §1224: its own
+            // family; the value is scanned with expansion, §498, and
+            // `\\afterassignment`'s token runs, §1269; never a parameter)
+            Some(pass::Shape::Quantity(q @ ('i' | 'd' | 'g' | 't'))) => {
+                let fam = match q {
+                    'i' => "count:",
+                    'd' => "dimen:",
+                    'g' => "skip:",
+                    _ => "toks:",
+                };
+                add_heads(st, Some(&[fam, "if:", "aftertoken"]));
             }
             Some(pass::Shape::Quantity(_)) => {
                 add_heads(st, Some(&["box:", "lvlfix", "badness", "inspen", "align"]));
@@ -1902,7 +1937,33 @@ impl Analysis<'_> {
             Some(pass::Shape::Cond) => add_head(st, "if:"),
             Some(pass::Shape::Macro(_)) => {}
             // (definitions that disagree, or one the pass cannot read)
-            Some(pass::Shape::Opaque(_)) | None => *st = None,
+            Some(pass::Shape::Opaque(_)) | None => {
+                // (definitions that disagree, `\\let\\@sf\\empty` and an
+                // `\\edef` of it: what its bodies run, when the pass
+                // bounds that and it defines no name of its own)
+                let set = self.defset(name);
+                if set.unbounded.is_empty() && st.is_some() {
+                    let mut b = Bound {
+                        state: st.clone(),
+                        ..Bound::default()
+                    };
+                    let mut c = String::new();
+                    if self.add_set(&set, &mut b, &mut c)
+                        && b.names.is_empty()
+                        && b.prefixes.is_empty()
+                    {
+                        *st = b.state;
+                        return;
+                    }
+                }
+                if st.is_some() && crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                    eprintln!(
+                        "slices: state every head from defined \\{name}: {:?}",
+                        self.shape(name)
+                    );
+                }
+                *st = None;
+            }
         }
     }
 
@@ -1924,9 +1985,14 @@ impl Analysis<'_> {
                 if !b.names.contains(&f) {
                     b.names.push(f);
                 }
-            } else if let Some(p) = exact_param(f) {
-                add_head(&mut b.state, &p);
+            } else if let Some(p) = self.param_field(f) {
+                if let Some(p) = p {
+                    add_head(&mut b.state, &p);
+                }
             } else if let Some(h) = head_of_pass_field(f) {
+                if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                    eprintln!("slices: head {h} from name {f}");
+                }
                 add_head(&mut b.state, h);
             }
         }
@@ -1935,7 +2001,14 @@ impl Analysis<'_> {
                 if !b.prefixes.contains(&p) {
                     b.prefixes.push(p);
                 }
+            } else if let Some(p) = self.param_field(f) {
+                if let Some(p) = p {
+                    add_head(&mut b.state, &p);
+                }
             } else if let Some(h) = head_of_pass_field(f) {
+                if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                    eprintln!("slices: head {h} from prefix {f}");
+                }
                 add_head(&mut b.state, h);
             }
         }
@@ -2054,11 +2127,11 @@ impl Analysis<'_> {
         match &it.hints.may_define {
             pass::MayDefine::Nothing => true,
             pass::MayDefine::Names(ds) => {
-                add_defs(ds, false, b);
+                add_defs_with(self, ds, false, b);
                 true
             }
             pass::MayDefine::Prefixes(ds) => {
-                add_defs(ds, true, b);
+                add_defs_with(self, ds, true, b);
                 true
             }
             pass::MayDefine::Any
@@ -2147,11 +2220,16 @@ fn align_atoms(text: &str, atoms: &[Atom]) -> Vec<bool> {
     out
 }
 
-fn add_defs(ds: &[Def], prefixes: bool, b: &mut Bound) {
+fn add_defs_with(an: &Analysis<'_>, ds: &[Def], prefixes: bool, b: &mut Bound) {
     for d in ds {
-        if let Some(p) = exact_param(&d.field) {
-            add_head(&mut b.state, &p);
+        if let Some(p) = an.param_field(&d.field) {
+            if let Some(p) = p {
+                add_head(&mut b.state, &p);
+            }
         } else if let Some(h) = head_of_pass_field(&d.field) {
+            if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                eprintln!("slices: head {h} from def {}", d.field);
+            }
             add_head(&mut b.state, h);
         } else if prefixes {
             if let Some(p) = engine_prefix(&d.field)
@@ -2328,10 +2406,11 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
                 }
             }
         }
-        if ends
-            && !pending.is_empty()
-            && let Some(b) = &mut h.bound
-        {
+        if ends && let Some(b) = &mut h.bound {
+            // (a paragraph ended anywhere in the slice, a blank line in
+            // a macro's argument too (a runaway, §396): its `\\prevgraf`,
+            // §1096; and the resets pending, §1070)
+            add_head(&mut b.state, "pg:");
             add_heads(&mut b.state, Some(&pending));
         }
         pending = out;

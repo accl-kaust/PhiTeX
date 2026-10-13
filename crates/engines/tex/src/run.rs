@@ -323,7 +323,14 @@ impl<'c, 'a> Run<'c, 'a> {
     /// parked, with the node and its operation.
     #[cold]
     fn trace_read(&mut self, f: Field, parked: bool) {
-        const HEADS: [&str; 6] = ["pg:", "parshape", "box:", "lvlfix", "badness", "markclasses"];
+        const HEADS: [&str; 6] = [
+            "pg:",
+            "parshape",
+            "box:",
+            "lvlfix",
+            "badness",
+            "markclasses",
+        ];
         let name = crate::val::field_name(self.v, f);
         if parked || HEADS.iter().any(|h| name.starts_with(h)) {
             eprintln!(
