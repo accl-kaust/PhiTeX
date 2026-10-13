@@ -1158,6 +1158,7 @@ impl Analysis<'_> {
         };
         let it = &self.p.items[i];
         let end = it.end.max(a + 1).min(atoms.len());
+        #[allow(clippy::needless_range_loop)]
         for k in a + 1..end {
             self.cats_of(first, k, &mut b.cats);
             // (an operand expanded while read: a pdfTeX primitive's state,
@@ -1446,6 +1447,7 @@ fn file_hints(v: &Values, id: ValueId, name: ValueId) -> Arc<TextHints> {
         .unwrap_or_else(PoisonError::into_inner)
         .get(&id.raw())
         .cloned();
+    #[allow(clippy::single_match_else)]
     let t = match known {
         Some(t) => t,
         None => {

@@ -166,6 +166,12 @@ fn speculation_ab() {
                     s.busy.as_secs_f64() / s.wall.as_secs_f64().max(1e-9),
                     s.wall
                 );
+                if label == "all" {
+                    eprintln!(
+                        "  refuted by field: {:?}",
+                        s.refuted_by_field.iter().take(10).collect::<Vec<_>>()
+                    );
+                }
                 if !same {
                     for d in b.diagnostics() {
                         eprintln!(
