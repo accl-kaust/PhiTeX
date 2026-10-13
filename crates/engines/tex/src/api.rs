@@ -396,14 +396,19 @@ pub struct Stats {
     pub critical_path: Option<usize>,
     /// The engine's pending waits by kind, summed over the evaluations.
     pub waits_by_kind: Vec<(&'static str, u64)>,
+    /// The nodes most waited on in the last evaluation (raw ids, waits).
+    pub top_waited: Vec<(u64, u64)>,
+    /// Starts the engine held back until a node's inputs were known.
+    pub gated: u64,
 }
 
 /// A round's counters (`PHITEX_TEX_TIME`).
 fn print_round(t: std::time::Duration, r: &Report) {
     eprintln!(
-        "round: {t:?}, {} nodes run, {} runs, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} raises, {} pending, {} created, {} freed, spec {}/{}/{}, by op {:?}",
+        "round: {t:?}, {} nodes run, {} runs, {} gated, {} cutoffs, {} rebinds, {} restarts, {} loop rounds, {} stops, {} raises, {} pending, {} created, {} freed, spec {}/{}/{}, by op {:?}",
         r.nodes_run,
         r.runs,
+        r.gated,
         r.cutoffs,
         r.rebinds,
         r.restarts,
@@ -446,6 +451,8 @@ impl Stats {
         self.loop_rounds += r.rounds;
         self.pending_waits += r.pending_waits;
         self.stops += r.stops;
+        self.gated += r.gated;
+        self.top_waited = r.top_waited.iter().map(|&(n, w)| (n.raw(), w)).collect();
         for &(k, n) in &r.waits_by_kind {
             match self.waits_by_kind.iter_mut().find(|x| x.0 == k) {
                 Some(x) => x.1 += n,
@@ -652,12 +659,7 @@ impl Graph {
                 print_round(t0.elapsed(), &r);
                 eprintln!("  waits by kind {:?}", r.waits_by_kind);
                 for &(n, w) in &r.top_waited {
-                    let what = self.eng.node_info(n).map_or_else(String::new, |i| {
-                        let a = i.args.first().map(|&x| self.eng.values().render(x));
-                        let a: String = a.unwrap_or_default().chars().take(80).collect();
-                        format!("{} {a}", i.op)
-                    });
-                    eprintln!("  waited on {w}x: {what}");
+                    eprintln!("  waited on {w}x: {}", describe(&self.eng, n));
                 }
             }
             stats.add(&r);
@@ -1247,6 +1249,53 @@ impl Build {
         (dvi, log)
     }
 
+    /// A node by its raw id ([`Stats::top_waited`]): its operation and
+    /// the start of its first argument.
+    #[must_use]
+    pub fn describe_node(&self, raw: u64) -> String {
+        describe(&self.g.eng, phitex_defuse::NodeId::from_raw(raw))
+    }
+
+    /// Up to three defined control sequences within two edits of `name`,
+    /// nearest first, for an undefined one's help.
+    fn near_names(&self, name: &str, known: &mut Option<Vec<String>>) -> Vec<String> {
+        if name.is_empty() {
+            return Vec::new();
+        }
+        let known = known.get_or_insert_with(|| {
+            let v = self.g.eng.values();
+            let mut names: Vec<String> = self
+                .prelude
+                .env
+                .iter()
+                .filter_map(|(k, _)| k.strip_prefix("cs:").map(str::to_owned))
+                .collect();
+            let f = v.field("defs");
+            if let Some(d) = self.g.eng.acc_value(self.unit, f) {
+                for l in v.seq_to_vec(d) {
+                    for n in list_of(v, l) {
+                        if let Some(c) = field_name(v, Field(n)).strip_prefix("cs:") {
+                            names.push(c.to_owned());
+                        }
+                    }
+                }
+            }
+            names.sort_unstable();
+            names.dedup();
+            names
+        });
+        let mut near: Vec<(usize, &String)> = known
+            .iter()
+            .filter(|k| k.as_str() != name)
+            .filter_map(|k| {
+                let d = edit_distance(name, k);
+                (d <= 2).then_some((d, k))
+            })
+            .collect();
+        near.sort();
+        near.into_iter().take(3).map(|(_, k)| k.clone()).collect()
+    }
+
     #[allow(clippy::too_many_lines)]
     /// The diagnostics of the last build or edit: TeX's errors and
     /// warnings (box reports, missing characters) where the input was,
@@ -1274,6 +1323,8 @@ impl Build {
         }
         let docname = self.opts.name.clone();
         let mut out = Vec::new();
+        // the control sequences defined, gathered at the first undefined one
+        let mut known: Option<Vec<String>> = None;
         let f = v.field("diags");
         let entries = self
             .g
@@ -1349,12 +1400,22 @@ impl Build {
                 " ".repeat(lead.len() + before.chars().count())
             );
             let help = undefined.then(|| {
-                "The control sequence at the end of the top line\n\
+                let mut h = "The control sequence at the end of the top line\n\
                  of your error message was never \\def'ed. If you have\n\
                  misspelled it (e.g., `\\hobx'), type `I' and the correct\n\
                  spelling (e.g., `I\\hbox'). Otherwise just continue,\n\
                  and I'll forget about whatever was undefined."
-                    .to_owned()
+                    .to_owned();
+                let name = before.rfind('\\').map_or("", |k| &before[k + 1..]);
+                let near = self.near_names(name, &mut known);
+                if !near.is_empty() {
+                    let l: Vec<String> = near.iter().map(|n| format!("\\{n}")).collect();
+                    let _ = std::fmt::Write::write_fmt(
+                        &mut h,
+                        format_args!("\nDid you mean {}?", l.join(", ")),
+                    );
+                }
+                h
             });
             out.push(Diagnostic {
                 file,
@@ -1478,4 +1539,29 @@ impl Build {
     pub fn live_nodes(&self) -> usize {
         self.g.eng.live_nodes()
     }
+}
+
+/// The Levenshtein distance between `a` and `b`, by characters.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != cb)).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
+/// A node: its operation and the start of its first argument.
+fn describe(eng: &Engine, n: phitex_defuse::NodeId) -> String {
+    eng.node_info(n).map_or_else(String::new, |i| {
+        let a = i.args.first().map(|&x| eng.values().render(x));
+        let a: String = a.unwrap_or_default().chars().take(80).collect();
+        format!("{} {a}", i.op)
+    })
 }
