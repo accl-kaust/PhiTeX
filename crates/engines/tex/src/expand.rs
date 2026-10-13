@@ -40,13 +40,14 @@ macro_rules! cs_once {
     ($name:ident, $s:expr) => {
         pub(crate) fn $name() -> Tok {
             static C: std::sync::OnceLock<crate::val::CsId> = std::sync::OnceLock::new();
-            Tok::S(*C.get_or_init(|| crate::val::CsId::intern($s)))
+            Tok::of_cs(*C.get_or_init(|| crate::val::CsId::intern($s)))
         }
     };
 }
 cs_once!(par_tok, "par");
 cs_once!(relax_tok, "\u{10FFFE}relax");
 cs_once!(notexpanded_tok, "\u{10FFFE}notexpanded");
+cs_once!(halt_tok, "\u{10FFFE}halt");
 
 impl Run<'_, '_> {
     /// `expand` (§366): `cur` is expandable.
@@ -72,12 +73,12 @@ impl Run<'_, '_> {
                 cmd::EXPAND_AFTER => {
                     // §368
                     self.get_token()?;
-                    let t = self.cur.tok.clone();
+                    let t = self.cur.tok;
                     self.get_token()?;
                     if self.cur.cmd > cmd::MAX_COMMAND {
                         self.expand()?;
                     } else {
-                        let u = self.cur.tok.clone();
+                        let u = self.cur.tok;
                         self.back_input(u);
                     }
                     self.back_input(t);
@@ -85,7 +86,7 @@ impl Run<'_, '_> {
                 cmd::NO_EXPAND => {
                     // §369
                     self.get_token()?;
-                    let t = self.cur.tok.clone();
+                    let t = self.cur.tok;
                     let cs = t.is_cs_or_active();
                     self.back_input(t);
                     if cs {
@@ -138,7 +139,7 @@ impl Run<'_, '_> {
 
     /// `insert_relax` (§379).
     pub(crate) fn insert_relax(&mut self) {
-        let t = self.cur.tok.clone();
+        let t = self.cur.tok;
         self.back_input(t);
         self.back_input(relax_tok());
     }
@@ -154,10 +155,10 @@ impl Run<'_, '_> {
         r?;
         if self.cur.cmd != cmd::END_CS_NAME {
             // §373: back_error
-            let t = self.cur.tok.clone();
+            let t = self.cur.tok;
             self.back_input(t);
         }
-        if self.mean_of(&t)? == Mean::Undefined {
+        if self.mean_of(t)? == Mean::Undefined {
             let relax = Mean::Prim("relax", cmd::RELAX, 256).encode(self.v);
             let f = t.field_name().unwrap_or_default();
             self.set(&f, relax, false);
@@ -168,10 +169,10 @@ impl Run<'_, '_> {
 
     /// `macro_call` (§389–§400).
     /// §396: "Paragraph ended before \\x was complete".
-    fn runaway(&mut self, name: &Tok) -> R<()> {
+    fn runaway(&mut self, name: Tok) -> R<()> {
         let mut s = String::from("Paragraph ended before ");
         let mut cs = String::new();
-        self.show_toks_into(&mut cs, std::slice::from_ref(name))?;
+        self.show_toks_into(&mut cs, std::slice::from_ref(&name))?;
         s.push_str(cs.trim_end());
         s.push_str(" was complete");
         self.log("error", &s)
@@ -193,7 +194,7 @@ impl Run<'_, '_> {
     /// its arguments substituted is built in another, then pushed as one
     /// shared list (one allocation a call).
     pub(crate) fn macro_call(&mut self) -> R<()> {
-        let Mean::Macro(m) = self.cur.mean.clone() else {
+        let Mean::Macro(m) = self.cur_mean()? else {
             return Ok(());
         };
         if m.params.is_empty() {
@@ -207,7 +208,7 @@ impl Run<'_, '_> {
             let MacroBufs { args, bounds, out } = &mut bufs;
             out.clear();
             for t in m.body.iter() {
-                if let Tok::C(x) = t
+                if let Some(x) = t.as_char()
                     && x >> 21 == u32::from(OUT_PARAM_CAT)
                 {
                     let k = usize::try_from(x & 0x1F_FFFF).unwrap_or(1);
@@ -215,10 +216,10 @@ impl Run<'_, '_> {
                         out.extend_from_slice(&args[lo..hi]);
                     }
                 } else {
-                    out.push(t.clone());
+                    out.push(*t);
                 }
             }
-            let toks: Rc<[Tok]> = Rc::from(&out[..]);
+            let toks: Rc<[Tok]> = crate::run::pooled_toks(out);
             self.push_toks(toks);
         }
         bufs.args.clear();
@@ -232,13 +233,13 @@ impl Run<'_, '_> {
     /// `bounds`); false when the call was abandoned.
     #[allow(clippy::too_many_lines)]
     fn macro_args(&mut self, m: &Macro, bufs: &mut MacroBufs) -> R<bool> {
-        let name = self.cur.tok.clone();
+        let name = self.cur.tok;
         let MacroBufs { args, bounds, .. } = bufs;
         args.clear();
         bounds.clear();
         let p: &[Tok] = &m.params;
         let len = p.len();
-        let is_match = |t: &Tok| matches!(*t, Tok::C(x) if x >> 21 == u32::from(MATCH_CAT));
+        let is_match = |t: &Tok| t.raw() >> 21 == u32::from(MATCH_CAT);
         let mut long_state = m.flags & 1 != 0;
         let mut r = 0usize;
         let par = par_tok();
@@ -256,7 +257,7 @@ impl Run<'_, '_> {
             let mut rbrace: Option<usize> = None;
             'cont: loop {
                 self.get_token()?;
-                let tok = self.cur.tok.clone();
+                let tok = self.cur.tok;
                 if r < len && !is_match(&p[r]) && tok == p[r] {
                     // §394
                     r += 1;
@@ -274,7 +275,7 @@ impl Run<'_, '_> {
                     };
                     let mut t = s0;
                     loop {
-                        args.push(p[t].clone());
+                        args.push(p[t]);
                         m_count += 1;
                         let mut u = t + 1;
                         let mut v = s0;
@@ -306,24 +307,24 @@ impl Run<'_, '_> {
                 }
                 if tok == par && !long_state {
                     // §396: a runaway argument; the \par is read again
-                    self.runaway(&name)?;
+                    self.runaway(name)?;
                     self.back_input(tok);
                     return Ok(false);
                 }
                 match tok {
-                    Tok::C(x) if x >> 21 == 1 => {
+                    x if x.raw() >> 21 == 1 => {
                         // §399
                         let mut unbalance = 1;
                         args.push(tok);
                         loop {
                             self.get_token()?;
-                            let t2 = self.cur.tok.clone();
+                            let t2 = self.cur.tok;
                             if t2 == par && !long_state {
-                                self.runaway(&name)?;
+                                self.runaway(name)?;
                                 self.back_input(t2);
                                 return Ok(false);
                             }
-                            if let Tok::C(y) = t2 {
+                            if let Some(y) = t2.as_char() {
                                 match y >> 21 {
                                     1 => unbalance += 1,
                                     2 => {
@@ -340,10 +341,10 @@ impl Run<'_, '_> {
                             args.push(t2);
                         }
                     }
-                    Tok::C(x) if x >> 21 == 2 => {
+                    x if x.raw() >> 21 == 2 => {
                         // §395: an extra }, and a \par inserted
                         self.back_input(tok);
-                        self.back_input(par.clone());
+                        self.back_input(par);
                         long_state = false;
                         continue 'cont;
                     }
@@ -368,7 +369,7 @@ impl Run<'_, '_> {
                 if m_count == 1
                     && let Some(rb) = rbrace
                     && hi > lo
-                    && matches!(args[hi - 1], Tok::C(x) if x >> 21 == 2)
+                    && args[hi - 1].raw() >> 21 == 2
                     && rb == hi - lo - 1
                 {
                     lo += 1;
@@ -408,7 +409,7 @@ impl Run<'_, '_> {
         self.get_x_token()?;
         let (mut c, mut h) = (self.cur.cmd, self.cur.chr);
         if c == cmd::RELAX && h == crate::val::NO_EXPAND_FLAG {
-            if self.cur.tok.cat() == Some(13) && !matches!(self.cur.tok, Tok::S(_)) {
+            if self.cur.tok.cat() == Some(13) && !self.cur.tok.is_cs() {
                 c = cmd::ACTIVE_CHAR;
                 h = i32::try_from(self.cur.tok.chr()).unwrap_or(0);
             } else {
@@ -443,15 +444,14 @@ impl Run<'_, '_> {
                     self.scan_normal_dimen()?
                 };
                 self.skip_blanks_x()?;
-                let rel = match &self.cur.tok {
-                    Tok::C(_)
-                        if self.cur.tok.cat() == Some(12)
-                            && (60..=62).contains(&self.cur.tok.chr()) =>
+                let rel = match self.cur.tok {
+                    _ if self.cur.tok.cat() == Some(12)
+                        && (60..=62).contains(&self.cur.tok.chr()) =>
                     {
                         self.cur.tok.chr()
                     }
                     _ => {
-                        let t = self.cur.tok.clone();
+                        let t = self.cur.tok;
                         self.back_input(t);
                         61
                     }
@@ -495,13 +495,13 @@ impl Run<'_, '_> {
             12 => {
                 // §507
                 if self.get_next()? {
-                    let m1 = self.cur.mean.clone();
-                    let t1 = self.cur.tok.clone();
-                    let (p, q) = self.cur_cmd_chr_for_ifx(&t1, &m1);
+                    let m1 = self.cur_mean()?;
+                    let t1 = self.cur.tok;
+                    let (p, q) = self.cur_cmd_chr_for_ifx(t1, &m1);
                     if self.get_next()? {
-                        let m2 = self.cur.mean.clone();
-                        let t2 = self.cur.tok.clone();
-                        let (c2, h2) = self.cur_cmd_chr_for_ifx(&t2, &m2);
+                        let m2 = self.cur_mean()?;
+                        let t2 = self.cur.tok;
+                        let (c2, h2) = self.cur_cmd_chr_for_ifx(t2, &m2);
                         if c2 != p {
                             false
                         } else if c2 < cmd::CALL {
@@ -579,7 +579,7 @@ impl Run<'_, '_> {
         self.conds.len() >= save
     }
 
-    fn cur_cmd_chr_for_ifx(&self, _t: &Tok, m: &Mean) -> (u8, i32) {
+    fn cur_cmd_chr_for_ifx(&self, _t: Tok, m: &Mean) -> (u8, i32) {
         (
             self.cur.cmd,
             if matches!(m, Mean::Macro(_)) {
@@ -645,16 +645,16 @@ impl Run<'_, '_> {
             }
             2 => {
                 self.get_token()?;
-                let esc = self.int("param:escapechar")?;
+                let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
                 if self.cur.is_cs() {
-                    print::sprint_cs(&mut s, &self.cur.tok, esc);
+                    print::sprint_cs(&mut s, self.cur.tok, esc);
                 } else {
                     print::push_code(&mut s, self.cur.tok.chr());
                 }
             }
             3 => {
                 self.get_token()?;
-                let (t, m) = (self.cur.tok.clone(), self.cur.mean.clone());
+                let (t, m) = (self.cur.tok, self.cur_mean()?);
                 let (c, h) = (self.cur.cmd, self.cur.chr);
                 let _ = t;
                 self.print_meaning(&mut s, &m, c, h)?;
@@ -664,7 +664,7 @@ impl Run<'_, '_> {
                 self.print_font_name(&mut s, f)?;
             }
             _ => {
-                let j = self.get("jobname")?;
+                let j = self.get_loc(crate::fields::cell::JOBNAME)?;
                 s.push_str(&j.map_or_else(|| "texput".to_owned(), |x| str_of(self.v, x)));
             }
         }
@@ -694,7 +694,7 @@ impl Run<'_, '_> {
 
     /// `print_meaning` (§296) with `print_cmd_chr` (§298 and the others).
     pub(crate) fn print_meaning(&mut self, s: &mut String, m: &Mean, c: u8, h: i32) -> R<()> {
-        let esc = self.int("param:escapechar")?;
+        let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
         match m {
             Mean::Macro(mac) => {
                 if mac.flags & crate::etex::PROTECTED != 0 {
@@ -769,17 +769,17 @@ impl Run<'_, '_> {
     fn show_macro(&mut self, s: &mut String, m: &Macro, _esc: i64) -> R<()> {
         let mut all = m.params.clone();
         all.push(crate::val::end_match());
-        all.extend(m.body.iter().cloned());
+        all.extend(m.body.iter().copied());
         self.show_toks_into(s, &all)
     }
 
     /// `show_token_list` with the current `\escapechar` and category codes.
     pub(crate) fn show_toks_into(&mut self, s: &mut String, toks: &[Tok]) -> R<()> {
-        let esc = self.int("param:escapechar")?;
+        let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
         // single-character names: their current category code (§262)
         let mut cats: crate::FxHashMap<u32, i64> = crate::FxHashMap::default();
         for t in toks {
-            if let Tok::S(n) = t {
+            if let Some(n) = t.as_cs() {
                 let mut cs = n.chars();
                 if let (Some(c), None) = (cs.next(), cs.next()) {
                     let k = u32::from(c);
@@ -818,7 +818,7 @@ impl Run<'_, '_> {
                     Frame::Toks(t, p) => {
                         if t[*p..]
                             .iter()
-                            .any(|x| matches!(x, Tok::S(n) if n.starts_with("\u{10FFFE}eof")))
+                            .any(|x| matches!(x.as_cs(), Some(n) if n.starts_with("\u{10FFFE}eof")))
                         {
                             found = true;
                             break;
@@ -887,9 +887,9 @@ impl Run<'_, '_> {
         loop {
             if self.cur.cmd > cmd::OTHER_CHAR
                 || self.cur.chr > 255
-                || self.cur.is_cs() && !matches!(self.cur.mean, Mean::Char(..))
+                || self.cur.is_cs() && !matches!(self.cur_mean()?, Mean::Char(..))
             {
-                let t = self.cur.tok.clone();
+                let t = self.cur.tok;
                 self.back_input(t);
                 break;
             }

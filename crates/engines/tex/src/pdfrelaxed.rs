@@ -66,7 +66,9 @@ fn int_key(v: &Values, x: ValueId) -> u64 {
 
 /// Whether this build writes the PDF file in relaxed mode.
 pub(crate) fn on(r: &mut Run<'_, '_>) -> R<bool> {
-    Ok(r.param("pdfoutput")? > 0 && r.int("pdf:relaxed")? == 1 && r.int("pdf:exact")? == 0)
+    Ok(r.param("pdfoutput")? > 0
+        && r.cint(crate::fields::cell::PDF_RELAXED)? == 1
+        && r.cint(crate::fields::cell::PDF_EXACT)? == 0)
 }
 
 /// Asks for exact mode: the build is evaluated again with the fold.
@@ -95,9 +97,12 @@ pub(crate) fn new_handle(r: &mut Run<'_, '_>) -> i64 {
 fn params(r: &mut Run<'_, '_>) -> R<PdfParams> {
     let v = r.v;
     let date = r
-        .get("pdfdate")?
+        .get_loc(crate::fields::cell::PDFDATE)?
         .map_or_else(|| phitex_pdf::pdf_date(0), |x| str_of(v, x));
-    let jobname = r.get("jobname")?.map(|x| str_of(v, x)).unwrap_or_default();
+    let jobname = r
+        .get_loc(crate::fields::cell::JOBNAME)?
+        .map(|x| str_of(v, x))
+        .unwrap_or_default();
     let mut p = PdfParams {
         date,
         banner: BANNER.to_owned(),
@@ -119,7 +124,7 @@ fn params(r: &mut Run<'_, '_>) -> R<PdfParams> {
 /// records them.
 fn fix(r: &mut Run<'_, '_>, p: &PdfParams) -> R<PdfParams> {
     let v = r.v;
-    let first = if let Some(x) = r.get("pdf:fixed")? {
+    let first = if let Some(x) = r.get_loc(crate::fields::cell::PDF_FIXED)? {
         fixed_of(v, x, p)
     } else {
         {
@@ -133,7 +138,7 @@ fn fix(r: &mut Run<'_, '_>, p: &PdfParams) -> R<PdfParams> {
                 p.inclusion_copy_fonts,
             ];
             let l = v.list(xs.iter().map(|&x| v.int(i64::from(x))).collect());
-            r.set("pdf:fixed", l, true);
+            r.set_cell(crate::fields::cell::PDF_FIXED, l, true);
             p.clone()
         }
     };
@@ -160,7 +165,7 @@ fn fixed_of(v: &Values, x: ValueId, p: &PdfParams) -> PdfParams {
 /// `\pdfmapfile` (true) and `\pdfmapline` (false) texts read so far.
 fn maps(r: &mut Run<'_, '_>) -> R<Vec<(bool, Vec<u8>)>> {
     let v = r.v;
-    let Some(x) = r.get("pdf:maps")? else {
+    let Some(x) = r.get_loc(crate::fields::cell::PDF_MAPS)? else {
         return Ok(Vec::new());
     };
     Ok(list_of(v, x)
@@ -228,7 +233,7 @@ fn keep(r: &mut Run<'_, '_>, page: bool, p: Piece) -> u64 {
 /// The carry where this node is, with the pages shipped before.
 fn carry_here(r: &mut Run<'_, '_>) -> R<(Carry, usize)> {
     let v = r.v;
-    let got = r.get("pdf:carry")?.and_then(|x| {
+    let got = r.get_loc(crate::fields::cell::PDF_CARRY)?.and_then(|x| {
         carries()
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -238,7 +243,7 @@ fn carry_here(r: &mut Run<'_, '_>) -> R<(Carry, usize)> {
     let (mut c, n) = got.map(|a| (*a).clone()).unwrap_or_default();
     // the colour stacks `\pdfcolorstackinit` made so far
     let inits: Vec<(bool, bool, Vec<u8>)> = r
-        .get("pdf:colorstacks")?
+        .get_loc(crate::fields::cell::PDF_COLORSTACKS)?
         .map(|x| list_of(v, x))
         .unwrap_or_default()
         .into_iter()
@@ -331,11 +336,11 @@ pub(crate) fn ship(
         .unwrap_or_else(PoisonError::into_inner)
         .entry(ck)
         .or_insert_with(|| Arc::new((next, n + 1)));
-    r.set("pdf:carry", key_int(v, ck), true);
+    r.set_cell(crate::fields::cell::PDF_CARRY, key_int(v, ck), true);
     if let Some(h) = piece.page_height()
-        && i64::from(h) != r.int("pdf:lastph")?
+        && i64::from(h) != r.cint(crate::fields::cell::PDF_LASTPH)?
     {
-        r.set("pdf:lastph", v.int(i64::from(h)), true);
+        r.set_cell(crate::fields::cell::PDF_LASTPH, v.int(i64::from(h)), true);
     }
     Ok(keep(r, true, piece))
 }
@@ -411,7 +416,10 @@ pub(crate) fn xform(
     // the form's origin: the last page's height for an immediate one,
     // else the height of the pages that will reference it
     let height = if immediate {
-        (i32::try_from(r.int("pdf:lastph")?).unwrap_or(0), false)
+        (
+            i32::try_from(r.cint(crate::fields::cell::PDF_LASTPH)?).unwrap_or(0),
+            false,
+        )
     } else {
         (r.param("pdfpageheight")?, true)
     };
@@ -495,17 +503,17 @@ pub(crate) fn font_objnum(r: &mut Run<'_, '_>, f: u32) -> R<i64> {
 }
 
 /// Whether the `Dvi` node finishes in relaxed mode.
-pub(crate) fn finishing(cx: &mut Ctx<'_>) -> Result<bool, Stop> {
+pub(crate) fn finishing(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<bool, Stop> {
     let v = cx.values();
     let int = |cx: &mut Ctx<'_>, f: &str| -> Result<i64, Stop> {
-        Ok(cx.use_field(v.field(f))?.map_or(0, |x| int_of(v, x)))
+        Ok(fin.get(cx, v.field(f))?.map_or(0, |x| int_of(v, x)))
     };
     Ok(int(cx, "pdf:relaxed")? == 1 && int(cx, "pdf:exact")? == 0)
 }
 
 /// The PDF file from the pieces (`Dvi` in relaxed mode). A document
 /// the mode cannot write asks for exact mode, with a warning naming why.
-pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<ValueId, Stop> {
     let v = cx.values();
     let all = cx.acc_range(v.field(PIECES), None)?;
     let (mut pages, mut objs) = (Vec::new(), Vec::new());
@@ -526,10 +534,10 @@ pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
             }
         }
     }
-    let field = |cx: &mut Ctx<'_>, f: &str| cx.use_field(v.field(f));
+    let field = |cx: &mut Ctx<'_>, f: &str| fin.get(cx, v.field(f));
     let int = |cx: &mut Ctx<'_>, f: &str| -> Result<i32, Stop> {
-        Ok(cx
-            .use_field(v.field(f))?
+        Ok(fin
+            .get(cx, v.field(f))?
             .map_or(0, |x| i32::try_from(int_of(v, x)).unwrap_or(0)))
     };
     // the parameters: the last page's, the fixed ones the first write's
@@ -554,7 +562,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     }
     p.info_omit_date = int(cx, "param:pdfinfoomitdate")?;
     p.suppress_ptex_info = int(cx, "param:pdfsuppressptexinfo")?;
-    let cmds = doc_cmds(cx)?;
+    let cmds = doc_cmds(cx, fin)?;
     match relaxed::finish_relaxed(&p, &pages, &objs, &cmds) {
         Ok(bytes) => {
             let s: String = bytes.iter().map(|&b| char::from(b)).collect();
@@ -570,12 +578,12 @@ pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
 }
 
 /// The document-level commands, from what TeX kept of them.
-fn doc_cmds(cx: &mut Ctx<'_>) -> Result<Vec<DocCmd>, Stop> {
+fn doc_cmds(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<Vec<DocCmd>, Stop> {
     let v = cx.values();
     let mut out = Vec::new();
     let texts = |cx: &mut Ctx<'_>, f: &str| -> Result<Vec<ValueId>, Stop> {
-        Ok(cx
-            .use_field(v.field(f))?
+        Ok(fin
+            .get(cx, v.field(f))?
             .map(|x| list_of(v, x))
             .unwrap_or_default())
     };
@@ -599,8 +607,8 @@ fn doc_cmds(cx: &mut Ctx<'_>) -> Result<Vec<DocCmd>, Stop> {
     for t in texts(cx, "pdf:catalog")? {
         out.push(DocCmd::Catalog(b(t), None));
     }
-    if let Some(a) = cx
-        .use_field(v.field("pdf:openaction"))?
+    if let Some(a) = fin
+        .get(cx, v.field("pdf:openaction"))?
         .and_then(|x| crate::pdfout::action_of(v, x))
     {
         out.push(DocCmd::Catalog(Vec::new(), Some(a)));
@@ -611,16 +619,16 @@ fn doc_cmds(cx: &mut Ctx<'_>) -> Result<Vec<DocCmd>, Stop> {
     for t in texts(cx, "pdf:trailer")? {
         out.push(DocCmd::Trailer(b(t)));
     }
-    if let Some(t) = cx.use_field(v.field("pdf:trailerid"))? {
+    if let Some(t) = fin.get(cx, v.field("pdf:trailerid"))? {
         out.push(DocCmd::TrailerId(b(t)));
     }
     // the font commands: the last attributes of each font, the
     // characters included, the fonts without built-in ToUnicode
-    let count = cx
-        .use_field(v.field("fontcount"))?
+    let count = fin
+        .get(cx, v.field("fontcount"))?
         .map_or(0, |x| int_of(v, x));
     for f in 1..=count {
-        if let Some(t) = cx.use_field(v.field(&format!("pdf:fontattr:{f}")))? {
+        if let Some(t) = fin.get(cx, v.field(&format!("pdf:fontattr:{f}")))? {
             out.push(DocCmd::FontAttr(u32::try_from(f).unwrap_or(0), b(t)));
         }
     }

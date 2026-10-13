@@ -141,6 +141,14 @@ fn chain(dir: &std::path::Path, name: &str) -> Vec<String> {
         b.stats.par_boundary_violations,
         b.stats.if_depth_violations
     );
+    eprintln!(
+        "{name}: loop rounds {}, refuted guesses {}",
+        b.stats.loop_rounds,
+        b.stats.refuted_guesses.len()
+    );
+    for r in &b.stats.refuted_guesses {
+        eprintln!("  {name} {r}");
+    }
     let fails = target_failures(name, &b);
     eprintln!(
         "{name}: height {:?}, {} token-frame nodes, {} target-graph failures",
@@ -340,7 +348,7 @@ fn chain_bar() {
 #[ignore = "a measure: the chain of 400 paragraphs"]
 fn para400() {
     use std::fmt::Write as _;
-    for n in [400, 1000] {
+    for n in [400, 4000] {
         let name = format!("para{n}");
         let dir =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/gate/p400");

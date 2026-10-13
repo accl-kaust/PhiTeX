@@ -903,8 +903,8 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             *x = cur;
         }
     }
-    // inside a brace group or a `\begingroup` pair opened at depth 0:
-    // the slice goes on to its end (a group is never split between nodes)
+    // inside a brace group of the text opened at depth 0: the slice goes
+    // on to its end (a brace group of the text is never split)
     let mut inside = vec![false; n];
     for (k, a) in p.atoms.iter().enumerate() {
         // (a brace knows its mate's atom index; `p.braces` indexes tokens)
@@ -914,22 +914,11 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             }
         }
     }
-    for g in &p.groups {
-        // (the document environment: its `\\begin` opens the scope the
-        // body's regions run in, an engine scope, so its body is sliced
-        // like top-level text; `\\begin{document}` and `\\end{document}`
-        // are slices of their own)
-        if doc_scope() && matches!(&g.kind, pass::GroupKind::Env(e) if e == "document") {
-            continue;
-        }
-        if let (Some(o), Some(c)) = (g.open, g.close)
-            && depth.get(o) == Some(&0)
-        {
-            for x in inside.iter_mut().take(c + 1).skip(o + 1) {
-                *x = true;
-            }
-        }
-    }
+    // (a `\\begingroup`...`\\endgroup` pair or an environment is no
+    // bar to a cut: a paragraph end inside it at brace depth 0 of the
+    // text is one, the region that leaves the group open leaves it to the
+    // engine as a scope and the one that closes it closes that scope,
+    // `Run::run_all`, `Run::close_group`)
     // a control sequence at depth 0 and its `[...]`/`{...}` arguments
     // (with the spaces between): one slice; a loading command's are
     // never cut and end a paragraph before it
@@ -1408,6 +1397,10 @@ struct Analysis<'t> {
     reg: Vec<usize>,
     /// Atoms textually inside an alignment's braces (`\\halign{`…`}`).
     in_align: Vec<bool>,
+    /// Atoms inside a brace group of the text: a font they select is
+    /// the group's, restored at its `}` (§1217), never a definition of
+    /// the node.
+    inner: Vec<bool>,
     memo: std::cell::RefCell<FxHashMap<String, DefSet>>,
     /// The names whose state [`Analysis::defined_state`] is reading.
     visiting: std::cell::RefCell<Vec<String>>,
@@ -1533,6 +1526,17 @@ impl Analysis<'_> {
             }
         }
         let in_align = align_atoms(text, &p.atoms);
+        let mut inner = Vec::with_capacity(p.atoms.len());
+        let mut d = 0usize;
+        for a in &p.atoms {
+            if a.kind == AtomKind::Close {
+                d = d.saturating_sub(1);
+            }
+            inner.push(d > 0);
+            if a.kind == AtomKind::Open {
+                d += 1;
+            }
+        }
         let reg: Vec<usize> = {
             let mut k = 0;
             p.atoms
@@ -1553,6 +1557,7 @@ impl Analysis<'_> {
             claimed,
             reg,
             in_align,
+            inner,
             memo: std::cell::RefCell::new(FxHashMap::default()),
             visiting: std::cell::RefCell::new(Vec::new()),
             prelude,
@@ -1713,6 +1718,43 @@ impl Analysis<'_> {
         self.hint_run(a)
     }
 
+    /// Whether the atom at `k`, outside every brace group of the text
+    /// (or after `\\global`), is a command whose own state (its class,
+    /// or its body's calls, not its arguments') includes `head`.
+    fn selects_outside(&self, k: usize, head: &str) -> bool {
+        let atoms = self.atoms();
+        let Some(at) = atoms.get(k) else { return false };
+        if at.kind != AtomKind::Cs || (self.inner[k] && !self.after_global(k)) {
+            return false;
+        }
+        let name = at.name(self.text);
+        let mut st = Some(Vec::new());
+        if self.is_defined(name) {
+            self.defined_state(name, false, &mut st);
+        } else {
+            add_heads(&mut st, class_state(name));
+            if class_state(name).is_none() && (is_prim(name) || table_param(name)) {
+                return true;
+            }
+        }
+        st.is_none_or(|st| st.iter().any(|x| x == head))
+    }
+
+    /// Whether the atom at `a` follows `\\global` (spaces between).
+    fn after_global(&self, a: usize) -> bool {
+        let atoms = self.atoms();
+        let mut k = a;
+        while k > 0 {
+            k -= 1;
+            match atoms[k].kind {
+                AtomKind::Space => {}
+                AtomKind::Cs => return atoms[k].name(self.text) == "global",
+                _ => return false,
+            }
+        }
+        false
+    }
+
     /// The hint of the atom at `a` as if it ran (a command a macro is
     /// only guessed to read does run, when the guess is wrong).
     #[allow(clippy::too_many_lines)]
@@ -1824,6 +1866,14 @@ impl Analysis<'_> {
                 format!("{f}: an active character the text does not make"),
                 excerpt,
             );
+        }
+        // (a font selected inside a brace group, not `\\global`ly, is
+        // the group's: no `font` definition reaches the engine)
+        if self.inner.get(a).copied().unwrap_or(false)
+            && !self.after_global(a)
+            && let Some(st) = &mut b.state
+        {
+            st.retain(|h| h != "font");
         }
         b.no_scope = ok && self.no_scope(a);
         if ok {
@@ -2032,7 +2082,7 @@ impl Analysis<'_> {
                 add_heads(st, Some(&[fam, "aftertoken"]));
             }
             Some(pass::Shape::Quantity(_)) => {
-                add_heads(st, Some(&["box:", "lvlfix", "badness", "inspen", "align"]));
+                add_heads(st, Some(&["box:", "lvlfix", "badness", "inspen"]));
                 if may_start_par {
                     add_heads(st, Some(&["pg:"]));
                 }
@@ -2495,23 +2545,26 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         {
             b.no_scope = true;
         }
-        // (`\\begin{document}`: its run leaves the environment's group
-        // open as the engine scope the body runs in, `Run::leave_scope`;
-        // what it defines is the document class's business: unbounded)
-        if kind == FileKind::Document && opens_document(&text[s..e]) {
-            let mut x = Hint::any("opens the document scope", &text[s..e]).encode();
-            x.push_str(OPENS_SCOPE);
-            slice_hints.push(Arc::from(x));
-            pending.clear();
-            continue;
-        }
         let excerpt = short(&text[s..text.len().min(s + 40)]);
+        // (a font selection, `\\bf`, that only an argument or a group
+        // inside the slice makes is local to that group: the slice
+        // declares it only when a command outside every brace group of
+        // the slice selects one, §1217)
+        for head in GROUP_LOCAL {
+            let k0 = t.starts.partition_point(|&x| x < s);
+            let k1 = t.starts.partition_point(|&x| x < e);
+            let outside = (k0..k1).any(|k| an.selects_outside(k, head));
+            if !outside {
+                for b in [h.bound.as_mut(), h.guess.as_mut()].into_iter().flatten() {
+                    if let Some(st) = &mut b.state {
+                        st.retain(|x| x != head);
+                    }
+                }
+            }
+        }
         if t.pars[i] {
             if let Some(b) = &mut h.bound {
-                // (its paragraph begins by running `\\everypar`, §1091,
-                // which may set `\\everypar` again: LaTeX's paragraph
-                // hooks do at every paragraph)
-                add_heads(&mut b.state, Some(&["pg:", "param:everypar"]));
+                add_heads(&mut b.state, Some(&["pg:"]));
                 "region".clone_into(&mut h.cause);
             } else {
                 h.cause = format!("region: {}", h.cause);
@@ -2526,6 +2579,16 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         // slice that may set one and ends no paragraph after it leaves
         // the reset pending, and the next slice ending a paragraph
         // declares it)
+        // (LaTeX's paragraph hooks assign `\\everypar` at every
+        // paragraph, the value it has: no definition. A heading's
+        // `\\@afterheading`, a list's `\\item` and an environment's
+        // end (`\\@doendpe`) set another, which the next paragraph
+        // consumes, §1091: a slice calling one declares it)
+        if sets_everypar(&text[s..e])
+            && let Some(b) = h.bound.as_mut().or(h.guess.as_mut())
+        {
+            add_head(&mut b.state, "param:everypar");
+        }
         let mut out = pending.clone();
         let mut ends = false;
         let k0 = t.starts.partition_point(|&x| x < s);
@@ -2825,11 +2888,7 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
             // they append to the paragraph's list, may begin one (§1091,
             // `\\prevgraf` 0) and open and close no scope; no meaning
             // or catcode is read again, §1030-§1044)
-            if !toks.is_empty()
-                && toks
-                    .iter()
-                    .all(|t| matches!(t, Tok::C(_)) && matches!(t.cat(), Some(10..=12)))
-            {
+            if !toks.is_empty() && toks.iter().all(|t| matches!(t.cat(), Some(10..=12))) {
                 let mut b = Bound {
                     state: Some(Vec::new()),
                     no_scope: true,
@@ -2860,38 +2919,35 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
                 text.clear();
                 let mut ok = true;
                 for t in &toks {
-                    match t {
-                        Tok::S(n) => {
-                            // (a name the pass reads back as one token:
-                            // letters of the regime, or one other character)
-                            let word = !n.is_empty()
-                                && n.chars()
-                                    .all(|c| c.is_ascii_alphabetic() || (at && c == '@'));
-                            let symbol = n.chars().count() == 1
-                                && n.chars().all(|c| c.is_ascii() && !c.is_ascii_alphabetic());
-                            if !(word || symbol) {
-                                ok = false;
-                                break;
-                            }
-                            text.push('\\');
-                            text.push_str(n);
-                            if word {
-                                text.push(' ');
-                            }
+                    if let Some(n) = t.as_cs() {
+                        // (a name the pass reads back as one token:
+                        // letters of the regime, or one other character)
+                        let word = !n.is_empty()
+                            && n.chars()
+                                .all(|c| c.is_ascii_alphabetic() || (at && c == '@'));
+                        let symbol = n.chars().count() == 1
+                            && n.chars().all(|c| c.is_ascii() && !c.is_ascii_alphabetic());
+                        if !(word || symbol) {
+                            ok = false;
+                            break;
                         }
-                        Tok::C(_) => {
-                            let c = t.chr();
-                            let cat = t.cat().unwrap_or(12);
-                            let Some(ch) = char::from_u32(c).filter(char::is_ascii) else {
-                                ok = false;
-                                break;
-                            };
-                            if plain_catcode(ch as u8, at) != cat {
-                                ok = false;
-                                break;
-                            }
-                            text.push(ch);
+                        text.push('\\');
+                        text.push_str(&n);
+                        if word {
+                            text.push(' ');
                         }
+                    } else {
+                        let c = t.chr();
+                        let cat = t.cat().unwrap_or(12);
+                        let Some(ch) = char::from_u32(c).filter(char::is_ascii) else {
+                            ok = false;
+                            break;
+                        };
+                        if plain_catcode(ch as u8, at) != cat {
+                            ok = false;
+                            break;
+                        }
+                        text.push(ch);
                     }
                 }
                 if ok {
@@ -2927,8 +2983,12 @@ fn fragment_context(b: &mut Bound) {
     add_heads(&mut b.state, Some(NORMAL_PARAGRAPH));
     add_head(&mut b.state, "pg:");
     add_head(&mut b.state, "aftertoken");
-    add_head(&mut b.state, "align");
 }
+
+/// The heads a font switch sets (§1217, §1228 `\\fam`): local to the
+/// group it runs in, so a slice declares them only for a switch outside
+/// every brace group ([`Analysis::selects_outside`]).
+const GROUP_LOCAL: [&str; 2] = ["font", "param:fam"];
 
 /// Plain TeX's catcode of an ASCII byte (`@` a letter when `at`).
 fn plain_catcode(b: u8, at: bool) -> u8 {
@@ -2977,27 +3037,26 @@ pub fn set_hints_enabled(on: bool) {
     OFF.store(!on, Ordering::Relaxed);
 }
 
-/// The mark a slice hint ends with when the slice opens the scope the
-/// rest of the document runs in (`\\begin{document}`).
-const OPENS_SCOPE: &str = "\x1eO";
-
-/// Whether the document environment's body is sliced into regions
-/// under the scope `\\begin{document}` leaves open (`PHITEX_DOC_SCOPE=1`;
-/// off until its PDF is byte-identical, test `latex_paragraph_nodes`).
-fn doc_scope() -> bool {
-    crate::exec::env_flag!("PHITEX_DOC_SCOPE")
-}
-
-fn opens_document(slice: &str) -> bool {
-    doc_scope() && slice.trim_start().starts_with("\\begin{document}")
-}
-
-/// Whether the node's slice opens the document's scope: its run leaves
-/// the one group it ends in open to the engine (`Run::leave_scope`).
-pub(crate) fn opens_scope(v: &Values, args: &[ValueId]) -> bool {
-    args.iter().skip(2).any(|&h| {
-        matches!(&*v.get(h), Value::Str(t) if t.starts_with("A\x1e") && t.ends_with(OPENS_SCOPE))
-    })
+/// Whether a slice calls a command that leaves `\\everypar` other
+/// than LaTeX's paragraph hooks leave it: a heading (`\\@afterheading`),
+/// a list item, an environment's begin or end (`\\@doendpe`), a title.
+fn sets_everypar(slice: &str) -> bool {
+    const SETS: &[&str] = &[
+        "\\section",
+        "\\subsection",
+        "\\subsubsection",
+        "\\paragraph",
+        "\\subparagraph",
+        "\\chapter",
+        "\\part",
+        "\\@afterheading",
+        "\\@startsection",
+        "\\item",
+        "\\begin",
+        "\\end",
+        "\\maketitle",
+    ];
+    SETS.iter().any(|c| slice.contains(c))
 }
 
 /// Whether the node's text says its command opens and closes no scope.
@@ -3046,76 +3105,6 @@ pub(crate) fn may_define(v: &Values, args: &[ValueId]) -> MayDefine {
         eprintln!("hint {:?}: {answer} ({})", h.excerpt, h.cause);
     }
     h.may_define()
-}
-
-/// What a page step may define besides what its output routine's
-/// commands define: the marks (§1012), `\\box255` and the insertion
-/// boxes (§1018, §1021), `\\outputpenalty` (§1013), `\\deadcycles`
-/// (§1012, §638), `\\insertpenalties` (§1018), the page's whatsits at
-/// shipout (§1374, pdfTeX's), the output group's `normal_paragraph`
-/// (§1025, §1070).
-const PAGE_STEP: &[&str] = &[
-    "mark:",
-    "marks:",
-    "markclasses",
-    "box:",
-    "lvlfix",
-    "badness",
-    "param:outputpenalty",
-    "deadcycles",
-    "inspen",
-    "write:",
-    "wopen:",
-    "pdf:",
-    "param:looseness",
-    "param:hangindent",
-    "param:hangafter",
-    "param:interlinepenalties",
-    "parshape",
-];
-
-/// A page step's answer: [`PAGE_STEP`] and what the format's output
-/// routine (its last `\\output{…}`, the macros it calls, through the
-/// definitions) defines; anything when the pass cannot bound the
-/// routine. (A routine the document sets differently defines outside
-/// it: the engine reports the definition, never a wrong output.)
-pub(crate) fn page_step_may_define(defs: &Defs) -> MayDefine {
-    static C: OnceLock<Mutex<FxHashMap<usize, MayDefine>>> = OnceLock::new();
-    if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
-        return MayDefine::Any;
-    }
-    let key = Arc::as_ptr(defs) as usize;
-    let c = C.get_or_init(|| Mutex::new(FxHashMap::default()));
-    if let Some(m) = c.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
-        return m.clone();
-    }
-    let an = Analysis::new("", FileKind::Document, defs.clone());
-    let mut b = Bound {
-        state: Some(Vec::new()),
-        ..Bound::default()
-    };
-    add_heads(&mut b.state, Some(PAGE_STEP));
-    let mut cause = String::new();
-    let ok = match defs.output_defines(defs) {
-        Some(set) => an.add_set(&set, &mut b, &mut cause),
-        None => true,
-    };
-    let m = if ok {
-        Hint {
-            bound: Some(b),
-            ..Hint::default()
-        }
-        .may_define()
-    } else {
-        MayDefine::Any
-    };
-    if crate::exec::env_flag!("PHITEX_HINTS") {
-        eprintln!("page step hint: {m:?} ({cause})");
-    }
-    c.lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(key, m.clone());
-    m
 }
 
 /// The accumulators the nodes count into.
@@ -3198,9 +3187,9 @@ fn mean_kind(m: &Mean) -> &'static str {
 }
 
 /// The definitions a run made outside its bound: the violation, if any.
-pub(crate) fn check_defs(r: &Run<'_, '_>, h: &Hint) -> Option<String> {
+pub(crate) fn check_defs(r: &mut Run<'_, '_>, h: &Hint) -> Option<String> {
     let b = h.bound.as_ref()?;
-    for (f, _, _) in &r.defs {
+    for f in r.def_fields() {
         let name = match &*r.v.get(f.0) {
             Value::Str(s) => s.to_string(),
             _ => continue,
@@ -3229,12 +3218,12 @@ pub(crate) fn check_defs(r: &Run<'_, '_>, h: &Hint) -> Option<String> {
 
 /// `PHITEX_HINTS=2`: the node's definitions, for learning the state
 /// each command sets.
-pub(crate) fn debug_defs(r: &Run<'_, '_>, h: &Hint) {
+pub(crate) fn debug_defs(r: &mut Run<'_, '_>, h: &Hint) {
     if std::env::var("PHITEX_HINTS").is_ok_and(|x| x == "2") {
         let mut fs: Vec<String> = r
-            .defs
-            .iter()
-            .filter_map(|(f, _, _)| match &*r.v.get(f.0) {
+            .def_fields()
+            .into_iter()
+            .filter_map(|f| match &*r.v.get(f.0) {
                 Value::Str(s) if !is_cs_field(s) => {
                     Some(s.split(':').next().unwrap_or(s).to_owned())
                 }
@@ -3408,14 +3397,7 @@ mod tests {
         let MayDefine::Prefixes(ps) = md else {
             panic!("prefixes")
         };
-        for f in [
-            "pg:1",
-            "aftertoken",
-            "cat:64",
-            "count:10",
-            "align:open",
-            "fontinfo:2",
-        ] {
+        for f in ["pg:1", "aftertoken", "cat:64", "count:10", "fontinfo:2"] {
             assert!(ps.iter().any(|p| f.starts_with(p.as_str())), "{f}");
         }
         for f in ["cs:foo", "act:126"] {

@@ -11,9 +11,10 @@
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use phitex_defuse::{Ctx, Effect, Field, FxHashMap, Locality, OpId, Stop, Value, ValueId, Values};
+use phitex_defuse::{Ctx, Effect, Field, Locality, OpId, Stop, Value, ValueId, Values};
 
 use crate::fields::Par;
+use crate::runstate::{Loc, Native};
 use crate::val::{Mean, Tok, cmd, int_of, list_of, str_of};
 
 /// Why a run cannot finish its command now.
@@ -55,6 +56,12 @@ pub(crate) struct Ops {
     /// Page-step runs that reached their finish, by page index (not
     /// the attempts that stopped or were cut off): [`crate::Stats`].
     pub steps_done: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    /// The page chain's loop-backs as read and published in the current
+    /// evaluation: the refuted guesses ([`crate::Stats`]).
+    pub lblog: std::sync::Arc<std::sync::Mutex<crate::page::LbLog>>,
+    /// The evaluation counter: `pgref` counts refuted rounds of one
+    /// evaluation only.
+    pub eval: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// A level of the input stack.
@@ -176,17 +183,24 @@ pub(crate) struct Src {
     pub rescanned: bool,
 }
 
+/// The commands an alignment entry watches for (§342, §347, §357):
+/// braces, `&` and `\cr`, as a bit mask by command code.
+const ALIGN_CMDS: u128 =
+    1 << cmd::LEFT_BRACE | 1 << cmd::RIGHT_BRACE | 1 << cmd::TAB_MARK | 1 << cmd::CAR_RET;
+
 pub(crate) const MID_LINE: u8 = 0;
 pub(crate) const SKIP_BLANKS: u8 = 1;
 pub(crate) const NEW_LINE: u8 = 2;
 
-/// The current token (`cur_tok`, `cur_cmd`, `cur_chr`, `cur_cs`).
-#[derive(Clone, Debug)]
+/// The current token (`cur_tok`, `cur_cmd`, `cur_chr`, `cur_cs`, §297).
+/// Its meaning is read from its slot when a command needs it
+/// ([`Run::cur_mean`]), as TeX reads `equiv(cur_cs)` (§389: a macro's
+/// body at expansion time).
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Cur {
     pub tok: Tok,
     pub cmd: u8,
     pub chr: i32,
-    pub mean: Mean,
 }
 
 impl Cur {
@@ -232,32 +246,21 @@ pub(crate) struct Run<'c, 'a> {
     /// While looking for the command's first token: a node's command
     /// begins in its own text (the next sibling's begins in its own).
     pub no_pull: bool,
-    /// The category codes this run read (§232), by character below
-    /// 256, plus one (0: not read yet); emptied whenever `own` changes.
-    /// The run's field slots ([`crate::fields`]), a cache of field values:
-    /// `None` until read, then the run's view of the slot's field (as
-    /// [`Run::get_f`] reads it), kept in step with every definition and
-    /// restore. Empty until the first read.
-    #[allow(clippy::option_option)]
-    slots: Vec<Option<Option<ValueId>>>,
-    pub own: FxHashMap<Field, Option<ValueId>>,
-    /// Values read in place of the fields' reaching definitions (a page
-    /// step's `\count0..9` from `pgdef:<j-1>`), below this run's own.
-    pub over: FxHashMap<Field, ValueId>,
-    pub defs: Vec<(Field, ValueId, Locality)>,
-    /// Where each field's definitions are in `defs`, latest last: a
-    /// redefinition within the same group replaces in place instead of
-    /// growing `defs` (and no linear search finds the earlier one).
-    pub def_ix: FxHashMap<Field, Vec<usize>>,
-    /// Per field, the stamp of its latest global definition inside a
-    /// group of this run: saved entries stamped before it are inert.
-    pub ginert: FxHashMap<Field, u64>,
-    /// The clock of `ginert` and the saved entries (`nest.rs`).
-    pub stamp: u64,
+    /// The run's state table ([`crate::runstate`]): every field it read
+    /// or defined, native.
+    pub st: crate::runstate::State,
+    /// The category codes of characters 0–255 as last read (`u8::MAX`:
+    /// not read), valid while the table's catcode generation is
+    /// `cat_gen`.
+    cat_cache: [u8; 256],
+    cat_gen: u64,
     pub contribs: Vec<(Field, ValueId)>,
     /// The page builder of a text run as one node, paging inline
     /// (`pageinline.rs`).
     pub pg: Option<Box<crate::pageinline::Inline>>,
+    /// A page step whose output routine published leftovers
+    /// (`pagefx:<j>`).
+    pub pagefx_pub: bool,
     pub kids: Vec<(OpId, Vec<ValueId>)>,
     pub effect: Effect,
     pub cur: Cur,
@@ -265,11 +268,6 @@ pub(crate) struct Run<'c, 'a> {
     pub conds: Vec<u8>,
     /// The codes (`cur_if`) of `conds`, parallel to it.
     pub if_codes: Vec<i32>,
-    mcache: FxHashMap<ValueId, Mean>,
-    /// The meaning fields of the control sequences this run looked up,
-    /// by [`crate::val::CsId::index`], and of the active characters.
-    tfields: Vec<Option<Field>>,
-    afields: FxHashMap<u32, Field>,
     /// The buffer a control sequence's name is scanned into (§356).
     name_buf: String,
     /// The scope kind last decoded (`Run::mode`, once a command): its
@@ -277,6 +275,9 @@ pub(crate) struct Run<'c, 'a> {
     pub kind_memo: Option<(ValueId, KindFields)>,
     /// `align_state` as this run has it (§309), once read.
     pub astate: Option<i64>,
+    /// The alignments open in this run (`align_state`'s companion,
+    /// §324): run-local, an alignment never crosses a node.
+    pub aopen: i64,
     /// Lines entered by this run (for `\inputlineno`).
     pub lines_entered: i64,
     /// Whether the input is exhausted for good (the file ended).
@@ -295,6 +296,9 @@ pub(crate) struct Run<'c, 'a> {
     pub irreversible: u64,
     /// The input as the command in progress began ([`Run::rewind`]).
     mark: Mark,
+    /// A halt raised on the token path ([`Run::raise`]), returned by the
+    /// next `get_next` of the command in progress.
+    halt: Option<Halt>,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
@@ -324,31 +328,25 @@ impl<'c, 'a> Run<'c, 'a> {
             doc: false,
             fread: Vec::new(),
             no_pull: false,
-            own: FxHashMap::default(),
-            over: FxHashMap::default(),
-            slots: Vec::new(),
-            defs: Vec::new(),
-            def_ix: FxHashMap::default(),
-            ginert: FxHashMap::default(),
-            stamp: 0,
+            st: crate::runstate::State::new(),
+            cat_cache: [u8::MAX; 256],
+            cat_gen: u64::MAX,
             contribs: Vec::new(),
             pg: None,
+            pagefx_pub: false,
             kids: Vec::new(),
             effect: Effect::None,
             cur: Cur {
-                tok: Tok::C(0),
+                tok: Tok::c(0),
                 cmd: 0,
                 chr: 0,
-                mean: Mean::Undefined,
             },
             conds: Vec::new(),
             if_codes: Vec::new(),
-            mcache: FxHashMap::default(),
-            tfields: Vec::new(),
-            afields: FxHashMap::default(),
             name_buf: String::new(),
             kind_memo: None,
             astate: None,
+            aopen: 0,
             lines_entered: 0,
             eof: false,
             radix: 0,
@@ -357,60 +355,121 @@ impl<'c, 'a> Run<'c, 'a> {
             resumed: false,
             irreversible: 0,
             mark: Mark::default(),
+            halt: None,
         }
     }
 
-    /// A binding of `f` in the run's view changed to `x` (`None`: the
-    /// engine's value again): its slot follows.
-    #[allow(clippy::option_option)]
-    pub(crate) fn slot_note(&mut self, f: Field, x: Option<Option<ValueId>>) {
-        if self.slots.is_empty() {
-            return;
+    /// The field of location `loc`.
+    pub(crate) fn loc_field(&mut self, loc: Loc) -> Field {
+        if let Some(f) = self.st.field(loc) {
+            return f;
         }
-        if let Some(s) = self.ops.fields.field_slot(f) {
-            self.slots[s] = x;
+        let f = self
+            .ops
+            .fields
+            .field_of(self.v, self.cx.values_epoch(), loc as usize);
+        self.st.set_field(loc, f);
+        f
+    }
+
+    /// The location of field `f` (a fixed one, a meaning's, or the
+    /// spill's).
+    pub(crate) fn loc_of(&mut self, f: Field) -> Loc {
+        match self.ops.fields.loc_of(self.v, self.cx.values_epoch(), f) {
+            Some(l) => {
+                let l = Loc::try_from(l).unwrap_or(0);
+                if self.st.field(l).is_none() {
+                    self.st.set_field(l, f);
+                }
+                l
+            }
+            None => self.st.spill_loc(f),
         }
     }
 
-    /// Field slot `s`: its field read once a run.
+    /// Location `loc` read: from the engine on its first read in the run.
     #[inline]
-    pub(crate) fn slot_get(&mut self, s: usize) -> R<Option<ValueId>> {
-        if let Some(Some(x)) = self.slots.get(s) {
-            return Ok(*x);
+    pub(crate) fn load(&mut self, loc: Loc) -> R<()> {
+        if self.st.is_loaded(loc) {
+            return Ok(());
         }
-        let x = self.get_f(self.ops.fields.slot_field(s))?;
-        if self.slots.is_empty() {
-            self.slots = vec![None; crate::fields::NSLOT];
-        }
-        self.slots[s] = Some(x);
-        Ok(x)
+        self.load_slow(loc)
     }
 
-    /// Defines slot `s` (as [`Self::set`]).
-    pub(crate) fn slot_set(&mut self, s: usize, val: ValueId, global: bool) {
-        self.set_f(self.ops.fields.slot_field(s), val, global);
+    #[inline(never)]
+    fn load_slow(&mut self, loc: Loc) -> R<()> {
+        let f = self.loc_field(loc);
+        let r = self.cx.use_field(f);
+        crate::exec::widths::read(f);
+        if crate::exec::env_flag!("PHITEX_READS") {
+            self.trace_read(f, r.is_err());
+        }
+        self.st.fill(loc, r?);
+        Ok(())
+    }
+
+    /// The engine value of location `loc` in the run's view.
+    pub(crate) fn get_loc(&mut self, loc: Loc) -> R<Option<ValueId>> {
+        self.load(loc)?;
+        Ok(self.st.id_of(loc, self.v))
+    }
+
+    /// Location `loc` as an integer.
+    #[inline]
+    pub(crate) fn int_loc(&mut self, loc: Loc) -> R<i32> {
+        self.load(loc)?;
+        Ok(self.st.int_of(loc, self.v))
+    }
+
+    /// Location `loc` as an integer, widened.
+    pub(crate) fn cint(&mut self, loc: Loc) -> R<i64> {
+        Ok(self.get_loc(loc)?.map_or(0, |x| int_of(self.v, x)))
+    }
+
+    /// Defines the state cell at `loc` ([`crate::fields::cell`]).
+    pub(crate) fn set_cell(&mut self, loc: Loc, val: ValueId, global: bool) {
+        self.set_loc(loc, Native::Raw(val), global);
+    }
+
+    /// Location `loc` as glue.
+    pub(crate) fn glue_loc(&mut self, loc: Loc) -> R<phitex_typeset::glue::Glue> {
+        self.load(loc)?;
+        Ok(self.st.glue_of(loc, self.v))
+    }
+
+    /// Location `loc` as a token list.
+    #[allow(dead_code)]
+    pub(crate) fn toks_loc(&mut self, loc: Loc) -> R<Rc<[Tok]>> {
+        self.load(loc)?;
+        Ok(self.st.toks_of(loc, self.v))
+    }
+
+    /// Defines location `loc` (§277–§279: `eq_define` / `geq_define`).
+    pub(crate) fn set_loc(&mut self, loc: Loc, val: Native, global: bool) {
+        let grp = self.innermost_group();
+        self.st.set(loc, val, global, grp);
+        self.irreversible += 1;
     }
 
     /// The parameter `p`.
     pub(crate) fn par(&mut self, p: Par) -> R<Option<ValueId>> {
-        self.slot_get(p as usize)
+        self.get_loc(p as Loc)
     }
 
     /// The integer or dimension parameter `p`.
+    #[inline]
     pub(crate) fn ipar(&mut self, p: Par) -> R<i32> {
-        let x = self.slot_get(p as usize)?;
-        Ok(crate::val::i32_of(self.v, x))
+        self.int_loc(p as Loc)
     }
 
     /// The glue parameter `p`.
     pub(crate) fn gpar(&mut self, p: Par) -> R<phitex_typeset::glue::Glue> {
-        let x = self.slot_get(p as usize)?;
-        Ok(crate::val::glue_of(self.v, x))
+        self.glue_loc(p as Loc)
     }
 
     /// Defines the parameter `p`.
     pub(crate) fn set_par(&mut self, p: Par, val: ValueId, global: bool) {
-        self.slot_set(p as usize, val, global);
+        self.set_loc(p as Loc, Native::Raw(val), global);
     }
 
     /// The field of the primitive quantity at `(c, chr)` (§1224, §1228).
@@ -421,12 +480,20 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
+    /// The location of the primitive quantity at `(c, chr)`.
+    pub(crate) fn quantity_loc(&mut self, c: u8, chr: i32) -> Loc {
+        if let Some(s) = self.ops.fields.quantity_slot(c, chr) {
+            Loc::try_from(s).unwrap_or(0)
+        } else {
+            let f = self.v.field(&crate::val::quantity_field(c, chr));
+            self.loc_of(f)
+        }
+    }
+
     /// The value of the field of the primitive quantity at `(c, chr)`.
     pub(crate) fn qget(&mut self, c: u8, chr: i32) -> R<Option<ValueId>> {
-        match self.ops.fields.quantity_slot(c, chr) {
-            Some(s) => self.slot_get(s),
-            None => self.get(&crate::val::quantity_field(c, chr)),
-        }
+        let l = self.quantity_loc(c, chr);
+        self.get_loc(l)
     }
 
     /// The field `<fam>:<key>` ([`crate::fields::Fam`]).
@@ -447,40 +514,32 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
-    /// Field `f` in the run's view, through its slot if it has one.
-    pub(crate) fn read_f(&mut self, f: Field) -> R<Option<ValueId>> {
-        match self.ops.fields.field_slot(f) {
-            Some(s) => self.slot_get(s),
-            None => self.get_f(f),
+    /// The location of register `n` of kind `r`.
+    pub(crate) fn reg_loc(&mut self, r: usize, n: i32) -> Loc {
+        if let Some(s) = crate::fields::reg_slot(r, n) {
+            Loc::try_from(s).unwrap_or(0)
+        } else {
+            let f = self.reg_field(r, n);
+            self.loc_of(f)
         }
+    }
+
+    /// Field `f` in the run's view.
+    pub(crate) fn read_f(&mut self, f: Field) -> R<Option<ValueId>> {
+        self.get_f(f)
     }
 
     /// Register `n` of kind `r` (0 count, 1 dimen, 2 skip, 3 muskip, 4 toks).
     pub(crate) fn reg(&mut self, r: usize, n: i32) -> R<Option<ValueId>> {
-        match crate::fields::reg_slot(r, n) {
-            Some(s) => self.slot_get(s),
-            None => self.get(&format!(
-                "{}:{n}",
-                ["count", "dimen", "skip", "muskip", "toks"][r]
-            )),
-        }
+        let l = self.reg_loc(r, n);
+        self.get_loc(l)
     }
 
     // ------------------------------------------------------------ fields
 
     pub(crate) fn get_f(&mut self, f: Field) -> R<Option<ValueId>> {
-        if let Some(&x) = self.own.get(&f) {
-            return Ok(x);
-        }
-        if let Some(&x) = self.over.get(&f) {
-            return Ok(Some(x));
-        }
-        let r = self.cx.use_field(f);
-        crate::exec::widths::read(f);
-        if crate::exec::env_flag!("PHITEX_READS") {
-            self.trace_read(f, r.is_err());
-        }
-        Ok(r?)
+        let l = self.loc_of(f);
+        self.get_loc(l)
     }
 
     /// `PHITEX_READS`: a read under a head a paragraph region declares
@@ -622,20 +681,18 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn interpret_line(&mut self, line: &str) -> R<ValueId> {
         let v = self.v;
         let frames = std::mem::take(&mut self.frames);
-        let own = self.own.clone();
-        let defs = self.defs.clone();
+        let st = self.st.clone();
         let (nc, nk) = (self.contribs.len(), self.kids.len());
         let nest_len = self.nest.len();
-        let saved: Vec<_> = self.nest.iter().map(|l| l.saved.clone()).collect();
         let conds = self.conds.clone();
         let codes = self.if_codes.clone();
-        let cur = self.cur.clone();
+        let cur = self.cur;
         let (eof, no_pull, claim) = (self.eof, self.no_pull, self.claim_rest);
         let effect = self.effect;
         self.eof = true;
         self.no_pull = true;
         self.set("cat:64", v.int(11), false);
-        let base = self.defs.len();
+        let base = self.st.stamp();
         for l in line.split('\n') {
             let mut buf: Vec<u32> = l.chars().map(u32::from).collect();
             while buf.last() == Some(&32) {
@@ -659,10 +716,13 @@ impl<'c, 'a> Run<'c, 'a> {
                 break;
             }
         }
-        let made: Vec<ValueId> = self.defs[base.min(self.defs.len())..]
-            .iter()
+        let made: Vec<ValueId> = self
+            .st
+            .defined_since(v, base)
+            .into_iter()
+            .filter_map(|(loc, x, l)| Some((self.loc_field(loc), x?, l)))
             .filter(|d| !str_of(v, d.0.0).starts_with("cat:"))
-            .map(|&(f, x, l)| {
+            .map(|(f, x, l)| {
                 v.list(vec![
                     f.0,
                     x,
@@ -671,17 +731,10 @@ impl<'c, 'a> Run<'c, 'a> {
             })
             .collect();
         self.frames = frames;
-        self.own = own;
-        self.defs = defs;
-        // (`def_ix` indexed the longer `defs`: rebuilt, or a later
-        // redefinition in place indexes past the end)
-        self.reindex_defs();
+        self.st = st;
         self.contribs.truncate(nc);
         self.kids.truncate(nk);
         self.nest.truncate(nest_len);
-        for (l, sv) in self.nest.iter_mut().zip(saved) {
-            l.saved = sv;
-        }
         self.conds = conds;
         self.if_codes = codes;
         self.cur = cur;
@@ -689,7 +742,6 @@ impl<'c, 'a> Run<'c, 'a> {
         self.no_pull = no_pull;
         self.claim_rest = claim;
         self.effect = effect;
-        self.slots.clear();
         self.kind_memo = None;
         res?;
         Ok(v.list(made))
@@ -722,27 +774,59 @@ impl<'c, 'a> Run<'c, 'a> {
     /// The parameter `name` (a name known only at run time; the fixed
     /// ones read [`Self::ipar`]).
     pub(crate) fn param(&mut self, name: &str) -> R<i32> {
-        let x = match self.ops.fields.par_slot(name) {
-            Some(s) => self.slot_get(s)?,
-            None => self.get_f(self.ops.fields.param(self.v, name))?,
+        let l = if let Some(s) = self.ops.fields.par_slot(name) {
+            Loc::try_from(s).unwrap_or(0)
+        } else {
+            let f = self.ops.fields.param(self.v, name);
+            self.loc_of(f)
         };
-        Ok(crate::val::i32_of(self.v, x))
+        self.int_loc(l)
     }
 
     pub(crate) fn glue_param(&mut self, name: &str) -> R<phitex_typeset::glue::Glue> {
-        let x = match self.ops.fields.par_slot(name) {
-            Some(s) => self.slot_get(s)?,
-            None => self.get_f(self.ops.fields.param(self.v, name))?,
+        let l = if let Some(s) = self.ops.fields.par_slot(name) {
+            Loc::try_from(s).unwrap_or(0)
+        } else {
+            let f = self.ops.fields.param(self.v, name);
+            self.loc_of(f)
         };
-        Ok(crate::val::glue_of(self.v, x))
+        self.glue_loc(l)
     }
 
+    /// The category code of character `c` (§232), through the run's
+    /// copy of the catcode table (refreshed when any category code
+    /// changes, [`crate::runstate::State::cat_gen`]).
+    #[inline]
     pub(crate) fn cat(&mut self, c: u32) -> R<u8> {
-        let x = match usize::try_from(c).ok().filter(|&i| i < 256) {
-            Some(i) => self.slot_get(crate::fields::CAT0 + i)?,
-            None => self.get_f(self.ops.fields.cat(self.v, c))?,
+        if let Ok(i) = usize::try_from(c)
+            && i < 256
+        {
+            let g = self.st.cat_gen();
+            if self.cat_gen != g {
+                self.cat_cache = [u8::MAX; 256];
+                self.cat_gen = g;
+            }
+            let x = self.cat_cache[i];
+            if x != u8::MAX {
+                return Ok(x);
+            }
+            let x = self.cat_slow(c)?;
+            self.cat_cache[i] = x;
+            return Ok(x);
+        }
+        self.cat_slow(c)
+    }
+
+    #[inline(never)]
+    fn cat_slow(&mut self, c: u32) -> R<u8> {
+        let x = if c < 256 {
+            self.int_loc(Loc::try_from(crate::fields::CAT0).unwrap_or(0) + c)?
+        } else {
+            let f = self.ops.fields.cat(self.v, c);
+            let l = self.loc_of(f);
+            self.int_loc(l)?
         };
-        Ok(u8::try_from(x.map_or(0, |x| int_of(self.v, x))).unwrap_or(12))
+        Ok(u8::try_from(x).unwrap_or(12))
     }
 
     /// Defines `name` (§277–§279: `eq_define` / `geq_define`).
@@ -752,43 +836,14 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     pub(crate) fn set_f(&mut self, f: Field, val: ValueId, global: bool) {
-        // a local definition inside a group of this run is undone at the
-        // group's close (`nest.rs`); a global one is retained through it
-        if global {
-            self.make_inert(f);
-        } else {
-            self.save_local(f);
-        }
-        self.own.insert(f, Some(val));
-        self.irreversible += 1;
-        self.slot_note(f, Some(Some(val)));
-        let loc = if global {
-            Locality::Global
-        } else {
-            Locality::Local
-        };
-        // the definitions since the innermost group opened are the
-        // group's (`nest.rs` pop_level truncates to its opening): one
-        // per field there; outside every group, one per field at all. A
-        // local after a global is kept apart, in a group (its close drops
-        // the local, the global stays, §283) and at level 0 (the engine's
-        // scope sees the global, then the local)
-        let floor = self
-            .nest
-            .iter()
-            .rev()
-            .find(|l| l.group != 0)
-            .map_or(0, |l| l.defs_len);
-        let ix = self.def_ix.entry(f).or_default();
-        if let Some(&i) = ix.last()
-            && i >= floor
-            && !(self.defs[i].2 == Locality::Global && loc == Locality::Local)
-        {
-            self.defs[i] = (f, val, loc);
-            return;
-        }
-        ix.push(self.defs.len());
-        self.defs.push((f, val, loc));
+        let l = self.loc_of(f);
+        self.set_loc(l, Native::Raw(val), global);
+    }
+
+    /// The fields the run defines at its base level.
+    pub(crate) fn def_fields(&mut self) -> Vec<Field> {
+        let locs: Vec<Loc> = self.st.defined_locs().collect();
+        locs.into_iter().map(|l| self.loc_field(l)).collect()
     }
 
     pub(crate) fn contribute(&mut self, name: &str, val: ValueId) {
@@ -858,70 +913,121 @@ impl<'c, 'a> Run<'c, 'a> {
 
     // ----------------------------------------------------------- meanings
 
-    pub(crate) fn mean_of(&mut self, t: &Tok) -> R<Mean> {
-        // a token's meaning field, interned once a run
-        // (a control sequence's by its interned number: no name is
-        // hashed on the token path)
-        let hit = match t {
-            Tok::S(c) => self.tfields.get(c.index()).copied().flatten(),
-            Tok::C(x) => self.afields.get(x).copied(),
-        };
-        let f = if hit.is_some() {
-            hit
-        } else {
-            let f = self
-                .ops
-                .fields
-                .meaning_at(self.v, self.cx.values_epoch(), t);
-            if let Some(f) = f {
-                match t {
-                    Tok::S(c) => {
-                        let i = c.index();
-                        if i >= self.tfields.len() {
-                            self.tfields.resize(i + 1, None);
-                        }
-                        self.tfields[i] = Some(f);
-                    }
-                    Tok::C(x) => {
-                        self.afields.insert(*x, f);
-                    }
+    /// The location of token `t`'s meaning, if it has one.
+    #[inline]
+    pub(crate) fn mean_loc(&mut self, t: Tok) -> Option<Loc> {
+        if let Some(l) = crate::fields::mean_loc(t) {
+            return Loc::try_from(l).ok();
+        }
+        let f = self
+            .ops
+            .fields
+            .meaning_at(self.v, self.cx.values_epoch(), t)?;
+        Some(self.loc_of(f))
+    }
+
+    #[inline]
+    pub(crate) fn mean_of(&mut self, t: Tok) -> R<Mean> {
+        match self.mean_loc(t) {
+            Some(l) => {
+                if !self.st.is_loaded(l) {
+                    self.load_slow(l)?;
                 }
-            }
-            f
-        };
-        match f {
-            Some(f) => {
-                let x = self.get_f(f)?;
-                Ok(self.decode_mean(x))
+                Ok(self.st.mean_of(l, self.v))
             }
             None => Ok(Mean::Char(t.cat().unwrap_or(0), t.chr())),
         }
     }
 
-    pub(crate) fn decode_mean(&mut self, x: Option<ValueId>) -> Mean {
-        let Some(x) = x else { return Mean::Undefined };
-        if let Some(m) = self.mcache.get(&x) {
-            return m.clone();
+    /// The current token's meaning, read from its slot now (§389, §508):
+    /// a character's own, `\noexpand`'s marker, a `v` template's end.
+    pub(crate) fn cur_mean(&mut self) -> R<Mean> {
+        let t = self.cur.tok;
+        if !t.is_cs_or_active() {
+            return Ok(Mean::Char(t.cat().unwrap_or(0), t.chr()));
         }
-        let m = Mean::decode(self.v, Some(x));
-        self.mcache.insert(x, m.clone());
-        m
+        if self.cur.cmd == cmd::RELAX && self.cur.chr == crate::val::NO_EXPAND_FLAG {
+            return Ok(Mean::NotExpanded);
+        }
+        if self.cur.cmd == cmd::IGNORE
+            && t.as_cs()
+                .is_some_and(|n| n.frozen() && n.starts_with("\u{10FFFE}endv"))
+        {
+            return Ok(Mean::Prim("\u{10FFFE}endv", cmd::IGNORE, self.cur.chr));
+        }
+        self.mean_of(t)
+    }
+
+    /// Defines token `t`'s meaning (`\def`, `\let`, …): kept native,
+    /// encoded only if the run publishes it.
+    pub(crate) fn set_mean(&mut self, t: Tok, m: Mean, global: bool) {
+        if let Some(l) = self.mean_loc(t) {
+            self.set_loc(l, Native::Mean(m), global);
+        }
+    }
+
+    pub(crate) fn decode_mean(&mut self, x: Option<ValueId>) -> Mean {
+        Mean::decode(self.v, x)
     }
 
     pub(crate) fn set_cur(&mut self, tok: Tok) -> R<()> {
-        let mean = self.mean_of(&tok)?;
-        let (c, h) = match (&tok, &mean) {
-            (Tok::C(_), _) if !tok.is_cs_or_active() => (
+        self.set_cur_flag(tok);
+        match self.halt.take() {
+            Some(h) => Err(h),
+            None => Ok(()),
+        }
+    }
+
+    /// The token path's halt (an engine read that must wait, the text
+    /// ended): kept until the command's next `get_next` returns it; the
+    /// current token is the sentinel meanwhile (`cmd::HALT`).
+    #[cold]
+    pub(crate) fn raise(&mut self, h: Halt) {
+        if self.halt.is_none() {
+            self.halt = Some(h);
+        }
+        self.cur = Cur {
+            tok: crate::expand::halt_tok(),
+            cmd: cmd::HALT,
+            chr: 0,
+        };
+    }
+
+    /// [`Self::set_cur`] without a `Result`: a halt is raised.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn set_cur_flag(&mut self, tok: Tok) {
+        if !tok.is_cs_or_active() {
+            // (a character's meaning is its own: no meaning stored)
+            self.cur.tok = tok;
+            self.cur.cmd = tok.cat().unwrap_or(0);
+            self.cur.chr = i32::try_from(tok.chr()).unwrap_or(0);
+            return;
+        }
+        if let Err(h) = self.set_cur_cs(tok) {
+            self.raise(h);
+        }
+    }
+
+    /// [`Self::set_cur`] for a control sequence or active character.
+    #[inline(never)]
+    fn set_cur_cs(&mut self, tok: Tok) -> R<()> {
+        let (c, h) = match self.mean_loc(tok) {
+            Some(l) => {
+                if !self.st.is_loaded(l) {
+                    self.load_slow(l)?;
+                }
+                self.st.cmd_chr_of(l, self.v)
+            }
+            None => (
                 tok.cat().unwrap_or(0),
                 i32::try_from(tok.chr()).unwrap_or(0),
             ),
-            _ => mean.cmd_chr(),
         };
         self.cur = Cur {
             tok,
             cmd: c,
             chr: h,
-            mean,
         };
         Ok(())
     }
@@ -932,7 +1038,6 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn back_input(&mut self, t: Tok) {
         // §325: a brace put back is counted again when read
         if let Some(s) = self.astate
-            && matches!(t, Tok::C(_))
             && !t.is_cs_or_active()
         {
             match t.cat() {
@@ -1086,7 +1191,20 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// `get_next` (§341): the next token, its meaning not yet looked up.
     /// `None` at the end of all input.
+    #[inline]
     pub(crate) fn next_tok(&mut self) -> R<Option<Tok>> {
+        // (the common case: the next token of the list on top)
+        if let Some(Frame::Toks(t, p)) = self.frames.front_mut()
+            && let Some(&tok) = t.get(*p)
+        {
+            *p += 1;
+            return Ok(Some(tok));
+        }
+        self.next_tok_slow()
+    }
+
+    #[inline(never)]
+    fn next_tok_slow(&mut self) -> R<Option<Tok>> {
         loop {
             let Some(front) = self.frames.front_mut() else {
                 if self.pull()? {
@@ -1097,7 +1215,7 @@ impl<'c, 'a> Run<'c, 'a> {
             match front {
                 Frame::Toks(t, p) => {
                     if *p < t.len() {
-                        let tok = t[*p].clone();
+                        let tok = t[*p];
                         *p += 1;
                         return Ok(Some(tok));
                     }
@@ -1419,43 +1537,103 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// `get_next` with the meaning (§357–§358).
+    // the per-token hot path: inlined on purpose
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub(crate) fn get_next(&mut self) -> R<bool> {
+        let b = self.fetch();
+        match self.halt.take() {
+            Some(h) => Err(h),
+            None => Ok(b),
+        }
+    }
+
+    /// `get_next` without a `Result` (§341–§357): false at the end of all
+    /// input; a halt is raised ([`Self::raise`]).
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn fetch(&mut self) -> bool {
+        // (the common case: a token of the list on top that is not an
+        // internal marker, and no alignment entry to watch for)
+        let next = match self.frames.front_mut() {
+            Some(Frame::Toks(t, p)) => match t.get(*p) {
+                Some(&tok) if tok.as_cs().is_none_or(|n| !n.frozen()) => {
+                    *p += 1;
+                    Some(tok)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(tok) = next {
+            self.set_cur_flag(tok);
+            if ALIGN_CMDS.checked_shr(u32::from(self.cur.cmd)).unwrap_or(0) & 1 != 0 {
+                match self.align_token() {
+                    Ok(true) => return self.fetch_slow(),
+                    Ok(false) => {}
+                    Err(h) => self.raise(h),
+                }
+            }
+            return true;
+        }
+        self.fetch_slow()
+    }
+
+    #[inline(never)]
+    fn fetch_slow(&mut self) -> bool {
+        match self.get_next_slow() {
+            Ok(b) => b,
+            Err(h) => {
+                self.raise(h);
+                true
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn get_next_slow(&mut self) -> R<bool> {
         loop {
             let t = loop {
                 let Some(t) = self.next_tok()? else {
                     return Ok(false);
                 };
-                if let Tok::S(n) = &t {
+                if let Some(n) = t.as_cs()
+                    && n.frozen()
+                {
                     if n.starts_with("\u{10FFFE}eof") {
                         // §362: the end of an \input file (or a pseudo file)
                         crate::etex::end_of_file(self, n.name())?;
                         continue;
                     }
-                    if &**n == "\u{10FFFE}uend" {
+                    if n.name() == "\u{10FFFE}uend" {
                         // §324: the end of a u template
-                        self.align_u_end()?;
+                        self.align_u_end();
                         continue;
                     }
                 }
                 break t;
             };
-            if let Tok::S(n) = &t
+            if let Some(n) = t.as_cs()
+                && n.frozen()
                 && let Some(k) = n.strip_prefix("\u{10FFFE}endv:")
             {
                 // §789: the end of a v template (`endv`, §380)
                 let chr = k.parse().unwrap_or(0);
                 self.cur = Cur {
-                    tok: t.clone(),
+                    tok: t,
                     cmd: cmd::IGNORE,
                     chr,
-                    mean: Mean::Prim("\u{10FFFE}endv", cmd::IGNORE, chr),
                 };
                 return Ok(true);
             }
             if !self.get_next_rest(t)? {
                 return Ok(false);
             }
-            if self.align_token()? {
+            if matches!(
+                self.cur.cmd,
+                cmd::LEFT_BRACE | cmd::RIGHT_BRACE | cmd::TAB_MARK | cmd::CAR_RET
+            ) && self.align_token()?
+            {
                 continue;
             }
             return Ok(true);
@@ -1463,9 +1641,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     fn get_next_rest(&mut self, t: Tok) -> R<bool> {
-        if let Tok::S(n) = &t
-            && &**n == "\u{10FFFE}notexpanded"
-        {
+        if t == crate::expand::notexpanded_tok() {
             // §358
             let Some(t2) = self.next_tok()? else {
                 return Ok(false);
@@ -1474,7 +1650,6 @@ impl<'c, 'a> Run<'c, 'a> {
             if self.cur.cmd > cmd::MAX_COMMAND {
                 self.cur.cmd = cmd::RELAX;
                 self.cur.chr = crate::val::NO_EXPAND_FLAG;
-                self.cur.mean = Mean::NotExpanded;
             }
             return Ok(true);
         }
@@ -1493,7 +1668,6 @@ impl<'c, 'a> Run<'c, 'a> {
                 tok: Tok::cs("\u{10FFFE}relax"),
                 cmd: cmd::RELAX,
                 chr: 256,
-                mean: Mean::Prim("relax", cmd::RELAX, 256),
             };
         }
         Ok(())
@@ -1510,6 +1684,11 @@ impl<'c, 'a> Run<'c, 'a> {
             self.get_next_or_end()?;
             if self.cur.cmd <= cmd::MAX_COMMAND {
                 return Ok(());
+            }
+            // (a macro: its body goes on top here, no expansion level)
+            if (cmd::CALL..cmd::END_TEMPLATE).contains(&self.cur.cmd) {
+                self.macro_call()?;
+                continue;
             }
             if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
                 return Ok(());
@@ -1558,13 +1737,13 @@ impl<'c, 'a> Run<'c, 'a> {
                     for tok in &t[*p..] {
                         let ch = matches!(tok.cat(), Some(10..=12));
                         if ch {
-                            run.push(crate::val::tok_id(v, epoch, tok));
+                            run.push(crate::val::tok_id(v, epoch, *tok));
                             continue;
                         }
                         if !run.is_empty() {
                             out.push(node(std::mem::take(&mut run)));
                         }
-                        out.push(node(vec![crate::val::tok_id(v, epoch, tok)]));
+                        out.push(node(vec![crate::val::tok_id(v, epoch, *tok)]));
                     }
                 }
                 Frame::Src(s) => {
@@ -1618,6 +1797,21 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         if !run.is_empty() {
             out.push(node(run));
+        }
+        // (conditionals open when the run closed its scope go on in the
+        // first of them, `carried_conds`)
+        if self.closed_scope()
+            && !self.conds.is_empty()
+            && let Some(first) = out.first_mut()
+            && let Some(fs) = first.first_mut()
+        {
+            let mut xs = vec![tag("c")];
+            xs.extend(self.conds.iter().map(|&c| v.int(i64::from(c))));
+            xs.push(v.int(-1));
+            xs.extend(self.if_codes.iter().map(|&c| v.int(i64::from(c))));
+            let mut frames = vec![v.list(xs)];
+            frames.extend(list_of(v, *fs));
+            *fs = v.list(frames);
         }
         out
     }
@@ -1679,19 +1873,26 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.begin_command();
                 self.command()?;
                 self.mark.active = false;
-                if self.claim_rest {
+                if self.claim_rest || self.closed_scope() {
                     return Ok(());
                 }
             }
-            // `\begin{document}`'s slice ends inside the environment's
-            // group: that group becomes the engine scope the body's
-            // regions run in (`hints::opens_scope`)
+            // a region that ends with one group of its own still open
+            // (an environment's `\begin`, a macro's `\begingroup` or
+            // `\bgroup`), outside every paragraph, box and conditional,
+            // leaves it to the engine as the scope the following regions
+            // run in (`Run::leave_scope`); more than one, or a text that
+            // said it opens no scope, reads on
             if self.doc
                 && self.conds.is_empty()
+                && self.effect == Effect::None
                 && self.nest.len() == 1
-                && self.nest[0].group != 0
                 && !self.nest[0].owns
-                && crate::hints::opens_scope(self.v, &self.cx.args())
+                && matches!(
+                    self.nest[0].group,
+                    crate::val::group::SIMPLE | crate::val::group::SEMI_SIMPLE
+                )
+                && !crate::hints::effect_none(self.v, &self.cx.args())
             {
                 self.leave_scope()?;
                 return Ok(());
@@ -1706,7 +1907,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 // groups end with it (nothing after reads them), the
                 // node reports the error
                 self.diag(true, "format: group left open at end");
-                for l in std::mem::take(&mut self.nest) {
+                let nest = std::mem::take(&mut self.nest);
+                self.abandon_levels(&nest);
+                for l in nest {
                     if l.owns {
                         for x in l.list {
                             self.append(0, x);
@@ -1716,6 +1919,15 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             return Ok(());
         }
+    }
+
+    /// Whether a document run closed the engine scope it ran in, with
+    /// nothing of its own open but conditionals: it ends after that
+    /// command (`Effect::Close`, its reads and definitions inside the
+    /// scope), and what it has left of its input runs outside it as the
+    /// following nodes, the conditionals carried ([`Run::leftover`]).
+    fn closed_scope(&self) -> bool {
+        self.doc && self.effect == Effect::Close && self.nest.is_empty()
     }
 
     /// Whether the run has something open that must close in this run:
@@ -1731,12 +1943,12 @@ impl<'c, 'a> Run<'c, 'a> {
         crate::pageinline::finish(&mut self);
         // a page parameter this run set reaches the page fold as a
         // marker in the main list (page.rs `breaks`)
-        if self.defs.iter().any(|&(f, _, _)| {
-            matches!(
-                crate::val::field_name(self.v, f).as_str(),
-                "param:vsize" | "param:maxdepth" | "param:topskip" | "param:holdinginserts"
-            )
-        }) {
+        if self.st.defines_any(&[
+            Par::vsize as Loc,
+            Par::maxdepth as Loc,
+            Par::topskip as Loc,
+            Par::holdinginserts as Loc,
+        ]) {
             let v = self.v;
             let vsize = self.ipar(Par::vsize).unwrap_or(0);
             let maxdepth = self.ipar(Par::maxdepth).unwrap_or(0);
@@ -1753,12 +1965,35 @@ impl<'c, 'a> Run<'c, 'a> {
             let s = v.seq_unit(item);
             self.contribute("items", s);
         }
-        for (f, x, l) in std::mem::take(&mut self.defs) {
-            crate::exec::widths::def(f);
-            self.cx.define_with(f, x, l);
+        // a page step defines nothing to the engine: its definitions are
+        // the page chain's delta (`page::step_defs`), so no step reads
+        // another
+        let op = self.cx.op();
+        let t_pub = std::time::Instant::now();
+        let published: Vec<(Field, ValueId, Locality)> = self
+            .st
+            .published(self.v)
+            .into_iter()
+            .map(|(loc, x, l)| (self.loc_field(loc), x, l))
+            .collect();
+        if op == self.ops.pagestep || op == self.ops.pagestep_any {
+            crate::page::step_defs(&mut self, published);
+        } else {
+            let (n, t_list) = (published.len(), t_pub.elapsed());
+            for (f, x, l) in published {
+                crate::exec::widths::def(f);
+                self.cx.define_with(f, x, l);
+            }
+            if n >= 10_000 && crate::exec::env_flag!("PHITEX_TEX_TIME") {
+                eprintln!(
+                    "run finish: {n} definitions published: listed {t_list:?}, define_with {:?}",
+                    t_pub.elapsed().checked_sub(t_list).unwrap_or_default()
+                );
+            }
         }
-        if !self.own.is_empty() {
-            let names: Vec<ValueId> = self.own.keys().map(|f| f.0).collect();
+        let locs: Vec<Loc> = self.st.defined_locs().collect();
+        if !locs.is_empty() {
+            let names: Vec<ValueId> = locs.into_iter().map(|l| self.loc_field(l).0).collect();
             let l = self.v.list(names);
             let s = self.v.seq_unit(l);
             let defs = self
@@ -1852,6 +2087,41 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 }
 
+/// Spent token lists by length, for the next macro body of that length
+/// (a body is written into one, not allocated, [`pooled_toks`]).
+const POOL_LEN: usize = 64;
+
+thread_local! {
+    static TOK_POOL: std::cell::RefCell<Vec<Vec<Rc<[Tok]>>>> =
+        std::cell::RefCell::new(vec![Vec::new(); POOL_LEN]);
+}
+
+/// A shared list holding `xs`: a spent one of its length reused if any.
+pub(crate) fn pooled_toks(xs: &[Tok]) -> Rc<[Tok]> {
+    if xs.len() < POOL_LEN
+        && let Some(mut r) = TOK_POOL.with(|p| p.borrow_mut()[xs.len()].pop())
+        && let Some(m) = Rc::get_mut(&mut r)
+    {
+        m.copy_from_slice(xs);
+        return r;
+    }
+    Rc::from(xs)
+}
+
+/// A token list read to its end: kept for [`pooled_toks`] if nothing
+/// else holds it.
+fn recycle_toks(t: Rc<[Tok]>) {
+    if !t.is_empty() && t.len() < POOL_LEN && Rc::strong_count(&t) == 1 && Rc::weak_count(&t) == 0 {
+        TOK_POOL.with(|p| {
+            let mut p = p.borrow_mut();
+            let v = &mut p[t.len()];
+            if v.len() < 32 {
+                v.push(t);
+            }
+        });
+    }
+}
+
 fn is_hex(c: u32) -> bool {
     (u32::from(b'0')..=u32::from(b'9')).contains(&c)
         || (u32::from(b'a')..=u32::from(b'f')).contains(&c)
@@ -1888,6 +2158,34 @@ fn decode_frames_upto(v: &Values, args: &[ValueId], limit: usize) -> Vec<Frame> 
         out.extend(crate::val::frame_of(v, f, || decode_frame(v, f)));
     }
     out
+}
+
+/// The conditionals a node's text begins inside: those its run's
+/// predecessor left open when it closed its scope ([`Run::leftover`]),
+/// `(if_limit, cur_if)` each.
+pub(crate) fn carried_conds(v: &Values, args: &[ValueId]) -> Option<(Vec<u8>, Vec<i32>)> {
+    let &l = args.first()?;
+    let Value::List(fs) = &*v.get(l) else {
+        return None;
+    };
+    let &f = fs.first()?;
+    let Value::List(xs) = &*v.get(f) else {
+        return None;
+    };
+    if xs.first().map(|&t| str_of(v, t)).as_deref() != Some("c") {
+        return None;
+    }
+    let ns: Vec<i64> = xs[1..].iter().map(|&x| int_of(v, x)).collect();
+    let k = ns.iter().position(|&x| x < 0)?;
+    let conds = ns[..k]
+        .iter()
+        .map(|&c| u8::try_from(c).unwrap_or(0))
+        .collect();
+    let codes = ns[k + 1..]
+        .iter()
+        .map(|&c| i32::try_from(c).unwrap_or(0))
+        .collect();
+    Some((conds, codes))
 }
 
 /// One frame of a node's arguments (a frame is an immutable value, so
@@ -2037,28 +2335,8 @@ pub(crate) fn slice_args(v: &Values, text: &str, starts_line: bool) -> Vec<Value
 
 // ------------------------------------------------------------- parking
 
-/// A token without `Rc`: a parked run crosses threads.
-enum PTok {
-    C(u32),
-    S(Box<str>),
-}
-
-fn ptok(t: &Tok) -> PTok {
-    match t {
-        Tok::C(c) => PTok::C(*c),
-        Tok::S(s) => PTok::S(Box::from(&**s)),
-    }
-}
-
-fn utok(t: PTok) -> Tok {
-    match t {
-        PTok::C(c) => Tok::C(c),
-        PTok::S(s) => Tok::cs(&s),
-    }
-}
-
 enum PFrame {
-    Toks(Vec<PTok>),
+    Toks(Vec<Tok>),
     Src(Src),
     File(FileRest),
 }
@@ -2074,11 +2352,11 @@ struct PLevel {
     par: Option<(i64, i64)>,
     prev_graf: i64,
     extra: Vec<ValueId>,
-    #[allow(clippy::option_option)]
-    saved: Vec<(Field, Option<Option<ValueId>>, u64)>,
-    saved_ix: FxHashMap<Field, usize>,
-    defs_len: usize,
-    ag: Vec<PTok>,
+    gid: u32,
+    save_base: usize,
+    def_base: usize,
+    open_stamp: u64,
+    ag: Vec<Tok>,
 }
 
 /// A run stopped at a read, at the start of the command the read
@@ -2098,16 +2376,14 @@ pub(crate) struct Parked {
     doc: bool,
     fread: Vec<(String, u64)>,
     no_pull: bool,
-    own: FxHashMap<Field, Option<ValueId>>,
-    defs: Vec<(Field, ValueId, Locality)>,
-    ginert: FxHashMap<Field, u64>,
-    stamp: u64,
+    st: crate::runstate::PState,
     contribs: Vec<(Field, ValueId)>,
     kids: Vec<(OpId, Vec<ValueId>)>,
     effect: Effect,
     conds: Vec<u8>,
     if_codes: Vec<i32>,
     astate: Option<i64>,
+    aopen: i64,
     lines_entered: i64,
     eof: bool,
     radix: i32,
@@ -2146,6 +2422,7 @@ struct Mark {
     sig: u64,
     effect: Option<Effect>,
     astate: Option<i64>,
+    aopen: i64,
     radix: i32,
     cur_order: Option<phitex_typeset::glue::Order>,
     no_pull: bool,
@@ -2170,19 +2447,16 @@ impl Run<'_, '_> {
     /// rewinding its input.
     fn state_sig(&self) -> u64 {
         use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut h = phitex_defuse::FxHasher::default();
         (
-            self.defs.len(),
+            self.st.sig(),
             self.contribs.len(),
             self.kids.len(),
             self.nest.len(),
             self.conds.len(),
             self.if_codes.len(),
             self.next_lid,
-            self.own.len(),
             self.irreversible,
-            self.stamp,
-            self.ginert.len(),
             self.fread.len(),
         )
             .hash(&mut h);
@@ -2201,7 +2475,7 @@ impl Run<'_, '_> {
                 l.list.len(),
                 l.list.last(),
                 l.ag.len(),
-                l.saved.len(),
+                l.save_base,
                 l.prev_graf,
                 l.fold.sf,
                 l.fold.pd,
@@ -2228,6 +2502,7 @@ impl Run<'_, '_> {
         m.sig = sig;
         m.effect = Some(self.effect);
         m.astate = self.astate;
+        m.aopen = self.aopen;
         m.radix = self.radix;
         m.cur_order = Some(self.cur_order);
         m.no_pull = self.no_pull;
@@ -2244,6 +2519,8 @@ impl Run<'_, '_> {
             }
             let s = self.snap_front();
             self.mark.snaps.push(s);
+        } else if let Some(Frame::Toks(t, _)) = f {
+            recycle_toks(t);
         }
     }
 
@@ -2302,6 +2579,7 @@ impl Run<'_, '_> {
             }
         }
         self.astate = m.astate;
+        self.aopen = m.aopen;
         self.radix = m.radix;
         self.no_pull = m.no_pull;
         if let Some(o) = m.cur_order {
@@ -2319,7 +2597,7 @@ impl Run<'_, '_> {
         let frames = std::mem::take(&mut self.frames)
             .into_iter()
             .map(|f| match f {
-                Frame::Toks(t, p) => PFrame::Toks(t[p.min(t.len())..].iter().map(ptok).collect()),
+                Frame::Toks(t, p) => PFrame::Toks(t[p.min(t.len())..].to_vec()),
                 Frame::Src(s) => PFrame::Src(s),
                 Frame::File(f) => PFrame::File(f),
             })
@@ -2336,10 +2614,11 @@ impl Run<'_, '_> {
                 par: l.par,
                 prev_graf: l.prev_graf,
                 extra: l.extra,
-                saved: l.saved,
-                saved_ix: l.saved_ix,
-                defs_len: l.defs_len,
-                ag: l.ag.iter().map(ptok).collect(),
+                gid: l.gid,
+                save_base: l.save_base,
+                def_base: l.def_base,
+                open_stamp: l.open_stamp,
+                ag: l.ag,
             })
             .collect();
         Some(Parked {
@@ -2354,16 +2633,14 @@ impl Run<'_, '_> {
             doc: self.doc,
             fread: std::mem::take(&mut self.fread),
             no_pull: self.no_pull,
-            own: std::mem::take(&mut self.own),
-            defs: std::mem::take(&mut self.defs),
-            ginert: std::mem::take(&mut self.ginert),
-            stamp: self.stamp,
+            st: self.st.park(self.v),
             contribs: std::mem::take(&mut self.contribs),
             kids: std::mem::take(&mut self.kids),
             effect: self.effect,
             conds: std::mem::take(&mut self.conds),
             if_codes: std::mem::take(&mut self.if_codes),
             astate: self.astate,
+            aopen: self.aopen,
             lines_entered: self.lines_entered,
             eof: self.eof,
             radix: self.radix,
@@ -2391,9 +2668,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .frames
             .into_iter()
             .map(|f| match f {
-                PFrame::Toks(t) => {
-                    Frame::Toks(t.into_iter().map(utok).collect::<Vec<_>>().into(), 0)
-                }
+                PFrame::Toks(t) => Frame::Toks(t.into(), 0),
                 PFrame::Src(s) => Frame::Src(s),
                 PFrame::File(f) => Frame::File(f),
             })
@@ -2407,10 +2682,11 @@ impl<'c, 'a> Run<'c, 'a> {
                 x.fold = l.fold;
                 x.par = l.par;
                 x.prev_graf = l.prev_graf;
-                x.saved = l.saved;
-                x.saved_ix = l.saved_ix;
-                x.defs_len = l.defs_len;
-                x.ag = l.ag.into_iter().map(utok).collect();
+                x.gid = l.gid;
+                x.save_base = l.save_base;
+                x.def_base = l.def_base;
+                x.open_stamp = l.open_stamp;
+                x.ag = l.ag;
                 x
             })
             .collect();
@@ -2422,19 +2698,14 @@ impl<'c, 'a> Run<'c, 'a> {
         r.doc = p.doc;
         r.fread = p.fread;
         r.no_pull = p.no_pull;
-        r.own = p.own;
-        r.defs = p.defs;
-        for (i, d) in r.defs.iter().enumerate() {
-            r.def_ix.entry(d.0).or_default().push(i);
-        }
-        r.ginert = p.ginert;
-        r.stamp = p.stamp;
+        r.st = crate::runstate::State::unpark(p.st);
         r.contribs = p.contribs;
         r.kids = p.kids;
         r.effect = p.effect;
         r.conds = p.conds;
         r.if_codes = p.if_codes;
         r.astate = p.astate;
+        r.aopen = p.aopen;
         r.lines_entered = p.lines_entered;
         r.eof = p.eof;
         r.radix = p.radix;

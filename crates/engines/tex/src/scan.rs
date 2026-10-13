@@ -94,7 +94,7 @@ impl Run<'_, '_> {
     }
 
     pub(crate) fn back_cur(&mut self) {
-        let t = self.cur.tok.clone();
+        let t = self.cur.tok;
         self.back_input(t);
     }
 
@@ -129,7 +129,7 @@ impl Run<'_, '_> {
                 && (self.cur.chr == i32::from(c)
                     || self.cur.chr == i32::from(c) - i32::from(b'a') + i32::from(b'A'))
             {
-                matched.push(self.cur.tok.clone());
+                matched.push(self.cur.tok);
                 k += 1;
             } else if self.cur.cmd != cmd::SPACER || !matched.is_empty() {
                 self.back_cur();
@@ -173,9 +173,9 @@ impl Run<'_, '_> {
         if self.is_other(b'`') {
             // §442
             self.get_token()?;
-            let t = self.cur.tok.clone();
-            val = match &t {
-                Tok::S(n) => {
+            let t = self.cur.tok;
+            val = match t.as_cs() {
+                Some(n) => {
                     let mut cs = n.chars();
                     match (cs.next(), cs.next()) {
                         (Some(c), None) if !n.starts_with('\u{10FFFE}') => {
@@ -184,7 +184,7 @@ impl Run<'_, '_> {
                         _ => 256,
                     }
                 }
-                Tok::C(_) => i32::try_from(t.chr()).unwrap_or(0),
+                None => i32::try_from(t.chr()).unwrap_or(0),
             };
             if val > 255 {
                 // "Improper alphabetic constant"
@@ -465,7 +465,7 @@ impl Run<'_, '_> {
 
     /// The `em` and `ex` of the current font (§558).
     fn font_param_cur(&mut self, k: i32) -> R<i32> {
-        let f = self.int("font")?;
+        let f = self.cint(crate::fields::cell::FONT)?;
         self.font_dimen(f, k)
     }
 
@@ -535,7 +535,7 @@ impl Run<'_, '_> {
     pub(crate) fn scan_font_ident(&mut self) -> R<i64> {
         self.skip_blanks_x()?;
         Ok(match self.cur.cmd {
-            cmd::DEF_FONT => self.int("font")?,
+            cmd::DEF_FONT => self.cint(crate::fields::cell::FONT)?,
             cmd::SET_FONT => i64::from(self.cur.chr),
             cmd::DEF_FAMILY => {
                 let m = self.cur.chr;
@@ -565,7 +565,7 @@ impl Run<'_, '_> {
         }
         let count = self.int32(&format!("fdn:{f}"))?;
         if n > count {
-            let last = self.int("fontcount")?;
+            let last = self.cint(crate::fields::cell::FONTCOUNT)?;
             if f < last || f == 0 {
                 return Ok(None);
             }
@@ -657,9 +657,9 @@ impl Run<'_, '_> {
             cmd::SET_PAGE_INT => {
                 // §419
                 IVal::Int(if m == 0 {
-                    self.int32("deadcycles")?
+                    self.int_loc(crate::fields::cell::DEADCYCLES)?
                 } else {
-                    self.int32("inspen")?
+                    self.int_loc(crate::fields::cell::INSPEN)?
                 })
             }
             cmd::SET_PAGE_DIMEN => {
@@ -668,7 +668,7 @@ impl Run<'_, '_> {
             }
             cmd::SET_SHAPE => {
                 // §423
-                let x = self.get("parshape")?;
+                let x = self.get_loc(crate::fields::cell::PARSHAPE)?;
                 IVal::Int(x.map_or(0, |x| {
                     i32::try_from(crate::val::list_of(self.v, x).len() / 2).unwrap_or(0)
                 }))
@@ -753,7 +753,7 @@ impl Run<'_, '_> {
             // §474
             loop {
                 self.get_token()?;
-                let tok = self.cur.tok.clone();
+                let tok = self.cur.tok;
                 if !tok.is_cs_or_active() && matches!(tok.cat(), Some(1 | 2)) {
                     if tok.cat() == Some(2) {
                         // §475 "Missing { inserted": `\def\a}` is `\def\a{}`
@@ -765,9 +765,9 @@ impl Run<'_, '_> {
                     // §476
                     let s = Tok::ch(MATCH_CAT, tok.chr());
                     self.get_token()?;
-                    let nt = self.cur.tok.clone();
+                    let nt = self.cur.tok;
                     if !nt.is_cs_or_active() && nt.cat() == Some(1) {
-                        hash_brace = Some(nt.clone());
+                        hash_brace = Some(nt);
                         let _ = s;
                         params.push(nt);
                         return self.scan_body(params, body, xpand, macro_def, t, hash_brace);
@@ -810,7 +810,7 @@ impl Run<'_, '_> {
                 // §478
                 loop {
                     self.get_next_or_end()?;
-                    if self.cur.cmd <= cmd::MAX_COMMAND || crate::etex::protect(&mut self.cur) {
+                    if self.cur.cmd <= cmd::MAX_COMMAND || crate::etex::protect(self)? {
                         break;
                     }
                     if self.cur.cmd == cmd::THE {
@@ -827,7 +827,7 @@ impl Run<'_, '_> {
             } else {
                 self.get_token()?;
             }
-            let tok = self.cur.tok.clone();
+            let tok = self.cur.tok;
             if !tok.is_cs_or_active() && matches!(tok.cat(), Some(1 | 2)) {
                 if tok.cat() == Some(1) {
                     unbalance += 1;
@@ -839,14 +839,14 @@ impl Run<'_, '_> {
                 }
             } else if self.cur.cmd == cmd::MAC_PARAM && macro_def {
                 // §479
-                let s = tok.clone();
+                let s = tok;
                 if xpand {
                     self.get_x_token()?;
                 } else {
                     self.get_token()?;
                 }
                 if self.cur.cmd != cmd::MAC_PARAM {
-                    let nt = self.cur.tok.clone();
+                    let nt = self.cur.tok;
                     let c = nt.chr();
                     if nt.is_cs_or_active() || nt.cat() != Some(12) || c <= 48 || c > 48 + t {
                         // "Illegal parameter number in definition"
@@ -857,7 +857,7 @@ impl Run<'_, '_> {
                     body.push(Tok::ch(OUT_PARAM_CAT, c - 48));
                     continue;
                 }
-                body.push(self.cur.tok.clone());
+                body.push(self.cur.tok);
                 continue;
             }
             body.push(tok);

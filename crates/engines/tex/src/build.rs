@@ -163,9 +163,10 @@ impl Run<'_, '_> {
         if let Some(k) = self.nest.iter().rposition(|l| l.group != 0) {
             let above = self.nest.split_off(k + 1);
             self.pop_level();
-            let floor = self.defs.len();
+            let (_, floor_s, floor_d, _) = self.st.open();
             for mut l in above {
-                l.defs_len = l.defs_len.min(floor);
+                l.save_base = l.save_base.min(floor_s);
+                l.def_base = l.def_base.min(floor_d);
                 self.nest.push(l);
             }
             return self.mode();
@@ -180,7 +181,9 @@ impl Run<'_, '_> {
     /// they own goes to the main list (lid 0). A format node closes its
     /// own groups; one open at its end is an error.
     pub(crate) fn end_open(&mut self) {
-        for l in std::mem::take(&mut self.nest) {
+        let nest = std::mem::take(&mut self.nest);
+        self.abandon_levels(&nest);
+        for l in nest {
             if self.claim_rest && l.owns {
                 for x in l.list {
                     self.append(0, x);
@@ -202,6 +205,7 @@ impl Run<'_, '_> {
         let Some(l) = self.nest.pop() else {
             return Ok(());
         };
+        self.abandon_levels(std::slice::from_ref(&l));
         let sid = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
         let mut xs = vec![
             v.int(l.group),
@@ -488,10 +492,10 @@ impl Run<'_, '_> {
             self.set_par(Par::hangafter, v.int(1), false);
         }
         if self
-            .get("parshape")?
+            .get_loc(crate::fields::cell::PARSHAPE)?
             .is_some_and(|x| !list_of(v, x).is_empty())
         {
-            self.set("parshape", v.list(Vec::new()), false);
+            self.set_cell(crate::fields::cell::PARSHAPE, v.list(Vec::new()), false);
         }
         crate::etex::normal_paragraph(self)
     }
@@ -624,7 +628,7 @@ impl Run<'_, '_> {
             .collect();
         let view = self.font_view(&list)?;
         let shape = self
-            .get("parshape")?
+            .get_loc(crate::fields::cell::PARSHAPE)?
             .map(|x| list_of(v, x))
             .unwrap_or_default();
         let par_shape: Vec<(i32, i32)> = shape
@@ -730,7 +734,7 @@ impl Run<'_, '_> {
     fn patterns(&mut self) -> R<Arc<phitex_typeset::hyph::Patterns>> {
         type Cache = Mutex<phitex_defuse::FxHashMap<u64, Arc<phitex_typeset::hyph::Patterns>>>;
         static C: OnceLock<Cache> = OnceLock::new();
-        let x = self.get("patterns")?;
+        let x = self.get_loc(crate::fields::cell::PATTERNS)?;
         let key = x.map_or(0, ValueId::raw);
         let cache = C.get_or_init(|| Mutex::new(phitex_defuse::FxHashMap::default()));
         if let Some(p) = cache
@@ -832,7 +836,8 @@ impl Run<'_, '_> {
         let lvl = x.map_or(0, |x| crate::val::int_at(v, x, 0));
         let val = v.list(vec![v.int(lvl), b.unwrap_or(ValueId::UNIT)]);
         let base = self.base_mode()?.depth;
-        self.modify_at(f, val, lvl, base);
+        let l = self.loc_of(f);
+        self.modify_at(l, val, lvl, base);
         Ok(())
     }
 
@@ -1118,7 +1123,7 @@ impl Run<'_, '_> {
     pub(crate) fn append_discretionary(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
         if self.cur.chr == 1 {
-            let f = self.int("font")?;
+            let f = self.cint(crate::fields::cell::FONT)?;
             let c = self.int32(&format!("hc:{f}"))?;
             let mut d = Disc::default();
             if (0..256).contains(&c) {
@@ -1150,7 +1155,7 @@ impl Run<'_, '_> {
     pub(crate) fn make_accent(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
         let a_ch = self.scan_char_num()?;
-        let f = u32::try_from(self.int("font")?).unwrap_or(0);
+        let f = u32::try_from(self.cint(crate::fields::cell::FONT)?).unwrap_or(0);
         let mut view = crate::fonts::View::default();
         self.add_font(&mut view, f)?;
         if !view.exists(f, u32::try_from(a_ch).unwrap_or(0)) {
@@ -1168,7 +1173,7 @@ impl Run<'_, '_> {
             .map_or(0, |d| d.width);
         self.do_assignments()?;
         // §1124
-        let f2 = u32::try_from(self.int("font")?).unwrap_or(0);
+        let f2 = u32::try_from(self.cint(crate::fields::cell::FONT)?).unwrap_or(0);
         let mut view2 = crate::fonts::View::default();
         self.add_font(&mut view2, f2)?;
         let q: Option<u32> = match self.cur.cmd {
@@ -1266,7 +1271,7 @@ impl Run<'_, '_> {
                     | group::NO_ALIGN
             )
         {
-            let t = self.cur.tok.clone();
+            let t = self.cur.tok;
             self.back_input(t);
             self.back_input(Tok::cs("\u{10FFFE}endgraf"));
             return Ok(());
@@ -1315,7 +1320,11 @@ impl Run<'_, '_> {
                     }
                     p
                 };
-                self.set("badness", v.int(i64::from(packed.badness)), true);
+                self.set_cell(
+                    crate::fields::cell::BADNESS,
+                    v.int(i64::from(packed.badness)),
+                    true,
+                );
                 let h = md.group == group::HBOX || adjusted;
                 self.box_report(h, packed.report, false);
                 // packaging without adjustments keeps the list as it was:
@@ -1503,7 +1512,7 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn char_run(&mut self, md: &Mode, cancel: bool) -> R<()> {
         let v = self.v;
-        let f = u32::try_from(self.int("font")?).unwrap_or(0);
+        let f = u32::try_from(self.cint(crate::fields::cell::FONT)?).unwrap_or(0);
         let mut view = crate::fonts::View::default();
         self.add_font(&mut view, f)?;
         // the space factor is never read: the run's effect on it so far
@@ -2079,7 +2088,7 @@ impl Run<'_, '_> {
             return Ok(IVal::Int(if m == 3 {
                 self.input_line_no()?
             } else {
-                self.int32("badness")?
+                self.int_loc(crate::fields::cell::BADNESS)?
             }));
         }
         let md = self.mode()?;

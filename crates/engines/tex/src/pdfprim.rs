@@ -345,7 +345,7 @@ pub(crate) fn initex(v: &phitex_defuse::Values) -> Vec<(String, ValueId)> {
 /// primitive meaning, whatever it means now.
 pub(crate) fn pdf_primitive(r: &mut Run<'_, '_>) -> R<()> {
     r.get_token()?;
-    let Tok::S(name) = r.cur.tok.clone() else {
+    let Some(name) = r.cur.tok.as_cs() else {
         r.log("error", "Missing primitive name")?;
         r.back_cur();
         return Ok(());
@@ -369,12 +369,14 @@ pub(crate) fn pdf_primitive(r: &mut Run<'_, '_>) -> R<()> {
 /// `\ifpdfprimitive` (pdfTeX §1684).
 pub(crate) fn if_pdf_primitive(r: &mut Run<'_, '_>) -> R<bool> {
     r.get_token()?;
-    let t = r.cur.tok.clone();
-    let Tok::S(name) = &t else { return Ok(false) };
-    let Some((n, _, _)) = crate::val::prim(name) else {
+    let t = r.cur.tok;
+    let Some(name) = t.as_cs() else {
         return Ok(false);
     };
-    Ok(matches!(&r.cur.mean, Mean::Prim(m, _, _) if *m == n))
+    let Some((n, _, _)) = crate::val::prim(&name) else {
+        return Ok(false);
+    };
+    Ok(matches!(&r.cur_mean()?, Mean::Prim(m, _, _) if *m == n))
 }
 
 // ------------------------------------------------------- the conversions
@@ -627,7 +629,7 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             };
             let s = ext_string(r)?;
             let mut stacks = r
-                .get("pdf:colorstacks")?
+                .get_loc(crate::fields::cell::PDF_COLORSTACKS)?
                 .map(|x| list_of(v, x))
                 .unwrap_or_default();
             // stack 0 is pdfTeX's own ("0 g 0 G")
@@ -648,7 +650,7 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             };
             let n = got.unwrap_or(stacks.len() + 1);
             stacks.push(v.list(vec![v.int(i64::from(page)), v.int(mode), v.str(&s)]));
-            r.set("pdf:colorstacks", v.list(stacks), true);
+            r.set_cell(crate::fields::cell::PDF_COLORSTACKS, v.list(stacks), true);
             n.to_string()
         }
         cv::UNIFORM_DEVIATE => {
@@ -738,8 +740,8 @@ fn font_num(r: &mut Run<'_, '_>, f: i64) -> R<(i64, i64)> {
     if let Some(x) = r.get(&field)? {
         return Ok((crate::val::int_at(v, x, 0), crate::val::int_at(v, x, 1)));
     }
-    let n = r.int("pdf:fontcount")? + 1;
-    r.set("pdf:fontcount", v.int(n), true);
+    let n = r.cint(crate::fields::cell::PDF_FONTCOUNT)? + 1;
+    r.set_cell(crate::fields::cell::PDF_FONTCOUNT, v.int(n), true);
     let o = alloc_obj(r)?;
     r.set(&field, v.list(vec![v.int(n), v.int(o)]), true);
     Ok((n, o))
@@ -747,9 +749,9 @@ fn font_num(r: &mut Run<'_, '_>, f: i64) -> R<(i64, i64)> {
 
 /// The next object number (`pdf_create_obj`): allocation order.
 fn alloc_obj(r: &mut Run<'_, '_>) -> R<i64> {
-    let n = r.int("pdf:objnum")? + 1;
+    let n = r.cint(crate::fields::cell::PDF_OBJNUM)? + 1;
     let x = r.v.int(n);
-    r.set("pdf:objnum", x, true);
+    r.set_cell(crate::fields::cell::PDF_OBJNUM, x, true);
     Ok(n)
 }
 
@@ -787,14 +789,14 @@ fn pdf_match(r: &mut Run<'_, '_>) -> R<String> {
         v.str(&string(&text)),
         v.list(groups),
     ]);
-    r.set("pdf:match", st, true);
+    r.set_cell(crate::fields::cell::PDF_MATCH, st, true);
     Ok(if found.is_some() { "1" } else { "0" }.to_owned())
 }
 
 /// `\pdflastmatch` (utils.c `getmatch`).
 fn last_match(r: &mut Run<'_, '_>, n: i32) -> R<String> {
     let v = r.v;
-    let Some(st) = r.get("pdf:match")? else {
+    let Some(st) = r.get_loc(crate::fields::cell::PDF_MATCH)? else {
         return Ok("-1->".to_owned());
     };
     let xs = list_of(v, st);
@@ -1440,7 +1442,7 @@ impl Random {
 /// seeds it at its start (F15: the time is an environment input).
 fn random_state(r: &mut Run<'_, '_>) -> R<Random> {
     let v = r.v;
-    if let Some(x) = r.get("pdf:random")? {
+    if let Some(x) = r.get_loc(crate::fields::cell::PDF_RANDOM)? {
         let xs = list_of(v, x);
         let n = |k: usize| {
             xs.get(k)
@@ -1470,7 +1472,7 @@ fn put_random(r: &mut Run<'_, '_>, st: &Random) {
         v.int(i64::try_from(st.j).unwrap_or(0)),
     ];
     xs.extend(st.a.iter().map(|&x| v.int(i64::from(x))));
-    r.set("pdf:random", v.list(xs), true);
+    r.set_cell(crate::fields::cell::PDF_RANDOM, v.list(xs), true);
 }
 
 // ----------------------------------------------------------- `last_item`
@@ -1578,9 +1580,9 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
     if c == cmd::SET_INTERACTION && (chr == 11 || chr == 12) {
         // \letterspacefont, \pdfcopyfont (pdfTeX §1257 ff.)
         let u = r.get_r_tok()?;
-        let t: String = match &u {
-            Tok::S(n) => n.to_string(),
-            Tok::C(_) => format!("FONT{}", char::from_u32(u.chr()).unwrap_or('?')),
+        let t: String = match u.as_cs() {
+            Some(n) => n.to_string(),
+            None => format!("FONT{}", char::from_u32(u.chr()).unwrap_or('?')),
         };
         r.define_cs(&u, &Mean::Font(0), global);
         r.scan_optional_equals()?;
@@ -1612,8 +1614,8 @@ fn copy_font(r: &mut Run<'_, '_>, f: i64, suffix: &str) -> R<i64> {
     let Some(i) = crate::fonts::info(v, info) else {
         return Ok(0);
     };
-    let nf = r.int("fontcount")? + 1;
-    r.set("fontcount", v.int(nf), true);
+    let nf = r.cint(crate::fields::cell::FONTCOUNT)? + 1;
+    r.set_cell(crate::fields::cell::FONTCOUNT, v.int(nf), true);
     let mut xs = vec![
         v.str(&format!("{}{suffix}", i.name)),
         v.int(i64::from(i.size)),
@@ -1648,7 +1650,7 @@ impl Run<'_, '_> {
             self.back_cur();
             return Ok(Tok::cs("inaccessible"));
         }
-        Ok(self.cur.tok.clone())
+        Ok(self.cur.tok)
     }
 }
 
@@ -1875,7 +1877,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
         }
         ex::COLORSTACK => {
             let n = r.scan_int()?;
-            let count = r.get("pdf:colorstacks")?.map_or(0, |x| list_of(v, x).len());
+            let count = r
+                .get_loc(crate::fields::cell::PDF_COLORSTACKS)?
+                .map_or(0, |x| list_of(v, x).len());
             if n < 0 || usize::try_from(n).unwrap_or(usize::MAX) > count {
                 r.log("error", "pdfTeX error (colorstack): invalid identifier")?;
             }
@@ -1915,7 +1919,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                         crate::pdfout::command(r, input, &[], |st, _| Some(st.obj_reserve()))?;
                     or_alloc(r, got)?
                 };
-                r.set("pdf:lastobj", v.int(n), true);
+                r.set_cell(crate::fields::cell::PDF_LASTOBJ, v.int(n), true);
                 return Ok(());
             }
             let stream = r.scan_keyword("stream")?;
@@ -1934,7 +1938,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             let attr_b = Some(bytes(&str_of(v, at))).filter(|a| !a.is_empty());
             if crate::pdfrelaxed::on(r)? {
                 let n = crate::pdfrelaxed::obj(r, use_n, stream, attr_b, body)?;
-                r.set("pdf:lastobj", v.int(n), true);
+                r.set_cell(crate::fields::cell::PDF_LASTOBJ, v.int(n), true);
                 return Ok(());
             }
             let input = v.list(vec![
@@ -1959,7 +1963,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             let n = match got {
                 Some((n, refused, err)) => {
                     if refused {
-                        r.set("pdf:retval", v.int(-1), true);
+                        r.set_cell(crate::fields::cell::PDF_RETVAL, v.int(-1), true);
                         r.log(
                             "error",
                             "pdfTeX warning (ext1): invalid object number being ignored",
@@ -1975,7 +1979,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     None => alloc_obj(r)?,
                 },
             };
-            r.set("pdf:lastobj", v.int(n), true);
+            r.set_cell(crate::fields::cell::PDF_LASTOBJ, v.int(n), true);
         }
         ex::REFOBJ => {
             let n = r.scan_int()?;
@@ -1997,8 +2001,8 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 None
             };
             let o = or_alloc(r, got)?;
-            let fx = r.int("pdf:xformcount")? + 1;
-            r.set("pdf:xformcount", v.int(fx), true);
+            let fx = r.cint(crate::fields::cell::PDF_XFORMCOUNT)? + 1;
+            r.set_cell(crate::fields::cell::PDF_XFORMCOUNT, v.int(fx), true);
             let bx = b.unwrap_or(ValueId::UNIT);
             let (w, h, d) = b.map_or((0, 0, 0), |b| {
                 (
@@ -2021,7 +2025,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 true,
             );
             r.modify_box_reg(k, None)?;
-            r.set("pdf:lastxform", v.int(o), true);
+            r.set_cell(crate::fields::cell::PDF_LASTXFORM, v.int(o), true);
         }
         ex::REFXFORM => {
             let n = r.scan_int()?;
@@ -2090,7 +2094,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     ],
                 );
             }
-            r.set("pdf:lastannot", v.int(n), true);
+            r.set_cell(crate::fields::cell::PDF_LASTANNOT, v.int(n), true);
         }
         ex::START_LINK => {
             if md.m.abs() == 1 {
@@ -2122,7 +2126,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     act,
                 ],
             );
-            r.set("pdf:lastlink", v.int(n), true);
+            r.set_cell(crate::fields::cell::PDF_LASTLINK, v.int(n), true);
         }
         ex::END_LINK => {
             if md.m.abs() == 1 {
@@ -2243,7 +2247,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             let mut oa = ValueId::UNIT;
             if r.scan_keyword("openaction")? {
                 oa = action(r)?;
-                r.set("pdf:openaction", oa, true);
+                r.set_cell(crate::fields::cell::PDF_OPENACTION, oa, true);
             }
             let a = (oa != ValueId::UNIT)
                 .then(|| crate::pdfout::action_of(v, oa))
@@ -2281,7 +2285,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
         }
         ex::TRAILER_ID => {
             let t = ext_value(r)?;
-            r.set("pdf:trailerid", t, true);
+            r.set_cell(crate::fields::cell::PDF_TRAILERID, t, true);
             if crate::pdfrelaxed::on(r)? {
                 return Ok(());
             }
@@ -2390,7 +2394,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
         ex::RUNNING_LINK_ON => whatsit(r, md, vec![s("pdf:runninglinkon")]),
         ex::SPACE_FONT => {
             let f = r.scan_font_ident()?;
-            r.set("pdf:spacefont", v.int(f), true);
+            r.set_cell(crate::fields::cell::PDF_SPACEFONT, v.int(f), true);
         }
         _ => {}
     }
@@ -2536,9 +2540,17 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
         ]),
         true,
     );
-    r.set("pdf:lastximage", v.int(n), true);
-    r.set("pdf:lastximagepages", v.int(i64::from(pages)), true);
-    r.set("pdf:lastximagecolordepth", v.int(i64::from(depth)), true);
+    r.set_cell(crate::fields::cell::PDF_LASTXIMAGE, v.int(n), true);
+    r.set_cell(
+        crate::fields::cell::PDF_LASTXIMAGEPAGES,
+        v.int(i64::from(pages)),
+        true,
+    );
+    r.set_cell(
+        crate::fields::cell::PDF_LASTXIMAGECOLORDEPTH,
+        v.int(i64::from(depth)),
+        true,
+    );
     Ok(())
 }
 
@@ -3059,8 +3071,8 @@ pub(crate) fn at_shipout(
         } else {
             (h + 4_736_286, p.page_height - vv - 4_736_286)
         };
-        r.set("pdf:lastxpos", v.int(i64::from(x)), true);
-        r.set("pdf:lastypos", v.int(i64::from(y)), true);
+        r.set_cell(crate::fields::cell::PDF_LASTXPOS, v.int(i64::from(x)), true);
+        r.set_cell(crate::fields::cell::PDF_LASTYPOS, v.int(i64::from(y)), true);
     }
     Ok(())
 }

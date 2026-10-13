@@ -222,13 +222,15 @@ pub(crate) fn take_protected(a: &mut i32) -> bool {
 /// pdfTeX §478 (e-TeX): a protected macro is not expanded while a token
 /// list is built with expansion; true if `cur` was one (it is now
 /// `\relax`-like, `no_expand_flag`).
-pub(crate) fn protect(cur: &mut crate::run::Cur) -> bool {
-    if matches!(&cur.mean, Mean::Macro(x) if x.flags & PROTECTED != 0) {
-        cur.cmd = cmd::RELAX;
-        cur.chr = crate::val::NO_EXPAND_FLAG;
-        return true;
+pub(crate) fn protect(r: &mut Run<'_, '_>) -> R<bool> {
+    if (cmd::CALL..cmd::END_TEMPLATE).contains(&r.cur.cmd)
+        && matches!(&r.cur_mean()?, Mean::Macro(x) if x.flags & PROTECTED != 0)
+    {
+        r.cur.cmd = cmd::RELAX;
+        r.cur.chr = crate::val::NO_EXPAND_FLAG;
+        return Ok(true);
     }
-    false
+    Ok(false)
 }
 
 /// Whether `(c, m)` is an internal quantity of e-TeX or pdfTeX under a
@@ -357,7 +359,7 @@ pub(crate) fn if_test(r: &mut Run<'_, '_>, this_if: i32) -> R<bool> {
                 r.back_cur();
             }
             let t = Tok::cs(&name);
-            r.mean_of(&t)? != Mean::Undefined
+            r.mean_of(t)? != Mean::Undefined
         }
         IF_FONT_CHAR => {
             // pdfTeX §1762
@@ -465,7 +467,7 @@ pub(crate) fn last_item(r: &mut Run<'_, '_>, m: i32) -> R<IVal> {
             let mut q = m - li::PAR_SHAPE_LENGTH;
             let mut n = r.scan_int()?;
             let shape = r
-                .get("parshape")?
+                .get_loc(crate::fields::cell::PARSHAPE)?
                 .map(|x| list_of(v, x))
                 .unwrap_or_default();
             let count = i32::try_from(shape.len() / 2).unwrap_or(0);
@@ -902,11 +904,11 @@ pub(crate) fn force_eof(r: &mut Run<'_, '_>) {
     for f in &mut r.frames {
         if let Frame::Toks(t, p) = f
             && let Some(k) = t[*p..].iter().position(
-                |x| matches!(x, Tok::S(n) if n.starts_with("\u{10FFFE}eof") && !n.ends_with(['S', 'F'])),
+                |x| matches!(x.as_cs(), Some(n) if n.starts_with("\u{10FFFE}eof") && !n.ends_with(['S', 'F'])),
             )
         {
             let mut v: Vec<Tok> = t.to_vec();
-            if let Tok::S(n) = &v[*p + k] {
+            if let Some(n) = v[*p + k].as_cs() {
                 v[*p + k] = Tok::cs(&format!("{n}F"));
             }
             *t = Rc::from(v);
@@ -969,7 +971,7 @@ fn get_r_token(r: &mut Run<'_, '_>) -> R<Tok> {
         r.back_cur();
         return Ok(Tok::cs("inaccessible"));
     }
-    Ok(r.cur.tok.clone())
+    Ok(r.cur.tok)
 }
 
 // --------------------------------------------------------- assignments
@@ -1006,7 +1008,7 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
         cmd::SET_INTERACTION if chr == 10 => {
             // partoken.ch: `\partokenname`
             let t = get_r_token(r)?;
-            r.set("partoken", t.encode(v), true);
+            r.set_cell(crate::fields::cell::PARTOKEN, t.encode(v), true);
         }
         cmd::SET_INTERACTION | cmd::ASSIGN_FONT_INT => {
             return crate::pdfprim::prefixed(r, global);
@@ -1020,7 +1022,7 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
 fn set_interaction(r: &mut Run<'_, '_>, n: i32) -> R<()> {
     r.log("println", "")?;
     let x = r.v.int(i64::from(n));
-    r.set("interaction", x, true);
+    r.set_cell(crate::fields::cell::INTERACTION, x, true);
     Ok(())
 }
 
@@ -1030,7 +1032,7 @@ pub(crate) fn internal(r: &mut Run<'_, '_>) -> R<IVal> {
     let (c, m) = (r.cur.cmd, r.cur.chr);
     let v = r.v;
     if c == cmd::SET_PAGE_INT {
-        return Ok(IVal::Int(r.int32("interaction")?));
+        return Ok(IVal::Int(r.int_loc(crate::fields::cell::INTERACTION)?));
     }
     if c == cmd::ASSIGN_FONT_INT {
         return crate::pdfprim::font_code(r, m);
@@ -1134,13 +1136,13 @@ fn marks(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
         toks
     } else {
         let classes = r
-            .get("markclasses")?
+            .get_loc(crate::fields::cell::MARKCLASSES)?
             .map(|x| list_of(v, x))
             .unwrap_or_default();
         if !classes.iter().any(|&x| int_of(v, x) == i64::from(c)) {
             let mut cl = classes;
             cl.push(v.int(i64::from(c)));
-            r.set("markclasses", v.list(cl), true);
+            r.set_cell(crate::fields::cell::MARKCLASSES, v.list(cl), true);
         }
         v.list(vec![v.int(-1), v.int(i64::from(c)), toks])
     };
@@ -1242,7 +1244,7 @@ pub(crate) fn is_class_mark(v: &phitex_defuse::Values, m: Option<ValueId>) -> bo
 pub(crate) fn fire_marks_values(r: &mut Run<'_, '_>, page_marks: &[ValueId]) -> R<()> {
     let v = r.v;
     let classes: Vec<i32> = r
-        .get("markclasses")?
+        .get_loc(crate::fields::cell::MARKCLASSES)?
         .map(|x| list_of(v, x))
         .unwrap_or_default()
         .iter()
@@ -1288,7 +1290,7 @@ pub(crate) fn fire_marks_values(r: &mut Run<'_, '_>, page_marks: &[ValueId]) -> 
 pub(crate) fn split_marks(r: &mut Run<'_, '_>, split: &[u32], side: &nodes::Side) -> R<()> {
     let v = r.v;
     let mut classes: Vec<i32> = r
-        .get("markclasses")?
+        .get_loc(crate::fields::cell::MARKCLASSES)?
         .map(|x| list_of(v, x))
         .unwrap_or_default()
         .iter()

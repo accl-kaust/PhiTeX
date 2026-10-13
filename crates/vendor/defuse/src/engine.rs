@@ -952,12 +952,23 @@ impl Node {
         self.flags & f != 0
     }
 
+    /// The index of `f` in the node's definitions, kept sorted by field
+    /// (a node defining many fields is read by many: a scan per read was
+    /// quadratic).
+    pub(crate) fn def_index(&self, f: Field) -> Option<usize> {
+        self.defs.binary_search_by_key(&f, |d| d.field).ok()
+    }
+
     pub(crate) fn def_value(&self, f: Field) -> Option<ValueId> {
-        self.defs
-            .iter()
-            .find(|d| d.field == f)
-            .map(|d| d.value)
+        self.def_index(f)
+            .map(|i| self.defs[i].value)
             .filter(|v| *v != ValueId::NONE)
+    }
+
+    fn set_def_value(&mut self, f: Field, v: ValueId) {
+        if let Some(i) = self.def_index(f) {
+            self.defs[i].value = v;
+        }
     }
 
     pub(crate) fn has_dyn_effect(&self) -> bool {
@@ -2053,6 +2064,29 @@ impl Engine {
                     });
                 }
             }
+        }
+        out.sort_by_key(|w| w.node);
+        out.dedup_by_key(|w| w.node);
+        out
+    }
+
+    /// The waiters, plus every finished node held above a node it read
+    /// before that one was settled: its result stands only once that node
+    /// does (a cycle of two shows as one queued and one held).
+    fn waiters_with_held(&self) -> Vec<Waiter> {
+        let mut out = self.waiters();
+        for (&s, o) in &self.origins {
+            if o.raised == 0 || o.raised_how != Lifted::Read || !self.live(s) || self.n(s).state != State::Done {
+                continue;
+            }
+            let on = if o.raised_from != NIL && self.live(o.raised_from) && !self.settled(o.raised_from) {
+                WaitOn::Node(self.n(o.raised_from).id, None)
+            } else if o.raised_from == NIL {
+                WaitOn::Queued
+            } else {
+                continue;
+            };
+            out.push(Waiter { node: self.n(s).id, on });
         }
         out.sort_by_key(|w| w.node);
         out.dedup_by_key(|w| w.node);
@@ -3384,20 +3418,14 @@ impl Engine {
             .map(|((_, r), w)| (*r, *w))
             .filter(|&(r, _)| lo < self.n(r).label)
             .collect();
-        let mut flushed = false;
         for (r, w) in readers {
             // Parked until its range has no node in work: the new nodes
             // are in work, and stab_settle wakes it once they finish
-            // (unless none is, as when they are all claimed at once).
+            // (unless none is, as when they are all claimed at once:
+            // settle_deferred checks at the end of the step).
             if w.waiting && self.n(r).state == State::Parked {
-                if !flushed {
-                    self.flush_order();
-                    flushed = true;
-                }
-                let lo = self.watch_key(r, w.anchor).0;
-                if self.ord_fold(unit, lo, self.n(r).label).work != 0 {
-                    continue;
-                }
+                self.settle_pending.push((unit, self.n(r).label - 1));
+                continue;
             }
             self.make_dirty(r);
         }
@@ -3781,7 +3809,7 @@ impl Engine {
     // ------------------------------------------------------------- binding
 
     fn def_global(&self, d: Slot, f: Field) -> bool {
-        self.n(d).defs.iter().any(|x| x.field == f && x.global)
+        self.n(d).def_index(f).is_some_and(|i| self.n(d).defs[i].global)
     }
 
     /// Whether the node at `label` lies after its own brackets.
@@ -3835,7 +3863,7 @@ impl Engine {
 
     /// The depth `x`'s definition of `f` is indexed at.
     fn indexed_depth(&self, x: Slot, f: Field) -> i32 {
-        self.n(x).defs.iter().find(|d| d.field == f).map_or(0, |d| d.depth)
+        self.n(x).def_index(f).map_or(0, |i| self.n(x).defs[i].depth)
     }
 
     fn ix_remove(&mut self, unit: u32, f: Field, label: u64, depth: i32) {
@@ -4320,21 +4348,36 @@ impl Engine {
             .filter(|d| self.is_client_def(x, d.field) && d.value != self.seq_start)
             .map(|d| (d.field, d.global))
             .collect();
-        let new: Vec<(Field, bool)> = new
+        let mut new: Vec<(Field, bool)> = new
             .iter()
             .map(|&(f, g)| (self.canon(f), g))
             .filter(|d| self.is_client_def(x, d.0))
             .collect();
-        let new = &new[..];
-        for &(f, g) in &old {
-            if !new.contains(&(f, g)) {
-                self.remove_def(x, f);
+        new.sort_unstable();
+        new.dedup();
+        // `old` is in field order (the node's list is sorted).
+        let mut gone = Vec::new();
+        let mut added = Vec::new();
+        let (mut i, mut j) = (0, 0);
+        while i < old.len() || j < new.len() {
+            let take_old = j >= new.len() || (i < old.len() && old[i] < new[j]);
+            let take_new = i >= old.len() || (j < new.len() && new[j] < old[i]);
+            if take_old {
+                gone.push(old[i].0);
+                i += 1;
+            } else if take_new {
+                added.push(new[j]);
+                j += 1;
+            } else {
+                i += 1;
+                j += 1;
             }
         }
-        for &(f, g) in new {
-            if !old.contains(&(f, g)) {
-                self.add_def(x, f, g);
-            }
+        for f in gone {
+            self.remove_def(x, f);
+        }
+        for (f, g) in added {
+            self.add_def(x, f, g);
         }
     }
 
@@ -4380,14 +4423,18 @@ impl Engine {
             let mut defs = std::mem::take(&mut n.defs).into_vec();
             // Re-registering keeps the value (a marker an opener already
             // holds; a run's value when only the locality changes).
-            let value = defs.iter().find(|d| d.field == f).map_or(ValueId::NONE, |d| d.value);
-            defs.retain(|d| d.field != f);
-            defs.push(Def {
-                field: f,
-                value,
-                global,
-                depth: 0,
-            });
+            match defs.binary_search_by_key(&f, |d| d.field) {
+                Ok(i) => defs[i].global = global,
+                Err(i) => defs.insert(
+                    i,
+                    Def {
+                        field: f,
+                        value: ValueId::NONE,
+                        global,
+                        depth: 0,
+                    },
+                ),
+            }
             n.defs = defs.into_boxed_slice();
         }
         if self.fresh_scope && !global {
@@ -4610,7 +4657,9 @@ impl Engine {
         {
             let n = self.nm(x);
             let mut defs = std::mem::take(&mut n.defs).into_vec();
-            defs.retain(|d| d.field != f);
+            if let Ok(i) = defs.binary_search_by_key(&f, |d| d.field) {
+                defs.remove(i);
+            }
             n.defs = defs.into_boxed_slice();
         }
         if self.n(x).has(F_APP) {
@@ -4975,7 +5024,7 @@ impl Engine {
         let mut marks = vec![(self.kind_field, kind)];
         marks.extend(self.seqs.iter().map(|&(_, h)| (h, start)));
         for (f, v) in marks {
-            let cur = self.n(s).defs.iter().find(|d| d.field == f).map(|d| d.value);
+            let cur = self.n(s).def_index(f).map(|i| self.n(s).defs[i].value);
             if !opens {
                 // Only the markers go; a contribution stays, and a declared
                 // one (shadowed while this node opened) is registered.
@@ -4993,11 +5042,7 @@ impl Engine {
                 self.add_def(s, f, false);
             }
             if self.n(s).def_value(f) != Some(v) {
-                for d in &mut self.nm(s).defs {
-                    if d.field == f {
-                        d.value = v;
-                    }
-                }
+                self.nm(s).set_def_value(f, v);
                 let cause = Cause::Changed {
                     field: f,
                     site: Some(self.n(s).id),
@@ -6226,17 +6271,13 @@ impl Engine {
     /// the new nodes finish; a change that leaves such a range without
     /// work wakes its reader here (nothing would finish for it).
     fn stab_structure(&mut self, unit: u32, label: u64) {
-        let mut flushed = false;
         for (r, w) in self.stab(unit, label) {
             if w.waiting && self.n(r).state == State::Parked {
-                if !flushed {
-                    self.flush_order();
-                    flushed = true;
-                }
-                let lo = self.watch_key(r, w.anchor).0;
-                if self.ord_fold(unit, lo, self.n(r).label).work != 0 {
-                    continue;
-                }
+                // Parked until its range has no node in work: checked once
+                // at the end of the step (settle_deferred), not here, which
+                // would flush the lazy order per inserted node.
+                self.settle_pending.push((unit, self.n(r).label - 1));
+                continue;
             }
             self.make_dirty(r);
         }
@@ -6648,6 +6689,8 @@ impl Engine {
             let set: Vec<(Field, bool)> = defs.iter().map(|d| (d.0, d.2)).collect();
             self.set_defset(x, &set);
         } else {
+            // Both lists in field order: the node's is sorted, the run's is
+            // sorted here.
             let declared: Vec<Field> = self
                 .n(x)
                 .defs
@@ -6655,15 +6698,17 @@ impl Engine {
                 .filter(|d| self.is_client_def(x, d.field) && d.value != self.seq_start)
                 .map(|d| d.field)
                 .collect();
+            let mut made: Vec<Field> = defs.iter().map(|d| d.0).collect();
+            made.sort_unstable();
             for &(f, _, _) in defs {
-                if !declared.contains(&f) && self.is_client_def(x, f) {
+                if declared.binary_search(&f).is_err() && self.is_client_def(x, f) {
                     let id = self.n(x).id;
                     let field = self.client_name(f);
                     self.node_error(x, EvalError::UndeclaredDefinition { node: id, field });
                 }
             }
             for &f in &declared {
-                if !defs.iter().any(|d| d.0 == f) {
+                if made.binary_search(&f).is_err() {
                     let id = self.n(x).id;
                     let field = self.client_name(f);
                     self.node_error(x, EvalError::UndeclaredDefinition { node: id, field });
@@ -6678,12 +6723,7 @@ impl Engine {
             let old = self.n(x).def_value(f);
             if old != Some(v) {
                 changed = true;
-                let n = self.nm(x);
-                for d in &mut n.defs {
-                    if d.field == f {
-                        d.value = v;
-                    }
-                }
+                self.nm(x).set_def_value(f, v);
                 let cause = Cause::Changed {
                     field: f,
                     site: Some(self.n(x).id),
@@ -6919,10 +6959,12 @@ impl Engine {
         }
         let x = r.slot;
         if !self.live(x) || self.n(x).id != r.node || self.n(x).epoch != r.epoch {
+            count!(DeadResult);
             return;
         }
         let st = self.n(x).state;
         if !matches!(st, State::Dirty | State::Parked) || (st == State::Parked && !r.speculative) {
+            count!(StateResult);
             return;
         }
         if r.resumed {
@@ -7062,9 +7104,13 @@ impl Engine {
         if let Some(e) = r.error.clone() {
             self.node_error(x, e);
         }
-        if r.raise > 0 && !matches!(r.end, End::Raise(..)) {
-            // A read of a finished node not settled below this level, then
-            // a stop: the node re-runs above that node too.
+        if r.raise > 0 {
+            // A read of a finished node not settled below this level: the
+            // node goes above that node (a completed run keeps its result
+            // there; a stopped one re-runs there).
+            if matches!(r.end, End::Output(_)) {
+                self.report.raises += 1;
+            }
             let h = r.raise.max(self.n(x).height);
             self.lift(x, h);
             self.note_raise(x, h, r.raise_from, Lifted::Read);
@@ -7089,14 +7135,6 @@ impl Engine {
                 let h = h.max(self.n(x).height);
                 self.lift(x, h);
                 self.note_raise(x, h, from, Lifted::Gate);
-                return;
-            }
-            End::Raise(h, from) => {
-                self.report.stops += 1;
-                self.report.raises += 1;
-                let h = h.max(self.n(x).height + 1);
-                self.lift(x, h);
-                self.note_raise(x, h, from, Lifted::Read);
                 return;
             }
             End::Wait(t, kind, field) => {
@@ -7162,13 +7200,20 @@ impl Engine {
         };
         self.touch_with(x, r.old_sites.take());
         let provisional = r.speculative && !r.assumptions.is_empty();
-        if r.speculative && self.shape_changes(x, &r) {
+        if r.speculative && (provisional || r.read_unsettled) && self.shape_changes(x, &r) {
             // A guess that changes the structure (claim, unfolding, scope
             // effect or definition set) is not applied: it would re-bind
             // and dirty its surroundings on a value that may still change,
             // and the next guess would undo it (a chain of pending claims
-            // storms this way). The node runs at its level.
+            // storms this way). The node runs at its level. A speculative
+            // run that read only settled facts is no guess: its structure
+            // is applied like any result (a cold build's defining nodes
+            // above the level would otherwise each run once for nothing).
+            // Not guessed again this evaluation: the shape is what the
+            // node does, and F_NOSPEC alone is cleared by the next change
+            // to any input (a whole run per step, dropped, uncounted).
             self.report.spec_shape_changes += 1;
+            self.mispredicted.insert(x, MISPREDICTIONS_PER_NODE);
             self.set_flag(x, F_NOSPEC, true);
             return;
         }
@@ -7332,6 +7377,11 @@ impl Engine {
         } else {
             let h = self.target_height_mut(x);
             self.finish(x, h);
+            if r.raise > 0 {
+                // Kept above the node it read before that one was settled
+                // (finish clears a raise that does not match its height).
+                self.note_raise(x, self.n(x).height, r.raise_from, Lifted::Read);
+            }
             // Its count claim took a node whose own claims were released
             // into its view: the count applies to the view it sees, so it
             // runs again on that view (and converges: each run claims a
@@ -7993,7 +8043,12 @@ impl Engine {
                 continue;
             }
             let sites = self.site_list(s);
-            let rebound = sites.iter().filter(|x| !snap.sites.contains(x)).count();
+            let rebound = if snap.sites.len() > 16 {
+                let was: FxHashSet<(u64, u64)> = snap.sites.iter().copied().collect();
+                sites.iter().filter(|x| !was.contains(x)).count()
+            } else {
+                sites.iter().filter(|x| !snap.sites.contains(x)).count()
+            };
             self.report.rebinds += rebound as u64;
             if sig != snap.sig || args != snap.args {
                 self.report.nodes_run += 1;
@@ -8442,7 +8497,7 @@ impl Engine {
             if self.past_deadline() {
                 return Err(EvalError::Deadline {
                     runs: self.eval_runs,
-                    waiters: self.waiters(),
+                    waiters: self.waiters_with_held(),
                 });
             }
             self.level = level;
@@ -8509,7 +8564,7 @@ impl Engine {
                 if self.idle_rounds > self.limits.idle_rounds {
                     return Err(EvalError::NoProgress {
                         rounds: self.idle_rounds,
-                        waiters: self.waiters(),
+                        waiters: self.waiters_with_held(),
                     });
                 }
             } else {
@@ -8618,9 +8673,6 @@ pub(crate) enum End {
     Wait(Slot, WaitKind, Option<Field>),
     /// Waiting for an environment field neither supplied nor absent.
     WaitEnv(Field),
-    /// Re-done at the level, above the finished node it read there
-    /// (`NIL`: a range).
-    Raise(u32, Slot),
     NeedApp(OpId, ValueId),
     NeedChild(usize),
     WaitRange(Field, Slot),
@@ -8643,6 +8695,8 @@ pub struct RunResult {
     /// The level the run has to be re-done at (0: none), see [`Ctx`], and
     /// the finished node read there that set it (`NIL`: a range).
     pub(crate) raise: u32,
+    /// A speculative run read a finished node not yet settled.
+    pub(crate) read_unsettled: bool,
     pub(crate) raise_from: Slot,
     pub(crate) uses: Vec<Use>,
     pub(crate) defs: Vec<(Field, ValueId, bool)>,

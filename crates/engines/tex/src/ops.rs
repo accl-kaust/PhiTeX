@@ -69,7 +69,24 @@ pub(crate) fn run_node_parking(
         }
         None => Run::new(cx, o),
     };
+    let t_body = std::time::Instant::now();
     let res = body(&mut r);
+    let t_body = t_body.elapsed();
+    // (a long run, the format's: its commands' time, then its finish)
+    let timed = t_body.as_secs() >= 1 && crate::exec::env_flag!("PHITEX_TEX_TIME");
+    if timed {
+        eprintln!(
+            "run: commands {t_body:?} ({}, speculative {}, resumed {})",
+            match &res {
+                Ok(()) => "ok",
+                Err(Halt::Stop(_)) => "stop",
+                Err(Halt::Starve) => "starve",
+                Err(Halt::Fatal) => "fatal",
+            },
+            r.cx.is_speculative(),
+            r.resumed
+        );
+    }
     if trace {
         eprintln!(
             "  -> {}",
@@ -84,7 +101,12 @@ pub(crate) fn run_node_parking(
     match res {
         Ok(()) => {
             r.end_open();
-            Ok(r.finish())
+            let t = std::time::Instant::now();
+            let x = r.finish();
+            if timed {
+                eprintln!("run: finish {:?}", t.elapsed());
+            }
+            Ok(x)
         }
         Err(Halt::Stop(s)) => {
             if parks
@@ -197,6 +219,10 @@ impl Operation for Exec {
                 let tokens = matches!(fs.first(), Some(crate::run::Frame::Toks(..)));
                 crate::hints::count(r, if tokens { 5 } else { 6 });
                 r.frames.extend(fs);
+                if let Some((c, k)) = crate::run::carried_conds(r.v, &args) {
+                    r.conds = c;
+                    r.if_codes = k;
+                }
                 // the hint's assumptions, against what is in force here
                 if let Some(m) = crate::hints::verify(r, &hint)? {
                     r.log("error", &format!("hint regime violated: {m}"))?;
@@ -321,7 +347,7 @@ impl Operation for Put {
 }
 
 /// The DVI file.
-pub(crate) struct Dvi;
+pub(crate) struct Dvi(pub Shared);
 
 impl Operation for Dvi {
     fn name(&self) -> &'static str {
@@ -331,7 +357,8 @@ impl Operation for Dvi {
         Some(Vec::new())
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        crate::page::dvi(cx)
+        let o = ops(&self.0);
+        crate::page::dvi(cx, &o)
     }
 }
 
