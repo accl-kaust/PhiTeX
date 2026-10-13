@@ -39,6 +39,11 @@ pub enum Counter {
     RegionNode,
     /// Runs discarded because a definition they read went away meanwhile.
     StaleSite,
+    /// Results dropped because the node went away or was re-bound (its
+    /// epoch moved) while it ran.
+    DeadResult,
+    /// Results dropped because the node's state no longer takes one.
+    StateResult,
     /// Re-bound nodes revalidated without running.
     RevalidateOk,
     /// Re-bound nodes that had to run after all.
@@ -60,7 +65,7 @@ pub enum Counter {
 }
 
 impl Counter {
-    pub const ALL: [Counter; 21] = [
+    pub const ALL: [Counter; 23] = [
         Counter::Walk,
         Counter::WalkLevel,
         Counter::Step,
@@ -73,6 +78,8 @@ impl Counter {
         Counter::MoveUser,
         Counter::RegionNode,
         Counter::StaleSite,
+        Counter::DeadResult,
+        Counter::StateResult,
         Counter::RevalidateOk,
         Counter::RevalidateMiss,
         Counter::ClaimRecompute,
@@ -99,6 +106,8 @@ impl Counter {
             Counter::MoveUser => "move_user",
             Counter::RegionNode => "region_node",
             Counter::StaleSite => "stale_site",
+            Counter::DeadResult => "dead_result",
+            Counter::StateResult => "state_result",
             Counter::RevalidateOk => "revalidate_ok",
             Counter::RevalidateMiss => "revalidate_miss",
             Counter::ClaimRecompute => "claim_recompute",
