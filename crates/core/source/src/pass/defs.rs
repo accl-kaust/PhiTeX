@@ -1168,7 +1168,12 @@ fn last_command(text: &str) -> Option<Last> {
                     i += 1;
                 }
             }
-            b'\n' if depth == 0 && text[i + 1..].trim_start_matches([' ', '\t']).starts_with('\n') => {
+            b'\n'
+                if depth == 0
+                    && text[i + 1..]
+                        .trim_start_matches([' ', '\t'])
+                        .starts_with('\n') =>
+            {
                 last = Some(Last::Blank);
             }
             b' ' | b'\t' | b'\n' => {}

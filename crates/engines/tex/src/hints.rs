@@ -90,22 +90,21 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // definitions and contributions: the control sequence only, or
         // the list accumulators (§1218, §1221, §1224, §1103)
         "def" | "gdef" | "let" | "futurelet" | "chardef" | "mathchardef" | "countdef"
-        | "dimendef" | "skipdef" | "muskipdef" | "toksdef" | "relax" | "global" | "long" | "outer" | "protected" | "the" | "number" | "romannumeral"
-        | "string" | "meaning" | "show" | "showbox" | "showthe" | "showlists"
-        | "showgroups" | "showtokens" | "showifs" | "dump" | "jobname"
-        | "fontname" | "detokenize" | "unexpanded" | "ignorespaces" | "endcsname"
-        | "prevdepth" | "spacefactor" | "nullfont" | "pagediscards" | "splitdiscards"
-        | "noboundary" | "lastpenalty" | "lastskip" | "lastkern" | "lastnodetype" | "inputlineno"
-        | "badness" | "eTeXversion" | "eTeXrevision" | "currentgrouplevel" | "currentgrouptype"
-        | "currentiflevel" | "currentiftype" | "currentifbranch" | "numexpr" | "dimexpr"
-        | "glueexpr" | "muexpr" | "gluestretch" | "glueshrink" | "gluestretchorder"
-        | "glueshrinkorder" | "mutoglue" | "gluetomu" | "fontcharwd" | "fontcharht"
-        | "fontchardp" | "fontcharic" | "parshapelength" | "parshapeindent" | "parshapedimen"
-        | "topmark" | "firstmark" | "botmark"
-        | "splitfirstmark" | "splitbotmark" | "topmarks" | "firstmarks" | "botmarks"
-        | "splitfirstmarks" | "splitbotmarks" | "/" | " " | "mskip"
-        | "mkern" | "penalty" | "end" | "par" | "beginL" | "endL" | "beginR" | "endR"
-        => &[],
+        | "dimendef" | "skipdef" | "muskipdef" | "toksdef" | "relax" | "global" | "long"
+        | "outer" | "protected" | "the" | "number" | "romannumeral" | "string" | "meaning"
+        | "show" | "showbox" | "showthe" | "showlists" | "showgroups" | "showtokens"
+        | "showifs" | "dump" | "jobname" | "fontname" | "detokenize" | "unexpanded"
+        | "ignorespaces" | "endcsname" | "prevdepth" | "spacefactor" | "nullfont"
+        | "pagediscards" | "splitdiscards" | "noboundary" | "lastpenalty" | "lastskip"
+        | "lastkern" | "lastnodetype" | "inputlineno" | "badness" | "eTeXversion"
+        | "eTeXrevision" | "currentgrouplevel" | "currentgrouptype" | "currentiflevel"
+        | "currentiftype" | "currentifbranch" | "numexpr" | "dimexpr" | "glueexpr" | "muexpr"
+        | "gluestretch" | "glueshrink" | "gluestretchorder" | "glueshrinkorder" | "mutoglue"
+        | "gluetomu" | "fontcharwd" | "fontcharht" | "fontchardp" | "fontcharic"
+        | "parshapelength" | "parshapeindent" | "parshapedimen" | "topmark" | "firstmark"
+        | "botmark" | "splitfirstmark" | "splitbotmark" | "topmarks" | "firstmarks"
+        | "botmarks" | "splitfirstmarks" | "splitbotmarks" | "/" | " " | "mskip" | "mkern"
+        | "penalty" | "end" | "par" | "beginL" | "endL" | "beginR" | "endR" => &[],
         // a box's dimension (§1247)
         "wd" | "ht" | "dp" => &["box:", "lvlfix"],
         // horizontal material: may start a paragraph ([`starts_par`] adds
@@ -117,12 +116,12 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "vskip" | "vfil" | "vfill" | "vss" | "vfilneg" | "kern" | "hrule" | "unvbox"
         | "unvcopy" | "unskip" | "unpenalty" | "unkern" | "lastbox" => &["box:"],
         // math only (§1136-§1194)
-        "mathord" | "mathop" | "mathbin" | "mathrel" | "mathopen" | "mathclose"
-        | "mathpunct" | "mathinner" | "underline" | "overline" | "mathaccent" | "radical"
-        | "displaystyle" | "textstyle" | "scriptstyle" | "scriptscriptstyle" | "left"
-        | "right" | "middle" | "mathchar" | "delimiter" | "displaylimits" | "limits"
-        | "nolimits" | "nonscript" | "mathchoice" | "eqno" | "leqno" | "over" | "atop"
-        | "above" | "overwithdelims" | "atopwithdelims" | "abovewithdelims" => &["inc"],
+        "mathord" | "mathop" | "mathbin" | "mathrel" | "mathopen" | "mathclose" | "mathpunct"
+        | "mathinner" | "underline" | "overline" | "mathaccent" | "radical" | "displaystyle"
+        | "textstyle" | "scriptstyle" | "scriptscriptstyle" | "left" | "right" | "middle"
+        | "mathchar" | "delimiter" | "displaylimits" | "limits" | "nolimits" | "nonscript"
+        | "mathchoice" | "eqno" | "leqno" | "over" | "atop" | "above" | "overwithdelims"
+        | "atopwithdelims" | "abovewithdelims" => &["inc"],
         // opening a group: the scope's opener record (`lopen:`, run.rs
         // `finish`; §1063)
         "begingroup" | "bgroup" => &["lopen:"],
@@ -146,14 +145,21 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
             &["box:", "align", "param:", "lvlfix"]
         }
         // conditionals (§498-§510)
-        "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode" | "ifinner"
-        | "ifvoid" | "ifhbox" | "ifvbox" | "ifcat" | "ifcase" | "iftrue" | "iffalse"
-        | "ifdefined" | "ifcsname" | "iffontchar" | "unless" | "else" | "fi" | "or"
-        | "ifpdfprimitive" | "ifpdfabsnum" | "ifpdfabsdim" | "ifincsname" | "ifeof" => {
-            &["ifstack"]
-        }
+        "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode"
+        | "ifinner" | "ifvoid" | "ifhbox" | "ifvbox" | "ifcat" | "ifcase" | "iftrue"
+        | "iffalse" | "ifdefined" | "ifcsname" | "iffontchar" | "unless" | "else" | "fi" | "or"
+        | "ifpdfprimitive" | "ifpdfabsnum" | "ifpdfabsdim" | "ifincsname" | "ifeof" => &["ifstack"],
         // fonts (§1257 new_font, §1234)
-        "font" => &["fd:", "fdn:", "fontcount", "fontid:", "fontinfo:", "hc:", "sc:", "ifstack"],
+        "font" => &[
+            "fd:",
+            "fdn:",
+            "fontcount",
+            "fontid:",
+            "fontinfo:",
+            "hc:",
+            "sc:",
+            "ifstack",
+        ],
         "textfont" | "scriptfont" | "scriptscriptfont" => &["fam:"],
         // a font's parameters (§1253)
         "fontdimen" => &["fd:", "fdn:"],
@@ -167,8 +173,18 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "mathcode" => &["mc:"],
         "delcode" => &["dc:"],
         // registers and parameters (§1224-§1248)
-        "count" | "dimen" | "skip" | "muskip" | "toks" | "advance" | "multiply" | "divide"
-        | "parshape" | "interlinepenalties" | "clubpenalties" | "widowpenalties"
+        "count"
+        | "dimen"
+        | "skip"
+        | "muskip"
+        | "toks"
+        | "advance"
+        | "multiply"
+        | "divide"
+        | "parshape"
+        | "interlinepenalties"
+        | "clubpenalties"
+        | "widowpenalties"
         | "displaywidowpenalties" => &[
             "count:", "dimen:", "skip:", "muskip:", "toks:", "param:", "parshape",
         ],
@@ -252,7 +268,6 @@ fn add_head(st: &mut Option<Vec<String>>, h: &str) {
     add_heads(st, Some(&[h]));
 }
 
-
 /// The heads of every field a run may set besides the control sequences:
 /// each lowercase letter but `c` and `a`, and those two followed by any
 /// letter but the `s` of `cs:` and the `c` of `act:`.
@@ -265,10 +280,7 @@ fn state_prefixes() -> &'static [String] {
                 v.push((c as char).to_string());
             }
         }
-        for c in (b'A'..=b'Z')
-            .chain(b'0'..=b'9')
-            .chain(*b"_@.-/:")
-        {
+        for c in (b'A'..=b'Z').chain(b'0'..=b'9').chain(*b"_@.-/:") {
             v.push((c as char).to_string());
         }
         for c in b'a'..=b'z' {
@@ -566,9 +578,25 @@ struct Analysis<'t> {
 fn starts_par(name: &str) -> bool {
     matches!(
         name,
-        "indent" | "noindent" | "char" | "unhbox" | "unhcopy" | "vrule" | "accent"
-            | "discretionary" | "-" | "hskip" | "hfil" | "hfill" | "hss" | "hfilneg" | "valign"
-            | " " | "noboundary" | "tex_indent:D" | "tex_noindent:D"
+        "indent"
+            | "noindent"
+            | "char"
+            | "unhbox"
+            | "unhcopy"
+            | "vrule"
+            | "accent"
+            | "discretionary"
+            | "-"
+            | "hskip"
+            | "hfil"
+            | "hfill"
+            | "hss"
+            | "hfilneg"
+            | "valign"
+            | " "
+            | "noboundary"
+            | "tex_indent:D"
+            | "tex_noindent:D"
     )
 }
 
@@ -583,10 +611,19 @@ impl Analysis<'_> {
             prelude: &empty,
         };
         let p = pass::analyze(text, kind, scope);
-        let item_of = p.items.iter().enumerate().map(|(i, it)| (it.atom, i)).collect();
+        let item_of = p
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| (it.atom, i))
+            .collect();
         let mut claimed = vec![false; p.atoms.len()];
         for it in &p.items {
-            for c in claimed.iter_mut().take(it.end.min(p.atoms.len())).skip(it.atom + 1) {
+            for c in claimed
+                .iter_mut()
+                .take(it.end.min(p.atoms.len()))
+                .skip(it.atom + 1)
+            {
                 *c = true;
             }
         }
@@ -623,9 +660,15 @@ impl Analysis<'_> {
     /// Nothing of an atom read under another regime than the command's
     /// first (a change the command itself makes, as the pass predicted).
     fn cats_of(&self, first: usize, a: usize, out: &mut Vec<(u8, u8)>) {
-        let Some(at) = self.atoms().get(a) else { return };
+        let Some(at) = self.atoms().get(a) else {
+            return;
+        };
         let r = self.p.regime_at(at.tok);
-        if self.atoms().get(first).is_some_and(|f| self.p.regime_at(f.tok) != r) {
+        if self
+            .atoms()
+            .get(first)
+            .is_some_and(|f| self.p.regime_at(f.tok) != r)
+        {
             return;
         }
         let bytes: Vec<u8> = match at.kind {
@@ -685,7 +728,11 @@ impl Analysis<'_> {
         let Some(t) = self.prev(a) else { return false };
         let Some(c) = self.prev(t) else { return false };
         let at = self.atoms()[c];
-        at.kind == AtomKind::Cs && matches!(at.name(self.text), "afterassignment" | "tex_afterassignment:D")
+        at.kind == AtomKind::Cs
+            && matches!(
+                at.name(self.text),
+                "afterassignment" | "tex_afterassignment:D"
+            )
     }
 
     /// The hint of the command whose first atom is `a`.
@@ -696,7 +743,10 @@ impl Analysis<'_> {
         };
         let excerpt = &self.text[at.start..self.text.len().min(at.start + 40)];
         if self.claimed[a] {
-            return Hint::any("operand of an earlier command (claimed, never run)", excerpt);
+            return Hint::any(
+                "operand of an earlier command (claimed, never run)",
+                excerpt,
+            );
         }
         if at.kind == AtomKind::Par {
             return demoted("par", excerpt);
@@ -707,7 +757,10 @@ impl Analysis<'_> {
         if at.kind != AtomKind::Cs
             && let Some(p) = self.prev(a)
             && self.atoms()[p].kind == AtomKind::Cs
-            && self.hint(p).bound.is_none()
+            && {
+                let h = self.hint(p);
+                h.bound.is_none() && !is_demoted(&h)
+            }
         {
             // (what follows a command the pass cannot bound may be its
             // operand, read by it)
@@ -726,8 +779,13 @@ impl Analysis<'_> {
             AtomKind::Char(_) | AtomKind::Verb => {
                 // (a run of characters: the active ones expand here, and
                 // the token after the run is looked at, §1038)
+                // (a run appends to its paragraph's cells, `par:<anchor>:…`,
+                // whether or not it starts the paragraph; the engine's
+                // narrowing keeps the anchor its own)
+                add_head(&mut b.state, "par:");
                 if self.may_start_par(a) {
-                    add_head(&mut b.state, "par:");
+                    // (a paragraph begun: its list's opener, §1091)
+                    add_head(&mut b.state, "lopen:");
                 }
                 // (the token after the run is read with it, and may end
                 // the paragraph: `\\prevgraf`, §1096)
@@ -743,7 +801,9 @@ impl Analysis<'_> {
                         // set to -1, §1138, §1139)
                         add_heads(&mut b.state, Some(&["lopen:", "param:", "inc"]));
                     }
-                    if x.kind == AtomKind::Char('&') && self.p.regime_at(x.tok).catcode(b'&') == Some(4) {
+                    if x.kind == AtomKind::Char('&')
+                        && self.p.regime_at(x.tok).catcode(b'&') == Some(4)
+                    {
                         // (a cell's end, §789)
                         add_head(&mut b.state, "align");
                         add_head(&mut b.state, "badness");
@@ -762,7 +822,7 @@ impl Analysis<'_> {
             }
             AtomKind::Par => {
                 self.cats_of(a, a, &mut b.cats);
-                add_head(&mut b.state, "par:");
+                add_heads(&mut b.state, Some(&["par:", "param:", "parshape"]));
                 self.call_hint("par", &mut b, &mut cause)
             }
             AtomKind::Close => {
@@ -783,7 +843,10 @@ impl Analysis<'_> {
         }) {
             // (a character this text never makes active is defined as
             // one: the regime here is not the one the pass read)
-            return Hint::any(format!("{f}: an active character the text does not make"), excerpt);
+            return Hint::any(
+                format!("{f}: an active character the text does not make"),
+                excerpt,
+            );
         }
         b.no_scope = ok && self.no_scope(a);
         if ok {
@@ -843,14 +906,59 @@ impl Analysis<'_> {
             .unwrap_or(name);
         matches!(
             n,
-            "def" | "gdef" | "edef" | "xdef" | "let" | "chardef" | "mathchardef" | "countdef"
-                | "dimendef" | "skipdef" | "muskipdef" | "toksdef" | "relax" | "message"
-                | "errmessage" | "catcode" | "lccode" | "uccode" | "sfcode" | "mathcode"
-                | "delcode" | "count" | "dimen" | "skip" | "muskip" | "advance" | "multiply"
-                | "divide" | "font" | "fontdimen" | "hyphenchar" | "skewchar" | "penalty"
-                | "kern" | "hskip" | "vskip" | "hfil" | "hfill" | "vfil" | "vfill" | "hss"
-                | "vss" | "char" | "/" | " " | "unskip" | "unpenalty" | "unkern"
-                | "textfont" | "scriptfont" | "scriptscriptfont" | "showthe" | "show"
+            "def"
+                | "gdef"
+                | "edef"
+                | "xdef"
+                | "let"
+                | "chardef"
+                | "mathchardef"
+                | "countdef"
+                | "dimendef"
+                | "skipdef"
+                | "muskipdef"
+                | "toksdef"
+                | "relax"
+                | "message"
+                | "errmessage"
+                | "catcode"
+                | "lccode"
+                | "uccode"
+                | "sfcode"
+                | "mathcode"
+                | "delcode"
+                | "count"
+                | "dimen"
+                | "skip"
+                | "muskip"
+                | "advance"
+                | "multiply"
+                | "divide"
+                | "font"
+                | "fontdimen"
+                | "hyphenchar"
+                | "skewchar"
+                | "penalty"
+                | "kern"
+                | "hskip"
+                | "vskip"
+                | "hfil"
+                | "hfill"
+                | "vfil"
+                | "vfill"
+                | "hss"
+                | "vss"
+                | "char"
+                | "/"
+                | " "
+                | "unskip"
+                | "unpenalty"
+                | "unkern"
+                | "textfont"
+                | "scriptfont"
+                | "scriptscriptfont"
+                | "showthe"
+                | "show"
         ) || (table_param(n) && !matches!(n, "everypar" | "output"))
     }
 
@@ -889,7 +997,7 @@ impl Analysis<'_> {
                 continue;
             }
             if starts_par(c) {
-                add_head(st, "par:");
+                add_heads(st, Some(&["par:", "lopen:"]));
             }
             add_heads(st, class_state(c));
         }
@@ -903,7 +1011,9 @@ impl Analysis<'_> {
     fn defined_state(&self, name: &str, may_start_par: bool, st: &mut Option<Vec<String>>) {
         match self.defs.shape(name) {
             Some(pass::Shape::Quantity('f')) => add_head(st, "font"),
-            Some(pass::Shape::Quantity('i' | 'd' | 'g' | 't')) => add_heads(st, class_state("count")),
+            Some(pass::Shape::Quantity('i' | 'd' | 'g' | 't')) => {
+                add_heads(st, class_state("count"))
+            }
             Some(pass::Shape::Quantity(_)) => {
                 add_heads(st, Some(&["box:", "lvlfix", "badness", "inspen", "align"]));
                 if may_start_par {
@@ -1006,13 +1116,25 @@ impl Analysis<'_> {
                 } else if class_state(o) == Some(&["ifstack"][..]) {
                     // (a conditional expanded in an operand, §498)
                     add_head(&mut b.state, "ifstack");
-                } else if matches!(o, "csname" | "tex_csname:D") && !b.prefixes.iter().any(|p| p == "cs:") {
+                } else if matches!(o, "csname" | "tex_csname:D")
+                    && !b.prefixes.iter().any(|p| p == "cs:")
+                {
                     b.prefixes.push("cs:".to_owned());
                 }
             }
         }
         if let Some(f) = Tok::cs(&caret_name(name)).field_name() {
             b.means.push((f, 1));
+        }
+        {
+            // (a pdfTeX primitive read on the command's line, in an operand
+            // the item does not cover: its state, and a box it takes)
+            let at = &atoms[a];
+            let line = &self.text[at.start..];
+            let line = &line[..line.find('\n').unwrap_or(line.len())];
+            if line.contains("\\pdf") {
+                add_heads(&mut b.state, Some(&["pdf:", "box:"]));
+            }
         }
         for r in &it.hints.relied {
             if let Some(f) = Tok::cs(&caret_name(r)).field_name()
@@ -1035,10 +1157,15 @@ impl Analysis<'_> {
             b.prefixes.push("cs:\u{10FFFE}F".to_owned());
         }
         if starts_par(name) && self.may_start_par(a) {
-            add_head(&mut b.state, "par:");
+            add_heads(&mut b.state, Some(&["par:", "lopen:"]));
         }
-        if matches!(name, "par" | "tex_par:D") || it.hints.implicit == pass::Implicit::EndsParagraph {
+        if matches!(name, "par" | "tex_par:D") || it.hints.implicit == pass::Implicit::EndsParagraph
+        {
             add_head(&mut b.state, "par:");
+            // (a paragraph's end: `normal_paragraph` resets `\\looseness`,
+            // `\\hangindent`, `\\hangafter`, `\\parshape`,
+            // `\\interlinepenalties`, §1070, §1096)
+            add_heads(&mut b.state, Some(&["param:", "parshape"]));
         }
         if self.after_afterassignment(first) {
             add_head(&mut b.state, "aftertoken");
@@ -1078,7 +1205,7 @@ impl Analysis<'_> {
 fn opener(st: &mut Option<Vec<String>>, open: bool) {
     let opens = st.as_ref().is_some_and(|v| {
         v.iter()
-            .any(|h| matches!(h.as_str(), "par:" | "box:" | "inc" | "align" | "param:" | "lvlfix"))
+            .any(|h| matches!(h.as_str(), "box:" | "inc" | "align" | "param:" | "lvlfix"))
     });
     if open || opens {
         add_head(st, "lopen:");
@@ -1087,9 +1214,6 @@ fn opener(st: &mut Option<Vec<String>>, open: bool) {
     // §1091, §1096)
     if st.as_ref().is_some_and(|v| v.iter().any(|h| h == "par:")) {
         add_head(st, "pg:");
-        // (and `normal_paragraph` resets `\\looseness`, `\\hangindent`,
-        // `\\hangafter`, `\\parshape`, `\\interlinepenalties`, §1070)
-        add_heads(st, Some(&["param:", "parshape"]));
     }
 }
 
@@ -1211,7 +1335,9 @@ fn by_name() -> &'static Cache<u64> {
 /// run without a format).
 fn looks_initex(text: &str) -> bool {
     let brace = text.find('{');
-    let line = text.find("\\catcode`\\{").or_else(|| text.find("\\catcode123"));
+    let line = text
+        .find("\\catcode`\\{")
+        .or_else(|| text.find("\\catcode123"));
     match (line, brace) {
         (Some(l), Some(b)) => l < b,
         (Some(_), None) => true,
@@ -1510,7 +1636,10 @@ pub(crate) fn effect_none(v: &Values, args: &[ValueId]) -> bool {
     if OFF.load(Ordering::Relaxed) || std::env::var_os("PHITEX_HINTS_OFF").is_some() {
         return false;
     }
-    hint_of_args(v, args).bound.as_ref().is_some_and(|b| b.no_scope)
+    hint_of_args(v, args)
+        .bound
+        .as_ref()
+        .is_some_and(|b| b.no_scope)
 }
 
 /// The engine's question, answered from the text.
@@ -1563,6 +1692,9 @@ const DEMOTED: &[&str] = &[
     "errmessage",
     // (a catcode read after a `\\scantokens` changed the escape, §1235)
     "catcode",
+    // (`\\patterns` in hyphen.tex records a list opener, `lopen:`)
+    "patterns",
+    "hyphenation",
 ];
 
 fn demoted(class: &str, excerpt: &str) -> Hint {
@@ -1753,11 +1885,15 @@ mod tests {
         assert!(is_demoted(&text.at(0)));
         // the run after it is in one: the list, and `\\prevgraf` if the
         // token it reads after it ends the paragraph
-        assert_eq!(st(10).as_deref(), Some(&["pg:".to_owned()][..]));
+        assert_eq!(
+            st(10).as_deref(),
+            Some(&["par:".to_owned(), "pg:".to_owned()][..])
+        );
         // a run of text after \par may start a paragraph
         assert!(st(5).expect("some").contains(&"par:".to_owned()));
-        // and the run after it is in one
-        assert!(!st(10).expect("some").contains(&"par:".to_owned()));
+        // and the run after it is in one: no list opened
+        assert!(st(5).expect("some").contains(&"lopen:".to_owned()));
+        assert!(!st(10).expect("some").contains(&"lopen:".to_owned()));
         // (a conditional, when bounded, may change the if stack)
         if let Some(b) = text.at(15).bound {
             assert!(b.state.expect("some").contains(&"ifstack".to_owned()));
