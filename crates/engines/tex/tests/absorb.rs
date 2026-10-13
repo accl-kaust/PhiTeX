@@ -176,15 +176,21 @@ fn texts_cut_short_while_the_cold_build_evaluates() {
     let (p2, tx2, new2) = (progress.clone(), tx.clone(), new.clone());
     let t = std::thread::spawn(move || {
         loop {
-            let deep = p2.running().iter().flatten().any(|&(op, off)| {
-                op == 1 && off > 2000 && off != phitex_tex::Progress::INSIDE
-            });
+            let deep = p2
+                .running()
+                .iter()
+                .flatten()
+                .any(|&(op, off)| op == 1 && off > 2000 && off != phitex_tex::Progress::INSIDE);
             if deep {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        for x in [String::new(), new2[..new2.len() / 3].to_owned(), new2.clone()] {
+        for x in [
+            String::new(),
+            new2[..new2.len() / 3].to_owned(),
+            new2.clone(),
+        ] {
             tx2.send(&x);
             std::thread::sleep(std::time::Duration::from_millis(30));
         }
