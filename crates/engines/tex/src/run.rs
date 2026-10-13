@@ -1617,6 +1617,21 @@ impl<'c, 'a> Run<'c, 'a> {
         if !run.is_empty() {
             out.push(node(run));
         }
+        // (conditionals open when the run closed its scope go on in the
+        // first of them, `carried_conds`)
+        if self.closed_scope()
+            && !self.conds.is_empty()
+            && let Some(first) = out.first_mut()
+            && let Some(fs) = first.first_mut()
+        {
+            let mut xs = vec![tag("c")];
+            xs.extend(self.conds.iter().map(|&c| v.int(i64::from(c))));
+            xs.push(v.int(-1));
+            xs.extend(self.if_codes.iter().map(|&c| v.int(i64::from(c))));
+            let mut frames = vec![v.list(xs)];
+            frames.extend(list_of(v, *fs));
+            *fs = v.list(frames);
+        }
         out
     }
 
@@ -1677,19 +1692,26 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.begin_command();
                 self.command()?;
                 self.mark.active = false;
-                if self.claim_rest {
+                if self.claim_rest || self.closed_scope() {
                     return Ok(());
                 }
             }
-            // `\begin{document}`'s slice ends inside the environment's
-            // group: that group becomes the engine scope the body's
-            // regions run in (`hints::opens_scope`)
+            // a region that ends with one group of its own still open
+            // (an environment's `\begin`, a macro's `\begingroup` or
+            // `\bgroup`), outside every paragraph, box and conditional,
+            // leaves it to the engine as the scope the following regions
+            // run in (`Run::leave_scope`); more than one, or a text that
+            // said it opens no scope, reads on
             if self.doc
                 && self.conds.is_empty()
+                && self.effect == Effect::None
                 && self.nest.len() == 1
-                && self.nest[0].group != 0
                 && !self.nest[0].owns
-                && crate::hints::opens_scope(self.v, &self.cx.args())
+                && matches!(
+                    self.nest[0].group,
+                    crate::val::group::SIMPLE | crate::val::group::SEMI_SIMPLE
+                )
+                && !crate::hints::effect_none(self.v, &self.cx.args())
             {
                 self.leave_scope()?;
                 return Ok(());
@@ -1716,6 +1738,15 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             return Ok(());
         }
+    }
+
+    /// Whether a document run closed the engine scope it ran in, with
+    /// nothing of its own open but conditionals: it ends after that
+    /// command (`Effect::Close`, its reads and definitions inside the
+    /// scope), and what it has left of its input runs outside it as the
+    /// following nodes, the conditionals carried ([`Run::leftover`]).
+    fn closed_scope(&self) -> bool {
+        self.doc && self.effect == Effect::Close && self.nest.is_empty()
     }
 
     /// Whether the run has something open that must close in this run:
@@ -1903,6 +1934,34 @@ fn decode_frames_upto(v: &Values, args: &[ValueId], limit: usize) -> Vec<Frame> 
         out.extend(crate::val::frame_of(v, f, || decode_frame(v, f)));
     }
     out
+}
+
+/// The conditionals a node's text begins inside: those its run's
+/// predecessor left open when it closed its scope ([`Run::leftover`]),
+/// `(if_limit, cur_if)` each.
+pub(crate) fn carried_conds(v: &Values, args: &[ValueId]) -> Option<(Vec<u8>, Vec<i32>)> {
+    let &l = args.first()?;
+    let Value::List(fs) = &*v.get(l) else {
+        return None;
+    };
+    let &f = fs.first()?;
+    let Value::List(xs) = &*v.get(f) else {
+        return None;
+    };
+    if xs.first().map(|&t| str_of(v, t)).as_deref() != Some("c") {
+        return None;
+    }
+    let ns: Vec<i64> = xs[1..].iter().map(|&x| int_of(v, x)).collect();
+    let k = ns.iter().position(|&x| x < 0)?;
+    let conds = ns[..k]
+        .iter()
+        .map(|&c| u8::try_from(c).unwrap_or(0))
+        .collect();
+    let codes = ns[k + 1..]
+        .iter()
+        .map(|&c| i32::try_from(c).unwrap_or(0))
+        .collect();
+    Some((conds, codes))
 }
 
 /// One frame of a node's arguments (a frame is an immutable value, so
