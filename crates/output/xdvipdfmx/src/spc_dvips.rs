@@ -27,7 +27,10 @@ pub struct State {
 fn spc_handler_ps_header(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     args.skip_white();
     if args.curptr + 1 >= args.endptr || args.buf[args.curptr] != b'=' {
-        dpx.spc_warn(spe, format_args!("No filename specified for PSfile special."));
+        dpx.spc_warn(
+            spe,
+            format_args!("No filename specified for PSfile special."),
+        );
         return Ok(-1);
     }
     args.curptr = args.endptr;
@@ -79,7 +82,10 @@ fn first_page() -> LoadOptions {
 fn spc_handler_ps_file(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
     args.skip_white();
     if args.curptr + 1 >= args.endptr || args.buf[args.curptr] != b'=' {
-        dpx.spc_warn(spe, format_args!("No filename specified for PSfile special."));
+        dpx.spc_warn(
+            spe,
+            format_args!("No filename specified for PSfile special."),
+        );
         return Ok(-1);
     }
     args.curptr += 1;
@@ -88,7 +94,10 @@ fn spc_handler_ps_file(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Re
         parse_filename(s, pp)
     };
     let Some(filename) = filename else {
-        dpx.spc_warn(spe, format_args!("No filename specified for PSfile special."));
+        dpx.spc_warn(
+            spe,
+            format_args!("No filename specified for PSfile special."),
+        );
         return Ok(-1);
     };
     let mut ti = TransformInfo::default();
@@ -100,7 +109,10 @@ fn spc_handler_ps_file(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Re
     if form_id < 0 {
         dpx.spc_warn(
             spe,
-            format_args!("Failed to read image file: {}", String::from_utf8_lossy(&filename)),
+            format_args!(
+                "Failed to read image file: {}",
+                String::from_utf8_lossy(&filename)
+            ),
         );
         return Ok(-1);
     }
@@ -112,7 +124,10 @@ fn spc_handler_ps_file(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Re
 /// `spc_handler_ps_plotfile` ("not correct implementation but dvipdfm
 /// supports...").
 fn spc_handler_ps_plotfile(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -> Result<i32> {
-    dpx.spc_warn(spe, format_args!("\"ps: plotfile\" found (not properly implemented)"));
+    dpx.spc_warn(
+        spe,
+        format_args!("\"ps: plotfile\" found (not properly implemented)"),
+    );
     args.skip_white();
     let filename = {
         let (s, pp) = args.parts();
@@ -126,7 +141,10 @@ fn spc_handler_ps_plotfile(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -
     if form_id < 0 {
         dpx.spc_warn(
             spe,
-            format_args!("Could not open PS file: {}", String::from_utf8_lossy(&filename)),
+            format_args!(
+                "Could not open PS file: {}",
+                String::from_utf8_lossy(&filename)
+            ),
         );
         return Ok(-1);
     }
@@ -140,17 +158,32 @@ fn spc_handler_ps_plotfile(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) -
 
 /// The warnings after inline PostScript, and the graphics state back
 /// where it was if it failed (with `restore`).
-fn after_inline(dpx: &mut Dpx, spe: &SpcEnv, error: i32, st_depth: usize, gs_depth: i32, restore: bool) -> Result<()> {
+fn after_inline(
+    dpx: &mut Dpx,
+    spe: &SpcEnv,
+    error: i32,
+    st_depth: usize,
+    gs_depth: i32,
+    restore: bool,
+) -> Result<()> {
     if error != 0 {
-        dpx.spc_warn(spe, format_args!("Interpreting PS code failed!!! Output might be broken!!!"));
+        dpx.spc_warn(
+            spe,
+            format_args!("Interpreting PS code failed!!! Output might be broken!!!"),
+        );
         if restore {
             dpx.pdf_dev_grestore_to(gs_depth)?;
         }
     } else if st_depth != dpx.mps_stack_depth() {
-        dpx.spc_warn(spe, format_args!("Stack not empty after execution of inline PostScript code."));
         dpx.spc_warn(
             spe,
-            format_args!(">> Your macro package makes some assumption on internal behaviour of DVI drivers."),
+            format_args!("Stack not empty after execution of inline PostScript code."),
+        );
+        dpx.spc_warn(
+            spe,
+            format_args!(
+                ">> Your macro package makes some assumption on internal behaviour of DVI drivers."
+            ),
         );
         dpx.spc_warn(spe, format_args!(">> It may not compatible with dvipdfmx."));
     }
@@ -181,7 +214,11 @@ fn spc_handler_ps_literal(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
         (x_user, y_user) = (st.pending_x, st.pending_y);
         args.curptr += b":[end]".len();
     } else if rest.first() == Some(&b':') {
-        (x_user, y_user) = if st.position_set { (st.pending_x, st.pending_y) } else { (cp.x, cp.y) };
+        (x_user, y_user) = if st.position_set {
+            (st.pending_x, st.pending_y)
+        } else {
+            (cp.x, cp.y)
+        };
         args.curptr += 1;
     } else {
         st.position_set = true;
@@ -215,7 +252,14 @@ fn spc_handler_ps_default(dpx: &mut Dpx, spe: &mut SpcEnv, args: &mut SpcArg) ->
     let st_depth = dpx.mps_stack_depth();
     let gs_depth = dpx.pdf_dev_current_depth();
     let cp = dpx.spc_get_current_point(spe);
-    let mut m = PdfTmatrix { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: cp.x, f: cp.y };
+    let mut m = PdfTmatrix {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: cp.x,
+        f: cp.y,
+    };
     dpx.pdf_dev_concat(&m)?;
     let error = {
         let (s, pp) = args.parts();
@@ -273,7 +317,10 @@ pub fn spc_dvips_setup_handler(
         if ap.rest().starts_with(b" plotfile ") {
             ap.curptr += b" plotfile ".len();
         }
-    } else if ap.curptr + 1 < ap.endptr && ap.buf[ap.curptr] == b'"' && ap.buf[ap.curptr + 1] == b' ' {
+    } else if ap.curptr + 1 < ap.endptr
+        && ap.buf[ap.curptr] == b'"'
+        && ap.buf[ap.curptr + 1] == b' '
+    {
         ap.curptr += 2;
     }
     if ap.curptr == key {
@@ -306,10 +353,16 @@ mod tests {
     #[test]
     fn filenames() {
         let mut p = 0;
-        assert_eq!(parse_filename(b"\"a b.eps\" llx=0", &mut p).as_deref(), Some(&b"a b.eps"[..]));
+        assert_eq!(
+            parse_filename(b"\"a b.eps\" llx=0", &mut p).as_deref(),
+            Some(&b"a b.eps"[..])
+        );
         assert_eq!(p, 9);
         let mut p = 0;
-        assert_eq!(parse_filename(b"x.eps llx=0", &mut p).as_deref(), Some(&b"x.eps"[..]));
+        assert_eq!(
+            parse_filename(b"x.eps llx=0", &mut p).as_deref(),
+            Some(&b"x.eps"[..])
+        );
         assert_eq!(p, 5);
         let mut p = 0;
         assert_eq!(parse_filename(b"\"x.eps", &mut p), None);

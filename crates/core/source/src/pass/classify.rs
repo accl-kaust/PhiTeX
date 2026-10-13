@@ -1789,7 +1789,14 @@ impl Cx<'_> {
         } else if quantity && !it.consumes {
             hints::DefSet::default()
         } else {
-            let e = hints::effects(self.text, self.atoms, a, a + 1, global);
+            // (its arguments may be expanded as it reads them: what
+            // they define counts here; a box's content runs after it)
+            let hi = if boxk.is_some() {
+                a + 1
+            } else {
+                it.end.max(a + 1)
+            };
+            let e = hints::effects(self.text, self.atoms, a, hi, global);
             closure.of(&e)
         };
         let may_define = set.may_define();
@@ -1859,7 +1866,14 @@ impl Cx<'_> {
                 None => ScopeHint::None,
             },
         };
-        let implicit = hints::implicit_of(name, next_open.is_some());
+        let mut implicit = hints::implicit_of(name, next_open.is_some());
+        if implicit == hints::Implicit::None
+            && (self.scope.document.ends_paragraph(name, 8)
+                || self.scope.prelude.ends_paragraph(name, 8))
+        {
+            // (a macro whose body ends with a paragraph's end)
+            implicit = hints::Implicit::EndsParagraph;
+        }
         let mut reads = vec![hints::cs(name)];
         for (_, d) in noted {
             let f = hints::cs(d);
@@ -1880,6 +1894,8 @@ impl Cx<'_> {
             implicit,
             reads,
             cause: it.cause.as_ref().map(|c| c.kind),
+            relied: set.relied.clone(),
+            calls: set.calls.clone(),
         }
     }
 }

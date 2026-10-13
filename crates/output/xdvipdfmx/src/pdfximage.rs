@@ -1052,8 +1052,14 @@ impl Dpx {
             return Ok(-1);
         };
         let version = self.o.get_version();
-        let Some(data) = self.files.apply_filter(&distiller_template, filename, version) else {
-            warn!("Image format conversion for \"{}\" failed...", String::from_utf8_lossy(filename));
+        let Some(data) = self
+            .files
+            .apply_filter(&distiller_template, filename, version)
+        else {
+            warn!(
+                "Image format conversion for \"{}\" failed...",
+                String::from_utf8_lossy(filename)
+            );
             return Ok(-1);
         };
         // (C's temporary file's name: the distilled file's identity in the
@@ -1063,11 +1069,19 @@ impl Dpx {
         let mut fp = MemFile::new(data, &temp);
         let error = self.pdf_include_page(xobj_id, &mut fp, &temp, options)?;
         if error != 0 {
-            warn!("Failed to include image file \"{}\"", String::from_utf8_lossy(filename));
+            warn!(
+                "Failed to include image file \"{}\"",
+                String::from_utf8_lossy(filename)
+            );
             warn!(">> Please check if");
             warn!(">>   {}", String::from_utf8_lossy(&distiller_template));
-            warn!(">>   %o = output filename, %i = input filename, %b = input filename without suffix");
-            warn!(">> can really convert \"{}\" to PDF format image.", String::from_utf8_lossy(filename));
+            warn!(
+                ">>   %o = output filename, %i = input filename, %b = input filename without suffix"
+            );
+            warn!(
+                ">> can really convert \"{}\" to PDF format image.",
+                String::from_utf8_lossy(filename)
+            );
         }
         Ok(error)
     }

@@ -14,8 +14,9 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use phitex_defuse::{
     Engine, Field, NodeId, OpId, Report, SeqMonoid, SumMonoid, UnitId, Value, ValueId, Values,
 };
-use phitex_source::pass::{self, AtomKind};
+use phitex_source::pass;
 
+use crate::hints::Defs;
 use crate::ops::{Dvi, Exec, Files, Mark, OutPage, Put, Shared};
 use crate::run::{Ops, slice_args};
 use crate::val::{field_name, int_of, list_of, str_of};
@@ -169,12 +170,14 @@ struct Absorb<'a> {
     nodes: &'a mut Vec<(String, NodeId)>,
     exec: OpId,
     dvi: NodeId,
+    /// The format's definitions, for the new slices' hints and regions.
+    defs: Defs,
 }
 
 impl phitex_defuse::EditSource for Absorb<'_> {
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
         let (text, version) = self.edits.take()?;
-        apply_text(eng, self.exec, self.dvi, self.nodes, &text);
+        apply_text(eng, self.exec, self.dvi, self.nodes, &text, &self.defs);
         Some(version)
     }
 }
@@ -188,9 +191,10 @@ fn apply_text(
     dvi: NodeId,
     nodes_now: &mut Vec<(String, NodeId)>,
     text: &str,
+    defs: &Defs,
 ) {
     let text = as_file(text);
-    let new: Vec<(String, (usize, usize))> = slices(&text)
+    let new: Vec<(String, (usize, usize))> = slices(&text, defs)
         .into_iter()
         .map(|(s, e)| {
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
@@ -213,16 +217,20 @@ fn apply_text(
     let common = old_mid.min(new_mid);
     // the paragraph regions before and after (OUTPUT.md §5): a kept node
     // whose anchor or boundary flag changed is replaced
-    let new_flags = slice_flags(&text);
+    let (new_flags, new_depths) = slice_info(&text, defs);
     let old_text: String = old.iter().map(|(k, _)| k.get(1..).unwrap_or("")).collect();
-    let old_flags = slice_flags(&old_text);
+    let (old_flags, old_depths) = slice_info(&old_text, defs);
     let old_regions =
         (old_flags.len() == old.len()).then(|| regions(&old_flags, |i| raw_of(old[i].1)));
+    let hints = crate::hints::text_hints(&text, pass::FileKind::Document, defs);
     let args_of = |eng: &Engine, k: usize, anchor: i64| {
         let (s, e) = new[k].1;
         let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
         let boundary = new_flags.get(k).is_some_and(|f| f & 1 != 0);
-        slice_args(eng.values(), &text[s..e], starts, anchor, boundary)
+        let depth = new_depths.get(k).copied().unwrap_or(0);
+        let mut args = slice_args(eng.values(), &text[s..e], starts, anchor, boundary, depth);
+        args.push(crate::hints::hint_arg(eng.values(), &hints, s));
+        args
     };
     for k in common..old_mid {
         eng.remove(old[a + k].1);
@@ -241,7 +249,8 @@ fn apply_text(
             let n = old[oi].1;
             let same = old_regions
                 .as_ref()
-                .is_some_and(|r| r[oi] == (anchor, f & 1 != 0));
+                .is_some_and(|r| r[oi] == (anchor, f & 1 != 0))
+                && old_depths.get(oi) == new_depths.get(i);
             if !same {
                 let args = args_of(eng, i, anchor);
                 eng.replace(n, exec, args);
@@ -274,7 +283,7 @@ fn raw_of(n: NodeId) -> i64 {
     i64::from_ne_bytes(n.raw().to_ne_bytes())
 }
 
-/// Each slice's `(anchor, boundary)` from its flags ([`slice_flags`]),
+/// Each slice's `(anchor, boundary)` from its flags ([`slice_info`]),
 /// `id` giving the raw id of slice `i`'s node.
 fn regions(flags: &[u8], id: impl Fn(usize) -> i64) -> Vec<(i64, bool)> {
     let (mut anchor, mut last) = (0, None);
@@ -482,7 +491,7 @@ impl Rd<'_> {
 /// the serialised environment's layout, the node args, the `Fields` set,
 /// the hint args or the state fields' names change: a prelude exported
 /// under another layout is refused (rebuilt), never loaded.
-pub const PRELUDE_LAYOUT: u32 = 2;
+pub const PRELUDE_LAYOUT: u32 = 3;
 
 /// The exported prelude's magic, before the layout and the engine's
 /// identity.
@@ -611,69 +620,90 @@ fn date_params(t: i64) -> [(&'static str, i64); 4] {
 }
 
 /// The nodes of a text: slices starting at the pass's atoms (characters
-/// run together), each with the blanks before the next.
-pub(crate) fn slices(text: &str) -> Vec<(usize, usize)> {
-    let defs = pass::Definitions::default();
-    let scope = pass::Scope {
-        document: &defs,
-        file: 0,
-        prelude: &defs,
-    };
-    let p = pass::analyze(text, pass::FileKind::Document, scope);
-    let mut starts: Vec<usize> = Vec::new();
-    let mut prev_char = false;
-    for a in &p.atoms {
-        let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
-        if !(ch && prev_char) {
-            starts.push(a.start);
-        }
-        prev_char = ch;
-    }
-    if starts.first() != Some(&0) {
-        starts.insert(0, 0);
-    }
-    starts.dedup();
-    let mut out = Vec::with_capacity(starts.len());
-    for (i, &s) in starts.iter().enumerate() {
-        let e = starts.get(i + 1).copied().unwrap_or(text.len());
-        if e > s {
-            out.push((s, e));
-        }
-    }
-    out
+/// run together), each with the blanks before the next; the pass over
+/// the whole text also gives each slice's hint ([`crate::hints`]).
+pub(crate) fn slices(text: &str, defs: &Defs) -> Vec<(usize, usize)> {
+    crate::hints::text_hints(text, pass::FileKind::Document, defs)
+        .slices
+        .clone()
 }
+
+/// The primitive conditionals (§487) and e-TeX's and pdfTeX's.
+const CONDITIONALS: &[&str] = &[
+    "if",
+    "ifcat",
+    "ifnum",
+    "ifdim",
+    "ifodd",
+    "ifvmode",
+    "ifhmode",
+    "ifmmode",
+    "ifinner",
+    "ifvoid",
+    "ifhbox",
+    "ifvbox",
+    "ifx",
+    "ifeof",
+    "iftrue",
+    "iffalse",
+    "ifcase",
+    "ifdefined",
+    "ifcsname",
+    "iffontchar",
+    "ifincsname",
+    "ifpdfabsnum",
+    "ifpdfabsdim",
+    "ifpdfprimitive",
+];
 
 /// The paragraph regions of a text's slices ([`slices`], OUTPUT.md §5):
 /// bit 0, the slice holds an item the pass marks paragraph-ending
 /// (`Implicit::EndsParagraph`: a blank line, `\par`, a vertical command
 /// that reads nothing after it, a macro whose body ends in one) at brace
-/// depth 0 and not consumed by an earlier item; bit 1, a region starts at the slice (the first after
-/// what that item consumes).
-pub(crate) fn slice_flags(text: &str) -> Vec<u8> {
-    let defs = pass::Definitions::default();
+/// depth 0 and not consumed by an earlier item; bit 1, a region starts
+/// at the slice (the first after what that item consumes). And each slice's condition-stack depth by the text
+/// (OUTPUT.md §6): the primitive conditionals before it less the `\fi`s,
+/// items consumed by an earlier one (a `\let`'s, a definition's body)
+/// not counted.
+///
+/// A macro ends a paragraph when its body does (`Definitions::ends_paragraph`),
+/// so the text's own definitions are harvested first and the format's
+/// (`defs`) stand behind them: a document written as calls of a
+/// paragraph macro has one region per call, not one for the file.
+pub(crate) fn slice_info(text: &str, defs: &Defs) -> (Vec<u8>, Vec<i64>) {
+    let mut doc = pass::Definitions::new();
+    doc.harvest(text, pass::FileKind::Document, 0);
     let scope = pass::Scope {
-        document: &defs,
+        document: &doc,
         file: 0,
-        prelude: &defs,
+        prelude: defs,
     };
     let p = pass::analyze(text, pass::FileKind::Document, scope);
-    let sl = slices(text);
+    let sl = slices(text, defs);
     let mut flags = vec![0u8; sl.len()];
     // brace depth before each atom
     let mut depth = Vec::with_capacity(p.atoms.len());
     let mut d: usize = 0;
     for at in &p.atoms {
-        if at.kind == AtomKind::Close {
+        if at.kind == pass::AtomKind::Close {
             d = d.saturating_sub(1);
         }
         depth.push(d);
-        if at.kind == AtomKind::Open {
+        if at.kind == pass::AtomKind::Open {
             d += 1;
         }
     }
     let mut ends: Vec<(usize, usize)> = Vec::new();
+    let mut ifs: Vec<(usize, i64)> = Vec::new();
     let mut consumed = 0;
     for it in &p.items {
+        if it.atom >= consumed {
+            if CONDITIONALS.contains(&it.name.as_str()) {
+                ifs.push((it.atom, 1));
+            } else if it.name == "fi" {
+                ifs.push((it.atom, -1));
+            }
+        }
         if it.atom >= consumed
             && depth.get(it.atom) == Some(&0)
             && it.hints.implicit == pass::Implicit::EndsParagraph
@@ -709,7 +739,18 @@ pub(crate) fn slice_flags(text: &str) -> Vec<u8> {
             *f |= 2;
         }
     }
-    flags
+    // the depth before each slice: the items in earlier slices
+    let mut depths = vec![0i64; sl.len()];
+    let mut k = 0;
+    let mut d = 0i64;
+    for (i, &(s, _)) in sl.iter().enumerate() {
+        while k < ifs.len() && at_byte(ifs[k].0) < s {
+            d = (d + ifs[k].1).max(0);
+            k += 1;
+        }
+        depths[i] = d;
+    }
+    (flags, depths)
 }
 
 /// What the evaluations of one build or edit did.
@@ -731,6 +772,9 @@ pub struct Stats {
     /// Paragraph-ending items after which the list was not vertical
     /// (OUTPUT.md §5): the nodes after them read a wrong mode.
     pub par_boundary_violations: u64,
+    /// Outer `\fi`s that found no conditional at the depth the text's
+    /// nesting gave their node (OUTPUT.md §6).
+    pub if_depth_violations: u64,
     pub tail_siblings: u64,
     /// Children that ran out of text (a claim measured short: a bug).
     pub starved: u64,
@@ -773,6 +817,26 @@ pub struct Stats {
     /// is the mean batch.
     pub steps: u64,
     pub ready_total: u64,
+    /// Nodes whose text bounded what they may define ([`crate::hints`]),
+    /// and those that may define anything, among the live nodes that
+    /// ran.
+    pub nodes_bounded: u64,
+    pub nodes_any: u64,
+    /// Nodes whose hint's assumptions (catcodes, meanings) did not hold
+    /// when they ran, and nodes that defined outside their bound: both
+    /// diagnostics, never a silent fallback.
+    pub regime_violations: u64,
+    pub undeclared_definitions: u64,
+    /// Nodes answering `Any` because their class is demoted
+    /// (`crate::hints`; `PHITEX_HINTS=1` names the class).
+    pub hints_demoted: u64,
+    /// Nodes whose text is a token list (`["t", ...]`), and nodes
+    /// reading source text (a document slice, a line, a file).
+    pub nodes_token_frames: u64,
+    pub nodes_text_frames: u64,
+    /// The fields whose speculative reads were refuted, with counts,
+    /// most first.
+    pub refuted_by_field: Vec<(String, u64)>,
     /// The engine's speculative runs: kept with outstanding
     /// assumptions, confirmed, and whose assumptions failed; and nodes
     /// re-done higher after running below a finished input (raises).
@@ -831,6 +895,46 @@ impl Stats {
         self.batches_inline += bi;
         self.jobs_max_batch = self.jobs_max_batch.max(m);
         self.critical_path = usize::try_from(eng.critical_path()).ok();
+    }
+
+    /// The hint counters of `unit` (the live nodes' accumulators), and
+    /// the engine's undeclared-definition errors so far.
+    fn add_hints(&mut self, eng: &Engine, unit: UnitId, errors: &[String]) {
+        let v = eng.values();
+        let get = |name: &str| -> u64 {
+            eng.acc_value(unit, v.field(name))
+                .and_then(|x| v.as_int(x))
+                .and_then(|x| u64::try_from(x).ok())
+                .unwrap_or(0)
+        };
+        let c = crate::hints::COUNTERS;
+        self.nodes_bounded = get(c[0]);
+        self.nodes_any = get(c[1]);
+        self.regime_violations = get(c[2]);
+        self.hints_demoted = get(c[4]);
+        self.nodes_token_frames = get(c[5]);
+        self.nodes_text_frames = get(c[6]);
+        self.undeclared_definitions = get(c[3])
+            + u64::try_from(
+                errors
+                    .iter()
+                    .filter(|e| e.contains("UndeclaredDefinition"))
+                    .count(),
+            )
+            .unwrap_or(u64::MAX);
+    }
+
+    fn add_refuted(&mut self, eng: &Engine, r: &Report) {
+        let v = eng.values();
+        for &(f, n) in &r.refuted_by_field {
+            let name = field_name(v, f);
+            match self.refuted_by_field.iter_mut().find(|e| e.0 == name) {
+                Some(e) => e.1 += n,
+                None => self.refuted_by_field.push((name, n)),
+            }
+        }
+        self.refuted_by_field
+            .sort_by_key(|e| std::cmp::Reverse(e.1));
     }
 
     fn add(&mut self, r: &Report) {
@@ -947,6 +1051,7 @@ impl Graph {
             "writes",
             "tails",
             "parviol",
+            "ifviol",
             "streams",
             crate::pdfrelaxed::PIECES,
         ] {
@@ -955,6 +1060,10 @@ impl Graph {
         }
         let lines = eng.values().field("lines");
         eng.declare_accumulator(lines, Arc::new(SumMonoid));
+        for f in crate::hints::COUNTERS {
+            let fld = eng.values().field(f);
+            eng.declare_accumulator(fld, Arc::new(SumMonoid));
+        }
         Graph {
             eng,
             ops,
@@ -989,7 +1098,9 @@ impl Graph {
             }
             _ => {}
         }
-        let mut out = format!("evaluation: {e}\n{e:?}");
+        // (the field and the nodes' texts first: a harness shows the
+        // head of the message; the error's full form last)
+        let mut out = format!("evaluation: {e}");
         let v = self.eng.values();
         if let E::UndeclaredDefinition { field, .. } = e {
             let _ = write!(out, "\n  field {}", field_name(v, *field));
@@ -1003,17 +1114,22 @@ impl Graph {
                         .iter()
                         .map(|&a| v.render(a).chars().take(200).collect())
                         .collect();
+                    // (and the node's hint: what its text was taken to be)
+                    let h = crate::hints::hint_of_args(v, &i.args);
                     format!(
-                        "{} {:?}, parent {:?}, args {}",
+                        "{} {:?}, parent {:?}, hint {:?} ({}), args {}",
                         i.op,
                         i.state,
                         i.parent,
+                        h.excerpt,
+                        h.cause,
                         args.join(" ")
                     )
                 },
             );
             let _ = write!(out, "\n  {id:?}: {what}");
         }
+        let _ = write!(out, "\n  {e:?}");
         out
     }
 
@@ -1089,6 +1205,7 @@ impl Graph {
                         eprintln!("{m}");
                     }
                     self.eval_errors.push(m);
+                    stats.add_hints(&self.eng, unit, &self.eval_errors);
                     return;
                 }
             };
@@ -1100,7 +1217,9 @@ impl Graph {
                 }
             }
             stats.add(&r);
+            stats.add_refuted(&self.eng, &r);
             stats.add_exec(&ex, c0, &self.eng);
+            stats.add_hints(&self.eng, unit, &self.eval_errors);
             let opened = self.opened(unit);
             let mut asked = false;
             // a file supplied from the finder that the job turns out to
@@ -1189,6 +1308,9 @@ impl Graph {
         if let Some(t) = self.eng.acc_value(unit, v.field("parviol")) {
             stats.par_boundary_violations += u64::try_from(v.seq_to_vec(t).len()).unwrap_or(0);
         }
+        if let Some(t) = self.eng.acc_value(unit, v.field("ifviol")) {
+            stats.if_depth_violations += u64::try_from(v.seq_to_vec(t).len()).unwrap_or(0);
+        }
         let tails_f = v.field("tails");
         if let Some(t) = self.eng.acc_value(unit, tails_f) {
             for x in v.seq_to_vec(t) {
@@ -1199,13 +1321,14 @@ impl Graph {
     }
 
     /// The text's nodes pushed onto `unit`.
-    fn push_text(&mut self, unit: UnitId, text: &str) -> Vec<(String, NodeId)> {
+    fn push_text(&mut self, unit: UnitId, text: &str, defs: &Defs) -> Vec<(String, NodeId)> {
         let mut out = Vec::new();
         let t0 = std::time::Instant::now();
-        let sl = slices(text);
-        let flags = slice_flags(text);
+        let sl = slices(text, defs);
+        let (flags, depths) = slice_info(text, defs);
         let t1 = t0.elapsed();
         let (mut anchor, mut last) = (0, None);
+        let hints = crate::hints::text_hints(text, pass::FileKind::Document, defs);
         for (i, (s, e)) in sl.into_iter().enumerate() {
             let piece = &text[s..e];
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
@@ -1218,7 +1341,9 @@ impl Graph {
             {
                 anchor = l;
             }
-            let args = slice_args(self.eng.values(), piece, starts, anchor, f & 1 != 0);
+            let depth = depths.get(i).copied().unwrap_or(0);
+            let mut args = slice_args(self.eng.values(), piece, starts, anchor, f & 1 != 0, depth);
+            args.push(crate::hints::hint_arg(self.eng.values(), &hints, s));
             let n = self.eng.push(unit, self.ops.exec, args);
             if f & 1 != 0 {
                 last = Some(raw_of(n));
@@ -1248,6 +1373,71 @@ fn as_file(text: &str) -> String {
     } else {
         format!("{text}\n")
     }
+}
+
+/// Whether a file the prelude read is TeX text worth harvesting (fonts,
+/// encodings and maps are not).
+fn is_tex_text(name: &str) -> bool {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    match base.rsplit_once('.') {
+        None => true,
+        Some((_, ext)) => matches!(
+            ext,
+            "tex" | "ltx" | "sty" | "cls" | "def" | "fd" | "clo" | "cfg" | "ini" | "dtx" | "ldf"
+        ),
+    }
+}
+
+/// The definitions the prelude's text and the files it read make, in
+/// load order: the format's macros, which the hints bound a document's
+/// calls with ([`crate::hints`]) and whose bodies mark paragraph regions
+/// ([`slice_info`]). Harvested once per prelude key (a text pass, no
+/// evaluation), for a prelude evaluated here or imported from bytes.
+fn prelude_defs(c: &Cached, prelude: Option<&str>, finder: &Finder) -> Defs {
+    static C: OnceLock<Mutex<HashMap<[u8; 32], Defs>>> = OnceLock::new();
+    let cache = C.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(d) = cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&c.key)
+    {
+        return d.clone();
+    }
+    let t0 = std::time::Instant::now();
+    let mut defs = pass::Definitions::new();
+    let mut order: Vec<u32> = Vec::new();
+    if let Some(p) = prelude {
+        defs.harvest(p, crate::hints::kind_of(p, pass::FileKind::Package), 0);
+        order.push(0);
+    }
+    for (k, (name, h)) in c.reads.iter().enumerate() {
+        if *h == 0 || !is_tex_text(name) {
+            continue;
+        }
+        let Some((_, bytes)) = finder(name) else {
+            continue;
+        };
+        let text: String = bytes.iter().map(|&b| char::from(b)).collect();
+        let file = u32::try_from(k + 1).unwrap_or(u32::MAX);
+        let kind = crate::hints::kind_of(&text, pass::FileKind::from_path(name));
+        defs.harvest(&text, kind, file);
+        order.push(file);
+    }
+    defs.set_load_order(&order);
+    if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+        eprintln!(
+            "prelude definitions: {} names from {} files in {:?}",
+            defs.len(),
+            order.len(),
+            t0.elapsed()
+        );
+    }
+    let d: Defs = Arc::new(defs);
+    cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(c.key, d.clone());
+    d
 }
 
 /// INITEX's state, and the prelude's on top of it: a format, `\dump`
@@ -1295,7 +1485,8 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             let (f, x) = (v.field("jobname"), v.str(&opts.prelude_jobname));
             g.eng.set_env(unit, f, x);
         }
-        g.push_text(unit, &as_file(p));
+        // (the prelude's own slices: INITEX knows no definitions yet)
+        g.push_text(unit, &as_file(p), crate::hints::no_defs());
         // the point the prelude's final bindings are read at
         let end = g.eng.push(unit, g.mark, Vec::new());
         let mut stats = Stats::default();
@@ -1389,6 +1580,8 @@ pub struct Build {
     nodes: Vec<(String, NodeId)>,
     dvi: NodeId,
     prelude: Arc<Cached>,
+    /// The format's definitions ([`prelude_defs`]).
+    defs: Defs,
     /// What the last build or edit ran.
     pub stats: Stats,
     /// Where new texts come from ([`Options::edits`]).
@@ -1414,6 +1607,7 @@ impl Build {
         let t0 = std::time::Instant::now();
         let cached = prelude_env(prelude, &opts);
         let env = cached.env.clone();
+        let defs = prelude_defs(&cached, prelude, &opts.finder);
         let t1 = t0.elapsed();
         let mut g = Graph::new(opts.time_limit, opts.threads);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
@@ -1463,7 +1657,7 @@ impl Build {
                 g.eng.push(unit, exec, args);
             }
         }
-        let nodes = g.push_text(unit, &as_file(document));
+        let nodes = g.push_text(unit, &as_file(document), &defs);
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
         let files_op = g.files_op;
@@ -1477,6 +1671,7 @@ impl Build {
             nodes,
             dvi,
             prelude: cached,
+            defs,
             stats: Stats::default(),
             edits,
             settled: Vec::new(),
@@ -1507,6 +1702,7 @@ impl Build {
             nodes: &mut self.nodes,
             exec: self.g.ops.exec,
             dvi: self.dvi,
+            defs: self.defs.clone(),
         };
         // a text sent before the evaluation starts is the one it is for
         if let Some(v) = phitex_defuse::EditSource::absorb(&mut absorb, &mut self.g.eng) {
@@ -1521,6 +1717,50 @@ impl Build {
         );
         stats.live = self.g.eng.live_nodes();
         self.stats = stats;
+        // `PHITEX_CLAIMS=<text>`: the nodes whose slice holds the text,
+        // their claims and their descendants' (a debugging dump)
+        if let Ok(want) = std::env::var("PHITEX_CLAIMS") {
+            fn dump(eng: &Engine, v: &Values, n: NodeId, depth: usize) {
+                let Some(i) = eng.node_info(n) else { return };
+                let a = i
+                    .args
+                    .first()
+                    .map(|&x| v.render(x).chars().take(60).collect::<String>())
+                    .unwrap_or_default();
+                let claimed: Vec<String> = eng
+                    .claimed(n)
+                    .iter()
+                    .map(|&c| {
+                        eng.node_info(c)
+                            .and_then(|ci| ci.args.first().map(|&x| v.render(x)))
+                            .map_or_else(
+                                || "?".to_owned(),
+                                |t| t.chars().take(30).collect::<String>(),
+                            )
+                    })
+                    .collect();
+                eprintln!(
+                    "{}{} {:?} {} claims {:?}",
+                    "  ".repeat(depth),
+                    n.raw() % 100_000,
+                    i.state,
+                    a,
+                    claimed
+                );
+                if depth < 4 {
+                    for c in eng.children(n) {
+                        dump(eng, v, c, depth + 1);
+                    }
+                }
+            }
+            let v = self.g.eng.values();
+            let eng = &self.g.eng;
+            for (k, n) in &self.nodes {
+                if k.contains(&want) {
+                    dump(eng, v, *n, 0);
+                }
+            }
+        }
         if let Some(cb) = self.opts.on_page_settled.clone() {
             let pages = self.pages();
             for (k, &h) in pages.iter().enumerate() {
@@ -1639,11 +1879,21 @@ impl Build {
         self.prelude.key
     }
 
-    /// The prelude's environment, serialised, for
-    /// [`Options::prelude_bytes`].
+    /// Whether the prelude's evaluation finished: no deadline, no
+    /// evaluation error (a node left waiting ends the evaluation with
+    /// one).
     #[must_use]
-    pub fn export_prelude(&self) -> Vec<u8> {
-        serialise(&self.prelude)
+    pub fn prelude_complete(&self) -> bool {
+        self.prelude.errors.is_empty()
+    }
+
+    /// The prelude's environment, serialised, for
+    /// [`Options::prelude_bytes`]; `None` when its evaluation did not
+    /// finish ([`Self::prelude_complete`]): a part of a format is never
+    /// stored.
+    #[must_use]
+    pub fn export_prelude(&self) -> Option<Vec<u8>> {
+        self.prelude_complete().then(|| serialise(&self.prelude))
     }
 
     /// The files the job wrote (`\openout`, `\write`), with their text,
@@ -1958,6 +2208,66 @@ impl Build {
                 format!("{i:4} h{h:<5} {why}\n       node [{}]", describe(eng, n))
             })
             .collect()
+    }
+
+    /// The critical chain's waits in detail (a measure): for each
+    /// `Woken` link, the waiter and the node it waited on (text, the
+    /// hint's class and cause, `may_define`, effect, the hinted reads);
+    /// for each `Raised` link, the node and its hinted reads.
+    #[must_use]
+    pub fn chain_waits(&self) -> Vec<String> {
+        use phitex_defuse::Cause;
+        let v = self.g.eng.values();
+        let describe = |n: phitex_defuse::NodeId| -> String {
+            let Some(i) = self.g.eng.node_info(n) else {
+                return "gone".to_owned();
+            };
+            let text: String = i
+                .args
+                .first()
+                .map(|&x| v.render(x))
+                .unwrap_or_default()
+                .chars()
+                .take(40)
+                .collect();
+            if i.op != "exec" {
+                return format!("{} {text}", i.op);
+            }
+            let h = crate::hints::hint_of_args(v, &i.args);
+            let md = match crate::hints::may_define(v, &i.args) {
+                phitex_defuse::MayDefine::Any => "Any".to_owned(),
+                other => format!("{other:?}").chars().take(160).collect(),
+            };
+            let eff = if crate::hints::effect_none(v, &i.args) {
+                "None"
+            } else {
+                "Pending"
+            };
+            let reads: Vec<String> = crate::hints::reads(v, &i.args)
+                .unwrap_or_default()
+                .iter()
+                .map(|f| field_name(v, *f))
+                .collect();
+            format!(
+                "{text:?} [{}] may_define {md} effect {eff} reads {reads:?}",
+                h.cause
+            )
+        };
+        let mut out = Vec::new();
+        for (n, c) in self.g.eng.critical_chain() {
+            match c {
+                Cause::Woken { by } => out.push(format!(
+                    "Woken\n    waiter: {}\n    waited: {}",
+                    describe(n),
+                    describe(by)
+                )),
+                Cause::Raised { to, .. } => {
+                    out.push(format!("Raised to {to}\n    node: {}", describe(n)));
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     /// The engine's critical chain, from the highest finished node back:

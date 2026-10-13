@@ -37,3 +37,29 @@ fn profile_latex_hello() {
     let b = common::build(opts, Some("\\input latex.ini\n"), &src);
     eprintln!("hello: {:?}, {} nodes run", t0.elapsed(), b.stats.nodes_run);
 }
+
+/// A plain document named by `PHITEX_PROFILE_DOC` (a path), cold, at
+/// `PHITEX_THREADS` threads: its stats printed.
+#[test]
+#[ignore = "profiling run (a document given by path)"]
+fn profile_doc() {
+    let Some(path) = std::env::var_os("PHITEX_PROFILE_DOC") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    let dir = path.parent().expect("a directory").to_path_buf();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("doc")
+        .to_owned();
+    let src = common::read(&path);
+    let prelude = common::plain();
+    let t0 = std::time::Instant::now();
+    let b = common::build(
+        common::options(&format!("./{stem}.tex"), &stem, "", &dir),
+        Some(&prelude),
+        &src,
+    );
+    eprintln!("{stem}: {:?}\n{:#?}", t0.elapsed(), b.stats);
+}

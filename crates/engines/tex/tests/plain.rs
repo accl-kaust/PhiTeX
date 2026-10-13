@@ -31,7 +31,7 @@ fn gate(dir: &str, body: &str, default: bool, plain: bool) -> Result<String, Str
     }
     let s = &b.stats;
     let report = format!(
-        "{name}: {} nodes run, {} runs, {} live, {} rounds, tails {}/{}, starved {}, critical path {}",
+        "{name}: {} nodes run, {} runs, {} live, {} rounds, tails {}/{}, starved {}, critical path {}, hints {} bounded / {} any, {} regime violations, {} undeclared",
         s.nodes_run,
         s.runs,
         s.live,
@@ -39,8 +39,32 @@ fn gate(dir: &str, body: &str, default: bool, plain: bool) -> Result<String, Str
         s.tails,
         s.tail_siblings,
         s.starved,
-        s.critical_path.unwrap_or(0)
+        s.critical_path.unwrap_or(0),
+        s.nodes_bounded,
+        s.nodes_any,
+        s.regime_violations,
+        s.undeclared_definitions
     );
+    if s.regime_violations != 0 || s.undeclared_definitions != 0 {
+        let diags: Vec<String> = b
+            .diagnostics()
+            .iter()
+            .filter(|d| {
+                d.message.contains("hint")
+                    || d.message.contains("undeclared")
+                    || d.message.contains("UndeclaredDefinition")
+            })
+            .map(|d| {
+                format!(
+                    "{}:{} {}",
+                    d.file,
+                    d.line,
+                    d.message.chars().take(1200).collect::<String>()
+                )
+            })
+            .collect();
+        return Err(format!("{report}\n  FAIL hints: {}", diags.join("\n  ")));
+    }
     match common::first_difference(&dvi, &want) {
         None => Ok(report),
         Some(d) => {
