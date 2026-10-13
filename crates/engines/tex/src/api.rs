@@ -478,9 +478,46 @@ impl Rd<'_> {
     }
 }
 
-/// The key of a prelude: its text and jobname, and what it read.
+/// The layout of an exported prelude and of what it binds. Bump when
+/// the serialised environment's layout, the node args, the `Fields` set,
+/// the hint args or the state fields' names change: a prelude exported
+/// under another layout is refused (rebuilt), never loaded.
+pub const PRELUDE_LAYOUT: u32 = 2;
+
+/// The exported prelude's magic, before the layout and the engine's
+/// identity.
+const PRELUDE_MAGIC: &[u8; 8] = b"PHITEXPR";
+
+/// The vendored engine's identity: a hash of its sources, so vendoring
+/// another engine invalidates every exported prelude.
+fn engine_identity() -> u64 {
+    static ID: OnceLock<u64> = OnceLock::new();
+    *ID.get_or_init(|| {
+        let srcs: [&[u8]; 9] = [
+            include_bytes!("../../../vendor/defuse/Cargo.toml"),
+            include_bytes!("../../../vendor/defuse/src/lib.rs"),
+            include_bytes!("../../../vendor/defuse/src/engine.rs"),
+            include_bytes!("../../../vendor/defuse/src/value.rs"),
+            include_bytes!("../../../vendor/defuse/src/ctx.rs"),
+            include_bytes!("../../../vendor/defuse/src/sched.rs"),
+            include_bytes!("../../../vendor/defuse/src/tree.rs"),
+            include_bytes!("../../../vendor/defuse/src/hash.rs"),
+            include_bytes!("../../../vendor/defuse/src/obs.rs"),
+        ];
+        let mut h = 0u64;
+        for s in srcs {
+            h = phitex_defuse::hash_bytes(h ^ 0x9e37_79b9, s);
+        }
+        h
+    })
+}
+
+/// The key of a prelude: the layout and the engine, its text and
+/// jobname, and what it read.
 fn prelude_key_of(text_key: u64, reads: &[(String, u64)]) -> [u8; 32] {
-    let mut b = text_key.to_le_bytes().to_vec();
+    let mut b = PRELUDE_LAYOUT.to_le_bytes().to_vec();
+    b.extend_from_slice(&engine_identity().to_le_bytes());
+    b.extend_from_slice(&text_key.to_le_bytes());
     for (n, h) in reads {
         b.extend_from_slice(n.as_bytes());
         b.push(0);
@@ -494,9 +531,17 @@ fn prelude_key_of(text_key: u64, reads: &[(String, u64)]) -> [u8; 32] {
     out
 }
 
-/// `[key][reads][env]`, as [`Build::export_prelude`] writes it.
+/// `[magic][layout][engine][key][reads][env]`, as
+/// [`Build::export_prelude`] writes it.
 fn serialise(c: &Cached) -> Vec<u8> {
-    let mut out = c.key.to_vec();
+    serialise_as(c, PRELUDE_LAYOUT, engine_identity())
+}
+
+fn serialise_as(c: &Cached, layout: u32, engine: u64) -> Vec<u8> {
+    let mut out = PRELUDE_MAGIC.to_vec();
+    out.extend_from_slice(&layout.to_le_bytes());
+    out.extend_from_slice(&engine.to_le_bytes());
+    out.extend_from_slice(&c.key);
     out.extend_from_slice(&c.text_key.to_le_bytes());
     out.extend_from_slice(&(c.reads.len() as u64).to_le_bytes());
     for (n, h) in &c.reads {
@@ -511,8 +556,24 @@ fn serialise(c: &Cached) -> Vec<u8> {
     out
 }
 
+/// A prelude exported under this layout and engine; `None` (rebuild)
+/// for any other.
 fn deserialise(b: &[u8]) -> Option<Cached> {
+    let c = deserialise_as(b, PRELUDE_LAYOUT, engine_identity());
+    if c.is_none() && !b.is_empty() {
+        eprintln!("format cache rebuilt (layout changed)");
+    }
+    c
+}
+
+fn deserialise_as(b: &[u8], layout: u32, engine: u64) -> Option<Cached> {
     let mut r = Rd(b);
+    if r.take(8)? != PRELUDE_MAGIC
+        || u32::from_le_bytes(r.take(4)?.try_into().ok()?) != layout
+        || r.u64()? != engine
+    {
+        return None;
+    }
     let key: [u8; 32] = r.take(32)?.try_into().ok()?;
     let text_key = r.u64()?;
     let n = usize::try_from(r.u64()?).ok()?;
@@ -2003,4 +2064,28 @@ fn describe(eng: &Engine, n: phitex_defuse::NodeId) -> String {
         let a: String = a.unwrap_or_default().chars().take(80).collect();
         format!("{} {a}", i.op)
     })
+}
+
+#[cfg(test)]
+mod prelude_tests {
+    use super::*;
+
+    #[test]
+    fn another_layout_or_engine_is_refused() {
+        let c = Cached {
+            key: [3; 32],
+            text_key: 5,
+            reads: vec![("a.tex".to_owned(), 9)],
+            env: Arc::new(vec![("x".to_owned(), Tree::Leaf(Value::Int(1)))]),
+            errors: Vec::new(),
+        };
+        let b = serialise(&c);
+        assert!(deserialise_as(&b, PRELUDE_LAYOUT, engine_identity()).is_some());
+        let other = serialise_as(&c, PRELUDE_LAYOUT + 1, engine_identity());
+        assert!(deserialise(&other).is_none());
+        let other = serialise_as(&c, PRELUDE_LAYOUT, engine_identity() ^ 1);
+        assert!(deserialise(&other).is_none());
+        // the old layout, with no header
+        assert!(deserialise(&b[20..]).is_none());
+    }
 }
