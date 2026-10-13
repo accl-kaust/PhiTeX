@@ -474,7 +474,7 @@ impl Run<'_, '_> {
             let b = nodes::encode_box(v, &p.node, &s2);
             self.set(&format!("box:{n}"), v.list(vec![v.int(0), b]), true);
         }
-        self.set_par(Par::outputpenalty, v.int(output_penalty), true);
+        self.set("param:outputpenalty", v.int(output_penalty), true);
         let output = self.par(Par::output)?;
         let otoks = toks_of(v, output);
         if otoks.is_empty() {
