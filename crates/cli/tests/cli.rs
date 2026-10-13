@@ -1243,6 +1243,8 @@ fn watch_tables_bounded() {
 /// bytes, " the ") with " thy " and back: each build's "engine tables"
 /// note numbers (nodes, units, values, kB resident, us collecting, nodes
 /// freed) and wall, printed for builds 1, 2, 10, 25, 51.
+// measurement means only: f64 precision is irrelevant here
+#[allow(clippy::cast_precision_loss)]
 fn watch_gc_series(name: &str, file: &str, text: &str, args: &[&str], word: usize) {
     let _one = one();
     let dir = scratch(name);
@@ -1335,7 +1337,7 @@ fn watch_gc_latex30() {
         if k == 15 {
             word = text.len() + "This is".len();
         }
-        text += &format!("{k}. {para}\n\n");
+        let _ = write!(text, "{k}. {para}\n\n");
     }
     text += "\\end{document}\n";
     // (" the " right after "15. This is")
