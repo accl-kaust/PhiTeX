@@ -625,6 +625,9 @@ pub(crate) struct TextHints {
     /// Per atom: an operand an earlier command reads (never run on its
     /// own), or a character after the first of its run.
     skip: Vec<bool>,
+    /// Per slice: whether a paragraph starts in it (a region: its run
+    /// begins and ends in the vertical list).
+    pars: Vec<bool>,
     /// Per slice.
     slice_hints: Vec<Arc<str>>,
 }
@@ -689,10 +692,11 @@ impl TextHints {
 /// definitions, one per node), extended through a conditional opened at
 /// depth 0 to its `\fi`.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> Vec<(usize, usize)> {
-    let mut starts: Vec<usize> = Vec::new();
+pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, usize)>, Vec<bool>) {
+    let _ = kind;
+    let n = p.atoms.len();
     // brace depth before each atom
-    let mut depth = Vec::with_capacity(p.atoms.len());
+    let mut depth = Vec::with_capacity(n);
     let mut d: usize = 0;
     for at in &p.atoms {
         if at.kind == AtomKind::Close {
@@ -703,9 +707,16 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> Vec<(usize, usi
             d += 1;
         }
     }
+    // atoms an earlier item claims (operands: never a slice's start)
+    let mut claimed = vec![false; n];
+    for it in &p.items {
+        for c in claimed.iter_mut().take(it.end.min(n)).skip(it.atom + 1) {
+            *c = true;
+        }
+    }
     // the conditional nesting before each atom, by the text's items
     // (`\if…` +1, `\fi` -1; an item an earlier one consumes not counted)
-    let mut ifd = vec![0i64; p.atoms.len() + 1];
+    let mut ifd = vec![0i64; n + 1];
     {
         let mut consumed = 0;
         let mut cur = 0i64;
@@ -731,17 +742,41 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> Vec<(usize, usi
             *x = cur;
         }
     }
-    if kind == FileKind::Document {
-        // the atom after each paragraph-ending item
+    // inside a brace group or a `\begingroup` pair opened at depth 0:
+    // the slice goes on to its end (a group is never split between nodes)
+    let mut inside = vec![false; n];
+    for (k, a) in p.atoms.iter().enumerate() {
+        // (a brace knows its mate's atom index; `p.braces` indexes tokens)
+        if a.kind == AtomKind::Open && a.mate != usize::MAX && a.mate > k && depth[k] == 0 {
+            for x in inside.iter_mut().take(a.mate + 1).skip(k + 1) {
+                *x = true;
+            }
+        }
+    }
+    for g in &p.groups {
+        if let (Some(o), Some(c)) = (g.open, g.close)
+            && depth.get(o) == Some(&0)
+        {
+            for x in inside.iter_mut().take(c + 1).skip(o + 1) {
+                *x = true;
+            }
+        }
+    }
+    // a paragraph: from its first horizontal atom at depth 0 (a
+    // character, a command of §1090) to the end of the next item the
+    // pass marks paragraph-ending (a blank line, `\par`, a vertical
+    // command, a macro whose body ends in one); one slice, so its run
+    // begins and ends in the vertical list
+    let mut ends: Vec<usize> = Vec::new();
+    {
         let mut consumed = 0;
-        let mut ends: Vec<usize> = Vec::new();
         for it in &p.items {
             if it.atom >= consumed
                 && depth.get(it.atom) == Some(&0)
                 && it.hints.implicit == pass::Implicit::EndsParagraph
-                && ifd.get(it.atom) == Some(&0)
+                && ifd[it.atom] == 0
                 // these read keywords or a number past their text, and
-                // put back what follows (§1094): the region goes on
+                // put back what follows (§1094): the paragraph goes on
                 && !matches!(
                     it.name.as_str(),
                     "vskip" | "hrule" | "unvbox" | "unvcopy" | "halign"
@@ -756,75 +791,74 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> Vec<(usize, usi
         for m in &p.marks {
             if depth.get(m.atom) == Some(&0)
                 && m.hints.implicit == pass::Implicit::EndsParagraph
-                && ifd.get(m.atom) == Some(&0)
+                && ifd[m.atom] == 0
             {
                 ends.push(m.atom + 1);
             }
         }
         ends.sort_unstable();
         ends.dedup();
-        starts.push(0);
-        for a in ends {
-            // (the region after an end: at the next atom at depth 0 and
-            // outside every conditional)
-            let mut k = a;
-            while k < p.atoms.len() && (depth[k] != 0 || ifd[k] != 0) {
-                k += 1;
-            }
-            if let Some(at) = p.atoms.get(k) {
-                starts.push(at.start);
-            }
-        }
-    } else {
-        // (inside a brace group, a `\begingroup` pair or a conditional
-        // opened at depth 0 the slice goes on to its end: a group or a
-        // conditional is never split between nodes)
-        let mut inside = vec![false; p.atoms.len()];
-        for (k, a) in p.atoms.iter().enumerate() {
-            // (a brace knows its mate's atom index; `p.braces` indexes tokens)
-            if a.kind == AtomKind::Open
-                && a.mate != usize::MAX
-                && a.mate > k
-                && depth.get(k) == Some(&0)
-            {
-                for x in inside.iter_mut().take(a.mate + 1).skip(k + 1) {
+    }
+    let mut par_at = vec![false; n];
+    {
+        let mut k = 0;
+        while k < n {
+            let a = &p.atoms[k];
+            let horizontal = match a.kind {
+                AtomKind::Char(_) | AtomKind::Verb => true,
+                AtomKind::Cs => starts_par(a.name(text)),
+                _ => false,
+            };
+            if horizontal && depth[k] == 0 && ifd[k] == 0 && !inside[k] && !claimed[k] {
+                // the first atom after the paragraph's end, at depth 0
+                // and outside every conditional
+                let mut e = ends.partition_point(|&x| x <= k);
+                let mut end = ends.get(e).copied().unwrap_or(n);
+                while end < n && (depth[end] != 0 || ifd[end] != 0) {
+                    end += 1;
+                    e += 1;
+                    if let Some(&x) = ends.get(e) {
+                        end = end.max(x);
+                    }
+                }
+                par_at[k] = true;
+                for x in inside.iter_mut().take(end.min(n)).skip(k + 1) {
                     *x = true;
                 }
+                k = end.max(k + 1);
+                continue;
             }
-        }
-        for g in &p.groups {
-            if let (Some(o), Some(c)) = (g.open, g.close)
-                && depth.get(o) == Some(&0)
-            {
-                for x in inside.iter_mut().take(c + 1).skip(o + 1) {
-                    *x = true;
-                }
-            }
-        }
-        let mut prev_char = false;
-        for (k, a) in p.atoms.iter().enumerate() {
-            let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
-            let inside_if = ifd.get(k).is_some_and(|&x| x > 0)
-                && (a.kind != AtomKind::Cs || !CONDITIONALS.contains(&a.name(text)));
-            if !(ch && prev_char) && !inside_if && !inside[k] {
-                starts.push(a.start);
-            }
-            prev_char = ch;
+            k += 1;
         }
     }
-    if starts.first() != Some(&0) {
-        starts.insert(0, 0);
+    let mut starts: Vec<usize> = vec![0];
+    let mut prev_char = false;
+    for (k, a) in p.atoms.iter().enumerate() {
+        let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
+        let inside_if = ifd[k] > 0 && (a.kind != AtomKind::Cs || !CONDITIONALS.contains(&a.name(text)));
+        if !(ch && prev_char) && !inside_if && !inside[k] {
+            starts.push(a.start);
+        }
+        prev_char = ch;
     }
     starts.sort_unstable();
     starts.dedup();
     let mut out = Vec::with_capacity(starts.len());
+    let mut pars = Vec::with_capacity(starts.len());
     for (i, &s) in starts.iter().enumerate() {
         let e = starts.get(i + 1).copied().unwrap_or(text.len());
         if e > s {
+            // (the slice holds a paragraph if one starts in it)
+            let has_par = p
+                .atoms
+                .iter()
+                .enumerate()
+                .any(|(k, a)| a.start >= s && a.start < e && par_at[k]);
             out.push((s, e));
+            pars.push(has_par);
         }
     }
-    out
+    (out, pars)
 }
 
 /// The primitive conditionals (§487) and e-TeX's and pdfTeX's.
@@ -1734,7 +1768,7 @@ fn add_defs(ds: &[Def], prefixes: bool, b: &mut Bound) {
 
 fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
     let an = Analysis::new(text, kind, defs.clone());
-    let slices = slices_of(text, &an.p, kind);
+    let (slices, pars) = slices_of(text, &an.p, kind);
     let mut starts = Vec::with_capacity(an.p.atoms.len());
     let mut hints: Vec<Arc<str>> = Vec::with_capacity(an.p.atoms.len());
     let mut memo: HashMap<String, Arc<str>> = HashMap::new();
@@ -1760,17 +1794,17 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         starts,
         hints,
         skip,
+        pars,
         slice_hints: Vec::new(),
     };
     // each slice's hint: the union of its commands' bounds (a run
-    // executes the whole slice); a document region also defines
+    // executes the whole slice); a paragraph's region also defines
     // `\prevgraf` of the list it is in
-    let region = kind == FileKind::Document;
     let mut slice_hints = Vec::with_capacity(t.slices.len());
-    for &(s, e) in &t.slices {
+    for (i, &(s, e)) in t.slices.iter().enumerate() {
         let mut h = t.at_until(s, e);
         let excerpt = short(&text[s..text.len().min(s + 40)]);
-        if region {
+        if t.pars[i] {
             match &mut h.bound {
                 Some(b) => {
                     add_head(&mut b.state, "pg:");
