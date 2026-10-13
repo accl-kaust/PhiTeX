@@ -36,11 +36,15 @@ impl From<Stop> for Halt {
 pub(crate) type R<T> = Result<T, Halt>;
 
 /// The operations, as registered.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub(crate) struct Ops {
     pub exec: OpId,
     pub put: OpId,
     pub outpage: OpId,
+    pub pagestep: OpId,
+    pub pagestep_any: OpId,
+    /// The build's field handles (`crate::fields`).
+    pub fields: std::sync::Arc<crate::fields::Fields>,
 }
 
 /// A level of the input stack.
@@ -160,9 +164,16 @@ pub(crate) struct Run<'c, 'a> {
     pub trial_kind: Option<Option<ValueId>>,
     /// In a trial, the groups it opens get list ids of their own.
     pub trial_ids: Option<std::cell::Cell<i64>>,
+    /// The list and scope ids this run made (`node_raw`): each gets its
+    /// opener (`lopen:<id>`) when the run ends, so a reader of the list
+    /// reads the contributions after this node, not the unit's.
+    pub minted: std::cell::RefCell<Vec<i64>>,
     /// While looking for the command's first token: a node's command
     /// begins in its own text (the next sibling's begins in its own).
     pub no_pull: bool,
+    /// A `build_page` call not yet folded (OUTPUT.md §4.2a): the
+    /// children and main-list items the run had made at the call.
+    pub page_due: Option<(usize, usize, bool)>,
     own: FxHashMap<Field, Option<ValueId>>,
     pub defs: Vec<(Field, ValueId, Locality)>,
     pub contribs: Vec<(Field, ValueId)>,
@@ -172,6 +183,8 @@ pub(crate) struct Run<'c, 'a> {
     /// Conditionals begun in this run: their `if_limit` (§489).
     pub conds: Vec<u8>,
     mcache: FxHashMap<ValueId, Mean>,
+    /// The meaning fields of the tokens this run looked up.
+    tfields: FxHashMap<Tok, Field>,
     /// `align_state` as this run has it (§309), once read.
     pub astate: Option<i64>,
     /// Lines entered by this run (for `\inputlineno`).
@@ -210,6 +223,7 @@ impl<'c, 'a> Run<'c, 'a> {
             claim_rest: false,
             trial_kind: None,
             trial_ids: None,
+            minted: std::cell::RefCell::new(Vec::new()),
             no_pull: false,
             own: FxHashMap::default(),
             defs: Vec::new(),
@@ -224,7 +238,9 @@ impl<'c, 'a> Run<'c, 'a> {
             },
             conds: Vec::new(),
             mcache: FxHashMap::default(),
+            tfields: FxHashMap::default(),
             astate: None,
+            page_due: None,
             lines_entered: 0,
             eof: false,
             radix: 0,
@@ -235,6 +251,12 @@ impl<'c, 'a> Run<'c, 'a> {
 
     pub(crate) fn node_raw(&self) -> i64 {
         let id = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+        let x = self.node_raw_of(id);
+        self.minted.borrow_mut().push(x);
+        x
+    }
+
+    fn node_raw_of(&self, id: i64) -> i64 {
         match &self.trial_ids {
             Some(c) => {
                 c.set(c.get() + 1);
@@ -271,7 +293,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     pub(crate) fn get(&mut self, name: &str) -> R<Option<ValueId>> {
-        let f = self.v.field(name);
+        let f = self.ops.fields.get(self.v, name);
         self.get_f(f)
     }
 
@@ -284,21 +306,25 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     pub(crate) fn param(&mut self, name: &str) -> R<i32> {
-        self.int32(&format!("param:{name}"))
+        let f = self.ops.fields.param(self.v, name);
+        Ok(crate::val::i32_of(self.v, self.get_f(f)?))
     }
 
     pub(crate) fn glue_param(&mut self, name: &str) -> R<phitex_typeset::glue::Glue> {
-        let x = self.get(&format!("param:{name}"))?;
+        let f = self.ops.fields.param(self.v, name);
+        let x = self.get_f(f)?;
         Ok(crate::val::glue_of(self.v, x))
     }
 
     pub(crate) fn cat(&mut self, c: u32) -> R<u8> {
-        Ok(u8::try_from(self.int(&format!("cat:{c}"))?).unwrap_or(12))
+        let f = self.ops.fields.cat(self.v, c);
+        let x = self.get_f(f)?;
+        Ok(u8::try_from(x.map_or(0, |x| int_of(self.v, x))).unwrap_or(12))
     }
 
     /// Defines `name` (§277–§279: `eq_define` / `geq_define`).
     pub(crate) fn set(&mut self, name: &str, val: ValueId, global: bool) {
-        let f = self.v.field(name);
+        let f = self.ops.fields.get(self.v, name);
         self.set_f(f, val, global);
     }
 
@@ -384,9 +410,19 @@ impl<'c, 'a> Run<'c, 'a> {
     // ----------------------------------------------------------- meanings
 
     pub(crate) fn mean_of(&mut self, t: &Tok) -> R<Mean> {
-        match t.field_name() {
-            Some(name) => {
-                let x = self.get(&name)?;
+        // a token's meaning field, interned once a run
+        let f = if let Some(&f) = self.tfields.get(t) {
+            Some(f)
+        } else {
+            let f = t.field_name().map(|n| self.v.field(&n));
+            if let Some(f) = f {
+                self.tfields.insert(t.clone(), f);
+            }
+            f
+        };
+        match f {
+            Some(f) => {
+                let x = self.get_f(f)?;
                 Ok(self.decode_mean(x))
             }
             None => Ok(Mean::Char(t.cat().unwrap_or(0), t.chr())),
@@ -505,7 +541,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if op != self.ops.exec {
             return Ok(false);
         }
-        match decode_frames(self.v, &args).first() {
+        match first_frame(self.v, &args).as_ref() {
             Some(Frame::Src(s)) if !s.starts => match s.buf.first() {
                 Some(&c) => Ok(matches!(self.cat(c)?, 7 | 11)),
                 None => Ok(false),
@@ -524,7 +560,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         match self.cx.following(self.pulled) {
             Some((op, args)) if op == self.ops.exec => {
-                matches!(decode_frames(self.v, &args).first(), Some(Frame::Src(s)) if !s.starts)
+                matches!(first_frame(self.v, &args), Some(Frame::Src(s)) if !s.starts)
             }
             _ => false,
         }
@@ -1184,6 +1220,7 @@ impl<'c, 'a> Run<'c, 'a> {
             eof: self.eof,
             claim_rest: self.claim_rest,
             astate: self.astate,
+            page_due: self.page_due,
         }
     }
 
@@ -1201,11 +1238,32 @@ impl<'c, 'a> Run<'c, 'a> {
         self.eof = s.eof;
         self.claim_rest = s.claim_rest;
         self.astate = s.astate;
+        self.page_due = s.page_due;
     }
 
     /// Ends the run: definitions, contributions, children (what the
     /// command made, then the input left), the claim and the scope effect.
     pub(crate) fn finish(mut self) -> ValueId {
+        // the opener of each list this run made: this node, and what it
+        // appended to the list itself (a later reader's range starts after
+        // this node)
+        let minted = std::mem::take(&mut *self.minted.borrow_mut());
+        if !minted.is_empty() {
+            let v = self.v;
+            let me = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
+            let items = v.field("items");
+            for id in minted {
+                let mine: Vec<ValueId> = self
+                    .contribs
+                    .iter()
+                    .filter(|(g, _)| *g == items)
+                    .flat_map(|(_, x)| v.seq_to_vec(*x))
+                    .filter(|&e| crate::val::int_at(v, e, 0) == id)
+                    .collect();
+                let val = v.list(vec![me, v.list(mine)]);
+                self.set(&format!("lopen:{id}"), val, true);
+            }
+        }
         for (f, x, l) in std::mem::take(&mut self.defs) {
             self.cx.define_with(f, x, l);
         }
@@ -1221,8 +1279,16 @@ impl<'c, 'a> Run<'c, 'a> {
         for (op, args) in std::mem::take(&mut self.kids) {
             self.cx.child(op, args);
         }
-        // the input left is what follows the command: its continuation,
-        // at its own depth
+        // a deferred page step comes first, then the input left, what
+        // follows the command: its continuation, at its own depth
+        if let Some((_, _, any)) = self.page_due {
+            let op = if any {
+                self.ops.pagestep_any
+            } else {
+                self.ops.pagestep
+            };
+            self.cx.follow(op, Vec::new());
+        }
         for args in self.leftover() {
             self.cx.follow(self.ops.exec, args);
         }
@@ -1266,6 +1332,7 @@ struct Snapshot {
     eof: bool,
     claim_rest: bool,
     astate: Option<i64>,
+    page_due: Option<(usize, usize, bool)>,
 }
 
 fn is_hex(c: u32) -> bool {
@@ -1283,12 +1350,24 @@ fn hex(c: u32) -> u32 {
 
 /// The frames of an `Exec` node's arguments.
 pub(crate) fn decode_frames(v: &Values, args: &[ValueId]) -> Vec<Frame> {
+    decode_frames_upto(v, args, usize::MAX)
+}
+
+/// The first of a node's frames, the rest not decoded.
+pub(crate) fn first_frame(v: &Values, args: &[ValueId]) -> Option<Frame> {
+    decode_frames_upto(v, args, 1).into_iter().next()
+}
+
+fn decode_frames_upto(v: &Values, args: &[ValueId], limit: usize) -> Vec<Frame> {
     let mut out = Vec::new();
     let Some(&l) = args.first() else { return out };
     let Value::List(fs) = &*v.get(l) else {
         return out;
     };
     for &f in fs {
+        if out.len() >= limit {
+            break;
+        }
         let Value::List(xs) = &*v.get(f) else {
             continue;
         };

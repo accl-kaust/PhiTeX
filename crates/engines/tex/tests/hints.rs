@@ -42,10 +42,8 @@ fn with_hints_off<T>(off: bool, f: impl FnOnce() -> T) -> T {
 fn far_use() -> String {
     let mut s = String::from("\\def\\hello{Hello}\n");
     for k in 2..50 {
-        s.push_str(&format!(
-            "\\def\\filler{}{{line {k} of filler text.}}\n",
-            roman(k)
-        ));
+        use std::fmt::Write as _;
+        let _ = writeln!(s, "\\def\\filler{}{{line {k} of filler text.}}", roman(k));
     }
     s.push_str("\\hello\\ world.\n\\bye\n");
     s

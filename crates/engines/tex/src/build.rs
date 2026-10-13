@@ -9,13 +9,13 @@
 
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use phitex_defuse::{Brackets, Effect, Value, ValueId};
+use phitex_defuse::{Brackets, Effect, Value, ValueId, Values};
 use phitex_typeset::glue::Glue;
 use phitex_typeset::node::{BoxKind, BoxNode, Disc, GlueKind, KernKind, Ligature, List, Node};
 use phitex_typeset::pack::{PackParams, Spec};
 
 use crate::control::{LEADER_FLAG, SHIP_OUT_FLAG};
-use crate::nodes::{self, Side, T_BUILD_PAGE, T_DELETE};
+use crate::nodes::{self, Side, T_BUILD_PAGE, T_DELETE, T_PD, T_SF, T_SPACE, T_VBOX};
 use crate::run::{R, Run};
 use crate::val::{Tok, cmd, glue_of, group, int_of, list_of};
 
@@ -230,21 +230,110 @@ impl Run<'_, '_> {
     }
 
     /// A point where tex.web calls `build_page` on the main list.
+    /// The step is deferred to a light `PageStep` node after this one
+    /// (OUTPUT.md §4.2a): only the marker goes on the list now.
     pub(crate) fn build_page_mark(&mut self, md: &Mode) -> R<()> {
-        self.build_page(md)
+        if md.lid != 0 || md.km != 1 {
+            return Ok(());
+        }
+        // a second call folds the first in place
+        self.flush_page()?;
+        let m = nodes::marker(self.v, nodes::T_BUILD_PAGE);
+        self.append(0, m);
+        // with no output routine the step ships pages itself (§1023)
+        let output = self.get("param:output")?;
+        let any = crate::val::toks_of(self.v, output).is_empty();
+        self.page_due = Some((self.kids.len(), self.own_main_items(), any));
+        // (the fold takes the main list up to this call's marker)
+        Ok(())
+    }
+
+    /// How many items this run has appended to the main list.
+    fn own_main_items(&self) -> usize {
+        let v = self.v;
+        let items = v.field("items");
+        self.contribs
+            .iter()
+            .filter(|(g, _)| *g == items)
+            .flat_map(|(_, x)| v.seq_to_vec(*x))
+            .filter(|&e| crate::val::int_at(v, e, 0) == 0)
+            .count()
+    }
+
+    /// Folds a due step in place: the page builder runs over the main
+    /// list as it was at the call, and the children it makes go before
+    /// those the run made after the call.
+    pub(crate) fn flush_page(&mut self) -> R<()> {
+        let Some((k, _, _)) = self.page_due.take() else {
+            return Ok(());
+        };
+        let tail = self.kids.split_off(k);
+        let res = self.page_fold();
+        self.kids.extend(tail);
+        res
+    }
+
+    /// At the run's end: a due step stays deferred only when nothing in
+    /// the run followed the call; otherwise it folds in place.
+    pub(crate) fn settle_page(&mut self) -> R<()> {
+        if let Some((k, n, _)) = self.page_due
+            && (self.kids.len() > k || self.own_main_items() > n)
+        {
+            self.flush_page()?;
+        }
+        Ok(())
     }
 
     /// The contents of list `lid` so far, and how many of them are
-    /// still contributions (after the last `build_page`).
-    // REDUCE-GAP: acc_range anchors only at a node id the run holds;
-    // a list's opener is known as a value, so its readers fold from the
-    // unit's start and keep their list's items.
+    /// still contributions (after the last `build_page`): the items its
+    /// opener appended, then the contributions after the opener (the main
+    /// list, opened by no node: from the unit's start).
     pub(crate) fn list_items(&mut self, lid: i64) -> R<(Vec<ValueId>, usize)> {
+        let f = self.list_fold(lid)?;
+        Ok((f.items, f.since_bp))
+    }
+
+    /// [`Self::list_items`] with the space factor at the list's end: the
+    /// list's transitions are folded left to right from 1000 (§1091,
+    /// §1083), and each waiting space gets its glue from the factor where
+    /// it stands (§1041–§1044).
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn list_fold(&mut self, lid: i64) -> R<ListFold> {
         let v = self.v;
         let f = v.field("items");
-        let all = self.cx.acc_range(f, None)?;
+        let opener = if lid == 0 {
+            None
+        } else if self.minted.borrow().contains(&lid) {
+            // this run opened it: its own contributions hold the list
+            Some(None)
+        } else {
+            self.get(&format!("lopen:{lid}"))?.map(|o| {
+                let xs = list_of(v, o);
+                let raw = u64::from_ne_bytes(crate::val::int_at(v, o, 0).to_ne_bytes());
+                Some((raw, xs.get(1).copied().unwrap_or(ValueId::UNIT)))
+            })
+        };
+        let all = match opener {
+            Some(None) => ValueId::NIL,
+            Some(Some((raw, first))) => {
+                let after = self
+                    .cx
+                    .acc_range(f, Some(phitex_defuse::NodeId::from_raw(raw)))?;
+                let mut head = ValueId::NIL;
+                for e in list_of(v, first) {
+                    head = v.seq_concat(head, v.seq_unit(e));
+                }
+                v.seq_concat(head, after)
+            }
+            None => self.cx.acc_range(f, None)?,
+        };
         let mut out: Vec<ValueId> = Vec::new();
         let mut since_bp = 0usize;
+        let mut sf = 1000i32;
+        // §215, §1083, §1099, §1025: a vertical list begins with the
+        // depth ignored
+        let mut pd = IGNORE_DEPTH;
+        let mut bp_at = 0usize;
         let own: Vec<ValueId> = self
             .contribs
             .iter()
@@ -264,7 +353,36 @@ impl Run<'_, '_> {
                         since_bp -= 1;
                     }
                 }
-                T_BUILD_PAGE => since_bp = 0,
+                T_BUILD_PAGE => {
+                    since_bp = 0;
+                    bp_at = out.len();
+                }
+                T_PD => pd = i32::try_from(crate::val::int_at(v, n, 1)).unwrap_or(0),
+                T_VBOX => {
+                    let ys = list_of(v, n);
+                    let b = ys.get(1).copied().unwrap_or(ValueId::UNIT);
+                    let bs = crate::val::glue_of(v, ys.get(2).copied());
+                    let ls = crate::val::glue_of(v, ys.get(3).copied());
+                    let lsl = i32::try_from(crate::val::int_at(v, n, 4)).unwrap_or(0);
+                    let ht = nodes::box_dim(v, b, 3);
+                    if let Some(g) = phitex_typeset::linebreak::interline_glue(pd, ht, bs, ls, lsl)
+                    {
+                        out.push(nodes::encode(v, &g, &Side::default()));
+                        since_bp += 1;
+                    }
+                    out.push(b);
+                    since_bp += 1;
+                    pd = nodes::box_dim(v, b, 2);
+                }
+                T_SF => {
+                    let k = crate::val::int_at(v, n, 1);
+                    let s = i32::try_from(crate::val::int_at(v, n, 2)).unwrap_or(1000);
+                    sf = if k == 0 || sf >= 1000 { s } else { 1000 };
+                }
+                T_SPACE => {
+                    out.push(resolve_space(v, n, sf));
+                    since_bp += 1;
+                }
                 _ => {
                     out.push(n);
                     since_bp += 1;
@@ -279,45 +397,58 @@ impl Run<'_, '_> {
                 push(x, &mut out);
             }
         }
-        Ok((out, since_bp))
+        let bp_at = bp_at.min(out.len());
+        Ok(ListFold {
+            items: out,
+            since_bp,
+            sf,
+            pd,
+            bp_at,
+        })
     }
 
+    /// `\\prevdepth` (§679): the fold of list `md.vlid`'s boxes and
+    /// transitions so far.
     pub(crate) fn prev_depth(&mut self, md: &Mode) -> R<i32> {
-        let x = self.get(&format!("pd:{}", md.vlid))?;
-        Ok(x.map_or(IGNORE_DEPTH, |x| {
-            i32::try_from(int_of(self.v, x)).unwrap_or(0)
-        }))
+        Ok(self.list_fold(md.vlid)?.pd)
     }
 
+    /// Sets the previous depth: a transition on the list, folded by its
+    /// reader.
     pub(crate) fn set_prev_depth(&mut self, md: &Mode, d: i32) {
-        let v = self.v.int(i64::from(d));
-        self.set(&format!("pd:{}", md.vlid), v, true);
+        let m = pd_set(self.v, d);
+        self.append(md.vlid, m);
     }
 
+    /// `\\spacefactor` (§1034): the fold of list `md.lid`'s transitions
+    /// so far.
     pub(crate) fn space_factor(&mut self, md: &Mode) -> R<i32> {
-        let x = self.get(&format!("spf:{}", md.lid))?;
-        Ok(x.map_or(1000, |x| i32::try_from(int_of(self.v, x)).unwrap_or(1000)))
+        Ok(self.list_fold(md.lid)?.sf)
     }
 
+    /// Sets the space factor: a transition on the list, not a definition
+    /// (no later command reads it; the list's reader folds it).
     pub(crate) fn set_space_factor(&mut self, md: &Mode, s: i32) {
-        let v = self.v.int(i64::from(s));
-        self.set(&format!("spf:{}", md.lid), v, true);
+        let m = sf_set(self.v, s);
+        self.append(md.lid, m);
     }
 
-    /// `append_to_vlist` (§679).
+    /// `append_to_vlist` (§679): the box with the interline glue
+    /// parameters in force here; the list's reader makes the glue from
+    /// the depth before it ([`Self::list_fold`]).
     pub(crate) fn append_to_vlist(&mut self, md: &Mode, b: ValueId) -> R<()> {
-        let pd = self.prev_depth(md)?;
-        let ht = nodes::box_dim(self.v, b, 3);
+        let v = self.v;
         let bs = self.glue_param("baselineskip")?;
         let ls = self.glue_param("lineskip")?;
         let lsl = self.param("lineskiplimit")?;
-        if let Some(g) = phitex_typeset::linebreak::interline_glue(pd, ht, bs, ls, lsl) {
-            let gv = nodes::encode(self.v, &g, &Side::default());
-            self.append(md.vlid, gv);
-        }
-        self.append(md.vlid, b);
-        let d = nodes::box_dim(self.v, b, 2);
-        self.set_prev_depth(md, d);
+        let x = v.list(vec![
+            v.int(nodes::T_VBOX),
+            b,
+            crate::val::glue_value(v, &bs),
+            crate::val::glue_value(v, &ls),
+            v.int(i64::from(lsl)),
+        ]);
+        self.append(md.vlid, x);
         Ok(())
     }
 
@@ -1390,11 +1521,14 @@ impl Run<'_, '_> {
         let f = u32::try_from(self.int("font")?).unwrap_or(0);
         let mut view = crate::fonts::View::default();
         self.add_font(&mut view, f)?;
-        // the space factor is read from before this node only where
-        // §1034 or a space needs the old value: a word of letters sets it
-        // without reading it, so words do not chain on each other
+        // the space factor is never read: the run's effect on it so far
+        // (`sf`: SF_UNREAD none, n >= 0 set to n, -s §1034's update by s)
+        // goes on the list as a transition before each space that needs
+        // the factor, and at the end; the list's reader folds them
         let mut sf = SF_UNREAD;
         let mut out: Vec<Node> = Vec::new();
+        // transitions and waiting spaces, each before `out[k]`
+        let mut raws: Vec<(usize, ValueId)> = Vec::new();
         let mut cancel_boundary = cancel;
         loop {
             // reswitch
@@ -1430,12 +1564,19 @@ impl Run<'_, '_> {
                     continue;
                 }
                 cmd::SPACER | cmd::EX_SPACE => {
-                    if sf == SF_UNREAD {
-                        sf = self.space_factor(md)?;
+                    if c == cmd::EX_SPACE || sf >= 0 {
+                        // the factor is known here (or not needed)
+                        let normal = c == cmd::EX_SPACE || sf == 1000;
+                        let g = self.space_glue(f, sf, normal)?;
+                        out.push(g);
+                    } else {
+                        if sf != SF_UNREAD {
+                            raws.push((out.len(), sf_value(v, sf)));
+                            sf = SF_UNREAD;
+                        }
+                        let p = self.waiting_space(f)?;
+                        raws.push((out.len(), p));
                     }
-                    let normal = c == cmd::EX_SPACE || sf == 1000;
-                    let g = self.space_glue(f, sf, normal)?;
-                    out.push(g);
                 }
                 _ => {
                     self.back_cur();
@@ -1461,65 +1602,101 @@ impl Run<'_, '_> {
                 break;
             }
         }
+        if sf != SF_UNREAD {
+            raws.push((out.len(), sf_value(v, sf)));
+        }
         let side = Side::default();
-        for n in &out {
+        let mut raws = raws.into_iter().peekable();
+        for (k, n) in out.iter().enumerate() {
+            while let Some((_, r)) = raws.next_if(|&(at, _)| at == k) {
+                self.append(md.lid, r);
+            }
             let x = nodes::encode(v, n, &side);
             self.append(md.lid, x);
         }
-        if sf != SF_UNREAD {
-            self.set_space_factor(md, sf);
+        for (_, r) in raws {
+            self.append(md.lid, r);
         }
         Ok(())
+    }
+
+    /// A space whose glue waits for the space factor: the parameters in
+    /// force here, for the list's reader ([`resolve_space`]).
+    fn waiting_space(&mut self, f: u32) -> R<ValueId> {
+        let v = self.v;
+        let ss = self.glue_param("spaceskip")?;
+        let xs = self.glue_param("xspaceskip")?;
+        let fi = i64::from(f);
+        let mut xs_v = vec![
+            v.int(nodes::T_SPACE),
+            crate::val::glue_value(v, &ss),
+            crate::val::glue_value(v, &xs),
+        ];
+        for k in [2, 3, 4, 7] {
+            xs_v.push(v.int(i64::from(self.font_dimen(fi, k)?)));
+        }
+        Ok(v.list(xs_v))
     }
 
     /// A space (§1041–§1044).
     pub(crate) fn space_glue(&mut self, f: u32, sf: i32, normal: bool) -> R<Node> {
         let ss = self.glue_param("spaceskip")?;
-        let zero = |g: &Glue| g.width == 0 && g.stretch == 0 && g.shrink == 0;
         let fi = i64::from(f);
-        let font_glue = |r: &mut Self| -> R<Glue> {
-            Ok(Glue::new(
-                r.font_dimen(fi, 2)?,
-                r.font_dimen(fi, 3)?,
-                r.font_dimen(fi, 4)?,
-            ))
+        let zero = |g: &Glue| g.width == 0 && g.stretch == 0 && g.shrink == 0;
+        if normal && !zero(&ss) {
+            return Ok(Node::param_glue(12, ss));
+        }
+        let xs = if normal {
+            Glue::ZERO
+        } else {
+            self.glue_param("xspaceskip")?
         };
-        if normal {
-            return Ok(if zero(&ss) {
-                Node::glue(font_glue(self)?)
-            } else {
-                Node::param_glue(12, ss)
-            });
-        }
-        let xs = self.glue_param("xspaceskip")?;
-        if sf >= 2000 && !zero(&xs) {
-            return Ok(Node::param_glue(13, xs));
-        }
-        let mut g = if zero(&ss) { font_glue(self)? } else { ss };
-        if sf >= 2000 {
-            g.width += self.font_dimen(fi, 7)?;
-        }
-        g.stretch = phitex_typeset::arith::xn_over_d(g.stretch, sf, 1000).value;
-        g.shrink = phitex_typeset::arith::xn_over_d(g.shrink, 1000, sf).value;
-        Ok(Node::glue(g))
+        let need_font = zero(&ss) || (normal && zero(&ss));
+        let d = if need_font {
+            [
+                self.font_dimen(fi, 2)?,
+                self.font_dimen(fi, 3)?,
+                self.font_dimen(fi, 4)?,
+                if sf >= 2000 {
+                    self.font_dimen(fi, 7)?
+                } else {
+                    0
+                },
+            ]
+        } else {
+            [
+                0,
+                0,
+                0,
+                if sf >= 2000 {
+                    self.font_dimen(fi, 7)?
+                } else {
+                    0
+                },
+            ]
+        };
+        Ok(space_node(&ss, &xs, d, sf, normal))
     }
 
-    /// `adjust_space_factor` (§1034); `SF_UNREAD` while the old value is
-    /// not needed (an `sf_code` of 0 leaves it so).
-    fn adjust_sf(&mut self, md: &Mode, ch: u32, sf: &mut i32) -> R<()> {
+    /// `adjust_space_factor` (§1034) on the run's effect `sf` (see
+    /// [`Self::char_run`]): an `sf_code` above 1000 needs the old factor
+    /// only through "below 1000?", so with the old factor unknown it is
+    /// kept as the update itself (`-s`), never read.
+    fn adjust_sf(&mut self, _md: &Mode, ch: u32, sf: &mut i32) -> R<()> {
         let s = self.int32(&format!("sf:{ch}"))?;
-        if s > 1000 && *sf == SF_UNREAD {
-            *sf = self.space_factor(md)?;
-        }
         if s == 1000 {
             *sf = 1000;
         } else if s < 1000 {
             if s > 0 {
                 *sf = s;
             }
-        } else if *sf < 1000 {
+        } else if *sf == SF_UNREAD {
+            *sf = -s;
+        } else if *sf >= 0 && *sf < 1000 {
             *sf = 1000;
         } else {
+            // a known factor of 1000 or more, or an update (whose result
+            // is 1000 or more): `s`
             *sf = s;
         }
         Ok(())
@@ -1979,7 +2156,7 @@ impl Run<'_, '_> {
         self.append(0, g);
         let p = nodes::penalty_node(v, -0o10000000000);
         self.append(0, p);
-        self.build_page(md)
+        self.build_page_mark(md)
     }
 
     /// `\vsplit` (§977): the box split off register `n` at height `h`.
@@ -2041,3 +2218,71 @@ pub(crate) fn _unused(_: ValueId) -> Option<Glue> {
 
 /// The space factor not read yet in a run of characters.
 const SF_UNREAD: i32 = i32::MIN;
+
+/// A list's contents as its reader sees them ([`Run::list_fold`]).
+pub(crate) struct ListFold {
+    /// The items, transitions folded, waiting spaces and interline glue
+    /// made.
+    pub items: Vec<ValueId>,
+    /// How many are still contributions (after the last `build_page`).
+    pub since_bp: usize,
+    /// The space factor at the end (§1034).
+    pub sf: i32,
+    /// The previous depth at the end (§679).
+    pub pd: i32,
+    /// How many items stood before the last `build_page` marker.
+    pub bp_at: usize,
+}
+
+/// A transition setting the previous depth to `d`.
+fn pd_set(v: &Values, d: i32) -> ValueId {
+    v.list(vec![v.int(nodes::T_PD), v.int(i64::from(d))])
+}
+
+/// A transition setting the space factor to `s`.
+fn sf_set(v: &Values, s: i32) -> ValueId {
+    v.list(vec![v.int(nodes::T_SF), v.int(0), v.int(i64::from(s))])
+}
+
+/// The transition of a run's effect `sf` (not `SF_UNREAD`).
+fn sf_value(v: &Values, sf: i32) -> ValueId {
+    if sf >= 0 {
+        sf_set(v, sf)
+    } else {
+        v.list(vec![v.int(nodes::T_SF), v.int(1), v.int(i64::from(-sf))])
+    }
+}
+
+/// The glue of a space (§1041–§1044) from `\\spaceskip`, `\\xspaceskip`,
+/// the font's dimensions 2, 3, 4 and 7, and the space factor.
+fn space_node(ss: &Glue, xs: &Glue, d: [i32; 4], sf: i32, normal: bool) -> Node {
+    let zero = |g: &Glue| g.width == 0 && g.stretch == 0 && g.shrink == 0;
+    let font_glue = Glue::new(d[0], d[1], d[2]);
+    if normal {
+        return if zero(ss) {
+            Node::glue(font_glue)
+        } else {
+            Node::param_glue(12, *ss)
+        };
+    }
+    if sf >= 2000 && !zero(xs) {
+        return Node::param_glue(13, *xs);
+    }
+    let mut g = if zero(ss) { font_glue } else { *ss };
+    if sf >= 2000 {
+        g.width += d[3];
+    }
+    g.stretch = phitex_typeset::arith::xn_over_d(g.stretch, sf, 1000).value;
+    g.shrink = phitex_typeset::arith::xn_over_d(g.shrink, 1000, sf).value;
+    Node::glue(g)
+}
+
+/// The glue node of a waiting space (`T_SPACE`) at space factor `sf`.
+fn resolve_space(v: &Values, n: ValueId, sf: i32) -> ValueId {
+    let xs = list_of(v, n);
+    let ss = crate::val::glue_of(v, xs.get(1).copied());
+    let xsk = crate::val::glue_of(v, xs.get(2).copied());
+    let d = |k: usize| i32::try_from(crate::val::int_at(v, n, k)).unwrap_or(0);
+    let node = space_node(&ss, &xsk, [d(3), d(4), d(5), d(6)], sf, sf == 1000);
+    nodes::encode(v, &node, &Side::default())
+}

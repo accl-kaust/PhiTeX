@@ -75,6 +75,10 @@ pub enum FileKind {
     /// A package, class, format or documented source (`.sty`, `.cls`,
     /// `.ltx`, `.dtx`, pgf's `.code.tex`): `@` a letter.
     Package,
+    /// A text read under INITEX's catcodes (a format's source, a document
+    /// run without a format): only `\\`, `%`, letters and space have
+    /// their usual catcodes until its own `\catcode` lines (§232).
+    Initex,
 }
 
 impl FileKind {
@@ -106,6 +110,7 @@ impl FileKind {
         match self {
             FileKind::Document => Catcodes::PLAIN,
             FileKind::Package => Catcodes::at_letter(),
+            FileKind::Initex => Catcodes::initex(),
         }
     }
 }
@@ -168,20 +173,26 @@ pub struct Item {
 /// A catcode regime as far as the pass reads it: the catcode of each
 /// ASCII byte under plain TeX's table with the regime's changes (`@`,
 /// `_`, `:` letters; spaces ignored and `~` a space under expl3; the
-/// shaping characters the text changed).
+/// shaping characters the text changed; INITEX's others), or none where
+/// a `\catcode` of the text set a value the pass does not model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Regime {
-    cats: [u8; 128],
+    cats: [Option<u8>; 128],
     /// Spaces are ignored (expl3's).
     pub ignore_spaces: bool,
 }
 
 impl Regime {
     pub(crate) fn of(c: &Catcodes) -> Regime {
-        let mut cats = [12u8; 128];
+        let mut cats = [Some(12u8); 128];
         for (b, cat) in cats.iter_mut().enumerate() {
             let b = u8::try_from(b).unwrap_or(0);
-            *cat = match b {
+            *cat = Some(match b {
+                _ if c.is_unknown(b) => {
+                    *cat = None;
+                    continue;
+                }
+                b'$' | b'&' | b'^' | b'_' | b'~' | b'\t' if c.is_special12(b) => 12,
                 b'\\' | b'{' | b'}' | b'#' | b'%' if c.is_other(b) => 12,
                 b'\\' => 0,
                 b'{' => 1,
@@ -204,7 +215,7 @@ impl Regime {
                 _ if c.is_open(b) => 1,
                 _ if c.is_close(b) => 2,
                 _ => 12,
-            };
+            });
         }
         Regime {
             cats,
@@ -212,10 +223,11 @@ impl Regime {
         }
     }
 
-    /// The catcode of ASCII byte `b` (12 for a byte above 127).
+    /// The catcode of ASCII byte `b` (`None`: not known to the regime; a
+    /// byte above 127: 12).
     #[must_use]
-    pub fn catcode(&self, b: u8) -> u8 {
-        self.cats.get(usize::from(b)).copied().unwrap_or(12)
+    pub fn catcode(&self, b: u8) -> Option<u8> {
+        self.cats.get(usize::from(b)).copied().unwrap_or(Some(12))
     }
 }
 

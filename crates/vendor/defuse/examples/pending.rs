@@ -8,9 +8,11 @@
 //! Prints, per schedule, the time, runs, stops, pending waits and the
 //! cost of a stop against a completed run.
 //!
-//! `--follow`: the chain shape instead: one node pushed, each node created
-//! as the continuation (`Ctx::follow`) of the previous one at the end of its
-//! run, reading three names each defined by a pseudo-random earlier node.
+//! `--follow`: the chain shape instead: a first node and a "rest of the
+//! text" node pushed, every node's claim pending until it runs; each node
+//! reads three names each defined by a pseudo-random earlier node, then
+//! claims the rest node and leaves the next node and a new rest node as
+//! its continuations (`Ctx::follow`).
 //!
 //! `cargo run --release --example pending -- [N..] [--threads T] [--spread S] [--only SCHEDULE] [--follow]`
 
@@ -23,13 +25,19 @@ use std::time::Instant;
 
 use common::Threads;
 use defuse::{
-    Ctx, Engine, Field, Greedy, Locality, OpId, Operation, Sequential, Speculation, Stop, Value, ValueId, Values,
+    Claim, Ctx, Engine, Field, Greedy, Locality, OpId, Operation, Sequential, Speculation, Stop, Value, ValueId, Values,
 };
 
 struct Node {
     spread: usize,
     follow: bool,
 }
+
+/// Runs of command nodes and of rest nodes.
+static RUNS: [std::sync::atomic::AtomicU64; 2] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
 
 /// A pseudo-random earlier node for the `k`th read of node `i`.
 fn earlier(i: usize, k: u64) -> usize {
@@ -47,6 +55,9 @@ impl Operation for Node {
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         None
     }
+    fn claim(&self, _: &[ValueId], _: &Values, _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>) -> Claim {
+        if self.follow { Claim::Pending } else { Claim::None }
+    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
         let a = cx.args();
@@ -55,6 +66,14 @@ impl Operation for Node {
             _ => 0,
         };
         let (i, n) = (int(0), int(1));
+        RUNS[usize::from(a.len() > 2)].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // The rest node: nothing until the command before it runs.
+        if a.len() > 2 {
+            if self.follow {
+                cx.claim(0);
+            }
+            return Ok(ValueId::UNIT);
+        }
         let mut sum: i64 = 0;
         if self.follow {
             for k in 0..3 {
@@ -72,13 +91,19 @@ impl Operation for Node {
             }
         }
         cx.define(v.field(&format!("x{i}")), v.int(sum % 1000 + 1));
-        if self.follow && i + 1 < n {
-            let op = cx.op();
-            let next = vec![
-                v.int(i64::try_from(i + 1).unwrap_or(0)),
-                v.int(i64::try_from(n).unwrap_or(0)),
-            ];
-            cx.follow(op, next);
+        if self.follow {
+            // Takes the rest node; leaves the next command and a new rest.
+            let has_rest = cx.following(0).is_some();
+            cx.claim(usize::from(has_rest));
+            if i + 1 < n {
+                let op = cx.op();
+                let (ni, nn) = (
+                    v.int(i64::try_from(i + 1).unwrap_or(0)),
+                    v.int(i64::try_from(n).unwrap_or(0)),
+                );
+                cx.follow(op, vec![ni, nn]);
+                cx.follow(op, vec![ni, nn, v.str("rest")]);
+            }
         }
         Ok(ValueId::UNIT)
     }
@@ -95,6 +120,11 @@ fn build(n: usize, spread: usize, follow: bool) -> (Engine, OpId) {
     for i in 0..if follow { 1 } else { n } {
         let v = eng.values();
         let a = vec![v.int(i64::try_from(i).unwrap_or(0)), v.int(total)];
+        eng.push(u, op, a);
+    }
+    if follow {
+        let v = eng.values();
+        let a = vec![v.int(0), v.int(total), v.str("rest")];
         eng.push(u, op, a);
     }
     (eng, op)
@@ -164,6 +194,11 @@ fn main() {
                 continue;
             }
             let (mut eng, _) = build(n, spread, follow);
+            if let Some(k) = std::env::var("PENDING_LIMIT").ok().and_then(|s| s.parse().ok()) {
+                let mut l = eng.limits().clone();
+                l.runs_per_node = k;
+                eng.set_limits(l);
+            }
             let t0 = Instant::now();
             let r = eval(&mut eng);
             let t = t0.elapsed();
@@ -176,6 +211,19 @@ fn main() {
                 r.critical_path,
                 r.stops as f64 / r.runs.max(1) as f64
             );
+            if follow {
+                println!(
+                    "         command runs {}  rest runs {}",
+                    RUNS[0].swap(0, std::sync::atomic::Ordering::Relaxed),
+                    RUNS[1].swap(0, std::sync::atomic::Ordering::Relaxed)
+                );
+            }
+            if r.stops > 0 {
+                println!(
+                    "         waits by kind {:?}  top waited {:?}  raises {}",
+                    r.waits_by_kind, r.top_waited, r.raises
+                );
+            }
         }
     }
 }

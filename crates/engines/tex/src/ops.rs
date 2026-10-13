@@ -14,14 +14,14 @@ use crate::val::{int_of, list_of, str_of};
 /// The operations' ids, known once all are registered.
 pub(crate) type Shared = Arc<OnceLock<Ops>>;
 
-fn ops(s: &Shared) -> Ops {
-    *s.get().expect("operations registered")
+pub(crate) fn ops(s: &Shared) -> Ops {
+    s.get().expect("operations registered").clone()
 }
 
 /// Runs `body` as one node: its definitions, contributions and
 /// children go out only if it finishes; a starved or file-waiting run
 /// records its need for the client instead.
-fn run_node(
+pub(crate) fn run_node(
     cx: &mut Ctx<'_>,
     o: Ops,
     body: impl FnOnce(&mut Run<'_, '_>) -> R<()>,
@@ -53,7 +53,11 @@ fn run_node(
         );
     }
     match res {
-        Ok(()) => Ok(r.finish()),
+        Ok(()) => match r.settle_page() {
+            Ok(()) => Ok(r.finish()),
+            Err(Halt::Stop(s)) => Err(s),
+            Err(_) => Ok(r.stall("fatal", ValueId::UNIT)),
+        },
         Err(Halt::Stop(s)) => Err(s),
         Err(Halt::Starve) => {
             let u = ValueId::UNIT;
@@ -274,7 +278,7 @@ impl Operation for Mark {
 
 /// Whether a node may define `f`: files (`file:`) come only from the
 /// client.
-fn client_only(v: &Values, f: Field) -> bool {
+pub(crate) fn client_only(v: &Values, f: Field) -> bool {
     match &*v.get(f.0) {
         phitex_defuse::Value::Str(s) => !s.starts_with("file:"),
         _ => true,
