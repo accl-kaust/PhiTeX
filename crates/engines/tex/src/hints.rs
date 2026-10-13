@@ -919,7 +919,7 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
         // body's regions run in, an engine scope, so its body is sliced
         // like top-level text; `\\begin{document}` and `\\end{document}`
         // are slices of their own)
-        if matches!(&g.kind, pass::GroupKind::Env(e) if e == "document") {
+        if doc_scope() && matches!(&g.kind, pass::GroupKind::Env(e) if e == "document") {
             continue;
         }
         if let (Some(o), Some(c)) = (g.open, g.close)
@@ -2495,7 +2495,10 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         let excerpt = short(&text[s..text.len().min(s + 40)]);
         if t.pars[i] {
             if let Some(b) = &mut h.bound {
-                add_head(&mut b.state, "pg:");
+                // (its paragraph begins by running `\\everypar`, §1091,
+                // which may set `\\everypar` again: LaTeX's paragraph
+                // hooks do at every paragraph)
+                add_heads(&mut b.state, Some(&["pg:", "param:everypar"]));
                 "region".clone_into(&mut h.cause);
             } else {
                 h.cause = format!("region: {}", h.cause);
@@ -2965,8 +2968,15 @@ pub fn set_hints_enabled(on: bool) {
 /// rest of the document runs in (`\\begin{document}`).
 const OPENS_SCOPE: &str = "\x1eO";
 
+/// Whether the document environment's body is sliced into regions
+/// under the scope `\\begin{document}` leaves open (`PHITEX_DOC_SCOPE=1`;
+/// off until its PDF is byte-identical, test `latex_paragraph_nodes`).
+fn doc_scope() -> bool {
+    crate::exec::env_flag!("PHITEX_DOC_SCOPE")
+}
+
 fn opens_document(slice: &str) -> bool {
-    slice.trim_start().starts_with("\\begin{document}")
+    doc_scope() && slice.trim_start().starts_with("\\begin{document}")
 }
 
 /// Whether the node's slice opens the document's scope: its run leaves
