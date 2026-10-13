@@ -1480,7 +1480,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     }
                     if n.name() == "\u{10FFFE}uend" {
                         // §324: the end of a u template
-                        self.align_u_end()?;
+                        self.align_u_end();
                         continue;
                     }
                 }

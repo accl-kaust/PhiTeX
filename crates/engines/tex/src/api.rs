@@ -1212,52 +1212,7 @@ impl Graph {
             eval: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let _ = shared.set(ops.clone());
-        for f in [
-            "items",
-            "log",
-            "diags",
-            "needs",
-            "defs",
-            "pages",
-            "pagehash",
-            "writes",
-            "ifviol",
-            "streams",
-            "wplan",
-            "fread",
-            "pagefxs",
-            "pgdeltas",
-            "pgsts",
-            crate::pdfrelaxed::PIECES,
-        ] {
-            let fld = eng.values().field(f);
-            eng.declare_accumulator(fld, Arc::new(SeqMonoid));
-        }
-        let lines = eng.values().field("lines");
-        eng.declare_accumulator(lines, Arc::new(SumMonoid));
-        // what each page's output routine leaves for the next: a
-        // loop-back the page builder's fold reads from the previous round
-        for j in 0..crate::page::MAX_PAGES {
-            let f = eng.values().field(&format!("pagefx:{j}"));
-            let none = eng.values().list(Vec::new());
-            eng.declare_loopback(f, none);
-            // what `\count0..9` are after page j's step (the build's
-            // guess in round one, `page_guesses`)
-            let f = eng.values().field(&format!("pgdef:{j}"));
-            eng.declare_loopback(f, ValueId::UNIT);
-            // what the routines up to page j left changed, besides
-            // `\count0..9` (the chain's cumulative delta, folded by the
-            // writer; guess: none)
-            let f = eng.values().field(&format!("pgst:{j}"));
-            eng.declare_loopback(f, ValueId::UNIT);
-        }
-        // refuted rounds of the page chain (two: it runs serially)
-        let f = eng.values().field("pgref");
-        eng.declare_loopback(f, ValueId::UNIT);
-        for f in crate::hints::COUNTERS {
-            let fld = eng.values().field(f);
-            eng.declare_accumulator(fld, Arc::new(SumMonoid));
-        }
+        declare_fields(&mut eng);
         Graph {
             eng,
             ops,
@@ -3433,6 +3388,56 @@ fn chain_guesses(g: &mut Graph, bytes: &[u8]) {
             let x = import(v, &t);
             g.eng.declare_loopback(f, x);
         }
+    }
+}
+
+/// The graph's accumulators and loop-backs (their round-one values).
+fn declare_fields(eng: &mut Engine) {
+    for f in [
+        "items",
+        "log",
+        "diags",
+        "needs",
+        "defs",
+        "pages",
+        "pagehash",
+        "writes",
+        "ifviol",
+        "streams",
+        "wplan",
+        "fread",
+        "pagefxs",
+        "pgdeltas",
+        "pgsts",
+        crate::pdfrelaxed::PIECES,
+    ] {
+        let fld = eng.values().field(f);
+        eng.declare_accumulator(fld, Arc::new(SeqMonoid));
+    }
+    let lines = eng.values().field("lines");
+    eng.declare_accumulator(lines, Arc::new(SumMonoid));
+    // what each page's output routine leaves for the next: a
+    // loop-back the page builder's fold reads from the previous round
+    for j in 0..crate::page::MAX_PAGES {
+        let f = eng.values().field(&format!("pagefx:{j}"));
+        let none = eng.values().list(Vec::new());
+        eng.declare_loopback(f, none);
+        // what `\count0..9` are after page j's step (the build's
+        // guess in round one, `page_guesses`)
+        let f = eng.values().field(&format!("pgdef:{j}"));
+        eng.declare_loopback(f, ValueId::UNIT);
+        // what the routines up to page j left changed, besides
+        // `\count0..9` (the chain's cumulative delta, folded by the
+        // writer; guess: none)
+        let f = eng.values().field(&format!("pgst:{j}"));
+        eng.declare_loopback(f, ValueId::UNIT);
+    }
+    // refuted rounds of the page chain (two: it runs serially)
+    let f = eng.values().field("pgref");
+    eng.declare_loopback(f, ValueId::UNIT);
+    for f in crate::hints::COUNTERS {
+        let fld = eng.values().field(f);
+        eng.declare_accumulator(fld, Arc::new(SumMonoid));
     }
 }
 
