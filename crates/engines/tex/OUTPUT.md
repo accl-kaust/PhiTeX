@@ -959,6 +959,49 @@ neither `page:state` nor `prev_depth`:
 Parameters read at the contribution are ordinary definitions (the
 node's own reads), not a chain: they bind to their last definer.
 
+### 4.2a The split: heavy contribution, light step (approved; replaces 4.3's `OutPage` per page)
+
+The output routine must run where tex.web runs it: at the `build_page`
+call that finds the break, so its definitions bind for the text after
+that point and for nothing before it. A page node chained after the
+previous page's would sit in the wrong place, so the fold stays at the
+`build_page` points, split in two:
+
+- The **heavy** node (the command: a paragraph's `\par` with its line
+  breaking, a box, glue, a penalty in vertical mode) appends to list 0
+  and reads neither `page:state` nor the fold. Where tex.web calls
+  `build_page`, it only notes that a step is due.
+- When it ends, it leaves a **light step** (`PageStep`, its own operation)
+  as its continuation (`Ctx::follow`), before the rest of its input. The
+  step reads `page:state` and the contributions since the last step,
+  runs §980–§1008 with the parameters in force at its position (the same
+  as at tex.web's call: nothing runs between the command's end and the
+  step), and fires the output routine there when the page breaks; the
+  routine's `OutPage` and `Exec` nodes unfold as the step's children, in
+  place.
+- A step defines only the page builder's fields: `page:state`, the
+  marks, the insertion boxes, `\outputpenalty` and `\deadcycles`
+  (`MayDefine::Prefixes`). The output routine itself is not the step's:
+  it runs in the step's children (`OutPage` and the routine's text),
+  which answer for their own definitions, so the step's answer does not
+  depend on recognising the routine. With no routine (§1023) the step
+  ships the page itself and a shipout may define anything: such a step
+  is a separate operation, `pagestep_any`, answering `Any` (counted,
+  `Stats::page_steps_any`). Recognising plain's and LaTeX's routines
+  (§1.3, §2.14) narrows the children's answers, not the step's.
+- A command that unfolds children or appends to the main list after its
+  `build_page` call, or calls `build_page` twice, or reads the page state
+  (`\pagegoal`, `\pagetotal`, `\showlists`, the empty-page test of
+  §1054) folds the due step in place at that point (`flush_page`): the
+  fold takes the main list as it was at the call, and its children go
+  before those the command made after the call. Otherwise the step is
+  deferred: the command's last continuation is the step (`Ctx::follow`),
+  then the rest of its input.
+
+The chain is then one light step per `build_page` call, each a few
+microseconds, beside the paragraphs, which build in parallel; the fast
+path of 4.3 makes most steps add a whole segment.
+
 ### 4.3 The page fold
 
 The fold runs in `OutPage` nodes, one per page, not in the contributing

@@ -166,22 +166,21 @@ impl Run<'_, '_> {
 
     /// The page builder's state where this node is.
     pub(crate) fn page_state(&mut self) -> R<State> {
+        // a read of the page state folds a due step first
+        self.flush_page()?;
         let x = self.get("page:state")?;
         Ok(State::decode(self.v, x))
     }
 
-    /// `build_page` (§994): a step of the fold, in outer vertical mode.
-    pub(crate) fn build_page(&mut self, md: &Mode) -> R<()> {
-        if md.lid != 0 || md.km != 1 {
-            return Ok(());
-        }
-        let m = nodes::marker(self.v, nodes::T_BUILD_PAGE);
-        self.append(0, m);
+    /// The fold over the main list's contributions, all but the last
+    /// `excess` (appended after the call it stands for).
+    pub(crate) fn page_fold(&mut self, excess: usize) -> R<()> {
         let mut st = self.page_state()?;
         let (items, _) = self.list_items(0)?;
+        let end = items.len() - excess;
         let mut queue: VecDeque<ValueId> = st.pending.drain(..).collect();
-        queue.extend(items.iter().skip(st.consumed).copied());
-        st.consumed = items.len();
+        queue.extend(items[..end].iter().skip(st.consumed).copied());
+        st.consumed = end;
         self.page_steps(st, queue)
     }
 

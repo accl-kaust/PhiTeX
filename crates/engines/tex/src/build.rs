@@ -230,8 +230,58 @@ impl Run<'_, '_> {
     }
 
     /// A point where tex.web calls `build_page` on the main list.
+    /// The step is deferred to a light `PageStep` node after this one
+    /// (OUTPUT.md §4.2a): only the marker goes on the list now.
     pub(crate) fn build_page_mark(&mut self, md: &Mode) -> R<()> {
-        self.build_page(md)
+        if md.lid != 0 || md.km != 1 {
+            return Ok(());
+        }
+        // a second call folds the first in place
+        self.flush_page()?;
+        let m = nodes::marker(self.v, nodes::T_BUILD_PAGE);
+        self.append(0, m);
+        // with no output routine the step ships pages itself (§1023)
+        let output = self.get("param:output")?;
+        let any = crate::val::toks_of(self.v, output).is_empty();
+        self.page_due = Some((self.kids.len(), self.own_main_items(), any));
+        Ok(())
+    }
+
+    /// How many items this run has appended to the main list.
+    fn own_main_items(&self) -> usize {
+        let v = self.v;
+        let items = v.field("items");
+        self.contribs
+            .iter()
+            .filter(|(g, _)| *g == items)
+            .flat_map(|(_, x)| v.seq_to_vec(*x))
+            .filter(|&e| crate::val::int_at(v, e, 0) == 0)
+            .count()
+    }
+
+    /// Folds a due step in place: the page builder runs over the main
+    /// list as it was at the call, and the children it makes go before
+    /// those the run made after the call.
+    pub(crate) fn flush_page(&mut self) -> R<()> {
+        let Some((k, n, _)) = self.page_due.take() else {
+            return Ok(());
+        };
+        let excess = self.own_main_items() - n;
+        let tail = self.kids.split_off(k);
+        let res = self.page_fold(excess);
+        self.kids.extend(tail);
+        res
+    }
+
+    /// At the run's end: a due step stays deferred only when nothing in
+    /// the run followed the call; otherwise it folds in place.
+    pub(crate) fn settle_page(&mut self) -> R<()> {
+        if let Some((k, n, _)) = self.page_due
+            && (self.kids.len() > k || self.own_main_items() > n)
+        {
+            self.flush_page()?;
+        }
+        Ok(())
     }
 
     /// The contents of list `lid` so far, and how many of them are
@@ -2003,7 +2053,7 @@ impl Run<'_, '_> {
         self.append(0, g);
         let p = nodes::penalty_node(v, -0o10000000000);
         self.append(0, p);
-        self.build_page(md)
+        self.build_page_mark(md)
     }
 
     /// `\vsplit` (§977): the box split off register `n` at height `h`.
