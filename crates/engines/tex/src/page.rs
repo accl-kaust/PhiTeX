@@ -1439,7 +1439,11 @@ fn dvi_file(cx: &mut Ctx<'_>, fin: &FinalState) -> Result<ValueId, Stop> {
     let at = w.location();
     let bytes = w.finish();
     let t2 = t0.elapsed();
-    s.push_str(&latin1(&bytes[at..]));
+    // (no file at all without pages, §642)
+    match bytes.get(at..) {
+        Some(b) => s.push_str(&latin1(b)),
+        None => s.clear(),
+    }
     let t3 = t0.elapsed();
     let r = v.intern(Value::Str(s.into_boxed_str()));
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
