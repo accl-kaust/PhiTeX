@@ -521,7 +521,10 @@ impl Run<'_, '_> {
                     self.last_par = l.par.unwrap_or((0, 0));
                     l.list
                 }
-                _ => return Ok(()),
+                _ => match self.par_level_under_groups() {
+                    Some(k) => self.end_graf_under_groups(k)?,
+                    None => return Ok(()),
+                },
             };
             if !items.is_empty() {
                 self.line_break(md, &items, false)?;
@@ -529,6 +532,43 @@ impl Run<'_, '_> {
             self.normal_paragraph()?;
         }
         Ok(())
+    }
+
+    /// The paragraph's level when groups opened inside the paragraph
+    /// are still open above it (`abc{def\\par}`): the innermost level,
+    /// under groups that share its list only.
+    fn par_level_under_groups(&self) -> Option<usize> {
+        let k = self
+            .nest
+            .iter()
+            .rposition(|l| l.group == 0 && l.mode == 102 && l.owns)?;
+        let lid = self.nest[k].lid;
+        self.nest[k + 1..]
+            .iter()
+            .all(|l| l.group != 0 && !l.owns && l.lid == lid)
+            .then_some(k)
+    }
+
+    /// Ends the paragraph at level `k` under the groups opened in it:
+    /// the semantic nest and the groups are apart in TeX (§1096
+    /// `pop_nest` pops the paragraph whatever groups are open), so the
+    /// groups stay open, now in the vertical list the paragraph was in
+    /// (their saved definitions restored at their own close, as ever).
+    /// Returns the paragraph's list.
+    fn end_graf_under_groups(&mut self, k: usize) -> R<Vec<ValueId>> {
+        let (mode, lid) = if let Some(b) = k.checked_sub(1) {
+            (self.nest[b].mode, self.nest[b].lid)
+        } else {
+            let base = self.base_mode()?;
+            (base.m, base.lid)
+        };
+        let l = self.nest.remove(k);
+        for g in &mut self.nest[k..] {
+            g.mode = mode;
+            g.lid = lid;
+        }
+        self.last_par = l.par.unwrap_or((0, 0));
+        Ok(l.list)
     }
 
     /// The fonts the nodes use.

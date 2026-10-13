@@ -132,6 +132,7 @@ fn dvi_fixtures() {
         ("dvi", "fonts", false, false),
         ("dvi", "disc", false, false),
         ("dvi", "accent", false, false),
+        ("dvi", "pargroup", false, false),
     ]);
 }
 
