@@ -160,6 +160,10 @@ pub(crate) struct Run<'c, 'a> {
     pub trial_kind: Option<Option<ValueId>>,
     /// In a trial, the groups it opens get list ids of their own.
     pub trial_ids: Option<std::cell::Cell<i64>>,
+    /// The list and scope ids this run made (`node_raw`): each gets its
+    /// opener (`lopen:<id>`) when the run ends, so a reader of the list
+    /// reads the contributions after this node, not the unit's.
+    pub minted: std::cell::RefCell<Vec<i64>>,
     /// While looking for the command's first token: a node's command
     /// begins in its own text (the next sibling's begins in its own).
     pub no_pull: bool,
@@ -210,6 +214,7 @@ impl<'c, 'a> Run<'c, 'a> {
             claim_rest: false,
             trial_kind: None,
             trial_ids: None,
+            minted: std::cell::RefCell::new(Vec::new()),
             no_pull: false,
             own: FxHashMap::default(),
             defs: Vec::new(),
@@ -235,6 +240,12 @@ impl<'c, 'a> Run<'c, 'a> {
 
     pub(crate) fn node_raw(&self) -> i64 {
         let id = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+        let x = self.node_raw_of(id);
+        self.minted.borrow_mut().push(x);
+        x
+    }
+
+    fn node_raw_of(&self, id: i64) -> i64 {
         match &self.trial_ids {
             Some(c) => {
                 c.set(c.get() + 1);
@@ -1206,6 +1217,26 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Ends the run: definitions, contributions, children (what the
     /// command made, then the input left), the claim and the scope effect.
     pub(crate) fn finish(mut self) -> ValueId {
+        // the opener of each list this run made: this node, and what it
+        // appended to the list itself (a later reader's range starts after
+        // this node)
+        let minted = std::mem::take(&mut *self.minted.borrow_mut());
+        if !minted.is_empty() {
+            let v = self.v;
+            let me = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
+            let items = v.field("items");
+            for id in minted {
+                let mine: Vec<ValueId> = self
+                    .contribs
+                    .iter()
+                    .filter(|(g, _)| *g == items)
+                    .flat_map(|(_, x)| v.seq_to_vec(*x))
+                    .filter(|&e| crate::val::int_at(v, e, 0) == id)
+                    .collect();
+                let val = v.list(vec![me, v.list(mine)]);
+                self.set(&format!("lopen:{id}"), val, true);
+            }
+        }
         for (f, x, l) in std::mem::take(&mut self.defs) {
             self.cx.define_with(f, x, l);
         }
