@@ -1094,14 +1094,20 @@ impl<'c, 'a> Run<'c, 'a> {
     /// The location of token `t`'s meaning, if it has one.
     #[inline]
     pub(crate) fn mean_loc(&mut self, t: Tok) -> Option<Loc> {
-        if let Some(l) = crate::fields::mean_loc(t) {
-            return Loc::try_from(l).ok();
+        let l = if let Some(l) = crate::fields::mean_loc(t) {
+            Loc::try_from(l).ok()?
+        } else {
+            let f = self
+                .ops
+                .fields
+                .meaning_at(self.v, self.cx.values_epoch(), t)?;
+            self.loc_of(f)
+        };
+        if self.interp.is_some() {
+            // (a meaning read bypasses `load` once the slot is loaded)
+            let _ = self.revert_read_back(l);
         }
-        let f = self
-            .ops
-            .fields
-            .meaning_at(self.v, self.cx.values_epoch(), t)?;
-        Some(self.loc_of(f))
+        Some(l)
     }
 
     #[inline]
@@ -1204,6 +1210,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // has read and decoded: one slot access)
         if let Some(i) = tok.cs_index()
             && let Ok(l) = Loc::try_from(crate::fields::MEAN_BASE + i)
+            && self.interp.is_none()
             && let Some((c, h)) = self.st.cmd_chr_fast(l)
         {
             self.cur = Cur {
