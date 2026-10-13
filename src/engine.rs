@@ -382,6 +382,10 @@ pub struct Report {
     pub runs: u64,
     /// Executions stopped at a value that was not ready.
     pub stops: u64,
+    /// Of those, runs re-done at a higher level because they read a
+    /// finished node not yet settled below theirs (once per run, above
+    /// everything the run read).
+    pub raises: u64,
     /// Waits on pending structure (definition sets, claims, scope effects).
     pub pending_waits: u64,
     /// Nodes left waiting for an environment field not yet supplied (nor
@@ -703,6 +707,9 @@ const F_TAINT: u16 = 512;
 const F_CLAIMER: u16 = 1024;
 const F_PARKSET: u16 = 2048;
 /// Runs of one stream claimer in one evaluation taken as a cycle.
+/// Queue entries a step examines for speculation per candidate it may take.
+const SPEC_SCAN_PER_CANDIDATE: usize = 32;
+
 const STREAM_RUN_LIMIT: u32 = 4096;
 /// A stream claimer with a predicted extent: eligible for speculation.
 const F_PREDICT: u16 = 4096;
@@ -5749,6 +5756,12 @@ impl Engine {
         if let Some(e) = r.error.clone() {
             self.errors.push(e);
         }
+        if r.raise > 0 && !matches!(r.end, End::Raise(_)) {
+            // A read of a finished node not settled below this level, then
+            // a stop: the node re-runs above that node too.
+            let h = r.raise.max(self.n(x).height);
+            self.set_height(x, h);
+        }
         let output = match r.end {
             End::Output(v) => v,
             End::Unpredictable | End::OutOfFuel => return,
@@ -5770,6 +5783,7 @@ impl Engine {
             }
             End::Raise(h) => {
                 self.report.stops += 1;
+                self.report.raises += 1;
                 let h = h.max(self.n(x).height + 1);
                 self.set_height(x, h);
                 return;
@@ -6064,7 +6078,9 @@ impl Engine {
     /// A stopped run still unfolds: its children so far are created (so it
     /// can wait on them) and its environment set; later children are kept.
     fn apply_partial(&mut self, x: Slot, r: &RunResult) {
-        if r.children.is_empty() && r.env.is_empty() {
+        // A run that read past its level keeps nothing (as one that stopped
+        // at that read kept nothing).
+        if r.raise > 0 || (r.children.is_empty() && r.env.is_empty()) {
             return;
         }
         let old = self.aux_of(x).map_or_else(Default::default, |a| a.children.clone());
@@ -6764,12 +6780,17 @@ impl Engine {
             let room = sched.max_outstanding().saturating_sub(self.spec_live as usize);
             if budget > 0 && room > 0 {
                 let lim = budget.min(room);
+                // The scan is bounded: a queue of nodes that are not
+                // candidates (re-bound, or marked not to speculate) would
+                // otherwise be walked whole at every step.
+                let mut scan = lim.saturating_mul(SPEC_SCAN_PER_CANDIDATE);
                 let mut seen = FxHashSet::default();
                 'levels: for h in (level as usize + 1)..self.queue.len() {
                     for &(id, s) in &self.queue[h] {
-                        if cands.len() >= lim {
+                        if cands.len() >= lim || scan == 0 {
                             break 'levels;
                         }
+                        scan -= 1;
                         if !self.queue_live(h, id, s) || !seen.insert(s) {
                             continue;
                         }
@@ -6787,9 +6808,10 @@ impl Engine {
                     }
                 }
                 for &(_, s) in &self.parked {
-                    if cands.len() >= 2 * lim {
+                    if cands.len() >= 2 * lim || scan == 0 {
                         break;
                     }
+                    scan -= 1;
                     let n = self.n(s);
                     if !n.has(F_NOSPEC) && n.on != NIL {
                         cands.push(Candidate {
@@ -6945,6 +6967,8 @@ pub struct RunResult {
     pub(crate) epoch: u32,
     pub(crate) speculative: bool,
     pub(crate) end: End,
+    /// The level the run has to be re-done at (0: none), see [`Ctx`].
+    pub(crate) raise: u32,
     pub(crate) uses: Vec<Use>,
     pub(crate) defs: Vec<(Field, ValueId, bool)>,
     pub(crate) children: Vec<(OpId, ValueId)>,
