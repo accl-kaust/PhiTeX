@@ -61,6 +61,9 @@ impl Native {
 const LOADED: u8 = 1;
 const HAS_ID: u8 = 2;
 const PRELOADED: u8 = 4;
+/// `cmd` and `chr` hold the meaning's command code and modifier
+/// (`eq_type`, `equiv`, §221).
+const CC: u8 = 8;
 
 /// A slot's value and what is known of it.
 #[derive(Clone, Debug)]
@@ -69,12 +72,16 @@ pub(crate) struct Entry {
     /// The engine value of `val`, once known (`HAS_ID`).
     id: Option<ValueId>,
     flags: u8,
+    cmd: u8,
+    chr: i32,
 }
 
 const UNLOADED: Entry = Entry {
     val: Native::Absent,
     id: None,
     flags: 0,
+    cmd: 0,
+    chr: 0,
 };
 
 #[derive(Clone)]
@@ -301,6 +308,8 @@ impl State {
             val: x.map_or(Native::Absent, Native::Raw),
             id: x,
             flags: LOADED | HAS_ID,
+            cmd: 0,
+            chr: 0,
         };
     }
 
@@ -315,6 +324,8 @@ impl State {
             val: x.map_or(Native::Absent, Native::Raw),
             id: x,
             flags: LOADED | HAS_ID | PRELOADED,
+            cmd: 0,
+            chr: 0,
         };
     }
 
@@ -401,11 +412,19 @@ impl State {
     #[inline]
     pub(crate) fn cmd_chr_of(&mut self, loc: Loc, v: &Values) -> (u8, i32) {
         let e = self.entry_mut(loc);
-        match &e.val {
+        if e.flags & CC != 0 {
+            return (e.cmd, e.chr);
+        }
+        let (c, h) = match &e.val {
             Native::Mean(m) => m.cmd_chr(),
             Native::Absent => Mean::Undefined.cmd_chr(),
             _ => self.mean_of(loc, v).cmd_chr(),
-        }
+        };
+        let e = self.entry_mut(loc);
+        e.cmd = c;
+        e.chr = h;
+        e.flags |= CC;
+        (c, h)
     }
 
     /// Loaded `loc` as a token list (decoded once).
@@ -500,6 +519,8 @@ impl State {
             val: val.clone(),
             id,
             flags: LOADED | if id.is_some() { HAS_ID } else { 0 },
+            cmd: 0,
+            chr: 0,
         };
         if !global && grp.is_some() {
             self.defined.push(loc);
@@ -530,6 +551,8 @@ impl State {
             val: val.clone(),
             id,
             flags: LOADED | if id.is_some() { HAS_ID } else { 0 },
+            cmd: 0,
+            chr: 0,
         };
         if !base {
             self.defined.push(loc);
@@ -678,7 +701,7 @@ impl State {
             };
             PEntry {
                 id,
-                flags: e.flags | HAS_ID,
+                flags: (e.flags | HAS_ID) & !CC,
             }
         };
         let mut slots = Vec::new();
@@ -739,6 +762,8 @@ impl State {
             val: e.id.map_or(Native::Absent, Native::Raw),
             id: e.id,
             flags: e.flags,
+            cmd: 0,
+            chr: 0,
         };
         for s in p.slots {
             let l = loc(&mut st, s.loc);
