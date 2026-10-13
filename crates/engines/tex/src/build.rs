@@ -260,6 +260,16 @@ impl Run<'_, '_> {
         Ok((items, f.since_bp))
     }
 
+    /// The last item of list `lid` and the count [`Self::list_items`]
+    /// gives, without copying a local list.
+    pub(crate) fn list_last(&mut self, lid: i64) -> R<(Option<ValueId>, usize)> {
+        if let Some(l) = self.level_of(lid) {
+            return Ok((l.list.last().copied(), l.list.len()));
+        }
+        let (items, since) = self.list_items(lid)?;
+        Ok((items.last().copied(), since))
+    }
+
     /// [`Self::list_items`] with the space factor at the list's end: the
     /// list's transitions are folded left to right from 1000 (§1091,
     /// §1083), and each waiting space gets its glue from the factor where
@@ -373,7 +383,7 @@ impl Run<'_, '_> {
         let nonempty = if md.km == 1 {
             true
         } else {
-            !self.list_items(md.vlid)?.0.is_empty()
+            self.list_last(md.vlid)?.0.is_some()
         };
         if nonempty {
             let g = self.glue_param("parskip")?;
@@ -707,9 +717,38 @@ impl Run<'_, '_> {
 
     // ------------------------------------------------------------ boxes
 
+    /// The field of box register `n`, `box:<n>`, interned once per values
+    /// epoch (a register access builds no name).
+    pub(crate) fn box_field(&self, n: i64) -> phitex_defuse::Field {
+        thread_local! {
+            static BOXES: std::cell::RefCell<(u64, u64, Vec<Option<phitex_defuse::Field>>)> =
+                const { std::cell::RefCell::new((u64::MAX, u64::MAX, Vec::new())) };
+        }
+        let v = self.v;
+        let epoch = self.cx.values_epoch();
+        let slot = usize::try_from(n).ok().filter(|&i| i < 32768);
+        let make = || self.ops.fields.get_at(v, epoch, &format!("box:{n}"));
+        let Some(i) = slot else { return make() };
+        BOXES.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.0 != v.instance() || c.1 != epoch {
+                *c = (v.instance(), epoch, Vec::new());
+            }
+            if let Some(Some(f)) = c.2.get(i) {
+                return *f;
+            }
+            let f = make();
+            if c.2.len() <= i {
+                c.2.resize(i + 1, None);
+            }
+            c.2[i] = Some(f);
+            f
+        })
+    }
+
     /// The box in register `n` (`None`: void).
     pub(crate) fn box_reg(&mut self, n: i32) -> R<Option<ValueId>> {
-        let x = self.get(&format!("box:{n}"))?;
+        let x = { let f = self.box_field(i64::from(n)); self.get_f(f)? };
         let v = self.v;
         Ok(x.and_then(|x| match &*v.get(x) {
             Value::List(xs) => xs.get(1).copied().filter(|&b| b != ValueId::UNIT),
@@ -722,7 +761,8 @@ impl Run<'_, '_> {
         let v = self.v;
         let lvl = if global { 0 } else { md.depth };
         let val = v.list(vec![v.int(lvl), b.unwrap_or(ValueId::UNIT)]);
-        self.set(&format!("box:{n}"), val, global);
+        let f = self.box_field(n);
+        self.set_f(f, val, global);
     }
 
     /// A box register changed "at the same level" (§1079 `box(n):=null`,
@@ -731,12 +771,11 @@ impl Run<'_, '_> {
     /// keep the change at their close ([`Run::modify_at`]).
     pub(crate) fn modify_box_reg(&mut self, n: i32, b: Option<ValueId>) -> R<()> {
         let v = self.v;
-        let name = format!("box:{n}");
-        let x = self.get(&name)?;
+        let f = self.box_field(i64::from(n));
+        let x = self.get_f(f)?;
         let lvl = x.map_or(0, |x| crate::val::int_at(v, x, 0));
         let val = v.list(vec![v.int(lvl), b.unwrap_or(ValueId::UNIT)]);
         let base = self.base_mode()?.depth;
-        let f = self.ops.fields.get_at(v, self.cx.values_epoch(), &name);
         self.modify_at(f, val, lvl, base);
         Ok(())
     }
@@ -961,12 +1000,12 @@ impl Run<'_, '_> {
             11 => nodes::T_KERN,
             _ => nodes::T_PENALTY,
         };
-        let (items, since) = self.list_items(md.lid)?;
+        let (last, since) = self.list_last(md.lid)?;
         if md.m == 1 && since == 0 {
             // §1106: nothing can be taken from the current page
             return Ok(());
         }
-        if items.last().is_some_and(|&x| nodes::tag(self.v, x) == want) {
+        if last.is_some_and(|x| nodes::tag(self.v, x) == want) {
             let m = nodes::marker(self.v, T_DELETE);
             self.append(md.lid, m);
         }
@@ -998,8 +1037,7 @@ impl Run<'_, '_> {
 
     /// `append_italic_correction` (§1113).
     pub(crate) fn append_italic_correction(&mut self, md: &Mode) -> R<()> {
-        let (items, _) = self.list_items(md.lid)?;
-        let Some(&last) = items.last() else {
+        let Some(last) = self.list_last(md.lid)?.0 else {
             return Ok(());
         };
         let v = self.v;
