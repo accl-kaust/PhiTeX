@@ -56,6 +56,9 @@ pub(crate) const T_PD: i64 = 94;
 /// `\end` (§1054): `[tag, null box, fill glue, penalty]`, the material
 /// the page builder appends each time round until the page is empty.
 pub(crate) const T_END: i64 = 93;
+/// A fatal error (§93): `[tag]`; the main list ends there, the page
+/// the builder holds is not shipped (§1335).
+pub(crate) const T_ABORT: i64 = 89;
 /// The page parameters a run changed, for the page builder's fold:
 /// `[tag, vsize, maxdepth, topskip, holdinginserts]` (§980).
 pub(crate) const T_PAGE_PARAMS: i64 = 92;
