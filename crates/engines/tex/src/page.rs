@@ -224,11 +224,17 @@ impl Run<'_, '_> {
             };
             match nodes::tag(v, x) {
                 nodes::T_END => {
+                    ending = Some(x);
+                    // §1054: an empty page (and empty contributions: the
+                    // queue holds nothing before `\end`) ends the job
+                    // without another cycle
+                    if pb.page.is_empty() {
+                        continue;
+                    }
                     let xs = list_of(v, x);
                     for &y in xs.iter().skip(1).rev() {
                         queue.push_front(y);
                     }
-                    ending = Some(x);
                     continue;
                 }
                 nodes::T_PAGE_PARAMS => {
