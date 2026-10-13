@@ -254,13 +254,7 @@ fn structural(kind: &str, field: &str) -> bool {
     kind != "Changed"
         || field.is_empty()
         || [
-            "pagefx:",
-            "font",
-            "items",
-            "pages",
-            "lopen:",
-            "scope",
-            "kind",
+            "pagefx:", "font", "items", "pages", "lopen:", "scope", "kind",
         ]
         .iter()
         .any(|p| field.starts_with(p))
