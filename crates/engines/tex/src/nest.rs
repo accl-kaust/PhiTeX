@@ -172,7 +172,13 @@ impl Run<'_, '_> {
     /// that made the binding saved what it hid, and the definition is
     /// that group's, so the closes of the groups opened since keep it.
     /// `base` is the depth of level 0.
-    pub(crate) fn modify_at(&mut self, loc: crate::runstate::Loc, val: ValueId, lvl: i64, base: i64) {
+    pub(crate) fn modify_at(
+        &mut self,
+        loc: crate::runstate::Loc,
+        val: ValueId,
+        lvl: i64,
+        base: i64,
+    ) {
         self.irreversible += 1;
         // the first open group deeper than the binding's level
         let mut depth = base;

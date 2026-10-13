@@ -2825,11 +2825,7 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
             // they append to the paragraph's list, may begin one (§1091,
             // `\\prevgraf` 0) and open and close no scope; no meaning
             // or catcode is read again, §1030-§1044)
-            if !toks.is_empty()
-                && toks
-                    .iter()
-                    .all(|t| matches!(t.cat(), Some(10..=12)))
-            {
+            if !toks.is_empty() && toks.iter().all(|t| matches!(t.cat(), Some(10..=12))) {
                 let mut b = Bound {
                     state: Some(Vec::new()),
                     no_scope: true,

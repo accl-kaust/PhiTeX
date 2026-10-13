@@ -11,7 +11,7 @@
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use phitex_defuse::{Ctx, Effect, Field, FxHashMap, Locality, OpId, Stop, Value, ValueId, Values};
+use phitex_defuse::{Ctx, Effect, Field, Locality, OpId, Stop, Value, ValueId, Values};
 
 use crate::fields::Par;
 use crate::runstate::{Loc, Native};
@@ -396,6 +396,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// Location `loc` as a token list.
+    #[allow(dead_code)]
     pub(crate) fn toks_loc(&mut self, loc: Loc) -> R<Rc<[Tok]>> {
         self.load(loc)?;
         Ok(self.st.toks_of(loc, self.v))
@@ -406,17 +407,6 @@ impl<'c, 'a> Run<'c, 'a> {
         let grp = self.innermost_group();
         self.st.set(loc, val, global, grp);
         self.irreversible += 1;
-    }
-
-    /// Field slot `s` (a fixed location).
-    #[inline]
-    pub(crate) fn slot_get(&mut self, s: usize) -> R<Option<ValueId>> {
-        self.get_loc(Loc::try_from(s).unwrap_or(0))
-    }
-
-    /// Defines slot `s` (as [`Self::set`]).
-    pub(crate) fn slot_set(&mut self, s: usize, val: ValueId, global: bool) {
-        self.set_loc(Loc::try_from(s).unwrap_or(0), Native::Raw(val), global);
     }
 
     /// The parameter `p`.
@@ -1427,7 +1417,7 @@ impl<'c, 'a> Run<'c, 'a> {
                         crate::etex::end_of_file(self, n.name())?;
                         continue;
                     }
-                    if &**n == "\u{10FFFE}uend" {
+                    if n.name() == "\u{10FFFE}uend" {
                         // §324: the end of a u template
                         self.align_u_end()?;
                         continue;
@@ -1460,8 +1450,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     fn get_next_rest(&mut self, t: Tok) -> R<bool> {
-        if t == crate::expand::notexpanded_tok()
-        {
+        if t == crate::expand::notexpanded_tok() {
             // §358
             let Some(t2) = self.next_tok()? else {
                 return Ok(false);
