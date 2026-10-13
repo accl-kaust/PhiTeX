@@ -31,7 +31,8 @@
 //!   it are checked at once; a run whose assumptions all hold is confirmed
 //!   without re-running or re-walking.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -139,6 +140,10 @@ pub struct Brackets {
     pub opens: u8,
     pub before: bool,
     pub kind: Option<ValueId>,
+    /// The kind is set by the run ([`Ctx::set_kind`]): the brackets are
+    /// known from the text, so readers do not wait on the node to know
+    /// it is one, only readers of [`Ctx::scope_kind`] wait for the kind.
+    pub kind_pending: bool,
 }
 
 /// Extent of a node's claim on its following siblings, from the text.
@@ -184,6 +189,8 @@ pub(crate) struct Static {
 struct PendIx {
     unbounded: bool,
     effect: bool,
+    /// A static opener whose kind the run sets: pending for the kind field.
+    kind: bool,
     bound: MayDefine,
 }
 
@@ -387,6 +394,11 @@ pub struct Report {
     /// Per batch of edits absorbed during the evaluation: its version and
     /// the step it was absorbed before.
     pub edits_applied: Vec<(u64, u64)>,
+    /// Marked nodes reported final (see [`Settled`]).
+    pub settled: u64,
+    /// Of those, reports that replaced an earlier one at the same version
+    /// with another output: the node's level under-estimated its inputs.
+    pub resettled: u64,
     /// `nodes_run` by operation name.
     pub runs_by_op: Vec<(&'static str, u64)>,
 
@@ -425,6 +437,13 @@ pub struct Report {
     pub confirmations: u64,
     /// Speculative runs whose assumptions failed.
     pub mispredictions: u64,
+    /// Of those refuted by a pending node defining what the run read (or
+    /// its definer changing), by field, most refuted first.
+    pub refuted_by_field: Vec<(Field, u64)>,
+    /// Nodes with a refuted speculative run, and the most refutations one
+    /// node had.
+    pub refuted_nodes: u64,
+    pub refutations_max: u32,
     /// Speculative runs that ran out of fuel.
     pub fuel_outs: u64,
     /// Scheduler steps.
@@ -778,6 +797,11 @@ const F_PARKSET: u16 = 2048;
 const SPEC_SCAN_PER_CANDIDATE: usize = 32;
 
 const STREAM_RUN_LIMIT: u32 = 4096;
+/// Mispredictions of one node in one evaluation after which it is not
+/// speculated on again (each costs a run; a reader behind many pending
+/// predecessors would otherwise be refuted at each).
+const MISPREDICTIONS_PER_NODE: u32 = 3;
+
 /// A stream claimer with a predicted extent: eligible for speculation.
 const F_PREDICT: u16 = 4096;
 const F_HINT: u16 = 8192;
@@ -886,6 +910,10 @@ pub(crate) struct Aux {
     reach1: u64,
     /// For a stream claimer: the range whose structure its last run read.
     stream: Option<StreamRange>,
+    /// The diagnostics of the node's last applied run ([`Ctx::diagnostic`]).
+    diagnostics: Vec<ValueId>,
+    /// A static opener whose kind the run sets (`Brackets::kind_pending`).
+    kind_pending: bool,
 }
 
 /// The range a stream claim read, as nodes (labels change under
@@ -912,6 +940,8 @@ pub(crate) struct OItem {
     sreach: u64,
     /// Whether the node holds local definitions.
     ld: bool,
+    /// 1 when the node reads a loop-back field, directly or not.
+    taint: u8,
 }
 
 impl From<OItem> for Slot {
@@ -933,6 +963,8 @@ pub(crate) struct OSum {
     maxs: u64,
     /// Nodes holding local definitions.
     ld: u32,
+    /// Nodes tainted by a loop-back field.
+    taint: u32,
 }
 
 struct OAug;
@@ -953,6 +985,7 @@ impl Aug<OItem, OSum> for OAug {
             maxhit: i.hit,
             maxs: i.sreach,
             ld: u32::from(i.ld),
+            taint: u32::from(i.taint),
         }
     }
 
@@ -967,6 +1000,7 @@ impl Aug<OItem, OSum> for OAug {
             maxhit: a.maxhit.max(b.maxhit),
             maxs: a.maxs.max(b.maxs),
             ld: a.ld + b.ld,
+            taint: a.taint + b.taint,
         }
     }
 }
@@ -1179,6 +1213,34 @@ pub trait EditSource {
     /// between steps (never while a batch runs) and once more when the
     /// evaluation runs out of work. Must not evaluate.
     fn absorb(&mut self, eng: &mut Engine) -> Option<u64>;
+
+    /// Takes the marked nodes whose output became final since the last
+    /// call (see [`Settled`]): called between steps and when the
+    /// evaluation ends, never while a batch runs. Returns whether `items`
+    /// were taken; otherwise the engine keeps them for
+    /// [`Engine::take_settled`].
+    fn settled(&mut self, eng: &Engine, items: &[Settled]) -> bool {
+        let _ = (eng, items);
+        false
+    }
+}
+
+/// A marked node ([`Engine::mark`]) whose output is final for a version
+/// of the text: the node is done, nothing queued below its level can
+/// reach it, and no edit has arrived since. `version` is the one the
+/// last absorbed batch brought ([`Report::version`]). A node tainted by a
+/// loop-back field (it reads one, or reads a node that does) is reported
+/// when the evaluation ends, at the fixpoint. After an edit, every marked
+/// node is reported again at the new version once the evaluation passes
+/// it (the output unchanged or not); a report with the same version and
+/// output as the node's last one is not repeated. A second report at the
+/// same version with another output ([`Report::resettled`]) means the
+/// level ordering under-estimated the node's inputs.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Settled {
+    pub node: NodeId,
+    pub output: ValueId,
+    pub version: u64,
 }
 
 /// No edits during the evaluation.
@@ -1213,6 +1275,8 @@ pub enum Edit {
     Remove { node: NodeId },
     /// [`Engine::set_environment`].
     Environment { fields: Vec<(Field, ValueId)> },
+    /// [`Engine::mark`] (`on`) or [`Engine::unmark`].
+    Mark { node: NodeId, on: bool },
 }
 
 #[derive(Default)]
@@ -1221,6 +1285,8 @@ struct QueueInner {
     queue: std::collections::VecDeque<(Edit, u64)>,
     /// The nodes insertions made, by the version of their edit.
     made: Vec<(u64, NodeId)>,
+    /// Marked nodes reported final (see [`Settled`]).
+    settled: Vec<Settled>,
 }
 
 /// A queue of edits for an evaluation running elsewhere: the host pushes
@@ -1269,6 +1335,13 @@ impl EditQueue {
     pub fn pending(&self) -> usize {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner).queue.len()
     }
+
+    /// The marked nodes reported final so far, in order; taken (the next
+    /// call starts after them). See [`Settled`].
+    #[must_use]
+    pub fn take_settled(&self) -> Vec<Settled> {
+        std::mem::take(&mut self.inner.lock().unwrap_or_else(PoisonError::into_inner).settled)
+    }
 }
 
 impl EditSource for EditQueue {
@@ -1289,6 +1362,13 @@ impl EditSource for EditQueue {
                 Edit::Push { unit, op, args } => made.push((version, eng.push(unit, op, args))),
                 Edit::Remove { node } => eng.remove(node),
                 Edit::Environment { fields } => eng.set_environment(fields),
+                Edit::Mark { node, on } => {
+                    if on {
+                        eng.mark(node);
+                    } else {
+                        eng.unmark(node);
+                    }
+                }
             }
             last = Some(version);
         }
@@ -1299,6 +1379,15 @@ impl EditSource for EditQueue {
             self.applied.store(v, Ordering::Release);
         }
         last
+    }
+
+    fn settled(&mut self, _: &Engine, items: &[Settled]) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .settled
+            .extend_from_slice(items);
+        true
     }
 }
 
@@ -1437,6 +1526,26 @@ pub struct Engine {
     version: u64,
     /// Batches of edits absorbed since the loop-back round started.
     absorbed_in_round: u32,
+    /// Marked nodes ([`Self::mark`]) with the version and output last
+    /// reported for each.
+    marks: FxHashMap<Slot, Option<(u64, ValueId)>>,
+    /// Operations whose nodes are marked at creation.
+    marked_ops: Vec<OpId>,
+    /// Marked nodes done, by height: reported once the level passes them.
+    settle_heap: BinaryHeap<Reverse<(u32, Slot, u32)>>,
+    /// Reports the edit source did not take (see [`Self::take_settled`]).
+    settled: Vec<Settled>,
+    /// Marked nodes done below the level but behind a pending node in
+    /// work: checked again at the next step.
+    settle_held: Vec<Slot>,
+    /// Done nodes by height (for [`Self::critical_path`] without a scan).
+    done_heights: Vec<u32>,
+    done_max: usize,
+    /// Value sweeps so far (see [`Self::values_epoch`]).
+    sweeps: u64,
+    /// Mispredictions per node this evaluation: past
+    /// [`MISPREDICTIONS_PER_NODE`] the node is no longer a candidate.
+    mispredicted: FxHashMap<Slot, u32>,
     pins: FxHashMap<ValueId, u32>,
     values_at_sweep: usize,
     open_op: OpId,
@@ -1604,6 +1713,15 @@ impl Engine {
             edit_version: 0,
             version: 0,
             absorbed_in_round: 0,
+            marks: FxHashMap::default(),
+            marked_ops: Vec::new(),
+            settle_heap: BinaryHeap::new(),
+            settled: Vec::new(),
+            settle_held: Vec::new(),
+            done_heights: Vec::new(),
+            done_max: 0,
+            mispredicted: FxHashMap::default(),
+            sweeps: 0,
             pins: FxHashMap::default(),
             values_at_sweep: 0,
             open_op: OpId(0),
@@ -1860,6 +1978,25 @@ impl Engine {
     #[must_use]
     pub fn check_invariants(&self) -> Vec<String> {
         let mut bad = Vec::new();
+        let done = self.nodes.iter().filter(|n| n.state == State::Done).count();
+        let counted: u32 = self.done_heights.iter().sum();
+        if counted as usize != done {
+            bad.push(format!("done nodes {done}, counted by height {counted}"));
+        }
+        let scanned = self
+            .nodes
+            .iter()
+            .filter(|n| n.state == State::Done)
+            .map(|n| n.height)
+            .max()
+            .unwrap_or(0);
+        if scanned != self.critical_path() {
+            bad.push(format!(
+                "critical path {} by scan, {} by count",
+                scanned,
+                self.critical_path()
+            ));
+        }
         for i in 0..self.nodes.len() {
             let s = self.slot_at(i);
             if !self.live(s) {
@@ -2048,6 +2185,31 @@ impl Engine {
         })
     }
 
+    /// The values' epoch: the number of sweeps so far. A [`ValueId`] made
+    /// or read at one epoch stays valid while the epoch is unchanged (a
+    /// sweep, which frees unreferenced values, happens only at the end of
+    /// an evaluation and bumps it), so a client cache keyed by the epoch
+    /// is valid by construction; [`Ctx::values_epoch`] gives it to a run.
+    #[must_use]
+    pub fn values_epoch(&self) -> u64 {
+        self.sweeps
+    }
+
+    /// The diagnostics `node`'s last run emitted ([`Ctx::diagnostic`]),
+    /// once the node is done (a speculative run's are held until it is
+    /// confirmed; none for a node in work or inert).
+    #[must_use]
+    pub fn diagnostics(&self, node: NodeId) -> &[ValueId] {
+        let Some(&s) = self.ids.get(&node) else {
+            return &[];
+        };
+        let n = self.n(s);
+        if n.state != State::Done || !n.has(F_RAN) {
+            return &[];
+        }
+        self.aux_of(s).map_or(&[], |a| a.diagnostics.as_slice())
+    }
+
     /// The output of `node` from its last completed run.
     #[must_use]
     pub fn output(&self, node: NodeId) -> Option<ValueId> {
@@ -2113,12 +2275,53 @@ impl Engine {
     /// height after evaluation).
     #[must_use]
     pub fn critical_path(&self) -> u32 {
-        self.nodes
-            .iter()
-            .filter(|n| n.state == State::Done)
-            .map(|n| n.height)
-            .max()
-            .unwrap_or(0)
+        let mut h = self.done_max.min(self.done_heights.len().saturating_sub(1));
+        loop {
+            if self.done_heights.get(h).copied().unwrap_or(0) > 0 {
+                // Heights are `u32` (the index came from one).
+                return u32::try_from(h).unwrap_or(u32::MAX);
+            }
+            if h == 0 {
+                return 0;
+            }
+            h -= 1;
+        }
+    }
+
+    fn mispredicted(&mut self, x: Slot) {
+        self.report.mispredictions += 1;
+        *self.mispredicted.entry(x).or_insert(0) += 1;
+    }
+
+    /// Whether `s` may still be run speculatively this evaluation.
+    fn may_speculate(&self, s: Slot) -> bool {
+        self.mispredicted.get(&s).is_none_or(|&c| c < MISPREDICTIONS_PER_NODE)
+    }
+
+    /// Sets a node's state, keeping the count of done nodes per height.
+    fn set_state(&mut self, s: Slot, st: State) {
+        let n = self.nm(s);
+        let (old, h) = (n.state, n.height);
+        n.state = st;
+        if old == State::Done && st != State::Done {
+            self.done_count(h, false);
+        } else if st == State::Done && old != State::Done {
+            self.done_count(h, true);
+        }
+    }
+
+    fn done_count(&mut self, h: u32, up: bool) {
+        let h = h as usize;
+        if self.done_heights.len() <= h {
+            self.done_heights.resize(h + 1, 0);
+        }
+        if up {
+            self.done_heights[h] += 1;
+            self.done_max = self.done_max.max(h);
+        } else {
+            debug_assert!(self.done_heights[h] > 0, "done count underflow at height {h}");
+            self.done_heights[h] = self.done_heights[h].saturating_sub(1);
+        }
     }
 
     /// The chain of waits behind the longest one: from the finished node
@@ -2499,7 +2702,7 @@ impl Engine {
                 eff_code(eff)
             };
             if eff != Effect::Pending {
-                self.ax(s).kind = eff_kind(eff);
+                self.set_static_kind(s, eff);
             }
             self.change_effect(s, new_eff);
             self.make_dirty(s);
@@ -2516,6 +2719,8 @@ impl Engine {
             self.claimer_near(p);
         }
         let (u, l) = (self.n(s).unit, self.n(s).label);
+        // Its text changed: a reader anchored on it by its text re-anchors.
+        self.unanchor_watches(s);
         self.stab_structure(u, l);
     }
 
@@ -2534,6 +2739,39 @@ impl Engine {
     /// [`Report::version`].
     pub fn set_version(&mut self, version: u64) {
         self.version = version;
+    }
+
+    /// Marks `node`: the evaluation reports when its output is final (a
+    /// [`Settled`], through [`EditSource::settled`] or
+    /// [`Self::take_settled`]). A node already done is reported at the
+    /// next step the level passes it.
+    pub fn mark(&mut self, node: NodeId) {
+        let s = self.slot_of(node);
+        if self.marks.insert(s, None).is_none() && self.n(s).state == State::Done {
+            let n = self.n(s);
+            self.settle_heap.push(Reverse((n.height, s, n.epoch)));
+        }
+    }
+
+    /// Undoes [`Self::mark`] (nothing for an unknown node).
+    pub fn unmark(&mut self, node: NodeId) {
+        if let Some(&s) = self.ids.get(&node) {
+            self.marks.remove(&s);
+        }
+    }
+
+    /// Marks every node created with `op` from now on (the client's
+    /// output nodes, say), at creation.
+    pub fn mark_op(&mut self, op: OpId) {
+        if !self.marked_ops.contains(&op) {
+            self.marked_ops.push(op);
+        }
+    }
+
+    /// The [`Settled`] reports the edit source did not take, in order;
+    /// taken (the next call starts after them).
+    pub fn take_settled(&mut self) -> Vec<Settled> {
+        std::mem::take(&mut self.settled)
     }
 
     pub fn set_environment(&mut self, env: impl IntoIterator<Item = (Field, ValueId)>) {
@@ -2767,6 +3005,9 @@ impl Engine {
             }
         };
         assert!(self.ids.insert(id, s).is_none(), "node id collision");
+        if self.marked_ops.contains(&op) {
+            self.marks.insert(s, None);
+        }
         self.touched.insert(
             id,
             Snap {
@@ -2805,14 +3046,14 @@ impl Engine {
         }
         if region {
             self.effect_region_changed(s, EFF_NONE);
-            self.set_kind(s, eff_kind(eff));
+            self.set_static_kind(s, eff);
         }
     }
 
     fn set_created_kind(&mut self, s: Slot) {
         let eff = self.statics(self.n(s).op, self.n(s).args).eff;
         if eff != Effect::Pending && eff != Effect::None {
-            self.set_kind(s, eff_kind(eff));
+            self.set_static_kind(s, eff);
         }
     }
 
@@ -2915,7 +3156,7 @@ impl Engine {
             height
         };
         if h > 0 {
-            self.set_height(s, h);
+            self.lift(s, h);
         }
         if creator != NIL || !matches!(from, HeightFrom::Start) {
             let hint = match from {
@@ -2982,6 +3223,9 @@ impl Engine {
             }
         };
         assert!(self.ids.insert(id, s).is_none(), "node id collision");
+        if self.marked_ops.contains(&op) {
+            self.marks.insert(s, None);
+        }
         self.touched.insert(
             id,
             Snap {
@@ -3036,6 +3280,7 @@ impl Engine {
                 .and_then(|a| a.stream)
                 .map_or(0, |r| self.stream_labels(s, r).1),
             ld: n.defs.iter().any(|d| !d.global),
+            taint: u8::from(n.has(F_TAINT)),
         }
     }
 
@@ -3696,6 +3941,7 @@ impl Engine {
         PendIx {
             unbounded: n.has(F_DYN) && !bounded,
             effect: n.has(F_EFF_DYN),
+            kind: self.aux_of(s).is_some_and(|a| a.kind_pending),
             bound,
         }
     }
@@ -3752,6 +3998,14 @@ impl Engine {
                 }
             }
         }
+        if ix.kind {
+            let key = (unit, self.kind_field, label);
+            if insert {
+                self.pending_f.insert(key, s);
+            } else {
+                self.pending_f.remove(&key);
+            }
+        }
     }
 
     fn sync_pending(&mut self, s: Slot) {
@@ -3759,7 +4013,10 @@ impl Engine {
         let want = n.in_work()
             && n.state != State::Inert
             && !n.has(F_APP)
-            && (n.has(F_DYN) || n.has(F_EFF_DYN) || n.has(F_CLAIM_DYN));
+            && (n.has(F_DYN)
+                || n.has(F_EFF_DYN)
+                || n.has(F_CLAIM_DYN)
+                || self.aux_of(s).is_some_and(|a| a.kind_pending));
         if want == n.has(F_INPEND) {
             return;
         }
@@ -4401,6 +4658,20 @@ impl Engine {
         self.sync_kind(s);
     }
 
+    /// Sets the kind of the scope `s` opens from its static effect; with
+    /// `Brackets::kind_pending` the run sets it and readers of the kind
+    /// wait for the run (the node is pending for the kind field).
+    fn set_static_kind(&mut self, s: Slot, eff: Effect) {
+        let pending = matches!(eff, Effect::Scope(b) if b.kind_pending);
+        if pending != self.aux_of(s).is_some_and(|a| a.kind_pending) {
+            self.ax(s).kind_pending = pending;
+            self.set_flag(s, F_INPEND, false);
+            self.pending_index(s, false);
+            self.sync_pending(s);
+        }
+        self.set_kind(s, eff_kind(eff));
+    }
+
     /// Sets the kind of the scope `s` opens (from its effect).
     fn set_kind(&mut self, s: Slot, kind: Option<ValueId>) {
         if self.aux_of(s).and_then(|a| a.kind) != kind {
@@ -4698,7 +4969,7 @@ impl Engine {
         let waiters = std::mem::take(&mut self.ax(s).waiters);
         self.release_waiters(s, &waiters);
         let old_eff = self.oitem(s).eff;
-        self.nm(s).state = State::Inert;
+        self.set_state(s, State::Inert);
         self.nm(s).epoch = self.n(s).epoch.wrapping_add(1);
         self.sync_pending(s);
         self.sync_order(s);
@@ -4711,7 +4982,7 @@ impl Engine {
     fn activate(&mut self, s: Slot) {
         self.touch(s);
         self.ax(s).claimed_by = None;
-        self.nm(s).state = State::Dirty;
+        self.set_state(s, State::Dirty);
         self.nm(s).epoch = self.n(s).epoch.wrapping_add(1);
         // A sibling again: a reader whose range spans it may anchor on it.
         let (unit, label) = (self.n(s).unit, self.n(s).label);
@@ -4735,7 +5006,7 @@ impl Engine {
             self.effect_region_changed(s, EFF_NONE);
         }
         if eff != Effect::Pending {
-            self.set_kind(s, eff_kind(eff));
+            self.set_static_kind(s, eff);
         }
         if self.n(s).has(F_CLAIMER) {
             self.claim_dirty.insert(s);
@@ -4786,8 +5057,12 @@ impl Engine {
             return;
         }
         let queued = n.has(F_QUEUED);
-        let id = n.id;
+        let (id, old, done) = (n.id, n.height, n.state == State::Done);
         self.nm(x).height = h;
+        if done {
+            self.done_count(old, false);
+            self.done_count(h, true);
+        }
         if queued {
             // The old entry is dead (wrong height).
             self.queue_push(h as usize, id, x);
@@ -4870,6 +5145,15 @@ impl Engine {
     }
 
     /// Raises `x` and the finished readers that must stay above it.
+    /// Sets `x`'s height to `h` if higher, raising the done nodes that
+    /// read it above it (a node in work below a done reader would let the
+    /// reader pass for settled).
+    fn lift(&mut self, x: Slot, h: u32) {
+        if h > self.n(x).height {
+            self.raise(x, h, NIL);
+        }
+    }
+
     fn raise(&mut self, x: Slot, h: u32, origin: Slot) {
         let mut stack = vec![(x, h)];
         let mut budget = 4 * self.ids.len() + 16;
@@ -4884,12 +5168,12 @@ impl Engine {
             self.set_height(y, h);
             if let Some(a) = self.aux_of(y) {
                 for &r in &a.out_readers {
-                    if self.n(r).state == State::Done {
+                    // A node reading its own result is not above itself.
+                    if r != y && self.n(r).state == State::Done {
                         stack.push((r, h + 1));
                     }
                 }
             }
-            let unit = self.n(y).unit;
             for d in &self.n(y).defs {
                 let from = y.pack();
                 for (_, &r) in self.users.range((from, d.field, 0)..=(from, d.field, u64::MAX)) {
@@ -4898,7 +5182,16 @@ impl Engine {
                     }
                 }
             }
-            let _ = unit;
+            // Range readers whose range covers `y` read its contribution.
+            let n = self.n(y);
+            if !n.has(F_APP) && !self.units[n.unit as usize].watches.is_empty() {
+                let (unit, label) = (n.unit, n.label);
+                for (r, _) in self.stab(unit, label) {
+                    if self.n(r).state == State::Done {
+                        stack.push((r, h + 1));
+                    }
+                }
+            }
         }
     }
 
@@ -4929,19 +5222,19 @@ impl Engine {
         match st {
             State::Dirty => return,
             State::Spec => {
-                self.report.mispredictions += 1;
+                self.mispredicted(x);
                 self.leave_spec(x);
             }
             State::Parked => {
                 self.dequeue(x);
             }
             State::Done if self.spec_done.remove(&x) => {
-                self.report.mispredictions += 1;
+                self.mispredicted(x);
             }
             _ => {}
         }
         count!(Dirty);
-        self.nm(x).state = State::Dirty;
+        self.set_state(x, State::Dirty);
         self.nm(x).floor = 0;
         if let Some(o) = self.origins.get_mut(&x) {
             o.raised = 0;
@@ -4965,7 +5258,19 @@ impl Engine {
             if self.tracing > 0 {
                 self.note(u, cause.clone());
             }
+            let n = self.n(u);
+            if n.state == State::Spec || (n.state == State::Done && self.spec_done.contains(&u)) {
+                // A speculative result read a definition that changed.
+                self.count_refuted(f);
+            }
             self.make_dirty_quiet(u);
+        }
+    }
+
+    fn count_refuted(&mut self, f: Field) {
+        match self.report.refuted_by_field.iter_mut().find(|c| c.0 == f) {
+            Some(c) => c.1 += 1,
+            None => self.report.refuted_by_field.push((f, 1)),
         }
     }
 
@@ -4988,7 +5293,7 @@ impl Engine {
     fn park(&mut self, x: Slot, on: Slot) {
         count!(Park);
         self.dequeue(x);
-        self.nm(x).state = State::Parked;
+        self.set_state(x, State::Parked);
         self.nm(x).on = on;
         if on != NIL {
             let name = self.op(self.n(on).op).name();
@@ -5022,9 +5327,9 @@ impl Engine {
                     self.note(w, Cause::Woken { by: self.n(x).id });
                 }
                 self.dequeue(w);
-                self.nm(w).state = State::Dirty;
+                self.set_state(w, State::Dirty);
                 let hw = self.n(w).height.max(h);
-                self.set_height(w, hw);
+                self.lift(w, hw);
                 self.enqueue(w);
             }
         }
@@ -5263,6 +5568,8 @@ impl Engine {
         }
         self.clear_contribs(x);
         self.drop_watch(x);
+        // Not a sibling for anyone now: a reader anchored on it re-anchors.
+        self.unanchor_watches(x);
         self.leave_spec(x);
         self.dequeue(x);
         let old_eff = self.oitem(x).eff;
@@ -5299,7 +5606,7 @@ impl Engine {
             self.units[body as usize].watches.clear();
             self.free_units.push(body);
         } else {
-            self.nm(x).state = State::Done;
+            self.set_state(x, State::Done);
             let root = self.units[unit as usize].root;
             let (r, _) = self.order.remove(&OAug, root, label);
             self.units[unit as usize].root = r;
@@ -5320,13 +5627,14 @@ impl Engine {
             self.aux[a as usize] = Aux::default();
             self.free_aux.push(a);
         }
+        self.set_state(x, State::Free);
         let n = self.nm(x);
-        n.state = State::Free;
         n.gen_ = n.gen_.wrapping_add(1);
         n.aux = NO_AUX;
         n.uses = Box::new([]);
         n.defs = Box::new([]);
         n.flags = 0;
+        self.marks.remove(&x);
         self.free_slots.push(x.ix);
     }
 
@@ -5537,9 +5845,9 @@ impl Engine {
             if s.work == 0 {
                 self.drop_watch(r);
                 self.dequeue(r);
-                self.nm(r).state = State::Dirty;
+                self.set_state(r, State::Dirty);
                 let h = self.n(r).height.max(s.maxh + 1);
-                self.set_height(r, h);
+                self.lift(r, h);
                 self.enqueue(r);
             }
         }
@@ -6026,6 +6334,15 @@ impl Engine {
         if n.parent != NIL && self.live(n.parent) && self.n(n.parent).has(F_TAINT) {
             return true;
         }
+        // A range reader folds over tainted contributions.
+        if let Some((_, anchor)) = self.aux_of(x).and_then(|a| a.watch)
+            && !n.has(F_APP)
+        {
+            let lo = self.watch_key(x, anchor).0;
+            if self.ord_fold(n.unit, lo, n.label).taint > 0 {
+                return true;
+            }
+        }
         n.uses.iter().any(|u| match u.kind {
             K_LOOP => true,
             K_FIELD if u.site != NIL => self.n(u.site).has(F_TAINT),
@@ -6038,6 +6355,7 @@ impl Engine {
     }
 
     fn update_taint(&mut self, x: Slot) {
+        self.flush_order();
         let mut stack = vec![x];
         while let Some(y) = stack.pop() {
             if !self.live(y) {
@@ -6048,9 +6366,16 @@ impl Engine {
                 continue;
             }
             self.set_flag(y, F_TAINT, t);
+            self.sync_order(y);
             if let Some(a) = self.aux_of(y) {
                 stack.extend(a.out_readers.iter().copied());
                 stack.extend(a.children.iter().copied());
+            }
+            // Range readers folding over `y`.
+            let n = self.n(y);
+            if !n.has(F_APP) && !self.units[n.unit as usize].watches.is_empty() {
+                let (unit, label) = (n.unit, n.label);
+                stack.extend(self.stab(unit, label).into_iter().map(|(r, _)| r));
             }
             for d in &self.n(y).defs {
                 let from = y.pack();
@@ -6159,7 +6484,7 @@ impl Engine {
                 End::Output(_) => {}
                 End::OutOfFuel => {
                     self.report.fuel_outs += 1;
-                    self.report.mispredictions += 1;
+                    self.mispredicted(x);
                     self.set_flag(x, F_NOSPEC, true);
                     return;
                 }
@@ -6177,7 +6502,7 @@ impl Engine {
             if !self.stale_assumptions_hold(x, &r) {
                 // A target finished earlier in this batch, against the
                 // prediction: the run is discarded and the node runs again.
-                self.report.mispredictions += 1;
+                self.mispredicted(x);
                 return;
             }
         }
@@ -6188,7 +6513,7 @@ impl Engine {
             // A read of a finished node not settled below this level, then
             // a stop: the node re-runs above that node too.
             let h = r.raise.max(self.n(x).height);
-            self.set_height(x, h);
+            self.lift(x, h);
         }
         let output = match r.end {
             End::Output(v) => v,
@@ -6201,14 +6526,14 @@ impl Engine {
                     self.park(x, t);
                 } else if self.live(t) {
                     let h = (self.n(t).height + 1).max(self.n(x).height);
-                    self.set_height(x, h);
+                    self.lift(x, h);
                     self.note_raise(x, h, t);
                 }
                 return;
             }
             End::GateRaise(h, from) => {
                 let h = h.max(self.n(x).height);
-                self.set_height(x, h);
+                self.lift(x, h);
                 self.note_raise(x, h, from);
                 return;
             }
@@ -6216,7 +6541,7 @@ impl Engine {
                 self.report.stops += 1;
                 self.report.raises += 1;
                 let h = h.max(self.n(x).height + 1);
-                self.set_height(x, h);
+                self.lift(x, h);
                 self.note_raise(x, h, NIL);
                 return;
             }
@@ -6228,7 +6553,7 @@ impl Engine {
                     self.park(x, t);
                 } else if self.live(t) {
                     let h = (self.n(t).height + 1).max(self.n(x).height);
-                    self.set_height(x, h);
+                    self.lift(x, h);
                     self.note_raise(x, h, t);
                 }
                 return;
@@ -6295,7 +6620,10 @@ impl Engine {
         }
         self.report.runs += 1;
         self.eval_runs += 1;
-        {
+        // A speculative run is a guess the scheduler's budget bounds: it
+        // does not count toward the node's run budget (a guess refuted
+        // at every pending predecessor would end the evaluation).
+        if !r.speculative {
             let c = self.runs_in_eval.entry(x).or_insert(0);
             *c += 1;
             let c = *c;
@@ -6313,7 +6641,7 @@ impl Engine {
         }
         if self.n(x).state == State::Parked {
             self.dequeue(x);
-            self.nm(x).state = State::Dirty;
+            self.set_state(x, State::Dirty);
         }
         self.nm(x).on = NIL;
         if self.n(x).has(F_CLAIM_DYN) {
@@ -6361,6 +6689,10 @@ impl Engine {
                 self.ax(x).kind = r.kind;
             }
             self.change_effect(x, e);
+        } else if r.kind.is_some() && self.aux_of(x).is_some_and(|a| a.kind_pending && a.kind != r.kind) {
+            // A static opener's kind, from its run.
+            self.ax(x).kind = r.kind;
+            self.sync_kind(x);
         }
         if self.n(x).output != output || !self.n(x).has(F_RAN) {
             changed = true;
@@ -6383,6 +6715,9 @@ impl Engine {
         self.nm(x).sig = r.sig;
         self.set_flag(x, F_RAN, true);
         self.set_flag(x, F_REBIND, false);
+        if !r.diagnostics.is_empty() || self.aux_of(x).is_some_and(|a| !a.diagnostics.is_empty()) {
+            self.ax(x).diagnostics = r.diagnostics;
+        }
         if r.speculative {
             self.spec_done.insert(x);
         } else {
@@ -6434,11 +6769,11 @@ impl Engine {
         if pending_assumptions > 0 {
             self.report.speculations += 1;
             self.dequeue(x);
-            self.nm(x).state = State::Spec;
+            self.set_state(x, State::Spec);
             self.spec_live += 1;
             self.ax(x).assume_left = pending_assumptions;
             let h = self.target_height_mut(x).max(self.n(x).height);
-            self.set_height(x, h);
+            self.lift(x, h);
             self.sync_order_lazy(x);
         } else {
             let h = self.target_height_mut(x);
@@ -6547,7 +6882,7 @@ impl Engine {
             }
             self.dequeue(y);
             self.leave_spec(y);
-            self.nm(y).state = State::Done;
+            self.set_state(y, State::Done);
             if self.n(y).on != NIL {
                 self.nm(y).on = NIL;
             }
@@ -6565,11 +6900,16 @@ impl Engine {
             }
             let old = self.n(y).height;
             if h > old {
-                self.raise(y, h, y);
+                // Its readers done below the new height follow it up.
+                self.raise(y, h, NIL);
             } else {
                 self.set_height(y, h);
             }
             self.sync_order_lazy(y);
+            if self.marks.contains_key(&y) {
+                let n = self.n(y);
+                self.settle_heap.push(Reverse((n.height, y, n.epoch)));
+            }
             for c in self.children_of(y).to_vec() {
                 self.clear_prov(c);
             }
@@ -6643,6 +6983,9 @@ impl Engine {
                         work.push((a.node, h));
                     }
                 } else {
+                    if let AssumeKind::Structure(f) | AssumeKind::Def(f) = a.kind {
+                        self.count_refuted(f);
+                    }
                     self.make_dirty(a.node);
                 }
             }
@@ -6715,6 +7058,7 @@ impl Engine {
         }
         span!(Sweep);
         count!(Sweep);
+        self.sweeps += 1;
         let mut live: FxHashSet<ValueId> = FxHashSet::default();
         for n in &self.nodes {
             if n.state == State::Free {
@@ -6740,6 +7084,7 @@ impl Engine {
             for x in &a.assumers {
                 live.insert(x.value);
             }
+            live.extend(a.diagnostics.iter().copied());
         }
         for (f, v) in self.environment.iter().chain(self.env_next.iter().flatten()) {
             live.insert(f.0);
@@ -6890,6 +7235,7 @@ impl Engine {
         self.stream_runs.clear();
         self.runs_in_eval.clear();
         self.causes.clear();
+        self.mispredicted.clear();
         self.tracing = 0;
         self.created_in_eval.clear();
         self.idle_rounds = 0;
@@ -6900,6 +7246,7 @@ impl Engine {
         }
         self.apply_environment();
         self.touch_log.clear();
+        self.requeue_marks();
         let restarted = self.feedback;
         let mut result = self.evaluate_inner(sched, exec, edits);
         self.feedback = self.has_feedback();
@@ -6914,6 +7261,7 @@ impl Engine {
         self.report.edits = self.edit_version;
         if result.is_ok() {
             self.collect_apps(false);
+            self.fire_all(edits);
         }
         self.sweep_values(result.as_ref().err());
         self.sweep_all_shifts(50_000);
@@ -6988,6 +7336,11 @@ impl Engine {
 
     fn finalize_report(&mut self) {
         self.report.critical_path = self.critical_path();
+        self.report
+            .refuted_by_field
+            .sort_by_key(|&(f, c)| (std::cmp::Reverse(c), f.0.raw()));
+        self.report.refuted_nodes = self.mispredicted.len() as u64;
+        self.report.refutations_max = self.mispredicted.values().copied().max().unwrap_or(0);
         let mut top: Vec<(Slot, u64)> = std::mem::take(&mut self.wait_counts).into_iter().collect();
         top.sort_unstable_by_key(|&(s, c)| (std::cmp::Reverse(c), s.ix));
         self.report.top_waited = top
@@ -7263,7 +7616,137 @@ impl Engine {
         self.created_in_eval.clear();
         self.stream_runs.clear();
         self.idle_rounds = 0;
+        // The new version: every marked node is reported again at it.
+        self.requeue_marks();
         true
+    }
+
+    /// Queues every marked node that is done for a report at the current
+    /// version.
+    fn requeue_marks(&mut self) {
+        let mut done: Vec<Slot> = self
+            .marks
+            .keys()
+            .copied()
+            .filter(|&s| self.live(s) && self.n(s).state == State::Done)
+            .collect();
+        done.sort_unstable();
+        for s in done {
+            let n = self.n(s);
+            self.settle_heap.push(Reverse((n.height, s, n.epoch)));
+        }
+    }
+
+    /// Reports the marked nodes done below `level` (with `all`, every
+    /// marked node done, the loop-tainted ones included).
+    fn fire_settled(&mut self, level: u32, all: bool, edits: &mut dyn EditSource) {
+        for s in std::mem::take(&mut self.settle_held) {
+            if self.live(s) && self.marks.contains_key(&s) {
+                let n = self.n(s);
+                self.settle_heap.push(Reverse((n.height, s, n.epoch)));
+            }
+        }
+        while let Some(&Reverse((h, s, epoch))) = self.settle_heap.peek() {
+            if h >= level {
+                break;
+            }
+            self.settle_heap.pop();
+            if !self.live(s) || !self.marks.contains_key(&s) {
+                continue;
+            }
+            let n = self.n(s);
+            if n.state != State::Done || n.epoch != epoch {
+                continue;
+            }
+            if n.height != h {
+                // Raised since: wait for the level to pass the new height.
+                self.settle_heap.push(Reverse((n.height, s, epoch)));
+                continue;
+            }
+            if n.has(F_TAINT) && !all {
+                // A later loop-back round may change it: at the end.
+                continue;
+            }
+            if self.work_around(s) {
+                // A node in work before it (or in its unfolding) may still
+                // change what it read or remake its definers: once done.
+                self.settle_held.push(s);
+                continue;
+            }
+            self.fire(s);
+        }
+        self.deliver(edits);
+    }
+
+    /// Whether a node in work lies before `x` in its unit (reads bind
+    /// backwards: it may still define, claim or shape what `x` read, or
+    /// remake the node that defined it), in `x`'s own unfolding, or
+    /// before the unit's owner up the unit tree.
+    fn work_around(&self, x: Slot) -> bool {
+        let n = self.n(x);
+        let end = self.unfolded_end(x);
+        if self.ord_fold(n.unit, 0, end + 1).work > 0 {
+            return true;
+        }
+        let mut unit = n.unit;
+        loop {
+            let owner = self.units[unit as usize].owner;
+            if owner == NIL || !self.live(owner) {
+                return false;
+            }
+            let o = self.n(owner);
+            if o.in_work() || self.ord_fold(o.unit, 0, o.label).work > 0 {
+                return true;
+            }
+            unit = o.unit;
+        }
+    }
+
+    /// Reports every marked node that is done (the evaluation's end).
+    fn fire_all(&mut self, edits: &mut dyn EditSource) {
+        self.settle_heap.clear();
+        let mut done: Vec<Slot> = self
+            .marks
+            .keys()
+            .copied()
+            .filter(|&s| self.live(s) && self.n(s).state == State::Done)
+            .collect();
+        done.sort_unstable();
+        for s in done {
+            if !self.work_around(s) {
+                self.fire(s);
+            }
+        }
+        self.deliver(edits);
+    }
+
+    fn fire(&mut self, s: Slot) {
+        let n = self.n(s);
+        if !n.has(F_RAN) {
+            return;
+        }
+        let (id, output) = (n.id, n.output);
+        let version = self.version;
+        let Some(last) = self.marks.get_mut(&s) else { return };
+        if *last == Some((version, output)) {
+            return;
+        }
+        if last.is_some_and(|(v, _)| v == version) {
+            self.report.resettled += 1;
+        }
+        *last = Some((version, output));
+        self.report.settled += 1;
+        self.settled.push(Settled {
+            node: id,
+            output,
+            version,
+        });
+    }
+
+    fn deliver(&mut self, edits: &mut dyn EditSource) {
+        if !self.settled.is_empty() && edits.settled(self, &self.settled) {
+            self.settled.clear();
+        }
     }
 
     /// The speculation candidates for a step at `level`: dirty nodes above
@@ -7292,7 +7775,7 @@ impl Engine {
                 let n = self.n(s);
                 // Re-bound nodes are revalidated at their level instead
                 // (cheaper than any run).
-                if n.state == State::Dirty && !n.has(F_NOSPEC) && !n.has(F_REBIND) {
+                if n.state == State::Dirty && !n.has(F_NOSPEC) && !n.has(F_REBIND) && self.may_speculate(s) {
                     cands.push(Candidate {
                         node: n.id,
                         slot: s,
@@ -7308,7 +7791,7 @@ impl Engine {
             }
             scan -= 1;
             let n = self.n(s);
-            if !n.has(F_NOSPEC) && n.on != NIL {
+            if !n.has(F_NOSPEC) && n.on != NIL && self.may_speculate(s) {
                 cands.push(Candidate {
                     node: n.id,
                     slot: s,
@@ -7339,6 +7822,7 @@ impl Engine {
             self.settle_deferred();
             self.flush_order();
             let Some((level, at_level)) = self.queue_first() else {
+                self.fire_settled(u32::MAX, false, edits);
                 if self.absorb(edits) {
                     continue;
                 }
@@ -7351,6 +7835,7 @@ impl Engine {
                 });
             }
             self.level = level;
+            self.fire_settled(level, false, edits);
             ready.clear();
             #[cfg(feature = "profile")]
             let gate_span = crate::obs::enter_impl(crate::obs::Span::Gate);
@@ -7544,6 +8029,7 @@ pub struct RunResult {
     pub(crate) assumptions: Vec<(Slot, AssumeKind, ValueId)>,
     pub(crate) sig: u64,
     pub(crate) error: Option<EvalError>,
+    pub(crate) diagnostics: Vec<ValueId>,
     /// Unfolded-text and lexical-application memo hits and misses.
     pub(crate) memo: [u32; 4],
 }
