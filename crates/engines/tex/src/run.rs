@@ -1754,8 +1754,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .map(|(loc, x, l)| (self.loc_field(loc), x, l))
             .collect();
         if op == self.ops.pagestep || op == self.ops.pagestep_any {
-            let j = self.page_index();
-            crate::page::step_defs(&mut self, j, published);
+            crate::page::step_defs(&mut self, published);
         } else {
             for (f, x, l) in published {
                 crate::exec::widths::def(f);

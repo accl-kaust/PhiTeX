@@ -584,6 +584,10 @@ impl Session {
                         .wkeys_path()
                         .and_then(|p| self.cache.as_ref()?.get(&p.with_file_name("pagefx")))
                         .unwrap_or_default(),
+                    pgst: self
+                        .wkeys_path()
+                        .and_then(|p| self.cache.as_ref()?.get(&p.with_file_name("pgst")))
+                        .unwrap_or_default(),
                     ..Options::default()
                 };
                 let opts = Options {
@@ -847,6 +851,11 @@ impl Session {
         let p = p.with_file_name("pagefx");
         if c.get(&p).as_deref() != Some(fx.as_slice()) {
             let _ = c.put(&p, &fx, &[]);
+        }
+        let st = b.export_pgst();
+        let p = p.with_file_name("pgst");
+        if c.get(&p).as_deref() != Some(st.as_slice()) {
+            let _ = c.put(&p, &st, &[]);
         }
     }
 

@@ -415,41 +415,47 @@ impl Run<'_, '_> {
     pub(crate) fn page_step(&mut self, args: &[ValueId]) -> R<()> {
         let v = self.v;
         let j = self.page_index();
-        // `\count0..9` as the step before this one left them (`pgdef:<j-1>`,
-        // a loop-back: the build's guess in round one): read from there,
-        // not through the step before, so the steps do not chain on them
-        if j > 0 && j < MAX_PAGES {
+        // whether the chain runs serially (`pgref` >= 2: guesses were
+        // refuted in two rounds, a routine whose delta depends on its own
+        // previous one): then each step reads the step before it
+        // (`pgstd:<j-1>`, a definition), all pages right in one round
+        let serial = j < MAX_PAGES
+            && self
+                .cx
+                .use_field(v.field("pgref"))?
+                .is_some_and(|x| int_of(v, x) >= 2);
+        let mut readst = ValueId::UNIT;
+        let mut readdef = ValueId::UNIT;
+        let mut inherited: Vec<(Field, ValueId)> = Vec::new();
+        if serial && j > 0 {
+            let x = self.cx.use_field(v.field(&format!("pgstd:{}", j - 1)))?;
+            let xs = x.map(|x| list_of(v, x)).unwrap_or_default();
+            if let Some(&cs) = xs.first() {
+                self.preload_counts(cs);
+            }
+            inherited = pgst_pairs(v, xs.get(1).copied());
+        } else if j > 0 && j < MAX_PAGES {
+            // `\count0..9` as the step before this one left them
+            // (`pgdef:<j-1>`, a loop-back: the build's guess in round one)
             let f = v.field(&format!("pgdef:{}", j - 1));
             let x = self.cx.use_field(f)?;
             log_read(&self.ops, "pgdef", j - 1, count_entries(v, x));
             if let Some(x) = x {
-                let xs = list_of(v, x);
-                if xs.len() == 10 {
-                    for (k, &c) in xs.iter().enumerate() {
-                        let cf = self.ops.fields.get_at(
-                            v,
-                            self.cx.values_epoch(),
-                            &format!("count:{k}"),
-                        );
-                        let l = self.loc_of(cf);
-                        self.st.preload(l, Some(c));
-                    }
-                }
+                readdef = x;
+                self.preload_counts(x);
             }
-        }
-        // every other field the routines before this page left changed
-        // (`pgst:<j-1>`, a loop-back: the page chain's cumulative delta;
-        // round one's guess none, the state before the chain): read from
-        // there, so no step reads a step before it
-        if j > 0 && j < MAX_PAGES {
+            // every other field the routines before this page left
+            // changed (`pgst:<j-1>`, a loop-back: the chain's cumulative
+            // delta; round one's guess none, the state before the chain)
             let f = v.field(&format!("pgst:{}", j - 1));
             let x = self.cx.use_field(f)?;
-            let pairs = pgst_pairs(v, x);
-            log_read(&self.ops, "pgst", j - 1, named(v, &pairs));
-            for (f, x) in pairs {
-                let l = self.loc_of(f);
-                self.st.preload(l, Some(x));
-            }
+            readst = x.unwrap_or(ValueId::UNIT);
+            inherited = pgst_pairs(v, x);
+            log_read(&self.ops, "pgst", j - 1, named(v, &inherited));
+        }
+        for &(f, x) in &inherited {
+            let l = self.loc_of(f);
+            self.st.preload(l, Some(x));
         }
         let d = args.get(1).copied().unwrap_or(ValueId::UNIT);
         if self.fire_page(d, args.get(2).copied())? {
@@ -460,14 +466,76 @@ impl Run<'_, '_> {
             for k in 0..10 {
                 cs.push(v.int(self.int(&format!("count:{k}"))?));
             }
-            let x = v.list(cs);
-            log_pub(&self.ops, "pgdef", j, count_entries(v, Some(x)));
-            self.cx.publish(v.field(&format!("pgdef:{j}")), x);
+            let counts = v.list(cs);
+            log_pub(&self.ops, "pgdef", j, count_entries(v, Some(counts)));
+            self.cx.publish(v.field(&format!("pgdef:{j}")), counts);
             if !self.pagefx_pub {
                 log_pub(&self.ops, "pagefx", j, Vec::new());
             }
+            // the step's own delta, for the writer's fold (`pgdeltas`)
+            let mut own: std::collections::BTreeMap<String, (Field, ValueId)> =
+                std::collections::BTreeMap::new();
+            for (loc, x, _) in self.st.published(v) {
+                let f = self.loc_field(loc);
+                let name = crate::val::field_name(v, f);
+                if name == "pdf:state" || step_input(&name) {
+                    continue;
+                }
+                own.insert(name, (f, x));
+            }
+            let pairs: Vec<ValueId> = own.values().map(|&(f, x)| v.list(vec![f.0, x])).collect();
+            let e = v.list(vec![
+                v.int(i64::try_from(j).unwrap_or(0)),
+                v.list(pairs),
+                readst,
+                counts,
+                readdef,
+                v.int(i64::from(serial)),
+            ]);
+            self.contribute("pgdeltas", v.seq_unit(e));
+            if serial {
+                // the cumulative state after this step, for the next
+                let mut state: std::collections::BTreeMap<String, (Field, ValueId)> = inherited
+                    .iter()
+                    .map(|&(f, x)| (crate::val::field_name(v, f), (f, x)))
+                    .collect();
+                for (name, (f, x)) in own {
+                    let pre = self.cx.use_field(f)?;
+                    if same_as_before(v, &name, pre, x) {
+                        state.remove(&name);
+                    } else {
+                        state.insert(name, (f, x));
+                    }
+                }
+                let st = if state.is_empty() {
+                    ValueId::UNIT
+                } else {
+                    v.list(state.values().map(|&(f, x)| v.list(vec![f.0, x])).collect())
+                };
+                let f = v.field(&format!("pgstd:{j}"));
+                self.cx
+                    .define_with(f, v.list(vec![counts, st]), Locality::Global);
+            }
         }
         Ok(())
+    }
+
+    /// `\count0..9` read from `cs` (ten values) in place of the
+    /// engine's.
+    fn preload_counts(&mut self, cs: ValueId) {
+        let v = self.v;
+        let xs = list_of(v, cs);
+        if xs.len() != 10 {
+            return;
+        }
+        for (k, &c) in xs.iter().enumerate() {
+            let cf = self
+                .ops
+                .fields
+                .get_at(v, self.cx.values_epoch(), &format!("count:{k}"));
+            let l = self.loc_of(cf);
+            self.st.preload(l, Some(c));
+        }
     }
 
     /// `fire_up` (§1012–§1025) for the fired page `d` ([`Self::page_data`]):
@@ -981,9 +1049,11 @@ impl Operation for PageStep {
     fn name(&self) -> &'static str {
         if self.any { "pagestep_any" } else { "pagestep" }
     }
-    /// Only the exact PDF fold's state ([`Run::finish`]).
+    /// Only the exact PDF fold's state ([`Run::finish`]) and, when the
+    /// chain runs serially, the state for the next step (`pgstd:<j>`).
     fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
-        MayDefine::Names(vec![v.field("pdf:state")])
+        let _ = v;
+        MayDefine::Prefixes(vec!["pdf:state".to_owned(), "pgstd:".to_owned()])
     }
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         None
@@ -1201,31 +1271,17 @@ fn same_as_before(v: &Values, name: &str, pre: Option<ValueId>, x: ValueId) -> b
     pre == Some(x) || (initial_like(v, name, pre) && initial_like(v, name, Some(x)))
 }
 
-/// [`Run::finish`] of page step `j`: its base-level definitions go to
-/// the chain's delta (`pgdeltas`), never to the engine, but for the
-/// exact PDF writer's fold (`pdf:state`).
-pub(crate) fn step_defs(r: &mut Run<'_, '_>, j: usize, defs: Vec<(Field, ValueId, Locality)>) {
+/// [`Run::finish`] of a page step: nothing reaches the engine (the
+/// step's delta went to `pgdeltas` in [`Run::page_step`]) but the exact
+/// PDF writer's fold (`pdf:state`).
+pub(crate) fn step_defs(r: &mut Run<'_, '_>, defs: Vec<(Field, ValueId, Locality)>) {
     let v = r.v;
-    let mut own: std::collections::BTreeMap<String, (Field, ValueId)> =
-        std::collections::BTreeMap::new();
     for (f, x, l) in defs {
         crate::exec::widths::def(f);
-        let name = crate::val::field_name(v, f);
-        if name == "pdf:state" {
+        if crate::val::field_name(v, f) == "pdf:state" {
             r.cx.define_with(f, x, l);
-            continue;
         }
-        if step_input(&name) {
-            continue;
-        }
-        own.insert(name, (f, x));
     }
-    if own.is_empty() || j >= MAX_PAGES {
-        return;
-    }
-    let pairs: Vec<ValueId> = own.values().map(|&(f, x)| v.list(vec![f.0, x])).collect();
-    let e = v.list(vec![v.int(i64::try_from(j).unwrap_or(0)), v.list(pairs)]);
-    r.contribute("pgdeltas", v.seq_unit(e));
 }
 
 /// The TeX state after the page chain, for the writer (§4 of the
@@ -1247,42 +1303,94 @@ impl FinalState {
             .use_field(v.field("pp:steps"))?
             .map_or(0, |x| usize::try_from(int_of(v, x)).unwrap_or(0))
             .min(MAX_PAGES);
-        let mut deltas: std::collections::BTreeMap<usize, Vec<(Field, ValueId)>> =
+        // each step's entry: [j, own pairs, pgst read, counts, pgdef
+        // read, serial] (`Run::page_step`)
+        let mut entries: std::collections::BTreeMap<usize, Vec<ValueId>> =
             std::collections::BTreeMap::new();
         for e in v.seq_to_vec(all) {
             let xs = list_of(v, e);
-            let (Some(&j), Some(&ps)) = (xs.first(), xs.get(1)) else {
-                continue;
-            };
-            let j = usize::try_from(int_of(v, j)).unwrap_or(0);
-            deltas.entry(j).or_default().extend(pgst_pairs(v, Some(ps)));
+            let Some(&j) = xs.first() else { continue };
+            entries.insert(usize::try_from(int_of(v, j)).unwrap_or(0), xs);
         }
+        let old = cx.use_field(v.field("pgref"))?.map_or(0, |x| int_of(v, x));
+        let mut refuted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut state: std::collections::BTreeMap<String, (Field, ValueId)> =
             std::collections::BTreeMap::new();
         let mut cur = ValueId::UNIT;
+        let mut counts = ValueId::UNIT;
         for j in 0..steps {
-            if let Some(ds) = deltas.get(&j) {
-                for &(f, x) in ds {
-                    let name = crate::val::field_name(v, f);
-                    let pre = cx.use_field(f)?;
-                    if same_as_before(v, &name, pre, x) {
-                        state.remove(&name);
-                    } else {
-                        state.insert(name, (f, x));
+            let Some(xs) = entries.get(&j) else { continue };
+            let g = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
+            // what step j read against what the steps before it left
+            if j > 0 && int_of(v, g(5)) == 0 {
+                if g(2) != cur {
+                    let read = named(v, &pgst_pairs(v, Some(g(2))));
+                    let want: Vec<(String, ValueId)> =
+                        state.iter().map(|(n, &(_, x))| (n.clone(), x)).collect();
+                    for n in differing(&read, &want) {
+                        refuted.insert(n);
                     }
                 }
-                cur = if state.is_empty() {
-                    ValueId::UNIT
-                } else {
-                    v.list(state.values().map(|&(f, x)| v.list(vec![f.0, x])).collect())
-                };
+                if g(4) != counts && counts != ValueId::UNIT {
+                    let read = count_entries(v, Some(g(4)));
+                    let want = count_entries(v, Some(counts));
+                    for n in differing(&read, &want) {
+                        refuted.insert(n);
+                    }
+                }
             }
+            counts = g(3);
+            for (f, x) in pgst_pairs(v, Some(g(1))) {
+                let name = crate::val::field_name(v, f);
+                let pre = cx.use_field(f)?;
+                if same_as_before(v, &name, pre, x) {
+                    state.remove(&name);
+                } else {
+                    state.insert(name, (f, x));
+                }
+            }
+            cur = if state.is_empty() {
+                ValueId::UNIT
+            } else {
+                v.list(state.values().map(|&(f, x)| v.list(vec![f.0, x])).collect())
+            };
             let e: Vec<(String, ValueId)> =
                 state.iter().map(|(n, &(_, x))| (n.clone(), x)).collect();
             log_pub(o, "pgst", j, e);
             if cur != ValueId::UNIT {
                 cx.publish(v.field(&format!("pgst:{j}")), cur);
+                // (kept for the client: the next session's guess)
+                let jj = v.int(i64::try_from(j).unwrap_or(0));
+                cx.contribute(
+                    v.field("pgsts"),
+                    v.seq_unit(v.list(vec![v.int(0), jj, cur])),
+                );
             }
+            if counts != ValueId::UNIT {
+                let jj = v.int(i64::try_from(j).unwrap_or(0));
+                cx.contribute(
+                    v.field("pgsts"),
+                    v.seq_unit(v.list(vec![v.int(1), jj, counts])),
+                );
+            }
+        }
+        // a refuted round counts towards the serial chain (two make it
+        // serial: `Run::page_step`)
+        let new = if refuted.is_empty() {
+            old
+        } else {
+            (old + 1).min(2)
+        };
+        if !refuted.is_empty() {
+            let names: Vec<String> = refuted.into_iter().collect();
+            o.lblog
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .rounds
+                .insert(format!("refuted round {}: {}", old + 1, names.join(" ")));
+        }
+        if new > 0 {
+            cx.publish(v.field("pgref"), v.int(new));
         }
         Ok(FinalState {
             map: state.into_values().collect(),
@@ -1305,6 +1413,24 @@ impl FinalState {
 pub(crate) struct LbLog {
     reads: std::collections::BTreeMap<LbKey, Vec<Entries>>,
     pubs: std::collections::BTreeMap<LbKey, Entries>,
+    /// The writer's refuted rounds, with the fields.
+    rounds: std::collections::BTreeSet<String>,
+}
+
+/// The names whose values differ between `a` and `b`.
+fn differing(a: &[(String, ValueId)], b: &[(String, ValueId)]) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for (n, x) in a {
+        if !b.iter().any(|(m, y)| m == n && y == x) {
+            out.insert(n.clone());
+        }
+    }
+    for (n, x) in b {
+        if !a.iter().any(|(m, y)| m == n && y == x) {
+            out.insert(n.clone());
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// A loop-back of the page chain: its kind and page.
@@ -1336,7 +1462,7 @@ impl LbLog {
     /// <fields> at page <n> (<loop-back>)`, the fields whose values
     /// differ.
     pub(crate) fn refuted(&self) -> Vec<String> {
-        let mut out = Vec::new();
+        let mut out: Vec<String> = self.rounds.iter().cloned().collect();
         for (&(kind, j), reads) in &self.reads {
             let Some(p) = self.pubs.get(&(kind, j)) else {
                 continue;

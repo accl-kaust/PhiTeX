@@ -608,3 +608,41 @@ fn latex_paragraph_nodes() {
         pages
     );
 }
+
+/// `hello.tex` cold, then a second session given the first's page
+/// guesses (`export_pagefx`, `export_pgst`): loop rounds and the
+/// refuted guesses of each (a measure; the second must be one round).
+#[test]
+#[ignore = "heavy: the LaTeX format"]
+fn latex_hello_warm() {
+    let dir = common::fixtures().join("latex/hello");
+    let src = common::read(&dir.join("hello.tex"));
+    let want = std::fs::read(dir.join("hello.dvi")).expect("the oracle");
+    let comment = common::dvi_comment(&want);
+    let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/cache/latex.fmt");
+    let opts = || Options {
+        prelude_bytes: std::fs::read(&cache).ok(),
+        time_limit: None,
+        ..options("hello", &dir, &comment, false, false)
+    };
+    let b = common::build(opts(), Some(&prelude(false)), &src);
+    eprintln!(
+        "hello cold: loop rounds {}, critical path {:?}, nodes run {}, refuted {:?}",
+        b.stats.loop_rounds, b.stats.critical_path, b.stats.nodes_run, b.stats.refuted_guesses
+    );
+    let o = Options {
+        pagefx: b.export_pagefx(),
+        pgst: b.export_pgst(),
+        ..opts()
+    };
+    let w = common::build(o, Some(&prelude(false)), &src);
+    eprintln!(
+        "hello warm: loop rounds {}, critical path {:?}, nodes run {}, refuted {:?}",
+        w.stats.loop_rounds, w.stats.critical_path, w.stats.nodes_run, w.stats.refuted_guesses
+    );
+    assert_eq!(w.output().0, b.output().0, "warm output differs");
+    assert!(
+        common::first_difference(&w.output().0, &want).is_none(),
+        "differs from latex"
+    );
+}
