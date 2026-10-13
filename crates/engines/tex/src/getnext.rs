@@ -150,6 +150,19 @@ impl Run<'_, '_> {
         self.get_next_or_end()
     }
 
+    /// `get_token`'s token alone (§365 for a macro's arguments, §392-§399:
+    /// the meaning is not needed, every test there is on `cur_tok`); the
+    /// internal markers still go through the slow path.
+    #[inline]
+    pub(crate) fn get_token_tok(&mut self) -> R<Tok> {
+        if let Some(t) = self.input.next_plain_of_top() {
+            self.cur.tok = t;
+            return Ok(t);
+        }
+        self.get_next_or_end()?;
+        Ok(self.cur.tok)
+    }
+
     /// `get_x_token` (§380).
     pub(crate) fn get_x_token(&mut self) -> R<()> {
         loop {
