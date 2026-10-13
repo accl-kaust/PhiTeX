@@ -23,7 +23,7 @@ use phitex_typeset::node::BoxNode;
 
 use crate::{FontSource, FontType, OBJ_TYPE_OTHERS, OBJ_TYPE_PAGE, PdfError, PdfState};
 
-/// A font event of the walk, in order.
+/// An event of the walk that touches the document's tables, in order.
 #[derive(Clone, Debug)]
 pub(crate) enum FontEv {
     /// `load_font` made the font's state.
@@ -32,6 +32,15 @@ pub(crate) enum FontEv {
     DoVf(FontId),
     /// `init_font` on an unused font.
     Init(FontId),
+    /// `pdf_create_obj(t, i)`: the number it gave.
+    New(usize, i64, usize),
+    /// `get_obj(t, id)`: the number it gave.
+    Get(usize, crate::Ident, usize),
+    /// An annotation's or link's object (a number TeX gave) found
+    /// scheduled or not.
+    Sched(usize, bool),
+    /// The object an annotation or link got, scheduled.
+    Scheduled(usize),
 }
 
 /// The writer's variables a page's walk reads or leaves: everything but
@@ -220,6 +229,16 @@ pub struct PageRecord {
     ffs: Vec<(FontId, FontId)>,
     /// The uncompressed content, width and height (`last_page_shown`).
     shown: (Vec<u8>, i32, i32),
+    /// The page's resources, page and contents objects where recorded.
+    pre_nums: [usize; 3],
+    /// The objects of the state recorded on (numbers up to it shared).
+    shared: usize,
+    /// The marks lists and their data, numbered where recorded.
+    annots: Vec<usize>,
+    links: Vec<usize>,
+    dests: Vec<usize>,
+    marks: Vec<(usize, crate::marks::Mark)>,
+    dest_data: Vec<(usize, crate::marks::Dest)>,
 }
 
 impl PageRecord {
@@ -234,11 +253,21 @@ impl PageRecord {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Recording {
     pub events: Vec<FontEv>,
+    /// Whether the walk of the page is being recorded (the object
+    /// events count only then), and how deep in a recorded call.
+    pub walk: bool,
+    pub depth: u32,
+    /// The page's resources, page and contents objects.
+    pub pre_nums: [usize; 3],
     /// Where the content object's bytes begin and end in `out`.
     pub blob: Option<(usize, usize)>,
     pub font_list: Vec<FontId>,
-    /// Whether the page made anything but text and rules.
+    /// Whether the page made anything but text, rules, annotations,
+    /// links and destinations.
     pub other: bool,
+    /// The marks and destinations as the walk left them.
+    pub marks: Vec<(usize, crate::marks::Mark)>,
+    pub dest_data: Vec<(usize, crate::marks::Dest)>,
 }
 
 /// The sharing key of a scalable font (`init_font`'s test).
@@ -251,7 +280,25 @@ impl PdfState {
     /// Records a font event of the walk, when recording.
     pub(crate) fn rec_font(&mut self, e: FontEv) {
         if let Some(r) = &mut self.rec {
-            r.events.push(e);
+            let object = matches!(
+                e,
+                FontEv::New(..) | FontEv::Get(..) | FontEv::Sched(..) | FontEv::Scheduled(_)
+            );
+            if !object || (r.walk && r.depth == 0) {
+                r.events.push(e);
+            }
+        }
+    }
+
+    /// Enters (`true`) or leaves a call whose objects its own replay
+    /// makes again (`init_font`, `get_obj`).
+    pub(crate) fn rec_depth(&mut self, enter: bool) {
+        if let Some(r) = &mut self.rec {
+            if enter {
+                r.depth += 1;
+            } else {
+                r.depth -= 1;
+            }
         }
     }
 
@@ -269,11 +316,14 @@ impl PdfState {
     ) -> (Result<(), PdfError>, PageRecord) {
         self.init_output();
         let pre = self.pre_key();
+        let shared = self.sys_obj_ptr();
         self.rec = Some(Box::default());
         let r = self.ship(page, true, fonts, wh);
         let rec = self.rec.take().unwrap_or_default();
         let mut pr = PageRecord {
             pre,
+            shared,
+            pre_nums: rec.pre_nums,
             ..PageRecord::default()
         };
         let Some((a, b)) = rec.blob else {
@@ -294,6 +344,12 @@ impl PdfState {
                 }
             }
             pr.shown = self.page_shown.clone();
+            pr.annots.clone_from(&self.annot_list);
+            pr.links.clone_from(&self.link_list);
+            pr.dests.clone_from(&self.dest_list);
+            // (the marks were written and taken out: the walk's copies)
+            pr.marks = rec.marks;
+            pr.dest_data = rec.dest_data;
         }
         (r, pr)
     }
@@ -377,6 +433,25 @@ impl PdfState {
                 }
             }
         }
+        // the objects TeX numbered are as they were where recorded, and
+        // no destination the page defines was defined by a page before
+        for e in &rec.events {
+            match e {
+                FontEv::Sched(n, was) if *n <= rec.shared => {
+                    if *n > self.sys_obj_ptr() || self.is_scheduled(*n) != *was {
+                        return Err(format!("object {n} scheduled differently here"));
+                    }
+                }
+                FontEv::Get(t, id, n) if rec.dests.contains(n) => {
+                    if let Some(k) = self.index.get(&(*t, id.clone()))
+                        && self.aux.dests.contains_key(k)
+                    {
+                        return Err(format!("destination {id:?} defined before"));
+                    }
+                }
+                _ => {}
+            }
+        }
         // §752 as `ship` does it
         let last_resources = self.new_objnum_();
         self.page_group_val = 0;
@@ -389,6 +464,16 @@ impl PdfState {
         );
         self.aux.pages_made.insert(self.last_page);
         let last_stream = self.new_dict(OBJ_TYPE_OTHERS, 0, 0);
+        // the recorded state's numbers here: its own objects mapped as
+        // they are made again, the shared ones kept
+        let mut map: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        for (a, b) in rec
+            .pre_nums
+            .into_iter()
+            .zip([last_resources, self.last_page, last_stream])
+        {
+            map.insert(a, b);
+        }
         self.annot_list.clear();
         self.link_list.clear();
         self.dest_list.clear();
@@ -408,7 +493,27 @@ impl PdfState {
                         self.init_font(f, fonts);
                     }
                 }
+                FontEv::New(t, i, n) => {
+                    let k = self.create_obj(t, i);
+                    map.insert(n, k);
+                }
+                FontEv::Get(t, ref id, n) => {
+                    let k = self.get_obj(t, id);
+                    map.insert(n, k);
+                }
+                FontEv::Sched(..) => {}
+                FontEv::Scheduled(n) => {
+                    let k = map.get(&n).copied().unwrap_or(n);
+                    self.set_scheduled(k);
+                }
             }
+        }
+        let at = |n: usize| map.get(&n).copied().unwrap_or(n);
+        for (k, m) in &rec.marks {
+            self.aux.marks.insert(at(*k), m.clone());
+        }
+        for (k, d) in &rec.dest_data {
+            self.aux.dests.insert(at(*k), d.clone());
         }
         for (f, cs) in &rec.chars {
             if let Some(s) = self.fonts.get(f)
@@ -429,13 +534,21 @@ impl PdfState {
         self.print(&rec.blob);
         self.total_pages += 1;
         self.set_scratch(post);
+        for l in &mut self.link_stack {
+            l.objnum = at(l.objnum);
+        }
+        self.annot_list = rec.annots.iter().map(|&k| at(k)).collect();
+        self.link_list = rec.links.iter().map(|&k| at(k)).collect();
+        self.dest_list = rec.dests.iter().map(|&k| at(k)).collect();
         self.page_shown.clone_from(&rec.shown);
         self.write_page_object(last_stream, last_resources);
         self.font_list.clone_from(&rec.font_list);
         self.write_page_marks();
         self.write_resources(last_resources, true);
         self.restore_resource_lists(saved);
+        let links = std::mem::take(&mut self.link_stack);
         self.set_scratch(post);
+        self.link_stack = links;
         Ok(())
     }
 }

@@ -274,6 +274,12 @@ impl PdfState {
     /// `pdf_init_font`.
     pub(crate) fn init_font(&mut self, f: FontId, src: &dyn FontSource) {
         self.rec_font(crate::replay::FontEv::Init(f));
+        self.rec_depth(true);
+        self.init_font_(f, src);
+        self.rec_depth(false);
+    }
+
+    fn init_font_(&mut self, f: FontId, src: &dyn FontSource) {
         let x = self.font(f).expand.filter(|x| x.auto && x.base != 0);
         if let Some(x) = x {
             self.load_font(x.base, src);
@@ -1206,6 +1212,8 @@ impl PdfState {
             last_stream = self.new_dict(OBJ_TYPE_OTHERS, 0, 0);
             if let Some(r) = &mut self.rec {
                 r.blob = Some((self.out.len(), 0));
+                r.pre_nums = [last_resources, self.last_page, last_stream];
+                r.walk = true;
             }
             self.cur_h = cur_h_offset;
             self.cur_v = p.height + cur_v_offset;
@@ -1285,16 +1293,25 @@ impl PdfState {
             if let Some(b) = &mut r.blob {
                 b.1 = self.out.len();
             }
+            r.walk = false;
             r.font_list.clone_from(&self.font_list);
             r.other = !self.obj_list.is_empty()
                 || !self.xform_list.is_empty()
                 || !self.ximage_list.is_empty()
-                || !self.annot_list.is_empty()
-                || !self.link_list.is_empty()
-                || !self.dest_list.is_empty()
                 || !self.bead_list.is_empty()
                 || self.page_group_val != 0
                 || self.image_procset != 0;
+            r.marks = self
+                .annot_list
+                .iter()
+                .chain(&self.link_list)
+                .filter_map(|k| Some((*k, self.aux.marks.get(k)?.clone())))
+                .collect();
+            r.dest_data = self
+                .dest_list
+                .iter()
+                .filter_map(|k| Some((*k, self.aux.dests.get(k)?.clone())))
+                .collect();
         }
         if shipping_page {
             self.write_page_object(last_stream, last_resources);
