@@ -493,8 +493,14 @@ impl Graph {
         let dvi = eng.register(Arc::new(Dvi));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
-        let ops = Ops { exec, put, outpage };
-        let _ = shared.set(ops);
+        let fields = Arc::new(crate::fields::Fields::new(eng.values()));
+        let ops = Ops {
+            exec,
+            put,
+            outpage,
+            fields,
+        };
+        let _ = shared.set(ops.clone());
         for f in [
             "items",
             "log",
