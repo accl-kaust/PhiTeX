@@ -1378,6 +1378,16 @@ impl FinalState {
             for (f, x) in pgst_pairs(v, Some(g(1))) {
                 let name = crate::val::field_name(v, f);
                 let pre = cx.use_field(f)?;
+                // a count register by the step's change, as `\\count0..9`
+                // (a routine's counter of pages or shipouts it advances)
+                let x = if name.starts_with("count:") && !serial {
+                    let as_int = |y: Option<ValueId>| y.map_or(0, |y| int_of(v, y));
+                    let had = as_int(read_pairs.iter().find(|p| p.0 == f).map(|p| p.1).or(pre));
+                    let now = as_int(state.get(&name).map(|p| p.1).or(pre));
+                    v.int(now + int_of(v, x) - had)
+                } else {
+                    x
+                };
                 if same_as_before(v, &name, pre, x) {
                     state.remove(&name);
                 } else {
