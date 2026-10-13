@@ -592,6 +592,7 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
     };
     // (the groups the text opens so far: braces and named groups)
     let mut depth: i64 = 0;
+    let mut letted: Vec<&str> = Vec::new();
     // (what the previous atom added, and whether it ran inside a group
     // without `\global`: its local definitions are undone at the
     // group's end, §283)
@@ -794,6 +795,9 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                 k = target(&mut e, k, gg);
             }
             "let" | "futurelet" => {
+                if let Some(x) = atoms.get(skip(atoms, k)).filter(|x| x.kind == AtomKind::Cs) {
+                    letted.push(x.name(text));
+                }
                 let p = target(&mut e, k, gl);
                 let mut q = skip(atoms, p);
                 if atoms.get(q).map(|x| x.kind) == Some(AtomKind::Char('=')) {
@@ -1220,7 +1224,10 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                     }
                     continue;
                 }
-                if rd {
+                // (a name this text `\let` runs as what it was let to,
+                // a call the `\let` recorded, not as its definitions
+                // elsewhere: `\let\next\f@@t ... \next`)
+                if rd || letted.contains(&n) {
                     continue;
                 }
                 e.calls.push(n.to_owned());
