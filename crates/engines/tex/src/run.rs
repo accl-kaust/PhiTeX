@@ -224,6 +224,8 @@ pub(crate) struct Run<'c, 'a> {
     pub top: bool,
     /// Whether `\end` takes every following sibling.
     pub claim_rest: bool,
+    /// Whether the node's hint was found violated when it started.
+    pub hint_void: bool,
     /// The semantic nest (§211): the lists and groups this run has open
     /// ([`crate::nest`]), level 0 being the engine's scope.
     pub nest: Vec<crate::nest::Level>,
@@ -324,6 +326,7 @@ impl<'c, 'a> Run<'c, 'a> {
             pulled: 0,
             top: false,
             claim_rest: false,
+            hint_void: false,
             nest: Vec::new(),
             next_lid: 0,
             last_par: (0, 0),
@@ -2464,6 +2467,7 @@ pub(crate) struct Parked {
     pulled: usize,
     top: bool,
     claim_rest: bool,
+    hint_void: bool,
     nest: Vec<PLevel>,
     next_lid: i64,
     last_par: (i64, i64),
@@ -2721,6 +2725,7 @@ impl Run<'_, '_> {
             pulled: self.pulled,
             top: self.top,
             claim_rest: self.claim_rest,
+            hint_void: self.hint_void,
             nest,
             next_lid: self.next_lid,
             last_par: self.last_par,
@@ -2787,6 +2792,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.pulled = p.pulled;
         r.top = p.top;
         r.claim_rest = p.claim_rest;
+        r.hint_void = p.hint_void;
         r.next_lid = p.next_lid;
         r.last_par = p.last_par;
         r.doc = p.doc;
