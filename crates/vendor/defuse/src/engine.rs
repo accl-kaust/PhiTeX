@@ -611,8 +611,14 @@ pub enum Cause {
     Changed { field: Field, site: Option<NodeId> },
     /// The output of `of`, which it reads, changed.
     Output { of: NodeId },
-    /// The node it waited on finished (or went away).
-    Woken { by: NodeId },
+    /// The node it waited on finished (or went away): for `field` (`None`
+    /// for its output or claim), and when the wait was on a pending
+    /// definition set declared by prefixes, the prefix the field matched.
+    Woken {
+        by: NodeId,
+        field: Option<Field>,
+        prefix: Option<String>,
+    },
     /// A loop-back field's value for the next round.
     Loop { field: Field },
     /// The environment's `field` changed.
@@ -670,6 +676,8 @@ struct Origin {
     hint: Option<(Field, Slot)>,
     /// The node it last waited on when its floor rose (`NIL`: none).
     waited: Slot,
+    /// The field it last parked for (`None`: an output or a claim).
+    waited_field: Option<Field>,
     /// The level it was last re-done at after reading above its level.
     raised: u32,
     /// The node whose height set that level when a read does not say
@@ -683,6 +691,7 @@ impl Origin {
         creator: NIL,
         hint: None,
         waited: NIL,
+        waited_field: None,
         raised: 0,
         raised_from: NIL,
         raised_how: Lifted::Read,
@@ -699,8 +708,8 @@ pub struct Waiter {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WaitOn {
     /// Parked until that node finishes (its definitions, claim, scope
-    /// effect or output).
-    Node(NodeId),
+    /// effect or output), for the field (`None`: its output or claim).
+    Node(NodeId, Option<Field>),
     /// Parked until every node in its accumulator range has finished.
     Range { field: Field },
     /// Parked until the client supplies that environment field.
@@ -2013,7 +2022,7 @@ impl Engine {
             }
             let n = self.n(s);
             let on = if n.on != NIL && self.live(n.on) {
-                WaitOn::Node(self.n(n.on).id)
+                WaitOn::Node(self.n(n.on).id, self.origins.get(&s).and_then(|o| o.waited_field))
             } else if let Some((f, _)) = self.env_waiters.iter().find(|(_, xs)| xs.contains(&s)) {
                 WaitOn::Environment(*f)
             } else if let Some((field, _)) = self.aux_of(s).and_then(|a| a.watch) {
@@ -2093,7 +2102,7 @@ impl Engine {
                 continue;
             }
             let target = match w.on {
-                WaitOn::Node(id) => self
+                WaitOn::Node(id, _) => self
                     .slot_by_id(id)
                     .map_or_else(|| "gone".to_string(), |t| format!("{:?}", self.n(t).state)),
                 _ => String::new(),
@@ -2582,7 +2591,12 @@ impl Engine {
                     let live = |t: Slot| (t != NIL && self.live(t)).then_some(t);
                     let woken = |o: &Origin| {
                         let by = live(o.waited)?;
-                        Some((Cause::Woken { by: self.n(by).id }, Some(by)))
+                        let cause = Cause::Woken {
+                            by: self.n(by).id,
+                            field: o.waited_field,
+                            prefix: self.matched_prefix(by, o.waited_field),
+                        };
+                        Some((cause, Some(by)))
                     };
                     let raised = |o: &Origin| {
                         (o.raised == h && h > 0).then(|| {
@@ -3420,6 +3434,7 @@ impl Engine {
                     creator,
                     hint,
                     waited: NIL,
+                    waited_field: None,
                     raised: 0,
                     raised_from: NIL,
                     raised_how: Lifted::Read,
@@ -5180,7 +5195,7 @@ impl Engine {
                 self.nm(w).on = NIL;
                 if self.n(w).state == State::Parked {
                     if self.tracing > 0 {
-                        self.note(w, Cause::Woken { by: self.n(x).id });
+                        self.note(w, self.woken_by(w, x));
                     }
                     self.make_dirty_quiet(w);
                 }
@@ -5632,12 +5647,39 @@ impl Engine {
         }
     }
 
-    fn park(&mut self, x: Slot, on: Slot) {
+    /// The cause of `w`'s wake by `x` (tracing).
+    fn woken_by(&self, w: Slot, x: Slot) -> Cause {
+        let field = self.origins.get(&w).and_then(|o| o.waited_field);
+        Cause::Woken {
+            by: self.n(x).id,
+            field,
+            prefix: self.matched_prefix(x, field),
+        }
+    }
+
+    /// The declared prefix of `on`'s pending definition set that `f`'s
+    /// name matched, if its set is declared by prefixes.
+    fn matched_prefix(&self, on: Slot, f: Option<Field>) -> Option<String> {
+        let f = f?;
+        let n = self.n(on);
+        let st = self.statics(n.op, n.args);
+        let MayDefine::Prefixes(ps) = &st.may_define else {
+            return None;
+        };
+        let name = self.client_name(f);
+        match &*self.values.get(name.0) {
+            Value::Str(text) => ps.iter().find(|p| text.starts_with(p.as_str())).cloned(),
+            _ => None,
+        }
+    }
+
+    fn park(&mut self, x: Slot, on: Slot, field: Option<Field>) {
         count!(Park);
         self.dequeue(x);
         self.set_state(x, State::Parked);
         self.nm(x).on = on;
         if on != NIL {
+            self.origins.entry(x).or_insert(Origin::NONE).waited_field = field;
             let name = self.op(self.n(on).op).name();
             bump(&mut self.report.waits_by_op, name);
             self.ax(on).waiters.push(x);
@@ -5664,7 +5706,7 @@ impl Engine {
             if self.live(w) && self.n(w).state == State::Parked && self.n(w).on == x {
                 count!(Wake);
                 if self.tracing > 0 {
-                    self.note(w, Cause::Woken { by: self.n(x).id });
+                    self.note(w, self.woken_by(w, x));
                 }
                 self.dequeue(w);
                 self.set_state(w, State::Dirty);
@@ -6989,12 +7031,12 @@ impl Engine {
         let output = match r.end {
             End::Output(v) => v,
             End::Unpredictable | End::OutOfFuel => return,
-            End::Gated(t, kind) => {
+            End::Gated(t, kind, field) => {
                 self.report.gated += 1;
                 count!(Gated);
                 if self.live(t) && self.n(t).in_work() {
                     self.note_wait(t, kind);
-                    self.park(x, t);
+                    self.park(x, t, field);
                 } else if self.live(t) {
                     let h = (self.n(t).height + 1).max(self.n(x).height);
                     self.lift(x, h);
@@ -7016,12 +7058,12 @@ impl Engine {
                 self.note_raise(x, h, from, Lifted::Read);
                 return;
             }
-            End::Wait(t, kind) => {
+            End::Wait(t, kind, field) => {
                 self.report.stops += 1;
                 self.apply_partial(x, &r);
                 if self.live(t) && self.n(t).in_work() {
                     self.note_wait(t, kind);
-                    self.park(x, t);
+                    self.park(x, t, field);
                 } else if self.live(t) {
                     let h = (self.n(t).height + 1).max(self.n(x).height);
                     self.lift(x, h);
@@ -7036,7 +7078,7 @@ impl Engine {
                 self.report.stops += 1;
                 bump(&mut self.report.waits_by_kind, WaitKind::Environment.name());
                 self.apply_partial(x, &r);
-                self.park(x, NIL);
+                self.park(x, NIL, None);
                 self.env_waiters.entry(f).or_default().push(x);
                 return;
             }
@@ -7047,7 +7089,7 @@ impl Engine {
                     None => self.create_app(op, args),
                 };
                 self.apply_partial(x, &r);
-                self.park(x, t);
+                self.park(x, t, None);
                 return;
             }
             End::NeedChild(i) => {
@@ -7057,7 +7099,7 @@ impl Engine {
                     && self.n(c).in_work()
                 {
                     self.note_wait(c, WaitKind::Child);
-                    self.park(x, c);
+                    self.park(x, c, None);
                 }
                 return;
             }
@@ -7065,7 +7107,7 @@ impl Engine {
                 self.report.stops += 1;
                 bump(&mut self.report.waits_by_kind, WaitKind::Range.name());
                 self.apply_partial(x, &r);
-                self.park(x, NIL);
+                self.park(x, NIL, None);
                 self.set_watch(x, Some((field, anchor, ValueId::NONE, true)));
                 // It may already be settled.
                 let (u, l) = (self.n(x).unit, self.n(x).label);
@@ -7667,7 +7709,7 @@ impl Engine {
                     WaitOn::Range { field } | WaitOn::Environment(field) => {
                         live.insert(field.0);
                     }
-                    WaitOn::Node(_) | WaitOn::Queued => {}
+                    WaitOn::Node(..) | WaitOn::Queued => {}
                 }
             }
         };
@@ -8107,12 +8149,12 @@ impl Engine {
             }
             let w = self.walk(n.unit, n.label, f);
             if w.pending != NIL {
-                return Err(End::Gated(w.pending, w.pending_kind));
+                return Err(End::Gated(w.pending, w.pending_kind, Some(f)));
             }
             if w.site != NIL {
                 let t = self.n(w.site);
                 if t.in_work() {
-                    return Err(End::Gated(w.site, WaitKind::Value));
+                    return Err(End::Gated(w.site, WaitKind::Value, Some(f)));
                 }
                 if t.height >= self.level {
                     return Err(End::GateRaise(t.height + 1, w.site));
@@ -8530,7 +8572,8 @@ pub(crate) fn eff_kind(e: Effect) -> Option<ValueId> {
 #[derive(Clone, Debug)]
 pub(crate) enum End {
     Output(ValueId),
-    Wait(Slot, WaitKind),
+    /// Parked on the node, for the field (`None`: its output or claim).
+    Wait(Slot, WaitKind, Option<Field>),
     /// Waiting for an environment field neither supplied nor absent.
     WaitEnv(Field),
     /// Re-done at the level, above the finished node it read there
@@ -8542,7 +8585,7 @@ pub(crate) enum End {
     OutOfFuel,
     Unpredictable,
     /// Not started: a hinted input is in work (or behind pending structure).
-    Gated(Slot, WaitKind),
+    Gated(Slot, WaitKind, Option<Field>),
     /// Not started: a hinted input (at the node) is finished but not
     /// settled below `h`.
     GateRaise(u32, Slot),

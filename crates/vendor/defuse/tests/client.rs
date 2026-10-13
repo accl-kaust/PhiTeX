@@ -2184,3 +2184,110 @@ fn a_loop_back_starts_an_edit_from_its_last_fixpoint_when_asked() {
     assert_eq!((rep.restarts, rep.rounds, rep.runs), (0, 1, 1), "{rep:?}");
     assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
 }
+
+/// `["w", k]` declares it may define `f…` and defines `f = k` (reading
+/// nothing); `["wr", k]` is the same but first reads `g`, which no node
+/// defines; `["wf", k]` first reads `fz` (inside its own prefix); `["d"]`
+/// reads `f`.
+struct Writers;
+
+impl Operation for Writers {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        if tag(v, a) == "d" { Some(Vec::new()) } else { None }
+    }
+    fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
+        MayDefine::Prefixes(vec!["f".into()])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        match tag(v, &a).as_str() {
+            "d" => Ok(cx.use_field(v.field("f"))?.unwrap_or(ValueId::UNIT)),
+            t => {
+                if t == "wr" {
+                    let _ = cx.use_field(v.field("g"))?;
+                } else if t == "wf" {
+                    let _ = cx.use_field(v.field("fz"))?;
+                }
+                cx.define(v.field("f"), a[1]);
+                Ok(ValueId::UNIT)
+            }
+        }
+    }
+}
+
+/// Definers of one field are not ordered among themselves: only a read
+/// waits, and only on a pending set that may cover what it reads.
+#[test]
+fn writers_of_one_field_run_in_one_step_unless_they_read_inside_a_pending_set() {
+    let run = |t: &str| {
+        let mut eng = Engine::new();
+        let op = eng.register(Arc::new(Writers));
+        let u = eng.new_unit();
+        for k in 1..=3 {
+            let a = vec![eng.values().str(t), eng.values().int(k)];
+            eng.push(u, op, a);
+        }
+        let a = vec![eng.values().str("d")];
+        let d = eng.push(u, op, a);
+        let rep = eng.evaluate_sequential().expect("evaluate");
+        assert_eq!(eng.values().as_int(eng.output(d).expect("d")), Some(3), "{t}: {rep:?}");
+        (rep.critical_path, rep.pending_sets)
+    };
+    // Writers that read nothing: one step for the three, one for the
+    // reader (which waits on each pending set in turn).
+    assert_eq!(run("w").0, 1);
+    // Writers that read a field outside every pending set: the same.
+    assert_eq!(run("wr").0, 1);
+    // Writers that read a field inside their predecessors' declared
+    // prefix: each waits for the one before (the declaration, not what
+    // it ends up defining, orders them).
+    let (height, waits) = run("wf");
+    assert!(height >= 3 && waits >= 3, "height {height}, waits {waits}");
+}
+
+/// `["p"]` declares it may define `f…` and defines `fq = 1`; `["r"]`
+/// reads `fz`, which p's set may cover but p does not define.
+struct PrefixWait;
+
+impl Operation for PrefixWait {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        if tag(v, a) == "p" { None } else { Some(Vec::new()) }
+    }
+    fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
+        MayDefine::Prefixes(vec!["f".into()])
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        if tag(v, &a) == "p" {
+            cx.define(v.field("fq"), v.int(1));
+            Ok(ValueId::UNIT)
+        } else {
+            Ok(cx.use_field(v.field("fz"))?.unwrap_or(ValueId::UNIT))
+        }
+    }
+}
+
+#[test]
+fn a_woken_link_names_the_field_waited_for_and_the_prefix_it_matched() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(PrefixWait));
+    let u = eng.new_unit();
+    let (p, r) = {
+        let v = eng.values();
+        (vec![v.str("p")], vec![v.str("r")])
+    };
+    let p = eng.push(u, op, p);
+    let r = eng.push(u, op, r);
+    eng.evaluate_sequential().expect("evaluate");
+    let fz = eng.values().field("fz");
+    let chain = eng.critical_chain();
+    let link = chain.iter().find(|c| c.0 == r).expect("r is in the chain");
+    assert!(
+        matches!(&link.1, defuse::Cause::Woken { by, field, prefix }
+            if *by == p && *field == Some(fz) && prefix.as_deref() == Some("f")),
+        "{chain:?}"
+    );
+    assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+}
