@@ -467,8 +467,9 @@ impl State {
 
     /// A binding changed in place (§1079, §1247), nothing saved:
     /// `base` when the binding is the run's base level's (then it is
-    /// the run's definition there), else a group's of the run.
-    pub(crate) fn modify(&mut self, loc: Loc, val: Native, base: bool) {
+    /// the run's definition there, `global` at level one), else a
+    /// group's of the run.
+    pub(crate) fn modify(&mut self, loc: Loc, val: Native, base: bool, global: bool) {
         let mi = self.meta(loc);
         self.stamp += 1;
         let st = self.stamp;
@@ -488,7 +489,12 @@ impl State {
         m.ldef_stamp = st;
         m.ldef_local = true;
         if base {
-            m.publ = Some((val, Locality::Local));
+            let l = if global {
+                Locality::Global
+            } else {
+                Locality::Local
+            };
+            m.publ = Some((val, l));
         }
     }
 

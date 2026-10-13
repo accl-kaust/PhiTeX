@@ -321,7 +321,7 @@ impl Operation for Put {
 }
 
 /// The DVI file.
-pub(crate) struct Dvi;
+pub(crate) struct Dvi(pub Shared);
 
 impl Operation for Dvi {
     fn name(&self) -> &'static str {
@@ -331,7 +331,8 @@ impl Operation for Dvi {
         Some(Vec::new())
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        crate::page::dvi(cx)
+        let o = ops(&self.0);
+        crate::page::dvi(cx, &o)
     }
 }
 

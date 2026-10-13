@@ -56,6 +56,9 @@ pub(crate) struct Ops {
     /// Page-step runs that reached their finish, by page index (not
     /// the attempts that stopped or were cut off): [`crate::Stats`].
     pub steps_done: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    /// The page chain's loop-backs as read and published in the current
+    /// evaluation: the refuted guesses ([`crate::Stats`]).
+    pub lblog: std::sync::Arc<std::sync::Mutex<crate::page::LbLog>>,
 }
 
 /// A level of the input stack.
@@ -240,6 +243,9 @@ pub(crate) struct Run<'c, 'a> {
     /// The page builder of a text run as one node, paging inline
     /// (`pageinline.rs`).
     pub pg: Option<Box<crate::pageinline::Inline>>,
+    /// A page step whose output routine published leftovers
+    /// (`pagefx:<j>`).
+    pub pagefx_pub: bool,
     pub kids: Vec<(OpId, Vec<ValueId>)>,
     pub effect: Effect,
     pub cur: Cur,
@@ -304,6 +310,7 @@ impl<'c, 'a> Run<'c, 'a> {
             st: crate::runstate::State::new(),
             contribs: Vec::new(),
             pg: None,
+            pagefx_pub: false,
             kids: Vec::new(),
             effect: Effect::None,
             cur: Cur {
@@ -1746,10 +1753,23 @@ impl<'c, 'a> Run<'c, 'a> {
             let s = v.seq_unit(item);
             self.contribute("items", s);
         }
-        for (loc, x, l) in self.st.published(self.v) {
-            let f = self.loc_field(loc);
-            crate::exec::widths::def(f);
-            self.cx.define_with(f, x, l);
+        // a page step defines nothing to the engine: its definitions are
+        // the page chain's delta (`page::step_defs`), so no step reads
+        // another
+        let op = self.cx.op();
+        let published: Vec<(Field, ValueId, Locality)> = self
+            .st
+            .published(self.v)
+            .into_iter()
+            .map(|(loc, x, l)| (self.loc_field(loc), x, l))
+            .collect();
+        if op == self.ops.pagestep || op == self.ops.pagestep_any {
+            crate::page::step_defs(&mut self, published);
+        } else {
+            for (f, x, l) in published {
+                crate::exec::widths::def(f);
+                self.cx.define_with(f, x, l);
+            }
         }
         let locs: Vec<Loc> = self.st.defined_locs().collect();
         if !locs.is_empty() {
