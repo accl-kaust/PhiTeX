@@ -211,9 +211,14 @@ fn declare_marks_before(eng: &mut Engine, n: NodeId) {
     eng.declare_loopback(f, ValueId::UNIT);
 }
 
+/// Edited texts of `\\input` files by name: the text and its bytes.
+type Overrides = Arc<Mutex<FxHashMap<String, (String, Vec<u8>)>>>;
+
 /// Edits the document's nodes `nodes` to the text `text`: the slices
 /// both texts share at the start and the end stay, those between are
 /// replaced, removed or inserted.
+// one call site (Absorb::absorb), which passes its fields apart
+#[allow(clippy::too_many_arguments)]
 fn apply_text(
     eng: &mut Engine,
     exec: OpId,
@@ -787,6 +792,10 @@ pub struct Stats {
     pub pending_sets: u64,
     pub pending_sets_defining: u64,
     pub stops: u64,
+    /// Attempts that resumed a stopped run at its blocked read, and that
+    /// started over though one was kept (a read changed).
+    pub resumed: u64,
+    pub restarted: u64,
     /// Stopped runs restarted instead of resumed, by the first read that
     /// refused the resume.
     pub restarted_by: Vec<(&'static str, u64)>,
@@ -851,6 +860,9 @@ pub struct Stats {
     pub speculations: u64,
     pub confirmations: u64,
     pub mispredictions: u64,
+    /// Speculative runs dropped at a stop (their guess is then blocked
+    /// until its node leaves work).
+    pub spec_stops: u64,
     pub raises: u64,
     /// The most nodes ready at one step, and the speculative runs that
     /// ran out of fuel.
@@ -960,6 +972,8 @@ impl Stats {
         self.pending_sets += r.pending_sets;
         self.pending_sets_defining += r.pending_sets_defining;
         self.stops += r.stops;
+        self.resumed += r.resumed;
+        self.restarted += r.restarted;
         for &(k, n) in &r.restarted_by {
             match self.restarted_by.iter_mut().find(|x| x.0 == k) {
                 Some(x) => x.1 += n,
@@ -973,6 +987,7 @@ impl Stats {
         self.speculations += r.speculations;
         self.confirmations += r.confirmations;
         self.mispredictions += r.mispredictions;
+        self.spec_stops += r.spec_stops;
         self.raises += r.raises;
         self.max_ready = self.max_ready.max(r.max_ready);
         self.fuel_outs += r.fuel_outs;
@@ -1032,7 +1047,7 @@ struct Graph {
     /// (`crate::inputs`), and their texts as edited (`Build::edit_file`)
     /// over the finder's.
     inputs_read: Vec<String>,
-    overrides: Arc<Mutex<FxHashMap<String, (String, Vec<u8>)>>>,
+    overrides: Overrides,
 }
 
 /// A file the environment provider answered: name, field, the value
@@ -2041,7 +2056,6 @@ impl Build {
         let mut g = Graph::new(opts.time_limit, opts.threads);
         g.eng.set_max_rounds(opts.max_rounds);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
-        g.sched = opts.speculation.scheduler(opts.speculation_budget);
         if let Some(p) = &opts.progress {
             g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
         }
@@ -2067,32 +2081,7 @@ impl Build {
             g.eng.set_environment(env);
             g.eng.set_environment_absent(g.absent.clone());
         }
-        {
-            let v = g.eng.values();
-            let mut sets: Vec<(Field, ValueId)> = Vec::new();
-            for (k, t) in env.iter() {
-                sets.push((v.field(k), import(v, t)));
-            }
-            sets.push((v.field("jobname"), v.str(&opts.jobname)));
-            sets.push((v.field("dvicomment"), v.str(&opts.comment)));
-            sets.push((
-                v.field("pdf:relaxed"),
-                v.int(i64::from(!opts.exact_objects)),
-            ));
-            sets.push((
-                v.field("pdfdate"),
-                v.str(&phitex_pdf::pdf_date(opts.epoch.unwrap_or(0))),
-            ));
-            if let Some(t) = opts.epoch {
-                // §241 fix_date_and_time, at the job's start
-                for (k, x) in date_params(t) {
-                    sets.push((v.field(k), v.int(x)));
-                }
-            }
-            for (f, x) in sets {
-                g.eng.set_env(unit, f, x);
-            }
-        }
+        job_env(&mut g, unit, &env, &opts);
         // §1337: `\everyjob`, before the job's first line
         let every = env
             .iter()
@@ -2118,8 +2107,7 @@ impl Build {
         }
         // the page builder's fold, after the text: one node choosing every
         // page break, its children the pages
-        let pageplan = g.ops.pageplan;
-        let _ = g.eng.push(unit, pageplan, Vec::new());
+        let _ = g.eng.push(unit, g.ops.pageplan, Vec::new());
         page_guesses(&mut g, &env);
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
@@ -2151,9 +2139,57 @@ impl Build {
         b
     }
 
+    /// `PHITEX_CLAIMS=<text>`: the debugging dump after a settle.
+    fn dump_claims(&self) {
+        // `PHITEX_CLAIMS=<text>`: the nodes whose slice holds the text,
+        // their claims and their descendants' (a debugging dump)
+        if let Ok(want) = std::env::var("PHITEX_CLAIMS") {
+            fn dump(eng: &Engine, v: &Values, n: NodeId, depth: usize) {
+                let Some(i) = eng.node_info(n) else { return };
+                let a = i
+                    .args
+                    .first()
+                    .map(|&x| v.render(x).chars().take(60).collect::<String>())
+                    .unwrap_or_default();
+                let claimed: Vec<String> = eng
+                    .claimed(n)
+                    .iter()
+                    .map(|&c| {
+                        eng.node_info(c)
+                            .and_then(|ci| ci.args.first().map(|&x| v.render(x)))
+                            .map_or_else(
+                                || "?".to_owned(),
+                                |t| t.chars().take(30).collect::<String>(),
+                            )
+                    })
+                    .collect();
+                eprintln!(
+                    "{}{} {:?} {} claims {:?}",
+                    "  ".repeat(depth),
+                    n.raw() % 100_000,
+                    i.state,
+                    a,
+                    claimed
+                );
+                if depth < 4 {
+                    for c in eng.children(n) {
+                        dump(eng, v, c, depth + 1);
+                    }
+                }
+            }
+            let v = self.g.eng.values();
+            let eng = &self.g.eng;
+            for (k, n) in &self.nodes {
+                if k.contains(&want) {
+                    dump(eng, v, *n, 0);
+                }
+            }
+        }
+    }
+
     fn settle(&mut self) {
         // the text nodes' offsets in the document, for the progress
-        let mut offsets = phitex_defuse::FxHashMap::default();
+        let mut offsets = FxHashMap::default();
         let mut off = 0u64;
         for (k, n) in &self.nodes {
             offsets.insert(n.raw(), off);
@@ -2208,50 +2244,7 @@ impl Build {
                 "sizes: {nodes} live nodes ({node} B), {units} live units, {values} values (use {use_} B), rss {rss}"
             );
         }
-        // `PHITEX_CLAIMS=<text>`: the nodes whose slice holds the text,
-        // their claims and their descendants' (a debugging dump)
-        if let Ok(want) = std::env::var("PHITEX_CLAIMS") {
-            fn dump(eng: &Engine, v: &Values, n: NodeId, depth: usize) {
-                let Some(i) = eng.node_info(n) else { return };
-                let a = i
-                    .args
-                    .first()
-                    .map(|&x| v.render(x).chars().take(60).collect::<String>())
-                    .unwrap_or_default();
-                let claimed: Vec<String> = eng
-                    .claimed(n)
-                    .iter()
-                    .map(|&c| {
-                        eng.node_info(c)
-                            .and_then(|ci| ci.args.first().map(|&x| v.render(x)))
-                            .map_or_else(
-                                || "?".to_owned(),
-                                |t| t.chars().take(30).collect::<String>(),
-                            )
-                    })
-                    .collect();
-                eprintln!(
-                    "{}{} {:?} {} claims {:?}",
-                    "  ".repeat(depth),
-                    n.raw() % 100_000,
-                    i.state,
-                    a,
-                    claimed
-                );
-                if depth < 4 {
-                    for c in eng.children(n) {
-                        dump(eng, v, c, depth + 1);
-                    }
-                }
-            }
-            let v = self.g.eng.values();
-            let eng = &self.g.eng;
-            for (k, n) in &self.nodes {
-                if k.contains(&want) {
-                    dump(eng, v, *n, 0);
-                }
-            }
-        }
+        self.dump_claims();
         if let Some(cb) = self.opts.on_page_settled.clone() {
             let pages = self.pages();
             for (k, &h) in pages.iter().enumerate() {
@@ -2957,27 +2950,32 @@ fn describe(eng: &Engine, n: phitex_defuse::NodeId) -> String {
     })
 }
 
-#[cfg(test)]
-mod prelude_tests {
-    use super::*;
-
-    #[test]
-    fn another_layout_or_engine_is_refused() {
-        let c = Cached {
-            key: [3; 32],
-            text_key: 5,
-            reads: vec![("a.tex".to_owned(), 9)],
-            env: Arc::new(vec![("x".to_owned(), Tree::Leaf(Value::Int(1)))]),
-            errors: Vec::new(),
-        };
-        let b = serialise(&c);
-        assert!(deserialise_as(&b, PRELUDE_LAYOUT, engine_identity()).is_some());
-        let other = serialise_as(&c, PRELUDE_LAYOUT + 1, engine_identity());
-        assert!(deserialise(&other).is_none());
-        let other = serialise_as(&c, PRELUDE_LAYOUT, engine_identity() ^ 1);
-        assert!(deserialise(&other).is_none());
-        // the old layout, with no header
-        assert!(deserialise(&b[20..]).is_none());
+/// The job's environment: the format's parameters, the job name, the
+/// PDF options and the date (§241), set on `unit` before the first line.
+fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
+    let v = g.eng.values();
+    let mut sets: Vec<(Field, ValueId)> = Vec::new();
+    for (k, t) in env.iter() {
+        sets.push((v.field(k), import(v, t)));
+    }
+    sets.push((v.field("jobname"), v.str(&opts.jobname)));
+    sets.push((v.field("dvicomment"), v.str(&opts.comment)));
+    sets.push((
+        v.field("pdf:relaxed"),
+        v.int(i64::from(!opts.exact_objects)),
+    ));
+    sets.push((
+        v.field("pdfdate"),
+        v.str(&phitex_pdf::pdf_date(opts.epoch.unwrap_or(0))),
+    ));
+    if let Some(t) = opts.epoch {
+        // §241 fix_date_and_time, at the job's start
+        for (k, x) in date_params(t) {
+            sets.push((v.field(k), v.int(x)));
+        }
+    }
+    for (f, x) in sets {
+        g.eng.set_env(unit, f, x);
     }
 }
 
@@ -3007,5 +3005,29 @@ fn page_guesses(g: &mut Graph, env: &Env) {
     }
     for (f, x) in decl {
         g.eng.declare_loopback(f, x);
+    }
+}
+
+#[cfg(test)]
+mod prelude_tests {
+    use super::*;
+
+    #[test]
+    fn another_layout_or_engine_is_refused() {
+        let c = Cached {
+            key: [3; 32],
+            text_key: 5,
+            reads: vec![("a.tex".to_owned(), 9)],
+            env: Arc::new(vec![("x".to_owned(), Tree::Leaf(Value::Int(1)))]),
+            errors: Vec::new(),
+        };
+        let b = serialise(&c);
+        assert!(deserialise_as(&b, PRELUDE_LAYOUT, engine_identity()).is_some());
+        let other = serialise_as(&c, PRELUDE_LAYOUT + 1, engine_identity());
+        assert!(deserialise(&other).is_none());
+        let other = serialise_as(&c, PRELUDE_LAYOUT, engine_identity() ^ 1);
+        assert!(deserialise(&other).is_none());
+        // the old layout, with no header
+        assert!(deserialise(&b[20..]).is_none());
     }
 }

@@ -199,6 +199,7 @@ impl Run<'_, '_> {
     /// (`pp:start:<j>`) and the `marks:before:<N>` values; then one `brk`
     /// node per page, which re-folds its own page and fires its step:
     /// the pages' material is made and the steps run in parallel.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn page_plan(&mut self) -> R<()> {
         let v = self.v;
         let l = self.list_fold(0)?;
@@ -230,7 +231,7 @@ impl Run<'_, '_> {
         let any = toks_of(v, output).is_empty();
         let mut start = PageStart::FIRST;
         let mut marks = MarksState::default();
-        let mut published = std::collections::HashSet::new();
+        let mut published = phitex_defuse::FxHashSet::default();
         let mut starts = vec![start.value(v)];
         let mut ended = false;
         let mut plan: Vec<ValueId> = Vec::new();
@@ -254,27 +255,24 @@ impl Run<'_, '_> {
                     }
                 }
             }
-            match out.fired {
-                Some((f, side, end)) => {
-                    plan.push(v.int(i64::try_from(j).unwrap_or(0)));
-                    let ms: Vec<ValueId> = f
-                        .marks
-                        .iter()
-                        .filter_map(|&k| side.marks.get(k as usize).copied())
-                        .collect();
-                    marks.fire_values(v, &ms);
-                    starts.push(end.value(v));
-                    start = end;
+            if let Some((f, side, end)) = out.fired {
+                plan.push(v.int(i64::try_from(j).unwrap_or(0)));
+                let ms: Vec<ValueId> = f
+                    .marks
+                    .iter()
+                    .filter_map(|&k| side.marks.get(k as usize).copied())
+                    .collect();
+                marks.fire_values(v, &ms);
+                starts.push(end.value(v));
+                start = end;
+            } else {
+                if out.stuck {
+                    self.diag(
+                        true,
+                        "\\end could not empty the page (an output routine that never ships?)",
+                    );
                 }
-                None => {
-                    if out.stuck {
-                        self.diag(
-                            true,
-                            "\\end could not empty the page (an output routine that never ships?)",
-                        );
-                    }
-                    ended = true;
-                }
+                ended = true;
             }
             j += 1;
         }
@@ -290,7 +288,7 @@ impl Run<'_, '_> {
             self.set(&format!("pp:start:{j}"), s, true);
         }
         for j in 0..starts.len() {
-            self.kid(self.ops.brk, vec![v.int(j as i64)]);
+            self.kid(self.ops.brk, vec![v.int(i64::try_from(j).unwrap_or(0))]);
         }
         Ok(())
     }
@@ -333,7 +331,7 @@ impl Run<'_, '_> {
         drop(guard);
         if let Some((f, side, _)) = out.fired {
             let data = self.page_data(&f, &side)?;
-            self.kid(op, vec![v.int(j as i64), data]);
+            self.kid(op, vec![v.int(i64::try_from(j).unwrap_or(0)), data]);
         }
         Ok(())
     }
@@ -879,6 +877,7 @@ impl Operation for PagePlan {
     fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
         Effect::None
     }
+    #[allow(clippy::redundant_closure_for_method_calls)]
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         run_node(cx, ops(&self.0), |r| r.page_plan())
     }

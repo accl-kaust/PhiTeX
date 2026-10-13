@@ -541,7 +541,19 @@ pub(crate) fn step_forms<T>(
                 output_file_name: format!("{jobname}.pdf"),
                 ..PdfParams::default()
             };
-            (PdfState::new(p), PdfBytes::new(), Forms::default(), 0)
+            let mut st = PdfState::new(p);
+            // the `\pdfglyphtounicode` table a format carries
+            // (`dumptounicode`, pdfTeX §1502; `undumptounicode`, §1503):
+            // a fresh writer state, a format loaded, starts from it
+            if let Some(t) = r.get("pdf:glyphtounicode")? {
+                for e in list_of(v, t) {
+                    let ab = list_of(v, e);
+                    if let [a, b] = ab[..] {
+                        st.glyph_to_unicode(&bytes_of(&str_of(v, a)), &bytes_of(&str_of(v, b)));
+                    }
+                }
+            }
+            (st, PdfBytes::new(), Forms::default(), 0)
         }
     };
     // the parameters a write reads (the version, compression: fixed
