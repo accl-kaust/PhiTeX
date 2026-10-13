@@ -20,6 +20,7 @@ pub(crate) const LEADER_FLAG: i64 = BOX_FLAG + 513;
 impl Run<'_, '_> {
     /// The node's command: expand once, or do one command (§1030).
     pub(crate) fn command(&mut self) -> R<()> {
+        self.heartbeat();
         self.no_pull = true;
         let got = self.get_next();
         self.no_pull = false;
@@ -33,6 +34,56 @@ impl Run<'_, '_> {
             return self.expand();
         }
         self.dispatch()
+    }
+
+    /// With `PHITEX_HEARTBEAT=1`, every 100,000 commands on this thread:
+    /// elapsed seconds, commands, the innermost file and line, and the
+    /// run's sizes, on stderr (a diagnostic for long serial runs).
+    fn heartbeat(&self) {
+        use std::cell::Cell;
+        use std::sync::OnceLock;
+        use std::time::Instant;
+        static ON: OnceLock<bool> = OnceLock::new();
+        thread_local! {
+            static N: Cell<u64> = const { Cell::new(0) };
+            static T0: Cell<Option<Instant>> = const { Cell::new(None) };
+        }
+        if !*ON.get_or_init(|| std::env::var("PHITEX_HEARTBEAT").is_ok_and(|v| v == "1")) {
+            return;
+        }
+        let n = N.with(|c| {
+            c.set(c.get() + 1);
+            c.get()
+        });
+        let t0 = T0.with(|c| {
+            let t = c.get().unwrap_or_else(Instant::now);
+            c.set(Some(t));
+            t
+        });
+        if n % 100_000 != 0 {
+            return;
+        }
+        let (file, line) = self
+            .frames
+            .iter()
+            .find_map(|f| match f {
+                crate::run::Frame::File(f) => Some(f.where_(self.v)),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let mut last = String::new();
+        crate::print::print_cs(&mut last, &self.cur.tok, i64::from(b'\\'), &mut |c| {
+            if char::from_u32(c).is_some_and(char::is_alphabetic) { 11 } else { 12 }
+        });
+        eprintln!(
+            "hb {:.1}s cmds {n} {file}:{line} last {last} cmd {} defs {} own {} nest {} frames {}",
+            t0.elapsed().as_secs_f64(),
+            self.cur.cmd,
+            self.defs.len(),
+            self.own.len(),
+            self.nest.len(),
+            self.frames.len()
+        );
     }
 
     /// `reswitch` (§1045): the case for `cur` in the current mode.
