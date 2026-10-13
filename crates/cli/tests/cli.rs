@@ -1189,7 +1189,14 @@ fn watch_tables_bounded() {
     std::fs::write(dir.join("big.tex"), &text).expect("the document");
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
-            "watch", "--json", "--no-view", "--ini", "--etex", "-j", "8", "big.tex",
+            "watch",
+            "--json",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "-j",
+            "8",
+            "big.tex",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1234,7 +1241,10 @@ fn watch_tables_bounded() {
     }
     if std::env::var_os("PHITEX_NO_GC").is_none() {
         let (a, b) = (&sizes[1], &sizes[sizes.len() - 1]);
-        assert!(b[0] <= a[0] * 11 / 10 && b[2] <= a[2] * 11 / 10, "grew: {a:?} -> {b:?}");
+        assert!(
+            b[0] <= a[0] * 11 / 10 && b[2] <= a[2] * 11 / 10,
+            "grew: {a:?} -> {b:?}"
+        );
     }
 }
 
@@ -1243,6 +1253,8 @@ fn watch_tables_bounded() {
 /// bytes, " the ") with " thy " and back: each build's "engine tables"
 /// note numbers (nodes, units, values, kB resident, us collecting, nodes
 /// freed) and wall, printed for builds 1, 2, 10, 25, 51.
+// measurement means only: f64 precision is irrelevant here
+#[allow(clippy::cast_precision_loss)]
 fn watch_gc_series(name: &str, file: &str, text: &str, args: &[&str], word: usize) {
     let _one = one();
     let dir = scratch(name);
@@ -1295,9 +1307,14 @@ fn watch_gc_series(name: &str, file: &str, text: &str, args: &[&str], word: usiz
     }
     let _ = child.wait();
     let gc = std::env::var_os("PHITEX_NO_GC").is_none();
-    eprintln!("GCSERIES {name} gc={gc}: build | nodes units values | RSS kB | gc us (freed) | wall ms | notes");
+    eprintln!(
+        "GCSERIES {name} gc={gc}: build | nodes units values | RSS kB | gc us (freed) | wall ms | notes"
+    );
     for (k, (s, wall, runs)) in rows.iter().enumerate() {
-        eprintln!("GCROW {name} gc={gc} build {} {s:?} wall {wall:.1} | {runs}", k + 1);
+        eprintln!(
+            "GCROW {name} gc={gc} build {} {s:?} wall {wall:.1} | {runs}",
+            k + 1
+        );
     }
     let walls: Vec<f64> = rows[1..].iter().map(|r| r.1).collect();
     let gcs: Vec<u64> = rows[1..].iter().map(|r| r.0[4]).collect();
@@ -1318,7 +1335,13 @@ fn watch_gc_para400() {
     let text = std::fs::read_to_string(p).expect("scratch/para400.tex");
     let mid = text.len() / 2;
     let word = text[mid..].find(" the ").expect("a word") + mid;
-    watch_gc_series("gc-para400", "para400.tex", &text, &["--engine", "tex", "-j", "8"], word);
+    watch_gc_series(
+        "gc-para400",
+        "para400.tex",
+        &text,
+        &["--engine", "tex", "-j", "8"],
+        word,
+    );
 }
 
 /// LaTeX's hello with 30 paragraphs added: the GC series under
@@ -1335,11 +1358,17 @@ fn watch_gc_latex30() {
         if k == 15 {
             word = text.len() + "This is".len();
         }
-        text += &format!("{k}. {para}\n\n");
+        let _ = write!(text, "{k}. {para}\n\n");
     }
     text += "\\end{document}\n";
     // (" the " right after "15. This is")
     word += "15. ".len();
     assert_eq!(&text[word..word + 5], " the ");
-    watch_gc_series("gc-latex30", "hello.tex", &text, &["--engine", "pdflatex", "-j", "8"], word);
+    watch_gc_series(
+        "gc-latex30",
+        "hello.tex",
+        &text,
+        &["--engine", "pdflatex", "-j", "8"],
+        word,
+    );
 }

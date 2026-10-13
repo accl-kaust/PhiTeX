@@ -126,3 +126,33 @@ fn generated_documents() {
         }
     }
 }
+
+/// One cold build per run of `PHITEX_GEN_DOC` (in `PHITEX_GEN`) at
+/// `PHITEX_GEN_THREADS` threads: its wall, critical path, runs and
+/// loop rounds, for timings that alternate builds.
+#[test]
+#[ignore = "needs PHITEX_GEN"]
+fn generated_wall() {
+    let (Ok(dir), Ok(name)) = (std::env::var("PHITEX_GEN"), std::env::var("PHITEX_GEN_DOC")) else {
+        return;
+    };
+    let t: usize = std::env::var("PHITEX_GEN_THREADS")
+        .ok()
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(1);
+    let dir = std::path::PathBuf::from(dir);
+    let src = std::fs::read_to_string(dir.join(format!("{name}.tex"))).expect("the document");
+    let o = phitex_tex::Options {
+        threads: Some(t),
+        ..common::options(&format!("./{name}.tex"), &name, "", &dir)
+    };
+    let b = common::build(o, Some(&common::plain()), &src);
+    eprintln!(
+        "WALL {name} t={t} wall_ms={:.1} cp={:?} runs={} rounds={} steps={}",
+        b.stats.wall.as_secs_f64() * 1000.0,
+        b.stats.critical_path,
+        b.stats.runs,
+        b.stats.loop_rounds,
+        b.stats.page_steps
+    );
+}
