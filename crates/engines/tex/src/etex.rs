@@ -931,17 +931,8 @@ fn read_line(r: &mut Run<'_, '_>, global: bool) -> R<()> {
     let st = r.get(&field)?.filter(|&x| x != ValueId::UNIT);
     let mut body = Vec::new();
     if let Some(st) = st {
-        let xs = list_of(v, st);
-        let lines = xs.get(1).map(|&l| list_of(v, l)).unwrap_or_default();
         // §486: at the file's end, an empty line, and the stream closes
-        let text = if let Some((&l, rest)) = lines.split_first() {
-            let next = v.list(vec![v.int(2), v.list(rest.to_vec())]);
-            r.set(&field, next, true);
-            crate::val::str_of(v, l)
-        } else {
-            r.set(&field, ValueId::UNIT, true);
-            String::new()
-        };
+        let text = r.next_read_line(&field, st).unwrap_or_default();
         let e = i64::from(r.ipar(Par::endlinechar)?);
         if let Frame::Src(s) = crate::run::src_frame(&text, e) {
             for c in s.buf {

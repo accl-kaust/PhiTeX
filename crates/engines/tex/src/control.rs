@@ -4,7 +4,7 @@
 
 use std::rc::Rc;
 
-use phitex_defuse::ValueId;
+use phitex_defuse::{Value, ValueId};
 use phitex_typeset::glue::Glue;
 
 use crate::fields::Par;
@@ -1086,6 +1086,37 @@ impl Run<'_, '_> {
         Ok(())
     }
 
+    /// The next line of the open stream whose state `st` field `field`
+    /// holds (`[state, lines, position]`): the position moves on, or at
+    /// the end (`None`) the stream closes (§486). The lines are kept as
+    /// they were read in; only the position changes per line.
+    pub(crate) fn next_read_line(&mut self, field: &str, st: ValueId) -> Option<String> {
+        let v = self.v;
+        let (lines, pos) = match &*v.get(st) {
+            Value::List(xs) => (
+                xs.get(1).copied(),
+                xs.get(2).map_or(0, |&p| crate::val::int_of(v, p)),
+            ),
+            _ => (None, 0),
+        };
+        let at = usize::try_from(pos).unwrap_or(0);
+        let line = lines.and_then(|l| match &*v.get(l) {
+            Value::List(xs) => xs.get(at).copied(),
+            _ => None,
+        });
+        match (line, lines) {
+            (Some(l), Some(lines)) => {
+                let next = v.list(vec![v.int(2), lines, v.int(pos + 1)]);
+                self.set(field, next, true);
+                Some(str_of(v, l))
+            }
+            _ => {
+                self.set(field, ValueId::UNIT, true);
+                None
+            }
+        }
+    }
+
     /// `read_toks` (§482–§486): the lines of stream `n` up to balanced
     /// braces.
     fn read_toks(&mut self, n: i32) -> R<Vec<Tok>> {
@@ -1105,18 +1136,7 @@ impl Run<'_, '_> {
                 )?;
                 return Ok(out);
             };
-            let xs = list_of(v, st);
-            let lines = xs.get(1).map(|&l| list_of(v, l)).unwrap_or_default();
-            let (line, rest) = match lines.split_first() {
-                Some((&l, rest)) => (Some(str_of(v, l)), rest.to_vec()),
-                None => (None, Vec::new()),
-            };
-            if line.is_some() {
-                let next = v.list(vec![v.int(2), v.list(rest)]);
-                self.set(&field, next, true);
-            } else {
-                self.set(&field, ValueId::UNIT, true);
-            }
+            let line = self.next_read_line(&field, st);
             let text = line.unwrap_or_default();
             let e = i64::from(self.ipar(Par::endlinechar)?);
             let frames = vec![crate::run::src_frame(&text, e)];
