@@ -311,23 +311,23 @@ struct IfRec {
 
 /// The whole stack (`\showifs`, `\currentif…`): the run's own
 /// conditionals, since a conditional never spans nodes.
-// REDUCE-GAP: the codes (`cur_if`) are not kept on the run (`conds`
-// holds the limits only); `\currentiftype` answers 0 and `\showifs`
-// names every conditional `\if` until the run records them.
-fn if_stack(r: &mut Run<'_, '_>) -> R<Vec<IfRec>> {
-    Ok(r
-        .conds
+fn if_stack(r: &Run<'_, '_>) -> Vec<IfRec> {
+    r.conds
         .iter()
-        .map(|&l| IfRec {
-            code: -1,
+        .zip(&r.if_codes)
+        .map(|(&l, &code)| IfRec {
+            code,
             limit: i32::from(l),
         })
-        .collect())
+        .collect()
 }
 
 /// The conditional `code` (with `unless_code`) begins (`push_cond`,
-/// §495): its record is `conds`, kept by `conditional`.
-pub(crate) fn if_begin(_r: &mut Run<'_, '_>, _code: i32) {}
+/// §495): its limit is on `conds`, kept by `conditional`, its code on
+/// `if_codes`.
+pub(crate) fn if_begin(r: &mut Run<'_, '_>, code: i32) {
+    r.if_codes.push(code);
+}
 
 /// The tests e-TeX and pdfTeX add to `conditional` (§501).
 pub(crate) fn if_test(r: &mut Run<'_, '_>, this_if: i32) -> R<bool> {
@@ -418,7 +418,7 @@ pub(crate) fn last_item(r: &mut Run<'_, '_>, m: i32) -> R<IVal> {
             IVal::Int(i32::try_from(md.group).unwrap_or(0))
         }
         li::CURRENT_IF_LEVEL | li::CURRENT_IF_TYPE | li::CURRENT_IF_BRANCH => {
-            let st = if_stack(r)?;
+            let st = if_stack(r);
             let Some(top) = st.last() else {
                 return Ok(IVal::Int(0));
             };
@@ -1184,17 +1184,7 @@ pub(crate) fn is_class_mark(v: &phitex_defuse::Values, m: Option<ValueId>) -> bo
     m.is_some_and(|m| mark_class(v, m).0 != 0)
 }
 
-/// `fire_up`'s marks of the classes other than 0 (pdfTeX §1012–§1014:
-/// `do_marks(fire_up_init)`, the page's marks, `do_marks(fire_up_done)`).
-pub(crate) fn fire_marks(r: &mut Run<'_, '_>, page_marks: &[u32], side: &nodes::Side) -> R<()> {
-    let marks: Vec<ValueId> = page_marks
-        .iter()
-        .filter_map(|&k| side.marks.get(k as usize).copied())
-        .collect();
-    fire_marks_values(r, &marks)
-}
-
-/// [`fire_marks`] with the page's marks as values.
+/// `fire_up`'s marks of the classes other than 0 (pdfTeX §1012–§1014), the page's marks given as values.
 pub(crate) fn fire_marks_values(r: &mut Run<'_, '_>, page_marks: &[ValueId]) -> R<()> {
     let v = r.v;
     let classes: Vec<i32> = r
@@ -1346,7 +1336,7 @@ pub(crate) fn show(r: &mut Run<'_, '_>) -> R<()> {
         }
         _ => {
             // \showifs
-            let st = if_stack(r)?;
+            let st = if_stack(r);
             if st.is_empty() {
                 s.push_str("### no active conditionals");
             } else {

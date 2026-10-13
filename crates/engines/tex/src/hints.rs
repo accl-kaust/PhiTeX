@@ -678,7 +678,7 @@ impl TextHints {
 
 /// The slices of a text, each with the blanks before the next.
 ///
-/// A document's slices are its paragraph regions (docs/TARGET_GRAPH.md):
+/// A document's slices are its paragraph regions (`docs/TARGET_GRAPH.md`):
 /// a region runs from its start to the end of the next item the pass
 /// marks paragraph-ending (`Implicit::EndsParagraph`: a blank line,
 /// `\par`, a vertical command, a macro whose body ends in one) that is
@@ -688,6 +688,7 @@ impl TextHints {
 /// format's (`Initex`, `Package`) slices are one command each (its
 /// definitions, one per node), extended through a conditional opened at
 /// depth 0 to its `\fi`.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> Vec<(usize, usize)> {
     let mut starts: Vec<usize> = Vec::new();
     // brace depth before each atom
@@ -804,7 +805,7 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> Vec<(usize, usi
         for (k, a) in p.atoms.iter().enumerate() {
             let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
             let inside_if = ifd.get(k).is_some_and(|&x| x > 0)
-                && !(a.kind == AtomKind::Cs && CONDITIONALS.contains(&a.name(text)));
+                && (a.kind != AtomKind::Cs || !CONDITIONALS.contains(&a.name(text)));
             if !(ch && prev_char) && !inside_if && !inside[k] {
                 starts.push(a.start);
             }
@@ -1773,7 +1774,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
             match &mut h.bound {
                 Some(b) => {
                     add_head(&mut b.state, "pg:");
-                    h.cause = "region".to_owned();
+                    "region".clone_into(&mut h.cause);
                 }
                 None => h.cause = format!("region: {}", h.cause),
             }
@@ -2182,14 +2183,6 @@ pub(crate) fn is_region(v: &Values, args: &[ValueId]) -> bool {
     h.cause == "region" || h.cause.starts_with("region: ")
 }
 
-/// Whether the node's text bounds what its command defines.
-pub(crate) fn bounded(v: &Values, args: &[ValueId]) -> bool {
-    if OFF.load(Ordering::Relaxed) || crate::exec::env_flag!("PHITEX_HINTS_OFF") {
-        return false;
-    }
-    hint_of_args(v, args).bound.is_some()
-}
-
 /// The fields the hint rests on, which the node reads first: the
 /// meanings of the names its text calls (`cs:name`, `act:code`) and the
 /// catcodes its bytes were read with (`cat:c`).
@@ -2478,4 +2471,3 @@ mod tests {
         }
     }
 }
-
