@@ -232,6 +232,7 @@ impl Operation for Put {
             let val = xs.get(1).copied().unwrap_or(ValueId::UNIT);
             let f = v.field(&name);
             names.push(f.0);
+            crate::exec::widths::def(f);
             cx.define_with(f, val, if g { Locality::Global } else { Locality::Local });
         }
         // the fields defined, for the prelude's export (as `Run::finish`)
