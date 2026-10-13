@@ -128,7 +128,10 @@ fn same_as_cold(b: &phitex_tex::Build, cold: impl FnOnce() -> phitex_tex::Build)
     }
     let c = cold();
     let same = b.output().0 == c.output().0;
-    eprintln!("== EDITPATH identical to cold: {}", if same { "yes" } else { "no" });
+    eprintln!(
+        "== EDITPATH identical to cold: {}",
+        if same { "yes" } else { "no" }
+    );
 }
 
 fn edit_line(what: &str, t: std::time::Duration, b: &phitex_tex::Build) {
@@ -136,7 +139,10 @@ fn edit_line(what: &str, t: std::time::Duration, b: &phitex_tex::Build) {
     eprintln!("== EDITPATH {what}: critical path {:?}", s.critical_path);
     if std::env::var_os("PHITEX_CHAIN").is_some() {
         for (w, k, f) in b.critical_chain() {
-            eprintln!("   chain {k:9} {f:24} {}", w.chars().take(100).collect::<String>());
+            eprintln!(
+                "   chain {k:9} {f:24} {}",
+                w.chars().take(100).collect::<String>()
+            );
         }
     }
     eprintln!(
@@ -243,6 +249,8 @@ fn editpath_hello() {
     let t0 = std::time::Instant::now();
     b.edit(&e1);
     edit_line("word", t0.elapsed(), &b);
-    same_as_cold(&b, || common::build(opts(), Some("\\input pdflatex.ini\n"), &e1));
+    same_as_cold(&b, || {
+        common::build(opts(), Some("\\input pdflatex.ini\n"), &e1)
+    });
     assert!(b.is_pdf());
 }
