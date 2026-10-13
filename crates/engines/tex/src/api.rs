@@ -203,14 +203,25 @@ fn apply_text(
         .collect();
     let old = &*nodes_now;
     let hints = crate::hints::text_hints(&text, pass::FileKind::Document, defs);
-    crate::hints::register_text(eng.values().str(DOC_NAME), &hints);
+    // (only a document's fragments take their hints from the whole
+    // analysis; a format's keep the hint of their own text: a format
+    // fragment bounded from the whole analysis left its siblings waiting)
+    let doc = crate::hints::kind_of(&text, pass::FileKind::Document) == pass::FileKind::Document;
+    if doc {
+        crate::hints::register_text(eng.values().str(DOC_NAME), &hints);
+    }
     let args_of = |eng: &Engine, k: usize| {
         let (s, e) = new[k].1;
         let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
         let v = eng.values();
-        let mut args = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s);
-        // (a document node is a top-level node)
-        args[1] = v.int(1);
+        let mut args = if doc {
+            let mut a = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s);
+            // (a document node is a top-level node)
+            a[1] = v.int(1);
+            a
+        } else {
+            slice_args(v, &text[s..e], starts)
+        };
         args.push(crate::hints::hint_arg(v, &hints, s));
         args
     };
@@ -1165,7 +1176,10 @@ impl Graph {
         let sl = slices(text, defs);
         let t1 = t0.elapsed();
         let hints = crate::hints::text_hints(text, pass::FileKind::Document, defs);
-        crate::hints::register_text(self.eng.values().str(DOC_NAME), &hints);
+        let doc = crate::hints::kind_of(text, pass::FileKind::Document) == pass::FileKind::Document;
+        if doc {
+            crate::hints::register_text(self.eng.values().str(DOC_NAME), &hints);
+        }
         for (s, e) in sl {
             let piece = &text[s..e];
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
@@ -1173,8 +1187,13 @@ impl Graph {
                 eprintln!("node {piece:?}");
             }
             let v = self.eng.values();
-            let mut args = slice_args_in_file(v, piece, starts, v.str(DOC_NAME), s);
-            args[1] = v.int(1);
+            let mut args = if doc {
+                let mut a = slice_args_in_file(v, piece, starts, v.str(DOC_NAME), s);
+                a[1] = v.int(1);
+                a
+            } else {
+                slice_args(v, piece, starts)
+            };
             args.push(crate::hints::hint_arg(v, &hints, s));
             let n = self.eng.push(unit, self.ops.exec, args);
             out.push((key(piece, starts), n));
