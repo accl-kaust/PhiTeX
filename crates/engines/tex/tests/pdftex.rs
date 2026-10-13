@@ -55,8 +55,12 @@ fn savepos() {
 }
 
 /// The PDF documents not yet byte-identical, compared by their streams
-/// (PDF-BACKEND-GAP): bera and vf use virtual fonts.
-const BACKEND_GAPS: &[&str] = &["bera", "vf"];
+/// (PDF-BACKEND-GAP):
+/// - vfgap: a form without `\immediate` whose virtual font brings in a
+///   new font has it numbered at `\pdfxform`, not when pdfTeX writes
+///   the form (after the page that references it), so a font the page
+///   brings in first gets the other number (`pdf_documents_gaps`).
+const BACKEND_GAPS: &[&str] = &["vfgap"];
 
 /// The `stream ... endstream` bodies of a PDF file.
 fn streams(b: &[u8]) -> Vec<Vec<u8>> {
@@ -78,8 +82,7 @@ fn find(h: &[u8], n: &[u8]) -> Option<usize> {
 }
 
 /// The documents that do not pass yet: un-ignored as they are fixed.
-/// berasizes: virtual fonts.
-const PENDING: &[&str] = &["berasizes"];
+const PENDING: &[&str] = &[];
 
 /// Gate 1: `pdftex -ini` on `oracle/fixtures/pdf/*.tex` with a `.pdf`
 /// oracle: byte-identical; for the documents on a backend gap, whether
@@ -89,10 +92,24 @@ fn pdf_documents() {
     pdf_gate(false);
 }
 
+/// The documents on [`BACKEND_GAPS`], byte-identical: fails until the
+/// gaps are fixed.
 #[test]
-#[ignore = "berasizes: virtual fonts"]
-fn pdf_documents_pending() {
-    pdf_gate(true);
+#[ignore = "PDF-BACKEND-GAP: vfgap (virtual fonts of a form read at \\pdfxform)"]
+fn pdf_documents_gaps() {
+    let dir = common::fixtures().join("pdf");
+    for name in BACKEND_GAPS {
+        let src = common::read(&dir.join(format!("{name}.tex")));
+        let want = std::fs::read(dir.join(format!("{name}.pdf"))).expect("the oracle");
+        let opts = phitex_tex::Options {
+            epoch: Some(0),
+            ..common::options(&format!("./{name}.tex"), name, "", &dir)
+        };
+        let (pdf, _) = common::build(opts, None, &src).output();
+        if let Some(d) = common::first_difference(&pdf, &want) {
+            panic!("{name}: {d}");
+        }
+    }
 }
 
 fn pdf_gate(pending: bool) {
@@ -273,4 +290,56 @@ fn parallel_counters() {
     assert_eq!(one.threads, 1);
     assert_eq!(one.peak_running, 1);
     assert!(one.busy <= one.wall);
+}
+
+/// Gate 2 of the relaxed PDF mode (`crates/output/pdf/RELAXED.md`): on
+/// every document of gate 1, the relaxed file equals pdfTeX's after
+/// renumbering (`phitex_pdf::norm`); a document the mode does not cover
+/// is built in exact mode and must say why.
+#[test]
+fn relaxed_documents() {
+    let dir = common::fixtures().join("pdf");
+    let only = std::env::var("PHITEX_GATE").ok();
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .expect("the fixtures")
+        .flatten()
+        .filter_map(|e| {
+            let f = e.file_name().to_string_lossy().into_owned();
+            f.strip_suffix(".tex").map(str::to_owned)
+        })
+        .filter(|n| dir.join(format!("{n}.pdf")).exists())
+        .filter(|n| !PENDING.contains(&n.as_str()) && !BACKEND_GAPS.contains(&n.as_str()))
+        .filter(|n| only.as_ref().is_none_or(|o| o == n))
+        .collect();
+    names.sort();
+    let mut failed = Vec::new();
+    for name in names {
+        let src = common::read(&dir.join(format!("{name}.tex")));
+        let want = std::fs::read(dir.join(format!("{name}.pdf"))).expect("the oracle");
+        let opts = phitex_tex::Options {
+            epoch: Some(0),
+            exact_objects: false,
+            ..common::options(&format!("./{name}.tex"), &name, "", &dir)
+        };
+        let b = common::build(opts, None, &src);
+        let (pdf, _) = b.output();
+        if let Some(why) = b.pdf_exact_reason() {
+            eprintln!("exact {name}: {why}");
+            if common::first_difference(&pdf, &want).is_some() {
+                failed.push(name);
+            }
+            continue;
+        }
+        if let Ok(d) = std::env::var("PHITEX_GATE_OUT") {
+            let _ = std::fs::write(format!("{d}/{name}.relaxed.pdf"), &pdf);
+        }
+        match phitex_pdf::norm::first_difference(&pdf, &want) {
+            None => eprintln!("ok {name}: equal after renumbering"),
+            Some(d) => {
+                eprintln!("FAIL {name}: {d}");
+                failed.push(name);
+            }
+        }
+    }
+    assert!(failed.is_empty(), "failed: {failed:?}");
 }

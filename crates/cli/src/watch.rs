@@ -121,8 +121,40 @@ fn tex_text(s: &str) -> String {
     tex::chars(s.as_bytes())
 }
 
-/// The diagnostics of a build for the viewer.
-fn diagnostics(r: &session::Report, log: &str) -> Vec<Value> {
+/// The diagnostics of a build for the viewer: the engine's, at their
+/// places, each a whole problem (the viewer's `Problem`: its line, the
+/// culprit underlined, TeX's context and help), else the transcript's.
+fn diagnostics(s: &Session, r: &session::Report, log: &str) -> Vec<Value> {
+    if r.internal.is_none() && !r.diagnostics.is_empty() {
+        return r
+            .diagnostics
+            .iter()
+            .map(|d| {
+                let p = crate::problems::from_diagnostic(d, s.source(&d.file).as_deref(), false);
+                let chars = |b: usize| p.text.get(..b.min(p.text.len())).map_or(0, |t| t.chars().count());
+                let error = d.severity == phitex_tex::Severity::Error;
+                let excerpt = (!p.text.is_empty()).then(|| {
+                    json!({"text": p.text, "start": chars(p.start), "len": chars(p.end).saturating_sub(chars(p.start))})
+                });
+                json!({
+                    "severity": if error { "error" } else { "warning" },
+                    "code": "tex",
+                    "message": d.message,
+                    "notes": p.label.iter().collect::<Vec<_>>(),
+                    "help": d.help.iter().flat_map(|h| h.lines()).collect::<Vec<_>>(),
+                    "suggestions": [],
+                    "file": p.file,
+                    "line": d.line,
+                    "col": excerpt.as_ref().map(|_| chars(p.start) + 1),
+                    "excerpt": excerpt,
+                    "context": [],
+                    "included": [],
+                    "box": null,
+                    "detail": d.context,
+                })
+            })
+            .collect();
+    }
     let mut v: Vec<Value> = r
         .out
         .errors
@@ -271,6 +303,8 @@ struct Last {
     build: Option<(String, bool)>,
     /// Its errors and its log's text, for `p`.
     problems: Option<(Vec<String>, String)>,
+    /// Its errors and warnings at their places, rendered, for `p` and `w`.
+    placed: (Vec<String>, Vec<String>),
     /// The last output written without errors.
     good: Option<PathBuf>,
     viewers: usize,
@@ -599,7 +633,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                 history: r.history(),
                 ms: r.wall.as_secs_f64() * 1e3,
                 since_ms: since.map(|t| t.elapsed().as_secs_f64() * 1e3),
-                diagnostics: diagnostics(&r, &log),
+                diagnostics: diagnostics(s, &r, &log),
             });
             v.building(false);
             status.set("");
@@ -626,10 +660,19 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         // (a save that changed nothing the build reads (vim writes twice)
         // keeps the last change's time to the screen)
         let noop = !failed && builds > 1 && nodes == 0 && changed.is_empty();
-        let warnings: usize = crate::warnings::summarize(&r.log_text())
-            .iter()
-            .map(|w| w.1)
-            .sum();
+        let placed = (
+            crate::problems::rendered(s, &r, false, st.color, ui.verbose > 0),
+            crate::problems::rendered(s, &r, true, st.color, ui.verbose > 0),
+        );
+        let warnings: usize = if r.diagnostics.is_empty() {
+            crate::warnings::summarize(&r.log_text())
+                .iter()
+                .map(|w| w.1)
+                .sum()
+        } else {
+            placed.1.len()
+        };
+        last.borrow_mut().placed = placed;
         let live = r.runs.last().map_or(0, |x| x.live);
         // (aligned columns: what changed, the work, the time; then the
         // speed against the cold build, parallelism when there was some,
@@ -866,6 +909,24 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                                 }
                             }
                             _ => ui.line("phitex watch: no viewer (--no-view) and no output yet"),
+                        }
+                    }
+                    Key::Problems if !last.borrow().placed.0.is_empty() => {
+                        for p in &last.borrow().placed.0 {
+                            ui.line(p);
+                        }
+                    }
+                    Key::Warnings if !last.borrow().placed.1.is_empty() => {
+                        let l = last.borrow();
+                        let max = if ui.verbose > 0 { usize::MAX } else { 20 };
+                        for p in l.placed.1.iter().take(max) {
+                            ui.line(p);
+                        }
+                        if l.placed.1.len() > max {
+                            ui.line(&st.dim(&format!(
+                                "… {} warnings in all (-v shows every one)",
+                                l.placed.1.len()
+                            )));
                         }
                     }
                     Key::Problems => match &last.borrow().problems {

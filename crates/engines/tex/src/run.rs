@@ -185,11 +185,25 @@ pub(crate) struct Run<'c, 'a> {
     /// `radix` (§438) and `cur_order` (§447).
     pub radix: i32,
     pub cur_order: phitex_typeset::glue::Order,
+    /// The objects this run made at read time in relaxed PDF mode (their
+    /// owner keys: the node and the occurrence).
+    pub pdf_occ: usize,
 }
 
 impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn new(cx: &'c mut Ctx<'a>, ops: Ops) -> Self {
         let v = cx.values();
+        let op = cx.op();
+        let code = if op == ops.exec {
+            1
+        } else if op == ops.put {
+            2
+        } else if op == ops.outpage {
+            3
+        } else {
+            0
+        };
+        crate::exec::note(code, cx.node().raw());
         Run {
             cx,
             v,
@@ -220,6 +234,7 @@ impl<'c, 'a> Run<'c, 'a> {
             eof: false,
             radix: 0,
             cur_order: phitex_typeset::glue::Order::Normal,
+            pdf_occ: 0,
         }
     }
 

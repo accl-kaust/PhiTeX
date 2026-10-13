@@ -146,6 +146,10 @@ struct Opts {
         global = true
     )]
     jobs: Option<usize>,
+    /// The PDF byte-identical to pdfTeX's, object numbers included (the
+    /// faster mode, pages written apart, may number them differently)
+    #[arg(long = "exact-pdf", global = true)]
+    exact_pdf: bool,
     /// Each run, each warning's first lines, an engine failure's whole
     /// message (-vv: more)
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
@@ -206,6 +210,7 @@ pub struct Options {
     pub etex: bool,
     pub output_dir: Option<String>,
     pub threads: Option<usize>,
+    pub exact_pdf: bool,
     pub verbose: u8,
     pub quiet: bool,
     pub json: bool,
@@ -240,6 +245,7 @@ impl Cli {
             etex: o.etex,
             output_dir: o.output_dir,
             threads: o.jobs,
+            exact_pdf: o.exact_pdf,
             verbose: o.verbose,
             quiet: o.quiet,
             json: o.json,
@@ -401,6 +407,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
             .map_or_else(|| PathBuf::from("."), PathBuf::from),
         // (batch mode, as the oracles run: the CLI shows the errors itself)
         threads: o.threads,
+        exact_pdf: o.exact_pdf,
         synctex: t.synctex,
         recorder: false,
         shell_escape: t.shell_escape,
@@ -457,7 +464,20 @@ pub fn report(
     }
     let log = job.out_dir.join(format!("{}.log", job.jobname));
     let text = r.log_text();
-    crate::problems::show(ui, &r.out.errors, &text, &t.file);
+    // (the engine's places when it gave them, else the transcript's)
+    let placed = crate::problems::rendered(s, r, false, st.color, o.verbose > 0 || ui.verbose > 0);
+    if placed.is_empty() {
+        crate::problems::show(ui, &r.out.errors, &text, &t.file);
+    } else {
+        let max = if o.verbose > 0 || ui.verbose > 0 {
+            100
+        } else {
+            10
+        };
+        for p in placed.iter().take(max) {
+            ui.line(p);
+        }
+    }
     if r.out.errors.len() > 10 && o.verbose == 0 {
         ui.line(&format!(
             "  … {} errors in all (-v shows more; the log: {})",

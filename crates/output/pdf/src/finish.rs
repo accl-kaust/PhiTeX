@@ -168,6 +168,44 @@ impl PdfState {
         if self.total_pages == 0 || self.fixed_draftmode != 0 {
             return Ok(None);
         }
+        let (root, _) = self.tail_objects()?;
+        if self.os.enable {
+            self.os_flush();
+            self.output_xref_stream(root);
+        } else {
+            self.output_obj_tab();
+            // the trailer
+            self.print_ln(b"trailer");
+            self.print(b"<< ");
+            self.int_entry_ln(b"Size", int(self.sys_obj_ptr()) + 1);
+            self.indirect_ln(b"Root", root);
+            if self.p.omit_info_dict == 0 {
+                self.indirect_ln(b"Info", self.sys_obj_ptr());
+            }
+            if let Some(t) = self.trailer_toks.take() {
+                self.print_toks_ln(&t);
+            }
+            self.print_id();
+            self.print_ln(b" >>");
+        }
+        self.print_ln(b"startxref");
+        if self.os.enable {
+            let n = self.objs[self.sys_obj_ptr()].offset;
+            self.print_int_ln(n);
+        } else {
+            self.print_int_ln(int(self.save_offset));
+        }
+        self.print_ln(b"%%EOF");
+        match self.error.take() {
+            Some(e) => Err(e),
+            None => Ok(Some(self.out)),
+        }
+    }
+
+    /// The objects at the end of the file (pdfTeX §794 ff.): the fonts,
+    /// the pages tree, outlines, names, threads, the catalog and `/Info`;
+    /// the catalog's number and `/Info`'s.
+    pub(crate) fn tail_objects(&mut self) -> Result<(usize, Option<usize>), PdfError> {
         if self.total_pages % PAGES_TREE_KIDS_MAX != 0 {
             self.objs[self.last_pages].info = self.total_pages % PAGES_TREE_KIDS_MAX;
         }
@@ -222,40 +260,22 @@ impl PdfState {
             self.indirect_ln(b"OpenAction", self.catalog_openaction);
         }
         self.end_dict();
+        let mut info = None;
         if self.p.omit_info_dict == 0 {
             self.print_info();
+            info = Some(self.sys_obj_ptr());
         }
-        if self.os.enable {
-            self.os_flush();
-            self.output_xref_stream(root);
-        } else {
-            self.output_obj_tab();
-            // the trailer
-            self.print_ln(b"trailer");
-            self.print(b"<< ");
-            self.int_entry_ln(b"Size", int(self.sys_obj_ptr()) + 1);
-            self.indirect_ln(b"Root", root);
-            if self.p.omit_info_dict == 0 {
-                self.indirect_ln(b"Info", self.sys_obj_ptr());
-            }
-            if let Some(t) = self.trailer_toks.take() {
-                self.print_toks_ln(&t);
-            }
-            self.print_id();
-            self.print_ln(b" >>");
-        }
-        self.print_ln(b"startxref");
-        if self.os.enable {
-            let n = self.objs[self.sys_obj_ptr()].offset;
-            self.print_int_ln(n);
-        } else {
-            self.print_int_ln(int(self.save_offset));
-        }
-        self.print_ln(b"%%EOF");
         match self.error.take() {
             Some(e) => Err(e),
-            None => Ok(Some(self.out)),
+            None => Ok((root, info)),
         }
+    }
+
+    /// The trailer's `/ID` entry (`print_ID`).
+    pub(crate) fn id_entry(&mut self) -> Vec<u8> {
+        let at = self.out.len();
+        self.print_id();
+        self.out.split_off(at)
     }
 
     /// `print_ID` or `print_ID_alt`.
