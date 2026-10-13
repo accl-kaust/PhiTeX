@@ -289,10 +289,9 @@ impl DataList {
         self.state.namelistdata.get(nlid).and_then(|l| l.ul)
     }
     pub fn vis(&self, nlid: &str) -> (usize, usize, usize, usize) {
-        self.state
-            .namelistdata
-            .get(nlid)
-            .map_or((0, 0, 0, 0), |l| (l.viscite, l.visbib, l.vissort, l.visalpha))
+        self.state.namelistdata.get(nlid).map_or((0, 0, 0, 0), |l| {
+            (l.viscite, l.visbib, l.vissort, l.visalpha)
+        })
     }
     pub fn entryfield(&self, key: &str, f: &str) -> Option<FieldV> {
         self.state.fields.get(key).and_then(|m| m.get(f)).cloned()
