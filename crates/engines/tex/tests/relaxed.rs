@@ -39,7 +39,7 @@ fn relaxed(name: &str, dir: &Path) -> Options {
 /// pdfTeX's file after renumbering; a document built in exact mode
 /// instead says why.
 #[test]
-#[ignore = "heavy: the LaTeX format"]
+#[ignore = "heavy: the LaTeX format; meaningful once exact pdflatex is byte-identical (the prelude does not load latex.ltx to the end yet)"]
 fn relaxed_pdflatex() {
     let _turn = turn();
     let oracles = common::fixtures().join("latex/pdf");
