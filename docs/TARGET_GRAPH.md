@@ -10,9 +10,14 @@ A document node is a **paragraph region**: the text from the end of one
 paragraph-ending item to the end of the next (a blank line, `\par`, a
 vertical command, a macro whose body ends a paragraph), at brace depth 0
 and outside every conditional, as the syntactic pass marks them
-(`hints::slices_of`). A region is balanced: its run opens and closes its
-own groups, boxes, math and conditionals on its own semantic nest
-(`nest.rs`) and leaves nothing to another node. A region begins in the
+(`hints::slices_of`); an environment or a `\begingroup` pair is no bar
+to a cut. A region's run opens and closes its own boxes, math and
+conditionals on its own semantic nest (`nest.rs`); a group of its own
+still open at its end (an environment's `\begin`) becomes an engine
+scope the following regions run in, and a `\endgroup`/`\egroup` that
+closes the scope it runs in (an environment's `\end`) ends its run
+there (engine effect: close), the rest of its input following it
+outside the scope. A region begins in the
 vertical list of the scope it runs in and ends there; one the pass
 closed too early reads on into the following siblings (claimed) until it
 is closed: correct, and serial for exactly that span.
@@ -20,7 +25,7 @@ is closed: correct, and serial for exactly that span.
 Region slicing (`hints::slices_of`): a paragraph is whole; a brace or
 bracket argument joins its command (`\centerline{...}`); a keyword or
 unit scan joins the next slice (`\vskip 1in \centerline{...}`); a
-conditional and a `\begingroup`...`\endgroup` pair stay in one slice. A
+conditional stays in one slice. A
 slice the pass sees open and close no scope (`hints.rs` `no_scope`)
 declares no scope effect, so nothing waits on it for one.
 
@@ -36,7 +41,7 @@ engine's environment provider (`api.rs` `Graph::provide`). Its hint is
 `Any`; its definitions are final before any document node runs, and
 its macro bodies bound the hints of document slices that call them. A
 group still open at the format's end is an error ("format: group left
-open at end"); no node leaves an engine scope open.
+open at end").
 
 Besides the text: one `breaks` node after it (the page builder's fold),
 its children the `pagestep`s (one per page, the output routine run
@@ -75,7 +80,7 @@ Writing `A <- B` for "A reads what B defined".
 |---|---|---|
 | region R | regime cells (`cat:`, `cs:`, `font`, `param:`, `count:`, …) | the last node before R that changed them: a fan-out from the format and the preamble, not a chain |
 | `breaks` | `items` (the whole main list), the page parameters, the insert classes | every region (one fan-in) |
-| `pagestep` j | its page's material (its argument), `\count0..9`, the insert boxes, the marks, `\output` | `breaks`; the previous steps for what their routines defined globally (page numbers) |
+| `pagestep` j | its page's material (its argument), the marks (`pp:mk:<j>`), `\output`, the state before the chain | `breaks` and the regions; never another step: `\count0..9` from `pgdef:<j-1>` and everything else the routines changed from `pgst:<j-1>` (loop-backs, previous round; the writer folds the steps' deltas into `pgst`) |
 | `dvi` | `pages` | every `pagestep` |
 | `breaks` (round 2) | `pagefx:<j>` | what routine j left (loop-back, previous round): held inserts, the leftover list; planned (branch para-vsize): page parameters the routine set |
 | region R (planned, branch para-marks) | `marks:before:<N>` | the marks in force before node N (a per-node loop-back from the page chain) |
@@ -90,8 +95,10 @@ Forbidden, and asserted by the test:
 ## Heights
 
 Critical path: the format's definition chain (cached) + one region (1)
-+ `breaks` (1) + the page steps chained through `\count0` (one per
-page) + `dvi` (1). The test asserts `height <= 6 + pages` per fixture.
++ `breaks` (1) + `brk:<j>` (1) + one page step (1) + `dvi` (1),
+independent of the page count: a page step defines nothing to the
+engine (only the exact PDF writer's `pdf:state` fold chains, by
+design). The test asserts `height <= 6 + pages` per fixture.
 
 ## Why this shape
 
