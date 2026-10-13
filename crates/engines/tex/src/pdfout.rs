@@ -993,7 +993,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     st.params_mut().info_omit_date = int(cx, "param:pdfinfoomitdate")?;
     st.params_mut().suppress_ptex_info = int(cx, "param:pdfsuppressptexinfo")?;
     let bytes = phitex_pdf::finish(st, &a.bytes).unwrap_or_else(|e| {
-        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!("pdf: {e}");
         }
         Vec::new()

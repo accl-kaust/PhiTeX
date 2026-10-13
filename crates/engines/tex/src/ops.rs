@@ -1,6 +1,6 @@
 //! The operations: `Exec` (one command of TeX's input), `Put`
-//! (definitions that land outside a group that just closed), `OutPage`
-//! (an output routine begins, [`crate::page`]) and `Dvi` (the file).
+//! (definitions that land outside a group that just closed) and `Dvi`
+//! (the file).
 
 use std::sync::{Arc, OnceLock};
 
@@ -26,7 +26,7 @@ pub(crate) fn run_node(
     o: Ops,
     body: impl FnOnce(&mut Run<'_, '_>) -> R<()>,
 ) -> Result<ValueId, Stop> {
-    let trace = std::env::var_os("PHITEX_TEX_TRACE").is_some();
+    let trace = crate::exec::env_flag!("PHITEX_TEX_TRACE");
     if trace {
         let a = cx
             .args()
@@ -243,28 +243,6 @@ impl Operation for Put {
             cx.define_with(v.field("lvlfix"), v.list(fix), Locality::Local);
         }
         Ok(ValueId::UNIT)
-    }
-}
-
-/// An output routine begins (§1025).
-pub(crate) struct OutPage(pub Shared);
-
-impl Operation for OutPage {
-    fn name(&self) -> &'static str {
-        "outpage"
-    }
-    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
-        None
-    }
-    fn may_define_field(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
-        client_only(v, f)
-    }
-    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
-        Effect::Pending
-    }
-    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        let args = cx.args();
-        run_node(cx, ops(&self.0), |r| crate::page::out_page(r, &args))
     }
 }
 
