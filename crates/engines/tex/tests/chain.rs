@@ -24,9 +24,12 @@ fn chain(dir: &std::path::Path, name: &str) {
         }
     }
     eprintln!(
-        "{name}: {} nodes run, critical path {:?}, chain {} links: {by:?}",
+        "{name}: {} nodes run, critical path {:?}, peak running {}, page steps {} ({} any), chain {} links: {by:?}",
         b.stats.nodes_run,
         b.stats.critical_path,
+        b.stats.peak_running,
+        b.stats.page_steps,
+        b.stats.page_steps_any,
         c.len()
     );
 }
