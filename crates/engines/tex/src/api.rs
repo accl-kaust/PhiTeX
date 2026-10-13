@@ -736,6 +736,11 @@ impl Graph {
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
+        // (handles held outside the graph: pinned, or a value sweep
+        // frees them while a run still defines through them)
+        for f in fields.handles() {
+            eng.pin(f.0);
+        }
         let ops = Ops {
             exec,
             put,
@@ -799,6 +804,9 @@ impl Graph {
         }
         let mut out = format!("evaluation: {e}\n{e:?}");
         let v = self.eng.values();
+        if let E::UndeclaredDefinition { field, .. } = e {
+            out.push_str(&format!("\n  field {}", field_name(v, *field)));
+        }
         for id in ids {
             let what = self.eng.node_info(id).map_or_else(
                 || "gone".to_owned(),
@@ -890,6 +898,9 @@ impl Graph {
                 Err(e) => {
                     // the build ends here; the error is a diagnostic
                     let m = self.diagnose(&e);
+                    if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+                        eprintln!("{m}");
+                    }
                     self.eval_errors.push(m);
                     return;
                 }
