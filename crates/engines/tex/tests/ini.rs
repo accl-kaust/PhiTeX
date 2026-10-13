@@ -17,6 +17,14 @@ fn run(ini: &str, jobname: &str, comment: &str) -> Vec<u8> {
         ..common::options("./doc.tex", "doc", comment, &dir)
     };
     let b = common::build(opts, Some(&format!("\\input {ini}\n")), &src);
+    for d in b.diagnostics() {
+        eprintln!(
+            "{:?} {}: {}",
+            d.severity,
+            d.line,
+            d.message.chars().take(800).collect::<String>()
+        );
+    }
     b.output().0
 }
 

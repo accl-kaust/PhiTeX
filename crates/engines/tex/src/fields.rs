@@ -5,11 +5,20 @@
 //! instead of formatting and interning its name each time; names not
 //! here are interned as before.
 
+use std::cell::RefCell;
+
 use phitex_defuse::FxHashMap;
 use phitex_defuse::{Field, Values};
 
+use crate::val::Tok;
+
 /// The state cells with fixed names.
 const STATIC: &[&str] = &[
+    // (the tags of a node's input frames, interned once: token list,
+    // source line, file rest)
+    "t",
+    "s",
+    "f",
     "aftertoken",
     "align:open",
     "align:state",
@@ -206,14 +215,6 @@ impl Fields {
             .copied()
     }
 
-    /// The field `name`.
-    pub(crate) fn get(&self, v: &Values, name: &str) -> Field {
-        match self.names.get(name) {
-            Some(&f) => f,
-            None => v.field(name),
-        }
-    }
-
     /// The parameter `name` (`param:<name>`).
     pub(crate) fn param(&self, v: &Values, name: &str) -> Field {
         match self.params.get(name) {
@@ -229,4 +230,77 @@ impl Fields {
             None => v.field(&format!("cat:{c}")),
         }
     }
+
+    /// The field `name`, in a run at values epoch `epoch`
+    /// ([`phitex_defuse::Ctx::values_epoch`]): names not in the table are
+    /// kept per thread while the epoch lasts (an id made at an epoch is
+    /// valid while it lasts), so a name is interned once an epoch, not
+    /// once a read.
+    pub(crate) fn get_at(&self, v: &Values, epoch: u64, name: &str) -> Field {
+        if let Some(&f) = self.names.get(name) {
+            return f;
+        }
+        let hit = with_names(v, epoch, |c| c.names.get(name).copied());
+        hit.unwrap_or_else(|| {
+            let f = v.field(name);
+            with_names(v, epoch, |c| {
+                bounded(&mut c.names);
+                c.names.insert(name.into(), f);
+            });
+            f
+        })
+    }
+
+    /// The field of token `t`'s meaning (`cs:<name>`, `act:<c>`), if it
+    /// has one, kept per thread as [`Self::get_at`] keeps names.
+    #[allow(clippy::unused_self)]
+    pub(crate) fn meaning_at(&self, v: &Values, epoch: u64, t: &Tok) -> Option<Field> {
+        if let Some(f) = with_names(v, epoch, |c| c.toks.get(t).copied()) {
+            return Some(f);
+        }
+        let f = v.field(&t.field_name()?);
+        with_names(v, epoch, |c| {
+            bounded(&mut c.toks);
+            c.toks.insert(t.clone(), f);
+        });
+        Some(f)
+    }
+}
+
+/// A thread's fields named at one values epoch of one table.
+#[derive(Default)]
+struct Named {
+    instance: u64,
+    epoch: u64,
+    names: FxHashMap<Box<str>, Field>,
+    toks: FxHashMap<Tok, Field>,
+}
+
+thread_local! {
+    static NAMED: RefCell<Named> = RefCell::default();
+}
+
+/// Entries kept per map before it is emptied (a bound, not a policy).
+const NAMED_MAX: usize = 1 << 16;
+
+fn bounded<K, V>(m: &mut FxHashMap<K, V>) {
+    if m.len() >= NAMED_MAX {
+        m.clear();
+    }
+}
+
+/// `f` on this thread's names for `v` at `epoch` (emptied when either
+/// changed).
+fn with_names<T>(v: &Values, epoch: u64, f: impl FnOnce(&mut Named) -> T) -> T {
+    NAMED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.instance != v.instance() || c.epoch != epoch {
+            *c = Named {
+                instance: v.instance(),
+                epoch,
+                ..Named::default()
+            };
+        }
+        f(&mut c)
+    })
 }

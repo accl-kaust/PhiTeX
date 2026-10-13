@@ -102,7 +102,8 @@ impl Run<'_, '_> {
             }
         }
         (self.radix, self.cur_order) = saved;
-        crate::etex::after_expand(self, c)
+        crate::etex::after_expand(self, c);
+        Ok(())
     }
 
     /// `insert_relax` (§379).
@@ -362,7 +363,7 @@ impl Run<'_, '_> {
     pub(crate) fn conditional(&mut self) -> R<()> {
         self.conds.push(IF_CODE);
         let save = self.conds.len();
-        crate::etex::if_begin(self, self.cur.chr)?;
+        crate::etex::if_begin(self, self.cur.chr);
         let negate = self.cur.chr >= crate::etex::UNLESS_CODE;
         let this_if = self.cur.chr % crate::etex::UNLESS_CODE;
         let b = match this_if {

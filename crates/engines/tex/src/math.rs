@@ -259,6 +259,7 @@ impl Run<'_, '_> {
             self.pre_display_size(last.as_ref())?
         };
         self.set(&self.par_cell(md.vlid), ValueId::UNIT, true);
+        self.region_advance();
         // §1149
         let pg = self.int32(&format!("pg:{}", md.vlid))?;
         let shape: Vec<i32> = self

@@ -67,6 +67,9 @@ pub(crate) struct Lexed {
     /// Token indices of each `{` and its `}`.
     pub braces: Vec<(usize, Option<usize>)>,
     pub unmatched_closes: Vec<usize>,
+    /// The regime each token was read under, as change points: from
+    /// token index `i` on (the first entry is the file's own regime).
+    pub regimes: Vec<(usize, Catcodes)>,
 }
 
 /// What an open brace group is to the regime.
@@ -339,6 +342,18 @@ fn args_end(b: &[u8], mut j: usize) -> usize {
         .map_or(b.len(), |k| j + k)
 }
 
+/// Plain TeX's catcode of one of `$ & ^ _ ~` and tab.
+fn assumed_plain(c: u8) -> u32 {
+    match c {
+        b'$' => 3,
+        b'&' => 4,
+        b'^' => 7,
+        b'_' => 8,
+        b'~' => 13,
+        _ => 10,
+    }
+}
+
 /// The catcode the tokenizer reads `c` with under `cat`.
 fn assumed(c: u8, cat: &Catcodes) -> u32 {
     match c {
@@ -369,7 +384,14 @@ fn assumed(c: u8, cat: &Catcodes) -> u32 {
 /// `cat` with `c` back to its usual catcode as far as this regime goes
 /// (an other `\\ { } % #`, a letter `{`, a group's character no more).
 fn restored(cat: Catcodes, c: u8) -> Catcodes {
-    let r = cat.with_other(c, false).with_shaping(c, 16);
+    let r = cat
+        .with_other(c, false)
+        .with_shaping(c, 16)
+        .with_unknown(c, false);
+    let r = match c {
+        b'$' | b'&' | b'^' | b'_' | b'~' | b'\t' => r.with_special(c, assumed_plain(c)),
+        _ => r,
+    };
     if structural(c) {
         r.without_letter(c)
     } else {
@@ -556,6 +578,7 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
     let mut frames: Vec<Frame> = Vec::new();
     let mut soft: Vec<Soft> = Vec::new();
     let mut cat = kind.catcodes();
+    let mut regimes: Vec<(usize, Catcodes)> = vec![(0, cat)];
     let mut role = Role::Simple;
     let mut body_depth = 0usize;
     let mut pre_expl: Option<Catcodes> = None;
@@ -809,6 +832,9 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
             }
             _ => {}
         }
+        if regimes.last().is_none_or(|r| r.1 != cat0) {
+            regimes.push((here, cat0));
+        }
         st.tokens.push(Token {
             kind: tk,
             start: i,
@@ -825,6 +851,7 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
         hazards: st.hazards,
         braces,
         unmatched_closes,
+        regimes,
     }
 }
 
@@ -1087,7 +1114,7 @@ fn assign(
             st.begin(i, "\\catcode literal", format!("{}=11", c as char), sure);
         }
         (c, Some(11)) if !structural(c) => {
-            *cat = cat.with_letter(c);
+            *cat = cat.with_letter(c).with_unknown(c, false);
             st.begin(i, "\\catcode literal", format!("{}=11", c as char), sure);
         }
         (c, Some(12)) if matches!(c, b'\\' | b'{' | b'}' | b'%' | b'#') => {
@@ -1095,16 +1122,20 @@ fn assign(
             st.begin(i, "\\catcode literal", format!("{}=12", c as char), sure);
         }
         (c, Some(12)) if !structural(c) => {
-            *cat = cat.without_letter(c);
+            *cat = cat.without_letter(c).with_unknown(c, false);
             st.begin(i, "\\catcode literal", format!("{}=12", c as char), sure);
         }
-        (c, Some(v)) if !structural(c) && matches!(v, 3 | 4 | 7 | 8) => {}
-        (b'~', Some(13)) => {}
+        (c @ (b'$' | b'&' | b'^' | b'_' | b'~' | b'\t'), Some(v)) if !structural(c) => {
+            *cat = cat.with_special(c, v);
+        }
+        (c, Some(v)) if !structural(c) && matches!(v, 3 | 4 | 7 | 8) => {
+            *cat = cat.with_unknown(c, true);
+        }
         // (a byte past ASCII: UTF-8 text, which the kernel makes active
         // anyway; the tokens here do not depend on it)
         (c, _) if c >= 128 => {}
         (c, _) if !structural(c) => {
-            *cat = cat.without_letter(c);
+            *cat = cat.without_letter(c).with_unknown(c, true);
             st.special |= 1 << c;
         }
         (c, Some(v)) => st.begin(

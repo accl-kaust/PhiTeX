@@ -33,6 +33,7 @@ mod exec;
 mod expand;
 mod fields;
 mod fonts;
+mod hints;
 mod log;
 mod math;
 mod nodes;
@@ -52,5 +53,6 @@ pub use api::{
     Build, Diagnostic, EditSender, Finder, Options, PageSettled, Severity, Speculation, Stats,
 };
 pub use exec::{Progress, SpawnWorker, set_spawn_worker};
+pub use hints::set_hints_enabled;
 pub use pdfrelaxed::pages_written as pdf_pages_written;
 pub(crate) use phitex_defuse::FxHashMap;

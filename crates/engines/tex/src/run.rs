@@ -125,6 +125,10 @@ pub(crate) struct Src {
     /// Where `buf[0]` is in a file: the file's name and byte position
     /// (lines of `\input` files; for diagnostics only).
     pub origin: Option<(ValueId, usize)>,
+    /// Text read under the catcodes in force when it is read, which no
+    /// analysis of a file saw: a pseudo file's lines (pdfTeX §1766) and
+    /// a `\read` line (§483).
+    pub rescanned: bool,
 }
 
 pub(crate) const MID_LINE: u8 = 0;
@@ -146,8 +150,14 @@ impl Cur {
     }
 }
 
+/// A decoded scope kind: `(group, sid, lid, mode, depth, extra)`.
+pub(crate) type KindFields = (i64, i64, i64, i32, i64, Vec<ValueId>);
+
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Run<'c, 'a> {
+    /// Encodings through the worker's cache at this run's values epoch
+    /// while the run lives ([`crate::val::EpochScope`]).
+    _scope: crate::val::EpochScope,
     pub cx: &'c mut Ctx<'a>,
     pub v: &'a Values,
     pub ops: Ops,
@@ -173,15 +183,33 @@ pub(crate) struct Run<'c, 'a> {
     pub no_pull: bool,
     /// The paragraph region the node is in (OUTPUT.md §5): the raw id
     /// of the document node whose paragraph-ending item precedes it, or
-    /// 0; a node's args are `[frames, top, anchor, boundary]`, children
-    /// inherit the anchor.
+    /// 0; a node's args are `[frames, top, anchor, boundary, ifdepth]`,
+    /// children inherit the anchor.
     pub anchor: i64,
     /// Whether the node is a document node holding such an item: its
     /// first command is checked (`par_boundary_violations`).
     pub boundary: bool,
+    /// The same, kept for the run's length: when its paragraph ends, the
+    /// run and its children go on in the region after it, keyed by this
+    /// node's id as the pass keyed the siblings ([`Run::region_advance`]).
+    pub region_end: bool,
+    /// The condition-stack depth below this node's own conditionals
+    /// (OUTPUT.md §6): node arg 4, from the text's nesting; a `\fi` of an
+    /// outer conditional lowers it.
+    pub ifbase: i64,
+    /// The codes of `conds`' conditionals (`cur_if`).
+    pub if_codes: Vec<i32>,
+    /// The highest level this run wrote.
+    pub if_top_written: i64,
+    /// The condition-stack depth of each child [`Run::leftover`] makes,
+    /// planned where reads can wait ([`Run::measure_tail`]).
+    kid_ifdepths: Option<Vec<i64>>,
     /// A `build_page` call not yet folded (OUTPUT.md §4.2a): the
     /// children and main-list items the run had made at the call.
     pub page_due: Option<(usize, usize, bool)>,
+    /// The category codes this run read (§232), by character below
+    /// 256, plus one (0: not read yet); emptied whenever `own` changes.
+    cats: [u8; 256],
     own: FxHashMap<Field, Option<ValueId>>,
     pub defs: Vec<(Field, ValueId, Locality)>,
     pub contribs: Vec<(Field, ValueId)>,
@@ -193,6 +221,9 @@ pub(crate) struct Run<'c, 'a> {
     mcache: FxHashMap<ValueId, Mean>,
     /// The meaning fields of the tokens this run looked up.
     tfields: FxHashMap<Tok, Field>,
+    /// The scope kind last decoded (`Run::mode`, once a command): its
+    /// value and its fields `(group, sid, lid, mode, depth, extra)`.
+    pub kind_memo: Option<(ValueId, KindFields)>,
     /// `align_state` as this run has it (§309), once read.
     pub astate: Option<i64>,
     /// Lines entered by this run (for `\inputlineno`).
@@ -221,16 +252,18 @@ impl<'c, 'a> Run<'c, 'a> {
             0
         };
         crate::exec::note(code, cx.node().raw());
-        let (anchor, boundary) = if code == 1 {
+        let (anchor, boundary, ifbase) = if code == 1 {
             let args = cx.args();
             (
                 args.get(2).map_or(0, |&x| int_of(v, x)),
                 args.get(3).is_some_and(|&x| int_of(v, x) != 0),
+                args.get(4).map_or(0, |&x| int_of(v, x)),
             )
         } else {
-            (0, false)
+            (0, false, 0)
         };
         Run {
+            _scope: crate::val::EpochScope::enter(v, cx.values_epoch()),
             cx,
             v,
             ops,
@@ -244,7 +277,13 @@ impl<'c, 'a> Run<'c, 'a> {
             no_pull: false,
             anchor,
             boundary,
+            region_end: boundary,
+            ifbase,
+            if_codes: Vec::new(),
+            if_top_written: ifbase,
+            kid_ifdepths: None,
             own: FxHashMap::default(),
+            cats: [0; 256],
             defs: Vec::new(),
             contribs: Vec::new(),
             kids: Vec::new(),
@@ -258,6 +297,7 @@ impl<'c, 'a> Run<'c, 'a> {
             conds: Vec::new(),
             mcache: FxHashMap::default(),
             tfields: FxHashMap::default(),
+            kind_memo: None,
             astate: None,
             page_due: None,
             lines_entered: 0,
@@ -275,15 +315,33 @@ impl<'c, 'a> Run<'c, 'a> {
         x
     }
 
+    /// A paragraph ended in this run (`end_graf`, a display's start): if
+    /// the pass marked this node paragraph-ending, the text after it is
+    /// in a new region whose anchor is this node (api.rs `regions`), so
+    /// the rest of this run and the children it leaves use that anchor
+    /// too (OUTPUT.md §5). Otherwise the region goes on (the pass did not
+    /// see the end: the siblings read the same cells; correct, serial).
+    pub(crate) fn region_advance(&mut self) {
+        if self.region_end {
+            self.anchor = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+        }
+    }
+
     fn node_raw_of(&self, id: i64) -> i64 {
-        match &self.trial_ids {
-            Some(c) => {
-                c.set(c.get() + 1);
-                id ^ c
-                    .get()
-                    .wrapping_mul(0x9E37_79B9_7F4A_7C15_u64.cast_signed())
-            }
-            None => id,
+        if let Some(c) = &self.trial_ids {
+            c.set(c.get() + 1);
+            return id
+                ^ c.get()
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15_u64.cast_signed());
+        }
+        // A continued run may mint several lists for one node (a paragraph,
+        // then an \llap box); each needs its own id or list_fold mistakes
+        // the second for the first.
+        let k = i64::try_from(self.minted.borrow().len()).unwrap_or(0);
+        if k == 0 {
+            id
+        } else {
+            id ^ k.wrapping_mul(0x6A09_E667_F3BC_C909_u64.cast_signed())
         }
     }
 
@@ -312,7 +370,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     pub(crate) fn get(&mut self, name: &str) -> R<Option<ValueId>> {
-        let f = self.ops.fields.get(self.v, name);
+        let f = self.ops.fields.get_at(self.v, self.cx.values_epoch(), name);
         self.get_f(f)
     }
 
@@ -336,19 +394,32 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     pub(crate) fn cat(&mut self, c: u32) -> R<u8> {
+        let slot = usize::try_from(c).ok().filter(|&i| i < 256);
+        if let Some(i) = slot
+            && self.cats[i] != 0
+        {
+            return Ok(self.cats[i] - 1);
+        }
         let f = self.ops.fields.cat(self.v, c);
         let x = self.get_f(f)?;
-        Ok(u8::try_from(x.map_or(0, |x| int_of(self.v, x))).unwrap_or(12))
+        let k = u8::try_from(x.map_or(0, |x| int_of(self.v, x))).unwrap_or(12);
+        if let Some(i) = slot
+            && k < u8::MAX
+        {
+            self.cats[i] = k + 1;
+        }
+        Ok(k)
     }
 
     /// Defines `name` (§277–§279: `eq_define` / `geq_define`).
     pub(crate) fn set(&mut self, name: &str, val: ValueId, global: bool) {
-        let f = self.ops.fields.get(self.v, name);
+        let f = self.ops.fields.get_at(self.v, self.cx.values_epoch(), name);
         self.set_f(f, val, global);
     }
 
     pub(crate) fn set_f(&mut self, f: Field, val: ValueId, global: bool) {
         self.own.insert(f, Some(val));
+        self.cats = [0; 256];
         self.defs.retain(|d| d.0 != f);
         self.defs.push((
             f,
@@ -433,7 +504,10 @@ impl<'c, 'a> Run<'c, 'a> {
         let f = if let Some(&f) = self.tfields.get(t) {
             Some(f)
         } else {
-            let f = t.field_name().map(|n| self.v.field(&n));
+            let f = self
+                .ops
+                .fields
+                .meaning_at(self.v, self.cx.values_epoch(), t);
             if let Some(f) = f {
                 self.tfields.insert(t.clone(), f);
             }
@@ -1033,26 +1107,44 @@ impl<'c, 'a> Run<'c, 'a> {
     /// as one node per segment.
     pub(crate) fn leftover(&self) -> Vec<Vec<ValueId>> {
         let v = self.v;
+        let epoch = self.cx.values_epoch();
+        let tag = |n: &str| self.ops.fields.get_at(v, epoch, n).0;
+        let (tag_t, tag_s, tag_f) = (tag("t"), tag("s"), tag("f"));
         let anchor = v.int(self.anchor);
+        let base = self.ifbase + i64::try_from(self.conds.len()).unwrap_or(0);
+        let depths = self.kid_ifdepths.as_deref().unwrap_or(&[]);
+        let depth = std::cell::Cell::new(0usize);
+        // [frames, top, anchor, boundary, ifdepth]
+        let tail = || -> [ValueId; 4] {
+            let k = depth.get();
+            depth.set(k + 1);
+            let d = depths.get(k).copied().unwrap_or(base);
+            [v.int(0), anchor, v.int(0), v.int(d)]
+        };
+        let with = |frames: ValueId| -> Vec<ValueId> {
+            let mut a = vec![frames];
+            a.extend(tail());
+            a
+        };
         let mut out: Vec<Vec<ValueId>> = Vec::new();
         let mut run: Vec<ValueId> = Vec::new();
         let node = |toks: Vec<ValueId>| -> Vec<ValueId> {
             let l = v.list(toks);
-            vec![v.list(vec![v.list(vec![v.str("t"), l])]), v.int(0), anchor]
+            with(v.list(vec![v.list(vec![tag_t, l])]))
         };
         for f in &self.frames {
             match f {
                 Frame::Toks(t, p) => {
                     for tok in &t[*p..] {
-                        let ch = matches!(tok.cat(), Some(11 | 12));
+                        let ch = matches!(tok.cat(), Some(10..=12));
                         if ch {
-                            run.push(tok.encode(v));
+                            run.push(crate::val::tok_id(v, epoch, tok));
                             continue;
                         }
                         if !run.is_empty() {
                             out.push(node(std::mem::take(&mut run)));
                         }
-                        out.push(node(vec![tok.encode(v)]));
+                        out.push(node(vec![crate::val::tok_id(v, epoch, tok)]));
                     }
                 }
                 Frame::Src(s) => {
@@ -1072,11 +1164,15 @@ impl<'c, 'a> Run<'c, 'a> {
                         .collect();
                     let starts = s.starts && s.endch == -2;
                     let mut xs = vec![
-                        v.str("s"),
+                        tag_s,
                         v.str(&text),
                         v.int(i64::from(s.state)),
                         v.int(-2),
-                        v.int(i64::from(starts) | (i64::from(end_due) << 1)),
+                        v.int(
+                            i64::from(starts)
+                                | (i64::from(end_due) << 1)
+                                | (i64::from(s.rescanned) << 2),
+                        ),
                     ];
                     if let Some((name, at)) = s.origin {
                         let at = at + s.loc.min(s.buf.len());
@@ -1086,10 +1182,10 @@ impl<'c, 'a> Run<'c, 'a> {
                     let fr = v.list(xs);
                     let mut frs = Vec::new();
                     if !head.is_empty() {
-                        frs.push(v.list(vec![v.str("t"), v.list(head)]));
+                        frs.push(v.list(vec![tag_t, v.list(head)]));
                     }
                     frs.push(fr);
-                    out.push(vec![v.list(frs), v.int(0), anchor]);
+                    out.push(with(v.list(frs)));
                 }
                 Frame::File(f) => {
                     if !run.is_empty() {
@@ -1097,12 +1193,12 @@ impl<'c, 'a> Run<'c, 'a> {
                     }
                     if f.has_lines() {
                         let fr = v.list(vec![
-                            v.str("f"),
+                            tag_f,
                             f.id,
                             v.int(i64::try_from(f.off).unwrap_or(0)),
                             f.name,
                         ]);
-                        out.push(vec![v.list(vec![fr]), v.int(0), anchor]);
+                        out.push(with(v.list(vec![fr])));
                     }
                 }
             }
@@ -1120,6 +1216,114 @@ impl<'c, 'a> Run<'c, 'a> {
     /// are claimed, so the expansion's children find them in their own
     /// text (a child never reads past its parent).
     pub(crate) fn measure_tail(&mut self) -> R<()> {
+        self.measure_tail_inner()?;
+        let d = self.plan_ifdepths()?;
+        self.kid_ifdepths = Some(d);
+        Ok(())
+    }
+
+    /// The condition-stack depth of each child [`Run::leftover`] will
+    /// make, in its order: the depth after this run's command, then each
+    /// child's text's nesting (`\if…` +1, `\fi` -1, by meaning, §489) for
+    /// the children after it (OUTPUT.md §6).
+    fn plan_ifdepths(&mut self) -> R<Vec<i64>> {
+        let mut d = self.ifbase + i64::try_from(self.conds.len()).unwrap_or(0);
+        let mut out = Vec::new();
+        let mut run = false;
+        let frames: Vec<Frame> = self.frames.iter().cloned().collect();
+        for f in &frames {
+            match f {
+                Frame::Toks(t, p) => {
+                    for tok in &t[*p..] {
+                        if matches!(tok.cat(), Some(10..=12)) {
+                            run = true;
+                            continue;
+                        }
+                        if std::mem::take(&mut run) {
+                            out.push(d);
+                        }
+                        out.push(d);
+                        d = (d + self.if_delta(tok)?).max(0);
+                    }
+                }
+                Frame::Src(s) => {
+                    let head = std::mem::take(&mut run);
+                    let end_due = s.ends && s.endch < -1;
+                    if s.loc >= s.buf.len() && !end_due {
+                        if head {
+                            out.push(d);
+                        }
+                        continue;
+                    }
+                    out.push(d);
+                    d = (d + self.src_if_delta(&s.buf[s.loc.min(s.buf.len())..])?).max(0);
+                }
+                Frame::File(fr) => {
+                    if std::mem::take(&mut run) {
+                        out.push(d);
+                    }
+                    if fr.has_lines() {
+                        out.push(d);
+                    }
+                }
+            }
+        }
+        if run {
+            out.push(d);
+        }
+        Ok(out)
+    }
+
+    /// A token's effect on the condition stack's depth: only control
+    /// sequences named `if…` or `fi…` are looked up (their meaning
+    /// decides; a conditional under another name is a violation the
+    /// outer `\fi` reports).
+    fn if_delta(&mut self, tok: &Tok) -> R<i64> {
+        let Tok::S(name) = tok else { return Ok(0) };
+        if !(name.starts_with("if") || name.starts_with("fi")) {
+            return Ok(0);
+        }
+        let (c, h) = self.mean_of(tok)?.cmd_chr();
+        Ok(match c {
+            cmd::IF_TEST => 1,
+            cmd::FI_OR_ELSE if h == 2 => -1,
+            _ => 0,
+        })
+    }
+
+    /// The nesting of a line's unread text: its control words (escape
+    /// and letters by the current category codes, §354–§356) to the end
+    /// or a comment character.
+    fn src_if_delta(&mut self, text: &[u32]) -> R<i64> {
+        let mut d = 0;
+        let mut i = 0;
+        while i < text.len() {
+            let c = self.cat(text[i])?;
+            if c == 14 {
+                break;
+            }
+            i += 1;
+            if c != 0 {
+                continue;
+            }
+            let s = i;
+            while i < text.len() && self.cat(text[i])? == 11 {
+                i += 1;
+            }
+            if i == s {
+                i += 1;
+                continue;
+            }
+            let name: String = text[s..i]
+                .iter()
+                .map(|&c| char::from_u32(c).unwrap_or('?'))
+                .collect();
+            d += self.if_delta(&Tok::cs(&name))?;
+        }
+        Ok(d)
+    }
+
+    fn measure_tail_inner(&mut self) -> R<()> {
         if !self
             .frames
             .iter()
@@ -1236,11 +1440,16 @@ impl<'c, 'a> Run<'c, 'a> {
             effect: self.effect,
             cur: self.cur.clone(),
             conds: self.conds.clone(),
+            ifs: (self.ifbase, self.if_codes.clone(), self.if_top_written),
             lines_entered: self.lines_entered,
             eof: self.eof,
             claim_rest: self.claim_rest,
             astate: self.astate,
             page_due: self.page_due,
+            anchor: self.anchor,
+            // (lists a trial's commands open are the trial's: without this
+            // the run defined `lopen:` for ids no node owns)
+            minted: self.minted.borrow().clone(),
         }
     }
 
@@ -1248,17 +1457,21 @@ impl<'c, 'a> Run<'c, 'a> {
         self.frames = s.frames;
         self.pulled = s.pulled;
         self.own = s.own;
+        self.cats = [0; 256];
         self.defs = s.defs;
         self.contribs = s.contribs;
         self.kids = s.kids;
         self.effect = s.effect;
         self.cur = s.cur;
         self.conds = s.conds;
+        (self.ifbase, self.if_codes, self.if_top_written) = s.ifs;
         self.lines_entered = s.lines_entered;
         self.eof = s.eof;
         self.claim_rest = s.claim_rest;
         self.astate = s.astate;
         self.page_due = s.page_due;
+        self.anchor = s.anchor;
+        *self.minted.borrow_mut() = s.minted;
     }
 
     /// Ends the run: definitions, contributions, children (what the
@@ -1270,8 +1483,9 @@ impl<'c, 'a> Run<'c, 'a> {
         let minted = std::mem::take(&mut *self.minted.borrow_mut());
         if !minted.is_empty() {
             let v = self.v;
-            let me = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
-            let items = v.field("items");
+            let epoch = self.cx.values_epoch();
+            let me = crate::val::int_id(v, i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
+            let items = self.ops.fields.get_at(v, epoch, "items");
             for id in minted {
                 let mine: Vec<ValueId> = self
                     .contribs
@@ -1291,7 +1505,43 @@ impl<'c, 'a> Run<'c, 'a> {
             let names: Vec<ValueId> = self.own.keys().map(|f| f.0).collect();
             let l = self.v.list(names);
             let s = self.v.seq_unit(l);
-            self.contribs.push((self.v.field("defs"), s));
+            let defs = self
+                .ops
+                .fields
+                .get_at(self.v, self.cx.values_epoch(), "defs");
+            self.contribs.push((defs, s));
+        }
+        if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+            let v = self.v;
+            let items = v.field("items");
+            for (f, x) in &self.contribs {
+                if *f == items {
+                    for e in v.seq_to_vec(*x) {
+                        eprintln!(
+                            "  item lid {} {}",
+                            crate::val::int_at(v, e, 0),
+                            v.render(
+                                crate::val::list_of(v, e)
+                                    .get(1)
+                                    .copied()
+                                    .unwrap_or(ValueId::UNIT)
+                            )
+                            .chars()
+                            .take(60)
+                            .collect::<String>()
+                        );
+                    }
+                }
+            }
+            for (_, a) in &self.kids {
+                eprintln!(
+                    "  kid {}",
+                    a.first()
+                        .map(|&x| v.render(x).chars().take(80).collect::<String>())
+                        .unwrap_or_default()
+                );
+            }
+            eprintln!("  effect {:?} anchor {}", self.effect, self.anchor);
         }
         for (f, x) in std::mem::take(&mut self.contribs) {
             self.cx.contribute(f, x);
@@ -1310,6 +1560,15 @@ impl<'c, 'a> Run<'c, 'a> {
             self.cx.follow(op, Vec::new());
         }
         for args in self.leftover() {
+            if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+                let v = self.v;
+                eprintln!(
+                    "  follow {}",
+                    args.first()
+                        .map(|&x| v.render(x).chars().take(90).collect::<String>())
+                        .unwrap_or_default()
+                );
+            }
             self.cx.follow(self.ops.exec, args);
         }
         let mut n = self.pulled;
@@ -1348,11 +1607,14 @@ struct Snapshot {
     effect: Effect,
     cur: Cur,
     conds: Vec<u8>,
+    ifs: (i64, Vec<i32>, i64),
     lines_entered: i64,
     eof: bool,
     claim_rest: bool,
     astate: Option<i64>,
     page_due: Option<(usize, usize, bool)>,
+    anchor: i64,
+    minted: Vec<i64>,
 }
 
 fn is_hex(c: u32) -> bool {
@@ -1369,6 +1631,11 @@ fn hex(c: u32) -> u32 {
 }
 
 /// The frames of an `Exec` node's arguments.
+/// The condition-stack depth an output routine's tokens start at: its
+/// conditionals are above any the page builder interrupted, in levels of
+/// their own (OUTPUT.md §6).
+pub(crate) const OUTPUT_IF_BASE: i64 = 1 << 40;
+
 pub(crate) fn decode_frames(v: &Values, args: &[ValueId]) -> Vec<Frame> {
     decode_frames_upto(v, args, usize::MAX)
 }
@@ -1388,30 +1655,41 @@ fn decode_frames_upto(v: &Values, args: &[ValueId], limit: usize) -> Vec<Frame> 
         if out.len() >= limit {
             break;
         }
+        out.extend(crate::val::frame_of(v, f, || decode_frame(v, f)));
+    }
+    out
+}
+
+/// One frame of a node's arguments (a frame is an immutable value, so
+/// its decoding is kept by id, [`crate::val::frame_of`]).
+fn decode_frame(v: &Values, f: ValueId) -> Option<Frame> {
+    let mut out = None;
+    {
         let Value::List(xs) = &*v.get(f) else {
-            continue;
+            return None;
         };
         match xs.first().map(|&t| str_of(v, t)).as_deref() {
             Some("t") => {
                 let toks = crate::val::toks_of(v, xs.get(1).copied());
-                out.push(Frame::Toks(Rc::from(toks), 0));
+                out = Some(Frame::Toks(Rc::from(toks), 0));
             }
             Some("f") => {
                 if let (Some(&id), Some(&o)) = (xs.get(1), xs.get(2)) {
                     let off = usize::try_from(int_of(v, o)).unwrap_or(0);
                     let name = xs.get(3).copied().unwrap_or(ValueId::UNIT);
-                    out.push(Frame::File(FileRest::new(v, id, off, name)));
+                    out = Some(Frame::File(FileRest::new(v, id, off, name)));
                 }
             }
             Some("s") => {
                 let text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
-                out.push(Frame::Src(Src {
+                out = Some(Frame::Src(Src {
                     buf: text.chars().map(u32::from).collect(),
                     loc: 0,
                     state: u8::try_from(xs.get(2).map_or(2, |&x| int_of(v, x))).unwrap_or(2),
                     endch: xs.get(3).map_or(-2, |&x| int_of(v, x)),
                     starts: xs.get(4).is_none_or(|&x| int_of(v, x) & 1 != 0),
                     ends: xs.get(4).is_none_or(|&x| int_of(v, x) & 2 != 0),
+                    rescanned: xs.get(4).is_some_and(|&x| int_of(v, x) & 4 != 0),
                     origin: match (xs.get(5), xs.get(6)) {
                         (Some(&n), Some(&o)) => {
                             Some((n, usize::try_from(int_of(v, o)).unwrap_or(0)))
@@ -1448,6 +1726,7 @@ pub(crate) fn src_frame(line: &str, endlinechar: i64) -> Frame {
         starts: true,
         ends: true,
         origin: None,
+        rescanned: true,
     })
 }
 
@@ -1483,6 +1762,7 @@ pub(crate) fn slice_args(
     starts_line: bool,
     anchor: i64,
     boundary: bool,
+    ifdepth: i64,
 ) -> Vec<ValueId> {
     let mut frames = Vec::new();
     let mut starts = starts_line;
@@ -1514,5 +1794,6 @@ pub(crate) fn slice_args(
         v.int(1),
         v.int(anchor),
         v.int(i64::from(boundary)),
+        v.int(ifdepth),
     ]
 }

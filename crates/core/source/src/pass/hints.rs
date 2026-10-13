@@ -135,6 +135,11 @@ pub struct Hints {
     /// Fields it reads literally (a hint, not a complete set).
     pub reads: Vec<String>,
     pub cause: Option<&'static str>,
+    /// The macros whose bodies (as the text defines them) `may_define`
+    /// relies on: right while each still has that meaning.
+    pub relied: Vec<String>,
+    /// The commands the item and the bodies it relies on call.
+    pub calls: Vec<String>,
 }
 
 impl Hints {
@@ -148,6 +153,8 @@ impl Hints {
             implicit: Implicit::None,
             reads: Vec::new(),
             cause: None,
+            relied: Vec::new(),
+            calls: Vec::new(),
         }
     }
 }
@@ -524,6 +531,9 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
     let mut e = Effects::default();
     let mut g = global;
     let mut reading = false;
+    // (after `\expandafter`: the next token is expanded first, so a
+    // quoter after it does not quote)
+    let mut xa_next = false;
     let mut k = lo;
     let hi = hi.min(atoms.len());
     let name_at = |p: usize| -> Option<&str> {
@@ -545,10 +555,21 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
             k += 1;
             continue;
         }
+        // (expl3's `\tex_def:D` is `\def`)
         let n = a.name(text);
+        let n = n
+            .strip_prefix("tex_")
+            .and_then(|x| x.strip_suffix(":D"))
+            .filter(|x| t.primitive(x))
+            .unwrap_or(n);
         let gl = std::mem::replace(&mut g, false);
         let rd = std::mem::replace(&mut reading, false);
+        let xa = std::mem::replace(&mut xa_next, false);
         k += 1;
+        if matches!(n, "expandafter" | "exp_after:wN") {
+            xa_next = true;
+            continue;
+        }
         if matches!(
             n,
             "global" | "long" | "outer" | "protected" | "tex_global:D"
@@ -556,7 +577,7 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
             g = gl || matches!(n, "global" | "tex_global:D");
             continue;
         }
-        if QUOTERS.contains(&n) {
+        if QUOTERS.contains(&n) && !xa {
             k = skip(atoms, k) + 1;
             continue;
         }
@@ -620,12 +641,33 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                     }
                 }
                 Some(x) if matches!(x.kind, AtomKind::Char(_)) => {
-                    // (an active character)
+                    // (an active character; `^^X` the character X xor 64,
+                    // §352)
                     if let AtomKind::Char(c) = x.kind {
-                        e.names.push(Def {
-                            field: format!("cs:{c}"),
-                            global: g,
-                        });
+                        let caret = c == '^'
+                            && atoms.get(p + 1).map(|y| y.kind) == Some(AtomKind::Char('^'));
+                        let coded = caret
+                            .then(|| atoms.get(p + 2))
+                            .flatten()
+                            .and_then(|y| match y.kind {
+                                AtomKind::Char(d) if d.is_ascii() => {
+                                    char::from_u32(u32::from(d) ^ 64)
+                                }
+                                _ => None,
+                            });
+                        match coded {
+                            Some(d) => {
+                                e.names.push(Def {
+                                    field: format!("cs:{d}"),
+                                    global: g,
+                                });
+                                return p + 3;
+                            }
+                            None => e.names.push(Def {
+                                field: format!("cs:{c}"),
+                                global: g,
+                            }),
+                        }
                     }
                     p + 1
                 }
@@ -663,9 +705,14 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
         };
         let gg = gl || matches!(n, "gdef" | "xdef" | "protected@xdef");
         match n {
-            "def" | "gdef" | "edef" | "xdef" | "protected@edef" | "protected@xdef" => {
+            "def" | "gdef" => {
                 let p = target(&mut e, k, gg);
                 k = past_body(atoms, p);
+            }
+            // (an expanded body runs as expansion here: `\csname` in it
+            // defines; the loop reads it as code, an over-approximation)
+            "edef" | "xdef" | "protected@edef" | "protected@xdef" => {
+                k = target(&mut e, k, gg);
             }
             "let" | "futurelet" => {
                 let p = target(&mut e, k, gl);
@@ -897,6 +944,94 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                 e.unbounded
                     .push(format!("\\{n} (text the pass cannot see)"));
             }
+            // l3kernel's patchers and primitive namers rewrite bodies
+            _ if n.starts_with("__kernel_patch") || n.starts_with("__kernel_primitive") => {
+                e.unbounded.push(format!("\\{n} (a kernel patcher)"));
+            }
+            "cs_undefine:N" | "cs_undefine:c" => {
+                k = target(&mut e, k, true);
+            }
+            // `\cs_generate_variant:Nn \foo:nn { nx , nV }`: the variants
+            "cs_generate_variant:Nn" | "cs_generate_variant:cn" => {
+                let p = skip(atoms, k);
+                let base: Option<String> = match atoms.get(p) {
+                    Some(x) if x.kind == AtomKind::Cs && n.ends_with(":Nn") => {
+                        Some(x.name(text).to_owned())
+                    }
+                    Some(x) if x.kind == AtomKind::Open => group_chars(atoms, p),
+                    _ => None,
+                };
+                let q = if n.ends_with(":Nn") {
+                    p + 1
+                } else {
+                    past_group(atoms, p)
+                };
+                let variants = group_chars(atoms, q);
+                match (base, variants) {
+                    (Some(b), Some(vs)) if b.contains(':') => {
+                        let stem = b.rsplit_once(':').map_or(b.as_str(), |x| x.0);
+                        for vsig in vs.split(',') {
+                            let vsig: String =
+                                vsig.chars().filter(|c| !c.is_whitespace()).collect();
+                            if vsig.is_empty() {
+                                continue;
+                            }
+                            e.names.push(Def {
+                                field: cs(&format!("{stem}:{vsig}")),
+                                global: true,
+                            });
+                        }
+                    }
+                    _ => e
+                        .unbounded
+                        .push(format!("\\{n} with a computed name or list")),
+                }
+                k = past_group(atoms, q).max(q);
+            }
+            // `\prg_new_conditional:Npnn \foo:n #1 { p , T , F , TF } {…}`:
+            // `\foo_p:n`, `\foo:nT`, `\foo:nF`, `\foo:nTF`
+            "prg_new_conditional:Npnn"
+            | "prg_set_conditional:Npnn"
+            | "prg_new_protected_conditional:Npnn"
+            | "prg_set_protected_conditional:Npnn"
+            | "prg_new_conditional:Nnn"
+            | "prg_set_conditional:Nnn"
+            | "prg_new_protected_conditional:Nnn"
+            | "prg_set_protected_conditional:Nnn"
+            | "prg_new_eq_conditional:NNn"
+            | "prg_set_eq_conditional:NNn" => {
+                let p = skip(atoms, k);
+                match atoms.get(p) {
+                    Some(x) if x.kind == AtomKind::Cs && x.name(text).contains(':') => {
+                        let full = x.name(text);
+                        let (stem, sig) = full.rsplit_once(':').unwrap_or((full, ""));
+                        for f in [
+                            format!("{stem}_p:{sig}"),
+                            format!("{stem}:{sig}T"),
+                            format!("{stem}:{sig}F"),
+                            format!("{stem}:{sig}TF"),
+                        ] {
+                            e.names.push(Def {
+                                field: cs(&f),
+                                global: true,
+                            });
+                        }
+                    }
+                    _ => e.unbounded.push(format!("\\{n} with a computed name")),
+                }
+                let mut q = p + 1;
+                if n.ends_with(":NNn") {
+                    q = skip(atoms, q) + 1;
+                    q = past_group(atoms, q);
+                } else if n.contains(":Np") {
+                    q = past_body(atoms, q);
+                    q = past_group(atoms, q);
+                } else {
+                    q = past_group(atoms, q);
+                    q = past_group(atoms, q);
+                }
+                k = q.max(k);
+            }
             _ => {
                 if let Some(f) = allocator(n) {
                     let p = if n == "newlength" {
@@ -972,8 +1107,26 @@ pub(crate) fn effects(text: &str, atoms: &[Atom], lo: usize, hi: usize, global: 
                         }
                         _ => e.unbounded.push(format!("\\{n} with a computed target")),
                     }
-                    if n.starts_with("cs_") && n.contains(":Np") {
-                        k = past_body(atoms, k);
+                    // (the rest of its arguments are values or a body,
+                    // not code that runs here)
+                    let sig = n.rsplit_once(':').map_or("", |x| x.1);
+                    for ch in sig.chars().skip(1) {
+                        match ch {
+                            'N' => k = skip(atoms, k) + 1,
+                            'p' => {
+                                k = past_body(atoms, k);
+                                break;
+                            }
+                            // (expanded, or unknown: read as code)
+                            'x' | 'e' | 'f' | 'o' | 'V' | 'v' | 'w' | 'D' => break,
+                            _ => {
+                                let q = past_group(atoms, k);
+                                if q == k {
+                                    break;
+                                }
+                                k = q;
+                            }
+                        }
                     }
                     continue;
                 }
@@ -1021,10 +1174,26 @@ pub struct DefSet {
     pub prefixes: BTreeMap<String, bool>,
     /// What makes it unbounded, with where (`\caller: reason`).
     pub unbounded: Vec<String>,
+    /// The macros whose bodies (as the text defines them) the set
+    /// relies on: right while each still has that meaning.
+    pub relied: Vec<String>,
+    /// Every command the text and the bodies it relies on call (the
+    /// engine's state each may touch is the client's to say).
+    pub calls: Vec<String>,
 }
 
 impl DefSet {
     fn add(&mut self, o: &DefSet) {
+        for r in &o.relied {
+            if !self.relied.contains(r) {
+                self.relied.push(r.clone());
+            }
+        }
+        for c in &o.calls {
+            if !self.calls.contains(c) {
+                self.calls.push(c.clone());
+            }
+        }
         for (k, v) in &o.names {
             *self.names.entry(k.clone()).or_default() |= v;
         }
@@ -1100,6 +1269,9 @@ impl<'a> Closure<'a> {
             s.add(&x);
         }
         for c in &e.calls {
+            if !s.calls.contains(c) {
+                s.calls.push(c.clone());
+            }
             let x = self.call(c);
             s.add(&x);
         }
@@ -1158,6 +1330,7 @@ impl<'a> Closure<'a> {
             (None, None) => Vec::new(),
         };
         if !bodies.is_empty() {
+            s.relied.push(name.to_owned());
             for b in bodies {
                 let x = self.of(&b);
                 s.add(&x);
@@ -1169,6 +1342,7 @@ impl<'a> Closure<'a> {
             .shapes(name)
             .or_else(|| self.prelude.shapes(name));
         if let Some(v) = shapes {
+            s.relied.push(name.to_owned());
             for sh in v {
                 match sh {
                     Shape::Alias(t) => {
@@ -1185,13 +1359,19 @@ impl<'a> Closure<'a> {
             }
             return s;
         }
-        if table().commands.contains_key(name) || is_control_symbol(name) {
-            // (a primitive, or a kernel command the format's text did not
-            // give: it defines nothing but what its own syntax names,
-            // which `effects` reads at the call)
+        if table().primitive(name) || is_control_symbol(name) {
+            // (a primitive: it defines nothing but what its own syntax
+            // names, which `effects` reads at the call)
             return s;
         }
         if let Some(Entry::Command(_)) = expl3_primitive(name) {
+            return s;
+        }
+        if table().commands.contains_key(name) {
+            // (a format's command whose syntax the table gives but whose
+            // body the text did not: what it defines is not read)
+            s.unbounded
+                .push(format!("\\{name}: a kernel macro whose body was not read"));
             return s;
         }
         s.unbounded.push(format!("\\{name} defined elsewhere"));

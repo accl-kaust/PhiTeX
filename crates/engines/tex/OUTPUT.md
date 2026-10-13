@@ -1076,3 +1076,63 @@ The gate: story's and pages' critical path at most a few per cent of the
 nodes run; all outputs byte-identical; edits equal cold; at 1 and 4
 threads. Order of work: the `Ctx::follow` switch, the LaTeX article run,
 the list fix, then this.
+
+## 5. Paragraph regions
+
+The cell of the paragraph open in a vertical list (§211's mode: a
+paragraph's `[list, lang, packed hyphen minima]`, or unit) is one per
+*region*, `par:<anchor>:<vlid>`, not one per list. Otherwise the start
+of every paragraph reads the end of the one before, a chain over the
+document.
+
+- **Region.** It is the text after an item the syntactic pass marks
+  `Implicit::EndsParagraph`, at brace depth 0 and not consumed by an
+  earlier item. Such items are a blank line, `\par`, a vertical command
+  that reads nothing after it, and a macro whose body ends in one.
+  `\vskip`, `\hrule`, `\unvbox`, `\unvcopy` and `\halign` are excluded:
+  their keyword or number scan puts back the token after them, and that
+  token would run in the old region. `anchor` is the raw id of the node
+  holding the item (0 before the first).
+- **Node args.** Exec nodes take `[frames, top, anchor, boundary,
+  ifdepth]`. Children inherit the anchor; `boundary` is set only on
+  document nodes.
+- **Scope kinds.** A scope kind is `[group, sid, list, mode, depth,
+  parent, opener's anchor, extra…]`. A box, insert, math or alignment
+  end reads the outer paragraph in the opener's region. When its own
+  region differs, it carries that paragraph into its own region, so a
+  blank line inside a minipage does not end the outer paragraph.
+- **Check.** A boundary node whose first command is not §1094/§1095's
+  paragraph end, in vertical mode or in a paragraph of a vertical list,
+  gives the warning "paragraph boundary regime violated" and counts in
+  `Stats::par_boundary_violations`. An expandable first command is not
+  checked.
+- **Not detected:** a blank line taken as an unbraced `\long` argument
+  (the claimer ends the paragraph in its own region), and a macro marked
+  paragraph-ending whose expansion does not end it.
+
+## 6. Condition-stack levels
+
+The condition stack (`cond_ptr`, §489) is one cell per level, `if:<d>`
+(1 the outermost), holding `[code, limit, owner node]`. It is not one
+cell for the whole stack, so a conditional no longer reads the previous
+conditional's stack.
+
+- **Depth.** A node's depth below its own conditionals is node arg 4,
+  `ifdepth`, taken from the text:
+  - a document node: the primitive conditionals before it, less the
+    `\fi`s (api.rs `slice_info`);
+  - a child: its parent's depth after the parent's command, plus the
+    nesting of the children before it.
+  For that nesting, control sequences named `if…`/`fi…` count by
+  meaning, and so do the control words of a line's unread text.
+- **Conditionals.** A conditional writes only its own level. A `\fi`,
+  `\else` or `\or` of a conditional begun in another node reads only
+  level `ifdepth` (§510). `\currentiflevel`, `\currentiftype`,
+  `\currentifbranch` and `\showifs` read levels 1…`ifdepth`.
+- **Output routine.** Its tokens start at `OUTPUT_IF_BASE` (2^40), in
+  levels of their own. They see only their own levels.
+- **Check.** An outer `\fi` that finds no record at its depth gives the
+  warning "conditional depth regime violated" and counts in
+  `Stats::if_depth_violations`.
+- **Not detected:** a conditional named neither `if…` nor `fi…` (a
+  `\let` alias) whose `\fi` is in the same node.

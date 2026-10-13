@@ -224,13 +224,29 @@ fn prelude_round_trip() {
     let prelude = common::plain();
     let opts = || common::options("./story.tex", "story", "", &fx);
     let a = common::build(opts(), Some(&prelude), &src);
-    let bytes = a.export_prelude();
+    let bytes = a.export_prelude().expect("the prelude finished");
     let mut o = opts();
     o.prelude_bytes = Some(bytes.clone());
     let b = common::build(o, Some(&prelude), &src);
     assert_eq!(a.prelude_key(), b.prelude_key());
-    assert_eq!(b.export_prelude(), bytes);
+    assert_eq!(b.export_prelude(), Some(bytes));
     assert_eq!(a.output().0, b.output().0);
+}
+
+/// A prelude whose evaluation ran out of time exports nothing.
+#[test]
+fn unfinished_prelude_is_not_exported() {
+    let fx = common::fixtures().join("plain");
+    let src = common::read(&fx.join("story.tex"));
+    let o = phitex_tex::Options {
+        time_limit: Some(std::time::Duration::from_nanos(1)),
+        ..common::options("./story.tex", "story", "", &fx)
+    };
+    // (a prelude text of its own: no finished one is cached under it)
+    let prelude = format!("{}\n% unfinished\n", common::plain());
+    let b = common::build(o, Some(&prelude), &src);
+    assert!(!b.prelude_complete());
+    assert!(b.export_prelude().is_none());
 }
 
 /// `Build::pages` and §642's log line on `pages.tex`: four pages, the
@@ -297,4 +313,70 @@ fn edit_costs_a_cold_build() {
     b.edit(&big);
     show("edit", t0.elapsed(), &b.stats);
     assert_eq!(b.output().0, cold.output().0);
+}
+
+/// Twenty word edits: the nodes each re-runs as a fraction of a cold
+/// build's, p50 and p99, the output equal to cold after every edit (the
+/// trace replay's bar: p99 <= 2.4%).
+fn edit_fractions(dir: &std::path::Path, name: &str) {
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let prelude = common::plain();
+    let opts = || common::options(&format!("./{name}.tex"), name, "", dir);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let cold_nodes = b.stats.nodes_run.max(1);
+    let body = src
+        .find("\\mark")
+        .or_else(|| src.find("\\begin"))
+        .unwrap_or(0);
+    let ws: Vec<(usize, usize)> = words(&src).into_iter().filter(|&(s, _)| s > body).collect();
+    let mut text = src.clone();
+    let mut fr = Vec::new();
+    let mut failed = Vec::new();
+    for k in 0..20 {
+        let (s, e) = ws[(k * 7) % ws.len()];
+        let mut r: Vec<u8> = text.as_bytes()[s..e].to_vec();
+        r.rotate_left(1);
+        text = format!(
+            "{}{}{}",
+            &text[..s],
+            String::from_utf8_lossy(&r),
+            &text[e..]
+        );
+        b.edit(&text);
+        #[allow(clippy::cast_precision_loss)]
+        fr.push(b.stats.nodes_run as f64 / cold_nodes as f64);
+        let cold = common::build(opts(), Some(&prelude), &text);
+        if common::first_difference(&b.output().0, &cold.output().0).is_some() {
+            failed.push(k);
+        }
+    }
+    fr.sort_by(f64::total_cmp);
+    let at = |q: f64| {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let i = ((fr.len() - 1) as f64 * q).round() as usize;
+        fr[i]
+    };
+    eprintln!(
+        "{name}: edits re-run p50 {:.4} p99 {:.4} of {cold_nodes} nodes (bar p99 <= 0.024)",
+        at(0.5),
+        at(0.99)
+    );
+    assert!(
+        failed.is_empty(),
+        "{name}: edits differing from cold: {failed:?}"
+    );
+}
+
+#[test]
+#[ignore = "a measure: the edit gate"]
+fn edit_gate() {
+    edit_fractions(&common::fixtures().join("plain"), "story");
+    let kt = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/tmp/kt");
+    if kt.join("s.tex").exists() {
+        edit_fractions(&kt, "s");
+    }
 }

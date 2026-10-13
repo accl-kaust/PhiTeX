@@ -342,7 +342,9 @@ impl Run<'_, '_> {
         }
         let frame = v.list(vec![v.str("t"), crate::val::toks_value(v, &toks)]);
         let exec = self.ops.exec;
-        self.kid(exec, vec![v.list(vec![frame]), v.int(0)]);
+        let base = v.int(crate::run::OUTPUT_IF_BASE);
+        let z = v.int(0);
+        self.kid(exec, vec![v.list(vec![frame]), z, z, z, base]);
         Ok(true)
     }
 

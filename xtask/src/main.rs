@@ -60,7 +60,14 @@ fn check() -> Result<()> {
         }
         Ok(())
     };
-    run(&["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])?;
+    run(&[
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings",
+    ])?;
     let mut wasm = vec!["check", "--target", "wasm32-unknown-unknown"];
     for c in WASM_CRATES {
         wasm.extend(["-p", c]);

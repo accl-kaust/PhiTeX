@@ -57,19 +57,26 @@ impl Run<'_, '_> {
     pub(crate) fn mode(&mut self) -> R<Mode> {
         let k = self.scope_kind()?;
         let v = self.v;
+        // (the kind is read by every command of the run and seldom
+        // changes: decoded once per value)
         let (group, sid, lid, km, depth, extra) = match k {
-            Some(k) => {
-                let xs = list_of(v, k);
-                let n = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
-                (
-                    n(0),
-                    n(1),
-                    n(2),
-                    i32::try_from(n(3)).unwrap_or(1),
-                    n(4),
-                    xs.get(7..).map(<[ValueId]>::to_vec).unwrap_or_default(),
-                )
-            }
+            Some(k) => match &self.kind_memo {
+                Some((kk, p)) if *kk == k => p.clone(),
+                _ => {
+                    let xs = list_of(v, k);
+                    let n = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
+                    let p = (
+                        n(0),
+                        n(1),
+                        n(2),
+                        i32::try_from(n(3)).unwrap_or(1),
+                        n(4),
+                        xs.get(7..).map(<[ValueId]>::to_vec).unwrap_or_default(),
+                    );
+                    self.kind_memo = Some((k, p.clone()));
+                    p
+                }
+            },
             None => (0, 0, 0, 1, 0, Vec::new()),
         };
         let mut md = Mode {
@@ -544,6 +551,7 @@ impl Run<'_, '_> {
                 self.line_break(md, &items, false)?;
             }
             self.set(&self.par_cell(md.vlid), ValueId::UNIT, true);
+            self.region_advance();
             self.normal_paragraph()?;
             let _ = v;
         }

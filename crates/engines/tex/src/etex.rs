@@ -278,13 +278,7 @@ pub(crate) fn expand(r: &mut Run<'_, '_>) -> R<bool> {
         cmd::FI_OR_ELSE if r.conds.is_empty() => {
             // the conditional began in another node: its record goes
             // (§510), unless this is an extra `\else` or `\or`
-            let mut st = if_stack(r)?;
-            if let Some(top) = st.last()
-                && chr <= top.limit
-            {
-                st.pop();
-                set_if_stack(r, &st);
-            }
+            close_outer(r, chr)?;
             return Ok(false);
         }
         _ => return Ok(false),
@@ -294,11 +288,10 @@ pub(crate) fn expand(r: &mut Run<'_, '_>) -> R<bool> {
 
 /// After `expand` did a conditional or `\fi`: the condition stack's
 /// records for this run's conditionals follow `conds`.
-pub(crate) fn after_expand(r: &mut Run<'_, '_>, c: u8) -> R<()> {
+pub(crate) fn after_expand(r: &mut Run<'_, '_>, c: u8) {
     if c == cmd::IF_TEST || c == cmd::FI_OR_ELSE {
-        sync_ifs(r, None)?;
+        sync_ifs(r, None);
     }
-    Ok(())
 }
 
 /// `\unless` (pdfTeX §1758).
@@ -307,7 +300,8 @@ fn unless(r: &mut Run<'_, '_>) -> R<()> {
     if r.cur.cmd == cmd::IF_TEST && r.cur.chr != 16 {
         r.cur.chr += UNLESS_CODE;
         r.conditional()?;
-        return sync_ifs(r, None);
+        sync_ifs(r, None);
+        return Ok(());
     }
     r.log("error", "You can't use `\\unless' before this")?;
     r.back_cur();
@@ -326,76 +320,122 @@ struct IfRec {
     owner: i64,
 }
 
-fn if_stack(r: &mut Run<'_, '_>) -> R<Vec<IfRec>> {
-    let x = r.get("ifstack")?;
+/// The cell of condition-stack level `d` (1 the outermost): one per
+/// level, not one stack, so a conditional reads only the level it closes
+/// (OUTPUT.md §6).
+fn if_cell(d: i64) -> String {
+    format!("if:{d}")
+}
+
+fn read_level(r: &mut Run<'_, '_>, d: i64) -> R<Option<IfRec>> {
     let v = r.v;
-    Ok(x.map(|x| list_of(v, x))
-        .unwrap_or_default()
-        .into_iter()
+    Ok(r.get(&if_cell(d))?
+        .filter(|&x| x != ValueId::UNIT)
         .map(|e| IfRec {
             code: i32::try_from(crate::val::int_at(v, e, 0)).unwrap_or(0),
             limit: i32::try_from(crate::val::int_at(v, e, 1)).unwrap_or(0),
             owner: crate::val::int_at(v, e, 2),
-        })
-        .collect())
+        }))
 }
 
-fn set_if_stack(r: &mut Run<'_, '_>, st: &[IfRec]) {
+fn write_level(r: &mut Run<'_, '_>, d: i64, e: Option<&IfRec>) {
     let v = r.v;
-    let xs = st
-        .iter()
-        .map(|e| {
-            v.list(vec![
-                v.int(i64::from(e.code)),
-                v.int(i64::from(e.limit)),
-                v.int(e.owner),
-            ])
-        })
-        .collect();
-    r.set("ifstack", v.list(xs), true);
+    let x = e.map_or(ValueId::UNIT, |e| {
+        v.list(vec![
+            v.int(i64::from(e.code)),
+            v.int(i64::from(e.limit)),
+            v.int(e.owner),
+        ])
+    });
+    r.set(&if_cell(d), x, true);
+}
+
+/// The whole stack (`\showifs`, `\currentif…`): the levels below the
+/// node's, then its own conditionals. An output routine's levels start
+/// at [`crate::run::OUTPUT_IF_BASE`] and it sees only its own.
+fn if_stack(r: &mut Run<'_, '_>) -> R<Vec<IfRec>> {
+    let floor = if r.ifbase >= crate::run::OUTPUT_IF_BASE {
+        crate::run::OUTPUT_IF_BASE + 1
+    } else {
+        1
+    };
+    let mut st = Vec::new();
+    for d in floor..=r.ifbase {
+        if let Some(e) = read_level(r, d)? {
+            st.push(e);
+        }
+    }
+    let me = owner(r);
+    for (i, &l) in r.conds.iter().enumerate() {
+        st.push(IfRec {
+            code: r.if_codes.get(i).copied().unwrap_or(0),
+            limit: i32::from(l),
+            owner: me,
+        });
+    }
+    Ok(st)
+}
+
+/// A `\fi`, `\else` or `\or` of a conditional begun in another node: the
+/// level below the node's (§510). A missing record where the text's
+/// nesting put one is a violation of the depth the node was given.
+fn close_outer(r: &mut Run<'_, '_>, chr: i32) -> R<()> {
+    if r.ifbase <= 0 || r.ifbase == crate::run::OUTPUT_IF_BASE {
+        return Ok(());
+    }
+    if let Some(top) = read_level(r, r.ifbase)? {
+        if chr <= top.limit {
+            write_level(r, r.ifbase, None);
+            r.ifbase -= 1;
+        }
+    } else {
+        r.diag(
+            false,
+            "conditional depth regime violated: no conditional open at this node's depth",
+        );
+        let one = r.v.seq_unit(r.v.int(1));
+        r.contribute("ifviol", one);
+    }
+    Ok(())
 }
 
 fn owner(r: &Run<'_, '_>) -> i64 {
     i64::from_ne_bytes(r.cx.node().raw().to_ne_bytes())
 }
 
-/// The records of this run's conditionals made to match `conds` (the
-/// limits); with `push`, a new one for the conditional just begun.
-fn sync_ifs(r: &mut Run<'_, '_>, push: Option<i32>) -> R<()> {
+/// The levels of this run's conditionals made to match `conds` (the
+/// limits); with `push`, the code of the conditional just begun. Levels
+/// this run wrote above its open ones are emptied.
+fn sync_ifs(r: &mut Run<'_, '_>, push: Option<i32>) {
     let me = owner(r);
-    let st = if_stack(r)?;
-    let mut outer: Vec<IfRec> = Vec::new();
-    let mut local: Vec<IfRec> = Vec::new();
-    for e in st {
-        if e.owner == me {
-            local.push(e);
-        } else {
-            outer.push(e);
-        }
-    }
-    let n = r.conds.len() - usize::from(push.is_some());
-    local.truncate(n);
+    let n = r.conds.len();
     if let Some(code) = push {
-        local.push(IfRec {
-            code,
-            limit: 1,
+        r.if_codes.truncate(n.saturating_sub(1));
+        r.if_codes.push(code);
+    } else {
+        r.if_codes.truncate(n);
+    }
+    let base = r.ifbase;
+    for i in 0..n {
+        let e = IfRec {
+            code: r.if_codes.get(i).copied().unwrap_or(0),
+            limit: i32::from(r.conds[i]),
             owner: me,
-        });
+        };
+        let d = base + 1 + i64::try_from(i).unwrap_or(0);
+        write_level(r, d, Some(&e));
     }
-    for (e, &l) in local.iter_mut().zip(r.conds.iter()) {
-        e.limit = i32::from(l);
+    let top = base + i64::try_from(n).unwrap_or(0);
+    for d in top + 1..=r.if_top_written {
+        write_level(r, d, None);
     }
-    let old_len = outer.len() + local.len();
-    outer.extend(local);
-    let _ = old_len;
-    set_if_stack(r, &outer);
-    Ok(())
+    r.if_top_written = top;
 }
 
 /// The conditional `code` (with `unless_code`) begins: its record
 /// (`push_cond`, §495).
-pub(crate) fn if_begin(r: &mut Run<'_, '_>, code: i32) -> R<()> {
-    sync_ifs(r, Some(code))
+pub(crate) fn if_begin(r: &mut Run<'_, '_>, code: i32) {
+    sync_ifs(r, Some(code));
 }
 
 /// The tests e-TeX and pdfTeX add to `conditional` (§501).
@@ -936,6 +976,7 @@ fn pseudo_start(r: &mut Run<'_, '_>) -> R<()> {
             starts: false,
             ends: true,
             origin: None,
+            rescanned: true,
         }));
     }
     Ok(())

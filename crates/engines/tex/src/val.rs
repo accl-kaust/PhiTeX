@@ -7,7 +7,7 @@
 use std::rc::Rc;
 use std::sync::OnceLock;
 
-use phitex_defuse::{Field, Value, ValueId, Values};
+use phitex_defuse::{Field, FxHashMap, Value, ValueId, Values};
 use phitex_typeset::glue::{Glue, Order};
 
 // Command codes (§207–§210), the table whole.
@@ -247,17 +247,284 @@ pub(crate) fn space_tok() -> Tok {
 }
 
 pub(crate) fn toks_value(v: &Values, toks: &[Tok]) -> ValueId {
-    v.list(toks.iter().map(|t| t.encode(v)).collect())
+    v.list(toks.iter().map(|t| tok_value(v, t)).collect())
+}
+
+/// The value of token `t`: in a run, through the worker's cache
+/// ([`tok_id`] at the run's epoch, [`EpochScope`]).
+fn tok_value(v: &Values, t: &Tok) -> ValueId {
+    match scope_epoch(v) {
+        Some(e) => tok_id(v, e, t),
+        None => t.encode(v),
+    }
 }
 
 pub(crate) fn toks_of(v: &Values, id: Option<ValueId>) -> Vec<Tok> {
     match id {
-        Some(id) => match &*v.get(id) {
-            Value::List(xs) => xs.iter().map(|&x| Tok::decode(v, x)).collect(),
-            _ => Vec::new(),
-        },
+        Some(id) => decoded(
+            v,
+            id,
+            |d| &mut d.toks,
+            || match &*v.get(id) {
+                Value::List(xs) => xs.iter().map(|&x| Tok::decode(v, x)).collect(),
+                _ => Vec::new(),
+            },
+        ),
         None => Vec::new(),
     }
+}
+
+/// Each thread's decoded values, by id: an id is a content hash, so a
+/// decoding never goes stale, and a value being decoded is live (a
+/// swept id is never asked for again). Saves the value reads of a token
+/// list or meaning read again by later runs on the same worker.
+#[derive(Default)]
+struct Decoded {
+    instance: u64,
+    toks: FxHashMap<ValueId, Vec<Tok>>,
+    means: FxHashMap<ValueId, Mean>,
+    glues: FxHashMap<ValueId, Glue>,
+    frames: FxHashMap<ValueId, Option<crate::run::Frame>>,
+    leaves: FxHashMap<ValueId, phitex_typeset::node::Node>,
+}
+
+/// Entries kept per map before it is emptied (a bound, not a policy).
+const DECODED_MAX: usize = 1 << 15;
+
+thread_local! {
+    static DECODED: std::cell::RefCell<Decoded> = std::cell::RefCell::default();
+    static ENCODED: std::cell::RefCell<Encoded> = std::cell::RefCell::default();
+}
+
+/// Each thread's encoded values at one values epoch of one table: an id
+/// made at an epoch is valid while it lasts
+/// ([`phitex_defuse::Ctx::values_epoch`]), so a token written again by
+/// a later run on the same worker is interned once an epoch, not once a
+/// write (the leftover of every run encodes its tokens).
+#[derive(Default)]
+struct Encoded {
+    instance: u64,
+    epoch: u64,
+    toks: FxHashMap<Tok, ValueId>,
+    ints: FxHashMap<i64, ValueId>,
+    strs: FxHashMap<Box<str>, ValueId>,
+    glues: FxHashMap<Glue, ValueId>,
+    means: FxHashMap<MeanKey, ValueId>,
+    nodes: FxHashMap<NodeKey, ValueId>,
+}
+
+/// A node of fixed shape, as the key of its value: its tag, up to three
+/// integers and a glue.
+pub(crate) type NodeKey = (i64, [i64; 3], Option<Glue>);
+
+/// A meaning other than a macro, as the key of its value.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum MeanKey {
+    Prim(&'static str),
+    Char(u8, u32),
+    Undefined,
+    Font(i64),
+    CharDef(i64),
+    MathCharDef(i64),
+    Reg(u8, i32),
+    NotExpanded,
+}
+
+thread_local! {
+    /// The values table and epoch of the run on this thread, if one is
+    /// running ([`EpochScope`]).
+    static SCOPE: std::cell::Cell<Option<(u64, u64)>> = const { std::cell::Cell::new(None) };
+}
+
+/// While alive, encodings on this thread go through the worker's cache
+/// at `epoch` (a run holds one: an id made at an epoch is valid while it
+/// lasts, and a run runs on one thread from start to finish).
+pub(crate) struct EpochScope {
+    prev: Option<(u64, u64)>,
+}
+
+impl EpochScope {
+    pub(crate) fn enter(v: &Values, epoch: u64) -> EpochScope {
+        EpochScope {
+            prev: SCOPE.with(|c| c.replace(Some((v.instance(), epoch)))),
+        }
+    }
+}
+
+impl Drop for EpochScope {
+    fn drop(&mut self) {
+        SCOPE.with(|c| c.set(self.prev));
+    }
+}
+
+/// The epoch of the run on this thread, if it uses `v`.
+fn scope_epoch(v: &Values) -> Option<u64> {
+    SCOPE
+        .with(std::cell::Cell::get)
+        .and_then(|(i, e)| (i == v.instance()).then_some(e))
+}
+
+/// `make()`, the value keyed `key` in `map`, through this thread's cache
+/// when a run is in scope; else made.
+fn encoded<K: std::hash::Hash + Eq>(
+    v: &Values,
+    map: fn(&mut Encoded) -> &mut FxHashMap<K, ValueId>,
+    key: K,
+    make: impl FnOnce() -> ValueId,
+) -> ValueId {
+    let Some(epoch) = scope_epoch(v) else {
+        return make();
+    };
+    let hit = ENCODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.instance != v.instance() || c.epoch != epoch {
+            *c = Encoded {
+                instance: v.instance(),
+                epoch,
+                ..Encoded::default()
+            };
+        }
+        map(&mut c).get(&key).copied()
+    });
+    if let Some(x) = hit {
+        return x;
+    }
+    let x = make();
+    ENCODED.with(|c| {
+        let mut c = c.borrow_mut();
+        let m = map(&mut c);
+        if m.len() >= DECODED_MAX {
+            m.clear();
+        }
+        m.insert(key, x);
+    });
+    x
+}
+
+/// The value of integer `i` (cached in a run).
+pub(crate) fn int_id(v: &Values, i: i64) -> ValueId {
+    encoded(v, |c| &mut c.ints, i, || v.int(i))
+}
+
+/// The value of string `s` (cached in a run).
+pub(crate) fn str_id(v: &Values, s: &str) -> ValueId {
+    if let Some(e) = scope_epoch(v) {
+        let hit = ENCODED.with(|c| {
+            let c = c.borrow();
+            (c.instance == v.instance() && c.epoch == e)
+                .then(|| c.strs.get(s).copied())
+                .flatten()
+        });
+        if let Some(x) = hit {
+            return x;
+        }
+    }
+    encoded(v, |c| &mut c.strs, Box::from(s), || v.str(s))
+}
+
+/// The value of the fixed-shape node `key` (`make()` builds it), cached
+/// in a run.
+pub(crate) fn node_id(v: &Values, key: NodeKey, make: impl FnOnce() -> ValueId) -> ValueId {
+    encoded(v, |c| &mut c.nodes, key, make)
+}
+
+/// The value of token `t` ([`Tok::encode`]) in a run at `epoch`, through
+/// this thread's cache.
+pub(crate) fn tok_id(v: &Values, epoch: u64, t: &Tok) -> ValueId {
+    let hit = ENCODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.instance != v.instance() || c.epoch != epoch {
+            *c = Encoded {
+                instance: v.instance(),
+                epoch,
+                ..Encoded::default()
+            };
+        }
+        c.toks.get(t).copied()
+    });
+    if let Some(x) = hit {
+        return x;
+    }
+    let x = t.encode(v);
+    ENCODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.toks.len() >= DECODED_MAX {
+            c.toks.clear();
+        }
+        c.toks.insert(t.clone(), x);
+    });
+    x
+}
+
+/// The input frame `id` (`make()` decodes it), through this thread's
+/// cache.
+pub(crate) fn frame_of(
+    v: &Values,
+    id: ValueId,
+    make: impl FnOnce() -> Option<crate::run::Frame>,
+) -> Option<crate::run::Frame> {
+    decoded(v, id, |d| &mut d.frames, make)
+}
+
+/// The node `id` decoded before on this thread, if it is a leaf (a node
+/// holding no list, mark or whatsit: its decoding is a function of its
+/// value alone).
+pub(crate) fn leaf_of(v: &Values, id: ValueId) -> Option<phitex_typeset::node::Node> {
+    DECODED.with(|c| {
+        let c = c.borrow();
+        (c.instance == v.instance())
+            .then(|| c.leaves.get(&id).cloned())
+            .flatten()
+    })
+}
+
+/// Keeps leaf node `n`, the decoding of `id` ([`leaf_of`]).
+pub(crate) fn keep_leaf(v: &Values, id: ValueId, n: &phitex_typeset::node::Node) {
+    DECODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.instance != v.instance() {
+            *c = Decoded {
+                instance: v.instance(),
+                ..Decoded::default()
+            };
+        }
+        if c.leaves.len() >= DECODED_MAX {
+            c.leaves.clear();
+        }
+        c.leaves.insert(id, n.clone());
+    });
+}
+
+/// `make()`, the decoding of `id`, through this thread's cache.
+fn decoded<T: Clone>(
+    v: &Values,
+    id: ValueId,
+    map: fn(&mut Decoded) -> &mut FxHashMap<ValueId, T>,
+    make: impl FnOnce() -> T,
+) -> T {
+    let hit = DECODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.instance != v.instance() {
+            *c = Decoded {
+                instance: v.instance(),
+                ..Decoded::default()
+            };
+        }
+        map(&mut c).get(&id).cloned()
+    });
+    if let Some(x) = hit {
+        return x;
+    }
+    let x = make();
+    DECODED.with(|c| {
+        let mut c = c.borrow_mut();
+        let m = map(&mut c);
+        if m.len() >= DECODED_MAX {
+            m.clear();
+        }
+        m.insert(id, x.clone());
+    });
+    x
 }
 
 pub(crate) fn list_of(v: &Values, id: ValueId) -> Vec<ValueId> {
@@ -382,8 +649,23 @@ impl Mean {
     }
 
     pub(crate) fn encode(&self, v: &Values) -> ValueId {
-        let s = |x: &str| v.str(x);
-        let i = |x: i64| v.int(x);
+        let key = match self {
+            Mean::Macro(_) => return self.encode_new(v),
+            Mean::Prim(n, _, _) => MeanKey::Prim(n),
+            Mean::Char(c, h) => MeanKey::Char(*c, *h),
+            Mean::Undefined => MeanKey::Undefined,
+            Mean::Font(f) => MeanKey::Font(*f),
+            Mean::CharDef(n) => MeanKey::CharDef(*n),
+            Mean::MathCharDef(n) => MeanKey::MathCharDef(*n),
+            Mean::Reg(c, h) => MeanKey::Reg(*c, *h),
+            Mean::NotExpanded => MeanKey::NotExpanded,
+        };
+        encoded(v, |c| &mut c.means, key, || self.encode_new(v))
+    }
+
+    fn encode_new(&self, v: &Values) -> ValueId {
+        let s = |x: &str| str_id(v, x);
+        let i = |x: i64| int_id(v, x);
         match self {
             Mean::Prim(n, _, _) => v.list(vec![s("prim"), s(n)]),
             Mean::Macro(m) => v.list(vec![
@@ -407,6 +689,10 @@ impl Mean {
 
     pub(crate) fn decode(v: &Values, id: Option<ValueId>) -> Mean {
         let Some(id) = id else { return Mean::Undefined };
+        decoded(v, id, |d| &mut d.means, || Mean::decode_new(v, id))
+    }
+
+    fn decode_new(v: &Values, id: ValueId) -> Mean {
         let xs = match &*v.get(id) {
             Value::List(xs) => xs.clone(),
             _ => return Mean::Undefined,
@@ -488,13 +774,20 @@ pub(crate) fn quantity_field(c: u8, chr: i32) -> String {
 
 /// A glue value: `[width, stretch, stretch order, shrink, shrink order]`.
 pub(crate) fn glue_value(v: &Values, g: &Glue) -> ValueId {
-    v.list(vec![
-        v.int(i64::from(g.width)),
-        v.int(i64::from(g.stretch)),
-        v.int(g.stretch_order as i64),
-        v.int(i64::from(g.shrink)),
-        v.int(g.shrink_order as i64),
-    ])
+    encoded(
+        v,
+        |c| &mut c.glues,
+        *g,
+        || {
+            v.list(vec![
+                int_id(v, i64::from(g.width)),
+                int_id(v, i64::from(g.stretch)),
+                int_id(v, g.stretch_order as i64),
+                int_id(v, i64::from(g.shrink)),
+                int_id(v, g.shrink_order as i64),
+            ])
+        },
+    )
 }
 
 pub(crate) fn order(i: i64) -> Order {
@@ -508,6 +801,10 @@ pub(crate) fn order(i: i64) -> Order {
 
 pub(crate) fn glue_of(v: &Values, id: Option<ValueId>) -> Glue {
     let Some(id) = id else { return Glue::ZERO };
+    decoded(v, id, |d| &mut d.glues, || glue_new(v, id))
+}
+
+fn glue_new(v: &Values, id: ValueId) -> Glue {
     match &*v.get(id) {
         Value::List(xs) if xs.len() == 5 => {
             let n = |k: usize| i32::try_from(int_of(v, xs[k])).unwrap_or(0);

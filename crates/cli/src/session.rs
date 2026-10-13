@@ -762,8 +762,11 @@ impl Session {
                         && plain_name(&d.file) != plain_name(&self.job.file))
         }) || b.output().1.contains("deadline");
         let key = b.prelude_key();
-        if had != Some(key) && !failed {
-            let _ = c.put_format(&self.format_name(text), &key, &b.export_prelude());
+        if had != Some(key)
+            && !failed
+            && let Some(bytes) = b.export_prelude()
+        {
+            let _ = c.put_format(&self.format_name(text), &key, &bytes);
         }
     }
 

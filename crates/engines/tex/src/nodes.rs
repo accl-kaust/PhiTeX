@@ -12,7 +12,7 @@ use phitex_typeset::node::{
     Rule, Unset,
 };
 
-use crate::val::{glue_of, glue_value, int_of, list_of};
+use crate::val::{glue_of, glue_value, int_of, list_of, node_id};
 
 pub(crate) const T_CHAR: i64 = 0;
 pub(crate) const T_BOX: i64 = 1;
@@ -62,7 +62,7 @@ pub(crate) struct Side {
 }
 
 fn i(v: &Values, x: i64) -> ValueId {
-    v.int(x)
+    crate::val::int_id(v, x)
 }
 
 fn n32(v: &Values, x: ValueId) -> i32 {
@@ -144,13 +144,49 @@ pub(crate) fn encode_box(v: &Values, b: &BoxNode, side: &Side) -> ValueId {
     ])
 }
 
+/// A node of fixed shape (a character, glue without leaders, a kern, a
+/// penalty), through the worker's cache in a run ([`node_id`]).
+fn encode_fixed(v: &Values, n: &Node) -> Option<ValueId> {
+    Some(match n {
+        Node::Char { font, ch } => {
+            let (f, c) = (i64::from(*font), i64::from(*ch));
+            node_id(v, (T_CHAR, [f, c, 0], None), || {
+                v.list(vec![i(v, T_CHAR), i(v, f), i(v, c)])
+            })
+        }
+        Node::Glue(g) if g.leader.is_none() => {
+            let k = glue_kind_code(g.kind);
+            node_id(v, (T_GLUE, [k, 0, 0], Some(g.spec)), || {
+                v.list(vec![
+                    i(v, T_GLUE),
+                    glue_value(v, &g.spec),
+                    i(v, k),
+                    ValueId::UNIT,
+                ])
+            })
+        }
+        Node::Kern(w, k) => {
+            let (w, k) = (i64::from(*w), kern_code(*k));
+            node_id(v, (T_KERN, [w, k, 0], None), || {
+                v.list(vec![i(v, T_KERN), i(v, w), i(v, k)])
+            })
+        }
+        Node::Penalty(p) => {
+            let p = i64::from(*p);
+            node_id(v, (T_PENALTY, [p, 0, 0], None), || {
+                v.list(vec![i(v, T_PENALTY), i(v, p)])
+            })
+        }
+        _ => return None,
+    })
+}
+
 pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
+    if let Some(x) = encode_fixed(v, n) {
+        return x;
+    }
     match n {
-        Node::Char { font, ch } => v.list(vec![
-            i(v, T_CHAR),
-            i(v, i64::from(*font)),
-            i(v, i64::from(*ch)),
-        ]),
+        Node::Char { .. } | Node::Kern(..) | Node::Penalty(_) => unreachable!("fixed shape"),
         Node::Box(b) => encode_box(v, b, side),
         Node::Rule(r) => v.list(vec![
             i(v, T_RULE),
@@ -221,8 +257,6 @@ pub(crate) fn encode(v: &Values, n: &Node, side: &Side) -> ValueId {
                 .as_ref()
                 .map_or(ValueId::UNIT, |l| encode(v, l, side)),
         ]),
-        Node::Kern(w, k) => v.list(vec![i(v, T_KERN), i(v, i64::from(*w)), i(v, kern_code(*k))]),
-        Node::Penalty(p) => v.list(vec![i(v, T_PENALTY), i(v, i64::from(*p))]),
         Node::Unset(u) => v.list(vec![
             i(v, T_UNSET),
             i(v, i64::from(u.span_count)),
@@ -270,8 +304,29 @@ pub(crate) fn decode_box(v: &Values, xs: &[ValueId], side: &mut Side) -> BoxNode
     }
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
+    if let Some(n) = crate::val::leaf_of(v, x) {
+        return Some(n);
+    }
+    let n = decode_new(v, x, side)?;
+    let leaf = match &n {
+        Node::Char { .. }
+        | Node::Rule(_)
+        | Node::Kern(..)
+        | Node::Penalty(_)
+        | Node::Math(..)
+        | Node::Language { .. } => true,
+        Node::Glue(g) => g.leader.is_none(),
+        _ => false,
+    };
+    if leaf {
+        crate::val::keep_leaf(v, x, &n);
+    }
+    Some(n)
+}
+
+#[allow(clippy::too_many_lines)]
+fn decode_new(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
     let xs = match &*v.get(x) {
         Value::List(xs) => xs.clone(),
         _ => return None,

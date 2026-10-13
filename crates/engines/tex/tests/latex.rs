@@ -391,7 +391,9 @@ fn hello(pdf: bool) -> Build {
             .all(|d| !d.message.starts_with("evaluation"))
     {
         let _ = std::fs::create_dir_all(cache.parent().expect("dir"));
-        let _ = std::fs::write(&cache, b.export_prelude());
+        if let Some(bytes) = b.export_prelude() {
+            let _ = std::fs::write(&cache, bytes);
+        }
     }
     let (out, log) = b.output();
     eprintln!("{} bytes, {} pages\n{log}", out.len(), b.pages().len());
