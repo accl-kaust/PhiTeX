@@ -562,6 +562,26 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
         let _ = std::fs::write(format!("{d}/{name}.pdf"), b.output().0);
         let _ = std::fs::write(format!("{d}/{name}.log"), b.output().1);
     }
+    let chain = b.critical_chain();
+    let mut by: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (_, kind, field) in &chain {
+        let f = field.split(':').next().unwrap_or("");
+        *by.entry(format!("{kind} {f}:")).or_default() += 1;
+    }
+    let everypar = chain.iter().filter(|c| c.2 == "param:everypar").count();
+    let s = &b.stats;
+    eprintln!(
+        "chains {name}: critical path {:?}, {} nodes run, {} regions, {} rounds, {} loop rounds, {} undeclared, {} violations, {} mispredictions, everypar links {everypar}, chain {} links {by:?}",
+        s.critical_path,
+        s.nodes_run,
+        s.nodes_text_frames,
+        s.rounds,
+        s.loop_rounds,
+        s.undeclared_definitions,
+        s.regime_violations,
+        s.mispredictions,
+        chain.len()
+    );
     for d in b.diagnostics() {
         eprintln!("{d:?}");
     }
