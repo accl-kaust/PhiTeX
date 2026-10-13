@@ -600,16 +600,17 @@ impl<'c, 'a> Run<'c, 'a> {
         // the definitions since the innermost group opened are the
         // group's (`nest.rs` pop_level truncates to its opening): one
         // per field there; outside every group, one per field at all. A
-        // local after a global of the same group is kept apart: the
-        // group's close drops it and the global stays (§283)
+        // local after a global is kept apart, in a group (its close drops
+        // the local, the global stays, §283) and at level 0 (the engine's
+        // scope sees the global, then the local)
         let floor = self.nest.iter().rev().find(|l| l.group != 0).map_or(0, |l| l.defs_len);
         let ix = self.def_ix.entry(f).or_default();
-        if let Some(&i) = ix.last() {
-            if i >= floor && !(self.defs[i].2 == Locality::Global && loc == Locality::Local && floor > 0)
-            {
-                self.defs[i] = (f, val, loc);
-                return;
-            }
+        if let Some(&i) = ix.last()
+            && i >= floor
+            && !(self.defs[i].2 == Locality::Global && loc == Locality::Local)
+        {
+            self.defs[i] = (f, val, loc);
+            return;
         }
         ix.push(self.defs.len());
         self.defs.push((f, val, loc));
