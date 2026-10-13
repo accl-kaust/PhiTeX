@@ -839,7 +839,8 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
     for (k, a) in p.atoms.iter().enumerate() {
         let ch = matches!(a.kind, AtomKind::Char(_) | AtomKind::Verb);
         let inside_if = ifd[k] > 0 && (a.kind != AtomKind::Cs || !CONDITIONALS.contains(&a.name(text)));
-        if !(ch && prev_char) && !inside_if && !inside[k] {
+        // (an operand an earlier command claims never starts a slice)
+        if !(ch && prev_char) && !inside_if && !inside[k] && !claimed[k] {
             starts.push(a.start);
         }
         prev_char = ch;
@@ -1069,9 +1070,18 @@ impl Analysis<'_> {
             .collect();
         let mut claimed = vec![false; p.atoms.len()];
         for it in &p.items {
+            // (a scope opener, `\\hbox to 3pt{`, claims its operands up
+            // to its brace; the list inside runs, §1083, §1086)
+            let end = match (&it.hints.scope, &it.hints.claim) {
+                (pass::ScopeHint::Open(_), pass::Claim::Known(b)) => {
+                    let to = p.atoms.get(it.atom).map_or(0, |a| a.end) + b;
+                    p.atoms.partition_point(|a| a.start < to).min(it.end)
+                }
+                _ => it.end,
+            };
             for c in claimed
                 .iter_mut()
-                .take(it.end.min(p.atoms.len()))
+                .take(end.min(p.atoms.len()))
                 .skip(it.atom + 1)
             {
                 *c = true;
