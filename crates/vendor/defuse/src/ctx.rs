@@ -829,8 +829,24 @@ impl<'a> Ctx<'a> {
         } else {
             Vec::new()
         };
+        // Work the apply phase would do one node at a time, done here on
+        // the run's thread: the children's ids, their statics (cached by
+        // text), the sites of the node's previous uses for its snapshot.
+        let (child_ids, old_sites) = if matches!(end, End::Output(_)) {
+            for &(op, args) in &self.children {
+                drop(self.eng.statics(op, args));
+            }
+            (
+                self.eng.child_ids_pub(self.slot, &self.children),
+                Some(self.eng.site_list_pub(self.slot)),
+            )
+        } else {
+            (Vec::new(), None)
+        };
         RunResult {
             child_heights,
+            child_ids,
+            old_sites,
             node: n.id,
             slot: self.slot,
             epoch: n.epoch,
