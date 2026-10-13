@@ -798,3 +798,18 @@ fn latex_one_paragraph() {
     let cold = common::build(pdf_opts("red02", &dir), Some(&prelude(true)), &new);
     edit_check("red02", &b, &cold, 3);
 }
+
+/// A heading and three paragraphs (`pdfdocs/secpars.tex`): the first
+/// consumes `\@afterheading`'s `\everypar` and resets it, the second and
+/// third are indented as pdfTeX indents them (the reset is a declared
+/// definition, never dropped); an edit in the first equals a cold build.
+#[test]
+fn latex_heading_paragraphs() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join("secpars.tex"));
+    let (mut b, _) = cold_nodes("secpars", &dir, &src);
+    let new = quack(&src, "The first paragraph after the heading: the ");
+    b.edit(&new);
+    let cold = common::build(pdf_opts("secpars", &dir), Some(&prelude(true)), &new);
+    edit_check("secpars", &b, &cold, 3);
+}

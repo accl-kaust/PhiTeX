@@ -885,6 +885,10 @@ impl<'c, 'a> Run<'c, 'a> {
             if l == Locality::Local
                 && crate::hints::regime_guess_empty(&str_of(v, self.loc_field(loc).0))
                 && crate::val::toks_rc(v, Some(x)).is_empty()
+                && self
+                    .st
+                    .loaded(loc)
+                    .is_none_or(|e| e.is_none_or(|e| crate::val::toks_rc(v, Some(e)).is_empty()))
             {
                 out.push(loc);
             }

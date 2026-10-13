@@ -675,6 +675,16 @@ impl State {
         out
     }
 
+    /// The engine's value of `loc` as the run read it: `None` when the
+    /// run did not read it, `Some(None)` when it was unset.
+    pub(crate) fn loaded(&self, loc: Loc) -> Option<Option<ValueId>> {
+        let s = self.slot_ref(loc)?;
+        if s.meta == 0 {
+            return None;
+        }
+        self.metas[s.meta as usize - 1].eng
+    }
+
     /// Whether any of `locs` has a definition at the base level.
     pub(crate) fn defines_any(&self, locs: &[Loc]) -> bool {
         locs.iter().any(|&l| {
