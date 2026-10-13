@@ -1239,3 +1239,80 @@ fn a_static_opener_sets_its_kind_when_it_runs() {
     assert_eq!(eng.output(k), Some(list));
     assert!(rep.nodes_run <= 2, "{rep:?}");
 }
+
+/// `["sum"]` reads the environment fields a, b, c in turn and outputs
+/// their sum; it parks its progress before each read and resumes from it,
+/// counting the times it started from the top.
+struct Sum;
+
+static SUM_STARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl Operation for Sum {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let names = ["a", "b", "c"];
+        let (mut i, mut acc) = if let Some(t) = cx.parked().and_then(|t| t.downcast::<(usize, i64)>().ok()) {
+            *t
+        } else {
+            SUM_STARTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            (0, 0)
+        };
+        while i < names.len() {
+            cx.park(Box::new((i, acc)));
+            let x = cx.use_env(v.field(names[i]))?;
+            acc += x.and_then(|x| v.as_int(x)).unwrap_or(0);
+            i += 1;
+        }
+        Ok(v.int(acc))
+    }
+}
+
+/// A run that stops at a read resumes there on its next attempt when
+/// every read it made still holds; it starts over when one changed; the
+/// report counts both.
+#[test]
+fn a_stopped_run_resumes_at_its_read_while_its_earlier_reads_hold() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Sum));
+    let u = eng.new_unit();
+    let sum = eng.values().str("sum");
+    let n = eng.push(u, op, vec![sum]);
+    let (a, b, c) = (
+        eng.values().field("a"),
+        eng.values().field("b"),
+        eng.values().field("c"),
+    );
+    let (one, two, three, ten) = (
+        eng.values().int(1),
+        eng.values().int(2),
+        eng.values().int(3),
+        eng.values().int(10),
+    );
+    eng.set_environment([(a, one)]);
+    let r = eng.evaluate_sequential().expect("evaluate");
+    assert_eq!(r.env_waits, vec![(n, b)]);
+    assert_eq!(SUM_STARTS.load(std::sync::atomic::Ordering::Relaxed), 1);
+    // b arrives: the run resumes after a (one start so far).
+    eng.set_environment([(a, one), (b, two)]);
+    let r = eng.evaluate_sequential().expect("evaluate");
+    assert_eq!(r.env_waits, vec![(n, c)]);
+    assert_eq!((r.resumed, r.restarted), (1, 0), "{r:?}");
+    assert_eq!(SUM_STARTS.load(std::sync::atomic::Ordering::Relaxed), 1);
+    // c arrives but a changed: the kept state is dropped, the run starts
+    // over and sees the new a.
+    eng.set_environment([(a, ten), (b, two), (c, three)]);
+    let r = eng.evaluate_sequential().expect("evaluate");
+    assert_eq!(r.env_waits, vec![]);
+    assert_eq!((r.resumed, r.restarted), (0, 1), "{r:?}");
+    assert_eq!(SUM_STARTS.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(eng.output(n), Some(eng.values().int(15)));
+    // A completed run keeps nothing: the next re-run starts from the top.
+    eng.set_environment([(a, ten), (b, three), (c, three)]);
+    let r = eng.evaluate_sequential().expect("evaluate");
+    assert_eq!((r.resumed, r.restarted), (0, 0), "{r:?}");
+    assert_eq!(SUM_STARTS.load(std::sync::atomic::Ordering::Relaxed), 3);
+    assert_eq!(eng.output(n), Some(eng.values().int(16)));
+}

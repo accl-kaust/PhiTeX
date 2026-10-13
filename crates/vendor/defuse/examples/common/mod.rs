@@ -1170,6 +1170,12 @@ fn claimed_values(cx: &mut Ctx<'_>, ops: Ops, lines: &[(OpId, Vec<ValueId>)]) ->
     Ok(out)
 }
 
+/// When set, every statement parks a token at its start, so a stop keeps
+/// the run's state and the next attempt resumes it (re-executing from the
+/// top over the kept reads): the fuzz and the gate exercise the engine's
+/// read revalidation.
+pub static REPLAY_STOPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl Operation for StmtOp {
     fn name(&self) -> &'static str {
         "stmt"
@@ -1393,6 +1399,14 @@ impl Operation for StmtOp {
 
     #[allow(clippy::too_many_lines)]
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        if REPLAY_STOPS.load(std::sync::atomic::Ordering::Relaxed) {
+            // Exercise the engine's resume: the statement re-executes from
+            // the top on a kept state (its reads hit the cache).
+            if cx.parked().is_some() {
+                cx.restart();
+            }
+            cx.park(Box::new(()));
+        }
         let ops = ops(&self.0);
         let v = cx.values();
         let (t, a) = tag(v, cx.args()[0]);
