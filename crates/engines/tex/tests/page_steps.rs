@@ -72,6 +72,17 @@ fn generated_documents() {
             continue;
         };
         let opts = || common::options(&format!("./{name}.tex"), name, "", &dir);
+        for t in [1, 4, 8] {
+            let o = phitex_tex::Options {
+                threads: Some(t),
+                ..opts()
+            };
+            let b = common::build(o, Some(&common::plain()), &src);
+            eprintln!(
+                "{name} at {t} threads: wall {:?}, loop rounds {}, critical path {:?}, mispredictions {}",
+                b.stats.wall, b.stats.loop_rounds, b.stats.critical_path, b.stats.mispredictions
+            );
+        }
         let mut b = common::build(opts(), Some(&common::plain()), &src);
         let s = &b.stats;
         eprintln!(
