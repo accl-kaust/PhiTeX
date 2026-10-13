@@ -2038,6 +2038,9 @@ impl Analysis<'_> {
     /// The state the commands `calls` (of a body the text defines) may
     /// set.
     fn calls_state_split(&self, calls: &[String], outer: &[String], st: &mut Option<Vec<String>>) {
+        if std::env::var_os("PHITEX_HEAD_TRACE").is_some() && calls.iter().any(|c| c == "next") {
+            eprintln!("NEXTCALL {calls:?}");
+        }
         let (out, inner): (Vec<String>, Vec<String>) =
             calls.iter().cloned().partition(|c| outer.contains(c));
         self.calls_state(&out, st);
