@@ -1572,9 +1572,12 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
                     no_scope: true,
                     ..Bound::default()
                 };
+                // (a run that reaches a cell's end in an alignment, §789)
                 add_heads(
                     &mut b.state,
-                    Some(&["par:", "pg:", "lopen:", "box:", "lvlfix"]),
+                    Some(&[
+                        "par:", "pg:", "lopen:", "box:", "lvlfix", "align", "badness",
+                    ]),
                 );
                 return Hint {
                     bound: Some(b),
