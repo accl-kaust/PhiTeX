@@ -1118,3 +1118,50 @@ fn a_claim_made_by_the_run_itself_does_not_rerun_the_claimer() {
     assert_eq!(TAKER_RUNS.load(std::sync::atomic::Ordering::Relaxed), 2);
     assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
 }
+
+/// `["d", k]`: outputs `k` and emits a diagnostic; `["r", k]` reads the
+/// output of the `k`-th node of the unit (by its id passed as an arg).
+struct Diag;
+
+impl Operation for Diag {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let a = cx.args();
+        let v = cx.values();
+        let k = a.get(1).copied().unwrap_or(ValueId::UNIT);
+        let msg = v.str("careful");
+        cx.diagnostic(msg);
+        Ok(k)
+    }
+}
+
+/// A run's diagnostics are readable once the node is done, under every
+/// policy, and a node that is not done has none.
+#[test]
+fn a_runs_diagnostics_are_kept_with_its_result() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Diag));
+    let u = eng.new_unit();
+    let d = eng.values().str("d");
+    let ints: Vec<ValueId> = (0..40).map(|i| eng.values().int(i)).collect();
+    let nodes: Vec<NodeId> = ints.iter().map(|&k| eng.push(u, op, vec![d, k])).collect();
+    assert_eq!(eng.diagnostics(nodes[0]), &[]);
+    eng.evaluate(
+        &mut defuse::Greedy::speculative(defuse::Speculation::All, 64),
+        &mut defuse::Sequential,
+    )
+    .expect("evaluate");
+    let careful = eng.values().str("careful");
+    for &n in &nodes {
+        assert_eq!(eng.diagnostics(n), &[careful], "{n:?}");
+    }
+    let hundred = eng.values().int(100);
+    eng.replace(nodes[3], op, vec![d, hundred]);
+    eng.evaluate_sequential().expect("evaluate");
+    assert_eq!(eng.diagnostics(nodes[3]), &[careful]);
+    assert_eq!(eng.output(nodes[3]), Some(hundred));
+    eng.remove(nodes[3]);
+    assert_eq!(eng.diagnostics(nodes[3]), &[]);
+}

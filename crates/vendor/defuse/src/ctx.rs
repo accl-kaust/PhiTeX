@@ -53,6 +53,7 @@ pub struct Ctx<'a> {
     assumptions: Vec<(Slot, AssumeKind, ValueId)>,
     sig: u64,
     error: Option<EvalError>,
+    diagnostics: Vec<ValueId>,
     /// Text memo hits, misses; application memo hits, misses.
     memo: [std::cell::Cell<u32>; 4],
 }
@@ -88,6 +89,7 @@ impl<'a> Ctx<'a> {
             memo: Default::default(),
             sig: 0,
             error: None,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -119,6 +121,23 @@ impl<'a> Ctx<'a> {
     #[must_use]
     pub fn is_speculative(&self) -> bool {
         self.spec
+    }
+
+    /// The values' epoch ([`Engine::values_epoch`]): every [`ValueId`] this
+    /// run makes or reads stays valid while it is unchanged, so a cache of
+    /// interned values keyed by `(epoch, content)` needs no pinning.
+    #[must_use]
+    pub fn values_epoch(&self) -> u64 {
+        self.eng.values_epoch()
+    }
+
+    /// Emits a diagnostic (a value: a message, a record) as part of this
+    /// run's result: readable with [`Engine::diagnostics`] once the node
+    /// is done. A speculative run's diagnostics are held until the run is
+    /// confirmed and dropped with it if it is refuted; a run that stops
+    /// keeps none.
+    pub fn diagnostic(&mut self, d: ValueId) {
+        self.diagnostics.push(d);
     }
 
     /// Whether `f` is a loop-back field.
@@ -828,6 +847,7 @@ impl<'a> Ctx<'a> {
             assumptions: self.assumptions,
             sig: self.sig,
             error: self.error,
+            diagnostics: self.diagnostics,
             memo: self.memo.map(std::cell::Cell::into_inner),
         }
     }
