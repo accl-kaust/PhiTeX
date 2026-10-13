@@ -201,10 +201,10 @@ impl CsId {
             static LOCAL: std::cell::RefCell<FxHashMap<Box<str>, CsId>> =
                 std::cell::RefCell::default();
         }
+        static TABLE: OnceLock<std::sync::Mutex<FxHashMap<&'static str, CsId>>> = OnceLock::new();
         if let Some(c) = LOCAL.with(|l| l.borrow().get(name).copied()) {
             return c;
         }
-        static TABLE: OnceLock<std::sync::Mutex<FxHashMap<&'static str, CsId>>> = OnceLock::new();
         let c = {
             let mut t = TABLE
                 .get_or_init(Default::default)
