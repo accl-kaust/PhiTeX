@@ -677,6 +677,7 @@ impl State {
 
     /// The engine's value of `loc` as the run read it: `None` when the
     /// run did not read it, `Some(None)` when it was unset.
+    #[allow(clippy::option_option)]
     pub(crate) fn loaded(&self, loc: Loc) -> Option<Option<ValueId>> {
         let s = self.slot_ref(loc)?;
         if s.meta == 0 {
