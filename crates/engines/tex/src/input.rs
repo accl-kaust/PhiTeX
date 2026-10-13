@@ -408,6 +408,23 @@ impl Input {
         }
     }
 
+    /// [`Input::next_of_top`] for a token that is not a frozen control
+    /// sequence: a frozen one is left in place (the slow path handles it).
+    #[inline]
+    pub(crate) fn next_plain_of_top(&mut self) -> Option<Tok> {
+        let l = self.levels.last_mut()?;
+        if l.kind == kind::TOKS && l.a < l.b {
+            let t = self.arena.at(l.a);
+            if t.is_frozen_cs() {
+                return None;
+            }
+            l.a += 1;
+            Some(t)
+        } else {
+            None
+        }
+    }
+
     /// `back_input` (§325): the token goes on top as a backed-up list,
     /// or, when it is the token just read from the list on top, that
     /// list steps back (no allocation).

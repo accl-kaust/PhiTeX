@@ -39,9 +39,7 @@ impl Run<'_, '_> {
     pub(crate) fn fetch(&mut self) -> bool {
         // (the common case: a token of the list on top that is not an
         // internal marker, and no alignment entry to watch for)
-        if let Some(tok) = self.input.next_of_top()
-            && !tok.is_frozen_cs()
-        {
+        if let Some(tok) = self.input.next_plain_of_top() {
             self.set_cur_flag(tok);
             if self.aopen != 0
                 && ALIGN_CMDS.checked_shr(u32::from(self.cur.cmd)).unwrap_or(0) & 1 != 0
