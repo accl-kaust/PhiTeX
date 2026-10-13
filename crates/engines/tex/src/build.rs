@@ -794,7 +794,10 @@ impl Run<'_, '_> {
 
     /// The box in register `n` (`None`: void).
     pub(crate) fn box_reg(&mut self, n: i32) -> R<Option<ValueId>> {
-        let x = { let f = self.box_field(i64::from(n)); self.get_f(f)? };
+        let x = {
+            let f = self.box_field(i64::from(n));
+            self.get_f(f)?
+        };
         let v = self.v;
         Ok(x.and_then(|x| match &*v.get(x) {
             Value::List(xs) => xs.get(1).copied().filter(|&b| b != ValueId::UNIT),

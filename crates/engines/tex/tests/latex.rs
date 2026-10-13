@@ -438,14 +438,13 @@ fn pdflatex_hello() {
 /// document environment's body is sliced into its paragraphs, one node
 /// each (`\begin{document}` leaves its group to the engine as the scope
 /// they run in); the PDF equals pdfTeX's cold and after a one-word edit,
-/// which reruns a few document nodes.
+/// which reruns a few document nodes. Run with `PHITEX_DOC_SCOPE=1`.
 #[test]
 #[ignore = "heavy: the LaTeX format"]
 fn latex_paragraph_nodes() {
     let dir = common::fixtures().join("latex/pdfdocs");
     let src = common::read(&dir.join("paras30.tex"));
-    let want =
-        std::fs::read(common::fixtures().join("latex/pdf/paras30.pdf")).expect("the oracle");
+    let want = std::fs::read(common::fixtures().join("latex/pdf/paras30.pdf")).expect("the oracle");
     let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/cache/pdflatex.fmt");
     let opts = || Options {
         prelude_bytes: std::fs::read(&cache).ok(),
@@ -461,7 +460,11 @@ fn latex_paragraph_nodes() {
         }
     }
     let regions = b.stats.nodes_text_frames;
-    eprintln!("cold: {regions} document nodes, {} pages; {}", b.pages().len(), report("paras30", &b));
+    eprintln!(
+        "cold: {regions} document nodes, {} pages; {}",
+        b.pages().len(),
+        report("paras30", &b)
+    );
     if let Ok(d) = std::env::var("PHITEX_GATE_OUT") {
         let _ = std::fs::write(format!("{d}/paras30.pdf"), b.output().0);
         let _ = std::fs::write(format!("{d}/paras30.log"), b.output().1);
@@ -473,7 +476,10 @@ fn latex_paragraph_nodes() {
         panic!("paras30.pdf cold: {d}");
     }
     assert!(regions >= 30, "{regions} document nodes for 30 paragraphs");
-    let at = src.find("Paragraph 17 of the text: the quick").expect("p17") + 35;
+    let at = src
+        .find("Paragraph 17 of the text: the quick")
+        .expect("p17")
+        + 35;
     let new = format!("{}quack{}", &src[..at], &src[at + 5..]);
     let t0 = std::time::Instant::now();
     b.edit(&new);
