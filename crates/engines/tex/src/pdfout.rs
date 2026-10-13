@@ -41,7 +41,9 @@ pub(crate) const XPAGES: &str = "pdf:xpages";
 /// ([`finish`]); each step has already written its page once, apart, so
 /// that the finish finds its content stream compressed.
 pub(crate) struct PagePiece {
-    bx: BoxNode,
+    /// The page's box as `\shipout` got it (decoded again only for a
+    /// page the finish cannot place).
+    boxv: ValueId,
     params: Vec<ValueId>,
     margins: [i32; 3],
     whats: BTreeMap<u32, Whatsit>,
@@ -385,11 +387,26 @@ pub(crate) fn vf_for(r: &mut Run<'_, '_>, b: &BoxNode) -> R<()> {
 
 /// A file's bytes, `None` if absent.
 pub(crate) fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Arc<[u8]>>> {
+    type Memo = Mutex<FxHashMap<u64, Arc<[u8]>>>;
+    static M: OnceLock<Memo> = OnceLock::new();
     let v = r.v;
     Ok(r.file(name)?.and_then(|x| {
-        list_of(v, x)
-            .get(1)
-            .map(|&t| Arc::from(bytes_of(&str_of(v, t))))
+        let &t = list_of(v, x).get(1)?;
+        // (a pure function's memo by the text's value: every page step
+        // asks for its fonts' files)
+        let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
+        if let Some(b) = m
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&t.raw())
+        {
+            return Some(b.clone());
+        }
+        let b: Arc<[u8]> = Arc::from(bytes_of(&str_of(v, t)));
+        m.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(t.raw(), b.clone());
+        Some(b)
     }))
 }
 
@@ -1018,16 +1035,7 @@ pub(crate) fn ship(
         r.param("pdfthreadmargin")?,
     ];
     if in_page_step(r) && !folding(r)? {
-        return ship_apart(
-            r,
-            page.raw(),
-            &p,
-            bx,
-            &side.whats,
-            &resolved,
-            fonts,
-            margins,
-        );
+        return ship_apart(r, page, &p, bx, &side.whats, &resolved, fonts, margins);
     }
     let (err, shown) = step_forms(r, page, &fonts, |st, forms, fonts| {
         page_params(v, st.params_mut(), &p);
@@ -1100,7 +1108,7 @@ fn set_page_params(v: &Values, st: &mut PdfState, params: &[ValueId], margins: [
 #[allow(clippy::too_many_arguments)]
 fn ship_apart(
     r: &mut Run<'_, '_>,
-    page_id: u64,
+    page_v: ValueId,
     p: &[ValueId],
     bx: &BoxNode,
     side_whats: &[ValueId],
@@ -1131,7 +1139,7 @@ fn ship_apart(
         }
     }
     let mut pc = PagePiece {
-        bx: bx.clone(),
+        boxv: list_of(v, page_v).first().copied().unwrap_or(ValueId::UNIT),
         params: p.to_vec(),
         margins,
         whats,
@@ -1147,7 +1155,7 @@ fn ship_apart(
         .map_or(0, ValueId::raw);
     let pdfmap = r.file("pdftex.map")?.map_or(0, ValueId::raw);
     let mut words = vec![
-        page_id,
+        page_v.raw(),
         k0,
         maps,
         pdfmap,
@@ -1174,7 +1182,7 @@ fn ship_apart(
     pc.base = st.fonts_used();
     let (res, rec) = {
         let mut wh = |h: u32, _leaders: bool| page_whatsit(&forms, &pc.whats, h);
-        st.ship_recorded(&pc.bx, &pc.fonts, &mut wh)
+        st.ship_recorded(bx, &pc.fonts, &mut wh)
     };
     pc.rec = rec;
     let err = res.err();
@@ -1206,6 +1214,7 @@ fn ship_apart(
 /// on it in order (`PdfState::replay_page`: numbered, the content bytes
 /// the step made copied, no walk, no compression), or shipped again
 /// where a page cannot be placed, finished.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<ValueId, Stop> {
     let v = cx.values();
     let k = fin
@@ -1268,7 +1277,12 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
             shipped += 1;
             // (the step logged the writer's error when it wrote the page)
             let mut wh = |h: u32, _leaders: bool| page_whatsit(&a.forms, &pc.whats, h);
-            let _ = st.ship_out_with(&pc.bx, &pc.fonts, &mut wh);
+            let mut side = crate::nodes::Side::default();
+            if let Some(phitex_typeset::node::Node::Box(bx)) =
+                crate::nodes::decode(v, pc.boxv, &mut side)
+            {
+                let _ = st.ship_out_with(&bx, &pc.fonts, &mut wh);
+            }
         }
     }
     st.flush(&mut bytes);
