@@ -734,14 +734,7 @@ impl Run<'_, '_> {
         let k = self.flushes;
         self.flushes += 1;
         let f = v.field(&format!("pgst:at:{node}:{k}"));
-        if !self.cx.is_loopback(f) {
-            // the client declares it (`flushdecl:<node>:<k>`, answered by
-            // `api::Graph::settle`) and the node runs again
-            self.cx.use_env(v.field(&format!("flushdecl:{node}:{k}")))?;
-            if !self.cx.is_loopback(f) {
-                return Ok(());
-            }
-        }
+        let decl = v.field(&format!("flushdecl:{node}:{k}"));
         // the text's `\count0..9` as they stand here: what the page the
         // flush opens starts from (the writer's fold replaces its
         // running counts with them: the text's arithmetic since the
@@ -757,10 +750,31 @@ impl Run<'_, '_> {
             v.list(before),
         ]);
         self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+        // (read on the next count-register read, [`Run::flush_read`])
+        self.flush_pending = Some((decl, f));
+        Ok(())
+    }
+
+    /// The pending flush point's loop-back read: declared by the client
+    /// first (`flushdecl:<node>:<k>`, answered by `api::Graph::settle`;
+    /// the node then runs again), then its fields read in place of the
+    /// engine's from here on; UNIT (round one) leaves the state as it is.
+    pub(crate) fn flush_read(&mut self) -> R<()> {
+        let v = self.v;
+        let Some((decl, f)) = self.flush_pending.take() else {
+            return Ok(());
+        };
+        if !self.cx.is_loopback(f) {
+            self.cx.use_env(decl)?;
+            if !self.cx.is_loopback(f) {
+                return Ok(());
+            }
+        }
         let read = self.cx.use_field(f)?;
         if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
-                "aux-trace: flush point {node}:{k} reads {}",
+                "aux-trace: flush point {} reads {}",
+                crate::val::field_name(v, f),
                 read.map_or("none".to_owned(), |x| v.render(x))
             );
         }

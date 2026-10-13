@@ -1366,10 +1366,32 @@ impl Run<'_, '_> {
             let t = self.get("toks:11")?.map(|x| self.v.render(x));
             eprintln!("aux-trace: empty write: body {shown:?}, toks:11 = {t:?}");
         }
+        if crate::exec::env_flag!("PHITEX_AUX_TRACE") && s.contains("@writefile{toc}") {
+            let tf = self
+                .get("cs:tf@toc")?
+                .map(|x| crate::val::show_def(self.v, x));
+            let w3 = self.get("write:3")?.map(|x| self.v.render(x));
+            let pct = self
+                .get("cs:protected@file@percent")?
+                .map(|x| crate::val::show_def(self.v, x));
+            eprintln!(
+                "aux-trace: at a toc line: tf@toc = {tf:?}, write:3 = {w3:?}, protected@file@percent = {pct:?}"
+            );
+        }
         if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
             let w = self
                 .get(&format!("write:{k}"))?
                 .map(|x| crate::val::show_def(self.v, x));
+            if k == 3 {
+                let mut shown = String::new();
+                self.show_toks_into(&mut shown, body)?;
+                let t = self.get("toks:11")?.map(|x| self.v.render(x));
+                eprintln!(
+                    "aux-trace: stream 3 write: interp={} body {shown:?} toks:11 {t:?} frames {}",
+                    self.interp.is_some(),
+                    self.frames.len()
+                );
+            }
             eprintln!(
                 "aux-trace: write_out stream {k} open={open} ({w:?}) node {} op {:?}: {s}",
                 self.cx.node().raw(),

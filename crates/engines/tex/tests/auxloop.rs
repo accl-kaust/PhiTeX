@@ -97,7 +97,7 @@ fn equal_content_publishes_nothing_the_second_time() {
 /// the same number twice: at most two rounds beyond the loop-back's
 /// declaration.
 const FLUSH_DOC: &str = r"\count0=1
-Text one.\penalty-10000
+Text one.\par\penalty-10000
 \ifodd\count0 odd\else even\fi
 \bye
 ";
