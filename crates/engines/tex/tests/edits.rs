@@ -198,6 +198,7 @@ fn edit_input_file() {
     let doc = "\\font\\x=cmr12 \\input part\nAnd the {\\x main} text.\\par\\end\n";
     let opts = || common::options("./main.tex", "main", "", &dir);
     let mut b = common::build(opts(), Some(&prelude), doc);
+    eprintln!("edit_file: first build {} bytes", b.output().0.len());
     let reads = b.reads();
     assert!(
         reads.iter().any(|(n, hit)| n == "part.tex" && *hit),
@@ -213,6 +214,18 @@ fn edit_input_file() {
     b.edit_file("part.tex", Some(new.as_bytes()));
     std::fs::write(dir.join("part.tex"), new).unwrap();
     let cold = common::build(opts(), Some(&prelude), doc);
+    if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+        eprintln!(
+            "edit_file: {} nodes run: {d}\nedited log: {}\ncold log: {}",
+            b.stats.nodes_run,
+            b.output().1,
+            cold.output().1
+        );
+        for x in cold.diagnostics() {
+            eprintln!("cold: {}: {}", x.line, x.message);
+        }
+        eprintln!("cold reads: {:?}", cold.reads());
+    }
     assert_eq!(b.output().0, cold.output().0, "edit_file differs from cold");
 }
 
