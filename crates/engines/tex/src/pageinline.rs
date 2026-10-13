@@ -187,7 +187,7 @@ impl Run<'_, '_> {
                 let data = self.page_data(&f, &pg.side)?;
                 pg.pb = PageBuilder::new();
                 pg.side = Side::default();
-                if self.fire_page(data)? {
+                if self.fire_page(data, None)? {
                     // the routine runs next in this run's input
                     return Ok(());
                 }
