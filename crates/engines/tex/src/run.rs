@@ -331,7 +331,17 @@ impl<'c, 'a> Run<'c, 'a> {
                     .get()
                     .wrapping_mul(0x9E37_79B9_7F4A_7C15_u64.cast_signed())
             }
-            None => id,
+            // A continued run may mint several lists for one node (a paragraph,
+            // then an \llap box); each needs its own id or list_fold mistakes
+            // the second for the first.
+            None => {
+                let k = i64::try_from(self.minted.borrow().len()).unwrap_or(0);
+                if k == 0 {
+                    id
+                } else {
+                    id ^ k.wrapping_mul(0x6A09_E667_F3BC_C909_u64.cast_signed())
+                }
+            }
         }
     }
 
@@ -1487,6 +1497,33 @@ impl<'c, 'a> Run<'c, 'a> {
                 .get_at(self.v, self.cx.values_epoch(), "defs");
             self.contribs.push((defs, s));
         }
+        if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+            let v = self.v;
+            let items = v.field("items");
+            for (f, x) in &self.contribs {
+                if *f == items {
+                    for e in v.seq_to_vec(*x) {
+                        eprintln!(
+                            "  item lid {} {}",
+                            crate::val::int_at(v, e, 0),
+                            v.render(crate::val::list_of(v, e).get(1).copied().unwrap_or(ValueId::UNIT))
+                                .chars()
+                                .take(60)
+                                .collect::<String>()
+                        );
+                    }
+                }
+            }
+            for (_, a) in &self.kids {
+                eprintln!(
+                    "  kid {}",
+                    a.first()
+                        .map(|&x| v.render(x).chars().take(80).collect::<String>())
+                        .unwrap_or_default()
+                );
+            }
+            eprintln!("  effect {:?} anchor {}", self.effect, self.anchor);
+        }
         for (f, x) in std::mem::take(&mut self.contribs) {
             self.cx.contribute(f, x);
         }
@@ -1504,6 +1541,15 @@ impl<'c, 'a> Run<'c, 'a> {
             self.cx.follow(op, Vec::new());
         }
         for args in self.leftover() {
+            if std::env::var_os("PHITEX_TEX_TRACE").is_some() {
+                let v = self.v;
+                eprintln!(
+                    "  follow {}",
+                    args.first()
+                        .map(|&x| v.render(x).chars().take(90).collect::<String>())
+                        .unwrap_or_default()
+                );
+            }
             self.cx.follow(self.ops.exec, args);
         }
         let mut n = self.pulled;
