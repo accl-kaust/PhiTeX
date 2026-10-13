@@ -173,12 +173,23 @@ pub(crate) struct Run<'c, 'a> {
     pub no_pull: bool,
     /// The paragraph region the node is in (OUTPUT.md §5): the raw id
     /// of the document node whose paragraph-ending item precedes it, or
-    /// 0; a node's args are `[frames, top, anchor, boundary]`, children
-    /// inherit the anchor.
+    /// 0; a node's args are `[frames, top, anchor, boundary, ifdepth]`,
+    /// children inherit the anchor.
     pub anchor: i64,
     /// Whether the node is a document node holding such an item: its
     /// first command is checked (`par_boundary_violations`).
     pub boundary: bool,
+    /// The condition-stack depth below this node's own conditionals
+    /// (OUTPUT.md §6): node arg 4, from the text's nesting; a `\fi` of an
+    /// outer conditional lowers it.
+    pub ifbase: i64,
+    /// The codes of `conds`' conditionals (`cur_if`).
+    pub if_codes: Vec<i32>,
+    /// The highest level this run wrote.
+    pub if_top_written: i64,
+    /// The condition-stack depth of each child [`Run::leftover`] makes,
+    /// planned where reads can wait ([`Run::measure_tail`]).
+    kid_ifdepths: Option<Vec<i64>>,
     /// A `build_page` call not yet folded (OUTPUT.md §4.2a): the
     /// children and main-list items the run had made at the call.
     pub page_due: Option<(usize, usize, bool)>,
@@ -221,14 +232,15 @@ impl<'c, 'a> Run<'c, 'a> {
             0
         };
         crate::exec::note(code, cx.node().raw());
-        let (anchor, boundary) = if code == 1 {
+        let (anchor, boundary, ifbase) = if code == 1 {
             let args = cx.args();
             (
                 args.get(2).map_or(0, |&x| int_of(v, x)),
                 args.get(3).is_some_and(|&x| int_of(v, x) != 0),
+                args.get(4).map_or(0, |&x| int_of(v, x)),
             )
         } else {
-            (0, false)
+            (0, false, 0)
         };
         Run {
             cx,
@@ -244,6 +256,10 @@ impl<'c, 'a> Run<'c, 'a> {
             no_pull: false,
             anchor,
             boundary,
+            ifbase,
+            if_codes: Vec::new(),
+            if_top_written: ifbase,
+            kid_ifdepths: None,
             own: FxHashMap::default(),
             defs: Vec::new(),
             contribs: Vec::new(),
@@ -1034,11 +1050,26 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn leftover(&self) -> Vec<Vec<ValueId>> {
         let v = self.v;
         let anchor = v.int(self.anchor);
+        let base = self.ifbase + i64::try_from(self.conds.len()).unwrap_or(0);
+        let depths = self.kid_ifdepths.as_deref().unwrap_or(&[]);
+        let depth = std::cell::Cell::new(0usize);
+        // [frames, top, anchor, boundary, ifdepth]
+        let tail = || -> [ValueId; 4] {
+            let k = depth.get();
+            depth.set(k + 1);
+            let d = depths.get(k).copied().unwrap_or(base);
+            [v.int(0), anchor, v.int(0), v.int(d)]
+        };
+        let with = |frames: ValueId| -> Vec<ValueId> {
+            let mut a = vec![frames];
+            a.extend(tail());
+            a
+        };
         let mut out: Vec<Vec<ValueId>> = Vec::new();
         let mut run: Vec<ValueId> = Vec::new();
         let node = |toks: Vec<ValueId>| -> Vec<ValueId> {
             let l = v.list(toks);
-            vec![v.list(vec![v.list(vec![v.str("t"), l])]), v.int(0), anchor]
+            with(v.list(vec![v.list(vec![v.str("t"), l])]))
         };
         for f in &self.frames {
             match f {
@@ -1089,7 +1120,7 @@ impl<'c, 'a> Run<'c, 'a> {
                         frs.push(v.list(vec![v.str("t"), v.list(head)]));
                     }
                     frs.push(fr);
-                    out.push(vec![v.list(frs), v.int(0), anchor]);
+                    out.push(with(v.list(frs)));
                 }
                 Frame::File(f) => {
                     if !run.is_empty() {
@@ -1102,7 +1133,7 @@ impl<'c, 'a> Run<'c, 'a> {
                             v.int(i64::try_from(f.off).unwrap_or(0)),
                             f.name,
                         ]);
-                        out.push(vec![v.list(vec![fr]), v.int(0), anchor]);
+                        out.push(with(v.list(vec![fr])));
                     }
                 }
             }
@@ -1120,6 +1151,114 @@ impl<'c, 'a> Run<'c, 'a> {
     /// are claimed, so the expansion's children find them in their own
     /// text (a child never reads past its parent).
     pub(crate) fn measure_tail(&mut self) -> R<()> {
+        self.measure_tail_inner()?;
+        let d = self.plan_ifdepths()?;
+        self.kid_ifdepths = Some(d);
+        Ok(())
+    }
+
+    /// The condition-stack depth of each child [`Run::leftover`] will
+    /// make, in its order: the depth after this run's command, then each
+    /// child's text's nesting (`\if…` +1, `\fi` -1, by meaning, §489) for
+    /// the children after it (OUTPUT.md §6).
+    fn plan_ifdepths(&mut self) -> R<Vec<i64>> {
+        let mut d = self.ifbase + i64::try_from(self.conds.len()).unwrap_or(0);
+        let mut out = Vec::new();
+        let mut run = false;
+        let frames: Vec<Frame> = self.frames.iter().cloned().collect();
+        for f in &frames {
+            match f {
+                Frame::Toks(t, p) => {
+                    for tok in &t[*p..] {
+                        if matches!(tok.cat(), Some(11 | 12)) {
+                            run = true;
+                            continue;
+                        }
+                        if std::mem::take(&mut run) {
+                            out.push(d);
+                        }
+                        out.push(d);
+                        d = (d + self.if_delta(tok)?).max(0);
+                    }
+                }
+                Frame::Src(s) => {
+                    let head = std::mem::take(&mut run);
+                    let end_due = s.ends && s.endch < -1;
+                    if s.loc >= s.buf.len() && !end_due {
+                        if head {
+                            out.push(d);
+                        }
+                        continue;
+                    }
+                    out.push(d);
+                    d = (d + self.src_if_delta(&s.buf[s.loc.min(s.buf.len())..])?).max(0);
+                }
+                Frame::File(fr) => {
+                    if std::mem::take(&mut run) {
+                        out.push(d);
+                    }
+                    if fr.has_lines() {
+                        out.push(d);
+                    }
+                }
+            }
+        }
+        if run {
+            out.push(d);
+        }
+        Ok(out)
+    }
+
+    /// A token's effect on the condition stack's depth: only control
+    /// sequences named `if…` or `fi…` are looked up (their meaning
+    /// decides; a conditional under another name is a violation the
+    /// outer `\fi` reports).
+    fn if_delta(&mut self, tok: &Tok) -> R<i64> {
+        let Tok::S(name) = tok else { return Ok(0) };
+        if !(name.starts_with("if") || name.starts_with("fi")) {
+            return Ok(0);
+        }
+        let (c, h) = self.mean_of(tok)?.cmd_chr();
+        Ok(match c {
+            cmd::IF_TEST => 1,
+            cmd::FI_OR_ELSE if h == 2 => -1,
+            _ => 0,
+        })
+    }
+
+    /// The nesting of a line's unread text: its control words (escape
+    /// and letters by the current category codes, §354–§356) to the end
+    /// or a comment character.
+    fn src_if_delta(&mut self, text: &[u32]) -> R<i64> {
+        let mut d = 0;
+        let mut i = 0;
+        while i < text.len() {
+            let c = self.cat(text[i])?;
+            if c == 14 {
+                break;
+            }
+            i += 1;
+            if c != 0 {
+                continue;
+            }
+            let s = i;
+            while i < text.len() && self.cat(text[i])? == 11 {
+                i += 1;
+            }
+            if i == s {
+                i += 1;
+                continue;
+            }
+            let name: String = text[s..i]
+                .iter()
+                .map(|&c| char::from_u32(c).unwrap_or('?'))
+                .collect();
+            d += self.if_delta(&Tok::cs(&name))?;
+        }
+        Ok(d)
+    }
+
+    fn measure_tail_inner(&mut self) -> R<()> {
         if !self
             .frames
             .iter()
@@ -1236,6 +1375,7 @@ impl<'c, 'a> Run<'c, 'a> {
             effect: self.effect,
             cur: self.cur.clone(),
             conds: self.conds.clone(),
+            ifs: (self.ifbase, self.if_codes.clone(), self.if_top_written),
             lines_entered: self.lines_entered,
             eof: self.eof,
             claim_rest: self.claim_rest,
@@ -1254,6 +1394,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.effect = s.effect;
         self.cur = s.cur;
         self.conds = s.conds;
+        (self.ifbase, self.if_codes, self.if_top_written) = s.ifs;
         self.lines_entered = s.lines_entered;
         self.eof = s.eof;
         self.claim_rest = s.claim_rest;
@@ -1348,6 +1489,7 @@ struct Snapshot {
     effect: Effect,
     cur: Cur,
     conds: Vec<u8>,
+    ifs: (i64, Vec<i32>, i64),
     lines_entered: i64,
     eof: bool,
     claim_rest: bool,
@@ -1369,6 +1511,11 @@ fn hex(c: u32) -> u32 {
 }
 
 /// The frames of an `Exec` node's arguments.
+/// The condition-stack depth an output routine's tokens start at: its
+/// conditionals are above any the page builder interrupted, in levels of
+/// their own (OUTPUT.md §6).
+pub(crate) const OUTPUT_IF_BASE: i64 = 1 << 40;
+
 pub(crate) fn decode_frames(v: &Values, args: &[ValueId]) -> Vec<Frame> {
     decode_frames_upto(v, args, usize::MAX)
 }
@@ -1483,6 +1630,7 @@ pub(crate) fn slice_args(
     starts_line: bool,
     anchor: i64,
     boundary: bool,
+    ifdepth: i64,
 ) -> Vec<ValueId> {
     let mut frames = Vec::new();
     let mut starts = starts_line;
@@ -1514,5 +1662,6 @@ pub(crate) fn slice_args(
         v.int(1),
         v.int(anchor),
         v.int(i64::from(boundary)),
+        v.int(ifdepth),
     ]
 }

@@ -213,16 +213,17 @@ fn apply_text(
     let common = old_mid.min(new_mid);
     // the paragraph regions before and after (OUTPUT.md §5): a kept node
     // whose anchor or boundary flag changed is replaced
-    let new_flags = slice_flags(&text);
+    let (new_flags, new_depths) = slice_info(&text);
     let old_text: String = old.iter().map(|(k, _)| k.get(1..).unwrap_or("")).collect();
-    let old_flags = slice_flags(&old_text);
+    let (old_flags, old_depths) = slice_info(&old_text);
     let old_regions =
         (old_flags.len() == old.len()).then(|| regions(&old_flags, |i| raw_of(old[i].1)));
     let args_of = |eng: &Engine, k: usize, anchor: i64| {
         let (s, e) = new[k].1;
         let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
         let boundary = new_flags.get(k).is_some_and(|f| f & 1 != 0);
-        slice_args(eng.values(), &text[s..e], starts, anchor, boundary)
+        let depth = new_depths.get(k).copied().unwrap_or(0);
+        slice_args(eng.values(), &text[s..e], starts, anchor, boundary, depth)
     };
     for k in common..old_mid {
         eng.remove(old[a + k].1);
@@ -241,7 +242,8 @@ fn apply_text(
             let n = old[oi].1;
             let same = old_regions
                 .as_ref()
-                .is_some_and(|r| r[oi] == (anchor, f & 1 != 0));
+                .is_some_and(|r| r[oi] == (anchor, f & 1 != 0))
+                && old_depths.get(oi) == new_depths.get(i);
             if !same {
                 let args = args_of(eng, i, anchor);
                 eng.replace(n, exec, args);
@@ -274,7 +276,7 @@ fn raw_of(n: NodeId) -> i64 {
     i64::from_ne_bytes(n.raw().to_ne_bytes())
 }
 
-/// Each slice's `(anchor, boundary)` from its flags ([`slice_flags`]),
+/// Each slice's `(anchor, boundary)` from its flags ([`slice_info`]),
 /// `id` giving the raw id of slice `i`'s node.
 fn regions(flags: &[u8], id: impl Fn(usize) -> i64) -> Vec<(i64, bool)> {
     let (mut anchor, mut last) = (0, None);
@@ -482,7 +484,7 @@ impl Rd<'_> {
 /// the serialised environment's layout, the node args, the `Fields` set,
 /// the hint args or the state fields' names change: a prelude exported
 /// under another layout is refused (rebuilt), never loaded.
-pub const PRELUDE_LAYOUT: u32 = 2;
+pub const PRELUDE_LAYOUT: u32 = 3;
 
 /// The exported prelude's magic, before the layout and the engine's
 /// identity.
@@ -643,13 +645,44 @@ pub(crate) fn slices(text: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// The primitive conditionals (§487) and e-TeX's and pdfTeX's.
+const CONDITIONALS: &[&str] = &[
+    "if",
+    "ifcat",
+    "ifnum",
+    "ifdim",
+    "ifodd",
+    "ifvmode",
+    "ifhmode",
+    "ifmmode",
+    "ifinner",
+    "ifvoid",
+    "ifhbox",
+    "ifvbox",
+    "ifx",
+    "ifeof",
+    "iftrue",
+    "iffalse",
+    "ifcase",
+    "ifdefined",
+    "ifcsname",
+    "iffontchar",
+    "ifincsname",
+    "ifpdfabsnum",
+    "ifpdfabsdim",
+    "ifpdfprimitive",
+];
+
 /// The paragraph regions of a text's slices ([`slices`], OUTPUT.md §5):
 /// bit 0, the slice holds an item the pass marks paragraph-ending
 /// (`Implicit::EndsParagraph`: a blank line, `\par`, a vertical command
 /// that reads nothing after it, a macro whose body ends in one) at brace
-/// depth 0 and not consumed by an earlier item; bit 1, a region starts at the slice (the first after
-/// what that item consumes).
-pub(crate) fn slice_flags(text: &str) -> Vec<u8> {
+/// depth 0 and not consumed by an earlier item; bit 1, a region starts
+/// at the slice (the first after what that item consumes). And each slice's condition-stack depth by the text
+/// (OUTPUT.md §6): the primitive conditionals before it less the `\fi`s,
+/// items consumed by an earlier one (a `\let`'s, a definition's body)
+/// not counted.
+pub(crate) fn slice_info(text: &str) -> (Vec<u8>, Vec<i64>) {
     let defs = pass::Definitions::default();
     let scope = pass::Scope {
         document: &defs,
@@ -672,8 +705,16 @@ pub(crate) fn slice_flags(text: &str) -> Vec<u8> {
         }
     }
     let mut ends: Vec<(usize, usize)> = Vec::new();
+    let mut ifs: Vec<(usize, i64)> = Vec::new();
     let mut consumed = 0;
     for it in &p.items {
+        if it.atom >= consumed {
+            if CONDITIONALS.contains(&it.name.as_str()) {
+                ifs.push((it.atom, 1));
+            } else if it.name == "fi" {
+                ifs.push((it.atom, -1));
+            }
+        }
         if it.atom >= consumed
             && depth.get(it.atom) == Some(&0)
             && it.hints.implicit == pass::Implicit::EndsParagraph
@@ -709,7 +750,18 @@ pub(crate) fn slice_flags(text: &str) -> Vec<u8> {
             *f |= 2;
         }
     }
-    flags
+    // the depth before each slice: the items in earlier slices
+    let mut depths = vec![0i64; sl.len()];
+    let mut k = 0;
+    let mut d = 0i64;
+    for (i, &(s, _)) in sl.iter().enumerate() {
+        while k < ifs.len() && at_byte(ifs[k].0) < s {
+            d = (d + ifs[k].1).max(0);
+            k += 1;
+        }
+        depths[i] = d;
+    }
+    (flags, depths)
 }
 
 /// What the evaluations of one build or edit did.
@@ -731,6 +783,9 @@ pub struct Stats {
     /// Paragraph-ending items after which the list was not vertical
     /// (OUTPUT.md §5): the nodes after them read a wrong mode.
     pub par_boundary_violations: u64,
+    /// Outer `\fi`s that found no conditional at the depth the text's
+    /// nesting gave their node (OUTPUT.md §6).
+    pub if_depth_violations: u64,
     pub tail_siblings: u64,
     /// Children that ran out of text (a claim measured short: a bug).
     pub starved: u64,
@@ -942,6 +997,7 @@ impl Graph {
             "writes",
             "tails",
             "parviol",
+            "ifviol",
             "streams",
             crate::pdfrelaxed::PIECES,
         ] {
@@ -1178,6 +1234,9 @@ impl Graph {
         if let Some(t) = self.eng.acc_value(unit, v.field("parviol")) {
             stats.par_boundary_violations += u64::try_from(v.seq_to_vec(t).len()).unwrap_or(0);
         }
+        if let Some(t) = self.eng.acc_value(unit, v.field("ifviol")) {
+            stats.if_depth_violations += u64::try_from(v.seq_to_vec(t).len()).unwrap_or(0);
+        }
         let tails_f = v.field("tails");
         if let Some(t) = self.eng.acc_value(unit, tails_f) {
             for x in v.seq_to_vec(t) {
@@ -1192,7 +1251,7 @@ impl Graph {
         let mut out = Vec::new();
         let t0 = std::time::Instant::now();
         let sl = slices(text);
-        let flags = slice_flags(text);
+        let (flags, depths) = slice_info(text);
         let t1 = t0.elapsed();
         let (mut anchor, mut last) = (0, None);
         for (i, (s, e)) in sl.into_iter().enumerate() {
@@ -1207,7 +1266,8 @@ impl Graph {
             {
                 anchor = l;
             }
-            let args = slice_args(self.eng.values(), piece, starts, anchor, f & 1 != 0);
+            let depth = depths.get(i).copied().unwrap_or(0);
+            let args = slice_args(self.eng.values(), piece, starts, anchor, f & 1 != 0, depth);
             let n = self.eng.push(unit, self.ops.exec, args);
             if f & 1 != 0 {
                 last = Some(raw_of(n));

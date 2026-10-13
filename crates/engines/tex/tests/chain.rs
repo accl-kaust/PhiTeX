@@ -61,11 +61,12 @@ fn chain(dir: &std::path::Path, name: &str) {
         .critical_path
         .map(|p| p as f64 / b.stats.nodes_run.max(1) as f64);
     eprintln!(
-        "{name}: oracle_fraction {} (critical path {:?} / {} nodes run; bar 0.0004-0.003), paragraph boundary violations {}",
+        "{name}: oracle_fraction {} (critical path {:?} / {} nodes run; bar 0.0004-0.003), paragraph boundary violations {}, if depth violations {}",
         frac.map_or_else(|| "n/a".to_owned(), |f| format!("{f:.4}")),
         b.stats.critical_path,
         b.stats.nodes_run,
-        b.stats.par_boundary_violations
+        b.stats.par_boundary_violations,
+        b.stats.if_depth_violations
     );
 }
 
