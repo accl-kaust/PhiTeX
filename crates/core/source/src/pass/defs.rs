@@ -113,7 +113,15 @@ pub struct Definitions {
     order: Option<HashMap<u32, u32>>,
     /// Names some `\\font` defines (their [`Shape::Quantity`] is `'c'`).
     fonts: HashSet<String>,
+    /// Closures computed with these as the prelude ([`Closure`]): by
+    /// name, the set and every name looked up for it. Shared by clones;
+    /// dropped (a fresh table) by any change.
+    pub(crate) closures: ClosureCache,
 }
+
+/// [`Definitions::closures`].
+pub(crate) type ClosureCache =
+    std::sync::Arc<std::sync::Mutex<HashMap<String, (DefSet, std::sync::Arc<Vec<String>>)>>>;
 
 /// What a definition's body does to catcodes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -273,6 +281,7 @@ impl Definitions {
     /// Declares the order the files load in: `files[0]` first. A use then
     /// binds to the last definition loaded before it, in any file.
     pub fn set_load_order(&mut self, files: &[u32]) {
+        self.closures = ClosureCache::default();
         self.order = Some(
             files
                 .iter()
@@ -491,6 +500,7 @@ impl Definitions {
 
     /// Reads the definitions in `text`, file `file` of the document.
     pub fn harvest(&mut self, text: &str, kind: FileKind, file: u32) {
+        self.closures = ClosureCache::default();
         let lexed = lex::lex(text, kind, None);
         let atoms = atoms::atoms(text, &lexed.tokens);
         for t in &lexed.tokens {

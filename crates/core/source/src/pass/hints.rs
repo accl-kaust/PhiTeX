@@ -1422,8 +1422,13 @@ impl DefSet {
 pub(crate) struct Closure<'a> {
     pub document: &'a Definitions,
     pub prelude: &'a Definitions,
-    memo: HashMap<String, DefSet>,
+    /// By name: the set, the names looked up for it, and whether a
+    /// recursion cut it short (then it depends on the order of calls).
+    memo: HashMap<String, (DefSet, std::sync::Arc<Vec<String>>, bool)>,
     busy: HashSet<String>,
+    /// The call being computed: the names looked up so far, whether a
+    /// recursion cut it short.
+    frame: (Vec<String>, bool),
 }
 
 impl<'a> Closure<'a> {
@@ -1433,7 +1438,16 @@ impl<'a> Closure<'a> {
             prelude,
             memo: HashMap::new(),
             busy: HashSet::new(),
+            frame: (Vec::new(), false),
         }
+    }
+
+    /// Whether the document defines any of `names` (a set the prelude's
+    /// cache holds is then not this document's).
+    fn document_defines(&self, names: &[String]) -> bool {
+        names.iter().any(|n| {
+            self.document.effects(n).is_some() || self.document.shapes(n).is_some()
+        })
     }
 
     /// What running `e` may define.
@@ -1474,7 +1488,8 @@ impl<'a> Closure<'a> {
     }
 
     /// What assigning the quantity `name` defines.
-    pub(crate) fn assigned(&self, name: &str) -> DefSet {
+    pub(crate) fn assigned(&mut self, name: &str) -> DefSet {
+        self.frame.0.push(name.to_owned());
         let mut s = DefSet::default();
         if let Some(Entry::Quantity(_, None)) = table().commands.get(name) {
             s.names.insert(param(name), false);
@@ -1501,17 +1516,58 @@ impl<'a> Closure<'a> {
     }
 
     /// What calling `name` may define.
+    ///
+    /// A set that looked up no name the document defines and met no
+    /// recursion is the prelude's alone: it is kept in the prelude's
+    /// cache ([`Definitions::closures`]) for every text analysed with it,
+    /// and taken from there while the document defines none of the
+    /// names it looked up and none of them is being computed.
     pub(crate) fn call(&mut self, name: &str) -> DefSet {
-        if let Some(s) = self.memo.get(name) {
-            return s.clone();
+        if let Some((s, names, cut)) = self.memo.get(name) {
+            let s = s.clone();
+            self.frame.0.extend(names.iter().cloned());
+            self.frame.1 |= *cut;
+            return s;
         }
-        if !self.busy.insert(name.to_owned()) {
+        if self.busy.contains(name) {
             // (a recursion: its effects are those being collected)
+            self.frame.1 = true;
             return DefSet::default();
         }
+        let cached = self
+            .prelude
+            .closures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)
+            .cloned();
+        if let Some((s, names)) = cached
+            && !names.iter().any(|n| self.busy.contains(n))
+            && !self.document_defines(&names)
+        {
+            self.frame.0.extend(names.iter().cloned());
+            self.memo
+                .insert(name.to_owned(), (s.clone(), names, false));
+            return s;
+        }
+        self.busy.insert(name.to_owned());
+        let outer = std::mem::replace(&mut self.frame, (vec![name.to_owned()], false));
         let s = self.compute(name);
+        let (mut names, cut) = std::mem::replace(&mut self.frame, outer);
         self.busy.remove(name);
-        self.memo.insert(name.to_owned(), s.clone());
+        names.sort_unstable();
+        names.dedup();
+        let names = std::sync::Arc::new(names);
+        if !cut && !self.document_defines(&names) {
+            self.prelude
+                .closures
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(name.to_owned(), (s.clone(), names.clone()));
+        }
+        self.frame.0.extend(names.iter().cloned());
+        self.frame.1 |= cut;
+        self.memo.insert(name.to_owned(), (s.clone(), names, cut));
         s
     }
 
