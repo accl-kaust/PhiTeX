@@ -1071,6 +1071,43 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
     (out, pars)
 }
 
+/// Whether the atoms of `text[s..e]` open and close their groups
+/// themselves: braces pair up and never close an outer one, so do
+/// `\\begingroup`/`\\endgroup` and `\\bgroup`/`\\egroup`, and no macro
+/// called (its closure, transitively) uses one of a pair without the
+/// other.
+fn balanced(an: &Analysis<'_>, text: &str, s: usize, e: usize) -> bool {
+    let (mut brace, mut bg, mut sg) = (0i64, 0i64, 0i64);
+    for a in an.p.atoms.iter().filter(|a| a.start >= s && a.start < e) {
+        match a.kind {
+            AtomKind::Open => brace += 1,
+            AtomKind::Close => brace -= 1,
+            AtomKind::Cs => {
+                let n = a.name(text);
+                match n {
+                    "begingroup" => sg += 1,
+                    "endgroup" => sg -= 1,
+                    "bgroup" => bg += 1,
+                    "egroup" => bg -= 1,
+                    _ if crate::prims::PRIMS.iter().any(|q| q.0 == n) => {}
+                    _ => {
+                        let set = an.defset(n);
+                        let has = |x: &str| set.calls.iter().any(|c| c == x);
+                        if has("begingroup") != has("endgroup") || has("bgroup") != has("egroup") {
+                            return false;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if brace < 0 || bg < 0 || sg < 0 {
+            return false;
+        }
+    }
+    brace == 0 && bg == 0 && sg == 0
+}
+
 /// The commands that scan on past their text for a keyword or a unit
 /// (`plus`, `minus`, `width`, `true`), expanding what follows.
 const SCANS_ON: &[&str] = &["vskip", "hskip", "mskip", "hrule", "vrule", "kern", "mkern"];
@@ -2140,6 +2177,20 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
                 j += 1;
             }
         }
+        // (a document slice is balanced by construction: its groups,
+        // paragraphs and conditionals are whole inside it; when its
+        // braces and named group commands pair up and no macro it calls
+        // opens or closes a group its body does not, its run opens and
+        // closes no scope of the engine's)
+        if kind == FileKind::Document
+            && let Some(b) = &mut h.bound
+            && balanced(&an, text, s, e)
+        {
+            b.no_scope = true;
+            if let Some(st) = &mut b.state {
+                st.retain(|x| x != "lopen:");
+            }
+        }
         let excerpt = short(&text[s..text.len().min(s + 40)]);
         if t.pars[i] {
             match &mut h.bound {
@@ -2152,6 +2203,13 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
             h.excerpt = excerpt;
         }
         slice_hints.push(intern(&h));
+    }
+    if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+        let open = slice_hints
+            .iter()
+            .filter(|h| !Hint::decode(h).bound.is_some_and(|b| b.no_scope))
+            .count();
+        eprintln!("slices: no_scope false: {open} of {}", slice_hints.len());
     }
     t.slice_hints = slice_hints;
     t
