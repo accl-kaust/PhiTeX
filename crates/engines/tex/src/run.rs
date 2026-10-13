@@ -235,8 +235,12 @@ pub(crate) struct Run<'c, 'a> {
     /// The codes (`cur_if`) of `conds`, parallel to it.
     pub if_codes: Vec<i32>,
     mcache: FxHashMap<ValueId, Mean>,
-    /// The meaning fields of the tokens this run looked up.
-    tfields: FxHashMap<Tok, Field>,
+    /// The meaning fields of the control sequences this run looked up,
+    /// by [`crate::val::CsId::index`], and of the active characters.
+    tfields: Vec<Option<Field>>,
+    afields: FxHashMap<u32, Field>,
+    /// The buffer a control sequence's name is scanned into (§356).
+    name_buf: String,
     /// The scope kind last decoded (`Run::mode`, once a command): its
     /// value and its fields `(group, sid, lid, mode, depth, extra)`.
     pub kind_memo: Option<(ValueId, KindFields)>,
@@ -300,7 +304,9 @@ impl<'c, 'a> Run<'c, 'a> {
             conds: Vec::new(),
             if_codes: Vec::new(),
             mcache: FxHashMap::default(),
-            tfields: FxHashMap::default(),
+            tfields: Vec::new(),
+            afields: FxHashMap::default(),
+            name_buf: String::new(),
             kind_memo: None,
             astate: None,
             lines_entered: 0,
@@ -693,15 +699,32 @@ impl<'c, 'a> Run<'c, 'a> {
 
     pub(crate) fn mean_of(&mut self, t: &Tok) -> R<Mean> {
         // a token's meaning field, interned once a run
-        let f = if let Some(&f) = self.tfields.get(t) {
-            Some(f)
+        // (a control sequence's by its interned number: no name is
+        // hashed on the token path)
+        let hit = match t {
+            Tok::S(c) => self.tfields.get(c.index()).copied().flatten(),
+            Tok::C(x) => self.afields.get(x).copied(),
+        };
+        let f = if hit.is_some() {
+            hit
         } else {
             let f = self
                 .ops
                 .fields
                 .meaning_at(self.v, self.cx.values_epoch(), t);
             if let Some(f) = f {
-                self.tfields.insert(t.clone(), f);
+                match t {
+                    Tok::S(c) => {
+                        let i = c.index();
+                        if i >= self.tfields.len() {
+                            self.tfields.resize(i + 1, None);
+                        }
+                        self.tfields[i] = Some(f);
+                    }
+                    Tok::C(x) => {
+                        self.afields.insert(*x, f);
+                    }
+                }
             }
             f
         };
@@ -1165,13 +1188,17 @@ impl<'c, 'a> Run<'c, 'a> {
                     k -= 1;
                 }
                 if k > loc + 1 {
-                    let name: String = (loc..k)
-                        .map(|i| char::from_u32(self.buf(i)).unwrap_or('?'))
-                        .collect();
+                    // (the name is built in a buffer kept by the run:
+                    // a known name allocates nothing, §259)
+                    let mut name = std::mem::take(&mut self.name_buf);
+                    name.clear();
+                    name.extend((loc..k).map(|i| char::from_u32(self.buf(i)).unwrap_or('?')));
                     if let Some(Frame::Src(s)) = self.frames.front_mut() {
                         s.loc = k;
                     }
-                    return Ok(Tok::S(Rc::from(name)));
+                    let t = Tok::cs(&name);
+                    self.name_buf = name;
+                    return Ok(t);
                 }
             } else if self.reduce_expanded(k, cat) {
                 continue;
@@ -1180,9 +1207,8 @@ impl<'c, 'a> Run<'c, 'a> {
             if let Some(Frame::Src(s)) = self.frames.front_mut() {
                 s.loc = loc + 1;
             }
-            return Ok(Tok::S(Rc::from(
-                char::from_u32(c).unwrap_or('?').to_string(),
-            )));
+            let mut b = [0; 4];
+            return Ok(Tok::cs(char::from_u32(c).unwrap_or('?').encode_utf8(&mut b)));
         }
     }
 
@@ -1236,7 +1262,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 if let Tok::S(n) = &t {
                     if n.starts_with("\u{10FFFE}eof") {
                         // §362: the end of an \input file (or a pseudo file)
-                        crate::etex::end_of_file(self, &n.clone())?;
+                        crate::etex::end_of_file(self, n.name())?;
                         continue;
                     }
                     if &**n == "\u{10FFFE}uend" {

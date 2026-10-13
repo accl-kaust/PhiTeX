@@ -355,7 +355,7 @@ pub(crate) fn if_test(r: &mut Run<'_, '_>, this_if: i32) -> R<bool> {
                 r.log("error", "Missing \\endcsname inserted")?;
                 r.back_cur();
             }
-            let t = Tok::S(Rc::from(name));
+            let t = Tok::cs(&name);
             r.mean_of(&t)? != Mean::Undefined
         }
         IF_FONT_CHAR => {

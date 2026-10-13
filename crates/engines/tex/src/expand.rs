@@ -130,7 +130,7 @@ impl Run<'_, '_> {
             let t = self.cur.tok.clone();
             self.back_input(t);
         }
-        let t = Tok::S(Rc::from(name));
+        let t = Tok::cs(&name);
         if self.mean_of(&t)? == Mean::Undefined {
             let relax = Mean::Prim("relax", cmd::RELAX, 256).encode(self.v);
             let f = t.field_name().unwrap_or_default();
@@ -569,7 +569,7 @@ impl Run<'_, '_> {
     pub(crate) fn font_id_tok(&mut self, f: i64) -> R<Tok> {
         let x = self.get(&format!("fontid:{f}"))?;
         let name = x.map_or_else(|| "nullfont".to_owned(), |x| str_of(self.v, x));
-        Ok(Tok::S(Rc::from(format!("\u{10FFFE}F{f}\u{2}{name}"))))
+        Ok(Tok::cs(&format!("\u{10FFFE}F{f}\u{2}{name}")))
     }
 
     /// `conv_toks` (§470–§472).
