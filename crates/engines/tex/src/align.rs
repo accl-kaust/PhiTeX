@@ -579,7 +579,7 @@ impl Run<'_, '_> {
         }
         self.set_prev_depth(&outer, pd);
         if outer.m == 1 {
-            self.build_page(&outer)?;
+            self.build_page_mark(&outer)?;
         }
         Ok(())
     }

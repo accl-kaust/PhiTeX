@@ -41,6 +41,7 @@ pub(crate) struct Ops {
     pub exec: OpId,
     pub put: OpId,
     pub outpage: OpId,
+    pub pagestep: OpId,
 }
 
 /// A level of the input stack.
@@ -167,6 +168,9 @@ pub(crate) struct Run<'c, 'a> {
     /// While looking for the command's first token: a node's command
     /// begins in its own text (the next sibling's begins in its own).
     pub no_pull: bool,
+    /// A `build_page` call not yet folded (OUTPUT.md §4.2a): the
+    /// children and main-list items the run had made at the call.
+    pub page_due: Option<(usize, usize)>,
     own: FxHashMap<Field, Option<ValueId>>,
     pub defs: Vec<(Field, ValueId, Locality)>,
     pub contribs: Vec<(Field, ValueId)>,
@@ -230,6 +234,7 @@ impl<'c, 'a> Run<'c, 'a> {
             conds: Vec::new(),
             mcache: FxHashMap::default(),
             astate: None,
+            page_due: None,
             lines_entered: 0,
             eof: false,
             radix: 0,
@@ -1195,6 +1200,7 @@ impl<'c, 'a> Run<'c, 'a> {
             eof: self.eof,
             claim_rest: self.claim_rest,
             astate: self.astate,
+            page_due: self.page_due,
         }
     }
 
@@ -1212,6 +1218,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.eof = s.eof;
         self.claim_rest = s.claim_rest;
         self.astate = s.astate;
+        self.page_due = s.page_due;
     }
 
     /// Ends the run: definitions, contributions, children (what the
@@ -1252,8 +1259,11 @@ impl<'c, 'a> Run<'c, 'a> {
         for (op, args) in std::mem::take(&mut self.kids) {
             self.cx.child(op, args);
         }
-        // the input left is what follows the command: its continuation,
-        // at its own depth
+        // a deferred page step comes first, then the input left, what
+        // follows the command: its continuation, at its own depth
+        if self.page_due.is_some() {
+            self.cx.follow(self.ops.pagestep, Vec::new());
+        }
         for args in self.leftover() {
             self.cx.follow(self.ops.exec, args);
         }
@@ -1297,6 +1307,7 @@ struct Snapshot {
     eof: bool,
     claim_rest: bool,
     astate: Option<i64>,
+    page_due: Option<(usize, usize)>,
 }
 
 fn is_hex(c: u32) -> bool {

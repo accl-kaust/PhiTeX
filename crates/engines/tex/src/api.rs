@@ -482,10 +482,16 @@ impl Graph {
         let exec = eng.register(Arc::new(Exec(shared.clone())));
         let put = eng.register(Arc::new(Put(shared.clone())));
         let outpage = eng.register(Arc::new(OutPage(shared.clone())));
+        let pagestep = eng.register(Arc::new(crate::page_step::PageStep(shared.clone())));
         let dvi = eng.register(Arc::new(Dvi));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
-        let ops = Ops { exec, put, outpage };
+        let ops = Ops {
+            exec,
+            put,
+            outpage,
+            pagestep,
+        };
         let _ = shared.set(ops);
         for f in [
             "items",
