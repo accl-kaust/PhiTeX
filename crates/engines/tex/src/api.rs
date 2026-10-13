@@ -77,6 +77,46 @@ pub struct Options {
     /// ([`Build::pages`]) is new or changed: the page's index (0 the
     /// first), its hash, and the version of the text it is for.
     pub on_page_settled: Option<PageSettled>,
+    /// Whether the engine runs nodes ahead of their inputs
+    /// (`PHITEX_SPEC=off|predicted|all` overrides; default Predicted), and on how
+    /// many
+    /// candidates per step. The output is the same either way.
+    pub speculation: Speculation,
+    pub speculation_budget: usize,
+}
+
+/// When the engine speculates ([`Options::speculation`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Speculation {
+    /// Never.
+    Off,
+    /// On nodes a previous run predicts.
+    Predicted,
+    /// On any candidate.
+    All,
+}
+
+impl Speculation {
+    /// The engine's scheduler for `self` and `budget`, `PHITEX_SPEC`
+    /// overriding.
+    fn scheduler(self, budget: usize) -> phitex_defuse::Greedy {
+        use phitex_defuse::Speculation as S;
+        let mode = match std::env::var("PHITEX_SPEC").ok().as_deref() {
+            Some("off") => S::Off,
+            Some("predicted") => S::Predicted,
+            Some("all") => S::All,
+            _ => match self {
+                Speculation::Off => S::Off,
+                Speculation::Predicted => S::Predicted,
+                Speculation::All => S::All,
+            },
+        };
+        phitex_defuse::Greedy {
+            outstanding: 4096,
+            fuel: 10_000,
+            ..phitex_defuse::Greedy::speculative(mode, budget)
+        }
+    }
 }
 
 /// The callback of [`Options::on_page_settled`].
@@ -217,6 +257,11 @@ impl Default for Options {
             progress: None,
             edits: None,
             on_page_settled: None,
+            // free on a cold build, helps edits; All (the engine's advice
+            // for cold builds) mispredicts most of its runs while the
+            // commands answer `Any`
+            speculation: Speculation::Predicted,
+            speculation_budget: 256,
         }
     }
 }
@@ -542,6 +587,17 @@ pub struct Stats {
     /// is the mean batch.
     pub steps: u64,
     pub ready_total: u64,
+    /// The engine's speculative runs: kept with outstanding
+    /// assumptions, confirmed, and whose assumptions failed; and nodes
+    /// re-done higher after running below a finished input (raises).
+    pub speculations: u64,
+    pub confirmations: u64,
+    pub mispredictions: u64,
+    pub raises: u64,
+    /// The most nodes ready at one step, and the speculative runs that
+    /// ran out of fuel.
+    pub max_ready: usize,
+    pub fuel_outs: u64,
 }
 
 /// A round's counters (`PHITEX_TEX_TIME`).
@@ -604,6 +660,12 @@ impl Stats {
         self.version = r.version;
         self.steps += r.steps;
         self.ready_total += r.ready_total;
+        self.speculations += r.speculations;
+        self.confirmations += r.confirmations;
+        self.mispredictions += r.mispredictions;
+        self.raises += r.raises;
+        self.max_ready = self.max_ready.max(r.max_ready);
+        self.fuel_outs += r.fuel_outs;
         self.page_steps +=
             Report::by_op(&r.runs_by_op, "pagestep") + Report::by_op(&r.runs_by_op, "pagestep_any");
         self.page_steps_any += Report::by_op(&r.runs_by_op, "pagestep_any");
@@ -643,6 +705,8 @@ struct Graph {
     pdf_exact: Option<String>,
     /// What the executor runs now, for readers on other threads.
     watch: crate::exec::Watch,
+    /// The engine's scheduler ([`Options::speculation`]).
+    sched: phitex_defuse::Greedy,
 }
 
 impl Graph {
@@ -713,6 +777,7 @@ impl Graph {
             threads: crate::exec::threads(threads),
             pdf_exact: None,
             watch: crate::exec::Watch::new(crate::exec::threads(threads), None),
+            sched: phitex_defuse::Greedy::default(),
             eval_errors: Vec::new(),
         }
     }
@@ -820,11 +885,7 @@ impl Graph {
             let t0 = std::time::Instant::now();
             let mut ex = crate::exec::Threads::new(self.threads).watched(&self.watch);
             let c0 = crate::exec::clock().now();
-            let r = match self.eng.evaluate_absorbing(
-                &mut phitex_defuse::Greedy::default(),
-                &mut ex,
-                edits,
-            ) {
+            let r = match self.eng.evaluate_absorbing(&mut self.sched, &mut ex, edits) {
                 Ok(r) => r,
                 Err(e) => {
                     // the build ends here; the error is a diagnostic
@@ -1009,6 +1070,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         }
     }
     let mut g = Graph::new(opts.time_limit, opts.threads);
+    g.sched = opts.speculation.scheduler(opts.speculation_budget);
     let unit = g.eng.new_unit();
     let mut env: Vec<(String, ValueId)> = crate::val::initex(g.eng.values());
     for (name, x) in &env {
@@ -1142,6 +1204,8 @@ impl Build {
         let env = cached.env.clone();
         let t1 = t0.elapsed();
         let mut g = Graph::new(opts.time_limit, opts.threads);
+        g.sched = opts.speculation.scheduler(opts.speculation_budget);
+        g.sched = opts.speculation.scheduler(opts.speculation_budget);
         if let Some(p) = &opts.progress {
             g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
         }
