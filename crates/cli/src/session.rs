@@ -791,7 +791,9 @@ impl Session {
         let (Some(c), Some(p)) = (&self.cache, self.wkeys_path()) else {
             return Vec::new();
         };
-        let Some(b) = c.get(&p) else { return Vec::new() };
+        let Some(b) = c.get(&p) else {
+            return Vec::new();
+        };
         String::from_utf8_lossy(&b)
             .lines()
             .filter_map(|l| {

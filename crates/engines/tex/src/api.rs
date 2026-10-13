@@ -1284,6 +1284,28 @@ impl Graph {
             .collect()
     }
 
+    /// Round one's guesses for the loop-backs: the last session's
+    /// (`opts`), else from the text `document`.
+    fn guesses(&mut self, opts: &Options, document: &str) {
+        // the last session's page-builder loop-backs, round one's guess
+        {
+            let mut rd = Rd(&opts.pagefx);
+            while let (Some(j), Some(t)) = (rd.u64(), rd.tree()) {
+                if usize::try_from(j).is_ok_and(|j| j < crate::page::MAX_PAGES) {
+                    let v = self.eng.values();
+                    let f = v.field(&format!("pagefx:{j}"));
+                    let x = import(v, &t);
+                    self.eng.declare_loopback(f, x);
+                }
+            }
+        }
+        let aux = format!("{}.aux", opts.jobname);
+        self.wkeys_guess.clone_from(&opts.wkeys);
+        if !self.wkeys_guess.iter().any(|(n, _)| *n == aux) {
+            self.wkeys_guess.push((aux, guess_wkeys(document)));
+        }
+    }
+
     /// A file the job writes is read back: from the previous round
     /// (`fixpoint`: a loop-back field, absent in round one, as LaTeX's
     /// `\@input` finds no `.aux` on a first run), or absent.
@@ -1317,7 +1339,9 @@ impl Graph {
                 .wkeys_guess
                 .iter()
                 .find(|(n, _)| n == name && defines_only(name))
-                .map_or(none, |(_, ks)| v.list(ks.iter().map(|k| v.str(k)).collect()));
+                .map_or(none, |(_, ks)| {
+                    v.list(ks.iter().map(|k| v.str(k)).collect())
+                });
             self.eng.declare_loopback(w, guess);
             // the guessed keys' `wdef:<field>` loop-backs declared with
             // it: a read-back of a guessed key never waits for them
@@ -1618,6 +1642,7 @@ impl Graph {
 /// and `\bibcite` lines, in text order), then the kernel's
 /// `\@abspage@last` (the line `\enddocument` writes). Nothing without
 /// `\documentclass`: another job's `.aux` is its own.
+#[must_use]
 pub fn guess_wkeys(text: &str) -> Vec<String> {
     if !text.contains("\\documentclass") {
         return Vec::new();
@@ -2057,7 +2082,6 @@ impl Build {
         let mut g = Graph::new(opts.time_limit, opts.threads);
         g.eng.set_max_rounds(opts.max_rounds);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
-        g.sched = opts.speculation.scheduler(opts.speculation_budget);
         if let Some(p) = &opts.progress {
             g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
         }
@@ -2067,23 +2091,7 @@ impl Build {
         for (n, _) in cached.reads.clone() {
             g.supply(&opts.finder, &n);
         }
-        // the last session's page-builder loop-backs, round one's guess
-        {
-            let mut rd = Rd(&opts.pagefx);
-            while let (Some(j), Some(t)) = (rd.u64(), rd.tree()) {
-                if usize::try_from(j).is_ok_and(|j| j < crate::page::MAX_PAGES) {
-                    let v = g.eng.values();
-                    let f = v.field(&format!("pagefx:{j}"));
-                    let x = import(v, &t);
-                    g.eng.declare_loopback(f, x);
-                }
-            }
-        }
-        let aux = format!("{}.aux", opts.jobname);
-        g.wkeys_guess = opts.wkeys.clone();
-        if !g.wkeys_guess.iter().any(|(n, _)| *n == aux) {
-            g.wkeys_guess.push((aux, guess_wkeys(document)));
-        }
+        g.guesses(&opts, document);
         // the files a LaTeX job writes and reads back: in-memory values
         // from the start (`.bbl` and `.ind` stay files until their
         // BibTeX and makeindex nodes publish them)
@@ -2467,7 +2475,9 @@ impl Build {
         if let Some(s) = self.g.eng.acc_value(self.unit, v.field("pagefxs")) {
             for e in v.seq_to_vec(s) {
                 let xs = list_of(v, e);
-                let (Some(&j), Some(&x)) = (xs.first(), xs.get(1)) else { continue };
+                let (Some(&j), Some(&x)) = (xs.first(), xs.get(1)) else {
+                    continue;
+                };
                 let j = u64::try_from(crate::val::int_of(v, j)).unwrap_or(0);
                 match last.iter_mut().find(|(k, _)| *k == j) {
                     Some(slot) => slot.1 = x,
