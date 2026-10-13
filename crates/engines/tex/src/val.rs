@@ -177,13 +177,105 @@ pub(crate) mod group {
     pub const MATH_LEFT: i64 = 16;
 }
 
+/// An interned control sequence name (`id_lookup`, §259): a number,
+/// dense from 0 in order of first sight, and the name. Equal names have
+/// one entry for the life of the process, so comparing and hashing a
+/// control sequence touch the number only, and a run indexes the
+/// meanings it looked up by it ([`CsId::index`]). The table holds names
+/// only: ids never reach a value (tokens encode as their names), so
+/// cached formats and the value table do not depend on the order names
+/// were seen in.
+pub(crate) struct CsEntry {
+    id: u32,
+    name: Box<str>,
+}
+
+/// A control sequence: its interned entry ([`CsEntry`]).
+#[derive(Clone, Copy)]
+pub(crate) struct CsId(&'static CsEntry);
+
+impl CsId {
+    /// The entry of `name`, made on its first sight.
+    pub(crate) fn intern(name: &str) -> CsId {
+        thread_local! {
+            static LOCAL: std::cell::RefCell<FxHashMap<Box<str>, CsId>> =
+                std::cell::RefCell::default();
+        }
+        static TABLE: OnceLock<std::sync::Mutex<FxHashMap<&'static str, CsId>>> = OnceLock::new();
+        if let Some(c) = LOCAL.with(|l| l.borrow().get(name).copied()) {
+            return c;
+        }
+        let c = {
+            let mut t = TABLE
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(&c) = t.get(name) {
+                c
+            } else {
+                let e: &'static CsEntry = Box::leak(Box::new(CsEntry {
+                    id: u32::try_from(t.len()).unwrap_or(u32::MAX),
+                    name: Box::from(name),
+                }));
+                let c = CsId(e);
+                t.insert(&e.name, c);
+                c
+            }
+        };
+        LOCAL.with(|l| l.borrow_mut().insert(Box::from(name), c));
+        c
+    }
+
+    /// The dense number of this name.
+    pub(crate) fn index(self) -> usize {
+        self.0.id as usize
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        &self.0.name
+    }
+}
+
+impl PartialEq for CsId {
+    fn eq(&self, o: &CsId) -> bool {
+        self.0.id == o.0.id
+    }
+}
+
+impl Eq for CsId {}
+
+impl std::hash::Hash for CsId {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.0.id.hash(h);
+    }
+}
+
+impl std::ops::Deref for CsId {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0.name
+    }
+}
+
+impl std::fmt::Debug for CsId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.name(), f)
+    }
+}
+
+impl std::fmt::Display for CsId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// A token (§289): a character with its category, or a control sequence.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Tok {
     /// `cat << 21 | char`; category 13 is an active character.
     C(u32),
-    /// A control sequence's name (frozen ones start with `\u{10FFFE}`).
-    S(Rc<str>),
+    /// A control sequence (frozen ones' names start with `\u{10FFFE}`).
+    S(CsId),
 }
 
 impl Tok {
@@ -192,7 +284,7 @@ impl Tok {
     }
 
     pub(crate) fn cs(name: &str) -> Tok {
-        Tok::S(Rc::from(name))
+        Tok::S(CsId::intern(name))
     }
 
     /// The category of a character token.
@@ -235,7 +327,7 @@ impl Tok {
     pub(crate) fn decode(v: &Values, id: ValueId) -> Tok {
         match &*v.get(id) {
             Value::Int(i) => Tok::C(u32::try_from(*i).unwrap_or(0)),
-            Value::Str(s) => Tok::S(Rc::from(s.strip_prefix('\\').unwrap_or(s))),
+            Value::Str(s) => Tok::cs(s.strip_prefix('\\').unwrap_or(s)),
             _ => Tok::C(0),
         }
     }
@@ -260,6 +352,11 @@ fn tok_value(v: &Values, t: &Tok) -> ValueId {
 }
 
 pub(crate) fn toks_of(v: &Values, id: Option<ValueId>) -> Vec<Tok> {
+    toks_rc(v, id).to_vec()
+}
+
+/// The token list `id`, shared with this thread's cache (no copy).
+pub(crate) fn toks_rc(v: &Values, id: Option<ValueId>) -> Rc<[Tok]> {
     match id {
         Some(id) => decoded(
             v,
@@ -267,10 +364,10 @@ pub(crate) fn toks_of(v: &Values, id: Option<ValueId>) -> Vec<Tok> {
             |d| &mut d.toks,
             || match &*v.get(id) {
                 Value::List(xs) => xs.iter().map(|&x| Tok::decode(v, x)).collect(),
-                _ => Vec::new(),
+                _ => Rc::from([]),
             },
         ),
-        None => Vec::new(),
+        None => Rc::from([]),
     }
 }
 
@@ -281,7 +378,7 @@ pub(crate) fn toks_of(v: &Values, id: Option<ValueId>) -> Vec<Tok> {
 #[derive(Default)]
 struct Decoded {
     instance: u64,
-    toks: FxHashMap<ValueId, Vec<Tok>>,
+    toks: FxHashMap<ValueId, Rc<[Tok]>>,
     means: FxHashMap<ValueId, Mean>,
     glues: FxHashMap<ValueId, Glue>,
     frames: FxHashMap<ValueId, Option<crate::run::Frame>>,
@@ -310,6 +407,9 @@ struct Encoded {
     strs: FxHashMap<Box<str>, ValueId>,
     glues: FxHashMap<Glue, ValueId>,
     means: FxHashMap<MeanKey, ValueId>,
+    /// Macros by address (the `Rc` kept, so an address is never reused
+    /// while it is a key): a `\\let` of a macro encodes nothing.
+    macros: FxHashMap<usize, (Rc<Macro>, ValueId)>,
     nodes: FxHashMap<NodeKey, ValueId>,
 }
 
@@ -466,9 +566,9 @@ pub(crate) fn frame_of(
     decoded(v, id, |d| &mut d.frames, make)
 }
 
-/// The node `id` decoded before on this thread, if it is a leaf (a node
-/// holding no list, mark or whatsit: its decoding is a function of its
-/// value alone).
+/// The node `id` decoded before on this thread, if its decoding met no
+/// mark or whatsit (then it is a function of its value alone: a box and
+/// its list included).
 pub(crate) fn leaf_of(v: &Values, id: ValueId) -> Option<phitex_typeset::node::Node> {
     DECODED.with(|c| {
         let c = c.borrow();
@@ -580,7 +680,8 @@ pub(crate) enum Mean {
 pub(crate) struct Macro {
     pub flags: u8,
     pub params: Vec<Tok>,
-    pub body: Vec<Tok>,
+    /// Shared: a call without arguments reads it in place.
+    pub body: Rc<[Tok]>,
 }
 
 pub(crate) const MATCH_CAT: u8 = 14;
@@ -591,8 +692,8 @@ pub(crate) fn end_match() -> Tok {
 }
 pub(crate) const OUT_PARAM_CAT: u8 = 5;
 
-fn prim_index() -> &'static std::collections::HashMap<&'static str, (u8, i32)> {
-    static M: OnceLock<std::collections::HashMap<&'static str, (u8, i32)>> = OnceLock::new();
+fn prim_index() -> &'static phitex_defuse::FxHashMap<&'static str, (u8, i32)> {
+    static M: OnceLock<phitex_defuse::FxHashMap<&'static str, (u8, i32)>> = OnceLock::new();
     M.get_or_init(|| {
         crate::etex::all_prims()
             .map(|&(n, c, h)| (n, (c, h)))
@@ -600,8 +701,8 @@ fn prim_index() -> &'static std::collections::HashMap<&'static str, (u8, i32)> {
     })
 }
 
-fn prim_names() -> &'static std::collections::HashMap<(u8, i32), &'static str> {
-    static M: OnceLock<std::collections::HashMap<(u8, i32), &'static str>> = OnceLock::new();
+fn prim_names() -> &'static phitex_defuse::FxHashMap<(u8, i32), &'static str> {
+    static M: OnceLock<phitex_defuse::FxHashMap<(u8, i32), &'static str>> = OnceLock::new();
     M.get_or_init(|| {
         crate::etex::all_prims()
             .map(|&(n, c, h)| ((c, h), n))
@@ -650,7 +751,7 @@ impl Mean {
 
     pub(crate) fn encode(&self, v: &Values) -> ValueId {
         let key = match self {
-            Mean::Macro(_) => return self.encode_new(v),
+            Mean::Macro(m) => return macro_id(v, m),
             Mean::Prim(n, _, _) => MeanKey::Prim(n),
             Mean::Char(c, h) => MeanKey::Char(*c, *h),
             Mean::Undefined => MeanKey::Undefined,
@@ -689,7 +790,18 @@ impl Mean {
 
     pub(crate) fn decode(v: &Values, id: Option<ValueId>) -> Mean {
         let Some(id) = id else { return Mean::Undefined };
-        decoded(v, id, |d| &mut d.means, || Mean::decode_new(v, id))
+        decoded(
+            v,
+            id,
+            |d| &mut d.means,
+            || {
+                let m = Mean::decode_new(v, id);
+                if let Mean::Macro(x) = &m {
+                    remember_macro(v, x, id);
+                }
+                m
+            },
+        )
     }
 
     fn decode_new(v: &Values, id: ValueId) -> Mean {
@@ -710,7 +822,7 @@ impl Mean {
             "macro" => Mean::Macro(Rc::new(Macro {
                 flags: u8::try_from(n(1)).unwrap_or(0),
                 params: toks_of(v, xs.get(2).copied()),
-                body: toks_of(v, xs.get(3).copied()),
+                body: toks_rc(v, xs.get(3).copied()),
             })),
             "char" => Mean::Char(
                 u8::try_from(n(1)).unwrap_or(0),
@@ -743,6 +855,64 @@ impl Mean {
             _ => Mean::Undefined,
         }
     }
+}
+
+/// The value of macro `m`, encoded once an epoch per macro (cached by
+/// address), and its decoding kept so reading it back decodes nothing.
+fn macro_id(v: &Values, m: &Rc<Macro>) -> ValueId {
+    let Some(epoch) = scope_epoch(v) else {
+        return Mean::Macro(m.clone()).encode_new(v);
+    };
+    let key = Rc::as_ptr(m) as usize;
+    let hit = ENCODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.instance != v.instance() || c.epoch != epoch {
+            *c = Encoded {
+                instance: v.instance(),
+                epoch,
+                ..Encoded::default()
+            };
+        }
+        c.macros.get(&key).map(|e| e.1)
+    });
+    if let Some(x) = hit {
+        return x;
+    }
+    let x = Mean::Macro(m.clone()).encode_new(v);
+    remember_macro(v, m, x);
+    DECODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.instance != v.instance() {
+            *c = Decoded {
+                instance: v.instance(),
+                ..Decoded::default()
+            };
+        }
+        if c.means.len() >= DECODED_MAX {
+            c.means.clear();
+        }
+        c.means.entry(x).or_insert_with(|| Mean::Macro(m.clone()));
+    });
+    x
+}
+
+/// Records `id` as the value of macro `m` at the run's epoch.
+fn remember_macro(v: &Values, m: &Rc<Macro>, id: ValueId) {
+    let Some(epoch) = scope_epoch(v) else { return };
+    ENCODED.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.instance != v.instance() || c.epoch != epoch {
+            *c = Encoded {
+                instance: v.instance(),
+                epoch,
+                ..Encoded::default()
+            };
+        }
+        if c.macros.len() >= DECODED_MAX {
+            c.macros.clear();
+        }
+        c.macros.insert(Rc::as_ptr(m) as usize, (m.clone(), id));
+    });
 }
 
 fn reg_tag(c: u8) -> (&'static str, i32) {

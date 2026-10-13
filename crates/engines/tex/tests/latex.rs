@@ -437,6 +437,87 @@ fn pdflatex_hello() {
     assert!(b.is_pdf());
 }
 
+/// Loop-back rounds of `hello.tex` and of a document with a `\label`,
+/// cold and after a one-word edit, without and with the fixpoint
+/// (measurement; prints only).
+#[test]
+#[ignore = "heavy: the LaTeX format"]
+fn latex_loop_rounds() {
+    let dir = common::fixtures().join("latex/hello");
+    let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/cache/latex.fmt");
+    let hello = common::read(&dir.join("hello.tex"));
+    let label = "\\documentclass{article}\\begin{document}\\section{One}\\label{one}See section~\\ref{one} on page~\\pageref{one}.\\end{document}\n";
+    for (name, src) in [("hello", hello.as_str()), ("label", label)] {
+        for fixpoint in [false, true] {
+            let opts = Options {
+                prelude_bytes: std::fs::read(&cache).ok(),
+                time_limit: None,
+                ..options("hello", &dir, "", fixpoint, false)
+            };
+            let mut b = common::build(opts, Some(&prelude(false)), src);
+            if !cache.exists()
+                && let Some(bytes) = b.export_prelude()
+            {
+                let _ = std::fs::create_dir_all(cache.parent().expect("dir"));
+                let _ = std::fs::write(&cache, bytes);
+            }
+            let cold = (b.stats.loop_rounds, b.stats.rounds, b.stats.nodes_run);
+            let keys = b.wkeys();
+            let fx = b.export_pagefx();
+            if fixpoint {
+                // the same without the key-set guess (an empty guess)
+                let o3 = Options {
+                    prelude_bytes: std::fs::read(&cache).ok(),
+                    time_limit: None,
+                    wkeys: vec![("hello.aux".to_owned(), Vec::new())],
+                    ..options("hello", &dir, "", fixpoint, false)
+                };
+                let b3 = common::build(o3, Some(&prelude(false)), src);
+                eprintln!(
+                    "fixpoint {name} unguessed: {} loop rounds, {} evaluations, {} nodes run",
+                    b3.stats.loop_rounds, b3.stats.rounds, b3.stats.nodes_run
+                );
+                assert_eq!(b.output().0, b3.output().0, "the guess changed the output");
+                assert_eq!(b.files(), b3.files(), "the guess changed the files");
+                let (out, log) = b.output();
+                eprintln!(
+                    "fixpoint {name}: {} bytes out, {:?}, log tail {:?}",
+                    out.len(),
+                    b.diagnostics(),
+                    &log[log.len().saturating_sub(400)..]
+                );
+            }
+            // a second session from the first one's loop-back values
+            let opts2 = Options {
+                prelude_bytes: std::fs::read(&cache).ok(),
+                time_limit: None,
+                wkeys: keys.clone(),
+                pagefx: fx.clone(),
+                ..options("hello", &dir, "", fixpoint, false)
+            };
+            let b2 = common::build(opts2, Some(&prelude(false)), src);
+            assert_eq!(b2.output().0, b.output().0, "second session differs");
+            eprintln!(
+                "rounds {name} fixpoint={fixpoint} second session: {} loop rounds / {} nodes run (pagefx {} bytes)",
+                b2.stats.loop_rounds,
+                b2.stats.nodes_run,
+                fx.len()
+            );
+            b.edit(&src.replacen("\\begin{document}", "\\begin{document}Hi ", 1));
+            eprintln!(
+                "rounds {name} fixpoint={fixpoint}: cold {} loop rounds / {} evaluations / {} nodes run, edit {} / {} / {}; wkeys {keys:?}; guess {:?}",
+                cold.0,
+                cold.1,
+                cold.2,
+                b.stats.loop_rounds,
+                b.stats.rounds,
+                b.stats.nodes_run,
+                phitex_tex::guess_wkeys(src)
+            );
+        }
+    }
+}
+
 /// `pdflatex` hello byte-identical to the oracle, cold and from the
 /// format: the format carries `\pdfglyphtounicode`'s table
 /// (`dumptounicode`/`undumptounicode`, pdfTeX §1502–§1503), so the
@@ -450,4 +531,73 @@ fn pdflatex_hello_tounicode() {
         let (out, _) = b.output();
         assert!(out == want, "{:?}", common::first_difference(&out, &want));
     }
+}
+
+/// `pdflatex` on hello + 30 paragraphs (`pdfdocs/paras30.tex`): the
+/// document environment's body is sliced into its paragraphs, one node
+/// each (`\begin{document}` leaves its group to the engine as the scope
+/// they run in); the PDF equals pdfTeX's cold and after a one-word edit,
+/// which reruns a few document nodes. Run with `PHITEX_DOC_SCOPE=1`.
+#[test]
+#[ignore = "heavy: the LaTeX format"]
+fn latex_paragraph_nodes() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let src = common::read(&dir.join("paras30.tex"));
+    let want = std::fs::read(common::fixtures().join("latex/pdf/paras30.pdf")).expect("the oracle");
+    let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../target/cache/pdflatex.fmt");
+    let opts = || Options {
+        prelude_bytes: std::fs::read(&cache).ok(),
+        time_limit: None,
+        ..options("paras30", &dir, "", false, true)
+    };
+    let cached = cache.exists();
+    let mut b = common::build(opts(), Some(&prelude(true)), &src);
+    if !cached {
+        let _ = std::fs::create_dir_all(cache.parent().expect("dir"));
+        if let Some(bytes) = b.export_prelude() {
+            let _ = std::fs::write(&cache, bytes);
+        }
+    }
+    let regions = b.stats.nodes_text_frames;
+    eprintln!(
+        "cold: {regions} document nodes, {} pages; {}",
+        b.pages().len(),
+        report("paras30", &b)
+    );
+    if let Ok(d) = std::env::var("PHITEX_GATE_OUT") {
+        let _ = std::fs::write(format!("{d}/paras30.pdf"), b.output().0);
+        let _ = std::fs::write(format!("{d}/paras30.log"), b.output().1);
+    }
+    for d in b.diagnostics() {
+        eprintln!("{d:?}");
+    }
+    if let Some(d) = common::first_difference(&b.output().0, &want) {
+        panic!("paras30.pdf cold: {d}");
+    }
+    assert!(regions >= 30, "{regions} document nodes for 30 paragraphs");
+    let at = src
+        .find("Paragraph 17 of the text: the quick")
+        .expect("p17")
+        + 35;
+    let new = format!("{}quack{}", &src[..at], &src[at + 5..]);
+    let t0 = std::time::Instant::now();
+    b.edit(&new);
+    let pages = b.pages().len() as u64;
+    let s = &b.stats;
+    eprintln!(
+        "edit {:?}: {} nodes run, {} runs, {} pages; {}",
+        t0.elapsed(),
+        s.nodes_run,
+        s.runs,
+        pages,
+        report("paras30", &b)
+    );
+    let cold = common::build(opts(), Some(&prelude(true)), &new);
+    assert_eq!(b.output().0, cold.output().0, "edit differs from cold");
+    assert!(
+        b.stats.nodes_run <= 3 + pages + 2,
+        "edit reran {} nodes ({} pages)",
+        b.stats.nodes_run,
+        pages
+    );
 }

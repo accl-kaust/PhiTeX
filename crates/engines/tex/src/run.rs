@@ -13,6 +13,7 @@ use std::rc::Rc;
 
 use phitex_defuse::{Ctx, Effect, Field, FxHashMap, Locality, OpId, Stop, Value, ValueId, Values};
 
+use crate::fields::Par;
 use crate::val::{Mean, Tok, cmd, int_of, list_of, str_of};
 
 /// Why a run cannot finish its command now.
@@ -51,6 +52,9 @@ pub(crate) struct Ops {
     /// (set by `api::Build::with`; none while a format is built): a
     /// document file `\input` is sliced with them ([`Run::leftover`]).
     pub defs: std::sync::Arc<std::sync::Mutex<crate::hints::Defs>>,
+    /// Page-step runs that reached their finish, by page index (not
+    /// the attempts that stopped or were cut off): [`crate::Stats`].
+    pub steps_done: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
 }
 
 /// A level of the input stack.
@@ -96,12 +100,6 @@ impl FileRest {
         }
     }
 
-    /// The position of the next line in the file (its characters are the
-    /// file's bytes).
-    fn byte_pos(&self) -> usize {
-        self.pos
-    }
-
     /// The file's name and the line number of the next line, for
     /// diagnostics ([`Run::heartbeat`]).
     pub(crate) fn where_(&self, v: &Values) -> (String, usize) {
@@ -121,15 +119,39 @@ impl FileRest {
         self.off < self.str().len()
     }
 
-    /// The next line, with its end of line; the offset moves past it.
-    fn take_line(&mut self) -> String {
+    /// The next line as a segment not yet reached (what a top-level
+    /// node's arguments for it decode to, without a value or a string per
+    /// line: its bytes are its characters, trailing blanks removed, as
+    /// web2c's `input_line`); the offset moves past it.
+    fn take_src(&mut self) -> Src {
+        let at = self.pos;
         let s = self.str();
         let rest = &s[self.off..];
         let n = rest.find('\n').map_or(rest.len(), |k| k + 1);
-        let line = rest[..n].to_owned();
-        self.pos += line.chars().count();
+        let line = &rest[..n];
+        let bytes = line.as_bytes();
+        let mut end = bytes.len();
+        while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
+            end -= 1;
+        }
+        while end > 0 && matches!(bytes[end - 1], b' ' | b'\t') {
+            end -= 1;
+        }
+        let mut buf = Vec::with_capacity(end + 1);
+        buf.extend(bytes[..end].iter().map(|&b| u32::from(b)));
+        let chars = line.chars().count();
+        self.pos += chars;
         self.off += n;
-        line
+        Src {
+            buf,
+            loc: 0,
+            state: NEW_LINE,
+            endch: -2,
+            starts: true,
+            ends: true,
+            origin: Some((self.name, at)),
+            rescanned: false,
+        }
     }
 }
 
@@ -212,7 +234,12 @@ pub(crate) struct Run<'c, 'a> {
     pub no_pull: bool,
     /// The category codes this run read (§232), by character below
     /// 256, plus one (0: not read yet); emptied whenever `own` changes.
-    cats: [u8; 256],
+    /// The run's field slots ([`crate::fields`]), a cache of field values:
+    /// `None` until read, then the run's view of the slot's field (as
+    /// [`Run::get_f`] reads it), kept in step with every definition and
+    /// restore. Empty until the first read.
+    #[allow(clippy::option_option)]
+    slots: Vec<Option<Option<ValueId>>>,
     pub own: FxHashMap<Field, Option<ValueId>>,
     /// Values read in place of the fields' reaching definitions (a page
     /// step's `\count0..9` from `pgdef:<j-1>`), below this run's own.
@@ -239,8 +266,12 @@ pub(crate) struct Run<'c, 'a> {
     /// The codes (`cur_if`) of `conds`, parallel to it.
     pub if_codes: Vec<i32>,
     mcache: FxHashMap<ValueId, Mean>,
-    /// The meaning fields of the tokens this run looked up.
-    tfields: FxHashMap<Tok, Field>,
+    /// The meaning fields of the control sequences this run looked up,
+    /// by [`crate::val::CsId::index`], and of the active characters.
+    tfields: Vec<Option<Field>>,
+    afields: FxHashMap<u32, Field>,
+    /// The buffer a control sequence's name is scanned into (§356).
+    name_buf: String,
     /// The scope kind last decoded (`Run::mode`, once a command): its
     /// value and its fields `(group, sid, lid, mode, depth, extra)`.
     pub kind_memo: Option<(ValueId, KindFields)>,
@@ -295,7 +326,7 @@ impl<'c, 'a> Run<'c, 'a> {
             no_pull: false,
             own: FxHashMap::default(),
             over: FxHashMap::default(),
-            cats: [0; 256],
+            slots: Vec::new(),
             defs: Vec::new(),
             def_ix: FxHashMap::default(),
             ginert: FxHashMap::default(),
@@ -313,7 +344,9 @@ impl<'c, 'a> Run<'c, 'a> {
             conds: Vec::new(),
             if_codes: Vec::new(),
             mcache: FxHashMap::default(),
-            tfields: FxHashMap::default(),
+            tfields: Vec::new(),
+            afields: FxHashMap::default(),
+            name_buf: String::new(),
             kind_memo: None,
             astate: None,
             lines_entered: 0,
@@ -327,9 +360,110 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
-    /// Forgets the category codes read: a definition may have changed one.
-    pub(crate) fn forget_cats(&mut self) {
-        self.cats = [0; 256];
+    /// A binding of `f` in the run's view changed to `x` (`None`: the
+    /// engine's value again): its slot follows.
+    #[allow(clippy::option_option)]
+    pub(crate) fn slot_note(&mut self, f: Field, x: Option<Option<ValueId>>) {
+        if self.slots.is_empty() {
+            return;
+        }
+        if let Some(s) = self.ops.fields.field_slot(f) {
+            self.slots[s] = x;
+        }
+    }
+
+    /// Field slot `s`: its field read once a run.
+    #[inline]
+    pub(crate) fn slot_get(&mut self, s: usize) -> R<Option<ValueId>> {
+        if let Some(Some(x)) = self.slots.get(s) {
+            return Ok(*x);
+        }
+        let x = self.get_f(self.ops.fields.slot_field(s))?;
+        if self.slots.is_empty() {
+            self.slots = vec![None; crate::fields::NSLOT];
+        }
+        self.slots[s] = Some(x);
+        Ok(x)
+    }
+
+    /// Defines slot `s` (as [`Self::set`]).
+    pub(crate) fn slot_set(&mut self, s: usize, val: ValueId, global: bool) {
+        self.set_f(self.ops.fields.slot_field(s), val, global);
+    }
+
+    /// The parameter `p`.
+    pub(crate) fn par(&mut self, p: Par) -> R<Option<ValueId>> {
+        self.slot_get(p as usize)
+    }
+
+    /// The integer or dimension parameter `p`.
+    pub(crate) fn ipar(&mut self, p: Par) -> R<i32> {
+        let x = self.slot_get(p as usize)?;
+        Ok(crate::val::i32_of(self.v, x))
+    }
+
+    /// The glue parameter `p`.
+    pub(crate) fn gpar(&mut self, p: Par) -> R<phitex_typeset::glue::Glue> {
+        let x = self.slot_get(p as usize)?;
+        Ok(crate::val::glue_of(self.v, x))
+    }
+
+    /// Defines the parameter `p`.
+    pub(crate) fn set_par(&mut self, p: Par, val: ValueId, global: bool) {
+        self.slot_set(p as usize, val, global);
+    }
+
+    /// The field of the primitive quantity at `(c, chr)` (§1224, §1228).
+    pub(crate) fn quantity(&self, c: u8, chr: i32) -> Field {
+        match self.ops.fields.quantity_slot(c, chr) {
+            Some(s) => self.ops.fields.slot_field(s),
+            None => self.v.field(&crate::val::quantity_field(c, chr)),
+        }
+    }
+
+    /// The value of the field of the primitive quantity at `(c, chr)`.
+    pub(crate) fn qget(&mut self, c: u8, chr: i32) -> R<Option<ValueId>> {
+        match self.ops.fields.quantity_slot(c, chr) {
+            Some(s) => self.slot_get(s),
+            None => self.get(&crate::val::quantity_field(c, chr)),
+        }
+    }
+
+    /// The field `<fam>:<key>` ([`crate::fields::Fam`]).
+    pub(crate) fn keyed(&self, fam: crate::fields::Fam, key: &str) -> Field {
+        self.ops
+            .fields
+            .keyed(self.v, self.cx.values_epoch(), fam, key)
+    }
+
+    /// The field of register `n` of kind `r` (as [`Self::reg`]).
+    pub(crate) fn reg_field(&self, r: usize, n: i32) -> Field {
+        match crate::fields::reg_slot(r, n) {
+            Some(s) => self.ops.fields.slot_field(s),
+            None => self.v.field(&format!(
+                "{}:{n}",
+                ["count", "dimen", "skip", "muskip", "toks"][r]
+            )),
+        }
+    }
+
+    /// Field `f` in the run's view, through its slot if it has one.
+    pub(crate) fn read_f(&mut self, f: Field) -> R<Option<ValueId>> {
+        match self.ops.fields.field_slot(f) {
+            Some(s) => self.slot_get(s),
+            None => self.get_f(f),
+        }
+    }
+
+    /// Register `n` of kind `r` (0 count, 1 dimen, 2 skip, 3 muskip, 4 toks).
+    pub(crate) fn reg(&mut self, r: usize, n: i32) -> R<Option<ValueId>> {
+        match crate::fields::reg_slot(r, n) {
+            Some(s) => self.slot_get(s),
+            None => self.get(&format!(
+                "{}:{n}",
+                ["count", "dimen", "skip", "muskip", "toks"][r]
+            )),
+        }
     }
 
     // ------------------------------------------------------------ fields
@@ -381,9 +515,9 @@ impl<'c, 'a> Run<'c, 'a> {
         let v = self.v;
         // a file the job writes: its in-memory value (`wfile:<key>`, a
         // loop-back the writer publishes), never the client's file
-        let w = v.field(&format!("wfile:{key}"));
-        let f = v.field(&format!("file:{key}"));
-        let k = v.field(&format!("wkeys:{key}"));
+        let w = self.keyed(crate::fields::Fam::Wfile, key);
+        let f = self.keyed(crate::fields::Fam::File, key);
+        let k = self.keyed(crate::fields::Fam::Wkeys, key);
         let x = if self.cx.is_loopback(k) {
             // a file whose read-back only defines: it exists (empty) once
             // a line of it defines something ([`Run::read_back`])
@@ -435,9 +569,11 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Whether file `name` is one the job writes and reads back, with its
     /// loop-backs declared.
     pub(crate) fn written_known(&self, name: &str) -> bool {
-        let v = self.v;
-        self.cx.is_loopback(v.field(&format!("wfile:{name}")))
-            || self.cx.is_loopback(v.field(&format!("wkeys:{name}")))
+        self.cx
+            .is_loopback(self.keyed(crate::fields::Fam::Wfile, name))
+            || self
+                .cx
+                .is_loopback(self.keyed(crate::fields::Fam::Wkeys, name))
     }
 
     /// `\input` of a file whose read-back only defines (`.aux`): the
@@ -447,7 +583,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// is such a file.
     pub(crate) fn read_back(&mut self, key: &str) -> R<bool> {
         let v = self.v;
-        let wk = v.field(&format!("wkeys:{key}"));
+        let wk = self.keyed(crate::fields::Fam::Wkeys, key);
         if !self.cx.is_loopback(wk) {
             return Ok(false);
         }
@@ -458,9 +594,10 @@ impl<'c, 'a> Run<'c, 'a> {
             .unwrap_or_default();
         for k in keys {
             let name = str_of(v, k);
-            let wd = v.field(&format!("wdef:{name}"));
+            let wd = self.keyed(crate::fields::Fam::Wdef, &name);
             if !self.cx.is_loopback(wd) {
-                self.cx.use_env(v.field(&format!("wdefdecl:{name}")))?;
+                self.cx
+                    .use_env(self.keyed(crate::fields::Fam::Wdefdecl, &name))?;
             }
             if !self.cx.is_loopback(wd) {
                 continue;
@@ -549,7 +686,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.no_pull = no_pull;
         self.claim_rest = claim;
         self.effect = effect;
-        self.cats = [0; 256];
+        self.slots.clear();
         self.kind_memo = None;
         res?;
         Ok(v.list(made))
@@ -559,16 +696,16 @@ impl<'c, 'a> Run<'c, 'a> {
     /// loop-back is declared, the run asks the client to declare it
     /// (`wfiledecl:<name>`, answered by `api::Graph::settle`).
     pub(crate) fn written_decl(&mut self, name: &str) -> R<()> {
-        let v = self.v;
         if !self.written_known(name) {
-            self.cx.use_env(v.field(&format!("wfiledecl:{name}")))?;
+            self.cx
+                .use_env(self.keyed(crate::fields::Fam::Wfiledecl, name))?;
         }
         Ok(())
     }
 
     pub(crate) fn get(&mut self, name: &str) -> R<Option<ValueId>> {
         let f = self.ops.fields.get_at(self.v, self.cx.values_epoch(), name);
-        self.get_f(f)
+        self.read_f(f)
     }
 
     pub(crate) fn int(&mut self, name: &str) -> R<i64> {
@@ -579,33 +716,30 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(crate::val::i32_of(self.v, self.get(name)?))
     }
 
+    /// The parameter `name` (a name known only at run time; the fixed
+    /// ones read [`Self::ipar`]).
     pub(crate) fn param(&mut self, name: &str) -> R<i32> {
-        let f = self.ops.fields.param(self.v, name);
-        Ok(crate::val::i32_of(self.v, self.get_f(f)?))
+        let x = match self.ops.fields.par_slot(name) {
+            Some(s) => self.slot_get(s)?,
+            None => self.get_f(self.ops.fields.param(self.v, name))?,
+        };
+        Ok(crate::val::i32_of(self.v, x))
     }
 
     pub(crate) fn glue_param(&mut self, name: &str) -> R<phitex_typeset::glue::Glue> {
-        let f = self.ops.fields.param(self.v, name);
-        let x = self.get_f(f)?;
+        let x = match self.ops.fields.par_slot(name) {
+            Some(s) => self.slot_get(s)?,
+            None => self.get_f(self.ops.fields.param(self.v, name))?,
+        };
         Ok(crate::val::glue_of(self.v, x))
     }
 
     pub(crate) fn cat(&mut self, c: u32) -> R<u8> {
-        let slot = usize::try_from(c).ok().filter(|&i| i < 256);
-        if let Some(i) = slot
-            && self.cats[i] != 0
-        {
-            return Ok(self.cats[i] - 1);
-        }
-        let f = self.ops.fields.cat(self.v, c);
-        let x = self.get_f(f)?;
-        let k = u8::try_from(x.map_or(0, |x| int_of(self.v, x))).unwrap_or(12);
-        if let Some(i) = slot
-            && k < u8::MAX
-        {
-            self.cats[i] = k + 1;
-        }
-        Ok(k)
+        let x = match usize::try_from(c).ok().filter(|&i| i < 256) {
+            Some(i) => self.slot_get(crate::fields::CAT0 + i)?,
+            None => self.get_f(self.ops.fields.cat(self.v, c))?,
+        };
+        Ok(u8::try_from(x.map_or(0, |x| int_of(self.v, x))).unwrap_or(12))
     }
 
     /// Defines `name` (§277–§279: `eq_define` / `geq_define`).
@@ -624,7 +758,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         self.own.insert(f, Some(val));
         self.irreversible += 1;
-        self.cats = [0; 256];
+        self.slot_note(f, Some(Some(val)));
         let loc = if global {
             Locality::Global
         } else {
@@ -668,7 +802,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if kind == "error" {
             self.diag(true, text);
         }
-        let nl = self.int("param:newlinechar")?;
+        let nl = i64::from(self.ipar(Par::newlinechar)?);
         let e = self
             .v
             .list(vec![self.v.str(kind), self.v.str(text), self.v.int(nl)]);
@@ -723,15 +857,32 @@ impl<'c, 'a> Run<'c, 'a> {
 
     pub(crate) fn mean_of(&mut self, t: &Tok) -> R<Mean> {
         // a token's meaning field, interned once a run
-        let f = if let Some(&f) = self.tfields.get(t) {
-            Some(f)
+        // (a control sequence's by its interned number: no name is
+        // hashed on the token path)
+        let hit = match t {
+            Tok::S(c) => self.tfields.get(c.index()).copied().flatten(),
+            Tok::C(x) => self.afields.get(x).copied(),
+        };
+        let f = if hit.is_some() {
+            hit
         } else {
             let f = self
                 .ops
                 .fields
                 .meaning_at(self.v, self.cx.values_epoch(), t);
             if let Some(f) = f {
-                self.tfields.insert(t.clone(), f);
+                match t {
+                    Tok::S(c) => {
+                        let i = c.index();
+                        if i >= self.tfields.len() {
+                            self.tfields.resize(i + 1, None);
+                        }
+                        self.tfields[i] = Some(f);
+                    }
+                    Tok::C(x) => {
+                        self.afields.insert(*x, f);
+                    }
+                }
             }
             f
         };
@@ -787,15 +938,26 @@ impl<'c, 'a> Run<'c, 'a> {
                 _ => {}
             }
         }
+        // (the token just read from the list on top is that list's
+        // previous token again: it is read next by stepping back, the
+        // same tokens in the same order without a new list)
+        if let Some(Frame::Toks(l, p)) = self.frames.front_mut()
+            && *p > 0
+            && l[*p - 1] == t
+        {
+            *p -= 1;
+            return;
+        }
         self.drop_spent_lists();
-        self.frames.push_front(Frame::Toks(Rc::from(vec![t]), 0));
+        self.frames.push_front(Frame::Toks(Rc::from([t]), 0));
     }
 
     /// `begin_token_list` (§323): `toks` are read next.
-    pub(crate) fn push_toks(&mut self, toks: Vec<Tok>) {
+    pub(crate) fn push_toks(&mut self, toks: impl Into<Rc<[Tok]>>) {
+        let toks: Rc<[Tok]> = toks.into();
         if !toks.is_empty() {
             self.drop_spent_lists();
-            self.frames.push_front(Frame::Toks(Rc::from(toks), 0));
+            self.frames.push_front(Frame::Toks(toks, 0));
         }
     }
 
@@ -954,16 +1116,8 @@ impl<'c, 'a> Run<'c, 'a> {
                         unreachable!()
                     };
                     if f.has_lines() {
-                        let at = f.byte_pos();
-                        let name = f.name;
-                        let line = f.take_line();
-                        let args = line_args(self.v, &line);
-                        for mut fr in decode_frames(self.v, &args).into_iter().rev() {
-                            if let Frame::Src(s) = &mut fr {
-                                s.origin = Some((name, at));
-                            }
-                            self.frames.push_front(fr);
-                        }
+                        let src = f.take_src();
+                        self.frames.push_front(Frame::Src(src));
                     } else {
                         self.pop_front_marked();
                     }
@@ -1077,7 +1231,7 @@ impl<'c, 'a> Run<'c, 'a> {
     fn end_line_char(&mut self) -> R<()> {
         let due = matches!(self.frames.front(), Some(Frame::Src(s)) if s.ends && s.endch == -3 && s.loc >= s.buf.len());
         if due {
-            let e = self.int("param:endlinechar")?;
+            let e = i64::from(self.ipar(Par::endlinechar)?);
             if let Some(Frame::Src(s)) = self.frames.front_mut() {
                 if (0..256).contains(&e) {
                     s.buf.push(u32::try_from(e).unwrap_or(13));
@@ -1194,13 +1348,17 @@ impl<'c, 'a> Run<'c, 'a> {
                     k -= 1;
                 }
                 if k > loc + 1 {
-                    let name: String = (loc..k)
-                        .map(|i| char::from_u32(self.buf(i)).unwrap_or('?'))
-                        .collect();
+                    // (the name is built in a buffer kept by the run:
+                    // a known name allocates nothing, §259)
+                    let mut name = std::mem::take(&mut self.name_buf);
+                    name.clear();
+                    name.extend((loc..k).map(|i| char::from_u32(self.buf(i)).unwrap_or('?')));
                     if let Some(Frame::Src(s)) = self.frames.front_mut() {
                         s.loc = k;
                     }
-                    return Ok(Tok::S(Rc::from(name)));
+                    let t = Tok::cs(&name);
+                    self.name_buf = name;
+                    return Ok(t);
                 }
             } else if self.reduce_expanded(k, cat) {
                 continue;
@@ -1209,9 +1367,10 @@ impl<'c, 'a> Run<'c, 'a> {
             if let Some(Frame::Src(s)) = self.frames.front_mut() {
                 s.loc = loc + 1;
             }
-            return Ok(Tok::S(Rc::from(
-                char::from_u32(c).unwrap_or('?').to_string(),
-            )));
+            let mut b = [0; 4];
+            return Ok(Tok::cs(
+                char::from_u32(c).unwrap_or('?').encode_utf8(&mut b),
+            ));
         }
     }
 
@@ -1266,7 +1425,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 if let Tok::S(n) = &t {
                     if n.starts_with("\u{10FFFE}eof") {
                         // §362: the end of an \input file (or a pseudo file)
-                        crate::etex::end_of_file(self, &n.clone())?;
+                        crate::etex::end_of_file(self, n.name())?;
                         continue;
                     }
                     if &**n == "\u{10FFFE}uend" {
@@ -1521,6 +1680,19 @@ impl<'c, 'a> Run<'c, 'a> {
                     return Ok(());
                 }
             }
+            // `\begin{document}`'s slice ends inside the environment's
+            // group: that group becomes the engine scope the body's
+            // regions run in (`hints::opens_scope`)
+            if self.doc
+                && self.conds.is_empty()
+                && self.nest.len() == 1
+                && self.nest[0].group != 0
+                && !self.nest[0].owns
+                && crate::hints::opens_scope(self.v, &self.cx.args())
+            {
+                self.leave_scope()?;
+                return Ok(());
+            }
             // a paragraph, a group or a conditional still open reads on
             // into the next sibling, claimed
             if self.open_span() && !self.eof && self.pull()? {
@@ -1563,10 +1735,10 @@ impl<'c, 'a> Run<'c, 'a> {
             )
         }) {
             let v = self.v;
-            let vsize = self.param("vsize").unwrap_or(0);
-            let maxdepth = self.param("maxdepth").unwrap_or(0);
-            let topskip = self.glue_param("topskip").unwrap_or_default();
-            let holding = self.param("holdinginserts").unwrap_or(0);
+            let vsize = self.ipar(Par::vsize).unwrap_or(0);
+            let maxdepth = self.ipar(Par::maxdepth).unwrap_or(0);
+            let topskip = self.gpar(Par::topskip).unwrap_or_default();
+            let holding = self.ipar(Par::holdinginserts).unwrap_or(0);
             let marker = v.list(vec![
                 v.int(crate::nodes::T_PAGE_PARAMS),
                 v.int(i64::from(vsize)),
@@ -1785,28 +1957,6 @@ pub(crate) fn src_frame(line: &str, endlinechar: i64) -> Frame {
     })
 }
 
-/// A source line as a top-level node's arguments: its characters with
-/// trailing spaces removed (web2c's `input_line`), not yet read.
-pub(crate) fn line_args(v: &Values, line: &str) -> Vec<ValueId> {
-    let bytes = line.as_bytes();
-    let mut end = bytes.len();
-    while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
-        end -= 1;
-    }
-    while end > 0 && matches!(bytes[end - 1], b' ' | b'\t') {
-        end -= 1;
-    }
-    let text: String = bytes[..end].iter().map(|&b| char::from(b)).collect();
-    let frame = v.list(vec![
-        v.str("s"),
-        v.str(&text),
-        v.int(i64::from(NEW_LINE)),
-        v.int(-2),
-        v.int(3),
-    ]);
-    vec![v.list(vec![frame]), v.int(1)]
-}
-
 /// [`slice_args`] for a piece of a file `\input` read, beginning at
 /// byte `at` of the file named `name`: every segment carries its origin
 /// `(name, offset)`; the kind is 2 (a document's piece, not the top).
@@ -1900,7 +2050,7 @@ fn ptok(t: &Tok) -> PTok {
 fn utok(t: PTok) -> Tok {
     match t {
         PTok::C(c) => Tok::C(c),
-        PTok::S(s) => Tok::S(Rc::from(s)),
+        PTok::S(s) => Tok::cs(&s),
     }
 }
 
@@ -1966,7 +2116,12 @@ pub(crate) struct Parked {
 /// Where an input frame stood when the command began.
 enum Snap {
     Toks(Rc<[Tok]>, usize),
-    Src { loc: usize, state: u8, endch: i64, len: usize },
+    Src {
+        loc: usize,
+        state: u8,
+        endch: i64,
+        len: usize,
+    },
     File(usize, usize),
     None,
 }

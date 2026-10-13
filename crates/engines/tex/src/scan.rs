@@ -4,12 +4,13 @@
 use phitex_typeset::arith::{nx_plus_y, round_decimals, xn_over_d};
 use phitex_typeset::glue::{Glue, Order};
 
+use crate::fields::Par;
 use crate::print;
 use crate::run::{R, Run};
 use crate::val::{
     COUNT_BASE, DEL_CODE_BASE, LC_CODE_BASE, MATCH_CAT, MATH_CODE_BASE, MATH_FONT_BASE,
     MU_SKIP_BASE, OUT_PARAM_CAT, SCALED_BASE, SF_CODE_BASE, SKIP_BASE, TOKS_BASE, Tok,
-    UC_CODE_BASE, cmd, glue_of, quantity_field, toks_of,
+    UC_CODE_BASE, cmd, glue_of, toks_of,
 };
 
 pub(crate) const MAX_DIMEN: i32 = 0o7777777777;
@@ -381,7 +382,7 @@ impl Run<'_, '_> {
         }
         if self.scan_keyword("true")? {
             // §457
-            let mag = self.param("mag")?;
+            let mag = self.ipar(Par::mag)?;
             if mag != 1000 && mag > 0 {
                 let d = xn_over_d(val, 1000, mag);
                 val = d.value;
@@ -610,21 +611,21 @@ impl Run<'_, '_> {
                     } else {
                         m
                     };
-                    let x = self.get(&quantity_field(cmd::ASSIGN_TOKS, loc))?;
+                    let x = self.qget(cmd::ASSIGN_TOKS, loc)?;
                     IVal::Toks(toks_of(self.v, x))
                 } else {
                     self.back_cur();
                     IVal::Ident(self.scan_font_ident()?)
                 }
             }
-            cmd::ASSIGN_INT => IVal::Int(self.int32(&quantity_field(c, m))?),
-            cmd::ASSIGN_DIMEN => IVal::Dimen(self.int32(&quantity_field(c, m))?),
+            cmd::ASSIGN_INT => IVal::Int(crate::val::i32_of(self.v, self.qget(c, m)?)),
+            cmd::ASSIGN_DIMEN => IVal::Dimen(crate::val::i32_of(self.v, self.qget(c, m)?)),
             cmd::ASSIGN_GLUE => {
-                let x = self.get(&quantity_field(c, m))?;
+                let x = self.qget(c, m)?;
                 IVal::Glue(glue_of(self.v, x))
             }
             cmd::ASSIGN_MU_GLUE => {
-                let x = self.get(&quantity_field(c, m))?;
+                let x = self.qget(c, m)?;
                 IVal::Mu(glue_of(self.v, x))
             }
             cmd::SET_AUX => {
@@ -695,14 +696,14 @@ impl Run<'_, '_> {
                 // §427
                 let n = self.scan_eight_bit_int()?;
                 match m {
-                    0 => IVal::Int(self.int32(&format!("count:{n}"))?),
-                    1 => IVal::Dimen(self.int32(&format!("dimen:{n}"))?),
+                    0 => IVal::Int(crate::val::i32_of(self.v, self.reg(0, n)?)),
+                    1 => IVal::Dimen(crate::val::i32_of(self.v, self.reg(1, n)?)),
                     2 => {
-                        let x = self.get(&format!("skip:{n}"))?;
+                        let x = self.reg(2, n)?;
                         IVal::Glue(glue_of(self.v, x))
                     }
                     _ => {
-                        let x = self.get(&format!("muskip:{n}"))?;
+                        let x = self.reg(3, n)?;
                         IVal::Mu(glue_of(self.v, x))
                     }
                 }
@@ -745,7 +746,7 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn scan_toks(&mut self, macro_def: bool, xpand: bool) -> R<(Vec<Tok>, Vec<Tok>)> {
         let mut params: Vec<Tok> = Vec::new();
-        let mut body: Vec<Tok> = Vec::new();
+        let mut body: Vec<Tok> = Vec::with_capacity(32);
         let mut hash_brace: Option<Tok> = None;
         let mut t: u32 = 0; // parameters so far
         if macro_def {

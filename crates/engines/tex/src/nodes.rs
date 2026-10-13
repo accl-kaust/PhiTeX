@@ -139,6 +139,11 @@ pub(crate) fn encode_list(v: &Values, list: &[Node], side: &Side) -> ValueId {
 }
 
 pub(crate) fn encode_box(v: &Values, b: &BoxNode, side: &Side) -> ValueId {
+    encode_box_with(v, b, encode_list(v, &b.list, side))
+}
+
+/// Box `b` with `list`, the value of its list (already encoded).
+pub(crate) fn encode_box_with(v: &Values, b: &BoxNode, list: ValueId) -> ValueId {
     v.list(vec![
         i(v, T_BOX),
         i(v, i64::from(b.kind != BoxKind::H)),
@@ -156,7 +161,7 @@ pub(crate) fn encode_box(v: &Values, b: &BoxNode, side: &Side) -> ValueId {
         ),
         i(v, b.glue.order as i64),
         i(v, i64::from_ne_bytes(b.glue.ratio.to_bits().to_ne_bytes())),
-        encode_list(v, &b.list, side),
+        list,
     ])
 }
 
@@ -324,17 +329,11 @@ pub(crate) fn decode(v: &Values, x: ValueId, side: &mut Side) -> Option<Node> {
     if let Some(n) = crate::val::leaf_of(v, x) {
         return Some(n);
     }
+    let (marks, whats) = (side.marks.len(), side.whats.len());
     let n = decode_new(v, x, side)?;
-    let leaf = match &n {
-        Node::Char { .. }
-        | Node::Rule(_)
-        | Node::Kern(..)
-        | Node::Penalty(_)
-        | Node::Math(..)
-        | Node::Language { .. } => true,
-        Node::Glue(g) => g.leader.is_none(),
-        _ => false,
-    };
+    // a node that met no mark or whatsit decodes the same from its value
+    // alone, a box or a list-holding node included
+    let leaf = side.marks.len() == marks && side.whats.len() == whats;
     if leaf {
         crate::val::keep_leaf(v, x, &n);
     }

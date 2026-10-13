@@ -25,8 +25,8 @@
 //! rule: no `unsafe`; borrowed closures reach the workers through
 //! rayon's scoped API or `std::thread::scope`.
 
+use phitex_defuse::FxHashMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -170,14 +170,14 @@ impl Progress {
 #[derive(Clone)]
 pub(crate) struct Watch {
     pub progress: Arc<Progress>,
-    pub offsets: Arc<HashMap<u64, u64>>,
+    pub offsets: Arc<FxHashMap<u64, u64>>,
 }
 
 impl Watch {
     pub(crate) fn new(workers: usize, given: Option<Arc<Progress>>) -> Watch {
         Watch {
             progress: given.unwrap_or_else(|| Arc::new(Progress::new(workers))),
-            offsets: Arc::new(HashMap::new()),
+            offsets: Arc::new(FxHashMap::default()),
         }
     }
 }
@@ -346,6 +346,7 @@ impl Executor for Threads {
         run: &(dyn Fn(usize) -> RunResult + Sync),
         out: &mut Vec<RunResult>,
     ) {
+        let _st = StepTrace::enter(n);
         if let Some(w) = &self.watch {
             w.progress
                 .total
@@ -418,10 +419,10 @@ fn parallel(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) 
 #[cfg(feature = "rayon")]
 fn pool(threads: usize) -> std::sync::Arc<rayon::ThreadPool> {
     use std::sync::{Arc, Mutex, PoisonError};
-    type Pools = Mutex<std::collections::HashMap<usize, Arc<rayon::ThreadPool>>>;
+    type Pools = Mutex<phitex_defuse::FxHashMap<usize, Arc<rayon::ThreadPool>>>;
     static POOLS: OnceLock<Pools> = OnceLock::new();
     let mut m = POOLS
-        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .get_or_init(|| Mutex::new(phitex_defuse::FxHashMap::default()))
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     m.entry(threads)
@@ -478,8 +479,8 @@ fn parallel(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) 
 /// (these two need the `profile` feature, else they print zero).
 /// Histograms are printed when the executor is dropped.
 pub(crate) mod widths {
+    use phitex_defuse::FxHashSet as HashSet;
     use std::cell::Cell;
-    use std::collections::HashSet;
     use std::sync::Mutex;
 
     use phitex_defuse::Field;
@@ -677,5 +678,41 @@ pub(crate) mod widths {
             "widths: lookups {} misses {} ({pct:.1}%)",
             s.lookups, s.misses
         );
+    }
+}
+
+/// (measurement) `PHITEX_STEP_TRACE`: per batch, its width, its run time,
+/// and the time since the previous batch ended (the engine's apply of it).
+struct StepTrace(Option<(std::time::Instant, usize)>);
+
+static STEP_LAST: std::sync::Mutex<Option<(std::time::Instant, usize)>> =
+    std::sync::Mutex::new(None);
+
+impl StepTrace {
+    fn enter(n: usize) -> StepTrace {
+        if std::env::var_os("PHITEX_STEP_TRACE").is_none() {
+            return StepTrace(None);
+        }
+        let now = std::time::Instant::now();
+        if let Some((t, pn)) = *STEP_LAST.lock().unwrap() {
+            eprintln!(
+                "stepgap: prev_n {pn} gap_us {}",
+                now.duration_since(t).as_micros()
+            );
+        }
+        StepTrace(Some((now, n)))
+    }
+}
+
+impl Drop for StepTrace {
+    fn drop(&mut self) {
+        if let Some((t, n)) = self.0 {
+            let now = std::time::Instant::now();
+            eprintln!(
+                "steprun: n {n} run_us {}",
+                now.duration_since(t).as_micros()
+            );
+            *STEP_LAST.lock().unwrap() = Some((now, n));
+        }
     }
 }

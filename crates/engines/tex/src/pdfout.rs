@@ -10,7 +10,9 @@
 //! `\pdffontobjnum`, ...) comes from the state the step made. At the end
 //! the `Dvi` node finishes the state that reaches it.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
+
+use phitex_defuse::FxHashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use phitex_defuse::{Ctx, Stop, Value, ValueId, Values};
@@ -34,12 +36,12 @@ pub(crate) const BANNER: &str = "This is pdfTeX, Version 3.141592653-2.6-1.40.29
 /// A font map by TFM name.
 type Map = BTreeMap<Vec<u8>, MapEntry>;
 
-type MapCache = Mutex<HashMap<u64, Arc<Map>>>;
+type MapCache = Mutex<FxHashMap<u64, Arc<Map>>>;
 
 /// Parsed map files: a pure function's memo by the file's value.
 fn maps() -> &'static MapCache {
     static C: OnceLock<MapCache> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+    C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// What the fold carries beside the writer: the whatsits of the forms'
@@ -72,13 +74,13 @@ pub(crate) struct Fold {
     bytes_hash: u64,
 }
 
-type States = Mutex<HashMap<u64, Arc<Fold>>>;
+type States = Mutex<FxHashMap<u64, Arc<Fold>>>;
 
 /// The writer's states by key: a pure function's memo (the key is the
 /// state's digest: [`step_forms`]).
 fn states() -> &'static States {
     static S: OnceLock<States> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(HashMap::new()))
+    S.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// One font as the writer asks for it.
@@ -94,14 +96,14 @@ struct Font {
 /// font's number if loaded.
 #[derive(Default)]
 pub(crate) struct Fonts {
-    by_id: HashMap<FontId, Font>,
-    pub(crate) files: HashMap<Vec<u8>, Arc<[u8]>>,
+    by_id: FxHashMap<FontId, Font>,
+    pub(crate) files: FxHashMap<Vec<u8>, Arc<[u8]>>,
     space: Option<FontId>,
     pub(crate) ps: Option<Arc<PsMap>>,
     /// The files asked for and not given (a dry run's findings).
     pub(crate) missed: std::cell::RefCell<BTreeSet<Vec<u8>>>,
     /// The virtual fonts `do_vf` read, by font.
-    vfs: HashMap<FontId, VirtualFont>,
+    vfs: FxHashMap<FontId, VirtualFont>,
 }
 
 impl Fonts {
@@ -136,11 +138,11 @@ impl Fonts {
 /// `pdftex.map`'s `ps_tree`.
 type PsMap = BTreeMap<(Vec<u8>, i32, i32), MapEntry>;
 
-type PsCache = Mutex<HashMap<u64, Arc<PsMap>>>;
+type PsCache = Mutex<FxHashMap<u64, Arc<PsMap>>>;
 
 fn ps_maps() -> &'static PsCache {
     static C: OnceLock<PsCache> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+    C.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// `pdftex.map` by PostScript name: a pure function's memo.
@@ -864,7 +866,7 @@ pub(crate) fn ship(
     let v = r.v;
     let xs = list_of(v, page);
     let p = xs.get(3).map(|&l| list_of(v, l)).unwrap_or_default();
-    let mut resolved: HashMap<u32, ValueId> = HashMap::new();
+    let mut resolved: FxHashMap<u32, ValueId> = FxHashMap::default();
     for e in xs.get(4).map(|&l| list_of(v, l)).unwrap_or_default() {
         let ys = list_of(v, e);
         if let (Some(&h), Some(&d)) = (ys.first(), ys.get(1)) {
@@ -1004,6 +1006,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     };
     st.params_mut().info_omit_date = int(cx, "param:pdfinfoomitdate")?;
     st.params_mut().suppress_ptex_info = int(cx, "param:pdfsuppressptexinfo")?;
+    let t0 = std::time::Instant::now();
     let bytes = phitex_pdf::finish(st, &a.bytes).unwrap_or_else(|e| {
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!("pdf: {e}");
@@ -1011,5 +1014,9 @@ pub(crate) fn finish(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         Vec::new()
     });
     let s: String = bytes.iter().map(|&b| char::from(b)).collect();
-    Ok(v.intern(Value::Str(s.into_boxed_str())))
+    let out = v.intern(Value::Str(s.into_boxed_str()));
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        eprintln!("pdf finish: {:?}, {} bytes", t0.elapsed(), bytes.len());
+    }
+    Ok(out)
 }

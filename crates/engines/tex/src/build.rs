@@ -19,6 +19,7 @@ use phitex_typeset::node::{BoxKind, BoxNode, Disc, GlueKind, KernKind, Ligature,
 use phitex_typeset::pack::{PackParams, Spec};
 
 use crate::control::{LEADER_FLAG, SHIP_OUT_FLAG};
+use crate::fields::Par;
 use crate::nodes::{self, Side, T_BUILD_PAGE, T_DELETE, T_PD, T_SF, T_SPACE, T_VBOX};
 use crate::run::{R, Run};
 use crate::val::{Tok, cmd, glue_of, group, int_of, list_of};
@@ -188,6 +189,45 @@ impl Run<'_, '_> {
         }
     }
 
+    /// Leaves the run's one open group (sharing the list it is in) to
+    /// the engine as a scope (`new_save_level`, §274): its kind is
+    /// `[group, sid, list, mode, depth, parent kind, extra…]`, the
+    /// following siblings' level 0 ([`Run::base_mode`]). Its local
+    /// definitions are the run's, made inside the scope (`before`); its
+    /// `\aftergroup` tokens the scope's `ag` list.
+    pub(crate) fn leave_scope(&mut self) -> R<()> {
+        let v = self.v;
+        let base = self.base_mode()?;
+        let parent = self.scope_kind()?.unwrap_or(ValueId::UNIT);
+        let Some(l) = self.nest.pop() else {
+            return Ok(());
+        };
+        let sid = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
+        let mut xs = vec![
+            v.int(l.group),
+            v.int(sid),
+            v.int(base.lid),
+            v.int(i64::from(l.mode)),
+            v.int(base.depth + 1),
+            parent,
+        ];
+        xs.extend(l.extra.iter().copied());
+        let kind = v.list(xs);
+        if !l.ag.is_empty() {
+            let mut xs = vec![v.int(sid)];
+            xs.extend(l.ag.iter().map(|t| t.encode(v)));
+            self.set("ag", v.list(xs), false);
+        }
+        self.effect = Effect::Scope(phitex_defuse::Brackets {
+            closes: 0,
+            opens: 1,
+            before: true,
+            kind: Some(kind),
+            kind_pending: false,
+        });
+        Ok(())
+    }
+
     /// What `unsave` does besides restoring: the `\aftergroup` tokens
     /// (§282), and box registers changed "at the same level" (§1079,
     /// §1247), defined again outside.
@@ -200,7 +240,7 @@ impl Run<'_, '_> {
             let v = self.v;
             let mut defs = Vec::new();
             let mut carry = Vec::new();
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = phitex_defuse::FxHashSet::default();
             for f in fix {
                 let name = crate::val::str_of(v, f);
                 if !seen.insert(name.clone()) {
@@ -362,9 +402,9 @@ impl Run<'_, '_> {
     /// the depth before it ([`Self::list_fold`]).
     pub(crate) fn append_to_vlist(&mut self, md: &Mode, b: ValueId) -> R<()> {
         let v = self.v;
-        let bs = self.glue_param("baselineskip")?;
-        let ls = self.glue_param("lineskip")?;
-        let lsl = self.param("lineskiplimit")?;
+        let bs = self.gpar(Par::baselineskip)?;
+        let ls = self.gpar(Par::lineskip)?;
+        let lsl = self.ipar(Par::lineskiplimit)?;
         let x = v.list(vec![
             v.int(nodes::T_VBOX),
             b,
@@ -393,13 +433,13 @@ impl Run<'_, '_> {
             self.list_last(md.vlid)?.0.is_some()
         };
         if nonempty {
-            let g = self.glue_param("parskip")?;
+            let g = self.gpar(Par::parskip)?;
             let n = nodes::glue_node(v, &g, GlueKind::Param(2));
             self.append(md.vlid, n);
         }
-        let lang = i64::from(phitex_typeset::hyph::cur_lang(self.param("language")?));
-        let lhm = Self::norm_min(self.param("lefthyphenmin")?);
-        let rhm = Self::norm_min(self.param("righthyphenmin")?);
+        let lang = i64::from(phitex_typeset::hyph::cur_lang(self.ipar(Par::language)?));
+        let lhm = Self::norm_min(self.ipar(Par::lefthyphenmin)?);
+        let rhm = Self::norm_min(self.ipar(Par::righthyphenmin)?);
         let packed = (lhm * 64 + rhm) * 65536 + lang;
         // the paragraph: a level of the nest (§1091 `push_nest`)
         let lid = self.push_list(102, 0, Vec::new());
@@ -407,11 +447,11 @@ impl Run<'_, '_> {
             l.par = Some((lang, packed));
         }
         if indented {
-            let w = self.param("parindent")?;
+            let w = self.ipar(Par::parindent)?;
             let b = null_box(v, w);
             self.append(lid, b);
         }
-        let ep = self.get("param:everypar")?;
+        let ep = self.par(Par::everypar)?;
         let toks = crate::val::toks_of(v, ep);
         self.push_toks(toks);
         self.build_page_par()
@@ -438,14 +478,14 @@ impl Run<'_, '_> {
     /// `normal_paragraph` (§1070).
     pub(crate) fn normal_paragraph(&mut self) -> R<()> {
         let v = self.v;
-        if self.param("looseness")? != 0 {
-            self.set("param:looseness", v.int(0), false);
+        if self.ipar(Par::looseness)? != 0 {
+            self.set_par(Par::looseness, v.int(0), false);
         }
-        if self.param("hangindent")? != 0 {
-            self.set("param:hangindent", v.int(0), false);
+        if self.ipar(Par::hangindent)? != 0 {
+            self.set_par(Par::hangindent, v.int(0), false);
         }
-        if self.param("hangafter")? != 1 {
-            self.set("param:hangafter", v.int(1), false);
+        if self.ipar(Par::hangafter)? != 1 {
+            self.set_par(Par::hangafter, v.int(1), false);
         }
         if self
             .get("parshape")?
@@ -552,14 +592,14 @@ impl Run<'_, '_> {
     pub(crate) fn pack_params(&mut self, h: bool) -> R<PackParams> {
         Ok(if h {
             PackParams {
-                badness: self.param("hbadness")?,
-                fuzz: self.param("hfuzz")?,
-                overfull_rule: self.param("overfullrule")?,
+                badness: self.ipar(Par::hbadness)?,
+                fuzz: self.ipar(Par::hfuzz)?,
+                overfull_rule: self.ipar(Par::overfullrule)?,
             }
         } else {
             PackParams {
-                badness: self.param("vbadness")?,
-                fuzz: self.param("vfuzz")?,
+                badness: self.ipar(Par::vbadness)?,
+                fuzz: self.ipar(Par::vfuzz)?,
                 overfull_rule: 0,
             }
         })
@@ -604,29 +644,29 @@ impl Run<'_, '_> {
             rhm: u8::try_from((pg_packed / 65536) % 64).unwrap_or(3),
         };
         let params = phitex_typeset::linebreak::LineBreakParams {
-            pretolerance: self.param("pretolerance")?,
-            tolerance: self.param("tolerance")?,
-            emergency_stretch: self.param("emergencystretch")?,
-            looseness: self.param("looseness")?,
-            line_penalty: self.param("linepenalty")?,
-            hyphen_penalty: self.param("hyphenpenalty")?,
-            ex_hyphen_penalty: self.param("exhyphenpenalty")?,
-            adj_demerits: self.param("adjdemerits")?,
-            double_hyphen_demerits: self.param("doublehyphendemerits")?,
-            final_hyphen_demerits: self.param("finalhyphendemerits")?,
-            left_skip: self.glue_param("leftskip")?,
-            right_skip: self.glue_param("rightskip")?,
-            par_fill_skip: self.glue_param("parfillskip")?,
-            hsize: self.param("hsize")?,
-            hang_indent: self.param("hangindent")?,
-            hang_after: self.param("hangafter")?,
+            pretolerance: self.ipar(Par::pretolerance)?,
+            tolerance: self.ipar(Par::tolerance)?,
+            emergency_stretch: self.ipar(Par::emergencystretch)?,
+            looseness: self.ipar(Par::looseness)?,
+            line_penalty: self.ipar(Par::linepenalty)?,
+            hyphen_penalty: self.ipar(Par::hyphenpenalty)?,
+            ex_hyphen_penalty: self.ipar(Par::exhyphenpenalty)?,
+            adj_demerits: self.ipar(Par::adjdemerits)?,
+            double_hyphen_demerits: self.ipar(Par::doublehyphendemerits)?,
+            final_hyphen_demerits: self.ipar(Par::finalhyphendemerits)?,
+            left_skip: self.gpar(Par::leftskip)?,
+            right_skip: self.gpar(Par::rightskip)?,
+            par_fill_skip: self.gpar(Par::parfillskip)?,
+            hsize: self.ipar(Par::hsize)?,
+            hang_indent: self.ipar(Par::hangindent)?,
+            hang_after: self.ipar(Par::hangafter)?,
             par_shape,
-            last_line_fit: self.param("lastlinefit")?,
-            inter_line_penalty: self.param("interlinepenalty")?,
-            club_penalty: self.param("clubpenalty")?,
-            widow_penalty: self.param("widowpenalty")?,
-            display_widow_penalty: self.param("displaywidowpenalty")?,
-            broken_penalty: self.param("brokenpenalty")?,
+            last_line_fit: self.ipar(Par::lastlinefit)?,
+            inter_line_penalty: self.ipar(Par::interlinepenalty)?,
+            club_penalty: self.ipar(Par::clubpenalty)?,
+            widow_penalty: self.ipar(Par::widowpenalty)?,
+            display_widow_penalty: self.ipar(Par::displaywidowpenalty)?,
+            broken_penalty: self.ipar(Par::brokenpenalty)?,
             inter_line_penalties: crate::etex::penalties(self, 1)?,
             club_penalties: crate::etex::penalties(self, 2)?,
             widow_penalties: crate::etex::penalties(self, 3)?,
@@ -636,11 +676,17 @@ impl Run<'_, '_> {
             pack: self.pack_params(true)?,
         };
         let patterns = self.patterns()?;
+        // \lccode of the characters the hyphenator can meet: those of the
+        // list (a character not in it is never asked for)
         let mut lc = [0u16; 256];
+        let mut seen = [false; 256];
+        chars_of(&list, &mut seen);
         for (c, x) in lc.iter_mut().enumerate() {
-            *x = u16::try_from(self.int(&format!("lc:{c}"))?).unwrap_or(0);
+            if seen[c] {
+                *x = u16::try_from(self.int(&format!("lc:{c}"))?).unwrap_or(0);
+            }
         }
-        let uc_hyph = self.param("uchyph")?;
+        let uc_hyph = self.ipar(Par::uchyph)?;
         let hyphen = view.hyphen.clone();
         let lcf = |c: u16| lc.get(usize::from(c)).copied().unwrap_or(0);
         let hcf = |f: u32| hyphen.get(&f).copied().unwrap_or(-1);
@@ -682,11 +728,11 @@ impl Run<'_, '_> {
     /// The hyphenation patterns and exceptions so far, entered once per
     /// value for the process.
     fn patterns(&mut self) -> R<Arc<phitex_typeset::hyph::Patterns>> {
-        type Cache = Mutex<std::collections::HashMap<u64, Arc<phitex_typeset::hyph::Patterns>>>;
+        type Cache = Mutex<phitex_defuse::FxHashMap<u64, Arc<phitex_typeset::hyph::Patterns>>>;
         static C: OnceLock<Cache> = OnceLock::new();
         let x = self.get("patterns")?;
         let key = x.map_or(0, ValueId::raw);
-        let cache = C.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+        let cache = C.get_or_init(|| Mutex::new(phitex_defuse::FxHashMap::default()));
         if let Some(p) = cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1236,12 +1282,17 @@ impl Run<'_, '_> {
                 } else {
                     Spec::Additional(amount)
                 };
-                let depth_limit = self.param("boxmaxdepth")?;
+                let depth_limit = self.ipar(Par::boxmaxdepth)?;
                 let (items, _) = self.list_items(md.lid)?;
                 let mut side = Side::default();
+                let mut kept = Vec::with_capacity(items.len());
                 let list: List = items
                     .iter()
-                    .filter_map(|&y| nodes::decode(v, y, &mut side))
+                    .filter_map(|&y| {
+                        let n = nodes::decode(v, y, &mut side)?;
+                        kept.push(y);
+                        Some(n)
+                    })
                     .collect();
                 let adjusted = md.group == group::ADJUSTED_HBOX;
                 let packed = if md.group == group::HBOX || adjusted {
@@ -1267,7 +1318,13 @@ impl Run<'_, '_> {
                 self.set("badness", v.int(i64::from(packed.badness)), true);
                 let h = md.group == group::HBOX || adjusted;
                 self.box_report(h, packed.report, false);
-                let b = nodes::encode_box(v, &packed.node, &side);
+                // packaging without adjustments keeps the list as it was:
+                // its value is the items' (encoded once, when appended)
+                let b = if !adjusted && packed.node.list.len() == kept.len() {
+                    nodes::encode_box_with(v, &packed.node, v.list(kept))
+                } else {
+                    nodes::encode_box(v, &packed.node, &side)
+                };
                 let outer = self.close_group(md)?;
                 if (BOX_FLAG..SHIP_OUT_FLAG).contains(&ctx)
                     && ctx < BOX_FLAG + 256
@@ -1298,9 +1355,9 @@ impl Run<'_, '_> {
             group::INSERT => {
                 // §1100
                 let n = md.extra.first().map_or(0, |&y| int_of(v, y));
-                let q = self.glue_param("splittopskip")?;
-                let d = self.param("splitmaxdepth")?;
-                let f = self.param("floatingpenalty")?;
+                let q = self.gpar(Par::splittopskip)?;
+                let d = self.ipar(Par::splitmaxdepth)?;
+                let f = self.ipar(Par::floatingpenalty)?;
                 let (items, _) = self.list_items(md.lid)?;
                 let mut side = Side::default();
                 let list: List = items
@@ -1552,8 +1609,8 @@ impl Run<'_, '_> {
     /// force here, for the list's reader ([`resolve_space`]).
     fn waiting_space(&mut self, f: u32) -> R<ValueId> {
         let v = self.v;
-        let ss = self.glue_param("spaceskip")?;
-        let xs = self.glue_param("xspaceskip")?;
+        let ss = self.gpar(Par::spaceskip)?;
+        let xs = self.gpar(Par::xspaceskip)?;
         let fi = i64::from(f);
         let mut xs_v = vec![
             v.int(nodes::T_SPACE),
@@ -1568,7 +1625,7 @@ impl Run<'_, '_> {
 
     /// A space (§1041–§1044).
     pub(crate) fn space_glue(&mut self, f: u32, sf: i32, normal: bool) -> R<Node> {
-        let ss = self.glue_param("spaceskip")?;
+        let ss = self.gpar(Par::spaceskip)?;
         let fi = i64::from(f);
         let zero = |g: &Glue| g.width == 0 && g.stretch == 0 && g.shrink == 0;
         if normal && !zero(&ss) {
@@ -1577,7 +1634,7 @@ impl Run<'_, '_> {
         let xs = if normal {
             Glue::ZERO
         } else {
-            self.glue_param("xspaceskip")?
+            self.gpar(Par::xspaceskip)?
         };
         let need_font = zero(&ss) || (normal && zero(&ss));
         let d = if need_font {
@@ -1996,7 +2053,7 @@ impl Run<'_, '_> {
 
     /// `char_warning` (§581).
     fn char_warning(&mut self, f: u32, c: u32) -> R<()> {
-        if self.param("tracinglostchars")? > 0 {
+        if self.ipar(Par::tracinglostchars)? > 0 {
             let mut s = String::from("Missing character: There is no ");
             crate::print::push_code(&mut s, c);
             s.push_str(" in font ");
@@ -2067,7 +2124,7 @@ impl Run<'_, '_> {
         // the page builder (`page.rs`) empties the page: §1054's loop is
         // its, with the material `\end` appends each time round
         let v = self.v;
-        let w = self.param("hsize")?;
+        let w = self.ipar(Par::hsize)?;
         let b = null_box(v, w);
         let fill = Glue {
             stretch: 65536,
@@ -2110,8 +2167,8 @@ impl Run<'_, '_> {
         if bx.kind != BoxKind::V {
             return Ok(None);
         }
-        let stk = self.glue_param("splittopskip")?;
-        let smd = self.param("splitmaxdepth")?;
+        let stk = self.gpar(Par::splittopskip)?;
+        let smd = self.ipar(Par::splitmaxdepth)?;
         let pp = self.pack_params(false)?;
         let r = phitex_typeset::page::vsplit(bx.list, h, smd, stk, false, &pp);
         crate::etex::split_marks(self, &r.marks, &side)?;
@@ -2152,6 +2209,42 @@ fn merge_sides(a: Side, b: Side) -> Side {
 pub(crate) fn _unused(_: ValueId) -> Option<Glue> {
     let _ = glue_of;
     None
+}
+
+/// Marks in `seen` the character codes below 256 of `list`, its
+/// ligatures' originals and its nested lists included.
+fn chars_of(list: &[Node], seen: &mut [bool; 256]) {
+    fn mark(seen: &mut [bool; 256], c: u16) {
+        if let Some(s) = seen.get_mut(usize::from(c)) {
+            *s = true;
+        }
+    }
+    for n in list {
+        match n {
+            Node::Char { ch, .. } => mark(seen, *ch),
+            Node::Lig(l) => {
+                mark(seen, l.ch);
+                for &c in &l.original {
+                    mark(seen, c);
+                }
+            }
+            Node::Disc(d) => {
+                chars_of(&d.pre, seen);
+                chars_of(&d.post, seen);
+                chars_of(&d.replace, seen);
+            }
+            Node::Box(b) => chars_of(&b.list, seen),
+            Node::Ins(i) => chars_of(&i.list, seen),
+            Node::Adjust(l) => chars_of(l, seen),
+            Node::Unset(u) => chars_of(&u.list, seen),
+            Node::Glue(g) => {
+                if let Some(l) = &g.leader {
+                    chars_of(std::slice::from_ref(&**l), seen);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The space factor not read yet in a run of characters.
