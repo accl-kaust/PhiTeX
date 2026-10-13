@@ -149,13 +149,13 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // vertical material and removals (§1056, §1105, §1080)
         "vskip" | "vfil" | "vfill" | "vss" | "vfilneg" | "kern" | "hrule" | "unvbox"
         | "unvcopy" | "unskip" | "unpenalty" | "unkern" | "lastbox" => &["box:"],
-        // math only (§1136-§1194)
+        // math only (§1136-§1194): the incompleat noad is the run's own
         "mathord" | "mathop" | "mathbin" | "mathrel" | "mathopen" | "mathclose" | "mathpunct"
         | "mathinner" | "underline" | "overline" | "mathaccent" | "radical" | "displaystyle"
         | "textstyle" | "scriptstyle" | "scriptscriptstyle" | "left" | "right" | "middle"
         | "mathchar" | "delimiter" | "displaylimits" | "limits" | "nolimits" | "nonscript"
         | "mathchoice" | "eqno" | "leqno" | "over" | "atop" | "above" | "overwithdelims"
-        | "atopwithdelims" | "abovewithdelims" => &["inc"],
+        | "atopwithdelims" | "abovewithdelims" => &[],
         // opening a group: a level of the run's own nest (§1063)
         "begingroup" | "bgroup" => &[],
         // closing a group: the box's badness, its level fix, inserts (§1100, §1079)
@@ -302,7 +302,6 @@ const NORMAL_PARAGRAPH: &[&str] = &[
 /// a display's sizes and the lines of the paragraph before it (§1145,
 /// §1146), and its end's resumption (§1200).
 const MATH_SHIFT: &[&str] = &[
-    "inc",
     "pg:",
     "param:fam",
     "param:predisplaysize",
