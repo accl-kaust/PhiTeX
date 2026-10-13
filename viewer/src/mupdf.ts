@@ -18,6 +18,20 @@ export interface TextLine {
   text: string;
   /** Each character's left edge (none: the line stretched to `w`). */
   xs?: number[];
+  /** Each character's right edge. */
+  rs?: number[];
+}
+
+/** A match of a search: its page (from 0) and its boxes, [x, y top, w, h] in PDF points from the page's top left. */
+export interface Hit {
+  k: number;
+  boxes: [number, number, number, number][];
+}
+
+/** A UTF-16 unit as a search compares it: no accents, lower case (`Ö` as `o`). */
+export function fold(c: string): string {
+  const f = c.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+  return f.length === 1 ? f : c.toLowerCase().length === 1 ? c.toLowerCase() : c;
 }
 
 /** TeX's accents, set as glyphs of their own over a letter: as combining marks. */
@@ -153,11 +167,71 @@ export class MupdfDoc {
           if (!text.trim()) return;
           // (one position a UTF-16 unit, as the SVG counts them)
           const xs = cs.flatMap((c) => Array.from({ length: c.c.length }, () => c.x));
-          out.push({ ...line, text, xs, w: Math.max(right - line.x, 0) });
+          const rs = cs.flatMap((c) => Array.from({ length: c.c.length }, () => c.r));
+          out.push({ ...line, text, xs, rs, w: Math.max(right - line.x, 0) });
         },
       });
     } finally {
       st.destroy();
+    }
+    return out;
+  }
+
+  /** Each page's text, kept for searching (this PDF's: it never changes). */
+  private texts = new Map<number, TextLine[]>();
+
+  private textOf(k: number): TextLine[] {
+    let t = this.texts.get(k);
+    if (!t) {
+      const page = this.doc.loadPage(k);
+      try {
+        const [x0, y0] = page.getBounds();
+        t = this.text(page, x0, y0);
+      } finally {
+        page.destroy();
+      }
+      this.texts.set(k, t);
+    }
+    return t;
+  }
+
+  /**
+   * Where `q` is on the pages, in page order: accents and case ignored, a
+   * match running across a line break (the lines joined by a space) boxed
+   * on each line; at most `max` matches.
+   */
+  search(q: string, max = 1000): Hit[] {
+    const needle = Array.from(q.replace(/\s+/g, " ").trim(), fold).join("");
+    if (!needle) return [];
+    const out: Hit[] = [];
+    for (let k = 0; k < this.pages && out.length < max; k++) {
+      const lines = this.textOf(k);
+      // (the page as one string, a space between lines; each unit's line)
+      let hay = "";
+      const at: number[] = [];
+      const col: number[] = [];
+      lines.forEach((l, i) => {
+        if (i) (hay += " "), at.push(-1), col.push(-1);
+        for (let j = 0; j < l.text.length; j++) (hay += fold(l.text[j])), at.push(i), col.push(j);
+      });
+      for (let from = hay.indexOf(needle); from >= 0 && out.length < max; from = hay.indexOf(needle, from + needle.length)) {
+        const boxes: Hit["boxes"] = [];
+        let cur = -1, x = 0, r = 0;
+        const flush = () => {
+          if (cur < 0) return;
+          const l = lines[cur];
+          boxes.push([x, l.y - l.size * 0.78, r - x, l.size * 1.02]);
+        };
+        for (let u = from; u < from + needle.length; u++) {
+          const i = at[u];
+          if (i < 0) continue;
+          const l = lines[i], xl = l.xs?.[col[u]] ?? l.x, xr = l.rs?.[col[u]] ?? l.x + l.w;
+          if (i !== cur) (flush(), (cur = i), (x = xl), (r = xr));
+          else (x = Math.min(x, xl)), (r = Math.max(r, xr));
+        }
+        flush();
+        if (boxes.length) out.push({ k, boxes });
+      }
     }
     return out;
   }

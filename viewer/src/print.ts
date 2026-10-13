@@ -75,6 +75,15 @@ header button.ib:hover, .bar button.ib:hover, .win.docked header button.ib:hover
 button.ib[aria-pressed=true], .win.docked header button.ib[aria-pressed=true] { background: none; color: var(--mark); }
 button.ib.txt { width: auto; padding: 0 8px; font: 10px var(--sans); letter-spacing: .1em; text-transform: uppercase; }
 .win.no-footer > footer, .win.docked.own-header.no-footer > footer { display: none; }
+.find { display: inline-flex; align-items: center; gap: 6px; margin-right: 8px; }
+.find[hidden] { display: none; }
+.find input { width: 180px; height: 20px; padding: 0 6px; font: 11px var(--mono); color: var(--ink); background: var(--sheet); border: 1px solid var(--ink);
+  border-radius: 0; outline: none; }
+.find input::placeholder { color: var(--ink-3); font-family: var(--sans); letter-spacing: .04em; }
+#findn { font: 11px var(--mono); color: var(--ink-2); min-width: 52px; }
+#findn.none { color: var(--mark); }
+.slot .mark.fnd { background: rgb(255 214 0 / 40%); outline: 0; transition: none; }
+.slot .mark.fnd.cur { background: rgb(255 170 0 / 55%); outline: 1px solid #141414; }
 .speedchip:empty { display: none !important; }
 .pno { font: 11px var(--mono); color: var(--ink-2); min-width: 48px; }
 .bar { background: var(--paper); color: var(--ink-2); border-bottom: 1px solid var(--rule); padding: 4px 10px; }

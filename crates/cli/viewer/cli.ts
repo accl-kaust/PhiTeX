@@ -17,7 +17,7 @@
 
 import { Panel } from "../../../viewer/src/panel.ts";
 import { PreviewSession, type CoreEvent, type CoreRes, type CoreTransport, type EditorHost } from "../../../viewer/src/session.ts";
-import { MupdfDoc, toCanvas } from "../../../viewer/src/mupdf.ts";
+import { MupdfDoc, toCanvas, type Hit } from "../../../viewer/src/mupdf.ts";
 import { DiffControls, LATEXDIFF_LOOK, type DiffRunner } from "../../../viewer/src/compare.ts";
 import type { DiffLook } from "../../../viewer/src/panel.ts";
 import { COMMITS_CSS, Commits, type Commit } from "../../../viewer/src/commits.ts";
@@ -166,6 +166,12 @@ class Pages implements CoreTransport {
     return this.sock.request(op);
   }
 
+  /** Where `q` is in the build's PDF (MuPDF's text, every page). */
+  async find(q: string): Promise<Hit[]> {
+    const d = await this.open().catch(() => null);
+    return d?.search(q) ?? [];
+  }
+
   onEvent(cb: (e: CoreEvent) => void): void {
     this.sock.onEvent(cb);
   }
@@ -193,6 +199,7 @@ const panel = new Panel(
     onClean: () => void session.resync(),
     onGoto: (file, line) => source(file, line),
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
+    onFind: (q) => pages.find(q),
   },
   // (the panel's settings: this browser's)
   {
