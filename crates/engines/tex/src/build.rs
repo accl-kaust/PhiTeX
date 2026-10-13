@@ -227,6 +227,19 @@ impl Run<'_, '_> {
         if n == 0 {
             return Ok(());
         }
+        if self.claim_rest {
+            // `\end` ended the job inside the groups (§1054): nothing
+            // after it reads them, so they open no engine scope; what
+            // they own goes to the main list (lid 0)
+            for l in std::mem::take(&mut self.nest) {
+                if l.owns {
+                    for x in l.list {
+                        self.append(0, x);
+                    }
+                }
+            }
+            return Ok(());
+        }
         let base = self.base_mode()?;
         let mut parent = self.scope_kind()?.unwrap_or(ValueId::UNIT);
         let mut md = base;
