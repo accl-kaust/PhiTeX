@@ -33,7 +33,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use crate::ctx::{Ctx, Stop};
 use crate::hash::{FxHashMap, FxHashSet, hash_bytes, hash_words};
@@ -406,6 +407,9 @@ pub struct Report {
     pub waits_by_kind: Vec<(&'static str, u64)>,
     /// The nodes waited on most often, with their counts (at most five).
     pub top_waited: Vec<(NodeId, u64)>,
+    /// The sum of the batch sizes over the steps: `ready_total / steps`
+    /// is the mean number of nodes run per step.
+    pub ready_total: u64,
     /// Nodes left waiting for an environment field not yet supplied (nor
     /// declared absent), and the nodes waiting on them, when the
     /// evaluation ended.
@@ -607,6 +611,19 @@ struct Origin {
     waited: Slot,
     /// The level it was last re-done at after reading above its level.
     raised: u32,
+    /// The node whose height set that level when a read does not say
+    /// (a gate's hinted input, or a finished node it waited on; `NIL`).
+    raised_from: Slot,
+}
+
+impl Origin {
+    const NONE: Origin = Origin {
+        creator: NIL,
+        hint: None,
+        waited: NIL,
+        raised: 0,
+        raised_from: NIL,
+    };
 }
 
 /// What a node is waiting for when an evaluation stops without finishing.
@@ -1170,6 +1187,118 @@ pub struct NoEdits;
 impl EditSource for NoEdits {
     fn absorb(&mut self, _: &mut Engine) -> Option<u64> {
         None
+    }
+}
+
+/// An edit queued for an evaluation on another thread (see [`EditQueue`]).
+#[derive(Clone, Debug)]
+pub enum Edit {
+    /// [`Engine::replace`].
+    Replace { node: NodeId, op: OpId, args: Vec<ValueId> },
+    /// [`Engine::insert_after`]; the new node's id is reported back.
+    InsertAfter {
+        after: NodeId,
+        op: OpId,
+        args: Vec<ValueId>,
+    },
+    /// [`Engine::insert_before`]; the new node's id is reported back.
+    InsertBefore {
+        before: NodeId,
+        op: OpId,
+        args: Vec<ValueId>,
+    },
+    /// [`Engine::push`]; the new node's id is reported back.
+    Push { unit: UnitId, op: OpId, args: Vec<ValueId> },
+    /// [`Engine::remove`].
+    Remove { node: NodeId },
+    /// [`Engine::set_environment`].
+    Environment { fields: Vec<(Field, ValueId)> },
+}
+
+#[derive(Default)]
+struct QueueInner {
+    /// Queued edits with the version each one brings the text to.
+    queue: std::collections::VecDeque<(Edit, u64)>,
+    /// The nodes insertions made, by the version of their edit.
+    made: Vec<(u64, NodeId)>,
+}
+
+/// A queue of edits for an evaluation running elsewhere: the host pushes
+/// edits from its thread, the evaluation absorbs them between steps
+/// ([`Engine::evaluate_absorbing`]) and `applied` says which version the
+/// engine's state reflects. Clone it to share it; it is `Send` and `Sync`
+/// (a mutex and an atomic, usable with the wasm atomics target).
+#[derive(Clone, Default)]
+pub struct EditQueue {
+    inner: Arc<Mutex<QueueInner>>,
+    applied: Arc<AtomicU64>,
+}
+
+impl EditQueue {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queues `edit`, which brings the text to `version` (the host's own
+    /// numbering, reported back as [`Report::version`]).
+    pub fn push(&self, edit: Edit, version: u64) {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .queue
+            .push_back((edit, version));
+    }
+
+    /// The version the engine's state reflects: that of the last batch
+    /// absorbed (0 before any).
+    #[must_use]
+    pub fn applied(&self) -> u64 {
+        self.applied.load(Ordering::Acquire)
+    }
+
+    /// The nodes insertions made so far, by the version of their edit, in
+    /// order; taken (the next call starts after them).
+    #[must_use]
+    pub fn take_made(&self) -> Vec<(u64, NodeId)> {
+        std::mem::take(&mut self.inner.lock().unwrap_or_else(PoisonError::into_inner).made)
+    }
+
+    /// Queued edits not absorbed yet.
+    #[must_use]
+    pub fn pending(&self) -> usize {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner).queue.len()
+    }
+}
+
+impl EditSource for EditQueue {
+    fn absorb(&mut self, eng: &mut Engine) -> Option<u64> {
+        let batch: Vec<(Edit, u64)> = {
+            let mut g = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            g.queue.drain(..).collect()
+        };
+        let mut last = None;
+        let mut made = Vec::new();
+        for (e, version) in batch {
+            match e {
+                Edit::Replace { node, op, args } => eng.replace(node, op, args),
+                Edit::InsertAfter { after, op, args } => made.push((version, eng.insert_after(after, op, args))),
+                Edit::InsertBefore { before, op, args } => {
+                    made.push((version, eng.insert_before(before, op, args)));
+                }
+                Edit::Push { unit, op, args } => made.push((version, eng.push(unit, op, args))),
+                Edit::Remove { node } => eng.remove(node),
+                Edit::Environment { fields } => eng.set_environment(fields),
+            }
+            last = Some(version);
+        }
+        if let Some(v) = last {
+            let mut g = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            g.made.extend(made);
+            drop(g);
+            self.applied.store(v, Ordering::Release);
+        }
+        last
     }
 }
 
@@ -1999,8 +2128,19 @@ impl Engine {
     /// contributor, or its creation with a starting height). Empty when
     /// nothing has finished.
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn critical_chain(&self) -> Vec<(NodeId, Cause)> {
+        self.critical_chain_heights()
+            .into_iter()
+            .map(|(n, _, c)| (n, c))
+            .collect()
+    }
+
+    /// [`Self::critical_chain`] with each node's height: a read link stands
+    /// one level above its site; a `Raised` link stands at the level the
+    /// node was re-done at.
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub fn critical_chain_heights(&self) -> Vec<(NodeId, u32, Cause)> {
         let mut chain = Vec::new();
         let Some(mut x) = self
             .nodes
@@ -2024,7 +2164,7 @@ impl Engine {
             let h = n.height;
             let origin = self.origins.get(&x).copied();
             if let Some(o) = origin.filter(|o| o.raised > 0) {
-                chain.push((n.id, Cause::Raised { to: o.raised }));
+                chain.push((n.id, h, Cause::Raised { to: o.raised }));
             }
             // The read whose site stands highest; ties: the first recorded.
             let mut best: Option<(u32, Slot, Cause)> = None;
@@ -2077,7 +2217,7 @@ impl Engine {
             }
             match best {
                 Some((bh, site, cause)) if site != NIL && bh + 1 == h && bh < h => {
-                    chain.push((n.id, cause));
+                    chain.push((n.id, h, cause));
                     x = site;
                 }
                 _ => {
@@ -2089,17 +2229,25 @@ impl Engine {
                         Some(o) if live(o.waited).is_some() => {
                             chain.push((
                                 n.id,
+                                h,
                                 Cause::Woken {
                                     by: self.n(o.waited).id,
                                 },
                             ));
                             Some(o.waited)
                         }
+                        Some(o) if o.raised > 0 && live(o.raised_from).is_some() => {
+                            // Set to its level by a hinted input (the gate)
+                            // or a finished node it waited on: the Raised
+                            // link above names the level.
+                            Some(o.raised_from)
+                        }
                         Some(o) => {
                             let by = live(o.creator);
                             let hint = o.hint.filter(|&(_, t)| live(t).is_some());
                             chain.push((
                                 n.id,
+                                h,
                                 Cause::Created {
                                     by: by.map(|t| self.n(t).id),
                                     from_hint: hint.map(|(f, t)| (f, self.n(t).id)),
@@ -2110,6 +2258,7 @@ impl Engine {
                         None => {
                             chain.push((
                                 n.id,
+                                h,
                                 Cause::Created {
                                     by: None,
                                     from_hint: None,
@@ -2693,14 +2842,14 @@ impl Engine {
                 }
             }
         }
-        self.structure_edit_run(created);
+        self.structure_edit_run(creator, created);
     }
 
     /// [`Self::structure_edit`] for a run of consecutive fresh siblings:
     /// the claims reaching into it are those reaching its first node (the
     /// claimers inside it are fresh, already marked), and the range readers
     /// over it are found with one query.
-    fn structure_edit_run(&mut self, created: &[Slot]) {
+    fn structure_edit_run(&mut self, creator: Slot, created: &[Slot]) {
         let (Some(&first), Some(&last)) = (created.first(), created.last()) else {
             return;
         };
@@ -2709,8 +2858,14 @@ impl Engine {
         let hi = self.n(last).label;
         self.dirty_reaching_claims(unit, lo);
         if let Some((_, i)) = self.order.prev(self.units[unit as usize].root, lo) {
+            // The node before the run may claim it, unless the run is the
+            // creator's own unfolding (children after its claimed text,
+            // continuations): a node never claims what it unfolded.
             let p = i.slot;
-            self.claimer_near(p);
+            let own = p == creator || self.aux_of(p).and_then(|a| a.claimed_by) == Some(creator);
+            if !own {
+                self.claimer_near(p);
+            }
         }
         let u = &self.units[unit as usize];
         let from = lo.saturating_sub(u.max_span);
@@ -2774,6 +2929,7 @@ impl Engine {
                     hint,
                     waited: NIL,
                     raised: 0,
+                    raised_from: NIL,
                 },
             );
         }
@@ -4389,7 +4545,7 @@ impl Engine {
         count!(ClaimRecompute);
         span!(Claim);
         if self.n(c).state == State::Inert || !self.n(c).has(F_CLAIMER) {
-            self.set_claim(c, &[]);
+            self.set_claim(c, &[], false);
             return;
         }
         if self.n(c).has(F_CLAIM_DYN) {
@@ -4406,7 +4562,7 @@ impl Engine {
             Claim::Count(k) => k,
             _ => 0,
         };
-        self.claim_count(c, k);
+        self.claim_count(c, k, false);
     }
 
     /// Recomputes a pending claim's syntactic reach.
@@ -4437,7 +4593,9 @@ impl Engine {
     }
 
     /// Claims the first `k` following siblings of `c` (a run's decision).
-    fn claim_count(&mut self, c: Slot, k: usize) {
+    /// Claims the `k` following siblings of `c`; `own_run`: the claim is
+    /// the one `c`'s run just made (so `c` need not run again for it).
+    fn claim_count(&mut self, c: Slot, k: usize, own_run: bool) {
         let mut it = self.following(c);
         for _ in 0..k {
             if it.next().is_none() {
@@ -4445,10 +4603,10 @@ impl Engine {
             }
         }
         let slots = it.slots;
-        self.set_claim(c, &slots);
+        self.set_claim(c, &slots, own_run);
     }
 
-    fn set_claim(&mut self, c: Slot, new: &[Slot]) {
+    fn set_claim(&mut self, c: Slot, new: &[Slot], own_run: bool) {
         let old = self.aux_of(c).map_or_else(Default::default, |a| a.claimed.clone());
         if old == new {
             return;
@@ -4476,7 +4634,12 @@ impl Engine {
                 self.make_inert(s, c);
             }
         }
-        self.make_dirty(c);
+        // A claim set from outside the claimer's run (a static claim, an
+        // edit) changes what the run sees: it runs again. Its own run's
+        // claim does not: the run made it from the text it saw.
+        if !own_run {
+            self.make_dirty(c);
+        }
     }
 
     /// Nodes parked on `x` (by a wait, a gate or a needed child) run again:
@@ -4782,6 +4945,7 @@ impl Engine {
         self.nm(x).floor = 0;
         if let Some(o) = self.origins.get_mut(&x) {
             o.raised = 0;
+            o.raised_from = NIL;
             o.waited = NIL;
         }
         // New information: a stopped speculation may be tried again.
@@ -4836,15 +5000,7 @@ impl Engine {
             let h = self.n(on).height + 1;
             if h > self.n(x).floor {
                 self.nm(x).floor = h;
-                self.origins
-                    .entry(x)
-                    .or_insert(Origin {
-                        creator: NIL,
-                        hint: None,
-                        waited: NIL,
-                        raised: 0,
-                    })
-                    .waited = on;
+                self.origins.entry(x).or_insert(Origin::NONE).waited = on;
             }
             self.raise(x, h, on);
         }
@@ -6046,12 +6202,14 @@ impl Engine {
                 } else if self.live(t) {
                     let h = (self.n(t).height + 1).max(self.n(x).height);
                     self.set_height(x, h);
+                    self.note_raise(x, h, t);
                 }
                 return;
             }
-            End::GateRaise(h) => {
+            End::GateRaise(h, from) => {
                 let h = h.max(self.n(x).height);
                 self.set_height(x, h);
+                self.note_raise(x, h, from);
                 return;
             }
             End::Raise(h) => {
@@ -6059,15 +6217,7 @@ impl Engine {
                 self.report.raises += 1;
                 let h = h.max(self.n(x).height + 1);
                 self.set_height(x, h);
-                self.origins
-                    .entry(x)
-                    .or_insert(Origin {
-                        creator: NIL,
-                        hint: None,
-                        waited: NIL,
-                        raised: 0,
-                    })
-                    .raised = h;
+                self.note_raise(x, h, NIL);
                 return;
             }
             End::Wait(t, kind) => {
@@ -6079,6 +6229,7 @@ impl Engine {
                 } else if self.live(t) {
                     let h = (self.n(t).height + 1).max(self.n(x).height);
                     self.set_height(x, h);
+                    self.note_raise(x, h, t);
                 }
                 return;
             }
@@ -6168,7 +6319,7 @@ impl Engine {
         if self.n(x).has(F_CLAIM_DYN) {
             // Before the children: they follow the claimed text.
             let k = r.claim.unwrap_or(0);
-            self.claim_count(x, k);
+            self.claim_count(x, k, true);
         }
         {
             span!(Children);
@@ -6822,6 +6973,14 @@ impl Engine {
         false
     }
 
+    /// Records that `x` was set to level `h` by `from` (`NIL`: by what it
+    /// read, which explains the level itself).
+    fn note_raise(&mut self, x: Slot, h: u32, from: Slot) {
+        let o = self.origins.entry(x).or_insert(Origin::NONE);
+        o.raised = h;
+        o.raised_from = from;
+    }
+
     fn note_wait(&mut self, on: Slot, kind: WaitKind) {
         bump(&mut self.report.waits_by_kind, kind.name());
         *self.wait_counts.entry(on).or_insert(0) += 1;
@@ -7076,7 +7235,7 @@ impl Engine {
                     return Err(End::Gated(w.site, WaitKind::Value));
                 }
                 if t.height >= self.level {
-                    return Err(End::GateRaise(t.height + 1));
+                    return Err(End::GateRaise(t.height + 1, w.site));
                 }
             }
             walks.push((f, w));
@@ -7224,6 +7383,7 @@ impl Engine {
             count!(Step);
             count!(Job, batch.len());
             self.report.max_ready = self.report.max_ready.max(batch.len());
+            self.report.ready_total += batch.len() as u64;
             count!(SpecJob, batch.iter().filter(|j| j.speculative).count());
             let fuel = sched.fuel();
             results.clear();
@@ -7345,8 +7505,9 @@ pub(crate) enum End {
     Unpredictable,
     /// Not started: a hinted input is in work (or behind pending structure).
     Gated(Slot, WaitKind),
-    /// Not started: a hinted input is finished but not settled below `h`.
-    GateRaise(u32),
+    /// Not started: a hinted input (at the node) is finished but not
+    /// settled below `h`.
+    GateRaise(u32, Slot),
 }
 
 /// What one run of a node reported. Opaque to clients.
