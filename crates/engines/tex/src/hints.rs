@@ -163,9 +163,9 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "endgroup" | "egroup" => &["badness", "lvlfix", "inspen", "box:"],
         // arguments expanded while read: a conditional may end (§366, §498)
         "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["if:", "cs:"],
-        "mark" => &[],
+        "mark" => &["param:"],
         // (e-TeX's mark classes, §1494 ff.)
-        "marks" => &["markclasses"],
+        "marks" => &["param:", "markclasses"],
         "write" | "openout" | "closeout" => &["if:", "wopen:", "write:"],
         // (`\\immediate` of a pdfTeX object too, pdfTeX §1528)
         "immediate" => &["if:", "wopen:", "write:", "pdf:"],
