@@ -42,6 +42,8 @@ pub struct Ctx<'a> {
     /// Continuations: nodes to go after this one at its own depth.
     follows: Vec<(OpId, ValueId)>,
     env: Vec<(Field, ValueId)>,
+    /// Environment reads the provider answered ([`Engine::set_env_provider`]).
+    env_found: Vec<(Field, Option<ValueId>)>,
     publishes: Vec<(Field, ValueId)>,
     contribs: Vec<(Field, ValueId)>,
     watch: Option<(Field, Slot, ValueId)>,
@@ -51,6 +53,7 @@ pub struct Ctx<'a> {
     stream: Option<StreamRange>,
     touch_seq: usize,
     relabels: u64,
+    binding_epoch: u64,
     assumptions: Vec<(Slot, AssumeKind, ValueId)>,
     sig: u64,
     error: Option<EvalError>,
@@ -83,6 +86,7 @@ impl<'a> Ctx<'a> {
             children: Vec::new(),
             follows: Vec::new(),
             env: Vec::new(),
+            env_found: Vec::new(),
             publishes: Vec::new(),
             contribs: Vec::new(),
             watch: None,
@@ -92,6 +96,7 @@ impl<'a> Ctx<'a> {
             stream: None,
             touch_seq: eng.touch_log.len(),
             relabels: eng.relabels,
+            binding_epoch: eng.binding_epoch,
             assumptions: Vec::new(),
             memo: Default::default(),
             sig: 0,
@@ -363,8 +368,16 @@ impl<'a> Ctx<'a> {
             return Ok(v);
         }
         let n = e.n(self.slot);
-        let Ok(v) = e.env_value(n.unit, f) else {
-            return self.stop(End::WaitEnv(f));
+        let v = if let Ok(v) = e.env_value(n.unit, f) {
+            v
+        } else {
+            // Not held (a root unit): the provider may answer now, on this
+            // thread.
+            let Some(v) = e.env_provider.as_ref().and_then(|p| p(f)) else {
+                return self.stop(End::WaitEnv(f));
+            };
+            self.env_found.push((f, v));
+            v
         };
         self.cache.insert((K_ENV, key), v);
         self.uses.push(Use {
@@ -982,6 +995,7 @@ impl<'a> Ctx<'a> {
             children: self.children,
             follows,
             env: self.env,
+            env_found: self.env_found,
             publishes: self.publishes,
             contribs: self.contribs,
             watch: self.watch,
@@ -991,6 +1005,7 @@ impl<'a> Ctx<'a> {
             stream: self.stream,
             touch_seq: self.touch_seq,
             relabels: self.relabels,
+            binding_epoch: self.binding_epoch,
             assumptions: self.assumptions,
             sig: self.sig,
             error: self.error,
