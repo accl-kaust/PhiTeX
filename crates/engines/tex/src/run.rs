@@ -45,6 +45,10 @@ pub(crate) struct Ops {
     pub breaks: OpId,
     /// The build's field handles (`crate::fields`).
     pub fields: std::sync::Arc<crate::fields::Fields>,
+    /// The format's definitions the build analyses document texts with
+    /// (set by `api::Build::with`; none while a format is built): a
+    /// document file `\input` is sliced with them ([`Run::leftover`]).
+    pub defs: std::sync::Arc<std::sync::Mutex<crate::hints::Defs>>,
 }
 
 /// A level of the input stack.
@@ -168,12 +172,6 @@ pub(crate) struct Run<'c, 'a> {
     pub top: bool,
     /// Whether `\end` takes every following sibling.
     pub claim_rest: bool,
-    /// The scope ids this run made for groups it leaves open to the
-    /// engine (`node_raw`): each gets its opener (`lopen:<id>`) when the
-    /// run ends, so a reader of the list reads the contributions after
-    /// this node, not the unit's. (A format's `\begingroup` on its own
-    /// line; a document region opens none.)
-    pub minted: std::cell::RefCell<Vec<i64>>,
     /// The semantic nest (§211): the lists and groups this run has open
     /// ([`crate::nest`]), level 0 being the engine's scope.
     pub nest: Vec<crate::nest::Level>,
@@ -247,7 +245,6 @@ impl<'c, 'a> Run<'c, 'a> {
             pulled: 0,
             top: false,
             claim_rest: false,
-            minted: std::cell::RefCell::new(Vec::new()),
             nest: Vec::new(),
             next_lid: 0,
             last_par: (0, 0),
@@ -1164,14 +1161,30 @@ impl<'c, 'a> Run<'c, 'a> {
                     }
                     if f.has_lines() && self.doc && self.doc_file(f) {
                         let text = str_of(v, f.id);
-                        let t = crate::hints::file_hints(v, f.id, f.name);
+                        // analysed as the document's own text: once, with
+                        // the format's definitions, registered under the
+                        // file's name for its fragments' hints
+                        let defs = self
+                            .ops
+                            .defs
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
+                        let t = crate::hints::text_hints(
+                            &text,
+                            phitex_source::pass::FileKind::Document,
+                            &defs,
+                        );
+                        crate::hints::register_text(f.name, &t);
                         for &(s, e) in &t.slices {
                             if e <= f.off {
                                 continue;
                             }
                             let a = s.max(f.off);
                             let starts = a == 0 || text.as_bytes()[a - 1] == b'\n';
-                            out.push(slice_args_in_file(v, &text[a..e], starts, f.name, a));
+                            let mut args = slice_args_in_file(v, &text[a..e], starts, f.name, a);
+                            args.push(crate::hints::hint_arg(v, &t, s));
+                            out.push(args);
                         }
                     } else if f.has_lines() {
                         let fr = v.list(vec![
