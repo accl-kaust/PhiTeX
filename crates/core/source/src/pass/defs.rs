@@ -501,6 +501,12 @@ impl Definitions {
     /// Reads the definitions in `text`, file `file` of the document.
     pub fn harvest(&mut self, text: &str, kind: FileKind, file: u32) {
         self.closures = ClosureCache::default();
+        // (read under the initial catcodes, a text without a backslash
+        // (nor a `^^` that could make one, §355) has no control
+        // sequence: nothing defined, nothing made active)
+        if !text.contains('\\') && !text.contains("^^") {
+            return;
+        }
         let lexed = lex::lex(text, kind, None);
         let atoms = atoms::atoms(text, &lexed.tokens);
         for t in &lexed.tokens {
