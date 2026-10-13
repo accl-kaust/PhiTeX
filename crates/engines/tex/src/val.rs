@@ -648,7 +648,7 @@ pub(crate) fn tok_id(v: &Values, epoch: u64, t: Tok) -> ValueId {
         if c.toks.len() >= DECODED_MAX {
             c.toks.clear();
         }
-        c.toks.insert(*t, x);
+        c.toks.insert(t, x);
     });
     x
 }
