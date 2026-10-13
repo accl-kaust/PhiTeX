@@ -2073,7 +2073,12 @@ pub(crate) struct Parked {
 /// Where an input frame stood when the command began.
 enum Snap {
     Toks(Rc<[Tok]>, usize),
-    Src { loc: usize, state: u8, endch: i64, len: usize },
+    Src {
+        loc: usize,
+        state: u8,
+        endch: i64,
+        len: usize,
+    },
     File(usize, usize),
     None,
 }
