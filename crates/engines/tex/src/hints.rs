@@ -378,9 +378,6 @@ fn add_heads(st: &mut Option<Vec<String>>, heads: Option<&[&str]>) {
     match (st.as_mut(), heads) {
         (Some(v), Some(hs)) => {
             for h in hs {
-                if std::env::var("PHITEX_HEAD_TRACE").is_ok_and(|w| *h == w) {
-                    eprintln!("HEADTRACE {h}\n{}", std::backtrace::Backtrace::force_capture());
-                }
                 if !v.iter().any(|x| x == h) {
                     v.push((*h).to_owned());
                 }
@@ -2115,11 +2112,10 @@ impl Analysis<'_> {
                 };
                 add_heads(st, Some(&[fam, "aftertoken"]));
             }
+            // (a character, or a brace whose `}` sets only the register
+            // its `\\setbox` names, §1075, as the `egroup` row)
             Some(pass::Shape::Quantity(_)) => {
-                if std::env::var_os("PHITEX_HEAD_TRACE").is_some() {
-                    eprintln!("QTRACE {name}");
-                }
-                add_heads(st, Some(&["box:", "lvlfix", "badness", "inspen"]));
+                add_heads(st, Some(&["box:255", "lvlfix", "badness", "inspen"]));
                 if may_start_par {
                     add_heads(st, Some(&["pg:"]));
                 }
@@ -2217,9 +2213,6 @@ impl Analysis<'_> {
             } else if let Some(h) = head_of_pass_field(f) {
                 if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
                     eprintln!("slices: head {h} from name {f}");
-                }
-                if std::env::var_os("PHITEX_HEAD_TRACE").is_some() {
-                    eprintln!("NTRACE {f} {:?}", set.relied);
                 }
                 add_head(&mut b.state, h);
             }
