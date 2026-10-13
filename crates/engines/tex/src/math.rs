@@ -367,7 +367,7 @@ impl Run<'_, '_> {
     }
 
     fn mathcode(&mut self, c: i32) -> R<i32> {
-        self.int32(&format!("mc:{c}"))
+        self.code(3, c)
     }
 
     fn fam_in_range(&mut self) -> R<Option<i32>> {
@@ -461,7 +461,7 @@ impl Run<'_, '_> {
         } else {
             self.skip_blanks_relax_x()?;
             match self.cur.cmd {
-                cmd::LETTER | cmd::OTHER_CHAR => self.int32(&format!("dc:{}", self.cur.chr))?,
+                cmd::LETTER | cmd::OTHER_CHAR => self.code(4, self.cur.chr)?,
                 cmd::DELIM_NUM => self.scan_twenty_seven_bit_int()?,
                 _ => -1,
             }

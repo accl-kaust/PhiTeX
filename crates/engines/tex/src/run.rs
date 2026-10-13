@@ -524,6 +524,26 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
+    /// Character `c`'s entry in code table `table` (0 `lc`, 1 `uc`, 2
+    /// `sf`, 3 `mc`, 4 `dc`).
+    pub(crate) fn code(&mut self, table: usize, c: impl TryInto<u32>) -> R<i32> {
+        let c = c.try_into().unwrap_or(u32::MAX);
+        let l = if let Some(s) = crate::fields::code_slot(table, c) {
+            Loc::try_from(s).unwrap_or(0)
+        } else {
+            let name = ["lc", "uc", "sf", "mc", "dc"][table];
+            let f = self.v.field(&format!("{name}:{c}"));
+            self.loc_of(f)
+        };
+        self.int_loc(l)
+    }
+
+    /// Integer register `n` of kind `r` (0 count, 1 dimen).
+    pub(crate) fn reg_int(&mut self, r: usize, n: impl TryInto<i32>) -> R<i32> {
+        let l = self.reg_loc(r, n.try_into().unwrap_or(-1));
+        self.int_loc(l)
+    }
+
     /// Field `f` in the run's view.
     pub(crate) fn read_f(&mut self, f: Field) -> R<Option<ValueId>> {
         self.get_f(f)
