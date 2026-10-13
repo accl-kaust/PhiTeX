@@ -678,7 +678,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let made: Vec<ValueId> = self
             .st
-            .published_since(v, base)
+            .defined_since(v, base)
             .into_iter()
             .filter_map(|(loc, x, l)| Some((self.loc_field(loc), x?, l)))
             .filter(|d| !str_of(v, d.0.0).starts_with("cat:"))
@@ -1543,13 +1543,13 @@ impl<'c, 'a> Run<'c, 'a> {
                     for tok in &t[*p..] {
                         let ch = matches!(tok.cat(), Some(10..=12));
                         if ch {
-                            run.push(crate::val::tok_id(v, epoch, tok));
+                            run.push(crate::val::tok_id(v, epoch, *tok));
                             continue;
                         }
                         if !run.is_empty() {
                             out.push(node(std::mem::take(&mut run)));
                         }
-                        out.push(node(vec![crate::val::tok_id(v, epoch, tok)]));
+                        out.push(node(vec![crate::val::tok_id(v, epoch, *tok)]));
                     }
                 }
                 Frame::Src(s) => {

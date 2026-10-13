@@ -548,19 +548,29 @@ impl State {
             .map(|m| m.loc)
     }
 
-    /// The definitions at the base level made after stamp `since`: the
-    /// location, the value and the locality.
-    pub(crate) fn published_since(
-        &self,
+    /// The definitions made after stamp `since`, at any level (a line
+    /// read back is interpreted wherever the run is): the location, the
+    /// value in force and the locality of the latest one.
+    pub(crate) fn defined_since(
+        &mut self,
         v: &Values,
         since: u64,
     ) -> Vec<(Loc, Option<ValueId>, Locality)> {
-        self.metas
+        let hits: Vec<(Loc, bool)> = self
+            .metas
             .iter()
             .filter(|m| m.ldef_stamp > since)
-            .filter_map(|m| {
-                let (val, l) = m.publ.as_ref()?;
-                Some((m.loc, val.encode(v), *l))
+            .map(|m| (m.loc, m.ldef_local))
+            .collect();
+        hits.into_iter()
+            .map(|(loc, local)| {
+                let x = self.id_of(loc, v);
+                let l = if local {
+                    Locality::Local
+                } else {
+                    Locality::Global
+                };
+                (loc, x, l)
             })
             .collect()
     }
