@@ -51,7 +51,7 @@ impl Run<'_, '_> {
         let v = self.v;
         let mut counts = [0i32; 10];
         for (k, c) in counts.iter_mut().enumerate() {
-            *c = self.int32(&format!("count:{k}"))?;
+            *c = self.reg_int(0, k)?;
         }
         let mut j = 9;
         while j > 0 && counts[j] == 0 {
@@ -179,9 +179,9 @@ impl Run<'_, '_> {
         Ok(InsertClass {
             box_height_plus_depth: b.map(|b| nodes::box_dim(v, b, 3) + nodes::box_dim(v, b, 2)),
             box_is_hbox: b.is_some_and(|b| nodes::box_is_h(v, b)),
-            count: self.int32(&format!("count:{n}"))?,
-            dimen: self.int32(&format!("dimen:{n}"))?,
-            skip: crate::val::glue_of(v, self.get(&format!("skip:{n}"))?),
+            count: self.reg_int(0, n)?,
+            dimen: self.reg_int(1, n)?,
+            skip: crate::val::glue_of(v, self.reg(2, i32::from(n))?),
         })
     }
 
@@ -197,7 +197,7 @@ impl Run<'_, '_> {
         Ok(if m == 0 { MAX_DIMEN } else { 0 })
     }
 
-    /// `pageplan`: the main vertical list folded once (`pp:items`), the
+    /// `pageplan`: the main vertical list folded once (each page's part `pp:items:<j>`), the
     /// insertion classes it uses (`pp:classes`), whether the routine is
     /// empty (`pp:any`); then §994–§1017's arithmetic over the whole list
     /// choosing every break (what each routine left, `pagefx:<j>`, taken
@@ -244,6 +244,7 @@ impl Run<'_, '_> {
         let mut before: Vec<ValueId> = Vec::new();
         let mut ended = false;
         let mut plan: Vec<ValueId> = Vec::new();
+        let mut reaches: Vec<usize> = Vec::new();
         let mut j = 0;
         while !ended && j < MAX_PAGES {
             let fx = if j > 0 {
@@ -252,6 +253,7 @@ impl Run<'_, '_> {
                 Vec::new()
             };
             let out = fold_page(v, &items, &table, marker, &start, fx);
+            reaches.push(out.reach);
             // the job-written files' order: an immediate write's entry
             // where its marker is, page `j` where it fires (`wplan`)
             plan.extend(out.writes.iter().copied());
@@ -292,7 +294,22 @@ impl Run<'_, '_> {
         starts.pop();
         let wp = v.seq_unit(v.list(plan));
         self.contribute("wplan", wp);
-        self.set("pp:items", v.list(items), true);
+        // each page's own material (`pp:items:<j>`, its start rebased to
+        // it): a `brk` reads only its page, so an edit elsewhere on the
+        // list wakes no other page's `brk`
+        for (j, s) in starts.iter_mut().enumerate() {
+            let Some(mut p) = PageStart::of(v, *s) else {
+                continue;
+            };
+            let (a, b) = (p.idx.min(items.len()), reaches[j].min(items.len()));
+            self.set(
+                &format!("pp:items:{j}"),
+                v.list(items[a..b.max(a)].to_vec()),
+                true,
+            );
+            p.idx = 0;
+            *s = p.value(v);
+        }
         self.set("pp:classes", v.list(table), true);
         self.set("pp:any", v.int(i64::from(any)), true);
         self.set("pp:marker", marker, true);
@@ -327,8 +344,8 @@ impl Run<'_, '_> {
         else {
             return Ok(());
         };
-        // (the list borrowed, not copied: every page's `brk` reads it)
-        let items_v = self.get("pp:items")?.unwrap_or(ValueId::UNIT);
+        // (the page's own material, borrowed, not copied)
+        let items_v = self.get(&format!("pp:items:{j}"))?.unwrap_or(ValueId::UNIT);
         let classes = self
             .get("pp:classes")?
             .map(|x| list_of(v, x))
@@ -451,7 +468,7 @@ impl Run<'_, '_> {
         if j < MAX_PAGES {
             let mut cs = Vec::new();
             for k in 0..10 {
-                cs.push(v.int(self.int(&format!("count:{k}"))?));
+                cs.push(v.int(i64::from(self.reg_int(0, k)?)));
             }
             let counts = v.list(cs);
             if !self.pagefx_pub {
@@ -490,11 +507,7 @@ impl Run<'_, '_> {
             return;
         }
         for (k, &c) in xs.iter().enumerate() {
-            let cf = self
-                .ops
-                .fields
-                .get_at(v, self.cx.values_epoch(), &format!("count:{k}"));
-            let l = self.loc_of(cf);
+            let l = self.reg_loc(0, i32::try_from(k).unwrap_or(0));
             self.st.preload(l, Some(c));
         }
     }
@@ -797,6 +810,9 @@ struct PageFold {
     /// The immediate writes' entries met (`T_WRITE_AT`), in order.
     writes: Vec<ValueId>,
     stuck: bool,
+    /// The end of the list's items the fold read (its cursor, or one
+    /// past it where a kern looked at what follows).
+    reach: usize,
 }
 
 /// §994–§1017 from `start` to the first fire (§1005): what routine j-1
@@ -825,6 +841,7 @@ fn fold_page(
     let mut queue: VecDeque<ValueId> = fx.into();
     queue.extend(start.carried.iter().copied());
     let mut cursor = start.idx;
+    let mut reach = cursor;
     let mut pb = PageBuilder::new();
     let mut side = Side::default();
     let mut ending = start.ending;
@@ -859,6 +876,7 @@ fn fold_page(
             x
         } else if let Some(&x) = items.get(cursor) {
             cursor += 1;
+            reach = reach.max(cursor);
             x
         } else {
             if let Some(e) = ending
@@ -909,6 +927,9 @@ fn fold_page(
         };
         // §1000: only a kern looks at what follows it
         let next = if matches!(p, Node::Kern(..)) {
+            if queue.is_empty() {
+                reach = reach.max((cursor + 1).min(items.len()));
+            }
             queue
                 .front()
                 .copied()
@@ -943,6 +964,7 @@ fn fold_page(
                 passed,
                 writes,
                 stuck: false,
+                reach,
             };
         }
     }
@@ -951,6 +973,7 @@ fn fold_page(
         passed,
         writes,
         stuck: ending.is_some() && !pb.page.is_empty(),
+        reach,
     }
 }
 

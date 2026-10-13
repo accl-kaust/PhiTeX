@@ -136,6 +136,9 @@ pub(crate) mod cmd {
     pub const LONG_OUTER_CALL: u8 = 114;
     pub const END_TEMPLATE: u8 = 115;
     pub const DONT_EXPAND: u8 = 116;
+    /// The command of the halt sentinel ([`crate::run::Run::raise`]): no
+    /// handler matches it; a stored one is a bug.
+    pub const HALT: u8 = 255;
 }
 
 // eqtb regions (§222–§236), as tex.web numbers them.
@@ -1146,7 +1149,12 @@ pub(crate) fn initex(v: &Values) -> Vec<(String, ValueId)> {
         "cs:\u{10FFFE}endgraf".to_owned(),
         v.list(vec![v.str("prim"), v.str("\u{10FFFE}endgraf")]),
     ));
-    for n in ["\u{10FFFE}alignpeek", "\u{10FFFE}cr"] {
+    for n in [
+        "\u{10FFFE}alignpeek",
+        "\u{10FFFE}cr",
+        "\u{10FFFE}endgroup",
+        "\u{10FFFE}right",
+    ] {
         out.push((format!("cs:{n}"), v.list(vec![v.str("prim"), v.str(n)])));
     }
     out.extend(crate::pdfprim::initex(v));
