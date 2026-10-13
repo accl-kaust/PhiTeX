@@ -1048,8 +1048,7 @@ impl Analysis<'_> {
     fn is_active(&self, c: char) -> bool {
         c == '~'
             || (c.is_ascii()
-                && (self.defs.active_chars() | self.prelude.active_chars()) >> (c as u32) & 1
-                    == 1)
+                && (self.defs.active_chars() | self.prelude.active_chars()) >> (c as u32) & 1 == 1)
     }
 
     /// A macro called by name (`\par` for a blank line, an active

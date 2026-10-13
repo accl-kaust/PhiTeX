@@ -253,6 +253,7 @@ impl Fields {
 
     /// The field of token `t`'s meaning (`cs:<name>`, `act:<c>`), if it
     /// has one, kept per thread as [`Self::get_at`] keeps names.
+    #[allow(clippy::unused_self)]
     pub(crate) fn meaning_at(&self, v: &Values, epoch: u64, t: &Tok) -> Option<Field> {
         if let Some(f) = with_names(v, epoch, |c| c.toks.get(t).copied()) {
             return Some(f);

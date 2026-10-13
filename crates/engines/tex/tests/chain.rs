@@ -5,7 +5,7 @@ mod common;
 
 use std::collections::BTreeMap;
 
-/// The target graph's forbidden links (docs/TARGET_GRAPH.md) and its
+/// The target graph's forbidden links (`docs/TARGET_GRAPH.md`) and its
 /// height bound, for one build: the failures found.
 fn target_failures(name: &str, b: &phitex_tex::Build) -> Vec<String> {
     let mut out = Vec::new();
@@ -37,6 +37,7 @@ fn target_failures(name: &str, b: &phitex_tex::Build) -> Vec<String> {
     out
 }
 
+#[allow(clippy::too_many_lines)]
 fn chain(dir: &std::path::Path, name: &str) -> Vec<String> {
     let src = common::read(&dir.join(format!("{name}.tex")));
     let opts = common::options(&format!("./{name}.tex"), name, "", dir);
