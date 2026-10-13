@@ -422,6 +422,11 @@ pub struct Report {
     /// The sum of the batch sizes over the steps: `ready_total / steps`
     /// is the mean number of nodes run per step.
     pub ready_total: u64,
+    /// Steps by the number of runs applied in them (the batch width),
+    /// in powers of two: `applied_widths[k]` counts the steps that
+    /// applied from `2^k` to `2^(k+1) - 1` runs (`[0]`: one run); steps
+    /// that applied nothing are not counted.
+    pub applied_widths: Vec<u64>,
     /// Nodes left waiting for an environment field not yet supplied (nor
     /// declared absent), and the nodes waiting on them, when the
     /// evaluation ended.
@@ -2264,6 +2269,12 @@ impl Engine {
         self.ids.len()
     }
 
+    /// Live units: the client's plus one per memoized application body.
+    #[must_use]
+    pub fn live_units(&self) -> usize {
+        self.units.iter().filter(|u| u.live).count()
+    }
+
     /// The fold of an accumulator over a whole unit.
     #[must_use]
     pub fn acc_value(&self, unit: UnitId, field: Field) -> Option<ValueId> {
@@ -2916,7 +2927,7 @@ impl Engine {
         id: NodeId,
         provisional: bool,
     ) -> Slot {
-        let s = self.create_raw(unit, after, None, op, args, parent, id, provisional);
+        let s = self.create_raw(unit, after, None, op, args, parent, id, provisional, true);
         self.set_created_effect(s, true);
         self.bind_created(s, None, NIL);
         s
@@ -2935,6 +2946,7 @@ impl Engine {
         parent: Slot,
         id: NodeId,
         provisional: bool,
+        in_order: bool,
     ) -> Slot {
         count!(Create);
         let st = self.statics(op, args);
@@ -3026,8 +3038,11 @@ impl Engine {
         self.stream_touch(unit, label);
         let item = self.oitem(s);
         self.nm(s).bound = item.eff;
-        let root = self.units[unit as usize].root;
-        self.units[unit as usize].root = self.order.insert(&OAug, root, label, item);
+        if in_order {
+            let root = self.units[unit as usize].root;
+            span!(OrderInsert);
+            self.units[unit as usize].root = self.order.insert(&OAug, root, label, item);
+        }
         s
     }
 
@@ -6064,6 +6079,8 @@ impl Engine {
                 });
             }
         }
+        #[cfg(feature = "profile")]
+        let create_span = crate::obs::enter_impl(crate::obs::Span::Create);
         for i in pre..ids.len() - suf {
             let (op, args) = specs[i];
             let follow = i >= follows_at;
@@ -6076,6 +6093,7 @@ impl Engine {
                 if follow { self.n(x).parent } else { parent },
                 ids[i],
                 provisional,
+                false,
             );
             if body.is_some() && !follow {
                 // Body nodes belong to the application.
@@ -6083,6 +6101,18 @@ impl Engine {
             }
             created.push(c);
         }
+        if !created.is_empty() {
+            // The run's records go into the order at once (their labels
+            // are consecutive and fresh).
+            span!(OrderInsert);
+            let items: Vec<(u64, OItem)> = created.iter().map(|&c| (self.n(c).label, self.oitem(c))).collect();
+            let root = self.units[unit as usize].root;
+            self.units[unit as usize].root = self.order.insert_run(&OAug, root, items);
+        }
+        #[cfg(feature = "profile")]
+        drop(create_span);
+        #[cfg(feature = "profile")]
+        let _bind_span = crate::obs::enter_impl(crate::obs::Span::Bind);
         if let (Some(&first), Some(&last)) = (created.first(), created.last()) {
             for &c in &created {
                 self.set_created_effect(c, false);
@@ -7900,6 +7930,14 @@ impl Engine {
                 self.apply(r);
             }
             self.settle_deferred();
+            let applied = self.report.runs - runs_before;
+            if applied > 0 {
+                let k = (u64::BITS - 1 - applied.leading_zeros()) as usize;
+                if self.report.applied_widths.len() <= k {
+                    self.report.applied_widths.resize(k + 1, 0);
+                }
+                self.report.applied_widths[k] += 1;
+            }
             if self.report.runs == runs_before {
                 self.idle_rounds += 1;
                 if self.idle_rounds > self.limits.idle_rounds {
