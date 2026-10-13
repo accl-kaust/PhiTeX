@@ -79,8 +79,11 @@ impl Operation for Exec {
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         None
     }
-    fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
-        MayDefine::Any
+    /// What the text says it may define ([`crate::hints`]): the state's
+    /// field heads and the control sequences its command can define, or
+    /// anything where the pass cannot bound it.
+    fn may_define(&self, args: &[ValueId], v: &Values) -> MayDefine {
+        crate::hints::may_define(v, args)
     }
     fn may_define_field(&self, _: &[ValueId], v: &Values, f: Field) -> bool {
         client_only(v, f)
@@ -98,12 +101,29 @@ impl Operation for Exec {
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let args = cx.args();
+        let hint = crate::hints::hint_of_args(cx.values(), &args);
         run_node(cx, ops(&self.0), |r| {
             r.top = args.get(1).is_some_and(|&t| int_of(r.v, t) != 0);
             let fs = decode_frames(r.v, &args);
             r.frames.extend(fs);
+            // the hint's assumptions, against what is in force here
+            if let Some(m) = crate::hints::verify(r, &hint)? {
+                r.log("error", &format!("hint regime violated: {m}"))?;
+                crate::hints::count(r, 2);
+            }
             r.command()?;
-            r.measure_tail()
+            r.measure_tail()?;
+            crate::hints::debug_defs(r, &hint);
+            if hint.bound.is_some() {
+                if let Some(m) = crate::hints::check_defs(r, &hint) {
+                    r.log("error", &m)?;
+                    crate::hints::count(r, 3);
+                }
+                crate::hints::count(r, 0);
+            } else {
+                crate::hints::count(r, 1);
+            }
+            Ok(())
         })
     }
 }
