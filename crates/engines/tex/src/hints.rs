@@ -2,9 +2,10 @@
 //! (`phitex-source`): the engine then makes readers of other fields wait
 //! on nothing of it.
 //!
-//! A node's text is one command (its first atom: a control sequence, a
-//! run of characters, a brace, a blank line). The pass bounds the
-//! control sequences a command may define (`cs:` and `act:` fields: its
+//! A node's text is a slice (`slices_of`): a document's paragraph
+//! region or loading command, or a whole format or package text, whose
+//! hint is `Any`. The pass bounds the control sequences a slice may
+//! define (`cs:` and `act:` fields: its
 //! own statement and the bodies of the macros it calls, when those are
 //! visible in the same text); every other field the run may set (the
 //! lists, the page, fonts, conditionals: the engine's state) is covered
@@ -24,20 +25,19 @@
 //! Where the text comes from: a document's or prelude's slices are
 //! analysed whole in [`text_hints`] (the regime tracked across the text:
 //! `\makeatletter`, `\ExplSyntaxOn`, literal `\catcode`s) and each slice's
-//! hint goes into its node's arguments ([`hint_arg`]); a file read by
-//! `\input` is analysed once by its text ([`file_hints`]) when its first
-//! node asks, and the rest of its lines (nodes whose text frame names
-//! the file and an offset) find it by name. Expansion tokens carry no
-//! text position and answer `Any`.
+//! hint goes into its node's arguments ([`hint_arg`]); a document file
+//! read by `\input` is sliced and analysed the same way
+//! (`Run::doc_file_regions`), its regions finding the analysis by name.
+//! A slice that opens and closes no scope (`no_scope`) declares no
+//! scope effect. Expansion tokens carry no text position and answer
+//! `Any`.
 //!
 //! The pass reads bodies from the text itself and from the format's
 //! definitions ([`Defs`]: the prelude's text and every file it read,
 //! harvested once per prelude by `api.rs`): a call of a format macro is
 //! bounded by its body like a call of the document's own, and a macro
 //! whose body ends a paragraph marks a paragraph region's end wherever
-//! it is called (OUTPUT.md §5). Without them every region boundary a
-//! macro hides was missed, and every paragraph of a document written
-//! as macro calls shared one cell (`par:0:…`) in one serial chain.
+//! it is called (OUTPUT.md §5).
 //!
 //! `PHITEX_HINTS=1` prints each distinct node text's answer and cause;
 //! `PHITEX_HINTS_OFF=1` answers `Any` for every node (the comparison).

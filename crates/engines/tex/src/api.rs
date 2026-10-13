@@ -2,10 +2,10 @@
 //! the files the graph asks for, edits, and the outputs read back (DVI
 //! bytes, the log).
 //!
-//! Nodes come from the syntactic pass ([`phitex_source::pass`]): one per
-//! control sequence, one per run of characters, one per space, brace or
-//! blank line, each holding its slice of the text (and the blanks after
-//! it). A node reads its own slice and the siblings its command claims.
+//! Nodes come from the syntactic pass ([`phitex_source::pass`]) sliced by
+//! `hints::slices_of`: one per paragraph region or loading command of a
+//! document, one for a whole format. Files a run reads come in place
+//! from the environment provider (`Graph::provide`).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -861,7 +861,7 @@ struct Graph {
     sched: phitex_defuse::Greedy,
     /// The files the environment provider found or missed during runs
     /// (name, field, value, hash), merged into `files`/`absent`/`reads`
-    /// before the environment is set again ([`Graph::provide`]).
+    /// before the environment is set again (`Graph::provide`).
     provided: Arc<std::sync::Mutex<Vec<Provided>>>,
 }
 

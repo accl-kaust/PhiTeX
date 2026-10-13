@@ -17,15 +17,32 @@ vertical list of the scope it runs in and ends there; one the pass
 closed too early reads on into the following siblings (claimed) until it
 is closed: correct, and serial for exactly that span.
 
-Format text (`Initex`, `Package` kinds) keeps one command per node, a
-conditional opened at depth 0 running on to its `\fi` in the same node.
-A group a format line leaves open (`\begingroup` on its own line,
-`\setbox0\vbox{` closed on a later line) is an engine scope
-(`Run::leave_open`), the only case of one.
+Region slicing (`hints::slices_of`): a paragraph is whole; a brace or
+bracket argument joins its command (`\centerline{...}`); a keyword or
+unit scan joins the next slice (`\vskip 1in \centerline{...}`); a
+conditional and a `\begingroup`...`\endgroup` pair stay in one slice. A
+slice the pass sees open and close no scope (`hints.rs` `no_scope`)
+declares no scope effect, so nothing waits on it for one.
+
+A loading command (`\documentclass`, `\usepackage`, `\RequirePackage`,
+`\input`, `\include`) with its arguments is one slice. Its run reads
+package-kind files (`.cls`, `.sty`, nested `\RequirePackage`) inline; a
+document-kind file it `\input`s is sliced into regions with hints, as
+the main text is (`Run::doc_file_regions`).
+
+A **format** (`plain.tex`, `latex.ini` and everything it `\input`s) is
+ONE node, run sequentially, its files read in place through the
+engine's environment provider (`api.rs` `Graph::provide`). Its hint is
+`Any`; its definitions are final before any document node runs, and
+its macro bodies bound the hints of document slices that call them. A
+group still open at the format's end is an error ("format: group left
+open at end"); no node leaves an engine scope open.
 
 Besides the text: one `breaks` node after it (the page builder's fold),
 its children the `pagestep`s (one per page, the output routine run
-inline), the `dvi`/PDF writer, and file-rest children for `\input`.
+inline), and the `dvi`/PDF writer. So a node is a paragraph region, a
+display, an alignment, a page step, `breaks` or the writer; the nest
+(`nest.rs`) is local to its run.
 
 Nothing else is a node. Expansion runs inline in the node that reads the
 token; a macro body, a conditional, `\the`, `\csname` never become
@@ -60,7 +77,8 @@ Writing `A <- B` for "A reads what B defined".
 | `breaks` | `items` (the whole main list), the page parameters, the insert classes | every region (one fan-in) |
 | `pagestep` j | its page's material (its argument), `\count0..9`, the insert boxes, the marks, `\output` | `breaks`; the previous steps for what their routines defined globally (page numbers) |
 | `dvi` | `pages` | every `pagestep` |
-| `breaks` (round 2) | `pagefx:<j>` | what routine j left (loop-back, previous round) |
+| `breaks` (round 2) | `pagefx:<j>` | what routine j left (loop-back, previous round): held inserts, the leftover list; planned (branch para-vsize): page parameters the routine set |
+| region R (planned, branch para-marks) | `marks:before:<N>` | the marks in force before node N (a per-node loop-back from the page chain) |
 
 Forbidden, and asserted by the test:
 
@@ -97,6 +115,14 @@ nodes' source positions; it fails on any forbidden link above, on any
 `par:` or `if:` field, on `height > 6 + pages`, and on an evaluation
 with no page step. Bytes identical to pdfTeX remain necessary; they are
 not the acceptance.
+
+## Status (measured, accl jobs 8557/8586, tex-paragraph 879f11a8/951dafc0)
+
+- Story document: one round 0.210 s at 1 thread; critical path 248 -> 8
+  after `no_scope`.
+- Plain format: 52 ms (release), one node.
+- Catcode stops 697 -> 20; attempts per run 3.9 -> 2.1.
+- Pages: height 22 for 4 pages, still a chain (census pending).
 
 ## Not yet
 

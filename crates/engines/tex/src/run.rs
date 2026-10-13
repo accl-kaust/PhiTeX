@@ -1,7 +1,8 @@
-//! One run of one command node: its input (the node's own text, then the
-//! siblings it claims), `get_next` (§341–§365) over it, and the
-//! definitions, contributions and children it makes, buffered until the
-//! command is done.
+//! One run of one node (a paragraph region, a loading command, a whole
+//! format): its input (the node's own text, the files it reads inline,
+//! the siblings it claims while a span is open), `get_next` (§341–§365)
+//! over it, and the definitions, contributions and children it makes,
+//! buffered until the run is done.
 //!
 //! Everything here is local to one run: a small sequential scanner over
 //! the node's own text. What TeX keeps between commands is read through
