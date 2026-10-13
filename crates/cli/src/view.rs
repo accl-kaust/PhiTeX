@@ -94,7 +94,10 @@ pub enum Ask {
     /// A change reached the screen this long after it was made.
     Painted(u64),
     /// File `file`'s text is the editor's buffer from now on.
-    SetFile { file: String, text: String },
+    SetFile {
+        file: String,
+        text: String,
+    },
     /// Characters `start..end` (UTF-16 code units) of `file`'s buffer
     /// replaced by `text`.
     Edit {
@@ -103,6 +106,33 @@ pub enum Ask {
         end: usize,
         text: String,
     },
+    /// Diff version `rev` against `to` (none: the files as they are).
+    DiffStart {
+        rev: String,
+        to: Option<String>,
+    },
+    /// Show the diff's pages (true) or the document's.
+    DiffShow(bool),
+    /// The diff's look: markup, subtype, the added and deleted colours
+    /// (none: as it is).
+    DiffRestyle {
+        markup: Option<String>,
+        subtype: Option<String>,
+        add: Option<String>,
+        del: Option<String>,
+    },
+    DiffStop,
+}
+
+/// The diff the viewer is told of: its state (`compare.rs`'s), whether
+/// its pages are the ones shown, its PDF, pages and marked-up text.
+#[derive(Default)]
+struct Diff {
+    state: Value,
+    shown: bool,
+    pdf: Option<Arc<[u8]>>,
+    hashes: Vec<u64>,
+    tex: Option<String>,
 }
 
 /// The pages of the last build.
@@ -141,6 +171,9 @@ struct Shared {
     console: Mutex<(std::collections::VecDeque<Value>, Value)>,
     /// Told how many browsers are connected when that changes.
     on_clients: Mutex<Option<Box<dyn Fn(usize) + Send>>>,
+    diff: Mutex<Diff>,
+    /// The commits of the project's history (the diff's picker).
+    log: Mutex<Option<Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>>>,
 }
 
 /// The messages a browser that joins is shown.
@@ -197,6 +230,8 @@ impl View {
             building: AtomicBool::new(false),
             console: Mutex::new((std::collections::VecDeque::new(), Value::Null)),
             on_clients: Mutex::new(None),
+            diff: Mutex::new(Diff::default()),
+            log: Mutex::new(None),
         });
         let url = format!("http://127.0.0.1:{port}/{}/", shared.token);
         let s = shared.clone();
@@ -248,6 +283,76 @@ impl View {
             }
             broadcast(&s, &json!({"event": "console", "item": item}).to_string());
         })
+    }
+
+    /// The history the diff's picker lists, from `log(skip, limit)`.
+    pub fn on_log(&self, log: Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>) {
+        *lock(&self.shared.log) = Some(log);
+    }
+
+    /// The diff is (still) under way: its state, PDF, pages and text; the
+    /// browsers told, and given its pages if they are the ones shown.
+    pub fn diff(&self, state: Value, pdf: Option<Arc<[u8]>>, hashes: Vec<u64>, tex: String) {
+        let mut d = lock(&self.shared.diff);
+        let redraw = d.shown && (d.hashes != hashes || d.pdf.is_none());
+        d.pdf = pdf;
+        d.hashes = hashes;
+        d.tex = Some(tex);
+        d.state = state;
+        let shown = d.shown;
+        if let Some(o) = d.state.as_object_mut() {
+            o.insert("shown".into(), Value::Bool(shown));
+        }
+        let msg = json!({"event": "diff", "diff": d.state}).to_string();
+        drop(d);
+        broadcast(&self.shared, &msg);
+        if redraw {
+            broadcast(
+                &self.shared,
+                &json!({"event": "settled", "since_ms": null}).to_string(),
+            );
+        }
+    }
+
+    /// The diff's pages shown (`on`) or the document's: the browsers draw
+    /// the ones now shown.
+    pub fn diff_shown(&self, on: bool) {
+        let mut d = lock(&self.shared.diff);
+        let on = on && d.tex.is_some();
+        if d.shown == on {
+            return;
+        }
+        d.shown = on;
+        if let Some(o) = d.state.as_object_mut() {
+            o.insert("shown".into(), Value::Bool(on));
+        }
+        let msg = json!({"event": "diff", "diff": d.state}).to_string();
+        drop(d);
+        broadcast(&self.shared, &msg);
+        broadcast(
+            &self.shared,
+            &json!({"event": "settled", "since_ms": null}).to_string(),
+        );
+    }
+
+    /// Whether the diff's pages are the ones shown.
+    pub fn diff_is_shown(&self) -> bool {
+        lock(&self.shared.diff).shown
+    }
+
+    /// No diff any more: the document's pages shown.
+    pub fn diff_stopped(&self) {
+        let shown = std::mem::take(&mut *lock(&self.shared.diff)).shown;
+        broadcast(
+            &self.shared,
+            &json!({"event": "diff", "diff": {}}).to_string(),
+        );
+        if shown {
+            broadcast(
+                &self.shared,
+                &json!({"event": "settled", "since_ms": null}).to_string(),
+            );
+        }
     }
 
     /// What the browsers asked for since last taken.
@@ -352,8 +457,35 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
         "viewer.js" => {
             let _ = ws::respond(&mut w, "200 OK", "text/javascript; charset=utf-8", SCRIPT);
         }
+        "diff.pdf" => {
+            let pdf = lock(&s.diff).pdf.clone();
+            let _ = match pdf {
+                Some(p) => ws::respond(&mut w, "200 OK", "application/pdf", &p),
+                None => ws::respond(&mut w, "404 Not Found", "text/plain", b"no diff yet\n"),
+            };
+        }
+        "diff.tex" => {
+            let tex = lock(&s.diff).tex.clone();
+            let _ = match tex {
+                Some(t) => ws::respond(
+                    &mut w,
+                    "200 OK",
+                    "application/x-tex; charset=utf-8",
+                    t.as_bytes(),
+                ),
+                None => ws::respond(&mut w, "404 Not Found", "text/plain", b"no diff yet\n"),
+            };
+        }
         "doc.pdf" => {
-            let pdf = lock(&s.pages).pdf.clone();
+            // (the diff's pages while they are the ones shown)
+            let pdf = {
+                let d = lock(&s.diff);
+                if d.shown {
+                    d.pdf.clone()
+                } else {
+                    lock(&s.pages).pdf.clone()
+                }
+            };
             let _ = match pdf {
                 Some(p) => ws::respond(&mut w, "200 OK", "application/pdf", &p),
                 None => ws::respond(&mut w, "404 Not Found", "text/plain", b"no PDF yet\n"),
@@ -449,7 +581,13 @@ fn answer(s: &Shared, req: &Value) -> String {
     let text = |k: &str| req.get(k).and_then(Value::as_str).map(str::to_owned);
     let state = || {
         let p = lock(&s.pages);
-        (p.hashes.clone(), p.history, p.ms)
+        let d = lock(&s.diff);
+        let hashes = if d.shown {
+            d.hashes.clone()
+        } else {
+            p.hashes.clone()
+        };
+        (hashes, p.history, p.ms)
     };
     let ok = |json: Value| json!({"id": id, "ok": true, "json": json});
     let fail = |e: &str| json!({"id": id, "ok": false, "error": e});
@@ -529,10 +667,53 @@ fn answer(s: &Shared, req: &Value) -> String {
         }
         // (the browser reads the outline from the PDF itself, with MuPDF)
         "outline" => ok(json!({"items": []})),
-        "diff" => ok(json!({})),
-        o if o.starts_with("diff_") => {
-            fail("the diff against a past version is not in the CLI yet")
+        "diff" => ok(lock(&s.diff).state.clone()),
+        "diff_log" => {
+            let skip = req.get("skip").and_then(index).unwrap_or(0);
+            let limit = req.get("limit").and_then(index).unwrap_or(100);
+            match lock(&s.log).as_ref().map(|f| f(skip, limit)) {
+                Some(Ok(commits)) => ok(json!({"commits": commits})),
+                Some(Err(e)) => fail(&e),
+                None => fail("no history here"),
+            }
         }
+        "diff_start" => match text("rev") {
+            Some(rev) => {
+                ask(
+                    s,
+                    Ask::DiffStart {
+                        rev,
+                        to: text("to"),
+                    },
+                );
+                ok(json!({}))
+            }
+            None => fail("diff_start: which version (rev)?"),
+        },
+        "diff_show" => {
+            ask(
+                s,
+                Ask::DiffShow(text("which").as_deref() != Some("current")),
+            );
+            ok(json!({}))
+        }
+        "diff_restyle" => {
+            ask(
+                s,
+                Ask::DiffRestyle {
+                    markup: text("markup"),
+                    subtype: text("subtype"),
+                    add: text("add_color"),
+                    del: text("del_color"),
+                },
+            );
+            ok(json!({}))
+        }
+        "diff_stop" => {
+            ask(s, Ask::DiffStop);
+            ok(json!({}))
+        }
+        o if o.starts_with("diff_") => fail(&format!("no op {o:?} here")),
         "trace" | "check" => ok(json!({"ok": true, "ms": 0})),
         _ => fail(&format!("no op {op:?} here")),
     };

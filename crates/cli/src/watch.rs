@@ -178,6 +178,40 @@ fn diagnostics(s: &Session, r: &session::Report, log: &str) -> Vec<Value> {
     v
 }
 
+/// The diff's state told the viewer, its files known as the watch's own,
+/// a line on the terminal (none: no diff).
+fn diff_told(ui: &Ui, v: &View, ours: &Ours, c: Option<&crate::compare::Compare>) {
+    let Some(c) = c else { return };
+    {
+        let mut mine = ours.lock().unwrap_or_else(PoisonError::into_inner);
+        for (p, h) in &c.wrote {
+            mine.insert(p.canonicalize().unwrap_or_else(|_| p.clone()), *h);
+        }
+    }
+    let state = c.state(false);
+    let n = state["changes"].as_array().map_or(0, Vec::len);
+    let errors = state["errors"].as_u64().unwrap_or(0);
+    v.diff(state, c.pdf.clone(), c.hashes.clone(), c.tex.clone());
+    let st = ui.st;
+    let mut line = format!(
+        "diff {}: {n} change{}",
+        c.label,
+        if n == 1 { "" } else { "s" }
+    );
+    if errors > 0 {
+        line.push_str(&st.red(&format!(
+            " · {errors} error{} in the marked-up document",
+            if errors == 1 { "" } else { "s" }
+        )));
+    }
+    ui.line(&line);
+    // (its first errors, as a build's; p shows them all while the diff is shown)
+    for e in c.errors(st.color).iter().take(3) {
+        ui.line(e);
+    }
+    ui.event(&json!({"event": "diff", "label": c.label, "changes": n, "errors": errors}));
+}
+
 /// What a line on standard input (a pipe) asks.
 fn line_key(l: &str) -> Key {
     let l = l.trim();
@@ -438,6 +472,11 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         match View::start(editor, o.port) {
             Ok(v) => {
                 ui.tap(v.console());
+                // (the diff's picker: the project's git history)
+                let here = root.clone();
+                v.on_log(Box::new(move |skip, limit| {
+                    crate::compare::Versions::log(&crate::compare::Git::open(&here)?, skip, limit)
+                }));
                 let wake = Mutex::new(tx.clone());
                 v.on_ask(Box::new(move || {
                     let _ = wake
@@ -895,6 +934,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
             s.set_buffer(file, text.as_deref());
         }
     };
+    // (the diff against a past version, and what the viewer asked of it)
+    let mut comparing: Option<crate::compare::Compare> = None;
+    let mut diff_asks: Vec<Ask> = Vec::new();
     while let Ok(first) = rx.recv() {
         // (what came meanwhile, a build's time of keystrokes among it, is
         // one edit, timed from the last of them: the wait a writer feels)
@@ -936,6 +978,21 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                                 }
                             }
                             _ => ui.line("phitex watch: no viewer (--no-view) and no output yet"),
+                        }
+                    }
+                    Key::Problems
+                        if view.as_ref().is_some_and(View::diff_is_shown)
+                            && comparing.is_some() =>
+                    {
+                        let errs = comparing
+                            .as_ref()
+                            .map(|c| c.errors(st.color))
+                            .unwrap_or_default();
+                        if errs.is_empty() {
+                            ui.line(&st.green("the diff: no errors"));
+                        }
+                        for e in errs {
+                            ui.line(&e);
                         }
                     }
                     Key::Problems if !last.borrow().placed.0.is_empty() => {
@@ -1038,6 +1095,13 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
                                 again = true;
                                 continue;
                             }
+                            Ask::DiffStart { .. }
+                            | Ask::DiffShow(_)
+                            | Ask::DiffRestyle { .. }
+                            | Ask::DiffStop => {
+                                diff_asks.push(a);
+                                continue;
+                            }
                             Ask::SetFile { file, text } => {
                                 buffers.insert(file.clone(), text);
                                 file
@@ -1071,6 +1135,81 @@ pub fn main(t: &Target, o: &Options, ui: &Ui) -> ! {
         if again {
             why.dedup();
             rebuild(&mut s, &why.join(", "), Some(came));
+        }
+        // (the diff: asked for, or diffed again after the edit)
+        if let Some(v) = &view {
+            let now = crate::compare::Now {
+                root: &root,
+                buffers: &buffers,
+            };
+            let edited = again && comparing.as_ref().is_some_and(|c| c.to.is_none());
+            for a in std::mem::take(&mut diff_asks) {
+                match a {
+                    Ask::DiffStart { rev, to } => {
+                        let spin = ui.spin(format!("{what}: diff against {rev}"), status.clone());
+                        let started = crate::compare::Git::open(&root).and_then(|g| {
+                            crate::compare::Compare::start(
+                                &g,
+                                &rev,
+                                to.as_deref(),
+                                &now,
+                                &main_rel,
+                                &s.job,
+                                Arc::new(Status::default()),
+                            )
+                        });
+                        spin.done();
+                        match started {
+                            Ok(c) => {
+                                // (its pages in first: then shown)
+                                diff_told(ui, v, &ours, Some(&c));
+                                comparing = Some(c);
+                                v.diff_shown(true);
+                            }
+                            Err(e) => {
+                                ui.warning(&format!("diff: {e}"));
+                                v.diff_stopped();
+                                ui.event(&json!({"event": "diff", "error": e}));
+                            }
+                        }
+                    }
+                    Ask::DiffShow(on) => v.diff_shown(on),
+                    Ask::DiffRestyle {
+                        markup,
+                        subtype,
+                        add,
+                        del,
+                    } => {
+                        if let Some(c) = comparing.as_mut() {
+                            let look = c.look_from(
+                                markup.as_deref(),
+                                subtype.as_deref(),
+                                add.as_deref(),
+                                del.as_deref(),
+                            );
+                            match crate::compare::Git::open(&root) {
+                                Ok(g) => {
+                                    c.restyle(look, &now, &g, &main_rel);
+                                    diff_told(ui, v, &ours, Some(c));
+                                }
+                                Err(e) => ui.warning(&format!("diff: {e}")),
+                            }
+                        }
+                    }
+                    Ask::DiffStop => {
+                        comparing = None;
+                        v.diff_stopped();
+                        ui.line(&st.dim("diff: stopped"));
+                    }
+                    _ => {}
+                }
+            }
+            if edited && let Some(c) = comparing.as_mut() {
+                let t0 = Instant::now();
+                c.edited(&now, &main_rel);
+                diff_told(ui, v, &ours, Some(c));
+                ui.line(&st.dim(&format!("diff: again in {}", ms(t0.elapsed()))));
+            }
         }
     }
     quit(ui)
