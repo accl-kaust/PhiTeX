@@ -2926,29 +2926,20 @@ mod tests {
         // (`\\par` is bounded: a paragraph's end, §1094-§1096, §1070)
         let par = st(0).expect("a state row");
         assert!(par.iter().any(|h| h == "pg:") && par.iter().any(|h| h == "parshape"));
-        // the run after it is in one: the list, and `\\prevgraf` if a
-        // command after it in its text ends the paragraph; the region
-        // runs on to its end, so the conditional's and
-        // `\\afterassignment`'s rows are its too
+        // the run after it: `\\prevgraf` if a command after it in its
+        // text ends the paragraph, and `\\afterassignment`'s row (the
+        // region runs on to its end); no dead head (`par:`, `if:`,
+        // `lopen:`, `page:`) is ever declared
         assert_eq!(
             st(10).as_deref(),
-            Some(
-                &[
-                    "par:".to_owned(),
-                    "pg:".to_owned(),
-                    "if:".to_owned(),
-                    "aftertoken".to_owned()
-                ][..]
-            )
+            Some(&["pg:".to_owned(), "aftertoken".to_owned()][..])
         );
-        // a run of text after \par may start a paragraph
-        assert!(st(5).expect("some").contains(&"par:".to_owned()));
-        // and the run after it is in one: no list opened
-        assert!(st(5).expect("some").contains(&"lopen:".to_owned()));
-        assert!(!st(10).expect("some").contains(&"lopen:".to_owned()));
-        // (a conditional, when bounded, may change the if stack)
-        if let Some(b) = text.at(15).bound {
-            assert!(b.state.expect("some").contains(&"if:".to_owned()));
+        for off in [0, 5, 10] {
+            let v = st(off).expect("some");
+            assert!(
+                !v.iter().any(|h| DEAD_HEADS.contains(&h.as_str())),
+                "{off}: {v:?}"
+            );
         }
         let d = text.at(t.find("\\def").unwrap()).bound.expect("bounded");
         assert!(d.state.expect("some").contains(&"aftertoken".to_owned()));
