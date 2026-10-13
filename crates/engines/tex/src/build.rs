@@ -254,7 +254,10 @@ impl Run<'_, '_> {
             return Ok((l.list.clone(), l.list.len()));
         }
         let f = self.list_fold(lid)?;
-        Ok((f.items, f.since_bp))
+        // the page builder's markers are no list material
+        let v = self.v;
+        let items = f.items.into_iter().filter(|&x| !is_marker(v, x)).collect();
+        Ok((items, f.since_bp))
     }
 
     /// [`Self::list_items`] with the space factor at the list's end: the
@@ -2120,10 +2123,16 @@ pub(crate) fn fold_item(
     match nodes::tag(v, n) {
         T_DELETE => {
             if st.since_bp > 0 {
-                out.pop();
+                // the last node, seen through the page builder's markers
+                if let Some(i) = out.iter().rposition(|&x| !is_marker(v, x)) {
+                    out.remove(i);
+                }
                 st.since_bp -= 1;
             }
         }
+        // the page builder's markers (page parameters, a marks read): kept
+        // in place for its fold, invisible to the list's readers
+        nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT => out.push(n),
         T_BUILD_PAGE => {
             st.since_bp = 0;
         }
@@ -2157,6 +2166,12 @@ pub(crate) fn fold_item(
             st.since_bp += 1;
         }
     }
+}
+
+/// Whether `x` is a marker for the page builder's fold
+/// (`T_PAGE_PARAMS`, `T_MARKS_AT`), not list material.
+fn is_marker(v: &Values, x: ValueId) -> bool {
+    matches!(nodes::tag(v, x), nodes::T_PAGE_PARAMS | nodes::T_MARKS_AT)
 }
 
 /// A list's contents as its reader sees them ([`Run::list_fold`]).

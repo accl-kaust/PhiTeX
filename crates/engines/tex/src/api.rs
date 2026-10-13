@@ -868,6 +868,10 @@ struct Graph {
     threads: usize,
     /// Why the relaxed PDF mode gave way to exact mode, once it has.
     pdf_exact: Option<String>,
+    /// The `marks:before:<node>` loop-backs declared for nodes the graph
+    /// made (they asked through `marksdecl:<node>`), as the
+    /// environment's answers.
+    marks_decl: Vec<(Field, ValueId)>,
     /// What the executor runs now, for readers on other threads.
     watch: crate::exec::Watch,
     /// The engine's scheduler ([`Options::speculation`]).
@@ -967,6 +971,7 @@ impl Graph {
             written: Vec::new(),
             threads: crate::exec::threads(threads),
             pdf_exact: None,
+            marks_decl: Vec::new(),
             watch: crate::exec::Watch::new(crate::exec::threads(threads), None),
             sched: phitex_defuse::Greedy::default(),
             eval_errors: Vec::new(),
@@ -1139,6 +1144,7 @@ impl Graph {
     fn environment(&self, fixpoint: bool) -> Vec<(Field, ValueId)> {
         let v = self.eng.values();
         let mut env = self.files.clone();
+        env.extend(self.marks_decl.iter().copied());
         if self.pdf_exact.is_some() {
             env.push((v.field("pdf:exact"), v.int(1)));
         }
@@ -1203,6 +1209,24 @@ impl Graph {
                     self.written_file(name, fixpoint);
                     asked = true;
                 }
+            }
+            // nodes made in the graph that read the marks: their
+            // `marks:before:<node>` loop-backs declared
+            let decl: Vec<(NodeId, Field)> = {
+                let v = self.eng.values();
+                r.env_waits
+                    .iter()
+                    .filter(|&&(_, f)| field_name(v, f).starts_with("marksdecl:"))
+                    .copied()
+                    .collect()
+            };
+            for (n, f) in decl {
+                if self.marks_decl.iter().any(|&(g, _)| g == f) {
+                    continue;
+                }
+                declare_marks_before(&mut self.eng, n);
+                self.marks_decl.push((f, ValueId::UNIT));
+                asked = true;
             }
             let asked_names: Vec<String> = {
                 let v = self.eng.values();
