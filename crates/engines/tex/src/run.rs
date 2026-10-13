@@ -187,10 +187,21 @@ pub(crate) struct Cur {
     pub tok: Tok,
     pub cmd: u8,
     pub chr: i32,
-    pub mean: Mean,
+    /// The meaning of a control sequence or active character (a
+    /// character token's is [`Cur::mean`]'s, never stored here).
+    pub cs_mean: Mean,
 }
 
 impl Cur {
+    /// The meaning of the current token.
+    pub(crate) fn mean(&self) -> Mean {
+        if self.tok.is_cs_or_active() {
+            self.cs_mean.clone()
+        } else {
+            Mean::Char(self.tok.cat().unwrap_or(0), self.tok.chr())
+        }
+    }
+
     pub(crate) fn is_cs(&self) -> bool {
         self.tok.is_cs_or_active()
     }
@@ -310,7 +321,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 tok: Tok::c(0),
                 cmd: 0,
                 chr: 0,
-                mean: Mean::Undefined,
+                cs_mean: Mean::Undefined,
             },
             conds: Vec::new(),
             if_codes: Vec::new(),
@@ -899,14 +910,10 @@ impl<'c, 'a> Run<'c, 'a> {
     #[inline]
     pub(crate) fn set_cur(&mut self, tok: Tok) -> R<()> {
         if !tok.is_cs_or_active() {
-            let c = tok.cat().unwrap_or(0);
-            let h = tok.chr();
-            self.cur = Cur {
-                tok,
-                cmd: c,
-                chr: i32::try_from(h).unwrap_or(0),
-                mean: Mean::Char(c, h),
-            };
+            // (a character's meaning is its own: no meaning stored)
+            self.cur.tok = tok;
+            self.cur.cmd = tok.cat().unwrap_or(0);
+            self.cur.chr = i32::try_from(tok.chr()).unwrap_or(0);
             return Ok(());
         }
         let mean = self.mean_of(tok)?;
@@ -915,7 +922,7 @@ impl<'c, 'a> Run<'c, 'a> {
             tok,
             cmd: c,
             chr: h,
-            mean,
+            cs_mean: mean,
         };
         Ok(())
     }
@@ -1429,13 +1436,17 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn get_next(&mut self) -> R<bool> {
         // (the common case: a token of the list on top that is not an
         // internal marker, and no alignment entry to watch for)
-        if let Some(Frame::Toks(t, p)) = self.frames.front()
-            && let Some(&tok) = t.get(*p)
-            && tok.as_cs().is_none_or(|n| !n.frozen())
-        {
-            if let Some(Frame::Toks(_, p)) = self.frames.front_mut() {
-                *p += 1;
-            }
+        let next = match self.frames.front_mut() {
+            Some(Frame::Toks(t, p)) => match t.get(*p) {
+                Some(&tok) if tok.as_cs().is_none_or(|n| !n.frozen()) => {
+                    *p += 1;
+                    Some(tok)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(tok) = next {
             self.set_cur(tok)?;
             if matches!(
                 self.cur.cmd,
@@ -1482,7 +1493,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     tok: t,
                     cmd: cmd::IGNORE,
                     chr,
-                    mean: Mean::Prim("\u{10FFFE}endv", cmd::IGNORE, chr),
+                    cs_mean: Mean::Prim("\u{10FFFE}endv", cmd::IGNORE, chr),
                 };
                 return Ok(true);
             }
@@ -1510,7 +1521,7 @@ impl<'c, 'a> Run<'c, 'a> {
             if self.cur.cmd > cmd::MAX_COMMAND {
                 self.cur.cmd = cmd::RELAX;
                 self.cur.chr = crate::val::NO_EXPAND_FLAG;
-                self.cur.mean = Mean::NotExpanded;
+                self.cur.cs_mean = Mean::NotExpanded;
             }
             return Ok(true);
         }
@@ -1529,7 +1540,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 tok: Tok::cs("\u{10FFFE}relax"),
                 cmd: cmd::RELAX,
                 chr: 256,
-                mean: Mean::Prim("relax", cmd::RELAX, 256),
+                cs_mean: Mean::Prim("relax", cmd::RELAX, 256),
             };
         }
         Ok(())
