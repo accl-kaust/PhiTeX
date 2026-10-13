@@ -40,6 +40,7 @@ mod nest;
 mod nodes;
 mod ops;
 mod page;
+mod pageinline;
 mod pdfout;
 mod pdfprim;
 mod pdfrelaxed;

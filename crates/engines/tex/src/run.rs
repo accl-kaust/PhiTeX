@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use phitex_defuse::{Ctx, Effect, Field, FxHashMap, Locality, OpId, Stop, Value, ValueId, Values};
 
-use crate::val::{Mean, Tok, cmd, int_of, str_of};
+use crate::val::{Mean, Tok, cmd, int_of, list_of, str_of};
 
 /// Why a run cannot finish its command now.
 pub(crate) enum Halt {
@@ -222,7 +222,15 @@ pub(crate) struct Run<'c, 'a> {
     /// redefinition within the same group replaces in place instead of
     /// growing `defs` (and no linear search finds the earlier one).
     pub def_ix: FxHashMap<Field, Vec<usize>>,
+    /// Per field, the stamp of its latest global definition inside a
+    /// group of this run: saved entries stamped before it are inert.
+    pub ginert: FxHashMap<Field, u64>,
+    /// The clock of `ginert` and the saved entries (`nest.rs`).
+    pub stamp: u64,
     pub contribs: Vec<(Field, ValueId)>,
+    /// The page builder of a text run as one node, paging inline
+    /// (`pageinline.rs`).
+    pub pg: Option<Box<crate::pageinline::Inline>>,
     pub kids: Vec<(OpId, Vec<ValueId>)>,
     pub effect: Effect,
     pub cur: Cur,
@@ -282,7 +290,10 @@ impl<'c, 'a> Run<'c, 'a> {
             cats: [0; 256],
             defs: Vec::new(),
             def_ix: FxHashMap::default(),
+            ginert: FxHashMap::default(),
+            stamp: 0,
             contribs: Vec::new(),
+            pg: None,
             kids: Vec::new(),
             effect: Effect::None,
             cur: Cur {
@@ -320,6 +331,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(Some(x));
         }
         let r = self.cx.use_field(f);
+        crate::exec::widths::read(f);
         if crate::exec::env_flag!("PHITEX_READS") {
             self.trace_read(f, r.is_err());
         }
@@ -331,7 +343,14 @@ impl<'c, 'a> Run<'c, 'a> {
     /// parked, with the node and its operation.
     #[cold]
     fn trace_read(&mut self, f: Field, parked: bool) {
-        const HEADS: [&str; 6] = ["pg:", "parshape", "box:", "lvlfix", "badness", "markclasses"];
+        const HEADS: [&str; 6] = [
+            "pg:",
+            "parshape",
+            "box:",
+            "lvlfix",
+            "badness",
+            "markclasses",
+        ];
         let name = crate::val::field_name(self.v, f);
         if parked || HEADS.iter().any(|h| name.starts_with(h)) {
             eprintln!(
@@ -349,8 +368,23 @@ impl<'c, 'a> Run<'c, 'a> {
     /// writes and reads back is a loop-back field: the previous round's.
     pub(crate) fn file(&mut self, key: &str) -> R<Option<ValueId>> {
         let v = self.v;
+        // a file the job writes: its in-memory value (`wfile:<key>`, a
+        // loop-back the writer publishes), never the client's file
+        let w = v.field(&format!("wfile:{key}"));
         let f = v.field(&format!("file:{key}"));
-        let x = if self.cx.is_loopback(f) {
+        let k = v.field(&format!("wkeys:{key}"));
+        let x = if self.cx.is_loopback(k) {
+            // a file whose read-back only defines: it exists (empty) once
+            // a line of it defines something ([`Run::read_back`])
+            let keys = self.cx.use_field(k)?;
+            if keys.is_some_and(|x| !list_of(v, x).is_empty()) {
+                Some(v.list(vec![v.str(&format!("./{key}")), v.str("")]))
+            } else {
+                None
+            }
+        } else if self.cx.is_loopback(w) {
+            self.cx.use_field(w)?
+        } else if self.cx.is_loopback(f) {
             self.get_f(f)?
         } else {
             self.cx.use_env(f)?
@@ -363,6 +397,162 @@ impl<'c, 'a> Run<'c, 'a> {
                 .push((key.to_owned(), std::hash::Hasher::finish(&h)));
         }
         Ok(x)
+    }
+
+    /// A `streams` entry (`[name]` opens the file empty, `[name, text]`
+    /// adds to it): from a page step, tagged with its page (`[j, entry]`,
+    /// the writer places it with page `j`); from a document node, also a
+    /// `T_WRITE_AT` marker on the main list, which the page builder's
+    /// fold places among the pages (§1370, §1374).
+    pub(crate) fn contribute_stream(&mut self, e: ValueId) {
+        let v = self.v;
+        let op = self.cx.op();
+        if op == self.ops.pagestep || op == self.ops.pagestep_any {
+            let j = i64::try_from(self.page_index()).unwrap_or(0);
+            self.contribute("streams", v.seq_unit(v.list(vec![v.int(j), e])));
+        } else if self.pg.is_some() {
+            // a text paging inline (`pageinline.rs`): its entries are in
+            // TeX's order as they are made
+            self.contribute("streams", v.seq_unit(e));
+        } else {
+            self.contribute("streams", v.seq_unit(e));
+            let at = v.list(vec![v.int(crate::nodes::T_WRITE_AT), e]);
+            self.contribute("items", v.seq_unit(v.list(vec![v.int(0), at])));
+        }
+    }
+
+    /// Whether file `name` is one the job writes and reads back, with its
+    /// loop-backs declared.
+    pub(crate) fn written_known(&self, name: &str) -> bool {
+        let v = self.v;
+        self.cx.is_loopback(v.field(&format!("wfile:{name}")))
+            || self.cx.is_loopback(v.field(&format!("wkeys:{name}")))
+    }
+
+    /// `\input` of a file whose read-back only defines (`.aux`): the
+    /// definitions its lines make, from the per-field loop-backs
+    /// `wdef:<field>` the writer publishes for the fields listed in
+    /// `wkeys:<key>`; nothing of the file's text is read. Whether `key`
+    /// is such a file.
+    pub(crate) fn read_back(&mut self, key: &str) -> R<bool> {
+        let v = self.v;
+        let wk = v.field(&format!("wkeys:{key}"));
+        if !self.cx.is_loopback(wk) {
+            return Ok(false);
+        }
+        let keys = self
+            .cx
+            .use_field(wk)?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default();
+        for k in keys {
+            let name = str_of(v, k);
+            let wd = v.field(&format!("wdef:{name}"));
+            if !self.cx.is_loopback(wd) {
+                self.cx.use_env(v.field(&format!("wdefdecl:{name}")))?;
+            }
+            if !self.cx.is_loopback(wd) {
+                continue;
+            }
+            let Some(x) = self.cx.use_field(wd)? else {
+                continue;
+            };
+            let xs = list_of(v, x);
+            if let [val, g] = xs.as_slice() {
+                let global = int_of(v, *g) != 0;
+                self.set(&name, *val, global);
+            }
+        }
+        Ok(true)
+    }
+
+    /// A line written to a file whose read-back only defines, read as
+    /// its read-back reads it (under `\makeatletter`), on scratch: the
+    /// definitions it makes, `[[field, value, global], ...]`; nothing of
+    /// it stays in this run (its input, lists, contributions and
+    /// definitions are restored).
+    pub(crate) fn interpret_line(&mut self, line: &str) -> R<ValueId> {
+        let v = self.v;
+        let frames = std::mem::take(&mut self.frames);
+        let own = self.own.clone();
+        let defs = self.defs.clone();
+        let (nc, nk) = (self.contribs.len(), self.kids.len());
+        let nest_len = self.nest.len();
+        let saved: Vec<_> = self.nest.iter().map(|l| l.saved.clone()).collect();
+        let conds = self.conds.clone();
+        let codes = self.if_codes.clone();
+        let cur = self.cur.clone();
+        let (eof, no_pull, claim) = (self.eof, self.no_pull, self.claim_rest);
+        let effect = self.effect;
+        self.eof = true;
+        self.no_pull = true;
+        self.set("cat:64", v.int(11), false);
+        let base = self.defs.len();
+        for l in line.split('\n') {
+            let mut buf: Vec<u32> = l.chars().map(u32::from).collect();
+            while buf.last() == Some(&32) {
+                buf.pop();
+            }
+            self.frames.push_back(Frame::Src(Src {
+                buf,
+                loc: 0,
+                state: NEW_LINE,
+                endch: -2,
+                starts: false,
+                ends: true,
+                origin: None,
+                rescanned: true,
+            }));
+        }
+        let mut res = Ok(());
+        while self.has_input() {
+            if let Err(h) = self.command() {
+                res = Err(h);
+                break;
+            }
+        }
+        let made: Vec<ValueId> = self.defs[base.min(self.defs.len())..]
+            .iter()
+            .filter(|d| !str_of(v, d.0.0).starts_with("cat:"))
+            .map(|&(f, x, l)| {
+                v.list(vec![
+                    f.0,
+                    x,
+                    v.int(i64::from(matches!(l, Locality::Global))),
+                ])
+            })
+            .collect();
+        self.frames = frames;
+        self.own = own;
+        self.defs = defs;
+        self.contribs.truncate(nc);
+        self.kids.truncate(nk);
+        self.nest.truncate(nest_len);
+        for (l, sv) in self.nest.iter_mut().zip(saved) {
+            l.saved = sv;
+        }
+        self.conds = conds;
+        self.if_codes = codes;
+        self.cur = cur;
+        self.eof = eof;
+        self.no_pull = no_pull;
+        self.claim_rest = claim;
+        self.effect = effect;
+        self.cats = [0; 256];
+        self.kind_memo = None;
+        res?;
+        Ok(v.list(made))
+    }
+
+    /// File `name` is opened for writing: unless its `wfile:<name>`
+    /// loop-back is declared, the run asks the client to declare it
+    /// (`wfiledecl:<name>`, answered by `api::Graph::settle`).
+    pub(crate) fn written_decl(&mut self, name: &str) -> R<()> {
+        let v = self.v;
+        if !self.written_known(name) {
+            self.cx.use_env(v.field(&format!("wfiledecl:{name}")))?;
+        }
+        Ok(())
     }
 
     pub(crate) fn get(&mut self, name: &str) -> R<Option<ValueId>> {
@@ -423,20 +613,30 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         self.own.insert(f, Some(val));
         self.cats = [0; 256];
-        let loc = if global { Locality::Global } else { Locality::Local };
+        let loc = if global {
+            Locality::Global
+        } else {
+            Locality::Local
+        };
         // the definitions since the innermost group opened are the
         // group's (`nest.rs` pop_level truncates to its opening): one
         // per field there; outside every group, one per field at all. A
-        // local after a global of the same group is kept apart: the
-        // group's close drops it and the global stays (§283)
-        let floor = self.nest.iter().rev().find(|l| l.group != 0).map_or(0, |l| l.defs_len);
+        // local after a global is kept apart, in a group (its close drops
+        // the local, the global stays, §283) and at level 0 (the engine's
+        // scope sees the global, then the local)
+        let floor = self
+            .nest
+            .iter()
+            .rev()
+            .find(|l| l.group != 0)
+            .map_or(0, |l| l.defs_len);
         let ix = self.def_ix.entry(f).or_default();
-        if let Some(&i) = ix.last() {
-            if i >= floor && !(self.defs[i].2 == Locality::Global && loc == Locality::Local && floor > 0)
-            {
-                self.defs[i] = (f, val, loc);
-                return;
-            }
+        if let Some(&i) = ix.last()
+            && i >= floor
+            && !(self.defs[i].2 == Locality::Global && loc == Locality::Local)
+        {
+            self.defs[i] = (f, val, loc);
+            return;
         }
         ix.push(self.defs.len());
         self.defs.push((f, val, loc));
@@ -1294,6 +1494,11 @@ impl<'c, 'a> Run<'c, 'a> {
         let k = args.get(1).map_or(0, |&t| int_of(self.v, t));
         self.top = k & 1 != 0;
         self.doc = k & 2 != 0;
+        // a job's text run as one node (no format: INITEX's regime) pages
+        // inline, in TeX's order (`pageinline.rs`)
+        if self.top && !self.doc && self.pg.is_none() {
+            self.pg = Some(Box::new(crate::pageinline::Inline::new()));
+        }
         loop {
             while self.has_input() {
                 self.command()?;
@@ -1333,6 +1538,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// command made, then the input left), the claim and the scope effect.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn finish(mut self) -> ValueId {
+        crate::pageinline::finish(&mut self);
         // a page parameter this run set reaches the page fold as a
         // marker in the main list (page.rs `breaks`)
         if self.defs.iter().any(|&(f, _, _)| {
@@ -1358,6 +1564,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.contribute("items", s);
         }
         for (f, x, l) in std::mem::take(&mut self.defs) {
+            crate::exec::widths::def(f);
             self.cx.define_with(f, x, l);
         }
         if !self.own.is_empty() {
