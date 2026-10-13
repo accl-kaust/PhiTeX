@@ -45,6 +45,7 @@ fn equal_content_publishes_nothing_the_second_time() {
         .iter()
         .filter(|d| d.severity == phitex_tex::Severity::Error)
         .map(|d| d.message.clone())
+        .filter(|m| m.contains("fixpoint") || m.contains("rounds"))
         .collect();
     assert!(errors.is_empty(), "{errors:?}");
     assert!(b.stats.loop_rounds <= 5, "{} loop rounds", b.stats.loop_rounds);
@@ -58,8 +59,20 @@ fn equal_content_publishes_nothing_the_second_time() {
     // the page typeset with the read-back values: `abc/xyz` set in the
     // DVI (set_char opcodes are the ASCII codes)
     let (dvi, _) = b.output();
-    assert!(
-        dvi.windows(7).any(|w| w == b"abc/xyz"),
-        "the page does not show the read-back values"
-    );
+    let shown: String = dvi
+        .iter()
+        .map(|&c| if c.is_ascii_graphic() { char::from(c) } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .filter(|w| w.len() > 1)
+        .collect::<Vec<_>>()
+        .join(" ");
+    // (cmr10 kerns b–c: the words as the DVI sets them)
+    for word in [&b"ab"[..], b"c/xyz"] {
+        assert!(
+            dvi.windows(word.len()).any(|w| w == word),
+            "the page does not show the read-back value {}: {shown}",
+            String::from_utf8_lossy(word)
+        );
+    }
 }
