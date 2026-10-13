@@ -157,3 +157,41 @@ fn generated_wall() {
         b.stats.page_steps
     );
 }
+
+/// `selfdep.tex` in `PHITEX_GEN` (400 paragraphs, a routine that
+/// advances a count it reads): the page chain's delta depends on the
+/// previous one, one page per loop round; the DVI equals tex's
+/// (`selfdep.dvi`).
+#[test]
+#[ignore = "needs PHITEX_GEN"]
+fn self_dependent_routine() {
+    let Ok(dir) = std::env::var("PHITEX_GEN") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let src = std::fs::read_to_string(dir.join("selfdep.tex")).expect("the document");
+    let want = std::fs::read(dir.join("selfdep.dvi")).expect("the oracle");
+    let opts = common::options(
+        "./selfdep.tex",
+        "selfdep",
+        &common::dvi_comment(&want),
+        &dir,
+    );
+    let b = common::build(opts, Some(&common::plain()), &src);
+    let s = &b.stats;
+    eprintln!(
+        "selfdep: pages {}, loop rounds {}, critical path {:?}, refuted guesses {}",
+        b.pages().len(),
+        s.loop_rounds,
+        s.critical_path,
+        s.refuted_guesses.len()
+    );
+    for r in s.refuted_guesses.iter().take(5) {
+        eprintln!("  {r}");
+    }
+    assert!(
+        common::first_difference(&b.output().0, &want).is_none(),
+        "selfdep.dvi differs: {:?}",
+        common::first_difference(&b.output().0, &want)
+    );
+}
