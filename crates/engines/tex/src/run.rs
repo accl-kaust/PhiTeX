@@ -285,7 +285,7 @@ pub(crate) struct Run<'c, 'a> {
     /// `end_graf`, §1096): at 100 the job stops (§82).
     pub error_count: u32,
     /// Whether the job stopped at 100 errors.
-    pub too_many_errors: bool,
+    pub fatal_logged: bool,
     /// The input as the command in progress began ([`Run::rewind`]).
     pub(crate) mark: crate::getnext::Mark,
     /// A halt raised on the token path ([`Run::raise`]), returned by the
@@ -351,7 +351,7 @@ impl<'c, 'a> Run<'c, 'a> {
             resumed: false,
             irreversible: 0,
             error_count: 0,
-            too_many_errors: false,
+            fatal_logged: false,
             mark: crate::getnext::Mark::default(),
             halt: None,
         }
@@ -896,10 +896,20 @@ impl<'c, 'a> Run<'c, 'a> {
             ]);
             let s = self.v.seq_unit(e);
             self.contribute("log", s);
-            self.too_many_errors = true;
+            self.fatal_logged = true;
             return Err(Halt::Fatal);
         }
         Ok(())
+    }
+
+    /// `fatal_error` (§93): `s` logged, and the job ends there (§1335).
+    /// A build has no terminal: it runs as `nonstop_mode` does, so every
+    /// read from the terminal and every file error ends the job (§71,
+    /// §484, §530).
+    pub(crate) fn fatal<T>(&mut self, s: &str) -> R<T> {
+        self.log("error", s)?;
+        self.fatal_logged = true;
+        Err(Halt::Fatal)
     }
 
     /// A diagnostic for [`crate::Build::diagnostics`]: where the input is

@@ -449,7 +449,9 @@ impl Input {
         if self.text_at >= self.text.len() {
             return false;
         }
-        let seg = std::mem::replace(&mut self.text[self.text_at], Seg::Toks(Vec::new()));
+        // (the segment stays in the text: a rewind after a halt inside
+        // the reached line puts `text_at` back and reaches it again)
+        let seg = self.text[self.text_at].clone();
         self.text_at += 1;
         match seg {
             Seg::Line(l) => {
@@ -476,7 +478,11 @@ impl Input {
     /// nodes).
     pub(crate) fn append_text(&mut self, segs: Vec<Seg>) {
         for s in segs {
-            if let (Some(Seg::Line(last)), Seg::Line(next)) = (self.text.last_mut(), &s)
+            // (a reached segment stays in the text as a copy; a
+            // continuation of the line on top joins that line instead,
+            // `Run::join_continuation`)
+            if self.text.len() > self.text_at
+                && let (Some(Seg::Line(last)), Seg::Line(next)) = (self.text.last_mut(), &s)
                 && !last.ends
                 && !next.starts
             {
@@ -486,11 +492,6 @@ impl Input {
             }
             self.text.push(s);
         }
-    }
-
-    /// The last segment of the text (the one a continuation would join).
-    pub(crate) fn text_last(&self) -> Option<&Seg> {
-        self.text.last()
     }
 
     /// Where the levels stand, for a rewind: each level copied (four
