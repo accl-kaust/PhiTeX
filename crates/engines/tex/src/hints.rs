@@ -96,9 +96,8 @@ pub(crate) struct Bound {
 /// The state fields (heads: a family's prefix with its colon, or a
 /// cell's name) a command of this name may set besides control
 /// sequences, from tex.web; `None`: a command whose state is not
-/// listed here (every head). The alignment state (`align:`), the
-/// paragraph (`par:`) and `aftertoken` come from the context, not from
-/// the command ([`Analysis::cs_hint`]).
+/// listed here (every head). The alignment state (`align:`), `\\prevgraf`
+/// (`pg:`) and `aftertoken` come from the context, not from the command ([`Analysis::cs_hint`]).
 #[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn class_state(name: &str) -> Option<&'static [&'static str]> {
     let n = name
@@ -124,18 +123,13 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         | "botmark" | "splitfirstmark" | "splitbotmark" | "topmarks" | "firstmarks"
         | "botmarks" | "splitfirstmarks" | "splitbotmarks" | "/" | " " | "mskip" | "mkern"
         | "penalty" | "end" | "beginL" | "endL" | "beginR" | "endR" => &[],
-        // a paragraph's end (§1094-§1096): `line_break` sets its lines'
-        // cells (`par:`), `\\prevgraf` (`pg:`, §1096), the vertical
-        // list's opener (`lopen:`); the lines' inserts and `\\vadjust`
-        // material (`inspen`, `box:`, `param:`, §1199); the page builder
-        // after it (`page:`, `deadcycles`, §1094 build_page); and
-        // `normal_paragraph` (§1070)
+        // a paragraph's end (§1094-§1096): `\\prevgraf` (`pg:`, §1096);
+        // the paragraph, the conditionals and the groups are run-local
         "par" => PAR_END,
-        // a box's dimension (§1247): the box and its level fix; the
-        // dimension's value is scanned with expansion (`if:`, §498)
-        "wd" | "ht" | "dp" => &["box:", "lvlfix", "if:"],
+        // a box's dimension (§1247): the box and its level fix
+        "wd" | "ht" | "dp" => &["box:", "lvlfix"],
         // horizontal material: may start a paragraph ([`starts_par`] adds
-        // `par:`), the box level fix (§1090, §1091)
+        // `pg:`), the box level fix (§1090, §1091)
         // (`\\accent` does the assignments before its character: a font,
         // registers, §1123)
         "accent" => &[
@@ -154,30 +148,29 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         | "mathchar" | "delimiter" | "displaylimits" | "limits" | "nolimits" | "nonscript"
         | "mathchoice" | "eqno" | "leqno" | "over" | "atop" | "above" | "overwithdelims"
         | "atopwithdelims" | "abovewithdelims" => &["inc"],
-        // opening a group: the scope's opener record (`lopen:`, run.rs
-        // `finish`; §1063)
-        "begingroup" | "bgroup" => &["lopen:"],
+        // opening a group: a level of the run's own nest (§1063)
+        "begingroup" | "bgroup" => &[],
         // closing a group: the box's badness, its level fix, inserts (§1100, §1079)
         // and the box a `\\setbox` or box context gets (§1077 box_end)
         // (an output routine's `}` resumes the page builder, §1100)
         "endgroup" | "egroup" => &["badness", "lvlfix", "inspen", "box:"],
         // arguments expanded while read: a conditional may end (§366, §498)
-        "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["if:", "cs:"],
+        "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["cs:"],
         "mark" => &[],
         // (e-TeX's mark classes, §1494 ff.)
         "marks" => &["markclasses"],
-        "write" | "openout" | "closeout" => &["if:", "wopen:", "write:"],
+        "write" | "openout" | "closeout" => &["wopen:", "write:"],
         // (`\\immediate` of a pdfTeX object too, pdfTeX §1528)
-        "immediate" => &["if:", "wopen:", "write:", "pdf:"],
+        "immediate" => &["wopen:", "write:", "pdf:"],
         // (§1099: `normal_paragraph` in the insert's own group; §1100)
         "insert" | "vadjust" => NORMAL_PARAGRAPH,
         // (§638 `dead_cycles:=0`; §1374 the page's `\\write`, `\\openout`,
         // `\\closeout` whatsits, expanded, §1370; pdfTeX's at shipout)
-        "shipout" => &["deadcycles", "write:", "wopen:", "pdf:", "if:"],
+        "shipout" => &["deadcycles", "write:", "wopen:", "pdf:"],
         // (the token parameter, §1226)
         "output" => &["param:output"],
         "afterassignment" => &["aftertoken"],
-        "aftergroup" => &["ag"],
+        "aftergroup" => &[],
         // boxes (§1083 begin_box, §1077 \\setbox); a box whose braces close in
         // the same node is packaged there and sets \\\\badness, §1086, §649)
         "hbox" | "vbox" | "vtop" | "vcenter" | "setbox" | "vsplit" => {
@@ -187,7 +180,7 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode"
         | "ifinner" | "ifvoid" | "ifhbox" | "ifvbox" | "ifcat" | "ifcase" | "iftrue"
         | "iffalse" | "ifdefined" | "ifcsname" | "iffontchar" | "unless" | "else" | "fi" | "or"
-        | "ifpdfprimitive" | "ifpdfabsnum" | "ifpdfabsdim" | "ifincsname" | "ifeof" => &["if:"],
+        | "ifpdfprimitive" | "ifpdfabsnum" | "ifpdfabsdim" | "ifincsname" | "ifeof" => &[],
         // fonts (§1257 new_font, §1234)
         "font" => &[
             "fd:",
@@ -197,7 +190,6 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
             "fontinfo:",
             "hc:",
             "sc:",
-            "if:",
         ],
         "textfont" | "scriptfont" | "scriptscriptfont" => &["fam:"],
         // a font's parameters (§1253)
@@ -207,7 +199,7 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // codes (§1232)
         // (the code's value is scanned with expansion: a conditional
         // may end, §1232, §498)
-        "catcode" => &["cat:", "if:"],
+        "catcode" => &["cat:"],
         "lccode" => &["lc:"],
         "uccode" => &["uc:"],
         "sfcode" => &["sf:"],
@@ -217,11 +209,11 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // parameters (`\\advance\\tolerance`), a conditional expanded
         // in the value (§498), `\\afterassignment`'s token (§1269)
         // (a register by number assigns that family's register, §1224)
-        "count" => &["count:", "if:", "aftertoken"],
-        "dimen" => &["dimen:", "if:", "aftertoken"],
-        "skip" => &["skip:", "if:", "aftertoken"],
-        "muskip" => &["muskip:", "if:", "aftertoken"],
-        "toks" => &["toks:", "if:", "aftertoken"],
+        "count" => &["count:", "aftertoken"],
+        "dimen" => &["dimen:", "aftertoken"],
+        "skip" => &["skip:", "aftertoken"],
+        "muskip" => &["muskip:", "aftertoken"],
+        "toks" => &["toks:", "aftertoken"],
         "advance" | "multiply" | "divide" => &[
             "count:",
             "dimen:",
@@ -229,7 +221,6 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
             "muskip:",
             "toks:",
             "param:",
-            "if:",
             "aftertoken",
         ],
         "parshape"
@@ -243,21 +234,19 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "deadcycles" => &["deadcycles"],
         "insertpenalties" => &["inspen"],
         "pagegoal" | "pagetotal" | "pagestretch" | "pagefilstretch" | "pagefillstretch"
-        | "pagefilllstretch" | "pageshrink" | "pagedepth" => &["page:"],
+        | "pagefilllstretch" | "pageshrink" | "pagedepth" => &[],
         "batchmode" | "nonstopmode" | "scrollmode" | "errorstopmode" | "interactionmode" => {
             &["interaction"]
         }
-        // (§960, §934: the pattern trie and exceptions; the list opener
-        // the engine records for the braced list, `lopen:`; a
-        // conditional in the list's expansion, §961)
-        "hyphenation" | "patterns" => &["patterns", "lopen:", "if:"],
+        // (§960, §934: the pattern trie and exceptions)
+        "hyphenation" | "patterns" => &["patterns"],
         // expansion only (§367, §369)
         "noexpand" => &[],
         // boxes in a box context (§1073 begin_box via §1084)
         "moveleft" | "moveright" | "raise" | "lower" => &["box:", "lvlfix", "badness"],
         // a language whatsit (§1377) in horizontal material, which may
-        // start a paragraph (`par:`, `lopen:`, `pg:`, §1091)
-        "setlanguage" => &["box:", "lvlfix", "par:", "lopen:", "pg:"],
+        // start a paragraph (`pg:`, §1091)
+        "setlanguage" => &["box:", "lvlfix", "pg:"],
         // (they may read or expand anything: every head, §366 \\expandafter,
         // §362 \\input/\\endinput, §1285 \\lowercase/\\uppercase)
         "expandafter" | "input" | "endinput" | "lowercase" | "uppercase" => return None,
@@ -266,7 +255,7 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "read" | "readline" | "openin" | "closein" => &["read:"],
         // pdfTeX's objects, streams, random numbers, colour stacks
         _ if n.starts_with("pdf") && crate::prims::PRIMS.iter().any(|p| p.0 == n) => {
-            &["pdf:", "if:"]
+            &["pdf:"]
         }
         _ => {
             if crate::prims::PRIMS.iter().any(|p| p.0 == n) || table_param(n) {
@@ -307,7 +296,6 @@ const NORMAL_PARAGRAPH: &[&str] = &[
 /// a display's sizes and the lines of the paragraph before it (§1145,
 /// §1146), and its end's resumption (§1200).
 const MATH_SHIFT: &[&str] = &[
-    "lopen:",
     "inc",
     "pg:",
     "param:fam",
@@ -370,12 +358,6 @@ fn add_heads(st: &mut Option<Vec<String>>, heads: Option<&[&str]>) {
     match (st.as_mut(), heads) {
         (Some(v), Some(hs)) => {
             for h in hs {
-                // (dead heads: the paragraph, conditionals and groups are
-                // run-local, the page builder's state lives in its own
-                // node)
-                if DEAD_HEADS.contains(h) {
-                    continue;
-                }
                 if !v.iter().any(|x| x == h) {
                     v.push((*h).to_owned());
                 }
@@ -385,9 +367,6 @@ fn add_heads(st: &mut Option<Vec<String>>, heads: Option<&[&str]>) {
         (None, _) => {}
     }
 }
-
-/// The state heads no node defines any more.
-const DEAD_HEADS: &[&str] = &["par:", "if:", "lopen:", "page:"];
 
 fn add_head(st: &mut Option<Vec<String>>, h: &str) {
     add_heads(st, Some(&[h]));
@@ -1634,15 +1613,6 @@ impl Analysis<'_> {
             AtomKind::Char(_) | AtomKind::Verb => {
                 // (a run of characters: the active ones expand here, and
                 // the token after the run is looked at, §1038)
-                // (a run appends to its paragraph's cells, `par:<anchor>:…`,
-                // whether or not it starts the paragraph; the engine's
-                // narrowing keeps the anchor its own)
-                add_head(&mut b.state, "par:");
-                if self.may_start_par(a) {
-                    // (a paragraph begun: its list's opener and
-                    // `\\prevgraf` set to 0, §1091)
-                    add_head(&mut b.state, "lopen:");
-                }
                 // (the run goes on through the commands after it in its
                 // own text, and a line's end may end the paragraph there:
                 // `\\prevgraf`, §1096)
@@ -1717,7 +1687,6 @@ impl Analysis<'_> {
         }
         b.no_scope = ok && self.no_scope(a);
         if ok {
-            opener(&mut b.state, at.kind == AtomKind::Open);
             if cause.is_empty() {
                 "bounded".clone_into(&mut cause);
             }
@@ -1867,12 +1836,11 @@ impl Analysis<'_> {
             if self.is_defined(c) {
                 // (a name the text defines: its body's calls are in the
                 // list already)
-                add_head(st, "lopen:");
                 self.defined_state(c, true, st);
                 continue;
             }
             if starts_par(c) {
-                add_heads(st, Some(&["par:", "lopen:", "pg:"]));
+                add_heads(st, Some(&["pg:"]));
             }
             let row = class_state(c);
             if row.is_none()
@@ -1918,24 +1886,23 @@ impl Analysis<'_> {
                     'g' => "skip:",
                     _ => "toks:",
                 };
-                add_heads(st, Some(&[fam, "if:", "aftertoken"]));
+                add_heads(st, Some(&[fam, "aftertoken"]));
             }
             Some(pass::Shape::Quantity(_)) => {
                 add_heads(st, Some(&["box:", "lvlfix", "badness", "inspen", "align"]));
                 if may_start_par {
-                    add_heads(st, Some(&["par:", "pg:"]));
+                    add_heads(st, Some(&["pg:"]));
                 }
             }
             Some(pass::Shape::Alias(t)) => {
                 if starts_par(&t) && may_start_par {
-                    add_heads(st, Some(&["par:", "pg:"]));
+                    add_heads(st, Some(&["pg:"]));
                 }
                 if !self.is_defined(&t) {
                     add_heads(st, class_state(&t));
                 }
             }
-            Some(pass::Shape::Cond) => add_head(st, "if:"),
-            Some(pass::Shape::Macro(_)) => {}
+            Some(pass::Shape::Cond | pass::Shape::Macro(_)) => {}
             // (definitions that disagree, or one the pass cannot read)
             Some(pass::Shape::Opaque(_)) | None => {
                 // (definitions that disagree, `\\let\\@sf\\empty` and an
@@ -2061,9 +2028,6 @@ impl Analysis<'_> {
                 let o = atoms[k].name(self.text);
                 if o.starts_with("pdf") && crate::prims::PRIMS.iter().any(|p| p.0 == o) {
                     add_head(&mut b.state, "pdf:");
-                } else if class_state(o) == Some(&["if:"][..]) {
-                    // (a conditional expanded in an operand, §498)
-                    add_head(&mut b.state, "if:");
                 } else if matches!(o, "csname" | "tex_csname:D")
                     && !b.prefixes.iter().any(|p| p == "cs:")
                 {
@@ -2095,7 +2059,6 @@ impl Analysis<'_> {
         // it, and what the bodies it relies on call)
         if self.is_defined(name) {
             // (a body may open a group of its own)
-            add_head(&mut b.state, "lopen:");
             self.defined_state(name, self.may_start_par(a), &mut b.state);
         } else {
             add_heads(&mut b.state, class_state(name));
@@ -2105,7 +2068,7 @@ impl Analysis<'_> {
             b.prefixes.push("cs:\u{10FFFE}F".to_owned());
         }
         if starts_par(name) && self.may_start_par(a) {
-            add_heads(&mut b.state, Some(&["par:", "lopen:", "pg:"]));
+            add_heads(&mut b.state, Some(&["pg:"]));
         }
         if matches!(name, "par" | "tex_par:D") || it.hints.implicit == pass::Implicit::EndsParagraph
         {
@@ -2167,19 +2130,6 @@ impl Analysis<'_> {
                 false
             }
         }
-    }
-}
-
-/// A command that opens a list or a scope (a group, a paragraph, a box,
-/// math, an alignment, an insert) records its opener when it ends
-/// (`lopen:<id>`, run.rs `finish`): every class that may open one.
-fn opener(st: &mut Option<Vec<String>>, open: bool) {
-    let opens = st.as_ref().is_some_and(|v| {
-        v.iter()
-            .any(|h| matches!(h.as_str(), "box:" | "inc" | "align" | "param:" | "lvlfix"))
-    });
-    if open || opens {
-        add_head(st, "lopen:");
     }
 }
 
@@ -2365,9 +2315,6 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
             && balanced(&an, text, s, e)
         {
             b.no_scope = true;
-            if let Some(st) = &mut b.state {
-                st.retain(|x| x != "lopen:");
-            }
         }
         let excerpt = short(&text[s..text.len().min(s + 40)]);
         if t.pars[i] {
@@ -2686,12 +2633,11 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
                     ..Bound::default()
                 };
                 // (a run that reaches a cell's end in an alignment, §789:
-                // the template's v part runs there, and may hold a
-                // conditional, `if:`)
+                // the template's v part runs there)
                 add_heads(
                     &mut b.state,
                     Some(&[
-                        "par:", "pg:", "lopen:", "box:", "lvlfix", "align", "badness", "if:",
+                        "pg:", "box:", "lvlfix", "align", "badness",
                     ]),
                 );
                 return Hint {
@@ -2775,11 +2721,9 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
 fn fragment_context(b: &mut Bound) {
     // (a `}` among them may end the output routine: the page's state
     // and the held-over contributions are restored, §1100)
-    add_heads(&mut b.state, Some(&["page:", "deadcycles"]));
-    add_head(&mut b.state, "par:");
+    add_heads(&mut b.state, Some(&["deadcycles"]));
     add_heads(&mut b.state, Some(NORMAL_PARAGRAPH));
     add_head(&mut b.state, "pg:");
-    add_head(&mut b.state, "lopen:");
     add_head(&mut b.state, "aftertoken");
     add_head(&mut b.state, "align");
 }
@@ -3149,7 +3093,7 @@ mod tests {
         for off in [0, 5, 10] {
             let v = st(off).expect("some");
             assert!(
-                !v.iter().any(|h| DEAD_HEADS.contains(&h.as_str())),
+                !v.iter().any(|h| ["par:", "if:", "lopen:", "page:"].contains(&h.as_str())),
                 "{off}: {v:?}"
             );
         }

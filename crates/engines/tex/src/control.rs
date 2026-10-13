@@ -323,15 +323,10 @@ impl Run<'_, '_> {
                 // §1271
                 self.get_token()?;
                 let t = self.cur.tok.clone();
-                if self.in_local_group() {
-                    // the run's own group: its level keeps the tokens
-                    if let Some(l) = self.nest.iter_mut().rev().find(|l| l.group != 0) {
-                        l.ag.push(t);
-                    }
-                } else if md.depth > 0 {
-                    let mut toks = self.scope_list("ag", &md)?;
-                    toks.push(t.encode(self.v));
-                    self.set_scope_list("ag", &md, toks);
+                // the innermost group's level keeps the tokens; at the
+                // bottom level they are dropped (§1271 `cur_level>level_one`)
+                if let Some(l) = self.nest.iter_mut().rev().find(|l| l.group != 0) {
+                    l.ag.push(t);
                 }
             }
             cmd::IN_STREAM => self.open_or_close_in()?,
