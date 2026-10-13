@@ -163,9 +163,9 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "endgroup" | "egroup" => &["badness", "lvlfix", "inspen", "box:"],
         // arguments expanded while read: a conditional may end (§366, §498)
         "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["if:", "cs:"],
-        "mark" => &["param:"],
+        "mark" => &[],
         // (e-TeX's mark classes, §1494 ff.)
-        "marks" => &["param:", "markclasses"],
+        "marks" => &["markclasses"],
         "write" | "openout" | "closeout" => &["if:", "wopen:", "write:"],
         // (`\\immediate` of a pdfTeX object too, pdfTeX §1528)
         "immediate" => &["if:", "wopen:", "write:", "pdf:"],
@@ -1613,7 +1613,6 @@ impl Analysis<'_> {
             AtomKind::Par => {
                 self.cats_of(a, a, &mut b.cats);
                 add_heads(&mut b.state, Some(PAR_END));
-                add_heads(&mut b.state, Some(NORMAL_PARAGRAPH));
                 self.call_hint("par", &mut b, &mut cause)
             }
             AtomKind::Close => {
@@ -1806,7 +1805,24 @@ impl Analysis<'_> {
             if starts_par(c) {
                 add_heads(st, Some(&["par:", "lopen:", "pg:"]));
             }
-            add_heads(st, class_state(c));
+            let row = class_state(c);
+            if row.is_none()
+                && !crate::prims::PRIMS.iter().any(|q| q.0 == c.as_str())
+                && !table_param(c)
+            {
+                // (a name neither a primitive nor defined: a `\\let`'s
+                // value that may be undefined, `\\let\\next\\undefined`;
+                // a call of it is unbounded in the may-define set, not
+                // in the state)
+                if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                    eprintln!("slices: state skips undefined \\{c}");
+                }
+                continue;
+            }
+            if row.is_none() && crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+                eprintln!("slices: state every head from \\{c}");
+            }
+            add_heads(st, row);
         }
     }
 
@@ -1974,7 +1990,6 @@ impl Analysis<'_> {
             // `normal_paragraph` resets `\\looseness`, `\\hangindent`,
             // `\\hangafter`, `\\parshape`, `\\interlinepenalties`, §1070)
             add_heads(&mut b.state, Some(PAR_END));
-            add_heads(&mut b.state, Some(NORMAL_PARAGRAPH));
         }
         if self.after_afterassignment(first) {
             add_head(&mut b.state, "aftertoken");
@@ -2922,6 +2937,14 @@ mod tests {
     fn paragraph_and_conditional_classes() {
         let t = "\\par\nText here \\ifnum1=1 \\fi\n\\afterassignment\\x\\def\\y{}\n";
         let text = analyse(t, FileKind::Document, no_defs());
+        for off in [0, 5, 10, 15] {
+            let h = text.at(off);
+            eprintln!(
+                "{off}: {} {:?}",
+                h.cause,
+                h.bound.as_ref().map(|b| &b.state)
+            );
+        }
         let st = |off: usize| text.at(off).bound.expect("bounded").state;
         // (`\\par` is bounded: a paragraph's end, §1094-§1096, §1070)
         let par = st(0).expect("a state row");
