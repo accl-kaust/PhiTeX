@@ -461,7 +461,11 @@ fn latex_paragraph_nodes() {
         }
     }
     let regions = b.stats.nodes_text_frames;
-    eprintln!("cold: {regions} document nodes; {}", report("paras30", &b));
+    eprintln!("cold: {regions} document nodes, {} pages; {}", b.pages().len(), report("paras30", &b));
+    if let Ok(d) = std::env::var("PHITEX_GATE_OUT") {
+        let _ = std::fs::write(format!("{d}/paras30.pdf"), b.output().0);
+        let _ = std::fs::write(format!("{d}/paras30.log"), b.output().1);
+    }
     for d in b.diagnostics() {
         eprintln!("{d:?}");
     }
