@@ -347,7 +347,7 @@ impl Run<'_, '_> {
                 // §1268
                 self.get_token()?;
                 let t = self.cur.tok.encode(self.v);
-                self.set("aftertoken", t, true);
+                self.set_cell(crate::fields::cell::AFTERTOKEN, t, true);
             }
             cmd::AFTER_GROUP => {
                 // §1271
@@ -444,7 +444,7 @@ impl Run<'_, '_> {
             cmd::SET_FONT => {
                 // §1217
                 let f = v.int(i64::from(self.cur.chr));
-                self.set("font", f, global);
+                self.set_cell(crate::fields::cell::FONT, f, global);
             }
             cmd::DEF => {
                 // §1218
@@ -704,7 +704,7 @@ impl Run<'_, '_> {
                     xs.push(v.int(i64::from(i)));
                     xs.push(v.int(i64::from(w)));
                 }
-                self.set("parshape", v.list(xs), global);
+                self.set_cell(crate::fields::cell::PARSHAPE, v.list(xs), global);
             }
             cmd::HYPH_DATA => {
                 // §1252
@@ -746,12 +746,12 @@ impl Run<'_, '_> {
 
     /// §1269: the token saved by `\afterassignment`, if any.
     pub(crate) fn after_assignment(&mut self) -> R<()> {
-        if let Some(t) = self.get("aftertoken")?
+        if let Some(t) = self.get_loc(crate::fields::cell::AFTERTOKEN)?
             && t != ValueId::UNIT
         {
             let tok = Tok::decode(self.v, t);
             self.back_input(tok);
-            self.set("aftertoken", ValueId::UNIT, true);
+            self.set_cell(crate::fields::cell::AFTERTOKEN, ValueId::UNIT, true);
         }
         Ok(())
     }
@@ -913,7 +913,7 @@ impl Run<'_, '_> {
             -1000
         };
         // §1260
-        let count = self.int("fontcount")?;
+        let count = self.cint(crate::fields::cell::FONTCOUNT)?;
         let mut found = None;
         for f in 1..=count {
             let info = self.get(&format!("fontinfo:{f}"))?;
@@ -957,8 +957,8 @@ impl Run<'_, '_> {
             self.log("error", "Font not loadable")?;
             return Ok(0);
         };
-        let f = self.int("fontcount")? + 1;
-        self.set("fontcount", v.int(f), true);
+        let f = self.cint(crate::fields::cell::FONTCOUNT)? + 1;
+        self.set_cell(crate::fields::cell::FONTCOUNT, v.int(f), true);
         let info = v.list(vec![
             v.str(name),
             v.int(i64::from(l.at.size)),
@@ -1025,10 +1025,10 @@ impl Run<'_, '_> {
                 }
             }
         }
-        let old = self.get("patterns")?;
+        let old = self.get_loc(crate::fields::cell::PATTERNS)?;
         let mut all = old.map(|x| list_of(v, x)).unwrap_or_default();
         all.push(v.list(vec![v.int(i64::from(lang)), v.str("p"), v.list(words)]));
-        self.set("patterns", v.list(all), true);
+        self.set_cell(crate::fields::cell::PATTERNS, v.list(all), true);
         Ok(())
     }
 
@@ -1073,10 +1073,10 @@ impl Run<'_, '_> {
                 _ => {}
             }
         }
-        let old = self.get("patterns")?;
+        let old = self.get_loc(crate::fields::cell::PATTERNS)?;
         let mut all = old.map(|x| list_of(v, x)).unwrap_or_default();
         all.push(v.list(vec![v.int(i64::from(lang)), v.str("h"), v.list(words)]));
-        self.set("patterns", v.list(all), true);
+        self.set_cell(crate::fields::cell::PATTERNS, v.list(all), true);
         Ok(())
     }
 

@@ -389,6 +389,16 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(self.st.int_of(loc, self.v))
     }
 
+    /// Location `loc` as an integer, widened.
+    pub(crate) fn cint(&mut self, loc: Loc) -> R<i64> {
+        Ok(self.get_loc(loc)?.map_or(0, |x| int_of(self.v, x)))
+    }
+
+    /// Defines the state cell at `loc` ([`crate::fields::cell`]).
+    pub(crate) fn set_cell(&mut self, loc: Loc, val: ValueId, global: bool) {
+        self.set_loc(loc, Native::Raw(val), global);
+    }
+
     /// Location `loc` as glue.
     pub(crate) fn glue_loc(&mut self, loc: Loc) -> R<phitex_typeset::glue::Glue> {
         self.load(loc)?;
@@ -2132,7 +2142,7 @@ impl Run<'_, '_> {
     /// rewinding its input.
     fn state_sig(&self) -> u64 {
         use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut h = phitex_defuse::FxHasher::default();
         (
             self.st.sig(),
             self.contribs.len(),
