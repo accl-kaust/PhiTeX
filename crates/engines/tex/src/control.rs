@@ -96,7 +96,7 @@ impl Run<'_, '_> {
             })
             .unwrap_or_default();
         let mut last = String::new();
-        crate::print::print_cs(&mut last, &self.cur.tok, i64::from(b'\\'), &mut |c| {
+        crate::print::print_cs(&mut last, self.cur.tok, i64::from(b'\\'), &mut |c| {
             if char::from_u32(c).is_some_and(char::is_alphabetic) {
                 11
             } else {
@@ -352,7 +352,7 @@ impl Run<'_, '_> {
             cmd::AFTER_GROUP => {
                 // §1271
                 self.get_token()?;
-                let t = self.cur.tok.clone();
+                let t = self.cur.tok;
                 // the innermost group's level keeps the tokens; at the
                 // bottom level they are dropped (§1271 `cur_level>level_one`)
                 if let Some(l) = self.nest.iter_mut().rev().find(|l| l.group != 0) {
@@ -483,9 +483,9 @@ impl Run<'_, '_> {
                     }
                 } else {
                     self.get_token()?;
-                    let q = self.cur.tok.clone();
+                    let q = self.cur.tok;
                     self.get_token()?;
-                    let t = self.cur.tok.clone();
+                    let t = self.cur.tok;
                     self.back_input(t);
                     self.back_input(q);
                 }
@@ -611,12 +611,11 @@ impl Run<'_, '_> {
                     None => (c < 256).then(|| crate::fields::CAT0 + c as usize),
                     Some(t) => crate::fields::code_slot(t, c),
                 };
-                let l = match fixed {
-                    Some(s) => Loc::try_from(s).unwrap_or(0),
-                    None => {
-                        let f = self.v.field(&format!("{name}:{ch}"));
-                        self.loc_of(f)
-                    }
+                let l = if let Some(s) = fixed {
+                    Loc::try_from(s).unwrap_or(0)
+                } else {
+                    let f = self.v.field(&format!("{name}:{ch}"));
+                    self.loc_of(f)
                 };
                 self.set_loc(l, Native::Int(val), global);
             }
@@ -770,7 +769,7 @@ impl Run<'_, '_> {
             self.back_cur();
             return Ok(Tok::cs("inaccessible"));
         }
-        Ok(self.cur.tok.clone())
+        Ok(self.cur.tok)
     }
 
     #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -1220,7 +1219,7 @@ impl Run<'_, '_> {
                 self.get_token()?;
                 let esc = i64::from(self.ipar(Par::escapechar)?);
                 if self.cur.is_cs() {
-                    crate::print::sprint_cs(&mut s, &self.cur.tok, esc);
+                    crate::print::sprint_cs(&mut s, self.cur.tok, esc);
                     s.push('=');
                 }
                 let (m, c, h) = (self.cur.mean.clone(), self.cur.cmd, self.cur.chr);

@@ -94,7 +94,7 @@ impl Run<'_, '_> {
     }
 
     pub(crate) fn back_cur(&mut self) {
-        let t = self.cur.tok.clone();
+        let t = self.cur.tok;
         self.back_input(t);
     }
 
@@ -129,7 +129,7 @@ impl Run<'_, '_> {
                 && (self.cur.chr == i32::from(c)
                     || self.cur.chr == i32::from(c) - i32::from(b'a') + i32::from(b'A'))
             {
-                matched.push(self.cur.tok.clone());
+                matched.push(self.cur.tok);
                 k += 1;
             } else if self.cur.cmd != cmd::SPACER || !matched.is_empty() {
                 self.back_cur();
@@ -753,7 +753,7 @@ impl Run<'_, '_> {
             // §474
             loop {
                 self.get_token()?;
-                let tok = self.cur.tok.clone();
+                let tok = self.cur.tok;
                 if !tok.is_cs_or_active() && matches!(tok.cat(), Some(1 | 2)) {
                     if tok.cat() == Some(2) {
                         // §475 "Missing { inserted": `\def\a}` is `\def\a{}`
@@ -765,9 +765,9 @@ impl Run<'_, '_> {
                     // §476
                     let s = Tok::ch(MATCH_CAT, tok.chr());
                     self.get_token()?;
-                    let nt = self.cur.tok.clone();
+                    let nt = self.cur.tok;
                     if !nt.is_cs_or_active() && nt.cat() == Some(1) {
-                        hash_brace = Some(nt.clone());
+                        hash_brace = Some(nt);
                         let _ = s;
                         params.push(nt);
                         return self.scan_body(params, body, xpand, macro_def, t, hash_brace);
@@ -827,7 +827,7 @@ impl Run<'_, '_> {
             } else {
                 self.get_token()?;
             }
-            let tok = self.cur.tok.clone();
+            let tok = self.cur.tok;
             if !tok.is_cs_or_active() && matches!(tok.cat(), Some(1 | 2)) {
                 if tok.cat() == Some(1) {
                     unbalance += 1;
@@ -839,14 +839,14 @@ impl Run<'_, '_> {
                 }
             } else if self.cur.cmd == cmd::MAC_PARAM && macro_def {
                 // §479
-                let s = tok.clone();
+                let s = tok;
                 if xpand {
                     self.get_x_token()?;
                 } else {
                     self.get_token()?;
                 }
                 if self.cur.cmd != cmd::MAC_PARAM {
-                    let nt = self.cur.tok.clone();
+                    let nt = self.cur.tok;
                     let c = nt.chr();
                     if nt.is_cs_or_active() || nt.cat() != Some(12) || c <= 48 || c > 48 + t {
                         // "Illegal parameter number in definition"
@@ -857,7 +857,7 @@ impl Run<'_, '_> {
                     body.push(Tok::ch(OUT_PARAM_CAT, c - 48));
                     continue;
                 }
-                body.push(self.cur.tok.clone());
+                body.push(self.cur.tok);
                 continue;
             }
             body.push(tok);

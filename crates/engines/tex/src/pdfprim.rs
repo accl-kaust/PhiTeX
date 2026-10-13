@@ -1650,7 +1650,7 @@ impl Run<'_, '_> {
             self.back_cur();
             return Ok(Tok::cs("inaccessible"));
         }
-        Ok(self.cur.tok.clone())
+        Ok(self.cur.tok)
     }
 }
 

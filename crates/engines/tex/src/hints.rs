@@ -2856,38 +2856,35 @@ fn compute_hint(v: &Values, args: &[ValueId]) -> Hint {
                 text.clear();
                 let mut ok = true;
                 for t in &toks {
-                    match t.as_cs() {
-                        Some(n) => {
-                            // (a name the pass reads back as one token:
-                            // letters of the regime, or one other character)
-                            let word = !n.is_empty()
-                                && n.chars()
-                                    .all(|c| c.is_ascii_alphabetic() || (at && c == '@'));
-                            let symbol = n.chars().count() == 1
-                                && n.chars().all(|c| c.is_ascii() && !c.is_ascii_alphabetic());
-                            if !(word || symbol) {
-                                ok = false;
-                                break;
-                            }
-                            text.push('\\');
-                            text.push_str(&n);
-                            if word {
-                                text.push(' ');
-                            }
+                    if let Some(n) = t.as_cs() {
+                        // (a name the pass reads back as one token:
+                        // letters of the regime, or one other character)
+                        let word = !n.is_empty()
+                            && n.chars()
+                                .all(|c| c.is_ascii_alphabetic() || (at && c == '@'));
+                        let symbol = n.chars().count() == 1
+                            && n.chars().all(|c| c.is_ascii() && !c.is_ascii_alphabetic());
+                        if !(word || symbol) {
+                            ok = false;
+                            break;
                         }
-                        None => {
-                            let c = t.chr();
-                            let cat = t.cat().unwrap_or(12);
-                            let Some(ch) = char::from_u32(c).filter(char::is_ascii) else {
-                                ok = false;
-                                break;
-                            };
-                            if plain_catcode(ch as u8, at) != cat {
-                                ok = false;
-                                break;
-                            }
-                            text.push(ch);
+                        text.push('\\');
+                        text.push_str(&n);
+                        if word {
+                            text.push(' ');
                         }
+                    } else {
+                        let c = t.chr();
+                        let cat = t.cat().unwrap_or(12);
+                        let Some(ch) = char::from_u32(c).filter(char::is_ascii) else {
+                            ok = false;
+                            break;
+                        };
+                        if plain_catcode(ch as u8, at) != cat {
+                            ok = false;
+                            break;
+                        }
+                        text.push(ch);
                     }
                 }
                 if ok {
