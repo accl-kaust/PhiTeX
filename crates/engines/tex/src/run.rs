@@ -312,7 +312,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     pub(crate) fn get(&mut self, name: &str) -> R<Option<ValueId>> {
-        let f = self.ops.fields.get(self.v, name);
+        let f = self.ops.fields.get_at(self.v, self.cx.values_epoch(), name);
         self.get_f(f)
     }
 
@@ -343,7 +343,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Defines `name` (§277–§279: `eq_define` / `geq_define`).
     pub(crate) fn set(&mut self, name: &str, val: ValueId, global: bool) {
-        let f = self.ops.fields.get(self.v, name);
+        let f = self.ops.fields.get_at(self.v, self.cx.values_epoch(), name);
         self.set_f(f, val, global);
     }
 
@@ -433,7 +433,10 @@ impl<'c, 'a> Run<'c, 'a> {
         let f = if let Some(&f) = self.tfields.get(t) {
             Some(f)
         } else {
-            let f = t.field_name().map(|n| self.v.field(&n));
+            let f = self
+                .ops
+                .fields
+                .meaning_at(self.v, self.cx.values_epoch(), t);
             if let Some(f) = f {
                 self.tfields.insert(t.clone(), f);
             }
@@ -1388,24 +1391,34 @@ fn decode_frames_upto(v: &Values, args: &[ValueId], limit: usize) -> Vec<Frame> 
         if out.len() >= limit {
             break;
         }
+        out.extend(crate::val::frame_of(v, f, || decode_frame(v, f)));
+    }
+    out
+}
+
+/// One frame of a node's arguments (a frame is an immutable value, so
+/// its decoding is kept by id, [`crate::val::frame_of`]).
+fn decode_frame(v: &Values, f: ValueId) -> Option<Frame> {
+    let mut out = None;
+    {
         let Value::List(xs) = &*v.get(f) else {
-            continue;
+            return None;
         };
         match xs.first().map(|&t| str_of(v, t)).as_deref() {
             Some("t") => {
                 let toks = crate::val::toks_of(v, xs.get(1).copied());
-                out.push(Frame::Toks(Rc::from(toks), 0));
+                out = Some(Frame::Toks(Rc::from(toks), 0));
             }
             Some("f") => {
                 if let (Some(&id), Some(&o)) = (xs.get(1), xs.get(2)) {
                     let off = usize::try_from(int_of(v, o)).unwrap_or(0);
                     let name = xs.get(3).copied().unwrap_or(ValueId::UNIT);
-                    out.push(Frame::File(FileRest::new(v, id, off, name)));
+                    out = Some(Frame::File(FileRest::new(v, id, off, name)));
                 }
             }
             Some("s") => {
                 let text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
-                out.push(Frame::Src(Src {
+                out = Some(Frame::Src(Src {
                     buf: text.chars().map(u32::from).collect(),
                     loc: 0,
                     state: u8::try_from(xs.get(2).map_or(2, |&x| int_of(v, x))).unwrap_or(2),
