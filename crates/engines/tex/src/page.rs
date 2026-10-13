@@ -222,14 +222,38 @@ impl Run<'_, '_> {
         let marker = self.page_params_marker()?;
         // the insertion classes on the list, read here (before any page
         // step): a `brk` reads nothing a page step may define
-        let mut classes = std::collections::BTreeSet::new();
-        for &x in items {
-            if nodes::tag(v, x) == nodes::T_INS
-                && let Some(Node::Ins(i)) = nodes::decode(v, x, &mut Side::default())
-            {
-                classes.insert(i.number);
+        // (counted again only over what the edit changed)
+        let ins_count =
+            |xs: &[ValueId], sign: isize, c: &mut std::collections::BTreeMap<u16, isize>| {
+                for &x in xs {
+                    if nodes::tag(v, x) == nodes::T_INS
+                        && let Some(Node::Ins(i)) = nodes::decode(v, x, &mut Side::default())
+                    {
+                        *c.entry(i.number).or_default() += sign;
+                    }
+                }
+            };
+        let mut ins = std::collections::BTreeMap::new();
+        match &prev {
+            Some(p) => {
+                let old = &p.items.items;
+                let pre = old.iter().zip(items).take_while(|(a, b)| a == b).count();
+                let m = old.len().min(items.len()) - pre;
+                let suf = old
+                    .iter()
+                    .rev()
+                    .zip(items.iter().rev())
+                    .take(m)
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                ins.clone_from(&p.ins);
+                ins_count(&old[pre..old.len() - suf], -1, &mut ins);
+                ins_count(&items[pre..items.len() - suf], 1, &mut ins);
+                ins.retain(|_, n| *n > 0);
             }
+            None => ins_count(items, 1, &mut ins),
         }
+        let classes: Vec<u16> = ins.keys().copied().collect();
         let mut table = Vec::new();
         for n in classes {
             let c = self.insert_class(n)?;
@@ -423,6 +447,7 @@ impl Run<'_, '_> {
             v,
             crate::planinc::Plan {
                 items: folded.clone(),
+                ins,
                 table: table_v,
                 marker,
                 pages: recs,

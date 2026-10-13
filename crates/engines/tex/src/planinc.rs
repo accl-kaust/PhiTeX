@@ -65,6 +65,8 @@ impl PageRec {
 /// What a run of the plan leaves for the next.
 pub(crate) struct Plan {
     pub items: Arc<ListMemo>,
+    /// The insertions on the list by class.
+    pub ins: std::collections::BTreeMap<u16, isize>,
     pub table: ValueId,
     pub marker: ValueId,
     pub pages: Vec<PageRec>,
