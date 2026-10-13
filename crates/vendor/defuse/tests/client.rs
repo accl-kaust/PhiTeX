@@ -2291,3 +2291,119 @@ fn a_woken_link_names_the_field_waited_for_and_the_prefix_it_matched() {
     );
     assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
 }
+
+/// `["pub"]` publishes loop-back `n = 3`; `["rd"]` reads `n` and outputs
+/// it.
+struct Guessed;
+
+impl Operation for Guessed {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        if tag(v, &a) == "pub" {
+            cx.publish(v.field("n"), v.int(3));
+            Ok(ValueId::UNIT)
+        } else {
+            Ok(cx.use_field(v.field("n"))?.unwrap_or(ValueId::UNIT))
+        }
+    }
+}
+
+/// A loop-back's round-one value is whatever it was last declared with:
+/// a right guess makes a cold build one round, a wrong one two.
+#[test]
+fn a_loop_back_declared_with_the_right_guess_takes_one_round() {
+    let run = |guess: i64| {
+        let mut eng = Engine::new();
+        let op = eng.register(Arc::new(Guessed));
+        let n = eng.values().field("n");
+        let g = eng.values().int(guess);
+        eng.declare_loopback(n, g);
+        let u = eng.new_unit();
+        let (p, r) = {
+            let v = eng.values();
+            (vec![v.str("pub")], vec![v.str("rd")])
+        };
+        eng.push(u, op, p);
+        let rd = eng.push(u, op, r);
+        let rep = eng.evaluate_sequential().expect("evaluate");
+        assert_eq!(eng.values().as_int(eng.output(rd).expect("rd")), Some(3), "{rep:?}");
+        (rep.rounds, rep.runs)
+    };
+    assert_eq!(run(3), (1, 2), "right guess: one round, each node once");
+    let (rounds, runs) = run(0);
+    assert!(
+        rounds == 2 && runs == 3,
+        "wrong guess: a second round for the reader: {rounds} {runs}"
+    );
+}
+
+/// `["x"]` (pending claim) parks a token, reads its first following
+/// sibling's text, reads environment field `file`, then claims one
+/// sibling and outputs the sibling's argument; `["s", k]` is plain.
+struct ClaimerResume;
+
+impl Operation for ClaimerResume {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn claim(&self, a: &[ValueId], v: &Values, _: &mut dyn Iterator<Item = (OpId, Vec<ValueId>)>) -> Claim {
+        if tag(v, a) == "x" { Claim::Pending } else { Claim::None }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args();
+        if tag(v, &a) != "x" {
+            return Ok(ValueId::UNIT);
+        }
+        let _ = cx.parked();
+        cx.park(Box::new(()));
+        let first = cx
+            .following(0)
+            .and_then(|(_, a)| a.get(1).copied())
+            .unwrap_or(ValueId::UNIT);
+        let _ = cx.use_env(v.field("file"))?;
+        cx.claim(1);
+        Ok(first)
+    }
+}
+
+#[test]
+fn a_claimer_stopped_before_claiming_resumes_while_the_siblings_it_read_hold() {
+    let build = || {
+        let mut eng = Engine::new();
+        let op = eng.register(Arc::new(ClaimerResume));
+        let u = eng.new_unit();
+        let (x, s1, s2) = {
+            let v = eng.values();
+            (vec![v.str("x")], vec![v.str("s"), v.int(1)], vec![v.str("s"), v.int(2)])
+        };
+        let x = eng.push(u, op, x);
+        let s1 = eng.push(u, op, s1);
+        eng.push(u, op, s2);
+        let rep = eng.evaluate_sequential().expect("first: waits for the file");
+        assert_eq!(rep.env_waits.len(), 1, "{rep:?}");
+        (eng, op, x, s1)
+    };
+    // The file arrives, the siblings are unchanged: the attempt resumes.
+    let (mut eng, _, x, _) = build();
+    let (file, one) = (eng.values().field("file"), eng.values().int(1));
+    eng.set_environment(vec![(file, one)]);
+    let rep = eng.evaluate_sequential().expect("resumed");
+    assert_eq!(eng.output(x), Some(one), "{rep:?}");
+    assert_eq!((rep.resumed, rep.restarted), (1, 0), "{rep:?}");
+    // The sibling it read was replaced meanwhile: the attempt restarts and
+    // reads the new text.
+    let (mut eng, op, x, s1) = build();
+    let (file, one, nine) = (eng.values().field("file"), eng.values().int(1), eng.values().int(9));
+    let a = vec![eng.values().str("s"), nine];
+    eng.replace(s1, op, a);
+    eng.set_environment(vec![(file, one)]);
+    let rep = eng.evaluate_sequential().expect("restarted");
+    assert_eq!(eng.output(x), Some(nine), "{rep:?}");
+    assert_eq!((rep.resumed, rep.restarted), (0, 1), "{rep:?}");
+    assert!(rep.restarted_by.iter().any(|r| r.0 == "following: changed"), "{rep:?}");
+}
