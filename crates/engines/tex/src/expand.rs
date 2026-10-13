@@ -644,7 +644,7 @@ impl Run<'_, '_> {
             }
             2 => {
                 self.get_token()?;
-                let esc = self.int("param:escapechar")?;
+                let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
                 if self.cur.is_cs() {
                     print::sprint_cs(&mut s, self.cur.tok, esc);
                 } else {
@@ -663,7 +663,7 @@ impl Run<'_, '_> {
                 self.print_font_name(&mut s, f)?;
             }
             _ => {
-                let j = self.get("jobname")?;
+                let j = self.get_loc(crate::fields::cell::JOBNAME)?;
                 s.push_str(&j.map_or_else(|| "texput".to_owned(), |x| str_of(self.v, x)));
             }
         }
@@ -693,7 +693,7 @@ impl Run<'_, '_> {
 
     /// `print_meaning` (§296) with `print_cmd_chr` (§298 and the others).
     pub(crate) fn print_meaning(&mut self, s: &mut String, m: &Mean, c: u8, h: i32) -> R<()> {
-        let esc = self.int("param:escapechar")?;
+        let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
         match m {
             Mean::Macro(mac) => {
                 if mac.flags & crate::etex::PROTECTED != 0 {
@@ -774,7 +774,7 @@ impl Run<'_, '_> {
 
     /// `show_token_list` with the current `\escapechar` and category codes.
     pub(crate) fn show_toks_into(&mut self, s: &mut String, toks: &[Tok]) -> R<()> {
-        let esc = self.int("param:escapechar")?;
+        let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
         // single-character names: their current category code (§262)
         let mut cats: crate::FxHashMap<u32, i64> = crate::FxHashMap::default();
         for t in toks {

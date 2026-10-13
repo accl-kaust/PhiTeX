@@ -88,7 +88,7 @@ impl Run<'_, '_> {
     // ---------------------------------------------------- align_state
 
     fn align_open(&mut self) -> R<bool> {
-        Ok(self.int("align:open")? > 0)
+        Ok(self.int_loc(crate::fields::cell::ALIGN_OPEN)? > 0)
     }
 
     fn astate(&mut self) -> R<i64> {
@@ -96,7 +96,7 @@ impl Run<'_, '_> {
             return Ok(s);
         }
         let s = self
-            .get("align:state")?
+            .get_loc(crate::fields::cell::ALIGN_STATE)?
             .map_or(1_000_000, |x| int_of(self.v, x));
         self.astate = Some(s);
         Ok(s)
@@ -105,7 +105,11 @@ impl Run<'_, '_> {
     pub(crate) fn set_astate(&mut self, s: i64) {
         self.astate = Some(s);
         let x = self.v.int(s);
-        self.set("align:state", x, true);
+        self.set_loc(
+            crate::fields::cell::ALIGN_STATE,
+            crate::runstate::Native::Raw(x),
+            true,
+        );
     }
 
     /// The end of a u template (§324): `align_state` becomes 0.
@@ -188,8 +192,8 @@ impl Run<'_, '_> {
         } else {
             1_000_000
         };
-        let open = self.int("align:open")?;
-        self.set("align:open", v.int(open + 1), true);
+        let open = self.cint(crate::fields::cell::ALIGN_OPEN)?;
+        self.set_cell(crate::fields::cell::ALIGN_OPEN, v.int(open + 1), true);
         self.set_astate(-1_000_000);
         let spec = if self.scan_keyword("to")? {
             (0, self.scan_normal_dimen()?)
@@ -553,8 +557,12 @@ impl Run<'_, '_> {
         let out = set_alignment(list, &proto, true, 0, &view);
         let pd = self.prev_depth(md)?;
         let outer = self.close_group(md)?;
-        let open = self.int("align:open")?;
-        self.set("align:open", v.int((open - 1).max(0)), true);
+        let open = self.cint(crate::fields::cell::ALIGN_OPEN)?;
+        self.set_cell(
+            crate::fields::cell::ALIGN_OPEN,
+            v.int((open - 1).max(0)),
+            true,
+        );
         self.set_astate(saved);
         for n in &out {
             let y = nodes::encode(v, n, &side);

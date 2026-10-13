@@ -130,7 +130,7 @@ impl Run<'_, '_> {
         let h = v.seq_unit(v.int(i64::from_ne_bytes(shown.to_ne_bytes())));
         self.contribute("pagehash", h);
         self.log("shipend", "]")?;
-        self.set("deadcycles", v.int(0), true);
+        self.set_cell(crate::fields::cell::DEADCYCLES, v.int(0), true);
         Ok(())
     }
 
@@ -154,7 +154,10 @@ impl Run<'_, '_> {
         ] {
             xs.push(v.int(i64::from(self.param(p)?)));
         }
-        xs.push(self.get("pdf:colorstacks")?.unwrap_or(ValueId::UNIT));
+        xs.push(
+            self.get_loc(crate::fields::cell::PDF_COLORSTACKS)?
+                .unwrap_or(ValueId::UNIT),
+        );
         for p in ["pdfobjcompresslevel", "pdfgentounicode"] {
             xs.push(v.int(i64::from(self.param(p)?)));
         }
@@ -444,7 +447,7 @@ impl Run<'_, '_> {
             self.run_all()?;
         }
         if j < MAX_PAGES {
-            let dc = self.int("deadcycles")?;
+            let dc = self.cint(crate::fields::cell::DEADCYCLES)?;
             // (0, the usual value, as the declared start: no change)
             let x = if dc == 0 { ValueId::UNIT } else { v.int(dc) };
             self.cx.publish(v.field(&format!("pagedc:{j}")), x);
@@ -476,8 +479,10 @@ impl Run<'_, '_> {
                 (m(xs[0]), m(xs[1]))
             }
             _ => (
-                self.get("mark:top")?.filter(|&x| x != ValueId::UNIT),
-                self.get("mark:bot")?.filter(|&x| x != ValueId::UNIT),
+                self.get_loc(crate::fields::cell::MARK_TOP)?
+                    .filter(|&x| x != ValueId::UNIT),
+                self.get_loc(crate::fields::cell::MARK_BOT)?
+                    .filter(|&x| x != ValueId::UNIT),
             ),
         };
         let mut first = None;
@@ -539,9 +544,13 @@ impl Run<'_, '_> {
             return Ok(false);
         }
         // §1025
-        let dead = self.int("deadcycles")? + 1;
-        self.set("deadcycles", v.int(dead), true);
-        self.set("box:255", v.list(vec![v.int(0), b255]), true);
+        let dead = self.cint(crate::fields::cell::DEADCYCLES)? + 1;
+        self.set_cell(crate::fields::cell::DEADCYCLES, v.int(dead), true);
+        self.set_cell(
+            crate::fields::BOX0 as crate::runstate::Loc + 255,
+            v.list(vec![v.int(0), b255]),
+            true,
+        );
         // the page parameters the routine starts with: one it changes
         // globally reaches the fold for the next page (`output_end`)
         let before = self.page_params_marker()?;
@@ -574,7 +583,7 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
     if r.box_reg(255)?.is_some() {
         r.log("error", "Output routine didn't use all of \\box255")?;
     }
-    r.set("inspen", v.int(0), true);
+    r.set_cell(crate::fields::cell::INSPEN, v.int(0), true);
     left.extend(items);
     if r.pg.is_some() {
         // a text paging inline (`pageinline.rs`): §1026's contributions
@@ -591,7 +600,7 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
             r.contribute("pagefxs", v.seq_unit(v.list(vec![v.int(jj), x])));
         }
     }
-    r.set("deadcycles", v.int(0), true);
+    r.set_cell(crate::fields::cell::DEADCYCLES, v.int(0), true);
     Ok(())
 }
 

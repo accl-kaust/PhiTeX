@@ -465,7 +465,7 @@ pub(crate) fn last_item(r: &mut Run<'_, '_>, m: i32) -> R<IVal> {
             let mut q = m - li::PAR_SHAPE_LENGTH;
             let mut n = r.scan_int()?;
             let shape = r
-                .get("parshape")?
+                .get_loc(crate::fields::cell::PARSHAPE)?
                 .map(|x| list_of(v, x))
                 .unwrap_or_default();
             let count = i32::try_from(shape.len() / 2).unwrap_or(0);
@@ -1006,7 +1006,7 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
         cmd::SET_INTERACTION if chr == 10 => {
             // partoken.ch: `\partokenname`
             let t = get_r_token(r)?;
-            r.set("partoken", t.encode(v), true);
+            r.set_cell(crate::fields::cell::PARTOKEN, t.encode(v), true);
         }
         cmd::SET_INTERACTION | cmd::ASSIGN_FONT_INT => {
             return crate::pdfprim::prefixed(r, global);
@@ -1020,7 +1020,7 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
 fn set_interaction(r: &mut Run<'_, '_>, n: i32) -> R<()> {
     r.log("println", "")?;
     let x = r.v.int(i64::from(n));
-    r.set("interaction", x, true);
+    r.set_cell(crate::fields::cell::INTERACTION, x, true);
     Ok(())
 }
 
@@ -1030,7 +1030,7 @@ pub(crate) fn internal(r: &mut Run<'_, '_>) -> R<IVal> {
     let (c, m) = (r.cur.cmd, r.cur.chr);
     let v = r.v;
     if c == cmd::SET_PAGE_INT {
-        return Ok(IVal::Int(r.int32("interaction")?));
+        return Ok(IVal::Int(r.int_loc(crate::fields::cell::INTERACTION)?));
     }
     if c == cmd::ASSIGN_FONT_INT {
         return crate::pdfprim::font_code(r, m);
@@ -1134,13 +1134,13 @@ fn marks(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
         toks
     } else {
         let classes = r
-            .get("markclasses")?
+            .get_loc(crate::fields::cell::MARKCLASSES)?
             .map(|x| list_of(v, x))
             .unwrap_or_default();
         if !classes.iter().any(|&x| int_of(v, x) == i64::from(c)) {
             let mut cl = classes;
             cl.push(v.int(i64::from(c)));
-            r.set("markclasses", v.list(cl), true);
+            r.set_cell(crate::fields::cell::MARKCLASSES, v.list(cl), true);
         }
         v.list(vec![v.int(-1), v.int(i64::from(c)), toks])
     };
@@ -1242,7 +1242,7 @@ pub(crate) fn is_class_mark(v: &phitex_defuse::Values, m: Option<ValueId>) -> bo
 pub(crate) fn fire_marks_values(r: &mut Run<'_, '_>, page_marks: &[ValueId]) -> R<()> {
     let v = r.v;
     let classes: Vec<i32> = r
-        .get("markclasses")?
+        .get_loc(crate::fields::cell::MARKCLASSES)?
         .map(|x| list_of(v, x))
         .unwrap_or_default()
         .iter()
@@ -1288,7 +1288,7 @@ pub(crate) fn fire_marks_values(r: &mut Run<'_, '_>, page_marks: &[ValueId]) -> 
 pub(crate) fn split_marks(r: &mut Run<'_, '_>, split: &[u32], side: &nodes::Side) -> R<()> {
     let v = r.v;
     let mut classes: Vec<i32> = r
-        .get("markclasses")?
+        .get_loc(crate::fields::cell::MARKCLASSES)?
         .map(|x| list_of(v, x))
         .unwrap_or_default()
         .iter()
