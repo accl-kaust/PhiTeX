@@ -462,6 +462,15 @@ fn latex_loop_rounds() {
             let keys = b.wkeys();
             let fx = b.export_pagefx();
             if fixpoint {
+                // the same without the key-set guess (an empty guess)
+                let o3 = Options {
+                    prelude_bytes: std::fs::read(&cache).ok(),
+                    time_limit: None,
+                    wkeys: vec![("hello.aux".to_owned(), Vec::new())],
+                    ..options("hello", &dir, "", fixpoint, false)
+                };
+                let b3 = common::build(o3, Some(&prelude(false)), src);
+                eprintln!("fixpoint {name} unguessed: {} bytes out, {} nodes run", b3.output().0.len(), b3.stats.nodes_run);
                 let (out, log) = b.output();
                 eprintln!("fixpoint {name}: {} bytes out, {:?}, log tail {:?}", out.len(), b.diagnostics(), &log[log.len().saturating_sub(400)..]);
             }
