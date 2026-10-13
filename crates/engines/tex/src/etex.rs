@@ -20,6 +20,7 @@ use phitex_typeset::glue::{Glue, Order};
 
 use crate::build::Mode;
 use crate::expand::str_toks;
+use crate::fields::Par;
 use crate::nodes;
 use crate::run::{Frame, Halt, R, Run, Src};
 use crate::scan::IVal;
@@ -837,7 +838,7 @@ fn pseudo_start(r: &mut Run<'_, '_>) -> R<()> {
     let (_, body) = r.scan_toks(false, false)?;
     let mut s = String::new();
     r.show_toks_into(&mut s, &body)?;
-    let nl = r.int("param:newlinechar")?;
+    let nl = i64::from(r.ipar(Par::newlinechar)?);
     let mut lines: Vec<Vec<u32>> = Vec::new();
     let mut cur: Vec<u32> = Vec::new();
     let mut ended = true;
@@ -881,7 +882,7 @@ pub(crate) fn end_of_file(r: &mut Run<'_, '_>, marker: &str) -> R<()> {
     let base = marker.trim_end_matches(['S', 'F']);
     let pseudo = base == EOF_PSEUDO;
     if marker == base {
-        let ev = r.get("param:everyeof")?;
+        let ev = r.par(Par::everyeof)?;
         let toks = toks_of(r.v, ev);
         if !toks.is_empty() {
             r.frames
@@ -941,7 +942,7 @@ fn read_line(r: &mut Run<'_, '_>, global: bool) -> R<()> {
             r.set(&field, ValueId::UNIT, true);
             String::new()
         };
-        let e = r.int("param:endlinechar")?;
+        let e = i64::from(r.ipar(Par::endlinechar)?);
         if let Frame::Src(s) = crate::run::src_frame(&text, e) {
             for c in s.buf {
                 body.push(if c == 32 {
@@ -1359,7 +1360,7 @@ impl Run<'_, '_> {
 /// `\showgroups`, `\showtokens`, `\showifs` (pdfTeX §1293, §1702–§1708):
 /// shown in the log.
 pub(crate) fn show(r: &mut Run<'_, '_>) -> R<()> {
-    let esc = r.int("param:escapechar")?;
+    let esc = i64::from(r.ipar(Par::escapechar)?);
     let mut s = String::new();
     match r.cur.chr {
         5 => {
