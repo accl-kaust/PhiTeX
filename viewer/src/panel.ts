@@ -13,6 +13,7 @@ import type { PackageState } from "./packages.ts";
 import { ENGINES, errorNeeds, type Engine } from "./engines.ts";
 import { Viewer } from "./viewer.ts";
 import { VIEWER_CSS } from "./css.ts";
+import { PRINT_CSS } from "./print.ts";
 import { PROBLEMS_CSS, problemHtml } from "./problems.ts";
 import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
 import { KEYS, bindKeys } from "./keys.ts";
@@ -120,6 +121,8 @@ export interface PanelWords {
   /** The reading card's note, and where packages are kept. */
   reading: string;
   keptIn: string;
+  /** The loading card's three steps (reading, getting what it needs, building). */
+  steps: [string, string, string];
 }
 
 const OVERLEAF_WORDS: PanelWords = {
@@ -140,6 +143,7 @@ const OVERLEAF_WORDS: PanelWords = {
   openFailed: "Overleaf's PDF is one click away. Reload the tab to try again.",
   reading: "Your project's files stay in this browser: read from Overleaf, typeset here.",
   keptIn: "this browser",
+  steps: ["Project", "Packages", "Typesetting"],
 };
 
 /** `c` if it is a #rrggbb color (what goes into a style or value attribute), else `or`. */
@@ -158,6 +162,8 @@ export interface PanelOptions {
   keys?: boolean;
   /** Docked where the host has no toolbar of its own (the CLI's page, VS Code's webview): the panel's header and footer shown. */
   header?: boolean;
+  /** The panel's footer (false: the host has its own status bar, the CLI's). */
+  footer?: boolean;
 }
 
 /** Where the panel keeps its preferences (chrome.storage.local in the extension). */
@@ -203,6 +209,10 @@ const PATHS: Record<string, string> = {
 };
 const icon = (name: string, size = 18) =>
   `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
+
+/** The loading card's steps: `state` each "ok", "now" or "" (to come). */
+const stepsHtml = (names: string[], state: string[]) =>
+  `<div class="steps">${names.map((n, k) => `<span class="${state[k]}">${n}</span>`).join("<i></i>")}</div>`;
 
 const CSS = `
 :host { all: initial; }
@@ -506,7 +516,7 @@ export class Panel {
     const w = (this.words = { ...OVERLEAF_WORDS, ...opts.words });
     const host = document.createElement("phitex-preview");
     this.root = host.attachShadow({ mode: "open" });
-    this.root.innerHTML = (`<style>${VIEWER_CSS}${PROBLEMS_CSS}${OUTLINE_CSS}${CSS}</style>
+    this.root.innerHTML = (`<style>${VIEWER_CSS}${PROBLEMS_CSS}${OUTLINE_CSS}${CSS}${PRINT_CSS}</style>
 <div class="win" role="dialog" aria-label="PhiTeX preview">
   <header>
     <span class="icon" aria-hidden="true">preview</span>
@@ -543,7 +553,7 @@ export class Panel {
       <textarea id="reporttext" readonly spellcheck="false"></textarea>
       <div class="btns"><button class="btn" id="reportcopy">Copy</button><button class="btn" id="reportmail">Email</button><button class="btn" id="reportclose">Close</button></div>
     </div>
-    <div class="speedchip" id="speedchip" aria-live="off">⚡ – ms</div>
+    <div class="speedchip" id="speedchip" aria-live="off" title="From the keystroke to the page on screen"></div>
     <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
     <div class="diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="pkgs" id="pkgs" role="status" aria-live="polite"></div>
@@ -554,7 +564,7 @@ export class Panel {
     </div>
     <nav class="side" id="side" aria-label="Contents"></nav>
     <div class="keyhelp" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
-    <div class="stage" id="stage"><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load"><div class="steps"><span class="now">Project read</span><i></i><span>Packages</span><i></i><span>Typesetting</span></div><h3>Reading the project…</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
+    <div class="stage" id="stage"><div class="approx" id="approx"></div><div class="banner" id="banner"></div><div class="empty" id="empty"><div class="load">${stepsHtml(w.steps, ["now", "", ""])}<h3>${w.steps[0]}…</h3><div class="bar busy"><i></i></div></div></div><div class="viewer" id="viewer"></div></div>
   </div>
   <footer><span class="lat" id="lat" title="Click for details">–</span><span class="grow"></span><span class="msg" id="msg">all local</span></footer>
 </div>`).replace(/<span class="icon"(?: aria-hidden="true")?>(\w+)<\/span>/g, (_, n) => icon(n, n === "download" ? 16 : 18));
@@ -1013,7 +1023,7 @@ export class Panel {
       ? quiet < 4
         ? `Still fetching · ${s} s · files arriving`
         : `Still fetching · ${s} s · a large package (TikZ, fonts) is on its way`
-      : `Typesetting · ${s} s`;
+      : `${this.words.steps[2]} · ${s} s`;
     if (s >= 20 && fetching) el.textContent += " · only the first time: next visits reuse them";
   }
 
@@ -1047,7 +1057,7 @@ export class Panel {
     let card = empty.querySelector<HTMLElement>(".load.reading");
     if (!card) {
       empty.innerHTML =
-        `<div class="load reading"><div class="steps"><span class="now">Project</span><i></i><span>Packages</span><i></i><span>Typesetting</span></div>` +
+        `<div class="load reading">${stepsHtml(this.words.steps, ["now", "", ""])}` +
         `<h3></h3><div class="bar busy"><i></i></div><div class="alive" data-phase="read"></div><div class="count"></div><div class="names"></div>` +
         `<div class="note">${this.words.reading}</div></div>`;
       card = empty.querySelector<HTMLElement>(".load.reading")!;
@@ -1092,8 +1102,8 @@ export class Panel {
         // (the same card as while fetching, at its last step: one screen until the page)
         if (!this.stopped()) {
           empty.innerHTML =
-            `<div class="load"><div class="steps"><span class="ok">Project read</span><i></i><span class="ok">Packages</span><i></i><span class="now">Typesetting</span></div>` +
-            `<h3>Typesetting…</h3><div class="bar busy"><i></i></div><div class="alive" data-phase="tex"></div></div>`;
+            `<div class="load">${stepsHtml(this.words.steps, ["ok", "ok", "now"])}` +
+            `<h3>${this.words.steps[2]}…</h3><div class="bar busy"><i></i></div><div class="alive" data-phase="tex"></div></div>`;
           this.loadT0 ||= performance.now();
           this.alive();
           this.loadTick ??= setInterval(() => this.alive(), 1000);
@@ -1104,7 +1114,7 @@ export class Panel {
       const fetch = p.loading.length > 0;
       this.pkgBusy = true;
       empty.innerHTML =
-        `<div class="load"><div class="steps"><span class="ok">Project read</span><i></i><span class="${fetch ? "now" : "ok"}">Packages</span><i></i><span class="${fetch ? "" : "now"}">Typesetting</span></div>` +
+        `<div class="load">${stepsHtml(this.words.steps, ["ok", fetch ? "now" : "ok", fetch ? "" : "now"])}` +
         `<h3></h3><div class="bar${fetch ? "" : " busy"}"><i style="width:${pct}%"></i></div>` +
         `<div class="alive" data-phase="${fetch ? "fetch" : "tex"}"></div>` +
         `<div class="count"></div><div class="names"></div><div class="note"></div></div>`;
@@ -1203,7 +1213,8 @@ export class Panel {
   private scale(): number {
     if (this.prefs.zoom !== "fit") return Number(this.prefs.zoom);
     const pageW = (this.last?.w ?? 612) * (96 / 72);
-    return Math.max(this.$("#stage").clientWidth - (this.docked ? 40 : 24), 200) / pageW;
+    // (the stage's padding and the crop marks' room on both sides)
+    return Math.max(this.$("#stage").clientWidth - 80, 200) / pageW;
   }
 
   goPage(k: number): void {
@@ -1240,10 +1251,34 @@ export class Panel {
   }
 
   /** A button of the host's in the header, before the page controls (the CLI's Compare). */
+  /**
+   * The loading card at step `k` (0, 1, 2 of the words' steps), saying
+   * `text` (the host's own phases: the CLI's build); nothing once a page
+   * is shown.
+   */
+  loadStep(k: number, text: string): void {
+    if (this.last) return;
+    // (the host's clock now, not the card's own)
+    clearInterval(this.loadTick);
+    this.loadTick = undefined;
+    const empty = this.$("#empty");
+    let card = empty.querySelector<HTMLElement>(".load");
+    if (!card || card.querySelector(".engine")) {
+      empty.innerHTML = `<div class="load">${stepsHtml(this.words.steps, ["", "", ""])}<h3></h3><div class="bar busy"><i></i></div><div class="alive"></div></div>`;
+      empty.style.display = "";
+      card = empty.querySelector<HTMLElement>(".load")!;
+    }
+    card.querySelectorAll(".steps span").forEach((s, i) => (s.className = i < k ? "ok" : i === k ? "now" : ""));
+    card.querySelector("h3")!.textContent = `${this.words.steps[k]}…`;
+    let alive = card.querySelector<HTMLElement>(".alive");
+    if (!alive) card.append((alive = Object.assign(document.createElement("div"), { className: "alive" })));
+    alive.textContent = text;
+    delete alive.dataset.phase;
+  }
+
   headerButton(label: string, title: string, onclick: (b: HTMLButtonElement) => void): HTMLButtonElement {
     const b = document.createElement("button");
-    b.className = "ib";
-    b.style.cssText = "width:auto;padding:0 8px;font-size:12px";
+    b.className = "ib txt";
     b.title = title;
     b.textContent = label;
     b.onclick = () => onclick(b);
@@ -1254,6 +1289,7 @@ export class Panel {
   /** The contents and the keys, as the host asked (PanelOptions). */
   private extras(opts: PanelOptions): void {
     if (opts.header) this.win.classList.add("own-header");
+    if (opts.footer === false) this.win.classList.add("no-footer");
     if (opts.outline) {
       this.win.classList.add("has-side");
       this.contents = new Outline(this.$("#side"), { goToPlace: (k, top) => this.viewer.goToPlace(k, top) });
@@ -1371,7 +1407,7 @@ export class Panel {
   painted(ms: number): void {
     this.speed = { ms, at: performance.now() };
     const chip = this.$("#speedchip");
-    chip.textContent = `⚡ ${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
+    chip.textContent = `${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
     chip.classList.toggle("slow", ms > 100);
     chip.classList.remove("flash");
     void chip.offsetWidth;
@@ -1473,14 +1509,14 @@ export class Panel {
     clearInterval(this.warmTimer);
     if (w.state === "ready") {
       el.className = "warmup on ready";
-      el.innerHTML = `<span class="dot"></span>⚡ Instant typing ready`;
+      el.innerHTML = `<span class="dot"></span>Instant typing ready`;
       this.warmTimer = setTimeout(() => (el.className = "warmup"), 2500) as unknown as ReturnType<typeof setInterval>;
       return;
     }
     const since = w.since ?? Date.now();
     const tick = () => {
       const s = Math.round((Date.now() - since) / 1000);
-      el.innerHTML = `<span class="dot"></span><span>⚡ Preview ready · preparing instant typing… ${s} s${w.slow ? ` <span class="slow">· edits slower until ready</span>` : ""}</span>`;
+      el.innerHTML = `<span class="dot"></span><span>Preview ready · preparing instant typing… ${s} s${w.slow ? ` <span class="slow">· edits slower until ready</span>` : ""}</span>`;
     };
     el.className = "warmup on";
     tick();

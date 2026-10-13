@@ -272,7 +272,15 @@ export class Viewer {
     s.img = img;
     // (the first page's size known: the pages at it, drawn again if coarser)
     if (resized) queueMicrotask(() => this.redraw());
+    // (a page drawn before and changed by an edit: a change bar in its
+    // margin, as a revised page of a manual has, fading)
+    const was = s.drawn;
     s.drawn = hash ?? s.hash;
+    if (was && s.drawn && was !== s.drawn) {
+      s.el.classList.remove("changed");
+      void s.el.offsetWidth;
+      s.el.classList.add("changed");
+    }
     // (painted at the next frame, a few a frame, those on screen first: a
     // burst of pages never stalls a scroll)
     this.toPaint.add(s);
