@@ -165,6 +165,60 @@ pub struct Item {
     pub hints: Hints,
 }
 
+/// A catcode regime as far as the pass reads it: the catcode of each
+/// ASCII byte under plain TeX's table with the regime's changes (`@`,
+/// `_`, `:` letters; spaces ignored and `~` a space under expl3; the
+/// shaping characters the text changed).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Regime {
+    cats: [u8; 128],
+    /// Spaces are ignored (expl3's).
+    pub ignore_spaces: bool,
+}
+
+impl Regime {
+    pub(crate) fn of(c: &Catcodes) -> Regime {
+        let mut cats = [12u8; 128];
+        for (b, cat) in cats.iter_mut().enumerate() {
+            let b = u8::try_from(b).unwrap_or(0);
+            *cat = match b {
+                b'\\' | b'{' | b'}' | b'#' | b'%' if c.is_other(b) => 12,
+                b'\\' => 0,
+                b'{' => 1,
+                b'}' => 2,
+                b'$' => 3,
+                b'&' => 4,
+                13 => 5,
+                b'#' => 6,
+                b'^' => 7,
+                b'_' if !c.is_letter(b) => 8,
+                0 => 9,
+                b' ' | b'\t' if c.ignore_spaces => 9,
+                b' ' | b'\t' => 10,
+                b'~' if c.ignore_spaces => 10,
+                b'~' => 13,
+                b'%' => 14,
+                127 => 15,
+                _ if c.is_letter(b) => 11,
+                _ if c.is_escape(b) => 0,
+                _ if c.is_open(b) => 1,
+                _ if c.is_close(b) => 2,
+                _ => 12,
+            };
+        }
+        Regime {
+            cats,
+            ignore_spaces: c.ignore_spaces,
+        }
+    }
+
+    /// The catcode of ASCII byte `b` (12 for a byte above 127).
+    #[must_use]
+    pub fn catcode(&self, b: u8) -> u8 {
+        self.cats.get(usize::from(b)).copied().unwrap_or(12)
+    }
+}
+
 /// What the pass found in one text.
 #[derive(Debug)]
 pub struct Pass {
@@ -180,9 +234,19 @@ pub struct Pass {
     /// `$`, `$$`, a blank line, a run of characters), outside definition
     /// bodies.
     pub marks: Vec<Mark>,
+    /// The regime each token was read under, as change points: from
+    /// token index `i` on.
+    pub regimes: Vec<(usize, Regime)>,
 }
 
 impl Pass {
+    /// The regime token `tok` was read under.
+    #[must_use]
+    pub fn regime_at(&self, tok: usize) -> &Regime {
+        let k = self.regimes.partition_point(|r| r.0 <= tok);
+        &self.regimes[k.saturating_sub(1).min(self.regimes.len() - 1)].1
+    }
+
     /// Every item's and mark's hints, one JSON object per line in text
     /// order: `{"atom", "start", "end", "name", "hints"}` (`name` is the
     /// control sequence's name, or a mark's text).
@@ -273,6 +337,11 @@ pub fn analyze_with(text: &str, kind: FileKind, scope: Scope<'_>, features: Feat
     let groups = atoms::group_pairs(text, &atoms, &lexed.tokens);
     let items = classify::classify(text, &atoms, &lexed, scope, kind, features);
     let marks = hints::marks(text, &atoms, &lexed.tokens, &items);
+    let regimes = lexed
+        .regimes
+        .iter()
+        .map(|(i, c)| (*i, Regime::of(c)))
+        .collect();
     Pass {
         tokens: lexed.tokens,
         hazards: lexed.hazards,
@@ -282,5 +351,6 @@ pub fn analyze_with(text: &str, kind: FileKind, scope: Scope<'_>, features: Feat
         groups,
         items,
         marks,
+        regimes,
     }
 }
