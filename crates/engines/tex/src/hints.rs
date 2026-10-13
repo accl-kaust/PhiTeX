@@ -841,6 +841,13 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
         }
     }
     for g in &p.groups {
+        // (the document environment: its `\\begin` opens the scope the
+        // body's regions run in, an engine scope, so its body is sliced
+        // like top-level text; `\\begin{document}` and `\\end{document}`
+        // are slices of their own)
+        if matches!(&g.kind, pass::GroupKind::Env(e) if e == "document") {
+            continue;
+        }
         if let (Some(o), Some(c)) = (g.open, g.close)
             && depth.get(o) == Some(&0)
         {
@@ -2316,6 +2323,16 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         {
             b.no_scope = true;
         }
+        // (`\\begin{document}`: its run leaves the environment's group
+        // open as the engine scope the body runs in, `Run::leave_scope`;
+        // what it defines is the document class's business: unbounded)
+        if kind == FileKind::Document && opens_document(&text[s..e]) {
+            let mut x = Hint::any("opens the document scope", &text[s..e]).encode();
+            x.push_str(OPENS_SCOPE);
+            slice_hints.push(Arc::from(x));
+            pending.clear();
+            continue;
+        }
         let excerpt = short(&text[s..text.len().min(s + 40)]);
         if t.pars[i] {
             match &mut h.bound {
@@ -2773,6 +2790,22 @@ static OFF: AtomicBool = AtomicBool::new(false);
 /// same for a process.
 pub fn set_hints_enabled(on: bool) {
     OFF.store(!on, Ordering::Relaxed);
+}
+
+/// The mark a slice hint ends with when the slice opens the scope the
+/// rest of the document runs in (`\\begin{document}`).
+const OPENS_SCOPE: &str = "\x1eO";
+
+fn opens_document(slice: &str) -> bool {
+    slice.trim_start().starts_with("\\begin{document}")
+}
+
+/// Whether the node's slice opens the document's scope: its run leaves
+/// the one group it ends in open to the engine (`Run::leave_scope`).
+pub(crate) fn opens_scope(v: &Values, args: &[ValueId]) -> bool {
+    args.iter().skip(2).any(|&h| {
+        matches!(&*v.get(h), Value::Str(t) if t.starts_with("A\x1e") && t.ends_with(OPENS_SCOPE))
+    })
 }
 
 /// Whether the node's text says its command opens and closes no scope.
