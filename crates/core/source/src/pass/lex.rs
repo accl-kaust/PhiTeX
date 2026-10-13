@@ -67,6 +67,9 @@ pub(crate) struct Lexed {
     /// Token indices of each `{` and its `}`.
     pub braces: Vec<(usize, Option<usize>)>,
     pub unmatched_closes: Vec<usize>,
+    /// The regime each token was read under, as change points: from
+    /// token index `i` on (the first entry is the file's own regime).
+    pub regimes: Vec<(usize, Catcodes)>,
 }
 
 /// What an open brace group is to the regime.
@@ -556,6 +559,7 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
     let mut frames: Vec<Frame> = Vec::new();
     let mut soft: Vec<Soft> = Vec::new();
     let mut cat = kind.catcodes();
+    let mut regimes: Vec<(usize, Catcodes)> = vec![(0, cat)];
     let mut role = Role::Simple;
     let mut body_depth = 0usize;
     let mut pre_expl: Option<Catcodes> = None;
@@ -809,6 +813,9 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
             }
             _ => {}
         }
+        if regimes.last().is_none_or(|r| r.1 != cat0) {
+            regimes.push((here, cat0));
+        }
         st.tokens.push(Token {
             kind: tk,
             start: i,
@@ -825,6 +832,7 @@ pub(crate) fn lex(text: &str, kind: FileKind, scope: Option<Scope<'_>>) -> Lexed
         hazards: st.hazards,
         braces,
         unmatched_closes,
+        regimes,
     }
 }
 

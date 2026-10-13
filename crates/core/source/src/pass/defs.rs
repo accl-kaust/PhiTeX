@@ -318,6 +318,13 @@ impl Definitions {
         self.active
     }
 
+    /// The ASCII characters some `\catcode` line of the document makes
+    /// active (bit `c` set), besides `~`.
+    #[must_use]
+    pub fn active_chars(&self) -> u128 {
+        self.active
+    }
+
     /// Whether the definition of `name` bound at `at` changes catcodes
     /// (0 no, 1 for the arguments it reads, 2 for good).
     pub(crate) fn changes_catcodes(&self, name: &str, at: Option<(u32, usize)>) -> (u8, u128) {

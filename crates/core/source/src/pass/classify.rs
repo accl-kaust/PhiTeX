@@ -1880,6 +1880,7 @@ impl Cx<'_> {
             implicit,
             reads,
             cause: it.cause.as_ref().map(|c| c.kind),
+            relied: set.relied.clone(),
         }
     }
 }
