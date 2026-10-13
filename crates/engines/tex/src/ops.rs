@@ -452,14 +452,27 @@ impl Operation for Files {
                     keys.push(v.str(f));
                     if trace {
                         let xs = list_of(v, *val);
-                        let shown = xs.first().map(|&x| crate::val::show_def(v, x)).unwrap_or_default();
-                        eprintln!("aux-trace: publish {name} {f} = {shown} (id {:?})", val.raw());
+                        let shown = xs
+                            .first()
+                            .map(|&x| crate::val::show_def(v, x))
+                            .unwrap_or_default();
+                        eprintln!(
+                            "aux-trace: publish {name} {f} = {shown} (id {:?})",
+                            val.raw()
+                        );
                     }
                 }
             }
             if trace {
-                let t = texts.iter().find(|(n, _)| n == name).map(|(_, t)| t.as_str()).unwrap_or("");
-                eprintln!("aux-trace: publish {name}: {} keys, text {} bytes:\n{t}", keys.len(), t.len());
+                let t = texts
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map_or("", |(_, t)| t.as_str());
+                eprintln!(
+                    "aux-trace: publish {name}: {} keys, text {} bytes:\n{t}",
+                    keys.len(),
+                    t.len()
+                );
             }
             cx.publish(k, v.list(keys));
         }
@@ -474,7 +487,10 @@ impl Operation for Files {
                 |(_, t)| v.list(vec![v.str(&format!("./{name}")), v.str(t)]),
             );
             if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                let t = texts.iter().find(|(n, _)| *n == name).map(|(_, t)| t.as_str()).unwrap_or("");
+                let t = texts
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or("", |(_, t)| t.as_str());
                 eprintln!("aux-trace: publish wfile {name}: {} bytes:\n{t}", t.len());
             }
             cx.publish(f, x);

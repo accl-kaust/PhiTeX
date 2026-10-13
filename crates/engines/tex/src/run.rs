@@ -291,6 +291,21 @@ pub(crate) struct Run<'c, 'a> {
     /// definitions, a buffer reduced in place): a stop after one does
     /// not park ([`Run::rewind`]).
     pub irreversible: u64,
+    /// While a job-written line is interpreted ([`Run::interpret_line`]):
+    /// the read-back fields reverted so far in that line, to the value
+    /// they had before this round's read-back (`wpre:<field>`), and
+    /// what each location's pre-value is (memoized for the run).
+    pub interp: Option<phitex_defuse::FxHashSet<Loc>>,
+    /// The streams a document node closed with `\immediate\closeout`:
+    /// closed for this run's later writes, and for the writer from the
+    /// close's position (a stream entry), never for the page steps: the
+    /// steps run on the state at the end of the text, and TeX's deferred
+    /// writes fire before a close that follows their page
+    /// (`\enddocument` closes the `.aux` after `\clearpage`).
+    pub closed: Vec<i32>,
+    /// Flush points met by this run so far ([`Run::flush_point`]).
+    pub flushes: usize,
+    pub pre_memo: phitex_defuse::FxHashMap<Loc, Option<ValueId>>,
     /// Errors since the last paragraph ended (§76 `error_count`, reset by
     /// `end_graf`, §1096): at 100 the job stops (§82).
     pub error_count: u32,
@@ -356,6 +371,10 @@ impl<'c, 'a> Run<'c, 'a> {
             pdf_occ: 0,
             resumed: false,
             irreversible: 0,
+            interp: None,
+            closed: Vec::new(),
+            flushes: 0,
+            pre_memo: phitex_defuse::FxHashMap::default(),
             error_count: 0,
             fatal_logged: false,
             mark: Mark::default(),
@@ -394,10 +413,56 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Location `loc` read: from the engine on its first read in the run.
     #[inline]
     pub(crate) fn load(&mut self, loc: Loc) -> R<()> {
+        if self.interp.is_some() {
+            self.revert_read_back(loc)?;
+        }
         if self.st.is_loaded(loc) {
             return Ok(());
         }
         self.load_slow(loc)
+    }
+
+    /// A job-written line is read as the next round's read-back reads
+    /// it: in the state before this round's read-back took effect. The
+    /// first read of a read-back field in the line gets the value the
+    /// read-back replaced (`wpre:<field>`, left by [`Run::read_back`]),
+    /// so a line whose effect depends on the field (biblatex's
+    /// `\xifinlist`-guarded `\listxadd`, `\ifcsundef`-guarded
+    /// `\csgdef`) defines it as the reading run will, not as this run,
+    /// which already holds the previous round's value, would.
+    #[inline(never)]
+    fn revert_read_back(&mut self, loc: Loc) -> R<()> {
+        let Some(done) = &mut self.interp else {
+            return Ok(());
+        };
+        if !done.insert(loc) {
+            return Ok(());
+        }
+        let pre = if let Some(&p) = self.pre_memo.get(&loc) {
+            p
+        } else {
+            let f = self.loc_field(loc);
+            let name = crate::val::field_name(self.v, f);
+            let p = if self
+                .cx
+                .is_loopback(self.keyed(crate::fields::Fam::Wdef, &name))
+            {
+                self.get(&format!("wpre:{name}"))?
+            } else {
+                None
+            };
+            self.pre_memo.insert(loc, p);
+            p
+        };
+        if let Some(p) = pre {
+            let val = if p == ValueId::UNIT {
+                Native::Absent
+            } else {
+                Native::Raw(p)
+            };
+            self.set_loc(loc, val, false);
+        }
+        Ok(())
     }
 
     #[inline(never)]
@@ -614,7 +679,10 @@ impl<'c, 'a> Run<'c, 'a> {
             let x = self.cx.use_field(w)?;
             if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
                 let t = x.and_then(|x| list_of(v, x).get(1).map(|&t| str_of(v, t)));
-                eprintln!("aux-trace: read wfile {key}: {:?} bytes", t.map(|t| t.len()));
+                eprintln!(
+                    "aux-trace: read wfile {key}: {:?} bytes",
+                    t.map(|t| t.len())
+                );
             }
             x
         } else if self.cx.is_loopback(f) {
@@ -695,12 +763,20 @@ impl<'c, 'a> Run<'c, 'a> {
             let xs = list_of(v, x);
             if let [val, g] = xs.as_slice() {
                 let global = int_of(v, *g) != 0;
-                if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
-                    let was = self.get(&name)?.map(|x| crate::val::show_def(v, x));
-                    eprintln!(
-                        "aux-trace: read-back {key} {name} = {} (was {was:?})",
-                        crate::val::show_def(v, *val)
-                    );
+                // the value the read-back replaces, for the lines
+                // written this round ([`Run::revert_read_back`]): once
+                // per run (LaTeX reads the `.aux` again at `\enddocument`)
+                let pre = format!("wpre:{name}");
+                if self.get(&pre)?.is_none() {
+                    let was = self.get(&name)?;
+                    if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                        eprintln!(
+                            "aux-trace: read-back {key} {name} = {} (was {:?})",
+                            crate::val::show_def(v, *val),
+                            was.map(|x| crate::val::show_def(v, x))
+                        );
+                    }
+                    self.set(&pre, was.unwrap_or(ValueId::UNIT), true);
                 }
                 self.set(&name, *val, global);
             }
@@ -730,6 +806,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.eof = true;
         self.no_pull = true;
         self.set("cat:64", v.int(11), false);
+        self.interp = Some(phitex_defuse::FxHashSet::default());
         let base = self.st.stamp();
         for l in line.split('\n') {
             let mut buf: Vec<u32> = l.chars().map(u32::from).collect();
@@ -768,6 +845,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 ])
             })
             .collect();
+        self.interp = None;
         self.frames = frames;
         self.st = st;
         let streams = v.field("streams");

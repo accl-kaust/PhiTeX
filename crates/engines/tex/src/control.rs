@@ -342,6 +342,9 @@ impl Run<'_, '_> {
                 self.append(md.lid, node);
                 if md.m == 1 {
                     self.build_page_outer()?;
+                    if n <= -10000 && md.lid == 0 {
+                        self.flush_point()?;
+                    }
                 }
             }
             cmd::REMOVE_ITEM => self.delete_last(&md)?,
@@ -1330,7 +1333,7 @@ impl Run<'_, '_> {
                         }
                         _ => {
                             let n = self.scan_four_bit_int()?;
-                            self.set(&format!("write:{n}"), ValueId::UNIT, true);
+                            self.close_out(n)?;
                         }
                     }
                 } else {
@@ -1353,9 +1356,20 @@ impl Run<'_, '_> {
     pub(crate) fn write_out(&mut self, k: i32, body: &[Tok]) -> R<()> {
         let s = self.expand_late(body)?;
         let open = (0..16).contains(&k)
+            && !self.closed.contains(&k)
             && self
                 .get(&format!("write:{k}"))?
                 .is_some_and(|x| x != ValueId::UNIT);
+        if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+            let w = self
+                .get(&format!("write:{k}"))?
+                .map(|x| crate::val::show_def(self.v, x));
+            eprintln!(
+                "aux-trace: write_out stream {k} open={open} ({w:?}) node {} op {:?}: {s}",
+                self.cx.node().raw(),
+                self.cx.op()
+            );
+        }
         if open {
             let v = self.v;
             let e = v.list(vec![v.int(i64::from(k)), v.str(&s)]);
@@ -1393,6 +1407,31 @@ impl Run<'_, '_> {
             self.contribute_stream(e);
         } else {
             self.log("wlog", &s)?;
+        }
+        Ok(())
+    }
+
+    /// `\closeout` done (§1374): in a page step or a text paging inline
+    /// the stream is closed for what follows; in a document node the
+    /// close is an event at its position (a `[name, "", "close"]` stream
+    /// entry the writer applies in the pages' order, [`Run::closed`]),
+    /// not a definition the page steps would see before their deferred
+    /// writes fire.
+    pub(crate) fn close_out(&mut self, n: i32) -> R<()> {
+        let v = self.v;
+        let op = self.cx.op();
+        if op == self.ops.pagestep || op == self.ops.pagestep_any || self.pg.is_some() {
+            self.set(&format!("write:{n}"), ValueId::UNIT, true);
+            return Ok(());
+        }
+        let name = self
+            .get(&format!("write:{n}"))?
+            .and_then(|x| list_of(v, x).first().map(|&m| str_of(v, m)));
+        if !self.closed.contains(&n) {
+            self.closed.push(n);
+        }
+        if let Some(name) = name {
+            self.contribute_stream(v.list(vec![v.str(&name), v.str(""), v.str("close")]));
         }
         Ok(())
     }
@@ -1435,17 +1474,11 @@ impl Run<'_, '_> {
                 .filter(|(g, _)| *g == f)
                 .flat_map(|(_, x)| v.seq_to_vec(*x)),
         );
-        let mut text = String::new();
-        for e in all {
-            let xs = list_of(v, crate::api::stream_entry(v, e));
-            if xs.first().map(|&n| str_of(v, n)).as_deref() != Some(key) {
-                continue;
-            }
-            match xs.get(1) {
-                Some(&t) => text.push_str(&str_of(v, t)),
-                None => text.clear(),
-            }
-        }
+        let text = crate::api::stream_texts(v, &all)
+            .into_iter()
+            .find(|(n, _)| n == key)
+            .map(|(_, t)| t)
+            .unwrap_or_default();
         Ok(Some(v.list(vec![v.str(&format!("./{key}")), v.str(&text)])))
     }
 
