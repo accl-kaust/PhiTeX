@@ -39,6 +39,8 @@ fn shrink_history(hist: &[(Vec<String>, Ed)]) {
     shrink::report(&start, &eds, from(j));
 }
 fn main() {
+    // Stops keep their state and resume (the toy re-executes over it).
+    common::REPLAY_STOPS.store(true, std::sync::atomic::Ordering::Relaxed);
     let pool: Vec<String> = std::env::args()
         .nth(1)
         .map(|f| std::fs::read_to_string(f).unwrap().lines().map(String::from).collect())

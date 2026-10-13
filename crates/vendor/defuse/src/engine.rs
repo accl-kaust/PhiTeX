@@ -442,6 +442,11 @@ pub struct Report {
     pub confirmations: u64,
     /// Speculative runs whose assumptions failed.
     pub mispredictions: u64,
+    /// Attempts that resumed a stopped run at its blocked read
+    /// ([`Ctx::park`]), and attempts that started over because the saved
+    /// state's reads no longer held.
+    pub resumed: u64,
+    pub restarted: u64,
     /// Of those refuted by a pending node defining what the run read (or
     /// its definer changing), by field, most refuted first.
     pub refuted_by_field: Vec<(Field, u64)>,
@@ -607,9 +612,22 @@ pub enum Cause {
         by: Option<NodeId>,
         from_hint: Option<(Field, NodeId)>,
     },
-    /// It ran below a finished node it read and was re-done at `to`
-    /// (for [`Engine::critical_chain`], before the link naming the read).
-    Raised { to: u32 },
+    /// It was re-done at `to`, the level above `by`: a finished node it
+    /// needed that was not settled below its level, when nothing it read
+    /// or waited for stands at the level below (for
+    /// [`Engine::critical_chain`], which goes on from `by`; `None`: gone).
+    Raised { to: u32, by: Option<NodeId>, how: Lifted },
+}
+
+/// How a finished node put another above it ([`Cause::Raised`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lifted {
+    /// Its run read the node (a value, an output, a range) above its
+    /// level and was re-done above it.
+    Read,
+    /// Its gate found the node, the definer of a hinted field, finished
+    /// at or above its level before the run started.
+    Gate,
 }
 
 /// What gave a node its starting height (for [`Engine::critical_chain`]).
@@ -638,6 +656,7 @@ struct Origin {
     /// The node whose height set that level when a read does not say
     /// (a gate's hinted input, or a finished node it waited on; `NIL`).
     raised_from: Slot,
+    raised_how: Lifted,
 }
 
 impl Origin {
@@ -647,6 +666,7 @@ impl Origin {
         waited: NIL,
         raised: 0,
         raised_from: NIL,
+        raised_how: Lifted::Read,
     };
 }
 
@@ -763,6 +783,28 @@ pub(crate) const K_LOOP: u8 = 2;
 pub(crate) const K_CHAIN: u8 = 3;
 /// A read of the environment ([`Ctx::use_env`]): `key` is the field.
 pub(crate) const K_ENV: u8 = 4;
+
+/// A stopped run's state, kept for a resume at its blocked read (see
+/// [`Ctx::park`]): the reads so far with their values, what the run made
+/// before the stop, and the operation's token.
+pub(crate) struct Suspended {
+    pub(crate) uses: Vec<Use>,
+    pub(crate) cache: FxHashMap<(u8, u64), Option<ValueId>>,
+    pub(crate) defs: Vec<(Field, ValueId, bool)>,
+    pub(crate) children: Vec<(OpId, ValueId)>,
+    pub(crate) follows: Vec<(OpId, ValueId)>,
+    pub(crate) env: Vec<(Field, ValueId)>,
+    pub(crate) publishes: Vec<(Field, ValueId)>,
+    pub(crate) contribs: Vec<(Field, ValueId)>,
+    pub(crate) effect: Option<u8>,
+    pub(crate) kind: Option<ValueId>,
+    pub(crate) diagnostics: Vec<ValueId>,
+    pub(crate) sig: u64,
+    pub(crate) steps: u64,
+    /// Behind a mutex only so a result holding it is `Sync` for client
+    /// executors (never contended).
+    pub(crate) token: Mutex<Box<dyn std::any::Any + Send>>,
+}
 
 /// A recorded read: 16 bytes.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -919,6 +961,9 @@ pub(crate) struct Aux {
     diagnostics: Vec<ValueId>,
     /// A static opener whose kind the run sets (`Brackets::kind_pending`).
     kind_pending: bool,
+    /// The last stopped attempt's state, for a resume (taken by the next
+    /// attempt on its thread; behind a mutex only for that hand-off).
+    suspended: Mutex<Option<Box<Suspended>>>,
 }
 
 /// The range a stream claim read, as nodes (labels change under
@@ -2106,6 +2151,15 @@ impl Engine {
         if a == NO_AUX { None } else { Some(&self.aux[a as usize]) }
     }
 
+    fn aux_mut_opt(&mut self, s: Slot) -> Option<&mut Aux> {
+        let a = self.n(s).aux;
+        if a == NO_AUX {
+            None
+        } else {
+            Some(&mut self.aux[a as usize])
+        }
+    }
+
     fn ax(&mut self, s: Slot) -> &mut Aux {
         if self.n(s).aux == NO_AUX {
             let i = if let Some(i) = self.free_aux.pop() {
@@ -2377,9 +2431,6 @@ impl Engine {
             let n = self.n(x);
             let h = n.height;
             let origin = self.origins.get(&x).copied();
-            if let Some(o) = origin.filter(|o| o.raised > 0) {
-                chain.push((n.id, h, Cause::Raised { to: o.raised }));
-            }
             // The read whose site stands highest; ties: the first recorded.
             let mut best: Option<(u32, Slot, Cause)> = None;
             let mut offer = |cand: (u32, Slot, Cause)| {
@@ -2439,24 +2490,36 @@ impl Engine {
                     // there (above what made it and its hinted reads), or
                     // a wait raised its floor. The walk goes on from there.
                     let live = |t: Slot| (t != NIL && self.live(t)).then_some(t);
-                    let next = match origin {
-                        Some(o) if live(o.waited).is_some() => {
-                            chain.push((
-                                n.id,
-                                h,
-                                Cause::Woken {
-                                    by: self.n(o.waited).id,
-                                },
-                            ));
-                            Some(o.waited)
+                    let woken = |o: &Origin| {
+                        let by = live(o.waited)?;
+                        Some((Cause::Woken { by: self.n(by).id }, Some(by)))
+                    };
+                    let raised = |o: &Origin| {
+                        (o.raised == h && h > 0).then(|| {
+                            let by = live(o.raised_from);
+                            let cause = Cause::Raised {
+                                to: h,
+                                by: by.map(|t| self.n(t).id),
+                                how: o.raised_how,
+                            };
+                            (cause, by)
+                        })
+                    };
+                    // The wait that set its floor, the level it was re-done
+                    // at, a wait below the level, or its creation.
+                    let link = origin.and_then(|o| {
+                        if n.floor == h {
+                            woken(&o).or_else(|| raised(&o))
+                        } else {
+                            raised(&o).or_else(|| woken(&o))
                         }
-                        Some(o) if o.raised > 0 && live(o.raised_from).is_some() => {
-                            // Set to its level by a hinted input (the gate)
-                            // or a finished node it waited on: the Raised
-                            // link above names the level.
-                            Some(o.raised_from)
+                    });
+                    let next = match (link, origin) {
+                        (Some((cause, by)), _) => {
+                            chain.push((n.id, h, cause));
+                            by
                         }
-                        Some(o) => {
+                        (None, Some(o)) => {
                             let by = live(o.creator);
                             let hint = o.hint.filter(|&(_, t)| live(t).is_some());
                             chain.push((
@@ -2469,7 +2532,7 @@ impl Engine {
                             ));
                             hint.map(|(_, t)| t).or(by)
                         }
-                        None => {
+                        (None, None) => {
                             chain.push((
                                 n.id,
                                 h,
@@ -2675,6 +2738,10 @@ impl Engine {
         }
         self.nm(s).op = op;
         self.nm(s).args = args;
+        if let Some(a) = self.aux_mut_opt(s) {
+            // A stopped attempt of the old text has nothing to resume.
+            *a.suspended.get_mut().unwrap_or_else(PoisonError::into_inner) = None;
+        }
         let st = self.statics(op, args);
         let decl = st.decl.clone();
         let eff = st.eff;
@@ -3186,6 +3253,7 @@ impl Engine {
                     waited: NIL,
                     raised: 0,
                     raised_from: NIL,
+                    raised_how: Lifted::Read,
                 },
             );
         }
@@ -5216,6 +5284,49 @@ impl Engine {
         }
     }
 
+    /// Whether every read a stopped attempt made still resolves to the same
+    /// settled site and value: its state may then be resumed.
+    fn reads_hold(&self, x: Slot, s: &Suspended) -> bool {
+        let n = self.n(x);
+        if n.has(F_CLAIMER) || n.has(F_APP) {
+            return false;
+        }
+        for u in &s.uses {
+            let seen = s.cache.get(&(u.kind, u.key)).copied();
+            let now = match u.kind {
+                K_FIELD => {
+                    let f = Field(ValueId(u.key));
+                    let w = self.walk(n.unit, n.label, f);
+                    if w.pending != NIL || w.site != u.site {
+                        return false;
+                    }
+                    if w.site == NIL {
+                        Some(self.start_value(n.unit, f))
+                    } else if self.settled(w.site) {
+                        Some(self.n(w.site).def_value(f))
+                    } else {
+                        return false;
+                    }
+                }
+                K_OUTPUT => {
+                    let t = Slot::unpack(u.key);
+                    if !self.live(t) || !self.settled(t) {
+                        return false;
+                    }
+                    let tn = self.n(t);
+                    Some(tn.has_ran().then_some(tn.output))
+                }
+                K_ENV => self.env_value(n.unit, Field(ValueId(u.key))).ok(),
+                K_LOOP => Some(self.loop_vals.get(&Field(ValueId(u.key))).copied()),
+                _ => return false,
+            };
+            if now != seen {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Marks `x` as needing a re-run.
     pub(crate) fn make_dirty(&mut self, x: Slot) {
         if self.tracing > 0 {
@@ -5317,11 +5428,9 @@ impl Engine {
             if self.n(on).has(F_INPEND) {
                 self.report.pending_waits += 1;
             }
+            // Above it while it waits; its floor takes the final height
+            // when it wakes.
             let h = self.n(on).height + 1;
-            if h > self.n(x).floor {
-                self.nm(x).floor = h;
-                self.origins.entry(x).or_insert(Origin::NONE).waited = on;
-            }
             self.raise(x, h, on);
         }
         self.sync_order_lazy(x);
@@ -5343,6 +5452,11 @@ impl Engine {
                 }
                 self.dequeue(w);
                 self.set_state(w, State::Dirty);
+                if h > self.n(w).floor {
+                    // It finishes above what it waited on, read or not.
+                    self.nm(w).floor = h;
+                    self.origins.entry(w).or_insert(Origin::NONE).waited = x;
+                }
                 let hw = self.n(w).height.max(h);
                 self.lift(w, hw);
                 self.enqueue(w);
@@ -6485,6 +6599,31 @@ impl Engine {
         if !matches!(st, State::Dirty | State::Parked) || (st == State::Parked && !r.speculative) {
             return;
         }
+        if r.resumed {
+            self.report.resumed += 1;
+        }
+        if r.restarted {
+            self.report.restarted += 1;
+        }
+        let mut r = r;
+        if !r.speculative {
+            // A stop keeps its state for the next attempt; anything else
+            // ends it.
+            let keep = matches!(
+                r.end,
+                End::Wait(..)
+                    | End::WaitEnv(_)
+                    | End::NeedApp(..)
+                    | End::NeedChild(_)
+                    | End::WaitRange(..)
+                    | End::Gated(..)
+                    | End::GateRaise(..)
+            );
+            let saved = if keep { r.suspended.take() } else { None };
+            if saved.is_some() || self.aux_of(x).is_some() {
+                *self.ax(x).suspended.get_mut().unwrap_or_else(PoisonError::into_inner) = saved;
+            }
+        }
         // A definition the run read was removed while it ran (its node
         // freed or re-run by an unfolding parent applied in the same
         // batch): only committed uses were re-bound, so run again.
@@ -6553,11 +6692,12 @@ impl Engine {
         if let Some(e) = r.error.clone() {
             self.errors.push(e);
         }
-        if r.raise > 0 && !matches!(r.end, End::Raise(_)) {
+        if r.raise > 0 && !matches!(r.end, End::Raise(..)) {
             // A read of a finished node not settled below this level, then
             // a stop: the node re-runs above that node too.
             let h = r.raise.max(self.n(x).height);
             self.lift(x, h);
+            self.note_raise(x, h, r.raise_from, Lifted::Read);
         }
         let output = match r.end {
             End::Output(v) => v,
@@ -6571,22 +6711,22 @@ impl Engine {
                 } else if self.live(t) {
                     let h = (self.n(t).height + 1).max(self.n(x).height);
                     self.lift(x, h);
-                    self.note_raise(x, h, t);
+                    self.note_raise(x, h, t, Lifted::Gate);
                 }
                 return;
             }
             End::GateRaise(h, from) => {
                 let h = h.max(self.n(x).height);
                 self.lift(x, h);
-                self.note_raise(x, h, from);
+                self.note_raise(x, h, from, Lifted::Gate);
                 return;
             }
-            End::Raise(h) => {
+            End::Raise(h, from) => {
                 self.report.stops += 1;
                 self.report.raises += 1;
                 let h = h.max(self.n(x).height + 1);
                 self.lift(x, h);
-                self.note_raise(x, h, NIL);
+                self.note_raise(x, h, from, Lifted::Read);
                 return;
             }
             End::Wait(t, kind) => {
@@ -6598,7 +6738,7 @@ impl Engine {
                 } else if self.live(t) {
                     let h = (self.n(t).height + 1).max(self.n(x).height);
                     self.lift(x, h);
-                    self.note_raise(x, h, t);
+                    self.note_raise(x, h, t, Lifted::Read);
                 }
                 return;
             }
@@ -6650,7 +6790,6 @@ impl Engine {
                 return;
             }
         };
-        let mut r = r;
         self.touch_with(x, r.old_sites.take());
         let provisional = r.speculative && !r.assumptions.is_empty();
         if r.speculative && self.shape_changes(x, &r) {
@@ -6949,6 +7088,15 @@ impl Engine {
                 self.raise(y, h, NIL);
             } else {
                 self.set_height(y, h);
+            }
+            if let Some(o) = self.origins.get_mut(&y)
+                && o.raised != 0
+                && o.raised != h
+            {
+                // Re-done at a level its reads do not reach: the raise
+                // explains nothing about where it stands.
+                o.raised = 0;
+                o.raised_from = NIL;
             }
             self.sync_order_lazy(y);
             if self.marks.contains_key(&y) {
@@ -7366,12 +7514,22 @@ impl Engine {
         false
     }
 
-    /// Records that `x` was set to level `h` by `from` (`NIL`: by what it
-    /// read, which explains the level itself).
-    fn note_raise(&mut self, x: Slot, h: u32, from: Slot) {
+    /// Records that `x` was set to level `h` by `from`: a finished node
+    /// one below it (else the level came from elsewhere, and a record of
+    /// the same level with its source stays).
+    fn note_raise(&mut self, x: Slot, h: u32, from: Slot, how: Lifted) {
+        let from = if from != NIL && self.live(from) && self.n(from).height + 1 == h {
+            from
+        } else {
+            NIL
+        };
         let o = self.origins.entry(x).or_insert(Origin::NONE);
+        if from == NIL && o.raised == h && o.raised_from != NIL {
+            return;
+        }
         o.raised = h;
         o.raised_from = from;
+        o.raised_how = how;
     }
 
     fn note_wait(&mut self, on: Slot, kind: WaitKind) {
@@ -7994,7 +8152,21 @@ impl Engine {
         let n = self.n(job.slot);
         // Borrowed, not cloned: every worker would bump the same count.
         let op = &**self.op(n.op);
-        let mut cx = Ctx::new(self, job.slot, job.speculative, fuel);
+        let saved = if job.speculative {
+            None
+        } else {
+            self.aux_of(job.slot)
+                .and_then(|a| a.suspended.lock().unwrap_or_else(PoisonError::into_inner).take())
+        };
+        let mut cx = match saved {
+            Some(s) if self.reads_hold(job.slot, &s) => Ctx::resume(self, job.slot, fuel, *s),
+            Some(_) => {
+                let mut cx = Ctx::new(self, job.slot, job.speculative, fuel);
+                cx.restarted = true;
+                cx
+            }
+            None => Ctx::new(self, job.slot, job.speculative, fuel),
+        };
         if !job.speculative {
             match self.gate_walks(job.slot) {
                 Ok(walks) => cx.walks = walks,
@@ -8035,7 +8207,9 @@ pub(crate) enum End {
     Wait(Slot, WaitKind),
     /// Waiting for an environment field neither supplied nor absent.
     WaitEnv(Field),
-    Raise(u32),
+    /// Re-done at the level, above the finished node it read there
+    /// (`NIL`: a range).
+    Raise(u32, Slot),
     NeedApp(OpId, ValueId),
     NeedChild(usize),
     WaitRange(Field, Slot),
@@ -8055,8 +8229,10 @@ pub struct RunResult {
     pub(crate) epoch: u32,
     pub(crate) speculative: bool,
     pub(crate) end: End,
-    /// The level the run has to be re-done at (0: none), see [`Ctx`].
+    /// The level the run has to be re-done at (0: none), see [`Ctx`], and
+    /// the finished node read there that set it (`NIL`: a range).
     pub(crate) raise: u32,
+    pub(crate) raise_from: Slot,
     pub(crate) uses: Vec<Use>,
     pub(crate) defs: Vec<(Field, ValueId, bool)>,
     pub(crate) children: Vec<(OpId, ValueId)>,
@@ -8088,6 +8264,12 @@ pub struct RunResult {
     pub(crate) sig: u64,
     pub(crate) error: Option<EvalError>,
     pub(crate) diagnostics: Vec<ValueId>,
+    /// The state to keep for a resume (a non-speculative stop with a token).
+    pub(crate) suspended: Option<Box<Suspended>>,
+    /// Whether this attempt resumed a saved state / started over after
+    /// dropping one.
+    pub(crate) resumed: bool,
+    pub(crate) restarted: bool,
     /// Unfolded-text and lexical-application memo hits and misses.
     pub(crate) memo: [u32; 4],
 }
