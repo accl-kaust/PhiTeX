@@ -1313,24 +1313,16 @@ impl FinalState {
             .min(MAX_PAGES);
         // each step's entry: [j, own pairs, pgst read, counts, pgdef
         // read, serial] (`Run::page_step`)
-        let mut entries: std::collections::BTreeMap<usize, Vec<ValueId>> =
-            std::collections::BTreeMap::new();
-        for e in v.seq_to_vec(all) {
-            let xs = list_of(v, e);
-            let Some(&j) = xs.first() else { continue };
-            entries.insert(usize::try_from(int_of(v, j)).unwrap_or(0), xs);
-        }
+        let entries = Self::entries(v, all);
         let old = cx.use_field(v.field("pgref"))?.map_or(0, |x| int_of(v, x));
         let mut refuted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut state: std::collections::BTreeMap<String, (Field, ValueId)> =
             std::collections::BTreeMap::new();
         let mut cur = ValueId::UNIT;
         // `\\count0..9` before the chain, then as folded
-        let mut counts: Vec<i64> = Vec::with_capacity(10);
-        for k in 0..10 {
-            counts.push(cx.use_field(v.field(&format!("count:{k}")))?.map_or(0, |x| int_of(v, x)));
-        }
-        let ints = |x: ValueId| -> Vec<i64> { list_of(v, x).iter().map(|&y| int_of(v, y)).collect() };
+        let mut counts = Self::counts(cx)?;
+        let ints =
+            |x: ValueId| -> Vec<i64> { list_of(v, x).iter().map(|&y| int_of(v, y)).collect() };
         for j in 0..steps {
             let Some(xs) = entries.get(&j) else { continue };
             let g = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
@@ -1349,7 +1341,11 @@ impl FinalState {
                             let r = |e: &[(String, ValueId)]| {
                                 e.iter().find(|p| p.0 == n).map(|p| v.render(p.1))
                             };
-                            eprintln!("pgst refuted at {j}: {n} read {:?} want {:?}", r(&read), r(&want));
+                            eprintln!(
+                                "pgst refuted at {j}: {n} read {:?} want {:?}",
+                                r(&read),
+                                r(&want)
+                            );
                         }
                         refuted.insert(n);
                     }
@@ -1390,7 +1386,10 @@ impl FinalState {
             if cur != ValueId::UNIT {
                 cx.publish(v.field(&format!("pgst:{j}")), cur);
                 // (kept for the client: the next session's guess)
-                cx.contribute(v.field("pgsts"), v.seq_unit(v.list(vec![v.int(0), jj, cur])));
+                cx.contribute(
+                    v.field("pgsts"),
+                    v.seq_unit(v.list(vec![v.int(0), jj, cur])),
+                );
             }
             let cs = v.list(counts.iter().map(|&c| v.int(c)).collect());
             log_pub(o, "pgdef", j, count_entries(v, Some(cs)));
@@ -1404,6 +1403,41 @@ impl FinalState {
         } else {
             (old + 1).min(2)
         };
+        Self::log_refuted(o, old, refuted);
+        if new > 0 {
+            cx.publish(v.field("pgref"), v.int(new));
+        }
+        Ok(FinalState {
+            map: state.into_values().collect(),
+        })
+    }
+
+    /// Each step's entry in the chain's accumulation, by page.
+    fn entries(v: &Values, all: ValueId) -> std::collections::BTreeMap<usize, Vec<ValueId>> {
+        let mut entries = std::collections::BTreeMap::new();
+        for e in v.seq_to_vec(all) {
+            let xs = list_of(v, e);
+            let Some(&j) = xs.first() else { continue };
+            entries.insert(usize::try_from(int_of(v, j)).unwrap_or(0), xs);
+        }
+        entries
+    }
+
+    /// `\\count0..9` before the chain.
+    fn counts(cx: &mut Ctx<'_>) -> Result<Vec<i64>, Stop> {
+        let v = cx.values();
+        let mut counts: Vec<i64> = Vec::with_capacity(10);
+        for k in 0..10 {
+            counts.push(
+                cx.use_field(v.field(&format!("count:{k}")))?
+                    .map_or(0, |x| int_of(v, x)),
+            );
+        }
+        Ok(counts)
+    }
+
+    /// The loop-back log's line for a refuted round.
+    fn log_refuted(o: &crate::run::Ops, old: i64, refuted: std::collections::BTreeSet<String>) {
         if !refuted.is_empty() {
             let names: Vec<String> = refuted.into_iter().collect();
             o.lblog
@@ -1412,12 +1446,6 @@ impl FinalState {
                 .rounds
                 .insert(format!("refuted round {}: {}", old + 1, names.join(" ")));
         }
-        if new > 0 {
-            cx.publish(v.field("pgref"), v.int(new));
-        }
-        Ok(FinalState {
-            map: state.into_values().collect(),
-        })
     }
 
     /// Field `f` after the chain.
