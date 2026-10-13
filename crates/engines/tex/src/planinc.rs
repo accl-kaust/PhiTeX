@@ -312,13 +312,22 @@ pub(crate) fn fold(v: &Values, all: ValueId, prev: Option<ListMemo>) -> (ListMem
             let made = fresh.len();
             let removed = splice(&mut p, bi, k, out0, fresh, fblocks, st, dn);
             p.root = all;
-            let suf = p.items.len() - out0 - made;
+            // (narrowed to the items that differ)
+            let new = &p.items[out0..out0 + made];
+            let a = removed.iter().zip(new).take_while(|(x, y)| x == y).count();
+            let b = removed[a..]
+                .iter()
+                .rev()
+                .zip(new[a..].iter().rev())
+                .take_while(|(x, y)| x == y)
+                .count();
+            let suf = p.items.len() - out0 - made + b;
             return (
                 p,
                 Some(Change {
-                    pre: out0,
+                    pre: out0 + a,
                     suf,
-                    removed,
+                    removed: removed[a..removed.len() - b].to_vec(),
                     old_len,
                 }),
             );

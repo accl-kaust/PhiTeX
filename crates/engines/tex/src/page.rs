@@ -214,6 +214,7 @@ impl Run<'_, '_> {
         let t0 = std::time::Instant::now();
         let epoch = self.cx.values_epoch();
         let all = self.cx.acc_range(v.field("items"), None)?;
+        let t_acc = t0.elapsed();
         let mut prev = crate::planinc::take(v, epoch);
         let (folded, change) =
             crate::planinc::fold(v, all, prev.as_mut().map(|p| std::mem::take(&mut p.items)));
@@ -403,7 +404,7 @@ impl Run<'_, '_> {
         }
         if tm {
             eprintln!(
-                "plan: {} items, {pages} pages ({folds} folded, pre {pre} suf {suf}): list fold {t1:?}, pages {:?}, sets {:?}",
+                "plan: {} items, {pages} pages ({folds} folded, pre {pre} suf {suf}): list fold {t1:?} (acc {t_acc:?}), pages {:?}, sets {:?}",
                 items.len(),
                 t2.saturating_sub(t1),
                 t0.elapsed().saturating_sub(t2)
