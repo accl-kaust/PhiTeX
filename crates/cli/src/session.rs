@@ -173,6 +173,10 @@ pub struct RunInfo {
     pub fuel_outs: u64,
     pub max_ready: usize,
     pub ready_mean: f64,
+    /// The parser's hints: nodes bounded, nodes that may define anything,
+    /// hints whose assumptions failed, definitions outside a bound, the
+    /// stops and pending waits.
+    pub hints: [u64; 6],
 }
 
 impl RunInfo {
@@ -674,6 +678,14 @@ impl Session {
                 fuel_outs: s.fuel_outs,
                 max_ready: s.max_ready,
                 ready_mean: s.ready_mean(),
+                hints: [
+                    s.nodes_bounded,
+                    s.nodes_any,
+                    s.regime_violations,
+                    s.undeclared_definitions,
+                    s.stops,
+                    s.pending_waits,
+                ],
             }],
             internal: None,
             diagnostics: b.diagnostics(),
@@ -751,19 +763,10 @@ impl Session {
         let (Some(c), Some(text)) = (&self.cache, prelude) else {
             return;
         };
-        // (a format whose evaluation did not end well is not kept: its
-        // errors would come back at every run)
-        // (an error in the document itself says nothing of the format)
-        let doc = plain_name(&self.job.path.to_string_lossy());
-        let failed = b.diagnostics().iter().any(|d| {
-            d.severity == phitex_tex::Severity::Error
-                && (d.message.contains("deadline")
-                    || plain_name(&d.file) != doc
-                        && plain_name(&d.file) != plain_name(&self.job.file))
-        }) || b.output().1.contains("deadline");
         let key = b.prelude_key();
+        // (none: the format's evaluation did not finish cleanly, and is not
+        // kept: its errors would come back at every run)
         if had != Some(key)
-            && !failed
             && let Some(bytes) = b.export_prelude()
         {
             let _ = c.put_format(&self.format_name(text), &key, &bytes);
