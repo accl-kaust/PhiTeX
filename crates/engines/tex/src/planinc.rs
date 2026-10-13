@@ -328,6 +328,14 @@ fn refold(
                 items,
             };
         }
+        if let Some((p, suf, dn)) = old
+            && at >= suf
+            && crate::exec::env_flag!("PHITEX_PLAN_TIME")
+            && let Some(o) = at.checked_add_signed(-dn)
+            && let Ok(k) = p.blocks.binary_search_by_key(&o, |b| b.0)
+        {
+            eprintln!("plan fold: at {at} state {st:?} old {:?}", p.blocks[k]);
+        }
         let end = block_end(&entries, at);
         let del = deletes(v, &entries[at..end]);
         blocks.push((at, items.len(), st, del));

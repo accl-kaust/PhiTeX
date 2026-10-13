@@ -277,6 +277,8 @@ impl Run<'_, '_> {
         let mut plan: Vec<ValueId> = Vec::new();
         let mut folds = 0usize;
         let mut tfx = std::time::Duration::ZERO;
+        let mut tfold = std::time::Duration::ZERO;
+        let tl = std::time::Instant::now();
         let mut j = 0;
         while !ended && j < MAX_PAGES {
             let tf = std::time::Instant::now();
@@ -311,7 +313,9 @@ impl Run<'_, '_> {
             } else {
                 folds += 1;
                 reused.push(false);
+                let tq = std::time::Instant::now();
                 let out = plan_fold(v, items, table_v, marker, &start, fx.clone());
+                tfold += tq.elapsed();
                 crate::planinc::PageRec {
                     start: start.clone(),
                     fx,
@@ -402,10 +406,11 @@ impl Run<'_, '_> {
         }
         if tm {
             eprintln!(
-                "plan: {} items, {} pages ({folds} folded, pre {pre} suf {suf}): list fold {t1:?}, page folds {:?} (fx {tfx:?}), sets {:?}",
+                "plan: {} items, {} pages ({folds} folded, pre {pre} suf {suf}): list fold {t1:?}, page folds {:?} (fx {tfx:?}, folds {tfold:?}, loop {:?}), sets {:?}",
                 items.len(),
                 starts.len(),
                 t2.saturating_sub(t1),
+                tl.elapsed(),
                 t0.elapsed().saturating_sub(t2)
             );
         }
