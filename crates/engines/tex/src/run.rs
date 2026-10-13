@@ -545,8 +545,17 @@ impl<'c, 'a> Run<'c, 'a> {
                 Native::Raw(x) => self.v.render(*x),
                 _ => "?".to_owned(),
             };
+            let cmd = self
+                .cur
+                .tok
+                .as_cs()
+                .map_or_else(|| format!("{:?}", self.cur.tok), |n| n.name().to_owned());
+            let int = match &val {
+                Native::Int(i) => i.to_string(),
+                _ => String::new(),
+            };
             eprintln!(
-                "aux-trace: count0 := {x} global={global} by node {} op {:?}",
+                "aux-trace: count0 := {x}{int} global={global} by node {} op {:?} at \\{cmd}",
                 self.cx.node().raw(),
                 self.cx.op()
             );
