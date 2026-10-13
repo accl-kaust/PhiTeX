@@ -1077,7 +1077,10 @@ impl Graph {
             }
             let n = count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if crate::exec::env_flag!("PHITEX_TEX_TIME") && (n == 1 || n.is_multiple_of(100)) {
-                eprintln!("provider: {:.1} s, {n} answers, last {name}", t0.elapsed().as_secs_f64());
+                eprintln!(
+                    "provider: {:.1} s, {n} answers, last {name}",
+                    t0.elapsed().as_secs_f64()
+                );
             }
             let found = finder(name);
             let hash = file_hash(found.as_ref());

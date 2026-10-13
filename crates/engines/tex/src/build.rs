@@ -726,25 +726,18 @@ impl Run<'_, '_> {
     }
 
     /// A box register changed "at the same level" (§1079 `box(n):=null`,
-    /// §1247): the binding keeps its level; groups closing above that
-    /// level define it again outside them (`lvlfix`).
+    /// §1247): the binding keeps its level and is replaced where it was
+    /// made, so no group saves it and the groups opened above that level
+    /// keep the change at their close ([`Run::modify_at`]).
     pub(crate) fn modify_box_reg(&mut self, n: i32, b: Option<ValueId>) -> R<()> {
         let v = self.v;
         let name = format!("box:{n}");
         let x = self.get(&name)?;
         let lvl = x.map_or(0, |x| crate::val::int_at(v, x, 0));
         let val = v.list(vec![v.int(lvl), b.unwrap_or(ValueId::UNIT)]);
-        let md = self.mode()?;
-        if lvl == 0 {
-            self.set(&name, val, true);
-        } else {
-            self.set(&name, val, false);
-            if lvl < md.depth {
-                let mut fix = self.scope_list("lvlfix", &md)?;
-                fix.push(v.str(&name));
-                self.set_scope_list("lvlfix", &md, fix);
-            }
-        }
+        let base = self.base_mode()?.depth;
+        let f = self.ops.fields.get_at(v, self.cx.values_epoch(), &name);
+        self.modify_at(f, val, lvl, base);
         Ok(())
     }
 

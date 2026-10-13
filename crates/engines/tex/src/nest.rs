@@ -181,6 +181,47 @@ impl Run<'_, '_> {
         l.saved.push((f, prev, false));
     }
 
+    /// A binding of `f` made at group depth `lvl` changed in place
+    /// (§1079, §1247: a box register "at the same level"): the value in
+    /// force is replaced without saving it, since the group that made the
+    /// binding saved what it hid, and the definition is filed with that
+    /// group's definitions, below every group opened since, so their
+    /// closes keep it. `base` is the depth of level 0.
+    pub(crate) fn modify_at(&mut self, f: Field, val: ValueId, lvl: i64, base: i64) {
+        self.own.insert(f, Some(val));
+        self.forget_cats();
+        // the first open group deeper than the binding's level
+        let mut depth = base;
+        let mut at = None;
+        for (i, l) in self.nest.iter().enumerate() {
+            if l.group != 0 {
+                depth += 1;
+                if depth > lvl {
+                    at = Some(i);
+                    break;
+                }
+            }
+        }
+        let d = (f, val, Locality::Local);
+        match at {
+            // the binding is the innermost group's own (or the run's,
+            // outside every group): a definition at this level
+            None => {
+                if !self.in_local_group() {
+                    self.defs.retain(|x| x.0 != f);
+                }
+                self.defs.push(d);
+            }
+            Some(i) => {
+                let pos = self.nest[i].defs_len.min(self.defs.len());
+                self.defs.insert(pos, d);
+                for l in &mut self.nest[i..] {
+                    l.defs_len += 1;
+                }
+            }
+        }
+    }
+
     /// A global definition of `f`: every saved entry for it is inert.
     pub(crate) fn make_inert(&mut self, f: Field) {
         for l in &mut self.nest {
