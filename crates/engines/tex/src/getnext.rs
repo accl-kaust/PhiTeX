@@ -315,14 +315,20 @@ impl Run<'_, '_> {
         }
     }
 
+    /// Whether the input is down to one line that a node boundary cut
+    /// (it does not end its line and nothing of the text follows it), so
+    /// the next sibling's first segment continues it.
+    fn top_line_is_cut(&self) -> bool {
+        self.input.depth() == 1
+            && self.input.text_rest().is_empty()
+            && self.input.top_line().is_some_and(|s| !s.ends)
+    }
+
     /// Whether the first character of the next sibling's text, if it
     /// continues this line, is a letter (§356: a control word's name
     /// goes on).
     fn next_continues_name(&mut self) -> R<bool> {
-        let Some(Seg::Line(last)) = self.input.text_last() else {
-            return Ok(false);
-        };
-        if last.ends {
+        if !self.top_line_is_cut() {
             return Ok(false);
         }
         let Some((op, args)) = self.cx.following(self.pulled) else {
@@ -343,10 +349,7 @@ impl Run<'_, '_> {
     /// Whether the next sibling's text continues this line (the line on
     /// top is the last segment of the text, not ended).
     fn next_is_continuation(&self) -> bool {
-        let Some(Seg::Line(last)) = self.input.text_last() else {
-            return false;
-        };
-        if last.ends || self.input.depth() != 1 {
+        if !self.top_line_is_cut() {
             return false;
         }
         match self.cx.following(self.pulled) {
@@ -417,19 +420,34 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines)]
     fn src_next(&mut self) -> R<Option<Tok>> {
         // §362: a line is read when it is reached
-        if let Some(s) = self.input.top_line_mut()
+        if let Some(s) = self.input.top_line()
             && s.endch == -2
         {
+            let (starts, ends) = (s.starts, s.ends);
+            // §360: `\endlinechar` as it is when the line is read goes
+            // after its last character (an assignment on the line itself
+            // reaches the next line only: `\endlinechar=-1` on a line
+            // still ends that line)
+            let e = if ends {
+                i64::from(self.ipar(crate::fields::Par::endlinechar)?)
+            } else {
+                -1
+            };
             // §362: a line is counted as it begins
-            let starts = s.starts;
-            s.endch = -3;
             if starts {
-                s.state = NEW_LINE;
                 self.lines_entered += 1;
                 self.lines_read += 1;
             }
+            if let Some(s) = self.input.top_line_mut() {
+                if (0..256).contains(&e) {
+                    s.buf.push(u32::try_from(e).unwrap_or(13));
+                }
+                s.endch = e;
+                if starts {
+                    s.state = NEW_LINE;
+                }
+            }
         }
-        self.end_line_char()?;
         loop {
             let (c, state) = {
                 let Some(s) = self.input.top_line_mut() else {
@@ -462,7 +480,7 @@ impl Run<'_, '_> {
                             .is_some_and(|s| s.loc + 2 > s.buf.len());
                         if near_end && self.next_is_continuation() {
                             self.pull()?;
-                            self.join_continuation();
+                            self.join_continuation()?;
                         }
                         if let Some(x) = self.sup_mark(c) {
                             c = x;
@@ -496,7 +514,6 @@ impl Run<'_, '_> {
                 }
             }
             // goto switch
-            self.end_line_char()?;
             let done = self.input.top_line().is_none_or(|s| s.loc >= s.buf.len());
             if done {
                 return Ok(None);
@@ -506,44 +523,44 @@ impl Run<'_, '_> {
 
     /// The line on top is the last segment of the text and a sibling's
     /// first segment continues it: the sibling's segment, just pulled to
-    /// the back of the text, joins the line on top.
-    fn join_continuation(&mut self) {
-        let Some(&top) = self.input.top() else { return };
+    /// the back of the text, joins the line on top. When the join
+    /// completes a line already reached, `\endlinechar` as it is now goes
+    /// after it (§360); it is read before anything changes, so a halt
+    /// there rewinds cleanly.
+    fn join_continuation(&mut self) -> R<()> {
+        let Some(&top) = self.input.top() else {
+            return Ok(());
+        };
         if top.kind != kind::LINE {
-            return;
+            return Ok(());
         }
-        // (the text's next segment is the continuation; take it)
         let at = self.input.text_at;
         if at >= self.input.text.len() {
-            return;
+            return Ok(());
         }
-        if let Seg::Line(next) = &self.input.text[at]
-            && !next.starts
-        {
-            let next = std::mem::replace(&mut self.input.text[at], Seg::Toks(Vec::new()));
-            self.input.text_at += 1;
-            let Seg::Line(next) = next else { return };
-            let line = self.input.line_mut(top);
-            line.buf.extend_from_slice(&next.buf);
-            line.ends = next.ends;
+        let Seg::Line(next) = &self.input.text[at] else {
+            return Ok(());
+        };
+        if next.starts {
+            return Ok(());
         }
-    }
-
-    /// At the end of a segment that ends its line: `\endlinechar` goes
-    /// after it (§360; read here, where the line's end is reached).
-    fn end_line_char(&mut self) -> R<()> {
-        let due = self
-            .input
-            .top_line()
-            .is_some_and(|s| s.ends && s.endch == -3 && s.loc >= s.buf.len());
-        if due {
-            let e = i64::from(self.ipar(crate::fields::Par::endlinechar)?);
-            if let Some(s) = self.input.top_line_mut() {
-                if (0..256).contains(&e) {
-                    s.buf.push(u32::try_from(e).unwrap_or(13));
-                }
-                s.endch = e;
+        let completes = next.ends && self.input.line(top).endch != -2;
+        let e = if completes {
+            i64::from(self.ipar(crate::fields::Par::endlinechar)?)
+        } else {
+            -1
+        };
+        let Seg::Line(next) = self.input.text.remove(at) else {
+            return Ok(());
+        };
+        let line = self.input.line_mut(top);
+        line.buf.extend_from_slice(&next.buf);
+        line.ends = next.ends;
+        if completes {
+            if (0..256).contains(&e) {
+                line.buf.push(u32::try_from(e).unwrap_or(13));
             }
+            line.endch = e;
         }
         Ok(())
     }
@@ -616,7 +633,7 @@ impl Run<'_, '_> {
                     letters && self.next_continues_name()?
                 };
                 if more && self.pull()? {
-                    self.join_continuation();
+                    self.join_continuation()?;
                     continue;
                 }
             }

@@ -46,6 +46,10 @@ pub(crate) struct PagePiece {
     margins: [i32; 3],
     whats: BTreeMap<u32, Whatsit>,
     fonts: Fonts,
+    /// The page as its step wrote it, for the finish to place.
+    rec: phitex_pdf::PageRecord,
+    /// The fonts used on the state the step wrote it on.
+    base: BTreeSet<FontId>,
 }
 
 type PieceMemo = Mutex<FxHashMap<u64, Arc<PagePiece>>>;
@@ -1012,7 +1016,16 @@ pub(crate) fn ship(
         r.param("pdfthreadmargin")?,
     ];
     if in_page_step(r) && !folding(r)? {
-        return ship_apart(r, &p, bx, &side.whats, &resolved, fonts, margins);
+        return ship_apart(
+            r,
+            page.raw(),
+            &p,
+            bx,
+            &side.whats,
+            &resolved,
+            fonts,
+            margins,
+        );
     }
     let (err, shown) = step_forms(r, page, &fonts, |st, forms, fonts| {
         page_params(v, st.params_mut(), &p);
@@ -1068,22 +1081,13 @@ fn page_whatsit(forms: &Forms, whats: &BTreeMap<u32, Whatsit>, h: u32) -> Option
     whats.get(&h).cloned()
 }
 
-/// `pdf_ship_out` of one page on `st` (pdfTeX §750–§771): the page's
-/// parameters set, the page written; the writer's error, if any.
-fn ship_piece(
-    v: &Values,
-    st: &mut PdfState,
-    forms: &Forms,
-    pc: &PagePiece,
-) -> Option<phitex_pdf::PdfError> {
-    // the parameters a write reads, as the fold's step sets them
-    page_params(v, st.params_mut(), &pc.params);
+/// The page's parameters on `st`, as the fold's step sets them.
+fn set_page_params(v: &Values, st: &mut PdfState, params: &[ValueId], margins: [i32; 3]) {
+    page_params(v, st.params_mut(), params);
     let pm = st.params_mut();
-    pm.link_margin = pc.margins[0];
-    pm.dest_margin = pc.margins[1];
-    pm.thread_margin = pc.margins[2];
-    let mut wh = |h: u32, _leaders: bool| page_whatsit(forms, &pc.whats, h);
-    st.ship_out_with(&pc.bx, &pc.fonts, &mut wh).err()
+    pm.link_margin = margins[0];
+    pm.dest_margin = margins[1];
+    pm.thread_margin = margins[2];
 }
 
 /// The page written on its own (no other page's state read): kept as a
@@ -1091,8 +1095,10 @@ fn ship_piece(
 /// written once here, on the state the read-time commands left, so that
 /// its content stream is compressed in parallel with the other pages'
 /// and the hash of what it shows is known.
+#[allow(clippy::too_many_arguments)]
 fn ship_apart(
     r: &mut Run<'_, '_>,
+    page_id: u64,
     p: &[ValueId],
     bx: &BoxNode,
     side_whats: &[ValueId],
@@ -1122,28 +1128,31 @@ fn ship_apart(
             );
         }
     }
-    let pc = PagePiece {
+    let mut pc = PagePiece {
         bx: bx.clone(),
         params: p.to_vec(),
         margins,
         whats,
         fonts,
+        rec: phitex_pdf::PageRecord::default(),
+        base: BTreeSet::new(),
     };
-    let key = phitex_defuse::hash_bytes(
-        phitex_defuse::hash_words(pc.fonts.digest(), &[0x7067_7069_6563_6531]),
-        format!(
-            "{:?}|{:?}|{:?}|{:?}",
-            pc.params
-                .iter()
-                .map(|&x| format!("{:?}", *v.get(x)))
-                .collect::<Vec<_>>(),
-            pc.margins,
-            pc.bx,
-            pc.whats
-        )
-        .as_bytes(),
-    )
-    .max(1);
+    // the key: what the piece is made of, by the values' identities
+    // (interned: equal values, equal ids), not by their bytes
+    let (k0, _) = before(r)?;
+    let maps = r
+        .get_loc(crate::fields::cell::PDF_MAPS)?
+        .map_or(0, ValueId::raw);
+    let pdfmap = r.file("pdftex.map")?.map_or(0, ValueId::raw);
+    let mut words = vec![
+        page_id,
+        k0,
+        maps,
+        pdfmap,
+        u64::from(pc.fonts.space.is_some()),
+    ];
+    words.extend(pc.margins.iter().map(|&m| u64::from(m.cast_unsigned())));
+    let key = phitex_defuse::hash_words(0x7067_7069_6563_6531, &words).max(1);
     // the page written once, apart, on the read-time commands' state
     let (_, a) = before(r)?;
     let (mut st, forms) = if let Some(a) = a {
@@ -1159,7 +1168,14 @@ fn ship_apart(
         let g2u = r.get("pdf:glyphtounicode")?;
         (fresh(v, date, &jobname, g2u), Forms::default())
     };
-    let err = ship_piece(v, &mut st, &forms, &pc);
+    set_page_params(v, &mut st, &pc.params, pc.margins);
+    pc.base = st.fonts_used();
+    let (res, rec) = {
+        let mut wh = |h: u32, _leaders: bool| page_whatsit(&forms, &pc.whats, h);
+        st.ship_recorded(&pc.bx, &pc.fonts, &mut wh)
+    };
+    pc.rec = rec;
+    let err = res.err();
     let (content, w, h) = st.last_page_shown();
     let words = [
         u64::from_ne_bytes(i64::from(w).to_ne_bytes()),
@@ -1184,10 +1200,10 @@ fn ship_apart(
 }
 
 /// The PDF file: the state the read-time commands left (with the pages
-/// folded, when the writer folds them), the pages written apart shipped
-/// on it in order, finished. A page shipped on an equal state gives an
-/// equal state (memo by the two keys), so an edit ships again only from
-/// its first changed page on, compressing nothing already compressed.
+/// folded, when the writer folds them), the pages written apart placed
+/// on it in order (`PdfState::replay_page`: numbered, the content bytes
+/// the step made copied, no walk, no compression), or shipped again
+/// where a page cannot be placed, finished.
 pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<ValueId, Stop> {
     let v = cx.values();
     let k = fin
@@ -1203,7 +1219,7 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
         .into_iter()
         .map(|x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()))
         .collect();
-    let mut a = match start {
+    let a = match start {
         Some(a) => a,
         None if xpages.is_empty() => return Ok(v.str("")),
         None => {
@@ -1223,44 +1239,49 @@ pub(crate) fn finish(cx: &mut Ctx<'_>, fin: &crate::page::FinalState) -> Result<
             })
         }
     };
-    let mut key = k;
+    let t0 = std::time::Instant::now();
+    let mut st = a.st.clone();
+    let mut bytes = a.bytes.clone();
+    let (mut replayed, mut shipped) = (0usize, 0usize);
     for pk in xpages {
-        let next = phitex_defuse::hash_words(key, &[pk, 0x7870_6167_6573]).max(1);
-        let got = states()
+        let Some(pc) = pieces()
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&next)
-            .cloned();
-        a = if let Some(b) = got {
-            b
-        } else {
-            let Some(pc) = pieces()
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(&pk)
-                .cloned()
-            else {
-                return Ok(v.str(""));
-            };
-            let mut st = a.st.clone();
-            let mut bytes = a.bytes.clone();
-            // (the step logged the writer's error when it wrote the page)
-            let _ = ship_piece(v, &mut st, &a.forms, &pc);
-            st.flush(&mut bytes);
-            let b = Arc::new(Fold {
-                st,
-                bytes,
-                forms: a.forms.clone(),
-                bytes_hash: a.bytes_hash,
-            });
-            states()
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(next, b.clone());
-            b
+            .get(&pk)
+            .cloned()
+        else {
+            return Ok(v.str(""));
         };
-        key = next;
+        set_page_params(v, &mut st, &pc.params, pc.margins);
+        let placed = st.replay_page(&pc.rec, &pc.fonts, &pc.base);
+        if let Err(why) = &placed
+            && shipped == 0
+            && crate::exec::env_flag!("PHITEX_TEX_TIME")
+        {
+            eprintln!("pdf pages: page {} shipped again: {why}", replayed + 1);
+        }
+        if placed.is_ok() {
+            replayed += 1;
+        } else {
+            shipped += 1;
+            // (the step logged the writer's error when it wrote the page)
+            let mut wh = |h: u32, _leaders: bool| page_whatsit(&a.forms, &pc.whats, h);
+            let _ = st.ship_out_with(&pc.bx, &pc.fonts, &mut wh);
+        }
     }
+    st.flush(&mut bytes);
+    if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+        eprintln!(
+            "pdf pages: {replayed} placed, {shipped} shipped again, {:?}",
+            t0.elapsed()
+        );
+    }
+    let a = Arc::new(Fold {
+        st,
+        bytes,
+        forms: a.forms.clone(),
+        bytes_hash: a.bytes_hash,
+    });
     let mut st = a.st.clone();
     let int = |cx: &mut Ctx<'_>, f: &str| -> Result<i32, Stop> {
         Ok(fin
