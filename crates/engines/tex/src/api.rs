@@ -1465,6 +1465,55 @@ impl Build {
         out
     }
 
+    /// The critical chain in full, one line per link, last node first:
+    /// the link's cause with what it names (the site that defined the
+    /// field read, the node waited on, the creator, the height a raise
+    /// went to) and the node, each as its operation and text.
+    #[must_use]
+    pub fn critical_chain_lines(&self) -> Vec<String> {
+        use phitex_defuse::Cause;
+        let eng = &self.g.eng;
+        let v = eng.values();
+        let d = |n: Option<phitex_defuse::NodeId>| {
+            n.map_or_else(|| "(unit start)".to_owned(), |n| describe(eng, n))
+        };
+        eng.critical_chain()
+            .into_iter()
+            .enumerate()
+            .map(|(i, (n, c))| {
+                let why = match c {
+                    Cause::Rebind { field, to, .. } => {
+                        format!("Rebind {} to [{}]", field_name(v, field), d(to))
+                    }
+                    Cause::Changed { field, site } => {
+                        format!("Changed {} at [{}]", field_name(v, field), d(site))
+                    }
+                    Cause::Output { of } => format!("Output of [{}]", d(Some(of))),
+                    Cause::Woken { by } => format!("Woken by [{}]", d(Some(by))),
+                    Cause::Loop { field } => format!("Loop {}", field_name(v, field)),
+                    Cause::Environment { field } => {
+                        format!("Environment {}", field_name(v, field))
+                    }
+                    Cause::Structure => "Structure".to_owned(),
+                    Cause::Range { field, from } => {
+                        format!("Range {} from [{}]", field_name(v, field), d(from))
+                    }
+                    Cause::Created { by, from_hint } => format!(
+                        "Created by [{}]{}",
+                        d(by),
+                        from_hint.map_or_else(String::new, |(f, t)| format!(
+                            ", hint {} at [{}]",
+                            field_name(v, f),
+                            d(Some(t))
+                        ))
+                    ),
+                    Cause::Raised { to } => format!("Raised to height {to}"),
+                };
+                format!("{i:4} {why}\n       node [{}]", describe(eng, n))
+            })
+            .collect()
+    }
+
     /// The engine's critical chain, from the highest finished node back:
     /// for each link the node's operation and first argument (shortened),
     /// the cause's kind, and its field if any ([`Engine::critical_chain`]).
