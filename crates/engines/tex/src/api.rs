@@ -1950,7 +1950,10 @@ impl Build {
                             d(Some(t))
                         ))
                     ),
-                    Cause::Raised { to } => format!("Raised to height {to}"),
+                    Cause::Raised { to, by, how } => format!(
+                        "Raised to height {to} by {:?} ({how:?})",
+                        by.map(|n| n.raw() % 100_000)
+                    ),
                 };
                 format!("{i:4} h{h:<5} {why}\n       node [{}]", describe(eng, n))
             })

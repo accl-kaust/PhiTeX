@@ -4,7 +4,7 @@ use std::sync::PoisonError;
 
 use crate::engine::{
     AssumeKind, Effect, End, Engine, EvalError, K_CHAIN, K_ENV, K_FIELD, K_LOOP, K_OUTPUT, Locality, NIL, NodeId, OpId,
-    RunResult, Slot, State, StreamRange, Until, Use, WaitKind, WalkResult, eff_code, eff_kind,
+    RunResult, Slot, State, StreamRange, Suspended, Until, Use, WaitKind, WalkResult, eff_code, eff_kind,
 };
 use crate::hash::{FxHashMap, hash_words};
 use crate::value::{Field, Value, ValueId, Values};
@@ -29,6 +29,7 @@ pub struct Ctx<'a> {
     /// node it read that is not settled yet (0: none). The run goes on with
     /// the current values and is re-done once, not once per such read.
     raise: u32,
+    raise_from: Slot,
     cache: FxHashMap<(u8, u64), Option<ValueId>>,
     /// Walks the gate did for this run (same node, same batch state).
     pub(crate) walks: Vec<(Field, WalkResult)>,
@@ -54,6 +55,11 @@ pub struct Ctx<'a> {
     sig: u64,
     error: Option<EvalError>,
     diagnostics: Vec<ValueId>,
+    /// The operation's resume token ([`Self::park`]); restored for a
+    /// resumed attempt until [`Self::parked`] takes it.
+    token: Option<Box<dyn std::any::Any + Send>>,
+    resumed: bool,
+    pub(crate) restarted: bool,
     /// Text memo hits, misses; application memo hits, misses.
     memo: [std::cell::Cell<u32>; 4],
 }
@@ -68,6 +74,7 @@ impl<'a> Ctx<'a> {
             steps: 0,
             stopped: None,
             raise: 0,
+            raise_from: NIL,
             cache: FxHashMap::default(),
             walks: Vec::new(),
             following_cursor: std::cell::Cell::new((0, 0)),
@@ -90,7 +97,77 @@ impl<'a> Ctx<'a> {
             sig: 0,
             error: None,
             diagnostics: Vec::new(),
+            token: None,
+            resumed: false,
+            restarted: false,
         }
+    }
+
+    /// A run resumed from the state its last attempt stopped with (every
+    /// recorded read verified unchanged by the engine).
+    pub(crate) fn resume(eng: &'a Engine, slot: Slot, fuel: u64, s: Suspended) -> Self {
+        let mut cx = Ctx::new(eng, slot, false, fuel);
+        cx.steps = s.steps;
+        cx.cache = s.cache;
+        cx.uses = s.uses;
+        cx.defs = s.defs;
+        cx.children = s.children;
+        cx.follows = s.follows;
+        cx.env = s.env;
+        cx.publishes = s.publishes;
+        cx.contribs = s.contribs;
+        cx.effect = s.effect;
+        cx.kind = s.kind;
+        cx.diagnostics = s.diagnostics;
+        cx.sig = s.sig;
+        cx.token = Some(s.token.into_inner().unwrap_or_else(PoisonError::into_inner));
+        cx.resumed = true;
+        cx
+    }
+
+    /// Hands the engine a token to give back if this run stops at a read
+    /// and is attempted again: the engine then keeps the run's state (the
+    /// reads so far with their values, the children, continuations,
+    /// definitions, environment, publications, contributions and
+    /// diagnostics made before the stop), verifies on the next attempt
+    /// that every read still resolves to the same settled definition and
+    /// value, and if so starts that attempt from the kept state with
+    /// [`Self::parked`] returning the token: the operation continues at
+    /// the read instead of re-executing what came before (which it must
+    /// not do again: the children and definitions are already there).
+    /// If any read changed, or the node's text did, or the node was re-run
+    /// for a structural reason, the state and the token are dropped and
+    /// the attempt starts from the top. A speculative run never parks.
+    /// Calling it again replaces the token; a run that completes drops it.
+    pub fn park(&mut self, token: Box<dyn std::any::Any + Send>) {
+        self.token = Some(token);
+    }
+
+    /// The token of the attempt this run resumes, once (`None` for a run
+    /// starting from the top). See [`Self::park`].
+    pub fn parked(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+        if self.resumed { self.token.take() } else { None }
+    }
+
+    /// For a resumed run that re-executes from the top anyway: forgets
+    /// what the kept state made (children, continuations, definitions,
+    /// environment, publications, contributions, diagnostics) so the
+    /// re-execution makes them again, and keeps only the reads, which hit
+    /// the cache. Nothing for a run starting from the top.
+    pub fn restart(&mut self) {
+        if !self.resumed {
+            return;
+        }
+        self.children.clear();
+        self.follows.clear();
+        self.defs.clear();
+        self.env.clear();
+        self.publishes.clear();
+        self.contribs.clear();
+        self.diagnostics.clear();
+        self.effect = None;
+        self.kind = None;
+        // The signature holds the reads only, which stay.
     }
 
     /// The value table.
@@ -198,7 +275,10 @@ impl<'a> Ctx<'a> {
         if tn.in_work() {
             self.stop(End::Wait(t, WaitKind::Value))
         } else {
-            self.raise = self.raise.max(tn.height + 1);
+            if tn.height + 1 > self.raise {
+                self.raise = tn.height + 1;
+                self.raise_from = t;
+            }
             Ok(val)
         }
     }
@@ -780,8 +860,9 @@ impl<'a> Ctx<'a> {
         if s.0 > 0 {
             return self.stop(End::WaitRange(f, anchor));
         }
-        if s.1 >= e.level && !self.spec {
-            self.raise = self.raise.max(s.1 + 1);
+        if s.1 >= e.level && !self.spec && s.1 + 1 > self.raise {
+            self.raise = s.1 + 1;
+            self.raise_from = NIL;
         }
         let v = e.acc_fold(n.unit, f, lo, n.label);
         self.watch = Some((f, anchor, v));
@@ -817,13 +898,55 @@ impl<'a> Ctx<'a> {
     pub(crate) fn finish(mut self, r: Result<ValueId, Stop>) -> RunResult {
         let n = self.eng.n(self.slot);
         let follows = self.follows.len();
-        self.children.append(&mut self.follows);
         let end = match (self.stopped, r) {
             (Some(e), _) => e,
-            (None, Ok(_)) if self.raise > 0 => End::Raise(self.raise),
+            (None, Ok(_)) if self.raise > 0 => End::Raise(self.raise, self.raise_from),
             (None, Ok(v)) => End::Output(v),
             (None, Err(_)) => End::Unpredictable,
         };
+        // A non-speculative stop at a read with a token: the state the
+        // next attempt may resume from. Not for runs whose reads the
+        // engine does not re-check one by one (claims, ranges, chains).
+        let resumable = !self.spec
+            && self.token.is_some()
+            && self.watch.is_none()
+            && self.stream.is_none()
+            && self.claim.is_none()
+            && self.assumptions.is_empty()
+            && self
+                .uses
+                .iter()
+                .all(|u| matches!(u.kind, K_FIELD | K_OUTPUT | K_ENV | K_LOOP))
+            && matches!(
+                end,
+                End::Wait(..)
+                    | End::WaitEnv(_)
+                    | End::NeedApp(..)
+                    | End::NeedChild(_)
+                    | End::Gated(..)
+                    | End::GateRaise(..)
+            );
+        let suspended = if resumable {
+            Some(Box::new(Suspended {
+                uses: self.uses.clone(),
+                cache: self.cache.clone(),
+                defs: self.defs.clone(),
+                children: self.children.clone(),
+                follows: self.follows.clone(),
+                env: self.env.clone(),
+                publishes: self.publishes.clone(),
+                contribs: self.contribs.clone(),
+                effect: self.effect,
+                kind: self.kind,
+                diagnostics: self.diagnostics.clone(),
+                sig: self.sig,
+                steps: self.steps,
+                token: std::sync::Mutex::new(self.token.take().expect("a token")),
+            }))
+        } else {
+            None
+        };
+        self.children.append(&mut self.follows);
         let child_heights = if matches!(end, End::Output(_)) && !n.is_app() {
             self.eng.child_heights(self.slot, &self.children)
         } else {
@@ -853,6 +976,7 @@ impl<'a> Ctx<'a> {
             speculative: self.spec,
             end,
             raise: self.raise,
+            raise_from: self.raise_from,
             uses: self.uses,
             defs: self.defs,
             children: self.children,
@@ -871,6 +995,9 @@ impl<'a> Ctx<'a> {
             sig: self.sig,
             error: self.error,
             diagnostics: self.diagnostics,
+            suspended,
+            resumed: self.resumed,
+            restarted: self.restarted,
             memo: self.memo.map(std::cell::Cell::into_inner),
         }
     }

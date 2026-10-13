@@ -1035,11 +1035,76 @@ fn critical_path_is_bounded() {
 
 #[test]
 fn generated_programs_match_the_interpreter() {
+    common::REPLAY_STOPS.store(true, std::sync::atomic::Ordering::Relaxed);
     for (seed, n) in [(1, 1_000), (2, 4_000), (3, 16_000)] {
         let (mut eng, prog) = Program::load(generate(seed, n));
         eng.evaluate(&mut Greedy::default(), &mut Threads(4)).unwrap();
         assert_eq!(prog.result(&eng), reference(&prog.lines), "seed {seed}, {n} lines");
     }
+}
+
+/// Every link of the critical chain lands one below the node it names: a
+/// read's site, a range's last contributor, the node a raise stands above.
+/// A wait's node may have risen since. The chain's top is the critical
+/// path, and it ends only at a creation (or at height 0).
+#[test]
+fn the_critical_chain_falls_by_one_through_reads_ranges_and_raises() {
+    common::REPLAY_STOPS.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut raises = 0;
+    let mut waits = 0;
+    for (seed, n, random) in [(1, 1_000, false), (2, 4_000, false), (3, 2_000, true), (4, 4_000, true)] {
+        let (mut eng, prog) = Program::load(generate(seed, n));
+        let r = if random {
+            eng.evaluate(&mut RandomScheduler::new(seed * 31 + 5, true), &mut Threads(4))
+        } else {
+            eng.evaluate(&mut Greedy::default(), &mut Threads(4))
+        }
+        .unwrap();
+        assert_eq!(prog.result(&eng), reference(&prog.lines), "seed {seed}");
+        raises += r.raises;
+        waits += r.stops;
+        let chain = eng.critical_chain_heights();
+        assert_eq!(chain[0].1, r.critical_path, "seed {seed}: {chain:?}");
+        for w in chain.windows(2) {
+            let (h, cause) = (w[0].1, &w[0].2);
+            let (next, hn) = (w[1].0, w[1].1);
+            match cause {
+                Cause::Changed { site, .. } => {
+                    assert_eq!(*site, Some(next), "seed {seed}: {w:?}");
+                    assert_eq!(hn + 1, h, "seed {seed}: {w:?}");
+                }
+                Cause::Output { of } => {
+                    assert_eq!(*of, next, "seed {seed}: {w:?}");
+                    assert_eq!(hn + 1, h, "seed {seed}: {w:?}");
+                }
+                Cause::Range { from, .. } => {
+                    assert_eq!(*from, Some(next), "seed {seed}: {w:?}");
+                    assert_eq!(hn + 1, h, "seed {seed}: {w:?}");
+                }
+                Cause::Raised { to, by, .. } => {
+                    assert_eq!((*to, *by), (h, Some(next)), "seed {seed}: {w:?}");
+                    assert_eq!(hn + 1, h, "seed {seed}: {w:?}");
+                }
+                Cause::Woken { by } => {
+                    assert_eq!(*by, next, "seed {seed}: {w:?}");
+                    assert!(hn + 1 >= h, "seed {seed}: {w:?}");
+                }
+                Cause::Created { by, from_hint } => {
+                    assert!(
+                        *by == Some(next) || from_hint.map(|(_, t)| t) == Some(next),
+                        "seed {seed}: {w:?}"
+                    );
+                }
+                c => panic!("seed {seed}: {c:?} in a chain"),
+            }
+        }
+        let last = chain.last().unwrap();
+        assert!(
+            last.1 == 0 || matches!(last.2, Cause::Created { .. } | Cause::Raised { by: None, .. }),
+            "seed {seed}: {last:?}"
+        );
+    }
+    assert!(raises > 0 && waits > 0, "raises {raises} waits {waits}");
 }
 
 #[test]
@@ -2168,6 +2233,8 @@ impl defuse::EditSource for Absorber<'_> {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn edits_absorbed_between_steps_give_the_final_texts_result() {
+    // Every statement keeps its state at a stop and resumes from it.
+    common::REPLAY_STOPS.store(true, std::sync::atomic::Ordering::Relaxed);
     let pool: Vec<String> = std::fs::read_to_string("examples/fuzz_pool.txt")
         .expect("pool")
         .lines()
@@ -2243,10 +2310,12 @@ fn edits_absorbed_between_steps_give_the_final_texts_result() {
             let mut k = 1;
             let mut versions = Vec::new();
             let mut resettled = 0;
+            let mut resumed = 0;
             while !a.edits.is_empty() || k == 1 {
                 let r = eval(&mut eng, &mut a, k).unwrap_or_else(|e| panic!("{name} seed {seed}: {e:?}"));
                 versions.push((r.version, r.edits_applied.clone()));
                 resettled += r.resettled;
+                resumed += r.resumed + r.restarted;
                 k += 1;
                 assert!(k <= 5000, "{name} seed {seed}: edits never released");
             }
@@ -2329,6 +2398,11 @@ fn edits_absorbed_between_steps_give_the_final_texts_result() {
                 }
             }
             assert_eq!(resettled, 0, "{name} seed {seed}: corrected reports");
+            // The replaying statements did keep and take up their state.
+            assert!(
+                kind != 0 || seed % 2 == 0 || resumed > 0,
+                "{name} seed {seed}: nothing resumed"
+            );
             let refs: Vec<Vec<u64>> = a.texts.iter().map(|t| reference(&t.0)).collect();
             assert!(!a.fires.is_empty(), "{name} seed {seed}: nothing reported final");
             for f in &a.fires {
