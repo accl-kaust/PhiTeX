@@ -827,6 +827,9 @@ pub struct Stats {
     pub speculations: u64,
     pub confirmations: u64,
     pub mispredictions: u64,
+    /// Speculative runs dropped at a stop (their guess is then blocked
+    /// until its node leaves work).
+    pub spec_stops: u64,
     pub raises: u64,
     /// The most nodes ready at one step, and the speculative runs that
     /// ran out of fuel.
@@ -951,6 +954,7 @@ impl Stats {
         self.speculations += r.speculations;
         self.confirmations += r.confirmations;
         self.mispredictions += r.mispredictions;
+        self.spec_stops += r.spec_stops;
         self.raises += r.raises;
         self.max_ready = self.max_ready.max(r.max_ready);
         self.fuel_outs += r.fuel_outs;
