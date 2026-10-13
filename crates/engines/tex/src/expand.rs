@@ -193,7 +193,7 @@ impl Run<'_, '_> {
     /// its arguments substituted is built in another, then pushed as one
     /// shared list (one allocation a call).
     pub(crate) fn macro_call(&mut self) -> R<()> {
-        let Mean::Macro(m) = self.cur.mean() else {
+        let Mean::Macro(m) = self.cur_mean()? else {
             return Ok(());
         };
         if m.params.is_empty() {
@@ -494,11 +494,11 @@ impl Run<'_, '_> {
             12 => {
                 // §507
                 if self.get_next()? {
-                    let m1 = self.cur.mean();
+                    let m1 = self.cur_mean()?;
                     let t1 = self.cur.tok;
                     let (p, q) = self.cur_cmd_chr_for_ifx(t1, &m1);
                     if self.get_next()? {
-                        let m2 = self.cur.mean();
+                        let m2 = self.cur_mean()?;
                         let t2 = self.cur.tok;
                         let (c2, h2) = self.cur_cmd_chr_for_ifx(t2, &m2);
                         if c2 != p {
@@ -653,7 +653,7 @@ impl Run<'_, '_> {
             }
             3 => {
                 self.get_token()?;
-                let (t, m) = (self.cur.tok, self.cur.mean());
+                let (t, m) = (self.cur.tok, self.cur_mean()?);
                 let (c, h) = (self.cur.cmd, self.cur.chr);
                 let _ = t;
                 self.print_meaning(&mut s, &m, c, h)?;
@@ -886,7 +886,7 @@ impl Run<'_, '_> {
         loop {
             if self.cur.cmd > cmd::OTHER_CHAR
                 || self.cur.chr > 255
-                || self.cur.is_cs() && !matches!(self.cur.mean(), Mean::Char(..))
+                || self.cur.is_cs() && !matches!(self.cur_mean()?, Mean::Char(..))
             {
                 let t = self.cur.tok;
                 self.back_input(t);
