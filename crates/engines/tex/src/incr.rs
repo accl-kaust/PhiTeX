@@ -418,6 +418,21 @@ mod tests {
         );
     }
 
+    /// The cold analysis of the document named by `PHITEX_INCR_DOC`
+    /// only (for a profile).
+    #[test]
+    #[ignore = "a measurement (a document given by path)"]
+    fn incr_cold_doc() {
+        let Some(path) = std::env::var_os("PHITEX_INCR_DOC") else {
+            return;
+        };
+        let b = std::fs::read(path).expect("the document");
+        let text: String = b.iter().map(|&c| char::from(c)).collect();
+        let mut inc = Incr::new(crate::hints::no_defs().clone());
+        inc.set_text(&text);
+        eprintln!("incr: cold, {} chunks", inc.chunks.len());
+    }
+
     #[test]
     fn chunks_follow_conditionals() {
         let mut inc = Incr::new(crate::hints::no_defs().clone());
