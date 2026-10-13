@@ -87,18 +87,89 @@ pub(crate) struct Bound {
     /// Prefixes of fields (`cs:name` for `\csname name…`).
     pub prefixes: Vec<String>,
     /// Bytes and the catcode each was read with.
-    pub cats: Vec<(u8, u8)>,
+    pub cats: Cats,
     /// Meaning fields (`cs:name`, `act:code`) and the class assumed: 0
     /// a primitive, 1 anything defined.
     pub means: Vec<(String, u8)>,
     /// The state fields (prefixes) the command's class may set, or
     /// `None`: every state head ([`state_prefixes`]).
-    pub state: Option<Vec<String>>,
+    pub state: Option<Vec<&'static str>>,
     /// The command opens and closes no scope (its effect is `None`).
     pub no_scope: bool,
     /// For a slice: the following siblings its run takes, when the text
     /// says so exactly (`Some(0)`: none); `None` when only the run knows.
     pub claim: Option<usize>,
+}
+
+/// Bytes and the catcode each was read with, in the order first met,
+/// each pair once: the list, and by byte the catcode it came with
+/// first, so adding is mostly a compare, not a search.
+#[derive(Clone, Debug)]
+pub(crate) struct Cats {
+    list: Vec<(u8, u8)>,
+    /// By byte below 128, the catcode it was first added with (16:
+    /// none); a byte added again with another catcode is searched for.
+    first: [u8; 128],
+}
+
+impl Default for Cats {
+    fn default() -> Cats {
+        Cats {
+            list: Vec::new(),
+            first: [16; 128],
+        }
+    }
+}
+
+impl PartialEq for Cats {
+    fn eq(&self, o: &Cats) -> bool {
+        self.list == o.list
+    }
+}
+
+impl Eq for Cats {}
+
+impl std::ops::Deref for Cats {
+    type Target = [(u8, u8)];
+    fn deref(&self) -> &[(u8, u8)] {
+        &self.list
+    }
+}
+
+impl FromIterator<(u8, u8)> for Cats {
+    fn from_iter<I: IntoIterator<Item = (u8, u8)>>(it: I) -> Cats {
+        let mut c = Cats::default();
+        for p in it {
+            c.add(p);
+        }
+        c
+    }
+}
+
+impl Cats {
+    /// Adds the pair unless it is there (a byte below 128, a catcode
+    /// below 16; any other pair is searched for).
+    pub(crate) fn add(&mut self, (b, k): (u8, u8)) {
+        if b < 128 && k < 16 {
+            let f = &mut self.first[usize::from(b)];
+            if *f == k {
+                return;
+            }
+            if *f == 16 {
+                *f = k;
+                self.list.push((b, k));
+                return;
+            }
+        }
+        if !self.list.contains(&(b, k)) {
+            self.list.push((b, k));
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.list.clear();
+        self.first = [16; 128];
+    }
 }
 
 /// The state fields (heads: a family's prefix with its colon, or a
@@ -142,26 +213,34 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // registers, §1123)
         // (the assignments between it and its character, §1123, are
         // commands of the text or of the calling body: their own rows)
-        "accent" => &["box:", "lvlfix"],
+        // (the only register material sets is `\\box255`, when the page
+        // builder runs inline and fires the routine, §1091, §1094, §1012;
+        // `\\unhbox`, `\\box` and `\\lastbox` void their own, §1110, §1079)
+        "accent" => &["box:255", "lvlfix"],
         "char" | "discretionary" | "-" | "hskip" | "hfil" | "hfill" | "hss" | "hfilneg"
-        | "vrule" | "indent" | "noindent" | "unhbox" | "unhcopy" | "box" | "copy" | "leaders"
-        | "cleaders" | "xleaders" => &["box:", "lvlfix"],
+        | "vrule" | "indent" | "noindent" | "unhcopy" | "copy" | "leaders" | "cleaders"
+        | "xleaders" => &["box:255", "lvlfix"],
+        "unhbox" | "box" => &["box:", "lvlfix"],
         // vertical material and removals (§1056, §1105, §1080)
-        "vskip" | "vfil" | "vfill" | "vss" | "vfilneg" | "kern" | "hrule" | "unvbox"
-        | "unvcopy" | "unskip" | "unpenalty" | "unkern" | "lastbox" => &["box:"],
-        // math only (§1136-§1194)
+        "vskip" | "vfil" | "vfill" | "vss" | "vfilneg" | "kern" | "hrule" | "unvcopy"
+        | "unskip" | "unpenalty" | "unkern" => &["box:255"],
+        "unvbox" | "lastbox" => &["box:"],
+        // math only (§1136-§1194): the incompleat noad is the run's own
         "mathord" | "mathop" | "mathbin" | "mathrel" | "mathopen" | "mathclose" | "mathpunct"
         | "mathinner" | "underline" | "overline" | "mathaccent" | "radical" | "displaystyle"
         | "textstyle" | "scriptstyle" | "scriptscriptstyle" | "left" | "right" | "middle"
         | "mathchar" | "delimiter" | "displaylimits" | "limits" | "nolimits" | "nonscript"
         | "mathchoice" | "eqno" | "leqno" | "over" | "atop" | "above" | "overwithdelims"
-        | "atopwithdelims" | "abovewithdelims" => &["inc"],
+        | "atopwithdelims" | "abovewithdelims" => &[],
         // opening a group: a level of the run's own nest (§1063)
         "begingroup" | "bgroup" => &[],
         // closing a group: the box's badness, its level fix, inserts (§1100, §1079)
         // and the box a `\\setbox` or box context gets (§1077 box_end)
         // (an output routine's `}` resumes the page builder, §1100)
-        "endgroup" | "egroup" => &["badness", "lvlfix", "inspen", "box:"],
+        // (a box's `}` sets a register only in a `\\setbox`'s context,
+        // §1075, and that command's row names it; a `}` closing a box
+        // begun before the node is a fragment's, [`fragment_context`])
+        "endgroup" | "egroup" => &["badness", "lvlfix", "inspen"],
         // arguments expanded while read: a conditional may end (§366, §498)
         "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["cs:"],
         "mark" => &[],
@@ -170,8 +249,9 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "write" | "openout" | "closeout" => &["wopen:", "write:"],
         // (`\\immediate` of a pdfTeX object too, pdfTeX §1528)
         "immediate" => &["wopen:", "write:", "pdf:"],
-        // (§1099: `normal_paragraph` in the insert's own group; §1100)
-        "insert" | "vadjust" => NORMAL_PARAGRAPH,
+        // (§1099: `normal_paragraph` runs in the insert's own group, its
+        // resets undone at the group's end, §283, §1100)
+        "insert" | "vadjust" => &[],
         // (§638 `dead_cycles:=0`; §1374 the page's `\\write`, `\\openout`,
         // `\\closeout` whatsits, expanded, §1370; pdfTeX's at shipout)
         "shipout" => &["deadcycles", "write:", "wopen:", "pdf:"],
@@ -181,9 +261,8 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         "aftergroup" => &[],
         // boxes (§1083 begin_box, §1077 \\setbox); a box whose braces close in
         // the same node is packaged there and sets \\\\badness, §1086, §649)
-        "hbox" | "vbox" | "vtop" | "vcenter" | "setbox" | "vsplit" => {
-            &["box:", "lvlfix", "badness", "markclasses"]
-        }
+        "hbox" | "vbox" | "vtop" | "vcenter" => &["lvlfix", "badness", "markclasses"],
+        "setbox" | "vsplit" => &["box:", "lvlfix", "badness", "markclasses"],
         // conditionals (§498-§510)
         "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode"
         | "ifinner" | "ifvoid" | "ifhbox" | "ifvbox" | "ifcat" | "ifcase" | "iftrue"
@@ -302,7 +381,6 @@ const NORMAL_PARAGRAPH: &[&str] = &[
 /// a display's sizes and the lines of the paragraph before it (§1145,
 /// §1146), and its end's resumption (§1200).
 const MATH_SHIFT: &[&str] = &[
-    "inc",
     "pg:",
     "param:fam",
     "param:predisplaysize",
@@ -367,12 +445,12 @@ fn head_of_pass_field(f: &str) -> Option<&'static str> {
 }
 
 /// Adds heads to a state set (`None`: every head already).
-fn add_heads(st: &mut Option<Vec<String>>, heads: Option<&[&str]>) {
+fn add_heads(st: &mut Option<Vec<&'static str>>, heads: Option<&[&'static str]>) {
     match (st.as_mut(), heads) {
         (Some(v), Some(hs)) => {
-            for h in hs {
-                if !v.iter().any(|x| x == h) {
-                    v.push((*h).to_owned());
+            for &h in hs {
+                if !v.contains(&h) {
+                    v.push(h);
                 }
             }
         }
@@ -381,8 +459,40 @@ fn add_heads(st: &mut Option<Vec<String>>, heads: Option<&[&str]>) {
     }
 }
 
-fn add_head(st: &mut Option<Vec<String>>, h: &str) {
-    add_heads(st, Some(&[h]));
+fn add_head(st: &mut Option<Vec<&'static str>>, h: &'static str) {
+    if let Some(v) = st.as_mut()
+        && !v.contains(&h)
+    {
+        v.push(h);
+    }
+}
+
+/// [`add_head`] for a head made at run time (a parameter's field, a
+/// decoded hint's): interned once ([`head`]).
+fn add_head_dyn(st: &mut Option<Vec<&'static str>>, h: &str) {
+    if let Some(v) = st.as_mut()
+        && !v.contains(&h)
+    {
+        v.push(head(h));
+    }
+}
+
+/// A state head as a static string: the heads are few (tex.web's
+/// families and cells, the parameters' fields), so each distinct one
+/// made at run time is leaked once and a bound holds no strings.
+fn head(h: &str) -> &'static str {
+    type Heads = Mutex<phitex_defuse::FxHashSet<&'static str>>;
+    static H: OnceLock<Heads> = OnceLock::new();
+    let mut set = H
+        .get_or_init(Heads::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(&x) = set.get(h) {
+        return x;
+    }
+    let x: &'static str = Box::leak(h.to_owned().into_boxed_str());
+    set.insert(x);
+    x
 }
 
 /// The heads of every field a run may set besides the control sequences:
@@ -433,7 +543,7 @@ impl Hint {
             None => MayDefine::Any,
             Some(b) => {
                 let mut ps: Vec<String> = match &b.state {
-                    Some(st) => st.clone(),
+                    Some(st) => st.iter().map(|&h| h.to_owned()).collect(),
                     None => state_prefixes().to_vec(),
                 };
                 ps.extend(b.names.iter().cloned());
@@ -514,7 +624,7 @@ impl Hint {
         }
         match &b.state {
             None => true,
-            Some(st) => st.iter().any(|h| f.starts_with(h.as_str())),
+            Some(st) => st.iter().any(|h| f.starts_with(*h)),
         }
     }
 }
@@ -570,7 +680,7 @@ fn decode_bound<'s>(mut it: impl Iterator<Item = &'s str>) -> Bound {
         .collect();
     let state = match it.next().unwrap_or("*") {
         "*" => None,
-        st => Some(items(st)),
+        st => Some(items(st).iter().map(|h| head(h)).collect()),
     };
     let no_scope = it.next() == Some("N");
     let claim = it.next().and_then(|c| c.parse().ok());
@@ -675,7 +785,7 @@ fn may_set(h: &Hint, name: &str) -> bool {
         None => true,
         Some(b) => match &b.state {
             None => true,
-            Some(st) => st.iter().any(|x| name.starts_with(x.as_str())),
+            Some(st) => st.iter().any(|x| name.starts_with(*x)),
         },
     }
 }
@@ -731,7 +841,7 @@ impl TextHints {
     fn at_until(&self, off: usize, end: usize) -> Hint {
         let k = self.starts.partition_point(|&s| s < off);
         let mut acc: Option<Bound> = None;
-        let mut first: Option<Hint> = None;
+        let mut first: Option<usize> = None;
         // (the first unbounded command, and whether every unbounded one
         // has a guess: the span's guess is then the union)
         let mut any: Option<Hint> = None;
@@ -746,7 +856,7 @@ impl TextHints {
             }
             let h = &*self.hints[a - 1];
             if first.is_none() {
-                first = Some(h.clone());
+                first = Some(a - 1);
             }
             let part = if let Some(b) = &h.bound {
                 b
@@ -768,11 +878,16 @@ impl TextHints {
             return h;
         }
         match (first, acc) {
-            (Some(mut h), Some(b)) => {
-                h.bound = Some(b);
-                h
+            (Some(i), Some(b)) => {
+                let h = &*self.hints[i];
+                Hint {
+                    bound: Some(b),
+                    cause: h.cause.clone(),
+                    excerpt: h.excerpt.clone(),
+                    guess: h.guess.clone(),
+                }
             }
-            (Some(h), None) => h,
+            (Some(i), None) => (*self.hints[i]).clone(),
             // (a slice of blanks only: a space in vertical mode does
             // nothing, §1045)
             (None, _) if end != usize::MAX && off < end => Hint {
@@ -1381,9 +1496,9 @@ fn union(a: &mut Bound, b: &Bound) {
             a.prefixes.push(p.clone());
         }
     }
-    for c in &b.cats {
-        if !a.cats.contains(c) {
-            a.cats.push(*c);
+    for &c in b.cats.iter() {
+        {
+            a.cats.add(c);
         }
     }
     for m in &b.means {
@@ -1402,7 +1517,7 @@ fn union(a: &mut Bound, b: &Bound) {
         (Some(sa), Some(sb)) => {
             for h in sb {
                 if !sa.contains(h) {
-                    sa.push(h.clone());
+                    sa.push(*h);
                 }
             }
         }
@@ -1647,7 +1762,7 @@ impl Analysis<'_> {
     /// has any catcode but a letter's), a character, a brace, a space.
     /// Nothing of an atom read under another regime than the command's
     /// first (a change the command itself makes, as the pass predicted).
-    fn cats_of(&self, first: usize, a: usize, out: &mut Vec<(u8, u8)>) {
+    fn cats_of(&self, first: usize, a: usize, out: &mut Cats) {
         let Some(at) = self.atoms().get(a) else {
             return;
         };
@@ -1677,9 +1792,8 @@ impl Analysis<'_> {
             if b < 128
                 && (b == 9 || (32..127).contains(&b))
                 && let Some(c) = r.catcode(b)
-                && !out.contains(&(b, c))
             {
-                out.push((b, c));
+                out.add((b, c));
             }
         }
     }
@@ -1766,7 +1880,7 @@ impl Analysis<'_> {
                 return true;
             }
         }
-        st.is_none_or(|st| st.iter().any(|x| x == head))
+        st.is_none_or(|st| st.contains(&head))
     }
 
     /// Whether the atom at `a` follows `\\global` (spaces between).
@@ -1902,7 +2016,7 @@ impl Analysis<'_> {
             && !self.after_global(a)
             && let Some(st) = &mut b.state
         {
-            st.retain(|h| h != "font");
+            st.retain(|h| *h != "font");
         }
         b.no_scope = ok && self.no_scope(a);
         if ok {
@@ -2053,7 +2167,12 @@ impl Analysis<'_> {
 
     /// The state the commands `calls` (of a body the text defines) may
     /// set.
-    fn calls_state_split(&self, calls: &[String], outer: &[String], st: &mut Option<Vec<String>>) {
+    fn calls_state_split(
+        &self,
+        calls: &[String],
+        outer: &[String],
+        st: &mut Option<Vec<&'static str>>,
+    ) {
         let (out, inner): (Vec<String>, Vec<String>) =
             calls.iter().cloned().partition(|c| outer.contains(c));
         self.calls_state(&out, st);
@@ -2069,7 +2188,7 @@ impl Analysis<'_> {
             Some(hs) => {
                 let keep: Vec<&str> = hs
                     .iter()
-                    .map(String::as_str)
+                    .copied()
                     .filter(|h| !group_local_head(h))
                     .collect();
                 add_heads(st, Some(&keep));
@@ -2077,7 +2196,7 @@ impl Analysis<'_> {
         }
     }
 
-    fn calls_state(&self, calls: &[String], st: &mut Option<Vec<String>>) {
+    fn calls_state(&self, calls: &[String], st: &mut Option<Vec<&'static str>>) {
         for c in calls {
             if st.is_none() {
                 return;
@@ -2119,7 +2238,7 @@ impl Analysis<'_> {
     /// register is assigned (§1224); a character or a `\\chardef` is
     /// appended, or is a brace or tab the `\\let` copied (§1038, §1063,
     /// §1100, §789); an alias is its target's class.
-    fn defined_state(&self, name: &str, may_start_par: bool, st: &mut Option<Vec<String>>) {
+    fn defined_state(&self, name: &str, may_start_par: bool, st: &mut Option<Vec<&'static str>>) {
         match self.shape(name) {
             Some(pass::Shape::Quantity('f')) => add_head(st, "font"),
             // (a register's name assigns that register, §1224: its own
@@ -2134,8 +2253,10 @@ impl Analysis<'_> {
                 };
                 add_heads(st, Some(&[fam, "aftertoken"]));
             }
+            // (a character, or a brace whose `}` sets only the register
+            // its `\\setbox` names, §1075, as the `egroup` row)
             Some(pass::Shape::Quantity(_)) => {
-                add_heads(st, Some(&["box:", "lvlfix", "badness", "inspen"]));
+                add_heads(st, Some(&["box:255", "lvlfix", "badness", "inspen"]));
                 if may_start_par {
                     add_heads(st, Some(&["pg:"]));
                 }
@@ -2228,7 +2349,7 @@ impl Analysis<'_> {
                 }
             } else if let Some(p) = self.param_field(f) {
                 if let Some(p) = p {
-                    add_head(&mut b.state, &p);
+                    add_head_dyn(&mut b.state, &p);
                 }
             } else if let Some(h) = head_of_pass_field(f) {
                 if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
@@ -2244,7 +2365,7 @@ impl Analysis<'_> {
                 }
             } else if let Some(p) = self.param_field(f) {
                 if let Some(p) = p {
-                    add_head(&mut b.state, &p);
+                    add_head_dyn(&mut b.state, &p);
                 }
             } else if let Some(h) = head_of_pass_field(f) {
                 if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
@@ -2469,7 +2590,7 @@ fn add_defs_with(an: &Analysis<'_>, ds: &[Def], prefixes: bool, b: &mut Bound) {
     for d in ds {
         if let Some(p) = an.param_field(&d.field) {
             if let Some(p) = p {
-                add_head(&mut b.state, &p);
+                add_head_dyn(&mut b.state, &p);
             }
         } else if let Some(h) = head_of_pass_field(&d.field) {
             if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
@@ -2521,10 +2642,20 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         }
     }
     let mut prev_char = false;
+    let blank = Arc::new(Hint::default());
     #[allow(clippy::needless_range_loop)]
     for a in 0..an.p.atoms.len() {
         let at = &an.p.atoms[a];
         starts.push(at.start);
+        let ch = matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb);
+        // (an atom inside a run of characters, or a space, is skipped
+        // whatever its hint: no span reads it, so none is made)
+        if (ch && prev_char) || at.kind == AtomKind::Space {
+            hints.push(blank.clone());
+            skip.push(true);
+            prev_char = ch;
+            continue;
+        }
         let h = if an.claimed[a] && at.kind == AtomKind::Cs && !prim_operand[a] {
             an.hint_run(a)
         } else {
@@ -2534,14 +2665,10 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         // read, not run: `\\headline={\\tenrm…}`)
         let unbounded_operand = an.claimed[a] && h.bound.is_none();
         hints.push(Arc::new(h));
-        let ch = matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb);
         // (a command a macro is only guessed to read still runs in the
         // slice: its rows count in the union)
         skip.push(
-            (ch && prev_char)
-                || (an.claimed[a]
-                    && (at.kind != AtomKind::Cs || prim_operand[a] || unbounded_operand))
-                || at.kind == AtomKind::Space,
+            an.claimed[a] && (at.kind != AtomKind::Cs || prim_operand[a] || unbounded_operand),
         );
         prev_char = ch;
     }
@@ -2633,7 +2760,7 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
             if !outside {
                 for b in [h.bound.as_mut(), h.guess.as_mut()].into_iter().flatten() {
                     if let Some(st) = &mut b.state {
-                        st.retain(|x| x != head);
+                        st.retain(|x| *x != head);
                     }
                 }
             }
@@ -2736,6 +2863,26 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
             b.claim = (!reads_on && an.slice_claims_nothing(k0, e)).then_some(0);
         }
         slice_hints.push(intern(&h));
+    }
+    // (`PHITEX_HINTS_DIGEST`: one line per text, a hash of every hint
+    // a span reads (the atoms not skipped) and every slice's, encoded:
+    // the check that a rework of the analysis keeps its answers byte
+    // for byte)
+    if crate::exec::env_flag!("PHITEX_HINTS_DIGEST") {
+        let mut d = phitex_defuse::hash_bytes(0, text.as_bytes());
+        for (h, &skip) in t.hints.iter().zip(&t.skip) {
+            if !skip {
+                d = phitex_defuse::hash_bytes(d, h.encode().as_bytes());
+            }
+        }
+        for h in &slice_hints {
+            d = phitex_defuse::hash_bytes(d, h.as_bytes());
+        }
+        eprintln!(
+            "hints digest: {d:016x} ({} atoms, {} slices)",
+            t.hints.len(),
+            slice_hints.len()
+        );
     }
     if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
         let open = slice_hints
@@ -3088,6 +3235,8 @@ fn fragment_context(b: &mut Bound) {
     // (a `}` among them may end the output routine: the page's state
     // and the held-over contributions are restored, §1100)
     add_heads(&mut b.state, Some(&["deadcycles"]));
+    // (and a box a `\\setbox` before it began, §1075)
+    add_head(&mut b.state, "box:");
     add_heads(&mut b.state, Some(NORMAL_PARAGRAPH));
     add_head(&mut b.state, "pg:");
     add_head(&mut b.state, "aftertoken");
@@ -3262,7 +3411,7 @@ pub(crate) fn verify(r: &mut Run<'_, '_>, h: &Hint) -> R<Option<String>> {
     let Some(b) = &h.bound else {
         return Ok(None);
     };
-    for &(byte, cat) in &b.cats {
+    for &(byte, cat) in b.cats.iter() {
         let got = r.cat(u32::from(byte))?;
         if got != cat {
             return Ok(Some(format!(
@@ -3317,7 +3466,7 @@ pub(crate) fn check_defs(r: &mut Run<'_, '_>, h: &Hint) -> Option<String> {
         };
         if !is_cs_field(&name) {
             match &b.state {
-                Some(st) if !st.iter().any(|p| name.starts_with(p.as_str())) => {
+                Some(st) if !st.iter().any(|p| name.starts_with(*p)) => {
                     return Some(format!(
                         "undeclared definition of {name} by {:?} (state {st:?}, {})",
                         h.excerpt, h.cause
@@ -3454,7 +3603,7 @@ mod tests {
         // after finds it reset already)
         let t = "\\parshape 1 0pt 100pt text\n\\input x\nmore text\\par\nthird\\par\n";
         let text = analyse(t, FileKind::Document, no_defs());
-        let state = |needle: &str| -> Vec<String> {
+        let state = |needle: &str| -> Vec<&'static str> {
             let k = text
                 .slices
                 .iter()
@@ -3466,8 +3615,8 @@ mod tests {
                 .and_then(|b| b.state)
                 .expect("a state row")
         };
-        assert!(state("more").iter().any(|h| h == "parshape"));
-        assert!(!state("third").iter().any(|h| h == "parshape"));
+        assert!(state("more").contains(&"parshape"));
+        assert!(!state("third").contains(&"parshape"));
     }
 
     #[test]
@@ -3486,25 +3635,22 @@ mod tests {
         // (`\\par` is bounded: a paragraph's end, §1094-§1096; its
         // `normal_paragraph` resets only what a command since set, §1070)
         let par = st(0).expect("a state row");
-        assert!(par.iter().any(|h| h == "pg:") && !par.iter().any(|h| h == "parshape"));
+        assert!(par.contains(&"pg:") && !par.contains(&"parshape"));
         // the run after it: `\\prevgraf` if a command after it in its
         // text ends the paragraph, and `\\afterassignment`'s row (the
         // region runs on to its end); no dead head (`par:`, `if:`,
         // `lopen:`, `page:`) is ever declared
-        assert_eq!(
-            st(10).as_deref(),
-            Some(&["pg:".to_owned(), "aftertoken".to_owned()][..])
-        );
+        assert_eq!(st(10).as_deref(), Some(&["pg:", "aftertoken"][..]));
         for off in [0, 5, 10] {
             let v = st(off).expect("some");
             assert!(
                 !v.iter()
-                    .any(|h| ["par:", "if:", "lopen:", "page:"].contains(&h.as_str())),
+                    .any(|h| ["par:", "if:", "lopen:", "page:"].contains(h)),
                 "{off}: {v:?}"
             );
         }
         let d = text.at(t.find("\\def").unwrap()).bound.expect("bounded");
-        assert!(d.state.expect("some").contains(&"aftertoken".to_owned()));
+        assert!(d.state.expect("some").contains(&"aftertoken"));
         assert_eq!(d.names, vec!["cs:y".to_owned()]);
     }
 
