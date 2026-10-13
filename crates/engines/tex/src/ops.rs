@@ -223,6 +223,7 @@ impl Operation for Exec {
             .and_then(|b| b.claim)
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let args = cx.args();
         let hint = crate::hints::hint_of_args(cx.values(), &args);
         run_node_parking(cx, ops(&self.0), true, |r| {
@@ -295,6 +296,7 @@ impl Operation for Put {
         Some(out)
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let args = cx.args();
         let o = ops(&self.0);
         let v = cx.values();
@@ -371,6 +373,7 @@ impl Operation for Dvi {
         Some(Vec::new())
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
         crate::page::dvi(cx, &o)
     }
@@ -414,6 +417,7 @@ impl Operation for Files {
         Some(Vec::new())
     }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let v = cx.values();
         let names: Vec<String> = cx
             .use_field(v.field("loopfiles"))?
