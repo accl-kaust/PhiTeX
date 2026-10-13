@@ -498,3 +498,38 @@ fn oscillating_written_file() {
         "{msgs:#?}"
     );
 }
+
+/// A one-word edit on a generated plain document of 40 paragraphs:
+/// the edited region, its page's `brk`, the page step and the writer
+/// re-run (the plan too: it folds the list), no loop round, and the PDF
+/// equals a cold build of the edited text. (On the last page: the
+/// pages after an edit re-run while `pdf:state` chains them.)
+#[test]
+fn one_word_edit_reruns_little() {
+    let fx = common::fixtures().join("dvi");
+    let words = [
+        "galley", "proof", "margin", "printer", "ligature", "kern", "reader", "spacing",
+    ];
+    let mut src = String::from("\\pdfoutput=1 \\hsize=6in \\vsize=8.5in \\parindent=20pt\n");
+    for p in 0..40 {
+        for w in 0..90 {
+            src.push_str(words[(p * 7 + w * 3 + w / 5) % words.len()]);
+            src.push(if w == 89 { '.' } else { ' ' });
+        }
+        src.push_str("\n\n");
+    }
+    src.push_str("\\bye\n");
+    let prelude = common::plain();
+    let opts = || common::options("./w.tex", "w", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    assert!(b.is_pdf());
+    let at = src.match_indices("\n\n").nth(37).expect("a paragraph").0 + 2;
+    let text = format!("{}Q{}", &src[..at], &src[at + 1..]);
+    b.edit(&text);
+    let (runs, rounds) = (b.stats.nodes_run, b.stats.loop_rounds);
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "edit differs from cold: {d:?}");
+    assert!(rounds <= 1, "{rounds} loop rounds");
+    assert!(runs <= 5, "{runs} nodes run");
+}
