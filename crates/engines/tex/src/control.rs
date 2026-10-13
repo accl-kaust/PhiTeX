@@ -1106,23 +1106,19 @@ impl Run<'_, '_> {
             Value::List(xs) => xs.get(at).copied(),
             _ => None,
         });
-        match (line, lines) {
-            (Some(l), Some(lines)) => {
-                let next = v.list(vec![v.int(2), lines, v.int(pos + 1)]);
-                self.set(field, next, true);
-                Some(str_of(v, l))
-            }
-            _ => {
-                self.set(field, ValueId::UNIT, true);
-                None
-            }
+        if let (Some(l), Some(lines)) = (line, lines) {
+            let next = v.list(vec![v.int(2), lines, v.int(pos + 1)]);
+            self.set(field, next, true);
+            Some(str_of(v, l))
+        } else {
+            self.set(field, ValueId::UNIT, true);
+            None
         }
     }
 
     /// `read_toks` (§482–§486): the lines of stream `n` up to balanced
     /// braces.
     fn read_toks(&mut self, n: i32) -> R<Vec<Tok>> {
-        let v = self.v;
         let m = if (0..=15).contains(&n) { n } else { 16 };
         let field = format!("read:{m}");
         let mut out = Vec::new();
