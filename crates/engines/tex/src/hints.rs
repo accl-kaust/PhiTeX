@@ -931,6 +931,24 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
             k += 1;
         }
     }
+    if crate::exec::env_flag!("PHITEX_SLICES_TRACE") {
+        for (k, a) in p.atoms.iter().enumerate() {
+            eprintln!(
+                "slices: {k} {:?} {:?} depth {} ifd {} inside {} claimed {} operand {} par {}",
+                a.kind,
+                &text[a.start..a.end],
+                depth[k],
+                ifd[k],
+                inside[k],
+                claimed[k],
+                operand[k],
+                par_at[k]
+            );
+        }
+        for it in &p.items {
+            eprintln!("slices: item {:?} {}..{} {:?}", it.name, it.atom, it.end, it.hints.implicit);
+        }
+    }
     let mut starts: Vec<usize> = vec![0];
     let mut prev_char = false;
     for (k, a) in p.atoms.iter().enumerate() {
@@ -2611,16 +2629,16 @@ mod tests {
     #[test]
     fn control_space_after_a_macro_is_a_region() {
         let t = "\\def\\hello{Hello}\n\\hello\\ world.\n\\bye\n";
-        let an = Analysis::new(t, FileKind::Document, no_defs().clone());
-        for (k, a) in an.p.atoms.iter().enumerate() {
-            eprintln!("{k} {:?} {:?} claimed {}", a.kind, &t[a.start..a.end], an.claimed[k]);
-        }
-        for it in &an.p.items {
-            eprintln!("item {} {}..{} {:?}", it.name, it.atom, it.end, it.hints.implicit);
-        }
+        // (under the plain prelude's definitions, as a build reads it)
+        let fx = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../oracle/fixtures/dvi/plaintext.tex");
+        let plain = std::fs::read_to_string(fx).expect("plaintext.tex");
+        let mut d = pass::Definitions::new();
+        d.harvest(&plain, kind_of(&plain, FileKind::Package), 0);
+        let defs: Defs = Arc::new(d);
+        let an = Analysis::new(t, FileKind::Document, defs);
         let (sl, pars) = slices_of(t, &an.p, FileKind::Document);
         eprintln!("{sl:?} {pars:?}");
-        let h = t.find("\\hello\\").expect("call");
+        let h = t.find("world").expect("world");
         let k = sl.iter().position(|x| x.0 <= h && h < x.1).expect("a slice");
         assert!(pars[k], "{sl:?} {pars:?}");
     }
