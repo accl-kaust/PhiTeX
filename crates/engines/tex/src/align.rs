@@ -9,7 +9,7 @@
 //! the entry's nodes before a \span, the row so far, its adjustments,
 //! omitted, alignment id]`; `\noalign` `[alignment id]`.
 
-use phitex_defuse::{Brackets, Effect, ValueId};
+use phitex_defuse::ValueId;
 use phitex_typeset::align::{
     AlignColumn, TAB_SKIP, column_widths, pack_entry, pack_row, prototype, set_alignment,
 };
@@ -159,6 +159,17 @@ impl Run<'_, '_> {
     /// The innermost entry's kind extra (`cur_align`).
     fn cur_cell(&mut self) -> R<Option<Vec<ValueId>>> {
         let v = self.v;
+        // the run's own levels first (innermost out), then the engine's
+        // scopes below them
+        let is_cell = |xs: &[ValueId]| xs.first().map(|&t| str_of(v, t)).as_deref() == Some("cell");
+        if let Some(l) = self
+            .nest
+            .iter()
+            .rev()
+            .find(|l| l.group == group::ALIGN && is_cell(&l.extra))
+        {
+            return Ok(Some(l.extra.clone()));
+        }
         let mut k = self.scope_kind()?;
         while let Some(kind) = k.filter(|&x| x != ValueId::UNIT) {
             let xs = list_of(v, kind);
@@ -182,7 +193,6 @@ impl Run<'_, '_> {
     /// `init_align` (§774–§784) in vertical mode.
     pub(crate) fn init_align(&mut self, md: &Mode) -> R<()> {
         let v = self.v;
-        let asid = self.node_raw();
         let saved = if self.align_open()? {
             self.astate()?
         } else {
@@ -207,8 +217,8 @@ impl Run<'_, '_> {
             v.int(i64::from(spec.1)),
             v.int(saved),
         ];
-        let kind = self.kind_value(md, group::ALIGN, asid, asid, -1, extra)?;
-        self.open_scope_here(kind);
+        // the alignment: a level of the nest owning the rows' list
+        let asid = self.push_list(-1, group::ALIGN, extra);
         let pd = self.prev_depth(md)?;
         let m = v.list(vec![v.int(crate::nodes::T_PD), v.int(i64::from(pd))]);
         self.append(asid, m);
@@ -316,10 +326,8 @@ impl Run<'_, '_> {
             match self.cur.cmd {
                 cmd::NO_ALIGN => {
                     self.scan_left_brace()?;
-                    let sid = self.node_raw();
-                    let kind =
-                        self.kind_value(md, group::NO_ALIGN, sid, md.lid, -1, vec![v.int(md.lid)])?;
-                    self.open_scope_here(kind);
+                    // §785: a group sharing the alignment's list
+                    self.push_group(-1, md.lid, group::NO_ALIGN, vec![v.int(md.lid)]);
                     return self.normal_paragraph();
                 }
                 cmd::RIGHT_BRACE => return self.fin_align(md),
@@ -333,7 +341,6 @@ impl Run<'_, '_> {
                         &tab_glue(pre.tab0),
                         &Side::default(),
                     )]);
-                    let sid = self.node_raw();
                     let extra = vec![
                         v.str("cell"),
                         v.int(0),
@@ -344,8 +351,7 @@ impl Run<'_, '_> {
                         v.int(i64::from(omit)),
                         v.int(md.lid),
                     ];
-                    let kind = self.kind_value(md, group::ALIGN, sid, sid, -102, extra)?;
-                    self.open_scope_here(kind);
+                    self.push_list(-102, group::ALIGN, extra);
                     return Ok(());
                 }
             }
@@ -409,27 +415,17 @@ impl Run<'_, '_> {
         }
         let (items, _) = self.list_items(md.lid)?;
         prefix.extend(items);
+        // the entry's level closes (its items read above) and the next
+        // column's opens
         let next = |r: &mut Self, extra: Vec<ValueId>| -> R<()> {
-            let sid = r.node_raw();
-            let mut outer = md.clone();
-            outer.depth -= 1;
-            let cur = r.scope_kind()?.unwrap_or(ValueId::UNIT);
-            let parent = list_of(r.v, cur).get(5).copied().unwrap_or(ValueId::UNIT);
-            let k = r.kind_with_parent(&outer, group::ALIGN, sid, sid, -102, extra, parent);
-            r.effect = Effect::Scope(Brackets {
-                closes: 1,
-                opens: 1,
-                before: false,
-                kind: Some(k),
-                kind_pending: false,
-            });
+            r.pop_level();
+            r.push_list(-102, group::ALIGN, extra);
             Ok(())
         };
         if kind == SPAN_CODE {
             // the entry goes on into the next column
             // REDUCE-GAP: tex.web keeps the entry's save level across
             // \span; here the next column is a group of its own
-            self.unsave_extras(md)?;
             let omit = self.next_col(asid, col + 1)?;
             let extra = vec![
                 v.str("cell"),
@@ -460,7 +456,6 @@ impl Run<'_, '_> {
         for a in &adj {
             adjust.push(nodes::encode(v, a, &side));
         }
-        self.unsave_extras(md)?;
         if kind >= CR_CODE {
             // §799 fin_row
             let mut s2 = Side::default();
@@ -470,8 +465,7 @@ impl Run<'_, '_> {
                 .collect();
             let view = self.font_view(&rl)?;
             let r = pack_row(rl, true, &view, &pp);
-            self.effect = Effect::Close;
-            let amd = self.outer_mode(md)?;
+            let amd = self.close_group(md)?;
             let rv = nodes::encode(v, &Node::Unset(r), &s2);
             self.append_to_vlist(&amd, rv)?;
             for a in adjust {
@@ -507,8 +501,7 @@ impl Run<'_, '_> {
 
     /// The `}` of `\noalign` (§1133).
     pub(crate) fn noalign_end(&mut self, md: &Mode) -> R<()> {
-        self.effect = Effect::Close;
-        self.unsave_extras(md)?;
+        self.close_group(md)?;
         self.push_toks(vec![Tok::cs("\u{10FFFE}alignpeek")]);
         Ok(())
     }
@@ -569,20 +562,15 @@ impl Run<'_, '_> {
         // slice; the offset is 0
         let out = set_alignment(list, &proto, true, 0, &view);
         let pd = self.prev_depth(md)?;
-        self.effect = Effect::Close;
-        self.unsave_extras(md)?;
+        let outer = self.close_group(md)?;
         let open = self.int("align:open")?;
         self.set("align:open", v.int((open - 1).max(0)), true);
         self.set_astate(saved);
-        let outer = self.outer_mode(md)?;
         for n in &out {
             let y = nodes::encode(v, n, &side);
             self.append(outer.lid, y);
         }
         self.set_prev_depth(&outer, pd);
-        if outer.m == 1 {
-            self.build_page_mark(&outer)?;
-        }
         Ok(())
     }
 }
