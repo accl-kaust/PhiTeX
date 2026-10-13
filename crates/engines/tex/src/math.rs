@@ -848,6 +848,7 @@ impl Run<'_, '_> {
                 opens: 1,
                 before: false,
                 kind: Some(kind),
+                kind_pending: false,
             });
             return Ok(());
         }
@@ -1073,6 +1074,7 @@ impl Run<'_, '_> {
                 opens: 0,
                 before: false,
                 kind: None,
+                kind_pending: false,
             })
         };
         self.unsave_extras(dmd)?;

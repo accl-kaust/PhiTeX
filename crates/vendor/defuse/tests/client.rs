@@ -343,12 +343,14 @@ impl Operation for Toy5 {
                 opens: 1,
                 before: true,
                 kind: None,
+                kind_pending: false,
             }),
             "C" => Effect::Scope(Brackets {
                 closes: 1,
                 opens: 1,
                 before: false,
                 kind: None,
+                kind_pending: false,
             }),
             "E" => Effect::Close,
             _ => Effect::None,
@@ -1117,4 +1119,123 @@ fn a_claim_made_by_the_run_itself_does_not_rerun_the_claimer() {
     eng.evaluate_sequential().expect("after the edit");
     assert_eq!(TAKER_RUNS.load(std::sync::atomic::Ordering::Relaxed), 2);
     assert!(eng.check_invariants().is_empty(), "{:?}", eng.check_invariants());
+}
+
+/// `["d", k]`: outputs `k` and emits a diagnostic; `["r", k]` reads the
+/// output of the `k`-th node of the unit (by its id passed as an arg).
+struct Diag;
+
+impl Operation for Diag {
+    fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(Vec::new())
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let a = cx.args();
+        let v = cx.values();
+        let k = a.get(1).copied().unwrap_or(ValueId::UNIT);
+        let msg = v.str("careful");
+        cx.diagnostic(msg);
+        Ok(k)
+    }
+}
+
+/// A run's diagnostics are readable once the node is done, under every
+/// policy, and a node that is not done has none.
+#[test]
+fn a_runs_diagnostics_are_kept_with_its_result() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Diag));
+    let u = eng.new_unit();
+    let d = eng.values().str("d");
+    let ints: Vec<ValueId> = (0..40).map(|i| eng.values().int(i)).collect();
+    let nodes: Vec<NodeId> = ints.iter().map(|&k| eng.push(u, op, vec![d, k])).collect();
+    assert_eq!(eng.diagnostics(nodes[0]), &[]);
+    eng.evaluate(
+        &mut defuse::Greedy::speculative(defuse::Speculation::All, 64),
+        &mut defuse::Sequential,
+    )
+    .expect("evaluate");
+    let careful = eng.values().str("careful");
+    for &n in &nodes {
+        assert_eq!(eng.diagnostics(n), &[careful], "{n:?}");
+    }
+    let hundred = eng.values().int(100);
+    eng.replace(nodes[3], op, vec![d, hundred]);
+    eng.evaluate_sequential().expect("evaluate");
+    assert_eq!(eng.diagnostics(nodes[3]), &[careful]);
+    assert_eq!(eng.output(nodes[3]), Some(hundred));
+    eng.remove(nodes[3]);
+    assert_eq!(eng.diagnostics(nodes[3]), &[]);
+}
+
+/// `["open", k]` opens a scope after itself whose kind `k` it sets when it
+/// runs; `["kind"]` outputs the kind of its scope; `["val", x]` outputs
+/// `x`; `["read"]` outputs what `v` is bound to.
+struct Kinds;
+
+impl Operation for Kinds {
+    fn defs(&self, a: &[ValueId], v: &Values) -> Option<Vec<(Field, Locality)>> {
+        Some(match tag(v, a).as_str() {
+            "val" => vec![(v.field("v"), Locality::Local)],
+            _ => Vec::new(),
+        })
+    }
+    fn effect(&self, a: &[ValueId], v: &Values) -> defuse::Effect {
+        match tag(v, a).as_str() {
+            "open" => defuse::Effect::Scope(defuse::Brackets {
+                opens: 1,
+                kind_pending: true,
+                ..defuse::Brackets::default()
+            }),
+            _ => defuse::Effect::None,
+        }
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let a = cx.args();
+        let v = cx.values();
+        match tag(v, &a).as_str() {
+            "open" => {
+                let k = a[1];
+                cx.set_kind(k);
+                Ok(k)
+            }
+            "kind" => Ok(cx.scope_kind()?.unwrap_or(ValueId::UNIT)),
+            "val" => {
+                let x = a[1];
+                cx.define(v.field("v"), x);
+                Ok(x)
+            }
+            _ => Ok(cx.use_field(v.field("v"))?.unwrap_or(ValueId::UNIT)),
+        }
+    }
+}
+
+/// A static opener whose kind the run sets: readers of the kind wait for
+/// the opener's run (a definition-set wait, not a scope-effect one), a
+/// reader of anything else inside the scope waits for nothing, and the
+/// kind follows the opener's text.
+#[test]
+fn a_static_opener_sets_its_kind_when_it_runs() {
+    let mut eng = Engine::new();
+    let op = eng.register(Arc::new(Kinds));
+    let u = eng.new_unit();
+    let v = eng.values();
+    let (open, kind, val, read) = (v.str("open"), v.str("kind"), v.str("val"), v.str("read"));
+    let (doc, list, one) = (v.str("doc"), v.str("list"), v.int(1));
+    let _ = eng.push(u, op, vec![val, one]);
+    let opener = eng.push(u, op, vec![open, doc]);
+    let k = eng.push(u, op, vec![kind]);
+    let r = eng.push(u, op, vec![read]);
+    let rep = eng.evaluate_sequential().expect("evaluate");
+    assert_eq!(eng.output(k), Some(doc));
+    assert_eq!(eng.output(r), Some(one));
+    // The kind reader waited on the opener's run; nothing waited on a
+    // scope effect (the brackets were known from the text).
+    let kinds: Vec<&str> = rep.waits_by_kind.iter().map(|w| w.0).collect();
+    assert!(!kinds.contains(&"scope effect"), "{:?}", rep.waits_by_kind);
+    assert!(rep.top_waited.iter().any(|w| w.0 == opener), "{:?}", rep.top_waited);
+    eng.replace(opener, op, vec![open, list]);
+    let rep = eng.evaluate_sequential().expect("evaluate");
+    assert_eq!(eng.output(k), Some(list));
+    assert!(rep.nodes_run <= 2, "{rep:?}");
 }

@@ -6,8 +6,8 @@ mod common;
 use common::interp::{interpret, interpret_env};
 use common::{Program, SECTION, Threads, env_values, generate, generate_with};
 use defuse::{
-    Cause, Engine, EvalError, Field, Greedy, Limits, NodeId, RandomScheduler, Report, Rng, Sequential, Speculation,
-    ValueId, WaitOn,
+    Cause, Engine, EvalError, Field, Greedy, Limits, NodeId, RandomScheduler, Report, Rng, Sequential, Settled,
+    Speculation, ValueId, WaitOn,
 };
 
 fn lines(src: &[&str]) -> Vec<String> {
@@ -26,6 +26,12 @@ fn load(src: &[&str]) -> (Engine, Program, Report) {
 }
 
 /// The sequential interpreter's result: the reference.
+fn refs_of(lines: &[String]) -> Vec<String> {
+    let (mut e, p) = Program::load(lines.to_vec());
+    e.evaluate_sequential().expect("cold");
+    p.render(&e)
+}
+
 fn reference(lines: &[String]) -> Vec<u64> {
     interpret(lines).expect("interpreter")
 }
@@ -379,11 +385,17 @@ fn a_stream_claim_ends_at_the_first_node_of_a_class_after_unfolding() {
     eval(&mut eng, &prog);
     assert_eq!(out(&eng, &prog, 0), "[1 2 3 5 4]");
     assert_eq!(out(&eng, &prog, 6), "[1 2 3 5 4]");
-    // Without any, it would take the reader of its own result: each run
-    // feeds the next, which the run budget ends, naming the claimer.
+    // Without any, it would take the reader of its own result: each
+    // waits above the other, which the idle-round budget ends, naming the
+    // claimer among the waiters.
     prog.set_line(&mut eng, 5, "6".into());
     let e = eng.evaluate_sequential().expect_err("a claim that feeds itself");
-    assert!(matches!(e, EvalError::RunawayNode { runs: 65, .. }), "{e}");
+    match e {
+        EvalError::NoProgress { waiters, .. } => {
+            assert!(waiters.iter().any(|w| w.node == prog.nodes[0]), "{waiters:?}");
+        }
+        e => panic!("{e}"),
+    }
 }
 
 #[test]
@@ -432,7 +444,8 @@ fn a_stream_claim_follows_its_range_through_label_renumbering() {
     // The delimiter goes: the range runs on to the next delimiter.
     let mark = prog.lines.iter().position(|l| l == "mark a").unwrap();
     prog.set_line(&mut eng, mark, "6".into());
-    assert!(matches!(eng.evaluate_sequential(), Err(EvalError::RunawayNode { .. })));
+    let r = eng.evaluate_sequential();
+    assert!(matches!(r, Err(EvalError::NoProgress { .. })), "{r:?}");
 }
 
 #[test]
@@ -922,6 +935,16 @@ fn wrong_prediction_is_corrected() {
         .unwrap_or_else(|e| panic!("{e:?}"));
     assert_eq!(&prog.render(&eng)[..4], ["5", "6", "7", "8"]);
     assert!(r.mispredictions > 0, "{r:?}");
+    // The refutations are counted by the field whose assumed definition
+    // changed, and per node.
+    let by_field: u64 = r.refuted_by_field.iter().map(|c| c.1).sum();
+    assert!(by_field > 0 && by_field <= r.mispredictions, "{r:?}");
+    assert!(r.refuted_by_field.windows(2).all(|w| w[0].1 >= w[1].1), "{r:?}");
+    assert!(
+        r.refuted_nodes > 0 && u64::from(r.refutations_max) <= r.mispredictions,
+        "{r:?}"
+    );
+    assert!(r.refuted_nodes <= r.mispredictions, "{r:?}");
 }
 
 #[test]
@@ -2096,6 +2119,23 @@ struct Absorber<'a> {
     /// twice as many calls).
     release: usize,
     held: usize,
+    /// Every marked node reported final, and per version the text and
+    /// its nodes then (version 0: the loaded text).
+    fires: Vec<Settled>,
+    texts: Vec<(Vec<String>, Vec<NodeId>)>,
+}
+
+impl Absorber<'_> {
+    fn edit_log_text(&self) -> Vec<String> {
+        self.prog.edit_log.iter().map(|e| format!("{e:?}")).collect()
+    }
+
+    fn mark_all(&mut self, eng: &mut Engine) {
+        for &n in &self.prog.nodes {
+            eng.mark(n);
+        }
+        self.texts.push((self.prog.lines.clone(), self.prog.nodes.clone()));
+    }
 }
 
 impl defuse::EditSource for Absorber<'_> {
@@ -2111,8 +2151,14 @@ impl defuse::EditSource for Absorber<'_> {
         let e = self.edits.pop_front().expect("an edit");
         common::shrink::apply(eng, self.prog, &e);
         self.applied += 1;
+        self.mark_all(eng);
         // The client's version: the edits applied so far.
         Some(self.applied as u64)
+    }
+
+    fn settled(&mut self, _: &Engine, items: &[Settled]) -> bool {
+        self.fires.extend_from_slice(items);
+        true
     }
 }
 
@@ -2120,6 +2166,7 @@ impl defuse::EditSource for Absorber<'_> {
 /// fresh evaluation of the final text gives, under every scheduler, and
 /// the report says which version each step saw.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn edits_absorbed_between_steps_give_the_final_texts_result() {
     let pool: Vec<String> = std::fs::read_to_string("examples/fuzz_pool.txt")
         .expect("pool")
@@ -2189,12 +2236,17 @@ fn edits_absorbed_between_steps_give_the_final_texts_result() {
                 applied: 0,
                 release,
                 held: 0,
+                fires: Vec::new(),
+                texts: Vec::new(),
             };
+            a.mark_all(&mut eng);
             let mut k = 1;
             let mut versions = Vec::new();
+            let mut resettled = 0;
             while !a.edits.is_empty() || k == 1 {
                 let r = eval(&mut eng, &mut a, k).unwrap_or_else(|e| panic!("{name} seed {seed}: {e:?}"));
                 versions.push((r.version, r.edits_applied.clone()));
+                resettled += r.resettled;
                 k += 1;
                 assert!(k <= 5000, "{name} seed {seed}: edits never released");
             }
@@ -2206,6 +2258,129 @@ fn edits_absorbed_between_steps_give_the_final_texts_result() {
             // Each batch carries the client's tag; tags never decrease.
             let tags: Vec<u64> = versions.iter().flat_map(|v| v.1.iter().map(|b| b.0)).collect();
             assert!(tags.windows(2).all(|w| w[0] < w[1]), "{name} seed {seed}: {tags:?}");
+            // Each single edit, applied to a cold evaluation of the
+            // previous text, matches the interpreter (the reports at the
+            // intermediate versions are checked against it below).
+            for (v, e) in a.prog.edit_log.clone().iter().enumerate() {
+                let (mut e1, mut p1) = Program::load(a.texts[v].0.clone());
+                e1.evaluate_sequential().expect("cold");
+                common::shrink::apply(&mut e1, &mut p1, e);
+                e1.evaluate_sequential().expect("after the edit");
+                assert_eq!(p1.lines, a.texts[v + 1].0, "{name} seed {seed}: text {}", v + 1);
+                if p1.result(&e1) != reference(&p1.lines) {
+                    std::fs::create_dir_all("target/single-edit-failure").expect("dir");
+                    std::fs::write("target/single-edit-failure/program.txt", a.texts[v].0.join("\n") + "\n")
+                        .expect("w");
+                    std::fs::write(
+                        "target/single-edit-failure/edits.txt",
+                        common::shrink::edits_text(std::slice::from_ref(e)),
+                    )
+                    .expect("w");
+                }
+                assert_eq!(
+                    p1.result(&e1),
+                    reference(&p1.lines),
+                    "{name} seed {seed}: single edit {v} -> version {} ({e:?})",
+                    v + 1
+                );
+            }
+            // A node reported final at a version has the output the
+            // interpreter gives for the text at that version, and no
+            // report was ever corrected at its version.
+            if resettled != 0 {
+                let mut seen: std::collections::BTreeMap<(NodeId, u64), Vec<ValueId>> =
+                    std::collections::BTreeMap::default();
+                for f in &a.fires {
+                    seen.entry((f.node, f.version)).or_default().push(f.output);
+                }
+                for (&(n, v), outs) in &seen {
+                    if outs.len() > 1 {
+                        let (lines, nodes) = &a.texts[usize::try_from(v).expect("version")];
+                        let i = nodes.iter().position(|&x| x == n);
+                        eprintln!(
+                            "{name} seed {seed}: node {n:?} version {v} line {i:?} {:?}: {:?}\ntext:\n{}",
+                            i.map(|i| lines[i].clone()),
+                            outs.iter().map(|&o| eng.values().render(o)).collect::<Vec<_>>(),
+                            lines.join("\n")
+                        );
+                    }
+                }
+                let order: Vec<String> = a.edit_log_text();
+                eprintln!("edits:\n{}", order.join("\n"));
+                let bad: Vec<NodeId> = seen.iter().filter(|(_, o)| o.len() > 1).map(|(k, _)| k.0).collect();
+                for n in bad {
+                    let hist: Vec<String> = a
+                        .fires
+                        .iter()
+                        .filter(|f| f.node == n)
+                        .map(|f| format!("v{} {}", f.version, eng.values().render(f.output)))
+                        .collect();
+                    let expect: Vec<String> = a
+                        .texts
+                        .iter()
+                        .enumerate()
+                        .map(|(v, (lines, nodes))| {
+                            nodes.iter().position(|&x| x == n).map_or("-".into(), |i| {
+                                format!("v{v} {} = {} (line {i})", lines[i], refs_of(lines)[i])
+                            })
+                        })
+                        .collect();
+                    eprintln!("history of {n:?}: {hist:?}\nexpected: {expect:#?}");
+                }
+            }
+            assert_eq!(resettled, 0, "{name} seed {seed}: corrected reports");
+            let refs: Vec<Vec<u64>> = a.texts.iter().map(|t| reference(&t.0)).collect();
+            assert!(!a.fires.is_empty(), "{name} seed {seed}: nothing reported final");
+            for f in &a.fires {
+                let v = usize::try_from(f.version).expect("version");
+                let (lines, nodes) = &a.texts[v];
+                let i = nodes
+                    .iter()
+                    .position(|&n| n == f.node)
+                    .unwrap_or_else(|| panic!("{name} seed {seed}: {f:?} is not a line of version {v}"));
+                if f.output.raw() != refs[v][i] {
+                    let hist: Vec<String> = a
+                        .fires
+                        .iter()
+                        .filter(|g| g.node == f.node)
+                        .map(|g| format!("v{} {}", g.version, eng.values().render(g.output)))
+                        .collect();
+                    let expect: Vec<String> = a
+                        .texts
+                        .iter()
+                        .enumerate()
+                        .map(|(v, (lines, nodes))| {
+                            nodes.iter().position(|&x| x == f.node).map_or("-".into(), |i| {
+                                format!("v{v} {} = {} (line {i})", lines[i], refs_of(lines)[i])
+                            })
+                        })
+                        .collect();
+                    eprintln!(
+                        "node {:?} history: {hist:?}\nexpected: {expect:#?}\nloops: {:?}\ntext:\n{}",
+                        f.node,
+                        a.prog.loops,
+                        lines.join("\n")
+                    );
+                }
+                assert_eq!(
+                    f.output.raw(),
+                    refs[v][i],
+                    "{name} seed {seed}: line {i} of version {v} ({:?}) reported {:?}",
+                    lines[i],
+                    eng.values().render(f.output)
+                );
+            }
+            // The final text: every line reported at the last version.
+            let last_fired: std::collections::BTreeSet<NodeId> =
+                a.fires.iter().filter(|f| f.version == 30).map(|f| f.node).collect();
+            for (i, n) in prog.nodes.iter().enumerate() {
+                if eng.output(*n).is_some() {
+                    assert!(
+                        last_fired.contains(n),
+                        "{name} seed {seed}: line {i} not reported at version 30"
+                    );
+                }
+            }
             let got = prog.result(&eng);
             assert_eq!(
                 got,
@@ -2237,4 +2412,150 @@ fn a_loop_back_field_without_publishers_returns_to_its_initial_value() {
     prog.insert_line(&mut eng, 3, "endlist".to_string());
     eval(&mut eng, &prog);
     assert_eq!(out(&eng, &prog, 1), "4");
+}
+
+/// Reports marked nodes final as they come, with the absorb call each
+/// report came before.
+#[derive(Default)]
+struct Recorder {
+    calls: usize,
+    fires: Vec<(usize, Settled)>,
+}
+
+impl defuse::EditSource for Recorder {
+    fn absorb(&mut self, _: &mut Engine) -> Option<u64> {
+        self.calls += 1;
+        None
+    }
+
+    fn settled(&mut self, _: &Engine, items: &[Settled]) -> bool {
+        self.fires.extend(items.iter().map(|&s| (self.calls, s)));
+        true
+    }
+}
+
+/// A marked node is reported final, with the text's version, once the
+/// evaluation's level passes it: the first node of a chain before the
+/// evaluation ends, the last one at its end. Every marked node is
+/// reported again at a new version, and after an edit with its new
+/// output; nothing is reported twice for one version and output.
+#[test]
+fn marked_nodes_are_reported_final_as_the_evaluation_passes_them() {
+    let (mut eng, mut prog) = Program::load(lines(&["x = 3", "y = x + 1", "z = y + 1"]));
+    for &n in &prog.nodes {
+        eng.mark(n);
+    }
+    eng.set_version(7);
+    let mut rec = Recorder::default();
+    let r = eng
+        .evaluate_absorbing(&mut Greedy::default(), &mut Sequential, &mut rec)
+        .expect("evaluate");
+    assert_eq!(prog.result(&eng), reference(&prog.lines));
+    assert_eq!((r.settled, r.resettled), (3, 0));
+    let order: Vec<NodeId> = rec.fires.iter().map(|f| f.1.node).collect();
+    assert_eq!(order, prog.nodes, "{:?}", rec.fires);
+    assert!(rec.fires.iter().all(|f| f.1.version == 7), "{:?}", rec.fires);
+    assert!(rec.fires[0].0 < rec.fires[2].0, "x before the end: {:?}", rec.fires);
+    assert_eq!(rec.fires[0].0, 2, "x at the second step: {:?}", rec.fires);
+    assert!(
+        rec.fires[2].0 < rec.calls,
+        "z before the last absorb call: {:?}",
+        rec.fires
+    );
+    for (i, &n) in prog.nodes.iter().enumerate() {
+        assert_eq!(Some(rec.fires[i].1.output), eng.output(n));
+    }
+    assert_eq!(eng.values().render(rec.fires[2].1.output), "5");
+    // The same version again: nothing new.
+    let mut again = Recorder::default();
+    let r = eng
+        .evaluate_absorbing(&mut Greedy::default(), &mut Sequential, &mut again)
+        .expect("evaluate");
+    assert_eq!(r.settled, 0);
+    assert_eq!(again.fires, Vec::new());
+    // A new version: every marked node, the outputs unchanged.
+    eng.set_version(8);
+    let mut v8 = Recorder::default();
+    let r = eng
+        .evaluate_absorbing(&mut Greedy::default(), &mut Sequential, &mut v8)
+        .expect("evaluate");
+    assert_eq!((r.settled, r.resettled), (3, 0));
+    assert!(v8.fires.iter().all(|f| f.1.version == 8), "{:?}", v8.fires);
+    assert_eq!(
+        v8.fires.iter().map(|f| f.1.output).collect::<Vec<_>>(),
+        rec.fires.iter().map(|f| f.1.output).collect::<Vec<_>>()
+    );
+    // An edit: new outputs, at the new version.
+    prog.set_line(&mut eng, 0, "x = 10".to_string());
+    eng.set_version(9);
+    let mut v9 = Recorder::default();
+    let r = eng
+        .evaluate_absorbing(&mut Greedy::default(), &mut Sequential, &mut v9)
+        .expect("evaluate");
+    assert_eq!(prog.result(&eng), reference(&prog.lines));
+    assert_eq!((r.settled, r.resettled), (3, 0));
+    assert_eq!(
+        v9.fires
+            .iter()
+            .map(|f| eng.values().render(f.1.output))
+            .collect::<Vec<_>>(),
+        ["10", "11", "12"]
+    );
+    // Unmarked nodes are not reported; a source that does not take the
+    // reports leaves them to `take_settled`.
+    eng.unmark(prog.nodes[2]);
+    eng.set_version(10);
+    let r = eng.evaluate_sequential().expect("evaluate");
+    assert_eq!(r.settled, 2);
+    let kept = eng.take_settled();
+    assert_eq!(kept.iter().map(|s| s.node).collect::<Vec<_>>(), prog.nodes[..2]);
+    assert!(kept.iter().all(|s| s.version == 10));
+    assert_eq!(eng.take_settled(), Vec::new());
+}
+
+/// `mark_op` marks every node an operation creates from then on, and an
+/// edit queue carries marks and the reports between threads.
+#[test]
+fn an_edit_queue_carries_marks_and_the_reports_of_final_nodes() {
+    let (mut eng, prog) = Program::load(lines(&["x = 3", "y = x + 1"]));
+    let queue = defuse::EditQueue::new();
+    let mut q = queue.clone();
+    queue.push(
+        defuse::Edit::Mark {
+            node: prog.nodes[1],
+            on: true,
+        },
+        1,
+    );
+    let r = eng
+        .evaluate_absorbing(&mut Greedy::default(), &mut Sequential, &mut q)
+        .expect("evaluate");
+    assert_eq!((r.version, r.settled), (1, 1));
+    let got = queue.take_settled();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!((got[0].node, got[0].version), (prog.nodes[1], 1));
+    assert_eq!(eng.values().render(got[0].output), "4");
+    assert_eq!(queue.take_settled(), Vec::new());
+}
+
+/// A range reader anchored on a previous sibling reads from the unit's
+/// start once that sibling is removed.
+#[test]
+fn a_range_reader_whose_anchor_is_removed_reads_from_the_start() {
+    let (mut eng, mut prog, _) = load(&["emit x2_3 + 82", "page", "page"]);
+    assert_eq!(out(&eng, &prog, 2), "[0 0]");
+    prog.remove_line(&mut eng, 1);
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 1), "[1 0]");
+}
+
+/// A range reader anchored on a previous sibling chosen by its text
+/// re-anchors when that sibling's text changes.
+#[test]
+fn a_range_reader_whose_anchor_is_replaced_re_anchors() {
+    let (mut eng, mut prog, _) = load(&["emit g21 + 84", "page", "page"]);
+    assert_eq!(out(&eng, &prog, 2), "[0 0]");
+    prog.set_line(&mut eng, 1, "s = fold.state".into());
+    eval(&mut eng, &prog);
+    assert_eq!(out(&eng, &prog, 2), "[1 0]");
 }
