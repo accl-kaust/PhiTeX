@@ -1942,6 +1942,15 @@ impl<'c, 'a> Run<'c, 'a> {
                 if self.claim_rest || self.closed_scope() {
                     return Ok(());
                 }
+                // (one scope per node, `Effect::Scope` carrying one kind:
+                // a region in vertical mode inside one group of its own
+                // that is about to open another leaves the first to the
+                // engine here, and the rest of its input follows inside)
+                if self.can_leave_scope() && self.nest[0].mode.abs() == 1 && self.next_opens_group()
+                {
+                    self.leave_scope()?;
+                    return Ok(());
+                }
             }
             // a region that ends with one group of its own still open
             // (an environment's `\begin`, a macro's `\begingroup` or
@@ -1949,17 +1958,7 @@ impl<'c, 'a> Run<'c, 'a> {
             // leaves it to the engine as the scope the following regions
             // run in (`Run::leave_scope`); more than one, or a text that
             // said it opens no scope, reads on
-            if self.doc
-                && self.conds.is_empty()
-                && self.effect == Effect::None
-                && self.nest.len() == 1
-                && !self.nest[0].owns
-                && matches!(
-                    self.nest[0].group,
-                    crate::val::group::SIMPLE | crate::val::group::SEMI_SIMPLE
-                )
-                && !crate::hints::effect_none(self.v, &self.cx.args())
-            {
+            if self.can_leave_scope() {
                 self.leave_scope()?;
                 return Ok(());
             }
@@ -1985,6 +1984,49 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             return Ok(());
         }
+    }
+
+    /// Whether the run is a document region with exactly one group of
+    /// its own open (sharing the list below it), nothing else open, no
+    /// scope effect yet, and a text that does not say it opens none: the
+    /// group can be left to the engine as a scope (`Run::leave_scope`).
+    fn can_leave_scope(&self) -> bool {
+        self.doc
+            && self.conds.is_empty()
+            && self.effect == Effect::None
+            && self.nest.len() == 1
+            && !self.nest[0].owns
+            && matches!(
+                self.nest[0].group,
+                crate::val::group::SIMPLE | crate::val::group::SEMI_SIMPLE
+            )
+            && !crate::hints::effect_none(self.v, &self.cx.args())
+    }
+
+    /// Whether the text the run reads next begins (after blanks) with a
+    /// command that opens a group: `\\begin`, `\\begingroup`,
+    /// `\\bgroup` (the document's text only).
+    fn next_opens_group(&self) -> bool {
+        let Some(Frame::Src(s)) = self.frames.iter().find(|f| match f {
+            Frame::Src(s) => s.loc < s.buf.len(),
+            Frame::Toks(t, p) => *p < t.len(),
+            Frame::File(_) => true,
+        }) else {
+            return false;
+        };
+        let rest = &s.buf[s.loc.min(s.buf.len())..];
+        let k = rest
+            .iter()
+            .position(|&c| !matches!(c, 32 | 9 | 10 | 13))
+            .unwrap_or(rest.len());
+        let word: String = rest[k..]
+            .iter()
+            .take(12)
+            .map(|&c| char::from_u32(c).unwrap_or('?'))
+            .collect();
+        ["\\begingroup", "\\bgroup", "\\begin{"]
+            .iter()
+            .any(|p| word.starts_with(p))
     }
 
     /// Whether a document run closed the engine scope it ran in, with
