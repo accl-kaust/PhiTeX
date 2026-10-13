@@ -54,6 +54,19 @@ fn chain(dir: &std::path::Path, name: &str) {
         b.stats.page_steps_any,
         c.len()
     );
+    // the bar: the trace replay's critical path is 0.04-0.3% of the nodes
+    #[allow(clippy::cast_precision_loss)]
+    let frac = b
+        .stats
+        .critical_path
+        .map(|p| p as f64 / b.stats.nodes_run.max(1) as f64);
+    eprintln!(
+        "{name}: oracle_fraction {} (critical path {:?} / {} nodes run; bar 0.0004-0.003), paragraph boundary violations {}",
+        frac.map_or_else(|| "n/a".to_owned(), |f| format!("{f:.4}")),
+        b.stats.critical_path,
+        b.stats.nodes_run,
+        b.stats.par_boundary_violations
+    );
 }
 
 #[test]

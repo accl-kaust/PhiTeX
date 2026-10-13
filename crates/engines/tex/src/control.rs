@@ -27,6 +27,8 @@ impl Run<'_, '_> {
             return Ok(());
         }
         if self.cur.cmd > cmd::MAX_COMMAND {
+            // an expandable item is not checked (OUTPUT.md §5)
+            self.boundary = false;
             if self.cur.cmd >= cmd::END_TEMPLATE && self.cur.cmd != cmd::DONT_EXPAND {
                 return Ok(());
             }
@@ -35,10 +37,35 @@ impl Run<'_, '_> {
         self.dispatch()
     }
 
+    /// A document node the pass marked paragraph-ending (OUTPUT.md §5):
+    /// the nodes after it read the paragraph cells of a new region, so
+    /// its first command must leave the list vertical: one of §1094's
+    /// and §1095's (`par_end`, `stop`, `vskip`, `hrule`, `un_vbox`,
+    /// `halign`) in vertical mode or in a paragraph of a vertical list.
+    /// A macro is not checked (the pass vouched for its body).
+    fn check_boundary(&mut self, md: &crate::build::Mode) {
+        let ends = matches!(
+            self.cur.cmd,
+            cmd::PAR_END | cmd::STOP | cmd::VSKIP | cmd::HRULE | cmd::UN_VBOX | cmd::HALIGN
+        );
+        let vertical = md.m.abs() == 1 || (md.m == 102 && md.km.abs() == 1);
+        if !(ends && vertical) {
+            self.diag(
+                false,
+                "paragraph boundary regime violated: the text after this item is not in vertical mode",
+            );
+            let one = self.v.seq_unit(self.v.int(1));
+            self.contribute("parviol", one);
+        }
+    }
+
     /// `reswitch` (§1045): the case for `cur` in the current mode.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn dispatch(&mut self) -> R<()> {
         let md = self.mode()?;
+        if std::mem::take(&mut self.boundary) {
+            self.check_boundary(&md);
+        }
         if crate::etex::command(self, &md)? {
             return Ok(());
         }
