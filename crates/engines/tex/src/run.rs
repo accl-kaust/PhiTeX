@@ -1305,7 +1305,12 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Whether a file `\input` opened is a document's (its rest becomes
     /// paragraph regions), not a format's (run line by line).
     fn doc_file(&self, f: &FileRest) -> bool {
+        // (the same test as for a file the text names, `inputs.rs`: a
+        // file of the distribution, or one that ends itself early or
+        // reads its own line numbers, is read inline, as a package's
+        // `\\input` of `supp-pdf.mkii` is)
         crate::hints::file_kind_of(self.v, f.id, f.name) == phitex_source::pass::FileKind::Document
+            && crate::inputs::document_file(&str_of(self.v, f.name), &str_of(self.v, f.id))
     }
 
     /// `get_next` on the current line (§343–§356); `None` when the line
