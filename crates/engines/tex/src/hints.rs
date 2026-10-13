@@ -162,7 +162,7 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // (an output routine's `}` resumes the page builder, §1100)
         "endgroup" | "egroup" => &["badness", "lvlfix", "inspen", "box:", "deadcycles"],
         // arguments expanded while read: a conditional may end (§366, §498)
-        "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["if:"],
+        "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["if:", "cs:"],
         "mark" => &["if:", "param:"],
         // (e-TeX's mark classes, §1494 ff.)
         "marks" => &["if:", "param:", "markclasses"],
@@ -175,7 +175,7 @@ fn class_state(name: &str) -> Option<&'static [&'static str]> {
         // boxes (§1083 begin_box, §1077 \\setbox); a box whose braces close in
         // the same node is packaged there and sets \\\\badness, §1086, §649)
         "hbox" | "vbox" | "vtop" | "vcenter" | "setbox" | "vsplit" => {
-            &["box:", "align", "param:", "lvlfix", "badness"]
+            &["box:", "align", "param:", "lvlfix", "badness", "markclasses"]
         }
         // conditionals (§498-§510)
         "if" | "ifx" | "ifnum" | "ifdim" | "ifodd" | "ifvmode" | "ifhmode" | "ifmmode"
@@ -951,11 +951,21 @@ pub(crate) fn slices_of(text: &str, p: &Pass, kind: FileKind) -> (Vec<(usize, us
         let e = starts.get(i + 1).copied().unwrap_or(text.len());
         if e > s {
             // (the slice holds a paragraph if one starts in it)
-            let has_par = p
-                .atoms
-                .iter()
-                .enumerate()
-                .any(|(k, a)| a.start >= s && a.start < e && par_at[k]);
+            // (or a horizontal atom at depth 0 outside conditionals that
+            // only a macro's guessed operands cover: `\hello\ world.`)
+            let has_par = p.atoms.iter().enumerate().any(|(k, a)| {
+                a.start >= s
+                    && a.start < e
+                    && (par_at[k]
+                        || (depth[k] == 0
+                            && ifd[k] == 0
+                            && !operand[k]
+                            && match a.kind {
+                                AtomKind::Char(_) | AtomKind::Verb => true,
+                                AtomKind::Cs => starts_par(a.name(text)),
+                                _ => false,
+                            }))
+            });
             out.push((s, e));
             pars.push(has_par);
         }
@@ -1905,7 +1915,13 @@ fn analyse(text: &str, kind: FileKind, defs: &Defs) -> TextHints {
         let h = an.hint(a);
         hints.push(intern(&h));
         let ch = matches!(at.kind, AtomKind::Char(_) | AtomKind::Verb);
-        skip.push((ch && prev_char) || an.claimed[a] || at.kind == AtomKind::Space);
+        // (a command a macro is only guessed to read still runs in the
+        // slice: its rows count in the union)
+        skip.push(
+            (ch && prev_char)
+                || (an.claimed[a] && at.kind != AtomKind::Cs)
+                || at.kind == AtomKind::Space,
+        );
         prev_char = ch;
     }
     let mut t = TextHints {
