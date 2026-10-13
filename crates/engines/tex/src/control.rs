@@ -249,8 +249,9 @@ impl Run<'_, '_> {
             cmd::END_GROUP => {
                 if md.group == crate::val::group::SEMI_SIMPLE {
                     self.close_simple(&md)?;
+                } else {
+                    self.off_save(&md)?;
                 }
-                // otherwise `off_save` (§1064): an error
             }
             cmd::RIGHT_BRACE => self.handle_right_brace(&md)?,
             cmd::HMOVE | cmd::VMOVE => {

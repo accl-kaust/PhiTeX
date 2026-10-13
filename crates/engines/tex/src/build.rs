@@ -526,6 +526,8 @@ impl Run<'_, '_> {
                     None => return Ok(()),
                 },
             };
+            // §1096: error_count:=0
+            self.error_count = 0;
             if !items.is_empty() {
                 self.line_break(md, &items, false)?;
             }

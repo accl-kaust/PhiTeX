@@ -1149,7 +1149,12 @@ pub(crate) fn initex(v: &Values) -> Vec<(String, ValueId)> {
         "cs:\u{10FFFE}endgraf".to_owned(),
         v.list(vec![v.str("prim"), v.str("\u{10FFFE}endgraf")]),
     ));
-    for n in ["\u{10FFFE}alignpeek", "\u{10FFFE}cr"] {
+    for n in [
+        "\u{10FFFE}alignpeek",
+        "\u{10FFFE}cr",
+        "\u{10FFFE}endgroup",
+        "\u{10FFFE}right",
+    ] {
         out.push((format!("cs:{n}"), v.list(vec![v.str("prim"), v.str(n)])));
     }
     out.extend(crate::pdfprim::initex(v));

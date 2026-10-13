@@ -294,6 +294,11 @@ pub(crate) struct Run<'c, 'a> {
     /// definitions, a buffer reduced in place): a stop after one does
     /// not park ([`Run::rewind`]).
     pub irreversible: u64,
+    /// Errors since the last paragraph ended (§76 `error_count`, reset by
+    /// `end_graf`, §1096): at 100 the job stops (§82).
+    pub error_count: u32,
+    /// Whether the job stopped at 100 errors.
+    pub too_many_errors: bool,
     /// The input as the command in progress began ([`Run::rewind`]).
     mark: Mark,
     /// A halt raised on the token path ([`Run::raise`]), returned by the
@@ -354,6 +359,8 @@ impl<'c, 'a> Run<'c, 'a> {
             pdf_occ: 0,
             resumed: false,
             irreversible: 0,
+            error_count: 0,
+            too_many_errors: false,
             mark: Mark::default(),
             halt: None,
         }
@@ -880,12 +887,28 @@ impl<'c, 'a> Run<'c, 'a> {
         if kind == "error" {
             self.diag(true, text);
         }
+        let stop = kind == "error" && {
+            self.error_count += 1;
+            self.error_count >= 100
+        };
         let nl = i64::from(self.ipar(Par::newlinechar)?);
         let e = self
             .v
             .list(vec![self.v.str(kind), self.v.str(text), self.v.int(nl)]);
         let s = self.v.seq_unit(e);
         self.contribute("log", s);
+        if stop {
+            // §82: history is fatal_error_stop and the job ends
+            let e = self.v.list(vec![
+                self.v.str("wlog"),
+                self.v.str("(That makes 100 errors; please try again.)"),
+                self.v.int(nl),
+            ]);
+            let s = self.v.seq_unit(e);
+            self.contribute("log", s);
+            self.too_many_errors = true;
+            return Err(Halt::Fatal);
+        }
         Ok(())
     }
 
