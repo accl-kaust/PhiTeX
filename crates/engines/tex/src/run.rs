@@ -875,6 +875,13 @@ impl<'c, 'a> Run<'c, 'a> {
         self.set_loc(l, Native::Raw(val), global);
     }
 
+    /// The fields the run publishes: its definitions at the base level
+    /// but a local one equal to the value it read (the same binding).
+    pub(crate) fn published_fields(&mut self) -> Vec<Field> {
+        let locs: Vec<Loc> = self.st.published(self.v).into_iter().map(|x| x.0).collect();
+        locs.into_iter().map(|l| self.loc_field(l)).collect()
+    }
+
     /// The fields the run defines at its base level.
     pub(crate) fn def_fields(&mut self) -> Vec<Field> {
         let locs: Vec<Loc> = self.st.defined_locs().collect();
