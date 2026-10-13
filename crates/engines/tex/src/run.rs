@@ -56,6 +56,12 @@ pub(crate) struct Ops {
     /// Page-step runs that reached their finish, by page index (not
     /// the attempts that stopped or were cut off): [`crate::Stats`].
     pub steps_done: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    /// The page chain's loop-backs as read and published in the current
+    /// evaluation: the refuted guesses ([`crate::Stats`]).
+    pub lblog: std::sync::Arc<std::sync::Mutex<crate::page::LbLog>>,
+    /// The evaluation counter: `pgref` counts refuted rounds of one
+    /// evaluation only.
+    pub eval: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// A level of the input stack.
@@ -177,17 +183,24 @@ pub(crate) struct Src {
     pub rescanned: bool,
 }
 
+/// The commands an alignment entry watches for (§342, §347, §357):
+/// braces, `&` and `\cr`, as a bit mask by command code.
+const ALIGN_CMDS: u128 =
+    1 << cmd::LEFT_BRACE | 1 << cmd::RIGHT_BRACE | 1 << cmd::TAB_MARK | 1 << cmd::CAR_RET;
+
 pub(crate) const MID_LINE: u8 = 0;
 pub(crate) const SKIP_BLANKS: u8 = 1;
 pub(crate) const NEW_LINE: u8 = 2;
 
-/// The current token (`cur_tok`, `cur_cmd`, `cur_chr`, `cur_cs`).
-#[derive(Clone, Debug)]
+/// The current token (`cur_tok`, `cur_cmd`, `cur_chr`, `cur_cs`, §297).
+/// Its meaning is read from its slot when a command needs it
+/// ([`Run::cur_mean`]), as TeX reads `equiv(cur_cs)` (§389: a macro's
+/// body at expansion time).
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Cur {
     pub tok: Tok,
     pub cmd: u8,
     pub chr: i32,
-    pub mean: Mean,
 }
 
 impl Cur {
@@ -236,10 +249,18 @@ pub(crate) struct Run<'c, 'a> {
     /// The run's state table ([`crate::runstate`]): every field it read
     /// or defined, native.
     pub st: crate::runstate::State,
+    /// The category codes of characters 0–255 as last read (`u8::MAX`:
+    /// not read), valid while the table's catcode generation is
+    /// `cat_gen`.
+    cat_cache: [u8; 256],
+    cat_gen: u64,
     pub contribs: Vec<(Field, ValueId)>,
     /// The page builder of a text run as one node, paging inline
     /// (`pageinline.rs`).
     pub pg: Option<Box<crate::pageinline::Inline>>,
+    /// A page step whose output routine published leftovers
+    /// (`pagefx:<j>`).
+    pub pagefx_pub: bool,
     pub kids: Vec<(OpId, Vec<ValueId>)>,
     pub effect: Effect,
     pub cur: Cur,
@@ -254,6 +275,9 @@ pub(crate) struct Run<'c, 'a> {
     pub kind_memo: Option<(ValueId, KindFields)>,
     /// `align_state` as this run has it (§309), once read.
     pub astate: Option<i64>,
+    /// The alignments open in this run (`align_state`'s companion,
+    /// §324): run-local, an alignment never crosses a node.
+    pub aopen: i64,
     /// Lines entered by this run (for `\inputlineno`).
     pub lines_entered: i64,
     /// Whether the input is exhausted for good (the file ended).
@@ -302,21 +326,24 @@ impl<'c, 'a> Run<'c, 'a> {
             fread: Vec::new(),
             no_pull: false,
             st: crate::runstate::State::new(),
+            cat_cache: [u8::MAX; 256],
+            cat_gen: u64::MAX,
             contribs: Vec::new(),
             pg: None,
+            pagefx_pub: false,
             kids: Vec::new(),
             effect: Effect::None,
             cur: Cur {
                 tok: Tok::c(0),
                 cmd: 0,
                 chr: 0,
-                mean: Mean::Undefined,
             },
             conds: Vec::new(),
             if_codes: Vec::new(),
             name_buf: String::new(),
             kind_memo: None,
             astate: None,
+            aopen: 0,
             lines_entered: 0,
             eof: false,
             radix: 0,
@@ -365,6 +392,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.load_slow(loc)
     }
 
+    #[inline(never)]
     fn load_slow(&mut self, loc: Loc) -> R<()> {
         let f = self.loc_field(loc);
         let r = self.cx.use_field(f);
@@ -654,7 +682,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let nest_len = self.nest.len();
         let conds = self.conds.clone();
         let codes = self.if_codes.clone();
-        let cur = self.cur.clone();
+        let cur = self.cur;
         let (eof, no_pull, claim) = (self.eof, self.no_pull, self.claim_rest);
         let effect = self.effect;
         self.eof = true;
@@ -761,8 +789,32 @@ impl<'c, 'a> Run<'c, 'a> {
         self.glue_loc(l)
     }
 
+    /// The category code of character `c` (§232), through the run's
+    /// copy of the catcode table (refreshed when any category code
+    /// changes, [`crate::runstate::State::cat_gen`]).
     #[inline]
     pub(crate) fn cat(&mut self, c: u32) -> R<u8> {
+        if let Ok(i) = usize::try_from(c)
+            && i < 256
+        {
+            let g = self.st.cat_gen();
+            if self.cat_gen != g {
+                self.cat_cache = [u8::MAX; 256];
+                self.cat_gen = g;
+            }
+            let x = self.cat_cache[i];
+            if x != u8::MAX {
+                return Ok(x);
+            }
+            let x = self.cat_slow(c)?;
+            self.cat_cache[i] = x;
+            return Ok(x);
+        }
+        self.cat_slow(c)
+    }
+
+    #[inline(never)]
+    fn cat_slow(&mut self, c: u32) -> R<u8> {
         let x = if c < 256 {
             self.int_loc(Loc::try_from(crate::fields::CAT0).unwrap_or(0) + c)?
         } else {
@@ -874,11 +926,32 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn mean_of(&mut self, t: Tok) -> R<Mean> {
         match self.mean_loc(t) {
             Some(l) => {
-                self.load(l)?;
+                if !self.st.is_loaded(l) {
+                    self.load_slow(l)?;
+                }
                 Ok(self.st.mean_of(l, self.v))
             }
             None => Ok(Mean::Char(t.cat().unwrap_or(0), t.chr())),
         }
+    }
+
+    /// The current token's meaning, read from its slot now (§389, §508):
+    /// a character's own, `\noexpand`'s marker, a `v` template's end.
+    pub(crate) fn cur_mean(&mut self) -> R<Mean> {
+        let t = self.cur.tok;
+        if !t.is_cs_or_active() {
+            return Ok(Mean::Char(t.cat().unwrap_or(0), t.chr()));
+        }
+        if self.cur.cmd == cmd::RELAX && self.cur.chr == crate::val::NO_EXPAND_FLAG {
+            return Ok(Mean::NotExpanded);
+        }
+        if self.cur.cmd == cmd::IGNORE
+            && t.as_cs()
+                .is_some_and(|n| n.frozen() && n.starts_with("\u{10FFFE}endv"))
+        {
+            return Ok(Mean::Prim("\u{10FFFE}endv", cmd::IGNORE, self.cur.chr));
+        }
+        self.mean_of(t)
     }
 
     /// Defines token `t`'s meaning (`\def`, `\let`, …): kept native,
@@ -893,26 +966,39 @@ impl<'c, 'a> Run<'c, 'a> {
         Mean::decode(self.v, x)
     }
 
-    #[inline]
+    // the per-token hot path: inlined on purpose
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub(crate) fn set_cur(&mut self, tok: Tok) -> R<()> {
         if !tok.is_cs_or_active() {
-            let c = tok.cat().unwrap_or(0);
-            let h = tok.chr();
-            self.cur = Cur {
-                tok,
-                cmd: c,
-                chr: i32::try_from(h).unwrap_or(0),
-                mean: Mean::Char(c, h),
-            };
+            // (a character's meaning is its own: no meaning stored)
+            self.cur.tok = tok;
+            self.cur.cmd = tok.cat().unwrap_or(0);
+            self.cur.chr = i32::try_from(tok.chr()).unwrap_or(0);
             return Ok(());
         }
-        let mean = self.mean_of(tok)?;
-        let (c, h) = mean.cmd_chr();
+        self.set_cur_cs(tok)
+    }
+
+    /// [`Self::set_cur`] for a control sequence or active character.
+    #[inline(never)]
+    fn set_cur_cs(&mut self, tok: Tok) -> R<()> {
+        let (c, h) = match self.mean_loc(tok) {
+            Some(l) => {
+                if !self.st.is_loaded(l) {
+                    self.load_slow(l)?;
+                }
+                self.st.cmd_chr_of(l, self.v)
+            }
+            None => (
+                tok.cat().unwrap_or(0),
+                i32::try_from(tok.chr()).unwrap_or(0),
+            ),
+        };
         self.cur = Cur {
             tok,
             cmd: c,
             chr: h,
-            mean,
         };
         Ok(())
     }
@@ -1076,7 +1162,20 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// `get_next` (§341): the next token, its meaning not yet looked up.
     /// `None` at the end of all input.
+    #[inline]
     pub(crate) fn next_tok(&mut self) -> R<Option<Tok>> {
+        // (the common case: the next token of the list on top)
+        if let Some(Frame::Toks(t, p)) = self.frames.front_mut()
+            && let Some(&tok) = t.get(*p)
+        {
+            *p += 1;
+            return Ok(Some(tok));
+        }
+        self.next_tok_slow()
+    }
+
+    #[inline(never)]
+    fn next_tok_slow(&mut self) -> R<Option<Tok>> {
         loop {
             let Some(front) = self.frames.front_mut() else {
                 if self.pull()? {
@@ -1409,7 +1508,36 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// `get_next` with the meaning (§357–§358).
+    // the per-token hot path: inlined on purpose
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
     pub(crate) fn get_next(&mut self) -> R<bool> {
+        // (the common case: a token of the list on top that is not an
+        // internal marker, and no alignment entry to watch for)
+        let next = match self.frames.front_mut() {
+            Some(Frame::Toks(t, p)) => match t.get(*p) {
+                Some(&tok) if tok.as_cs().is_none_or(|n| !n.frozen()) => {
+                    *p += 1;
+                    Some(tok)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(tok) = next {
+            self.set_cur(tok)?;
+            if ALIGN_CMDS.checked_shr(u32::from(self.cur.cmd)).unwrap_or(0) & 1 != 0
+                && self.align_token()?
+            {
+                return self.get_next_slow();
+            }
+            return Ok(true);
+        }
+        self.get_next_slow()
+    }
+
+    #[inline(never)]
+    fn get_next_slow(&mut self) -> R<bool> {
         loop {
             let t = loop {
                 let Some(t) = self.next_tok()? else {
@@ -1425,7 +1553,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     }
                     if n.name() == "\u{10FFFE}uend" {
                         // §324: the end of a u template
-                        self.align_u_end()?;
+                        self.align_u_end();
                         continue;
                     }
                 }
@@ -1441,14 +1569,17 @@ impl<'c, 'a> Run<'c, 'a> {
                     tok: t,
                     cmd: cmd::IGNORE,
                     chr,
-                    mean: Mean::Prim("\u{10FFFE}endv", cmd::IGNORE, chr),
                 };
                 return Ok(true);
             }
             if !self.get_next_rest(t)? {
                 return Ok(false);
             }
-            if self.align_token()? {
+            if matches!(
+                self.cur.cmd,
+                cmd::LEFT_BRACE | cmd::RIGHT_BRACE | cmd::TAB_MARK | cmd::CAR_RET
+            ) && self.align_token()?
+            {
                 continue;
             }
             return Ok(true);
@@ -1465,7 +1596,6 @@ impl<'c, 'a> Run<'c, 'a> {
             if self.cur.cmd > cmd::MAX_COMMAND {
                 self.cur.cmd = cmd::RELAX;
                 self.cur.chr = crate::val::NO_EXPAND_FLAG;
-                self.cur.mean = Mean::NotExpanded;
             }
             return Ok(true);
         }
@@ -1484,7 +1614,6 @@ impl<'c, 'a> Run<'c, 'a> {
                 tok: Tok::cs("\u{10FFFE}relax"),
                 cmd: cmd::RELAX,
                 chr: 256,
-                mean: Mean::Prim("relax", cmd::RELAX, 256),
             };
         }
         Ok(())
@@ -1777,10 +1906,31 @@ impl<'c, 'a> Run<'c, 'a> {
             let s = v.seq_unit(item);
             self.contribute("items", s);
         }
-        for (loc, x, l) in self.st.published(self.v) {
-            let f = self.loc_field(loc);
-            crate::exec::widths::def(f);
-            self.cx.define_with(f, x, l);
+        // a page step defines nothing to the engine: its definitions are
+        // the page chain's delta (`page::step_defs`), so no step reads
+        // another
+        let op = self.cx.op();
+        let t_pub = std::time::Instant::now();
+        let published: Vec<(Field, ValueId, Locality)> = self
+            .st
+            .published(self.v)
+            .into_iter()
+            .map(|(loc, x, l)| (self.loc_field(loc), x, l))
+            .collect();
+        if op == self.ops.pagestep || op == self.ops.pagestep_any {
+            crate::page::step_defs(&mut self, published);
+        } else {
+            let (n, t_list) = (published.len(), t_pub.elapsed());
+            for (f, x, l) in published {
+                crate::exec::widths::def(f);
+                self.cx.define_with(f, x, l);
+            }
+            if n >= 10_000 && crate::exec::env_flag!("PHITEX_TEX_TIME") {
+                eprintln!(
+                    "run finish: {n} definitions published: listed {t_list:?}, define_with {:?}",
+                    t_pub.elapsed().checked_sub(t_list).unwrap_or_default()
+                );
+            }
         }
         let locs: Vec<Loc> = self.st.defined_locs().collect();
         if !locs.is_empty() {
@@ -2139,6 +2289,7 @@ pub(crate) struct Parked {
     conds: Vec<u8>,
     if_codes: Vec<i32>,
     astate: Option<i64>,
+    aopen: i64,
     lines_entered: i64,
     eof: bool,
     radix: i32,
@@ -2177,6 +2328,7 @@ struct Mark {
     sig: u64,
     effect: Option<Effect>,
     astate: Option<i64>,
+    aopen: i64,
     radix: i32,
     cur_order: Option<phitex_typeset::glue::Order>,
     no_pull: bool,
@@ -2256,6 +2408,7 @@ impl Run<'_, '_> {
         m.sig = sig;
         m.effect = Some(self.effect);
         m.astate = self.astate;
+        m.aopen = self.aopen;
         m.radix = self.radix;
         m.cur_order = Some(self.cur_order);
         m.no_pull = self.no_pull;
@@ -2330,6 +2483,7 @@ impl Run<'_, '_> {
             }
         }
         self.astate = m.astate;
+        self.aopen = m.aopen;
         self.radix = m.radix;
         self.no_pull = m.no_pull;
         if let Some(o) = m.cur_order {
@@ -2390,6 +2544,7 @@ impl Run<'_, '_> {
             conds: std::mem::take(&mut self.conds),
             if_codes: std::mem::take(&mut self.if_codes),
             astate: self.astate,
+            aopen: self.aopen,
             lines_entered: self.lines_entered,
             eof: self.eof,
             radix: self.radix,
@@ -2454,6 +2609,7 @@ impl<'c, 'a> Run<'c, 'a> {
         r.conds = p.conds;
         r.if_codes = p.if_codes;
         r.astate = p.astate;
+        r.aopen = p.aopen;
         r.lines_entered = p.lines_entered;
         r.eof = p.eof;
         r.radix = p.radix;

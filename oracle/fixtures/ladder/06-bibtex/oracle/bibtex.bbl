@@ -1,0 +1,59 @@
+\begin{thebibliography}{10}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Knuth(1984)]{knuth84}
+Donald~E. Knuth.
+\newblock \emph{The {\TeX}book}.
+\newblock Addison-Wesley, 1984.
+
+\bibitem[Knuth(1986)]{knuth86}
+Donald~E. Knuth.
+\newblock \emph{{\TeX}: The Program}.
+\newblock Addison-Wesley, 1986.
+
+\bibitem[Knuth and Plass(1981)]{knuthplass81}
+Donald~E. Knuth and Michael~F. Plass.
+\newblock Breaking paragraphs into lines.
+\newblock \emph{Software: Practice and Experience}, 11\penalty0 (11):\penalty0
+  1119--1184, 1981.
+
+\bibitem[Lamport(1994)]{lamport94}
+Leslie Lamport.
+\newblock \emph{{\LaTeX}: A Document Preparation System}.
+\newblock Addison-Wesley, 2nd edition, 1994.
+
+\bibitem[Liang(1983)]{liang83}
+Frank~M. Liang.
+\newblock \emph{Word Hy-phen-a-tion by Com-put-er}.
+\newblock PhD thesis, Stanford University, 1983.
+
+\bibitem[Mittelbach and Goossens(2004)]{mittelbach04}
+Frank Mittelbach and Michel Goossens.
+\newblock \emph{The {\LaTeX} Companion}.
+\newblock Addison-Wesley, 2004.
+
+\bibitem[Patashnik(1988)]{patashnik88}
+Oren Patashnik.
+\newblock \emph{{BibTeX}ing}, 1988.
+
+\bibitem[Plass(1981)]{plass81}
+Michael~F. Plass.
+\newblock \emph{Optimal Pagination Techniques for Automatic Typesetting
+  Systems}.
+\newblock PhD thesis, Stanford University, 1981.
+
+\bibitem[Tantau(2013)]{tantau13}
+Till Tantau.
+\newblock \emph{The {TikZ} and {PGF} Packages}, 2013.
+\newblock Manual for version 3.0.
+
+\bibitem[Th\`anh(2000)]{thanh01}
+H\`an~Th\'{\^e} Th\`anh.
+\newblock Micro-typographic extensions to the {\TeX} typesetting system.
+\newblock In \emph{TUGboat}, pages 317--434, 2000.
+
+\end{thebibliography}

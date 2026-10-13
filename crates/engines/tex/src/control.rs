@@ -489,7 +489,7 @@ impl Run<'_, '_> {
                     self.back_input(t);
                     self.back_input(q);
                 }
-                let m = self.cur.mean.clone();
+                let m = self.cur_mean()?;
                 self.define_cs(&p, &m, global);
             }
             cmd::SHORTHAND_DEF => {
@@ -1222,7 +1222,7 @@ impl Run<'_, '_> {
                     crate::print::sprint_cs(&mut s, self.cur.tok, esc);
                     s.push('=');
                 }
-                let (m, c, h) = (self.cur.mean.clone(), self.cur.cmd, self.cur.chr);
+                let (m, c, h) = (self.cur_mean()?, self.cur.cmd, self.cur.chr);
                 self.print_meaning(&mut s, &m, c, h)?;
             }
             2 => {

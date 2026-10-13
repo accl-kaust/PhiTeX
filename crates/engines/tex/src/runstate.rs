@@ -146,6 +146,28 @@ pub(crate) struct State {
     defined: Vec<Loc>,
     stamp: u64,
     next_gid: u32,
+    /// Bumped whenever a category code below 256 may have changed
+    /// ([`State::cat_gen`]); unique across tables of a thread, so a
+    /// table put in place of another is never mistaken for it.
+    cat_gen: u64,
+}
+
+thread_local! {
+    static CAT_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// A new catcode generation, never given out before on this thread.
+fn new_cat_gen() -> u64 {
+    CAT_GEN.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    })
+}
+
+/// Whether `loc` is a category code below 256.
+#[inline]
+fn is_cat(loc: Loc) -> bool {
+    (loc as usize).wrapping_sub(crate::fields::CAT0) < 256
 }
 
 thread_local! {
@@ -169,6 +191,7 @@ impl Clone for State {
             defined: self.defined.clone(),
             stamp: self.stamp,
             next_gid: self.next_gid,
+            cat_gen: new_cat_gen(),
         }
     }
 }
@@ -204,7 +227,15 @@ impl State {
             defined: Vec::new(),
             stamp: 0,
             next_gid: 0,
+            cat_gen: new_cat_gen(),
         }
+    }
+
+    /// The catcode generation: equal while no category code below 256
+    /// changed.
+    #[inline]
+    pub(crate) fn cat_gen(&self) -> u64 {
+        self.cat_gen
     }
 
     #[inline]
@@ -277,6 +308,9 @@ impl State {
     /// as the step before left them): loaded, and never compared with
     /// the engine's at the end.
     pub(crate) fn preload(&mut self, loc: Loc, x: Option<ValueId>) {
+        if is_cat(loc) {
+            self.cat_gen = new_cat_gen();
+        }
         self.slot(loc).e = Entry {
             val: x.map_or(Native::Absent, Native::Raw),
             id: x,
@@ -362,6 +396,18 @@ impl State {
         }
     }
 
+    /// The command code and modifier of loaded meaning `loc` (decoded
+    /// once; nothing cloned).
+    #[inline]
+    pub(crate) fn cmd_chr_of(&mut self, loc: Loc, v: &Values) -> (u8, i32) {
+        let e = self.entry_mut(loc);
+        match &e.val {
+            Native::Mean(m) => m.cmd_chr(),
+            Native::Absent => Mean::Undefined.cmd_chr(),
+            _ => self.mean_of(loc, v).cmd_chr(),
+        }
+    }
+
     /// Loaded `loc` as a token list (decoded once).
     #[allow(dead_code)]
     pub(crate) fn toks_of(&mut self, loc: Loc, v: &Values) -> Rc<[Tok]> {
@@ -422,6 +468,9 @@ impl State {
     /// before it inert. A definition outside every group of the run, or
     /// a global one, is the run's for its base level.
     pub(crate) fn set(&mut self, loc: Loc, val: Native, global: bool, grp: Option<u32>) {
+        if is_cat(loc) {
+            self.cat_gen = new_cat_gen();
+        }
         let mi = self.meta(loc);
         self.stamp += 1;
         let st = self.stamp;
@@ -467,8 +516,9 @@ impl State {
 
     /// A binding changed in place (§1079, §1247), nothing saved:
     /// `base` when the binding is the run's base level's (then it is
-    /// the run's definition there), else a group's of the run.
-    pub(crate) fn modify(&mut self, loc: Loc, val: Native, base: bool) {
+    /// the run's definition there, `global` at level one), else a
+    /// group's of the run.
+    pub(crate) fn modify(&mut self, loc: Loc, val: Native, base: bool, global: bool) {
         let mi = self.meta(loc);
         self.stamp += 1;
         let st = self.stamp;
@@ -488,7 +538,12 @@ impl State {
         m.ldef_stamp = st;
         m.ldef_local = true;
         if base {
-            m.publ = Some((val, Locality::Local));
+            let l = if global {
+                Locality::Global
+            } else {
+                Locality::Local
+            };
+            m.publ = Some((val, l));
         }
     }
 
@@ -502,6 +557,10 @@ impl State {
             if slot.ginert > s.at {
                 continue;
             }
+            if is_cat(s.loc) {
+                self.cat_gen = new_cat_gen();
+            }
+            let slot = self.slot(s.loc);
             slot.e = s.prev;
             slot.save_gid = s.gid;
             slot.save_stamp = s.stamp;
@@ -718,6 +777,7 @@ impl State {
         }
         st.stamp = p.stamp;
         st.next_gid = p.next_gid;
+        st.cat_gen = new_cat_gen();
         st
     }
 }

@@ -810,7 +810,7 @@ impl Run<'_, '_> {
                 // §478
                 loop {
                     self.get_next_or_end()?;
-                    if self.cur.cmd <= cmd::MAX_COMMAND || crate::etex::protect(&mut self.cur) {
+                    if self.cur.cmd <= cmd::MAX_COMMAND || crate::etex::protect(self)? {
                         break;
                     }
                     if self.cur.cmd == cmd::THE {

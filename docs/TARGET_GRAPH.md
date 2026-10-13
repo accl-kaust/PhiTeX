@@ -80,7 +80,7 @@ Writing `A <- B` for "A reads what B defined".
 |---|---|---|
 | region R | regime cells (`cat:`, `cs:`, `font`, `param:`, `count:`, …) | the last node before R that changed them: a fan-out from the format and the preamble, not a chain |
 | `breaks` | `items` (the whole main list), the page parameters, the insert classes | every region (one fan-in) |
-| `pagestep` j | its page's material (its argument), `\count0..9`, the insert boxes, the marks, `\output` | `breaks`; the previous steps for what their routines defined globally (page numbers) |
+| `pagestep` j | its page's material (its argument), the marks (`pp:mk:<j>`), `\output`, the state before the chain | `breaks` and the regions; never another step: `\count0..9` from `pgdef:<j-1>` and everything else the routines changed from `pgst:<j-1>` (loop-backs, previous round; the writer folds the steps' deltas into `pgst`) |
 | `dvi` | `pages` | every `pagestep` |
 | `breaks` (round 2) | `pagefx:<j>` | what routine j left (loop-back, previous round): held inserts, the leftover list; planned (branch para-vsize): page parameters the routine set |
 | region R (planned, branch para-marks) | `marks:before:<N>` | the marks in force before node N (a per-node loop-back from the page chain) |
@@ -95,8 +95,10 @@ Forbidden, and asserted by the test:
 ## Heights
 
 Critical path: the format's definition chain (cached) + one region (1)
-+ `breaks` (1) + the page steps chained through `\count0` (one per
-page) + `dvi` (1). The test asserts `height <= 6 + pages` per fixture.
++ `breaks` (1) + `brk:<j>` (1) + one page step (1) + `dvi` (1),
+independent of the page count: a page step defines nothing to the
+engine (only the exact PDF writer's `pdf:state` fold chains, by
+design). The test asserts `height <= 6 + pages` per fixture.
 
 ## Why this shape
 

@@ -1905,7 +1905,12 @@ fn a_definition_outside_the_declared_set_refutes_the_declaration() {
     let rep = eng.evaluate_sequential().expect("after e's edit");
     assert_eq!((int(&eng, r), int(&eng, r2)), (Some(5), Some(5)), "{rep:?}");
     assert_eq!(rep.declarations_refuted, 0, "{rep:?}");
-    assert!(rep.pending_sets > 0 && rep.stops > 0, "r2 waited on q's set: {rep:?}");
+    // (A raise counts as a wait: r2 read q finished above the level and
+    // was lifted over it with its result kept.)
+    assert!(
+        rep.pending_sets > 0 && rep.stops + rep.raises > 0,
+        "r2 waited on q's set: {rep:?}"
+    );
     assert_eq!(rep.runs, 4, "e, q, r, r2 once each: {rep:?}");
     // A new text for q has a new declaration, checked afresh.
     let a = args(&mut eng, "q", 6);
