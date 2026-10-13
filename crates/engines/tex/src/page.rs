@@ -759,8 +759,12 @@ impl Run<'_, '_> {
             return Ok(());
         };
         let xs = list_of(v, x);
+        // (`\count0..9` after the page: not yet; read through, the
+        // chain's page number fed back here grows by one a round on
+        // LaTeX's `\enddocument` (its `\clearpage` + `\end` pages);
+        // `PHITEX_FLUSH_COUNTS=1` tries it)
         if let Some(&cs) = xs.first()
-            && !crate::exec::env_flag!("PHITEX_FLUSH_NOCOUNTS")
+            && crate::exec::env_flag!("PHITEX_FLUSH_COUNTS")
         {
             self.preload_counts(cs);
         }

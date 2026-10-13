@@ -475,6 +475,10 @@ impl<'c, 'a> Run<'c, 'a> {
             p
         };
         if let Some(p) = pre {
+            if crate::exec::env_flag!("PHITEX_AUX_TRACE") {
+                let name = crate::val::field_name(self.v, self.loc_field(loc));
+                eprintln!("aux-trace: revert {name} for the line's read");
+            }
             // (read in place of the value, not a definition of the line:
             // only what the line defines on it is published)
             self.st
