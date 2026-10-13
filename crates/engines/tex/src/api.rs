@@ -933,6 +933,12 @@ pub struct Stats {
     /// last reset, with the `profile` feature only (0 without it).
     pub dead_result: u64,
     pub state_result: u64,
+    /// The engine's parallel-apply probe counters (`profile` feature,
+    /// totals since their last reset): tail passes, use records, and
+    /// slices aborted.
+    pub tail: u64,
+    pub use_record: u64,
+    pub slice_abort: u64,
     pub raises: u64,
     /// The most nodes ready at one step, and the speculative runs that
     /// ran out of fuel.
@@ -993,6 +999,9 @@ impl Stats {
                 match name {
                     "dead_result" => self.dead_result = n,
                     "state_result" => self.state_result = n,
+                    "tail" => self.tail = n,
+                    "use_record" => self.use_record = n,
+                    "slice_abort" => self.slice_abort = n,
                     _ => {}
                 }
             }
@@ -1109,6 +1118,8 @@ struct Graph {
     threads: usize,
     /// Why the relaxed PDF mode gave way to exact mode, once it has.
     pdf_exact: Option<String>,
+    /// Why the exact PDF writer folds the pages (`pdf:fold`), if it does.
+    pdf_fold: Option<String>,
     /// The `marks:before:<node>` loop-backs declared for nodes the graph
     /// made (they asked through `marksdecl:<node>`), as the
     /// environment's answers.
@@ -1210,7 +1221,6 @@ impl Graph {
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             steps_done: Arc::new(Mutex::new(Vec::new())),
             lblog: Arc::new(Mutex::new(crate::page::LbLog::default())),
-            eval: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let _ = shared.set(ops.clone());
         declare_fields(&mut eng);
@@ -1227,6 +1237,7 @@ impl Graph {
             written: Vec::new(),
             threads: crate::exec::threads(threads),
             pdf_exact: None,
+            pdf_fold: None,
             marks_decl: Vec::new(),
             wdefs: Vec::new(),
             wkeys_guess: Vec::new(),
@@ -1518,6 +1529,9 @@ impl Graph {
         if self.pdf_exact.is_some() {
             env.push((v.field("pdf:exact"), v.int(1)));
         }
+        if self.pdf_fold.is_some() {
+            env.push((v.field("pdf:fold"), v.int(1)));
+        }
         if fixpoint {
             let names = self.written.iter().map(|n| v.str(n)).collect();
             env.push((v.field("loopfiles"), v.list(names)));
@@ -1675,6 +1689,12 @@ impl Graph {
                 // build again, in exact mode
                 if kind == "pdf:exact" && self.pdf_exact.is_none() {
                     self.pdf_exact = Some(why.clone());
+                    asked = true;
+                }
+                // the exact writer's pages cannot be written apart:
+                // the build again, with the pages in the `pdf:state` fold
+                if kind == "pdf:fold" && self.pdf_fold.is_none() {
+                    self.pdf_fold = Some(why.clone());
                     asked = true;
                 }
             }
@@ -2203,6 +2223,8 @@ fn cached_prelude(key: u64, opts: &Options) -> Result<Arc<Cached>, Vec<String>> 
 /// INITEX's state, and the prelude's on top of it: a format, `\dump`
 /// ending it (or its text's end). Cached by the prelude's text, and good
 /// while every file it read is what the finder gives now.
+// (its phases timed and measured inline, PHITEX_TEX_TIME)
+#[allow(clippy::too_many_lines)]
 fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     let key = prelude.map_or(0, |p| {
         let mut b = p.as_bytes().to_vec();
@@ -2225,6 +2247,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         Err(known) => known,
     };
     let t_check = t_start.elapsed();
+    let m_check = mem_mb();
     let finder = &opts.finder;
     let mut g = Graph::new(opts.time_limit, opts.threads);
     g.eng.set_max_rounds(opts.max_rounds);
@@ -2242,6 +2265,8 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
         g.eng.set_environment_absent(g.absent.clone());
     }
     let t_supply = t_start.elapsed();
+    let m_supply = mem_mb();
+    let mut m_settle = m_supply;
     let mut t_settle = t_supply;
     let mut env: Vec<(String, ValueId)> = crate::val::initex(g.eng.values());
     for (name, x) in &env {
@@ -2265,9 +2290,11 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             eprintln!("prelude settle {:?}", t0.elapsed());
         }
         t_settle = t_start.elapsed();
+        m_settle = mem_mb();
         env = final_bindings(&g, unit, end, env);
     }
     let t_bindings = t_start.elapsed();
+    let m_bindings = mem_mb();
     let v = g.eng.values();
     let out: Vec<(String, Tree)> = env.into_iter().map(|(k, x)| (k, export(v, x))).collect();
     let e = Arc::new(out);
@@ -2282,6 +2309,10 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
                 .checked_sub(t_bindings)
                 .unwrap_or_default(),
             e.len()
+        );
+        let m_export = mem_mb();
+        eprintln!(
+            "prelude memory (MB resident/peak): before {m_check:?}, after supply {m_supply:?}, after the run {m_settle:?}, after final bindings {m_bindings:?}, after export {m_export:?}"
         );
     }
     let c = Arc::new(Cached {
@@ -2371,6 +2402,21 @@ fn final_bindings(
         );
     }
     slots.into_iter().flatten().collect()
+}
+
+/// The process's resident and peak resident memory now, in MB
+/// (`PHITEX_TEX_TIME`'s phase lines), from `/proc/self/status` (zeros
+/// elsewhere).
+pub(crate) fn mem_mb() -> (u64, u64) {
+    let t = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let kb = |k: &str| {
+        t.lines()
+            .find_map(|l| l.strip_prefix(k))
+            .and_then(|v| v.split_whitespace().next()?.parse::<u64>().ok())
+            .unwrap_or(0)
+            / 1024
+    };
+    (kb("VmRSS:"), kb("VmHWM:"))
 }
 
 /// How bad a [`Diagnostic`] is.
@@ -2608,11 +2654,6 @@ impl Build {
         let mut stats = Stats::default();
         self.g.take_steps_done();
         self.g.take_refuted();
-        // the serial fallback is per evaluation (`pgref` is keyed by it)
-        self.g
-            .ops
-            .eval
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.g.queries.clear();
         // (the files sliced into the document's regions were read)
         let sliced: Vec<(String, bool)> = self
@@ -2720,6 +2761,14 @@ impl Build {
     #[must_use]
     pub fn pdf_exact_reason(&self) -> Option<&str> {
         self.g.pdf_exact.as_deref()
+    }
+
+    /// Why the exact PDF writer folded the pages in order (`pdf:state`
+    /// threaded through the page steps) instead of writing each on its
+    /// own, if it did.
+    #[must_use]
+    pub fn pdf_fold_reason(&self) -> Option<&str> {
+        self.g.pdf_fold.as_deref()
     }
 
     /// Frees the engine's memoized applications nothing reaches any
@@ -3329,6 +3378,41 @@ impl Build {
         out
     }
 
+    /// The critical chain's links whose reader and writer are both page
+    /// steps (the target graph forbids any): reader, writer, the cause.
+    #[must_use]
+    pub fn page_step_links(&self) -> Vec<String> {
+        use phitex_defuse::Cause;
+        let eng = &self.g.eng;
+        let v = eng.values();
+        let step = |n: phitex_defuse::NodeId| {
+            eng.node_info(n)
+                .is_some_and(|i| i.op.starts_with("pagestep"))
+        };
+        let mut out = Vec::new();
+        for (n, c) in eng.critical_chain() {
+            let (w, f) = match c {
+                Cause::Changed { field, site } => (site, Some(field)),
+                Cause::Rebind { field, to, .. } => (to, Some(field)),
+                Cause::Woken { by, field, .. } => (Some(by), field),
+                Cause::Output { of } => (Some(of), None),
+                _ => (None, None),
+            };
+            if let Some(w) = w
+                && step(n)
+                && step(w)
+            {
+                out.push(format!(
+                    "[{}] <- [{}] {}",
+                    describe(eng, n),
+                    describe(eng, w),
+                    f.map_or_else(String::new, |f| field_name(v, f))
+                ));
+            }
+        }
+        out
+    }
+
     /// The engine's critical chain, from the highest finished node back:
     /// for each link the node's operation and first argument (shortened),
     /// the cause's kind, and its field if any ([`Engine::critical_chain`]).
@@ -3484,14 +3568,28 @@ fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
 /// The last session's page-chain loop-backs ([`Build::export_pgst`]):
 /// `[kind, j, value]`, kind 0 `pgst:<j>`, 1 `pgdef:<j>`; declared after
 /// the cold guesses, which they replace.
+///
+/// A page past the last one given guesses the last `pgst` (the state a
+/// routine left settles: a first-page hook clears itself once).
 fn chain_guesses(g: &mut Graph, bytes: &[u8]) {
     let mut rd = Rd(bytes);
+    let mut last: Option<(usize, ValueId)> = None;
     while let (Some(k), Some(j), Some(t)) = (rd.u64(), rd.u64(), rd.tree()) {
-        if usize::try_from(j).is_ok_and(|j| j < crate::page::MAX_PAGES) {
+        let Ok(j) = usize::try_from(j) else { continue };
+        if j < crate::page::MAX_PAGES {
             let v = g.eng.values();
             let name = if k == 0 { "pgst" } else { "pgdef" };
             let f = v.field(&format!("{name}:{j}"));
             let x = import(v, &t);
+            g.eng.declare_loopback(f, x);
+            if k == 0 && last.is_none_or(|(l, _)| j > l) {
+                last = Some((j, x));
+            }
+        }
+    }
+    if let Some((l, x)) = last {
+        for j in l + 1..crate::page::MAX_PAGES {
+            let f = g.eng.values().field(&format!("pgst:{j}"));
             g.eng.declare_loopback(f, x);
         }
     }
@@ -3516,6 +3614,7 @@ fn declare_fields(eng: &mut Engine) {
         "pgdeltas",
         "pgsts",
         crate::pdfrelaxed::PIECES,
+        crate::pdfout::XPAGES,
     ] {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SeqMonoid));
@@ -3538,9 +3637,6 @@ fn declare_fields(eng: &mut Engine) {
         let f = eng.values().field(&format!("pgst:{j}"));
         eng.declare_loopback(f, ValueId::UNIT);
     }
-    // refuted rounds of the page chain (two: it runs serially)
-    let f = eng.values().field("pgref");
-    eng.declare_loopback(f, ValueId::UNIT);
     for f in crate::hints::COUNTERS {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SumMonoid));

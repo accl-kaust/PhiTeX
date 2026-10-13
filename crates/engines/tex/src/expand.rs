@@ -47,6 +47,7 @@ macro_rules! cs_once {
 cs_once!(par_tok, "par");
 cs_once!(relax_tok, "\u{10FFFE}relax");
 cs_once!(notexpanded_tok, "\u{10FFFE}notexpanded");
+cs_once!(halt_tok, "\u{10FFFE}halt");
 
 impl Run<'_, '_> {
     /// `expand` (§366): `cur` is expandable.
@@ -218,7 +219,7 @@ impl Run<'_, '_> {
                     out.push(*t);
                 }
             }
-            let toks: Rc<[Tok]> = Rc::from(&out[..]);
+            let toks: Rc<[Tok]> = crate::run::pooled_toks(out);
             self.push_toks(toks);
         }
         bufs.args.clear();

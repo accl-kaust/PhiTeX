@@ -32,17 +32,21 @@
 //!   without re-running or re-walking.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use crate::ctx::{Ctx, Stop};
 use crate::hash::{FxHashMap, FxHashSet, hash_bytes, hash_words};
+use crate::ix::{LabelIx, SlotCounts, SlotMap};
 use crate::obs::{count, span};
+use crate::ov::{OvMap, OvSet};
 use crate::sched::{Candidate, Executor, Job, Scheduler};
 use crate::tree::{Arena, Aug, LazyFold, NIL as TNIL};
 use crate::value::{Field, Value, ValueId, Values};
+
+mod slice;
 
 /// A node reference: its slot index and the slot's generation when the node
 /// was created. Freeing a node bumps its slot's generation, so a reference
@@ -921,6 +925,7 @@ fn eff_opens(e: u8) -> u32 {
 }
 
 /// The node record (under 128 bytes; rare data lives in `Aux`).
+#[derive(Clone)]
 pub(crate) struct Node {
     pub(crate) id: NodeId,
     pub(crate) args: ValueId,
@@ -952,12 +957,23 @@ impl Node {
         self.flags & f != 0
     }
 
+    /// The index of `f` in the node's definitions, kept sorted by field
+    /// (a node defining many fields is read by many: a scan per read was
+    /// quadratic).
+    pub(crate) fn def_index(&self, f: Field) -> Option<usize> {
+        self.defs.binary_search_by_key(&f, |d| d.field).ok()
+    }
+
     pub(crate) fn def_value(&self, f: Field) -> Option<ValueId> {
-        self.defs
-            .iter()
-            .find(|d| d.field == f)
-            .map(|d| d.value)
+        self.def_index(f)
+            .map(|i| self.defs[i].value)
             .filter(|v| *v != ValueId::NONE)
+    }
+
+    fn set_def_value(&mut self, f: Field, v: ValueId) {
+        if let Some(i) = self.def_index(f) {
+            self.defs[i].value = v;
+        }
     }
 
     pub(crate) fn has_dyn_effect(&self) -> bool {
@@ -1071,7 +1087,17 @@ pub(crate) struct OSum {
 
 struct OAug;
 
-impl Aug<OItem, OSum> for OAug {
+/// The bracket counts of an order summary: what scope depths and openers
+/// are found by, read apart from the rest of the summary.
+#[derive(Copy, Clone, Debug, Default)]
+pub(crate) struct Br {
+    c: u32,
+    o: u32,
+    /// Nodes in work.
+    work: u32,
+}
+
+impl Aug<OItem, OSum, Br> for OAug {
     fn empty(&self) -> OSum {
         OSum::default()
     }
@@ -1103,6 +1129,26 @@ impl Aug<OItem, OSum> for OAug {
             maxs: a.maxs.max(b.maxs),
             ld: a.ld + b.ld,
             taint: a.taint + b.taint,
+        }
+    }
+
+    fn proj(&self, s: &OSum) -> Br {
+        Br {
+            c: s.c,
+            o: s.o,
+            work: s.work,
+        }
+    }
+
+    fn pempty(&self) -> Br {
+        Br::default()
+    }
+
+    fn pcombine(&self, a: Br, b: Br) -> Br {
+        Br {
+            c: a.c + b.c.saturating_sub(a.o),
+            o: b.o + a.o.saturating_sub(b.c),
+            work: a.work + b.work,
         }
     }
 }
@@ -1170,6 +1216,12 @@ impl Aug<ValueId, AccSum> for AccAug {
             len: a.len + b.len,
         }
     }
+
+    fn proj(&self, _: &AccSum) {}
+
+    fn pempty(&self) {}
+
+    fn pcombine(&self, (): (), (): ()) {}
 }
 
 /// Builds monoid values from the tree, reusing every whole subtree whose
@@ -1494,29 +1546,83 @@ impl EditSource for EditQueue {
 }
 
 /// The evaluator.
+/// A change to a unit's order tree (see `Engine::ord_op`).
+enum OrderOp {
+    Insert(u32, u64, OItem),
+    InsertRun(u32, Vec<(u64, OItem)>),
+    Remove(u32, u64),
+    Update(u32, u64, OItem),
+    SetMany(u32, Vec<(u64, OItem)>),
+}
+
+impl OrderOp {
+    fn unit(&self) -> u32 {
+        match *self {
+            OrderOp::Insert(u, ..)
+            | OrderOp::InsertRun(u, _)
+            | OrderOp::Remove(u, _)
+            | OrderOp::Update(u, ..)
+            | OrderOp::SetMany(u, _) => u,
+        }
+    }
+}
+
+/// A write a slice deferred because it touches a node of another slice.
+#[derive(Clone, Copy, Debug)]
+enum Tail {
+    /// `make_dirty_quiet` of the node.
+    Dirty(Slot),
+    /// `raise(node, height, origin)`.
+    Raise(Slot, u32, Slot),
+    /// The first node parked on the second: it joins the waiters.
+    ParkOn(Slot, Slot),
+    /// The first node, parked on the second, wakes at the height.
+    Wake(Slot, Slot, u32),
+    /// The second node reads the first's output (registered, or dropped).
+    OutAdd(Slot, Slot),
+    OutDel(Slot, Slot),
+}
+
+/// Whether slices are applied through overlays (`DEFUSE_OVERLAY=0`: in
+/// place, one after another, for comparison).
+fn slice_overlays() -> bool {
+    static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *P.get_or_init(|| std::env::var("DEFUSE_OVERLAY").map_or(true, |v| v != "0"))
+}
+
+/// Results per slice of a wide batch, and the width a batch needs to be
+/// sliced (`DEFUSE_SLICE`, `DEFUSE_SLICE_MIN` override them, for tests).
+fn slice_params() -> (usize, usize) {
+    static P: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
+    *P.get_or_init(|| {
+        let get = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        (get("DEFUSE_SLICE", 0), get("DEFUSE_SLICE_MIN", 256))
+    })
+}
+
 pub struct Engine {
-    pub(crate) values: Values,
+    pub(crate) values: Arc<Values>,
     ops: Vec<Arc<dyn Operation>>,
     pub(crate) nodes: Vec<Node>,
     /// Indices of free slots.
     free_slots: Vec<u32>,
     pub(crate) aux: Vec<Aux>,
     free_aux: Vec<u32>,
-    ids: FxHashMap<NodeId, Slot>,
+    ids: OvMap<NodeId, Slot>,
     pub(crate) units: Vec<Unit>,
     free_units: Vec<u32>,
-    pub(crate) order: Arena<OItem, OSum>,
+    pub(crate) order: Arena<OItem, OSum, Br>,
     accs_arena: Arena<ValueId, AccSum>,
     /// Built accumulator values of whole subtrees, by content summary
     /// (cleared at value sweeps).
     acc_cache: RwLock<FxHashMap<AccSum, ValueId>>,
     monoids: FxHashMap<Field, Arc<dyn Monoid>>,
-    defs_ix: BTreeMap<(u32, Field, u64), Slot>,
+    defs_ix: LabelIx<(u32, Field)>,
     /// Local definitions by scope depth: `(unit, field, depth, label)`.
-    local_ix: BTreeMap<(u32, Field, i32, u64), Slot>,
+    local_ix: LabelIx<(u32, Field, i32)>,
     /// The depth each local definition is indexed under.
     /// Runs of each stream claimer in this evaluation.
-    stream_runs: FxHashMap<Slot, u32>,
+    stream_runs: OvMap<Slot, u32>,
     /// The labels `stream_touch` saw this evaluation, in order: a claim
     /// that ran meanwhile is checked against those after its start.
     pub(crate) touch_log: Vec<(u32, u64)>,
@@ -1551,11 +1657,11 @@ pub struct Engine {
     /// of nodes past half their budget (`tracing` says any exist),
     /// children created per node, rounds in a row applying nothing, runs
     /// in all, and the start time.
-    runs_in_eval: FxHashMap<Slot, u32>,
-    causes: FxHashMap<Slot, Vec<Cause>>,
+    runs_in_eval: SlotCounts,
+    causes: OvMap<Slot, Vec<Cause>>,
     /// Nodes past half their run budget (`> 0`: causes are recorded).
     tracing: u32,
-    created_in_eval: FxHashMap<Slot, (u32, Vec<(OpId, ValueId)>)>,
+    created_in_eval: OvMap<Slot, (u32, Vec<(OpId, ValueId)>)>,
     /// While a run of fresh siblings is bound: (label, effect in the order,
     /// scope depth before it), sorted by label. Their definitions' depths
     /// come from here instead of a fold each.
@@ -1565,26 +1671,29 @@ pub struct Engine {
     #[cfg(not(target_arch = "wasm32"))]
     eval_start: Option<std::time::Instant>,
     /// Global definitions: `(unit, field, label)`.
-    global_ix: BTreeMap<(u32, Field, u64), Slot>,
-    users: BTreeMap<(u64, Field, u64), Slot>,
+    global_ix: LabelIx<(u32, Field)>,
+    users: LabelIx<(u64, Field)>,
     /// Of those, the chain reads (read at another node's position, so not
     /// found by position): keyed the same way.
-    chain_users: BTreeMap<(u64, Field, u64), Slot>,
+    chain_users: LabelIx<(u64, Field)>,
+    /// Per (unit, field), a bound on the labels of the uses ever indexed
+    /// (it only grows): a definition after it moves no use.
+    user_max: OvMap<(u32, Field), u64>,
     /// Pending nodes with an unbounded definition set.
-    pending: BTreeMap<(u32, u64), Slot>,
+    pending: LabelIx<u32>,
     /// Pending nodes whose scope effect is unknown.
-    pending_eff: BTreeMap<(u32, u64), Slot>,
+    pending_eff: LabelIx<u32>,
     /// Pending definition sets bounded to known fields.
-    pending_f: BTreeMap<(u32, Field, u64), Slot>,
+    pending_f: LabelIx<(u32, Field)>,
     /// Pending definition sets bounded to name prefixes: `(unit, prefix
     /// hash, label)`, with how many entries use each prefix length.
-    pending_p: BTreeMap<(u32, u64, u64), Slot>,
+    pending_p: LabelIx<(u32, u64)>,
     pending_p_lens: BTreeMap<usize, u32>,
     pub(crate) loop_vals: FxHashMap<Field, ValueId>,
     loop_init: FxHashMap<Field, ValueId>,
-    loop_users: FxHashMap<Field, FxHashSet<Slot>>,
-    loop_pubs: FxHashMap<Field, BTreeMap<NodeId, ValueId>>,
-    pub(crate) memo: FxHashMap<(OpId, ValueId), Slot>,
+    loop_users: OvMap<Field, FxHashSet<Slot>>,
+    loop_pubs: OvMap<Field, BTreeMap<NodeId, ValueId>>,
+    pub(crate) memo: OvMap<(OpId, ValueId), Slot>,
     pub(crate) text_memo: RwLock<FxHashMap<(ValueId, ValueId), ValueId>>,
     /// The text-only hooks of each (operation, text), computed once.
     statics: RwLock<FxHashMap<(OpId, ValueId), Arc<Static>>>,
@@ -1601,7 +1710,11 @@ pub struct Engine {
     /// Finished positions whose range readers are checked at the end of the
     /// batch.
     settle_pending: Vec<(u32, u64)>,
-    parked: BTreeSet<(NodeId, Slot)>,
+    /// Parked nodes, in the order they parked: an entry stands while
+    /// the node holds `F_PARKSET` (a node unparked and parked again has a
+    /// later entry too; `parked_nodes` drops the stale ones).
+    parked: Vec<Slot>,
+    parked_len: usize,
     roots: FxHashSet<Slot>,
     /// The hidden field an opener defines inside its scope: its kind.
     pub(crate) kind_field: Field,
@@ -1614,16 +1727,16 @@ pub struct Engine {
     /// collection (see `collect_apps`).
     apps_live: usize,
     apps_at_collect: usize,
-    claim_dirty: FxHashSet<Slot>,
+    claim_dirty: OvSet<Slot>,
     errors: Vec<EvalError>,
     /// Errors of a node's current result (an undeclared definition, a
     /// conflicting publication): withdrawn when the node runs again, so a
     /// run on a binding that a later structure change undoes does not end
     /// the evaluation; reported when it ends with them standing.
-    node_errors: FxHashMap<Slot, EvalError>,
+    node_errors: OvMap<Slot, EvalError>,
     pub(crate) level: u32,
     report: Report,
-    touched: FxHashMap<NodeId, Snap>,
+    touched: OvMap<NodeId, Snap>,
     max_rounds: u64,
     client_serial: u64,
     feedback: bool,
@@ -1632,9 +1745,19 @@ pub struct Engine {
     spec_live: u32,
     /// Nodes committed from a speculative run this evaluation (a later
     /// re-dirtying is a misprediction).
-    spec_done: FxHashSet<Slot>,
+    spec_done: OvSet<Slot>,
+    /// While a wide batch is applied slice by slice: the unit and label
+    /// range of the slice being applied. Writes to nodes outside it go to
+    /// `tail` and are replayed once every result of the batch is applied.
+    slice: Option<(u32, u64, u64)>,
+    tail: Vec<Tail>,
+    /// Nodes whose output changed while a sliced batch was applied.
+    tail_out_changed: OvSet<Slot>,
+    /// Nodes parked in this batch on a node with a lower id: if that one
+    /// finishes in the batch, they are lifted above it, not woken.
+    batch_lift: OvMap<Slot, Lifted>,
     /// Per node, what set its height besides what it read (see [`Origin`]).
-    origins: FxHashMap<Slot, Origin>,
+    origins: SlotMap<Origin>,
     /// Waits on each node this evaluation (for [`Report::top_waited`]).
     wait_counts: FxHashMap<Slot, u64>,
     /// Edits made so far (see [`Report::edits`]).
@@ -1645,7 +1768,7 @@ pub struct Engine {
     absorbed_in_round: u32,
     /// Marked nodes ([`Self::mark`]) with the version and output last
     /// reported for each.
-    marks: FxHashMap<Slot, Option<(u64, ValueId)>>,
+    marks: OvMap<Slot, Option<(u64, ValueId)>>,
     /// Operations whose nodes are marked at creation.
     marked_ops: Vec<OpId>,
     /// Marked nodes done, by height: reported once the level passes them.
@@ -1662,7 +1785,7 @@ pub struct Engine {
     sweeps: u64,
     /// Mispredictions per node this evaluation: past
     /// [`MISPREDICTIONS_PER_NODE`] the node is no longer a candidate.
-    mispredicted: FxHashMap<Slot, u32>,
+    mispredicted: OvMap<Slot, u32>,
     /// The node a dropped guess stopped on, per node: not a candidate
     /// again while that node is in work (every step would otherwise
     /// re-run the same stop).
@@ -1671,6 +1794,11 @@ pub struct Engine {
     values_at_sweep: usize,
     open_op: OpId,
     close_op: OpId,
+    /// While a wide batch's slices are applied: per node slot, the slice
+    /// holding a copy of it (see `slice`).
+    stage: Vec<AtomicU32>,
+    /// Set in an overlay engine (a slice of a wide batch, see `slice`).
+    ov: Option<Box<slice::Ov>>,
 }
 
 /// The built-in scope markers.
@@ -1756,7 +1884,7 @@ impl Engine {
     #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn new() -> Self {
-        let values = Values::new();
+        let values = Arc::new(Values::new());
         let kind_field = values.field("\u{1}scope-kind");
         let mut e = Engine {
             values,
@@ -1765,16 +1893,16 @@ impl Engine {
             free_slots: Vec::new(),
             aux: Vec::new(),
             free_aux: Vec::new(),
-            ids: FxHashMap::default(),
+            ids: OvMap::default(),
             units: Vec::new(),
             free_units: Vec::new(),
             order: Arena::default(),
             accs_arena: Arena::default(),
             acc_cache: RwLock::new(FxHashMap::default()),
             monoids: FxHashMap::default(),
-            defs_ix: BTreeMap::new(),
-            local_ix: BTreeMap::new(),
-            stream_runs: FxHashMap::default(),
+            defs_ix: LabelIx::default(),
+            local_ix: LabelIx::default(),
+            stream_runs: OvMap::default(),
             touch_log: Vec::new(),
             in_eval: false,
             relabels: 0,
@@ -1787,28 +1915,29 @@ impl Engine {
             env_waiters: FxHashMap::default(),
             env_provider: None,
             limits: Limits::default(),
-            runs_in_eval: FxHashMap::default(),
-            causes: FxHashMap::default(),
+            runs_in_eval: SlotCounts::default(),
+            causes: OvMap::default(),
             tracing: 0,
-            created_in_eval: FxHashMap::default(),
+            created_in_eval: OvMap::default(),
             run_depths: Vec::new(),
             idle_rounds: 0,
             eval_runs: 0,
             #[cfg(not(target_arch = "wasm32"))]
             eval_start: None,
-            global_ix: BTreeMap::new(),
-            users: BTreeMap::new(),
-            chain_users: BTreeMap::new(),
-            pending: BTreeMap::new(),
-            pending_eff: BTreeMap::new(),
-            pending_f: BTreeMap::new(),
-            pending_p: BTreeMap::new(),
+            global_ix: LabelIx::default(),
+            users: LabelIx::default(),
+            chain_users: LabelIx::default(),
+            user_max: OvMap::default(),
+            pending: LabelIx::default(),
+            pending_eff: LabelIx::default(),
+            pending_f: LabelIx::default(),
+            pending_p: LabelIx::default(),
             pending_p_lens: BTreeMap::new(),
             loop_vals: FxHashMap::default(),
             loop_init: FxHashMap::default(),
-            loop_users: FxHashMap::default(),
-            loop_pubs: FxHashMap::default(),
-            memo: FxHashMap::default(),
+            loop_users: OvMap::default(),
+            loop_pubs: OvMap::default(),
+            memo: OvMap::default(),
             text_memo: RwLock::new(FxHashMap::default()),
             statics: RwLock::new(FxHashMap::default()),
             queue: Vec::new(),
@@ -1816,44 +1945,51 @@ impl Engine {
             queue_len: 0,
             order_dirty: Vec::new(),
             settle_pending: Vec::new(),
-            parked: BTreeSet::new(),
+            parked: Vec::new(),
+            parked_len: 0,
             roots: FxHashSet::default(),
             kind_field: Field(ValueId::NONE),
             seqs: Vec::new(),
             seq_start: ValueId::NONE,
             apps_live: 0,
             apps_at_collect: 0,
-            claim_dirty: FxHashSet::default(),
+            claim_dirty: OvSet::default(),
             errors: Vec::new(),
-            node_errors: FxHashMap::default(),
+            node_errors: OvMap::default(),
             level: 0,
             report: Report::default(),
-            touched: FxHashMap::default(),
+            touched: OvMap::default(),
             max_rounds: DEFAULT_MAX_ROUNDS,
             client_serial: 0,
             feedback: false,
             loop_start: LoopStart::Initial,
             spec_live: 0,
-            spec_done: FxHashSet::default(),
-            origins: FxHashMap::default(),
+            spec_done: OvSet::default(),
+            slice: None,
+            tail: Vec::new(),
+            tail_out_changed: OvSet::default(),
+            batch_lift: OvMap::default(),
+            origins: SlotMap::default(),
             wait_counts: FxHashMap::default(),
             edit_version: 0,
             version: 0,
             absorbed_in_round: 0,
-            marks: FxHashMap::default(),
+            marks: OvMap::default(),
             marked_ops: Vec::new(),
             settle_heap: BinaryHeap::new(),
             settled: Vec::new(),
             settle_held: Vec::new(),
             done_heights: Vec::new(),
             done_max: 0,
-            mispredicted: FxHashMap::default(),
+            mispredicted: OvMap::default(),
             spec_blocked: FxHashMap::default(),
             sweeps: 0,
             pins: FxHashMap::default(),
             values_at_sweep: 0,
             open_op: OpId(0),
             close_op: OpId(0),
+            stage: Vec::new(),
+            ov: None,
         };
         e.open_op = e.register(Arc::new(Marker(Effect::Open)));
         e.close_op = e.register(Arc::new(Marker(Effect::Close)));
@@ -1896,6 +2032,24 @@ impl Engine {
     /// The text-only hooks of `op` on `args`: computed on first use (by
     /// any thread) and shared by every node with that text.
     pub(crate) fn statics(&self, op: OpId, args: ValueId) -> Arc<Static> {
+        if self.ov.is_some() {
+            // An overlay keeps its own copy of what it looked up: the
+            // base's lock is shared by every slice.
+            if let Some(st) = self
+                .statics
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&(op, args))
+            {
+                return st.clone();
+            }
+            let st = self.frozen().statics(op, args);
+            self.statics
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert((op, args), st.clone());
+            return st;
+        }
         if let Some(st) = self
             .statics
             .read()
@@ -1962,7 +2116,7 @@ impl Engine {
     /// marker left until the node's new effect applies has the value
     /// `seq_start`.
     fn is_client_def(&self, x: Slot, f: Field) -> bool {
-        f != self.kind_field && !(self.is_seq_hidden(f) && eff_opens(self.oitem(x).eff) > 0)
+        f != self.kind_field && !(self.is_seq_hidden(f) && eff_opens(self.eff_now(x)) > 0)
     }
 
     /// Fields the engine defines on its own (never client-declared).
@@ -2015,26 +2169,33 @@ impl Engine {
             return;
         }
         let half = self.limits.runs_per_node / 2;
-        if self.runs_in_eval.get(&x).is_none_or(|&c| c < half) {
+        if self.runs_in_eval.get(x).is_none_or(|c| c < half) {
             return;
         }
-        let v = self.causes.entry(x).or_default();
+        let v = self.causes.entry_or(x, Default::default);
         if v.len() == 4 {
             v.remove(0);
         }
         v.push(cause);
     }
 
+    /// The parked nodes, each once, in the order they parked.
+    fn parked_nodes(&self) -> Vec<Slot> {
+        let mut seen = FxHashSet::default();
+        self.parked
+            .iter()
+            .copied()
+            .filter(|&s| self.live(s) && self.n(s).has(F_PARKSET) && seen.insert(s))
+            .collect()
+    }
+
     /// The nodes an unfinished evaluation leaves waiting or queued.
     fn waiters(&self) -> Vec<Waiter> {
         let mut out: Vec<Waiter> = Vec::new();
-        for &(_, s) in &self.parked {
-            if !self.live(s) {
-                continue;
-            }
+        for s in self.parked_nodes() {
             let n = self.n(s);
             let on = if n.on != NIL && self.live(n.on) {
-                WaitOn::Node(self.n(n.on).id, self.origins.get(&s).and_then(|o| o.waited_field))
+                WaitOn::Node(self.n(n.on).id, self.origins.get(s).and_then(|o| o.waited_field))
             } else if let Some((f, _)) = self.env_waiters.iter().find(|(_, xs)| xs.contains(&s)) {
                 WaitOn::Environment(*f)
             } else if let Some((field, _)) = self.aux_of(s).and_then(|a| a.watch) {
@@ -2053,6 +2214,29 @@ impl Engine {
                     });
                 }
             }
+        }
+        out.sort_by_key(|w| w.node);
+        out.dedup_by_key(|w| w.node);
+        out
+    }
+
+    /// The waiters, plus every finished node held above a node it read
+    /// before that one was settled: its result stands only once that node
+    /// does (a cycle of two shows as one queued and one held).
+    fn waiters_with_held(&self) -> Vec<Waiter> {
+        let mut out = self.waiters();
+        for (s, o) in self.origins.iter() {
+            if o.raised == 0 || o.raised_how != Lifted::Read || !self.live(s) || self.n(s).state != State::Done {
+                continue;
+            }
+            let on = if o.raised_from != NIL && self.live(o.raised_from) && !self.settled(o.raised_from) {
+                WaitOn::Node(self.n(o.raised_from).id, None)
+            } else if o.raised_from == NIL {
+                WaitOn::Queued
+            } else {
+                continue;
+            };
+            out.push(Waiter { node: self.n(s).id, on });
         }
         out.sort_by_key(|w| w.node);
         out.dedup_by_key(|w| w.node);
@@ -2079,20 +2263,34 @@ impl Engine {
 
     // ----------------------------------------------------------------- access
 
+    #[inline]
     pub(crate) fn n(&self, s: Slot) -> &Node {
+        if let Some(ov) = &self.ov {
+            return ov.node(s);
+        }
         let n = &self.nodes[s.ix as usize];
         debug_assert_eq!(n.gen_, s.gen_, "stale node reference");
         n
     }
 
+    #[inline]
     fn nm(&mut self, s: Slot) -> &mut Node {
+        if self.ov.is_some() {
+            return self.nm_ov(s);
+        }
         let n = &mut self.nodes[s.ix as usize];
         debug_assert_eq!(n.gen_, s.gen_, "stale node reference");
         n
     }
 
     /// Whether `s` refers to a node that still exists (the same one).
+    #[inline]
     pub(crate) fn live(&self, s: Slot) -> bool {
+        if let Some(ov) = &self.ov {
+            return ov
+                .node_opt(s)
+                .is_some_and(|n| n.gen_ == s.gen_ && n.state != State::Free);
+        }
         self.nodes
             .get(s.ix as usize)
             .is_some_and(|n| n.gen_ == s.gen_ && n.state != State::Free)
@@ -2167,10 +2365,10 @@ impl Engine {
             if n.state == State::Inert || n.has(F_APP) {
                 continue;
             }
-            let root = self.units[n.unit as usize].root;
+            let root = self.root(n.unit);
             for d in &n.defs {
                 if d.global {
-                    if self.global_ix.get(&(n.unit, d.field, n.label)) != Some(&s) {
+                    if self.global_ix.get(&(n.unit, d.field), n.label) != Some(s) {
                         bad.push(format!("{s:?}: global {:?} not indexed", d.field));
                     }
                     continue;
@@ -2217,7 +2415,7 @@ impl Engine {
                         desc(w.site)
                     ));
                 }
-                if self.users.get(&(site_key(n.unit, u.site), f, n.label)) != Some(&s) {
+                if self.users.get(&(site_key(n.unit, u.site), f), n.label) != Some(s) {
                     bad.push(format!("{s:?}: use of {} missing from users", self.values.render(f.0)));
                 }
             }
@@ -2257,12 +2455,23 @@ impl Engine {
         }
     }
 
+    #[inline]
     pub(crate) fn aux_of(&self, s: Slot) -> Option<&Aux> {
+        if self.ov.is_some() {
+            return self.aux_of_ov(s);
+        }
         let a = self.n(s).aux;
         if a == NO_AUX { None } else { Some(&self.aux[a as usize]) }
     }
 
     fn aux_mut_opt(&mut self, s: Slot) -> Option<&mut Aux> {
+        if self.ov.is_some() {
+            return if self.n(s).aux == NO_AUX {
+                None
+            } else {
+                Some(self.ax_ov(s))
+            };
+        }
         let a = self.n(s).aux;
         if a == NO_AUX {
             None
@@ -2272,6 +2481,9 @@ impl Engine {
     }
 
     fn ax(&mut self, s: Slot) -> &mut Aux {
+        if self.ov.is_some() {
+            return self.ax_ov(s);
+        }
         if self.n(s).aux == NO_AUX {
             let i = if let Some(i) = self.free_aux.pop() {
                 self.aux[i as usize] = Aux::default();
@@ -2284,6 +2496,85 @@ impl Engine {
         }
         let a = self.n(s).aux;
         &mut self.aux[a as usize]
+    }
+
+    #[inline]
+    pub(crate) fn unit(&self, u: u32) -> &Unit {
+        &self.frozen().units[u as usize]
+    }
+
+    #[inline]
+    fn unit_mut(&mut self, u: u32) -> &mut Unit {
+        if let Some(ov) = &mut self.ov {
+            ov.fail("a change to a unit");
+            return &mut ov.scratch_unit;
+        }
+        &mut self.units[u as usize]
+    }
+
+    /// The root of `u`'s order tree.
+    #[inline]
+    pub(crate) fn root(&self, u: u32) -> u32 {
+        if let Some(ov) = &self.ov
+            && let Some(&r) = ov.roots.get(&u)
+        {
+            return r;
+        }
+        self.frozen().units[u as usize].root
+    }
+
+    #[inline]
+    fn set_root(&mut self, u: u32, r: u32) {
+        if let Some(ov) = &mut self.ov {
+            ov.roots.insert(u, r);
+            return;
+        }
+        self.units[u as usize].root = r;
+    }
+
+    /// Applies a change to a unit's order tree (an overlay also logs it,
+    /// to replay on its base when merged).
+    fn ord_op(&mut self, op: OrderOp) {
+        let unit = op.unit();
+        let root = self.root(unit);
+        let r = match &op {
+            OrderOp::Insert(_, l, item) => self.order.insert(&OAug, root, *l, *item),
+            OrderOp::InsertRun(_, items) => self.order.insert_run(&OAug, root, items),
+            OrderOp::Remove(_, l) => self.order.remove(&OAug, root, *l).0,
+            OrderOp::Update(_, l, item) => {
+                let item = *item;
+                self.order.update(&OAug, root, *l, &mut |i| *i = item);
+                root
+            }
+            OrderOp::SetMany(_, items) => {
+                self.order.set_many(&OAug, root, items);
+                root
+            }
+        };
+        if r != root {
+            self.set_root(unit, r);
+        }
+        if let Some(ov) = &mut self.ov {
+            ov.order_log.push(op);
+        }
+    }
+
+    /// The root of `u`'s accumulator tree for `f`.
+    fn acc_root(&self, u: u32, f: Field) -> u32 {
+        if let Some(ov) = &self.ov
+            && let Some(&r) = ov.acc_roots.get(&(u, f))
+        {
+            return r;
+        }
+        self.frozen().units[u as usize].accs.get(&f).copied().unwrap_or(TNIL)
+    }
+
+    fn set_acc_root(&mut self, u: u32, f: Field, r: u32) {
+        if let Some(ov) = &mut self.ov {
+            ov.acc_roots.insert((u, f), r);
+            return;
+        }
+        self.units[u as usize].accs.insert(f, r);
     }
 
     pub(crate) fn children_of(&self, s: Slot) -> &[Slot] {
@@ -2323,8 +2614,13 @@ impl Engine {
         false
     }
 
+    /// The nodes in work over `[lo, hi)` of a unit.
+    fn work_in(&self, unit: u32, lo: u64, hi: u64) -> u32 {
+        self.order.pfold(&OAug, self.root(unit), lo, hi).work
+    }
+
     fn ord_fold(&self, unit: u32, lo: u64, hi: u64) -> OSum {
-        self.order.fold(&OAug, self.units[unit as usize].root, lo, hi)
+        self.order.fold(&OAug, self.root(unit), lo, hi)
     }
 
     // ----------------------------------------------------------- public reads
@@ -2420,8 +2716,8 @@ impl Engine {
         if n.has(F_APP) {
             return None;
         }
-        let w = self.walk(n.unit, n.label, field);
-        (w.site != NIL).then(|| self.n(w.site).id)
+        let site = self.walk_site(n.unit, n.label, field).0;
+        (site != NIL).then(|| self.n(site).id)
     }
 
     #[must_use]
@@ -2466,7 +2762,7 @@ impl Engine {
 
     fn mispredicted(&mut self, x: Slot) {
         self.report.mispredictions += 1;
-        *self.mispredicted.entry(x).or_insert(0) += 1;
+        *self.mispredicted.entry_or(x, || 0) += 1;
     }
 
     /// Whether `s` may still be run speculatively this evaluation: not
@@ -2474,6 +2770,7 @@ impl Engine {
     fn may_speculate(&self, s: Slot) -> bool {
         self.mispredicted.get(&s).is_none_or(|&c| c < MISPREDICTIONS_PER_NODE)
             && self
+                .frozen()
                 .spec_blocked
                 .get(&s)
                 .is_none_or(|&(t, id)| !(self.live(t) && self.n(t).id == id && self.n(t).in_work()))
@@ -2492,6 +2789,10 @@ impl Engine {
     }
 
     fn done_count(&mut self, h: u32, up: bool) {
+        if let Some(ov) = &mut self.ov {
+            ov.done_log.push((h, up));
+            return;
+        }
         let h = h as usize;
         if self.done_heights.len() <= h {
             self.done_heights.resize(h + 1, 0);
@@ -2546,7 +2847,7 @@ impl Engine {
             }
             let n = self.n(x);
             let h = n.height;
-            let origin = self.origins.get(&x).copied();
+            let origin = self.origins.get(x).copied();
             // The read whose site stands highest; ties: the first recorded.
             let mut best: Option<(u32, Slot, Cause)> = None;
             let mut offer = |cand: (u32, Slot, Cause)| {
@@ -2578,7 +2879,7 @@ impl Engine {
             }
             if let Some((field, anchor)) = self.aux_of(x).and_then(|a| a.watch) {
                 let lo = self.watch_key(x, anchor).0;
-                let root = self.units[n.unit as usize].root;
+                let root = self.root(n.unit);
                 let top = self.order.fold(&OAug, root, lo, n.label).maxh;
                 let last = self
                     .order
@@ -2692,6 +2993,10 @@ impl Engine {
     }
 
     fn alloc_unit(&mut self, owner: Slot) -> u32 {
+        if self.ov.is_some() {
+            self.ov_fail("a new unit");
+            return 0;
+        }
         let u = Unit {
             root: TNIL,
             env: FxHashMap::default(),
@@ -2719,7 +3024,7 @@ impl Engine {
     /// Appends a node at the end of `unit`.
     pub fn push(&mut self, unit: UnitId, op: OpId, args: Vec<ValueId>) -> NodeId {
         span!(Edit);
-        let after = self.order.last(self.units[unit.0 as usize].root).map(|(_, i)| i.slot);
+        let after = self.order.last(self.root(unit.0)).map(|(_, i)| i.slot);
         let after = after.map(|a| self.subtree_end(a));
         self.client_insert(unit, after, op, args)
     }
@@ -2747,10 +3052,7 @@ impl Engine {
         let b = self.slot_of(before);
         let n = self.n(b);
         let unit = UnitId(n.unit);
-        let prev = self
-            .order
-            .prev(self.units[n.unit as usize].root, n.label)
-            .map(|(_, i)| i.slot);
+        let prev = self.order.prev(self.root(n.unit), n.label).map(|(_, i)| i.slot);
         self.client_insert(unit, prev, op, args)
     }
 
@@ -2778,10 +3080,7 @@ impl Engine {
         );
         let unit = self.n(s).unit;
         let label = self.n(s).label;
-        let prev = self
-            .order
-            .prev(self.units[unit as usize].root, label)
-            .map(|(_, i)| i.slot);
+        let prev = self.order.prev(self.root(unit), label).map(|(_, i)| i.slot);
         let by = self.aux_of(s).and_then(|a| a.claimed_by);
         self.dirty_reaching_claims(unit, label);
         self.roots.remove(&s);
@@ -2915,7 +3214,7 @@ impl Engine {
         }
         let prev = self
             .order
-            .prev(self.units[self.n(s).unit as usize].root, self.n(s).label)
+            .prev(self.root(self.n(s).unit), self.n(s).label)
             .map(|(_, i)| i.slot);
         if let Some(p) = prev {
             self.claimer_near(p);
@@ -3009,6 +3308,10 @@ impl Engine {
     /// Stores what the provider answered for `f` during a run (nothing
     /// when the environment already says so).
     fn provide_env(&mut self, f: Field, answer: Option<ValueId>) {
+        if self.ov.is_some() {
+            self.ov_fail("the environment");
+            return;
+        }
         let known = if let Some(v) = answer {
             self.environment.get(&f) == Some(&v)
         } else {
@@ -3037,7 +3340,7 @@ impl Engine {
             return;
         }
         for unit in 0..u32::try_from(self.units.len()).expect("unit count") {
-            let u = &self.units[unit as usize];
+            let u = self.unit(unit);
             if u.live && u.owner == NIL && !u.env.contains_key(&f) {
                 self.dirty_field_users(site_key(unit, NIL), f, &Cause::Environment { field: f });
             }
@@ -3083,12 +3386,12 @@ impl Engine {
             }
         }
         for unit in 0..u32::try_from(self.units.len()).expect("unit count") {
-            let u = &self.units[unit as usize];
+            let u = self.unit(unit);
             if !u.live || u.owner != NIL {
                 continue;
             }
             for &f in &changed {
-                if !self.units[unit as usize].env.contains_key(&f) {
+                if !self.unit(unit).env.contains_key(&f) {
                     self.dirty_field_users(site_key(unit, NIL), f, &Cause::Environment { field: f });
                 }
             }
@@ -3098,7 +3401,7 @@ impl Engine {
     /// The environment's value of `f` for a node of `unit`: `Err(())` when
     /// neither supplied nor declared absent (a body sees none).
     pub(crate) fn env_value(&self, unit: u32, f: Field) -> Result<Option<ValueId>, ()> {
-        if self.units[unit as usize].owner != NIL {
+        if self.unit(unit).owner != NIL {
             return Ok(None);
         }
         match self.environment.get(&f) {
@@ -3110,15 +3413,21 @@ impl Engine {
 
     /// The value `f` has at the start of `unit`.
     pub(crate) fn start_value(&self, unit: u32, f: Field) -> Option<ValueId> {
-        let u = &self.units[unit as usize];
+        let u = self.unit(unit);
         u.env
             .get(&f)
-            .or_else(|| if u.owner == NIL { self.environment.get(&f) } else { None })
+            .or_else(|| {
+                if u.owner == NIL {
+                    self.frozen().environment.get(&f)
+                } else {
+                    None
+                }
+            })
             .copied()
     }
 
     fn set_env_slot(&mut self, unit: u32, field: Field, value: ValueId) {
-        let old = self.units[unit as usize].env.insert(field, value);
+        let old = self.unit_mut(unit).env.insert(field, value);
         if old != Some(value) {
             self.dirty_field_users(site_key(unit, NIL), field, &Cause::Environment { field });
         }
@@ -3258,7 +3567,9 @@ impl Engine {
             uses: Box::new([]),
             defs: Box::new([]),
         };
-        let s = if let Some(ix) = self.free_slots.pop() {
+        let s = if self.ov.is_some() {
+            self.fresh_ov(node)
+        } else if let Some(ix) = self.free_slots.pop() {
             let gen_ = self.nodes[ix as usize].gen_;
             self.nodes[ix as usize] = Node { gen_, ..node };
             Slot { ix, gen_ }
@@ -3269,6 +3580,9 @@ impl Engine {
                 gen_: 0,
             }
         };
+        if self.ov_aborted() {
+            return s;
+        }
         assert!(self.ids.insert(id, s).is_none(), "node id collision");
         if self.marked_ops.contains(&op) {
             self.marks.insert(s, None);
@@ -3283,7 +3597,7 @@ impl Engine {
                 sites: Vec::new(),
             },
         );
-        if parent == NIL && self.units[unit as usize].owner != NIL && after.is_none() {
+        if parent == NIL && self.unit(unit).owner != NIL && after.is_none() {
             // A body-unit child placed at the start.
         }
         let label = label.unwrap_or_else(|| self.alloc_label(unit, after));
@@ -3292,9 +3606,8 @@ impl Engine {
         let item = self.oitem(s);
         self.nm(s).bound = item.eff;
         if in_order {
-            let root = self.units[unit as usize].root;
             span!(OrderInsert);
-            self.units[unit as usize].root = self.order.insert(&OAug, root, label, item);
+            self.ord_op(OrderOp::Insert(unit, label, item));
         }
         s
     }
@@ -3366,7 +3679,7 @@ impl Engine {
         let (unit, lo) = (n.unit, n.label);
         let hi = self.n(last).label;
         self.dirty_reaching_claims(unit, lo);
-        if let Some((_, i)) = self.order.prev(self.units[unit as usize].root, lo) {
+        if let Some((_, i)) = self.order.prev(self.root(unit), lo) {
             // The node before the run may claim it, unless the run is the
             // creator's own unfolding (children after its claimed text,
             // continuations): a node never claims what it unfolded.
@@ -3376,7 +3689,7 @@ impl Engine {
                 self.claimer_near(p);
             }
         }
-        let u = &self.units[unit as usize];
+        let u = self.unit(unit);
         let from = lo.saturating_sub(u.max_span);
         let readers: Vec<(Slot, Watch)> = u
             .watches
@@ -3460,6 +3773,10 @@ impl Engine {
     }
 
     fn create_app(&mut self, op: OpId, args: ValueId) -> Slot {
+        if self.ov.is_some() {
+            self.ov_fail("an application");
+            return NIL;
+        }
         self.apps_live += 1;
         let id = NodeId(hash_words(12, &[u64::from(op.0), args.0]));
         let body = self.alloc_unit(NIL);
@@ -3514,7 +3831,7 @@ impl Engine {
                 sites: Vec::new(),
             },
         );
-        self.units[body as usize].owner = s;
+        self.unit_mut(body).owner = s;
         self.ax(s).body = Some(body);
         self.memo.insert((op, args), s);
         self.enqueue(s);
@@ -3524,8 +3841,22 @@ impl Engine {
     /// Whether `s` opens a scope before itself (with `run` the effect its
     /// current run has set): its own reads are inside that scope.
     pub(crate) fn opens_before(&self, s: Slot, run: Option<u8>) -> bool {
-        let e = run.unwrap_or_else(|| self.oitem(s).eff);
+        let e = run.unwrap_or_else(|| self.eff_now(s));
         e & EFF_BEFORE != 0 && eff_opens(e) > 0
+    }
+
+    /// The scope effect the order holds for `s`: a pending effect keeps
+    /// the one the bindings reflect until the node is done (the
+    /// pending-effect index makes readers wait).
+    fn eff_now(&self, s: Slot) -> u8 {
+        let n = self.n(s);
+        if n.state == State::Inert {
+            EFF_NONE
+        } else if n.has(F_EFF_DYN) && n.in_work() {
+            n.bound
+        } else {
+            n.effect
+        }
     }
 
     fn oitem(&self, s: Slot) -> OItem {
@@ -3539,15 +3870,7 @@ impl Engine {
         };
         OItem {
             slot: s,
-            // A pending effect keeps the one the bindings reflect until the
-            // node is done (the pending-effect index makes readers wait).
-            eff: if inert {
-                EFF_NONE
-            } else if n.has(F_EFF_DYN) && n.in_work() {
-                n.bound
-            } else {
-                n.effect
-            },
+            eff: self.eff_now(s),
             pend: !inert && n.has(F_INPEND),
             work: n.in_work(),
             h: n.height,
@@ -3569,8 +3892,7 @@ impl Engine {
         }
         let (unit, label) = (n.unit, n.label);
         let item = self.oitem(s);
-        let root = self.units[unit as usize].root;
-        self.order.update(&OAug, root, label, &mut |i| *i = item);
+        self.ord_op(OrderOp::Update(unit, label, item));
     }
 
     /// The label of the last node `x` unfolded (children and continuations,
@@ -3626,7 +3948,7 @@ impl Engine {
         let k = k.max(1) as u64;
         loop {
             let lo = after.map_or(0, |a| self.n(a).label);
-            let root = self.units[unit as usize].root;
+            let root = self.root(unit);
             let hi = self.order.next(root, lo).map_or(u64::MAX, |(k, _)| k);
             if hi == u64::MAX && (u64::MAX - lo) / GAP > k + 1 {
                 return (1..=k).map(|i| lo + GAP * i).collect();
@@ -3642,9 +3964,13 @@ impl Engine {
     /// Renumbers the labels around `lo` so that at least `need` labels fit
     /// between any two neighbours there.
     fn relabel_around(&mut self, unit: u32, lo: u64, need: u64) {
+        if self.ov.is_some() {
+            self.ov_fail("renumbering labels");
+            return;
+        }
         let mut w = 8usize;
         loop {
-            let root = self.units[unit as usize].root;
+            let root = self.root(unit);
             let mut before = Vec::new();
             let mut k = lo.saturating_add(1);
             while before.len() < w {
@@ -3716,16 +4042,14 @@ impl Engine {
             .map(|u| (site_key(unit, u.site), Field(ValueId(u.key)), u.kind == K_CHAIN))
             .collect();
         let pend = n.has(F_INPEND);
-        let root = self.units[unit as usize].root;
-        let (r, _) = self.order.remove(&OAug, root, label);
-        self.units[unit as usize].root = r;
+        self.ord_op(OrderOp::Remove(unit, label));
         for (f, depth) in defs {
             self.ix_remove(unit, f, label, depth);
         }
         for (s, f, chain) in uses {
-            self.users.remove(&(s, f, label));
+            self.users.remove(&(s, f), label);
             if chain {
-                self.chain_users.remove(&(s, f, label));
+                self.chain_users.remove(&(s, f), label);
             }
         }
         if pend {
@@ -3752,15 +4076,15 @@ impl Engine {
         let pend = n.has(F_INPEND);
         let item = self.oitem(x);
         self.nm(x).bound = item.eff;
-        let root = self.units[unit as usize].root;
-        self.units[unit as usize].root = self.order.insert(&OAug, root, label, item);
+        self.ord_op(OrderOp::Insert(unit, label, item));
         for f in defs {
             self.ix_insert(unit, f, label, x);
         }
         for (s, f, chain) in uses {
-            self.users.insert((s, f, label), x);
+            self.note_user(unit, f, label);
+            self.users.insert((s, f), label, x);
             if chain {
-                self.chain_users.insert((s, f, label), x);
+                self.chain_users.insert((s, f), label, x);
             }
         }
         if pend {
@@ -3775,7 +4099,7 @@ impl Engine {
     // ------------------------------------------------------------- binding
 
     fn def_global(&self, d: Slot, f: Field) -> bool {
-        self.n(d).defs.iter().any(|x| x.field == f && x.global)
+        self.n(d).def_index(f).is_some_and(|i| self.n(d).defs[i].global)
     }
 
     /// Whether the node at `label` lies after its own brackets.
@@ -3807,18 +4131,18 @@ impl Engine {
         }
         let inside = self.def_inside(root, label, f);
         self.order
-            .fold(&OAug, root, 0, if inside { label + 1 } else { label })
+            .pfold(&OAug, root, 0, if inside { label + 1 } else { label })
             .o
     }
 
     fn ix_insert(&mut self, unit: u32, f: Field, label: u64, x: Slot) {
-        self.defs_ix.insert((unit, f, label), x);
+        self.defs_ix.insert((unit, f), label, x);
         if self.def_global(x, f) {
-            self.global_ix.insert((unit, f, label), x);
+            self.global_ix.insert((unit, f), label, x);
         } else {
-            let root = self.units[unit as usize].root;
+            let root = self.root(unit);
             let depth = self.stored_depth(unit, label, self.def_depth(root, label, f));
-            self.local_ix.insert((unit, f, depth, label), x);
+            self.local_ix.insert((unit, f, depth), label, x);
             for d in &mut self.nm(x).defs {
                 if d.field == f {
                     d.depth = depth;
@@ -3829,20 +4153,20 @@ impl Engine {
 
     /// The depth `x`'s definition of `f` is indexed at.
     fn indexed_depth(&self, x: Slot, f: Field) -> i32 {
-        self.n(x).defs.iter().find(|d| d.field == f).map_or(0, |d| d.depth)
+        self.n(x).def_index(f).map_or(0, |i| self.n(x).defs[i].depth)
     }
 
     fn ix_remove(&mut self, unit: u32, f: Field, label: u64, depth: i32) {
-        self.defs_ix.remove(&(unit, f, label));
-        if self.global_ix.remove(&(unit, f, label)).is_none() {
-            self.local_ix.remove(&(unit, f, depth, label));
+        self.defs_ix.remove(&(unit, f), label);
+        if self.global_ix.remove(&(unit, f), label).is_none() {
+            self.local_ix.remove(&(unit, f, depth), label);
         }
     }
 
     /// The pending depth shift at `label`: what the scope depth of the
     /// labels there gained since their definitions were indexed.
     fn shift_at(&self, unit: u32, label: u64) -> i32 {
-        self.units[unit as usize]
+        self.unit(unit)
             .shifts
             .iter()
             .filter(|&&(lo, hi, _)| lo <= label && label < hi)
@@ -3859,7 +4183,7 @@ impl Engine {
     /// `[lo, hi)` cut at the pending shifts' boundaries: pieces with the
     /// shift on each, in label order.
     fn shift_pieces(&self, unit: u32, lo: u64, hi: u64) -> Vec<(u64, u64, i32)> {
-        let shifts = &self.units[unit as usize].shifts;
+        let shifts = &self.unit(unit).shifts;
         if shifts.is_empty() {
             return vec![(lo, hi, 0)];
         }
@@ -3891,11 +4215,7 @@ impl Engine {
         }
         let d = i32::try_from(depth).unwrap_or(i32::MAX);
         for (a, b, s) in self.shift_pieces(unit, lo, hi).into_iter().rev() {
-            if let Some((&(_, _, _, l), &x)) = self
-                .local_ix
-                .range((unit, f, d - s, a)..(unit, f, d - s, b))
-                .next_back()
-            {
+            if let Some((l, x)) = self.local_ix.range(&(unit, f, d - s), a..b).next_back() {
                 return Some((l, x));
             }
         }
@@ -3917,7 +4237,7 @@ impl Engine {
     /// label order. Subtrees of the order without definitions, or lying
     /// entirely deeper than `depth`, are skipped.
     fn locals_in(&self, unit: u32, depth: Option<u32>, lo: u64, hi: u64) -> Vec<(u64, Slot, Field, u32)> {
-        let root = self.units[unit as usize].root;
+        let root = self.root(unit);
         let mut out = Vec::new();
         if lo >= hi {
             return out;
@@ -3949,8 +4269,16 @@ impl Engine {
     /// it lies directly in one of the scopes enclosing the use: one range
     /// query per enclosing level, never a scan over closed scopes.
     pub(crate) fn walk(&self, unit: u32, label: u64, f: Field) -> WalkResult {
+        let (site, site_label) = self.walk_site(unit, label, f);
+        let root = self.root(unit);
+        self.walk_pending(unit, label, f, root, site, site_label)
+    }
+
+    /// The reaching definition of `f` for a use at `label` and its label
+    /// (`NIL`, 0: none), without the pending nodes `walk` also finds.
+    pub(crate) fn walk_site(&self, unit: u32, label: u64, f: Field) -> (Slot, u64) {
         count!(Walk);
-        let root = self.units[unit as usize].root;
+        let root = self.root(unit);
         let mut local: Option<(u64, Slot, u32)> = None;
         // Brackets up to `bhi` (exclusive) enclose the use: a node whose
         // brackets come before it lies after them, except that the kind it
@@ -3961,7 +4289,7 @@ impl Engine {
         } else {
             label
         };
-        let mut depth = self.order.fold(&OAug, root, 0, bhi).o;
+        let mut depth = self.order.pfold(&OAug, root, 0, bhi).o;
         let mut hi = label;
         // Closes the node at `bhi` makes before it opens (a separator that
         // closes a scope and opens the next): they close that many scopes
@@ -3972,7 +4300,7 @@ impl Engine {
             let opener = if depth == 0 {
                 None
             } else {
-                self.order.search_back(&OAug, root, bhi, &|s: OSum| s.o > extra)
+                self.order.psearch_back(&OAug, root, bhi, &|s: Br| s.o > extra)
             };
             // The opener's own definitions inside its scope (its kind, or
             // all of them if it opens before itself) count at this level.
@@ -3993,11 +4321,7 @@ impl Engine {
                 _ => break,
             }
         }
-        let global = self
-            .global_ix
-            .range((unit, f, 0)..(unit, f, label))
-            .next_back()
-            .map(|(&(_, _, l), &d)| (l, d));
+        let global = self.global_ix.range(&(unit, f), 0..label).next_back();
         let (site, site_label) = match (local, global) {
             (Some((ll, ld, _)), Some((gl, gd))) => {
                 if ll > gl {
@@ -4010,18 +4334,19 @@ impl Engine {
             (None, Some((gl, gd))) => (gd, gl),
             (None, None) => (NIL, 0),
         };
+        (site, site_label)
+    }
+
+    /// The nearest pending node between a use at `label` and its reaching
+    /// definition `site` (at `site_label`), with what it may change.
+    fn walk_pending(&self, unit: u32, label: u64, f: Field, root: u32, site: Slot, site_label: u64) -> WalkResult {
         let all = self
             .pending
-            .range((unit, site_label + 1)..(unit, label))
+            .range(&unit, site_label + 1..label)
             .rev()
-            .find(|&(_, &p)| self.pending_for(p, f))
-            .map(|(&(_, l), &p)| (l, p));
+            .find(|&(_, p)| self.pending_for(p, f));
         let eff = self.walk_effects(unit, f, site_label, label);
-        let one = self
-            .pending_f
-            .range((unit, f, site_label + 1)..(unit, f, label))
-            .next_back()
-            .map(|(&(_, _, l), &p)| (l, p));
+        let one = self.pending_f.range(&(unit, f), site_label + 1..label).next_back();
         let pre = self.walk_prefixes(unit, f, site_label, label);
         // A pending claim before the site that could extend over it may
         // swallow the definition.
@@ -4065,7 +4390,7 @@ impl Engine {
                 break;
             }
             let h = hash_bytes(PREFIX_SEED, &name[..len]);
-            if let Some((&(_, _, l), &p)) = self.pending_p.range((unit, h, site + 1)..(unit, h, label)).next_back()
+            if let Some((l, p)) = self.pending_p.range(&(unit, h), site + 1..label).next_back()
                 && best.is_none_or(|b| l > b.0)
             {
                 best = Some((l, p));
@@ -4087,36 +4412,29 @@ impl Engine {
     /// a definition of `f` lies in that range or a close is ignored there;
     /// effects sharing an outermost scope are checked once.
     fn walk_effects(&self, unit: u32, f: Field, site: u64, label: u64) -> Option<(u64, Slot)> {
-        let (&(_, first), &first_s) = self.pending_eff.range((unit, site + 1)..(unit, label)).next_back()?;
+        let (first, first_s) = self.pending_eff.range(&unit, site + 1..label).next_back()?;
         if f == self.kind_field {
             // A pending effect may open a scope, defining a nearer kind.
             return Some((first, first_s));
         }
-        let root = self.units[unit as usize].root;
+        let root = self.root(unit);
         // The common case: no other definition and no close between the
         // site and the use, so every pending effect between them lies in
         // the site's top-level scope (if it has one), where it may hide it.
-        if self
-            .defs_ix
-            .range((unit, f, site + 1)..(unit, f, label))
-            .next()
-            .is_none()
-            && self.order.fold(&OAug, root, site + 1, label).c == 0
+        if self.defs_ix.range(&(unit, f), site + 1..label).next().is_none()
+            && self.order.pfold(&OAug, root, site + 1, label).c == 0
         {
             let in_scope = site != 0 && self.def_depth(root, site, f) > 0;
             return in_scope.then_some((first, first_s));
         }
-        let ignored = |x: u64| self.order.fold(&OAug, root, 0, x).c;
+        let ignored = |x: u64| self.order.pfold(&OAug, root, 0, x).c;
         // A close ignored at depth 0 after a pending effect shifts every
         // depth up to it: any pending effect before the last such close in
         // the range counts.
         let target = ignored(label);
         if target > ignored(site + 1)
-            && let Some(c) = self.order.search_fwd(&OAug, root, 0, &|s: OSum| s.c >= target)
-            && let Some((&(_, p), &s)) = self
-                .pending_eff
-                .range((unit, site + 1)..(unit, c.min(label)))
-                .next_back()
+            && let Some(c) = self.order.psearch_fwd(&OAug, root, 0, &|s: Br| s.c >= target)
+            && let Some((p, s)) = self.pending_eff.range(&unit, site + 1..c.min(label)).next_back()
         {
             return Some((p, s));
         }
@@ -4129,7 +4447,7 @@ impl Engine {
             if hi <= site + 1 {
                 return None;
             }
-            let (&(_, p), &s) = self.pending_eff.range((unit, site + 1)..(unit, hi)).next_back()?;
+            let (p, s) = self.pending_eff.range(&unit, site + 1..hi).next_back()?;
             match self.effect_scope(unit, p, label, f) {
                 Ok(()) => return Some((p, s)),
                 Err(open) if open == p => {
@@ -4139,13 +4457,13 @@ impl Engine {
                     // after it may hold the definition in its scope.
                     let prev = self
                         .order
-                        .search_back(&OAug, root, p, &|s: OSum| s.c >= 1)
+                        .psearch_back(&OAug, root, p, &|s: Br| s.c >= 1)
                         .map_or(0, |k| k + 1);
                     hi = self
                         .defs_ix
-                        .range((unit, f, prev)..(unit, f, p))
+                        .range(&(unit, f), prev..p)
                         .next_back()
-                        .map_or(prev, |(&(_, _, l), _)| l + 1);
+                        .map_or(prev, |(l, _)| l + 1);
                 }
                 Err(open) => hi = open.min(p),
             }
@@ -4165,8 +4483,8 @@ impl Engine {
     /// visible past its close.
     /// `Err(open)`: it cannot, nor can any effect in `(open, p)`.
     fn effect_scope(&self, unit: u32, p: u64, label: u64, f: Field) -> Result<(), u64> {
-        let root = self.units[unit as usize].root;
-        let depth = self.order.fold(&OAug, root, 0, p).o;
+        let root = self.root(unit);
+        let depth = self.order.pfold(&OAug, root, 0, p).o;
         let (open, close) = if depth == 0 {
             let opens = self.order.get(root, p).map_or(0, |i| eff_opens(i.eff));
             if opens == 0 {
@@ -4174,7 +4492,7 @@ impl Engine {
             }
             let close = self
                 .order
-                .search_fwd(&OAug, root, p, &|s: OSum| s.c >= opens)
+                .psearch_fwd(&OAug, root, p, &|s: Br| s.c >= opens)
                 .unwrap_or(u64::MAX);
             if label <= close {
                 // The use lies inside: the latest definition before it
@@ -4185,21 +4503,16 @@ impl Engine {
         } else {
             (
                 self.order
-                    .search_back(&OAug, root, p, &|s: OSum| s.o >= depth)
+                    .psearch_back(&OAug, root, p, &|s: Br| s.o >= depth)
                     .unwrap_or(0),
                 self.order
-                    .search_fwd(&OAug, root, p, &|s: OSum| s.c >= depth)
+                    .psearch_fwd(&OAug, root, p, &|s: Br| s.c >= depth)
                     .unwrap_or(u64::MAX),
             )
         };
         // An opener's start-of-sequence marker lies inside its scope.
         let from = if self.is_seq_hidden(f) { open } else { open + 1 };
-        if self
-            .defs_ix
-            .range((unit, f, from)..(unit, f, close.min(label)))
-            .next()
-            .is_some()
-        {
+        if self.defs_ix.range(&(unit, f), from..close.min(label)).next().is_some() {
             Ok(())
         } else {
             Err(open)
@@ -4242,9 +4555,9 @@ impl Engine {
         for (on, map) in [(ix.unbounded, &mut self.pending), (ix.effect, &mut self.pending_eff)] {
             if on {
                 if insert {
-                    map.insert((unit, label), s);
+                    map.insert(unit, label, s);
                 } else {
-                    map.remove(&(unit, label));
+                    map.remove(&unit, label);
                 }
             }
         }
@@ -4252,17 +4565,17 @@ impl Engine {
             MayDefine::Nothing | MayDefine::Any => {}
             MayDefine::Prefixes(ps) => {
                 for p in ps {
-                    let key = (unit, hash_bytes(PREFIX_SEED, p.as_bytes()), label);
+                    let key = (unit, hash_bytes(PREFIX_SEED, p.as_bytes()));
                     let c = self.pending_p_lens.entry(p.len()).or_insert(0);
                     if insert {
                         *c += 1;
-                        self.pending_p.insert(key, s);
+                        self.pending_p.insert(key, label, s);
                     } else {
                         *c -= 1;
                         if *c == 0 {
                             self.pending_p_lens.remove(&p.len());
                         }
-                        self.pending_p.remove(&key);
+                        self.pending_p.remove(&key, label);
                     }
                 }
             }
@@ -4270,19 +4583,19 @@ impl Engine {
                 for f in fs {
                     let f = self.canon(f);
                     if insert {
-                        self.pending_f.insert((unit, f, label), s);
+                        self.pending_f.insert((unit, f), label, s);
                     } else {
-                        self.pending_f.remove(&(unit, f, label));
+                        self.pending_f.remove(&(unit, f), label);
                     }
                 }
             }
         }
         if ix.kind {
-            let key = (unit, self.kind_field, label);
+            let key = (unit, self.kind_field);
             if insert {
-                self.pending_f.insert(key, s);
+                self.pending_f.insert(key, label, s);
             } else {
-                self.pending_f.remove(&key);
+                self.pending_f.remove(&key, label);
             }
         }
     }
@@ -4314,29 +4627,52 @@ impl Engine {
             .filter(|d| self.is_client_def(x, d.field) && d.value != self.seq_start)
             .map(|d| (d.field, d.global))
             .collect();
-        let new: Vec<(Field, bool)> = new
+        let mut new: Vec<(Field, bool)> = new
             .iter()
             .map(|&(f, g)| (self.canon(f), g))
             .filter(|d| self.is_client_def(x, d.0))
             .collect();
-        let new = &new[..];
-        for &(f, g) in &old {
-            if !new.contains(&(f, g)) {
-                self.remove_def(x, f);
+        new.sort_unstable();
+        new.dedup();
+        // `old` is in field order (the node's list is sorted).
+        let mut gone = Vec::new();
+        let mut added = Vec::new();
+        let (mut i, mut j) = (0, 0);
+        while i < old.len() || j < new.len() {
+            let take_old = j >= new.len() || (i < old.len() && old[i] < new[j]);
+            let take_new = i >= old.len() || (j < new.len() && new[j] < old[i]);
+            if take_old {
+                gone.push(old[i].0);
+                i += 1;
+            } else if take_new {
+                added.push(new[j]);
+                j += 1;
+            } else {
+                i += 1;
+                j += 1;
             }
         }
-        for &(f, g) in new {
-            if !old.contains(&(f, g)) {
-                self.add_def(x, f, g);
-            }
+        for f in gone {
+            self.remove_def(x, f);
         }
+        for (f, g) in added {
+            self.add_def(x, f, g);
+        }
+    }
+
+    /// Records a use of `f` at `label` in `unit` for `user_max`.
+    fn note_user(&mut self, unit: u32, f: Field, label: u64) {
+        let m = self.user_max.entry_or((unit, f), || 0);
+        *m = (*m).max(label);
     }
 
     fn move_user(&mut self, from: u64, to: u64, f: Field, label: u64, u: Slot, to_slot: Slot) {
         count!(MoveUser);
-        self.users.remove(&(from, f, label));
+        self.users.remove(&(from, f), label);
         self.touch(u);
-        self.users.insert((to, f, label), u);
+        let uu = self.n(u).unit;
+        self.note_user(uu, f, label);
+        self.users.insert((to, f), label, u);
         let unit = self.n(u).unit;
         let mut old_site = NIL;
         let n = self.nm(u);
@@ -4374,14 +4710,18 @@ impl Engine {
             let mut defs = std::mem::take(&mut n.defs).into_vec();
             // Re-registering keeps the value (a marker an opener already
             // holds; a run's value when only the locality changes).
-            let value = defs.iter().find(|d| d.field == f).map_or(ValueId::NONE, |d| d.value);
-            defs.retain(|d| d.field != f);
-            defs.push(Def {
-                field: f,
-                value,
-                global,
-                depth: 0,
-            });
+            match defs.binary_search_by_key(&f, |d| d.field) {
+                Ok(i) => defs[i].global = global,
+                Err(i) => defs.insert(
+                    i,
+                    Def {
+                        field: f,
+                        value: ValueId::NONE,
+                        global,
+                        depth: 0,
+                    },
+                ),
+            }
             n.defs = defs.into_boxed_slice();
         }
         if self.fresh_scope && !global {
@@ -4390,9 +4730,10 @@ impl Engine {
             self.sync_order_lazy(x);
             return;
         }
-        let root = self.units[unit as usize].root;
-        if self.order.next(root, lx).is_none() {
-            // The unit's last node (a push): no use lies after it to move.
+        let root = self.root(unit);
+        if self.user_max.get(&(unit, f)).is_none_or(|&m| m <= lx) || self.order.next(root, lx).is_none() {
+            // No use of `f` lies after `lx` (or nothing does: the unit's
+            // last node, a push): no use can move.
             self.ix_insert(unit, f, lx, x);
             self.stream_touch(unit, lx);
             self.sync_order_lazy(x);
@@ -4404,13 +4745,13 @@ impl Engine {
             // Every use after `lx` bound to the latest global before it
             // (wherever that lies: possibly inside a scope the walk below
             // steps over) now reaches `x`.
-            if let Some((_, &g)) = self.global_ix.range((unit, f, 0)..(unit, f, lx)).next_back() {
+            if let Some((_, g)) = self.global_ix.range(&(unit, f), 0..lx).next_back() {
                 prev.push((g, u64::MAX));
             }
             let mut hi = lx;
             let mut last_rel: i64 = -1;
             loop {
-                let Some((&(_, _, ld), &d)) = self.defs_ix.range((unit, f, 0)..(unit, f, hi)).next_back() else {
+                let Some((ld, d)) = self.defs_ix.range(&(unit, f), 0..hi).next_back() else {
                     prev.push((NIL, u64::MAX));
                     break;
                 };
@@ -4421,7 +4762,7 @@ impl Engine {
                     break;
                 }
                 let depth = self.def_depth(root, ld, f);
-                let seg = self.order.fold(&OAug, root, ld, lx);
+                let seg = self.order.pfold(&OAug, root, ld, lx);
                 if depth == 0 || seg.c == 0 {
                     let rel = i64::from(seg.o);
                     if rel > last_rel {
@@ -4432,7 +4773,7 @@ impl Engine {
                         break;
                     }
                 }
-                if let Some(k) = self.order.search_back(&OAug, root, ld, &|s: OSum| s.o >= 1) {
+                if let Some(k) = self.order.psearch_back(&OAug, root, ld, &|s: Br| s.o >= 1) {
                     hi = k + 1;
                 } else {
                     prev.push((NIL, u64::MAX));
@@ -4440,7 +4781,7 @@ impl Engine {
                 }
             }
         } else {
-            let site = self.walk(unit, lx, f).site;
+            let site = self.walk_site(unit, lx, f).0;
             prev.push((site, self.local_end(root, lx, f)));
         }
         self.ix_insert(unit, f, lx, x);
@@ -4448,11 +4789,7 @@ impl Engine {
         self.sync_order_lazy(x);
         for (site, end) in prev {
             let from = site_key(unit, site);
-            let movers: Vec<(u64, Slot)> = self
-                .users
-                .range((from, f, lx + 1)..(from, f, end))
-                .map(|(&(_, _, l), &u)| (l, u))
-                .collect();
+            let movers: Vec<(u64, Slot)> = self.users.range(&(from, f), lx + 1..end).collect();
             for (l, u) in movers {
                 self.move_user(from, x.pack(), f, l, u, x);
                 self.report.rebinds += 0;
@@ -4549,7 +4886,7 @@ impl Engine {
         // The closing node's own reads are inside the scope, unless its
         // brackets come before it (its kind read always is).
         self.order
-            .search_fwd(&OAug, root, after, &|s: OSum| s.c >= 1)
+            .psearch_fwd(&OAug, root, after, &|s: Br| s.c >= 1)
             .map_or(u64::MAX, |e| {
                 if f == self.kind_field || !self.brackets_before(root, e) {
                     e + 1
@@ -4566,7 +4903,7 @@ impl Engine {
     /// definition, uses that stay are not touched.
     fn rescope_def(&mut self, x: Slot, f: Field) {
         let (unit, lx) = (self.n(x).unit, self.n(x).label);
-        let root = self.units[unit as usize].root;
+        let root = self.root(unit);
         // The index is keyed by depth.
         let depth = self.indexed_depth(x, f);
         self.ix_remove(unit, f, lx, depth);
@@ -4574,23 +4911,15 @@ impl Engine {
         let end = self.local_end(root, lx, f);
         let from = x.pack();
         if end < u64::MAX {
-            let leavers: Vec<(u64, Slot)> = self
-                .users
-                .range((from, f, end)..=(from, f, u64::MAX))
-                .map(|(&(_, _, l), &u)| (l, u))
-                .collect();
+            let leavers: Vec<(u64, Slot)> = self.users.range(&(from, f), end..).collect();
             for (l, u) in leavers {
-                let site = self.walk(unit, l, f).site;
+                let site = self.walk_site(unit, l, f).0;
                 self.move_user(from, site_key(unit, site), f, l, u, site);
             }
         }
-        let site = self.walk(unit, lx, f).site;
+        let site = self.walk_site(unit, lx, f).0;
         let prev = site_key(unit, site);
-        let movers: Vec<(u64, Slot)> = self
-            .users
-            .range((prev, f, lx + 1)..(prev, f, end))
-            .map(|(&(_, _, l), &u)| (l, u))
-            .collect();
+        let movers: Vec<(u64, Slot)> = self.users.range(&(prev, f), lx + 1..end).collect();
         for (l, u) in movers {
             self.move_user(prev, from, f, l, u, x);
         }
@@ -4604,7 +4933,9 @@ impl Engine {
         {
             let n = self.nm(x);
             let mut defs = std::mem::take(&mut n.defs).into_vec();
-            defs.retain(|d| d.field != f);
+            if let Ok(i) = defs.binary_search_by_key(&f, |d| d.field) {
+                defs.remove(i);
+            }
             n.defs = defs.into_boxed_slice();
         }
         if self.n(x).has(F_APP) {
@@ -4614,13 +4945,9 @@ impl Engine {
         self.stream_touch(unit, label);
         self.sync_order_lazy(x);
         let from = x.pack();
-        let users: Vec<(u64, Slot)> = self
-            .users
-            .range((from, f, 0)..=(from, f, u64::MAX))
-            .map(|(&(_, _, l), &u)| (l, u))
-            .collect();
+        let users: Vec<(u64, Slot)> = self.users.range(&(from, f), 0..).collect();
         for (l, u) in users {
-            let site = self.walk(unit, l, f).site;
+            let site = self.walk_site(unit, l, f).0;
             self.move_user(from, site_key(unit, site), f, l, u, site);
         }
     }
@@ -4629,7 +4956,7 @@ impl Engine {
     /// its pending status changed): re-bind everything whose visibility may
     /// have changed, i.e. the region from it to where depth returns to 0.
     fn effect_region_changed(&mut self, p: Slot, old: u8) {
-        let e = self.oitem(p).eff;
+        let e = self.eff_now(p);
         self.nm(p).bound = e;
         let (unit, lp) = (self.n(p).unit, self.n(p).label);
         self.stream_touch(unit, lp);
@@ -4649,6 +4976,10 @@ impl Engine {
     /// instead of re-keying them.
     #[allow(clippy::too_many_lines)]
     fn effect_changed(&mut self, unit: u32, label: u64, old: u8, new: u8) {
+        if self.ov.is_some() {
+            self.ov_fail("a scope boundary change");
+            return;
+        }
         span!(Region);
         let (co, oo) = (eff_closes(old), eff_opens(old));
         let (cn, on) = (eff_closes(new), eff_opens(new));
@@ -4657,8 +4988,8 @@ impl Engine {
         }
         self.binding_epoch += 1;
         self.flush_order();
-        let root = self.units[unit as usize].root;
-        let before = self.order.fold(&OAug, root, 0, label);
+        let root = self.root(unit);
+        let before = self.order.pfold(&OAug, root, 0, label);
         let d0 = before.o;
         // The first position after `label` where `d` closes accumulate.
         let fwd = |e: &Self, d: u32| -> u64 {
@@ -4666,7 +4997,7 @@ impl Engine {
                 label
             } else {
                 e.order
-                    .search_fwd(&OAug, root, label, &|s: OSum| s.c >= d)
+                    .psearch_fwd(&OAug, root, label, &|s: Br| s.c >= d)
                     .unwrap_or(u64::MAX)
             }
         };
@@ -4688,7 +5019,7 @@ impl Engine {
                 let to = fwd(self, lo_d + u32::try_from(i).expect("depth"));
                 let shift = i32::try_from(delta - sign * i64::try_from(i - 1).expect("depth")).expect("depth shift");
                 if from < to {
-                    self.units[unit as usize].shifts.push((from, to, shift));
+                    self.unit_mut(unit).shifts.push((from, to, shift));
                 }
                 if to == u64::MAX {
                     break;
@@ -4700,7 +5031,7 @@ impl Engine {
         let mut openers = Vec::new();
         let (mut bhi, mut extra, mut depth) = (label, 0, d0);
         while depth > 0 {
-            let Some(k) = self.order.search_back(&OAug, root, bhi, &|s: OSum| s.o > extra) else {
+            let Some(k) = self.order.psearch_back(&OAug, root, bhi, &|s: Br| s.o > extra) else {
                 break;
             };
             openers.push(k);
@@ -4722,22 +5053,14 @@ impl Engine {
         // Users of `x`'s definition of `f` at positions `[lo, hi)`.
         let users_of = |e: &Self, from: u64, f: Field, lo: u64, hi: u64, out: &mut Vec<(u64, Slot, Field)>| {
             if lo < hi {
-                out.extend(
-                    e.users
-                        .range((from, f, lo)..(from, f, hi))
-                        .map(|(&(_, _, l), &u)| (l, u, f)),
-                );
+                out.extend(e.users.range(&(from, f), lo..hi).map(|(l, u)| (l, u, f)));
             }
         };
         // The chain reads of `x`'s definition of `f`, wherever they were
         // made: they are read at other nodes' positions, so any change in
         // the definition's reach may concern them.
         let chains_of = |e: &Self, from: u64, f: Field, out: &mut Vec<(u64, Slot, Field)>| {
-            out.extend(
-                e.chain_users
-                    .range((from, f, 0)..=(from, f, u64::MAX))
-                    .map(|(&(_, _, l), &u)| (l, u, f)),
-            );
+            out.extend(e.chain_users.range(&(from, f), 0..).map(|(l, u)| (l, u, f)));
         };
         // The uses of `f` in `[lo, hi)` that a local definition at `d`
         // (visible there now) may take: those bound to what reaches `at`,
@@ -4746,10 +5069,10 @@ impl Engine {
             if lo >= hi {
                 return;
             }
-            let o = site_key(unit, e.walk(unit, at, f).site);
+            let o = site_key(unit, e.walk_site(unit, at, f).0);
             users_of(e, o, f, lo, hi, out);
             chains_of(e, o, f, out);
-            let globals: Vec<Slot> = e.global_ix.range((unit, f, 0)..(unit, f, d)).map(|(_, &g)| g).collect();
+            let globals: Vec<Slot> = e.global_ix.range(&(unit, f), 0..d).map(|(_, g)| g).collect();
             for g in globals {
                 if g.pack() != o {
                     users_of(e, g.pack(), f, lo, hi, out);
@@ -4864,9 +5187,9 @@ impl Engine {
         }
         // Small ranges are re-keyed at once; large ones stay lazy until
         // the sweeps retire them (or too many accumulate).
-        if !self.units[unit as usize].shifts.is_empty() {
+        if !self.unit(unit).shifts.is_empty() {
             self.sweep_shifts(unit, 4096);
-            while self.units[unit as usize].shifts.len() > 16 {
+            while self.unit(unit).shifts.len() > 16 {
                 self.sweep_shifts(unit, usize::MAX);
             }
         }
@@ -4876,10 +5199,10 @@ impl Engine {
     /// to `budget` nodes, and retires the shift once its range is done.
     /// Returns whether anything is left pending.
     fn sweep_shifts(&mut self, unit: u32, budget: usize) -> bool {
-        let Some(&(lo, hi, delta)) = self.units[unit as usize].shifts.first() else {
+        let Some(&(lo, hi, delta)) = self.unit(unit).shifts.first() else {
             return false;
         };
-        let root = self.units[unit as usize].root;
+        let root = self.root(unit);
         let mut nodes: Vec<(u64, Slot)> = Vec::new();
         self.order
             .range(root, lo, hi.saturating_sub(1), &mut nodes, budget.saturating_add(1));
@@ -4899,8 +5222,8 @@ impl Engine {
                 .map(|d| (d.field, d.depth))
                 .collect();
             for (f, d) in defs {
-                self.local_ix.remove(&(unit, f, d, l));
-                self.local_ix.insert((unit, f, d + delta, l), x);
+                self.local_ix.remove(&(unit, f, d), l);
+                self.local_ix.insert((unit, f, d + delta), l, x);
                 for df in &mut self.nm(x).defs {
                     if df.field == f {
                         df.depth = d + delta;
@@ -4908,7 +5231,7 @@ impl Engine {
                 }
             }
         }
-        let shifts = &mut self.units[unit as usize].shifts;
+        let shifts = &mut self.unit_mut(unit).shifts;
         if more {
             shifts[0].0 = nodes.last().map_or(hi, |n| n.0 + 1);
         } else {
@@ -4929,10 +5252,10 @@ impl Engine {
     }
 
     fn change_effect(&mut self, s: Slot, new: u8) {
-        let old = self.oitem(s).eff;
+        let old = self.eff_now(s);
         self.nm(s).effect = new;
         self.sync_order(s);
-        if self.oitem(s).eff != old {
+        if self.eff_now(s) != old {
             self.effect_region_changed(s, old);
         }
         self.sync_kind(s);
@@ -4963,13 +5286,23 @@ impl Engine {
     /// An opener defines the kind of its scope inside it (a local
     /// definition of `kind_field`, read by [`Ctx::scope_kind`]).
     fn sync_kind(&mut self, s: Slot) {
-        let opens = eff_opens(self.oitem(s).eff) > 0;
+        let opens = eff_opens(self.eff_now(s)) > 0;
+        if !opens
+            && self
+                .n(s)
+                .defs
+                .iter()
+                .all(|d| d.field != self.kind_field && !self.is_seq_hidden(d.field))
+        {
+            // No scope opened and no marker held: nothing to place or take.
+            return;
+        }
         let kind = self.aux_of(s).and_then(|a| a.kind).unwrap_or(ValueId::UNIT);
         let start = self.seq_start;
         let mut marks = vec![(self.kind_field, kind)];
         marks.extend(self.seqs.iter().map(|&(_, h)| (h, start)));
         for (f, v) in marks {
-            let cur = self.n(s).defs.iter().find(|d| d.field == f).map(|d| d.value);
+            let cur = self.n(s).def_index(f).map(|i| self.n(s).defs[i].value);
             if !opens {
                 // Only the markers go; a contribution stays, and a declared
                 // one (shadowed while this node opened) is registered.
@@ -4987,11 +5320,7 @@ impl Engine {
                 self.add_def(s, f, false);
             }
             if self.n(s).def_value(f) != Some(v) {
-                for d in &mut self.nm(s).defs {
-                    if d.field == f {
-                        d.value = v;
-                    }
-                }
+                self.nm(s).set_def_value(f, v);
                 let cause = Cause::Changed {
                     field: f,
                     site: Some(self.n(s).id),
@@ -5018,7 +5347,7 @@ impl Engine {
 
     /// Pending claims whose syntactic bound covers `label` recompute it.
     fn dirty_reaching_claims(&mut self, unit: u32, label: u64) {
-        let root = self.units[unit as usize].root;
+        let root = self.root(unit);
         let mut before = label;
         let mut hit = Vec::new();
         if self.order.sum(&OAug, root).maxhit < label {
@@ -5046,7 +5375,7 @@ impl Engine {
         let n = self.n(s);
         let (unit, label) = (n.unit, n.label);
         self.dirty_reaching_claims(unit, label);
-        if let Some((_, i)) = self.order.prev(self.units[unit as usize].root, label) {
+        if let Some((_, i)) = self.order.prev(self.root(unit), label) {
             let p = i.slot;
             self.claimer_near(p);
         }
@@ -5075,7 +5404,7 @@ impl Engine {
     fn flush_claims(&mut self) {
         span!(FlushClaims);
         while !self.claim_dirty.is_empty() {
-            let dirty: Vec<Slot> = self.claim_dirty.drain().collect();
+            let dirty: Vec<Slot> = self.claim_dirty.plain_mut().drain().map(|e| e.0).collect();
             let mut batch: Vec<(u32, u64, Slot)> = dirty
                 .into_iter()
                 .filter(|&s| self.live(s))
@@ -5256,7 +5585,7 @@ impl Engine {
         self.refute_assumers(s);
         let waiters = std::mem::take(&mut self.ax(s).waiters);
         self.release_waiters(s, &waiters);
-        let old_eff = self.oitem(s).eff;
+        let old_eff = self.eff_now(s);
         self.set_state(s, State::Inert);
         self.nm(s).epoch = self.n(s).epoch.wrapping_add(1);
         self.sync_pending(s);
@@ -5290,7 +5619,7 @@ impl Engine {
         };
         self.sync_pending(s);
         self.sync_order(s);
-        if self.oitem(s).eff != EFF_NONE {
+        if self.eff_now(s) != EFF_NONE {
             self.effect_region_changed(s, EFF_NONE);
         }
         if eff != Effect::Pending {
@@ -5313,13 +5642,16 @@ impl Engine {
             State::Dirty if !n.has(F_QUEUED) => {
                 let (h, id) = (n.height as usize, n.id);
                 self.queue_push(h, id, x);
-                self.queue_len += 1;
+                self.queue_len = self.queue_len.wrapping_add(1);
                 self.set_flag(x, F_QUEUED, true);
             }
             State::Parked if !n.has(F_PARKSET) => {
-                let key = (n.id, x);
-                self.parked.insert(key);
+                self.parked.push(x);
+                self.parked_len = self.parked_len.wrapping_add(1);
                 self.set_flag(x, F_PARKSET, true);
+                if self.ov.is_none() && self.parked.len() > 2 * self.parked_len + 1024 {
+                    self.parked = self.parked_nodes();
+                }
             }
             _ => {}
         }
@@ -5328,13 +5660,12 @@ impl Engine {
     fn dequeue(&mut self, x: Slot) {
         let n = self.n(x);
         if n.has(F_QUEUED) {
-            self.queue_len -= 1;
+            self.queue_len = self.queue_len.wrapping_sub(1);
             self.set_flag(x, F_QUEUED, false);
         }
         let n = self.n(x);
         if n.has(F_PARKSET) {
-            let key = (n.id, x);
-            self.parked.remove(&key);
+            self.parked_len = self.parked_len.wrapping_sub(1);
             self.set_flag(x, F_PARKSET, false);
         }
     }
@@ -5426,8 +5757,7 @@ impl Engine {
             let unit = items[i].0;
             let j = i + items[i..].iter().take_while(|x| x.0 == unit).count();
             let batch: Vec<(u64, OItem)> = items[i..j].iter().map(|x| (x.1, x.2)).collect();
-            let root = self.units[unit as usize].root;
-            self.order.set_many(&OAug, root, &batch);
+            self.ord_op(OrderOp::SetMany(unit, batch));
             i = j;
         }
     }
@@ -5453,6 +5783,10 @@ impl Engine {
             if !self.live(y) || self.n(y).height >= h {
                 continue;
             }
+            if !self.owned(y) {
+                self.defer(Tail::Raise(y, h, origin));
+                continue;
+            }
             self.set_height(y, h);
             if let Some(a) = self.aux_of(y) {
                 for &r in &a.out_readers {
@@ -5464,7 +5798,7 @@ impl Engine {
             }
             for d in &self.n(y).defs {
                 let from = y.pack();
-                for (_, &r) in self.users.range((from, d.field, 0)..=(from, d.field, u64::MAX)) {
+                for (_, r) in self.users.range(&(from, d.field), 0..) {
                     if self.n(r).state == State::Done {
                         stack.push((r, h + 1));
                     }
@@ -5472,7 +5806,7 @@ impl Engine {
             }
             // Range readers whose range covers `y` read its contribution.
             let n = self.n(y);
-            if !n.has(F_APP) && !self.units[n.unit as usize].watches.is_empty() {
+            if !n.has(F_APP) && !self.unit(n.unit).watches.is_empty() {
                 let (unit, label) = (n.unit, n.label);
                 for (r, _) in self.stab(unit, label) {
                     if self.n(r).state == State::Done {
@@ -5575,7 +5909,7 @@ impl Engine {
     /// Records an error of `x`'s current result (the first one stands
     /// until the node runs again).
     fn node_error(&mut self, x: Slot, e: EvalError) {
-        self.node_errors.entry(x).or_insert(e);
+        self.node_errors.entry_or(x, || e);
     }
 
     /// Ends an evaluation that has nothing left to run: the standing node
@@ -5584,17 +5918,22 @@ impl Engine {
     fn standing_errors(&mut self) -> Result<(), EvalError> {
         let first = self
             .node_errors
+            .plain()
             .iter()
             .filter(|(x, _)| self.live(**x))
             .min_by_key(|(x, _)| self.n(**x).id)
             .map(|(_, e)| e.clone());
-        self.node_errors.clear();
+        self.node_errors.plain_mut().clear();
         first.map_or(Ok(()), Err)
     }
 
     /// `make_dirty` with the cause already noted.
     fn make_dirty_quiet(&mut self, x: Slot) {
         if !self.live(x) || self.n(x).state == State::Inert {
+            return;
+        }
+        if !self.owned(x) {
+            self.defer(Tail::Dirty(x));
             return;
         }
         self.node_errors.remove(&x);
@@ -5620,7 +5959,7 @@ impl Engine {
         count!(Dirty);
         self.set_state(x, State::Dirty);
         self.nm(x).floor = 0;
-        if let Some(o) = self.origins.get_mut(&x) {
+        if let Some(o) = self.origins.get_mut(x) {
             o.raised = 0;
             o.raised_from = NIL;
             o.waited = NIL;
@@ -5633,11 +5972,7 @@ impl Engine {
     }
 
     fn dirty_field_users(&mut self, site: u64, f: Field, cause: &Cause) {
-        let users: Vec<Slot> = self
-            .users
-            .range((site, f, 0)..=(site, f, u64::MAX))
-            .map(|(_, &u)| u)
-            .collect();
+        let users: Vec<Slot> = self.users.range(&(site, f), 0..).map(|(_, u)| u).collect();
         for u in users {
             if self.tracing > 0 {
                 self.note(u, cause.clone());
@@ -5676,7 +6011,7 @@ impl Engine {
 
     /// The cause of `w`'s wake by `x` (tracing).
     fn woken_by(&self, w: Slot, x: Slot) -> Cause {
-        let field = self.origins.get(&w).and_then(|o| o.waited_field);
+        let field = self.origins.get(w).and_then(|o| o.waited_field);
         Cause::Woken {
             by: self.n(x).id,
             field,
@@ -5700,16 +6035,61 @@ impl Engine {
         }
     }
 
+    /// `x` stopped for `t` (a wait or a gate). A batch's results are
+    /// applied in text order, but where `x` and `t` both ran in it the
+    /// outcome is the one of applying them in id order (as before): `x`
+    /// parks and is woken (finishing above `t`) when it comes first, and
+    /// is lifted above `t` when `t` comes first.
+    fn stop_on(&mut self, x: Slot, t: Slot, kind: WaitKind, field: Option<Field>, how: Lifted) {
+        if !self.live(t) {
+            return;
+        }
+        let first = self.n(x).id < self.n(t).id;
+        if self.n(t).in_work() {
+            self.note_wait(t, kind);
+            self.park(x, t, field);
+            if !first {
+                // Should `t` finish in this batch, it came first.
+                self.batch_lift.insert(x, how);
+            }
+        } else if first {
+            // `t` finished earlier in this batch.
+            self.note_wait(t, kind);
+            self.park_woken(x, t, field);
+        } else {
+            let h = (self.n(t).height + 1).max(self.n(x).height);
+            self.lift(x, h);
+            self.note_raise(x, h, t, how);
+        }
+    }
+
+    /// `park(x, on)` followed by `on`'s wake, for an `on` that is done.
+    fn park_woken(&mut self, x: Slot, on: Slot, field: Option<Field>) {
+        self.park_inner(x, on, field, false);
+        let h = self.n(on).height + 1;
+        self.wake_one(x, on, h);
+    }
+
     fn park(&mut self, x: Slot, on: Slot, field: Option<Field>) {
+        self.park_inner(x, on, field, true);
+    }
+
+    fn park_inner(&mut self, x: Slot, on: Slot, field: Option<Field>, wait: bool) {
         count!(Park);
         self.dequeue(x);
         self.set_state(x, State::Parked);
         self.nm(x).on = on;
         if on != NIL {
-            self.origins.entry(x).or_insert(Origin::NONE).waited_field = field;
+            self.origins.entry_or(x, || Origin::NONE).waited_field = field;
             let name = self.op(self.n(on).op).name();
             bump(&mut self.report.waits_by_op, name);
-            self.ax(on).waiters.push(x);
+            if wait {
+                if self.owned(on) {
+                    self.ax(on).waiters.push(x);
+                } else {
+                    self.defer(Tail::ParkOn(x, on));
+                }
+            }
             if self.n(on).has(F_INPEND) {
                 self.report.pending_waits += 1;
             }
@@ -5730,23 +6110,109 @@ impl Engine {
         let waiters = std::mem::take(&mut self.ax(x).waiters);
         let h = self.n(x).height + 1;
         for w in waiters {
-            if self.live(w) && self.n(w).state == State::Parked && self.n(w).on == x {
-                count!(Wake);
-                if self.tracing > 0 {
-                    self.note(w, self.woken_by(w, x));
-                }
+            if self.owned(w) {
+                self.wake_one(w, x, h);
+            } else {
+                self.defer(Tail::Wake(w, x, h));
+            }
+        }
+    }
+
+    /// Wakes `w` if it is still parked on `x`, to run at `h` or above.
+    fn wake_one(&mut self, w: Slot, x: Slot, h: u32) {
+        if self.live(w) && self.n(w).state == State::Parked && self.n(w).on == x {
+            if !self.batch_lift.is_empty()
+                && let Some(how) = self.batch_lift.remove(&w)
+            {
+                // `x` came first in the batch: `w` is lifted, not woken.
                 self.dequeue(w);
                 self.set_state(w, State::Dirty);
-                if h > self.n(w).floor {
-                    // It finishes above what it waited on, read or not.
-                    self.nm(w).floor = h;
-                    self.origins.entry(w).or_insert(Origin::NONE).waited = x;
+                if let Some(o) = self.origins.get_mut(w) {
+                    o.waited_field = None;
                 }
                 let hw = self.n(w).height.max(h);
                 self.lift(w, hw);
+                self.note_raise(w, hw, x, how);
                 self.enqueue(w);
+                return;
+            }
+            count!(Wake);
+            if self.tracing > 0 {
+                self.note(w, self.woken_by(w, x));
+            }
+            self.dequeue(w);
+            self.set_state(w, State::Dirty);
+            if h > self.n(w).floor {
+                // It finishes above what it waited on, read or not.
+                self.nm(w).floor = h;
+                self.origins.entry_or(w, || Origin::NONE).waited = x;
+            }
+            let hw = self.n(w).height.max(h);
+            self.lift(w, hw);
+            self.enqueue(w);
+        }
+    }
+
+    /// Whether a write to `x` stays in the slice being applied (always,
+    /// outside a sliced batch).
+    #[inline]
+    fn owned(&self, x: Slot) -> bool {
+        let Some((u, lo, hi)) = self.slice else { return true };
+        let n = self.n(x);
+        n.unit == u && !n.has(F_APP) && n.label >= lo && n.label < hi && self.live(x)
+    }
+
+    fn defer(&mut self, t: Tail) {
+        count!(Tail);
+        self.tail.push(t);
+    }
+
+    /// Replays the writes the slices of a batch deferred, in their order.
+    fn drain_tail(&mut self) {
+        span!(Tail);
+        debug_assert!(self.slice.is_none());
+        let tail = std::mem::take(&mut self.tail);
+        for t in &tail {
+            match *t {
+                Tail::Dirty(x) => self.make_dirty_quiet(x),
+                Tail::Raise(y, h, origin) => self.raise(y, h, origin),
+                Tail::ParkOn(x, on) => {
+                    if !self.live(x) || self.n(x).state != State::Parked || self.n(x).on != on || !self.live(on) {
+                        continue;
+                    }
+                    if self.n(on).in_work() {
+                        self.ax(on).waiters.push(x);
+                    } else {
+                        // It finished after `x` parked: as its wake would.
+                        let h = self.n(on).height + 1;
+                        self.wake_one(x, on, h);
+                    }
+                }
+                Tail::Wake(w, x, h) => self.wake_one(w, x, h),
+                Tail::OutAdd(t, x) => {
+                    if self.live(t) && self.live(x) {
+                        let a = self.ax(t);
+                        if !a.out_readers.contains(&x) {
+                            a.out_readers.push(x);
+                        }
+                        if self.tail_out_changed.contains(&t) {
+                            self.make_dirty(x);
+                        }
+                    }
+                }
+                Tail::OutDel(t, x) => {
+                    if self.live(t) {
+                        self.ax(t).out_readers.retain(|&r| r != x);
+                    }
+                }
             }
         }
+        let mut tail = tail;
+        tail.clear();
+        if self.tail.is_empty() {
+            self.tail = tail;
+        }
+        self.tail_out_changed.plain_mut().clear();
     }
 
     // --------------------------------------------------------- reachability
@@ -5812,7 +6278,7 @@ impl Engine {
     /// reaches it (a superset of those whose range covers it: a claimer's
     /// range starts after its own unfolded text).
     fn stream_reaching(&self, unit: u32, label: u64) -> Vec<Slot> {
-        let root = self.units[unit as usize].root;
+        let root = self.root(unit);
         let mut before = label;
         let mut hit = Vec::new();
         // The unit's summary says at once when no range reaches this far
@@ -5861,16 +6327,12 @@ impl Engine {
 
     /// The node before `label` in `unit`'s order.
     fn order_prev(&self, unit: u32, label: u64) -> Option<(u64, Slot)> {
-        self.order
-            .prev(self.units[unit as usize].root, label)
-            .map(|(k, i)| (k, i.slot))
+        self.order.prev(self.root(unit), label).map(|(k, i)| (k, i.slot))
     }
 
     /// The next node after `label` in `unit`'s order.
     pub(crate) fn order_next(&self, unit: u32, label: u64) -> Option<(u64, Slot)> {
-        self.order
-            .next(self.units[unit as usize].root, label)
-            .map(|(k, i)| (k, i.slot))
+        self.order.next(self.root(unit), label).map(|(k, i)| (k, i.slot))
     }
 
     /// `x` goes away (or out of the program) before finishing: speculation
@@ -5904,15 +6366,15 @@ impl Engine {
         };
         let balanced = quiet || {
             let unit = self.n(first).unit;
-            let root = self.units[unit as usize].root;
+            let root = self.root(unit);
             let lo = self.n(first).label;
             let hi = self.n(self.subtree_end(last)).label;
-            let span = self.order.fold(&OAug, root, lo, hi + 1);
+            let span = self.order.pfold(&OAug, root, lo, hi + 1);
             span.c == 0 && span.o == 0
         };
         if balanced {
             for &k in &live {
-                if self.oitem(k).eff != EFF_NONE {
+                if self.eff_now(k) != EFF_NONE {
                     self.nm(k).effect = EFF_NONE;
                     self.nm(k).bound = EFF_NONE;
                     self.sync_order(k);
@@ -5948,6 +6410,10 @@ impl Engine {
     }
 
     fn free_node(&mut self, x: Slot) {
+        if self.ov.is_some() {
+            self.ov_fail("freeing a node");
+            return;
+        }
         count!(Free);
         self.node_errors.remove(&x);
         self.touch(x);
@@ -5987,7 +6453,7 @@ impl Engine {
         self.unanchor_watches(x);
         self.leave_spec(x);
         self.dequeue(x);
-        let old_eff = self.oitem(x).eff;
+        let old_eff = self.eff_now(x);
         if self.n(x).has(F_INPEND) {
             self.pending_index(x, false);
             self.set_flag(x, F_INPEND, false);
@@ -6014,29 +6480,27 @@ impl Engine {
             self.apps_live -= 1;
             self.memo.remove(&key);
             let body = unit;
-            self.units[body as usize].live = false;
-            self.units[body as usize].root = TNIL;
-            self.units[body as usize].env.clear();
-            self.units[body as usize].accs.clear();
-            self.units[body as usize].watches.clear();
+            self.unit_mut(body).live = false;
+            self.set_root(body, TNIL);
+            self.unit_mut(body).env.clear();
+            self.unit_mut(body).accs.clear();
+            self.unit_mut(body).watches.clear();
             self.free_units.push(body);
         } else {
             self.set_state(x, State::Done);
-            let root = self.units[unit as usize].root;
-            let (r, _) = self.order.remove(&OAug, root, label);
-            self.units[unit as usize].root = r;
+            self.ord_op(OrderOp::Remove(unit, label));
             if old_eff != EFF_NONE {
                 // The bracket disappeared: re-bind the region it shaped.
-                let after = self.order.next(r, label).map(|(_, i)| i.slot);
+                let after = self.order.next(self.root(unit), label).map(|(_, i)| i.slot);
                 if let Some(a) = after {
-                    let o = self.oitem(a).eff;
+                    let o = self.eff_now(a);
                     self.effect_region_changed_at(unit, label, old_eff, o, a);
                 }
             }
         }
         let id = self.n(x).id;
         self.ids.remove(&id);
-        self.origins.remove(&x);
+        self.origins.remove(x);
         let a = self.n(x).aux;
         if a != NO_AUX {
             self.aux[a as usize] = Aux::default();
@@ -6069,14 +6533,17 @@ impl Engine {
         if !self.monoids.contains_key(&f) {
             return;
         }
-        let root = self.units[unit as usize].accs.get(&f).copied().unwrap_or(TNIL);
+        let root = self.acc_root(unit, f);
         let r = match v {
             // In place when the key is there: one path of cheap summaries.
             Some(v) if self.accs_arena.update(&AccAug, root, label, &mut |x| *x = v) => root,
             Some(v) => self.accs_arena.insert(&AccAug, root, label, v),
             None => self.accs_arena.remove(&AccAug, root, label).0,
         };
-        self.units[unit as usize].accs.insert(f, r);
+        self.set_acc_root(unit, f, r);
+        if let Some(ov) = &mut self.ov {
+            ov.acc_log.push((unit, f, label, v));
+        }
     }
 
     pub(crate) fn acc_fold(&self, unit: u32, f: Field, lo: u64, hi: u64) -> ValueId {
@@ -6087,9 +6554,9 @@ impl Engine {
             m,
             v: &self.values,
             empty,
-            cache: &self.acc_cache,
+            cache: &self.frozen().acc_cache,
         };
-        let root = self.units[unit as usize].accs.get(&f).copied().unwrap_or(TNIL);
+        let root = self.acc_root(unit, f);
         self.accs_arena.lazy_fold(&b, root, lo, hi)
     }
 
@@ -6153,7 +6620,7 @@ impl Engine {
         let unit = self.n(reader).unit;
         let key = self.watch_key(reader, anchor);
         let span = self.n(reader).label.saturating_sub(key.0);
-        let u = &mut self.units[unit as usize];
+        let u = self.unit_mut(unit);
         u.max_span = u.max_span.max(span);
         u.watches.insert(
             key,
@@ -6171,14 +6638,14 @@ impl Engine {
         if let Some((_, anchor)) = self.aux_of(reader).and_then(|a| a.watch) {
             let key = self.watch_key(reader, anchor);
             let unit = self.n(reader).unit;
-            self.units[unit as usize].watches.remove(&key);
+            self.unit_mut(unit).watches.remove(&key);
             self.ax(reader).watch = None;
         }
     }
 
     fn rebuild_watches(&mut self, unit: u32) {
-        let old = std::mem::take(&mut self.units[unit as usize].watches);
-        self.units[unit as usize].max_span = 0;
+        let old = std::mem::take(&mut self.unit_mut(unit).watches);
+        self.unit_mut(unit).max_span = 0;
         for ((_, reader), w) in old {
             if self.live(reader) {
                 self.ax(reader).watch = None;
@@ -6189,7 +6656,7 @@ impl Engine {
 
     /// Watches whose range `[from, reader)` contains `label`.
     fn stab(&self, unit: u32, label: u64) -> Vec<(Slot, Watch)> {
-        let u = &self.units[unit as usize];
+        let u = self.unit(unit);
         let lo = label.saturating_sub(u.max_span);
         u.watches
             .range((lo, Slot { ix: 0, gen_: 0 })..=(label, NIL))
@@ -6237,7 +6704,8 @@ impl Engine {
     fn unanchor_watches(&mut self, s: Slot) {
         let unit = self.n(s).unit;
         let from = self.n(s).label + 1;
-        let readers: Vec<Slot> = self.units[unit as usize]
+        let readers: Vec<Slot> = self
+            .unit(unit)
             .watches
             .range((from, Slot { ix: 0, gen_: 0 })..=(from, NIL))
             .map(|((_, r), _)| *r)
@@ -6255,27 +6723,46 @@ impl Engine {
         let mut d = std::mem::take(&mut self.settle_pending);
         d.sort_unstable();
         d.dedup();
-        self.flush_order();
+        // The waiting range readers over the finished positions, each once
+        // (a reader over many of them is checked once, not once per node).
+        let mut seen = FxHashSet::default();
+        let mut readers: Vec<(u32, Slot, Slot)> = Vec::new();
         for (u, l) in d {
-            self.stab_settle(u, l);
+            for (r, w) in self.stab(u, l) {
+                if w.waiting && self.n(r).state == State::Parked && seen.insert(r) {
+                    readers.push((u, r, w.anchor));
+                }
+            }
+        }
+        for (u, r, anchor) in readers {
+            self.settle_reader(u, r, anchor);
+        }
+    }
+
+    /// Unparks the waiting range reader `r` if nothing in its range is in
+    /// work.
+    fn settle_reader(&mut self, unit: u32, r: Slot, anchor: Slot) {
+        if self.n(r).state != State::Parked {
+            return;
+        }
+        self.flush_order();
+        let lo = self.watch_key(r, anchor).0;
+        let s = self.ord_fold(unit, lo, self.n(r).label);
+        if s.work == 0 {
+            self.drop_watch(r);
+            self.dequeue(r);
+            self.set_state(r, State::Dirty);
+            let h = self.n(r).height.max(s.maxh + 1);
+            self.lift(r, h);
+            self.enqueue(r);
         }
     }
 
     fn stab_settle(&mut self, unit: u32, label: u64) {
         self.flush_order();
         for (r, w) in self.stab(unit, label) {
-            if !w.waiting || self.n(r).state != State::Parked {
-                continue;
-            }
-            let lo = self.watch_key(r, w.anchor).0;
-            let s = self.ord_fold(unit, lo, self.n(r).label);
-            if s.work == 0 {
-                self.drop_watch(r);
-                self.dequeue(r);
-                self.set_state(r, State::Dirty);
-                let h = self.n(r).height.max(s.maxh + 1);
-                self.lift(r, h);
-                self.enqueue(r);
+            if w.waiting {
+                self.settle_reader(unit, r, w.anchor);
             }
         }
     }
@@ -6284,6 +6771,7 @@ impl Engine {
 
     fn set_uses(&mut self, x: Slot, new: Vec<Use>) {
         span!(Uses);
+        count!(UseRecord, new.len());
         let n = self.n(x);
         let (unit, label) = (n.unit, n.label);
         let has_label = !n.has(F_APP);
@@ -6292,15 +6780,19 @@ impl Engine {
             match u.kind {
                 K_FIELD | K_CHAIN | K_ENV if has_label => {
                     let key = (site_key(unit, u.site), Field(ValueId(u.key)), label);
-                    self.users.remove(&key);
+                    self.users.remove(&(key.0, key.1), key.2);
                     if u.kind == K_CHAIN {
-                        self.chain_users.remove(&key);
+                        self.chain_users.remove(&(key.0, key.1), key.2);
                     }
                 }
                 K_OUTPUT => {
                     let t = Slot::unpack(u.key);
                     if self.live(t) && self.n(t).aux != NO_AUX {
-                        self.ax(t).out_readers.retain(|&r| r != x);
+                        if self.owned(t) {
+                            self.ax(t).out_readers.retain(|&r| r != x);
+                        } else {
+                            self.defer(Tail::OutDel(t, x));
+                        }
                     }
                 }
                 K_LOOP => {
@@ -6316,14 +6808,19 @@ impl Engine {
             match u.kind {
                 K_FIELD | K_CHAIN | K_ENV if has_label => {
                     let key = (site_key(unit, u.site), Field(ValueId(u.key)), label);
-                    self.users.insert(key, x);
+                    self.note_user(unit, key.1, label);
+                    self.users.insert((key.0, key.1), key.2, x);
                     if u.kind == K_CHAIN {
-                        self.chain_users.insert(key, x);
+                        self.chain_users.insert((key.0, key.1), key.2, x);
                     }
                 }
                 K_OUTPUT => {
                     let t = Slot::unpack(u.key);
                     if self.live(t) {
+                        if !self.owned(t) {
+                            self.defer(Tail::OutAdd(t, x));
+                            continue;
+                        }
                         let a = self.ax(t);
                         if !a.out_readers.contains(&x) {
                             a.out_readers.push(x);
@@ -6331,7 +6828,9 @@ impl Engine {
                     }
                 }
                 K_LOOP => {
-                    self.loop_users.entry(Field(ValueId(u.key))).or_default().insert(x);
+                    self.loop_users
+                        .entry_or(Field(ValueId(u.key)), Default::default)
+                        .insert(x);
                 }
                 _ => {}
             }
@@ -6350,7 +6849,7 @@ impl Engine {
             }
         }
         for &(f, v) in &pubs {
-            self.loop_pubs.entry(f).or_default().insert(id, v);
+            self.loop_pubs.entry_or(f, Default::default).insert(id, v);
         }
         self.ax(x).publishes = pubs;
     }
@@ -6464,7 +6963,7 @@ impl Engine {
         };
         if ids.len() > pre + suf {
             let n_new = u32::try_from(ids.len() - pre - suf).unwrap_or(u32::MAX);
-            let e = self.created_in_eval.entry(x).or_default();
+            let e = self.created_in_eval.entry_or(x, Default::default);
             e.0 = e.0.saturating_add(n_new);
             for &spec in &specs[pre..ids.len() - suf] {
                 if e.1.len() == 4 {
@@ -6518,8 +7017,7 @@ impl Engine {
             // are consecutive and fresh).
             span!(OrderInsert);
             let items: Vec<(u64, OItem)> = created.iter().map(|&c| (self.n(c).label, self.oitem(c))).collect();
-            let root = self.units[unit as usize].root;
-            self.units[unit as usize].root = self.order.insert_run(&OAug, root, items);
+            self.ord_op(OrderOp::InsertRun(unit, items));
         }
         #[cfg(feature = "profile")]
         drop(create_span);
@@ -6529,10 +7027,10 @@ impl Engine {
             for &c in &created {
                 self.set_created_effect(c, false);
             }
-            let root = self.units[unit as usize].root;
+            let root = self.root(unit);
             let span = self
                 .order
-                .fold(&OAug, root, self.n(first).label, self.n(last).label + 1);
+                .pfold(&OAug, root, self.n(first).label, self.n(last).label + 1);
             let balanced = span.c == 0 && span.o == 0;
             if !balanced {
                 // Unbalanced: re-bind as if added one at a time.
@@ -6551,11 +7049,11 @@ impl Engine {
             }
             // The run's scope depths: one fold at its start, then a prefix
             // count of the brackets inside it.
-            let mut depth = self.order.fold(&OAug, root, 0, self.n(first).label).o;
+            let mut depth = self.order.pfold(&OAug, root, 0, self.n(first).label).o;
             let mut rd = std::mem::take(&mut self.run_depths);
             rd.clear();
             for &c in &created {
-                let eff = self.oitem(c).eff;
+                let eff = self.eff_now(c);
                 rd.push((self.n(c).label, eff, depth));
                 depth = eff_opens(eff) + depth.saturating_sub(eff_closes(eff));
             }
@@ -6638,6 +7136,8 @@ impl Engine {
             let set: Vec<(Field, bool)> = defs.iter().map(|d| (d.0, d.2)).collect();
             self.set_defset(x, &set);
         } else {
+            // Both lists in field order: the node's is sorted, the run's is
+            // sorted here.
             let declared: Vec<Field> = self
                 .n(x)
                 .defs
@@ -6645,15 +7145,17 @@ impl Engine {
                 .filter(|d| self.is_client_def(x, d.field) && d.value != self.seq_start)
                 .map(|d| d.field)
                 .collect();
+            let mut made: Vec<Field> = defs.iter().map(|d| d.0).collect();
+            made.sort_unstable();
             for &(f, _, _) in defs {
-                if !declared.contains(&f) && self.is_client_def(x, f) {
+                if declared.binary_search(&f).is_err() && self.is_client_def(x, f) {
                     let id = self.n(x).id;
                     let field = self.client_name(f);
                     self.node_error(x, EvalError::UndeclaredDefinition { node: id, field });
                 }
             }
             for &f in &declared {
-                if !defs.iter().any(|d| d.0 == f) {
+                if made.binary_search(&f).is_err() {
                     let id = self.n(x).id;
                     let field = self.client_name(f);
                     self.node_error(x, EvalError::UndeclaredDefinition { node: id, field });
@@ -6662,18 +7164,13 @@ impl Engine {
         }
         let mut changed = false;
         for &(f, v, _) in defs {
-            if self.is_seq_hidden(f) && eff_opens(self.oitem(x).eff) > 0 {
+            if self.is_seq_hidden(f) && eff_opens(self.eff_now(x)) > 0 {
                 continue;
             }
             let old = self.n(x).def_value(f);
             if old != Some(v) {
                 changed = true;
-                let n = self.nm(x);
-                for d in &mut n.defs {
-                    if d.field == f {
-                        d.value = v;
-                    }
-                }
+                self.nm(x).set_def_value(f, v);
                 let cause = Cause::Changed {
                     field: f,
                     site: Some(self.n(x).id),
@@ -6836,17 +7333,13 @@ impl Engine {
             }
             // Range readers folding over `y`.
             let n = self.n(y);
-            if !n.has(F_APP) && !self.units[n.unit as usize].watches.is_empty() {
+            if !n.has(F_APP) && !self.unit(n.unit).watches.is_empty() {
                 let (unit, label) = (n.unit, n.label);
                 stack.extend(self.stab(unit, label).into_iter().map(|(r, _)| r));
             }
             for d in &self.n(y).defs {
                 let from = y.pack();
-                stack.extend(
-                    self.users
-                        .range((from, d.field, 0)..=(from, d.field, u64::MAX))
-                        .map(|(_, &u)| u),
-                );
+                stack.extend(self.users.range(&(from, d.field), 0..).map(|(_, u)| u));
             }
         }
     }
@@ -6941,6 +7434,7 @@ impl Engine {
             let saved = if keep { r.suspended.take() } else { None };
             if saved.is_some() || self.aux_of(x).is_some() {
                 *self.ax(x).suspended.get_mut().unwrap_or_else(PoisonError::into_inner) = saved;
+                self.note_suspended(x);
             }
         }
         // A definition the run read was removed while it ran (its node
@@ -7054,9 +7548,13 @@ impl Engine {
         if let Some(e) = r.error.clone() {
             self.node_error(x, e);
         }
-        if r.raise > 0 && !matches!(r.end, End::Raise(..)) {
-            // A read of a finished node not settled below this level, then
-            // a stop: the node re-runs above that node too.
+        if r.raise > 0 {
+            // A read of a finished node not settled below this level: the
+            // node goes above that node (a completed run keeps its result
+            // there; a stopped one re-runs there).
+            if matches!(r.end, End::Output(_)) {
+                self.report.raises += 1;
+            }
             let h = r.raise.max(self.n(x).height);
             self.lift(x, h);
             self.note_raise(x, h, r.raise_from, Lifted::Read);
@@ -7067,14 +7565,7 @@ impl Engine {
             End::Gated(t, kind, field) => {
                 self.report.gated += 1;
                 count!(Gated);
-                if self.live(t) && self.n(t).in_work() {
-                    self.note_wait(t, kind);
-                    self.park(x, t, field);
-                } else if self.live(t) {
-                    let h = (self.n(t).height + 1).max(self.n(x).height);
-                    self.lift(x, h);
-                    self.note_raise(x, h, t, Lifted::Gate);
-                }
+                self.stop_on(x, t, kind, field, Lifted::Gate);
                 return;
             }
             End::GateRaise(h, from) => {
@@ -7083,25 +7574,10 @@ impl Engine {
                 self.note_raise(x, h, from, Lifted::Gate);
                 return;
             }
-            End::Raise(h, from) => {
-                self.report.stops += 1;
-                self.report.raises += 1;
-                let h = h.max(self.n(x).height + 1);
-                self.lift(x, h);
-                self.note_raise(x, h, from, Lifted::Read);
-                return;
-            }
             End::Wait(t, kind, field) => {
                 self.report.stops += 1;
                 self.apply_partial(x, &r);
-                if self.live(t) && self.n(t).in_work() {
-                    self.note_wait(t, kind);
-                    self.park(x, t, field);
-                } else if self.live(t) {
-                    let h = (self.n(t).height + 1).max(self.n(x).height);
-                    self.lift(x, h);
-                    self.note_raise(x, h, t, Lifted::Read);
-                }
+                self.stop_on(x, t, kind, field, Lifted::Read);
                 return;
             }
             End::WaitEnv(f) => {
@@ -7146,7 +7622,7 @@ impl Engine {
                 let (u, l) = (self.n(x).unit, self.n(x).label);
                 let lo = self.watch_key(x, anchor).0;
                 self.flush_order();
-                if self.ord_fold(u, lo, l).work == 0 {
+                if self.work_in(u, lo, l) == 0 {
                     self.stab_settle(u, lo);
                 }
                 return;
@@ -7177,9 +7653,7 @@ impl Engine {
         // does not count toward the node's run budget (a guess refuted
         // at every pending predecessor would end the evaluation).
         if !r.speculative {
-            let c = self.runs_in_eval.entry(x).or_insert(0);
-            *c += 1;
-            let c = *c;
+            let c = self.runs_in_eval.bump(x);
             if c * 2 == self.limits.runs_per_node || c * 2 == self.limits.runs_per_node + 1 {
                 self.tracing += 1;
             }
@@ -7224,7 +7698,7 @@ impl Engine {
             // A stream claim reads forward: a node it takes that reads the
             // claim back is a cycle that never parks (each run feeds the
             // next). Bound the runs per evaluation.
-            let runs = self.stream_runs.entry(x).or_insert(0);
+            let runs = self.stream_runs.entry_or(x, || 0);
             *runs += 1;
             if *runs == STREAM_RUN_LIMIT {
                 self.errors.push(EvalError::Cycle(vec![self.n(x).id]));
@@ -7250,6 +7724,9 @@ impl Engine {
         if self.n(x).output != output || !self.n(x).has(F_RAN) {
             changed = true;
             self.nm(x).output = output;
+            if self.slice.is_some() {
+                self.tail_out_changed.insert(x);
+            }
             let readers = self.aux_of(x).map_or_else(Default::default, |a| a.out_readers.clone());
             for rd in readers {
                 if self.tracing > 0 {
@@ -7275,7 +7752,9 @@ impl Engine {
             self.spec_done.insert(x);
         } else {
             self.set_flag(x, F_NOSPEC, false);
-            self.spec_done.remove(&x);
+            if !self.spec_done.is_empty() {
+                self.spec_done.remove(&x);
+            }
         }
         self.update_taint(x);
         if read_freed {
@@ -7331,6 +7810,11 @@ impl Engine {
         } else {
             let h = self.target_height_mut(x);
             self.finish(x, h);
+            if r.raise > 0 {
+                // Kept above the node it read before that one was settled
+                // (finish clears a raise that does not match its height).
+                self.note_raise(x, self.n(x).height, r.raise_from, Lifted::Read);
+            }
             // Its count claim took a node whose own claims were released
             // into its view: the count applies to the view it sees, so it
             // runs again on that view (and converges: each run claims a
@@ -7434,6 +7918,108 @@ impl Engine {
         }
     }
 
+    /// Applies a batch's results, sorted in text order. A wide batch with
+    /// nothing speculative is applied in slices of consecutive results of
+    /// one unit: a write to a node outside the current slice is deferred
+    /// and replayed after the last slice, and the results that read or
+    /// change more than their neighbourhood are applied whole after that
+    /// (any serial order of a batch is valid).
+    fn apply_results(&mut self, results: &mut Vec<RunResult>, exec: &mut dyn Executor) {
+        let (s_fixed, t) = slice_params();
+        let n = results.len();
+        if n < t.max(1) || self.spec_live > 0 || results.iter().any(|r| r.speculative) {
+            for r in results.drain(..) {
+                self.apply(r);
+            }
+            return;
+        }
+        let size = if s_fixed > 0 { s_fixed } else { (n / 32).clamp(64, 256) };
+        let whole: Vec<bool> = results.iter().map(|r| self.applies_whole(r)).collect();
+        let mut wholes = Vec::new();
+        let mut keys: Vec<(u32, u64)> = Vec::with_capacity(n);
+        for r in results.iter() {
+            let nn = self.n(r.slot);
+            keys.push((nn.unit, nn.label));
+        }
+        let mut start = 0;
+        let mut items = results.drain(..).zip(whole).enumerate().peekable();
+        let mut bound = None;
+        let overlays = slice_overlays() && exec.parallelism() > 1;
+        let mut slices: Vec<((u32, u64, u64), Vec<RunResult>)> = Vec::new();
+        while let Some((i, (r, w))) = items.next() {
+            if w {
+                wholes.push(r);
+                if items.peek().is_none() {
+                    break;
+                }
+                continue;
+            }
+            // A new slice at a unit change or after `size` results.
+            if bound.is_none() || keys[i].0 != keys[start].0 || i - start >= size {
+                start = i;
+                let (u, lo) = keys[i];
+                let end = (i + size).min(n);
+                let hi = (i + 1..end).find(|&j| keys[j].0 != u).map_or_else(
+                    || {
+                        if end < n && keys[end].0 == u {
+                            keys[end].1
+                        } else {
+                            u64::MAX
+                        }
+                    },
+                    |_| u64::MAX,
+                );
+                bound = Some((u, lo, hi));
+                if overlays {
+                    slices.push(((u, lo, hi), Vec::new()));
+                }
+            }
+            if overlays {
+                slices.last_mut().expect("a slice").1.push(r);
+                continue;
+            }
+            self.slice = bound;
+            self.apply(r);
+            self.slice = None;
+        }
+        drop(items);
+        if overlays {
+            self.apply_sliced(slices, wholes, exec);
+            return;
+        }
+        self.drain_tail();
+        for r in wholes {
+            self.apply(r);
+        }
+    }
+
+    /// Whether a result must be applied whole, after a sliced batch's
+    /// slices and tail: it reads ranges or the environment, changes its
+    /// effect or claims, or needs an application.
+    fn applies_whole(&self, r: &RunResult) -> bool {
+        if !self.live(r.slot) {
+            return true;
+        }
+        let n = self.n(r.slot);
+        n.has(F_APP)
+            || n.has(F_CLAIM_DYN)
+            || n.has(F_CLAIMER)
+            || (n.has(F_EFF_DYN) && r.effect.is_some())
+            || r.watch.is_some()
+            || self
+                .aux_of(r.slot)
+                .is_some_and(|a| a.watch.is_some() || a.stream.is_some() || !a.publishes.is_empty())
+            || !r.publishes.is_empty()
+            || r.uses.iter().any(|u| u.kind == K_LOOP)
+            || !r.assumptions.is_empty()
+            || r.error.is_some()
+            || !r.env.is_empty()
+            || !r.env_found.is_empty()
+            || r.stream.is_some()
+            || r.claim.is_some()
+            || matches!(r.end, End::NeedApp(..) | End::WaitEnv(..) | End::WaitRange(..))
+    }
+
     /// `x` completed with all reads settled (or confirmed).
     #[allow(clippy::too_many_lines)]
     fn finish(&mut self, x: Slot, height: u32) {
@@ -7455,7 +8041,7 @@ impl Engine {
                 // region if it differs from what the bindings reflect.
                 let old = self.n(y).bound;
                 self.sync_order(y);
-                let new = self.oitem(y).eff;
+                let new = self.eff_now(y);
                 if new != old {
                     self.effect_region_changed(y, old);
                 }
@@ -7468,7 +8054,7 @@ impl Engine {
             } else {
                 self.set_height(y, h);
             }
-            if let Some(o) = self.origins.get_mut(&y)
+            if let Some(o) = self.origins.get_mut(y)
                 && o.raised != 0
                 && o.raised != h
             {
@@ -7487,7 +8073,7 @@ impl Engine {
             }
             self.wake_waiters(y);
             let (u, l) = (self.n(y).unit, self.n(y).label);
-            if !self.n(y).has(F_APP) && !self.units[u as usize].watches.is_empty() {
+            if !self.n(y).has(F_APP) && !self.unit(u).watches.is_empty() {
                 // Range readers are checked once per batch.
                 self.settle_pending.push((u, l));
             }
@@ -7589,7 +8175,7 @@ impl Engine {
         let mut todo: Vec<Slot> = Vec::new();
         for i in 0..self.nodes.len() {
             let n = &self.nodes[i];
-            if n.state != State::Free && !n.has(F_APP) && self.units[n.unit as usize].owner == NIL {
+            if n.state != State::Free && !n.has(F_APP) && self.unit(n.unit).owner == NIL {
                 todo.push(self.slot_at(i));
             }
         }
@@ -7710,14 +8296,14 @@ impl Engine {
             live.insert(f.0);
             live.insert(*v);
         }
-        for (f, m) in &self.loop_pubs {
+        for (f, m) in self.loop_pubs.plain() {
             live.insert(f.0);
             live.extend(m.values().copied());
         }
         for f in self.monoids.keys() {
             live.insert(f.0);
         }
-        for (_, args) in self.memo.keys() {
+        for (_, args) in self.memo.plain().keys() {
             live.insert(*args);
         }
         live.extend(self.pins.keys().copied());
@@ -7825,14 +8411,14 @@ impl Engine {
             // follow the cold path from the initial values.
             self.restart_loops();
         }
-        self.spec_done.clear();
-        self.stream_runs.clear();
+        self.spec_done.plain_mut().clear();
+        self.stream_runs.plain_mut().clear();
         self.runs_in_eval.clear();
-        self.causes.clear();
-        self.mispredicted.clear();
+        self.causes.plain_mut().clear();
+        self.mispredicted.plain_mut().clear();
         self.spec_blocked.clear();
         self.tracing = 0;
-        self.created_in_eval.clear();
+        self.created_in_eval.plain_mut().clear();
         self.idle_rounds = 0;
         self.eval_runs = 0;
         #[cfg(not(target_arch = "wasm32"))]
@@ -7867,6 +8453,7 @@ impl Engine {
 
     fn has_feedback(&self) -> bool {
         self.loop_pubs
+            .plain()
             .values()
             .flat_map(|m| m.keys())
             .any(|id| self.ids.get(id).is_some_and(|&s| self.n(s).has(F_TAINT)))
@@ -7904,7 +8491,7 @@ impl Engine {
             return true;
         }
         let unit = self.n(s).unit;
-        let root = self.units[unit as usize].root;
+        let root = self.root(unit);
         let depth = self.def_depth(root, self.n(s).label, Field(ValueId::NONE));
         let mut stack: Vec<Slot> = self.children_of(s).to_vec();
         while let Some(c) = stack.pop() {
@@ -7930,7 +8517,7 @@ impl Engine {
         } else {
             NIL
         };
-        let o = self.origins.entry(x).or_insert(Origin::NONE);
+        let o = self.origins.entry_or(x, || Origin::NONE);
         if from == NIL && o.raised == h && o.raised_from != NIL {
             return;
         }
@@ -7950,7 +8537,7 @@ impl Engine {
             .refuted_by_field
             .sort_by_key(|&(f, c)| (std::cmp::Reverse(c), f.0.raw()));
         self.report.refuted_nodes = self.mispredicted.len() as u64;
-        self.report.refutations_max = self.mispredicted.values().copied().max().unwrap_or(0);
+        self.report.refutations_max = self.mispredicted.plain().values().copied().max().unwrap_or(0);
         let mut top: Vec<(Slot, u64)> = std::mem::take(&mut self.wait_counts).into_iter().collect();
         top.sort_unstable_by_key(|&(s, c)| (std::cmp::Reverse(c), s.ix));
         self.report.top_waited = top
@@ -7960,7 +8547,7 @@ impl Engine {
             .map(|(s, c)| (self.n(s).id, c))
             .collect();
         let touched = std::mem::take(&mut self.touched);
-        for (id, snap) in touched {
+        for (id, snap) in touched.into_plain() {
             let Some(&s) = self.ids.get(&id) else {
                 if snap.existed {
                     self.report.freed += 1;
@@ -7992,7 +8579,12 @@ impl Engine {
                 continue;
             }
             let sites = self.site_list(s);
-            let rebound = sites.iter().filter(|x| !snap.sites.contains(x)).count();
+            let rebound = if snap.sites.len() > 16 {
+                let was: FxHashSet<(u64, u64)> = snap.sites.iter().copied().collect();
+                sites.iter().filter(|x| !was.contains(x)).count()
+            } else {
+                sites.iter().filter(|x| !snap.sites.contains(x)).count()
+            };
             self.report.rebinds += rebound as u64;
             if sig != snap.sig || args != snap.args {
                 self.report.nodes_run += 1;
@@ -8070,8 +8662,8 @@ impl Engine {
                 self.report.restarts += 1;
                 continue;
             }
-            if !self.parked.is_empty() {
-                let parked: Vec<Slot> = self.parked.iter().map(|&(_, s)| s).collect();
+            if self.parked_len > 0 {
+                let parked: Vec<Slot> = self.parked_nodes();
                 if self.collect_apps(true) {
                     self.report.rounds -= 1;
                     continue;
@@ -8223,8 +8815,8 @@ impl Engine {
         self.apply_environment();
         // A new text: the per-evaluation limits start over.
         self.runs_in_eval.clear();
-        self.created_in_eval.clear();
-        self.stream_runs.clear();
+        self.created_in_eval.plain_mut().clear();
+        self.stream_runs.plain_mut().clear();
         self.idle_rounds = 0;
         // The new version: every marked node is reported again at it.
         self.requeue_marks();
@@ -8236,6 +8828,7 @@ impl Engine {
     fn requeue_marks(&mut self) {
         let mut done: Vec<Slot> = self
             .marks
+            .plain()
             .keys()
             .copied()
             .filter(|&s| self.live(s) && self.n(s).state == State::Done)
@@ -8295,17 +8888,17 @@ impl Engine {
     fn work_around(&self, x: Slot) -> bool {
         let n = self.n(x);
         let end = self.unfolded_end(x);
-        if self.ord_fold(n.unit, 0, end + 1).work > 0 {
+        if self.work_in(n.unit, 0, end + 1) > 0 {
             return true;
         }
         let mut unit = n.unit;
         loop {
-            let owner = self.units[unit as usize].owner;
+            let owner = self.unit(unit).owner;
             if owner == NIL || !self.live(owner) {
                 return false;
             }
             let o = self.n(owner);
-            if o.in_work() || self.ord_fold(o.unit, 0, o.label).work > 0 {
+            if o.in_work() || self.work_in(o.unit, 0, o.label) > 0 {
                 return true;
             }
             unit = o.unit;
@@ -8317,6 +8910,7 @@ impl Engine {
         self.settle_heap.clear();
         let mut done: Vec<Slot> = self
             .marks
+            .plain()
             .keys()
             .copied()
             .filter(|&s| self.live(s) && self.n(s).state == State::Done)
@@ -8395,11 +8989,15 @@ impl Engine {
                 }
             }
         }
-        for &(_, s) in &self.parked {
+        let mut seen_parked = FxHashSet::default();
+        for &s in &self.parked {
             if cands.len() >= 2 * lim || scan == 0 {
                 break;
             }
             scan -= 1;
+            if !self.live(s) || !self.n(s).has(F_PARKSET) || !seen_parked.insert(s) {
+                continue;
+            }
             let n = self.n(s);
             if !n.has(F_NOSPEC) && n.on != NIL && self.may_speculate(s) {
                 cands.push(Candidate {
@@ -8412,6 +9010,7 @@ impl Engine {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn drain(
         &mut self,
         sched: &mut dyn Scheduler,
@@ -8441,7 +9040,7 @@ impl Engine {
             if self.past_deadline() {
                 return Err(EvalError::Deadline {
                     runs: self.eval_runs,
-                    waiters: self.waiters(),
+                    waiters: self.waiters_with_held(),
                 });
             }
             self.level = level;
@@ -8489,11 +9088,22 @@ impl Engine {
                 exec.execute(jobs.len(), &|i| this.run_job(jobs[i], fuel), &mut results);
             }
             span!(ApplyBatch);
-            results.sort_by_key(|r| r.node);
-            let runs_before = self.report.runs;
-            for r in results.drain(..) {
-                self.apply(r);
+            // In text order: consecutive results touch neighbouring index
+            // entries and order leaves (any order of a batch's results is
+            // valid; ties and dead nodes by id, for determinism).
+            {
+                let this: &Engine = self;
+                results.sort_by_cached_key(|r| {
+                    let n = this.nodes.get(r.slot.ix as usize);
+                    match n {
+                        Some(n) if this.live(r.slot) => (n.unit, n.label, r.node),
+                        _ => (u32::MAX, 0, r.node),
+                    }
+                });
             }
+            let runs_before = self.report.runs;
+            self.apply_results(&mut results, exec);
+            self.batch_lift.plain_mut().clear();
             self.settle_deferred();
             let applied = self.report.runs - runs_before;
             if applied > 0 {
@@ -8508,7 +9118,7 @@ impl Engine {
                 if self.idle_rounds > self.limits.idle_rounds {
                     return Err(EvalError::NoProgress {
                         rounds: self.idle_rounds,
-                        waiters: self.waiters(),
+                        waiters: self.waiters_with_held(),
                     });
                 }
             } else {
@@ -8617,9 +9227,6 @@ pub(crate) enum End {
     Wait(Slot, WaitKind, Option<Field>),
     /// Waiting for an environment field neither supplied nor absent.
     WaitEnv(Field),
-    /// Re-done at the level, above the finished node it read there
-    /// (`NIL`: a range).
-    Raise(u32, Slot),
     NeedApp(OpId, ValueId),
     NeedChild(usize),
     WaitRange(Field, Slot),
@@ -8733,7 +9340,7 @@ impl Engine {
 
     pub(crate) fn prev_sibling_where(&self, x: Slot, pred: &dyn Fn(OpId, &[ValueId]) -> bool) -> Option<NodeId> {
         let n = self.n(x);
-        let root = self.units[n.unit as usize].root;
+        let root = self.root(n.unit);
         let mut label = n.label;
         while let Some((k, i)) = self.order.prev(root, label) {
             label = k;

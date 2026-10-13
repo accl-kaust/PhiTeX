@@ -120,11 +120,35 @@ fn change_word(src: &str, n: usize) -> String {
     panic!("no word in paragraph {n}");
 }
 
+/// (measure) `PHITEX_EP_CHECK`: the edited build's output against a
+/// cold build of the same text.
+fn same_as_cold(b: &phitex_tex::Build, cold: impl FnOnce() -> phitex_tex::Build) {
+    if std::env::var_os("PHITEX_EP_CHECK").is_none() {
+        return;
+    }
+    let c = cold();
+    let same = b.output().0 == c.output().0;
+    eprintln!(
+        "== EDITPATH identical to cold: {}",
+        if same { "yes" } else { "no" }
+    );
+}
+
 fn edit_line(what: &str, t: std::time::Duration, b: &phitex_tex::Build) {
     let s = &b.stats;
+    eprintln!("== EDITPATH {what}: critical path {:?}", s.critical_path);
+    if std::env::var_os("PHITEX_CHAIN").is_some() {
+        for (w, k, f) in b.critical_chain() {
+            eprintln!(
+                "   chain {k:9} {f:24} {}",
+                w.chars().take(100).collect::<String>()
+            );
+        }
+    }
     eprintln!(
-        "== EDITPATH {what}: wall {t:?}, evaluate wall {:?}, {} nodes run, {} page steps, {} loop rounds, {} rounds, {} pages",
+        "== EDITPATH {what}: wall {t:?}, evaluate wall {:?}, busy {:?}, {} nodes run, {} page steps, {} loop rounds, {} rounds, {} pages",
         s.wall,
+        s.busy,
         s.nodes_run,
         s.page_steps,
         s.loop_rounds,
@@ -162,6 +186,7 @@ fn editpath_doc() {
     let t0 = std::time::Instant::now();
     b.edit(&e1);
     edit_line("word middle", t0.elapsed(), &b);
+    same_as_cold(&b, || common::build(opts(), Some(&prelude), &e1));
     let e2 = change_word(&e1, 1);
     let t0 = std::time::Instant::now();
     b.edit(&e2);
@@ -171,6 +196,7 @@ fn editpath_doc() {
     let t0 = std::time::Instant::now();
     b.edit(&e3);
     edit_line("insert paragraph middle", t0.elapsed(), &b);
+    same_as_cold(&b, || common::build(opts(), Some(&prelude), &e3));
     assert!(b.is_pdf());
 }
 
@@ -223,5 +249,8 @@ fn editpath_hello() {
     let t0 = std::time::Instant::now();
     b.edit(&e1);
     edit_line("word", t0.elapsed(), &b);
+    same_as_cold(&b, || {
+        common::build(opts(), Some("\\input pdflatex.ini\n"), &e1)
+    });
     assert!(b.is_pdf());
 }
