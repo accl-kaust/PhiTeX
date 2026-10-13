@@ -389,10 +389,22 @@ impl Run<'_, '_> {
                 // §1271
                 self.get_token()?;
                 let t = self.cur.tok;
-                // the innermost group's level keeps the tokens; at the
-                // bottom level they are dropped (§1271 `cur_level>level_one`)
+                // the innermost group's level keeps the tokens: one of
+                // this run's, else the engine scope the node runs in (its
+                // `ag` list, run at its close, `Run::unsave_extras`); at
+                // the bottom level they are dropped (§1271
+                // `cur_level>level_one`)
                 if let Some(l) = self.nest.iter_mut().rev().find(|l| l.group != 0) {
                     l.ag.push(t);
+                } else {
+                    let base = self.base_mode()?;
+                    if base.depth > 0 {
+                        let v = self.v;
+                        let mut xs = vec![v.int(base.sid)];
+                        xs.extend(self.scope_list("ag", &base)?);
+                        xs.push(t.encode(v));
+                        self.set("ag", v.list(xs), false);
+                    }
                 }
             }
             cmd::IN_STREAM => self.open_or_close_in()?,
