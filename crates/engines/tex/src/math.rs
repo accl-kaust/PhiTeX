@@ -714,6 +714,9 @@ impl Run<'_, '_> {
             out.extend(p);
             return Ok(out);
         };
+        // the incompleat noad is consumed: a later list with the same
+        // id (local ids restart in every run) must not find it (§1185)
+        self.set(&format!("inc:{lid}"), ValueId::UNIT, true);
         let g = |i: usize| crate::val::int_at(v, inc, i);
         let n = usize::try_from(g(3)).unwrap_or(0).min(items.len());
         let (mut num, den) = (items[..n].to_vec(), items[n..].to_vec());
