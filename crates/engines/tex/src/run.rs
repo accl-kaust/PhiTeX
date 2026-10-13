@@ -280,24 +280,6 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
-    pub(crate) fn node_raw(&self) -> i64 {
-        let id = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
-        let x = self.node_raw_of(id);
-        self.minted.borrow_mut().push(x);
-        x
-    }
-
-    /// A run may open several scopes for the engine (a `\begingroup` and
-    /// a `\setbox` on one line): each needs its own id.
-    fn node_raw_of(&self, id: i64) -> i64 {
-        let k = i64::try_from(self.minted.borrow().len()).unwrap_or(0);
-        if k == 0 {
-            id
-        } else {
-            id ^ k.wrapping_mul(0x6A09_E667_F3BC_C909_u64.cast_signed())
-        }
-    }
-
     /// Forgets the category codes read: a definition may have changed one.
     pub(crate) fn forget_cats(&mut self) {
         self.cats = [0; 256];
@@ -636,13 +618,28 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Whether there is input left without claiming more siblings.
     pub(crate) fn has_input(&self) -> bool {
-        self.frames.iter().any(|f| match f {
-            Frame::Toks(t, p) => *p < t.len(),
-            Frame::Src(s) => s.loc < s.buf.len() || (s.ends && s.endch < -1),
-            Frame::File(f) => {
-                f.has_lines() && (!self.doc || self.open_span() || !self.doc_file(f))
+        // (a document file's lines left for the region children stop
+        // the run: what follows the file, its end marker included, is
+        // read after them, [`Run::leftover`])
+        for f in &self.frames {
+            let more = match f {
+                Frame::Toks(t, p) => *p < t.len(),
+                Frame::Src(s) => s.loc < s.buf.len() || (s.ends && s.endch < -1),
+                Frame::File(f) => {
+                    if !f.has_lines() {
+                        continue;
+                    }
+                    if self.doc && !self.open_span() && self.doc_file(f) {
+                        return false;
+                    }
+                    true
+                }
+            };
+            if more {
+                return true;
             }
-        })
+        }
+        false
     }
 
     /// `get_next` (§341): the next token, its meaning not yet looked up.
@@ -1108,10 +1105,12 @@ impl<'c, 'a> Run<'c, 'a> {
         let (tag_s, tag_f) = (tag("s"), tag("f"));
         let mut out: Vec<Vec<ValueId>> = Vec::new();
         let tag_t = tag("t");
+        // (a document's leftovers stay a document's, [`Run::run_all`])
+        let kind = if self.doc { 2 } else { 0 };
         let mut run: Vec<ValueId> = Vec::new();
         let node = |toks: Vec<ValueId>| -> Vec<ValueId> {
             let l = v.list(toks);
-            vec![v.list(vec![v.list(vec![tag_t, l])]), v.int(0)]
+            vec![v.list(vec![v.list(vec![tag_t, l])]), v.int(kind)]
         };
         for f in &self.frames {
             match f {
@@ -1157,7 +1156,7 @@ impl<'c, 'a> Run<'c, 'a> {
                         xs.push(name);
                         xs.push(v.int(i64::try_from(at).unwrap_or(0)));
                     }
-                    out.push(vec![v.list(vec![v.list(xs)]), v.int(0)]);
+                    out.push(vec![v.list(vec![v.list(xs)]), v.int(kind)]);
                 }
                 Frame::File(f) => {
                     if !run.is_empty() {
@@ -1205,7 +1204,11 @@ impl<'c, 'a> Run<'c, 'a> {
     /// following siblings, claimed, until it is closed or the text ends:
     /// correct, and serial for exactly that span.
     pub(crate) fn run_all(&mut self) -> R<()> {
-        self.doc = matches!(self.frames.front(), Some(Frame::Src(s)) if s.origin.is_some());
+        let args = self.cx.args();
+        // the node's text kind (`args[1]`: 1 the job's text, 2 a document's)
+        let k = args.get(1).map_or(0, |&t| int_of(self.v, t));
+        self.top = k & 1 != 0;
+        self.doc = k & 2 != 0;
         loop {
             while self.has_input() {
                 self.command()?;
@@ -1222,7 +1225,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 // a format or package text ended inside a group: the
                 // groups end with it (nothing after reads them), the
                 // node reports the error
-                self.diag(true, "a group is still open at the end of the file");
+                self.diag(true, "format: group left open at end");
                 for l in std::mem::take(&mut self.nest) {
                     if l.owns {
                         for x in l.list {
@@ -1268,27 +1271,6 @@ impl<'c, 'a> Run<'c, 'a> {
             let item = v.list(vec![v.int(0), marker]);
             let s = v.seq_unit(item);
             self.contribute("items", s);
-        }
-        // the opener of each list this run made: this node, and what it
-        // appended to the list itself (a later reader's range starts after
-        // this node)
-        let minted = std::mem::take(&mut *self.minted.borrow_mut());
-        if !minted.is_empty() {
-            let v = self.v;
-            let epoch = self.cx.values_epoch();
-            let me = crate::val::int_id(v, i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
-            let items = self.ops.fields.get_at(v, epoch, "items");
-            for id in minted {
-                let mine: Vec<ValueId> = self
-                    .contribs
-                    .iter()
-                    .filter(|(g, _)| *g == items)
-                    .flat_map(|(_, x)| v.seq_to_vec(*x))
-                    .filter(|&e| crate::val::int_at(v, e, 0) == id)
-                    .collect();
-                let val = v.list(vec![me, v.list(mine)]);
-                self.set(&format!("lopen:{id}"), val, true);
-            }
         }
         for (f, x, l) in std::mem::take(&mut self.defs) {
             self.cx.define_with(f, x, l);
@@ -1520,7 +1502,7 @@ pub(crate) fn line_args(v: &Values, line: &str) -> Vec<ValueId> {
 
 /// [`slice_args`] for a piece of a file `\input` read, beginning at
 /// byte `at` of the file named `name`: every segment carries its origin
-/// `(name, offset)`; the top is 0.
+/// `(name, offset)`; the kind is 2 (a document's piece, not the top).
 pub(crate) fn slice_args_in_file(
     v: &Values,
     text: &str,
@@ -1558,7 +1540,7 @@ pub(crate) fn slice_args_in_file(
         rest = next;
         pos += used;
     }
-    vec![v.list(frames), v.int(0)]
+    vec![v.list(frames), v.int(2)]
 }
 
 /// The text of a node from the document: a slice of its lines, as
