@@ -290,6 +290,7 @@ impl Threads {
 
     /// Runs one job, counted.
     fn job<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _run = widths::Run::begin();
         let c = self.running.fetch_add(1, Ordering::Relaxed) + 1;
         self.peak.fetch_max(c, Ordering::Relaxed);
         let t0 = clock().now();
@@ -330,6 +331,7 @@ fn threads_possible() -> bool {
 /// on: the engine's probes (spans and counters) printed, then reset.
 impl Drop for Threads {
     fn drop(&mut self) {
+        widths::print();
         if phitex_defuse::obs::enabled() && env_flag!("PHITEX_OBS") {
             eprint!("probes (evaluation):\n{}", phitex_defuse::obs::snapshot());
             phitex_defuse::obs::reset();
@@ -349,6 +351,7 @@ impl Executor for Threads {
                 .total
                 .fetch_add(u64::try_from(n).unwrap_or(0), Ordering::Relaxed);
         }
+        let _step = widths::Step::begin(n);
         self.batches.fetch_add(1, Ordering::Relaxed);
         self.jobs_max_batch.fetch_max(n, Ordering::Relaxed);
         if self.n <= 1 || n < job_grain() || !threads_possible() {
@@ -465,4 +468,196 @@ fn parallel(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) 
         }
         work();
     });
+}
+
+/// `PHITEX_WIDTHS=1`: statistics only (no behaviour change) for the
+/// engine's label-range partition decision. Per evaluation step (one
+/// `execute` batch): the ready nodes, the distinct fields read and
+/// defined; per run: the engine reads and definitions; the value-table
+/// lookups per run and the share missing the per-worker read cache
+/// (these two need the `profile` feature, else they print zero).
+/// Histograms are printed when the executor is dropped.
+pub(crate) mod widths {
+    use std::cell::Cell;
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    use phitex_defuse::Field;
+
+    pub(crate) fn on() -> bool {
+        super::env_flag!("PHITEX_WIDTHS")
+    }
+
+    /// Power-of-two buckets: bucket `b` holds values in `[2^(b-1), 2^b)`,
+    /// bucket 0 the zeros.
+    #[derive(Default)]
+    struct Hist {
+        b: [u64; 32],
+        n: u64,
+        sum: u64,
+        max: u64,
+    }
+
+    impl Hist {
+        fn add(&mut self, x: u64) {
+            let b = (64 - x.leading_zeros()) as usize;
+            self.b[b.min(31)] += 1;
+            self.n += 1;
+            self.sum += x;
+            self.max = self.max.max(x);
+        }
+        // PHITEX_WIDTHS statistics only: f64 precision is irrelevant here
+        #[allow(clippy::cast_precision_loss)]
+        fn print(&self, name: &str) {
+            if self.n == 0 {
+                return;
+            }
+            eprintln!(
+                "widths: {name}: n={} mean={:.1} max={}",
+                self.n,
+                self.sum as f64 / self.n as f64,
+                self.max
+            );
+            for (i, &c) in self.b.iter().enumerate() {
+                if c == 0 {
+                    continue;
+                }
+                let (lo, hi) = if i == 0 { (0, 0) } else { (1u64 << (i - 1), (1u64 << i) - 1) };
+                let pct = 100.0 * c as f64 / self.n as f64;
+                eprintln!("widths:   {lo:>8}..{hi:<8} {c:>9} {pct:5.1}%");
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct Stats {
+        ready: Hist,
+        step_reads: Hist,
+        step_defs: Hist,
+        run_reads: Hist,
+        run_defs: Hist,
+        step_lookups_per_run: Hist,
+        step_miss_pct: Hist,
+        lookups: u64,
+        misses: u64,
+        reads: HashSet<Field>,
+        defs: HashSet<Field>,
+    }
+
+    static STATS: Mutex<Option<Stats>> = Mutex::new(None);
+
+    thread_local! {
+        static RUN: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    }
+
+    fn with<T>(f: impl FnOnce(&mut Stats) -> T) -> T {
+        let mut g = STATS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(g.get_or_insert_with(Stats::default))
+    }
+
+    fn counters() -> (u64, u64) {
+        let s = phitex_defuse::obs::snapshot();
+        let get = |n: &str| s.counters.iter().find(|c| c.0 == n).map_or(0, |c| c.1);
+        (get("value_get"), get("value_get_miss"))
+    }
+
+    /// An engine read of `f` by the current run.
+    pub(crate) fn read(f: Field) {
+        if on() {
+            RUN.with(|c| c.set((c.get().0 + 1, c.get().1)));
+            with(|s| s.reads.insert(f));
+        }
+    }
+
+    /// A definition of `f` by the current run.
+    pub(crate) fn def(f: Field) {
+        if on() {
+            RUN.with(|c| c.set((c.get().0, c.get().1 + 1)));
+            with(|s| s.defs.insert(f));
+        }
+    }
+
+    pub(crate) struct Step(Option<(u64, (u64, u64))>);
+
+    impl Step {
+        pub(crate) fn begin(n: usize) -> Step {
+            if !on() {
+                return Step(None);
+            }
+            with(|s| {
+                s.reads.clear();
+                s.defs.clear();
+            });
+            Step(Some((n as u64, counters())))
+        }
+    }
+
+    impl Drop for Step {
+        fn drop(&mut self) {
+            let Some((n, (g0, m0))) = self.0 else { return };
+            let (g1, m1) = counters();
+            let (g, m) = (g1.saturating_sub(g0), m1.saturating_sub(m0));
+            with(|s| {
+                s.ready.add(n);
+                s.step_reads.add(s.reads.len() as u64);
+                s.step_defs.add(s.defs.len() as u64);
+                s.step_lookups_per_run.add(g / n.max(1));
+                if let Some(p) = (m * 100).checked_div(g) {
+                    s.step_miss_pct.add(p);
+                }
+                s.lookups += g;
+                s.misses += m;
+            });
+        }
+    }
+
+    pub(crate) struct Run(bool);
+
+    impl Run {
+        pub(crate) fn begin() -> Run {
+            if on() {
+                RUN.with(|c| c.set((0, 0)));
+            }
+            Run(on())
+        }
+    }
+
+    impl Drop for Run {
+        fn drop(&mut self) {
+            if !self.0 {
+                return;
+            }
+            // the worker's probe counts reach the global totals
+            phitex_defuse::obs::flush();
+            let (r, d) = RUN.with(Cell::get);
+            with(|s| {
+                s.run_reads.add(r);
+                s.run_defs.add(d);
+            });
+        }
+    }
+
+    /// The histograms so far, then cleared.
+    // PHITEX_WIDTHS statistics only: f64 precision is irrelevant here
+    #[allow(clippy::cast_precision_loss)]
+    pub(crate) fn print() {
+        if !on() {
+            return;
+        }
+        let Some(s) = STATS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() else {
+            return;
+        };
+        if s.ready.n == 0 {
+            return;
+        }
+        s.ready.print("ready nodes per step");
+        s.step_reads.print("distinct fields read per step");
+        s.step_defs.print("distinct fields defined per step");
+        s.run_reads.print("engine reads per run");
+        s.run_defs.print("definitions per run");
+        s.step_lookups_per_run.print("value lookups per run (step mean)");
+        s.step_miss_pct.print("lookup cache miss % per step");
+        let pct = if s.lookups == 0 { 0.0 } else { 100.0 * s.misses as f64 / s.lookups as f64 };
+        eprintln!("widths: lookups {} misses {} ({pct:.1}%)", s.lookups, s.misses);
+    }
 }
