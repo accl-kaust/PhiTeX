@@ -450,6 +450,10 @@ pub struct Report {
     pub confirmations: u64,
     /// Speculative runs whose assumptions failed.
     pub mispredictions: u64,
+    /// Speculative runs dropped at a stop (a read of a node still in work
+    /// with no value to assume): the node is not guessed again until the
+    /// node it stopped on leaves work.
+    pub spec_stops: u64,
     /// Attempts that resumed a stopped run at its blocked read
     /// ([`Ctx::park`]), and attempts that started over because the saved
     /// state's reads no longer held.
@@ -843,6 +847,9 @@ pub(crate) struct Suspended {
     pub(crate) diagnostics: Vec<ValueId>,
     pub(crate) sig: u64,
     pub(crate) steps: u64,
+    /// The following siblings the attempt consulted (index, node, text):
+    /// a claimer resumes only while they are still the same.
+    pub(crate) following: Vec<(usize, Slot, OpId, ValueId)>,
     /// Behind a mutex only so a result holding it is `Sync` for client
     /// executors (never contended).
     pub(crate) token: Mutex<Box<dyn std::any::Any + Send>>,
@@ -1656,6 +1663,10 @@ pub struct Engine {
     /// Mispredictions per node this evaluation: past
     /// [`MISPREDICTIONS_PER_NODE`] the node is no longer a candidate.
     mispredicted: FxHashMap<Slot, u32>,
+    /// The node a dropped guess stopped on, per node: not a candidate
+    /// again while that node is in work (every step would otherwise
+    /// re-run the same stop).
+    spec_blocked: FxHashMap<Slot, (Slot, NodeId)>,
     pins: FxHashMap<ValueId, u32>,
     values_at_sweep: usize,
     open_op: OpId,
@@ -1837,6 +1848,7 @@ impl Engine {
             done_heights: Vec::new(),
             done_max: 0,
             mispredicted: FxHashMap::default(),
+            spec_blocked: FxHashMap::default(),
             sweeps: 0,
             pins: FxHashMap::default(),
             values_at_sweep: 0,
@@ -2457,9 +2469,14 @@ impl Engine {
         *self.mispredicted.entry(x).or_insert(0) += 1;
     }
 
-    /// Whether `s` may still be run speculatively this evaluation.
+    /// Whether `s` may still be run speculatively this evaluation: not
+    /// refuted too often, and not stopped on a node still in work.
     fn may_speculate(&self, s: Slot) -> bool {
         self.mispredicted.get(&s).is_none_or(|&c| c < MISPREDICTIONS_PER_NODE)
+            && self
+                .spec_blocked
+                .get(&s)
+                .is_none_or(|&(t, id)| !(self.live(t) && self.n(t).id == id && self.n(t).in_work()))
     }
 
     /// Sets a node's state, keeping the count of done nodes per height.
@@ -5483,11 +5500,27 @@ impl Engine {
     /// the first read that does not hold ([`Report::restarted_by`]).
     fn reads_hold(&self, x: Slot, s: &Suspended) -> Result<(), &'static str> {
         let n = self.n(x);
-        if n.has(F_CLAIMER) {
-            return Err("claimer");
-        }
         if n.has(F_APP) {
             return Err("application");
+        }
+        // A claimer that stopped before claiming: the sibling texts it
+        // consulted must still be the same, in the same places.
+        if n.has(F_CLAIMER) {
+            let last = s.following.iter().map(|f| f.0 + 1).max().unwrap_or(0);
+            let mut it = self.following(x);
+            let mut now: Vec<(Slot, OpId, ValueId)> = Vec::with_capacity(last);
+            for _ in 0..last {
+                let Some((op, _)) = it.next() else { break };
+                let slot = *it.slots.last().expect("a sibling");
+                now.push((slot, op, self.n(slot).args));
+            }
+            for &(i, slot, op, args) in &s.following {
+                match now.get(i) {
+                    Some(&(ns, nop, nargs)) if ns == slot && nop == op && nargs == args => {}
+                    Some(_) => return Err("following: changed"),
+                    None => return Err("following: gone"),
+                }
+            }
         }
         for u in &s.uses {
             let seen = s.cache.get(&(u.kind, u.key)).copied();
@@ -6998,10 +7031,18 @@ impl Engine {
                     self.set_flag(x, F_NOSPEC, true);
                     return;
                 }
+                End::Wait(t, ..) | End::Gated(t, ..) | End::WaitRange(_, t) if self.live(t) => {
+                    // Stopped on a node in work: the same guess would stop
+                    // again at every step until that node finishes, so it
+                    // is not a candidate until then.
+                    self.report.spec_stops += 1;
+                    self.spec_blocked.insert(x, (t, self.n(t).id));
+                    return;
+                }
                 _ => {
-                    // Stopped (waiting on something unresolved): the same
-                    // guess would stop again every round until then; it
-                    // is tried again once something it depends on changes.
+                    // Stopped on something else unresolved: tried again
+                    // once something it depends on changes.
+                    self.report.spec_stops += 1;
                     self.set_flag(x, F_NOSPEC, true);
                     return;
                 }
@@ -7790,6 +7831,7 @@ impl Engine {
         self.runs_in_eval.clear();
         self.causes.clear();
         self.mispredicted.clear();
+        self.spec_blocked.clear();
         self.tracing = 0;
         self.created_in_eval.clear();
         self.idle_rounds = 0;

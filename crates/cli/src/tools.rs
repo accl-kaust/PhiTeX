@@ -1,4 +1,5 @@
-//! BibTeX and makeindex, in process (`phitex-bibtex`, `phitex-makeindex`):
+//! BibTeX, biber and makeindex, in process (`phitex-bibtex`, `phitex-biber`,
+//! `phitex-makeindex`):
 //! between the runs of a build's fixpoint, as latexmk runs them, on the
 //! `.aux` and `.idx` files the run wrote (held in memory, the build's
 //! written values), their outputs (`.bbl`, `.ind`) given to the next run
@@ -114,6 +115,27 @@ impl phitex_bibtex::Files for ToolFiles<'_> {
     }
 }
 
+impl phitex_biber::Files for ToolFiles<'_> {
+    /// biber's `locate_data_file`: the name as given (relative to the
+    /// job's directory), else kpathsea's `bib` lookup.
+    fn datasource(&mut self, name: &str) -> Option<(String, Vec<u8>)> {
+        let d = self.get(name.as_bytes());
+        self.read
+            .push(Lookup::Read(name.as_bytes().to_vec(), d.clone()));
+        if let Some(d) = d {
+            return Some((name.to_string(), d));
+        }
+        let f = self.find(name.as_bytes(), Format::Bib);
+        self.read.push(Lookup::Find(
+            name.as_bytes().to_vec(),
+            Format::Bib,
+            f.clone(),
+        ));
+        let (path, data) = f?;
+        Some((String::from_utf8_lossy(&path).into_owned(), data?))
+    }
+}
+
 impl phitex_makeindex::Files for ToolFiles<'_> {
     fn read(&mut self, name: &[u8]) -> Option<Vec<u8>> {
         let d = self.get(name);
@@ -147,6 +169,11 @@ impl phitex_makeindex::Files for ToolFiles<'_> {
 
 /// What BibTeX depends on in an `.aux` file: its `\citation`, `\bibdata`,
 /// `\bibstyle` and `\@input` lines (as latexmk judges whether to rerun it).
+/// A tool's first lookup: the `.bcf` itself, as the run wrote it.
+fn alloc_read(name: &str, bcf: &[u8]) -> Vec<Lookup> {
+    vec![Lookup::Read(name.as_bytes().to_vec(), Some(bcf.to_vec()))]
+}
+
 fn aux_digest(data: &[u8]) -> Vec<u8> {
     let mut d = Vec::new();
     for line in data.split(|&c| c == b'\n') {
@@ -224,7 +251,7 @@ pub struct Tools {
     mi_kpse: Option<Kpse>,
     bib_last: HashMap<String, Vec<Lookup>>,
     mi_last: HashMap<String, Vec<Lookup>>,
-    biber_noted: bool,
+    biber_last: HashMap<String, Vec<Lookup>>,
 }
 
 impl Tools {
@@ -321,16 +348,51 @@ impl Tools {
                     ),
                 });
             }
-            if name.ends_with(".bcf") && !self.biber_noted {
-                self.biber_noted = true;
+            if name.ends_with(".bcf") {
+                let kpse = self
+                    .bib_kpse
+                    .get_or_insert_with(|| crate::tex::kpse("bibtex", ""));
+                let bbl = format!("{}.bbl", name.trim_end_matches(".bcf"));
+                let blg = format!("{}.blg", name.trim_end_matches(".bcf"));
+                let bcf = crate::tex::bytes(text);
+                let mut files = ToolFiles {
+                    kpse,
+                    dir: dir.to_path_buf(),
+                    served: &served,
+                    read: alloc_read(name, &bcf),
+                };
+                if known(&bbl)
+                    && self
+                        .biber_last
+                        .get(name)
+                        .is_some_and(|r| files.unchanged(r))
+                {
+                    continue;
+                }
+                let t = std::time::Instant::now();
+                let out = phitex_biber::run(&bcf, &mut files);
+                self.biber_last
+                    .insert(name.clone(), std::mem::take(&mut files.read));
+                let ms = t.elapsed().as_secs_f64() * 1e3;
+                let line = if !out.unsupported.is_empty() {
+                    format!(
+                        "biber {name}: not supported by the native biber: {} (no .bbl written)",
+                        out.unsupported.join("; ")
+                    )
+                } else if let Some(e) = out.errors.first().filter(|_| out.bbl.is_none()) {
+                    format!("biber {name} in {ms:.1} ms: ERROR - {e}")
+                } else {
+                    format!(
+                        "biber {name} in {ms:.1} ms: {} warning(s), {} error(s)",
+                        out.warnings.len(),
+                        out.errors.len()
+                    )
+                };
                 made.push(Made {
-                    file: String::new(),
-                    text: None,
-                    side: None,
-                    line: format!(
-                        "biber: not run for {name}: the native biber is planned, not there yet \
-                         (biblatex shows the citation keys)"
-                    ),
+                    file: bbl,
+                    text: out.bbl.as_ref().map(|b| crate::tex::chars(b.as_bytes())),
+                    side: Some((blg, out.blg.into_bytes())),
+                    line,
                 });
             }
         }

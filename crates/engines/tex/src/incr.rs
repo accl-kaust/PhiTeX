@@ -67,7 +67,13 @@ impl Incr {
         }
     }
 
+    /// The format's definitions.
+    pub(crate) fn defs(&self) -> &Defs {
+        &self.defs
+    }
+
     /// The document's slices, in the whole text's bytes.
+    #[cfg(test)]
     pub(crate) fn slices(&self) -> Vec<(usize, usize)> {
         self.chunks
             .iter()

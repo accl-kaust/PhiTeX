@@ -178,6 +178,9 @@ struct Absorb<'a> {
     /// The document's units and their analyses (`None`: a format's
     /// text, one node).
     incr: Option<&'a mut Incr>,
+    /// The finder `\\input` files are sliced with, and the text applied.
+    finder: Finder,
+    text: &'a mut String,
 }
 
 impl phitex_defuse::EditSource for Absorb<'_> {
@@ -190,7 +193,9 @@ impl phitex_defuse::EditSource for Absorb<'_> {
             self.nodes,
             &text,
             self.incr.as_deref_mut(),
+            Some(&self.finder),
         );
+        *self.text = text;
         Some(version)
     }
 }
@@ -205,9 +210,14 @@ fn declare_marks_before(eng: &mut Engine, n: NodeId) {
     eng.declare_loopback(f, ValueId::UNIT);
 }
 
+/// Edited texts of `\\input` files by name: the text and its bytes.
+type Overrides = Arc<Mutex<HashMap<String, (String, Vec<u8>)>>>;
+
 /// Edits the document's nodes `nodes` to the text `text`: the slices
 /// both texts share at the start and the end stay, those between are
 /// replaced, removed or inserted.
+// one call site (Absorb::absorb), which passes its fields apart
+#[allow(clippy::too_many_arguments)]
 fn apply_text(
     eng: &mut Engine,
     exec: OpId,
@@ -215,6 +225,7 @@ fn apply_text(
     nodes_now: &mut Vec<(String, NodeId)>,
     text: &str,
     mut incr: Option<&mut Incr>,
+    finder: Option<&Finder>,
 ) {
     let text = as_file(text);
     let t0 = std::time::Instant::now();
@@ -222,47 +233,18 @@ fn apply_text(
         inc.set_text(&text);
     }
     let incr = incr.as_deref();
-    let doc = incr.is_some();
-    if let Some(inc) = incr {
-        register_doc(eng.values(), inc);
-    }
-    let sl = if let Some(inc) = incr {
-        inc.slices()
-    } else if text.is_empty() {
-        Vec::new()
-    } else {
-        vec![(0, text.len())]
+    let new: Vec<(String, DocNode)> = match incr {
+        Some(inc) => {
+            register_doc(eng.values(), inc);
+            let mut read = Vec::new();
+            doc_nodes(eng.values(), &text, inc, finder, &mut read)
+        }
+        None if text.is_empty() => Vec::new(),
+        None => vec![(key(&text, true), DocNode::Doc(0, text.len()))],
     };
-    let new: Vec<(String, (usize, usize))> = sl
-        .into_iter()
-        .map(|(s, e)| {
-            let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-            (key(&text[s..e], starts), (s, e))
-        })
-        .collect();
     let old = &*nodes_now;
     let t1 = t0.elapsed();
-    let args_of = |eng: &Engine, k: usize| {
-        let (s, e) = new[k].1;
-        let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
-        let v = eng.values();
-        let mut args = if doc {
-            let mut a = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s);
-            // (a document node is a top-level node)
-            a[1] = v.int(3);
-            a
-        } else {
-            slice_args(v, &text[s..e], starts)
-        };
-        args.push(match incr {
-            Some(inc) => {
-                let (c, at) = inc.chunk_at(s);
-                crate::hints::hint_arg(v, &c.th, at)
-            }
-            None => v.str(FORMAT_HINT),
-        });
-        args
-    };
+    let args_of = |eng: &Engine, k: usize| node_args(eng.values(), &text, incr, &new[k].1);
     let mut a = 0;
     while a < old.len() && a < new.len() && old[a].0 == new[a].0 {
         a += 1;
@@ -774,6 +756,10 @@ pub struct Stats {
     pub pending_sets: u64,
     pub pending_sets_defining: u64,
     pub stops: u64,
+    /// Attempts that resumed a stopped run at its blocked read, and that
+    /// started over though one was kept (a read changed).
+    pub resumed: u64,
+    pub restarted: u64,
     /// Stopped runs restarted instead of resumed, by the first read that
     /// refused the resume.
     pub restarted_by: Vec<(&'static str, u64)>,
@@ -838,6 +824,9 @@ pub struct Stats {
     pub speculations: u64,
     pub confirmations: u64,
     pub mispredictions: u64,
+    /// Speculative runs dropped at a stop (their guess is then blocked
+    /// until its node leaves work).
+    pub spec_stops: u64,
     pub raises: u64,
     /// The most nodes ready at one step, and the speculative runs that
     /// ran out of fuel.
@@ -947,6 +936,8 @@ impl Stats {
         self.pending_sets += r.pending_sets;
         self.pending_sets_defining += r.pending_sets_defining;
         self.stops += r.stops;
+        self.resumed += r.resumed;
+        self.restarted += r.restarted;
         for &(k, n) in &r.restarted_by {
             match self.restarted_by.iter_mut().find(|x| x.0 == k) {
                 Some(x) => x.1 += n,
@@ -960,6 +951,7 @@ impl Stats {
         self.speculations += r.speculations;
         self.confirmations += r.confirmations;
         self.mispredictions += r.mispredictions;
+        self.spec_stops += r.spec_stops;
         self.raises += r.raises;
         self.max_ready = self.max_ready.max(r.max_ready);
         self.fuel_outs += r.fuel_outs;
@@ -1015,6 +1007,11 @@ struct Graph {
     /// (name, field, value, hash), merged into `files`/`absent`/`reads`
     /// before the environment is set again (`Graph::provide`).
     provided: Arc<std::sync::Mutex<Vec<Provided>>>,
+    /// The document files sliced into the document's regions
+    /// (`crate::inputs`), and their texts as edited (`Build::edit_file`)
+    /// over the finder's.
+    inputs_read: Vec<String>,
+    overrides: Overrides,
 }
 
 /// A file the environment provider answered: name, field, the value
@@ -1046,7 +1043,8 @@ impl Graph {
                 any,
             }))
         });
-        let breaks = eng.register(Arc::new(crate::page::Breaks(shared.clone())));
+        let pageplan = eng.register(Arc::new(crate::page::PagePlan(shared.clone())));
+        let brk = eng.register(Arc::new(crate::page::Brk(shared.clone())));
         let dvi = eng.register(Arc::new(Dvi));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
@@ -1061,7 +1059,8 @@ impl Graph {
             put,
             pagestep,
             pagestep_any,
-            breaks,
+            pageplan,
+            brk,
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
         };
@@ -1092,6 +1091,10 @@ impl Graph {
             let f = eng.values().field(&format!("pagefx:{j}"));
             let none = eng.values().list(Vec::new());
             eng.declare_loopback(f, none);
+            // what `\count0..9` are after page j's step (the build's
+            // guess in round one, `page_guesses`)
+            let f = eng.values().field(&format!("pgdef:{j}"));
+            eng.declare_loopback(f, ValueId::UNIT);
         }
         for f in crate::hints::COUNTERS {
             let fld = eng.values().field(f);
@@ -1116,6 +1119,8 @@ impl Graph {
             sched: phitex_defuse::Greedy::default(),
             eval_errors: Vec::new(),
             provided: Arc::default(),
+            inputs_read: Vec::new(),
+            overrides: Arc::default(),
         }
     }
 
@@ -1264,6 +1269,21 @@ impl Graph {
                 None => self.absent.push(f),
             }
         }
+    }
+
+    /// The finder the document's `\\input` files are sliced with: the
+    /// edited texts first ([`Build::edit_file`]).
+    fn input_finder(&self, base: &Finder) -> Finder {
+        let base = Arc::clone(base);
+        let over = Arc::clone(&self.overrides);
+        Arc::new(move |n: &str| {
+            let o = over
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(n)
+                .cloned();
+            o.or_else(|| base(n))
+        })
     }
 
     /// The names of the files the job opened for writing.
@@ -1530,66 +1550,52 @@ impl Graph {
         text: &str,
         defs: Defs,
         doc: bool,
+        finder: Option<&Finder>,
     ) -> (Vec<(String, NodeId)>, Incr) {
         let mut incr = Incr::new(defs);
-        let nodes = self.push_text(unit, &as_file(text), doc.then_some(&mut incr));
+        let nodes = self.push_text(unit, &as_file(text), doc.then_some(&mut incr), finder);
         (nodes, incr)
     }
 
-    /// The text's nodes pushed onto `unit`.
-    /// `doc`: whether it is a document's text (paragraph regions), not a
-    /// format's (one node).
+    /// The text's nodes pushed onto `unit`: a document's (`incr`) its
+    /// paragraph regions, an `\\input` file's in place of the command
+    /// (`crate::inputs`); a format's one node.
     fn push_text(
         &mut self,
         unit: UnitId,
         text: &str,
         mut incr: Option<&mut Incr>,
+        finder: Option<&Finder>,
     ) -> Vec<(String, NodeId)> {
-        let mut out = Vec::new();
         let t0 = std::time::Instant::now();
         if let Some(inc) = incr.as_deref_mut() {
             inc.set_text(text);
         }
         let incr = incr.as_deref();
-        let doc = incr.is_some();
-        if let Some(inc) = incr {
-            register_doc(self.eng.values(), inc);
-        }
         // a format's text is one node: a sequential run over the whole
         // file, its `\input`s inline; what it may define is unknowable
         // from its parts, so anything (it runs once, serially, cached)
-        let sl = if let Some(inc) = incr {
-            inc.slices()
-        } else if text.is_empty() {
-            Vec::new()
-        } else {
-            vec![(0, text.len())]
+        let nodes: Vec<(String, DocNode)> = match incr {
+            Some(inc) => {
+                register_doc(self.eng.values(), inc);
+                let mut read = Vec::new();
+                let n = doc_nodes(self.eng.values(), text, inc, finder, &mut read);
+                self.inputs_read = read;
+                n
+            }
+            None if text.is_empty() => Vec::new(),
+            None => vec![(key(text, true), DocNode::Doc(0, text.len()))],
         };
         let t1 = t0.elapsed();
-        for (s, e) in sl {
-            let piece = &text[s..e];
-            let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
+        let mut out = Vec::with_capacity(nodes.len());
+        for (k, n) in &nodes {
             if crate::exec::env_flag!("PHITEX_TEX_TRACE") {
-                eprintln!("node {piece:?}");
+                eprintln!("node {k:?}");
             }
-            let v = self.eng.values();
-            let mut args = if doc {
-                let mut a = slice_args_in_file(v, piece, starts, v.str(DOC_NAME), s);
-                a[1] = v.int(3);
-                a
-            } else {
-                slice_args(v, piece, starts)
-            };
-            args.push(match incr {
-                Some(inc) => {
-                    let (c, at) = inc.chunk_at(s);
-                    crate::hints::hint_arg(v, &c.th, at)
-                }
-                None => v.str(FORMAT_HINT),
-            });
-            let n = self.eng.push(unit, self.ops.exec, args);
-            declare_marks_before(&mut self.eng, n);
-            out.push((key(piece, starts), n));
+            let args = node_args(self.eng.values(), text, incr, n);
+            let id = self.eng.push(unit, self.ops.exec, args);
+            declare_marks_before(&mut self.eng, id);
+            out.push((k.clone(), id));
         }
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             eprintln!(
@@ -1635,6 +1641,89 @@ const DOC_NAME: &str = "\u{10FFFE}document";
 fn register_doc(v: &Values, inc: &Incr) {
     if let [c] = inc.chunks.as_slice() {
         crate::hints::register_text(v.str(DOC_NAME), &c.th);
+    }
+}
+
+/// A document node's text: a slice of the document (its bytes), or one
+/// of an `\\input` file sliced in its place (`crate::inputs`).
+enum DocNode {
+    Doc(usize, usize),
+    File(crate::inputs::Piece),
+}
+
+/// The document's nodes, keyed: per chunk of its units, its slices; an
+/// `\\input` slice replaced by its file's ([`crate::inputs::pieces`],
+/// for the chunks that have one). `read` gets the files sliced in.
+fn doc_nodes(
+    v: &Values,
+    text: &str,
+    inc: &Incr,
+    finder: Option<&Finder>,
+    read: &mut Vec<String>,
+) -> Vec<(String, DocNode)> {
+    // (a text redefining `\\input` reads its files in its runs)
+    let finder = finder.filter(|_| {
+        ![
+            "\\def\\input",
+            "\\let\\input",
+            "\\edef\\input",
+            "\\gdef\\input",
+            "\\xdef\\input",
+        ]
+        .iter()
+        .any(|d| text.contains(d))
+    });
+    let mut out = Vec::new();
+    for c in &inc.chunks {
+        let end = c.start + c.th.slices.last().map_or(0, |x| x.1);
+        let slices = c.th.slices.iter().map(|&(s, e)| (c.start + s, c.start + e));
+        let doc_slice = |(s, e): (usize, usize)| {
+            let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
+            (key(&text[s..e], starts), DocNode::Doc(s, e))
+        };
+        let chunk = &text[c.start..end];
+        let Some(f) = finder.filter(|_| chunk.contains("\\input")) else {
+            out.extend(slices.map(doc_slice));
+            continue;
+        };
+        let mut slices = slices;
+        for p in crate::inputs::pieces(v, chunk, &c.th, inc.defs(), Some(f), read) {
+            if p.key.starts_with('\u{1}') {
+                out.push((p.key.clone(), DocNode::File(p)));
+                continue;
+            }
+            // (the document's own slice it is: the next whose key it has)
+            for sl in slices.by_ref() {
+                let (k, n) = doc_slice(sl);
+                if k == p.key {
+                    out.push((k, n));
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A document node's arguments: its text with its origin, and its hint;
+/// a format's (`incr` `None`): its text, and the format's hint.
+fn node_args(v: &Values, text: &str, incr: Option<&Incr>, n: &DocNode) -> Vec<ValueId> {
+    match (n, incr) {
+        (DocNode::File(p), _) => p.args(v, DOC_NAME),
+        (&DocNode::Doc(s, e), Some(inc)) => {
+            let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
+            let mut a = slice_args_in_file(v, &text[s..e], starts, v.str(DOC_NAME), s);
+            // (a document node is a top-level node)
+            a[1] = v.int(3);
+            let (c, at) = inc.chunk_at(s);
+            a.push(crate::hints::hint_arg(v, &c.th, at));
+            a
+        }
+        (&DocNode::Doc(s, e), None) => {
+            let mut a = slice_args(v, &text[s..e], true);
+            a.push(v.str(FORMAT_HINT));
+            a
+        }
     }
 }
 
@@ -1884,7 +1973,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
             g.eng.set_env(unit, f, x);
         }
         // (the prelude's own slices: INITEX knows no definitions yet)
-        g.push_text(unit, &as_file(p), None);
+        g.push_text(unit, &as_file(p), None, None);
         // the point the prelude's final bindings are read at
         let end = g.eng.push(unit, g.mark, Vec::new());
         let mut stats = Stats::default();
@@ -1988,6 +2077,9 @@ pub struct Build {
     doc: bool,
     /// The document's units and their analyses ([`Incr`]).
     incr: Incr,
+    /// The document's text last applied (`edit_file` applies it again
+    /// when a file sliced into its regions changed).
+    text: String,
 }
 
 impl Build {
@@ -2011,7 +2103,6 @@ impl Build {
         let t1 = t0.elapsed();
         let mut g = Graph::new(opts.time_limit, opts.threads);
         g.eng.set_max_rounds(opts.max_rounds);
-        g.sched = opts.speculation.scheduler(opts.speculation_budget);
         g.sched = opts.speculation.scheduler(opts.speculation_budget);
         if let Some(p) = &opts.progress {
             g.watch = crate::exec::Watch::new(g.threads, Some(p.clone()));
@@ -2038,32 +2129,7 @@ impl Build {
             g.eng.set_environment(env);
             g.eng.set_environment_absent(g.absent.clone());
         }
-        {
-            let v = g.eng.values();
-            let mut sets: Vec<(Field, ValueId)> = Vec::new();
-            for (k, t) in env.iter() {
-                sets.push((v.field(k), import(v, t)));
-            }
-            sets.push((v.field("jobname"), v.str(&opts.jobname)));
-            sets.push((v.field("dvicomment"), v.str(&opts.comment)));
-            sets.push((
-                v.field("pdf:relaxed"),
-                v.int(i64::from(!opts.exact_objects)),
-            ));
-            sets.push((
-                v.field("pdfdate"),
-                v.str(&phitex_pdf::pdf_date(opts.epoch.unwrap_or(0))),
-            ));
-            if let Some(t) = opts.epoch {
-                // §241 fix_date_and_time, at the job's start
-                for (k, x) in date_params(t) {
-                    sets.push((v.field(k), v.int(x)));
-                }
-            }
-            for (f, x) in sets {
-                g.eng.set_env(unit, f, x);
-            }
-        }
+        job_env(&mut g, unit, &env, &opts);
         // §1337: `\everyjob`, before the job's first line
         let every = env
             .iter()
@@ -2081,11 +2147,16 @@ impl Build {
         }
         *g.ops.defs.lock().unwrap_or_else(PoisonError::into_inner) = defs.clone();
         let doc = is_doc(prelude, document);
-        let (nodes, incr) = g.push_document(unit, document, defs, doc);
+        let inputs = g.input_finder(&opts.finder);
+        let (nodes, incr) = g.push_document(unit, document, defs, doc, Some(&inputs));
+        // (the files sliced in are read: listed, and watched)
+        for n in g.inputs_read.clone() {
+            g.supply(&opts.finder, &n);
+        }
         // the page builder's fold, after the text: one node choosing every
         // page break, its children the pages
-        let breaks = g.ops.breaks;
-        let _ = g.eng.push(unit, breaks, Vec::new());
+        let _ = g.eng.push(unit, g.ops.pageplan, Vec::new());
+        page_guesses(&mut g, &env);
         let dvi = g.eng.push(unit, g.dvi, Vec::new());
         g.eng.add_root(dvi);
         let files_op = g.files_op;
@@ -2104,6 +2175,7 @@ impl Build {
             settled: Vec::new(),
             doc,
             incr,
+            text: document.to_owned(),
         };
         b.settle();
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
@@ -2115,44 +2187,8 @@ impl Build {
         b
     }
 
-    fn settle(&mut self) {
-        // the text nodes' offsets in the document, for the progress
-        let mut offsets = std::collections::HashMap::new();
-        let mut off = 0u64;
-        for (k, n) in &self.nodes {
-            offsets.insert(n.raw(), off);
-            off += u64::try_from(k.len().saturating_sub(1)).unwrap_or(0);
-        }
-        self.g.watch.offsets = Arc::new(offsets);
-        let mut stats = Stats::default();
-        self.g.queries.clear();
-        let mut absorb = Absorb {
-            edits: &self.edits,
-            nodes: &mut self.nodes,
-            exec: self.g.ops.exec,
-            dvi: self.dvi,
-            incr: self.doc.then_some(&mut self.incr),
-        };
-        // a text sent before the evaluation starts is the one it is for
-        if let Some(v) = phitex_defuse::EditSource::absorb(&mut absorb, &mut self.g.eng) {
-            self.g.eng.set_version(v);
-        }
-        self.g.settle(
-            self.unit,
-            &self.opts.finder,
-            &mut stats,
-            self.opts.fixpoint,
-            &mut absorb,
-        );
-        stats.live = self.g.eng.live_nodes();
-        self.stats = stats;
-        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
-            let (nodes, units, values) = self.sizes();
-            let (node, use_) = Engine::record_sizes();
-            eprintln!(
-                "sizes: {nodes} live nodes ({node} B), {units} live units, {values} values (use {use_} B)"
-            );
-        }
+    /// `PHITEX_CLAIMS=<text>`: the debugging dump after a settle.
+    fn dump_claims(&self) {
         // `PHITEX_CLAIMS=<text>`: the nodes whose slice holds the text,
         // their claims and their descendants' (a debugging dump)
         if let Ok(want) = std::env::var("PHITEX_CLAIMS") {
@@ -2197,6 +2233,65 @@ impl Build {
                 }
             }
         }
+    }
+
+    fn settle(&mut self) {
+        // the text nodes' offsets in the document, for the progress
+        let mut offsets = std::collections::HashMap::new();
+        let mut off = 0u64;
+        for (k, n) in &self.nodes {
+            offsets.insert(n.raw(), off);
+            off += u64::try_from(k.len().saturating_sub(1)).unwrap_or(0);
+        }
+        self.g.watch.offsets = Arc::new(offsets);
+        let mut stats = Stats::default();
+        self.g.queries.clear();
+        // (the files sliced into the document's regions were read)
+        let sliced: Vec<(String, bool)> = self
+            .g
+            .inputs_read
+            .iter()
+            .map(|n| (n.clone(), true))
+            .collect();
+        self.g.queries.extend(sliced);
+        let mut absorb = Absorb {
+            edits: &self.edits,
+            nodes: &mut self.nodes,
+            exec: self.g.ops.exec,
+            dvi: self.dvi,
+            incr: self.doc.then_some(&mut self.incr),
+            finder: self.g.input_finder(&self.opts.finder),
+            text: &mut self.text,
+        };
+        // a text sent before the evaluation starts is the one it is for
+        if let Some(v) = phitex_defuse::EditSource::absorb(&mut absorb, &mut self.g.eng) {
+            self.g.eng.set_version(v);
+        }
+        self.g.settle(
+            self.unit,
+            &self.opts.finder,
+            &mut stats,
+            self.opts.fixpoint,
+            &mut absorb,
+        );
+        stats.live = self.g.eng.live_nodes();
+        self.stats = stats;
+        if crate::exec::env_flag!("PHITEX_TEX_TIME") {
+            let (nodes, units, values) = self.sizes();
+            let (node, use_) = Engine::record_sizes();
+            let rss = std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|t| {
+                    t.lines()
+                        .find_map(|l| l.strip_prefix("VmRSS:"))
+                        .map(|v| v.trim().to_owned())
+                })
+                .unwrap_or_default();
+            eprintln!(
+                "sizes: {nodes} live nodes ({node} B), {units} live units, {values} values (use {use_} B), rss {rss}"
+            );
+        }
+        self.dump_claims();
         if let Some(cb) = self.opts.on_page_settled.clone() {
             let pages = self.pages();
             for (k, &h) in pages.iter().enumerate() {
@@ -2311,6 +2406,29 @@ impl Build {
         }
         if let Some(r) = self.g.reads.iter_mut().find(|(n, _)| n == name) {
             r.1 = file_hash(found.as_ref());
+        }
+        // a file sliced into the document's regions (`crate::inputs`):
+        // the document is applied again with the new text, so only the
+        // regions whose slices changed are replaced
+        let sliced = self.g.inputs_read.iter().any(|n| n == name);
+        {
+            let mut o = self
+                .g
+                .overrides
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            match (&found, text) {
+                (Some(x), Some(_)) => {
+                    o.insert(name.to_owned(), x.clone());
+                }
+                _ => {
+                    o.remove(name);
+                }
+            }
+        }
+        if sliced {
+            let t = self.text.clone();
+            self.edits.send(&t);
         }
         self.g.absorb_provided();
         let env = self.g.environment(self.opts.fixpoint);
@@ -2877,6 +2995,64 @@ fn describe(eng: &Engine, n: phitex_defuse::NodeId) -> String {
         let a: String = a.unwrap_or_default().chars().take(80).collect();
         format!("{} {a}", i.op)
     })
+}
+
+/// The job's environment: the format's parameters, the job name, the
+/// PDF options and the date (§241), set on `unit` before the first line.
+fn job_env(g: &mut Graph, unit: UnitId, env: &Env, opts: &Options) {
+    let v = g.eng.values();
+    let mut sets: Vec<(Field, ValueId)> = Vec::new();
+    for (k, t) in env.iter() {
+        sets.push((v.field(k), import(v, t)));
+    }
+    sets.push((v.field("jobname"), v.str(&opts.jobname)));
+    sets.push((v.field("dvicomment"), v.str(&opts.comment)));
+    sets.push((
+        v.field("pdf:relaxed"),
+        v.int(i64::from(!opts.exact_objects)),
+    ));
+    sets.push((
+        v.field("pdfdate"),
+        v.str(&phitex_pdf::pdf_date(opts.epoch.unwrap_or(0))),
+    ));
+    if let Some(t) = opts.epoch {
+        // §241 fix_date_and_time, at the job's start
+        for (k, x) in date_params(t) {
+            sets.push((v.field(k), v.int(x)));
+        }
+    }
+    for (f, x) in sets {
+        g.eng.set_env(unit, f, x);
+    }
+}
+
+/// The cold guess of the page steps' loop-back `pgdef:<j>` (`\count0..9`
+/// after page j's step), declared as its round-one value before the
+/// first evaluation: `\count0` advanced by one per page (plain's and
+/// LaTeX's routines), the others as the format left them. A right guess
+/// costs nothing; a wrong one re-runs the steps after it.
+fn page_guesses(g: &mut Graph, env: &Env) {
+    let v = g.eng.values();
+    let int = |k: &str| {
+        env.iter()
+            .find(|(n, _)| n == k)
+            .map_or(0, |(_, t)| crate::val::int_of(v, import(v, t)))
+    };
+    let base: Vec<i64> = (0..10).map(|k| int(&format!("count:{k}"))).collect();
+    let mut decl = Vec::new();
+    for j in 0..crate::page::MAX_PAGES {
+        let d = i64::try_from(j).unwrap_or(0) + 1;
+        let mut cs: Vec<ValueId> = base.iter().map(|&c| v.int(c)).collect();
+        cs[0] = v.int(if base[0] >= 0 {
+            base[0] + d
+        } else {
+            base[0] - d
+        });
+        decl.push((v.field(&format!("pgdef:{j}")), v.list(cs)));
+    }
+    for (f, x) in decl {
+        g.eng.declare_loopback(f, x);
+    }
 }
 
 #[cfg(test)]
