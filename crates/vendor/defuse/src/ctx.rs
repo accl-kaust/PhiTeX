@@ -62,7 +62,7 @@ pub struct Ctx<'a> {
     /// resumed attempt until [`Self::parked`] takes it.
     token: Option<Box<dyn std::any::Any + Send>>,
     resumed: bool,
-    pub(crate) restarted: bool,
+    pub(crate) restarted: Option<&'static str>,
     /// Text memo hits, misses; application memo hits, misses.
     memo: [std::cell::Cell<u32>; 4],
 }
@@ -104,7 +104,7 @@ impl<'a> Ctx<'a> {
             diagnostics: Vec::new(),
             token: None,
             resumed: false,
-            restarted: false,
+            restarted: None,
         }
     }
 
@@ -373,7 +373,7 @@ impl<'a> Ctx<'a> {
         } else {
             // Not held (a root unit): the provider may answer now, on this
             // thread.
-            let Some(v) = e.env_provider.as_ref().and_then(|p| p(f)) else {
+            let Some(v) = e.env_provider.as_ref().and_then(|p| p(&e.values, f)) else {
                 return self.stop(End::WaitEnv(f));
             };
             self.env_found.push((f, v));
