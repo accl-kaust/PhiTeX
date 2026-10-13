@@ -137,8 +137,6 @@ pub struct Job {
 #[derive(Clone, Debug, Default)]
 pub struct RunInfo {
     pub wall: Duration,
-    /// The texts of the main file the build took while it ran.
-    pub absorbed: usize,
     /// Why it ran: `cold` or `edit`.
     pub why: String,
     /// Nodes reduced (not kept from the last build).
@@ -455,9 +453,9 @@ impl Session {
     }
 
     /// A handle to send the main text to a build while it runs, from
-    /// another thread (the cold build's included: it takes them too).
-    pub fn absorb(&self) -> Absorb {
-        self.absorb.clone()
+    /// another thread (none before the first build).
+    pub fn absorb(&self) -> Option<Absorb> {
+        self.build.as_ref().map(|_| self.absorb.clone())
     }
 
     /// Whether the last build is for the files as they are now (an edit
@@ -677,12 +675,6 @@ impl Session {
             edit_line,
             runs: vec![RunInfo {
                 wall,
-                // (a text taken before the engine's first step, while the
-                // format loaded, is not among the engine's)
-                absorbed: s
-                    .absorbed
-                    .len()
-                    .max(usize::from(self.absorbed_at.is_some())),
                 why: why.to_owned(),
                 commands_run: s.nodes_run,
                 live: s.live,
