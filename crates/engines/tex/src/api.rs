@@ -943,6 +943,10 @@ pub struct Stats {
     /// The fields whose speculative reads were refuted, with counts,
     /// most first.
     pub refuted_by_field: Vec<(String, u64)>,
+    /// The page chain's loop-back guesses the evaluation refuted, with
+    /// the fields that refuted them (`refuted: <fields> at page <n>
+    /// (<loop-back>)`).
+    pub refuted_guesses: Vec<String>,
     /// The engine's speculative runs: kept with outstanding
     /// assumptions, confirmed, and whose assumptions failed; and nodes
     /// re-done higher after running below a finished input (raises).
@@ -1145,6 +1149,17 @@ struct Graph {
 impl Graph {
     /// The page-step runs that reached their finish since the last call,
     /// by page index ([`Stats::page_steps_completed`]).
+    fn take_refuted(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .ops
+                .lblog
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+        .refuted()
+    }
+
     fn take_steps_done(&self) -> Vec<u64> {
         std::mem::take(
             &mut *self
@@ -1187,7 +1202,7 @@ impl Graph {
         });
         let pageplan = eng.register(Arc::new(crate::page::PagePlan(shared.clone())));
         let brk = eng.register(Arc::new(crate::page::Brk(shared.clone())));
-        let dvi = eng.register(Arc::new(Dvi));
+        let dvi = eng.register(Arc::new(Dvi(shared.clone())));
         let mark = eng.register(Arc::new(Mark));
         let files_op = eng.register(Arc::new(Files));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
@@ -1206,6 +1221,7 @@ impl Graph {
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
             steps_done: Arc::new(Mutex::new(Vec::new())),
+            lblog: Arc::new(Mutex::new(crate::page::LbLog::default())),
         };
         let _ = shared.set(ops.clone());
         for f in [
@@ -1222,6 +1238,7 @@ impl Graph {
             "wplan",
             "fread",
             "pagefxs",
+            "pgdeltas",
             crate::pdfrelaxed::PIECES,
         ] {
             let fld = eng.values().field(f);
@@ -1239,8 +1256,10 @@ impl Graph {
             // guess in round one, `page_guesses`)
             let f = eng.values().field(&format!("pgdef:{j}"));
             eng.declare_loopback(f, ValueId::UNIT);
-            // what `\\deadcycles` is after page j's step (guess: UNIT, 0)
-            let f = eng.values().field(&format!("pagedc:{j}"));
+            // what the routines up to page j left changed, besides
+            // `\count0..9` (the chain's cumulative delta, folded by the
+            // writer; guess: none)
+            let f = eng.values().field(&format!("pgst:{j}"));
             eng.declare_loopback(f, ValueId::UNIT);
         }
         for f in crate::hints::COUNTERS {
@@ -2445,6 +2464,7 @@ impl Build {
         self.g.watch.offsets = Arc::new(offsets);
         let mut stats = Stats::default();
         self.g.take_steps_done();
+        self.g.take_refuted();
         self.g.queries.clear();
         // (the files sliced into the document's regions were read)
         let sliced: Vec<(String, bool)> = self
@@ -2482,6 +2502,7 @@ impl Build {
         }
         stats.live = self.g.eng.live_nodes();
         stats.page_steps_completed = self.g.take_steps_done();
+        stats.refuted_guesses = self.g.take_refuted();
         self.stats = stats;
         if crate::exec::env_flag!("PHITEX_TEX_TIME") {
             let (nodes, units, values) = self.sizes();

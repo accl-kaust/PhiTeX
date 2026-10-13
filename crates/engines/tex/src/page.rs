@@ -10,8 +10,11 @@
 //! marks, the held-over insertions and `\outputpenalty`; the step runs
 //! the output routine inline on its own nest (`OutPage` §1025 opened at
 //! its start, `output_end` §1026 at its `}`) and ships the page. The
-//! steps read nothing of each other but what the routine defines
-//! globally (`\count0`, the insert boxes); no state cell threads them.
+//! steps read nothing of each other: a step defines nothing to the
+//! engine; what its routine defines is the chain's delta, which the
+//! writer folds into the loop-backs `pgst:<j>` the next round's steps
+//! read (round one's guess: no change), with `\count0..9` in
+//! `pgdef:<j>`.
 //!
 //! What a routine leaves for the next page (material `\unvbox`ed back,
 //! `\vsize` changed) is a loop-back the fold reads from the previous
@@ -296,6 +299,13 @@ impl Run<'_, '_> {
         for (j, &m) in before.iter().enumerate() {
             self.set(&format!("pp:mk:{j}"), m, true);
         }
+        // how many steps the chain has: the writer folds their deltas
+        // up to here ([`FinalState`])
+        self.set(
+            "pp:steps",
+            v.int(i64::try_from(starts.len()).unwrap_or(0)),
+            true,
+        );
         for j in 0..starts.len() {
             self.kid(self.ops.brk, vec![v.int(i64::try_from(j).unwrap_or(0))]);
         }
@@ -356,11 +366,14 @@ impl Run<'_, '_> {
         if !self.cx.is_loopback(f) {
             return Ok(Vec::new());
         }
-        Ok(self
-            .cx
-            .use_field(f)?
-            .map(|x| list_of(v, x))
-            .unwrap_or_default())
+        let x = self.cx.use_field(f)?;
+        let xs = x.map(|x| list_of(v, x)).unwrap_or_default();
+        let e = match x {
+            Some(x) if !xs.is_empty() => vec![("pagefx".to_owned(), x)],
+            _ => Vec::new(),
+        };
+        log_read(&self.ops, "pagefx", j, e);
+        Ok(xs)
     }
 
     /// A fired page as the step's argument: `[box255, inserts, marks,
@@ -407,7 +420,9 @@ impl Run<'_, '_> {
         // not through the step before, so the steps do not chain on them
         if j > 0 && j < MAX_PAGES {
             let f = v.field(&format!("pgdef:{}", j - 1));
-            if let Some(x) = self.cx.use_field(f)? {
+            let x = self.cx.use_field(f)?;
+            log_read(&self.ops, "pgdef", j - 1, count_entries(v, x));
+            if let Some(x) = x {
                 let xs = list_of(v, x);
                 if xs.len() == 10 {
                     for (k, &c) in xs.iter().enumerate() {
@@ -422,36 +437,35 @@ impl Run<'_, '_> {
                 }
             }
         }
-        // `\\deadcycles` as the step before left it (`pagedc:<j-1>`, a
-        // loop-back; round one's guess 0: a routine that ships resets
-        // it, §638): a wrong guess is refuted by the next round
+        // every other field the routines before this page left changed
+        // (`pgst:<j-1>`, a loop-back: the page chain's cumulative delta;
+        // round one's guess none, the state before the chain): read from
+        // there, so no step reads a step before it
         if j > 0 && j < MAX_PAGES {
-            let f = v.field(&format!("pagedc:{}", j - 1));
-            let dc = self
-                .cx
-                .use_field(f)?
-                .filter(|&x| x != ValueId::UNIT)
-                .unwrap_or_else(|| v.int(0));
-            let df = self
-                .ops
-                .fields
-                .get_at(v, self.cx.values_epoch(), "deadcycles");
-            self.over.insert(df, dc);
+            let f = v.field(&format!("pgst:{}", j - 1));
+            let x = self.cx.use_field(f)?;
+            let pairs = pgst_pairs(v, x);
+            log_read(&self.ops, "pgst", j - 1, named(v, &pairs));
+            for (f, x) in pairs {
+                self.over.insert(f, x);
+                self.slot_note(f, None);
+            }
         }
         let d = args.get(1).copied().unwrap_or(ValueId::UNIT);
         if self.fire_page(d, args.get(2).copied())? {
             self.run_all()?;
         }
         if j < MAX_PAGES {
-            let dc = self.int("deadcycles")?;
-            // (0, the usual value, as the declared start: no change)
-            let x = if dc == 0 { ValueId::UNIT } else { v.int(dc) };
-            self.cx.publish(v.field(&format!("pagedc:{j}")), x);
             let mut cs = Vec::new();
             for k in 0..10 {
                 cs.push(v.int(self.int(&format!("count:{k}"))?));
             }
-            self.cx.publish(v.field(&format!("pgdef:{j}")), v.list(cs));
+            let x = v.list(cs);
+            log_pub(&self.ops, "pgdef", j, count_entries(v, Some(x)));
+            self.cx.publish(v.field(&format!("pgdef:{j}")), x);
+            if !self.pagefx_pub {
+                log_pub(&self.ops, "pagefx", j, Vec::new());
+            }
         }
         Ok(())
     }
@@ -585,6 +599,8 @@ pub(crate) fn output_end(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
         if j < MAX_PAGES {
             let x = v.list(left);
             r.cx.publish(r.keyed(crate::fields::Fam::Pagefx, &j.to_string()), x);
+            log_pub(&r.ops, "pagefx", j, vec![("pagefx".to_owned(), x)]);
+            r.pagefx_pub = true;
             // (kept for the client: the next session's round-one guess)
             let jj = i64::try_from(j).unwrap_or(0);
             r.contribute("pagefxs", v.seq_unit(v.list(vec![v.int(jj), x])));
@@ -950,10 +966,12 @@ impl Operation for Brk {
     }
 }
 
-/// One page's step: the output routine run, the page shipped. With an
-/// output routine the step defines the marks, the insertion boxes,
-/// `\box255`, `\outputpenalty`, `\deadcycles` and whatever the routine
-/// defines globally; without one (§1023) it ships the page itself.
+/// One page's step: the output routine run, the page shipped (§1023
+/// without one). It defines nothing to the engine: what the routine
+/// defines at its base level goes to the chain's delta (`pgdeltas`,
+/// folded by the writer into the loop-backs `pgst:<j>`), `\count0..9`
+/// to `pgdef:<j>`; only the exact PDF writer's fold (`pdf:state`) is a
+/// definition, a chain by design (relaxed mode has none).
 pub(crate) struct PageStep {
     pub shared: Shared,
     pub any: bool,
@@ -963,15 +981,9 @@ impl Operation for PageStep {
     fn name(&self) -> &'static str {
         if self.any { "pagestep_any" } else { "pagestep" }
     }
-    /// The page's own fields and what the output routine's commands
-    /// define ([`crate::hints::page_step_may_define`]).
-    fn may_define(&self, _: &[ValueId], _: &Values) -> MayDefine {
-        let defs = ops(&self.shared)
-            .defs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        crate::hints::page_step_may_define(&defs)
+    /// Only the exact PDF fold's state ([`Run::finish`]).
+    fn may_define(&self, _: &[ValueId], v: &Values) -> MayDefine {
+        MayDefine::Names(vec![v.field("pdf:state")])
     }
     fn defs(&self, _: &[ValueId], _: &Values) -> Option<Vec<(Field, Locality)>> {
         None
@@ -1010,9 +1022,9 @@ const MAX_DIMEN: i32 = 0o7777777777;
 
 /// `Dvi`: the pages, written (§583–§645). The comment and `\mag` are
 /// read at the end.
-pub(crate) fn dvi(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+pub(crate) fn dvi(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
     let t0 = std::time::Instant::now();
-    let r = dvi_file(cx);
+    let r = FinalState::load(cx, o).and_then(|fin| dvi_file(cx, &fin));
     if crate::exec::env_flag!("PHITEX_TEX_TIME") {
         eprintln!(
             "output file (dvi root run): {:?}{}",
@@ -1023,7 +1035,7 @@ pub(crate) fn dvi(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
     r
 }
 
-fn dvi_file(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+fn dvi_file(cx: &mut Ctx<'_>, fin: &FinalState) -> Result<ValueId, Stop> {
     let v = cx.values();
     let pages = cx.acc_range(v.field("pages"), None)?;
     let all = v.seq_to_vec(pages);
@@ -1034,17 +1046,17 @@ fn dvi_file(cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
             .is_some_and(|&x| crate::val::int_at(v, x, 0) != 0)
     });
     if pdf {
-        if crate::pdfrelaxed::finishing(cx)? {
-            return crate::pdfrelaxed::finish(cx);
+        if crate::pdfrelaxed::finishing(cx, fin)? {
+            return crate::pdfrelaxed::finish(cx, fin);
         }
-        return crate::pdfout::finish(cx);
+        return crate::pdfout::finish(cx, fin);
     }
-    let comment = cx
-        .use_field(v.field("dvicomment"))?
+    let comment = fin
+        .get(cx, v.field("dvicomment"))?
         .map(|x| str_of(v, x))
         .unwrap_or_default();
-    let mag = cx
-        .use_field(v.field("param:mag"))?
+    let mag = fin
+        .get(cx, v.field("param:mag"))?
         .map_or(1000, |x| int_of(v, x));
     let mut w = phitex_dvi::DviWriter::new(i32::try_from(mag).unwrap_or(1000), &comment);
     for page in v.seq_to_vec(pages) {
@@ -1122,4 +1134,232 @@ fn dvi_shown(v: &Values, page: ValueId) -> u64 {
         return phitex_defuse::hash_bytes(0, b);
     }
     phitex_defuse::hash_bytes(phitex_defuse::hash_bytes(0, &b[..41]), &b[45..])
+}
+
+/// A loop-back's value as named entries, for the refutation report
+/// ([`LbLog`]): `pgdef:<j>`'s `\count0..9`.
+fn count_entries(v: &Values, x: Option<ValueId>) -> Vec<(String, ValueId)> {
+    x.map(|x| list_of(v, x))
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(k, c)| (format!("count:{k}"), c))
+        .collect()
+}
+
+/// `pgst:<j>`'s pairs `[field, value]` (UNIT: none).
+fn pgst_pairs(v: &Values, x: Option<ValueId>) -> Vec<(Field, ValueId)> {
+    x.map(|x| list_of(v, x))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|e| {
+            let xs = list_of(v, e);
+            match xs[..] {
+                [f, x] => Some((Field(f), x)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn named(v: &Values, pairs: &[(Field, ValueId)]) -> Vec<(String, ValueId)> {
+    pairs
+        .iter()
+        .map(|&(f, x)| (crate::val::field_name(v, f), x))
+        .collect()
+}
+
+/// What a step defines that the next step defines again from its own
+/// argument before anything reads it (§1012 the marks, §1013
+/// `\outputpenalty`, §1017 `\box255`), and `\count0..9`
+/// (`pgdef:<j>`): not in the chain's delta.
+fn step_input(name: &str) -> bool {
+    matches!(
+        name,
+        "mark:top" | "mark:first" | "mark:bot" | "box:255" | "param:outputpenalty"
+    ) || name
+        .strip_prefix("count:")
+        .is_some_and(|k| k.len() == 1 && k.as_bytes()[0].is_ascii_digit())
+}
+
+/// Whether `x` is a field's value as TeX starts it (§222–§240: zero,
+/// void, empty), which an undefined field reads as.
+fn initial_like(v: &Values, name: &str, x: Option<ValueId>) -> bool {
+    let Some(x) = x else { return true };
+    match &*v.get(x) {
+        Value::Unit | Value::Nil | Value::Int(0) => true,
+        Value::List(xs) => {
+            xs.is_empty() || (name.starts_with("box:") && xs.len() == 2 && xs[1] == ValueId::UNIT)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a step's value `x` of `name` equals the value before the
+/// page chain (`pre`).
+fn same_as_before(v: &Values, name: &str, pre: Option<ValueId>, x: ValueId) -> bool {
+    pre == Some(x) || (initial_like(v, name, pre) && initial_like(v, name, Some(x)))
+}
+
+/// [`Run::finish`] of page step `j`: its base-level definitions go to
+/// the chain's delta (`pgdeltas`), never to the engine, but for the
+/// exact PDF writer's fold (`pdf:state`).
+pub(crate) fn step_defs(r: &mut Run<'_, '_>, j: usize, defs: Vec<(Field, ValueId, Locality)>) {
+    let v = r.v;
+    let mut own: std::collections::BTreeMap<String, (Field, ValueId)> =
+        std::collections::BTreeMap::new();
+    for (f, x, l) in defs {
+        crate::exec::widths::def(f);
+        let name = crate::val::field_name(v, f);
+        if name == "pdf:state" {
+            r.cx.define_with(f, x, l);
+            continue;
+        }
+        if step_input(&name) {
+            continue;
+        }
+        own.insert(name, (f, x));
+    }
+    if own.is_empty() || j >= MAX_PAGES {
+        return;
+    }
+    let pairs: Vec<ValueId> = own.values().map(|&(f, x)| v.list(vec![f.0, x])).collect();
+    let e = v.list(vec![v.int(i64::try_from(j).unwrap_or(0)), v.list(pairs)]);
+    r.contribute("pgdeltas", v.seq_unit(e));
+}
+
+/// The TeX state after the page chain, for the writer (§4 of the
+/// chain's design): the fields the steps' deltas leave changed, read in
+/// place of their reaching definitions (the state before the chain).
+/// Loading it folds the steps' deltas (`pgdeltas`) in page order and
+/// publishes each page's cumulative delta as `pgst:<j>`, the next
+/// round's input of step `j+1`: a change made by one routine reaches
+/// every later page in one round.
+pub(crate) struct FinalState {
+    map: phitex_defuse::FxHashMap<Field, ValueId>,
+}
+
+impl FinalState {
+    pub(crate) fn load(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<FinalState, Stop> {
+        let v = cx.values();
+        let all = cx.acc_range(v.field("pgdeltas"), None)?;
+        let steps = cx
+            .use_field(v.field("pp:steps"))?
+            .map_or(0, |x| usize::try_from(int_of(v, x)).unwrap_or(0))
+            .min(MAX_PAGES);
+        let mut deltas: std::collections::BTreeMap<usize, Vec<(Field, ValueId)>> =
+            std::collections::BTreeMap::new();
+        for e in v.seq_to_vec(all) {
+            let xs = list_of(v, e);
+            let (Some(&j), Some(&ps)) = (xs.first(), xs.get(1)) else {
+                continue;
+            };
+            let j = usize::try_from(int_of(v, j)).unwrap_or(0);
+            deltas
+                .entry(j)
+                .or_default()
+                .extend(pgst_pairs(v, Some(ps)));
+        }
+        let mut state: std::collections::BTreeMap<String, (Field, ValueId)> =
+            std::collections::BTreeMap::new();
+        let mut cur = ValueId::UNIT;
+        for j in 0..steps {
+            if let Some(ds) = deltas.get(&j) {
+                for &(f, x) in ds {
+                    let name = crate::val::field_name(v, f);
+                    let pre = cx.use_field(f)?;
+                    if same_as_before(v, &name, pre, x) {
+                        state.remove(&name);
+                    } else {
+                        state.insert(name, (f, x));
+                    }
+                }
+                cur = if state.is_empty() {
+                    ValueId::UNIT
+                } else {
+                    v.list(
+                        state
+                            .values()
+                            .map(|&(f, x)| v.list(vec![f.0, x]))
+                            .collect(),
+                    )
+                };
+            }
+            let e: Vec<(String, ValueId)> = state.iter().map(|(n, &(_, x))| (n.clone(), x)).collect();
+            log_pub(o, "pgst", j, e);
+            if cur != ValueId::UNIT {
+                cx.publish(v.field(&format!("pgst:{j}")), cur);
+            }
+        }
+        Ok(FinalState {
+            map: state.into_values().collect(),
+        })
+    }
+
+    /// Field `f` after the chain.
+    pub(crate) fn get(&self, cx: &mut Ctx<'_>, f: Field) -> Result<Option<ValueId>, Stop> {
+        if let Some(&x) = self.map.get(&f) {
+            return Ok(Some(x));
+        }
+        cx.use_field(f)
+    }
+}
+
+/// The page chain's loop-backs as the steps read and published them in
+/// one evaluation, by (kind, page): the guesses refuted
+/// ([`crate::Stats::refuted_guesses`]).
+#[derive(Default)]
+pub(crate) struct LbLog {
+    reads: std::collections::BTreeMap<(&'static str, usize), Vec<Vec<(String, ValueId)>>>,
+    pubs: std::collections::BTreeMap<(&'static str, usize), Vec<(String, ValueId)>>,
+}
+
+fn log_read(o: &crate::run::Ops, kind: &'static str, j: usize, e: Vec<(String, ValueId)>) {
+    let mut l = o.lblog.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let rs = l.reads.entry((kind, j)).or_default();
+    if !rs.contains(&e) {
+        rs.push(e);
+    }
+}
+
+fn log_pub(o: &crate::run::Ops, kind: &'static str, j: usize, e: Vec<(String, ValueId)>) {
+    let mut l = o.lblog.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    l.pubs.insert((kind, j), e);
+}
+
+impl LbLog {
+    /// Every guess read that the value published refuted: `refuted:
+    /// <fields> at page <n> (<loop-back>)`, the fields whose values
+    /// differ.
+    pub(crate) fn refuted(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (&(kind, j), reads) in &self.reads {
+            let Some(p) = self.pubs.get(&(kind, j)) else {
+                continue;
+            };
+            for r in reads {
+                if r == p {
+                    continue;
+                }
+                let mut names = std::collections::BTreeSet::new();
+                for (n, x) in r {
+                    if !p.iter().any(|(m, y)| m == n && y == x) {
+                        names.insert(n.as_str());
+                    }
+                }
+                for (n, x) in p {
+                    if !r.iter().any(|(m, y)| m == n && y == x) {
+                        names.insert(n.as_str());
+                    }
+                }
+                let names: Vec<&str> = names.into_iter().collect();
+                out.push(format!(
+                    "refuted: {} at page {} ({kind}:{j})",
+                    names.join(" "),
+                    j + 2
+                ));
+            }
+        }
+        out
+    }
 }

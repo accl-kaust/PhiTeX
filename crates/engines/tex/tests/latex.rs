@@ -92,7 +92,14 @@ fn report(name: &str, b: &Build) -> String {
         s.wall,
         s.waits_by_kind
     );
-    for &(n, w) in &s.top_waited {
+    let _ = std::fmt::Write::write_fmt(
+        &mut out,
+        format_args!(
+            "\n  critical path {:?}, page steps {}, refuted guesses {:?}",
+            s.critical_path, s.page_steps, s.refuted_guesses
+        ),
+    );
+        for &(n, w) in &s.top_waited {
         let _ = std::fmt::Write::write_fmt(
             &mut out,
             format_args!("\n  waited on {w}x: {}", b.describe_node(n)),
