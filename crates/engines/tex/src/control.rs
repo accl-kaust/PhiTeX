@@ -7,12 +7,12 @@ use std::rc::Rc;
 use phitex_defuse::{Value, ValueId};
 use phitex_typeset::glue::Glue;
 
-use crate::runstate::{Loc, Native};
 use crate::fields::Par;
 use crate::run::{R, Run};
+use crate::runstate::{Loc, Native};
 use crate::val::{
     CAT_CODE_BASE, DEL_CODE_BASE, MATH_CODE_BASE, Macro, Mean, OUTPUT_ROUTINE_LOC, SF_CODE_BASE,
-    TOKS_BASE, Tok, cmd, glue_of, glue_value, int_of, list_of, str_of, toks_value,
+    TOKS_BASE, Tok, cmd, glue_of, int_of, list_of, str_of, toks_value,
 };
 
 const BOX_FLAG: i64 = 0o10000000000;

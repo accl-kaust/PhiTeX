@@ -30,6 +30,7 @@ pub(crate) const SPILL: Loc = 1 << 31;
 /// A slot's value in the run's own form. An engine value is kept as it
 /// is (`Raw`) until a typed read decodes it once.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub(crate) enum Native {
     /// The engine has no definition (an undefined control sequence, a
     /// void register).
@@ -360,6 +361,7 @@ impl State {
     }
 
     /// Loaded `loc` as a token list (decoded once).
+    #[allow(dead_code)]
     pub(crate) fn toks_of(&mut self, loc: Loc, v: &Values) -> Rc<[Tok]> {
         let e = self.entry_mut(loc);
         match &e.val {
@@ -381,7 +383,12 @@ impl State {
     /// definitions begin, and its stamp.
     pub(crate) fn open(&mut self) -> (u32, usize, usize, u64) {
         self.next_gid += 1;
-        (self.next_gid, self.save.len(), self.defined.len(), self.stamp)
+        (
+            self.next_gid,
+            self.save.len(),
+            self.defined.len(),
+            self.stamp,
+        )
     }
 
     /// The meta of `loc`, made on its first definition.
@@ -651,7 +658,7 @@ impl State {
     /// The table of a parked run ([`State::park`]).
     pub(crate) fn unpark(p: PState) -> State {
         let mut st = State::new();
-        let mut loc = |st: &mut State, l: PLoc| -> Loc {
+        let loc = |st: &mut State, l: PLoc| -> Loc {
             match l {
                 PLoc::Fixed(l) => l,
                 PLoc::Spill(f) => st.spill_loc(f),

@@ -307,11 +307,6 @@ impl Fields {
         }
     }
 
-    /// The location of the state cell `name` ([`STATIC`]).
-    pub(crate) fn static_slot(name: &str) -> Option<usize> {
-        STATIC.iter().position(|&n| n == name).map(|i| STATIC0 + i)
-    }
-
     /// The location of field `f` below the spill: a fixed one, or a
     /// meaning's (kept per thread at `epoch`; a name is looked at once an
     /// epoch). `None`: the field is in no fixed range.

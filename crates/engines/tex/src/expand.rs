@@ -445,7 +445,7 @@ impl Run<'_, '_> {
                 self.skip_blanks_x()?;
                 let rel = match self.cur.tok {
                     _ if self.cur.tok.cat() == Some(12)
-                            && (60..=62).contains(&self.cur.tok.chr()) =>
+                        && (60..=62).contains(&self.cur.tok.chr()) =>
                     {
                         self.cur.tok.chr()
                     }
