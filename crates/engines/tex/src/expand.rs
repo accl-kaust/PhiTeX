@@ -40,7 +40,7 @@ macro_rules! cs_once {
     ($name:ident, $s:expr) => {
         pub(crate) fn $name() -> Tok {
             static C: std::sync::OnceLock<crate::val::CsId> = std::sync::OnceLock::new();
-            Tok::S(*C.get_or_init(|| crate::val::CsId::intern($s)))
+            Tok::of_cs(*C.get_or_init(|| crate::val::CsId::intern($s)))
         }
     };
 }
@@ -207,7 +207,7 @@ impl Run<'_, '_> {
             let MacroBufs { args, bounds, out } = &mut bufs;
             out.clear();
             for t in m.body.iter() {
-                if let Tok::C(x) = t
+                if let Some(x) = t.as_char()
                     && x >> 21 == u32::from(OUT_PARAM_CAT)
                 {
                     let k = usize::try_from(x & 0x1F_FFFF).unwrap_or(1);
@@ -215,7 +215,7 @@ impl Run<'_, '_> {
                         out.extend_from_slice(&args[lo..hi]);
                     }
                 } else {
-                    out.push(t.clone());
+                    out.push(*t);
                 }
             }
             let toks: Rc<[Tok]> = Rc::from(&out[..]);
@@ -238,7 +238,7 @@ impl Run<'_, '_> {
         bounds.clear();
         let p: &[Tok] = &m.params;
         let len = p.len();
-        let is_match = |t: &Tok| matches!(*t, Tok::C(x) if x >> 21 == u32::from(MATCH_CAT));
+        let is_match = |t: &Tok| t.raw() >> 21 == u32::from(MATCH_CAT);
         let mut long_state = m.flags & 1 != 0;
         let mut r = 0usize;
         let par = par_tok();
@@ -311,7 +311,7 @@ impl Run<'_, '_> {
                     return Ok(false);
                 }
                 match tok {
-                    Tok::C(x) if x >> 21 == 1 => {
+                    x if x.raw() >> 21 == 1 => {
                         // §399
                         let mut unbalance = 1;
                         args.push(tok);
@@ -323,7 +323,7 @@ impl Run<'_, '_> {
                                 self.back_input(t2);
                                 return Ok(false);
                             }
-                            if let Tok::C(y) = t2 {
+                            if let Some(y) = t2.as_char() {
                                 match y >> 21 {
                                     1 => unbalance += 1,
                                     2 => {
@@ -340,7 +340,7 @@ impl Run<'_, '_> {
                             args.push(t2);
                         }
                     }
-                    Tok::C(x) if x >> 21 == 2 => {
+                    x if x.raw() >> 21 == 2 => {
                         // §395: an extra }, and a \par inserted
                         self.back_input(tok);
                         self.back_input(par.clone());
@@ -368,7 +368,7 @@ impl Run<'_, '_> {
                 if m_count == 1
                     && let Some(rb) = rbrace
                     && hi > lo
-                    && matches!(args[hi - 1], Tok::C(x) if x >> 21 == 2)
+                    && args[hi - 1].raw() >> 21 == 2
                     && rb == hi - lo - 1
                 {
                     lo += 1;
@@ -408,7 +408,7 @@ impl Run<'_, '_> {
         self.get_x_token()?;
         let (mut c, mut h) = (self.cur.cmd, self.cur.chr);
         if c == cmd::RELAX && h == crate::val::NO_EXPAND_FLAG {
-            if self.cur.tok.cat() == Some(13) && !matches!(self.cur.tok, Tok::S(_)) {
+            if self.cur.tok.cat() == Some(13) && !self.cur.tok.is_cs() {
                 c = cmd::ACTIVE_CHAR;
                 h = i32::try_from(self.cur.tok.chr()).unwrap_or(0);
             } else {
@@ -443,9 +443,8 @@ impl Run<'_, '_> {
                     self.scan_normal_dimen()?
                 };
                 self.skip_blanks_x()?;
-                let rel = match &self.cur.tok {
-                    Tok::C(_)
-                        if self.cur.tok.cat() == Some(12)
+                let rel = match self.cur.tok {
+                    _ if self.cur.tok.cat() == Some(12)
                             && (60..=62).contains(&self.cur.tok.chr()) =>
                     {
                         self.cur.tok.chr()
@@ -779,7 +778,7 @@ impl Run<'_, '_> {
         // single-character names: their current category code (§262)
         let mut cats: crate::FxHashMap<u32, i64> = crate::FxHashMap::default();
         for t in toks {
-            if let Tok::S(n) = t {
+            if let Some(n) = t.as_cs() {
                 let mut cs = n.chars();
                 if let (Some(c), None) = (cs.next(), cs.next()) {
                     let k = u32::from(c);
@@ -818,7 +817,7 @@ impl Run<'_, '_> {
                     Frame::Toks(t, p) => {
                         if t[*p..]
                             .iter()
-                            .any(|x| matches!(x, Tok::S(n) if n.starts_with("\u{10FFFE}eof")))
+                            .any(|x| matches!(x.as_cs(), Some(n) if n.starts_with("\u{10FFFE}eof")))
                         {
                             found = true;
                             break;

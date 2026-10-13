@@ -7,6 +7,7 @@ use std::rc::Rc;
 use phitex_defuse::{Value, ValueId};
 use phitex_typeset::glue::Glue;
 
+use crate::runstate::{Loc, Native};
 use crate::fields::Par;
 use crate::run::{R, Run};
 use crate::val::{
@@ -91,13 +92,12 @@ impl Run<'_, '_> {
             }
         });
         eprintln!(
-            "hb{} {:.1}s cmds {n} {file}:{line} last {last} cmd {} mode {} defs {} own {} nest {} frames {}",
+            "hb{} {:.1}s cmds {n} {file}:{line} last {last} cmd {} mode {} state {:?} nest {} frames {}",
             if trace { "t" } else { "" },
             t0.elapsed().as_secs_f64(),
             self.cur.cmd,
             self.nest.last().map_or(0, |l| l.mode),
-            self.defs.len(),
-            self.own.len(),
+            self.st.sig(),
             self.nest.len(),
             self.frames.len()
         );
@@ -367,8 +367,8 @@ impl Run<'_, '_> {
                 };
                 let mut out = Vec::with_capacity(body.len());
                 for t in body {
-                    match &t {
-                        Tok::C(_) => {
+                    match t.as_cs() {
+                        None => {
                             let ch = t.chr() & 0xFF;
                             let e = self.int(&format!("{table}:{ch}"))?;
                             if e != 0 {
@@ -380,7 +380,7 @@ impl Run<'_, '_> {
                                 out.push(t);
                             }
                         }
-                        Tok::S(_) => out.push(t),
+                        Some(_) => out.push(t),
                     }
                 }
                 self.push_toks(out);
@@ -551,23 +551,23 @@ impl Run<'_, '_> {
                 self.set_f(field, val, global);
             }
             cmd::ASSIGN_INT => {
-                let f = self.quantity(cmd::ASSIGN_INT, self.cur.chr);
+                let l = self.quantity_loc(cmd::ASSIGN_INT, self.cur.chr);
                 self.scan_optional_equals()?;
                 let n = self.scan_int()?;
-                self.set_f(f, v.int(i64::from(n)), global);
+                self.set_loc(l, Native::Int(n), global);
             }
             cmd::ASSIGN_DIMEN => {
-                let f = self.quantity(cmd::ASSIGN_DIMEN, self.cur.chr);
+                let l = self.quantity_loc(cmd::ASSIGN_DIMEN, self.cur.chr);
                 self.scan_optional_equals()?;
                 let n = self.scan_normal_dimen()?;
-                self.set_f(f, v.int(i64::from(n)), global);
+                self.set_loc(l, Native::Int(n), global);
             }
             cmd::ASSIGN_GLUE | cmd::ASSIGN_MU_GLUE => {
                 let n = self.cur.cmd;
-                let f = self.quantity(n, self.cur.chr);
+                let l = self.quantity_loc(n, self.cur.chr);
                 self.scan_optional_equals()?;
                 let g = self.scan_glue(if n == cmd::ASSIGN_MU_GLUE { 3 } else { 2 })?;
-                self.set_f(f, glue_value(v, &g), global);
+                self.set_loc(l, Native::Glue(g), global);
             }
             cmd::DEF_CODE => {
                 // §1232
@@ -586,15 +586,27 @@ impl Run<'_, '_> {
                     // "Invalid code"
                     val = 0;
                 }
-                let name = match base {
-                    CAT_CODE_BASE => "cat",
-                    crate::val::LC_CODE_BASE => "lc",
-                    crate::val::UC_CODE_BASE => "uc",
-                    SF_CODE_BASE => "sf",
-                    MATH_CODE_BASE => "mc",
-                    _ => "dc",
+                let (name, table) = match base {
+                    CAT_CODE_BASE => ("cat", None),
+                    crate::val::LC_CODE_BASE => ("lc", Some(0)),
+                    crate::val::UC_CODE_BASE => ("uc", Some(1)),
+                    SF_CODE_BASE => ("sf", Some(2)),
+                    MATH_CODE_BASE => ("mc", Some(3)),
+                    _ => ("dc", Some(4)),
                 };
-                self.set(&format!("{name}:{ch}"), v.int(i64::from(val)), global);
+                let c = u32::try_from(ch).unwrap_or(u32::MAX);
+                let fixed = match table {
+                    None => (c < 256).then(|| crate::fields::CAT0 + c as usize),
+                    Some(t) => crate::fields::code_slot(t, c),
+                };
+                let l = match fixed {
+                    Some(s) => Loc::try_from(s).unwrap_or(0),
+                    None => {
+                        let f = self.v.field(&format!("{name}:{ch}"));
+                        self.loc_of(f)
+                    }
+                };
+                self.set_loc(l, Native::Int(val), global);
             }
             cmd::DEF_FAMILY => {
                 // §1234
@@ -750,10 +762,7 @@ impl Run<'_, '_> {
     }
 
     pub(crate) fn define_cs(&mut self, t: &Tok, m: &Mean, global: bool) {
-        if let Some(f) = t.field_name() {
-            let x = m.encode(self.v);
-            self.set(&f, x, global);
-        }
+        self.set_mean(*t, m.clone(), global);
     }
 
     /// `do_register_command` (§1236–§1240).
@@ -824,7 +833,8 @@ impl Run<'_, '_> {
                 // "Arithmetic overflow"
                 return Ok(());
             };
-            self.set_f(field, v.int(i64::from(r)), global);
+            let l = self.loc_of(field);
+            self.set_loc(l, Native::Int(r), global);
         } else {
             let s = glue_of(v, old);
             let r: Option<Glue> = if q < cmd::MULTIPLY {
@@ -859,7 +869,8 @@ impl Run<'_, '_> {
                 }
             };
             let Some(r) = r else { return Ok(()) };
-            self.set_f(field, glue_value(v, &r), global);
+            let l = self.loc_of(field);
+            self.set_loc(l, Native::Glue(r), global);
         }
         Ok(())
     }
@@ -867,10 +878,10 @@ impl Run<'_, '_> {
     /// `new_font` (§1257–§1260).
     fn new_font(&mut self, global: bool) -> R<()> {
         let u = self.get_r_token()?;
-        let t: String = match &u {
-            Tok::S(n) if n.is_empty() => "FONT".to_owned(),
-            Tok::S(n) => n.to_string(),
-            Tok::C(_) => format!("FONT{}", char::from_u32(u.chr()).unwrap_or('?')),
+        let t: String = match u.as_cs() {
+            Some(n) if n.is_empty() => "FONT".to_owned(),
+            Some(n) => n.to_string(),
+            None => format!("FONT{}", char::from_u32(u.chr()).unwrap_or('?')),
         };
         self.define_cs(&u, &Mean::Font(0), global);
         self.scan_optional_equals()?;
