@@ -1053,6 +1053,36 @@ pub enum DocCmd {
     Outline(Option<Vec<u8>>, Action, i32, Vec<u8>),
     /// `\pdfglyphtounicode`.
     GlyphToUnicode(Vec<u8>, Vec<u8>),
+    /// `\pdffontattr f` (the last one TeX read for the font).
+    FontAttr(FontId, Vec<u8>),
+    /// `\pdfincludechars f`.
+    IncludeChars(FontId, Vec<u8>),
+    /// `\pdfnobuiltintounicode f`.
+    NoBuiltinToUnicode(FontId),
+}
+
+/// `\pdffontobjnum f` made on its own: the handle of the font's PDF
+/// font (the finish writes it, with the pages' characters).
+///
+/// # Errors
+/// A virtual font or `\nullfont` (`pdf_check_vf_cur_val`).
+pub fn font_objnum(
+    params: &PdfParams,
+    maps: &[(bool, Vec<u8>)],
+    f: FontId,
+    fonts: &dyn FontSource,
+) -> Result<usize, PdfError> {
+    let mut st = node_state(params);
+    for (file, t) in maps {
+        if *file {
+            st.map_file(t, fonts);
+        } else {
+            st.map_line(t);
+        }
+    }
+    st.font_command(f, fonts)?;
+    let rep = st.ff(f);
+    Ok(font_handle(font_key(rep, st.font(rep))))
 }
 
 /// The file from the pieces: the pages in order, then the objects TeX
@@ -1135,6 +1165,54 @@ pub fn finish_relaxed(
             }
         }
     }
+    // the font commands, on the PDF fonts their fonts share
+    let mut key_of_font: HashMap<FontId, u64> = HashMap::new();
+    for p in &all {
+        for (id, u) in &p.fonts {
+            key_of_font.insert(*id, u.key);
+        }
+    }
+    let mut attrs: BTreeMap<FontId, &[u8]> = BTreeMap::new();
+    for c in cmds {
+        let (DocCmd::FontAttr(id, _)
+        | DocCmd::IncludeChars(id, _)
+        | DocCmd::NoBuiltinToUnicode(id)) = c
+        else {
+            continue;
+        };
+        let Some(key) = key_of_font.get(id) else {
+            return Err(format!("a font command on font {id}, which no page shows"));
+        };
+        let Some((rep, s)) = by_key.get_mut(key) else {
+            continue;
+        };
+        match c {
+            DocCmd::FontAttr(_, t) => {
+                attrs.insert(*id, t);
+            }
+            DocCmd::IncludeChars(_, t) => {
+                for &ch in t {
+                    s.chars[usize::from(ch)] = true;
+                }
+            }
+            DocCmd::NoBuiltinToUnicode(_) if id == rep => s.nobuiltin_tounicode = true,
+            _ => {}
+        }
+    }
+    // a shared font's attributes: its first font's, else (`output_fonts`)
+    // the first sharer's that has some
+    for (key, (rep, s)) in &mut by_key {
+        let mine = attrs.get(rep).filter(|a| !a.is_empty());
+        let other = || {
+            attrs
+                .iter()
+                .find(|(id, a)| key_of_font.get(id) == Some(key) && !a.is_empty())
+                .map(|(_, a)| *a)
+        };
+        if let Some(a) = mine.copied().or_else(other) {
+            s.attr = a.to_vec();
+        }
+    }
     for (key, (rep, mut s)) in by_key {
         s.used = false;
         s.num = 0;
@@ -1165,6 +1243,9 @@ pub fn finish_relaxed(
             DocCmd::Outline(a, act, n, t) => f.outline(a.clone(), act, *n, t),
             DocCmd::GlyphToUnicode(a, b) => {
                 f.glyph_to_unicode(a, b);
+                Ok(())
+            }
+            DocCmd::FontAttr(..) | DocCmd::IncludeChars(..) | DocCmd::NoBuiltinToUnicode(_) => {
                 Ok(())
             }
         };
