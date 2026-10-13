@@ -136,7 +136,6 @@ impl PdfState {
         format!(
             "{:?}",
             (
-                &self.p,
                 (self.dd, self.min_bp_val),
                 (self.initialized, self.version_written),
                 [
@@ -213,8 +212,11 @@ impl PdfState {
 pub struct PageRecord {
     /// Whether the page can be replayed at all.
     simple: bool,
-    /// The variables before the walk (after `init_output`), formatted.
+    /// The variables before the walk (after `init_output`), formatted,
+    /// the parameters apart; and the same after the page.
     pre: String,
+    pre_p: Option<crate::PdfParams>,
+    post_key: String,
     /// ... and after the page.
     post: Option<Box<Scratch>>,
     /// The content stream object after its header line and `<<`.
@@ -244,6 +246,17 @@ pub struct PageRecord {
 }
 
 impl PageRecord {
+    /// The variables' key after the page placed, for the next page's
+    /// [`PdfState::replay_page`] (`known`): none while a link is open
+    /// (its object numbers are the document's after placing).
+    #[must_use]
+    pub fn post_key(&self) -> Option<&str> {
+        self.post
+            .as_deref()
+            .filter(|p| p.link_stack.is_empty())
+            .map(|_| self.post_key.as_str())
+    }
+
     /// Whether the page can be replayed.
     #[must_use]
     pub fn simple(&self) -> bool {
@@ -319,8 +332,10 @@ impl PdfState {
         self.rec = Some(Box::default());
         let r = self.ship(page, true, fonts, wh);
         let rec = self.rec.take().unwrap_or_default();
+        let pre_p = Some(self.p.clone());
         let mut pr = PageRecord {
             pre,
+            pre_p,
             shared,
             pre_nums: rec.pre_nums,
             ..PageRecord::default()
@@ -343,6 +358,7 @@ impl PdfState {
                 }
             }
             pr.shown = self.page_shown.clone();
+            pr.post_key = self.pre_key();
             pr.annots.clone_from(&self.annot_list);
             pr.links.clone_from(&self.link_list);
             pr.dests.clone_from(&self.dest_list);
@@ -379,12 +395,19 @@ impl PdfState {
         rec: &PageRecord,
         fonts: &dyn FontSource,
         base: &BTreeSet<FontId>,
+        known: Option<&str>,
     ) -> Result<Option<String>, String> {
         let Some(post) = rec.post.as_deref().filter(|_| rec.simple) else {
             return Err("not only text and rules".to_owned());
         };
         self.init_output();
-        let pre = self.pre_key();
+        if rec.pre_p.as_ref() != Some(&self.p) {
+            return Err("the parameters differ".to_owned());
+        }
+        let pre = match known {
+            Some(k) => k.to_owned(),
+            None => self.pre_key(),
+        };
         if pre != rec.pre {
             let at = pre
                 .bytes()

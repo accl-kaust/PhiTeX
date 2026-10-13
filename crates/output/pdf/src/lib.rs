@@ -164,7 +164,7 @@ fn pdf_error(t: &str, p: &str) -> PdfError {
 /// The parameters pdfTeX reads when it writes: `\pdf...` registers and
 /// token lists, `\hoffset`, `\voffset`, `\mag`, and what the system
 /// gives (the date, the banner, the file name).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PdfParams {
     /// `\pdfcompresslevel` (0–9).
     pub compress_level: i32,
