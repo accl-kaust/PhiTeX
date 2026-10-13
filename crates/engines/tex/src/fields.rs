@@ -347,7 +347,7 @@ impl Fields {
             Tok::ch(13, u32::try_from(loc - MEAN_ACTIVE).unwrap_or(0))
         };
         let f = self
-            .meaning_at(v, epoch, &t)
+            .meaning_at(v, epoch, t)
             .unwrap_or_else(|| v.field("cs:"));
         with_names(v, epoch, |c| {
             bounded(&mut c.locs);
@@ -445,14 +445,14 @@ impl Fields {
     /// The field of token `t`'s meaning (`cs:<name>`, `act:<c>`), if it
     /// has one, kept per thread as [`Self::get_at`] keeps names.
     #[allow(clippy::unused_self)]
-    pub(crate) fn meaning_at(&self, v: &Values, epoch: u64, t: &Tok) -> Option<Field> {
-        if let Some(f) = with_names(v, epoch, |c| c.toks.get(t).copied()) {
+    pub(crate) fn meaning_at(&self, v: &Values, epoch: u64, t: Tok) -> Option<Field> {
+        if let Some(f) = with_names(v, epoch, |c| c.toks.get(&t).copied()) {
             return Some(f);
         }
         let f = v.field(&t.field_name()?);
         with_names(v, epoch, |c| {
             bounded(&mut c.toks);
-            c.toks.insert(*t, f);
+            c.toks.insert(t, f);
         });
         Some(f)
     }
