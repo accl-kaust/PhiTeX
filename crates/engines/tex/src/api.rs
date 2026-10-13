@@ -792,6 +792,10 @@ pub struct Stats {
     pub pending_sets: u64,
     pub pending_sets_defining: u64,
     pub stops: u64,
+    /// Attempts that resumed a stopped run at its blocked read, and that
+    /// started over though one was kept (a read changed).
+    pub resumed: u64,
+    pub restarted: u64,
     /// Stopped runs restarted instead of resumed, by the first read that
     /// refused the resume.
     pub restarted_by: Vec<(&'static str, u64)>,
@@ -856,6 +860,9 @@ pub struct Stats {
     pub speculations: u64,
     pub confirmations: u64,
     pub mispredictions: u64,
+    /// Speculative runs dropped at a stop (their guess is then blocked
+    /// until its node leaves work).
+    pub spec_stops: u64,
     pub raises: u64,
     /// The most nodes ready at one step, and the speculative runs that
     /// ran out of fuel.
@@ -965,6 +972,8 @@ impl Stats {
         self.pending_sets += r.pending_sets;
         self.pending_sets_defining += r.pending_sets_defining;
         self.stops += r.stops;
+        self.resumed += r.resumed;
+        self.restarted += r.restarted;
         for &(k, n) in &r.restarted_by {
             match self.restarted_by.iter_mut().find(|x| x.0 == k) {
                 Some(x) => x.1 += n,
@@ -978,6 +987,7 @@ impl Stats {
         self.speculations += r.speculations;
         self.confirmations += r.confirmations;
         self.mispredictions += r.mispredictions;
+        self.spec_stops += r.spec_stops;
         self.raises += r.raises;
         self.max_ready = self.max_ready.max(r.max_ready);
         self.fuel_outs += r.fuel_outs;
