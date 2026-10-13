@@ -337,8 +337,9 @@ pub trait Monoid: Send + Sync {
 }
 
 /// Answers an environment read the engine does not hold
-/// ([`Engine::set_env_provider`]).
-pub type EnvProvider = dyn Fn(Field) -> Option<Option<ValueId>> + Send + Sync;
+/// ([`Engine::set_env_provider`]), with the value table to name the field
+/// (`values.get(field.0)` is its name) and to intern the answer.
+pub type EnvProvider = dyn Fn(&Values, Field) -> Option<Option<ValueId>> + Send + Sync;
 
 /// Sequence concatenation (structurally shared, see [`Values::seq_concat`]).
 pub struct SeqMonoid;
@@ -454,6 +455,10 @@ pub struct Report {
     /// state's reads no longer held.
     pub resumed: u64,
     pub restarted: u64,
+    /// Why kept states were not resumed: the first read that no longer
+    /// held, by kind ("field: another site reaches", "environment:
+    /// changed or gone", ...), or the node kind ("claimer").
+    pub restarted_by: Vec<(&'static str, u64)>,
     /// Of those refuted by a pending node defining what the run read (or
     /// its definer changing), by field, most refuted first.
     pub refuted_by_field: Vec<(Field, u64)>,
@@ -2060,9 +2065,33 @@ impl Engine {
     /// use bound where a fresh walk binds it and indexed among its site's
     /// users, every decided pending effect reflected in the order.
     #[doc(hidden)]
+    /// Nothing queued: a parked node then waits for the client's
+    /// environment, or for a wake that will never come.
+    fn stuck_waiters(&self, bad: &mut Vec<String>) {
+        if !self.queue.iter().all(Vec::is_empty) {
+            return;
+        }
+        for w in self.waiters() {
+            if matches!(w.on, WaitOn::Environment(_) | WaitOn::Queued) {
+                continue;
+            }
+            let target = match w.on {
+                WaitOn::Node(id) => self
+                    .slot_by_id(id)
+                    .map_or_else(|| "gone".to_string(), |t| format!("{:?}", self.n(t).state)),
+                _ => String::new(),
+            };
+            bad.push(format!(
+                "{:?} still parked on {:?} {target} with nothing queued",
+                w.node, w.on
+            ));
+        }
+    }
+
     #[must_use]
     pub fn check_invariants(&self) -> Vec<String> {
         let mut bad = Vec::new();
+        self.stuck_waiters(&mut bad);
         let done = self.nodes.iter().filter(|n| n.state == State::Done).count();
         let counted: u32 = self.done_heights.iter().sum();
         if counted as usize != done {
@@ -3286,13 +3315,27 @@ impl Engine {
         }
         let u = &self.units[unit as usize];
         let from = lo.saturating_sub(u.max_span);
-        let readers: Vec<Slot> = u
+        let readers: Vec<(Slot, Watch)> = u
             .watches
             .range((from, Slot { ix: 0, gen_: 0 })..=(hi, NIL))
-            .map(|((_, r), _)| *r)
-            .filter(|&r| lo < self.n(r).label)
+            .map(|((_, r), w)| (*r, *w))
+            .filter(|&(r, _)| lo < self.n(r).label)
             .collect();
-        for r in readers {
+        let mut flushed = false;
+        for (r, w) in readers {
+            // Parked until its range has no node in work: the new nodes
+            // are in work, and stab_settle wakes it once they finish
+            // (unless none is, as when they are all claimed at once).
+            if w.waiting && self.n(r).state == State::Parked {
+                if !flushed {
+                    self.flush_order();
+                    flushed = true;
+                }
+                let lo = self.watch_key(r, w.anchor).0;
+                if self.ord_fold(unit, lo, self.n(r).label).work != 0 {
+                    continue;
+                }
+            }
             self.make_dirty(r);
         }
     }
@@ -5381,46 +5424,62 @@ impl Engine {
     }
 
     /// Whether every read a stopped attempt made still resolves to the same
-    /// settled site and value: its state may then be resumed.
-    fn reads_hold(&self, x: Slot, s: &Suspended) -> bool {
+    /// settled site and value: its state may then be resumed. `Err` names
+    /// the first read that does not hold ([`Report::restarted_by`]).
+    fn reads_hold(&self, x: Slot, s: &Suspended) -> Result<(), &'static str> {
         let n = self.n(x);
-        if n.has(F_CLAIMER) || n.has(F_APP) {
-            return false;
+        if n.has(F_CLAIMER) {
+            return Err("claimer");
+        }
+        if n.has(F_APP) {
+            return Err("application");
         }
         for u in &s.uses {
             let seen = s.cache.get(&(u.kind, u.key)).copied();
-            let now = match u.kind {
+            let (now, changed) = match u.kind {
                 K_FIELD => {
                     let f = Field(ValueId(u.key));
                     let w = self.walk(n.unit, n.label, f);
-                    if w.pending != NIL || w.site != u.site {
-                        return false;
+                    if w.pending != NIL {
+                        return Err("field: pending node in between");
+                    }
+                    if w.site != u.site {
+                        return Err("field: another site reaches");
                     }
                     if w.site == NIL {
-                        Some(self.start_value(n.unit, f))
+                        (Some(self.start_value(n.unit, f)), "field: start value changed")
                     } else if self.settled(w.site) {
-                        Some(self.n(w.site).def_value(f))
+                        (Some(self.n(w.site).def_value(f)), "field: value changed")
                     } else {
-                        return false;
+                        return Err("field: site not settled");
                     }
                 }
                 K_OUTPUT => {
                     let t = Slot::unpack(u.key);
-                    if !self.live(t) || !self.settled(t) {
-                        return false;
+                    if !self.live(t) {
+                        return Err("output: node gone");
+                    }
+                    if !self.settled(t) {
+                        return Err("output: node not settled");
                     }
                     let tn = self.n(t);
-                    Some(tn.has_ran().then_some(tn.output))
+                    (Some(tn.has_ran().then_some(tn.output)), "output: changed")
                 }
-                K_ENV => self.env_value(n.unit, Field(ValueId(u.key))).ok(),
-                K_LOOP => Some(self.loop_vals.get(&Field(ValueId(u.key))).copied()),
-                _ => return false,
+                K_ENV => (
+                    self.env_value(n.unit, Field(ValueId(u.key))).ok(),
+                    "environment: changed or gone",
+                ),
+                K_LOOP => (
+                    Some(self.loop_vals.get(&Field(ValueId(u.key))).copied()),
+                    "loop-back: changed",
+                ),
+                _ => return Err("read kind not re-checked"),
             };
             if now != seen {
-                return false;
+                return Err(changed);
             }
         }
-        true
+        Ok(())
     }
 
     /// Marks `x` as needing a re-run.
@@ -6046,8 +6105,24 @@ impl Engine {
         }
     }
 
+    /// The structure at `label` changed (a node came, went or was
+    /// re-made): the range readers over it run again, except those parked
+    /// until their range has no node in work, which `stab_settle` wakes once
+    /// the new nodes finish; a change that leaves such a range without
+    /// work wakes its reader here (nothing would finish for it).
     fn stab_structure(&mut self, unit: u32, label: u64) {
-        for (r, _) in self.stab(unit, label) {
+        let mut flushed = false;
+        for (r, w) in self.stab(unit, label) {
+            if w.waiting && self.n(r).state == State::Parked {
+                if !flushed {
+                    self.flush_order();
+                    flushed = true;
+                }
+                let lo = self.watch_key(r, w.anchor).0;
+                if self.ord_fold(unit, lo, self.n(r).label).work != 0 {
+                    continue;
+                }
+            }
             self.make_dirty(r);
         }
     }
@@ -6738,8 +6813,9 @@ impl Engine {
         if r.resumed {
             self.report.resumed += 1;
         }
-        if r.restarted {
+        if let Some(why) = r.restarted {
             self.report.restarted += 1;
+            bump(&mut self.report.restarted_by, why);
         }
         let mut r = r;
         if !r.speculative {
@@ -7393,6 +7469,24 @@ impl Engine {
         !dead.is_empty()
     }
 
+    /// The values a kept stopped state holds: what it read and what it
+    /// made so far (the client's token is the client's).
+    fn suspended_live(s: &Suspended, live: &mut FxHashSet<ValueId>) {
+        live.extend(s.uses.iter().filter(|u| u.kind != K_OUTPUT).map(|u| ValueId(u.key)));
+        live.extend(s.cache.values().flatten().copied());
+        for &(f, v, _) in &s.defs {
+            live.insert(f.0);
+            live.insert(v);
+        }
+        live.extend(s.children.iter().chain(&s.follows).map(|&(_, a)| a));
+        for &(f, v) in s.env.iter().chain(&s.publishes).chain(&s.contribs) {
+            live.insert(f.0);
+            live.insert(v);
+        }
+        live.extend(s.kind);
+        live.extend(s.diagnostics.iter().copied());
+    }
+
     /// Frees the values nothing holds any more. What the report and the
     /// error name (environment waits, waiters, causes) stays until the next
     /// evaluation, so the client can render it.
@@ -7436,6 +7530,10 @@ impl Engine {
                 live.insert(x.value);
             }
             live.extend(a.diagnostics.iter().copied());
+            // A kept stopped state resumes with what it read and made.
+            if let Some(s) = a.suspended.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+                Self::suspended_live(s, &mut live);
+            }
         }
         for (f, v) in self.environment.iter().chain(self.env_next.iter().flatten()) {
             live.insert(f.0);
@@ -8317,12 +8415,14 @@ impl Engine {
                 .and_then(|a| a.suspended.lock().unwrap_or_else(PoisonError::into_inner).take())
         };
         let mut cx = match saved {
-            Some(s) if self.reads_hold(job.slot, &s) => Ctx::resume(self, job.slot, fuel, *s),
-            Some(_) => {
-                let mut cx = Ctx::new(self, job.slot, job.speculative, fuel);
-                cx.restarted = true;
-                cx
-            }
+            Some(s) => match self.reads_hold(job.slot, &s) {
+                Ok(()) => Ctx::resume(self, job.slot, fuel, *s),
+                Err(why) => {
+                    let mut cx = Ctx::new(self, job.slot, job.speculative, fuel);
+                    cx.restarted = Some(why);
+                    cx
+                }
+            },
             None => Ctx::new(self, job.slot, job.speculative, fuel),
         };
         if !job.speculative {
@@ -8431,7 +8531,8 @@ pub struct RunResult {
     /// Whether this attempt resumed a saved state / started over after
     /// dropping one.
     pub(crate) resumed: bool,
-    pub(crate) restarted: bool,
+    /// Why a kept state was not resumed ([`Report::restarted_by`]).
+    pub(crate) restarted: Option<&'static str>,
     /// Unfolded-text and lexical-application memo hits and misses.
     pub(crate) memo: [u32; 4],
 }
