@@ -460,6 +460,25 @@ fn latex_loop_rounds() {
             }
             let cold = (b.stats.loop_rounds, b.stats.rounds, b.stats.nodes_run);
             let keys = b.wkeys();
+            let fx = b.export_pagefx();
+            if fixpoint {
+                let (out, log) = b.output();
+                eprintln!("fixpoint {name}: {} bytes out, {:?}, log tail {:?}", out.len(), b.diagnostics(), &log[log.len().saturating_sub(400)..]);
+            }
+            // a second session from the first one's loop-back values
+            let opts2 = Options {
+                prelude_bytes: std::fs::read(&cache).ok(),
+                time_limit: None,
+                wkeys: keys.clone(),
+                pagefx: fx.clone(),
+                ..options("hello", &dir, "", fixpoint, false)
+            };
+            let b2 = common::build(opts2, Some(&prelude(false)), src);
+            assert_eq!(b2.output().0, b.output().0, "second session differs");
+            eprintln!(
+                "rounds {name} fixpoint={fixpoint} second session: {} loop rounds / {} nodes run (pagefx {} bytes)",
+                b2.stats.loop_rounds, b2.stats.nodes_run, fx.len()
+            );
             b.edit(&src.replacen("\\begin{document}", "\\begin{document}Hi ", 1));
             eprintln!(
                 "rounds {name} fixpoint={fixpoint}: cold {} loop rounds / {} evaluations / {} nodes run, edit {} / {} / {}; wkeys {keys:?}; guess {:?}",

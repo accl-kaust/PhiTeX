@@ -578,6 +578,10 @@ impl Session {
                         _ => Options::default().speculation,
                     },
                     wkeys: self.load_wkeys(),
+                    pagefx: self
+                        .wkeys_path()
+                        .and_then(|p| self.cache.as_ref()?.get(&p.with_file_name("pagefx")))
+                        .unwrap_or_default(),
                     ..Options::default()
                 };
                 let opts = Options {
@@ -764,7 +768,8 @@ impl Session {
     /// The prelude's evaluated state stored, unless the cache has it
     /// under the same key.
     /// The cache's file of the document's read-back key sets
-    /// ([`Build::wkeys`]): the next session's round-one guesses.
+    /// ([`Build::wkeys`]): the next session's round-one guesses (beside
+    /// it, `pagefx`: [`Build::export_pagefx`]).
     fn wkeys_path(&self) -> Option<PathBuf> {
         Some(self.cache.as_ref()?.doc_dir(&self.job.path).join("wkeys"))
     }
@@ -800,6 +805,11 @@ impl Session {
         }
         if c.get(&p).as_deref() != Some(out.as_bytes()) {
             let _ = c.put(&p, out.as_bytes(), &[]);
+        }
+        let fx = b.export_pagefx();
+        let p = p.with_file_name("pagefx");
+        if c.get(&p).as_deref() != Some(fx.as_slice()) {
+            let _ = c.put(&p, &fx, &[]);
         }
     }
 
