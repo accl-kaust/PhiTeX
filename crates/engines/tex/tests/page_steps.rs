@@ -94,6 +94,13 @@ fn generated_documents() {
             s.nodes_run,
             s.page_steps
         );
+        {
+            let mut by = std::collections::BTreeMap::<String, usize>::new();
+            for (_, kind, field) in b.critical_chain() {
+                *by.entry(format!("{kind} {field}")).or_default() += 1;
+            }
+            eprintln!("{name} chain by cause: {by:?}");
+        }
         let (r0, l0, p0) = (s.runs, s.loop_rounds, s.page_steps);
         let mid = src.len() / 2;
         let at = mid + src[mid..].find(" the ").expect("a word") + 1;
