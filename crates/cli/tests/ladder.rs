@@ -279,12 +279,38 @@ fn until(lines: &mut impl Iterator<Item = String>, build: u64) -> serde_json::Va
     serde_json::Value::Null
 }
 
+/// Seeds the format cache with a throwaway build, so a rung's cold
+/// numbers are the document's build with the format cached; the format's
+/// time is printed once (`FORMAT ...`).
+fn seed(latex: bool) {
+    let tag = if latex { "seed-latex" } else { "seed-plain" };
+    let dir = scratch(tag);
+    let text = if latex {
+        "\\documentclass{article}\\begin{document}x\\end{document}\n"
+    } else {
+        "x\\bye\n"
+    };
+    std::fs::write(dir.join("seed.tex"), text).expect("the seed");
+    let t = Instant::now();
+    let out = phitex(&dir)
+        .args(["build", "--json", "seed.tex"])
+        .output()
+        .expect("phitex build runs");
+    eprintln!(
+        "FORMAT {} {:.2} s (exit {:?}; 0 s if already cached)",
+        if latex { "pdflatex" } else { "pdftex" },
+        t.elapsed().as_secs_f64(),
+        out.status.code()
+    );
+}
+
 /// One rung: its row on standard error; the reds, empty if green.
 fn run(nn: &str) -> Vec<String> {
     let (rung, name) = rung_dir(nn);
     let scope = std::env::var("PHITEX_DOC_SCOPE").unwrap_or_default();
     let mut reds = Vec::new();
     let o = rung.join(".").join("oracle");
+    seed(name != "plain");
     let (c1, _) = cold(&rung, &name, ".", 1, &format!("{nn}-cold-1"));
     let (c8, _) = cold(&rung, &name, ".", 8, &format!("{nn}-cold-8"));
     for (t, c) in [(1, &c1), (8, &c8)] {
