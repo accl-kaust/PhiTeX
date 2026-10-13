@@ -207,6 +207,9 @@ pub(crate) struct Run<'c, 'a> {
     /// A `build_page` call not yet folded (OUTPUT.md §4.2a): the
     /// children and main-list items the run had made at the call.
     pub page_due: Option<(usize, usize, bool)>,
+    /// The category codes this run read (§232), by character below
+    /// 256, plus one (0: not read yet); emptied whenever `own` changes.
+    cats: [u8; 256],
     own: FxHashMap<Field, Option<ValueId>>,
     pub defs: Vec<(Field, ValueId, Locality)>,
     pub contribs: Vec<(Field, ValueId)>,
@@ -280,6 +283,7 @@ impl<'c, 'a> Run<'c, 'a> {
             if_top_written: ifbase,
             kid_ifdepths: None,
             own: FxHashMap::default(),
+            cats: [0; 256],
             defs: Vec::new(),
             contribs: Vec::new(),
             kids: Vec::new(),
@@ -384,9 +388,21 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     pub(crate) fn cat(&mut self, c: u32) -> R<u8> {
+        let slot = usize::try_from(c).ok().filter(|&i| i < 256);
+        if let Some(i) = slot
+            && self.cats[i] != 0
+        {
+            return Ok(self.cats[i] - 1);
+        }
         let f = self.ops.fields.cat(self.v, c);
         let x = self.get_f(f)?;
-        Ok(u8::try_from(x.map_or(0, |x| int_of(self.v, x))).unwrap_or(12))
+        let k = u8::try_from(x.map_or(0, |x| int_of(self.v, x))).unwrap_or(12);
+        if let Some(i) = slot
+            && k < u8::MAX
+        {
+            self.cats[i] = k + 1;
+        }
+        Ok(k)
     }
 
     /// Defines `name` (§277–§279: `eq_define` / `geq_define`).
@@ -397,6 +413,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     pub(crate) fn set_f(&mut self, f: Field, val: ValueId, global: bool) {
         self.own.insert(f, Some(val));
+        self.cats = [0; 256];
         self.defs.retain(|d| d.0 != f);
         self.defs.push((
             f,
@@ -1434,6 +1451,7 @@ impl<'c, 'a> Run<'c, 'a> {
         self.frames = s.frames;
         self.pulled = s.pulled;
         self.own = s.own;
+        self.cats = [0; 256];
         self.defs = s.defs;
         self.contribs = s.contribs;
         self.kids = s.kids;
