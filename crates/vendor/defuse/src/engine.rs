@@ -388,6 +388,13 @@ pub struct Report {
     pub raises: u64,
     /// Waits on pending structure (definition sets, claims, scope effects).
     pub pending_waits: u64,
+    /// The stops that parked, by what they waited for (a [`WaitKind`]'s
+    /// name): a value being computed, a pending definition set, scope
+    /// effect or claim between the definition and the read, a child, an
+    /// accumulator range, an environment field.
+    pub waits_by_kind: Vec<(&'static str, u64)>,
+    /// The nodes waited on most often, with their counts (at most five).
+    pub top_waited: Vec<(NodeId, u64)>,
     /// Nodes left waiting for an environment field not yet supplied (nor
     /// declared absent), and the nodes waiting on them, when the
     /// evaluation ended.
@@ -1080,6 +1087,45 @@ struct Snap {
 pub(crate) struct WalkResult {
     pub(crate) site: Slot,
     pub(crate) pending: Slot,
+    /// What is pending at `pending` (a [`WaitKind`]).
+    pub(crate) pending_kind: WaitKind,
+}
+
+/// What a stopped run waits for (the breakdown in
+/// [`Report::waits_by_kind`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitKind {
+    /// A definition it reads is being computed.
+    Value,
+    /// A node between the definition and the read may define the field
+    /// (its definition set is pending).
+    Defs,
+    /// A node between them may open or close a scope.
+    Effect,
+    /// A pending claim before the definition may swallow it.
+    Claim,
+    /// A child it needs is being computed.
+    Child,
+    /// An accumulator range it reads has members in work.
+    Range,
+    /// An environment field not yet supplied.
+    Environment,
+}
+
+impl WaitKind {
+    /// The kind's name in the report.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            WaitKind::Value => "value",
+            WaitKind::Defs => "definition set",
+            WaitKind::Effect => "scope effect",
+            WaitKind::Claim => "claim",
+            WaitKind::Child => "child",
+            WaitKind::Range => "range",
+            WaitKind::Environment => "environment",
+        }
+    }
 }
 
 const GAP: u64 = 1 << 32;
@@ -1221,6 +1267,8 @@ pub struct Engine {
     spec_done: FxHashSet<Slot>,
     /// Per node, what set its height besides what it read (see [`Origin`]).
     origins: FxHashMap<Slot, Origin>,
+    /// Waits on each node this evaluation (for [`Report::top_waited`]).
+    wait_counts: FxHashMap<Slot, u64>,
     pins: FxHashMap<ValueId, u32>,
     values_at_sweep: usize,
     open_op: OpId,
@@ -1384,6 +1432,7 @@ impl Engine {
             spec_live: 0,
             spec_done: FxHashSet::default(),
             origins: FxHashMap::default(),
+            wait_counts: FxHashMap::default(),
             pins: FxHashMap::default(),
             values_at_sweep: 0,
             open_op: OpId(0),
@@ -3251,12 +3300,22 @@ impl Engine {
                 .search_back(&OAug, root, site_label, &|s: OSum| s.maxr >= site_label)
                 .map(|l| (l, self.order.get(root, l).map_or(NIL, |i| i.slot)))
         };
-        let pending = [all, eff, one, pre, swallow]
-            .into_iter()
-            .flatten()
-            .max_by_key(|x| x.0)
-            .map_or(NIL, |x| x.1);
-        WalkResult { site, pending }
+        let (pending, pending_kind) = [
+            (all, WaitKind::Defs),
+            (eff, WaitKind::Effect),
+            (one, WaitKind::Defs),
+            (pre, WaitKind::Defs),
+            (swallow, WaitKind::Claim),
+        ]
+        .into_iter()
+        .filter_map(|(p, k)| p.map(|p| (p, k)))
+        .max_by_key(|x| x.0.0)
+        .map_or((NIL, WaitKind::Defs), |x| (x.0.1, x.1));
+        WalkResult {
+            site,
+            pending,
+            pending_kind,
+        }
     }
 
     /// The nearest pending node in `(site, label)` bounded to a prefix of
@@ -3587,6 +3646,13 @@ impl Engine {
             return;
         }
         let root = self.units[unit as usize].root;
+        if self.order.next(root, lx).is_none() {
+            // The unit's last node (a push): no use lies after it to move.
+            self.ix_insert(unit, f, lx, x);
+            self.stream_touch(unit, lx);
+            self.sync_order_lazy(x);
+            return;
+        }
         // (previous site, users in (lx, end)) pairs.
         let mut prev: Vec<(Slot, u64)> = Vec::new();
         if global {
@@ -5565,6 +5631,33 @@ impl Engine {
     /// Applies a run's definitions; returns whether any value changed.
     fn set_defs(&mut self, x: Slot, defs: &[(Field, ValueId, bool)]) -> bool {
         if self.n(x).has(F_DYN) {
+            // A dynamic definition set is bounded by the text's answer: a
+            // definition outside it would have left readers bound past the
+            // node while it was pending.
+            let (op, args, id) = (self.n(x).op, self.n(x).args, self.n(x).id);
+            let st = self.statics(op, args);
+            let av = self.args_vec(args);
+            let mut undeclared = Vec::new();
+            for &(f, _, _) in defs {
+                let f = self.canon(f);
+                if !self.is_client_def(x, f) {
+                    continue;
+                }
+                let name = self.client_name(f);
+                let covered = match &st.may_define {
+                    MayDefine::Nothing => false,
+                    MayDefine::Names(names) => names.iter().any(|&g| self.canon(g) == f),
+                    MayDefine::Prefixes(ps) => match &*self.values.get(name.0) {
+                        Value::Str(text) => ps.iter().any(|p| text.starts_with(p.as_str())),
+                        _ => false,
+                    },
+                    MayDefine::Any => self.op(op).may_define_field(&av, &self.values, name),
+                };
+                if !covered {
+                    undeclared.push(EvalError::UndeclaredDefinition { node: id, field: name });
+                }
+            }
+            self.errors.extend(undeclared);
             let set: Vec<(Field, bool)> = defs.iter().map(|d| (d.0, d.2)).collect();
             self.set_defset(x, &set);
         } else {
@@ -5891,10 +5984,11 @@ impl Engine {
         let output = match r.end {
             End::Output(v) => v,
             End::Unpredictable | End::OutOfFuel => return,
-            End::Gated(t) => {
+            End::Gated(t, kind) => {
                 self.report.gated += 1;
                 count!(Gated);
                 if self.live(t) && self.n(t).in_work() {
+                    self.note_wait(t, kind);
                     self.park(x, t);
                 } else if self.live(t) {
                     let h = (self.n(t).height + 1).max(self.n(x).height);
@@ -5923,10 +6017,11 @@ impl Engine {
                     .raised = h;
                 return;
             }
-            End::Wait(t) => {
+            End::Wait(t, kind) => {
                 self.report.stops += 1;
                 self.apply_partial(x, &r);
                 if self.live(t) && self.n(t).in_work() {
+                    self.note_wait(t, kind);
                     self.park(x, t);
                 } else if self.live(t) {
                     let h = (self.n(t).height + 1).max(self.n(x).height);
@@ -5939,6 +6034,7 @@ impl Engine {
                 // absent): the node stays in work, so what it may define
                 // keeps its readers waiting too.
                 self.report.stops += 1;
+                bump(&mut self.report.waits_by_kind, WaitKind::Environment.name());
                 self.apply_partial(x, &r);
                 self.park(x, NIL);
                 self.env_waiters.entry(f).or_default().push(x);
@@ -5960,12 +6056,14 @@ impl Engine {
                 if let Some(&c) = self.children_of(x).get(i)
                     && self.n(c).in_work()
                 {
+                    self.note_wait(c, WaitKind::Child);
                     self.park(x, c);
                 }
                 return;
             }
             End::WaitRange(field, anchor) => {
                 self.report.stops += 1;
+                bump(&mut self.report.waits_by_kind, WaitKind::Range.name());
                 self.apply_partial(x, &r);
                 self.park(x, NIL);
                 self.set_watch(x, Some((field, anchor, ValueId::NONE, true)));
@@ -6647,8 +6745,21 @@ impl Engine {
         false
     }
 
+    fn note_wait(&mut self, on: Slot, kind: WaitKind) {
+        bump(&mut self.report.waits_by_kind, kind.name());
+        *self.wait_counts.entry(on).or_insert(0) += 1;
+    }
+
     fn finalize_report(&mut self) {
         self.report.critical_path = self.critical_path();
+        let mut top: Vec<(Slot, u64)> = std::mem::take(&mut self.wait_counts).into_iter().collect();
+        top.sort_unstable_by_key(|&(s, c)| (std::cmp::Reverse(c), s.ix));
+        self.report.top_waited = top
+            .into_iter()
+            .filter(|&(s, _)| self.live(s))
+            .take(5)
+            .map(|(s, c)| (self.n(s).id, c))
+            .collect();
         let touched = std::mem::take(&mut self.touched);
         for (id, snap) in touched {
             let Some(&s) = self.ids.get(&id) else {
@@ -6861,12 +6972,12 @@ impl Engine {
             }
             let w = self.walk(n.unit, n.label, f);
             if w.pending != NIL {
-                return Err(End::Gated(w.pending));
+                return Err(End::Gated(w.pending, w.pending_kind));
             }
             if w.site != NIL {
                 let t = self.n(w.site);
                 if t.in_work() {
-                    return Err(End::Gated(w.site));
+                    return Err(End::Gated(w.site, WaitKind::Value));
                 }
                 if t.height >= self.level {
                     return Err(End::GateRaise(t.height + 1));
@@ -7089,7 +7200,7 @@ pub(crate) fn eff_kind(e: Effect) -> Option<ValueId> {
 #[derive(Clone, Debug)]
 pub(crate) enum End {
     Output(ValueId),
-    Wait(Slot),
+    Wait(Slot, WaitKind),
     /// Waiting for an environment field neither supplied nor absent.
     WaitEnv(Field),
     Raise(u32),
@@ -7099,7 +7210,7 @@ pub(crate) enum End {
     OutOfFuel,
     Unpredictable,
     /// Not started: a hinted input is in work (or behind pending structure).
-    Gated(Slot),
+    Gated(Slot, WaitKind),
     /// Not started: a hinted input is finished but not settled below `h`.
     GateRaise(u32),
 }
