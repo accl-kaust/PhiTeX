@@ -83,10 +83,13 @@ fn probes(what: &str) {
 }
 
 fn eval(eng: &mut Engine, threads: usize, spec: bool) -> (Duration, Report) {
-    let mut sched = if spec {
-        Greedy::speculative(Speculation::Predicted, 256)
-    } else {
-        Greedy::default()
+    // SPEC=all|predicted|off applies to the cold build and the edits
+    // alike (Phi's A/B); unset, the cold build does not speculate and the
+    // edits speculate on predicted nodes.
+    let mut sched = match (spec, std::env::var("SPEC").as_deref()) {
+        (_, Ok("all")) => Greedy::speculative(Speculation::All, 256),
+        (_, Ok("predicted")) | (true, Err(_)) => Greedy::speculative(Speculation::Predicted, 256),
+        _ => Greedy::default(),
     };
     let t = Instant::now();
     let r = eng.evaluate(&mut sched, &mut Threads(threads)).expect("evaluate");
@@ -161,6 +164,8 @@ const KINDS: [&str; 7] = [
     "move block close",
 ];
 
+// One report line per phase; splitting it would scatter the format.
+#[allow(clippy::too_many_lines)]
 fn bench(n: usize, o: &Opts) {
     println!("== {n} lines ({} threads)", o.threads);
     let t = Instant::now();
@@ -181,9 +186,13 @@ fn bench(n: usize, o: &Opts) {
         (load + t).as_secs_f64() / interp.as_secs_f64()
     );
     println!(
-        "load {load:.3?}  cold {t:.3?}  runs {}  stops {}  gated {}  pending waits {}  live {}  units {}  critical path {}  widths {:?}  rss {:.0} MB",
+        "load {load:.3?}  cold {t:.3?}  runs {}  stops {}  spec {}/{}/{}/{}  gated {}  pending waits {}  live {}  units {}  critical path {}  widths {:?}  rss {:.0} MB",
         r.runs,
         r.stops,
+        r.speculations,
+        r.confirmations,
+        r.mispredictions,
+        r.spec_stops,
         r.gated,
         r.pending_waits,
         eng.live_nodes(),
