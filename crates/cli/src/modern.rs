@@ -146,6 +146,10 @@ struct Opts {
         global = true
     )]
     jobs: Option<usize>,
+    /// The PDF byte-identical to pdfTeX's, object numbers included (the
+    /// faster mode, pages written apart, may number them differently)
+    #[arg(long = "exact-pdf", global = true)]
+    exact_pdf: bool,
     /// Each run, each warning's first lines, an engine failure's whole
     /// message (-vv: more)
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
@@ -206,6 +210,7 @@ pub struct Options {
     pub etex: bool,
     pub output_dir: Option<String>,
     pub threads: Option<usize>,
+    pub exact_pdf: bool,
     pub verbose: u8,
     pub quiet: bool,
     pub json: bool,
@@ -240,6 +245,7 @@ impl Cli {
             etex: o.etex,
             output_dir: o.output_dir,
             threads: o.jobs,
+            exact_pdf: o.exact_pdf,
             verbose: o.verbose,
             quiet: o.quiet,
             json: o.json,
@@ -401,6 +407,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
             .map_or_else(|| PathBuf::from("."), PathBuf::from),
         // (batch mode, as the oracles run: the CLI shows the errors itself)
         threads: o.threads,
+        exact_pdf: o.exact_pdf,
         synctex: t.synctex,
         recorder: false,
         shell_escape: t.shell_escape,
