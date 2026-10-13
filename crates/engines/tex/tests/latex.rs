@@ -470,7 +470,12 @@ fn latex_loop_rounds() {
                     ..options("hello", &dir, "", fixpoint, false)
                 };
                 let b3 = common::build(o3, Some(&prelude(false)), src);
-                eprintln!("fixpoint {name} unguessed: {} bytes out, {} nodes run", b3.output().0.len(), b3.stats.nodes_run);
+                eprintln!(
+                    "fixpoint {name} unguessed: {} loop rounds, {} evaluations, {} nodes run",
+                    b3.stats.loop_rounds, b3.stats.rounds, b3.stats.nodes_run
+                );
+                assert_eq!(b.output().0, b3.output().0, "the guess changed the output");
+                assert_eq!(b.files(), b3.files(), "the guess changed the files");
                 let (out, log) = b.output();
                 eprintln!("fixpoint {name}: {} bytes out, {:?}, log tail {:?}", out.len(), b.diagnostics(), &log[log.len().saturating_sub(400)..]);
             }
