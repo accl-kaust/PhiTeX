@@ -1,0 +1,11 @@
+\documentclass{article}
+\usepackage[style=authoryear,maxnames=2,minnames=1,uniquename=full,uniquelist=true]{biblatex}
+\addbibresource{refs.bib}
+\begin{document}
+\nocite{*}
+\begin{refsection}
+\cite{knuth1986}
+\printbibliography[keyword=math]
+\end{refsection}
+\printbibliography[type=book]
+\end{document}

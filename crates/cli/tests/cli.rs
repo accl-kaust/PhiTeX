@@ -452,6 +452,51 @@ fn build_to_the_fixpoint() {
     }
 }
 
+/// A biblatex document (`oracle/fixtures/biber/numeric.tex` and its
+/// `refs.bib`) built to the fixpoint by `phitex build`, biber run in
+/// process between the runs: its `.bbl` is biber's and its DVI file is
+/// that of `latex`, `biber`, `latex`, `latex` (both blessed by
+/// scripts/bless-biber.sh).
+#[test]
+#[ignore = "waits for phitex-tex running biblatex (at \\printbibliography: hint regime violated, catcode of ' ' is 9)"]
+fn build_biblatex_with_native_biber() {
+    let _one = one();
+    let src = fixtures().join("biber");
+    let name = "numeric";
+    let ours = scratch("biber-numeric");
+    for f in [format!("{name}.tex"), "refs.bib".to_string()] {
+        std::fs::copy(src.join(&f), ours.join(&f)).expect("a copy");
+    }
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &ours)
+        .args([
+            "build",
+            "-v",
+            "--output-format",
+            "dvi",
+            &format!("{name}.tex"),
+        ])
+        .output()
+        .expect("phitex runs");
+    let errs = String::from_utf8_lossy(&out.stderr);
+    eprintln!("{name}: phitex build:\n{errs}");
+    assert!(out.status.success(), "{name}: phitex build failed:\n{errs}");
+    assert!(errs.contains("biber"), "{name}: biber did not run:\n{errs}");
+    let got = std::fs::read(ours.join(format!("{name}.bbl"))).unwrap_or_default();
+    let want = std::fs::read(src.join(format!("{name}.bbl"))).expect("the .bbl oracle");
+    assert!(
+        got == want,
+        "{name}: the native biber's .bbl is not biber's"
+    );
+    let got = std::fs::read(ours.join(format!("{name}.dvi"))).unwrap_or_default();
+    let want = std::fs::read(src.join(format!("fixpoint/{name}.dvi"))).expect("the DVI oracle");
+    assert!(
+        masked(&got) == masked(&want),
+        "{name}: the fixpoint's DVI is not latex+biber's: {} (ours in {})",
+        first_difference(&got, &want),
+        ours.display()
+    );
+}
+
 /// The 48-page plain document of phitex-red's budgets ("big"), in PDF
 /// mode, as one `-ini` file.
 fn big() -> String {
